@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/artifact"
+	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 )
 
 // ArtifactWriter 约束 gateway 所需的最小 artifact 能力。

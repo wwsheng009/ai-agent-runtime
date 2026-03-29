@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // ProviderTurnRequest describes the normalized provider request for one assistant turn.

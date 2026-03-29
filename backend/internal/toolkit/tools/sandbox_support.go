@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	runtimeerrors "github.com/ai-gateway/ai-agent-runtime/internal/errors"
-	runtimeexecutor "github.com/ai-gateway/ai-agent-runtime/internal/executor"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 type sandboxPolicy struct {

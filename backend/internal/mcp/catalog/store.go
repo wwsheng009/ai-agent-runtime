@@ -1,6 +1,6 @@
 package catalog
 
-import "github.com/ai-gateway/ai-agent-runtime/internal/skill"
+import "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 
 // Snapshot 表示一份可持久化的 catalog 快照。
 type Snapshot struct {

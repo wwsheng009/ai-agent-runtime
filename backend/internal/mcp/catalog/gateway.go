@@ -1,7 +1,7 @@
 package catalog
 
 import (
-	"github.com/ai-gateway/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 // ToolSource 描述 catalog 刷新所需的最小工具来源。

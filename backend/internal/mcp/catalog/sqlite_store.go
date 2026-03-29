@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	_ "github.com/mattn/go-sqlite3"
 )
 

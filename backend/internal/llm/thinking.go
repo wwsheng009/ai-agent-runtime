@@ -1,6 +1,6 @@
 package llm
 
-import runtimetypes "github.com/ai-gateway/ai-agent-runtime/internal/types"
+import runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 
 type ThinkingConfig = runtimetypes.ThinkingConfig
 

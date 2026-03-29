@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	runtimeexecutor "github.com/ai-gateway/ai-agent-runtime/internal/executor"
-	"github.com/ai-gateway/ai-agent-runtime/internal/toolkit"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
 // DownloadTool 文件下载工具

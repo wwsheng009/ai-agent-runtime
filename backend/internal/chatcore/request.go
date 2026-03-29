@@ -1,6 +1,6 @@
 package chatcore
 
-import "github.com/ai-gateway/ai-agent-runtime/internal/types"
+import "github.com/wwsheng009/ai-agent-runtime/internal/types"
 
 // ChatRequest is the transport-neutral request contract shared by chat entrypoints.
 type ChatRequest struct {

@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	runtimeexecutor "github.com/ai-gateway/ai-agent-runtime/internal/executor"
-	"github.com/ai-gateway/ai-agent-runtime/internal/toolkit"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
 // LsTool 列出目录工具

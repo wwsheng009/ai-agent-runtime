@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/client"
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/config"
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/protocol"
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/registry"
-	runtimeerrors "github.com/ai-gateway/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/client"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
 var statusOutput io.Writer = os.Stdout

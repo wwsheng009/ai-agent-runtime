@@ -1,8 +1,8 @@
 package catalog
 
 import (
-	mcpmanager "github.com/ai-gateway/ai-agent-runtime/internal/mcp/manager"
-	"github.com/ai-gateway/ai-agent-runtime/internal/skill"
+	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 type managerToolSource struct {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // MockProvider 模拟 LLM 提供者（用于测试和演示）

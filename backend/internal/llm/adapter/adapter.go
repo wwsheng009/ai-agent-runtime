@@ -4,7 +4,7 @@ import (
 	"io"
 	"time"
 
-	anthropictypes "github.com/ai-gateway/ai-agent-runtime/internal/types/anthropic"
+	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
 
 // ToolCall 工具调用定义（简化版本，避免依赖 functions 包）

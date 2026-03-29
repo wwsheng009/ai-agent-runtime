@@ -7,10 +7,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/errors"
-	"github.com/ai-gateway/ai-agent-runtime/internal/llm"
-	"github.com/ai-gateway/ai-agent-runtime/internal/skill"
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // Planner 计划器

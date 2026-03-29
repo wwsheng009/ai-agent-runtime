@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // ToolResultPayload 是写入 tool_result 前的标准化负载。

@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 func TestFilterToolNames_SortsAndFilters(t *testing.T) {

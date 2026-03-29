@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/hooks"
-	"github.com/ai-gateway/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 // DecisionType represents a permission decision.

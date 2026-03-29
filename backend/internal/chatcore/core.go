@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/agent"
-	"github.com/ai-gateway/ai-agent-runtime/internal/chat"
-	"github.com/ai-gateway/ai-agent-runtime/internal/llm"
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // AgentExecutor is the minimal agent surface required by the shared chat core.

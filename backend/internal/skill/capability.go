@@ -1,6 +1,6 @@
 package skill
 
-import "github.com/ai-gateway/ai-agent-runtime/internal/capability"
+import "github.com/wwsheng009/ai-agent-runtime/internal/capability"
 
 // CapabilityDescriptor 返回统一能力描述
 func (s *Skill) CapabilityDescriptor() *capability.Descriptor {

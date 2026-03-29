@@ -1,7 +1,7 @@
 package skill
 
 import (
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const (

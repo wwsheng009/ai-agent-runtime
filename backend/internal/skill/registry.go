@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
 // MCPManager MCP 管理器接口

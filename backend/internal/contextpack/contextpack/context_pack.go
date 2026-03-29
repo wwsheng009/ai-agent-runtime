@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
-	"github.com/ai-gateway/ai-agent-runtime/internal/workspace"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
 )
 
 // SessionSnapshot is a transport-friendly view of session state used by context packing.

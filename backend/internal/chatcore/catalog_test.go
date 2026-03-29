@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	runtimepolicy "github.com/ai-gateway/ai-agent-runtime/internal/policy"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
 func TestCatalogTracksBuiltinAndSkillEntries(t *testing.T) {

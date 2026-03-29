@@ -1,6 +1,6 @@
 package agent
 
-import runtimepolicy "github.com/ai-gateway/ai-agent-runtime/internal/policy"
+import runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 
 // ToolExecutionPolicy 约束 agent 在 act 阶段允许执行的工具。
 type ToolExecutionPolicy = runtimepolicy.ToolExecutionPolicy

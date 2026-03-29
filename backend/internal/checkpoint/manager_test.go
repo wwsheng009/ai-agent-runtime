@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/artifact"
-	runtimeevents "github.com/ai-gateway/ai-agent-runtime/internal/events"
-	runtimetypes "github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

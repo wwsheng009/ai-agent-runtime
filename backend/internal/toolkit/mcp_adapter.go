@@ -3,7 +3,7 @@ package toolkit
 import (
 	"context"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/protocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 )
 
 // MCPAdapter 将 Tool 适配为 MCP Tool 格式

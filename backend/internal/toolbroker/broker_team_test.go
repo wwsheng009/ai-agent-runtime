@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
-	"github.com/ai-gateway/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	runtimeerrors "github.com/ai-gateway/ai-agent-runtime/internal/errors"
-	"github.com/ai-gateway/ai-agent-runtime/internal/llm"
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

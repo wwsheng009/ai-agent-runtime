@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/client"
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/protocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/client"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 )
 
 // ToolInfo 工具信息

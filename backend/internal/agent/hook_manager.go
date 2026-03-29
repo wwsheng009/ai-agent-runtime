@@ -1,6 +1,6 @@
 package agent
 
-import runtimehooks "github.com/ai-gateway/ai-agent-runtime/internal/hooks"
+import runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 
 // HookManager dispatches runtime lifecycle hooks.
 type HookManager = runtimehooks.Manager

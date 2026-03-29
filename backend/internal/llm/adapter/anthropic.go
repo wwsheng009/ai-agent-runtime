@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	anthropictypes "github.com/ai-gateway/ai-agent-runtime/internal/types/anthropic"
+	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
 
 // AnthropicAdapter Anthropic 协议适配器

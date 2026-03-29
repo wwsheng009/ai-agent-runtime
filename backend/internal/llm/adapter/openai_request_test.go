@@ -3,7 +3,7 @@ package adapter
 import (
 	"testing"
 
-	anthropictypes "github.com/ai-gateway/ai-agent-runtime/internal/types/anthropic"
+	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
 
 func TestOpenAIBuildRequest_IncludesExplicitReasoningEffortForReasoningModel(t *testing.T) {

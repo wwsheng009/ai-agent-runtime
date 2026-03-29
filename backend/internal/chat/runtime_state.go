@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"time"
 
-	runtimepolicy "github.com/ai-gateway/ai-agent-runtime/internal/policy"
-	"github.com/ai-gateway/ai-agent-runtime/internal/toolbroker"
-	"github.com/ai-gateway/ai-agent-runtime/internal/team"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 // PendingToolInvocation captures the tool call that is currently paused.

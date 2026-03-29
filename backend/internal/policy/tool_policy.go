@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/executor"
-	"github.com/ai-gateway/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 // ToolExecutionPolicy constrains which runtime tools may execute.

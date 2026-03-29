@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/protocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 )
 
 // mockClient 模拟 MCP 客户端

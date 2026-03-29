@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/config"
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/protocol"
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/registry"
-	runtimecfg "github.com/ai-gateway/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 )
 
 func TestNewDefaultManagerWithRuntimeConfig_AppliesSandboxToLocalTools(t *testing.T) {

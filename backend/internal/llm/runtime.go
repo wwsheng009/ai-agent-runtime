@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/errors"
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // RuntimeConfig Runtime 配置

@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestMessageBuilder_AssignsToolCallIDsAndRepairsMissingResults(t *testing.T) {

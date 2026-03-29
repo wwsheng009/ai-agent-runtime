@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/artifact"
-	"github.com/ai-gateway/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 func TestGateway_StoresRawOutputAndReturnsReducedEnvelope(t *testing.T) {

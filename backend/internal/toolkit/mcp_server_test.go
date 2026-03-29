@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/toolkit"
-	"github.com/ai-gateway/ai-agent-runtime/internal/toolkit/tools"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

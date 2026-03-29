@@ -3,8 +3,8 @@ package skill
 import (
 	"context"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/manager"
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/protocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 )
 
 // MCPAdapter MCP 适配器

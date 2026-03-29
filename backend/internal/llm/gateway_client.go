@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/llm/adapter"
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // GatewayClient Gateway 客户端，集成 loadbalancer 选择 Provider 并调用 LLM

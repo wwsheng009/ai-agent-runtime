@@ -3,7 +3,7 @@ package policy
 import (
 	"sort"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 // FilterToolNames filters and sorts tool names allowed by policy.

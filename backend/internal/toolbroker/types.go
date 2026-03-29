@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/background"
-	"github.com/ai-gateway/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 // UserQuestionRequest captures a prompt that needs user input.

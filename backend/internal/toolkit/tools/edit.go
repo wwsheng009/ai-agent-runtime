@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	runtimeexecutor "github.com/ai-gateway/ai-agent-runtime/internal/executor"
-	"github.com/ai-gateway/ai-agent-runtime/internal/toolkit"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
 // EditTool 文件编辑工具（单处替换）

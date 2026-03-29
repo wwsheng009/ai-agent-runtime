@@ -4,8 +4,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/capability"
-	runtimepolicy "github.com/ai-gateway/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
 const (

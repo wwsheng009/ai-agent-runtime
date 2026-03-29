@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	mcpconfig "github.com/ai-gateway/ai-agent-runtime/internal/mcp/config"
-	mcpmanager "github.com/ai-gateway/ai-agent-runtime/internal/mcp/manager"
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/protocol"
-	mcpregistry "github.com/ai-gateway/ai-agent-runtime/internal/mcp/registry"
+	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
+	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 )
 
 type fakeManager struct {

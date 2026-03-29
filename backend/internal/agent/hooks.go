@@ -3,8 +3,8 @@ package agent
 import (
 	"context"
 
-	runtimehooks "github.com/ai-gateway/ai-agent-runtime/internal/hooks"
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // ToolHooks 提供工具调用前后的可拦截扩展点。

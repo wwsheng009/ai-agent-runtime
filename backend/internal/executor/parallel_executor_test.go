@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	runtimeerrors "github.com/ai-gateway/ai-agent-runtime/internal/errors"
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestNewParallelExecutor(t *testing.T) {

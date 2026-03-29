@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	runtimehooks "github.com/ai-gateway/ai-agent-runtime/internal/hooks"
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/google/uuid"
 )
 

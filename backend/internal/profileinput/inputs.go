@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	runtimeexecutor "github.com/ai-gateway/ai-agent-runtime/internal/executor"
-	runtimepolicy "github.com/ai-gateway/ai-agent-runtime/internal/policy"
-	runtimeprompt "github.com/ai-gateway/ai-agent-runtime/internal/prompt"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"gopkg.in/yaml.v3"
 )
 

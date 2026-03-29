@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	anthropictypes "github.com/ai-gateway/ai-agent-runtime/internal/types/anthropic"
+	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
 
 type ThinkingConfig = anthropictypes.Thinking

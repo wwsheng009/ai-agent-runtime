@@ -1,6 +1,6 @@
 package agent
 
-import runtimecheckpoint "github.com/ai-gateway/ai-agent-runtime/internal/checkpoint"
+import runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 
 // CheckpointManager manages automatic checkpoints.
 type CheckpointManager = runtimecheckpoint.Manager

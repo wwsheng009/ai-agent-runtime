@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	runtimeevents "github.com/ai-gateway/ai-agent-runtime/internal/events"
-	"github.com/ai-gateway/ai-agent-runtime/internal/migrate"
-	"github.com/ai-gateway/ai-agent-runtime/internal/team"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/google/uuid"
 
 	_ "github.com/mattn/go-sqlite3"

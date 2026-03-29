@@ -1,6 +1,6 @@
 package llm
 
-import "github.com/ai-gateway/ai-agent-runtime/internal/llm/adapter"
+import "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 
 func buildMetaToolsForProtocol(protocol string) interface{} {
 	meta := adapter.BuildMCPMetaTools()

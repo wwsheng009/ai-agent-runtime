@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 // AgentAdapter exposes runtime tools through the skill.MCPManager shape used by Agent.

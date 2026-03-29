@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/config"
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/protocol"
-	"github.com/ai-gateway/ai-agent-runtime/internal/mcp/transport"
-	"github.com/ai-gateway/ai-agent-runtime/internal/pkg/logger"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/transport"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

@@ -1,6 +1,6 @@
 package capability
 
-import "github.com/ai-gateway/ai-agent-runtime/internal/types"
+import "github.com/wwsheng009/ai-agent-runtime/internal/types"
 
 // Kind 统一能力类型
 type Kind string

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/executor"
-	"github.com/ai-gateway/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 func TestToolExecutionPolicy_AllowToolInfo_BlocksRemoteWrite(t *testing.T) {

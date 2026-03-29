@@ -1,6 +1,6 @@
 package agent
 
-import toolbroker "github.com/ai-gateway/ai-agent-runtime/internal/toolbroker"
+import toolbroker "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 
 // ToolBroker provides synthetic runtime tools.
 type ToolBroker = toolbroker.Broker

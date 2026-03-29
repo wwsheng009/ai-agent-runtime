@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestSessionBuildPreviewDerivesTitleAndSummary(t *testing.T) {

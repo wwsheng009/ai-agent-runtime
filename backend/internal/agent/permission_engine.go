@@ -1,6 +1,6 @@
 package agent
 
-import runtimepolicy "github.com/ai-gateway/ai-agent-runtime/internal/policy"
+import runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 
 // PermissionEngine evaluates runtime tool permissions.
 type PermissionEngine = runtimepolicy.Engine

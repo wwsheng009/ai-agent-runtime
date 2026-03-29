@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/embedding"
+	"github.com/wwsheng009/ai-agent-runtime/internal/embedding"
 )
 
 // SemanticEmbeddingRouter 语义路由器实现

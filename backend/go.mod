@@ -1,4 +1,4 @@
-module github.com/ai-gateway/ai-agent-runtime
+module github.com/wwsheng009/ai-agent-runtime
 
 go 1.24.0
 

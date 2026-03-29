@@ -3,7 +3,7 @@ package team
 import (
 	"strings"
 
-	runtimetypes "github.com/ai-gateway/ai-agent-runtime/internal/types"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // SessionObservation captures a tool observation surfaced from a teammate session run.

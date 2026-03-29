@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ai-gateway/ai-agent-runtime/internal/llm/adapter"
-	"github.com/ai-gateway/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // Provider ??? Runtime Provider ??
