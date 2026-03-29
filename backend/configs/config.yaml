@@ -1,0 +1,1548 @@
+# AI Gateway Configuration
+#
+# 环境变量模板语法：
+# - ${VAR} - 直接引用环境变量，不存在时保持原样
+# - ${VAR:-default} - 带默认值，环境变量不存在时使用 default
+
+# 服务器超时配置（HTTP Server 层）
+# read_timeout: 读取客户端请求的超时时间（从连接开始到读取完整个请求体）
+#            - 建议 60s：支持大文件上传、长消息发送
+# write_timeout: 写入响应给客户端的超时时间（从响应开始到发送完整个响应体）
+#             - 建议 300s：AI 流式输出(SSE)可能持续较长时间，需要足够时间完成生成
+# idle_timeout: 连接空闲超时时间（无数据传输时的连接保持时间）
+#            - 建议 60s：及时释放僵尸连接，同时给SSE间歇留余量
+server:
+  name: "ai-gateway"
+  host: "${SERVER_HOST:-0.0.0.0}"
+  port: ${SERVER_PORT:-8080}
+  read_timeout: 60s
+  write_timeout: 300s
+  idle_timeout: "${SERVER_IDLE_TIMEOUT:-60s}"
+  graceful_stop: true
+  shutdown_time: 30s
+  admin_host: "${SERVER_ADMIN_HOST:-127.0.0.1}"
+  admin_port: ${SERVER_ADMIN_PORT:-8080}
+  development: ${SERVER_DEVELOPMENT:-true}
+
+database:
+  driver: "${DATABASE_DRIVER:-sqlite}"
+  dsn: "${DATABASE_DSN:-./data/gateway.db}"
+  prefix: ""
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime: 3600
+  log_level: "${DATABASE_LOG_LEVEL:-info}"
+  auto_migrate: true
+  sqlite:
+    busy_timeout_ms: ${SQLITE_BUSY_TIMEOUT_MS:-5000}
+    journal_mode: "${SQLITE_JOURNAL_MODE:-WAL}"
+    synchronous: "${SQLITE_SYNCHRONOUS:-NORMAL}"
+    foreign_keys: ${SQLITE_FOREIGN_KEYS:-true}
+    auto_vacuum: "${SQLITE_AUTO_VACUUM:-incremental}"
+    bootstrap_auto_vacuum: ${SQLITE_BOOTSTRAP_AUTO_VACUUM:-false}
+    wal_auto_checkpoint_pages: ${SQLITE_WAL_AUTO_CHECKPOINT_PAGES:-1000}
+    maintenance_interval: "${SQLITE_MAINTENANCE_INTERVAL:-10m}"
+    incremental_vacuum_pages: ${SQLITE_INCREMENTAL_VACUUM_PAGES:-4096}
+    incremental_vacuum_min_free_pages: ${SQLITE_INCREMENTAL_VACUUM_MIN_FREE_PAGES:-1024}
+    incremental_vacuum_min_free_ratio: ${SQLITE_INCREMENTAL_VACUUM_MIN_FREE_RATIO:-0.10}
+    checkpoint_on_maintenance: ${SQLITE_CHECKPOINT_ON_MAINTENANCE:-true}
+
+redis:
+  enabled: ${REDIS_ENABLED:-false}
+  addr: "${REDIS_ADDR:-localhost:6379}"
+  password: "${REDIS_PASSWORD:-}"
+  db: ${REDIS_DB:-0}
+  pool_size: 100
+  min_idle_conns: 10
+  dial_timeout: 5
+  read_timeout: 3
+  write_timeout: 3
+
+# Provider 超时配置（上游请求转发层）
+# timeout: 供应商请求总超时时间（控制核心转发路径）
+#          - 这是关键控制点：超过此时间未返回则自动超时
+#          - 建议 30s：平衡响应速度和复杂任务处理时间
+#          - 优先级：Provider 级别 > 全局 providers.timeout
+providers:
+  default_provider: "${PROVIDERS_DEFAULT:-nvidia}"
+  timeout: 300s
+  
+  # 重试配置说明：
+  # Pipeline 配置作为基础默认值，智能重试规则可以覆盖基础值。
+  #
+  # 配置关系：
+  # 1. Pipeline 配置（基础默认值）:
+  #    - pipeline.pipelines.<name>.retry.max_attempts (单独配置)
+  #    - pipeline.default_retry.max_attempts (默认配置)
+  #
+  # 2. 智能重试规则（可覆盖基础值）:
+  #    - retry.rules.*.max_retries (特定错误类型)
+  #    - retry.default_max_retries (默认)
+  #
+  # 注意：providers.max_retries 已废弃，请在上述层级中配置重试次数
+  # 详见文档: docs/config/pipeline重试配置.md
+
+  # SSE 心跳检测配置
+  # enabled: 是否启用心跳检测（建议启用，防止上游服务挂起）
+  # timeout: 无数据传输超时时间（建议 2m，AI 服务可能短暂停顿）
+  # check_interval: 检查间隔（建议 10s，平衡性能和响应速度）
+  # send_heartbeat: 是否发送 SSE 注释心跳（保持连接活跃）
+  # heartbeat_comment: 心跳注释内容（SSE 格式）
+  sse_heartbeat:
+    enabled: ${SSE_HEARTBEAT_ENABLED:-true}
+    timeout: "${SSE_HEARTBEAT_TIMEOUT:-2m}"
+    check_interval: "${SSE_HEARTBEAT_CHECK_INTERVAL:-10s}"
+    send_heartbeat: ${SSE_SEND_HEARTBEAT:-true}
+    heartbeat_comment: "${SSE_HEARTBEAT_COMMENT:-: heartbeat}"
+  # HTTP 代理配置（全局配置）
+  # 支持 HTTP/HTTPS 代理和 SOCKS5 代理
+  # 环境变量优先级：PROXY_ENABLED > HTTP_PROXY > HTTPS_PROXY > NO_PROXY
+  # 如果环境变量未设置，则使用默认值
+  proxy:
+    enabled: ${PROXY_ENABLED:-true}
+    http: "${HTTP_PROXY:-http://127.0.0.1:10810}"        # HTTP 代理 URL (支持 http:// 和 socks5://) - 使用 127.0.0.1 避免 DNS 解析问题
+    https: "${HTTPS_PROXY:-http://127.0.0.1:10810}"      # HTTPS 代理 URL (支持 http:// 和 socks5://) - 使用 127.0.0.1 避免 DNS 解析问题
+    no_proxy: "${NO_PROXY:-localhost,127.0.0.1}"  # 不使用代理的域名列表（添加常用 AI API 到白名单以减少延迟）
+
+  # HTTP 超时配置（细粒度控制）
+  # dial_timeout: TCP 连接建立超时（优化：3s，更激进的快速失败）
+  # tls_handshake_timeout: TLS 握手超时（优化：3s，更激进的快速重试）
+  # response_header_timeout: 等待响应头的超时（优化：10s，更积极的超时）
+  # body_read_timeout: 读取非流式响应体的超时
+  # stream_read_timeout: 读取流式响应数据块的超时
+  #                        - 优化：120s，AI 流式响应需要更长时间
+  # idle_conn_timeout: 空闲连接保持超时（优化：30s，更快释放资源）
+  # keep_alive: HTTP Keep-Alive 超时（优化：120s，减少连接重建）
+  http_timeout:
+    dial_timeout: "${PROVIDERS_DIAL_TIMEOUT:-5s}"
+    tls_handshake_timeout: "${PROVIDERS_TLS_HANDSHAKE_TIMEOUT:-15s}"  # 增加 TLS 握手超时，适应慢速 API (Worker 等)
+    response_header_timeout: "${PROVIDERS_RESPONSE_HEADER_TIMEOUT:-60s}"
+    body_read_timeout: "${PROVIDERS_BODY_READ_TIMEOUT:-60s}"  # 增加 body 读取超时，适应慢速响应
+    stream_read_timeout: "${PROVIDERS_STREAM_READ_TIMEOUT:-120s}"
+    idle_conn_timeout: "${PROVIDERS_IDLE_CONN_TIMEOUT:-30s}"
+    max_idle_conns: ${PROVIDERS_MAX_IDLE_CONNS:-1000}              # ✨ 优化：从 500 → 1000
+    max_idle_conns_per_host: ${PROVIDERS_MAX_IDLE_CONNS_PER_HOST:-200}  # ✨ 优化：从 100 → 200
+    max_conns_per_host: ${PROVIDERS_MAX_CONNS_PER_HOST:-300}       # ✨ 优化：从 200 → 300
+    keep_alive: "${PROVIDERS_KEEP_ALIVE:-120s}"
+    # 连接池控制配置
+    # disable_connection_pooling: 禁用连接池，每次请求重新拨号
+    #                          - false (默认): 使用共享连接池，性能更好
+    #                          - true: 每次创建新连接，不复用连接（适用于某些网络问题排查）
+    disable_connection_pooling: ${DISABLE_CONNECTION_POOLING:-false}
+    # HTTP 协议版本配置
+    # http_version: HTTP 协议版本（1.1 或 2）
+    #              - 1.1: 强制使用 HTTP/1.1（稳定但性能较差）
+    #              - 2: 强制尝试使用 HTTP/2（性能更好，推奿）
+    #              - auto 或 空值: 自动选择（优先尝试 HTTP/2，失败回退）
+    http_version: "${HTTP_VERSION:-2}"
+    # upstream_accept_encoding: 上游请求 Accept-Encoding 策略
+    #              - auto: 不手动设置，由 Go transport 自动协商并自动解压 gzip（推荐）
+    #              - identity/off/disable: 显式禁用压缩
+    #              - 其他值: 原样透传到 Accept-Encoding（如 "gzip, deflate"）
+    upstream_accept_encoding: "${HTTP_UPSTREAM_ACCEPT_ENCODING:-auto}"
+    # DNS 解析优化配置
+    # fallback_delay: IPv6 -> IPv4 回退延迟（优化：50ms，更快切换）
+    #                 - 当 IPv6 连接超时时，快速切换到 IPv4
+    #                 - 建议 50-100ms，根据网络环境调整
+    # prefer_ipv4: 是否优先使用 IPv4（优化：true，国内网络建议）
+    #              - 在 IPv6 不稳定的环境下设为 true
+    # dns_cache_ttl: DNS 缓存有效期（优化：600s，减少 DNS 查询）
+    #                - 减少重复 DNS 查询，提高性能
+    # dns_server: 自定义 DNS 服务器（可选，留空使用系统默认）
+    #             - 如果你的系统 DNS 配置有问题（如 fe80::1），建议设置此项
+    #             - 推荐的公共 DNS 服务器：
+    #               - 阿里 DNS: 223.5.5.5:53（中国大陆推荐）
+    #               - 腾讯 DNS: 119.29.29.29:53
+    #               - Google DNS: 8.8.8.8:53（国际网络）
+    #               - Cloudflare DNS: 1.1.1.1:53（国际网络）
+    fallback_delay: "${HTTP_FALLBACK_DELAY:-50ms}"
+    prefer_ipv4: ${HTTP_PREFER_IPV4:-true}                   # ✨ 优化：默认使用 IPv4
+    dns_cache_ttl: "${HTTP_DNS_CACHE_TTL:-600s}"
+    dns_server: "${HTTP_DNS_SERVER:-8.8.8.8}"              # 可选：自定义 DNS 服务器（如 "8.8.8.8" 或 "8.8.8.8:53"，不指定端口则自动添加 :53）
+
+  # ============================================================
+  # 供应商配置（使用 items 子节点）
+  # ============================================================
+  # protocol: 供应商协议类型 (openai, anthropic, gemini, codex)
+  # support_types: 支持的协议类型列表（用于协议转换）
+  # model_mappings: 模型映射（精确、通配符、前缀）
+  # headers: Provider 级固定请求头，在认证头之后注入
+  #          适合设置上游要求的常量头，如组织标识、版本标识、灰度标签
+  #          header value 支持环境变量模板，例如：
+  #            X-Org-ID: "${UPSTREAM_ORG_ID:-default-org}"
+  #            X-Env: "${DEPLOY_ENV:-dev}"
+  # header_mapping_rules/header_mappings: 在 headers 之后执行，可继续做条件改写和最终覆盖
+  #
+  # 注意：protocol 字段是可选的，系统会自动从 base_url/forward_url 推算
+
+  items:
+    # NVIDIA 供应商 (OpenAI 兼容协议)
+    nvidia:
+      enabled: true
+      protocol: openai
+      truncation_adapter: "openai_local"
+      base_url: "${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com}"
+      api_path: ""
+      forward_url: "/v1/chat/completions"
+      api_key: "${NVIDIA_API_KEYS:-}"
+      default_model: "z-ai/glm4.7"
+      supported_models:
+        - "z-ai/glm4.7"
+        - "z-ai/glm5"
+      support_types:
+        - openai
+        - anthropic
+        - codex
+      model_mappings:
+        "*": "z-ai/glm5"
+      max_tokens_limit: 10000  # NVIDIA API 最大输出 token 限制
+      # timeout: 覆盖全局 providers.timeout，留空则使用全局值
+      timeout: 300s
+
+    # DeepSeek 供应商 (OpenAI 兼容协议)
+    deepseek:
+      enabled: true
+      protocol: openai
+      truncation_adapter: "openai_local"
+      base_url: "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
+      api_path: ""
+      forward_url: "/v1/chat/completions"
+      api_key: "${DEEPSEEK_API_KEY:-}"
+      default_model: "deepseek-chat"
+      supported_models:
+        - "deepseek-chat"
+        - "deepseek-reasoner"
+      support_types:
+        - openai
+        - anthropic
+      model_mappings:
+        gpt-4: "deepseek-chat"
+        gpt-3.5-turbo: "deepseek-chat"
+        claude-3-opus-20240229: "deepseek-chat"
+        "gpt-4-turbo": "deepseek-chat"
+        "gpt-4o": "deepseek-chat"
+        o1: "deepseek-reasoner"
+        o1-preview: "deepseek-reasoner"
+        "o1-mini": "deepseek-chat"
+        glm-4.7: "deepseek-chat"
+        "glm-4-plus": "deepseek-chat"
+        "*": "deepseek-chat"
+      max_tokens_limit: 8000
+      timeout: 300s
+
+    # DeepSeek Anthropic 供应商 (原生 Anthropic 协议，无需转换)
+    deepseek_anthropic:
+      enabled: true
+      protocol: anthropic
+      truncation_adapter: "anthropic_local"
+      base_url: "${DEEPSEEK_ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}"
+      api_path: "/v1/messages"
+      forward_url: "/v1/messages"
+      api_key: "${DEEPSEEK_API_KEY:-}"
+      default_model: "deepseek-chat"
+      supported_models:
+        - "deepseek-chat"
+        - "deepseek-reasoner"
+      support_types:
+        - anthropic
+      model_mappings:
+        "claude-*": "deepseek-chat"
+        "*": "deepseek-chat"
+      max_tokens_limit: 8000
+      timeout: 300s
+
+    # BigModel 供应商 (Anthropic 协议)
+    # api_key 支持两种配置方式：
+    # 1. 单个 key: api_key: "${BIGMODEL_API_KEY:-}"
+    # 2. 多个 keys（逗号分隔，自动随机选择）: api_key: "${BIGMODEL_API_KEYS:-}"
+    bigmodel:
+      enabled: true
+      protocol: anthropic
+      truncation_adapter: "anthropic_local"
+      base_url: "https://open.bigmodel.cn/api/anthropic"
+      api_path: "/v1/messages"
+      forward_url: "/v1/messages"
+      api_key: "${BIGMODEL_API_KEYS:-}"  # 多个 key 用逗号分隔，自动随机选择
+      default_model: "glm-5"
+
+      # API Key 管理配置（智能资源管理）
+      api_key_config:
+        enabled: true
+        # 选择算法: round_robin（轮询）| random（随机）| health_based（基于健康状态，推荐）
+        selection_mode: "${BIGMODEL_KEY_SELECTION_MODE:-health_based}"
+        # 每个 Key 限速时的重试次数
+        max_retries_per_key: ${BIGMODEL_MAX_RETRIES_PER_KEY:-1}
+        # 所有 Key 限速后的回退模式: random（随机）| fail（失败）
+        fallback_mode: "${BIGMODEL_FALLBACK_MODE:-random}"
+
+      supported_models:
+        - "glm-5"
+        - "glm-4.7"
+        - "glm-4-plus"
+        - "glm-4-air"
+        - "glm-4-flash"
+      support_types:
+        - anthropic
+        - openai
+        - codex
+      model_mappings:
+        "*": "glm-5"
+      path_mappings:
+      max_tokens_limit: 10000
+      timeout: 300s
+
+    # Gemini 本地供应商
+    gemini_local:
+      enabled: true
+      protocol: gemini
+      truncation_adapter: "gemini_local"
+      base_url: "${GOOGLE_GEMINI_BASE_URL:-http://127.0.0.1:8045}"
+      api_path: "/v1beta/models"
+      api_key: "${GEMINI_API_KEY:-}"
+      forward_url: "/v1beta/models/{model}:streamGenerateContent?alt=sse"
+      default_model: "gemini-3.1-pro-high"
+      supported_models:
+        - "gemini-3.1-pro-high"
+        - "gemini-3.1-flash"
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      model_mappings:
+        gpt-4: "gemini-3.1-pro-high"
+        "gpt-*": "gemini-3.1-flash"
+        "claude-*": "gemini-3.1-pro-high"
+        "glm-*": "gemini-3.1-pro-high"
+        "*": "gemini-3.1-pro-high"
+      max_tokens_limit: 10000
+      timeout: 300s
+    codex_ee:
+      enabled: true
+      protocol: codex
+      base_url: "${CODEX_BASE_URL:-http://127.0.0.1:8045}"
+      api_path: "/v1/responses"
+      api_key: "${CODEX_API_KEYS:-}"
+      forward_url: "/v1/responses"
+      default_model: "gpt-5.4"
+      supported_models:
+        - "gpt-5.4-mini"
+        - "gpt-5.4-nano"
+        - "gpt-5.4"
+        - "gpt-5.2-codex"
+        - "*"
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      model_mappings:
+        "gpt-5.2-codex": "gpt-5.2-codex"
+        "gpt-5.4-nano": "gpt-5.4-nano"
+        "gpt-5.4-mini": "gpt-5.4-mini"
+        "*": "gpt-5.4"
+      header_mappings:
+        X-Gateway-Provider: "openai_codex"
+      header_mapping_rules:
+        - name: "rewrite-openai-js-user-agent"
+          enabled: true
+          header: "User-Agent"
+          target_header: "User-Agent"
+          match_type: "regex"
+          match: '^OpenAI/JS\s+(.+)$'
+          conditions:
+            - header: "Accept"
+              match_type: "contains"
+              match: "application/json"
+              not: false
+          or_conditions:
+            - header: "X-Gateway-Debug"
+              match_type: "exists"
+            - header: "X-Gateway-Provider"
+              match_type: "exact"
+              match: "openai_codex"
+          replace_with: 'OpenAI JS $1'
+          stop_on_match: true
+        - header: "X-Gateway-Provider"
+          target_header: "X-Provider-Shadow"
+          match_type: "exists"
+          copy_matched_value: true
+          priority: 10
+        - header: "User-Agent"
+          target_header: "X-User-Agent-Version"
+          match_type: "regex"
+          match: '^OpenAI/JS\s+(.+)$'
+          copy_from_capture: 1
+          priority: 20
+        - header: "User-Agent"
+          target_header: "X-User-Agent-Version-Named"
+          match_type: "regex"
+          match: '^OpenAI/JS\s+(?P<version>.+)$'
+          copy_from_capture_name: "version"
+        - header: "User-Agent"
+          target_header: "X-User-Agent-FirstReplace"
+          match_type: "regex"
+          match: '\d+'
+          replace_with: '#'
+          replace_all: false
+        - header: "X-Gateway-Provider"
+          target_header: "X-Gateway-Provider-Decorated"
+          match_type: "exists"
+          prepend_value: "gw-"
+          append_value: "-ok"
+        - header: "X-Gateway-Provider"
+          target_header: "X-Gateway-Provider-NewOnly"
+          match_type: "exists"
+          value: "created"
+          set_if_missing: true
+      context_window:
+        default: ${CONTEXT_WINDOW_CODEX_EE_DEFAULT:-400000}
+        models:
+          gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_EE_GPT_5_2_CODEX:-400000}
+      max_tokens_limit: 10000
+      timeout: 300s
+    CODEX_03:
+      enabled: true
+      protocol: codex
+      base_url: "${CODEX_03_BASE_URL}"
+      api_path: "/v1/responses"
+      api_key: "${CODEX_03_API_KEYS:-}"
+      forward_url: "/v1/responses"
+      default_model: "gpt-5.4"
+      supported_models:
+        - "gpt-5.2-codex"
+        - "gpt-5.4"
+        - "*"
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      model_mappings:
+        "*": "gpt-5.2-codex"
+        "gpt-5.4": "gpt-5.4"
+      header_mappings:
+        X-Gateway-Provider: "openai_codex"
+      header_mapping_rules:
+        - header: "User-Agent"
+          match_type: "regex"
+          match: '^OpenAI/JS\s+(.+)$'
+          replace_with: 'OpenAI JS $1'
+      context_window:
+        default: ${CONTEXT_WINDOW_CODEX_03_DEFAULT:-1050000}
+        models:
+          gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_03_GPT_5_2_CODEX:-400000}
+          gpt-5.4: ${CONTEXT_WINDOW_CODEX_03_GPT_5_4:-1050000}
+      max_tokens_limit: 10000
+      timeout: 300s
+    CODEX_04:
+      enabled: true
+      protocol: codex
+      base_url: "${CODEX_04_BASE_URL}"
+      api_path: "/v1/responses"
+      api_key: "${CODEX_04_API_KEYS:-}"
+      forward_url: "/v1/responses"
+      default_model: "gpt-5.4"
+      supported_models:
+        - "gpt-5.2-codex"
+        - "gpt-5.4"
+        - "*"
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      model_mappings:
+        "gpt-5.2-codex": "gpt-5.4"
+        "*": "gpt-5.2-codex"
+      header_mappings:
+        X-Gateway-Provider: "openai_codex"
+      header_mapping_rules:
+        - header: "User-Agent"
+          match_type: "regex"
+          match: '^OpenAI/JS\s+(.+)$'
+          replace_with: 'OpenAI JS $1'
+      context_window:
+        default: ${CONTEXT_WINDOW_CODEX_04_DEFAULT:-1050000}
+        models:
+          gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_04_GPT_5_2_CODEX:-400000}
+          gpt-5.4: ${CONTEXT_WINDOW_CODEX_04_GPT_5_4:-1050000}
+      max_tokens_limit: 10000
+      timeout: 300s
+    codex_fox:
+      enabled: true
+      protocol: codex
+      base_url: "${CODEX2_BASE_URL}"
+      api_path: "/v1/responses"
+      api_key: "${CODEX2_API_KEYS:-}"
+      forward_url: "/v1/responses"
+      default_model: "gpt-5.2-codex"
+      supported_models:
+        - "gpt-5.2-codex"
+        - "gpt-5.4"
+        - "gpt-5.4-mini"
+        - "gpt-5.4-nano"
+        - "*"
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      model_mappings:
+        "gpt-5.4-nano": "gpt-5.4-nano"
+        "gpt-5.4-mini": "gpt-5.4-mini"
+        "*": "gpt-5.2-codex"
+      header_mappings:
+        X-Gateway-Provider: "openai_codex"
+      header_mapping_rules:
+        - header: "User-Agent"
+          match_type: "regex"
+          match: '^OpenAI/JS\s+(.+)$'
+          replace_with: 'OpenAI JS $1'
+      context_window:
+        default: ${CONTEXT_WINDOW_CODEX_FOX_DEFAULT:-400000}
+        models:
+          gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_FOX_GPT_5_2_CODEX:-400000}
+      max_tokens_limit: 10000
+      timeout: 300s
+    # openai codex cli
+    codex_cli_gpt:
+      enabled: true
+      protocol: codex
+      base_url: "https://chatgpt.com/backend-api/codex/responses"
+      api_path: "/responses"
+      api_key: "${CODEX_CLI_API_KEYS}"
+      forward_url: "/responses"
+      default_model: "gpt-5.4"
+      supported_models:
+        - "gpt-5.4"
+        - "gpt-5.2-codex"
+        - "gpt-5.3"
+        - "*"
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      model_mappings:
+        "*": "gpt-5.4"
+      headers:
+        ChatGPT-Account-Id: "${CHATGPT_ACCOUNT_ID}"
+      header_mappings:
+        X-Gateway-Provider: "openai_codex"
+      header_mapping_rules:
+        - header: "User-Agent"
+          match_type: "regex"
+          match: '^OpenAI/JS\s+(.+)$'
+          replace_with: 'codex_cli_rs/0.112.0 (Windows 10.0.26200; x86_64) WindowsTerminal'
+      context_window:
+        default: ${CONTEXT_WINDOW_CODEX_CLI_GPT_DEFAULT:-1050000}
+        models:
+          gpt-5.4: ${CONTEXT_WINDOW_CODEX_CLI_GPT_GPT_5_4:-1050000}
+      max_tokens_limit: 10000
+      timeout: 300s
+# 供应商组配置
+# 一个组可以包含多个供应商实例，实现负载均衡
+#
+# 负载均衡策略 (strategy):
+#   - round_robin: 轮询，依次选择每个供应商
+#   - weighted: 加权随机，按 weight 比例分配流量
+#   - random: 完全随机选择
+#   - health: 健康优先，优先选择健康的供应商
+#
+
+# 并发控制配置
+# enabled: 是否启用并发控制（建议生产环境启用）
+# max_concurrent_requests: 最大并发请求数（根据服务器性能调整）
+# queue_size: 请求队列大小（突发流量缓冲）
+# queue_timeout: 队列等待超时（建议 10s，避免用户等待过久）
+# per_provider_limits: 每个 Provider 的并发限制
+concurrency:
+  enabled: ${CONCURRENCY_ENABLED:-true}
+  max_concurrent_requests: ${CONCURRENCY_MAX_REQUESTS:-200}     # ✨ 优化：从 100 → 200
+  queue_size: ${CONCURRENCY_QUEUE_SIZE:-500}                    # ✨ 优化：从 200 → 500
+  queue_timeout: "${CONCURRENCY_QUEUE_TIMEOUT:-5s}"              # ✨ 优化：从 10s → 5s，减少用户等待
+  per_provider_limits:
+    nvidia: 100                                                  # ✨ 优化：从 50 → 100
+    deepseek: 50
+    deepseek_anthropic: 50
+    bigmodel: 150
+    gemini_local: 40
+    default: 50
+
+# ============================================================================
+# 智能重试配置
+# ============================================================================
+# 这是核心重试配置层级之一，与其他层级的关系如下：
+#
+# 配置关系说明：
+# - Pipeline 配置（pipeline.pipelines.*.retry 或 pipeline.default_retry）作为基础默认值
+# - 智能重试规则（retry.rules.*.max_retries）可以覆盖 Pipeline 基础值
+# - 例如：Pipeline 基础 3 次，限流规则可设置 5 次
+#
+# 建议：
+# - 大多数场景只需配置 retry.default_max_retries 和 retry.rules
+# - 特殊 API 在 pipeline.pipelines 中单独配置基础值
+# - Provider Group 用于负载均衡策略控制
+# ============================================================================
+retry:
+  enabled: ${RETRY_ENABLED:-true}
+
+  # 默认重试配置（当规则未指定时使用）
+  # 这是全局兜底配置，建议设置为 3-5 次
+  default_max_retries: ${RETRY_DEFAULT_MAX_RETRIES:-3}
+  default_retry_delay_ms: ${RETRY_DEFAULT_DELAY_MS:-1000}
+  default_backoff_multiplier: 2.0
+
+  # invalid_encrypted_content 专项恢复：
+  # 对原生 Codex /v1/responses 请求，如果客户端携带的 previous_response_id
+  # 或 reasoning.encrypted_content 已失效，可选择剥离这些状态后仅重试一次。
+  # 默认关闭，避免自动改变会话连续性语义。
+  invalid_encrypted_content_recovery:
+    strip_client_state_once: ${RETRY_INVALID_ENCRYPTED_CONTENT_STRIP_CLIENT_STATE_ONCE:-false}
+
+  enhanced_strategy:
+    enabled: ${ENHANCED_STRATEGY_ENABLED:-true}
+    secondary_threshold: 2  # 保守：第3次开始降级
+    fallback_threshold: 4   # 保守：第5次降级
+    primary_min_score: 40.0
+    secondary_excluded_score: 10.0
+  # 重试规则列表（按顺序匹配，第一个匹配的规则生效）
+  # 每个规则可以针对特定错误类型设置不同的重试策略
+  rules:
+    # 规则 1: 空流响应重试（上游只有 ping/waiting，没有实际内容）
+    - name: empty_stream_response
+      description: "SSE 空流响应自动重试（只有 ping/waiting 事件）"
+      keyword:
+        values:
+          - "empty_stream_response"
+          - "only ping events"
+        case_sensitive: false
+      max_retries: 3          # 重试次数（建议 3-5 次）
+      retry_delay_ms: 2000    # 初始延迟 2s（空流响应需要更长等待）
+      backoff_multiplier: 1.5
+      enabled: true
+
+    # 规则 2: SSE 心跳超时重试
+    - name: sse_heartbeat_timeout
+      description: "SSE 流式响应心跳超时自动重试"
+      keyword:
+        values:
+          - "heartbeat timeout"
+        case_sensitive: false
+      max_retries: 3          # 重试 3 次
+      retry_delay_ms: 5000    # 初始延迟 5s（心跳超时通常需要更长等待）
+      backoff_multiplier: 1.5
+      enabled: true
+
+    # 规则 3: Codex 流在 response.completed 前断开
+    - name: codex_request_timeout_retry
+      description: "Codex 流式响应在 response.completed 前断开时自动重试"
+      error_code:
+        codes:
+          - "request_timeout"
+      keyword:
+        values:
+          - "stream disconnected before completion"
+          - "stream closed before response.completed"
+          - "request timeout"
+        case_sensitive: false
+      max_retries: 3
+      retry_delay_ms: 1000
+      backoff_multiplier: 2.0
+      enabled: true
+
+    # 规则 4: HTTP 5xx 错误重试（服务器错误）
+    - name: http_5xx_retry
+      description: "HTTP 5xx 服务器错误重试"
+      status_code:
+        range: "500-504"
+      max_retries: 3          # 服务器错误重试 3 次
+      retry_delay_ms: 1000    # 初始延迟 1s
+      backoff_multiplier: 2.0
+      enabled: true
+
+    # 规则 5: 上下文长度超限重试（自动截断）
+    - name: context_limit_retry
+      description: "上下文长度超限自动重试（触发截断逻辑）"
+      error_code:
+        pattern: "^13.*"
+      max_retries: 5          # 截断重试次数较多（逐步截断）
+      retry_delay_ms: 500     # 快速重试（截断操作较快）
+      backoff_multiplier: 1.5
+      enabled: true
+
+    # 规则 6: 速率限制重试（429 错误）
+    # 支持多种匹配方式：error_code、keyword.values、keyword.patterns
+    - name: rate_limit_retry
+      description: "速率限制错误重试（429 Too Many Requests）"
+      # 业务错误码匹配（支持多个错误码）
+      error_code:
+        codes:
+          - "1302"           # BigModel 限流错误码
+          - "rate_limit_exceeded"
+          - "slow_down"
+      # 关键字匹配（支持中英文、正则表达式）
+      keyword:
+        # 简单字符串匹配（任一匹配即触发）
+        values:
+          - "rate limit"
+          - "too many requests"
+          - "速率限制"
+          - "限流"
+          - "频率限制"
+        # 正则表达式匹配（任一匹配即触发，支持多个正则）
+        patterns:
+          - "(?i)(rate.?limit|限流|频率限制)"           # 限流相关（中英文）
+          - "(?i)(too.?many.?requests|请求过多)"        # 请求过多
+          - "(?i)(quota.?exceeded|配额超限)"            # 配额超限
+          - "(?i)(api.?calls?.?(limit|exceeded)|API调用限制)"  # API 调用限制
+        case_sensitive: false
+      max_retries: 10          # 限流重试 5 次（需要更多尝试）
+      retry_delay_ms: 2000    # 初始延迟 2s（给服务器恢复时间）
+      backoff_multiplier: 2.0
+      enabled: true
+provider_groups:
+  # ANTHROPIC 协议组 - 使用 /v1/messages 接口
+  - name: "anthropic_group"
+    strategy: "round_robin"
+    max_retries: 3
+    retry_delay: 1s
+    failover:
+      enabled: true
+      mode: "primary_standby"
+      scope: "model_key"
+    # 健康检查配置（可选，仅当 strategy 为 health 时生效）
+    # health_check:
+    #   unhealthy_threshold: 3      # 连续失败 3 次标记为不健康
+    #   healthy_threshold: 1        # 成功 1 次即恢复
+    #   health_expire_time: 5m      # 5 分钟无请求后重新评估
+    truncation:
+      enabled: false
+      max_retries: 3
+      strategy: "percentage"
+      step: 10
+    providers:
+      - name: "CODEX_03"
+        weight: 100
+        role: "primary"
+        enabled: true
+      - name: "CODEX_04"
+        weight: 100
+        role: "primary"
+        enabled: true
+      - name: "codex_fox"
+        role: "standby"
+        weight: 100
+        enabled: true
+
+# ANTHROPIC 协议组 - 使用 /v1/messages 接口
+  - name: "anthropic_group_second"
+    strategy: "round_robin"
+    max_retries: 3
+    retry_delay: 1s
+    failover:
+      enabled: true
+      mode: "primary_standby"
+      scope: "model_key"
+    # 健康检查配置（可选，仅当 strategy 为 health 时生效）
+    # health_check:
+    #   unhealthy_threshold: 3      # 连续失败 3 次标记为不健康
+    #   healthy_threshold: 1        # 成功 1 次即恢复
+    #   health_expire_time: 5m      # 5 分钟无请求后重新评估
+    truncation:
+      enabled: false
+      max_retries: 3
+      strategy: "percentage"
+      step: 10
+    providers:
+      - name: "codex_ee"
+        role: "primary"
+        weight: 100
+        enabled: true
+      - name: "codex_fox"
+        role: "standby"
+        weight: 100
+        enabled: true
+  # OpenAI 协议组 - 使用 /v1/chat/* 接口
+  - name: "openai_group"
+    strategy: "round_robin"
+    max_retries: 3
+    retry_delay: 1s
+    failover:
+      enabled: true
+      mode: "primary_standby"
+      scope: "model_key"
+    truncation:
+      enabled: false
+      max_retries: 6
+      strategy: "percentage"
+      step: 20
+    providers:
+      - name: "codex_ee"
+        weight: 100
+        enabled: true
+      - name: "bigmodel"
+        weight: 100
+        enabled: false
+      - name: "nvidia"
+        weight: 100
+        enabled: false
+      - name: "gemini_local"
+        weight: 100
+        enabled: false
+      - name: "deepseek"
+        weight: 80
+        enabled: false
+
+  # Codex 组 - 使用 /v1/responses 接口
+  - name: "codex_group"
+    strategy: "round_robin"
+    failover:
+      enabled: true
+      mode: "primary_standby"
+      scope: "model_key"
+    max_retries: 2
+    retry_delay: 1s
+    providers:
+      - name: "codex_ee"
+        role: "primary"
+        weight: 100
+        enabled: true
+      - name: "codex_fox"
+        role: "standby"
+        weight: 100
+        enabled: true
+      - name: "bigmodel"
+        weight: 100
+        enabled: false
+      - name: "nvidia"
+        weight: 100
+        enabled: false
+      - name: "deepseek_anthropic"
+        weight: 100
+        enabled: false
+
+  # Codex 组 - 使用 /v1/responses 接口
+  - name: "codex_group_54"
+    max_retries: 2
+    retry_delay: 1s
+    failover:
+      enabled: true
+      mode: "primary_standby"
+      scope: "model_key"
+    providers:
+      - name: "CODEX_03"
+        role: "primary"
+        weight: 100
+        enabled: true
+      - name: "CODEX_04"
+        role: "primary"
+        weight: 100
+        enabled: true
+      - name: "codex_fox"
+        role: "standby"
+        weight: 100
+        enabled: true
+  # Gemini 组 - 使用 /v1beta/* 接口
+  - name: "gemini_group"
+    strategy: "round_robin"
+    max_retries: 2
+    retry_delay: 2s
+    providers:
+      - name: "codex_ee"
+        weight: 100
+        enabled: true
+      - name: "nvidia"
+        weight: 100
+        enabled: false
+      - name: "codex_fox"
+        weight: 100
+        enabled: true
+
+# 路由配置 - 定义请求路径到供应商组的映射
+# 当前支持 path + protocol + model 三层匹配：
+#   ai_endpoint -> protocol+model -> provider_group -> provider -> ai call
+# 规则优先级：
+#   1. match_path/match_type 更精确者优先
+#   2. 显式 protocol 优先于未配置 protocol
+#   3. match_models 精确匹配 > glob/regex 匹配 > exclude-only > 未配置
+#   4. priority 数值更大者优先
+#
+# 路由扩展字段：
+#   - protocol: 请求协议匹配条件（openai/anthropic/gemini/codex）
+#   - match_models: 模型匹配列表，支持 glob，如 ["gpt-*", "glm-*", "z-ai/*"]
+#   - match_model_regexes: 模型正则匹配列表，如 ["^gpt-(4\\.1|5\\..*)$"]
+#   - exclude_models: 模型排除列表，支持 glob，如 ["claude-opus-*"]
+#   - exclude_model_regexes: 模型正则排除列表，如 ["^claude-opus-.*$"]
+#   - priority: 同等条件下的显式优先级
+routing:
+  strategy: "health"
+  failover: true
+  routes:
+    # ========================================
+    # 生产环境路由（使用标准 pipeline）
+    # ========================================
+    # /v1/chat/* -> OpenAI 协议组
+    - match_path: "/v1/chat"
+      match_type: "prefix"
+      group: "openai_group"
+      # protocol: openai  # 可选：默认可从 match_path 自动推算
+      # match_models: ["gpt-*", "o*"]  # 可选：模型命中后优先路由到指定 group
+      # match_model_regexes: ["^gpt-(4\\.1|5\\..*)$"]  # 可选：标准 Go regex
+      # exclude_models: ["gpt-5.4"]  # 可选：命中后排除此路由
+      # exclude_model_regexes: ["^o[0-9].*$"]  # 可选：标准 Go regex
+      # priority: 10
+      pipeline: "chat-completions"  # 生产模式使用标准 pipeline（stream stage）
+
+    # /v1/messages -> ANTHROPIC 协议组
+    - match_path: "/v1/messages"
+      match_type: "prefix"
+      group: "anthropic_group"
+      # protocol: anthropic  # 可选：默认可从 match_path 自动推算
+      match_models: ["claude-opus-4-6"]
+      # match_model_regexes: ["^claude-opus-4-6$"]  # 可选：regex 示例，当前未启用
+      pipeline: "anthropic"  # 生产模式使用标准 pipeline（stream stage）
+
+    - match_path: "/v1/messages"
+      match_type: "prefix"
+      group: "anthropic_group_second"
+      # protocol: anthropic  # 可选：默认可从 match_path 自动推算
+      exclude_models: ["claude-opus-4-6"]
+      # match_model_regexes: ["^claude-(sonnet|haiku)-4-6$"]  # 可选：regex 示例，当前未启用
+      # exclude_model_regexes: ["^claude-opus-4-6$"]  # 可选：regex 排除示例，当前未启用
+      pipeline: "anthropic"  # 生产模式使用标准 pipeline（stream stage）
+
+    # ========================================
+    # Debug 路由（用于调试和测试）
+    # ========================================
+    # /v1/debug/chat/* -> OpenAI 协议组（Debug 模式，使用简单流式处理器）
+    - match_path: "/v1/debug/chat"
+      match_type: "prefix"
+      group: "openai_group"
+      # protocol: openai  # 可选：默认可从 match_path 自动推算
+      pipeline: "chat-completions-debug"  # Debug 模式使用 simple_stream stage（无协议转换）
+
+    # /v1/debug/messages -> ANTHROPIC 协议组（Debug 模式）
+    - match_path: "/v1/debug/messages"
+      match_type: "prefix"
+      group: "anthropic_group"
+      # protocol: anthropic  # 可选：默认可从 match_path 自动推算
+      pipeline: "anthropic-debug"  # Debug 模式使用 simple_stream stage（无协议转换）
+
+    # /v1/completions -> OpenAI 协议组
+    - match_path: "/v1/completions"
+      match_type: "exact"
+      group: "openai_group"
+      # pipeline: "completions-debug"  # 调试模式
+
+    # /v1/embeddings -> OpenAI 协议组
+    - match_path: "/v1/embeddings"
+      match_type: "exact"
+      group: "openai_group"
+      # pipeline: "embeddings-debug"  # 调试模式
+
+    # /v1/responses -> Codex 组
+    - match_path: "/v1/responses"
+      match_type: "prefix"
+      group: "codex_group"
+      protocol: codex  # 可选：默认可从 match_path 自动推算
+      priority: 10
+      # pipeline: "responses-debug"  # 调试模式
+    
+    - match_path: "/v1/responses"
+      match_type: "prefix"
+      group: "codex_group_54"
+      protocol: codex  # 可选：默认可从 match_path 自动推算
+      match_models: ["gpt-5.4"]  # 可选：模型命中后优先路由到指定 group
+      priority: 10
+    # /v1beta/* -> Gemini 组
+    - match_path: "/v1beta"
+      match_type: "prefix"
+      group: "gemini_group"
+      # protocol: gemini  # 可选：默认可从 match_path 自动推算
+      # pipeline: "gemini-debug"  # 调试模式
+
+    # Special API 路由
+    - match_path: "/v1/audio/speech"
+      match_type: "exact"
+      group: "openai_group"
+      # pipeline: "audio-speech-debug"  # 调试模式
+
+    - match_path: "/v1/audio/transcriptions"
+      match_type: "exact"
+      group: "openai_group"
+      # pipeline: "audio-transcriptions-debug"  # 调试模式
+
+    - match_path: "/v1/audio/translations"
+      match_type: "exact"
+      group: "openai_group"
+      # pipeline: "audio-translations-debug"  # 调试模式
+
+    - match_path: "/v1/images/generations"
+      match_type: "exact"
+      group: "openai_group"
+      # pipeline: "images-generations-debug"  # 调试模式
+
+    - match_path: "/v1/images/edits"
+      match_type: "exact"
+      group: "openai_group"
+      # pipeline: "images-edits-debug"  # 调试模式
+
+    - match_path: "/v1/images/variations"
+      match_type: "exact"
+      group: "openai_group"
+      # pipeline: "images-variations-debug"  # 调试模式
+
+# 供应商映射配置（替代 vendors，使用 providers.items）
+vendors:
+  enabled: false
+  vendors: []
+
+# WebSocket 配置
+# - GET /v1/responses + Upgrade:websocket：原生 Responses WS passthrough
+# - GET /v1/realtime + Upgrade:websocket：Realtime WS passthrough
+# - responses.http_bridge_enabled / compat_bridge_enabled：控制 HTTP 请求是否允许内部切到 Responses WS bridge
+websocket:
+  enabled: true
+  responses:
+    ingress_enabled: true
+    http_bridge_enabled: false
+    compat_bridge_enabled: false
+    compat_bridge_source_protocols: []
+    allow_passthrough_only: false
+    capacity:
+      max_active_connections: 0
+    metrics:
+      enabled: true
+      close_code_labels_enabled: true
+    connection_pooling_enabled: true
+    affinity_ttl: 65m
+    pre_first_event_retry_once: true
+    handshake_max_retries: 2
+    failover_on_handshake_error: true
+  realtime:
+    ingress_enabled: true
+    capacity:
+      max_active_connections: 0
+    metrics:
+      enabled: true
+      close_code_labels_enabled: true
+    handshake_max_retries: 1
+    failover_on_handshake_error: true
+
+# 限流配置
+rate_limit:
+  enabled: ${RATE_LIMIT_ENABLED:-false}
+  storage: "${RATE_LIMIT_STORAGE:-memory}"
+  algorithm: "${RATE_LIMIT_ALGORITHM:-token_bucket}"
+  default_limits:
+    qps: ${RATE_LIMIT_QPS:-10}
+    tpm: ${RATE_LIMIT_TPM:-10000}
+    daily_tokens: ${RATE_LIMIT_DAILY_TOKENS:-1000000}
+    monthly_tokens: ${RATE_LIMIT_MONTHLY_TOKENS:-30000000}
+  global_limits:
+    global_qps: ${RATE_LIMIT_GLOBAL_QPS:-1000}
+    global_tpm: ${RATE_LIMIT_GLOBAL_TPM:-1000000}
+    global_daily_tokens: ${RATE_LIMIT_GLOBAL_DAILY_TOKENS:-100000000}
+    global_monthly_tokens: ${RATE_LIMIT_GLOBAL_MONTHLY_TOKENS:-3000000000}
+  api_key_limits:
+    - api_key_pattern: "sk-"
+      qps: 10
+      qpd: 100000
+      qpm: 600
+      block_duration: "60s"
+    - api_key_pattern: "sk-ant-"
+      qps: 15
+      qpd: 150000
+      qpm: 900
+      block_duration: "60s"
+    - api_key_pattern: "nvapi-"
+      qps: 20
+      qpd: 200000
+      qpm: 1200
+      block_duration: "60s"
+
+  # Special API 路径级限流（覆盖默认限制）
+  path_limits:
+    "/v1/audio/speech":
+      requests_per_minute: 100
+      burst: 20
+    "/v1/audio/transcriptions":
+      requests_per_minute: 50
+      burst: 10
+    "/v1/audio/translations":
+      requests_per_minute: 50
+      burst: 10
+    "/v1/images/generations":
+      requests_per_minute: 30
+      burst: 5
+    "/v1/images/edits":
+      requests_per_minute: 30
+      burst: 5
+    "/v1/images/variations":
+      requests_per_minute: 30
+      burst: 5
+    "/v1/rerank":
+      requests_per_minute: 200
+      burst: 50
+    "/v1/responses":
+      requests_per_minute: 60
+      burst: 15
+    "/v1/realtime":
+      requests_per_minute: 60
+      burst: 10
+
+# 监控配置
+monitor:
+  enabled: true
+  metrics:
+    enabled: ${METRICS_ENABLED:-false}
+    path: "${METRICS_PATH:-/metrics}"
+    aggregation: true
+  tracing:
+    enabled: ${TRACING_ENABLED:-false}
+    sampler: ${TRACING_SAMPLER:-0.1}
+    exporter: "${TRACING_EXPORTER:-stdout}"
+    server_addr: "${TRACING_SERVER_ADDR:-localhost:4318}"
+  alert:
+    enabled: ${ALERT_ENABLED:-false}
+    webhook_url: "${ALERT_WEBHOOK_URL:-}"
+    channels: ["webhook"]
+    min_threshold: ${ALERT_MIN_THRESHOLD:-5}
+    severity: "${ALERT_SEVERITY:-warning}"
+  # pprof 性能分析和内存泄露检测
+  pprof:
+    enabled: ${PPROF_ENABLED:-true}
+    listen_addr: ":6060"
+    gc_interval: ${PPROF_GC_INTERVAL:-30s}
+  # 内存监控（Prometheus 运行时指标）
+  memory:
+    enabled: ${MEMORY_ENABLED:-true}
+    sample_interval: ${MEMORY_SAMPLE_INTERVAL:-15s}
+    alert_threshold_mb: ${MEMORY_ALERT_THRESHOLD:-1024}
+    leak_threshold_percent: ${MEMORY_LEAK_THRESHOLD:-50}
+
+# ============================================================
+# 熔断器配置（Circuit Breaker）
+# ============================================================
+# 用于防止级联故障，当下游服务故障时自动切断请求
+circuit_breaker:
+  # 失败阈值配置
+  failure_threshold: ${CB_FAILURE_THRESHOLD:-3}         # 触发熔断的失败次数阈值（默认：3次，优化：更快触发熔断）
+  failure_rate: ${CB_FAILURE_RATE:-0.5}                 # 触发熔断的失败率阈值（默认：50%，0.0-1.0）
+  sample_threshold: ${CB_SAMPLE_THRESHOLD:-10}          # 计算失败率的最小样本数（默认：10个请求）
+
+  # 时间配置
+  window_duration: ${CB_WINDOW_DURATION:-10s}           # 滑动窗口时长（默认：10秒）
+  open_timeout: ${CB_OPEN_TIMEOUT:-60s}                 # 熔断持续时间/恢复时间（默认：60秒，优化：给provider更多恢复时间）
+  half_open_max_calls: ${CB_HALF_OPEN_MAX_CALLS:-1}    # 半开状态下最大试探请求数（默认：1次，优化：降低试探阈值）
+
+# 认证配置
+auth:
+  # 建议通过 AUTH_JWT_SECRET 在启动环境中维护。
+  # 运行时会兼容旧的 JWT_SECRET，但新部署统一使用 AUTH_JWT_SECRET。
+  # 当启用了数据库配置快照时，启动环境中的 AUTH_JWT_SECRET / JWT_SECRET 仍会覆盖数据库中的 auth.jwt_secret。
+  jwt_secret: "${AUTH_JWT_SECRET:-change-this-in-production}"
+  # 建议生产环境单独设置，避免 JWT secret 轮换影响历史 Access Key 的复制恢复能力
+  access_key_secret: "${AUTH_ACCESS_KEY_SECRET:-}"
+  jwt_expire: ${JWT_EXPIRE:-24h}
+  session_timeout: ${AUTH_SESSION_TIMEOUT:-30m}
+  max_api_create_times: ${AUTH_MAX_API_CREATE_TIMES:-100}
+  # /admin/* 管理端鉴权开关
+  # 支持 Authorization: Bearer <jwt> 中的 admin/readonly_admin claims，
+  # 或静态 admin_token
+  admin_auth_enabled: ${AUTH_ADMIN_ENABLED:-false}
+  admin_token: "${AUTH_ADMIN_TOKEN:-}"
+  access_auth:
+    # /v1/* 下游访问密钥鉴权开关
+    # 生产环境建议开启，并将 allow_anonymous 设为 false
+    enabled: ${AUTH_ACCESS_ENABLED:-false}
+    # 是否允许未携带 Access Key 的匿名访问
+    allow_anonymous: ${AUTH_ACCESS_ALLOW_ANONYMOUS:-true}
+
+# 转换器配置
+transformer:
+  # 高性能模式：使用预分配缓冲区，性能提升 10-15x
+  # true: 启用高性能模式（推荐生产环境）
+  # false: 使用传统 map + json.Marshal 方式
+  high_perf: ${TRANSFORMER_HIGH_PERF:-true}
+
+  # ========================================
+  # ✅ HTTPTransformStage 配置（新增）
+  # ========================================
+  # HTTPTransformStage 启用开关
+  # true: 使用新的 HTTPTransformer 体系（完整 HTTP 转换：Headers + Body，支持模型专属适配）
+  # false: 使用传统的 TransformStage（仅 Body 转换）
+  http_transform_stage_enabled: ${TRANSFORMER_HTTP_TRANSFORM_STAGE_ENABLED:-true}
+
+  # 适配器缓存配置
+  # true: 缓存适配器实例，提升性能（默认开启）
+  # false: 每次请求重新创建适配器
+  cache_adapters: ${TRANSFORMER_CACHE_ADAPTERS:-true}
+
+  # 流式响应 null 值过滤配置
+  # true: 清理 SSE 响应中的 null 字段，减少带宽占用
+  # false: 保留原始响应格式
+  stream_null_filter: ${TRANSFORMER_STREAM_NULL_FILTER:-true}
+
+  # ========================================
+  # 📦 Body 修改器配置（Modifier）- 可选
+  # ========================================
+  body_modifiers:
+    # 请求 Body 修改器：在发送给上游前应用到请求
+    request:
+      # 示例：禁用 temperature 参数（某些模型不支持）
+      # - type: 修改器类型 (disable_params, override_params, system_message_converter, max_tokens_adjust, response_field_filter)
+      # - enabled: 是否启用
+      # - models: 适用的模型列表（支持通配符，如 ["gpt-*"]）
+      # - params: 修改器特定参数
+      # - type: disable_params
+      #   enabled: true
+      #   models: ["claude-*"]
+      #   params:
+      #     params: ["temperature", "top_p"]
+
+      # 示例：覆盖 max_tokens 参数
+      # - type: override_params
+      #   enabled: true
+      #   models: ["gpt-4"]
+      #   params:
+      #     max_tokens: 4096
+
+      # 示例：系统消息转换（将 system 消息转换为其他角色）
+      # - type: system_message_converter
+      #   enabled: true
+      #   models: ["cohere-*"]
+      #   params:
+      #     target_role: "user"
+      #     prefix: "[SYSTEM]: "
+
+      # 示例：Max Tokens 自动调整
+      # - type: max_tokens_adjust
+      #   enabled: true
+      #   models: ["*"]
+      #   params:
+      #     default_max: 4096
+      #     max_cap: 200000
+      #     min_cap: 1
+
+    # 响应 Body 修改器：在返回给客户端前应用到响应
+    response:
+      # 示例：过滤响应中的特定字段
+      # - type: response_field_filter
+      #   enabled: true
+      #   models: ["openai-*"]
+      #   params:
+      #     fields: ["id", "system_fingerprint", "prompt_filter_results"]
+
+# 日志配置
+log:
+  level: "${LOG_LEVEL:-debug}"
+  format: "${LOG_FORMAT:-json}"
+  output: "${LOG_OUTPUT:-file}"
+  file_path: "${LOG_FILE_PATH:-./logs/gateway.log}"
+  max_size: ${LOG_MAX_SIZE:-100}
+  max_backups: ${LOG_MAX_BACKUPS:-3}
+  max_age: ${LOG_MAX_AGE:-7}
+  compress: true
+  enable_console: ${LOG_ENABLE_CONSOLE:-false}
+  request_log:
+    # 是否对请求/响应 JSON payload 中的敏感字段做脱敏后再入库。
+    # 关闭后，像 prompt_cache_key 这类字段将按原值写入请求日志。
+    mask_sensitive_fields: ${LOG_REQUEST_MASK_SENSITIVE_FIELDS:-true}
+
+# Special API 增强
+special_apis:
+  # 日志配置
+  logging:
+    enabled: ${SPECIAL_APIS_LOGGING_ENABLED:-true}
+    log_request: true
+    log_response: true
+    log_request_payload: ${SPECIAL_APIS_LOG_REQUEST_PAYLOAD:-false}
+    log_response_payload: ${SPECIAL_APIS_LOG_RESPONSE_PAYLOAD:-false}
+    max_payload_size: ${SPECIAL_APIS_LOG_MAX_PAYLOAD_SIZE:-4096}
+    log_headers: true
+    sensitive_headers:
+      - "authorization"
+      - "x-api-key"
+      - "cookie"
+      - "set-cookie"
+
+  # 指标收集
+  metrics:
+    enabled: ${SPECIAL_APIS_METRICS_ENABLED:-true}
+    namespace: "ai_gateway"
+    subsystem: "special_apis"
+
+# ============================================================
+# 智能资源管理器配置（新增）
+# ============================================================
+# 启用后将使用LoadBalanceStageV2，提供三层智能切换：
+#   Group -> Provider -> Key
+resource_manager:
+  # 是否启用智能资源管理
+  #   false: 使用传统的 LoadBalanceStage
+  #   true:  使用新的 LoadBalanceStageV2 + ResourceManager
+  enabled: ${RESOURCE_MANAGER_ENABLED:-true}
+
+  # 负载均衡算法选择
+  default_group_algorithm: "tiered"         # 组级别: tiered（按优先级）、round_robin、random、weighted
+  default_provider_algorithm: "round_robin"  # Provider 级别: round_robin、random、weighted、health
+  default_key_algorithm: "health_based"     # Key 级别: round_robin、random、weighted、health_based
+
+  # 跨供应商 Key 选择配置
+  #   false: 传统模式，先选 Provider 再选 Key（Key 只能在所选 Provider 内选择）
+  #   true:  跨供应商模式，直接从 Group 内所有 Provider 的所有 Key 中选择
+  cross_provider_key_selection: ${CROSS_PROVIDER_KEY_SELECTION:-true}
+
+  # 健康检查配置
+  health_check:
+    enabled: ${RESOURCE_MANAGER_HEALTH_CHECK_ENABLED:-true}  # 启用健康检查
+    interval: "${RESOURCE_MANAGER_HEALTH_CHECK_INTERVAL:-60s}"  # 检查间隔
+    auto_recovery: ${RESOURCE_MANAGER_AUTO_RECOVERY:-true}  # 自动恢复失败资源
+    recovery_threshold: ${RESOURCE_MANAGER_RECOVERY_THRESHOLD:-0.90}  # 恢复阈值（成功率 > 90% 可恢复）
+
+  # 统计配置
+  enable_stats: ${RESOURCE_MANAGER_ENABLE_STATS:-true}
+  stats_retention: "${RESOURCE_MANAGER_STATS_RETENTION:-24h}"
+
+# ============================================================
+# 供应商队列配置（Provider Queue）
+# ============================================================
+# 供应商级别并发控制和排队管理，支持队列感知负载均衡
+provider_queue:
+  # 是否启用供应商队列功能
+  enabled: ${PROVIDER_QUEUE_ENABLED:-true}
+
+  # 默认槽位配置（适用于所有供应商）
+  default_slot:
+    # 最大并发数（每个供应商）
+    max_concurrency: 3
+    # 等待队列大小（超出此数量则触发溢出或拒绝）
+    queue_size: 10
+    # 队列等待超时时间
+    queue_timeout: "30s"
+    # 溢出策略: "overflow"(溢出到其他供应商) | "reject"(拒绝) | "wait"(等待)
+    overflow_strategy: "overflow"
+
+  # 供应商特定配置（覆盖默认配置）
+  providers:
+    nvidia:
+      max_concurrency: 5
+      queue_size: 20
+      queue_timeout: "60s"
+    deepseek:
+      max_concurrency: 5
+      queue_size: 15
+      queue_timeout: "30s"
+
+  # 溢出配置（当单个供应商满载时的处理策略）
+  overflow:
+    # 是否启用溢出功能（自动切换到同组其他供应商）
+    enabled: true
+    # 最大溢出尝试次数
+    max_attempts: 3
+    # 溢出策略: "prefer_empty"(优先选择负载最低的) | "round_robin"(轮询) | "random"(随机)
+    strategy: "prefer_empty"
+
+  # 等待心跳配置（SSE 流式请求排队时发送心跳保持连接）
+  wait_heartbeat:
+    # 是否启用等待心跳（流式请求排队时发送心跳）
+    enabled: true
+    # 心跳发送间隔
+    interval: "5s"
+    # 注释说明
+    comment: ": queue heartbeat"
+    # 最大等待时间（超过此时间仍未获取槽位则返回超时错误）
+    max_wait_time: "120s"
+
+# Pipeline 灰度发布配置
+# 用于控制新 Pipeline 架构的灰度发布
+pipeline:
+  # 全局开关：是否启用 Pipeline 架构
+  # - false: 所有请求走旧版 ProxyHandler
+  # - true: 根据灰度策略决定走 Pipeline 还是旧版
+  enabled: true
+
+  # 灰度发布配置
+  canary:
+    # 是否启用灰度（需要 pipeline.enabled=true）
+    enabled: false
+    # 灰度百分比 (0-100)
+    # - 0: 不走 Pipeline
+    # - 50: 50% 请求走 Pipeline
+    # - 100: 全部走 Pipeline
+    percentage: 100
+    # 按 Header 匹配灰度（优先级高于百分比）
+    # 请求包含指定 header 时强制走 Pipeline
+    headers:
+      X-Use-Pipeline: "true"
+      X-Use-Old-Proxy: "true"  # 强制走旧版（用于后备测试）
+
+  # Pipeline 默认重试配置（所有 Pipeline 共享）
+  # 这是 Pipeline 层级的全局默认值，当 Pipeline 未单独配置时使用
+  # 注意：此配置会覆盖 retry.default_max_retries（对于 Pipeline 请求）
+  default_retry:
+    max_attempts: 10          # 默认重试 5 次（建议 3-5 次）
+    delay_ms: 100            # 初始延迟 100ms
+    max_delay_ms: 5000       # 最大延迟 5s
+
+  # Pipeline 默认 Stage 超时时间（非流式请求）
+  # 注意：SSE 流式请求不受此限制，由 sse_heartbeat 控制
+  default_stage_timeout: 120s
+
+  # Pipeline tracing stage span 留存时间
+  # 仅清理写入 request_logs 表中的 pipeline.* / stage.* 记录
+  # 支持 time.Duration 格式，例如：24h、6h、30m
+  # 设为 0s 可关闭自动清理
+  stage_log_retention: "${PIPELINE_STAGE_LOG_RETENTION:-1h}"
+
+  # HTTP Trace 配置（细粒度网络性能追踪）
+  # enabled: 是否启用 httptrace（详细记录 DNS/连接/TLS/首字节时间）
+  # 注意：启用后会产生额外的追踪数据，适用于性能分析
+  httptrace:
+    enabled: ${HTTPTRACE_ENABLED:-true}
+
+  # 旧版 ProxyHandler 能力迁移开关
+  # 默认全部关闭：代码已迁到 Pipeline，但不参与默认执行路径
+  legacy_proxy_compat:
+    capability_precheck: false
+    context_limit_truncation: false
+    truncation_event_logging: false
+    token_usage_persistence: false
+
+  # 单个 Pipeline 配置
+  pipelines:
+    chat-completions:
+      name: "chat-completions"
+      enabled: true
+      retry:
+        max_attempts: 10      # 聊天 API 重试 5 次
+        delay_ms: 100        # 初始延迟 100ms
+    completions:
+      name: "completions"
+      enabled: true
+    embeddings:
+      name: "embeddings"
+      enabled: true
+    anthropic:
+      name: "anthropic"
+      enabled: true
+    gemini:
+      name: "gemini"
+      enabled: true
+    # Audio APIs
+    audio-speech:
+      name: "audio-speech"
+      enabled: true
+      retry:
+        max_attempts: 2      # 音频 API 重试 2 次（成本较高）
+        delay_ms: 200        # 初始延迟 200ms
+    audio-transcriptions:
+      name: "audio-transcriptions"
+      enabled: true
+    audio-translations:
+      name: "audio-translations"
+      enabled: true
+    # Image APIs
+    images-generations:
+      name: "images-generations"
+      enabled: true
+      retry:
+        max_attempts: 2      # 图像生成重试 2 次（成本最高）
+        delay_ms: 300        # 初始延迟 300ms
+    images-edits:
+      name: "images-edits"
+      enabled: true
+    images-variations:
+      name: "images-variations"
+      enabled: true
+
+# AICLI 配置
+aicli:
+  # MCP (Model Context Protocol) 配置
+  mcp:
+    # MCP 配置文件路径（相对于项目根目录）
+    # 支持格式：.yaml, .yml, .json
+    # 如果未指定，将自动搜索以下位置：
+    # 1. configs/mcp.yaml, configs/mcp.json
+    # 2. mcp.yaml, mcp.json
+    # 3. ~/.aicli/mcp.yaml, ~/.aicli/mcp.json
+    # 4. ~/.config/aicli/mcp.yaml, ~/.config/aicli/mcp.json
+    config_file: "${MCP_CONFIG_FILE:-configs/mcp.yaml}"
+    # 是否自动连接（默认启用）
+    auto_connect: ${MCP_AUTO_CONNECT:-false}
+
+  # AICLI 日志配置（与 gateway 日志分离）
+  log:
+    file_path: "${AICLI_LOG_FILE_PATH:-./logs/aicli.log}"
+
+  # AICLI 重试配置
+  retry:
+    # 最大重试总时长（超过则停止重试）
+    max_total_time: "${AICLI_RETRY_MAX_TOTAL_TIME:-60s}"
+    # 前 N 次快速重试次数
+    fast_retry_count: ${AICLI_RETRY_FAST_COUNT:-5}
+    # 快速重试间隔
+    fast_retry_interval: "${AICLI_RETRY_FAST_INTERVAL:-2s}"
+    # 慢速重试间隔
+    slow_retry_interval: "${AICLI_RETRY_SLOW_INTERVAL:-5s}"
+
+  # AICLI 请求超时配置（0 表示不设置总超时）
+  timeout:
+    request_timeout: "${AICLI_REQUEST_TIMEOUT:-0s}"
+
+# Skills Runtime 配置
+skills_runtime:
+  enabled: ${SKILLS_RUNTIME_ENABLED:-true}
+  config_file: "${SKILLS_RUNTIME_CONFIG_FILE:-configs/runtime.yaml}"
+  # 系统级 skills 目录，仅放通用平台能力
+  skill_dir: "${SKILLS_RUNTIME_SKILL_DIR:-./docs/skill_runtime/skills}"
+  # 额外 skills 目录，用于加载外部或业务域 skill pack
+  extra_skill_dirs: []
+  # aicli chat 中默认暴露给模型的候选 skills 数量（route-first）
+  aicli_skill_exposure_top_k: ${SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_TOP_K:-5}
+  # aicli chat 中 skills 与内置 tools 的暴露策略：auto | prefer | only
+  aicli_skill_exposure_mode: "${SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_MODE:-auto}"
+  gateway_provider_name: "${SKILLS_RUNTIME_GATEWAY_PROVIDER_NAME:-gateway}"
+  # 管理员令牌：保护 search admin 与 skill mutation 接口
+  admin_token: "${SKILLS_RUNTIME_ADMIN_TOKEN:-}"
+  reindex_cooldown: "${SKILLS_RUNTIME_REINDEX_COOLDOWN:-30s}"
+  # 轻量治理策略
+  read_only: ${SKILLS_RUNTIME_READ_ONLY:-false}
+  disable_import: ${SKILLS_RUNTIME_DISABLE_IMPORT:-false}
+  disable_persist: ${SKILLS_RUNTIME_DISABLE_PERSIST:-false}
+  disable_reload_ops: ${SKILLS_RUNTIME_DISABLE_RELOAD_OPS:-false}
+  disable_hot_reload_ops: ${SKILLS_RUNTIME_DISABLE_HOT_RELOAD_OPS:-false}
+  usage_tracking_enabled: ${SKILLS_RUNTIME_USAGE_TRACKING_ENABLED:-true}
+  usage_ledger_enabled: ${SKILLS_RUNTIME_USAGE_LEDGER_ENABLED:-false}
+  quota_enabled: ${SKILLS_RUNTIME_QUOTA_ENABLED:-false}
+  default_max_requests: ${SKILLS_RUNTIME_DEFAULT_MAX_REQUESTS:-0}
+  default_max_tokens: ${SKILLS_RUNTIME_DEFAULT_MAX_TOKENS:-0}
+  scope_resolver_enabled: ${SKILLS_RUNTIME_SCOPE_RESOLVER_ENABLED:-true}
+  tenant_headers: ["X-Skills-Tenant", "X-Skills-Auth-Tenant", "X-Tenant-ID", "X-Authenticated-Tenant"]
+  project_headers: ["X-Skills-Project", "X-Skills-Auth-Project", "X-Project-ID", "X-Authenticated-Project"]
+  user_headers: ["X-Skills-User", "X-Skills-Auth-User", "X-User-ID", "X-Authenticated-User"]
+  role_headers: ["X-Skills-Role", "X-Skills-Auth-Role", "X-Role", "X-Authenticated-Role"]
+  jwt_claims_enabled: ${SKILLS_RUNTIME_JWT_CLAIMS_ENABLED:-false}
+  tenant_claims: ["tenant_id", "tenant", "tid"]
+  project_claims: ["project_id", "project", "pid"]
+  user_claims: ["user_id", "user", "uid", "sub"]
+  role_claims: ["role", "roles"]
+  admin_roles: []
+  api_key_scopes: {}
+  quota_policies:
+    tenants: {}
+    projects: {}
+    users: {}
+    # tenants:
+    #   team-a:
+    #     max_requests: 1000
+    #     max_tokens: 500000
+    # projects:
+    #   team-a/ops:
+    #     max_requests: 300
+    # users:
+    #   team-a/ops/alice:
+    #     max_requests: 50

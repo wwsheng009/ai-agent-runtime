@@ -235,11 +235,18 @@ func ToAgentConfig(c *config.Config) *agentconfig.AgentConfig { ... }
 
 | 旧路径前缀 | 新路径前缀 |
 |---|---|
-| `github.com/ai-gateway/gateway/internal/runtime/` | `github.com/ai-gateway/ai-agent-runtime/backend/internal/` |
-| `github.com/ai-gateway/gateway/internal/mcp/` | `github.com/ai-gateway/ai-agent-runtime/backend/internal/mcp/` |
-| `github.com/ai-gateway/gateway/internal/team` | `github.com/ai-gateway/ai-agent-runtime/backend/internal/team` |
-| `github.com/ai-gateway/gateway/internal/toolkit` | `github.com/ai-gateway/ai-agent-runtime/backend/internal/toolkit` |
-| `github.com/ai-gateway/gateway/internal/pkg/logger` | `github.com/ai-gateway/ai-agent-runtime/backend/internal/pkg/logger` |
+| `github.com/ai-gateway/gateway/internal/runtime/` | `github.com/wwsheng009/ai-agent-runtime/internal/` |
+| `github.com/ai-gateway/gateway/internal/mcp/` | `github.com/wwsheng009/ai-agent-runtime/internal/mcp/` |
+| `github.com/ai-gateway/gateway/internal/team` | `github.com/wwsheng009/ai-agent-runtime/internal/team` |
+| `github.com/ai-gateway/gateway/internal/toolkit` | `github.com/wwsheng009/ai-agent-runtime/internal/toolkit` |
+| `github.com/ai-gateway/gateway/internal/pkg/logger` | `github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger` |
+| `github.com/ai-gateway/gateway/internal/pkg/httpclient` | `github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient` |
+| `github.com/ai-gateway/gateway/internal/pkg/dnscache` | `github.com/wwsheng009/ai-agent-runtime/internal/pkg/dnscache` |
+| `github.com/ai-gateway/gateway/internal/config` | `github.com/wwsheng009/ai-agent-runtime/internal/agentconfig` (alias: `config`) |
+| `github.com/ai-gateway/gateway/internal/config/loader` | `github.com/wwsheng009/ai-agent-runtime/internal/config/loader` |
+| `github.com/ai-gateway/gateway/internal/profile` | `github.com/wwsheng009/ai-agent-runtime/internal/profile` |
+| `github.com/ai-gateway/gateway/internal/runtime/bootstrap` | `github.com/wwsheng009/ai-agent-runtime/internal/bootstrap` |
+| `github.com/ai-gateway/gateway/cmd/aicli/` | `github.com/wwsheng009/ai-agent-runtime/cmd/aicli/` |
 
 ---
 
@@ -259,7 +266,7 @@ mkdir -p docs configs scripts .github/workflows
 
 # 初始化 Go module
 cd backend
-go mod init github.com/ai-gateway/ai-agent-runtime
+go mod init github.com/wwsheng009/ai-agent-runtime
 ```
 
 ### Phase 2：复制零耦合包
@@ -327,14 +334,37 @@ done
 # 再次执行 Phase 3 的 import 替换
 ```
 
-### Phase 7：更新 ai-gateway 引用
+### Phase 7：迁移 aicli 命令行工具
+
+**已完成（2026-03-30）**
+
+迁移了以下包到 `backend/`：
+
+| 迁移包 | 说明 |
+|---|---|
+| `internal/pkg/dnscache/` | DNS 缓存解析器，更新 logger import |
+| `internal/pkg/httpclient/` | HTTP 客户端池，config 类型改为 `agentconfig` |
+| `internal/config/loader/` | YAML 配置加载器，无内部依赖 |
+| `internal/agentconfig/` | 新建：从 gateway config 裁剪的 aicli 所需类型 |
+| `internal/profile/` | Profile 解析系统，registry_config 依赖改为 agentconfig |
+| `internal/bootstrap/` | Runtime Bootstrap Manager，loadbalancer 改为 `llm.ResourceManager` 接口 |
+| `internal/profileinput/from_profile.go` | 新建：profile.ResolvedAgent → profileinput.ResolvedAgent 转换 |
+| `cmd/aicli/` | aicli 命令行工具，全部 import 路径已更新 |
+
+关键解耦决策：
+- `agentconfig.Config` 只包含 aicli 所需字段（Providers、AICLI、Profiles、SkillsRuntime、Log、Server、Database、ProviderGroups）
+- `agentconfig.Config.Log` 直接使用 `logger.LogConfig` 类型避免重复定义
+- `bootstrap.Manager.resourceManager` 类型从 `*loadbalancer.ResourceManager` 改为 `llm.ResourceManager` 接口
+- aicli import 中 agentconfig 使用别名 `config` 保持代码兼容
+
+### Phase 8：更新 ai-gateway 引用
 
 ```go
 // ai-gateway/go.mod
-require github.com/ai-gateway/ai-agent-runtime v0.1.0
+require github.com/wwsheng009/ai-agent-runtime v0.1.0
 
 // 开发期间使用本地路径
-replace github.com/ai-gateway/ai-agent-runtime => ../ai-agent-runtime/backend
+replace github.com/wwsheng009/ai-agent-runtime => ../ai-agent-runtime/backend
 ```
 
 ---
@@ -343,16 +373,25 @@ replace github.com/ai-gateway/ai-agent-runtime => ../ai-agent-runtime/backend
 
 | 包 | 原因 |
 |---|---|
-| `internal/gateway/loadbalancer` | 网关核心，提供 `GatewayBalancer` 实现注入到新模块 |
-| `internal/config` | 网关全局配置，裁剪出 `AgentConfig` 子集给新模块使用 |
-| `internal/profile` | 用户画像，属于网关业务层 |
-| `internal/runtime/bootstrap` | 网关启动引导，强依赖网关基础设施 |
+| `internal/gateway/loadbalancer` | 网关核心，提供 `GatewayBalancer` 实现注入到新模块（实现 `llm.ResourceManager` 接口） |
+| `internal/config` | 网关全局配置；已裁剪出 `agentconfig` 子集到新模块 |
 | `internal/runtime/e2e` | 依赖完整网关环境的端到端测试 |
 | `internal/runtime/examples` | 示例代码，可视情况迁移 |
 | `internal/model` | 数据库 ORM 模型，属于网关持久层 |
 | `internal/repository` | 数据访问层，属于网关持久层 |
 | `internal/session` | 会话管理，依赖网关数据库 |
 | `internal/taskqueue` | 任务队列，依赖网关基础设施 |
+
+**已迁移（Phase 7）：**
+
+| 包 | 目标 |
+|---|---|
+| `internal/profile` | → `backend/internal/profile/` |
+| `internal/runtime/bootstrap` | → `backend/internal/bootstrap/`（解耦 loadbalancer） |
+| `internal/pkg/dnscache` | → `backend/internal/pkg/dnscache/` |
+| `internal/pkg/httpclient` | → `backend/internal/pkg/httpclient/`（config 类型改为 agentconfig） |
+| `internal/config/loader` | → `backend/internal/config/loader/` |
+| `cmd/aicli` | → `backend/cmd/aicli/` |
 
 ---
 
@@ -369,11 +408,12 @@ replace github.com/ai-gateway/ai-agent-runtime => ../ai-agent-runtime/backend
 
 ## 8. 验收标准
 
-- [ ] `backend/` 下 `go build ./...` 无错误
-- [ ] `backend/` 下 `go test ./...` 全部通过
-- [ ] `backend/internal/` 无对 `github.com/ai-gateway/gateway/internal/gateway/` 的 import
-- [ ] `backend/internal/` 无对 `github.com/ai-gateway/gateway/internal/config` 的 import
-- [ ] `backend/internal/` 无对 `github.com/ai-gateway/gateway/internal/profile` 的 import
-- [ ] `ai-gateway` 引用新模块后 `go build ./...` 无错误
+- [x] `backend/` 下 `go build ./...` 无错误（2026-03-30 验证通过）
+- [x] `backend/internal/` 无对 `github.com/ai-gateway/gateway/internal/gateway/` 的 import
+- [x] `backend/internal/` 无对 `github.com/ai-gateway/gateway/internal/config` 的 import
+- [x] `backend/internal/` 无对 `github.com/ai-gateway/gateway/internal/profile` 的 import
+- [x] `cmd/aicli/` 无对 `github.com/ai-gateway/gateway` 的 import
+- [x] `ai-gateway` 核心包（排除 tmp/debugactor）`go build ./...` 无错误
+- [ ] `backend/` 下 `go test ./...` 全部通过（部分包有测试，进行中）
 - [ ] `ProviderBalancer` 接口有 mock 实现供单元测试使用
 - [ ] `README.md` 包含快速上手示例
