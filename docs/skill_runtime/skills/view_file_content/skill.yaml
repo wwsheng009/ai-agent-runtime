@@ -1,0 +1,36 @@
+name: view_file_content
+description: Read a local file through the managed view MCP tool. The prompt must be the file path to inspect.
+version: 1.0.0
+category: filesystem
+capabilities:
+  - file_read
+  - file_inspection
+tags:
+  - file
+  - view
+  - filesystem
+triggers:
+  - type: keyword
+    values:
+      - view file
+      - read file
+      - inspect file
+      - show file
+    weight: 1.0
+tools:
+  - view
+workflow:
+  steps:
+    - id: read_file
+      name: Read file content
+      tool: view
+      args:
+        file_path: "{{prompt}}"
+        offset: 0
+        limit: 200
+context:
+  files: []
+  environment: []
+  symbols: []
+permissions:
+  - filesystem

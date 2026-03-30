@@ -36,12 +36,12 @@ type Config struct {
 
 // ProvidersConfig holds the provider collection configuration.
 type ProvidersConfig struct {
-	DefaultProvider string             `yaml:"default_provider" mapstructure:"default_provider" env:"PROVIDERS_DEFAULT"`
-	Timeout         time.Duration      `yaml:"timeout" mapstructure:"timeout" env:"PROVIDERS_TIMEOUT"`
-	MaxRetries      int                `yaml:"max_retries" mapstructure:"max_retries" env:"PROVIDERS_MAX_RETRIES"`
-	Backoff         BackoffConfig      `yaml:"backoff" mapstructure:"backoff"`
-	HTTPTimeout     HTTPTimeout        `yaml:"http_timeout" mapstructure:"http_timeout"`
-	Proxy           ProxyConfig        `yaml:"proxy" mapstructure:"proxy"`
+	DefaultProvider string              `yaml:"default_provider" mapstructure:"default_provider" env:"PROVIDERS_DEFAULT"`
+	Timeout         time.Duration       `yaml:"timeout" mapstructure:"timeout" env:"PROVIDERS_TIMEOUT"`
+	MaxRetries      int                 `yaml:"max_retries" mapstructure:"max_retries" env:"PROVIDERS_MAX_RETRIES"`
+	Backoff         BackoffConfig       `yaml:"backoff" mapstructure:"backoff"`
+	HTTPTimeout     HTTPTimeout         `yaml:"http_timeout" mapstructure:"http_timeout"`
+	Proxy           ProxyConfig         `yaml:"proxy" mapstructure:"proxy"`
 	Items           map[string]Provider `yaml:"items" mapstructure:"items"`
 }
 
@@ -77,25 +77,25 @@ type HTTPTimeout struct {
 
 // Provider holds provider configuration.
 type Provider struct {
-	Enabled         bool              `yaml:"enabled" mapstructure:"enabled" json:"enabled"`
-	Type            string            `yaml:"type" mapstructure:"type" json:"type"`
-	Protocol        string            `yaml:"protocol" mapstructure:"protocol" json:"protocol"`
-	BaseURL         string            `yaml:"base_url" mapstructure:"base_url" json:"base_url"`
-	APIPath         string            `yaml:"api_path" mapstructure:"api_path" json:"api_path"`
-	ForwardURL      string            `yaml:"forward_url" mapstructure:"forward_url" json:"forward_url"`
-	APIKey          string            `yaml:"api_key" mapstructure:"api_key" json:"api_key"`
-	APIKeys         []string          `yaml:"api_keys" mapstructure:"api_keys" json:"api_keys"`
-	APIKeyRef       string            `yaml:"api_key_ref" mapstructure:"api_key_ref" json:"api_key_ref"`
-	DefaultModel    string            `yaml:"default_model" mapstructure:"default_model" json:"default_model"`
-	SupportedModels []string          `yaml:"supported_models" mapstructure:"supported_models" json:"supported_models"`
-	Headers             map[string]string    `yaml:"headers" mapstructure:"headers" json:"headers"`
-	HeaderMappings      map[string]string    `yaml:"header_mappings" mapstructure:"header_mappings" json:"header_mappings"`
-	HeaderMappingRules  []HeaderMappingRule  `yaml:"header_mapping_rules" mapstructure:"header_mapping_rules" json:"header_mapping_rules"`
-	SupportTypes        []string             `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
-	ModelMappings       map[string]string    `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
-	MaxTokensLimit      int                  `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
-	Timeout             time.Duration        `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
-	Proxy               *ProxyConfig         `yaml:"proxy" mapstructure:"proxy" json:"proxy"`
+	Enabled            bool                `yaml:"enabled" mapstructure:"enabled" json:"enabled"`
+	Type               string              `yaml:"type" mapstructure:"type" json:"type"`
+	Protocol           string              `yaml:"protocol" mapstructure:"protocol" json:"protocol"`
+	BaseURL            string              `yaml:"base_url" mapstructure:"base_url" json:"base_url"`
+	APIPath            string              `yaml:"api_path" mapstructure:"api_path" json:"api_path"`
+	ForwardURL         string              `yaml:"forward_url" mapstructure:"forward_url" json:"forward_url"`
+	APIKey             string              `yaml:"api_key" mapstructure:"api_key" json:"api_key"`
+	APIKeys            []string            `yaml:"api_keys" mapstructure:"api_keys" json:"api_keys"`
+	APIKeyRef          string              `yaml:"api_key_ref" mapstructure:"api_key_ref" json:"api_key_ref"`
+	DefaultModel       string              `yaml:"default_model" mapstructure:"default_model" json:"default_model"`
+	SupportedModels    []string            `yaml:"supported_models" mapstructure:"supported_models" json:"supported_models"`
+	Headers            map[string]string   `yaml:"headers" mapstructure:"headers" json:"headers"`
+	HeaderMappings     map[string]string   `yaml:"header_mappings" mapstructure:"header_mappings" json:"header_mappings"`
+	HeaderMappingRules []HeaderMappingRule `yaml:"header_mapping_rules" mapstructure:"header_mapping_rules" json:"header_mapping_rules"`
+	SupportTypes       []string            `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
+	ModelMappings      map[string]string   `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
+	MaxTokensLimit     int                 `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
+	Timeout            time.Duration       `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
+	Proxy              *ProxyConfig        `yaml:"proxy" mapstructure:"proxy" json:"proxy"`
 }
 
 // HeaderMappingRule defines a conditional header rewrite rule.
@@ -249,6 +249,23 @@ type ProfileConfig struct {
 	Root string `yaml:"root" mapstructure:"root"`
 }
 
+type SkillsRuntimeQuotaLimit struct {
+	MaxRequests *int `yaml:"max_requests" mapstructure:"max_requests"`
+	MaxTokens   *int `yaml:"max_tokens" mapstructure:"max_tokens"`
+}
+
+type SkillsRuntimeQuotaPolicies struct {
+	Tenants  map[string]SkillsRuntimeQuotaLimit `yaml:"tenants" mapstructure:"tenants"`
+	Projects map[string]SkillsRuntimeQuotaLimit `yaml:"projects" mapstructure:"projects"`
+	Users    map[string]SkillsRuntimeQuotaLimit `yaml:"users" mapstructure:"users"`
+}
+
+type SkillsRuntimeScopeBinding struct {
+	TenantID  string `yaml:"tenant_id" mapstructure:"tenant_id"`
+	ProjectID string `yaml:"project_id" mapstructure:"project_id"`
+	UserID    string `yaml:"user_id" mapstructure:"user_id"`
+}
+
 // ResolveRoot resolves a named profile to a root path when configured.
 func (c *ProfilesConfig) ResolveRoot(name string) string {
 	if c == nil {
@@ -269,13 +286,40 @@ func (c *ProfilesConfig) ResolveRoot(name string) string {
 
 // SkillsRuntimeConfig holds the skills runtime integration config (aicli-relevant fields only).
 type SkillsRuntimeConfig struct {
-	ConfigFile             string   `yaml:"config_file" mapstructure:"config_file" env:"SKILLS_RUNTIME_CONFIG_FILE"`
-	Enabled                bool     `yaml:"enabled" mapstructure:"enabled" env:"SKILLS_RUNTIME_ENABLED"`
-	SkillDir               string   `yaml:"skill_dir" mapstructure:"skill_dir" env:"SKILLS_RUNTIME_SKILL_DIR"`
-	SkillDirs              []string `yaml:"skill_dirs" mapstructure:"skill_dirs"`
-	ExtraSkillDirs         []string `yaml:"extra_skill_dirs" mapstructure:"extra_skill_dirs"`
-	AICLISkillExposureTopK int      `yaml:"aicli_skill_exposure_top_k" mapstructure:"aicli_skill_exposure_top_k" env:"SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_TOP_K"`
-	AICLISkillExposureMode string   `yaml:"aicli_skill_exposure_mode" mapstructure:"aicli_skill_exposure_mode" env:"SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_MODE"`
+	ConfigFile             string                               `yaml:"config_file" mapstructure:"config_file" env:"SKILLS_RUNTIME_CONFIG_FILE"`
+	Enabled                bool                                 `yaml:"enabled" mapstructure:"enabled" env:"SKILLS_RUNTIME_ENABLED"`
+	SkillDir               string                               `yaml:"skill_dir" mapstructure:"skill_dir" env:"SKILLS_RUNTIME_SKILL_DIR"`
+	SkillDirs              []string                             `yaml:"skill_dirs" mapstructure:"skill_dirs"`
+	ExtraSkillDirs         []string                             `yaml:"extra_skill_dirs" mapstructure:"extra_skill_dirs"`
+	AICLISkillExposureTopK int                                  `yaml:"aicli_skill_exposure_top_k" mapstructure:"aicli_skill_exposure_top_k" env:"SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_TOP_K"`
+	AICLISkillExposureMode string                               `yaml:"aicli_skill_exposure_mode" mapstructure:"aicli_skill_exposure_mode" env:"SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_MODE"`
+	GatewayProviderName    string                               `yaml:"gateway_provider_name" mapstructure:"gateway_provider_name" env:"SKILLS_RUNTIME_GATEWAY_PROVIDER_NAME"`
+	AdminToken             string                               `yaml:"admin_token" mapstructure:"admin_token" env:"SKILLS_RUNTIME_ADMIN_TOKEN"`
+	ReindexCooldown        time.Duration                        `yaml:"reindex_cooldown" mapstructure:"reindex_cooldown" env:"SKILLS_RUNTIME_REINDEX_COOLDOWN"`
+	ReadOnly               bool                                 `yaml:"read_only" mapstructure:"read_only" env:"SKILLS_RUNTIME_READ_ONLY"`
+	DisableImport          bool                                 `yaml:"disable_import" mapstructure:"disable_import" env:"SKILLS_RUNTIME_DISABLE_IMPORT"`
+	DisablePersist         bool                                 `yaml:"disable_persist" mapstructure:"disable_persist" env:"SKILLS_RUNTIME_DISABLE_PERSIST"`
+	DisableReloadOps       bool                                 `yaml:"disable_reload_ops" mapstructure:"disable_reload_ops" env:"SKILLS_RUNTIME_DISABLE_RELOAD_OPS"`
+	DisableHotReloadOps    bool                                 `yaml:"disable_hot_reload_ops" mapstructure:"disable_hot_reload_ops" env:"SKILLS_RUNTIME_DISABLE_HOT_RELOAD_OPS"`
+	UsageTrackingEnabled   bool                                 `yaml:"usage_tracking_enabled" mapstructure:"usage_tracking_enabled" env:"SKILLS_RUNTIME_USAGE_TRACKING_ENABLED"`
+	UsageLedgerEnabled     bool                                 `yaml:"usage_ledger_enabled" mapstructure:"usage_ledger_enabled" env:"SKILLS_RUNTIME_USAGE_LEDGER_ENABLED"`
+	QuotaEnabled           bool                                 `yaml:"quota_enabled" mapstructure:"quota_enabled" env:"SKILLS_RUNTIME_QUOTA_ENABLED"`
+	DefaultMaxRequests     int                                  `yaml:"default_max_requests" mapstructure:"default_max_requests" env:"SKILLS_RUNTIME_DEFAULT_MAX_REQUESTS"`
+	DefaultMaxTokens       int                                  `yaml:"default_max_tokens" mapstructure:"default_max_tokens" env:"SKILLS_RUNTIME_DEFAULT_MAX_TOKENS"`
+	QuotaPolicies          SkillsRuntimeQuotaPolicies           `yaml:"quota_policies" mapstructure:"quota_policies"`
+	ScopeResolverEnabled   bool                                 `yaml:"scope_resolver_enabled" mapstructure:"scope_resolver_enabled" env:"SKILLS_RUNTIME_SCOPE_RESOLVER_ENABLED"`
+	TenantHeaders          []string                             `yaml:"tenant_headers" mapstructure:"tenant_headers"`
+	ProjectHeaders         []string                             `yaml:"project_headers" mapstructure:"project_headers"`
+	UserHeaders            []string                             `yaml:"user_headers" mapstructure:"user_headers"`
+	RoleHeaders            []string                             `yaml:"role_headers" mapstructure:"role_headers"`
+	JWTClaimsEnabled       bool                                 `yaml:"jwt_claims_enabled" mapstructure:"jwt_claims_enabled" env:"SKILLS_RUNTIME_JWT_CLAIMS_ENABLED"`
+	JWTSecret              string                               `yaml:"jwt_secret" mapstructure:"jwt_secret" env:"SKILLS_RUNTIME_JWT_SECRET"`
+	TenantClaims           []string                             `yaml:"tenant_claims" mapstructure:"tenant_claims"`
+	ProjectClaims          []string                             `yaml:"project_claims" mapstructure:"project_claims"`
+	UserClaims             []string                             `yaml:"user_claims" mapstructure:"user_claims"`
+	RoleClaims             []string                             `yaml:"role_claims" mapstructure:"role_claims"`
+	AdminRoles             []string                             `yaml:"admin_roles" mapstructure:"admin_roles"`
+	APIKeyScopes           map[string]SkillsRuntimeScopeBinding `yaml:"api_key_scopes" mapstructure:"api_key_scopes"`
 }
 
 // ServerConfig holds basic server info (used by aicli config command).
@@ -317,7 +361,7 @@ type ProviderGroup struct {
 	RetryDelay  time.Duration           `yaml:"retry_delay" mapstructure:"retry_delay"`
 	Truncation  *TruncationConfig       `yaml:"truncation" mapstructure:"truncation"`
 	HealthCheck *HealthCheckConfig      `yaml:"health_check" mapstructure:"health_check"`
-	Failover    *ProviderFailoverConfig  `yaml:"failover" mapstructure:"failover"`
+	Failover    *ProviderFailoverConfig `yaml:"failover" mapstructure:"failover"`
 }
 
 // GroupProvider is a provider reference within a group.
@@ -381,7 +425,6 @@ func NormalizeRequestPath(path string) string {
 func NormalizeProtocol(proto string) string {
 	return strings.ToLower(strings.TrimSpace(proto))
 }
-
 
 // BuildUpstreamURLWithPath builds an upstream URL from the provider config and request path.
 func BuildUpstreamURLWithPath(provider Provider, transformedPath, queryString, model string) string {

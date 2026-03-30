@@ -1,15 +1,16 @@
 # ai-agent-runtime
 
-通用 Multi-Agent 执行运行时，从 [ai-gateway](https://github.com/ai-gateway/gateway) 项目中提取的独立子系统。
+通用 Multi-Agent 执行运行时，现已作为独立服务与 CLI 仓库维护，承载 `aicli`、`/api/agent`、`/api/skills` 等 agent / skills 能力。
 
 ## 项目结构
 
 ```
 ai-agent-runtime/
-├── backend/                  # Go 后端（module: github.com/ai-gateway/ai-agent-runtime）
+├── backend/                  # Go 后端（module: github.com/wwsheng009/ai-agent-runtime）
 │   ├── go.mod
 │   ├── cmd/
-│   │   ├── server/           # HTTP/gRPC 服务入口
+│   │   ├── runtime-server/   # Skills / Agent HTTP 服务入口
+│   │   ├── skillsapi-demo/   # Skills API 客户端示例
 │   │   └── aicli/            # 命令行工具
 │   └── internal/
 │       ├── agent/            # 核心：orchestrator、ReAct loop、planner、scheduler
@@ -41,6 +42,8 @@ ai-agent-runtime/
 └── README.md
 ```
 
+当前后端 module 路径为 `github.com/wwsheng009/ai-agent-runtime`。
+
 ## 快速开始
 
 ### 后端
@@ -50,7 +53,14 @@ cd backend
 go mod tidy
 go build ./...
 go test ./...
+go run ./cmd/runtime-server --listen 127.0.0.1:8081
 ```
+
+启动后，runtime 服务会独立承载：
+
+- `POST /api/agent/chat`
+- `/api/skills/*`
+- `GET /healthz`
 
 ### 前端
 
@@ -62,15 +72,10 @@ pnpm dev
 
 ## 与 ai-gateway 的关系
 
-本模块从 ai-gateway 中提取，作为独立的 agent 运行时库使用。ai-gateway 通过以下方式接入：
+`ai-agent-runtime` 已从 `ai-gateway` 中独立出来。当前约定是：
 
-```go
-// ai-gateway/go.mod
-require github.com/ai-gateway/ai-agent-runtime v0.1.0
-
-// 开发期间使用本地路径
-replace github.com/ai-gateway/ai-agent-runtime => ../ai-agent-runtime/backend
-```
+- `ai-agent-runtime` 负责 `aicli`、agent/skills HTTP API、多 agent runtime
+- `ai-gateway` 只保留网关与代理能力，不再暴露 `/api/agent`、`/api/skills`
 
 详细迁移步骤见 [MIGRATION.md](./MIGRATION.md)。
 
