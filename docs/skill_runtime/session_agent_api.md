@@ -2,20 +2,20 @@
 
 > 迁移说明（2026-03-30）：
 > - 该 HTTP API 现在由独立 `runtime-server` 提供，代码位于 `E:\projects\ai\ai-agent-runtime\backend`
-> - `ai-gateway` 已不再挂载 `/api/skills/sessions/{id}/agents*`
+> - `ai-gateway` 已不再挂载 `/api/runtime/sessions/{id}/agents*`
 > - 文中示例默认访问 `http://127.0.0.1:8081`
 
 ## Scope
 
 This document describes the lightweight child-agent control plane exposed under an existing session:
 
-- `POST /api/skills/sessions/{id}/agents`
-- `POST /api/skills/sessions/{id}/agents/wait`
-- `GET /api/skills/sessions/{id}/agents/{agent_id}`
-- `POST /api/skills/sessions/{id}/agents/{agent_id}/input`
-- `GET /api/skills/sessions/{id}/agents/{agent_id}/events`
-- `POST /api/skills/sessions/{id}/agents/{agent_id}/close`
-- `POST /api/skills/sessions/{id}/agents/{agent_id}/resume`
+- `POST /api/runtime/sessions/{id}/agents`
+- `POST /api/runtime/sessions/{id}/agents/wait`
+- `GET /api/runtime/sessions/{id}/agents/{agent_id}`
+- `POST /api/runtime/sessions/{id}/agents/{agent_id}/input`
+- `GET /api/runtime/sessions/{id}/agents/{agent_id}/events`
+- `POST /api/runtime/sessions/{id}/agents/{agent_id}/close`
+- `POST /api/runtime/sessions/{id}/agents/{agent_id}/resume`
 
 实现入口位于：
 
@@ -45,7 +45,7 @@ This document describes the lightweight child-agent control plane exposed under 
 
 ## Endpoint Summary
 
-### `POST /api/skills/sessions/{id}/agents`
+### `POST /api/runtime/sessions/{id}/agents`
 
 创建 child agent / child session。
 
@@ -86,7 +86,7 @@ Status code:
 - `202 Accepted`
   - 创建成功且已通过 `message` 异步排队执行。
 
-### `POST /api/skills/sessions/{id}/agents/{agent_id}/input`
+### `POST /api/runtime/sessions/{id}/agents/{agent_id}/input`
 
 向已有 child agent 发送新的输入。
 
@@ -118,7 +118,7 @@ Status code:
 
 - `agent.status` 是提交后的即时快照，可能是 `running`、`idle`，也可能是其他当前状态。
 
-### `POST /api/skills/sessions/{id}/agents/wait`
+### `POST /api/runtime/sessions/{id}/agents/wait`
 
 等待一个或多个 child agent 进入 ready state。
 
@@ -162,7 +162,7 @@ Response:
 - 批量模式下，任一 child ready 就会返回。
 - 超时不会报错；而是返回当前快照并带 `timed_out=true`。
 
-### `GET /api/skills/sessions/{id}/agents/{agent_id}`
+### `GET /api/runtime/sessions/{id}/agents/{agent_id}`
 
 读取单个 child agent 的当前状态快照。
 
@@ -189,7 +189,7 @@ Response:
 }
 ```
 
-### `GET /api/skills/sessions/{id}/agents/{agent_id}/events`
+### `GET /api/runtime/sessions/{id}/agents/{agent_id}/events`
 
 读取 child session 的 runtime events。
 
@@ -227,7 +227,7 @@ Response:
 - `timestamp`
 - `payload`
 
-### `POST /api/skills/sessions/{id}/agents/{agent_id}/close`
+### `POST /api/runtime/sessions/{id}/agents/{agent_id}/close`
 
 停止 child actor，并尝试关闭 child session。
 
@@ -242,7 +242,7 @@ Response:
 }
 ```
 
-### `POST /api/skills/sessions/{id}/agents/{agent_id}/resume`
+### `POST /api/runtime/sessions/{id}/agents/{agent_id}/resume`
 
 重新挂起/恢复一个已有 child session 的 actor。
 
@@ -325,7 +325,7 @@ BASE_URL=http://127.0.0.1:8081
 ### 0. Create parent session
 
 ```bash
-PARENT_SESSION_ID=$(curl -sS -X POST "$BASE_URL/api/skills/sessions" \
+PARENT_SESSION_ID=$(curl -sS -X POST "$BASE_URL/api/runtime/sessions" \
   -H "Content-Type: application/json" \
   -d '{"user_id":"demo-user","title":"child-agent-demo"}' \
   | jq -r '.session.id')
@@ -334,7 +334,7 @@ PARENT_SESSION_ID=$(curl -sS -X POST "$BASE_URL/api/skills/sessions" \
 ### 1. Spawn child agent
 
 ```bash
-AGENT_ID=$(curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents" \
+AGENT_ID=$(curl -sS -X POST "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents" \
   -H "Content-Type: application/json" \
   -d '{
     "agent_type":"explorer",
@@ -346,7 +346,7 @@ AGENT_ID=$(curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/ag
 如果想在创建时直接排队首条消息，可以把 `message` 一并带上；这时通常会返回 `202 Accepted`：
 
 ```bash
-curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents" \
+curl -sS -X POST "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents" \
   -H "Content-Type: application/json" \
   -d '{
     "agent_type":"explorer",
@@ -357,7 +357,7 @@ curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents" \
 ### 2. Send input
 
 ```bash
-curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/input" \
+curl -sS -X POST "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/input" \
   -H "Content-Type: application/json" \
   -d '{
     "message":"Reply with exactly: child done"
@@ -367,7 +367,7 @@ curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/$AGENT
 若 child 正在运行且你要抢占当前 run：
 
 ```bash
-curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/input" \
+curl -sS -X POST "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/input" \
   -H "Content-Type: application/json" \
   -d '{
     "message":"Stop current work and summarize progress.",
@@ -380,7 +380,7 @@ curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/$AGENT
 单个 child：
 
 ```bash
-curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/wait" \
+curl -sS -X POST "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents/wait" \
   -H "Content-Type: application/json" \
   -d "{
     \"id\":\"$AGENT_ID\",
@@ -391,7 +391,7 @@ curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/wait" 
 批量 child：
 
 ```bash
-curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/wait" \
+curl -sS -X POST "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents/wait" \
   -H "Content-Type: application/json" \
   -d "{
     \"ids\":[\"$AGENT_ID\",\"another-child-session-id\"],
@@ -402,7 +402,7 @@ curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/wait" 
 ### 4. Read status snapshot
 
 ```bash
-curl -sS "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID"
+curl -sS "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID"
 ```
 
 ### 5. Read events with cursor
@@ -410,25 +410,25 @@ curl -sS "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID"
 立即读取最近事件：
 
 ```bash
-curl -sS "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/events?after_seq=0&limit=20&wait_ms=0"
+curl -sS "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/events?after_seq=0&limit=20&wait_ms=0"
 ```
 
 长轮询等待新事件：
 
 ```bash
-curl -sS "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/events?after_seq=20&limit=20&wait_ms=5000"
+curl -sS "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/events?after_seq=20&limit=20&wait_ms=5000"
 ```
 
 ### 6. Resume child agent
 
 ```bash
-curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/resume"
+curl -sS -X POST "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/resume"
 ```
 
 ### 7. Close child agent
 
 ```bash
-curl -sS -X POST "$BASE_URL/api/skills/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/close"
+curl -sS -X POST "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents/$AGENT_ID/close"
 ```
 
 ## Behavior Notes

@@ -3,7 +3,7 @@
 > 迁移说明（2026-03-30）：
 > - 本文描述的治理 API 现由 `E:\projects\ai\ai-agent-runtime\backend\cmd\runtime-server` 承载
 > - `ai-gateway` 已不再暴露 `/monitor/skills-governance`、`/monitor/runtime-health`
-> - 运行态治理与观测请改看 `/api/skills/governance/policy`、`/api/skills/runtime/*`
+> - 运行态治理与观测请改看 `/api/runtime/governance/policy`、`/api/runtime/*`
 
 ## Scope
 
@@ -16,11 +16,11 @@ This guide covers the unified governance surfaces for `skill_runtime`:
 
 ## Skills API
 
-### `GET /api/skills/capabilities`
+### `GET /api/runtime/capabilities`
 
 Returns unified capability descriptors for `skill / tool / workflow / agent`.
 
-### `GET /api/skills/governance/policy`
+### `GET /api/runtime/governance/policy`
 
 Returns a unified governance view with:
 
@@ -32,7 +32,7 @@ Returns a unified governance view with:
 
 Use this when you want a single snapshot of the active governance state.
 
-### `GET /api/skills/runtime/status`
+### `GET /api/runtime/status`
 
 Returns runtime connectivity and provider/MCP status.
 
@@ -51,7 +51,7 @@ This is the main runtime surface for distinguishing:
 - local process-backed MCP execution
 - remote MCP execution that should be governed, not described as runtime sandboxing
 
-### `GET /api/skills/mutation/policy`
+### `GET /api/runtime/mutation/policy`
 
 Returns:
 
@@ -61,7 +61,7 @@ Returns:
 - `disable_reload_ops`
 - `disable_hot_reload`
 
-### `PUT /api/skills/mutation/policy`
+### `PUT /api/runtime/mutation/policy`
 
 Updates runtime mutation policy.
 
@@ -73,11 +73,11 @@ If `runtime-server` is backed by `configManager` and a config file, the followin
 - `disable_reload_ops`
 - `disable_hot_reload_ops` (mapped from API field `disable_hot_reload`)
 
-### `GET /api/skills/usage/policy`
+### `GET /api/runtime/usage/policy`
 
 Returns detailed runtime usage / quota policy.
 
-### `PUT /api/skills/usage/policy`
+### `PUT /api/runtime/usage/policy`
 
 Updates runtime usage / quota policy and, when config persistence is available, writes back:
 
@@ -87,11 +87,11 @@ Updates runtime usage / quota policy and, when config persistence is available, 
 - `default_max_tokens`
 - `quota_policies`
 
-### `GET /api/skills/auth/policy`
+### `GET /api/runtime/auth/policy`
 
 Returns detailed runtime auth / scope resolver policy.
 
-### `PUT /api/skills/auth/policy`
+### `PUT /api/runtime/auth/policy`
 
 Updates runtime auth / scope resolver policy and, when config persistence is available, writes back:
 
@@ -110,23 +110,23 @@ Updates runtime auth / scope resolver policy and, when config persistence is ava
 
 ## Runtime Observability API
 
-### `GET /api/skills/runtime/status`
+### `GET /api/runtime/status`
 
 Returns runtime connectivity and provider/MCP status.
 
 Use this when you need a current runtime snapshot, including provider health and MCP connectivity.
 
-### `GET /api/skills/runtime/health`
+### `GET /api/runtime/health`
 
 Returns a consolidated runtime health summary derived from the current runtime snapshot.
 
-### `GET /api/skills/runtime/traces/stats`
+### `GET /api/runtime/traces/stats`
 
 Returns aggregated runtime trace statistics, including governance and patch-related summaries.
 
 Use this when you want summarized recent runtime telemetry instead of raw traces.
 
-### `GET /api/skills/runtime/traces/governance`
+### `GET /api/runtime/traces/governance`
 
 Returns a governance-focused trace view for recent runtime activity.
 
@@ -136,11 +136,11 @@ Typical uses:
 - inspect patch decisions and provenance
 - audit recent governance-sensitive traces
 
-### `GET /api/skills/search/stats`
+### `GET /api/runtime/skills/search/stats`
 
 Returns search / indexing telemetry for the skill search subsystem.
 
-### `GET /api/skills/usage/stats`
+### `GET /api/runtime/usage/stats`
 
 Returns scoped usage/quota counters.
 

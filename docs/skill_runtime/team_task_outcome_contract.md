@@ -6,13 +6,13 @@ This document describes the canonical Team task outcome API and its compatibilit
 
 Canonical HTTP entrypoint:
 
-- `POST /api/skills/teams/{id}/tasks/{task_id}/outcome`
+- `POST /api/runtime/teams/{id}/tasks/{task_id}/outcome`
 
 Compatibility aliases:
 
-- `POST /api/skills/teams/{id}/tasks/{task_id}/complete`
-- `POST /api/skills/teams/{id}/tasks/{task_id}/fail`
-- `POST /api/skills/teams/{id}/tasks/{task_id}/block`
+- `POST /api/runtime/teams/{id}/tasks/{task_id}/complete`
+- `POST /api/runtime/teams/{id}/tasks/{task_id}/fail`
+- `POST /api/runtime/teams/{id}/tasks/{task_id}/block`
 
 Canonical broker tool:
 

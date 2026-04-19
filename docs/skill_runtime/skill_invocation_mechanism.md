@@ -268,7 +268,7 @@ user prompt
 
 ## 1. `AgentChat` 先构造上下文
 
-`POST /api/agent/chat`（兼容：`POST /api/skills/agent/chat`）收到请求后，会先构造：
+`POST /api/agent/chat`（兼容：`POST /api/agent/chat`）收到请求后，会先构造：
 
 - session
 - history

@@ -52,8 +52,8 @@
 来源：
 
 - `POST /api/skills`
-- `PUT /api/skills/{name}`
-- `POST /api/skills/batch`
+- `PUT /api/runtime/skills/{name}`
+- `POST /api/runtime/skills/batch`
 
 默认情况下它们只存在于当前 registry 中；如需落盘，必须显式持久化。
 
@@ -128,9 +128,9 @@ aicli chat --skills-dir ./team-skills --skills-dir ./project-skills
 以下接口支持来源过滤：
 
 - `GET /api/skills`
-- `GET /api/skills/search`
-- `GET /api/skills/stats`
-- `GET /api/skills/export`
+- `GET /api/runtime/skills/search`
+- `GET /api/runtime/skills/stats`
+- `GET /api/runtime/skills/export`
 
 支持的 query 参数：
 
@@ -141,9 +141,9 @@ aicli chat --skills-dir ./team-skills --skills-dir ./project-skills
 
 ```bash
 curl "http://127.0.0.1:8081/api/skills?source_layer=external"
-curl "http://127.0.0.1:8081/api/skills/search?q=shell&source_dir=C:/team-skills"
-curl "http://127.0.0.1:8081/api/skills/stats?source_layer=system"
-curl "http://127.0.0.1:8081/api/skills/export?source_layer=external"
+curl "http://127.0.0.1:8081/api/runtime/skills/search?q=shell&source_dir=C:/team-skills"
+curl "http://127.0.0.1:8081/api/runtime/skills/stats?source_layer=system"
+curl "http://127.0.0.1:8081/api/runtime/skills/export?source_layer=external"
 ```
 
 ## 管理保护
@@ -157,14 +157,14 @@ curl "http://127.0.0.1:8081/api/skills/export?source_layer=external"
 受保护的接口包括：
 
 - `POST /api/skills`
-- `PUT /api/skills/{name}`
-- `DELETE /api/skills/{name}`
-- `POST /api/skills/batch`
-- `POST /api/skills/import`
-- `POST /api/skills/reload`
-- `POST /api/skills/hot-reload/start`
-- `POST /api/skills/hot-reload/stop`
-- `POST /api/skills/hot-reload/reload`
+- `PUT /api/runtime/skills/{name}`
+- `DELETE /api/runtime/skills/{name}`
+- `POST /api/runtime/skills/batch`
+- `POST /api/runtime/skills/import`
+- `POST /api/runtime/skills/reload`
+- `POST /api/runtime/skills/hot-reload/start`
+- `POST /api/runtime/skills/hot-reload/stop`
+- `POST /api/runtime/skills/hot-reload/reload`
 
 此外还支持轻量治理策略：
 
@@ -181,13 +181,13 @@ curl "http://127.0.0.1:8081/api/skills/export?source_layer=external"
 - `read_only=true`：禁止 `create/update/delete/batch/import`
 - `disable_import=true`：单独禁止 `import`
 - `disable_persist=true`：禁止 `persist=true`、external skill 回写、`delete_file=true`
-- `disable_reload_ops=true`：禁止 `POST /api/skills/reload`
-- `disable_hot_reload_ops=true`：禁止 `POST /api/skills/hot-reload/*`
+- `disable_reload_ops=true`：禁止 `POST /api/runtime/skills/reload`
+- `disable_hot_reload_ops=true`：禁止 `POST /api/runtime/skills/hot-reload/*`
 
 同时，原有的搜索运维接口也仍然受同一 token 保护：
 
-- `GET /api/skills/search/stats`
-- `POST /api/skills/search/reindex`
+- `GET /api/runtime/skills/search/stats`
+- `POST /api/runtime/skills/search/reindex`
 
 Header 用法：
 
@@ -230,8 +230,8 @@ skills 变更接口现在会同步写入 runtime metrics：
 
 查看入口：
 
-- `GET /api/skills/stats`
-- `GET /api/skills/mutation/policy`
+- `GET /api/runtime/skills/stats`
+- `GET /api/runtime/mutation/policy`
 - runtime admin logs
 - 可选的外部 metrics 导出链路（若已接入）
 
@@ -254,9 +254,9 @@ skills 变更接口现在会同步写入 runtime metrics：
 支持接口：
 
 - `POST /api/skills?persist=true`
-- `PUT /api/skills/{name}?persist=true`
-- `POST /api/skills/batch?persist=true`
-- `POST /api/skills/import?persist=true`
+- `PUT /api/runtime/skills/{name}?persist=true`
+- `POST /api/runtime/skills/batch?persist=true`
+- `POST /api/runtime/skills/import?persist=true`
 
 可选参数：
 
@@ -286,7 +286,7 @@ curl -X POST "http://127.0.0.1:8081/api/skills?persist=true&target_dir=C:/team-s
 
 ### 热加载
 
-`POST /api/skills/hot-reload/start`
+`POST /api/runtime/skills/hot-reload/start`
 
 支持：
 
@@ -295,7 +295,7 @@ curl -X POST "http://127.0.0.1:8081/api/skills?persist=true&target_dir=C:/team-s
 
 ### 普通 reload
 
-`POST /api/skills/reload`
+`POST /api/runtime/skills/reload`
 
 支持：
 
@@ -306,7 +306,7 @@ curl -X POST "http://127.0.0.1:8081/api/skills?persist=true&target_dir=C:/team-s
 示例：
 
 ```bash
-curl -X POST http://127.0.0.1:8081/api/skills/reload \
+curl -X POST http://127.0.0.1:8081/api/runtime/skills/reload \
   -H "Content-Type: application/json" \
   -d '{
     "dirs": ["./docs/skill_runtime/skills", "./custom-skills"]

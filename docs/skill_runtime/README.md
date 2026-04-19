@@ -31,10 +31,10 @@ The current implementation status is:
 执行入口说明：
 
 - 独立 runtime 业务侧统一入口：`POST /api/agent/chat`
-- `POST /api/skills/agent/chat` 为 compatibility alias
-- `POST /api/skills/{name}/execute` 为 admin/debug（非主入口）
-- Team task outcome 统一入口：`POST /api/skills/teams/{id}/tasks/{task_id}/outcome`
-- `POST /api/skills/teams/{id}/tasks/{task_id}/complete|fail|block` 为 compatibility alias
+- `POST /api/agent/chat` 为 compatibility alias
+- `POST /api/runtime/skills/{name}/execute` 为 admin/debug（非主入口）
+- Team task outcome 统一入口：`POST /api/runtime/teams/{id}/tasks/{task_id}/outcome`
+- `POST /api/runtime/teams/{id}/tasks/{task_id}/complete|fail|block` 为 compatibility alias
 
 推荐启动方式：
 

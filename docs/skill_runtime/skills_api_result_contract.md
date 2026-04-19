@@ -8,21 +8,21 @@
 
 This document describes the JSON response contract for:
 
-- `POST /api/skills/{name}/execute` (admin/debug; not the primary entry)
+- `POST /api/runtime/skills/{name}/execute` (admin/debug; not the primary entry)
 - `POST /api/agent/chat` (non-stream mode; canonical)
-- `POST /api/skills/agent/chat` (non-stream mode; compatibility alias)
+- `POST /api/agent/chat` (non-stream mode; compatibility alias)
 
 The implementation lives in `E:\projects\ai\ai-agent-runtime\backend\internal\api\skills\handler.go`.
 
 **入口说明**
 
 - `POST /api/agent/chat` 是主入口，面向业务调用。
-- `POST /api/skills/agent/chat` 是兼容别名，响应会带 compatibility warning header。
-- `POST /api/skills/{name}/execute` 仅用于 admin/debug（未来会进一步收口）。
+- `POST /api/agent/chat` 是兼容别名，响应会带 compatibility warning header。
+- `POST /api/runtime/skills/{name}/execute` 仅用于 admin/debug（未来会进一步收口）。
 
 ## Request Additions
 
-`POST /api/agent/chat`（兼容：`POST /api/skills/agent/chat`）目前额外支持：
+`POST /api/agent/chat`（兼容：`POST /api/agent/chat`）目前额外支持：
 
 - `workspace_path`: 可选，本地 workspace 路径；若提供，会在入口构建 workspace context
 - `planning_mode`: 可选，当前支持 `planner_preferred`
@@ -36,7 +36,7 @@ The implementation lives in `E:\projects\ai\ai-agent-runtime\backend\internal\ap
 - `result.subagent_summary`
 - `result.subagent_results`
 
-## `POST /api/skills/{name}/execute`
+## `POST /api/runtime/skills/{name}/execute`
 
 > **注意**：此端点仅用于 admin/debug；建议使用 `/api/agent/chat` 作为统一入口。
 
@@ -97,7 +97,7 @@ For workflow-backed skill execution, each `observations[*].metrics` entry may al
 
 ## `POST /api/agent/chat` (non-stream)
 
-> 兼容别名：`POST /api/skills/agent/chat`
+> 兼容别名：`POST /api/agent/chat`
 
 ### Top-level response
 

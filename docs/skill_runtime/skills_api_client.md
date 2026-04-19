@@ -104,7 +104,7 @@
 
 说明：
 
-- 轻量 child-agent 控制面已经提供独立 HTTP API：`/api/skills/sessions/{id}/agents*`
+- 轻量 child-agent 控制面已经提供独立 HTTP API：`/api/runtime/sessions/{id}/agents*`
 - 现在 `pkg/skillsapi` 也已提供 typed helper；HTTP 语义与 `curl` 示例见 `docs/skill_runtime/session_agent_api.md`
 
 ## 初始化
@@ -261,7 +261,7 @@ events, err := client.ListSessionAgentEvents(ctx, parent.Session.ID, spawned.Age
 
 Canonical Team task outcome API:
 
-- `POST /api/skills/teams/{id}/tasks/{task_id}/outcome`
+- `POST /api/runtime/teams/{id}/tasks/{task_id}/outcome`
 
 Go client methods:
 

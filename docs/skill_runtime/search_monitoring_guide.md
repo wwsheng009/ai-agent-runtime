@@ -2,7 +2,7 @@
 
 > 迁移说明（2026-03-30）：
 > - `ai-gateway` 已下线 `/monitor/search-admin`、`/monitor/search`、`/monitor/metrics` 这类 runtime 专属监控桥接
-> - 当前应直接面向独立 `runtime-server` 的 `/api/skills/search/*`、`/api/skills/runtime/*` 与服务日志
+> - 当前应直接面向独立 `runtime-server` 的 `/api/runtime/skills/search/*`、`/api/runtime/*` 与服务日志
 > - `search_admin_actions_total`、`search_reindex_runs_total` 等指标常量仍存在于 runtime 内部；若要做 Prometheus 抓取，需要额外接入指标导出链路
 
 ## Scope
@@ -24,7 +24,7 @@ The related implementation lives in:
 
 ### 1. Search Admin Stats
 
-`GET /api/skills/search/stats`
+`GET /api/runtime/skills/search/stats`
 
 Returns the runtime-side search admin summary and current search telemetry snapshot.
 
@@ -43,12 +43,12 @@ Example:
 ```bash
 curl \
   -H "Authorization: Bearer $SKILLS_RUNTIME_ADMIN_TOKEN" \
-  http://127.0.0.1:8081/api/skills/search/stats
+  http://127.0.0.1:8081/api/runtime/skills/search/stats
 ```
 
 ### 2. Manual Reindex
 
-`POST /api/skills/search/reindex`
+`POST /api/runtime/skills/search/reindex`
 
 Behavior:
 
@@ -68,24 +68,24 @@ Examples:
 ```bash
 curl -X POST \
   -H "X-Skills-Admin-Token: $SKILLS_RUNTIME_ADMIN_TOKEN" \
-  http://127.0.0.1:8081/api/skills/search/reindex
+  http://127.0.0.1:8081/api/runtime/skills/search/reindex
 ```
 
 ```bash
 curl -X POST \
   -H "X-Skills-Admin-Token: $SKILLS_RUNTIME_ADMIN_TOKEN" \
-  "http://127.0.0.1:8081/api/skills/search/reindex?force=true"
+  "http://127.0.0.1:8081/api/runtime/skills/search/reindex?force=true"
 ```
 
 ### 3. Runtime Status
 
-`GET /api/skills/runtime/status`
+`GET /api/runtime/status`
 
 Use this to inspect current runtime wiring, runtime validation state, provider/MCP status, and config-derived runtime metadata.
 
 ### 4. Runtime Health
 
-`GET /api/skills/runtime/health`
+`GET /api/runtime/health`
 
 Use this to inspect a summarized health view derived from runtime status.
 

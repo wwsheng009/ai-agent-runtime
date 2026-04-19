@@ -214,7 +214,7 @@ JWT claims 说明：
 
 ## API
 
-### `GET /api/skills/usage/stats`
+### `GET /api/runtime/usage/stats`
 
 可选参数：
 
@@ -231,10 +231,10 @@ JWT claims 说明：
 
 ```bash
 curl -H "X-Skills-Admin-Token: <token>" \
-  "http://127.0.0.1:8081/api/skills/usage/stats?tenant_id=team-a&project_id=ops&user_id=demo-user"
+  "http://127.0.0.1:8081/api/runtime/usage/stats?tenant_id=team-a&project_id=ops&user_id=demo-user"
 ```
 
-### `POST /api/skills/usage/reset`
+### `POST /api/runtime/usage/reset`
 
 可选 body：
 
@@ -251,7 +251,7 @@ curl -H "X-Skills-Admin-Token: <token>" \
 - 指定任一 scope 参数：仅重置该 scope usage
 - 不指定：清空所有 usage 统计
 
-### `GET /api/skills/usage/ledger`
+### `GET /api/runtime/usage/ledger`
 
 读取持久化 usage ledger。
 
@@ -271,7 +271,7 @@ curl -H "X-Skills-Admin-Token: <token>" \
 - 只有在 `usage_ledger_enabled=true` 且数据库可用时，这个接口才可用
 - 当前 ledger 使用现有 `token_usage_history` 表，额外 scope 信息放在 `metadata`
 
-### `GET /api/skills/usage/policy`
+### `GET /api/runtime/usage/policy`
 
 返回当前 runtime 内生效的 usage / quota policy 明细：
 
@@ -283,7 +283,7 @@ curl -H "X-Skills-Admin-Token: <token>" \
 - `projects`
 - `users`
 
-### `GET /api/skills/auth/policy`
+### `GET /api/runtime/auth/policy`
 
 返回当前 runtime 内生效的 scope/auth resolver 策略摘要：
 
@@ -295,7 +295,7 @@ curl -H "X-Skills-Admin-Token: <token>" \
 - `admin_roles`
 - `api_key_scope_count`
 
-### `PUT /api/skills/auth/policy`
+### `PUT /api/runtime/auth/policy`
 
 用于在运行期更新 scope/auth resolver 策略。
 
@@ -317,14 +317,14 @@ curl -H "X-Skills-Admin-Token: <token>" \
 - 如果 `configManager` 绑定了配置文件，auth policy 相关字段会同步写回 YAML 文件
 - 文件写回只修改 `skills_runtime` 下的 auth/scope policy 字段，尽量避免覆盖其他配置项与 env 模板
 
-### `DELETE /api/skills/auth/policy`
+### `DELETE /api/runtime/auth/policy`
 
 当前支持删除两类条目：
 
 - `field=api_key_scope`
 - `field=admin_role`
 
-### `PUT /api/skills/usage/policy`
+### `PUT /api/runtime/usage/policy`
 
 用于在运行期更新 policy。
 
@@ -355,7 +355,7 @@ curl -H "X-Skills-Admin-Token: <token>" \
   - `quota_policies`
 - `usage_ledger_enabled` 不在这个接口里修改
 
-### `DELETE /api/skills/usage/policy`
+### `DELETE /api/runtime/usage/policy`
 
 删除单条 override。
 
@@ -377,7 +377,7 @@ curl -H "X-Skills-Admin-Token: <token>" \
 
 和 `search/stats`、`search/reindex`、skills mutation 管理接口保持一致。
 
-### `GET /api/skills/mutation/policy`
+### `GET /api/runtime/mutation/policy`
 
 返回当前 runtime 内生效的 mutation policy：
 
@@ -387,7 +387,7 @@ curl -H "X-Skills-Admin-Token: <token>" \
 - `disable_reload_ops`
 - `disable_hot_reload`
 
-### `GET /api/skills/governance/policy`
+### `GET /api/runtime/governance/policy`
 
 返回统一治理视图，聚合：
 
@@ -402,7 +402,7 @@ curl -H "X-Skills-Admin-Token: <token>" \
 - 一次请求查看当前平台治理面是否完整接线
 - 排查某个环境到底是“只在内存生效”还是“已接入持久化回写”
 
-### `PUT /api/skills/mutation/policy`
+### `PUT /api/runtime/mutation/policy`
 
 用于在运行期更新 mutation policy。
 
@@ -470,9 +470,9 @@ curl -H "X-Skills-Admin-Token: <token>" \
 
 查看入口：
 
-- `GET /api/skills/usage/stats`
-- `GET /api/skills/usage/policy`
-- `GET /api/skills/usage/ledger`
+- `GET /api/runtime/usage/stats`
+- `GET /api/runtime/usage/policy`
+- `GET /api/runtime/usage/ledger`
 - runtime admin logs
 - 可选的外部 metrics 导出链路（若已接入）
 

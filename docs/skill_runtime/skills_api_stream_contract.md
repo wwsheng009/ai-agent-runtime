@@ -15,7 +15,7 @@ The implementation lives in `E:\projects\ai\ai-agent-runtime\backend\internal\ap
 
 ## Request Additions
 
-`POST /api/agent/chat`（兼容：`POST /api/skills/agent/chat`）的流式请求目前额外支持：
+`POST /api/agent/chat`（兼容：`POST /api/agent/chat`）的流式请求目前额外支持：
 
 - `workspace_path`
 - `planning_mode`

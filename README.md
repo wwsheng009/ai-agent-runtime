@@ -1,6 +1,6 @@
 # ai-agent-runtime
 
-通用 Multi-Agent 执行运行时，现已作为独立服务与 CLI 仓库维护，承载 `aicli`、`/api/agent`、`/api/skills` 等 agent / skills 能力。
+通用 Multi-Agent 执行运行时，现已作为独立服务与 CLI 仓库维护，承载 `aicli`、`/api/agent`、`/api/runtime` 等 agent / runtime 能力。
 
 ## 项目结构
 
@@ -53,13 +53,13 @@ cd backend
 go mod tidy
 go build ./...
 go test ./...
-go run ./cmd/runtime-server --listen 127.0.0.1:8081
+go run ./cmd/runtime-server --listen 127.0.0.1:8101
 ```
 
 启动后，runtime 服务会独立承载：
 
 - `POST /api/agent/chat`
-- `/api/skills/*`
+- `/api/runtime/*`
 - `GET /healthz`
 
 ### 前端
@@ -70,12 +70,14 @@ pnpm install
 pnpm dev
 ```
 
+前端开发服务器默认监听 `http://0.0.0.0:5193`，并会把 `/api`、`/healthz` 代理到 `http://127.0.0.1:8101`。如果需要通过自定义域名或反向代理访问，可在 [frontend/.env.example](./frontend/.env.example) 对应的 `VITE_DEV_PUBLIC_ORIGIN`、`VITE_DEV_ALLOWED_HOSTS`、`VITE_DEV_HMR_*` 变量中覆盖。
+
 ## 与 ai-gateway 的关系
 
 `ai-agent-runtime` 已从 `ai-gateway` 中独立出来。当前约定是：
 
-- `ai-agent-runtime` 负责 `aicli`、agent/skills HTTP API、多 agent runtime
-- `ai-gateway` 只保留网关与代理能力，不再暴露 `/api/agent`、`/api/skills`
+- `ai-agent-runtime` 负责 `aicli`、agent/runtime HTTP API、多 agent runtime
+- `ai-gateway` 只保留网关与代理能力，不再暴露 `/api/agent`、`/api/runtime`
 
 详细迁移步骤见 [MIGRATION.md](./MIGRATION.md)。
 

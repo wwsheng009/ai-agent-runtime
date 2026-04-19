@@ -2,7 +2,7 @@
 
 > 迁移说明（2026-03-30）：
 > - `ai-gateway` 已下线 `/monitor/search-admin` 与 `/monitor/search`
-> - 独立 `runtime-server` 请改用 `/api/skills/search/stats`、`/api/skills/runtime/status`、`/api/skills/runtime/health` 和服务日志
+> - 独立 `runtime-server` 请改用 `/api/runtime/skills/search/stats`、`/api/runtime/status`、`/api/runtime/health` 和服务日志
 > - 如果部署额外接入了指标导出链路，再结合 `search_admin_actions_total`、`search_reindex_runs_total` 做观测
 
 ## Scope
@@ -17,9 +17,9 @@ This playbook covers four common operational failures in search-related runtime 
 Use this together with:
 
 - `docs/skill_runtime/search_monitoring_guide.md`
-- `GET /api/skills/search/stats`
-- `GET /api/skills/runtime/status`
-- `GET /api/skills/runtime/health`
+- `GET /api/runtime/skills/search/stats`
+- `GET /api/runtime/status`
+- `GET /api/runtime/health`
 - runtime service logs and any external metrics pipeline
 
 ## 1. Forbidden Admin Access Spikes
@@ -27,20 +27,20 @@ Use this together with:
 ### Symptom
 
 - `search_admin_actions_total{outcome="forbidden"}` grows continuously
-- `/api/skills/search/stats` or service logs show repeated admin authorization failures
+- `/api/runtime/skills/search/stats` or service logs show repeated admin authorization failures
 
 ### Quick Checks
 
 1. Confirm source IP pattern:
 
 ```bash
-curl http://127.0.0.1:8081/api/skills/search/stats
+curl http://127.0.0.1:8081/api/runtime/skills/search/stats
 ```
 
 2. Check whether access should be local-only:
 
-- `GET /api/skills/search/stats`
-- `POST /api/skills/search/reindex`
+- `GET /api/runtime/skills/search/stats`
+- `POST /api/runtime/skills/search/reindex`
 
 3. Check config:
 
@@ -70,7 +70,7 @@ skills_runtime:
 ### Symptom
 
 - `search_reindex_runs_total{outcome="rate_limited"}` increases
-- `/api/skills/search/reindex` returns `429`
+- `/api/runtime/skills/search/reindex` returns `429`
 - response contains `Retry-After`
 
 ### Quick Checks
@@ -78,7 +78,7 @@ skills_runtime:
 1. Inspect aggregated summary:
 
 ```bash
-curl http://127.0.0.1:8081/api/skills/search/stats
+curl http://127.0.0.1:8081/api/runtime/skills/search/stats
 ```
 
 2. Inspect cooldown config:
@@ -114,7 +114,7 @@ skills_runtime:
 ### Symptom
 
 - `search_reindex_runs_total{outcome="failed"}` increases
-- `/api/skills/search/reindex` returns `500`
+- `/api/runtime/skills/search/reindex` returns `500`
 - audit log shows `action=search_reindex outcome=failed`
 
 ### Quick Checks
@@ -144,7 +144,7 @@ embedding:
 
 - verify `skills_runtime.enabled=true`
 - verify runtime config file path and skill directory
-- run a normal `GET /api/skills` and `GET /api/skills/stats`
+- run a normal `GET /api/skills` and `GET /api/runtime/skills/stats`
 - fix invalid skill manifests, then retry reindex
 - restart standalone `runtime-server` if bootstrap state is inconsistent
 
@@ -153,7 +153,7 @@ embedding:
 ### Symptom
 
 - users report semantic search misses
-- `GET /api/skills/search?q=...` falls back to lexical or returns no results
+- `GET /api/runtime/skills/search?q=...` falls back to lexical or returns no results
 - `resolved_mode` no longer becomes `semantic` when expected
 
 ### Quick Checks
@@ -161,15 +161,15 @@ embedding:
 1. Compare search API behavior:
 
 ```bash
-curl "http://127.0.0.1:8081/api/skills/search?q=search%20customer%20orders%20in%20sap"
-curl "http://127.0.0.1:8081/api/skills/search?q=search%20customer%20orders%20in%20sap&mode=semantic"
-curl "http://127.0.0.1:8081/api/skills/search?q=search%20customer%20orders%20in%20sap&mode=lexical"
+curl "http://127.0.0.1:8081/api/runtime/skills/search?q=search%20customer%20orders%20in%20sap"
+curl "http://127.0.0.1:8081/api/runtime/skills/search?q=search%20customer%20orders%20in%20sap&mode=semantic"
+curl "http://127.0.0.1:8081/api/runtime/skills/search?q=search%20customer%20orders%20in%20sap&mode=lexical"
 ```
 
 2. Check embedding index stats:
 
 ```bash
-curl http://127.0.0.1:8081/api/skills/stats
+curl http://127.0.0.1:8081/api/runtime/skills/stats
 ```
 
 3. Compare current skill inventory:
@@ -181,7 +181,7 @@ curl http://127.0.0.1:8081/api/skills
 4. If needed, run manual reindex:
 
 ```bash
-curl -X POST http://127.0.0.1:8081/api/skills/search/reindex
+curl -X POST http://127.0.0.1:8081/api/runtime/skills/search/reindex
 ```
 
 ### Likely Causes
@@ -240,10 +240,10 @@ Escalate when any of the following is true:
 
 ## Minimal Triage Order
 
-1. check `GET /api/skills/search/stats`
-2. check `GET /api/skills/runtime/status`
-3. check `GET /api/skills/runtime/health`
-4. check `GET /api/skills/stats`
+1. check `GET /api/runtime/skills/search/stats`
+2. check `GET /api/runtime/status`
+3. check `GET /api/runtime/health`
+4. check `GET /api/runtime/skills/stats`
 5. check `GET /api/skills`
-6. run `POST /api/skills/search/reindex`
+6. run `POST /api/runtime/skills/search/reindex`
 7. inspect runtime audit logs and any external metrics pipeline
