@@ -168,3 +168,33 @@ func TestGateway_AskUserQuestionResultPreservesAnswerInJSONSummary(t *testing.T)
 		t.Fatalf("expected rendered envelope to stay non-empty, got %+v", envelope)
 	}
 }
+
+func TestGateway_BackgroundTaskResultPreservesJobIDInJSONSummary(t *testing.T) {
+	gateway := NewGateway(nil)
+
+	envelope, err := gateway.Process(context.Background(), RawToolResult{
+		SessionID:  "session-background",
+		ToolName:   toolbroker.ToolBackgroundTask,
+		ToolCallID: "call-background",
+		Content: toolbroker.BackgroundTaskResult{
+			JobID:         "job_test123",
+			Status:        "pending",
+			RestartPolicy: "fail",
+		},
+	})
+	if err != nil {
+		t.Fatalf("process background_task result: %v", err)
+	}
+	if envelope == nil {
+		t.Fatal("expected envelope")
+	}
+	if envelope.Metadata["reducer"] != "json_summary" {
+		t.Fatalf("expected json_summary reducer, got %v", envelope.Metadata["reducer"])
+	}
+	if !strings.Contains(envelope.Summary, "job_id=job_test123") {
+		t.Fatalf("expected reducer summary to preserve job_id, got %q", envelope.Summary)
+	}
+	if !strings.Contains(envelope.Render(), "job_id=job_test123") {
+		t.Fatalf("expected rendered envelope to preserve job_id, got %q", envelope.Render())
+	}
+}

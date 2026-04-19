@@ -104,7 +104,7 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 	fs.SetOutput(io.Discard)
 
 	fs.StringVar(&opts.mode, "mode", "chat", "demo mode: chat or session-agent")
-	fs.StringVar(&opts.baseURL, "url", "http://localhost:8080", "skills api base url")
+	fs.StringVar(&opts.baseURL, "url", "http://127.0.0.1:8101", "skills api base url")
 	fs.StringVar(&opts.message, "message", "", "user message to send")
 	fs.StringVar(&opts.sessionID, "session-id", "", "existing session id")
 	fs.StringVar(&opts.parentSessionID, "parent-session-id", "", "parent session id for session-agent mode")

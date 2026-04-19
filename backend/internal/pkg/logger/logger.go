@@ -53,11 +53,9 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, error) {
 	// Parse log level
 	level := parseLogLevel(effectiveCfg.Level)
 
-	// 校验 Output 参数
-	if effectiveCfg.EnableConsole {
-		// 如果启用了控制台，不需要校验 output
-	} else if effectiveCfg.Output != "stdout" && effectiveCfg.Output != "file" {
-		return nil, nil, fmt.Errorf("invalid output: %s (must be 'stdout' or 'file')", effectiveCfg.Output)
+	targets, err := resolveOutputTargets(&effectiveCfg)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// Create encoder config (基础配置)
@@ -96,55 +94,34 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, error) {
 		fileEncoder = zapcore.NewJSONEncoder(fileEncoderConfig)
 	}
 
-	// Create writer and core for each output
 	var cores []zapcore.Core
-	var writers []zapcore.WriteSyncer
 
-	// 配置控制台输出
-	if effectiveCfg.Output == "stdout" || effectiveCfg.EnableConsole {
-		writers = append(writers, zapcore.AddSync(os.Stdout))
+	if targets.Stdout {
+		cores = append(cores, zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), level))
 	}
 
-	// 配置文件输出
-	if effectiveCfg.Output == "file" || effectiveCfg.EnableConsole {
-		// 如果输出目标是文件但路径为空，返回错误
-		if effectiveCfg.Output == "file" && effectiveCfg.FilePath == "" {
+	if targets.File {
+		if strings.TrimSpace(effectiveCfg.FilePath) == "" {
 			return nil, nil, fmt.Errorf("file_writer: file_path is required")
 		}
 
-		// 启用控制台时，如果文件路径为空，设置默认值
-		if effectiveCfg.EnableConsole && effectiveCfg.FilePath == "" {
-			effectiveCfg.FilePath = "./logs/gateway.log"
-		}
-
-		// Ensure log directory exists
 		dir := dirPath(effectiveCfg.FilePath)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, nil, fmt.Errorf("failed to create log directory: %w", err)
 		}
-		writers = append(writers, zapcore.AddSync(&lumberjack.Logger{
+
+		fileWriter := zapcore.AddSync(&lumberjack.Logger{
 			Filename:   effectiveCfg.FilePath,
 			MaxSize:    effectiveCfg.MaxSize,
 			MaxBackups: effectiveCfg.MaxBackups,
 			MaxAge:     effectiveCfg.MaxAge,
 			Compress:   effectiveCfg.Compress,
-		}))
+		})
+		cores = append(cores, zapcore.NewCore(fileEncoder, fileWriter, level))
 	}
 
-	if len(writers) == 0 {
-		// Default to stdout if no writer configured
-		writers = append(writers, zapcore.AddSync(os.Stdout))
-	}
-
-	// 为每个 writer 创建独立的 core
-	for _, writer := range writers {
-		// 如果是控制台输出，使用带颜色的 encoder
-		// 否则使用不带颜色的 encoder
-		if writer == zapcore.AddSync(os.Stdout) {
-			cores = append(cores, zapcore.NewCore(consoleEncoder, writer, level))
-		} else {
-			cores = append(cores, zapcore.NewCore(fileEncoder, writer, level))
-		}
+	if len(cores) == 0 {
+		cores = append(cores, zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), level))
 	}
 
 	// 合并所有 cores
@@ -160,6 +137,42 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, error) {
 
 	logger := zap.New(core, opts...)
 	return logger, logger.Sugar(), nil
+}
+
+type outputTargets struct {
+	Stdout bool
+	File   bool
+}
+
+func resolveOutputTargets(cfg *LogConfig) (outputTargets, error) {
+	if cfg == nil {
+		return outputTargets{}, fmt.Errorf("log config is required")
+	}
+
+	output := strings.ToLower(strings.TrimSpace(cfg.Output))
+	if output == "" {
+		output = "stdout"
+	}
+
+	targets := outputTargets{}
+	switch output {
+	case "stdout":
+		targets.Stdout = true
+	case "file":
+		targets.File = true
+	case "both":
+		targets.Stdout = true
+		targets.File = true
+	default:
+		return outputTargets{}, fmt.Errorf("invalid output: %s (must be 'stdout', 'file' or 'both')", cfg.Output)
+	}
+
+	// 兼容旧配置：output=file + enable_console=true 等价于 output=both。
+	if cfg.EnableConsole {
+		targets.Stdout = true
+	}
+
+	return targets, nil
 }
 
 // parseLogLevel parses log level string

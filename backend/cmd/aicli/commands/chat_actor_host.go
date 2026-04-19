@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -17,10 +17,10 @@ import (
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 type localChatRuntimeHost struct {
@@ -389,6 +389,7 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 			ModelMappings:   cloneStringMap(session.Provider.ModelMappings),
 			Headers:         nil,
 			HeaderMappings:  cloneStringMap(session.Provider.HeaderMappings),
+			Proxy:           session.Provider.Proxy.Clone(),
 		})
 		if buildErr != nil {
 			return buildErr

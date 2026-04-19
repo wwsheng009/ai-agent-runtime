@@ -27,13 +27,13 @@ go build ./cmd/skillsapi-demo
 非流式：
 
 ```bash
-go run ./cmd/skillsapi-demo -url http://localhost:8080 -message "plan this task"
+go run ./cmd/skillsapi-demo -url http://127.0.0.1:8101 -message "plan this task"
 ```
 
 流式：
 
 ```bash
-go run ./cmd/skillsapi-demo -url http://localhost:8080 -message "stream this task" -stream -planning-mode planner_preferred
+go run ./cmd/skillsapi-demo -url http://127.0.0.1:8101 -message "stream this task" -stream -planning-mode planner_preferred
 ```
 
 常用参数：
@@ -57,7 +57,7 @@ go run ./cmd/skillsapi-demo -url http://localhost:8080 -message "stream this tas
 go run ./cmd/skillsapi-demo \
   -mode session-agent \
   -agent-action spawn \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -agent-type explorer \
   -fork-context
 ```
@@ -68,7 +68,7 @@ go run ./cmd/skillsapi-demo \
 go run ./cmd/skillsapi-demo \
   -mode session-agent \
   -agent-action spawn \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -parent-session-id <parent> \
   -agent-type explorer \
   -message "Summarize the parent context first."
@@ -80,7 +80,7 @@ go run ./cmd/skillsapi-demo \
 go run ./cmd/skillsapi-demo \
   -mode session-agent \
   -agent-action status \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -parent-session-id <parent> \
   -agent-id <child>
 ```
@@ -91,7 +91,7 @@ go run ./cmd/skillsapi-demo \
 go run ./cmd/skillsapi-demo \
   -mode session-agent \
   -agent-action input \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -parent-session-id <parent> \
   -agent-id <child> \
   -message "Summarize progress"
@@ -103,7 +103,7 @@ go run ./cmd/skillsapi-demo \
 go run ./cmd/skillsapi-demo \
   -mode session-agent \
   -agent-action input \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -parent-session-id <parent> \
   -agent-id <child> \
   -message "Stop current work and summarize progress." \
@@ -118,7 +118,7 @@ go run ./cmd/skillsapi-demo \
 go run ./cmd/skillsapi-demo \
   -mode session-agent \
   -agent-action wait \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -parent-session-id <parent> \
   -agent-id <child> \
   -agent-timeout-ms 10000
@@ -130,7 +130,7 @@ go run ./cmd/skillsapi-demo \
 go run ./cmd/skillsapi-demo \
   -mode session-agent \
   -agent-action wait \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -parent-session-id <parent> \
   -agent-ids child-a,child-b,child-c \
   -agent-timeout-ms 10000
@@ -142,7 +142,7 @@ go run ./cmd/skillsapi-demo \
 go run ./cmd/skillsapi-demo \
   -mode session-agent \
   -agent-action events \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -parent-session-id <parent> \
   -agent-id <child> \
   -after-seq 0 \
@@ -156,14 +156,14 @@ go run ./cmd/skillsapi-demo \
 go run ./cmd/skillsapi-demo \
   -mode session-agent \
   -agent-action close \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -parent-session-id <parent> \
   -agent-id <child>
 
 go run ./cmd/skillsapi-demo \
   -mode session-agent \
   -agent-action resume \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -parent-session-id <parent> \
   -agent-id <child>
 ```
@@ -191,7 +191,7 @@ go run ./cmd/skillsapi-demo \
 
 ```bash
 go run ./cmd/skillsapi-demo \
-  -url http://localhost:8080 \
+  -url http://127.0.0.1:8101 \
   -message "hello" \
   -bearer-token <jwt>
 ```

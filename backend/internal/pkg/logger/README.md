@@ -7,7 +7,7 @@ This module provides structured logging capabilities for the AI Gateway using Za
 - **Structured Logging**: JSON and text formats with customizable fields
 - **Context Awareness**: Automatic correlation of request-scoped fields (request_id, user_id, etc.)
 - **Log Rotation**: Automatic log file rotation with lumberjack
-- **Multiple Outputs**: Support for stdout and file outputs
+- **Multiple Outputs**: Support for stdout, file, or simultaneous stdout+file outputs
 - **Configurable Levels**: Debug, Info, Warn, Error levels
 - **Performance**: Zero-allocation logging for hot paths
 
@@ -25,7 +25,7 @@ import (
 cfg := &config.LogConfig{
     Level:      "info",
     Format:     "json",
-    Output:     "stdout",
+    Output:     "both",
     FilePath:   "./logs/gateway.log",
     MaxSize:    100,
     MaxBackups: 3,
@@ -137,8 +137,8 @@ logger.Panic("Panic, calls panic()")
 |--------|------|---------|-------------|
 | Level | string | info | Log level: debug, info, warn, error |
 | Format | string | json | Log format: json, text |
-| Output | string | stdout | Output target: stdout, file |
-| FilePath | string | ./logs/gateway.log | Log file path (when output=file) |
+| Output | string | stdout | Output target: stdout, file, both |
+| FilePath | string | ./logs/gateway.log | Log file path (when output=file or both) |
 | MaxSize | int | 100 | Max log file size in MB |
 | MaxBackups | int | 3 | Max number of old log files |
 | MaxAge | int | 7 | Max age of old log files in days |
@@ -152,7 +152,11 @@ Use environment variables to override logging configuration:
 # Set log level
 export LOG__LEVEL=debug
 
-# Set output to file
+# Set output to stdout and file simultaneously
+export LOG__OUTPUT=both
+export LOG__FILE_PATH=/var/log/gateway/gateway.log
+
+# Or set output to file only
 export LOG__OUTPUT=file
 export LOG__FILE_PATH=/var/log/gateway/gateway.log
 ```

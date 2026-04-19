@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/background"
-	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/google/uuid"
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const (
@@ -82,13 +82,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		{
 			Name:        ToolBackgroundTask,
-			Description: "Run a long-running task in the background and return a job id.",
+			Description: "Run a long-running task in the background and return a job id. On Windows the command executes under cmd.exe, so use cmd-compatible commands.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"command": map[string]interface{}{
 						"type":        "string",
-						"description": "Shell command to execute.",
+						"description": "Shell command to execute. On Windows use cmd-compatible commands such as `cd` or `echo %cd%` instead of `pwd`.",
 					},
 					"cwd": map[string]interface{}{
 						"type":        "string",

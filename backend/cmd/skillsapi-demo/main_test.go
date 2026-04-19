@@ -137,14 +137,14 @@ func TestStreamDemoPrinterHandleEvent(t *testing.T) {
 
 func TestParseDemoOptions(t *testing.T) {
 	opts, err := parseDemoOptions([]string{
-		"-url", "http://localhost:8080",
+		"-url", "http://127.0.0.1:8101",
 		"-message", "hi",
 		"-stream",
 		"-planning-mode", "planner_preferred",
 		"-timeout", "30s",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "http://localhost:8080", opts.baseURL)
+	assert.Equal(t, "http://127.0.0.1:8101", opts.baseURL)
 	assert.Equal(t, "hi", opts.message)
 	assert.True(t, opts.stream)
 	assert.Equal(t, "planner_preferred", opts.planningMode)
@@ -155,7 +155,7 @@ func TestParseDemoOptions_SessionAgentSpawnAllowsEmptyMessage(t *testing.T) {
 	opts, err := parseDemoOptions([]string{
 		"-mode", "session-agent",
 		"-agent-action", "spawn",
-		"-url", "http://localhost:8080",
+		"-url", "http://127.0.0.1:8101",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "session-agent", opts.mode)
@@ -166,7 +166,7 @@ func TestParseDemoOptions_SessionAgentInputRequiresMessage(t *testing.T) {
 	_, err := parseDemoOptions([]string{
 		"-mode", "session-agent",
 		"-agent-action", "input",
-		"-url", "http://localhost:8080",
+		"-url", "http://127.0.0.1:8101",
 		"-parent-session-id", "parent-1",
 		"-agent-id", "child-1",
 	})
@@ -181,9 +181,9 @@ func TestRun_SessionAgentSpawnAutoCreatesParent(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/skills/sessions":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/sessions":
 			_, _ = io.WriteString(w, `{"session":{"id":"parent-1","userId":"demo-user","state":"active","metadata":{},"createdAt":"2026-03-18T00:00:00Z","updatedAt":"2026-03-18T00:00:00Z"}}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/skills/sessions/parent-1/agents":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/sessions/parent-1/agents":
 			_, _ = io.WriteString(w, `{"agent":{"id":"child-1","session_id":"child-1","parent_session_id":"parent-1","agent_type":"explorer","status":"idle","exists":true,"created":true}}`)
 		default:
 			http.NotFound(w, r)
@@ -208,13 +208,13 @@ func TestRun_SessionAgentSpawnAutoCreatesParent(t *testing.T) {
 	assert.Contains(t, output, "agent_session=child-1 status=idle exists=true")
 	assert.Contains(t, output, "agent_type=explorer")
 	assert.Contains(t, output, "created=true")
-	assert.Equal(t, []string{"/api/skills/sessions", "/api/skills/sessions/parent-1/agents"}, requestPaths)
+	assert.Equal(t, []string{"/api/runtime/sessions", "/api/runtime/sessions/parent-1/agents"}, requestPaths)
 }
 
 func TestRun_SessionAgentEvents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		assert.Equal(t, "/api/skills/sessions/parent-1/agents/child-1/events", r.URL.Path)
+		assert.Equal(t, "/api/runtime/sessions/parent-1/agents/child-1/events", r.URL.Path)
 		assert.Equal(t, "after_seq=12&limit=3&wait_ms=900", r.URL.RawQuery)
 		_, _ = io.WriteString(w, `{"result":{"session_id":"child-1","count":1,"latest_seq":12,"events":[{"seq":12,"type":"turn.completed","agent_name":"explorer","timestamp":"2026-03-18T00:00:00Z","payload":{"status":"ok"}}]}}`)
 	}))

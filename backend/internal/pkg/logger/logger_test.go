@@ -111,6 +111,40 @@ func TestInitLogger_InvalidOutput(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid output")
 }
 
+func TestResolveOutputTargets_Both(t *testing.T) {
+	targets, err := resolveOutputTargets(&LogConfig{Output: "both"})
+	assert.NoError(t, err)
+	assert.True(t, targets.Stdout)
+	assert.True(t, targets.File)
+}
+
+func TestResolveOutputTargets_FileWithLegacyConsoleFlag(t *testing.T) {
+	targets, err := resolveOutputTargets(&LogConfig{
+		Output:        "file",
+		EnableConsole: true,
+	})
+	assert.NoError(t, err)
+	assert.True(t, targets.Stdout)
+	assert.True(t, targets.File)
+}
+
+func TestResolveOutputTargets_StdoutWithLegacyConsoleFlag(t *testing.T) {
+	targets, err := resolveOutputTargets(&LogConfig{
+		Output:        "stdout",
+		EnableConsole: true,
+	})
+	assert.NoError(t, err)
+	assert.True(t, targets.Stdout)
+	assert.False(t, targets.File)
+}
+
+func TestResolveOutputTargets_DefaultsToStdout(t *testing.T) {
+	targets, err := resolveOutputTargets(&LogConfig{})
+	assert.NoError(t, err)
+	assert.True(t, targets.Stdout)
+	assert.False(t, targets.File)
+}
+
 func TestL_Default(t *testing.T) {
 	// Reset global logger
 	globalLogger = nil

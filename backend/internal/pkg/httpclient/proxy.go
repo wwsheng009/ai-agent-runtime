@@ -10,15 +10,26 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"golang.org/x/net/http/httpproxy"
 	"golang.org/x/net/proxy"
 )
 
 // ProxyFunc 返回代理函数，用于 http.Transport
 // 支持 HTTP/HTTPS 代理和 SOCKS5 代理
 func ProxyFunc(cfg *agentconfig.ProxyConfig) func(*http.Request) (*url.URL, error) {
-	if cfg == nil || cfg.IsEmpty() {
-		// 使用环境变量的默认行为
-		return http.ProxyFromEnvironment
+	if cfg == nil {
+		return proxyFromEnvironment
+	}
+	if cfg.IsEmpty() {
+		if cfg.NoProxy == "" {
+			return proxyFromEnvironment
+		}
+		return func(req *http.Request) (*url.URL, error) {
+			if shouldBypassProxy(req.URL.Host, cfg.NoProxy) {
+				return nil, nil
+			}
+			return proxyFromEnvironment(req)
+		}
 	}
 
 	return func(req *http.Request) (*url.URL, error) {
@@ -49,6 +60,14 @@ func ProxyFunc(cfg *agentconfig.ProxyConfig) func(*http.Request) (*url.URL, erro
 
 		return parseProxyURL(proxyURL)
 	}
+}
+
+func proxyFromEnvironment(req *http.Request) (*url.URL, error) {
+	if req == nil || req.URL == nil {
+		return nil, nil
+	}
+
+	return httpproxy.FromEnvironment().ProxyFunc()(req.URL)
 }
 
 // parseProxyURL 解析代理 URL

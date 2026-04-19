@@ -16,22 +16,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	skillshandler "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/embedding"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	mcpprotocol "github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
-	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
-	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
-	"github.com/wwsheng009/ai-agent-runtime/internal/embedding"
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
-	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/gorilla/mux"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type testMCPManager struct{}
@@ -2246,7 +2246,7 @@ func TestClient_SessionAgentEndpointsEncodePathsAndQuery(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPost, gotMethod)
-	assert.Equal(t, "/api/skills/sessions/parent%2F1/agents/wait", gotPath)
+	assert.Equal(t, "/api/runtime/sessions/parent%2F1/agents/wait", gotPath)
 	assert.Contains(t, gotBody, `"ids":["child-1","child-2"]`)
 	assert.Contains(t, gotBody, `"timeout_ms":1500`)
 
@@ -2257,7 +2257,7 @@ func TestClient_SessionAgentEndpointsEncodePathsAndQuery(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodGet, gotMethod)
-	assert.Equal(t, "/api/skills/sessions/parent%2F1/agents/child%2F1/events", gotPath)
+	assert.Equal(t, "/api/runtime/sessions/parent%2F1/agents/child%2F1/events", gotPath)
 	assert.Contains(t, gotQuery, "after_seq=12")
 	assert.Contains(t, gotQuery, "limit=5")
 	assert.Contains(t, gotQuery, "wait_ms=900")
@@ -2287,7 +2287,7 @@ func TestClient_ReportTaskOutcomeUsesCanonicalEndpoint(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
-	assert.Equal(t, "/api/skills/teams/team-1/tasks/task-1/outcome", gotPath)
+	assert.Equal(t, "/api/runtime/teams/team-1/tasks/task-1/outcome", gotPath)
 	assert.Equal(t, "done", gotReq.TaskStatus)
 	assert.Equal(t, "finished", gotReq.Summary)
 	assert.Equal(t, "artifact://1", gotReq.ResultRef)
@@ -2296,11 +2296,12 @@ func TestClient_ReportTaskOutcomeUsesCanonicalEndpoint(t *testing.T) {
 	assert.Equal(t, "artifact://1", *resp.Task.ResultRef)
 }
 
-func TestClient_LegacyTaskOutcomeHelpersUseCompatibilityEndpoints(t *testing.T) {
+func TestClient_TaskOutcomeHelpersReuseCanonicalEndpoint(t *testing.T) {
 	cases := []struct {
 		name        string
 		call        func(*Client) (*ReportTaskOutcomeResponse, error)
 		expectedURL string
+		expectedReq string
 	}{
 		{
 			name: "complete",
@@ -2309,7 +2310,8 @@ func TestClient_LegacyTaskOutcomeHelpersUseCompatibilityEndpoints(t *testing.T) 
 					Summary: "done summary",
 				})
 			},
-			expectedURL: "/api/skills/teams/team-1/tasks/task-1/complete",
+			expectedURL: "/api/runtime/teams/team-1/tasks/task-1/outcome",
+			expectedReq: `"task_status":"done"`,
 		},
 		{
 			name: "fail",
@@ -2318,7 +2320,8 @@ func TestClient_LegacyTaskOutcomeHelpersUseCompatibilityEndpoints(t *testing.T) 
 					Summary: "failed summary",
 				})
 			},
-			expectedURL: "/api/skills/teams/team-1/tasks/task-1/fail",
+			expectedURL: "/api/runtime/teams/team-1/tasks/task-1/outcome",
+			expectedReq: `"task_status":"failed"`,
 		},
 		{
 			name: "block",
@@ -2327,15 +2330,20 @@ func TestClient_LegacyTaskOutcomeHelpersUseCompatibilityEndpoints(t *testing.T) 
 					Summary: "blocked summary",
 				})
 			},
-			expectedURL: "/api/skills/teams/team-1/tasks/task-1/block",
+			expectedURL: "/api/runtime/teams/team-1/tasks/task-1/outcome",
+			expectedReq: `"task_status":"blocked"`,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotPath string
+			var gotBody string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotPath = r.URL.Path
+				body, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				gotBody = string(body)
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"task":{"id":"task-1","team_id":"team-1","status":"ok","summary":"ok"}}`))
 			}))
@@ -2345,6 +2353,7 @@ func TestClient_LegacyTaskOutcomeHelpersUseCompatibilityEndpoints(t *testing.T) 
 			_, err := tc.call(client)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expectedURL, gotPath)
+			assert.Contains(t, gotBody, tc.expectedReq)
 		})
 	}
 }
@@ -2613,7 +2622,7 @@ func TestClient_PlanTeamTasksUsesEndpoint(t *testing.T) {
 		AutoPersist: true,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "/api/skills/teams/team-1/plan", gotPath)
+	assert.Equal(t, "/api/runtime/teams/team-1/plan", gotPath)
 	assert.Equal(t, "ship feature", gotReq.Goal)
 	assert.True(t, gotReq.AutoPersist)
 	assert.Equal(t, "team-1", resp.TeamID)
@@ -2976,7 +2985,7 @@ func TestClient_ReplanTaskUsesEndpoint(t *testing.T) {
 		AutoPersist: true,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "/api/skills/teams/team-1/tasks/task-1/replan", gotPath)
+	assert.Equal(t, "/api/runtime/teams/team-1/tasks/task-1/replan", gotPath)
 	assert.True(t, gotReq.AutoPersist)
 	assert.Equal(t, "team-1", resp.TeamID)
 	assert.Equal(t, "task-1", resp.FailedTask)
@@ -3031,4 +3040,3 @@ func TestClient_ListAndAckTeamMailbox(t *testing.T) {
 func strPtr(v string) *string {
 	return &v
 }
-

@@ -107,7 +107,7 @@ func summarizeJSONPayload(payload interface{}) (string, map[string]interface{}) 
 
 func collectJSONFacts(payload map[string]interface{}) []string {
 	orderedKeys := []string{
-		"team_id", "task_id", "message_count", "from_agent", "to_agent",
+		"job_id", "session_id", "team_id", "task_id", "message_count", "from_agent", "to_agent",
 		"answer", "question_id", "prompt",
 		"status", "success", "message", "error", "summary",
 		"count", "total", "id", "name", "type", "path",
@@ -115,29 +115,55 @@ func collectJSONFacts(payload map[string]interface{}) []string {
 	}
 
 	facts := make([]string, 0, 6)
+	seen := make(map[string]bool, len(payload))
 	for _, key := range orderedKeys {
-		value, ok := payload[key]
-		if !ok {
+		appendJSONFact(payload, key, &facts)
+		seen[key] = true
+		if len(facts) >= 6 {
+			break
+		}
+	}
+	if len(facts) >= 6 {
+		return facts
+	}
+
+	identifierKeys := make([]string, 0, len(payload))
+	for key := range payload {
+		if seen[key] {
 			continue
 		}
-		switch typed := value.(type) {
-		case string:
-			if text := summarizeLine(typed, 80); text != "" {
-				facts = append(facts, fmt.Sprintf("%s=%s", key, text))
-			}
-		case bool, json.Number, float64, float32, int, int32, int64:
-			facts = append(facts, fmt.Sprintf("%s=%v", key, typed))
-		case []interface{}:
-			facts = append(facts, fmt.Sprintf("%s[%d]", key, len(typed)))
-		case map[string]interface{}:
-			facts = append(facts, fmt.Sprintf("%s{%d keys}", key, len(typed)))
+		if key == "id" || strings.HasSuffix(key, "_id") {
+			identifierKeys = append(identifierKeys, key)
 		}
+	}
+	sort.Strings(identifierKeys)
+	for _, key := range identifierKeys {
+		appendJSONFact(payload, key, &facts)
 		if len(facts) >= 6 {
 			break
 		}
 	}
 
 	return facts
+}
+
+func appendJSONFact(payload map[string]interface{}, key string, facts *[]string) {
+	value, ok := payload[key]
+	if !ok {
+		return
+	}
+	switch typed := value.(type) {
+	case string:
+		if text := summarizeLine(typed, 80); text != "" {
+			*facts = append(*facts, fmt.Sprintf("%s=%s", key, text))
+		}
+	case bool, json.Number, float64, float32, int, int32, int64:
+		*facts = append(*facts, fmt.Sprintf("%s=%v", key, typed))
+	case []interface{}:
+		*facts = append(*facts, fmt.Sprintf("%s[%d]", key, len(typed)))
+	case map[string]interface{}:
+		*facts = append(*facts, fmt.Sprintf("%s{%d keys}", key, len(typed)))
+	}
 }
 
 func detectJSONCollection(payload map[string]interface{}) (string, int, bool) {

@@ -87,9 +87,9 @@ func (e *APIError) Error() string {
 		return ""
 	}
 	if e.Message != "" {
-		return fmt.Sprintf("skills api returned %d: %s", e.StatusCode, e.Message)
+		return fmt.Sprintf("runtime api returned %d: %s", e.StatusCode, e.Message)
 	}
-	return fmt.Sprintf("skills api returned %d", e.StatusCode)
+	return fmt.Sprintf("runtime api returned %d", e.StatusCode)
 }
 
 func (e *APIError) HasCode(code string) bool {
@@ -2989,7 +2989,7 @@ func (c *Client) ListSkills(ctx context.Context, params ListSkillsParams) (*List
 	}
 
 	var response ListSkillsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/skills", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -2997,7 +2997,7 @@ func (c *Client) ListSkills(ctx context.Context, params ListSkillsParams) (*List
 
 func (c *Client) GetSkill(ctx context.Context, name string) (*Skill, error) {
 	var response Skill
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/"+url.PathEscape(name), nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/skills/"+url.PathEscape(name), nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3023,7 +3023,7 @@ func (c *Client) SearchSkills(ctx context.Context, params SearchSkillsParams) (*
 	}
 
 	var response SearchSkillsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/search", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/skills/search", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3039,7 +3039,7 @@ func (c *Client) GetStats(ctx context.Context, params ListSkillsParams) (*GetSta
 	}
 
 	var response GetStatsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/stats", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/skills/stats", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3047,7 +3047,7 @@ func (c *Client) GetStats(ctx context.Context, params ListSkillsParams) (*GetSta
 
 func (c *Client) GetRuntimeStatus(ctx context.Context) (*GetRuntimeStatusResponse, error) {
 	var response GetRuntimeStatusResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/runtime/status", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/status", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3055,7 +3055,7 @@ func (c *Client) GetRuntimeStatus(ctx context.Context) (*GetRuntimeStatusRespons
 
 func (c *Client) GetRuntimeHealth(ctx context.Context) (*GetRuntimeHealthResponse, error) {
 	var response GetRuntimeHealthResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/runtime/health", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/health", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3063,7 +3063,7 @@ func (c *Client) GetRuntimeHealth(ctx context.Context) (*GetRuntimeHealthRespons
 
 func (c *Client) ReloadRuntimeMCPs(ctx context.Context) (*ReloadRuntimeMCPsResponse, error) {
 	var response ReloadRuntimeMCPsResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/runtime/mcps/reload", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/mcps/reload", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3071,7 +3071,7 @@ func (c *Client) ReloadRuntimeMCPs(ctx context.Context) (*ReloadRuntimeMCPsRespo
 
 func (c *Client) ValidateRuntime(ctx context.Context) (*GetRuntimeValidationResponse, error) {
 	var response GetRuntimeValidationResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/runtime/validate", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/validate", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3079,7 +3079,7 @@ func (c *Client) ValidateRuntime(ctx context.Context) (*GetRuntimeValidationResp
 
 func (c *Client) GetCapabilities(ctx context.Context) (*GetCapabilitiesResponse, error) {
 	var response GetCapabilitiesResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/capabilities", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/capabilities", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3087,7 +3087,7 @@ func (c *Client) GetCapabilities(ctx context.Context) (*GetCapabilitiesResponse,
 
 func (c *Client) ExecuteSkill(ctx context.Context, name string, req ExecuteSkillRequest) (*ExecuteSkillResponse, error) {
 	var response ExecuteSkillResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/"+url.PathEscape(name)+"/execute", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/skills/"+url.PathEscape(name)+"/execute", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3137,7 +3137,7 @@ func (c *Client) StreamSessionRuntimeEvents(ctx context.Context, sessionID strin
 		query.Set("poll_ms", strconv.Itoa(pollMs))
 	}
 
-	httpReq, err := c.newRequest(ctx, http.MethodGet, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/runtime/stream", query, nil)
+	httpReq, err := c.newRequest(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/runtime/stream", query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -3174,7 +3174,7 @@ func (c *Client) ListRuntimeEvents(ctx context.Context, filters map[string]strin
 	}
 
 	var response RuntimeEventsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/runtime/events", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/events", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3190,7 +3190,7 @@ func (c *Client) CreateSkill(ctx context.Context, skill Skill, opts CreateSkillO
 	}
 
 	var response SkillMutationResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills", query, skill, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/skills", query, skill, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3206,7 +3206,7 @@ func (c *Client) UpdateSkill(ctx context.Context, name string, skill Skill, opts
 	}
 
 	var response SkillMutationResponse
-	if err := c.doJSON(ctx, http.MethodPut, "/api/skills/"+url.PathEscape(name), query, skill, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPut, "/api/runtime/skills/"+url.PathEscape(name), query, skill, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3219,7 +3219,7 @@ func (c *Client) DeleteSkill(ctx context.Context, name string, opts DeleteSkillO
 	}
 
 	var response SkillMutationResponse
-	if err := c.doJSON(ctx, http.MethodDelete, "/api/skills/"+url.PathEscape(name), query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodDelete, "/api/runtime/skills/"+url.PathEscape(name), query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3235,7 +3235,7 @@ func (c *Client) ExportSkills(ctx context.Context, params ListSkillsParams) (*Ex
 	}
 
 	var response ExportSkillsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/export", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/skills/export", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3255,7 +3255,7 @@ func (c *Client) ImportSkillsWithOptions(ctx context.Context, skills []Skill, op
 	}
 
 	var response ImportSkillsResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/import", query, map[string]interface{}{"skills": skills}, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/skills/import", query, map[string]interface{}{"skills": skills}, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3263,7 +3263,7 @@ func (c *Client) ImportSkillsWithOptions(ctx context.Context, skills []Skill, op
 
 func (c *Client) ReloadSkills(ctx context.Context, req ReloadSkillsRequest) (*ReloadSkillsResponse, error) {
 	var response ReloadSkillsResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/reload", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/skills/reload", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3271,7 +3271,7 @@ func (c *Client) ReloadSkills(ctx context.Context, req ReloadSkillsRequest) (*Re
 
 func (c *Client) StartHotReload(ctx context.Context, req HotReloadRequest) (*StartHotReloadResponse, error) {
 	var response StartHotReloadResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/hot-reload/start", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/skills/hot-reload/start", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3279,7 +3279,7 @@ func (c *Client) StartHotReload(ctx context.Context, req HotReloadRequest) (*Sta
 
 func (c *Client) StopHotReload(ctx context.Context) (*StopHotReloadResponse, error) {
 	var response StopHotReloadResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/hot-reload/stop", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/skills/hot-reload/stop", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3287,7 +3287,7 @@ func (c *Client) StopHotReload(ctx context.Context) (*StopHotReloadResponse, err
 
 func (c *Client) ReloadHotReload(ctx context.Context) (*ReloadHotReloadResponse, error) {
 	var response ReloadHotReloadResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/hot-reload/reload", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/skills/hot-reload/reload", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3295,7 +3295,7 @@ func (c *Client) ReloadHotReload(ctx context.Context) (*ReloadHotReloadResponse,
 
 func (c *Client) GetHotReloadStats(ctx context.Context) (*HotReloadStatsResponse, error) {
 	var response HotReloadStatsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/hot-reload/stats", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/skills/hot-reload/stats", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3303,7 +3303,7 @@ func (c *Client) GetHotReloadStats(ctx context.Context) (*HotReloadStatsResponse
 
 func (c *Client) GetSearchStats(ctx context.Context) (*SearchStatsResponse, error) {
 	var response SearchStatsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/search/stats", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/skills/search/stats", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3316,7 +3316,7 @@ func (c *Client) ReindexSearchIndex(ctx context.Context, force bool) (*ReindexSe
 	}
 
 	var response ReindexSearchIndexResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/search/reindex", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/skills/search/reindex", query, nil, &response); err != nil {
 		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusTooManyRequests {
 			_ = json.Unmarshal([]byte(apiErr.Body), &response)
 			response.Error = apiErr.Message
@@ -3344,7 +3344,7 @@ func (c *Client) GetUsageStatsWithScope(ctx context.Context, scope UsageScope) (
 	}
 
 	var response UsageStatsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/usage/stats", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/usage/stats", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3378,7 +3378,7 @@ func (c *Client) GetUsageLedger(ctx context.Context, params GetUsageLedgerParams
 	}
 
 	var response GetUsageLedgerResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/usage/ledger", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/usage/ledger", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3386,7 +3386,7 @@ func (c *Client) GetUsageLedger(ctx context.Context, params GetUsageLedgerParams
 
 func (c *Client) ResetUsageStats(ctx context.Context, req ResetUsageStatsRequest) (*ResetUsageStatsResponse, error) {
 	var response ResetUsageStatsResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/usage/reset", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/usage/reset", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3394,7 +3394,7 @@ func (c *Client) ResetUsageStats(ctx context.Context, req ResetUsageStatsRequest
 
 func (c *Client) GetUsagePolicy(ctx context.Context) (*GetUsagePolicyResponse, error) {
 	var response GetUsagePolicyResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/usage/policy", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/usage/policy", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3402,7 +3402,7 @@ func (c *Client) GetUsagePolicy(ctx context.Context) (*GetUsagePolicyResponse, e
 
 func (c *Client) GetMutationPolicy(ctx context.Context) (*GetMutationPolicyResponse, error) {
 	var response GetMutationPolicyResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/mutation/policy", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/mutation/policy", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3410,7 +3410,7 @@ func (c *Client) GetMutationPolicy(ctx context.Context) (*GetMutationPolicyRespo
 
 func (c *Client) GetGovernancePolicy(ctx context.Context) (*GetGovernancePolicyResponse, error) {
 	var response GetGovernancePolicyResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/governance/policy", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/governance/policy", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3418,7 +3418,7 @@ func (c *Client) GetGovernancePolicy(ctx context.Context) (*GetGovernancePolicyR
 
 func (c *Client) UpdateMutationPolicy(ctx context.Context, req MutationPolicyUpdateRequest) (*UpdateMutationPolicyResponse, error) {
 	var response UpdateMutationPolicyResponse
-	if err := c.doJSON(ctx, http.MethodPut, "/api/skills/mutation/policy", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPut, "/api/runtime/mutation/policy", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3426,7 +3426,7 @@ func (c *Client) UpdateMutationPolicy(ctx context.Context, req MutationPolicyUpd
 
 func (c *Client) GetAuthPolicy(ctx context.Context) (*GetAuthPolicyResponse, error) {
 	var response GetAuthPolicyResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/auth/policy", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/auth/policy", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3434,7 +3434,7 @@ func (c *Client) GetAuthPolicy(ctx context.Context) (*GetAuthPolicyResponse, err
 
 func (c *Client) UpdateAuthPolicy(ctx context.Context, req AuthPolicyUpdateRequest) (*UpdateAuthPolicyResponse, error) {
 	var response UpdateAuthPolicyResponse
-	if err := c.doJSON(ctx, http.MethodPut, "/api/skills/auth/policy", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPut, "/api/runtime/auth/policy", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3442,7 +3442,7 @@ func (c *Client) UpdateAuthPolicy(ctx context.Context, req AuthPolicyUpdateReque
 
 func (c *Client) DeleteAuthPolicyEntry(ctx context.Context, req DeleteAuthPolicyEntryRequest) (*DeleteAuthPolicyEntryResponse, error) {
 	var response DeleteAuthPolicyEntryResponse
-	if err := c.doJSON(ctx, http.MethodDelete, "/api/skills/auth/policy", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodDelete, "/api/runtime/auth/policy", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3450,7 +3450,7 @@ func (c *Client) DeleteAuthPolicyEntry(ctx context.Context, req DeleteAuthPolicy
 
 func (c *Client) UpdateUsagePolicy(ctx context.Context, req UsagePolicyUpdateRequest) (*UpdateUsagePolicyResponse, error) {
 	var response UpdateUsagePolicyResponse
-	if err := c.doJSON(ctx, http.MethodPut, "/api/skills/usage/policy", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPut, "/api/runtime/usage/policy", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3458,7 +3458,7 @@ func (c *Client) UpdateUsagePolicy(ctx context.Context, req UsagePolicyUpdateReq
 
 func (c *Client) DeleteUsagePolicyEntry(ctx context.Context, req DeleteUsagePolicyEntryRequest) (*DeleteUsagePolicyEntryResponse, error) {
 	var response DeleteUsagePolicyEntryResponse
-	if err := c.doJSON(ctx, http.MethodDelete, "/api/skills/usage/policy", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodDelete, "/api/runtime/usage/policy", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3466,7 +3466,7 @@ func (c *Client) DeleteUsagePolicyEntry(ctx context.Context, req DeleteUsagePoli
 
 func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (*CreateSessionResponse, error) {
 	var response CreateSessionResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3479,7 +3479,7 @@ func (c *Client) ListSessions(ctx context.Context, userID string) (*ListSessions
 	}
 
 	var response ListSessionsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/sessions", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3487,7 +3487,7 @@ func (c *Client) ListSessions(ctx context.Context, userID string) (*ListSessions
 
 func (c *Client) GetSession(ctx context.Context, sessionID string) (*GetSessionResponse, error) {
 	var response GetSessionResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/sessions/"+url.PathEscape(sessionID), nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(sessionID), nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3495,7 +3495,7 @@ func (c *Client) GetSession(ctx context.Context, sessionID string) (*GetSessionR
 
 func (c *Client) UpdateSession(ctx context.Context, sessionID string, req UpdateSessionRequest) (*GetSessionResponse, error) {
 	var response GetSessionResponse
-	if err := c.doJSON(ctx, http.MethodPatch, "/api/skills/sessions/"+url.PathEscape(sessionID), nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPatch, "/api/runtime/sessions/"+url.PathEscape(sessionID), nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3503,7 +3503,7 @@ func (c *Client) UpdateSession(ctx context.Context, sessionID string, req Update
 
 func (c *Client) DeleteSession(ctx context.Context, sessionID string) (*DeleteSessionResponse, error) {
 	var response DeleteSessionResponse
-	if err := c.doJSON(ctx, http.MethodDelete, "/api/skills/sessions/"+url.PathEscape(sessionID), nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodDelete, "/api/runtime/sessions/"+url.PathEscape(sessionID), nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3511,7 +3511,7 @@ func (c *Client) DeleteSession(ctx context.Context, sessionID string) (*DeleteSe
 
 func (c *Client) GetSessionHistory(ctx context.Context, sessionID string) (*SessionHistoryResponse, error) {
 	var response SessionHistoryResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/history", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/history", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3519,7 +3519,7 @@ func (c *Client) GetSessionHistory(ctx context.Context, sessionID string) (*Sess
 
 func (c *Client) ClearSessionHistory(ctx context.Context, sessionID string) (*ClearSessionHistoryResponse, error) {
 	var response ClearSessionHistoryResponse
-	if err := c.doJSON(ctx, http.MethodDelete, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/history", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodDelete, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/history", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3527,7 +3527,7 @@ func (c *Client) ClearSessionHistory(ctx context.Context, sessionID string) (*Cl
 
 func (c *Client) CreateTeam(ctx context.Context, req CreateTeamRequest) (*CreateTeamResponse, error) {
 	var response CreateTeamResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/teams", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/teams", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3559,7 +3559,7 @@ func (c *Client) ListTeams(ctx context.Context, params ListTeamsParams) (*ListTe
 	}
 
 	var response ListTeamsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/teams", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/teams", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -3580,7 +3580,7 @@ func (c *Client) ListTeammates(ctx context.Context, teamID string, params ListTe
 	}
 
 	var response ListTeammatesResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/teammates"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/teammates"
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, query, nil, &response); err != nil {
 		return nil, err
 	}
@@ -3594,7 +3594,7 @@ func (c *Client) PlanTeamTasks(ctx context.Context, teamID string, req PlanTeamT
 	}
 
 	var response PlanTeamTasksResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/plan"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/plan"
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, req, &response); err != nil {
 		return nil, err
 	}
@@ -3648,7 +3648,7 @@ func (c *Client) GetTaskGraph(ctx context.Context, teamID string, params GetTask
 	}
 
 	var response GetTaskGraphResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/graph"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/graph"
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, query, nil, &response); err != nil {
 		return nil, err
 	}
@@ -3662,7 +3662,7 @@ func (c *Client) ClaimReadyTasks(ctx context.Context, teamID string, req ClaimRe
 	}
 
 	var response ClaimReadyTasksResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/claim"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/claim"
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, req, &response); err != nil {
 		return nil, err
 	}
@@ -3676,7 +3676,7 @@ func (c *Client) ReclaimExpiredTasks(ctx context.Context, teamID string, req Rec
 	}
 
 	var response ReclaimExpiredTasksResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/reclaim"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/reclaim"
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, req, &response); err != nil {
 		return nil, err
 	}
@@ -3690,7 +3690,7 @@ func (c *Client) MarkReadyTasks(ctx context.Context, teamID string) (*MarkReadyT
 	}
 
 	var response MarkReadyTasksResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/ready"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/ready"
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, nil, &response); err != nil {
 		return nil, err
 	}
@@ -3708,7 +3708,7 @@ func (c *Client) ReplanTask(ctx context.Context, teamID, taskID string, req Repl
 	}
 
 	var response ReplanTaskResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID) + "/replan"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID) + "/replan"
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, req, &response); err != nil {
 		return nil, err
 	}
@@ -3720,15 +3720,18 @@ func (c *Client) ReportTaskOutcome(ctx context.Context, teamID, taskID string, r
 }
 
 func (c *Client) CompleteTask(ctx context.Context, teamID, taskID string, req ReportTaskOutcomeRequest) (*ReportTaskOutcomeResponse, error) {
-	return c.teamTaskOutcomeAction(ctx, teamID, taskID, "complete", req)
+	req.TaskStatus = "done"
+	return c.ReportTaskOutcome(ctx, teamID, taskID, req)
 }
 
 func (c *Client) FailTask(ctx context.Context, teamID, taskID string, req ReportTaskOutcomeRequest) (*ReportTaskOutcomeResponse, error) {
-	return c.teamTaskOutcomeAction(ctx, teamID, taskID, "fail", req)
+	req.TaskStatus = "failed"
+	return c.ReportTaskOutcome(ctx, teamID, taskID, req)
 }
 
 func (c *Client) BlockTask(ctx context.Context, teamID, taskID string, req ReportTaskOutcomeRequest) (*ReportTaskOutcomeResponse, error) {
-	return c.teamTaskOutcomeAction(ctx, teamID, taskID, "block", req)
+	req.TaskStatus = "blocked"
+	return c.ReportTaskOutcome(ctx, teamID, taskID, req)
 }
 
 func (c *Client) GetTeamTask(ctx context.Context, teamID, taskID string, opts GetTeamTaskOptions) (*GetTeamTaskResponse, error) {
@@ -3750,7 +3753,7 @@ func (c *Client) GetTeamTask(ctx context.Context, teamID, taskID string, opts Ge
 	}
 
 	var response GetTeamTaskResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID)
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID)
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, query, nil, &response); err != nil {
 		return nil, err
 	}
@@ -3807,7 +3810,7 @@ func (c *Client) ListTeamTasks(ctx context.Context, teamID string, params ListTe
 	}
 
 	var response ListTeamTasksResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks"
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, query, nil, &response); err != nil {
 		return nil, err
 	}
@@ -3825,7 +3828,7 @@ func (c *Client) ListTaskDependencies(ctx context.Context, teamID, taskID string
 	}
 
 	var response TeamTaskDependenciesResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID) + "/dependencies"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID) + "/dependencies"
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, nil, &response); err != nil {
 		return nil, err
 	}
@@ -3843,7 +3846,7 @@ func (c *Client) ListTaskDependents(ctx context.Context, teamID, taskID string) 
 	}
 
 	var response TeamTaskDependentsResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID) + "/dependents"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID) + "/dependents"
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, nil, &response); err != nil {
 		return nil, err
 	}
@@ -3857,7 +3860,7 @@ func (c *Client) CreateTeamTask(ctx context.Context, teamID string, req CreateTe
 	}
 
 	var response CreateTeamTaskResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks"
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, req, &response); err != nil {
 		return nil, err
 	}
@@ -3875,7 +3878,7 @@ func (c *Client) UpdateTeamTask(ctx context.Context, teamID, taskID string, req 
 	}
 
 	var response UpdateTeamTaskResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID)
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID)
 	if err := c.doJSON(ctx, http.MethodPatch, endpoint, nil, req, &response); err != nil {
 		return nil, err
 	}
@@ -3897,7 +3900,7 @@ func (c *Client) AddTaskDependency(ctx context.Context, teamID, taskID, dependsO
 	}
 
 	var response AddTaskDependencyResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID) + "/dependencies"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID) + "/dependencies"
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, AddTaskDependencyRequest{
 		DependsOnID: dependsOnID,
 	}, &response); err != nil {
@@ -3913,7 +3916,7 @@ func (c *Client) SendTeamMailboxMessage(ctx context.Context, teamID string, req 
 	}
 
 	var response SendTeamMailboxMessageResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/mailbox"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/mailbox"
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, req, &response); err != nil {
 		return nil, err
 	}
@@ -3962,7 +3965,7 @@ func (c *Client) ListTeamMailbox(ctx context.Context, teamID string, params List
 	}
 
 	var response ListTeamMailboxResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/mailbox"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/mailbox"
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, query, nil, &response); err != nil {
 		return nil, err
 	}
@@ -3985,7 +3988,7 @@ func (c *Client) AckTeamMailboxMessage(ctx context.Context, teamID, messageID, a
 	}
 
 	var response AckTeamMailboxMessageResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/mailbox/" + url.PathEscape(messageID) + "/ack"
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/mailbox/" + url.PathEscape(messageID) + "/ack"
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, query, nil, &response); err != nil {
 		return nil, err
 	}
@@ -4008,7 +4011,7 @@ func (c *Client) ListBackgroundJobs(ctx context.Context, sessionID, status strin
 	}
 
 	var response BackgroundJobListResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/background/jobs", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/background/jobs", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4029,7 +4032,7 @@ func (c *Client) teamTaskOutcomeAction(ctx context.Context, teamID, taskID, acti
 	}
 
 	var response ReportTaskOutcomeResponse
-	endpoint := "/api/skills/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID) + "/" + action
+	endpoint := "/api/runtime/teams/" + url.PathEscape(teamID) + "/tasks/" + url.PathEscape(taskID) + "/" + action
 	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, req, &response); err != nil {
 		return nil, err
 	}
@@ -4038,7 +4041,7 @@ func (c *Client) teamTaskOutcomeAction(ctx context.Context, teamID, taskID, acti
 
 func (c *Client) GetBackgroundJob(ctx context.Context, jobID string) (*BackgroundJobResponse, error) {
 	var response BackgroundJobResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/background/jobs/"+url.PathEscape(jobID), nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/background/jobs/"+url.PathEscape(jobID), nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4054,7 +4057,7 @@ func (c *Client) ListBackgroundJobEvents(ctx context.Context, jobID string, afte
 	}
 
 	var response BackgroundJobEventsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/background/jobs/"+url.PathEscape(jobID)+"/events", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/background/jobs/"+url.PathEscape(jobID)+"/events", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4070,7 +4073,7 @@ func (c *Client) GetBackgroundJobOutput(ctx context.Context, jobID string, offse
 	}
 
 	var response BackgroundJobOutputResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/background/jobs/"+url.PathEscape(jobID)+"/output", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/background/jobs/"+url.PathEscape(jobID)+"/output", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4086,7 +4089,7 @@ func (c *Client) ListSessionCheckpoints(ctx context.Context, sessionID string, l
 	}
 
 	var response CheckpointListResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/checkpoints", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/checkpoints", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4094,7 +4097,7 @@ func (c *Client) ListSessionCheckpoints(ctx context.Context, sessionID string, l
 
 func (c *Client) GetCheckpointFiles(ctx context.Context, sessionID, checkpointID string) (*CheckpointFilesResponse, error) {
 	var response CheckpointFilesResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/checkpoints/"+url.PathEscape(checkpointID)+"/files", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/checkpoints/"+url.PathEscape(checkpointID)+"/files", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4106,7 +4109,7 @@ func (c *Client) PreviewSessionCheckpoint(ctx context.Context, sessionID, checkp
 		query.Set("mode", strings.TrimSpace(mode))
 	}
 	var response CheckpointPreviewResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/checkpoints/"+url.PathEscape(checkpointID)+"/preview", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/checkpoints/"+url.PathEscape(checkpointID)+"/preview", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4118,7 +4121,7 @@ func (c *Client) RestoreSessionCheckpoint(ctx context.Context, sessionID, checkp
 		query.Set("mode", strings.TrimSpace(mode))
 	}
 	var response SessionRuntimeCommandResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/checkpoints/"+url.PathEscape(checkpointID)+"/restore", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/checkpoints/"+url.PathEscape(checkpointID)+"/restore", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4126,7 +4129,7 @@ func (c *Client) RestoreSessionCheckpoint(ctx context.Context, sessionID, checkp
 
 func (c *Client) GetSessionRuntimeState(ctx context.Context, sessionID string) (*SessionRuntimeStateResponse, error) {
 	var response SessionRuntimeStateResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/runtime", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/runtime", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4142,7 +4145,7 @@ func (c *Client) ListSessionRuntimeEvents(ctx context.Context, sessionID string,
 	}
 
 	var response SessionRuntimeEventsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/runtime/events", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/runtime/events", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4150,7 +4153,7 @@ func (c *Client) ListSessionRuntimeEvents(ctx context.Context, sessionID string,
 
 func (c *Client) SubmitSessionRuntimeCommand(ctx context.Context, sessionID string, req SessionRuntimeCommandRequest) (*SessionRuntimeCommandResponse, error) {
 	var response SessionRuntimeCommandResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/runtime/commands", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/runtime/commands", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4158,7 +4161,7 @@ func (c *Client) SubmitSessionRuntimeCommand(ctx context.Context, sessionID stri
 
 func (c *Client) SpawnSessionAgent(ctx context.Context, parentSessionID string, req SpawnSessionAgentRequest) (*SessionAgentStatusResponse, error) {
 	var response SessionAgentStatusResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/"+url.PathEscape(parentSessionID)+"/agents", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(parentSessionID)+"/agents", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4166,7 +4169,7 @@ func (c *Client) SpawnSessionAgent(ctx context.Context, parentSessionID string, 
 
 func (c *Client) GetSessionAgentStatus(ctx context.Context, parentSessionID, agentID string) (*SessionAgentStatusResponse, error) {
 	var response SessionAgentStatusResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID), nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID), nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4174,7 +4177,7 @@ func (c *Client) GetSessionAgentStatus(ctx context.Context, parentSessionID, age
 
 func (c *Client) SendSessionAgentInput(ctx context.Context, parentSessionID, agentID string, req SendSessionAgentInputRequest) (*SessionAgentStatusResponse, error) {
 	var response SessionAgentStatusResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID)+"/input", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID)+"/input", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4182,7 +4185,7 @@ func (c *Client) SendSessionAgentInput(ctx context.Context, parentSessionID, age
 
 func (c *Client) WaitSessionAgents(ctx context.Context, parentSessionID string, req WaitSessionAgentsRequest) (*WaitSessionAgentsResponse, error) {
 	var response WaitSessionAgentsResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/"+url.PathEscape(parentSessionID)+"/agents/wait", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(parentSessionID)+"/agents/wait", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4201,7 +4204,7 @@ func (c *Client) ListSessionAgentEvents(ctx context.Context, parentSessionID, ag
 	}
 
 	var response ListSessionAgentEventsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID)+"/events", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID)+"/events", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4209,7 +4212,7 @@ func (c *Client) ListSessionAgentEvents(ctx context.Context, parentSessionID, ag
 
 func (c *Client) CloseSessionAgent(ctx context.Context, parentSessionID, agentID string) (*SessionAgentStatusResponse, error) {
 	var response SessionAgentStatusResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID)+"/close", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID)+"/close", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4217,7 +4220,7 @@ func (c *Client) CloseSessionAgent(ctx context.Context, parentSessionID, agentID
 
 func (c *Client) ResumeSessionAgent(ctx context.Context, parentSessionID, agentID string) (*SessionAgentStatusResponse, error) {
 	var response SessionAgentStatusResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID)+"/resume", nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID)+"/resume", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4230,7 +4233,7 @@ func (c *Client) GetSessionStats(ctx context.Context, userID string) (*SessionSt
 	}
 
 	var response SessionStatsResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/api/skills/sessions/stats", query, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/stats", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4238,7 +4241,7 @@ func (c *Client) GetSessionStats(ctx context.Context, userID string) (*SessionSt
 
 func (c *Client) SearchSessions(ctx context.Context, req SearchSessionsRequest) (*SearchSessionsResponse, error) {
 	var response SearchSessionsResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/search", nil, req, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/search", nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4266,7 +4269,7 @@ func (c *Client) BatchArchiveSessions(ctx context.Context, sessionIDs []string) 
 
 func (c *Client) changeSessionState(ctx context.Context, sessionID, action string) (*SessionStateChangeResponse, error) {
 	var response SessionStateChangeResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/"+url.PathEscape(sessionID)+"/"+action, nil, nil, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/"+action, nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4274,7 +4277,7 @@ func (c *Client) changeSessionState(ctx context.Context, sessionID, action strin
 
 func (c *Client) batchSessionAction(ctx context.Context, action string, sessionIDs []string) (*BatchSessionActionResponse, error) {
 	var response BatchSessionActionResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/api/skills/sessions/batch/"+action, nil, BatchSessionActionRequest{
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/sessions/batch/"+action, nil, BatchSessionActionRequest{
 		SessionIDs: append([]string(nil), sessionIDs...),
 	}, &response); err != nil {
 		return nil, err
@@ -4359,4 +4362,3 @@ func decodeAPIError(statusCode int, body []byte) error {
 	}
 	return apiErr
 }
-
