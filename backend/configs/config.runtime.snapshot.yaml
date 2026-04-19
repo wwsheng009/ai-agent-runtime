@@ -111,6 +111,14 @@ provider_groups:
       name: anthropic_group
       providers:
         - enabled: true
+          name: CODEX_03
+          role: primary
+          weight: 100
+        - enabled: true
+          name: CODEX_04
+          role: primary
+          weight: 100
+        - enabled: true
           name: codex_fox
           role: standby
           weight: 100
@@ -129,6 +137,10 @@ provider_groups:
       name: anthropic_group_second
       providers:
         - enabled: true
+          name: codex_ee
+          role: primary
+          weight: 100
+        - enabled: true
           name: codex_fox
           role: standby
           weight: 100
@@ -146,6 +158,12 @@ provider_groups:
       max_retries: 3
       name: openai_group
       providers:
+        - enabled: true
+          name: codex_ee
+          weight: 100
+        - enabled: false
+          name: bigmodel
+          weight: 100
         - enabled: false
           name: nvidia
           weight: 100
@@ -170,8 +188,15 @@ provider_groups:
       name: codex_group
       providers:
         - enabled: true
+          name: codex_ee
+          role: primary
+          weight: 100
+        - enabled: true
           name: codex_fox
           role: standby
+          weight: 100
+        - enabled: false
+          name: bigmodel
           weight: 100
         - enabled: false
           name: nvidia
@@ -189,6 +214,14 @@ provider_groups:
       name: codex_group_54
       providers:
         - enabled: true
+          name: CODEX_03
+          role: primary
+          weight: 100
+        - enabled: true
+          name: CODEX_04
+          role: primary
+          weight: 100
+        - enabled: true
           name: codex_fox
           role: standby
           weight: 100
@@ -196,6 +229,9 @@ provider_groups:
     - max_retries: 2
       name: gemini_group
       providers:
+        - enabled: true
+          name: codex_ee
+          weight: 100
         - enabled: false
           name: nvidia
           weight: 100
@@ -382,6 +418,90 @@ providers:
                 - gpt-5.3
                 - '*'
             timeout: 300s
+        codex_ee:
+            api_key: ${CODEX_API_KEYS:-}
+            api_path: /v1/responses
+            base_url: ${CODEX_BASE_URL:-http://127.0.0.1:8045}
+            context_window:
+                default: ${CONTEXT_WINDOW_CODEX_EE_DEFAULT:-400000}
+                models:
+                    gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_EE_GPT_5_2_CODEX:-400000}
+            default_model: gpt-5.4
+            enabled: true
+            forward_url: /v1/responses
+            header_mapping_rules:
+                - conditions:
+                    - header: Accept
+                      match: application/json
+                      match_type: contains
+                      not: false
+                  enabled: true
+                  header: User-Agent
+                  match: ^OpenAI/JS\s+(.+)$
+                  match_type: regex
+                  name: rewrite-openai-js-user-agent
+                  or_conditions:
+                    - header: X-Gateway-Debug
+                      match_type: exists
+                    - header: X-Gateway-Provider
+                      match: openai_codex
+                      match_type: exact
+                  replace_with: OpenAI JS $1
+                  stop_on_match: true
+                  target_header: User-Agent
+                - copy_matched_value: true
+                  header: X-Gateway-Provider
+                  match_type: exists
+                  priority: 10
+                  target_header: X-Provider-Shadow
+                - copy_from_capture: 1
+                  header: User-Agent
+                  match: ^OpenAI/JS\s+(.+)$
+                  match_type: regex
+                  priority: 20
+                  target_header: X-User-Agent-Version
+                - copy_from_capture_name: version
+                  header: User-Agent
+                  match: ^OpenAI/JS\s+(?P<version>.+)$
+                  match_type: regex
+                  target_header: X-User-Agent-Version-Named
+                - header: User-Agent
+                  match: \d+
+                  match_type: regex
+                  replace_all: false
+                  replace_with: '#'
+                  target_header: X-User-Agent-FirstReplace
+                - append_value: -ok
+                  header: X-Gateway-Provider
+                  match_type: exists
+                  prepend_value: gw-
+                  target_header: X-Gateway-Provider-Decorated
+                - header: X-Gateway-Provider
+                  match_type: exists
+                  set_if_missing: true
+                  target_header: X-Gateway-Provider-NewOnly
+                  value: created
+            header_mappings:
+                X-Gateway-Provider: openai_codex
+            max_tokens_limit: 10000
+            model_mappings:
+                '*': gpt-5.4
+                gpt-5.2-codex: gpt-5.2-codex
+                gpt-5.4-mini: gpt-5.4-mini
+                gpt-5.4-nano: gpt-5.4-nano
+            protocol: codex
+            support_types:
+                - gemini
+                - openai
+                - anthropic
+                - codex
+            supported_models:
+                - gpt-5.4-mini
+                - gpt-5.4-nano
+                - gpt-5.4
+                - gpt-5.2-codex
+                - '*'
+            timeout: 300s
         codex_fox:
             api_key: ${CODEX2_API_KEYS:-}
             api_path: /v1/responses
@@ -494,15 +614,16 @@ providers:
             timeout: 300s
             truncation_adapter: gemini_local
         nvidia:
-            api_key: ${NVIDIA_API_KEYS:-}
+            api_key: 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
             api_path: ""
-            base_url: ${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com}
-            default_model: z-ai/glm-5.1
+            base_url: https://integrate.api.nvidia.com
+            default_model: z-ai/glm4.7
             enabled: true
             forward_url: /v1/chat/completions
+            headers: {}
             max_tokens_limit: 10000
-            # model_mappings:
-            #     '*': z-ai/glm-5.1
+            model_mappings:
+                '*': z-ai/glm-5.1
             protocol: openai
             support_types:
                 - openai
@@ -515,10 +636,10 @@ providers:
             timeout: 300s
             truncation_adapter: openai_local
     proxy:
-        enabled: ${PROXY_ENABLED:-true}
-        http: ${HTTP_PROXY:-http://127.0.0.1:10810}
-        https: ${HTTPS_PROXY:-http://127.0.0.1:10810}
-        no_proxy: ${NO_PROXY:-localhost,127.0.0.1}
+        enabled: true
+        http: http://127.0.0.1:10810
+        https: http://127.0.0.1:10810
+        no_proxy: localhost,127.0.0.1
     sse_heartbeat:
         check_interval: ${SSE_HEARTBEAT_CHECK_INTERVAL:-10s}
         enabled: ${SSE_HEARTBEAT_ENABLED:-true}
