@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+    <meta charset="UTF-8">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent Runtime Console</title>
+    <script>
+      window.addEventListener("error", function (event) {
+        const pre = document.createElement("pre");
+        pre.style.cssText =
+          "position:fixed;left:8px;right:8px;bottom:8px;z-index:99999;max-height:45vh;overflow:auto;background:#200;color:#fff;padding:12px;font:12px/1.5 monospace;white-space:pre-wrap";
+        pre.textContent = "window.error\n" + (event.error?.stack || event.message || "unknown");
+        document.body.appendChild(pre);
+      });
+      window.addEventListener("unhandledrejection", function (event) {
+        const pre = document.createElement("pre");
+        pre.style.cssText =
+          "position:fixed;left:8px;right:8px;bottom:8px;z-index:99999;max-height:45vh;overflow:auto;background:#200;color:#fff;padding:12px;font:12px/1.5 monospace;white-space:pre-wrap";
+        const reason = event.reason;
+        pre.textContent =
+          "unhandledrejection\n" + (reason?.stack || reason?.message || String(reason));
+        document.body.appendChild(pre);
+      });
+      window.setTimeout(function () {
+        const pre = document.createElement("pre");
+        pre.style.cssText =
+          "position:fixed;left:8px;right:8px;top:8px;z-index:99999;max-height:30vh;overflow:auto;background:#002;color:#fff;padding:12px;font:12px/1.5 monospace;white-space:pre-wrap";
+        pre.textContent = "root html length: " + (document.getElementById("root")?.innerHTML?.length || 0);
+        document.body.appendChild(pre);
+      }, 3000);
+    </script>
+    <script type="module" crossorigin="" src="/assets/index-9sgU-OJC.js"></script>
+    <link rel="stylesheet" crossorigin="" href="/assets/index-Da7Oh0m9.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  
+
+<pre style="position: fixed; left: 8px; right: 8px; top: 8px; z-index: 99999; max-height: 30vh; overflow: auto; background: rgb(0, 0, 34); color: rgb(255, 255, 255); padding: 12px; font: 12px / 1.5 monospace; white-space: pre-wrap;">root html length: 0</pre></body></html>
