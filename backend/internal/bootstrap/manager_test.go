@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 type bootstrapResourceManager struct{}
@@ -182,6 +182,62 @@ func TestManager_NewManager_WiresDefaultProvider(t *testing.T) {
 	assert.Equal(t, "real-model", manager.LLMRuntime().DefaultModel())
 }
 
+func TestManager_ReloadProviderConfigsReplacesRuntimeProviders(t *testing.T) {
+	firstUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"model-v1","choices":[{"index":0,"message":{"role":"assistant","content":"hello from v1"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+	}))
+	defer firstUpstream.Close()
+
+	secondUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"model-v2","choices":[{"index":0,"message":{"role":"assistant","content":"hello from v2"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+	}))
+	defer secondUpstream.Close()
+
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Agent.DefaultModel = "model-v1"
+	cfg.HotReload.Enabled = false
+
+	manager, err := NewManager(&Options{
+		Config: cfg,
+		ProviderConfigs: map[string]*llm.ProviderConfig{
+			"openai-test": {
+				Type:            "openai",
+				BaseURL:         firstUpstream.URL,
+				DefaultModel:    "model-v1",
+				SupportedModels: []string{"model-v1"},
+				Timeout:         2 * time.Second,
+			},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	require.NoError(t, manager.ReloadProviderConfigs(map[string]*llm.ProviderConfig{
+		"openai-test": {
+			Type:            "openai",
+			BaseURL:         secondUpstream.URL,
+			DefaultModel:    "model-v2",
+			SupportedModels: []string{"model-v2"},
+			Timeout:         2 * time.Second,
+		},
+	}))
+
+	resp, err := manager.LLMRuntime().Call(context.Background(), &llm.LLMRequest{
+		Model: "model-v2",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "hello from v2", resp.Content)
+
+	_, err = manager.LLMRuntime().GetProvider("model-v1")
+	require.Error(t, err)
+}
+
 func TestManager_NewManager_BuildsLocalEmbeddingRouter(t *testing.T) {
 	mcpManager := &bootstrapMCPManager{}
 	skillDir := t.TempDir()
@@ -266,6 +322,35 @@ tools: ["echo_tool"]
 	require.NotNil(t, extraSkill.Source)
 	assert.Equal(t, skill.SkillSourceLayerExternal, extraSkill.Source.Layer)
 	assert.Equal(t, extraDir, extraSkill.Source.Dir)
+}
+
+func TestManager_NewManager_PersistsSessionsWhenSessionsDirConfigured(t *testing.T) {
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = false
+	cfg.Sessions.Dir = t.TempDir()
+
+	firstManager, err := NewManager(&Options{
+		Config: cfg,
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	session, err := firstManager.SessionManager().CreateSession(ctx, "persist-user")
+	require.NoError(t, err)
+	require.NoError(t, firstManager.SessionManager().AddMessage(ctx, session.ID, *types.NewUserMessage("persist me")))
+	require.NoError(t, firstManager.Stop())
+
+	secondManager, err := NewManager(&Options{
+		Config: cfg,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = secondManager.Stop() })
+
+	restored, err := secondManager.SessionManager().GetSession(ctx, session.ID)
+	require.NoError(t, err)
+	require.Equal(t, session.ID, restored.ID)
+	require.Len(t, restored.History, 1)
+	require.Equal(t, "persist me", restored.History[0].Content)
 }
 
 func TestManager_NewManager_PrefersFirstSkillDirOnDuplicateNames(t *testing.T) {

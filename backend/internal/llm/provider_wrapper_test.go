@@ -4,14 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestNewProvider_WorksWithUnifiedRuntimeInterface(t *testing.T) {
@@ -153,6 +155,70 @@ func TestProviderWrapper_OpenAICall_ParsesToolCalls(t *testing.T) {
 	assert.Equal(t, "spawn_team", resp.ToolCalls[0].Name)
 	assert.Equal(t, "call_1", resp.ToolCalls[0].ID)
 	assert.Empty(t, resp.Content)
+}
+
+func TestProviderWrapper_CallUsesConfiguredHTTPProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Proxy-Seen") != "true" {
+			http.Error(w, "direct request not expected", http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-proxy-test","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello via proxy"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer upstream.Close()
+
+	directTransport := http.DefaultTransport.(*http.Transport).Clone()
+	directTransport.Proxy = nil
+
+	var proxyHits int
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits++
+
+		targetURL := r.URL.String()
+		require.NotEmpty(t, targetURL)
+
+		proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+		require.NoError(t, err)
+		proxyReq.Header = r.Header.Clone()
+		proxyReq.Header.Set("X-Proxy-Seen", "true")
+
+		proxyResp, err := directTransport.RoundTrip(proxyReq)
+		require.NoError(t, err)
+		defer proxyResp.Body.Close()
+
+		for key, values := range proxyResp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(proxyResp.StatusCode)
+		_, copyErr := io.Copy(w, proxyResp.Body)
+		require.NoError(t, copyErr)
+	}))
+	defer proxyServer.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: upstream.URL,
+		Proxy: &agentconfig.ProxyConfig{
+			Enabled: true,
+			HTTP:    proxyServer.URL,
+		},
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello through proxy",
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "hello via proxy", resp.Content)
+	assert.Greater(t, proxyHits, 0)
 }
 
 func TestProviderWrapper_CodexCall_SendsAndParsesToolCalls(t *testing.T) {

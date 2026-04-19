@@ -29,6 +29,7 @@ type RuntimeConfig struct {
 	Workspace      WorkspaceConfig           `yaml:"workspace" json:"workspace"`
 	Context        ContextConfig             `yaml:"context" json:"context"`
 	Catalog        CatalogConfig             `yaml:"catalog" json:"catalog"`
+	Sessions       SessionsConfig            `yaml:"sessions" json:"sessions"`
 	Team           TeamConfig                `yaml:"team" json:"team"`
 	Trace          TraceConfig               `yaml:"trace" json:"trace"`
 	Hooks          []runtimehooks.HookConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
@@ -112,6 +113,11 @@ type ContextConfig struct {
 type CatalogConfig struct {
 	Backend      string `yaml:"backend" json:"backend"`
 	SnapshotPath string `yaml:"snapshotPath" json:"snapshotPath"`
+}
+
+// SessionsConfig configures session history persistence.
+type SessionsConfig struct {
+	Dir string `yaml:"dir" json:"dir"`
 }
 
 // TraceConfig configures runtime trace exports.
@@ -246,6 +252,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		Catalog: CatalogConfig{
 			Backend: "memory",
 		},
+		Sessions: SessionsConfig{},
 		Trace: TraceConfig{
 			TeamIDLimit: 0,
 		},
@@ -534,6 +541,9 @@ func ValidateRuntimeConfig(config *RuntimeConfig) error {
 	if err := ValidateCatalogConfig(&config.Catalog); err != nil {
 		return err
 	}
+	if err := ValidateSessionsConfig(&config.Sessions); err != nil {
+		return err
+	}
 	if err := ValidateTeamConfig(&config.Team); err != nil {
 		return err
 	}
@@ -573,6 +583,14 @@ func ValidateCatalogConfig(config *CatalogConfig) error {
 	backend := strings.ToLower(strings.TrimSpace(config.Backend))
 	if (backend == "file" || backend == "sqlite") && strings.TrimSpace(config.SnapshotPath) == "" {
 		return errors.New(errors.ErrValidationFailed, "catalog snapshotPath is required for file/sqlite backend")
+	}
+	return nil
+}
+
+// ValidateSessionsConfig validates session storage configuration.
+func ValidateSessionsConfig(config *SessionsConfig) error {
+	if config == nil {
+		return nil
 	}
 	return nil
 }

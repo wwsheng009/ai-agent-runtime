@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -24,44 +25,251 @@ import (
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"go.uber.org/zap/zapcore"
 )
 
+const defaultRuntimeServerConfigPath = "./configs/config.yaml"
+
+type runtimeServerCommandOptions struct {
+	ConfigPath string
+	ListenAddr string
+	PIDFile    string
+	PID        int
+	Wait       time.Duration
+}
+
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	loadEnv()
 
-	var configPath string
-	var listenAddr string
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch strings.ToLower(strings.TrimSpace(args[0])) {
+		case "help", "-h", "--help":
+			printRuntimeServerRootUsage()
+			return 0
+		case "serve":
+			return runServe(args[1:])
+		case "start":
+			return runStart(args[1:])
+		case "stop":
+			return runStop(args[1:])
+		case "status":
+			return runStatus(args[1:])
+		default:
+			if !strings.HasPrefix(strings.TrimSpace(args[0]), "-") {
+				fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", args[0])
+				printRuntimeServerRootUsage()
+				return 1
+			}
+		}
+	}
 
-	flags := pflag.NewFlagSet("runtime-server", pflag.ExitOnError)
-	flags.StringVarP(&configPath, "config", "c", "./configs/config.yaml", "配置文件路径")
-	flags.StringVar(&listenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8081")
-	_ = flags.Parse(os.Args[1:])
+	return runServe(args)
+}
 
-	cfg, err := config.InitGlobalConfig(configPath)
+func printRuntimeServerRootUsage() {
+	fmt.Fprintln(os.Stdout, "Usage:")
+	fmt.Fprintln(os.Stdout, "  runtime-server serve  [--config PATH] [--listen HOST:PORT] [--pid-file PATH]")
+	fmt.Fprintln(os.Stdout, "  runtime-server start  [--config PATH] [--listen HOST:PORT] [--pid-file PATH] [--wait 30s]")
+	fmt.Fprintln(os.Stdout, "  runtime-server stop   [--pid-file PATH] [--pid PID] [--wait 10s]")
+	fmt.Fprintln(os.Stdout, "  runtime-server status [--config PATH] [--listen HOST:PORT] [--pid-file PATH]")
+	fmt.Fprintln(os.Stdout, "")
+	fmt.Fprintln(os.Stdout, "Notes:")
+	fmt.Fprintln(os.Stdout, "  - 不带子命令时，等价于 `serve`，以前的启动方式保持兼容。")
+	fmt.Fprintln(os.Stdout, "  - `start` 会在后台启动服务并写入 PID 文件。")
+	fmt.Fprintln(os.Stdout, "  - `stop` 优先使用 PID 文件停止受管实例，也支持 `--pid` 直接停止指定进程。")
+	fmt.Fprintln(os.Stdout, "  - 默认 PID 文件为 ./logs/runtime-server.pid。")
+}
+
+func newRuntimeServerFlagSet(name string) *pflag.FlagSet {
+	flags := pflag.NewFlagSet(name, pflag.ContinueOnError)
+	flags.SetOutput(os.Stdout)
+	return flags
+}
+
+func parseServeOptions(args []string) (runtimeServerCommandOptions, error) {
+	opts := runtimeServerCommandOptions{
+		ConfigPath: defaultRuntimeServerConfigPath,
+		PIDFile:    runtimeserver.DefaultPIDFile,
+	}
+	flags := newRuntimeServerFlagSet("runtime-server serve")
+	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径")
+	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
+	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
+	return opts, flags.Parse(args)
+}
+
+func parseStartOptions(args []string) (runtimeServerCommandOptions, error) {
+	opts := runtimeServerCommandOptions{
+		ConfigPath: defaultRuntimeServerConfigPath,
+		PIDFile:    runtimeserver.DefaultPIDFile,
+		Wait:       30 * time.Second,
+	}
+	flags := newRuntimeServerFlagSet("runtime-server start")
+	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径")
+	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
+	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
+	flags.DurationVar(&opts.Wait, "wait", opts.Wait, "等待后台进程完成启动的超时时间")
+	return opts, flags.Parse(args)
+}
+
+func parseStopOptions(args []string) (runtimeServerCommandOptions, error) {
+	opts := runtimeServerCommandOptions{
+		PIDFile: runtimeserver.DefaultPIDFile,
+		Wait:    10 * time.Second,
+	}
+	flags := newRuntimeServerFlagSet("runtime-server stop")
+	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
+	flags.IntVar(&opts.PID, "pid", 0, "直接停止指定 PID，跳过 PID 文件")
+	flags.DurationVar(&opts.Wait, "wait", opts.Wait, "等待进程退出的超时时间")
+	return opts, flags.Parse(args)
+}
+
+func parseStatusOptions(args []string) (runtimeServerCommandOptions, error) {
+	opts := runtimeServerCommandOptions{
+		ConfigPath: defaultRuntimeServerConfigPath,
+		PIDFile:    runtimeserver.DefaultPIDFile,
+	}
+	flags := newRuntimeServerFlagSet("runtime-server status")
+	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径")
+	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
+	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
+	return opts, flags.Parse(args)
+}
+
+func resolveRuntimeServerConfigPath(configPath string) string {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		configPath = defaultRuntimeServerConfigPath
+	}
+
+	cleaned := filepath.Clean(configPath)
+	candidates := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	appendCandidate := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		path = filepath.Clean(path)
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		candidates = append(candidates, path)
+	}
+
+	appendCandidate(cleaned)
+	if !filepath.IsAbs(cleaned) {
+		relative := strings.TrimPrefix(cleaned, "."+string(filepath.Separator))
+		normalizedRelative := filepath.ToSlash(relative)
+		switch {
+		case normalizedRelative == "" || normalizedRelative == ".":
+		case strings.HasPrefix(normalizedRelative, "backend/"):
+			appendCandidate(filepath.FromSlash(strings.TrimPrefix(normalizedRelative, "backend/")))
+		default:
+			appendCandidate(filepath.Join("backend", relative))
+		}
+	}
+
+	for _, candidate := range candidates {
+		resolved := runtimeserver.ResolveUpwardPath(candidate)
+		if info, err := os.Stat(resolved); err == nil && !info.IsDir() {
+			if absolutePath, absErr := filepath.Abs(resolved); absErr == nil {
+				return absolutePath
+			}
+			return resolved
+		}
+	}
+
+	return cleaned
+}
+
+func runServe(args []string) int {
+	opts, err := parseServeOptions(args)
+	if err != nil {
+		if err == pflag.ErrHelp {
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "failed to parse serve flags: %v\n", err)
+		return 1
+	}
+	opts.ConfigPath = resolveRuntimeServerConfigPath(opts.ConfigPath)
+
+	cfg, configSnapshotInfo, err := runtimeserver.LoadRuntimeAgentConfig(opts.ConfigPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if err := logger.InitLogger(&cfg.Log); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
-		os.Exit(1)
+		return 1
+	}
+	defer func() {
+		_ = logger.Sync()
+	}()
+
+	pidFile := runtimeserver.ResolvePIDFilePath(opts.PIDFile)
+	if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil {
+		if runtimeserver.ProcessRunning(info.PID) {
+			logger.Error("Runtime server already running",
+				logger.Int("pid", info.PID),
+				logger.String("pid_file", pidFile),
+				logger.String("listen", info.ListenAddr),
+			)
+			return 1
+		}
+		_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, info.PID)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	app, err := newRuntimeServerApp(ctx, cfg, configPath)
+	app, err := newRuntimeServerApp(ctx, cfg, opts.ConfigPath)
 	if err != nil {
 		logger.Error("Failed to initialize runtime server", logger.Err(err))
-		os.Exit(1)
+		return 1
 	}
 	defer app.close()
 
-	addr := resolveListenAddr(cfg, listenAddr)
+	addr := resolveListenAddr(cfg, opts.ListenAddr)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		fields := []zapcore.Field{logger.Err(err), logger.String("listen", addr)}
+		if ownerPID, lookupErr := runtimeserver.FindListeningPID(addr); lookupErr == nil && ownerPID > 0 {
+			fields = append(fields, logger.Int("port_owner_pid", ownerPID))
+		}
+		logger.Error("Runtime server exited with error", fields...)
+		return 1
+	}
+	defer listener.Close()
+
+	cwd, _ := os.Getwd()
+	if err := runtimeserver.WriteInstanceInfo(pidFile, runtimeserver.InstanceInfo{
+		PID:        os.Getpid(),
+		ListenAddr: addr,
+		ConfigPath: strings.TrimSpace(opts.ConfigPath),
+		Cwd:        cwd,
+		StartedAt:  time.Now().UTC(),
+	}); err != nil {
+		logger.Error("Failed to write runtime server pid file", logger.Err(err), logger.String("pid_file", pidFile))
+		return 1
+	}
+	defer func() {
+		if err := runtimeserver.RemoveInstanceInfoIfPID(pidFile, os.Getpid()); err != nil {
+			logger.Warn("Failed to remove runtime server pid file", logger.Err(err), logger.String("pid_file", pidFile))
+		}
+	}()
+	app.configureServiceControl(pidFile, addr, opts.ConfigPath, cwd)
+
 	server := &http.Server{
-		Addr:              addr,
 		Handler:           app.router,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -77,20 +285,237 @@ func main() {
 
 	logger.Info("AI agent runtime HTTP server started",
 		logger.String("listen", addr),
-		logger.String("config_file", strings.TrimSpace(configPath)),
+		logger.String("config_file", strings.TrimSpace(opts.ConfigPath)),
+		logger.String("active_config_file", strings.TrimSpace(configSnapshotInfo.ActivePath)),
+		logger.String("config_snapshot_file", strings.TrimSpace(configSnapshotInfo.SnapshotPath)),
 		logger.String("runtime_config_file", strings.TrimSpace(app.runtimeManager.GetFilePath())),
 		logger.String("skill_dir", strings.TrimSpace(app.skillsCfg.SkillDir)),
 		logger.Int("extra_skill_dir_count", len(app.skillsCfg.ExtraSkillDirs)),
+		logger.Int("pid", os.Getpid()),
+		logger.String("pid_file", pidFile),
 	)
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		logger.Error("Runtime server exited with error", logger.Err(err))
-		os.Exit(1)
+		return 1
 	}
+	return 0
+}
+
+func runStart(args []string) int {
+	opts, err := parseStartOptions(args)
+	if err != nil {
+		if err == pflag.ErrHelp {
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "failed to parse start flags: %v\n", err)
+		return 1
+	}
+	opts.ConfigPath = resolveRuntimeServerConfigPath(opts.ConfigPath)
+
+	pidFile := runtimeserver.ResolvePIDFilePath(opts.PIDFile)
+	if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil {
+		if runtimeserver.ProcessRunning(info.PID) {
+			fmt.Fprintf(os.Stdout, "runtime-server 已在运行: pid=%d listen=%s pid_file=%s\n", info.PID, strings.TrimSpace(info.ListenAddr), pidFile)
+			return 1
+		}
+		_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, info.PID)
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to resolve executable path: %v\n", err)
+		return 1
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to resolve working directory: %v\n", err)
+		return 1
+	}
+
+	commandArgs := []string{"serve", "--config", opts.ConfigPath, "--pid-file", pidFile}
+	if strings.TrimSpace(opts.ListenAddr) != "" {
+		commandArgs = append(commandArgs, "--listen", strings.TrimSpace(opts.ListenAddr))
+	}
+	launchCommand, launchArgs, err := runtimeserver.PrepareStartCommand(executable, cwd, commandArgs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to prepare runtime-server start command: %v\n", err)
+		return 1
+	}
+
+	env := ensureEnvDefault(os.Environ(), "LOG_OUTPUT", "file")
+	env = ensureEnvDefault(env, "LOG_ENABLE_CONSOLE", "false")
+
+	cmd, err := runtimeserver.StartDetachedProcess(launchCommand, launchArgs, env)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to start runtime-server in background: %v\n", err)
+		return 1
+	}
+
+	exitCh := make(chan error, 1)
+	go func() {
+		exitCh <- cmd.Wait()
+	}()
+
+	deadline := time.NewTimer(opts.Wait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil && info.PID > 0 && runtimeserver.ProcessRunning(info.PID) {
+			if runtimeServerReady(info.ListenAddr, 500*time.Millisecond) {
+				fmt.Fprintf(os.Stdout, "runtime-server 已启动: pid=%d listen=%s pid_file=%s\n", info.PID, strings.TrimSpace(info.ListenAddr), pidFile)
+				return 0
+			}
+		}
+
+		select {
+		case err := <-exitCh:
+			if err == nil {
+				fmt.Fprintf(os.Stderr, "runtime-server 进程在写入 PID 文件前已退出，请检查日志文件。\n")
+			} else {
+				fmt.Fprintf(os.Stderr, "runtime-server 启动失败，请检查日志文件: %v\n", err)
+			}
+			return 1
+		case <-deadline.C:
+			fmt.Fprintf(os.Stderr, "runtime-server 启动超时，未在 %s 内写入 PID 文件: %s\n", opts.Wait, pidFile)
+			return 1
+		case <-ticker.C:
+		}
+	}
+}
+
+func runStop(args []string) int {
+	opts, err := parseStopOptions(args)
+	if err != nil {
+		if err == pflag.ErrHelp {
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "failed to parse stop flags: %v\n", err)
+		return 1
+	}
+
+	pidFile := runtimeserver.ResolvePIDFilePath(opts.PIDFile)
+	targetPID := opts.PID
+	if targetPID <= 0 {
+		info, err := runtimeserver.ReadInstanceInfo(pidFile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "未找到 PID 文件: %s\n", pidFile)
+			} else {
+				fmt.Fprintf(os.Stderr, "读取 PID 文件失败: %v\n", err)
+			}
+			return 1
+		}
+		targetPID = info.PID
+	}
+
+	if !runtimeserver.ProcessRunning(targetPID) {
+		_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, targetPID)
+		fmt.Fprintf(os.Stdout, "runtime-server 已停止: pid=%d\n", targetPID)
+		return 0
+	}
+
+	if err := runtimeserver.TerminateProcess(targetPID, opts.Wait); err != nil {
+		fmt.Fprintf(os.Stderr, "停止 runtime-server 失败: %v\n", err)
+		return 1
+	}
+	_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, targetPID)
+	fmt.Fprintf(os.Stdout, "runtime-server 已停止: pid=%d\n", targetPID)
+	return 0
+}
+
+func runStatus(args []string) int {
+	opts, err := parseStatusOptions(args)
+	if err != nil {
+		if err == pflag.ErrHelp {
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "failed to parse status flags: %v\n", err)
+		return 1
+	}
+	opts.ConfigPath = resolveRuntimeServerConfigPath(opts.ConfigPath)
+
+	pidFile := runtimeserver.ResolvePIDFilePath(opts.PIDFile)
+	if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil {
+		if runtimeserver.ProcessRunning(info.PID) {
+			fmt.Fprintf(os.Stdout, "runtime-server 运行中: pid=%d listen=%s pid_file=%s\n", info.PID, strings.TrimSpace(info.ListenAddr), pidFile)
+			return 0
+		}
+		fmt.Fprintf(os.Stdout, "runtime-server 未运行，发现陈旧 PID 文件: pid=%d pid_file=%s\n", info.PID, pidFile)
+		return 1
+	} else if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "读取 PID 文件失败: %v\n", err)
+		return 1
+	}
+
+	addr, err := resolveListenAddrForCommand(opts.ConfigPath, opts.ListenAddr)
+	if err == nil && strings.TrimSpace(addr) != "" {
+		if pid, lookupErr := runtimeserver.FindListeningPID(addr); lookupErr == nil && pid > 0 {
+			fmt.Fprintf(os.Stdout, "runtime-server 端口已被占用，但没有受管 PID 文件: listen=%s pid=%d pid_file=%s\n", addr, pid, pidFile)
+			return 1
+		}
+	}
+
+	fmt.Fprintf(os.Stdout, "runtime-server 未运行: pid_file=%s\n", pidFile)
+	return 1
+}
+
+func resolveListenAddrForCommand(configPath, override string) (string, error) {
+	cfg, _, err := runtimeserver.LoadRuntimeAgentConfig(configPath)
+	if err != nil {
+		return "", err
+	}
+	return resolveListenAddr(cfg, override), nil
+}
+
+func ensureEnvDefault(env []string, key, value string) []string {
+	prefix := key + "="
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+func runtimeServerReady(listenAddr string, timeout time.Duration) bool {
+	healthURL, ok := runtimeServerHealthURL(listenAddr)
+	if !ok {
+		return false
+	}
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(healthURL)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+func runtimeServerHealthURL(listenAddr string) (string, bool) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
+	if err != nil || strings.TrimSpace(port) == "" {
+		return "", false
+	}
+
+	host = strings.TrimSpace(host)
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		host = "127.0.0.1"
+	}
+
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + strings.Trim(host, "[]") + "]"
+	}
+
+	return fmt.Sprintf("http://%s/healthz", net.JoinHostPort(host, port)), true
 }
 
 type runtimeServerApp struct {
 	router         *mux.Router
+	handler        *skillsapi.Handler
 	cfg            *config.Config
 	skillsCfg      *config.SkillsRuntimeConfig
 	runtimeManager *runtimecfg.RuntimeManager
@@ -105,6 +530,11 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	if err := runtimeManager.Load(); err != nil {
 		return nil, fmt.Errorf("failed to load runtime config: %w", err)
 	}
+	runtimeConfig := runtimeManager.Get()
+	runtimeConfig.Sessions.Dir = resolvePathFromConfigFile(
+		runtimeManager.GetFilePath(),
+		runtimeConfig.Sessions.Dir,
+	)
 
 	mcpAdapter, manager, err := buildSkillsMCPManager(ctx, cfg)
 	if err != nil {
@@ -112,7 +542,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	}
 
 	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
-		Config:              runtimeManager.Get(),
+		Config:              runtimeConfig,
 		SkillDir:            skillsCfg.SkillDir,
 		SkillDirs:           resolvedExtraSkillDirs(skillsCfg),
 		DiscoverOnly:        true,
@@ -137,6 +567,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	handler := skillsapi.NewHandler(bootstrapManager.Registry(), bootstrapManager.Loader(), mcpAdapter)
 	bootstrapManager.ApplyToSkillsHandler(handler)
 	handler.SetRuntimeConfig(runtimeManager.Get(), runtimeManager.GetFilePath())
+	handler.SetRuntimeLogFilePath(strings.TrimSpace(cfg.Log.FilePath))
 	handler.SetRuntimeConfigResolver(func(scope skillsapi.UsageScope) *runtimecfg.RuntimeConfig {
 		return runtimeManager.SelectConfigForScope(scope.ScopeKey)
 	})
@@ -148,13 +579,20 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		GlobalSkillDirs:   allConfiguredSkillDirs(skillsCfg),
 		MCPAutoConnect:    configuredMCPAutoConnect(cfg),
 	})
-	if persister := newSkillsRuntimePolicyPersister(configPath, cfg); persister != nil {
-		handler.SetAuthPolicyPersister(persister.persistAuthPolicy)
-		handler.SetUsagePolicyPersister(persister.persistUsagePolicy)
-		handler.SetMutationPolicyPersister(persister.persistMutationPolicy)
+	configDocumentService := runtimeserver.NewLocalConfigDocumentService(configPath)
+	if configDocumentService != nil {
+		configDocumentService.SetHotReloader(
+			runtimeserver.NewRuntimeConfigHotReloader(handler, cfg, bootstrapManager),
+		)
+	}
+	handler.SetConfigDocumentService(configDocumentService)
+	if persister := runtimeserver.NewSkillsRuntimePolicyPersister(configPath, cfg); persister != nil {
+		handler.SetAuthPolicyPersister(persister.PersistAuthPolicy)
+		handler.SetUsagePolicyPersister(persister.PersistUsagePolicy)
+		handler.SetMutationPolicyPersister(persister.PersistMutationPolicy)
 	}
 	applySkillsRuntimePolicies(handler, skillsCfg)
-	ledgerStore, err := buildUsageLedgerStore(cfg)
+	ledgerStore, err := runtimeserver.BuildUsageLedgerStore(cfg)
 	if err != nil {
 		if manager != nil {
 			_ = manager.Stop()
@@ -173,6 +611,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 
 	return &runtimeServerApp{
 		router:         router,
+		handler:        handler,
 		cfg:            cfg,
 		skillsCfg:      skillsCfg,
 		runtimeManager: runtimeManager,
@@ -180,6 +619,37 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		mcpManager:     manager,
 		ledgerStore:    ledgerStore,
 	}, nil
+}
+
+func resolvePathFromConfigFile(configFile, target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return ""
+	}
+	if filepath.IsAbs(target) {
+		return filepath.Clean(target)
+	}
+	configFile = strings.TrimSpace(configFile)
+	if configFile == "" {
+		return filepath.Clean(target)
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(configFile), target))
+}
+
+func (a *runtimeServerApp) configureServiceControl(pidFile, listenAddr, configPath, cwd string) {
+	if a == nil || a.handler == nil {
+		return
+	}
+	executable, _ := os.Executable()
+	a.handler.SetServiceControlService(
+		runtimeserver.NewLocalRuntimeServiceControl(
+			executable,
+			cwd,
+			pidFile,
+			configPath,
+			listenAddr,
+		),
+	)
 }
 
 func (a *runtimeServerApp) close() {
@@ -219,7 +689,7 @@ func normalizeSkillsRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfi
 		cfg.SkillsRuntime = &config.SkillsRuntimeConfig{}
 	}
 	if strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) == "" {
-		cfg.SkillsRuntime.ConfigFile = "configs/runtime.yaml"
+		cfg.SkillsRuntime.ConfigFile = "backend/configs/runtime.yaml"
 	}
 	if strings.TrimSpace(cfg.SkillsRuntime.SkillDir) == "" {
 		cfg.SkillsRuntime.SkillDir = "./docs/skill_runtime/skills"
@@ -254,6 +724,10 @@ func normalizeSkillsRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfi
 	if len(cfg.SkillsRuntime.RoleClaims) == 0 {
 		cfg.SkillsRuntime.RoleClaims = []string{"role", "roles"}
 	}
+	cfg.SkillsRuntime.ConfigFile = runtimeserver.ResolveUpwardPath(cfg.SkillsRuntime.ConfigFile)
+	cfg.SkillsRuntime.SkillDir = runtimeserver.ResolveUpwardPath(cfg.SkillsRuntime.SkillDir)
+	cfg.SkillsRuntime.SkillDirs = runtimeserver.ResolveUpwardPaths(cfg.SkillsRuntime.SkillDirs)
+	cfg.SkillsRuntime.ExtraSkillDirs = runtimeserver.ResolveUpwardPaths(cfg.SkillsRuntime.ExtraSkillDirs)
 	return cfg.SkillsRuntime
 }
 
@@ -263,7 +737,7 @@ func resolveListenAddr(cfg *config.Config, override string) string {
 	}
 
 	host := "127.0.0.1"
-	port := 8081
+	port := 8101
 	if cfg != nil {
 		if trimmed := strings.TrimSpace(cfg.Server.Host); trimmed != "" {
 			host = trimmed
@@ -282,6 +756,7 @@ func buildSkillsMCPManager(ctx context.Context, cfg *config.Config) (runtimeskil
 	if !cfg.AICLI.MCP.AutoConnect {
 		return nil, nil, nil
 	}
+	cfg.AICLI.MCP.ConfigFile = runtimeserver.ResolveUpwardPath(cfg.AICLI.MCP.ConfigFile)
 
 	manager := mcpmanager.NewManager()
 	if err := manager.LoadConfig(cfg.AICLI.MCP.ConfigFile); err != nil {
@@ -330,6 +805,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			Headers:            cloneStringMap(provider.Headers),
 			HeaderMappings:     cloneStringMap(provider.HeaderMappings),
 			HeaderMappingRules: cloneHeaderMappingRules(provider.HeaderMappingRules),
+			Proxy:              config.EffectiveProxyConfig(&cfg.Providers.Proxy, provider.Proxy),
 		}
 	}
 
@@ -443,7 +919,7 @@ func runtimeInfoHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"ok":      true,
 		"service": "ai-agent-runtime",
-		"routes":  []string{"/api/agent/chat", "/api/skills"},
+		"routes":  []string{"/api/agent/chat", "/api/runtime"},
 	})
 }
 

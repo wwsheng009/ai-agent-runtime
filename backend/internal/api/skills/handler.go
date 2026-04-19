@@ -17,12 +17,9 @@ import (
 	"sync"
 	"time"
 
-	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
-	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
-	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
-	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
-	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
-	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
@@ -36,16 +33,19 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
+	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
-	"github.com/gorilla/mux"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -57,14 +57,8 @@ const (
 	searchModeSemantic searchMode = "semantic"
 	searchModeHybrid   searchMode = "hybrid"
 
+	canonicalRuntimeEntrypoint   = "/api/runtime"
 	canonicalAgentChatEntrypoint = "/api/agent/chat"
-	legacyAgentChatEntrypoint    = "/api/skills/agent/chat"
-
-	legacyAgentChatWarning    = `299 ai-gateway "/api/skills/agent/chat is a compatibility alias; prefer /api/agent/chat"`
-	executeSkillWarning       = `299 ai-gateway "/api/skills/{name}/execute is an admin/debug endpoint; prefer /api/agent/chat for normal usage"`
-	legacyTaskCompleteWarning = `299 ai-gateway "/api/skills/teams/{id}/tasks/{task_id}/complete is a compatibility alias; prefer /api/skills/teams/{id}/tasks/{task_id}/outcome"`
-	legacyTaskFailWarning     = `299 ai-gateway "/api/skills/teams/{id}/tasks/{task_id}/fail is a compatibility alias; prefer /api/skills/teams/{id}/tasks/{task_id}/outcome"`
-	legacyTaskBlockWarning    = `299 ai-gateway "/api/skills/teams/{id}/tasks/{task_id}/block is a compatibility alias; prefer /api/skills/teams/{id}/tasks/{task_id}/outcome"`
 
 	skillMutationActionCreate         = "skill_create"
 	skillMutationActionUpdate         = "skill_update"
@@ -116,6 +110,9 @@ type Handler struct {
 	runtimeConfig                  *runtimecfg.RuntimeConfig
 	runtimeConfigFile              string
 	runtimeConfigResolver          func(UsageScope) *runtimecfg.RuntimeConfig
+	configDocumentService          ConfigDocumentService
+	serviceControlService          RuntimeServiceControlService
+	logFilePath                    string
 	profileRegistry                *profilesys.Registry
 	profileDefaultRef              string
 	profileGlobalRuntimePath       string
@@ -163,6 +160,7 @@ type routeHeaderOptions struct {
 	canonicalResolver   func(*http.Request) string
 	mode                string
 	warning             string
+	warningResolver     func(*http.Request) string
 }
 
 // MutationPolicy 控制 skills 变更接口的轻量治理策略。
@@ -393,6 +391,17 @@ func (h *Handler) SetRuntimeConfigResolver(resolver func(UsageScope) *runtimecfg
 	h.runtimeConfigResolver = resolver
 }
 
+// SetRuntimeLogFilePath 设置 runtime 服务日志文件路径。
+func (h *Handler) SetRuntimeLogFilePath(path string) {
+	path = strings.TrimSpace(path)
+	if path != "" {
+		if absolutePath, err := filepath.Abs(path); err == nil {
+			path = absolutePath
+		}
+	}
+	h.logFilePath = path
+}
+
 // SetSearchReindexCooldown 设置索引重建冷却时间
 func (h *Handler) SetSearchReindexCooldown(cooldown time.Duration) {
 	if cooldown < 0 {
@@ -410,198 +419,193 @@ func (h *Handler) withRouteHeaders(next http.HandlerFunc, options routeHeaderOpt
 		if options.canonicalResolver != nil {
 			canonicalEntrypoint = strings.TrimSpace(options.canonicalResolver(r))
 		}
+		warning := strings.TrimSpace(options.warning)
+		if options.warningResolver != nil {
+			warning = strings.TrimSpace(options.warningResolver(r))
+		}
 		if canonicalEntrypoint != "" {
 			w.Header().Set("X-AI-Gateway-Canonical-Entrypoint", canonicalEntrypoint)
-			if options.warning != "" || (r != nil && r.URL != nil && r.URL.Path != canonicalEntrypoint) {
+			if warning != "" || (r != nil && r.URL != nil && r.URL.Path != canonicalEntrypoint) {
 				w.Header().Set("Link", fmt.Sprintf("<%s>; rel=\"canonical\"", canonicalEntrypoint))
 			}
 		}
 		if options.mode != "" {
 			w.Header().Set("X-AI-Gateway-Entrypoint-Mode", options.mode)
 		}
-		if options.warning != "" {
-			w.Header().Set("Warning", options.warning)
+		if warning != "" {
+			w.Header().Set("Warning", warning)
 		}
 		next(w, r)
 	}
 }
 
-func canonicalTaskOutcomeEntrypoint(r *http.Request) string {
+func adminDebugRouteWarning(entrypoint, preferredPath string) string {
+	entrypoint = strings.TrimSpace(entrypoint)
+	preferredPath = strings.TrimSpace(preferredPath)
+	if entrypoint == "" || preferredPath == "" {
+		return ""
+	}
+	return fmt.Sprintf(`299 ai-agent-runtime "%s is an admin/debug endpoint; prefer %s for normal usage"`, entrypoint, preferredPath)
+}
+
+func requestPath(r *http.Request) string {
 	if r == nil || r.URL == nil {
 		return ""
 	}
-	path := strings.TrimSpace(r.URL.Path)
-	switch {
-	case strings.HasSuffix(path, "/complete"):
-		return strings.TrimSuffix(path, "/complete") + "/outcome"
-	case strings.HasSuffix(path, "/fail"):
-		return strings.TrimSuffix(path, "/fail") + "/outcome"
-	case strings.HasSuffix(path, "/block"):
-		return strings.TrimSuffix(path, "/block") + "/outcome"
-	default:
-		return path
-	}
+	return strings.TrimSpace(r.URL.Path)
 }
 
 // RegisterRoutes 注册路由
 func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
-	apiRouter := router.PathPrefix("/api/skills").Subrouter()
+	runtimeRouter := router.PathPrefix(canonicalRuntimeEntrypoint).Subrouter()
 	agentRouter := router.PathPrefix("/api/agent").Subrouter()
 
-	// 固定路径优先，避免被 /{name} 吞掉
-	apiRouter.HandleFunc("", h.ListSkills).Methods(http.MethodGet)
-	apiRouter.HandleFunc("", h.CreateSkill).Methods(http.MethodPost)
-
-	apiRouter.HandleFunc("/search", h.SearchSkills).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/search/stats", h.GetSearchStats).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/search/reindex", h.ReindexSearchIndex).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/capabilities", h.ListCapabilities).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/usage/stats", h.GetUsageStats).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/usage/ledger", h.GetUsageLedger).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/usage/reset", h.ResetUsageStats).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/usage/policy", h.GetUsagePolicy).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/usage/policy", h.UpdateUsagePolicy).Methods(http.MethodPut)
-	apiRouter.HandleFunc("/usage/policy", h.DeleteUsagePolicyEntry).Methods(http.MethodDelete)
-	apiRouter.HandleFunc("/mutation/policy", h.GetMutationPolicy).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/mutation/policy", h.UpdateMutationPolicy).Methods(http.MethodPut)
-	apiRouter.HandleFunc("/auth/policy", h.GetAuthPolicy).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/auth/policy", h.UpdateAuthPolicy).Methods(http.MethodPut)
-	apiRouter.HandleFunc("/auth/policy", h.DeleteAuthPolicyEntry).Methods(http.MethodDelete)
-	apiRouter.HandleFunc("/governance/policy", h.GetGovernancePolicy).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/runtime/status", h.GetRuntimeStatus).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/runtime/health", h.GetRuntimeHealth).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/runtime/events", h.ListRuntimeEvents).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/runtime/traces/stats", h.GetRuntimeTraceStats).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/runtime/traces/governance", h.GetRuntimeTraceGovernance).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/runtime/traces", h.GetRuntimeTraces).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/runtime/traces/{trace_id}", h.GetRuntimeTrace).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/background/jobs", h.ListBackgroundJobs).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/background/jobs/{id}", h.GetBackgroundJob).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/background/jobs/{id}/cancel", h.CancelBackgroundJob).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/background/jobs/{id}/events", h.ListBackgroundJobEvents).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/background/jobs/{id}/output", h.GetBackgroundJobOutput).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/runtime/mcps/reload", h.ReloadRuntimeMCPs).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/runtime/teams/reload", h.ReloadRuntimeTeams).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/runtime/validate", h.ValidateRuntimeConfig).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/batch", h.BatchCreateSkills).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/stats", h.GetStats).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/reload", h.ReloadSkills).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/validate", h.ValidateSkill).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/export", h.ExportSkills).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/import", h.ImportSkills).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/hot-reload/start", h.StartHotReload).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/hot-reload/stop", h.StopHotReload).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/hot-reload/reload", h.ReloadHotReload).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/hot-reload/stats", h.GetHotReloadStats).Methods(http.MethodGet)
-
-	apiRouter.HandleFunc("/agent/chat", h.withRouteHeaders(h.AgentChat, routeHeaderOptions{
-		canonicalEntrypoint: canonicalAgentChatEntrypoint,
-		mode:                "compatibility",
-		warning:             legacyAgentChatWarning,
-	})).Methods(http.MethodPost)
 	agentRouter.HandleFunc("/chat", h.withRouteHeaders(h.AgentChat, routeHeaderOptions{
 		canonicalEntrypoint: canonicalAgentChatEntrypoint,
 		mode:                "canonical",
 	})).Methods(http.MethodPost)
 
-	apiRouter.HandleFunc("/sessions", h.ListSessions).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions", h.CreateSession).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/search", h.SearchSessions).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/batch/delete", h.BatchDeleteSessions).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/batch/archive", h.BatchArchiveSessions).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/stats", h.GetSessionStats).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}", h.GetSession).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}", h.UpdateSession).Methods(http.MethodPatch)
-	apiRouter.HandleFunc("/sessions/{id}", h.DeleteSession).Methods(http.MethodDelete)
-	apiRouter.HandleFunc("/sessions/{id}/archive", h.ArchiveSession).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/activate", h.ActivateSession).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/close", h.CloseSession).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/history", h.GetSessionHistory).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}/runtime", h.GetSessionRuntimeState).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}/runtime/events", h.ListSessionRuntimeEvents).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}/runtime/tool-receipts", h.ListSessionToolReceipts).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}/runtime/stream", h.StreamSessionRuntimeEvents).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}/runtime/commands", h.SubmitSessionRuntimeCommand).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/agents", h.SpawnSessionAgent).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/agents/wait", h.WaitSessionAgents).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/agents/{agent_id}", h.GetSessionAgentStatus).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/input", h.SendSessionAgentInput).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/close", h.CloseSessionAgent).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/resume", h.ResumeSessionAgent).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/checkpoints", h.ListSessionCheckpoints).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/files", h.GetCheckpointFiles).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/preview", h.PreviewSessionCheckpoint).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/restore", h.RestoreSessionCheckpoint).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/sessions/{id}/history", h.ClearSessionHistory).Methods(http.MethodDelete)
+	// Skills 管理与执行
+	runtimeRouter.HandleFunc("/skills", h.ListSkills).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills", h.CreateSkill).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/search", h.SearchSkills).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/search/stats", h.GetSearchStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/search/reindex", h.ReindexSearchIndex).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/capabilities", h.ListCapabilities).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/models", h.GetRuntimeModels).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/batch", h.BatchCreateSkills).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/stats", h.GetStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/reload", h.ReloadSkills).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/validate", h.ValidateSkill).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/export", h.ExportSkills).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/import", h.ImportSkills).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/hot-reload/start", h.StartHotReload).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/hot-reload/stop", h.StopHotReload).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/hot-reload/reload", h.ReloadHotReload).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/hot-reload/stats", h.GetHotReloadStats).Methods(http.MethodGet)
 
-	apiRouter.HandleFunc("/teams", h.ListTeams).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams", h.CreateTeam).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}", h.GetTeam).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}", h.UpdateTeam).Methods(http.MethodPatch)
-	apiRouter.HandleFunc("/teams/{id}", h.DeleteTeam).Methods(http.MethodDelete)
-	apiRouter.HandleFunc("/teams/{id}/events", h.ListTeamEvents).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/summary", h.GetTeamSummary).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/summary/final", h.GetTeamFinalSummary).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/summary", h.ListTeamSummaries).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/teammates", h.ListTeammates).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/teammates", h.UpsertTeammate).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/teammates/{teammate_id}", h.UpdateTeammate).Methods(http.MethodPatch)
-	apiRouter.HandleFunc("/teams/{id}/teammates/{teammate_id}/heartbeat", h.UpdateTeammateHeartbeat).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks", h.ListTasks).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/plan", h.PlanTeamTasks).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/graph", h.GetTaskGraph).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/tasks", h.CreateTask).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}", h.GetTask).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}", h.UpdateTask).Methods(http.MethodPatch)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/dependencies", h.ListTaskDependencies).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/dependencies", h.AddTaskDependency).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/dependents", h.ListTaskDependents).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/replan", h.ReplanTask).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/lease", h.RenewTaskLease).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/release", h.ReleaseTaskLease).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/retry", h.RetryTask).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/outcome", h.withRouteHeaders(h.ReportTaskOutcome, routeHeaderOptions{
-		canonicalResolver: canonicalTaskOutcomeEntrypoint,
+	// Runtime / governance / observability
+	runtimeRouter.HandleFunc("/usage/stats", h.GetUsageStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/usage/ledger", h.GetUsageLedger).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/usage/reset", h.ResetUsageStats).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/usage/policy", h.GetUsagePolicy).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/usage/policy", h.UpdateUsagePolicy).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/usage/policy", h.DeleteUsagePolicyEntry).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/mutation/policy", h.GetMutationPolicy).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/mutation/policy", h.UpdateMutationPolicy).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/auth/policy", h.GetAuthPolicy).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/auth/policy", h.UpdateAuthPolicy).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/auth/policy", h.DeleteAuthPolicyEntry).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/governance/policy", h.GetGovernancePolicy).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/config/document", h.GetConfigDocument).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/config/document/preview", h.PreviewConfigDocument).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/config/document", h.UpdateConfigDocument).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/service", h.GetRuntimeServiceStatus).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/service/restart", h.RestartRuntimeService).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/status", h.GetRuntimeStatus).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/health", h.GetRuntimeHealth).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/events", h.ListRuntimeEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/logs", h.ListRuntimeLogs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/logs/stream", h.StreamRuntimeLogs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/traces/stats", h.GetRuntimeTraceStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/traces/governance", h.GetRuntimeTraceGovernance).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/traces", h.GetRuntimeTraces).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/traces/{trace_id}", h.GetRuntimeTrace).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/background/jobs", h.ListBackgroundJobs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/background/jobs/{id}", h.GetBackgroundJob).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/cancel", h.CancelBackgroundJob).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/events", h.ListBackgroundJobEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/output", h.GetBackgroundJobOutput).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/mcps/reload", h.ReloadRuntimeMCPs).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/reload", h.ReloadRuntimeTeams).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/validate", h.ValidateRuntimeConfig).Methods(http.MethodGet)
+
+	// Sessions
+	runtimeRouter.HandleFunc("/sessions", h.ListSessions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions", h.CreateSession).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/search", h.SearchSessions).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/batch/delete", h.BatchDeleteSessions).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/batch/archive", h.BatchArchiveSessions).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/stats", h.GetSessionStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}", h.GetSession).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}", h.UpdateSession).Methods(http.MethodPatch)
+	runtimeRouter.HandleFunc("/sessions/{id}", h.DeleteSession).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/sessions/{id}/archive", h.ArchiveSession).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/activate", h.ActivateSession).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/close", h.CloseSession).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/history", h.GetSessionHistory).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime", h.GetSessionRuntimeState).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/events", h.ListSessionRuntimeEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tool-receipts", h.ListSessionToolReceipts).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/stream", h.StreamSessionRuntimeEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/commands", h.SubmitSessionRuntimeCommand).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents", h.SpawnSessionAgent).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/wait", h.WaitSessionAgents).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}", h.GetSessionAgentStatus).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/input", h.SendSessionAgentInput).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/close", h.CloseSessionAgent).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/resume", h.ResumeSessionAgent).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints", h.ListSessionCheckpoints).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/files", h.GetCheckpointFiles).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/preview", h.PreviewSessionCheckpoint).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/restore", h.RestoreSessionCheckpoint).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/history", h.ClearSessionHistory).Methods(http.MethodDelete)
+
+	// Teams
+	runtimeRouter.HandleFunc("/teams", h.ListTeams).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams", h.CreateTeam).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/summary", h.ListTeamSummaries).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}", h.GetTeam).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}", h.UpdateTeam).Methods(http.MethodPatch)
+	runtimeRouter.HandleFunc("/teams/{id}", h.DeleteTeam).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/teams/{id}/events", h.ListTeamEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/summary", h.GetTeamSummary).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/summary/final", h.GetTeamFinalSummary).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/teammates", h.ListTeammates).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/teammates", h.UpsertTeammate).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/teammates/{teammate_id}", h.UpdateTeammate).Methods(http.MethodPatch)
+	runtimeRouter.HandleFunc("/teams/{id}/teammates/{teammate_id}/heartbeat", h.UpdateTeammateHeartbeat).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks", h.ListTasks).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/plan", h.PlanTeamTasks).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/graph", h.GetTaskGraph).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks", h.CreateTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}", h.GetTask).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}", h.UpdateTask).Methods(http.MethodPatch)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/dependencies", h.ListTaskDependencies).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/dependencies", h.AddTaskDependency).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/dependents", h.ListTaskDependents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/replan", h.ReplanTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/lease", h.RenewTaskLease).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/release", h.ReleaseTaskLease).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/retry", h.RetryTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/outcome", h.withRouteHeaders(h.ReportTaskOutcome, routeHeaderOptions{
+		canonicalResolver: requestPath,
 		mode:              "canonical",
 	})).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/ready", h.MarkReadyTasks).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/claim", h.ClaimReadyTasks).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/reclaim", h.ReclaimExpiredTasks).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/block", h.withRouteHeaders(h.BlockTask, routeHeaderOptions{
-		canonicalResolver: canonicalTaskOutcomeEntrypoint,
-		mode:              "compatibility",
-		warning:           legacyTaskBlockWarning,
-	})).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/complete", h.withRouteHeaders(h.CompleteTask, routeHeaderOptions{
-		canonicalResolver: canonicalTaskOutcomeEntrypoint,
-		mode:              "compatibility",
-		warning:           legacyTaskCompleteWarning,
-	})).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/tasks/{task_id}/fail", h.withRouteHeaders(h.FailTask, routeHeaderOptions{
-		canonicalResolver: canonicalTaskOutcomeEntrypoint,
-		mode:              "compatibility",
-		warning:           legacyTaskFailWarning,
-	})).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/mailbox", h.ListMailbox).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/mailbox", h.SendMailboxMessage).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/mailbox/{message_id}/ack", h.AckMailboxMessage).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/path-claims", h.ListPathClaims).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/teams/{id}/path-claims/check", h.CheckPathClaims).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/path-claims/prune", h.PrunePathClaims).Methods(http.MethodPost)
-	apiRouter.HandleFunc("/teams/{id}/teammates/sweep", h.SweepTeammates).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/ready", h.MarkReadyTasks).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/claim", h.ClaimReadyTasks).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/reclaim", h.ReclaimExpiredTasks).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/mailbox", h.ListMailbox).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/mailbox", h.SendMailboxMessage).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/mailbox/{message_id}/ack", h.AckMailboxMessage).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/path-claims", h.ListPathClaims).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/path-claims/check", h.CheckPathClaims).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/path-claims/prune", h.PrunePathClaims).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/teammates/sweep", h.SweepTeammates).Methods(http.MethodPost)
 
-	// Skills 管理与执行
-	apiRouter.HandleFunc("/{name}", h.GetSkill).Methods(http.MethodGet)
-	apiRouter.HandleFunc("/{name}", h.UpdateSkill).Methods(http.MethodPut)
-	apiRouter.HandleFunc("/{name}", h.DeleteSkill).Methods(http.MethodDelete)
-	apiRouter.HandleFunc("/{name}/execute", h.withRouteHeaders(h.ExecuteSkill, routeHeaderOptions{
-		canonicalEntrypoint: canonicalAgentChatEntrypoint,
-		mode:                "admin-debug",
-		warning:             executeSkillWarning,
+	runtimeRouter.HandleFunc("/skills/{name}", h.GetSkill).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/{name}", h.UpdateSkill).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/skills/{name}", h.DeleteSkill).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/skills/{name}/execute", h.withRouteHeaders(h.ExecuteSkill, routeHeaderOptions{
+		canonicalResolver: requestPath,
+		mode:              "admin-debug",
+		warningResolver: func(r *http.Request) string {
+			return adminDebugRouteWarning(requestPath(r), canonicalAgentChatEntrypoint)
+		},
 	})).Methods(http.MethodPost)
 
-	return apiRouter
+	return runtimeRouter
 }
 
 // ListSkills 列出所有 Skills
@@ -875,7 +879,7 @@ func (h *Handler) ExecuteSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if session != nil {
-		_ = h.persistChatTurn(ctx, session, executeReq.Prompt, result.Output)
+		_ = h.persistChatTurn(ctx, session, executeReq.Prompt, result.Output, nil)
 	}
 	h.recordUsage(usageScope, "execute", skillItem.Name, result.Success, estimatedPromptTokens, result.Usage, result.Output)
 
@@ -1061,34 +1065,52 @@ func (h *Handler) ListCapabilities(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, response)
 }
 
+// GetRuntimeModels 列出前端可用的聊天 provider / model 目录。
+func (h *Handler) GetRuntimeModels(w http.ResponseWriter, r *http.Request) {
+	payload := runtimeModelsSnapshot(h.llmRuntime)
+	if err := h.attachProfileMetadata(r, payload); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
 // AgentChat Agent 对话接口
 func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
+	httpTraceID, requestID := runtimeTraceIDForRequest(r)
+	if requestID == "" {
+		requestID = httpTraceID
+	}
+	if requestID != "" {
+		w.Header().Set("X-Request-ID", requestID)
+	}
+
 	var req struct {
-		Messages                   []map[string]string  `json:"messages"`
-		Profile                    string               `json:"profile,omitempty"`
-		Agent                      string               `json:"agent,omitempty"`
-		Provider                   string               `json:"provider,omitempty"`
-		Model                      string               `json:"model,omitempty"`
-		ReasoningEffort            string               `json:"reasoning_effort,omitempty"`
+		Messages                   []map[string]string   `json:"messages"`
+		Profile                    string                `json:"profile,omitempty"`
+		Agent                      string                `json:"agent,omitempty"`
+		Provider                   string                `json:"provider,omitempty"`
+		Model                      string                `json:"model,omitempty"`
+		ReasoningEffort            string                `json:"reasoning_effort,omitempty"`
 		Thinking                   *types.ThinkingConfig `json:"thinking,omitempty"`
-		SessionID                  string               `json:"session_id,omitempty"`
-		TeamID                     string               `json:"team_id,omitempty"`
-		TaskID                     string               `json:"task_id,omitempty"`
-		UserID                     string               `json:"user_id,omitempty"`
-		TenantID                   string               `json:"tenant_id,omitempty"`
-		ProjectID                  string               `json:"project_id,omitempty"`
-		WorkspacePath              string               `json:"workspace_path,omitempty"`
-		MaxSteps                   int                  `json:"max_steps,omitempty"`
-		EnableRoute                bool                 `json:"enable_routing,omitempty"`
-		EnableReAct                bool                 `json:"enable_react,omitempty"`
-		PlanningMode               string               `json:"planning_mode,omitempty"`
-		ExecutePlannedSubagents    bool                 `json:"execute_planned_subagents,omitempty"`
-		AllowWritePlannedSubagents bool                 `json:"allow_write_planned_subagents,omitempty"`
-		PatchDecisionPolicy        string               `json:"patch_decision_policy,omitempty"`
-		ApproveBlockedPatches      bool                 `json:"approve_blocked_patches,omitempty"`
-		PatchApprovalNote          string               `json:"patch_approval_note,omitempty"`
-		PatchApproval              *agent.PatchApproval `json:"patch_approval,omitempty"`
-		Stream                     bool                 `json:"stream,omitempty"`
+		SessionID                  string                `json:"session_id,omitempty"`
+		TeamID                     string                `json:"team_id,omitempty"`
+		TaskID                     string                `json:"task_id,omitempty"`
+		UserID                     string                `json:"user_id,omitempty"`
+		TenantID                   string                `json:"tenant_id,omitempty"`
+		ProjectID                  string                `json:"project_id,omitempty"`
+		WorkspacePath              string                `json:"workspace_path,omitempty"`
+		MaxSteps                   int                   `json:"max_steps,omitempty"`
+		EnableRoute                bool                  `json:"enable_routing,omitempty"`
+		EnableReAct                bool                  `json:"enable_react,omitempty"`
+		PlanningMode               string                `json:"planning_mode,omitempty"`
+		ExecutePlannedSubagents    bool                  `json:"execute_planned_subagents,omitempty"`
+		AllowWritePlannedSubagents bool                  `json:"allow_write_planned_subagents,omitempty"`
+		PatchDecisionPolicy        string                `json:"patch_decision_policy,omitempty"`
+		ApproveBlockedPatches      bool                  `json:"approve_blocked_patches,omitempty"`
+		PatchApprovalNote          string                `json:"patch_approval_note,omitempty"`
+		PatchApproval              *agent.PatchApproval  `json:"patch_approval,omitempty"`
+		Stream                     bool                  `json:"stream,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1104,6 +1126,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	if requestID != "" {
+		ctx = logger.WithRequestID(ctx, requestID)
+	}
 	usageScope := h.resolveUsageScope(r, req.TenantID, req.ProjectID, req.UserID)
 	effectiveProfile := strings.TrimSpace(req.Profile)
 	if effectiveProfile == "" && isAutoProfileRef(h.profileDefaultRef) {
@@ -1208,6 +1233,13 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	if model := strings.TrimSpace(req.Model); model != "" {
 		agentModel = model
 	}
+	if agentProvider != "" {
+		ctx = logger.WithProvider(ctx, agentProvider)
+	}
+	if agentModel != "" {
+		ctx = logger.WithModel(ctx, agentModel)
+	}
+	ctx = llm.WithHTTPDebugReporter(ctx, runtimeHTTPDebugReporter(ctx))
 	agentConfig := &agent.Config{
 		Name:     "api-agent",
 		Provider: agentProvider,
@@ -1365,9 +1397,6 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 					nil,
 					orchResult.FallbackReason,
 				)
-				if session != nil && orchResult.AgentResult != nil {
-					_ = h.persistChatTurn(ctx, session, lastMessage, orchResult.AgentResult.Output)
-				}
 				if orchResult.AgentResult != nil {
 					h.recordUsage(usageScope, "agent_chat", orchResult.AgentResult.Skill, orchResult.AgentResult.Success, estimatedPromptTokens, orchResult.AgentResult.Usage, orchResult.AgentResult.Output)
 				}
@@ -1381,9 +1410,6 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 					orchResult.LLMResponse,
 					orchResult.FallbackReason,
 				)
-				if session != nil && orchResult.LLMResponse != nil {
-					_ = h.persistChatTurn(ctx, session, lastMessage, orchResult.LLMResponse.Content)
-				}
 				if orchResult.LLMResponse != nil {
 					h.recordUsage(usageScope, "agent_chat", "", true, estimatedPromptTokens, orchResult.LLMResponse.Usage, orchResult.LLMResponse.Content)
 				}
@@ -1406,6 +1432,29 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 					if orchResult.PlanningError != "" {
 						orchestration["planning_error"] = orchResult.PlanningError
 					}
+				}
+			}
+
+			switch orchResult.Source {
+			case "agent_route", "agent_direct", "agent_planned_subagents":
+				if session != nil && orchResult.AgentResult != nil {
+					_ = h.persistChatTurn(
+						ctx,
+						session,
+						lastMessage,
+						orchResult.AgentResult.Output,
+						buildWorkspaceEvidenceMetadata(resultPayload),
+					)
+				}
+			default:
+				if session != nil && orchResult.LLMResponse != nil {
+					_ = h.persistChatTurn(
+						ctx,
+						session,
+						lastMessage,
+						orchResult.LLMResponse.Content,
+						buildWorkspaceEvidenceMetadata(resultPayload),
+					)
 				}
 			}
 
@@ -1449,9 +1498,6 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if shouldUseAgentResult(result, h.llmRuntime) {
-				if session != nil {
-					_ = h.persistChatTurn(ctx, session, lastMessage, result.Output)
-				}
 				h.recordUsage(usageScope, "agent_chat", result.Skill, result.Success, estimatedPromptTokens, result.Usage, result.Output)
 				payload := buildAgentResultPayload("agent_route", result)
 				payload["orchestration"] = buildOrchestrationPayload("agent_route", routeAttempted, routeCandidates, result, nil, "")
@@ -1473,6 +1519,15 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 							orchestration["planning_error"] = planningError
 						}
 					}
+				}
+				if session != nil {
+					_ = h.persistChatTurn(
+						ctx,
+						session,
+						lastMessage,
+						result.Output,
+						buildWorkspaceEvidenceMetadata(payload),
+					)
 				}
 				h.streamStaticResult(w, session, a.GetConfig().Name, payload)
 				return
@@ -1604,9 +1659,6 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			nil,
 			orchResult.FallbackReason,
 		)
-		if session != nil && orchResult.AgentResult != nil {
-			_ = h.persistChatTurn(ctx, session, lastMessage, orchResult.AgentResult.Output)
-		}
 		if orchResult.AgentResult != nil {
 			h.recordUsage(usageScope, "agent_chat", orchResult.AgentResult.Skill, orchResult.AgentResult.Success, estimatedPromptTokens, orchResult.AgentResult.Usage, orchResult.AgentResult.Output)
 		}
@@ -1620,9 +1672,6 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			orchResult.LLMResponse,
 			orchResult.FallbackReason,
 		)
-		if session != nil && orchResult.LLMResponse != nil {
-			_ = h.persistChatTurn(ctx, session, lastMessage, orchResult.LLMResponse.Content)
-		}
 		if orchResult.LLMResponse != nil {
 			h.recordUsage(usageScope, "agent_chat", "", true, estimatedPromptTokens, orchResult.LLMResponse.Usage, orchResult.LLMResponse.Content)
 		}
@@ -1644,6 +1693,28 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			if orchResult.PlanningError != "" {
 				orchestration["planning_error"] = orchResult.PlanningError
 			}
+		}
+	}
+	switch orchResult.Source {
+	case "agent_route", "agent_direct", "agent_planned_subagents":
+		if session != nil && orchResult.AgentResult != nil {
+			_ = h.persistChatTurn(
+				ctx,
+				session,
+				lastMessage,
+				orchResult.AgentResult.Output,
+				buildWorkspaceEvidenceMetadata(responseResult.(map[string]interface{})),
+			)
+		}
+	default:
+		if session != nil && orchResult.LLMResponse != nil {
+			_ = h.persistChatTurn(
+				ctx,
+				session,
+				lastMessage,
+				orchResult.LLMResponse.Content,
+				buildWorkspaceEvidenceMetadata(responseResult.(map[string]interface{})),
+			)
 		}
 	}
 
@@ -1785,10 +1856,15 @@ func (h *Handler) GetSessionHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	history := session.GetMessages()
+	if history == nil {
+		history = []types.Message{}
+	}
+
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"session_id": session.ID,
-		"history":    session.GetMessages(),
-		"count":      len(session.GetMessages()),
+		"history":    history,
+		"count":      len(history),
 	})
 }
 
@@ -2300,7 +2376,7 @@ func (h *Handler) getOrCreateSession(ctx context.Context, userID, requestedSessi
 	return h.sessionManager.GetOrCreate(ctx, userID, requestedSessionID)
 }
 
-func (h *Handler) persistChatTurn(ctx context.Context, session *chat.Session, userPrompt, assistantReply string) error {
+func (h *Handler) persistChatTurn(ctx context.Context, session *chat.Session, userPrompt, assistantReply string, assistantMetadata types.Metadata) error {
 	if h.sessionManager == nil || session == nil {
 		return nil
 	}
@@ -2310,7 +2386,11 @@ func (h *Handler) persistChatTurn(ctx context.Context, session *chat.Session, us
 		}
 	}
 	if assistantReply != "" {
-		if err := h.sessionManager.AddMessage(ctx, session.ID, *types.NewAssistantMessage(assistantReply)); err != nil {
+		assistantMessage := types.NewAssistantMessage(assistantReply)
+		if len(assistantMetadata) > 0 {
+			assistantMessage.Metadata = assistantMetadata.Clone()
+		}
+		if err := h.sessionManager.AddMessage(ctx, session.ID, *assistantMessage); err != nil {
 			return err
 		}
 	}
@@ -3379,6 +3459,9 @@ func buildAgentResultPayload(source string, result *agent.Result) map[string]int
 		"duration":     result.Duration,
 		"error":        result.Error,
 	}
+	if toolCalls := observedToolCalls(result.Observations); len(toolCalls) > 0 {
+		payload["tool_calls"] = toolCalls
+	}
 	if subagentSummary := summarizeSubagents(result.Observations); subagentSummary != nil {
 		payload["subagent_summary"] = subagentSummary
 	}
@@ -3480,6 +3563,57 @@ func countObservedToolCalls(observations []types.Observation) int {
 		count++
 	}
 	return count
+}
+
+func observedToolCalls(observations []types.Observation) []map[string]interface{} {
+	if len(observations) == 0 {
+		return nil
+	}
+
+	calls := make([]map[string]interface{}, 0, len(observations))
+	for index, observation := range observations {
+		toolName := strings.TrimSpace(observation.Tool)
+		if toolName == "" {
+			continue
+		}
+
+		call := map[string]interface{}{
+			"id":   observationToolCallID(observation, index),
+			"name": toolName,
+		}
+		if args := cloneObservedToolArguments(observation.Input); len(args) > 0 {
+			call["arguments"] = args
+		}
+		calls = append(calls, call)
+	}
+
+	if len(calls) == 0 {
+		return nil
+	}
+	return calls
+}
+
+func observationToolCallID(observation types.Observation, index int) string {
+	step := strings.TrimSpace(observation.Step)
+	if step == "" {
+		return fmt.Sprintf("observation_tool_%d", index+1)
+	}
+
+	replacer := strings.NewReplacer(" ", "_", ":", "_", "/", "_", "\\", "_")
+	return "observation_" + replacer.Replace(step)
+}
+
+func cloneObservedToolArguments(input interface{}) map[string]interface{} {
+	args, ok := input.(map[string]interface{})
+	if !ok || len(args) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]interface{}, len(args))
+	for key, value := range args {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func selectCapabilityDescriptor(candidates []*capability.Candidate, skillName string) *capability.Descriptor {
@@ -5615,6 +5749,101 @@ func defaultAgentProvider(runtime *llm.LLMRuntime) string {
 	return ""
 }
 
+func runtimeProviderModels(runtime *llm.LLMRuntime, providerName, defaultProvider, defaultModel string) []string {
+	if runtime == nil {
+		return []string{}
+	}
+
+	models := make([]string, 0)
+	for _, alias := range runtime.ProviderAliases(providerName) {
+		alias = strings.TrimSpace(alias)
+		if alias == "" || alias == providerName {
+			continue
+		}
+		models = append(models, alias)
+	}
+
+	if model := strings.TrimSpace(defaultModel); model != "" {
+		resolvedDefault := runtime.ResolveProviderName(model)
+		if resolvedDefault == providerName || (resolvedDefault == "" && defaultProvider == providerName) {
+			models = append(models, model)
+		}
+	}
+
+	models = uniqueStrings(normalizeStringList(models))
+	if len(models) == 0 {
+		if defaultProvider == providerName {
+			return []string{providerName}
+		}
+		return []string{}
+	}
+	sort.Strings(models)
+	return models
+}
+
+func runtimeProviderDefaultModel(runtime *llm.LLMRuntime, providerName, defaultProvider, defaultModel string, models []string) string {
+	if runtime != nil {
+		if model := strings.TrimSpace(defaultModel); model != "" {
+			resolvedDefault := runtime.ResolveProviderName(model)
+			if resolvedDefault == providerName || (resolvedDefault == "" && defaultProvider == providerName) {
+				return model
+			}
+		}
+	}
+	if len(models) > 0 {
+		return models[0]
+	}
+	return ""
+}
+
+func runtimeModelsSnapshot(runtime *llm.LLMRuntime) map[string]interface{} {
+	defaultProvider := defaultAgentProvider(runtime)
+	defaultModel := defaultAgentModel(runtime)
+	providersPayload := make([]map[string]interface{}, 0)
+	totalModels := 0
+
+	if runtime != nil {
+		providers := runtime.ListProviders()
+		sort.Strings(providers)
+
+		for _, name := range providers {
+			models := runtimeProviderModels(runtime, name, defaultProvider, defaultModel)
+			providerPayload := map[string]interface{}{
+				"name":        name,
+				"models":      models,
+				"model_count": len(models),
+			}
+
+			if providerDefault := runtimeProviderDefaultModel(
+				runtime,
+				name,
+				defaultProvider,
+				defaultModel,
+				models,
+			); providerDefault != "" {
+				providerPayload["default_model"] = providerDefault
+			}
+
+			if caps, err := runtime.GetCapabilities(name); err == nil && caps != nil {
+				providerPayload["supports_tools"] = caps.SupportsTools
+				providerPayload["supports_streaming"] = caps.SupportsStreaming
+				providerPayload["max_context_tokens"] = caps.MaxContextTokens
+				providerPayload["max_output_tokens"] = caps.MaxOutputTokens
+			}
+
+			providersPayload = append(providersPayload, providerPayload)
+			totalModels += len(models)
+		}
+	}
+
+	return map[string]interface{}{
+		"default_provider": defaultProvider,
+		"default_model":    defaultModel,
+		"providers":        providersPayload,
+		"count":            totalModels,
+	}
+}
+
 func executionStatus(success bool) string {
 	if success {
 		return "completed"
@@ -5725,9 +5954,6 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 	}
 
 	fullContent := builder.String()
-	if session != nil {
-		_ = h.persistChatTurn(ctx, session, userPrompt, fullContent)
-	}
 	h.recordUsage(usageScope, "agent_chat", "", true, estimatedPromptTokens, nil, fullContent)
 	resultPayload := map[string]interface{}{
 		"kind":        "llm",
@@ -5757,6 +5983,15 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 				orchestration["planning_error"] = planningError
 			}
 		}
+	}
+	if session != nil {
+		_ = h.persistChatTurn(
+			ctx,
+			session,
+			userPrompt,
+			fullContent,
+			buildWorkspaceEvidenceMetadata(resultPayload),
+		)
 	}
 	emitter.Emit("orchestration", resultPayload["orchestration"])
 	if planningPayload != nil {
@@ -5793,6 +6028,9 @@ func (h *Handler) streamStaticResult(w http.ResponseWriter, session *chat.Sessio
 	emitter.Emit("orchestration", resultPayload["orchestration"])
 	if routePayload, ok := buildAgentRouteEventPayload(resultPayload); ok {
 		emitter.Emit("route", routePayload)
+	}
+	for _, toolEvent := range buildObservedToolEventPayloads(resultPayload) {
+		emitter.Emit(toolEvent.Event, toolEvent.Payload)
 	}
 	for _, observationPayload := range buildObservationEventPayloads(resultPayload) {
 		emitter.Emit("observation", observationPayload)
@@ -5891,6 +6129,106 @@ func buildToolEventPayload(chunk llm.StreamChunk) map[string]interface{} {
 	}
 }
 
+type staticToolEvent struct {
+	Event   string
+	Payload map[string]interface{}
+}
+
+func buildObservedToolEventPayloads(resultPayload map[string]interface{}) []staticToolEvent {
+	observations := observationsFromResultPayload(resultPayload)
+	if len(observations) == 0 {
+		return nil
+	}
+
+	events := make([]staticToolEvent, 0, len(observations)*3)
+	for index, observation := range observations {
+		toolName := strings.TrimSpace(observation.Tool)
+		if toolName == "" {
+			continue
+		}
+
+		toolCallID := observationToolCallID(observation, index)
+		toolCall := map[string]interface{}{
+			"id":   toolCallID,
+			"name": toolName,
+		}
+		if args := cloneObservedToolArguments(observation.Input); len(args) > 0 {
+			toolCall["arguments"] = args
+		}
+
+		metadata := map[string]interface{}{
+			"step":        observation.Step,
+			"success":     observation.Success,
+			"duration_ms": observation.Duration.GetDuration().Milliseconds(),
+		}
+		if strings.TrimSpace(observation.Error) != "" {
+			metadata["error"] = observation.Error
+		}
+		if len(observation.Metrics) > 0 {
+			metadata["metrics"] = observation.Metrics
+		}
+
+		events = append(events,
+			buildStaticToolEventPayload(index, llm.EventTypeToolCall, toolCall, metadata, ""),
+			buildStaticToolEventPayload(index, llm.EventTypeToolStart, toolCall, metadata, ""),
+			buildStaticToolEventPayload(index, llm.EventTypeToolEnd, toolCall, metadata, observationOutputText(observation)),
+		)
+	}
+
+	if len(events) == 0 {
+		return nil
+	}
+	return events
+}
+
+func buildStaticToolEventPayload(index int, eventType llm.StreamEventType, toolCall map[string]interface{}, metadata map[string]interface{}, content string) staticToolEvent {
+	toolPayload := map[string]interface{}{
+		"id":      toolCall["id"],
+		"name":    toolCall["name"],
+		"args":    toolCall["arguments"],
+		"status":  string(eventType),
+		"content": content,
+	}
+
+	payload := map[string]interface{}{
+		"index":     index + 1,
+		"type":      string(eventType),
+		"content":   content,
+		"metadata":  metadata,
+		"tool_call": toolCall,
+		"tool":      toolPayload,
+	}
+	if eventType == llm.EventTypeToolCall {
+		payload["delta"] = toolCall
+	}
+
+	return staticToolEvent{
+		Event:   streamEventName(eventType),
+		Payload: payload,
+	}
+}
+
+func observationOutputText(observation types.Observation) string {
+	if strings.TrimSpace(observation.Error) != "" {
+		return observation.Error
+	}
+
+	switch value := observation.Output.(type) {
+	case nil:
+		return ""
+	case string:
+		return value
+	case []byte:
+		return string(value)
+	default:
+		encoded, err := json.Marshal(value)
+		if err == nil {
+			return string(encoded)
+		}
+		return fmt.Sprintf("%v", value)
+	}
+}
+
 func buildAgentRouteEventPayload(resultPayload map[string]interface{}) (map[string]interface{}, bool) {
 	if resultPayload == nil {
 		return nil, false
@@ -5910,25 +6248,9 @@ func buildAgentRouteEventPayload(resultPayload map[string]interface{}) (map[stri
 }
 
 func buildObservationEventPayloads(resultPayload map[string]interface{}) []map[string]interface{} {
-	if resultPayload == nil {
+	observations := observationsFromResultPayload(resultPayload)
+	if len(observations) == 0 {
 		return nil
-	}
-	rawObservations, ok := resultPayload["observations"]
-	if !ok {
-		return nil
-	}
-
-	var observations []types.Observation
-	switch value := rawObservations.(type) {
-	case []types.Observation:
-		observations = value
-	case []interface{}:
-		observations = make([]types.Observation, 0, len(value))
-		for _, item := range value {
-			if observation, ok := item.(types.Observation); ok {
-				observations = append(observations, observation)
-			}
-		}
 	}
 
 	payloads := make([]map[string]interface{}, 0, len(observations))
@@ -5946,6 +6268,85 @@ func buildObservationEventPayloads(resultPayload map[string]interface{}) []map[s
 		})
 	}
 	return payloads
+}
+
+func observationsFromResultPayload(resultPayload map[string]interface{}) []types.Observation {
+	if resultPayload == nil {
+		return nil
+	}
+
+	rawObservations, ok := resultPayload["observations"]
+	if !ok {
+		return nil
+	}
+
+	switch value := rawObservations.(type) {
+	case []types.Observation:
+		return value
+	case []interface{}:
+		observations := make([]types.Observation, 0, len(value))
+		for _, item := range value {
+			switch observation := item.(type) {
+			case types.Observation:
+				observations = append(observations, observation)
+			case map[string]interface{}:
+				decoded, ok := observationFromMap(observation)
+				if ok {
+					observations = append(observations, decoded)
+				}
+			}
+		}
+		return observations
+	default:
+		return nil
+	}
+}
+
+func observationFromMap(value map[string]interface{}) (types.Observation, bool) {
+	if len(value) == 0 {
+		return types.Observation{}, false
+	}
+
+	observation := types.Observation{
+		Step:    stringMapValueAny(value, "step"),
+		Tool:    stringMapValueAny(value, "tool"),
+		Input:   value["input"],
+		Output:  value["output"],
+		Success: boolMapValueAny(value, "success"),
+		Error:   stringMapValueAny(value, "error"),
+		Metrics: mapMapValueAny(value["metrics"]),
+	}
+	if timestamp, ok := value["timestamp"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, timestamp); err == nil {
+			observation.Timestamp = parsed
+		}
+	}
+	if durationMap, ok := value["duration"].(map[string]interface{}); ok {
+		if start, ok := durationMap["start"].(string); ok {
+			if parsed, err := time.Parse(time.RFC3339Nano, start); err == nil {
+				observation.Duration.Start = parsed
+			}
+		}
+		if end, ok := durationMap["end"].(string); ok {
+			if parsed, err := time.Parse(time.RFC3339Nano, end); err == nil {
+				observation.Duration.End = parsed
+			}
+		}
+	}
+	return observation, strings.TrimSpace(observation.Tool) != ""
+}
+
+func mapMapValueAny(value interface{}) map[string]interface{} {
+	typed, ok := value.(map[string]interface{})
+	if !ok || len(typed) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]interface{}, len(typed))
+	for key, item := range typed {
+		cloned[key] = item
+	}
+	return cloned
 }
 
 func buildSubagentEventPayloads(resultPayload map[string]interface{}) []map[string]interface{} {
@@ -6002,6 +6403,136 @@ func buildSubagentEventPayloads(resultPayload map[string]interface{}) []map[stri
 		})
 	}
 	return payloads
+}
+
+func buildWorkspaceEvidenceMetadata(resultPayload map[string]interface{}) types.Metadata {
+	if len(resultPayload) == 0 {
+		return nil
+	}
+
+	evidence := buildWorkspaceEvidenceEntries(resultPayload)
+	if len(evidence) == 0 {
+		return nil
+	}
+
+	artifactIDs := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		id, _ := item["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		artifactIDs = append(artifactIDs, id)
+	}
+	if len(artifactIDs) == 0 {
+		return nil
+	}
+
+	metadata := types.NewMetadata()
+	metadata["workspace_related_artifact_ids"] = artifactIDs
+	metadata["workspace_related_artifacts"] = evidence
+	return metadata
+}
+
+func buildWorkspaceEvidenceEntries(resultPayload map[string]interface{}) []map[string]interface{} {
+	entries := make([]map[string]interface{}, 0, 8)
+	source := strings.TrimSpace(responseResultSource(resultPayload))
+
+	entries = append(entries, buildWorkspaceEvidenceEntry(
+		"agent-chat-response",
+		"Final response payload persisted with the assistant history.",
+		source,
+		map[string]interface{}{
+			"source": resultPayload["source"],
+			"kind":   resultPayload["kind"],
+			"status": finalResultStatus(resultPayload),
+			"result": resultPayload,
+		},
+	))
+
+	if planning, ok := resultPayload["planning"].(map[string]interface{}); ok && len(planning) > 0 {
+		entries = append(entries, buildWorkspaceEvidenceEntry(
+			"planning",
+			"Planning payload emitted by /api/agent/chat.",
+			source,
+			planning,
+		))
+	}
+
+	if orchestration, ok := resultPayload["orchestration"].(map[string]interface{}); ok && len(orchestration) > 0 {
+		entries = append(entries, buildWorkspaceEvidenceEntry(
+			"orchestration",
+			"Structured orchestration summary emitted by /api/agent/chat.",
+			source,
+			orchestration,
+		))
+	}
+
+	if route, ok := buildAgentRouteEventPayload(resultPayload); ok && len(route) > 0 {
+		entries = append(entries, buildWorkspaceEvidenceEntry(
+			"route",
+			"Route metadata emitted by static agent execution.",
+			source,
+			route,
+		))
+	}
+
+	if toolEvents := buildObservedToolEventPayloads(resultPayload); len(toolEvents) > 0 {
+		payloads := make([]map[string]interface{}, 0, len(toolEvents))
+		for _, item := range toolEvents {
+			if len(item.Payload) == 0 {
+				continue
+			}
+			payloads = append(payloads, item.Payload)
+		}
+		if len(payloads) > 0 {
+			entries = append(entries, buildWorkspaceEvidenceEntry(
+				"tool-events",
+				"Tool events observed during agent execution.",
+				source,
+				payloads,
+			))
+		}
+	}
+
+	if observations := buildObservationEventPayloads(resultPayload); len(observations) > 0 {
+		entries = append(entries, buildWorkspaceEvidenceEntry(
+			"observations",
+			"Observation events emitted by static agent execution.",
+			source,
+			observations,
+		))
+	}
+
+	if subagents := buildSubagentEventPayloads(resultPayload); len(subagents) > 0 {
+		entries = append(entries, buildWorkspaceEvidenceEntry(
+			"subagents",
+			"Subagent events emitted by static agent execution.",
+			source,
+			subagents,
+		))
+	}
+
+	return entries
+}
+
+func buildWorkspaceEvidenceEntry(kind, summary, source string, payload interface{}) map[string]interface{} {
+	if strings.TrimSpace(kind) == "" {
+		return nil
+	}
+	idSource := strings.TrimSpace(source)
+	if idSource == "" {
+		idSource = "runtime"
+	}
+	filename := kind + "-" + idSource + ".json"
+	return map[string]interface{}{
+		"id":       "persisted-" + kind + "-" + idSource,
+		"name":     filename,
+		"path":     "runtime/" + filename,
+		"summary":  summary,
+		"kind":     "json",
+		"language": "json",
+		"content":  payload,
+	}
 }
 
 func finalResultStatus(result interface{}) string {
@@ -6141,6 +6672,9 @@ func (h *Handler) writeError(w http.ResponseWriter, statusCode int, err error) {
 	response := map[string]interface{}{
 		"error": err.Error(),
 	}
+	if requestID := strings.TrimSpace(w.Header().Get("X-Request-ID")); requestID != "" {
+		response["request_id"] = requestID
+	}
 
 	var runtimeErr *errors.RuntimeError
 	if stderrors.As(err, &runtimeErr) {
@@ -6149,6 +6683,59 @@ func (h *Handler) writeError(w http.ResponseWriter, statusCode int, err error) {
 	}
 
 	h.writeJSON(w, statusCode, response)
+}
+
+func runtimeHTTPDebugReporter(ctx context.Context) llm.HTTPDebugReporter {
+	return func(event llm.HTTPDebugEvent) {
+		fields := make([]zapcore.Field, 0, 12)
+		if value := strings.TrimSpace(event.Source); value != "" {
+			fields = append(fields, logger.String("http_debug_source", value))
+		}
+		if value := strings.TrimSpace(event.Phase); value != "" {
+			fields = append(fields, logger.String("http_debug_phase", value))
+		}
+		if value := strings.TrimSpace(event.Provider); value != "" {
+			fields = append(fields, logger.String("upstream_provider", value))
+		}
+		if value := strings.TrimSpace(event.Protocol); value != "" {
+			fields = append(fields, logger.String("upstream_protocol", value))
+		}
+		if value := strings.TrimSpace(event.Model); value != "" {
+			fields = append(fields, logger.String("upstream_model", value))
+		}
+		if value := strings.TrimSpace(event.Method); value != "" {
+			fields = append(fields, logger.Method(value))
+		}
+		if value := strings.TrimSpace(event.URL); value != "" {
+			fields = append(fields, logger.URL(value))
+		}
+		if event.RequestBodyBytes > 0 {
+			fields = append(fields, logger.Int("request_body_bytes", event.RequestBodyBytes))
+		}
+		if event.ResponseStatusCode > 0 {
+			fields = append(fields, logger.Int("response_status_code", event.ResponseStatusCode))
+		}
+		if event.ResponseBodyBytes > 0 {
+			fields = append(fields, logger.Int("response_body_bytes", event.ResponseBodyBytes))
+		}
+		if value := strings.TrimSpace(event.ResponseBodyPreview); value != "" {
+			fields = append(fields, logger.String("response_body_preview", value))
+		}
+		if value := strings.TrimSpace(event.Error); value != "" {
+			fields = append(fields, logger.String("upstream_error", value))
+		}
+
+		switch {
+		case strings.TrimSpace(event.Error) != "" || event.ResponseStatusCode >= http.StatusBadRequest:
+			logger.CtxError(ctx, "LLM upstream request failed", fields...)
+		case logger.L().Core().Enabled(zapcore.DebugLevel):
+			message := "LLM upstream response"
+			if strings.EqualFold(strings.TrimSpace(event.Phase), "request") {
+				message = "LLM upstream request"
+			}
+			logger.CtxDebug(ctx, message, fields...)
+		}
+	}
 }
 
 // SkillStats Skill 统计信息
@@ -9119,4 +9706,3 @@ func containsAny(text string, needles []string) bool {
 	}
 	return false
 }
-

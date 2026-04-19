@@ -136,6 +136,15 @@ type ProxyConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled" env:"PROXY_ENABLED" json:"enabled"`
 }
 
+// Clone returns a detached copy of the proxy config.
+func (c *ProxyConfig) Clone() *ProxyConfig {
+	if c == nil {
+		return nil
+	}
+	cloned := *c
+	return &cloned
+}
+
 // IsEmpty reports whether the proxy config is empty.
 func (c *ProxyConfig) IsEmpty() bool {
 	return c.HTTP == "" && c.HTTPS == "" && !c.Enabled
@@ -178,6 +187,38 @@ func (c *ProxyConfig) Merge(other *ProxyConfig) *ProxyConfig {
 		result.Enabled = true
 	}
 	return &result
+}
+
+// EffectiveProxyConfig clones and merges global/provider proxy settings.
+// When both sides are empty and disabled, it returns nil so callers can
+// continue falling back to environment proxy behavior.
+func EffectiveProxyConfig(base *ProxyConfig, override *ProxyConfig) *ProxyConfig {
+	switch {
+	case base == nil && override == nil:
+		return nil
+	case base == nil:
+		if override == nil {
+			return nil
+		}
+		if override.IsEmpty() && override.NoProxy == "" {
+			return nil
+		}
+		return override.Clone()
+	case override == nil:
+		if base.IsEmpty() && base.NoProxy == "" {
+			return nil
+		}
+		return base.Clone()
+	default:
+		result := base.Merge(override)
+		if result == nil {
+			return nil
+		}
+		if result.IsEmpty() && result.NoProxy == "" {
+			return nil
+		}
+		return result
+	}
 }
 
 // ProxyFromEnv creates a ProxyConfig from environment variables.

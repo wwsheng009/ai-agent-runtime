@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -139,17 +140,18 @@ type ChoiceChunk struct {
 
 // ProviderConfig 提供者配置
 type ProviderConfig struct {
-	Type               string                     `json:"type"` // openai, anthropic, gemini, codex
-	APIKey             string                     `json:"apiKey"`
-	BaseURL            string                     `json:"baseUrl"`
-	Timeout            time.Duration              `json:"timeout"`
-	MaxRetries         int                        `json:"maxRetries"`
-	DefaultModel       string                     `json:"defaultModel,omitempty"`
-	SupportedModels    []string                   `json:"supportedModels,omitempty"`
-	ModelMappings      map[string]string          `json:"modelMappings,omitempty"`
-	Headers            map[string]string          `json:"headers,omitempty"`
-	HeaderMappings     map[string]string          `json:"headerMappings,omitempty"`
-	HeaderMappingRules []HeaderMappingRule `json:"headerMappingRules,omitempty"`
+	Type               string                   `json:"type"` // openai, anthropic, gemini, codex
+	APIKey             string                   `json:"apiKey"`
+	BaseURL            string                   `json:"baseUrl"`
+	Timeout            time.Duration            `json:"timeout"`
+	MaxRetries         int                      `json:"maxRetries"`
+	DefaultModel       string                   `json:"defaultModel,omitempty"`
+	SupportedModels    []string                 `json:"supportedModels,omitempty"`
+	ModelMappings      map[string]string        `json:"modelMappings,omitempty"`
+	Headers            map[string]string        `json:"headers,omitempty"`
+	HeaderMappings     map[string]string        `json:"headerMappings,omitempty"`
+	HeaderMappingRules []HeaderMappingRule      `json:"headerMappingRules,omitempty"`
+	Proxy              *agentconfig.ProxyConfig `json:"proxy,omitempty"`
 }
 
 // ProviderWrapper Provider 包装器，使用 ProtocolAdapter
@@ -224,9 +226,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	}
 
 	// 发送请求
-	client := &http.Client{
-		Timeout: p.config.Timeout,
-	}
+	client := newProviderHTTPClient(p.config.Timeout, p.config.Proxy, false)
 	resp, err := client.Do(req)
 	if err != nil {
 		reportHTTPDebug(ctx, HTTPDebugEvent{
@@ -393,9 +393,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	}
 
 	// 发送请求
-	client := &http.Client{
-		Timeout: 0, // 流式请求不设置超时，由 Context 控制
-	}
+	client := newProviderHTTPClient(p.config.Timeout, p.config.Proxy, true)
 	resp, err := client.Do(req)
 	if err != nil {
 		reportHTTPDebug(ctx, HTTPDebugEvent{
@@ -578,7 +576,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		httpReq.Header.Set(key, value)
 	}
 
-	client := &http.Client{Timeout: 0}
+	client := newProviderHTTPClient(p.config.Timeout, p.config.Proxy, true)
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		reportHTTPDebug(ctx, HTTPDebugEvent{

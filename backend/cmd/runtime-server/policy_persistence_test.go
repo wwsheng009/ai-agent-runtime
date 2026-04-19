@@ -8,11 +8,13 @@ import (
 	"github.com/stretchr/testify/require"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"gopkg.in/yaml.v3"
 )
 
 func TestSkillsRuntimePolicyPersister_PersistsYAMLSectionOnly(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	snapshotPath := runtimeserver.ResolveAgentConfigSnapshotInfo(configPath).SnapshotPath
 	initial := `
 server:
   host: "${SERVER_HOST:-127.0.0.1}"
@@ -50,7 +52,7 @@ skills_runtime:
 	cfg, err := config.InitGlobalConfig(configPath)
 	require.NoError(t, err)
 
-	persister := newSkillsRuntimePolicyPersister(configPath, cfg)
+	persister := runtimeserver.NewSkillsRuntimePolicyPersister(configPath, cfg)
 	require.NotNil(t, persister)
 
 	authPolicy := skillsapi.ScopeResolverConfig{
@@ -73,7 +75,7 @@ skills_runtime:
 			},
 		},
 	}
-	require.NoError(t, persister.persistAuthPolicy(authPolicy, "tester"))
+	require.NoError(t, persister.PersistAuthPolicy(authPolicy, "tester"))
 
 	usagePolicy := skillsapi.UsagePolicy{
 		TrackingEnabled:    true,
@@ -87,7 +89,7 @@ skills_runtime:
 			},
 		},
 	}
-	require.NoError(t, persister.persistUsagePolicy(usagePolicy, "tester"))
+	require.NoError(t, persister.PersistUsagePolicy(usagePolicy, "tester"))
 
 	mutationPolicy := skillsapi.MutationPolicy{
 		ReadOnly:         true,
@@ -96,17 +98,26 @@ skills_runtime:
 		DisableReloadOps: true,
 		DisableHotReload: true,
 	}
-	require.NoError(t, persister.persistMutationPolicy(mutationPolicy, "tester"))
+	require.NoError(t, persister.PersistMutationPolicy(mutationPolicy, "tester"))
 
-	raw, err := os.ReadFile(configPath)
+	baseRaw, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	require.Contains(t, string(baseRaw), `${OPENAI_API_KEY:-secret}`)
+	require.Contains(t, string(baseRaw), `${SERVER_HOST:-127.0.0.1}`)
+
+	raw, err := os.ReadFile(snapshotPath)
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `${OPENAI_API_KEY:-secret}`)
 	require.Contains(t, string(raw), `${SERVER_HOST:-127.0.0.1}`)
 
 	var persisted struct {
+		Server        map[string]interface{}     `yaml:"server"`
+		Providers     map[string]interface{}     `yaml:"providers"`
 		SkillsRuntime config.SkillsRuntimeConfig `yaml:"skills_runtime"`
 	}
 	require.NoError(t, yaml.Unmarshal(raw, &persisted))
+	require.NotNil(t, persisted.Server)
+	require.NotNil(t, persisted.Providers)
 
 	require.True(t, persisted.SkillsRuntime.JWTClaimsEnabled)
 	require.Equal(t, []string{"X-Skills-Tenant"}, persisted.SkillsRuntime.TenantHeaders)

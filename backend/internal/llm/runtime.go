@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,13 +24,14 @@ type RuntimeConfig struct {
 
 // LLMRuntime LLM 运行时
 type LLMRuntime struct {
-	providers map[string]Provider
-	aliases   map[string]string
-	router    *ModelRouter
-	config    *RuntimeConfig
-	tokenizer *Tokenizer
-	health    *ProviderHealthTracker
-	mu        sync.RWMutex
+	providers       map[string]Provider
+	aliases         map[string]string
+	providerAliases map[string]map[string]struct{}
+	router          *ModelRouter
+	config          *RuntimeConfig
+	tokenizer       *Tokenizer
+	health          *ProviderHealthTracker
+	mu              sync.RWMutex
 }
 
 // LLMProvider ?????????????? Provider
@@ -107,12 +109,13 @@ func NewLLMRuntime(config *RuntimeConfig) *LLMRuntime {
 	}
 
 	return &LLMRuntime{
-		providers: make(map[string]Provider),
-		aliases:   make(map[string]string),
-		router:    NewModelRouter(),
-		config:    config,
-		tokenizer: NewTokenizer("simple"),
-		health:    NewProviderHealthTracker(config.HealthCheck),
+		providers:       make(map[string]Provider),
+		aliases:         make(map[string]string),
+		providerAliases: make(map[string]map[string]struct{}),
+		router:          NewModelRouter(),
+		config:          config,
+		tokenizer:       NewTokenizer("simple"),
+		health:          NewProviderHealthTracker(config.HealthCheck),
 	}
 }
 
@@ -131,6 +134,7 @@ func (r *LLMRuntime) RegisterProvider(name string, provider Provider) error {
 
 	r.providers[name] = provider
 	r.aliases[name] = name
+	r.providerAliases[name] = map[string]struct{}{name: {}}
 	if r.health != nil {
 		r.health.AddProvider(name)
 	}
@@ -141,6 +145,50 @@ func (r *LLMRuntime) RegisterProvider(name string, provider Provider) error {
 			Model:     name,
 			Condition: &DefaultCondition{},
 		})
+	}
+
+	return nil
+}
+
+// ReplaceProviderRegistration replaces or inserts a provider registration and resets its aliases atomically.
+func (r *LLMRuntime) ReplaceProviderRegistration(name string, provider Provider, aliases ...string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New(errors.ErrValidationFailed, "provider name cannot be empty")
+	}
+	if provider == nil {
+		return errors.New(errors.ErrValidationFailed, "provider cannot be nil")
+	}
+
+	r.providers[name] = provider
+	r.aliases[name] = name
+	r.providerAliases[name] = map[string]struct{}{name: {}}
+	if r.health != nil {
+		r.health.AddProvider(name)
+	}
+	r.router.RemoveRule(name)
+	if caps := provider.GetCapabilities(); caps != nil {
+		r.router.AddRule(&RoutingRule{
+			Model:     name,
+			Condition: &DefaultCondition{},
+		})
+	}
+
+	for alias, providerName := range r.aliases {
+		if providerName == name && alias != name {
+			delete(r.aliases, alias)
+		}
+	}
+	for _, alias := range aliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" || alias == name {
+			continue
+		}
+		r.aliases[alias] = name
+		r.providerAliases[name][alias] = struct{}{}
 	}
 
 	return nil
@@ -162,6 +210,10 @@ func (r *LLMRuntime) RegisterProviderAlias(alias string, providerName string) er
 	}
 
 	r.aliases[alias] = providerName
+	if _, exists := r.providerAliases[providerName]; !exists {
+		r.providerAliases[providerName] = map[string]struct{}{providerName: {}}
+	}
+	r.providerAliases[providerName][alias] = struct{}{}
 	return nil
 }
 
@@ -203,6 +255,7 @@ func (r *LLMRuntime) UnregisterProvider(name string) {
 	defer r.mu.Unlock()
 
 	delete(r.providers, name)
+	delete(r.providerAliases, name)
 	if r.health != nil {
 		r.health.RemoveProvider(name)
 	}
@@ -251,6 +304,11 @@ func (r *LLMRuntime) resolveRegisteredProviderName(name string) string {
 	return ""
 }
 
+// ResolveProviderName resolves an alias or provider identifier to the registered provider name.
+func (r *LLMRuntime) ResolveProviderName(name string) string {
+	return r.resolveRegisteredProviderName(name)
+}
+
 // ListProviders 列出所有提供者
 func (r *LLMRuntime) ListProviders() []string {
 	r.mu.RLock()
@@ -262,6 +320,36 @@ func (r *LLMRuntime) ListProviders() []string {
 	}
 
 	return names
+}
+
+// ProviderAliases returns the registered aliases for the given provider, including the provider name.
+func (r *LLMRuntime) ProviderAliases(providerName string) []string {
+	if r == nil {
+		return nil
+	}
+
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		return nil
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	resolvedName := providerName
+	if alias, ok := r.aliases[providerName]; ok {
+		resolvedName = alias
+	}
+	if _, ok := r.providers[resolvedName]; !ok {
+		return nil
+	}
+
+	aliases := make([]string, 0, len(r.providerAliases[resolvedName]))
+	for alias := range r.providerAliases[resolvedName] {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	return aliases
 }
 
 // DefaultModel 返回 Runtime 配置的默认模型/Provider 名称

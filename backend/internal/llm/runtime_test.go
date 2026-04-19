@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type captureProvider struct {
@@ -119,4 +119,47 @@ func TestLLMRuntime_RegisterGatewayClient(t *testing.T) {
 	assert.Equal(t, 2, gatewayProvider.maxRetries)
 	assert.Equal(t, 15*time.Second, gatewayProvider.defaultTimeout)
 	assert.Contains(t, runtime.ListProviders(), "gateway-default")
+}
+
+func TestLLMRuntime_ReplaceProviderRegistrationResetsAliases(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{MaxRetries: 0})
+	providerA := &captureProvider{name: "provider-a"}
+	require.NoError(t, runtime.RegisterProvider("provider-a", providerA))
+	require.NoError(t, runtime.RegisterProviderAlias("model-old", "provider-a"))
+
+	providerB := &captureProvider{name: "provider-a"}
+	require.NoError(t, runtime.ReplaceProviderRegistration("provider-a", providerB, "model-new"))
+
+	require.Nil(t, runtime.ProviderAliases("model-old"))
+	require.ElementsMatch(t, []string{"model-new", "provider-a"}, runtime.ProviderAliases("provider-a"))
+
+	resp, err := runtime.Call(context.Background(), &LLMRequest{
+		Model:    "model-new",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotNil(t, providerB.lastReq)
+	assert.Equal(t, "provider:provider-a", resp.Content)
+}
+
+func TestLLMRuntime_ProviderAliasesRemainScopedWhenGlobalAliasCollides(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{MaxRetries: 0})
+	require.NoError(t, runtime.RegisterProvider("provider-a", &captureProvider{name: "provider-a"}))
+	require.NoError(t, runtime.RegisterProvider("provider-b", &captureProvider{name: "provider-b"}))
+
+	require.NoError(t, runtime.RegisterProviderAlias("shared-model", "provider-a"))
+	require.NoError(t, runtime.RegisterProviderAlias("shared-model", "provider-b"))
+	require.NoError(t, runtime.RegisterProviderAlias("provider-a-only", "provider-a"))
+	require.NoError(t, runtime.RegisterProviderAlias("provider-b-only", "provider-b"))
+
+	assert.Equal(t, "provider-b", runtime.ResolveProviderName("shared-model"))
+	assert.ElementsMatch(t,
+		[]string{"provider-a", "provider-a-only", "shared-model"},
+		runtime.ProviderAliases("provider-a"),
+	)
+	assert.ElementsMatch(t,
+		[]string{"provider-b", "provider-b-only", "shared-model"},
+		runtime.ProviderAliases("provider-b"),
+	)
 }

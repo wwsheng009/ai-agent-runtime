@@ -63,6 +63,11 @@ func NewManager(opts *Options) (*Manager, error) {
 		config = runtimecfg.DefaultRuntimeConfig()
 	}
 
+	sessionManager, err := newSessionManager(config)
+	if err != nil {
+		return nil, err
+	}
+
 	manager := &Manager{
 		config:          config,
 		skillDir:        strings.TrimSpace(opts.SkillDir),
@@ -72,7 +77,7 @@ func NewManager(opts *Options) (*Manager, error) {
 		providerConfigs: opts.ProviderConfigs,
 		registry:        skill.NewRegistry(opts.MCPManager),
 		loader:          skill.NewLoader(opts.MCPManager),
-		sessionManager:  chat.NewSessionManager(chat.NewInMemoryStorage(), nil),
+		sessionManager:  sessionManager,
 	}
 
 	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{
@@ -129,6 +134,20 @@ func NewManager(opts *Options) (*Manager, error) {
 	}
 
 	return manager, nil
+}
+
+func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, error) {
+	if config != nil {
+		if dir := strings.TrimSpace(config.Sessions.Dir); dir != "" {
+			storage, err := chat.NewFileStorage(dir)
+			if err != nil {
+				return nil, fmt.Errorf("failed to initialize session file storage: %w", err)
+			}
+			return chat.NewSessionManager(storage, nil), nil
+		}
+	}
+
+	return chat.NewSessionManager(chat.NewInMemoryStorage(), nil), nil
 }
 
 func (m *Manager) buildLLMRuntime(gatewayProviderName string) (*llm.LLMRuntime, error) {
@@ -260,6 +279,53 @@ func (m *Manager) registerConfiguredProviders(runtime *llm.LLMRuntime) error {
 	return nil
 }
 
+// ReloadProviderConfigs atomically updates the configured provider registrations on the live LLM runtime.
+func (m *Manager) ReloadProviderConfigs(providerConfigs map[string]*llm.ProviderConfig) error {
+	if m == nil {
+		return fmt.Errorf("bootstrap manager is nil")
+	}
+	if m.llmRuntime == nil {
+		return fmt.Errorf("llm runtime is nil")
+	}
+
+	nextConfigs := cloneProviderConfigMap(providerConfigs)
+	currentNames := make(map[string]struct{}, len(m.providerConfigs))
+	for name := range m.providerConfigs {
+		currentNames[name] = struct{}{}
+	}
+
+	builtProviders := make(map[string]llm.LegacyChatProvider, len(nextConfigs))
+	builtAliases := make(map[string][]string, len(nextConfigs))
+	for name, providerConfig := range nextConfigs {
+		if providerConfig == nil {
+			continue
+		}
+
+		provider, err := llm.NewProvider(cloneProviderConfig(providerConfig))
+		if err != nil {
+			return fmt.Errorf("failed to create provider %s: %w", name, err)
+		}
+		builtProviders[name] = provider
+		builtAliases[name] = collectProviderAliases(providerConfig, provider)
+	}
+
+	for name := range currentNames {
+		if _, exists := nextConfigs[name]; exists {
+			continue
+		}
+		m.llmRuntime.UnregisterProvider(name)
+	}
+
+	for name, provider := range builtProviders {
+		if err := m.llmRuntime.ReplaceProviderRegistration(name, provider, builtAliases[name]...); err != nil {
+			return fmt.Errorf("failed to replace provider %s: %w", name, err)
+		}
+	}
+
+	m.providerConfigs = nextConfigs
+	return nil
+}
+
 func collectProviderAliases(providerConfig *llm.ProviderConfig, provider llm.ModelCatalogProvider) []string {
 	aliasSet := make(map[string]struct{})
 	addAlias := func(alias string) {
@@ -286,6 +352,63 @@ func collectProviderAliases(providerConfig *llm.ProviderConfig, provider llm.Mod
 		aliases = append(aliases, alias)
 	}
 	return aliases
+}
+
+func cloneProviderConfigMap(input map[string]*llm.ProviderConfig) map[string]*llm.ProviderConfig {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]*llm.ProviderConfig, len(input))
+	for key, value := range input {
+		output[key] = cloneProviderConfig(value)
+	}
+	return output
+}
+
+func cloneProviderConfig(input *llm.ProviderConfig) *llm.ProviderConfig {
+	if input == nil {
+		return nil
+	}
+	cloned := *input
+	if len(input.SupportedModels) > 0 {
+		cloned.SupportedModels = append([]string(nil), input.SupportedModels...)
+	}
+	if len(input.ModelMappings) > 0 {
+		cloned.ModelMappings = cloneStringMap(input.ModelMappings)
+	}
+	if len(input.Headers) > 0 {
+		cloned.Headers = cloneStringMap(input.Headers)
+	}
+	if len(input.HeaderMappings) > 0 {
+		cloned.HeaderMappings = cloneStringMap(input.HeaderMappings)
+	}
+	if len(input.HeaderMappingRules) > 0 {
+		cloned.HeaderMappingRules = cloneHeaderMappingRules(input.HeaderMappingRules)
+	}
+	if input.Proxy != nil {
+		cloned.Proxy = input.Proxy.Clone()
+	}
+	return &cloned
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]string, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func cloneHeaderMappingRules(input []llm.HeaderMappingRule) []llm.HeaderMappingRule {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make([]llm.HeaderMappingRule, len(input))
+	copy(output, input)
+	return output
 }
 
 // ApplyToSkillsHandler 将组件接线到 Skills Handler
