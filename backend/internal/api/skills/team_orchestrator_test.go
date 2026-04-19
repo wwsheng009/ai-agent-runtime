@@ -6,16 +6,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestGetTeamOrchestratorEnrichesInjectedOrchestrator(t *testing.T) {
@@ -268,4 +268,3 @@ func TestSyncTeamLifecycleLoopsCompletesTeamWhenTeammateReportsOutcomeViaBroker(
 		return len(runtimeBusEvents) > 0
 	}, 5*time.Second, 20*time.Millisecond)
 }
-

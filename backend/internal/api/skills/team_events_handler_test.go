@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 func TestListTeamEventsHandlerFilters(t *testing.T) {
@@ -53,7 +53,7 @@ func TestListTeamEventsHandlerFilters(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/teams/"+teamID+"/events?event_type=task.*", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/teams/"+teamID+"/events?event_type=task.*", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -69,7 +69,7 @@ func TestListTeamEventsHandlerFilters(t *testing.T) {
 	require.Equal(t, "task.completed", resp.Events[0].Type)
 	require.Equal(t, "task.failed", resp.Events[1].Type)
 
-	req = httptest.NewRequest(http.MethodGet, "/api/skills/teams/"+teamID+"/events?since="+base.Add(30*time.Minute).Format(time.RFC3339Nano), nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/runtime/teams/"+teamID+"/events?since="+base.Add(30*time.Minute).Format(time.RFC3339Nano), nil)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -80,7 +80,7 @@ func TestListTeamEventsHandlerFilters(t *testing.T) {
 	require.Equal(t, int64(3), resp.Events[1].Seq)
 	require.Equal(t, "task.failed", resp.Events[1].Type)
 
-	req = httptest.NewRequest(http.MethodGet, "/api/skills/teams/"+teamID+"/events?until="+base.Add(45*time.Minute).Format(time.RFC3339Nano), nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/runtime/teams/"+teamID+"/events?until="+base.Add(45*time.Minute).Format(time.RFC3339Nano), nil)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -91,7 +91,7 @@ func TestListTeamEventsHandlerFilters(t *testing.T) {
 	require.Equal(t, int64(2), resp.Events[1].Seq)
 	require.Equal(t, "team.summary", resp.Events[1].Type)
 
-	req = httptest.NewRequest(http.MethodGet, "/api/skills/teams/"+teamID+"/events?since="+base.Add(15*time.Minute).Format(time.RFC3339Nano)+"&until="+base.Add(45*time.Minute).Format(time.RFC3339Nano), nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/runtime/teams/"+teamID+"/events?since="+base.Add(15*time.Minute).Format(time.RFC3339Nano)+"&until="+base.Add(45*time.Minute).Format(time.RFC3339Nano), nil)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -100,4 +100,3 @@ func TestListTeamEventsHandlerFilters(t *testing.T) {
 	require.Equal(t, int64(2), resp.Events[0].Seq)
 	require.Equal(t, "team.summary", resp.Events[0].Type)
 }
-

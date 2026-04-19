@@ -14,12 +14,10 @@ import (
 	"testing"
 	"time"
 
-	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
-	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
-	mcpprotocol "github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
-	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
-	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
-	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -28,13 +26,15 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	mcpprotocol "github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
+	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
+	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/gorilla/mux"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 type testMCPManager struct{}
@@ -256,6 +256,8 @@ type testLLMProvider struct {
 	name         string
 	content      string
 	streamChunks []llm.StreamChunk
+	callErr      error
+	streamErr    error
 	healthErr    error
 	requests     []*llm.LLMRequest
 }
@@ -270,6 +272,9 @@ func (p *testLLMProvider) Name() string { return p.name }
 
 func (p *testLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
 	p.requests = append(p.requests, cloneLLMRequest(req))
+	if p.callErr != nil {
+		return nil, p.callErr
+	}
 	return &llm.LLMResponse{
 		Content: p.content,
 		Model:   p.name,
@@ -278,6 +283,9 @@ func (p *testLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.L
 
 func (p *testLLMProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
 	p.requests = append(p.requests, cloneLLMRequest(req))
+	if p.streamErr != nil {
+		return nil, p.streamErr
+	}
 	chunks := p.streamChunks
 	if len(chunks) == 0 {
 		chunks = []llm.StreamChunk{{Type: llm.EventTypeText, Content: p.content, Done: true}}
@@ -378,7 +386,7 @@ func TestExecuteSkill_RunsWorkflow(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"prompt":"hello workflow"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/echo-skill/execute", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/echo-skill/execute", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -417,16 +425,16 @@ func TestExecuteSkill_AddsAdminDebugWarningHeader(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/echo-skill/execute", bytes.NewReader([]byte(`{"prompt":"hello workflow"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/echo-skill/execute", bytes.NewReader([]byte(`{"prompt":"hello workflow"}`)))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "/api/skills/echo-skill/execute", rec.Header().Get("X-AI-Gateway-Entrypoint"))
-	assert.Equal(t, canonicalAgentChatEntrypoint, rec.Header().Get("X-AI-Gateway-Canonical-Entrypoint"))
+	assert.Equal(t, "/api/runtime/skills/echo-skill/execute", rec.Header().Get("X-AI-Gateway-Entrypoint"))
+	assert.Equal(t, "/api/runtime/skills/echo-skill/execute", rec.Header().Get("X-AI-Gateway-Canonical-Entrypoint"))
 	assert.Equal(t, "admin-debug", rec.Header().Get("X-AI-Gateway-Entrypoint-Mode"))
 	assert.Contains(t, rec.Header().Get("Warning"), "admin/debug")
-	assert.Contains(t, rec.Header().Get("Link"), canonicalAgentChatEntrypoint)
+	assert.Contains(t, rec.Header().Get("Link"), "/api/runtime/skills/echo-skill/execute")
 }
 
 func TestExecuteSkill_DeniesMissingSkillPermission(t *testing.T) {
@@ -454,7 +462,7 @@ func TestExecuteSkill_DeniesMissingSkillPermission(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"prompt":"hello workflow"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/permissioned-echo/execute", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/permissioned-echo/execute", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -504,7 +512,7 @@ func TestAgentChat_CanonicalRouteUsesAgentFirstEntrypoint(t *testing.T) {
 	assert.Equal(t, "hello from canonical route", result["output"])
 }
 
-func TestAgentChat_LegacyRouteAddsCompatibilityWarningHeader(t *testing.T) {
+func TestAgentChat_RuntimeNamespaceDoesNotExposeChatRoute(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
 	handler := NewHandler(registry, nil, mcpManager)
@@ -512,23 +520,18 @@ func TestAgentChat_LegacyRouteAddsCompatibilityWarningHeader(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
 	require.NoError(t, runtime.RegisterProvider("test-model", &testLLMProvider{
 		name:    "test-model",
-		content: "hello from legacy route",
+		content: "hello from runtime namespace route",
 	}))
 	handler.SetLLMRuntime(runtime)
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader([]byte(`{"messages":[{"role":"user","content":"hi"}]}`)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/agent/chat", bytes.NewReader([]byte(`{"messages":[{"role":"user","content":"hi"}]}`)))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, legacyAgentChatEntrypoint, rec.Header().Get("X-AI-Gateway-Entrypoint"))
-	assert.Equal(t, canonicalAgentChatEntrypoint, rec.Header().Get("X-AI-Gateway-Canonical-Entrypoint"))
-	assert.Equal(t, "compatibility", rec.Header().Get("X-AI-Gateway-Entrypoint-Mode"))
-	assert.Contains(t, rec.Header().Get("Warning"), "compatibility alias")
-	assert.Contains(t, rec.Header().Get("Link"), canonicalAgentChatEntrypoint)
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestExecuteSkill_AllowsGrantedSkillPermissionHeader(t *testing.T) {
@@ -556,7 +559,7 @@ func TestExecuteSkill_AllowsGrantedSkillPermissionHeader(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"prompt":"hello workflow"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/permissioned-echo/execute", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/permissioned-echo/execute", bytes.NewReader(body))
 	req.Header.Set("X-Skills-Permission", "shell")
 	rec := httptest.NewRecorder()
 
@@ -597,7 +600,7 @@ func TestAgentChat_UsesLLMAndPersistsSession(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"user_id":"user-1"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -630,6 +633,36 @@ func TestAgentChat_UsesLLMAndPersistsSession(t *testing.T) {
 	assert.Equal(t, "assistant", session.GetMessages()[1].Role)
 }
 
+func TestAgentChat_ErrorResponseIncludesRequestID(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
+	require.NoError(t, runtime.RegisterProvider("test-model", &testLLMProvider{
+		name:    "test-model",
+		callErr: fmt.Errorf(`HTTP 503: {"error":{"message":"Service temporarily unavailable","type":"api_error"}}`),
+	}))
+	handler.SetLLMRuntime(runtime)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader([]byte(`{"messages":[{"role":"user","content":"hi"}]}`)))
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	requestID := strings.TrimSpace(rec.Header().Get("X-Request-ID"))
+	require.NotEmpty(t, requestID)
+
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	assert.Equal(t, requestID, payload["request_id"])
+	assert.Contains(t, payload["error"], "Service temporarily unavailable")
+}
+
 func TestAgentChat_UsesExplicitThinkingAndReasoningForLLMFallback(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
@@ -647,7 +680,7 @@ func TestAgentChat_UsesExplicitThinkingAndReasoningForLLMFallback(t *testing.T) 
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"model":"test-model","reasoning_effort":"high","thinking":{"type":"enabled","budget_tokens":8192}}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -685,7 +718,7 @@ func TestExecuteSkill_UsesThinkingAndReasoningFromOptionsForLLMFallback(t *testi
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"prompt":"hi","options":{"reasoning_effort":"medium","thinking":{"type":"adaptive","effort":"high","budget_tokens":8192}}}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/llm-skill/execute", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/llm-skill/execute", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -726,7 +759,7 @@ func TestAgentChat_EnableReAct_UsesAgentLoopAndPersistsSession(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"user_id":"user-react","enable_react":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -778,7 +811,7 @@ func TestAgentChat_EnableReAct_IncludesWorkspaceContextInModelRequest(t *testing
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"search docs"}],"enable_react":true,"workspace_path":"` + strings.ReplaceAll(tmpDir, `\`, `\\`) + `"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	req.Header.Set("X-Skills-Permission", "shell")
 	rec := httptest.NewRecorder()
 
@@ -826,7 +859,7 @@ func TestAgentChat_EnableReAct_DoesNotAutoScanDefaultWorkspace(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"search docs"}],"enable_react":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -859,7 +892,7 @@ func TestAgentChat_EnableReAct_SupportsStreamingMode(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"enable_react":true,"stream":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	req.Header.Set("Accept", "text/event-stream")
 	rec := httptest.NewRecorder()
 
@@ -868,6 +901,52 @@ func TestAgentChat_EnableReAct_SupportsStreamingMode(t *testing.T) {
 	assert.Contains(t, rec.Header().Get("Content-Type"), "text/event-stream")
 	assert.Contains(t, rec.Body.String(), `"source":"agent_react"`)
 	assert.Contains(t, rec.Body.String(), "event: done")
+}
+
+func TestAgentChat_EnableReAct_StreamingMode_ReplaysToolEvents(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
+	require.NoError(t, runtime.RegisterProvider("test-model", &testSequenceLLMProvider{
+		name: "test-model",
+		responses: []*llm.LLMResponse{
+			{
+				Model: "test-model",
+				ToolCalls: []types.ToolCall{{
+					ID:   "call-1",
+					Name: "echo_tool",
+					Args: map[string]interface{}{"prompt": "hi"},
+				}},
+			},
+			{
+				Model:   "test-model",
+				Content: "tool finished",
+			},
+		},
+	}))
+	handler.SetLLMRuntime(runtime)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	body := []byte(`{"messages":[{"role":"user","content":"run tool"}],"enable_react":true,"stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"source":"agent_react"`)
+	assert.Contains(t, rec.Body.String(), "event: tool_call")
+	assert.Contains(t, rec.Body.String(), "event: tool_start")
+	assert.Contains(t, rec.Body.String(), "event: tool_end")
+	assert.Contains(t, rec.Body.String(), `"name":"echo_tool"`)
+	assert.Contains(t, rec.Body.String(), `"status":"tool_call"`)
+	assert.Contains(t, rec.Body.String(), `"status":"tool_start"`)
+	assert.Contains(t, rec.Body.String(), `"status":"tool_end"`)
+	assert.Contains(t, rec.Body.String(), `"arguments":{"prompt":"hi"}`)
 }
 
 func TestAgentChat_EnableReAct_ExposesSubagentSummary(t *testing.T) {
@@ -914,7 +993,7 @@ func TestAgentChat_EnableReAct_ExposesSubagentSummary(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"inspect logs"}],"enable_react":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -969,7 +1048,7 @@ func TestGetRuntimeTrace_ReturnsEventsForTrace(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"run tool"}],"enable_react":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -990,7 +1069,7 @@ func TestGetRuntimeTrace_ReturnsEventsForTrace(t *testing.T) {
 		},
 	})
 
-	traceReq := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces/"+traceID+"?limit=20", nil)
+	traceReq := httptest.NewRequest(http.MethodGet, "/api/runtime/traces/"+traceID+"?limit=20", nil)
 	traceReq.Header.Set("X-Skills-Admin-Token", "secret-token")
 	traceRec := httptest.NewRecorder()
 	router.ServeHTTP(traceRec, traceReq)
@@ -1043,7 +1122,7 @@ func TestGetRuntimeTrace_SummarizesPatchDecisionAudit(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	traceReq := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces/trace-patch-audit?limit=20", nil)
+	traceReq := httptest.NewRequest(http.MethodGet, "/api/runtime/traces/trace-patch-audit?limit=20", nil)
 	traceReq.Header.Set("X-Skills-Admin-Token", "secret-token")
 	traceRec := httptest.NewRecorder()
 	router.ServeHTTP(traceRec, traceReq)
@@ -1093,7 +1172,7 @@ func TestGetRuntimeTrace_IncludesCheckpointCreatedProvenance(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	traceReq := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces/trace-checkpoint-provenance?limit=20", nil)
+	traceReq := httptest.NewRequest(http.MethodGet, "/api/runtime/traces/trace-checkpoint-provenance?limit=20", nil)
 	traceReq.Header.Set("X-Skills-Admin-Token", "secret-token")
 	traceRec := httptest.NewRecorder()
 	router.ServeHTTP(traceRec, traceReq)
@@ -1186,7 +1265,7 @@ func TestGetRuntimeTraces_ReturnsRecentSummaries(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces?trace_prefix=trace-&event_type=mcp.&limit=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/traces?trace_prefix=trace-&event_type=mcp.&limit=10", nil)
 	req.Header.Set("X-Forwarded-For", "10.0.0.5")
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -1309,7 +1388,7 @@ func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces/stats?trace_prefix=trace-&limit=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/traces/stats?trace_prefix=trace-&limit=10", nil)
 	req.Header.Set("X-Forwarded-For", "10.0.0.5")
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -1397,7 +1476,7 @@ func TestListRuntimeEvents_FiltersByProfileResourceKind(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/events?profile_resource_kind=notes&limit=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/events?profile_resource_kind=notes&limit=10", nil)
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -1441,7 +1520,7 @@ func TestGetRuntimeTraces_FiltersByToolName(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces?tool_name=run_tests&limit=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/traces?tool_name=run_tests&limit=10", nil)
 	req.Header.Set("X-Forwarded-For", "10.0.0.5")
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -1503,7 +1582,7 @@ func TestGetRuntimeTraceGovernance_ReturnsDeniedView(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces/governance?trace_prefix=trace-&limit=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/traces/governance?trace_prefix=trace-&limit=10", nil)
 	req.Header.Set("X-Forwarded-For", "10.0.0.5")
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -1587,7 +1666,7 @@ func TestGetRuntimeTraceGovernance_FiltersByProfileResourceKind(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces/governance?trace_prefix=trace-&profile_resource_kind=memory&limit=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/traces/governance?trace_prefix=trace-&profile_resource_kind=memory&limit=10", nil)
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -1699,7 +1778,7 @@ agents:
 	handler.RegisterRoutes(router)
 
 	body := fmt.Sprintf(`{"profile":%q,"messages":[{"role":"user","content":"hi"}]}`, profileRoot)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader([]byte(body)))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -1738,7 +1817,7 @@ agents:
 	handler.RegisterRoutes(router)
 
 	body := fmt.Sprintf(`{"profile":%q,"messages":[{"role":"user","content":"hi"}]}`, profileRoot)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader([]byte(body)))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -1792,7 +1871,7 @@ agents:
 	handler.RegisterRoutes(router)
 
 	body := fmt.Sprintf(`{"profile":%q,"messages":[{"role":"user","content":"hi"}],"enable_react":true}`, profileRoot)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader([]byte(body)))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -1992,7 +2071,7 @@ agents:
 	handler.RegisterRoutes(router)
 
 	body := fmt.Sprintf(`{"profile":"auto","workspace_path":%q,"messages":[{"role":"user","content":"search docs"}]}`, workspaceRoot)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader([]byte(body)))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2045,7 +2124,7 @@ agents:
 	handler.RegisterRoutes(router)
 
 	body := fmt.Sprintf(`{"profile":"auto","workspace_path":%q,"messages":[{"role":"user","content":"search docs"}]}`, workspaceRoot)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader([]byte(body)))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2074,7 +2153,7 @@ func TestAgentChat_InvalidWorkspacePathReturnsBadRequest(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}],"workspace_path":"Z:/definitely/not/exist"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2103,7 +2182,7 @@ func SearchDocs() {}
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"search docs"}],"workspace_path":"` + strings.ReplaceAll(tmpDir, `\`, `\\`) + `"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2134,7 +2213,7 @@ func TestAgentChat_PlannerPreferredIncludesPlan(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"plan workflow for me"}],"enable_routing":true,"planning_mode":"planner_preferred"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2188,7 +2267,7 @@ func TestAgentChat_PlannerPreferredIncludesSubagentTasks(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"plan writer verify flow"}],"enable_routing":true,"planning_mode":"planner_preferred"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2256,7 +2335,7 @@ func TestAgentChat_PlannerPreferredCanExecutePlannedSubagents(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"plan execute verify flow"}],"enable_routing":true,"planning_mode":"planner_preferred","execute_planned_subagents":true,"allow_write_planned_subagents":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2338,7 +2417,7 @@ func TestAgentChat_PlannerPreferredPatchDecisionBlockedWhenVerifierFails(t *test
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"plan execute blocked flow"}],"enable_routing":true,"planning_mode":"planner_preferred","execute_planned_subagents":true,"allow_write_planned_subagents":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2413,7 +2492,7 @@ func TestAgentChat_PlannerPreferredPatchDecisionWarnPolicy(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"plan warn flow"}],"enable_routing":true,"planning_mode":"planner_preferred","execute_planned_subagents":true,"allow_write_planned_subagents":true,"patch_decision_policy":"warn"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2480,7 +2559,7 @@ func TestAgentChat_PlannerPreferredPatchDecisionManualOverride(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"plan override flow"}],"enable_routing":true,"planning_mode":"planner_preferred","execute_planned_subagents":true,"allow_write_planned_subagents":true,"approve_blocked_patches":true,"patch_approval_note":"human reviewed"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2545,7 +2624,7 @@ func TestAgentChat_PlannerPreferredPatchApprovalObjectReturned(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"plan approval object"}],"enable_routing":true,"planning_mode":"planner_preferred","execute_planned_subagents":true,"allow_write_planned_subagents":true,"patch_approval":{"approved":true,"ticket_id":"CAB-456","approver":"release-manager","reason":"approved during CAB"}}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2609,7 +2688,7 @@ func TestAgentChat_PlannedSubagentExecutionBlockedWithoutWriteApproval(t *testin
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"plan write approval flow"}],"enable_routing":true,"planning_mode":"planner_preferred","execute_planned_subagents":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2655,7 +2734,7 @@ func TestAgentChat_PlannedSubagentExecutionBlockedByReadOnlyPolicy(t *testing.T)
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"plan blocked writer flow"}],"enable_routing":true,"planning_mode":"planner_preferred","execute_planned_subagents":true,"allow_write_planned_subagents":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -2692,7 +2771,7 @@ func TestSessionEndpoints_Lifecycle(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	createReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions", bytes.NewReader([]byte(`{"user_id":"user-42","title":"demo"}`)))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions", bytes.NewReader([]byte(`{"user_id":"user-42","title":"demo"}`)))
 	createRec := httptest.NewRecorder()
 	router.ServeHTTP(createRec, createReq)
 	require.Equal(t, http.StatusCreated, createRec.Code)
@@ -2706,38 +2785,68 @@ func TestSessionEndpoints_Lifecycle(t *testing.T) {
 	require.NoError(t, sessionManager.AddMessage(context.Background(), sessionIDValue, *types.NewUserMessage("hello")))
 	require.NoError(t, sessionManager.AddMessage(context.Background(), sessionIDValue, *types.NewAssistantMessage("hi there")))
 
-	listReq := httptest.NewRequest(http.MethodGet, "/api/skills/sessions?user_id=user-42", nil)
+	listReq := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions?user_id=user-42", nil)
 	listRec := httptest.NewRecorder()
 	router.ServeHTTP(listRec, listReq)
 	require.Equal(t, http.StatusOK, listRec.Code)
 	assert.Contains(t, listRec.Body.String(), sessionIDValue)
 
-	getReq := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/"+sessionIDValue, nil)
+	getReq := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+sessionIDValue, nil)
 	getRec := httptest.NewRecorder()
 	router.ServeHTTP(getRec, getReq)
 	require.Equal(t, http.StatusOK, getRec.Code)
 	assert.Contains(t, getRec.Body.String(), "user-42")
 
-	historyReq := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/"+sessionIDValue+"/history", nil)
+	historyReq := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+sessionIDValue+"/history", nil)
 	historyRec := httptest.NewRecorder()
 	router.ServeHTTP(historyRec, historyReq)
 	require.Equal(t, http.StatusOK, historyRec.Code)
 	assert.Contains(t, historyRec.Body.String(), "hello")
 	assert.Contains(t, historyRec.Body.String(), "hi there")
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/stats?user_id=user-42", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/stats?user_id=user-42", nil)
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
 	require.Equal(t, http.StatusOK, statsRec.Code)
 	assert.Contains(t, statsRec.Body.String(), "totalMessages")
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/skills/sessions/"+sessionIDValue, nil)
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/runtime/sessions/"+sessionIDValue, nil)
 	deleteRec := httptest.NewRecorder()
 	router.ServeHTTP(deleteRec, deleteReq)
 	require.Equal(t, http.StatusOK, deleteRec.Code)
 
 	_, err := sessionManager.GetSession(context.Background(), sessionIDValue)
 	assert.Error(t, err)
+}
+
+func TestGetSessionHistory_EmptyHistoryUsesEmptyArray(t *testing.T) {
+	registry := skill.NewRegistry(nil)
+	handler := NewHandler(registry, nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
+		TTL:             time.Hour,
+		MaxHistory:      20,
+		CleanupInterval: time.Hour,
+		AutoArchive:     false,
+		IdleTimeout:     time.Hour,
+	})
+	handler.SetSessionManager(sessionManager)
+
+	session, err := sessionManager.CreateSession(context.Background(), "empty-history-user")
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/history", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := httptest.NewRecorder()
+
+	handler.GetSessionHistory(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	payload := map[string]interface{}{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	history, ok := payload["history"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, history, 0)
+	assert.Equal(t, float64(0), payload["count"])
 }
 
 func TestSessionEndpoints_SearchUpdateAndBatchOperations(t *testing.T) {
@@ -2758,7 +2867,7 @@ func TestSessionEndpoints_SearchUpdateAndBatchOperations(t *testing.T) {
 
 	createOne := func(userID, title string) string {
 		body := []byte(fmt.Sprintf(`{"user_id":%q,"title":%q}`, userID, title))
-		req := httptest.NewRequest(http.MethodPost, "/api/skills/sessions", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusCreated, rec.Code)
@@ -2775,7 +2884,7 @@ func TestSessionEndpoints_SearchUpdateAndBatchOperations(t *testing.T) {
 	require.NoError(t, sessionManager.AddMessage(context.Background(), sessionOne, *types.NewUserMessage("hello")))
 	require.NoError(t, sessionManager.AddMessage(context.Background(), sessionOne, *types.NewAssistantMessage("world")))
 
-	updateReq := httptest.NewRequest(http.MethodPatch, "/api/skills/sessions/"+sessionOne, bytes.NewReader([]byte(`{"title":"renamed","tags_add":["priority"],"context":{"ticket":"INC-42"},"state":"idle"}`)))
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/runtime/sessions/"+sessionOne, bytes.NewReader([]byte(`{"title":"renamed","tags_add":["priority"],"context":{"ticket":"INC-42"},"state":"idle"}`)))
 	updateRec := httptest.NewRecorder()
 	router.ServeHTTP(updateRec, updateReq)
 	require.Equal(t, http.StatusOK, updateRec.Code)
@@ -2783,14 +2892,14 @@ func TestSessionEndpoints_SearchUpdateAndBatchOperations(t *testing.T) {
 	assert.Contains(t, updateRec.Body.String(), "priority")
 	assert.Contains(t, updateRec.Body.String(), "INC-42")
 
-	searchReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/search", bytes.NewReader([]byte(`{"user_id":"user-batch","tags":["support"],"state":"idle"}`)))
+	searchReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/search", bytes.NewReader([]byte(`{"user_id":"user-batch","tags":["support"],"state":"idle"}`)))
 	searchRec := httptest.NewRecorder()
 	router.ServeHTTP(searchRec, searchReq)
 	require.Equal(t, http.StatusOK, searchRec.Code)
 	assert.Contains(t, searchRec.Body.String(), sessionOne)
 	assert.NotContains(t, searchRec.Body.String(), sessionTwo)
 
-	clearReq := httptest.NewRequest(http.MethodDelete, "/api/skills/sessions/"+sessionOne+"/history", nil)
+	clearReq := httptest.NewRequest(http.MethodDelete, "/api/runtime/sessions/"+sessionOne+"/history", nil)
 	clearRec := httptest.NewRecorder()
 	router.ServeHTTP(clearRec, clearReq)
 	require.Equal(t, http.StatusOK, clearRec.Code)
@@ -2798,32 +2907,32 @@ func TestSessionEndpoints_SearchUpdateAndBatchOperations(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, updatedSession.GetMessages(), 0)
 
-	archiveReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+sessionOne+"/archive", nil)
+	archiveReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+sessionOne+"/archive", nil)
 	archiveRec := httptest.NewRecorder()
 	router.ServeHTTP(archiveRec, archiveReq)
 	require.Equal(t, http.StatusOK, archiveRec.Code)
 	assert.Contains(t, archiveRec.Body.String(), "archived")
 
-	activateReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+sessionOne+"/activate", nil)
+	activateReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+sessionOne+"/activate", nil)
 	activateRec := httptest.NewRecorder()
 	router.ServeHTTP(activateRec, activateReq)
 	require.Equal(t, http.StatusOK, activateRec.Code)
 	assert.Contains(t, activateRec.Body.String(), "active")
 
-	closeReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+sessionOne+"/close", nil)
+	closeReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+sessionOne+"/close", nil)
 	closeRec := httptest.NewRecorder()
 	router.ServeHTTP(closeRec, closeReq)
 	require.Equal(t, http.StatusOK, closeRec.Code)
 	assert.Contains(t, closeRec.Body.String(), "closed")
 
-	batchArchiveReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/batch/archive", bytes.NewReader([]byte(fmt.Sprintf(`{"session_ids":[%q,%q]}`, sessionOne, sessionTwo))))
+	batchArchiveReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/batch/archive", bytes.NewReader([]byte(fmt.Sprintf(`{"session_ids":[%q,%q]}`, sessionOne, sessionTwo))))
 	batchArchiveRec := httptest.NewRecorder()
 	router.ServeHTTP(batchArchiveRec, batchArchiveReq)
 	require.Equal(t, http.StatusOK, batchArchiveRec.Code)
 	assert.Contains(t, batchArchiveRec.Body.String(), sessionOne)
 	assert.Contains(t, batchArchiveRec.Body.String(), sessionTwo)
 
-	batchDeleteReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/batch/delete", bytes.NewReader([]byte(fmt.Sprintf(`{"session_ids":[%q,%q]}`, sessionOne, sessionTwo))))
+	batchDeleteReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/batch/delete", bytes.NewReader([]byte(fmt.Sprintf(`{"session_ids":[%q,%q]}`, sessionOne, sessionTwo))))
 	batchDeleteRec := httptest.NewRecorder()
 	router.ServeHTTP(batchDeleteRec, batchDeleteReq)
 	require.Equal(t, http.StatusOK, batchDeleteRec.Code)
@@ -2845,7 +2954,7 @@ func TestRegisterRoutes_FixedPathsNotCapturedByNameRoute(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/search?q=test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search?q=test", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -2878,7 +2987,7 @@ func TestSearchSkills_AutoFallsBackToEmbedding(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/search?q=search%20customer%20orders%20in%20sap&category=erp", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search?q=search%20customer%20orders%20in%20sap&category=erp", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -2925,7 +3034,7 @@ func TestSearchSkills_LexicalModeSkipsEmbedding(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/search?q=search%20customer%20orders%20in%20sap&mode=lexical", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search?q=search%20customer%20orders%20in%20sap&mode=lexical", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -2962,7 +3071,7 @@ func TestGetStats_IncludesEmbeddingStats(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/stats", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/stats", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -2992,7 +3101,7 @@ func TestGetStats_IncludesRuntimeStatus(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/stats", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/stats", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -3045,13 +3154,13 @@ func TestGetRuntimeStatus_RequiresAdmin(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/status", nil)
 	req.Header.Set("X-Forwarded-For", "10.0.0.5")
 	rec := httptest.NewRecorder()
 	handler.GetRuntimeStatus(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
-	authorizedReq := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/status", nil)
+	authorizedReq := httptest.NewRequest(http.MethodGet, "/api/runtime/status", nil)
 	authorizedReq.Header.Set("X-Forwarded-For", "10.0.0.5")
 	authorizedReq.Header.Set("X-Skills-Admin-Token", "secret-token")
 	authorizedRec := httptest.NewRecorder()
@@ -3069,6 +3178,104 @@ func TestGetRuntimeStatus_RequiresAdmin(t *testing.T) {
 	assert.Contains(t, authorizedRec.Body.String(), `"profile_resource_labels":["memory:memory.json"]`)
 	_, err := os.Stat(runtimeCfg.Catalog.SnapshotPath)
 	require.NoError(t, err)
+}
+
+func TestGetRuntimeModels_ListsProviderAliases(t *testing.T) {
+	registry := skill.NewRegistry(nil)
+	handler := NewHandler(registry, nil, nil)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "openai",
+		DefaultModel:    "gpt-4o",
+		MaxRetries:      0,
+	})
+	require.NoError(t, runtime.RegisterProvider("openai", &testLLMProvider{
+		name:    "openai",
+		content: "openai response",
+	}))
+	require.NoError(t, runtime.RegisterProvider("anthropic", &testLLMProvider{
+		name:    "anthropic",
+		content: "anthropic response",
+	}))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-4o", "openai"))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-4.1", "openai"))
+	require.NoError(t, runtime.RegisterProviderAlias("claude-3-7-sonnet", "anthropic"))
+	handler.SetLLMRuntime(runtime)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/models", nil)
+	req.Header.Set("X-Forwarded-For", "203.0.113.20")
+	rec := httptest.NewRecorder()
+
+	handler.GetRuntimeModels(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	payload := map[string]interface{}{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	assert.Equal(t, "openai", payload["default_provider"])
+	assert.Equal(t, "gpt-4o", payload["default_model"])
+	assert.Equal(t, float64(3), payload["count"])
+
+	providers, ok := payload["providers"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, providers, 2)
+
+	anthropic := providers[0].(map[string]interface{})
+	openai := providers[1].(map[string]interface{})
+
+	assert.Equal(t, "anthropic", anthropic["name"])
+	assert.Equal(t, "claude-3-7-sonnet", anthropic["default_model"])
+	assert.Equal(t, []interface{}{"claude-3-7-sonnet"}, anthropic["models"])
+
+	assert.Equal(t, "openai", openai["name"])
+	assert.Equal(t, "gpt-4o", openai["default_model"])
+	assert.Equal(t, []interface{}{"gpt-4.1", "gpt-4o"}, openai["models"])
+}
+
+func TestGetRuntimeModels_PreservesProviderModelCatalogWhenAliasesOverlap(t *testing.T) {
+	registry := skill.NewRegistry(nil)
+	handler := NewHandler(registry, nil, nil)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-b",
+		DefaultModel:    "shared-model",
+		MaxRetries:      0,
+	})
+	require.NoError(t, runtime.RegisterProvider("provider-a", &testLLMProvider{
+		name:    "provider-a",
+		content: "provider a response",
+	}))
+	require.NoError(t, runtime.RegisterProvider("provider-b", &testLLMProvider{
+		name:    "provider-b",
+		content: "provider b response",
+	}))
+	require.NoError(t, runtime.RegisterProviderAlias("shared-model", "provider-a"))
+	require.NoError(t, runtime.RegisterProviderAlias("shared-model", "provider-b"))
+	require.NoError(t, runtime.RegisterProviderAlias("provider-a-only", "provider-a"))
+	require.NoError(t, runtime.RegisterProviderAlias("provider-b-only", "provider-b"))
+	handler.SetLLMRuntime(runtime)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/models", nil)
+	rec := httptest.NewRecorder()
+
+	handler.GetRuntimeModels(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	payload := map[string]interface{}{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+
+	providers, ok := payload["providers"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, providers, 2)
+
+	providerA := providers[0].(map[string]interface{})
+	providerB := providers[1].(map[string]interface{})
+
+	assert.Equal(t, "provider-a", providerA["name"])
+	assert.Equal(t, []interface{}{"provider-a-only", "shared-model"}, providerA["models"])
+
+	assert.Equal(t, "provider-b", providerB["name"])
+	assert.Equal(t, "shared-model", providerB["default_model"])
+	assert.Equal(t, []interface{}{"provider-b-only", "shared-model"}, providerB["models"])
 }
 
 func TestGetRuntimeStatus_IncludesProfileMetadata(t *testing.T) {
@@ -3089,7 +3296,7 @@ agents:
 
 	query := url.Values{}
 	query.Set("profile", profileRoot)
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/status?"+query.Encode(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/status?"+query.Encode(), nil)
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
 
@@ -3128,7 +3335,7 @@ agents:
 
 	query := url.Values{}
 	query.Set("profile", profileRoot)
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/health?"+query.Encode(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/health?"+query.Encode(), nil)
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
 
@@ -3160,7 +3367,7 @@ agents:
 
 	query := url.Values{}
 	query.Set("profile", profileRoot)
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces?"+query.Encode(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/traces?"+query.Encode(), nil)
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
 
@@ -3198,7 +3405,7 @@ agents:
 
 	query := url.Values{}
 	query.Set("profile", profileRoot)
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces/"+traceID+"?"+query.Encode(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/traces/"+traceID+"?"+query.Encode(), nil)
 	req = mux.SetURLVars(req, map[string]string{"trace_id": traceID})
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -3231,7 +3438,7 @@ agents:
 
 	query := url.Values{}
 	query.Set("profile", profileRoot)
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/validate?"+query.Encode(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/validate?"+query.Encode(), nil)
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
 
@@ -3312,7 +3519,7 @@ func TestGetRuntimeHealth_ReturnsSummary(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/health", nil)
 	req.Header.Set("X-Forwarded-For", "10.0.0.5")
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -3355,7 +3562,7 @@ func TestReloadRuntimeMCPs_ReloadsUnderlyingManager(t *testing.T) {
 	handler := NewHandler(registry, nil, adapter)
 	handler.SetAdminToken("secret-token")
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/runtime/mcps/reload", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/mcps/reload", nil)
 	req.Header.Set("X-Forwarded-For", "10.0.0.5")
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -3396,7 +3603,7 @@ func TestReloadRuntimeMCPs_EmitsTraceableLifecycleEvents(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	reloadReq := httptest.NewRequest(http.MethodPost, "/api/skills/runtime/mcps/reload", nil)
+	reloadReq := httptest.NewRequest(http.MethodPost, "/api/runtime/mcps/reload", nil)
 	reloadReq.Header.Set("X-Forwarded-For", "10.0.0.5")
 	reloadReq.Header.Set("X-Skills-Admin-Token", "secret-token")
 	reloadRec := httptest.NewRecorder()
@@ -3409,7 +3616,7 @@ func TestReloadRuntimeMCPs_EmitsTraceableLifecycleEvents(t *testing.T) {
 	require.True(t, ok)
 	require.NotEmpty(t, traceID)
 
-	traceReq := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/traces/"+traceID, nil)
+	traceReq := httptest.NewRequest(http.MethodGet, "/api/runtime/traces/"+traceID, nil)
 	traceReq.Header.Set("X-Forwarded-For", "10.0.0.5")
 	traceReq.Header.Set("X-Skills-Admin-Token", "secret-token")
 	traceRec := httptest.NewRecorder()
@@ -3433,7 +3640,7 @@ func TestValidateRuntimeConfig_ReturnsWarnings(t *testing.T) {
 	handler := NewHandler(registry, nil, mcpManager)
 	handler.SetAdminToken("secret-token")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/validate", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/validate", nil)
 	req.Header.Set("X-Forwarded-For", "10.0.0.5")
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -3455,7 +3662,7 @@ func TestValidateRuntimeConfig_IncludesConfigFileWarnings(t *testing.T) {
 	missingPath := filepath.Join(t.TempDir(), "missing-runtime.yaml")
 	handler.SetRuntimeConfig(runtimeConfig, missingPath)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/runtime/validate", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/validate", nil)
 	req.Header.Set("X-Forwarded-For", "10.0.0.5")
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -3491,12 +3698,12 @@ func TestGetSearchStats_TracksModesAndEmbeddingUsage(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	searchReq := httptest.NewRequest(http.MethodGet, "/api/skills/search?q=search%20customer%20orders%20in%20sap", nil)
+	searchReq := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search?q=search%20customer%20orders%20in%20sap", nil)
 	searchRec := httptest.NewRecorder()
 	router.ServeHTTP(searchRec, searchReq)
 	require.Equal(t, http.StatusOK, searchRec.Code)
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/search/stats", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search/stats", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
@@ -3541,7 +3748,7 @@ func TestReindexSearchIndex_RebuildsEmbeddingIndex(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/search/reindex", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/search/reindex", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -3565,13 +3772,13 @@ func TestGetSearchStats_RequiresAdminToken(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/search/stats", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search/stats", nil)
 	req.RemoteAddr = "10.0.0.5:9000"
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
-	authorizedReq := httptest.NewRequest(http.MethodGet, "/api/skills/search/stats", nil)
+	authorizedReq := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search/stats", nil)
 	authorizedReq.RemoteAddr = "10.0.0.5:9000"
 	authorizedReq.Header.Set("X-Skills-Admin-Token", "secret-token")
 	authorizedRec := httptest.NewRecorder()
@@ -3619,13 +3826,13 @@ func TestReindexSearchIndex_CooldownReturnsRateLimit(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	firstReq := httptest.NewRequest(http.MethodPost, "/api/skills/search/reindex", nil)
+	firstReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/search/reindex", nil)
 	firstReq.RemoteAddr = "127.0.0.1:1234"
 	firstRec := httptest.NewRecorder()
 	router.ServeHTTP(firstRec, firstReq)
 	require.Equal(t, http.StatusOK, firstRec.Code)
 
-	secondReq := httptest.NewRequest(http.MethodPost, "/api/skills/search/reindex", nil)
+	secondReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/search/reindex", nil)
 	secondReq.RemoteAddr = "127.0.0.1:1234"
 	secondRec := httptest.NewRecorder()
 	router.ServeHTTP(secondRec, secondReq)
@@ -3680,7 +3887,7 @@ func TestAgentChat_StreamSSE(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"stream please"}],"user_id":"stream-user","stream":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	req.Header.Set("Accept", "text/event-stream")
 	rec := httptest.NewRecorder()
 
@@ -3751,7 +3958,7 @@ func TestAgentChat_StreamSSE_AgentRouteResult(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"please route this"}],"user_id":"route-user","stream":true,"enable_routing":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	req.Header.Set("Accept", "text/event-stream")
 	rec := httptest.NewRecorder()
 
@@ -3804,7 +4011,7 @@ func TestAgentChat_StreamSSE_AgentRouteResult_WithPlanning(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"please planroute this"}],"user_id":"route-user","stream":true,"enable_routing":true,"planning_mode":"planner_preferred"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	req.Header.Set("Accept", "text/event-stream")
 	rec := httptest.NewRecorder()
 
@@ -3836,7 +4043,7 @@ func TestAgentChat_RouteFallbackIncludesOrchestration(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"no route here"}],"user_id":"fallback-user","enable_routing":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -3873,7 +4080,7 @@ func TestAgentChat_StreamSSE_LLMResult_WithPlanning(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"no route but plan this"}],"user_id":"planner-stream-user","stream":true,"planning_mode":"planner_preferred"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	req.Header.Set("Accept", "text/event-stream")
 	rec := httptest.NewRecorder()
 
@@ -3935,7 +4142,7 @@ func TestAgentChat_StreamSSE_ExecutesPlannedSubagents(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"plan and stream"}],"stream":true,"enable_routing":true,"planning_mode":"planner_preferred","execute_planned_subagents":true,"allow_write_planned_subagents":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	req.Header.Set("Accept", "text/event-stream")
 	rec := httptest.NewRecorder()
 
@@ -3995,7 +4202,7 @@ func TestAgentChat_UsesEmbeddingRouterForSemanticRoute(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"search customer orders in sap"}],"enable_routing":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -4053,7 +4260,7 @@ func TestAgentChat_AgentRouteFailureIncludesObservationDetails(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"broken route now"}],"enable_routing":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -4102,7 +4309,7 @@ func TestListCapabilities_ReturnsDescriptors(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/capabilities", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/capabilities", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -4150,23 +4357,23 @@ func TestSkillsAPI_E2EMatrix_BasicPaths(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	searchReq := httptest.NewRequest(http.MethodGet, "/api/skills/search?q=matrix", nil)
+	searchReq := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search?q=matrix", nil)
 	searchRec := httptest.NewRecorder()
 	router.ServeHTTP(searchRec, searchReq)
 	require.Equal(t, http.StatusOK, searchRec.Code)
 
-	semanticReq := httptest.NewRequest(http.MethodGet, "/api/skills/search?q=semantic+probe&mode=semantic", nil)
+	semanticReq := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search?q=semantic+probe&mode=semantic", nil)
 	semanticRec := httptest.NewRecorder()
 	router.ServeHTTP(semanticRec, semanticReq)
 	require.Equal(t, http.StatusOK, semanticRec.Code)
 
 	execBody := []byte(`{"prompt":"run matrix"}`)
-	execReq := httptest.NewRequest(http.MethodPost, "/api/skills/matrix-skill/execute", bytes.NewReader(execBody))
+	execReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/matrix-skill/execute", bytes.NewReader(execBody))
 	execRec := httptest.NewRecorder()
 	router.ServeHTTP(execRec, execReq)
 	require.Equal(t, http.StatusOK, execRec.Code)
 
-	createSessionReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions", bytes.NewReader([]byte(`{"user_id":"matrix-user"}`)))
+	createSessionReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions", bytes.NewReader([]byte(`{"user_id":"matrix-user"}`)))
 	createSessionRec := httptest.NewRecorder()
 	router.ServeHTTP(createSessionRec, createSessionReq)
 	require.Equal(t, http.StatusCreated, createSessionRec.Code)
@@ -4176,12 +4383,12 @@ func TestSkillsAPI_E2EMatrix_BasicPaths(t *testing.T) {
 	sessionID := session["id"].(string)
 
 	agentBody := fmt.Sprintf(`{"messages":[{"role":"user","content":"matrix skill"}],"enable_routing":true,"session_id":"%s"}`, sessionID)
-	agentReq := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader([]byte(agentBody)))
+	agentReq := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader([]byte(agentBody)))
 	agentRec := httptest.NewRecorder()
 	router.ServeHTTP(agentRec, agentReq)
 	require.Equal(t, http.StatusOK, agentRec.Code)
 
-	historyReq := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/"+sessionID+"/history", nil)
+	historyReq := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+sessionID+"/history", nil)
 	historyRec := httptest.NewRecorder()
 	router.ServeHTTP(historyRec, historyReq)
 	require.Equal(t, http.StatusOK, historyRec.Code)
@@ -4209,7 +4416,7 @@ tools: ["echo_tool"]
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	startReq := httptest.NewRequest(http.MethodPost, "/api/skills/hot-reload/start", bytes.NewReader([]byte(`{"dir":"`+strings.ReplaceAll(skillDir, "\\", "\\\\")+`"}`)))
+	startReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/start", bytes.NewReader([]byte(`{"dir":"`+strings.ReplaceAll(skillDir, "\\", "\\\\")+`"}`)))
 	startReq.RemoteAddr = "127.0.0.1:1234"
 	startRec := httptest.NewRecorder()
 	router.ServeHTTP(startRec, startReq)
@@ -4224,13 +4431,13 @@ tools: ["echo_tool"]
 	assert.True(t, loadedSkill.Source.DiscoveryOnly)
 	assert.Equal(t, "", loadedSkill.SystemPrompt)
 
-	listReq := httptest.NewRequest(http.MethodGet, "/api/skills", nil)
+	listReq := httptest.NewRequest(http.MethodGet, "/api/runtime/skills", nil)
 	listRec := httptest.NewRecorder()
 	router.ServeHTTP(listRec, listReq)
 	require.Equal(t, http.StatusOK, listRec.Code)
 	assert.Contains(t, listRec.Body.String(), `"systemPrompt":"You are hot hydrated."`)
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/hot-reload/stats", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/hot-reload/stats", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
@@ -4247,7 +4454,7 @@ triggers:
 tools: ["echo_tool"]
 `), 0o644))
 
-	reloadReq := httptest.NewRequest(http.MethodPost, "/api/skills/hot-reload/reload", nil)
+	reloadReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/reload", nil)
 	reloadReq.RemoteAddr = "127.0.0.1:1234"
 	reloadRec := httptest.NewRecorder()
 	router.ServeHTTP(reloadRec, reloadReq)
@@ -4256,7 +4463,7 @@ tools: ["echo_tool"]
 	_, exists := registry.Get("hot-skill-updated")
 	assert.True(t, exists)
 
-	stopReq := httptest.NewRequest(http.MethodPost, "/api/skills/hot-reload/stop", nil)
+	stopReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/stop", nil)
 	stopReq.RemoteAddr = "127.0.0.1:1234"
 	stopRec := httptest.NewRecorder()
 	router.ServeHTTP(stopRec, stopReq)
@@ -4287,7 +4494,7 @@ func TestGetStats_IncludesSkillDirs(t *testing.T) {
 	registeredSkill.SetSource(filepath.Join(systemDir, "stats-skill.yaml"), systemDir, skill.SkillSourceLayerSystem)
 
 	handler := NewHandler(registry, loader, mcpManager)
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/stats", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/stats", nil)
 	rec := httptest.NewRecorder()
 
 	handler.GetStats(rec, req)
@@ -4339,7 +4546,7 @@ tools: ["echo_tool"]
 	handler.RegisterRoutes(router)
 
 	body := fmt.Sprintf(`{"dirs":["%s","%s"]}`, strings.ReplaceAll(systemDir, "\\", "\\\\"), strings.ReplaceAll(extraDir, "\\", "\\\\"))
-	startReq := httptest.NewRequest(http.MethodPost, "/api/skills/hot-reload/start", bytes.NewReader([]byte(body)))
+	startReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/start", bytes.NewReader([]byte(body)))
 	startReq.RemoteAddr = "127.0.0.1:1234"
 	startRec := httptest.NewRecorder()
 	router.ServeHTTP(startRec, startReq)
@@ -4354,7 +4561,7 @@ tools: ["echo_tool"]
 	assert.Equal(t, extraDir, rawDirs[1])
 	assert.Equal(t, 2, registry.Count())
 
-	stopReq := httptest.NewRequest(http.MethodPost, "/api/skills/hot-reload/stop", nil)
+	stopReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/stop", nil)
 	stopReq.RemoteAddr = "127.0.0.1:1234"
 	stopRec := httptest.NewRecorder()
 	router.ServeHTTP(stopRec, stopReq)
@@ -4381,7 +4588,7 @@ func TestListSkills_IncludesSourceMetadata(t *testing.T) {
 	require.True(t, ok)
 	skillItem.SetSource(filepath.Join(sourceDir, "list-skill.yaml"), sourceDir, skill.SkillSourceLayerExternal)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills", nil)
 	rec := httptest.NewRecorder()
 	handler.ListSkills(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -4418,7 +4625,7 @@ triggers:
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "prompt.md"), []byte("You are hydrated."), 0o644))
 	require.NoError(t, loader.DiscoverAllWithRegistry([]string{sourceDir}, registry))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills", nil)
 	rec := httptest.NewRecorder()
 	handler.ListSkills(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -4455,7 +4662,7 @@ Reply from hydrated skill.`), 0o644))
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/hydrated-skill", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/hydrated-skill", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -4476,7 +4683,7 @@ func TestCreateSkill_AssignsRuntimeSource(t *testing.T) {
 		"description":"runtime source test",
 		"triggers":[{"type":"keyword","values":["runtime"],"weight":1}]
 	}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
@@ -4502,7 +4709,7 @@ func TestCreateSkill_PersistsToExternalDir(t *testing.T) {
 		"description":"persist test",
 		"triggers":[{"type":"keyword","values":["persist"],"weight":1}]
 	}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills?persist=true", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills?persist=true", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
@@ -4533,7 +4740,7 @@ func TestCreateSkill_PersistsPromptToCompanionMarkdown(t *testing.T) {
 		"userPrompt":"Return only the result.",
 		"triggers":[{"type":"keyword","values":["persist"],"weight":1}]
 	}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills?persist=true", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills?persist=true", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
@@ -4571,7 +4778,7 @@ func TestCreateSkill_RejectsPersistToSystemDir(t *testing.T) {
 		"description":"persist test",
 		"triggers":[{"type":"keyword","values":["persist"],"weight":1}]
 	}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills?persist=true&target_dir="+systemDir, bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills?persist=true&target_dir="+systemDir, bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
@@ -4599,7 +4806,7 @@ func TestListSkills_FiltersBySourceLayer(t *testing.T) {
 	systemSkill.SetSource("system.yaml", filepath.Clean("C:/skills/system"), skill.SkillSourceLayerSystem)
 	externalSkill.SetSource("external.yaml", filepath.Clean("C:/skills/external"), skill.SkillSourceLayerExternal)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills?source_layer=external", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills?source_layer=external", nil)
 	rec := httptest.NewRecorder()
 	handler.ListSkills(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -4632,7 +4839,7 @@ func TestSearchSkills_FiltersBySourceDir(t *testing.T) {
 	externalSkill.SetSource("external.yaml", filepath.Clean("C:/skills/external/external-shell"), skill.SkillSourceLayerExternal)
 
 	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/search?q=shell&source_dir=C:/skills/external", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search?q=shell&source_dir=C:/skills/external", nil)
 	rec := httptest.NewRecorder()
 	handler.SearchSkills(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -4665,7 +4872,7 @@ triggers:
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "prompt.md"), []byte("You are hydrated."), 0o644))
 	require.NoError(t, loader.DiscoverAllWithRegistry([]string{sourceDir}, registry))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/search?q=hydrate", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/search?q=hydrate", nil)
 	rec := httptest.NewRecorder()
 	handler.SearchSkills(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -4709,7 +4916,7 @@ triggers:
 tools: ["echo_tool"]
 `), 0o644))
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/reload", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/reload", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.ReloadSkills(rec, req)
@@ -4737,7 +4944,7 @@ triggers:
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "prompt.md"), []byte("You are hydrated."), 0o644))
 	require.NoError(t, loader.DiscoverAllWithRegistry([]string{sourceDir}, registry))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/export", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/export", nil)
 	rec := httptest.NewRecorder()
 	handler.ExportSkills(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -4777,7 +4984,7 @@ tools: ["echo_tool"]
 `), 0o644))
 
 	body := fmt.Sprintf(`{"dirs":["%s","%s"]}`, strings.ReplaceAll(systemDir, "\\", "\\\\"), strings.ReplaceAll(externalDir, "\\", "\\\\"))
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/reload", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/reload", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.ReloadSkills(rec, req)
@@ -4799,13 +5006,13 @@ func TestCreateSkill_RequiresAdminToken(t *testing.T) {
 		"triggers":[{"type":"keyword","values":["auth"],"weight":1}]
 	}`
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "10.0.0.5:9000"
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
-	authorizedReq := httptest.NewRequest(http.MethodPost, "/api/skills", bytes.NewReader([]byte(body)))
+	authorizedReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills", bytes.NewReader([]byte(body)))
 	authorizedReq.RemoteAddr = "10.0.0.5:9000"
 	authorizedReq.Header.Set("X-Skills-Admin-Token", "secret-token")
 	authorizedRec := httptest.NewRecorder()
@@ -4837,13 +5044,13 @@ func TestReloadSkills_RequiresAdminToken(t *testing.T) {
 	handler := NewHandler(registry, loader, mcpManager)
 	handler.SetSearchAdminToken("secret-token")
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/reload", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/reload", nil)
 	req.RemoteAddr = "10.0.0.5:9000"
 	rec := httptest.NewRecorder()
 	handler.ReloadSkills(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 
-	authorizedReq := httptest.NewRequest(http.MethodPost, "/api/skills/reload", nil)
+	authorizedReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/reload", nil)
 	authorizedReq.RemoteAddr = "10.0.0.5:9000"
 	authorizedReq.Header.Set("Authorization", "Bearer secret-token")
 	authorizedRec := httptest.NewRecorder()
@@ -4890,7 +5097,7 @@ func TestCreateSkill_AllowsAdminRoleFromJWTClaims(t *testing.T) {
 	tokenString, err := token.SignedString([]byte("jwt-admin-secret"))
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "10.0.0.5:9000"
 	req.Header.Set("Authorization", "Bearer "+tokenString)
 	rec := httptest.NewRecorder()
@@ -4928,7 +5135,7 @@ func TestGetAuthPolicy_ReturnsScopeResolverSnapshot(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/auth/policy", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/auth/policy", nil)
 	req.RemoteAddr = "10.0.0.5:9000"
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -4968,7 +5175,7 @@ func TestGetGovernancePolicy_ReturnsUnifiedPolicies(t *testing.T) {
 	handler.SetUsageLedgerStore(&testUsageLedgerStore{})
 	handler.SetSearchReindexCooldown(45 * time.Second)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/governance/policy", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/governance/policy", nil)
 	req.RemoteAddr = "10.0.0.5:9000"
 	req.Header.Set("X-Skills-Admin-Token", "secret-token")
 	rec := httptest.NewRecorder()
@@ -5009,7 +5216,7 @@ func TestAuthPolicyEndpoints_UpdateAndDelete(t *testing.T) {
 		},
 	})
 
-	updateReq := httptest.NewRequest(http.MethodPut, "/api/skills/auth/policy", bytes.NewReader([]byte(`{
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/runtime/auth/policy", bytes.NewReader([]byte(`{
 		"role_headers":["X-Role"],
 		"role_claims":["roles"],
 		"admin_roles":["platform-admin"],
@@ -5027,7 +5234,7 @@ func TestAuthPolicyEndpoints_UpdateAndDelete(t *testing.T) {
 	assert.Contains(t, policy["admin_roles"].([]interface{}), "platform-admin")
 	assert.Equal(t, float64(2), policy["api_key_scope_count"])
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/skills/auth/policy", bytes.NewReader([]byte(`{"field":"api_key_scope","key":"scope-key-a"}`)))
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/runtime/auth/policy", bytes.NewReader([]byte(`{"field":"api_key_scope","key":"scope-key-a"}`)))
 	deleteReq.RemoteAddr = "10.0.0.5:9000"
 	deleteReq.Header.Set("Authorization", "Bearer secret-token")
 	deleteRec := httptest.NewRecorder()
@@ -5054,7 +5261,7 @@ func TestUpdateAuthPolicy_RevertsOnPersistError(t *testing.T) {
 		return fmt.Errorf("persist failed")
 	})
 
-	updateReq := httptest.NewRequest(http.MethodPut, "/api/skills/auth/policy", bytes.NewReader([]byte(`{
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/runtime/auth/policy", bytes.NewReader([]byte(`{
 		"admin_roles":["platform-admin"]
 	}`)))
 	updateReq.RemoteAddr = "10.0.0.5:9000"
@@ -5081,7 +5288,7 @@ func TestUpdateUsagePolicy_RevertsOnPersistError(t *testing.T) {
 		return fmt.Errorf("persist failed")
 	})
 
-	updateReq := httptest.NewRequest(http.MethodPut, "/api/skills/usage/policy", bytes.NewReader([]byte(`{
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/runtime/usage/policy", bytes.NewReader([]byte(`{
 		"default_max_requests":10
 	}`)))
 	updateReq.RemoteAddr = "10.0.0.5:9000"
@@ -5106,7 +5313,7 @@ func TestUpdateMutationPolicy_RevertsOnPersistError(t *testing.T) {
 		return fmt.Errorf("persist failed")
 	})
 
-	updateReq := httptest.NewRequest(http.MethodPut, "/api/skills/mutation/policy", bytes.NewReader([]byte(`{
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/runtime/mutation/policy", bytes.NewReader([]byte(`{
 		"read_only":false,
 		"disable_import":true
 	}`)))
@@ -5147,7 +5354,7 @@ func TestUpdateSkill_PersistsBackToExistingExternalSource(t *testing.T) {
 		"description":"new description",
 		"triggers":[{"type":"keyword","values":["new"],"weight":1}]
 	}`
-	req := httptest.NewRequest(http.MethodPut, "/api/skills/persisted-skill", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPut, "/api/runtime/skills/persisted-skill", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	req = mux.SetURLVars(req, map[string]string{"name": "persisted-skill"})
 	rec := httptest.NewRecorder()
@@ -5179,7 +5386,7 @@ func TestDeleteSkill_DeleteFileRemovesExternalManifest(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "prompt.md"), []byte("You are deletable."), 0o644))
 	skillItem.SetPromptSource(filepath.Join(sourceDir, "prompt.md"))
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/skills/deletable-skill?delete_file=true", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/runtime/skills/deletable-skill?delete_file=true", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
 	req = mux.SetURLVars(req, map[string]string{"name": "deletable-skill"})
 	rec := httptest.NewRecorder()
@@ -5205,7 +5412,7 @@ func TestDeleteSkill_DeleteFileRejectsSystemSkill(t *testing.T) {
 	skillItem, _ := registry.Get("system-skill")
 	skillItem.SetSource("C:/system/skill.yaml", "C:/system", skill.SkillSourceLayerSystem)
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/skills/system-skill?delete_file=true", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/runtime/skills/system-skill?delete_file=true", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
 	req = mux.SetURLVars(req, map[string]string{"name": "system-skill"})
 	rec := httptest.NewRecorder()
@@ -5225,7 +5432,7 @@ func TestCreateSkill_ReadOnlyPolicyBlocksMutation(t *testing.T) {
 		"description":"read only test",
 		"triggers":[{"type":"keyword","values":["blocked"],"weight":1}]
 	}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
@@ -5254,7 +5461,7 @@ func TestCreateSkill_PersistDisabledBlocksPersist(t *testing.T) {
 		"description":"persist disabled test",
 		"triggers":[{"type":"keyword","values":["persist"],"weight":1}]
 	}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills?persist=true", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills?persist=true", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.CreateSkill(rec, req)
@@ -5270,7 +5477,7 @@ func TestImportSkills_DisabledByPolicy(t *testing.T) {
 	handler.SetMutationPolicy(MutationPolicy{DisableImport: true})
 
 	body := `{"skills":[{"name":"imported-skill","description":"blocked import","triggers":[{"type":"keyword","values":["import"],"weight":1}]}]}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/import", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/import", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.ImportSkills(rec, req)
@@ -5288,7 +5495,7 @@ func TestImportSkills_PersistsToExternalDirWithPromptCompanion(t *testing.T) {
 	handler := NewHandler(registry, loader, mcpManager)
 
 	body := `{"skills":[{"name":"imported-persisted-skill","description":"persisted import","systemPrompt":"You are imported.","userPrompt":"Return imported.","triggers":[{"type":"keyword","values":["import"],"weight":1}]}]}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/import?persist=true", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/import?persist=true", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.ImportSkills(rec, req)
@@ -5322,7 +5529,7 @@ func TestReloadSkills_DisabledByPolicy(t *testing.T) {
 	handler := NewHandler(registry, loader, mcpManager)
 	handler.SetMutationPolicy(MutationPolicy{DisableReloadOps: true})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/reload", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/reload", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.ReloadSkills(rec, req)
@@ -5338,7 +5545,7 @@ func TestHotReloadStart_DisabledByPolicy(t *testing.T) {
 	handler.SetMutationPolicy(MutationPolicy{DisableHotReload: true})
 
 	body := fmt.Sprintf(`{"dir":"%s"}`, strings.ReplaceAll(t.TempDir(), "\\", "\\\\"))
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/hot-reload/start", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/start", bytes.NewReader([]byte(body)))
 	req.RemoteAddr = "127.0.0.1:1234"
 	rec := httptest.NewRecorder()
 	handler.StartHotReload(rec, req)
@@ -5364,7 +5571,7 @@ func TestGetStats_IncludesMutationPolicy(t *testing.T) {
 		DefaultMaxTokens:   1000,
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/stats", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/skills/stats", nil)
 	rec := httptest.NewRecorder()
 	handler.GetStats(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -5408,18 +5615,18 @@ func TestExecuteSkill_RequestQuotaExceeded(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	firstReq := httptest.NewRequest(http.MethodPost, "/api/skills/quota-skill/execute", bytes.NewReader([]byte(`{"prompt":"one","user_id":"quota-user"}`)))
+	firstReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/quota-skill/execute", bytes.NewReader([]byte(`{"prompt":"one","user_id":"quota-user"}`)))
 	firstRec := httptest.NewRecorder()
 	router.ServeHTTP(firstRec, firstReq)
 	require.Equal(t, http.StatusOK, firstRec.Code)
 
-	secondReq := httptest.NewRequest(http.MethodPost, "/api/skills/quota-skill/execute", bytes.NewReader([]byte(`{"prompt":"two","user_id":"quota-user"}`)))
+	secondReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/quota-skill/execute", bytes.NewReader([]byte(`{"prompt":"two","user_id":"quota-user"}`)))
 	secondRec := httptest.NewRecorder()
 	router.ServeHTTP(secondRec, secondReq)
 	require.Equal(t, http.StatusTooManyRequests, secondRec.Code)
 	assert.Contains(t, secondRec.Body.String(), "request quota exceeded")
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/usage/stats?user_id=quota-user", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?user_id=quota-user", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
@@ -5454,13 +5661,13 @@ func TestAgentChat_TokenQuotaExceeded(t *testing.T) {
 	handler.RegisterRoutes(router)
 
 	body := []byte(`{"messages":[{"role":"user","content":"this should exceed token quota"}],"user_id":"token-user"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/agent/chat", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 	assert.Contains(t, rec.Body.String(), "token quota exceeded")
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/usage/stats?user_id=token-user", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?user_id=token-user", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
@@ -5490,19 +5697,19 @@ func TestUsageStats_ResetUser(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	execReq := httptest.NewRequest(http.MethodPost, "/api/skills/usage-skill/execute", bytes.NewReader([]byte(`{"prompt":"record","user_id":"usage-user"}`)))
+	execReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/usage-skill/execute", bytes.NewReader([]byte(`{"prompt":"record","user_id":"usage-user"}`)))
 	execRec := httptest.NewRecorder()
 	router.ServeHTTP(execRec, execReq)
 	require.Equal(t, http.StatusOK, execRec.Code)
 
-	resetReq := httptest.NewRequest(http.MethodPost, "/api/skills/usage/reset", bytes.NewReader([]byte(`{"user_id":"usage-user"}`)))
+	resetReq := httptest.NewRequest(http.MethodPost, "/api/runtime/usage/reset", bytes.NewReader([]byte(`{"user_id":"usage-user"}`)))
 	resetReq.RemoteAddr = "127.0.0.1:1234"
 	resetRec := httptest.NewRecorder()
 	router.ServeHTTP(resetRec, resetReq)
 	require.Equal(t, http.StatusOK, resetRec.Code)
 	assert.Contains(t, resetRec.Body.String(), `"reset":true`)
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/usage/stats?user_id=usage-user", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?user_id=usage-user", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
@@ -5536,18 +5743,18 @@ func TestExecuteSkill_RequestQuotaScopedByTenantProject(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	firstReq := httptest.NewRequest(http.MethodPost, "/api/skills/scoped-quota-skill/execute", bytes.NewReader([]byte(`{"prompt":"one","tenant_id":"tenant-a","project_id":"project-a","user_id":"scope-user"}`)))
+	firstReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/scoped-quota-skill/execute", bytes.NewReader([]byte(`{"prompt":"one","tenant_id":"tenant-a","project_id":"project-a","user_id":"scope-user"}`)))
 	firstRec := httptest.NewRecorder()
 	router.ServeHTTP(firstRec, firstReq)
 	require.Equal(t, http.StatusOK, firstRec.Code)
 
-	secondReq := httptest.NewRequest(http.MethodPost, "/api/skills/scoped-quota-skill/execute", bytes.NewReader([]byte(`{"prompt":"two","tenant_id":"tenant-a","project_id":"project-a","user_id":"scope-user"}`)))
+	secondReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/scoped-quota-skill/execute", bytes.NewReader([]byte(`{"prompt":"two","tenant_id":"tenant-a","project_id":"project-a","user_id":"scope-user"}`)))
 	secondRec := httptest.NewRecorder()
 	router.ServeHTTP(secondRec, secondReq)
 	require.Equal(t, http.StatusTooManyRequests, secondRec.Code)
 	assert.Contains(t, secondRec.Body.String(), "scope_key")
 
-	thirdReq := httptest.NewRequest(http.MethodPost, "/api/skills/scoped-quota-skill/execute", bytes.NewReader([]byte(`{"prompt":"three","tenant_id":"tenant-a","project_id":"project-b","user_id":"scope-user"}`)))
+	thirdReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/scoped-quota-skill/execute", bytes.NewReader([]byte(`{"prompt":"three","tenant_id":"tenant-a","project_id":"project-b","user_id":"scope-user"}`)))
 	thirdRec := httptest.NewRecorder()
 	router.ServeHTTP(thirdRec, thirdReq)
 	require.Equal(t, http.StatusOK, thirdRec.Code)
@@ -5571,17 +5778,17 @@ func TestGetUsageStats_FiltersByTenantProjectScope(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	reqA := httptest.NewRequest(http.MethodPost, "/api/skills/usage-scope-skill/execute", bytes.NewReader([]byte(`{"prompt":"one","tenant_id":"tenant-a","project_id":"project-a","user_id":"scope-user"}`)))
+	reqA := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/usage-scope-skill/execute", bytes.NewReader([]byte(`{"prompt":"one","tenant_id":"tenant-a","project_id":"project-a","user_id":"scope-user"}`)))
 	recA := httptest.NewRecorder()
 	router.ServeHTTP(recA, reqA)
 	require.Equal(t, http.StatusOK, recA.Code)
 
-	reqB := httptest.NewRequest(http.MethodPost, "/api/skills/usage-scope-skill/execute", bytes.NewReader([]byte(`{"prompt":"two","tenant_id":"tenant-b","project_id":"project-b","user_id":"scope-user"}`)))
+	reqB := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/usage-scope-skill/execute", bytes.NewReader([]byte(`{"prompt":"two","tenant_id":"tenant-b","project_id":"project-b","user_id":"scope-user"}`)))
 	recB := httptest.NewRecorder()
 	router.ServeHTTP(recB, reqB)
 	require.Equal(t, http.StatusOK, recB.Code)
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=scope-user", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=scope-user", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
@@ -5636,19 +5843,19 @@ func TestGetUsageStats_ResolvesQuotaPolicyPrecedence(t *testing.T) {
 		return payload["quota"].(map[string]interface{})
 	}
 
-	userQuota := checkQuota("/api/skills/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=alice")
+	userQuota := checkQuota("/api/runtime/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=alice")
 	assert.Equal(t, float64(3), userQuota["max_requests"])
 	assert.Equal(t, "user", userQuota["resolved_from"])
 
-	projectQuota := checkQuota("/api/skills/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=bob")
+	projectQuota := checkQuota("/api/runtime/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=bob")
 	assert.Equal(t, float64(1), projectQuota["max_requests"])
 	assert.Equal(t, "project", projectQuota["resolved_from"])
 
-	tenantQuota := checkQuota("/api/skills/usage/stats?tenant_id=tenant-a&project_id=project-b&user_id=bob")
+	tenantQuota := checkQuota("/api/runtime/usage/stats?tenant_id=tenant-a&project_id=project-b&user_id=bob")
 	assert.Equal(t, float64(2), tenantQuota["max_requests"])
 	assert.Equal(t, "tenant", tenantQuota["resolved_from"])
 
-	defaultQuota := checkQuota("/api/skills/usage/stats?tenant_id=tenant-b&project_id=project-z&user_id=bob")
+	defaultQuota := checkQuota("/api/runtime/usage/stats?tenant_id=tenant-b&project_id=project-z&user_id=bob")
 	assert.Equal(t, float64(5), defaultQuota["max_requests"])
 	assert.Equal(t, "default", defaultQuota["resolved_from"])
 }
@@ -5661,7 +5868,7 @@ func TestUsagePolicyEndpoints_UpdateAndDelete(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	getReq := httptest.NewRequest(http.MethodGet, "/api/skills/usage/policy", nil)
+	getReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/policy", nil)
 	getReq.RemoteAddr = "127.0.0.1:1234"
 	getRec := httptest.NewRecorder()
 	router.ServeHTTP(getRec, getReq)
@@ -5681,7 +5888,7 @@ func TestUsagePolicyEndpoints_UpdateAndDelete(t *testing.T) {
 			"tenant-a/project-a/alice": {"max_requests": 1}
 		}
 	}`)
-	updateReq := httptest.NewRequest(http.MethodPut, "/api/skills/usage/policy", bytes.NewReader(updateBody))
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/runtime/usage/policy", bytes.NewReader(updateBody))
 	updateReq.RemoteAddr = "127.0.0.1:1234"
 	updateRec := httptest.NewRecorder()
 	router.ServeHTTP(updateRec, updateReq)
@@ -5695,7 +5902,7 @@ func TestUsagePolicyEndpoints_UpdateAndDelete(t *testing.T) {
 	tenants := policy["tenants"].(map[string]interface{})
 	assert.Contains(t, tenants, "tenant-a")
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=alice", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=alice", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
@@ -5706,13 +5913,13 @@ func TestUsagePolicyEndpoints_UpdateAndDelete(t *testing.T) {
 	assert.Equal(t, float64(1), quota["max_requests"])
 	assert.Equal(t, "user", quota["resolved_from"])
 
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/skills/usage/policy", bytes.NewReader([]byte(`{"level":"user","key":"tenant-a/project-a/alice"}`)))
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/runtime/usage/policy", bytes.NewReader([]byte(`{"level":"user","key":"tenant-a/project-a/alice"}`)))
 	deleteReq.RemoteAddr = "127.0.0.1:1234"
 	deleteRec := httptest.NewRecorder()
 	router.ServeHTTP(deleteRec, deleteReq)
 	require.Equal(t, http.StatusOK, deleteRec.Code)
 
-	statsReq2 := httptest.NewRequest(http.MethodGet, "/api/skills/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=alice", nil)
+	statsReq2 := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-a&project_id=project-a&user_id=alice", nil)
 	statsReq2.RemoteAddr = "127.0.0.1:1234"
 	statsRec2 := httptest.NewRecorder()
 	router.ServeHTTP(statsRec2, statsReq2)
@@ -5743,12 +5950,12 @@ func TestGetUsageLedger_ReturnsPersistedRecords(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	execReq := httptest.NewRequest(http.MethodPost, "/api/skills/ledger-skill/execute", bytes.NewReader([]byte(`{"prompt":"record ledger","tenant_id":"tenant-a","project_id":"project-a","user_id":"alice"}`)))
+	execReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/ledger-skill/execute", bytes.NewReader([]byte(`{"prompt":"record ledger","tenant_id":"tenant-a","project_id":"project-a","user_id":"alice"}`)))
 	execRec := httptest.NewRecorder()
 	router.ServeHTTP(execRec, execReq)
 	require.Equal(t, http.StatusOK, execRec.Code)
 
-	ledgerReq := httptest.NewRequest(http.MethodGet, "/api/skills/usage/ledger?tenant_id=tenant-a&project_id=project-a&user_id=alice&entrypoint=execute&skill=ledger-skill", nil)
+	ledgerReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/ledger?tenant_id=tenant-a&project_id=project-a&user_id=alice&entrypoint=execute&skill=ledger-skill", nil)
 	ledgerReq.RemoteAddr = "127.0.0.1:1234"
 	ledgerRec := httptest.NewRecorder()
 	router.ServeHTTP(ledgerRec, ledgerReq)
@@ -5793,7 +6000,7 @@ func TestExecuteSkill_ResolvesScopeFromHeaders(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/header-skill/execute", bytes.NewReader([]byte(`{"prompt":"record header scope"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/header-skill/execute", bytes.NewReader([]byte(`{"prompt":"record header scope"}`)))
 	req.Header.Set("X-Tenant-ID", "tenant-header")
 	req.Header.Set("X-Project-ID", "project-header")
 	req.Header.Set("X-User-ID", "user-header")
@@ -5801,7 +6008,7 @@ func TestExecuteSkill_ResolvesScopeFromHeaders(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/usage/stats?tenant_id=tenant-header&project_id=project-header&user_id=user-header", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-header&project_id=project-header&user_id=user-header", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
@@ -5837,13 +6044,13 @@ func TestExecuteSkill_ResolvesScopeFromAPIKeyBinding(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/apikey-skill/execute", bytes.NewReader([]byte(`{"prompt":"record api key scope"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/apikey-skill/execute", bytes.NewReader([]byte(`{"prompt":"record api key scope"}`)))
 	req.Header.Set("Authorization", "Bearer secret-scope-key")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/usage/stats?tenant_id=tenant-api&project_id=project-api&user_id=user-api", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-api&project_id=project-api&user_id=user-api", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
@@ -5889,13 +6096,13 @@ func TestExecuteSkill_ResolvesScopeFromJWTClaims(t *testing.T) {
 	tokenString, err := token.SignedString([]byte("jwt-secret"))
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/jwt-skill/execute", bytes.NewReader([]byte(`{"prompt":"record jwt scope"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/jwt-skill/execute", bytes.NewReader([]byte(`{"prompt":"record jwt scope"}`)))
 	req.Header.Set("Authorization", "Bearer "+tokenString)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	statsReq := httptest.NewRequest(http.MethodGet, "/api/skills/usage/stats?tenant_id=tenant-jwt&project_id=project-jwt&user_id=user-jwt", nil)
+	statsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/stats?tenant_id=tenant-jwt&project_id=project-jwt&user_id=user-jwt", nil)
 	statsReq.RemoteAddr = "127.0.0.1:1234"
 	statsRec := httptest.NewRecorder()
 	router.ServeHTTP(statsRec, statsReq)
@@ -5923,4 +6130,3 @@ func TestBuildOrchestrationPayload_AgentResultCountsObservedTools(t *testing.T) 
 func promptPathForSource(sourcePath string) string {
 	return filepath.Join(filepath.Dir(sourcePath), "prompt.md")
 }
-

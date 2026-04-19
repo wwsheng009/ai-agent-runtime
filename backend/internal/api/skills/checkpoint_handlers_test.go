@@ -8,14 +8,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/require"
 	runtimeagent "github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/gorilla/mux"
-	"github.com/stretchr/testify/require"
 )
 
 func TestRestoreSessionCheckpointConversationRewritesSessionHistory(t *testing.T) {
@@ -72,7 +72,7 @@ func TestRestoreSessionCheckpointConversationRewritesSessionHistory(t *testing.T
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+session.ID+"/checkpoints/"+checkpointID+"/restore", strings.NewReader(`{"mode":"conversation"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/checkpoints/"+checkpointID+"/restore", strings.NewReader(`{"mode":"conversation"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -147,7 +147,7 @@ func TestPreviewSessionCheckpointConversationReportsExactSnapshot(t *testing.T) 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+session.ID+"/checkpoints/"+checkpointID+"/preview", strings.NewReader(`{"mode":"conversation"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/checkpoints/"+checkpointID+"/preview", strings.NewReader(`{"mode":"conversation"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -220,7 +220,7 @@ func TestPreviewSessionCheckpointConversationIncludesProvenance(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+session.ID+"/checkpoints/"+checkpointID+"/preview", strings.NewReader(`{"mode":"conversation"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/checkpoints/"+checkpointID+"/preview", strings.NewReader(`{"mode":"conversation"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -286,7 +286,7 @@ func TestListSessionCheckpointsIncludesConversationExactSummary(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/"+session.ID+"/checkpoints", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/checkpoints", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -359,7 +359,7 @@ func TestListSessionCheckpointsIncludesProvenanceSummary(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/"+session.ID+"/checkpoints", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/checkpoints", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -378,4 +378,3 @@ func TestListSessionCheckpointsIncludesProvenanceSummary(t *testing.T) {
 	require.Equal(t, 1, resp.Checkpoints[0].Provenance.ProfileResourceKinds["memory"])
 	require.Contains(t, resp.Checkpoints[0].Provenance.ProfileResourceLabels, "memory:memory.json")
 }
-

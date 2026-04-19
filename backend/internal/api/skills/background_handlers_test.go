@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
-	"github.com/gorilla/mux"
-	"github.com/stretchr/testify/require"
 )
 
 func TestGetBackgroundJobIncludesRestartPolicy(t *testing.T) {
@@ -40,7 +40,7 @@ func TestGetBackgroundJobIncludesRestartPolicy(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/background/jobs/"+job.ID, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/background/jobs/"+job.ID, nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -52,4 +52,3 @@ func TestGetBackgroundJobIncludesRestartPolicy(t *testing.T) {
 	require.Equal(t, job.ID, resp.Job.ID)
 	require.Equal(t, background.RestartPolicyRerun, resp.Job.RestartPolicy)
 }
-

@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
@@ -20,11 +23,8 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
-	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/gorilla/mux"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type synchronizedResponseRecorder struct {
@@ -206,7 +206,7 @@ func TestSubmitSessionRuntimeCommand_SubmitPromptPropagatesRunMeta(t *testing.T)
 	session, err := sessionManager.Create(context.Background(), "user-1")
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
 		"type":"submit_prompt",
 		"prompt":"Use the tool.",
 		"run_meta":{
@@ -277,7 +277,7 @@ func TestSubmitSessionRuntimeCommand_RewindReturnsRestoreResult(t *testing.T) {
 		})
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
 		"type":"rewind",
 		"checkpoint_id":"`+checkpointID+`",
 		"mode":"conversation"
@@ -332,7 +332,7 @@ func TestSubmitSessionRuntimeCommand_SubmitPromptReturnsAcceptedWhenApprovalIsPe
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
 		"type":"submit_prompt",
 		"prompt":"Inspect the repository."
 	}`)).WithContext(ctx)
@@ -378,7 +378,7 @@ func TestSubmitSessionRuntimeCommand_SubmitPromptCompletesWithBootstrapWiring(t 
 	session, err := bootstrap.SessionManager().Create(context.Background(), "user-bootstrap")
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
 		"type":"submit_prompt",
 		"prompt":"Reply with exactly hi."
 	}`))
@@ -404,7 +404,7 @@ func TestSessionAgentHTTP_SpawnAndStatus(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	spawnReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+parentSession.ID+"/agents", strings.NewReader(`{
+	spawnReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+parentSession.ID+"/agents", strings.NewReader(`{
 		"agent_type":"explorer",
 		"fork_context":true
 	}`))
@@ -420,7 +420,7 @@ func TestSessionAgentHTTP_SpawnAndStatus(t *testing.T) {
 	assert.Equal(t, parentSession.ID, agentPayload["parent_session_id"])
 	assert.Equal(t, "explorer", agentPayload["agent_type"])
 
-	statusReq := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/"+parentSession.ID+"/agents/"+childID, nil)
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+parentSession.ID+"/agents/"+childID, nil)
 	statusRec := httptest.NewRecorder()
 	router.ServeHTTP(statusRec, statusReq)
 	require.Equal(t, http.StatusOK, statusRec.Code)
@@ -459,7 +459,7 @@ func TestSessionAgentHTTP_SendWaitAndEvents(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	spawnReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+parentSession.ID+"/agents", strings.NewReader(`{}`))
+	spawnReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+parentSession.ID+"/agents", strings.NewReader(`{}`))
 	spawnRec := httptest.NewRecorder()
 	router.ServeHTTP(spawnRec, spawnReq)
 	require.Equal(t, http.StatusCreated, spawnRec.Code)
@@ -467,7 +467,7 @@ func TestSessionAgentHTTP_SendWaitAndEvents(t *testing.T) {
 	require.NoError(t, json.Unmarshal(spawnRec.Body.Bytes(), &spawnPayload))
 	childID := spawnPayload["agent"].(map[string]interface{})["session_id"].(string)
 
-	inputReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+parentSession.ID+"/agents/"+childID+"/input", strings.NewReader(`{
+	inputReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+parentSession.ID+"/agents/"+childID+"/input", strings.NewReader(`{
 		"message":"say child done"
 	}`))
 	inputRec := httptest.NewRecorder()
@@ -476,7 +476,7 @@ func TestSessionAgentHTTP_SendWaitAndEvents(t *testing.T) {
 
 	var agentResult map[string]interface{}
 	require.Eventually(t, func() bool {
-		waitReq := httptest.NewRequest(http.MethodPost, "/api/skills/sessions/"+parentSession.ID+"/agents/wait", strings.NewReader(`{
+		waitReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+parentSession.ID+"/agents/wait", strings.NewReader(`{
 			"ids":["`+childID+`"],
 			"timeout_ms":5000
 		}`))
@@ -510,7 +510,7 @@ func TestSessionAgentHTTP_SendWaitAndEvents(t *testing.T) {
 	assert.Equal(t, "idle", agentResult["status"])
 	assert.Equal(t, "child done", agentResult["output"])
 
-	eventsReq := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/"+parentSession.ID+"/agents/"+childID+"/events?after_seq=0&limit=20&wait_ms=0", nil)
+	eventsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+parentSession.ID+"/agents/"+childID+"/events?after_seq=0&limit=20&wait_ms=0", nil)
 	var eventsResult map[string]interface{}
 	require.Eventually(t, func() bool {
 		eventsRec := httptest.NewRecorder()
@@ -556,7 +556,7 @@ func TestListSessionToolReceiptsReturnsPersistedReceipts(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/session-receipts/runtime/tool-receipts", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-receipts/runtime/tool-receipts", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -589,7 +589,7 @@ func TestListSessionToolReceiptsUsesExactLookupForToolCallID(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/session-receipts-filter/runtime/tool-receipts?tool_call_id=tool_receipt_old&limit=1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-receipts-filter/runtime/tool-receipts?tool_call_id=tool_receipt_old&limit=1", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -625,7 +625,7 @@ func TestListSessionRuntimeEventsIncludesToolReceiptLedgerEvents(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/session-runtime-events/runtime/events", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-events/runtime/events", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -665,7 +665,7 @@ func TestListSessionRuntimeEventsIncludesProfileProvenanceEvents(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/session-runtime-events-profile/runtime/events", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-events-profile/runtime/events", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -721,7 +721,7 @@ func TestListSessionRuntimeEventsIncludesCheckpointCreatedEvents(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/session-runtime-events-checkpoint/runtime/events", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-events-checkpoint/runtime/events", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -749,7 +749,7 @@ func TestListSessionRuntimeEventsReturnsEmptyArrayWhenNoEvents(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/session-runtime-events-empty/runtime/events", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-events-empty/runtime/events", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -787,7 +787,7 @@ func TestStreamSessionRuntimeEventsIncludesToolReceiptLedgerEvents(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/session-runtime-stream/runtime/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-stream/runtime/stream", nil).WithContext(ctx)
 	req = mux.SetURLVars(req, map[string]string{"id": "session-runtime-stream"})
 	rec := newSynchronizedResponseRecorder()
 
@@ -839,7 +839,7 @@ func TestStreamSessionRuntimeEventsIncludesCompactProvenanceSummary(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/sessions/session-runtime-stream-provenance/runtime/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-stream-provenance/runtime/stream", nil).WithContext(ctx)
 	req = mux.SetURLVars(req, map[string]string{"id": "session-runtime-stream-provenance"})
 	rec := newSynchronizedResponseRecorder()
 
@@ -867,4 +867,3 @@ func TestStreamSessionRuntimeEventsIncludesCompactProvenanceSummary(t *testing.T
 	assert.Contains(t, rec.BodyString(), `"profile_resource_labels":["memory:memory.json"]`)
 	assert.NotContains(t, rec.BodyString(), `"data":{"type":"context.profile.injected"`)
 }
-

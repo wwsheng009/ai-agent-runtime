@@ -7,10 +7,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 func TestListMailboxHandlerMarksMessagesReadForAgent(t *testing.T) {
@@ -43,7 +43,7 @@ func TestListMailboxHandlerMarksMessagesReadForAgent(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/skills/teams/"+teamID+"/mailbox?to_agent=mate-1&include_broadcast=true&unread_only=true&mark_read=true&agent_id=mate-1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/teams/"+teamID+"/mailbox?to_agent=mate-1&include_broadcast=true&unread_only=true&mark_read=true&agent_id=mate-1", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -67,4 +67,3 @@ func TestListMailboxHandlerMarksMessagesReadForAgent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, unread, 0)
 }
-

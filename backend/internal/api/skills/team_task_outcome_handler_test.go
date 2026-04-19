@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/gorilla/mux"
-	"github.com/stretchr/testify/require"
 )
 
 func TestCompleteTaskHandlerAcceptsStructuredOutcomeContract(t *testing.T) {
@@ -37,7 +37,7 @@ func TestCompleteTaskHandlerAcceptsStructuredOutcomeContract(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"task_status":"done","summary":"artifact published","result_ref":"artifact://build-1","teammate_id":"mate-1"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/complete", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -64,7 +64,7 @@ func TestCompleteTaskHandlerAcceptsStructuredOutcomeContract(t *testing.T) {
 	require.Equal(t, team.TeamStatusDone, teamRecord.Status)
 }
 
-func TestCompleteTaskHandlerRetainsLegacyPayloadCompatibility(t *testing.T) {
+func TestReportTaskOutcomeHandlerAcceptsMinimalDonePayload(t *testing.T) {
 	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-outcome-complete-legacy?mode=memory&cache=shared")
 
 	teamID, err := store.CreateTeam(ctx, team.Team{})
@@ -76,7 +76,7 @@ func TestCompleteTaskHandlerRetainsLegacyPayloadCompatibility(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/complete", strings.NewReader(`{"summary":"legacy complete"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(`{"task_status":"done","summary":"legacy complete"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -90,7 +90,7 @@ func TestCompleteTaskHandlerRetainsLegacyPayloadCompatibility(t *testing.T) {
 	require.Equal(t, "legacy complete", task.Summary)
 }
 
-func TestCompleteTaskHandlerAddsCompatibilityWarningHeader(t *testing.T) {
+func TestReportTaskOutcomeHandlerUsesCanonicalHeaders(t *testing.T) {
 	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-outcome-complete-warning?mode=memory&cache=shared")
 
 	teamID, err := store.CreateTeam(ctx, team.Team{})
@@ -102,16 +102,15 @@ func TestCompleteTaskHandlerAddsCompatibilityWarningHeader(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/complete", strings.NewReader(`{"summary":"legacy complete"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(`{"task_status":"done","summary":"legacy complete"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "compatibility", rec.Header().Get("X-AI-Gateway-Entrypoint-Mode"))
-	require.Equal(t, "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/outcome", rec.Header().Get("X-AI-Gateway-Canonical-Entrypoint"))
-	require.Contains(t, rec.Header().Get("Warning"), "compatibility alias")
-	require.Contains(t, rec.Header().Get("Link"), "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/outcome")
+	require.Equal(t, "canonical", rec.Header().Get("X-AI-Gateway-Entrypoint-Mode"))
+	require.Equal(t, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", rec.Header().Get("X-AI-Gateway-Canonical-Entrypoint"))
+	require.Empty(t, rec.Header().Get("Warning"))
 }
 
 func TestBlockTaskHandlerAcceptsStructuredHandoffOutcome(t *testing.T) {
@@ -143,7 +142,7 @@ func TestBlockTaskHandlerAcceptsStructuredHandoffOutcome(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"task_status":"handoff","summary":"pass to reviewer","blocker":"need review","handoff_to":"mate-2","teammate_id":"mate-1","auto_replan":false}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/block", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -172,7 +171,7 @@ func TestBlockTaskHandlerAcceptsStructuredHandoffOutcome(t *testing.T) {
 	require.Equal(t, team.TeammateStateBlocked, mate.State)
 }
 
-func TestLegacyTaskOutcomeRoutesAddCompatibilityWarningHeaders(t *testing.T) {
+func TestReportTaskOutcomeRouteSupportsCanonicalStatuses(t *testing.T) {
 	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-outcome-legacy-warning-routes?mode=memory&cache=shared")
 
 	teamID, err := store.CreateTeam(ctx, team.Team{LeadSessionID: "lead-session"})
@@ -187,13 +186,12 @@ func TestLegacyTaskOutcomeRoutesAddCompatibilityWarningHeaders(t *testing.T) {
 	assignee := "mate-1"
 
 	cases := []struct {
-		name   string
-		suffix string
-		body   string
+		name string
+		body string
 	}{
-		{name: "complete", suffix: "complete", body: `{"summary":"done summary"}`},
-		{name: "fail", suffix: "fail", body: `{"summary":"failed summary"}`},
-		{name: "block", suffix: "block", body: `{"summary":"blocked summary","auto_replan":false}`},
+		{name: "complete", body: `{"task_status":"done","summary":"done summary"}`},
+		{name: "fail", body: `{"task_status":"failed","summary":"failed summary","blocker":"execution failed"}`},
+		{name: "block", body: `{"task_status":"blocked","summary":"blocked summary","blocker":"waiting on dependency","auto_replan":false}`},
 	}
 
 	for _, tc := range cases {
@@ -206,17 +204,16 @@ func TestLegacyTaskOutcomeRoutesAddCompatibilityWarningHeaders(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			req := httptest.NewRequest(http.MethodPost, "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/"+tc.suffix, strings.NewReader(tc.body))
+			req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(tc.body))
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 
 			require.Equal(t, http.StatusOK, rec.Code)
-			canonical := "/api/skills/teams/" + teamID + "/tasks/" + taskID + "/outcome"
-			require.Equal(t, "compatibility", rec.Header().Get("X-AI-Gateway-Entrypoint-Mode"))
+			canonical := "/api/runtime/teams/" + teamID + "/tasks/" + taskID + "/outcome"
+			require.Equal(t, "canonical", rec.Header().Get("X-AI-Gateway-Entrypoint-Mode"))
 			require.Equal(t, canonical, rec.Header().Get("X-AI-Gateway-Canonical-Entrypoint"))
-			require.Contains(t, rec.Header().Get("Warning"), "compatibility alias")
-			require.Contains(t, rec.Header().Get("Link"), canonical)
+			require.Empty(t, rec.Header().Get("Warning"))
 		})
 	}
 }
@@ -234,7 +231,7 @@ func TestBlockTaskHandlerRejectsInvalidStructuredOutcome(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"task_status":"handoff","summary":"pass to reviewer","blocker":"need review","auto_replan":false}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/block", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -265,7 +262,7 @@ func TestReportTaskOutcomeHandlerSupportsStructuredFailedOutcome(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"task_status":"failed","summary":"tests failed","blocker":"nil token case","result_ref":"log://task-1","teammate_id":"mate-1"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -295,13 +292,13 @@ func TestReportTaskOutcomeHandlerAddsCanonicalRouteHeaders(t *testing.T) {
 	require.NoError(t, err)
 
 	body := `{"task_status":"done","summary":"finished"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	canonical := "/api/skills/teams/" + teamID + "/tasks/" + taskID + "/outcome"
+	canonical := "/api/runtime/teams/" + teamID + "/tasks/" + taskID + "/outcome"
 	require.Equal(t, canonical, rec.Header().Get("X-AI-Gateway-Entrypoint"))
 	require.Equal(t, canonical, rec.Header().Get("X-AI-Gateway-Canonical-Entrypoint"))
 	require.Equal(t, "canonical", rec.Header().Get("X-AI-Gateway-Entrypoint-Mode"))
@@ -320,7 +317,7 @@ func TestReportTaskOutcomeHandlerRejectsMissingStructuredStatus(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(`{"summary":"legacy body not allowed here"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/outcome", strings.NewReader(`{"summary":"legacy body not allowed here"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -348,4 +345,3 @@ func newTeamTaskOutcomeTestRouter(t *testing.T, dsn string) (context.Context, te
 func decodeJSONResponse(rec *httptest.ResponseRecorder, target interface{}) error {
 	return json.NewDecoder(rec.Body).Decode(target)
 }
-
