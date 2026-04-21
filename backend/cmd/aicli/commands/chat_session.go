@@ -14,6 +14,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -752,7 +753,7 @@ func runtimeMessageFromAICLIMessage(raw map[string]interface{}) (runtimetypes.Me
 			message.Metadata[key] = value
 		}
 	}
-	if reasoningBlock := runtimetypes.ReasoningBlockFromMap(normalized["reasoning_details"]); reasoningBlock != nil {
+	if reasoningBlock := runtimellm.ReasoningBlockFromAssistantMessage(normalized); reasoningBlock != nil {
 		runtimetypes.SetReasoningBlock(message.Metadata, reasoningBlock)
 		if text := strings.TrimSpace(reasoningBlock.DisplayText()); text != "" {
 			message.Metadata.Set(chatcoreReasoningMetadataKey, text)

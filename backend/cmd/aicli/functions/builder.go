@@ -589,6 +589,12 @@ func (b *CodexFunctionCallBuilder) BuildAssistantMessageWithReasoning(toolCalls 
 	msg := b.BuildAssistantMessage(toolCalls)
 	if reasoning != "" {
 		msg["reasoning_content"] = reasoning
+		msg["reasoning_details"] = map[string]interface{}{
+			"format":     "openai_responses",
+			"summary":    reasoning,
+			"streamable": true,
+			"visibility": "summary",
+		}
 	}
 	return msg
 }

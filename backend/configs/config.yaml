@@ -173,6 +173,10 @@ provider_groups:
           name: codex_fox
           role: standby
           weight: 100
+        - enabled: true
+          name: CODEX_LOCAL
+          role: standby
+          weight: 100
         - enabled: false
           name: nvidia
           weight: 100
@@ -250,16 +254,17 @@ providers:
         tls_handshake_timeout: ${PROVIDERS_TLS_HANDSHAKE_TIMEOUT:-15s}
         upstream_accept_encoding: ${HTTP_UPSTREAM_ACCEPT_ENCODING:-auto}
     items:
-        CODEX_03:
-            api_key: ${CODEX_03_API_KEYS:-}
+        CODEX_LOCAL:
+            api_key: ${CODEX_LOCAL_API_KEYS:-}
             api_path: /v1/responses
-            base_url: ${CODEX_03_BASE_URL}
+            base_url: ${CODEX_LOCAL_BASE_URL}
             context_window:
-                default: ${CONTEXT_WINDOW_CODEX_03_DEFAULT:-1050000}
+                default: ${CONTEXT_WINDOW_CODEX_LOCAL_DEFAULT:-400000}
                 models:
-                    gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_03_GPT_5_2_CODEX:-400000}
-                    gpt-5.4: ${CONTEXT_WINDOW_CODEX_03_GPT_5_4:-1050000}
-            default_model: gpt-5.4
+                    gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_LOCAL_GPT_5_2_CODEX:-400000}
+                    gpt-5.4: ${CONTEXT_WINDOW_CODEX_LOCAL_GPT_5_4:-1050000}
+                    gpt-5.4-mini: ${CONTEXT_WINDOW_CODEX_LOCAL_GPT_5_4:-400000}
+            default_model: gpt-5.4-mini
             enabled: true
             forward_url: /v1/responses
             header_mapping_rules:
@@ -271,7 +276,7 @@ providers:
                 X-Gateway-Provider: openai_codex
             max_tokens_limit: 10000
             model_mappings:
-                '*': gpt-5.2-codex
+                '*': gpt-5.4-mini
                 gpt-5.4: gpt-5.4
             protocol: codex
             support_types:
@@ -282,6 +287,7 @@ providers:
             supported_models:
                 - gpt-5.2-codex
                 - gpt-5.4
+                - gpt-5.4-mini
                 - '*'
             timeout: 300s
         CODEX_04:

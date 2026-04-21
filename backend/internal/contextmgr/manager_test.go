@@ -5,13 +5,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memory"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestResolveBudget_ProfileAndOverrides(t *testing.T) {
@@ -375,6 +375,8 @@ func (s stubWorkspaceBuilder) Build(query string) *workspace.WorkspaceContext {
 
 func TestManager_Build_IncludesWorkspaceRecall(t *testing.T) {
 	manager := NewManager(DefaultBudget(), nil)
+	manager.Strategy.WorkspaceMode = WorkspaceModeSignals
+	manager.Strategy.MinWorkspaceQueryLength = 4
 	manager.Workspace = stubWorkspaceBuilder{
 		ctx: &workspace.WorkspaceContext{
 			Summary: "workspace summary",
@@ -417,6 +419,36 @@ func TestManager_Build_IncludesWorkspaceRecall(t *testing.T) {
 	}
 	if got := result.Metadata["workspace_summary"]; got != "workspace summary" {
 		t.Fatalf("expected workspace_summary metadata, got %v", got)
+	}
+}
+
+func TestManager_Build_WorkspaceSignalsSkipGenericGreeting(t *testing.T) {
+	manager := NewManager(DefaultBudget(), nil)
+	manager.Strategy.WorkspaceMode = WorkspaceModeSignals
+	manager.Strategy.MinWorkspaceQueryLength = 4
+	manager.Workspace = stubWorkspaceBuilder{
+		ctx: &workspace.WorkspaceContext{
+			Summary: "workspace summary",
+			Files:   []string{"main.go"},
+		},
+	}
+
+	result := manager.Build(context.Background(), BuildInput{
+		SessionID: "session-workspace-greeting",
+		Goal:      "hello",
+		History: []types.Message{
+			*types.NewSystemMessage("system prompt"),
+			*types.NewUserMessage("hello"),
+		},
+	})
+
+	for _, message := range result.Messages {
+		if strings.Contains(message.Content, "Workspace recall:") {
+			t.Fatalf("did not expect workspace recall for generic greeting, got %+v", result.Messages)
+		}
+	}
+	if got := result.Metadata["workspace_context_injected"]; got != nil {
+		t.Fatalf("expected workspace_context_injected to be unset, got %v", got)
 	}
 }
 

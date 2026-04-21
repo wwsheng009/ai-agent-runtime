@@ -12,6 +12,7 @@ import (
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -179,7 +180,7 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		StateStore:   h.RuntimeStore,
 		EventStore:   h.EventStore,
 		EventBus:     h.EventBus,
-		LoopConfig:   buildLocalChatLoopConfig(runtimeConfig),
+		LoopConfig:   buildLocalChatLoopConfig(runtimeConfig, session),
 	})
 	if err != nil {
 		return nil, err
@@ -206,8 +207,13 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		if session.Stream {
 			agentConfig.Options["stream"] = true
 		}
+		if strings.TrimSpace(session.ReasoningEffort) != "" {
+			agentConfig.Options["reasoning_effort"] = strings.TrimSpace(session.ReasoningEffort)
+		}
 		if workspaceRoot != "" {
 			agentConfig.Options["workspace_path"] = workspaceRoot
+			agentConfig.Options["context_workspace_mode"] = contextmgr.WorkspaceModeSignals
+			agentConfig.Options["context_min_workspace_query_length"] = 4
 		}
 		if len(session.ProfileContext) > 0 {
 			agentConfig.Options["profile_context"] = cloneSkillContextMap(session.ProfileContext)
@@ -323,7 +329,7 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 	return policy
 }
 
-func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig) *agent.LoopReActConfig {
+func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *ChatSession) *agent.LoopReActConfig {
 	config := &agent.LoopReActConfig{
 		MaxSteps:        0,
 		EnableThought:   true,
@@ -332,6 +338,9 @@ func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig) *agent.Lo
 	}
 	if runtimeConfig != nil {
 		config.MaxSteps = agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps)
+	}
+	if session != nil && strings.TrimSpace(session.ReasoningEffort) != "" {
+		config.ReasoningEffort = strings.TrimSpace(session.ReasoningEffort)
 	}
 	return config
 }

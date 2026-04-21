@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -85,6 +86,64 @@ func TestLocalChatRuntimeHost_MirrorsTeamSummaryIntoBaseSession(t *testing.T) {
 	}
 	if !foundSummary {
 		t.Fatalf("expected mirrored team summary in base session history, got %+v", reloaded.History)
+	}
+}
+
+func TestBuildLocalChatAgent_PropagatesReasoningEffortToAgentOptions(t *testing.T) {
+	session := &ChatSession{
+		ReasoningEffort: "medium",
+		Stream:          true,
+	}
+	host := &localChatRuntimeHost{
+		Bootstrap: &runtimebootstrap.Manager{},
+	}
+
+	apiAgent := buildLocalChatAgent(session, host, nil, "", "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+
+	cfg := apiAgent.GetConfig()
+	if cfg == nil || cfg.Options == nil {
+		t.Fatal("expected agent options")
+	}
+	if got := cfg.Options["reasoning_effort"]; got != "medium" {
+		t.Fatalf("expected reasoning_effort=medium, got %#v", got)
+	}
+}
+
+func TestBuildLocalChatAgent_UsesSignalsWorkspaceContextForActorChat(t *testing.T) {
+	session := &ChatSession{}
+	host := &localChatRuntimeHost{
+		Bootstrap: &runtimebootstrap.Manager{},
+	}
+
+	apiAgent := buildLocalChatAgent(session, host, nil, t.TempDir(), "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+
+	cfg := apiAgent.GetConfig()
+	if cfg == nil || cfg.Options == nil {
+		t.Fatal("expected agent options")
+	}
+	if got := cfg.Options["context_workspace_mode"]; got != "signals" {
+		t.Fatalf("expected context_workspace_mode=signals, got %#v", got)
+	}
+	if got := cfg.Options["context_min_workspace_query_length"]; got != 4 {
+		t.Fatalf("expected context_min_workspace_query_length=4, got %#v", got)
+	}
+}
+
+func TestBuildLocalChatLoopConfig_PropagatesReasoningEffort(t *testing.T) {
+	config := buildLocalChatLoopConfig(nil, &ChatSession{
+		ReasoningEffort: "high",
+	})
+	if config == nil {
+		t.Fatal("expected loop config")
+	}
+	if got := config.ReasoningEffort; got != "high" {
+		t.Fatalf("expected loop reasoning_effort=high, got %#v", got)
 	}
 }
 

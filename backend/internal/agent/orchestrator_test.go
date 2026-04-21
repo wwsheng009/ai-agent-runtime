@@ -152,6 +152,40 @@ func TestAgent_Orchestrate_PassesContextToSkillRequest(t *testing.T) {
 	}
 }
 
+func TestAgent_RunWithHistoryAndContext_ResolvesReasoningEffortFromContext(t *testing.T) {
+	agent := NewAgent(&Config{
+		Name:             "test-agent",
+		Model:            "mock",
+		DefaultMaxTokens: 256,
+	}, nil)
+
+	if err := agent.RegisterSkill(&skill.Skill{
+		Name:        "search_docs",
+		Description: "Search docs",
+		Triggers: []skill.Trigger{
+			{Type: "keyword", Values: []string{"search"}, Weight: 1},
+		},
+		Handler: skill.SkillHandlerFunc(func(ctx interface{}, req *types.Request) (*types.Result, error) {
+			if req.ReasoningEffort != "medium" {
+				return types.NewResult(false, "bad_reasoning"), nil
+			}
+			return types.NewResult(true, "REASONING_OK").WithSkill("search_docs"), nil
+		}),
+	}); err != nil {
+		t.Fatalf("register skill failed: %v", err)
+	}
+
+	result, err := agent.RunWithHistoryAndContext(context.Background(), "search docs", nil, map[string]interface{}{
+		"reasoning_effort": "medium",
+	})
+	if err != nil {
+		t.Fatalf("run with history failed: %v", err)
+	}
+	if result.Output != "REASONING_OK" {
+		t.Fatalf("unexpected agent output: %+v", result)
+	}
+}
+
 func TestAgent_Orchestrate_UsesWorkspaceSummaryInLLMMode(t *testing.T) {
 	mockProvider := llm.NewMockProvider("mock", 0)
 	mockProvider.SetResponse("hello", "LLM_OK")
@@ -179,6 +213,76 @@ func TestAgent_Orchestrate_UsesWorkspaceSummaryInLLMMode(t *testing.T) {
 	}
 	if result.LLMResponse == nil || result.LLMResponse.Content != "LLM_OK" {
 		t.Fatalf("unexpected llm response: %+v", result.LLMResponse)
+	}
+}
+
+func TestAgent_buildRequest_PopulatesPromptCacheMetadata(t *testing.T) {
+	agent := NewAgent(&Config{
+		Name:             "test-agent",
+		Model:            "mock",
+		DefaultMaxTokens: 256,
+	}, nil)
+
+	req := agent.buildRequest("hello", nil, false, map[string]interface{}{
+		"session_id":       "session-123",
+		"conversation_id":  "conversation-456",
+		"prompt_cache_key": "custom-cache-key",
+	}, "", nil)
+
+	if req == nil {
+		t.Fatal("expected request")
+	}
+
+	if value, ok := req.Metadata.Get("session_id"); !ok || value != "session-123" {
+		t.Fatalf("expected session_id metadata, got %#v", value)
+	}
+	if value, ok := req.Metadata.Get("conversation_id"); !ok || value != "conversation-456" {
+		t.Fatalf("expected conversation_id metadata, got %#v", value)
+	}
+	if value, ok := req.Metadata.Get("prompt_cache_key"); !ok || value != "custom-cache-key" {
+		t.Fatalf("expected prompt_cache_key metadata, got %#v", value)
+	}
+}
+
+func TestAgent_Orchestrate_LLMOnlyPropagatesPromptCacheMetadata(t *testing.T) {
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{Content: "LLM_OK", Model: "test-model"},
+		},
+	}
+	runtime := llm.NewLLMRuntime(nil)
+	if err := runtime.RegisterProvider("test-provider", provider); err != nil {
+		t.Fatalf("register provider failed: %v", err)
+	}
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Model:            "test-provider",
+		DefaultMaxTokens: 256,
+	}, nil, runtime)
+
+	result, err := agent.Orchestrate(context.Background(), &OrchestrationRequest{
+		Prompt: "hello",
+		Mode:   OrchestrationLLMOnly,
+		Context: map[string]interface{}{
+			"session_id": "session-llm",
+		},
+	})
+	if err != nil {
+		t.Fatalf("orchestrate failed: %v", err)
+	}
+	if result.LLMResponse == nil || result.LLMResponse.Content != "LLM_OK" {
+		t.Fatalf("unexpected llm response: %+v", result.LLMResponse)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(provider.requests))
+	}
+	if provider.requests[0].Metadata == nil {
+		t.Fatal("expected metadata on LLM request")
+	}
+	if value := provider.requests[0].Metadata["session_id"]; value != "session-llm" {
+		t.Fatalf("expected session_id metadata session-llm, got %#v", value)
 	}
 }
 

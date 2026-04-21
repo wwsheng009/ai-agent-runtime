@@ -419,6 +419,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			"remaining_budget": remainingBudget,
 		},
 	}
+	if sessionID != "" {
+		req.Metadata["prompt_cache_key"] = sessionID
+	}
 	if loop.agent != nil && loop.agent.config != nil && boolValue(optionValue(loop.agent.config.Options, "stream")) {
 		req.Stream = true
 	}
@@ -1451,6 +1454,19 @@ func hasLeadingSystemPrompt(history []types.Message, systemPrompt string) bool {
 	}
 	first := history[0]
 	return first.Role == "system" && first.Content == systemPrompt
+}
+
+func hasSystemPrompt(history []types.Message, systemPrompt string) bool {
+	for _, msg := range history {
+		if msg.Role == "system" && msg.Content == systemPrompt {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLeadingSystemPromptInMessages(messages []types.Message, systemPrompt string) bool {
+	return hasLeadingSystemPrompt(messages, systemPrompt)
 }
 
 func cloneMessageHistory(history []types.Message) []types.Message {

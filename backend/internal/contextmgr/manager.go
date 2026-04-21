@@ -8,9 +8,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memory"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 const (
@@ -33,6 +33,10 @@ const (
 
 	ObservationModeAll      = "all"
 	ObservationModeFailures = "failures"
+
+	WorkspaceModeDisabled = "disabled"
+	WorkspaceModeSignals  = "signals"
+	WorkspaceModeBroad    = "broad"
 )
 
 // TokenCounter 允许 context manager 复用不同 tokenizer。
@@ -91,13 +95,15 @@ type BuildResult struct {
 }
 
 type Strategy struct {
-	Profile               string
-	CompactionMode        string
-	RecallMode            string
-	ObservationMode       string
-	MinCompactionMessages int
-	MinRecallQueryLength  int
-	LedgerLoadLimit       int
+	Profile                 string
+	CompactionMode          string
+	RecallMode              string
+	ObservationMode         string
+	WorkspaceMode           string
+	MinCompactionMessages   int
+	MinRecallQueryLength    int
+	MinWorkspaceQueryLength int
+	LedgerLoadLimit         int
 }
 
 type LayerSpec struct {
@@ -188,33 +194,39 @@ func StrategyForProfile(profile string) Strategy {
 	switch normalizeBudgetProfile(profile) {
 	case BudgetProfileCompact:
 		return Strategy{
-			Profile:               BudgetProfileCompact,
-			CompactionMode:        CompactionModeSummary,
-			RecallMode:            RecallModeDisabled,
-			ObservationMode:       ObservationModeFailures,
-			MinCompactionMessages: 2,
-			MinRecallQueryLength:  12,
-			LedgerLoadLimit:       6,
+			Profile:                 BudgetProfileCompact,
+			CompactionMode:          CompactionModeSummary,
+			RecallMode:              RecallModeDisabled,
+			ObservationMode:         ObservationModeFailures,
+			WorkspaceMode:           WorkspaceModeBroad,
+			MinCompactionMessages:   2,
+			MinRecallQueryLength:    12,
+			MinWorkspaceQueryLength: 4,
+			LedgerLoadLimit:         6,
 		}
 	case BudgetProfileExtended:
 		return Strategy{
-			Profile:               BudgetProfileExtended,
-			CompactionMode:        CompactionModeLedgerPreferred,
-			RecallMode:            RecallModeBroad,
-			ObservationMode:       ObservationModeAll,
-			MinCompactionMessages: 1,
-			MinRecallQueryLength:  4,
-			LedgerLoadLimit:       20,
+			Profile:                 BudgetProfileExtended,
+			CompactionMode:          CompactionModeLedgerPreferred,
+			RecallMode:              RecallModeBroad,
+			ObservationMode:         ObservationModeAll,
+			WorkspaceMode:           WorkspaceModeBroad,
+			MinCompactionMessages:   1,
+			MinRecallQueryLength:    4,
+			MinWorkspaceQueryLength: 4,
+			LedgerLoadLimit:         20,
 		}
 	default:
 		return Strategy{
-			Profile:               BudgetProfileBalanced,
-			CompactionMode:        CompactionModeLedgerPreferred,
-			RecallMode:            RecallModeSignals,
-			ObservationMode:       ObservationModeAll,
-			MinCompactionMessages: 1,
-			MinRecallQueryLength:  8,
-			LedgerLoadLimit:       12,
+			Profile:                 BudgetProfileBalanced,
+			CompactionMode:          CompactionModeLedgerPreferred,
+			RecallMode:              RecallModeSignals,
+			ObservationMode:         ObservationModeAll,
+			WorkspaceMode:           WorkspaceModeBroad,
+			MinCompactionMessages:   1,
+			MinRecallQueryLength:    8,
+			MinWorkspaceQueryLength: 4,
+			LedgerLoadLimit:         12,
 		}
 	}
 }
@@ -230,11 +242,17 @@ func ResolveStrategy(profile string, overrides Strategy) Strategy {
 	if overrides.ObservationMode != "" {
 		strategy.ObservationMode = overrides.ObservationMode
 	}
+	if overrides.WorkspaceMode != "" {
+		strategy.WorkspaceMode = overrides.WorkspaceMode
+	}
 	if overrides.MinCompactionMessages > 0 {
 		strategy.MinCompactionMessages = overrides.MinCompactionMessages
 	}
 	if overrides.MinRecallQueryLength > 0 {
 		strategy.MinRecallQueryLength = overrides.MinRecallQueryLength
+	}
+	if overrides.MinWorkspaceQueryLength > 0 {
+		strategy.MinWorkspaceQueryLength = overrides.MinWorkspaceQueryLength
 	}
 	if overrides.LedgerLoadLimit > 0 {
 		strategy.LedgerLoadLimit = overrides.LedgerLoadLimit
@@ -318,12 +336,14 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"budget_max_messages":      budget.MaxMessages,
 			"context_profile":          m.Strategy.Profile,
 			"context_strategy": map[string]interface{}{
-				"compaction_mode":         m.Strategy.CompactionMode,
-				"recall_mode":             m.Strategy.RecallMode,
-				"observation_mode":        m.Strategy.ObservationMode,
-				"min_compaction_messages": m.Strategy.MinCompactionMessages,
-				"min_recall_query_length": m.Strategy.MinRecallQueryLength,
-				"ledger_load_limit":       m.Strategy.LedgerLoadLimit,
+				"compaction_mode":            m.Strategy.CompactionMode,
+				"recall_mode":                m.Strategy.RecallMode,
+				"observation_mode":           m.Strategy.ObservationMode,
+				"workspace_mode":             m.Strategy.WorkspaceMode,
+				"min_compaction_messages":    m.Strategy.MinCompactionMessages,
+				"min_recall_query_length":    m.Strategy.MinRecallQueryLength,
+				"min_workspace_query_length": m.Strategy.MinWorkspaceQueryLength,
+				"ledger_load_limit":          m.Strategy.LedgerLoadLimit,
 			},
 			"context_layers": ResolvedLayerPlan(m.Strategy.Profile, budget, m.Strategy),
 		},
@@ -450,6 +470,8 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		}
 	}
 
+	managed = append(managed, cloneMessages(recent)...)
+
 	selectedObservations := selectObservationsForMode(input.Memory, input.Observations, m.Strategy.ObservationMode)
 	layerMetrics["warm"].(map[string]interface{})["selected_items"] = len(selectedObservations)
 	if observationMessage := buildObservationMessage(selectedObservations, budget.MaxObservationItems); observationMessage != nil {
@@ -475,7 +497,7 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		m.emitEvent("recall.performed", input.TraceID, input.SessionID, payload)
 	}
 
-	if m.Workspace != nil && strings.TrimSpace(input.Goal) != "" {
+	if m.Workspace != nil && m.shouldBuildWorkspace(input.Goal) {
 		wsCtx := m.Workspace.Build(input.Goal)
 		if wsMsg, wsSummary := buildWorkspaceMessage(wsCtx); wsMsg != nil {
 			fileCount := 0
@@ -544,7 +566,6 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		}
 	}
 
-	managed = append(managed, cloneMessages(recent)...)
 	managed = trimMessageCount(managed, budget.MaxMessages)
 	managed = trimByTokenBudget(managed, budget, input.CountTokens, result.Metadata)
 	layerMetrics["hot"].(map[string]interface{})["final_messages"] = len(managed)
@@ -801,24 +822,35 @@ func trimMessageCount(messages []types.Message, maxMessages int) []types.Message
 		return messages
 	}
 
-	systemMessages, protectedMessages, rawMessages := splitManagedMessages(messages)
-	keep := maxMessages - len(systemMessages) - len(protectedMessages)
+	systemMessages, stableMessages, dynamicMessages, rawMessages := splitManagedMessages(messages)
+	keep := maxMessages - len(systemMessages) - len(stableMessages)
 	if keep <= 0 {
 		trimmed := append([]types.Message{}, systemMessages...)
-		trimmed = append(trimmed, protectedMessages...)
+		trimmed = append(trimmed, stableMessages...)
 		if len(trimmed) > maxMessages {
 			return trimmed[:maxMessages]
 		}
 		return trimmed
 	}
-	if len(rawMessages) > keep {
-		rawMessages = rawMessages[len(rawMessages)-keep:]
+
+	flex := len(dynamicMessages) + len(rawMessages)
+	if flex > keep {
+		if len(dynamicMessages) >= keep {
+			dynamicMessages = nil
+		} else {
+			keep -= len(dynamicMessages)
+			dynamicMessages = nil
+			if len(rawMessages) > keep {
+				rawMessages = rawMessages[len(rawMessages)-keep:]
+			}
+		}
 	}
 
-	trimmed := make([]types.Message, 0, len(systemMessages)+len(protectedMessages)+len(rawMessages))
+	trimmed := make([]types.Message, 0, len(systemMessages)+len(stableMessages)+len(rawMessages)+len(dynamicMessages))
 	trimmed = append(trimmed, systemMessages...)
-	trimmed = append(trimmed, protectedMessages...)
+	trimmed = append(trimmed, stableMessages...)
 	trimmed = append(trimmed, rawMessages...)
+	trimmed = append(trimmed, dynamicMessages...)
 	return trimmed
 }
 
@@ -829,13 +861,23 @@ func trimByTokenBudget(messages []types.Message, budget Budget, counter TokenCou
 
 	trimmed := cloneMessages(messages)
 	for len(trimmed) > 1 && counter(trimmed) > budget.MaxPromptTokens {
-		systemMessages, protectedMessages, rawMessages := splitManagedMessages(trimmed)
+		systemMessages, stableMessages, dynamicMessages, rawMessages := splitManagedMessages(trimmed)
+
+		if len(dynamicMessages) > 0 {
+			dynamicMessages = dynamicMessages[:len(dynamicMessages)-1]
+			trimmed = append(systemMessages, stableMessages...)
+			trimmed = append(trimmed, rawMessages...)
+			trimmed = append(trimmed, dynamicMessages...)
+			continue
+		}
+
 		if len(rawMessages) == 0 {
 			break
 		}
 		rawMessages = rawMessages[1:]
-		trimmed = append(systemMessages, protectedMessages...)
+		trimmed = append(systemMessages, stableMessages...)
 		trimmed = append(trimmed, rawMessages...)
+		trimmed = append(trimmed, dynamicMessages...)
 	}
 
 	if metadata != nil {
@@ -863,6 +905,50 @@ func shouldRecall(goal string) bool {
 		}
 	}
 	return false
+}
+
+func (m *Manager) shouldBuildWorkspace(goal string) bool {
+	goal = strings.TrimSpace(goal)
+	if goal == "" {
+		return false
+	}
+
+	minLength := maxInt(1, m.Strategy.MinWorkspaceQueryLength)
+	if len(goal) < minLength {
+		return false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(m.Strategy.WorkspaceMode)) {
+	case WorkspaceModeDisabled:
+		return false
+	case "", WorkspaceModeBroad:
+		return true
+	default:
+		return hasWorkspaceSignals(goal)
+	}
+}
+
+func hasWorkspaceSignals(goal string) bool {
+	lower := strings.ToLower(strings.TrimSpace(goal))
+	if lower == "" {
+		return false
+	}
+
+	for _, needle := range []string{
+		"/", "\\", "./", "../", ".\\", "..\\",
+		".go", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".md", ".py", ".rs", ".java", ".cs",
+		"workspace", "repo", "repository", "project", "codebase", "source", "directory", "folder",
+		"path", "file", "files", "module", "package", "function", "method", "class", "symbol",
+		"test", "tests", "error", "stack trace", "trace", "bug", "docs", "documentation", "readme", "config",
+		"当前目录", "目录", "路径", "文件", "代码", "函数", "方法", "类", "模块", "包",
+		"符号", "测试", "报错", "错误", "堆栈", "仓库", "工程", "项目", "文档", "配置",
+	} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+
+	return shouldRecall(goal)
 }
 
 func maxInt(a, b int) int {
@@ -893,9 +979,10 @@ func deriveRecallQueries(goal string) []string {
 	return queries
 }
 
-func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Message, []types.Message) {
+func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Message, []types.Message, []types.Message) {
 	systemMessages := make([]types.Message, 0, 1)
-	protectedMessages := make([]types.Message, 0, 3)
+	stableMessages := make([]types.Message, 0, 2)
+	dynamicMessages := make([]types.Message, 0, 6)
 	rawMessages := make([]types.Message, 0, len(messages))
 	for _, message := range messages {
 		if message.Role == "system" {
@@ -903,12 +990,17 @@ func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Me
 			continue
 		}
 		if stage := message.Metadata.GetString("context_stage", ""); stage != "" {
-			protectedMessages = append(protectedMessages, *message.Clone())
+			switch stage {
+			case "ledger", "profile":
+				stableMessages = append(stableMessages, *message.Clone())
+			default:
+				dynamicMessages = append(dynamicMessages, *message.Clone())
+			}
 			continue
 		}
 		rawMessages = append(rawMessages, *message.Clone())
 	}
-	return systemMessages, protectedMessages, rawMessages
+	return systemMessages, stableMessages, dynamicMessages, rawMessages
 }
 
 func ledgerStoreFromSearcher(searcher ArtifactSearcher) LedgerStore {

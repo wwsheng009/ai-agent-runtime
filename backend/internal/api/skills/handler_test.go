@@ -1839,6 +1839,38 @@ agents:
 	assert.Equal(t, absRoot, session.Metadata.Context[apiProfileContextRoot])
 }
 
+func TestStreamLLMChat_AttachesSessionMetadataForPromptCaching(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	provider := &testLLMProvider{name: "test-model", content: "hello from llm"}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
+	require.NoError(t, runtime.RegisterProvider("test-model", provider))
+	handler.SetLLMRuntime(runtime)
+
+	session := chat.NewSession("user-1")
+	recorder := httptest.NewRecorder()
+	err := handler.streamLLMChat(
+		context.Background(),
+		recorder,
+		session,
+		"agent-1",
+		"test-model",
+		"hello",
+		[]types.Message{{Role: "user", Content: "hello"}},
+		"",
+		nil,
+		false,
+		nil,
+		"",
+		UsageScope{},
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, provider.requests)
+	require.NotNil(t, provider.requests[0].Metadata)
+	assert.Equal(t, session.ID, provider.requests[0].Metadata["session_id"])
+}
+
 func TestAgentChat_ProfileAddsContextPackLayerToRuntimeSummary(t *testing.T) {
 	profileRoot := t.TempDir()
 	writeProfileFile := func(path, contents string) {

@@ -1192,9 +1192,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	}
 	contextPack := h.buildContextPack(ctx, session, buildProfileContextPack(profileState), workspaceCtx, chatMessages, lastMessage, workspacePath, req.TeamID, req.TaskID, requestTraceID, selectedConfig)
 	agentContext := map[string]interface{}{
-		"workspace_path": workspacePath,
-		"context_pack":   contextPack,
-		"session_id":     sessionID(session),
+		"workspace_path":   workspacePath,
+		"context_pack":     contextPack,
+		"session_id":       sessionID(session),
+		"reasoning_effort": types.ResolveReasoningEffort(req.ReasoningEffort),
 	}
 	if grantedPermissions := h.resolveGrantedSkillPermissions(r); len(grantedPermissions) > 0 {
 		agentContext["permissions"] = grantedPermissions
@@ -5879,6 +5880,9 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 		ReasoningEffort: reasoningEffort,
 		Thinking:        types.CloneThinkingConfig(thinking),
 		Stream:          true,
+		Metadata: map[string]interface{}{
+			"session_id": sessionID(session),
+		},
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)

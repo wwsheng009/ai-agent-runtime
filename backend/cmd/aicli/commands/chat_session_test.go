@@ -110,6 +110,43 @@ func TestRuntimeMessageFromAICLIMessage_PreservesReasoningBlock(t *testing.T) {
 	}
 }
 
+func TestRuntimeMessageFromAICLIMessage_PreservesCodexOutputItems(t *testing.T) {
+	raw := map[string]interface{}{
+		"role":              "assistant",
+		"content":           "",
+		"reasoning_content": "先确认上下文，再继续。",
+		"response_output_items": []map[string]interface{}{
+			{
+				"type": "reasoning",
+				"summary": []map[string]interface{}{
+					{
+						"type": "summary_text",
+						"text": "先确认上下文，再继续。",
+					},
+				},
+				"encrypted_content": "-",
+			},
+		},
+	}
+
+	message, err := runtimeMessageFromAICLIMessage(raw)
+	if err != nil {
+		t.Fatalf("runtimeMessageFromAICLIMessage: %v", err)
+	}
+
+	block := runtimetypes.GetReasoningBlock(message.Metadata)
+	if block == nil {
+		t.Fatal("expected reasoning block in runtime metadata")
+	}
+	outputItems, ok := block.Metadata["response_output_items"].([]map[string]interface{})
+	if !ok || len(outputItems) != 1 {
+		t.Fatalf("expected response_output_items to be preserved, got %#v", block.Metadata["response_output_items"])
+	}
+	if outputItems[0]["encrypted_content"] != "-" {
+		t.Fatalf("expected encrypted_content to be preserved, got %#v", outputItems[0]["encrypted_content"])
+	}
+}
+
 func TestLoadRequestedRuntimeSessionReturnsLatestForResume(t *testing.T) {
 	storage, err := runtimechat.NewFileStorage(t.TempDir())
 	if err != nil {

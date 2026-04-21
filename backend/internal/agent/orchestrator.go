@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
-	"github.com/google/uuid"
 )
 
 // OrchestrationMode 统一编排模式
@@ -170,7 +170,7 @@ func (a *Agent) Orchestrate(ctx context.Context, req *OrchestrationRequest) (*Or
 		return result, nil
 
 	case OrchestrationAgentOnly:
-		agentResult, err := a.RunWithHistory(ctx, req.Prompt, req.History)
+		agentResult, err := a.RunWithHistoryAndContext(ctx, req.Prompt, req.History, req.Context)
 		if err != nil {
 			return nil, err
 		}
@@ -690,7 +690,7 @@ func (a *Agent) callLLM(ctx context.Context, req *OrchestrationRequest) (*llm.LL
 	}
 
 	messages := make([]types.Message, 0, len(req.History)+2)
-	if a.config.SystemPrompt != "" {
+	if a.config.SystemPrompt != "" && !hasSystemPrompt(req.History, a.config.SystemPrompt) {
 		messages = append(messages, *types.NewSystemMessage(a.config.SystemPrompt))
 	}
 	if req.Workspace != nil && req.Workspace.Summary != "" {
@@ -698,6 +698,13 @@ func (a *Agent) callLLM(ctx context.Context, req *OrchestrationRequest) (*llm.LL
 	}
 	messages = append(messages, req.History...)
 	messages = append(messages, *types.NewUserMessage(req.Prompt))
+
+	metadata := types.NewMetadata()
+	populatePromptCacheMetadata(metadata, req.Context)
+	var llmMetadata map[string]interface{}
+	if len(metadata) > 0 {
+		llmMetadata = map[string]interface{}(metadata)
+	}
 
 	return a.llmRuntime.Call(ctx, &llm.LLMRequest{
 		Provider:        provider,
@@ -707,5 +714,6 @@ func (a *Agent) callLLM(ctx context.Context, req *OrchestrationRequest) (*llm.LL
 		Temperature:     temperature,
 		ReasoningEffort: req.ReasoningEffort,
 		Thinking:        types.CloneThinkingConfig(req.Thinking),
+		Metadata:        llmMetadata,
 	})
 }

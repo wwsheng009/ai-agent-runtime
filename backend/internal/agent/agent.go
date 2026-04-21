@@ -501,18 +501,50 @@ func (a *Agent) buildRequest(prompt string, history []types.Message, includeProm
 	if len(history) > 0 {
 		req.History = append(req.History, history...)
 	}
-	req.ReasoningEffort = reasoningEffort
+	req.ReasoningEffort = types.ResolveReasoningEffort(reasoningEffort, contextValues, a.requestOptionsMetadata())
 	req.Thinking = types.CloneThinkingConfig(thinking)
 	for key, value := range contextValues {
 		req.Context[key] = value
 	}
+	if req.ReasoningEffort != "" {
+		req.Metadata.Set("reasoning_effort", req.ReasoningEffort)
+		req.Metadata.Set("reasoning", map[string]interface{}{
+			"effort": req.ReasoningEffort,
+		})
+	}
+	populatePromptCacheMetadata(req.Metadata, contextValues)
 	if includePromptInHistory {
 		req.AddToHistory(*types.NewUserMessage(prompt))
 	}
-	if a.config.SystemPrompt != "" {
+	if a.config.SystemPrompt != "" && !hasSystemPrompt(req.History, a.config.SystemPrompt) {
 		req.History = append([]types.Message{*types.NewSystemMessage(a.config.SystemPrompt)}, req.History...)
 	}
 	return req
+}
+
+func (a *Agent) requestOptionsMetadata() map[string]interface{} {
+	if a == nil || a.config == nil || len(a.config.Options) == 0 {
+		return nil
+	}
+	return a.config.Options
+}
+
+func populatePromptCacheMetadata(metadata types.Metadata, contextValues map[string]interface{}) {
+	if metadata == nil || len(contextValues) == 0 {
+		return
+	}
+
+	for _, key := range []string{
+		"prompt_cache_key",
+		"session_id",
+		"conversation_id",
+	} {
+		if value, ok := contextValues[key]; ok {
+			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" && text != "<nil>" {
+				metadata.Set(key, text)
+			}
+		}
+	}
 }
 
 func (a *Agent) runWithPreparedRoutes(ctx context.Context, req *types.Request, routes []*skill.RouteResult) (*Result, error) {
@@ -736,11 +768,17 @@ func newDefaultContextManager(cfg *Config, store *artifact.Store) *contextmgr.Ma
 		if value, ok := cfg.Options["context_observation_mode"].(string); ok && value != "" {
 			strategy.ObservationMode = value
 		}
+		if value, ok := cfg.Options["context_workspace_mode"].(string); ok && value != "" {
+			strategy.WorkspaceMode = value
+		}
 		if value, ok := contextOptionInt(cfg.Options, "context_min_compaction_messages"); ok {
 			strategy.MinCompactionMessages = value
 		}
 		if value, ok := contextOptionInt(cfg.Options, "context_min_recall_query_length"); ok {
 			strategy.MinRecallQueryLength = value
+		}
+		if value, ok := contextOptionInt(cfg.Options, "context_min_workspace_query_length"); ok {
+			strategy.MinWorkspaceQueryLength = value
 		}
 		if value, ok := contextOptionInt(cfg.Options, "context_ledger_load_limit"); ok {
 			strategy.LedgerLoadLimit = value
