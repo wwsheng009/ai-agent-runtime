@@ -7,11 +7,38 @@ import (
 	"strings"
 	"testing"
 
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
-	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
+
+type toolkitErrorToolStub struct {
+	name    string
+	content string
+	err     error
+}
+
+func (s toolkitErrorToolStub) Name() string { return s.name }
+
+func (s toolkitErrorToolStub) Description() string { return "toolkit error stub" }
+
+func (s toolkitErrorToolStub) Version() string { return "test" }
+
+func (s toolkitErrorToolStub) Parameters() map[string]interface{} {
+	return map[string]interface{}{"type": "object"}
+}
+
+func (s toolkitErrorToolStub) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	return &toolkit.ToolResult{
+		Success: false,
+		Content: s.content,
+		Error:   s.err,
+	}, nil
+}
+
+func (s toolkitErrorToolStub) CanDirectCall() bool { return true }
 
 func TestNewDefaultManagerWithRuntimeConfig_AppliesSandboxToLocalTools(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -176,6 +203,46 @@ func TestManagerExecute_PrefersLocalToolkitOverExternalFilesystemMCPForWorkspace
 	}
 	if !strings.Contains(output, "目录:") {
 		t.Fatalf("expected local ls output, got %q", output)
+	}
+}
+
+func TestManagerExecute_PreservesToolkitOutputOnError(t *testing.T) {
+	manager := &Manager{toolkit: toolkit.NewRegistry()}
+	if err := manager.toolkit.Register(toolkitErrorToolStub{
+		name:    "toolkit_error",
+		content: "fatal: not a git repository (or any of the parent directories): .git",
+		err:     fmt.Errorf("exit status 128"),
+	}); err != nil {
+		t.Fatalf("register stub tool: %v", err)
+	}
+
+	output, err := manager.Execute(context.Background(), "toolkit_error", map[string]interface{}{})
+	if err == nil {
+		t.Fatal("expected toolkit tool to fail")
+	}
+	if !strings.Contains(output, "fatal: not a git repository") {
+		t.Fatalf("expected stderr output to be preserved, got %q", output)
+	}
+	if !strings.Contains(err.Error(), "exit status 128") {
+		t.Fatalf("expected exit status in error, got %v", err)
+	}
+}
+
+func TestFormatMCPResult_PreservesErrorText(t *testing.T) {
+	output, err := formatMCPResult(&protocol.CallToolResult{
+		IsError: true,
+		Content: []protocol.Content{
+			{Type: "text", Text: "fatal: command rejected"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected MCP error")
+	}
+	if output != "fatal: command rejected" {
+		t.Fatalf("expected error text to be preserved, got %q", output)
+	}
+	if err.Error() != "fatal: command rejected" {
+		t.Fatalf("unexpected MCP error: %v", err)
 	}
 }
 

@@ -53,7 +53,7 @@ func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 	if strings.Contains(toolName, "bash") || strings.Contains(toolName, "shell") || strings.Contains(toolName, "exec") {
 		caps = append(caps, CapExecShell)
 	}
-	if strings.Contains(toolName, "fetch") || strings.Contains(toolName, "http") || strings.Contains(toolName, "web") || strings.Contains(toolName, "download") {
+	if strings.Contains(toolName, "fetch") || strings.Contains(toolName, "http") || strings.Contains(toolName, "web") || strings.Contains(toolName, "download") || strings.Contains(toolName, "sourcegraph") || strings.Contains(toolName, "search") {
 		caps = append(caps, CapNetwork)
 	}
 	if strings.Contains(toolName, "email") || strings.Contains(toolName, "slack") || strings.Contains(toolName, "notify") {

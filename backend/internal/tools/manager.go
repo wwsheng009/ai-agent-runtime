@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
-	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
 )
@@ -230,6 +230,9 @@ func formatToolkitResult(result *toolkit.ToolResult) (string, error) {
 	if result == nil {
 		return "", nil
 	}
+	if result.Error != nil {
+		return result.Content, result.Error
+	}
 	if result.Success {
 		if result.Content != "" {
 			return result.Content, nil
@@ -239,9 +242,6 @@ func formatToolkitResult(result *toolkit.ToolResult) (string, error) {
 		}
 		return "", nil
 	}
-	if result.Error != nil {
-		return "", result.Error
-	}
 	return "", fmt.Errorf("tool execution failed")
 }
 
@@ -250,10 +250,14 @@ func formatMCPResult(result *protocol.CallToolResult) (string, error) {
 		return "", nil
 	}
 	if len(result.Content) == 1 && result.Content[0].Type == "text" {
+		text := result.Content[0].Text
 		if result.IsError {
-			return "", errors.New(result.Content[0].Text)
+			if strings.TrimSpace(text) == "" {
+				return "", errors.New("tool execution failed")
+			}
+			return text, errors.New(text)
 		}
-		return result.Content[0].Text, nil
+		return text, nil
 	}
 
 	var output strings.Builder
@@ -270,11 +274,15 @@ func formatMCPResult(result *protocol.CallToolResult) (string, error) {
 			output.WriteString(fmt.Sprintf("content: %s\n", content.Type))
 		}
 	}
+	rendered := strings.TrimSpace(output.String())
 
 	if result.IsError {
-		return "", errors.New(output.String())
+		if rendered == "" {
+			return "", errors.New("tool execution failed")
+		}
+		return rendered, errors.New(rendered)
 	}
-	return strings.TrimSpace(output.String()), nil
+	return rendered, nil
 }
 
 func (m *Manager) metaToolDescriptor() *ToolDescriptor {
