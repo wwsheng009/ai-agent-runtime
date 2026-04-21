@@ -14,7 +14,7 @@ func TestMessageBuilder_AssignsToolCallIDsAndRepairsMissingResults(t *testing.T)
 			Name: "search_repo",
 			Args: map[string]interface{}{"query": "gateway"},
 		},
-	})
+	}, nil)
 	if len(toolCalls) != 1 {
 		t.Fatalf("expected one tool call, got %d", len(toolCalls))
 	}
@@ -51,7 +51,7 @@ func TestMessageBuilder_AlignsResultsByOrderWhenIDsMissing(t *testing.T) {
 	toolCalls := builder.AppendAssistantAction("Run both tools.", []types.ToolCall{
 		{Name: "tool_a"},
 		{Name: "tool_b"},
-	})
+	}, nil)
 	builder.AppendToolResults(toolCalls, []ToolResultPayload{
 		{Content: "result A"},
 		{Content: "result B"},
@@ -66,5 +66,29 @@ func TestMessageBuilder_AlignsResultsByOrderWhenIDsMissing(t *testing.T) {
 	}
 	if messages[2].ToolCallID != toolCalls[1].ID {
 		t.Fatalf("expected second tool result id %s, got %s", toolCalls[1].ID, messages[2].ToolCallID)
+	}
+}
+
+func TestMessageBuilder_PreservesAssistantReasoningMetadata(t *testing.T) {
+	builder := NewMessageBuilder(nil)
+
+	builder.AppendAssistantAction("answer", nil, &types.ReasoningBlock{
+		Provider:       "gemini",
+		Format:         "gemini_thought",
+		Summary:        "先给出摘要，再继续正文。",
+		OpaqueState:    "sig-1",
+		ReplayRequired: true,
+	})
+
+	messages := builder.Messages()
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+	reasoning := types.GetReasoningBlock(messages[0].Metadata)
+	if reasoning == nil {
+		t.Fatal("expected reasoning metadata to be preserved")
+	}
+	if reasoning.Provider != "gemini" || reasoning.OpaqueState != "sig-1" || !reasoning.ReplayRequired {
+		t.Fatalf("unexpected reasoning metadata: %+v", reasoning)
 	}
 }

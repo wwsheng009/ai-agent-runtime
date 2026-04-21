@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
@@ -12,24 +13,23 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
-	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/google/uuid"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const emptyTerminalAssistantResponseError = "upstream model returned an empty reply: no text and no tool calls"
 
 // LoopReActConfig ReAct 循环配置
 type LoopReActConfig struct {
-	MaxSteps        int     `yaml:"maxSteps"`
-	EnableThought   bool    `yaml:"enableThought"`
-	EnableToolCalls bool    `yaml:"enableToolCalls"`
-	Verbose         bool    `yaml:"verbose"`
-	Temperature     float64 `yaml:"temperature"`
-	ReasoningEffort string  `yaml:"reasoningEffort"`
+	MaxSteps        int                   `yaml:"maxSteps"`
+	EnableThought   bool                  `yaml:"enableThought"`
+	EnableToolCalls bool                  `yaml:"enableToolCalls"`
+	Verbose         bool                  `yaml:"verbose"`
+	Temperature     float64               `yaml:"temperature"`
+	ReasoningEffort string                `yaml:"reasoningEffort"`
 	Thinking        *types.ThinkingConfig `yaml:"thinking"`
-	StopOnSuccess   bool    `yaml:"stopOnSuccess"`
-	MaxIterations   int     `yaml:"maxIterations"`
+	StopOnSuccess   bool                  `yaml:"stopOnSuccess"`
+	MaxIterations   int                   `yaml:"maxIterations"`
 }
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
@@ -73,7 +73,7 @@ type HistorySession interface {
 func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActConfig) *ReActLoop {
 	if config == nil {
 		config = &LoopReActConfig{
-			MaxSteps:        10,
+			MaxSteps:        0,
 			EnableThought:   true,
 			EnableToolCalls: true,
 			Verbose:         false,
@@ -82,6 +82,7 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 			MaxIterations:   10,
 		}
 	}
+	config.MaxSteps = NormalizeMaxSteps(config.MaxSteps)
 	if agent != nil && agent.llmRuntime == nil && llmRuntime != nil {
 		agent.llmRuntime = llmRuntime
 	}
@@ -198,7 +199,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	remainingBudget := options.BudgetTokens
 
 	// ReAct 循环：Think - Act - Observe
-	for step := 1; step <= loop.config.MaxSteps; step++ {
+	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
 		loop.agent.state.CurrentStep = step
 		if options.BudgetTokens > 0 && remainingBudget <= 0 {
 			result.Success = false
@@ -215,7 +216,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 
 		// 1. Think: LLM 推理决定下一步行动
-		thought, action, usage, err := loop.think(ctx, traceID, sessionID, prompt, builder.Messages(), observations, options.ToolWhitelist, remainingBudget)
+		thought, action, usage, err := loop.think(ctx, traceID, sessionID, step, prompt, builder.Messages(), observations, options.ToolWhitelist, remainingBudget)
 		if err != nil {
 			loop.agent.AddError(fmt.Sprintf("think failed: %v", err))
 			result.Error = err.Error()
@@ -250,13 +251,14 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				result.State = loop.agent.GetState()
 				return result, err
 			}
-			builder.AppendAssistantAction(action.Content, nil)
+			builder.AppendAssistantAction(action.Content, nil, action.Reasoning)
 			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 				return nil, err
 			}
 
 			result.Success = !hadToolFailure
 			result.Output = action.Content
+			result.Reasoning = action.Reasoning
 			result.Steps = step
 			result.Observations = observations
 			result.Duration = *startTime
@@ -276,7 +278,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 
 		// 2. Act: 执行工具调用
-		normalizedCalls := builder.AppendAssistantAction(action.Content, action.ToolCalls)
+		normalizedCalls := builder.AppendAssistantAction(action.Content, action.ToolCalls, action.Reasoning)
 		historySnapshot := builder.Messages()
 		toolResults, err := loop.act(ctx, traceID, sessionID, step, options.Depth, historySnapshot, normalizedCalls, options.ToolWhitelist)
 		if err != nil {
@@ -295,7 +297,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			result.State = loop.agent.GetState()
 
 			// 单次失败不立即返回，让 LLM 决定下一步
-			if step < loop.config.MaxSteps {
+			if hasRemainingStepBudget(loop.config.MaxSteps, step) {
 				result.Success = false
 				continue
 			}
@@ -324,21 +326,48 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 	}
 
-	result.Success = !hadToolFailure
-	result.Output = "Reached maximum iterations. Consider increasing max steps."
-	result.Steps = loop.config.MaxSteps
+	result.Success = false
+	result.LimitReached = true
+	result.StepLimit = NormalizeMaxSteps(loop.config.MaxSteps)
+	result.Output = stepLimitReachedMessage(result.StepLimit)
+	result.Steps = result.StepLimit
 	result.Observations = observations
 	result.Duration = *startTime
 	result.Usage = totalUsage.Clone()
-	if hadToolFailure && len(failureMessages) > 0 {
-		result.Error = joinFailureMessages(failureMessages)
+	builder.AppendAssistantAction(result.Output, nil, nil)
+	if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+		return nil, err
 	}
+	if hadToolFailure && len(failureMessages) > 0 {
+		result.Error = joinFailureMessages(append(failureMessages, result.Output))
+	} else {
+		result.Error = result.Output
+	}
+	result.State = loop.agent.GetState()
 
 	return result, nil
 }
 
+func stepExceedsLimit(maxSteps int, step int) bool {
+	maxSteps = NormalizeMaxSteps(maxSteps)
+	return maxSteps > 0 && step > maxSteps
+}
+
+func hasRemainingStepBudget(maxSteps int, step int) bool {
+	maxSteps = NormalizeMaxSteps(maxSteps)
+	return maxSteps == 0 || step < maxSteps
+}
+
+func stepLimitReachedMessage(maxSteps int) string {
+	maxSteps = NormalizeMaxSteps(maxSteps)
+	if maxSteps <= 0 {
+		return "当前运行未配置步数上限。"
+	}
+	return fmt.Sprintf("已达到 maxSteps=%d 的执行上限，当前轮次已停止。未配置、0 或负数表示不限制。", maxSteps)
+}
+
 // think 思考阶段：让 LLM 决定下一步行动
-func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID, goal string, history []types.Message, observations []types.Observation, toolWhitelist []string, remainingBudget int) (thought string, action *AgentAction, usage *types.TokenUsage, err error) {
+func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, step int, goal string, history []types.Message, observations []types.Observation, toolWhitelist []string, remainingBudget int) (thought string, action *AgentAction, usage *types.TokenUsage, err error) {
 	action = &AgentAction{}
 	managedHistory := history
 	if manager := loop.agent.GetContextManager(); manager != nil {
@@ -394,16 +423,37 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID, goal strin
 		req.Stream = true
 	}
 	callCtx := ctx
+	streamedReasoning := false
 	if req.Stream {
 		callCtx = llm.WithStreamReporter(ctx, func(chunk llm.StreamChunk) {
-			if chunk.Type != llm.EventTypeText || chunk.Content == "" {
-				return
+			switch chunk.Type {
+			case llm.EventTypeText:
+				if chunk.Content == "" {
+					return
+				}
+				loop.agent.emitRuntimeEvent("assistant_delta", sessionID, "", map[string]interface{}{
+					"trace_id": traceID,
+					"content":  chunk.Content,
+					"delta":    chunk.Content,
+				})
+			case llm.EventTypeReasoning:
+				if chunk.Content == "" {
+					return
+				}
+				streamedReasoning = true
+				reasoning := &types.ReasoningBlock{
+					Provider:   req.Provider,
+					Summary:    chunk.Content,
+					Format:     "stream_delta",
+					Streamable: true,
+					Visibility: types.ReasoningVisibilitySummary,
+				}
+				loop.agent.emitRuntimeEvent("assistant.reasoning", sessionID, "", map[string]interface{}{
+					"trace_id":  traceID,
+					"step":      step,
+					"reasoning": reasoning.ToMap(),
+				})
 			}
-			loop.agent.emitRuntimeEvent("assistant_delta", sessionID, "", map[string]interface{}{
-				"trace_id": traceID,
-				"content":  chunk.Content,
-				"delta":    chunk.Content,
-			})
 		})
 	}
 
@@ -448,6 +498,26 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID, goal strin
 	// 解析响应
 	action.Content = response.Content
 	action.ToolCalls = response.ToolCalls
+	action.Reasoning = response.ReasoningBlock
+	if action.Reasoning == nil && strings.TrimSpace(response.Reasoning) != "" {
+		action.Reasoning = &types.ReasoningBlock{
+			Provider:   req.Provider,
+			Summary:    strings.TrimSpace(response.Reasoning),
+			Visibility: types.ReasoningVisibilitySummary,
+		}
+	}
+	if action.Reasoning != nil {
+		if strings.TrimSpace(action.Reasoning.Provider) == "" {
+			action.Reasoning.Provider = req.Provider
+		}
+		if !streamedReasoning {
+			loop.agent.emitRuntimeEvent("assistant.reasoning", sessionID, "", map[string]interface{}{
+				"trace_id":  traceID,
+				"step":      step,
+				"reasoning": action.Reasoning.ToMap(),
+			})
+		}
+	}
 	thought = "Based on the context, I'll " + action.Content
 
 	if len(response.ToolCalls) > 0 {
@@ -478,11 +548,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			"step":     step,
 			"trace_id": traceID,
 		}
-		loop.agent.emitRuntimeEvent("tool.requested", sessionID, tc.Name, map[string]interface{}{
-			"tool_call_id": tc.ID,
-			"step":         step,
-			"trace_id":     traceID,
-		})
+		loop.agent.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, nil))
 		if err := loop.agent.runPreToolUseHooks(ctx, sessionID, tc); err != nil {
 			result.Error = err.Error()
 			loop.emitToolDenied(sessionID, tc, step, traceID, "hook", result.Error, nil)
@@ -735,12 +801,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				envelope.Metadata["gateway_error"] = gatewayErr.Error()
 			}
 			result.Envelope = envelope
-			loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, map[string]interface{}{
-				"tool_call_id": tc.ID,
-				"step":         step,
-				"error":        result.Error,
-				"trace_id":     traceID,
-			})
+			loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+				"awaiting_model": i == len(toolCalls)-1 && hasRemainingStepBudget(loop.config.MaxSteps, step),
+			}))
 			loop.emitToolReduced(sessionID, tc, step, traceID, result, nil)
 			results[i] = result
 			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
@@ -1086,12 +1149,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			envelope.Metadata["gateway_error"] = gatewayErr.Error()
 		}
 		result.Envelope = envelope
-		loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, map[string]interface{}{
-			"tool_call_id": tc.ID,
-			"step":         step,
-			"error":        result.Error,
-			"trace_id":     traceID,
-		})
+		loop.agent.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+			"awaiting_model": i == len(toolCalls)-1 && hasRemainingStepBudget(loop.config.MaxSteps, step),
+		}))
 		if pendingCheckpoints != nil {
 			if pending := pendingCheckpoints[tc.ID]; pending != nil {
 				meta := map[string]interface{}{}
@@ -1335,6 +1395,7 @@ type AgentAction struct {
 	Content   string                 `json:"content" yaml:"content"`
 	ToolCalls []types.ToolCall       `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
 	Thought   string                 `json:"thought,omitempty" yaml:"thought,omitempty"`
+	Reasoning *types.ReasoningBlock  `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 

@@ -435,9 +435,8 @@ func selectHeuristicTools(goal string, availableTools []skill.ToolInfo, maxSteps
 		return nil
 	}
 	if maxSteps <= 0 {
-		maxSteps = 1
-	}
-	if maxSteps > len(availableTools) {
+		maxSteps = len(availableTools)
+	} else if maxSteps > len(availableTools) {
 		maxSteps = len(availableTools)
 	}
 

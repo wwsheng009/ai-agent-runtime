@@ -3,22 +3,24 @@ package agent
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // MockLLMProvider 模拟 LLM Provider 用于测试
@@ -167,7 +169,7 @@ func TestNewReActLoop_WithNilConfig(t *testing.T) {
 
 	// 验证默认配置
 	expectedDefaults := map[string]interface{}{
-		"MaxSteps":        10,
+		"MaxSteps":        0,
 		"EnableThought":   true,
 		"EnableToolCalls": true,
 		"Verbose":         false,
@@ -179,6 +181,64 @@ func TestNewReActLoop_WithNilConfig(t *testing.T) {
 	if loop.config.MaxSteps != expectedDefaults["MaxSteps"].(int) {
 		t.Errorf("expected default MaxSteps %d, got %d", expectedDefaults["MaxSteps"].(int), loop.config.MaxSteps)
 	}
+}
+
+func TestReActLoop_RunWithSession_DoesNotLimitWhenMaxStepsIsNonPositive(t *testing.T) {
+	session := newTestHistorySession("session-unlimited")
+
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Model:        "test-provider",
+			MaxSteps:     0,
+			SystemPrompt: "You are a helpful assistant.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "先读取目录。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{
+						ID:   "tool_1",
+						Name: "ls",
+						Args: map[string]interface{}{"path": "."},
+					},
+				},
+			},
+			{
+				Content: "已完成分析。",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        0,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+
+	result, err := loop.RunWithSession(context.Background(), "请分析当前目录。", session)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.False(t, result.LimitReached)
+	require.Equal(t, "已完成分析。", result.Output)
+	require.Len(t, provider.requests, 2)
+
+	messages := session.GetMessages()
+	require.Len(t, messages, 4)
+	require.Equal(t, "assistant", messages[len(messages)-1].Role)
+	require.Equal(t, "已完成分析。", messages[len(messages)-1].Content)
 }
 
 func TestReActLoop_RunWithSession_PropagatesStreamOptionToLLMRequest(t *testing.T) {
@@ -231,6 +291,61 @@ func TestReActLoop_RunWithSession_PropagatesStreamOptionToLLMRequest(t *testing.
 	if !provider.requests[0].Stream {
 		t.Fatalf("expected stream=true on provider request, got %#v", provider.requests[0])
 	}
+}
+
+func TestReActLoop_RunWithSession_DoesNotEmitDuplicateReasoningAfterStreaming(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"reasoning_content":"先确认问题。"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"Hello!"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := llm.NewProvider(&llm.ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+
+	llmRuntime := llm.NewLLMRuntime(nil)
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Provider: "test-provider",
+			Model:    "gpt-4o-mini",
+			Options: map[string]interface{}{
+				"stream": true,
+			},
+		},
+		state: AgentState{},
+	}
+
+	bus := runtimeevents.NewBus()
+	var reasoningEvents []runtimeevents.Event
+	bus.Subscribe("assistant.reasoning", func(event runtimeevents.Event) {
+		reasoningEvents = append(reasoningEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        1,
+		EnableThought:   true,
+		EnableToolCalls: false,
+	})
+
+	result, err := loop.RunWithSession(context.Background(), "hello", newTestHistorySession("session-stream-reasoning"))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "Hello!", result.Output)
+	require.Len(t, reasoningEvents, 1)
+
+	block := types.ReasoningBlockFromMap(reasoningEvents[0].Payload["reasoning"])
+	require.NotNil(t, block)
+	require.Equal(t, "stream_delta", block.Format)
+	require.Equal(t, "先确认问题。", block.DisplayText())
 }
 
 func TestReActLoop_Run_WithoutAgent(t *testing.T) {
@@ -378,6 +493,65 @@ func TestReActLoop_Run_WithMaxSteps(t *testing.T) {
 	if result.State.CurrentStep > config.MaxSteps {
 		t.Errorf("expected at most %d steps, got %d", config.MaxSteps, result.State.CurrentStep)
 	}
+}
+
+func TestReActLoop_RunWithSession_EmitsLimitNoticeAndPersistsAssistantMessage(t *testing.T) {
+	session := newTestHistorySession("session-step-limit")
+
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Model:        "test-provider",
+			MaxSteps:     1,
+			SystemPrompt: "You are a helpful assistant.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "先读取目录。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{
+						ID:   "tool_limit_1",
+						Name: "ls",
+						Args: map[string]interface{}{"path": "."},
+					},
+				},
+			},
+			{
+				Content: "这条回复不应出现。",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        1,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+
+	result, err := loop.RunWithSession(context.Background(), "请分析当前目录。", session)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.True(t, result.LimitReached)
+	require.Equal(t, 1, result.StepLimit)
+	require.Contains(t, result.Output, "maxSteps=1")
+	require.Len(t, provider.requests, 1)
+
+	messages := session.GetMessages()
+	require.Len(t, messages, 4)
+	require.Equal(t, "assistant", messages[len(messages)-1].Role)
+	require.Equal(t, result.Output, messages[len(messages)-1].Content)
 }
 
 func TestReActLoop_Run_WithTimeout(t *testing.T) {

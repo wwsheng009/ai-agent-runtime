@@ -6,12 +6,12 @@ import (
 	"strings"
 	"sync"
 
-	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memory"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -74,16 +74,19 @@ type AgentState struct {
 
 // Result Agent 执行结果
 type Result struct {
-	Success      bool                `json:"success"`
-	Output       string              `json:"output"`
-	Steps        int                 `json:"steps"`
-	Observations []types.Observation `json:"observations"`
-	Skill        string              `json:"skill,omitempty"`
-	TraceID      string              `json:"trace_id,omitempty"`
-	State        AgentState          `json:"state"`
-	Usage        *types.TokenUsage   `json:"usage,omitempty"`
-	Duration     types.Duration      `json:"duration"`
-	Error        string              `json:"error,omitempty"`
+	Success      bool                  `json:"success"`
+	Output       string                `json:"output"`
+	Steps        int                   `json:"steps"`
+	LimitReached bool                  `json:"limit_reached,omitempty"`
+	StepLimit    int                   `json:"step_limit,omitempty"`
+	Observations []types.Observation   `json:"observations"`
+	Skill        string                `json:"skill,omitempty"`
+	TraceID      string                `json:"trace_id,omitempty"`
+	State        AgentState            `json:"state"`
+	Usage        *types.TokenUsage     `json:"usage,omitempty"`
+	Reasoning    *types.ReasoningBlock `json:"reasoning,omitempty"`
+	Duration     types.Duration        `json:"duration"`
+	Error        string                `json:"error,omitempty"`
 }
 
 // NewAgent 创建 Agent
@@ -91,12 +94,18 @@ func NewAgent(cfg *Config, mcpManager skill.MCPManager) *Agent {
 	return NewAgentWithLLM(cfg, mcpManager, nil)
 }
 
+// NormalizeMaxSteps normalizes non-positive step limits to unlimited mode.
+func NormalizeMaxSteps(maxSteps int) int {
+	if maxSteps <= 0 {
+		return 0
+	}
+	return maxSteps
+}
+
 // NewAgentWithLLM 创建带 LLM Runtime 的 Agent
 func NewAgentWithLLM(cfg *Config, mcpManager skill.MCPManager, llmRuntime *llm.LLMRuntime) *Agent {
 	// 设置默认配置
-	if cfg.MaxSteps <= 0 {
-		cfg.MaxSteps = 10
-	}
+	cfg.MaxSteps = NormalizeMaxSteps(cfg.MaxSteps)
 	if cfg.DefaultMaxTokens <= 0 {
 		cfg.DefaultMaxTokens = 4096
 	}
@@ -630,10 +639,6 @@ func (a *Agent) Validate() error {
 
 	if a.config.Model == "" {
 		return errors.New(errors.ErrValidationFailed, "model is required")
-	}
-
-	if a.config.MaxSteps < 1 {
-		return errors.New(errors.ErrValidationFailed, "maxSteps must be >= 1")
 	}
 
 	return nil

@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/google/uuid"
 )
 
 // ExecuteApprovedToolCall executes a previously approved tool call without re-running approval checks.
@@ -29,11 +29,9 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		"trace_id":        traceID,
 		"approved_resume": true,
 	}
-	a.emitRuntimeEvent("tool.requested", sessionID, call.Name, map[string]interface{}{
-		"tool_call_id": call.ID,
-		"trace_id":     traceID,
-		"approved":     true,
-	})
+	a.emitRuntimeEvent("tool.requested", sessionID, call.Name, toolRequestedEventPayload(call, 0, traceID, map[string]interface{}{
+		"approved": true,
+	}))
 
 	finalize := func() *types.Message {
 		envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
@@ -49,12 +47,10 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 			envelope.Metadata["gateway_error"] = gatewayErr.Error()
 		}
 		result.Envelope = envelope
-		a.emitRuntimeEvent("tool.completed", sessionID, call.Name, map[string]interface{}{
-			"tool_call_id": call.ID,
-			"error":        result.Error,
-			"trace_id":     traceID,
-			"approved":     true,
-		})
+		a.emitRuntimeEvent("tool.completed", sessionID, call.Name, toolCompletedEventPayload(result, 0, traceID, map[string]interface{}{
+			"approved":       true,
+			"awaiting_model": true,
+		}))
 		a.runPostToolUseHooks(ctx, sessionID, result)
 		message := types.NewToolMessage(call.ID, "")
 		if envelope != nil {
