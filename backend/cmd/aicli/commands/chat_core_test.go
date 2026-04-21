@@ -295,6 +295,51 @@ func TestAICLIProviderTurnExecutor_UsesSanitizedProtocolMessagesForSharedReplay(
 	}
 }
 
+func TestToolDefinitionsFromSelection_SortsDefinitionsByName(t *testing.T) {
+	selection := &aicliFunctionSelection{
+		Schemas: []map[string]interface{}{
+			{"name": "write", "description": "write file", "parameters": map[string]interface{}{"type": "object"}},
+			{"name": "bash", "description": "run shell", "parameters": map[string]interface{}{"type": "object"}},
+			{"name": "edit", "description": "edit file", "parameters": map[string]interface{}{"type": "object"}},
+		},
+	}
+
+	defs := toolDefinitionsFromSelection(selection)
+	if len(defs) != 3 {
+		t.Fatalf("expected 3 tool definitions, got %d", len(defs))
+	}
+
+	got := make([]string, 0, len(defs))
+	for _, def := range defs {
+		got = append(got, def.Name)
+	}
+	if joined := strings.Join(got, ","); joined != "bash,edit,write" {
+		t.Fatalf("expected stable tool definition order, got %q", joined)
+	}
+}
+
+func TestToolDefinitionsToSchemas_SortsDefinitionsByName(t *testing.T) {
+	defs := []types.ToolDefinition{
+		{Name: "write", Description: "write file", Parameters: map[string]interface{}{"type": "object"}},
+		{Name: "bash", Description: "run shell", Parameters: map[string]interface{}{"type": "object"}},
+		{Name: "edit", Description: "edit file", Parameters: map[string]interface{}{"type": "object"}},
+	}
+
+	schemas := toolDefinitionsToSchemas(defs)
+	if len(schemas) != 3 {
+		t.Fatalf("expected 3 schemas, got %d", len(schemas))
+	}
+
+	got := make([]string, 0, len(schemas))
+	for _, schema := range schemas {
+		name, _ := schema["name"].(string)
+		got = append(got, name)
+	}
+	if joined := strings.Join(got, ","); joined != "bash,edit,write" {
+		t.Fatalf("expected stable schema order, got %q", joined)
+	}
+}
+
 func TestSendMessage_UsesActorFirstExecutorWhenLocalHostAvailable(t *testing.T) {
 	manager, userID, dir, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -507,6 +552,25 @@ func TestAICLISharedChatExecutor_RemainsAvailableAsFallback(t *testing.T) {
 	}
 	if response != "legacy output" {
 		t.Fatalf("unexpected response: %q", response)
+	}
+}
+
+func TestAdapterRequestConfig_PropagatesReasoningEffortMetadata(t *testing.T) {
+	session := &ChatSession{
+		Provider:        config.Provider{Protocol: "codex"},
+		Model:           "gpt-5.4-mini",
+		ReasoningEffort: "medium",
+	}
+
+	req := adapterRequestConfig(session, nil, runtimechatcore.ProviderTurnRequest{Stream: true})
+	if req.ReasoningEffort != "medium" {
+		t.Fatalf("expected reasoning effort medium, got %q", req.ReasoningEffort)
+	}
+	if req.Metadata == nil {
+		t.Fatal("expected metadata to be populated")
+	}
+	if got := req.Metadata["reasoning_effort"]; got != "medium" {
+		t.Fatalf("expected reasoning_effort metadata medium, got %#v", got)
 	}
 }
 

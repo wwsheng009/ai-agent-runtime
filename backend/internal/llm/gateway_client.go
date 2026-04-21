@@ -832,6 +832,7 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, proto
 		Temperature:     req.Temperature,
 		Functions:       tools,
 		Timeout:         c.defaultTimeout,
+		Metadata:        req.Metadata,
 	}
 }
 

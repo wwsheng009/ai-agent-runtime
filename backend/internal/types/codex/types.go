@@ -10,8 +10,6 @@
 // 参考: https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/sse/responses.rs
 package codex
 
-import "encoding/json"
-
 const (
 	Name    = "codex"
 	Version = "1.1.0"
@@ -27,7 +25,6 @@ type ResponsesRequest struct {
 	ToolChoice           interface{}     `json:"tool_choice,omitempty"` // string or ToolChoiceObject
 	ParallelToolCalls    *bool           `json:"parallel_tool_calls,omitempty"`
 	PromptCacheKey       string          `json:"prompt_cache_key,omitempty"`
-	PromptCacheRetention json.RawMessage `json:"prompt_cache_retention,omitempty"`
 
 	// 推理配置
 	Reasoning *Reasoning `json:"reasoning,omitempty"`
@@ -127,7 +124,6 @@ type ResponsesResponse struct {
 	Output               []OutputItem    `json:"output,omitempty"`
 	Usage                *Usage          `json:"usage,omitempty"`
 	PromptCacheKey       string          `json:"prompt_cache_key,omitempty"`
-	PromptCacheRetention json.RawMessage `json:"prompt_cache_retention,omitempty"`
 
 	// 错误信息
 	Error *ResponseError `json:"error,omitempty"`
@@ -249,7 +245,6 @@ type ResponseData struct {
 	Usage                *Usage          `json:"usage,omitempty"`
 	StopReason           string          `json:"stop_reason,omitempty"`
 	PromptCacheKey       string          `json:"prompt_cache_key,omitempty"`
-	PromptCacheRetention json.RawMessage `json:"prompt_cache_retention,omitempty"`
 
 	// 错误信息
 	Error *ResponseError `json:"error,omitempty"`

@@ -32,6 +32,7 @@ type RequestConfig struct {
 	Temperature     float64
 	Timeout         time.Duration
 	Functions       interface{} // Function Call 配置（tools, tools 等）
+	Metadata        map[string]interface{}
 }
 
 // AdapterConfig 适配器配置

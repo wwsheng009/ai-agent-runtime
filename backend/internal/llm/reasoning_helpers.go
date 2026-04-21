@@ -27,17 +27,25 @@ func attachReasoningToAssistantMessage(msg map[string]interface{}, reasoning *ty
 			msg["reasoning_content"] = text
 		}
 	}
+	if outputItems, ok := reasoning.Metadata[reasoningMetadataCodexOutputItemsKey]; ok {
+		msg[codexResponseOutputItemsMessageKey] = outputItems
+	}
 	if encoded := reasoning.ToMap(); len(encoded) > 0 {
 		msg[assistantReasoningDetailsKey] = encoded
 	}
 	return msg
 }
 
-func extractReasoningFromAssistantMessage(msg map[string]interface{}) *types.ReasoningBlock {
+// ReasoningBlockFromAssistantMessage 从 assistant 消息中恢复统一 reasoning 信息。
+// 优先使用 reasoning_details，其次回退到 Codex 的 response_output_items，最后才使用纯文本 reasoning_content。
+func ReasoningBlockFromAssistantMessage(msg map[string]interface{}) *types.ReasoningBlock {
 	if len(msg) == 0 {
 		return nil
 	}
 	if block := types.ReasoningBlockFromMap(msg[assistantReasoningDetailsKey]); block != nil {
+		return block
+	}
+	if block := reasoningBlockFromCodexOutputItems(msg[codexResponseOutputItemsMessageKey]); block != nil {
 		return block
 	}
 	if text, _ := msg["reasoning_content"].(string); strings.TrimSpace(text) != "" {
@@ -46,7 +54,17 @@ func extractReasoningFromAssistantMessage(msg map[string]interface{}) *types.Rea
 			Visibility: types.ReasoningVisibilitySummary,
 		}
 	}
+	if text, _ := msg["reasoning"].(string); strings.TrimSpace(text) != "" {
+		return &types.ReasoningBlock{
+			Summary:    strings.TrimSpace(text),
+			Visibility: types.ReasoningVisibilitySummary,
+		}
+	}
 	return nil
+}
+
+func extractReasoningFromAssistantMessage(msg map[string]interface{}) *types.ReasoningBlock {
+	return ReasoningBlockFromAssistantMessage(msg)
 }
 
 func reasoningFromMessageMetadata(metadata types.Metadata) *types.ReasoningBlock {
@@ -58,6 +76,73 @@ func reasoningFromMapMetadata(metadata map[string]interface{}) *types.ReasoningB
 		return nil
 	}
 	return types.ReasoningBlockFromMap(metadata[assistantReasoningDetailsKey])
+}
+
+func reasoningBlockFromCodexOutputItems(raw interface{}) *types.ReasoningBlock {
+	outputItems := decodeSliceOfMaps(raw)
+	if len(outputItems) == 0 {
+		return nil
+	}
+
+	block := &types.ReasoningBlock{
+		Format:     "openai_responses",
+		Streamable: true,
+		Visibility: types.ReasoningVisibilityOpaque,
+		Metadata: map[string]interface{}{
+			reasoningMetadataCodexOutputItemsKey: outputItems,
+		},
+	}
+
+	if summary := extractCodexReasoningSummary(outputItems); summary != "" {
+		block.Summary = summary
+		block.Visibility = types.ReasoningVisibilitySummary
+	}
+
+	return block
+}
+
+func extractCodexReasoningSummary(outputItems []map[string]interface{}) string {
+	if len(outputItems) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(outputItems))
+	for _, item := range outputItems {
+		if item == nil {
+			continue
+		}
+		itemType, _ := item["type"].(string)
+		if itemType != "reasoning" {
+			continue
+		}
+		if summary := extractCodexReasoningSummaryParts(item["summary"]); summary != "" {
+			parts = append(parts, summary)
+		}
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+func extractCodexReasoningSummaryParts(raw interface{}) string {
+	summaryParts := decodeSliceOfMaps(raw)
+	if len(summaryParts) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(summaryParts))
+	for _, part := range summaryParts {
+		if part == nil {
+			continue
+		}
+		if partType, _ := part["type"].(string); partType != "summary_text" {
+			continue
+		}
+		if text, _ := part["text"].(string); strings.TrimSpace(text) != "" {
+			parts = append(parts, strings.TrimSpace(text))
+		}
+	}
+
+	return strings.Join(parts, "\n")
 }
 
 func runtimeMessageToAdapterMessage(msg types.Message, protocol string) map[string]interface{} {

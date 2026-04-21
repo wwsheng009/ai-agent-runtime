@@ -18,6 +18,11 @@ import (
 type CodexAdapter struct{}
 
 const codexResponseOutputItemsKey = "response_output_items"
+const (
+	codexPromptCacheKeyMetadataKey = "prompt_cache_key"
+	codexSessionIDMetadataKey      = "session_id"
+	codexConversationIDMetadataKey = "conversation_id"
+)
 
 // Name 返回适配器名称
 func (a *CodexAdapter) Name() string {
@@ -32,6 +37,7 @@ type CodexStreamState struct {
 	Content      strings.Builder
 	Reasoning    strings.Builder
 	ToolCalls    map[int]*CodexToolCall // index -> tool call
+	OutputItems  map[int]map[string]interface{}
 	FinishReason string
 	Usage        map[string]int64
 
@@ -63,8 +69,9 @@ var validCodexReasoningEfforts = map[string]struct{}{
 // NewCodexStreamState 创建新的 Codex 流式状态
 func NewCodexStreamState() *CodexStreamState {
 	return &CodexStreamState{
-		ToolCalls: make(map[int]*CodexToolCall),
-		Usage:     make(map[string]int64),
+		ToolCalls:   make(map[int]*CodexToolCall),
+		OutputItems: make(map[int]map[string]interface{}),
+		Usage:       make(map[string]int64),
 	}
 }
 
@@ -74,6 +81,7 @@ func NewCodexStreamState() *CodexStreamState {
 func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{} {
 	// Responses API prefers system/developer guidance in top-level instructions.
 	instructions, input := a.buildCodexInstructionsAndInput(config.Messages)
+	promptCacheKey := a.resolvePromptCacheKey(config)
 
 	request := map[string]interface{}{
 		"model":  config.Model,
@@ -82,6 +90,9 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 	}
 	if instructions != "" {
 		request["instructions"] = instructions
+	}
+	if promptCacheKey != "" {
+		request["prompt_cache_key"] = promptCacheKey
 	}
 
 	// 设置 max_output_tokens (Codex 使用 max_output_tokens 而非 max_tokens)
@@ -92,6 +103,14 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 	}
 
 	effort := NormalizeCodexReasoningEffort(config.ReasoningEffort)
+	if effort == "" {
+		effort = NormalizeCodexReasoningEffort(stringFromMetadata(config.Metadata, "reasoning_effort"))
+	}
+	if effort == "" {
+		if reasoning, ok := config.Metadata["reasoning"].(map[string]interface{}); ok {
+			effort = NormalizeCodexReasoningEffort(stringFromMetadata(reasoning, "effort"))
+		}
+	}
 	if !IsValidCodexReasoningEffort(effort) && config.Thinking != nil {
 		effort = NormalizeCodexReasoningEffort(mapAnthropicThinkingToReasoningEffort(config.Model, config.Thinking))
 	}
@@ -100,6 +119,7 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 			"effort":  effort,
 			"summary": "auto",
 		}
+		request["include"] = []string{"reasoning.encrypted_content"}
 	}
 
 	// 添加 Function Call
@@ -112,6 +132,39 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 	}
 
 	return request
+}
+
+func (a *CodexAdapter) resolvePromptCacheKey(config RequestConfig) string {
+	if key := strings.TrimSpace(stringFromMetadata(config.Metadata, codexPromptCacheKeyMetadataKey)); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(stringFromMetadata(config.Metadata, codexSessionIDMetadataKey)); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(stringFromMetadata(config.Metadata, codexConversationIDMetadataKey)); key != "" {
+		return key
+	}
+	return ""
+}
+
+func stringFromMetadata(metadata map[string]interface{}, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []byte:
+		return string(typed)
+	case json.RawMessage:
+		return string(typed)
+	default:
+		return fmt.Sprint(typed)
+	}
 }
 
 func (a *CodexAdapter) buildCodexInstructionsAndInput(messages []map[string]interface{}) (string, []map[string]interface{}) {
@@ -422,6 +475,7 @@ func (a *CodexAdapter) handleOutputItemAdded(state *CodexStreamState, event map[
 	state.CurrentItemIndex = index
 	state.CurrentItemType = itemType
 	state.CurrentItemStarted = true
+	state.OutputItems[index] = cloneInterfaceMap(item)
 
 	// 如果是 function_call，初始化 ToolCall
 	if itemType == "function_call" {
@@ -524,6 +578,7 @@ func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[s
 			tc.Arguments.WriteString(args)
 		}
 	}
+	state.OutputItems[index] = cloneInterfaceMap(item)
 
 	// 可以在这里验证完整的 output item
 	state.CurrentItemStarted = false
@@ -588,6 +643,9 @@ func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, callback
 	output, ok := resp["output"].([]interface{})
 	if !ok {
 		return result, nil
+	}
+	if len(output) > 0 {
+		result[codexResponseOutputItemsKey] = output
 	}
 
 	var content strings.Builder
@@ -703,7 +761,36 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 		}
 	}
 
+	if len(s.OutputItems) > 0 {
+		keys := make([]int, 0, len(s.OutputItems))
+		for index := range s.OutputItems {
+			keys = append(keys, index)
+		}
+		sort.Ints(keys)
+
+		outputItems := make([]map[string]interface{}, 0, len(keys))
+		for _, index := range keys {
+			if item := s.OutputItems[index]; item != nil {
+				outputItems = append(outputItems, cloneInterfaceMap(item))
+			}
+		}
+		if len(outputItems) > 0 {
+			result[codexResponseOutputItemsKey] = outputItems
+		}
+	}
+
 	return result
+}
+
+func cloneInterfaceMap(raw map[string]interface{}) map[string]interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(raw))
+	for key, value := range raw {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // getIntIndex 从事件中获取 index 字段
@@ -740,7 +827,29 @@ func mergeCodexTools(groups ...interface{}) []map[string]interface{} {
 	if len(merged) == 0 {
 		return nil
 	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		leftName := codexToolName(merged[i])
+		rightName := codexToolName(merged[j])
+		if leftName == rightName {
+			return false
+		}
+		if leftName == "" {
+			return false
+		}
+		if rightName == "" {
+			return true
+		}
+		return leftName < rightName
+	})
 	return merged
+}
+
+func codexToolName(tool map[string]interface{}) string {
+	if tool == nil {
+		return ""
+	}
+	name, _ := tool["name"].(string)
+	return strings.TrimSpace(name)
 }
 
 // getSummaryIndex 从事件中获取 summary_index 字段
@@ -1111,15 +1220,20 @@ func (a *CodexAdapter) ProcessResponse(result map[string]interface{}) ProcessRes
 		Content:   a.ExtractResponse(result),
 		Reasoning: a.ExtractReasoning(result),
 	}
-	if strings.TrimSpace(pr.Reasoning) != "" {
+	if outputItems := decodeSliceOfMaps(result[codexResponseOutputItemsKey]); len(outputItems) > 0 || strings.TrimSpace(pr.Reasoning) != "" {
+		visibility := runtimetypes.ReasoningVisibilitySummary
+		if strings.TrimSpace(pr.Reasoning) == "" {
+			visibility = runtimetypes.ReasoningVisibilityOpaque
+		}
 		pr.ReasoningBlock = &runtimetypes.ReasoningBlock{
 			Format:     "openai_responses",
 			Summary:    strings.TrimSpace(pr.Reasoning),
 			Streamable: true,
-			Visibility: runtimetypes.ReasoningVisibilitySummary,
-			Metadata: map[string]interface{}{
-				"response_output_items": result[codexResponseOutputItemsKey],
-			},
+			Visibility: visibility,
+			Metadata:   map[string]interface{}{},
+		}
+		if len(outputItems) > 0 {
+			pr.ReasoningBlock.Metadata["response_output_items"] = outputItems
 		}
 	}
 
@@ -1165,6 +1279,9 @@ func (a *CodexAdapter) BuildAssistantMessage(content string, toolCalls []map[str
 	}
 	if outputItems := buildCodexResponseOutputItems(content, toolCalls, reasoning); len(outputItems) > 0 {
 		msg[codexResponseOutputItemsKey] = outputItems
+		if reasoningDetails := buildCodexReasoningDetails(reasoning, outputItems); len(reasoningDetails) > 0 {
+			msg[assistantReasoningDetailsKey] = reasoningDetails
+		}
 	}
 
 	return msg
@@ -1224,6 +1341,28 @@ func buildCodexResponseOutputItems(content string, toolCalls []map[string]interf
 		return nil
 	}
 	return items
+}
+
+func buildCodexReasoningDetails(reasoning string, outputItems []map[string]interface{}) map[string]interface{} {
+	details := map[string]interface{}{
+		"format":     "openai_responses",
+		"streamable": true,
+	}
+	if strings.TrimSpace(reasoning) != "" {
+		details["summary"] = strings.TrimSpace(reasoning)
+		details["visibility"] = "summary"
+	} else {
+		details["visibility"] = "opaque"
+	}
+	if len(outputItems) > 0 {
+		details["metadata"] = map[string]interface{}{
+			"response_output_items": outputItems,
+		}
+	}
+	if len(details) == 0 {
+		return nil
+	}
+	return details
 }
 
 func buildCodexReasoningItem(reasoning string) map[string]interface{} {

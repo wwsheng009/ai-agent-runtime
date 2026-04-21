@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -599,6 +600,14 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 		ReasoningEffort: session.ReasoningEffort,
 		Temperature:     0.7,
 	}
+	config.Metadata = map[string]interface{}{}
+	if strings.TrimSpace(session.ReasoningEffort) != "" {
+		config.Metadata["reasoning_effort"] = strings.TrimSpace(session.ReasoningEffort)
+	}
+	if session.RuntimeSession != nil && strings.TrimSpace(session.RuntimeSession.ID) != "" {
+		config.Metadata["prompt_cache_key"] = strings.TrimSpace(session.RuntimeSession.ID)
+		config.Metadata["session_id"] = strings.TrimSpace(session.RuntimeSession.ID)
+	}
 	if defs := req.Tools; len(defs) > 0 {
 		catalog := ensureFunctionCatalog(session)
 		builder := catalog.Builder(session.Provider.GetProtocol())
@@ -633,6 +642,7 @@ func toolDefinitionsFromSelection(selection *aicliFunctionSelection) []runtimety
 			Parameters:  cloneFunctionSchema(parameters),
 		})
 	}
+	sortToolDefinitions(definitions)
 	return definitions
 }
 
@@ -640,8 +650,11 @@ func toolDefinitionsToSchemas(defs []runtimetypes.ToolDefinition) []map[string]i
 	if len(defs) == 0 {
 		return nil
 	}
-	schemas := make([]map[string]interface{}, 0, len(defs))
-	for _, def := range defs {
+	orderedDefs := append([]runtimetypes.ToolDefinition(nil), defs...)
+	sortToolDefinitions(orderedDefs)
+
+	schemas := make([]map[string]interface{}, 0, len(orderedDefs))
+	for _, def := range orderedDefs {
 		schemas = append(schemas, map[string]interface{}{
 			"name":        def.Name,
 			"description": def.Description,
@@ -649,6 +662,19 @@ func toolDefinitionsToSchemas(defs []runtimetypes.ToolDefinition) []map[string]i
 		})
 	}
 	return schemas
+}
+
+func sortToolDefinitions(definitions []runtimetypes.ToolDefinition) {
+	sort.SliceStable(definitions, func(i, j int) bool {
+		leftName := strings.TrimSpace(definitions[i].Name)
+		rightName := strings.TrimSpace(definitions[j].Name)
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		leftDescription := strings.TrimSpace(definitions[i].Description)
+		rightDescription := strings.TrimSpace(definitions[j].Description)
+		return leftDescription < rightDescription
+	})
 }
 
 func tokenUsageFromResponseBody(raw []byte) *runtimetypes.TokenUsage {

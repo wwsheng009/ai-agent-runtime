@@ -998,6 +998,7 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 		Temperature:     request.Temperature,
 		Functions:       tools,
 		Timeout:         p.config.Timeout,
+		Metadata:        request.Metadata,
 	}
 }
 

@@ -67,6 +67,54 @@ func TestCodexBuildRequest_AddsToolChoice(t *testing.T) {
 	}
 }
 
+func TestCodexBuildRequest_SortsMergedToolsByName(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hello"}},
+		Functions: []map[string]interface{}{
+			{
+				"type":        "function",
+				"name":        "write",
+				"description": "write file",
+				"parameters": map[string]interface{}{
+					"type": "object",
+				},
+			},
+			{
+				"type":        "function",
+				"name":        "bash",
+				"description": "run shell",
+				"parameters": map[string]interface{}{
+					"type": "object",
+				},
+			},
+			{
+				"type":        "function",
+				"name":        "edit",
+				"description": "edit file",
+				"parameters": map[string]interface{}{
+					"type": "object",
+				},
+			},
+		},
+	})
+
+	tools, ok := req["tools"].([]map[string]interface{})
+	if !ok || len(tools) != 4 {
+		t.Fatalf("expected 4 tools, got %T %v", req["tools"], req["tools"])
+	}
+
+	got := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		got = append(got, name)
+	}
+	if joined := strings.Join(got, ","); joined != "bash,edit,list_mcp_resources,write" {
+		t.Fatalf("expected stable merged tool order, got %q", joined)
+	}
+}
+
 func TestCodexBuildRequest_UsesConfiguredStreamFlag(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{
@@ -143,6 +191,39 @@ func TestCodexBuildRequest_AddsReasoningConfig(t *testing.T) {
 	if reasoning["summary"] != "auto" {
 		t.Fatalf("expected reasoning summary auto, got %v", reasoning["summary"])
 	}
+	include, ok := req["include"].([]string)
+	if !ok {
+		rawInclude, ok := req["include"].([]interface{})
+		if !ok {
+			t.Fatalf("expected include list, got %T", req["include"])
+		}
+		include = make([]string, 0, len(rawInclude))
+		for _, item := range rawInclude {
+			include = append(include, item.(string))
+		}
+	}
+	if len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("expected reasoning.encrypted_content include, got %v", include)
+	}
+}
+
+func TestCodexBuildRequest_UsesReasoningMetadataFallback(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.2",
+		Messages: []map[string]interface{}{{"role": "user", "content": "test"}},
+		Metadata: map[string]interface{}{
+			"reasoning_effort": "medium",
+		},
+	})
+
+	reasoning, ok := req["reasoning"].(map[string]interface{})
+	if !ok || reasoning == nil {
+		t.Fatalf("expected reasoning config from metadata fallback, got %T", req["reasoning"])
+	}
+	if reasoning["effort"] != "medium" {
+		t.Fatalf("expected reasoning effort medium, got %v", reasoning["effort"])
+	}
 }
 
 func TestCodexBuildRequest_OmitsReasoningConfigWhenInvalid(t *testing.T) {
@@ -177,6 +258,21 @@ func TestCodexBuildRequest_DerivesReasoningFromAnthropicThinking(t *testing.T) {
 	}
 	if reasoning["effort"] != "xhigh" {
 		t.Fatalf("expected derived reasoning effort xhigh, got %v", reasoning["effort"])
+	}
+}
+
+func TestCodexBuildRequest_UsesSessionMetadataForPromptCache(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.2-codex",
+		Messages: []map[string]interface{}{{"role": "user", "content": "test"}},
+		Metadata: map[string]interface{}{
+			"session_id": "session-123",
+		},
+	})
+
+	if req["prompt_cache_key"] != "session-123" {
+		t.Fatalf("expected prompt_cache_key=session-123, got %#v", req["prompt_cache_key"])
 	}
 }
 
@@ -272,6 +368,82 @@ func TestCodexHandleResponse_NonStreamReturnsStandardAssistantMessage(t *testing
 	}
 }
 
+func TestCodexHandleResponse_NonStreamPreservesReasoningOutputItems(t *testing.T) {
+	a := &CodexAdapter{}
+	jsonData := `{
+		"id":"resp_1",
+		"model":"gpt-5.2-codex",
+		"stop_reason":"end_turn",
+		"output":[
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"Thinking"}],"encrypted_content":"-"},
+			{"type":"message","content":[{"type":"output_text","text":"Hello"}],"role":"assistant"}
+		]
+	}`
+
+	msg, err := a.HandleResponse(false, strings.NewReader(jsonData), StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("HandleResponse failed: %v", err)
+	}
+	outputItems, ok := msg["response_output_items"].([]map[string]interface{})
+	if !ok || len(outputItems) != 2 {
+		t.Fatalf("expected 2 response_output_items, got %T %#v", msg["response_output_items"], msg["response_output_items"])
+	}
+	if outputItems[0]["type"] != "reasoning" {
+		t.Fatalf("expected first output item reasoning, got %#v", outputItems[0])
+	}
+	if outputItems[0]["encrypted_content"] != "-" {
+		t.Fatalf("expected encrypted_content to be preserved, got %#v", outputItems[0]["encrypted_content"])
+	}
+}
+
+func TestCodexHandleResponse_StreamPreservesReasoningOutputItems(t *testing.T) {
+	a := &CodexAdapter{}
+	sseData := strings.Join([]string{
+		"event: response.created",
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.2-codex\"}}",
+		"",
+		"event: response.reasoning_summary_part.added",
+		"data: {\"type\":\"response.reasoning_summary_part.added\",\"summary_index\":0}",
+		"",
+		"event: response.reasoning_summary_text.delta",
+		"data: {\"type\":\"response.reasoning_summary_text.delta\",\"summary_index\":0,\"delta\":\"Thinking\"}",
+		"",
+		"event: response.output_item.added",
+		"data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Thinking\"}],\"encrypted_content\":\"-\"}}",
+		"",
+		"event: response.output_item.done",
+		"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Thinking\"}],\"encrypted_content\":\"-\"}}",
+		"",
+		"event: response.output_item.added",
+		"data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}",
+		"",
+		"event: response.output_text.delta",
+		"data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Hello\"}",
+		"",
+		"event: response.output_item.done",
+		"data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\"}]}}",
+		"",
+		"event: response.completed",
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"stop_reason\":\"end_turn\"}}",
+		"",
+	}, "\n")
+
+	msg, err := a.HandleResponse(true, strings.NewReader(sseData), StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("HandleResponse failed: %v", err)
+	}
+	outputItems, ok := msg["response_output_items"].([]map[string]interface{})
+	if !ok || len(outputItems) != 2 {
+		t.Fatalf("expected 2 response_output_items, got %T %#v", msg["response_output_items"], msg["response_output_items"])
+	}
+	if outputItems[0]["type"] != "reasoning" {
+		t.Fatalf("expected first output item reasoning, got %#v", outputItems[0])
+	}
+	if outputItems[0]["encrypted_content"] != "-" {
+		t.Fatalf("expected encrypted_content to be preserved, got %#v", outputItems[0]["encrypted_content"])
+	}
+}
+
 func TestCodexHandleResponse_NonStreamFunctionCallOnlyReturnsToolCall(t *testing.T) {
 	a := &CodexAdapter{}
 	jsonData := `{
@@ -358,7 +530,7 @@ func TestCodexBuildRequest_SanitizesOptionalPropertiesToNullableRequired(t *test
 	})
 
 	tools := req["tools"].([]map[string]interface{})
-	view := tools[0]
+	view := findToolByName(t, tools, "view")
 	params := view["parameters"].(map[string]interface{})
 	required := toStringSlice(t, params["required"])
 	if len(required) != 3 {
@@ -410,7 +582,8 @@ func TestCodexBuildRequest_RemovesDefaultsAndSanitizesNestedSchemas(t *testing.T
 	})
 
 	tools := req["tools"].([]map[string]interface{})
-	params := tools[0]["parameters"].(map[string]interface{})
+	todosTool := findToolByName(t, tools, "todos")
+	params := todosTool["parameters"].(map[string]interface{})
 	props := params["properties"].(map[string]interface{})
 
 	count := props["count"].(map[string]interface{})
@@ -468,7 +641,8 @@ func TestCodexBuildRequest_SanitizesSkillRuntimeOpenObjects(t *testing.T) {
 	})
 
 	tools := req["tools"].([]map[string]interface{})
-	params := tools[0]["parameters"].(map[string]interface{})
+	skillTool := findToolByName(t, tools, "skill__alpha")
+	params := skillTool["parameters"].(map[string]interface{})
 	required := toStringSlice(t, params["required"])
 	if len(required) != 3 {
 		t.Fatalf("expected all skill params required, got %v", required)
@@ -532,6 +706,43 @@ func TestCodexBuildRequest_FollowUpToolCallUsesOutputItems(t *testing.T) {
 	}
 }
 
+func TestCodexBuildAssistantMessage_PreservesReasoningDetails(t *testing.T) {
+	a := &CodexAdapter{}
+	msg := a.BuildAssistantMessage(
+		"Hello",
+		[]map[string]interface{}{
+			{
+				"id":   "call_1",
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":      "execute_shell_command",
+					"arguments": `{"command":"git status -sb"}`,
+				},
+			},
+		},
+		"**Checking git status**",
+	)
+
+	details, ok := msg["reasoning_details"].(map[string]interface{})
+	if !ok || len(details) == 0 {
+		t.Fatalf("expected reasoning_details, got %T %#v", msg["reasoning_details"], msg["reasoning_details"])
+	}
+	if details["summary"] != "**Checking git status**" {
+		t.Fatalf("expected reasoning summary, got %#v", details["summary"])
+	}
+	meta, ok := details["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected reasoning metadata, got %T", details["metadata"])
+	}
+	outputItems, ok := meta["response_output_items"].([]map[string]interface{})
+	if !ok || len(outputItems) != 3 {
+		t.Fatalf("expected 3 response_output_items, got %T %#v", meta["response_output_items"], meta["response_output_items"])
+	}
+	if outputItems[0]["type"] != "reasoning" {
+		t.Fatalf("expected first response output item reasoning, got %#v", outputItems[0])
+	}
+}
+
 func toStringSlice(t *testing.T, raw interface{}) []string {
 	t.Helper()
 	switch typed := raw.(type) {
@@ -551,4 +762,16 @@ func toStringSlice(t *testing.T, raw interface{}) []string {
 		t.Fatalf("expected string slice, got %T", raw)
 		return nil
 	}
+}
+
+func findToolByName(t *testing.T, tools []map[string]interface{}, name string) map[string]interface{} {
+	t.Helper()
+	for _, tool := range tools {
+		toolName, _ := tool["name"].(string)
+		if toolName == name {
+			return tool
+		}
+	}
+	t.Fatalf("expected tool %q in %#v", name, tools)
+	return nil
 }

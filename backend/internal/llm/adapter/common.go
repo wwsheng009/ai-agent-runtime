@@ -67,6 +67,9 @@ func attachReasoningBlock(msg map[string]interface{}, reasoning *runtimetypes.Re
 	if display := strings.TrimSpace(reasoning.DisplayText()); display != "" {
 		msg["reasoning_content"] = display
 	}
+	if outputItems, ok := reasoning.Metadata[codexResponseOutputItemsKey]; ok {
+		msg[codexResponseOutputItemsKey] = outputItems
+	}
 	if encoded := reasoning.ToMap(); len(encoded) > 0 {
 		msg[assistantReasoningDetailsKey] = encoded
 	}

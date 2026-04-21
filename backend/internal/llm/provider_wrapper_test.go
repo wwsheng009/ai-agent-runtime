@@ -697,6 +697,46 @@ func TestProviderWrapper_CodexCall_WithStreamPreservesWhitespaceAcrossTextDeltas
 	assert.Equal(t, []string{"Hello", " world."}, deltas)
 }
 
+func TestProviderWrapper_CodexCall_PropagatesPromptCacheFieldsFromMetadata(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/responses", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			"event: response.created",
+			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`,
+			"",
+			"event: response.completed",
+			`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","stop_reason":"end_turn"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:         "codex",
+		BaseURL:      server.URL,
+		DefaultModel: "gpt-5.4",
+	})
+	require.NoError(t, err)
+
+	_, err = provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Metadata: map[string]interface{}{
+			"session_id": "session-123",
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "session-123", capturedBody["prompt_cache_key"])
+}
+
 func TestProviderWrapper_AnthropicCall_PropagatesThinkingToBodyAndHeader(t *testing.T) {
 	var capturedBody map[string]interface{}
 	var capturedBeta string
