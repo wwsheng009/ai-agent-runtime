@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
-	"github.com/fatih/color"
 )
 
 func TestBuildChatSessionInfo_IncludesEndpointHostAndOperationalMetadata(t *testing.T) {
@@ -134,7 +134,7 @@ func TestPrintSessionInfo_AlignsFollowupMetadataRows(t *testing.T) {
 		MCPStatus:         &MCPStatus{Enabled: true, ToolCount: 13, MCPCount: 2},
 		ReasoningEffort:   "medium",
 		PermissionMode:    "default",
-		ApprovalReuseMode: chatApprovalReuseTeamReadOnlyShell,
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
 		DisableTools:      false,
 		RuntimeSession:    &runtimechat.Session{ID: "session-1", State: runtimechat.StateActive},
 		LocalRuntimeHost:  &localChatRuntimeHost{},
@@ -156,7 +156,7 @@ func TestPrintSessionInfo_AlignsFollowupMetadataRows(t *testing.T) {
 		"MCP:               已启用 (13 个工具, 2 个 MCP 服务器)",
 		"Reasoning Effort:  medium",
 		"Permission Mode:   default",
-		"Approval Reuse:    team_readonly_shell",
+		"Approval Reuse:    session_readonly_shell",
 		"Queued Input:      2 pending (draining)",
 		"Session:           session-1 [active]",
 	} {
@@ -214,8 +214,20 @@ func TestPrintCurrentRuntimeSession_IncludesSessionPathAndStore(t *testing.T) {
 	ui.SetTheme(ui.ThemeAuto)
 
 	sessionDir := t.TempDir()
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, "https://example.com")
+	if err := logger.SetLogDir(t.TempDir()); err != nil {
+		t.Fatalf("set log dir: %v", err)
+	}
+	runtimeCapture := &chatRuntimeHTTPCapture{}
+	runtimeCapture.SetArtifactDir(logger.RuntimeHTTPArtifactDir())
+	requestPath := filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_request_gateway_client.json")
+	responsePath := filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_response_gateway_client.json")
+	runtimeCapture.RecordArtifactPath("request", requestPath)
+	runtimeCapture.RecordArtifactPath("response", responsePath)
 	session := &ChatSession{
-		SessionDir: sessionDir,
+		SessionDir:         sessionDir,
+		Logger:             logger,
+		runtimeHTTPCapture: runtimeCapture,
 		RuntimeSession: &runtimechat.Session{
 			ID:    "session-1",
 			State: runtimechat.StateActive,
@@ -230,6 +242,11 @@ func TestPrintCurrentRuntimeSession_IncludesSessionPathAndStore(t *testing.T) {
 		"Session:           session-1 [active]",
 		"Session File:      " + filepath.Join(sessionDir, "session-1.json"),
 		"Session Store:     " + sessionDir + " (custom; default ",
+		"Chat Log File:     " + logger.SessionLogPath(),
+		"Debug Log File:    " + logger.DebugLogPath(),
+		"HTTP Artifact Dir: " + logger.RuntimeHTTPArtifactDir(),
+		"Last HTTP Req:     " + requestPath,
+		"Last HTTP Resp:    " + responsePath,
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)

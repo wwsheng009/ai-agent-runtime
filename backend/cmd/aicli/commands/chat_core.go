@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
-	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -173,11 +173,8 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		logScope = e.nextScope()
 	}
 
-	messages, err := buildAICLIMessagesFromRuntimeHistory(req.Messages)
-	if err != nil {
-		return nil, fmt.Errorf("构建 provider request 消息失败: %w", err)
-	}
-	config := adapterRequestConfig(session, messages, req)
+	protocolMessages := runtimellm.RuntimeMessagesToProtocolMessages(req.Messages, session.Provider.GetProtocol())
+	config := adapterRequestConfig(session, protocolMessages, req)
 	requestBody := session.Adapter.BuildRequest(config)
 
 	bodyBytes, err := json.Marshal(requestBody)
@@ -191,7 +188,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		logpkg.String("model", session.Model),
 		logpkg.URL(session.BaseURL),
 		logpkg.Bool("stream", req.Stream),
-		logpkg.Int("messages", len(messages)),
+		logpkg.Int("messages", len(protocolMessages)),
 		logpkg.Int("body_bytes", len(bodyBytes)),
 	)
 
@@ -276,22 +273,35 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(responseBody))
 	}
 
-	var onContent func(string)
+	callbacks := adapter.StreamCallbacks{}
 	if req.Stream {
-		onContent = func(content string) {
-			if session.IsInterrupted() {
-				return
-			}
-			if req.EventSink != nil {
-				req.EventSink(runtimechatcore.ChatEvent{
-					Type:    runtimechatcore.EventResult,
-					Content: content,
-				})
-			}
+		callbacks = adapter.StreamCallbacks{
+			OnText: func(content string) {
+				if session.IsInterrupted() {
+					return
+				}
+				if req.EventSink != nil {
+					req.EventSink(runtimechatcore.ChatEvent{
+						Type:    runtimechatcore.EventResult,
+						Content: content,
+					})
+				}
+			},
+			OnReasoning: func(reasoning string) {
+				if session.IsInterrupted() {
+					return
+				}
+				if req.EventSink != nil {
+					req.EventSink(runtimechatcore.ChatEvent{
+						Type:    runtimechatcore.EventPlanning,
+						Content: reasoning,
+					})
+				}
+			},
 		}
 	}
 
-	assistantMsg, err := session.Adapter.HandleResponse(req.Stream, io.NopCloser(bytes.NewReader(responseBody)), onContent)
+	assistantMsg, err := session.Adapter.HandleResponse(req.Stream, io.NopCloser(bytes.NewReader(responseBody)), callbacks)
 	if session.IsInterrupted() {
 		return nil, fmt.Errorf("用户中断")
 	}
@@ -387,8 +397,8 @@ type aicliEventRenderer struct {
 	session        *ChatSession
 	streamBuffer   strings.Builder
 	streamLines    int
+	reasoningOpen  bool
 	spinnerCleared bool
-	toolBatchOpen  bool
 }
 
 func newAICLIEventRenderer(session *ChatSession) *aicliEventRenderer {
@@ -400,6 +410,29 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 		return
 	}
 	switch event.Type {
+	case runtimechatcore.EventPlanning:
+		if !r.session.Stream || !shouldRenderInteractiveOutput(r.session) {
+			return
+		}
+		if event.Content == "" {
+			return
+		}
+		r.clearSpinner()
+		if r.session.Interaction != nil {
+			r.session.Interaction.RenderReasoningDelta(&runtimetypes.ReasoningBlock{
+				Format:     "stream_delta",
+				Summary:    event.Content,
+				Streamable: true,
+				Visibility: runtimetypes.ReasoningVisibilitySummary,
+			})
+			r.reasoningOpen = true
+			return
+		}
+		if !r.reasoningOpen {
+			fmt.Println("\n--- Thinking ---")
+			r.reasoningOpen = true
+		}
+		fmt.Print(event.Content)
 	case runtimechatcore.EventResult:
 		if !r.session.Stream || !shouldRenderInteractiveOutput(r.session) {
 			return
@@ -408,6 +441,20 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 			return
 		}
 		r.clearSpinner()
+		if r.session.Interaction != nil {
+			if r.reasoningOpen {
+				r.session.Interaction.FinalizeReasoningDelta()
+				r.reasoningOpen = false
+			}
+			r.streamBuffer.WriteString(event.Content)
+			r.streamLines += strings.Count(event.Content, "\n")
+			r.session.Interaction.RenderAssistantDelta(event.Content)
+			return
+		}
+		if r.reasoningOpen {
+			fmt.Print("\n--- End Thinking ---\n\n")
+			r.reasoningOpen = false
+		}
 		r.streamBuffer.WriteString(event.Content)
 		r.streamLines += strings.Count(event.Content, "\n")
 		fmt.Print(event.Content)
@@ -415,17 +462,18 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 		if !shouldRenderInteractiveOutput(r.session) {
 			return
 		}
-		switch event.Stage {
-		case "batch_start":
-			r.clearSpinner()
-			ui.PrintToolCallsStart(chatEventInt(event, "call_count"))
-			r.toolBatchOpen = true
-		case "tool_result":
-			ui.PrintToolCallResult(event.ToolName, event.Arguments, event.Success, firstNonEmptyToolEventOutput(event))
-		case "batch_end":
-			ui.PrintToolCallsEnd(chatEventInt(event, "success_count"), chatEventInt(event, "error_count"))
-			r.toolBatchOpen = false
+		if event.Stage == "batch_start" {
+			r.flushAssistantTurnForToolBatch()
 		}
+		rendered := renderSharedChatToolEvent(event)
+		if strings.TrimSpace(rendered) == "" {
+			return
+		}
+		if r.session.Interaction != nil {
+			r.session.Interaction.RenderAsyncLine(rendered)
+			return
+		}
+		fmt.Println(rendered)
 	}
 }
 
@@ -434,19 +482,38 @@ func (r *aicliEventRenderer) Finalize(response *runtimechatcore.ChatResult, fina
 		return
 	}
 
-	reasoning := ""
-	if finalMessage != nil && finalMessage.Metadata != nil {
-		reasoning = finalMessage.Metadata.GetString(chatcoreReasoningMetadataKey, "")
-	}
-	if reasoning != "" && shouldRenderInteractiveOutput(r.session) {
+	reasoningBlock := finalReasoningBlock(finalMessage)
+	if reasoningBlock != nil && shouldRenderInteractiveOutput(r.session) && !r.session.Stream {
 		r.clearSpinner()
-		fmt.Println("\n--- Thinking ---")
-		fmt.Println(reasoning)
-		fmt.Println("--- End Thinking ---")
-		fmt.Println()
+		lines := chatReasoningLines(reasoningBlock)
+		if len(lines) > 0 {
+			if r.session.Interaction != nil {
+				r.session.Interaction.RenderAsyncLine(strings.Join(lines, "\n"))
+			} else {
+				fmt.Println(strings.Join(lines, "\n"))
+			}
+		}
 	}
 
 	if r.session.Stream && shouldRenderInteractiveOutput(r.session) {
+		if r.session.Interaction != nil {
+			if r.reasoningOpen {
+				r.session.Interaction.FinalizeReasoningDelta()
+				r.reasoningOpen = false
+			}
+			if response != nil && (strings.TrimSpace(response.Output) != "" || r.streamBuffer.Len() > 0) {
+				if !r.session.Interaction.CompleteAssistantResponse(response.Output) {
+					r.session.Interaction.FinalizeAssistantDelta()
+				}
+			} else {
+				r.session.Interaction.FinalizeAssistantDelta()
+			}
+			return
+		}
+		if r.reasoningOpen {
+			fmt.Print("\n--- End Thinking ---\n\n")
+			r.reasoningOpen = false
+		}
 		content := r.streamBuffer.String()
 		if content != "" && r.session.Formatter != nil && r.session.Formatter.IsMarkdown(content) {
 			fmt.Printf("\033[%dF", r.streamLines+1)
@@ -461,6 +528,22 @@ func (r *aicliEventRenderer) Finalize(response *runtimechatcore.ChatResult, fina
 	r.clearSpinner()
 }
 
+func finalReasoningBlock(finalMessage *runtimetypes.Message) *runtimetypes.ReasoningBlock {
+	if finalMessage == nil || finalMessage.Metadata == nil {
+		return nil
+	}
+	if block := runtimetypes.GetReasoningBlock(finalMessage.Metadata); block != nil {
+		return block
+	}
+	if reasoning := finalMessage.Metadata.GetString(chatcoreReasoningMetadataKey, ""); strings.TrimSpace(reasoning) != "" {
+		return &runtimetypes.ReasoningBlock{
+			Summary:    strings.TrimSpace(reasoning),
+			Visibility: runtimetypes.ReasoningVisibilitySummary,
+		}
+	}
+	return nil
+}
+
 func (r *aicliEventRenderer) clearSpinner() {
 	if r.spinnerCleared {
 		return
@@ -469,8 +552,42 @@ func (r *aicliEventRenderer) clearSpinner() {
 		r.spinnerCleared = true
 		return
 	}
+	if r.session.Interaction != nil {
+		r.session.Interaction.ClearThinking()
+		r.spinnerCleared = true
+		return
+	}
 	fmt.Print("\r   \r")
 	r.spinnerCleared = true
+}
+
+func (r *aicliEventRenderer) flushAssistantTurnForToolBatch() {
+	if r == nil || r.session == nil {
+		return
+	}
+	r.clearSpinner()
+	if r.session.Interaction != nil {
+		if r.reasoningOpen {
+			r.session.Interaction.FinalizeReasoningDelta()
+			r.reasoningOpen = false
+		}
+		r.session.Interaction.FinalizeAssistantDelta()
+		r.resetAssistantStreamState()
+		return
+	}
+	if r.reasoningOpen {
+		fmt.Print("\n--- End Thinking ---\n\n")
+		r.reasoningOpen = false
+	}
+	r.resetAssistantStreamState()
+}
+
+func (r *aicliEventRenderer) resetAssistantStreamState() {
+	if r == nil {
+		return
+	}
+	r.streamBuffer.Reset()
+	r.streamLines = 0
 }
 
 func adapterRequestConfig(session *ChatSession, messages []map[string]interface{}, req runtimechatcore.ProviderTurnRequest) adapter.RequestConfig {
@@ -569,16 +686,6 @@ func toolCallFromRuntime(call runtimetypes.ToolCall) functions.ToolCall {
 
 func shouldRenderInteractiveOutput(session *ChatSession) bool {
 	return session != nil && !session.NoInteractive && !session.JSONOutput
-}
-
-func firstNonEmptyToolEventOutput(event runtimechatcore.ChatEvent) string {
-	if strings.TrimSpace(event.Output) != "" {
-		return event.Output
-	}
-	if strings.TrimSpace(event.Error) != "" {
-		return event.Error
-	}
-	return ""
 }
 
 func chatEventInt(event runtimechatcore.ChatEvent, key string) int {

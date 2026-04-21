@@ -16,7 +16,11 @@ func newRuntimeHTTPDebugReporter(session *ChatSession) runtimellm.HTTPDebugRepor
 	}
 	return func(event runtimellm.HTTPDebugEvent) {
 		if session.runtimeHTTPCapture != nil {
+			session.runtimeHTTPCapture.SetArtifactDir(currentRuntimeHTTPArtifactDir(session))
 			session.runtimeHTTPCapture.Record(event)
+		}
+		if _, err := writeRuntimeHTTPArtifact(session, event); err != nil {
+			fmt.Fprintf(os.Stderr, "[runtime HTTP artifact 写入失败] %v\n", err)
 		}
 		if session.HTTPDebug && session.Logger != nil && session.Logger.logDir != "" {
 			if err := session.Logger.WriteDebugInfo(session.Logger.logDir, formatRuntimeHTTPDebugEvent(event)); err != nil {

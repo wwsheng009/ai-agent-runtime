@@ -11,16 +11,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/stretchr/testify/require"
 )
 
 func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
@@ -39,8 +39,88 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "planning.started"}); got != "[planning] started" {
 		t.Fatalf("unexpected planning render: %q", got)
 	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: runtimechat.EventAssistantReasoning,
+		Payload: map[string]interface{}{
+			"reasoning": map[string]interface{}{
+				"provider":        "anthropic",
+				"format":          "anthropic_thinking",
+				"summary":         "先确认配置，再决定是否调用工具。",
+				"replay_required": true,
+			},
+		},
+	}); got != strings.Join([]string{
+		chatToolDivider("reasoning"),
+		"[reasoning] provider=anthropic format=anthropic_thinking replay=required",
+		"  先确认配置，再决定是否调用工具。",
+		chatToolDivider("end reasoning"),
+	}, "\n") {
+		t.Fatalf("unexpected reasoning render: %q", got)
+	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "subagent.completed", Payload: map[string]interface{}{"agent_id": "writer"}}); got != "[subagent] completed writer" {
 		t.Fatalf("unexpected subagent render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "ls", Payload: map[string]interface{}{"arg_preview": "path=src"}}); got != strings.Join([]string{
+		chatToolDivider("command start"),
+		"[tool] ls path=src",
+	}, "\n") {
+		t.Fatalf("unexpected tool requested render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "ls",
+		Payload: map[string]interface{}{
+			"arg_preview":   "path=src",
+			"summary_lines": []interface{}{"目录: src", "📁 a/ · 📁 b/", "统计: 0 个文件, 2 个目录"},
+		},
+	}); got != strings.Join([]string{
+		"[tool done] ls path=src",
+		"  目录: src",
+		"  📁 a/ · 📁 b/",
+		"  统计: 0 个文件, 2 个目录",
+		chatToolDivider("command end"),
+	}, "\n") {
+		t.Fatalf("unexpected tool completed render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "execute_shell_command",
+		Payload: map[string]interface{}{
+			"arg_preview":   "command=git status",
+			"summary_lines": []interface{}{"Tool execute_shell_command failed before producing output."},
+			"error":         "exit status 128",
+		},
+	}); got != strings.Join([]string{
+		"[tool done] execute_shell_command command=git status",
+		"  failed: exit status 128",
+		chatToolDivider("command end"),
+	}, "\n") {
+		t.Fatalf("unexpected failed tool render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "web_search",
+		Payload: map[string]interface{}{
+			"arg_preview":    "query=天气预报",
+			"summary_lines":  []interface{}{"返回 10 条结果"},
+			"awaiting_model": true,
+		},
+	}); got != strings.Join([]string{
+		"[tool done] web_search query=天气预报",
+		"  返回 10 条结果",
+		chatToolDivider("command end"),
+		"[thinking] 等待中...",
+	}, "\n") {
+		t.Fatalf("unexpected waiting tool render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:    "tool.denied",
+		Payload: map[string]interface{}{"reason": "approval denied"},
+	}); got != strings.Join([]string{
+		"[tool denied] approval denied",
+		chatToolDivider("command end"),
+	}, "\n") {
+		t.Fatalf("unexpected denied tool render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "task.started", Payload: map[string]interface{}{"task_id": "task-1", "assignee": "planner"}}); got != "[task] started task-1 @planner" {
 		t.Fatalf("unexpected task render: %q", got)
@@ -84,6 +164,172 @@ func TestChatRuntimeEvents_DedupesStableTimelineEventsPerRun(t *testing.T) {
 	if len(rendered) != 1 {
 		t.Fatalf("expected one rendered line after dedupe, got %d (%v)", len(rendered), rendered)
 	}
+}
+
+func TestChatRuntimeEvents_RendersAssistantMessageReasoningBeforeContent(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+	bridge.renderResponse = func(response string) {
+		rendered = append(rendered, response)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"content": "Hello!",
+			"reasoning": map[string]interface{}{
+				"provider": "nvidia",
+				"format":   "openai_compatible",
+				"summary":  "先输出 reasoning，再输出正文。",
+			},
+		},
+	})
+
+	if len(rendered) != 2 {
+		t.Fatalf("expected reasoning and content render, got %v", rendered)
+	}
+	if !strings.Contains(rendered[0], chatToolDivider("reasoning")) || !strings.Contains(rendered[0], "先输出 reasoning，再输出正文。") {
+		t.Fatalf("expected reasoning block first, got %q", rendered[0])
+	}
+	if rendered[1] != "Hello!" {
+		t.Fatalf("expected assistant content second, got %q", rendered[1])
+	}
+}
+
+func TestChatRuntimeEvents_CompletesFinalStreamableReasoningInsteadOfRestartingIt(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction.liveStreamFn = func() bool { return true }
+
+	bridge := newChatRuntimeEventBridge(session)
+	var deltaCalls []string
+	var completed []string
+	bridge.writeReasoningDelta = func(block *runtimetypes.ReasoningBlock) {
+		deltaCalls = append(deltaCalls, block.DisplayText())
+	}
+	bridge.completeReasoning = func(block *runtimetypes.ReasoningBlock) bool {
+		completed = append(completed, block.DisplayText())
+		return true
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantReasoning,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"step": 1,
+			"reasoning": map[string]interface{}{
+				"provider":   "nvidia",
+				"format":     "stream_delta",
+				"summary":    "先检查目录。",
+				"streamable": true,
+			},
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantReasoning,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"step": 1,
+			"reasoning": map[string]interface{}{
+				"provider":   "nvidia",
+				"format":     "openai_compatible",
+				"summary":    "先检查目录，再整理结果。",
+				"streamable": true,
+			},
+		},
+	})
+
+	require.Equal(t, []string{"先检查目录。"}, deltaCalls)
+	require.Equal(t, []string{"先检查目录，再整理结果。"}, completed)
+	if !bridge.hasRenderedReasoningFinal() {
+		t.Fatal("expected reasoning stream to be finalized")
+	}
+}
+
+func TestChatRuntimeEvents_IgnoresLateDuplicateReasoningAfterAssistantMessageCompletion(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction.liveStreamFn = func() bool { return true }
+
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writePrompt = func() {}
+	bridge.writeReasoningDelta = func(block *runtimetypes.ReasoningBlock) {
+		rendered = append(rendered, "delta:"+block.DisplayText())
+	}
+	bridge.completeReasoning = func(block *runtimetypes.ReasoningBlock) bool {
+		rendered = append(rendered, "complete:"+block.DisplayText())
+		return true
+	}
+	bridge.renderResponse = func(response string) {
+		rendered = append(rendered, "content:"+response)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantReasoning,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"step": 1,
+			"reasoning": map[string]interface{}{
+				"provider":   "nvidia",
+				"format":     "stream_delta",
+				"summary":    "先确认上下文。",
+				"streamable": true,
+			},
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"content": "Hello!",
+			"reasoning": map[string]interface{}{
+				"provider":   "nvidia",
+				"format":     "openai_compatible",
+				"summary":    "先确认上下文，再直接问候。",
+				"streamable": true,
+			},
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantReasoning,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"step": 1,
+			"reasoning": map[string]interface{}{
+				"provider":   "nvidia",
+				"format":     "openai_compatible",
+				"summary":    "先确认上下文，再直接问候。",
+				"streamable": true,
+			},
+		},
+	})
+
+	require.Equal(t, []string{
+		"delta:先确认上下文。",
+		"complete:先确认上下文，再直接问候。",
+		"content:Hello!",
+	}, rendered)
 }
 
 func TestChatRuntimeEvents_RendersAsyncAssistantSummaryAfterTeamCompletion(t *testing.T) {
@@ -430,7 +676,7 @@ func TestIsReadOnlyShellCommand(t *testing.T) {
 func TestChatRuntimeEvents_RendersPermissionModeHintOnce(t *testing.T) {
 	session := &ChatSession{
 		PermissionMode:    runtimepolicy.ModeDefault,
-		ApprovalReuseMode: chatApprovalReuseTeamReadOnlyShell,
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
 	}
 	bridge := newChatRuntimeEventBridge(session)
 	var rendered []string
@@ -444,7 +690,7 @@ func TestChatRuntimeEvents_RendersPermissionModeHintOnce(t *testing.T) {
 	if len(rendered) != 1 {
 		t.Fatalf("expected one permission mode hint, got %v", rendered)
 	}
-	if !strings.Contains(rendered[0], "--yolo") || !strings.Contains(rendered[0], "--approval-reuse=team_readonly_shell") {
+	if !strings.Contains(rendered[0], "--yolo") || !strings.Contains(rendered[0], "--approval-reuse=session_readonly_shell") {
 		t.Fatalf("unexpected permission mode hint: %q", rendered[0])
 	}
 }
@@ -965,6 +1211,9 @@ func TestActorExecutor_ApprovalThroughCLIBridgeExecutesToolOnceAndResumes(t *tes
 	if !strings.Contains(rendered.String(), "[approval] team_echo") {
 		t.Fatalf("expected approval timeline render, got %q", rendered.String())
 	}
+	if !strings.Contains(rendered.String(), "[approval] approved team_echo, executing...") {
+		t.Fatalf("expected post-approval execution feedback, got %q", rendered.String())
+	}
 	if strings.Contains(rendered.String(), "[tool denied]") {
 		t.Fatalf("expected no tool denial after approval, got %q", rendered.String())
 	}
@@ -1231,6 +1480,9 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 	if !strings.Contains(rendered.String(), "[approval] execute_shell_command") {
 		t.Fatalf("expected initial approval line, got %q", rendered.String())
 	}
+	if !strings.Contains(rendered.String(), "[approval] approved execute_shell_command, executing...") {
+		t.Fatalf("expected post-approval execution feedback, got %q", rendered.String())
+	}
 	if !strings.Contains(rendered.String(), "[approval] auto-approved bash") {
 		t.Fatalf("expected cached auto-approval line for bash, got %q", rendered.String())
 	}
@@ -1267,6 +1519,402 @@ func TestChatRuntimeEvents_ApprovalReuseDoesNotApplyWithoutActiveTeam(t *testing
 	}
 	if key := bridge.autoApprovalGrantKey("session-1", approval); key != "" {
 		t.Fatalf("expected no approval reuse scope without active team, got %q", key)
+	}
+}
+
+func TestChatRuntimeEvents_SessionReadOnlyShellScopeWithoutTeam(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+		// No ActiveTeam — session_readonly_shell should still work.
+	})
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"dir"}`),
+	}
+	key := bridge.autoApprovalGrantKey("session-abc", approval)
+	if key == "" {
+		t.Fatal("expected session-scoped approval key without active team")
+	}
+	if !strings.HasPrefix(key, "session:") {
+		t.Fatalf("expected session-scoped key, got %q", key)
+	}
+}
+
+func TestChatRuntimeEvents_SessionReadOnlyShellScopePersistsAcrossTurns(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "bash",
+		ArgsJSON: []byte(`{"command":"Get-ChildItem docs"}`),
+	}
+	key := bridge.autoApprovalGrantKey("session-1", approval)
+	if key == "" {
+		t.Fatal("expected non-empty session-scoped approval key")
+	}
+	bridge.rememberApprovalGrant(key)
+
+	bridge.BeginRun()
+	if !bridge.hasApprovalGrant(key) {
+		t.Fatalf("expected approval grant to persist across turns for session scope")
+	}
+}
+
+func TestChatRuntimeEvents_TeamReadOnlyShellStillRequiresTeam(t *testing.T) {
+	// team_readonly_shell without ActiveTeam should return empty scope.
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseTeamReadOnlyShell,
+	})
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "bash",
+		ArgsJSON: []byte(`{"command":"dir"}`),
+	}
+	if key := bridge.autoApprovalGrantKey("session-1", approval); key != "" {
+		t.Fatalf("expected empty key for team_readonly_shell without ActiveTeam, got %q", key)
+	}
+}
+
+func TestChatRuntimeEvents_ReadOnlyNetworkToolsApprovalReuse(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	// web_search should produce a readonly_network grant key.
+	webSearchApproval := &runtimechat.ApprovalRequest{
+		ToolName: "web_search",
+		ArgsJSON: []byte(`{"query":"golang testing"}`),
+	}
+	key := bridge.autoApprovalGrantKey("session-1", webSearchApproval)
+	if key == "" {
+		t.Fatal("expected non-empty approval grant key for web_search")
+	}
+	if !strings.Contains(key, "readonly_network") {
+		t.Fatalf("expected readonly_network in key, got %q", key)
+	}
+	bridge.rememberApprovalGrant(key)
+
+	// Second web_search should be auto-approved.
+	if !bridge.hasApprovalGrant(key) {
+		t.Fatal("expected approval grant to exist for subsequent web_search")
+	}
+}
+
+func TestChatRuntimeEvents_SourcegraphApprovalReuse(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "sourcegraph",
+		ArgsJSON: []byte(`{"query":"func approvalGrantFamily"}`),
+	}
+	key := bridge.autoApprovalGrantKey("session-1", approval)
+	if key == "" {
+		t.Fatal("expected non-empty approval grant key for sourcegraph")
+	}
+	if !strings.Contains(key, "readonly_network") {
+		t.Fatalf("expected readonly_network in key, got %q", key)
+	}
+}
+
+func TestChatRuntimeEvents_FetchApprovalReuse(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "fetch",
+		ArgsJSON: []byte(`{"url":"https://example.com"}`),
+	}
+	key := bridge.autoApprovalGrantKey("session-1", approval)
+	if key == "" {
+		t.Fatal("expected non-empty approval grant key for fetch")
+	}
+	if !strings.Contains(key, "readonly_network") {
+		t.Fatalf("expected readonly_network in key, got %q", key)
+	}
+}
+
+func TestChatRuntimeEvents_NetworkAndShellGrantsAreSeparateFamilies(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	shellApproval := &runtimechat.ApprovalRequest{
+		ToolName: "bash",
+		ArgsJSON: []byte(`{"command":"ls"}`),
+	}
+	shellKey := bridge.autoApprovalGrantKey("session-1", shellApproval)
+
+	networkApproval := &runtimechat.ApprovalRequest{
+		ToolName: "web_search",
+		ArgsJSON: []byte(`{"query":"test"}`),
+	}
+	networkKey := bridge.autoApprovalGrantKey("session-1", networkApproval)
+
+	if shellKey == networkKey {
+		t.Fatalf("shell and network grants should have different keys, got same: %q", shellKey)
+	}
+	if !strings.Contains(shellKey, "readonly_shell") {
+		t.Fatalf("expected readonly_shell in shell key, got %q", shellKey)
+	}
+	if !strings.Contains(networkKey, "readonly_network") {
+		t.Fatalf("expected readonly_network in network key, got %q", networkKey)
+	}
+}
+
+func TestChatRuntimeEvents_WriteToolsAreNotApprovalReusable(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	// write/edit/download tools should not produce an approval grant key.
+	for _, toolName := range []string{"write", "edit", "multiedit", "download"} {
+		approval := &runtimechat.ApprovalRequest{
+			ToolName: toolName,
+			ArgsJSON: []byte(`{}`),
+		}
+		key := bridge.autoApprovalGrantKey("session-1", approval)
+		if key != "" {
+			t.Fatalf("expected no approval grant key for write-like tool %q, got %q", toolName, key)
+		}
+	}
+}
+
+func TestChatRuntimeEvents_FutureNetworkToolAutoCovered(t *testing.T) {
+	// A hypothetical future tool "web_fetch" containing "fetch" should be
+	// automatically covered by the capability-based family derivation without
+	// any code changes to approvalGrantFamily.
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "web_fetch",
+		ArgsJSON: []byte(`{"url":"https://example.com/api"}`),
+	}
+	key := bridge.autoApprovalGrantKey("session-1", approval)
+	if key == "" {
+		t.Fatal("expected approval grant key for future network tool web_fetch")
+	}
+	if !strings.Contains(key, "readonly_network") {
+		t.Fatalf("expected readonly_network in key for web_fetch, got %q", key)
+	}
+}
+
+func TestChatRuntimeEvents_MutatingShellNotReusable(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	// A shell command that writes (e.g. mkdir) should not produce a grant key.
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "bash",
+		ArgsJSON: []byte(`{"command":"mkdir /tmp/test"}`),
+	}
+	key := bridge.autoApprovalGrantKey("session-1", approval)
+	if key != "" {
+		t.Fatalf("expected no approval grant key for mutating shell, got %q", key)
+	}
+}
+
+func TestChatRuntimeEvents_ApprovedShellFamilyForNonWhitelistedCommands(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	// "go test" is not in the read-only whitelist but is also not dangerous.
+	// It should produce an "approved_shell" family key.
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"go test ./..."}`),
+	}
+	key := bridge.autoApprovalGrantKey("session-1", approval)
+	if key == "" {
+		t.Fatal("expected approval grant key for non-dangerous non-whitelisted shell command")
+	}
+	if !strings.Contains(key, "approved_shell") {
+		t.Fatalf("expected approved_shell in key, got %q", key)
+	}
+
+	// Once remembered, the grant should allow auto-approval of similar commands.
+	bridge.rememberApprovalGrant(key)
+	if !bridge.hasApprovalGrant(key) {
+		t.Fatal("expected approved_shell grant to be cached")
+	}
+}
+
+func TestChatRuntimeEvents_ApprovedShellSeparateFromReadonlyShell(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	readonlyApproval := &runtimechat.ApprovalRequest{
+		ToolName: "bash",
+		ArgsJSON: []byte(`{"command":"git status"}`),
+	}
+	readonlyKey := bridge.autoApprovalGrantKey("session-1", readonlyApproval)
+
+	approvedApproval := &runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"go build ./..."}`),
+	}
+	approvedKey := bridge.autoApprovalGrantKey("session-1", approvedApproval)
+
+	if readonlyKey == approvedKey {
+		t.Fatalf("readonly_shell and approved_shell should have different keys, got same: %q", readonlyKey)
+	}
+	if !strings.Contains(readonlyKey, "readonly_shell") {
+		t.Fatalf("expected readonly_shell in key, got %q", readonlyKey)
+	}
+	if !strings.Contains(approvedKey, "approved_shell") {
+		t.Fatalf("expected approved_shell in key, got %q", approvedKey)
+	}
+}
+
+func TestChatRuntimeEvents_ApprovedShellDoesNotCoverDangerousCommands(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	bridge.BeginRun()
+
+	// Commands with redirect operators should not produce any grant key.
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "bash",
+		ArgsJSON: []byte(`{"command":"echo hello > /tmp/out.txt"}`),
+	}
+	key := bridge.autoApprovalGrantKey("session-1", approval)
+	if key != "" {
+		t.Fatalf("expected no approval grant key for command with redirect, got %q", key)
+	}
+}
+
+func TestChatRuntimeEvents_FlushesBufferedDeltaOnSessionEnd(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var deltas []string
+	finalized := 0
+	bridge.writeDelta = func(delta string) {
+		deltas = append(deltas, delta)
+	}
+	bridge.finalizeDelta = func() {
+		finalized++
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": "Analyzing the issue..."},
+	})
+	// Session ends without an EventAssistantMessage (e.g. ReAct loop ended
+	// with tool calls but no final text, or LLM only returned tool calls).
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"success": true},
+	})
+
+	if len(deltas) != 1 || deltas[0] != "Analyzing the issue..." {
+		t.Fatalf("expected buffered delta to be written, got %v", deltas)
+	}
+	if finalized != 1 {
+		t.Fatalf("expected delta to be finalized on session_end, got %d finalizations", finalized)
+	}
+	if !bridge.HasRenderedAssistantFinal() {
+		t.Fatal("expected assistant final flag after session_end flush")
+	}
+}
+
+func TestChatRuntimeEvents_SkipsDeltaFlushOnSessionEndWhenAlreadyFinalized(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	finalized := 0
+	bridge.writeDelta = func(string) {}
+	bridge.finalizeDelta = func() {
+		finalized++
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": "Hello"},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"content": "Hello"},
+	})
+	if finalized != 1 {
+		t.Fatalf("expected initial finalize, got %d", finalized)
+	}
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"success": true},
+	})
+	if finalized != 1 {
+		t.Fatalf("expected no double-finalize on session_end, got %d", finalized)
+	}
+}
+
+func TestIsReadOnlyShellCommand_ChainedAndCommands(t *testing.T) {
+	tests := []struct {
+		command string
+		want    bool
+	}{
+		// Simple commands (existing behavior)
+		{"dir", true},
+		{"ls", true},
+		{"git status", true},
+		{"git commit", false},
+		{"rm -rf /", false},
+		// cd && read-only: should now be read-only
+		{"cd E:\\projects\\ai\\codex-server && dir", true},
+		{"cd /tmp && ls", true},
+		{"cd /tmp && pwd && ls", true},
+		// cd && write: not read-only
+		{"cd /tmp && npm install", false},
+		// Pipe (existing behavior)
+		{"dir | findstr /i job", true},
+		{"cat file.txt | grep pattern", true},
+		// || chains: each segment checked
+		{"dir || ls", true},
+		// Mixed: read-only && write
+		{"ls && npm install", false},
+		// cd is read-only for approval purposes
+		{"cd somedir", true},
+		// echo is read-only for approval purposes
+		{"echo hello", true},
+		// Redirect: still not read-only
+		{"echo hello > file.txt", false},
+		// Windows-style: cd /d with && dir
+		{"cd /d E:\\code && dir /b", true},
+	}
+	for _, tt := range tests {
+		got := isReadOnlyShellCommand(tt.command)
+		if got != tt.want {
+			t.Errorf("isReadOnlyShellCommand(%q) = %v, want %v", tt.command, got, tt.want)
+		}
 	}
 }
 

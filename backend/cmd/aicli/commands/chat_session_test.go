@@ -80,6 +80,36 @@ func TestAICLIMessageRoundTripPreservesToolMetadata(t *testing.T) {
 	}
 }
 
+func TestRuntimeMessageFromAICLIMessage_PreservesReasoningBlock(t *testing.T) {
+	raw := map[string]interface{}{
+		"role":              "assistant",
+		"content":           "Hello!",
+		"reasoning_content": "先输出 reasoning，再输出正文。",
+		"reasoning_details": map[string]interface{}{
+			"provider":   "nvidia",
+			"format":     "openai_compatible",
+			"summary":    "先输出 reasoning，再输出正文。",
+			"streamable": true,
+		},
+	}
+
+	message, err := runtimeMessageFromAICLIMessage(raw)
+	if err != nil {
+		t.Fatalf("runtimeMessageFromAICLIMessage: %v", err)
+	}
+
+	block := runtimetypes.GetReasoningBlock(message.Metadata)
+	if block == nil {
+		t.Fatal("expected reasoning block in runtime metadata")
+	}
+	if block.Provider != "nvidia" || block.Format != "openai_compatible" {
+		t.Fatalf("unexpected reasoning block metadata: %#v", block)
+	}
+	if got := message.Metadata.GetString(chatcoreReasoningMetadataKey, ""); got != "先输出 reasoning，再输出正文。" {
+		t.Fatalf("expected reasoning summary metadata, got %q", got)
+	}
+}
+
 func TestLoadRequestedRuntimeSessionReturnsLatestForResume(t *testing.T) {
 	storage, err := runtimechat.NewFileStorage(t.TempDir())
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type chatRuntimeEventBridge struct {
@@ -28,6 +29,8 @@ type chatRuntimeEventBridge struct {
 	permissionHintShown    bool
 	renderedAssistantDelta bool
 	renderedAssistantFinal bool
+	renderedReasoningDelta bool
+	renderedReasoningFinal bool
 	runActive              bool
 	enqueuedEvents         uint64
 	processedEvents        uint64
@@ -36,6 +39,9 @@ type chatRuntimeEventBridge struct {
 	writeLine              func(string)
 	writeDelta             func(string)
 	finalizeDelta          func()
+	writeReasoningDelta    func(*runtimetypes.ReasoningBlock)
+	finalizeReasoning      func()
+	completeReasoning      func(*runtimetypes.ReasoningBlock) bool
 	renderResponse         func(string)
 	writePrompt            func()
 }
@@ -85,6 +91,31 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				return
 			}
 			fmt.Println()
+		},
+		writeReasoningDelta: func(block *runtimetypes.ReasoningBlock) {
+			if block == nil {
+				return
+			}
+			if session != nil && session.Interaction != nil {
+				session.Interaction.RenderReasoningDelta(block)
+				return
+			}
+			lines := chatReasoningLines(block)
+			if len(lines) == 0 {
+				return
+			}
+			fmt.Println(strings.Join(lines, "\n"))
+		},
+		finalizeReasoning: func() {
+			if session != nil && session.Interaction != nil {
+				session.Interaction.FinalizeReasoningDelta()
+			}
+		},
+		completeReasoning: func(block *runtimetypes.ReasoningBlock) bool {
+			if session != nil && session.Interaction != nil {
+				return session.Interaction.CompleteReasoningResponse(block)
+			}
+			return false
 		},
 		renderResponse: func(response string) {
 			if strings.TrimSpace(response) == "" {
@@ -174,6 +205,8 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.pruneApprovalGrantsLocked(time.Now().UTC())
 	b.renderedAssistantDelta = false
 	b.renderedAssistantFinal = false
+	b.renderedReasoningDelta = false
+	b.renderedReasoningFinal = false
 	b.runActive = true
 	b.renderMu.Unlock()
 	b.progressMu.Lock()
@@ -258,11 +291,20 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b == nil || b.session == nil {
 		return
 	}
+	if b.handleAssistantReasoning(event) {
+		return
+	}
 	if b.handleAssistantDelta(event) {
 		return
 	}
 	if b.handlePrimaryAssistantMessage(event) {
 		b.writePromptIfIdle()
+		return
+	}
+	if b.shouldFlushReasoningOnSessionEnd(event) {
+		return
+	}
+	if b.shouldFlushAssistantDeltaOnSessionEnd(event) {
 		return
 	}
 	if b.shouldSuppressTimelineDuringAssistantStream(event) {
@@ -322,6 +364,9 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		}
 		if allowed {
 			b.rememberApprovalGrant(b.autoApprovalGrantKey(event.SessionID, approval))
+			if b.writeLine != nil {
+				b.writeLine(fmt.Sprintf("[approval] approved %s, executing...", strings.TrimSpace(toolName)))
+			}
 		}
 		if err := actor.ApproveTool(context.Background(), requestID, allowed); err != nil {
 			b.setRunError(err)
@@ -358,6 +403,89 @@ func (b *chatRuntimeEventBridge) shouldSuppressTimelineDuringAssistantStream(eve
 	default:
 		return false
 	}
+}
+
+func (b *chatRuntimeEventBridge) shouldFlushReasoningOnSessionEnd(event runtimeevents.Event) bool {
+	if b == nil || b.session == nil || event.Type != runtimechat.EventSessionEnd {
+		return false
+	}
+	if !b.hasRenderedReasoningDelta() || b.hasRenderedReasoningFinal() {
+		return false
+	}
+	if b.finalizeReasoning != nil {
+		b.finalizeReasoning()
+	}
+	b.renderMu.Lock()
+	b.renderedReasoningFinal = true
+	b.renderMu.Unlock()
+	return true
+}
+
+// shouldFlushAssistantDeltaOnSessionEnd flushes any buffered streaming delta
+// when the session ends (EventSessionEnd) without a preceding
+// EventAssistantMessage. In a ReAct loop the runtime only emits
+// EventAssistantMessage after the entire loop completes, so intermediate
+// text deltas from earlier turns would otherwise be silently dropped.
+func (b *chatRuntimeEventBridge) shouldFlushAssistantDeltaOnSessionEnd(event runtimeevents.Event) bool {
+	if b == nil || b.session == nil || event.Type != runtimechat.EventSessionEnd {
+		return false
+	}
+	if !b.HasRenderedAssistantDelta() || b.HasRenderedAssistantFinal() {
+		return false
+	}
+	if b.finalizeDelta != nil {
+		b.finalizeDelta()
+	}
+	b.renderMu.Lock()
+	b.renderedAssistantFinal = true
+	b.renderMu.Unlock()
+	return true
+}
+
+func (b *chatRuntimeEventBridge) handleAssistantReasoning(event runtimeevents.Event) bool {
+	if b == nil || b.session == nil {
+		return false
+	}
+	if event.Type != runtimechat.EventAssistantReasoning && event.Type != "assistant.reasoning" {
+		return false
+	}
+	if !shouldRenderInteractiveOutput(b.session) || !b.isPrimarySessionEvent(event) {
+		return false
+	}
+	block := runtimetypes.ReasoningBlockFromMap(event.Payload["reasoning"])
+	if block == nil {
+		return false
+	}
+	display := block.RawDisplayText()
+	if b.hasRenderedReasoningFinal() {
+		return true
+	}
+	if b.hasRenderedReasoningDelta() && !isReasoningStreamDeltaBlock(block) && b.completeReasoning != nil {
+		if b.completeReasoning(block) {
+			b.renderMu.Lock()
+			b.renderedReasoningFinal = true
+			b.renderMu.Unlock()
+			return true
+		}
+	}
+	if block.Streamable && display != "" && b.writeReasoningDelta != nil && b.session.Interaction != nil && b.session.Interaction.SupportsLiveStream() {
+		b.renderMu.Lock()
+		b.renderedReasoningDelta = true
+		b.renderMu.Unlock()
+		b.writeReasoningDelta(block)
+		return true
+	}
+	rendered := chatReasoningTimelineEvent(strings.TrimSpace(event.TraceID), payloadStringValue(event.Payload["step"]), block)
+	if rendered.Line == "" {
+		return false
+	}
+	if b.shouldRenderTimelineEvent(rendered) && b.writeLine != nil {
+		b.writeLine(rendered.Line)
+	}
+	b.renderMu.Lock()
+	b.renderedReasoningFinal = true
+	b.renderMu.Unlock()
+	return true
 }
 
 func (b *chatRuntimeEventBridge) handleAssistantDelta(event runtimeevents.Event) bool {
@@ -412,6 +540,9 @@ func (b *chatRuntimeEventBridge) handlePrimaryAssistantMessage(event runtimeeven
 	if b.HasRenderedAssistantFinal() {
 		return b.handleAsyncTeamAssistantMessage(event)
 	}
+	if block := runtimetypes.ReasoningBlockFromMap(event.Payload["reasoning"]); block != nil {
+		b.renderReasoningFromAssistantMessage(event, block)
+	}
 	renderedSummary := false
 	if rendered := b.renderAsyncTeamSummaryFallback(event); rendered.Line != "" && b.shouldRenderTimelineEvent(rendered) {
 		b.writeLine(rendered.Line)
@@ -453,6 +584,30 @@ func (b *chatRuntimeEventBridge) handleAsyncTeamAssistantMessage(event runtimeev
 		renderedSomething = true
 	}
 	return renderedSomething
+}
+
+func (b *chatRuntimeEventBridge) renderReasoningFromAssistantMessage(event runtimeevents.Event, block *runtimetypes.ReasoningBlock) {
+	if b == nil || block == nil || b.hasRenderedReasoningFinal() {
+		return
+	}
+	if b.hasRenderedReasoningDelta() && !b.hasRenderedReasoningFinal() && b.completeReasoning != nil {
+		if b.completeReasoning(block) {
+			b.renderMu.Lock()
+			b.renderedReasoningFinal = true
+			b.renderMu.Unlock()
+			return
+		}
+	}
+	rendered := chatReasoningTimelineEvent(strings.TrimSpace(event.TraceID), "", block)
+	if rendered.Line == "" {
+		return
+	}
+	if b.shouldRenderTimelineEvent(rendered) && b.writeLine != nil {
+		b.writeLine(rendered.Line)
+	}
+	b.renderMu.Lock()
+	b.renderedReasoningFinal = true
+	b.renderMu.Unlock()
 }
 
 func (b *chatRuntimeEventBridge) shouldRenderTimelineEvent(rendered chatRuntimeTimelineEvent) bool {
@@ -549,18 +704,25 @@ func (b *chatRuntimeEventBridge) autoApprovalGrantKey(sessionID string, approval
 }
 
 func (b *chatRuntimeEventBridge) autoApprovalScope(sessionID string) string {
-	if b == nil {
+	if b == nil || b.session == nil {
 		return ""
 	}
-	if b.session == nil || b.session.ApprovalReuseMode != chatApprovalReuseTeamReadOnlyShell {
-		return ""
-	}
-	if b.session != nil && b.session.ActiveTeam != nil {
-		if teamID := strings.TrimSpace(b.session.ActiveTeam.TeamID); teamID != "" {
-			return "team:" + teamID
+	switch b.session.ApprovalReuseMode {
+	case chatApprovalReuseSessionReadOnlyShell:
+		if sid := strings.TrimSpace(sessionID); sid != "" {
+			return "session:" + sid
 		}
+		return ""
+	case chatApprovalReuseTeamReadOnlyShell:
+		if b.session.ActiveTeam != nil {
+			if teamID := strings.TrimSpace(b.session.ActiveTeam.TeamID); teamID != "" {
+				return "team:" + teamID
+			}
+		}
+		return ""
+	default:
+		return ""
 	}
-	return ""
 }
 
 func (b *chatRuntimeEventBridge) hasApprovalGrant(key string) bool {
@@ -616,7 +778,7 @@ func (b *chatRuntimeEventBridge) maybeRenderPermissionModeHint(reason string) {
 		mode = string(runtimepolicy.ModeDefault)
 	}
 	b.writeLine(fmt.Sprintf(
-		"[tip] 当前 permission-mode=%s。若你信任当前会话，可用 --yolo（等价于 --permission-mode bypass_permissions）关闭审批；--approval-reuse=%s 仅减少同一团队里的重复只读 shell 审批。",
+		"[tip] 当前 permission-mode=%s。若你信任当前会话，可用 --yolo（等价于 --permission-mode bypass_permissions）关闭审批；--approval-reuse=%s 可减少重复只读审批（shell/网络搜索等）。",
 		mode,
 		formatChatApprovalReuseMode(b.session.ApprovalReuseMode),
 	))
@@ -658,6 +820,24 @@ func (b *chatRuntimeEventBridge) MarkAssistantFinalRendered() {
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
 	b.renderedAssistantFinal = true
+}
+
+func (b *chatRuntimeEventBridge) hasRenderedReasoningDelta() bool {
+	if b == nil {
+		return false
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	return b.renderedReasoningDelta
+}
+
+func (b *chatRuntimeEventBridge) hasRenderedReasoningFinal() bool {
+	if b == nil {
+		return false
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	return b.renderedReasoningFinal
 }
 
 func (b *chatRuntimeEventBridge) isPrimarySessionEvent(event runtimeevents.Event) bool {
@@ -786,6 +966,11 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			Line:     fmt.Sprintf("[thinking] model error %s", payloadStringValue(event.Payload["error"])),
 			DedupKey: fmt.Sprintf("llm.request.finished:%s", strings.TrimSpace(event.TraceID)),
 		}
+	case runtimechat.EventAssistantReasoning, "assistant.reasoning":
+		if rendered := renderChatReasoningTimelineEvent(event); rendered.Line != "" {
+			return rendered
+		}
+		return chatRuntimeTimelineEvent{}
 	case "planning.started":
 		return chatRuntimeTimelineEvent{Line: "[planning] started"}
 	case "planning.completed":
@@ -801,11 +986,33 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 	case "subagent.denied":
 		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[subagent] denied %s", payloadStringValue(event.Payload["reason"]))}
 	case "tool.requested":
-		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[tool] %s", firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])))}
+		line := fmt.Sprintf("[tool] %s", firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])))
+		if argPreview := chatToolArgPreview(event.Payload); argPreview != "" {
+			line += " " + argPreview
+		}
+		return chatRuntimeTimelineEvent{Line: strings.Join([]string{chatToolDivider("command start"), line}, "\n")}
 	case "tool.completed":
-		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[tool done] %s", firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])))}
+		line := fmt.Sprintf("[tool done] %s", firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])))
+		if argPreview := chatToolArgPreview(event.Payload); argPreview != "" {
+			line += " " + argPreview
+		}
+		if summaryLines := chatToolSummaryLines(event.Payload); len(summaryLines) > 0 {
+			rendered := make([]string, 0, len(summaryLines)+1)
+			rendered = append(rendered, line)
+			for _, summaryLine := range summaryLines {
+				rendered = append(rendered, "  "+summaryLine)
+			}
+			line = strings.Join(rendered, "\n")
+		}
+		rendered := []string{line, chatToolDivider("command end")}
+		if waitingLine := chatToolPostCommandHint(event.Payload); waitingLine != "" {
+			rendered = append(rendered, waitingLine)
+		}
+		line = strings.Join(rendered, "\n")
+		return chatRuntimeTimelineEvent{Line: line}
 	case "tool.denied":
-		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[tool denied] %s", payloadStringValue(event.Payload["reason"]))}
+		line := fmt.Sprintf("[tool denied] %s", payloadStringValue(event.Payload["reason"]))
+		return chatRuntimeTimelineEvent{Line: strings.Join([]string{line, chatToolDivider("command end")}, "\n")}
 	case runtimechat.EventApprovalRequested:
 		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[approval] %s", payloadStringValue(event.Payload["tool_name"]))}
 	case runtimechat.EventQuestionAsked:
@@ -1004,13 +1211,70 @@ func isChatOptionLine(text string) bool {
 	return false
 }
 
+// approvalGrantFamily returns a family key for approval reuse. Tools in the
+// same family share a single approval grant, so that once a user approves one
+// call, subsequent calls of the same family are auto-approved within the
+// configured scope (session or team).
+//
+// The family is derived from the tool's capabilities rather than a hardcoded
+// name list, so that new tools are automatically covered as long as the
+// capability resolver can classify them.
+//
+// Current families:
+//   - "readonly_shell":   shell-like tools (bash, execute_shell_command, …)
+//     whose command is clearly read-only (whitelist match).
+//   - "approved_shell":   shell-like tools whose command is not in the
+//     read-only whitelist but also not in the dangerous
+//     blacklist. The first call still requires manual
+//     approval, but subsequent calls are auto-approved.
+//   - "readonly_network": read-only tools that require network access
+//     (web_search, sourcegraph, fetch, …).
 func approvalGrantFamily(toolName string, argsJSON json.RawMessage) string {
-	switch strings.TrimSpace(toolName) {
-	case "bash", "execute_shell_command":
+	normalized := strings.ToLower(strings.TrimSpace(toolName))
+	if normalized == "" {
+		return ""
+	}
+
+	// Shell-like tools need special handling: we must inspect the actual
+	// command to determine the risk level.
+	if runtimepolicy.IsShellLikeToolName(normalized) {
 		if isReadOnlyShellApprovalArgs(argsJSON) {
 			return "readonly_shell"
 		}
+		if isApprovedShellApprovalArgs(argsJSON) {
+			return "approved_shell"
+		}
+		return "" // dangerous shell command → no reuse
 	}
+
+	// Write-like tools never qualify for automatic approval reuse.
+	if runtimepolicy.IsWriteLikeToolName(normalized) {
+		return ""
+	}
+
+	// For all other tools, derive the family from capabilities.
+	caps := runtimepolicy.DefaultCapabilityResolver{}.Resolve(
+		runtimepolicy.EvalRequest{ToolName: normalized},
+	)
+	hasNetwork := false
+	for _, cap := range caps {
+		switch cap {
+		case runtimepolicy.CapWriteFS, runtimepolicy.CapExecShell,
+			runtimepolicy.CapExternalSideEffect, runtimepolicy.CapBackgroundTask:
+			// Capabilities that imply mutation or side effects disqualify
+			// the tool from automatic approval reuse.
+			return ""
+		case runtimepolicy.CapNetwork:
+			hasNetwork = true
+		}
+	}
+
+	if hasNetwork {
+		return "readonly_network"
+	}
+
+	// Pure read-only tools without network access (e.g. view, grep, glob)
+	// don't require approval in default mode, so no family is needed.
 	return ""
 }
 
@@ -1030,6 +1294,28 @@ func isReadOnlyShellApprovalArgs(argsJSON json.RawMessage) bool {
 		return false
 	}
 	return isReadOnlyShellCommand(command)
+}
+
+// isApprovedShellApprovalArgs returns true for shell commands that are not
+// clearly dangerous (not in the blacklist) but also not in the read-only
+// whitelist. Such commands still require manual approval the first time, but
+// once approved the grant is cached so subsequent calls are auto-approved.
+func isApprovedShellApprovalArgs(argsJSON json.RawMessage) bool {
+	if len(argsJSON) == 0 {
+		return false
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(argsJSON, &payload); err != nil {
+		return false
+	}
+	if mutated := extractApprovalStringSlice(payload["mutated_paths"]); len(mutated) > 0 {
+		return false
+	}
+	command := payloadStringValue(payload["command"])
+	if command == "" {
+		return false
+	}
+	return !isDangerousShellCommand(command)
 }
 
 func extractApprovalStringSlice(value interface{}) []string {
@@ -1052,25 +1338,105 @@ func isReadOnlyShellCommand(command string) bool {
 	if command == "" {
 		return false
 	}
-	lower := strings.ToLower(command)
-	for _, marker := range []string{"&&", "||", ";", ">>", "out-file", "set-content", "add-content", "copy-item", "move-item", "remove-item", "new-item", "rename-item", "invoke-webrequest", "curl ", "wget ", " start-process", "taskkill", " rm ", " del ", " move ", " copy ", " mkdir ", " rmdir ", " sed -i", " perl -pi", "git apply", "git commit", "git push"} {
-		if strings.Contains(lower, marker) {
-			return false
-		}
-	}
-	for _, marker := range []string{">", "<"} {
-		if strings.Contains(lower, marker) {
-			return false
-		}
+	if isDangerousShellCommand(command) {
+		return false
 	}
 
-	segments := strings.Split(lower, "|")
+	lower := strings.ToLower(command)
+	// Split on &&, ||, and ; to check each segment independently.
+	// Each segment (after splitting on | for pipes) must be a read-only command.
+	segments := splitShellChainSegments(lower)
 	for _, segment := range segments {
-		segment = strings.TrimSpace(segment)
-		if segment == "" {
+		if !isReadOnlyShellSegment(segment) {
 			return false
 		}
-		fields := strings.Fields(segment)
+	}
+	return true
+}
+
+// isDangerousShellCommand returns true for commands that are clearly
+// destructive or write-like. These commands are never eligible for
+// automatic approval reuse.
+func isDangerousShellCommand(command string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return true
+	}
+	lower := strings.ToLower(command)
+
+	// Block clearly dangerous write operations, regardless of &&/||/; structure.
+	for _, marker := range []string{">>", "out-file", "set-content", "add-content", "copy-item", "move-item", "remove-item", "new-item", "rename-item", "invoke-webrequest", "curl ", "wget ", " start-process", "taskkill", " sed -i", " perl -pi", "git apply", "git commit", "git push"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	// Redirect operators are always write-like.
+	for _, marker := range []string{">", "<"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	// Broad destructive keywords — dangerous regardless of chaining.
+	// Match both in the middle (e.g. "&& rm …") and at the start (e.g. "rm …").
+	for _, marker := range []string{"rm ", "del ", "move ", "copy ", "mkdir ", "rmdir "} {
+		if strings.HasPrefix(lower, marker) || strings.Contains(lower, " "+marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// splitShellChainSegments splits a command string on chain operators &&, ||, and ;.
+// It handles the case where these appear inside quoted strings incorrectly by doing
+// a simple split — this is acceptable because the read-only whitelist is conservative.
+func splitShellChainSegments(command string) []string {
+	var segments []string
+	current := ""
+	i := 0
+	for i < len(command) {
+		if i+1 < len(command) && command[i] == '&' && command[i+1] == '&' {
+			if trimmed := strings.TrimSpace(current); trimmed != "" {
+				segments = append(segments, trimmed)
+			}
+			current = ""
+			i += 2
+			continue
+		}
+		if i+1 < len(command) && command[i] == '|' && command[i+1] == '|' {
+			if trimmed := strings.TrimSpace(current); trimmed != "" {
+				segments = append(segments, trimmed)
+			}
+			current = ""
+			i += 2
+			continue
+		}
+		if command[i] == ';' {
+			if trimmed := strings.TrimSpace(current); trimmed != "" {
+				segments = append(segments, trimmed)
+			}
+			current = ""
+			i++
+			continue
+		}
+		current += string(command[i])
+		i++
+	}
+	if trimmed := strings.TrimSpace(current); trimmed != "" {
+		segments = append(segments, trimmed)
+	}
+	return segments
+}
+
+// isReadOnlyShellSegment checks whether a single chain segment (no &&, ||, ;)
+// is read-only. A segment may still contain pipes (|), each pipe stage is checked.
+func isReadOnlyShellSegment(segment string) bool {
+	pipeStages := strings.Split(segment, "|")
+	for _, stage := range pipeStages {
+		stage = strings.TrimSpace(stage)
+		if stage == "" {
+			return false
+		}
+		fields := strings.Fields(stage)
 		if len(fields) == 0 {
 			return false
 		}
@@ -1078,14 +1444,16 @@ func isReadOnlyShellCommand(command string) bool {
 		switch cmd {
 		case "ls", "dir", "pwd", "cat", "type", "find", "findstr", "grep", "rg", "tree", "stat", "head", "tail", "wc",
 			"get-childitem", "gci", "get-content", "gc", "select-string", "sls", "where-object", "sort-object", "measure-object",
-			"format-table", "ft", "format-list", "fl", "resolve-path", "test-path":
+			"format-table", "ft", "format-list", "fl", "resolve-path", "test-path", "cd", "chdir", "pushd", "popd", "echo",
+			// Common always-read-only commands
+			"which", "where", "command", "env", "printenv", "whoami", "hostname", "uname":
 			continue
 		case "git":
 			if len(fields) < 2 {
 				return false
 			}
 			switch strings.TrimSpace(fields[1]) {
-			case "status", "diff", "log", "show", "branch":
+			case "status", "diff", "log", "show", "branch", "stash", "remote", "config", "tag", "blame", "describe", "rev-parse", "ls-files", "ls-tree":
 				continue
 			default:
 				return false
@@ -1118,6 +1486,174 @@ func interfaceSliceToStrings(value interface{}) []string {
 	default:
 		return nil
 	}
+}
+
+func chatToolArgPreview(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	return truncateChatRuntimeText(payloadStringValue(payload["arg_preview"]), 72)
+}
+
+func chatToolDivider(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return strings.Repeat("─", 72)
+	}
+	content := " " + label + " "
+	width := 72
+	runeCount := len([]rune(content))
+	if runeCount >= width {
+		return content
+	}
+	left := (width - runeCount) / 2
+	right := width - runeCount - left
+	return strings.Repeat("─", left) + content + strings.Repeat("─", right)
+}
+
+func chatToolSummaryLines(payload map[string]interface{}) []string {
+	if payload == nil {
+		return nil
+	}
+	errText := payloadStringValue(payload["error"])
+
+	lines := interfaceSliceToStrings(payload["summary_lines"])
+	if len(lines) == 0 {
+		summary := payloadStringValue(payload["summary"])
+		if summary != "" {
+			lines = strings.Split(strings.ReplaceAll(summary, "\r\n", "\n"), "\n")
+		}
+	}
+
+	out := make([]string, 0, 3)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, truncateChatRuntimeText(trimmed, 120))
+		if len(out) == 3 {
+			return out
+		}
+	}
+	if len(out) > 0 {
+		if errText != "" && isGenericChatToolFailureSummary(out) {
+			return []string{truncateChatRuntimeText("failed: "+errText, 120)}
+		}
+		return out
+	}
+
+	if errText != "" {
+		return []string{truncateChatRuntimeText("failed: "+errText, 120)}
+	}
+	return nil
+}
+
+func chatToolPostCommandHint(payload map[string]interface{}) string {
+	if payloadBoolValue(payload, "awaiting_model") {
+		return "[thinking] 等待中..."
+	}
+	return ""
+}
+
+func renderChatReasoningTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
+	block := runtimetypes.ReasoningBlockFromMap(event.Payload["reasoning"])
+	if block == nil {
+		return chatRuntimeTimelineEvent{}
+	}
+	stepLabel := payloadStringValue(event.Payload["step"])
+	if stepLabel == "" {
+		if stepValue, ok := event.Payload["step"].(int); ok && stepValue > 0 {
+			stepLabel = fmt.Sprintf("%d", stepValue)
+		}
+	}
+	return chatReasoningTimelineEvent(strings.TrimSpace(event.TraceID), stepLabel, block)
+}
+
+func chatReasoningTimelineEvent(traceID, stepLabel string, block *runtimetypes.ReasoningBlock) chatRuntimeTimelineEvent {
+	if block == nil {
+		return chatRuntimeTimelineEvent{}
+	}
+	lines := chatReasoningLines(block)
+	if len(lines) == 0 {
+		return chatRuntimeTimelineEvent{}
+	}
+	stepLabel = strings.TrimSpace(stepLabel)
+	keyParts := []string{"assistant.reasoning", strings.TrimSpace(traceID), stepLabel, strings.TrimSpace(block.DisplayText())}
+	return chatRuntimeTimelineEvent{
+		Line:     strings.Join(lines, "\n"),
+		DedupKey: strings.Join(keyParts, ":"),
+	}
+}
+
+func chatReasoningLines(block *runtimetypes.ReasoningBlock) []string {
+	if block == nil {
+		return nil
+	}
+	lines := []string{chatToolDivider("reasoning")}
+	meta := chatReasoningMetaLine(block)
+	if meta != "" {
+		lines = append(lines, meta)
+	}
+	display := strings.TrimSpace(block.DisplayText())
+	if display != "" {
+		for _, line := range strings.Split(strings.ReplaceAll(display, "\r\n", "\n"), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
+			}
+			lines = append(lines, "  "+truncateChatRuntimeText(trimmed, 160))
+		}
+	} else if strings.TrimSpace(block.OpaqueState) != "" {
+		lines = append(lines, "  provider 返回了不可显示的 reasoning state，已保留续接信息。")
+	}
+	if len(lines) == 1 {
+		return nil
+	}
+	lines = append(lines, chatToolDivider("end reasoning"))
+	return lines
+}
+
+func isReasoningStreamDeltaBlock(block *runtimetypes.ReasoningBlock) bool {
+	if block == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(block.Format), "stream_delta")
+}
+
+func chatReasoningMetaLine(block *runtimetypes.ReasoningBlock) string {
+	if block == nil {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	if provider := strings.TrimSpace(block.Provider); provider != "" {
+		parts = append(parts, "provider="+provider)
+	}
+	if format := strings.TrimSpace(block.Format); format != "" {
+		parts = append(parts, "format="+format)
+	}
+	if block.ReplayRequired {
+		parts = append(parts, "replay=required")
+	}
+	if strings.TrimSpace(block.DisplayText()) == "" && strings.TrimSpace(block.OpaqueState) != "" {
+		parts = append(parts, "visibility=opaque")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[reasoning] " + strings.Join(parts, " ")
+}
+
+func isGenericChatToolFailureSummary(lines []string) bool {
+	if len(lines) == 0 {
+		return false
+	}
+	normalized := strings.ToLower(strings.Join(lines, " "))
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if normalized == "tool returned no output." {
+		return true
+	}
+	return strings.Contains(normalized, "failed before producing output.")
 }
 
 func payloadBoolValue(payload map[string]interface{}, key string) bool {

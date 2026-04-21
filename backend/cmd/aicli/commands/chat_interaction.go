@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type chatInteractionCoordinator struct {
@@ -30,6 +31,13 @@ type chatInteractionCoordinator struct {
 	promptDelay        time.Duration
 	promptSeq          uint64
 	promptAdvanceFn    func() bool
+	liveStreamFn       func() bool
+
+	reasoningActive     bool
+	reasoningRendered   bool
+	reasoningTrailingLF bool
+	reasoningMeta       string
+	reasoningBuffer     strings.Builder
 }
 
 func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordinator {
@@ -49,6 +57,32 @@ func (c *chatInteractionCoordinator) SetWriter(writer io.Writer) {
 	c.writer = writer
 }
 
+func (c *chatInteractionCoordinator) SupportsLiveStream() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.supportsLiveStreamLocked()
+}
+
+func (c *chatInteractionCoordinator) supportsLiveStreamLocked() bool {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
+		return false
+	}
+	if c.liveStreamFn != nil {
+		return c.liveStreamFn()
+	}
+	if c.writer != os.Stdout {
+		return false
+	}
+	stdoutInfo, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return stdoutInfo.Mode()&os.ModeCharDevice != 0
+}
+
 func (c *chatInteractionCoordinator) PrintPrompt() {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
 		return
@@ -59,7 +93,7 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.promptSeq++
-	if c.promptVisible || c.thinkingActive || c.streamingActive {
+	if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 		return
 	}
 	fmt.Fprint(c.writer, ui.FormatUserPrompt())
@@ -106,6 +140,40 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	fmt.Fprintln(c.writer, ui.FormatAssistantMessage(formatted))
 }
 
+func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.ReasoningBlock) {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || block == nil {
+		return
+	}
+	display := block.RawDisplayText()
+	if display == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.reasoningActive {
+		c.beginMessageLocked()
+		c.reasoningActive = true
+		c.reasoningRendered = false
+		c.reasoningTrailingLF = false
+		c.reasoningBuffer.Reset()
+		fmt.Fprintln(c.writer, ui.IndentAssistantContent(chatToolDivider("reasoning")))
+		if meta := chatReasoningMetaLine(block); meta != "" {
+			c.reasoningMeta = meta
+			fmt.Fprintln(c.writer, ui.IndentAssistantContent(meta))
+		} else {
+			c.reasoningMeta = ""
+		}
+	}
+	delta := normalizeAssistantStreamDelta(c.reasoningBuffer.String(), display)
+	if delta == "" {
+		return
+	}
+	if c.supportsLiveStreamLocked() {
+		c.writeIndentedStreamingDeltaLocked(delta, ui.AssistantContentIndent()+"  ", &c.reasoningRendered, &c.reasoningTrailingLF)
+	}
+	c.reasoningBuffer.WriteString(delta)
+}
+
 func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || delta == "" {
 		return
@@ -113,7 +181,9 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.streamingActive {
-		c.beginMessageLocked()
+		if !c.reasoningActive {
+			c.beginMessageLocked()
+		}
 		c.streamingActive = true
 		c.streamRendered = false
 		c.streamMode = assistantStreamModeUnknown
@@ -124,6 +194,9 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 	delta = normalizeAssistantStreamDelta(c.streamBuffer.String(), delta)
 	if delta == "" {
 		return
+	}
+	if c.supportsLiveStreamLocked() && !c.reasoningActive {
+		c.writeIndentedStreamingDeltaLocked(delta, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
 	}
 	c.streamBuffer.WriteString(delta)
 	c.streamLines += strings.Count(delta, "\n")
@@ -137,6 +210,19 @@ func normalizeAssistantStreamDelta(existing, incoming string) string {
 		return incoming[len(existing):]
 	}
 	return incoming
+}
+
+func resolveStreamCompletionSuffix(existing, final string) string {
+	if final == "" {
+		return ""
+	}
+	if existing == "" {
+		return final
+	}
+	if strings.HasPrefix(final, existing) {
+		return final[len(existing):]
+	}
+	return ""
 }
 
 func (c *chatInteractionCoordinator) EstimateStreamFlushTimeout(content string) time.Duration {
@@ -179,12 +265,65 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 		return true
 	}
 	finalContent = sanitizeInteractiveAsyncTeamLaunchResponse(finalContent)
+	if c.supportsLiveStreamLocked() {
+		suffix := resolveStreamCompletionSuffix(c.streamBuffer.String(), finalContent)
+		if suffix != "" {
+			c.writeIndentedStreamingDeltaLocked(suffix, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+			c.streamBuffer.WriteString(suffix)
+		}
+		if c.streamRendered && !c.streamTrailingLF {
+			fmt.Fprintln(c.writer)
+		}
+		c.resetStreamLocked()
+		return true
+	}
 	formatted := finalContent
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(finalContent)
 	}
 	fmt.Fprintln(c.writer, ui.FormatAssistantMessage(formatted))
 	c.resetStreamLocked()
+	return true
+}
+
+func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetypes.ReasoningBlock) bool {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.reasoningActive {
+		return false
+	}
+	finalText := c.reasoningBuffer.String()
+	if block != nil {
+		if display := block.RawDisplayText(); display != "" {
+			finalText = display
+		}
+	}
+	if c.supportsLiveStreamLocked() {
+		suffix := resolveStreamCompletionSuffix(c.reasoningBuffer.String(), finalText)
+		if suffix != "" {
+			c.writeIndentedStreamingDeltaLocked(suffix, ui.AssistantContentIndent()+"  ", &c.reasoningRendered, &c.reasoningTrailingLF)
+			c.reasoningBuffer.WriteString(suffix)
+		}
+		c.finalizeReasoningLocked()
+		return true
+	}
+	renderBlock := block
+	if renderBlock == nil {
+		renderBlock = &runtimetypes.ReasoningBlock{
+			Summary:        finalText,
+			Visibility:     runtimetypes.ReasoningVisibilitySummary,
+			Streamable:     true,
+			ReplayRequired: false,
+		}
+	}
+	lines := chatReasoningLines(renderBlock)
+	if len(lines) > 0 {
+		fmt.Fprintln(c.writer, ui.IndentAssistantContent(strings.Join(lines, "\n")))
+	}
+	c.resetReasoningLocked()
 	return true
 }
 
@@ -198,6 +337,13 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		return
 	}
 	content := c.streamBuffer.String()
+	if c.supportsLiveStreamLocked() {
+		if c.streamRendered && !c.streamTrailingLF {
+			fmt.Fprintln(c.writer)
+		}
+		c.resetStreamLocked()
+		return
+	}
 	if content != "" {
 		content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
 		formatted := content
@@ -209,6 +355,31 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		return
 	}
 	c.resetStreamLocked()
+}
+
+func (c *chatInteractionCoordinator) FinalizeReasoningDelta() {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.reasoningActive {
+		return
+	}
+	if c.supportsLiveStreamLocked() {
+		c.finalizeReasoningLocked()
+		return
+	}
+	renderBlock := &runtimetypes.ReasoningBlock{
+		Summary:    c.reasoningBuffer.String(),
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+		Streamable: true,
+	}
+	lines := chatReasoningLines(renderBlock)
+	if len(lines) > 0 {
+		fmt.Fprintln(c.writer, ui.IndentAssistantContent(strings.Join(lines, "\n")))
+	}
+	c.resetReasoningLocked()
 }
 
 func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
@@ -250,15 +421,63 @@ func (c *chatInteractionCoordinator) beginMessageLocked() {
 		fmt.Fprint(c.writer, "\r   \r")
 		c.thinkingActive = false
 	}
+	if c.reasoningActive {
+		c.flushReasoningLocked()
+		c.resetReasoningLocked()
+	}
 	if c.streamingActive {
-		if !c.streamTrailingLF {
-			fmt.Fprintln(c.writer)
-		}
+		c.flushStreamLocked()
 		c.resetStreamLocked()
 	}
 	if c.promptVisible {
 		c.clearVisiblePromptLocked()
 		c.promptVisible = false
+	}
+}
+
+// flushStreamLocked outputs any buffered streaming content before the stream
+// is interrupted by another message (e.g. thinking, async line, new response).
+// This prevents text from being silently swallowed when a ReAct loop's
+// intermediate assistant deltas are never finalized via FinalizeAssistantDelta.
+func (c *chatInteractionCoordinator) flushStreamLocked() {
+	if c.supportsLiveStreamLocked() {
+		c.renderBufferedAssistantStreamLocked()
+		if c.streamRendered && !c.streamTrailingLF {
+			fmt.Fprintln(c.writer)
+		}
+		return
+	}
+	content := c.streamBuffer.String()
+	if strings.TrimSpace(content) == "" {
+		if !c.streamTrailingLF {
+			fmt.Fprintln(c.writer)
+		}
+		return
+	}
+	content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
+	formatted := content
+	if c.session.Formatter != nil {
+		formatted = c.session.Formatter.Format(content)
+	}
+	fmt.Fprintln(c.writer, ui.FormatAssistantMessage(formatted))
+}
+
+func (c *chatInteractionCoordinator) flushReasoningLocked() {
+	if !c.reasoningActive {
+		return
+	}
+	if c.supportsLiveStreamLocked() {
+		c.finalizeReasoningLocked()
+		return
+	}
+	renderBlock := &runtimetypes.ReasoningBlock{
+		Summary:    c.reasoningBuffer.String(),
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+		Streamable: true,
+	}
+	lines := chatReasoningLines(renderBlock)
+	if len(lines) > 0 {
+		fmt.Fprintln(c.writer, ui.IndentAssistantContent(strings.Join(lines, "\n")))
 	}
 }
 
@@ -277,6 +496,29 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	fmt.Fprint(c.writer, "\r"+strings.Repeat(" ", clearWidth)+"\r")
 }
 
+func (c *chatInteractionCoordinator) finalizeReasoningLocked() {
+	if !c.reasoningActive {
+		return
+	}
+	if c.reasoningRendered && !c.reasoningTrailingLF {
+		fmt.Fprintln(c.writer)
+	}
+	fmt.Fprintln(c.writer, ui.IndentAssistantContent(chatToolDivider("end reasoning")))
+	c.resetReasoningLocked()
+	c.renderBufferedAssistantStreamLocked()
+}
+
+func (c *chatInteractionCoordinator) renderBufferedAssistantStreamLocked() {
+	if !c.supportsLiveStreamLocked() || !c.streamingActive || c.streamRendered {
+		return
+	}
+	content := c.streamBuffer.String()
+	if content == "" {
+		return
+	}
+	c.writeIndentedStreamingDeltaLocked(content, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+}
+
 func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.streamingActive = false
 	c.streamRendered = false
@@ -285,6 +527,14 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.streamLines = 0
 	c.streamDisplayLines = 0
 	c.streamBuffer.Reset()
+}
+
+func (c *chatInteractionCoordinator) resetReasoningLocked() {
+	c.reasoningActive = false
+	c.reasoningRendered = false
+	c.reasoningTrailingLF = false
+	c.reasoningMeta = ""
+	c.reasoningBuffer.Reset()
 }
 
 func (c *chatInteractionCoordinator) shouldAdvanceAfterPromptLocked() bool {
@@ -311,6 +561,28 @@ func (c *chatInteractionCoordinator) shouldAdvanceAfterPromptLocked() bool {
 func promptDisplayText() string {
 	theme := ui.GetTheme(ui.ThemeAuto)
 	return theme.UserIcon + "你> "
+}
+
+func (c *chatInteractionCoordinator) writeIndentedStreamingDeltaLocked(delta, indent string, rendered *bool, trailingLF *bool) {
+	if delta == "" {
+		return
+	}
+	atLineStart := !*rendered || *trailingLF
+	for _, r := range []rune(delta) {
+		if atLineStart && r != '\n' {
+			fmt.Fprint(c.writer, indent)
+			atLineStart = false
+			*rendered = true
+		}
+		c.writeStreamingDeltaLocked(string(r))
+		if r == '\n' {
+			atLineStart = true
+		}
+	}
+	*trailingLF = atLineStart
+	if !*rendered && delta != "" {
+		*rendered = true
+	}
 }
 
 func (c *chatInteractionCoordinator) writeStreamingDeltaLocked(delta string) {
@@ -422,7 +694,7 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 		if seq != c.promptSeq {
 			return
 		}
-		if c.promptVisible || c.thinkingActive || c.streamingActive {
+		if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 			return
 		}
 		fmt.Fprint(c.writer, ui.FormatUserPrompt())

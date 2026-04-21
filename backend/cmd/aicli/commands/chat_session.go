@@ -268,6 +268,24 @@ func printCurrentRuntimeSession(session *ChatSession) {
 	if store := currentRuntimeSessionStoreSummary(session); store != "" {
 		printChatSessionMetaRow("Session Store:", store)
 	}
+	if logPath := currentChatLogFile(session); logPath != "" {
+		printChatSessionMetaRow("Chat Log File:", logPath)
+	}
+	if debugPath := currentDebugLogFile(session); debugPath != "" {
+		printChatSessionMetaRow("Debug Log File:", debugPath)
+	}
+	if artifactDir := currentRuntimeHTTPArtifactDir(session); artifactDir != "" {
+		printChatSessionMetaRow("HTTP Artifact Dir:", artifactDir)
+	}
+	if session.runtimeHTTPCapture != nil {
+		snapshot := session.runtimeHTTPCapture.Snapshot()
+		if snapshot.RequestArtifactPath != "" {
+			printChatSessionMetaRow("Last HTTP Req:", snapshot.RequestArtifactPath)
+		}
+		if snapshot.ResponseArtifactPath != "" {
+			printChatSessionMetaRow("Last HTTP Resp:", snapshot.ResponseArtifactPath)
+		}
+	}
 	if preview.Title != "" {
 		printChatSessionMetaRow("Title:", preview.Title)
 	}
@@ -733,6 +751,18 @@ func runtimeMessageFromAICLIMessage(raw map[string]interface{}) (runtimetypes.Me
 			}
 			message.Metadata[key] = value
 		}
+	}
+	if reasoningBlock := runtimetypes.ReasoningBlockFromMap(normalized["reasoning_details"]); reasoningBlock != nil {
+		runtimetypes.SetReasoningBlock(message.Metadata, reasoningBlock)
+		if text := strings.TrimSpace(reasoningBlock.DisplayText()); text != "" {
+			message.Metadata.Set(chatcoreReasoningMetadataKey, text)
+		}
+	} else if reasoning, ok := normalized["reasoning_content"].(string); ok && strings.TrimSpace(reasoning) != "" {
+		message.Metadata.Set(chatcoreReasoningMetadataKey, strings.TrimSpace(reasoning))
+		runtimetypes.SetReasoningBlock(message.Metadata, &runtimetypes.ReasoningBlock{
+			Summary:    strings.TrimSpace(reasoning),
+			Visibility: runtimetypes.ReasoningVisibilitySummary,
+		})
 	}
 	message.Metadata.Set(chatRuntimeMessageRawJSONKey, string(data))
 	return message, nil

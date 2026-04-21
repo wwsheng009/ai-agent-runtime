@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
@@ -75,7 +76,11 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		return "", nil
 	}
 	renderAsyncTeamLaunchNotice(session, previousTeamID)
-	return resolveActorExecutorResponse(result.Output, session, previousAssistant), nil
+	response := resolveActorExecutorResponse(result.Output, session, previousAssistant)
+	if response == "" {
+		response = fallbackActorExecutorResponse(result)
+	}
+	return response, nil
 }
 
 func humanizeActorExecutorError(session *ChatSession, err error) error {
@@ -85,34 +90,40 @@ func humanizeActorExecutorError(session *ChatSession, err error) error {
 	if strings.Contains(err.Error(), "upstream model returned an empty reply: no text and no tool calls") {
 		message := "上游模型返回了空回复：既没有文本，也没有发起工具调用；请重试，或调整提示词/切换模型后再试"
 		if session != nil && session.runtimeHTTPCapture != nil {
-			source, provider, protocol, model, status, preview, errText := session.runtimeHTTPCapture.Snapshot()
+			snapshot := session.runtimeHTTPCapture.Snapshot()
 			details := make([]string, 0, 4)
-			if source != "" || provider != "" || protocol != "" || model != "" {
+			if snapshot.Source != "" || snapshot.Provider != "" || snapshot.Protocol != "" || snapshot.Model != "" {
 				meta := []string{}
-				if source != "" {
-					meta = append(meta, "source="+source)
+				if snapshot.Source != "" {
+					meta = append(meta, "source="+snapshot.Source)
 				}
-				if provider != "" {
-					meta = append(meta, "provider="+provider)
+				if snapshot.Provider != "" {
+					meta = append(meta, "provider="+snapshot.Provider)
 				}
-				if protocol != "" {
-					meta = append(meta, "protocol="+protocol)
+				if snapshot.Protocol != "" {
+					meta = append(meta, "protocol="+snapshot.Protocol)
 				}
-				if model != "" {
-					meta = append(meta, "model="+model)
+				if snapshot.Model != "" {
+					meta = append(meta, "model="+snapshot.Model)
 				}
 				if len(meta) > 0 {
 					details = append(details, strings.Join(meta, " "))
 				}
 			}
-			if status > 0 {
-				details = append(details, fmt.Sprintf("status=%d", status))
+			if snapshot.ResponseStatus > 0 {
+				details = append(details, fmt.Sprintf("status=%d", snapshot.ResponseStatus))
 			}
-			if errText != "" {
-				details = append(details, "http_error="+errText)
+			if snapshot.ErrorText != "" {
+				details = append(details, "http_error="+snapshot.ErrorText)
 			}
-			if preview != "" {
-				details = append(details, "response_preview="+truncateUTF8Bytes(strings.TrimSpace(preview), 512))
+			if snapshot.RequestArtifactPath != "" {
+				details = append(details, "request_artifact="+snapshot.RequestArtifactPath)
+			}
+			if snapshot.ResponseArtifactPath != "" {
+				details = append(details, "response_artifact="+snapshot.ResponseArtifactPath)
+			}
+			if snapshot.ResponsePreview != "" {
+				details = append(details, "response_preview="+truncateUTF8Bytes(strings.TrimSpace(snapshot.ResponsePreview), 512))
 			}
 			if len(details) > 0 {
 				message += " 最近一次响应诊断：" + strings.Join(details, " | ")
@@ -192,6 +203,24 @@ func resolveActorExecutorResponse(output string, session *ChatSession, previousA
 		return ""
 	}
 	return current
+}
+
+func fallbackActorExecutorResponse(result *agent.Result) string {
+	if result == nil {
+		return ""
+	}
+	if result.Success || strings.TrimSpace(result.Output) != "" {
+		return ""
+	}
+	errText := strings.TrimSpace(result.Error)
+	if errText == "" {
+		return "这次处理没有生成后续回复，请重试。"
+	}
+	return strings.Join([]string{
+		"这次处理没有生成后续回复。",
+		"原因: " + truncateChatRuntimeText(errText, 240),
+		"请根据上面的信息重试，或调整请求后再试。",
+	}, "\n")
 }
 
 func renderAsyncTeamLaunchNotice(session *ChatSession, previousTeamID string) {

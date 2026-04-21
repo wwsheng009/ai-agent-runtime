@@ -13,9 +13,9 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 func TestAICLIChatActorExecutor_SpawnTeamBindsSessionForFollowupTeamTool(t *testing.T) {
@@ -1035,9 +1035,10 @@ func TestAICLIChatActorExecutor_FailedAutoStartTeamClosesNonLeadTeammateSessionA
 }
 
 func containsAllChatTimelineLines(lines []string, expected ...string) bool {
+	flattened := flattenChatTimelineLines(lines)
 	for _, want := range expected {
 		found := false
-		for _, line := range lines {
+		for _, line := range flattened {
 			if strings.TrimSpace(line) == strings.TrimSpace(want) {
 				found = true
 				break
@@ -1055,12 +1056,29 @@ func containsChatTimelinePrefix(lines []string, prefix string) bool {
 	if prefix == "" {
 		return false
 	}
-	for _, line := range lines {
+	for _, line := range flattenChatTimelineLines(lines) {
 		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
 			return true
 		}
 	}
 	return false
+}
+
+func flattenChatTimelineLines(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	flattened := make([]string, 0, len(lines))
+	for _, block := range lines {
+		for _, line := range strings.Split(strings.ReplaceAll(block, "\r\n", "\n"), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
+			}
+			flattened = append(flattened, trimmed)
+		}
+	}
+	return flattened
 }
 
 func runtimeStoreFromHost(host *localChatRuntimeHost) runtimechat.RuntimeStateStore {

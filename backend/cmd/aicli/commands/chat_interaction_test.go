@@ -10,13 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fatih/color"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/fatih/color"
-	"github.com/stretchr/testify/require"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type synchronizedBuffer struct {
@@ -77,6 +78,21 @@ func TestChatInteractionCoordinator_RenderAsyncLineClearsVisiblePromptInInteract
 	}
 	if !strings.Contains(rendered, strings.TrimRight(ui.IndentAssistantContent("[tool] view"), " ")) {
 		t.Fatalf("expected async line in output, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_RenderAsyncLineSupportsMultilineToolSummary(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAsyncLine("[tool done] ls path=docs\n  目录: docs\n  📁 aicli/ · 📁 architecture/\n  统计: 0 个文件, 2 个目录")
+
+	rendered := output.String()
+	expected := ui.IndentAssistantContent("[tool done] ls path=docs\n  目录: docs\n  📁 aicli/ · 📁 architecture/\n  统计: 0 个文件, 2 个目录")
+	if !strings.Contains(rendered, expected) {
+		t.Fatalf("expected multiline async line in output, got %q", rendered)
 	}
 }
 
@@ -556,6 +572,49 @@ func TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt(t *testing.T)
 	}
 }
 
+func TestChatInteractionCoordinator_FlushesBufferedStreamBeforeThinking(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAssistantDelta("Analyzing the code...")
+	if output.String() != "" {
+		t.Fatalf("expected delta to stay buffered before flush, got %q", output.String())
+	}
+
+	// StartThinking interrupts the stream and should flush the buffered content.
+	coord.StartThinking()
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "Analyzing the code...") {
+		t.Fatalf("expected buffered delta to be flushed before thinking, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_FlushesBufferedStreamBeforeAsyncLine(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAssistantDelta("Partial analysis")
+	if output.String() != "" {
+		t.Fatalf("expected delta to stay buffered before flush, got %q", output.String())
+	}
+
+	// RenderAsyncLine interrupts the stream and should flush the buffered content.
+	coord.RenderAsyncLine("[tool] view")
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "Partial analysis") {
+		t.Fatalf("expected buffered delta to be flushed before async line, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "[tool] view") {
+		t.Fatalf("expected async line after flush, got %q", rendered)
+	}
+}
+
 func TestChatInteractionCoordinator_ClearsThinkingBeforeAssistantResponse(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
@@ -957,6 +1016,156 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_BuffersShortPlainTextUn
 	coord.FinalizeAssistantDelta()
 	if !strings.Contains(output.String(), "Hello") {
 		t.Fatalf("expected finalized plain text to be written, got %q", output.String())
+	}
+}
+
+func TestChatInteractionCoordinator_RenderAssistantDelta_StreamsImmediatelyWhenLiveOutputEnabled(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAssistantDelta("Hello")
+
+	rendered := output.String()
+	if !strings.Contains(rendered, ui.AssistantContentIndent()+"Hello") {
+		t.Fatalf("expected live stream output immediately, got %q", rendered)
+	}
+	if strings.Contains(rendered, "\n") {
+		t.Fatalf("expected live stream to avoid premature newline, got %q", rendered)
+	}
+
+	coord.FinalizeAssistantDelta()
+	if !strings.HasSuffix(output.String(), "\n") {
+		t.Fatalf("expected live stream finalize to append newline, got %q", output.String())
+	}
+}
+
+func TestChatInteractionCoordinator_RenderAssistantDelta_PreservesLeadingWhitespaceBetweenChunks(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAssistantDelta("Hello")
+	coord.RenderAssistantDelta(" world.")
+	coord.RenderAssistantDelta(" Next")
+
+	rendered := output.String()
+	if !strings.Contains(rendered, ui.AssistantContentIndent()+"Hello world. Next") {
+		t.Fatalf("expected streamed assistant text to preserve leading whitespace, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_RenderReasoningDelta_StreamsImmediatelyWhenLiveOutputEnabled(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderReasoningDelta(&runtimetypes.ReasoningBlock{
+		Provider:   "nvidia",
+		Format:     "openai_compatible",
+		Summary:    "先输出 reasoning，再输出正文。",
+		Streamable: true,
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+
+	rendered := output.String()
+	if !strings.Contains(rendered, chatToolDivider("reasoning")) {
+		t.Fatalf("expected reasoning divider, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "[reasoning] provider=nvidia format=openai_compatible") {
+		t.Fatalf("expected reasoning meta line, got %q", rendered)
+	}
+	if !strings.Contains(rendered, ui.AssistantContentIndent()+"  先输出 reasoning，再输出正文。") {
+		t.Fatalf("expected reasoning content to stream immediately, got %q", rendered)
+	}
+
+	coord.FinalizeReasoningDelta()
+	if !strings.Contains(output.String(), chatToolDivider("end reasoning")) {
+		t.Fatalf("expected reasoning finalize divider, got %q", output.String())
+	}
+}
+
+func TestChatInteractionCoordinator_RenderReasoningDelta_PreservesLeadingWhitespaceBetweenChunks(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderReasoningDelta(&runtimetypes.ReasoningBlock{
+		Provider:   "nvidia",
+		Format:     "stream_delta",
+		Summary:    "The",
+		Streamable: true,
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+	coord.RenderReasoningDelta(&runtimetypes.ReasoningBlock{
+		Provider:   "nvidia",
+		Format:     "stream_delta",
+		Summary:    " user",
+		Streamable: true,
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+
+	rendered := output.String()
+	if !strings.Contains(rendered, ui.AssistantContentIndent()+"  The user") {
+		t.Fatalf("expected streamed reasoning to preserve leading whitespace, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_DefersAssistantTextUntilReasoningCompletes(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderReasoningDelta(&runtimetypes.ReasoningBlock{
+		Provider:   "nvidia",
+		Format:     "stream_delta",
+		Summary:    "先确认问题。",
+		Streamable: true,
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+	coord.RenderAssistantDelta("Hello")
+	coord.RenderReasoningDelta(&runtimetypes.ReasoningBlock{
+		Provider:   "nvidia",
+		Format:     "stream_delta",
+		Summary:    " 即可。",
+		Streamable: true,
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+
+	rendered := output.String()
+	if strings.Contains(rendered, ui.AssistantContentIndent()+"Hello") {
+		t.Fatalf("expected assistant text to stay buffered while reasoning is active, got %q", rendered)
+	}
+	if strings.Count(rendered, chatToolDivider("reasoning")) != 1 {
+		t.Fatalf("expected a single reasoning block before finalize, got %q", rendered)
+	}
+
+	coord.FinalizeReasoningDelta()
+
+	rendered = output.String()
+	if strings.Count(rendered, chatToolDivider("reasoning")) != 1 {
+		t.Fatalf("expected reasoning output to remain a single block, got %q", rendered)
+	}
+	if !strings.Contains(rendered, ui.AssistantContentIndent()+"  先确认问题。 即可。") {
+		t.Fatalf("expected reasoning chunks to stay contiguous, got %q", rendered)
+	}
+	if !strings.Contains(rendered, chatToolDivider("end reasoning")+"\n"+ui.AssistantContentIndent()+"Hello") {
+		t.Fatalf("expected buffered assistant text after reasoning block, got %q", rendered)
 	}
 }
 

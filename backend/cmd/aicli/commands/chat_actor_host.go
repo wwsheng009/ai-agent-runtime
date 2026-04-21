@@ -193,13 +193,13 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		Provider:     resolveLocalChatAgentProvider(session, host),
 		Model:        resolveLocalChatAgentModel(session, host),
 		SystemPrompt: composeLocalChatSystemPrompt(session, workspaceRoot),
-		MaxSteps:     10,
+		MaxSteps:     0,
 	}
 	if strings.TrimSpace(requestedModel) != "" {
 		agentConfig.Model = strings.TrimSpace(requestedModel)
 	}
-	if runtimeConfig != nil && runtimeConfig.Agent.MaxMaxSteps > 0 {
-		agentConfig.MaxSteps = runtimeConfig.Agent.MaxMaxSteps
+	if runtimeConfig != nil {
+		agentConfig.MaxSteps = agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps)
 	}
 	if session.Stream || workspaceRoot != "" || len(session.ProfileContext) > 0 {
 		agentConfig.Options = make(map[string]interface{})
@@ -325,13 +325,13 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 
 func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig) *agent.LoopReActConfig {
 	config := &agent.LoopReActConfig{
-		MaxSteps:        10,
+		MaxSteps:        0,
 		EnableThought:   true,
 		EnableToolCalls: true,
 		Temperature:     0.7,
 	}
-	if runtimeConfig != nil && runtimeConfig.Agent.MaxMaxSteps > 0 {
-		config.MaxSteps = runtimeConfig.Agent.MaxMaxSteps
+	if runtimeConfig != nil {
+		config.MaxSteps = agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps)
 	}
 	return config
 }

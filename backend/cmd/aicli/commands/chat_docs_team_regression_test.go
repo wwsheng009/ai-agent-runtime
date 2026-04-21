@@ -10,19 +10,19 @@ import (
 	"testing"
 	"time"
 
-	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
-	mcpprotocol "github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
-	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	mcpprotocol "github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
+	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 func TestAICLIChatActorExecutor_DocsPromptRegression_CoversWorkspaceToolPriorityBlockedReplanAndStreamFallback(t *testing.T) {
@@ -194,14 +194,14 @@ func TestAICLIChatActorExecutor_DocsPromptRegression_CoversWorkspaceToolPriority
 	linesMu.Unlock()
 	followupStartedLine := fmt.Sprintf("[task] started %s @docs_api", followupTask.ID)
 	followupCompletedLine := fmt.Sprintf("[task] completed %s @docs_api docs/guides/getting-started.md explains how to start using the docs toolkit", followupTask.ID)
-	if !containsAllChatTimelineLines(snapshot,
-		"[tool] ls",
-		"[tool] view",
-		"[task] started task_docs_root @docs_arch",
-		"[task] blocked task_docs_root @docs_arch waiting on focused API guide summary",
-		followupStartedLine,
-		followupCompletedLine,
-	) {
+	if !containsChatTimelinePrefix(snapshot, "[tool] ls") ||
+		!containsChatTimelinePrefix(snapshot, "[tool] view") ||
+		!containsAllChatTimelineLines(snapshot,
+			"[task] started task_docs_root @docs_arch",
+			"[task] blocked task_docs_root @docs_arch waiting on focused API guide summary",
+			followupStartedLine,
+			followupCompletedLine,
+		) {
 		t.Fatalf("expected timeline lines not found, got %v", snapshot)
 	}
 	if !containsOrderedChatTimelineLines(snapshot,
@@ -1005,8 +1005,9 @@ func containsOrderedChatTimelineLines(lines []string, expected ...string) bool {
 	if len(expected) == 0 {
 		return true
 	}
+	flattened := flattenChatTimelineLines(lines)
 	index := 0
-	for _, line := range lines {
+	for _, line := range flattened {
 		if strings.TrimSpace(line) == strings.TrimSpace(expected[index]) {
 			index++
 			if index == len(expected) {
@@ -1021,8 +1022,9 @@ func containsOrderedChatTimelinePrefixes(lines []string, prefixes ...string) boo
 	if len(prefixes) == 0 {
 		return true
 	}
+	flattened := flattenChatTimelineLines(lines)
 	index := 0
-	for _, line := range lines {
+	for _, line := range flattened {
 		if strings.HasPrefix(strings.TrimSpace(line), strings.TrimSpace(prefixes[index])) {
 			index++
 			if index == len(prefixes) {
@@ -1036,7 +1038,7 @@ func containsOrderedChatTimelinePrefixes(lines []string, prefixes ...string) boo
 func countExactChatTimelineLine(lines []string, expected string) int {
 	count := 0
 	expected = strings.TrimSpace(expected)
-	for _, line := range lines {
+	for _, line := range flattenChatTimelineLines(lines) {
 		if strings.TrimSpace(line) == expected {
 			count++
 		}
@@ -1046,7 +1048,7 @@ func countExactChatTimelineLine(lines []string, expected string) int {
 
 func containsAnyChatTimelineLine(lines []string, expected ...string) bool {
 	for _, want := range expected {
-		for _, line := range lines {
+		for _, line := range flattenChatTimelineLines(lines) {
 			if strings.TrimSpace(line) == strings.TrimSpace(want) {
 				return true
 			}
