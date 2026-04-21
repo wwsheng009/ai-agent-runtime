@@ -317,6 +317,23 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	reasoning, _ := assistantMsg["reasoning_content"].(string)
 	rawToolCalls, hasToolCalls := assistantMsg["tool_calls"].([]map[string]interface{})
 
+	// 检查是否因 token 限制被截断
+	finishReason, _ := assistantMsg["finish_reason"].(string)
+	if finishReason == "length" {
+		warnMsg := "[输出因 token 限制被截断，可配置 max_tokens_limit 增大上限]"
+		if req.EventSink != nil && shouldRenderInteractiveOutput(session) {
+			req.EventSink(runtimechatcore.ChatEvent{
+				Type:    runtimechatcore.EventWarning,
+				Content: warnMsg,
+			})
+		}
+		logpkg.Warn("AICLI response truncated by token limit",
+			logpkg.String("provider", session.ProviderName),
+			logpkg.String("model", session.Model),
+			logpkg.String("finish_reason", finishReason),
+		)
+	}
+
 	if session.Logger != nil && session.Logger.logDir != "" {
 		logContent := map[string]interface{}{"streamed": req.Stream}
 		if content != "" {
@@ -475,6 +492,19 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 			return
 		}
 		fmt.Println(rendered)
+	case runtimechatcore.EventWarning:
+		if !shouldRenderInteractiveOutput(r.session) {
+			return
+		}
+		if event.Content == "" {
+			return
+		}
+		r.clearSpinner()
+		if r.session.Interaction != nil {
+			r.session.Interaction.RenderAsyncLine(fmt.Sprintf("⚠ %s", event.Content))
+			return
+		}
+		fmt.Printf("\n⚠ %s\n", event.Content)
 	}
 }
 
@@ -591,12 +621,28 @@ func (r *aicliEventRenderer) resetAssistantStreamState() {
 	r.streamLines = 0
 }
 
+func resolveMaxTokens(session *ChatSession) int {
+	// 1. Provider 配置的 MaxTokensLimit 优先
+	if session.Provider.MaxTokensLimit > 0 {
+		return session.Provider.MaxTokensLimit
+	}
+	// 2. 按 provider 类型选择合理默认值
+	switch strings.ToLower(strings.TrimSpace(session.Provider.GetProtocol())) {
+	case "anthropic":
+		return 8192
+	case "gemini":
+		return 8192
+	default:
+		return 4096
+	}
+}
+
 func adapterRequestConfig(session *ChatSession, messages []map[string]interface{}, req runtimechatcore.ProviderTurnRequest) adapter.RequestConfig {
 	config := adapter.RequestConfig{
 		Model:           session.Model,
 		Messages:        messages,
 		Stream:          req.Stream,
-		MaxTokens:       2000,
+		MaxTokens:       resolveMaxTokens(session),
 		ReasoningEffort: session.ReasoningEffort,
 		Temperature:     0.7,
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -292,7 +293,18 @@ func (s *Sandbox) ExecuteCommand(ctx context.Context, command string, args []str
 }
 
 func normalizeCommandName(command string) string {
-	return strings.ToLower(filepath.Base(strings.TrimSpace(command)))
+	name := strings.ToLower(filepath.Base(strings.TrimSpace(command)))
+	// On Windows, strip common executable extensions so that
+	// "cmd.exe" matches a deny entry for "cmd".
+	if runtime.GOOS == "windows" {
+		for _, ext := range []string{".exe", ".cmd", ".bat"} {
+			if strings.HasSuffix(name, ext) {
+				name = name[:len(name)-len(ext)]
+				break
+			}
+		}
+	}
+	return name
 }
 
 func normalizeNames(values []string) []string {

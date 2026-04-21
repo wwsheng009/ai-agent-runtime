@@ -7,13 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 // Config controls background execution defaults.
@@ -976,10 +976,10 @@ func buildShellCommand(ctx context.Context, command string) *exec.Cmd {
 	if command == "" {
 		return nil
 	}
-	if runtime.GOOS == "windows" {
-		return exec.CommandContext(ctx, "cmd", "/C", command)
-	}
-	return exec.CommandContext(ctx, "/bin/sh", "-c", command)
+	// 使用智能 shell 检测，与 BashTool 保持一致
+	shell := runtimeexecutor.DefaultUserShell()
+	shellArgs := shell.DeriveExecArgs(command, false)
+	return exec.CommandContext(ctx, shellArgs[0], shellArgs[1:]...)
 }
 
 func exitCodeFromError(err error) int {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -44,6 +45,10 @@ func NewBashTool() *BashTool {
 			"command": map[string]interface{}{
 				"type":        "string",
 				"description": "Shell 命令。Windows: 'dir' 查看目录；Linux/Mac: 'ls -la' 查看目录",
+			},
+			"workdir": map[string]interface{}{
+				"type":        "string",
+				"description": "可选：命令执行的工作目录。绝对路径直接使用，相对路径基于当前工作目录解析。默认为当前工作目录。",
 			},
 			"mutated_paths": map[string]interface{}{
 				"type":        "array",
@@ -88,6 +93,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 	mutatedPaths := extractStringList(params["mutated_paths"])
+	workdir := extractString(params["workdir"])
 
 	// 检查黑名单
 	if b.isBlacklisted(command) {
@@ -98,7 +104,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	// 使用 executer 执行命令
-	output, err := b.executeCommand(ctx, command)
+	output, err := b.executeCommand(ctx, command, workdir)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success: false,
@@ -124,9 +130,15 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}, nil
 }
 
-func (b *BashTool) executeCommand(ctx context.Context, command string) (string, error) {
+func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string) (string, error) {
+	// 解析工作目录
+	resolvedWorkdir, err := resolveWorkdir(workdir)
+	if err != nil {
+		return "", err
+	}
+
 	if b.sandbox == nil {
-		return b.executer.Execute(ctx, command, b.timeout)
+		return b.executer.Execute(ctx, command, b.timeout, WithWorkdir(resolvedWorkdir))
 	}
 
 	mainCmd := extractPrimaryCommand(command)
@@ -138,15 +150,11 @@ func (b *BashTool) executeCommand(ctx context.Context, command string) (string, 
 		})
 	}
 
-	workDir, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("获取当前工作目录失败: %w", err)
-	}
-	if err := b.sandbox.CheckPermission(runtimeexecutor.OpExecute, workDir); err != nil {
+	if err := b.sandbox.CheckPermission(runtimeexecutor.OpExecute, resolvedWorkdir); err != nil {
 		return "", wrapSandboxPermissionError("sandbox denied command working directory", err, map[string]interface{}{
 			"policy":      "sandbox",
 			"operation":   string(runtimeexecutor.OpExecute),
-			"target_path": workDir,
+			"target_path": resolvedWorkdir,
 			"command":     mainCmd,
 		})
 	}
@@ -158,12 +166,10 @@ func (b *BashTool) executeCommand(ctx context.Context, command string) (string, 
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var shellCmd []string
-	if runtime.GOOS == "windows" {
-		shellCmd = []string{"cmd", "/c", command}
-	} else {
-		shellCmd = []string{"sh", "-c", command}
-	}
+	// 使用智能 shell 检测
+	shell := runtimeexecutor.DefaultUserShell()
+	shellCmd := shell.DeriveExecArgs(command, false)
+
 	if err := b.sandbox.CheckCommandDenied(shellCmd[0]); err != nil {
 		return "", wrapSandboxPermissionError("sandbox denied shell launcher", err, map[string]interface{}{
 			"policy":    "sandbox",
@@ -174,8 +180,14 @@ func (b *BashTool) executeCommand(ctx context.Context, command string) (string, 
 	}
 
 	cmd := exec.CommandContext(cmdCtx, shellCmd[0], shellCmd[1:]...)
-	cmd.Dir = workDir
-	cmd.Env = b.sandbox.FilterEnv(os.Environ())
+	cmd.Dir = resolvedWorkdir
+	cmd.Env = runtimeexecutor.BuildFilteredEnv(b.sandbox, os.Environ())
+
+	// PowerShell 需要 UTF-8 输出编码
+	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
+		prefixPowershellUTF8(cmd)
+	}
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
@@ -184,6 +196,175 @@ func (b *BashTool) executeCommand(ctx context.Context, command string) (string, 
 		return string(output), err
 	}
 	return string(output), nil
+}
+
+func (b *BashTool) isBlacklisted(command string) bool {
+	cmdLower := strings.ToLower(command)
+	for _, blocked := range b.blacklist {
+		if strings.Contains(cmdLower, strings.ToLower(blocked)) {
+			return true
+		}
+	}
+	return false
+}
+
+// --- CommandExecuter interface (updated with options) ---
+
+// CommandExecuter 命令执行器接口
+type CommandExecuter interface {
+	Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (string, error)
+}
+
+// ExecOption configures command execution.
+type ExecOption func(*execConfig)
+
+type execConfig struct {
+	workdir string
+}
+
+// WithWorkdir sets the working directory for command execution.
+func WithWorkdir(dir string) ExecOption {
+	return func(c *execConfig) {
+		c.workdir = dir
+	}
+}
+
+// DefaultCommandExecuter 默认命令执行器
+type DefaultCommandExecuter struct{}
+
+// Execute 实现命令执行
+func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (string, error) {
+	cfg := &execConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// 使用智能 shell 检测
+	shell := runtimeexecutor.DefaultUserShell()
+	shellArgs := shell.DeriveExecArgs(command, false)
+
+	cmd := exec.CommandContext(cmdCtx, shellArgs[0], shellArgs[1:]...)
+
+	// 设置工作目录
+	if cfg.workdir != "" {
+		cmd.Dir = cfg.workdir
+	}
+
+	// 过滤敏感环境变量
+	cmd.Env = runtimeexecutor.FilterSensitiveEnv(os.Environ())
+
+	// PowerShell 需要 UTF-8 输出编码
+	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
+		prefixPowershellUTF8(cmd)
+	}
+
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		if cmdCtx.Err() == context.DeadlineExceeded {
+			return string(output), fmt.Errorf("命令执行超时（超过 %v）", timeout)
+		}
+
+		// 检查常见错误并给出友好提示
+		friendlyHint := friendlyHintFor(command, string(output), err)
+		if friendlyHint != "" {
+			return string(output), fmt.Errorf("命令执行失败: %w\n%s\n\n当前环境信息:\n%s", err, friendlyHint, GetShellEnvironmentInfo())
+		}
+		return string(output), err
+	}
+
+	return string(output), nil
+}
+
+// --- Helper functions ---
+
+// resolveWorkdir resolves the working directory for command execution.
+// If workdir is empty, returns the current working directory.
+// If workdir is relative, joins it to the current working directory.
+// If workdir is absolute, uses it as-is.
+func resolveWorkdir(workdir string) (string, error) {
+	workdir = strings.TrimSpace(workdir)
+	if workdir == "" {
+		return os.Getwd()
+	}
+	if filepath.IsAbs(workdir) {
+		return filepath.Clean(workdir), nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("获取当前工作目录失败: %w", err)
+	}
+	return filepath.Clean(filepath.Join(cwd, workdir)), nil
+}
+
+// prefixPowershellUTF8 prepends a UTF-8 encoding command for PowerShell
+// to ensure output is correctly encoded, mirroring codex-rs/shell-command/src/powershell.rs.
+func prefixPowershellUTF8(cmd *exec.Cmd) {
+	if len(cmd.Args) < 3 {
+		return
+	}
+	// The command is the last arg; prepend UTF-8 encoding directive
+	lastIdx := len(cmd.Args) - 1
+	cmd.Args[lastIdx] = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd.Args[lastIdx]
+}
+
+// friendlyHintFor returns a user-friendly hint when a command fails.
+func friendlyHintFor(command string, output string, err error) string {
+	cmdLower := strings.ToLower(command)
+	mainCmd := ""
+	cmdParts := strings.Fields(command)
+	if len(cmdParts) > 0 {
+		mainCmd = strings.ToLower(cmdParts[0])
+	}
+
+	exitCode := -1
+	if exitError, ok := err.(*exec.ExitError); ok {
+		exitCode = exitError.ExitCode()
+	}
+
+	switch {
+	case cmdLower == "pwd" && runtime.GOOS == "windows":
+		return "提示: Windows 下请使用 `cd` 查看当前目录，或 `echo %cd%`"
+	case mainCmd == "ls" && runtime.GOOS == "windows":
+		return "提示: Windows 下请使用 `dir` 查看目录内容"
+	case mainCmd == "uname" && runtime.GOOS == "windows":
+		return "提示: Windows 下请使用 `ver` 或 `systeminfo` 查看系统信息"
+	case mainCmd == "cat" && runtime.GOOS == "windows" && !strings.Contains(cmdLower, "."):
+		return "提示: Windows 下请使用 `type` 查看文件内容"
+	case exitCode == 127:
+		return "提示: 命令未找到，请检查命令拼写或确认命令是否已安装"
+	case strings.Contains(strings.ToLower(output), "permission") ||
+		strings.Contains(strings.ToLower(output), "access") && strings.Contains(strings.ToLower(output), "denied"):
+		return "提示: 权限不足，请检查是否有执行该命令的权限"
+	case strings.Contains(output, "no such file or directory") ||
+		strings.Contains(output, "cannot find the path"):
+		return "提示: 文件或目录不存在"
+	}
+	return ""
+}
+
+// GetShellEnvironmentInfo returns environment info for error messages,
+// including the detected shell type.
+func GetShellEnvironmentInfo() string {
+	shell := runtimeexecutor.DefaultUserShell()
+	var parts []string
+	parts = append(parts, fmt.Sprintf("系统类型: %s", runtime.GOOS))
+	parts = append(parts, fmt.Sprintf("Shell: %s (%s)", shell.Type, shell.Path))
+	return strings.Join(parts, "\n")
+}
+
+// extractString extracts a string value from a map, returning "" if not found.
+func extractString(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	if s, ok := value.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
 }
 
 func extractStringList(value interface{}) []string {
@@ -213,76 +394,10 @@ func extractStringList(value interface{}) []string {
 	return out
 }
 
-// isBlacklisted 检查命令是否在黑名单中
-func (b *BashTool) isBlacklisted(command string) bool {
-	cmdLower := strings.ToLower(command)
-	for _, blocked := range b.blacklist {
-		if strings.Contains(cmdLower, strings.ToLower(blocked)) {
-			return true
-		}
-	}
-	return false
-}
-
 func extractPrimaryCommand(command string) string {
 	parts := strings.Fields(strings.TrimSpace(command))
 	if len(parts) == 0 {
 		return ""
 	}
 	return parts[0]
-}
-
-// CommandExecuter 命令执行器接口
-type CommandExecuter interface {
-	Execute(ctx context.Context, command string, timeout time.Duration) (string, error)
-}
-
-// DefaultCommandExecuter 默认命令执行器
-type DefaultCommandExecuter struct{}
-
-// Execute 实现命令执行
-func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, timeout time.Duration) (string, error) {
-	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	var shellCmd []string
-	if runtime.GOOS == "windows" {
-		shellCmd = []string{"cmd", "/c", command}
-	} else {
-		shellCmd = []string{"sh", "-c", command}
-	}
-
-	cmd := exec.CommandContext(cmdCtx, shellCmd[0], shellCmd[1:]...)
-	output, err := cmd.CombinedOutput()
-
-	if err != nil {
-		if cmdCtx.Err() == context.DeadlineExceeded {
-			return string(output), fmt.Errorf("命令执行超时（超过 %v）", timeout)
-		}
-
-		// 检查常见错误并给出友好提示
-		cmdLower := strings.ToLower(command)
-		var friendlyHint string
-		mainCmd := ""
-		cmdParts := strings.Fields(command)
-		if len(cmdParts) > 0 {
-			mainCmd = strings.ToLower(cmdParts[0])
-		}
-
-		switch {
-		case cmdLower == "pwd" && runtime.GOOS == "windows":
-			friendlyHint = "提示: Windows 下请使用 `cd` 查看当前目录，或 `echo %cd%`"
-		case mainCmd == "ls" && runtime.GOOS == "windows":
-			friendlyHint = "提示: Windows 下请使用 `dir` 查看目录内容"
-		case mainCmd == "uname" && runtime.GOOS == "windows":
-			friendlyHint = "提示: Windows 下请使用 `ver` 或 `systeminfo` 查看系统信息"
-		}
-
-		if friendlyHint != "" {
-			return string(output), fmt.Errorf("命令执行失败: %w\n%s", err, friendlyHint)
-		}
-		return string(output), err
-	}
-
-	return string(output), nil
 }

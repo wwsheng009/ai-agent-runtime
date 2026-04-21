@@ -21,7 +21,11 @@ func NewExecuteShellCommandTool() *ExecuteShellCommandTool {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "要执行的 shell 命令。注意命令需与当前操作系统匹配。Windows: 'dir'查看目录，'type filename.txt'查看文件，'systeminfo'查看系统信息，'ver'查看系统版本；Linux/Mac: 'ls -la'查看目录，'cat filename.txt'查看文件，'uname -a'查看系统信息，'pwd'查看当前目录，'df -h'查看磁盘空间等",
+				"description": "要执行的 shell 命令。注意：系统会自动检测可用的 shell（Windows 优先使用 PowerShell/Core，回退到 cmd；Unix 使用用户默认 shell）。路径请使用正斜杠（如 E:/projects/foo）以兼容所有平台。",
+			},
+			"workdir": map[string]interface{}{
+				"type":        "string",
+				"description": "可选：命令执行的工作目录。绝对路径直接使用，相对路径基于当前工作目录解析。默认为当前工作目录。路径请使用正斜杠（如 E:/projects/foo）以兼容所有平台。",
 			},
 			"mutated_paths": map[string]interface{}{
 				"type":        "array",
@@ -37,8 +41,8 @@ func NewExecuteShellCommandTool() *ExecuteShellCommandTool {
 
 	return &ExecuteShellCommandTool{
 		BashTool:    NewBashTool(),
-		description: "在当前工作目录执行 shell 命令并返回输出结果。适用于查看文件、目录、系统信息等场景。请根据命令的实际用途选择合适的命令，如查看系统信息（Windows: cmd命令；Linux/Mac: uname/ls等）。",
-		version:     "1.0.0",
+		description: "在指定工作目录执行 shell 命令并返回输出结果。系统会自动检测最优 shell（Windows: PowerShell Core > PowerShell > cmd；Unix: $SHELL > zsh > bash > sh）。路径建议使用正斜杠格式（如 E:/projects/foo）以确保跨平台兼容。适用于查看文件、目录、系统信息等场景。",
+		version:     "1.1.0",
 		parameters:  parameters,
 	}
 }
