@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/stretchr/testify/require"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 func TestRuntimeManager_VersionHistoryAndRollback(t *testing.T) {
@@ -51,6 +51,15 @@ func TestValidateRolloutConfig_RequiresCandidateAndVersion(t *testing.T) {
 	cfg.Rollout.CandidateFile = "candidate.yaml"
 	err = ValidateRuntimeConfig(cfg)
 	require.NoError(t, err)
+}
+
+func TestValidateAgentConfig_AllowsNonPositiveMaxStepsAsUnlimited(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	cfg.Agent.MaxMaxSteps = 0
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.Agent.MaxMaxSteps = -3
+	require.NoError(t, ValidateRuntimeConfig(cfg))
 }
 
 func TestValidateSandboxConfig(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
@@ -16,10 +17,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimeoutput "github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/google/uuid"
 )
 
 // SessionActorConfig configures a SessionActor instance.
@@ -77,11 +77,22 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 			bus = runtimeevents.NewBus()
 		}
 	}
+	loopConfig := cfg.LoopConfig
+	if loopConfig == nil && cfg.Agent != nil {
+		if agentConfig := cfg.Agent.GetConfig(); agentConfig != nil {
+			loopConfig = &agent.LoopReActConfig{
+				MaxSteps:        agent.NormalizeMaxSteps(agentConfig.MaxSteps),
+				EnableThought:   true,
+				EnableToolCalls: true,
+				Temperature:     agentConfig.Temperature,
+			}
+		}
+	}
 	actor := &SessionActor{
 		id:              sessionID,
 		agent:           cfg.Agent,
 		llmRuntime:      cfg.LLMRuntime,
-		loopConfig:      cfg.LoopConfig,
+		loopConfig:      loopConfig,
 		sessionStore:    cfg.SessionStore,
 		stateStore:      cfg.StateStore,
 		eventStore:      cfg.EventStore,
@@ -1036,11 +1047,17 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			"resume":   resume,
 			"success":  execErr == nil && result != nil && result.Success,
 			"steps":    resultSteps(result),
-			"error":    errorString(execErr),
+			"error":    firstNonEmptyError(execErr, result),
 			"duration": durationMillis(result),
 		}
 		if result != nil {
 			payload["trace_id"] = result.TraceID
+			if result.LimitReached {
+				payload["limit_reached"] = true
+				if result.StepLimit > 0 {
+					payload["step_limit"] = result.StepLimit
+				}
+			}
 		}
 		if hookMgr := a.agent.GetHookManager(); hookMgr != nil {
 			hookPayload := map[string]interface{}{
@@ -1048,7 +1065,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				"turn_id":    turnID,
 				"resume":     resume,
 				"success":    execErr == nil && result != nil && result.Success,
-				"error":      errorString(execErr),
+				"error":      firstNonEmptyError(execErr, result),
 			}
 			if result != nil {
 				hookPayload["trace_id"] = result.TraceID
@@ -1062,14 +1079,26 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			Payload:   payload,
 		})
 		if result != nil && strings.TrimSpace(result.Output) != "" {
+			payload := map[string]interface{}{
+				"turn_id": turnID,
+				"content": result.Output,
+			}
+			if result.LimitReached {
+				payload["limit_reached"] = true
+				if result.StepLimit > 0 {
+					payload["step_limit"] = result.StepLimit
+				}
+			}
+			if result.Reasoning != nil {
+				if encoded := result.Reasoning.ToMap(); len(encoded) > 0 {
+					payload["reasoning"] = encoded
+				}
+			}
 			a.publish(runtimeevents.Event{
 				Type:      EventAssistantMessage,
 				SessionID: a.id,
 				TraceID:   resultTraceID(result, turnID),
-				Payload: map[string]interface{}{
-					"turn_id": turnID,
-					"content": result.Output,
-				},
+				Payload:   payload,
 			})
 		}
 		if reply != nil {
@@ -1928,4 +1957,14 @@ func errorString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func firstNonEmptyError(err error, result *agent.Result) string {
+	if value := errorString(err); strings.TrimSpace(value) != "" {
+		return value
+	}
+	if result == nil {
+		return ""
+	}
+	return strings.TrimSpace(result.Error)
 }

@@ -210,7 +210,7 @@ func NewRuntimeManager(filePath string) *RuntimeManager {
 func DefaultRuntimeConfig() *RuntimeConfig {
 	return &RuntimeConfig{
 		Agent: AgentConfig{
-			MaxMaxSteps:         10,
+			MaxMaxSteps:         0,
 			DefaultProvider:     "",
 			DefaultModel:        "claude-3-5-sonnet",
 			EnableMemory:        true,
@@ -719,9 +719,6 @@ func ValidateContextConfig(config *ContextConfig) error {
 
 // ValidateAgentConfig 验证 Agent 配置
 func ValidateAgentConfig(config *AgentConfig) error {
-	if config.MaxMaxSteps <= 0 {
-		return errors.New(errors.ErrValidationFailed, "maxSteps must be positive")
-	}
 	if config.DefaultModel == "" {
 		return errors.New(errors.ErrValidationFailed, "defaultModel cannot be empty")
 	}

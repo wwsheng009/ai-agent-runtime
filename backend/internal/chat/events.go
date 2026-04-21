@@ -6,6 +6,7 @@ const (
 	EventSessionEnd          = "session_end"
 	EventSessionInterrupted  = "session_interrupted"
 	EventAssistantDelta      = "assistant_delta"
+	EventAssistantReasoning  = "assistant_reasoning"
 	EventAssistantMessage    = "assistant_message"
 	EventLLMRequestStarted   = "llm_request_started"
 	EventLLMRequestFinished  = "llm_request_finished"

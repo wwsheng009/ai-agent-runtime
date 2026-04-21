@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
@@ -12,11 +14,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
@@ -71,6 +71,108 @@ func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
 	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
+}
+
+func TestSessionActorSubmitPrompt_EmitsLimitNoticeToSessionAndEvents(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "test-step-limit-model",
+		MaxRetries:   0,
+	})
+	provider := &runMetaSequenceProvider{
+		name: "test-step-limit-model",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "先调用工具。",
+				Model:   "test-step-limit-model",
+				ToolCalls: []types.ToolCall{
+					{
+						ID:   "tool_limit",
+						Name: "team_echo",
+						Args: map[string]interface{}{"message": "hello"},
+					},
+				},
+			},
+			{
+				Content: "这条回复不应出现。",
+				Model:   "test-step-limit-model",
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:         "actor-step-limit-test",
+		Model:        provider.Name(),
+		MaxSteps:     1,
+		SystemPrompt: "You are a helpful assistant.",
+	}, &runMetaCapturingMCPManager{}, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	result, err := actor.SubmitPrompt(ctx, "Start the flow.", &team.RunMeta{
+		Team: &team.TeamRunMeta{
+			TeamID:        "team-limit",
+			AgentID:       "mate-limit",
+			CurrentTaskID: "task-limit",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.True(t, result.LimitReached)
+	require.Contains(t, result.Output, "maxSteps=1")
+
+	updated, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.NotEmpty(t, updated.History)
+	require.Equal(t, "assistant", updated.History[len(updated.History)-1].Role)
+	require.Equal(t, result.Output, updated.History[len(updated.History)-1].Content)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	var (
+		sawAssistantMessage bool
+		sawSessionEnd       bool
+	)
+	for _, event := range events {
+		switch event.Type {
+		case EventAssistantMessage:
+			if content, _ := event.Payload["content"].(string); content == result.Output {
+				limitReached, _ := event.Payload["limit_reached"].(bool)
+				stepLimit, _ := event.Payload["step_limit"].(int)
+				require.True(t, limitReached)
+				require.Equal(t, 1, stepLimit)
+				sawAssistantMessage = true
+			}
+		case EventSessionEnd:
+			limitReached, _ := event.Payload["limit_reached"].(bool)
+			stepLimit, _ := event.Payload["step_limit"].(int)
+			success, _ := event.Payload["success"].(bool)
+			if limitReached && stepLimit == 1 {
+				require.False(t, success)
+				sawSessionEnd = true
+			}
+		}
+	}
+	require.True(t, sawAssistantMessage)
+	require.True(t, sawSessionEnd)
 }
 
 func TestSessionActorStopReturnsWhenActorNeverStarted(t *testing.T) {
