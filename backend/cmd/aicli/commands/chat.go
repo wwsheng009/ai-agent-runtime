@@ -10,19 +10,20 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
-	"github.com/spf13/cobra"
 )
 
 const chatSessionMetaLabelWidth = 18
@@ -95,14 +96,19 @@ type ChatSession struct {
 }
 
 type chatRuntimeHTTPCapture struct {
-	mu                  sync.Mutex
-	lastSource          string
-	lastProvider        string
-	lastProtocol        string
-	lastModel           string
-	lastResponseStatus  int
-	lastResponsePreview string
-	lastError           string
+	mu                   sync.Mutex
+	lastSource           string
+	lastProvider         string
+	lastProtocol         string
+	lastModel            string
+	lastResponseStatus   int
+	lastResponsePreview  string
+	lastError            string
+	artifactDir          string
+	lastRequestArtifact  string
+	lastResponseArtifact string
+	artifactCounter      int
+	pendingArtifactSeq   int
 }
 
 // Interrupt 中断当前操作
@@ -492,7 +498,7 @@ func printSessionInfo(session *ChatSession) {
 		}
 		printChatSessionMetaRow("Profile:", profileValue)
 	}
-	if session.Provider.GetProtocol() == "codex" && session.ReasoningEffort != "" {
+	if session.ReasoningEffort != "" {
 		printChatSessionMetaRow("Reasoning Effort:", session.ReasoningEffort)
 	}
 	if session.LocalRuntimeHost != nil {
@@ -531,22 +537,37 @@ func printChatSessionMetaRow(label, value string) {
 func resolveChatReasoningEffort(protocol, raw string, explicit bool) (string, string, error) {
 	protocol = strings.TrimSpace(protocol)
 	effort := adapter.NormalizeCodexReasoningEffort(raw)
-	if strings.EqualFold(protocol, "codex") {
-		if effort == "" {
-			return "medium", "", nil
+	if !explicit && effort == "" {
+		if chatProtocolSupportsReasoningEffort(protocol) {
+			return chatDefaultReasoningEffort(protocol), "", nil
 		}
-		if !adapter.IsValidCodexReasoningEffort(effort) {
-			return "", "", fmt.Errorf("无效的 reasoning-effort: %s（可选值: low|medium|high|xhigh）", raw)
-		}
-		return effort, "", nil
-	}
-	if !explicit || effort == "" {
 		return "", "", nil
 	}
 	if !adapter.IsValidCodexReasoningEffort(effort) {
 		return "", "", fmt.Errorf("无效的 reasoning-effort: %s（可选值: low|medium|high|xhigh）", raw)
 	}
-	return "", fmt.Sprintf("Warning: reasoning-effort 仅对 codex 协议生效，当前协议为 %s，已忽略", protocol), nil
+	if !chatProtocolSupportsReasoningEffort(protocol) {
+		return "", fmt.Sprintf("Warning: reasoning-effort 当前协议未启用，protocol=%s，已忽略", protocol), nil
+	}
+	return effort, "", nil
+}
+
+func chatProtocolSupportsReasoningEffort(protocol string) bool {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "codex", "openai", "anthropic", "gemini":
+		return true
+	default:
+		return false
+	}
+}
+
+func chatDefaultReasoningEffort(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "codex", "openai", "anthropic", "gemini":
+		return "medium"
+	default:
+		return ""
+	}
 }
 
 func resolvedChatSkillsMode(session *ChatSession, binding *skillsRuntimeBinding) string {
@@ -673,21 +694,25 @@ func shouldPrintChatSessionPreamble(session *ChatSession) bool {
 }
 
 type chatResponsePayload struct {
-	Response            string `json:"response"`
-	Provider            string `json:"provider,omitempty"`
-	Protocol            string `json:"protocol,omitempty"`
-	Model               string `json:"model,omitempty"`
-	Stream              bool   `json:"stream"`
-	SessionID           string `json:"session_id,omitempty"`
-	SessionPath         string `json:"session_path,omitempty"`
-	SessionStore        string `json:"session_store,omitempty"`
-	SessionState        string `json:"session_state,omitempty"`
-	QueuedInputCount    int    `json:"queued_input_count,omitempty"`
-	QueuedInputDraining bool   `json:"queued_input_draining,omitempty"`
-	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
-	TotalTokens         int    `json:"total_tokens,omitempty"`
-	ResponseTimeMs      int64  `json:"average_response_time_ms,omitempty"`
-	LogPath             string `json:"log_path,omitempty"`
+	Response             string `json:"response"`
+	Provider             string `json:"provider,omitempty"`
+	Protocol             string `json:"protocol,omitempty"`
+	Model                string `json:"model,omitempty"`
+	Stream               bool   `json:"stream"`
+	SessionID            string `json:"session_id,omitempty"`
+	SessionPath          string `json:"session_path,omitempty"`
+	SessionStore         string `json:"session_store,omitempty"`
+	SessionState         string `json:"session_state,omitempty"`
+	QueuedInputCount     int    `json:"queued_input_count,omitempty"`
+	QueuedInputDraining  bool   `json:"queued_input_draining,omitempty"`
+	ReasoningEffort      string `json:"reasoning_effort,omitempty"`
+	TotalTokens          int    `json:"total_tokens,omitempty"`
+	ResponseTimeMs       int64  `json:"average_response_time_ms,omitempty"`
+	LogPath              string `json:"log_path,omitempty"`
+	DebugLogPath         string `json:"debug_log_path,omitempty"`
+	HTTPArtifactDir      string `json:"http_artifact_dir,omitempty"`
+	LastHTTPRequestPath  string `json:"last_http_request_path,omitempty"`
+	LastHTTPResponsePath string `json:"last_http_response_path,omitempty"`
 }
 
 func buildChatResponsePayload(session *ChatSession, response string) chatResponsePayload {
@@ -714,7 +739,14 @@ func buildChatResponsePayload(session *ChatSession, response string) chatRespons
 			payload.TotalTokens = summary.TotalTokens
 			payload.ResponseTimeMs = summary.AverageResponseTimeMs
 		}
-		payload.LogPath = session.Logger.SessionLogPath()
+		payload.LogPath = currentChatLogFile(session)
+		payload.DebugLogPath = currentDebugLogFile(session)
+	}
+	payload.HTTPArtifactDir = currentRuntimeHTTPArtifactDir(session)
+	if session.runtimeHTTPCapture != nil {
+		snapshot := session.runtimeHTTPCapture.Snapshot()
+		payload.LastHTTPRequestPath = snapshot.RequestArtifactPath
+		payload.LastHTTPResponsePath = snapshot.ResponseArtifactPath
 	}
 	return payload
 }
@@ -750,8 +782,22 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 	sigCountChan := make(chan int, 1)
 	setupSignalHandler(session, sigChan, sigCountChan)
 
+	// 监听二次 Ctrl+C，触发优雅退出
+	var shouldExit atomic.Bool
+	go func() {
+		for range sigCountChan {
+		}
+		shouldExit.Store(true)
+	}()
+
 	// 聊天循环
 	for {
+		// 检查二次终止信号
+		if shouldExit.Load() {
+			fmt.Println()
+			break
+		}
+
 		// 重置中断状态（新的输入开始）
 		session.ResetInterrupt()
 		// 创建新的可取消上下文用于本次操作
