@@ -10,8 +10,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 type sessionActorClient struct {
@@ -547,10 +547,10 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
 		agentConfig.SystemPrompt = strings.TrimSpace(profileState.PromptText)
 	}
-	if selectedConfig != nil && selectedConfig.Agent.MaxMaxSteps > 0 {
-		agentConfig.MaxSteps = selectedConfig.Agent.MaxMaxSteps
-	} else if agentConfig.MaxSteps == 0 {
-		agentConfig.MaxSteps = 10
+	if agentConfig.MaxSteps < 0 {
+		agentConfig.MaxSteps = 0
+	} else if agentConfig.MaxSteps == 0 && selectedConfig != nil {
+		agentConfig.MaxSteps = agent.NormalizeMaxSteps(selectedConfig.Agent.MaxMaxSteps)
 	}
 	if selectedConfig != nil {
 		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig)
@@ -677,4 +677,3 @@ func (h *Handler) getSessionToolReceiptStore() chat.ToolReceiptStore {
 	receiptStore, _ := store.(chat.ToolReceiptStore)
 	return receiptStore
 }
-

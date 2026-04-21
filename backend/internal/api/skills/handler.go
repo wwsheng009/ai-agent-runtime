@@ -1275,12 +1275,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		}
 		agentConfig.Options["profile_context"] = cloneProfileContextValues(profilePack)
 	}
-	if agentConfig.MaxSteps == 0 {
-		if selectedConfig != nil && selectedConfig.Agent.MaxMaxSteps > 0 {
-			agentConfig.MaxSteps = selectedConfig.Agent.MaxMaxSteps
-		} else {
-			agentConfig.MaxSteps = 10
-		}
+	if agentConfig.MaxSteps < 0 {
+		agentConfig.MaxSteps = 0
+	} else if agentConfig.MaxSteps == 0 && selectedConfig != nil {
+		agentConfig.MaxSteps = agent.NormalizeMaxSteps(selectedConfig.Agent.MaxMaxSteps)
 	}
 
 	a := h.newAPIAgentWithRuntime(agentConfig, &agentRuntimeComponents{
@@ -3480,7 +3478,7 @@ func buildLLMResultPayload(source string, response *llm.LLMResponse) map[string]
 		}
 	}
 
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"kind":       "llm",
 		"source":     source,
 		"success":    true,
@@ -3491,6 +3489,10 @@ func buildLLMResultPayload(source string, response *llm.LLMResponse) map[string]
 		"reasoning":  response.Reasoning,
 		"metadata":   response.Metadata,
 	}
+	if response.ReasoningBlock != nil {
+		result["reasoning_block"] = response.ReasoningBlock.ToMap()
+	}
+	return result
 }
 
 func responseResultSource(result interface{}) string {
