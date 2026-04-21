@@ -220,7 +220,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("  /queue clear       - 清空当前排队输入")
 		fmt.Println("  /permission-mode [mode] - 查看或切换权限模式（default|accept_edits|plan|bypass_permissions）")
 		fmt.Println("  /mode [mode]       - /permission-mode 的别名")
-		fmt.Println("  /approval-reuse [mode]  - 查看或切换审批复用策略（off|team_readonly_shell）")
+		fmt.Println("  /approval-reuse [mode]  - 查看或切换审批复用策略（off|session_readonly_shell|team_readonly_shell）")
 		fmt.Println("  /yolo              - 快速切换到 permission-mode=bypass_permissions")
 		fmt.Println("  /functions, /catalog - 显示当前已加载的 builtin tools 和 skill functions")
 		fmt.Println("  /functions --json  - 以 JSON 输出当前 catalog")

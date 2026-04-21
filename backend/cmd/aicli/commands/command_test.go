@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
-	"github.com/spf13/cobra"
 )
 
 func TestFormatFunctionCatalogSummary_IncludesBuiltinAndSkillGroups(t *testing.T) {
@@ -344,16 +344,16 @@ func TestResolveChatReasoningEffort_InvalidValue(t *testing.T) {
 	}
 }
 
-func TestResolveChatReasoningEffort_NonCodexProtocol(t *testing.T) {
+func TestResolveChatReasoningEffort_OpenAIProtocol(t *testing.T) {
 	effort, warning, err := resolveChatReasoningEffort("openai", "medium", true)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
-	if effort != "" {
-		t.Fatalf("expected empty effort for non-codex protocol, got %q", effort)
+	if effort != "medium" {
+		t.Fatalf("expected medium effort for openai protocol, got %q", effort)
 	}
-	if !strings.Contains(warning, "仅对 codex 协议生效") {
-		t.Fatalf("unexpected warning: %q", warning)
+	if warning != "" {
+		t.Fatalf("expected empty warning, got %q", warning)
 	}
 }
 
@@ -370,7 +370,7 @@ func TestResolveChatReasoningEffort_DefaultsToMediumForCodex(t *testing.T) {
 	}
 }
 
-func TestResolveChatReasoningEffort_IgnoresImplicitDefaultForNonCodex(t *testing.T) {
+func TestResolveChatReasoningEffort_DefaultsToMediumForOpenAI(t *testing.T) {
 	effort, warning, err := resolveChatReasoningEffort("openai", "", false)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
@@ -378,8 +378,8 @@ func TestResolveChatReasoningEffort_IgnoresImplicitDefaultForNonCodex(t *testing
 	if warning != "" {
 		t.Fatalf("expected empty warning, got %q", warning)
 	}
-	if effort != "" {
-		t.Fatalf("expected empty effort, got %q", effort)
+	if effort != "medium" {
+		t.Fatalf("expected medium effort, got %q", effort)
 	}
 }
 
@@ -433,17 +433,22 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	}
 	queue.lines <- chatQueuedInput{Text: "queued-1\n", Source: "stdin"}
 	queue.lines <- chatQueuedInput{Text: "queued-2\n", Source: "stdin"}
+	runtimeCapture := &chatRuntimeHTTPCapture{}
+	runtimeCapture.SetArtifactDir(logger.RuntimeHTTPArtifactDir())
+	runtimeCapture.RecordArtifactPath("request", filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_request_gateway_client.json"))
+	runtimeCapture.RecordArtifactPath("response", filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_response_gateway_client.json"))
 
 	payload := buildChatResponsePayload(&ChatSession{
-		ProviderName:     "codex_ee",
-		Provider:         config.Provider{Protocol: "codex"},
-		Model:            "gpt-5.2-code",
-		Stream:           false,
-		ReasoningEffort:  "medium",
-		Logger:           logger,
-		SessionDir:       sessionDir,
-		InputQueue:       queue,
-		queuedInputDrain: true,
+		ProviderName:       "codex_ee",
+		Provider:           config.Provider{Protocol: "codex"},
+		Model:              "gpt-5.2-code",
+		Stream:             false,
+		ReasoningEffort:    "medium",
+		Logger:             logger,
+		SessionDir:         sessionDir,
+		InputQueue:         queue,
+		queuedInputDrain:   true,
+		runtimeHTTPCapture: runtimeCapture,
 		RuntimeSession: &runtimechat.Session{
 			ID:    "session-123",
 			State: runtimechat.StateActive,
@@ -474,6 +479,18 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	if !strings.Contains(payload.LogPath, "chat_codex_ee_codex_gpt-5.2-code_") {
 		t.Fatalf("unexpected payload log path: %+v", payload)
 	}
+	if payload.DebugLogPath != logger.DebugLogPath() {
+		t.Fatalf("unexpected payload debug log path: %+v", payload)
+	}
+	if payload.HTTPArtifactDir != logger.RuntimeHTTPArtifactDir() {
+		t.Fatalf("unexpected payload HTTP artifact dir: %+v", payload)
+	}
+	if !strings.HasSuffix(payload.LastHTTPRequestPath, "001_request_gateway_client.json") {
+		t.Fatalf("unexpected payload last request artifact: %+v", payload)
+	}
+	if !strings.HasSuffix(payload.LastHTTPResponsePath, "001_response_gateway_client.json") {
+		t.Fatalf("unexpected payload last response artifact: %+v", payload)
+	}
 }
 
 func TestResolveChatOutputFormat(t *testing.T) {
@@ -503,6 +520,15 @@ func TestChatLoggerSessionLogPath(t *testing.T) {
 	path := logger.SessionLogPath()
 	if !strings.Contains(path, "chat_codex_ee_codex_gpt-5.2-code_") {
 		t.Fatalf("unexpected session log path: %s", path)
+	}
+	if sessionDir := logger.SessionDirPath(); sessionDir == "" || filepath.Dir(path) != sessionDir {
+		t.Fatalf("unexpected session dir path: %q (log path %q)", sessionDir, path)
+	}
+	if debugPath := logger.DebugLogPath(); debugPath == "" || filepath.Dir(debugPath) != logger.SessionDirPath() {
+		t.Fatalf("unexpected debug log path: %q", debugPath)
+	}
+	if artifactDir := logger.RuntimeHTTPArtifactDir(); artifactDir == "" || filepath.Dir(artifactDir) != logger.SessionDirPath() {
+		t.Fatalf("unexpected runtime HTTP artifact dir: %q", artifactDir)
 	}
 
 	summary := logger.CurrentSummary()
@@ -553,7 +579,7 @@ func TestParseChatCommandOptions(t *testing.T) {
 	cmd.Flags().Int("skills-top-k", 0, "")
 	cmd.Flags().String("skills-mode", "auto", "")
 	cmd.Flags().Bool("skills-debug", false, "")
-	cmd.Flags().String("approval-reuse", "team_readonly_shell", "")
+	cmd.Flags().String("approval-reuse", "session_readonly_shell", "")
 	cmd.Flags().String("output", "", "")
 	cmd.Flags().Bool("json", false, "")
 	cmd.Flags().Bool("envelope", false, "")
@@ -583,7 +609,7 @@ func TestParseChatCommandOptions(t *testing.T) {
 	if opts.SessionFilter.Provider != "codex_ee" {
 		t.Fatalf("unexpected session filter: %+v", opts.SessionFilter)
 	}
-	if opts.ApprovalReuseMode != chatApprovalReuseTeamReadOnlyShell {
+	if opts.ApprovalReuseMode != chatApprovalReuseSessionReadOnlyShell {
 		t.Fatalf("unexpected approval reuse mode: %+v", opts)
 	}
 }
@@ -591,7 +617,7 @@ func TestParseChatCommandOptions(t *testing.T) {
 func TestHandleCommand_PermissionModeAndApprovalReuse(t *testing.T) {
 	session := &ChatSession{
 		PermissionMode:    "default",
-		ApprovalReuseMode: chatApprovalReuseTeamReadOnlyShell,
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
 		ActiveTeam:        &chatTeamBinding{TeamID: "team-1", AgentID: "lead"},
 	}
 

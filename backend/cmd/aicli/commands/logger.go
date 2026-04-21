@@ -313,12 +313,38 @@ func (cl *ChatLogger) CurrentSummary() *ChatSessionSummary {
 	return &cloned
 }
 
+// SessionDirPath 返回当前聊天日志会话目录。
+func (cl *ChatLogger) SessionDirPath() string {
+	if cl == nil || cl.logDir == "" || cl.sessionLog == nil {
+		return ""
+	}
+	return filepath.Join(cl.logDir, cl.sessionID)
+}
+
 // SessionLogPath 返回当前会话日志路径。
 func (cl *ChatLogger) SessionLogPath() string {
 	if cl == nil || cl.logDir == "" || cl.sessionLog == nil {
 		return ""
 	}
 	return cl.buildLogPath()
+}
+
+// DebugLogPath 返回当前会话调试日志路径。
+func (cl *ChatLogger) DebugLogPath() string {
+	sessionDir := cl.SessionDirPath()
+	if sessionDir == "" {
+		return ""
+	}
+	return filepath.Join(sessionDir, "debug.log")
+}
+
+// RuntimeHTTPArtifactDir 返回 runtime HTTP artifact 目录。
+func (cl *ChatLogger) RuntimeHTTPArtifactDir() string {
+	sessionDir := cl.SessionDirPath()
+	if sessionDir == "" {
+		return ""
+	}
+	return filepath.Join(sessionDir, "runtime-http")
 }
 
 // updateSummary 更新会话摘要

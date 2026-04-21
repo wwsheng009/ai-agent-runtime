@@ -228,7 +228,7 @@ func main() {
 	chatCmd.Flags().String("skills-mode", "auto", "aicli chat 的 skills 暴露模式（auto|prefer|only）")
 	chatCmd.Flags().Bool("skills-debug", false, "打印当前请求的 skill route 候选、暴露结果与模式")
 	chatCmd.Flags().String("permission-mode", "default", "本地 actor/team 运行的权限模式（default|accept_edits|plan|bypass_permissions）")
-	chatCmd.Flags().String("approval-reuse", "team_readonly_shell", "本地 actor/team 审批复用策略（off|team_readonly_shell）")
+	chatCmd.Flags().String("approval-reuse", "session_readonly_shell", "本地 actor/team 审批复用策略（off|session_readonly_shell|team_readonly_shell）")
 	chatCmd.Flags().Bool("yolo", false, "快捷模式：等价于 --permission-mode bypass_permissions")
 	rootCmd.AddCommand(chatCmd)
 

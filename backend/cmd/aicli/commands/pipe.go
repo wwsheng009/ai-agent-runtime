@@ -15,10 +15,10 @@ import (
 	"syscall"
 	"time"
 
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/spf13/cobra"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 )
 
 // PipeSession 管道会话状态
@@ -327,7 +327,7 @@ func sendPipeRequest(session *PipeSession, message string, stream bool) (*pipeCo
 		if err != nil {
 			return nil, fmt.Errorf("读取响应失败: %w", err)
 		}
-		assistantMsg, handleErr := session.Adapter.HandleResponse(false, bytes.NewReader(body), nil)
+		assistantMsg, handleErr := session.Adapter.HandleResponse(false, bytes.NewReader(body), adapter.StreamCallbacks{})
 		if handleErr == nil {
 			if content, ok := assistantMsg["content"].(string); ok && strings.TrimSpace(content) != "" {
 				result.Response = content
