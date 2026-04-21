@@ -2,7 +2,11 @@ package adapter
 
 import (
 	"strings"
+
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+const assistantReasoningDetailsKey = "reasoning_details"
 
 // reasoningModels 推理模型列表
 var reasoningModels = []string{
@@ -51,6 +55,22 @@ func extractReasoningContent(result map[string]interface{}) string {
 	}
 
 	return ""
+}
+
+func attachReasoningBlock(msg map[string]interface{}, reasoning *runtimetypes.ReasoningBlock) map[string]interface{} {
+	if len(msg) == 0 || reasoning == nil {
+		return msg
+	}
+	if strings.TrimSpace(reasoning.DisplayText()) == "" && strings.TrimSpace(reasoning.OpaqueState) == "" && len(reasoning.Metadata) == 0 {
+		return msg
+	}
+	if display := strings.TrimSpace(reasoning.DisplayText()); display != "" {
+		msg["reasoning_content"] = display
+	}
+	if encoded := reasoning.ToMap(); len(encoded) > 0 {
+		msg[assistantReasoningDetailsKey] = encoded
+	}
+	return msg
 }
 
 // checkFinishReason 检查完成原因

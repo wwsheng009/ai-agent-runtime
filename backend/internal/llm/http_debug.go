@@ -13,9 +13,11 @@ type HTTPDebugEvent struct {
 	URL                 string `json:"url,omitempty"`
 	RequestBody         string `json:"request_body,omitempty"`
 	RequestBodyBytes    int    `json:"request_body_bytes,omitempty"`
+	RequestBodyRaw      []byte `json:"-"`
 	ResponseStatusCode  int    `json:"response_status_code,omitempty"`
 	ResponseBodyPreview string `json:"response_body_preview,omitempty"`
 	ResponseBodyBytes   int    `json:"response_body_bytes,omitempty"`
+	ResponseBodyRaw     []byte `json:"-"`
 	Error               string `json:"error,omitempty"`
 }
 
@@ -51,4 +53,11 @@ func truncateHTTPDebugText(text string, maxBytes int) string {
 		return text
 	}
 	return text[:maxBytes]
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

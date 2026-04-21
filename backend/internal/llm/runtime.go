@@ -63,12 +63,13 @@ type LLMRequest struct {
 
 // LLMResponse LLM 响应
 type LLMResponse struct {
-	Content   string                 `json:"content" yaml:"content"`
-	ToolCalls []types.ToolCall       `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
-	Usage     *types.TokenUsage      `json:"usage,omitempty" yaml:"usage,omitempty"`
-	Model     string                 `json:"model" yaml:"model"`
-	Reasoning string                 `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Content        string                 `json:"content" yaml:"content"`
+	ToolCalls      []types.ToolCall       `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
+	Usage          *types.TokenUsage      `json:"usage,omitempty" yaml:"usage,omitempty"`
+	Model          string                 `json:"model" yaml:"model"`
+	Reasoning      string                 `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
+	ReasoningBlock *types.ReasoningBlock  `json:"reasoning_block,omitempty" yaml:"reasoning_block,omitempty"`
+	Metadata       map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 // StreamChunk 流式响应块

@@ -112,6 +112,7 @@ type Choice struct {
 type MessageDelta struct {
 	Role      string     `json:"role,omitempty"`
 	Content   string     `json:"content,omitempty"`
+	Reasoning string     `json:"reasoning,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
@@ -203,6 +204,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 		URL:              url,
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
+		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
 	})
 
 	// 创建 HTTP 请求
@@ -255,6 +257,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 			ResponseStatusCode:  resp.StatusCode,
 			ResponseBodyBytes:   len(body),
 			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
+			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 		})
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
@@ -274,23 +277,39 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 		ResponseStatusCode:  resp.StatusCode,
 		ResponseBodyBytes:   len(body),
 		ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
+		ResponseBodyRaw:     append([]byte(nil), body...),
 	})
 
 	// 使用 adapter 处理响应
-	onContent := func(content string) {
-		if !request.Stream || content == "" {
-			return
-		}
-		reportStreamChunk(ctx, StreamChunk{
-			Type:    EventTypeText,
-			Content: content,
-			Metadata: map[string]interface{}{
-				"provider": p.config.Type,
-				"model":    adapterRequest.Model,
-			},
-		})
+	callbacks := adapter.StreamCallbacks{
+		OnText: func(content string) {
+			if !request.Stream || content == "" {
+				return
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:    EventTypeText,
+				Content: content,
+				Metadata: map[string]interface{}{
+					"provider": p.config.Type,
+					"model":    adapterRequest.Model,
+				},
+			})
+		},
+		OnReasoning: func(reasoning string) {
+			if !request.Stream || reasoning == "" {
+				return
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:    EventTypeReasoning,
+				Content: reasoning,
+				Metadata: map[string]interface{}{
+					"provider": p.config.Type,
+					"model":    adapterRequest.Model,
+				},
+			})
+		},
 	}
-	assistantMsg, err := p.adapter.HandleResponse(request.Stream, bytes.NewReader(body), onContent)
+	assistantMsg, err := p.adapter.HandleResponse(request.Stream, bytes.NewReader(body), callbacks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to handle response: %w", err)
 	}
@@ -338,8 +357,13 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 		}
 	}
 
-	// 提取 reasoning_content
-	if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
+	if reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg); reasoningBlock != nil {
+		response.Choices[0].Message.Reasoning = reasoningBlock.DisplayText()
+		if response.Metadata == nil {
+			response.Metadata = make(map[string]interface{})
+		}
+		response.Metadata[assistantReasoningDetailsKey] = reasoningBlock.ToMap()
+	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
 		response.Choices[0].Message.Reasoning = reasoning
 	}
 
@@ -370,6 +394,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 		URL:              url,
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
+		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
 	})
 
 	// 创建 HTTP 请求
@@ -422,32 +447,68 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 			ResponseStatusCode:  resp.StatusCode,
 			ResponseBodyBytes:   len(body),
 			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
+			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 		})
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	// 使用 adapter 处理流式响应
-	onContent := func(content string) {
-		if onResponse != nil && content != "" {
-			onResponse(ChatChunk{
-				ID:      fmt.Sprintf("chat_%d", time.Now().Unix()),
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   request.Model,
-				Choices: []ChoiceChunk{
-					{
-						Index: 0,
-						Delta: MessageDelta{
-							Content: content,
+	callbacks := adapter.StreamCallbacks{
+		OnText: func(content string) {
+			if onResponse != nil && content != "" {
+				onResponse(ChatChunk{
+					ID:      fmt.Sprintf("chat_%d", time.Now().Unix()),
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   request.Model,
+					Choices: []ChoiceChunk{
+						{
+							Index: 0,
+							Delta: MessageDelta{
+								Content: content,
+							},
 						},
 					},
-				},
-			})
-		}
+				})
+			}
+		},
+		OnReasoning: func(reasoning string) {
+			if onResponse != nil && reasoning != "" {
+				onResponse(ChatChunk{
+					ID:      fmt.Sprintf("chat_%d", time.Now().Unix()),
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   request.Model,
+					Choices: []ChoiceChunk{
+						{
+							Index: 0,
+							Delta: MessageDelta{
+								Reasoning: reasoning,
+							},
+						},
+					},
+				})
+			}
+		},
 	}
 
-	assistantMsg, err := p.adapter.HandleResponse(true, resp.Body, onContent)
+	var responseBuffer bytes.Buffer
+	assistantMsg, err := p.adapter.HandleResponse(true, io.TeeReader(resp.Body, &responseBuffer), callbacks)
+	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
+	reportHTTPDebug(ctx, HTTPDebugEvent{
+		Source:              "provider_wrapper",
+		Phase:               "response",
+		Protocol:            p.config.Type,
+		Model:               adapterRequest.Model,
+		Method:              http.MethodPost,
+		URL:                 url,
+		ResponseStatusCode:  resp.StatusCode,
+		ResponseBodyBytes:   len(responseBody),
+		ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
+		ResponseBodyRaw:     responseBody,
+		Error:               errorString(err),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to handle stream response: %w", err)
 	}
@@ -556,6 +617,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		URL:              url,
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
+		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
 	})
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
@@ -604,25 +666,56 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			ResponseStatusCode:  resp.StatusCode,
 			ResponseBodyBytes:   len(body),
 			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
+			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 		})
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	onContent := func(content string) {
-		if content == "" {
-			return
-		}
-		reportStreamChunk(ctx, StreamChunk{
-			Type:    EventTypeText,
-			Content: content,
-			Metadata: map[string]interface{}{
-				"provider": p.config.Type,
-				"model":    adapterRequest.Model,
-			},
-		})
+	callbacks := adapter.StreamCallbacks{
+		OnText: func(content string) {
+			if content == "" {
+				return
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:    EventTypeText,
+				Content: content,
+				Metadata: map[string]interface{}{
+					"provider": p.config.Type,
+					"model":    adapterRequest.Model,
+				},
+			})
+		},
+		OnReasoning: func(reasoning string) {
+			if reasoning == "" {
+				return
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:    EventTypeReasoning,
+				Content: reasoning,
+				Metadata: map[string]interface{}{
+					"provider": p.config.Type,
+					"model":    adapterRequest.Model,
+				},
+			})
+		},
 	}
-	assistantMsg, err := p.adapter.HandleResponse(true, resp.Body, onContent)
+	var responseBuffer bytes.Buffer
+	assistantMsg, err := p.adapter.HandleResponse(true, io.TeeReader(resp.Body, &responseBuffer), callbacks)
+	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
+	reportHTTPDebug(ctx, HTTPDebugEvent{
+		Source:              "provider_wrapper",
+		Phase:               "response",
+		Protocol:            p.config.Type,
+		Model:               adapterRequest.Model,
+		Method:              http.MethodPost,
+		URL:                 url,
+		ResponseStatusCode:  resp.StatusCode,
+		ResponseBodyBytes:   len(responseBody),
+		ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
+		ResponseBodyRaw:     responseBody,
+		Error:               errorString(err),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to handle stream response: %w", err)
 	}
@@ -666,7 +759,13 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			}
 		}
 	}
-	if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
+	if reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg); reasoningBlock != nil {
+		response.Choices[0].Message.Reasoning = reasoningBlock.DisplayText()
+		if response.Metadata == nil {
+			response.Metadata = make(map[string]interface{})
+		}
+		response.Metadata[assistantReasoningDetailsKey] = reasoningBlock.ToMap()
+	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
 		response.Choices[0].Message.Reasoning = reasoning
 	}
 	return p.toLLMResponse(response), nil
@@ -687,6 +786,9 @@ func (p *ProviderWrapper) Stream(ctx context.Context, req *LLMRequest) (<-chan S
 			for _, choice := range chunk.Choices {
 				if choice.Delta.Content != "" {
 					ch <- StreamChunk{Type: EventTypeText, Content: choice.Delta.Content}
+				}
+				if choice.Delta.Reasoning != "" {
+					ch <- StreamChunk{Type: EventTypeReasoning, Content: choice.Delta.Reasoning}
 				}
 				if choice.FinishReason != "" {
 					sawDone = true
@@ -827,6 +929,12 @@ func (p *ProviderWrapper) toLLMResponse(resp *ChatResponse) *LLMResponse {
 	choice := resp.Choices[0]
 	result.Content = choice.Message.Content
 	result.Reasoning = choice.Message.Reasoning
+	if reasoningBlock := types.ReasoningBlockFromMap(result.Metadata[assistantReasoningDetailsKey]); reasoningBlock != nil {
+		result.ReasoningBlock = reasoningBlock
+		if result.Reasoning == "" {
+			result.Reasoning = reasoningBlock.DisplayText()
+		}
+	}
 	if result.Model == "" {
 		result.Model = p.Name()
 	}
@@ -871,19 +979,7 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 	// 转换 Messages
 	messages := make([]map[string]interface{}, len(request.Messages))
 	for i, msg := range request.Messages {
-		messages[i] = map[string]interface{}{
-			"role":    msg.Role,
-			"content": msg.Content,
-		}
-		if len(msg.ToolCalls) > 0 {
-			messages[i]["tool_calls"] = msg.ToolCalls
-		}
-		if msg.ToolCallID != "" {
-			messages[i]["tool_call_id"] = msg.ToolCallID
-		}
-		if msg.Reasoning != "" {
-			messages[i]["reasoning_content"] = msg.Reasoning
-		}
+		messages[i] = providerMessageToAdapterMessage(msg, p.config.Type)
 	}
 
 	// 转换 Tools（从 OpenAI 嵌套格式转换为协议特定格式）
@@ -922,8 +1018,8 @@ func (p *ProviderWrapper) convertTools(tools []Tool, protocol string) interface{
 }
 
 // HandleResponse 处理 HTTP 响应
-func (p *ProviderWrapper) HandleResponse(isStream bool, respBody io.Reader, onContent func(string)) (map[string]interface{}, error) {
-	return p.adapter.HandleResponse(isStream, respBody, onContent)
+func (p *ProviderWrapper) HandleResponse(isStream bool, respBody io.Reader, callbacks adapter.StreamCallbacks) (map[string]interface{}, error) {
+	return p.adapter.HandleResponse(isStream, respBody, callbacks)
 }
 
 // buildURL 构建完整请求 URL

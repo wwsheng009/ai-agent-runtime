@@ -8,6 +8,8 @@ import (
 	"io"
 	"sort"
 	"strings"
+
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // CodexAdapter Codex (OpenAI Responses API) 协议适配器
@@ -253,7 +255,7 @@ func (a *CodexAdapter) IsReasoningModel(model string) bool {
 }
 
 // HandleResponse 处理完整响应（流式或非流式）
-func (a *CodexAdapter) HandleResponse(isStream bool, respBody io.Reader, onContent func(string)) (map[string]interface{}, error) {
+func (a *CodexAdapter) HandleResponse(isStream bool, respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
 	rawBody, err := io.ReadAll(respBody)
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
@@ -261,19 +263,19 @@ func (a *CodexAdapter) HandleResponse(isStream bool, respBody io.Reader, onConte
 
 	// 某些 Codex 网关在 stream=false 时仍会返回 SSE；这里按响应体内容自适应解析。
 	if isStream || looksLikeCodexSSEResponse(rawBody) {
-		result, err := a.handleCodexStreamResponse(bytes.NewReader(rawBody), onContent)
+		result, err := a.handleCodexStreamResponse(bytes.NewReader(rawBody), callbacks)
 		if err != nil {
 			return nil, err
 		}
 		procResult := a.ProcessResponse(result)
-		return a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), nil
+		return attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock), nil
 	}
-	result, err := a.handleCodexNonStreamResponse(bytes.NewReader(rawBody), onContent)
+	result, err := a.handleCodexNonStreamResponse(bytes.NewReader(rawBody), callbacks)
 	if err != nil {
 		return nil, err
 	}
 	procResult := a.ProcessResponse(result)
-	return a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), nil
+	return attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock), nil
 }
 
 func looksLikeCodexSSEResponse(body []byte) bool {
@@ -292,7 +294,7 @@ func looksLikeCodexSSEResponse(body []byte) bool {
 //
 //	event: response.completed
 //	data: {"type":"response.completed","response":{"id":"resp_xxx","status":"completed","stop_reason":"end_turn"}}
-func (a *CodexAdapter) handleCodexStreamResponse(respBody io.Reader, onContent func(string)) (map[string]interface{}, error) {
+func (a *CodexAdapter) handleCodexStreamResponse(respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
 	state := NewCodexStreamState()
 
 	scanner := bufio.NewScanner(respBody)
@@ -321,7 +323,7 @@ func (a *CodexAdapter) handleCodexStreamResponse(respBody io.Reader, onContent f
 				continue
 			}
 
-			a.processCodexEvent(state, currentEvent, event, onContent)
+			a.processCodexEvent(state, currentEvent, event, callbacks)
 		}
 	}
 
@@ -334,7 +336,7 @@ func (a *CodexAdapter) handleCodexStreamResponse(respBody io.Reader, onContent f
 }
 
 // processCodexEvent 处理单个 Codex 事件
-func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType string, event map[string]interface{}, onContent func(string)) {
+func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType string, event map[string]interface{}, callbacks StreamCallbacks) {
 	// 获取事件类型
 	if eventType == "" {
 		if t, ok := event["type"].(string); ok {
@@ -350,7 +352,7 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 		a.handleOutputItemAdded(state, event)
 
 	case "response.output_text.delta":
-		a.handleOutputTextDelta(state, event, onContent)
+		a.handleOutputTextDelta(state, event, callbacks)
 
 	case "response.function_call_arguments.delta":
 		a.handleFunctionCallArgumentsDelta(state, event)
@@ -359,13 +361,13 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 		a.handleReasoningSummaryPartAdded(state, event)
 
 	case "response.reasoning_summary_text.delta":
-		a.handleReasoningSummaryTextDelta(state, event)
+		a.handleReasoningSummaryTextDelta(state, event, callbacks)
 
 	case "response.reasoning_summary_part.done":
 		// 推理块结束，无需特殊处理
 
 	case "response.reasoning_text.delta":
-		a.handleReasoningTextDelta(state, event)
+		a.handleReasoningTextDelta(state, event, callbacks)
 
 	case "response.output_item.done":
 		a.handleOutputItemDone(state, event)
@@ -435,16 +437,14 @@ func (a *CodexAdapter) handleOutputItemAdded(state *CodexStreamState, event map[
 }
 
 // handleOutputTextDelta 处理 response.output_text.delta 事件
-func (a *CodexAdapter) handleOutputTextDelta(state *CodexStreamState, event map[string]interface{}, onContent func(string)) {
+func (a *CodexAdapter) handleOutputTextDelta(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
 	delta, _ := event["delta"].(string)
 	if delta == "" {
 		return
 	}
 
 	state.Content.WriteString(delta)
-	if onContent != nil {
-		onContent(delta)
-	}
+	callbacks.EmitText(delta)
 }
 
 // handleFunctionCallArgumentsDelta 处理 response.function_call_arguments.delta 事件
@@ -476,7 +476,7 @@ func (a *CodexAdapter) handleReasoningSummaryPartAdded(state *CodexStreamState, 
 }
 
 // handleReasoningSummaryTextDelta 处理 response.reasoning_summary_text.delta 事件
-func (a *CodexAdapter) handleReasoningSummaryTextDelta(state *CodexStreamState, event map[string]interface{}) {
+func (a *CodexAdapter) handleReasoningSummaryTextDelta(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
 	// 注意：使用 summary_index 而非 index
 	delta, _ := event["delta"].(string)
 	if delta == "" {
@@ -485,10 +485,11 @@ func (a *CodexAdapter) handleReasoningSummaryTextDelta(state *CodexStreamState, 
 
 	state.Reasoning.WriteString(delta)
 	state.SummaryContent.WriteString(delta)
+	callbacks.EmitReasoning(delta)
 }
 
 // handleReasoningTextDelta 处理 response.reasoning_text.delta 事件
-func (a *CodexAdapter) handleReasoningTextDelta(state *CodexStreamState, event map[string]interface{}) {
+func (a *CodexAdapter) handleReasoningTextDelta(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
 	// 注意：使用 content_index 而非 index
 	delta, _ := event["delta"].(string)
 	if delta == "" {
@@ -496,6 +497,7 @@ func (a *CodexAdapter) handleReasoningTextDelta(state *CodexStreamState, event m
 	}
 
 	state.Reasoning.WriteString(delta)
+	callbacks.EmitReasoning(delta)
 }
 
 // handleOutputItemDone 处理 response.output_item.done 事件
@@ -558,7 +560,7 @@ func (a *CodexAdapter) handleResponseIncomplete(state *CodexStreamState, event m
 }
 
 // handleCodexNonStreamResponse 处理非流式响应
-func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, onContent func(string)) (map[string]interface{}, error) {
+func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
 	var resp map[string]interface{}
 	if err := json.NewDecoder(respBody).Decode(&resp); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
@@ -610,9 +612,7 @@ func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, onConten
 							if cType == "output_text" {
 								if text, ok := cMap["text"].(string); ok {
 									content.WriteString(text)
-									if onContent != nil {
-										onContent(text)
-									}
+									callbacks.EmitText(text)
 								}
 							}
 						}
@@ -1110,6 +1110,17 @@ func (a *CodexAdapter) ProcessResponse(result map[string]interface{}) ProcessRes
 	pr := ProcessResult{
 		Content:   a.ExtractResponse(result),
 		Reasoning: a.ExtractReasoning(result),
+	}
+	if strings.TrimSpace(pr.Reasoning) != "" {
+		pr.ReasoningBlock = &runtimetypes.ReasoningBlock{
+			Format:     "openai_responses",
+			Summary:    strings.TrimSpace(pr.Reasoning),
+			Streamable: true,
+			Visibility: runtimetypes.ReasoningVisibilitySummary,
+			Metadata: map[string]interface{}{
+				"response_output_items": result[codexResponseOutputItemsKey],
+			},
+		}
 	}
 
 	if tc, ok := result["tool_calls"].([]map[string]interface{}); ok {

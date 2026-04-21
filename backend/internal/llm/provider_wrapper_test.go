@@ -414,9 +414,11 @@ func TestProviderWrapper_CallReportsHTTPDebugPayload(t *testing.T) {
 	assert.Contains(t, events[0].RequestBody, `"model":"gpt-5.2-codex"`)
 	assert.Contains(t, events[0].RequestBody, `"input"`)
 	assert.Contains(t, events[0].RequestBody, `"hello"`)
+	assert.Contains(t, string(events[0].RequestBodyRaw), `"hello"`)
 	assert.Equal(t, "response", events[1].Phase)
 	assert.Equal(t, 200, events[1].ResponseStatusCode)
 	assert.Contains(t, events[1].ResponseBodyPreview, `"resp_ok_1"`)
+	assert.Contains(t, string(events[1].ResponseBodyRaw), `"resp_ok_1"`)
 }
 
 func TestProviderWrapper_CallReportsStreamDeltasFromSSEResponse(t *testing.T) {
@@ -452,6 +454,157 @@ func TestProviderWrapper_CallReportsStreamDeltasFromSSEResponse(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hello world", resp.Content)
 	assert.Equal(t, []string{"hello ", "world"}, deltas)
+}
+
+func TestProviderWrapper_CallReportsTextDeltasPreserveWhitespaceFromOpenAIStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"Hello"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":" world."},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+
+	var deltas []string
+	ctx := WithStreamReporter(context.Background(), func(chunk StreamChunk) {
+		if chunk.Type == EventTypeText {
+			deltas = append(deltas, chunk.Content)
+		}
+	})
+
+	resp, err := provider.Call(ctx, &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "stream this",
+		}},
+		Stream: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Hello world.", resp.Content)
+	assert.Equal(t, []string{"Hello", " world."}, deltas)
+}
+
+func TestProviderWrapper_CallReportsReasoningDeltasFromSSEResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"reasoning_content":"先看目录。"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"我来查看目录。"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+
+	var chunks []StreamChunk
+	ctx := WithStreamReporter(context.Background(), func(chunk StreamChunk) {
+		chunks = append(chunks, chunk)
+	})
+
+	resp, err := provider.Call(ctx, &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "stream this",
+		}},
+		Stream: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "我来查看目录。", resp.Content)
+	assert.Equal(t, "先看目录。", resp.Reasoning)
+	require.Len(t, chunks, 2)
+	assert.Equal(t, EventTypeReasoning, chunks[0].Type)
+	assert.Equal(t, "先看目录。", chunks[0].Content)
+	assert.Equal(t, EventTypeText, chunks[1].Type)
+	assert.Equal(t, "我来查看目录。", chunks[1].Content)
+}
+
+func TestProviderWrapper_CallWithStreamReportsRawResponseBody(t *testing.T) {
+	var events []HTTPDebugEvent
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello "}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"world"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+
+	ctx := WithHTTPDebugReporter(context.Background(), func(event HTTPDebugEvent) {
+		events = append(events, event)
+	})
+
+	resp, err := provider.Call(ctx, &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "stream this",
+		}},
+		Stream: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "hello world", resp.Content)
+	require.Len(t, events, 2)
+	assert.Equal(t, "request", events[0].Phase)
+	assert.Equal(t, "response", events[1].Phase)
+	assert.Contains(t, string(events[1].ResponseBodyRaw), `"content":"hello "`)
+	assert.Contains(t, string(events[1].ResponseBodyRaw), `[DONE]`)
+}
+
+func TestProviderWrapper_StreamEmitsReasoningChunks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"reasoning_content":"先整理上下文。"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"开始处理。"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+
+	stream, err := provider.Stream(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "stream this",
+		}},
+		Stream: true,
+	})
+	require.NoError(t, err)
+
+	var got []StreamChunk
+	for chunk := range stream {
+		got = append(got, chunk)
+		if chunk.Type == EventTypeError && chunk.Error != "" {
+			t.Fatalf("unexpected stream error: %s", chunk.Error)
+		}
+	}
+
+	require.Len(t, got, 3)
+	assert.Equal(t, EventTypeReasoning, got[0].Type)
+	assert.Equal(t, "先整理上下文。", got[0].Content)
+	assert.Equal(t, EventTypeText, got[1].Type)
+	assert.Equal(t, "开始处理。", got[1].Content)
+	assert.Equal(t, EventTypeDone, got[2].Type)
 }
 
 func TestProviderWrapper_CodexCall_WithStreamAggregatesSSEResponse(t *testing.T) {
@@ -492,6 +645,56 @@ func TestProviderWrapper_CodexCall_WithStreamAggregatesSSEResponse(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, "Hello", resp.Content)
 	assert.Empty(t, resp.ToolCalls)
+}
+
+func TestProviderWrapper_CodexCall_WithStreamPreservesWhitespaceAcrossTextDeltas(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			"event: response.created",
+			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`,
+			"",
+			"event: response.output_item.added",
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}`,
+			"",
+			"event: response.output_text.delta",
+			`data: {"type":"response.output_text.delta","output_index":0,"delta":"Hello"}`,
+			"",
+			"event: response.output_text.delta",
+			`data: {"type":"response.output_text.delta","output_index":0,"delta":" world."}`,
+			"",
+			"event: response.completed",
+			`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","stop_reason":"end_turn"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:         "codex",
+		BaseURL:      server.URL,
+		DefaultModel: "gpt-5.4",
+	})
+	require.NoError(t, err)
+
+	var deltas []string
+	ctx := WithStreamReporter(context.Background(), func(chunk StreamChunk) {
+		if chunk.Type == EventTypeText {
+			deltas = append(deltas, chunk.Content)
+		}
+	})
+
+	resp, err := provider.Call(ctx, &LLMRequest{
+		Model: "gpt-5.4",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Stream: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "Hello world.", resp.Content)
+	assert.Equal(t, []string{"Hello", " world."}, deltas)
 }
 
 func TestProviderWrapper_AnthropicCall_PropagatesThinkingToBodyAndHeader(t *testing.T) {

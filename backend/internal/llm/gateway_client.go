@@ -208,6 +208,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		URL:              url,
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
+		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
 	})
 
 	// 创建 HTTP 请求
@@ -268,6 +269,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 			ResponseStatusCode:  httpResp.StatusCode,
 			ResponseBodyBytes:   len(body),
 			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
+			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
 		return nil, fmt.Errorf("HTTP %d: %s", httpResp.StatusCode, string(body))
@@ -288,28 +290,46 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		ResponseStatusCode:  httpResp.StatusCode,
 		ResponseBodyBytes:   len(body),
 		ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
+		ResponseBodyRaw:     append([]byte(nil), body...),
 	})
 
 	// 使用 adapter 处理响应
-	onContent := func(content string) {
-		if !req.Stream || content == "" {
-			return
-		}
-		reportStreamChunk(ctx, StreamChunk{
-			Type:    EventTypeText,
-			Content: content,
-			Metadata: map[string]interface{}{
-				"provider": selected.Provider.Name,
-				"protocol": protocol,
-				"model":    model,
-			},
-		})
+	callbacks := adapter.StreamCallbacks{
+		OnText: func(content string) {
+			if !req.Stream || content == "" {
+				return
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:    EventTypeText,
+				Content: content,
+				Metadata: map[string]interface{}{
+					"provider": selected.Provider.Name,
+					"protocol": protocol,
+					"model":    model,
+				},
+			})
+		},
+		OnReasoning: func(reasoning string) {
+			if !req.Stream || reasoning == "" {
+				return
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:    EventTypeReasoning,
+				Content: reasoning,
+				Metadata: map[string]interface{}{
+					"provider": selected.Provider.Name,
+					"protocol": protocol,
+					"model":    model,
+				},
+			})
+		},
 	}
 
-	assistantMsg, err := adpt.HandleResponse(req.Stream, bytes.NewReader(body), onContent)
+	assistantMsg, err := adpt.HandleResponse(req.Stream, bytes.NewReader(body), callbacks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to handle response: %w", err)
 	}
+	reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg)
 
 	// 构建响应
 	response := &LLMResponse{
@@ -334,13 +354,16 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 
 	// 提取 tool_calls
 	if toolCalls, ok := assistantMsg["tool_calls"]; ok {
-		if tcSlice, ok := toolCalls.([]interface{}); ok && len(tcSlice) > 0 {
+		if tcSlice := normalizeGatewayToolCalls(toolCalls); len(tcSlice) > 0 {
 			response.ToolCalls = c.convertToolCalls(tcSlice)
 		}
 	}
 
-	// 提取 reasoning_content
-	if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
+	if reasoningBlock != nil {
+		response.ReasoningBlock = reasoningBlock
+		response.Reasoning = reasoningBlock.DisplayText()
+		response.Metadata[assistantReasoningDetailsKey] = reasoningBlock.ToMap()
+	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
 		response.Reasoning = reasoning
 	}
 
@@ -391,6 +414,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		URL:              url,
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
+		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
 	})
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
@@ -445,29 +469,63 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			ResponseStatusCode:  httpResp.StatusCode,
 			ResponseBodyBytes:   len(body),
 			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
+			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
 		return nil, fmt.Errorf("HTTP %d: %s", httpResp.StatusCode, string(body))
 	}
 
-	onContent := func(content string) {
-		if content == "" {
-			return
-		}
-		reportStreamChunk(ctx, StreamChunk{
-			Type:    EventTypeText,
-			Content: content,
-			Metadata: map[string]interface{}{
-				"provider": selected.Provider.Name,
-				"protocol": protocol,
-				"model":    model,
-			},
-		})
+	callbacks := adapter.StreamCallbacks{
+		OnText: func(content string) {
+			if content == "" {
+				return
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:    EventTypeText,
+				Content: content,
+				Metadata: map[string]interface{}{
+					"provider": selected.Provider.Name,
+					"protocol": protocol,
+					"model":    model,
+				},
+			})
+		},
+		OnReasoning: func(reasoning string) {
+			if reasoning == "" {
+				return
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:    EventTypeReasoning,
+				Content: reasoning,
+				Metadata: map[string]interface{}{
+					"provider": selected.Provider.Name,
+					"protocol": protocol,
+					"model":    model,
+				},
+			})
+		},
 	}
-	assistantMsg, err := adpt.HandleResponse(true, httpResp.Body, onContent)
+	var responseBuffer bytes.Buffer
+	assistantMsg, err := adpt.HandleResponse(true, io.TeeReader(httpResp.Body, &responseBuffer), callbacks)
+	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
+	reportHTTPDebug(ctx, HTTPDebugEvent{
+		Source:              "gateway_client",
+		Phase:               "response",
+		Provider:            selected.Provider.Name,
+		Protocol:            protocol,
+		Model:               model,
+		Method:              http.MethodPost,
+		URL:                 url,
+		ResponseStatusCode:  httpResp.StatusCode,
+		ResponseBodyBytes:   len(responseBody),
+		ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
+		ResponseBodyRaw:     responseBody,
+		Error:               errorString(err),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to handle stream response: %w", err)
 	}
+	reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg)
 
 	response := &LLMResponse{
 		Content: "",
@@ -487,11 +545,15 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		response.Content = content
 	}
 	if toolCalls, ok := assistantMsg["tool_calls"]; ok {
-		if tcSlice, ok := toolCalls.([]interface{}); ok && len(tcSlice) > 0 {
+		if tcSlice := normalizeGatewayToolCalls(toolCalls); len(tcSlice) > 0 {
 			response.ToolCalls = c.convertToolCalls(tcSlice)
 		}
 	}
-	if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
+	if reasoningBlock != nil {
+		response.ReasoningBlock = reasoningBlock
+		response.Reasoning = reasoningBlock.DisplayText()
+		response.Metadata[assistantReasoningDetailsKey] = reasoningBlock.ToMap()
+	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
 		response.Reasoning = reasoning
 	}
 	response.Usage.PromptTokens = c.tokenizer.CountMessages(convertToInterfaceSlice(req.Messages))
@@ -572,6 +634,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 		URL:              url,
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
+		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
 	})
 
 	// 创建 HTTP 请求
@@ -629,6 +692,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 			ResponseStatusCode:  httpResp.StatusCode,
 			ResponseBodyBytes:   len(body),
 			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
+			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
 		return nil, fmt.Errorf("HTTP %d: %s", httpResp.StatusCode, string(body))
@@ -641,24 +705,54 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 	go func() {
 		defer httpResp.Body.Close()
 		defer close(ch)
+		var responseBuffer bytes.Buffer
 
-		// 构建回调函数
-		onContent := func(content string) {
-			if content != "" {
-				ch <- StreamChunk{
-					Type:    EventTypeText,
-					Content: content,
-					Metadata: map[string]interface{}{
-						"provider": selected.Provider.Name,
-						"protocol": protocol,
-						"model":    model,
-					},
+		callbacks := adapter.StreamCallbacks{
+			OnText: func(content string) {
+				if content != "" {
+					ch <- StreamChunk{
+						Type:    EventTypeText,
+						Content: content,
+						Metadata: map[string]interface{}{
+							"provider": selected.Provider.Name,
+							"protocol": protocol,
+							"model":    model,
+						},
+					}
 				}
-			}
+			},
+			OnReasoning: func(reasoning string) {
+				if reasoning != "" {
+					ch <- StreamChunk{
+						Type:    EventTypeReasoning,
+						Content: reasoning,
+						Metadata: map[string]interface{}{
+							"provider": selected.Provider.Name,
+							"protocol": protocol,
+							"model":    model,
+						},
+					}
+				}
+			},
 		}
 
 		// 使用 adapter 处理流式响应
-		_, err := adpt.HandleResponse(true, httpResp.Body, onContent)
+		_, err := adpt.HandleResponse(true, io.TeeReader(httpResp.Body, &responseBuffer), callbacks)
+		responseBody := append([]byte(nil), responseBuffer.Bytes()...)
+		reportHTTPDebug(ctx, HTTPDebugEvent{
+			Source:              "gateway_client",
+			Phase:               "response",
+			Provider:            selected.Provider.Name,
+			Protocol:            protocol,
+			Model:               model,
+			Method:              http.MethodPost,
+			URL:                 url,
+			ResponseStatusCode:  httpResp.StatusCode,
+			ResponseBodyBytes:   len(responseBody),
+			ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
+			ResponseBodyRaw:     responseBody,
+			Error:               errorString(err),
+		})
 		if err != nil {
 			ch <- StreamChunk{
 				Type:  EventTypeError,
@@ -719,13 +813,7 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, proto
 	// 转换 Messages
 	messages := make([]map[string]interface{}, len(req.Messages))
 	for i, msg := range req.Messages {
-		messages[i] = map[string]interface{}{
-			"role":    msg.Role,
-			"content": msg.Content,
-		}
-		if msg.ToolCallID != "" {
-			messages[i]["tool_call_id"] = msg.ToolCallID
-		}
+		messages[i] = runtimeMessageToAdapterMessage(msg, protocol)
 	}
 
 	// 转换 Tools（根据协议生成正确格式）
@@ -785,6 +873,21 @@ func (c *GatewayClient) convertToolCalls(tcSlice []interface{}) []types.ToolCall
 		}
 	}
 	return result
+}
+
+func normalizeGatewayToolCalls(raw interface{}) []interface{} {
+	switch tcSlice := raw.(type) {
+	case []interface{}:
+		return tcSlice
+	case []map[string]interface{}:
+		normalized := make([]interface{}, 0, len(tcSlice))
+		for _, tc := range tcSlice {
+			normalized = append(normalized, tc)
+		}
+		return normalized
+	default:
+		return nil
+	}
 }
 
 // parseToolCalls 解析工具调用参数

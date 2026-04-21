@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
 
@@ -169,7 +170,8 @@ func (a *AnthropicAdapter) ExtractResponse(result map[string]interface{}) string
 
 // ExtractReasoning 从响应中提取推理内容（thinking）
 func (a *AnthropicAdapter) ExtractReasoning(result map[string]interface{}) string {
-	return ""
+	procResult := a.ProcessResponse(result)
+	return procResult.Reasoning
 }
 
 // ProcessResponse 统一处理响应，提取 reasoning、content 和 tool_calls
@@ -183,8 +185,11 @@ func (a *AnthropicAdapter) ProcessResponse(result map[string]interface{}) Proces
 
 	// 提取 content
 	if content, ok := result["content"].([]interface{}); ok && len(content) > 0 {
+		rawBlocks := make([]map[string]interface{}, 0, len(content))
+		opaqueState := ""
 		for _, item := range content {
 			if itemMap, ok := item.(map[string]interface{}); ok {
+				rawBlocks = append(rawBlocks, itemMap)
 				typ, _ := itemMap["type"].(string)
 
 				if typ == "text" {
@@ -192,11 +197,41 @@ func (a *AnthropicAdapter) ProcessResponse(result map[string]interface{}) Proces
 					if text, ok := itemMap["text"].(string); ok {
 						procResult.Content += text
 					}
+				} else if typ == "thinking" {
+					if thinking := anthropicThinkingText(itemMap); thinking != "" {
+						procResult.Reasoning += thinking
+					}
+					if signature, _ := itemMap["signature"].(string); strings.TrimSpace(signature) != "" {
+						opaqueState = strings.TrimSpace(signature)
+					}
+				} else if typ == "redacted_thinking" {
+					if opaqueState == "" {
+						if raw, err := json.Marshal(itemMap); err == nil {
+							opaqueState = string(raw)
+						}
+					}
 				} else if typ == "tool_use" {
 					// Function Call
 					procResult.HasToolCalls = true
 					procResult.ToolCalls = append(procResult.ToolCalls, itemMap)
 				}
+			}
+		}
+		if strings.TrimSpace(procResult.Reasoning) != "" || opaqueState != "" {
+			visibility := runtimetypes.ReasoningVisibilitySummary
+			if strings.TrimSpace(procResult.Reasoning) == "" {
+				visibility = runtimetypes.ReasoningVisibilityOpaque
+			}
+			procResult.ReasoningBlock = &runtimetypes.ReasoningBlock{
+				Format:         "anthropic_thinking",
+				Summary:        strings.TrimSpace(procResult.Reasoning),
+				OpaqueState:    opaqueState,
+				ReplayRequired: true,
+				Streamable:     true,
+				Visibility:     visibility,
+				Metadata: map[string]interface{}{
+					"anthropic_content_blocks": rawBlocks,
+				},
 			}
 		}
 	}
@@ -217,6 +252,9 @@ func (a *AnthropicAdapter) ExtractStreamContent(result map[string]interface{}) s
 
 // ExtractStreamReasoning 从流式响应中提取推理内容
 func (a *AnthropicAdapter) ExtractStreamReasoning(result map[string]interface{}) string {
+	if delta, ok := result["delta"].(map[string]interface{}); ok {
+		return anthropicThinkingText(delta)
+	}
 	return ""
 }
 
@@ -231,10 +269,12 @@ type AnthropicToolCall struct {
 // AnthropicStreamState Anthropic 流式响应累积状态
 // Anthropic 是事件驱动的，需要跟踪 content_block
 type AnthropicStreamState struct {
-	Content    strings.Builder
-	ToolCalls  []*AnthropicToolCall
-	blocks     map[int]*AnthropicToolCall // key 是 content_block 的 index
-	StopReason string
+	Content            strings.Builder
+	Reasoning          strings.Builder
+	ReasoningSignature string
+	ToolCalls          []*AnthropicToolCall
+	blocks             map[int]*AnthropicToolCall // key 是 content_block 的 index
+	StopReason         string
 }
 
 // NewAnthropicStreamState 创建新的 Anthropic 流式状态
@@ -259,6 +299,12 @@ func (s *AnthropicStreamState) getOrCreateBlock(index int) *AnthropicToolCall {
 func (s *AnthropicStreamState) ToMap() map[string]interface{} {
 	result := map[string]interface{}{
 		"content": s.Content.String(),
+	}
+	if s.Reasoning.Len() > 0 {
+		result["reasoning"] = s.Reasoning.String()
+	}
+	if strings.TrimSpace(s.ReasoningSignature) != "" {
+		result["reasoning_signature"] = strings.TrimSpace(s.ReasoningSignature)
 	}
 
 	if s.StopReason != "" {
@@ -285,9 +331,9 @@ func (s *AnthropicStreamState) ToMap() map[string]interface{} {
 }
 
 // HandleResponse 处理完整响应（流式或非流式）
-func (a *AnthropicAdapter) HandleResponse(isStream bool, respBody io.Reader, onContent func(string)) (map[string]interface{}, error) {
+func (a *AnthropicAdapter) HandleResponse(isStream bool, respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
 	if isStream {
-		return a.handleStreamResponse(respBody, onContent)
+		return a.handleStreamResponse(respBody, callbacks)
 	}
 
 	// 非流式处理
@@ -297,7 +343,7 @@ func (a *AnthropicAdapter) HandleResponse(isStream bool, respBody io.Reader, onC
 	}
 
 	procResult := a.ProcessResponse(result)
-	return a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), nil
+	return attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock), nil
 }
 
 // handleStreamResponse 处理 Anthropic 事件驱动的流式响应
@@ -316,7 +362,7 @@ func (a *AnthropicAdapter) HandleResponse(isStream bool, respBody io.Reader, onC
 //	data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\""}}
 //
 //	event: message_stop
-func (a *AnthropicAdapter) handleStreamResponse(respBody io.Reader, onContent func(string)) (map[string]interface{}, error) {
+func (a *AnthropicAdapter) handleStreamResponse(respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
 	state := NewAnthropicStreamState()
 
 	scanner := bufio.NewScanner(respBody)
@@ -350,7 +396,7 @@ func (a *AnthropicAdapter) handleStreamResponse(respBody io.Reader, onContent fu
 		}
 
 		// 根据事件类型处理
-		a.handleAnthropicEvent(state, currentEvent, payload, onContent)
+		a.handleAnthropicEvent(state, currentEvent, payload, callbacks)
 
 		// 检查是否结束
 		if currentEvent == "message_stop" {
@@ -366,17 +412,33 @@ func (a *AnthropicAdapter) handleStreamResponse(respBody io.Reader, onContent fu
 	streamData := state.ToMap()
 	toolCalls, _ := streamData["tool_calls"].([]map[string]interface{})
 	content, _ := streamData["content"].(string)
-
-	return a.BuildAssistantMessage(content, toolCalls, ""), nil
+	reasoning, _ := streamData["reasoning"].(string)
+	signature, _ := streamData["reasoning_signature"].(string)
+	var reasoningBlock *runtimetypes.ReasoningBlock
+	if strings.TrimSpace(reasoning) != "" || strings.TrimSpace(signature) != "" {
+		visibility := runtimetypes.ReasoningVisibilitySummary
+		if strings.TrimSpace(reasoning) == "" {
+			visibility = runtimetypes.ReasoningVisibilityOpaque
+		}
+		reasoningBlock = &runtimetypes.ReasoningBlock{
+			Format:         "anthropic_thinking",
+			Summary:        strings.TrimSpace(reasoning),
+			OpaqueState:    strings.TrimSpace(signature),
+			ReplayRequired: true,
+			Streamable:     true,
+			Visibility:     visibility,
+		}
+	}
+	return attachReasoningBlock(a.BuildAssistantMessage(content, toolCalls, reasoning), reasoningBlock), nil
 }
 
 // handleAnthropicEvent 处理 Anthropic SSE 事件
-func (a *AnthropicAdapter) handleAnthropicEvent(state *AnthropicStreamState, event string, payload map[string]interface{}, onContent func(string)) {
+func (a *AnthropicAdapter) handleAnthropicEvent(state *AnthropicStreamState, event string, payload map[string]interface{}, callbacks StreamCallbacks) {
 	switch event {
 	case "content_block_start":
 		a.handleContentBlockStart(state, payload)
 	case "content_block_delta":
-		a.handleContentBlockDelta(state, payload, onContent)
+		a.handleContentBlockDelta(state, payload, callbacks)
 	case "message_delta":
 		a.handleMessageDelta(state, payload)
 	}
@@ -416,7 +478,7 @@ func (a *AnthropicAdapter) handleContentBlockStart(state *AnthropicStreamState, 
 
 // handleContentBlockDelta 处理 content_block_delta 事件
 // 处理 text_delta 和 input_json_delta
-func (a *AnthropicAdapter) handleContentBlockDelta(state *AnthropicStreamState, payload map[string]interface{}, onContent func(string)) {
+func (a *AnthropicAdapter) handleContentBlockDelta(state *AnthropicStreamState, payload map[string]interface{}, callbacks StreamCallbacks) {
 	indexFloat, ok := payload["index"].(float64)
 	if !ok {
 		return
@@ -435,9 +497,7 @@ func (a *AnthropicAdapter) handleContentBlockDelta(state *AnthropicStreamState, 
 		// 文本增量
 		text, _ := delta["text"].(string)
 		state.Content.WriteString(text)
-		if onContent != nil {
-			onContent(text)
-		}
+		callbacks.EmitText(text)
 
 	case "input_json_delta":
 		// Tool arguments 增量（流式拼接）
@@ -447,6 +507,15 @@ func (a *AnthropicAdapter) handleContentBlockDelta(state *AnthropicStreamState, 
 		}
 		part, _ := delta["partial_json"].(string)
 		tc.Args.WriteString(part)
+	case "thinking_delta":
+		if thinking := anthropicThinkingText(delta); thinking != "" {
+			state.Reasoning.WriteString(thinking)
+			callbacks.EmitReasoning(thinking)
+		}
+	case "signature_delta":
+		if signature, _ := delta["signature"].(string); strings.TrimSpace(signature) != "" {
+			state.ReasoningSignature = strings.TrimSpace(signature)
+		}
 	}
 }
 
@@ -460,6 +529,18 @@ func (a *AnthropicAdapter) handleMessageDelta(state *AnthropicStreamState, paylo
 	if stopReason, ok := delta["stop_reason"].(string); ok {
 		state.StopReason = stopReason
 	}
+}
+
+func anthropicThinkingText(raw map[string]interface{}) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	for _, key := range []string{"thinking", "text"} {
+		if text, ok := raw[key].(string); ok && text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 // ExtractStreamToolCalls 从流式累积数据中提取 ToolCalls

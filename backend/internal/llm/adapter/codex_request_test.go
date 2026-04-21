@@ -200,7 +200,7 @@ func TestCodexHandleResponse_StreamWithOutputIndexToolCall(t *testing.T) {
 		"",
 	}, "\n")
 
-	msg, err := a.HandleResponse(true, strings.NewReader(sseData), nil)
+	msg, err := a.HandleResponse(true, strings.NewReader(sseData), StreamCallbacks{})
 	if err != nil {
 		t.Fatalf("HandleResponse failed: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestCodexHandleResponse_StreamReturnsStandardAssistantMessage(t *testing.T)
 		"",
 	}, "\n")
 
-	msg, err := a.HandleResponse(true, strings.NewReader(sseData), nil)
+	msg, err := a.HandleResponse(true, strings.NewReader(sseData), StreamCallbacks{})
 	if err != nil {
 		t.Fatalf("HandleResponse failed: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestCodexHandleResponse_NonStreamReturnsStandardAssistantMessage(t *testing
 		]
 	}`
 
-	msg, err := a.HandleResponse(false, strings.NewReader(jsonData), nil)
+	msg, err := a.HandleResponse(false, strings.NewReader(jsonData), StreamCallbacks{})
 	if err != nil {
 		t.Fatalf("HandleResponse failed: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestCodexHandleResponse_NonStreamFunctionCallOnlyReturnsToolCall(t *testing
 		]
 	}`
 
-	msg, err := a.HandleResponse(false, strings.NewReader(jsonData), nil)
+	msg, err := a.HandleResponse(false, strings.NewReader(jsonData), StreamCallbacks{})
 	if err != nil {
 		t.Fatalf("HandleResponse failed: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestCodexHandleResponse_NonStreamAcceptsSSEPayload(t *testing.T) {
 		"",
 	}, "\n")
 
-	msg, err := a.HandleResponse(false, strings.NewReader(sseData), nil)
+	msg, err := a.HandleResponse(false, strings.NewReader(sseData), StreamCallbacks{})
 	if err != nil {
 		t.Fatalf("HandleResponse failed: %v", err)
 	}

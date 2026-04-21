@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // GeminiAdapter Gemini 协议适配器
@@ -89,6 +91,10 @@ func (a *GeminiAdapter) BuildRequest(config RequestConfig) map[string]interface{
 	// temperature
 	generationConfig["temperature"] = config.Temperature
 
+	if thinkingConfig := deriveGeminiThinkingConfig(config.ReasoningEffort, config.Thinking); len(thinkingConfig) > 0 {
+		generationConfig["thinkingConfig"] = thinkingConfig
+	}
+
 	// topP 默认值
 	generationConfig["topP"] = 0.95
 
@@ -142,7 +148,8 @@ func (a *GeminiAdapter) ExtractResponse(result map[string]interface{}) string {
 // ExtractReasoning 从响应中提取推理内容（thinking）
 // Gemini 目前不支持独立的 reasoning_content 字段
 func (a *GeminiAdapter) ExtractReasoning(result map[string]interface{}) string {
-	return ""
+	procResult := a.ProcessResponse(result)
+	return procResult.Reasoning
 }
 
 // ProcessResponse 统一处理响应，提取 reasoning、content 和 tool_calls
@@ -159,10 +166,16 @@ func (a *GeminiAdapter) ProcessResponse(result map[string]interface{}) ProcessRe
 		if candidate, ok := candidates[0].(map[string]interface{}); ok {
 			if content, ok := candidate["content"].(map[string]interface{}); ok {
 				if parts, ok := content["parts"].([]interface{}); ok && len(parts) > 0 {
+					rawParts := make([]map[string]interface{}, 0, len(parts))
+					opaqueState := ""
 					for _, part := range parts {
 						if partMap, ok := part.(map[string]interface{}); ok {
-							// 检查 text 内容
-							if text, ok := partMap["text"].(string); ok {
+							rawParts = append(rawParts, partMap)
+							if thought, _ := partMap["thought"].(bool); thought {
+								if text, ok := partMap["text"].(string); ok {
+									procResult.Reasoning += text
+								}
+							} else if text, ok := partMap["text"].(string); ok {
 								procResult.Content += text
 							}
 							// 检查 Function Call
@@ -170,6 +183,26 @@ func (a *GeminiAdapter) ProcessResponse(result map[string]interface{}) ProcessRe
 								procResult.HasToolCalls = true
 								procResult.ToolCalls = append(procResult.ToolCalls, functionCall)
 							}
+							if signature, _ := partMap["thoughtSignature"].(string); strings.TrimSpace(signature) != "" {
+								opaqueState = strings.TrimSpace(signature)
+							}
+						}
+					}
+					if strings.TrimSpace(procResult.Reasoning) != "" || opaqueState != "" {
+						visibility := runtimetypes.ReasoningVisibilitySummary
+						if strings.TrimSpace(procResult.Reasoning) == "" {
+							visibility = runtimetypes.ReasoningVisibilityOpaque
+						}
+						procResult.ReasoningBlock = &runtimetypes.ReasoningBlock{
+							Format:         "gemini_thought",
+							Summary:        strings.TrimSpace(procResult.Reasoning),
+							OpaqueState:    opaqueState,
+							ReplayRequired: opaqueState != "",
+							Streamable:     true,
+							Visibility:     visibility,
+							Metadata: map[string]interface{}{
+								"gemini_parts": rawParts,
+							},
 						}
 					}
 				}
@@ -189,15 +222,39 @@ func (a *GeminiAdapter) ExtractStreamContent(result map[string]interface{}) stri
 // ExtractStreamReasoning 从流式响应中提取推理内容
 // Gemini 推理模型如果支持，在这里实现
 func (a *GeminiAdapter) ExtractStreamReasoning(result map[string]interface{}) string {
+	if candidates, ok := result["candidates"].([]interface{}); ok && len(candidates) > 0 {
+		if candidate, ok := candidates[0].(map[string]interface{}); ok {
+			if content, ok := candidate["content"].(map[string]interface{}); ok {
+				if parts, ok := content["parts"].([]interface{}); ok {
+					var reasoning strings.Builder
+					for _, item := range parts {
+						part, ok := item.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if thought, _ := part["thought"].(bool); !thought {
+							continue
+						}
+						if text, ok := part["text"].(string); ok {
+							reasoning.WriteString(text)
+						}
+					}
+					return reasoning.String()
+				}
+			}
+		}
+	}
 	return ""
 }
 
 // GeminiStreamState Gemini 流式响应累积状态
 // Gemini 比 OpenAI 简单：functionCall 是完整的，不需要拼接 arguments
 type GeminiStreamState struct {
-	Content      strings.Builder
-	ToolCalls    []map[string]interface{} // Gemini functionCall 直接完整
-	FinishReason string
+	Content          strings.Builder
+	Reasoning        strings.Builder
+	ThoughtSignature string
+	ToolCalls        []map[string]interface{} // Gemini functionCall 直接完整
+	FinishReason     string
 }
 
 // NewGeminiStreamState 创建新的 Gemini 流式状态
@@ -211,6 +268,12 @@ func NewGeminiStreamState() *GeminiStreamState {
 func (s *GeminiStreamState) ToMap() map[string]interface{} {
 	result := map[string]interface{}{
 		"content": s.Content.String(),
+	}
+	if s.Reasoning.Len() > 0 {
+		result["reasoning"] = s.Reasoning.String()
+	}
+	if strings.TrimSpace(s.ThoughtSignature) != "" {
+		result["thought_signature"] = strings.TrimSpace(s.ThoughtSignature)
 	}
 
 	if s.FinishReason != "" {
@@ -254,9 +317,9 @@ func (s *GeminiStreamState) ToMap() map[string]interface{} {
 }
 
 // HandleResponse 处理完整响应（流式或非流式）
-func (a *GeminiAdapter) HandleResponse(isStream bool, respBody io.Reader, onContent func(string)) (map[string]interface{}, error) {
+func (a *GeminiAdapter) HandleResponse(isStream bool, respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
 	if isStream {
-		return a.handleStreamResponse(respBody, onContent)
+		return a.handleStreamResponse(respBody, callbacks)
 	}
 
 	// 非流式处理
@@ -266,11 +329,11 @@ func (a *GeminiAdapter) HandleResponse(isStream bool, respBody io.Reader, onCont
 	}
 
 	procResult := a.ProcessResponse(result)
-	return a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), nil
+	return attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock), nil
 }
 
 // handleStreamResponse 处理流式响应
-func (a *GeminiAdapter) handleStreamResponse(respBody io.Reader, onContent func(string)) (map[string]interface{}, error) {
+func (a *GeminiAdapter) handleStreamResponse(respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
 	state := NewGeminiStreamState()
 
 	scanner := bufio.NewScanner(respBody)
@@ -293,7 +356,7 @@ func (a *GeminiAdapter) handleStreamResponse(respBody io.Reader, onContent func(
 			continue
 		}
 
-		a.parseGeminiChunk(state, chunk, onContent)
+		a.parseGeminiChunk(state, chunk, callbacks)
 
 		// 检查是否结束
 		if state.FinishReason != "" {
@@ -308,12 +371,28 @@ func (a *GeminiAdapter) handleStreamResponse(respBody io.Reader, onContent func(
 	streamData := state.ToMap()
 	toolCalls, _ := streamData["tool_calls"].([]map[string]interface{})
 	content, _ := streamData["content"].(string)
-
-	return a.BuildAssistantMessage(content, toolCalls, ""), nil
+	reasoning, _ := streamData["reasoning"].(string)
+	signature, _ := streamData["thought_signature"].(string)
+	var reasoningBlock *runtimetypes.ReasoningBlock
+	if strings.TrimSpace(reasoning) != "" || strings.TrimSpace(signature) != "" {
+		visibility := runtimetypes.ReasoningVisibilitySummary
+		if strings.TrimSpace(reasoning) == "" {
+			visibility = runtimetypes.ReasoningVisibilityOpaque
+		}
+		reasoningBlock = &runtimetypes.ReasoningBlock{
+			Format:         "gemini_thought",
+			Summary:        strings.TrimSpace(reasoning),
+			OpaqueState:    strings.TrimSpace(signature),
+			ReplayRequired: strings.TrimSpace(signature) != "",
+			Streamable:     true,
+			Visibility:     visibility,
+		}
+	}
+	return attachReasoningBlock(a.BuildAssistantMessage(content, toolCalls, reasoning), reasoningBlock), nil
 }
 
 // parseGeminiChunk 解析 Gemini 流式 chunk
-func (a *GeminiAdapter) parseGeminiChunk(state *GeminiStreamState, chunk map[string]interface{}, onContent func(string)) {
+func (a *GeminiAdapter) parseGeminiChunk(state *GeminiStreamState, chunk map[string]interface{}, callbacks StreamCallbacks) {
 	candidates, ok := chunk["candidates"].([]interface{})
 	if !ok || len(candidates) == 0 {
 		return
@@ -346,8 +425,8 @@ func (a *GeminiAdapter) parseGeminiChunk(state *GeminiStreamState, chunk map[str
 			continue
 		}
 
-		// 解析文本
-		a.parseGeminiText(state, part, onContent)
+		// 解析文本 / thinking
+		a.parseGeminiText(state, part, callbacks)
 
 		// 解析 Function Call（完整的，不需要拼接）
 		a.parseGeminiFunctionCall(state, part)
@@ -355,16 +434,24 @@ func (a *GeminiAdapter) parseGeminiChunk(state *GeminiStreamState, chunk map[str
 }
 
 // parseGeminiText 解析 Gemini parts 中的 text
-func (a *GeminiAdapter) parseGeminiText(state *GeminiStreamState, part map[string]interface{}, onContent func(string)) {
+func (a *GeminiAdapter) parseGeminiText(state *GeminiStreamState, part map[string]interface{}, callbacks StreamCallbacks) {
 	text, ok := part["text"].(string)
 	if !ok || text == "" {
+		if signature, _ := part["thoughtSignature"].(string); strings.TrimSpace(signature) != "" {
+			state.ThoughtSignature = strings.TrimSpace(signature)
+		}
 		return
 	}
-
-	state.Content.WriteString(text)
-	if onContent != nil {
-		onContent(text)
+	if signature, _ := part["thoughtSignature"].(string); strings.TrimSpace(signature) != "" {
+		state.ThoughtSignature = strings.TrimSpace(signature)
 	}
+	if thought, _ := part["thought"].(bool); thought {
+		state.Reasoning.WriteString(text)
+		callbacks.EmitReasoning(text)
+		return
+	}
+	state.Content.WriteString(text)
+	callbacks.EmitText(text)
 }
 
 // parseGeminiFunctionCall 解析 Gemini parts 中的 functionCall

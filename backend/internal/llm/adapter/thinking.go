@@ -186,3 +186,31 @@ func deriveOpenAIReasoningEffort(model, explicit string, thinking *anthropictype
 	}
 	return normalizeOpenAIReasoningEffort(mapAnthropicThinkingToReasoningEffort(model, thinking))
 }
+
+func deriveGeminiThinkingConfig(explicit string, thinking *anthropictypes.Thinking) map[string]interface{} {
+	effort := normalizeRuntimeReasoningEffort(explicit)
+	if effort == "" && thinking != nil {
+		effort = normalizeRuntimeReasoningEffort(mapAnthropicThinkingToReasoningEffort("", thinking))
+	}
+	if effort == "" || effort == "none" {
+		return nil
+	}
+
+	var budget int
+	switch effort {
+	case "low":
+		budget = 1024
+	case "medium":
+		budget = 8192
+	case "high":
+		budget = 16384
+	case "xhigh":
+		budget = 24576
+	default:
+		budget = 8192
+	}
+	return map[string]interface{}{
+		"includeThoughts": true,
+		"thinkingBudget":  budget,
+	}
+}

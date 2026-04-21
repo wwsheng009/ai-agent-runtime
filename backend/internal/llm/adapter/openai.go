@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // OpenAIAdapter OpenAI/Gemini protocol adapter
@@ -64,6 +66,10 @@ func (a *OpenAIAdapter) ExtractResponse(result map[string]interface{}) string {
 					return ""
 				}
 				if content, ok := msg["content"].(string); ok && content != "" {
+					cleanContent, toolCalls, _ := parseToolCallMarkupContent(content, true, 0)
+					if len(toolCalls) > 0 {
+						return cleanContent
+					}
 					return content
 				}
 			}
@@ -91,6 +97,8 @@ func (a *OpenAIAdapter) ProcessResponse(result map[string]interface{}) ProcessRe
 			if msg, ok := choice["message"].(map[string]interface{}); ok {
 				if reasoning, ok := msg["reasoning_content"].(string); ok {
 					procResult.Reasoning = reasoning
+				} else if reasoning, ok := msg["reasoning"].(string); ok {
+					procResult.Reasoning = reasoning
 				}
 				if content, ok := msg["content"].(string); ok {
 					procResult.Content = content
@@ -107,7 +115,25 @@ func (a *OpenAIAdapter) ProcessResponse(result map[string]interface{}) ProcessRe
 					procResult.HasToolCalls = true
 					procResult.ToolCalls = append(procResult.ToolCalls, fn)
 				}
+				if procResult.Content != "" {
+					cleanContent, markupToolCalls, _ := parseToolCallMarkupContent(procResult.Content, true, len(procResult.ToolCalls))
+					if len(markupToolCalls) > 0 {
+						procResult.Content = cleanContent
+						if !procResult.HasToolCalls {
+							procResult.HasToolCalls = true
+							procResult.ToolCalls = append(procResult.ToolCalls, markupToolCalls...)
+						}
+					}
+				}
 			}
+		}
+	}
+	if strings.TrimSpace(procResult.Reasoning) != "" {
+		procResult.ReasoningBlock = &runtimetypes.ReasoningBlock{
+			Format:     "openai_compatible",
+			Summary:    strings.TrimSpace(procResult.Reasoning),
+			Streamable: true,
+			Visibility: runtimetypes.ReasoningVisibilitySummary,
 		}
 	}
 
@@ -136,6 +162,9 @@ func (a *OpenAIAdapter) ExtractStreamReasoning(result map[string]interface{}) st
 				if reasoning, ok := delta["reasoning_content"].(string); ok && reasoning != "" {
 					return reasoning
 				}
+				if reasoning, ok := delta["reasoning"].(string); ok && reasoning != "" {
+					return reasoning
+				}
 			}
 		}
 	}
@@ -153,7 +182,10 @@ type StreamToolCall struct {
 // StreamState 管理流式响应的累积状态
 type StreamState struct {
 	Content      strings.Builder
+	Reasoning    strings.Builder
 	ToolCalls    map[int]*StreamToolCall // key 是 tool_call 的 index
+	MarkupTail   string
+	MarkupCalls  []map[string]interface{}
 	FinishReason string
 }
 
@@ -179,16 +211,16 @@ func (s *StreamState) BuildMessage() *AssistantMessage {
 	msg := &AssistantMessage{
 		Content: s.Content.String(),
 	}
-	if len(s.ToolCalls) == 0 {
+	rawToolCalls := s.rawToolCalls()
+	if len(rawToolCalls) == 0 {
 		return msg
 	}
-	// 按 index 顺序输出
-	for i := 0; i < len(s.ToolCalls); i++ {
-		tc := s.ToolCalls[i]
-		if tc == nil {
+	for _, tcMap := range rawToolCalls {
+		toolCall := rawToolCallToAssistantToolCall(tcMap)
+		if toolCall == nil {
 			continue
 		}
-		msg.ToolCalls = append(msg.ToolCalls, tc.ToToolCall())
+		msg.ToolCalls = append(msg.ToolCalls, toolCall)
 	}
 	return msg
 }
@@ -233,17 +265,207 @@ func repairJSON(s string) string {
 	return s
 }
 
+const (
+	toolCallStartTag = "<tool_call>"
+	toolCallEndTag   = "</tool_call>"
+	argKeyStartTag   = "<arg_key>"
+	argKeyEndTag     = "</arg_key>"
+	argValueStartTag = "<arg_value>"
+	argValueEndTag   = "</arg_value>"
+)
+
+var toolCallMarkupTags = []string{
+	toolCallStartTag,
+	toolCallEndTag,
+	argKeyStartTag,
+	argKeyEndTag,
+	argValueStartTag,
+	argValueEndTag,
+}
+
+func rawToolCallToAssistantToolCall(tcMap map[string]interface{}) *ToolCall {
+	if tcMap == nil {
+		return nil
+	}
+	toolCall := &ToolCall{
+		Type: "function",
+	}
+	if id, ok := tcMap["id"].(string); ok {
+		toolCall.ID = id
+	}
+	if typ, ok := tcMap["type"].(string); ok && typ != "" {
+		toolCall.Type = typ
+	}
+	fn, ok := tcMap["function"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	if name, ok := fn["name"].(string); ok {
+		toolCall.Function.Name = name
+	}
+	if args, ok := fn["arguments"].(string); ok {
+		toolCall.Function.Arguments = args
+	}
+	if toolCall.Function.Name == "" {
+		return nil
+	}
+	return toolCall
+}
+
+func parseToolCallMarkupContent(raw string, final bool, offset int) (string, []map[string]interface{}, string) {
+	var text strings.Builder
+	toolCalls := make([]map[string]interface{}, 0)
+	remaining := raw
+
+	for len(remaining) > 0 {
+		tagIndex := strings.IndexByte(remaining, '<')
+		if tagIndex == -1 {
+			text.WriteString(remaining)
+			remaining = ""
+			break
+		}
+		if tagIndex > 0 {
+			text.WriteString(remaining[:tagIndex])
+			remaining = remaining[tagIndex:]
+			continue
+		}
+		if strings.HasPrefix(remaining, toolCallStartTag) {
+			endIndex := strings.Index(remaining[len(toolCallStartTag):], toolCallEndTag)
+			if endIndex == -1 {
+				if final {
+					text.WriteString(remaining)
+					remaining = ""
+				}
+				break
+			}
+
+			blockEnd := len(toolCallStartTag) + endIndex
+			blockBody := remaining[len(toolCallStartTag):blockEnd]
+			fullEnd := blockEnd + len(toolCallEndTag)
+			if toolCall, ok := parseToolCallMarkupBlock(blockBody, offset+len(toolCalls)); ok {
+				toolCalls = append(toolCalls, toolCall)
+			} else {
+				text.WriteString(remaining[:fullEnd])
+			}
+			remaining = remaining[fullEnd:]
+			continue
+		}
+
+		if !final && hasPartialToolCallMarkupPrefix(remaining) {
+			break
+		}
+
+		text.WriteByte('<')
+		remaining = remaining[1:]
+	}
+
+	return text.String(), toolCalls, remaining
+}
+
+func hasPartialToolCallMarkupPrefix(raw string) bool {
+	for _, tag := range toolCallMarkupTags {
+		if strings.HasPrefix(tag, raw) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseToolCallMarkupBlock(body string, index int) (map[string]interface{}, bool) {
+	remaining := body
+	name := strings.TrimSpace(remaining)
+	if argIndex := strings.Index(remaining, argKeyStartTag); argIndex >= 0 {
+		name = strings.TrimSpace(remaining[:argIndex])
+		remaining = remaining[argIndex:]
+	} else {
+		remaining = ""
+	}
+	if name == "" {
+		return nil, false
+	}
+
+	args := make(map[string]interface{})
+	for strings.TrimSpace(remaining) != "" {
+		remaining = strings.TrimSpace(remaining)
+		if !strings.HasPrefix(remaining, argKeyStartTag) {
+			return nil, false
+		}
+		remaining = remaining[len(argKeyStartTag):]
+
+		keyEnd := strings.Index(remaining, argKeyEndTag)
+		if keyEnd == -1 {
+			return nil, false
+		}
+		key := strings.TrimSpace(remaining[:keyEnd])
+		remaining = remaining[keyEnd+len(argKeyEndTag):]
+		if key == "" {
+			return nil, false
+		}
+
+		remaining = strings.TrimSpace(remaining)
+		if !strings.HasPrefix(remaining, argValueStartTag) {
+			return nil, false
+		}
+		remaining = remaining[len(argValueStartTag):]
+
+		valueEnd := strings.Index(remaining, argValueEndTag)
+		if valueEnd == -1 {
+			return nil, false
+		}
+		value := remaining[:valueEnd]
+		remaining = remaining[valueEnd+len(argValueEndTag):]
+		args[key] = parseToolCallMarkupValue(value)
+	}
+
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return nil, false
+	}
+
+	return map[string]interface{}{
+		"id":   fmt.Sprintf("markup_tool_call_%d", index+1),
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":      name,
+			"arguments": string(argsJSON),
+		},
+	}, true
+}
+
+func parseToolCallMarkupValue(raw string) interface{} {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	var decoded interface{}
+	if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+		return decoded
+	}
+	return trimmed
+}
+
 // ToMap 将累积结果转换为 map 格式
 func (s *StreamState) ToMap() map[string]interface{} {
 	result := map[string]interface{}{
 		"content": s.Content.String(),
+	}
+	if s.Reasoning.Len() > 0 {
+		result["reasoning"] = s.Reasoning.String()
 	}
 
 	if s.FinishReason != "" {
 		result["finish_reason"] = s.FinishReason
 	}
 
-	// 将 tool_calls 转换为数组格式，按 index 顺序
+	if toolCalls := s.rawToolCalls(); len(toolCalls) > 0 {
+		result["tool_calls"] = toolCalls
+	}
+
+	return result
+}
+
+func (s *StreamState) rawToolCalls() []map[string]interface{} {
+	toolCalls := make([]map[string]interface{}, 0, len(s.ToolCalls)+len(s.MarkupCalls))
 	if len(s.ToolCalls) > 0 {
 		maxIndex := 0
 		for idx := range s.ToolCalls {
@@ -251,8 +473,6 @@ func (s *StreamState) ToMap() map[string]interface{} {
 				maxIndex = idx
 			}
 		}
-
-		toolCalls := make([]map[string]interface{}, 0, maxIndex+1)
 		for i := 0; i <= maxIndex; i++ {
 			if tc, exists := s.ToolCalls[i]; exists {
 				toolCalls = append(toolCalls, map[string]interface{}{
@@ -265,14 +485,15 @@ func (s *StreamState) ToMap() map[string]interface{} {
 				})
 			}
 		}
-		result["tool_calls"] = toolCalls
 	}
-
-	return result
+	if len(s.MarkupCalls) > 0 {
+		toolCalls = append(toolCalls, s.MarkupCalls...)
+	}
+	return toolCalls
 }
 
 // HandleResponse handles complete response (stream or non-stream)
-func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, onContent func(string)) (map[string]interface{}, error) {
+func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error) {
 	if isStream {
 		state := NewStreamState()
 
@@ -295,7 +516,7 @@ func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, onCont
 				continue
 			}
 
-			parseChunk(state, chunk, onContent)
+			parseChunk(state, chunk, callbacks)
 
 			if state.FinishReason != "" {
 				break
@@ -305,13 +526,19 @@ func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, onCont
 		if err := scanner.Err(); err != nil {
 			return nil, fmt.Errorf("读取流式响应失败: %w", err)
 		}
+		flushPendingMarkupContent(state, callbacks)
 
 		// 转换为最终结果
 		streamData := state.ToMap()
 		toolCalls, _ := streamData["tool_calls"].([]map[string]interface{})
 		content, _ := streamData["content"].(string)
-
-		return a.BuildAssistantMessage(content, toolCalls, ""), nil
+		reasoning, _ := streamData["reasoning"].(string)
+		return attachReasoningBlock(a.BuildAssistantMessage(content, toolCalls, reasoning), &runtimetypes.ReasoningBlock{
+			Format:     "openai_compatible",
+			Summary:    strings.TrimSpace(reasoning),
+			Streamable: true,
+			Visibility: runtimetypes.ReasoningVisibilitySummary,
+		}), nil
 	}
 
 	var result map[string]interface{}
@@ -320,11 +547,11 @@ func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, onCont
 	}
 
 	procResult := a.ProcessResponse(result)
-	return a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), nil
+	return attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock), nil
 }
 
 // parseChunk 解析单个流式 chunk
-func parseChunk(state *StreamState, chunk map[string]interface{}, onContent func(string)) {
+func parseChunk(state *StreamState, chunk map[string]interface{}, callbacks StreamCallbacks) {
 	choices, ok := chunk["choices"].([]interface{})
 	if !ok || len(choices) == 0 {
 		return
@@ -345,19 +572,53 @@ func parseChunk(state *StreamState, chunk map[string]interface{}, onContent func
 		return
 	}
 
-	parseContent(state, delta, onContent)
+	parseReasoning(state, delta, callbacks)
+	parseContent(state, delta, callbacks)
 	parseToolCalls(state, delta)
 }
 
 // parseContent 解析 delta 中的 content
-func parseContent(state *StreamState, delta map[string]interface{}, onContent func(string)) {
+func parseContent(state *StreamState, delta map[string]interface{}, callbacks StreamCallbacks) {
 	content, ok := delta["content"].(string)
 	if !ok || content == "" {
 		return
 	}
-	state.Content.WriteString(content)
-	if onContent != nil {
-		onContent(content)
+	state.MarkupTail += content
+	text, toolCalls, pending := parseToolCallMarkupContent(state.MarkupTail, false, len(state.MarkupCalls))
+	if text != "" {
+		state.Content.WriteString(text)
+		callbacks.EmitText(text)
+	}
+	if len(toolCalls) > 0 {
+		state.MarkupCalls = append(state.MarkupCalls, toolCalls...)
+	}
+	state.MarkupTail = pending
+}
+
+func flushPendingMarkupContent(state *StreamState, callbacks StreamCallbacks) {
+	if state == nil || state.MarkupTail == "" {
+		return
+	}
+	text, toolCalls, _ := parseToolCallMarkupContent(state.MarkupTail, true, len(state.MarkupCalls))
+	if text != "" {
+		state.Content.WriteString(text)
+		callbacks.EmitText(text)
+	}
+	if len(toolCalls) > 0 {
+		state.MarkupCalls = append(state.MarkupCalls, toolCalls...)
+	}
+	state.MarkupTail = ""
+}
+
+func parseReasoning(state *StreamState, delta map[string]interface{}, callbacks StreamCallbacks) {
+	if reasoning, ok := delta["reasoning_content"].(string); ok && reasoning != "" {
+		state.Reasoning.WriteString(reasoning)
+		callbacks.EmitReasoning(reasoning)
+		return
+	}
+	if reasoning, ok := delta["reasoning"].(string); ok && reasoning != "" {
+		state.Reasoning.WriteString(reasoning)
+		callbacks.EmitReasoning(reasoning)
 	}
 }
 

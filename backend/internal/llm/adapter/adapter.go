@@ -4,6 +4,7 @@ import (
 	"io"
 	"time"
 
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
 
@@ -43,6 +44,28 @@ type AdapterConfig struct {
 	Headers     map[string]string      // 调用方附加的自定义 headers
 }
 
+// StreamCallbacks 统一流式增量回调。
+type StreamCallbacks struct {
+	OnText      func(string)
+	OnReasoning func(string)
+}
+
+// EmitText 发出正文增量。
+func (c StreamCallbacks) EmitText(text string) {
+	if text == "" || c.OnText == nil {
+		return
+	}
+	c.OnText(text)
+}
+
+// EmitReasoning 发出 reasoning 增量。
+func (c StreamCallbacks) EmitReasoning(reasoning string) {
+	if reasoning == "" || c.OnReasoning == nil {
+		return
+	}
+	c.OnReasoning(reasoning)
+}
+
 // ProtocolAdapter 协议适配器接口
 type ProtocolAdapter interface {
 	// Name 返回适配器名称
@@ -79,9 +102,9 @@ type ProtocolAdapter interface {
 	// HandleResponse 处理完整响应（流式或非流式）
 	// isStream: 是否为流式请求
 	// respBody: 响应体
-	// onContent: 回调函数，流式模式下实时返回 content 用于打印
+	// callbacks: 流式模式下实时返回正文与 reasoning 增量
 	// 返回: assistant 消息（可直接添加到 messages），包含 role, content, tool_calls, reasoning_content 等
-	HandleResponse(isStream bool, respBody io.Reader, onContent func(string)) (map[string]interface{}, error)
+	HandleResponse(isStream bool, respBody io.Reader, callbacks StreamCallbacks) (map[string]interface{}, error)
 
 	// ProcessResponse 统一处理响应，提取 reasoning、content 和 tool_calls
 	ProcessResponse(result map[string]interface{}) ProcessResult
@@ -95,8 +118,9 @@ type ProtocolAdapter interface {
 
 // ProcessResult 响应处理结果
 type ProcessResult struct {
-	Reasoning    string                   // 推理/thinking 内容
-	Content      string                   // 普通内容
-	HasToolCalls bool                     // 是否包含 Function Call
-	ToolCalls    []map[string]interface{} // Function Call 原始数据
+	Reasoning      string                       // 推理/thinking 内容
+	ReasoningBlock *runtimetypes.ReasoningBlock // 统一 reasoning 抽象
+	Content        string                       // 普通内容
+	HasToolCalls   bool                         // 是否包含 Function Call
+	ToolCalls      []map[string]interface{}     // Function Call 原始数据
 }
