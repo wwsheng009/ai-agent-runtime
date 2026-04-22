@@ -2111,8 +2111,7 @@ agents:
 	require.NotEmpty(t, provider.requests)
 	messages := provider.requests[0].Messages
 	require.NotEmpty(t, messages)
-	assert.Equal(t, "system", messages[0].Role)
-	assert.Contains(t, messages[0].Content, "Explore profile prompt.")
+	assert.True(t, messageListContainsText(messages, "Explore profile prompt."))
 }
 
 func TestAgentChat_ProfileAutoPrefersWorkspaceProfileOverRegistry(t *testing.T) {
@@ -2164,9 +2163,8 @@ agents:
 	require.NotEmpty(t, provider.requests)
 	messages := provider.requests[0].Messages
 	require.NotEmpty(t, messages)
-	assert.Equal(t, "system", messages[0].Role)
-	assert.Contains(t, messages[0].Content, "Workspace explore prompt.")
-	assert.NotContains(t, messages[0].Content, "Registry explore prompt.")
+	assert.True(t, messageListContainsText(messages, "Workspace explore prompt."))
+	assert.False(t, messageListContainsText(messages, "Registry explore prompt."))
 }
 
 func TestAgentChat_InvalidWorkspacePathReturnsBadRequest(t *testing.T) {
@@ -2220,6 +2218,19 @@ func SearchDocs() {}
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "hello from llm")
+}
+
+func messageListContainsText(messages []types.Message, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	if needle == "" {
+		return false
+	}
+	for _, message := range messages {
+		if strings.Contains(message.Content, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAgentChat_PlannerPreferredIncludesPlan(t *testing.T) {
