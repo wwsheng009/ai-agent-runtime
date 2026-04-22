@@ -49,6 +49,9 @@ func TestGateway_StoresRawOutputAndReturnsReducedEnvelope(t *testing.T) {
 	if strings.Contains(envelope.Summary, "line 5: tail") {
 		t.Fatal("expected summary to be truncated before the last line")
 	}
+	if strings.Contains(envelope.Render(), "artifact_refs:") {
+		t.Fatalf("expected rendered envelope to omit artifact refs, got %q", envelope.Render())
+	}
 
 	record, err := store.Get(context.Background(), envelope.ArtifactIDs[0])
 	if err != nil {
@@ -196,5 +199,39 @@ func TestGateway_BackgroundTaskResultPreservesJobIDInJSONSummary(t *testing.T) {
 	}
 	if !strings.Contains(envelope.Render(), "job_id=job_test123") {
 		t.Fatalf("expected rendered envelope to preserve job_id, got %q", envelope.Render())
+	}
+}
+
+func TestGateway_UsesCacheSafeSummaryOverrideFromToolMetadata(t *testing.T) {
+	gateway := NewGateway(nil)
+
+	envelope, err := gateway.Process(context.Background(), RawToolResult{
+		SessionID:  "session-cache-safe",
+		ToolName:   toolbroker.ToolSpawnTeam,
+		ToolCallID: "call-cache-safe",
+		Content: map[string]interface{}{
+			"team_id":  "team-dynamic-123",
+			"task_ids": []string{"task-dynamic-456"},
+		},
+		Metadata: map[string]interface{}{
+			"tool_metadata": map[string]interface{}{
+				"cache_safe_summary": "Created team run with 0 teammates and 1 tasks. Background orchestration not auto-started.",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("process cache-safe summary result: %v", err)
+	}
+	if envelope == nil {
+		t.Fatal("expected envelope")
+	}
+	if envelope.Render() != "Created team run with 0 teammates and 1 tasks. Background orchestration not auto-started." {
+		t.Fatalf("unexpected rendered envelope: %q", envelope.Render())
+	}
+	if strings.Contains(envelope.Render(), "team-dynamic-123") || strings.Contains(envelope.Render(), "task-dynamic-456") {
+		t.Fatalf("expected rendered envelope to omit dynamic ids, got %q", envelope.Render())
+	}
+	if override, ok := envelope.Metadata["summary_override"].(bool); !ok || !override {
+		t.Fatalf("expected summary_override metadata, got %+v", envelope.Metadata)
 	}
 }

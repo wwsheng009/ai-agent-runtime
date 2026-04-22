@@ -20,6 +20,8 @@ import (
 	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -742,11 +744,11 @@ func TestReActLoop_Run_UsesOutputGatewayForToolResults(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected observation output to be string, got %T", result.Observations[0].Output)
 	}
-	if !strings.Contains(outputText, "artifact_refs:") {
-		t.Fatalf("expected observation output to mention artifact refs, got %q", outputText)
-	}
 	if strings.Contains(outputText, "frame 4") {
 		t.Fatalf("expected inline output to be reduced, got %q", outputText)
+	}
+	if strings.Contains(outputText, "artifact_refs:") {
+		t.Fatalf("expected observation output to omit artifact refs, got %q", outputText)
 	}
 }
 
@@ -1445,7 +1447,7 @@ func TestReActLoop_GetAvailableTools_UsesCatalogSearch(t *testing.T) {
 	agent.SetToolCatalog(catalog)
 
 	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{})
-	tools, err := loop.getAvailableTools("inspect recent logs and errors", nil)
+	tools, err := loop.getAvailableTools(context.Background(), "inspect recent logs and errors", nil)
 	if err != nil {
 		t.Fatalf("get available tools: %v", err)
 	}
@@ -1455,6 +1457,152 @@ func TestReActLoop_GetAvailableTools_UsesCatalogSearch(t *testing.T) {
 	if tools[0].Name != "read_logs" {
 		t.Fatalf("expected read_logs to rank first, got %s", tools[0].Name)
 	}
+}
+
+func TestReActLoop_GetAvailableTools_HidesTeamOnlyBrokerToolsUntilRunMetaActive(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Model:    "test-provider",
+			MaxSteps: 1,
+		},
+		toolBroker: &toolbroker.Broker{TeamStore: store},
+	}
+
+	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{EnableToolCalls: true})
+
+	tools, err := loop.getAvailableTools(context.Background(), "coordinate team tasks", nil)
+	require.NoError(t, err)
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	assert.Contains(t, names, toolbroker.ToolSpawnTeam)
+	assert.NotContains(t, names, toolbroker.ToolReadTaskSpec)
+	assert.NotContains(t, names, toolbroker.ToolReadTaskContext)
+	assert.NotContains(t, names, toolbroker.ToolSendTeamMessage)
+
+	runCtx := team.WithRunMeta(context.Background(), &team.RunMeta{
+		Team: &team.TeamRunMeta{
+			TeamID:  "team-1",
+			AgentID: "lead",
+		},
+	})
+	tools, err = loop.getAvailableTools(runCtx, "coordinate team tasks", nil)
+	require.NoError(t, err)
+	names = names[:0]
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	assert.Contains(t, names, toolbroker.ToolSpawnTeam)
+	assert.Contains(t, names, toolbroker.ToolReadTaskSpec)
+	assert.Contains(t, names, toolbroker.ToolReadTaskContext)
+	assert.Contains(t, names, toolbroker.ToolSendTeamMessage)
+}
+
+func TestReActLoop_Run_FreezesToolSurfaceWithinActiveTurnAfterSpawnTeam(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Model:        "test-provider",
+			MaxSteps:     3,
+			SystemPrompt: "You are a helpful assistant.",
+		},
+		toolBroker: &toolbroker.Broker{TeamStore: store},
+	}
+
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "I will create a team.",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{
+						ID:   "tool_spawn_team",
+						Name: toolbroker.ToolSpawnTeam,
+						Args: map[string]interface{}{
+							"team_id":    "team-cache-freeze",
+							"auto_start": false,
+						},
+					},
+				},
+			},
+			{
+				Content: "Team created.",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        3,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+
+	result, err := loop.Run(context.Background(), "Coordinate team tasks.")
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Len(t, provider.requests, 2)
+
+	firstNames := toolDefinitionNames(provider.requests[0].Tools)
+	secondNames := toolDefinitionNames(provider.requests[1].Tools)
+	assert.Contains(t, firstNames, toolbroker.ToolSpawnTeam)
+	assert.NotContains(t, firstNames, toolbroker.ToolReadTaskSpec)
+	assert.Equal(t, firstNames, secondNames)
+	assert.NotContains(t, secondNames, toolbroker.ToolReadTaskSpec)
+	assert.NotContains(t, secondNames, toolbroker.ToolReadTaskContext)
+	assert.NotContains(t, secondNames, toolbroker.ToolSendTeamMessage)
+}
+
+func TestReActLoop_GetAvailableTools_RecomputesForIndependentTurnSnapshots(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Model:    "test-provider",
+			MaxSteps: 1,
+		},
+		toolBroker: &toolbroker.Broker{TeamStore: store},
+	}
+
+	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{EnableToolCalls: true})
+
+	firstTurnCtx := ensureTurnToolSurfaceSnapshot(context.Background())
+	firstTurnTools, err := loop.getAvailableTools(firstTurnCtx, "coordinate team tasks", nil)
+	require.NoError(t, err)
+	firstTurnNames := toolDefinitionNames(firstTurnTools)
+	assert.Contains(t, firstTurnNames, toolbroker.ToolSpawnTeam)
+	assert.NotContains(t, firstTurnNames, toolbroker.ToolReadTaskSpec)
+
+	secondTurnCtx := ensureTurnToolSurfaceSnapshot(context.Background())
+	secondTurnCtx = team.WithRunMeta(secondTurnCtx, &team.RunMeta{
+		Team: &team.TeamRunMeta{
+			TeamID:  "team-1",
+			AgentID: "lead",
+		},
+	})
+	secondTurnTools, err := loop.getAvailableTools(secondTurnCtx, "coordinate team tasks", nil)
+	require.NoError(t, err)
+	secondTurnNames := toolDefinitionNames(secondTurnTools)
+	assert.Contains(t, secondTurnNames, toolbroker.ToolSpawnTeam)
+	assert.Contains(t, secondTurnNames, toolbroker.ToolReadTaskSpec)
+	assert.Contains(t, secondTurnNames, toolbroker.ToolReadTaskContext)
+	assert.Contains(t, secondTurnNames, toolbroker.ToolSendTeamMessage)
 }
 
 func TestReActLoop_Run_EmitsRuntimeEvents(t *testing.T) {
@@ -1581,7 +1729,7 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 	assert.Contains(t, result.Observations[0].Error, "read-only policy blocks write-like tool")
 	assert.Contains(t, deniedPolicies, "read_only")
 
-	tools, err := loop.getAvailableTools("write file", nil)
+	tools, err := loop.getAvailableTools(context.Background(), "write file", nil)
 	require.NoError(t, err)
 	for _, tool := range tools {
 		assert.NotEqual(t, "write_file", tool.Name)
@@ -2243,6 +2391,14 @@ func allEqualStrings(values []string) bool {
 		}
 	}
 	return true
+}
+
+func toolDefinitionNames(defs []types.ToolDefinition) []string {
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		names = append(names, def.Name)
+	}
+	return names
 }
 
 type testHistorySession struct {

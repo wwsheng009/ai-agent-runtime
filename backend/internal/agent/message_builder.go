@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
-
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -81,7 +79,7 @@ func normalizeToolCalls(toolCalls []types.ToolCall) []types.ToolCall {
 	for index, toolCall := range toolCalls {
 		normalized[index] = toolCall
 		if strings.TrimSpace(normalized[index].ID) == "" {
-			normalized[index].ID = "toolcall_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+			normalized[index].ID = types.DeterministicToolCallID("toolcall_", index, normalized[index].Name, normalized[index].Args)
 		}
 		if normalized[index].Args == nil {
 			normalized[index].Args = map[string]interface{}{}

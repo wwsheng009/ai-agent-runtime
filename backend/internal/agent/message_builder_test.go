@@ -69,6 +69,34 @@ func TestMessageBuilder_AlignsResultsByOrderWhenIDsMissing(t *testing.T) {
 	}
 }
 
+func TestMessageBuilder_AssignsDeterministicToolCallIDs(t *testing.T) {
+	builderA := NewMessageBuilder(nil)
+	builderB := NewMessageBuilder(nil)
+
+	callsA := builderA.AppendAssistantAction("Run tool.", []types.ToolCall{
+		{
+			Name: "search_repo",
+			Args: map[string]interface{}{"query": "gateway"},
+		},
+	}, nil)
+	callsB := builderB.AppendAssistantAction("Run tool.", []types.ToolCall{
+		{
+			Name: "search_repo",
+			Args: map[string]interface{}{"query": "gateway"},
+		},
+	}, nil)
+
+	if len(callsA) != 1 || len(callsB) != 1 {
+		t.Fatalf("expected one tool call in each builder, got %d and %d", len(callsA), len(callsB))
+	}
+	if callsA[0].ID == "" || callsB[0].ID == "" {
+		t.Fatal("expected tool call ids to be auto-generated")
+	}
+	if callsA[0].ID != callsB[0].ID {
+		t.Fatalf("expected deterministic tool call ids, got %s and %s", callsA[0].ID, callsB[0].ID)
+	}
+}
+
 func TestMessageBuilder_PreservesAssistantReasoningMetadata(t *testing.T) {
 	builder := NewMessageBuilder(nil)
 

@@ -474,6 +474,7 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		state.Status = SessionRunning
 		state.CurrentTurnID = turnID
 		state.CurrentRunMeta = cmd.RunMeta.Clone()
+		resetFrozenTurnTools(state)
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	})
@@ -1010,6 +1011,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 
 	runCtx, cancel := context.WithCancel(ctx)
 	runCtx = team.WithRunMeta(runCtx, runMeta)
+	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
 	a.setActiveCancel(cancel)
 	a.activeRunWG.Add(1)
 	go func() {
@@ -1034,6 +1036,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			state.Status = status
 			state.CurrentTurnID = ""
 			state.CurrentRunMeta = nil
+			resetFrozenTurnTools(state)
 			state.PendingTool = nil
 			state.UpdatedAt = time.Now().UTC()
 			return nil
@@ -1072,35 +1075,37 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			}
 			hookMgr.DispatchAsync(ctx, runtimehooks.EventSessionEnd, hookPayload)
 		}
-		a.publish(runtimeevents.Event{
-			Type:      EventSessionEnd,
-			SessionID: a.id,
-			TraceID:   resultTraceID(result, turnID),
-			Payload:   payload,
-		})
 		if result != nil && strings.TrimSpace(result.Output) != "" {
-			payload := map[string]interface{}{
+			messagePayload := map[string]interface{}{
 				"turn_id": turnID,
 				"content": result.Output,
 			}
 			if result.LimitReached {
-				payload["limit_reached"] = true
+				messagePayload["limit_reached"] = true
 				if result.StepLimit > 0 {
-					payload["step_limit"] = result.StepLimit
+					messagePayload["step_limit"] = result.StepLimit
 				}
 			}
 			if result.Reasoning != nil {
 				if encoded := result.Reasoning.ToMap(); len(encoded) > 0 {
-					payload["reasoning"] = encoded
+					messagePayload["reasoning"] = encoded
 				}
 			}
 			a.publish(runtimeevents.Event{
 				Type:      EventAssistantMessage,
 				SessionID: a.id,
 				TraceID:   resultTraceID(result, turnID),
-				Payload:   payload,
+				Payload:   messagePayload,
 			})
 		}
+		// Publish assistant_message before session_end so interactive clients can
+		// complete any buffered streaming output before session teardown.
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionEnd,
+			SessionID: a.id,
+			TraceID:   resultTraceID(result, turnID),
+			Payload:   payload,
+		})
 		if reply != nil {
 			reply <- SubmitResult{Result: result, Err: execErr}
 		}
@@ -1192,16 +1197,8 @@ func (a *SessionActor) recordPendingToolCall(ctx context.Context, pending *Pendi
 	if err != nil {
 		return err
 	}
-	if sessionHasToolCall(session, pending.ToolCallID) {
-		return nil
-	}
-	assistant := runtimetypes.NewAssistantMessage("")
-	assistant.ToolCalls = []runtimetypes.ToolCall{{
-		ID:   pending.ToolCallID,
-		Name: pending.ToolName,
-		Args: decodePendingToolArgs(pending.ArgsJSON),
-	}}
-	session.AddMessage(*assistant)
+	batchCtx, _ := agent.ToolBatchContextFromContext(ctx)
+	ensurePendingToolBatchInSession(session, pending, batchCtx.CompletedToolMessages)
 	return a.persistSession(ctx, session)
 }
 
@@ -1239,23 +1236,7 @@ func (a *SessionActor) resumePendingToolWithResult(ctx context.Context, state *R
 	if err := a.persistSession(ctx, session); err != nil {
 		return err
 	}
-	runMeta := state.CurrentRunMeta.Clone()
-	turnID := strings.TrimSpace(state.CurrentTurnID)
-	if err := a.updateState(ctx, func(runtimeState *RuntimeState) error {
-		if runtimeState.PendingTool == nil || runtimeState.PendingTool.ToolCallID != state.PendingTool.ToolCallID {
-			return fmt.Errorf("pending tool changed while resuming")
-		}
-		runtimeState.PendingTool = nil
-		runtimeState.PendingApproval = nil
-		runtimeState.PendingQuestion = nil
-		runtimeState.Status = SessionRunning
-		runtimeState.UpdatedAt = time.Now().UTC()
-		return nil
-	}); err != nil {
-		return err
-	}
-	a.startSessionRun(ctx, session, "", true, turnID, runMeta, nil)
-	return nil
+	return a.resumePendingBatchAfterCurrentResult(ctx, state, state.PendingTool, session, false)
 }
 
 func (a *SessionActor) resumeFromPersistedToolResult(ctx context.Context, state *RuntimeState, session *Session) error {
@@ -1271,24 +1252,7 @@ func (a *SessionActor) resumeFromPersistedToolResult(ctx context.Context, state 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	runMeta := state.CurrentRunMeta.Clone()
-	turnID := strings.TrimSpace(state.CurrentTurnID)
-	if err := a.updateState(ctx, func(runtimeState *RuntimeState) error {
-		if runtimeState.PendingTool == nil || runtimeState.PendingTool.ToolCallID != state.PendingTool.ToolCallID {
-			return fmt.Errorf("pending tool changed while resuming")
-		}
-		runtimeState.PendingTool = nil
-		runtimeState.PendingApproval = nil
-		runtimeState.PendingQuestion = nil
-		runtimeState.Status = SessionRunning
-		runtimeState.UpdatedAt = time.Now().UTC()
-		return nil
-	}); err != nil {
-		return err
-	}
-	a.deleteStoredToolReceipt(context.Background(), a.id, state.PendingTool.ToolCallID)
-	a.startSessionRun(ctx, session, "", true, turnID, runMeta, nil)
-	return nil
+	return a.resumePendingBatchAfterCurrentResult(ctx, state, state.PendingTool, session, true)
 }
 
 func (a *SessionActor) appendPendingToolReceiptToSession(ctx context.Context, pending *PendingToolInvocation, session *Session) (*Session, error) {
@@ -1426,23 +1390,7 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 	if err := a.persistSession(ctx, session); err != nil {
 		return err
 	}
-	turnID := strings.TrimSpace(state.CurrentTurnID)
-	if err := a.updateState(ctx, func(runtimeState *RuntimeState) error {
-		if runtimeState.PendingTool == nil || runtimeState.PendingTool.ToolCallID != state.PendingTool.ToolCallID {
-			return fmt.Errorf("pending tool changed while resuming")
-		}
-		runtimeState.PendingTool = nil
-		runtimeState.PendingApproval = nil
-		runtimeState.PendingQuestion = nil
-		runtimeState.Status = SessionRunning
-		runtimeState.UpdatedAt = time.Now().UTC()
-		return nil
-	}); err != nil {
-		return err
-	}
-	a.deleteStoredToolReceipt(context.Background(), a.id, pending.ToolCallID)
-	a.startSessionRun(ctx, session, "", true, turnID, runMeta, nil)
-	return nil
+	return a.resumePendingBatchAfterCurrentResult(ctx, state, &pending, session, true)
 }
 
 func (a *SessionActor) buildPendingToolResultMessage(ctx context.Context, pending *PendingToolInvocation, content interface{}, toolErr string) (*runtimetypes.Message, error) {
@@ -1477,6 +1425,143 @@ func (a *SessionActor) buildPendingToolResultMessage(ctx context.Context, pendin
 		message.Metadata["gateway_error"] = gatewayErr.Error()
 	}
 	return message, nil
+}
+
+func (a *SessionActor) resumePendingBatchAfterCurrentResult(ctx context.Context, state *RuntimeState, pending *PendingToolInvocation, session *Session, deleteStoredReceipt bool) error {
+	if a == nil {
+		return fmt.Errorf("session actor is nil")
+	}
+	if state == nil || pending == nil {
+		return fmt.Errorf("pending tool not found")
+	}
+	if session == nil {
+		return fmt.Errorf("session is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ensurePendingToolBatchInSession(session, pending, nil)
+	if err := a.persistSession(ctx, session); err != nil {
+		return err
+	}
+	runMeta := state.CurrentRunMeta.Clone()
+	turnID := strings.TrimSpace(state.CurrentTurnID)
+	if err := a.updateState(ctx, func(runtimeState *RuntimeState) error {
+		if runtimeState.PendingTool == nil || runtimeState.PendingTool.ToolCallID != state.PendingTool.ToolCallID {
+			return fmt.Errorf("pending tool changed while resuming")
+		}
+		runtimeState.PendingTool = nil
+		runtimeState.PendingApproval = nil
+		runtimeState.PendingQuestion = nil
+		runtimeState.Status = SessionRunning
+		runtimeState.UpdatedAt = time.Now().UTC()
+		return nil
+	}); err != nil {
+		return err
+	}
+	if deleteStoredReceipt {
+		a.deleteStoredToolReceipt(context.Background(), a.id, pending.ToolCallID)
+	}
+	a.startPendingBatchRecoveryRun(ctx, session, pending, turnID, runMeta)
+	return nil
+}
+
+func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session *Session, pending *PendingToolInvocation, turnID string, runMeta *team.RunMeta) {
+	if a == nil || session == nil || pending == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	runCtx = team.WithRunMeta(runCtx, runMeta)
+	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
+	a.setActiveCancel(cancel)
+	a.activeRunWG.Add(1)
+	go func() {
+		defer a.activeRunWG.Done()
+		if err := a.executeRemainingPendingBatch(runCtx, session, pending); err != nil {
+			cancel()
+			a.clearActiveCancel()
+			a.finishPendingBatchRecovery(session, turnID, err)
+			return
+		}
+		cancel()
+		a.clearActiveCancel()
+		a.startSessionRun(context.Background(), session, "", true, turnID, runMeta, nil)
+	}()
+}
+
+func (a *SessionActor) executeRemainingPendingBatch(ctx context.Context, session *Session, pending *PendingToolInvocation) error {
+	if a == nil || a.agent == nil {
+		return fmt.Errorf("agent is not configured")
+	}
+	if session == nil || pending == nil {
+		return fmt.Errorf("pending batch is not available")
+	}
+	batch := pendingRuntimeToolCalls(session, pending)
+	if len(batch) == 0 {
+		return nil
+	}
+	currentIndex := 0
+	for index, call := range batch {
+		if strings.TrimSpace(call.ID) == strings.TrimSpace(pending.ToolCallID) {
+			currentIndex = index
+			break
+		}
+	}
+	for index := currentIndex + 1; index < len(batch); index++ {
+		call := batch[index]
+		if strings.TrimSpace(call.ID) == "" || sessionHasToolResult(session, call.ID) {
+			continue
+		}
+		message, err := a.agent.ExecuteToolCall(ctx, a.id, call, session.GetMessages(), batch)
+		if err != nil {
+			return err
+		}
+		session.AddMessage(*message)
+		if err := a.persistSession(ctx, session); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *SessionActor) finishPendingBatchRecovery(session *Session, turnID string, execErr error) {
+	if a == nil {
+		return
+	}
+	status := SessionIdle
+	if a.consumeInterrupted() || (execErr != nil && (strings.Contains(execErr.Error(), "context canceled") || strings.Contains(execErr.Error(), "deadline exceeded"))) {
+		status = SessionStopped
+	}
+	_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+		state.Status = status
+		state.CurrentTurnID = ""
+		state.CurrentRunMeta = nil
+		resetFrozenTurnTools(state)
+		state.PendingTool = nil
+		state.PendingApproval = nil
+		state.PendingQuestion = nil
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	if session != nil {
+		_ = a.persistSession(context.Background(), session)
+	}
+	a.publish(runtimeevents.Event{
+		Type:      EventSessionEnd,
+		SessionID: a.id,
+		TraceID:   strings.TrimSpace(turnID),
+		Payload: map[string]interface{}{
+			"turn_id":  strings.TrimSpace(turnID),
+			"resume":   true,
+			"success":  false,
+			"steps":    0,
+			"error":    errorString(execErr),
+			"duration": int64(0),
+		},
+	})
 }
 
 func (a *SessionActor) setActiveCancel(cancel context.CancelFunc) {
@@ -1515,7 +1600,7 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 	if strings.TrimSpace(req.SessionID) == "" {
 		req.SessionID = a.id
 	}
-	pendingTool, err := newPendingToolInvocation(req.ToolCallID, req.ToolName, req.ArgsJSON)
+	pendingTool, err := newPendingToolInvocation(ctx, req.ToolCallID, req.ToolName, req.ArgsJSON)
 	if err != nil {
 		return runtimepolicy.ApprovalResponse{}, err
 	}
@@ -1562,6 +1647,9 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 				state.PendingApproval = nil
 				state.PendingTool = nil
 				state.Status = SessionIdle
+				state.CurrentTurnID = ""
+				state.CurrentRunMeta = nil
+				resetFrozenTurnTools(state)
 				state.UpdatedAt = time.Now().UTC()
 			}
 			return nil
@@ -1584,7 +1672,7 @@ func (a *SessionActor) AskUserQuestion(ctx context.Context, req toolbroker.UserQ
 	if strings.TrimSpace(req.SessionID) == "" {
 		req.SessionID = a.id
 	}
-	pendingTool, err := newPendingToolInvocation(req.ToolCallID, toolbroker.ToolAskUserQuestion, askUserQuestionArgsJSON(req))
+	pendingTool, err := newPendingToolInvocation(ctx, req.ToolCallID, toolbroker.ToolAskUserQuestion, askUserQuestionArgsJSON(req))
 	if err != nil {
 		return "", err
 	}
@@ -1630,6 +1718,9 @@ func (a *SessionActor) AskUserQuestion(ctx context.Context, req toolbroker.UserQ
 				state.PendingQuestion = nil
 				state.PendingTool = nil
 				state.Status = SessionIdle
+				state.CurrentTurnID = ""
+				state.CurrentRunMeta = nil
+				resetFrozenTurnTools(state)
 				state.UpdatedAt = time.Now().UTC()
 			}
 			return nil
@@ -1696,14 +1787,14 @@ func (a *SessionActor) resolveQuestion(questionID, answer string) bool {
 	return true
 }
 
-func newPendingToolInvocation(toolCallID, toolName string, argsJSON json.RawMessage) (*PendingToolInvocation, error) {
+func newPendingToolInvocation(ctx context.Context, toolCallID, toolName string, argsJSON json.RawMessage) (*PendingToolInvocation, error) {
 	toolName = strings.TrimSpace(toolName)
 	if toolName == "" {
 		return nil, fmt.Errorf("tool name is required")
 	}
 	toolCallID = strings.TrimSpace(toolCallID)
 	if toolCallID == "" {
-		toolCallID = "toolcall_pending_" + uuid.NewString()
+		toolCallID = pendingToolCallIDFromContext(ctx, toolName, argsJSON)
 	}
 	pending := &PendingToolInvocation{
 		ToolCallID: toolCallID,
@@ -1713,7 +1804,216 @@ func newPendingToolInvocation(toolCallID, toolName string, argsJSON json.RawMess
 	if len(argsJSON) > 0 {
 		pending.ArgsJSON = append(json.RawMessage(nil), argsJSON...)
 	}
+	pending.BatchToolCalls = pendingToolCallsFromContext(ctx, pending.ToolCallID, pending.ToolName, pending.ArgsJSON)
 	return pending, nil
+}
+
+func pendingToolCallIDFromContext(ctx context.Context, toolName string, argsJSON json.RawMessage) string {
+	batchCtx, ok := agent.ToolBatchContextFromContext(ctx)
+	if !ok || len(batchCtx.ToolCalls) == 0 {
+		return runtimetypes.DeterministicToolCallIDFromJSON("toolcall_pending_", 0, toolName, argsJSON)
+	}
+
+	if current := strings.TrimSpace(batchCtx.CurrentToolCallID); current != "" {
+		return current
+	}
+
+	batch := normalizedPendingToolCalls(batchCtx.ToolCalls)
+	currentIndex := len(batchCtx.CompletedToolMessages)
+	if currentIndex >= 0 && currentIndex < len(batch) && strings.TrimSpace(batch[currentIndex].ToolCallID) != "" {
+		return batch[currentIndex].ToolCallID
+	}
+
+	canonicalArgs := canonicalPendingToolArgsJSON(argsJSON)
+	normalizedToolName := strings.TrimSpace(toolName)
+	for _, call := range batch {
+		if strings.TrimSpace(call.ToolName) != normalizedToolName {
+			continue
+		}
+		if canonicalPendingToolArgsJSON(call.ArgsJSON) == canonicalArgs {
+			return call.ToolCallID
+		}
+	}
+
+	return runtimetypes.DeterministicToolCallIDFromJSON("toolcall_", 0, toolName, argsJSON)
+}
+
+func pendingToolCallsFromContext(ctx context.Context, toolCallID, toolName string, argsJSON json.RawMessage) []PendingToolCall {
+	batchCtx, ok := agent.ToolBatchContextFromContext(ctx)
+	if !ok || len(batchCtx.ToolCalls) == 0 {
+		return []PendingToolCall{{
+			ToolCallID: strings.TrimSpace(toolCallID),
+			ToolName:   strings.TrimSpace(toolName),
+			ArgsJSON:   append(json.RawMessage(nil), argsJSON...),
+		}}
+	}
+	calls := normalizedPendingToolCalls(batchCtx.ToolCalls)
+	if len(calls) == 0 {
+		calls = append(calls, PendingToolCall{
+			ToolCallID: strings.TrimSpace(toolCallID),
+			ToolName:   strings.TrimSpace(toolName),
+			ArgsJSON:   append(json.RawMessage(nil), argsJSON...),
+		})
+		return calls
+	}
+
+	current := PendingToolCall{
+		ToolCallID: strings.TrimSpace(toolCallID),
+		ToolName:   strings.TrimSpace(toolName),
+		ArgsJSON:   append(json.RawMessage(nil), argsJSON...),
+	}
+	if current.ToolCallID == "" {
+		return calls
+	}
+	for _, call := range calls {
+		if call.ToolCallID == current.ToolCallID {
+			return calls
+		}
+	}
+
+	currentIndex := len(batchCtx.CompletedToolMessages)
+	if currentIndex >= 0 && currentIndex < len(calls) {
+		calls[currentIndex] = current
+		return calls
+	}
+	return append(calls, current)
+}
+
+func normalizedPendingToolCalls(toolCalls []runtimetypes.ToolCall) []PendingToolCall {
+	if len(toolCalls) == 0 {
+		return nil
+	}
+
+	calls := make([]PendingToolCall, 0, len(toolCalls))
+	for index, call := range toolCalls {
+		payload, err := json.Marshal(call.Args)
+		if err != nil || string(payload) == "null" {
+			payload = nil
+		}
+		callID := strings.TrimSpace(call.ID)
+		if callID == "" {
+			callID = runtimetypes.DeterministicToolCallIDFromJSON("toolcall_", index, call.Name, payload)
+		}
+		calls = append(calls, PendingToolCall{
+			ToolCallID: callID,
+			ToolName:   strings.TrimSpace(call.Name),
+			ArgsJSON:   append(json.RawMessage(nil), payload...),
+		})
+	}
+	return calls
+}
+
+func canonicalPendingToolArgsJSON(argsJSON json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(argsJSON))
+	if trimmed == "" || strings.EqualFold(trimmed, "null") {
+		return "{}"
+	}
+	var decoded interface{}
+	if err := json.Unmarshal(argsJSON, &decoded); err != nil {
+		return trimmed
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil || len(canonical) == 0 || string(canonical) == "null" {
+		return "{}"
+	}
+	return string(canonical)
+}
+
+func ensurePendingToolBatchInSession(session *Session, pending *PendingToolInvocation, completed []runtimetypes.Message) {
+	if session == nil || pending == nil {
+		return
+	}
+	batch := pendingRuntimeToolCalls(session, pending)
+	if len(batch) == 0 {
+		return
+	}
+	index := assistantMessageIndexForToolCall(session, pending.ToolCallID)
+	if index >= 0 {
+		session.History[index].ToolCalls = batch
+	} else {
+		assistant := runtimetypes.NewAssistantMessage("")
+		assistant.ToolCalls = batch
+		session.AddMessage(*assistant)
+	}
+	for _, message := range completed {
+		if message.Role != "tool" || strings.TrimSpace(message.ToolCallID) == "" || sessionHasToolResult(session, message.ToolCallID) {
+			continue
+		}
+		session.AddMessage(*message.Clone())
+	}
+}
+
+func pendingRuntimeToolCalls(session *Session, pending *PendingToolInvocation) []runtimetypes.ToolCall {
+	if pending == nil {
+		return nil
+	}
+	if len(pending.BatchToolCalls) == 0 {
+		if batch := sessionToolCallsForPending(session, pending.ToolCallID); len(batch) > 0 {
+			return batch
+		}
+		return []runtimetypes.ToolCall{{
+			ID:   pending.ToolCallID,
+			Name: pending.ToolName,
+			Args: decodePendingToolArgs(pending.ArgsJSON),
+		}}
+	}
+	calls := make([]runtimetypes.ToolCall, 0, len(pending.BatchToolCalls))
+	for _, call := range pending.BatchToolCalls {
+		callID := strings.TrimSpace(call.ToolCallID)
+		if callID == "" {
+			continue
+		}
+		calls = append(calls, runtimetypes.ToolCall{
+			ID:   callID,
+			Name: strings.TrimSpace(call.ToolName),
+			Args: decodePendingToolArgs(call.ArgsJSON),
+		})
+	}
+	return calls
+}
+
+func sessionToolCallsForPending(session *Session, toolCallID string) []runtimetypes.ToolCall {
+	if session == nil || strings.TrimSpace(toolCallID) == "" {
+		return nil
+	}
+	index := assistantMessageIndexForToolCall(session, toolCallID)
+	if index < 0 || index >= len(session.History) {
+		return nil
+	}
+	message := session.History[index]
+	if len(message.ToolCalls) == 0 {
+		return nil
+	}
+	calls := make([]runtimetypes.ToolCall, len(message.ToolCalls))
+	for i := range message.ToolCalls {
+		calls[i] = runtimetypes.ToolCall{
+			ID:   message.ToolCalls[i].ID,
+			Name: message.ToolCalls[i].Name,
+		}
+		if len(message.ToolCalls[i].Args) > 0 {
+			calls[i].Args = make(map[string]interface{}, len(message.ToolCalls[i].Args))
+			for key, value := range message.ToolCalls[i].Args {
+				calls[i].Args[key] = value
+			}
+		}
+	}
+	return calls
+}
+
+func assistantMessageIndexForToolCall(session *Session, toolCallID string) int {
+	if session == nil || strings.TrimSpace(toolCallID) == "" {
+		return -1
+	}
+	for index := len(session.History) - 1; index >= 0; index-- {
+		message := session.History[index]
+		if message.Role != "assistant" || len(message.ToolCalls) == 0 {
+			continue
+		}
+		if toolCall, ok := message.GetToolCall(toolCallID); ok && toolCall != nil {
+			return index
+		}
+	}
+	return -1
 }
 
 func askUserQuestionArgsJSON(req toolbroker.UserQuestionRequest) json.RawMessage {

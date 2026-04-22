@@ -78,8 +78,88 @@ func TestAICLIChatActorExecutor_SpawnTeamBindsSessionForFollowupTeamTool(t *test
 	if err != nil {
 		t.Fatalf("second Execute failed: %v", err)
 	}
-	if !strings.Contains(response, "task_id") {
-		t.Fatalf("expected task id in follow-up response, got %q", response)
+	if !strings.Contains(response, "Task: Write summary") {
+		t.Fatalf("expected task spec in follow-up response, got %q", response)
+	}
+}
+
+func TestAICLIChatActorExecutor_SpawnTeamKeepsFrozenToolSurfaceWithinSameTurn(t *testing.T) {
+	manager, userID, dir, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	provider := &sameTurnSpawnReadTaskSpecProvider{}
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+	})
+	if err := llmRuntime.RegisterProvider("test-provider", provider); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+	if err := llmRuntime.RegisterProviderAlias("test-model", "test-provider"); err != nil {
+		t.Fatalf("RegisterProviderAlias: %v", err)
+	}
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+
+	session := &ChatSession{
+		ProviderName:     "test-provider",
+		PermissionMode:   runtimepolicy.ModeDefault,
+		Model:            "test-model",
+		SessionManager:   manager,
+		RuntimeSession:   runtimeSession,
+		SessionUserID:    userID,
+		SessionDir:       dir,
+		LocalRuntimeHost: host,
+		ChatExecutor:     newAICLIActorChatExecutor(),
+	}
+	host.BaseSession = session
+
+	response, err := session.ChatExecutor.Execute(context.Background(), session, "Create a team and read the current task spec in the same turn")
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if !strings.Contains(response, "Task: Write summary") {
+		t.Fatalf("expected same-turn task spec in response, got %q", response)
+	}
+	if session.ActiveTeam == nil || session.ActiveTeam.TeamID != "team-1" {
+		t.Fatalf("expected active team binding after same-turn spawn, got %+v", session.ActiveTeam)
+	}
+
+	snapshots := provider.toolSnapshots()
+	if len(snapshots) < 3 {
+		t.Fatalf("expected at least three llm requests, got %+v", snapshots)
+	}
+	if !containsToolName(snapshots[0], toolbroker.ToolSpawnTeam) {
+		t.Fatalf("expected spawn_team in initial tool set, got %+v", snapshots[0])
+	}
+	for _, hidden := range []string{
+		toolbroker.ToolReadTaskSpec,
+		toolbroker.ToolReadTaskContext,
+		toolbroker.ToolSendTeamMessage,
+		toolbroker.ToolReadMailboxDigest,
+		toolbroker.ToolReportTaskOutcome,
+		toolbroker.ToolBlockCurrentTask,
+	} {
+		if containsToolName(snapshots[0], hidden) {
+			t.Fatalf("did not expect %s in initial tool set before spawn_team, got %+v", hidden, snapshots[0])
+		}
+	}
+	if !sameToolSnapshot(snapshots[0], snapshots[1]) {
+		t.Fatalf("expected turn tool surface to stay frozen after spawn_team, got initial=%+v followup=%+v", snapshots[0], snapshots[1])
 	}
 }
 
@@ -160,8 +240,8 @@ func TestAICLIChatActorExecutor_RestoresAmbientBindingAfterRestart(t *testing.T)
 	if err != nil {
 		t.Fatalf("restored Execute failed: %v", err)
 	}
-	if !strings.Contains(response, "task_id") {
-		t.Fatalf("expected restored task context, got %q", response)
+	if !strings.Contains(response, "Task: Write summary") {
+		t.Fatalf("expected restored task spec, got %q", response)
 	}
 }
 
@@ -339,7 +419,6 @@ func TestAICLIChatActorExecutor_InteractiveAutoStartRendersTeamTimeline(t *testi
 			return cloned
 		}()
 		if containsAllChatTimelineLines(snapshot,
-			"[task] started task-auto @planner",
 			"[progress] planner -> lead task-auto Started task: Auto task",
 			"[done] planner -> lead task-auto auto smoke finished",
 			"[task] completed task-auto @planner auto smoke finished",
@@ -440,9 +519,7 @@ func TestAICLIChatActorExecutor_AutoStartQueuedTasksStaySerializedPerTeammate(t 
 			return cloned
 		}()
 		if containsOrderedChatTimelinePrefixes(snapshot,
-			"[task] started task-serial-1 @planner",
 			"[task] completed task-serial-1 @planner",
-			"[task] started task-serial-2 @planner",
 			"[task] completed task-serial-2 @planner",
 			"[team] completed team-serial status=done",
 			"[team summary] team-serial serial lead summary",
@@ -1039,7 +1116,7 @@ func containsAllChatTimelineLines(lines []string, expected ...string) bool {
 	for _, want := range expected {
 		found := false
 		for _, line := range flattened {
-			if strings.TrimSpace(line) == strings.TrimSpace(want) {
+			if chatTimelineLineEquals(line, want) {
 				found = true
 				break
 			}
@@ -1057,11 +1134,71 @@ func containsChatTimelinePrefix(lines []string, prefix string) bool {
 		return false
 	}
 	for _, line := range flattenChatTimelineLines(lines) {
-		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+		if chatTimelineLineHasPrefix(strings.TrimSpace(line), prefix) {
 			return true
 		}
 	}
 	return false
+}
+
+func chatTimelineLineHasPrefix(line, prefix string) bool {
+	line = strings.TrimSpace(line)
+	prefix = strings.TrimSpace(prefix)
+	if line == "" || prefix == "" {
+		return false
+	}
+	if strings.HasPrefix(line, prefix) {
+		return true
+	}
+	if strings.HasPrefix(line, "• "+prefix) {
+		return true
+	}
+	for _, alias := range chatTimelineToolAliases(prefix) {
+		if strings.HasPrefix(line, alias) {
+			return true
+		}
+	}
+	return false
+}
+
+func chatTimelineLineEquals(line, expected string) bool {
+	line = strings.TrimSpace(line)
+	expected = strings.TrimSpace(expected)
+	if line == "" || expected == "" {
+		return false
+	}
+	if line == expected {
+		return true
+	}
+	if line == "• "+expected {
+		return true
+	}
+	for _, alias := range chatTimelineToolAliases(expected) {
+		if line == alias {
+			return true
+		}
+	}
+	return false
+}
+
+func chatTimelineToolAliases(expected string) []string {
+	expected = strings.TrimSpace(expected)
+	switch {
+	case strings.HasPrefix(expected, "[tool] "):
+		tail := strings.TrimSpace(strings.TrimPrefix(expected, "[tool] "))
+		if tail == "" {
+			return []string{"• Running", "• Ran"}
+		}
+		return []string{"• Running " + tail, "• Ran " + tail}
+	case strings.HasPrefix(expected, "[tool done] "):
+		tail := strings.TrimSpace(strings.TrimPrefix(expected, "[tool done] "))
+		if tail == "" {
+			return []string{"• Ran"}
+		}
+		return []string{"• Ran " + tail}
+	default:
+		return nil
+	}
 }
 
 func flattenChatTimelineLines(lines []string) []string {
@@ -1236,6 +1373,126 @@ func (p *localOrchestrationProvider) GetCapabilities() *runtimellm.ModelCapabili
 }
 
 func (p *localOrchestrationProvider) CheckHealth(ctx context.Context) error { return nil }
+
+type sameTurnSpawnReadTaskSpecProvider struct {
+	mu        sync.Mutex
+	snapshots [][]string
+}
+
+func (p *sameTurnSpawnReadTaskSpecProvider) Name() string { return "test-provider" }
+
+func (p *sameTurnSpawnReadTaskSpecProvider) Call(ctx context.Context, req *runtimellm.LLMRequest) (*runtimellm.LLMResponse, error) {
+	p.recordToolSnapshot(req.Tools)
+	sawSpawn := false
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		message := req.Messages[i]
+		switch message.Role {
+		case "tool":
+			switch strings.TrimSpace(message.ToolCallID) {
+			case "call-read-same-turn":
+				return &runtimellm.LLMResponse{
+					Content: message.Metadata.GetString("task_id", message.Content),
+					Model:   req.Model,
+				}, nil
+			case "call-spawn-same-turn":
+				sawSpawn = true
+			}
+		}
+	}
+	if sawSpawn {
+		return &runtimellm.LLMResponse{
+			Model: req.Model,
+			ToolCalls: []runtimetypes.ToolCall{
+				{
+					ID:   "call-read-same-turn",
+					Name: toolbroker.ToolReadTaskSpec,
+					Args: map[string]interface{}{},
+				},
+			},
+		}, nil
+	}
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		message := req.Messages[i]
+		if message.Role == "user" && strings.Contains(message.Content, "same turn") {
+			return &runtimellm.LLMResponse{
+				Model: req.Model,
+				ToolCalls: []runtimetypes.ToolCall{
+					{
+						ID:   "call-spawn-same-turn",
+						Name: toolbroker.ToolSpawnTeam,
+						Args: map[string]interface{}{
+							"team_id":    "team-1",
+							"auto_start": false,
+							"tasks": []interface{}{
+								map[string]interface{}{
+									"id":    "task-1",
+									"title": "Write summary",
+									"goal":  "Write summary",
+								},
+							},
+						},
+					},
+				},
+			}, nil
+		}
+	}
+	return &runtimellm.LLMResponse{Content: "no-op", Model: req.Model}, nil
+}
+
+func (p *sameTurnSpawnReadTaskSpecProvider) Stream(ctx context.Context, req *runtimellm.LLMRequest) (<-chan runtimellm.StreamChunk, error) {
+	ch := make(chan runtimellm.StreamChunk, 1)
+	close(ch)
+	return ch, nil
+}
+
+func (p *sameTurnSpawnReadTaskSpecProvider) CountTokens(text string) int { return len(text) }
+
+func (p *sameTurnSpawnReadTaskSpecProvider) GetCapabilities() *runtimellm.ModelCapabilities {
+	return &runtimellm.ModelCapabilities{SupportsTools: true}
+}
+
+func (p *sameTurnSpawnReadTaskSpecProvider) CheckHealth(ctx context.Context) error { return nil }
+
+func (p *sameTurnSpawnReadTaskSpecProvider) recordToolSnapshot(tools []runtimetypes.ToolDefinition) {
+	snapshot := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		snapshot = append(snapshot, tool.Name)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.snapshots = append(p.snapshots, snapshot)
+}
+
+func (p *sameTurnSpawnReadTaskSpecProvider) toolSnapshots() [][]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cloned := make([][]string, len(p.snapshots))
+	for i := range p.snapshots {
+		cloned[i] = append([]string(nil), p.snapshots[i]...)
+	}
+	return cloned
+}
+
+func containsToolName(names []string, target string) bool {
+	for _, name := range names {
+		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(target)) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameToolSnapshot(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !strings.EqualFold(strings.TrimSpace(left[i]), strings.TrimSpace(right[i])) {
+			return false
+		}
+	}
+	return true
+}
 
 type autoStartLocalOrchestrationProvider struct {
 	teammateDelay time.Duration

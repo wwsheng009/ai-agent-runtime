@@ -44,6 +44,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	toolbrokersessionctx "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker/sessionctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
 	"go.uber.org/zap/zapcore"
@@ -3173,6 +3174,9 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 			broker = &toolbroker.Broker{}
 			a.SetToolBroker(broker)
 		}
+		if broker.SessionContextStore == nil {
+			broker.SessionContextStore = toolbrokersessionctx.New(h.sessionManager.GetStorage())
+		}
 		broker.AgentSessions = &sessionAgentController{handler: h}
 	}
 
@@ -3181,6 +3185,9 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 		if broker == nil {
 			broker = &toolbroker.Broker{}
 			a.SetToolBroker(broker)
+		}
+		if broker.SessionContextStore == nil && h.sessionManager != nil {
+			broker.SessionContextStore = toolbrokersessionctx.New(h.sessionManager.GetStorage())
 		}
 		broker.AgentSessions = &sessionAgentController{handler: h}
 		broker.TeamStore = store
@@ -3220,6 +3227,9 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 		if broker == nil {
 			broker = &toolbroker.Broker{}
 			a.SetToolBroker(broker)
+		}
+		if broker.SessionContextStore == nil && h.sessionManager != nil {
+			broker.SessionContextStore = toolbrokersessionctx.New(h.sessionManager.GetStorage())
 		}
 		if broker.AgentSessions == nil {
 			broker.AgentSessions = &sessionAgentController{handler: h}
@@ -6717,6 +6727,21 @@ func runtimeHTTPDebugReporter(ctx context.Context) llm.HTTPDebugReporter {
 		}
 		if event.RequestBodyBytes > 0 {
 			fields = append(fields, logger.Int("request_body_bytes", event.RequestBodyBytes))
+		}
+		if debug := llm.HTTPDebugRequestDiagnostics(event.RequestMetadata); len(debug) > 0 {
+			for _, key := range []string{"request_sha256", "cache_surface_sha256", "input_sha256", "tools_sha256"} {
+				if value := strings.TrimSpace(stringMapValueAny(debug, key)); value != "" {
+					fields = append(fields, logger.String(key, value))
+				}
+			}
+			for _, key := range []string{"message_count", "input_count", "tool_count", "instructions_length"} {
+				if value := intMapValueAny(debug, key); value > 0 {
+					fields = append(fields, logger.Int(key, value))
+				}
+			}
+			if value := strings.TrimSpace(stringMapValueAny(debug, "prompt_cache_key")); value != "" {
+				fields = append(fields, logger.String("prompt_cache_key", value))
+			}
 		}
 		if event.ResponseStatusCode > 0 {
 			fields = append(fields, logger.Int("response_status_code", event.ResponseStatusCode))

@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type plannerSessionClient struct {
@@ -130,6 +130,80 @@ func TestBrokerDefinitionsMarkCanonicalAndCompatibilityOutcomeTools(t *testing.T
 	assert.Equal(t, []string{"blocked", "handoff"}, blockEnum)
 }
 
+func TestBrokerDefinitionsAnnotateActiveTeamRunRequirements(t *testing.T) {
+	store := newTeamStore(t)
+	broker := &Broker{TeamStore: store}
+
+	defs := broker.Definitions()
+	required := map[string]bool{
+		ToolSendTeamMessage:   false,
+		ToolReadMailboxDigest: false,
+		ToolReadTaskSpec:      false,
+		ToolReadTaskContext:   false,
+		ToolReportTaskOutcome: false,
+		ToolBlockCurrentTask:  false,
+	}
+
+	for _, def := range defs {
+		if _, ok := required[def.Name]; !ok {
+			continue
+		}
+		required[def.Name] = true
+		require.NotNil(t, def.Metadata)
+		assert.Equal(t, "requires_active_team_run", def.Metadata["availability"])
+		assert.Equal(t, true, def.Metadata["defer_loading"])
+		assert.Contains(t, def.Description, "Requires an active team run")
+		assert.Contains(t, def.Description, "call spawn_team first")
+	}
+
+	for name, found := range required {
+		assert.True(t, found, "expected definition for %s", name)
+	}
+}
+
+func TestBrokerDefinitionsForContext_HidesTeamOnlyToolsWithoutActiveRun(t *testing.T) {
+	store := newTeamStore(t)
+	broker := &Broker{TeamStore: store}
+
+	names := toolDefinitionNames(broker.DefinitionsForContext(context.Background()))
+	assert.Contains(t, names, ToolSpawnTeam)
+	for _, hidden := range []string{
+		ToolSendTeamMessage,
+		ToolReadMailboxDigest,
+		ToolReadTaskSpec,
+		ToolReadTaskContext,
+		ToolReportTaskOutcome,
+		ToolBlockCurrentTask,
+	} {
+		assert.NotContains(t, names, hidden)
+	}
+}
+
+func TestBrokerDefinitionsForContext_IncludesTeamOnlyToolsWithActiveRun(t *testing.T) {
+	store := newTeamStore(t)
+	broker := &Broker{TeamStore: store}
+
+	runCtx := team.WithRunMeta(context.Background(), &team.RunMeta{
+		Team: &team.TeamRunMeta{
+			TeamID:  "team-1",
+			AgentID: "lead",
+		},
+	})
+
+	names := toolDefinitionNames(broker.DefinitionsForContext(runCtx))
+	for _, required := range []string{
+		ToolSpawnTeam,
+		ToolSendTeamMessage,
+		ToolReadMailboxDigest,
+		ToolReadTaskSpec,
+		ToolReadTaskContext,
+		ToolReportTaskOutcome,
+		ToolBlockCurrentTask,
+	} {
+		assert.Contains(t, names, required)
+	}
+}
+
 func TestBrokerExecuteTeamToolRequiresRunMeta(t *testing.T) {
 	store := newTeamStore(t)
 	ctx := context.Background()
@@ -144,6 +218,14 @@ func TestBrokerExecuteTeamToolRequiresRunMeta(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "team tools require an active team run")
+}
+
+func toolDefinitionNames(defs []types.ToolDefinition) []string {
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		names = append(names, def.Name)
+	}
+	return names
 }
 
 func TestBrokerExecuteReadMailboxDigestUsesUnreadMessagesForCurrentAgent(t *testing.T) {

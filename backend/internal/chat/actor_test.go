@@ -2,6 +2,8 @@ package chat
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +20,146 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+type capturingSequenceProvider struct {
+	name      string
+	responses []*llm.LLMResponse
+	requests  []*llm.LLMRequest
+	callCount int
+}
+
+func (p *capturingSequenceProvider) Name() string {
+	return p.name
+}
+
+func (p *capturingSequenceProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	if req != nil {
+		cloned := &llm.LLMRequest{
+			Provider:        req.Provider,
+			Model:           req.Model,
+			Tools:           append([]types.ToolDefinition(nil), req.Tools...),
+			MaxTokens:       req.MaxTokens,
+			Temperature:     req.Temperature,
+			ReasoningEffort: req.ReasoningEffort,
+			Thinking:        types.CloneThinkingConfig(req.Thinking),
+			Stream:          req.Stream,
+		}
+		if len(req.Metadata) > 0 {
+			cloned.Metadata = make(map[string]interface{}, len(req.Metadata))
+			for key, value := range req.Metadata {
+				cloned.Metadata[key] = value
+			}
+		}
+		if len(req.Messages) > 0 {
+			cloned.Messages = make([]types.Message, len(req.Messages))
+			for index := range req.Messages {
+				cloned.Messages[index] = *req.Messages[index].Clone()
+			}
+		}
+		p.requests = append(p.requests, cloned)
+	}
+	if p.callCount >= len(p.responses) {
+		return &llm.LLMResponse{Content: "done", Model: p.name}, nil
+	}
+	response := p.responses[p.callCount]
+	p.callCount++
+	return response, nil
+}
+
+func (p *capturingSequenceProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
+	return nil, nil
+}
+
+func (p *capturingSequenceProvider) CountTokens(text string) int {
+	return len(text) / 4
+}
+
+func (p *capturingSequenceProvider) GetCapabilities() *llm.ModelCapabilities {
+	return &llm.ModelCapabilities{
+		MaxContextTokens:  128000,
+		MaxOutputTokens:   4096,
+		SupportsTools:     true,
+		SupportsStreaming: true,
+		SupportsJSONMode:  true,
+	}
+}
+
+func (p *capturingSequenceProvider) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
+type simpleEchoMCPManager struct {
+	callCount int
+	messages  []string
+}
+
+func (m *simpleEchoMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
+	if toolName != "team_echo" {
+		return skill.ToolInfo{}, fmt.Errorf("tool not found: %s", toolName)
+	}
+	return skill.ToolInfo{
+		Name:          toolName,
+		Description:   "Echo tool for tests",
+		MCPName:       "test-mcp",
+		MCPTrustLevel: "local",
+		ExecutionMode: "local_mcp",
+		Enabled:       true,
+	}, nil
+}
+
+func (m *simpleEchoMCPManager) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
+	message, _ := args["message"].(string)
+	m.callCount++
+	m.messages = append(m.messages, strings.TrimSpace(message))
+	if strings.TrimSpace(message) == "" {
+		return "ok", nil
+	}
+	return "echo: " + strings.TrimSpace(message), nil
+}
+
+func (m *simpleEchoMCPManager) ListTools() []skill.ToolInfo {
+	info, _ := m.FindTool("team_echo")
+	return []skill.ToolInfo{info}
+}
+
+func TestNewPendingToolInvocationGeneratesDeterministicStandaloneID(t *testing.T) {
+	argsJSON := []byte(`{"prompt":"Need confirmation","required":true}`)
+
+	first, err := newPendingToolInvocation(context.Background(), "", toolbroker.ToolAskUserQuestion, argsJSON)
+	require.NoError(t, err)
+	second, err := newPendingToolInvocation(context.Background(), "", toolbroker.ToolAskUserQuestion, argsJSON)
+	require.NoError(t, err)
+
+	require.Equal(t, first.ToolCallID, second.ToolCallID)
+	require.True(t, strings.HasPrefix(first.ToolCallID, "toolcall_pending_"))
+	require.Len(t, first.BatchToolCalls, 1)
+	require.Equal(t, first.ToolCallID, first.BatchToolCalls[0].ToolCallID)
+}
+
+func TestNewPendingToolInvocationInfersStableCurrentBatchToolCallID(t *testing.T) {
+	firstArgs := map[string]interface{}{"message": "first"}
+	secondArgs := map[string]interface{}{"message": "second"}
+	firstID := types.DeterministicToolCallID("toolcall_", 0, "team_echo", firstArgs)
+	secondID := types.DeterministicToolCallID("toolcall_", 1, "team_echo", secondArgs)
+
+	ctx := agent.WithToolBatchContext(context.Background(), []types.ToolCall{
+		{Name: "team_echo", Args: firstArgs},
+		{Name: "team_echo", Args: secondArgs},
+	}, "", []types.Message{
+		*types.NewToolMessage(firstID, "echo: first"),
+	})
+
+	first, err := newPendingToolInvocation(ctx, "", "team_echo", []byte(`{"message":"second"}`))
+	require.NoError(t, err)
+	second, err := newPendingToolInvocation(ctx, "", "team_echo", []byte(`{"message":"second"}`))
+	require.NoError(t, err)
+
+	require.Equal(t, secondID, first.ToolCallID)
+	require.Equal(t, first.ToolCallID, second.ToolCallID)
+	require.Len(t, first.BatchToolCalls, 2)
+	require.Equal(t, firstID, first.BatchToolCalls[0].ToolCallID)
+	require.Equal(t, secondID, first.BatchToolCalls[1].ToolCallID)
+}
 
 func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
 	ctx := context.Background()
@@ -71,6 +213,68 @@ func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
 	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
+}
+
+func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "gpt-4",
+		MaxRetries:   1,
+	})
+	mockProvider := NewMockLLMProviderForChat()
+	runtime.RegisterProvider(mockProvider.Name(), mockProvider)
+	_ = runtime.RegisterProviderAlias("gpt-4", mockProvider.Name())
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:         "actor-order-test",
+		Model:        "gpt-4",
+		MaxSteps:     3,
+		SystemPrompt: "You are a helpful assistant.",
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	result, err := actor.SubmitPrompt(ctx, "Hello there", nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotEmpty(t, strings.TrimSpace(result.Output))
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+
+	assistantIndex := -1
+	sessionEndIndex := -1
+	for index, event := range events {
+		switch event.Type {
+		case EventAssistantMessage:
+			if assistantIndex < 0 {
+				assistantIndex = index
+			}
+		case EventSessionEnd:
+			if sessionEndIndex < 0 {
+				sessionEndIndex = index
+			}
+		}
+	}
+
+	require.GreaterOrEqual(t, assistantIndex, 0)
+	require.GreaterOrEqual(t, sessionEndIndex, 0)
+	require.Less(t, assistantIndex, sessionEndIndex)
 }
 
 func TestSessionActorSubmitPrompt_EmitsLimitNoticeToSessionAndEvents(t *testing.T) {
@@ -602,6 +806,155 @@ func TestSessionActorAnswerQuestionResumesWithoutInMemoryWaiter(t *testing.T) {
 	}
 }
 
+func TestSessionActorAnswerQuestionResumesWithFrozenToolSurfaceWithinSameTurn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = teamStore.Close() })
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "test-question-frozen-tools-model",
+		MaxRetries:   0,
+	})
+	provider := &capturingSequenceProvider{
+		name: "test-question-frozen-tools-model",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "I will create a team and ask a question.",
+				Model:   "test-question-frozen-tools-model",
+				ToolCalls: []types.ToolCall{
+					{
+						ID:   "tool_spawn_team",
+						Name: toolbroker.ToolSpawnTeam,
+						Args: map[string]interface{}{
+							"team_id":    "team-frozen-tools",
+							"auto_start": false,
+						},
+					},
+					{
+						ID:   "tool_question",
+						Name: toolbroker.ToolAskUserQuestion,
+						Args: map[string]interface{}{
+							"prompt":   "Need confirmation",
+							"required": true,
+						},
+					},
+				},
+			},
+			{
+				Content: "Finished after question resume.",
+				Model:   "test-question-frozen-tools-model",
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:         "actor-question-frozen-tools-test",
+		Model:        provider.Name(),
+		MaxSteps:     3,
+		SystemPrompt: "You are a helpful assistant.",
+	}, nil, runtime)
+	apiAgent.SetToolBroker(&toolbroker.Broker{TeamStore: teamStore})
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor1, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	submitDone := make(chan error, 1)
+	go func() {
+		_, submitErr := actor1.SubmitPrompt(ctx, "Start the flow.", nil)
+		submitDone <- submitErr
+	}()
+
+	var questionID string
+	require.Eventually(t, func() bool {
+		state := actor1.State()
+		if state == nil || state.PendingQuestion == nil || state.PendingTool == nil {
+			return false
+		}
+		if state.Status != SessionWaitingInput {
+			return false
+		}
+		if state.PendingTool.ToolCallID != "tool_question" {
+			return false
+		}
+		if !state.FrozenTurnToolsSet {
+			return false
+		}
+		questionID = state.PendingQuestion.ID
+		return questionID != ""
+	}, 5*time.Second, 20*time.Millisecond)
+
+	state := actor1.State()
+	require.NotNil(t, state)
+	assert.True(t, state.FrozenTurnToolsSet)
+	frozenNames := toolDefinitionNames(state.FrozenTurnTools)
+	assert.Contains(t, frozenNames, toolbroker.ToolSpawnTeam)
+	assert.NotContains(t, frozenNames, toolbroker.ToolReadTaskSpec)
+	assert.NotContains(t, frozenNames, toolbroker.ToolReadTaskContext)
+	assert.NotContains(t, frozenNames, toolbroker.ToolSendTeamMessage)
+
+	actor2, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, actor2.AnswerQuestion(context.Background(), questionID, "yes"))
+
+	require.Eventually(t, func() bool {
+		state := actor2.State()
+		if state == nil || state.Status != SessionIdle || state.PendingQuestion != nil || state.PendingTool != nil {
+			return false
+		}
+		updated, loadErr := storage.Load(context.Background(), session.ID)
+		if loadErr != nil || updated == nil {
+			return false
+		}
+		messages := updated.GetMessages()
+		if len(messages) == 0 {
+			return false
+		}
+		last := messages[len(messages)-1]
+		return last.Role == "assistant" && last.Content == "Finished after question resume."
+	}, 5*time.Second, 20*time.Millisecond)
+
+	cancel()
+	select {
+	case <-submitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("original actor submit did not exit after cancellation")
+	}
+
+	require.Len(t, provider.requests, 2)
+	firstNames := toolDefinitionNames(provider.requests[0].Tools)
+	secondNames := toolDefinitionNames(provider.requests[1].Tools)
+	assert.Equal(t, firstNames, secondNames)
+	assert.Contains(t, secondNames, toolbroker.ToolSpawnTeam)
+	assert.NotContains(t, secondNames, toolbroker.ToolReadTaskSpec)
+	assert.NotContains(t, secondNames, toolbroker.ToolReadTaskContext)
+	assert.NotContains(t, secondNames, toolbroker.ToolSendTeamMessage)
+}
+
 func TestSessionActorApproveToolResumesWithoutInMemoryWaiter(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -749,6 +1102,440 @@ func TestSessionActorApproveToolResumesWithoutInMemoryWaiter(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("original actor submit did not exit after cancellation")
 	}
+}
+
+func TestSessionActorApproveToolRecoversRemainingSiblingCallsBeforeResumingModel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "test-multi-pending-approval-model",
+		MaxRetries:   0,
+	})
+	provider := &capturingSequenceProvider{
+		name: "test-multi-pending-approval-model",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "I need approval for the first tool.",
+				Model:   "test-multi-pending-approval-model",
+				ToolCalls: []types.ToolCall{
+					{
+						ID:   "tool_approval_a",
+						Name: "team_echo",
+						Args: map[string]interface{}{"message": "hello-a"},
+					},
+					{
+						ID:   "tool_approval_b",
+						Name: "team_echo",
+						Args: map[string]interface{}{"message": "hello-b"},
+					},
+				},
+			},
+			{Content: "Finished after multi-tool recovery.", Model: "test-multi-pending-approval-model"},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	mcpManager := &simpleEchoMCPManager{}
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:         "actor-multi-pending-approval-test",
+		Model:        provider.Name(),
+		MaxSteps:     3,
+		SystemPrompt: "You are a helpful assistant.",
+	}, mcpManager, runtime)
+	apiAgent.SetPermissionEngine(&agent.PermissionEngine{
+		Callback: func(ctx context.Context, req runtimepolicy.EvalRequest) (runtimepolicy.Decision, string, error) {
+			if req.ToolCallID == "tool_approval_a" {
+				return runtimepolicy.Decision{Type: runtimepolicy.DecisionAsk}, "manual approval", nil
+			}
+			return runtimepolicy.Decision{Type: runtimepolicy.DecisionAllow}, "", nil
+		},
+	})
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor1, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	submitDone := make(chan error, 1)
+	go func() {
+		_, submitErr := actor1.SubmitPrompt(ctx, "Start approval flow.", nil)
+		submitDone <- submitErr
+	}()
+
+	var requestID string
+	require.Eventually(t, func() bool {
+		state := actor1.State()
+		if state == nil || state.PendingApproval == nil || state.PendingTool == nil {
+			return false
+		}
+		if state.Status != SessionWaitingApproval || state.PendingTool.ToolCallID != "tool_approval_a" {
+			return false
+		}
+		requestID = state.PendingApproval.ID
+		return requestID != ""
+	}, 5*time.Second, 20*time.Millisecond)
+
+	state := actor1.State()
+	require.NotNil(t, state)
+	require.NotNil(t, state.PendingTool)
+	require.Len(t, state.PendingTool.BatchToolCalls, 2)
+
+	pendingSession, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, pendingSession)
+	require.Len(t, pendingSession.History, 2)
+	require.True(t, pendingSession.History[1].HasToolCalls())
+	require.Len(t, pendingSession.History[1].ToolCalls, 2)
+
+	actor2, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, actor2.ApproveTool(context.Background(), requestID, true))
+
+	require.Eventually(t, func() bool {
+		state := actor2.State()
+		if state == nil || state.Status != SessionIdle || state.PendingApproval != nil || state.PendingTool != nil {
+			return false
+		}
+		updated, loadErr := storage.Load(context.Background(), session.ID)
+		if loadErr != nil || updated == nil {
+			return false
+		}
+		messages := updated.GetMessages()
+		if len(messages) < 5 {
+			return false
+		}
+		if messages[2].Role != "tool" || messages[2].ToolCallID != "tool_approval_a" {
+			return false
+		}
+		if messages[3].Role != "tool" || messages[3].ToolCallID != "tool_approval_b" {
+			return false
+		}
+		last := messages[len(messages)-1]
+		return last.Role == "assistant" && last.Content == "Finished after multi-tool recovery."
+	}, 5*time.Second, 20*time.Millisecond)
+
+	updated, err := storage.Load(context.Background(), session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.Len(t, updated.History, 5)
+	require.Equal(t, "tool_approval_a", updated.History[2].ToolCallID)
+	require.Contains(t, updated.History[2].Content, "echo: hello-a")
+	require.Equal(t, "tool_approval_b", updated.History[3].ToolCallID)
+	require.Contains(t, updated.History[3].Content, "echo: hello-b")
+	require.Equal(t, 2, mcpManager.callCount)
+	require.Equal(t, []string{"hello-a", "hello-b"}, mcpManager.messages)
+
+	require.Len(t, provider.requests, 2)
+	require.Len(t, provider.requests[1].Messages, 5)
+	require.Equal(t, "system", provider.requests[1].Messages[0].Role)
+	require.True(t, provider.requests[1].Messages[2].HasToolCalls())
+	require.Len(t, provider.requests[1].Messages[2].ToolCalls, 2)
+	require.Equal(t, "tool_approval_a", provider.requests[1].Messages[3].ToolCallID)
+	require.Contains(t, provider.requests[1].Messages[3].Content, "echo: hello-a")
+	require.Equal(t, "tool_approval_b", provider.requests[1].Messages[4].ToolCallID)
+	require.Contains(t, provider.requests[1].Messages[4].Content, "echo: hello-b")
+	require.NotContains(t, provider.requests[1].Messages[4].Content, "pending-tool recovery")
+
+	cancel()
+	select {
+	case <-submitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("original actor submit did not exit after cancellation")
+	}
+}
+
+func TestSessionActorApproveToolPersistsEarlierSiblingResultsBeforePendingPause(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "test-multi-pending-second-model",
+		MaxRetries:   0,
+	})
+	provider := &capturingSequenceProvider{
+		name: "test-multi-pending-second-model",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "The second tool needs approval.",
+				Model:   "test-multi-pending-second-model",
+				ToolCalls: []types.ToolCall{
+					{
+						ID:   "tool_before",
+						Name: "team_echo",
+						Args: map[string]interface{}{"message": "before"},
+					},
+					{
+						ID:   "tool_pending",
+						Name: "team_echo",
+						Args: map[string]interface{}{"message": "pending"},
+					},
+				},
+			},
+			{Content: "Finished after pending-second recovery.", Model: "test-multi-pending-second-model"},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	mcpManager := &simpleEchoMCPManager{}
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:         "actor-multi-pending-second-test",
+		Model:        provider.Name(),
+		MaxSteps:     3,
+		SystemPrompt: "You are a helpful assistant.",
+	}, mcpManager, runtime)
+	apiAgent.SetPermissionEngine(&agent.PermissionEngine{
+		Callback: func(ctx context.Context, req runtimepolicy.EvalRequest) (runtimepolicy.Decision, string, error) {
+			if req.ToolCallID == "tool_pending" {
+				return runtimepolicy.Decision{Type: runtimepolicy.DecisionAsk}, "manual approval", nil
+			}
+			return runtimepolicy.Decision{Type: runtimepolicy.DecisionAllow}, "", nil
+		},
+	})
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor1, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	submitDone := make(chan error, 1)
+	go func() {
+		_, submitErr := actor1.SubmitPrompt(ctx, "Start approval flow.", nil)
+		submitDone <- submitErr
+	}()
+
+	var requestID string
+	require.Eventually(t, func() bool {
+		state := actor1.State()
+		if state == nil || state.PendingApproval == nil || state.PendingTool == nil {
+			return false
+		}
+		if state.Status != SessionWaitingApproval || state.PendingTool.ToolCallID != "tool_pending" {
+			return false
+		}
+		requestID = state.PendingApproval.ID
+		return requestID != ""
+	}, 5*time.Second, 20*time.Millisecond)
+
+	state := actor1.State()
+	require.NotNil(t, state)
+	require.NotNil(t, state.PendingTool)
+	require.Len(t, state.PendingTool.BatchToolCalls, 2)
+
+	pendingSession, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, pendingSession)
+	require.Len(t, pendingSession.History, 3)
+	require.True(t, pendingSession.History[1].HasToolCalls())
+	require.Len(t, pendingSession.History[1].ToolCalls, 2)
+	require.Equal(t, "tool_before", pendingSession.History[2].ToolCallID)
+	require.Contains(t, pendingSession.History[2].Content, "echo: before")
+
+	actor2, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, actor2.ApproveTool(context.Background(), requestID, true))
+
+	require.Eventually(t, func() bool {
+		state := actor2.State()
+		if state == nil || state.Status != SessionIdle || state.PendingApproval != nil || state.PendingTool != nil {
+			return false
+		}
+		updated, loadErr := storage.Load(context.Background(), session.ID)
+		if loadErr != nil || updated == nil {
+			return false
+		}
+		messages := updated.GetMessages()
+		if len(messages) < 5 {
+			return false
+		}
+		last := messages[len(messages)-1]
+		return last.Role == "assistant" && last.Content == "Finished after pending-second recovery."
+	}, 5*time.Second, 20*time.Millisecond)
+
+	updated, err := storage.Load(context.Background(), session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.Len(t, updated.History, 5)
+	require.Equal(t, "tool_before", updated.History[2].ToolCallID)
+	require.Contains(t, updated.History[2].Content, "echo: before")
+	require.Equal(t, "tool_pending", updated.History[3].ToolCallID)
+	require.Contains(t, updated.History[3].Content, "echo: pending")
+	require.Equal(t, 2, mcpManager.callCount)
+	require.Equal(t, []string{"before", "pending"}, mcpManager.messages)
+
+	require.Len(t, provider.requests, 2)
+	require.Len(t, provider.requests[1].Messages, 5)
+	require.Equal(t, "system", provider.requests[1].Messages[0].Role)
+	require.True(t, provider.requests[1].Messages[2].HasToolCalls())
+	require.Len(t, provider.requests[1].Messages[2].ToolCalls, 2)
+	require.Equal(t, "tool_before", provider.requests[1].Messages[3].ToolCallID)
+	require.Contains(t, provider.requests[1].Messages[3].Content, "echo: before")
+	require.Equal(t, "tool_pending", provider.requests[1].Messages[4].ToolCallID)
+	require.Contains(t, provider.requests[1].Messages[4].Content, "echo: pending")
+	require.NotContains(t, provider.requests[1].Messages[4].Content, "pending-tool recovery")
+
+	cancel()
+	select {
+	case <-submitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("original actor submit did not exit after cancellation")
+	}
+}
+
+func TestSessionActorApproveToolRecoversBatchFromSessionWhenPendingStateHasNoBatch(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+	session.AddMessage(*types.NewUserMessage("Start approval flow."))
+	assistant := types.NewAssistantMessage("")
+	assistant.ToolCalls = []types.ToolCall{
+		{
+			ID:   "tool_legacy_a",
+			Name: "team_echo",
+			Args: map[string]interface{}{"message": "legacy-a"},
+		},
+		{
+			ID:   "tool_legacy_b",
+			Name: "team_echo",
+			Args: map[string]interface{}{"message": "legacy-b"},
+		},
+	}
+	session.AddMessage(*assistant)
+	require.NoError(t, storage.Update(ctx, session))
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "test-legacy-pending-batch-model",
+		MaxRetries:   0,
+	})
+	provider := &capturingSequenceProvider{
+		name: "test-legacy-pending-batch-model",
+		responses: []*llm.LLMResponse{
+			{Content: "Finished after legacy pending recovery.", Model: "test-legacy-pending-batch-model"},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	mcpManager := &simpleEchoMCPManager{}
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:         "actor-legacy-pending-batch-test",
+		Model:        provider.Name(),
+		MaxSteps:     2,
+		SystemPrompt: "You are a helpful assistant.",
+	}, mcpManager, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	require.NoError(t, runtimeStore.SaveState(ctx, &RuntimeState{
+		SessionID:     session.ID,
+		Status:        SessionWaitingApproval,
+		CurrentTurnID: "turn_legacy_pending_batch",
+		PendingTool: &PendingToolInvocation{
+			ToolCallID: "tool_legacy_a",
+			ToolName:   "team_echo",
+			ArgsJSON:   []byte(`{"message":"legacy-a"}`),
+			CreatedAt:  time.Now().UTC(),
+		},
+		PendingApproval: &ApprovalRequest{
+			ID:         "tool_legacy_a",
+			SessionID:  session.ID,
+			ToolCallID: "tool_legacy_a",
+			ToolName:   "team_echo",
+			ArgsJSON:   []byte(`{"message":"legacy-a"}`),
+			Reason:     "manual approval",
+		},
+		UpdatedAt: time.Now().UTC(),
+	}))
+
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, actor.ApproveTool(context.Background(), "tool_legacy_a", true))
+
+	require.Eventually(t, func() bool {
+		state := actor.State()
+		if state == nil || state.Status != SessionIdle || state.PendingApproval != nil || state.PendingTool != nil {
+			return false
+		}
+		updated, loadErr := storage.Load(context.Background(), session.ID)
+		if loadErr != nil || updated == nil {
+			return false
+		}
+		messages := updated.GetMessages()
+		if len(messages) < 5 {
+			return false
+		}
+		last := messages[len(messages)-1]
+		return last.Role == "assistant" && last.Content == "Finished after legacy pending recovery."
+	}, 5*time.Second, 20*time.Millisecond)
+
+	updated, err := storage.Load(context.Background(), session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.Len(t, updated.History, 5)
+	require.Equal(t, "tool_legacy_a", updated.History[2].ToolCallID)
+	require.Contains(t, updated.History[2].Content, "echo: legacy-a")
+	require.Equal(t, "tool_legacy_b", updated.History[3].ToolCallID)
+	require.Contains(t, updated.History[3].Content, "echo: legacy-b")
+	require.Equal(t, 2, mcpManager.callCount)
+	require.Equal(t, []string{"legacy-a", "legacy-b"}, mcpManager.messages)
+
+	require.Len(t, provider.requests, 1)
+	require.Len(t, provider.requests[0].Messages, 5)
+	require.Equal(t, "system", provider.requests[0].Messages[0].Role)
+	require.True(t, provider.requests[0].Messages[2].HasToolCalls())
+	require.Len(t, provider.requests[0].Messages[2].ToolCalls, 2)
+	require.Equal(t, "tool_legacy_a", provider.requests[0].Messages[3].ToolCallID)
+	require.Contains(t, provider.requests[0].Messages[3].Content, "echo: legacy-a")
+	require.Equal(t, "tool_legacy_b", provider.requests[0].Messages[4].ToolCallID)
+	require.Contains(t, provider.requests[0].Messages[4].Content, "echo: legacy-b")
+	require.NotContains(t, provider.requests[0].Messages[4].Content, "pending-tool recovery")
 }
 
 func TestSessionActorAnswerQuestionSelfHealsWhenToolResultAlreadyExists(t *testing.T) {
@@ -1187,4 +1974,12 @@ func stringPayloadValue(payload map[string]interface{}, key string) string {
 	}
 	value, _ := payload[key].(string)
 	return value
+}
+
+func toolDefinitionNames(defs []types.ToolDefinition) []string {
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		names = append(names, def.Name)
+	}
+	return names
 }

@@ -8,10 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestSQLiteRuntimeStorePersistsCurrentRunMeta(t *testing.T) {
@@ -272,6 +273,37 @@ func TestSQLiteRuntimeStorePersistsPendingTool(t *testing.T) {
 	assert.JSONEq(t, `{"prompt":"Need confirmation","required":true}`, string(loaded.PendingTool.ArgsJSON))
 }
 
+func TestSQLiteRuntimeStorePersistsFrozenTurnTools(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-frozen-turn-tools-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	state := &RuntimeState{
+		SessionID:     "session-frozen-turn-tools",
+		Status:        SessionRunning,
+		CurrentTurnID: "turn-1",
+		FrozenTurnTools: []types.ToolDefinition{
+			{Name: "spawn_team", Description: "Create a team"},
+			{Name: "ask_user_question", Description: "Ask the user"},
+		},
+		FrozenTurnToolsSet: true,
+		UpdatedAt:          time.Now().UTC(),
+	}
+	require.NoError(t, store.SaveState(ctx, state))
+
+	loaded, err := store.LoadState(ctx, "session-frozen-turn-tools")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, "turn-1", loaded.CurrentTurnID)
+	assert.True(t, loaded.FrozenTurnToolsSet)
+	require.Len(t, loaded.FrozenTurnTools, 2)
+	assert.Equal(t, "spawn_team", loaded.FrozenTurnTools[0].Name)
+	assert.Equal(t, "ask_user_question", loaded.FrozenTurnTools[1].Name)
+}
+
 func TestSQLiteRuntimeStorePersistsToolReceipt(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
 		DSN: "file:runtime-store-tool-receipt-test?mode=memory&cache=shared",
@@ -435,4 +467,91 @@ func TestSQLiteRuntimeStoreMigratesToolReceiptOrderingColumn(t *testing.T) {
 	require.Len(t, receipts, 2)
 	assert.Equal(t, "tool_receipt_fractional", receipts[0].ToolCallID)
 	assert.Equal(t, "tool_receipt_whole_second", receipts[1].ToolCallID)
+}
+
+func TestSQLiteRuntimeStoreMigratesFrozenTurnToolsColumn(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "runtime.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		);
+		INSERT INTO schema_migrations (version, name, applied_at) VALUES
+			(1, 'session_runtime_state', '2026-03-15T00:00:00Z'),
+			(2, 'session_events', '2026-03-15T00:00:00Z'),
+			(3, 'session_runtime_state_current_run_meta', '2026-03-15T00:00:00Z'),
+			(4, 'session_runtime_state_pending_tool', '2026-03-15T00:00:00Z'),
+			(5, 'session_tool_receipts', '2026-03-15T00:00:00Z'),
+			(6, 'session_tool_receipts_created_at_unix_nano', '2026-03-15T00:00:00Z'),
+			(7, 'session_runtime_state_ambient_run_meta', '2026-03-15T00:00:00Z');
+
+		CREATE TABLE session_runtime_state (
+			session_id TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			current_turn_id TEXT,
+			current_checkpoint_id TEXT,
+			pending_approval_json BLOB,
+			pending_question_json BLOB,
+			head_offset INTEGER NOT NULL DEFAULT 0,
+			active_job_ids_json BLOB NOT NULL DEFAULT '[]',
+			updated_at TEXT NOT NULL,
+			current_run_meta_json BLOB,
+			pending_tool_json BLOB,
+			ambient_run_meta_json BLOB
+		);
+
+		CREATE TABLE session_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			type TEXT NOT NULL,
+			trace_id TEXT,
+			agent_name TEXT,
+			tool_name TEXT,
+			payload_json BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			UNIQUE(session_id, seq)
+		);
+
+		CREATE TABLE session_tool_receipts (
+			session_id TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			tool_name TEXT,
+			message_json BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			created_at_unix_nano INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (session_id, tool_call_id)
+		);
+	`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: dbPath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	state := &RuntimeState{
+		SessionID:     "session-frozen-turn-tools-migration",
+		Status:        SessionRunning,
+		CurrentTurnID: "turn-migration",
+		FrozenTurnTools: []types.ToolDefinition{
+			{Name: "spawn_team", Description: "Create a team"},
+		},
+		FrozenTurnToolsSet: true,
+		UpdatedAt:          time.Now().UTC(),
+	}
+	require.NoError(t, store.SaveState(context.Background(), state))
+
+	loaded, err := store.LoadState(context.Background(), "session-frozen-turn-tools-migration")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.True(t, loaded.FrozenTurnToolsSet)
+	require.Len(t, loaded.FrozenTurnTools, 1)
+	assert.Equal(t, "spawn_team", loaded.FrozenTurnTools[0].Name)
 }

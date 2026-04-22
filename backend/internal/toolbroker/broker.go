@@ -2,13 +2,15 @@ package toolbroker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -38,6 +40,7 @@ type Broker struct {
 	UserInput            UserInputHandler
 	Background           *background.Manager
 	AgentSessions        AgentSessionController
+	SessionContextStore  SessionContextStore
 	TeamStore            team.Store
 	TeamClaims           *team.PathClaimManager
 	TeamPlanner          *team.LeadPlanner
@@ -466,7 +469,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		types.ToolDefinition{
 			Name:        ToolSendTeamMessage,
-			Description: "Send a direct or broadcast mailbox message within the current team.",
+			Description: describeRequiresActiveTeamRun("Send a direct or broadcast mailbox message within the current team."),
+			Metadata:    metadataRequiresActiveTeamRun(nil),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -500,7 +504,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		types.ToolDefinition{
 			Name:        ToolReadMailboxDigest,
-			Description: "Read unread mailbox context for the current teammate, including broadcast messages.",
+			Description: describeRequiresActiveTeamRun("Read unread mailbox context for the current teammate, including broadcast messages."),
+			Metadata:    metadataRequiresActiveTeamRun(nil),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -525,7 +530,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		types.ToolDefinition{
 			Name:        ToolReadTaskSpec,
-			Description: "Read the current task specification for the team run.",
+			Description: describeRequiresActiveTeamRun("Read the current task specification for the team run."),
+			Metadata:    metadataRequiresActiveTeamRun(nil),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -542,7 +548,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		types.ToolDefinition{
 			Name:        ToolReadTaskContext,
-			Description: "Read the current task specification plus richer team context for the active task.",
+			Description: describeRequiresActiveTeamRun("Read the current task specification plus richer team context for the active task."),
+			Metadata:    metadataRequiresActiveTeamRun(nil),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -579,11 +586,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		types.ToolDefinition{
 			Name:        ToolReportTaskOutcome,
-			Description: "Report a structured done, failed, blocked, or handoff outcome for the current team task.",
-			Metadata: map[string]interface{}{
+			Description: describeRequiresActiveTeamRun("Report a structured done, failed, blocked, or handoff outcome for the current team task."),
+			Metadata: metadataRequiresActiveTeamRun(map[string]interface{}{
 				"canonical": true,
 				"replaces":  []string{ToolBlockCurrentTask},
-			},
+			}),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -617,11 +624,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		types.ToolDefinition{
 			Name:        ToolBlockCurrentTask,
-			Description: "Compatibility alias for report_task_outcome when reporting blocked or handoff outcomes.",
-			Metadata: map[string]interface{}{
+			Description: describeRequiresActiveTeamRun("Compatibility alias for report_task_outcome when reporting blocked or handoff outcomes."),
+			Metadata: metadataRequiresActiveTeamRun(map[string]interface{}{
 				"compatibility_alias": true,
 				"canonical_tool":      ToolReportTaskOutcome,
-			},
+			}),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -670,6 +677,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	handleAliases, err := b.loadSessionHandleAliases(ctx, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
 	switch normalizeToolName(toolName) {
 	case ToolAskUserQuestion:
 		if b.UserInput == nil {
@@ -698,7 +709,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				}
 			}
 		}
-		questionID := "q_" + uuid.NewString()
+		questionID := deterministicQuestionID(toolCallID, request)
 		answer, err := b.UserInput.AskUserQuestion(ctx, UserQuestionRequest{
 			ID:          questionID,
 			SessionID:   sessionID,
@@ -749,12 +760,24 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if err != nil {
 			return nil, nil, err
 		}
+		jobAlias := strings.TrimSpace(job.ID)
+		if handleAliases != nil {
+			jobAlias = handleAliases.Jobs.register(job.ID, deterministicHandleAlias(backgroundJobAliasPrefix, toolCallID, ToolBackgroundTask, args))
+			if err := b.saveSessionHandleAliases(ctx, sessionID, handleAliases); err != nil {
+				return nil, nil, err
+			}
+		}
 		return BackgroundTaskResult{
-			JobID:         job.ID,
-			Status:        string(job.Status),
-			Message:       job.Message,
-			RestartPolicy: job.RestartPolicy,
-		}, nil, nil
+				JobID:         jobAlias,
+				Status:        string(job.Status),
+				Message:       job.Message,
+				RestartPolicy: job.RestartPolicy,
+			}, map[string]interface{}{
+				"job_id":         strings.TrimSpace(job.ID),
+				"job_alias":      jobAlias,
+				"status":         string(job.Status),
+				"restart_policy": job.RestartPolicy,
+			}, nil
 
 	case ToolTaskOutput:
 		if b.Background == nil {
@@ -764,6 +787,14 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		jobID = strings.TrimSpace(jobID)
 		if jobID == "" {
 			return nil, nil, fmt.Errorf("job_id is required")
+		}
+		resolvedJobID := jobID
+		jobAlias := ""
+		if handleAliases != nil {
+			resolvedJobID, jobAlias, err = handleAliases.Jobs.resolve(jobID, backgroundJobAliasPrefix, "background job")
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 		offset := int64(0)
 		limit := 0
@@ -778,20 +809,32 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			limit = value
 		}
 		output, err := b.Background.ReadOutput(ctx, background.TaskOutputArgs{
-			JobID:  jobID,
+			JobID:  resolvedJobID,
 			Offset: offset,
 			Limit:  limit,
 		})
 		if err != nil {
 			return nil, nil, err
 		}
+		displayJobID := strings.TrimSpace(output.JobID)
+		if handleAliases != nil {
+			displayJobID = handleAliases.Jobs.aliasFor(output.JobID)
+			if displayJobID == strings.TrimSpace(output.JobID) && jobAlias != "" {
+				displayJobID = jobAlias
+			}
+		}
 		return TaskOutputResult{
-			JobID:      output.JobID,
-			Status:     output.Status,
-			Output:     output.Output,
-			NextOffset: output.NextOffset,
-			ExitCode:   output.ExitCode,
-		}, nil, nil
+				JobID:      displayJobID,
+				Status:     output.Status,
+				Output:     output.Output,
+				NextOffset: output.NextOffset,
+				ExitCode:   output.ExitCode,
+			}, map[string]interface{}{
+				"job_id":      strings.TrimSpace(output.JobID),
+				"job_alias":   displayJobID,
+				"status":      output.Status,
+				"next_offset": output.NextOffset,
+			}, nil
 
 	case ToolSpawnAgent:
 		if b.AgentSessions == nil {
@@ -816,16 +859,33 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["fork_context"].(bool); ok {
 			request.ForkContext = &value
 		}
+		explicitSessionID := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID)) != ""
 		result, err := b.AgentSessions.Spawn(ctx, strings.TrimSpace(sessionID), request)
 		if err != nil {
 			return nil, nil, err
 		}
-		return result, map[string]interface{}{
-			"session_id": result.SessionID,
-			"status":     result.Status,
-			"created":    result.Created,
-			"queued":     result.Queued,
-		}, nil
+		actualSessionID := ""
+		if result != nil {
+			actualSessionID = firstNonEmptyToolValue(result.SessionID, result.ID)
+		}
+		if handleAliases != nil && !explicitSessionID && actualSessionID != "" {
+			handleAliases.Sessions.register(actualSessionID, deterministicHandleAlias(agentSessionAliasPrefix, toolCallID, ToolSpawnAgent, args))
+			if err := b.saveSessionHandleAliases(ctx, sessionID, handleAliases); err != nil {
+				return nil, nil, err
+			}
+		}
+		aliasedResult := aliasAgentStatusResult(result, handleAliases)
+		aliasedSessionID := actualSessionID
+		if aliasedResult != nil {
+			aliasedSessionID = firstNonEmptyToolValue(aliasedResult.SessionID, aliasedResult.ID)
+		}
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"session_id":    actualSessionID,
+			"session_alias": aliasedSessionID,
+			"status":        valueOrEmptyAgentStatus(result),
+			"created":       result != nil && result.Created,
+			"queued":        result != nil && result.Queued,
+		}, agentStatusCacheSafeSummary(aliasedResult)), nil
 
 	case ToolSendInput:
 		if b.AgentSessions == nil {
@@ -844,15 +904,34 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["interrupt"].(bool); ok {
 			request.Interrupt = &value
 		}
+		sessionRef := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID))
+		actualSessionID := sessionRef
+		if handleAliases != nil {
+			actualSessionID, _, err = handleAliases.Sessions.resolve(sessionRef, agentSessionAliasPrefix, "agent session")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		if strings.TrimSpace(request.ID) != "" {
+			request.ID = actualSessionID
+		} else {
+			request.SessionID = actualSessionID
+		}
 		result, err := b.AgentSessions.SendInput(ctx, request)
 		if err != nil {
 			return nil, nil, err
 		}
-		return result, map[string]interface{}{
-			"session_id": result.SessionID,
-			"status":     result.Status,
-			"queued":     result.Queued,
-		}, nil
+		aliasedResult := aliasAgentStatusResult(result, handleAliases)
+		aliasedSessionID := actualSessionID
+		if aliasedResult != nil {
+			aliasedSessionID = firstNonEmptyToolValue(aliasedResult.SessionID, aliasedResult.ID)
+		}
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"session_id":    actualSessionID,
+			"session_alias": aliasedSessionID,
+			"status":        valueOrEmptyAgentStatus(result),
+			"queued":        result != nil && result.Queued,
+		}, agentStatusCacheSafeSummary(aliasedResult)), nil
 
 	case ToolWaitAgent:
 		if b.AgentSessions == nil {
@@ -872,16 +951,40 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		request.IDs = coerceStringSlice(args["ids"])
 		request.SessionIDs = coerceStringSlice(args["session_ids"])
+		if handleAliases != nil {
+			if request.ID, _, err = handleAliases.Sessions.resolve(request.ID, agentSessionAliasPrefix, "agent session"); err != nil {
+				return nil, nil, err
+			}
+			if request.SessionID, _, err = handleAliases.Sessions.resolve(request.SessionID, agentSessionAliasPrefix, "agent session"); err != nil {
+				return nil, nil, err
+			}
+			for index, value := range request.IDs {
+				if request.IDs[index], _, err = handleAliases.Sessions.resolve(value, agentSessionAliasPrefix, "agent session"); err != nil {
+					return nil, nil, err
+				}
+			}
+			for index, value := range request.SessionIDs {
+				if request.SessionIDs[index], _, err = handleAliases.Sessions.resolve(value, agentSessionAliasPrefix, "agent session"); err != nil {
+					return nil, nil, err
+				}
+			}
+		}
 		result, err := b.AgentSessions.Wait(ctx, request)
 		if err != nil {
 			return nil, nil, err
 		}
-		return result, map[string]interface{}{
-			"session_id":  result.MatchedSessionID,
-			"status":      waitResultStatus(result),
-			"timed_out":   result.TimedOut,
-			"ready_count": result.ReadyCount,
-		}, nil
+		aliasedResult := aliasAgentWaitResult(result, handleAliases)
+		aliasedMatchedSessionID := ""
+		if aliasedResult != nil {
+			aliasedMatchedSessionID = strings.TrimSpace(aliasedResult.MatchedSessionID)
+		}
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"session_id":    valueOrEmptyWaitMatchedSession(result),
+			"session_alias": aliasedMatchedSessionID,
+			"status":        waitResultStatus(result),
+			"timed_out":     result != nil && result.TimedOut,
+			"ready_count":   valueOrZeroWaitReadyCount(result),
+		}, agentWaitCacheSafeSummary(aliasedResult)), nil
 
 	case ToolReadAgentEvents:
 		if b.AgentSessions == nil {
@@ -911,16 +1014,35 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		} else if value, ok := args["wait_ms"].(int); ok {
 			request.WaitMs = value
 		}
+		sessionRef := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID))
+		actualSessionID := sessionRef
+		if handleAliases != nil {
+			actualSessionID, _, err = handleAliases.Sessions.resolve(sessionRef, agentSessionAliasPrefix, "agent session")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		if strings.TrimSpace(request.ID) != "" {
+			request.ID = actualSessionID
+		} else {
+			request.SessionID = actualSessionID
+		}
 		result, err := b.AgentSessions.ReadEvents(ctx, request)
 		if err != nil {
 			return nil, nil, err
 		}
-		return result, map[string]interface{}{
-			"session_id": result.SessionID,
-			"count":      result.Count,
-			"latest_seq": result.LatestSeq,
-			"timed_out":  result.TimedOut,
-		}, nil
+		aliasedResult := aliasAgentEventsResult(result, handleAliases)
+		aliasedSessionID := actualSessionID
+		if aliasedResult != nil {
+			aliasedSessionID = strings.TrimSpace(aliasedResult.SessionID)
+		}
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"session_id":    valueOrEmptyEventsSession(result),
+			"session_alias": aliasedSessionID,
+			"count":         valueOrZeroEventsCount(result),
+			"latest_seq":    valueOrZeroEventsSeq(result),
+			"timed_out":     result != nil && result.TimedOut,
+		}, agentEventsCacheSafeSummary(aliasedResult)), nil
 
 	case ToolCloseAgent:
 		if b.AgentSessions == nil {
@@ -933,14 +1055,27 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if sessionKey == "" {
 			return nil, nil, fmt.Errorf("id is required")
 		}
-		result, err := b.AgentSessions.Close(ctx, sessionKey)
+		actualSessionID := sessionKey
+		if handleAliases != nil {
+			actualSessionID, _, err = handleAliases.Sessions.resolve(sessionKey, agentSessionAliasPrefix, "agent session")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		result, err := b.AgentSessions.Close(ctx, actualSessionID)
 		if err != nil {
 			return nil, nil, err
 		}
-		return result, map[string]interface{}{
-			"session_id": result.SessionID,
-			"status":     result.Status,
-		}, nil
+		aliasedResult := aliasAgentStatusResult(result, handleAliases)
+		aliasedSessionID := actualSessionID
+		if aliasedResult != nil {
+			aliasedSessionID = firstNonEmptyToolValue(aliasedResult.SessionID, aliasedResult.ID)
+		}
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"session_id":    actualSessionID,
+			"session_alias": aliasedSessionID,
+			"status":        valueOrEmptyAgentStatus(result),
+		}, agentStatusCacheSafeSummary(aliasedResult)), nil
 
 	case ToolResumeAgent:
 		if b.AgentSessions == nil {
@@ -953,14 +1088,27 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if sessionKey == "" {
 			return nil, nil, fmt.Errorf("id is required")
 		}
-		result, err := b.AgentSessions.Resume(ctx, sessionKey)
+		actualSessionID := sessionKey
+		if handleAliases != nil {
+			actualSessionID, _, err = handleAliases.Sessions.resolve(sessionKey, agentSessionAliasPrefix, "agent session")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		result, err := b.AgentSessions.Resume(ctx, actualSessionID)
 		if err != nil {
 			return nil, nil, err
 		}
-		return result, map[string]interface{}{
-			"session_id": result.SessionID,
-			"status":     result.Status,
-		}, nil
+		aliasedResult := aliasAgentStatusResult(result, handleAliases)
+		aliasedSessionID := actualSessionID
+		if aliasedResult != nil {
+			aliasedSessionID = firstNonEmptyToolValue(aliasedResult.SessionID, aliasedResult.ID)
+		}
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"session_id":    actualSessionID,
+			"session_alias": aliasedSessionID,
+			"status":        valueOrEmptyAgentStatus(result),
+		}, agentStatusCacheSafeSummary(aliasedResult)), nil
 
 	case ToolSpawnTeam:
 		if b.TeamStore == nil {
@@ -1296,7 +1444,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if len(taskIDs) == 1 {
 			rawMeta["task_id"] = taskIDs[0]
 		}
-		return SpawnTeamResult{
+		result := SpawnTeamResult{
 			TeamID:        teamID,
 			CreatedTeam:   createdTeam,
 			AutoStarted:   autoStarted,
@@ -1304,7 +1452,8 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			TaskIDs:       taskIDs,
 			TeammateCount: len(teammateIDs),
 			TaskCount:     len(taskIDs),
-		}, rawMeta, nil
+		}
+		return result, attachCacheSafeSummary(rawMeta, spawnTeamCacheSafeSummary(result)), nil
 
 	case ToolSendTeamMessage:
 		if b.TeamStore == nil {
@@ -1361,28 +1510,30 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 					"to_agent":       message.ToAgent,
 					"dispatch_error": dispatchErr.Error(),
 				}
-				return SendTeamMessageResult{
+				result := SendTeamMessageResult{
 					MessageID: messageID,
 					TeamID:    teamID,
 					FromAgent: agentID,
 					ToAgent:   message.ToAgent,
 					Kind:      message.Kind,
 					TaskID:    taskID,
-				}, rawMeta, nil
+				}
+				return result, attachCacheSafeSummary(rawMeta, sendTeamMessageCacheSafeSummary(result)), nil
 			}
 		}
-		return SendTeamMessageResult{
-				MessageID: messageID,
-				TeamID:    teamID,
-				FromAgent: agentID,
-				ToAgent:   message.ToAgent,
-				Kind:      message.Kind,
-				TaskID:    taskID,
-			}, map[string]interface{}{
-				"team_id":    teamID,
-				"from_agent": agentID,
-				"to_agent":   message.ToAgent,
-			}, nil
+		result := SendTeamMessageResult{
+			MessageID: messageID,
+			TeamID:    teamID,
+			FromAgent: agentID,
+			ToAgent:   message.ToAgent,
+			Kind:      message.Kind,
+			TaskID:    taskID,
+		}
+		return result, attachCacheSafeSummary(map[string]interface{}{
+			"team_id":    teamID,
+			"from_agent": agentID,
+			"to_agent":   message.ToAgent,
+		}, sendTeamMessageCacheSafeSummary(result)), nil
 
 	case ToolReadMailboxDigest:
 		if b.TeamStore == nil {
@@ -1422,19 +1573,20 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if digestResult == nil {
 			digestResult = &team.MailboxDigest{}
 		}
-		return ReadMailboxDigestResult{
-				TeamID:       teamID,
-				AgentID:      agentID,
-				Digest:       digestResult.Digest,
-				MessageIDs:   append([]string(nil), digestResult.MessageIDs...),
-				MessageCount: digestResult.MessageCount,
-				MarkedRead:   digestResult.MarkedRead,
-			}, map[string]interface{}{
-				"team_id":       teamID,
-				"agent_id":      agentID,
-				"message_count": digestResult.MessageCount,
-				"marked_read":   digestResult.MarkedRead,
-			}, nil
+		result := ReadMailboxDigestResult{
+			TeamID:       teamID,
+			AgentID:      agentID,
+			Digest:       digestResult.Digest,
+			MessageIDs:   append([]string(nil), digestResult.MessageIDs...),
+			MessageCount: digestResult.MessageCount,
+			MarkedRead:   digestResult.MarkedRead,
+		}
+		return result, attachCacheSafeSummary(map[string]interface{}{
+			"team_id":       teamID,
+			"agent_id":      agentID,
+			"message_count": digestResult.MessageCount,
+			"marked_read":   digestResult.MarkedRead,
+		}, readMailboxDigestCacheSafeSummary(result)), nil
 
 	case ToolReadTaskSpec:
 		if b.TeamStore == nil {
@@ -1452,11 +1604,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			return nil, nil, err
 		}
 		result := buildTaskSpecResult(task)
-		return result, map[string]interface{}{
+		return result, attachCacheSafeSummary(map[string]interface{}{
 			"team_id": task.TeamID,
 			"task_id": task.ID,
 			"status":  string(task.Status),
-		}, nil
+		}, readTaskSpecCacheSafeSummary(result)), nil
 
 	case ToolReadTaskContext:
 		if b.TeamStore == nil {
@@ -1542,14 +1694,14 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			}
 		}
 
-		return result, map[string]interface{}{
+		return result, attachCacheSafeSummary(map[string]interface{}{
 			"team_id":             teamID,
 			"task_id":             task.ID,
 			"message_count":       result.MessageCount,
 			"dependency_count":    len(result.Dependencies),
 			"dependent_count":     len(result.Dependents),
 			"mailbox_marked_read": result.MarkedRead,
-		}, nil
+		}, readTaskContextCacheSafeSummary(result)), nil
 
 	case ToolBlockCurrentTask:
 		request := ReportTaskOutcomeArgs{}
@@ -1868,7 +2020,7 @@ func coerceStringSlice(value interface{}) []string {
 func (b *Broker) resolveTeamScope(ctx context.Context, sessionID, explicitTeamID string) (teamID string, agentID string, taskID string, err error) {
 	runMeta, ok := team.GetRunMeta(ctx)
 	if !ok || runMeta == nil || runMeta.Team == nil || strings.TrimSpace(runMeta.Team.TeamID) == "" {
-		return "", "", "", fmt.Errorf("team tools require an active team run")
+		return "", "", "", fmt.Errorf("team tools require an active team run; call spawn_team first from the lead chat or continue within an active team task")
 	}
 	teamID = strings.TrimSpace(explicitTeamID)
 	runTeamID := strings.TrimSpace(runMeta.Team.TeamID)
@@ -2031,7 +2183,7 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 		if result.ResultRef != nil {
 			payload["result_ref"] = *result.ResultRef
 		}
-		return ReportTaskOutcomeResult{
+		resultPayload := ReportTaskOutcomeResult{
 			TaskID:    task.ID,
 			TeamID:    teamID,
 			Status:    string(result.Status),
@@ -2040,7 +2192,8 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 			Blocker:   strings.TrimSpace(result.Outcome.Blocker),
 			ResultRef: firstNonEmptyString(payloadString(payload, "result_ref")),
 			BlockedBy: agentID,
-		}, payload, nil
+		}
+		return resultPayload, attachCacheSafeSummary(payload, reportTaskOutcomeCacheSafeSummary(resultPayload)), nil
 
 	case team.TaskOutcomeBlocked, team.TaskOutcomeHandoff:
 		applyOutcome := outcome
@@ -2109,7 +2262,7 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 			"replanned":    len(plannedTaskIDs) > 0,
 			"replan_error": replanError,
 		}
-		return ReportTaskOutcomeResult{
+		resultPayload := ReportTaskOutcomeResult{
 			TaskID:          task.ID,
 			TeamID:          teamID,
 			Status:          string(team.TaskStatusBlocked),
@@ -2123,7 +2276,8 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 			PlannedTaskIDs:  plannedTaskIDs,
 			DependencyCount: dependencyCount,
 			ReplanError:     replanError,
-		}, payload, nil
+		}
+		return resultPayload, attachCacheSafeSummary(payload, reportTaskOutcomeCacheSafeSummary(resultPayload)), nil
 	default:
 		return ReportTaskOutcomeResult{}, nil, fmt.Errorf("unsupported task outcome: %s", outcome.Status)
 	}
@@ -2157,4 +2311,24 @@ func stringValue(value interface{}) string {
 	default:
 		return fmt.Sprintf("%v", value)
 	}
+}
+
+func deterministicQuestionID(toolCallID string, request AskUserQuestionArgs) string {
+	payload := struct {
+		ToolCallID  string   `json:"tool_call_id,omitempty"`
+		Prompt      string   `json:"prompt"`
+		Suggestions []string `json:"suggestions,omitempty"`
+		Required    bool     `json:"required"`
+	}{
+		ToolCallID:  strings.TrimSpace(toolCallID),
+		Prompt:      strings.TrimSpace(request.Prompt),
+		Suggestions: append([]string(nil), request.Suggestions...),
+		Required:    request.Required,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil || len(encoded) == 0 {
+		encoded = []byte(strings.TrimSpace(request.Prompt))
+	}
+	sum := sha256.Sum256(encoded)
+	return "q_" + hex.EncodeToString(sum[:8])
 }

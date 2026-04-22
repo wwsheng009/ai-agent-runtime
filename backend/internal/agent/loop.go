@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -197,6 +198,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		return nil, err
 	}
 	remainingBudget := options.BudgetTokens
+	currentCtx := ensureTurnToolSurfaceSnapshot(ctx)
 
 	// ReAct 循环：Think - Act - Observe
 	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
@@ -216,7 +218,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 
 		// 1. Think: LLM 推理决定下一步行动
-		thought, action, usage, err := loop.think(ctx, traceID, sessionID, step, prompt, builder.Messages(), observations, options.ToolWhitelist, remainingBudget)
+		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, builder.Messages(), observations, options.ToolWhitelist, remainingBudget)
 		if err != nil {
 			loop.agent.AddError(fmt.Sprintf("think failed: %v", err))
 			result.Error = err.Error()
@@ -280,7 +282,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// 2. Act: 执行工具调用
 		normalizedCalls := builder.AppendAssistantAction(action.Content, action.ToolCalls, action.Reasoning)
 		historySnapshot := builder.Messages()
-		toolResults, err := loop.act(ctx, traceID, sessionID, step, options.Depth, historySnapshot, normalizedCalls, options.ToolWhitelist)
+		toolResults, err := loop.act(currentCtx, traceID, sessionID, step, options.Depth, historySnapshot, normalizedCalls, options.ToolWhitelist)
 		if err != nil {
 			loop.agent.AddError(fmt.Sprintf("act failed: %v", err))
 			hadToolFailure = true
@@ -313,7 +315,8 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 
 		// 3. Observe: 记录执行结果
-		observations = loop.observe(ctx, toolResults, observations, step)
+		currentCtx = promoteTeamRunContext(currentCtx, toolResults)
+		observations = loop.observe(currentCtx, toolResults, observations, step)
 
 		// 4. 更新对话历史
 		builder.AppendToolResults(normalizedCalls, toolResultsToPayloads(toolResults))
@@ -463,7 +466,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	// 添加工具定义（如果启用了工具调用）
 	if loop.config.EnableToolCalls {
 		// 获取可用工具
-		tools, err := loop.getAvailableTools(goal, toolWhitelist)
+		tools, err := loop.getAvailableTools(ctx, goal, toolWhitelist)
 		if err != nil {
 			return "", nil, nil, err
 		}
@@ -471,18 +474,25 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 
 	// 调用 LLM
-	loop.agent.emitRuntimeEvent("llm.request.started", sessionID, "", map[string]interface{}{
+	requestPayload := map[string]interface{}{
 		"trace_id":         traceID,
+		"step":             step,
 		"model":            req.Model,
 		"provider":         req.Provider,
 		"message_count":    len(req.Messages),
 		"tool_count":       len(req.Tools),
 		"remaining_budget": remainingBudget,
-	})
+	}
+	if availability := summarizeToolAvailability(req.Tools); len(availability) > 0 {
+		req.Metadata["tool_availability"] = cloneInterfaceMap(availability)
+		requestPayload["tool_availability"] = availability
+	}
+	loop.agent.emitRuntimeEvent("llm.request.started", sessionID, "", requestPayload)
 	response, err := loop.llmRuntime.Call(callCtx, req)
 	if err != nil {
 		loop.agent.emitRuntimeEvent("llm.request.finished", sessionID, "", map[string]interface{}{
 			"trace_id": traceID,
+			"step":     step,
 			"model":    req.Model,
 			"provider": req.Provider,
 			"success":  false,
@@ -492,6 +502,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	loop.agent.emitRuntimeEvent("llm.request.finished", sessionID, "", map[string]interface{}{
 		"trace_id":        traceID,
+		"step":            step,
 		"model":           req.Model,
 		"provider":        req.Provider,
 		"success":         true,
@@ -551,6 +562,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			"step":     step,
 			"trace_id": traceID,
 		}
+		callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, tc.ID, results[:i]), results[:i])
 		loop.agent.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, nil))
 		if err := loop.agent.runPreToolUseHooks(ctx, sessionID, tc); err != nil {
 			result.Error = err.Error()
@@ -700,7 +712,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 
 		if broker := loop.agent.GetToolBroker(); broker != nil && broker.IsBrokerTool(tc.Name) {
 			if engine != nil {
-				decision, evalErr := engine.Evaluate(ctx, runtimepolicy.EvalRequest{
+				decision, evalErr := engine.Evaluate(callCtx, runtimepolicy.EvalRequest{
 					SessionID:  sessionID,
 					TraceID:    traceID,
 					ToolCallID: tc.ID,
@@ -781,7 +793,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				rawMeta   map[string]interface{}
 				callErr   error
 			)
-			rawOutput, rawMeta, callErr = broker.ExecuteToolCall(ctx, sessionID, tc)
+			rawOutput, rawMeta, callErr = broker.ExecuteToolCall(callCtx, sessionID, tc)
 			if callErr != nil {
 				result.Error = callErr.Error()
 			} else {
@@ -815,7 +827,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 
 		if tc.Name == "spawn_subagents" {
 			if engine != nil {
-				decision, evalErr := engine.Evaluate(ctx, runtimepolicy.EvalRequest{
+				decision, evalErr := engine.Evaluate(callCtx, runtimepolicy.EvalRequest{
 					SessionID:  sessionID,
 					TraceID:    traceID,
 					ToolCallID: tc.ID,
@@ -999,7 +1011,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		metadata["trust_level"] = toolInfo.MCPTrustLevel
 		metadata["execution_mode"] = toolInfo.ExecutionMode
 		if engine != nil {
-			decision, evalErr := engine.Evaluate(ctx, runtimepolicy.EvalRequest{
+			decision, evalErr := engine.Evaluate(callCtx, runtimepolicy.EvalRequest{
 				SessionID:  sessionID,
 				TraceID:    traceID,
 				ToolCallID: tc.ID,
@@ -1315,7 +1327,28 @@ func (loop *ReActLoop) observe(ctx context.Context, toolResults []toolExecutionR
 }
 
 // getAvailableTools 获取可用工具列表
-func (loop *ReActLoop) getAvailableTools(goal string, toolWhitelist []string) ([]types.ToolDefinition, error) {
+func (loop *ReActLoop) getAvailableTools(ctx context.Context, goal string, toolWhitelist []string) ([]types.ToolDefinition, error) {
+	if snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx); ok && snapshot != nil {
+		tools, cached, err := snapshot.LoadTurnToolSurface(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if cached {
+			return cloneToolDefinitions(tools), nil
+		}
+		tools, err = loop.computeAvailableTools(ctx, goal, toolWhitelist)
+		if err != nil {
+			return nil, err
+		}
+		if err := snapshot.SaveTurnToolSurface(ctx, tools); err != nil {
+			return nil, err
+		}
+		return cloneToolDefinitions(tools), nil
+	}
+	return loop.computeAvailableTools(ctx, goal, toolWhitelist)
+}
+
+func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, toolWhitelist []string) ([]types.ToolDefinition, error) {
 	allowed := whitelistSet(toolWhitelist)
 	tools := make([]types.ToolDefinition, 0, 8)
 	seen := make(map[string]bool)
@@ -1352,7 +1385,7 @@ func (loop *ReActLoop) getAvailableTools(goal string, toolWhitelist []string) ([
 	}
 
 	if broker := loop.agent.GetToolBroker(); broker != nil {
-		for _, def := range broker.Definitions() {
+		for _, def := range broker.DefinitionsForContext(ctx) {
 			if len(allowed) > 0 && !allowed[def.Name] {
 				continue
 			}
@@ -1368,6 +1401,106 @@ func (loop *ReActLoop) getAvailableTools(goal string, toolWhitelist []string) ([
 	}
 
 	return tools, nil
+}
+
+func promoteTeamRunContext(ctx context.Context, results []toolExecutionResult) context.Context {
+	promoted := ctx
+	for _, result := range results {
+		promoted = promoteTeamRunContextFromResult(promoted, result)
+	}
+	return promoted
+}
+
+func promoteTeamRunContextFromResult(ctx context.Context, result toolExecutionResult) context.Context {
+	if strings.TrimSpace(result.Error) != "" || !strings.EqualFold(strings.TrimSpace(result.Call.Name), toolbroker.ToolSpawnTeam) {
+		return ctx
+	}
+	teamID, taskID := spawnTeamContextIDs(result)
+	if teamID == "" {
+		return ctx
+	}
+
+	meta, ok := team.GetRunMeta(ctx)
+	if ok && meta != nil {
+		meta = meta.Clone()
+	} else {
+		meta = &team.RunMeta{}
+	}
+	if meta.Team == nil {
+		meta.Team = &team.TeamRunMeta{}
+	}
+	meta.Team.TeamID = teamID
+	if strings.TrimSpace(meta.Team.AgentID) == "" {
+		meta.Team.AgentID = "lead"
+	}
+	if taskID != "" {
+		meta.Team.CurrentTaskID = taskID
+	}
+	return team.WithRunMeta(ctx, meta)
+}
+
+func spawnTeamContextIDs(result toolExecutionResult) (teamID string, taskID string) {
+	switch output := result.Output.(type) {
+	case toolbroker.SpawnTeamResult:
+		teamID = strings.TrimSpace(output.TeamID)
+		if len(output.TaskIDs) == 1 {
+			taskID = strings.TrimSpace(output.TaskIDs[0])
+		}
+	case *toolbroker.SpawnTeamResult:
+		if output != nil {
+			teamID = strings.TrimSpace(output.TeamID)
+			if len(output.TaskIDs) == 1 {
+				taskID = strings.TrimSpace(output.TaskIDs[0])
+			}
+		}
+	}
+
+	if result.Envelope != nil {
+		if teamID == "" {
+			if rawMeta, ok := result.Envelope.Metadata["tool_metadata"].(map[string]interface{}); ok {
+				teamID = strings.TrimSpace(stringValue(rawMeta["team_id"]))
+				if taskID == "" {
+					taskID = strings.TrimSpace(stringValue(rawMeta["task_id"]))
+				}
+			}
+		}
+	}
+
+	if teamID == "" {
+		teamID = strings.TrimSpace(stringValue(result.Call.Args["team_id"]))
+	}
+	if taskID == "" {
+		taskID = firstSpawnTaskID(result.Call.Args)
+	}
+	return teamID, taskID
+}
+
+func firstSpawnTaskID(args map[string]interface{}) string {
+	if len(args) == 0 {
+		return ""
+	}
+	rawTasks, ok := args["tasks"]
+	if !ok {
+		return ""
+	}
+	switch tasks := rawTasks.(type) {
+	case []interface{}:
+		if len(tasks) != 1 {
+			return ""
+		}
+		entry, ok := tasks[0].(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		return strings.TrimSpace(stringValue(entry["id"]))
+	case []map[string]interface{}:
+		if len(tasks) != 1 {
+			return ""
+		}
+		return strings.TrimSpace(stringValue(tasks[0]["id"]))
+	default:
+		return ""
+	}
 }
 
 func normalizeToolParameters(schema map[string]interface{}) map[string]interface{} {
@@ -1439,6 +1572,61 @@ func toolResultsToPayloads(results []toolExecutionResult) []ToolResultPayload {
 		payloads = append(payloads, payload)
 	}
 	return payloads
+}
+
+func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToolCallID string, completed []toolExecutionResult) context.Context {
+	if batch, ok := ToolBatchContextFromContext(ctx); ok && len(batch.ToolCalls) > 0 {
+		return WithToolBatchContext(ctx, batch.ToolCalls, currentToolCallID, batch.CompletedToolMessages)
+	}
+	return WithToolBatchContext(ctx, toolCalls, currentToolCallID, toolMessagesFromResults(completed))
+}
+
+func toolMessagesFromResults(results []toolExecutionResult) []types.Message {
+	if len(results) == 0 {
+		return nil
+	}
+	messages := make([]types.Message, 0, len(results))
+	for _, result := range results {
+		if message := toolExecutionResultMessage(result); message != nil {
+			messages = append(messages, *message)
+		}
+	}
+	return messages
+}
+
+func toolExecutionResultMessage(result toolExecutionResult) *types.Message {
+	if strings.TrimSpace(result.Call.ID) == "" {
+		return nil
+	}
+	message := types.NewToolMessage(result.Call.ID, "")
+	if result.Envelope != nil {
+		message.Content = result.Envelope.Render()
+		if len(result.Envelope.Metadata) > 0 {
+			message.Metadata = types.NewMetadata()
+			for key, value := range result.Envelope.Metadata {
+				message.Metadata[key] = value
+			}
+		}
+		if len(result.Envelope.ArtifactIDs) > 0 {
+			if message.Metadata == nil {
+				message.Metadata = types.NewMetadata()
+			}
+			message.Metadata["artifact_refs"] = append([]string(nil), result.Envelope.ArtifactIDs...)
+		}
+	}
+	if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(result.Error) != "" {
+		message.Content = "Tool execution failed: " + strings.TrimSpace(result.Error)
+	}
+	if strings.TrimSpace(message.Content) == "" {
+		return nil
+	}
+	if message.Metadata == nil {
+		message.Metadata = types.NewMetadata()
+	}
+	if strings.TrimSpace(result.Error) != "" {
+		message.Metadata["tool_error"] = result.Error
+	}
+	return message
 }
 
 func persistBuilderHistory(builder *MessageBuilder, persist func([]types.Message) error) error {
@@ -1520,6 +1708,22 @@ func cloneMessages(input []types.Message) []types.Message {
 	cloned := make([]types.Message, len(input))
 	for i := range input {
 		cloned[i] = *input[i].Clone()
+	}
+	return cloned
+}
+
+func cloneToolDefinitions(input []types.ToolDefinition) []types.ToolDefinition {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make([]types.ToolDefinition, len(input))
+	for index, tool := range input {
+		cloned[index] = types.ToolDefinition{
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  cloneInterfaceMap(tool.Parameters),
+			Metadata:    cloneInterfaceMap(tool.Metadata),
+		}
 	}
 	return cloned
 }
@@ -1779,6 +1983,37 @@ func spawnSubagentsToolDefinition() types.ToolDefinition {
 			"required": []string{"agents"},
 		},
 	}
+}
+
+func summarizeToolAvailability(tools []types.ToolDefinition) map[string]interface{} {
+	if len(tools) == 0 {
+		return nil
+	}
+	requiresActiveTeamRun := make([]string, 0, 4)
+	deferredTools := make([]string, 0, 4)
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" || len(tool.Metadata) == 0 {
+			continue
+		}
+		if availability, _ := tool.Metadata["availability"].(string); strings.EqualFold(strings.TrimSpace(availability), "requires_active_team_run") {
+			requiresActiveTeamRun = append(requiresActiveTeamRun, name)
+		}
+		if deferred, _ := tool.Metadata["defer_loading"].(bool); deferred {
+			deferredTools = append(deferredTools, name)
+		}
+	}
+	if len(requiresActiveTeamRun) == 0 && len(deferredTools) == 0 {
+		return nil
+	}
+	summary := make(map[string]interface{}, 2)
+	if len(requiresActiveTeamRun) > 0 {
+		summary["requires_active_team_run"] = requiresActiveTeamRun
+	}
+	if len(deferredTools) > 0 {
+		summary["deferred_tools"] = deferredTools
+	}
+	return summary
 }
 
 func stringValue(value interface{}) string {

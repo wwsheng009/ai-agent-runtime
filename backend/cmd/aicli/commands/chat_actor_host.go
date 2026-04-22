@@ -20,6 +20,7 @@ import (
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	toolbrokersessionctx "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker/sessionctx"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -248,6 +249,9 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			broker = &toolbroker.Broker{}
 			apiAgent.SetToolBroker(broker)
 		}
+		if broker.SessionContextStore == nil {
+			broker.SessionContextStore = toolbrokersessionctx.New(host.SessionStore)
+		}
 		broker.AgentSessions = host.ActorRegistry
 		broker.TeamStore = host.TeamStore
 		broker.TeamClaims = host.TeamClaims
@@ -258,9 +262,15 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		}
 	}
 	if apiAgent.GetToolBroker() == nil && host.ActorRegistry != nil {
-		apiAgent.SetToolBroker(&toolbroker.Broker{AgentSessions: host.ActorRegistry})
+		apiAgent.SetToolBroker(&toolbroker.Broker{
+			AgentSessions:       host.ActorRegistry,
+			SessionContextStore: toolbrokersessionctx.New(host.SessionStore),
+		})
 	} else if broker := apiAgent.GetToolBroker(); broker != nil && broker.AgentSessions == nil && host.ActorRegistry != nil {
 		broker.AgentSessions = host.ActorRegistry
+	}
+	if broker := apiAgent.GetToolBroker(); broker != nil && broker.SessionContextStore == nil {
+		broker.SessionContextStore = toolbrokersessionctx.New(host.SessionStore)
 	}
 	if toolPolicy := buildLocalChatToolPolicy(session, host.ToolSurface, apiAgent.GetToolBroker()); toolPolicy != nil {
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
@@ -291,6 +301,7 @@ func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) st
 		"Interpret \"当前目录\", \".\", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.",
 		"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",
 		"When planning file or directory work, only use paths that you directly confirmed from tool output in the current workspace. Do not invent sibling directories or extrapolate missing paths from naming patterns.",
+		"Team-only tools such as read_task_spec, read_task_context, send_team_message, read_mailbox_digest, report_task_outcome, and block_current_task require an active team run. Only call them after spawn_team has created the team run or when the current chat is already bound to an active team task.",
 		"When calling team tools, leave teammate session_id unset unless you truly need a fixed explicit session. Never use session_id=\"current\" for teammates.",
 		"When calling spawn_team from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
 		"When you call spawn_team with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",

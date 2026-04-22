@@ -19,17 +19,35 @@ type fakeAgentSessionController struct {
 func (f *fakeAgentSessionController) Spawn(ctx context.Context, parentSessionID string, args SpawnAgentArgs) (*AgentStatusResult, error) {
 	f.lastParent = parentSessionID
 	f.lastSpawn = args
-	return &AgentStatusResult{ID: "child-1", SessionID: "child-1", ParentSessionID: parentSessionID, Status: "running", Exists: true, Created: true, Queued: true}, nil
+	return &AgentStatusResult{
+		ID:                "child-1",
+		SessionID:         "child-1",
+		ParentSessionID:   parentSessionID,
+		Status:            "running",
+		Exists:            true,
+		Created:           true,
+		Queued:            true,
+		CurrentTurnID:     "turn-dynamic-123",
+		PendingToolCallID: "toolcall-dynamic-456",
+	}, nil
 }
 
 func (f *fakeAgentSessionController) SendInput(ctx context.Context, args SendAgentInputArgs) (*AgentStatusResult, error) {
 	f.lastInput = args
-	return &AgentStatusResult{ID: "child-1", SessionID: "child-1", Status: "running", Exists: true, Queued: true}, nil
+	return &AgentStatusResult{
+		ID:                "child-1",
+		SessionID:         "child-1",
+		Status:            "running",
+		Exists:            true,
+		Queued:            true,
+		CurrentTurnID:     "turn-dynamic-234",
+		PendingToolCallID: "toolcall-dynamic-567",
+	}, nil
 }
 
 func (f *fakeAgentSessionController) Wait(ctx context.Context, args WaitAgentArgs) (*AgentWaitResult, error) {
 	f.lastWait = args
-	agent := AgentStatusResult{ID: "child-1", SessionID: "child-1", Status: "idle", Exists: true}
+	agent := AgentStatusResult{ID: "child-1", SessionID: "child-1", Status: "idle", Exists: true, CurrentTurnID: "turn-dynamic-345", PendingToolCallID: "toolcall-dynamic-678"}
 	return &AgentWaitResult{
 		Agent:            &agent,
 		Agents:           []AgentStatusResult{agent},
@@ -57,12 +75,12 @@ func (f *fakeAgentSessionController) ReadEvents(ctx context.Context, args ReadAg
 
 func (f *fakeAgentSessionController) Close(ctx context.Context, sessionID string) (*AgentStatusResult, error) {
 	f.lastClose = sessionID
-	return &AgentStatusResult{ID: sessionID, SessionID: sessionID, Status: "stopped", Exists: true}, nil
+	return &AgentStatusResult{ID: sessionID, SessionID: sessionID, Status: "stopped", Exists: true, CurrentTurnID: "turn-dynamic-456"}, nil
 }
 
 func (f *fakeAgentSessionController) Resume(ctx context.Context, sessionID string) (*AgentStatusResult, error) {
 	f.lastResume = sessionID
-	return &AgentStatusResult{ID: sessionID, SessionID: sessionID, Status: "idle", Exists: true}, nil
+	return &AgentStatusResult{ID: sessionID, SessionID: sessionID, Status: "idle", Exists: true, CurrentTurnID: "turn-dynamic-567"}, nil
 }
 
 func TestBroker_Definitions_ExposeAgentToolsWhenControllerConfigured(t *testing.T) {

@@ -58,6 +58,8 @@ type Gateway struct {
 	reducers []Reducer
 }
 
+const cacheSafeSummaryMetadataKey = "cache_safe_summary"
+
 // NewGateway 创建 output gateway。
 func NewGateway(store ArtifactWriter, reducers ...Reducer) *Gateway {
 	normalized := make([]Reducer, 0, len(reducers))
@@ -147,6 +149,11 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 		envelope.Metadata["reducer"] = "text_truncation"
 	}
 
+	if override := cacheSafeSummaryOverride(result.Metadata); override != "" {
+		envelope.Summary = override
+		envelope.Metadata["summary_override"] = true
+	}
+
 	if len(processErrs) > 0 {
 		envelope.Metadata["gateway_errors"] = processErrs
 	}
@@ -166,9 +173,6 @@ func (e *Envelope) Render() string {
 	}
 	if strings.TrimSpace(e.Summary) != "" {
 		parts = append(parts, strings.TrimSpace(e.Summary))
-	}
-	if len(e.ArtifactIDs) > 0 {
-		parts = append(parts, "artifact_refs: "+strings.Join(e.ArtifactIDs, ", "))
 	}
 
 	return strings.TrimSpace(strings.Join(parts, "\n"))
@@ -255,6 +259,23 @@ func preview(content string, maxLen int) string {
 		return content[:maxLen]
 	}
 	return content[:maxLen-3] + "..."
+}
+
+func cacheSafeSummaryOverride(metadata map[string]interface{}) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	if value, ok := metadata[cacheSafeSummaryMetadataKey].(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	toolMetadata, _ := metadata["tool_metadata"].(map[string]interface{})
+	if len(toolMetadata) == 0 {
+		return ""
+	}
+	if value, ok := toolMetadata[cacheSafeSummaryMetadataKey].(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return ""
 }
 
 func joinErrors(errs []string) error {

@@ -13,6 +13,33 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// ExecuteToolCall executes one tool call using the normal permission/broker/runtime path.
+// batch should contain the full assistant tool batch so recovery can persist crash-safe state.
+func (a *Agent) ExecuteToolCall(ctx context.Context, sessionID string, call types.ToolCall, history []types.Message, batch []types.ToolCall) (*types.Message, error) {
+	if a == nil {
+		return nil, fmt.Errorf("agent is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(batch) == 0 {
+		batch = []types.ToolCall{call}
+	}
+	loop := NewReActLoop(a, a.llmRuntime, nil)
+	callCtx := WithToolBatchContext(ctx, batch, call.ID, completedBatchToolMessages(history, batch, call.ID))
+	results, err := loop.act(callCtx, "trace_"+uuid.NewString(), sessionID, 0, 0, cloneMessages(history), []types.ToolCall{call}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != 1 {
+		return nil, fmt.Errorf("unexpected tool execution result count: %d", len(results))
+	}
+	if message := toolExecutionResultMessage(results[0]); message != nil {
+		return message, nil
+	}
+	return types.NewToolMessage(call.ID, ""), nil
+}
+
 // ExecuteApprovedToolCall executes a previously approved tool call without re-running approval checks.
 func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, call types.ToolCall, history []types.Message) (*types.Message, error) {
 	if a == nil {
@@ -182,4 +209,34 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		}
 	}
 	return message, nil
+}
+
+func completedBatchToolMessages(history []types.Message, batch []types.ToolCall, currentToolCallID string) []types.Message {
+	if len(history) == 0 || len(batch) == 0 {
+		return nil
+	}
+	messages := make([]types.Message, 0, len(batch))
+	for _, batchCall := range batch {
+		callID := strings.TrimSpace(batchCall.ID)
+		if callID == "" || callID == strings.TrimSpace(currentToolCallID) {
+			break
+		}
+		if message := findToolResultMessage(history, callID); message != nil {
+			messages = append(messages, *message.Clone())
+		}
+	}
+	return messages
+}
+
+func findToolResultMessage(history []types.Message, toolCallID string) *types.Message {
+	if len(history) == 0 || strings.TrimSpace(toolCallID) == "" {
+		return nil
+	}
+	for index := len(history) - 1; index >= 0; index-- {
+		if history[index].Role != "tool" || strings.TrimSpace(history[index].ToolCallID) != strings.TrimSpace(toolCallID) {
+			continue
+		}
+		return &history[index]
+	}
+	return nil
 }

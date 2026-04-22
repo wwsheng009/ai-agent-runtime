@@ -12,10 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/google/uuid"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -312,7 +313,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT session_id, status, current_turn_id, current_checkpoint_id, current_run_meta_json, ambient_run_meta_json,
+		SELECT session_id, status, current_turn_id, current_checkpoint_id, current_run_meta_json, ambient_run_meta_json, frozen_turn_tools_json,
 		       pending_tool_json, pending_approval_json, pending_question_json, head_offset, active_job_ids_json, updated_at
 		FROM session_runtime_state
 		WHERE session_id = ?
@@ -323,6 +324,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		statusRaw            string
 		currentRunMetaRaw    sql.NullString
 		ambientRunMetaRaw    sql.NullString
+		frozenTurnToolsRaw   sql.NullString
 		pendingToolRaw       sql.NullString
 		pendingApprovalRaw   sql.NullString
 		pendingQuestionRaw   sql.NullString
@@ -338,6 +340,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		&currentCheckpointRaw,
 		&currentRunMetaRaw,
 		&ambientRunMetaRaw,
+		&frozenTurnToolsRaw,
 		&pendingToolRaw,
 		&pendingApprovalRaw,
 		&pendingQuestionRaw,
@@ -367,6 +370,13 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		var runMeta team.RunMeta
 		if err := json.Unmarshal([]byte(ambientRunMetaRaw.String), &runMeta); err == nil {
 			state.AmbientRunMeta = runMeta.Clone()
+		}
+	}
+	if frozenTurnToolsRaw.Valid && strings.TrimSpace(frozenTurnToolsRaw.String) != "" {
+		var frozen []types.ToolDefinition
+		if err := json.Unmarshal([]byte(frozenTurnToolsRaw.String), &frozen); err == nil {
+			state.FrozenTurnTools = cloneRuntimeToolDefinitions(frozen)
+			state.FrozenTurnToolsSet = true
 		}
 	}
 	if pendingToolRaw.Valid && strings.TrimSpace(pendingToolRaw.String) != "" {
@@ -423,6 +433,14 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 		}
 		ambientRunMetaJSON = string(payload)
 	}
+	frozenTurnToolsJSON := ""
+	if state.FrozenTurnToolsSet {
+		payload, err := json.Marshal(state.FrozenTurnTools)
+		if err != nil {
+			return fmt.Errorf("marshal frozen turn tools: %w", err)
+		}
+		frozenTurnToolsJSON = string(payload)
+	}
 	pendingToolJSON := ""
 	if state.PendingTool != nil {
 		payload, err := json.Marshal(state.PendingTool)
@@ -458,15 +476,16 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO session_runtime_state (
-			session_id, status, current_turn_id, current_checkpoint_id, current_run_meta_json, ambient_run_meta_json, pending_tool_json, pending_approval_json,
+			session_id, status, current_turn_id, current_checkpoint_id, current_run_meta_json, ambient_run_meta_json, frozen_turn_tools_json, pending_tool_json, pending_approval_json,
 			pending_question_json, head_offset, active_job_ids_json, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			status = excluded.status,
 			current_turn_id = excluded.current_turn_id,
 			current_checkpoint_id = excluded.current_checkpoint_id,
 			current_run_meta_json = excluded.current_run_meta_json,
 			ambient_run_meta_json = excluded.ambient_run_meta_json,
+			frozen_turn_tools_json = excluded.frozen_turn_tools_json,
 			pending_tool_json = excluded.pending_tool_json,
 			pending_approval_json = excluded.pending_approval_json,
 			pending_question_json = excluded.pending_question_json,
@@ -474,7 +493,7 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 			active_job_ids_json = excluded.active_job_ids_json,
 			updated_at = excluded.updated_at
 	`, state.SessionID, string(state.Status), nullIfEmpty(state.CurrentTurnID), nullIfEmpty(state.CurrentCheckpointID),
-		nullIfEmpty(currentRunMetaJSON), nullIfEmpty(ambientRunMetaJSON), nullIfEmpty(pendingToolJSON), pendingApprovalJSON, pendingQuestionJSON, state.HeadOffset, activeJobsJSON, state.UpdatedAt.Format(time.RFC3339Nano))
+		nullIfEmpty(currentRunMetaJSON), nullIfEmpty(ambientRunMetaJSON), nullIfEmpty(frozenTurnToolsJSON), nullIfEmpty(pendingToolJSON), pendingApprovalJSON, pendingQuestionJSON, state.HeadOffset, activeJobsJSON, state.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("save runtime state: %w", err)
 	}
@@ -814,6 +833,13 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 			Name:    "session_runtime_state_ambient_run_meta",
 			UpSQL: `
 				ALTER TABLE session_runtime_state ADD COLUMN ambient_run_meta_json BLOB;
+			`,
+		},
+		{
+			Version: 8,
+			Name:    "session_runtime_state_frozen_turn_tools",
+			UpSQL: `
+				ALTER TABLE session_runtime_state ADD COLUMN frozen_turn_tools_json BLOB;
 			`,
 		},
 	}
