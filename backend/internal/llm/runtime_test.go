@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -40,6 +41,44 @@ func (p *captureProvider) GetCapabilities() *ModelCapabilities {
 }
 
 func (p *captureProvider) CheckHealth(ctx context.Context) error { return nil }
+
+type flakyProvider struct {
+	name  string
+	errs  []error
+	resp  *LLMResponse
+	calls int
+}
+
+func (p *flakyProvider) Name() string { return p.name }
+
+func (p *flakyProvider) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
+	p.calls++
+	if index := p.calls - 1; index < len(p.errs) && p.errs[index] != nil {
+		return nil, p.errs[index]
+	}
+	if p.resp != nil {
+		return p.resp, nil
+	}
+	return &LLMResponse{
+		Content: "provider:" + p.name,
+		Model:   req.Model,
+	}, nil
+}
+
+func (p *flakyProvider) Stream(ctx context.Context, req *LLMRequest) (<-chan StreamChunk, error) {
+	ch := make(chan StreamChunk, 1)
+	ch <- StreamChunk{Type: EventTypeDone, Done: true}
+	close(ch)
+	return ch, nil
+}
+
+func (p *flakyProvider) CountTokens(text string) int { return len(text) }
+
+func (p *flakyProvider) GetCapabilities() *ModelCapabilities {
+	return &ModelCapabilities{SupportsStreaming: true}
+}
+
+func (p *flakyProvider) CheckHealth(ctx context.Context) error { return nil }
 
 func TestLLMRuntime_Call_UsesExplicitProviderAndPreservesModel(t *testing.T) {
 	runtime := NewLLMRuntime(&RuntimeConfig{
@@ -87,6 +126,56 @@ func TestLLMRuntime_Call_UsesDefaultProviderWhenRequestOmitsProvider(t *testing.
 	assert.Equal(t, "provider-b", providerB.lastReq.Provider)
 	assert.Equal(t, "model-b", providerB.lastReq.Model)
 	assert.Nil(t, providerA.lastReq)
+}
+
+func TestLLMRuntime_Call_DoesNotRetryMissingRequiredParameterErrors(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      3,
+	})
+	provider := &flakyProvider{
+		name: "provider-a",
+		errs: []error{
+			fmt.Errorf("failed to handle stream response: codex response failed: Missing required parameter: 'input[11].summary'."),
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	_, err := runtime.Call(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Missing required parameter")
+	assert.Equal(t, 1, provider.calls)
+}
+
+func TestLLMRuntime_Call_RetriesRetryableProviderErrors(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      3,
+	})
+	provider := &flakyProvider{
+		name: "provider-a",
+		errs: []error{
+			fmt.Errorf("HTTP 500: {\"error\":{\"message\":\"temporary upstream failure\"}}"),
+			fmt.Errorf("HTTP 500: {\"error\":{\"message\":\"temporary upstream failure\"}}"),
+		},
+		resp: &LLMResponse{
+			Content: "recovered",
+			Model:   "gpt-5.4-mini",
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	resp, err := runtime.Call(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "recovered", resp.Content)
+	assert.Equal(t, 3, provider.calls)
 }
 
 type mockResourceManager struct{}

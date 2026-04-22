@@ -401,6 +401,12 @@ func TestProviderWrapper_CallReportsHTTPDebugPayload(t *testing.T) {
 			Role:    "user",
 			Content: "hello",
 		}},
+		Metadata: map[string]interface{}{
+			"trace_id": "trace-1",
+			"tool_availability": map[string]interface{}{
+				"requires_active_team_run": []string{"read_task_spec"},
+			},
+		},
 	})
 	require.NoError(t, err)
 	require.Len(t, events, 2)
@@ -411,6 +417,13 @@ func TestProviderWrapper_CallReportsHTTPDebugPayload(t *testing.T) {
 	assert.Equal(t, http.MethodPost, events[0].Method)
 	assert.Contains(t, events[0].URL, "/v1/responses")
 	assert.Greater(t, events[0].RequestBodyBytes, 0)
+	assert.Equal(t, "trace-1", events[0].RequestMetadata["trace_id"])
+	availability, ok := events[0].RequestMetadata["tool_availability"].(map[string]interface{})
+	require.True(t, ok)
+	requires, ok := availability["requires_active_team_run"].([]string)
+	require.True(t, ok)
+	require.Len(t, requires, 1)
+	assert.Equal(t, "read_task_spec", requires[0])
 	assert.Contains(t, events[0].RequestBody, `"model":"gpt-5.2-codex"`)
 	assert.Contains(t, events[0].RequestBody, `"input"`)
 	assert.Contains(t, events[0].RequestBody, `"hello"`)
@@ -735,6 +748,43 @@ func TestProviderWrapper_CodexCall_PropagatesPromptCacheFieldsFromMetadata(t *te
 	require.NoError(t, err)
 
 	assert.Equal(t, "session-123", capturedBody["prompt_cache_key"])
+}
+
+func TestProviderWrapper_CodexCall_WithStreamReturnsProviderFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			"event: response.created",
+			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`,
+			"",
+			"event: error",
+			`data: {"type":"error","code":"internal_server_error","message":"connection reset by peer"}`,
+			"",
+			"event: response.failed",
+			`data: {"status":"failed","error":{"message":"no available resource: no available key/provider"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:         "codex",
+		BaseURL:      server.URL,
+		DefaultModel: "gpt-5.4",
+	})
+	require.NoError(t, err)
+
+	_, err = provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Stream: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to handle stream response")
+	assert.Contains(t, err.Error(), "no available resource: no available key/provider")
 }
 
 func TestProviderWrapper_AnthropicCall_PropagatesThinkingToBodyAndHeader(t *testing.T) {

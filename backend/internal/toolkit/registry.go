@@ -3,6 +3,7 @@ package toolkit
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -63,6 +64,9 @@ func (r *Registry) List() []Tool {
 	for _, tool := range r.tools {
 		tools = append(tools, tool)
 	}
+	sort.Slice(tools, func(i, j int) bool {
+		return tools[i].Name() < tools[j].Name()
+	})
 	return tools
 }
 
@@ -87,8 +91,15 @@ func (r *Registry) GetToolSchemas() []map[string]interface{} {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	schemas := make([]map[string]interface{}, 0, len(r.tools))
-	for _, tool := range r.tools {
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	schemas := make([]map[string]interface{}, 0, len(names))
+	for _, name := range names {
+		tool := r.tools[name]
 		schema := map[string]interface{}{
 			"name":        tool.Name(),
 			"description": tool.Description(),
@@ -111,5 +122,8 @@ func (r *Registry) FilterByPrefix(prefix string) []Tool {
 			filtered = append(filtered, tool)
 		}
 	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Name() < filtered[j].Name()
+	})
 	return filtered
 }

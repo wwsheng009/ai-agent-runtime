@@ -1,6 +1,11 @@
 package llm
 
-import "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+import (
+	"sort"
+	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+)
 
 func buildMetaToolsForProtocol(protocol string) interface{} {
 	meta := adapter.BuildMCPMetaTools()
@@ -46,6 +51,23 @@ func buildToolDefinitionsForProtocol(tools []map[string]interface{}, protocol st
 			addTool(tool)
 		}
 	}
+
+	sort.SliceStable(combined, func(i, j int) bool {
+		left, _ := combined[i]["name"].(string)
+		right, _ := combined[j]["name"].(string)
+		left = strings.TrimSpace(left)
+		right = strings.TrimSpace(right)
+		if left == right {
+			return false
+		}
+		if left == "" {
+			return false
+		}
+		if right == "" {
+			return true
+		}
+		return left < right
+	})
 
 	switch protocol {
 	case "codex":

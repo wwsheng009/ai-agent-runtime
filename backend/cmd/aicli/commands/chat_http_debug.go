@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -60,6 +61,17 @@ func formatRuntimeHTTPDebugEvent(event runtimellm.HTTPDebugEvent) string {
 	if event.RequestBodyBytes > 0 {
 		lines = append(lines, fmt.Sprintf("[http-debug/runtime] request_body_bytes=%d", event.RequestBodyBytes))
 	}
+	if debug := runtimellm.HTTPDebugRequestDiagnostics(event.RequestMetadata); len(debug) > 0 {
+		if line := formatRuntimeHTTPFingerprintLine(debug); line != "" {
+			lines = append(lines, "[http-debug/runtime] "+line)
+		}
+		if line := formatRuntimeHTTPShapeLine(debug); line != "" {
+			lines = append(lines, "[http-debug/runtime] "+line)
+		}
+	}
+	if metadata := compactRuntimeHTTPDebugMetadata(event.RequestMetadata); metadata != "" {
+		lines = append(lines, fmt.Sprintf("[http-debug/runtime] request_metadata=%s", truncateUTF8Bytes(metadata, 4096)))
+	}
 	if body := strings.TrimSpace(event.RequestBody); body != "" {
 		lines = append(lines, fmt.Sprintf("[http-debug/runtime] request_body=%s", truncateUTF8Bytes(body, aicliRuntimeHTTPDebugBodyLimit)))
 	}
@@ -79,4 +91,76 @@ func formatRuntimeHTTPDebugEvent(event runtimellm.HTTPDebugEvent) string {
 		return "[http-debug/runtime] no details"
 	}
 	return strings.Join(lines, "\n")
+}
+
+func compactRuntimeHTTPDebugMetadata(metadata map[string]interface{}) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func formatRuntimeHTTPFingerprintLine(debug map[string]interface{}) string {
+	parts := make([]string, 0, 4)
+	for _, key := range []string{"request_sha256", "cache_surface_sha256", "input_sha256", "tools_sha256"} {
+		if value := strings.TrimSpace(runtimeHTTPDebugString(debug, key)); value != "" {
+			parts = append(parts, key+"="+value)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatRuntimeHTTPShapeLine(debug map[string]interface{}) string {
+	parts := make([]string, 0, 4)
+	for _, key := range []string{"message_count", "input_count", "tool_count", "instructions_length"} {
+		if value := runtimeHTTPDebugInt(debug, key); value > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", key, value))
+		}
+	}
+	if value := strings.TrimSpace(runtimeHTTPDebugString(debug, "prompt_cache_key")); value != "" {
+		parts = append(parts, "prompt_cache_key="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func runtimeHTTPDebugString(values map[string]interface{}, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	value, ok := values[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return fmt.Sprint(typed)
+	}
+}
+
+func runtimeHTTPDebugInt(values map[string]interface{}, key string) int {
+	if len(values) == 0 {
+		return 0
+	}
+	value, ok := values[key]
+	if !ok || value == nil {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
+	}
 }

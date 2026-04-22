@@ -53,6 +53,28 @@ func TestRegistry(t *testing.T) {
 	}
 }
 
+func TestRegistryList_SortsToolsByName(t *testing.T) {
+	registry := toolkit.NewRegistry()
+
+	if err := registry.Register(tools.NewWriteTool()); err != nil {
+		t.Fatalf("register write: %v", err)
+	}
+	if err := registry.Register(tools.NewBashTool()); err != nil {
+		t.Fatalf("register bash: %v", err)
+	}
+	if err := registry.Register(tools.NewViewTool()); err != nil {
+		t.Fatalf("register view: %v", err)
+	}
+
+	toolsList := registry.List()
+	if len(toolsList) != 3 {
+		t.Fatalf("expected 3 tools, got %d", len(toolsList))
+	}
+	if toolsList[0].Name() != "bash" || toolsList[1].Name() != "view" || toolsList[2].Name() != "write" {
+		t.Fatalf("expected sorted tool list, got %s, %s, %s", toolsList[0].Name(), toolsList[1].Name(), toolsList[2].Name())
+	}
+}
+
 func TestBashTool(t *testing.T) {
 	ctx := context.Background()
 	bashTool := tools.NewBashTool()

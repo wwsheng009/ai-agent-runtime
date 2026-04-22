@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +29,27 @@ type GatewayClient struct {
 
 	// Tokenizer 实现
 	tokenizer *Tokenizer
+}
+
+type gatewayProviderError struct {
+	message    string
+	statusCode int
+	retryable  bool
+	cause      error
+}
+
+func (e *gatewayProviderError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+func (e *gatewayProviderError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
 
 // NewGatewayClient 创建新的 Gateway 客户端
@@ -102,6 +124,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 		// 构建请求
 		response, err := c.callProvider(ctx, selected, model, req)
 		if err != nil {
+			statusCode := gatewayProviderErrorStatusCode(err)
 			// 记录失败
 			c.resourceManager.RecordResult(
 				&SelectedResource{
@@ -112,7 +135,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 					KeyID:     selected.KeyID,
 					Model:     selected.Model,
 				},
-				false, err, 0,
+				false, err, statusCode,
 				0,
 			)
 
@@ -130,6 +153,10 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 					retryInfo.TriedAPIKeys = make(map[string][]string)
 				}
 				retryInfo.TriedAPIKeys[selected.Provider.Name] = append(retryInfo.TriedAPIKeys[selected.Provider.Name], selected.KeyID)
+			}
+
+			if !isRetryableGatewayProviderError(err) {
+				return nil, err
 			}
 
 			// 等待后重试
@@ -206,6 +233,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		Model:            model,
 		Method:           http.MethodPost,
 		URL:              url,
+		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
@@ -272,7 +300,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
-		return nil, fmt.Errorf("HTTP %d: %s", httpResp.StatusCode, string(body))
+		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body))
 	}
 
 	body, err := io.ReadAll(httpResp.Body)
@@ -327,7 +355,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 
 	assistantMsg, err := adpt.HandleResponse(req.Stream, bytes.NewReader(body), callbacks)
 	if err != nil {
-		return nil, fmt.Errorf("failed to handle response: %w", err)
+		return nil, newGatewayResponseError("failed to handle response", err)
 	}
 	reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg)
 
@@ -412,6 +440,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		Model:            model,
 		Method:           http.MethodPost,
 		URL:              url,
+		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
@@ -472,7 +501,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
-		return nil, fmt.Errorf("HTTP %d: %s", httpResp.StatusCode, string(body))
+		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body))
 	}
 
 	callbacks := adapter.StreamCallbacks{
@@ -523,7 +552,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		Error:               errorString(err),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to handle stream response: %w", err)
+		return nil, newGatewayResponseError("failed to handle stream response", err)
 	}
 	reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg)
 
@@ -632,6 +661,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 		Model:            model,
 		Method:           http.MethodPost,
 		URL:              url,
+		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
@@ -907,6 +937,58 @@ func parseToolArguments(argsStr string) map[string]interface{} {
 		return make(map[string]interface{})
 	}
 	return args
+}
+
+func newGatewayHTTPError(statusCode int, body string) error {
+	message := fmt.Sprintf("HTTP %d: %s", statusCode, body)
+	return &gatewayProviderError{
+		message:    message,
+		statusCode: statusCode,
+		retryable:  isRetryableGatewayHTTPStatus(statusCode),
+	}
+}
+
+func newGatewayResponseError(prefix string, err error) error {
+	message := prefix
+	if err != nil {
+		message = fmt.Sprintf("%s: %v", prefix, err)
+	}
+	return &gatewayProviderError{
+		message:   message,
+		retryable: isRetryableGatewayResponseError(err),
+		cause:     err,
+	}
+}
+
+func gatewayProviderErrorStatusCode(err error) int {
+	var providerErr *gatewayProviderError
+	if errors.As(err, &providerErr) {
+		return providerErr.statusCode
+	}
+	return 0
+}
+
+func isRetryableGatewayProviderError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var providerErr *gatewayProviderError
+	if errors.As(err, &providerErr) {
+		return providerErr.retryable
+	}
+	return true
+}
+
+func isRetryableGatewayHTTPStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
+		return true
+	}
+	return statusCode >= 500
+}
+
+func isRetryableGatewayResponseError(err error) bool {
+	return isRetryableProviderResponseError(err)
 }
 
 // SupportedModels 返回支持的模型列表

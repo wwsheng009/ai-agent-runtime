@@ -419,6 +419,9 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 		}
 
 		lastError = err
+		if !isRetryableProviderCallError(err) {
+			return nil, err
+		}
 
 		if attempt == maxRetries {
 			break

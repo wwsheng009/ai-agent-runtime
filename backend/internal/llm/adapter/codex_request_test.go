@@ -126,6 +126,9 @@ func TestCodexBuildRequest_UsesConfiguredStreamFlag(t *testing.T) {
 	if req["stream"] != false {
 		t.Fatalf("expected stream=false, got %v", req["stream"])
 	}
+	if req["store"] != false {
+		t.Fatalf("expected store=false, got %v", req["store"])
+	}
 }
 
 func TestCodexBuildRequest_MovesSystemMessagesToInstructions(t *testing.T) {
@@ -309,6 +312,72 @@ func TestCodexHandleResponse_StreamWithOutputIndexToolCall(t *testing.T) {
 	}
 	if toolCalls[0]["arguments"] != "{}" {
 		t.Fatalf("unexpected tool arguments: %#v", toolCalls[0])
+	}
+}
+
+func TestCodexHandleResponse_StreamPreservesAllSparseIndexedToolCalls(t *testing.T) {
+	a := &CodexAdapter{}
+	sseData := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_sparse","model":"gpt-5.4-mini"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","summary":[]}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","role":"assistant","content":[]}}`,
+		"",
+		"event: response.output_text.delta",
+		`data: {"type":"response.output_text.delta","output_index":1,"delta":"我继续查看剩余改动。"}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","call_id":"call_1","name":"execute_shell_command","arguments":""}}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","call_id":"call_1","name":"execute_shell_command","arguments":"{\"command\":\"echo 1\"}"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":3,"item":{"type":"function_call","call_id":"call_2","name":"execute_shell_command","arguments":""}}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":3,"item":{"type":"function_call","call_id":"call_2","name":"execute_shell_command","arguments":"{\"command\":\"echo 2\"}"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":4,"item":{"type":"function_call","call_id":"call_3","name":"execute_shell_command","arguments":""}}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":4,"item":{"type":"function_call","call_id":"call_3","name":"execute_shell_command","arguments":"{\"command\":\"echo 3\"}"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":5,"item":{"type":"function_call","call_id":"call_4","name":"execute_shell_command","arguments":""}}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":5,"item":{"type":"function_call","call_id":"call_4","name":"execute_shell_command","arguments":"{\"command\":\"echo 4\"}"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":6,"item":{"type":"function_call","call_id":"call_5","name":"execute_shell_command","arguments":""}}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":6,"item":{"type":"function_call","call_id":"call_5","name":"execute_shell_command","arguments":"{\"command\":\"echo 5\"}"}}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"id":"resp_sparse","status":"completed","stop_reason":"end_turn"}}`,
+		"",
+	}, "\n")
+
+	msg, err := a.HandleResponse(true, strings.NewReader(sseData), StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("HandleResponse failed: %v", err)
+	}
+	toolCalls, ok := msg["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 5 {
+		t.Fatalf("expected 5 tool calls, got %T %#v", msg["tool_calls"], msg["tool_calls"])
+	}
+	if toolCalls[4]["id"] != "call_5" {
+		t.Fatalf("expected last sparse-indexed tool call to be preserved, got %#v", toolCalls[4])
+	}
+	if toolCalls[4]["arguments"] != `{"command":"echo 5"}` {
+		t.Fatalf("unexpected last tool arguments: %#v", toolCalls[4])
 	}
 }
 
@@ -502,6 +571,38 @@ func TestCodexHandleResponse_NonStreamAcceptsSSEPayload(t *testing.T) {
 	}
 	if msg["content"] != "Hello" {
 		t.Fatalf("expected SSE fallback content Hello, got %#v", msg["content"])
+	}
+}
+
+func TestCodexHandleResponse_StreamReturnsErrorOnFailedResponse(t *testing.T) {
+	a := &CodexAdapter{}
+	sseData := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.2-codex"}}`,
+		"",
+		"event: error",
+		`data: {"type":"error","code":"internal_server_error","message":"connection reset by peer"}`,
+		"",
+		"event: response.failed",
+		`data: {"status":"failed","error":{"message":"no available resource: no available key/provider"}}`,
+		"",
+	}, "\n")
+
+	msg, err := a.handleCodexStreamResponse(strings.NewReader(sseData), StreamCallbacks{})
+	if err == nil {
+		t.Fatal("expected stream failure error")
+	}
+	if !strings.Contains(err.Error(), "codex response failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no available resource: no available key/provider") {
+		t.Fatalf("expected provider failure in error, got %v", err)
+	}
+	if got, _ := msg["finish_reason"].(string); got != "failed" {
+		t.Fatalf("expected finish_reason failed, got %#v", msg["finish_reason"])
+	}
+	if got, _ := msg["error"].(string); !strings.Contains(got, "no available resource: no available key/provider") {
+		t.Fatalf("expected error field to contain provider failure, got %#v", msg["error"])
 	}
 }
 

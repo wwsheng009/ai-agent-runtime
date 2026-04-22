@@ -2,6 +2,7 @@ package registry
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/client"
@@ -10,15 +11,15 @@ import (
 
 // ToolInfo 工具信息
 type ToolInfo struct {
-	Tool       *protocol.Tool
-	MCPName    string
-	Enabled    bool
+	Tool    *protocol.Tool
+	MCPName string
+	Enabled bool
 }
 
 // Registry MCP 工具注册表
 type Registry struct {
 	mu    sync.RWMutex
-	tools map[string]*ToolInfo  // key: ${mcp_name}_${tool_name}
+	tools map[string]*ToolInfo // key: ${mcp_name}_${tool_name}
 	mcps  map[string]client.Client
 }
 
@@ -87,6 +88,26 @@ func (r *Registry) ListTools() []*ToolInfo {
 			tools = append(tools, info)
 		}
 	}
+	sort.Slice(tools, func(i, j int) bool {
+		leftName, rightName := "", ""
+		leftMCP, rightMCP := "", ""
+		if tools[i] != nil {
+			leftMCP = tools[i].MCPName
+			if tools[i].Tool != nil {
+				leftName = tools[i].Tool.Name
+			}
+		}
+		if tools[j] != nil {
+			rightMCP = tools[j].MCPName
+			if tools[j].Tool != nil {
+				rightName = tools[j].Tool.Name
+			}
+		}
+		if leftName == rightName {
+			return leftMCP < rightMCP
+		}
+		return leftName < rightName
+	})
 	return tools
 }
 
@@ -101,6 +122,16 @@ func (r *Registry) ListToolsByMCP(mcpName string) []*ToolInfo {
 			tools = append(tools, info)
 		}
 	}
+	sort.Slice(tools, func(i, j int) bool {
+		leftName, rightName := "", ""
+		if tools[i] != nil && tools[i].Tool != nil {
+			leftName = tools[i].Tool.Name
+		}
+		if tools[j] != nil && tools[j].Tool != nil {
+			rightName = tools[j].Tool.Name
+		}
+		return leftName < rightName
+	})
 	return tools
 }
 

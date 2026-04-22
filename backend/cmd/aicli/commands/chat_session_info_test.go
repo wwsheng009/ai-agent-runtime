@@ -254,6 +254,65 @@ func TestPrintCurrentRuntimeSession_IncludesSessionPathAndStore(t *testing.T) {
 	}
 }
 
+func TestPrintCurrentRuntimeSession_ResolvesRelativePathsToAbsolute(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tempWD := t.TempDir()
+	if err := os.Chdir(tempWD); err != nil {
+		t.Fatalf("chdir temp wd: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(originalWD)
+	}()
+
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, "https://example.com")
+	if err := logger.SetLogDir("chat-logs"); err != nil {
+		t.Fatalf("set relative log dir: %v", err)
+	}
+	runtimeCapture := &chatRuntimeHTTPCapture{}
+	requestPath := filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_request_gateway_client.json")
+	responsePath := filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_response_gateway_client.json")
+	runtimeCapture.RecordArtifactPath("request", requestPath)
+	runtimeCapture.RecordArtifactPath("response", responsePath)
+
+	session := &ChatSession{
+		SessionDir:         "sessions",
+		Logger:             logger,
+		runtimeHTTPCapture: runtimeCapture,
+		RuntimeSession: &runtimechat.Session{
+			ID:    "session-1",
+			State: runtimechat.StateActive,
+		},
+	}
+
+	output := captureStdout(t, func() {
+		printCurrentRuntimeSession(session)
+	})
+
+	for _, expected := range []string{
+		"Session File:      " + resolveAbsoluteChatPath(filepath.Join("sessions", "session-1.json")),
+		"Session Store:     " + resolveAbsoluteChatPath("sessions") + " (custom; default ",
+		"Chat Log File:     " + resolveAbsoluteChatPath(logger.SessionLogPath()),
+		"Debug Log File:    " + resolveAbsoluteChatPath(logger.DebugLogPath()),
+		"HTTP Artifact Dir: " + resolveAbsoluteChatPath(logger.RuntimeHTTPArtifactDir()),
+		"Last HTTP Req:     " + resolveAbsoluteChatPath(requestPath),
+		"Last HTTP Resp:    " + resolveAbsoluteChatPath(responsePath),
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 

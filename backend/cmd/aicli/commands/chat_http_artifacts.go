@@ -12,22 +12,23 @@ import (
 )
 
 type runtimeHTTPArtifactEnvelope struct {
-	Sequence           int             `json:"sequence"`
-	CapturedAt         string          `json:"captured_at"`
-	Source             string          `json:"source,omitempty"`
-	Phase              string          `json:"phase,omitempty"`
-	Provider           string          `json:"provider,omitempty"`
-	Protocol           string          `json:"protocol,omitempty"`
-	Model              string          `json:"model,omitempty"`
-	Method             string          `json:"method,omitempty"`
-	URL                string          `json:"url,omitempty"`
-	ResponseStatusCode int             `json:"response_status_code,omitempty"`
-	Error              string          `json:"error,omitempty"`
-	BodyBytes          int             `json:"body_bytes,omitempty"`
-	BodyFormat         string          `json:"body_format,omitempty"`
-	BodyPreview        string          `json:"body_preview,omitempty"`
-	BodyJSON           json.RawMessage `json:"body_json,omitempty"`
-	BodyText           string          `json:"body_text,omitempty"`
+	Sequence           int                    `json:"sequence"`
+	CapturedAt         string                 `json:"captured_at"`
+	Source             string                 `json:"source,omitempty"`
+	Phase              string                 `json:"phase,omitempty"`
+	Provider           string                 `json:"provider,omitempty"`
+	Protocol           string                 `json:"protocol,omitempty"`
+	Model              string                 `json:"model,omitempty"`
+	Method             string                 `json:"method,omitempty"`
+	URL                string                 `json:"url,omitempty"`
+	RequestMetadata    map[string]interface{} `json:"request_metadata,omitempty"`
+	ResponseStatusCode int                    `json:"response_status_code,omitempty"`
+	Error              string                 `json:"error,omitempty"`
+	BodyBytes          int                    `json:"body_bytes,omitempty"`
+	BodyFormat         string                 `json:"body_format,omitempty"`
+	BodyPreview        string                 `json:"body_preview,omitempty"`
+	BodyJSON           json.RawMessage        `json:"body_json,omitempty"`
+	BodyText           string                 `json:"body_text,omitempty"`
 }
 
 func writeRuntimeHTTPArtifact(session *ChatSession, event runtimellm.HTTPDebugEvent) (string, error) {
@@ -70,6 +71,7 @@ func buildRuntimeHTTPArtifactEnvelope(sequence int, event runtimellm.HTTPDebugEv
 		Model:              strings.TrimSpace(event.Model),
 		Method:             strings.TrimSpace(event.Method),
 		URL:                strings.TrimSpace(event.URL),
+		RequestMetadata:    cloneRuntimeHTTPArtifactMetadata(event.RequestMetadata),
 		ResponseStatusCode: event.ResponseStatusCode,
 		Error:              strings.TrimSpace(event.Error),
 	}
@@ -119,7 +121,7 @@ func currentRuntimeHTTPArtifactDir(session *ChatSession) string {
 	}
 	if session.Logger != nil {
 		if dir := session.Logger.RuntimeHTTPArtifactDir(); dir != "" {
-			return dir
+			return resolveAbsoluteChatPath(dir)
 		}
 	}
 	sessionPath := currentRuntimeSessionPath(session)
@@ -130,21 +132,21 @@ func currentRuntimeHTTPArtifactDir(session *ChatSession) string {
 	if baseName == "" {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(sessionPath), baseName+".artifacts", "runtime-http")
+	return resolveAbsoluteChatPath(filepath.Join(filepath.Dir(sessionPath), baseName+".artifacts", "runtime-http"))
 }
 
 func currentChatLogFile(session *ChatSession) string {
 	if session == nil || session.Logger == nil {
 		return ""
 	}
-	return session.Logger.SessionLogPath()
+	return resolveAbsoluteChatPath(session.Logger.SessionLogPath())
 }
 
 func currentDebugLogFile(session *ChatSession) string {
 	if session == nil || session.Logger == nil {
 		return ""
 	}
-	return session.Logger.DebugLogPath()
+	return resolveAbsoluteChatPath(session.Logger.DebugLogPath())
 }
 
 func firstNonZero(values ...int) int {
@@ -154,4 +156,38 @@ func firstNonZero(values ...int) int {
 		}
 	}
 	return 0
+}
+
+func cloneRuntimeHTTPArtifactMetadata(input map[string]interface{}) map[string]interface{} {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		cloned[key] = cloneRuntimeHTTPArtifactValue(value)
+	}
+	return cloned
+}
+
+func cloneRuntimeHTTPArtifactValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return cloneRuntimeHTTPArtifactMetadata(typed)
+	case []interface{}:
+		cloned := make([]interface{}, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneRuntimeHTTPArtifactValue(item)
+		}
+		return cloned
+	case []string:
+		return append([]string(nil), typed...)
+	case []map[string]interface{}:
+		cloned := make([]map[string]interface{}, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneRuntimeHTTPArtifactMetadata(item)
+		}
+		return cloned
+	default:
+		return typed
+	}
 }

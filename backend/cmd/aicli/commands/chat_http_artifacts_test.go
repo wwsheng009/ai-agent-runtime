@@ -19,13 +19,19 @@ func TestWriteRuntimeHTTPArtifact_PersistsRawBodiesAndTracksLatestPaths(t *testi
 	}
 
 	requestPath, err := writeRuntimeHTTPArtifact(session, runtimellm.HTTPDebugEvent{
-		Source:           "gateway_client",
-		Phase:            "request",
-		Provider:         "nvidia",
-		Protocol:         "openai",
-		Model:            "z-ai/glm4.7",
-		Method:           "POST",
-		URL:              "https://example.com/v1/chat/completions",
+		Source:   "gateway_client",
+		Phase:    "request",
+		Provider: "nvidia",
+		Protocol: "openai",
+		Model:    "z-ai/glm4.7",
+		Method:   "POST",
+		URL:      "https://example.com/v1/chat/completions",
+		RequestMetadata: map[string]interface{}{
+			"trace_id": "trace-1",
+			"tool_availability": map[string]interface{}{
+				"requires_active_team_run": []string{"read_task_spec"},
+			},
+		},
 		RequestBodyBytes: len(`{"messages":[{"role":"user","content":"hello"}]}`),
 		RequestBodyRaw:   []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
 	})
@@ -72,6 +78,26 @@ func TestWriteRuntimeHTTPArtifact_PersistsRawBodiesAndTracksLatestPaths(t *testi
 	}
 	if envelope.BodyFormat != "text" || envelope.BodyText != responseBody {
 		t.Fatalf("expected full SSE response body, got %+v", envelope)
+	}
+
+	requestData, err := os.ReadFile(requestPath)
+	if err != nil {
+		t.Fatalf("read request artifact: %v", err)
+	}
+	var requestEnvelope runtimeHTTPArtifactEnvelope
+	if err := json.Unmarshal(requestData, &requestEnvelope); err != nil {
+		t.Fatalf("unmarshal request artifact: %v", err)
+	}
+	if requestEnvelope.RequestMetadata["trace_id"] != "trace-1" {
+		t.Fatalf("expected request trace metadata, got %+v", requestEnvelope.RequestMetadata)
+	}
+	availability, ok := requestEnvelope.RequestMetadata["tool_availability"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected tool_availability metadata, got %+v", requestEnvelope.RequestMetadata["tool_availability"])
+	}
+	requires, ok := availability["requires_active_team_run"].([]interface{})
+	if !ok || len(requires) != 1 || requires[0] != "read_task_spec" {
+		t.Fatalf("unexpected requires_active_team_run metadata: %+v", availability["requires_active_team_run"])
 	}
 
 	snapshot := session.runtimeHTTPCapture.Snapshot()

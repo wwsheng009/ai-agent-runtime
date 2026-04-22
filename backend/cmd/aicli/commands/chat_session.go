@@ -281,10 +281,10 @@ func printCurrentRuntimeSession(session *ChatSession) {
 	if session.runtimeHTTPCapture != nil {
 		snapshot := session.runtimeHTTPCapture.Snapshot()
 		if snapshot.RequestArtifactPath != "" {
-			printChatSessionMetaRow("Last HTTP Req:", snapshot.RequestArtifactPath)
+			printChatSessionMetaRow("Last HTTP Req:", resolveAbsoluteChatPath(snapshot.RequestArtifactPath))
 		}
 		if snapshot.ResponseArtifactPath != "" {
-			printChatSessionMetaRow("Last HTTP Resp:", snapshot.ResponseArtifactPath)
+			printChatSessionMetaRow("Last HTTP Resp:", resolveAbsoluteChatPath(snapshot.ResponseArtifactPath))
 		}
 	}
 	if preview.Title != "" {
@@ -723,6 +723,7 @@ func buildAICLIMessagesFromRuntimeHistory(history []runtimetypes.Message) ([]map
 
 func runtimeMessageFromAICLIMessage(raw map[string]interface{}) (runtimetypes.Message, error) {
 	normalized := normalizeAICLIMessageMap(raw)
+	recoverAssistantToolCallsFromReasoning(normalized)
 	role, _ := normalized["role"].(string)
 	role = strings.TrimSpace(role)
 	if role == "" {
@@ -767,6 +768,81 @@ func runtimeMessageFromAICLIMessage(raw map[string]interface{}) (runtimetypes.Me
 	}
 	message.Metadata.Set(chatRuntimeMessageRawJSONKey, string(data))
 	return message, nil
+}
+
+func recoverAssistantToolCallsFromReasoning(normalized map[string]interface{}) {
+	if len(normalized) == 0 {
+		return
+	}
+	role, _ := normalized["role"].(string)
+	if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+		return
+	}
+
+	existing := decodeRuntimeToolCalls(normalized["tool_calls"])
+	recovered := decodeRuntimeToolCallsFromCodexOutputItems(normalized)
+	if len(recovered) <= len(existing) {
+		return
+	}
+	normalized["tool_calls"] = encodeRuntimeToolCalls(recovered)
+}
+
+func decodeRuntimeToolCallsFromCodexOutputItems(normalized map[string]interface{}) []runtimetypes.ToolCall {
+	if len(normalized) == 0 {
+		return nil
+	}
+	block := runtimellm.ReasoningBlockFromAssistantMessage(normalized)
+	if block == nil || len(block.Metadata) == 0 {
+		return nil
+	}
+	items := normalizeMapSlice(block.Metadata["response_output_items"])
+	if len(items) == 0 {
+		return nil
+	}
+
+	result := make([]runtimetypes.ToolCall, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		itemType, _ := item["type"].(string)
+		if !strings.EqualFold(strings.TrimSpace(itemType), "function_call") {
+			continue
+		}
+
+		call := runtimetypes.ToolCall{}
+		if id, ok := item["call_id"].(string); ok {
+			call.ID = strings.TrimSpace(id)
+		} else if id, ok := item["id"].(string); ok {
+			call.ID = strings.TrimSpace(id)
+		}
+		if name, ok := item["name"].(string); ok {
+			call.Name = strings.TrimSpace(name)
+		}
+		switch args := item["arguments"].(type) {
+		case map[string]interface{}:
+			call.Args = args
+		case string:
+			call.Args = decodeToolArguments(args)
+		}
+		if fn, ok := item["function"].(map[string]interface{}); ok {
+			if call.Name == "" {
+				if name, ok := fn["name"].(string); ok {
+					call.Name = strings.TrimSpace(name)
+				}
+			}
+			switch args := fn["arguments"].(type) {
+			case map[string]interface{}:
+				call.Args = args
+			case string:
+				call.Args = decodeToolArguments(args)
+			}
+		}
+		if call.Name != "" {
+			result = append(result, call)
+		}
+	}
+	return result
 }
 
 func aicliMessageFromRuntimeMessage(message runtimetypes.Message) (map[string]interface{}, error) {

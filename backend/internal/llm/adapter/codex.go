@@ -40,6 +40,8 @@ type CodexStreamState struct {
 	OutputItems  map[int]map[string]interface{}
 	FinishReason string
 	Usage        map[string]int64
+	ErrorCode    string
+	ErrorMessage string
 
 	// 追踪当前 output item
 	CurrentItemIndex   int
@@ -87,6 +89,9 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 		"model":  config.Model,
 		"input":  input, // Codex 使用 input 数组格式
 		"stream": config.Stream,
+		// This adapter replays full conversation state via input/prompt_cache_key,
+		// so requests should stay stateless across Codex-compatible upstreams.
+		"store": false,
 	}
 	if instructions != "" {
 		request["instructions"] = instructions
@@ -384,6 +389,10 @@ func (a *CodexAdapter) handleCodexStreamResponse(respBody io.Reader, callbacks S
 		return nil, fmt.Errorf("读取流式响应失败: %w", err)
 	}
 
+	if err := state.StreamError(); err != nil {
+		return state.ToMap(), err
+	}
+
 	// 转换为最终结果
 	return state.ToMap(), nil
 }
@@ -433,6 +442,9 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 
 	case "response.incomplete":
 		a.handleResponseIncomplete(state, event)
+
+	case "error":
+		a.handleErrorEvent(state, event)
 
 	case "response.done":
 		// 增量响应结束信号
@@ -607,11 +619,20 @@ func (a *CodexAdapter) handleResponseCompleted(state *CodexStreamState, event ma
 // handleResponseFailed 处理 response.failed 事件
 func (a *CodexAdapter) handleResponseFailed(state *CodexStreamState, event map[string]interface{}) {
 	state.FinishReason = "failed"
+	code, message := codexErrorFromEvent(event)
+	state.SetError(code, message)
 }
 
 // handleResponseIncomplete 处理 response.incomplete 事件
 func (a *CodexAdapter) handleResponseIncomplete(state *CodexStreamState, event map[string]interface{}) {
 	state.FinishReason = "incomplete"
+	code, message := codexIncompleteMessage(event)
+	state.SetError(code, message)
+}
+
+func (a *CodexAdapter) handleErrorEvent(state *CodexStreamState, event map[string]interface{}) {
+	code, message := codexErrorFromEvent(event)
+	state.SetError(code, message)
 }
 
 // handleCodexNonStreamResponse 处理非流式响应
@@ -739,6 +760,12 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 	if s.FinishReason != "" {
 		result["finish_reason"] = s.FinishReason
 	}
+	if s.ErrorCode != "" {
+		result["error_code"] = s.ErrorCode
+	}
+	if s.ErrorMessage != "" {
+		result["error"] = s.ErrorMessage
+	}
 
 	if len(s.Usage) > 0 {
 		result["usage"] = s.Usage
@@ -746,15 +773,20 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 
 	// 转换 ToolCalls
 	if len(s.ToolCalls) > 0 {
-		toolCalls := make([]map[string]interface{}, 0, len(s.ToolCalls))
-		for i := 0; i < len(s.ToolCalls)+1; i++ {
-			if tc, exists := s.ToolCalls[i]; exists {
-				toolCalls = append(toolCalls, map[string]interface{}{
-					"id":        tc.CallID,
-					"name":      tc.Name,
-					"arguments": tc.Arguments.String(),
-				})
-			}
+		keys := make([]int, 0, len(s.ToolCalls))
+		for index := range s.ToolCalls {
+			keys = append(keys, index)
+		}
+		sort.Ints(keys)
+
+		toolCalls := make([]map[string]interface{}, 0, len(keys))
+		for _, index := range keys {
+			tc := s.ToolCalls[index]
+			toolCalls = append(toolCalls, map[string]interface{}{
+				"id":        tc.CallID,
+				"name":      tc.Name,
+				"arguments": tc.Arguments.String(),
+			})
 		}
 		if len(toolCalls) > 0 {
 			result["tool_calls"] = toolCalls
@@ -780,6 +812,110 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 	}
 
 	return result
+}
+
+func (s *CodexStreamState) SetError(code, message string) {
+	if s == nil {
+		return
+	}
+	code = strings.TrimSpace(code)
+	message = strings.TrimSpace(message)
+	if s.ErrorCode == "" && code != "" {
+		s.ErrorCode = code
+	}
+	if message == "" {
+		return
+	}
+	if s.ErrorMessage == "" {
+		s.ErrorMessage = message
+		return
+	}
+	if !strings.Contains(s.ErrorMessage, message) {
+		s.ErrorMessage = s.ErrorMessage + "; " + message
+	}
+}
+
+func (s *CodexStreamState) StreamError() error {
+	if s == nil {
+		return nil
+	}
+	switch strings.TrimSpace(s.FinishReason) {
+	case "failed":
+		message := strings.TrimSpace(s.ErrorMessage)
+		if message == "" {
+			message = "unknown codex stream failure"
+		}
+		return fmt.Errorf("codex response failed: %s", message)
+	case "incomplete":
+		message := strings.TrimSpace(s.ErrorMessage)
+		if message == "" {
+			message = "unknown codex stream incomplete response"
+		}
+		return fmt.Errorf("codex response incomplete: %s", message)
+	default:
+		return nil
+	}
+}
+
+func codexErrorFromEvent(event map[string]interface{}) (string, string) {
+	if len(event) == 0 {
+		return "", ""
+	}
+	code := strings.TrimSpace(asCodexString(event["code"]))
+	if nested, ok := event["error"].(map[string]interface{}); ok {
+		if code == "" {
+			code = strings.TrimSpace(asCodexString(nested["code"]))
+		}
+		if message := strings.TrimSpace(asCodexString(nested["message"])); message != "" {
+			return code, message
+		}
+	}
+	return code, strings.TrimSpace(asCodexString(event["message"]))
+}
+
+func codexIncompleteMessage(event map[string]interface{}) (string, string) {
+	if len(event) == 0 {
+		return "incomplete", ""
+	}
+	if details, ok := event["incomplete_details"]; ok {
+		if encoded := stringifyCodexEventField(details); encoded != "" {
+			return "incomplete", encoded
+		}
+	}
+	if response, ok := event["response"].(map[string]interface{}); ok {
+		if details, ok := response["incomplete_details"]; ok {
+			if encoded := stringifyCodexEventField(details); encoded != "" {
+				return "incomplete", encoded
+			}
+		}
+	}
+	return "incomplete", strings.TrimSpace(asCodexString(event["message"]))
+}
+
+func stringifyCodexEventField(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return strings.TrimSpace(fmt.Sprint(typed))
+		}
+		return strings.TrimSpace(string(encoded))
+	}
+}
+
+func asCodexString(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	default:
+		return fmt.Sprint(typed)
+	}
 }
 
 func cloneInterfaceMap(raw map[string]interface{}) map[string]interface{} {

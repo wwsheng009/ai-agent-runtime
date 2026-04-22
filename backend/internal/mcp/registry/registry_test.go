@@ -225,6 +225,9 @@ func TestListTools(t *testing.T) {
 	if len(tools) != 2 {
 		t.Errorf("Expected 2 enabled tools, got %d", len(tools))
 	}
+	if tools[0].Tool.Name != "tool1" || tools[1].Tool.Name != "tool2" {
+		t.Fatalf("expected tools to be sorted by name, got %s, %s", tools[0].Tool.Name, tools[1].Tool.Name)
+	}
 }
 
 func TestListToolsByMCP(t *testing.T) {
@@ -254,6 +257,9 @@ func TestListToolsByMCP(t *testing.T) {
 	if len(tools) != 2 {
 		t.Errorf("Expected 2 tools for mcp1, got %d", len(tools))
 	}
+	if tools[0].Tool.Name != "tool1" || tools[1].Tool.Name != "tool2" {
+		t.Fatalf("expected mcp1 tools to be sorted, got %s, %s", tools[0].Tool.Name, tools[1].Tool.Name)
+	}
 
 	tools = reg.ListToolsByMCP("mcp2")
 	if len(tools) != 1 {
@@ -263,6 +269,31 @@ func TestListToolsByMCP(t *testing.T) {
 	tools = reg.ListToolsByMCP("nonexistent")
 	if len(tools) != 0 {
 		t.Errorf("Expected 0 tools for nonexistent MCP, got %d", len(tools))
+	}
+}
+
+func TestListTools_SortsByNameThenMCP(t *testing.T) {
+	reg := NewRegistry()
+
+	reg.RegisterTool("mcp-b", &protocol.Tool{Name: "alpha", InputSchema: map[string]interface{}{}}, true)
+	reg.RegisterTool("mcp-a", &protocol.Tool{Name: "alpha", InputSchema: map[string]interface{}{}}, true)
+	reg.RegisterTool("mcp-z", &protocol.Tool{Name: "zeta", InputSchema: map[string]interface{}{}}, true)
+
+	tools := reg.ListTools()
+	if len(tools) != 3 {
+		t.Fatalf("Expected 3 tools, got %d", len(tools))
+	}
+
+	got := []string{
+		tools[0].MCPName + ":" + tools[0].Tool.Name,
+		tools[1].MCPName + ":" + tools[1].Tool.Name,
+		tools[2].MCPName + ":" + tools[2].Tool.Name,
+	}
+	want := []string{"mcp-a:alpha", "mcp-b:alpha", "mcp-z:zeta"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sorted tools mismatch: got %v want %v", got, want)
+		}
 	}
 }
 

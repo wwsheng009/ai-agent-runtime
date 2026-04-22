@@ -14,6 +14,34 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+type gatewayTestResourceManager struct {
+	selected    *SelectedResource
+	selectCalls int
+	results     []gatewayTestRecordedResult
+}
+
+type gatewayTestRecordedResult struct {
+	success    bool
+	statusCode int
+	err        string
+}
+
+func (m *gatewayTestResourceManager) SelectResource(retryInfo RetryInfo) (*SelectedResource, error) {
+	m.selectCalls++
+	return m.selected, nil
+}
+
+func (m *gatewayTestResourceManager) RecordResult(selected *SelectedResource, success bool, err error, statusCode int, latencyMs int64) {
+	record := gatewayTestRecordedResult{
+		success:    success,
+		statusCode: statusCode,
+	}
+	if err != nil {
+		record.err = err.Error()
+	}
+	m.results = append(m.results, record)
+}
+
 func TestGatewayClient_ConvertTools_CodexIncludesRuntimeTools(t *testing.T) {
 	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
 	tools := []types.ToolDefinition{
@@ -81,6 +109,12 @@ func TestGatewayClient_CallProviderReportsHTTPDebugPayload(t *testing.T) {
 			Role:    "user",
 			Content: "hello",
 		}},
+		Metadata: map[string]interface{}{
+			"trace_id": "trace-1",
+			"tool_availability": map[string]interface{}{
+				"requires_active_team_run": []string{"read_task_spec"},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("callProvider failed: %v", err)
@@ -105,6 +139,17 @@ func TestGatewayClient_CallProviderReportsHTTPDebugPayload(t *testing.T) {
 	}
 	if events[0].RequestBodyBytes == 0 {
 		t.Fatal("expected request body bytes")
+	}
+	if events[0].RequestMetadata["trace_id"] != "trace-1" {
+		t.Fatalf("expected request trace metadata, got %+v", events[0].RequestMetadata)
+	}
+	availability, ok := events[0].RequestMetadata["tool_availability"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected tool_availability metadata, got %+v", events[0].RequestMetadata["tool_availability"])
+	}
+	requires, ok := availability["requires_active_team_run"].([]string)
+	if !ok || len(requires) != 1 || requires[0] != "read_task_spec" {
+		t.Fatalf("unexpected requires_active_team_run metadata: %+v", availability["requires_active_team_run"])
 	}
 	want := `"hello"`
 	if !strings.Contains(events[0].RequestBody, want) {
@@ -531,4 +576,174 @@ func TestGatewayClient_CallProvider_OpenAINormalizesReasoningEffort(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, "ok", resp.Content)
 	assert.Equal(t, "high", capturedBody["reasoning_effort"])
+}
+
+func TestGatewayClientCall_DoesNotRetryInvalidRequestHTTPError(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"message":"No tool call found for function call output with call_id call_1.","type":"invalid_request_error","param":"input","code":null}}`)
+	}))
+	defer server.Close()
+
+	rm := &gatewayTestResourceManager{
+		selected: &SelectedResource{
+			Provider: &ProviderResource{
+				Name:    "codex_ee",
+				Type:    "codex",
+				BaseURL: server.URL,
+			},
+			KeyValue: "test-key",
+		},
+	}
+	client := NewGatewayClient(rm, "gpt-5.4-mini")
+	client.SetMaxRetries(3)
+
+	_, err := client.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP 400")
+	assert.Equal(t, 1, requests)
+	assert.Equal(t, 1, rm.selectCalls)
+	require.Len(t, rm.results, 1)
+	assert.False(t, rm.results[0].success)
+	assert.Equal(t, http.StatusBadRequest, rm.results[0].statusCode)
+}
+
+func TestGatewayClientCall_RetriesRetryableHTTPError(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":{"message":"temporary upstream failure"}}`)
+	}))
+	defer server.Close()
+
+	rm := &gatewayTestResourceManager{
+		selected: &SelectedResource{
+			Provider: &ProviderResource{
+				Name:    "codex_ee",
+				Type:    "codex",
+				BaseURL: server.URL,
+			},
+			KeyValue: "test-key",
+		},
+	}
+	client := NewGatewayClient(rm, "gpt-5.4-mini")
+	client.SetMaxRetries(3)
+
+	_, err := client.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "all retry attempts failed")
+	assert.Equal(t, 3, requests)
+	assert.Equal(t, 3, rm.selectCalls)
+	require.Len(t, rm.results, 3)
+	for _, result := range rm.results {
+		assert.False(t, result.success)
+		assert.Equal(t, http.StatusInternalServerError, result.statusCode)
+	}
+}
+
+func TestGatewayClientCall_DoesNotRetryInvalidRequestResponseError(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			"event: response.created",
+			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4-mini"}}`,
+			"",
+			"event: response.failed",
+			`data: {"type":"response.failed","error":{"message":"No tool call found for function call output with call_id call_1.","type":"invalid_request_error"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	rm := &gatewayTestResourceManager{
+		selected: &SelectedResource{
+			Provider: &ProviderResource{
+				Name:    "codex_ee",
+				Type:    "codex",
+				BaseURL: server.URL,
+			},
+			KeyValue: "test-key",
+		},
+	}
+	client := NewGatewayClient(rm, "gpt-5.4-mini")
+	client.SetMaxRetries(3)
+
+	_, err := client.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to handle response")
+	assert.Equal(t, 1, requests)
+	assert.Equal(t, 1, rm.selectCalls)
+	require.Len(t, rm.results, 1)
+	assert.False(t, rm.results[0].success)
+	assert.Equal(t, 0, rm.results[0].statusCode)
+}
+
+func TestGatewayClientCall_DoesNotRetryMissingRequiredParameterResponseError(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			"event: response.created",
+			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4-mini"}}`,
+			"",
+			"event: response.failed",
+			`data: {"type":"response.failed","error":{"message":"Missing required parameter: 'input[11].summary'.","code":"missing_required_parameter"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	rm := &gatewayTestResourceManager{
+		selected: &SelectedResource{
+			Provider: &ProviderResource{
+				Name:    "codex_ee",
+				Type:    "codex",
+				BaseURL: server.URL,
+			},
+			KeyValue: "test-key",
+		},
+	}
+	client := NewGatewayClient(rm, "gpt-5.4-mini")
+	client.SetMaxRetries(3)
+
+	_, err := client.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Missing required parameter")
+	assert.Equal(t, 1, requests)
+	assert.Equal(t, 1, rm.selectCalls)
+	require.Len(t, rm.results, 1)
+	assert.False(t, rm.results[0].success)
+	assert.Equal(t, 0, rm.results[0].statusCode)
 }

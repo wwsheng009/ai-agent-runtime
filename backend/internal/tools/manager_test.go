@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -104,6 +105,23 @@ func TestAgentAdapter_ListTools_MergesToolkitAndMCP(t *testing.T) {
 	}
 	if _, ok := toolNames["mcp_echo"]; !ok {
 		t.Fatalf("expected MCP tool mcp_echo to be present: %+v", tools)
+	}
+}
+
+func TestManagerListTools_ReturnsSortedNames(t *testing.T) {
+	manager := NewDefaultManager(newStubMCPManager())
+
+	tools := manager.ListTools()
+	if len(tools) == 0 {
+		t.Fatal("expected manager to expose tools")
+	}
+
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	if !sort.StringsAreSorted(names) {
+		t.Fatalf("expected sorted tool names, got %v", names)
 	}
 }
 

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -144,6 +145,78 @@ func TestRuntimeMessageFromAICLIMessage_PreservesCodexOutputItems(t *testing.T) 
 	}
 	if outputItems[0]["encrypted_content"] != "-" {
 		t.Fatalf("expected encrypted_content to be preserved, got %#v", outputItems[0]["encrypted_content"])
+	}
+}
+
+func TestRuntimeMessageFromAICLIMessage_RecoversMissingToolCallsFromCodexOutputItems(t *testing.T) {
+	raw := map[string]interface{}{
+		"role":    "assistant",
+		"content": "我继续查看剩余改动。",
+		"tool_calls": []map[string]interface{}{
+			{
+				"id":   "call_1",
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":      "execute_shell_command",
+					"arguments": `{"command":"echo 1"}`,
+				},
+			},
+		},
+		"reasoning_details": map[string]interface{}{
+			"format":     "openai_responses",
+			"streamable": true,
+			"visibility": "opaque",
+			"metadata": map[string]interface{}{
+				"response_output_items": []map[string]interface{}{
+					{
+						"type": "message",
+						"role": "assistant",
+						"content": []map[string]interface{}{
+							{
+								"type": "output_text",
+								"text": "我继续查看剩余改动。",
+							},
+						},
+					},
+					{
+						"type":      "function_call",
+						"call_id":   "call_1",
+						"name":      "execute_shell_command",
+						"arguments": `{"command":"echo 1"}`,
+					},
+					{
+						"type":      "function_call",
+						"call_id":   "call_2",
+						"name":      "execute_shell_command",
+						"arguments": `{"command":"echo 2"}`,
+					},
+				},
+			},
+		},
+	}
+
+	message, err := runtimeMessageFromAICLIMessage(raw)
+	if err != nil {
+		t.Fatalf("runtimeMessageFromAICLIMessage: %v", err)
+	}
+	if len(message.ToolCalls) != 2 {
+		t.Fatalf("expected recovered tool calls from response_output_items, got %#v", message.ToolCalls)
+	}
+	if message.ToolCalls[1].ID != "call_2" {
+		t.Fatalf("expected second recovered tool call, got %#v", message.ToolCalls[1])
+	}
+
+	rawJSON := message.Metadata.GetString(chatRuntimeMessageRawJSONKey, "")
+	if rawJSON == "" {
+		t.Fatal("expected raw message json to be preserved")
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(rawJSON), &stored); err != nil {
+		t.Fatalf("unmarshal raw message json: %v", err)
+	}
+	storedToolCalls, ok := stored["tool_calls"].([]interface{})
+	if !ok || len(storedToolCalls) != 2 {
+		t.Fatalf("expected healed raw tool_calls, got %#v", stored["tool_calls"])
 	}
 }
 

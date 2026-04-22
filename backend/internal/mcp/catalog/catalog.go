@@ -195,11 +195,19 @@ func (c *Catalog) Search(query string, limit int) []skill.ToolInfo {
 }
 
 func (c *Catalog) rebuildLocked(tools []skill.ToolInfo, stats RefreshStats) {
-	c.tools = make([]skill.ToolInfo, 0, len(tools))
-	c.docs = make([]catalogDoc, 0, len(tools))
+	sortedTools := append([]skill.ToolInfo(nil), tools...)
+	sort.Slice(sortedTools, func(i, j int) bool {
+		if sortedTools[i].Name == sortedTools[j].Name {
+			return sortedTools[i].MCPName < sortedTools[j].MCPName
+		}
+		return sortedTools[i].Name < sortedTools[j].Name
+	})
+
+	c.tools = make([]skill.ToolInfo, 0, len(sortedTools))
+	c.docs = make([]catalogDoc, 0, len(sortedTools))
 	c.docFreq = make(map[string]int)
 	totalDocLen := 0
-	for _, tool := range tools {
+	for _, tool := range sortedTools {
 		cloned := cloneTool(tool)
 		c.tools = append(c.tools, cloned)
 		doc := buildCatalogDoc(cloned)

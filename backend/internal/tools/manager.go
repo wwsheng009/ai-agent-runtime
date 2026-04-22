@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -106,6 +107,10 @@ func (m *Manager) ListTools() []ToolDescriptor {
 			toolsList = append(toolsList, *meta)
 		}
 	}
+
+	sort.Slice(toolsList, func(i, j int) bool {
+		return toolsList[i].Name < toolsList[j].Name
+	})
 
 	return toolsList
 }

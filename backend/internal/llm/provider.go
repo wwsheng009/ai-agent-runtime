@@ -202,6 +202,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
+		RequestMetadata:  buildHTTPDebugRequestMetadata(request.Metadata, p.config.Type, requestBody),
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
@@ -392,6 +393,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
+		RequestMetadata:  buildHTTPDebugRequestMetadata(request.Metadata, p.config.Type, requestBody),
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
@@ -615,6 +617,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
+		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, p.config.Type, requestBody),
 		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
 		RequestBodyBytes: len(bodyBytes),
 		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
@@ -980,6 +983,9 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 	messages := make([]map[string]interface{}, len(request.Messages))
 	for i, msg := range request.Messages {
 		messages[i] = providerMessageToAdapterMessage(msg, p.config.Type)
+	}
+	if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
+		messages = sanitizeCodexProtocolMessages(messages)
 	}
 
 	// 转换 Tools（从 OpenAI 嵌套格式转换为协议特定格式）

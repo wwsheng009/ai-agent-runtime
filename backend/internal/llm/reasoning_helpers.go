@@ -27,10 +27,16 @@ func attachReasoningToAssistantMessage(msg map[string]interface{}, reasoning *ty
 			msg["reasoning_content"] = text
 		}
 	}
-	if outputItems, ok := reasoning.Metadata[reasoningMetadataCodexOutputItemsKey]; ok {
+	if outputItems := canonicalizeCodexOutputItems(reasoning.Metadata[reasoningMetadataCodexOutputItemsKey]); len(outputItems) > 0 {
 		msg[codexResponseOutputItemsMessageKey] = outputItems
 	}
 	if encoded := reasoning.ToMap(); len(encoded) > 0 {
+		if metadata := decodeMapAny(encoded["metadata"]); metadata != nil {
+			if outputItems := canonicalizeCodexOutputItems(metadata[reasoningMetadataCodexOutputItemsKey]); len(outputItems) > 0 {
+				metadata[reasoningMetadataCodexOutputItemsKey] = outputItems
+				encoded["metadata"] = metadata
+			}
+		}
 		msg[assistantReasoningDetailsKey] = encoded
 	}
 	return msg
@@ -79,7 +85,7 @@ func reasoningFromMapMetadata(metadata map[string]interface{}) *types.ReasoningB
 }
 
 func reasoningBlockFromCodexOutputItems(raw interface{}) *types.ReasoningBlock {
-	outputItems := decodeSliceOfMaps(raw)
+	outputItems := canonicalizeCodexOutputItems(raw)
 	if len(outputItems) == 0 {
 		return nil
 	}
@@ -145,6 +151,241 @@ func extractCodexReasoningSummaryParts(raw interface{}) string {
 	return strings.Join(parts, "\n")
 }
 
+func canonicalizeCodexOutputItems(raw interface{}) []map[string]interface{} {
+	items := decodeSliceOfMaps(raw)
+	if len(items) == 0 {
+		return nil
+	}
+
+	out := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		if canonical := canonicalizeCodexOutputItem(item); canonical != nil {
+			out = append(out, canonical)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func canonicalizeCodexOutputItem(item map[string]interface{}) map[string]interface{} {
+	if len(item) == 0 {
+		return nil
+	}
+
+	itemType, _ := item["type"].(string)
+	switch strings.ToLower(strings.TrimSpace(itemType)) {
+	case "reasoning":
+		return canonicalizeCodexReasoningOutputItem(item)
+	case "message":
+		return canonicalizeCodexMessageOutputItem(item)
+	case "function_call":
+		return canonicalizeCodexFunctionCallOutputItem(item)
+	case "function_call_output":
+		return canonicalizeCodexFunctionCallResultOutputItem(item)
+	default:
+		return cloneCodexOutputMapDroppingKeys(item, "id", "status", "phase")
+	}
+}
+
+func canonicalizeCodexReasoningOutputItem(item map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{
+		"type": "reasoning",
+	}
+	if summary := canonicalizeCodexSummaryParts(item["summary"]); len(summary) > 0 {
+		out["summary"] = summary
+	} else if _, exists := item["summary"]; exists {
+		out["summary"] = []map[string]interface{}{}
+	}
+	if encrypted, _ := item["encrypted_content"].(string); strings.TrimSpace(encrypted) != "" {
+		out["encrypted_content"] = encrypted
+		// Responses replay still expects reasoning.summary, even when the provider
+		// only returned opaque encrypted_content and an empty summary array.
+		if _, exists := out["summary"]; !exists {
+			out["summary"] = []map[string]interface{}{}
+		}
+	}
+	return out
+}
+
+func canonicalizeCodexMessageOutputItem(item map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{
+		"type": "message",
+		"role": "assistant",
+	}
+	if role, _ := item["role"].(string); strings.TrimSpace(role) != "" {
+		out["role"] = strings.TrimSpace(role)
+	}
+	if content := canonicalizeCodexMessageContentParts(item["content"]); len(content) > 0 {
+		out["content"] = content
+	}
+	return out
+}
+
+func canonicalizeCodexFunctionCallOutputItem(item map[string]interface{}) map[string]interface{} {
+	callID, _ := item["call_id"].(string)
+	if strings.TrimSpace(callID) == "" {
+		callID, _ = item["id"].(string)
+	}
+
+	name, _ := item["name"].(string)
+	arguments, _ := item["arguments"].(string)
+	if fn := decodeMapAny(item["function"]); fn != nil {
+		if strings.TrimSpace(name) == "" {
+			name, _ = fn["name"].(string)
+		}
+		if strings.TrimSpace(arguments) == "" {
+			arguments, _ = fn["arguments"].(string)
+		}
+		if strings.TrimSpace(arguments) == "" {
+			if encoded, ok := marshalStableJSONString(fn["arguments"]); ok {
+				arguments = encoded
+			}
+		}
+	}
+
+	callID = strings.TrimSpace(callID)
+	name = strings.TrimSpace(name)
+	if callID == "" || name == "" {
+		return cloneCodexOutputMapDroppingKeys(item, "id", "status", "phase")
+	}
+	if strings.TrimSpace(arguments) == "" {
+		arguments = "{}"
+	}
+
+	return map[string]interface{}{
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":      name,
+		"arguments": arguments,
+	}
+}
+
+func canonicalizeCodexFunctionCallResultOutputItem(item map[string]interface{}) map[string]interface{} {
+	callID, _ := item["call_id"].(string)
+	if strings.TrimSpace(callID) == "" {
+		callID, _ = item["id"].(string)
+	}
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return cloneCodexOutputMapDroppingKeys(item, "id", "status", "phase")
+	}
+	return map[string]interface{}{
+		"type":    "function_call_output",
+		"call_id": callID,
+		"output":  item["output"],
+	}
+}
+
+func canonicalizeCodexSummaryParts(raw interface{}) []map[string]interface{} {
+	parts := decodeSliceOfMaps(raw)
+	if len(parts) == 0 {
+		return nil
+	}
+
+	out := make([]map[string]interface{}, 0, len(parts))
+	for _, part := range parts {
+		if len(part) == 0 {
+			continue
+		}
+		canonical := cloneCodexOutputMapDroppingKeys(part, "id", "status", "phase")
+		if _, exists := canonical["type"]; !exists {
+			continue
+		}
+		out = append(out, canonical)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func canonicalizeCodexMessageContentParts(raw interface{}) []map[string]interface{} {
+	parts := decodeSliceOfMaps(raw)
+	if len(parts) == 0 {
+		return nil
+	}
+
+	out := make([]map[string]interface{}, 0, len(parts))
+	for _, part := range parts {
+		if len(part) == 0 {
+			continue
+		}
+		canonical := cloneCodexOutputMapDroppingKeys(part, "id", "status", "phase", "logprobs")
+		if _, exists := canonical["type"]; !exists {
+			continue
+		}
+		if annotations := decodeSliceOfMaps(canonical["annotations"]); len(annotations) == 0 {
+			delete(canonical, "annotations")
+		}
+		out = append(out, canonical)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func cloneCodexOutputMapDroppingKeys(input map[string]interface{}, keys ...string) map[string]interface{} {
+	if len(input) == 0 {
+		return nil
+	}
+	if len(keys) == 0 {
+		cloned := make(map[string]interface{}, len(input))
+		for key, value := range input {
+			cloned[key] = value
+		}
+		return cloned
+	}
+
+	drop := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		drop[key] = struct{}{}
+	}
+
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		if _, skip := drop[key]; skip {
+			continue
+		}
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func marshalStableJSONString(value interface{}) (string, bool) {
+	if value == nil {
+		return "", false
+	}
+	payload, err := json.Marshal(value)
+	if err != nil || len(payload) == 0 {
+		return "", false
+	}
+	return string(payload), true
+}
+
+func decodeMapAny(raw interface{}) map[string]interface{} {
+	switch typed := raw.(type) {
+	case map[string]interface{}:
+		if len(typed) == 0 {
+			return nil
+		}
+		return typed
+	case json.RawMessage:
+		var decoded map[string]interface{}
+		if err := json.Unmarshal(typed, &decoded); err == nil && len(decoded) > 0 {
+			return decoded
+		}
+	case []byte:
+		var decoded map[string]interface{}
+		if err := json.Unmarshal(typed, &decoded); err == nil && len(decoded) > 0 {
+			return decoded
+		}
+	}
+	return nil
+}
+
 func runtimeMessageToAdapterMessage(msg types.Message, protocol string) map[string]interface{} {
 	reasoning := reasoningFromMessageMetadata(msg.Metadata)
 	toolCalls := encodeRuntimeToolCalls(msg.ToolCalls)
@@ -162,7 +403,75 @@ func RuntimeMessagesToProtocolMessages(messages []types.Message, protocol string
 	for _, msg := range messages {
 		result = append(result, runtimeMessageToAdapterMessage(msg, protocol))
 	}
+	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
+		result = sanitizeCodexProtocolMessages(result)
+	}
 	return result
+}
+
+func sanitizeCodexProtocolMessages(messages []map[string]interface{}) []map[string]interface{} {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	seenToolCalls := make(map[string]struct{})
+	filtered := make([]map[string]interface{}, 0, len(messages))
+	for _, msg := range messages {
+		role, _ := msg["role"].(string)
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "assistant":
+			filtered = append(filtered, msg)
+			for id := range codexMessageToolCallIDs(msg) {
+				seenToolCalls[id] = struct{}{}
+			}
+		case "tool":
+			toolCallID, _ := msg["tool_call_id"].(string)
+			toolCallID = strings.TrimSpace(toolCallID)
+			if toolCallID == "" {
+				continue
+			}
+			if _, ok := seenToolCalls[toolCallID]; !ok {
+				continue
+			}
+			filtered = append(filtered, msg)
+		default:
+			filtered = append(filtered, msg)
+		}
+	}
+	return filtered
+}
+
+func codexMessageToolCallIDs(message map[string]interface{}) map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, toolCall := range decodeSliceOfMaps(message["tool_calls"]) {
+		if toolCall == nil {
+			continue
+		}
+		if id, ok := toolCall["id"].(string); ok && strings.TrimSpace(id) != "" {
+			ids[strings.TrimSpace(id)] = struct{}{}
+			continue
+		}
+		if id, ok := toolCall["call_id"].(string); ok && strings.TrimSpace(id) != "" {
+			ids[strings.TrimSpace(id)] = struct{}{}
+		}
+	}
+	for _, item := range decodeSliceOfMaps(message[codexResponseOutputItemsMessageKey]) {
+		if item == nil {
+			continue
+		}
+		itemType, _ := item["type"].(string)
+		if !strings.EqualFold(strings.TrimSpace(itemType), "function_call") {
+			continue
+		}
+		if id, ok := item["call_id"].(string); ok && strings.TrimSpace(id) != "" {
+			ids[strings.TrimSpace(id)] = struct{}{}
+			continue
+		}
+		if id, ok := item["id"].(string); ok && strings.TrimSpace(id) != "" {
+			ids[strings.TrimSpace(id)] = struct{}{}
+		}
+	}
+	return ids
 }
 
 func providerMessageToAdapterMessage(msg Message, protocol string) map[string]interface{} {
@@ -207,10 +516,12 @@ func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]int
 
 func buildCodexProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock) map[string]interface{} {
 	message := buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning)
-	if reasoning == nil || !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+	if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
 		return message
 	}
-	if outputItems := decodeSliceOfMaps(reasoning.Metadata[reasoningMetadataCodexOutputItemsKey]); len(outputItems) > 0 {
+
+	outputItems := codexProtocolOutputItems(content, toolCalls, reasoning)
+	if len(outputItems) > 0 {
 		message[codexResponseOutputItemsMessageKey] = outputItems
 		delete(message, "reasoning_content")
 		delete(message, "tool_calls")
@@ -219,6 +530,95 @@ func buildCodexProtocolMessage(role, content string, toolCalls []map[string]inte
 		}
 	}
 	return message
+}
+
+func codexProtocolOutputItems(content string, toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock) []map[string]interface{} {
+	if reasoning != nil {
+		if outputItems := canonicalizeCodexOutputItems(reasoning.Metadata[reasoningMetadataCodexOutputItemsKey]); len(outputItems) > 0 {
+			return outputItems
+		}
+	}
+
+	items := make([]map[string]interface{}, 0, len(toolCalls)+2)
+	if reasoningText := codexReasoningSummary(reasoning); reasoningText != "" {
+		items = append(items, map[string]interface{}{
+			"type": "reasoning",
+			"summary": []map[string]interface{}{
+				{
+					"type": "summary_text",
+					"text": reasoningText,
+				},
+			},
+		})
+	}
+	if text := strings.TrimSpace(content); text != "" {
+		items = append(items, map[string]interface{}{
+			"type": "message",
+			"role": "assistant",
+			"content": []map[string]interface{}{
+				{
+					"type": "output_text",
+					"text": text,
+				},
+			},
+		})
+	}
+	for _, toolCall := range toolCalls {
+		if item := codexProtocolFunctionCallItem(toolCall); item != nil {
+			items = append(items, item)
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return items
+}
+
+func codexReasoningSummary(reasoning *types.ReasoningBlock) string {
+	if reasoning == nil {
+		return ""
+	}
+	return strings.TrimSpace(reasoning.DisplayText())
+}
+
+func codexProtocolFunctionCallItem(toolCall map[string]interface{}) map[string]interface{} {
+	if len(toolCall) == 0 {
+		return nil
+	}
+
+	function, _ := toolCall["function"].(map[string]interface{})
+	name, _ := function["name"].(string)
+	if strings.TrimSpace(name) == "" {
+		name, _ = toolCall["name"].(string)
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+
+	callID, _ := toolCall["id"].(string)
+	if strings.TrimSpace(callID) == "" {
+		callID, _ = toolCall["call_id"].(string)
+	}
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return nil
+	}
+
+	arguments, _ := function["arguments"].(string)
+	if strings.TrimSpace(arguments) == "" {
+		arguments, _ = toolCall["arguments"].(string)
+	}
+	if strings.TrimSpace(arguments) == "" {
+		arguments = "{}"
+	}
+
+	return map[string]interface{}{
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":      name,
+		"arguments": arguments,
+	}
 }
 
 func buildAnthropicProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock) map[string]interface{} {
