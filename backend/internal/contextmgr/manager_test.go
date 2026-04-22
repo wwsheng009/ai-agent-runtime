@@ -257,6 +257,99 @@ func TestManager_Build_CompactProfilePrefersSummaryAndSkipsRecall(t *testing.T) 
 	}
 }
 
+func TestManager_BuildAppendsCompactionSegmentsInsteadOfRewritingPrefix(t *testing.T) {
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	manager := NewManagerWithProfile(BudgetProfileCompact, Budget{
+		MaxPromptTokens:     4000,
+		MaxMessages:         8,
+		KeepRecentMessages:  2,
+		MaxRecallResults:    2,
+		MaxObservationItems: 2,
+	}, store)
+
+	baseHistory := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("Investigate the failure"),
+		*types.NewAssistantMessage("I will inspect the logs."),
+		*types.NewToolMessage("call-1", "tool output A"),
+		*types.NewAssistantMessage("I saw a stack trace in earlier output."),
+		*types.NewUserMessage("Summarize the root cause"),
+	}
+
+	first := manager.Build(context.Background(), BuildInput{
+		SessionID: "session-compaction-segments",
+		TaskID:    "task-compaction-segments",
+		Goal:      "Summarize the root cause",
+		History:   baseHistory,
+	})
+
+	firstCompactions := compactionMessagesFromResult(first.Messages)
+	require.Len(t, firstCompactions, 1)
+	firstContent := firstCompactions[0].Content
+
+	extendedHistory := append([]types.Message{}, baseHistory[:len(baseHistory)-1]...)
+	extendedHistory = append(extendedHistory,
+		*types.NewAssistantMessage("I confirmed the fallback path hits the same stack trace."),
+		*types.NewUserMessage("Summarize the updated root cause"),
+	)
+
+	second := manager.Build(context.Background(), BuildInput{
+		SessionID: "session-compaction-segments",
+		TaskID:    "task-compaction-segments",
+		Goal:      "Summarize the updated root cause",
+		History:   extendedHistory,
+	})
+
+	secondCompactions := compactionMessagesFromResult(second.Messages)
+	require.Len(t, secondCompactions, 2)
+	assert.Equal(t, firstContent, secondCompactions[0].Content)
+	assert.Contains(t, secondCompactions[1].Content, "Compacted context from earlier turns (continued):")
+
+	checkpoints, err := store.ListCheckpoints(context.Background(), "session-compaction-segments", 10, 0)
+	require.NoError(t, err)
+	require.Len(t, checkpoints, 2)
+}
+
+func TestBuildObservationMessage_StableMapSerialization(t *testing.T) {
+	mapA := map[string]interface{}{
+		"weather": map[string]interface{}{
+			"text": "sunny",
+			"temp": 22,
+		},
+		"city": "beijing",
+	}
+	mapB := map[string]interface{}{
+		"city": "beijing",
+		"weather": map[string]interface{}{
+			"temp": 22,
+			"text": "sunny",
+		},
+	}
+
+	msgA := buildObservationMessage([]types.Observation{
+		{
+			Tool:    "weather_lookup",
+			Success: true,
+			Output:  mapA,
+		},
+	}, 4)
+	msgB := buildObservationMessage([]types.Observation{
+		{
+			Tool:    "weather_lookup",
+			Success: true,
+			Output:  mapB,
+		},
+	}, 4)
+
+	require.NotNil(t, msgA)
+	require.NotNil(t, msgB)
+	assert.Equal(t, msgA.Content, msgB.Content)
+	assert.Contains(t, msgA.Content, `{"city":"beijing","weather":{"temp":22,"text":"sunny"}}`)
+}
+
 func TestManager_Build_ExtendedProfileUsesBroadRecall(t *testing.T) {
 	store, err := artifact.NewStore(nil)
 	if err != nil {
@@ -363,6 +456,211 @@ func TestManager_Build_DoesNotSplitToolCallHistoryAtRecentBoundary(t *testing.T)
 	require.Len(t, result.Messages, 9)
 	assert.Equal(t, "tool", result.Messages[1].Role)
 	assert.Equal(t, "call_ls_1", result.Messages[1].ToolCallID)
+}
+
+func TestRecentWindowStart_ProtectsActiveUserTurnFromCompaction(t *testing.T) {
+	messages := []types.Message{
+		*types.NewUserMessage("previous request"),
+		*types.NewAssistantMessage("previous answer"),
+		*types.NewUserMessage("current request"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{
+					ID:   "call_view_1",
+					Name: "view",
+					Args: map[string]interface{}{"file_path": "README.md"},
+				},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_view_1", "README preview"),
+		*types.NewAssistantMessage("继续分析中"),
+	}
+
+	start := recentWindowStart(messages, 2)
+	assert.Equal(t, 2, start)
+}
+
+func TestTrimFlexibleMessageCount_PreservesActiveUserTurnSuffix(t *testing.T) {
+	rawMessages := []types.Message{
+		*types.NewAssistantMessage("previous answer"),
+		*types.NewUserMessage("current request"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{
+					ID:   "call_view_1",
+					Name: "view",
+					Args: map[string]interface{}{"file_path": "README.md"},
+				},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_view_1", "README preview"),
+	}
+
+	trimmedRaw, trimmedDynamic := trimFlexibleMessageCount(rawMessages, []types.Message{
+		{
+			Role:    "assistant",
+			Content: "Workspace recall",
+			Metadata: types.Metadata{
+				"context_stage": "workspace",
+			},
+		},
+	}, 2)
+
+	require.Len(t, trimmedRaw, 3)
+	assert.Equal(t, "user", trimmedRaw[0].Role)
+	assert.Equal(t, "current request", trimmedRaw[0].Content)
+	assert.Equal(t, "assistant", trimmedRaw[1].Role)
+	assert.Equal(t, "tool", trimmedRaw[2].Role)
+	assert.Empty(t, trimmedDynamic)
+}
+
+func TestActiveUserTurnHasReplay(t *testing.T) {
+	assert.False(t, activeUserTurnHasReplay([]types.Message{
+		*types.NewUserMessage("current request"),
+	}))
+
+	assert.True(t, activeUserTurnHasReplay([]types.Message{
+		*types.NewUserMessage("current request"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{
+					ID:   "call_view_1",
+					Name: "view",
+					Args: map[string]interface{}{"file_path": "README.md"},
+				},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_view_1", "README preview"),
+	}))
+}
+
+func TestManager_Build_DoesNotCompactActiveUserTurn(t *testing.T) {
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	manager := NewManager(Budget{
+		MaxPromptTokens:     8000,
+		MaxMessages:         16,
+		KeepRecentMessages:  2,
+		MaxRecallResults:    2,
+		MaxObservationItems: 2,
+	}, store)
+	manager.Strategy.WorkspaceMode = WorkspaceModeDisabled
+	manager.Strategy.RecallMode = RecallModeDisabled
+
+	history := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("继续分析当前实现"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{
+					ID:   "call_readme_1",
+					Name: "view",
+					Args: map[string]interface{}{"file_path": "README.md"},
+				},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_readme_1", "README preview"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{
+					ID:   "call_agents_1",
+					Name: "view",
+					Args: map[string]interface{}{"file_path": "AGENTS.md"},
+				},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_agents_1", "AGENTS preview"),
+	}
+
+	result := manager.Build(context.Background(), BuildInput{
+		SessionID:   "session-active-turn",
+		TaskID:      "task-active-turn",
+		Goal:        "继续分析当前实现",
+		History:     history,
+		CountTokens: func(messages []types.Message) int { return len(messages) * 20 },
+	})
+
+	for _, message := range result.Messages {
+		stage := message.Metadata.GetString("context_stage", "")
+		if stage == "ledger" || stage == "compaction" {
+			t.Fatalf("did not expect active user turn to be compacted, got stage=%s messages=%+v", stage, result.Messages)
+		}
+	}
+	require.Len(t, result.Messages, len(history))
+	assert.Equal(t, "user", result.Messages[1].Role)
+	assert.Equal(t, "继续分析当前实现", result.Messages[1].Content)
+}
+
+func TestManager_Build_SuppressesVolatileContextDuringActiveUserTurnReplay(t *testing.T) {
+	manager := NewManager(DefaultBudget(), nil)
+	manager.Strategy.WorkspaceMode = WorkspaceModeSignals
+	manager.Strategy.MinWorkspaceQueryLength = 4
+	manager.Workspace = stubWorkspaceBuilder{
+		ctx: &workspace.WorkspaceContext{
+			Summary: "workspace summary",
+			Files:   []string{"README.md"},
+			Symbols: []workspace.SymbolInfo{{Name: "SearchDocs"}},
+		},
+	}
+
+	history := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("search docs"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{
+					ID:   "call_view_1",
+					Name: "view",
+					Args: map[string]interface{}{"file_path": "README.md"},
+				},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_view_1", "README preview"),
+	}
+
+	result := manager.Build(context.Background(), BuildInput{
+		SessionID: "session-active-turn-volatile",
+		Goal:      "search docs",
+		History:   history,
+		Observations: []types.Observation{
+			*types.NewObservation("step_1", "view").WithOutput("README preview").MarkSuccess(),
+		},
+	})
+
+	for _, message := range result.Messages {
+		if strings.Contains(message.Content, "Recent observations:") {
+			t.Fatalf("did not expect warm memory during active turn replay, got %+v", result.Messages)
+		}
+		if strings.Contains(message.Content, "Workspace recall:") {
+			t.Fatalf("did not expect workspace recall during active turn replay, got %+v", result.Messages)
+		}
+	}
+	if got := result.Metadata["observation_injected"]; got != nil {
+		t.Fatalf("expected observation_injected to stay unset, got %v", got)
+	}
+	if got := result.Metadata["workspace_context_injected"]; got != nil {
+		t.Fatalf("expected workspace_context_injected to stay unset, got %v", got)
+	}
+
+	layerMetrics := result.Metadata["context_layer_metrics"].(map[string]interface{})
+	warm := layerMetrics["warm"].(map[string]interface{})
+	workspaceMetrics := layerMetrics["workspace"].(map[string]interface{})
+	assert.Equal(t, true, warm["suppressed_for_active_turn"])
+	assert.Equal(t, true, workspaceMetrics["suppressed_for_active_turn"])
 }
 
 type stubWorkspaceBuilder struct {
@@ -505,6 +803,63 @@ func TestManager_BuildReusesCheckpointWithoutDuplicatingLedger(t *testing.T) {
 	if first.Metadata["checkpoint_id"] != second.Metadata["checkpoint_id"] {
 		t.Fatalf("expected checkpoint reuse, got first=%v second=%v", first.Metadata["checkpoint_id"], second.Metadata["checkpoint_id"])
 	}
+}
+
+func TestManager_BuildAppendsLedgerSegmentsInsteadOfRewritingPrefix(t *testing.T) {
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	manager := NewManager(Budget{
+		MaxPromptTokens:     8000,
+		MaxMessages:         8,
+		KeepRecentMessages:  2,
+		MaxRecallResults:    2,
+		MaxObservationItems: 2,
+	}, store)
+
+	baseHistory := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("Investigate the failure"),
+		*types.NewAssistantMessage("Decision: inspect the first failing test."),
+		*types.NewToolMessage("call-1", "panic: parser failed"),
+		*types.NewAssistantMessage("Conclusion: the parser panic starts in the config loader."),
+		*types.NewUserMessage("Summarize the root cause"),
+	}
+
+	first := manager.Build(context.Background(), BuildInput{
+		SessionID: "session-ledger-segments",
+		TaskID:    "task-ledger-segments",
+		Goal:      "Summarize the root cause",
+		History:   baseHistory,
+	})
+
+	firstLedgers := ledgerMessagesFromResult(first.Messages)
+	require.Len(t, firstLedgers, 1)
+	firstContent := firstLedgers[0].Content
+
+	extendedHistory := append([]types.Message{}, baseHistory[:len(baseHistory)-1]...)
+	extendedHistory = append(extendedHistory,
+		*types.NewAssistantMessage("Decision: confirm whether the same loader panic affects the fallback path."),
+		*types.NewUserMessage("Summarize the updated root cause"),
+	)
+
+	second := manager.Build(context.Background(), BuildInput{
+		SessionID: "session-ledger-segments",
+		TaskID:    "task-ledger-segments",
+		Goal:      "Summarize the updated root cause",
+		History:   extendedHistory,
+	})
+
+	secondLedgers := ledgerMessagesFromResult(second.Messages)
+	require.Len(t, secondLedgers, 2)
+	assert.Equal(t, firstContent, secondLedgers[0].Content)
+	assert.Contains(t, secondLedgers[1].Content, "Decision ledger (continued):")
+	assert.NotEqual(t, secondLedgers[0].Metadata["checkpoint_id"], secondLedgers[1].Metadata["checkpoint_id"])
+
+	checkpoints, err := store.ListCheckpoints(context.Background(), "session-ledger-segments", 10, 0)
+	require.NoError(t, err)
+	require.Len(t, checkpoints, 2)
 }
 
 func TestManager_Build_InjectsProfileContextLayer(t *testing.T) {
@@ -791,6 +1146,102 @@ func TestManager_Build_LongSessionLayerMetricsDifferAcrossProfiles(t *testing.T)
 	if extendedCold["recall_count"] == 0 {
 		t.Fatalf("expected extended profile recall count > 0, got %v", extendedCold["recall_count"])
 	}
+}
+
+func TestTrimByTokenBudget_PrefersDroppingDynamicThenOldRawThenNewestStable(t *testing.T) {
+	messages := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		{
+			Role:    "assistant",
+			Content: "Profile context",
+			Metadata: types.Metadata{
+				"context_stage": "profile",
+			},
+		},
+		{
+			Role:    "assistant",
+			Content: "Decision ledger (continued): segment 2",
+			Metadata: types.Metadata{
+				"context_stage": "ledger",
+			},
+		},
+		*types.NewAssistantMessage("recent assistant reply"),
+		*types.NewUserMessage("latest user question"),
+		{
+			Role:    "assistant",
+			Content: "Workspace recall",
+			Metadata: types.Metadata{
+				"context_stage": "workspace",
+			},
+		},
+	}
+
+	trimmed := trimByTokenBudget(messages, Budget{
+		MaxPromptTokens: 30,
+	}, func(messages []types.Message) int {
+		return len(messages) * 10
+	}, nil)
+
+	require.Len(t, trimmed, 3)
+	assert.Equal(t, "system", trimmed[0].Role)
+	assert.Equal(t, "profile", trimmed[1].Metadata.GetString("context_stage", ""))
+	assert.Equal(t, "user", trimmed[2].Role)
+	assert.Equal(t, "latest user question", trimmed[2].Content)
+}
+
+func TestTrimByTokenBudget_KeepsLastUserWhenStableContextExceedsBudget(t *testing.T) {
+	messages := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		{
+			Role:    "assistant",
+			Content: "Profile context",
+			Metadata: types.Metadata{
+				"context_stage": "profile",
+			},
+		},
+		{
+			Role:    "assistant",
+			Content: "Decision ledger (continued): newest segment",
+			Metadata: types.Metadata{
+				"context_stage": "ledger",
+			},
+		},
+		*types.NewUserMessage("latest user question"),
+	}
+
+	trimmed := trimByTokenBudget(messages, Budget{
+		MaxPromptTokens: 30,
+	}, func(messages []types.Message) int {
+		return len(messages) * 10
+	}, nil)
+
+	require.Len(t, trimmed, 3)
+	assert.Equal(t, "system", trimmed[0].Role)
+	assert.Equal(t, "profile", trimmed[1].Metadata.GetString("context_stage", ""))
+	assert.Equal(t, "user", trimmed[2].Role)
+	assert.Equal(t, "latest user question", trimmed[2].Content)
+}
+
+func ledgerMessagesFromResult(messages []types.Message) []types.Message {
+	ledgers := make([]types.Message, 0)
+	for _, message := range messages {
+		if message.Metadata.GetString("context_stage", "") != "ledger" {
+			continue
+		}
+		ledgers = append(ledgers, message)
+	}
+	return ledgers
+}
+
+func compactionMessagesFromResult(messages []types.Message) []types.Message {
+	compactions := make([]types.Message, 0)
+	for _, message := range messages {
+		if message.Metadata.GetString("context_stage", "") != "compaction" {
+			continue
+		}
+		compactions = append(compactions, message)
+	}
+	return compactions
 }
 
 func containsSourceRef(refs []string, prefix string) bool {

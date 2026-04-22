@@ -39,6 +39,16 @@ const (
 	WorkspaceModeBroad    = "broad"
 )
 
+const (
+	ledgerCheckpointReason         = "history_window"
+	ledgerCheckpointSegmentReason  = "history_window_segment"
+	summaryCheckpointSegmentReason = "history_window_summary_segment"
+
+	ledgerCheckpointSegmentStartKey = "segment_start"
+	ledgerCheckpointSegmentEndKey   = "segment_end"
+	compactionSummaryTextKey        = "summary_text"
+)
+
 // TokenCounter 允许 context manager 复用不同 tokenizer。
 type TokenCounter func([]types.Message) int
 
@@ -63,6 +73,16 @@ type LedgerStore interface {
 	LoadMemoryEntries(ctx context.Context, sessionID string, kinds []string, limit int) ([]artifact.MemoryEntry, error)
 	SaveCheckpoint(ctx context.Context, checkpoint artifact.Checkpoint) (string, error)
 	LatestCheckpoint(ctx context.Context, sessionID string) (*artifact.Checkpoint, error)
+}
+
+type ledgerCheckpointLister interface {
+	ListCheckpoints(ctx context.Context, sessionID string, limit, offset int) ([]artifact.Checkpoint, error)
+}
+
+type matchedLedgerCheckpoint struct {
+	Checkpoint artifact.Checkpoint
+	Start      int
+	End        int
 }
 
 // Budget 描述一次请求允许消耗的上下文预算。
@@ -361,10 +381,11 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"max_tokens":       budget.MaxPromptTokens,
 		},
 		"warm": map[string]interface{}{
-			"mode":           m.Strategy.ObservationMode,
-			"selected_items": 0,
-			"injected":       false,
-			"max_items":      budget.MaxObservationItems,
+			"mode":                       m.Strategy.ObservationMode,
+			"selected_items":             0,
+			"injected":                   false,
+			"max_items":                  budget.MaxObservationItems,
+			"suppressed_for_active_turn": false,
 		},
 		"cold": map[string]interface{}{
 			"compaction_mode":  m.Strategy.CompactionMode,
@@ -377,10 +398,11 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"max_recall_items": budget.MaxRecallResults,
 		},
 		"workspace": map[string]interface{}{
-			"injected":     false,
-			"file_count":   0,
-			"symbol_count": 0,
-			"chunk_count":  0,
+			"injected":                   false,
+			"file_count":                 0,
+			"symbol_count":               0,
+			"chunk_count":                0,
+			"suppressed_for_active_turn": false,
 		},
 		"team": map[string]interface{}{
 			"injected": false,
@@ -427,54 +449,83 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"compaction_mode":  m.Strategy.CompactionMode,
 		})
 		if m.Strategy.CompactionMode == CompactionModeLedgerPreferred {
-			if ledgerMessage, checkpointID := m.buildLedgerMessage(ctx, input.SessionID, input.TaskID, older, input.Profile); ledgerMessage != nil {
-				managed = append(managed, *ledgerMessage)
+			if ledgerMessages, checkpointIDs := m.buildLedgerMessages(ctx, input.SessionID, input.TaskID, older, input.Profile); len(ledgerMessages) > 0 {
+				for _, ledgerMessage := range ledgerMessages {
+					managed = append(managed, ledgerMessage)
+				}
 				result.Metadata["compacted_messages"] = len(older)
 				result.Metadata["ledger_injected"] = true
 				layerMetrics["cold"].(map[string]interface{})["compacted"] = true
 				layerMetrics["cold"].(map[string]interface{})["ledger_injected"] = true
-				if checkpointID != "" {
-					result.Metadata["checkpoint_id"] = checkpointID
+				if len(checkpointIDs) > 0 {
+					result.Metadata["checkpoint_id"] = checkpointIDs[len(checkpointIDs)-1]
+					if len(checkpointIDs) > 1 {
+						result.Metadata["checkpoint_ids"] = append([]string(nil), checkpointIDs...)
+					}
 				}
 				m.emitEvent("context.compact.completed", input.TraceID, input.SessionID, map[string]interface{}{
 					"task_id":         input.TaskID,
 					"source_messages": len(older),
 					"ledger":          true,
-					"checkpoint_id":   checkpointID,
+					"checkpoint_id":   result.Metadata["checkpoint_id"],
+					"checkpoint_ids":  result.Metadata["checkpoint_ids"],
 					"compaction_mode": m.Strategy.CompactionMode,
 				})
 			} else {
-				compacted := compactMessages(older)
-				if compacted != nil {
-					managed = append(managed, *compacted)
+				compactedMessages, checkpointIDs := m.buildCompactionSummaryMessages(ctx, input.SessionID, input.TaskID, older)
+				if len(compactedMessages) > 0 {
+					for _, compacted := range compactedMessages {
+						managed = append(managed, compacted)
+					}
 					result.Metadata["compacted_messages"] = len(older)
 					layerMetrics["cold"].(map[string]interface{})["compacted"] = true
+					if len(checkpointIDs) > 0 {
+						result.Metadata["checkpoint_id"] = checkpointIDs[len(checkpointIDs)-1]
+						if len(checkpointIDs) > 1 {
+							result.Metadata["checkpoint_ids"] = append([]string(nil), checkpointIDs...)
+						}
+					}
 					m.emitEvent("context.compact.completed", input.TraceID, input.SessionID, map[string]interface{}{
 						"task_id":         input.TaskID,
 						"source_messages": len(older),
 						"ledger":          false,
+						"checkpoint_id":   result.Metadata["checkpoint_id"],
+						"checkpoint_ids":  result.Metadata["checkpoint_ids"],
 						"compaction_mode": m.Strategy.CompactionMode,
 					})
 				}
 			}
-		} else if compacted := compactMessages(older); compacted != nil {
-			managed = append(managed, *compacted)
+		} else if compactedMessages, checkpointIDs := m.buildCompactionSummaryMessages(ctx, input.SessionID, input.TaskID, older); len(compactedMessages) > 0 {
+			for _, compacted := range compactedMessages {
+				managed = append(managed, compacted)
+			}
 			result.Metadata["compacted_messages"] = len(older)
 			layerMetrics["cold"].(map[string]interface{})["compacted"] = true
+			if len(checkpointIDs) > 0 {
+				result.Metadata["checkpoint_id"] = checkpointIDs[len(checkpointIDs)-1]
+				if len(checkpointIDs) > 1 {
+					result.Metadata["checkpoint_ids"] = append([]string(nil), checkpointIDs...)
+				}
+			}
 			m.emitEvent("context.compact.completed", input.TraceID, input.SessionID, map[string]interface{}{
 				"task_id":         input.TaskID,
 				"source_messages": len(older),
 				"ledger":          false,
+				"checkpoint_id":   result.Metadata["checkpoint_id"],
+				"checkpoint_ids":  result.Metadata["checkpoint_ids"],
 				"compaction_mode": m.Strategy.CompactionMode,
 			})
 		}
 	}
 
 	managed = append(managed, cloneMessages(recent)...)
+	activeTurnHasReplay := activeUserTurnHasReplay(recent)
 
 	selectedObservations := selectObservationsForMode(input.Memory, input.Observations, m.Strategy.ObservationMode)
 	layerMetrics["warm"].(map[string]interface{})["selected_items"] = len(selectedObservations)
-	if observationMessage := buildObservationMessage(selectedObservations, budget.MaxObservationItems); observationMessage != nil {
+	if activeTurnHasReplay {
+		layerMetrics["warm"].(map[string]interface{})["suppressed_for_active_turn"] = true
+	} else if observationMessage := buildObservationMessage(selectedObservations, budget.MaxObservationItems); observationMessage != nil {
 		managed = append(managed, *observationMessage)
 		result.Metadata["observation_injected"] = true
 		layerMetrics["warm"].(map[string]interface{})["injected"] = true
@@ -497,7 +548,9 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		m.emitEvent("recall.performed", input.TraceID, input.SessionID, payload)
 	}
 
-	if m.Workspace != nil && m.shouldBuildWorkspace(input.Goal) {
+	if activeTurnHasReplay {
+		layerMetrics["workspace"].(map[string]interface{})["suppressed_for_active_turn"] = true
+	} else if m.Workspace != nil && m.shouldBuildWorkspace(input.Goal) {
 		wsCtx := m.Workspace.Build(input.Goal)
 		if wsMsg, wsSummary := buildWorkspaceMessage(wsCtx); wsMsg != nil {
 			fileCount := 0
@@ -649,55 +702,331 @@ func (m *Manager) shouldRecallGoal(goal string) bool {
 	}
 }
 
-func (m *Manager) buildLedgerMessage(ctx context.Context, sessionID, taskID string, older []types.Message, profile map[string]interface{}) (*types.Message, string) {
-	if m.Ledger == nil || len(older) == 0 {
-		return nil, ""
-	}
-
-	historyHash := hashHistory(older)
-	checkpoint, err := m.Ledger.LatestCheckpoint(ctx, sessionID)
-	if err != nil {
-		return nil, ""
-	}
-
-	var entries []artifact.MemoryEntry
-	checkpointID := ""
-	if checkpoint != nil && checkpoint.HistoryHash == historyHash && checkpoint.MessageCount == len(older) {
-		entries = checkpoint.Ledger
-		checkpointID = checkpoint.ID
-	} else {
-		entries = deriveMemoryEntries(sessionID, firstNonEmpty(taskID, sessionID), "history_window", older, buildProfileSourceRefs(profile))
-		for _, entry := range entries {
-			_, _ = m.Ledger.InsertMemoryEntry(ctx, entry)
+func (m *Manager) buildCompactionSummaryMessages(ctx context.Context, sessionID, taskID string, older []types.Message) ([]types.Message, []string) {
+	if m == nil || m.Ledger == nil || len(older) == 0 {
+		if compacted := compactMessages(older); compacted != nil {
+			return []types.Message{*compacted}, nil
 		}
-		checkpointID, _ = m.Ledger.SaveCheckpoint(ctx, artifact.Checkpoint{
-			SessionID:    sessionID,
-			TaskID:       firstNonEmpty(taskID, sessionID),
-			Reason:       "history_window",
-			HistoryHash:  historyHash,
-			MessageCount: len(older),
-			Ledger:       entries,
-			Metadata: map[string]interface{}{
-				"source_messages":        len(older),
-				"source_refs":            mergeSourceRefsFromEntries(entries),
-				"profile_source_refs":    extractProfileSourceRefs(mergeSourceRefsFromEntries(entries)),
-				"profile_resource_kinds": profileSourceKindCounts(mergeSourceRefsFromEntries(entries)),
-			},
+		return nil, nil
+	}
+
+	matched, covered := m.matchSummaryCheckpoints(ctx, sessionID, older)
+	messages := make([]types.Message, 0, len(matched)+1)
+	checkpointIDs := make([]string, 0, len(matched)+1)
+	for index, match := range matched {
+		if message := compactionPromptMessage(summaryTextFromCheckpoint(match.Checkpoint), match.Checkpoint.ID, match.Start, match.End, index > 0); message != nil {
+			messages = append(messages, *message)
+			if strings.TrimSpace(match.Checkpoint.ID) != "" {
+				checkpointIDs = append(checkpointIDs, strings.TrimSpace(match.Checkpoint.ID))
+			}
+		}
+	}
+
+	if covered < len(older) {
+		if checkpoint, summaryText := m.saveSummaryCheckpointSegment(ctx, sessionID, taskID, older[covered:], covered); strings.TrimSpace(summaryText) != "" {
+			if message := compactionPromptMessage(summaryText, checkpoint.ID, covered, covered+len(older[covered:]), len(messages) > 0); message != nil {
+				messages = append(messages, *message)
+				if strings.TrimSpace(checkpoint.ID) != "" {
+					checkpointIDs = append(checkpointIDs, strings.TrimSpace(checkpoint.ID))
+				}
+			}
+		}
+	}
+
+	if len(messages) > 0 {
+		return messages, checkpointIDs
+	}
+
+	if compacted := compactMessages(older); compacted != nil {
+		return []types.Message{*compacted}, checkpointIDs
+	}
+	return nil, checkpointIDs
+}
+
+func (m *Manager) buildLedgerMessages(ctx context.Context, sessionID, taskID string, older []types.Message, profile map[string]interface{}) ([]types.Message, []string) {
+	if m == nil || m.Ledger == nil || len(older) == 0 {
+		return nil, nil
+	}
+
+	matched, covered := m.matchLedgerCheckpoints(ctx, sessionID, older)
+	messages := make([]types.Message, 0, len(matched)+1)
+	checkpointIDs := make([]string, 0, len(matched)+1)
+	for index, match := range matched {
+		if message := ledgerPromptMessage(match.Checkpoint.Ledger, match.Checkpoint.ID, match.Start, match.End, index > 0); message != nil {
+			messages = append(messages, *message)
+			if strings.TrimSpace(match.Checkpoint.ID) != "" {
+				checkpointIDs = append(checkpointIDs, strings.TrimSpace(match.Checkpoint.ID))
+			}
+		}
+	}
+
+	if covered < len(older) {
+		if checkpoint, entries := m.saveLedgerCheckpointSegment(ctx, sessionID, taskID, older[covered:], covered, profile); len(entries) > 0 {
+			if message := ledgerPromptMessage(entries, checkpoint.ID, covered, covered+len(older[covered:]), len(messages) > 0); message != nil {
+				messages = append(messages, *message)
+				if strings.TrimSpace(checkpoint.ID) != "" {
+					checkpointIDs = append(checkpointIDs, strings.TrimSpace(checkpoint.ID))
+				}
+			}
+		}
+	}
+
+	if len(messages) > 0 {
+		return messages, checkpointIDs
+	}
+
+	loaded, err := m.Ledger.LoadMemoryEntries(ctx, sessionID, []string{"decision", "plan", "open_question", "failure", "fact"}, maxInt(1, m.Strategy.LedgerLoadLimit))
+	if err != nil || len(loaded) == 0 {
+		return nil, checkpointIDs
+	}
+	if message := ledgerPromptMessage(loaded, "", 0, len(older), false); message != nil {
+		return []types.Message{*message}, checkpointIDs
+	}
+	return nil, checkpointIDs
+}
+
+func (m *Manager) matchLedgerCheckpoints(ctx context.Context, sessionID string, older []types.Message) ([]matchedLedgerCheckpoint, int) {
+	checkpoints := m.listLedgerCheckpoints(ctx, sessionID)
+	if len(checkpoints) == 0 || len(older) == 0 {
+		return nil, 0
+	}
+
+	matched := make([]matchedLedgerCheckpoint, 0, 4)
+	covered := 0
+	for covered < len(older) {
+		bestIndex := -1
+		bestLength := 0
+		for index, checkpoint := range checkpoints {
+			start, end, ok := ledgerCheckpointRange(checkpoint)
+			if !ok || start != covered || end > len(older) {
+				continue
+			}
+			segmentLength := end - start
+			if segmentLength <= 0 {
+				continue
+			}
+			if checkpoint.HistoryHash != hashHistory(older[start:end]) {
+				continue
+			}
+			if segmentLength > bestLength {
+				bestIndex = index
+				bestLength = segmentLength
+			}
+		}
+		if bestIndex < 0 {
+			break
+		}
+
+		checkpoint := checkpoints[bestIndex]
+		start, end, _ := ledgerCheckpointRange(checkpoint)
+		matched = append(matched, matchedLedgerCheckpoint{
+			Checkpoint: checkpoint,
+			Start:      start,
+			End:        end,
 		})
+		covered = end
 	}
 
-	if len(entries) == 0 {
-		loaded, err := m.Ledger.LoadMemoryEntries(ctx, sessionID, []string{"decision", "plan", "open_question", "failure", "fact"}, maxInt(1, m.Strategy.LedgerLoadLimit))
-		if err != nil {
-			return nil, checkpointID
-		}
-		entries = loaded
+	return matched, covered
+}
+
+func (m *Manager) matchSummaryCheckpoints(ctx context.Context, sessionID string, older []types.Message) ([]matchedLedgerCheckpoint, int) {
+	checkpoints := m.listLedgerCheckpoints(ctx, sessionID)
+	if len(checkpoints) == 0 || len(older) == 0 {
+		return nil, 0
 	}
+
+	matched := make([]matchedLedgerCheckpoint, 0, 4)
+	covered := 0
+	for covered < len(older) {
+		bestIndex := -1
+		bestLength := 0
+		for index, checkpoint := range checkpoints {
+			if strings.TrimSpace(checkpoint.Reason) != summaryCheckpointSegmentReason {
+				continue
+			}
+			start, end, ok := ledgerCheckpointRange(checkpoint)
+			if !ok || start != covered || end > len(older) {
+				continue
+			}
+			segmentLength := end - start
+			if segmentLength <= 0 {
+				continue
+			}
+			if checkpoint.HistoryHash != hashHistory(older[start:end]) {
+				continue
+			}
+			if strings.TrimSpace(summaryTextFromCheckpoint(checkpoint)) == "" {
+				continue
+			}
+			if segmentLength > bestLength {
+				bestIndex = index
+				bestLength = segmentLength
+			}
+		}
+		if bestIndex < 0 {
+			break
+		}
+
+		checkpoint := checkpoints[bestIndex]
+		start, end, _ := ledgerCheckpointRange(checkpoint)
+		matched = append(matched, matchedLedgerCheckpoint{
+			Checkpoint: checkpoint,
+			Start:      start,
+			End:        end,
+		})
+		covered = end
+	}
+
+	return matched, covered
+}
+
+func (m *Manager) listLedgerCheckpoints(ctx context.Context, sessionID string) []artifact.Checkpoint {
+	if m == nil || m.Ledger == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+
+	if lister, ok := m.Ledger.(ledgerCheckpointLister); ok {
+		checkpoints, err := lister.ListCheckpoints(ctx, sessionID, 128, 0)
+		if err == nil && len(checkpoints) > 0 {
+			return checkpoints
+		}
+	}
+
+	checkpoint, err := m.Ledger.LatestCheckpoint(ctx, sessionID)
+	if err != nil || checkpoint == nil {
+		return nil
+	}
+	return []artifact.Checkpoint{*checkpoint}
+}
+
+func (m *Manager) saveSummaryCheckpointSegment(ctx context.Context, sessionID, taskID string, segment []types.Message, segmentStart int) (artifact.Checkpoint, string) {
+	if m == nil || m.Ledger == nil || len(segment) == 0 {
+		return artifact.Checkpoint{}, ""
+	}
+
+	summaryText := compactMessageText(segment, false)
+	if strings.TrimSpace(summaryText) == "" {
+		return artifact.Checkpoint{}, ""
+	}
+
+	normalizedTaskID := firstNonEmpty(taskID, sessionID)
+	checkpoint := artifact.Checkpoint{
+		SessionID:    sessionID,
+		TaskID:       normalizedTaskID,
+		Reason:       summaryCheckpointSegmentReason,
+		HistoryHash:  hashHistory(segment),
+		MessageCount: len(segment),
+		Metadata: map[string]interface{}{
+			"source_messages":               len(segment),
+			compactionSummaryTextKey:        summaryText,
+			ledgerCheckpointSegmentStartKey: segmentStart,
+			ledgerCheckpointSegmentEndKey:   segmentStart + len(segment),
+		},
+	}
+	checkpointID, err := m.Ledger.SaveCheckpoint(ctx, checkpoint)
+	if err == nil {
+		checkpoint.ID = checkpointID
+	}
+	return checkpoint, summaryText
+}
+
+func (m *Manager) saveLedgerCheckpointSegment(ctx context.Context, sessionID, taskID string, segment []types.Message, segmentStart int, profile map[string]interface{}) (artifact.Checkpoint, []artifact.MemoryEntry) {
+	if m == nil || m.Ledger == nil || len(segment) == 0 {
+		return artifact.Checkpoint{}, nil
+	}
+
+	normalizedTaskID := firstNonEmpty(taskID, sessionID)
+	entries := deriveMemoryEntries(sessionID, normalizedTaskID, ledgerCheckpointReason, segment, buildProfileSourceRefs(profile))
 	if len(entries) == 0 {
-		return nil, checkpointID
+		return artifact.Checkpoint{}, nil
+	}
+	for _, entry := range entries {
+		_, _ = m.Ledger.InsertMemoryEntry(ctx, entry)
+	}
+
+	sourceRefs := mergeSourceRefsFromEntries(entries)
+	checkpoint := artifact.Checkpoint{
+		SessionID:    sessionID,
+		TaskID:       normalizedTaskID,
+		Reason:       ledgerCheckpointSegmentReason,
+		HistoryHash:  hashHistory(segment),
+		MessageCount: len(segment),
+		Ledger:       entries,
+		Metadata: map[string]interface{}{
+			"source_messages":               len(segment),
+			"source_refs":                   sourceRefs,
+			"profile_source_refs":           extractProfileSourceRefs(sourceRefs),
+			"profile_resource_kinds":        profileSourceKindCounts(sourceRefs),
+			ledgerCheckpointSegmentStartKey: segmentStart,
+			ledgerCheckpointSegmentEndKey:   segmentStart + len(segment),
+		},
+	}
+	checkpointID, err := m.Ledger.SaveCheckpoint(ctx, checkpoint)
+	if err == nil {
+		checkpoint.ID = checkpointID
+	}
+	return checkpoint, entries
+}
+
+func ledgerCheckpointRange(checkpoint artifact.Checkpoint) (int, int, bool) {
+	length := checkpoint.MessageCount
+	if length <= 0 {
+		return 0, 0, false
+	}
+
+	start, hasStart := intValue(checkpoint.Metadata, ledgerCheckpointSegmentStartKey)
+	end, hasEnd := intValue(checkpoint.Metadata, ledgerCheckpointSegmentEndKey)
+	if !hasStart {
+		switch strings.TrimSpace(checkpoint.Reason) {
+		case ledgerCheckpointReason, "":
+			start = 0
+		default:
+			return 0, 0, false
+		}
+	}
+	if !hasEnd {
+		end = start + length
+	}
+	if end-start != length || start < 0 || end <= start {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+func intValue(metadata map[string]interface{}, key string) (int, bool) {
+	if len(metadata) == 0 {
+		return 0, false
+	}
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int32:
+		return int(typed), true
+	case int64:
+		return int(typed), true
+	case float32:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	default:
+		return 0, false
+	}
+}
+
+func ledgerPromptMessage(entries []artifact.MemoryEntry, checkpointID string, segmentStart, segmentEnd int, continued bool) *types.Message {
+	if len(entries) == 0 {
+		return nil
 	}
 
 	lines := []string{"Decision ledger:"}
+	if continued {
+		lines[0] = "Decision ledger (continued):"
+	}
 	sourceRefs := make([]string, 0)
 	for _, entry := range entries {
 		summary := summarizeLine(fmt.Sprintf("%v", entry.Content["summary"]), 220)
@@ -711,16 +1040,51 @@ func (m *Manager) buildLedgerMessage(ctx context.Context, sessionID, taskID stri
 		lines = append(lines, line)
 		sourceRefs = mergeSourceRefs(sourceRefs, entry.SourceRefs)
 	}
+	if len(lines) <= 1 {
+		return nil
+	}
 
 	message := types.NewAssistantMessage(strings.Join(lines, "\n"))
 	message.Metadata["context_stage"] = "ledger"
-	if checkpointID != "" {
-		message.Metadata["checkpoint_id"] = checkpointID
+	if strings.TrimSpace(checkpointID) != "" {
+		message.Metadata["checkpoint_id"] = strings.TrimSpace(checkpointID)
 	}
+	message.Metadata[ledgerCheckpointSegmentStartKey] = segmentStart
+	message.Metadata[ledgerCheckpointSegmentEndKey] = segmentEnd
 	if len(sourceRefs) > 0 {
 		message.Metadata["source_refs"] = sourceRefs
 	}
-	return message, checkpointID
+	return message
+}
+
+func summaryTextFromCheckpoint(checkpoint artifact.Checkpoint) string {
+	if len(checkpoint.Metadata) == 0 {
+		return ""
+	}
+	value, ok := checkpoint.Metadata[compactionSummaryTextKey]
+	if !ok || value == nil {
+		return ""
+	}
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
+}
+
+func compactionPromptMessage(summaryText, checkpointID string, segmentStart, segmentEnd int, continued bool) *types.Message {
+	summaryText = strings.TrimSpace(summaryText)
+	if summaryText == "" {
+		return nil
+	}
+	if continued {
+		summaryText = strings.Replace(summaryText, compactionHeading(false), compactionHeading(true), 1)
+	}
+	message := types.NewAssistantMessage(summaryText)
+	message.Metadata["context_stage"] = "compaction"
+	if strings.TrimSpace(checkpointID) != "" {
+		message.Metadata["checkpoint_id"] = strings.TrimSpace(checkpointID)
+	}
+	message.Metadata[ledgerCheckpointSegmentStartKey] = segmentStart
+	message.Metadata[ledgerCheckpointSegmentEndKey] = segmentEnd
+	return message
 }
 
 func (m *Manager) searchRecallHits(ctx context.Context, sessionID, goal string, limit int) ([]artifact.SearchResult, error) {
@@ -792,6 +1156,17 @@ func recentWindowStart(messages []types.Message, count int) int {
 	if start <= 0 || start >= len(messages) {
 		return 0
 	}
+	start = adjustRecentWindowForToolBlock(messages, start)
+	if turnStart := activeUserTurnStart(messages); turnStart >= 0 && turnStart < start {
+		return turnStart
+	}
+	return start
+}
+
+func adjustRecentWindowForToolBlock(messages []types.Message, start int) int {
+	if start <= 0 || start >= len(messages) {
+		return 0
+	}
 	if messages[start].Role != "tool" {
 		return start
 	}
@@ -807,6 +1182,33 @@ func recentWindowStart(messages []types.Message, count int) int {
 		}
 	}
 	return blockStart
+}
+
+func activeUserTurnStart(messages []types.Message) int {
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Role == "user" {
+			return index
+		}
+	}
+	return -1
+}
+
+func activeUserTurnHasReplay(messages []types.Message) bool {
+	start := activeUserTurnStart(messages)
+	if start < 0 || start >= len(messages)-1 {
+		return false
+	}
+
+	for _, message := range messages[start+1:] {
+		if message.Metadata.GetString("context_stage", "") != "" {
+			continue
+		}
+		switch message.Role {
+		case "assistant", "tool":
+			return true
+		}
+	}
+	return false
 }
 
 func cloneMessages(messages []types.Message) []types.Message {
@@ -835,17 +1237,55 @@ func trimMessageCount(messages []types.Message, maxMessages int) []types.Message
 
 	flex := len(dynamicMessages) + len(rawMessages)
 	if flex > keep {
-		if len(dynamicMessages) >= keep {
-			dynamicMessages = nil
-		} else {
-			keep -= len(dynamicMessages)
-			dynamicMessages = nil
-			if len(rawMessages) > keep {
-				rawMessages = rawMessages[len(rawMessages)-keep:]
-			}
-		}
+		rawMessages, dynamicMessages = trimFlexibleMessageCount(rawMessages, dynamicMessages, keep)
 	}
 
+	trimmed := make([]types.Message, 0, len(systemMessages)+len(stableMessages)+len(rawMessages)+len(dynamicMessages))
+	trimmed = append(trimmed, systemMessages...)
+	trimmed = append(trimmed, stableMessages...)
+	trimmed = append(trimmed, rawMessages...)
+	trimmed = append(trimmed, dynamicMessages...)
+	return trimmed
+}
+
+func trimFlexibleMessageCount(rawMessages, dynamicMessages []types.Message, keep int) ([]types.Message, []types.Message) {
+	unpinnedRaw, pinnedRaw := splitPinnedRawMessages(rawMessages)
+	if keep <= 0 {
+		return pinnedRaw, nil
+	}
+
+	if len(pinnedRaw) >= keep {
+		return pinnedRaw, nil
+	}
+	keep -= len(pinnedRaw)
+
+	if len(dynamicMessages) > keep {
+		dynamicMessages = dynamicMessages[len(dynamicMessages)-keep:]
+		keep = 0
+	} else {
+		keep -= len(dynamicMessages)
+	}
+	if keep < len(unpinnedRaw) {
+		unpinnedRaw = unpinnedRaw[len(unpinnedRaw)-keep:]
+	}
+	if len(pinnedRaw) > 0 {
+		unpinnedRaw = append(unpinnedRaw, pinnedRaw...)
+	}
+	return unpinnedRaw, dynamicMessages
+}
+
+func splitPinnedRawMessages(rawMessages []types.Message) ([]types.Message, []types.Message) {
+	if len(rawMessages) == 0 {
+		return nil, nil
+	}
+	start := activeUserTurnStart(rawMessages)
+	if start < 0 {
+		return rawMessages, nil
+	}
+	return rawMessages[:start], rawMessages[start:]
+}
+
+func assembleManagedMessages(systemMessages, stableMessages, rawMessages, dynamicMessages []types.Message) []types.Message {
 	trimmed := make([]types.Message, 0, len(systemMessages)+len(stableMessages)+len(rawMessages)+len(dynamicMessages))
 	trimmed = append(trimmed, systemMessages...)
 	trimmed = append(trimmed, stableMessages...)
@@ -862,22 +1302,30 @@ func trimByTokenBudget(messages []types.Message, budget Budget, counter TokenCou
 	trimmed := cloneMessages(messages)
 	for len(trimmed) > 1 && counter(trimmed) > budget.MaxPromptTokens {
 		systemMessages, stableMessages, dynamicMessages, rawMessages := splitManagedMessages(trimmed)
+		unpinnedRaw, pinnedRaw := splitPinnedRawMessages(rawMessages)
 
 		if len(dynamicMessages) > 0 {
 			dynamicMessages = dynamicMessages[:len(dynamicMessages)-1]
-			trimmed = append(systemMessages, stableMessages...)
-			trimmed = append(trimmed, rawMessages...)
-			trimmed = append(trimmed, dynamicMessages...)
+			trimmed = assembleManagedMessages(systemMessages, stableMessages, append(unpinnedRaw, pinnedRaw...), dynamicMessages)
 			continue
 		}
 
-		if len(rawMessages) == 0 {
+		if len(unpinnedRaw) > 0 {
+			unpinnedRaw = unpinnedRaw[1:]
+			trimmed = assembleManagedMessages(systemMessages, stableMessages, append(unpinnedRaw, pinnedRaw...), dynamicMessages)
+			continue
+		}
+
+		if len(stableMessages) > 0 {
+			stableMessages = stableMessages[:len(stableMessages)-1]
+			trimmed = assembleManagedMessages(systemMessages, stableMessages, pinnedRaw, dynamicMessages)
+			continue
+		}
+
+		if len(pinnedRaw) == 0 {
 			break
 		}
-		rawMessages = rawMessages[1:]
-		trimmed = append(systemMessages, stableMessages...)
-		trimmed = append(trimmed, rawMessages...)
-		trimmed = append(trimmed, dynamicMessages...)
+		break
 	}
 
 	if metadata != nil {
@@ -991,7 +1439,7 @@ func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Me
 		}
 		if stage := message.Metadata.GetString("context_stage", ""); stage != "" {
 			switch stage {
-			case "ledger", "profile":
+			case "ledger", "profile", "compaction":
 				stableMessages = append(stableMessages, *message.Clone())
 			default:
 				dynamicMessages = append(dynamicMessages, *message.Clone())

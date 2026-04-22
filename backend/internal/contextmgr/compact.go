@@ -2,6 +2,7 @@ package contextmgr
 
 import (
 	"crypto/sha1"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +14,10 @@ import (
 )
 
 func compactMessages(messages []types.Message) *types.Message {
+	return compactMessagesWithContinuation(messages, false)
+}
+
+func compactMessagesWithContinuation(messages []types.Message, continued bool) *types.Message {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -48,7 +53,7 @@ func compactMessages(messages []types.Message) *types.Message {
 		}
 	}
 
-	lines := []string{"Compacted context from earlier turns:"}
+	lines := []string{compactionHeading(continued)}
 	if len(userItems) > 0 {
 		lines = append(lines, "User goals:")
 		for _, item := range userItems {
@@ -72,6 +77,21 @@ func compactMessages(messages []types.Message) *types.Message {
 	message.Metadata["context_stage"] = "compaction"
 	message.Metadata["source_messages"] = len(messages)
 	return message
+}
+
+func compactMessageText(messages []types.Message, continued bool) string {
+	message := compactMessagesWithContinuation(messages, continued)
+	if message == nil {
+		return ""
+	}
+	return message.Content
+}
+
+func compactionHeading(continued bool) string {
+	if continued {
+		return "Compacted context from earlier turns (continued):"
+	}
+	return "Compacted context from earlier turns:"
 }
 
 func deriveMemoryEntries(sessionID, taskID, reason string, messages []types.Message, extraSourceRefs []string) []artifact.MemoryEntry {
@@ -140,10 +160,8 @@ func buildObservationMessage(observations []types.Observation, limit int) *types
 		if !observation.Success {
 			status = "failed"
 			detail = observation.Error
-		} else if output, ok := observation.Output.(string); ok {
-			detail = output
 		} else if observation.Output != nil {
-			detail = fmt.Sprintf("%v", observation.Output)
+			detail = stableObservationDetail(observation.Output)
 		}
 
 		line := fmt.Sprintf("- [%s] %s", status, observation.Tool)
@@ -204,6 +222,23 @@ func summarizeLine(text string, limit int) string {
 		return string(runes[:limit])
 	}
 	return string(runes[:limit-3]) + "..."
+}
+
+func stableObservationDetail(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	case []byte:
+		return string(typed)
+	}
+
+	payload, err := json.Marshal(value)
+	if err == nil && len(payload) > 0 {
+		return string(payload)
+	}
+	return fmt.Sprintf("%v", value)
 }
 
 func looksLikeDecision(s string) bool {
