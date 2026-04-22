@@ -102,3 +102,25 @@ func TestIndentAssistantContent_UsesSameGutterAsAssistantMessage(t *testing.T) {
 		t.Fatalf("expected assistant indent to have positive visible width")
 	}
 }
+
+func TestSanitizeTerminalText_IsolatesRTLRunInsideChineseSentence(t *testing.T) {
+	input := "这些改动 هنوز在工作区里，尚未提交"
+
+	sanitized := SanitizeTerminalText(input)
+
+	if !strings.Contains(sanitized, "\u2066هنوز\u2069") {
+		t.Fatalf("expected RTL run to be isolated, got %q", sanitized)
+	}
+	if strings.Contains(sanitized, "\u202e") || strings.Contains(sanitized, "\u202d") {
+		t.Fatalf("expected unsafe bidi overrides to be removed, got %q", sanitized)
+	}
+}
+
+func TestDisplayWidth_IgnoresDirectionalIsolates(t *testing.T) {
+	plain := "abc"
+	sanitized := SanitizeTerminalText("abc")
+
+	if DisplayWidth(sanitized) != DisplayWidth(plain) {
+		t.Fatalf("expected directional isolates to have zero width, plain=%d sanitized=%d", DisplayWidth(plain), DisplayWidth(sanitized))
+	}
+}

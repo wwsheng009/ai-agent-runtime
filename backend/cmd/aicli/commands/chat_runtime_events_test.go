@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -23,21 +24,69 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+func TestFormatInteractiveSupplementPromptLine_PreservesPromptContentWithoutIndent(t *testing.T) {
+	got := formatInteractiveSupplementPromptLine("[approval] query=北京 天气预报 未来 7 天")
+	if strings.HasPrefix(got, ui.AssistantContentIndent()) {
+		t.Fatalf("expected prompt line without assistant gutter indent, got %q", got)
+	}
+	if !strings.Contains(got, "[approval] query=北京 天气预报 未来 7 天") {
+		t.Fatalf("expected approval content to stay visible, got %q", got)
+	}
+}
+
 func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
-	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestStarted, TraceID: "trace-1", Payload: map[string]interface{}{"model": "gpt-5.4"}}); got != "[thinking] contacting model=gpt-5.4" {
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestStarted, TraceID: "trace-1", Payload: map[string]interface{}{"model": "gpt-5.4"}}); got != "" {
 		t.Fatalf("unexpected llm started render: %q", got)
 	}
-	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "llm.request.started", TraceID: "trace-1", Payload: map[string]interface{}{"model": "gpt-5.4"}}); got != "[thinking] contacting model=gpt-5.4" {
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:    runtimechat.EventLLMRequestStarted,
+		TraceID: "trace-1",
+		Payload: map[string]interface{}{
+			"model": "gpt-5.4",
+			"step":  1,
+			"tool_availability": map[string]interface{}{
+				"requires_active_team_run": []interface{}{
+					"read_task_spec",
+					"read_task_context",
+					"send_team_message",
+					"read_mailbox_digest",
+					"report_task_outcome",
+				},
+			},
+		},
+	}); got != "" {
+		t.Fatalf("unexpected llm started tool availability render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "llm.request.started", TraceID: "trace-1", Payload: map[string]interface{}{"model": "gpt-5.4"}}); got != "" {
 		t.Fatalf("unexpected dotted llm started render: %q", got)
 	}
-	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestFinished, TraceID: "trace-1", Payload: map[string]interface{}{"success": true}}); got != "[thinking] model responded" {
-		t.Fatalf("unexpected llm finished render: %q", got)
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-1",
+		Payload: map[string]interface{}{
+			"model": "gpt-5.4",
+			"step":  2,
+			"tool_availability": map[string]interface{}{
+				"requires_active_team_run": []interface{}{"read_task_spec"},
+			},
+		},
+	}); got != "" {
+		t.Fatalf("unexpected repeated llm started tool availability render: %q", got)
 	}
-	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "llm.request.finished", TraceID: "trace-1", Payload: map[string]interface{}{"success": true}}); got != "[thinking] model responded" {
-		t.Fatalf("unexpected dotted llm finished render: %q", got)
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestFinished, TraceID: "trace-1", Payload: map[string]interface{}{"success": true}}); got != "" {
+		t.Fatalf("expected successful llm finished render to be suppressed, got %q", got)
 	}
-	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "planning.started"}); got != "[planning] started" {
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "llm.request.finished", TraceID: "trace-1", Payload: map[string]interface{}{"success": true}}); got != "" {
+		t.Fatalf("expected dotted successful llm finished render to be suppressed, got %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "planning.started"}); got != "" {
 		t.Fatalf("unexpected planning render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "subagent.batch.started"}); got != "" {
+		t.Fatalf("unexpected subagent batch render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "subagent.started", Payload: map[string]interface{}{"agent_id": "reader"}}); got != "" {
+		t.Fatalf("unexpected subagent started render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type: runtimechat.EventAssistantReasoning,
@@ -51,20 +100,31 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		},
 	}); got != strings.Join([]string{
 		chatToolDivider("reasoning"),
-		"[reasoning] provider=anthropic format=anthropic_thinking replay=required",
+		"[reasoning] replay=required",
 		"  先确认配置，再决定是否调用工具。",
 		chatToolDivider("end reasoning"),
 	}, "\n") {
 		t.Fatalf("unexpected reasoning render: %q", got)
 	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: runtimechat.EventAssistantReasoning,
+		Payload: map[string]interface{}{
+			"reasoning": map[string]interface{}{
+				"provider": "CODEX_LOCAL",
+				"format":   "openai_responses",
+			},
+		},
+	}); got != "" {
+		t.Fatalf("expected metadata-only reasoning render to be suppressed, got %q", got)
+	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "subagent.completed", Payload: map[string]interface{}{"agent_id": "writer"}}); got != "[subagent] completed writer" {
 		t.Fatalf("unexpected subagent render: %q", got)
 	}
-	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "ls", Payload: map[string]interface{}{"arg_preview": "path=src"}}); got != strings.Join([]string{
-		chatToolDivider("command start"),
-		"[tool] ls path=src",
-	}, "\n") {
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "ls", Payload: map[string]interface{}{"arg_preview": "path=src"}}); got != "• Running ls path=src" {
 		t.Fatalf("unexpected tool requested render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "execute_shell_command", Payload: map[string]interface{}{"command_text": "git status --short", "arg_preview": "command=git status --short"}}); got != "• Running git status --short" {
+		t.Fatalf("unexpected shell tool requested render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:     "tool.completed",
@@ -74,11 +134,10 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"summary_lines": []interface{}{"目录: src", "📁 a/ · 📁 b/", "统计: 0 个文件, 2 个目录"},
 		},
 	}); got != strings.Join([]string{
-		"[tool done] ls path=src",
+		"• Ran ls path=src",
 		"  目录: src",
 		"  📁 a/ · 📁 b/",
 		"  统计: 0 个文件, 2 个目录",
-		chatToolDivider("command end"),
 	}, "\n") {
 		t.Fatalf("unexpected tool completed render: %q", got)
 	}
@@ -86,16 +145,30 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		Type:     "tool.completed",
 		ToolName: "execute_shell_command",
 		Payload: map[string]interface{}{
+			"command_text":  "git status",
 			"arg_preview":   "command=git status",
 			"summary_lines": []interface{}{"Tool execute_shell_command failed before producing output."},
 			"error":         "exit status 128",
 		},
 	}); got != strings.Join([]string{
-		"[tool done] execute_shell_command command=git status",
+		"• Ran git status",
 		"  failed: exit status 128",
-		chatToolDivider("command end"),
 	}, "\n") {
 		t.Fatalf("unexpected failed tool render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "execute_shell_command",
+		Payload: map[string]interface{}{
+			"command_text":  "go build -o .\\aicli-cachetest.exe .\\cmd\\aicli",
+			"arg_preview":   "command=go build -o .\\aicli-cachetest.exe .\\cmd\\aicli",
+			"summary_lines": []interface{}{"Tool returned no output."},
+		},
+	}); got != strings.Join([]string{
+		"• Ran go build -o .\\aicli-cachetest.exe .\\cmd\\aicli",
+		"  (no output)",
+	}, "\n") {
+		t.Fatalf("unexpected no-output shell tool render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:     "tool.completed",
@@ -106,23 +179,18 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"awaiting_model": true,
 		},
 	}); got != strings.Join([]string{
-		"[tool done] web_search query=天气预报",
+		"• Ran web_search query=天气预报",
 		"  返回 10 条结果",
-		chatToolDivider("command end"),
-		"[thinking] 等待中...",
 	}, "\n") {
-		t.Fatalf("unexpected waiting tool render: %q", got)
+		t.Fatalf("unexpected tool render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:    "tool.denied",
 		Payload: map[string]interface{}{"reason": "approval denied"},
-	}); got != strings.Join([]string{
-		"[tool denied] approval denied",
-		chatToolDivider("command end"),
-	}, "\n") {
+	}); got != "[tool denied] approval denied" {
 		t.Fatalf("unexpected denied tool render: %q", got)
 	}
-	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "task.started", Payload: map[string]interface{}{"task_id": "task-1", "assignee": "planner"}}); got != "[task] started task-1 @planner" {
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "task.started", Payload: map[string]interface{}{"task_id": "task-1", "assignee": "planner"}}); got != "" {
 		t.Fatalf("unexpected task render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventMailboxReceived, Payload: map[string]interface{}{"team_id": "team-1", "message_id": "msg-1", "from_agent": "planner", "to_agent": "lead", "kind": "progress", "task_id": "task-1", "body": "Started task: Draft"}}); got != "[progress] planner -> lead task-1 Started task: Draft" {
@@ -164,6 +232,72 @@ func TestChatRuntimeEvents_DedupesStableTimelineEventsPerRun(t *testing.T) {
 	if len(rendered) != 1 {
 		t.Fatalf("expected one rendered line after dedupe, got %d (%v)", len(rendered), rendered)
 	}
+}
+
+func TestChatRuntimeEvents_RendersRepeatedLLMRequestStartedForDifferentSteps(t *testing.T) {
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-1",
+		Payload: map[string]interface{}{"model": "gpt-5.4", "step": 1},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-1",
+		Payload: map[string]interface{}{"model": "gpt-5.4", "step": 2},
+	})
+
+	require.Empty(t, rendered)
+}
+
+func TestChatRuntimeEvents_RendersRepeatedLLMRequestFinishedForDifferentSteps(t *testing.T) {
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:    "llm.request.finished",
+		TraceID: "trace-1",
+		Payload: map[string]interface{}{"success": true, "step": 1},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:    "llm.request.finished",
+		TraceID: "trace-1",
+		Payload: map[string]interface{}{"success": true, "step": 2},
+	})
+
+	require.Empty(t, rendered)
+}
+
+func TestChatRuntimeEvents_DedupesRepeatedLLMRequestStartedWithinSameStep(t *testing.T) {
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+
+	bridge.BeginRun()
+	event := runtimeevents.Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-1",
+		Payload: map[string]interface{}{"model": "gpt-5.4", "step": 2},
+	}
+	bridge.handleEvent(event)
+	bridge.handleEvent(event)
+
+	require.Empty(t, rendered)
 }
 
 func TestChatRuntimeEvents_RendersAssistantMessageReasoningBeforeContent(t *testing.T) {
@@ -695,6 +829,73 @@ func TestChatRuntimeEvents_RendersPermissionModeHintOnce(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeEvents_ApprovalPromptHintForReadonlyShell(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	hint := bridge.approvalPromptHint("session-1", &runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"git status --short"}`),
+	})
+	if !strings.Contains(hint, "readonly_shell") {
+		t.Fatalf("expected readonly_shell hint, got %q", hint)
+	}
+	if !strings.Contains(hint, "当前会话") {
+		t.Fatalf("expected session-scoped hint, got %q", hint)
+	}
+}
+
+func TestChatRuntimeEvents_ApprovalPromptHintForApprovedShell(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	hint := bridge.approvalPromptHint("session-1", &runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"go test ./..."}`),
+	})
+	if !strings.Contains(hint, "approved_shell") {
+		t.Fatalf("expected approved_shell hint, got %q", hint)
+	}
+	if !strings.Contains(hint, "首次仍需审批") {
+		t.Fatalf("expected first-approval hint, got %q", hint)
+	}
+}
+
+func TestChatRuntimeEvents_ApprovalPromptHintForMutatingShell(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	})
+	hint := bridge.approvalPromptHint("session-1", &runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"git add a.txt && git commit -m \"test\"","mutated_paths":["a.txt"]}`),
+	})
+	if !strings.Contains(hint, "mutated_paths") {
+		t.Fatalf("expected mutated_paths hint, got %q", hint)
+	}
+	if !strings.Contains(hint, "不参与 approval-reuse") {
+		t.Fatalf("expected non-reusable hint, got %q", hint)
+	}
+}
+
+func TestApprovalRequestPreviewLines_ShellCommand(t *testing.T) {
+	lines := approvalRequestPreviewLines(&runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"git status --short --branch","workdir":"E:/projects/ai/ai-gateway","mutated_paths":null}`),
+	})
+	require.Equal(t, []string{
+		"command=git status --short --branch",
+		"workdir=E:/projects/ai/ai-gateway",
+	}, lines)
+}
+
+func TestApprovalRequestPreviewLines_FallbackArgs(t *testing.T) {
+	lines := approvalRequestPreviewLines(&runtimechat.ApprovalRequest{
+		ToolName: "team_echo",
+		ArgsJSON: []byte(`{"message":"hello"}`),
+	})
+	require.Equal(t, []string{"args={\"message\":\"hello\"}"}, lines)
+}
+
 func TestChatRuntimeEvents_WaitForCurrentEventsWaitsForLateArrivingEvents(t *testing.T) {
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
@@ -730,6 +931,92 @@ func TestChatRuntimeEvents_WaitForCurrentEventsWaitsForLateArrivingEvents(t *tes
 	if elapsed < 20*time.Millisecond {
 		t.Fatalf("expected wait to stay pending for late event arrival, got %v", elapsed)
 	}
+}
+
+func TestChatRuntimeEvents_HandleDoesNotDropEventsWhenQueueBacksUp(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.eventQueue = make(chan runtimeevents.Event, 1)
+
+	var (
+		mu      sync.Mutex
+		deltas  []string
+		started = make(chan struct{}, 1)
+		release = make(chan struct{})
+	)
+	bridge.writeDelta = func(delta string) {
+		mu.Lock()
+		deltas = append(deltas, delta)
+		mu.Unlock()
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		bridge.run()
+	}()
+	defer func() {
+		close(bridge.eventQueue)
+		<-done
+	}()
+
+	bridge.BeginRun()
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		bridge.Handle(runtimeevents.Event{
+			Type:      runtimechat.EventAssistantDelta,
+			SessionID: "lead-session",
+			Payload:   map[string]interface{}{"delta": "Hello"},
+		})
+	}()
+
+	<-started
+
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		bridge.Handle(runtimeevents.Event{
+			Type:      runtimechat.EventAssistantDelta,
+			SessionID: "lead-session",
+			Payload:   map[string]interface{}{"delta": " world"},
+		})
+	}()
+
+	<-secondDone
+
+	thirdDone := make(chan struct{})
+	go func() {
+		defer close(thirdDone)
+		bridge.Handle(runtimeevents.Event{
+			Type:      runtimechat.EventAssistantDelta,
+			SessionID: "lead-session",
+			Payload:   map[string]interface{}{"delta": "!"},
+		})
+	}()
+
+	select {
+	case <-thirdDone:
+		t.Fatal("expected third Handle call to block until queue space was available")
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	close(release)
+	<-firstDone
+	<-thirdDone
+	bridge.WaitForCurrentEvents(300 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{"Hello", " world", "!"}, deltas)
 }
 
 func TestChatRuntimeEvents_RendersAssistantDeltaAndFinalizesWithoutRepeatingResponse(t *testing.T) {
@@ -778,6 +1065,52 @@ func TestChatRuntimeEvents_RendersAssistantDeltaAndFinalizesWithoutRepeatingResp
 	if !bridge.HasRenderedAssistantFinal() {
 		t.Fatal("expected bridge to remember rendered assistant final output")
 	}
+}
+
+func TestChatRuntimeEvents_CompletesAssistantDeltaWithFinalMessageContent(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var deltas []string
+	var completed []string
+	finalized := 0
+	renderedResponses := 0
+	bridge.writeDelta = func(delta string) {
+		deltas = append(deltas, delta)
+	}
+	bridge.completeDelta = func(content string) bool {
+		completed = append(completed, content)
+		return true
+	}
+	bridge.finalizeDelta = func() {
+		finalized++
+	}
+	bridge.renderResponse = func(response string) {
+		renderedResponses++
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": "`E:\\projects\\ai"},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		Payload: map[string]interface{}{
+			"content": "`E:\\projects\\ai\\ai-gateway` 的 git 状态如下：\n\n- 当前分支：`main`",
+		},
+	})
+
+	require.Equal(t, []string{"`E:\\projects\\ai"}, deltas)
+	require.Equal(t, []string{"`E:\\projects\\ai\\ai-gateway` 的 git 状态如下：\n\n- 当前分支：`main`"}, completed)
+	require.Equal(t, 0, finalized)
+	require.Equal(t, 0, renderedResponses)
+	require.True(t, bridge.HasRenderedAssistantDelta())
+	require.True(t, bridge.HasRenderedAssistantFinal())
 }
 
 func TestChatRuntimeEvents_MarksAssistantDeltaRenderedBeforeSlowWriteCompletes(t *testing.T) {
@@ -1174,13 +1507,13 @@ func TestActorExecutor_ApprovalThroughCLIBridgeExecutesToolOnceAndResumes(t *tes
 		rendered.WriteString(line)
 		rendered.WriteString("\n")
 	}
-	bridge.askApproval = func(toolName, reason string) (bool, error) {
+	bridge.askApproval = func(approval *runtimechat.ApprovalRequest) (bool, error) {
 		approvalCalls.Add(1)
-		if toolName != "team_echo" {
-			t.Fatalf("unexpected approval tool: %q", toolName)
+		if approval == nil || approval.ToolName != "team_echo" {
+			t.Fatalf("unexpected approval request: %+v", approval)
 		}
-		if reason != "manual approval" {
-			t.Fatalf("unexpected approval reason: %q", reason)
+		if approval.Reason != "manual approval" {
+			t.Fatalf("unexpected approval reason: %q", approval.Reason)
 		}
 		return true, nil
 	}
@@ -1208,11 +1541,11 @@ func TestActorExecutor_ApprovalThroughCLIBridgeExecutesToolOnceAndResumes(t *tes
 	if mcpManager.lastMeta.Team.TeamID != "team-approval" || mcpManager.lastMeta.Team.AgentID != "mate-approval" || mcpManager.lastMeta.Team.CurrentTaskID != "task-approval" {
 		t.Fatalf("unexpected run meta on approved tool execution: %+v", mcpManager.lastMeta)
 	}
-	if !strings.Contains(rendered.String(), "[approval] team_echo") {
-		t.Fatalf("expected approval timeline render, got %q", rendered.String())
+	if strings.Contains(rendered.String(), "[approval] team_echo") {
+		t.Fatalf("expected interactive approval timeline noise to stay suppressed, got %q", rendered.String())
 	}
-	if !strings.Contains(rendered.String(), "[approval] approved team_echo, executing...") {
-		t.Fatalf("expected post-approval execution feedback, got %q", rendered.String())
+	if strings.Contains(rendered.String(), "[approval] approved team_echo, executing...") {
+		t.Fatalf("expected post-approval execution noise to stay suppressed, got %q", rendered.String())
 	}
 	if strings.Contains(rendered.String(), "[tool denied]") {
 		t.Fatalf("expected no tool denial after approval, got %q", rendered.String())
@@ -1455,10 +1788,13 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 		rendered.WriteString(line)
 		rendered.WriteString("\n")
 	}
-	bridge.askApproval = func(toolName, reason string) (bool, error) {
+	bridge.askApproval = func(approval *runtimechat.ApprovalRequest) (bool, error) {
 		approvalCalls.Add(1)
-		if reason != "manual approval" {
-			t.Fatalf("unexpected approval reason: %q", reason)
+		if approval == nil {
+			t.Fatal("expected approval request")
+		}
+		if approval.Reason != "manual approval" {
+			t.Fatalf("unexpected approval reason: %q", approval.Reason)
 		}
 		return true, nil
 	}
@@ -1477,14 +1813,17 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 	if mcpManager.callCount != 2 {
 		t.Fatalf("expected both shell tools to execute, got %d", mcpManager.callCount)
 	}
-	if !strings.Contains(rendered.String(), "[approval] execute_shell_command") {
-		t.Fatalf("expected initial approval line, got %q", rendered.String())
+	if strings.Contains(rendered.String(), "[approval] execute_shell_command") {
+		t.Fatalf("expected interactive approval line to stay suppressed, got %q", rendered.String())
 	}
-	if !strings.Contains(rendered.String(), "[approval] approved execute_shell_command, executing...") {
-		t.Fatalf("expected post-approval execution feedback, got %q", rendered.String())
+	if strings.Contains(rendered.String(), "[approval] approved execute_shell_command, executing...") {
+		t.Fatalf("expected post-approval execution noise to stay suppressed, got %q", rendered.String())
 	}
-	if !strings.Contains(rendered.String(), "[approval] auto-approved bash") {
-		t.Fatalf("expected cached auto-approval line for bash, got %q", rendered.String())
+	if strings.Contains(rendered.String(), "[approval] bash") {
+		t.Fatalf("expected cached approval for bash to stay silent, got %q", rendered.String())
+	}
+	if strings.Contains(rendered.String(), "[approval] auto-approved bash") {
+		t.Fatalf("expected no auto-approved line for cached bash approval, got %q", rendered.String())
 	}
 }
 
@@ -1905,6 +2244,9 @@ func TestIsReadOnlyShellCommand_ChainedAndCommands(t *testing.T) {
 		{"cd somedir", true},
 		// echo is read-only for approval purposes
 		{"echo hello", true},
+		// printf is stdout-only for approval purposes
+		{"printf 'hello\\n'", true},
+		{"git diff --stat && printf '\\n---\\n' && git diff --name-only", true},
 		// Redirect: still not read-only
 		{"echo hello > file.txt", false},
 		// Windows-style: cd /d with && dir

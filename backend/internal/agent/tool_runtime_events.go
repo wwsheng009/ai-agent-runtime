@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -38,6 +39,9 @@ func toolRequestedEventPayload(call types.ToolCall, step int, traceID string, ex
 	if preview := summarizeToolCallArgs(call.Args); preview != "" {
 		payload["arg_preview"] = preview
 	}
+	if commandText := summarizeShellToolCommand(call.Name, call.Args); commandText != "" {
+		payload["command_text"] = commandText
+	}
 	mergeToolEventPayload(payload, extra)
 	return payload
 }
@@ -51,6 +55,9 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 	}
 	if preview := summarizeToolCallArgs(result.Call.Args); preview != "" {
 		payload["arg_preview"] = preview
+	}
+	if commandText := summarizeShellToolCommand(result.Call.Name, result.Call.Args); commandText != "" {
+		payload["command_text"] = commandText
 	}
 	if summaryLines := summarizeToolExecutionLines(result); len(summaryLines) > 0 {
 		payload["summary"] = strings.Join(summaryLines, "\n")
@@ -96,6 +103,17 @@ func summarizeToolCallArgs(args map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+func summarizeShellToolCommand(toolName string, args map[string]interface{}) string {
+	if !runtimepolicy.IsShellLikeToolName(strings.TrimSpace(toolName)) || len(args) == 0 {
+		return ""
+	}
+	command := normalizeToolEventText(renderToolArgValue(args["command"]))
+	if command == "" {
+		return ""
+	}
+	return truncateToolEventText(command, 200)
 }
 
 func formatSingleToolArgPreview(key string, value interface{}) string {

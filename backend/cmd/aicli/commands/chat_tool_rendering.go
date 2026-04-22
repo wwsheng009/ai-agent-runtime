@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
 var sharedChatToolPreviewKeys = []string{
@@ -32,33 +33,13 @@ func renderSharedChatToolEvent(event runtimechatcore.ChatEvent) string {
 	payload := sharedChatToolPayload(event)
 	switch event.Stage {
 	case "batch_start":
-		line := "[tool] 执行工具调用"
-		if count := chatEventInt(event, "call_count"); count > 1 {
-			line = fmt.Sprintf("[tool] 执行 %d 个工具调用", count)
-		}
-		return strings.Join([]string{chatToolDivider("command start"), line}, "\n")
+		return ""
+	case "tool_requested":
+		return renderCompactToolRequested(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]))
 	case "tool_result":
-		line := fmt.Sprintf("[tool done] %s", strings.TrimSpace(event.ToolName))
-		if argPreview := chatToolArgPreview(payload); argPreview != "" {
-			line += " " + argPreview
-		}
-		rendered := []string{line}
-		for _, summaryLine := range chatToolSummaryLines(payload) {
-			rendered = append(rendered, "  "+summaryLine)
-		}
-		return strings.Join(rendered, "\n")
+		return renderCompactToolCompleted(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), chatToolSummaryLines(payload))
 	case "batch_end":
-		successCount := chatEventInt(event, "success_count")
-		errorCount := chatEventInt(event, "error_count")
-		line := fmt.Sprintf("[tool] 完成 %d 个工具调用", successCount)
-		if errorCount > 0 {
-			line = fmt.Sprintf("[tool] 完成: %d 成功, %d 失败", successCount, errorCount)
-		}
-		rendered := []string{line, chatToolDivider("command end")}
-		if waitingLine := chatToolPostCommandHint(payload); waitingLine != "" {
-			rendered = append(rendered, waitingLine)
-		}
-		return strings.Join(rendered, "\n")
+		return ""
 	default:
 		return ""
 	}
@@ -68,6 +49,9 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 	payload := map[string]interface{}{}
 	if preview := summarizeSharedChatToolCallArgs(event.Arguments); preview != "" {
 		payload["arg_preview"] = preview
+	}
+	if commandText := summarizeSharedShellToolCommand(event.ToolName, event.Arguments); commandText != "" {
+		payload["command_text"] = commandText
 	}
 	if lines := summarizeSharedChatToolResultLines(event); len(lines) > 0 {
 		payload["summary_lines"] = lines
@@ -192,6 +176,97 @@ func summarizeSharedChatToolResultLines(event runtimechatcore.ChatEvent) []strin
 	return nil
 }
 
+func summarizeSharedShellToolCommand(toolName string, args map[string]interface{}) string {
+	if !runtimepolicy.IsShellLikeToolName(strings.TrimSpace(toolName)) || len(args) == 0 {
+		return ""
+	}
+	command := normalizeSharedChatToolText(renderSharedChatToolArgValue(args["command"]))
+	if command == "" {
+		return ""
+	}
+	return truncateChatRuntimeText(command, 200)
+}
+
 func normalizeSharedChatToolText(text string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+}
+
+func renderCompactToolRequested(toolName, commandArg, commandText, argPreview string) string {
+	display := compactToolDisplayText(toolName, commandArg, commandText, argPreview)
+	if display == "" {
+		return ""
+	}
+	return "• Running " + display
+}
+
+func renderCompactToolCompleted(toolName, commandArg, commandText, argPreview string, summaryLines []string) string {
+	display := compactToolDisplayText(toolName, commandArg, commandText, argPreview)
+	if display == "" {
+		return ""
+	}
+	lines := []string{"• Ran " + display}
+	outputLines := compactToolOutputLines(summaryLines)
+	if len(outputLines) == 0 {
+		outputLines = []string{"(no output)"}
+	}
+	for _, line := range outputLines {
+		lines = append(lines, "  "+line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func compactToolDisplayText(toolName, commandArg, commandText, argPreview string) string {
+	toolName = strings.TrimSpace(toolName)
+	if runtimepolicy.IsShellLikeToolName(toolName) {
+		command := firstNonEmptyChatValue(
+			compactToolDisplaySegment(commandArg),
+			compactToolDisplaySegment(commandText),
+			compactToolDisplaySegment(extractCommandPreview(argPreview)),
+		)
+		if command != "" {
+			return truncateChatRuntimeText(command, 200)
+		}
+	}
+	if preview := compactToolDisplaySegment(argPreview); preview != "" {
+		if toolName != "" {
+			return truncateChatRuntimeText(toolName+" "+preview, 200)
+		}
+		return truncateChatRuntimeText(preview, 200)
+	}
+	if toolName != "" {
+		return truncateChatRuntimeText(toolName, 200)
+	}
+	return ""
+}
+
+func compactToolOutputLines(summaryLines []string) []string {
+	if len(summaryLines) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(summaryLines))
+	for _, line := range summaryLines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	if len(out) == 1 && strings.EqualFold(normalizeSharedChatToolText(out[0]), "Tool returned no output.") {
+		return nil
+	}
+	return out
+}
+
+func compactToolDisplaySegment(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+}
+
+func extractCommandPreview(argPreview string) string {
+	argPreview = strings.TrimSpace(argPreview)
+	if !strings.HasPrefix(argPreview, "command=") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(argPreview, "command="))
 }

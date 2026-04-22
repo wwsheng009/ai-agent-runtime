@@ -71,12 +71,12 @@ func printDetailedWelcome(config *WelcomeConfig, theme *Theme) {
 
 	// 版本
 	if config.ShowVersion {
-		printWelcomeKeyValue("Version:", theme.Dimmed(config.Version))
+		printWelcomeKeyValue(theme, "Version:", theme.Dimmed(config.Version))
 	}
 
 	// 描述
 	if config.Description != "" {
-		printWelcomeKeyValue("Description:", config.Description)
+		printWelcomeKeyValue(theme, "Description:", theme.ColorizeSecondary(config.Description))
 	}
 
 	fmt.Println()
@@ -129,11 +129,14 @@ func printASCIIWelcome(config *WelcomeConfig, theme *Theme) {
 // printHint打印提示项
 func printHint(text string, theme *Theme) {
 	prefix := fmt.Sprintf("  %s ", theme.InfoIcon)
-	fmt.Printf("%s%s\n", prefix, text)
+	fmt.Printf("%s%s\n", prefix, theme.ColorizeSecondary(text))
 }
 
-func printWelcomeKeyValue(label, value string) {
-	fmt.Printf("%-*s %s\n", welcomeLabelWidth, label, value)
+func printWelcomeKeyValue(theme *Theme, label, value string) {
+	if theme == nil {
+		theme = GetTheme(ThemeAuto)
+	}
+	fmt.Printf("%-*s %s\n", welcomeLabelWidth, theme.ColorizeLabel(label), value)
 }
 
 // PrintHelp 打印帮助信息

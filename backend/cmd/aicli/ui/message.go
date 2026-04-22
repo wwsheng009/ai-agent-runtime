@@ -5,6 +5,13 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
+)
+
+const (
+	leftToRightIsolate  = '\u2066'
+	popDirectionalIsolate = '\u2069'
+	arabicLetterMark    = '\u061C'
 )
 
 // MessageType 消息类型
@@ -70,6 +77,7 @@ func (m *Message) Format() string {
 	var plainPrefix string
 	var coloredContent string
 	contentPadding := ""
+	safeContent := SanitizeTerminalText(m.content)
 
 	switch m.mType {
 	case MessageUser:
@@ -80,7 +88,7 @@ func (m *Message) Format() string {
 			plainPrefix = "你> "
 			prefix = "你> "
 		}
-		coloredContent = m.theme.ColorizeUser(m.content)
+		coloredContent = m.theme.ColorizeUser(safeContent)
 
 	case MessageAssistant:
 		if m.showIcon {
@@ -90,7 +98,7 @@ func (m *Message) Format() string {
 			plainPrefix = "助手> "
 			prefix = "助手> "
 		}
-		coloredContent = m.theme.ColorizeAssistant(m.content)
+		coloredContent = m.theme.ColorizeAssistant(safeContent)
 
 	case MessageSystem:
 		if m.showIcon {
@@ -100,7 +108,7 @@ func (m *Message) Format() string {
 			plainPrefix = "系统> "
 			prefix = "系统> "
 		}
-		coloredContent = m.theme.ColorizeSystem(m.content)
+		coloredContent = m.theme.ColorizeSystem(safeContent)
 
 	case MessageTool:
 		if m.showIcon {
@@ -110,7 +118,7 @@ func (m *Message) Format() string {
 			plainPrefix = "工具> "
 			prefix = "工具> "
 		}
-		coloredContent = m.content
+		coloredContent = safeContent
 
 	case MessageError:
 		if m.showIcon {
@@ -120,12 +128,12 @@ func (m *Message) Format() string {
 			plainPrefix = "错误> "
 			prefix = "错误> "
 		}
-		coloredContent = m.theme.ColorizeError(m.content)
+		coloredContent = m.theme.ColorizeError(safeContent)
 
 	default:
 		plainPrefix = "> "
 		prefix = "> "
-		coloredContent = m.content
+		coloredContent = safeContent
 	}
 
 	result := coloredContent
@@ -238,6 +246,49 @@ func DisplayWidth(text string) int {
 	return messageDisplayWidth(text)
 }
 
+// SanitizeTerminalText removes unsafe bidi formatting controls and isolates
+// strong RTL runs so mixed-direction content does not reorder adjacent CJK/LTR
+// text in terminal renderers.
+func SanitizeTerminalText(text string) string {
+	if text == "" {
+		return ""
+	}
+	cleaned := strings.Map(func(r rune) rune {
+		switch {
+		case isUnsafeBidiControlRune(r):
+			return -1
+		default:
+			return r
+		}
+	}, text)
+	if cleaned == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(cleaned) + 8)
+	inRTLRun := false
+	for _, r := range cleaned {
+		if isStrongRTL(r) {
+			if !inRTLRun {
+				builder.WriteRune(leftToRightIsolate)
+				inRTLRun = true
+			}
+			builder.WriteRune(r)
+			continue
+		}
+		if inRTLRun {
+			builder.WriteRune(popDirectionalIsolate)
+			inRTLRun = false
+		}
+		builder.WriteRune(r)
+	}
+	if inRTLRun {
+		builder.WriteRune(popDirectionalIsolate)
+	}
+	return builder.String()
+}
+
 func messageDisplayWidth(text string) int {
 	width := 0
 	for _, r := range text {
@@ -251,6 +302,9 @@ func messageRuneWidth(r rune) int {
 		return 0
 	}
 	if r < 32 || r == 127 {
+		return 0
+	}
+	if unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
 		return 0
 	}
 	if messageIsWideRune(r) {
@@ -288,4 +342,29 @@ func messageIsWideRune(r rune) bool {
 		return true
 	}
 	return false
+}
+
+func isUnsafeBidiControlRune(r rune) bool {
+	switch r {
+	case '\u202A', '\u202B', '\u202C', '\u202D', '\u202E',
+		'\u2066', '\u2067', '\u2068', '\u2069',
+		arabicLetterMark:
+		return true
+	default:
+		return false
+	}
+}
+
+func isStrongRTL(r rune) bool {
+	if !utf8.ValidRune(r) {
+		return false
+	}
+	return unicode.Is(unicode.Arabic, r) ||
+		unicode.Is(unicode.Hebrew, r) ||
+		unicode.Is(unicode.Syriac, r) ||
+		unicode.Is(unicode.Thaana, r) ||
+		unicode.Is(unicode.Nko, r) ||
+		unicode.Is(unicode.Samaritan, r) ||
+		unicode.Is(unicode.Mandaic, r) ||
+		unicode.Is(unicode.Adlam, r)
 }

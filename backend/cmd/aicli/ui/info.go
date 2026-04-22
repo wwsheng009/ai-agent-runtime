@@ -28,25 +28,25 @@ func PrintSessionInfo(info SessionInfo) bool {
 	PrintThickSeparator()
 
 	// Provider 信息
-	printSessionInfoRow(theme.SystemIcon+" ", "Provider:", theme.SuccessColor.Sprint("( "+info.ProviderName+" )"), func(text string) string { return theme.CommandColor.Sprint(text) })
+	printSessionInfoRow(theme.SystemIcon+" ", "Provider:", theme.SuccessColor.Sprint("( "+info.ProviderName+" )"), theme.ColorizeLabel)
 	if info.Protocol != "" {
-		printSessionInfoRow(sessionInfoChildPrefix(theme), "Protocol:", theme.Dimmed(info.Protocol), theme.Dimmed)
+		printSessionInfoRow(sessionInfoChildPrefix(theme), "Protocol:", theme.Dimmed(info.Protocol), theme.ColorizeLabel)
 	}
 	if info.EndpointURL != "" {
-		printSessionInfoRow(sessionInfoChildPrefix(theme), "Endpoint:", theme.Dimmed(info.EndpointURL), theme.Dimmed)
+		printSessionInfoRow(sessionInfoChildPrefix(theme), "Endpoint:", theme.Dimmed(info.EndpointURL), theme.ColorizeLabel)
 	}
 	if info.Host != "" {
-		printSessionInfoRow(sessionInfoChildPrefix(theme), "Host:", theme.Dimmed(info.Host), theme.Dimmed)
+		printSessionInfoRow(sessionInfoChildPrefix(theme), "Host:", theme.Dimmed(info.Host), theme.ColorizeLabel)
 	}
 	if info.KeyCount > 0 {
-		printSessionInfoRow(sessionInfoChildPrefix(theme), "Auth Keys:", theme.Dimmed(fmt.Sprintf("%d", info.KeyCount)), theme.Dimmed)
+		printSessionInfoRow(sessionInfoChildPrefix(theme), "Auth Keys:", theme.Dimmed(fmt.Sprintf("%d", info.KeyCount)), theme.ColorizeLabel)
 	}
 	if info.Timeout != "" {
-		printSessionInfoRow(sessionInfoChildPrefix(theme), "Timeout:", theme.Dimmed(info.Timeout), theme.Dimmed)
+		printSessionInfoRow(sessionInfoChildPrefix(theme), "Timeout:", theme.Dimmed(info.Timeout), theme.ColorizeLabel)
 	}
 
 	// Model 信息
-	printSessionInfoRow(theme.SystemIcon+" ", "Model:", theme.SuccessColor.Sprint(info.ModelName), func(text string) string { return theme.CommandColor.Sprint(text) })
+	printSessionInfoRow(theme.SystemIcon+" ", "Model:", theme.SuccessColor.Sprint(info.ModelName), theme.ColorizeLabel)
 
 	// Stream 模式
 	streamStatus := "off"
@@ -55,11 +55,11 @@ func PrintSessionInfo(info SessionInfo) bool {
 	} else {
 		streamStatus = theme.Dimmed(streamStatus)
 	}
-	printSessionInfoRow(theme.SystemIcon+" ", "Stream:", streamStatus, func(text string) string { return theme.CommandColor.Sprint(text) })
+	printSessionInfoRow(theme.SystemIcon+" ", "Stream:", streamStatus, theme.ColorizeLabel)
 
 	// 推理模型标识
 	if info.IsReasoningModel {
-		printSessionInfoRow(theme.SystemIcon+" ", "Type:", theme.WarningColor.Sprint("推理模型 (禁用 temperature)"), func(text string) string { return theme.CommandColor.Sprint(text) })
+		printSessionInfoRow(theme.SystemIcon+" ", "Type:", theme.WarningColor.Sprint("推理模型 (禁用 temperature)"), theme.ColorizeLabel)
 	}
 
 	PrintThickSeparator()
@@ -83,13 +83,13 @@ func printSessionInfoRow(prefix, label, value string, colorizeLabel func(string)
 // PrintStatus 打印状态信息
 func PrintStatus(label, value string) {
 	theme := GetTheme(ThemeAuto)
-	fmt.Printf("%-15s %s\n", theme.CommandColor.Sprint(label+":"), value)
+	fmt.Printf("%-15s %s\n", theme.ColorizeLabel(label+":"), theme.ColorizeSecondary(value))
 }
 
 // PrintStatusColored 打印带颜色的状态信息
 func PrintStatusColored(label, value string, colorFunc func(string) string) {
 	theme := GetTheme(ThemeAuto)
-	fmt.Printf("%-15s %s\n", theme.CommandColor.Sprint(label+":"), colorFunc(value))
+	fmt.Printf("%-15s %s\n", theme.ColorizeLabel(label+":"), colorFunc(value))
 }
 
 // PrintTable 打印表格
@@ -121,7 +121,7 @@ func PrintTable(headers []string, rows [][]string) {
 	// 打印表头
 	var headerParts []string
 	for i, header := range headers {
-		headerParts = append(headerParts, theme.CommandColor.Sprintf("%-*s", colWidths[i], header))
+		headerParts = append(headerParts, theme.ColorizeLabel(fmt.Sprintf("%-*s", colWidths[i], header)))
 	}
 	fmt.Println(strings.Join(headerParts, "  "))
 
@@ -145,7 +145,7 @@ func PrintTable(headers []string, rows [][]string) {
 // PrintKeyValue 打印键值对
 func PrintKeyValue(key, value string) {
 	theme := GetTheme(ThemeAuto)
-	fmt.Printf("%s: %s\n", theme.CommandColor.Sprint(key), value)
+	fmt.Printf("%s: %s\n", theme.ColorizeLabel(key), theme.ColorizeSecondary(value))
 }
 
 // PrintKeyValues 打印多个键值对
@@ -160,7 +160,7 @@ func PrintKeyValues(pairs map[string]string) {
 	}
 
 	for key, value := range pairs {
-		fmt.Printf("%-*s: %s\n", maxKeyLen, theme.CommandColor.Sprint(key), value)
+		fmt.Printf("%-*s: %s\n", maxKeyLen, theme.ColorizeLabel(key), theme.ColorizeSecondary(value))
 	}
 }
 
@@ -174,21 +174,21 @@ func PrintUsageInfo(promptTokens, completionTokens, totalTokens int64, duration 
 	if totalTokens > 0 {
 		fmt.Printf("%s %s %s\n",
 			theme.InfoIcon,
-			theme.CommandColor.Sprintf("Total Tokens:"),
+			theme.ColorizeLabel("Total Tokens:"),
 			theme.SuccessColor.Sprintf("%d", totalTokens))
 	}
 
 	if promptTokens > 0 {
 		fmt.Printf("%s %s %d\n",
 			theme.InfoIcon,
-			theme.CommandColor.Sprintf("  Prompt:"),
+			theme.ColorizeLabel("  Prompt:"),
 			promptTokens)
 	}
 
 	if completionTokens > 0 {
 		fmt.Printf("%s %s %d\n",
 			theme.InfoIcon,
-			theme.CommandColor.Sprintf("Completion:"),
+			theme.ColorizeLabel("Completion:"),
 			completionTokens)
 	}
 
@@ -196,7 +196,7 @@ func PrintUsageInfo(promptTokens, completionTokens, totalTokens int64, duration 
 		seconds := float64(duration) / 1000.0
 		fmt.Printf("%s %s %.2f%s\n",
 			theme.InfoIcon,
-			theme.CommandColor.Sprintf("Duration:"),
+			theme.ColorizeLabel("Duration:"),
 			seconds,
 			theme.Dimmed("s"))
 	}

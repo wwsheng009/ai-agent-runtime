@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands"
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
 var (
@@ -69,6 +71,7 @@ func main() {
 	configPath := "./configs/config.yaml"
 	rootCmd.PersistentFlags().StringP("config", "c", "./configs/config.yaml", "配置文件路径")
 	rootCmd.PersistentFlags().StringVarP(&logFilePath, "logfile", "l", "", "日志文件路径（默认使用 aicli.log.file_path 或 log.file_path）")
+	rootCmd.PersistentFlags().String("theme", "", "输出主题（classic|focus|contrast|mono，留空使用配置或默认）")
 	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
 
 	// 解析配置后初始化
@@ -92,6 +95,20 @@ func main() {
 			}
 			if logFilePath != "" {
 				cfg.Log.FilePath = logFilePath
+			}
+		}
+
+		themeName := ""
+		if flagTheme, err := rootCmd.Flags().GetString("theme"); err == nil {
+			themeName = strings.TrimSpace(flagTheme)
+		}
+		if themeName == "" && cfg != nil && cfg.AICLI != nil && cfg.AICLI.Theme != nil {
+			themeName = strings.TrimSpace(cfg.AICLI.Theme.Name)
+		}
+		if themeName != "" {
+			if err := ui.SetThemePreset(themeName); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
 			}
 		}
 

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -508,6 +509,62 @@ func TestResolveChatOutputFormat(t *testing.T) {
 	}
 	if _, err := resolveChatOutputFormat(true, "yaml", false); err == nil {
 		t.Fatal("expected invalid output format to fail")
+	}
+}
+
+func TestBuildChatResponsePayload_ResolvesRelativePathsToAbsolute(t *testing.T) {
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tempWD := t.TempDir()
+	if err := os.Chdir(tempWD); err != nil {
+		t.Fatalf("chdir temp wd: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(originalWD)
+	}()
+
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, "https://example.com")
+	if err := logger.SetLogDir("chat-logs"); err != nil {
+		t.Fatalf("set relative log dir: %v", err)
+	}
+	runtimeCapture := &chatRuntimeHTTPCapture{}
+	requestPath := filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_request_gateway_client.json")
+	responsePath := filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_response_gateway_client.json")
+	runtimeCapture.RecordArtifactPath("request", requestPath)
+	runtimeCapture.RecordArtifactPath("response", responsePath)
+
+	payload := buildChatResponsePayload(&ChatSession{
+		ProviderName:       "codex_ee",
+		Provider:           config.Provider{Protocol: "codex"},
+		Model:              "gpt-5.2-code",
+		Logger:             logger,
+		SessionDir:         "sessions",
+		runtimeHTTPCapture: runtimeCapture,
+		RuntimeSession: &runtimechat.Session{
+			ID:    "session-123",
+			State: runtimechat.StateActive,
+		},
+	}, "hello")
+
+	if payload.SessionPath != resolveAbsoluteChatPath(filepath.Join("sessions", "session-123.json")) {
+		t.Fatalf("expected absolute session path, got %+v", payload)
+	}
+	if payload.LogPath != resolveAbsoluteChatPath(logger.SessionLogPath()) {
+		t.Fatalf("expected absolute log path, got %+v", payload)
+	}
+	if payload.DebugLogPath != resolveAbsoluteChatPath(logger.DebugLogPath()) {
+		t.Fatalf("expected absolute debug log path, got %+v", payload)
+	}
+	if payload.HTTPArtifactDir != resolveAbsoluteChatPath(logger.RuntimeHTTPArtifactDir()) {
+		t.Fatalf("expected absolute HTTP artifact dir, got %+v", payload)
+	}
+	if payload.LastHTTPRequestPath != resolveAbsoluteChatPath(requestPath) {
+		t.Fatalf("expected absolute last request artifact path, got %+v", payload)
+	}
+	if payload.LastHTTPResponsePath != resolveAbsoluteChatPath(responsePath) {
+		t.Fatalf("expected absolute last response artifact path, got %+v", payload)
 	}
 }
 

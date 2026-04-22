@@ -252,6 +252,7 @@ type AICLIConfig struct {
 	Log     *AICLILogConfig     `yaml:"log" mapstructure:"log"`
 	Retry   *AICLIRetryConfig   `yaml:"retry" mapstructure:"retry"`
 	Timeout *AICLITimeoutConfig `yaml:"timeout" mapstructure:"timeout"`
+	Theme   *AICLIThemeConfig   `yaml:"theme" mapstructure:"theme"`
 }
 
 // AICLIMCPConfig holds aicli MCP configuration.
@@ -276,6 +277,11 @@ type AICLIRetryConfig struct {
 // AICLITimeoutConfig holds aicli timeout configuration.
 type AICLITimeoutConfig struct {
 	RequestTimeout time.Duration `yaml:"request_timeout" mapstructure:"request_timeout"`
+}
+
+// AICLIThemeConfig holds aicli terminal theme preferences.
+type AICLIThemeConfig struct {
+	Name string `yaml:"name" mapstructure:"name" env:"AICLI_THEME"`
 }
 
 // ProfilesConfig holds profile topology configuration.

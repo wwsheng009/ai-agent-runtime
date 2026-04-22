@@ -109,6 +109,14 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 		successCount := 0
 		errorCount := 0
 		for _, call := range assistantMessage.ToolCalls {
+			emitChatEvent(req.EventSink, ChatEvent{
+				Type:       EventTool,
+				Stage:      "tool_requested",
+				ToolName:   call.Name,
+				ToolCallID: call.ID,
+				Arguments:  cloneInterfaceMap(call.Args),
+			})
+
 			toolResult := req.ToolExecutor.ExecuteTool(ctx, call)
 			execution := ToolExecutionSummary{
 				ToolCallID: call.ID,

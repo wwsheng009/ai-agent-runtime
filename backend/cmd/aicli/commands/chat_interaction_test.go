@@ -50,7 +50,7 @@ func TestChatInteractionCoordinator_RendersPromptAndAsyncLineOnSameWriter(t *tes
 	if !strings.Contains(rendered, "你> ") {
 		t.Fatalf("expected prompt in output, got %q", rendered)
 	}
-	if !strings.Contains(rendered, ui.IndentAssistantContent("[task] started task-1 @planner")) {
+	if !strings.Contains(rendered, ui.FormatAssistantSupplementBlock("[task] started task-1 @planner")) {
 		t.Fatalf("expected async line in output, got %q", rendered)
 	}
 }
@@ -76,7 +76,7 @@ func TestChatInteractionCoordinator_RenderAsyncLineClearsVisiblePromptInInteract
 	if strings.Contains(rendered, "你> ") {
 		t.Fatalf("expected prompt to be cleared before async line, got %q", rendered)
 	}
-	if !strings.Contains(rendered, strings.TrimRight(ui.IndentAssistantContent("[tool] view"), " ")) {
+	if !strings.Contains(rendered, strings.TrimRight(ui.FormatAssistantSupplementBlock("[tool] view"), " ")) {
 		t.Fatalf("expected async line in output, got %q", rendered)
 	}
 }
@@ -90,9 +90,25 @@ func TestChatInteractionCoordinator_RenderAsyncLineSupportsMultilineToolSummary(
 	coord.RenderAsyncLine("[tool done] ls path=docs\n  目录: docs\n  📁 aicli/ · 📁 architecture/\n  统计: 0 个文件, 2 个目录")
 
 	rendered := output.String()
-	expected := ui.IndentAssistantContent("[tool done] ls path=docs\n  目录: docs\n  📁 aicli/ · 📁 architecture/\n  统计: 0 个文件, 2 个目录")
+	expected := ui.FormatAssistantSupplementBlock("[tool done] ls path=docs\n  目录: docs\n  📁 aicli/ · 📁 architecture/\n  统计: 0 个文件, 2 个目录")
 	if !strings.Contains(rendered, expected) {
 		t.Fatalf("expected multiline async line in output, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_RenderAsyncLineSeparatesAdjacentBlocks(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAsyncLine("[tool done] first")
+	coord.RenderAsyncLine("[tool done] second")
+
+	rendered := output.String()
+	expected := ui.FormatAssistantSupplementBlock("[tool done] first") + "\n\n" + ui.FormatAssistantSupplementBlock("[tool done] second")
+	if !strings.Contains(rendered, expected) {
+		t.Fatalf("expected blank line between adjacent async blocks, got %q", rendered)
 	}
 }
 
@@ -625,14 +641,11 @@ func TestChatInteractionCoordinator_ClearsThinkingBeforeAssistantResponse(t *tes
 	coord.RenderAssistant("done")
 
 	rendered := output.String()
-	if !strings.Contains(rendered, ui.IndentAssistantContent("助手正在思考...")) {
-		t.Fatalf("expected thinking text in output, got %q", rendered)
-	}
 	if !strings.Contains(rendered, "done") {
 		t.Fatalf("expected assistant response in output, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "\r   \r") {
-		t.Fatalf("expected thinking clear sequence before assistant response, got %q", rendered)
+	if strings.Contains(rendered, "助手正在思考...") {
+		t.Fatalf("expected no visible thinking placeholder, got %q", rendered)
 	}
 }
 
@@ -650,8 +663,8 @@ func TestChatInteractionCoordinator_ClearPromptAdvancesLineForBufferedWriters(t 
 	if !strings.Contains(rendered, "你> \n") {
 		t.Fatalf("expected buffered prompt to advance to next line, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "\n"+ui.IndentAssistantContent("助手正在思考...")) {
-		t.Fatalf("expected thinking line after prompt advance, got %q", rendered)
+	if strings.Contains(rendered, "助手正在思考...") {
+		t.Fatalf("expected no visible thinking placeholder after prompt advance, got %q", rendered)
 	}
 }
 
@@ -1061,6 +1074,25 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_PreservesLeadingWhitesp
 	}
 }
 
+func TestChatInteractionCoordinator_RenderAssistantDelta_IsolatesRTLTextInLiveStream(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAssistantDelta("这些改动 هنوز在工作区里，尚未提交")
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "\u2066هنوز\u2069") {
+		t.Fatalf("expected RTL run to be isolated in live stream, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "这些改动") || !strings.Contains(rendered, "尚未提交") {
+		t.Fatalf("expected surrounding CJK text to remain visible, got %q", rendered)
+	}
+}
+
 func TestChatInteractionCoordinator_RenderReasoningDelta_StreamsImmediatelyWhenLiveOutputEnabled(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
@@ -1081,8 +1113,8 @@ func TestChatInteractionCoordinator_RenderReasoningDelta_StreamsImmediatelyWhenL
 	if !strings.Contains(rendered, chatToolDivider("reasoning")) {
 		t.Fatalf("expected reasoning divider, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "[reasoning] provider=nvidia format=openai_compatible") {
-		t.Fatalf("expected reasoning meta line, got %q", rendered)
+	if strings.Contains(rendered, "[reasoning]") {
+		t.Fatalf("expected default reasoning metadata line to be suppressed, got %q", rendered)
 	}
 	if !strings.Contains(rendered, ui.AssistantContentIndent()+"  先输出 reasoning，再输出正文。") {
 		t.Fatalf("expected reasoning content to stream immediately, got %q", rendered)
@@ -1091,6 +1123,26 @@ func TestChatInteractionCoordinator_RenderReasoningDelta_StreamsImmediatelyWhenL
 	coord.FinalizeReasoningDelta()
 	if !strings.Contains(output.String(), chatToolDivider("end reasoning")) {
 		t.Fatalf("expected reasoning finalize divider, got %q", output.String())
+	}
+}
+
+func TestChatInteractionCoordinator_CompleteReasoningResponse_SuppressesMetadataOnlyBlock(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.reasoningActive = true
+
+	if !coord.CompleteReasoningResponse(&runtimetypes.ReasoningBlock{
+		Provider: "CODEX_LOCAL",
+		Format:   "openai_responses",
+	}) {
+		t.Fatal("expected reasoning completion to be handled")
+	}
+
+	if output.String() != "" {
+		t.Fatalf("expected metadata-only reasoning block to be suppressed, got %q", output.String())
 	}
 }
 

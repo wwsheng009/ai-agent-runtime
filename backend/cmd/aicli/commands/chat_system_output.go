@@ -39,7 +39,7 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 		remaining := content[index+1:]
 		w.buffer.Reset()
 		w.buffer.WriteString(remaining)
-		if _, err := io.WriteString(w.writer, ui.IndentAssistantContent(line)+"\n"); err != nil {
+		if _, err := io.WriteString(w.writer, ui.FormatAssistantSupplementBlock(line)+"\n"); err != nil {
 			return 0, err
 		}
 	}

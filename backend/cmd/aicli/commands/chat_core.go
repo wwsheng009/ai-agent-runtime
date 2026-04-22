@@ -215,7 +215,14 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	}
 
 	startTime := time.Now()
-	resp, responseBody, httpReport, err := sendHTTPRequest(session.HTTPClient, httpReq, session.RetryConfig)
+
+	// 流式请求使用 Streaming 模式，避免 io.ReadAll 全量读取后假流式
+	retryCfg := session.RetryConfig
+	if req.Stream {
+		retryCfg.Streaming = true
+	}
+
+	resp, responseBody, httpReport, err := sendHTTPRequest(session.HTTPClient, httpReq, retryCfg)
 	if err != nil {
 		durationMs := time.Since(startTime).Milliseconds()
 		logpkg.Error("AICLI chat request failed",
@@ -249,6 +256,10 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		}
 	}
 
+	responseBytes := len(responseBody)
+	// 流式请求 + 2xx 响应：responseBody 为 nil（sendHTTPRequest 不读取 body），resp.Body 需要由调用方消费后关闭
+	needStreamBody := req.Stream && responseBody == nil && resp.Body != nil
+
 	logpkg.Info("AICLI chat response received",
 		logpkg.String("provider", session.ProviderName),
 		logpkg.String("protocol", session.Provider.GetProtocol()),
@@ -256,7 +267,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		logpkg.URL(session.BaseURL),
 		logpkg.Status(resp.StatusCode),
 		logpkg.Latency(time.Since(startTime).Milliseconds()),
-		logpkg.Int("response_bytes", len(responseBody)),
+		logpkg.Int("response_bytes", responseBytes),
 	)
 
 	if resp.StatusCode != http.StatusOK {
@@ -274,6 +285,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(responseBody))
 	}
 
+	// 准备流式回调
 	callbacks := adapter.StreamCallbacks{}
 	if req.Stream {
 		callbacks = adapter.StreamCallbacks{
@@ -302,15 +314,42 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		}
 	}
 
-	assistantMsg, err := session.Adapter.HandleResponse(req.Stream, io.NopCloser(bytes.NewReader(responseBody)), callbacks)
+	// 选择响应体 reader
+	var respReader io.Reader
+	var streamCapture bytes.Buffer // 流式请求用 TeeReader 边读边缓存
+	if needStreamBody {
+		// 真流式：用 TeeReader 同时写入缓存，供后续日志和 usage 提取
+		respReader = io.TeeReader(resp.Body, &streamCapture)
+	} else {
+		// 非流式：使用已读取的 responseBody
+		respReader = bytes.NewReader(responseBody)
+	}
+
+	assistantMsg, err := session.Adapter.HandleResponse(req.Stream, io.NopCloser(respReader), callbacks)
+
+	// 流式请求结束后关闭 resp.Body
+	if needStreamBody {
+		resp.Body.Close()
+	}
+
 	if session.IsInterrupted() {
 		return nil, fmt.Errorf("用户中断")
 	}
 	if err != nil {
 		if session.Logger != nil && session.Logger.logDir != "" {
-			session.Logger.LogResponse(logScope, nil, responseBody, req.Stream, err, time.Since(startTime).Milliseconds())
+			// 流式场景：使用 TeeReader 缓存的内容
+			capturedBody := responseBody
+			if capturedBody == nil {
+				capturedBody = streamCapture.Bytes()
+			}
+			session.Logger.LogResponse(logScope, nil, capturedBody, req.Stream, err, time.Since(startTime).Milliseconds())
 		}
 		return nil, fmt.Errorf("响应处理失败: %w", err)
+	}
+
+	// 流式场景：用缓存替换 responseBody，供后续日志和 usage 使用
+	if needStreamBody {
+		responseBody = streamCapture.Bytes()
 	}
 
 	content, _ := assistantMsg["content"].(string)
@@ -682,10 +721,12 @@ func toolDefinitionsFromSelection(selection *aicliFunctionSelection) []runtimety
 		}
 		description, _ := schema["description"].(string)
 		parameters, _ := schema["parameters"].(map[string]interface{})
+		metadata, _ := schema["metadata"].(map[string]interface{})
 		definitions = append(definitions, runtimetypes.ToolDefinition{
 			Name:        strings.TrimSpace(name),
 			Description: strings.TrimSpace(description),
 			Parameters:  cloneFunctionSchema(parameters),
+			Metadata:    cloneFunctionSchema(metadata),
 		})
 	}
 	sortToolDefinitions(definitions)
@@ -701,11 +742,15 @@ func toolDefinitionsToSchemas(defs []runtimetypes.ToolDefinition) []map[string]i
 
 	schemas := make([]map[string]interface{}, 0, len(orderedDefs))
 	for _, def := range orderedDefs {
-		schemas = append(schemas, map[string]interface{}{
+		schema := map[string]interface{}{
 			"name":        def.Name,
 			"description": def.Description,
 			"parameters":  cloneFunctionSchema(def.Parameters),
-		})
+		}
+		if len(def.Metadata) > 0 {
+			schema["metadata"] = cloneFunctionSchema(def.Metadata)
+		}
+		schemas = append(schemas, schema)
 	}
 	return schemas
 }

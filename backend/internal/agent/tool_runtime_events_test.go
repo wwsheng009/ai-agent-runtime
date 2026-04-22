@@ -19,6 +19,9 @@ func TestToolRequestedEventPayloadIncludesArgPreview(t *testing.T) {
 	if got := payload["arg_preview"]; got != "command=Get-ChildItem -Force" {
 		t.Fatalf("expected command preview, got %#v", got)
 	}
+	if got := payload["command_text"]; got != "Get-ChildItem -Force" {
+		t.Fatalf("expected command text, got %#v", got)
+	}
 }
 
 func TestToolCompletedEventPayloadPrefersStructuredSummary(t *testing.T) {
@@ -89,6 +92,9 @@ func TestToolCompletedEventPayloadFallsBackToEnvelopeSummary(t *testing.T) {
 		if summaryLines[i] != line {
 			t.Fatalf("expected summary line %d to be %q, got %q", i, line, summaryLines[i])
 		}
+	}
+	if got := payload["command_text"]; got != "git status" {
+		t.Fatalf("expected command text, got %#v", got)
 	}
 }
 

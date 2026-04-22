@@ -34,11 +34,12 @@ type chatRuntimeEventBridge struct {
 	runActive              bool
 	enqueuedEvents         uint64
 	processedEvents        uint64
-	askApproval            func(toolName, reason string) (bool, error)
+	askApproval            func(*runtimechat.ApprovalRequest) (bool, error)
 	askQuestion            func(prompt string, suggestions []string, required bool) (string, error)
 	writeLine              func(string)
 	writeDelta             func(string)
 	finalizeDelta          func()
+	completeDelta          func(string) bool
 	writeReasoningDelta    func(*runtimetypes.ReasoningBlock)
 	finalizeReasoning      func()
 	completeReasoning      func(*runtimetypes.ReasoningBlock) bool
@@ -63,7 +64,7 @@ func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge 
 func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	return &chatRuntimeEventBridge{
 		session:    session,
-		eventQueue: make(chan runtimeevents.Event, 128),
+		eventQueue: make(chan runtimeevents.Event, 512),
 		rendered:   make(map[string]struct{}),
 		writeLine: func(line string) {
 			if strings.TrimSpace(line) == "" {
@@ -73,7 +74,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				session.Interaction.RenderAsyncLine(line)
 				return
 			}
-			fmt.Println(line)
+			fmt.Println(ui.FormatAssistantSupplementBlock(line))
 		},
 		writeDelta: func(delta string) {
 			if delta == "" {
@@ -92,6 +93,12 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			}
 			fmt.Println()
 		},
+		completeDelta: func(content string) bool {
+			if session != nil && session.Interaction != nil {
+				return session.Interaction.CompleteAssistantResponse(content)
+			}
+			return false
+		},
 		writeReasoningDelta: func(block *runtimetypes.ReasoningBlock) {
 			if block == nil {
 				return
@@ -104,7 +111,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			if len(lines) == 0 {
 				return
 			}
-			fmt.Println(strings.Join(lines, "\n"))
+			fmt.Println(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")))
 		},
 		finalizeReasoning: func() {
 			if session != nil && session.Interaction != nil {
@@ -145,15 +152,24 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			}
 			fmt.Print(ui.FormatUserPrompt())
 		},
-		askApproval: func(toolName, reason string) (bool, error) {
+		askApproval: func(approval *runtimechat.ApprovalRequest) (bool, error) {
 			if notice := discardPendingInteractiveInputForPriorityPrompt(session, "审批提示"); notice != "" {
-				fmt.Printf("\n%s\n", notice)
+				fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine(notice))
 			}
-			fmt.Printf("\n[approval] allow %s", strings.TrimSpace(toolName))
+			toolName := ""
+			reason := ""
+			if approval != nil {
+				toolName = strings.TrimSpace(approval.ToolName)
+				reason = strings.TrimSpace(approval.Reason)
+				for _, line := range approvalRequestPreviewLines(approval) {
+					fmt.Printf("\n%s", formatInteractiveSupplementPromptLine("[approval] "+line))
+				}
+			}
+			promptLine := fmt.Sprintf("[approval] allow %s", strings.TrimSpace(toolName))
 			if strings.TrimSpace(reason) != "" {
-				fmt.Printf(" (%s)", strings.TrimSpace(reason))
+				promptLine += fmt.Sprintf(" (%s)", strings.TrimSpace(reason))
 			}
-			fmt.Print("? [y/N]: ")
+			fmt.Printf("\n%s? [y/N]: ", formatInteractiveSupplementPromptLine(promptLine))
 			text, err := chatInteractiveReadPriorityLine(session, context.Background())
 			if err != nil {
 				return false, err
@@ -163,11 +179,11 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 		},
 		askQuestion: func(prompt string, suggestions []string, required bool) (string, error) {
 			if notice := discardPendingInteractiveInputForPriorityPrompt(session, "问题提示"); notice != "" {
-				fmt.Printf("\n%s\n", notice)
+				fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine(notice))
 			}
-			fmt.Printf("\n[question] %s\n", strings.TrimSpace(prompt))
+			fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine("[question] "+strings.TrimSpace(prompt)))
 			if len(suggestions) > 0 {
-				fmt.Printf("Suggestions: %s\n", strings.Join(suggestions, ", "))
+				fmt.Printf("%s\n", formatInteractiveSupplementPromptLine("Suggestions: "+strings.Join(suggestions, ", ")))
 			}
 			if required {
 				fmt.Print("> ")
@@ -237,13 +253,10 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 	if b == nil {
 		return
 	}
-	select {
-	case b.eventQueue <- event:
-		b.progressMu.Lock()
-		b.enqueuedEvents++
-		b.progressMu.Unlock()
-	default:
-	}
+	b.eventQueue <- event
+	b.progressMu.Lock()
+	b.enqueuedEvents++
+	b.progressMu.Unlock()
 }
 
 func (b *chatRuntimeEventBridge) run() {
@@ -310,10 +323,17 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b.shouldSuppressTimelineDuringAssistantStream(event) {
 		return
 	}
+	suppressApprovalTimeline := false
+	if event.Type == runtimechat.EventApprovalRequested {
+		suppressApprovalTimeline = b.shouldSuppressApprovalTimeline(event)
+	}
 	renderedSomething := false
-	rendered := renderChatRuntimeTimelineEvent(event)
-	if rendered.Line == "" {
-		rendered = b.renderAsyncTeamSummaryFallback(event)
+	rendered := chatRuntimeTimelineEvent{}
+	if !suppressApprovalTimeline {
+		rendered = renderChatRuntimeTimelineEvent(event)
+		if rendered.Line == "" {
+			rendered = b.renderAsyncTeamSummaryFallback(event)
+		}
 	}
 	if rendered.Line != "" && shouldRenderInteractiveOutput(b.session) && b.shouldRenderTimelineEvent(rendered) {
 		b.writeLine(rendered.Line)
@@ -338,25 +358,24 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	switch event.Type {
 	case runtimechat.EventApprovalRequested:
 		requestID, _ := event.Payload["request_id"].(string)
-		toolName, _ := event.Payload["tool_name"].(string)
 		reason, _ := event.Payload["reason"].(string)
 		b.maybeRenderPermissionModeHint(reason)
-		approval := b.pendingApprovalForSession(event.SessionID)
+		approval := b.approvalRequestForEvent(event)
 		if grantKey := b.autoApprovalGrantKey(event.SessionID, approval); grantKey != "" && b.hasApprovalGrant(grantKey) {
-			if b.writeLine != nil {
-				b.writeLine(fmt.Sprintf("[approval] auto-approved %s", strings.TrimSpace(toolName)))
-			}
 			if err := actor.ApproveTool(context.Background(), requestID, true); err != nil {
 				b.setRunError(err)
 			}
 			return
+		}
+		if hint := b.approvalPromptHint(event.SessionID, approval); hint != "" && b.writeLine != nil {
+			b.writeLine(hint)
 		}
 		if b.session.NoInteractive {
 			b.setRunError(fmt.Errorf("interactive approval required in --no-interactive mode"))
 			_ = actor.ApproveTool(context.Background(), requestID, false)
 			return
 		}
-		allowed, askErr := b.askApproval(toolName, reason)
+		allowed, askErr := b.askApproval(approval)
 		if askErr != nil {
 			b.setRunError(askErr)
 			_ = actor.ApproveTool(context.Background(), requestID, false)
@@ -364,9 +383,6 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		}
 		if allowed {
 			b.rememberApprovalGrant(b.autoApprovalGrantKey(event.SessionID, approval))
-			if b.writeLine != nil {
-				b.writeLine(fmt.Sprintf("[approval] approved %s, executing...", strings.TrimSpace(toolName)))
-			}
 		}
 		if err := actor.ApproveTool(context.Background(), requestID, allowed); err != nil {
 			b.setRunError(err)
@@ -391,6 +407,45 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			b.setRunError(err)
 		}
 	}
+}
+
+func (b *chatRuntimeEventBridge) approvalRequestForEvent(event runtimeevents.Event) *runtimechat.ApprovalRequest {
+	if b == nil {
+		return nil
+	}
+	approval := b.pendingApprovalForSession(event.SessionID)
+	if approval != nil {
+		return approval
+	}
+	toolName, _ := event.Payload["tool_name"].(string)
+	reason, _ := event.Payload["reason"].(string)
+	return &runtimechat.ApprovalRequest{
+		ToolName: strings.TrimSpace(toolName),
+		Reason:   strings.TrimSpace(reason),
+	}
+}
+
+func formatInteractiveSupplementPromptLine(line string) string {
+	line = strings.TrimRight(strings.ReplaceAll(line, "\r\n", "\n"), "\n")
+	if strings.TrimSpace(line) == "" {
+		return ""
+	}
+	return ui.FormatAssistantSupplementBlock(line)
+}
+
+func (b *chatRuntimeEventBridge) shouldSuppressApprovalTimeline(event runtimeevents.Event) bool {
+	if b == nil || event.Type != runtimechat.EventApprovalRequested {
+		return false
+	}
+	approval := b.approvalRequestForEvent(event)
+	if approval == nil {
+		return false
+	}
+	if b.session != nil && !b.session.NoInteractive {
+		return true
+	}
+	grantKey := b.autoApprovalGrantKey(event.SessionID, approval)
+	return grantKey != "" && b.hasApprovalGrant(grantKey)
 }
 
 func (b *chatRuntimeEventBridge) shouldSuppressTimelineDuringAssistantStream(event runtimeevents.Event) bool {
@@ -549,6 +604,13 @@ func (b *chatRuntimeEventBridge) handlePrimaryAssistantMessage(event runtimeeven
 		renderedSummary = true
 	}
 	if b.HasRenderedAssistantDelta() {
+		content, _ := event.Payload["content"].(string)
+		if strings.TrimSpace(content) != "" && b.completeDelta != nil && b.completeDelta(content) {
+			b.renderMu.Lock()
+			b.renderedAssistantFinal = true
+			b.renderMu.Unlock()
+			return true
+		}
 		return b.finalizeAssistantDelta(event) || renderedSummary
 	}
 	content, _ := event.Payload["content"].(string)
@@ -784,6 +846,73 @@ func (b *chatRuntimeEventBridge) maybeRenderPermissionModeHint(reason string) {
 	))
 }
 
+func (b *chatRuntimeEventBridge) approvalPromptHint(sessionID string, approval *runtimechat.ApprovalRequest) string {
+	if b == nil || b.session == nil || approval == nil {
+		return ""
+	}
+	if b.session.ApprovalReuseMode == chatApprovalReuseOff {
+		return ""
+	}
+	scope := b.autoApprovalScope(sessionID)
+	if scope == "" {
+		if b.session.ApprovalReuseMode == chatApprovalReuseTeamReadOnlyShell {
+			return "[tip] 当前没有 active team，team_readonly_shell 不会缓存这次审批。"
+		}
+		return ""
+	}
+	family := approvalGrantFamily(strings.TrimSpace(approval.ToolName), approval.ArgsJSON)
+	switch family {
+	case "readonly_shell":
+		return fmt.Sprintf("[tip] 本次命令属于 readonly_shell；%s 里还没有该家族的审批缓存，所以这次仍需审批。", approvalGrantScopeLabel(scope))
+	case "approved_shell":
+		return fmt.Sprintf("[tip] 本次命令属于 approved_shell；首次仍需审批，后续同一%s内的同家族命令可自动复用。", approvalGrantScopeLabel(scope))
+	case "readonly_network":
+		return fmt.Sprintf("[tip] 本次命令属于 readonly_network；%s 里还没有该家族的审批缓存，所以这次仍需审批。", approvalGrantScopeLabel(scope))
+	}
+
+	if details := approvalGrantExclusionReason(strings.TrimSpace(approval.ToolName), approval.ArgsJSON); details != "" {
+		return "[tip] " + details
+	}
+	return ""
+}
+
+func approvalGrantScopeLabel(scope string) string {
+	scope = strings.TrimSpace(scope)
+	switch {
+	case strings.HasPrefix(scope, "session:"):
+		return "当前会话"
+	case strings.HasPrefix(scope, "team:"):
+		return "当前 team"
+	default:
+		return "当前作用域"
+	}
+}
+
+func approvalGrantExclusionReason(toolName string, argsJSON json.RawMessage) string {
+	normalized := strings.ToLower(strings.TrimSpace(toolName))
+	if normalized == "" {
+		return ""
+	}
+	if runtimepolicy.IsWriteLikeToolName(normalized) {
+		return "本次工具属于写操作，不参与 approval-reuse。"
+	}
+	if !runtimepolicy.IsShellLikeToolName(normalized) || len(argsJSON) == 0 {
+		return ""
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(argsJSON, &payload); err != nil {
+		return ""
+	}
+	if mutated := extractApprovalStringSlice(payload["mutated_paths"]); len(mutated) > 0 {
+		return "本次命令声明了 mutated_paths，按写操作处理，不参与 approval-reuse。"
+	}
+	command := payloadStringValue(payload["command"])
+	if command != "" && isDangerousShellCommand(command) {
+		return "本次 shell 命令包含写入或外部副作用风险，不参与 approval-reuse。"
+	}
+	return ""
+}
+
 func (b *chatRuntimeEventBridge) pruneApprovalGrantsLocked(now time.Time) {
 	if b == nil || b.approvalGrants == nil {
 		return
@@ -950,21 +1079,14 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 	teamID := payloadStringValue(event.Payload["team_id"])
 	switch event.Type {
 	case runtimechat.EventLLMRequestStarted, "llm.request.started":
-		model := firstNonEmptyChatValue(payloadStringValue(event.Payload["model"]), "?")
-		return chatRuntimeTimelineEvent{
-			Line:     fmt.Sprintf("[thinking] contacting model=%s", model),
-			DedupKey: fmt.Sprintf("llm.request.started:%s", strings.TrimSpace(event.TraceID)),
-		}
+		return chatRuntimeTimelineEvent{}
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		if payloadBoolValue(event.Payload, "success") {
-			return chatRuntimeTimelineEvent{
-				Line:     "[thinking] model responded",
-				DedupKey: fmt.Sprintf("llm.request.finished:%s", strings.TrimSpace(event.TraceID)),
-			}
+			return chatRuntimeTimelineEvent{}
 		}
 		return chatRuntimeTimelineEvent{
 			Line:     fmt.Sprintf("[thinking] model error %s", payloadStringValue(event.Payload["error"])),
-			DedupKey: fmt.Sprintf("llm.request.finished:%s", strings.TrimSpace(event.TraceID)),
+			DedupKey: llmRequestDedupKey(event, "llm.request.finished"),
 		}
 	case runtimechat.EventAssistantReasoning, "assistant.reasoning":
 		if rendered := renderChatReasoningTimelineEvent(event); rendered.Line != "" {
@@ -972,39 +1094,24 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		}
 		return chatRuntimeTimelineEvent{}
 	case "planning.started":
-		return chatRuntimeTimelineEvent{Line: "[planning] started"}
+		return chatRuntimeTimelineEvent{}
 	case "planning.completed":
 		return chatRuntimeTimelineEvent{Line: "[planning] completed"}
 	case "subagent.batch.started":
-		return chatRuntimeTimelineEvent{Line: "[subagents] started"}
+		return chatRuntimeTimelineEvent{}
 	case "subagent.batch.completed":
 		return chatRuntimeTimelineEvent{Line: "[subagents] completed"}
 	case "subagent.started":
-		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[subagent] started %s", firstNonEmptyChatValue(payloadStringValue(event.Payload["agent_id"]), payloadStringValue(event.Payload["role"]), strings.TrimSpace(event.SessionID)))}
+		return chatRuntimeTimelineEvent{}
 	case "subagent.completed":
 		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[subagent] completed %s", firstNonEmptyChatValue(payloadStringValue(event.Payload["agent_id"]), payloadStringValue(event.Payload["role"]), strings.TrimSpace(event.SessionID)))}
 	case "subagent.denied":
 		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[subagent] denied %s", payloadStringValue(event.Payload["reason"]))}
 	case "tool.requested":
-		line := fmt.Sprintf("[tool] %s", firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])))
-		if argPreview := chatToolArgPreview(event.Payload); argPreview != "" {
-			line += " " + argPreview
-		}
-		return chatRuntimeTimelineEvent{Line: strings.Join([]string{chatToolDivider("command start"), line}, "\n")}
+		return chatRuntimeTimelineEvent{Line: renderCompactToolRequested(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]))}
 	case "tool.completed":
-		line := fmt.Sprintf("[tool done] %s", firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])))
-		if argPreview := chatToolArgPreview(event.Payload); argPreview != "" {
-			line += " " + argPreview
-		}
-		if summaryLines := chatToolSummaryLines(event.Payload); len(summaryLines) > 0 {
-			rendered := make([]string, 0, len(summaryLines)+1)
-			rendered = append(rendered, line)
-			for _, summaryLine := range summaryLines {
-				rendered = append(rendered, "  "+summaryLine)
-			}
-			line = strings.Join(rendered, "\n")
-		}
-		rendered := []string{line, chatToolDivider("command end")}
+		line := renderCompactToolCompleted(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]), chatToolSummaryLines(event.Payload))
+		rendered := []string{line}
 		if waitingLine := chatToolPostCommandHint(event.Payload); waitingLine != "" {
 			rendered = append(rendered, waitingLine)
 		}
@@ -1012,7 +1119,7 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		return chatRuntimeTimelineEvent{Line: line}
 	case "tool.denied":
 		line := fmt.Sprintf("[tool denied] %s", payloadStringValue(event.Payload["reason"]))
-		return chatRuntimeTimelineEvent{Line: strings.Join([]string{line, chatToolDivider("command end")}, "\n")}
+		return chatRuntimeTimelineEvent{Line: line}
 	case runtimechat.EventApprovalRequested:
 		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[approval] %s", payloadStringValue(event.Payload["tool_name"]))}
 	case runtimechat.EventQuestionAsked:
@@ -1041,10 +1148,14 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		}
 		return chatRuntimeTimelineEvent{Line: line, DedupKey: "mailbox:" + messageID}
 	case "task.started", "task.completed", "task.failed", "task.blocked", "team.task.completed", "team.task.failed", "team.task.blocked":
+		action := chatRuntimeTaskAction(event.Type)
+		if action == "started" {
+			return chatRuntimeTimelineEvent{}
+		}
 		taskID := firstNonEmptyChatValue(payloadStringValue(event.Payload["task_id"]), "?")
 		assignee := payloadStringValue(event.Payload["assignee"])
 		summary := truncateChatRuntimeText(payloadStringValue(event.Payload["summary"]), 160)
-		line := fmt.Sprintf("[task] %s %s", chatRuntimeTaskAction(event.Type), taskID)
+		line := fmt.Sprintf("[task] %s %s", action, taskID)
 		if assignee != "" {
 			line += fmt.Sprintf(" @%s", assignee)
 		}
@@ -1095,6 +1206,15 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 	default:
 		return chatRuntimeTimelineEvent{}
 	}
+}
+
+func llmRequestDedupKey(event runtimeevents.Event, eventType string) string {
+	traceID := firstNonEmptyChatValue(strings.TrimSpace(event.TraceID), payloadStringValue(event.Payload["trace_id"]))
+	stepLabel := payloadStringValue(event.Payload["step"])
+	if stepLabel == "" {
+		return fmt.Sprintf("%s:%s", strings.TrimSpace(eventType), traceID)
+	}
+	return fmt.Sprintf("%s:%s:%s", strings.TrimSpace(eventType), traceID, stepLabel)
 }
 
 func chatRuntimeTaskAction(eventType string) string {
@@ -1444,7 +1564,7 @@ func isReadOnlyShellSegment(segment string) bool {
 		switch cmd {
 		case "ls", "dir", "pwd", "cat", "type", "find", "findstr", "grep", "rg", "tree", "stat", "head", "tail", "wc",
 			"get-childitem", "gci", "get-content", "gc", "select-string", "sls", "where-object", "sort-object", "measure-object",
-			"format-table", "ft", "format-list", "fl", "resolve-path", "test-path", "cd", "chdir", "pushd", "popd", "echo",
+			"format-table", "ft", "format-list", "fl", "resolve-path", "test-path", "cd", "chdir", "pushd", "popd", "echo", "printf",
 			// Common always-read-only commands
 			"which", "where", "command", "env", "printenv", "whoami", "hostname", "uname":
 			continue
@@ -1469,6 +1589,41 @@ func normalizeApprovalCommandName(command string) string {
 	command = strings.TrimSpace(strings.Trim(command, `"'`))
 	command = strings.TrimSuffix(command, ".exe")
 	return strings.ToLower(command)
+}
+
+func approvalRequestPreviewLines(approval *runtimechat.ApprovalRequest) []string {
+	if approval == nil || len(approval.ArgsJSON) == 0 {
+		return nil
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(approval.ArgsJSON, &payload); err != nil {
+		args := truncateChatRuntimeText(strings.TrimSpace(string(approval.ArgsJSON)), 200)
+		if args == "" {
+			return nil
+		}
+		return []string{"args=" + args}
+	}
+	lines := make([]string, 0, 3)
+	if command := truncateChatRuntimeText(payloadStringValue(payload["command"]), 200); command != "" {
+		lines = append(lines, "command="+command)
+	}
+	if workdir := truncateChatRuntimeText(payloadStringValue(payload["workdir"]), 120); workdir != "" {
+		lines = append(lines, "workdir="+workdir)
+	}
+	if len(lines) > 0 {
+		return lines
+	}
+	for _, key := range []string{"url", "path", "query", "prompt"} {
+		if value := truncateChatRuntimeText(payloadStringValue(payload[key]), 160); value != "" {
+			lines = append(lines, key+"="+value)
+			return lines
+		}
+	}
+	args := truncateChatRuntimeText(strings.TrimSpace(string(approval.ArgsJSON)), 200)
+	if args != "" {
+		lines = append(lines, "args="+args)
+	}
+	return lines
 }
 
 func interfaceSliceToStrings(value interface{}) []string {
@@ -1549,11 +1704,47 @@ func chatToolSummaryLines(payload map[string]interface{}) []string {
 	return nil
 }
 
-func chatToolPostCommandHint(payload map[string]interface{}) string {
-	if payloadBoolValue(payload, "awaiting_model") {
-		return "[thinking] 等待中..."
+func chatLLMRequestToolAvailabilityHint(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
 	}
+	raw, ok := payload["tool_availability"].(map[string]interface{})
+	if !ok || len(raw) == 0 {
+		return ""
+	}
+	names := interfaceSliceToStrings(raw["requires_active_team_run"])
+	if len(names) == 0 {
+		return ""
+	}
+	preview := names
+	extraCount := 0
+	if len(preview) > 4 {
+		extraCount = len(preview) - 4
+		preview = preview[:4]
+	}
+	line := fmt.Sprintf("[tools] %d team-run tool(s) require spawn_team first", len(names))
+	if len(preview) > 0 {
+		line += ": " + strings.Join(preview, ", ")
+		if extraCount > 0 {
+			line += fmt.Sprintf(", +%d more", extraCount)
+		}
+	}
+	return truncateChatRuntimeText(line, 200)
+}
+
+func chatToolPostCommandHint(payload map[string]interface{}) string {
 	return ""
+}
+
+func prefixExecutionBullet(line string) string {
+	line = strings.TrimRight(line, "\n")
+	if strings.TrimSpace(line) == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.TrimSpace(line), "• ") {
+		return line
+	}
+	return "• " + line
 }
 
 func renderChatReasoningTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
@@ -1590,6 +1781,9 @@ func chatReasoningLines(block *runtimetypes.ReasoningBlock) []string {
 	if block == nil {
 		return nil
 	}
+	if !chatReasoningHasVisibleContent(block) {
+		return nil
+	}
 	lines := []string{chatToolDivider("reasoning")}
 	meta := chatReasoningMetaLine(block)
 	if meta != "" {
@@ -1614,6 +1808,19 @@ func chatReasoningLines(block *runtimetypes.ReasoningBlock) []string {
 	return lines
 }
 
+func chatReasoningHasVisibleContent(block *runtimetypes.ReasoningBlock) bool {
+	if block == nil {
+		return false
+	}
+	if strings.TrimSpace(block.DisplayText()) != "" {
+		return true
+	}
+	if strings.TrimSpace(block.OpaqueState) != "" {
+		return true
+	}
+	return false
+}
+
 func isReasoningStreamDeltaBlock(block *runtimetypes.ReasoningBlock) bool {
 	if block == nil {
 		return false
@@ -1625,13 +1832,7 @@ func chatReasoningMetaLine(block *runtimetypes.ReasoningBlock) string {
 	if block == nil {
 		return ""
 	}
-	parts := make([]string, 0, 4)
-	if provider := strings.TrimSpace(block.Provider); provider != "" {
-		parts = append(parts, "provider="+provider)
-	}
-	if format := strings.TrimSpace(block.Format); format != "" {
-		parts = append(parts, "format="+format)
-	}
+	parts := make([]string, 0, 2)
 	if block.ReplayRequired {
 		parts = append(parts, "replay=required")
 	}

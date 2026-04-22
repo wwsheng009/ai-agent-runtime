@@ -199,6 +199,10 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	}
 
 	presentChatSession(session)
+	if persistenceState.loadedRuntimeSession != nil && shouldPrintChatSessionPreamble(session) && hasVisibleChatHistory(session) {
+		fmt.Println()
+		printVisibleChatHistory(session, "已加载历史会话")
+	}
 
 	// 开始聊天循环
 	runChatLoop(session, opts.NoInteractive, opts.Message)
@@ -531,7 +535,8 @@ func printChatSessionMetaRow(label, value string) {
 	if strings.TrimSpace(label) == "" {
 		return
 	}
-	fmt.Printf("%-*s %s\n", chatSessionMetaLabelWidth, label, value)
+	theme := ui.GetTheme(ui.ThemeAuto)
+	fmt.Printf("%-*s %s\n", chatSessionMetaLabelWidth, theme.ColorizeLabel(label), theme.ColorizeSecondary(value))
 }
 
 func resolveChatReasoningEffort(protocol, raw string, explicit bool) (string, string, error) {
@@ -745,8 +750,8 @@ func buildChatResponsePayload(session *ChatSession, response string) chatRespons
 	payload.HTTPArtifactDir = currentRuntimeHTTPArtifactDir(session)
 	if session.runtimeHTTPCapture != nil {
 		snapshot := session.runtimeHTTPCapture.Snapshot()
-		payload.LastHTTPRequestPath = snapshot.RequestArtifactPath
-		payload.LastHTTPResponsePath = snapshot.ResponseArtifactPath
+		payload.LastHTTPRequestPath = resolveAbsoluteChatPath(snapshot.RequestArtifactPath)
+		payload.LastHTTPResponsePath = resolveAbsoluteChatPath(snapshot.ResponseArtifactPath)
 	}
 	return payload
 }

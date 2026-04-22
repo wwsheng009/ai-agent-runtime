@@ -192,31 +192,26 @@ func TestAICLIChatActorExecutor_DocsPromptRegression_CoversWorkspaceToolPriority
 	linesMu.Lock()
 	snapshot := append([]string(nil), lines...)
 	linesMu.Unlock()
-	followupStartedLine := fmt.Sprintf("[task] started %s @docs_api", followupTask.ID)
 	followupCompletedLine := fmt.Sprintf("[task] completed %s @docs_api docs/guides/getting-started.md explains how to start using the docs toolkit", followupTask.ID)
 	if !containsChatTimelinePrefix(snapshot, "[tool] ls") ||
 		!containsChatTimelinePrefix(snapshot, "[tool] view") ||
 		!containsAllChatTimelineLines(snapshot,
-			"[task] started task_docs_root @docs_arch",
 			"[task] blocked task_docs_root @docs_arch waiting on focused API guide summary",
-			followupStartedLine,
 			followupCompletedLine,
 		) {
 		t.Fatalf("expected timeline lines not found, got %v", snapshot)
 	}
 	if !containsOrderedChatTimelineLines(snapshot,
-		"[task] started task_docs_root @docs_arch",
 		"[task] blocked task_docs_root @docs_arch waiting on focused API guide summary",
-		followupStartedLine,
 		followupCompletedLine,
 	) {
 		t.Fatalf("expected ordered task progression in timeline, got %v", snapshot)
 	}
-	if countExactChatTimelineLine(snapshot, followupStartedLine) != 1 {
-		t.Fatalf("expected follow-up task to start exactly once, got %v", snapshot)
+	if countExactChatTimelineLine(snapshot, followupCompletedLine) != 1 {
+		t.Fatalf("expected follow-up task to complete exactly once, got %v", snapshot)
 	}
-	if countExactChatTimelineLine(snapshot, fmt.Sprintf("[task] started %s @docs_arch", followupTask.ID)) != 0 {
-		t.Fatalf("expected blocked teammate not to be reused for follow-up task, got %v", snapshot)
+	if countExactChatTimelineLine(snapshot, fmt.Sprintf("[task] completed %s @docs_arch docs/guides/getting-started.md explains how to start using the docs toolkit", followupTask.ID)) != 0 {
+		t.Fatalf("expected blocked teammate not to complete the follow-up task, got %v", snapshot)
 	}
 	if containsAnyChatTimelineLine(snapshot, "[tool] background_task", "[tool] bash") {
 		t.Fatalf("expected docs exploration to use direct read tools instead of shell/background tools, got %v", snapshot)
@@ -1008,7 +1003,7 @@ func containsOrderedChatTimelineLines(lines []string, expected ...string) bool {
 	flattened := flattenChatTimelineLines(lines)
 	index := 0
 	for _, line := range flattened {
-		if strings.TrimSpace(line) == strings.TrimSpace(expected[index]) {
+		if chatTimelineLineEquals(line, expected[index]) {
 			index++
 			if index == len(expected) {
 				return true
@@ -1025,7 +1020,7 @@ func containsOrderedChatTimelinePrefixes(lines []string, prefixes ...string) boo
 	flattened := flattenChatTimelineLines(lines)
 	index := 0
 	for _, line := range flattened {
-		if strings.HasPrefix(strings.TrimSpace(line), strings.TrimSpace(prefixes[index])) {
+		if chatTimelineLineHasPrefix(line, prefixes[index]) {
 			index++
 			if index == len(prefixes) {
 				return true
@@ -1039,7 +1034,7 @@ func countExactChatTimelineLine(lines []string, expected string) int {
 	count := 0
 	expected = strings.TrimSpace(expected)
 	for _, line := range flattenChatTimelineLines(lines) {
-		if strings.TrimSpace(line) == expected {
+		if chatTimelineLineEquals(line, expected) {
 			count++
 		}
 	}
@@ -1049,7 +1044,7 @@ func countExactChatTimelineLine(lines []string, expected string) int {
 func containsAnyChatTimelineLine(lines []string, expected ...string) bool {
 	for _, want := range expected {
 		for _, line := range flattenChatTimelineLines(lines) {
-			if strings.TrimSpace(line) == strings.TrimSpace(want) {
+			if chatTimelineLineEquals(line, want) {
 				return true
 			}
 		}

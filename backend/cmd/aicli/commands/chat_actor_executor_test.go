@@ -28,7 +28,7 @@ func TestRenderAsyncTeamLaunchNotice_RendersForNewRunningTeam(t *testing.T) {
 	if len(rendered) != 1 {
 		t.Fatalf("expected exactly one rendered line, got %v", rendered)
 	}
-	if rendered[0] != "[team] team-docs 已在后台开始执行；我会继续接收进展，并在完成后自动总结结果。" {
+	if rendered[0] != "• [team] team-docs 已在后台开始执行；我会继续接收进展，并在完成后自动总结结果。" {
 		t.Fatalf("unexpected rendered line: %q", rendered[0])
 	}
 }

@@ -89,6 +89,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		}
 		fmt.Println("会话已加载")
 		printCurrentRuntimeSession(session)
+		if hasVisibleChatHistory(session) {
+			fmt.Println()
+			printVisibleChatHistory(session, "已加载历史会话")
+		}
 		return false
 	}
 	if strings.HasPrefix(cmdLower, "/title ") {
@@ -157,13 +161,8 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("提示: 已切换到普通模式")
 
 	case "/history", "/h":
-		fmt.Println("对话历史:")
-		for _, msg := range session.Messages {
-			if msg["role"] == "user" {
-				fmt.Printf("  你: %s\n", msg["content"])
-			} else {
-				fmt.Printf("  助手: %s\n", msg["content"])
-			}
+		if printVisibleChatHistory(session, "对话历史") == 0 {
+			fmt.Println("当前会话暂无历史消息")
 		}
 
 	case "/functions", "/catalog":
@@ -188,6 +187,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		}
 		fmt.Println("已恢复最近会话")
 		printCurrentRuntimeSession(session)
+		if hasVisibleChatHistory(session) {
+			fmt.Println()
+			printVisibleChatHistory(session, "已加载历史会话")
+		}
 
 	case "/yolo":
 		if session == nil {

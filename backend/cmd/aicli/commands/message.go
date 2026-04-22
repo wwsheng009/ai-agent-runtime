@@ -80,6 +80,7 @@ type RetryConfig struct {
 	FastRetryInterval time.Duration
 	SlowRetryInterval time.Duration
 	DisableRetries    bool
+	Streaming         bool // 为 true 时，成功(2xx)响应不读取 body，由调用方直接消费 resp.Body
 }
 
 type httpAttemptReport struct {
@@ -316,6 +317,17 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 			return nil, nil, report, err
 		}
 
+		// 流式请求：成功(2xx)响应不读取 body，由调用方直接消费 resp.Body
+		if retryCfg.Streaming && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			report.Attempts = append(report.Attempts, httpAttemptReport{
+				Attempt:    attempt + 1,
+				StatusCode: resp.StatusCode,
+				DurationMs: time.Since(attemptStart).Milliseconds(),
+			})
+			report.FinalStatusCode = resp.StatusCode
+			return resp, nil, report, nil
+		}
+
 		// 读取响应体
 		body, err = io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -396,8 +408,9 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 		return "", fmt.Errorf("用户中断")
 	}
 	ensureChatSystemPromptMessage(session)
+	executor := ensureChatExecutor(session)
 
-	if !session.NoInteractive {
+	if !session.NoInteractive && shouldShowInitialThinkingIndicator(session, executor) {
 		if session.Interaction != nil {
 			session.Interaction.StartThinking()
 		} else {
@@ -415,13 +428,26 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 		defer cancel()
 	}
 
-	response, err := ensureChatExecutor(session).Execute(ctx, session, userMessage)
+	response, err := executor.Execute(ctx, session, userMessage)
 	if session.Interaction != nil {
 		session.Interaction.ClearThinking()
 	} else if err != nil && !session.NoInteractive {
 		fmt.Print("\r   \r")
 	}
 	return response, err
+}
+
+func shouldShowInitialThinkingIndicator(session *ChatSession, executor aicliChatExecutor) bool {
+	if session == nil || session.NoInteractive {
+		return false
+	}
+	if session.LocalRuntimeHost != nil || session.ActorFirstReady {
+		return false
+	}
+	if _, ok := executor.(*aicliActorChatExecutor); ok {
+		return false
+	}
+	return true
 }
 
 // handleToolCalls 处理 Function Call

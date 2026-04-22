@@ -13,14 +13,15 @@ import (
 type ThemeType int
 
 const (
-	ThemeAuto ThemeType = iota // 自动检测
-	ThemeLight                 // 亮色模式
-	ThemeDark                  // 暗色模式
+	ThemeAuto  ThemeType = iota // 自动检测
+	ThemeLight                  // 亮色模式
+	ThemeDark                   // 暗色模式
 )
 
 // Theme 主题定义
 type Theme struct {
 	Type ThemeType
+	Name string
 
 	// 用户消息颜色
 	UserColor *color.Color
@@ -40,6 +41,27 @@ type Theme struct {
 
 	// 输出颜色
 	OutputColor *color.Color
+
+	// 次级内容颜色
+	SecondaryColor *color.Color
+
+	// 弱化辅助信息颜色
+	MutedColor *color.Color
+
+	// 元信息标签颜色
+	MetaLabelColor *color.Color
+
+	// 时间线/辅助提示颜色
+	TimelineColor *color.Color
+
+	// 工具相关颜色
+	ToolColor *color.Color
+
+	// 推理相关颜色
+	ReasoningColor *color.Color
+
+	// 审批/确认相关颜色
+	ApprovalColor *color.Color
 
 	// 错误颜色
 	ErrorColor *color.Color
@@ -83,7 +105,7 @@ func GetTheme(themeType ThemeType) *Theme {
 	themeMutex.Lock()
 	defer themeMutex.Unlock()
 
-	if currentTheme != nil && (themeType == ThemeAuto || currentTheme.Type == themeType) {
+	if currentTheme != nil && (themeType == ThemeAuto || currentTheme.Type == themeType) && currentTheme.Name == normalizeThemePresetName(currentThemeName) {
 		return currentTheme
 	}
 
@@ -114,31 +136,41 @@ func createTheme(themeType ThemeType) *Theme {
 	}
 
 	theme := &Theme{
-		Type:            actualType,
-		UserColor:       color.New(color.FgCyan, color.Bold),
-		UserIcon:        "👤",
-		AssistantColor:  color.New(color.FgGreen),
-		AssistantIcon:   "🤖",
-		SystemColor:     color.New(color.FgHiYellow),
-		SystemIcon:      "ℹ️",
-		CommandColor:    color.New(color.FgMagenta),
-		CommandIcon:     "❯",
-		OutputColor:     color.New(color.Reset),
-		ErrorColor:      color.New(color.FgRed, color.Bold),
-		ErrorIcon:       "❌",
-		WarningColor:    color.New(color.FgYellow, color.Bold),
-		WarningIcon:     "⚠️",
-		SuccessColor:    color.New(color.FgGreen, color.Bold),
-		SuccessIcon:     "✅",
-		InfoColor:       color.New(color.FgBlue),
-		InfoIcon:        "💡",
-		SeparatorColor:  color.New(color.FgHiBlack),
-		ProgressColor:   color.New(color.FgGreen),
-		ShellIcon:       "💻",
+		Type:             actualType,
+		Name:             normalizeThemePresetName(currentThemeName),
+		UserColor:        color.New(color.FgCyan, color.Bold),
+		UserIcon:         "👤",
+		AssistantColor:   color.New(color.FgGreen),
+		AssistantIcon:    "🤖",
+		SystemColor:      color.New(color.FgHiYellow),
+		SystemIcon:       "ℹ️",
+		CommandColor:     color.New(color.FgMagenta),
+		CommandIcon:      "❯",
+		OutputColor:      color.New(color.Reset),
+		SecondaryColor:   color.New(color.FgWhite),
+		MutedColor:       color.New(color.FgHiBlack),
+		MetaLabelColor:   color.New(color.FgHiBlack),
+		TimelineColor:    color.New(color.FgHiBlack),
+		ToolColor:        color.New(color.FgCyan, color.Bold),
+		ReasoningColor:   color.New(color.FgYellow),
+		ApprovalColor:    color.New(color.FgMagenta, color.Bold),
+		ErrorColor:       color.New(color.FgRed, color.Bold),
+		ErrorIcon:        "❌",
+		WarningColor:     color.New(color.FgYellow, color.Bold),
+		WarningIcon:      "⚠️",
+		SuccessColor:     color.New(color.FgGreen, color.Bold),
+		SuccessIcon:      "✅",
+		InfoColor:        color.New(color.FgBlue),
+		InfoIcon:         "💡",
+		SeparatorColor:   color.New(color.FgHiBlack),
+		ProgressColor:    color.New(color.FgGreen),
+		ShellIcon:        "💻",
 		BorderHorizontal: "═",
-		BorderVertical:  "║",
-		Separator:       "─",
+		BorderVertical:   "║",
+		Separator:        "─",
 	}
+
+	applyThemePreset(theme, theme.Name)
 
 	// 如果不支持颜色，禁用所有颜色
 	if !useColor {
@@ -155,6 +187,13 @@ func disableColors(theme *Theme) {
 	theme.SystemColor = color.New()
 	theme.CommandColor = color.New()
 	theme.OutputColor = color.New()
+	theme.SecondaryColor = color.New()
+	theme.MutedColor = color.New()
+	theme.MetaLabelColor = color.New()
+	theme.TimelineColor = color.New()
+	theme.ToolColor = color.New()
+	theme.ReasoningColor = color.New()
+	theme.ApprovalColor = color.New()
 	theme.ErrorColor = color.New()
 	theme.WarningColor = color.New()
 	theme.SuccessColor = color.New()
@@ -264,10 +303,10 @@ func (t *Theme) ColorizeInfo(text string) string {
 
 // Dimmed 变暗文本
 func (t *Theme) Dimmed(text string) string {
-	var dimColor *color.Color
-	// 两种模式都使用 FgHiBlack
-	dimColor = color.New(color.FgHiBlack)
-	return dimColor.Sprint(text)
+	if t == nil {
+		return text
+	}
+	return t.MutedColor.Sprint(text)
 }
 
 // GetTerminalWidth 获取终端宽度（用于自适应布局）

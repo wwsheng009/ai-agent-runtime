@@ -318,6 +318,33 @@ func TestToolDefinitionsFromSelection_SortsDefinitionsByName(t *testing.T) {
 	}
 }
 
+func TestToolDefinitionsFromSelection_PreservesMetadata(t *testing.T) {
+	selection := &aicliFunctionSelection{
+		Schemas: []map[string]interface{}{
+			{
+				"name":        "read_task_spec",
+				"description": "read task spec",
+				"parameters":  map[string]interface{}{"type": "object"},
+				"metadata": map[string]interface{}{
+					"availability":  "requires_active_team_run",
+					"defer_loading": true,
+				},
+			},
+		},
+	}
+
+	defs := toolDefinitionsFromSelection(selection)
+	if len(defs) != 1 {
+		t.Fatalf("expected 1 tool definition, got %d", len(defs))
+	}
+	if got := defs[0].Metadata["availability"]; got != "requires_active_team_run" {
+		t.Fatalf("expected availability metadata, got %#v", defs[0].Metadata)
+	}
+	if got := defs[0].Metadata["defer_loading"]; got != true {
+		t.Fatalf("expected defer_loading metadata, got %#v", defs[0].Metadata)
+	}
+}
+
 func TestToolDefinitionsToSchemas_SortsDefinitionsByName(t *testing.T) {
 	defs := []types.ToolDefinition{
 		{Name: "write", Description: "write file", Parameters: map[string]interface{}{"type": "object"}},
@@ -337,6 +364,35 @@ func TestToolDefinitionsToSchemas_SortsDefinitionsByName(t *testing.T) {
 	}
 	if joined := strings.Join(got, ","); joined != "bash,edit,write" {
 		t.Fatalf("expected stable schema order, got %q", joined)
+	}
+}
+
+func TestToolDefinitionsToSchemas_PreservesMetadata(t *testing.T) {
+	defs := []types.ToolDefinition{
+		{
+			Name:        "read_task_spec",
+			Description: "read task spec",
+			Parameters:  map[string]interface{}{"type": "object"},
+			Metadata: map[string]interface{}{
+				"availability":  "requires_active_team_run",
+				"defer_loading": true,
+			},
+		},
+	}
+
+	schemas := toolDefinitionsToSchemas(defs)
+	if len(schemas) != 1 {
+		t.Fatalf("expected 1 schema, got %d", len(schemas))
+	}
+	metadata, ok := schemas[0]["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected metadata map, got %#v", schemas[0]["metadata"])
+	}
+	if got := metadata["availability"]; got != "requires_active_team_run" {
+		t.Fatalf("expected availability metadata, got %#v", metadata)
+	}
+	if got := metadata["defer_loading"]; got != true {
+		t.Fatalf("expected defer_loading metadata, got %#v", metadata)
 	}
 }
 
@@ -843,6 +899,14 @@ func TestAICLIEventRenderer_ToolBatchUsesUnifiedInteractionRendering(t *testing.
 	})
 	renderer.Handle(runtimechatcore.ChatEvent{
 		Type:     runtimechatcore.EventTool,
+		Stage:    "tool_requested",
+		ToolName: "ls",
+		Arguments: map[string]interface{}{
+			"path": "docs",
+		},
+	})
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:     runtimechatcore.EventTool,
 		Stage:    "tool_result",
 		ToolName: "ls",
 		Arguments: map[string]interface{}{
@@ -867,22 +931,86 @@ func TestAICLIEventRenderer_ToolBatchUsesUnifiedInteractionRendering(t *testing.
 
 	rendered := output.String()
 	preludeIndex := strings.Index(rendered, "先说明一下。")
-	batchStartIndex := strings.Index(rendered, chatToolDivider("command start"))
-	toolDoneIndex := strings.Index(rendered, "[tool done] ls path=docs")
-	batchEndIndex := strings.LastIndex(rendered, chatToolDivider("command end"))
-	waitingIndex := strings.Index(rendered, "[thinking] 等待中...")
+	toolStartIndex := strings.Index(rendered, "• Running ls path=docs")
+	toolDoneIndex := strings.Index(rendered, "• Ran ls path=docs")
 	finalIndex := strings.Index(rendered, "最终答案。")
-	if preludeIndex == -1 || batchStartIndex == -1 || toolDoneIndex == -1 || batchEndIndex == -1 || waitingIndex == -1 || finalIndex == -1 {
-		t.Fatalf("expected buffered content, tool batch, waiting hint, and final answer in output, got %q", rendered)
+	if preludeIndex == -1 || toolStartIndex == -1 || toolDoneIndex == -1 || finalIndex == -1 {
+		t.Fatalf("expected buffered content, tool lines, and final answer in output, got %q", rendered)
 	}
-	if !(preludeIndex < batchStartIndex && batchStartIndex < toolDoneIndex && toolDoneIndex < batchEndIndex && batchEndIndex < waitingIndex && waitingIndex < finalIndex) {
-		t.Fatalf("expected tool batch rendering order to stay stable, got %q", rendered)
+	if !(preludeIndex < toolStartIndex && toolStartIndex < toolDoneIndex && toolDoneIndex < finalIndex) {
+		t.Fatalf("expected tool rendering order to stay stable, got %q", rendered)
+	}
+	if strings.Contains(rendered, "[tool] ls path=docs") || strings.Contains(rendered, "[tool done] ls path=docs") {
+		t.Fatalf("expected legacy tool labels to stay suppressed, got %q", rendered)
+	}
+	if strings.Contains(rendered, chatToolDivider("command start")) || strings.Contains(rendered, chatToolDivider("command end")) {
+		t.Fatalf("expected command dividers to stay suppressed, got %q", rendered)
 	}
 	if strings.Count(rendered, "先说明一下。") != 1 {
 		t.Fatalf("expected pre-tool assistant content once, got %q", rendered)
 	}
 	if strings.Count(rendered, "最终答案。") != 1 {
 		t.Fatalf("expected final assistant content once, got %q", rendered)
+	}
+}
+
+func TestAICLIEventRenderer_ShellToolUsesCompactCommandRendering(t *testing.T) {
+	session := &ChatSession{Stream: true}
+	session.Interaction = newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	session.Interaction.SetWriter(&output)
+
+	renderer := newAICLIEventRenderer(session)
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:    runtimechatcore.EventResult,
+		Content: "我先检查构建产物。",
+	})
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:  runtimechatcore.EventTool,
+		Stage: "batch_start",
+		Metadata: map[string]interface{}{
+			"call_count": 1,
+		},
+	})
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:     runtimechatcore.EventTool,
+		Stage:    "tool_requested",
+		ToolName: "execute_shell_command",
+		Arguments: map[string]interface{}{
+			"command": "Get-Item '.\\\\aicli-cachetest.exe' | Select-Object FullName,Length,LastWriteTime",
+		},
+	})
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:     runtimechatcore.EventTool,
+		Stage:    "tool_result",
+		ToolName: "execute_shell_command",
+		Arguments: map[string]interface{}{
+			"command": "Get-Item '.\\\\aicli-cachetest.exe' | Select-Object FullName,Length,LastWriteTime",
+		},
+		Output:  "FullName  Length LastWriteTime\n--------  ------ -------------\n.\\\\aicli-cachetest.exe 41346220 2026/4/22 20:39:05",
+		Success: true,
+	})
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:  runtimechatcore.EventTool,
+		Stage: "batch_end",
+		Metadata: map[string]interface{}{
+			"success_count": 1,
+			"error_count":   0,
+		},
+	})
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "• Running Get-Item '.\\\\aicli-cachetest.exe' | Select-Object FullName,Length,LastWriteTime") {
+		t.Fatalf("expected compact shell running line, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "• Ran Get-Item '.\\\\aicli-cachetest.exe' | Select-Object FullName,Length,LastWriteTime") {
+		t.Fatalf("expected compact shell completion line, got %q", rendered)
+	}
+	if strings.Contains(rendered, "[tool] execute_shell_command") || strings.Contains(rendered, "[tool done] execute_shell_command") {
+		t.Fatalf("expected execute_shell_command labels to stay suppressed, got %q", rendered)
+	}
+	if strings.Contains(rendered, chatToolDivider("command start")) || strings.Contains(rendered, chatToolDivider("command end")) {
+		t.Fatalf("expected command dividers to stay suppressed, got %q", rendered)
 	}
 }
 

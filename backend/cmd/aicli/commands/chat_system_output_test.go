@@ -3,6 +3,8 @@ package commands
 import (
 	"bytes"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
 func TestChatSystemOutputWriter_IndentsEachCompletedLine(t *testing.T) {
@@ -15,8 +17,8 @@ func TestChatSystemOutputWriter_IndentsEachCompletedLine(t *testing.T) {
 
 	rendered := output.String()
 	for _, expected := range []string{
-		"    [Manager] MCP 已启动: toolkit (工具: 13)",
-		"    [Manager] 加载工具失败: x",
+		ui.FormatAssistantSupplementBlock("[Manager] MCP 已启动: toolkit (工具: 13)"),
+		ui.FormatAssistantSupplementBlock("[Manager] 加载工具失败: x"),
 	} {
 		if !bytes.Contains([]byte(rendered), []byte(expected)) {
 			t.Fatalf("expected rendered output to contain %q, got %q", expected, rendered)

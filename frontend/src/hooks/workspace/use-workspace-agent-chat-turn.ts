@@ -43,6 +43,13 @@ type WorkspaceAgentChatTurnOptions = {
   workspacePath?: string;
 };
 
+export function shouldIgnoreTerminalStreamError(options: {
+  finalized: boolean;
+  aborted: boolean;
+}) {
+  return options.finalized || options.aborted;
+}
+
 export function useWorkspaceAgentChatTurn({
   onSessionTouched,
   selectedThread,
@@ -612,6 +619,14 @@ export function useWorkspaceAgentChatTurn({
               finalizeTurn(payload);
             },
             onErrorEvent: (payload) => {
+              if (
+                shouldIgnoreTerminalStreamError({
+                  finalized: turnFinalized,
+                  aborted: controller.signal.aborted,
+                })
+              ) {
+                return;
+              }
               receivedErrorEvent = true;
               const message =
                 typeof payload.message === "string" && payload.message.trim()
@@ -641,6 +656,14 @@ export function useWorkspaceAgentChatTurn({
       } catch (error) {
         if (controller.signal.aborted) {
           finalizeTurn({}, { stopped: true });
+          return;
+        }
+        if (
+          shouldIgnoreTerminalStreamError({
+            finalized: turnFinalized,
+            aborted: false,
+          })
+        ) {
           return;
         }
         const message = getErrorMessage(error, "agent chat stream failed");

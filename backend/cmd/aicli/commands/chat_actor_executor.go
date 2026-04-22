@@ -117,10 +117,10 @@ func humanizeActorExecutorError(session *ChatSession, err error) error {
 				details = append(details, "http_error="+snapshot.ErrorText)
 			}
 			if snapshot.RequestArtifactPath != "" {
-				details = append(details, "request_artifact="+snapshot.RequestArtifactPath)
+				details = append(details, "request_artifact="+resolveAbsoluteChatPath(snapshot.RequestArtifactPath))
 			}
 			if snapshot.ResponseArtifactPath != "" {
-				details = append(details, "response_artifact="+snapshot.ResponseArtifactPath)
+				details = append(details, "response_artifact="+resolveAbsoluteChatPath(snapshot.ResponseArtifactPath))
 			}
 			if snapshot.ResponsePreview != "" {
 				details = append(details, "response_preview="+truncateUTF8Bytes(strings.TrimSpace(snapshot.ResponsePreview), 512))
@@ -238,7 +238,7 @@ func renderAsyncTeamLaunchNotice(session *ChatSession, previousTeamID string) {
 		return
 	}
 	rendered := chatRuntimeTimelineEvent{
-		Line:     fmt.Sprintf("[team] %s 已在后台开始执行；我会继续接收进展，并在完成后自动总结结果。", currentTeamID),
+		Line:     prefixExecutionBullet(fmt.Sprintf("[team] %s 已在后台开始执行；我会继续接收进展，并在完成后自动总结结果。", currentTeamID)),
 		DedupKey: "team.started.notice:" + currentTeamID,
 	}
 	if session.RuntimeEventBridge.shouldRenderTimelineEvent(rendered) && session.RuntimeEventBridge.writeLine != nil {

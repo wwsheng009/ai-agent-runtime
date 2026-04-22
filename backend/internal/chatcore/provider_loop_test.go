@@ -174,7 +174,7 @@ func TestExecuteToolLoop_EmitsToolBatchEvents(t *testing.T) {
 		}
 		stages = append(stages, event.Stage)
 	}
-	if want := []string{"batch_start", "tool_result", "batch_end"}; !reflect.DeepEqual(stages, want) {
+	if want := []string{"batch_start", "tool_requested", "tool_result", "batch_end"}; !reflect.DeepEqual(stages, want) {
 		t.Fatalf("unexpected tool event stages: got %v want %v (events=%+v)", stages, want, events)
 	}
 }

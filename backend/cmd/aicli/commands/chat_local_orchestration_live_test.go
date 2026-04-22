@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fatih/color"
+	"github.com/joho/godotenv"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/fatih/color"
-	"github.com/joho/godotenv"
 )
 
 func TestAICLIChatActorExecutor_LiveAutoStartShowsTeamProgressTimeline(t *testing.T) {
@@ -162,7 +162,6 @@ func TestAICLIChatActorExecutor_LiveAutoStartShowsTeamProgressTimeline(t *testin
 			return cloned
 		}()
 		if containsAllChatTimelineLines(snapshot,
-			fmt.Sprintf("[task] started %s @planner", taskID),
 			fmt.Sprintf("[progress] planner -> lead %s Started task: Immediate structured completion", taskID),
 			fmt.Sprintf("[team] completed %s status=done", teamID),
 		) && containsChatTimelinePrefix(snapshot, fmt.Sprintf("[team summary] %s ", teamID)) {
@@ -343,8 +342,7 @@ func TestAICLIChatActorExecutor_LiveDocsPromptCreatesTeamAndUsesLocalReadFlow(t 
 			copy(cloned, lines)
 			return cloned
 		}()
-		if containsChatTimelinePrefix(snapshot, "[task] started ") &&
-			containsAnyChatTimelineLine(snapshot, "[tool] ls", "[tool] view", "[tool] glob", "[tool] grep") {
+		if containsAnyChatTimelineLine(snapshot, "[tool] ls", "[tool] view", "[tool] glob", "[tool] grep") {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -605,7 +603,7 @@ func TestAICLIChatActorExecutor_LiveDocsPromptClearsPromptBeforeAsyncTimeline(t 
 	deadline := time.Now().Add(45 * time.Second)
 	for {
 		rendered := capture.String()
-		if (strings.Contains(rendered, "[tool] ") || strings.Contains(rendered, "[task] ") || strings.Contains(rendered, "[team summary] ")) &&
+		if (strings.Contains(rendered, "• Running ") || strings.Contains(rendered, "• Ran ") || strings.Contains(rendered, "[task] ") || strings.Contains(rendered, "[team summary] ")) &&
 			strings.Contains(rendered, "你>") {
 			break
 		}
@@ -620,8 +618,8 @@ func TestAICLIChatActorExecutor_LiveDocsPromptClearsPromptBeforeAsyncTimeline(t 
 	for index, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.Contains(trimmed, "[thinking]") ||
-			strings.Contains(trimmed, "[tool]") ||
-			strings.Contains(trimmed, "[tool done]") ||
+			strings.Contains(trimmed, "• Running ") ||
+			strings.Contains(trimmed, "• Ran ") ||
 			strings.Contains(trimmed, "[task]") ||
 			strings.Contains(trimmed, "[team]") ||
 			strings.Contains(trimmed, "[team summary]") {
