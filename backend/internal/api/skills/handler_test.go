@@ -703,8 +703,8 @@ func TestAgentChat_SessionHistoryAutoCompactsBeforeLLMFallback(t *testing.T) {
 	updated, err := sessionManager.GetSession(context.Background(), session.ID)
 	require.NoError(t, err)
 	require.Len(t, updated.GetMessages(), 6)
-	require.Equal(t, "compaction", updated.GetMessages()[1].Metadata["context_stage"])
-	assert.NotContains(t, updated.GetMessages()[1].Content, "older assistant context older assistant context")
+	require.Equal(t, "compaction", updated.GetMessages()[3].Metadata["context_stage"])
+	assert.NotContains(t, updated.GetMessages()[3].Content, "older assistant context older assistant context")
 }
 
 func TestAgentChat_ErrorResponseIncludesRequestID(t *testing.T) {
@@ -1142,6 +1142,15 @@ func TestGetRuntimeTrace_ReturnsEventsForTrace(t *testing.T) {
 			},
 		},
 	})
+	handler.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:    "llm.request.started",
+		TraceID: traceID,
+		Payload: map[string]interface{}{
+			"prompt_layout_length": 88,
+			"prompt_layers":        []string{"base/system", "developer/developer"},
+			"prompt_sources":       []string{"system.md", "tools.md"},
+		},
+	})
 
 	traceReq := httptest.NewRequest(http.MethodGet, "/api/runtime/traces/"+traceID+"?limit=20", nil)
 	traceReq.Header.Set("X-Skills-Admin-Token", "secret-token")
@@ -1168,6 +1177,19 @@ func TestGetRuntimeTrace_ReturnsEventsForTrace(t *testing.T) {
 	assert.Equal(t, float64(1), provenance["profile_resource_count"])
 	assert.Equal(t, float64(1), provenance["profile_memory_count"])
 	assert.Contains(t, provenance["profile_resource_labels"].([]interface{}), "memory:memory.json")
+	prompt := summary["prompt"].(map[string]interface{})
+	assert.GreaterOrEqual(t, prompt["layouts_observed"], float64(1))
+	assert.GreaterOrEqual(t, prompt["instruction_chars"], float64(88))
+	assert.GreaterOrEqual(t, prompt["source_count"], float64(2))
+	assert.Contains(t, prompt["sources"].([]interface{}), "system.md")
+	assert.Contains(t, prompt["sources"].([]interface{}), "tools.md")
+	promptLayers := prompt["layers"].(map[string]interface{})
+	assert.GreaterOrEqual(t, promptLayers["base/system"], float64(1))
+	assert.GreaterOrEqual(t, promptLayers["developer/developer"], float64(1))
+	topLevelPrompt := tracePayload["prompt"].(map[string]interface{})
+	assert.GreaterOrEqual(t, topLevelPrompt["layouts_observed"], float64(1))
+	assert.GreaterOrEqual(t, topLevelPrompt["instruction_chars"], float64(88))
+	assert.GreaterOrEqual(t, topLevelPrompt["source_count"], float64(2))
 }
 
 func TestGetRuntimeTrace_SummarizesPatchDecisionAudit(t *testing.T) {
@@ -1335,6 +1357,16 @@ func TestGetRuntimeTraces_ReturnsRecentSummaries(t *testing.T) {
 			},
 		},
 	})
+	bus.Publish(runtimeevents.Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-beta",
+		Payload: map[string]interface{}{
+			"prompt_layout_summary": "layers=base/system -> user/developer | sources=system.md, AGENTS.md",
+			"prompt_layout_length":  128,
+			"prompt_layers":         []string{"base/system", "user/developer"},
+			"prompt_sources":        []string{"system.md", "AGENTS.md"},
+		},
+	})
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1354,7 +1386,7 @@ func TestGetRuntimeTraces_ReturnsRecentSummaries(t *testing.T) {
 	require.Len(t, traces, 1)
 	trace := traces[0].(map[string]interface{})
 	assert.Equal(t, "trace-beta", trace["trace_id"])
-	assert.Equal(t, float64(6), trace["event_count"])
+	assert.Equal(t, float64(7), trace["event_count"])
 	assert.Contains(t, trace["mcp_names"].([]interface{}), "echo-test")
 	assert.Contains(t, trace["transport_types"].([]interface{}), "websocket")
 	governance := trace["governance"].(map[string]interface{})
@@ -1382,6 +1414,15 @@ func TestGetRuntimeTraces_ReturnsRecentSummaries(t *testing.T) {
 	kinds := provenance["profile_resource_kinds"].(map[string]interface{})
 	assert.Equal(t, float64(1), kinds["memory"])
 	assert.Equal(t, float64(1), kinds["notes"])
+	prompt := trace["prompt"].(map[string]interface{})
+	assert.Equal(t, float64(1), prompt["layouts_observed"])
+	assert.Equal(t, float64(128), prompt["instruction_chars"])
+	assert.Equal(t, float64(2), prompt["source_count"])
+	assert.Contains(t, prompt["sources"].([]interface{}), "AGENTS.md")
+	assert.Contains(t, prompt["sources"].([]interface{}), "system.md")
+	promptLayers := prompt["layers"].(map[string]interface{})
+	assert.Equal(t, float64(1), promptLayers["base/system"])
+	assert.Equal(t, float64(1), promptLayers["user/developer"])
 }
 
 func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
@@ -1458,6 +1499,15 @@ func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
 			},
 		},
 	})
+	bus.Publish(runtimeevents.Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-beta",
+		Payload: map[string]interface{}{
+			"prompt_layout_length": 96,
+			"prompt_layers":        []string{"base/system", "developer/developer"},
+			"prompt_sources":       []string{"system.md"},
+		},
+	})
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1473,7 +1523,7 @@ func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	stats := payload["stats"].(map[string]interface{})
 	assert.Equal(t, float64(2), stats["trace_count"])
-	assert.Equal(t, float64(9), stats["event_count"])
+	assert.Equal(t, float64(10), stats["event_count"])
 
 	eventTypes := stats["event_types"].(map[string]interface{})
 	assert.Equal(t, float64(1), eventTypes["tool.requested"])
@@ -1515,6 +1565,14 @@ func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
 	assert.Equal(t, float64(1), provenance["profile_resource_count"])
 	assert.Equal(t, float64(1), provenance["profile_memory_count"])
 	assert.Contains(t, provenance["profile_resource_labels"].([]interface{}), "memory:memory.json")
+	prompt := stats["prompt"].(map[string]interface{})
+	assert.Equal(t, float64(1), prompt["layouts_observed"])
+	assert.Equal(t, float64(96), prompt["instruction_chars"])
+	assert.Equal(t, float64(1), prompt["source_count"])
+	assert.Contains(t, prompt["sources"].([]interface{}), "system.md")
+	promptLayers := prompt["layers"].(map[string]interface{})
+	assert.Equal(t, float64(1), promptLayers["base/system"])
+	assert.Equal(t, float64(1), promptLayers["developer/developer"])
 
 	latestTraceIDs := stats["latest_trace_ids"].([]interface{})
 	require.Len(t, latestTraceIDs, 2)
@@ -2015,12 +2073,58 @@ func TestStreamLLMChat_AttachesSessionMetadataForPromptCaching(t *testing.T) {
 		"",
 		UsageScope{},
 		0,
+		"",
 		nil,
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, provider.requests)
 	require.NotNil(t, provider.requests[0].Metadata)
 	assert.Equal(t, session.ID, provider.requests[0].Metadata["session_id"])
+}
+
+func TestStreamLLMChat_PublishesPromptLayoutRuntimeEvents(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	provider := &testLLMProvider{name: "test-model", content: "hello from llm"}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
+	require.NoError(t, runtime.RegisterProvider("test-model", provider))
+	handler.SetLLMRuntime(runtime)
+
+	session := chat.NewSession("user-1")
+	recorder := httptest.NewRecorder()
+	err := handler.streamLLMChat(
+		context.Background(),
+		recorder,
+		session,
+		"agent-1",
+		"test-model",
+		"hello",
+		[]types.Message{
+			*types.NewSystemMessage("Base prompt."),
+			*types.NewUserMessage("hello"),
+		},
+		"",
+		nil,
+		false,
+		nil,
+		"",
+		UsageScope{},
+		0,
+		"trace-stream",
+		nil,
+	)
+	require.NoError(t, err)
+
+	events := handler.getRuntimeEventBus().Trace("trace-stream", 10)
+	require.Len(t, events, 2)
+	assert.Equal(t, "llm.request.started", events[0].Type)
+	assert.Equal(t, "llm.request.finished", events[1].Type)
+	assert.Equal(t, true, events[1].Payload["success"])
+
+	preview, _ := events[0].Payload["prompt_layout_summary"].(string)
+	assert.Contains(t, preview, "layers=unknown/system")
+	length, _ := events[0].Payload["prompt_layout_length"].(int)
+	assert.Greater(t, length, 0)
+	assert.Equal(t, []string{"unknown/system"}, events[0].Payload["prompt_layers"])
 }
 
 func TestAgentChat_ProfileAddsContextPackLayerToRuntimeSummary(t *testing.T) {

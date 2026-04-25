@@ -1562,7 +1562,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		if routeAttempted {
 			fallbackReason = "no_matching_skill"
 		}
-		if err := h.streamLLMChat(ctx, w, session, a.GetConfig().Name, agentModel, lastMessage, chatMessages, types.ResolveReasoningEffort(req.ReasoningEffort), types.ResolveThinkingConfig(req.Thinking), routeAttempted, routeCandidates, fallbackReason, usageScope, estimatedPromptTokens, planningPayload); err != nil {
+		if err := h.streamLLMChat(ctx, w, session, a.GetConfig().Name, agentModel, lastMessage, chatMessages, types.ResolveReasoningEffort(req.ReasoningEffort), types.ResolveThinkingConfig(req.Thinking), routeAttempted, routeCandidates, fallbackReason, usageScope, estimatedPromptTokens, requestTraceID, planningPayload); err != nil {
 			return
 		}
 		return
@@ -5866,6 +5866,32 @@ func defaultAgentModel(runtime *llm.LLMRuntime) string {
 	return providers[0]
 }
 
+func totalMessageContentChars(messages []types.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += len(strings.TrimSpace(msg.Content))
+	}
+	return total
+}
+
+func totalMessageContentTokens(messages []types.Message, runtime *llm.LLMRuntime, model string) int {
+	if runtime == nil {
+		return 0
+	}
+	provider, err := runtime.GetProvider(model)
+	if err != nil || provider == nil {
+		return 0
+	}
+	total := 0
+	for _, msg := range messages {
+		content := strings.TrimSpace(msg.Content)
+		if content != "" {
+			total += provider.CountTokens(content)
+		}
+	}
+	return total
+}
+
 func defaultAgentProvider(runtime *llm.LLMRuntime) string {
 	if runtime == nil {
 		return ""
@@ -5991,7 +6017,7 @@ func (h *Handler) writeJSON(w http.ResponseWriter, statusCode int, data interfac
 	json.NewEncoder(w).Encode(data)
 }
 
-func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, session *chat.Session, agentID, modelName, userPrompt string, messages []types.Message, reasoningEffort string, thinking *types.ThinkingConfig, routeAttempted bool, routeCandidates []*skill.RouteResult, fallback string, usageScope UsageScope, estimatedPromptTokens int, planningPayload map[string]interface{}) error {
+func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, session *chat.Session, agentID, modelName, userPrompt string, messages []types.Message, reasoningEffort string, thinking *types.ThinkingConfig, routeAttempted bool, routeCandidates []*skill.RouteResult, fallback string, usageScope UsageScope, estimatedPromptTokens int, traceID string, planningPayload map[string]interface{}) error {
 	model := strings.TrimSpace(modelName)
 	if model == "" {
 		model = defaultAgentModel(h.llmRuntime)
@@ -5999,9 +6025,54 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 	metadata := map[string]interface{}{
 		"session_id": sessionID(session),
 	}
+	promptLayoutPreview := ""
+	promptLayoutLength := 0
+	instructionTokens := 0
+	var promptLayoutLayers []string
+	var promptLayoutSources []string
 	if layout := runtimeprompt.RenderInstructionMessagesLayout(messages); layout != "" {
 		metadata["prompt_layout"] = layout
 	}
+	var tokenCountFunc func(string) int
+	if provider, pErr := h.llmRuntime.GetProvider(model); pErr == nil && provider != nil {
+		tokenCountFunc = provider.CountTokens
+	}
+	layoutInfo := runtimeprompt.SummarizeInstructionMessagesWithTokens(messages, tokenCountFunc)
+	if layoutInfo.Summary != "" {
+		promptLayoutPreview = layoutInfo.Summary
+		promptLayoutLength = layoutInfo.InstructionChars
+		instructionTokens = layoutInfo.InstructionTokens
+		promptLayoutLayers = append([]string(nil), layoutInfo.Layers...)
+		promptLayoutSources = append([]string(nil), layoutInfo.Sources...)
+	}
+	requestPayload := map[string]interface{}{
+		"session_id":    sessionID(session),
+		"agent_id":      agentID,
+		"model":         model,
+		"message_count": len(messages),
+	}
+	if promptLayoutPreview != "" {
+		requestPayload["prompt_layout_summary"] = promptLayoutPreview
+	}
+	if promptLayoutLength > 0 {
+		requestPayload["prompt_layout_length"] = promptLayoutLength
+	}
+	if totalMessageChars := totalMessageContentChars(messages); totalMessageChars > 0 {
+		requestPayload["total_message_chars"] = totalMessageChars
+	}
+	if totalMessageTokens := totalMessageContentTokens(messages, h.llmRuntime, model); totalMessageTokens > 0 {
+		requestPayload["total_tokens"] = totalMessageTokens
+	}
+	if instructionTokens > 0 {
+		requestPayload["instruction_tokens"] = instructionTokens
+	}
+	if len(promptLayoutLayers) > 0 {
+		requestPayload["prompt_layers"] = promptLayoutLayers
+	}
+	if len(promptLayoutSources) > 0 {
+		requestPayload["prompt_sources"] = promptLayoutSources
+	}
+	h.publishSessionRuntimeEvent("llm.request.started", traceID, sessionID(session), requestPayload)
 	stream, err := h.llmRuntime.Stream(ctx, &llm.LLMRequest{
 		Model:           model,
 		Messages:        messages,
@@ -6013,6 +6084,11 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 		Metadata:        metadata,
 	})
 	if err != nil {
+		h.publishSessionRuntimeEvent("llm.request.finished", traceID, sessionID(session), map[string]interface{}{
+			"model":   model,
+			"success": false,
+			"error":   err.Error(),
+		})
 		h.writeError(w, http.StatusInternalServerError, err)
 		return err
 	}
@@ -6073,6 +6149,11 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 			emitter.Emit(streamEventName(chunk.Type), payload)
 			emitter.Emit("chunk", payload)
 		case llm.EventTypeError:
+			h.publishSessionRuntimeEvent("llm.request.finished", traceID, sessionID(session), map[string]interface{}{
+				"model":   model,
+				"success": false,
+				"error":   chunk.Error,
+			})
 			emitter.Emit("error", map[string]interface{}{
 				"index":   chunkIndex,
 				"message": chunk.Error,
@@ -6127,6 +6208,10 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 			buildWorkspaceEvidenceMetadata(resultPayload),
 		)
 	}
+	h.publishSessionRuntimeEvent("llm.request.finished", traceID, sessionID(session), map[string]interface{}{
+		"model":   model,
+		"success": true,
+	})
 	emitter.Emit("orchestration", resultPayload["orchestration"])
 	if planningPayload != nil {
 		emitter.Emit("planning", planningPayload)
@@ -7685,8 +7770,21 @@ func (h *Handler) GetRuntimeTrace(w http.ResponseWriter, r *http.Request) {
 		"approvals_with_ticket": 0,
 		"policies":              map[string]int{},
 	}
+	promptSummary := map[string]interface{}{
+		"layouts_observed":  0,
+		"instruction_chars": 0,
+		"total_chars":       0,
+		"instruction_tokens": 0,
+		"total_tokens":      0,
+		"layers":            map[string]int{},
+		"sources":           []string{},
+		"source_count":      0,
+	}
 	if summaryGovernance, ok := summary["governance"].(map[string]interface{}); ok {
 		patchGovernance = patchGovernanceSummaryFromMap(summaryGovernance)
+	}
+	if summaryPrompt, ok := summary["prompt"].(map[string]interface{}); ok {
+		promptSummary = promptSummaryFromMap(summaryPrompt)
 	}
 	payload := map[string]interface{}{
 		"trace_id":         traceID,
@@ -7694,6 +7792,7 @@ func (h *Handler) GetRuntimeTrace(w http.ResponseWriter, r *http.Request) {
 		"events":           events,
 		"summary":          summary,
 		"patch_governance": patchGovernance,
+		"prompt":           promptSummary,
 		"team_count":       countTeamIDsFromSummary(summary),
 		"filters": map[string]interface{}{
 			"session_id": strings.TrimSpace(r.URL.Query().Get("session_id")),
@@ -8092,6 +8191,16 @@ func summarizeRuntimeTrace(events []runtimeevents.Event) map[string]interface{} 
 			"profile_notes_count":      0,
 			"profile_resource_labels":  []string{},
 		},
+		"prompt": map[string]interface{}{
+			"layouts_observed":  0,
+			"instruction_chars": 0,
+			"total_chars":       0,
+			"instruction_tokens": 0,
+			"total_tokens":      0,
+			"layers":            map[string]int{},
+			"sources":           []string{},
+			"source_count":      0,
+		},
 		"patch_approval_tickets": []string{},
 		"started_at":             nil,
 		"ended_at":               nil,
@@ -8142,6 +8251,16 @@ func summarizeRuntimeTrace(events []runtimeevents.Event) map[string]interface{} 
 		"profile_notes_count":      0,
 		"profile_resource_labels":  []string{},
 	}
+	prompt := map[string]interface{}{
+		"layouts_observed":  0,
+		"instruction_chars": 0,
+		"total_chars":       0,
+		"instruction_tokens": 0,
+		"total_tokens":      0,
+		"layers":            map[string]int{},
+		"sources":           []string{},
+		"source_count":      0,
+	}
 	startedAt := events[0].Timestamp
 	endedAt := events[len(events)-1].Timestamp
 
@@ -8165,6 +8284,7 @@ func summarizeRuntimeTrace(events []runtimeevents.Event) map[string]interface{} 
 		applyTraceGovernanceEvent(governance, tickets, event)
 		applyTraceExecutionEvent(execution, event)
 		applyTraceProvenanceEvent(provenance, event)
+		applyTracePromptEvent(prompt, event)
 	}
 
 	summary["event_types"] = eventTypes
@@ -8174,6 +8294,7 @@ func summarizeRuntimeTrace(events []runtimeevents.Event) map[string]interface{} 
 	summary["execution"] = execution
 	summary["governance"] = governance
 	summary["provenance"] = provenance
+	summary["prompt"] = prompt
 	summary["patch_approval_tickets"] = sortedStringKeys(tickets)
 	summary["started_at"] = startedAt
 	summary["ended_at"] = endedAt
@@ -8305,6 +8426,42 @@ func applyTraceProvenanceEvent(provenance map[string]interface{}, event runtimee
 	refreshTraceProvenanceDisplay(provenance)
 }
 
+func applyTracePromptEvent(prompt map[string]interface{}, event runtimeevents.Event) {
+	if len(prompt) == 0 {
+		return
+	}
+	layers := map[string]int{}
+	switch typed := prompt["layers"].(type) {
+	case map[string]int:
+		layers = cloneIntMap(typed)
+	case map[string]interface{}:
+		layers = make(map[string]int, len(typed))
+		for key, value := range typed {
+			switch count := value.(type) {
+			case int:
+				layers[key] = count
+			case float64:
+				layers[key] = int(count)
+			}
+		}
+	}
+	summary := runtimeevents.PromptView{
+		LayoutsObserved:   intMapValueAny(prompt, "layouts_observed"),
+		InstructionChars:  intMapValueAny(prompt, "instruction_chars"),
+		TotalChars:        intMapValueAny(prompt, "total_chars"),
+		InstructionTokens: intMapValueAny(prompt, "instruction_tokens"),
+		TotalTokens:       intMapValueAny(prompt, "total_tokens"),
+		Layers:            layers,
+		Sources:           stringSliceValueAny(prompt["sources"]),
+		SourceCount:       intMapValueAny(prompt, "source_count"),
+	}
+	runtimeevents.ApplyPromptEventForAPI(&summary, event)
+	built := buildPromptSummaryFromView(summary)
+	for key, value := range built {
+		prompt[key] = value
+	}
+}
+
 func sortedStringKeys(values map[string]bool) []string {
 	if len(values) == 0 {
 		return []string{}
@@ -8350,6 +8507,30 @@ func cloneIntMap(values map[string]int) map[string]int {
 	return cloned
 }
 
+func cloneIntMapAny(value interface{}) map[string]int {
+	switch typed := value.(type) {
+	case map[string]int:
+		return cloneIntMap(typed)
+	case map[string]interface{}:
+		cloned := make(map[string]int, len(typed))
+		for key, raw := range typed {
+			switch count := raw.(type) {
+			case int:
+				cloned[key] = count
+			case int32:
+				cloned[key] = int(count)
+			case int64:
+				cloned[key] = int(count)
+			case float64:
+				cloned[key] = int(count)
+			}
+		}
+		return cloned
+	default:
+		return map[string]int{}
+	}
+}
+
 func buildProvenanceSummaryFromView(view runtimeevents.ProvenanceView) map[string]interface{} {
 	return map[string]interface{}{
 		"profile_context_injected": view.ProfileContextInjected,
@@ -8360,6 +8541,19 @@ func buildProvenanceSummaryFromView(view runtimeevents.ProvenanceView) map[strin
 		"profile_memory_count":     view.ProfileMemoryCount,
 		"profile_notes_count":      view.ProfileNotesCount,
 		"profile_resource_labels":  append([]string(nil), view.ProfileResourceLabels...),
+	}
+}
+
+func buildPromptSummaryFromView(view runtimeevents.PromptView) map[string]interface{} {
+	return map[string]interface{}{
+		"layouts_observed":  view.LayoutsObserved,
+		"instruction_chars": view.InstructionChars,
+		"total_chars":       view.TotalChars,
+		"instruction_tokens": view.InstructionTokens,
+		"total_tokens":      view.TotalTokens,
+		"layers":            cloneIntMap(view.Layers),
+		"sources":           append([]string(nil), view.Sources...),
+		"source_count":      view.SourceCount,
 	}
 }
 
@@ -8469,6 +8663,31 @@ func patchGovernanceSummaryFromMap(governance map[string]interface{}) map[string
 		"approved_override":     governance["patch_approved_override"],
 		"approvals_with_ticket": governance["patch_approvals_with_ticket"],
 		"policies":              governance["patch_policies"],
+	}
+}
+
+func promptSummaryFromMap(prompt map[string]interface{}) map[string]interface{} {
+	if len(prompt) == 0 {
+		return map[string]interface{}{
+			"layouts_observed":  0,
+			"instruction_chars": 0,
+			"total_chars":       0,
+			"instruction_tokens": 0,
+			"total_tokens":      0,
+			"layers":            map[string]int{},
+			"sources":           []string{},
+			"source_count":      0,
+		}
+	}
+	return map[string]interface{}{
+		"layouts_observed":  intMapValueAny(prompt, "layouts_observed"),
+		"instruction_chars": intMapValueAny(prompt, "instruction_chars"),
+		"total_chars":       intMapValueAny(prompt, "total_chars"),
+		"instruction_tokens": intMapValueAny(prompt, "instruction_tokens"),
+		"total_tokens":      intMapValueAny(prompt, "total_tokens"),
+		"layers":            cloneIntMapAny(prompt["layers"]),
+		"sources":           stringSliceValueAny(prompt["sources"]),
+		"source_count":      intMapValueAny(prompt, "source_count"),
 	}
 }
 

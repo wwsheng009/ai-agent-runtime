@@ -73,6 +73,32 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	}); got != "" {
 		t.Fatalf("unexpected repeated llm started tool availability render: %q", got)
 	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-1",
+		Payload: map[string]interface{}{
+			"step":                  3,
+			"prompt_layout_summary": "layers=base/system -> developer/developer | sources=system.md, tools.md",
+			"prompt_layout_length":  132,
+			"total_message_chars":   2048,
+			"instruction_tokens":    33,
+			"total_tokens":          512,
+		},
+	}); got != "[prompt] layers=base/system -> developer/developer | sources=system.md, tools.md (instruction 33 / total 512 tokens, 132 / 2048 chars)" {
+		t.Fatalf("unexpected llm started prompt layout render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-1",
+		Payload: map[string]interface{}{
+			"step":                  3,
+			"prompt_layout_summary": "layers=base/system -> developer/developer | sources=system.md, tools.md",
+			"prompt_layout_length":  132,
+			"instruction_tokens":    33,
+		},
+	}); got != "[prompt] layers=base/system -> developer/developer | sources=system.md, tools.md (33 tokens, 132 chars)" {
+		t.Fatalf("unexpected llm started prompt layout render without total: %q", got)
+	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestFinished, TraceID: "trace-1", Payload: map[string]interface{}{"success": true}}); got != "" {
 		t.Fatalf("expected successful llm finished render to be suppressed, got %q", got)
 	}

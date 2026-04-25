@@ -435,9 +435,27 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	promptLayoutSummary := ""
 	promptLayoutLength := 0
+	totalMessageChars := 0
+	instructionTokens := 0
+	totalMessageTokens := 0
+	var promptLayoutLayers []string
+	var promptLayoutSources []string
 	if layout := runtimeprompt.RenderInstructionMessagesLayout(managedHistory); layout != "" {
 		req.Metadata["prompt_layout"] = layout
-		promptLayoutSummary, promptLayoutLength = summarizePromptLayoutForEvent(layout)
+	}
+	var tokenCountFunc func(string) int
+	if provider, pErr := loop.llmRuntime.GetProvider(req.Provider); pErr == nil && provider != nil {
+		tokenCountFunc = provider.CountTokens
+	}
+	layoutInfo := summarizePromptLayoutForEvent(managedHistory, tokenCountFunc)
+	if layoutInfo.Summary != "" {
+		promptLayoutSummary = layoutInfo.Summary
+		promptLayoutLength = layoutInfo.InstructionChars
+		totalMessageChars = layoutInfo.TotalChars
+		instructionTokens = layoutInfo.InstructionTokens
+		totalMessageTokens = layoutInfo.TotalTokens
+		promptLayoutLayers = append([]string(nil), layoutInfo.Layers...)
+		promptLayoutSources = append([]string(nil), layoutInfo.Sources...)
 	}
 	if outputDir := generatedImageOutputDirForAgentSession(loop.agent, sessionID); outputDir != "" {
 		req.Metadata[llm.MetadataKeyGeneratedImageOutputDir] = outputDir
@@ -505,6 +523,21 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	if promptLayoutLength > 0 {
 		requestPayload["prompt_layout_length"] = promptLayoutLength
+	}
+	if totalMessageChars > 0 {
+		requestPayload["total_message_chars"] = totalMessageChars
+	}
+	if instructionTokens > 0 {
+		requestPayload["instruction_tokens"] = instructionTokens
+	}
+	if totalMessageTokens > 0 {
+		requestPayload["total_tokens"] = totalMessageTokens
+	}
+	if len(promptLayoutLayers) > 0 {
+		requestPayload["prompt_layers"] = promptLayoutLayers
+	}
+	if len(promptLayoutSources) > 0 {
+		requestPayload["prompt_sources"] = promptLayoutSources
 	}
 	if availability := summarizeToolAvailability(req.Tools); len(availability) > 0 {
 		req.Metadata["tool_availability"] = cloneInterfaceMap(availability)

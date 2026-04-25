@@ -76,6 +76,17 @@ type ProvenanceView struct {
 	ProfileResourceLabels  []string       `json:"profile_resource_labels,omitempty"`
 }
 
+type PromptView struct {
+	LayoutsObserved  int            `json:"layouts_observed"`
+	InstructionChars int            `json:"instruction_chars"`
+	TotalChars       int            `json:"total_chars"`
+	InstructionTokens int           `json:"instruction_tokens"`
+	TotalTokens      int            `json:"total_tokens"`
+	Layers           map[string]int `json:"layers"`
+	Sources          []string       `json:"sources,omitempty"`
+	SourceCount      int            `json:"source_count"`
+}
+
 // TraceSummary 表示一个 trace 的聚合摘要。
 type TraceSummary struct {
 	TraceID              string         `json:"trace_id"`
@@ -92,6 +103,7 @@ type TraceSummary struct {
 	Governance           GovernanceView `json:"governance"`
 	Execution            ExecutionView  `json:"execution"`
 	Provenance           ProvenanceView `json:"provenance"`
+	Prompt               PromptView     `json:"prompt"`
 	StartedAt            time.Time      `json:"started_at"`
 	EndedAt              time.Time      `json:"ended_at"`
 }
@@ -126,6 +138,7 @@ type TraceStats struct {
 	Governance     GovernanceView `json:"governance"`
 	Execution      ExecutionView  `json:"execution"`
 	Provenance     ProvenanceView `json:"provenance"`
+	Prompt         PromptView     `json:"prompt"`
 	LatestTraceIDs []string       `json:"latest_trace_ids,omitempty"`
 	StartedAt      time.Time      `json:"started_at"`
 	EndedAt        time.Time      `json:"ended_at"`
@@ -343,6 +356,9 @@ func (b *Bus) RecentTraces(filter TraceFilter) []TraceSummary {
 					Provenance: ProvenanceView{
 						ProfileResourceKinds: make(map[string]int),
 					},
+					Prompt: PromptView{
+						Layers: make(map[string]int),
+					},
 					StartedAt: event.Timestamp,
 					EndedAt:   event.Timestamp,
 				},
@@ -383,6 +399,7 @@ func (b *Bus) RecentTraces(filter TraceFilter) []TraceSummary {
 		applyGovernanceEvent(&item.summary.Governance, event)
 		applyExecutionEvent(&item.summary.Execution, event)
 		applyProvenanceEvent(&item.summary.Provenance, event)
+		applyPromptEvent(&item.summary.Prompt, event)
 		if mcpName, ok := event.Payload["mcp_name"].(string); ok && strings.TrimSpace(mcpName) != "" {
 			item.mcpSet[strings.TrimSpace(mcpName)] = true
 		}
@@ -445,6 +462,9 @@ func (b *Bus) TraceStats(filter TraceFilter) TraceStats {
 		},
 		Provenance: ProvenanceView{
 			ProfileResourceKinds: make(map[string]int),
+		},
+		Prompt: PromptView{
+			Layers: make(map[string]int),
 		},
 		LatestTraceIDs: []string{},
 	}
@@ -536,6 +556,24 @@ func (b *Bus) TraceStats(filter TraceFilter) TraceStats {
 			stats.Provenance.ProfileResourceKinds[kind] += count
 		}
 		updateProvenanceDisplay(&stats.Provenance)
+		stats.Prompt.LayoutsObserved += trace.Prompt.LayoutsObserved
+		if trace.Prompt.InstructionChars > stats.Prompt.InstructionChars {
+			stats.Prompt.InstructionChars = trace.Prompt.InstructionChars
+		}
+		if trace.Prompt.TotalChars > stats.Prompt.TotalChars {
+			stats.Prompt.TotalChars = trace.Prompt.TotalChars
+		}
+		if trace.Prompt.InstructionTokens > stats.Prompt.InstructionTokens {
+			stats.Prompt.InstructionTokens = trace.Prompt.InstructionTokens
+		}
+		if trace.Prompt.TotalTokens > stats.Prompt.TotalTokens {
+			stats.Prompt.TotalTokens = trace.Prompt.TotalTokens
+		}
+		stats.Prompt.Sources = mergeSortedStrings(stats.Prompt.Sources, trace.Prompt.Sources)
+		for layer, count := range trace.Prompt.Layers {
+			stats.Prompt.Layers[layer] += count
+		}
+		updatePromptDisplay(&stats.Prompt)
 	}
 
 	return stats
@@ -865,6 +903,51 @@ func ApplyProvenanceEventForAPI(summary *ProvenanceView, event Event) {
 	applyProvenanceEvent(summary, event)
 }
 
+func applyPromptEvent(summary *PromptView, event Event) {
+	if summary == nil {
+		return
+	}
+	if summary.Layers == nil {
+		summary.Layers = make(map[string]int)
+	}
+
+	layers := stringSlicePayloadValue(event.Payload, "prompt_layers")
+	sources := stringSlicePayloadValue(event.Payload, "prompt_sources")
+	instructionChars := intPayloadValue(event.Payload, "prompt_layout_length")
+	totalChars := intPayloadValue(event.Payload, "total_message_chars")
+	instructionTokens := intPayloadValue(event.Payload, "instruction_tokens")
+	totalTokens := intPayloadValue(event.Payload, "total_tokens")
+	_, hasSummary := stringPayloadValue(event.Payload, "prompt_layout_summary")
+	_, hasLayout := stringPayloadValue(event.Payload, "prompt_layout")
+	if instructionChars <= 0 && totalChars <= 0 && instructionTokens <= 0 && totalTokens <= 0 && len(layers) == 0 && len(sources) == 0 && !hasSummary && !hasLayout {
+		return
+	}
+
+	summary.LayoutsObserved++
+	if instructionChars > 0 {
+		summary.InstructionChars = instructionChars
+	}
+	if totalChars > 0 {
+		summary.TotalChars = totalChars
+	}
+	if instructionTokens > 0 {
+		summary.InstructionTokens = instructionTokens
+	}
+	if totalTokens > 0 {
+		summary.TotalTokens = totalTokens
+	}
+	for _, layer := range layers {
+		summary.Layers[layer]++
+	}
+	summary.Sources = mergeSortedStrings(summary.Sources, sources)
+	updatePromptDisplay(summary)
+}
+
+// ApplyPromptEventForAPI exposes prompt aggregation for API-side event list summaries.
+func ApplyPromptEventForAPI(summary *PromptView, event Event) {
+	applyPromptEvent(summary, event)
+}
+
 func isGovernanceDeniedEvent(eventType string) bool {
 	return eventType == "tool.denied" || eventType == "subagent.denied"
 }
@@ -1027,6 +1110,13 @@ func updateProvenanceDisplay(summary *ProvenanceView) {
 	summary.ProfileMemoryCount = memoryCount
 	summary.ProfileNotesCount = notesCount
 	summary.ProfileResourceLabels = labels
+}
+
+func updatePromptDisplay(summary *PromptView) {
+	if summary == nil {
+		return
+	}
+	summary.SourceCount = len(summary.Sources)
 }
 
 func profileResourceDisplay(refs []string) (int, int, []string) {

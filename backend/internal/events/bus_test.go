@@ -288,6 +288,45 @@ func TestBus_RecentTraces_AggregatesProfileProvenance(t *testing.T) {
 	}
 }
 
+func TestBus_RecentTraces_AggregatesPromptLayoutSummary(t *testing.T) {
+	bus := NewBusWithRetention(16)
+
+	bus.Publish(Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-prompt",
+		Payload: map[string]interface{}{
+			"prompt_layout_summary": "layers=base/system -> developer/developer | sources=system.md, tools.md",
+			"prompt_layout_length":  128,
+			"total_message_chars":   512,
+			"instruction_tokens":    32,
+			"total_tokens":          128,
+			"prompt_layers":         []string{"base/system", "developer/developer"},
+			"prompt_sources":        []string{"system.md", "tools.md"},
+		},
+	})
+
+	traces := bus.RecentTraces(TraceFilter{TraceIDPrefix: "trace-", Limit: 10})
+	if len(traces) != 1 {
+		t.Fatalf("expected 1 trace, got %d", len(traces))
+	}
+	trace := traces[0]
+	if trace.Prompt.LayoutsObserved != 1 || trace.Prompt.InstructionChars != 128 || trace.Prompt.TotalChars != 512 {
+		t.Fatalf("unexpected prompt summary counts: %#v", trace.Prompt)
+	}
+	if trace.Prompt.InstructionTokens != 32 || trace.Prompt.TotalTokens != 128 {
+		t.Fatalf("unexpected prompt token counts: %#v", trace.Prompt)
+	}
+	if trace.Prompt.Layers["base/system"] != 1 || trace.Prompt.Layers["developer/developer"] != 1 {
+		t.Fatalf("unexpected prompt layer counts: %#v", trace.Prompt.Layers)
+	}
+	if trace.Prompt.SourceCount != 2 {
+		t.Fatalf("expected 2 prompt sources, got %#v", trace.Prompt)
+	}
+	if len(trace.Prompt.Sources) != 2 || trace.Prompt.Sources[0] != "system.md" || trace.Prompt.Sources[1] != "tools.md" {
+		t.Fatalf("unexpected prompt sources: %#v", trace.Prompt.Sources)
+	}
+}
+
 func TestBus_TraceStats_AggregatesRecentTraces(t *testing.T) {
 	bus := NewBusWithRetention(16)
 
@@ -438,6 +477,55 @@ func TestBus_TraceStats_AggregatesProfileProvenance(t *testing.T) {
 	}
 	if stats.Provenance.ProfileResourceKinds["memory"] != 1 || stats.Provenance.ProfileResourceKinds["notes"] != 1 {
 		t.Fatalf("unexpected profile resource kinds: %#v", stats.Provenance.ProfileResourceKinds)
+	}
+}
+
+func TestBus_TraceStats_AggregatesPromptLayoutSummary(t *testing.T) {
+	bus := NewBusWithRetention(16)
+
+	bus.Publish(Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-one",
+		Payload: map[string]interface{}{
+			"prompt_layout_length": 96,
+			"instruction_tokens":   24,
+			"prompt_layers":        []string{"base/system", "developer/developer"},
+			"prompt_sources":       []string{"system.md"},
+		},
+	})
+	bus.Publish(Event{
+		Type:    "llm.request.started",
+		TraceID: "trace-two",
+		Payload: map[string]interface{}{
+			"prompt_layout_length": 144,
+			"instruction_tokens":   36,
+			"total_tokens":         200,
+			"prompt_layers":        []string{"base/system", "user/developer"},
+			"prompt_sources":       []string{"AGENTS.md"},
+		},
+	})
+
+	stats := bus.TraceStats(TraceFilter{TraceIDPrefix: "trace-", Limit: 10})
+	if stats.Prompt.LayoutsObserved != 2 {
+		t.Fatalf("unexpected prompt stats: %#v", stats.Prompt)
+	}
+	if stats.Prompt.InstructionChars != 144 {
+		t.Fatalf("expected instruction_chars=144 (max), got %d", stats.Prompt.InstructionChars)
+	}
+	if stats.Prompt.InstructionTokens != 36 {
+		t.Fatalf("expected instruction_tokens=36 (max), got %d", stats.Prompt.InstructionTokens)
+	}
+	if stats.Prompt.TotalTokens != 200 {
+		t.Fatalf("expected total_tokens=200 (max), got %d", stats.Prompt.TotalTokens)
+	}
+	if stats.Prompt.Layers["base/system"] != 2 || stats.Prompt.Layers["developer/developer"] != 1 || stats.Prompt.Layers["user/developer"] != 1 {
+		t.Fatalf("unexpected prompt layer stats: %#v", stats.Prompt.Layers)
+	}
+	if stats.Prompt.SourceCount != 2 {
+		t.Fatalf("expected prompt source_count=2, got %#v", stats.Prompt)
+	}
+	if len(stats.Prompt.Sources) != 2 || stats.Prompt.Sources[0] != "AGENTS.md" || stats.Prompt.Sources[1] != "system.md" {
+		t.Fatalf("unexpected prompt sources: %#v", stats.Prompt.Sources)
 	}
 }
 

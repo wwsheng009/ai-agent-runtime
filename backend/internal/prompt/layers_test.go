@@ -85,6 +85,38 @@ Read AGENTS`
 	}
 }
 
+func TestSummarizeRenderedLayout_ExtractsLayersAndSources(t *testing.T) {
+	layout := `[base/system]
+# Base
+Source: system.md
+Base guardrail
+
+[developer/developer]
+# Tools
+Source: tools.md
+Prefer rg
+
+[user/developer]
+# Workspace
+Source: E:\projects\ai\ai-agent-runtime\AGENTS.md
+Read AGENTS`
+
+	summary := SummarizeRenderedLayout(layout)
+	if summary.Length != len(layout) {
+		t.Fatalf("expected layout length %d, got %d", len(layout), summary.Length)
+	}
+	expectedSummary := "layers=base/system -> developer/developer -> user/developer | sources=system.md, tools.md, AGENTS.md"
+	if summary.Summary != expectedSummary {
+		t.Fatalf("unexpected layout summary: %q", summary.Summary)
+	}
+	if len(summary.Layers) != 3 || summary.Layers[0] != "base/system" || summary.Layers[2] != "user/developer" {
+		t.Fatalf("unexpected layers: %#v", summary.Layers)
+	}
+	if len(summary.Sources) != 3 || summary.Sources[0] != "system.md" || summary.Sources[2] != "AGENTS.md" {
+		t.Fatalf("unexpected sources: %#v", summary.Sources)
+	}
+}
+
 func TestLoadWorkspaceInstructions_PrefersOverrideAndWalksAncestors(t *testing.T) {
 	root := t.TempDir()
 	projectDir := filepath.Join(root, "repo")

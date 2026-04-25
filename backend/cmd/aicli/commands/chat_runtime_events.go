@@ -1080,6 +1080,12 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 	teamID := payloadStringValue(event.Payload["team_id"])
 	switch event.Type {
 	case runtimechat.EventLLMRequestStarted, "llm.request.started":
+		if line := chatLLMRequestPromptLayoutHint(event.Payload); line != "" {
+			return chatRuntimeTimelineEvent{
+				Line:     line,
+				DedupKey: llmRequestDedupKey(event, "llm.request.started"),
+			}
+		}
 		return chatRuntimeTimelineEvent{}
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		if payloadBoolValue(event.Payload, "success") {
@@ -1760,6 +1766,50 @@ func chatLLMRequestToolAvailabilityHint(payload map[string]interface{}) string {
 		if extraCount > 0 {
 			line += fmt.Sprintf(", +%d more", extraCount)
 		}
+	}
+	return truncateChatRuntimeText(line, 200)
+}
+
+func chatLLMRequestPromptLayoutHint(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	summary := payloadStringValue(payload["prompt_layout_summary"])
+	if summary == "" {
+		summary = payloadStringValue(payload["prompt_layout"])
+	}
+	if summary == "" {
+		return ""
+	}
+	line := "[prompt] " + summary
+	instructionTokens := intPayloadValue(payload, "instruction_tokens")
+	totalTokens := intPayloadValue(payload, "total_tokens")
+	instructionChars := intPayloadValue(payload, "prompt_layout_length")
+	totalChars := intPayloadValue(payload, "total_message_chars")
+	if instructionTokens > 0 && totalTokens > 0 && totalTokens != instructionTokens {
+		line += fmt.Sprintf(" (instruction %d / total %d tokens", instructionTokens, totalTokens)
+		if instructionChars > 0 && totalChars > 0 {
+			line += fmt.Sprintf(", %d / %d chars", instructionChars, totalChars)
+		}
+		line += ")"
+	} else if instructionTokens > 0 {
+		line += fmt.Sprintf(" (%d tokens", instructionTokens)
+		if instructionChars > 0 {
+			line += fmt.Sprintf(", %d chars", instructionChars)
+		}
+		line += ")"
+	} else if totalTokens > 0 {
+		line += fmt.Sprintf(" (total %d tokens", totalTokens)
+		if totalChars > 0 {
+			line += fmt.Sprintf(", %d chars", totalChars)
+		}
+		line += ")"
+	} else if instructionChars > 0 && totalChars > 0 && totalChars != instructionChars {
+		line += fmt.Sprintf(" (instruction %d / total %d chars)", instructionChars, totalChars)
+	} else if instructionChars > 0 {
+		line += fmt.Sprintf(" (%d chars)", instructionChars)
+	} else if totalChars > 0 {
+		line += fmt.Sprintf(" (total %d chars)", totalChars)
 	}
 	return truncateChatRuntimeText(line, 200)
 }
