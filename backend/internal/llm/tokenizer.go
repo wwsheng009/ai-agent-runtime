@@ -95,29 +95,26 @@ func (t *Tokenizer) countOpenAITokens(text string) int {
 
 	// OpenAI 的 Tokenization 比较复杂，这里使用近似算法
 	// 1. 实际上应该使用 tiktoken 库
-	// 2. 粗略估计：英文字符数 / 4
+	// 2. 粗略估计：英文约 4 字符 = 1 token
 	// 3. 中文字符每个约等于 2 个 Tokens
 
-	var tokens int
 	var chineseChars int
+	var asciiRunes int
 
 	for _, r := range text {
 		if r >= unicode.MaxASCII {
 			// 非ASCII字符（包括中文）
 			chineseChars++
 		} else {
-			// ASCII 字符
-			tokens++
+			asciiRunes++
 		}
 	}
 
 	// 中文每个字符约 2 tokens
-	tokens += chineseChars * 2
+	tokens := chineseChars * 2
 
-	// 英文大约 4 字符 = 1 token
-	if len(text) > chineseChars {
-		tokens += (len(text) - chineseChars) / 4
-	}
+	// 英文大约 4 字符 = 1 token，向上取整保证非空文本至少 1 token
+	tokens += (asciiRunes + 3) / 4
 
 	return tokens
 }
@@ -130,27 +127,25 @@ func (t *Tokenizer) countAnthropicTokens(text string) int {
 
 	// Anthropic 和 OpenAI 的 Tokenization 类似但略有不同
 	// 1. Claude 的 tokenization 使用自己的算法
-	// 2. 粗略估计：英文字符数 / 3.5
+	// 2. 粗略估计：英文约 3.5 字符 = 1 token
 	// 3. 中文字符每个约等于 1.5-2 个 Tokens
 
-	var tokens int
 	var chineseChars int
+	var asciiRunes int
 
 	for _, r := range text {
 		if r >= unicode.MaxASCII {
 			chineseChars++
 		} else {
-			tokens++
+			asciiRunes++
 		}
 	}
 
 	// 中文每个字符约 1.5 tokens
-	tokens += chineseChars * 3 / 2
+	tokens := chineseChars * 3 / 2
 
-	// 英文大约 3.5 字符 = 1 token
-	if len(text) > chineseChars {
-		tokens += (len(text) - chineseChars) * 2 / 7
-	}
+	// 英文大约 3.5 字符 = 1 token，向上取整保证非空文本至少 1 token
+	tokens += (asciiRunes*2 + 6) / 7
 
 	return tokens
 }

@@ -521,20 +521,18 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		}
 	}
 	reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg)
+	usage, usageSource := resolveUnifiedTokenUsage(protocol, body, assistantMsg, req.Messages, stringValue(assistantMsg["content"]), c.tokenizer)
 
 	// 构建响应
 	response := &LLMResponse{
 		Content: "",
-		Usage: &types.TokenUsage{
-			PromptTokens:     0,
-			CompletionTokens: 0,
-			TotalTokens:      0,
-		},
-		Model: adapterRequest.Model,
+		Usage:   usage,
+		Model:   adapterRequest.Model,
 		Metadata: map[string]interface{}{
-			"provider":   selected.Provider.Name,
-			"latency_ms": latency.Milliseconds(),
-			"protocol":   protocol,
+			"provider":     selected.Provider.Name,
+			"latency_ms":   latency.Milliseconds(),
+			"protocol":     protocol,
+			"usage_source": usageSource,
 		},
 	}
 
@@ -565,11 +563,6 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 			response.Reasoning = reasoning
 		}
 	}
-
-	// 统计 Token
-	response.Usage.PromptTokens = c.tokenizer.CountMessages(convertToInterfaceSlice(req.Messages))
-	response.Usage.CompletionTokens = c.tokenizer.Count(response.Content)
-	response.Usage.TotalTokens = response.Usage.PromptTokens + response.Usage.CompletionTokens
 
 	return response, nil
 }
@@ -738,19 +731,17 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		}
 	}
 	reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg)
+	usage, usageSource := resolveUnifiedTokenUsage(protocol, responseBody, assistantMsg, req.Messages, stringValue(assistantMsg["content"]), c.tokenizer)
 
 	response := &LLMResponse{
 		Content: "",
-		Usage: &types.TokenUsage{
-			PromptTokens:     0,
-			CompletionTokens: 0,
-			TotalTokens:      0,
-		},
-		Model: adapterRequest.Model,
+		Usage:   usage,
+		Model:   adapterRequest.Model,
 		Metadata: map[string]interface{}{
-			"provider":   selected.Provider.Name,
-			"latency_ms": latency.Milliseconds(),
-			"protocol":   protocol,
+			"provider":     selected.Provider.Name,
+			"latency_ms":   latency.Milliseconds(),
+			"protocol":     protocol,
+			"usage_source": usageSource,
 		},
 	}
 	if content, ok := assistantMsg["content"].(string); ok {
@@ -776,9 +767,6 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			response.Reasoning = reasoning
 		}
 	}
-	response.Usage.PromptTokens = c.tokenizer.CountMessages(convertToInterfaceSlice(req.Messages))
-	response.Usage.CompletionTokens = c.tokenizer.Count(response.Content)
-	response.Usage.TotalTokens = response.Usage.PromptTokens + response.Usage.CompletionTokens
 	return response, nil
 }
 

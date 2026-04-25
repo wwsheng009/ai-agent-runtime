@@ -437,6 +437,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	}
 
 	content, _ := assistantMsg["content"].(string)
+	usage, usageSource := resolveUnifiedChatTokenUsage(p.config.Type, body, assistantMsg, request.Messages, content, p.tokenizer)
 
 	// 构建响应
 	response := &ChatResponse{
@@ -454,11 +455,12 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 				FinishReason: "stop",
 			},
 		},
-		Usage: Usage{
-			PromptTokens:     len(request.Messages) * 10, // 简单估算
-			CompletionTokens: 100,                        // 简单估算
-			TotalTokens:      len(request.Messages)*10 + 100,
-		},
+		Usage: chatUsageFromTokenUsage(usage),
+	}
+	if usageSource != "" {
+		response.Metadata = map[string]interface{}{
+			"usage_source": usageSource,
+		}
 	}
 	if metadata := decodeMapAny(assistantMsg["metadata"]); len(metadata) > 0 {
 		response.Choices[0].Message.Metadata = cloneMapStringAny(metadata)
@@ -867,6 +869,9 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		}
 	}
 
+	content, _ := assistantMsg["content"].(string)
+	usage, usageSource := resolveUnifiedChatTokenUsage(p.config.Type, responseBody, assistantMsg, request.Messages, content, p.tokenizer)
+
 	response := &ChatResponse{
 		ID:      fmt.Sprintf("chat_%d", time.Now().Unix()),
 		Object:  "chat.completion",
@@ -881,12 +886,13 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				FinishReason: "stop",
 			},
 		},
-		Usage: Usage{
-			PromptTokens: len(request.Messages) * 10,
-		},
+		Usage: chatUsageFromTokenUsage(usage),
 	}
-	if content, ok := assistantMsg["content"].(string); ok {
-		response.Choices[0].Message.Content = content
+	response.Choices[0].Message.Content = content
+	if usageSource != "" {
+		response.Metadata = map[string]interface{}{
+			"usage_source": usageSource,
+		}
 	}
 	if metadata := decodeMapAny(assistantMsg["metadata"]); len(metadata) > 0 {
 		response.Choices[0].Message.Metadata = cloneMapStringAny(metadata)

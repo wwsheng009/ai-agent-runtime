@@ -251,6 +251,34 @@ func TestProviderWrapper_CallUsesConfiguredHTTPProxy(t *testing.T) {
 	assert.Greater(t, proxyHits, 0)
 }
 
+func TestProviderWrapper_CallUsesProviderReportedUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Usage)
+	assert.Equal(t, 3, resp.Usage.PromptTokens)
+	assert.Equal(t, 4, resp.Usage.CompletionTokens)
+	assert.Equal(t, 7, resp.Usage.TotalTokens)
+	assert.Equal(t, usageSourceProviderReported, resp.Metadata["usage_source"])
+}
+
 func TestProviderWrapper_CodexCall_SendsAndParsesToolCalls(t *testing.T) {
 	var capturedBody map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

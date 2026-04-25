@@ -280,6 +280,41 @@ func TestGatewayClient_CallProvider_WithStreamAggregatesSSEResponse(t *testing.T
 	assert.Empty(t, resp.ToolCalls)
 }
 
+func TestGatewayClient_CallProvider_WithStreamUsesProviderReportedUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"Hello"}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
+	selected := &SelectedResource{
+		Provider: &ProviderResource{
+			Name:    "openai_ee",
+			Type:    "openai",
+			BaseURL: server.URL,
+		},
+		KeyValue: "test-key",
+	}
+
+	resp, err := client.callProvider(context.Background(), selected, "gpt-4o-mini", &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Stream: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Usage)
+	assert.Equal(t, 11, resp.Usage.PromptTokens)
+	assert.Equal(t, 2, resp.Usage.CompletionTokens)
+	assert.Equal(t, 13, resp.Usage.TotalTokens)
+	assert.Equal(t, usageSourceProviderReported, resp.Metadata["usage_source"])
+}
+
 func TestGatewayClient_CallProvider_SavesGeneratedImagesAndReturnsMetadata(t *testing.T) {
 	var capturedBody map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
