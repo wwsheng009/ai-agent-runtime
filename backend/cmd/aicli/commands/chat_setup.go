@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
@@ -70,7 +71,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		HTTPClient:         httpclient.GetHTTPClientWithProvider(cfg, &runtimeState.provider),
 		cancelCtx:          cancelCtx,
 		cancelFunc:         cancelFunc,
-		interrupted:        false,
+		interrupted:        atomic.Bool{},
 		FunctionCatalog:    functionCatalog,
 		FunctionRegistry:   registry,
 		FunctionBuilder:    functionCatalog.Builder(runtimeState.provider.GetProtocol()),

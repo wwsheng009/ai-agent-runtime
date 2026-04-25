@@ -46,7 +46,7 @@ func setupSignalHandler(session *ChatSession, sigChan chan os.Signal, sigCountCh
 			if sigCount >= 2 {
 				// 第二次 Ctrl+C：正常退出循环（会保存日志）
 				fmt.Println("\n正在退出...")
-				session.interrupted = true
+				session.interrupted.Store(true)
 				close(sigCountChan)
 				return
 			}

@@ -3,6 +3,7 @@ package commands
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -68,11 +69,21 @@ func (q *chatInputQueue) startPump() {
 					})
 				}
 				if err != nil {
+					// EOF（Ctrl+D/Ctrl+Z）：静默忽略，不放入 errs 通道，
+					// 避免抢占 ctx.Done() 导致 Ctrl+C 中断失效
+					if errors.Is(err, io.EOF) {
+						continue
+					}
+					// 将错误通知给等待方，但不退出泵 goroutine。
+					// 在 Ctrl+C（SIGINT）场景下，ReadString 可能因终端中断返回临时错误，
+					// 泵应继续读取后续输入而非永久退出。
 					select {
 					case q.errs <- err:
 					default:
 					}
-					return
+					// 其他错误短暂睡眠避免空转，然后继续读取
+					time.Sleep(50 * time.Millisecond)
+					continue
 				}
 			}
 		}()

@@ -3,7 +3,9 @@ package commands
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sort"
@@ -43,7 +45,7 @@ type ChatSession struct {
 	HTTPClient         *http.Client
 	cancelCtx          context.Context                    // 可取消的上下文
 	cancelFunc         context.CancelFunc                 // 取消函数
-	interrupted        bool                               // 是否被中断
+	interrupted        atomic.Bool                         // 是否被中断（原子操作，避免竞态）
 	FunctionCatalog    *aicliFunctionCatalog              // 统一管理 builtin tools + skills + schema cache
 	FunctionRegistry   *functions.FunctionRegistry        // Function 注册表
 	FunctionBuilder    functions.FunctionCallBuilder      // 协议对应的 function/tool builder
@@ -117,19 +119,23 @@ func (s *ChatSession) Interrupt() {
 	if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
-	s.interrupted = true
+	s.interrupted.Store(true)
 }
 
 // ResetInterrupt 重置中断状态
 func (s *ChatSession) ResetInterrupt() {
-	s.interrupted = false
+	s.interrupted.Store(false)
 }
 
 // IsInterrupted 检查是否被中断
+// 优先检查原子标志（由信号处理器设置），再检查 cancelCtx 状态作为回退
 func (s *ChatSession) IsInterrupted() bool {
+	if s.interrupted.Load() {
+		return true
+	}
 	select {
 	case <-s.cancelCtx.Done():
-		s.interrupted = true
+		s.interrupted.Store(true)
 		return true
 	default:
 		return false
@@ -852,6 +858,10 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 
 			input, err = chatInteractiveReadLine(session, session.cancelCtx)
 			if err != nil {
+				// Ctrl+D (EOF)：静默忽略，不中断也不退出
+				if errors.Is(err, io.EOF) {
+					continue
+				}
 				// 读取失败通常是因为用户按了 Ctrl+C
 				// 这种情况下应该跳过本次循环，重新开始
 				if session.IsInterrupted() {
