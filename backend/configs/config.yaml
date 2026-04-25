@@ -477,12 +477,16 @@ providers:
                     native_tools:
                         image_generation: false
                 gpt-5.4-mini:
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
                     input_modalities:
                         - text
                         - image
                     native_tools:
                         image_generation: true
                 gpt-5.4:
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
                     input_modalities:
                         - text
                         - image
@@ -549,6 +553,14 @@ providers:
                 deepseek-v4-flash: deepseek-ai/DeepSeek-V4-Flash
                 o1-mini: deepseek-ai/DeepSeek-V4-Pro
                 o1-preview: deepseek-ai/DeepSeek-V4-Pro
+            model_capabilities:
+                '*':
+                    input_modalities:
+                        - text
+                    native_tools:
+                        image_generation: false
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
             protocol: openai
             support_types:
                 - openai
