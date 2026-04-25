@@ -754,6 +754,9 @@ func runtimeMessageFromAICLIMessage(raw map[string]interface{}) (runtimetypes.Me
 			message.Metadata[key] = value
 		}
 	}
+	if reasoning, ok := normalized["reasoning_content"].(string); ok {
+		message.Metadata.Set("reasoning_content", reasoning)
+	}
 	if reasoningBlock := runtimellm.ReasoningBlockFromAssistantMessage(normalized); reasoningBlock != nil {
 		runtimetypes.SetReasoningBlock(message.Metadata, reasoningBlock)
 		if text := strings.TrimSpace(reasoningBlock.DisplayText()); text != "" {

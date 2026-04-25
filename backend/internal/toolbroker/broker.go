@@ -13,6 +13,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -46,6 +47,22 @@ type Broker struct {
 	TeamPlanner          *team.LeadPlanner
 	TeamDispatcher       TeamMailboxDispatcher
 	TeamLifecycleChanged func()
+}
+
+func withBrokerSourceMetadata(metadata map[string]interface{}) map[string]interface{} {
+	return toolresult.WithSource(metadata, toolresult.SourceBroker)
+}
+
+func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.ToolDefinition {
+	if len(definitions) == 0 {
+		return nil
+	}
+	out := make([]types.ToolDefinition, len(definitions))
+	copy(out, definitions)
+	for index := range out {
+		out[index].Metadata = withBrokerSourceMetadata(out[index].Metadata)
+	}
+	return out
 }
 
 // IsBrokerTool returns true if the tool is handled by the broker.
@@ -85,13 +102,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		{
 			Name:        ToolBackgroundTask,
-			Description: "Run a long-running task in the background and return a job id. On Windows the command executes under cmd.exe, so use cmd-compatible commands.",
+			Description: "Run a long-running task in the background and return a job id. Commands execute through the detected user shell; prefer the cwd parameter for directory changes instead of embedding cd in the command.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"command": map[string]interface{}{
 						"type":        "string",
-						"description": "Shell command to execute. On Windows use cmd-compatible commands such as `cd` or `echo %cd%` instead of `pwd`.",
+						"description": "Shell command to execute through the detected user shell. Prefer the cwd parameter for directory changes; use pwd/Get-Location on PowerShell/pwsh or cd/echo %cd% on cmd only when printing the current directory.",
 					},
 					"cwd": map[string]interface{}{
 						"type":        "string",
@@ -138,9 +155,9 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 	}
 	if b == nil || b.TeamStore == nil {
 		if b == nil || b.AgentSessions == nil {
-			return definitions
+			return withBrokerSourceDefinitions(definitions)
 		}
-		return append(definitions,
+		return withBrokerSourceDefinitions(append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSpawnAgent,
 				Description: "Create a lightweight child agent session and optionally send its first prompt.",
@@ -234,7 +251,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 				},
 			},
-		)
+		))
 	}
 	if b.AgentSessions != nil {
 		definitions = append(definitions,
@@ -334,7 +351,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		)
 	}
 	if b == nil || b.TeamStore == nil {
-		return definitions
+		return withBrokerSourceDefinitions(definitions)
 	}
 	reportOutcomeSchema := team.TaskOutcomeContractSchemaFor(team.TaskOutcomeDone, team.TaskOutcomeFailed, team.TaskOutcomeBlocked, team.TaskOutcomeHandoff)
 	reportOutcomeProperties, _ := reportOutcomeSchema["properties"].(map[string]interface{})
@@ -659,17 +676,19 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 	)
-	return definitions
+	return withBrokerSourceDefinitions(definitions)
 }
 
 // Execute runs a broker tool without an originating tool call id.
 func (b *Broker) Execute(ctx context.Context, sessionID, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
-	return b.execute(ctx, sessionID, toolName, args, "")
+	result, metadata, err := b.execute(ctx, sessionID, toolName, args, "")
+	return result, withBrokerSourceMetadata(metadata), err
 }
 
 // ExecuteToolCall runs a broker tool for a concrete tool call.
 func (b *Broker) ExecuteToolCall(ctx context.Context, sessionID string, call types.ToolCall) (interface{}, map[string]interface{}, error) {
-	return b.execute(ctx, sessionID, call.Name, call.Args, call.ID)
+	result, metadata, err := b.execute(ctx, sessionID, call.Name, call.Args, call.ID)
+	return result, withBrokerSourceMetadata(metadata), err
 }
 
 // execute runs a broker tool.
@@ -722,7 +741,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if err != nil {
 			return nil, nil, err
 		}
-		return AskUserQuestionResult{QuestionID: questionID, Answer: answer}, nil, nil
+		return AskUserQuestionResult{QuestionID: questionID, Answer: answer}, map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+		}, nil
 
 	case ToolBackgroundTask:
 		if b.Background == nil {
@@ -773,10 +794,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				Message:       job.Message,
 				RestartPolicy: job.RestartPolicy,
 			}, map[string]interface{}{
-				"job_id":         strings.TrimSpace(job.ID),
-				"job_alias":      jobAlias,
-				"status":         string(job.Status),
-				"restart_policy": job.RestartPolicy,
+				toolresult.MetadataKey: toolresult.KindStructured,
+				"job_id":               strings.TrimSpace(job.ID),
+				"job_alias":            jobAlias,
+				"status":               string(job.Status),
+				"restart_policy":       job.RestartPolicy,
 			}, nil
 
 	case ToolTaskOutput:
@@ -830,10 +852,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				NextOffset: output.NextOffset,
 				ExitCode:   output.ExitCode,
 			}, map[string]interface{}{
-				"job_id":      strings.TrimSpace(output.JobID),
-				"job_alias":   displayJobID,
-				"status":      output.Status,
-				"next_offset": output.NextOffset,
+				toolresult.MetadataKey: toolresult.KindStructured,
+				"job_id":               strings.TrimSpace(output.JobID),
+				"job_alias":            displayJobID,
+				"status":               output.Status,
+				"next_offset":          output.NextOffset,
 			}, nil
 
 	case ToolSpawnAgent:

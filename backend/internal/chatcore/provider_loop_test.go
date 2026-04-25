@@ -168,13 +168,146 @@ func TestExecuteToolLoop_EmitsToolBatchEvents(t *testing.T) {
 	}
 
 	stages := make([]string, 0, len(events))
+	var toolResultMetadata map[string]interface{}
 	for _, event := range events {
 		if event.Type != EventTool {
 			continue
 		}
 		stages = append(stages, event.Stage)
+		if event.Stage == "tool_result" {
+			toolResultMetadata = event.Metadata
+		}
 	}
 	if want := []string{"batch_start", "tool_requested", "tool_result", "batch_end"}; !reflect.DeepEqual(stages, want) {
 		t.Fatalf("unexpected tool event stages: got %v want %v (events=%+v)", stages, want, events)
+	}
+	if toolResultMetadata != nil {
+		t.Fatalf("expected empty metadata by default, got %+v", toolResultMetadata)
+	}
+}
+
+func TestExecuteToolLoop_PropagatesToolResultMetadataToEvents(t *testing.T) {
+	provider := &fakeProviderTurnExecutor{
+		responses: []*ProviderTurnResponse{
+			{
+				Message: &types.Message{
+					Role: "assistant",
+					ToolCalls: []types.ToolCall{
+						{ID: "call_1", Name: "remote_search", Args: map[string]interface{}{"query": "golang"}},
+					},
+				},
+			},
+			{
+				Message: types.NewAssistantMessage("Done"),
+			},
+		},
+	}
+	tools := &fakeToolExecutor{
+		results: map[string]ToolResult{
+			"remote_search": {
+				Content: "result 1\nresult 2\nresult 3",
+				Metadata: map[string]interface{}{
+					"tool_source": "mcp",
+				},
+			},
+		},
+	}
+
+	var events []ChatEvent
+	_, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:   "Search",
+		Provider: provider,
+		Tools: []types.ToolDefinition{
+			{
+				Name:        "remote_search",
+				Description: "Search remotely",
+				Parameters:  map[string]interface{}{"type": "object"},
+				Metadata: map[string]interface{}{
+					"tool_source": "mcp",
+				},
+			},
+		},
+		ToolExecutor: tools,
+		EventSink: func(event ChatEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteToolLoop failed: %v", err)
+	}
+
+	for _, event := range events {
+		if event.Type == EventTool && event.Stage == "tool_requested" {
+			if got := event.Metadata["tool_source"]; got != "mcp" {
+				t.Fatalf("expected tool_requested metadata tool_source=mcp, got %#v", got)
+			}
+		}
+		if event.Type == EventTool && event.Stage == "tool_result" {
+			if got := event.Metadata["tool_source"]; got != "mcp" {
+				t.Fatalf("expected tool_result metadata tool_source=mcp, got %#v", got)
+			}
+			return
+		}
+	}
+	t.Fatal("expected tool_result event")
+}
+
+func TestExecuteToolLoop_PreservesToolResultMetadataInHistory(t *testing.T) {
+	provider := &fakeProviderTurnExecutor{
+		responses: []*ProviderTurnResponse{
+			{
+				Message: &types.Message{
+					Role: "assistant",
+					ToolCalls: []types.ToolCall{
+						{ID: "call_1", Name: "background_task", Args: map[string]interface{}{"command": "git status"}},
+					},
+				},
+			},
+			{
+				Message: types.NewAssistantMessage("Done"),
+			},
+		},
+	}
+	tools := &fakeToolExecutor{
+		results: map[string]ToolResult{
+			"background_task": {
+				Content: "job_id=job-1\nstatus=queued",
+				Metadata: map[string]interface{}{
+					"tool_source": "broker",
+					"output_kind": "text",
+				},
+			},
+		},
+	}
+
+	result, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:       "Run git status later",
+		Provider:     provider,
+		ToolExecutor: tools,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteToolLoop failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+	if len(result.History) < 3 {
+		t.Fatalf("expected replayed history, got %#v", result.History)
+	}
+	toolMessage := result.History[len(result.History)-2]
+	if toolMessage.Role != "tool" || toolMessage.ToolCallID != "call_1" {
+		t.Fatalf("expected tool message before final assistant message, got %#v", toolMessage)
+	}
+	if got := toolMessage.Metadata["tool_source"]; got != "broker" {
+		t.Fatalf("expected tool_source=broker in tool message metadata, got %#v", got)
+	}
+	if got := toolMessage.Metadata["output_kind"]; got != "text" {
+		t.Fatalf("expected output_kind=text in tool message metadata, got %#v", got)
+	}
+	if len(result.Response.ToolExecutions) != 1 {
+		t.Fatalf("expected one tool execution, got %+v", result.Response.ToolExecutions)
+	}
+	if got := result.Response.ToolExecutions[0].Metadata["tool_source"]; got != "broker" {
+		t.Fatalf("expected tool execution metadata tool_source=broker, got %#v", got)
 	}
 }

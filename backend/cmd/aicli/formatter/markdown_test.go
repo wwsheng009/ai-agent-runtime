@@ -511,6 +511,24 @@ func TestFormatLinks(t *testing.T) {
 	}
 }
 
+func TestFormatLinks_FileLinkRendersTerminalHyperlink(t *testing.T) {
+	formatter := NewMarkdownFormatter(true)
+
+	input := `打开 [C:\tmp\img.png](file:///C:/tmp/img.png)`
+	result := formatter.formatLink(input)
+	visible := stripANSICodes(result)
+
+	if !strings.Contains(result, "\x1b]8;;file:///C:/tmp/img.png\x1b\\") {
+		t.Fatalf("应该包含 OSC8 超链接序列，实际: %q", result)
+	}
+	if !strings.Contains(visible, `C:\tmp\img.png`) {
+		t.Fatalf("可见文本应该包含文件路径，实际: %q", visible)
+	}
+	if strings.Contains(visible, "file:///C:/tmp/img.png") {
+		t.Fatalf("文件链接渲染后不应再显示 file URL，实际: %q", visible)
+	}
+}
+
 // TestFormatQuote 测试引用格式化
 func TestFormatQuote(t *testing.T) {
 	formatter := NewMarkdownFormatter(false)

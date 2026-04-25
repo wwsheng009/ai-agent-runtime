@@ -318,16 +318,21 @@ func (c *aicliFunctionCatalog) sharedCapabilityCatalog() *runtimechatcore.Catalo
 }
 
 func (c *aicliFunctionCatalog) ExecuteFunction(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	output, _, err := c.ExecuteFunctionWithMeta(ctx, name, args)
+	return output, err
+}
+
+func (c *aicliFunctionCatalog) ExecuteFunctionWithMeta(ctx context.Context, name string, args map[string]interface{}) (string, map[string]interface{}, error) {
 	if c == nil || c.registry == nil {
-		return "", fmt.Errorf("function catalog is not initialized")
+		return "", nil, fmt.Errorf("function catalog is not initialized")
 	}
 	c.syncFromRegistry()
 	if entry, ok := c.entries[name]; ok && entry != nil && !entry.isSkill && c.toolPolicy != nil {
 		if err := c.toolPolicy.AllowToolCall(skill.ToolInfo{Name: name}, args); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
-	return c.registry.ExecuteFunction(ctx, name, args)
+	return c.registry.ExecuteFunctionWithMeta(ctx, name, args)
 }
 
 func (c *aicliFunctionCatalog) Stats() aicliFunctionCatalogStats {

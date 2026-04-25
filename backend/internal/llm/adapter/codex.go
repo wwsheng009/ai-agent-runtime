@@ -22,6 +22,7 @@ const (
 	codexPromptCacheKeyMetadataKey = "prompt_cache_key"
 	codexSessionIDMetadataKey      = "session_id"
 	codexConversationIDMetadataKey = "conversation_id"
+	codexImageGenerationToolType   = "image_generation"
 )
 
 // Name 返回适配器名称
@@ -133,6 +134,9 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 		if len(tools) > 0 {
 			request["tools"] = tools
 			request["tool_choice"] = "auto"
+			if codexToolsContainType(tools, codexImageGenerationToolType) {
+				request["parallel_tool_calls"] = false
+			}
 		}
 	}
 
@@ -1043,6 +1047,10 @@ func normalizeCodexTools(raw interface{}) []map[string]interface{} {
 		for key, value := range tool {
 			flat[key] = value
 		}
+		if toolType, _ := flat["type"].(string); strings.TrimSpace(toolType) != "" && !strings.EqualFold(strings.TrimSpace(toolType), "function") {
+			normalized = append(normalized, flat)
+			continue
+		}
 		if _, ok := flat["type"]; !ok {
 			flat["type"] = "function"
 		}
@@ -1058,6 +1066,23 @@ func normalizeCodexTools(raw interface{}) []map[string]interface{} {
 	}
 
 	return normalized
+}
+
+func codexToolsContainType(tools []map[string]interface{}, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		toolType, _ := tool["type"].(string)
+		if strings.EqualFold(strings.TrimSpace(toolType), target) {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeCodexToolsForRequest normalizes tool schemas to the Codex/Responses strict subset.

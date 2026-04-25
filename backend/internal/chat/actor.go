@@ -1409,17 +1409,14 @@ func (a *SessionActor) buildPendingToolResultMessage(ctx context.Context, pendin
 		Error:      toolErr,
 	})
 	message := runtimetypes.NewToolMessage(pending.ToolCallID, "")
+	message.Content = runtimeoutput.RenderToolResultContentForModel(content, toolErr, envelope)
 	if envelope != nil {
-		message.Content = envelope.Render()
 		if len(envelope.Metadata) > 0 {
 			message.Metadata = runtimetypes.NewMetadata()
 			for key, value := range envelope.Metadata {
 				message.Metadata[key] = value
 			}
 		}
-	}
-	if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(toolErr) != "" {
-		message.Content = "Tool execution failed: " + strings.TrimSpace(toolErr)
 	}
 	if gatewayErr != nil && message.Metadata != nil {
 		message.Metadata["gateway_error"] = gatewayErr.Error()

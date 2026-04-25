@@ -3,6 +3,9 @@ package toolkit
 import (
 	"context"
 	"encoding/json"
+	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // Tool 统一工具接口
@@ -31,6 +34,9 @@ type ToolResult struct {
 	// Success 是否执行成功
 	Success bool
 
+	// OutputKind 输出类型：text / structured / binary / empty
+	OutputKind string
+
 	// Content 文本内容
 	Content string
 
@@ -47,13 +53,46 @@ type ToolResult struct {
 	Metadata map[string]interface{}
 }
 
+func (r *ToolResult) NormalizedOutputKind() string {
+	if r == nil {
+		return ""
+	}
+	if kind := toolresult.NormalizeKind(r.OutputKind); kind != "" {
+		return kind
+	}
+	if kind := toolresult.KindFromMetadata(r.Metadata); kind != "" {
+		return kind
+	}
+	if len(r.Data) > 0 || strings.TrimSpace(r.MIMEType) != "" {
+		return toolresult.KindBinary
+	}
+	if strings.TrimSpace(r.Content) == "" {
+		return toolresult.KindEmpty
+	}
+	return toolresult.KindText
+}
+
+func (r *ToolResult) MetadataWithOutputKind() map[string]interface{} {
+	if r == nil {
+		return nil
+	}
+	return toolresult.WithKind(r.Metadata, r.NormalizedOutputKind())
+}
+
 // ToJSON 转换为 JSON 格式
 func (r *ToolResult) ToJSON() ([]byte, error) {
+	kind := ""
+	metadata := map[string]interface{}(nil)
+	if r != nil {
+		kind = r.NormalizedOutputKind()
+		metadata = r.MetadataWithOutputKind()
+	}
 	result := map[string]interface{}{
-		"success":  r.Success,
-		"content":  r.Content,
-		"mimeType": r.MIMEType,
-		"metadata": r.Metadata,
+		"success":    r.Success,
+		"content":    r.Content,
+		"mimeType":   r.MIMEType,
+		"outputKind": kind,
+		"metadata":   metadata,
 	}
 	if r.Data != nil {
 		result["data"] = r.Data

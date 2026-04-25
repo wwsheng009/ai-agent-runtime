@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // WebSearchTool 网络搜索工具
@@ -81,8 +82,9 @@ func (w *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 	query, ok := params["query"].(string)
 	if !ok || query == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("query 参数缺失或为空"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("query 参数缺失或为空"),
 		}, nil
 	}
 
@@ -99,8 +101,9 @@ func (w *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 	results, err := w.searchDuckDuckGo(ctx, query, count)
 	if err == nil && len(results) > 0 {
 		return &toolkit.ToolResult{
-			Success: true,
-			Content: w.formatResults(results),
+			Success:    true,
+			OutputKind: toolresult.KindText,
+			Content:    w.formatResults(results),
 			Metadata: map[string]interface{}{
 				"query":  query,
 				"count":  len(results),
@@ -113,14 +116,16 @@ func (w *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 	results, err = w.searchDuckDuckGoHTML(ctx, query, count)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("搜索失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("搜索失败: %w", err),
 		}, nil
 	}
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: w.formatResults(results),
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    w.formatResults(results),
 		Metadata: map[string]interface{}{
 			"query":  query,
 			"count":  len(results),

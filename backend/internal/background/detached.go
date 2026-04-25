@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 const (
@@ -245,8 +247,9 @@ func launchDetachedShell(command, cwd, logPath string) (*detachedLaunch, error) 
 	}
 	statusPath := strings.TrimSuffix(logPath, filepath.Ext(logPath)) + ".status"
 	runnerPath := strings.TrimSuffix(logPath, filepath.Ext(logPath))
+	shell := runtimeexecutor.DefaultUserShell()
 	if runtime.GOOS == "windows" {
-		runnerPath += ".cmd"
+		runnerPath += ".ps1"
 	} else {
 		runnerPath += ".sh"
 	}
@@ -254,7 +257,7 @@ func launchDetachedShell(command, cwd, logPath string) (*detachedLaunch, error) 
 	if err := os.Remove(statusPath); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	if err := writeDetachedRunner(runnerPath, command, cwd, logPath, statusPath); err != nil {
+	if err := writeDetachedRunner(runnerPath, shell, command, cwd, logPath, statusPath); err != nil {
 		return nil, err
 	}
 	pid, err := startDetachedRunner(runnerPath)
@@ -268,20 +271,27 @@ func launchDetachedShell(command, cwd, logPath string) (*detachedLaunch, error) 
 	}, nil
 }
 
-func writeDetachedRunner(path, command, cwd, logPath, statusPath string) error {
+func writeDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) error {
 	if runtime.GOOS == "windows" {
-		return writeWindowsDetachedRunner(path, command, cwd, logPath, statusPath)
+		return writeWindowsDetachedRunner(path, shell, command, cwd, logPath, statusPath)
 	}
-	return writeUnixDetachedRunner(path, command, cwd, logPath, statusPath)
+	return writeUnixDetachedRunner(path, shell, command, cwd, logPath, statusPath)
 }
 
-func writeUnixDetachedRunner(path, command, cwd, logPath, statusPath string) error {
+func writeUnixDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) error {
 	lines := []string{"#!/bin/sh", "set +e"}
 	if strings.TrimSpace(cwd) != "" {
-		lines = append(lines, fmt.Sprintf("cd %s || exit 1", shellQuote(cwd)))
+		lines = append(lines,
+			fmt.Sprintf("if ! cd %s; then", shellQuote(cwd)),
+			fmt.Sprintf("  printf 'failed to change directory: %%s\\n' %s >> %s 2>&1", shellQuote(cwd), shellQuote(logPath)),
+			fmt.Sprintf("  printf \"%%s\" \"1\" > %s", shellQuote(statusPath)),
+			"  exit 0",
+			"fi",
+		)
 	}
+	commandLine := buildShellCommandLine(shell.DeriveExecArgs(command, false))
 	lines = append(lines,
-		fmt.Sprintf("/bin/sh -c %s >> %s 2>&1", shellQuote(command), shellQuote(logPath)),
+		fmt.Sprintf("%s >> %s 2>&1", commandLine, shellQuote(logPath)),
 		`code=$?`,
 		fmt.Sprintf("printf \"%%s\" \"$code\" > %s", shellQuote(statusPath)),
 	)
@@ -291,24 +301,16 @@ func writeUnixDetachedRunner(path, command, cwd, logPath, statusPath string) err
 	return os.Chmod(path, 0o755)
 }
 
-func writeWindowsDetachedRunner(path, command, cwd, logPath, statusPath string) error {
-	lines := []string{"@echo off", "setlocal enableextensions"}
-	if strings.TrimSpace(cwd) != "" {
-		lines = append(lines, fmt.Sprintf("cd /d \"%s\" || exit /b 1", escapeBatchPath(cwd)))
-	}
-	lines = append(lines,
-		fmt.Sprintf("cmd.exe /D /S /C %s >> \"%s\" 2>&1", command, escapeBatchPath(logPath)),
-		"set \"CODE=%ERRORLEVEL%\"",
-		fmt.Sprintf("> \"%s\" <nul set /p =%%CODE%%", escapeBatchPath(statusPath)),
-		"exit /b 0",
-	)
-	return os.WriteFile(path, []byte(strings.Join(lines, "\r\n")+"\r\n"), 0o644)
+func writeWindowsDetachedRunner(path string, shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) error {
+	content := buildWindowsDetachedRunnerContent(shell, command, cwd, logPath, statusPath)
+	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 func startDetachedRunner(path string) (int, error) {
 	if runtime.GOOS == "windows" {
-		script := fmt.Sprintf("$p = Start-Process -FilePath '%s' -WindowStyle Hidden -PassThru; [Console]::Out.Write($p.Id)", escapePowerShellSingleQuotes(path))
-		out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Output()
+		launcher := windowsPowerShellHost()
+		script := fmt.Sprintf("$p = Start-Process -FilePath '%s' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', '%s') -WindowStyle Hidden -PassThru; [Console]::Out.Write($p.Id)", escapePowerShellSingleQuotes(launcher), escapePowerShellSingleQuotes(path))
+		out, err := exec.Command(launcher, "-NoProfile", "-NonInteractive", "-Command", script).Output()
 		if err != nil {
 			return 0, err
 		}
@@ -374,4 +376,62 @@ func escapeBatchPath(text string) string {
 
 func escapePowerShellSingleQuotes(text string) string {
 	return strings.ReplaceAll(text, `'`, `''`)
+}
+
+func buildShellCommandLine(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd, logPath, statusPath string) string {
+	commandArgs := shell.DeriveExecArgs(command, false)
+	quotedArgs := make([]string, 0, len(commandArgs)-1)
+	for _, arg := range commandArgs[1:] {
+		quotedArgs = append(quotedArgs, powershellQuote(arg))
+	}
+
+	lines := []string{"$ErrorActionPreference = 'Stop'"}
+	lines = append(lines, fmt.Sprintf("$shellPath = %s", powershellQuote(shell.Path)))
+	lines = append(lines, fmt.Sprintf("$shellArgs = @(%s)", strings.Join(quotedArgs, ", ")))
+	lines = append(lines,
+		fmt.Sprintf("$writer = [System.IO.StreamWriter]::new(%s, $true, (New-Object System.Text.UTF8Encoding $false))", powershellQuote(logPath)),
+		"$scriptExitCode = 0",
+		"try {",
+	)
+	if strings.TrimSpace(cwd) != "" {
+		lines = append(lines, fmt.Sprintf("  Set-Location -LiteralPath %s", powershellQuote(cwd)))
+	}
+	lines = append(lines,
+		"  & $shellPath @shellArgs 2>&1 | ForEach-Object { $writer.WriteLine($_) }",
+		"  if ($null -ne $LASTEXITCODE) { $scriptExitCode = $LASTEXITCODE }",
+		"} catch {",
+		"  $writer.WriteLine($_.ToString())",
+		"  $scriptExitCode = 1",
+		"} finally {",
+		"  $writer.Dispose()",
+		"}",
+		fmt.Sprintf("[System.IO.File]::WriteAllText(%s, [string]$scriptExitCode, (New-Object System.Text.UTF8Encoding $false))", powershellQuote(statusPath)),
+		"exit 0",
+	)
+	return strings.Join(lines, "\r\n") + "\r\n"
+}
+
+func powershellQuote(text string) string {
+	return "'" + strings.ReplaceAll(text, "'", "''") + "'"
+}
+
+func windowsPowerShellHost() string {
+	if path, err := exec.LookPath("pwsh"); err == nil {
+		return path
+	}
+	if path, err := exec.LookPath("powershell"); err == nil {
+		return path
+	}
+	return "powershell"
 }

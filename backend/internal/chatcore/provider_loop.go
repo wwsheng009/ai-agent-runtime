@@ -3,8 +3,8 @@ package chatcore
 import (
 	"context"
 	"fmt"
-	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -115,15 +115,17 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 				ToolName:   call.Name,
 				ToolCallID: call.ID,
 				Arguments:  cloneInterfaceMap(call.Args),
+				Metadata:   cloneInterfaceMap(toolDefinitionMetadata(req.Tools, call.Name)),
 			})
 
 			toolResult := req.ToolExecutor.ExecuteTool(ctx, call)
 			execution := ToolExecutionSummary{
 				ToolCallID: call.ID,
 				ToolName:   call.Name,
-				Output:     strings.TrimSpace(toolResult.Content),
-				Error:      strings.TrimSpace(toolResult.Error),
-				Success:    strings.TrimSpace(toolResult.Error) == "",
+				Output:     toolResult.Content,
+				Error:      toolResult.Error,
+				Metadata:   cloneInterfaceMap(toolResult.Metadata),
+				Success:    toolResult.Error == "",
 			}
 			response.ToolExecutions = append(response.ToolExecutions, execution)
 			if execution.Success {
@@ -132,7 +134,14 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 				errorCount++
 			}
 
-			history = append(history, *types.NewToolMessage(call.ID, renderToolMessage(toolResult)))
+			toolMessage := types.NewToolMessage(call.ID, renderToolMessage(toolResult))
+			if len(toolResult.Metadata) > 0 {
+				toolMessage.Metadata = types.NewMetadata()
+				for key, value := range toolResult.Metadata {
+					toolMessage.Metadata[key] = cloneInterfaceValue(value)
+				}
+			}
+			history = append(history, *toolMessage)
 
 			emitChatEvent(req.EventSink, ChatEvent{
 				Type:       EventTool,
@@ -143,6 +152,7 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 				Output:     execution.Output,
 				Error:      execution.Error,
 				Success:    execution.Success,
+				Metadata:   cloneInterfaceMap(toolResult.Metadata),
 			})
 		}
 
@@ -163,14 +173,23 @@ func emitChatEvent(sink func(ChatEvent), event ChatEvent) {
 	}
 }
 
+func toolDefinitionMetadata(defs []types.ToolDefinition, toolName string) map[string]interface{} {
+	for _, def := range defs {
+		if def.Name == toolName {
+			return def.Metadata
+		}
+	}
+	return nil
+}
+
 func renderToolMessage(result ToolResult) string {
-	if content := strings.TrimSpace(result.Content); content != "" {
-		return content
+	var envelope *output.Envelope
+	if len(result.Metadata) > 0 {
+		envelope = &output.Envelope{
+			Metadata: cloneInterfaceMap(result.Metadata),
+		}
 	}
-	if errText := strings.TrimSpace(result.Error); errText != "" {
-		return "Tool execution failed: " + errText
-	}
-	return ""
+	return output.RenderToolResultContentForModel(result.Content, result.Error, envelope)
 }
 
 func cloneMessage(message *types.Message) *types.Message {

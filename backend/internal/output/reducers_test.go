@@ -59,6 +59,29 @@ func TestPlaywrightSnapshotReducer_Reduce(t *testing.T) {
 	}
 }
 
+func TestPlaywrightSnapshotReducer_DoesNotMatchGitStatusSnapshotPath(t *testing.T) {
+	reducer := &PlaywrightSnapshotReducer{}
+	text := strings.Join([]string{
+		"On branch main",
+		"Changes not staged for commit:",
+		"\tmodified:   backend/configs/config.runtime.snapshot.yaml",
+	}, "\n")
+
+	env, ok, err := reducer.Reduce(context.Background(), ReducedInput{
+		Raw: RawToolResult{
+			ToolName:   "execute_shell_command",
+			ToolCallID: "call-git-status",
+		},
+		Text: text,
+	})
+	if err != nil {
+		t.Fatalf("reduce git status output: %v", err)
+	}
+	if ok || env != nil {
+		t.Fatalf("expected reducer not to match git status, got ok=%v env=%#v", ok, env)
+	}
+}
+
 func TestGitLogReducer_Reduce(t *testing.T) {
 	reducer := &GitLogReducer{}
 	text := strings.Join([]string{

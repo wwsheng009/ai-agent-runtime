@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -128,6 +129,18 @@ func TestBrokerDefinitionsMarkCanonicalAndCompatibilityOutcomeTools(t *testing.T
 	blockEnum, ok := blockTaskStatus["enum"].([]string)
 	require.True(t, ok)
 	assert.Equal(t, []string{"blocked", "handoff"}, blockEnum)
+}
+
+func TestBrokerDefinitionsIncludeBrokerSourceMetadata(t *testing.T) {
+	store := newTeamStore(t)
+	broker := &Broker{TeamStore: store}
+
+	defs := broker.Definitions()
+	require.NotEmpty(t, defs)
+	for _, def := range defs {
+		require.NotNilf(t, def.Metadata, "expected metadata for %s", def.Name)
+		assert.Equalf(t, toolresult.SourceBroker, def.Metadata[toolresult.SourceKey], "unexpected %s for %s", toolresult.SourceKey, def.Name)
+	}
 }
 
 func TestBrokerDefinitionsAnnotateActiveTeamRunRequirements(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // EditTool 文件编辑工具（单处替换）
@@ -71,8 +72,9 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	filePath, ok := params["file_path"].(string)
 	if !ok || filePath == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("file_path 参数缺失或无效"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("file_path 参数缺失或无效"),
 		}, nil
 	}
 	p.FilePath = filePath
@@ -80,8 +82,9 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	oldString, ok := params["old_string"].(string)
 	if !ok || oldString == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("old_string 参数缺失或无效"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("old_string 参数缺失或无效"),
 		}, nil
 	}
 	p.OldString = oldString
@@ -89,8 +92,9 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	newString, ok := params["new_string"].(string)
 	if !ok {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("new_string 参数缺失或无效"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("new_string 参数缺失或无效"),
 		}, nil
 	}
 	p.NewString = newString
@@ -102,8 +106,9 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 
 	if err := e.checkPath(runtimeexecutor.OpWrite, resolvedPath); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 
@@ -111,16 +116,18 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	absPath, err := filepath.Abs(resolvedPath)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("解析文件路径失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("解析文件路径失败: %w", err),
 		}, nil
 	}
 
 	content, err := os.ReadFile(absPath)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("读取文件失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("读取文件失败: %w", err),
 		}, nil
 	}
 
@@ -129,8 +136,9 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// 检查 old_string 是否存在
 	if !strings.Contains(contentStr, p.OldString) {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("old_string 未在文件中找到，请确保完全匹配（包括空格和换行）"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("old_string 未在文件中找到，请确保完全匹配（包括空格和换行）"),
 		}, nil
 	}
 
@@ -159,8 +167,9 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	err = os.WriteFile(absPath, []byte(newContent), 0644)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("写入文件失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("写入文件失败: %w", err),
 		}, nil
 	}
 
@@ -177,8 +186,9 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	result := toolkit.ToolResult{
-		Success: true,
-		Content: fmt.Sprintf("成功替换了 %d 处匹配项", count),
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    fmt.Sprintf("成功替换了 %d 处匹配项", count),
 		Metadata: map[string]interface{}{
 			"file_path":     absPath,
 			"replacements":  count,

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/patchutil"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
@@ -252,7 +253,7 @@ func collectCommandArgs(args map[string]interface{}) []string {
 }
 
 func collectPathArgs(args map[string]interface{}) []string {
-	return collectStringArgs(args, map[string]bool{
+	paths := collectStringArgs(args, map[string]bool{
 		"path":           true,
 		"file":           true,
 		"source":         true,
@@ -265,6 +266,13 @@ func collectPathArgs(args map[string]interface{}) []string {
 		"paths":          true,
 		"files":          true,
 	})
+	if raw, ok := args["patch"].(string); ok {
+		paths = append(paths, patchutil.ExtractPaths(raw)...)
+	}
+	if raw, ok := args["diff"].(string); ok {
+		paths = append(paths, patchutil.ExtractPaths(raw)...)
+	}
+	return dedupeValues(paths)
 }
 
 func collectURLArgs(args map[string]interface{}) []string {
@@ -317,6 +325,29 @@ func collectStringArgs(args map[string]interface{}, keys map[string]bool) []stri
 		walk(value, strings.ToLower(strings.TrimSpace(key)))
 	}
 	return collected
+}
+
+func dedupeValues(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func buildAllowedToolsMap(allowedTools []string) map[string]bool {

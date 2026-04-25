@@ -11,6 +11,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // GrepTool 文件内容搜索工具
@@ -62,8 +63,9 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 	pattern, ok := params["pattern"].(string)
 	if !ok || pattern == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("pattern 参数缺失或无效"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("pattern 参数缺失或无效"),
 		}, nil
 	}
 
@@ -74,8 +76,9 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 	resolvedSearchPath := g.resolvePath(searchPath)
 	if err := g.checkPath(runtimeexecutor.OpRead, resolvedSearchPath); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 
@@ -98,8 +101,9 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 		re, err = regexp.Compile(pattern)
 		if err != nil {
 			return &toolkit.ToolResult{
-				Success: false,
-				Error:   fmt.Errorf("正则表达式无效: %w", err),
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("正则表达式无效: %w", err),
 			}, nil
 		}
 	}
@@ -162,8 +166,9 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("搜索失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("搜索失败: %w", err),
 		}, nil
 	}
 
@@ -179,8 +184,9 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: output,
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    output,
 		Metadata: map[string]interface{}{
 			"pattern":     pattern,
 			"path":        searchPath,

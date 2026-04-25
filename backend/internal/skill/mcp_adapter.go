@@ -2,9 +2,11 @@ package skill
 
 import (
 	"context"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // MCPAdapter MCP 适配器
@@ -92,6 +94,22 @@ func (a *MCPAdapter) ListTools() []ToolInfo {
 	}
 
 	return result
+}
+
+// ResolveToolSource reports the source category for the named tool.
+func (a *MCPAdapter) ResolveToolSource(toolName string) string {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" || a == nil || a.manager == nil {
+		return ""
+	}
+	info, err := a.manager.FindTool(toolName)
+	if err != nil || info == nil {
+		return ""
+	}
+	if strings.TrimSpace(info.MCPName) != "" {
+		return toolresult.SourceMCP
+	}
+	return ""
 }
 
 func cloneInputSchema(schema map[string]interface{}) map[string]interface{} {

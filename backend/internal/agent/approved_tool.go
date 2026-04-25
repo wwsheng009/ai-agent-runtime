@@ -10,6 +10,7 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -56,9 +57,16 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		"trace_id":        traceID,
 		"approved_resume": true,
 	}
-	a.emitRuntimeEvent("tool.requested", sessionID, call.Name, toolRequestedEventPayload(call, 0, traceID, map[string]interface{}{
+	if source := resolveToolSourceForRequest(a, call.Name); source != "" {
+		metadata[toolresult.SourceKey] = source
+	}
+	requestedExtra := map[string]interface{}{
 		"approved": true,
-	}))
+	}
+	if source := resolveToolSourceForRequest(a, call.Name); source != "" {
+		requestedExtra[toolresult.SourceKey] = source
+	}
+	a.emitRuntimeEvent("tool.requested", sessionID, call.Name, toolRequestedEventPayload(call, 0, traceID, requestedExtra))
 
 	finalize := func() *types.Message {
 		envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
@@ -80,17 +88,14 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		}))
 		a.runPostToolUseHooks(ctx, sessionID, result)
 		message := types.NewToolMessage(call.ID, "")
+		message.Content = output.RenderToolResultContentForModel(result.Output, result.Error, envelope)
 		if envelope != nil {
-			message.Content = envelope.Render()
 			if len(envelope.Metadata) > 0 {
 				message.Metadata = types.NewMetadata()
 				for key, value := range envelope.Metadata {
 					message.Metadata[key] = value
 				}
 			}
-		}
-		if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(result.Error) != "" {
-			message.Content = "Tool execution failed: " + strings.TrimSpace(result.Error)
 		}
 		return message
 	}

@@ -103,3 +103,49 @@ func TestPrintVisibleChatHistory_ReturnsZeroWhenOnlyHiddenSystemPromptExists(t *
 		t.Fatalf("expected no output when no visible history exists, got:\n%s", output)
 	}
 }
+
+func TestPrintVisibleChatHistory_TruncatesToolOutputForCLI(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	longOutput := strings.Join([]string{
+		"line 1",
+		"line 2",
+		"line 3",
+		"line 4",
+		"line 5",
+		"line 6",
+		"line 7",
+	}, "\n")
+
+	session := &ChatSession{
+		Messages: []map[string]interface{}{
+			{
+				"role":         "tool",
+				"tool_call_id": "call-1",
+				"content":      longOutput,
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		count := printVisibleChatHistory(session, "已加载历史会话")
+		if count != 1 {
+			t.Fatalf("expected 1 visible history message, got %d", count)
+		}
+	})
+
+	if !strings.Contains(output, "[call-1] line 1") {
+		t.Fatalf("expected truncated tool output to keep leading content, got:\n%s", output)
+	}
+	if !strings.Contains(output, "已省略剩余 1 行") {
+		t.Fatalf("expected truncated tool output marker, got:\n%s", output)
+	}
+	if strings.Contains(output, "line 7") {
+		t.Fatalf("did not expect full tool output in CLI history, got:\n%s", output)
+	}
+}

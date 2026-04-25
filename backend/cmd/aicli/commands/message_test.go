@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,7 +10,26 @@ import (
 	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
+
+type failingRichTestFunction struct {
+	testFunction
+	metadata map[string]interface{}
+	err      error
+}
+
+func (f *failingRichTestFunction) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	if f.err == nil {
+		f.err = errors.New("tool failed")
+	}
+	return "", f.err
+}
+
+func (f *failingRichTestFunction) ExecuteWithMeta(ctx context.Context, args map[string]interface{}) (string, map[string]interface{}, error) {
+	output, err := f.Execute(ctx, args)
+	return output, cloneFunctionSchema(f.metadata), err
+}
 
 func TestBuildRequestLogContent_IncludesFunctionExposureReport(t *testing.T) {
 	requestBody := map[string]interface{}{
@@ -64,6 +85,8 @@ func TestBuildToolExecutionSummary_IncludesSuccessAndErrorCalls(t *testing.T) {
 			ToolCallID:    "call-1",
 			Function:      "skill__alpha",
 			Success:       true,
+			ToolSource:    "mcp",
+			OutputKind:    "text",
 			ResultPreview: "OK",
 			ResultBytes:   2,
 		},
@@ -72,6 +95,8 @@ func TestBuildToolExecutionSummary_IncludesSuccessAndErrorCalls(t *testing.T) {
 			Function:   "builtin__diagnose",
 			Success:    false,
 			Error:      "boom",
+			ToolSource: "meta",
+			OutputKind: "json",
 		},
 	}, 1, 1)
 
@@ -86,6 +111,12 @@ func TestBuildToolExecutionSummary_IncludesSuccessAndErrorCalls(t *testing.T) {
 	}
 	if len(summary.Calls) != 2 || !summary.Calls[0].Success || summary.Calls[1].Error != "boom" {
 		t.Fatalf("unexpected call summaries: %+v", summary.Calls)
+	}
+	if summary.Calls[0].ToolSource != "mcp" || summary.Calls[0].OutputKind != "text" {
+		t.Fatalf("expected first call metadata, got %+v", summary.Calls[0])
+	}
+	if summary.Calls[1].ToolSource != "meta" || summary.Calls[1].OutputKind != "json" {
+		t.Fatalf("expected second call metadata, got %+v", summary.Calls[1])
 	}
 }
 
@@ -269,36 +300,37 @@ func TestExtractUsageFromResponseBody(t *testing.T) {
 	}
 }
 
-func TestFormatToolCallsDebugReport_IncludesParsedCalls(t *testing.T) {
-	report := formatToolCallsDebugReport([]functions.ToolCall{
-		{ID: "call-1", Function: "bash", Args: map[string]interface{}{"command": "git status"}},
-	})
-
-	if !strings.Contains(report, "parsed_tool_calls=1") {
-		t.Fatalf("unexpected report: %s", report)
-	}
-	if !strings.Contains(report, `function=bash`) || !strings.Contains(report, `"command":"git status"`) {
-		t.Fatalf("unexpected report: %s", report)
-	}
-}
-
 func TestFormatToolExecutionResultDebug_UsesPreviewAndError(t *testing.T) {
 	successReport := formatToolExecutionResultDebug(
 		functions.ToolCall{ID: "call-1", Function: "bash"},
 		"line1\nline2",
 		nil,
+		map[string]interface{}{
+			toolresult.SourceKey:   toolresult.SourceToolkit,
+			toolresult.MetadataKey: toolresult.KindText,
+		},
 	)
 	if !strings.Contains(successReport, "success=true") || !strings.Contains(successReport, `preview="line1`) {
 		t.Fatalf("unexpected success report: %s", successReport)
+	}
+	if !strings.Contains(successReport, "source=toolkit") || !strings.Contains(successReport, "kind=text") {
+		t.Fatalf("expected metadata in success report: %s", successReport)
 	}
 
 	errorReport := formatToolExecutionResultDebug(
 		functions.ToolCall{ID: "call-2", Function: "view"},
 		"",
 		http.ErrHandlerTimeout,
+		map[string]interface{}{
+			toolresult.SourceKey:   toolresult.SourceMeta,
+			toolresult.MetadataKey: toolresult.KindStructured,
+		},
 	)
 	if !strings.Contains(errorReport, "success=false") || !strings.Contains(errorReport, http.ErrHandlerTimeout.Error()) {
 		t.Fatalf("unexpected error report: %s", errorReport)
+	}
+	if !strings.Contains(errorReport, "source=meta") || !strings.Contains(errorReport, "kind=structured") {
+		t.Fatalf("expected metadata in error report: %s", errorReport)
 	}
 }
 
@@ -308,6 +340,10 @@ func TestFormatToolExecutionSummaryDebug_IncludesCounts(t *testing.T) {
 		SuccessCount: 1,
 		ErrorCount:   1,
 		Functions:    []string{"bash", "view"},
+		Calls: []aicliToolExecutionCallSummary{
+			{ToolCallID: "call-1", Function: "bash", Success: true, ToolSource: "toolkit", OutputKind: "text"},
+			{ToolCallID: "call-2", Function: "view", Success: false, ToolSource: "meta", OutputKind: "json"},
+		},
 	})
 
 	if !strings.Contains(report, "summary calls=2 success=1 error=1") {
@@ -315,6 +351,12 @@ func TestFormatToolExecutionSummaryDebug_IncludesCounts(t *testing.T) {
 	}
 	if !strings.Contains(report, "functions=bash, view") {
 		t.Fatalf("unexpected report: %s", report)
+	}
+	if !strings.Contains(report, "call id=call-1 function=bash success=true source=toolkit kind=text") {
+		t.Fatalf("expected first call metadata in report: %s", report)
+	}
+	if !strings.Contains(report, "call id=call-2 function=view success=false source=meta kind=json") {
+		t.Fatalf("expected second call metadata in report: %s", report)
 	}
 }
 

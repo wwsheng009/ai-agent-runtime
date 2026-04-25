@@ -8,6 +8,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // WriteTool 文件写入工具
@@ -57,8 +58,9 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	filePath, ok := params["file_path"].(string)
 	if !ok || filePath == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("file_path 参数缺失或无效"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("file_path 参数缺失或无效"),
 		}, nil
 	}
 	p.FilePath = filePath
@@ -66,8 +68,9 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	content, ok := params["content"].(string)
 	if !ok {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("content 参数缺失或无效"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("content 参数缺失或无效"),
 		}, nil
 	}
 	p.Content = content
@@ -75,8 +78,9 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 
 	if err := w.checkPath(runtimeexecutor.OpWrite, resolvedPath); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 
@@ -84,8 +88,9 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	absPath, err := filepath.Abs(resolvedPath)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("解析文件路径失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("解析文件路径失败: %w", err),
 		}, nil
 	}
 
@@ -98,8 +103,9 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 		oldSize = fileInfo.Size()
 		if !fileInfo.Mode().IsRegular() {
 			return &toolkit.ToolResult{
-				Success: false,
-				Error:   fmt.Errorf("路径已存在但不是常规文件: %s", absPath),
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("路径已存在但不是常规文件: %s", absPath),
 			}, nil
 		}
 		if content, readErr := os.ReadFile(absPath); readErr == nil {
@@ -111,8 +117,9 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	dir := filepath.Dir(absPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("创建目录失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("创建目录失败: %w", err),
 		}, nil
 	}
 
@@ -120,8 +127,9 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	err = os.WriteFile(absPath, []byte(p.Content), 0644)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("写入文件失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("写入文件失败: %w", err),
 		}, nil
 	}
 
@@ -129,8 +137,9 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	newInfo, err := os.Stat(absPath)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("获取文件信息失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("获取文件信息失败: %w", err),
 		}, nil
 	}
 
@@ -140,8 +149,9 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	}
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: fmt.Sprintf("成功%s文件: %s\n文件大小: %d 字节", action, absPath, newInfo.Size()),
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    fmt.Sprintf("成功%s文件: %s\n文件大小: %d 字节", action, absPath, newInfo.Size()),
 		Metadata: map[string]interface{}{
 			"file_path":     absPath,
 			"action":        action,

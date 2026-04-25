@@ -43,7 +43,14 @@ func (a *OpenAIAdapter) BuildRequest(config RequestConfig) map[string]interface{
 	// Add Function Call
 	if config.Functions != nil {
 		request["tools"] = config.Functions
-		request["tool_choice"] = "auto"
+	}
+
+	applyOpenAICompatibleRequestMetadata(request, config)
+
+	if config.Functions != nil {
+		if _, exists := request["tool_choice"]; !exists {
+			request["tool_choice"] = "auto"
+		}
 	}
 
 	return request
@@ -97,8 +104,10 @@ func (a *OpenAIAdapter) ProcessResponse(result map[string]interface{}) ProcessRe
 			if msg, ok := choice["message"].(map[string]interface{}); ok {
 				if reasoning, ok := msg["reasoning_content"].(string); ok {
 					procResult.Reasoning = reasoning
+					procResult.ReasoningPresent = true
 				} else if reasoning, ok := msg["reasoning"].(string); ok {
 					procResult.Reasoning = reasoning
+					procResult.ReasoningPresent = true
 				}
 				if content, ok := msg["content"].(string); ok {
 					procResult.Content = content
@@ -181,12 +190,13 @@ type StreamToolCall struct {
 
 // StreamState 管理流式响应的累积状态
 type StreamState struct {
-	Content      strings.Builder
-	Reasoning    strings.Builder
-	ToolCalls    map[int]*StreamToolCall // key 是 tool_call 的 index
-	MarkupTail   string
-	MarkupCalls  []map[string]interface{}
-	FinishReason string
+	Content          strings.Builder
+	Reasoning        strings.Builder
+	ReasoningPresent bool
+	ToolCalls        map[int]*StreamToolCall // key 是 tool_call 的 index
+	MarkupTail       string
+	MarkupCalls      []map[string]interface{}
+	FinishReason     string
 }
 
 // NewStreamState 创建新的累积器
@@ -449,7 +459,7 @@ func (s *StreamState) ToMap() map[string]interface{} {
 	result := map[string]interface{}{
 		"content": s.Content.String(),
 	}
-	if s.Reasoning.Len() > 0 {
+	if s.ReasoningPresent {
 		result["reasoning"] = s.Reasoning.String()
 	}
 
@@ -533,12 +543,18 @@ func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, callba
 		toolCalls, _ := streamData["tool_calls"].([]map[string]interface{})
 		content, _ := streamData["content"].(string)
 		reasoning, _ := streamData["reasoning"].(string)
-		return attachReasoningBlock(a.BuildAssistantMessage(content, toolCalls, reasoning), &runtimetypes.ReasoningBlock{
-			Format:     "openai_compatible",
-			Summary:    strings.TrimSpace(reasoning),
-			Streamable: true,
-			Visibility: runtimetypes.ReasoningVisibilitySummary,
-		}), nil
+		_, reasoningPresent := streamData["reasoning"]
+		assistantMsg := a.buildAssistantMessageWithReasoningPresence(content, toolCalls, reasoning, reasoningPresent)
+		var reasoningBlock *runtimetypes.ReasoningBlock
+		if strings.TrimSpace(reasoning) != "" {
+			reasoningBlock = &runtimetypes.ReasoningBlock{
+				Format:     "openai_compatible",
+				Summary:    strings.TrimSpace(reasoning),
+				Streamable: true,
+				Visibility: runtimetypes.ReasoningVisibilitySummary,
+			}
+		}
+		return attachReasoningBlock(assistantMsg, reasoningBlock), nil
 	}
 
 	var result map[string]interface{}
@@ -547,7 +563,8 @@ func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, callba
 	}
 
 	procResult := a.ProcessResponse(result)
-	return attachReasoningBlock(a.BuildAssistantMessage(procResult.Content, procResult.ToolCalls, procResult.Reasoning), procResult.ReasoningBlock), nil
+	assistantMsg := a.buildAssistantMessageWithReasoningPresence(procResult.Content, procResult.ToolCalls, procResult.Reasoning, procResult.ReasoningPresent)
+	return attachReasoningBlock(assistantMsg, procResult.ReasoningBlock), nil
 }
 
 // parseChunk 解析单个流式 chunk
@@ -611,14 +628,20 @@ func flushPendingMarkupContent(state *StreamState, callbacks StreamCallbacks) {
 }
 
 func parseReasoning(state *StreamState, delta map[string]interface{}, callbacks StreamCallbacks) {
-	if reasoning, ok := delta["reasoning_content"].(string); ok && reasoning != "" {
-		state.Reasoning.WriteString(reasoning)
-		callbacks.EmitReasoning(reasoning)
+	if reasoning, ok := delta["reasoning_content"].(string); ok {
+		state.ReasoningPresent = true
+		if reasoning != "" {
+			state.Reasoning.WriteString(reasoning)
+			callbacks.EmitReasoning(reasoning)
+		}
 		return
 	}
-	if reasoning, ok := delta["reasoning"].(string); ok && reasoning != "" {
-		state.Reasoning.WriteString(reasoning)
-		callbacks.EmitReasoning(reasoning)
+	if reasoning, ok := delta["reasoning"].(string); ok {
+		state.ReasoningPresent = true
+		if reasoning != "" {
+			state.Reasoning.WriteString(reasoning)
+			callbacks.EmitReasoning(reasoning)
+		}
 	}
 }
 
@@ -648,10 +671,10 @@ func parseToolCalls(state *StreamState, delta map[string]interface{}) {
 
 		tc := state.getToolCall(index)
 
-		if id, ok := tcMap["id"].(string); ok {
+		if id, ok := tcMap["id"].(string); ok && id != "" {
 			tc.ID = id
 		}
-		if typ, ok := tcMap["type"].(string); ok {
+		if typ, ok := tcMap["type"].(string); ok && typ != "" {
 			tc.Type = typ
 		}
 
@@ -666,7 +689,7 @@ func parseFunction(tc *StreamToolCall, tcMap map[string]interface{}) {
 		return
 	}
 
-	if name, ok := fn["name"].(string); ok {
+	if name, ok := fn["name"].(string); ok && name != "" {
 		tc.Name = name
 	}
 	if args, ok := fn["arguments"].(string); ok {
@@ -692,6 +715,14 @@ func (a *OpenAIAdapter) BuildAssistantMessage(content string, toolCalls []map[st
 		msg["tool_calls"] = toolCalls
 	}
 	if reasoning != "" {
+		msg["reasoning_content"] = reasoning
+	}
+	return msg
+}
+
+func (a *OpenAIAdapter) buildAssistantMessageWithReasoningPresence(content string, toolCalls []map[string]interface{}, reasoning string, reasoningPresent bool) map[string]interface{} {
+	msg := a.BuildAssistantMessage(content, toolCalls, reasoning)
+	if reasoningPresent {
 		msg["reasoning_content"] = reasoning
 	}
 	return msg

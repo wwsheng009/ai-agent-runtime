@@ -75,6 +75,17 @@ type HTTPTimeout struct {
 	UpstreamAcceptEncoding   string        `yaml:"upstream_accept_encoding" mapstructure:"upstream_accept_encoding"`
 }
 
+// NativeToolCapabilities declares provider-native tool support for one model.
+type NativeToolCapabilities struct {
+	ImageGeneration bool `yaml:"image_generation" mapstructure:"image_generation" json:"image_generation"`
+}
+
+// ModelCapabilitySpec declares per-model input modalities and native tool support.
+type ModelCapabilitySpec struct {
+	InputModalities []string               `yaml:"input_modalities" mapstructure:"input_modalities" json:"input_modalities"`
+	NativeTools     NativeToolCapabilities `yaml:"native_tools" mapstructure:"native_tools" json:"native_tools"`
+}
+
 // Provider holds provider configuration.
 type Provider struct {
 	Enabled            bool                `yaml:"enabled" mapstructure:"enabled" json:"enabled"`
@@ -93,6 +104,7 @@ type Provider struct {
 	HeaderMappingRules []HeaderMappingRule `yaml:"header_mapping_rules" mapstructure:"header_mapping_rules" json:"header_mapping_rules"`
 	SupportTypes       []string            `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
 	ModelMappings      map[string]string   `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
+	ModelCapabilities  map[string]ModelCapabilitySpec `yaml:"model_capabilities" mapstructure:"model_capabilities" json:"model_capabilities"`
 	MaxTokensLimit     int                 `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
 	Timeout            time.Duration       `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
 	Proxy              *ProxyConfig        `yaml:"proxy" mapstructure:"proxy" json:"proxy"`

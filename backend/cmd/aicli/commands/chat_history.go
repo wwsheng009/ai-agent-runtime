@@ -78,6 +78,7 @@ func buildChatHistoryEntry(raw map[string]interface{}, hiddenSystemPrompt string
 		if content == "" {
 			return chatHistoryEntry{}, false
 		}
+		content = truncateOutputPreview(content, maxToolResultPreviewLines, maxToolResultPreviewBytes)
 		if toolCallID := strings.TrimSpace(chatHistoryString(raw["tool_call_id"])); toolCallID != "" {
 			content = fmt.Sprintf("[%s] %s", toolCallID, content)
 		}

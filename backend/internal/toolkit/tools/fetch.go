@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // FetchTool HTTP 内容获取工具
@@ -60,22 +61,25 @@ func (f *FetchTool) Execute(ctx context.Context, params map[string]interface{}) 
 	url, ok := params["url"].(string)
 	if !ok || url == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("url 参数缺失或为空"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("url 参数缺失或为空"),
 		}, nil
 	}
 
 	// 验证 URL
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("URL 必须以 http:// 或 https:// 开头"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("URL 必须以 http:// 或 https:// 开头"),
 		}, nil
 	}
 	if err := f.checkURL(url); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 
@@ -105,8 +109,9 @@ func (f *FetchTool) Execute(ctx context.Context, params map[string]interface{}) 
 	req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("创建请求失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("创建请求失败: %w", err),
 		}, nil
 	}
 
@@ -120,8 +125,9 @@ func (f *FetchTool) Execute(ctx context.Context, params map[string]interface{}) 
 	resp, err := client.Do(req)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("请求失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("请求失败: %w", err),
 		}, nil
 	}
 	defer resp.Body.Close()
@@ -129,16 +135,18 @@ func (f *FetchTool) Execute(ctx context.Context, params map[string]interface{}) 
 	// 检查响应状态
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("HTTP 错误: %s", resp.Status),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("HTTP 错误: %s", resp.Status),
 		}, nil
 	}
 
 	// 检查内容大小
 	if resp.ContentLength > f.maxSize {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("内容太大: %d 字节（最大 %d 字节）", resp.ContentLength, f.maxSize),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("内容太大: %d 字节（最大 %d 字节）", resp.ContentLength, f.maxSize),
 		}, nil
 	}
 
@@ -147,15 +155,17 @@ func (f *FetchTool) Execute(ctx context.Context, params map[string]interface{}) 
 	content, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("读取内容失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("读取内容失败: %w", err),
 		}, nil
 	}
 
 	if int64(len(content)) > f.maxSize {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("内容超过最大限制 %d 字节", f.maxSize),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("内容超过最大限制 %d 字节", f.maxSize),
 		}, nil
 	}
 
@@ -176,8 +186,9 @@ func (f *FetchTool) Execute(ctx context.Context, params map[string]interface{}) 
 	}
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: result,
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    result,
 		Metadata: map[string]interface{}{
 			"url":          url,
 			"format":       format,

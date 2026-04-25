@@ -1,7 +1,9 @@
 package llm
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -180,6 +182,8 @@ func canonicalizeCodexOutputItem(item map[string]interface{}) map[string]interfa
 		return canonicalizeCodexReasoningOutputItem(item)
 	case "message":
 		return canonicalizeCodexMessageOutputItem(item)
+	case "image_generation_call":
+		return canonicalizeCodexImageGenerationOutputItem(item)
 	case "function_call":
 		return canonicalizeCodexFunctionCallOutputItem(item)
 	case "function_call_output":
@@ -260,6 +264,25 @@ func canonicalizeCodexFunctionCallOutputItem(item map[string]interface{}) map[st
 		"name":      name,
 		"arguments": arguments,
 	}
+}
+
+func canonicalizeCodexImageGenerationOutputItem(item map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{
+		"type": "image_generation_call",
+	}
+	if id, _ := item["id"].(string); strings.TrimSpace(id) != "" {
+		out["id"] = strings.TrimSpace(id)
+	}
+	if status, _ := item["status"].(string); strings.TrimSpace(status) != "" {
+		out["status"] = strings.TrimSpace(status)
+	}
+	if revisedPrompt, _ := item["revised_prompt"].(string); strings.TrimSpace(revisedPrompt) != "" {
+		out["revised_prompt"] = strings.TrimSpace(revisedPrompt)
+	}
+	if result, ok := item["result"].(string); ok {
+		out["result"] = result
+	}
+	return out
 }
 
 func canonicalizeCodexFunctionCallResultOutputItem(item map[string]interface{}) map[string]interface{} {
@@ -386,22 +409,30 @@ func decodeMapAny(raw interface{}) map[string]interface{} {
 	return nil
 }
 
-func runtimeMessageToAdapterMessage(msg types.Message, protocol string) map[string]interface{} {
+func runtimeMessageToAdapterMessage(msg types.Message, protocol string, providerHint string) map[string]interface{} {
 	reasoning := reasoningFromMessageMetadata(msg.Metadata)
 	toolCalls := encodeRuntimeToolCalls(msg.ToolCalls)
-	return buildProtocolMessageMap(msg.Role, msg.Content, toolCalls, msg.ToolCallID, reasoning, protocol)
+	return buildProtocolMessageMap(msg.Role, msg.Content, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, mapFromMetadata(msg.Metadata))
 }
 
 // RuntimeMessagesToProtocolMessages converts normalized runtime messages into
 // protocol-specific request payloads.
-func RuntimeMessagesToProtocolMessages(messages []types.Message, protocol string) []map[string]interface{} {
+func RuntimeMessagesToProtocolMessages(messages []types.Message, protocol string, providerHints ...string) []map[string]interface{} {
 	if len(messages) == 0 {
 		return nil
 	}
 
+	providerHint := ""
+	for _, hint := range providerHints {
+		if trimmed := strings.TrimSpace(hint); trimmed != "" {
+			providerHint = trimmed
+			break
+		}
+	}
+
 	result := make([]map[string]interface{}, 0, len(messages))
 	for _, msg := range messages {
-		result = append(result, runtimeMessageToAdapterMessage(msg, protocol))
+		result = append(result, runtimeMessageToAdapterMessage(msg, protocol, providerHint))
 	}
 	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
 		result = sanitizeCodexProtocolMessages(result)
@@ -474,7 +505,7 @@ func codexMessageToolCallIDs(message map[string]interface{}) map[string]struct{}
 	return ids
 }
 
-func providerMessageToAdapterMessage(msg Message, protocol string) map[string]interface{} {
+func providerMessageToAdapterMessage(msg Message, protocol string, providerHint string) map[string]interface{} {
 	reasoning := reasoningFromMapMetadata(msg.Metadata)
 	if reasoning == nil && strings.TrimSpace(msg.Reasoning) != "" {
 		reasoning = &types.ReasoningBlock{
@@ -483,24 +514,24 @@ func providerMessageToAdapterMessage(msg Message, protocol string) map[string]in
 		}
 	}
 	toolCalls := encodeProviderToolCalls(msg.ToolCalls)
-	return buildProtocolMessageMap(msg.Role, msg.Content, toolCalls, msg.ToolCallID, reasoning, protocol)
+	return buildProtocolMessageMap(msg.Role, msg.Content, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, msg.Metadata)
 }
 
-func buildProtocolMessageMap(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, protocol string) map[string]interface{} {
+func buildProtocolMessageMap(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, protocol string, providerHint string, messageMetadata map[string]interface{}) map[string]interface{} {
 	normalizedProtocol := strings.ToLower(strings.TrimSpace(protocol))
 	switch normalizedProtocol {
 	case "codex":
-		return buildCodexProtocolMessage(role, content, toolCalls, toolCallID, reasoning)
+		return buildCodexProtocolMessage(role, content, toolCalls, toolCallID, reasoning, messageMetadata)
 	case "anthropic":
 		return buildAnthropicProtocolMessage(role, content, toolCalls, toolCallID, reasoning)
 	case "gemini":
 		return buildGeminiProtocolMessage(role, content, toolCalls, toolCallID, reasoning)
 	default:
-		return buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning)
+		return buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, providerHint, messageMetadata)
 	}
 }
 
-func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock) map[string]interface{} {
+func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, providerHint string, messageMetadata map[string]interface{}) map[string]interface{} {
 	message := map[string]interface{}{
 		"role":    role,
 		"content": content,
@@ -511,16 +542,29 @@ func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]int
 	if strings.TrimSpace(toolCallID) != "" {
 		message["tool_call_id"] = strings.TrimSpace(toolCallID)
 	}
+	if name, ok := stringMetadataValue(messageMetadata, "name"); ok {
+		message["name"] = name
+	}
+	if strings.EqualFold(strings.TrimSpace(role), "assistant") {
+		if prefix, ok := boolMetadataValue(messageMetadata, "prefix"); ok {
+			message["prefix"] = prefix
+		}
+		if reasoningContent, ok := stringMetadataValueAllowEmpty(messageMetadata, "reasoning_content"); ok {
+			message["reasoning_content"] = reasoningContent
+		} else if reasoningContent, ok := replayableOpenAIReasoningContent(toolCalls, reasoning, providerHint); ok {
+			message["reasoning_content"] = reasoningContent
+		}
+	}
 	return message
 }
 
-func buildCodexProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock) map[string]interface{} {
-	message := buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning)
+func buildCodexProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, messageMetadata map[string]interface{}) map[string]interface{} {
+	message := buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, "", nil)
 	if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
 		return message
 	}
 
-	outputItems := codexProtocolOutputItems(content, toolCalls, reasoning)
+	outputItems := codexProtocolOutputItems(content, toolCalls, reasoning, messageMetadata)
 	if len(outputItems) > 0 {
 		message[codexResponseOutputItemsMessageKey] = outputItems
 		delete(message, "reasoning_content")
@@ -532,10 +576,10 @@ func buildCodexProtocolMessage(role, content string, toolCalls []map[string]inte
 	return message
 }
 
-func codexProtocolOutputItems(content string, toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock) []map[string]interface{} {
+func codexProtocolOutputItems(content string, toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock, messageMetadata map[string]interface{}) []map[string]interface{} {
 	if reasoning != nil {
 		if outputItems := canonicalizeCodexOutputItems(reasoning.Metadata[reasoningMetadataCodexOutputItemsKey]); len(outputItems) > 0 {
-			return outputItems
+			return hydrateCodexImageGenerationResults(outputItems, messageMetadata)
 		}
 	}
 
@@ -572,6 +616,68 @@ func codexProtocolOutputItems(content string, toolCalls []map[string]interface{}
 		return nil
 	}
 	return items
+}
+
+func hydrateCodexImageGenerationResults(outputItems []map[string]interface{}, messageMetadata map[string]interface{}) []map[string]interface{} {
+	if len(outputItems) == 0 {
+		return nil
+	}
+	generatedImages := decodeSliceOfMaps(messageMetadata[MetadataKeyGeneratedImages])
+	if len(generatedImages) == 0 {
+		return outputItems
+	}
+
+	savedPaths := make(map[string]string, len(generatedImages))
+	for _, image := range generatedImages {
+		id := strings.TrimSpace(stringValue(image["id"]))
+		savedPath := strings.TrimSpace(stringValue(image["saved_path"]))
+		if id != "" && savedPath != "" {
+			savedPaths[id] = savedPath
+		}
+	}
+	if len(savedPaths) == 0 {
+		return outputItems
+	}
+
+	hydrated := make([]map[string]interface{}, 0, len(outputItems))
+	changed := false
+	for _, item := range outputItems {
+		cloned := cloneDeepMapStringAny(item)
+		if !strings.EqualFold(strings.TrimSpace(stringValue(cloned["type"])), codexImageGenerationCallType) {
+			hydrated = append(hydrated, cloned)
+			continue
+		}
+		if strings.TrimSpace(stringValue(cloned["result"])) != "" {
+			hydrated = append(hydrated, cloned)
+			continue
+		}
+
+		id := strings.TrimSpace(stringValue(cloned["id"]))
+		savedPath := strings.TrimSpace(savedPaths[id])
+		if id == "" || savedPath == "" {
+			hydrated = append(hydrated, cloned)
+			continue
+		}
+
+		bytes, err := os.ReadFile(savedPath)
+		if err != nil || len(bytes) == 0 {
+			hydrated = append(hydrated, cloned)
+			continue
+		}
+
+		cloned["result"] = base64.StdEncoding.EncodeToString(bytes)
+		status := strings.ToLower(strings.TrimSpace(stringValue(cloned["status"])))
+		if status == "" || status == "generating" || status == "in_progress" {
+			cloned["status"] = "completed"
+		}
+		hydrated = append(hydrated, cloned)
+		changed = true
+	}
+
+	if !changed {
+		return outputItems
+	}
+	return hydrated
 }
 
 func codexReasoningSummary(reasoning *types.ReasoningBlock) string {
@@ -767,6 +873,70 @@ func geminiFunctionCallPart(toolCall map[string]interface{}) map[string]interfac
 		part["functionCall"].(map[string]interface{})["id"] = id
 	}
 	return part
+}
+
+func stringMetadataValue(metadata map[string]interface{}, key string) (string, bool) {
+	if len(metadata) == 0 {
+		return "", false
+	}
+	value, ok := metadata[key].(string)
+	if !ok {
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	return value, true
+}
+
+func stringMetadataValueAllowEmpty(metadata map[string]interface{}, key string) (string, bool) {
+	if len(metadata) == 0 {
+		return "", false
+	}
+	value, exists := metadata[key]
+	if !exists {
+		return "", false
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", false
+	}
+	return text, true
+}
+
+func boolMetadataValue(metadata map[string]interface{}, key string) (bool, bool) {
+	if len(metadata) == 0 {
+		return false, false
+	}
+	value, ok := metadata[key].(bool)
+	if !ok {
+		return false, false
+	}
+	return value, true
+}
+
+func replayableOpenAIReasoningContent(toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock, providerHint string) (string, bool) {
+	provider := strings.ToLower(strings.TrimSpace(providerHint))
+	if reasoning != nil {
+		if normalized := strings.ToLower(strings.TrimSpace(reasoning.Provider)); normalized != "" {
+			provider = normalized
+		}
+		if strings.HasPrefix(provider, "deepseek") {
+			return reasoning.RawDisplayText(), true
+		}
+		if len(toolCalls) == 0 && !reasoning.ReplayRequired {
+			return "", false
+		}
+		if text := strings.TrimSpace(reasoning.DisplayText()); text != "" {
+			return text, true
+		}
+		return "", false
+	}
+	if strings.HasPrefix(provider, "deepseek") && len(toolCalls) > 0 {
+		return "", true
+	}
+	return "", false
 }
 
 func encodeRuntimeToolCalls(calls []types.ToolCall) []map[string]interface{} {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // SourcegraphTool 代码搜索工具
@@ -72,8 +73,9 @@ func (s *SourcegraphTool) Execute(ctx context.Context, params map[string]interfa
 	query, ok := params["query"].(string)
 	if !ok || query == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("query 参数缺失或为空"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("query 参数缺失或为空"),
 		}, nil
 	}
 
@@ -132,22 +134,25 @@ query Search($query: String!, $first: Int!) {
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("序列化请求失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("序列化请求失败: %w", err),
 		}, nil
 	}
 	if err := s.checkURL(s.baseURL); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", s.baseURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("创建请求失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("创建请求失败: %w", err),
 		}, nil
 	}
 
@@ -157,8 +162,9 @@ query Search($query: String!, $first: Int!) {
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("请求失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("请求失败: %w", err),
 		}, nil
 	}
 	defer resp.Body.Close()
@@ -166,15 +172,17 @@ query Search($query: String!, $first: Int!) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("读取响应失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("读取响应失败: %w", err),
 		}, nil
 	}
 
 	if resp.StatusCode != 200 {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("API 错误 (状态码 %d): %s", resp.StatusCode, string(body)),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("API 错误 (状态码 %d): %s", resp.StatusCode, string(body)),
 		}, nil
 	}
 
@@ -208,15 +216,17 @@ query Search($query: String!, $first: Int!) {
 
 	if err := json.Unmarshal(body, &result); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("解析响应失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("解析响应失败: %w", err),
 		}, nil
 	}
 
 	if len(result.Errors) > 0 {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("API 错误: %s", result.Errors[0].Message),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("API 错误: %s", result.Errors[0].Message),
 		}, nil
 	}
 
@@ -264,8 +274,9 @@ query Search($query: String!, $first: Int!) {
 	}
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: output.String(),
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    output.String(),
 		Metadata: map[string]interface{}{
 			"query":             query,
 			"count":             len(result.Data.Search.Results.Results),

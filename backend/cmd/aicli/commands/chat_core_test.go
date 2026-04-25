@@ -20,6 +20,8 @@ import (
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -267,8 +269,8 @@ func TestAICLIProviderTurnExecutor_UsesSanitizedProtocolMessagesForSharedReplay(
 	if _, exists := assistantPayload["metadata"]; exists {
 		t.Fatalf("did not expect raw metadata in assistant replay message: %#v", assistantPayload)
 	}
-	if _, exists := assistantPayload["reasoning_content"]; exists {
-		t.Fatalf("did not expect reasoning_content in openai replay message: %#v", assistantPayload)
+	if got := assistantPayload["reasoning_content"]; got != "先看目录。" {
+		t.Fatalf("expected reasoning_content in openai replay message, got %#v", got)
 	}
 	toolCalls, ok := assistantPayload["tool_calls"].([]interface{})
 	if !ok || len(toolCalls) != 1 {
@@ -292,6 +294,178 @@ func TestAICLIProviderTurnExecutor_UsesSanitizedProtocolMessagesForSharedReplay(
 	}
 	if _, exists := toolPayload["metadata"]; exists {
 		t.Fatalf("did not expect raw metadata in tool replay message: %#v", toolPayload)
+	}
+}
+
+func TestAICLIProviderTurnExecutor_ReplaysDeepSeekReasoningContentAfterToolTurns(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+
+	recordingAdapter := &recordingProtocolAdapter{
+		response: map[string]interface{}{
+			"role":    "assistant",
+			"content": "done",
+		},
+	}
+
+	session := &ChatSession{
+		ProviderName:  "",
+		Provider:      config.Provider{Protocol: "openai", BaseURL: server.URL},
+		Adapter:       recordingAdapter,
+		Model:         "deepseek-v4-flash",
+		BaseURL:       server.URL,
+		HTTPClient:    server.Client(),
+		cancelCtx:     context.Background(),
+		NoInteractive: true,
+	}
+
+	assistantToolMsg := types.Message{
+		Role:    "assistant",
+		Content: "",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_1", Name: "ls"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+	types.SetReasoningBlock(assistantToolMsg.Metadata, &types.ReasoningBlock{
+		Provider:   "deepseek",
+		Format:     "openai_compatible",
+		Summary:    "Let me inspect the workspace first.",
+		Streamable: true,
+		Visibility: types.ReasoningVisibilitySummary,
+	})
+
+	toolMsg := types.Message{
+		Role:       "tool",
+		Content:    "目录: .",
+		ToolCallID: "call_1",
+		Metadata:   types.NewMetadata(),
+	}
+
+	assistantSummaryMsg := types.Message{
+		Role:     "assistant",
+		Content:  "当前目录已经确认。",
+		Metadata: types.NewMetadata(),
+	}
+	types.SetReasoningBlock(assistantSummaryMsg.Metadata, &types.ReasoningBlock{
+		Provider:   "deepseek",
+		Format:     "openai_compatible",
+		Summary:    "Now I can see the directory structure. Let me show this to the user.",
+		Streamable: true,
+		Visibility: types.ReasoningVisibilitySummary,
+	})
+
+	userMsg := types.Message{
+		Role:     "user",
+		Content:  "check git status",
+		Metadata: types.NewMetadata(),
+	}
+
+	executor := &aicliProviderTurnExecutor{session: session}
+	turn, err := executor.Complete(context.Background(), runtimechatcore.ProviderTurnRequest{
+		Messages: []types.Message{assistantToolMsg, toolMsg, assistantSummaryMsg, userMsg},
+	})
+	if err != nil {
+		t.Fatalf("Complete failed: %v", err)
+	}
+	if turn == nil || turn.Message == nil || turn.Message.Content != "done" {
+		t.Fatalf("unexpected turn response: %#v", turn)
+	}
+
+	messages, ok := capturedBody["messages"].([]interface{})
+	if !ok || len(messages) != 4 {
+		t.Fatalf("expected 4 request messages, got %#v", capturedBody["messages"])
+	}
+
+	finalAssistantPayload, ok := messages[2].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected final assistant payload map, got %T", messages[2])
+	}
+	if got := finalAssistantPayload["reasoning_content"]; got != "Now I can see the directory structure. Let me show this to the user." {
+		t.Fatalf("expected deepseek final assistant reasoning_content replay, got %#v", got)
+	}
+}
+
+func TestAICLIProviderTurnExecutor_ReplaysDeepSeekEmptyReasoningContentForToolCalls(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+
+	recordingAdapter := &recordingProtocolAdapter{
+		response: map[string]interface{}{
+			"role":    "assistant",
+			"content": "done",
+		},
+	}
+
+	session := &ChatSession{
+		ProviderName:  "deepseek",
+		Provider:      config.Provider{Protocol: "openai", BaseURL: server.URL},
+		Adapter:       recordingAdapter,
+		Model:         "deepseek-v4-flash",
+		BaseURL:       server.URL,
+		HTTPClient:    server.Client(),
+		cancelCtx:     context.Background(),
+		NoInteractive: true,
+	}
+
+	assistantToolMsg := types.Message{
+		Role:    "assistant",
+		Content: "",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_view", Name: "view"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+
+	toolMsg := types.Message{
+		Role:       "tool",
+		Content:    "diff preview",
+		ToolCallID: "call_view",
+		Metadata:   types.NewMetadata(),
+	}
+
+	userMsg := types.Message{
+		Role:     "user",
+		Content:  "继续",
+		Metadata: types.NewMetadata(),
+	}
+
+	executor := &aicliProviderTurnExecutor{session: session}
+	turn, err := executor.Complete(context.Background(), runtimechatcore.ProviderTurnRequest{
+		Messages: []types.Message{assistantToolMsg, toolMsg, userMsg},
+	})
+	if err != nil {
+		t.Fatalf("Complete failed: %v", err)
+	}
+	if turn == nil || turn.Message == nil || turn.Message.Content != "done" {
+		t.Fatalf("unexpected turn response: %#v", turn)
+	}
+
+	messages, ok := capturedBody["messages"].([]interface{})
+	if !ok || len(messages) != 3 {
+		t.Fatalf("expected 3 request messages, got %#v", capturedBody["messages"])
+	}
+
+	assistantPayload, ok := messages[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected assistant payload map, got %T", messages[0])
+	}
+	if got, exists := assistantPayload["reasoning_content"]; !exists || got != "" {
+		t.Fatalf("expected empty deepseek reasoning_content replay, got exists=%v value=%#v", exists, got)
 	}
 }
 
@@ -611,6 +785,119 @@ func TestAICLISharedChatExecutor_RemainsAvailableAsFallback(t *testing.T) {
 	}
 }
 
+func TestAICLIToolExecutor_ExecuteTool_PreservesMetadata(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("codex", registry)
+	catalog.RegisterBuiltinToolFunction(&richTestFunction{
+		testFunction: testFunction{name: "background_task"},
+		metadata: map[string]interface{}{
+			toolresult.SourceKey:   toolresult.SourceBroker,
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}, runtimetools.ToolDescriptor{
+		Name:        "background_task",
+		Description: "background task",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+
+	session := &ChatSession{
+		FunctionRegistry: registry,
+		FunctionCatalog:  catalog,
+		cancelCtx:        context.Background(),
+	}
+	executor := &aicliToolExecutor{session: session}
+
+	result := executor.ExecuteTool(context.Background(), types.ToolCall{
+		ID:   "call-1",
+		Name: "background_task",
+		Args: map[string]interface{}{"command": "git status"},
+	})
+
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if result.Content != "ok" {
+		t.Fatalf("expected output ok, got %q", result.Content)
+	}
+	if got := result.Metadata[toolresult.SourceKey]; got != toolresult.SourceBroker {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceBroker, got)
+	}
+	if got := result.Metadata[toolresult.MetadataKey]; got != toolresult.KindText {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.MetadataKey, toolresult.KindText, got)
+	}
+}
+
+func TestAICLIToolExecutor_ExecuteTool_PreservesMetadataOnError(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("codex", registry)
+	catalog.RegisterBuiltinToolFunction(&failingRichTestFunction{
+		testFunction: testFunction{name: "background_task"},
+		metadata: map[string]interface{}{
+			toolresult.SourceKey:   toolresult.SourceBroker,
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}, runtimetools.ToolDescriptor{
+		Name:        "background_task",
+		Description: "background task",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+
+	logger := NewChatLogger("codex", "openai", "test-model", false, "")
+	session := &ChatSession{
+		FunctionRegistry: registry,
+		FunctionCatalog:  catalog,
+		Logger:           logger,
+		cancelCtx:        context.Background(),
+	}
+	executor := &aicliToolExecutor{session: session}
+
+	result := executor.ExecuteTool(context.Background(), types.ToolCall{
+		ID:   "call-err",
+		Name: "background_task",
+		Args: map[string]interface{}{"command": "git status"},
+	})
+
+	if result.Error == "" {
+		t.Fatalf("expected error result, got %+v", result)
+	}
+	if got := result.Metadata[toolresult.SourceKey]; got != toolresult.SourceBroker {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceBroker, got)
+	}
+	if got := result.Metadata[toolresult.MetadataKey]; got != toolresult.KindText {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.MetadataKey, toolresult.KindText, got)
+	}
+
+	var entry *ChatLogDetail
+	for i := range logger.sessionLog.Messages {
+		candidate := &logger.sessionLog.Messages[i]
+		if candidate.MessageType == "tool_result" {
+			entry = candidate
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatalf("expected tool_result log entry, got %+v", logger.sessionLog.Messages)
+	}
+	content, ok := entry.Content.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected content map, got %#v", entry.Content)
+	}
+	resultPayload, ok := content["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected result payload map, got %#v", content["result"])
+	}
+	metadata, ok := resultPayload["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected metadata map, got %#v", resultPayload["metadata"])
+	}
+	if got := metadata[toolresult.SourceKey]; got != toolresult.SourceBroker {
+		t.Fatalf("expected logged %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceBroker, got)
+	}
+	if got := metadata[toolresult.MetadataKey]; got != toolresult.KindText {
+		t.Fatalf("expected logged %s=%q, got %#v", toolresult.MetadataKey, toolresult.KindText, got)
+	}
+}
+
 func TestAdapterRequestConfig_PropagatesReasoningEffortMetadata(t *testing.T) {
 	session := &ChatSession{
 		Provider:        config.Provider{Protocol: "codex"},
@@ -627,6 +914,38 @@ func TestAdapterRequestConfig_PropagatesReasoningEffortMetadata(t *testing.T) {
 	}
 	if got := req.Metadata["reasoning_effort"]; got != "medium" {
 		t.Fatalf("expected reasoning_effort metadata medium, got %#v", got)
+	}
+}
+
+func TestAdapterRequestConfig_CodexInjectsImageGenerationToolWhenModelCapabilityAllows(t *testing.T) {
+	session := &ChatSession{
+		Provider: config.Provider{
+			Protocol: "codex",
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"gpt-5.4": {
+					InputModalities: []string{"text", "image"},
+					NativeTools: config.NativeToolCapabilities{
+						ImageGeneration: true,
+					},
+				},
+			},
+		},
+		Model: "gpt-5.4",
+	}
+
+	req := adapterRequestConfig(session, nil, runtimechatcore.ProviderTurnRequest{})
+	tools, ok := req.Functions.([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected codex functions payload, got %T", req.Functions)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 injected native tool, got %#v", tools)
+	}
+	if tools[0]["type"] != "image_generation" {
+		t.Fatalf("expected image_generation tool, got %#v", tools[0])
+	}
+	if tools[0]["output_format"] != "png" {
+		t.Fatalf("expected png output format, got %#v", tools[0]["output_format"])
 	}
 }
 
@@ -1011,6 +1330,94 @@ func TestAICLIEventRenderer_ShellToolUsesCompactCommandRendering(t *testing.T) {
 	}
 	if strings.Contains(rendered, chatToolDivider("command start")) || strings.Contains(rendered, chatToolDivider("command end")) {
 		t.Fatalf("expected command dividers to stay suppressed, got %q", rendered)
+	}
+}
+
+func TestAICLIEventRenderer_SharedToolResultUsesSourceLabelsAndTighterFolding(t *testing.T) {
+	session := &ChatSession{Stream: true}
+	session.Interaction = newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	session.Interaction.SetWriter(&output)
+
+	renderer := newAICLIEventRenderer(session)
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:     runtimechatcore.EventTool,
+		Stage:    "tool_result",
+		ToolName: "remote_search",
+		Arguments: map[string]interface{}{
+			"query": "golang tools",
+		},
+		Output: "result 1\nresult 2\nresult 3",
+		Metadata: map[string]interface{}{
+			"tool_source": "mcp",
+		},
+		Success: true,
+	})
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "• Ran [mcp] remote_search query=golang tools") {
+		t.Fatalf("expected mcp label in shared tool render, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "  result 1") || !strings.Contains(rendered, "  result 2") {
+		t.Fatalf("expected first two result lines, got %q", rendered)
+	}
+	if strings.Contains(rendered, "result 3") {
+		t.Fatalf("expected mcp folding to keep CLI compact, got %q", rendered)
+	}
+}
+
+func TestAICLIEventRenderer_SharedToolRequestedUsesSourceLabels(t *testing.T) {
+	session := &ChatSession{Stream: true}
+	session.Interaction = newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	session.Interaction.SetWriter(&output)
+
+	renderer := newAICLIEventRenderer(session)
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:     runtimechatcore.EventTool,
+		Stage:    "tool_requested",
+		ToolName: "list_mcp_resources",
+		Metadata: map[string]interface{}{
+			"tool_source": "meta",
+		},
+	})
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "• Running [meta] list_mcp_resources") {
+		t.Fatalf("expected meta label in shared requested render, got %q", rendered)
+	}
+}
+
+func TestAICLIEventRenderer_SharedBrokerToolResultUsesSourceLabels(t *testing.T) {
+	session := &ChatSession{Stream: true}
+	session.Interaction = newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	session.Interaction.SetWriter(&output)
+
+	renderer := newAICLIEventRenderer(session)
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:     runtimechatcore.EventTool,
+		Stage:    "tool_result",
+		ToolName: "background_task",
+		Arguments: map[string]interface{}{
+			"command": "git status",
+		},
+		Output: "job_id=job-1\nstatus=queued\nrestart_policy=fail",
+		Metadata: map[string]interface{}{
+			"tool_source": "broker",
+		},
+		Success: true,
+	})
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "• Ran [broker] background_task command=git status") {
+		t.Fatalf("expected broker label in shared tool render, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "  job_id=job-1") || !strings.Contains(rendered, "  status=queued") {
+		t.Fatalf("expected first two broker result lines, got %q", rendered)
+	}
+	if strings.Contains(rendered, "restart_policy=fail") {
+		t.Fatalf("expected broker folding to keep CLI compact, got %q", rendered)
 	}
 }
 

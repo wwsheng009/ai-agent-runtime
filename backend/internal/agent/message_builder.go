@@ -45,10 +45,13 @@ func (b *MessageBuilder) Add(message types.Message) {
 }
 
 // AppendAssistantAction 追加 assistant 消息，并修复缺失的 tool ids。
-func (b *MessageBuilder) AppendAssistantAction(content string, toolCalls []types.ToolCall, reasoning *types.ReasoningBlock) []types.ToolCall {
+func (b *MessageBuilder) AppendAssistantAction(content string, toolCalls []types.ToolCall, reasoning *types.ReasoningBlock, metadata types.Metadata) []types.ToolCall {
 	normalizedCalls := normalizeToolCalls(toolCalls)
 	assistant := types.NewAssistantMessage(content)
 	assistant.ToolCalls = normalizedCalls
+	if len(metadata) > 0 {
+		assistant.Metadata = metadata.Clone()
+	}
 	if reasoning != nil {
 		types.SetReasoningBlock(assistant.Metadata, reasoning)
 	}

@@ -1,6 +1,9 @@
 package llm
 
 import (
+	"encoding/base64"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -34,8 +37,8 @@ func TestRuntimeMessagesToProtocolMessages_OpenAINormalizesToolReplayPayload(t *
 		t.Fatalf("expected 2 protocol messages, got %d", len(messages))
 	}
 
-	if _, exists := messages[0]["reasoning_content"]; exists {
-		t.Fatalf("did not expect reasoning_content in openai request message: %#v", messages[0])
+	if got := messages[0]["reasoning_content"]; got != "先看目录。" {
+		t.Fatalf("expected reasoning_content in openai request message, got %#v", got)
 	}
 	if _, exists := messages[0]["metadata"]; exists {
 		t.Fatalf("did not expect metadata in openai request message: %#v", messages[0])
@@ -58,6 +61,97 @@ func TestRuntimeMessagesToProtocolMessages_OpenAINormalizesToolReplayPayload(t *
 	}
 	if got := messages[1]["tool_call_id"]; got != "call_1" {
 		t.Fatalf("unexpected tool_call_id: %#v", got)
+	}
+}
+
+func TestRuntimeMessagesToProtocolMessages_OpenAIIncludesCompatibleMessageOverrides(t *testing.T) {
+	assistant := types.Message{
+		Role:     "assistant",
+		Content:  "Answer:",
+		Metadata: types.NewMetadata(),
+	}
+	assistant.Metadata["name"] = "planner"
+	assistant.Metadata["prefix"] = true
+	assistant.Metadata["reasoning_content"] = "先整理上下文。"
+	assistant.Metadata["artifact_refs"] = []string{"art_1"}
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "openai")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+
+	if got := messages[0]["name"]; got != "planner" {
+		t.Fatalf("expected assistant name planner, got %#v", got)
+	}
+	if got := messages[0]["prefix"]; got != true {
+		t.Fatalf("expected assistant prefix=true, got %#v", got)
+	}
+	if got := messages[0]["reasoning_content"]; got != "先整理上下文。" {
+		t.Fatalf("expected reasoning_content override, got %#v", got)
+	}
+	if _, exists := messages[0]["artifact_refs"]; exists {
+		t.Fatalf("did not expect arbitrary metadata passthrough, got %#v", messages[0])
+	}
+}
+
+func TestRuntimeMessagesToProtocolMessages_OpenAIReplaysDeepSeekReasoningContentWithoutToolCalls(t *testing.T) {
+	assistant := types.Message{
+		Role:     "assistant",
+		Content:  "目录已经确认。",
+		Metadata: types.NewMetadata(),
+	}
+	types.SetReasoningBlock(assistant.Metadata, &types.ReasoningBlock{
+		Provider:   "deepseek",
+		Format:     "openai_compatible",
+		Summary:    "Now I can see the directory structure. Let me show this to the user.",
+		Streamable: true,
+		Visibility: types.ReasoningVisibilitySummary,
+	})
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "openai")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+	if got := messages[0]["reasoning_content"]; got != "Now I can see the directory structure. Let me show this to the user." {
+		t.Fatalf("expected deepseek reasoning_content replay, got %#v", got)
+	}
+}
+
+func TestRuntimeMessagesToProtocolMessages_OpenAIReplaysDeepSeekEmptyReasoningContentForToolCalls(t *testing.T) {
+	assistant := types.Message{
+		Role:    "assistant",
+		Content: "",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_view", Name: "view"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "openai", "deepseek")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+	if got, exists := messages[0]["reasoning_content"]; !exists || got != "" {
+		t.Fatalf("expected empty deepseek reasoning_content replay, got exists=%v value=%#v", exists, got)
+	}
+}
+
+func TestRuntimeMessagesToProtocolMessages_OpenAIReplaysDeepSeekEmptyReasoningContentFromModelHint(t *testing.T) {
+	assistant := types.Message{
+		Role:    "assistant",
+		Content: "",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_view", Name: "view"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "openai", "", "deepseek-v4-flash")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+	if got, exists := messages[0]["reasoning_content"]; !exists || got != "" {
+		t.Fatalf("expected empty deepseek reasoning_content replay from model hint, got exists=%v value=%#v", exists, got)
 	}
 }
 
@@ -273,5 +367,119 @@ func TestRuntimeMessagesToProtocolMessages_CodexPreservesEmptyReasoningSummaryFo
 	}
 	if len(summary) != 0 {
 		t.Fatalf("expected empty reasoning summary array, got %#v", summary)
+	}
+}
+
+func TestRuntimeMessagesToProtocolMessages_CodexCanonicalizesImageGenerationReplayShape(t *testing.T) {
+	assistant := types.Message{
+		Role:     "assistant",
+		Metadata: types.NewMetadata(),
+	}
+	types.SetReasoningBlock(assistant.Metadata, &types.ReasoningBlock{
+		Format:     "openai_responses",
+		Visibility: types.ReasoningVisibilityOpaque,
+		Metadata: map[string]interface{}{
+			"response_output_items": []map[string]interface{}{
+				{
+					"type":           "image_generation_call",
+					"id":             "ig_123",
+					"status":         "completed",
+					"action":         "generate",
+					"background":     "opaque",
+					"output_format":  "png",
+					"quality":        "medium",
+					"size":           "1024x1024",
+					"revised_prompt": "poster",
+					"result":         "Zm9v",
+				},
+			},
+		},
+	})
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "codex")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+
+	outputItems, ok := messages[0]["response_output_items"].([]map[string]interface{})
+	if !ok || len(outputItems) != 1 {
+		t.Fatalf("expected 1 response_output_item, got %#v", messages[0]["response_output_items"])
+	}
+	if outputItems[0]["type"] != "image_generation_call" {
+		t.Fatalf("expected image_generation_call item, got %#v", outputItems[0])
+	}
+	if outputItems[0]["id"] != "ig_123" {
+		t.Fatalf("expected image_generation_call id to be preserved, got %#v", outputItems[0]["id"])
+	}
+	if outputItems[0]["status"] != "completed" {
+		t.Fatalf("expected image_generation_call status to be preserved, got %#v", outputItems[0]["status"])
+	}
+	if outputItems[0]["result"] != "Zm9v" {
+		t.Fatalf("expected image_generation_call result to be preserved, got %#v", outputItems[0]["result"])
+	}
+	if _, exists := outputItems[0]["action"]; exists {
+		t.Fatalf("did not expect image_generation_call action after canonicalization: %#v", outputItems[0])
+	}
+	if _, exists := outputItems[0]["background"]; exists {
+		t.Fatalf("did not expect image_generation_call background after canonicalization: %#v", outputItems[0])
+	}
+	if _, exists := outputItems[0]["output_format"]; exists {
+		t.Fatalf("did not expect image_generation_call output_format after canonicalization: %#v", outputItems[0])
+	}
+	if _, exists := outputItems[0]["quality"]; exists {
+		t.Fatalf("did not expect image_generation_call quality after canonicalization: %#v", outputItems[0])
+	}
+	if _, exists := outputItems[0]["size"]; exists {
+		t.Fatalf("did not expect image_generation_call size after canonicalization: %#v", outputItems[0])
+	}
+}
+
+func TestRuntimeMessagesToProtocolMessages_CodexHydratesSavedImageGenerationResult(t *testing.T) {
+	outputDir := t.TempDir()
+	savedPath := filepath.Join(outputDir, "ig_123.png")
+	raw := []byte("fake-png-payload")
+	if err := os.WriteFile(savedPath, raw, 0o644); err != nil {
+		t.Fatalf("write saved image: %v", err)
+	}
+
+	assistant := types.Message{
+		Role:     "assistant",
+		Metadata: types.NewMetadata(),
+	}
+	assistant.Metadata[MetadataKeyGeneratedImages] = []map[string]interface{}{
+		{
+			"id":         "ig_123",
+			"saved_path": savedPath,
+		},
+	}
+	types.SetReasoningBlock(assistant.Metadata, &types.ReasoningBlock{
+		Format:     "openai_responses",
+		Visibility: types.ReasoningVisibilityOpaque,
+		Metadata: map[string]interface{}{
+			"response_output_items": []map[string]interface{}{
+				{
+					"type":           "image_generation_call",
+					"id":             "ig_123",
+					"status":         "generating",
+					"revised_prompt": "poster",
+				},
+			},
+		},
+	})
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "codex")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+
+	outputItems, ok := messages[0]["response_output_items"].([]map[string]interface{})
+	if !ok || len(outputItems) != 1 {
+		t.Fatalf("expected 1 response_output_item, got %#v", messages[0]["response_output_items"])
+	}
+	if outputItems[0]["status"] != "completed" {
+		t.Fatalf("expected hydrated image_generation_call status to normalize to completed, got %#v", outputItems[0]["status"])
+	}
+	if outputItems[0]["result"] != base64.StdEncoding.EncodeToString(raw) {
+		t.Fatalf("expected hydrated image_generation_call result from saved image, got %#v", outputItems[0]["result"])
 	}
 }

@@ -119,9 +119,10 @@ type ProtocolAdapter interface {
 
 // ProcessResult 响应处理结果
 type ProcessResult struct {
-	Reasoning      string                       // 推理/thinking 内容
-	ReasoningBlock *runtimetypes.ReasoningBlock // 统一 reasoning 抽象
-	Content        string                       // 普通内容
-	HasToolCalls   bool                         // 是否包含 Function Call
-	ToolCalls      []map[string]interface{}     // Function Call 原始数据
+	Reasoning        string                       // 推理/thinking 内容
+	ReasoningPresent bool                         // 是否显式返回了 reasoning 字段（允许空字符串）
+	ReasoningBlock   *runtimetypes.ReasoningBlock // 统一 reasoning 抽象
+	Content          string                       // 普通内容
+	HasToolCalls     bool                         // 是否包含 Function Call
+	ToolCalls        []map[string]interface{}     // Function Call 原始数据
 }

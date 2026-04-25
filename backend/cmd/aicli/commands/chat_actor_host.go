@@ -399,17 +399,19 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 	}
 	if _, err := runtime.GetProvider(providerName); err != nil {
 		provider, buildErr := runtimellm.NewProvider(&runtimellm.ProviderConfig{
-			Type:            session.Provider.GetType(),
-			APIKey:          session.Provider.GetAPIKey(),
-			BaseURL:         session.Provider.BaseURL,
-			Timeout:         session.Provider.Timeout,
-			MaxRetries:      3,
-			DefaultModel:    session.Provider.DefaultModel,
-			SupportedModels: append([]string(nil), session.Provider.SupportedModels...),
-			ModelMappings:   cloneStringMap(session.Provider.ModelMappings),
-			Headers:         nil,
-			HeaderMappings:  cloneStringMap(session.Provider.HeaderMappings),
-			Proxy:           session.Provider.Proxy.Clone(),
+			Type:              session.Provider.GetType(),
+			APIKey:            session.Provider.GetAPIKey(),
+			BaseURL:           session.Provider.BaseURL,
+			APIPath:           session.Provider.APIPath,
+			Timeout:           session.Provider.Timeout,
+			MaxRetries:        3,
+			DefaultModel:      session.Provider.DefaultModel,
+			SupportedModels:   append([]string(nil), session.Provider.SupportedModels...),
+			ModelMappings:     cloneStringMap(session.Provider.ModelMappings),
+			ModelCapabilities: cloneProviderModelCapabilities(session.Provider.ModelCapabilities),
+			Headers:           nil,
+			HeaderMappings:    cloneStringMap(session.Provider.HeaderMappings),
+			Proxy:             session.Provider.Proxy.Clone(),
 		})
 		if buildErr != nil {
 			return buildErr

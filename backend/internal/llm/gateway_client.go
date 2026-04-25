@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -211,7 +213,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	}
 
 	// 构建请求体
-	adapterRequest := c.buildAdapterRequest(model, req, protocol)
+	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
 	requestBody := adpt.BuildRequest(adapterRequest)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
@@ -223,14 +225,14 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	if baseURL == "" {
 		baseURL = "https://api.openai.com"
 	}
-	apiPath := adpt.GetAPIPath()
+	apiPath := resolveProviderAPIPath(selected.Provider, adpt.GetAPIPath())
 	url := baseURL + "/" + apiPath
 	reportHTTPDebug(ctx, HTTPDebugEvent{
 		Source:           "gateway_client",
 		Phase:            "request",
 		Provider:         selected.Provider.Name,
 		Protocol:         protocol,
-		Model:            model,
+		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
 		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
@@ -250,7 +252,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		Type:        protocol,
 		APIKey:      selected.KeyValue,
 		Timeout:     c.defaultTimeout,
-		Model:       model,
+		Model:       adapterRequest.Model,
 		RequestBody: requestBody,
 	}
 	headers := adpt.BuildHeaders(adaptConfig)
@@ -272,7 +274,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 			Phase:    "response",
 			Provider: selected.Provider.Name,
 			Protocol: protocol,
-			Model:    model,
+			Model:    adapterRequest.Model,
 			Method:   http.MethodPost,
 			URL:      url,
 			Error:    err.Error(),
@@ -291,7 +293,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 			Phase:               "response",
 			Provider:            selected.Provider.Name,
 			Protocol:            protocol,
-			Model:               model,
+			Model:               adapterRequest.Model,
 			Method:              http.MethodPost,
 			URL:                 url,
 			ResponseStatusCode:  httpResp.StatusCode,
@@ -312,7 +314,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		Phase:               "response",
 		Provider:            selected.Provider.Name,
 		Protocol:            protocol,
-		Model:               model,
+		Model:               adapterRequest.Model,
 		Method:              http.MethodPost,
 		URL:                 url,
 		ResponseStatusCode:  httpResp.StatusCode,
@@ -333,7 +335,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 				Metadata: map[string]interface{}{
 					"provider": selected.Provider.Name,
 					"protocol": protocol,
-					"model":    model,
+					"model":    adapterRequest.Model,
 				},
 			})
 		},
@@ -347,7 +349,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 				Metadata: map[string]interface{}{
 					"provider": selected.Provider.Name,
 					"protocol": protocol,
-					"model":    model,
+					"model":    adapterRequest.Model,
 				},
 			})
 		},
@@ -356,6 +358,18 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	assistantMsg, err := adpt.HandleResponse(req.Stream, bytes.NewReader(body), callbacks)
 	if err != nil {
 		return nil, newGatewayResponseError("failed to handle response", err)
+	}
+	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
+		if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
+			if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
+				metadata := decodeMapAny(assistantMsg["metadata"])
+				if metadata == nil {
+					metadata = map[string]interface{}{}
+				}
+				metadata["generated_images_error"] = imageErr.Error()
+				assistantMsg["metadata"] = metadata
+			}
+		}
 	}
 	reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg)
 
@@ -367,7 +381,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 			CompletionTokens: 0,
 			TotalTokens:      0,
 		},
-		Model: model,
+		Model: adapterRequest.Model,
 		Metadata: map[string]interface{}{
 			"provider":   selected.Provider.Name,
 			"latency_ms": latency.Milliseconds(),
@@ -378,6 +392,11 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	// 提取 content
 	if content, ok := assistantMsg["content"].(string); ok {
 		response.Content = content
+	}
+	if metadata := decodeMapAny(assistantMsg["metadata"]); len(metadata) > 0 {
+		for key, value := range metadata {
+			response.Metadata[key] = value
+		}
 	}
 
 	// 提取 tool_calls
@@ -391,8 +410,11 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		response.ReasoningBlock = reasoningBlock
 		response.Reasoning = reasoningBlock.DisplayText()
 		response.Metadata[assistantReasoningDetailsKey] = reasoningBlock.ToMap()
-	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
-		response.Reasoning = reasoning
+	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok {
+		response.Metadata["reasoning_content"] = reasoning
+		if reasoning != "" {
+			response.Reasoning = reasoning
+		}
 	}
 
 	// 统计 Token
@@ -418,7 +440,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		return nil, fmt.Errorf("failed to create adapter: %w", err)
 	}
 
-	adapterRequest := c.buildAdapterRequest(model, req, protocol)
+	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
 	adapterRequest.Stream = true
 	requestBody := adpt.BuildRequest(adapterRequest)
 	bodyBytes, err := json.Marshal(requestBody)
@@ -430,14 +452,14 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	if baseURL == "" {
 		baseURL = "https://api.openai.com"
 	}
-	apiPath := adpt.GetAPIPath()
+	apiPath := resolveProviderAPIPath(selected.Provider, adpt.GetAPIPath())
 	url := baseURL + "/" + apiPath
 	reportHTTPDebug(ctx, HTTPDebugEvent{
 		Source:           "gateway_client",
 		Phase:            "request",
 		Provider:         selected.Provider.Name,
 		Protocol:         protocol,
-		Model:            model,
+		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
 		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
@@ -455,7 +477,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		Type:        protocol,
 		APIKey:      selected.KeyValue,
 		Timeout:     0,
-		Model:       model,
+		Model:       adapterRequest.Model,
 		RequestBody: requestBody,
 	}
 	headers := adpt.BuildHeaders(adaptConfig)
@@ -475,7 +497,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			Phase:    "response",
 			Provider: selected.Provider.Name,
 			Protocol: protocol,
-			Model:    model,
+			Model:    adapterRequest.Model,
 			Method:   http.MethodPost,
 			URL:      url,
 			Error:    err.Error(),
@@ -492,7 +514,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			Phase:               "response",
 			Provider:            selected.Provider.Name,
 			Protocol:            protocol,
-			Model:               model,
+			Model:               adapterRequest.Model,
 			Method:              http.MethodPost,
 			URL:                 url,
 			ResponseStatusCode:  httpResp.StatusCode,
@@ -515,7 +537,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 				Metadata: map[string]interface{}{
 					"provider": selected.Provider.Name,
 					"protocol": protocol,
-					"model":    model,
+					"model":    adapterRequest.Model,
 				},
 			})
 		},
@@ -529,7 +551,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 				Metadata: map[string]interface{}{
 					"provider": selected.Provider.Name,
 					"protocol": protocol,
-					"model":    model,
+					"model":    adapterRequest.Model,
 				},
 			})
 		},
@@ -542,7 +564,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		Phase:               "response",
 		Provider:            selected.Provider.Name,
 		Protocol:            protocol,
-		Model:               model,
+		Model:               adapterRequest.Model,
 		Method:              http.MethodPost,
 		URL:                 url,
 		ResponseStatusCode:  httpResp.StatusCode,
@@ -554,6 +576,18 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	if err != nil {
 		return nil, newGatewayResponseError("failed to handle stream response", err)
 	}
+	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
+		if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
+			if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
+				metadata := decodeMapAny(assistantMsg["metadata"])
+				if metadata == nil {
+					metadata = map[string]interface{}{}
+				}
+				metadata["generated_images_error"] = imageErr.Error()
+				assistantMsg["metadata"] = metadata
+			}
+		}
+	}
 	reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg)
 
 	response := &LLMResponse{
@@ -563,7 +597,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			CompletionTokens: 0,
 			TotalTokens:      0,
 		},
-		Model: model,
+		Model: adapterRequest.Model,
 		Metadata: map[string]interface{}{
 			"provider":   selected.Provider.Name,
 			"latency_ms": latency.Milliseconds(),
@@ -572,6 +606,11 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	}
 	if content, ok := assistantMsg["content"].(string); ok {
 		response.Content = content
+	}
+	if metadata := decodeMapAny(assistantMsg["metadata"]); len(metadata) > 0 {
+		for key, value := range metadata {
+			response.Metadata[key] = value
+		}
 	}
 	if toolCalls, ok := assistantMsg["tool_calls"]; ok {
 		if tcSlice := normalizeGatewayToolCalls(toolCalls); len(tcSlice) > 0 {
@@ -582,8 +621,11 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		response.ReasoningBlock = reasoningBlock
 		response.Reasoning = reasoningBlock.DisplayText()
 		response.Metadata[assistantReasoningDetailsKey] = reasoningBlock.ToMap()
-	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
-		response.Reasoning = reasoning
+	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok {
+		response.Metadata["reasoning_content"] = reasoning
+		if reasoning != "" {
+			response.Reasoning = reasoning
+		}
 	}
 	response.Usage.PromptTokens = c.tokenizer.CountMessages(convertToInterfaceSlice(req.Messages))
 	response.Usage.CompletionTokens = c.tokenizer.Count(response.Content)
@@ -638,7 +680,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 	}
 
 	// 构建请求体
-	adapterRequest := c.buildAdapterRequest(model, req, protocol)
+	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
 	adapterRequest.Stream = true
 	requestBody := adpt.BuildRequest(adapterRequest)
 	bodyBytes, err := json.Marshal(requestBody)
@@ -651,14 +693,14 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 	if baseURL == "" {
 		baseURL = "https://api.openai.com"
 	}
-	apiPath := adpt.GetAPIPath()
+	apiPath := resolveProviderAPIPath(selected.Provider, adpt.GetAPIPath())
 	url := baseURL + "/" + apiPath
 	reportHTTPDebug(ctx, HTTPDebugEvent{
 		Source:           "gateway_client",
 		Phase:            "request",
 		Provider:         selected.Provider.Name,
 		Protocol:         protocol,
-		Model:            model,
+		Model:            adapterRequest.Model,
 		Method:           http.MethodPost,
 		URL:              url,
 		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
@@ -678,7 +720,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 		Type:        protocol,
 		APIKey:      selected.KeyValue,
 		Timeout:     0, // 流式请求不设超时，由 Context 控制
-		Model:       model,
+		Model:       adapterRequest.Model,
 		RequestBody: requestBody,
 	}
 	headers := adpt.BuildHeaders(adaptConfig)
@@ -699,7 +741,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 			Phase:    "response",
 			Provider: selected.Provider.Name,
 			Protocol: protocol,
-			Model:    model,
+			Model:    adapterRequest.Model,
 			Method:   http.MethodPost,
 			URL:      url,
 			Error:    err.Error(),
@@ -716,7 +758,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 			Phase:               "response",
 			Provider:            selected.Provider.Name,
 			Protocol:            protocol,
-			Model:               model,
+			Model:               adapterRequest.Model,
 			Method:              http.MethodPost,
 			URL:                 url,
 			ResponseStatusCode:  httpResp.StatusCode,
@@ -746,7 +788,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 						Metadata: map[string]interface{}{
 							"provider": selected.Provider.Name,
 							"protocol": protocol,
-							"model":    model,
+							"model":    adapterRequest.Model,
 						},
 					}
 				}
@@ -759,7 +801,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 						Metadata: map[string]interface{}{
 							"provider": selected.Provider.Name,
 							"protocol": protocol,
-							"model":    model,
+							"model":    adapterRequest.Model,
 						},
 					}
 				}
@@ -774,7 +816,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 			Phase:               "response",
 			Provider:            selected.Provider.Name,
 			Protocol:            protocol,
-			Model:               model,
+			Model:               adapterRequest.Model,
 			Method:              http.MethodPost,
 			URL:                 url,
 			ResponseStatusCode:  httpResp.StatusCode,
@@ -839,21 +881,25 @@ func (c *GatewayClient) CheckHealth(ctx context.Context) error {
 }
 
 // buildAdapterRequest 构建 Adapter 请求
-func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, protocol string) adapter.RequestConfig {
+func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selected *SelectedResource, protocol string) adapter.RequestConfig {
+	resolvedModel := resolveGatewaySelectedModel(selected, model)
+	metadata := cloneMapStringAny(req.Metadata)
+
 	// 转换 Messages
 	messages := make([]map[string]interface{}, len(req.Messages))
+	providerHint := strings.TrimSpace(req.Provider)
+	if providerHint == "" {
+		providerHint = strings.TrimSpace(resolvedModel)
+	}
 	for i, msg := range req.Messages {
-		messages[i] = runtimeMessageToAdapterMessage(msg, protocol)
+		messages[i] = runtimeMessageToAdapterMessage(msg, protocol, providerHint)
 	}
 
 	// 转换 Tools（根据协议生成正确格式）
-	var tools interface{}
-	if len(req.Tools) > 0 {
-		tools = c.convertTools(req.Tools, protocol)
-	}
+	tools := c.convertTools(req.Tools, protocol, resolvedModel, selectedProviderModelCapabilities(selected))
 
 	return adapter.RequestConfig{
-		Model:           model,
+		Model:           resolvedModel,
 		Messages:        messages,
 		Stream:          req.Stream,
 		MaxTokens:       req.MaxTokens,
@@ -862,25 +908,19 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, proto
 		Temperature:     req.Temperature,
 		Functions:       tools,
 		Timeout:         c.defaultTimeout,
-		Metadata:        req.Metadata,
+		Metadata:        metadata,
 	}
 }
 
 // convertTools 转换工具定义（根据协议类型生成正确格式）
 // protocol: "openai" | "anthropic" | "codex" | "gemini"
-func (c *GatewayClient) convertTools(tools []types.ToolDefinition, protocol string) interface{} {
-	if len(tools) == 0 {
-		return nil
-	}
-	normalized := make([]map[string]interface{}, 0, len(tools))
-	for _, tool := range tools {
-		normalized = append(normalized, map[string]interface{}{
-			"name":        tool.Name,
-			"description": tool.Description,
-			"parameters":  tool.Parameters,
-		})
-	}
-	return buildToolDefinitionsForProtocol(normalized, protocol, true)
+func (c *GatewayClient) convertTools(
+	tools []types.ToolDefinition,
+	protocol string,
+	model string,
+	modelCapabilities map[string]agentconfig.ModelCapabilitySpec,
+) interface{} {
+	return BuildToolDefinitionsForRequest(tools, protocol, model, modelCapabilities, true)
 }
 
 // convertToolCalls 转换 tool_calls 格式
@@ -937,6 +977,53 @@ func parseToolArguments(argsStr string) map[string]interface{} {
 		return make(map[string]interface{})
 	}
 	return args
+}
+
+func resolveProviderAPIPath(provider *ProviderResource, defaultPath string) string {
+	if provider != nil {
+		if configured := strings.TrimSpace(provider.APIPath); configured != "" {
+			return strings.TrimPrefix(configured, "/")
+		}
+	}
+	return strings.TrimPrefix(defaultPath, "/")
+}
+
+func resolveGatewaySelectedModel(selected *SelectedResource, requestedModel string) string {
+	if selected != nil {
+		if resolved := strings.TrimSpace(selected.Model); resolved != "" {
+			return resolved
+		}
+		if selected.Provider != nil {
+			switch cfg := selected.Provider.Config.(type) {
+			case *agentconfig.Provider:
+				if resolved := strings.TrimSpace(agentconfig.ApplyModelMapping(cfg, requestedModel)); resolved != "" {
+					return resolved
+				}
+			case agentconfig.Provider:
+				if resolved := strings.TrimSpace(agentconfig.ApplyModelMapping(&cfg, requestedModel)); resolved != "" {
+					return resolved
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(requestedModel)
+}
+
+func selectedProviderModelCapabilities(selected *SelectedResource) map[string]agentconfig.ModelCapabilitySpec {
+	if selected == nil || selected.Provider == nil {
+		return nil
+	}
+	if len(selected.Provider.ModelCapabilities) > 0 {
+		return selected.Provider.ModelCapabilities
+	}
+	switch cfg := selected.Provider.Config.(type) {
+	case *agentconfig.Provider:
+		return cfg.ModelCapabilities
+	case agentconfig.Provider:
+		return cfg.ModelCapabilities
+	default:
+		return nil
+	}
 }
 
 func newGatewayHTTPError(statusCode int, body string) error {

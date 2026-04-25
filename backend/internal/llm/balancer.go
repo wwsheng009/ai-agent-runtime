@@ -1,5 +1,7 @@
 package llm
 
+import agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+
 // ResourceManager 抽象接口，由宿主（如 ai-gateway）实现并注入。
 // 解耦 llm 包对 gateway/loadbalancer 具体实现的直接依赖。
 type ResourceManager interface {
@@ -29,13 +31,15 @@ type KeyResource struct {
 
 // ProviderResource Provider 资源信息
 type ProviderResource struct {
-	GroupName string
-	Name      string
-	Type      string
-	BaseURL   string
-	Weight    int
-	Enabled   bool
-	Config    interface{} // 原始配置（用于模型映射等）
+	GroupName         string
+	Name              string
+	Type              string
+	BaseURL           string
+	APIPath           string
+	Weight            int
+	Enabled           bool
+	ModelCapabilities map[string]agentconfig.ModelCapabilitySpec
+	Config            interface{} // 原始配置（用于模型映射等）
 }
 
 // RetryInfo 重试上下文信息

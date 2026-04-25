@@ -8,8 +8,19 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
+
+type richTestFunction struct {
+	testFunction
+	metadata map[string]interface{}
+}
+
+func (f *richTestFunction) ExecuteWithMeta(ctx context.Context, args map[string]interface{}) (string, map[string]interface{}, error) {
+	output, err := f.Execute(ctx, args)
+	return output, cloneFunctionSchema(f.metadata), err
+}
 
 func TestAICLIFunctionCatalog_TracksBuiltinAndSkillFunctions(t *testing.T) {
 	registry := functions.NewFunctionRegistry()
@@ -254,5 +265,36 @@ func TestAICLIFunctionCatalog_RespectsToolPolicyForExposureAndExecution(t *testi
 
 	if _, err := catalog.ExecuteFunction(context.Background(), "write_file", map[string]interface{}{"path": "foo.txt"}); err == nil {
 		t.Fatal("expected write_file execution to be blocked by tool policy")
+	}
+}
+
+func TestAICLIFunctionCatalog_ExecuteFunctionWithMeta_PreservesMetadata(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+
+	catalog.RegisterBuiltinToolFunction(&richTestFunction{
+		testFunction: testFunction{name: "background_task"},
+		metadata: map[string]interface{}{
+			toolresult.SourceKey:   toolresult.SourceBroker,
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}, runtimetools.ToolDescriptor{
+		Name:        "background_task",
+		Description: "background task",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+
+	output, metadata, err := catalog.ExecuteFunctionWithMeta(context.Background(), "background_task", map[string]interface{}{"command": "git status"})
+	if err != nil {
+		t.Fatalf("ExecuteFunctionWithMeta failed: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected output ok, got %q", output)
+	}
+	if got := metadata[toolresult.SourceKey]; got != toolresult.SourceBroker {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceBroker, got)
+	}
+	if got := metadata[toolresult.MetadataKey]; got != toolresult.KindText {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.MetadataKey, toolresult.KindText, got)
 	}
 }

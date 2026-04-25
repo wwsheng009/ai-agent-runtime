@@ -15,7 +15,10 @@ type MarkdownFormatter struct {
 	useColor bool
 }
 
-var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+var (
+	ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	osc8EscapeRE = regexp.MustCompile("\x1b]8;;[^\x1b]*\x1b\\\\|\x1b]8;;\x1b\\\\")
+)
 
 // NewMarkdownFormatter 创建新的 Markdown 格式化器
 func NewMarkdownFormatter(useColor bool) *MarkdownFormatter {
@@ -604,14 +607,39 @@ func (f *MarkdownFormatter) formatLink(text string) string {
 		if len(reMatches) >= 3 {
 			linkText := reMatches[1]
 			url := reMatches[2]
+			if isFileLinkTarget(url) {
+				if !f.useColor {
+					return linkText
+				}
+				return terminalHyperlink(
+					color.New(color.FgCyan, color.Underline).Sprintf("%s", linkText),
+					url,
+				)
+			}
 			if !f.useColor {
 				return fmt.Sprintf("%s (%s)", linkText, url)
 			}
-			return color.New(color.FgCyan, color.Underline).Sprintf("%s", linkText) +
+			return terminalHyperlink(
+				color.New(color.FgCyan, color.Underline).Sprintf("%s", linkText),
+				url,
+			) +
 				color.New(color.FgHiBlack).Sprintf(" (%s)", url)
 		}
 		return match
 	})
+}
+
+func isFileLinkTarget(target string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(target)), "file://")
+}
+
+func terminalHyperlink(label, target string) string {
+	trimmedLabel := strings.TrimSpace(label)
+	trimmedTarget := strings.TrimSpace(target)
+	if trimmedLabel == "" || trimmedTarget == "" {
+		return label
+	}
+	return "\x1b]8;;" + trimmedTarget + "\x1b\\" + label + "\x1b]8;;\x1b\\"
 }
 
 // FormatUserMessage 格式化用户消息（可能包含 Markdown）
@@ -671,6 +699,7 @@ func stripANSICodes(text string) string {
 	if text == "" {
 		return text
 	}
+	text = osc8EscapeRE.ReplaceAllString(text, "")
 	return ansiEscapeRE.ReplaceAllString(text, "")
 }
 

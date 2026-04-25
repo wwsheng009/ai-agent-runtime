@@ -10,6 +10,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // LsTool 列出目录工具
@@ -66,8 +67,9 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 	resolvedPath := l.resolvePath(path)
 	if err := l.checkPath(runtimeexecutor.OpRead, resolvedPath); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 
@@ -90,16 +92,18 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 	info, err := os.Stat(resolvedPath)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("路径不存在: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("路径不存在: %w", err),
 		}, nil
 	}
 
 	if !info.IsDir() {
 		// 如果是文件，返回文件信息
 		return &toolkit.ToolResult{
-			Success: true,
-			Content: fmt.Sprintf("%s (%d bytes, %s)", path, info.Size(), info.Mode().String()),
+			Success:    true,
+			OutputKind: toolresult.KindText,
+			Content:    fmt.Sprintf("%s (%d bytes, %s)", path, info.Size(), info.Mode().String()),
 			Metadata: map[string]interface{}{
 				"path":  path,
 				"isDir": false,
@@ -160,8 +164,9 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 	// 如果是限制错误，忽略
 	if err != nil && err.Error() != "limit reached" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("遍历目录失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("遍历目录失败: %w", err),
 		}, nil
 	}
 
@@ -196,8 +201,9 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 	output.WriteString(fmt.Sprintf("\n统计: %d 个文件, %d 个目录", fileCount, dirCount))
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: output.String(),
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    output.String(),
 		Metadata: map[string]interface{}{
 			"path":       path,
 			"depth":      depth,

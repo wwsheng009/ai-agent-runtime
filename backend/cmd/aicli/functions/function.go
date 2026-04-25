@@ -20,6 +20,12 @@ type Function interface {
 	Execute(ctx context.Context, args map[string]interface{}) (string, error)
 }
 
+// FunctionWithMetadata is an optional richer execution interface.
+type FunctionWithMetadata interface {
+	Function
+	ExecuteWithMeta(ctx context.Context, args map[string]interface{}) (string, map[string]interface{}, error)
+}
+
 // FunctionRegistry Function 注册表
 type FunctionRegistry struct {
 	functions map[string]Function
@@ -68,9 +74,19 @@ func (r *FunctionRegistry) GetFunctionSchemas() []map[string]interface{} {
 
 // ExecuteFunction 执行指定的 Function
 func (r *FunctionRegistry) ExecuteFunction(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	output, _, err := r.ExecuteFunctionWithMeta(ctx, name, args)
+	return output, err
+}
+
+// ExecuteFunctionWithMeta executes a function and returns optional metadata when supported.
+func (r *FunctionRegistry) ExecuteFunctionWithMeta(ctx context.Context, name string, args map[string]interface{}) (string, map[string]interface{}, error) {
 	fn, ok := r.Get(name)
 	if !ok {
-		return "", fmt.Errorf("function '%s' not found", name)
+		return "", nil, fmt.Errorf("function '%s' not found", name)
 	}
-	return fn.Execute(ctx, args)
+	if rich, ok := fn.(FunctionWithMetadata); ok {
+		return rich.ExecuteWithMeta(ctx, args)
+	}
+	output, err := fn.Execute(ctx, args)
+	return output, nil, err
 }

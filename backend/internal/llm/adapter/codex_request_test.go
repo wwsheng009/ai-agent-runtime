@@ -67,6 +67,50 @@ func TestCodexBuildRequest_AddsToolChoice(t *testing.T) {
 	}
 }
 
+func TestCodexBuildRequest_PreservesNativeImageGenerationToolAndDisablesParallelToolCalls(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.4",
+		Messages: []map[string]interface{}{{"role": "user", "content": "generate an image"}},
+		Functions: []map[string]interface{}{
+			{
+				"type":          "image_generation",
+				"output_format": "png",
+			},
+			{
+				"type":        "function",
+				"name":        "bash",
+				"description": "run shell",
+				"parameters": map[string]interface{}{
+					"type": "object",
+				},
+			},
+		},
+	})
+
+	if req["parallel_tool_calls"] != false {
+		t.Fatalf("expected parallel_tool_calls=false, got %#v", req["parallel_tool_calls"])
+	}
+
+	tools, ok := req["tools"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected []map[string]interface{} tools, got %T", req["tools"])
+	}
+
+	var sawNative bool
+	for _, tool := range tools {
+		if tool["type"] == "image_generation" {
+			sawNative = true
+			if tool["output_format"] != "png" {
+				t.Fatalf("expected output_format png, got %#v", tool["output_format"])
+			}
+		}
+	}
+	if !sawNative {
+		t.Fatalf("expected native image_generation tool, got %#v", tools)
+	}
+}
+
 func TestCodexBuildRequest_SortsMergedToolsByName(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{

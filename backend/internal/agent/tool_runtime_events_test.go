@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -21,6 +22,36 @@ func TestToolRequestedEventPayloadIncludesArgPreview(t *testing.T) {
 	}
 	if got := payload["command_text"]; got != "Get-ChildItem -Force" {
 		t.Fatalf("expected command text, got %#v", got)
+	}
+}
+
+func TestToolRequestedEventPayloadIncludesWorkdir(t *testing.T) {
+	payload := toolRequestedEventPayload(types.ToolCall{
+		ID:   "call-workdir",
+		Name: "execute_shell_command",
+		Args: map[string]interface{}{
+			"command": "git status",
+			"workdir": "E:/projects/ai/ai-agent-runtime",
+		},
+	}, 1, "trace-workdir", nil)
+
+	if got := payload["workdir"]; got != "E:/projects/ai/ai-agent-runtime" {
+		t.Fatalf("expected workdir, got %#v", got)
+	}
+}
+
+func TestToolRequestedEventPayloadIncludesBackgroundCwd(t *testing.T) {
+	payload := toolRequestedEventPayload(types.ToolCall{
+		ID:   "call-cwd",
+		Name: "background_task",
+		Args: map[string]interface{}{
+			"command": "git status",
+			"cwd":     "E:/projects/ai/ai-agent-runtime",
+		},
+	}, 1, "trace-cwd", nil)
+
+	if got := payload["cwd"]; got != "E:/projects/ai/ai-agent-runtime" {
+		t.Fatalf("expected cwd, got %#v", got)
 	}
 }
 
@@ -166,5 +197,25 @@ func TestToolCompletedEventPayloadMergesAwaitingModelHint(t *testing.T) {
 
 	if got := payload["awaiting_model"]; got != true {
 		t.Fatalf("expected awaiting_model=true, got %#v", got)
+	}
+}
+
+func TestToolCompletedEventPayloadIncludesToolSource(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-source",
+			Name: "view",
+			Args: map[string]interface{}{"file_path": "README.md"},
+		},
+		Output: "line 1",
+		Envelope: &output.Envelope{
+			Metadata: map[string]interface{}{
+				toolresult.SourceKey: toolresult.SourceToolkit,
+			},
+		},
+	}, 1, "trace-source", nil)
+
+	if got := payload[toolresult.SourceKey]; got != toolresult.SourceToolkit {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceToolkit, got)
 	}
 }

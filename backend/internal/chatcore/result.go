@@ -20,11 +20,12 @@ type PlanningSummary struct {
 
 // ToolExecutionSummary captures one replayed tool execution in a provider loop.
 type ToolExecutionSummary struct {
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	ToolName   string `json:"tool_name,omitempty"`
-	Output     string `json:"output,omitempty"`
-	Error      string `json:"error,omitempty"`
-	Success    bool   `json:"success"`
+	ToolCallID string                 `json:"tool_call_id,omitempty"`
+	ToolName   string                 `json:"tool_name,omitempty"`
+	Output     string                 `json:"output,omitempty"`
+	Error      string                 `json:"error,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	Success    bool                   `json:"success"`
 }
 
 // ChatResult is the transport-neutral result contract shared by chat entrypoints.

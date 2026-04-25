@@ -9,6 +9,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // MultieditTool 多处编辑工具
@@ -76,8 +77,9 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 	filePath, ok := params["file_path"].(string)
 	if !ok || filePath == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("file_path 参数缺失或为空"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("file_path 参数缺失或为空"),
 		}, nil
 	}
 
@@ -85,8 +87,9 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 	editsRaw, ok := params["edits"].([]interface{})
 	if !ok || len(editsRaw) == 0 {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("edits 参数缺失或为空数组"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("edits 参数缺失或为空数组"),
 		}, nil
 	}
 
@@ -96,16 +99,18 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		editMap, ok := editRaw.(map[string]interface{})
 		if !ok {
 			return &toolkit.ToolResult{
-				Success: false,
-				Error:   fmt.Errorf("edits[%d] 不是有效的对象", i),
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("edits[%d] 不是有效的对象", i),
 			}, nil
 		}
 
 		oldStr, ok := editMap["old_string"].(string)
 		if !ok || oldStr == "" {
 			return &toolkit.ToolResult{
-				Success: false,
-				Error:   fmt.Errorf("edits[%d].old_string 缺失或为空", i),
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("edits[%d].old_string 缺失或为空", i),
 			}, nil
 		}
 
@@ -129,8 +134,9 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 
 	if err := m.checkPath(runtimeexecutor.OpWrite, resolvedPath); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 
@@ -138,16 +144,18 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 	absPath, err := filepath.Abs(resolvedPath)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("无法解析文件路径: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("无法解析文件路径: %w", err),
 		}, nil
 	}
 
 	content, err := os.ReadFile(absPath)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("无法读取文件: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("无法读取文件: %w", err),
 		}, nil
 	}
 
@@ -179,16 +187,18 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 	// 检查是否有变化
 	if result == originalContent {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("没有任何编辑被应用"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("没有任何编辑被应用"),
 		}, nil
 	}
 
 	// 写回文件
 	if err := os.WriteFile(absPath, []byte(result), 0644); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("无法写入文件: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("无法写入文件: %w", err),
 		}, nil
 	}
 
@@ -203,8 +213,9 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 	}
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: message,
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    message,
 		Metadata: map[string]interface{}{
 			"file_path":       absPath,
 			"edits_applied":   appliedEdits,

@@ -14,7 +14,7 @@ func TestMessageBuilder_AssignsToolCallIDsAndRepairsMissingResults(t *testing.T)
 			Name: "search_repo",
 			Args: map[string]interface{}{"query": "gateway"},
 		},
-	}, nil)
+	}, nil, nil)
 	if len(toolCalls) != 1 {
 		t.Fatalf("expected one tool call, got %d", len(toolCalls))
 	}
@@ -51,7 +51,7 @@ func TestMessageBuilder_AlignsResultsByOrderWhenIDsMissing(t *testing.T) {
 	toolCalls := builder.AppendAssistantAction("Run both tools.", []types.ToolCall{
 		{Name: "tool_a"},
 		{Name: "tool_b"},
-	}, nil)
+	}, nil, nil)
 	builder.AppendToolResults(toolCalls, []ToolResultPayload{
 		{Content: "result A"},
 		{Content: "result B"},
@@ -78,13 +78,13 @@ func TestMessageBuilder_AssignsDeterministicToolCallIDs(t *testing.T) {
 			Name: "search_repo",
 			Args: map[string]interface{}{"query": "gateway"},
 		},
-	}, nil)
+	}, nil, nil)
 	callsB := builderB.AppendAssistantAction("Run tool.", []types.ToolCall{
 		{
 			Name: "search_repo",
 			Args: map[string]interface{}{"query": "gateway"},
 		},
-	}, nil)
+	}, nil, nil)
 
 	if len(callsA) != 1 || len(callsB) != 1 {
 		t.Fatalf("expected one tool call in each builder, got %d and %d", len(callsA), len(callsB))
@@ -106,7 +106,7 @@ func TestMessageBuilder_PreservesAssistantReasoningMetadata(t *testing.T) {
 		Summary:        "先给出摘要，再继续正文。",
 		OpaqueState:    "sig-1",
 		ReplayRequired: true,
-	})
+	}, nil)
 
 	messages := builder.Messages()
 	if len(messages) != 1 {
@@ -118,5 +118,21 @@ func TestMessageBuilder_PreservesAssistantReasoningMetadata(t *testing.T) {
 	}
 	if reasoning.Provider != "gemini" || reasoning.OpaqueState != "sig-1" || !reasoning.ReplayRequired {
 		t.Fatalf("unexpected reasoning metadata: %+v", reasoning)
+	}
+}
+
+func TestMessageBuilder_PreservesExplicitEmptyReasoningContentMetadata(t *testing.T) {
+	builder := NewMessageBuilder(nil)
+
+	builder.AppendAssistantAction("answer", nil, nil, types.Metadata{
+		"reasoning_content": "",
+	})
+
+	messages := builder.Messages()
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+	if got, exists := messages[0].Metadata["reasoning_content"]; !exists || got != "" {
+		t.Fatalf("expected explicit empty reasoning_content metadata, got exists=%v value=%#v", exists, got)
 	}
 }

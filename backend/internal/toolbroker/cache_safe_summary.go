@@ -3,6 +3,8 @@ package toolbroker
 import (
 	"fmt"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 const cacheSafeSummaryMetadataKey = "cache_safe_summary"
@@ -11,6 +13,7 @@ func attachCacheSafeSummary(meta map[string]interface{}, summary string) map[str
 	if meta == nil {
 		meta = map[string]interface{}{}
 	}
+	meta[toolresult.MetadataKey] = toolresult.KindStructured
 	summary = strings.TrimSpace(summary)
 	if summary != "" {
 		meta[cacheSafeSummaryMetadataKey] = summary

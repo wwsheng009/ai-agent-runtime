@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -48,7 +51,7 @@ func TestGatewayClient_ConvertTools_CodexIncludesRuntimeTools(t *testing.T) {
 		{Name: "bash", Description: "执行 Shell 命令", Parameters: map[string]interface{}{"type": "object"}},
 	}
 
-	got := client.convertTools(tools, "codex")
+	got := client.convertTools(tools, "codex", "", nil)
 	if got == nil {
 		t.Fatal("expected tools, got nil")
 	}
@@ -72,6 +75,36 @@ func TestGatewayClient_ConvertTools_CodexIncludesRuntimeTools(t *testing.T) {
 	if toolList[1]["name"] != "list_mcp_resources" {
 		t.Fatalf("expected list_mcp_resources, got %v", toolList[1]["name"])
 	}
+}
+
+func TestGatewayClient_ConvertTools_CodexAddsImageGenerationWhenModelCapabilityAllows(t *testing.T) {
+	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
+
+	got := client.convertTools(nil, "codex", "gpt-5.4", map[string]agentconfig.ModelCapabilitySpec{
+		"gpt-5.4": {
+			InputModalities: []string{"text", "image"},
+			NativeTools: agentconfig.NativeToolCapabilities{
+				ImageGeneration: true,
+			},
+		},
+	})
+	if got == nil {
+		t.Fatal("expected tools, got nil")
+	}
+
+	toolList, ok := got.([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected []map[string]interface{}, got %T", got)
+	}
+
+	var sawImageGeneration bool
+	for _, tool := range toolList {
+		if tool["type"] == "image_generation" {
+			sawImageGeneration = true
+			assert.Equal(t, "png", tool["output_format"])
+		}
+	}
+	assert.True(t, sawImageGeneration, "expected image_generation native tool in %#v", toolList)
 }
 
 func TestGatewayClient_CallProviderReportsHTTPDebugPayload(t *testing.T) {
@@ -172,6 +205,38 @@ func TestGatewayClient_CallProviderReportsHTTPDebugPayload(t *testing.T) {
 	}
 }
 
+func TestGatewayClient_CallProvider_UsesConfiguredAPIPathOverride(t *testing.T) {
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
+	selected := &SelectedResource{
+		Provider: &ProviderResource{
+			Name:    "deepseek_beta",
+			Type:    "openai",
+			BaseURL: server.URL,
+			APIPath: "/v1/completions",
+		},
+		KeyValue: "test-key",
+	}
+
+	resp, err := client.callProvider(context.Background(), selected, "deepseek-v4-pro", &LLMRequest{
+		Model: "deepseek-v4-pro",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	assert.Equal(t, "/v1/completions", capturedPath)
+}
+
 func TestGatewayClient_CallProvider_WithStreamAggregatesSSEResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -213,6 +278,81 @@ func TestGatewayClient_CallProvider_WithStreamAggregatesSSEResponse(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, "Hello", resp.Content)
 	assert.Empty(t, resp.ToolCalls)
+}
+
+func TestGatewayClient_CallProvider_SavesGeneratedImagesAndReturnsMetadata(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"id":"resp_image_1",
+			"model":"gpt-5.4",
+			"stop_reason":"end_turn",
+			"output":[
+				{
+					"type":"image_generation_call",
+					"id":"img:1",
+					"status":"completed",
+					"revised_prompt":"draw a red square",
+					"result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg=="
+				}
+			],
+			"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+		}`)
+	}))
+	defer server.Close()
+
+	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
+	selected := &SelectedResource{
+		Provider: &ProviderResource{
+			Name:    "codex_ee",
+			Type:    "codex",
+			BaseURL: server.URL,
+			ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+				"gpt-5.4": {
+					InputModalities: []string{"text", "image"},
+					NativeTools: agentconfig.NativeToolCapabilities{
+						ImageGeneration: true,
+					},
+				},
+			},
+		},
+		KeyValue: "test-key",
+	}
+
+	outputDir := t.TempDir()
+	resp, err := client.callProvider(context.Background(), selected, "gpt-5.4", &LLMRequest{
+		Model: "gpt-5.4",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "draw a red square",
+		}},
+		Metadata: map[string]interface{}{
+			MetadataKeyGeneratedImageOutputDir: outputDir,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, GeneratedImageSummary([]GeneratedImage{{SavedPath: filepath.Join(outputDir, "img_1.png")}}), resp.Content)
+
+	tools, ok := capturedBody["tools"].([]interface{})
+	require.True(t, ok)
+	var sawImageGeneration bool
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]interface{})
+		require.True(t, ok)
+		if tool["type"] == "image_generation" {
+			sawImageGeneration = true
+			assert.Equal(t, "png", tool["output_format"])
+		}
+	}
+	assert.True(t, sawImageGeneration)
+
+	generated := decodeSliceOfMaps(resp.Metadata[MetadataKeyGeneratedImages])
+	require.Len(t, generated, 1)
+	assert.Equal(t, filepath.Join(outputDir, "img_1.png"), generated[0]["saved_path"])
+	_, statErr := os.Stat(filepath.Join(outputDir, "img_1.png"))
+	require.NoError(t, statErr)
 }
 
 func TestGatewayClient_CallProvider_WithStreamReportsReasoningDeltas(t *testing.T) {

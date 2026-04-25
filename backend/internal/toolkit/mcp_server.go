@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/server"
 )
 
 // ToolkitMCPServer 将 Toolkit 工具暴露为 MCP 服务
@@ -91,7 +91,7 @@ func (s *ToolkitMCPServer) handleToolCall(ctx context.Context, tool Tool, args m
 	return &mcp.CallToolResult{
 		Content: contents,
 		IsError: !result.Success,
-		Meta:    result.Metadata,
+		Meta:    result.MetadataWithOutputKind(),
 	}, nil, nil
 }
 

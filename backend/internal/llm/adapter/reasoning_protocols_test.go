@@ -138,6 +138,37 @@ func TestOpenAIHandleResponse_EmitsReasoningBeforeTextWhenChunkContainsBoth(t *t
 	}
 }
 
+func TestOpenAIHandleResponse_PreservesExplicitEmptyReasoningContentFromStream(t *testing.T) {
+	adapter := &OpenAIAdapter{}
+	var reasoningParts []string
+
+	msg, err := adapter.HandleResponse(true, strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":""}}]}`,
+		"",
+		`data: {"choices":[{"index":0,"delta":{"content":"我来检查代码。"},"finish_reason":"stop"}]}`,
+		"",
+		`data: [DONE]`,
+		"",
+	}, "\n")), StreamCallbacks{
+		OnReasoning: func(reasoning string) {
+			reasoningParts = append(reasoningParts, reasoning)
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleResponse: %v", err)
+	}
+	got, exists := msg["reasoning_content"]
+	if !exists || got != "" {
+		t.Fatalf("expected explicit empty reasoning_content, got exists=%v value=%#v", exists, got)
+	}
+	if got, _ := msg["content"].(string); got != "我来检查代码。" {
+		t.Fatalf("unexpected content: %q", got)
+	}
+	if len(reasoningParts) != 0 {
+		t.Fatalf("expected no non-empty reasoning deltas, got %#v", reasoningParts)
+	}
+}
+
 func TestAnthropicHandleResponseStreamsThinkingDelta(t *testing.T) {
 	adapter := &AnthropicAdapter{}
 	var reasoningParts []string

@@ -22,6 +22,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -295,6 +297,57 @@ func TestReActLoop_RunWithSession_PropagatesStreamOptionToLLMRequest(t *testing.
 	}
 }
 
+func TestReActLoop_RunWithSession_AddsGeneratedImageOutputDirToLLMMetadata(t *testing.T) {
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "saved",
+				Model:   "test-model",
+				Usage: &types.TokenUsage{
+					PromptTokens:     10,
+					CompletionTokens: 5,
+					TotalTokens:      15,
+				},
+			},
+		},
+	}
+	llmRuntime := llm.NewLLMRuntime(nil)
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	artifactStorePath := filepath.Join(t.TempDir(), "runtime", "artifacts.sqlite")
+	agent := &Agent{
+		config: &Config{
+			Name:              "test-agent",
+			Provider:          "test-provider",
+			Model:             "test-model",
+			ArtifactStorePath: artifactStorePath,
+		},
+		state: AgentState{},
+	}
+	store := agent.GetArtifactStore()
+	require.NotNil(t, store)
+	defer func() {
+		_ = store.Close()
+	}()
+	session := newTestHistorySession("session-images")
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        1,
+		EnableThought:   true,
+		EnableToolCalls: false,
+	})
+
+	result, err := loop.RunWithSession(context.Background(), "hello", session)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "saved", result.Output)
+	require.Len(t, provider.requests, 1)
+
+	got, ok := provider.requests[0].Metadata[llm.MetadataKeyGeneratedImageOutputDir].(string)
+	require.True(t, ok)
+	require.Equal(t, filepath.Join(filepath.Dir(artifactStorePath), "generated-images", "session-images"), got)
+}
+
 func TestReActLoop_RunWithSession_DoesNotEmitDuplicateReasoningAfterStreaming(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -348,6 +401,54 @@ func TestReActLoop_RunWithSession_DoesNotEmitDuplicateReasoningAfterStreaming(t 
 	require.NotNil(t, block)
 	require.Equal(t, "stream_delta", block.Format)
 	require.Equal(t, "先确认问题。", block.DisplayText())
+}
+
+func TestReActLoop_RunWithSession_PreservesExplicitEmptyReasoningContentMetadata(t *testing.T) {
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "当前只有一个配置文件发生了修改。",
+				Model:   "test-model",
+				Metadata: map[string]interface{}{
+					"reasoning_content": "",
+				},
+			},
+		},
+	}
+	llmRuntime := llm.NewLLMRuntime(nil)
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Provider: "test-provider",
+			Model:    "test-model",
+			Options: map[string]interface{}{
+				"stream": true,
+			},
+		},
+		state: AgentState{},
+	}
+
+	session := newTestHistorySession("session-empty-reasoning")
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        1,
+		EnableThought:   true,
+		EnableToolCalls: false,
+	})
+
+	result, err := loop.RunWithSession(context.Background(), "git status", session)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "当前只有一个配置文件发生了修改。", result.Output)
+
+	messages := session.GetMessages()
+	require.Len(t, messages, 2)
+	require.Equal(t, "assistant", messages[1].Role)
+	got, exists := messages[1].Metadata["reasoning_content"]
+	require.True(t, exists, "expected explicit empty reasoning_content metadata to survive")
+	require.Equal(t, "", got)
 }
 
 func TestReActLoop_Run_WithoutAgent(t *testing.T) {
@@ -1457,6 +1558,54 @@ func TestReActLoop_GetAvailableTools_UsesCatalogSearch(t *testing.T) {
 	if tools[0].Name != "read_logs" {
 		t.Fatalf("expected read_logs to rank first, got %s", tools[0].Name)
 	}
+	if got := tools[0].Metadata[toolresult.SourceKey]; got != toolresult.SourceToolkit {
+		t.Fatalf("expected read_logs %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceToolkit, got)
+	}
+}
+
+func TestReActLoop_GetAvailableTools_PreservesMetaToolkitAndBrokerSourceMetadata(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Model:    "test-provider",
+			MaxSteps: 1,
+		},
+		mcpManager: runtimetools.NewAgentAdapter(runtimetools.NewDefaultManager(nil)),
+		toolBroker: &toolbroker.Broker{},
+	}
+
+	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{})
+	tools, err := loop.getAvailableTools(context.Background(), "", []string{"list_mcp_resources", "view", toolbroker.ToolBackgroundTask})
+	require.NoError(t, err)
+
+	var metaSource interface{}
+	var toolkitSource interface{}
+	var brokerSource interface{}
+	for _, tool := range tools {
+		switch tool.Name {
+		case "list_mcp_resources":
+			metaSource = tool.Metadata[toolresult.SourceKey]
+		case "view":
+			toolkitSource = tool.Metadata[toolresult.SourceKey]
+		case toolbroker.ToolBackgroundTask:
+			brokerSource = tool.Metadata[toolresult.SourceKey]
+		}
+	}
+
+	assert.Equal(t, toolresult.SourceMeta, metaSource)
+	assert.Equal(t, toolresult.SourceToolkit, toolkitSource)
+	assert.Equal(t, toolresult.SourceBroker, brokerSource)
+}
+
+func TestResolveToolSourceForRequest_PrefersResolvedRuntimeSource(t *testing.T) {
+	agent := &Agent{
+		mcpManager: runtimetools.NewAgentAdapter(runtimetools.NewDefaultManager(nil)),
+	}
+
+	assert.Equal(t, toolresult.SourceMeta, resolveToolSourceForRequest(agent, "list_mcp_resources"))
+	assert.Equal(t, toolresult.SourceToolkit, resolveToolSourceForRequest(agent, "view"))
+	agent.toolBroker = &toolbroker.Broker{}
+	assert.Equal(t, toolresult.SourceBroker, resolveToolSourceForRequest(agent, toolbroker.ToolBackgroundTask))
 }
 
 func TestReActLoop_GetAvailableTools_HidesTeamOnlyBrokerToolsUntilRunMetaActive(t *testing.T) {
@@ -2450,4 +2599,57 @@ func cloneTestMessages(messages []types.Message) []types.Message {
 		cloned[index] = *messages[index].Clone()
 	}
 	return cloned
+}
+
+func TestToolExecutionResultMessage_UsesFullRawOutputInsteadOfReducedEnvelope(t *testing.T) {
+	result := toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-1",
+			Name: "execute_shell_command",
+		},
+		Output: "line 1\nline 2\nline 3",
+		Envelope: &output.Envelope{
+			ToolName:   "execute_shell_command",
+			ToolCallID: "call-1",
+			Summary:    "line 1",
+		},
+	}
+
+	message := toolExecutionResultMessage(result)
+	if message == nil {
+		t.Fatal("expected tool message")
+	}
+	if message.Content != "line 1\nline 2\nline 3" {
+		t.Fatalf("expected full raw output, got %q", message.Content)
+	}
+}
+
+func TestToolResultsToPayloads_UsesFullRawOutputInsteadOfReducedEnvelope(t *testing.T) {
+	payloads := toolResultsToPayloads([]toolExecutionResult{
+		{
+			Call: types.ToolCall{
+				ID:   "call-1",
+				Name: "execute_shell_command",
+			},
+			Output: "line 1\nline 2\nline 3",
+			Envelope: &output.Envelope{
+				ToolName:   "execute_shell_command",
+				ToolCallID: "call-1",
+				Summary:    "line 1",
+				Metadata: map[string]interface{}{
+					"reducer": "text_truncation",
+				},
+			},
+		},
+	})
+
+	if len(payloads) != 1 {
+		t.Fatalf("expected 1 payload, got %d", len(payloads))
+	}
+	if payloads[0].Content != "line 1\nline 2\nline 3" {
+		t.Fatalf("expected full raw output, got %q", payloads[0].Content)
+	}
+	if payloads[0].Metadata["reducer"] != "text_truncation" {
+		t.Fatalf("expected reducer metadata to stay attached, got %v", payloads[0].Metadata["reducer"])
+	}
 }

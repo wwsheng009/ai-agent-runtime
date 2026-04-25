@@ -148,6 +148,43 @@ func TestRuntimeMessageFromAICLIMessage_PreservesCodexOutputItems(t *testing.T) 
 	}
 }
 
+func TestRuntimeMessageFromAICLIMessage_PreservesExplicitEmptyReasoningContent(t *testing.T) {
+	raw := map[string]interface{}{
+		"role":              "assistant",
+		"content":           "done",
+		"reasoning_content": "",
+	}
+
+	message, err := runtimeMessageFromAICLIMessage(raw)
+	if err != nil {
+		t.Fatalf("runtimeMessageFromAICLIMessage: %v", err)
+	}
+
+	if got, exists := message.Metadata["reasoning_content"]; !exists || got != "" {
+		t.Fatalf("expected empty reasoning_content metadata, got exists=%v value=%#v", exists, got)
+	}
+
+	rawJSON := message.Metadata.GetString(chatRuntimeMessageRawJSONKey, "")
+	if rawJSON == "" {
+		t.Fatal("expected raw message json to be preserved")
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(rawJSON), &stored); err != nil {
+		t.Fatalf("unmarshal raw message json: %v", err)
+	}
+	if got, exists := stored["reasoning_content"]; !exists || got != "" {
+		t.Fatalf("expected empty reasoning_content in stored raw json, got exists=%v value=%#v", exists, got)
+	}
+
+	restored, err := aicliMessageFromRuntimeMessage(message)
+	if err != nil {
+		t.Fatalf("aicliMessageFromRuntimeMessage: %v", err)
+	}
+	if got, exists := restored["reasoning_content"]; !exists || got != "" {
+		t.Fatalf("expected empty reasoning_content after restore, got exists=%v value=%#v", exists, got)
+	}
+}
+
 func TestRuntimeMessageFromAICLIMessage_RecoversMissingToolCallsFromCodexOutputItems(t *testing.T) {
 	raw := map[string]interface{}{
 		"role":    "assistant",

@@ -12,6 +12,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // BashTool Bash 命令执行工具
@@ -44,7 +45,7 @@ func NewBashTool() *BashTool {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "Shell 命令。Windows: 'dir' 查看目录；Linux/Mac: 'ls -la' 查看目录",
+				"description": "Shell command. On Windows this tool uses the detected user shell, usually PowerShell/pwsh rather than cmd.exe. Prefer the workdir parameter for directory changes; use pwd/Get-Location to print the current directory and do not use bare cd for that purpose.",
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
@@ -80,16 +81,18 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	command, ok := params["command"].(string)
 	if !ok {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("command 参数缺失或类型错误"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("command 参数缺失或类型错误"),
 		}, nil
 	}
 
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("command 参数为空"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("command 参数为空"),
 		}, nil
 	}
 	mutatedPaths := extractStringList(params["mutated_paths"])
@@ -98,8 +101,9 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// 检查黑名单
 	if b.isBlacklisted(command) {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("命令被禁止执行（安全限制）"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("命令被禁止执行（安全限制）"),
 		}, nil
 	}
 
@@ -107,15 +111,17 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	output, err := b.executeCommand(ctx, command, workdir)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Content: output,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Content:    output,
+			Error:      err,
 		}, nil
 	}
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: output,
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    output,
 		Metadata: map[string]interface{}{
 			"command":     command,
 			"output_size": len(output),
@@ -327,7 +333,11 @@ func friendlyHintFor(command string, output string, err error) string {
 
 	switch {
 	case cmdLower == "pwd" && runtime.GOOS == "windows":
-		return "提示: Windows 下请使用 `cd` 查看当前目录，或 `echo %cd%`"
+		shell := runtimeexecutor.DefaultUserShell()
+		if shell.Type == runtimeexecutor.ShellTypeCmd {
+			return "提示: cmd.exe 下请使用 `cd` 或 `echo %cd%` 查看当前目录；PowerShell/pwsh 下请使用 `pwd` 或 `Get-Location`。"
+		}
+		return ""
 	case mainCmd == "ls" && runtime.GOOS == "windows":
 		return "提示: Windows 下请使用 `dir` 查看目录内容"
 	case mainCmd == "uname" && runtime.GOOS == "windows":

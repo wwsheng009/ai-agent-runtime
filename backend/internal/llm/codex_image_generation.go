@@ -1,0 +1,381 @@
+package llm
+
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
+)
+
+const (
+	MetadataKeyGeneratedImageOutputDir = "generated_image_output_dir"
+	MetadataKeyGeneratedImages         = "generated_images"
+	codexImageGenerationToolType       = "image_generation"
+	codexImageGenerationCallType       = "image_generation_call"
+	defaultGeneratedImageFormat        = "png"
+	defaultGeneratedImageMimeType      = "image/png"
+)
+
+// GeneratedImage stores local metadata for one saved image_generation result.
+type GeneratedImage struct {
+	ID            string `json:"id,omitempty"`
+	Status        string `json:"status,omitempty"`
+	RevisedPrompt string `json:"revised_prompt,omitempty"`
+	MimeType      string `json:"mime_type,omitempty"`
+	SavedPath     string `json:"saved_path,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
+	ByteCount     int    `json:"byte_count,omitempty"`
+}
+
+// BuildToolDefinitionsForRequest converts local tool definitions into protocol
+// request payloads and appends Codex native tools when the selected model
+// explicitly supports them.
+func BuildToolDefinitionsForRequest(
+	tools []types.ToolDefinition,
+	protocol string,
+	model string,
+	modelCapabilities map[string]agentconfig.ModelCapabilitySpec,
+	includeMeta bool,
+) interface{} {
+	if len(tools) == 0 && !CodexImageGenerationEnabled(protocol, model, modelCapabilities) && !includeMeta {
+		return nil
+	}
+
+	normalized := make([]map[string]interface{}, 0, len(tools)+1)
+	for _, tool := range tools {
+		normalized = append(normalized, map[string]interface{}{
+			"name":        tool.Name,
+			"description": tool.Description,
+			"parameters":  cloneDeepMapStringAny(tool.Parameters),
+		})
+	}
+	if CodexImageGenerationEnabled(protocol, model, modelCapabilities) {
+		normalized = append(normalized, map[string]interface{}{
+			"type":          codexImageGenerationToolType,
+			"output_format": defaultGeneratedImageFormat,
+		})
+	}
+
+	return buildToolDefinitionsForProtocol(normalized, protocol, includeMeta)
+}
+
+// CodexImageGenerationEnabled reports whether the configured provider/model pair
+// may expose the Responses image_generation native tool.
+func CodexImageGenerationEnabled(
+	protocol string,
+	model string,
+	modelCapabilities map[string]agentconfig.ModelCapabilitySpec,
+) bool {
+	if !strings.EqualFold(strings.TrimSpace(protocol), "codex") {
+		return false
+	}
+	capability, ok := resolveModelCapability(model, modelCapabilities)
+	if !ok || !capability.NativeTools.ImageGeneration {
+		return false
+	}
+	modalities := make(map[string]struct{}, len(capability.InputModalities))
+	for _, modality := range capability.InputModalities {
+		trimmed := strings.ToLower(strings.TrimSpace(modality))
+		if trimmed != "" {
+			modalities[trimmed] = struct{}{}
+		}
+	}
+	_, hasText := modalities["text"]
+	_, hasImage := modalities["image"]
+	return hasText && hasImage
+}
+
+// ProcessCodexAssistantImageGeneration saves image_generation results to disk,
+// strips the raw base64 payload from replay metadata, and annotates the
+// assistant message with generated image metadata.
+func ProcessCodexAssistantImageGeneration(msg map[string]interface{}, outputDir string) ([]GeneratedImage, error) {
+	items := extractCodexOutputItems(msg)
+	if len(items) == 0 || strings.TrimSpace(outputDir) == "" {
+		return nil, nil
+	}
+
+	sanitized := make([]map[string]interface{}, 0, len(items))
+	generated := make([]GeneratedImage, 0, 1)
+	var errs []string
+
+	for _, item := range items {
+		cloned := cloneDeepMapStringAny(item)
+		if !strings.EqualFold(strings.TrimSpace(stringValue(cloned["type"])), codexImageGenerationCallType) {
+			sanitized = append(sanitized, cloned)
+			continue
+		}
+
+		payload := strings.TrimSpace(stringValue(cloned["result"]))
+		if payload == "" {
+			if canonical := canonicalizeCodexOutputItem(cloned); canonical != nil {
+				sanitized = append(sanitized, canonical)
+			} else {
+				sanitized = append(sanitized, cloned)
+			}
+			continue
+		}
+
+		image, err := saveGeneratedImage(outputDir, cloned)
+		if err != nil {
+			errs = append(errs, err.Error())
+			if canonical := canonicalizeCodexOutputItem(cloned); canonical != nil {
+				sanitized = append(sanitized, canonical)
+			} else {
+				sanitized = append(sanitized, cloned)
+			}
+			continue
+		}
+
+		delete(cloned, "result")
+		cloned["status"] = "completed"
+		if canonical := canonicalizeCodexOutputItem(cloned); canonical != nil {
+			cloned = canonical
+		}
+		generated = append(generated, image)
+		sanitized = append(sanitized, cloned)
+	}
+
+	if len(generated) > 0 {
+		msg[codexResponseOutputItemsMessageKey] = sanitized
+		if details := decodeMapAny(msg[assistantReasoningDetailsKey]); details != nil {
+			metadata := decodeMapAny(details["metadata"])
+			if metadata == nil {
+				metadata = map[string]interface{}{}
+			}
+			metadata[reasoningMetadataCodexOutputItemsKey] = sanitized
+			details["metadata"] = metadata
+			msg[assistantReasoningDetailsKey] = details
+		}
+		attachGeneratedImagesMetadata(msg, generated)
+		if strings.TrimSpace(stringValue(msg["content"])) == "" {
+			msg["content"] = GeneratedImageSummary(generated)
+		}
+	}
+
+	if len(errs) == 0 {
+		return generated, nil
+	}
+	return generated, errors.New(strings.Join(errs, "; "))
+}
+
+// GeneratedImageSummary renders a minimal user-facing summary for saved images.
+func GeneratedImageSummary(images []GeneratedImage) string {
+	if len(images) == 0 {
+		return ""
+	}
+	if len(images) == 1 {
+		return fmt.Sprintf("Generated image saved to %s", markdownLinkForLocalPath(images[0].SavedPath))
+	}
+	return fmt.Sprintf("Generated %d images. First saved to %s", len(images), markdownLinkForLocalPath(images[0].SavedPath))
+}
+
+func markdownLinkForLocalPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	fileURL := fileURLForLocalPath(trimmed)
+	if fileURL == "" {
+		return trimmed
+	}
+	return fmt.Sprintf("[%s](%s)", trimmed, fileURL)
+}
+
+func fileURLForLocalPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	resolved := trimmed
+	if !filepath.IsAbs(resolved) {
+		if abs, err := filepath.Abs(resolved); err == nil {
+			resolved = abs
+		}
+	}
+	slashed := filepath.ToSlash(resolved)
+	if vol := filepath.VolumeName(resolved); vol != "" && !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	return (&url.URL{Scheme: "file", Path: slashed}).String()
+}
+
+func extractCodexOutputItems(msg map[string]interface{}) []map[string]interface{} {
+	if len(msg) == 0 {
+		return nil
+	}
+	if items := decodeSliceOfMaps(msg[codexResponseOutputItemsMessageKey]); len(items) > 0 {
+		return items
+	}
+	if details := decodeMapAny(msg[assistantReasoningDetailsKey]); details != nil {
+		if metadata := decodeMapAny(details["metadata"]); metadata != nil {
+			if items := decodeSliceOfMaps(metadata[reasoningMetadataCodexOutputItemsKey]); len(items) > 0 {
+				return items
+			}
+		}
+	}
+	return nil
+}
+
+func attachGeneratedImagesMetadata(msg map[string]interface{}, images []GeneratedImage) {
+	if len(images) == 0 {
+		return
+	}
+	metadata := decodeMapAny(msg["metadata"])
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	payload := make([]map[string]interface{}, 0, len(images))
+	for _, image := range images {
+		entry := map[string]interface{}{
+			"id":             image.ID,
+			"status":         image.Status,
+			"revised_prompt": image.RevisedPrompt,
+			"mime_type":      image.MimeType,
+			"saved_path":     image.SavedPath,
+			"sha256":         image.SHA256,
+			"byte_count":     image.ByteCount,
+		}
+		payload = append(payload, entry)
+	}
+	metadata[MetadataKeyGeneratedImages] = payload
+	msg["metadata"] = metadata
+}
+
+func saveGeneratedImage(outputDir string, item map[string]interface{}) (GeneratedImage, error) {
+	id := strings.TrimSpace(stringValue(item["id"]))
+	if id == "" {
+		id = "generated_image"
+	}
+	payload := strings.TrimSpace(stringValue(item["result"]))
+	if payload == "" {
+		return GeneratedImage{}, fmt.Errorf("image_generation %s returned empty payload", id)
+	}
+	if strings.HasPrefix(strings.ToLower(payload), "data:") {
+		return GeneratedImage{}, fmt.Errorf("image_generation %s returned unsupported data URL payload", id)
+	}
+
+	bytes, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return GeneratedImage{}, fmt.Errorf("image_generation %s returned invalid base64 payload: %w", id, err)
+	}
+
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return GeneratedImage{}, fmt.Errorf("create generated image directory: %w", err)
+	}
+
+	path := filepath.Join(outputDir, sanitizeGeneratedImageID(id)+"."+defaultGeneratedImageFormat)
+	if err := os.WriteFile(path, bytes, 0o644); err != nil {
+		return GeneratedImage{}, fmt.Errorf("write generated image %s: %w", id, err)
+	}
+
+	sum := sha256.Sum256(bytes)
+	return GeneratedImage{
+		ID:            id,
+		Status:        strings.TrimSpace(stringValue(item["status"])),
+		RevisedPrompt: strings.TrimSpace(stringValue(item["revised_prompt"])),
+		MimeType:      defaultGeneratedImageMimeType,
+		SavedPath:     path,
+		SHA256:        hex.EncodeToString(sum[:]),
+		ByteCount:     len(bytes),
+	}, nil
+}
+
+func sanitizeGeneratedImageID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "generated_image"
+	}
+	var builder strings.Builder
+	for _, ch := range value {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			builder.WriteRune(ch)
+		case ch >= 'A' && ch <= 'Z':
+			builder.WriteRune(ch)
+		case ch >= '0' && ch <= '9':
+			builder.WriteRune(ch)
+		case ch == '-' || ch == '_':
+			builder.WriteRune(ch)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+	result := builder.String()
+	if result == "" {
+		return "generated_image"
+	}
+	return result
+}
+
+func resolveModelCapability(model string, modelCapabilities map[string]agentconfig.ModelCapabilitySpec) (agentconfig.ModelCapabilitySpec, bool) {
+	if len(modelCapabilities) == 0 {
+		return agentconfig.ModelCapabilitySpec{}, false
+	}
+	if exact, ok := modelCapabilities[strings.TrimSpace(model)]; ok {
+		return cloneModelCapability(exact), true
+	}
+	if wildcard, ok := modelCapabilities["*"]; ok {
+		return cloneModelCapability(wildcard), true
+	}
+	return agentconfig.ModelCapabilitySpec{}, false
+}
+
+func cloneModelCapability(input agentconfig.ModelCapabilitySpec) agentconfig.ModelCapabilitySpec {
+	cloned := input
+	if len(input.InputModalities) > 0 {
+		cloned.InputModalities = append([]string(nil), input.InputModalities...)
+	}
+	return cloned
+}
+
+func cloneDeepMapStringAny(input map[string]interface{}) map[string]interface{} {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		cloned[key] = cloneDeepInterfaceValue(value)
+	}
+	return cloned
+}
+
+func cloneDeepInterfaceValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return cloneDeepMapStringAny(typed)
+	case []interface{}:
+		cloned := make([]interface{}, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneDeepInterfaceValue(item)
+		}
+		return cloned
+	case []map[string]interface{}:
+		cloned := make([]map[string]interface{}, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneDeepMapStringAny(item)
+		}
+		return cloned
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return typed
+	}
+}
+
+func stringValue(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	if typed, ok := value.(string); ok {
+		return typed
+	}
+	return fmt.Sprint(value)
+}

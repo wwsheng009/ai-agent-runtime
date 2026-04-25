@@ -15,6 +15,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // ToolDescriptor describes a tool available to the runtime.
@@ -117,8 +118,19 @@ func (m *Manager) ListTools() []ToolDescriptor {
 
 // Execute runs a tool by name, preferring MCP tools over toolkit tools.
 func (m *Manager) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	output, _, err := m.ExecuteWithMeta(ctx, name, args)
+	return output, err
+}
+
+// ExecuteWithMeta runs a tool and preserves structured metadata for runtime callers.
+func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[string]interface{}) (string, map[string]interface{}, error) {
 	if name == "list_mcp_resources" {
-		return m.listMCPResources(ctx, args)
+		metadata := toolresult.WithSource(toolresult.WithKind(nil, toolresult.KindText), toolresult.SourceMeta)
+		output, err := m.listMCPResources(ctx, args)
+		if strings.TrimSpace(output) != "" {
+			metadata["output_size"] = len(output)
+		}
+		return output, metadata, err
 	}
 
 	if m.toolkit != nil {
@@ -126,9 +138,9 @@ func (m *Manager) Execute(ctx context.Context, name string, args map[string]inte
 			if m.shouldPreferLocalToolkitTool(name) {
 				result, err := tool.Execute(ctx, args)
 				if err != nil {
-					return "", err
+					return "", nil, err
 				}
-				return formatToolkitResult(result)
+				return formatToolkitResultWithSource(result, toolresult.SourceToolkit)
 			}
 		}
 	}
@@ -140,16 +152,16 @@ func (m *Manager) Execute(ctx context.Context, name string, args map[string]inte
 				if tool, ok := m.toolkit.Get(name); ok {
 					result, execErr := tool.Execute(ctx, args)
 					if execErr != nil {
-						return "", execErr
+						return "", nil, execErr
 					}
-					return formatToolkitResult(result)
+					return formatToolkitResultWithSource(result, toolresult.SourceToolkit)
 				}
 			}
 			result, callErr := m.mcp.CallTool(ctx, info.MCPName, name, args)
 			if callErr != nil {
-				return "", callErr
+				return "", nil, callErr
 			}
-			return formatMCPResult(result)
+			return formatMCPResultWithSource(result, toolresult.SourceMCP)
 		}
 	}
 
@@ -157,13 +169,43 @@ func (m *Manager) Execute(ctx context.Context, name string, args map[string]inte
 		if tool, ok := m.toolkit.Get(name); ok {
 			result, err := tool.Execute(ctx, args)
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
-			return formatToolkitResult(result)
+			return formatToolkitResultWithSource(result, toolresult.SourceToolkit)
 		}
 	}
 
-	return "", fmt.Errorf("tool '%s' not found", name)
+	return "", nil, fmt.Errorf("tool '%s' not found", name)
+}
+
+func (m *Manager) resolveToolSource(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if name == "list_mcp_resources" {
+		return toolresult.SourceMeta
+	}
+	if m.toolkit != nil {
+		if _, ok := m.toolkit.Get(name); ok && m.shouldPreferLocalToolkitTool(name) {
+			return toolresult.SourceToolkit
+		}
+	}
+	if m.mcp != nil {
+		info, err := m.mcp.FindTool(name)
+		if err == nil && info != nil {
+			if m.shouldPreferLocalToolkit(info.MCPName, name) {
+				return toolresult.SourceToolkit
+			}
+			return toolresult.SourceMCP
+		}
+	}
+	if m.toolkit != nil {
+		if _, ok := m.toolkit.Get(name); ok {
+			return toolresult.SourceToolkit
+		}
+	}
+	return ""
 }
 
 func (m *Manager) shouldPreferLocalToolkit(mcpName, toolName string) bool {
@@ -217,6 +259,7 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	// Ignore duplicates; registry will reject with error.
 	register(tools.NewBashTool())
 	register(tools.NewExecuteShellCommandTool())
+	register(tools.NewApplyPatchTool())
 	register(tools.NewViewTool())
 	register(tools.NewEditTool())
 	register(tools.NewWriteTool())
@@ -231,38 +274,67 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	register(tools.NewWebSearchTool())
 }
 
-func formatToolkitResult(result *toolkit.ToolResult) (string, error) {
+func formatToolkitResult(result *toolkit.ToolResult) (string, map[string]interface{}, error) {
 	if result == nil {
-		return "", nil
+		return "", nil, nil
 	}
+	metadata := result.MetadataWithOutputKind()
 	if result.Error != nil {
-		return result.Content, result.Error
+		return result.Content, metadata, result.Error
 	}
 	if result.Success {
-		if result.Content != "" {
-			return result.Content, nil
+		switch result.NormalizedOutputKind() {
+		case toolresult.KindText:
+			if result.Content != "" {
+				return result.Content, metadata, nil
+			}
+			return "", metadata, nil
+		case toolresult.KindEmpty:
+			return "", metadata, nil
+		case toolresult.KindStructured:
+			if strings.TrimSpace(result.Content) != "" {
+				return result.Content, metadata, nil
+			}
+			if data, err := result.ToJSON(); err == nil && len(data) > 0 {
+				return string(data), metadata, nil
+			}
+			return "", metadata, nil
+		case toolresult.KindBinary:
+			if data, err := result.ToJSON(); err == nil && len(data) > 0 {
+				return string(data), metadata, nil
+			}
+			return "", metadata, nil
 		}
 		if data, err := result.ToJSON(); err == nil && len(data) > 0 {
-			return string(data), nil
+			return string(data), metadata, nil
 		}
-		return "", nil
+		return "", metadata, nil
 	}
-	return "", fmt.Errorf("tool execution failed")
+	return "", metadata, fmt.Errorf("tool execution failed")
 }
 
-func formatMCPResult(result *protocol.CallToolResult) (string, error) {
+func formatToolkitResultWithSource(result *toolkit.ToolResult, source string) (string, map[string]interface{}, error) {
+	output, metadata, err := formatToolkitResult(result)
+	return output, toolresult.WithSource(metadata, source), err
+}
+
+func formatMCPResult(result *protocol.CallToolResult) (string, map[string]interface{}, error) {
 	if result == nil {
-		return "", nil
+		return "", nil, nil
+	}
+	metadata := cloneMetadataMap(result.Meta)
+	if kind := toolresult.KindFromMetadata(metadata); kind != "" {
+		metadata = toolresult.WithKind(metadata, kind)
 	}
 	if len(result.Content) == 1 && result.Content[0].Type == "text" {
 		text := result.Content[0].Text
 		if result.IsError {
 			if strings.TrimSpace(text) == "" {
-				return "", errors.New("tool execution failed")
+				return "", metadata, errors.New("tool execution failed")
 			}
-			return text, errors.New(text)
+			return text, metadata, errors.New(text)
 		}
-		return text, nil
+		return text, metadata, nil
 	}
 
 	var output strings.Builder
@@ -283,11 +355,27 @@ func formatMCPResult(result *protocol.CallToolResult) (string, error) {
 
 	if result.IsError {
 		if rendered == "" {
-			return "", errors.New("tool execution failed")
+			return "", metadata, errors.New("tool execution failed")
 		}
-		return rendered, errors.New(rendered)
+		return rendered, metadata, errors.New(rendered)
 	}
-	return rendered, nil
+	return rendered, metadata, nil
+}
+
+func formatMCPResultWithSource(result *protocol.CallToolResult, source string) (string, map[string]interface{}, error) {
+	output, metadata, err := formatMCPResult(result)
+	return output, toolresult.WithSource(metadata, source), err
+}
+
+func cloneMetadataMap(input map[string]any) map[string]interface{} {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func (m *Manager) metaToolDescriptor() *ToolDescriptor {

@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
@@ -15,6 +17,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -49,6 +52,10 @@ type toolExecutionResult struct {
 
 type richToolCaller interface {
 	CallToolWithMeta(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error)
+}
+
+type toolSourceResolver interface {
+	ResolveToolSource(toolName string) string
 }
 
 type loopRunOptions struct {
@@ -253,7 +260,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				result.State = loop.agent.GetState()
 				return result, err
 			}
-			builder.AppendAssistantAction(action.Content, nil, action.Reasoning)
+			builder.AppendAssistantAction(action.Content, nil, action.Reasoning, action.MessageMetadata)
 			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 				return nil, err
 			}
@@ -280,7 +287,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 
 		// 2. Act: 执行工具调用
-		normalizedCalls := builder.AppendAssistantAction(action.Content, action.ToolCalls, action.Reasoning)
+		normalizedCalls := builder.AppendAssistantAction(action.Content, action.ToolCalls, action.Reasoning, action.MessageMetadata)
 		historySnapshot := builder.Messages()
 		toolResults, err := loop.act(currentCtx, traceID, sessionID, step, options.Depth, historySnapshot, normalizedCalls, options.ToolWhitelist)
 		if err != nil {
@@ -337,7 +344,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	result.Observations = observations
 	result.Duration = *startTime
 	result.Usage = totalUsage.Clone()
-	builder.AppendAssistantAction(result.Output, nil, nil)
+	builder.AppendAssistantAction(result.Output, nil, nil, nil)
 	if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 		return nil, err
 	}
@@ -424,6 +431,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	if sessionID != "" {
 		req.Metadata["prompt_cache_key"] = sessionID
+	}
+	if outputDir := generatedImageOutputDirForAgentSession(loop.agent, sessionID); outputDir != "" {
+		req.Metadata[llm.MetadataKeyGeneratedImageOutputDir] = outputDir
 	}
 	if loop.agent != nil && loop.agent.config != nil && boolValue(optionValue(loop.agent.config.Options, "stream")) {
 		req.Stream = true
@@ -513,6 +523,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	action.Content = response.Content
 	action.ToolCalls = response.ToolCalls
 	action.Reasoning = response.ReasoningBlock
+	if len(response.Metadata) > 0 {
+		action.MessageMetadata = types.NewMetadata()
+		for key, value := range response.Metadata {
+			action.MessageMetadata[key] = value
+		}
+	}
 	if action.Reasoning == nil && strings.TrimSpace(response.Reasoning) != "" {
 		action.Reasoning = &types.ReasoningBlock{
 			Provider:   req.Provider,
@@ -562,8 +578,11 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			"step":     step,
 			"trace_id": traceID,
 		}
+		if source := resolveToolSourceForRequest(loop.agent, tc.Name); source != "" {
+			metadata[toolresult.SourceKey] = source
+		}
 		callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, tc.ID, results[:i]), results[:i])
-		loop.agent.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, nil))
+		loop.agent.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, toolRequestedEventSourcePayload(loop.agent, tc.Name)))
 		if err := loop.agent.runPreToolUseHooks(ctx, sessionID, tc); err != nil {
 			result.Error = err.Error()
 			loop.emitToolDenied(sessionID, tc, step, traceID, "hook", result.Error, nil)
@@ -1255,6 +1274,45 @@ func (loop *ReActLoop) emitToolReduced(sessionID string, tc types.ToolCall, step
 	loop.agent.emitRuntimeEvent("tool.reduced", sessionID, tc.Name, payload)
 }
 
+func toolRequestedEventSourcePayload(agent *Agent, toolName string) map[string]interface{} {
+	source := resolveToolSourceForRequest(agent, toolName)
+	if source == "" {
+		return nil
+	}
+	return map[string]interface{}{
+		toolresult.SourceKey: source,
+	}
+}
+
+func resolveToolSourceForRequest(agent *Agent, toolName string) string {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		return ""
+	}
+	if toolName == "list_mcp_resources" {
+		return toolresult.SourceMeta
+	}
+	if agent != nil {
+		if broker := agent.GetToolBroker(); broker != nil && broker.IsBrokerTool(toolName) {
+			return toolresult.SourceBroker
+		}
+		if resolver, ok := agent.mcpManager.(toolSourceResolver); ok {
+			if source := toolresult.NormalizeSource(resolver.ResolveToolSource(toolName)); source != "" {
+				return source
+			}
+		}
+		if agent.mcpManager != nil {
+			if info, err := agent.mcpManager.FindTool(toolName); err == nil {
+				if strings.TrimSpace(info.MCPName) != "" {
+					return toolresult.SourceMCP
+				}
+				return toolresult.SourceToolkit
+			}
+		}
+	}
+	return ""
+}
+
 func classifyDeniedPolicy(reason string) string {
 	lower := strings.ToLower(strings.TrimSpace(reason))
 	switch {
@@ -1369,11 +1427,17 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 				continue
 			}
 			seen[mt.Name] = true
-			tools = append(tools, types.ToolDefinition{
+			definition := types.ToolDefinition{
 				Name:        mt.Name,
 				Description: mt.Description,
 				Parameters:  normalizeToolParameters(mt.InputSchema),
-			})
+			}
+			if source := resolveToolSourceForRequest(loop.agent, mt.Name); source != "" {
+				definition.Metadata = map[string]interface{}{
+					toolresult.SourceKey: source,
+				}
+			}
+			tools = append(tools, definition)
 		}
 	}
 
@@ -1528,11 +1592,12 @@ func normalizeToolParameters(schema map[string]interface{}) map[string]interface
 
 // AgentAction Agent 行动
 type AgentAction struct {
-	Content   string                 `json:"content" yaml:"content"`
-	ToolCalls []types.ToolCall       `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
-	Thought   string                 `json:"thought,omitempty" yaml:"thought,omitempty"`
-	Reasoning *types.ReasoningBlock  `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Content         string                 `json:"content" yaml:"content"`
+	ToolCalls       []types.ToolCall       `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
+	Thought         string                 `json:"thought,omitempty" yaml:"thought,omitempty"`
+	Reasoning       *types.ReasoningBlock  `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
+	Metadata        map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	MessageMetadata types.Metadata         `json:"messageMetadata,omitempty" yaml:"messageMetadata,omitempty"`
 }
 
 // Stop 停止循环
@@ -1557,8 +1622,8 @@ func toolResultsToPayloads(results []toolExecutionResult) []ToolResultPayload {
 			ToolCallID: result.Call.ID,
 			Metadata:   types.NewMetadata(),
 		}
+		payload.Content = output.RenderToolResultContentForModel(result.Output, result.Error, result.Envelope)
 		if result.Envelope != nil {
-			payload.Content = result.Envelope.Render()
 			for key, value := range result.Envelope.Metadata {
 				payload.Metadata[key] = value
 			}
@@ -1599,8 +1664,8 @@ func toolExecutionResultMessage(result toolExecutionResult) *types.Message {
 		return nil
 	}
 	message := types.NewToolMessage(result.Call.ID, "")
+	message.Content = output.RenderToolResultContentForModel(result.Output, result.Error, result.Envelope)
 	if result.Envelope != nil {
-		message.Content = result.Envelope.Render()
 		if len(result.Envelope.Metadata) > 0 {
 			message.Metadata = types.NewMetadata()
 			for key, value := range result.Envelope.Metadata {
@@ -1613,9 +1678,6 @@ func toolExecutionResultMessage(result toolExecutionResult) *types.Message {
 			}
 			message.Metadata["artifact_refs"] = append([]string(nil), result.Envelope.ArtifactIDs...)
 		}
-	}
-	if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(result.Error) != "" {
-		message.Content = "Tool execution failed: " + strings.TrimSpace(result.Error)
 	}
 	if strings.TrimSpace(message.Content) == "" {
 		return nil
@@ -1759,6 +1821,56 @@ func resolveLoopMaxTokens(defaultMaxTokens int, remainingBudget int) int {
 		maxTokens = remainingBudget
 	}
 	return maxTokens
+}
+
+func generatedImageOutputDirForAgentSession(agent *Agent, sessionID string) string {
+	sessionID = sanitizeGeneratedImageSessionID(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	if artifactStorePath := resolveAgentArtifactStorePath(agent); artifactStorePath != "" {
+		return filepath.Join(filepath.Dir(artifactStorePath), "generated-images", sessionID)
+	}
+	return filepath.Join(os.TempDir(), "ai-agent-runtime", "generated-images", sessionID)
+}
+
+func resolveAgentArtifactStorePath(agent *Agent) string {
+	if agent == nil || agent.config == nil {
+		return ""
+	}
+	if path := strings.TrimSpace(agent.config.ArtifactStorePath); path != "" {
+		return path
+	}
+	if len(agent.config.Options) == 0 {
+		return ""
+	}
+	if path, ok := agent.config.Options["artifact_store_path"].(string); ok {
+		return strings.TrimSpace(path)
+	}
+	return ""
+}
+
+func sanitizeGeneratedImageSessionID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	var builder strings.Builder
+	for _, ch := range value {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			builder.WriteRune(ch)
+		case ch >= 'A' && ch <= 'Z':
+			builder.WriteRune(ch)
+		case ch >= '0' && ch <= '9':
+			builder.WriteRune(ch)
+		case ch == '-' || ch == '_':
+			builder.WriteRune(ch)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+	return strings.Trim(builder.String(), "_")
 }
 
 func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {

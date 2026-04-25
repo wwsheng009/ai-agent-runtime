@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -53,6 +55,34 @@ func TestNewProvider_WorksWithUnifiedRuntimeInterface(t *testing.T) {
 	catalogProvider, ok := provider.(ModelCatalogProvider)
 	require.True(t, ok)
 	assert.NotEmpty(t, catalogProvider.SupportedModels())
+}
+
+func TestNewProvider_UsesConfiguredAPIPathOverride(t *testing.T) {
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+		APIPath: "/v1/completions",
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "deepseek-v4-pro",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	assert.Equal(t, "/v1/completions", capturedPath)
 }
 
 func TestProviderWrapper_StreamImplementsUnifiedInterface(t *testing.T) {
@@ -291,6 +321,78 @@ func TestProviderWrapper_CodexCall_SendsAndParsesToolCalls(t *testing.T) {
 	assert.Equal(t, "spawn_team", resp.ToolCalls[0].Name)
 	assert.Equal(t, "call_1", resp.ToolCalls[0].ID)
 	assert.Empty(t, resp.Content)
+}
+
+func TestProviderWrapper_CodexCall_SavesGeneratedImagesAndReturnsMetadata(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"id":"resp_image_1",
+			"model":"gpt-5.4",
+			"stop_reason":"end_turn",
+			"output":[
+				{
+					"type":"image_generation_call",
+					"id":"img:1",
+					"status":"completed",
+					"revised_prompt":"draw a red square",
+					"result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg=="
+				}
+			],
+			"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+		}`)
+	}))
+	defer server.Close()
+
+	outputDir := t.TempDir()
+	provider, err := NewProvider(&ProviderConfig{
+		Type:         "codex",
+		BaseURL:      server.URL,
+		DefaultModel: "gpt-5.4",
+		ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5.4": {
+				InputModalities: []string{"text", "image"},
+				NativeTools: agentconfig.NativeToolCapabilities{
+					ImageGeneration: true,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "Draw me a red square.",
+		}},
+		Metadata: map[string]interface{}{
+			MetadataKeyGeneratedImageOutputDir: outputDir,
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, GeneratedImageSummary([]GeneratedImage{{SavedPath: filepath.Join(outputDir, "img_1.png")}}), resp.Content)
+
+	tools, ok := capturedBody["tools"].([]interface{})
+	require.True(t, ok)
+	var sawImageGeneration bool
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]interface{})
+		require.True(t, ok)
+		if tool["type"] == "image_generation" {
+			sawImageGeneration = true
+			require.Equal(t, "png", tool["output_format"])
+		}
+	}
+	require.True(t, sawImageGeneration, "expected native image_generation tool in request")
+
+	generated := decodeSliceOfMaps(resp.Metadata[MetadataKeyGeneratedImages])
+	require.Len(t, generated, 1)
+	require.Equal(t, filepath.Join(outputDir, "img_1.png"), generated[0]["saved_path"])
+	_, statErr := os.Stat(filepath.Join(outputDir, "img_1.png"))
+	require.NoError(t, statErr)
 }
 
 func TestProviderWrapper_CodexCall_FollowUpIncludesFunctionCallAndOutput(t *testing.T) {
@@ -577,6 +679,97 @@ func TestProviderWrapper_CallWithStreamReportsRawResponseBody(t *testing.T) {
 	assert.Equal(t, "response", events[1].Phase)
 	assert.Contains(t, string(events[1].ResponseBodyRaw), `"content":"hello "`)
 	assert.Contains(t, string(events[1].ResponseBodyRaw), `[DONE]`)
+}
+
+func TestProviderWrapper_CallReplaysDeepSeekEmptyReasoningContentForToolCalls(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "deepseek-v4-flash",
+		Messages: []types.Message{
+			{
+				Role:    "assistant",
+				Content: "",
+				ToolCalls: []types.ToolCall{
+					{ID: "call_view", Name: "view"},
+				},
+				Metadata: types.NewMetadata(),
+			},
+			{
+				Role:       "tool",
+				Content:    "diff preview",
+				ToolCallID: "call_view",
+				Metadata:   types.NewMetadata(),
+			},
+			{
+				Role:     "user",
+				Content:  "继续",
+				Metadata: types.NewMetadata(),
+			},
+		},
+		ReasoningEffort: "high",
+		Metadata: map[string]interface{}{
+			"thinking": map[string]interface{}{"type": "enabled"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+
+	messages, ok := capturedBody["messages"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, messages, 3)
+
+	assistantPayload, ok := messages[0].(map[string]interface{})
+	require.True(t, ok)
+	got, exists := assistantPayload["reasoning_content"]
+	require.True(t, exists, "expected reasoning_content to be present in replay payload")
+	assert.Equal(t, "", got)
+}
+
+func TestProviderWrapper_CallPreservesExplicitEmptyReasoningContentInResponseMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":""}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "deepseek-v4-flash",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "继续",
+		}},
+		Stream: true,
+		Metadata: map[string]interface{}{
+			"thinking": map[string]interface{}{"type": "enabled"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+
+	got, exists := resp.Metadata["reasoning_content"]
+	require.True(t, exists, "expected empty reasoning_content to survive stream aggregation")
+	assert.Equal(t, "", got)
 }
 
 func TestProviderWrapper_StreamEmitsReasoningChunks(t *testing.T) {

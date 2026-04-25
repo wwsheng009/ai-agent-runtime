@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 // handleCommand 处理命令
@@ -645,6 +646,15 @@ func isDangerousCommand(cmd string) bool {
 	return false
 }
 
+// prefixPowershellUTF8ForInteractiveCommand keeps Windows shell output UTF-8 encoded.
+func prefixPowershellUTF8ForInteractiveCommand(cmd *exec.Cmd) {
+	if len(cmd.Args) < 3 {
+		return
+	}
+	lastIdx := len(cmd.Args) - 1
+	cmd.Args[lastIdx] = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd.Args[lastIdx]
+}
+
 // executeShellCommand 执行 shell 命令
 func executeShellCommand(session *ChatSession, cmdStr string) (string, error) {
 	// 移除 ! 前缀
@@ -671,13 +681,9 @@ func executeShellCommand(session *ChatSession, cmdStr string) (string, error) {
 		}
 	}
 
-	// 根据操作系统选择 shell
-	var shellCmd []string
-	if runtime.GOOS == "windows" {
-		shellCmd = []string{"cmd", "/c", cmdStr}
-	} else {
-		shellCmd = []string{"sh", "-c", cmdStr}
-	}
+	// Use the same detected user shell as tool-based command execution.
+	shell := runtimeexecutor.DefaultUserShell()
+	shellCmd := shell.DeriveExecArgs(cmdStr, false)
 
 	fmt.Printf("\n执行命令: %s\n", cmdStr)
 	fmt.Println("--- 输出 ---")
@@ -688,6 +694,9 @@ func executeShellCommand(session *ChatSession, cmdStr string) (string, error) {
 
 	// 执行命令
 	cmd := exec.CommandContext(ctx, shellCmd[0], shellCmd[1:]...)
+	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
+		prefixPowershellUTF8ForInteractiveCommand(cmd)
+	}
 
 	// 启动 Goroutine 实时输出命令结果（支持长时间运行的命令）
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -782,7 +791,9 @@ commandDone: // 等待命令完成
 		switch {
 		case cmdLower == "pwd" && runtime.GOOS == "windows":
 			// 在 Windows 上执行 pwd（这是 Unix 命令）
-			friendlyHint = "提示: Windows 下请使用 `cd` 查看当前目录，或 `echo %cd%`"
+			if runtimeexecutor.DefaultUserShell().Type == runtimeexecutor.ShellTypeCmd {
+				friendlyHint = "提示: cmd.exe 下请使用 `cd` 或 `echo %cd%` 查看当前目录；PowerShell/pwsh 下请使用 `pwd` 或 `Get-Location`。"
+			}
 
 		case mainCmd == "ls" && runtime.GOOS == "windows":
 			// 在 Windows 上执行 ls（这是 Unix 命令）

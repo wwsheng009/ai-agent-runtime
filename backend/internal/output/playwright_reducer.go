@@ -82,7 +82,9 @@ func looksLikePlaywright(toolName, text string) bool {
 		"console error",
 		"failed request",
 		"request failed",
-		"snapshot",
+		"page snapshot",
+		"aria snapshot",
+		"browser snapshot",
 	} {
 		if strings.Contains(lowerText, marker) {
 			return true

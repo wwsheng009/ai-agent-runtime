@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -42,6 +43,7 @@ func toolRequestedEventPayload(call types.ToolCall, step int, traceID string, ex
 	if commandText := summarizeShellToolCommand(call.Name, call.Args); commandText != "" {
 		payload["command_text"] = commandText
 	}
+	copyToolExecutionDirectory(payload, call.Args)
 	mergeToolEventPayload(payload, extra)
 	return payload
 }
@@ -59,12 +61,31 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 	if commandText := summarizeShellToolCommand(result.Call.Name, result.Call.Args); commandText != "" {
 		payload["command_text"] = commandText
 	}
+	copyToolExecutionDirectory(payload, result.Call.Args)
 	if summaryLines := summarizeToolExecutionLines(result); len(summaryLines) > 0 {
 		payload["summary"] = strings.Join(summaryLines, "\n")
 		payload["summary_lines"] = append([]string(nil), summaryLines...)
 	}
+	if result.Envelope != nil {
+		if source := toolresult.SourceFromMetadata(result.Envelope.Metadata); source != "" {
+			payload[toolresult.SourceKey] = source
+		}
+	}
 	mergeToolEventPayload(payload, extra)
 	return payload
+}
+
+func copyToolExecutionDirectory(payload map[string]interface{}, args map[string]interface{}) {
+	if payload == nil || len(args) == 0 {
+		return
+	}
+	if workdir := normalizeToolEventText(renderToolArgValue(args["workdir"])); workdir != "" && workdir != "<nil>" {
+		payload["workdir"] = truncateToolEventText(workdir, 200)
+		return
+	}
+	if cwd := normalizeToolEventText(renderToolArgValue(args["cwd"])); cwd != "" && cwd != "<nil>" {
+		payload["cwd"] = truncateToolEventText(cwd, 200)
+	}
 }
 
 func mergeToolEventPayload(payload map[string]interface{}, extra map[string]interface{}) {
@@ -131,6 +152,8 @@ func formatSingleToolArgPreview(key string, value interface{}) string {
 
 func renderToolArgValue(value interface{}) string {
 	switch typed := value.(type) {
+	case nil:
+		return ""
 	case string:
 		return typed
 	case bool:

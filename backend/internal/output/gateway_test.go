@@ -7,6 +7,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 func TestGateway_StoresRawOutputAndReturnsReducedEnvelope(t *testing.T) {
@@ -233,5 +234,30 @@ func TestGateway_UsesCacheSafeSummaryOverrideFromToolMetadata(t *testing.T) {
 	}
 	if override, ok := envelope.Metadata["summary_override"].(bool); !ok || !override {
 		t.Fatalf("expected summary_override metadata, got %+v", envelope.Metadata)
+	}
+}
+
+func TestGateway_PromotesToolSourceFromNestedToolMetadata(t *testing.T) {
+	gateway := NewGateway(nil)
+
+	envelope, err := gateway.Process(context.Background(), RawToolResult{
+		SessionID:  "session-source",
+		ToolName:   "view",
+		ToolCallID: "call-source",
+		Content:    "hello",
+		Metadata: map[string]interface{}{
+			"tool_metadata": map[string]interface{}{
+				toolresult.SourceKey: toolresult.SourceToolkit,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("process tool output: %v", err)
+	}
+	if envelope == nil {
+		t.Fatal("expected envelope")
+	}
+	if got := envelope.Metadata[toolresult.SourceKey]; got != toolresult.SourceToolkit {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceToolkit, got)
 	}
 }

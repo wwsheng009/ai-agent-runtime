@@ -13,6 +13,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -1108,9 +1109,10 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 	case "subagent.denied":
 		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[subagent] denied %s", payloadStringValue(event.Payload["reason"]))}
 	case "tool.requested":
-		return chatRuntimeTimelineEvent{Line: renderCompactToolRequested(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]))}
+		return chatRuntimeTimelineEvent{Line: appendCompactToolDirectory(renderCompactToolRequestedWithSource(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]), payloadStringValue(event.Payload[toolresult.SourceKey])), event.Payload)}
 	case "tool.completed":
-		line := renderCompactToolCompleted(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]), chatToolSummaryLines(event.Payload))
+		line := renderCompactToolCompletedWithSource(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]), payloadStringValue(event.Payload[toolresult.SourceKey]), chatToolSummaryLines(event.Payload))
+		line = appendCompactToolDirectory(line, event.Payload)
 		rendered := []string{line}
 		if waitingLine := chatToolPostCommandHint(event.Payload); waitingLine != "" {
 			rendered = append(rendered, waitingLine)
@@ -1610,6 +1612,9 @@ func approvalRequestPreviewLines(approval *runtimechat.ApprovalRequest) []string
 	if workdir := truncateChatRuntimeText(payloadStringValue(payload["workdir"]), 120); workdir != "" {
 		lines = append(lines, "workdir="+workdir)
 	}
+	if cwd := truncateChatRuntimeText(payloadStringValue(payload["cwd"]), 120); cwd != "" {
+		lines = append(lines, "cwd="+cwd)
+	}
 	if len(lines) > 0 {
 		return lines
 	}
@@ -1650,6 +1655,20 @@ func chatToolArgPreview(payload map[string]interface{}) string {
 	return truncateChatRuntimeText(payloadStringValue(payload["arg_preview"]), 72)
 }
 
+func appendCompactToolDirectory(line string, payload map[string]interface{}) string {
+	line = strings.TrimRight(line, "\n")
+	if line == "" || payload == nil {
+		return line
+	}
+	if workdir := truncateChatRuntimeText(payloadStringValue(payload["workdir"]), 160); workdir != "" {
+		return line + "\n  workdir: " + workdir
+	}
+	if cwd := truncateChatRuntimeText(payloadStringValue(payload["cwd"]), 160); cwd != "" {
+		return line + "\n  cwd: " + cwd
+	}
+	return line
+}
+
 func chatToolDivider(label string) string {
 	label = strings.TrimSpace(label)
 	if label == "" {
@@ -1671,6 +1690,10 @@ func chatToolSummaryLines(payload map[string]interface{}) []string {
 		return nil
 	}
 	errText := payloadStringValue(payload["error"])
+	maxLines := chatToolSummaryLineLimit(payload)
+	if maxLines <= 0 {
+		maxLines = 3
+	}
 
 	lines := interfaceSliceToStrings(payload["summary_lines"])
 	if len(lines) == 0 {
@@ -1687,7 +1710,7 @@ func chatToolSummaryLines(payload map[string]interface{}) []string {
 			continue
 		}
 		out = append(out, truncateChatRuntimeText(trimmed, 120))
-		if len(out) == 3 {
+		if len(out) == maxLines {
 			return out
 		}
 	}
@@ -1702,6 +1725,15 @@ func chatToolSummaryLines(payload map[string]interface{}) []string {
 		return []string{truncateChatRuntimeText("failed: "+errText, 120)}
 	}
 	return nil
+}
+
+func chatToolSummaryLineLimit(payload map[string]interface{}) int {
+	switch toolresult.NormalizeSource(payloadStringValue(payload[toolresult.SourceKey])) {
+	case toolresult.SourceMeta, toolresult.SourceMCP, toolresult.SourceBroker:
+		return 2
+	default:
+		return 3
+	}
 }
 
 func chatLLMRequestToolAvailabilityHint(payload map[string]interface{}) string {

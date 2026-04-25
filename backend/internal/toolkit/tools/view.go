@@ -9,6 +9,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // ViewTool 文件查看工具
@@ -65,8 +66,9 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	filePath, ok := params["file_path"].(string)
 	if !ok || filePath == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("file_path 参数缺失或无效"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("file_path 参数缺失或无效"),
 		}, nil
 	}
 
@@ -94,31 +96,35 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// 检查文件是否存在
 	if err := v.checkPath(runtimeexecutor.OpRead, resolvedPath); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 	fileInfo, err := os.Stat(resolvedPath)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("无法访问文件: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("无法访问文件: %w", err),
 		}, nil
 	}
 
 	// 检查是否为目录
 	if fileInfo.IsDir() {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("路径是目录，不是文件: %s", p.FilePath),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("路径是目录，不是文件: %s", p.FilePath),
 		}, nil
 	}
 
 	// 检查文件大小
 	if fileInfo.Size() > v.maxReadSize {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("文件过大（超过 %d MB），无法读取", v.maxReadSize/(1024*1024)),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("文件过大（超过 %d MB），无法读取", v.maxReadSize/(1024*1024)),
 		}, nil
 	}
 
@@ -126,22 +132,25 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	content, err := v.readFile(resolvedPath, p.Offset, p.Limit)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("读取文件失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("读取文件失败: %w", err),
 		}, nil
 	}
 
 	// 检查是否为二进制文件
 	if v.isBinaryFile(content) {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("文件似乎是二进制文件，不支持显示"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("文件似乎是二进制文件，不支持显示"),
 		}, nil
 	}
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: content,
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    content,
 		Metadata: map[string]interface{}{
 			"file_path":    resolvedPath,
 			"file_size":    fileInfo.Size(),

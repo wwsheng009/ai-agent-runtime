@@ -17,6 +17,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/patchutil"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -1206,35 +1207,7 @@ func extractPathsFromValue(value interface{}) []string {
 }
 
 func extractPathsFromPatch(patch string) []string {
-	patch = strings.TrimSpace(patch)
-	if patch == "" {
-		return nil
-	}
-	lines := strings.Split(patch, "\n")
-	paths := make([]string, 0, 2)
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "diff --git ") {
-			parts := strings.Fields(line)
-			if len(parts) >= 4 {
-				path := strings.TrimPrefix(parts[3], "b/")
-				path = strings.TrimPrefix(path, "a/")
-				if path != "" && path != "/dev/null" {
-					paths = append(paths, path)
-				}
-			}
-			continue
-		}
-		if strings.HasPrefix(line, "+++ ") {
-			path := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
-			path = strings.TrimPrefix(path, "b/")
-			path = strings.TrimPrefix(path, "a/")
-			if path != "" && path != "/dev/null" {
-				paths = append(paths, path)
-			}
-		}
-	}
-	return paths
+	return patchutil.ExtractPaths(patch)
 }
 
 func dedupeStrings(values []string) []string {

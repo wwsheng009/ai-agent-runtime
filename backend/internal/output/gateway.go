@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // ArtifactWriter 约束 gateway 所需的最小 artifact 能力。
@@ -96,6 +97,12 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 	}
 	if envelope.Metadata == nil {
 		envelope.Metadata = map[string]interface{}{}
+	}
+	if kind := toolresult.KindFromMetadata(envelope.Metadata); kind != "" {
+		envelope.Metadata[toolresult.MetadataKey] = kind
+	}
+	if source := toolresult.SourceFromMetadata(envelope.Metadata); source != "" {
+		envelope.Metadata[toolresult.SourceKey] = source
 	}
 
 	text := stringify(result.Content)

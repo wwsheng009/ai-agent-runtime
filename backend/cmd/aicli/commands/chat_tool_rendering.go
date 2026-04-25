@@ -8,6 +8,7 @@ import (
 
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 var sharedChatToolPreviewKeys = []string{
@@ -31,13 +32,14 @@ var sharedChatToolPreviewKeys = []string{
 
 func renderSharedChatToolEvent(event runtimechatcore.ChatEvent) string {
 	payload := sharedChatToolPayload(event)
+	toolSource := payloadStringValue(payload[toolresult.SourceKey])
 	switch event.Stage {
 	case "batch_start":
 		return ""
 	case "tool_requested":
-		return renderCompactToolRequested(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]))
+		return renderCompactToolRequestedWithSource(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource)
 	case "tool_result":
-		return renderCompactToolCompleted(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), chatToolSummaryLines(payload))
+		return renderCompactToolCompletedWithSource(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource, chatToolSummaryLines(payload))
 	case "batch_end":
 		return ""
 	default:
@@ -59,6 +61,9 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 	}
 	if errText := strings.TrimSpace(event.Error); errText != "" {
 		payload["error"] = errText
+	}
+	if source := payloadStringValue(event.Metadata[toolresult.SourceKey]); source != "" {
+		payload[toolresult.SourceKey] = source
 	}
 	if event.Stage == "batch_end" {
 		payload["awaiting_model"] = true
@@ -192,7 +197,11 @@ func normalizeSharedChatToolText(text string) string {
 }
 
 func renderCompactToolRequested(toolName, commandArg, commandText, argPreview string) string {
-	display := compactToolDisplayText(toolName, commandArg, commandText, argPreview)
+	return renderCompactToolRequestedWithSource(toolName, commandArg, commandText, argPreview, "")
+}
+
+func renderCompactToolRequestedWithSource(toolName, commandArg, commandText, argPreview, toolSource string) string {
+	display := compactToolDisplayTextWithSource(toolName, commandArg, commandText, argPreview, toolSource)
 	if display == "" {
 		return ""
 	}
@@ -200,7 +209,11 @@ func renderCompactToolRequested(toolName, commandArg, commandText, argPreview st
 }
 
 func renderCompactToolCompleted(toolName, commandArg, commandText, argPreview string, summaryLines []string) string {
-	display := compactToolDisplayText(toolName, commandArg, commandText, argPreview)
+	return renderCompactToolCompletedWithSource(toolName, commandArg, commandText, argPreview, "", summaryLines)
+}
+
+func renderCompactToolCompletedWithSource(toolName, commandArg, commandText, argPreview, toolSource string, summaryLines []string) string {
+	display := compactToolDisplayTextWithSource(toolName, commandArg, commandText, argPreview, toolSource)
 	if display == "" {
 		return ""
 	}
@@ -213,6 +226,18 @@ func renderCompactToolCompleted(toolName, commandArg, commandText, argPreview st
 		lines = append(lines, "  "+line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func compactToolDisplayTextWithSource(toolName, commandArg, commandText, argPreview, toolSource string) string {
+	display := compactToolDisplayText(toolName, commandArg, commandText, argPreview)
+	prefix := compactToolSourcePrefix(toolSource)
+	if prefix == "" {
+		return display
+	}
+	if display == "" {
+		return strings.TrimSpace(prefix)
+	}
+	return prefix + display
 }
 
 func compactToolDisplayText(toolName, commandArg, commandText, argPreview string) string {
@@ -237,6 +262,19 @@ func compactToolDisplayText(toolName, commandArg, commandText, argPreview string
 		return truncateChatRuntimeText(toolName, 200)
 	}
 	return ""
+}
+
+func compactToolSourcePrefix(toolSource string) string {
+	switch toolresult.NormalizeSource(toolSource) {
+	case toolresult.SourceMeta:
+		return "[meta] "
+	case toolresult.SourceMCP:
+		return "[mcp] "
+	case toolresult.SourceBroker:
+		return "[broker] "
+	default:
+		return ""
+	}
 }
 
 func compactToolOutputLines(summaryLines []string) []string {

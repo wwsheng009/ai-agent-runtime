@@ -35,6 +35,7 @@ concurrency:
     per_provider_limits:
         bigmodel: 150
         deepseek: 50
+        deepseek_beta: 50
         deepseek_anthropic: 50
         default: 50
         gemini_local: 40
@@ -155,6 +156,9 @@ provider_groups:
         - enabled: false
           name: deepseek
           weight: 80
+        - enabled: false
+          name: deepseek_beta
+          weight: 80
       retry_delay: 1s
       strategy: round_robin
       truncation:
@@ -224,6 +228,10 @@ provider_queue:
             max_concurrency: 5
             queue_size: 15
             queue_timeout: 30s
+        deepseek_beta:
+            max_concurrency: 5
+            queue_size: 15
+            queue_timeout: 30s
         nvidia:
             max_concurrency: 5
             queue_size: 20
@@ -278,6 +286,18 @@ providers:
             model_mappings:
                 '*': gpt-5.4-mini
                 gpt-5.4: gpt-5.4
+            model_capabilities:
+                '*':
+                    input_modalities:
+                        - text
+                    native_tools:
+                        image_generation: false
+                gpt-5.4:
+                    input_modalities:
+                        - text
+                        - image
+                    native_tools:
+                        image_generation: true
             protocol: codex
             support_types:
                 - gemini
@@ -312,7 +332,20 @@ providers:
             max_tokens_limit: 10000
             model_mappings:
                 '*': gpt-5.2-codex
+                gpt-5.4: gpt-5.4
                 gpt-5.2-codex: gpt-5.4
+            model_capabilities:
+                '*':
+                    input_modalities:
+                        - text
+                    native_tools:
+                        image_generation: false
+                gpt-5.4:
+                    input_modalities:
+                        - text
+                        - image
+                    native_tools:
+                        image_generation: true
             protocol: codex
             support_types:
                 - gemini
@@ -376,6 +409,18 @@ providers:
             max_tokens_limit: 10000
             model_mappings:
                 '*': gpt-5.4
+            model_capabilities:
+                '*':
+                    input_modalities:
+                        - text
+                    native_tools:
+                        image_generation: false
+                gpt-5.4:
+                    input_modalities:
+                        - text
+                        - image
+                    native_tools:
+                        image_generation: true
             protocol: codex
             support_types:
                 - gemini
@@ -412,6 +457,18 @@ providers:
                 '*': gpt-5.2-codex
                 gpt-5.4-mini: gpt-5.4-mini
                 gpt-5.4-nano: gpt-5.4-nano
+            model_capabilities:
+                '*':
+                    input_modalities:
+                        - text
+                    native_tools:
+                        image_generation: false
+                gpt-5.4:
+                    input_modalities:
+                        - text
+                        - image
+                    native_tools:
+                        image_generation: true
             protocol: codex
             support_types:
                 - gemini
@@ -428,50 +485,106 @@ providers:
             truncation_adapter: ""
         deepseek:
             api_key: ${DEEPSEEK_API_KEY:-}
-            api_path: ""
+            api_path: /v1/chat/completions
             base_url: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-            default_model: deepseek-chat
+            default_model: deepseek-v4-flash
             enabled: true
             forward_url: /v1/chat/completions
             max_tokens_limit: 8000
             model_mappings:
-                '*': deepseek-chat
-                claude-3-opus-20240229: deepseek-chat
-                glm-4-plus: deepseek-chat
-                glm-4.7: deepseek-chat
-                gpt-3.5-turbo: deepseek-chat
-                gpt-4: deepseek-chat
-                gpt-4o: deepseek-chat
-                gpt-4-turbo: deepseek-chat
-                o1: deepseek-reasoner
-                o1-mini: deepseek-chat
-                o1-preview: deepseek-reasoner
+                '*': deepseek-v4-flash
+                "claude*": deepseek-v4-flash
+                glm-4-plus: deepseek-v4-flash
+                glm-4.7: deepseek-v4-flash
+                gpt*: deepseek-v4-pro
+                o1: deepseek-v4-pro
+                deepseek-v4-pro: deepseek-v4-pro
+                deepseek-v4-flash: deepseek-v4-flash
+                o1-mini: deepseek-v4-flash
+                o1-preview: deepseek-v4-pro
             protocol: openai
             support_types:
                 - openai
                 - anthropic
             supported_models:
-                - deepseek-chat
-                - deepseek-reasoner
+                - deepseek-v4-flash
+                - deepseek-v4-pro
+            timeout: 300s
+            truncation_adapter: openai_local
+        modelscope:
+            api_key: ${MODELSCOPE_API_KEY:-}
+            api_path: /v1/chat/completions
+            base_url: ${MODELSCOPE_BASE_URL:-https://api-inference.modelscope.cn}
+            default_model: deepseek-ai/DeepSeek-V4-Pro
+            enabled: true
+            forward_url: /v1/chat/completions
+            max_tokens_limit: 8000
+            model_mappings:
+                '*': deepseek-ai/DeepSeek-V4-Flash
+                "claude*": deepseek-ai/DeepSeek-V4-Pro
+                glm-4-plus: deepseek-ai/DeepSeek-V4-Pro
+                glm-4.7: deepseek-ai/DeepSeek-V4-Pro
+                gpt*: deepseek-ai/DeepSeek-V4-Pro
+                o1: deepseek-ai/DeepSeek-V4-Pro
+                deepseek-v4-pro: deepseek-ai/DeepSeek-V4-Pro
+                deepseek-v4-flash: deepseek-ai/DeepSeek-V4-Flash
+                o1-mini: deepseek-ai/DeepSeek-V4-Pro
+                o1-preview: deepseek-ai/DeepSeek-V4-Pro
+            protocol: openai
+            support_types:
+                - openai
+                - anthropic
+            supported_models:
+                - deepseek-ai/DeepSeek-V4-Flash
+                - deepseek-ai/DeepSeek-V4-Pro
+            timeout: 300s
+            truncation_adapter: openai_local
+        deepseek_beta:
+            api_key: ${DEEPSEEK_API_KEY:-}
+            api_path: /v1/chat/completions
+            base_url: ${DEEPSEEK_BETA_BASE_URL:-https://api.deepseek.com/beta}
+            default_model: deepseek-v4-flash
+            enabled: true
+            forward_url: /v1/chat/completions
+            max_tokens_limit: 8000
+            model_mappings:
+                '*': deepseek-v4-flash
+                "claude*": deepseek-v4-flash
+                glm-4-plus: deepseek-v4-flash
+                glm-4.7: deepseek-v4-flash
+                gpt-3.5-turbo: deepseek-v4-flash
+                gpt-4: deepseek-v4-flash
+                gpt-4o: deepseek-v4-flash
+                gpt-4-turbo: deepseek-v4-flash
+                o1: deepseek-v4-pro
+                o1-mini: deepseek-v4-flash
+                o1-preview: deepseek-v4-pro
+            protocol: openai
+            support_types:
+                - openai
+                - anthropic
+            supported_models:
+                - deepseek-v4-flash
+                - deepseek-v4-pro
             timeout: 300s
             truncation_adapter: openai_local
         deepseek_anthropic:
             api_key: ${DEEPSEEK_API_KEY:-}
             api_path: /v1/messages
             base_url: ${DEEPSEEK_ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}
-            default_model: deepseek-chat
+            default_model: deepseek-v4-flash
             enabled: true
             forward_url: /v1/messages
             max_tokens_limit: 8000
             model_mappings:
-                '*': deepseek-chat
-                claude-*: deepseek-chat
+                '*': deepseek-v4-flash
+                claude-*: deepseek-v4-flash
             protocol: anthropic
             support_types:
                 - anthropic
             supported_models:
-                - deepseek-chat
-                - deepseek-reasoner
+                - deepseek-v4-flash
+                - deepseek-v4-pro
             timeout: 300s
             truncation_adapter: anthropic_local
         gemini_local:
@@ -521,7 +634,7 @@ providers:
             timeout: 300s
             truncation_adapter: openai_local
     proxy:
-        enabled: ${PROXY_ENABLED:-true}
+        enabled: ${PROXY_ENABLED:-false}
         http: ${HTTP_PROXY:-http://127.0.0.1:10810}
         https: ${HTTPS_PROXY:-http://127.0.0.1:10810}
         no_proxy: ${NO_PROXY:-localhost,127.0.0.1}

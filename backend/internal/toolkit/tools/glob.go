@@ -11,6 +11,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // GlobTool 文件名模式匹配工具
@@ -54,8 +55,9 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	pattern, ok := params["pattern"].(string)
 	if !ok || pattern == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("pattern 参数缺失或无效"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("pattern 参数缺失或无效"),
 		}, nil
 	}
 
@@ -66,22 +68,25 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	resolvedSearchPath := g.resolvePath(searchPath)
 	if err := g.checkPath(runtimeexecutor.OpRead, resolvedSearchPath); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 	if err := validateRelativePattern(pattern); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 
 	matches, err := g.findMatches(resolvedSearchPath, pattern)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("glob 匹配失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("glob 匹配失败: %w", err),
 		}, nil
 	}
 	sort.Strings(matches)
@@ -105,8 +110,9 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: output,
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    output,
 		Metadata: map[string]interface{}{
 			"pattern":   pattern,
 			"path":      searchPath,

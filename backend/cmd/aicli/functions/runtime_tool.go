@@ -11,6 +11,12 @@ type RuntimeToolProvider interface {
 	Execute(ctx context.Context, name string, args map[string]interface{}) (string, error)
 }
 
+// RuntimeToolProviderWithMetadata optionally returns richer tool metadata.
+type RuntimeToolProviderWithMetadata interface {
+	RuntimeToolProvider
+	ExecuteWithMeta(ctx context.Context, name string, args map[string]interface{}) (string, map[string]interface{}, error)
+}
+
 // RuntimeToolFunction adapts runtime tools to the Function interface.
 type RuntimeToolFunction struct {
 	provider RuntimeToolProvider
@@ -43,4 +49,13 @@ func (f *RuntimeToolFunction) Parameters() map[string]interface{} {
 // Execute runs the tool through the runtime provider.
 func (f *RuntimeToolFunction) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	return f.provider.Execute(ctx, f.desc.Name, args)
+}
+
+// ExecuteWithMeta runs the tool and preserves metadata when the provider supports it.
+func (f *RuntimeToolFunction) ExecuteWithMeta(ctx context.Context, args map[string]interface{}) (string, map[string]interface{}, error) {
+	if provider, ok := f.provider.(RuntimeToolProviderWithMetadata); ok {
+		return provider.ExecuteWithMeta(ctx, f.desc.Name, args)
+	}
+	output, err := f.Execute(ctx, args)
+	return output, nil, err
 }

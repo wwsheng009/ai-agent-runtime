@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -71,6 +72,7 @@ func TestBrokerBackgroundTaskPersistsStableJobAliasAcrossBrokerInstances(t *test
 	result, ok := raw.(BackgroundTaskResult)
 	require.True(t, ok)
 	require.True(t, strings.HasPrefix(result.JobID, backgroundJobAliasPrefix), "expected stable alias, got %q", result.JobID)
+	assert.Equal(t, toolresult.SourceBroker, meta[toolresult.SourceKey])
 	actualJobID, ok := meta["job_id"].(string)
 	require.True(t, ok)
 	require.NotEmpty(t, actualJobID)
@@ -87,6 +89,7 @@ func TestBrokerBackgroundTaskPersistsStableJobAliasAcrossBrokerInstances(t *test
 
 	output, ok := outputRaw.(TaskOutputResult)
 	require.True(t, ok)
+	assert.Equal(t, toolresult.SourceBroker, outputMeta[toolresult.SourceKey])
 	assert.Equal(t, result.JobID, output.JobID)
 	assert.Equal(t, actualJobID, outputMeta["job_id"])
 	assert.Equal(t, result.JobID, outputMeta["job_alias"])
@@ -113,6 +116,7 @@ func TestBrokerAgentAliasesPersistAcrossBrokerInstances(t *testing.T) {
 	spawnResult, ok := spawnRaw.(*AgentStatusResult)
 	require.True(t, ok)
 	require.True(t, strings.HasPrefix(spawnResult.SessionID, agentSessionAliasPrefix), "expected stable alias, got %q", spawnResult.SessionID)
+	assert.Equal(t, toolresult.SourceBroker, spawnMeta[toolresult.SourceKey])
 	assert.Equal(t, "child-1", spawnMeta["session_id"])
 	assert.Equal(t, spawnResult.SessionID, spawnMeta["session_alias"])
 
@@ -125,6 +129,7 @@ func TestBrokerAgentAliasesPersistAcrossBrokerInstances(t *testing.T) {
 		"message": "continue",
 	})
 	require.NoError(t, err)
+	assert.Equal(t, toolresult.SourceBroker, sendMeta[toolresult.SourceKey])
 	assert.Equal(t, "child-1", controller.lastInput.ID)
 	assert.Equal(t, spawnResult.SessionID, sendMeta["session_alias"])
 
@@ -135,6 +140,7 @@ func TestBrokerAgentAliasesPersistAcrossBrokerInstances(t *testing.T) {
 	require.NoError(t, err)
 	waitResult, ok := waitRaw.(*AgentWaitResult)
 	require.True(t, ok)
+	assert.Equal(t, toolresult.SourceBroker, waitMeta[toolresult.SourceKey])
 	assert.Equal(t, "child-1", controller.lastWait.ID)
 	assert.Equal(t, spawnResult.SessionID, waitResult.MatchedSessionID)
 	assert.Equal(t, "child-1", waitMeta["session_id"])

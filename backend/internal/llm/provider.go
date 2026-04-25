@@ -141,18 +141,20 @@ type ChoiceChunk struct {
 
 // ProviderConfig 提供者配置
 type ProviderConfig struct {
-	Type               string                   `json:"type"` // openai, anthropic, gemini, codex
-	APIKey             string                   `json:"apiKey"`
-	BaseURL            string                   `json:"baseUrl"`
-	Timeout            time.Duration            `json:"timeout"`
-	MaxRetries         int                      `json:"maxRetries"`
-	DefaultModel       string                   `json:"defaultModel,omitempty"`
-	SupportedModels    []string                 `json:"supportedModels,omitempty"`
-	ModelMappings      map[string]string        `json:"modelMappings,omitempty"`
-	Headers            map[string]string        `json:"headers,omitempty"`
-	HeaderMappings     map[string]string        `json:"headerMappings,omitempty"`
-	HeaderMappingRules []HeaderMappingRule      `json:"headerMappingRules,omitempty"`
-	Proxy              *agentconfig.ProxyConfig `json:"proxy,omitempty"`
+	Type               string                                     `json:"type"` // openai, anthropic, gemini, codex
+	APIKey             string                                     `json:"apiKey"`
+	BaseURL            string                                     `json:"baseUrl"`
+	APIPath            string                                     `json:"apiPath,omitempty"`
+	Timeout            time.Duration                              `json:"timeout"`
+	MaxRetries         int                                        `json:"maxRetries"`
+	DefaultModel       string                                     `json:"defaultModel,omitempty"`
+	SupportedModels    []string                                   `json:"supportedModels,omitempty"`
+	ModelMappings      map[string]string                          `json:"modelMappings,omitempty"`
+	ModelCapabilities  map[string]agentconfig.ModelCapabilitySpec `json:"modelCapabilities,omitempty"`
+	Headers            map[string]string                          `json:"headers,omitempty"`
+	HeaderMappings     map[string]string                          `json:"headerMappings,omitempty"`
+	HeaderMappingRules []HeaderMappingRule                        `json:"headerMappingRules,omitempty"`
+	Proxy              *agentconfig.ProxyConfig                   `json:"proxy,omitempty"`
 }
 
 // ProviderWrapper Provider 包装器，使用 ProtocolAdapter
@@ -314,6 +316,20 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	if err != nil {
 		return nil, fmt.Errorf("failed to handle response: %w", err)
 	}
+	if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
+		if outputDir := strings.TrimSpace(stringValue(request.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
+			if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
+				metadata := decodeMapAny(assistantMsg["metadata"])
+				if metadata == nil {
+					metadata = map[string]interface{}{}
+				}
+				metadata["generated_images_error"] = imageErr.Error()
+				assistantMsg["metadata"] = metadata
+			}
+		}
+	}
+
+	content, _ := assistantMsg["content"].(string)
 
 	// 构建响应
 	response := &ChatResponse{
@@ -326,7 +342,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 				Index: 0,
 				Message: Message{
 					Role:    "assistant",
-					Content: assistantMsg["content"].(string),
+					Content: content,
 				},
 				FinishReason: "stop",
 			},
@@ -336,6 +352,9 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 			CompletionTokens: 100,                        // 简单估算
 			TotalTokens:      len(request.Messages)*10 + 100,
 		},
+	}
+	if metadata := decodeMapAny(assistantMsg["metadata"]); len(metadata) > 0 {
+		response.Choices[0].Message.Metadata = cloneMapStringAny(metadata)
 	}
 
 	// 提取 tool_calls
@@ -364,8 +383,14 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 			response.Metadata = make(map[string]interface{})
 		}
 		response.Metadata[assistantReasoningDetailsKey] = reasoningBlock.ToMap()
-	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
-		response.Choices[0].Message.Reasoning = reasoning
+	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok {
+		if response.Metadata == nil {
+			response.Metadata = make(map[string]interface{})
+		}
+		response.Metadata["reasoning_content"] = reasoning
+		if reasoning != "" {
+			response.Choices[0].Message.Reasoning = reasoning
+		}
 	}
 
 	return response, nil
@@ -722,6 +747,18 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	if err != nil {
 		return nil, fmt.Errorf("failed to handle stream response: %w", err)
 	}
+	if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
+		if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
+			if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
+				metadata := decodeMapAny(assistantMsg["metadata"])
+				if metadata == nil {
+					metadata = map[string]interface{}{}
+				}
+				metadata["generated_images_error"] = imageErr.Error()
+				assistantMsg["metadata"] = metadata
+			}
+		}
+	}
 
 	response := &ChatResponse{
 		ID:      fmt.Sprintf("chat_%d", time.Now().Unix()),
@@ -743,6 +780,9 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	}
 	if content, ok := assistantMsg["content"].(string); ok {
 		response.Choices[0].Message.Content = content
+	}
+	if metadata := decodeMapAny(assistantMsg["metadata"]); len(metadata) > 0 {
+		response.Choices[0].Message.Metadata = cloneMapStringAny(metadata)
 	}
 	if toolCalls, ok := assistantMsg["tool_calls"]; ok {
 		switch tcSlice := toolCalls.(type) {
@@ -768,8 +808,14 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			response.Metadata = make(map[string]interface{})
 		}
 		response.Metadata[assistantReasoningDetailsKey] = reasoningBlock.ToMap()
-	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
-		response.Choices[0].Message.Reasoning = reasoning
+	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok {
+		if response.Metadata == nil {
+			response.Metadata = make(map[string]interface{})
+		}
+		response.Metadata["reasoning_content"] = reasoning
+		if reasoning != "" {
+			response.Choices[0].Message.Reasoning = reasoning
+		}
 	}
 	return p.toLLMResponse(response), nil
 }
@@ -916,9 +962,13 @@ func (p *ProviderWrapper) toLLMResponse(resp *ChatResponse) *LLMResponse {
 		return nil
 	}
 
+	metadata := cloneMapStringAny(resp.Metadata)
+	if len(metadata) == 0 {
+		metadata = nil
+	}
 	result := &LLMResponse{
 		Model:    resp.Model,
-		Metadata: resp.Metadata,
+		Metadata: metadata,
 		Usage: &types.TokenUsage{
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
@@ -930,6 +980,14 @@ func (p *ProviderWrapper) toLLMResponse(resp *ChatResponse) *LLMResponse {
 	}
 
 	choice := resp.Choices[0]
+	if len(choice.Message.Metadata) > 0 {
+		if result.Metadata == nil {
+			result.Metadata = make(map[string]interface{}, len(choice.Message.Metadata))
+		}
+		for key, value := range choice.Message.Metadata {
+			result.Metadata[key] = value
+		}
+	}
 	result.Content = choice.Message.Content
 	result.Reasoning = choice.Message.Reasoning
 	if reasoningBlock := types.ReasoningBlockFromMap(result.Metadata[assistantReasoningDetailsKey]); reasoningBlock != nil {
@@ -977,25 +1035,42 @@ func mapFromMetadata(metadata types.Metadata) map[string]interface{} {
 	return result
 }
 
+func cloneMapStringAny(input map[string]interface{}) map[string]interface{} {
+	if len(input) == 0 {
+		return make(map[string]interface{})
+	}
+	output := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
 // convertRequest 转换请求格式
 func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestConfig {
+	metadata := cloneMapStringAny(request.Metadata)
+	if strings.TrimSpace(request.ToolChoice) != "" {
+		if _, exists := metadata["tool_choice"]; !exists {
+			metadata["tool_choice"] = strings.TrimSpace(request.ToolChoice)
+		}
+	}
+	resolvedModel := p.resolveModel(request.Model)
+
 	// 转换 Messages
 	messages := make([]map[string]interface{}, len(request.Messages))
+	providerHint := strings.TrimSpace(resolvedModel)
 	for i, msg := range request.Messages {
-		messages[i] = providerMessageToAdapterMessage(msg, p.config.Type)
+		messages[i] = providerMessageToAdapterMessage(msg, p.config.Type, providerHint)
 	}
 	if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
 		messages = sanitizeCodexProtocolMessages(messages)
 	}
 
 	// 转换 Tools（从 OpenAI 嵌套格式转换为协议特定格式）
-	var tools interface{}
-	if len(request.Tools) > 0 {
-		tools = p.convertTools(request.Tools, p.config.Type)
-	}
+	tools := p.convertTools(request.Tools, p.config.Type, resolvedModel)
 
 	return adapter.RequestConfig{
-		Model:           p.resolveModel(request.Model),
+		Model:           resolvedModel,
 		Messages:        messages,
 		Stream:          request.Stream,
 		MaxTokens:       request.MaxTokens,
@@ -1004,24 +1079,27 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 		Temperature:     request.Temperature,
 		Functions:       tools,
 		Timeout:         p.config.Timeout,
-		Metadata:        request.Metadata,
+		Metadata:        metadata,
 	}
 }
 
 // convertTools 转换工具定义（从 OpenAI 嵌套格式转换为协议特定格式）
-func (p *ProviderWrapper) convertTools(tools []Tool, protocol string) interface{} {
-	if len(tools) == 0 {
-		return nil
-	}
-	normalized := make([]map[string]interface{}, 0, len(tools))
+func (p *ProviderWrapper) convertTools(tools []Tool, protocol string, model string) interface{} {
+	normalized := make([]types.ToolDefinition, 0, len(tools))
 	for _, tool := range tools {
-		normalized = append(normalized, map[string]interface{}{
-			"name":        tool.Function.Name,
-			"description": tool.Function.Description,
-			"parameters":  tool.Function.Parameters,
+		normalized = append(normalized, types.ToolDefinition{
+			Name:        tool.Function.Name,
+			Description: tool.Function.Description,
+			Parameters:  cloneDeepMapStringAny(tool.Function.Parameters),
 		})
 	}
-	return buildToolDefinitionsForProtocol(normalized, protocol, true)
+	return BuildToolDefinitionsForRequest(
+		normalized,
+		protocol,
+		model,
+		p.config.ModelCapabilities,
+		true,
+	)
 }
 
 // HandleResponse 处理 HTTP 响应
@@ -1034,6 +1112,9 @@ func (p *ProviderWrapper) buildURL(apiPath string) string {
 	baseURL := p.config.BaseURL
 	if baseURL == "" {
 		baseURL = "https://api.openai.com"
+	}
+	if configured := strings.TrimSpace(p.config.APIPath); configured != "" {
+		apiPath = configured
 	}
 	return baseURL + "/" + strings.TrimPrefix(apiPath, "/")
 }

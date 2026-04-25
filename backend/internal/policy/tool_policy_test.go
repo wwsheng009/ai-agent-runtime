@@ -2,6 +2,7 @@ package policy
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,6 +118,34 @@ func TestToolExecutionPolicy_AllowToolCall_BlocksNestedShellCommandInReadOnlyMod
 	})
 	if err == nil {
 		t.Fatal("expected shell-like command to be blocked in read-only mode")
+	}
+}
+
+func TestToolExecutionPolicy_AllowToolCall_BlocksPatchPathOutsideSandbox(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "..", "outside.txt")
+
+	policy := NewToolExecutionPolicy(nil, false)
+	policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+		Enabled:      true,
+		AllowedPaths: []string{root},
+	})
+
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Add File: " + outside,
+		"+hello",
+		"*** End Patch",
+	}, "\n")
+	err := policy.AllowToolCall(skill.ToolInfo{
+		Name:          "apply_patch",
+		MCPTrustLevel: "local",
+		ExecutionMode: "local_mcp",
+	}, map[string]interface{}{
+		"patch": patch,
+	})
+	if err == nil {
+		t.Fatal("expected patch path outside sandbox to be blocked")
 	}
 }
 

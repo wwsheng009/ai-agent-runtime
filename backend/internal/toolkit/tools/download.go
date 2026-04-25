@@ -12,6 +12,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // DownloadTool 文件下载工具
@@ -67,16 +68,18 @@ func (d *DownloadTool) Execute(ctx context.Context, params map[string]interface{
 	url, ok := params["url"].(string)
 	if !ok || url == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("url 参数缺失或为空"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("url 参数缺失或为空"),
 		}, nil
 	}
 
 	filePath, ok := params["file_path"].(string)
 	if !ok || filePath == "" {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("file_path 参数缺失或为空"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("file_path 参数缺失或为空"),
 		}, nil
 	}
 
@@ -92,14 +95,16 @@ func (d *DownloadTool) Execute(ctx context.Context, params map[string]interface{
 	// 验证 URL
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("URL 必须以 http:// 或 https:// 开头"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("URL 必须以 http:// 或 https:// 开头"),
 		}, nil
 	}
 	if err := d.checkURL(url); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 	resolvedPath := d.resolvePath(filePath)
@@ -108,14 +113,16 @@ func (d *DownloadTool) Execute(ctx context.Context, params map[string]interface{
 	absPath, err := filepath.Abs(resolvedPath)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("无法解析文件路径: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("无法解析文件路径: %w", err),
 		}, nil
 	}
 	if err := d.checkPath(runtimeexecutor.OpWrite, absPath); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   err,
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
 		}, nil
 	}
 
@@ -123,8 +130,9 @@ func (d *DownloadTool) Execute(ctx context.Context, params map[string]interface{
 	parentDir := filepath.Dir(absPath)
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("无法创建父目录: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("无法创建父目录: %w", err),
 		}, nil
 	}
 
@@ -136,8 +144,9 @@ func (d *DownloadTool) Execute(ctx context.Context, params map[string]interface{
 			select {
 			case <-ctx.Done():
 				return &toolkit.ToolResult{
-					Success: false,
-					Error:   ctx.Err(),
+					Success:    false,
+					OutputKind: toolresult.KindText,
+					Error:      ctx.Err(),
 				}, nil
 			case <-time.After(time.Second * time.Duration(attempt)):
 				// 重试延迟
@@ -157,14 +166,16 @@ func (d *DownloadTool) Execute(ctx context.Context, params map[string]interface{
 
 	if lastErr != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("下载失败（尝试 %d 次）: %w", d.maxRetry+1, lastErr),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("下载失败（尝试 %d 次）: %w", d.maxRetry+1, lastErr),
 		}, nil
 	}
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: fmt.Sprintf("下载成功: %s (%d 字节)", absPath, written),
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    fmt.Sprintf("下载成功: %s (%d 字节)", absPath, written),
 		Metadata: map[string]interface{}{
 			"url":           url,
 			"file_path":     absPath,

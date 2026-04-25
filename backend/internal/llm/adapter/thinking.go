@@ -173,8 +173,37 @@ func normalizeOpenAIReasoningEffort(effort string) string {
 	}
 }
 
+func isDeepSeekOpenAIModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(model, "deepseek")
+}
+
+func normalizeDeepSeekReasoningEffort(effort string) string {
+	switch normalizeRuntimeReasoningEffort(effort) {
+	case "", "none":
+		return ""
+	case "low", "medium", "high":
+		return "high"
+	case "xhigh", "max":
+		return "max"
+	default:
+		return "high"
+	}
+}
+
 func deriveOpenAIReasoningEffort(model, explicit string, thinking *anthropictypes.Thinking) string {
-	if !isReasoningModelPrefix(strings.ToLower(strings.TrimSpace(model))) {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if isDeepSeekOpenAIModel(model) {
+		if normalized := normalizeDeepSeekReasoningEffort(explicit); normalized != "" {
+			return normalized
+		}
+		if thinking == nil {
+			return ""
+		}
+		return normalizeDeepSeekReasoningEffort(mapAnthropicThinkingToReasoningEffort(model, thinking))
+	}
+
+	if !isReasoningModelPrefix(model) {
 		return ""
 	}
 

@@ -65,7 +65,28 @@ func (a *AgentAdapter) CallTool(ctx interface{}, _ string, toolName string, args
 	if !ok || callCtx == nil {
 		callCtx = context.Background()
 	}
-	return a.manager.Execute(callCtx, toolName, args)
+	output, _, err := a.manager.ExecuteWithMeta(callCtx, toolName, args)
+	return output, err
+}
+
+// CallToolWithMeta delegates execution while preserving runtime metadata such as output_kind.
+func (a *AgentAdapter) CallToolWithMeta(ctx interface{}, _ string, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
+	if a == nil || a.manager == nil {
+		return nil, nil, fmt.Errorf("runtime tool manager is not configured")
+	}
+	callCtx, ok := ctx.(context.Context)
+	if !ok || callCtx == nil {
+		callCtx = context.Background()
+	}
+	return a.manager.ExecuteWithMeta(callCtx, toolName, args)
+}
+
+// ResolveToolSource reports the runtime source category for the named tool.
+func (a *AgentAdapter) ResolveToolSource(toolName string) string {
+	if a == nil || a.manager == nil {
+		return ""
+	}
+	return a.manager.resolveToolSource(toolName)
 }
 
 func (a *AgentAdapter) lookupMCPTool(toolName string) (skill.ToolInfo, bool) {

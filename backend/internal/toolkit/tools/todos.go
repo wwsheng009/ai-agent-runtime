@@ -13,6 +13,7 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // TodosTool 任务管理工具
@@ -92,8 +93,9 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 	todosRaw, ok := params["todos"].([]interface{})
 	if !ok {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("todos 参数缺失或类型错误"),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("todos 参数缺失或类型错误"),
 		}, nil
 	}
 
@@ -103,24 +105,27 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 		todoMap, ok := todoRaw.(map[string]interface{})
 		if !ok {
 			return &toolkit.ToolResult{
-				Success: false,
-				Error:   fmt.Errorf("todos[%d] 不是有效的对象", i),
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("todos[%d] 不是有效的对象", i),
 			}, nil
 		}
 
 		content, ok := todoMap["content"].(string)
 		if !ok || content == "" {
 			return &toolkit.ToolResult{
-				Success: false,
-				Error:   fmt.Errorf("todos[%d].content 缺失或为空", i),
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("todos[%d].content 缺失或为空", i),
 			}, nil
 		}
 
 		status, ok := todoMap["status"].(string)
 		if !ok || (status != "pending" && status != "in_progress" && status != "completed") {
 			return &toolkit.ToolResult{
-				Success: false,
-				Error:   fmt.Errorf("todos[%d].status 必须是 pending、in_progress 或 completed", i),
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("todos[%d].status 必须是 pending、in_progress 或 completed", i),
 			}, nil
 		}
 
@@ -148,8 +153,9 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 	}
 	if inProgressCount > 1 {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("同一时间只能有一个任务为 in_progress，当前有 %d 个", inProgressCount),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("同一时间只能有一个任务为 in_progress，当前有 %d 个", inProgressCount),
 		}, nil
 	}
 
@@ -168,8 +174,9 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 	storageMode, err := t.saveTodos(newTodos)
 	if err != nil {
 		return &toolkit.ToolResult{
-			Success: false,
-			Error:   fmt.Errorf("保存任务列表失败: %w", err),
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("保存任务列表失败: %w", err),
 		}, nil
 	}
 
@@ -192,8 +199,9 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 	result := fmt.Sprintf("任务列表已更新: %d 待处理, %d 进行中, %d 已完成", pending, inProgress, completed)
 
 	return &toolkit.ToolResult{
-		Success: true,
-		Content: result,
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    result,
 		Metadata: map[string]interface{}{
 			"total":        len(newTodos),
 			"pending":      pending,

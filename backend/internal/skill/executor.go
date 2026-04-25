@@ -12,6 +12,7 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -590,6 +591,13 @@ func (e *Executor) buildToolDefinitions(ctx context.Context, toolNames []string)
 			Name:        toolInfo.Name,
 			Description: toolInfo.Description,
 			Parameters:  normalizeToolParameters(toolInfo.InputSchema),
+		}
+		if resolver, ok := e.mcpManager.(interface{ ResolveToolSource(string) string }); ok {
+			if source := toolresult.NormalizeSource(resolver.ResolveToolSource(toolInfo.Name)); source != "" {
+				tool.Metadata = map[string]interface{}{
+					toolresult.SourceKey: source,
+				}
+			}
 		}
 
 		tools = append(tools, tool)

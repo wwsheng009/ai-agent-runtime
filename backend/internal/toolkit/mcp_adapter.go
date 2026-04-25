@@ -46,7 +46,7 @@ func (a *MCPAdapter) ExecuteAsMCP(ctx context.Context, args map[string]interface
 
 	return &protocol.CallToolResult{
 		Content: []protocol.Content{content},
-		Meta:    result.Metadata,
+		Meta:    result.MetadataWithOutputKind(),
 	}, nil
 }
 

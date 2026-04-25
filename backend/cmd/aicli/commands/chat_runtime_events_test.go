@@ -123,8 +123,23 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "ls", Payload: map[string]interface{}{"arg_preview": "path=src"}}); got != "• Running ls path=src" {
 		t.Fatalf("unexpected tool requested render: %q", got)
 	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "list_mcp_resources", Payload: map[string]interface{}{"tool_source": "meta"}}); got != "• Running [meta] list_mcp_resources" {
+		t.Fatalf("unexpected meta tool requested render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "remote_search", Payload: map[string]interface{}{"tool_source": "mcp", "arg_preview": "query=golang"}}); got != "• Running [mcp] remote_search query=golang" {
+		t.Fatalf("unexpected mcp tool requested render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "background_task", Payload: map[string]interface{}{"tool_source": "broker", "arg_preview": "command=git status"}}); got != "• Running [broker] background_task command=git status" {
+		t.Fatalf("unexpected broker tool requested render: %q", got)
+	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "execute_shell_command", Payload: map[string]interface{}{"command_text": "git status --short", "arg_preview": "command=git status --short"}}); got != "• Running git status --short" {
 		t.Fatalf("unexpected shell tool requested render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "execute_shell_command", Payload: map[string]interface{}{"command_text": "git status --short", "workdir": "E:/projects/ai/ai-agent-runtime"}}); got != strings.Join([]string{
+		"• Running git status --short",
+		"  workdir: E:/projects/ai/ai-agent-runtime",
+	}, "\n") {
+		t.Fatalf("unexpected shell tool requested workdir render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:     "tool.completed",
@@ -160,6 +175,21 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		Type:     "tool.completed",
 		ToolName: "execute_shell_command",
 		Payload: map[string]interface{}{
+			"command_text":  "git status",
+			"workdir":       "E:/projects/ai/ai-agent-runtime",
+			"summary_lines": []interface{}{"On branch main"},
+		},
+	}); got != strings.Join([]string{
+		"• Ran git status",
+		"  On branch main",
+		"  workdir: E:/projects/ai/ai-agent-runtime",
+	}, "\n") {
+		t.Fatalf("unexpected completed tool workdir render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "execute_shell_command",
+		Payload: map[string]interface{}{
 			"command_text":  "go build -o .\\aicli-cachetest.exe .\\cmd\\aicli",
 			"arg_preview":   "command=go build -o .\\aicli-cachetest.exe .\\cmd\\aicli",
 			"summary_lines": []interface{}{"Tool returned no output."},
@@ -183,6 +213,50 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		"  返回 10 条结果",
 	}, "\n") {
 		t.Fatalf("unexpected tool render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "list_mcp_resources",
+		Payload: map[string]interface{}{
+			"tool_source":   "meta",
+			"summary_lines": []interface{}{"server=docs resources=12", "next_cursor=cursor-1", "warning=truncated"},
+		},
+	}); got != strings.Join([]string{
+		"• Ran [meta] list_mcp_resources",
+		"  server=docs resources=12",
+		"  next_cursor=cursor-1",
+	}, "\n") {
+		t.Fatalf("unexpected meta tool render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "remote_search",
+		Payload: map[string]interface{}{
+			"tool_source":   "mcp",
+			"arg_preview":   "query=golang tools",
+			"summary_lines": []interface{}{"result 1", "result 2", "result 3"},
+		},
+	}); got != strings.Join([]string{
+		"• Ran [mcp] remote_search query=golang tools",
+		"  result 1",
+		"  result 2",
+	}, "\n") {
+		t.Fatalf("unexpected mcp tool render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "background_task",
+		Payload: map[string]interface{}{
+			"tool_source":   "broker",
+			"arg_preview":   "command=git status",
+			"summary_lines": []interface{}{"job_id=job-1", "status=queued", "restart_policy=fail"},
+		},
+	}); got != strings.Join([]string{
+		"• Ran [broker] background_task command=git status",
+		"  job_id=job-1",
+		"  status=queued",
+	}, "\n") {
+		t.Fatalf("unexpected broker tool render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:    "tool.denied",
@@ -885,6 +959,17 @@ func TestApprovalRequestPreviewLines_ShellCommand(t *testing.T) {
 	require.Equal(t, []string{
 		"command=git status --short --branch",
 		"workdir=E:/projects/ai/ai-gateway",
+	}, lines)
+}
+
+func TestApprovalRequestPreviewLines_BackgroundTaskCwd(t *testing.T) {
+	lines := approvalRequestPreviewLines(&runtimechat.ApprovalRequest{
+		ToolName: "background_task",
+		ArgsJSON: []byte(`{"command":"git status --short --branch","cwd":"E:/projects/ai/ai-gateway"}`),
+	})
+	require.Equal(t, []string{
+		"command=git status --short --branch",
+		"cwd=E:/projects/ai/ai-gateway",
 	}, lines)
 }
 

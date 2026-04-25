@@ -39,11 +39,13 @@ func buildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm
 			Type:               providerType,
 			APIKey:             provider.GetAPIKey(),
 			BaseURL:            provider.BaseURL,
+			APIPath:            provider.APIPath,
 			Timeout:            timeout,
 			MaxRetries:         maxRetries,
 			DefaultModel:       provider.DefaultModel,
 			SupportedModels:    cloneRuntimeStringSlice(provider.SupportedModels),
 			ModelMappings:      cloneRuntimeStringMap(provider.ModelMappings),
+			ModelCapabilities:  cloneRuntimeModelCapabilities(provider.ModelCapabilities),
 			Headers:            cloneRuntimeStringMap(provider.Headers),
 			HeaderMappings:     cloneRuntimeStringMap(provider.HeaderMappings),
 			HeaderMappingRules: cloneRuntimeHeaderMappingRules(provider.HeaderMappingRules),
@@ -68,6 +70,21 @@ func cloneRuntimeStringMap(input map[string]string) map[string]string {
 	output := make(map[string]string, len(input))
 	for key, value := range input {
 		output[key] = value
+	}
+	return output
+}
+
+func cloneRuntimeModelCapabilities(input map[string]agentconfig.ModelCapabilitySpec) map[string]agentconfig.ModelCapabilitySpec {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]agentconfig.ModelCapabilitySpec, len(input))
+	for key, value := range input {
+		cloned := value
+		if len(value.InputModalities) > 0 {
+			cloned.InputModalities = append([]string(nil), value.InputModalities...)
+		}
+		output[key] = cloned
 	}
 	return output
 }

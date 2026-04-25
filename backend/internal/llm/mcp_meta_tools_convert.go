@@ -32,14 +32,14 @@ func buildToolDefinitionsForProtocol(tools []map[string]interface{}, protocol st
 		if len(tool) == 0 {
 			return
 		}
-		name, _ := tool["name"].(string)
-		if name == "" {
+		key := protocolToolDedupKey(tool)
+		if key == "" {
 			return
 		}
-		if _, ok := seen[name]; ok {
+		if _, ok := seen[key]; ok {
 			return
 		}
-		seen[name] = struct{}{}
+		seen[key] = struct{}{}
 		combined = append(combined, tool)
 	}
 
@@ -123,6 +123,14 @@ func convertNamedToolsToGemini(meta []map[string]interface{}) []map[string]inter
 func convertNamedToolsToCodex(meta []map[string]interface{}) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(meta))
 	for _, tool := range meta {
+		if toolType, _ := tool["type"].(string); strings.TrimSpace(toolType) != "" && !strings.EqualFold(strings.TrimSpace(toolType), "function") {
+			cloned := make(map[string]interface{}, len(tool))
+			for key, value := range tool {
+				cloned[key] = value
+			}
+			result = append(result, cloned)
+			continue
+		}
 		result = append(result, map[string]interface{}{
 			"name":        tool["name"],
 			"description": tool["description"],
@@ -130,4 +138,17 @@ func convertNamedToolsToCodex(meta []map[string]interface{}) []map[string]interf
 		})
 	}
 	return result
+}
+
+func protocolToolDedupKey(tool map[string]interface{}) string {
+	if len(tool) == 0 {
+		return ""
+	}
+	if name, _ := tool["name"].(string); strings.TrimSpace(name) != "" {
+		return "name:" + strings.TrimSpace(name)
+	}
+	if toolType, _ := tool["type"].(string); strings.TrimSpace(toolType) != "" {
+		return "type:" + strings.TrimSpace(toolType)
+	}
+	return ""
 }
