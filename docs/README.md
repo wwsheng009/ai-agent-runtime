@@ -11,12 +11,14 @@ Migration notes:
 
 Main sections:
 
+- `aicli/` - CLI behavior, tool output rendering, metadata propagation, and provider integration notes
 - `skill_runtime/` - runtime APIs, governance, contracts, search, persistence, and design notes
 - `multi-agents/` - multi-agent design, profile, team, and rollout plans
 - `working/` - point-in-time debugging notes and implementation snapshots
 
 Recommended starting points:
 
+- `aicli/README.md`
 - `skill_runtime/README.md`
 - `multi-agents/README.md`
 - `working/README.md`
