@@ -249,13 +249,13 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 					"type": "message",
 					"role": role,
 				}
-				if content != "" {
-					inputItem["content"] = []map[string]interface{}{
-						{
-							"type": "input_text",
-							"text": content,
-						},
-					}
+				if parts := extractCodexUserInputParts(msg); len(parts) > 0 {
+					inputItem["content"] = parts
+				} else if content != "" {
+					inputItem["content"] = []map[string]interface{}{{
+						"type": "input_text",
+						"text": content,
+					}}
 				} else {
 					inputItem["content"] = []map[string]interface{}{}
 				}
@@ -1482,6 +1482,82 @@ func extractCodexMessageText(msg map[string]interface{}) string {
 		return strings.Join(parts, "\n")
 	default:
 		return ""
+	}
+}
+
+func extractCodexUserInputParts(msg map[string]interface{}) []map[string]interface{} {
+	if msg == nil {
+		return nil
+	}
+	switch typed := msg["content"].(type) {
+	case []map[string]interface{}:
+		return normalizeCodexInputPartsFromMaps(typed)
+	case []interface{}:
+		return normalizeCodexInputParts(typed)
+	default:
+		return nil
+	}
+}
+
+func normalizeCodexInputParts(raw []interface{}) []map[string]interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	parts := make([]map[string]interface{}, 0, len(raw))
+	for _, item := range raw {
+		part := decodeMap(item)
+		if canonical := normalizeCodexInputPart(part); canonical != nil {
+			parts = append(parts, canonical)
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return parts
+}
+
+func normalizeCodexInputPartsFromMaps(raw []map[string]interface{}) []map[string]interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	parts := make([]map[string]interface{}, 0, len(raw))
+	for _, part := range raw {
+		if canonical := normalizeCodexInputPart(part); canonical != nil {
+			parts = append(parts, canonical)
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return parts
+}
+
+func normalizeCodexInputPart(part map[string]interface{}) map[string]interface{} {
+	if len(part) == 0 {
+		return nil
+	}
+	partType, _ := part["type"].(string)
+	switch strings.ToLower(strings.TrimSpace(partType)) {
+	case "input_text", "text", "output_text", "summary_text":
+		text, _ := part["text"].(string)
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		return map[string]interface{}{
+			"type": "input_text",
+			"text": text,
+		}
+	case "input_image", "image_url":
+		imageURL, _ := part["image_url"].(string)
+		if strings.TrimSpace(imageURL) == "" {
+			return nil
+		}
+		return map[string]interface{}{
+			"type":      "input_image",
+			"image_url": strings.TrimSpace(imageURL),
+		}
+	default:
+		return nil
 	}
 }
 

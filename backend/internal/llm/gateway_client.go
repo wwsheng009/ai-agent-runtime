@@ -93,6 +93,155 @@ func (c *GatewayClient) Name() string {
 	return "gateway-client"
 }
 
+// ResolveModelCapability resolves capabilities for the provider resource that
+// would serve the requested model on the next gateway request.
+func (c *GatewayClient) ResolveModelCapability(requestedModel string) (string, agentconfig.ModelCapabilitySpec, bool) {
+	if c == nil || c.resourceManager == nil {
+		return strings.TrimSpace(requestedModel), agentconfig.ModelCapabilitySpec{}, false
+	}
+
+	model := strings.TrimSpace(requestedModel)
+	if model == "" {
+		model = strings.TrimSpace(c.defaultModel)
+	}
+	if model == "" {
+		return "", agentconfig.ModelCapabilitySpec{}, false
+	}
+	maxAttempts := c.maxRetries
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
+	selected, err := c.resourceManager.SelectResource(RetryInfo{
+		TargetGroup:      "default",
+		Attempt:          1,
+		MaxAttempts:      maxAttempts,
+		RequestedModel:   model,
+		UseEnhancedRetry: true,
+	})
+	if err != nil || selected == nil {
+		return model, agentconfig.ModelCapabilitySpec{}, false
+	}
+
+	resolvedModel := resolveGatewaySelectedModel(selected, model)
+	capability, ok := ResolveModelCapabilitySpec(resolvedModel, selectedProviderModelCapabilities(selected))
+	if !ok && resolvedModel != model {
+		capability, ok = ResolveModelCapabilitySpec(model, selectedProviderModelCapabilities(selected))
+		if ok {
+			resolvedModel = model
+		}
+	}
+	return strings.TrimSpace(resolvedModel), capability, ok
+}
+
+// RemoteCompact invokes a selected provider-native remote compaction endpoint.
+func (c *GatewayClient) RemoteCompact(ctx context.Context, req RemoteCompactRequest) (*RemoteCompactResponse, error) {
+	if c == nil || c.resourceManager == nil {
+		return nil, fmt.Errorf("resource manager not initialized")
+	}
+
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = strings.TrimSpace(c.defaultModel)
+	}
+	maxAttempts := c.maxRetries
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
+	selected, err := c.resourceManager.SelectResource(RetryInfo{
+		TargetGroup:      "default",
+		Attempt:          1,
+		MaxAttempts:      maxAttempts,
+		RequestedModel:   model,
+		UseEnhancedRetry: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to select provider: %w", err)
+	}
+	if selected == nil || selected.Provider == nil {
+		return nil, fmt.Errorf("selected provider is nil")
+	}
+
+	protocol := strings.TrimSpace(selected.Provider.Type)
+	if protocol == "" {
+		protocol = "openai"
+	}
+	if !strings.EqualFold(protocol, "codex") {
+		return nil, ErrRemoteCompactUnsupported
+	}
+
+	resolvedModel := resolveGatewaySelectedModel(selected, model)
+	requestBody := buildCodexRemoteCompactRequest(resolvedModel, req.History)
+	url := resolveCompactURL(selected.Provider.BaseURL, selected.Provider.APIPath, (&adapter.CodexAdapter{}).GetAPIPath()+"/compact")
+	bodyBytes, marshalErr := json.Marshal(requestBody)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("failed to marshal remote compact request body: %w", marshalErr)
+	}
+	reportHTTPDebug(ctx, HTTPDebugEvent{
+		Source:           "gateway_client",
+		Phase:            "request",
+		Provider:         selected.Provider.Name,
+		Protocol:         protocol,
+		Model:            resolvedModel,
+		Method:           http.MethodPost,
+		URL:              url,
+		RequestMetadata:  buildHTTPDebugRequestMetadata(nil, protocol, requestBody),
+		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+		RequestBodyBytes: len(bodyBytes),
+		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+	})
+
+	headers := buildCodexRemoteCompactHeaders(selected.KeyValue, c.defaultTimeout, requestBody, nil)
+	client := c.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: c.defaultTimeout}
+	}
+
+	startTime := time.Now()
+	responseBody, statusCode, err := sendRemoteCompactRequest(ctx, client, url, headers, requestBody)
+	latencyMs := time.Since(startTime).Milliseconds()
+	if err != nil {
+		reportHTTPDebug(ctx, HTTPDebugEvent{
+			Source:              "gateway_client",
+			Phase:               "response",
+			Provider:            selected.Provider.Name,
+			Protocol:            protocol,
+			Model:               resolvedModel,
+			Method:              http.MethodPost,
+			URL:                 url,
+			ResponseStatusCode:  statusCode,
+			ResponseBodyBytes:   len(responseBody),
+			ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
+			ResponseBodyRaw:     append([]byte(nil), responseBody...),
+			Error:               err.Error(),
+		})
+		c.resourceManager.RecordResult(selected, false, err, statusCode, latencyMs)
+		return nil, err
+	}
+	reportHTTPDebug(ctx, HTTPDebugEvent{
+		Source:              "gateway_client",
+		Phase:               "response",
+		Provider:            selected.Provider.Name,
+		Protocol:            protocol,
+		Model:               resolvedModel,
+		Method:              http.MethodPost,
+		URL:                 url,
+		ResponseStatusCode:  statusCode,
+		ResponseBodyBytes:   len(responseBody),
+		ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
+		ResponseBodyRaw:     append([]byte(nil), responseBody...),
+	})
+
+	response, decodeErr := decodeCodexRemoteCompactResponse(req.History, responseBody)
+	if decodeErr != nil {
+		c.resourceManager.RecordResult(selected, false, decodeErr, statusCode, latencyMs)
+		return nil, decodeErr
+	}
+	c.resourceManager.RecordResult(selected, true, nil, statusCode, latencyMs)
+	return response, nil
+}
+
 // Call 调用 LLM（非流式）
 func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
 	if c.resourceManager == nil {

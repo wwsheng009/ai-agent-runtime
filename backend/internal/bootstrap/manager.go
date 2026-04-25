@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/embedding"
@@ -376,6 +377,9 @@ func cloneProviderConfig(input *llm.ProviderConfig) *llm.ProviderConfig {
 	if len(input.ModelMappings) > 0 {
 		cloned.ModelMappings = cloneStringMap(input.ModelMappings)
 	}
+	if len(input.ModelCapabilities) > 0 {
+		cloned.ModelCapabilities = cloneRuntimeModelCapabilities(input.ModelCapabilities)
+	}
 	if len(input.Headers) > 0 {
 		cloned.Headers = cloneStringMap(input.Headers)
 	}
@@ -408,6 +412,21 @@ func cloneHeaderMappingRules(input []llm.HeaderMappingRule) []llm.HeaderMappingR
 	}
 	output := make([]llm.HeaderMappingRule, len(input))
 	copy(output, input)
+	return output
+}
+
+func cloneRuntimeModelCapabilities(input map[string]agentconfig.ModelCapabilitySpec) map[string]agentconfig.ModelCapabilitySpec {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]agentconfig.ModelCapabilitySpec, len(input))
+	for key, value := range input {
+		cloned := value
+		if len(value.InputModalities) > 0 {
+			cloned.InputModalities = append([]string(nil), value.InputModalities...)
+		}
+		output[key] = cloned
+	}
 	return output
 }
 

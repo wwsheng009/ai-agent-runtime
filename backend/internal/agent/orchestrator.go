@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
@@ -704,6 +705,12 @@ func (a *Agent) callLLM(ctx context.Context, req *OrchestrationRequest) (*llm.LL
 	var llmMetadata map[string]interface{}
 	if len(metadata) > 0 {
 		llmMetadata = map[string]interface{}(metadata)
+	}
+	if layout := runtimeprompt.RenderInstructionMessagesLayout(messages); layout != "" {
+		if llmMetadata == nil {
+			llmMetadata = map[string]interface{}{}
+		}
+		llmMetadata["prompt_layout"] = layout
 	}
 
 	return a.llmRuntime.Call(ctx, &llm.LLMRequest{

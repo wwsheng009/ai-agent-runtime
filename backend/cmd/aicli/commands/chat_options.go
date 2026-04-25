@@ -21,6 +21,7 @@ type chatCommandOptions struct {
 	StreamChanged            bool
 	NoInteractive            bool
 	Message                  string
+	ImagePaths               []string
 	LogDir                   string
 	RequestTimeoutFlag       string
 	ReasoningEffortFlag      string
@@ -67,6 +68,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	streamFlag, _ := cmd.Flags().GetBool("stream")
 	noInteractive, _ := cmd.Flags().GetBool("no-interactive")
 	message, _ := cmd.Flags().GetString("message")
+	imagePaths, _ := cmd.Flags().GetStringSlice("image")
 	logDir, _ := cmd.Flags().GetString("log-dir")
 	requestTimeoutFlag, _ := cmd.Flags().GetString("request-timeout")
 	reasoningEffortFlag, _ := cmd.Flags().GetString("reasoning-effort")
@@ -128,6 +130,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		StreamChanged:          cmd.Flags().Changed("stream"),
 		NoInteractive:          noInteractive,
 		Message:                message,
+		ImagePaths:             imagePaths,
 		LogDir:                 logDir,
 		RequestTimeoutFlag:     requestTimeoutFlag,
 		ReasoningEffortFlag:    reasoningEffortFlag,

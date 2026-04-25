@@ -115,8 +115,14 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("会话标题已更新")
 		return false
 	}
+	if strings.HasPrefix(cmdLower, "/image") {
+		return handleImageCommand(session, command)
+	}
 	if strings.HasPrefix(cmdLower, "/queue") {
 		return handleQueueCommand(session, command)
+	}
+	if strings.HasPrefix(cmdLower, "/compact") {
+		return handleCompactCommand(session, command)
 	}
 	if strings.HasPrefix(cmdLower, "/permission-mode") || strings.HasPrefix(cmdLower, "/mode") {
 		return handlePermissionModeCommand(session, command)
@@ -176,6 +182,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		}
 		printCurrentRuntimeSession(session)
 
+	case "/compact":
+		return handleCompactCommand(session, command)
+
 	case "/sessions":
 		if err := printChatSessionSummaries(session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session), session.SessionFilter); err != nil {
 			fmt.Printf("错误: %v\n", err)
@@ -205,6 +214,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		warnIfChatSessionSyncFails(session, "toggle permission mode", syncRuntimeSessionFromChat(session))
 		fmt.Println("提示: 已切换到 permission-mode=bypass_permissions（等价于 --yolo）")
 
+	case "/image":
+		handleImageCommand(session, "/image")
+
 	case "/help", "/?":
 		fmt.Println()
 		fmt.Println("可用命令:")
@@ -215,11 +227,14 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("  /normal, /n        - 切换到普通模式")
 		fmt.Println("  /history, /h       - 显示对话历史")
 		fmt.Println("  /session           - 显示当前会话信息")
+		fmt.Println("  /compact [mode]    - 手动触发会话压缩（auto|local|remote）")
 		fmt.Println("  /sessions          - 按当前筛选条件列出可恢复会话")
 		fmt.Println("  /sessions <query>  - 按关键字筛选会话")
 		fmt.Println("  /load <id>         - 加载指定会话")
 		fmt.Println("  /resume            - 恢复最近会话")
 		fmt.Println("  /title <text>      - 更新当前会话标题")
+		fmt.Println("  /image [path]      - 查看/添加图片附件（支持 PNG/JPEG/GIF/WebP）")
+		fmt.Println("  /image clear       - 清空待发送图片附件")
 		fmt.Println("  /queue             - 查看当前排队输入状态")
 		fmt.Println("  /queue clear       - 清空当前排队输入")
 		fmt.Println("  /permission-mode [mode] - 查看或切换权限模式（default|accept_edits|plan|bypass_permissions）")
@@ -273,6 +288,37 @@ func handlePermissionModeCommand(session *ChatSession, command string) bool {
 	return false
 }
 
+func handleImageCommand(session *ChatSession, command string) bool {
+	if session == nil {
+		fmt.Println("错误: 当前没有活动会话")
+		return false
+	}
+	arg := strings.TrimSpace(extractCommandArgument(command))
+	if arg == "" {
+		// /image with no argument: list current attachments
+		if len(session.ImagePaths) == 0 {
+			fmt.Println("当前无待发送图片附件")
+		} else {
+			fmt.Printf("待发送图片附件 (%d):\n", len(session.ImagePaths))
+			for i, path := range session.ImagePaths {
+				fmt.Printf("  [%d] %s\n", i+1, path)
+			}
+		}
+		return false
+	}
+	if arg == "clear" {
+		count := len(session.ImagePaths)
+		session.ImagePaths = nil
+		fmt.Printf("已清空 %d 个待发送图片附件\n", count)
+		return false
+	}
+	// /image <path>: add image path
+	path := arg
+	session.ImagePaths = append(session.ImagePaths, path)
+	fmt.Printf("已添加图片附件: %s (当前共 %d 个)\n", path, len(session.ImagePaths))
+	return false
+}
+
 func handleQueueCommand(session *ChatSession, command string) bool {
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
@@ -297,6 +343,27 @@ func handleQueueCommand(session *ChatSession, command string) bool {
 		fmt.Println("用法: /queue 或 /queue clear")
 		return false
 	}
+}
+
+func handleCompactCommand(session *ChatSession, command string) bool {
+	if session == nil {
+		fmt.Println("错误: 当前没有活动会话")
+		return false
+	}
+	mode, err := normalizeChatCompactMode(extractCommandArgument(command))
+	if err != nil {
+		fmt.Printf("错误: %v\n", err)
+		return false
+	}
+
+	report, err := runManualChatCompact(session, mode)
+	if report != nil {
+		fmt.Println(formatChatCompactReport(report))
+	}
+	if err != nil {
+		fmt.Printf("错误: %v\n", err)
+	}
+	return false
 }
 
 func handleApprovalReuseCommand(session *ChatSession, command string) bool {

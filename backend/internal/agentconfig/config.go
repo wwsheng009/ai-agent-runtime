@@ -82,32 +82,37 @@ type NativeToolCapabilities struct {
 
 // ModelCapabilitySpec declares per-model input modalities and native tool support.
 type ModelCapabilitySpec struct {
-	InputModalities []string               `yaml:"input_modalities" mapstructure:"input_modalities" json:"input_modalities"`
-	NativeTools     NativeToolCapabilities `yaml:"native_tools" mapstructure:"native_tools" json:"native_tools"`
+	InputModalities       []string               `yaml:"input_modalities" mapstructure:"input_modalities" json:"input_modalities"`
+	NativeTools           NativeToolCapabilities `yaml:"native_tools" mapstructure:"native_tools" json:"native_tools"`
+	MaxContextTokens      int                    `yaml:"max_context_tokens" mapstructure:"max_context_tokens" json:"max_context_tokens"`
+	AutoCompactRatio      float64                `yaml:"auto_compact_ratio" mapstructure:"auto_compact_ratio" json:"auto_compact_ratio"`
+	AutoCompactTokenLimit int                    `yaml:"auto_compact_token_limit" mapstructure:"auto_compact_token_limit" json:"auto_compact_token_limit"`
+	AutoCompactMode       string                 `yaml:"auto_compact_mode" mapstructure:"auto_compact_mode" json:"auto_compact_mode"`
+	SupportsRemoteCompact bool                   `yaml:"supports_remote_compact" mapstructure:"supports_remote_compact" json:"supports_remote_compact"`
 }
 
 // Provider holds provider configuration.
 type Provider struct {
-	Enabled            bool                `yaml:"enabled" mapstructure:"enabled" json:"enabled"`
-	Type               string              `yaml:"type" mapstructure:"type" json:"type"`
-	Protocol           string              `yaml:"protocol" mapstructure:"protocol" json:"protocol"`
-	BaseURL            string              `yaml:"base_url" mapstructure:"base_url" json:"base_url"`
-	APIPath            string              `yaml:"api_path" mapstructure:"api_path" json:"api_path"`
-	ForwardURL         string              `yaml:"forward_url" mapstructure:"forward_url" json:"forward_url"`
-	APIKey             string              `yaml:"api_key" mapstructure:"api_key" json:"api_key"`
-	APIKeys            []string            `yaml:"api_keys" mapstructure:"api_keys" json:"api_keys"`
-	APIKeyRef          string              `yaml:"api_key_ref" mapstructure:"api_key_ref" json:"api_key_ref"`
-	DefaultModel       string              `yaml:"default_model" mapstructure:"default_model" json:"default_model"`
-	SupportedModels    []string            `yaml:"supported_models" mapstructure:"supported_models" json:"supported_models"`
-	Headers            map[string]string   `yaml:"headers" mapstructure:"headers" json:"headers"`
-	HeaderMappings     map[string]string   `yaml:"header_mappings" mapstructure:"header_mappings" json:"header_mappings"`
-	HeaderMappingRules []HeaderMappingRule `yaml:"header_mapping_rules" mapstructure:"header_mapping_rules" json:"header_mapping_rules"`
-	SupportTypes       []string            `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
-	ModelMappings      map[string]string   `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
+	Enabled            bool                           `yaml:"enabled" mapstructure:"enabled" json:"enabled"`
+	Type               string                         `yaml:"type" mapstructure:"type" json:"type"`
+	Protocol           string                         `yaml:"protocol" mapstructure:"protocol" json:"protocol"`
+	BaseURL            string                         `yaml:"base_url" mapstructure:"base_url" json:"base_url"`
+	APIPath            string                         `yaml:"api_path" mapstructure:"api_path" json:"api_path"`
+	ForwardURL         string                         `yaml:"forward_url" mapstructure:"forward_url" json:"forward_url"`
+	APIKey             string                         `yaml:"api_key" mapstructure:"api_key" json:"api_key"`
+	APIKeys            []string                       `yaml:"api_keys" mapstructure:"api_keys" json:"api_keys"`
+	APIKeyRef          string                         `yaml:"api_key_ref" mapstructure:"api_key_ref" json:"api_key_ref"`
+	DefaultModel       string                         `yaml:"default_model" mapstructure:"default_model" json:"default_model"`
+	SupportedModels    []string                       `yaml:"supported_models" mapstructure:"supported_models" json:"supported_models"`
+	Headers            map[string]string              `yaml:"headers" mapstructure:"headers" json:"headers"`
+	HeaderMappings     map[string]string              `yaml:"header_mappings" mapstructure:"header_mappings" json:"header_mappings"`
+	HeaderMappingRules []HeaderMappingRule            `yaml:"header_mapping_rules" mapstructure:"header_mapping_rules" json:"header_mapping_rules"`
+	SupportTypes       []string                       `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
+	ModelMappings      map[string]string              `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
 	ModelCapabilities  map[string]ModelCapabilitySpec `yaml:"model_capabilities" mapstructure:"model_capabilities" json:"model_capabilities"`
-	MaxTokensLimit     int                 `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
-	Timeout            time.Duration       `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
-	Proxy              *ProxyConfig        `yaml:"proxy" mapstructure:"proxy" json:"proxy"`
+	MaxTokensLimit     int                            `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
+	Timeout            time.Duration                  `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
+	Proxy              *ProxyConfig                   `yaml:"proxy" mapstructure:"proxy" json:"proxy"`
 }
 
 // HeaderMappingRule defines a conditional header rewrite rule.

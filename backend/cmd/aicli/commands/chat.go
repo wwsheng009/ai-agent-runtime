@@ -93,6 +93,7 @@ type ChatSession struct {
 	Interaction        *chatInteractionCoordinator        // unified interactive stdout/prompt coordinator
 	runtimeHTTPCapture *chatRuntimeHTTPCapture            // recent runtime HTTP response diagnostics
 	queuedInputDrain   bool                               // suppress repeated queued-input notices while draining
+	ImagePaths         []string                           // explicit local image attachments for current turn
 }
 
 type chatRuntimeHTTPCapture struct {
@@ -844,7 +845,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					if session.Interaction != nil {
 						session.Interaction.PrintPrompt()
 					} else {
-						fmt.Print(ui.FormatUserPrompt())
+						fmt.Print(ui.FormatUserPromptWithAttachments(len(session.ImagePaths)))
 					}
 				}
 			}
@@ -911,6 +912,8 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			if shouldDisplayFinalResponse(session, response) && !handledByStreamFinalize && !wasInteractiveActorResponseAlreadyRendered(session) {
 				renderChatResponse(session, response)
 			}
+			// 消息发送成功后清空已使用的图片附件
+			session.ImagePaths = nil
 			// 实时保存会话日志
 			if session.Logger.logDir != "" {
 				if err := session.Logger.FlushSession(); err != nil {
@@ -968,6 +971,9 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			// 流式模式下添加换行
 			fmt.Println()
 		}
+
+		// 消息发送成功后清空已使用的图片附件
+		session.ImagePaths = nil
 
 		// 实时保存会话日志
 		if session.Logger.logDir != "" {

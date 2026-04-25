@@ -102,6 +102,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		ApprovalReuseMode:  opts.ApprovalReuseMode,
 		ChatExecutor:       newAICLISharedChatExecutor(),
 		runtimeHTTPCapture: &chatRuntimeHTTPCapture{},
+		ImagePaths:         opts.ImagePaths,
 	}
 	session.Interaction = newChatInteractionCoordinator(session)
 	if profileState != nil && profileState.Active() {

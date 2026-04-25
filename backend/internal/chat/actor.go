@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -133,18 +134,30 @@ func (a *SessionActor) Stop() {
 	<-a.done
 }
 
+// SubmitPromptOption configures a SubmitPrompt call.
+type SubmitPromptOption struct {
+	ImagePaths       []string
+	ImageArtifactDir string
+}
+
 // SubmitPrompt submits a prompt and waits for the result.
-func (a *SessionActor) SubmitPrompt(ctx context.Context, prompt string, runMeta *team.RunMeta) (*agent.Result, error) {
+func (a *SessionActor) SubmitPrompt(ctx context.Context, prompt string, runMeta *team.RunMeta, opts ...SubmitPromptOption) (*agent.Result, error) {
 	if a == nil {
 		return nil, fmt.Errorf("session actor is nil")
 	}
 	a.Start()
 	reply := make(chan SubmitResult, 1)
+	var opt SubmitPromptOption
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	cmd := SubmitPrompt{
-		Ctx:     ctx,
-		Prompt:  prompt,
-		RunMeta: runMeta.Clone(),
-		Reply:   reply,
+		Ctx:              ctx,
+		Prompt:           prompt,
+		ImagePaths:       opt.ImagePaths,
+		ImageArtifactDir: opt.ImageArtifactDir,
+		RunMeta:          runMeta.Clone(),
+		Reply:            reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
 		return nil, err
@@ -158,17 +171,23 @@ func (a *SessionActor) SubmitPrompt(ctx context.Context, prompt string, runMeta 
 }
 
 // SubmitPromptAsync submits a prompt without waiting for the final result.
-func (a *SessionActor) SubmitPromptAsync(ctx context.Context, prompt string, runMeta *team.RunMeta) error {
+func (a *SessionActor) SubmitPromptAsync(ctx context.Context, prompt string, runMeta *team.RunMeta, opts ...SubmitPromptOption) error {
 	if a == nil {
 		return fmt.Errorf("session actor is nil")
 	}
 	a.Start()
 	reply := make(chan SubmitResult, 1)
+	var opt SubmitPromptOption
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	cmd := SubmitPrompt{
-		Ctx:     ctx,
-		Prompt:  prompt,
-		RunMeta: runMeta.Clone(),
-		Reply:   reply,
+		Ctx:              ctx,
+		Prompt:           prompt,
+		ImagePaths:       opt.ImagePaths,
+		ImageArtifactDir: opt.ImageArtifactDir,
+		RunMeta:          runMeta.Clone(),
+		Reply:            reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
 		return err
@@ -279,6 +298,32 @@ func (a *SessionActor) Rewind(ctx context.Context, checkpointID, mode string) (*
 		return res.Result, res.Err
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+// Compact triggers a manual session compaction and returns the compaction result.
+func (a *SessionActor) Compact(ctx context.Context, mode string) (*compactruntime.Result, compactruntime.Status, error) {
+	if a == nil {
+		return nil, compactruntime.Status{}, fmt.Errorf("session actor is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.Start()
+	reply := make(chan CompactResult, 1)
+	cmd := CompactSession{
+		Ctx:   ctx,
+		Mode:  mode,
+		Reply: reply,
+	}
+	if err := a.send(ctx, cmd); err != nil {
+		return nil, compactruntime.Status{}, err
+	}
+	select {
+	case res := <-reply:
+		return res.Result, res.Status, res.Err
+	case <-ctx.Done():
+		return nil, compactruntime.Status{}, ctx.Err()
 	}
 }
 
@@ -431,6 +476,8 @@ func (a *SessionActor) handle(cmd Command) {
 		a.handleInterrupt(payload)
 	case RewindTo:
 		a.handleRewindTo(payload)
+	case CompactSession:
+		a.handleCompactSession(payload)
 	case DeliverMailboxMessage:
 		a.handleDeliverMailboxMessage(payload)
 	case SubscribeEvents:
@@ -461,8 +508,26 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		reply <- SubmitResult{Err: err}
 		return
 	}
-	if last := session.LastMessage(); last == nil || last.Role != "user" || last.Content != prompt {
-		session.AddMessage(*runtimetypes.NewUserMessage(prompt))
+	preparedPrompt := llm.NewUserPromptMessage(prompt)
+	if len(cmd.ImagePaths) > 0 {
+		msg, err := llm.NewUserPromptMessageWithImages(prompt, cmd.ImagePaths)
+		if err != nil {
+			reply <- SubmitResult{Err: fmt.Errorf("resolving image attachments: %w", err)}
+			return
+		}
+		preparedPrompt = msg
+	}
+	if cmd.ImageArtifactDir != "" && preparedPrompt != nil {
+		if persistErr := llm.PersistLocalInputImages(preparedPrompt, cmd.ImageArtifactDir); persistErr != nil {
+			// Non-fatal: log but don't block the prompt
+			a.eventBus.Publish(runtimeevents.Event{
+				Type:    "image_persist_error",
+				Payload: map[string]interface{}{"error": persistErr.Error()},
+			})
+		}
+	}
+	if shouldAppendUserPromptMessage(session.LastMessage(), preparedPrompt) {
+		session.AddMessage(*preparedPrompt)
 		if err := a.persistSession(ctx, session); err != nil {
 			reply <- SubmitResult{Err: err}
 			return
@@ -712,6 +777,43 @@ func (a *SessionActor) handleRewindTo(cmd RewindTo) {
 		hookMgr.DispatchAsync(ctx, runtimehooks.EventRewindCompleted, hookPayload)
 	}
 	cmd.Reply <- RewindResult{Result: result, Err: err}
+}
+
+func (a *SessionActor) handleCompactSession(cmd CompactSession) {
+	if cmd.Reply == nil {
+		return
+	}
+	ctx := cmd.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := a.ensureReady(); err != nil {
+		cmd.Reply <- CompactResult{
+			Status: compactruntime.Status{
+				Mode:   strings.TrimSpace(cmd.Mode),
+				Phase:  compactruntime.PhasePreTurn,
+				Reason: "session_busy",
+			},
+			Err: err,
+		}
+		return
+	}
+
+	session, err := a.loadSession(ctx)
+	if err != nil {
+		cmd.Reply <- CompactResult{
+			Status: compactruntime.Status{
+				Mode:   strings.TrimSpace(cmd.Mode),
+				Phase:  compactruntime.PhasePreTurn,
+				Reason: "load_session_failed",
+			},
+			Err: err,
+		}
+		return
+	}
+
+	result, status, err := a.runManualCompact(ctx, session, strings.TrimSpace(cmd.Mode))
+	cmd.Reply <- CompactResult{Result: result, Status: status, Err: err}
 }
 
 func (a *SessionActor) applyConversationRestore(ctx context.Context, restore *checkpoint.RestoreResult) error {
@@ -969,6 +1071,297 @@ func routeHistoryForSkillPrompt(session *Session, prompt string) []runtimetypes.
 	return cloned
 }
 
+func shouldAppendUserPromptMessage(last *runtimetypes.Message, prepared *runtimetypes.Message) bool {
+	if prepared == nil {
+		return false
+	}
+	if last == nil {
+		return true
+	}
+	if last.Role != "user" || last.Content != prepared.Content {
+		return true
+	}
+	return llm.MessageHasLocalInputImages(prepared) && !llm.MessageHasLocalInputImages(last)
+}
+
+func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Session, turnID string, runMeta *team.RunMeta, resume bool) {
+	if a == nil || session == nil || a.llmRuntime == nil || a.agent == nil {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"session_id": a.id,
+		"phase":      compactruntime.PhasePreTurn,
+		"mode":       compactruntime.ModeLocal,
+	}
+	if resume {
+		payload["reason"] = "resume_run"
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactSkipped,
+			SessionID: a.id,
+			TraceID:   turnID,
+			Payload:   payload,
+		})
+		return
+	}
+
+	state := a.State()
+	switch {
+	case state != nil && state.PendingTool != nil:
+		payload["reason"] = "pending_tool"
+	case state != nil && state.PendingApproval != nil:
+		payload["reason"] = "pending_approval"
+	case state != nil && state.PendingQuestion != nil:
+		payload["reason"] = "pending_question"
+	}
+	if payload["reason"] != nil {
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactSkipped,
+			SessionID: a.id,
+			TraceID:   turnID,
+			Payload:   payload,
+		})
+		return
+	}
+
+	history := session.GetMessages()
+	manager := a.agent.GetContextManager()
+	keepRecent := 0
+	cfg := a.agent.GetConfig()
+	if manager != nil {
+		keepRecent = manager.Budget.KeepRecentMessages
+	}
+
+	taskID := a.id
+	if runMeta != nil && runMeta.Team != nil && strings.TrimSpace(runMeta.Team.CurrentTaskID) != "" {
+		taskID = strings.TrimSpace(runMeta.Team.CurrentTaskID)
+	}
+
+	runtime := compactruntime.New(a.llmRuntime, manager)
+	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
+		SessionID:          a.id,
+		TaskID:             taskID,
+		Provider:           firstNonEmpty(chatActorConfigValue(cfg, "provider"), a.llmRuntime.DefaultProvider()),
+		Model:              firstNonEmpty(chatActorConfigValue(cfg, "model"), a.llmRuntime.DefaultModel()),
+		History:            history,
+		KeepRecentMessages: keepRecent,
+		Phase:              compactruntime.PhasePreTurn,
+		CountTokens:        a.llmRuntime.CountMessagesTokens,
+	})
+	payload["reason"] = status.Reason
+	payload["mode"] = status.Mode
+	payload["token_before"] = status.TokenBefore
+	payload["trigger_token_limit"] = status.TriggerTokenLimit
+	payload["max_context_tokens"] = status.MaxContextTokens
+	payload["provider"] = status.ResolvedProvider
+	payload["model"] = status.ResolvedModel
+
+	if status.TriggerTokenLimit > 0 && status.TokenBefore > status.TriggerTokenLimit {
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactStarted,
+			SessionID: a.id,
+			TraceID:   turnID,
+			Payload:   cloneEventPayload(payload),
+		})
+	}
+
+	if err != nil {
+		payload["error"] = err.Error()
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactFailed,
+			SessionID: a.id,
+			TraceID:   turnID,
+			Payload:   payload,
+		})
+		return
+	}
+	if result == nil {
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactSkipped,
+			SessionID: a.id,
+			TraceID:   turnID,
+			Payload:   payload,
+		})
+		return
+	}
+
+	originalHistory := history
+	session.ReplaceHistory(result.ReplacementHistory)
+	if persistErr := a.persistSession(ctx, session); persistErr != nil {
+		session.ReplaceHistory(originalHistory)
+		payload["error"] = persistErr.Error()
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactFailed,
+			SessionID: a.id,
+			TraceID:   turnID,
+			Payload:   payload,
+		})
+		return
+	}
+
+	payload["token_after"] = result.TokenAfter
+	payload["compacted_messages"] = result.CompactedMessages
+	payload["message_count_after"] = len(result.ReplacementHistory)
+	if len(result.CheckpointIDs) > 0 {
+		payload["checkpoint_ids"] = append([]string(nil), result.CheckpointIDs...)
+		payload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]
+	}
+	a.publish(runtimeevents.Event{
+		Type:      EventSessionCompactCompleted,
+		SessionID: a.id,
+		TraceID:   turnID,
+		Payload:   payload,
+	})
+}
+
+func (a *SessionActor) runManualCompact(
+	ctx context.Context,
+	session *Session,
+	requestedMode string,
+) (*compactruntime.Result, compactruntime.Status, error) {
+	status := compactruntime.Status{
+		Mode:  strings.TrimSpace(requestedMode),
+		Phase: compactruntime.PhasePreTurn,
+	}
+	if a == nil || session == nil {
+		status.Reason = "session_unavailable"
+		return nil, status, fmt.Errorf("session actor is not ready")
+	}
+	if a.llmRuntime == nil || a.agent == nil {
+		status.Reason = "runtime_unavailable"
+		return nil, status, fmt.Errorf("llm runtime is not configured")
+	}
+
+	payload := map[string]interface{}{
+		"session_id": a.id,
+		"phase":      compactruntime.PhasePreTurn,
+		"mode":       strings.TrimSpace(requestedMode),
+		"manual":     true,
+		"forced":     true,
+	}
+	if payload["mode"] == "" {
+		payload["mode"] = compactruntime.ModeAuto
+	}
+
+	state := a.State()
+	switch {
+	case state != nil && state.PendingTool != nil:
+		status.Reason = "pending_tool"
+	case state != nil && state.PendingApproval != nil:
+		status.Reason = "pending_approval"
+	case state != nil && state.PendingQuestion != nil:
+		status.Reason = "pending_question"
+	}
+	if status.Reason != "" {
+		payload["reason"] = status.Reason
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactSkipped,
+			SessionID: a.id,
+			TraceID:   "compact_" + uuid.NewString(),
+			Payload:   payload,
+		})
+		return nil, status, nil
+	}
+
+	traceID := "compact_" + uuid.NewString()
+	manager := a.agent.GetContextManager()
+	keepRecent := 0
+	cfg := a.agent.GetConfig()
+	if manager != nil {
+		keepRecent = manager.Budget.KeepRecentMessages
+	}
+
+	taskID := a.id
+	runtime := compactruntime.New(a.llmRuntime, manager)
+	result, resolvedStatus, err := runtime.MaybeCompact(ctx, compactruntime.Request{
+		SessionID:          a.id,
+		TaskID:             taskID,
+		Provider:           firstNonEmpty(chatActorConfigValue(cfg, "provider"), a.llmRuntime.DefaultProvider()),
+		Model:              firstNonEmpty(chatActorConfigValue(cfg, "model"), a.llmRuntime.DefaultModel()),
+		Mode:               strings.TrimSpace(requestedMode),
+		Force:              true,
+		History:            session.GetMessages(),
+		KeepRecentMessages: keepRecent,
+		Phase:              compactruntime.PhasePreTurn,
+		CountTokens:        a.llmRuntime.CountMessagesTokens,
+	})
+	status = resolvedStatus
+	payload["reason"] = status.Reason
+	payload["mode"] = status.Mode
+	payload["token_before"] = status.TokenBefore
+	payload["trigger_token_limit"] = status.TriggerTokenLimit
+	payload["max_context_tokens"] = status.MaxContextTokens
+	payload["provider"] = status.ResolvedProvider
+	payload["model"] = status.ResolvedModel
+
+	a.publish(runtimeevents.Event{
+		Type:      EventSessionCompactStarted,
+		SessionID: a.id,
+		TraceID:   traceID,
+		Payload:   cloneEventPayload(payload),
+	})
+
+	if err != nil {
+		payload["error"] = err.Error()
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactFailed,
+			SessionID: a.id,
+			TraceID:   traceID,
+			Payload:   payload,
+		})
+		return nil, status, err
+	}
+	if result == nil {
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactSkipped,
+			SessionID: a.id,
+			TraceID:   traceID,
+			Payload:   payload,
+		})
+		return nil, status, nil
+	}
+
+	originalHistory := session.GetMessages()
+	session.ReplaceHistory(result.ReplacementHistory)
+	if persistErr := a.persistSession(ctx, session); persistErr != nil {
+		session.ReplaceHistory(originalHistory)
+		payload["error"] = persistErr.Error()
+		a.publish(runtimeevents.Event{
+			Type:      EventSessionCompactFailed,
+			SessionID: a.id,
+			TraceID:   traceID,
+			Payload:   payload,
+		})
+		return nil, status, persistErr
+	}
+
+	payload["token_after"] = result.TokenAfter
+	payload["compacted_messages"] = result.CompactedMessages
+	payload["message_count_after"] = len(result.ReplacementHistory)
+	if len(result.CheckpointIDs) > 0 {
+		payload["checkpoint_ids"] = append([]string(nil), result.CheckpointIDs...)
+		payload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]
+	}
+	a.publish(runtimeevents.Event{
+		Type:      EventSessionCompactCompleted,
+		SessionID: a.id,
+		TraceID:   traceID,
+		Payload:   payload,
+	})
+	return result, status, nil
+}
+
+func cloneEventPayload(input map[string]interface{}) map[string]interface{} {
+	if len(input) == 0 {
+		return map[string]interface{}{}
+	}
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
+}
+
 func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, reply chan SubmitResult) {
 	if a == nil || session == nil {
 		if reply != nil {
@@ -1008,6 +1401,8 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		TraceID:   turnID,
 		Payload:   startPayload,
 	})
+
+	a.maybeAutoCompactSession(ctx, session, turnID, runMeta, resume)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	runCtx = team.WithRunMeta(runCtx, runMeta)
@@ -2264,4 +2659,28 @@ func firstNonEmptyError(err error, result *agent.Result) string {
 		return ""
 	}
 	return strings.TrimSpace(result.Error)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func chatActorConfigValue(cfg *agent.Config, field string) string {
+	if cfg == nil {
+		return ""
+	}
+	switch field {
+	case "provider":
+		return strings.TrimSpace(cfg.Provider)
+	case "model":
+		return strings.TrimSpace(cfg.Model)
+	default:
+		return ""
+	}
 }

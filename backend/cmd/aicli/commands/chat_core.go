@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
@@ -10,6 +11,21 @@ import (
 )
 
 const chatcoreReasoningMetadataKey = "chatcore_reasoning_content"
+
+// chatSessionImageArtifactDir returns the session-local directory for
+// persisting image attachment copies. Returns empty string if unavailable.
+func chatSessionImageArtifactDir(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	if session.RuntimeSession != nil && strings.TrimSpace(session.SessionDir) != "" {
+		return filepath.Join(session.SessionDir, session.RuntimeSession.ID+".artifacts", "images")
+	}
+	if strings.TrimSpace(session.SessionDir) != "" {
+		return filepath.Join(session.SessionDir, "images")
+	}
+	return ""
+}
 
 var executeToolLoop = runtimechatcore.ExecuteToolLoop
 
@@ -83,13 +99,15 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	}
 
 	loopResult, err := executeToolLoop(ctx, runtimechatcore.ToolLoopRequest{
-		Prompt:       prompt,
-		History:      history,
-		Stream:       session.Stream,
-		Tools:        toolDefinitionsFromSelection(selection),
-		Provider:     provider,
-		ToolExecutor: toolExec,
-		EventSink:    renderer.Handle,
+		Prompt:             prompt,
+		ExplicitImagePaths: session.ImagePaths,
+		ImageArtifactDir:   chatSessionImageArtifactDir(session),
+		History:            history,
+		Stream:             session.Stream,
+		Tools:              toolDefinitionsFromSelection(selection),
+		Provider:           provider,
+		ToolExecutor:       toolExec,
+		EventSink:          renderer.Handle,
 	})
 	if err != nil {
 		return "", err

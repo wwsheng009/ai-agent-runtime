@@ -220,6 +220,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			agentConfig.Options["profile_context"] = cloneSkillContextMap(session.ProfileContext)
 		}
 	}
+	applyLocalChatContextOptions(agentConfig, runtimeConfig)
 
 	apiAgent := agent.NewAgentWithLLM(agentConfig, host.ToolSurface, host.Bootstrap.LLMRuntime())
 	if registry := host.Bootstrap.Registry(); registry != nil {
@@ -354,6 +355,66 @@ func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *
 		config.ReasoningEffort = strings.TrimSpace(session.ReasoningEffort)
 	}
 	return config
+}
+
+func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runtimecfg.RuntimeConfig) {
+	if agentConfig == nil || runtimeConfig == nil {
+		return
+	}
+	ctxCfg := runtimeConfig.Context
+	if strings.TrimSpace(ctxCfg.Profile) == "" &&
+		strings.TrimSpace(ctxCfg.CompactionMode) == "" &&
+		strings.TrimSpace(ctxCfg.RecallMode) == "" &&
+		strings.TrimSpace(ctxCfg.ObservationMode) == "" &&
+		ctxCfg.MinCompactionMessages <= 0 &&
+		ctxCfg.MinRecallQueryLength <= 0 &&
+		ctxCfg.LedgerLoadLimit <= 0 &&
+		ctxCfg.MaxPromptTokens <= 0 &&
+		ctxCfg.MaxMessages <= 0 &&
+		ctxCfg.KeepRecentMessages <= 0 &&
+		ctxCfg.MaxRecallResults <= 0 &&
+		ctxCfg.MaxObservationItems <= 0 {
+		return
+	}
+	if agentConfig.Options == nil {
+		agentConfig.Options = make(map[string]interface{})
+	}
+	if strings.TrimSpace(ctxCfg.Profile) != "" {
+		agentConfig.Options["context_profile"] = strings.TrimSpace(ctxCfg.Profile)
+	}
+	if strings.TrimSpace(ctxCfg.CompactionMode) != "" {
+		agentConfig.Options["context_compaction_mode"] = strings.TrimSpace(ctxCfg.CompactionMode)
+	}
+	if strings.TrimSpace(ctxCfg.RecallMode) != "" {
+		agentConfig.Options["context_recall_mode"] = strings.TrimSpace(ctxCfg.RecallMode)
+	}
+	if strings.TrimSpace(ctxCfg.ObservationMode) != "" {
+		agentConfig.Options["context_observation_mode"] = strings.TrimSpace(ctxCfg.ObservationMode)
+	}
+	if ctxCfg.MinCompactionMessages > 0 {
+		agentConfig.Options["context_min_compaction_messages"] = ctxCfg.MinCompactionMessages
+	}
+	if ctxCfg.MinRecallQueryLength > 0 {
+		agentConfig.Options["context_min_recall_query_length"] = ctxCfg.MinRecallQueryLength
+	}
+	if ctxCfg.LedgerLoadLimit > 0 {
+		agentConfig.Options["context_ledger_load_limit"] = ctxCfg.LedgerLoadLimit
+	}
+	if ctxCfg.MaxPromptTokens > 0 {
+		agentConfig.Options["context_max_prompt_tokens"] = ctxCfg.MaxPromptTokens
+	}
+	if ctxCfg.MaxMessages > 0 {
+		agentConfig.Options["context_max_messages"] = ctxCfg.MaxMessages
+	}
+	if ctxCfg.KeepRecentMessages > 0 {
+		agentConfig.Options["context_keep_recent_messages"] = ctxCfg.KeepRecentMessages
+	}
+	if ctxCfg.MaxRecallResults > 0 {
+		agentConfig.Options["context_max_recall_results"] = ctxCfg.MaxRecallResults
+	}
+	if ctxCfg.MaxObservationItems > 0 {
+		agentConfig.Options["context_max_observation_items"] = ctxCfg.MaxObservationItems
+	}
 }
 
 func loadLocalChatRuntimeConfig(cfg *config.Config, session *ChatSession) (*runtimecfg.RuntimeConfig, error) {

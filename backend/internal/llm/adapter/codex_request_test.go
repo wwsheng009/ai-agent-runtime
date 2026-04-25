@@ -219,6 +219,46 @@ func TestCodexBuildRequest_MergesSystemAndDeveloperMessagesIntoInstructions(t *t
 	}
 }
 
+func TestCodexBuildRequest_PreservesStructuredUserInputParts(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model: "gpt-5.2-codex",
+		Messages: []map[string]interface{}{
+			{
+				"role": "user",
+				"content": []map[string]interface{}{
+					{
+						"type": "input_text",
+						"text": "look at this image",
+					},
+					{
+						"type":      "input_image",
+						"image_url": "data:image/png;base64,ZmFrZQ==",
+					},
+				},
+			},
+		},
+	})
+
+	input := req["input"].([]map[string]interface{})
+	if len(input) != 1 {
+		t.Fatalf("expected one input item, got %#v", input)
+	}
+	parts, ok := input[0]["content"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected structured content parts, got %T %#v", input[0]["content"], input[0]["content"])
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected two structured content parts, got %#v", parts)
+	}
+	if parts[0]["type"] != "input_text" || parts[1]["type"] != "input_image" {
+		t.Fatalf("unexpected structured parts: %#v", parts)
+	}
+	if parts[1]["image_url"] != "data:image/png;base64,ZmFrZQ==" {
+		t.Fatalf("expected image data URL to be preserved, got %#v", parts[1]["image_url"])
+	}
+}
+
 func TestCodexBuildRequest_AddsReasoningConfig(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{

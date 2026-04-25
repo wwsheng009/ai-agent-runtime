@@ -10,8 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -22,10 +24,11 @@ import (
 )
 
 type capturingSequenceProvider struct {
-	name      string
-	responses []*llm.LLMResponse
-	requests  []*llm.LLMRequest
-	callCount int
+	name         string
+	responses    []*llm.LLMResponse
+	requests     []*llm.LLMRequest
+	callCount    int
+	capabilities map[string]agentconfig.ModelCapabilitySpec
 }
 
 func (p *capturingSequenceProvider) Name() string {
@@ -86,6 +89,11 @@ func (p *capturingSequenceProvider) GetCapabilities() *llm.ModelCapabilities {
 
 func (p *capturingSequenceProvider) CheckHealth(ctx context.Context) error {
 	return nil
+}
+
+func (p *capturingSequenceProvider) ResolveModelCapability(requestedModel string) (string, agentconfig.ModelCapabilitySpec, bool) {
+	capability, ok := llm.ResolveModelCapabilitySpec(requestedModel, p.capabilities)
+	return requestedModel, capability, ok
 }
 
 type simpleEchoMCPManager struct {
@@ -275,6 +283,219 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 	require.GreaterOrEqual(t, assistantIndex, 0)
 	require.GreaterOrEqual(t, sessionEndIndex, 0)
 	require.Less(t, assistantIndex, sessionEndIndex)
+}
+
+func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-compact-user")
+	require.NoError(t, err)
+	session.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("You are a helpful assistant."),
+		*types.NewUserMessage(strings.Repeat("older user context ", 80)),
+		*types.NewAssistantMessage(strings.Repeat("older assistant context ", 80)),
+		*types.NewUserMessage(strings.Repeat("recent user context ", 80)),
+		*types.NewAssistantMessage(strings.Repeat("recent assistant context ", 80)),
+	})
+	require.NoError(t, storage.Update(ctx, session))
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "compact-provider",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &capturingSequenceProvider{
+		name: "compact-provider",
+		responses: []*llm.LLMResponse{
+			{Content: "Preserve the prior investigation details and continue from the latest turn.", Model: "gpt-5"},
+		},
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 120},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("compact-provider", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "compact-provider"))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-compact-test",
+		Provider: "compact-provider",
+		Model:    "gpt-5",
+		Options: map[string]interface{}{
+			"context_keep_recent_messages": 1,
+		},
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	loaded, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	actor.maybeAutoCompactSession(ctx, loaded, "trace-compact", nil, false)
+
+	updated, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.Len(t, updated.History, 4)
+	require.Equal(t, "system", updated.History[0].Role)
+	require.Equal(t, "assistant", updated.History[1].Role)
+	require.Equal(t, "compaction", updated.History[1].Metadata["context_stage"])
+	require.Equal(t, "user", updated.History[2].Role)
+	require.Equal(t, "assistant", updated.History[3].Role)
+	require.Equal(t, 1, provider.callCount)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	eventTypes := make([]string, 0, len(events))
+	for _, event := range events {
+		eventTypes = append(eventTypes, event.Type)
+	}
+	require.Contains(t, eventTypes, EventSessionCompactStarted)
+	require.Contains(t, eventTypes, EventSessionCompactCompleted)
+}
+
+func TestSessionActorMaybeAutoCompactSessionSkipsPendingToolState(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-compact-pending")
+	require.NoError(t, err)
+	session.ReplaceHistory([]types.Message{
+		*types.NewUserMessage(strings.Repeat("older user context ", 80)),
+		*types.NewAssistantMessage(strings.Repeat("older assistant context ", 80)),
+		*types.NewUserMessage(strings.Repeat("latest user context ", 80)),
+	})
+	require.NoError(t, storage.Update(ctx, session))
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "compact-provider",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &capturingSequenceProvider{
+		name: "compact-provider",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 80},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("compact-provider", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "compact-provider"))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-compact-pending-test",
+		Provider: "compact-provider",
+		Model:    "gpt-5",
+		Options: map[string]interface{}{
+			"context_keep_recent_messages": 1,
+		},
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	require.NoError(t, actor.updateState(ctx, func(state *RuntimeState) error {
+		state.PendingTool = &PendingToolInvocation{ToolCallID: "tool-1", ToolName: "echo"}
+		return nil
+	}))
+
+	loaded, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	original := loaded.GetMessages()
+	actor.maybeAutoCompactSession(ctx, loaded, "trace-pending", nil, false)
+
+	updated, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.Equal(t, original, updated.GetMessages())
+	require.Equal(t, 0, provider.callCount)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	found := false
+	for _, event := range events {
+		if event.Type == EventSessionCompactSkipped && event.Payload["reason"] == "pending_tool" {
+			found = true
+			break
+		}
+	}
+	require.True(t, found)
+}
+
+func TestSessionActorCompactForcesCompaction(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-manual-compact")
+	require.NoError(t, err)
+	session.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("You are a helpful assistant."),
+		*types.NewUserMessage(strings.Repeat("older user context ", 40)),
+		*types.NewAssistantMessage(strings.Repeat("older assistant context ", 40)),
+		*types.NewUserMessage(strings.Repeat("latest user context ", 20)),
+	})
+	require.NoError(t, storage.Update(ctx, session))
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "compact-provider",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &capturingSequenceProvider{
+		name: "compact-provider",
+		responses: []*llm.LLMResponse{
+			{Content: "Preserve the earlier context and continue from the latest turn.", Model: "gpt-5"},
+		},
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 5000},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("compact-provider", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "compact-provider"))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-manual-compact-test",
+		Provider: "compact-provider",
+		Model:    "gpt-5",
+		Options: map[string]interface{}{
+			"context_keep_recent_messages": 1,
+		},
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	result, status, err := actor.Compact(ctx, compactruntime.ModeLocal)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, compactruntime.ModeLocal, result.Mode)
+	require.Equal(t, compactruntime.ModeLocal, status.Mode)
+	require.Equal(t, 1, provider.callCount)
+
+	updated, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.Len(t, updated.History, 3)
+	require.Equal(t, "compaction", updated.History[1].Metadata["context_stage"])
 }
 
 func TestSessionActorSubmitPrompt_EmitsLimitNoticeToSessionAndEvents(t *testing.T) {

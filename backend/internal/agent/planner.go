@@ -9,6 +9,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -100,6 +101,9 @@ func (p *Planner) CreatePlanWithLLM(ctx context.Context, goal string, availableT
 		Temperature:     0.3, // 较低的温度以获得更确定性的输出
 		ReasoningEffort: p.reasoningEffort,
 		Thinking:        types.CloneThinkingConfig(p.thinking),
+	}
+	if layout := runtimeprompt.RenderInstructionMessagesLayout(messages); layout != "" {
+		llmRequest.Metadata = map[string]interface{}{"prompt_layout": layout}
 	}
 
 	response, err := p.llmRuntime.Call(ctx, llmRequest)

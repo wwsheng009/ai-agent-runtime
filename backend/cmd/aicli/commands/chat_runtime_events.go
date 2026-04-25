@@ -151,7 +151,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				session.Interaction.PrintPrompt()
 				return
 			}
-			fmt.Print(ui.FormatUserPrompt())
+			fmt.Print(ui.FormatUserPromptWithAttachments(len(session.ImagePaths)))
 		},
 		askApproval: func(approval *runtimechat.ApprovalRequest) (bool, error) {
 			if notice := discardPendingInteractiveInputForPriorityPrompt(session, "审批提示"); notice != "" {

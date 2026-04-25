@@ -544,7 +544,10 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		Provider: agentProvider,
 		Model:    agentModel,
 	}
-	if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
+	instructionMessages := buildRuntimeInstructionMessages(profileState, workspacePath, agentProvider)
+	if systemPrompt := primarySystemInstructionContent(instructionMessages); systemPrompt != "" {
+		agentConfig.SystemPrompt = systemPrompt
+	} else if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
 		agentConfig.SystemPrompt = strings.TrimSpace(profileState.PromptText)
 	}
 	if agentConfig.MaxSteps < 0 {

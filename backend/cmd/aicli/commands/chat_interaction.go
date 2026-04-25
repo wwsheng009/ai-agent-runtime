@@ -97,8 +97,16 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 		return
 	}
-	fmt.Fprint(c.writer, ui.FormatUserPrompt())
+	fmt.Fprint(c.writer, formatSessionUserPrompt(c.session))
 	c.promptVisible = true
+}
+
+func formatSessionUserPrompt(session *ChatSession) string {
+	attachmentCount := 0
+	if session != nil {
+		attachmentCount = len(session.ImagePaths)
+	}
+	return ui.FormatUserPromptWithAttachments(attachmentCount)
 }
 
 func (c *chatInteractionCoordinator) StartThinking() {
@@ -720,7 +728,7 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 		if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 			return
 		}
-		fmt.Fprint(c.writer, ui.FormatUserPrompt())
+		fmt.Fprint(c.writer, formatSessionUserPrompt(c.session))
 		c.promptVisible = true
 	})
 }

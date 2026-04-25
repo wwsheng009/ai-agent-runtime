@@ -113,6 +113,13 @@ func cloneHTTPDebugValue(value interface{}) interface{} {
 func buildHTTPDebugRequestMetadata(metadata map[string]interface{}, protocol string, requestBody map[string]interface{}) map[string]interface{} {
 	cloned := cloneHTTPDebugMetadata(metadata)
 	diagnostics := buildHTTPDebugRequestDiagnostics(protocol, requestBody)
+	if layout := strings.TrimSpace(fmt.Sprint(metadataValueAny(cloned, "prompt_layout"))); layout != "" && layout != "<nil>" {
+		if diagnostics == nil {
+			diagnostics = make(map[string]interface{}, 2)
+		}
+		diagnostics["prompt_layout_sha256"] = canonicalHTTPDebugValueSHA256(layout)
+		diagnostics["prompt_layout_length"] = len(layout)
+	}
 	if len(diagnostics) == 0 {
 		return cloned
 	}
@@ -206,4 +213,11 @@ func HTTPDebugRequestDiagnostics(metadata map[string]interface{}) map[string]int
 		return nil
 	}
 	return cloneHTTPDebugMetadata(raw)
+}
+
+func metadataValueAny(metadata map[string]interface{}, key string) interface{} {
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata[key]
 }

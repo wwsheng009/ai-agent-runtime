@@ -77,7 +77,7 @@ func CodexImageGenerationEnabled(
 	if !strings.EqualFold(strings.TrimSpace(protocol), "codex") {
 		return false
 	}
-	capability, ok := resolveModelCapability(model, modelCapabilities)
+	capability, ok := ResolveModelCapabilitySpec(model, modelCapabilities)
 	if !ok || !capability.NativeTools.ImageGeneration {
 		return false
 	}
@@ -313,27 +313,6 @@ func sanitizeGeneratedImageID(value string) string {
 		return "generated_image"
 	}
 	return result
-}
-
-func resolveModelCapability(model string, modelCapabilities map[string]agentconfig.ModelCapabilitySpec) (agentconfig.ModelCapabilitySpec, bool) {
-	if len(modelCapabilities) == 0 {
-		return agentconfig.ModelCapabilitySpec{}, false
-	}
-	if exact, ok := modelCapabilities[strings.TrimSpace(model)]; ok {
-		return cloneModelCapability(exact), true
-	}
-	if wildcard, ok := modelCapabilities["*"]; ok {
-		return cloneModelCapability(wildcard), true
-	}
-	return agentconfig.ModelCapabilitySpec{}, false
-}
-
-func cloneModelCapability(input agentconfig.ModelCapabilitySpec) agentconfig.ModelCapabilitySpec {
-	cloned := input
-	if len(input.InputModalities) > 0 {
-		cloned.InputModalities = append([]string(nil), input.InputModalities...)
-	}
-	return cloned
 }
 
 func cloneDeepMapStringAny(input map[string]interface{}) map[string]interface{} {

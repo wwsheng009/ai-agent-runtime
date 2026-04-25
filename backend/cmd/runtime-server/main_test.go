@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
+
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 )
 
 func TestResolvePathFromConfigFile(t *testing.T) {
@@ -12,5 +16,37 @@ func TestResolvePathFromConfigFile(t *testing.T) {
 	expected := filepath.Clean(filepath.Join("backend", "data", "runtime", "sessions"))
 	if resolved != expected {
 		t.Fatalf("expected %q, got %q", expected, resolved)
+	}
+}
+
+func TestBuildSkillsMCPManager_ExposesLocalToolkitWithoutExternalMCP(t *testing.T) {
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Workspace.Root = t.TempDir()
+
+	adapter, manager, err := buildSkillsMCPManager(context.Background(), &config.Config{}, runtimeConfig)
+	if err != nil {
+		t.Fatalf("buildSkillsMCPManager failed: %v", err)
+	}
+	if manager != nil {
+		t.Fatalf("expected nil external MCP manager, got %#v", manager)
+	}
+	if adapter == nil {
+		t.Fatal("expected local runtime tool adapter")
+	}
+
+	shellTool, err := adapter.FindTool("execute_shell_command")
+	if err != nil {
+		t.Fatalf("expected execute_shell_command to be exposed: %v", err)
+	}
+	if shellTool.MCPName != "" {
+		t.Fatalf("expected local shell tool without MCP name, got %+v", shellTool)
+	}
+
+	readTool, err := adapter.FindTool("grep")
+	if err != nil {
+		t.Fatalf("expected grep to be exposed: %v", err)
+	}
+	if readTool.MCPName != "" {
+		t.Fatalf("expected local grep tool without MCP name, got %+v", readTool)
 	}
 }

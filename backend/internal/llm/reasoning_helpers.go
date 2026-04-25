@@ -412,7 +412,7 @@ func decodeMapAny(raw interface{}) map[string]interface{} {
 func runtimeMessageToAdapterMessage(msg types.Message, protocol string, providerHint string) map[string]interface{} {
 	reasoning := reasoningFromMessageMetadata(msg.Metadata)
 	toolCalls := encodeRuntimeToolCalls(msg.ToolCalls)
-	return buildProtocolMessageMap(msg.Role, msg.Content, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, mapFromMetadata(msg.Metadata))
+	return buildProtocolMessageMap(msg.Role, msg.Content, msg.ContentParts, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, mapFromMetadata(msg.Metadata))
 }
 
 // RuntimeMessagesToProtocolMessages converts normalized runtime messages into
@@ -514,27 +514,60 @@ func providerMessageToAdapterMessage(msg Message, protocol string, providerHint 
 		}
 	}
 	toolCalls := encodeProviderToolCalls(msg.ToolCalls)
-	return buildProtocolMessageMap(msg.Role, msg.Content, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, msg.Metadata)
+	return buildProtocolMessageMap(msg.Role, msg.Content, msg.ContentParts, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, msg.Metadata)
 }
 
-func buildProtocolMessageMap(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, protocol string, providerHint string, messageMetadata map[string]interface{}) map[string]interface{} {
+func buildProtocolMessageMap(role, content string, contentParts []types.ContentPart, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, protocol string, providerHint string, messageMetadata map[string]interface{}) map[string]interface{} {
+	// contentParts carries structured multimodal content (text + images).
+	// Protocol builders currently still read from messageMetadata for backward
+	// compatibility; a future refactor will migrate them to use contentParts
+	// directly, eliminating the metadata sideband for images.
+	_ = contentParts
+
 	normalizedProtocol := strings.ToLower(strings.TrimSpace(protocol))
 	switch normalizedProtocol {
 	case "codex":
 		return buildCodexProtocolMessage(role, content, toolCalls, toolCallID, reasoning, messageMetadata)
 	case "anthropic":
-		return buildAnthropicProtocolMessage(role, content, toolCalls, toolCallID, reasoning)
+		return buildAnthropicProtocolMessage(role, content, toolCalls, toolCallID, reasoning, messageMetadata)
 	case "gemini":
-		return buildGeminiProtocolMessage(role, content, toolCalls, toolCallID, reasoning)
+		return buildGeminiProtocolMessage(role, content, toolCalls, toolCallID, reasoning, messageMetadata)
 	default:
 		return buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, providerHint, messageMetadata)
 	}
 }
 
+
+
 func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, providerHint string, messageMetadata map[string]interface{}) map[string]interface{} {
 	message := map[string]interface{}{
-		"role":    role,
-		"content": content,
+		"role": role,
+	}
+	if images := ExtractLocalInputImages(messageMetadata); len(images) > 0 && strings.EqualFold(role, "user") {
+		parts := make([]map[string]interface{}, 0, len(images)+1)
+		if strings.TrimSpace(content) != "" {
+			parts = append(parts, map[string]interface{}{
+				"type": "text",
+				"text": content,
+			})
+		}
+		for _, image := range images {
+			dataURL, err := localInputImageDataURL(image)
+			if err != nil || strings.TrimSpace(dataURL) == "" {
+				continue
+			}
+			parts = append(parts, map[string]interface{}{
+				"type":      "image_url",
+				"image_url": map[string]interface{}{"url": dataURL},
+			})
+		}
+		if len(parts) > 0 {
+			message["content"] = parts
+		} else {
+			message["content"] = content
+		}
+	} else {
+		message["content"] = content
 	}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
@@ -559,6 +592,16 @@ func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]int
 }
 
 func buildCodexProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, messageMetadata map[string]interface{}) map[string]interface{} {
+	if strings.EqualFold(strings.TrimSpace(role), "user") {
+		if parts := codexUserContentParts(content, messageMetadata); len(parts) > 0 {
+			return map[string]interface{}{
+				"role":    role,
+				"content": parts,
+			}
+		}
+		return buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, "", nil)
+	}
+
 	message := buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, "", nil)
 	if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
 		return message
@@ -574,6 +617,35 @@ func buildCodexProtocolMessage(role, content string, toolCalls []map[string]inte
 		}
 	}
 	return message
+}
+
+func codexUserContentParts(content string, messageMetadata map[string]interface{}) []map[string]interface{} {
+	images := ExtractLocalInputImages(messageMetadata)
+	if len(images) == 0 {
+		return nil
+	}
+
+	parts := make([]map[string]interface{}, 0, len(images)+1)
+	if strings.TrimSpace(content) != "" {
+		parts = append(parts, map[string]interface{}{
+			"type": "input_text",
+			"text": content,
+		})
+	}
+	for _, image := range images {
+		dataURL, err := localInputImageDataURL(image)
+		if err != nil || strings.TrimSpace(dataURL) == "" {
+			continue
+		}
+		parts = append(parts, map[string]interface{}{
+			"type":      "input_image",
+			"image_url": dataURL,
+		})
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return parts
 }
 
 func codexProtocolOutputItems(content string, toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock, messageMetadata map[string]interface{}) []map[string]interface{} {
@@ -727,51 +799,95 @@ func codexProtocolFunctionCallItem(toolCall map[string]interface{}) map[string]i
 	}
 }
 
-func buildAnthropicProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock) map[string]interface{} {
+func buildAnthropicProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, messageMetadata map[string]interface{}) map[string]interface{} {
 	message := map[string]interface{}{
-		"role":    role,
-		"content": content,
+		"role": role,
 	}
 	if strings.TrimSpace(toolCallID) != "" {
 		message["tool_call_id"] = strings.TrimSpace(toolCallID)
 	}
-	if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+	if !strings.EqualFold(strings.TrimSpace(role), "user") {
+		message["content"] = content
+		if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+			return message
+		}
+
+		if reasoning != nil {
+			if blocks := decodeSliceOfMaps(reasoning.Metadata[reasoningMetadataAnthropicBlocksKey]); len(blocks) > 0 {
+				message["content"] = blocks
+				return message
+			}
+		}
+
+		blocks := make([]map[string]interface{}, 0, len(toolCalls)+2)
+		if reasoning != nil && (strings.TrimSpace(reasoning.DisplayText()) != "" || strings.TrimSpace(reasoning.OpaqueState) != "") {
+			block := map[string]interface{}{
+				"type": "thinking",
+			}
+			if text := strings.TrimSpace(reasoning.DisplayText()); text != "" {
+				block["thinking"] = text
+			}
+			if opaque := strings.TrimSpace(reasoning.OpaqueState); opaque != "" {
+				block["signature"] = opaque
+			}
+			blocks = append(blocks, block)
+		}
+		if strings.TrimSpace(content) != "" {
+			blocks = append(blocks, map[string]interface{}{
+				"type": "text",
+				"text": content,
+			})
+		}
+		for _, toolCall := range toolCalls {
+			if block := anthropicToolUseBlock(toolCall); block != nil {
+				blocks = append(blocks, block)
+			}
+		}
+		if len(blocks) > 0 {
+			message["content"] = blocks
+		}
 		return message
 	}
 
-	if reasoning != nil {
-		if blocks := decodeSliceOfMaps(reasoning.Metadata[reasoningMetadataAnthropicBlocksKey]); len(blocks) > 0 {
-			message["content"] = blocks
-			return message
-		}
+	// User message: if images present in metadata, construct multimodal content blocks
+	images := ExtractLocalInputImages(messageMetadata)
+	if len(images) == 0 {
+		message["content"] = content
+		return message
 	}
 
-	blocks := make([]map[string]interface{}, 0, len(toolCalls)+2)
-	if reasoning != nil && (strings.TrimSpace(reasoning.DisplayText()) != "" || strings.TrimSpace(reasoning.OpaqueState) != "") {
-		block := map[string]interface{}{
-			"type": "thinking",
-		}
-		if text := strings.TrimSpace(reasoning.DisplayText()); text != "" {
-			block["thinking"] = text
-		}
-		if opaque := strings.TrimSpace(reasoning.OpaqueState); opaque != "" {
-			block["signature"] = opaque
-		}
-		blocks = append(blocks, block)
-	}
+	blocks := make([]map[string]interface{}, 0, len(images)+1)
 	if strings.TrimSpace(content) != "" {
 		blocks = append(blocks, map[string]interface{}{
 			"type": "text",
 			"text": content,
 		})
 	}
-	for _, toolCall := range toolCalls {
-		if block := anthropicToolUseBlock(toolCall); block != nil {
-			blocks = append(blocks, block)
+	for _, image := range images {
+		dataURL, err := localInputImageDataURL(image)
+		if err != nil || strings.TrimSpace(dataURL) == "" {
+			continue
 		}
+		// Anthropic uses base64 content blocks with media_type
+		parts := strings.SplitN(dataURL, ",", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		header := parts[0]
+		encoded := parts[1]
+		mediaType := "image/png"
+		if idx := strings.Index(header, ":"); idx >= 0 {
+			mediaType = strings.TrimSuffix(header[idx+1:], ";base64")
+		}
+		blocks = append(blocks, map[string]interface{}{
+			"type":       "image",
+			"source":     map[string]interface{}{"type": "base64", "media_type": mediaType, "data": encoded},
+		})
 	}
 	if len(blocks) > 0 {
 		message["content"] = blocks
+	} else {
+		message["content"] = content
 	}
 	return message
 }
@@ -801,10 +917,9 @@ func anthropicToolUseBlock(toolCall map[string]interface{}) map[string]interface
 	}
 }
 
-func buildGeminiProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock) map[string]interface{} {
+func buildGeminiProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, messageMetadata map[string]interface{}) map[string]interface{} {
 	message := map[string]interface{}{
-		"role":    role,
-		"content": content,
+		"role": role,
 	}
 	if strings.TrimSpace(toolCallID) != "" {
 		message["tool_call_id"] = strings.TrimSpace(toolCallID)
@@ -816,6 +931,48 @@ func buildGeminiProtocolMessage(role, content string, toolCalls []map[string]int
 		}
 	}
 	if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+		// User or tool message
+		if strings.EqualFold(strings.TrimSpace(role), "user") {
+			images := ExtractLocalInputImages(messageMetadata)
+			if len(images) > 0 {
+				parts := make([]map[string]interface{}, 0, len(images)+1)
+				if strings.TrimSpace(content) != "" {
+					parts = append(parts, map[string]interface{}{
+						"text": content,
+					})
+				}
+				for _, image := range images {
+					dataURL, err := localInputImageDataURL(image)
+					if err != nil || strings.TrimSpace(dataURL) == "" {
+						continue
+					}
+					// Gemini uses inline_data with mime_type and data
+					partsSlice := strings.SplitN(dataURL, ",", 2)
+					if len(partsSlice) != 2 {
+						continue
+					}
+					header := partsSlice[0]
+					encoded := partsSlice[1]
+					mimeType := "image/png"
+					if idx := strings.Index(header, ":"); idx >= 0 {
+						mimeType = strings.TrimSuffix(header[idx+1:], ";base64")
+					}
+					parts = append(parts, map[string]interface{}{
+						"inline_data": map[string]interface{}{
+							"mime_type": mimeType,
+							"data":      encoded,
+						},
+					})
+				}
+				if len(parts) > 0 {
+					message["parts"] = parts
+				} else {
+					message["content"] = content
+				}
+				return message
+			}
+		}
+		message["content"] = content
 		return message
 	}
 	parts := make([]map[string]interface{}, 0, len(toolCalls)+2)

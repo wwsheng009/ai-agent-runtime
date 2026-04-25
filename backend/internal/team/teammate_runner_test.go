@@ -151,6 +151,7 @@ func TestTeammateRunnerMarksMailboxDigestReadWhenInjected(t *testing.T) {
 	assert.Contains(t, client.prompt, "read_task_spec or read_task_context")
 	assert.Contains(t, client.prompt, "protocol error")
 	assert.Contains(t, client.prompt, "prefer direct read-only tools such as ls, glob, grep, and view")
+	assert.Contains(t, client.prompt, "The local grep tool prefers ripgrep (rg) when it is available")
 	assert.Contains(t, client.prompt, "Do not use background_task or shell commands for basic file listing or file reading")
 	assert.Contains(t, client.prompt, "Prefer report_task_outcome for done/failed/blocked/handoff outcomes")
 	assert.Contains(t, client.prompt, "If you do not call report_task_outcome or block_current_task, end your final response with a structured status block")

@@ -25,6 +25,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimecontext "github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextpack"
@@ -41,6 +42,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -503,6 +505,11 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/config/document", h.UpdateConfigDocument).Methods(http.MethodPut)
 	runtimeRouter.HandleFunc("/service", h.GetRuntimeServiceStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/service/restart", h.RestartRuntimeService).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/debug/prompt-layout", h.withRouteHeaders(h.PreviewPromptLayout, routeHeaderOptions{
+		canonicalEntrypoint: canonicalRuntimeEntrypoint + "/debug/prompt-layout",
+		mode:                "admin-debug",
+		warning:             adminDebugRouteWarning(canonicalRuntimeEntrypoint+"/debug/prompt-layout", canonicalAgentChatEntrypoint),
+	})).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/status", h.GetRuntimeStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/health", h.GetRuntimeHealth).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/events", h.ListRuntimeEvents).Methods(http.MethodGet)
@@ -1154,12 +1161,21 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if profileState != nil && session != nil {
+	selectedConfig := h.resolveRuntimeConfig(usageScope)
+	if profileState != nil && profileState.RuntimeConfig != nil {
+		selectedConfig = profileState.RuntimeConfig
+	}
+	requestedProvider := strings.TrimSpace(req.Provider)
+	instructionProvider := requestedProvider
+	if instructionProvider == "" {
+		instructionProvider = resolveAgentProvider(profileState, selectedConfig, h.llmRuntime)
+	}
+	instructionMessages := buildRuntimeInstructionMessages(profileState, workspacePath, instructionProvider)
+
+	if session != nil {
 		sessionUpdated := false
-		if strings.TrimSpace(profileState.PromptText) != "" {
-			if h.ensureSessionSystemPrompt(ctx, session, profileState.PromptText) {
-				sessionUpdated = true
-			}
+		if ensureSessionInstructionMessages(session, instructionMessages) {
+			sessionUpdated = true
 		}
 		if h.applyProfileSessionContext(session, profileState) {
 			sessionUpdated = true
@@ -1170,17 +1186,11 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	chatMessages, lastMessage := h.buildChatMessages(req.Messages, session)
-	if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
-		chatMessages = injectSystemPrompt(chatMessages, profileState.PromptText)
-	}
+	chatMessages = injectInstructionMessages(chatMessages, instructionMessages)
 	if lastMessage == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
 			"at least one user message is required"))
 		return
-	}
-	selectedConfig := h.resolveRuntimeConfig(usageScope)
-	if profileState != nil && profileState.RuntimeConfig != nil {
-		selectedConfig = profileState.RuntimeConfig
 	}
 	workspaceCtx, workspaceErr := h.buildWorkspaceContext(workspacePath, lastMessage, selectedConfig)
 	if workspaceErr != nil {
@@ -1229,8 +1239,8 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	// 创建 Agent 配置
 	agentProvider := resolveAgentProvider(profileState, selectedConfig, runtimeLLM)
 	agentModel := resolveAgentModel(profileState, selectedConfig, runtimeLLM)
-	if provider := strings.TrimSpace(req.Provider); provider != "" {
-		agentProvider = provider
+	if requestedProvider != "" {
+		agentProvider = requestedProvider
 	}
 	if model := strings.TrimSpace(req.Model); model != "" {
 		agentModel = model
@@ -1248,7 +1258,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		Model:    agentModel,
 		MaxSteps: req.MaxSteps,
 	}
-	if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
+	if systemPrompt := primarySystemInstructionContent(instructionMessages); systemPrompt != "" {
+		agentConfig.SystemPrompt = systemPrompt
+	} else if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
 		agentConfig.SystemPrompt = strings.TrimSpace(profileState.PromptText)
 	}
 	if selectedConfig != nil {
@@ -1292,6 +1304,12 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	h.applyAgentExecutionPolicy(a, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
 	h.applyAgentHooks(a, selectedConfig)
 	h.applyAgentRuntimeServices(a, selectedConfig)
+	usesSessionHistory := session != nil && (len(req.Messages) == 0 || (len(req.Messages) == 1 && strings.EqualFold(strings.TrimSpace(req.Messages[0]["role"]), "user")))
+	if usesSessionHistory {
+		h.maybeAutoCompactSessionHistory(ctx, session, a, agentProvider, agentModel, requestTraceID, req.TaskID)
+		chatMessages, lastMessage = h.buildChatMessages(req.Messages, session)
+		chatMessages = injectInstructionMessages(chatMessages, instructionMessages)
+	}
 	historyForAgent := trimLatestUserMessage(chatMessages)
 	streamingRequested := req.Stream || wantsEventStream(r)
 	effectivePlanningMode := h.resolvePlanningMode(req.PlanningMode, selectedConfig)
@@ -2497,6 +2515,75 @@ func (h *Handler) applyProfileSessionContext(session *chat.Session, state *profi
 	return changed
 }
 
+func (h *Handler) maybeAutoCompactSessionHistory(ctx context.Context, session *chat.Session, apiAgent *agent.Agent, provider, model, traceID, taskID string) {
+	if h == nil || session == nil || apiAgent == nil || h.llmRuntime == nil {
+		return
+	}
+
+	manager := apiAgent.GetContextManager()
+	keepRecent := 0
+	if manager != nil {
+		keepRecent = manager.Budget.KeepRecentMessages
+	}
+
+	runtime := compactruntime.New(h.llmRuntime, manager)
+	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
+		SessionID:          session.ID,
+		TaskID:             firstNonEmptyString(taskID, session.ID),
+		Provider:           provider,
+		Model:              model,
+		History:            session.GetMessages(),
+		KeepRecentMessages: keepRecent,
+		Phase:              compactruntime.PhasePreTurn,
+		CountTokens:        h.llmRuntime.CountMessagesTokens,
+	})
+
+	payload := map[string]interface{}{
+		"session_id":          session.ID,
+		"phase":               compactruntime.PhasePreTurn,
+		"mode":                status.Mode,
+		"reason":              status.Reason,
+		"token_before":        status.TokenBefore,
+		"trigger_token_limit": status.TriggerTokenLimit,
+		"max_context_tokens":  status.MaxContextTokens,
+		"provider":            status.ResolvedProvider,
+		"model":               status.ResolvedModel,
+	}
+	if status.TriggerTokenLimit > 0 && status.TokenBefore > status.TriggerTokenLimit {
+		h.publishSessionRuntimeEvent(chat.EventSessionCompactStarted, traceID, session.ID, cloneAnyMap(payload))
+	}
+
+	if err != nil {
+		payload["error"] = err.Error()
+		h.publishSessionRuntimeEvent(chat.EventSessionCompactFailed, traceID, session.ID, payload)
+		return
+	}
+	if result == nil {
+		h.publishSessionRuntimeEvent(chat.EventSessionCompactSkipped, traceID, session.ID, payload)
+		return
+	}
+
+	originalHistory := session.GetMessages()
+	session.ReplaceHistory(result.ReplacementHistory)
+	if h.sessionManager != nil {
+		if updateErr := h.sessionManager.Update(ctx, session); updateErr != nil {
+			session.ReplaceHistory(originalHistory)
+			payload["error"] = updateErr.Error()
+			h.publishSessionRuntimeEvent(chat.EventSessionCompactFailed, traceID, session.ID, payload)
+			return
+		}
+	}
+
+	payload["token_after"] = result.TokenAfter
+	payload["compacted_messages"] = result.CompactedMessages
+	payload["message_count_after"] = len(result.ReplacementHistory)
+	if len(result.CheckpointIDs) > 0 {
+		payload["checkpoint_ids"] = append([]string(nil), result.CheckpointIDs...)
+		payload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]
+	}
+	h.publishSessionRuntimeEvent(chat.EventSessionCompactCompleted, traceID, session.ID, payload)
+}
+
 func injectSystemPrompt(messages []types.Message, prompt string) []types.Message {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -3053,6 +3140,22 @@ func (h *Handler) publishRuntimeEvent(eventType, traceID string, payload map[str
 	h.getRuntimeEventBus().Publish(runtimeevents.Event{
 		Type:      eventType,
 		TraceID:   traceID,
+		AgentName: "runtime-admin",
+		Payload:   payload,
+	})
+}
+
+func (h *Handler) publishSessionRuntimeEvent(eventType, traceID, sessionID string, payload map[string]interface{}) {
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	if traceID != "" {
+		payload["trace_id"] = traceID
+	}
+	h.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:      eventType,
+		TraceID:   traceID,
+		SessionID: strings.TrimSpace(sessionID),
 		AgentName: "runtime-admin",
 		Payload:   payload,
 	})
@@ -5044,6 +5147,17 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
+func cloneAnyMap(input map[string]interface{}) map[string]interface{} {
+	if len(input) == 0 {
+		return map[string]interface{}{}
+	}
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
+}
+
 func normalizeAdminRoles(roles []string) []string {
 	return normalizeRoleValues(roles)
 }
@@ -5882,6 +5996,12 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 	if model == "" {
 		model = defaultAgentModel(h.llmRuntime)
 	}
+	metadata := map[string]interface{}{
+		"session_id": sessionID(session),
+	}
+	if layout := runtimeprompt.RenderInstructionMessagesLayout(messages); layout != "" {
+		metadata["prompt_layout"] = layout
+	}
 	stream, err := h.llmRuntime.Stream(ctx, &llm.LLMRequest{
 		Model:           model,
 		Messages:        messages,
@@ -5890,9 +6010,7 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 		ReasoningEffort: reasoningEffort,
 		Thinking:        types.CloneThinkingConfig(thinking),
 		Stream:          true,
-		Metadata: map[string]interface{}{
-			"session_id": sessionID(session),
-		},
+		Metadata:        metadata,
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -6729,12 +6847,12 @@ func runtimeHTTPDebugReporter(ctx context.Context) llm.HTTPDebugReporter {
 			fields = append(fields, logger.Int("request_body_bytes", event.RequestBodyBytes))
 		}
 		if debug := llm.HTTPDebugRequestDiagnostics(event.RequestMetadata); len(debug) > 0 {
-			for _, key := range []string{"request_sha256", "cache_surface_sha256", "input_sha256", "tools_sha256"} {
+			for _, key := range []string{"request_sha256", "cache_surface_sha256", "input_sha256", "tools_sha256", "prompt_layout_sha256"} {
 				if value := strings.TrimSpace(stringMapValueAny(debug, key)); value != "" {
 					fields = append(fields, logger.String(key, value))
 				}
 			}
-			for _, key := range []string{"message_count", "input_count", "tool_count", "instructions_length"} {
+			for _, key := range []string{"message_count", "input_count", "tool_count", "instructions_length", "prompt_layout_length"} {
 				if value := intMapValueAny(debug, key); value > 0 {
 					fields = append(fields, logger.Int(key, value))
 				}

@@ -238,7 +238,7 @@ func buildTaskPrompt(teamID, teammateName string, task Task, mailboxDigest strin
 	} else {
 		lines = append(lines, "- Do not modify files outside the write paths.")
 	}
-	lines = append(lines, "- For directory and document exploration, prefer direct read-only tools such as ls, glob, grep, and view.")
+	lines = append(lines, "- For directory and document exploration, prefer direct read-only tools such as ls, glob, grep, and view. The local grep tool prefers ripgrep (rg) when it is available.")
 	lines = append(lines, "- Do not use background_task or shell commands for basic file listing or file reading when direct tools can answer the task.")
 	lines = append(lines, "- If you are unsure about the exact task boundary, allowed paths, deliverables, or team context, call read_task_spec or read_task_context before editing.")
 	lines = append(lines, "- Summarize decisions and blockers.")

@@ -2,9 +2,13 @@ package chatcore
 
 import (
 	"context"
+	"encoding/base64"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -309,5 +313,94 @@ func TestExecuteToolLoop_PreservesToolResultMetadataInHistory(t *testing.T) {
 	}
 	if got := result.Response.ToolExecutions[0].Metadata["tool_source"]; got != "broker" {
 		t.Fatalf("expected tool execution metadata tool_source=broker, got %#v", got)
+	}
+}
+
+func TestExecuteToolLoop_AutoAttachesPromptImagesToHistory(t *testing.T) {
+	imagePath := filepath.Join(t.TempDir(), "diagram.png")
+	writeChatcoreTinyPNG(t, imagePath)
+
+	provider := &fakeProviderTurnExecutor{
+		responses: []*ProviderTurnResponse{{
+			Message: types.NewAssistantMessage("done"),
+		}},
+	}
+
+	result, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:   "请分析这张图 " + imagePath,
+		Provider: provider,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteToolLoop failed: %v", err)
+	}
+	if len(result.History) != 2 {
+		t.Fatalf("expected user + assistant history, got %#v", result.History)
+	}
+	if !llm.MessageHasLocalInputImages(&result.History[0]) {
+		t.Fatalf("expected first history message to include local input image metadata, got %+v", result.History[0].Metadata)
+	}
+	if len(provider.requests) != 1 || !llm.MessageHasLocalInputImages(&provider.requests[0].Messages[0]) {
+		t.Fatalf("expected provider request to preserve local image metadata, got %#v", provider.requests)
+	}
+}
+
+func TestExecuteToolLoop_ExplicitImagePathsAreAttachedToHistory(t *testing.T) {
+	imagePath := filepath.Join(t.TempDir(), "photo.png")
+	writeChatcoreTinyPNG(t, imagePath)
+
+	provider := &fakeProviderTurnExecutor{
+		responses: []*ProviderTurnResponse{{
+			Message: types.NewAssistantMessage("I see the image"),
+		}},
+	}
+
+	result, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:             "请查看附件",
+		ExplicitImagePaths: []string{imagePath},
+		Provider:           provider,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteToolLoop failed: %v", err)
+	}
+	if len(result.History) != 2 {
+		t.Fatalf("expected user + assistant history, got %#v", result.History)
+	}
+	if !llm.MessageHasLocalInputImages(&result.History[0]) {
+		t.Fatalf("expected first history message to include local input image metadata, got %+v", result.History[0].Metadata)
+	}
+	images := llm.ExtractLocalInputImages(map[string]interface{}(result.History[0].Metadata))
+	if len(images) == 0 {
+		t.Fatal("expected at least one image in extracted metadata")
+	}
+	if images[0].Source != "explicit" {
+		t.Fatalf("expected source=explicit, got %q", images[0].Source)
+	}
+}
+
+func TestExecuteToolLoop_InvalidExplicitImagePathReturnsError(t *testing.T) {
+	provider := &fakeProviderTurnExecutor{
+		responses: []*ProviderTurnResponse{{
+			Message: types.NewAssistantMessage("done"),
+		}},
+	}
+
+	_, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:             "请查看附件",
+		ExplicitImagePaths: []string{"/nonexistent/image.png"},
+		Provider:           provider,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid explicit image path")
+	}
+}
+
+func writeChatcoreTinyPNG(t *testing.T, path string) {
+	t.Helper()
+	payload, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP+qC1oAAAAAElFTkSuQmCC")
+	if err != nil {
+		t.Fatalf("decode tiny png: %v", err)
+	}
+	if err := os.WriteFile(path, payload, 0644); err != nil {
+		t.Fatalf("write tiny png: %v", err)
 	}
 }

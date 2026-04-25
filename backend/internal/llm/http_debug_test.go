@@ -31,8 +31,8 @@ func TestBuildHTTPDebugRequestMetadataAddsStableFingerprints(t *testing.T) {
 		"prompt_cache_key": "session-1",
 	}
 
-	metaFirst := buildHTTPDebugRequestMetadata(map[string]interface{}{"trace_id": "trace-1"}, "codex", requestBody)
-	metaSecond := buildHTTPDebugRequestMetadata(map[string]interface{}{"trace_id": "trace-2"}, "codex", requestBody)
+	metaFirst := buildHTTPDebugRequestMetadata(map[string]interface{}{"trace_id": "trace-1", "prompt_layout": "[base/system]\nSystem prompt"}, "codex", requestBody)
+	metaSecond := buildHTTPDebugRequestMetadata(map[string]interface{}{"trace_id": "trace-2", "prompt_layout": "[base/system]\nSystem prompt"}, "codex", requestBody)
 
 	debugFirst, ok := metaFirst["_request_debug"].(map[string]interface{})
 	if !ok {
@@ -49,6 +49,7 @@ func TestBuildHTTPDebugRequestMetadataAddsStableFingerprints(t *testing.T) {
 		"input_sha256",
 		"tools_sha256",
 		"instructions_sha256",
+		"prompt_layout_sha256",
 	} {
 		first, _ := debugFirst[key].(string)
 		second, _ := debugSecond[key].(string)
@@ -68,6 +69,9 @@ func TestBuildHTTPDebugRequestMetadataAddsStableFingerprints(t *testing.T) {
 	}
 	if debugFirst["prompt_cache_key"] != "session-1" {
 		t.Fatalf("expected prompt_cache_key=session-1, got %#v", debugFirst["prompt_cache_key"])
+	}
+	if debugFirst["prompt_layout_length"] != len("[base/system]\nSystem prompt") {
+		t.Fatalf("expected prompt_layout_length to be populated, got %#v", debugFirst["prompt_layout_length"])
 	}
 }
 

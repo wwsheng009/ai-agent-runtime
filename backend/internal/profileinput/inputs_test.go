@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
 )
 
 func TestBuildResolvedAgentInputs_LoadsPromptsAndToolPolicy(t *testing.T) {
@@ -39,6 +38,9 @@ func TestBuildResolvedAgentInputs_LoadsPromptsAndToolPolicy(t *testing.T) {
 	}
 	if inputs.PromptText != "# System\nSystem prompt.\n\n# Tools\nUse tools carefully." {
 		t.Fatalf("unexpected prompt text:\n%s", inputs.PromptText)
+	}
+	if inputs.PromptLayers == nil || len(inputs.PromptLayers.Fragments) != 2 {
+		t.Fatalf("expected structured prompt layers, got %#v", inputs.PromptLayers)
 	}
 	if inputs.ToolPolicy == nil {
 		t.Fatal("expected tool policy")
@@ -85,6 +87,9 @@ func TestBuildResolvedAgentInputs_LoadsProfileResourcesIntoPromptAndContext(t *t
 	}
 	if inputs.ContextText == "" {
 		t.Fatal("expected context text")
+	}
+	if inputs.PromptLayers == nil || len(inputs.PromptLayers.Fragments) != 1 {
+		t.Fatalf("expected one structured runtime context fragment, got %#v", inputs.PromptLayers)
 	}
 	if !strings.Contains(inputs.PromptText, "cached profile memory") {
 		t.Fatalf("expected memory preview in prompt:\n%s", inputs.PromptText)

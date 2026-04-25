@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimecontext "github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
@@ -260,6 +261,7 @@ type testLLMProvider struct {
 	streamErr    error
 	healthErr    error
 	requests     []*llm.LLMRequest
+	capabilities map[string]agentconfig.ModelCapabilitySpec
 }
 
 type testSequenceLLMProvider struct {
@@ -305,6 +307,11 @@ func (p *testLLMProvider) GetCapabilities() *llm.ModelCapabilities {
 }
 
 func (p *testLLMProvider) CheckHealth(ctx context.Context) error { return p.healthErr }
+
+func (p *testLLMProvider) ResolveModelCapability(requestedModel string) (string, agentconfig.ModelCapabilitySpec, bool) {
+	capability, ok := llm.ResolveModelCapabilitySpec(requestedModel, p.capabilities)
+	return requestedModel, capability, ok
+}
 
 func (p *testSequenceLLMProvider) Name() string { return p.name }
 
@@ -631,6 +638,73 @@ func TestAgentChat_UsesLLMAndPersistsSession(t *testing.T) {
 	require.Len(t, session.GetMessages(), 2)
 	assert.Equal(t, "user", session.GetMessages()[0].Role)
 	assert.Equal(t, "assistant", session.GetMessages()[1].Role)
+}
+
+func TestAgentChat_SessionHistoryAutoCompactsBeforeLLMFallback(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &testLLMProvider{
+		name:    "provider-a",
+		content: "hello from llm",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 120},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+	handler.SetLLMRuntime(runtime)
+
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Agent.DefaultProvider = "provider-a"
+	runtimeConfig.Agent.DefaultModel = "gpt-5"
+	runtimeConfig.Context.KeepRecentMessages = 1
+	handler.SetRuntimeConfig(runtimeConfig, "")
+
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
+		TTL:             time.Hour,
+		MaxHistory:      20,
+		CleanupInterval: time.Hour,
+		AutoArchive:     false,
+		IdleTimeout:     time.Hour,
+	})
+	handler.SetSessionManager(sessionManager)
+
+	session, err := sessionManager.CreateSession(context.Background(), "user-compact")
+	require.NoError(t, err)
+	session.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("You are a helpful assistant."),
+		*types.NewUserMessage(strings.Repeat("older user context ", 80)),
+		*types.NewAssistantMessage(strings.Repeat("older assistant context ", 80)),
+		*types.NewUserMessage(strings.Repeat("recent user context ", 80)),
+		*types.NewAssistantMessage(strings.Repeat("recent assistant context ", 80)),
+	})
+	require.NoError(t, sessionManager.Update(context.Background(), session))
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	body := []byte(fmt.Sprintf(`{"messages":[{"role":"user","content":"continue from here"}],"session_id":"%s","user_id":"user-compact"}`, session.ID))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Len(t, provider.requests, 2)
+	require.Equal(t, "compact", provider.requests[0].Metadata["internal_operation"])
+
+	updated, err := sessionManager.GetSession(context.Background(), session.ID)
+	require.NoError(t, err)
+	require.Len(t, updated.GetMessages(), 6)
+	require.Equal(t, "compaction", updated.GetMessages()[1].Metadata["context_stage"])
+	assert.NotContains(t, updated.GetMessages()[1].Content, "older assistant context older assistant context")
 }
 
 func TestAgentChat_ErrorResponseIncludesRequestID(t *testing.T) {
@@ -1786,10 +1860,88 @@ agents:
 	require.NotEmpty(t, provider.requests)
 	messages := provider.requests[0].Messages
 	require.NotEmpty(t, messages)
-	assert.Equal(t, "system", messages[0].Role)
-	assert.Contains(t, messages[0].Content, "Profile system prompt.")
-	assert.Contains(t, messages[0].Content, "cached profile memory")
-	assert.Contains(t, messages[0].Content, "Profile investigation notes.")
+	foundSystem := false
+	foundRuntimeContext := false
+	for _, message := range messages {
+		if message.Role == "system" && strings.Contains(message.Content, "Profile system prompt.") {
+			foundSystem = true
+		}
+		if message.Role == "developer" &&
+			strings.Contains(message.Content, "cached profile memory") &&
+			strings.Contains(message.Content, "Profile investigation notes.") {
+			foundRuntimeContext = true
+		}
+	}
+	assert.True(t, foundSystem, "expected structured system instruction message")
+	assert.True(t, foundRuntimeContext, "expected structured developer context instruction message")
+}
+
+func TestAgentChat_CodexBuildsStructuredInstructionMessagesFromProfileAndWorkspace(t *testing.T) {
+	profileRoot := t.TempDir()
+	workspaceRoot := t.TempDir()
+	writeProfileFile := func(path, contents string) {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(contents), 0o644))
+	}
+
+	writeProfileFile(filepath.Join(profileRoot, "profile.yaml"), `profile:
+  name: dev
+  default_agent: tester
+agents:
+  tester: {}
+`)
+	writeProfileFile(filepath.Join(profileRoot, "runtime.yaml"), "agent:\n  defaultModel: test-model\n")
+	writeProfileFile(filepath.Join(profileRoot, "agents", "tester", "prompts", "system.md"), "Profile system prompt.")
+	writeProfileFile(filepath.Join(profileRoot, "agents", "tester", "prompts", "tools.md"), "Prefer rg when available.")
+	writeProfileFile(filepath.Join(workspaceRoot, "AGENTS.md"), "Stay within the workspace boundary.")
+
+	registry := skill.NewRegistry(nil)
+	handler := NewHandler(registry, nil, nil)
+	handler.SetProfileSupport(ProfileSupportConfig{
+		Registry: profilesys.NewRegistry(""),
+	})
+
+	provider := &testLLMProvider{name: "codex", content: "hello from llm"}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultProvider: "codex", DefaultModel: "test-model", MaxRetries: 0})
+	require.NoError(t, runtime.RegisterProvider("codex", provider))
+	handler.SetLLMRuntime(runtime)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	body := fmt.Sprintf(`{"profile":%q,"provider":"codex","workspace_path":%q,"messages":[{"role":"user","content":"hi"}]}`, profileRoot, workspaceRoot)
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotEmpty(t, provider.requests)
+
+	messages := provider.requests[0].Messages
+	foundSystem := false
+	foundDeveloper := false
+	foundUser := false
+	for _, message := range messages {
+		if message.Role == "system" && strings.Contains(message.Content, "Profile system prompt.") {
+			foundSystem = true
+			assert.Equal(t, "base", message.Metadata["prompt_layer"])
+		}
+		if message.Role == "developer" && strings.Contains(message.Content, "Prefer rg when available.") {
+			foundDeveloper = true
+			assert.Equal(t, "developer", message.Metadata["prompt_layer"])
+		}
+		if message.Role == "developer" && strings.Contains(message.Content, "Stay within the workspace boundary.") {
+			foundUser = true
+			assert.Equal(t, "user", message.Metadata["prompt_layer"])
+		}
+	}
+	assert.True(t, foundSystem, "expected structured system instruction message")
+	assert.True(t, foundDeveloper, "expected structured developer instruction message")
+	assert.True(t, foundUser, "expected structured user instruction message")
+	layout, _ := provider.requests[0].Metadata["prompt_layout"].(string)
+	assert.Contains(t, layout, "[base/system]")
+	assert.Contains(t, layout, "[developer/developer]")
+	assert.Contains(t, layout, "[user/developer]")
 }
 
 func TestAgentChat_ProfileSetsSessionContext(t *testing.T) {
@@ -1981,9 +2133,7 @@ agents:
 	profileContextFound := false
 	for _, message := range provider.requests[0].Messages {
 		if message.Role == "system" &&
-			strings.Contains(message.Content, "Profile system prompt.") &&
-			strings.Contains(message.Content, "cached profile memory") &&
-			strings.Contains(message.Content, "Profile investigation notes.") {
+			strings.Contains(message.Content, "Profile system prompt.") {
 			found = true
 		}
 		if message.Role == "assistant" &&
@@ -3841,6 +3991,79 @@ func TestGetSearchStats_RequiresAdminToken(t *testing.T) {
 		observability.LabelAccessMode: "token",
 	})
 	assert.Equal(t, float64(1), successCounter.Get())
+}
+
+func TestPreviewPromptLayout_RequiresAdminToken(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetSearchAdminToken("secret-token")
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/debug/prompt-layout", bytes.NewReader([]byte(`{"messages":[{"role":"user","content":"hi"}]}`)))
+	req.RemoteAddr = "10.0.0.5:9000"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	authorizedReq := httptest.NewRequest(http.MethodPost, "/api/runtime/debug/prompt-layout", bytes.NewReader([]byte(`{"messages":[{"role":"user","content":"hi"}]}`)))
+	authorizedReq.RemoteAddr = "10.0.0.5:9000"
+	authorizedReq.Header.Set("X-Skills-Admin-Token", "secret-token")
+	authorizedRec := httptest.NewRecorder()
+	router.ServeHTTP(authorizedRec, authorizedReq)
+	require.Equal(t, http.StatusOK, authorizedRec.Code)
+}
+
+func TestPreviewPromptLayout_ReturnsStructuredLayout(t *testing.T) {
+	profileRoot := t.TempDir()
+	workspaceRoot := t.TempDir()
+	writeProfileFile := func(path, contents string) {
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(contents), 0o644))
+	}
+
+	writeProfileFile(filepath.Join(profileRoot, "profile.yaml"), `profile:
+  name: dev
+  default_agent: tester
+agents:
+  tester: {}
+`)
+	writeProfileFile(filepath.Join(profileRoot, "runtime.yaml"), "agent:\n  defaultModel: test-model\n")
+	writeProfileFile(filepath.Join(profileRoot, "agents", "tester", "prompts", "system.md"), "Profile system prompt.")
+	writeProfileFile(filepath.Join(profileRoot, "agents", "tester", "prompts", "tools.md"), "Prefer rg when available.")
+	writeProfileFile(filepath.Join(workspaceRoot, "AGENTS.md"), "Stay within the workspace boundary.")
+
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetProfileSupport(ProfileSupportConfig{
+		Registry: profilesys.NewRegistry(""),
+	})
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	body := fmt.Sprintf(`{"profile":%q,"provider":"codex","workspace_path":%q,"messages":[{"role":"user","content":"hi"}]}`, profileRoot, workspaceRoot)
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/debug/prompt-layout", bytes.NewReader([]byte(body)))
+	req.RemoteAddr = "127.0.0.1:9000"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	assert.Equal(t, "codex", payload["provider"])
+	assert.Equal(t, workspaceRoot, payload["workspace_path"])
+	layout, _ := payload["prompt_layout"].(string)
+	assert.Contains(t, layout, "[base/system]")
+	assert.Contains(t, layout, "[developer/developer]")
+	assert.Contains(t, layout, "[user/developer]")
+
+	fragments, ok := payload["fragments"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, fragments, 3)
+
+	instructionMessages, ok := payload["instruction_messages"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, instructionMessages, 3)
 }
 
 func TestReindexSearchIndex_CooldownReturnsRateLimit(t *testing.T) {

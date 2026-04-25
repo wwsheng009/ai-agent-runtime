@@ -127,6 +127,15 @@ func FormatUserPrompt() string {
 	return theme.UserColor.Sprintf("%s你> ", theme.UserIcon)
 }
 
+// FormatUserPromptWithAttachments 格式化带附件数量的用户输入提示
+func FormatUserPromptWithAttachments(attachmentCount int) string {
+	theme := GetTheme(ThemeAuto)
+	if attachmentCount <= 0 {
+		return FormatUserPrompt()
+	}
+	return theme.UserColor.Sprintf("%s你> [📎%d] ", theme.UserIcon, attachmentCount)
+}
+
 // FormatAssistantPrompt 格式化助手输出提示
 func FormatAssistantPrompt() string {
 	theme := GetTheme(ThemeAuto)

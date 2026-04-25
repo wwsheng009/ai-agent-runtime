@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
@@ -47,7 +48,10 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if reporter := newRuntimeHTTPDebugReporter(session); reporter != nil {
 		ctx = runtimellm.WithHTTPDebugReporter(ctx, reporter)
 	}
-	result, err := actor.SubmitPrompt(ctx, prompt, currentRunMetaForSession(session))
+	result, err := actor.SubmitPrompt(ctx, prompt, currentRunMetaForSession(session), runtimechat.SubmitPromptOption{
+		ImagePaths:       session.ImagePaths,
+		ImageArtifactDir: chatSessionImageArtifactDir(session),
+	})
 	if err != nil {
 		warnIfChatSessionSyncFails(session, "actor error sync", syncRuntimeSessionBackIntoCLI(session))
 		warnIfChatSessionSyncFails(session, "actor error team lifecycle sync", syncAmbientTeamLifecycleState(session))

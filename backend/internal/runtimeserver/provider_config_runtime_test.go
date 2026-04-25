@@ -23,6 +23,12 @@ func TestBuildRuntimeProviderConfigsMergesGlobalAndProviderProxy(t *testing.T) {
 					Protocol:     "openai",
 					BaseURL:      "https://api.example.com",
 					DefaultModel: "gpt-5",
+					ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+						"gpt-5": {
+							MaxContextTokens:      272000,
+							AutoCompactTokenLimit: 240000,
+						},
+					},
 					Proxy: &agentconfig.ProxyConfig{
 						Enabled: true,
 						HTTPS:   "socks5://127.0.0.1:10811",
@@ -39,4 +45,6 @@ func TestBuildRuntimeProviderConfigsMergesGlobalAndProviderProxy(t *testing.T) {
 	require.Equal(t, "socks5://127.0.0.1:10811", result["openai-main"].Proxy.HTTPS)
 	require.Equal(t, "localhost,127.0.0.1", result["openai-main"].Proxy.NoProxy)
 	require.True(t, result["openai-main"].Proxy.Enabled)
+	require.Equal(t, 272000, result["openai-main"].ModelCapabilities["gpt-5"].MaxContextTokens)
+	require.Equal(t, 240000, result["openai-main"].ModelCapabilities["gpt-5"].AutoCompactTokenLimit)
 }

@@ -17,6 +17,7 @@ import (
 // ResolvedAgentInputs contains shared runtime-facing inputs derived from a resolved profile.
 type ResolvedAgentInputs struct {
 	PromptText    string
+	PromptLayers  *runtimeprompt.Layers
 	ContextText   string
 	ContextValues map[string]interface{}
 	ToolPolicy    *runtimepolicy.ToolExecutionPolicy
@@ -32,6 +33,10 @@ func BuildResolvedAgentInputs(resolved *ResolvedAgent) (*ResolvedAgentInputs, er
 	if err != nil {
 		return nil, err
 	}
+	promptLayers, err := LoadPromptLayers(resolved.Prompts)
+	if err != nil {
+		return nil, err
+	}
 	contextText, contextValues, err := LoadContextInputs(resolved.Paths)
 	if err != nil {
 		return nil, err
@@ -41,8 +46,16 @@ func BuildResolvedAgentInputs(resolved *ResolvedAgent) (*ResolvedAgentInputs, er
 		return nil, err
 	}
 
+	if promptLayers == nil {
+		promptLayers = runtimeprompt.NewLayers()
+	}
+	if strings.TrimSpace(contextText) != "" {
+		promptLayers.AddLayer(runtimeprompt.LayerUser, "Profile Runtime Context", contextText, "")
+	}
+
 	return &ResolvedAgentInputs{
 		PromptText:    ComposeSystemPrompt(promptText, contextText),
+		PromptLayers:  promptLayers,
 		ContextText:   contextText,
 		ContextValues: contextValues,
 		ToolPolicy:    toolPolicy,
@@ -60,6 +73,26 @@ func LoadPromptText(files ResolvedPromptFiles) (string, error) {
 		return "", err
 	}
 	return runtimeprompt.Compose(loaded), nil
+}
+
+// LoadPromptLayers loads resolved prompt files into structured prompt fragments.
+func LoadPromptLayers(files ResolvedPromptFiles) (*runtimeprompt.Layers, error) {
+	loaded, err := runtimeprompt.LoadFiles(runtimeprompt.Files{
+		System: files.System,
+		Role:   files.Role,
+		Tools:  files.Tools,
+	})
+	if err != nil {
+		return nil, err
+	}
+	layers := runtimeprompt.NewLayers()
+	if loaded == nil {
+		return layers, nil
+	}
+	layers.AddLayer(runtimeprompt.LayerBase, "Profile System", loaded.System, loaded.Files.System)
+	layers.AddLayer(runtimeprompt.LayerDeveloper, "Profile Role", loaded.Role, loaded.Files.Role)
+	layers.AddLayer(runtimeprompt.LayerDeveloper, "Profile Tools", loaded.Tools, loaded.Files.Tools)
+	return layers, nil
 }
 
 // ComposeSystemPrompt appends read-only profile context to the composed prompt.

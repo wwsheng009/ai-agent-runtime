@@ -69,6 +69,9 @@ func formatRuntimeHTTPDebugEvent(event runtimellm.HTTPDebugEvent) string {
 			lines = append(lines, "[http-debug/runtime] "+line)
 		}
 	}
+	if line := formatRuntimeHTTPPromptLayoutLine(event.RequestMetadata); line != "" {
+		lines = append(lines, "[http-debug/runtime] "+line)
+	}
 	if metadata := compactRuntimeHTTPDebugMetadata(event.RequestMetadata); metadata != "" {
 		lines = append(lines, fmt.Sprintf("[http-debug/runtime] request_metadata=%s", truncateUTF8Bytes(metadata, 4096)))
 	}
@@ -97,7 +100,17 @@ func compactRuntimeHTTPDebugMetadata(metadata map[string]interface{}) string {
 	if len(metadata) == 0 {
 		return ""
 	}
-	data, err := json.Marshal(metadata)
+	display := make(map[string]interface{}, len(metadata))
+	for key, value := range metadata {
+		if key == "prompt_layout" {
+			if layout := strings.TrimSpace(fmt.Sprint(value)); layout != "" && layout != "<nil>" {
+				display[key] = fmt.Sprintf("[omitted:%d chars]", len(layout))
+			}
+			continue
+		}
+		display[key] = value
+	}
+	data, err := json.Marshal(display)
 	if err != nil {
 		return ""
 	}
@@ -105,8 +118,8 @@ func compactRuntimeHTTPDebugMetadata(metadata map[string]interface{}) string {
 }
 
 func formatRuntimeHTTPFingerprintLine(debug map[string]interface{}) string {
-	parts := make([]string, 0, 4)
-	for _, key := range []string{"request_sha256", "cache_surface_sha256", "input_sha256", "tools_sha256"} {
+	parts := make([]string, 0, 5)
+	for _, key := range []string{"request_sha256", "cache_surface_sha256", "input_sha256", "tools_sha256", "prompt_layout_sha256"} {
 		if value := strings.TrimSpace(runtimeHTTPDebugString(debug, key)); value != "" {
 			parts = append(parts, key+"="+value)
 		}
@@ -115,8 +128,8 @@ func formatRuntimeHTTPFingerprintLine(debug map[string]interface{}) string {
 }
 
 func formatRuntimeHTTPShapeLine(debug map[string]interface{}) string {
-	parts := make([]string, 0, 4)
-	for _, key := range []string{"message_count", "input_count", "tool_count", "instructions_length"} {
+	parts := make([]string, 0, 5)
+	for _, key := range []string{"message_count", "input_count", "tool_count", "instructions_length", "prompt_layout_length"} {
 		if value := runtimeHTTPDebugInt(debug, key); value > 0 {
 			parts = append(parts, fmt.Sprintf("%s=%d", key, value))
 		}
@@ -125,6 +138,14 @@ func formatRuntimeHTTPShapeLine(debug map[string]interface{}) string {
 		parts = append(parts, "prompt_cache_key="+value)
 	}
 	return strings.Join(parts, " ")
+}
+
+func formatRuntimeHTTPPromptLayoutLine(metadata map[string]interface{}) string {
+	layout := strings.TrimSpace(runtimeHTTPDebugString(metadata, "prompt_layout"))
+	if layout == "" {
+		return ""
+	}
+	return "prompt_layout=" + truncateUTF8Bytes(layout, 4096)
 }
 
 func runtimeHTTPDebugString(values map[string]interface{}, key string) string {

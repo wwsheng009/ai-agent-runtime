@@ -15,6 +15,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -432,6 +433,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if sessionID != "" {
 		req.Metadata["prompt_cache_key"] = sessionID
 	}
+	promptLayoutSummary := ""
+	promptLayoutLength := 0
+	if layout := runtimeprompt.RenderInstructionMessagesLayout(managedHistory); layout != "" {
+		req.Metadata["prompt_layout"] = layout
+		promptLayoutSummary, promptLayoutLength = summarizePromptLayoutForEvent(layout)
+	}
 	if outputDir := generatedImageOutputDirForAgentSession(loop.agent, sessionID); outputDir != "" {
 		req.Metadata[llm.MetadataKeyGeneratedImageOutputDir] = outputDir
 	}
@@ -492,6 +499,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		"message_count":    len(req.Messages),
 		"tool_count":       len(req.Tools),
 		"remaining_budget": remainingBudget,
+	}
+	if promptLayoutSummary != "" {
+		requestPayload["prompt_layout_summary"] = promptLayoutSummary
+	}
+	if promptLayoutLength > 0 {
+		requestPayload["prompt_layout_length"] = promptLayoutLength
 	}
 	if availability := summarizeToolAvailability(req.Tools); len(availability) > 0 {
 		req.Metadata["tool_availability"] = cloneInterfaceMap(availability)

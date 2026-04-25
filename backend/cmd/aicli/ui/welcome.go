@@ -148,6 +148,7 @@ func PrintHelp() {
 	helpItems := [][]string{
 		{"/help", "显示此帮助信息"},
 		{"/clear", "清空会话历史"},
+		{"/compact [mode]", "手动触发会话压缩"},
 		{"/exit, /quit", "退出程序"},
 		{"/provider [name]", "选择或查看提供商"},
 		{"/model [name]", "选择或查看模型"},

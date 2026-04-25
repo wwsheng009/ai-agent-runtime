@@ -13,7 +13,9 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
 
 // ProfileSupportConfig configures system-level profile resolution for API requests.
@@ -30,6 +32,7 @@ type profileRuntimeState struct {
 	Reference     string
 	Resolved      *profilesys.ResolvedAgent
 	PromptText    string
+	PromptLayers  *runtimeprompt.Layers
 	ContextValues map[string]interface{}
 	ToolPolicy    *runtimepolicy.ToolExecutionPolicy
 	RuntimeConfig *runtimecfg.RuntimeConfig
@@ -84,7 +87,7 @@ func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, ag
 		return nil, nil, err
 	}
 
-	mcpAdapter, mcpManager, err := h.resolveProfileMCPAdapter(ctx, resolved)
+	mcpAdapter, mcpManager, err := h.resolveProfileMCPAdapter(ctx, resolved, runtimeCfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -113,6 +116,7 @@ func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, ag
 		Reference:     ref,
 		Resolved:      resolved,
 		PromptText:    inputs.PromptText,
+		PromptLayers:  inputs.PromptLayers,
 		ContextValues: cloneProfileContextValues(inputs.ContextValues),
 		ToolPolicy:    inputs.ToolPolicy,
 		RuntimeConfig: runtimeCfg,
@@ -167,6 +171,7 @@ func (h *Handler) resolveProfileSessionState(profileRef, agentID string, workspa
 		Reference:     ref,
 		Resolved:      resolved,
 		PromptText:    inputs.PromptText,
+		PromptLayers:  inputs.PromptLayers,
 		ContextValues: cloneProfileContextValues(inputs.ContextValues),
 		ToolPolicy:    inputs.ToolPolicy,
 		RuntimeConfig: runtimeCfg,
@@ -356,19 +361,25 @@ func samePath(left, right string) bool {
 	return strings.EqualFold(left, right)
 }
 
-func (h *Handler) resolveProfileMCPAdapter(ctx context.Context, resolved *profilesys.ResolvedAgent) (skill.MCPManager, mcpmanager.Manager, error) {
+func (h *Handler) resolveProfileMCPAdapter(ctx context.Context, resolved *profilesys.ResolvedAgent, runtimeCfg *runtimecfg.RuntimeConfig) (skill.MCPManager, mcpmanager.Manager, error) {
 	if resolved == nil {
+		if h.mcpManager == nil {
+			return runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeCfg)), nil, nil
+		}
 		return h.mcpManager, nil, nil
 	}
 	configPath := strings.TrimSpace(resolved.MCPConfig)
 	if configPath == "" {
-		return nil, nil, nil
+		if h.mcpManager == nil {
+			return runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeCfg)), nil, nil
+		}
+		return h.mcpManager, nil, nil
 	}
 	if samePath(configPath, h.profileGlobalMCPPath) && h.mcpManager != nil {
 		return h.mcpManager, nil, nil
 	}
 	if !h.profileMCPAutoConnect {
-		return nil, nil, nil
+		return runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeCfg)), nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -380,7 +391,7 @@ func (h *Handler) resolveProfileMCPAdapter(ctx context.Context, resolved *profil
 	if err := manager.Start(ctx); err != nil {
 		return nil, nil, err
 	}
-	return skill.NewMCPAdapter(manager), manager, nil
+	return runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(manager, runtimeCfg)), manager, nil
 }
 
 func buildProfileEmbeddingRouter(config *runtimecfg.RuntimeConfig, registry *skill.Registry) (*skill.SemanticEmbeddingRouter, error) {

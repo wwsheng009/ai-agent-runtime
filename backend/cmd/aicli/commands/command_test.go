@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
@@ -739,6 +740,41 @@ func TestHandleCommand_QueueStatusAndClear(t *testing.T) {
 	}
 	if lenQueuedInteractiveInput(session) != 0 {
 		t.Fatalf("expected queue to be empty after clear")
+	}
+}
+
+func TestHandleCommand_Compact(t *testing.T) {
+	originalRunner := runManualChatCompact
+	defer func() {
+		runManualChatCompact = originalRunner
+	}()
+
+	runManualChatCompact = func(session *ChatSession, requestedMode string) (*chatCompactReport, error) {
+		return &chatCompactReport{
+			RequestedMode: requestedMode,
+			Result: &compactruntime.Result{
+				Mode:              compactruntime.ModeRemote,
+				ResolvedProvider:  "codex_ee",
+				ResolvedModel:     "gpt-5",
+				TokenBefore:       900,
+				TokenAfter:        120,
+				CompactedMessages: 4,
+			},
+			Status: compactruntime.Status{
+				Mode:             compactruntime.ModeRemote,
+				ResolvedProvider: "codex_ee",
+				ResolvedModel:    "gpt-5",
+			},
+		}, nil
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(&ChatSession{}, "/compact remote", false); quit {
+			t.Fatal("expected compact command not to exit")
+		}
+	})
+	if !strings.Contains(output, "压缩完成") || !strings.Contains(output, "mode=remote") {
+		t.Fatalf("expected compact command output, got %q", output)
 	}
 }
 

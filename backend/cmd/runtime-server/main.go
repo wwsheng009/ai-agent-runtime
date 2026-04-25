@@ -27,6 +27,7 @@ import (
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -536,7 +537,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		runtimeConfig.Sessions.Dir,
 	)
 
-	mcpAdapter, manager, err := buildSkillsMCPManager(ctx, cfg)
+	mcpAdapter, manager, err := buildSkillsMCPManager(ctx, cfg, runtimeConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -749,23 +750,23 @@ func resolveListenAddr(cfg *config.Config, override string) string {
 	return net.JoinHostPort(host, fmt.Sprintf("%d", port))
 }
 
-func buildSkillsMCPManager(ctx context.Context, cfg *config.Config) (runtimeskill.MCPManager, mcpmanager.Manager, error) {
-	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.MCP == nil || strings.TrimSpace(cfg.AICLI.MCP.ConfigFile) == "" {
-		return nil, nil, nil
-	}
-	if !cfg.AICLI.MCP.AutoConnect {
-		return nil, nil, nil
-	}
-	cfg.AICLI.MCP.ConfigFile = runtimeserver.ResolveUpwardPath(cfg.AICLI.MCP.ConfigFile)
+func buildSkillsMCPManager(ctx context.Context, cfg *config.Config, runtimeConfig *runtimecfg.RuntimeConfig) (runtimeskill.MCPManager, mcpmanager.Manager, error) {
+	var manager mcpmanager.Manager
 
-	manager := mcpmanager.NewManager()
-	if err := manager.LoadConfig(cfg.AICLI.MCP.ConfigFile); err != nil {
-		return nil, nil, fmt.Errorf("failed to load MCP config: %w", err)
+	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil && strings.TrimSpace(cfg.AICLI.MCP.ConfigFile) != "" && cfg.AICLI.MCP.AutoConnect {
+		cfg.AICLI.MCP.ConfigFile = runtimeserver.ResolveUpwardPath(cfg.AICLI.MCP.ConfigFile)
+
+		manager = mcpmanager.NewManager()
+		if err := manager.LoadConfig(cfg.AICLI.MCP.ConfigFile); err != nil {
+			return nil, nil, fmt.Errorf("failed to load MCP config: %w", err)
+		}
+		if err := manager.Start(ctx); err != nil {
+			return nil, nil, fmt.Errorf("failed to start MCP manager: %w", err)
+		}
 	}
-	if err := manager.Start(ctx); err != nil {
-		return nil, nil, fmt.Errorf("failed to start MCP manager: %w", err)
-	}
-	return runtimeskill.NewMCPAdapter(manager), manager, nil
+
+	toolManager := runtimetools.NewDefaultManagerWithRuntimeConfig(manager, runtimeConfig)
+	return runtimetools.NewAgentAdapter(toolManager), manager, nil
 }
 
 func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.ProviderConfig {
@@ -803,6 +804,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			DefaultModel:       provider.DefaultModel,
 			SupportedModels:    append([]string(nil), provider.SupportedModels...),
 			ModelMappings:      cloneStringMap(provider.ModelMappings),
+			ModelCapabilities:  cloneProviderModelCapabilities(provider.ModelCapabilities),
 			Headers:            cloneStringMap(provider.Headers),
 			HeaderMappings:     cloneStringMap(provider.HeaderMappings),
 			HeaderMappingRules: cloneHeaderMappingRules(provider.HeaderMappingRules),
@@ -960,6 +962,21 @@ func cloneStringMap(input map[string]string) map[string]string {
 	output := make(map[string]string, len(input))
 	for key, value := range input {
 		output[key] = value
+	}
+	return output
+}
+
+func cloneProviderModelCapabilities(input map[string]config.ModelCapabilitySpec) map[string]config.ModelCapabilitySpec {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]config.ModelCapabilitySpec, len(input))
+	for key, value := range input {
+		cloned := value
+		if len(value.InputModalities) > 0 {
+			cloned.InputModalities = append([]string(nil), value.InputModalities...)
+		}
+		output[key] = cloned
 	}
 	return output
 }

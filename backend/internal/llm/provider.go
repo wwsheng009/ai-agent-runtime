@@ -54,12 +54,13 @@ type ChatRequest struct {
 
 // Message 消息
 type Message struct {
-	Role       string                 `json:"role"`
-	Content    string                 `json:"content,omitempty"`
-	ToolCalls  []ToolCall             `json:"tool_calls,omitempty"`
-	ToolCallID string                 `json:"tool_call_id,omitempty"`
-	Reasoning  string                 `json:"reasoning,omitempty"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	Role         string                 `json:"role"`
+	Content      string                 `json:"content,omitempty"`
+	ContentParts []types.ContentPart    `json:"content_parts,omitempty"`
+	ToolCalls    []ToolCall             `json:"tool_calls,omitempty"`
+	ToolCallID   string                 `json:"tool_call_id,omitempty"`
+	Reasoning    string                 `json:"reasoning,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // Tool 工具
@@ -162,6 +163,112 @@ type ProviderWrapper struct {
 	config    *ProviderConfig
 	adapter   adapter.ProtocolAdapter
 	tokenizer *Tokenizer
+}
+
+// ResolveModelCapability exposes provider/model capability metadata for runtime
+// features such as auto compaction.
+func (p *ProviderWrapper) ResolveModelCapability(requestedModel string) (string, agentconfig.ModelCapabilitySpec, bool) {
+	if p == nil || p.config == nil {
+		return strings.TrimSpace(requestedModel), agentconfig.ModelCapabilitySpec{}, false
+	}
+
+	candidates := make([]string, 0, 3)
+	appendCandidate := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if existing == value {
+				return
+			}
+		}
+		candidates = append(candidates, value)
+	}
+
+	requestedModel = strings.TrimSpace(requestedModel)
+	appendCandidate(requestedModel)
+	if requestedModel == "" {
+		appendCandidate(p.config.DefaultModel)
+	}
+	if requestedModel != "" {
+		if mapped, ok := p.config.ModelMappings[requestedModel]; ok {
+			appendCandidate(mapped)
+		}
+	}
+
+	for _, candidate := range candidates {
+		if capability, ok := ResolveModelCapabilitySpec(candidate, p.config.ModelCapabilities); ok {
+			return candidate, capability, true
+		}
+	}
+
+	return requestedModel, agentconfig.ModelCapabilitySpec{}, false
+}
+
+// RemoteCompact invokes a provider-native remote compaction endpoint when the
+// configured protocol supports it.
+func (p *ProviderWrapper) RemoteCompact(ctx context.Context, req RemoteCompactRequest) (*RemoteCompactResponse, error) {
+	if p == nil || p.config == nil {
+		return nil, fmt.Errorf("provider config is required")
+	}
+	if !strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
+		return nil, ErrRemoteCompactUnsupported
+	}
+
+	model := strings.TrimSpace(p.resolveModel(req.Model))
+	requestBody := buildCodexRemoteCompactRequest(model, req.History)
+	url := resolveCompactURL(p.config.BaseURL, p.config.APIPath, (&adapter.CodexAdapter{}).GetAPIPath()+"/compact")
+	bodyBytes, marshalErr := json.Marshal(requestBody)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("failed to marshal remote compact request body: %w", marshalErr)
+	}
+	reportHTTPDebug(ctx, HTTPDebugEvent{
+		Source:           "provider_wrapper",
+		Phase:            "request",
+		Protocol:         p.config.Type,
+		Model:            model,
+		Method:           http.MethodPost,
+		URL:              url,
+		RequestMetadata:  buildHTTPDebugRequestMetadata(nil, p.config.Type, requestBody),
+		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+		RequestBodyBytes: len(bodyBytes),
+		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+	})
+
+	headers := buildCodexRemoteCompactHeaders(p.config.APIKey, p.config.Timeout, requestBody, p.config.Headers)
+	client := newProviderHTTPClient(p.config.Timeout, p.config.Proxy, false)
+	responseBody, statusCode, err := sendRemoteCompactRequest(ctx, client, url, headers, requestBody)
+	if err != nil {
+		reportHTTPDebug(ctx, HTTPDebugEvent{
+			Source:              "provider_wrapper",
+			Phase:               "response",
+			Protocol:            p.config.Type,
+			Model:               model,
+			Method:              http.MethodPost,
+			URL:                 url,
+			ResponseStatusCode:  statusCode,
+			ResponseBodyBytes:   len(responseBody),
+			ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
+			ResponseBodyRaw:     append([]byte(nil), responseBody...),
+			Error:               err.Error(),
+		})
+		return nil, err
+	}
+	reportHTTPDebug(ctx, HTTPDebugEvent{
+		Source:              "provider_wrapper",
+		Phase:               "response",
+		Protocol:            p.config.Type,
+		Model:               model,
+		Method:              http.MethodPost,
+		URL:                 url,
+		ResponseStatusCode:  statusCode,
+		ResponseBodyBytes:   len(responseBody),
+		ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
+		ResponseBodyRaw:     append([]byte(nil), responseBody...),
+	})
+
+	return decodeCodexRemoteCompactResponse(req.History, responseBody)
 }
 
 // NewProvider 创建新的 Provider

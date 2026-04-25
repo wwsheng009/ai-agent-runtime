@@ -24,6 +24,7 @@ type ExecuteRequest struct {
 	Session              *chat.Session
 	SessionUserID        string
 	Prompt               string
+	ExplicitImagePaths   []string
 	PreparedHistory      []types.Message
 	EnableReAct          bool
 	ReActConfig          *agent.LoopReActConfig
@@ -52,7 +53,15 @@ func ExecuteNonStream(ctx context.Context, req ExecuteRequest) (*ExecuteResult, 
 		}
 		execSession := session.Clone()
 		execSession.ReplaceHistory(req.PreparedHistory)
-		execSession.AddMessage(*types.NewUserMessage(req.Prompt))
+		preparedPrompt, err := llm.NewUserPromptMessageWithImages(req.Prompt, req.ExplicitImagePaths)
+		if err != nil {
+			return nil, fmt.Errorf("resolving image attachments: %w", err)
+		}
+		if preparedPrompt != nil {
+			execSession.AddMessage(*preparedPrompt)
+		} else if req.Prompt != "" {
+			execSession.AddMessage(*llm.NewUserPromptMessage(req.Prompt))
+		}
 
 		reactResult, err := req.Agent.RunReActWithSession(ctx, req.LLMRuntime, req.Prompt, execSession, req.ReActConfig)
 		if err != nil {

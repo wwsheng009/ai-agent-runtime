@@ -20,10 +20,14 @@ func (a *AnthropicAdapter) Name() string {
 
 // BuildRequest 构建请求体
 func (a *AnthropicAdapter) BuildRequest(config RequestConfig) map[string]interface{} {
+	system, messages := splitAnthropicSystemAndMessages(config.Messages)
 	request := map[string]interface{}{
 		"model":    config.Model,
-		"messages": config.Messages,
+		"messages": messages,
 		"stream":   config.Stream,
+	}
+	if system != "" {
+		request["system"] = system
 	}
 
 	// Anthropic 必须设置 max_tokens
@@ -47,6 +51,51 @@ func (a *AnthropicAdapter) BuildRequest(config RequestConfig) map[string]interfa
 	}
 
 	return request
+}
+
+func splitAnthropicSystemAndMessages(messages []map[string]interface{}) (string, []map[string]interface{}) {
+	if len(messages) == 0 {
+		return "", nil
+	}
+
+	systemParts := make([]string, 0, 2)
+	inputMessages := make([]map[string]interface{}, 0, len(messages))
+	for _, msg := range messages {
+		role, _ := msg["role"].(string)
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "system", "developer":
+			if text := anthropicInstructionText(msg); text != "" {
+				systemParts = append(systemParts, text)
+			}
+		default:
+			inputMessages = append(inputMessages, msg)
+		}
+	}
+	return strings.TrimSpace(strings.Join(systemParts, "\n\n")), inputMessages
+}
+
+func anthropicInstructionText(message map[string]interface{}) string {
+	if len(message) == 0 {
+		return ""
+	}
+	switch typed := message["content"].(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []interface{}:
+		parts := make([]string, 0, len(typed))
+		for _, raw := range typed {
+			part, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if text, ok := part["text"].(string); ok && strings.TrimSpace(text) != "" {
+				parts = append(parts, strings.TrimSpace(text))
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, "\n"))
+	default:
+		return ""
+	}
 }
 
 // BuildHeaders 构建请求头

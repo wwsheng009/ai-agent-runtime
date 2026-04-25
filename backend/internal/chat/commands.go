@@ -6,6 +6,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
@@ -17,10 +18,12 @@ type Command interface {
 
 // SubmitPrompt triggers a new prompt execution.
 type SubmitPrompt struct {
-	Ctx     context.Context
-	Prompt  string
-	RunMeta *team.RunMeta
-	Reply   chan SubmitResult
+	Ctx              context.Context
+	Prompt           string
+	ImagePaths       []string
+	ImageArtifactDir string
+	RunMeta          *team.RunMeta
+	Reply            chan SubmitResult
 }
 
 // SubmitResult carries the outcome of SubmitPrompt.
@@ -66,6 +69,20 @@ type RewindTo struct {
 	Reply        chan RewindResult
 }
 
+// CompactResult carries the outcome of a manual session compaction request.
+type CompactResult struct {
+	Result *compactruntime.Result
+	Status compactruntime.Status
+	Err    error
+}
+
+// CompactSession requests a manual session compaction.
+type CompactSession struct {
+	Ctx   context.Context
+	Mode  string
+	Reply chan CompactResult
+}
+
 // DeliverMailboxMessage notifies the actor of a mailbox message.
 type DeliverMailboxMessage struct {
 	Ctx     context.Context
@@ -86,5 +103,6 @@ func (ApproveTool) isCommand()           {}
 func (AnswerQuestion) isCommand()        {}
 func (Interrupt) isCommand()             {}
 func (RewindTo) isCommand()              {}
+func (CompactSession) isCommand()        {}
 func (DeliverMailboxMessage) isCommand() {}
 func (SubscribeEvents) isCommand()       {}

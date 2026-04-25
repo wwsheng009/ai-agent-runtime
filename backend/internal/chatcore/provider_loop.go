@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -41,13 +42,15 @@ type ToolResult struct {
 
 // ToolLoopRequest describes the prepared inputs required to replay provider tool calls.
 type ToolLoopRequest struct {
-	Prompt       string
-	History      []types.Message
-	Provider     ProviderTurnExecutor
-	Tools        []types.ToolDefinition
-	ToolExecutor ToolExecutor
-	EventSink    func(ChatEvent)
-	Stream       bool
+	Prompt              string
+	ExplicitImagePaths  []string
+	ImageArtifactDir    string // session-local directory for persisting image copies
+	History             []types.Message
+	Provider            ProviderTurnExecutor
+	Tools               []types.ToolDefinition
+	ToolExecutor        ToolExecutor
+	EventSink           func(ChatEvent)
+	Stream              bool
 }
 
 // ToolLoopResult returns the final assistant response plus the replayed history.
@@ -64,7 +67,27 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 
 	history := cloneMessages(req.History)
 	if req.Prompt != "" {
-		history = append(history, *types.NewUserMessage(req.Prompt))
+		msg, err := llm.NewUserPromptMessageWithImages(req.Prompt, req.ExplicitImagePaths)
+		if err != nil {
+			return nil, fmt.Errorf("resolving image attachments: %w", err)
+		}
+		if msg != nil {
+			if req.ImageArtifactDir != "" {
+				if persistErr := llm.PersistLocalInputImages(msg, req.ImageArtifactDir); persistErr != nil {
+					emitChatEvent(req.EventSink, ChatEvent{
+						Type:    EventWarning,
+						Content: fmt.Sprintf("image persistence: %v", persistErr),
+					})
+				}
+			}
+			history = append(history, *msg)
+		}
+		for _, warning := range llm.ValidateLocalInputImagePaths(req.ExplicitImagePaths) {
+			emitChatEvent(req.EventSink, ChatEvent{
+				Type:    EventWarning,
+				Content: warning,
+			})
+		}
 	}
 
 	response := NewChatResult()
