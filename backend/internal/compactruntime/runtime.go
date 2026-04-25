@@ -126,7 +126,14 @@ func (r *Runtime) MaybeCompact(ctx context.Context, req Request) (*Result, Statu
 
 	limit, ok := resolveAutoCompactThreshold(r.llmRuntime, req.Provider, req.Model, req.Mode)
 	if !ok {
+		if req.Force && normalizeMode(req.Mode) == ModeLocal {
+			limit = resolveForcedLocalThreshold(r.llmRuntime, req.Provider, req.Model)
+			ok = true
+		}
+	}
+	if !ok {
 		status.Reason = "missing_model_capability"
+		status.ResolvedProvider, status.ResolvedModel = resolveRuntimeProviderModel(r.llmRuntime, req.Provider, req.Model)
 		status.TokenBefore = counter(req.History)
 		return nil, status, nil
 	}
@@ -200,6 +207,37 @@ func resolveAutoCompactThreshold(runtime *llm.LLMRuntime, providerName, model, r
 		return threshold{}, false
 	}
 	return limit, true
+}
+
+func resolveForcedLocalThreshold(runtime *llm.LLMRuntime, providerName, model string) threshold {
+	resolvedProvider, resolvedModel := resolveRuntimeProviderModel(runtime, providerName, model)
+	return threshold{
+		ResolvedProvider: strings.TrimSpace(resolvedProvider),
+		ResolvedModel:    strings.TrimSpace(resolvedModel),
+		Mode:             ModeLocal,
+	}
+}
+
+func resolveRuntimeProviderModel(runtime *llm.LLMRuntime, providerName, model string) (string, string) {
+	resolvedProvider := strings.TrimSpace(providerName)
+	if runtime != nil {
+		if resolved := runtime.ResolveProviderName(resolvedProvider); resolved != "" {
+			resolvedProvider = resolved
+		}
+		if resolvedProvider == "" {
+			resolvedProvider = runtime.ResolveProviderName(model)
+		}
+		if resolvedProvider == "" {
+			resolvedProvider = strings.TrimSpace(runtime.DefaultProvider())
+		}
+	}
+
+	resolvedModel := strings.TrimSpace(model)
+	if resolvedModel == "" && runtime != nil {
+		resolvedModel = strings.TrimSpace(runtime.DefaultModel())
+	}
+
+	return strings.TrimSpace(resolvedProvider), strings.TrimSpace(resolvedModel)
 }
 
 func (r *Runtime) adapterForMode(mode string) (Adapter, string) {

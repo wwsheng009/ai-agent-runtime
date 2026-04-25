@@ -3,7 +3,6 @@ package compactruntime
 import (
 	"context"
 	"crypto/sha1"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -19,6 +18,16 @@ const (
 	localSegmentEndKey           = "segment_end"
 	localSummaryTextKey          = "summary_text"
 	localSummaryHeading          = "Compacted context from earlier turns:"
+	localRetainedUserMaxTokens   = 20000
+	localCompactionPrompt        = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`
 )
 
 type LocalAdapter struct {
@@ -36,18 +45,7 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		return nil, "no_non_system_history", nil
 	}
 
-	windowStart := recentWindowStart(nonSystemMessages, req.KeepRecentMessages)
-	if windowStart <= 0 {
-		return nil, "recent_window_covers_history", nil
-	}
-
-	older := cloneMessages(nonSystemMessages[:windowStart])
-	recent := cloneMessages(nonSystemMessages[windowStart:])
-	if len(older) == 0 {
-		return nil, "no_compaction_segment", nil
-	}
-
-	summaryMessage, checkpointIDs, err := a.buildSummaryMessage(ctx, req, older)
+	summaryMessage, checkpointIDs, err := a.buildSummaryMessage(ctx, req, systemMessages, nonSystemMessages)
 	if err != nil {
 		return nil, "summary_generation_failed", err
 	}
@@ -55,10 +53,13 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		return nil, "summary_generation_empty", nil
 	}
 
-	replacement := make([]types.Message, 0, len(systemMessages)+len(recent)+1)
-	replacement = append(replacement, cloneMessages(systemMessages)...)
-	replacement = append(replacement, *summaryMessage)
-	replacement = append(replacement, recent...)
+	retainedUsers := selectCompactionUserMessages(nonSystemMessages, counter, localRetainedUserMaxTokens)
+	replacement := buildLocalReplacementHistory(systemMessages, nonSystemMessages, retainedUsers, *summaryMessage)
+
+	compactedMessages := len(nonSystemMessages) - len(retainedUsers)
+	if compactedMessages < 0 {
+		compactedMessages = 0
+	}
 
 	return &Result{
 		Mode:               ModeLocal,
@@ -69,14 +70,14 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		MaxContextTokens:   threshold.MaxContextTokens,
 		TokenBefore:        counter(req.History),
 		TokenAfter:         counter(replacement),
-		CompactedMessages:  len(older),
+		CompactedMessages:  compactedMessages,
 		CheckpointIDs:      append([]string(nil), checkpointIDs...),
 		ReplacementHistory: replacement,
 	}, "", nil
 }
 
-func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, older []types.Message) (*types.Message, []string, error) {
-	if message, checkpointID := a.findReusableSummaryCheckpoint(ctx, req.SessionID, req.Phase, older); message != nil {
+func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, systemMessages, history []types.Message) (*types.Message, []string, error) {
+	if message, checkpointID := a.findReusableSummaryCheckpoint(ctx, req.SessionID, req.Phase, history); message != nil {
 		if checkpointID == "" {
 			return message, nil, nil
 		}
@@ -89,7 +90,7 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, old
 	response, err := a.llmRuntime.Call(ctx, &llm.LLMRequest{
 		Provider:    strings.TrimSpace(req.Provider),
 		Model:       strings.TrimSpace(req.Model),
-		Messages:    buildLocalSummaryPrompt(older),
+		Messages:    buildLocalCompactionRequest(systemMessages, history),
 		MaxTokens:   1024,
 		Temperature: 0,
 		Metadata: map[string]interface{}{
@@ -108,8 +109,8 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, old
 		return nil, nil, fmt.Errorf("compact summary response is empty")
 	}
 
-	checkpointID := a.saveSummaryCheckpoint(ctx, req.SessionID, req.TaskID, older, summaryText)
-	message := buildCompactionMessage(summaryText, checkpointID, 0, len(older), req.Phase)
+	checkpointID := a.saveSummaryCheckpoint(ctx, req.SessionID, req.TaskID, history, summaryText)
+	message := buildCompactionMessage(summaryText, checkpointID, 0, len(history), req.Phase)
 	if message == nil {
 		return nil, nil, fmt.Errorf("failed to build compaction message")
 	}
@@ -119,35 +120,80 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, old
 	return message, []string{checkpointID}, nil
 }
 
-func buildLocalSummaryPrompt(history []types.Message) []types.Message {
-	return []types.Message{
-		*types.NewSystemMessage("You are compacting earlier conversation history so an agent can continue working. Produce a concise plain-text handoff summary. Preserve user goals, constraints, key decisions, file paths, commands, tool outcomes, unresolved issues, and next steps. Do not invent facts. Do not include code fences."),
-		*types.NewUserMessage("Summarize this earlier conversation history for continued execution:\n\n" + renderHistory(history)),
-	}
+func buildLocalCompactionRequest(systemMessages, history []types.Message) []types.Message {
+	request := make([]types.Message, 0, len(systemMessages)+len(history)+1)
+	request = append(request, cloneMessages(systemMessages)...)
+	request = append(request, cloneMessages(history)...)
+	request = append(request, *types.NewUserMessage(localCompactionPrompt))
+	return request
 }
 
-func renderHistory(history []types.Message) string {
-	if len(history) == 0 {
-		return ""
+func selectCompactionUserMessages(messages []types.Message, counter TokenCounter, maxTokens int) []types.Message {
+	userMessages := collectRetainedUserMessages(messages)
+	if len(userMessages) == 0 {
+		return nil
 	}
-	lines := make([]string, 0, len(history)*4)
-	for index, message := range history {
-		lines = append(lines, fmt.Sprintf("[%d] role=%s", index+1, strings.TrimSpace(message.Role)))
-		if strings.TrimSpace(message.Content) != "" {
-			lines = append(lines, strings.TrimSpace(message.Content))
-		}
-		if len(message.ToolCalls) > 0 {
-			for _, call := range message.ToolCalls {
-				payload, _ := json.Marshal(call.Args)
-				lines = append(lines, fmt.Sprintf("tool_call id=%s name=%s args=%s", strings.TrimSpace(call.ID), strings.TrimSpace(call.Name), strings.TrimSpace(string(payload))))
-			}
-		}
-		if strings.TrimSpace(message.ToolCallID) != "" {
-			lines = append(lines, "tool_result_for="+strings.TrimSpace(message.ToolCallID))
-		}
-		lines = append(lines, "")
+	if counter == nil || maxTokens <= 0 {
+		return userMessages
 	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+
+	selectedStart := len(userMessages)
+	for index := len(userMessages) - 1; index >= 0; index-- {
+		candidate := cloneMessages(userMessages[index:])
+		if counter(candidate) > maxTokens {
+			break
+		}
+		selectedStart = index
+	}
+	if selectedStart < len(userMessages) {
+		return cloneMessages(userMessages[selectedStart:])
+	}
+	return cloneMessages(userMessages[len(userMessages)-1:])
+}
+
+func collectRetainedUserMessages(messages []types.Message) []types.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	retained := make([]types.Message, 0, len(messages))
+	for _, message := range messages {
+		if message.Role != "user" {
+			continue
+		}
+		if strings.EqualFold(message.Metadata.GetString("context_stage", ""), "compaction") {
+			continue
+		}
+		retained = append(retained, *message.Clone())
+	}
+	return retained
+}
+
+func buildLocalReplacementHistory(systemMessages, nonSystemMessages, retainedUsers []types.Message, summaryMessage types.Message) []types.Message {
+	replacement := make([]types.Message, 0, len(systemMessages)+len(retainedUsers)+1)
+	replacement = append(replacement, cloneMessages(systemMessages)...)
+	if shouldKeepTrailingUserAfterSummary(nonSystemMessages, retainedUsers) {
+		replacement = append(replacement, cloneMessages(retainedUsers[:len(retainedUsers)-1])...)
+		replacement = append(replacement, *summaryMessage.Clone())
+		replacement = append(replacement, *retainedUsers[len(retainedUsers)-1].Clone())
+		return replacement
+	}
+	replacement = append(replacement, cloneMessages(retainedUsers)...)
+	replacement = append(replacement, *summaryMessage.Clone())
+	return replacement
+}
+
+func shouldKeepTrailingUserAfterSummary(nonSystemMessages, retainedUsers []types.Message) bool {
+	if len(nonSystemMessages) == 0 || len(retainedUsers) == 0 {
+		return false
+	}
+	last := nonSystemMessages[len(nonSystemMessages)-1]
+	if last.Role != "user" {
+		return false
+	}
+	if strings.EqualFold(last.Metadata.GetString("context_stage", ""), "compaction") {
+		return false
+	}
+	return true
 }
 
 func ensureSummaryHeading(summary string) string {
@@ -166,7 +212,7 @@ func buildCompactionMessage(summaryText, checkpointID string, segmentStart, segm
 	if summaryText == "" {
 		return nil
 	}
-	message := types.NewAssistantMessage(summaryText)
+	message := types.NewUserMessage(summaryText)
 	message.Metadata["context_stage"] = "compaction"
 	message.Metadata["compact_mode"] = ModeLocal
 	message.Metadata["compact_phase"] = normalizedPhase(phase)
@@ -178,9 +224,9 @@ func buildCompactionMessage(summaryText, checkpointID string, segmentStart, segm
 	return message
 }
 
-func (a *LocalAdapter) findReusableSummaryCheckpoint(ctx context.Context, sessionID, phase string, older []types.Message) (*types.Message, string) {
+func (a *LocalAdapter) findReusableSummaryCheckpoint(ctx context.Context, sessionID, phase string, history []types.Message) (*types.Message, string) {
 	store := summaryCheckpointStore(a.contextManager)
-	if store == nil || strings.TrimSpace(sessionID) == "" || len(older) == 0 {
+	if store == nil || strings.TrimSpace(sessionID) == "" || len(history) == 0 {
 		return nil, ""
 	}
 
@@ -188,13 +234,13 @@ func (a *LocalAdapter) findReusableSummaryCheckpoint(ctx context.Context, sessio
 	if len(checkpoints) == 0 {
 		return nil, ""
 	}
-	expectedHash := hashHistory(older)
+	expectedHash := hashHistory(history)
 	for _, checkpoint := range checkpoints {
 		if strings.TrimSpace(checkpoint.Reason) != localSummaryCheckpointReason {
 			continue
 		}
 		start, end, ok := checkpointRange(checkpoint)
-		if !ok || start != 0 || end != len(older) {
+		if !ok || start != 0 || end != len(history) {
 			continue
 		}
 		if checkpoint.HistoryHash != expectedHash {
@@ -209,9 +255,9 @@ func (a *LocalAdapter) findReusableSummaryCheckpoint(ctx context.Context, sessio
 	return nil, ""
 }
 
-func (a *LocalAdapter) saveSummaryCheckpoint(ctx context.Context, sessionID, taskID string, older []types.Message, summaryText string) string {
+func (a *LocalAdapter) saveSummaryCheckpoint(ctx context.Context, sessionID, taskID string, history []types.Message, summaryText string) string {
 	store := summaryCheckpointStore(a.contextManager)
-	if store == nil || strings.TrimSpace(sessionID) == "" || len(older) == 0 {
+	if store == nil || strings.TrimSpace(sessionID) == "" || len(history) == 0 {
 		return ""
 	}
 
@@ -219,13 +265,13 @@ func (a *LocalAdapter) saveSummaryCheckpoint(ctx context.Context, sessionID, tas
 		SessionID:    strings.TrimSpace(sessionID),
 		TaskID:       firstNonEmpty(strings.TrimSpace(taskID), strings.TrimSpace(sessionID)),
 		Reason:       localSummaryCheckpointReason,
-		HistoryHash:  hashHistory(older),
-		MessageCount: len(older),
+		HistoryHash:  hashHistory(history),
+		MessageCount: len(history),
 		Metadata: map[string]interface{}{
-			"source_messages":    len(older),
+			"source_messages":    len(history),
 			localSummaryTextKey:  summaryText,
 			localSegmentStartKey: 0,
-			localSegmentEndKey:   len(older),
+			localSegmentEndKey:   len(history),
 		},
 	}
 	checkpointID, err := store.SaveCheckpoint(ctx, checkpoint)
@@ -330,50 +376,6 @@ func cloneMessages(messages []types.Message) []types.Message {
 		cloned[index] = *messages[index].Clone()
 	}
 	return cloned
-}
-
-func recentWindowStart(messages []types.Message, count int) int {
-	if count <= 0 || len(messages) <= count {
-		return 0
-	}
-	start := len(messages) - count
-	if start <= 0 || start >= len(messages) {
-		return 0
-	}
-	start = adjustRecentWindowForToolBlock(messages, start)
-	if turnStart := activeUserTurnStart(messages); turnStart >= 0 && turnStart < start {
-		return turnStart
-	}
-	return start
-}
-
-func adjustRecentWindowForToolBlock(messages []types.Message, start int) int {
-	if start <= 0 || start >= len(messages) {
-		return 0
-	}
-	if messages[start].Role != "tool" {
-		return start
-	}
-	blockStart := start
-	for blockStart > 0 && messages[blockStart-1].Role == "tool" {
-		blockStart--
-	}
-	if blockStart > 0 {
-		previous := messages[blockStart-1]
-		if previous.Role == "assistant" && len(previous.ToolCalls) > 0 {
-			return blockStart - 1
-		}
-	}
-	return blockStart
-}
-
-func activeUserTurnStart(messages []types.Message) int {
-	for index := len(messages) - 1; index >= 0; index-- {
-		if messages[index].Role == "user" {
-			return index
-		}
-	}
-	return -1
 }
 
 func hashHistory(messages []types.Message) string {

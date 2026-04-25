@@ -345,10 +345,10 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, updated.History, 4)
 	require.Equal(t, "system", updated.History[0].Role)
-	require.Equal(t, "assistant", updated.History[1].Role)
-	require.Equal(t, "compaction", updated.History[1].Metadata["context_stage"])
+	require.Equal(t, "user", updated.History[1].Role)
 	require.Equal(t, "user", updated.History[2].Role)
-	require.Equal(t, "assistant", updated.History[3].Role)
+	require.Equal(t, "user", updated.History[3].Role)
+	require.Equal(t, "compaction", updated.History[3].Metadata["context_stage"])
 	require.Equal(t, 1, provider.callCount)
 
 	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
@@ -494,8 +494,9 @@ func TestSessionActorCompactForcesCompaction(t *testing.T) {
 
 	updated, err := storage.Load(ctx, session.ID)
 	require.NoError(t, err)
-	require.Len(t, updated.History, 3)
-	require.Equal(t, "compaction", updated.History[1].Metadata["context_stage"])
+	require.Len(t, updated.History, 4)
+	require.Equal(t, "compaction", updated.History[2].Metadata["context_stage"])
+	require.Equal(t, "user", updated.History[3].Role)
 }
 
 func TestSessionActorSubmitPrompt_EmitsLimitNoticeToSessionAndEvents(t *testing.T) {

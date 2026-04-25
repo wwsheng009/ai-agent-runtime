@@ -14,6 +14,8 @@ type chatCompactReport struct {
 	Status        compactruntime.Status
 }
 
+const compactTokenSourceLocalEstimate = "local_estimate"
+
 var runManualChatCompact = executeManualChatCompact
 
 func executeManualChatCompact(session *ChatSession, requestedMode string) (*chatCompactReport, error) {
@@ -85,7 +87,7 @@ func formatChatCompactReport(report *chatCompactReport) string {
 
 	if report.Result == nil {
 		parts := []string{
-			fmt.Sprintf("压缩未执行: reason=%s", blankToDash(report.Status.Reason)),
+			fmt.Sprintf("压缩未执行: %s", formatCompactSkipReason(report.Status)),
 			fmt.Sprintf("mode=%s", mode),
 		}
 		if report.Status.ResolvedProvider != "" {
@@ -96,6 +98,7 @@ func formatChatCompactReport(report *chatCompactReport) string {
 		}
 		if report.Status.TokenBefore > 0 {
 			parts = append(parts, fmt.Sprintf("token_before=%d", report.Status.TokenBefore))
+			parts = append(parts, "token_source="+compactTokenSourceLocalEstimate)
 		}
 		if report.Status.TriggerTokenLimit > 0 {
 			parts = append(parts, fmt.Sprintf("trigger_token_limit=%d", report.Status.TriggerTokenLimit))
@@ -116,6 +119,7 @@ func formatChatCompactReport(report *chatCompactReport) string {
 	parts = append(parts,
 		fmt.Sprintf("token_before=%d", report.Result.TokenBefore),
 		fmt.Sprintf("token_after=%d", report.Result.TokenAfter),
+		"token_source="+compactTokenSourceLocalEstimate,
 		fmt.Sprintf("compacted_messages=%d", report.Result.CompactedMessages),
 		fmt.Sprintf("history_messages=%d", len(report.Result.ReplacementHistory)),
 	)
@@ -123,4 +127,35 @@ func formatChatCompactReport(report *chatCompactReport) string {
 		parts = append(parts, "checkpoint_id="+report.Result.CheckpointIDs[len(report.Result.CheckpointIDs)-1])
 	}
 	return strings.Join(parts, " | ")
+}
+
+func formatCompactSkipReason(status compactruntime.Status) string {
+	switch strings.TrimSpace(status.Reason) {
+	case "missing_model_capability":
+		return "reason=missing_model_capability; " + compactCapabilityHint(status)
+	default:
+		return "reason=" + blankToDash(status.Reason)
+	}
+}
+
+func compactCapabilityHint(status compactruntime.Status) string {
+	provider := strings.TrimSpace(status.ResolvedProvider)
+	model := strings.TrimSpace(status.ResolvedModel)
+
+	targetPath := "`providers.items.<provider>.model_capabilities.<model>`"
+	wildcardPath := "`providers.items.<provider>.model_capabilities.*`"
+	switch {
+	case provider != "" && model != "":
+		targetPath = fmt.Sprintf("`providers.items.%s.model_capabilities.%s`", provider, model)
+		wildcardPath = fmt.Sprintf("`providers.items.%s.model_capabilities.*`", provider)
+	case provider != "":
+		targetPath = fmt.Sprintf("`providers.items.%s.model_capabilities.<model>`", provider)
+		wildcardPath = fmt.Sprintf("`providers.items.%s.model_capabilities.*`", provider)
+	}
+
+	hint := fmt.Sprintf("需要配置 %s 或 %s，至少补 `max_context_tokens` / `auto_compact_token_limit`", targetPath, wildcardPath)
+	if strings.EqualFold(strings.TrimSpace(status.Mode), compactruntime.ModeRemote) {
+		hint += "；如需远端压缩，再补 `supports_remote_compact: true` 或 `auto_compact_mode: remote`"
+	}
+	return hint
 }
