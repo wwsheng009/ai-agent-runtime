@@ -21,7 +21,7 @@ func NewExecuteShellCommandTool() *ExecuteShellCommandTool {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "要执行的 shell 命令。系统会自动检测可用 shell（Windows 通常是 PowerShell/pwsh，回退到 cmd）。切换目录优先使用 workdir 参数；查看当前目录用 pwd/Get-Location（PowerShell/pwsh）或 cd/echo %cd%（cmd），不要用裸 cd 来验证目录。搜索文件或代码时，优先使用 rg；如果环境没有 rg，再考虑 grep/glob/view 等工具。路径建议使用正斜杠（如 E:/projects/foo）。",
+				"description": "要执行的 shell 命令。系统会自动检测可用 shell（Windows 通常是 PowerShell/pwsh，回退到 cmd）。切换目录优先使用 workdir 参数；查看当前目录用 pwd/Get-Location（PowerShell/pwsh）或 cd/echo %cd%（cmd），不要用裸 cd 来验证目录。搜索文件或代码时，推荐使用 grep 工具（内部已优先使用 ripgrep/rg，不可用时回退到内置扫描），而非通过 shell 直接调用 rg/grep。路径建议使用正斜杠（如 E:/projects/foo）。",
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
@@ -41,7 +41,7 @@ func NewExecuteShellCommandTool() *ExecuteShellCommandTool {
 
 	return &ExecuteShellCommandTool{
 		BashTool:    NewBashTool(),
-		description: "在指定工作目录执行 shell 命令并返回输出结果。系统会自动检测最优 shell（Windows: PowerShell Core > PowerShell > cmd；Unix: $SHELL > zsh > bash > sh）。切换目录优先使用 workdir 参数；不要用裸 cd 验证当前目录。搜索文件或代码时优先使用 rg；如果环境没有 rg，再考虑 grep/glob/view。路径建议使用正斜杠格式（如 E:/projects/foo）。适用于查看文件、目录、系统信息等场景。",
+		description: "在指定工作目录执行 shell 命令并返回输出结果。系统会自动检测最优 shell（Windows: PowerShell Core > PowerShell > cmd；Unix: $SHELL > zsh > bash > sh）。切换目录优先使用 workdir 参数；不要用裸 cd 验证当前目录。搜索文件或代码时推荐使用 grep 工具（内部已优先使用 ripgrep/rg，不可用时回退到内置扫描），而非通过 shell 直接调用 rg/grep。路径建议使用正斜杠格式（如 E:/projects/foo）。适用于查看文件、目录、系统信息等场景。",
 		version:     "1.1.0",
 		parameters:  parameters,
 	}
