@@ -37,9 +37,9 @@ func renderSharedChatToolEvent(event runtimechatcore.ChatEvent) string {
 	case "batch_start":
 		return ""
 	case "tool_requested":
-		return renderCompactToolRequestedWithSource(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource)
+		return appendCompactToolDirectory(renderCompactToolRequestedWithSource(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource), payload)
 	case "tool_result":
-		return renderCompactToolCompletedWithSource(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource, chatToolSummaryLines(payload))
+		return appendCompactToolDirectory(renderCompactToolCompletedWithSource(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource, chatToolSummaryLines(payload)), payload)
 	case "batch_end":
 		return ""
 	default:
@@ -55,6 +55,11 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 	if commandText := summarizeSharedShellToolCommand(event.ToolName, event.Arguments); commandText != "" {
 		payload["command_text"] = commandText
 	}
+	if workdir := strings.TrimSpace(payloadStringValue(event.Arguments["workdir"])); workdir != "" {
+		payload["workdir"] = workdir
+	} else if cwd := strings.TrimSpace(payloadStringValue(event.Arguments["cwd"])); cwd != "" {
+		payload["cwd"] = cwd
+	}
 	if lines := summarizeSharedChatToolResultLines(event); len(lines) > 0 {
 		payload["summary_lines"] = lines
 		payload["summary"] = strings.Join(lines, "\n")
@@ -64,6 +69,11 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 	}
 	if source := payloadStringValue(event.Metadata[toolresult.SourceKey]); source != "" {
 		payload[toolresult.SourceKey] = source
+	}
+	for _, key := range []string{"shell_type", "shell_path", "shell_display"} {
+		if value := payloadStringValue(event.Metadata[key]); value != "" {
+			payload[key] = value
+		}
 	}
 	if event.Stage == "batch_end" {
 		payload["awaiting_model"] = true

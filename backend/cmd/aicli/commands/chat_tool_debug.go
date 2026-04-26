@@ -11,14 +11,24 @@ import (
 )
 
 type aicliToolExecutionCallSummary struct {
-	ToolCallID    string `json:"tool_call_id,omitempty"`
-	Function      string `json:"function"`
-	Success       bool   `json:"success"`
-	Error         string `json:"error,omitempty"`
-	ToolSource    string `json:"tool_source,omitempty"`
-	OutputKind    string `json:"output_kind,omitempty"`
-	ResultPreview string `json:"result_preview,omitempty"`
-	ResultBytes   int    `json:"result_bytes,omitempty"`
+	ToolCallID                 string `json:"tool_call_id,omitempty"`
+	Function                   string `json:"function"`
+	Success                    bool   `json:"success"`
+	Error                      string `json:"error,omitempty"`
+	ToolSource                 string `json:"tool_source,omitempty"`
+	OutputKind                 string `json:"output_kind,omitempty"`
+	ShellType                  string `json:"shell_type,omitempty"`
+	ShellPath                  string `json:"shell_path,omitempty"`
+	ShellDisplay               string `json:"shell_display,omitempty"`
+	ResultPreview              string `json:"result_preview,omitempty"`
+	ResultBytes                int    `json:"result_bytes,omitempty"`
+	OutputCaptureComplete      *bool  `json:"output_capture_complete,omitempty"`
+	CaptureLimitReached        *bool  `json:"capture_limit_reached,omitempty"`
+	OutputCaptureLimitDisabled *bool  `json:"output_capture_limit_disabled,omitempty"`
+	OutputCaptureLimitBytes    int    `json:"output_capture_limit_bytes,omitempty"`
+	RetainedOutputBytes        int    `json:"retained_output_bytes,omitempty"`
+	OmittedOutputBytes         int    `json:"omitted_output_bytes,omitempty"`
+	RawOutputArtifactPath      string `json:"raw_output_artifact_path,omitempty"`
 }
 
 type aicliToolExecutionSummary struct {
@@ -54,6 +64,9 @@ func formatToolExecutionStartDebug(tc functions.ToolCall) string {
 
 func formatToolExecutionResultDebug(tc functions.ToolCall, result string, err error, metadata map[string]interface{}) string {
 	source, kind := compactToolExecutionMetadata(metadata)
+	captureSummary := aicliToolExecutionCallSummary{}
+	applyToolExecutionOutputCaptureMetadata(&captureSummary, metadata)
+	applyToolExecutionShellMetadata(&captureSummary, metadata)
 	if err != nil {
 		line := fmt.Sprintf("[tool-debug] result id=%s function=%s success=false error=%q",
 			tc.ID, tc.Function, err.Error())
@@ -63,6 +76,10 @@ func formatToolExecutionResultDebug(tc functions.ToolCall, result string, err er
 		if kind != "" {
 			line += fmt.Sprintf(" kind=%s", kind)
 		}
+		if shell := toolExecutionShellDebugValue(captureSummary); shell != "" {
+			line += fmt.Sprintf(" shell=%q", shell)
+		}
+		line += formatToolExecutionCaptureDebugSuffix(captureSummary)
 		return line
 	}
 	line := fmt.Sprintf("[tool-debug] result id=%s function=%s success=true bytes=%d preview=%q",
@@ -73,6 +90,10 @@ func formatToolExecutionResultDebug(tc functions.ToolCall, result string, err er
 	if kind != "" {
 		line += fmt.Sprintf(" kind=%s", kind)
 	}
+	if shell := toolExecutionShellDebugValue(captureSummary); shell != "" {
+		line += fmt.Sprintf(" shell=%q", shell)
+	}
+	line += formatToolExecutionCaptureDebugSuffix(captureSummary)
 	return line
 }
 
@@ -97,9 +118,62 @@ func formatToolExecutionSummaryDebug(summary *aicliToolExecutionSummary) string 
 		if strings.TrimSpace(call.OutputKind) != "" {
 			parts = append(parts, fmt.Sprintf("kind=%s", strings.TrimSpace(call.OutputKind)))
 		}
+		if shell := toolExecutionShellDebugValue(call); shell != "" {
+			parts = append(parts, fmt.Sprintf("shell=%q", shell))
+		}
+		if call.OutputCaptureComplete != nil {
+			parts = append(parts, fmt.Sprintf("capture_complete=%t", *call.OutputCaptureComplete))
+		}
+		if call.CaptureLimitReached != nil {
+			parts = append(parts, fmt.Sprintf("capture_limit_reached=%t", *call.CaptureLimitReached))
+		}
+		if call.OutputCaptureLimitDisabled != nil {
+			parts = append(parts, fmt.Sprintf("capture_limit_disabled=%t", *call.OutputCaptureLimitDisabled))
+		}
+		if call.OutputCaptureLimitBytes > 0 {
+			parts = append(parts, fmt.Sprintf("capture_limit_bytes=%d", call.OutputCaptureLimitBytes))
+		}
+		if call.RetainedOutputBytes > 0 {
+			parts = append(parts, fmt.Sprintf("retained_bytes=%d", call.RetainedOutputBytes))
+		}
+		if call.OmittedOutputBytes > 0 {
+			parts = append(parts, fmt.Sprintf("omitted_bytes=%d", call.OmittedOutputBytes))
+		}
+		if strings.TrimSpace(call.RawOutputArtifactPath) != "" {
+			parts = append(parts, fmt.Sprintf("artifact=%s", strings.TrimSpace(call.RawOutputArtifactPath)))
+		}
 		lines = append(lines, strings.Join(parts, " "))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatToolExecutionCaptureDebugSuffix(summary aicliToolExecutionCallSummary) string {
+	parts := make([]string, 0, 6)
+	if summary.OutputCaptureComplete != nil {
+		parts = append(parts, fmt.Sprintf("capture_complete=%t", *summary.OutputCaptureComplete))
+	}
+	if summary.CaptureLimitReached != nil {
+		parts = append(parts, fmt.Sprintf("capture_limit_reached=%t", *summary.CaptureLimitReached))
+	}
+	if summary.OutputCaptureLimitDisabled != nil {
+		parts = append(parts, fmt.Sprintf("capture_limit_disabled=%t", *summary.OutputCaptureLimitDisabled))
+	}
+	if summary.OutputCaptureLimitBytes > 0 {
+		parts = append(parts, fmt.Sprintf("capture_limit_bytes=%d", summary.OutputCaptureLimitBytes))
+	}
+	if summary.RetainedOutputBytes > 0 {
+		parts = append(parts, fmt.Sprintf("retained_bytes=%d", summary.RetainedOutputBytes))
+	}
+	if summary.OmittedOutputBytes > 0 {
+		parts = append(parts, fmt.Sprintf("omitted_bytes=%d", summary.OmittedOutputBytes))
+	}
+	if strings.TrimSpace(summary.RawOutputArtifactPath) != "" {
+		parts = append(parts, fmt.Sprintf("artifact=%s", strings.TrimSpace(summary.RawOutputArtifactPath)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
 }
 
 func toolExecutionLogPayload(content string, metadata map[string]interface{}) interface{} {
@@ -119,9 +193,83 @@ func compactToolExecutionMetadata(metadata map[string]interface{}) (string, stri
 	return firstNonEmptyString(metadata[toolresult.SourceKey]), firstNonEmptyString(metadata[toolresult.MetadataKey])
 }
 
+func applyToolExecutionOutputCaptureMetadata(summary *aicliToolExecutionCallSummary, metadata map[string]interface{}) {
+	if summary == nil || len(metadata) == 0 {
+		return
+	}
+	summary.OutputCaptureComplete = firstBoolPointer(metadata["output_capture_complete"])
+	summary.CaptureLimitReached = firstBoolPointer(metadata["capture_limit_reached"])
+	summary.OutputCaptureLimitDisabled = firstBoolPointer(metadata["output_capture_limit_disabled"])
+	summary.OutputCaptureLimitBytes = firstPositiveInt(metadata["output_capture_limit_bytes"])
+	summary.RetainedOutputBytes = firstPositiveInt(metadata["retained_output_bytes"])
+	summary.OmittedOutputBytes = firstPositiveInt(metadata["omitted_output_bytes"])
+	summary.RawOutputArtifactPath = firstNonEmptyString(metadata["raw_output_artifact_path"])
+}
+
+func applyToolExecutionShellMetadata(summary *aicliToolExecutionCallSummary, metadata map[string]interface{}) {
+	if summary == nil || len(metadata) == 0 {
+		return
+	}
+	summary.ShellType = firstNonEmptyString(metadata["shell_type"])
+	summary.ShellPath = firstNonEmptyString(metadata["shell_path"])
+	summary.ShellDisplay = firstNonEmptyString(metadata["shell_display"])
+}
+
+func toolExecutionShellDebugValue(summary aicliToolExecutionCallSummary) string {
+	if trimmed := strings.TrimSpace(summary.ShellDisplay); trimmed != "" {
+		return trimmed
+	}
+	shellType := strings.TrimSpace(summary.ShellType)
+	shellPath := strings.TrimSpace(summary.ShellPath)
+	switch {
+	case shellType != "" && shellPath != "":
+		return fmt.Sprintf("%s (%s)", shellType, shellPath)
+	case shellType != "":
+		return shellType
+	case shellPath != "":
+		return shellPath
+	default:
+		return ""
+	}
+}
+
 func firstNonEmptyString(value interface{}) string {
 	text, _ := value.(string)
 	return strings.TrimSpace(text)
+}
+
+func firstBoolPointer(value interface{}) *bool {
+	flag, ok := value.(bool)
+	if !ok {
+		return nil
+	}
+	return &flag
+}
+
+func firstPositiveInt(value interface{}) int {
+	switch typed := value.(type) {
+	case int:
+		if typed > 0 {
+			return typed
+		}
+	case int32:
+		if typed > 0 {
+			return int(typed)
+		}
+	case int64:
+		if typed > 0 {
+			return int(typed)
+		}
+	case float32:
+		if typed > 0 && float32(int(typed)) == typed {
+			return int(typed)
+		}
+	case float64:
+		if typed > 0 && float64(int(typed)) == typed {
+			return int(typed)
+		}
+	}
+	return 0
 }
 
 func marshalCompactJSON(value interface{}) string {
