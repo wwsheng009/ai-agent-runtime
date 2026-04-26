@@ -921,6 +921,85 @@ func TestGatewayClientCall_RetryRuleOverridesMaxRetriesForHTTP503(t *testing.T) 
 	assert.True(t, rm.results[1].success)
 }
 
+func TestGatewayClientCall_UsesRetryAfterHeaderAndReportsRetryDebugEvent(t *testing.T) {
+	requests := 0
+	var events []HTTPDebugEvent
+	var retryEvents []RetryEvent
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			w.Header().Set("Retry-After", "0.025")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"error":{"message":"rate limit reached"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-5.4","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	rm := &gatewayTestResourceManager{
+		selected: &SelectedResource{
+			Provider: &ProviderResource{
+				Name:    "openai_ee",
+				Type:    "openai",
+				BaseURL: server.URL,
+			},
+			KeyValue: "test-key",
+		},
+	}
+	client := NewGatewayClient(rm, "gpt-5.4-mini")
+	client.SetMaxRetries(2)
+
+	ctx := WithHTTPDebugReporter(context.Background(), func(event HTTPDebugEvent) {
+		events = append(events, event)
+	})
+	ctx = WithRetryEventReporter(ctx, func(event RetryEvent) {
+		retryEvents = append(retryEvents, event)
+	})
+	resp, err := client.Call(ctx, &LLMRequest{
+		Model: "gpt-5.4-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "ok", resp.Content)
+	assert.Equal(t, 2, requests)
+	assert.Equal(t, 2, rm.selectCalls)
+
+	require.Len(t, events, 5)
+	assert.Equal(t, "request", events[0].Phase)
+	assert.Equal(t, 1, events[0].Attempt)
+	assert.Equal(t, 2, events[0].MaxAttempts)
+	assert.Equal(t, "response", events[1].Phase)
+	assert.Equal(t, 429, events[1].ResponseStatusCode)
+	assert.Equal(t, 1, events[1].Attempt)
+	assert.Equal(t, "retry", events[2].Phase)
+	assert.Equal(t, "http_429", events[2].RetryReason)
+	assert.EqualValues(t, 25, events[2].RetryDelayMS)
+	assert.Equal(t, 1, events[2].Attempt)
+	assert.Equal(t, 2, events[2].MaxAttempts)
+	assert.Equal(t, "request", events[3].Phase)
+	assert.Equal(t, 2, events[3].Attempt)
+	assert.Equal(t, "response", events[4].Phase)
+	assert.Equal(t, 2, events[4].Attempt)
+	assert.Equal(t, 200, events[4].ResponseStatusCode)
+
+	require.Len(t, retryEvents, 1)
+	assert.Equal(t, "gateway_client", retryEvents[0].Source)
+	assert.Equal(t, "openai_ee", retryEvents[0].Provider)
+	assert.Equal(t, "openai", retryEvents[0].Protocol)
+	assert.Equal(t, "gpt-5.4-mini", retryEvents[0].Model)
+	assert.Equal(t, 1, retryEvents[0].Attempt)
+	assert.Equal(t, 2, retryEvents[0].MaxAttempts)
+	assert.Equal(t, "http_429", retryEvents[0].RetryReason)
+	assert.EqualValues(t, 25, retryEvents[0].RetryDelayMS)
+	assert.Contains(t, retryEvents[0].Error, "HTTP 429")
+}
+
 func TestGatewayClientCall_DoesNotRetryInvalidRequestResponseError(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

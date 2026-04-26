@@ -1095,6 +1095,8 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			Line:     fmt.Sprintf("[thinking] model error %s", payloadStringValue(event.Payload["error"])),
 			DedupKey: llmRequestDedupKey(event, "llm.request.finished"),
 		}
+	case "llm.retry":
+		return renderLLMRetryTimelineEvent(event)
 	case runtimechat.EventAssistantReasoning, "assistant.reasoning":
 		if rendered := renderChatReasoningTimelineEvent(event); rendered.Line != "" {
 			return rendered
@@ -1291,6 +1293,68 @@ func llmRequestDedupKey(event runtimeevents.Event, eventType string) string {
 		return fmt.Sprintf("%s:%s", strings.TrimSpace(eventType), traceID)
 	}
 	return fmt.Sprintf("%s:%s:%s", strings.TrimSpace(eventType), traceID, stepLabel)
+}
+
+func renderLLMRetryTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
+	payload := event.Payload
+	if payload == nil {
+		return chatRuntimeTimelineEvent{}
+	}
+	traceID := firstNonEmptyChatValue(strings.TrimSpace(event.TraceID), payloadStringValue(payload["trace_id"]))
+	stepLabel := payloadStringValue(payload["step"])
+	if stepLabel == "" {
+		if step := intPayloadValue(payload, "step"); step > 0 {
+			stepLabel = fmt.Sprintf("%d", step)
+		}
+	}
+	attempt := intPayloadValue(payload, "attempt")
+	maxAttempts := intPayloadValue(payload, "max_attempts")
+	reason := strings.TrimSpace(payloadStringValue(payload["retry_reason"]))
+	delay := intPayloadValue(payload, "retry_delay_ms")
+	source := strings.TrimSpace(payloadStringValue(payload["source"]))
+	targetParts := make([]string, 0, 3)
+	if provider := strings.TrimSpace(payloadStringValue(payload["provider"])); provider != "" {
+		targetParts = append(targetParts, provider)
+	}
+	if protocol := strings.TrimSpace(payloadStringValue(payload["protocol"])); protocol != "" {
+		targetParts = append(targetParts, protocol)
+	}
+	if model := strings.TrimSpace(payloadStringValue(payload["model"])); model != "" {
+		targetParts = append(targetParts, model)
+	}
+
+	parts := make([]string, 0, 6)
+	if stepLabel != "" {
+		parts = append(parts, "step="+stepLabel)
+	}
+	if len(targetParts) > 0 {
+		parts = append(parts, strings.Join(targetParts, " / "))
+	}
+	switch {
+	case attempt > 0 && maxAttempts > 0:
+		parts = append(parts, fmt.Sprintf("attempt=%d/%d", attempt, maxAttempts))
+	case attempt > 0:
+		parts = append(parts, fmt.Sprintf("attempt=%d", attempt))
+	}
+	if reason != "" {
+		parts = append(parts, "reason="+reason)
+	}
+	if delay > 0 {
+		parts = append(parts, fmt.Sprintf("delay=%dms", delay))
+	}
+	if source != "" {
+		parts = append(parts, "source="+source)
+	}
+	if errText := truncateChatRuntimeText(payloadStringValue(payload["error"]), 120); errText != "" {
+		parts = append(parts, "error="+errText)
+	}
+	if len(parts) == 0 {
+		return chatRuntimeTimelineEvent{}
+	}
+	return chatRuntimeTimelineEvent{
+		Line:     "[retry] " + strings.Join(parts, " "),
+		DedupKey: fmt.Sprintf("llm.retry:%s:%s:%d:%s:%s", traceID, stepLabel, attempt, reason, source),
+	}
 }
 
 func renderSessionCompactTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {

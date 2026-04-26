@@ -373,7 +373,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 		})
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, newProviderHTTPError(resp.StatusCode, string(body), resp.Header)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -589,7 +589,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 		})
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return newProviderHTTPError(resp.StatusCode, string(body), resp.Header)
 	}
 
 	// 使用 adapter 处理流式响应
@@ -727,31 +727,29 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.RetryTuning, p.config.RetryRules)
 	var lastErr error
 	startedAt := time.Now()
+	resolvedModel := p.resolveModel(chatReq.Model)
 
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
-		chatResp, err := p.Chat(ctx, chatReq)
+		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
+		chatResp, err := p.Chat(attemptCtx, chatReq)
 		if err == nil {
 			return p.toLLMResponse(chatResp), nil
 		}
 
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-
 		lastErr = err
-		decision := policy.decisionForError(err)
-		if !decision.Retryable {
+		retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, err, retryExecutionMeta{
+			Source:   "provider_wrapper",
+			Protocol: p.config.Type,
+			Model:    resolvedModel,
+		})
+		if retryErr != nil {
+			return nil, retryErr
+		}
+		if !retryResult.Decision.Retryable {
 			return nil, err
 		}
-		if attempt >= policy.maxAttemptsForDecision(decision) {
-			break
-		}
-		delay := policy.delayForDecision(attempt, decision)
-		if !policy.canRetryAfter(startedAt, time.Now(), delay) {
-			break
-		}
-		if err := waitRetryDelay(ctx, delay); err != nil {
-			return nil, err
+		if retryResult.Retry {
+			continue
 		}
 	}
 
@@ -790,7 +788,8 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	startedAt := time.Now()
 
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
-		reportHTTPDebug(ctx, HTTPDebugEvent{
+		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
+		reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 			Source:           "provider_wrapper",
 			Phase:            "request",
 			Protocol:         p.config.Type,
@@ -803,7 +802,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			RequestBodyRaw:   append([]byte(nil), bodyBytes...),
 		})
 
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
+		httpReq, err := http.NewRequestWithContext(attemptCtx, "POST", url, bytes.NewReader(bodyBytes))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
@@ -813,7 +812,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 
 		resp, err := client.Do(httpReq)
 		if err != nil {
-			reportHTTPDebug(ctx, HTTPDebugEvent{
+			reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 				Source:   "provider_wrapper",
 				Phase:    "response",
 				Protocol: p.config.Type,
@@ -822,28 +821,25 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				URL:      url,
 				Error:    err.Error(),
 			})
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
 			lastErr = fmt.Errorf("failed to send request: %w", err)
-			decision := policy.decisionForError(lastErr)
-			if !decision.Retryable || attempt >= policy.maxAttemptsForDecision(decision) {
-				break
+			retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
+				Source:   "provider_wrapper",
+				Protocol: p.config.Type,
+				Model:    adapterRequest.Model,
+			})
+			if retryErr != nil {
+				return nil, retryErr
 			}
-			delay := policy.delayForDecision(attempt, decision)
-			if !policy.canRetryAfter(startedAt, time.Now(), delay) {
-				break
+			if retryResult.Retry {
+				continue
 			}
-			if err := waitRetryDelay(ctx, delay); err != nil {
-				return nil, err
-			}
-			continue
+			break
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			responseBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			reportHTTPDebug(ctx, HTTPDebugEvent{
+			reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 				Source:              "provider_wrapper",
 				Phase:               "response",
 				Protocol:            p.config.Type,
@@ -856,22 +852,19 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				ResponseBodyRaw:     append([]byte(nil), responseBody...),
 				Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 			})
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
+			lastErr = newProviderHTTPError(resp.StatusCode, string(responseBody), resp.Header)
+			retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
+				Source:   "provider_wrapper",
+				Protocol: p.config.Type,
+				Model:    adapterRequest.Model,
+			})
+			if retryErr != nil {
+				return nil, retryErr
 			}
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(responseBody))
-			decision := policy.decisionForError(lastErr)
-			if !decision.Retryable || attempt >= policy.maxAttemptsForDecision(decision) {
-				break
+			if retryResult.Retry {
+				continue
 			}
-			delay := policy.delayForDecision(attempt, decision)
-			if !policy.canRetryAfter(startedAt, time.Now(), delay) {
-				break
-			}
-			if err := waitRetryDelay(ctx, delay); err != nil {
-				return nil, err
-			}
-			continue
+			break
 		}
 
 		emissionState := &streamEmissionState{}
@@ -881,7 +874,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 					return
 				}
 				emissionState.markText(content)
-				reportStreamChunk(ctx, StreamChunk{
+				reportStreamChunk(attemptCtx, StreamChunk{
 					Type:    EventTypeText,
 					Content: content,
 					Metadata: map[string]interface{}{
@@ -895,7 +888,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 					return
 				}
 				emissionState.markReasoning(reasoning)
-				reportStreamChunk(ctx, StreamChunk{
+				reportStreamChunk(attemptCtx, StreamChunk{
 					Type:    EventTypeReasoning,
 					Content: reasoning,
 					Metadata: map[string]interface{}{
@@ -914,7 +907,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		if handleErr == nil {
 			handleErr = validateStreamingAggregateResponse(p.config.Type, responseBody, assistantMsg)
 		}
-		reportHTTPDebug(ctx, HTTPDebugEvent{
+		reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 			Source:              "provider_wrapper",
 			Phase:               "response",
 			Protocol:            p.config.Type,
@@ -929,25 +922,22 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		})
 
 		if handleErr != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
 			lastErr = fmt.Errorf("failed to handle stream response: %w", handleErr)
 			if emissionState.emittedAnything() {
 				return nil, suppressRetry(lastErr)
 			}
-			decision := policy.decisionForError(lastErr)
-			if !decision.Retryable || attempt >= policy.maxAttemptsForDecision(decision) {
-				break
+			retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
+				Source:   "provider_wrapper",
+				Protocol: p.config.Type,
+				Model:    adapterRequest.Model,
+			})
+			if retryErr != nil {
+				return nil, retryErr
 			}
-			delay := policy.delayForDecision(attempt, decision)
-			if !policy.canRetryAfter(startedAt, time.Now(), delay) {
-				break
+			if retryResult.Retry {
+				continue
 			}
-			if err := waitRetryDelay(ctx, delay); err != nil {
-				return nil, err
-			}
-			continue
+			break
 		}
 
 		if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {

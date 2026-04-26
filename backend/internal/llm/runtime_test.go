@@ -80,6 +80,50 @@ func (p *flakyProvider) GetCapabilities() *ModelCapabilities {
 
 func (p *flakyProvider) CheckHealth(ctx context.Context) error { return nil }
 
+type debugFlakyProvider struct {
+	name  string
+	errs  []error
+	resp  *LLMResponse
+	calls int
+}
+
+func (p *debugFlakyProvider) Name() string { return p.name }
+
+func (p *debugFlakyProvider) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
+	p.calls++
+	reportHTTPDebug(ctx, HTTPDebugEvent{
+		Source: "test_provider",
+		Phase:  "response",
+		Model:  req.Model,
+		Error:  fmt.Sprintf("call-%d", p.calls),
+	})
+	if index := p.calls - 1; index < len(p.errs) && p.errs[index] != nil {
+		return nil, p.errs[index]
+	}
+	if p.resp != nil {
+		return p.resp, nil
+	}
+	return &LLMResponse{
+		Content: "provider:" + p.name,
+		Model:   req.Model,
+	}, nil
+}
+
+func (p *debugFlakyProvider) Stream(ctx context.Context, req *LLMRequest) (<-chan StreamChunk, error) {
+	ch := make(chan StreamChunk, 1)
+	ch <- StreamChunk{Type: EventTypeDone, Done: true}
+	close(ch)
+	return ch, nil
+}
+
+func (p *debugFlakyProvider) CountTokens(text string) int { return len(text) }
+
+func (p *debugFlakyProvider) GetCapabilities() *ModelCapabilities {
+	return &ModelCapabilities{SupportsStreaming: true}
+}
+
+func (p *debugFlakyProvider) CheckHealth(ctx context.Context) error { return nil }
+
 func TestLLMRuntime_Call_UsesExplicitProviderAndPreservesModel(t *testing.T) {
 	runtime := NewLLMRuntime(&RuntimeConfig{
 		DefaultProvider: "provider-a",
@@ -176,6 +220,72 @@ func TestLLMRuntime_Call_RetriesRetryableProviderErrors(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, "recovered", resp.Content)
 	assert.Equal(t, 3, provider.calls)
+}
+
+func TestLLMRuntime_Call_ReportsRetryDebugEventAndPropagatesAttemptContext(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      2,
+		RetryTuning: RetryTuning{
+			BaseDelay: 10 * time.Millisecond,
+		},
+	})
+	provider := &debugFlakyProvider{
+		name: "provider-a",
+		errs: []error{
+			fmt.Errorf("HTTP 500: {\"error\":{\"message\":\"temporary upstream failure\"}}"),
+		},
+		resp: &LLMResponse{
+			Content: "recovered",
+			Model:   "gpt-5.4-mini",
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	var events []HTTPDebugEvent
+	ctx := WithHTTPDebugReporter(context.Background(), func(event HTTPDebugEvent) {
+		events = append(events, event)
+	})
+	var retryEvents []RetryEvent
+	ctx = WithRetryEventReporter(ctx, func(event RetryEvent) {
+		retryEvents = append(retryEvents, event)
+	})
+	resp, err := runtime.Call(ctx, &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "recovered", resp.Content)
+	assert.Equal(t, 2, provider.calls)
+
+	require.Len(t, events, 3)
+	assert.Equal(t, "test_provider", events[0].Source)
+	assert.Equal(t, "response", events[0].Phase)
+	assert.Equal(t, 1, events[0].Attempt)
+	assert.Equal(t, 3, events[0].MaxAttempts)
+	assert.Equal(t, "llm_runtime", events[1].Source)
+	assert.Equal(t, "retry", events[1].Phase)
+	assert.Equal(t, "provider-a", events[1].Provider)
+	assert.Equal(t, "gpt-5.4-mini", events[1].Model)
+	assert.Equal(t, 1, events[1].Attempt)
+	assert.Equal(t, 3, events[1].MaxAttempts)
+	assert.Equal(t, "http_500", events[1].RetryReason)
+	assert.GreaterOrEqual(t, events[1].RetryDelayMS, int64(10))
+	assert.Equal(t, "test_provider", events[2].Source)
+	assert.Equal(t, "response", events[2].Phase)
+	assert.Equal(t, 2, events[2].Attempt)
+	assert.Equal(t, 3, events[2].MaxAttempts)
+
+	require.Len(t, retryEvents, 1)
+	assert.Equal(t, "llm_runtime", retryEvents[0].Source)
+	assert.Equal(t, "provider-a", retryEvents[0].Provider)
+	assert.Equal(t, "gpt-5.4-mini", retryEvents[0].Model)
+	assert.Equal(t, 1, retryEvents[0].Attempt)
+	assert.Equal(t, 3, retryEvents[0].MaxAttempts)
+	assert.Equal(t, "http_500", retryEvents[0].RetryReason)
+	assert.GreaterOrEqual(t, retryEvents[0].RetryDelayMS, int64(10))
+	assert.Contains(t, retryEvents[0].Error, "HTTP 500")
 }
 
 func TestLLMRuntime_Call_DoesNotRetryRetryExhaustedErrors(t *testing.T) {

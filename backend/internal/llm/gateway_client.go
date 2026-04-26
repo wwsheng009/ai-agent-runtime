@@ -39,6 +39,7 @@ type gatewayProviderError struct {
 	message    string
 	statusCode int
 	retryable  bool
+	retryAfter time.Duration
 	cause      error
 }
 
@@ -54,6 +55,20 @@ func (e *gatewayProviderError) Unwrap() error {
 		return nil
 	}
 	return e.cause
+}
+
+func (e *gatewayProviderError) HTTPStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.statusCode
+}
+
+func (e *gatewayProviderError) RetryAfterDelay() time.Duration {
+	if e == nil {
+		return 0
+	}
+	return e.retryAfter
 }
 
 // NewGatewayClient 创建新的 Gateway 客户端
@@ -279,6 +294,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 
 	var lastError error
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
 		retryInfo.Attempt = attempt
 
 		selected, err := c.resourceManager.SelectResource(retryInfo)
@@ -287,7 +303,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 		}
 
 		// 构建请求
-		response, err := c.callProvider(ctx, selected, model, req)
+		response, err := c.callProvider(attemptCtx, selected, model, req)
 		if err != nil {
 			statusCode := gatewayProviderErrorStatusCode(err)
 			// 记录失败
@@ -305,10 +321,6 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 			)
 
 			lastError = err
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-
 			// 更新重试信息
 			if selected.GroupName != "" {
 				retryInfo.TriedGroups = append(retryInfo.TriedGroups, selected.GroupName)
@@ -327,18 +339,19 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 				return nil, err
 			}
 
-			// 等待后重试
-			decision := policy.decisionForError(err)
-			if attempt < policy.maxAttemptsForDecision(decision) {
-				delay := policy.delayForDecision(attempt, decision)
-				if !policy.canRetryAfter(startedAt, time.Now(), delay) {
-					break
-				}
-				if err := waitRetryDelay(ctx, delay); err != nil {
-					return nil, err
-				}
+			retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, err, retryExecutionMeta{
+				Source:   "gateway_client",
+				Provider: gatewaySelectedProviderName(selected),
+				Protocol: gatewaySelectedProviderProtocol(selected),
+				Model:    resolveGatewaySelectedModel(selected, model),
+			})
+			if retryErr != nil {
+				return nil, retryErr
 			}
-			continue
+			if retryResult.Retry {
+				continue
+			}
+			break
 		}
 
 		// 记录成功
@@ -470,7 +483,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
-		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), c.retryRules)
+		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), httpResp.Header, c.retryRules)
 	}
 
 	body, err := io.ReadAll(httpResp.Body)
@@ -684,7 +697,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
-		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), c.retryRules)
+		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), httpResp.Header, c.retryRules)
 	}
 
 	emissionState := &streamEmissionState{}
@@ -939,7 +952,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
-		return nil, fmt.Errorf("HTTP %d: %s", httpResp.StatusCode, string(body))
+		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), httpResp.Header, c.retryRules)
 	}
 
 	// 创建流式响应通道
@@ -1217,14 +1230,19 @@ func selectedProviderModelCapabilities(selected *SelectedResource) map[string]ag
 	}
 }
 
-func newGatewayHTTPError(statusCode int, body string, rules []RetryRule) error {
-	message := fmt.Sprintf("HTTP %d: %s", statusCode, body)
-	decision := classifyRetryableLLMErrorWithRules(fmt.Errorf("%s", message), rules)
-	return &gatewayProviderError{
-		message:    message,
+func newGatewayHTTPError(statusCode int, body string, header http.Header, rules []RetryRule) error {
+	providerErr := &gatewayProviderError{
+		message:    fmt.Sprintf("HTTP %d: %s", statusCode, body),
 		statusCode: statusCode,
-		retryable:  decision.Retryable,
 	}
+	var ok bool
+	providerErr.retryAfter, ok = retryAfterDelayFromHeader(header, time.Time{})
+	if !ok {
+		providerErr.retryAfter, _ = retryAfterDelayFromBody(body)
+	}
+	decision := classifyRetryableLLMErrorWithRules(providerErr, rules)
+	providerErr.retryable = decision.Retryable
+	return providerErr
 }
 
 func newGatewayResponseError(prefix string, err error, rules []RetryRule) error {
@@ -1233,11 +1251,13 @@ func newGatewayResponseError(prefix string, err error, rules []RetryRule) error 
 		message = fmt.Sprintf("%s: %v", prefix, err)
 	}
 	decision := classifyRetryableLLMErrorWithRules(err, rules)
-	return &gatewayProviderError{
+	providerErr := &gatewayProviderError{
 		message:   message,
 		retryable: decision.Retryable,
 		cause:     err,
 	}
+	providerErr.retryAfter, _ = errorRetryAfterDelay(err)
+	return providerErr
 }
 
 func gatewayProviderErrorStatusCode(err error) int {
@@ -1269,6 +1289,20 @@ func isRetryableGatewayHTTPStatus(statusCode int) bool {
 
 func isRetryableGatewayResponseError(err error) bool {
 	return isRetryableProviderResponseError(err)
+}
+
+func gatewaySelectedProviderName(selected *SelectedResource) string {
+	if selected == nil || selected.Provider == nil {
+		return ""
+	}
+	return selected.Provider.Name
+}
+
+func gatewaySelectedProviderProtocol(selected *SelectedResource) string {
+	if selected == nil || selected.Provider == nil {
+		return ""
+	}
+	return strings.TrimSpace(selected.Provider.Type)
 }
 
 // SupportedModels 返回支持的模型列表

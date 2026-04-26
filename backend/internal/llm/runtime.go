@@ -420,31 +420,26 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 	startedAt := time.Now()
 
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
-		response, err := provider.Call(ctx, req)
+		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
+		response, err := provider.Call(attemptCtx, req)
 		if err == nil {
 			return response, nil
 		}
 
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-
 		lastError = err
-		decision := policy.decisionForError(err)
-		if !decision.Retryable {
+		retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, err, retryExecutionMeta{
+			Source:   "llm_runtime",
+			Provider: providerName,
+			Model:    req.Model,
+		})
+		if retryErr != nil {
+			return nil, retryErr
+		}
+		if !retryResult.Decision.Retryable {
 			return nil, err
 		}
-
-		if attempt >= policy.maxAttemptsForDecision(decision) {
-			break
-		}
-
-		delay := policy.delayForDecision(attempt, decision)
-		if !policy.canRetryAfter(startedAt, time.Now(), delay) {
-			break
-		}
-		if err := waitRetryDelay(ctx, delay); err != nil {
-			return nil, err
+		if retryResult.Retry {
+			continue
 		}
 	}
 

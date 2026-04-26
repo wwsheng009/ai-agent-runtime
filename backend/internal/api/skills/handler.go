@@ -6072,6 +6072,7 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 	if len(promptLayoutSources) > 0 {
 		requestPayload["prompt_sources"] = promptLayoutSources
 	}
+	ctx = llm.WithRetryEventReporter(ctx, h.runtimeRetryEventReporter(traceID, sessionID(session)))
 	h.publishSessionRuntimeEvent("llm.request.started", traceID, sessionID(session), requestPayload)
 	stream, err := h.llmRuntime.Stream(ctx, &llm.LLMRequest{
 		Model:           model,
@@ -6978,6 +6979,48 @@ func (h *Handler) publishAgentChatPromptPreflightEvent(traceID string, session *
 	h.publishSessionRuntimeEvent(chat.EventSessionEnd, traceID, sessionID(session), payload)
 }
 
+func (h *Handler) runtimeRetryEventReporter(traceID, sessionID string) llm.RetryEventReporter {
+	if h == nil {
+		return nil
+	}
+	traceID = strings.TrimSpace(traceID)
+	sessionID = strings.TrimSpace(sessionID)
+	return func(event llm.RetryEvent) {
+		payload := map[string]interface{}{
+			"source": strings.TrimSpace(event.Source),
+		}
+		if provider := strings.TrimSpace(event.Provider); provider != "" {
+			payload["provider"] = provider
+		}
+		if protocol := strings.TrimSpace(event.Protocol); protocol != "" {
+			payload["protocol"] = protocol
+		}
+		if model := strings.TrimSpace(event.Model); model != "" {
+			payload["model"] = model
+		}
+		if event.Attempt > 0 {
+			payload["attempt"] = event.Attempt
+		}
+		if event.MaxAttempts > 0 {
+			payload["max_attempts"] = event.MaxAttempts
+		}
+		if reason := strings.TrimSpace(event.RetryReason); reason != "" {
+			payload["retry_reason"] = reason
+		}
+		if event.RetryDelayMS > 0 {
+			payload["retry_delay_ms"] = event.RetryDelayMS
+		}
+		if errText := strings.TrimSpace(event.Error); errText != "" {
+			payload["error"] = errText
+		}
+		if sessionID != "" {
+			h.publishSessionRuntimeEvent("llm.retry", traceID, sessionID, payload)
+			return
+		}
+		h.publishRuntimeEvent("llm.retry", traceID, payload)
+	}
+}
+
 func runtimeHTTPDebugReporter(ctx context.Context) llm.HTTPDebugReporter {
 	return func(event llm.HTTPDebugEvent) {
 		fields := make([]zapcore.Field, 0, 12)
@@ -7001,6 +7044,18 @@ func runtimeHTTPDebugReporter(ctx context.Context) llm.HTTPDebugReporter {
 		}
 		if value := strings.TrimSpace(event.URL); value != "" {
 			fields = append(fields, logger.URL(value))
+		}
+		if event.Attempt > 0 {
+			fields = append(fields, logger.Int("attempt", event.Attempt))
+		}
+		if event.MaxAttempts > 0 {
+			fields = append(fields, logger.Int("max_attempts", event.MaxAttempts))
+		}
+		if value := strings.TrimSpace(event.RetryReason); value != "" {
+			fields = append(fields, logger.String("retry_reason", value))
+		}
+		if event.RetryDelayMS > 0 {
+			fields = append(fields, logger.Int64("retry_delay_ms", event.RetryDelayMS))
 		}
 		if event.RequestBodyBytes > 0 {
 			fields = append(fields, logger.Int("request_body_bytes", event.RequestBodyBytes))

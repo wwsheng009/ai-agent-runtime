@@ -525,6 +525,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			}
 		})
 	}
+	callCtx = llm.WithRetryEventReporter(callCtx, loop.runtimeRetryEventReporter(traceID, sessionID, step, req))
 
 	// 添加工具定义（如果启用了工具调用）
 	if loop.config.EnableToolCalls {
@@ -1351,6 +1352,50 @@ func (loop *ReActLoop) emitToolReduced(sessionID string, tc types.ToolCall, step
 	loop.agent.emitRuntimeEvent("tool.reduced", sessionID, tc.Name, payload)
 }
 
+func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step int, req *llm.LLMRequest) llm.RetryEventReporter {
+	if loop == nil || loop.agent == nil {
+		return nil
+	}
+	requestProvider := ""
+	requestModel := ""
+	if req != nil {
+		requestProvider = strings.TrimSpace(req.Provider)
+		requestModel = strings.TrimSpace(req.Model)
+	}
+	return func(event llm.RetryEvent) {
+		payload := map[string]interface{}{
+			"trace_id": traceID,
+			"step":     step,
+			"source":   strings.TrimSpace(event.Source),
+		}
+		if provider := firstNonEmptyTrimmed(event.Provider, requestProvider); provider != "" {
+			payload["provider"] = provider
+		}
+		if protocol := strings.TrimSpace(event.Protocol); protocol != "" {
+			payload["protocol"] = protocol
+		}
+		if model := firstNonEmptyTrimmed(event.Model, requestModel); model != "" {
+			payload["model"] = model
+		}
+		if event.Attempt > 0 {
+			payload["attempt"] = event.Attempt
+		}
+		if event.MaxAttempts > 0 {
+			payload["max_attempts"] = event.MaxAttempts
+		}
+		if reason := strings.TrimSpace(event.RetryReason); reason != "" {
+			payload["retry_reason"] = reason
+		}
+		if event.RetryDelayMS > 0 {
+			payload["retry_delay_ms"] = event.RetryDelayMS
+		}
+		if errText := strings.TrimSpace(event.Error); errText != "" {
+			payload["error"] = errText
+		}
+		loop.agent.emitRuntimeEvent("llm.retry", sessionID, "", payload)
+	}
+}
+
 func toolRequestedEventSourcePayload(agent *Agent, toolName string) map[string]interface{} {
 	source := resolveToolSourceForRequest(agent, toolName)
 	if source == "" {
@@ -1359,6 +1404,15 @@ func toolRequestedEventSourcePayload(agent *Agent, toolName string) map[string]i
 	return map[string]interface{}{
 		toolresult.SourceKey: source,
 	}
+}
+
+func firstNonEmptyTrimmed(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func resolveToolSourceForRequest(agent *Agent, toolName string) string {

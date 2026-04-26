@@ -105,6 +105,24 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "llm.request.finished", TraceID: "trace-1", Payload: map[string]interface{}{"success": true}}); got != "" {
 		t.Fatalf("expected dotted successful llm finished render to be suppressed, got %q", got)
 	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:    "llm.retry",
+		TraceID: "trace-1",
+		Payload: map[string]interface{}{
+			"step":           2,
+			"source":         "llm_runtime",
+			"provider":       "provider-a",
+			"protocol":       "openai",
+			"model":          "gpt-5.4",
+			"attempt":        1,
+			"max_attempts":   3,
+			"retry_reason":   "http_429",
+			"retry_delay_ms": int64(25),
+			"error":          "HTTP 429: rate limit reached",
+		},
+	}); got != "[retry] step=2 provider-a / openai / gpt-5.4 attempt=1/3 reason=http_429 delay=25ms source=llm_runtime error=HTTP 429: rate limit reached" {
+		t.Fatalf("unexpected llm retry render: %q", got)
+	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "planning.started"}); got != "" {
 		t.Fatalf("unexpected planning render: %q", got)
 	}

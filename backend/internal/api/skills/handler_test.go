@@ -1402,6 +1402,43 @@ func TestGetRuntimeTrace_ReturnsEventsForTrace(t *testing.T) {
 	assert.Equal(t, float64(1), topLevelRecovery["summary_fallbacks"])
 }
 
+func TestHandlerRuntimeRetryEventReporter_PublishesStructuredRetryEvent(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+
+	reporter := handler.runtimeRetryEventReporter("trace-retry", "session-retry")
+	require.NotNil(t, reporter)
+
+	reporter(llm.RetryEvent{
+		Source:       "gateway_client",
+		Provider:     "openai_ee",
+		Protocol:     "openai",
+		Model:        "gpt-5.4-mini",
+		Attempt:      1,
+		MaxAttempts:  3,
+		Error:        "HTTP 429: rate limit reached",
+		RetryReason:  "http_429",
+		RetryDelayMS: 25,
+	})
+
+	events := handler.getRuntimeEventBus().Trace("trace-retry", 10)
+	require.Len(t, events, 1)
+	assert.Equal(t, "llm.retry", events[0].Type)
+	assert.Equal(t, "trace-retry", events[0].TraceID)
+	assert.Equal(t, "session-retry", events[0].SessionID)
+	assert.Equal(t, "runtime-admin", events[0].AgentName)
+	assert.Equal(t, "gateway_client", events[0].Payload["source"])
+	assert.Equal(t, "openai_ee", events[0].Payload["provider"])
+	assert.Equal(t, "openai", events[0].Payload["protocol"])
+	assert.Equal(t, "gpt-5.4-mini", events[0].Payload["model"])
+	assert.EqualValues(t, 1, events[0].Payload["attempt"])
+	assert.EqualValues(t, 3, events[0].Payload["max_attempts"])
+	assert.Equal(t, "http_429", events[0].Payload["retry_reason"])
+	assert.EqualValues(t, 25, events[0].Payload["retry_delay_ms"])
+	assert.Equal(t, "HTTP 429: rate limit reached", events[0].Payload["error"])
+}
+
 func TestGetRuntimeTrace_SummarizesPatchDecisionAudit(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)

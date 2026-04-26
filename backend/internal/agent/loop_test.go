@@ -125,6 +125,53 @@ func (s *SequenceLLMProvider) CheckHealth(ctx context.Context) error {
 	return nil
 }
 
+type RetrySequenceLLMProvider struct {
+	name      string
+	errs      []error
+	response  *llm.LLMResponse
+	callCount int
+}
+
+func (p *RetrySequenceLLMProvider) Name() string {
+	return p.name
+}
+
+func (p *RetrySequenceLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	p.callCount++
+	if index := p.callCount - 1; index < len(p.errs) && p.errs[index] != nil {
+		return nil, p.errs[index]
+	}
+	if p.response != nil {
+		return p.response, nil
+	}
+	return &llm.LLMResponse{
+		Content: "retry provider default response",
+		Model:   req.Model,
+	}, nil
+}
+
+func (p *RetrySequenceLLMProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
+	return nil, nil
+}
+
+func (p *RetrySequenceLLMProvider) CountTokens(text string) int {
+	return len(text) / 4
+}
+
+func (p *RetrySequenceLLMProvider) GetCapabilities() *llm.ModelCapabilities {
+	return &llm.ModelCapabilities{
+		MaxContextTokens:  128000,
+		MaxOutputTokens:   4096,
+		SupportsTools:     true,
+		SupportsStreaming: true,
+		SupportsJSONMode:  true,
+	}
+}
+
+func (p *RetrySequenceLLMProvider) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
 func (s *SequenceLLMProvider) ResolveModelCapability(requestedModel string) (string, agentconfig.ModelCapabilitySpec, bool) {
 	capability, ok := llm.ResolveModelCapabilitySpec(requestedModel, s.modelCapabilities)
 	return requestedModel, capability, ok
@@ -412,6 +459,77 @@ func TestReActLoop_RunWithSession_DoesNotEmitDuplicateReasoningAfterStreaming(t 
 	require.NotNil(t, block)
 	require.Equal(t, "stream_delta", block.Format)
 	require.Equal(t, "先确认问题。", block.DisplayText())
+}
+
+func TestReActLoop_RunWithSession_EmitsLLMRetryRuntimeEvent(t *testing.T) {
+	provider := &RetrySequenceLLMProvider{
+		name: "test-provider",
+		errs: []error{
+			fmt.Errorf("HTTP 429: {\"error\":{\"message\":\"rate limit reached\"}}"),
+		},
+		response: &llm.LLMResponse{
+			Content: "已恢复。",
+			Model:   "test-model",
+			Usage: &types.TokenUsage{
+				PromptTokens:     10,
+				CompletionTokens: 5,
+				TotalTokens:      15,
+			},
+		},
+	}
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+		MaxRetries:      1,
+		RetryTuning: llm.RetryTuning{
+			BaseDelay: time.Millisecond,
+		},
+	})
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Provider: "test-provider",
+			Model:    "test-model",
+		},
+		state: AgentState{},
+	}
+
+	bus := runtimeevents.NewBus()
+	var retryEvents []runtimeevents.Event
+	bus.Subscribe("llm.retry", func(event runtimeevents.Event) {
+		retryEvents = append(retryEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        1,
+		EnableThought:   true,
+		EnableToolCalls: false,
+	})
+
+	result, err := loop.RunWithSession(context.Background(), "hello", newTestHistorySession("session-retry"))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "已恢复。", result.Output)
+	require.Len(t, retryEvents, 1)
+	require.Equal(t, 2, provider.callCount)
+
+	retryEvent := retryEvents[0]
+	require.NotEmpty(t, retryEvent.TraceID)
+	assert.Equal(t, "test-agent", retryEvent.AgentName)
+	assert.Equal(t, "session-retry", retryEvent.SessionID)
+	assert.Equal(t, retryEvent.TraceID, retryEvent.Payload["trace_id"])
+	assert.EqualValues(t, 1, retryEvent.Payload["step"])
+	assert.Equal(t, "llm_runtime", retryEvent.Payload["source"])
+	assert.Equal(t, "test-provider", retryEvent.Payload["provider"])
+	assert.Equal(t, "test-model", retryEvent.Payload["model"])
+	assert.EqualValues(t, 1, retryEvent.Payload["attempt"])
+	assert.EqualValues(t, 2, retryEvent.Payload["max_attempts"])
+	assert.Equal(t, "http_429", retryEvent.Payload["retry_reason"])
+	assert.EqualValues(t, 1, retryEvent.Payload["retry_delay_ms"])
+	assert.Contains(t, retryEvent.Payload["error"], "HTTP 429")
 }
 
 func TestReActLoop_RunWithSession_PreservesExplicitEmptyReasoningContentMetadata(t *testing.T) {
