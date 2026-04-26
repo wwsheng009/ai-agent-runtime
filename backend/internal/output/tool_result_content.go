@@ -12,6 +12,7 @@ const (
 	modelToolTextByteBudget      = 12 * 1024
 	modelToolTextMarkerReserve   = 160
 	modelToolTextMinSegmentBytes = 1024
+	modelArtifactNoticePrefix    = "Full raw output artifact: "
 )
 
 // RenderFullToolResultContent builds the full tool_result text that should be
@@ -45,7 +46,7 @@ func RenderToolResultContentForModel(content interface{}, toolErr string, envelo
 	if kind := toolResultKindForModel(content, envelope); kind != "" {
 		switch kind {
 		case toolresult.KindText, toolresult.KindEmpty:
-			return renderToolTextForModelHistory(content, toolErr)
+			return renderToolTextForModelHistory(content, toolErr, envelope)
 		case toolresult.KindStructured, toolresult.KindBinary:
 			if envelope != nil {
 				if summary := strings.TrimSpace(envelope.Render()); summary != "" {
@@ -56,7 +57,7 @@ func RenderToolResultContentForModel(content interface{}, toolErr string, envelo
 		}
 	}
 	if isTextLikeToolResult(content) {
-		return renderToolTextForModelHistory(content, toolErr)
+		return renderToolTextForModelHistory(content, toolErr, envelope)
 	}
 	if envelope != nil {
 		if summary := strings.TrimSpace(envelope.Render()); summary != "" {
@@ -125,15 +126,48 @@ func isTextLikeToolResult(content interface{}) bool {
 	}
 }
 
-func renderToolTextForModelHistory(content interface{}, toolErr string) string {
+func renderToolTextForModelHistory(content interface{}, toolErr string, envelope *Envelope) string {
 	full := RenderFullToolResultContent(content, toolErr)
+	notice := modelArtifactNotice(envelope)
 	if strings.TrimSpace(full) == "" {
-		return full
+		return appendToolArtifactNotice(full, notice)
 	}
-	if len(full) <= modelToolTextByteBudget {
-		return full
+	withNotice := appendToolArtifactNotice(full, notice)
+	if len(withNotice) <= modelToolTextByteBudget {
+		return withNotice
 	}
-	return formatTruncatedToolTextForModel(full, modelToolTextByteBudget)
+	if notice == "" {
+		return formatTruncatedToolTextForModel(full, modelToolTextByteBudget)
+	}
+	bodyBudget := modelToolTextByteBudget - len(notice) - len("\n\n")
+	if bodyBudget <= 0 {
+		return safePrefixByBytes(notice, modelToolTextByteBudget)
+	}
+	return appendToolArtifactNotice(formatTruncatedToolTextForModel(full, bodyBudget), notice)
+}
+
+func modelArtifactNotice(envelope *Envelope) string {
+	if envelope == nil {
+		return ""
+	}
+	path := strings.TrimSpace(metadataString(envelope.Metadata, "raw_output_artifact_path"))
+	if path == "" {
+		return ""
+	}
+	return modelArtifactNoticePrefix + path
+}
+
+func appendToolArtifactNotice(body string, notice string) string {
+	body = strings.TrimSpace(body)
+	notice = strings.TrimSpace(notice)
+	switch {
+	case body == "":
+		return notice
+	case notice == "":
+		return body
+	default:
+		return body + "\n\n" + notice
+	}
 }
 
 func formatTruncatedToolTextForModel(content string, budget int) string {

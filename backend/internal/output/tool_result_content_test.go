@@ -120,6 +120,26 @@ func TestRenderToolResultContentForModel_TruncatesLargeToolkitTextForHistory(t *
 	}
 }
 
+func TestRenderToolResultContentForModel_PreservesArtifactNoticeWhenToolkitTextIsTruncated(t *testing.T) {
+	envelope := &Envelope{
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:     toolresult.KindText,
+			"mcp_name":                 "toolkit",
+			"raw_output_artifact_path": `C:\temp\shell-output\toolkit\git_123.txt`,
+		},
+	}
+	content := strings.Repeat("git-diff-line-abcdefghijklmnopqrstuvwxyz0123456789\n", 600)
+
+	got := RenderToolResultContentForModel(content, "", envelope)
+
+	if !strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("expected truncation marker, got %q", got)
+	}
+	if !strings.Contains(got, `Full raw output artifact: C:\temp\shell-output\toolkit\git_123.txt`) {
+		t.Fatalf("expected artifact notice to be preserved, got %q", got)
+	}
+}
+
 func TestRenderToolResultContentForModel_TruncatesLargeErrorOutputForHistory(t *testing.T) {
 	envelope := &Envelope{
 		Metadata: map[string]interface{}{
@@ -188,5 +208,22 @@ func TestRenderToolResultContentForModel_ExternalMCPPreservesLargeTextOutput(t *
 	}
 	if strings.Contains(got, "output truncated for history safety") {
 		t.Fatalf("did not expect external MCP content to be truncated, got %q", got)
+	}
+}
+
+func TestRenderToolResultContentForModel_AppendsArtifactNoticeForSmallText(t *testing.T) {
+	envelope := &Envelope{
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:     toolresult.KindText,
+			"mcp_name":                 "toolkit",
+			"raw_output_artifact_path": `C:\temp\shell-output\toolkit\git_456.txt`,
+		},
+	}
+
+	got := RenderToolResultContentForModel("short output", "", envelope)
+
+	want := "short output\n\nFull raw output artifact: C:\\temp\\shell-output\\toolkit\\git_456.txt"
+	if got != want {
+		t.Fatalf("expected artifact notice for small text, got %q", got)
 	}
 }
