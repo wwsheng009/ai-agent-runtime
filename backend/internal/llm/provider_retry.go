@@ -2,9 +2,55 @@ package llm
 
 import (
 	stderrs "errors"
+	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
+
+type httpStatusCoder interface {
+	HTTPStatusCode() int
+}
+
+type providerHTTPError struct {
+	message    string
+	statusCode int
+	retryAfter time.Duration
+}
+
+func newProviderHTTPError(statusCode int, body string, header http.Header) error {
+	retryAfter, ok := retryAfterDelayFromHeader(header, time.Time{})
+	if !ok {
+		retryAfter, _ = retryAfterDelayFromBody(body)
+	}
+	return &providerHTTPError{
+		message:    fmt.Sprintf("HTTP %d: %s", statusCode, body),
+		statusCode: statusCode,
+		retryAfter: retryAfter,
+	}
+}
+
+func (e *providerHTTPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+func (e *providerHTTPError) HTTPStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.statusCode
+}
+
+func (e *providerHTTPError) RetryAfterDelay() time.Duration {
+	if e == nil {
+		return 0
+	}
+	return e.retryAfter
+}
 
 func isRetryableProviderCallError(err error) bool {
 	return classifyRetryableLLMError(err).Retryable
@@ -52,6 +98,12 @@ func isRetryableProviderResponseError(err error) bool {
 func providerCallHTTPStatus(err error) (int, bool) {
 	if err == nil {
 		return 0, false
+	}
+	var coder httpStatusCoder
+	if stderrs.As(err, &coder) {
+		if statusCode := coder.HTTPStatusCode(); statusCode > 0 {
+			return statusCode, true
+		}
 	}
 
 	lower := strings.ToLower(err.Error())

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -20,6 +21,48 @@ func TestClassifyRetryableLLMError_UsesRetryAfterHint(t *testing.T) {
 	assert.True(t, decision.Retryable)
 	assert.Equal(t, 1500*time.Millisecond, decision.Delay)
 	assert.Equal(t, "http_429", decision.Reason)
+}
+
+func TestParseRetryAfterHeaderValue_ParsesSecondsAndHTTPDate(t *testing.T) {
+	now := time.Date(2026, time.April, 26, 10, 0, 0, 0, time.UTC)
+
+	delay, ok := parseRetryAfterHeaderValue("0.25", now)
+	require.True(t, ok)
+	assert.Equal(t, 250*time.Millisecond, delay)
+
+	delay, ok = parseRetryAfterHeaderValue(now.Add(2*time.Second).Format(http.TimeFormat), now)
+	require.True(t, ok)
+	assert.Equal(t, 2*time.Second, delay)
+}
+
+func TestDecisionDelayFromServerHint_PrefersRetryAfterHeaderHint(t *testing.T) {
+	err := newProviderHTTPError(http.StatusTooManyRequests, `{"error":{"message":"rate limit reached"}}`, http.Header{
+		"Retry-After": []string{"0.05"},
+	})
+	assert.Equal(t, 50*time.Millisecond, decisionDelayFromServerHint(err))
+}
+
+func TestDecisionDelayFromServerHint_UsesHTTPBodyRetryAfterHint(t *testing.T) {
+	err := newProviderHTTPError(http.StatusTooManyRequests, `{"error":{"retry_after_ms":125}}`, nil)
+	assert.Equal(t, 125*time.Millisecond, decisionDelayFromServerHint(err))
+}
+
+func TestRetryAfterDelayFromHeader_ParsesRetryAfterMillisecondsHeader(t *testing.T) {
+	delay, ok := retryAfterDelayFromHeader(http.Header{
+		"Retry-After-Ms": []string{"125"},
+	}, time.Time{})
+	require.True(t, ok)
+	assert.Equal(t, 125*time.Millisecond, delay)
+}
+
+func TestRetryAfterDelayFromBody_ParsesNestedRetryAfterFields(t *testing.T) {
+	delay, ok := retryAfterDelayFromBody(`{"error":{"retry_after_ms":125}}`)
+	require.True(t, ok)
+	assert.Equal(t, 125*time.Millisecond, delay)
+
+	delay, ok = retryAfterDelayFromBody(`{"error":{"details":{"retry_after":"0.25"}}}`)
+	require.True(t, ok)
+	assert.Equal(t, 250*time.Millisecond, delay)
 }
 
 func TestNewProviderRetryPolicy_UsesConfiguredTuning(t *testing.T) {

@@ -16,6 +16,8 @@ type HTTPDebugEvent struct {
 	Provider            string                 `json:"provider,omitempty"`
 	Protocol            string                 `json:"protocol,omitempty"`
 	Model               string                 `json:"model,omitempty"`
+	Attempt             int                    `json:"attempt,omitempty"`
+	MaxAttempts         int                    `json:"max_attempts,omitempty"`
 	Method              string                 `json:"method,omitempty"`
 	URL                 string                 `json:"url,omitempty"`
 	RequestMetadata     map[string]interface{} `json:"request_metadata,omitempty"`
@@ -27,12 +29,20 @@ type HTTPDebugEvent struct {
 	ResponseBodyBytes   int                    `json:"response_body_bytes,omitempty"`
 	ResponseBodyRaw     []byte                 `json:"-"`
 	Error               string                 `json:"error,omitempty"`
+	RetryReason         string                 `json:"retry_reason,omitempty"`
+	RetryDelayMS        int64                  `json:"retry_delay_ms,omitempty"`
 }
 
 // HTTPDebugReporter consumes runtime HTTP debug events.
 type HTTPDebugReporter func(HTTPDebugEvent)
 
 type httpDebugReporterContextKey struct{}
+type httpDebugRetryAttemptContextKey struct{}
+
+type httpDebugRetryAttemptState struct {
+	Attempt     int
+	MaxAttempts int
+}
 
 const httpDebugRequestDiagnosticsKey = "_request_debug"
 
@@ -51,11 +61,32 @@ func reportHTTPDebug(ctx context.Context, event HTTPDebugEvent) {
 	if ctx == nil {
 		return
 	}
+	if state, ok := ctx.Value(httpDebugRetryAttemptContextKey{}).(httpDebugRetryAttemptState); ok {
+		if event.Attempt <= 0 {
+			event.Attempt = state.Attempt
+		}
+		if event.MaxAttempts <= 0 {
+			event.MaxAttempts = state.MaxAttempts
+		}
+	}
 	reporter, _ := ctx.Value(httpDebugReporterContextKey{}).(HTTPDebugReporter)
 	if reporter == nil {
 		return
 	}
 	reporter(event)
+}
+
+func withHTTPDebugRetryAttempt(ctx context.Context, attempt int, maxAttempts int) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if attempt <= 0 && maxAttempts <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, httpDebugRetryAttemptContextKey{}, httpDebugRetryAttemptState{
+		Attempt:     attempt,
+		MaxAttempts: maxAttempts,
+	})
 }
 
 func truncateHTTPDebugText(text string, maxBytes int) string {

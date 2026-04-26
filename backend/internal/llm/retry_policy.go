@@ -2,11 +2,12 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	stderrs "errors"
 	"fmt"
-	"math/rand"
 	"io"
 	"math"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -373,6 +374,10 @@ type retryErrorCoder interface {
 	RetryErrorCode() string
 }
 
+type retryDelayHinter interface {
+	RetryAfterDelay() time.Duration
+}
+
 func classifyRetryableLLMError(err error) retryDecision {
 	return classifyRetryableLLMErrorWithRules(err, nil)
 }
@@ -514,10 +519,170 @@ func decisionFromRetryRules(err error, rules []RetryRule) (retryDecision, bool) 
 }
 
 func decisionDelayFromServerHint(err error) time.Duration {
+	if delay, ok := errorRetryAfterDelay(err); ok {
+		return delay
+	}
 	if delay, ok := parseRetryAfterFromMessage(err.Error()); ok {
 		return delay
 	}
 	return 0
+}
+
+func errorRetryAfterDelay(err error) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	var hinter retryDelayHinter
+	if stderrs.As(err, &hinter) {
+		if delay := hinter.RetryAfterDelay(); delay > 0 {
+			return delay, true
+		}
+	}
+	return 0, false
+}
+
+func retryAfterDelayFromHeader(header http.Header, now time.Time) (time.Duration, bool) {
+	if len(header) == 0 {
+		return 0, false
+	}
+	if delay, ok := parseRetryAfterMillisecondsValue(header.Get("Retry-After-Ms")); ok {
+		return delay, true
+	}
+	return parseRetryAfterHeaderValue(header.Get("Retry-After"), now)
+}
+
+func parseRetryAfterHeaderValue(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if delay, ok := parseRetryAfterDuration(value, ""); ok {
+		return delay, true
+	}
+	parsedTime, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	delay := parsedTime.Sub(now)
+	if delay <= 0 {
+		return 0, false
+	}
+	return delay, true
+}
+
+func parseRetryAfterMillisecondsValue(value string) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if duration, err := time.ParseDuration(value); err == nil && duration > 0 {
+		return duration, true
+	}
+	number, err := strconv.ParseFloat(value, 64)
+	if err != nil || number <= 0 {
+		return 0, false
+	}
+	return time.Duration(number * float64(time.Millisecond)), true
+}
+
+func retryAfterDelayFromBody(body string) (time.Duration, bool) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return 0, false
+	}
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+	var payload interface{}
+	if err := decoder.Decode(&payload); err != nil {
+		return 0, false
+	}
+	return findRetryAfterDelayInValue(payload)
+}
+
+func findRetryAfterDelayInValue(value interface{}) (time.Duration, bool) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for _, key := range []string{"retry_after_ms", "retryAfterMs", "retry_after_milliseconds"} {
+			if delay, ok := parseRetryDelayValue(typed[key], true); ok {
+				return delay, true
+			}
+		}
+		for _, key := range []string{"retry_after", "retryAfter"} {
+			if delay, ok := parseRetryDelayValue(typed[key], false); ok {
+				return delay, true
+			}
+		}
+		for _, nested := range typed {
+			if delay, ok := findRetryAfterDelayInValue(nested); ok {
+				return delay, true
+			}
+		}
+	case []interface{}:
+		for _, nested := range typed {
+			if delay, ok := findRetryAfterDelayInValue(nested); ok {
+				return delay, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseRetryDelayValue(value interface{}, milliseconds bool) (time.Duration, bool) {
+	if value == nil {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case json.Number:
+		number, err := typed.Float64()
+		if err != nil || number <= 0 {
+			return 0, false
+		}
+		return retryDelayFromFloat(number, milliseconds), true
+	case float64:
+		if typed <= 0 {
+			return 0, false
+		}
+		return retryDelayFromFloat(typed, milliseconds), true
+	case float32:
+		if typed <= 0 {
+			return 0, false
+		}
+		return retryDelayFromFloat(float64(typed), milliseconds), true
+	case int:
+		if typed <= 0 {
+			return 0, false
+		}
+		return retryDelayFromFloat(float64(typed), milliseconds), true
+	case int64:
+		if typed <= 0 {
+			return 0, false
+		}
+		return retryDelayFromFloat(float64(typed), milliseconds), true
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return 0, false
+		}
+		if duration, err := time.ParseDuration(text); err == nil && duration > 0 {
+			return duration, true
+		}
+		if milliseconds {
+			return parseRetryAfterMillisecondsValue(text)
+		}
+		return parseRetryAfterHeaderValue(text, time.Time{})
+	default:
+		return 0, false
+	}
+}
+
+func retryDelayFromFloat(value float64, milliseconds bool) time.Duration {
+	if milliseconds {
+		return time.Duration(value * float64(time.Millisecond))
+	}
+	return time.Duration(value * float64(time.Second))
 }
 
 func retryRuleHasMatcher(rule RetryRule) bool {
