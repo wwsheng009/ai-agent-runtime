@@ -10,6 +10,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -315,10 +316,9 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		b.writePromptIfIdle()
 		return
 	}
-	if b.shouldFlushReasoningOnSessionEnd(event) {
-		return
-	}
-	if b.shouldFlushAssistantDeltaOnSessionEnd(event) {
+	flushedReasoning := b.shouldFlushReasoningOnSessionEnd(event)
+	flushedAssistant := b.shouldFlushAssistantDeltaOnSessionEnd(event)
+	if (flushedReasoning || flushedAssistant) && !isPromptPreflightSessionEndEvent(event) {
 		return
 	}
 	if b.shouldSuppressTimelineDuringAssistantStream(event) {
@@ -1100,6 +1100,16 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			return rendered
 		}
 		return chatRuntimeTimelineEvent{}
+	case runtimechat.EventSessionCompactStarted, runtimechat.EventSessionCompactCompleted, runtimechat.EventSessionCompactSkipped, runtimechat.EventSessionCompactFailed:
+		if rendered := renderSessionCompactTimelineEvent(event); rendered.Line != "" {
+			return rendered
+		}
+		return chatRuntimeTimelineEvent{}
+	case runtimechat.EventSessionEnd:
+		if rendered := renderPromptPreflightSessionEndTimelineEvent(event); rendered.Line != "" {
+			return rendered
+		}
+		return chatRuntimeTimelineEvent{}
 	case "planning.started":
 		return chatRuntimeTimelineEvent{}
 	case "planning.completed":
@@ -1170,23 +1180,81 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		if summary != "" {
 			line += " " + summary
 		}
-		return chatRuntimeTimelineEvent{Line: line, DedupKey: fmt.Sprintf("%s:%s:%s", strings.TrimSpace(event.Type), teamID, taskID)}
+		lines := []string{line}
+		if action == "failed" && strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["error_type"])), "prompt_preflight") {
+			lines[0] += " [prompt preflight]"
+			if reason := promptPreflightReasonSummary(event.Payload); reason != "" {
+				lines = append(lines, "  原因: "+reason)
+			}
+			if model := promptPreflightModelSummary(event.Payload); model != "" {
+				lines = append(lines, "  模型: "+model)
+			}
+			if budget := promptPreflightBudgetSourceSummary(event.Payload); budget != "" {
+				lines = append(lines, "  预算: "+budget)
+			}
+			if recovery := promptPreflightRecoverySummary(event.Payload); recovery != "" {
+				lines = append(lines, "  恢复: "+recovery)
+			}
+		} else if action == "blocked" && strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["replan_error_type"])), "prompt_preflight") {
+			replanPayload := extractPrefixedRuntimePayload(event.Payload, "replan")
+			if reason := promptPreflightReasonSummary(replanPayload); reason != "" {
+				lines = append(lines, "  replan: [prompt preflight] "+reason)
+			}
+			if model := promptPreflightModelSummary(replanPayload); model != "" {
+				lines = append(lines, "  replan 模型: "+model)
+			}
+			if budget := promptPreflightBudgetSourceSummary(replanPayload); budget != "" {
+				lines = append(lines, "  replan 预算: "+budget)
+			}
+			if recovery := promptPreflightRecoverySummary(replanPayload); recovery != "" {
+				lines = append(lines, "  replan 恢复: "+recovery)
+			}
+		}
+		return chatRuntimeTimelineEvent{Line: strings.Join(lines, "\n"), DedupKey: fmt.Sprintf("%s:%s:%s", strings.TrimSpace(event.Type), teamID, taskID)}
 	case "team.completed":
 		status := firstNonEmptyChatValue(payloadStringValue(event.Payload["status"]), "done")
 		return chatRuntimeTimelineEvent{
 			Line:     fmt.Sprintf("[team] completed %s status=%s", firstNonEmptyChatValue(teamID, "?"), status),
 			DedupKey: fmt.Sprintf("team.completed:%s:%s", teamID, status),
 		}
-	case "team.summary":
-		summary := truncateChatRuntimeText(payloadStringValue(event.Payload["summary"]), 200)
-		line := fmt.Sprintf("[team summary] %s", firstNonEmptyChatValue(teamID, "?"))
-		if summary != "" {
-			line += " " + summary
+	case "team.plan.failed", "team.plan.replan_failed", "team.summary.failed":
+		action := strings.TrimSpace(event.Type)
+		headline := "[team] failed"
+		switch action {
+		case "team.plan.failed":
+			headline = fmt.Sprintf("[team plan] failed %s", firstNonEmptyChatValue(teamID, "?"))
+		case "team.plan.replan_failed":
+			headline = fmt.Sprintf("[team replan] failed %s", firstNonEmptyChatValue(teamID, "?"))
+			if taskID := strings.TrimSpace(payloadStringValue(event.Payload["task_id"])); taskID != "" {
+				headline += " " + taskID
+			}
+		case "team.summary.failed":
+			headline = fmt.Sprintf("[team summary] failed %s", firstNonEmptyChatValue(teamID, "?"))
+		}
+		lines := []string{headline}
+		if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["error_type"])), "prompt_preflight") {
+			lines[0] += " [prompt preflight]"
+			if reason := promptPreflightReasonSummary(event.Payload); reason != "" {
+				lines = append(lines, "  原因: "+reason)
+			}
+			if model := promptPreflightModelSummary(event.Payload); model != "" {
+				lines = append(lines, "  模型: "+model)
+			}
+			if budget := promptPreflightBudgetSourceSummary(event.Payload); budget != "" {
+				lines = append(lines, "  预算: "+budget)
+			}
+			if recovery := promptPreflightRecoverySummary(event.Payload); recovery != "" {
+				lines = append(lines, "  恢复: "+recovery)
+			}
+		} else if summary := truncateChatRuntimeText(payloadStringValue(event.Payload["error"]), 160); summary != "" {
+			lines = append(lines, "  错误: "+summary)
 		}
 		return chatRuntimeTimelineEvent{
-			Line:     line,
-			DedupKey: fmt.Sprintf("team.summary:%s", teamID),
+			Line:     strings.Join(lines, "\n"),
+			DedupKey: fmt.Sprintf("%s:%s:%s", action, teamID, payloadStringValue(event.Payload["task_id"])),
 		}
+	case "team.summary", "team.summary.generated":
+		return renderTeamSummaryTimelineEvent(event, teamID)
 	case chatEventInputQueueDetected:
 		count := intPayloadValue(event.Payload, "queued_input_count")
 		source := firstNonEmptyChatValue(payloadStringValue(event.Payload["source"]), "stdin")
@@ -1223,6 +1291,350 @@ func llmRequestDedupKey(event runtimeevents.Event, eventType string) string {
 		return fmt.Sprintf("%s:%s", strings.TrimSpace(eventType), traceID)
 	}
 	return fmt.Sprintf("%s:%s:%s", strings.TrimSpace(eventType), traceID, stepLabel)
+}
+
+func renderSessionCompactTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
+	payload := event.Payload
+	if payload == nil {
+		return chatRuntimeTimelineEvent{}
+	}
+	mode := firstNonEmptyChatValue(payloadStringValue(payload["mode"]), compactruntime.ModeLocal)
+	phase := firstNonEmptyChatValue(payloadStringValue(payload["phase"]), compactruntime.PhasePreTurn)
+	traceID := firstNonEmptyChatValue(strings.TrimSpace(event.TraceID), payloadStringValue(payload["trace_id"]))
+	sessionID := firstNonEmptyChatValue(strings.TrimSpace(event.SessionID), payloadStringValue(payload["session_id"]))
+	dedupKeyBase := fmt.Sprintf("%s:%s:%s:%s", strings.TrimSpace(event.Type), sessionID, traceID, phase)
+
+	switch event.Type {
+	case runtimechat.EventSessionCompactStarted:
+		return chatRuntimeTimelineEvent{
+			Line:     fmt.Sprintf("[context] session compact started mode=%s phase=%s %s", mode, phase, sessionCompactBudgetSummary(payload)),
+			DedupKey: dedupKeyBase,
+		}
+	case runtimechat.EventSessionCompactCompleted:
+		line := fmt.Sprintf(
+			"[context] session compact completed mode=%s phase=%s token %d -> %d compacted_messages=%d history_messages=%d",
+			mode,
+			phase,
+			intPayloadValue(payload, "token_before"),
+			intPayloadValue(payload, "token_after"),
+			intPayloadValue(payload, "compacted_messages"),
+			intPayloadValue(payload, "message_count_after"),
+		)
+		if checkpointID := truncateChatRuntimeText(payloadStringValue(payload["checkpoint_id"]), 80); checkpointID != "" {
+			line += " checkpoint_id=" + checkpointID
+		}
+		return chatRuntimeTimelineEvent{
+			Line:     line,
+			DedupKey: dedupKeyBase,
+		}
+	case runtimechat.EventSessionCompactSkipped:
+		return chatRuntimeTimelineEvent{
+			Line:     fmt.Sprintf("[context] session compact skipped mode=%s phase=%s reason=%s", mode, phase, sessionCompactReasonSummary(payload)),
+			DedupKey: dedupKeyBase + ":reason=" + sessionCompactReasonSummary(payload),
+		}
+	case runtimechat.EventSessionCompactFailed:
+		line := fmt.Sprintf("[context] session compact failed mode=%s phase=%s reason=%s", mode, phase, sessionCompactReasonSummary(payload))
+		if errText := truncateChatRuntimeText(payloadStringValue(payload["error"]), 160); errText != "" {
+			line += " error=" + errText
+		}
+		return chatRuntimeTimelineEvent{
+			Line:     line,
+			DedupKey: dedupKeyBase + ":failed",
+		}
+	default:
+		return chatRuntimeTimelineEvent{}
+	}
+}
+
+func sessionCompactBudgetSummary(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	tokenBefore := intPayloadValue(payload, "token_before")
+	triggerLimit := intPayloadValue(payload, "trigger_token_limit")
+	maxContext := intPayloadValue(payload, "max_context_tokens")
+	model := sessionCompactModelSummary(payload)
+	parts := make([]string, 0, 4)
+	if tokenBefore > 0 {
+		parts = append(parts, fmt.Sprintf("token_before=%d", tokenBefore))
+	}
+	if triggerLimit > 0 {
+		parts = append(parts, fmt.Sprintf("trigger_token_limit=%d", triggerLimit))
+	}
+	if maxContext > 0 {
+		parts = append(parts, fmt.Sprintf("max_context_tokens=%d", maxContext))
+	}
+	if model != "" {
+		parts = append(parts, "target="+model)
+	}
+	return strings.Join(parts, " ")
+}
+
+func sessionCompactReasonSummary(payload map[string]interface{}) string {
+	reason := strings.TrimSpace(payloadStringValue(payload["reason"]))
+	switch reason {
+	case "":
+		return "unknown"
+	case "below_limit":
+		return "below_limit"
+	case "missing_model_capability":
+		return "missing_model_capability"
+	case "history_empty":
+		return "history_empty"
+	case "pending_tool":
+		return "pending_tool"
+	case "pending_approval":
+		return "pending_approval"
+	case "pending_question":
+		return "pending_question"
+	case "resume_run":
+		return "resume_run"
+	default:
+		return reason
+	}
+}
+
+func sessionCompactModelSummary(payload map[string]interface{}) string {
+	provider := strings.TrimSpace(payloadStringValue(payload["provider"]))
+	model := strings.TrimSpace(payloadStringValue(payload["model"]))
+	switch {
+	case provider != "" && model != "":
+		return provider + "/" + model
+	case provider != "":
+		return provider
+	default:
+		return model
+	}
+}
+
+func isPromptPreflightSessionEndEvent(event runtimeevents.Event) bool {
+	if strings.TrimSpace(event.Type) != runtimechat.EventSessionEnd {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["error_type"])), "prompt_preflight")
+}
+
+func renderPromptPreflightSessionEndTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
+	if !isPromptPreflightSessionEndEvent(event) {
+		return chatRuntimeTimelineEvent{}
+	}
+	payload := event.Payload
+	promptTokens := intPayloadValue(payload, "prompt_tokens")
+	promptBudget := intPayloadValue(payload, "prompt_budget")
+
+	headline := "[prompt preflight] 本地拦截：请求在发送给模型前因上下文预算超限而终止"
+	if promptTokens > 0 && promptBudget > 0 {
+		headline = fmt.Sprintf("[prompt preflight] 本地拦截：prompt %d > budget %d", promptTokens, promptBudget)
+	} else if promptTokens > 0 {
+		headline = fmt.Sprintf("[prompt preflight] 本地拦截：prompt=%d", promptTokens)
+	}
+
+	lines := []string{headline}
+	if reason := promptPreflightReasonSummary(payload); reason != "" {
+		lines = append(lines, "  原因: "+reason)
+	}
+	if suggestion := truncateChatRuntimeText(payloadStringValue(payload["suggested_action"]), 160); suggestion != "" {
+		lines = append(lines, "  建议: "+suggestion)
+	}
+	if model := promptPreflightModelSummary(payload); model != "" {
+		lines = append(lines, "  模型: "+model)
+	}
+	if budget := promptPreflightBudgetSourceSummary(payload); budget != "" {
+		lines = append(lines, "  预算: "+budget)
+	}
+	if activeTurn := promptPreflightActiveTurnSummary(payload); activeTurn != "" {
+		lines = append(lines, "  active-turn: "+activeTurn)
+	}
+	if recovery := promptPreflightRecoverySummary(payload); recovery != "" {
+		lines = append(lines, "  恢复: "+recovery)
+	}
+
+	traceID := firstNonEmptyChatValue(strings.TrimSpace(event.TraceID), payloadStringValue(payload["trace_id"]))
+	failureCode := firstNonEmptyChatValue(payloadStringValue(payload["failure_reason_code"]), "prompt_preflight")
+	return chatRuntimeTimelineEvent{
+		Line:     strings.Join(lines, "\n"),
+		DedupKey: fmt.Sprintf("session_end.prompt_preflight:%s:%s:%s", strings.TrimSpace(event.SessionID), traceID, failureCode),
+	}
+}
+
+func promptPreflightReasonSummary(payload map[string]interface{}) string {
+	switch strings.TrimSpace(payloadStringValue(payload["failure_reason_code"])) {
+	case "active_turn_not_compactable":
+		return "当前轮次里的 active-turn replay 已无法继续压缩"
+	case "prompt_still_exceeds_budget_after_compaction":
+		return "active-turn 已压缩，但 prompt 仍然超出预算"
+	}
+	if reason := truncateChatRuntimeText(payloadStringValue(payload["failure_reason"]), 160); reason != "" {
+		return reason
+	}
+	return truncateChatRuntimeText(payloadStringValue(payload["failure_reason_detail"]), 160)
+}
+
+func promptPreflightModelSummary(payload map[string]interface{}) string {
+	provider := strings.TrimSpace(payloadStringValue(payload["resolved_provider"]))
+	model := strings.TrimSpace(payloadStringValue(payload["resolved_model"]))
+	switch {
+	case provider != "" && model != "":
+		return provider + " / " + model
+	case model != "":
+		return model
+	default:
+		return provider
+	}
+}
+
+func promptPreflightBudgetSourceSummary(payload map[string]interface{}) string {
+	source := strings.TrimSpace(payloadStringValue(payload["budget_source"]))
+	switch source {
+	case "default_context_max_prompt_tokens":
+		return "默认 context prompt 预算"
+	case "context_max_prompt_tokens":
+		return "context manager 的 max_prompt_tokens"
+	case "remaining_budget":
+		return "本轮剩余 prompt 预算"
+	case "model_capability_auto_compact_token_limit":
+		return "模型能力 auto-compact token limit"
+	case "model_capability_auto_compact_ratio":
+		return "模型能力 auto-compact ratio"
+	case "model_capability_max_context_tokens":
+		return "模型能力 max_context_tokens"
+	case "provider_context_limit":
+		return "provider context limit"
+	case "":
+		return truncateChatRuntimeText(payloadStringValue(payload["budget_source_detail"]), 120)
+	default:
+		return source
+	}
+}
+
+func promptPreflightActiveTurnSummary(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	messageCount := intPayloadValue(payload, "active_turn_message_count")
+	replayBlockCount := intPayloadValue(payload, "latest_replay_block_message_count")
+	compacted := payloadBoolValue(payload, "active_turn_compacted")
+	if messageCount <= 0 && replayBlockCount <= 0 && !compacted {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if messageCount > 0 {
+		parts = append(parts, fmt.Sprintf("messages=%d", messageCount))
+	}
+	if replayBlockCount > 0 {
+		parts = append(parts, fmt.Sprintf("latest_replay_block=%d", replayBlockCount))
+	}
+	if compacted {
+		parts = append(parts, "compacted=true")
+	} else if messageCount > 0 || replayBlockCount > 0 {
+		parts = append(parts, "compacted=false")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func promptPreflightRecoverySummary(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	available := payloadBoolValue(payload, "replacement_history_available")
+	applied := payloadBoolValue(payload, "replacement_history_applied")
+	messageCount := intPayloadValue(payload, "replacement_history_message_count")
+	if !available && !applied && messageCount <= 0 {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	switch {
+	case applied:
+		parts = append(parts, "已自动保存压缩后的上下文，可直接继续下一轮")
+	case available:
+		parts = append(parts, "已生成压缩后的恢复上下文")
+	}
+	if messageCount > 0 {
+		parts = append(parts, fmt.Sprintf("history_messages=%d", messageCount))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func teamSummaryFallbackReasonSummary(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "sessions_not_configured":
+		return "lead summary 会话不可用，改用任务列表回退总结"
+	case "team_not_available":
+		return "未能加载 team 记录，改用任务列表回退总结"
+	case "lead_session_missing":
+		return "lead session 缺失，改用任务列表回退总结"
+	case "lead_session_error":
+		return "lead summary 执行失败，改用任务列表回退总结"
+	case "lead_output_empty":
+		return "lead 未返回总结内容，改用任务列表回退总结"
+	default:
+		return truncateChatRuntimeText(strings.TrimSpace(reason), 160)
+	}
+}
+
+func renderTeamSummaryTimelineEvent(event runtimeevents.Event, teamID string) chatRuntimeTimelineEvent {
+	summary := truncateChatRuntimeText(payloadStringValue(event.Payload["summary"]), 200)
+	line := fmt.Sprintf("[team summary] %s", firstNonEmptyChatValue(teamID, "?"))
+	lines := []string{}
+	if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["summary_source"])), "fallback") {
+		line += " [fallback]"
+		if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["error_type"])), "prompt_preflight") {
+			line += " [prompt preflight]"
+		}
+	}
+	if summary != "" {
+		line += " " + summary
+	}
+	lines = append(lines, line)
+	if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["summary_source"])), "fallback") {
+		if strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["error_type"])), "prompt_preflight") {
+			if reason := promptPreflightReasonSummary(event.Payload); reason != "" {
+				lines = append(lines, "  原因: "+reason)
+			}
+			if model := promptPreflightModelSummary(event.Payload); model != "" {
+				lines = append(lines, "  模型: "+model)
+			}
+			if budget := promptPreflightBudgetSourceSummary(event.Payload); budget != "" {
+				lines = append(lines, "  预算: "+budget)
+			}
+			if recovery := promptPreflightRecoverySummary(event.Payload); recovery != "" {
+				lines = append(lines, "  恢复: "+recovery)
+			}
+		} else if reason := teamSummaryFallbackReasonSummary(payloadStringValue(event.Payload["fallback_reason"])); reason != "" {
+			lines = append(lines, "  fallback: "+reason)
+		}
+	}
+	return chatRuntimeTimelineEvent{
+		Line:     strings.Join(lines, "\n"),
+		DedupKey: fmt.Sprintf("team.summary:%s", teamID),
+	}
+}
+
+func extractPrefixedRuntimePayload(payload map[string]interface{}, prefix string) map[string]interface{} {
+	if len(payload) == 0 {
+		return nil
+	}
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil
+	}
+	normalizedPrefix := prefix + "_"
+	out := map[string]interface{}{}
+	for key, value := range payload {
+		key = strings.TrimSpace(key)
+		if !strings.HasPrefix(key, normalizedPrefix) {
+			continue
+		}
+		trimmed := strings.TrimPrefix(key, normalizedPrefix)
+		if trimmed == "" {
+			continue
+		}
+		out[trimmed] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func chatRuntimeTaskAction(eventType string) string {

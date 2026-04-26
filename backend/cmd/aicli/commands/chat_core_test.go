@@ -16,6 +16,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
@@ -749,6 +750,88 @@ func TestHumanizeActorExecutorError_AppendsRuntimeHTTPPreview(t *testing.T) {
 	}
 }
 
+func TestHumanizeActorExecutorError_HumanizesPromptPreflightFailure(t *testing.T) {
+	err := humanizeActorExecutorError(nil, &agent.PromptPreflightError{
+		PromptTokens:     1400,
+		PromptBudget:     900,
+		Code:             "active_turn_not_compactable",
+		Reason:           "active-turn replay cannot be compacted further",
+		SuggestedAction:  "请开启新一轮对话、减少上下文，或提高预算。",
+		ResolvedProvider: "test-provider",
+		ResolvedModel:    "test-model",
+		BudgetSource:     "context_max_prompt_tokens",
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "本次请求在发送给模型前已被本地拦截") {
+		t.Fatalf("expected localized preflight message, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "provider=test-provider") || !strings.Contains(err.Error(), "model=test-model") {
+		t.Fatalf("expected provider/model context in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "建议：请开启新一轮对话、减少上下文，或提高预算。") {
+		t.Fatalf("expected suggested action in error, got %v", err)
+	}
+}
+
+func TestHumanizeActorExecutorError_NoticesRecoveredPromptPreflightHistory(t *testing.T) {
+	err := humanizeActorExecutorError(nil, &agent.PromptPreflightError{
+		PromptTokens:              1400,
+		PromptBudget:              900,
+		Code:                      "prompt_still_exceeds_budget_after_compaction",
+		Reason:                    "prompt budget still exceeded after active-turn compaction",
+		SuggestedAction:           "请继续收缩上下文层、提高预算，或从新的轮次继续。",
+		ResolvedProvider:          "test-provider",
+		ResolvedModel:             "test-model",
+		BudgetSource:              "context_max_prompt_tokens",
+		ReplacementHistoryApplied: true,
+		ReplacementHistory:        []types.Message{*types.NewUserMessage("继续处理"), *types.NewAssistantMessage("Compacted earlier tool replay in current turn: ...")},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "当前会话已自动保存压缩后的上下文，可直接继续下一轮。") {
+		t.Fatalf("expected recovery-applied hint in error, got %v", err)
+	}
+}
+
+func TestRenderSharedChatWarningEvent_ContextCategoryBypassesWarningPrefix(t *testing.T) {
+	event := runtimechatcore.ChatEvent{
+		Type:    runtimechatcore.EventWarning,
+		Content: "[context] shared auto-compact applied mode=local token 1200 -> 240 compacted_messages=6 history_messages=4",
+		Metadata: map[string]interface{}{
+			"category": "context",
+			"name":     "shared_auto_compact",
+		},
+	}
+	if got := renderSharedChatWarningEvent(event); got != event.Content {
+		t.Fatalf("expected context event to render raw content, got %q", got)
+	}
+}
+
+func TestSharedChatAutoCompactChatEvent_Applied(t *testing.T) {
+	event, ok := sharedChatAutoCompactChatEvent(&sharedChatAutoCompactReport{
+		Result: &compactruntime.Result{
+			Mode:               compactruntime.ModeLocal,
+			TokenBefore:        1200,
+			TokenAfter:         240,
+			CompactedMessages:  6,
+			ReplacementHistory: []types.Message{*types.NewUserMessage("继续处理"), *types.NewUserMessage("Compacted context from earlier turns: ...")},
+		},
+		Status: compactruntime.Status{Mode: compactruntime.ModeLocal},
+	}, nil)
+	if !ok {
+		t.Fatal("expected auto compact event")
+	}
+	if event.Type != runtimechatcore.EventWarning {
+		t.Fatalf("expected warning event, got %#v", event)
+	}
+	if !strings.Contains(event.Content, "[context] shared auto-compact applied") {
+		t.Fatalf("unexpected auto compact applied event: %#v", event)
+	}
+}
+
 func TestAICLISharedChatExecutor_RemainsAvailableAsFallback(t *testing.T) {
 	originalExecute := executeToolLoop
 	defer func() {
@@ -1418,6 +1501,356 @@ func TestAICLIEventRenderer_SharedBrokerToolResultUsesSourceLabels(t *testing.T)
 	}
 	if strings.Contains(rendered, "restart_policy=fail") {
 		t.Fatalf("expected broker folding to keep CLI compact, got %q", rendered)
+	}
+}
+
+func TestAICLISharedChatExecutor_PassesActiveTurnTokenBudgetToToolLoop(t *testing.T) {
+	original := executeToolLoop
+	defer func() {
+		executeToolLoop = original
+	}()
+
+	var captured runtimechatcore.ToolLoopRequest
+	executeToolLoop = func(ctx context.Context, req runtimechatcore.ToolLoopRequest) (*runtimechatcore.ToolLoopResult, error) {
+		captured = req
+		return &runtimechatcore.ToolLoopResult{
+			Response: &runtimechatcore.ChatResult{Output: "done"},
+			History: []types.Message{
+				*types.NewUserMessage("继续处理"),
+				*types.NewAssistantMessage("done"),
+			},
+		}, nil
+	}
+
+	session := &ChatSession{
+		DisableTools: true,
+		Model:        "gpt-5",
+		Provider: config.Provider{
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"gpt-5": {
+					MaxContextTokens: 10000,
+					AutoCompactRatio: 0.8,
+				},
+			},
+		},
+	}
+
+	executor := newAICLISharedChatExecutor()
+	output, err := executor.Execute(context.Background(), session, "继续处理")
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "done" {
+		t.Fatalf("unexpected output: %q", output)
+	}
+	if captured.ActiveTurnMaxTokens != 8000 {
+		t.Fatalf("expected active turn token budget 8000, got %d", captured.ActiveTurnMaxTokens)
+	}
+	if captured.PromptBudgetSource != "model_capability_auto_compact_ratio" {
+		t.Fatalf("expected prompt budget source to be model_capability_auto_compact_ratio, got %q", captured.PromptBudgetSource)
+	}
+	if captured.ResolvedModel != "gpt-5" {
+		t.Fatalf("expected resolved model gpt-5, got %q", captured.ResolvedModel)
+	}
+	if captured.ModelCapabilityMaxContextTokens != 10000 {
+		t.Fatalf("expected max context tokens 10000, got %d", captured.ModelCapabilityMaxContextTokens)
+	}
+	if captured.ModelCapabilityAutoCompactRatio != 0.8 {
+		t.Fatalf("expected auto compact ratio 0.8, got %v", captured.ModelCapabilityAutoCompactRatio)
+	}
+	if captured.CountTokens == nil {
+		t.Fatal("expected shared chat executor to pass a CountTokens callback")
+	}
+}
+
+func TestAICLISharedChatExecutor_HumanizesPromptPreflightFailureFromToolLoop(t *testing.T) {
+	original := executeToolLoop
+	defer func() {
+		executeToolLoop = original
+	}()
+
+	executeToolLoop = func(ctx context.Context, req runtimechatcore.ToolLoopRequest) (*runtimechatcore.ToolLoopResult, error) {
+		return nil, &agent.PromptPreflightError{
+			PromptTokens:     1600,
+			PromptBudget:     900,
+			Code:             "active_turn_not_compactable",
+			Reason:           "active-turn replay cannot be compacted further",
+			SuggestedAction:  "请开启新一轮对话、减少上下文，或提高预算。",
+			ResolvedProvider: "shared-provider",
+			ResolvedModel:    "shared-model",
+			BudgetSource:     "model_capability_auto_compact_token_limit",
+		}
+	}
+
+	session := &ChatSession{
+		DisableTools: true,
+		Model:        "shared-model",
+		ProviderName: "shared-provider",
+	}
+
+	_, err := newAICLISharedChatExecutor().Execute(context.Background(), session, "继续处理")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "本次请求在发送给模型前已被本地拦截") {
+		t.Fatalf("expected humanized preflight error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "provider=shared-provider") || !strings.Contains(err.Error(), "model=shared-model") {
+		t.Fatalf("expected provider/model metadata in humanized error, got %v", err)
+	}
+}
+
+func TestAICLISharedChatExecutor_AppliesPromptPreflightRecoveryHistoryBeforeReturningError(t *testing.T) {
+	original := executeToolLoop
+	originalCompact := autoCompactSharedChatHistory
+	defer func() {
+		executeToolLoop = original
+		autoCompactSharedChatHistory = originalCompact
+	}()
+	autoCompactSharedChatHistory = maybeAutoCompactSharedChatHistory
+
+	compacted := types.NewAssistantMessage("Compacted earlier tool replay in current turn:\n- earlier tool output summarized")
+	compacted.Metadata["active_turn_compaction"] = true
+
+	replacementHistory := []types.Message{
+		*types.NewUserMessage("继续处理"),
+		*compacted,
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_2", Name: "view", Args: map[string]interface{}{"file_path": "AGENTS.md"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_2", "AGENTS ..."),
+	}
+
+	executeToolLoop = func(ctx context.Context, req runtimechatcore.ToolLoopRequest) (*runtimechatcore.ToolLoopResult, error) {
+		return nil, &agent.PromptPreflightError{
+			PromptTokens:        1600,
+			PromptBudget:        900,
+			Code:                "prompt_still_exceeds_budget_after_compaction",
+			Reason:              "prompt budget still exceeded after active-turn compaction",
+			SuggestedAction:     "请继续收缩上下文层、提高预算，或从新的轮次继续。",
+			ResolvedProvider:    "shared-provider",
+			ResolvedModel:       "shared-model",
+			BudgetSource:        "model_capability_auto_compact_token_limit",
+			ActiveTurnCompacted: true,
+			ReplacementHistory:  replacementHistory,
+		}
+	}
+
+	originalMessages, err := buildAICLIMessagesFromRuntimeHistory([]types.Message{
+		*types.NewUserMessage("继续处理"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_1", Name: "view", Args: map[string]interface{}{"file_path": "README.md"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_1", "README ..."),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_2", Name: "view", Args: map[string]interface{}{"file_path": "AGENTS.md"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_2", "AGENTS ..."),
+	})
+	if err != nil {
+		t.Fatalf("buildAICLIMessagesFromRuntimeHistory failed: %v", err)
+	}
+
+	session := &ChatSession{
+		DisableTools: true,
+		Model:        "shared-model",
+		ProviderName: "shared-provider",
+		Messages:     originalMessages,
+	}
+
+	_, err = newAICLISharedChatExecutor().Execute(context.Background(), session, "继续处理")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if len(session.Messages) != 4 {
+		t.Fatalf("expected replacement history to be applied to session messages, got %#v", session.Messages)
+	}
+	metadata, _ := session.Messages[1]["metadata"].(map[string]interface{})
+	if metadata == nil || metadata["active_turn_compaction"] != true {
+		t.Fatalf("expected compacted assistant summary metadata in session messages, got %#v", session.Messages[1])
+	}
+	if !strings.Contains(err.Error(), "当前会话已自动保存压缩后的上下文，可直接继续下一轮。") {
+		t.Fatalf("expected recovery-applied hint in humanized error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "本次请求在发送给模型前已被本地拦截") {
+		t.Fatalf("expected humanized preflight error, got %v", err)
+	}
+}
+
+func TestAICLISharedChatExecutor_AutoCompactsHistoryBeforeToolLoop(t *testing.T) {
+	originalExecute := executeToolLoop
+	originalCompact := autoCompactSharedChatHistory
+	defer func() {
+		executeToolLoop = originalExecute
+		autoCompactSharedChatHistory = originalCompact
+	}()
+
+	compactedHistory := []types.Message{
+		*types.NewUserMessage("较新的问题"),
+		*types.NewUserMessage("Compacted context from earlier turns:\n- 关键结论 A\n- 关键结论 B"),
+	}
+	compactedHistory[1].Metadata["context_stage"] = "compaction"
+	compactedHistory[1].Metadata["compact_mode"] = compactruntime.ModeLocal
+
+	autoCompactSharedChatHistory = func(ctx context.Context, session *ChatSession, history []types.Message) ([]types.Message, *sharedChatAutoCompactReport, error) {
+		if len(history) == 0 {
+			t.Fatal("expected original history to be provided to auto compaction")
+		}
+		return compactedHistory, &sharedChatAutoCompactReport{
+			Result: &compactruntime.Result{
+				Mode:               compactruntime.ModeLocal,
+				TokenBefore:        1200,
+				TokenAfter:         240,
+				CompactedMessages:  6,
+				ReplacementHistory: compactedHistory,
+			},
+			Status: compactruntime.Status{
+				Mode:   compactruntime.ModeLocal,
+				Reason: "above_limit",
+			},
+		}, nil
+	}
+
+	var captured runtimechatcore.ToolLoopRequest
+	executeToolLoop = func(ctx context.Context, req runtimechatcore.ToolLoopRequest) (*runtimechatcore.ToolLoopResult, error) {
+		captured = req
+		return &runtimechatcore.ToolLoopResult{
+			Response: &runtimechatcore.ChatResult{Output: "done"},
+			History: append(append([]types.Message(nil), req.History...),
+				*types.NewAssistantMessage("done"),
+			),
+		}, nil
+	}
+
+	originalMessages, err := buildAICLIMessagesFromRuntimeHistory([]types.Message{
+		*types.NewUserMessage("很早之前的问题"),
+		*types.NewAssistantMessage("很早之前的回答"),
+		*types.NewUserMessage("较新的问题"),
+	})
+	if err != nil {
+		t.Fatalf("buildAICLIMessagesFromRuntimeHistory failed: %v", err)
+	}
+
+	session := &ChatSession{
+		DisableTools: true,
+		Model:        "shared-model",
+		ProviderName: "shared-provider",
+		Messages:     originalMessages,
+	}
+
+	output, err := newAICLISharedChatExecutor().Execute(context.Background(), session, "继续处理")
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "done" {
+		t.Fatalf("unexpected output: %q", output)
+	}
+	if len(captured.History) != len(compactedHistory) {
+		t.Fatalf("expected tool loop to receive compacted history, got %#v", captured.History)
+	}
+	if stage := captured.History[1].Metadata.GetString("context_stage", ""); stage != "compaction" {
+		t.Fatalf("expected compacted history marker in tool loop request, got %#v", captured.History)
+	}
+}
+
+func TestAICLISharedChatExecutor_AutoCompactFailureDoesNotBlockRequest(t *testing.T) {
+	originalExecute := executeToolLoop
+	originalCompact := autoCompactSharedChatHistory
+	defer func() {
+		executeToolLoop = originalExecute
+		autoCompactSharedChatHistory = originalCompact
+	}()
+
+	autoCompactSharedChatHistory = func(ctx context.Context, session *ChatSession, history []types.Message) ([]types.Message, *sharedChatAutoCompactReport, error) {
+		return history, &sharedChatAutoCompactReport{
+			Status: compactruntime.Status{
+				Mode:   compactruntime.ModeLocal,
+				Reason: "summary_generation_failed",
+			},
+		}, fmt.Errorf("compact summary failed")
+	}
+
+	var captured runtimechatcore.ToolLoopRequest
+	executeToolLoop = func(ctx context.Context, req runtimechatcore.ToolLoopRequest) (*runtimechatcore.ToolLoopResult, error) {
+		captured = req
+		return &runtimechatcore.ToolLoopResult{
+			Response: &runtimechatcore.ChatResult{Output: "done"},
+			History: append(append([]types.Message(nil), req.History...),
+				*types.NewAssistantMessage("done"),
+			),
+		}, nil
+	}
+
+	originalHistory := []types.Message{
+		*types.NewUserMessage("原始问题"),
+		*types.NewAssistantMessage("原始回答"),
+	}
+	originalMessages, err := buildAICLIMessagesFromRuntimeHistory(originalHistory)
+	if err != nil {
+		t.Fatalf("buildAICLIMessagesFromRuntimeHistory failed: %v", err)
+	}
+
+	session := &ChatSession{
+		DisableTools: true,
+		Model:        "shared-model",
+		ProviderName: "shared-provider",
+		Messages:     originalMessages,
+	}
+
+	output, err := newAICLISharedChatExecutor().Execute(context.Background(), session, "继续处理")
+	if err != nil {
+		t.Fatalf("Execute failed despite compaction error: %v", err)
+	}
+	if output != "done" {
+		t.Fatalf("unexpected output: %q", output)
+	}
+	if len(captured.History) != len(originalHistory) {
+		t.Fatalf("expected executor to continue with original history, got %#v", captured.History)
+	}
+	if captured.History[0].Content != "原始问题" {
+		t.Fatalf("expected original history to be preserved on auto compact failure, got %#v", captured.History)
+	}
+}
+
+func TestCountSharedChatMessagesTokens_IncludesToolCallPayloads(t *testing.T) {
+	messages := []types.Message{
+		{
+			Role:    "assistant",
+			Content: "Need to inspect the repository.",
+			ToolCalls: []types.ToolCall{
+				{
+					ID:   "call_1",
+					Name: "read_file",
+					Args: map[string]interface{}{"path": "README.md"},
+				},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_1", "README content"),
+	}
+
+	withoutToolArgs := estimateSharedChatTokenCount(messages[0].Role) +
+		estimateSharedChatTokenCount(messages[0].Content) +
+		estimateSharedChatTokenCount(messages[0].ToolCallID) +
+		estimateSharedChatTokenCount(messages[1].Role) +
+		estimateSharedChatTokenCount(messages[1].Content) +
+		estimateSharedChatTokenCount(messages[1].ToolCallID) + 8
+
+	withToolArgs := countSharedChatMessagesTokens(messages)
+	if withToolArgs <= withoutToolArgs {
+		t.Fatalf("expected tool call payloads to contribute to token estimate, got with=%d without=%d", withToolArgs, withoutToolArgs)
 	}
 }
 

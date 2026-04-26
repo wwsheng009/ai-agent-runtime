@@ -4,7 +4,7 @@
 
 这份文档说明 `aicli` 当前关于工具输出的几个核心约束：
 
-1. **返回给 LLM 的工具结果不应因为 CLI 展示而被截断。**
+1. **返回给 LLM 的工具结果不应因为 CLI 展示而被截断，但模型回传链路可以有独立的上下文安全截断。**
 2. **CLI 可以为了可读性单独做摘要和折叠。**
 3. **工具输出的“来源”和“类型”必须显式携带，而不是在链路后面猜。**
 4. **结构化输出可以被序列化成 JSON 文本传输，但这不等于要把它裁剪成摘要。**
@@ -19,7 +19,8 @@
 ### 2.1 模型视角
 
 - 对模型来说，`tool_result` 是**上下文事实输入**，不能因为“终端不好看”而丢信息。
-- `text` 输出默认保留全文。
+- 内置 / toolkit 的 `text` 输出在**较小**时保留全文，在**超大**时会在写入 history 前做独立的 history-safe truncation。
+- shell / exec 类工具在执行层还会额外应用 **capture limit**，避免 stdout/stderr 原始聚合本身无限膨胀。
 - `structured` / `binary` 输出允许通过 reducer 产出 envelope 摘要，但这是**模型上下文治理**，不是 CLI 展示截断。
 - 外部 MCP 工具当前优先保留完整输出，避免 host 过早压缩远端工具结果。
 
@@ -72,7 +73,7 @@
 
 含义：
 
-- `text`：原样文本最重要，应优先保留全文
+- `text`：原样文本最重要，应优先保留原文；必要时仅在模型回传层做大文本截断
 - `structured`：结构化对象，允许通过 envelope 或 JSON 文本承载
 - `binary`：二进制结果，不适合直接原样内联
 - `empty`：成功但无有效正文
@@ -117,6 +118,7 @@
 - JSON 文本化：**格式转换**
 - CLI 摘要：**展示裁剪**
 - 输出治理 envelope：**模型上下文治理**
+- 超大文本 history truncation：**模型回传链路的上下文安全保护**
 
 三者必须分开。
 
@@ -149,9 +151,10 @@
 
 1. 外部 MCP 结果优先保留 full content
 2. 若 envelope 中已有 `output_kind`，按该类型处理
-3. 若内容本身是 `string` / `[]byte` / `fmt.Stringer`，视作 text-like
-4. 若不是 text-like 但有 envelope summary，优先 summary
-5. 否则再回退到 full content
+3. 内置 / toolkit 的 `text-like` 结果先构造 full content；若体量超过 history 安全预算，则改为“头 + 尾 + 截断标记”的格式化文本
+4. 若内容本身是 `string` / `[]byte` / `fmt.Stringer`，也按同样规则视作 text-like
+5. 若不是 text-like 但有 envelope summary，优先 summary
+6. 否则再回退到 full content
 
 ## 6. 会不会误判
 
@@ -253,6 +256,12 @@ CLI 不截断会带来两个直接问题：
 - MCP tool
 - broker tool
 
+对于 shell / exec 一类高风险文本工具，执行层会先做：
+
+- 受控聚合 stdout/stderr
+- 超限后保留头尾并追加 capture-limit 标记
+- 继续 drain 子进程输出，避免因为停止读取而卡住
+
 ### 9.2 规范化层
 
 统一补齐：
@@ -271,6 +280,7 @@ CLI 不截断会带来两个直接问题：
 决定 `tool_result` 真正写回模型的是什么：
 
 - full raw text
+- history-safe truncated text
 - envelope summary
 
 主要在：
@@ -320,9 +330,11 @@ toolkit / MCP / broker tool
           v                              v
 +---------------------------+   +---------------------------+
 | model return path         |   | CLI / log path            |
-| - full text if text       |   | - compact preview         |
-| - envelope if structured  |   | - source label            |
-| - external MCP keep full  |   | - debug summary           |
+| - full text if small text |   | - compact preview         |
+| - truncate head/tail if   |   | - source label            |
+|   oversized internal text |   | - debug summary           |
+| - envelope if structured  |   |                           |
+| - external MCP keep full  |   |                           |
 +---------------------------+   +---------------------------+
           |                              |
           v                              v
@@ -335,22 +347,29 @@ toolkit / MCP / broker tool
 
 其中最重要的约束是：
 
-- **CLI 的截断只影响右侧展示链路，不影响左侧回传给 LLM 的内容。**
+- **CLI 的截断只影响右侧展示链路；左侧是否截断，由独立的模型上下文治理策略决定。**
 
 ## 10. 当前实现结论
 
 截至这次修复，当前契约是：
 
 1. **所有工具调用返回给 LLM 时，不再因为 CLI 展示被统一截断。**
-2. **CLI 仍然可以独立截断。**
-3. **`tool_source` / `output_kind` 已在 legacy `aicli` 路径和 shared `chatcore` 路径中端到端透传。**
-4. **success / error 两条路径都保留 metadata。**
-5. **内置 toolkit 工具显式声明 `OutputKind`，减少误判。**
-6. **外部 MCP 工具当前优先保留完整输出。**
+2. **内置 / toolkit 的超大文本输出，在进入 LLM history 前会做独立的 history-safe truncation。**
+3. **shell / exec 的原始聚合输出会在执行层应用 capture limit，避免还没进入 history 就先失控。**
+4. **同一用户轮次内如果连续多次工具重放导致 active turn 过大，会自动把更早的 replay 压成摘要，仅保留最新一段 raw replay；这套压缩现在同时覆盖 `agent.MessageBuilder` 与 shared `chatcore`，并支持 byte / token 双预算。**
+5. **shared chat 路径在进入 tool loop 前，也会基于 model capability 尝试一次 pre-turn auto compaction；如果整段会话历史已经明显逼近上下文窗口，会先把更早 turns 压成 summary，再继续当前请求。shared renderer 也会输出对应的 `[context] shared auto-compact ...` 提示，方便观察是否已提前压缩。**
+6. **在真正发起 LLM 请求前，还会执行一次 prompt preflight budget gate。若 prompt token 仍超预算，会优先尝试基于 token 的 active turn replay 压缩；若压缩后仍超限，则直接在本地失败，不再把超大请求发给模型。预算推导已开始结合 provider / model capability（`MaxContextTokens`、`AutoCompactRatio`、`AutoCompactTokenLimit`）与 provider fallback context limit。**
+7. **preflight fail-fast 现在会返回结构化的 `PromptPreflightError`，上层 actor / shared chat CLI 可以直接消费其中的失败码、建议动作、provider/model/budget source 等信息；runtime timeline 也能基于 `session_end` payload 渲染更清晰的本地拦截提示，而不再只能靠字符串匹配。**
+8. **如果 preflight 在“已完成 active-turn compaction 但仍超预算”后失败，错误对象还会携带 replacement history；actor loop 会先把这份更紧凑的 history 持久化回 session，shared chat CLI 也会在返回错误前把压缩后的 history 同步回当前 chat state。**
+9. **CLI 仍然可以独立截断。**
+10. **`tool_source` / `output_kind` 已在 legacy `aicli` 路径和 shared `chatcore` 路径中端到端透传。**
+11. **success / error 两条路径都保留 metadata。**
+12. **内置 toolkit 工具显式声明 `OutputKind`，减少误判。**
+13. **外部 MCP 工具当前优先保留完整输出。**
 
 ## 11. 后续建议
 
-还有两件事值得继续推进：
+还有几件事值得继续推进：
 
 ### 11.1 减少 string-only 接口
 
@@ -370,3 +389,47 @@ toolkit / MCP / broker tool
 - 内置工具必须显式声明
 - broker 返回必须显式补齐
 - MCP 适配层尽量保留远端 metadata，不在 host 侧猜
+
+### 11.3 继续增强 preflight gate 的 provider 感知与恢复策略
+
+这次修复后，preflight gate 已经不再只看 context manager 预算；它还会综合：
+
+- context manager 的 prompt 预算
+- 当前剩余 token budget
+- runtime 侧的通用 token 计数
+- provider / model capability 的 `MaxContextTokens`
+- capability 上的 `AutoCompactRatio` / `AutoCompactTokenLimit`
+- provider `GetCapabilities()` 暴露的 fallback context limit
+
+并且，preflight 失败事件现在已经附带结构化原因，例如：
+
+- `failure_reason_code`
+- `failure_reason_detail`
+- `active_turn_message_count`
+- `latest_replay_block_message_count`
+- `can_retry_after_compaction`
+- `suggested_action`
+- `replacement_history_available`
+- `replacement_history_message_count`
+- `replacement_history_applied`
+
+同时，agent 主链路与 shared `chatcore` tool loop 现在都会返回结构化 `PromptPreflightError`，因此：
+
+- actor `session_end` payload 可以携带结构化错误字段
+- skills API `/api/agent/chat` 的错误响应现在也会直接返回 `error_type=prompt_preflight`、`failure_reason_code`、`replacement_history_*` 等结构化字段
+- skills API 在 prompt preflight fail-fast 时会回传 `trace_id`，并补发一条带结构化 payload 的 `session_end` runtime event，便于和 runtime trace / timeline 对齐
+- team / orchestrator 链路现在也会把 teammate session 上浮的 `prompt_preflight` 失败元数据带到 `team.task.failed` 事件里，便于在 runtime trace / timeline 中直接定位“某个任务为什么在本地被上下文预算拦截”
+- lead planning / replan 失败现在也会把 lead session 的 `trace_id`、`error_type=prompt_preflight` 和恢复元数据上浮到 `team.plan.failed`、`team.plan.replan_failed` 以及 blocked-task 的 `replan_*` 字段中，便于继续追踪“不是执行任务失败，而是自动规划/重规划阶段被上下文预算拦截”
+- team final summary 路径现在也不会再静默吞掉 lead summary 的 `prompt_preflight` / session 失败：terminal reconciliation 会先发 `team.summary.failed`，再在可回退时继续发带 `summary_source=fallback`、`fallback_reason`、`trace_id`、`error_type` 和恢复元数据的 `team.summary`；`GET /api/runtime/teams/{id}/summary/final` 与 `team.summary.generated` 也会返回同样的结构化字段，CLI runtime timeline 现在也会把 `team.summary.generated` 以和 `team.summary` 一致的方式 humanize 展示出来
+- runtime trace 聚合层现在还会把这些信号汇总进 `recovery` 视图：包括 `prompt_preflight_events`、失败码分布、`replacement_history_*` 次数，以及 `team.summary(.generated)` 的 fallback 次数/原因；因此 `GET /api/runtime/traces/{trace_id}`、`GET /api/runtime/traces`、`GET /api/runtime/traces/stats` 都可以直接用于更高层诊断，而不必手工逐条扫事件
+- 其中 `GET /api/runtime/traces` 现在也会在顶层返回一份针对当前返回 trace 列表的聚合 `recovery` 摘要，便于列表页/后台面板直接展示“最近这些 traces 是否集中发生 prompt preflight / summary fallback”
+- shared chat / actor 两条 CLI 路径都可以直接把失败原因和恢复建议 humanize 给用户
+- 当“压缩过但仍超限”时，还可以把 replacement history 回写到 session / chat state，避免下一轮又从臃肿 history 重新起步
+- 上层不必再依赖 `strings.Contains(err.Error(), "...")` 这类脆弱分支
+- actor / skills 侧原有的 `session_compact_*` 事件也已可在 runtime timeline 中直接看见 started/completed/skipped/failed
+
+后续还可以继续增强：
+
+- 把 prompt / completion / reasoning 预算拆得更明确
+- 针对不同失败码提供自动恢复策略，而不只是 fail-fast
+- 在 shared chat / actor / team 等更高层把这些结构化失败原因做成统一恢复动作

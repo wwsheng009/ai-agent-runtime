@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
@@ -579,6 +580,9 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 		return providerConfigs
 	}
 
+	retryTuning := buildLLMRetryTuning(cfg)
+	retryRules := buildLLMRetryRules(cfg)
+
 	for name, provider := range cfg.Providers.Items {
 		if !provider.Enabled {
 			continue
@@ -595,6 +599,9 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 		}
 
 		maxRetries := cfg.Providers.MaxRetries
+		if maxRetries <= 0 && cfg.Retry != nil && cfg.Retry.DefaultMaxRetries > 0 {
+			maxRetries = cfg.Retry.DefaultMaxRetries
+		}
 		if maxRetries <= 0 {
 			maxRetries = 3
 		}
@@ -606,6 +613,8 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			APIPath:            provider.APIPath,
 			Timeout:            timeout,
 			MaxRetries:         maxRetries,
+			RetryTuning:        retryTuning,
+			RetryRules:         retryRules,
 			DefaultModel:       provider.DefaultModel,
 			SupportedModels:    append([]string(nil), provider.SupportedModels...),
 			ModelMappings:      cloneStringMap(provider.ModelMappings),
@@ -617,6 +626,57 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 	}
 
 	return providerConfigs
+}
+
+func buildLLMRetryTuning(cfg *config.Config) runtimellm.RetryTuning {
+	if cfg == nil {
+		return runtimellm.RetryTuning{}
+	}
+	tuning := runtimellm.RetryTuning{
+		BaseDelay:  cfg.Providers.Backoff.InitialInterval,
+		MaxDelay:   cfg.Providers.Backoff.MaxInterval,
+		Multiplier: cfg.Providers.Backoff.Multiplier,
+	}
+	if cfg.Retry != nil {
+		if tuning.BaseDelay <= 0 && cfg.Retry.DefaultRetryDelayMS > 0 {
+			tuning.BaseDelay = time.Duration(cfg.Retry.DefaultRetryDelayMS) * time.Millisecond
+		}
+		if tuning.Multiplier < 1 && cfg.Retry.DefaultBackoffMultiplier >= 1 {
+			tuning.Multiplier = cfg.Retry.DefaultBackoffMultiplier
+		}
+	}
+	return tuning
+}
+
+func buildLLMRetryRules(cfg *config.Config) []runtimellm.RetryRule {
+	if cfg == nil || cfg.Retry == nil || !cfg.Retry.Enabled || len(cfg.Retry.Rules) == 0 {
+		return nil
+	}
+	result := make([]runtimellm.RetryRule, 0, len(cfg.Retry.Rules))
+	for _, rule := range cfg.Retry.Rules {
+		result = append(result, runtimellm.RetryRule{
+			Name:              rule.Name,
+			Description:       rule.Description,
+			Enabled:           rule.Enabled,
+			MaxRetries:        rule.MaxRetries,
+			RetryDelay:        time.Duration(rule.RetryDelayMS) * time.Millisecond,
+			BackoffMultiplier: rule.BackoffMultiplier,
+			Keyword: runtimellm.RetryKeywordMatcher{
+				CaseSensitive: rule.Keyword.CaseSensitive,
+				Values:        append([]string(nil), rule.Keyword.Values...),
+				Patterns:      append([]string(nil), rule.Keyword.Patterns...),
+			},
+			ErrorCode: runtimellm.RetryErrorCodeMatcher{
+				Codes:   append([]string(nil), rule.ErrorCode.Codes...),
+				Pattern: rule.ErrorCode.Pattern,
+			},
+			StatusCode: runtimellm.RetryStatusCodeMatcher{
+				Codes: append([]int(nil), rule.StatusCode.Codes...),
+				Range: rule.StatusCode.Range,
+			},
+		})
+	}
+	return result
 }
 
 func cloneStringMap(input map[string]string) map[string]string {

@@ -302,6 +302,44 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "team.summary", Payload: map[string]interface{}{"team_id": "team-1", "summary": "auto lead summary"}}); got != "[team summary] team-1 auto lead summary" {
 		t.Fatalf("unexpected team summary render: %q", got)
 	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: "team.summary",
+		Payload: map[string]interface{}{
+			"team_id":                           "team-1",
+			"summary":                           "fallback summary",
+			"summary_source":                    "fallback",
+			"fallback_reason":                   "lead_session_error",
+			"error_type":                        "prompt_preflight",
+			"failure_reason_code":               "prompt_still_exceeds_budget_after_compaction",
+			"resolved_provider":                 "CODEX_LOCAL",
+			"resolved_model":                    "codex-gpt-5.4",
+			"budget_source":                     "model_capability_auto_compact_token_limit",
+			"replacement_history_applied":       true,
+			"replacement_history_message_count": 2,
+		},
+	}); got != strings.Join([]string{
+		"[team summary] team-1 [fallback] [prompt preflight] fallback summary",
+		"  原因: active-turn 已压缩，但 prompt 仍然超出预算",
+		"  模型: CODEX_LOCAL / codex-gpt-5.4",
+		"  预算: 模型能力 auto-compact token limit",
+		"  恢复: 已自动保存压缩后的上下文，可直接继续下一轮 | history_messages=2",
+	}, "\n") {
+		t.Fatalf("unexpected fallback team summary render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: "team.summary.generated",
+		Payload: map[string]interface{}{
+			"team_id":         "team-2",
+			"summary":         "generated fallback summary",
+			"summary_source":  "fallback",
+			"fallback_reason": "lead_session_error",
+		},
+	}); got != strings.Join([]string{
+		"[team summary] team-2 [fallback] generated fallback summary",
+		"  fallback: lead summary 执行失败，改用任务列表回退总结",
+	}, "\n") {
+		t.Fatalf("unexpected generated fallback team summary render: %q", got)
+	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: chatEventInputQueueDetected, Payload: map[string]interface{}{"queued_input_count": 2, "source": "stdin"}}); got != "[input] queued 2 line(s) from stdin" {
 		t.Fatalf("unexpected input queue detected render: %q", got)
 	}
@@ -310,6 +348,169 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: chatEventInputQueueDiscarded, Payload: map[string]interface{}{"discarded_count": 1, "prompt_kind": "审批提示"}}); got != "[input] discarded 1 queued line(s) before 审批提示" {
 		t.Fatalf("unexpected input queue discarded render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "session-1",
+		TraceID:   "trace-preflight",
+		Payload: map[string]interface{}{
+			"error_type":                        "prompt_preflight",
+			"failure_reason_code":               "active_turn_not_compactable",
+			"failure_reason":                    "active-turn replay cannot be compacted further",
+			"suggested_action":                  "请减少更早历史、提高 prompt 预算，或开启新的用户轮次。",
+			"prompt_tokens":                     8192,
+			"prompt_budget":                     4096,
+			"resolved_provider":                 "CODEX_LOCAL",
+			"resolved_model":                    "codex-gpt-5.4",
+			"budget_source":                     "model_capability_auto_compact_token_limit",
+			"active_turn_message_count":         12,
+			"latest_replay_block_message_count": 4,
+			"replacement_history_available":     true,
+			"replacement_history_message_count": 6,
+		},
+	}); got != strings.Join([]string{
+		"[prompt preflight] 本地拦截：prompt 8192 > budget 4096",
+		"  原因: 当前轮次里的 active-turn replay 已无法继续压缩",
+		"  建议: 请减少更早历史、提高 prompt 预算，或开启新的用户轮次。",
+		"  模型: CODEX_LOCAL / codex-gpt-5.4",
+		"  预算: 模型能力 auto-compact token limit",
+		"  active-turn: messages=12, latest_replay_block=4, compacted=false",
+		"  恢复: 已生成压缩后的恢复上下文 | history_messages=6",
+	}, "\n") {
+		t.Fatalf("unexpected prompt preflight session_end render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: "team.task.failed",
+		Payload: map[string]interface{}{
+			"team_id":                           "team-1",
+			"task_id":                           "task-42",
+			"assignee":                          "mate-1",
+			"summary":                           "prompt preflight budget exceeded",
+			"error_type":                        "prompt_preflight",
+			"failure_reason_code":               "prompt_still_exceeds_budget_after_compaction",
+			"resolved_provider":                 "CODEX_LOCAL",
+			"resolved_model":                    "codex-gpt-5.4",
+			"budget_source":                     "model_capability_auto_compact_token_limit",
+			"replacement_history_applied":       true,
+			"replacement_history_message_count": 4,
+		},
+	}); got != strings.Join([]string{
+		"[task] failed task-42 @mate-1 prompt preflight budget exceeded [prompt preflight]",
+		"  原因: active-turn 已压缩，但 prompt 仍然超出预算",
+		"  模型: CODEX_LOCAL / codex-gpt-5.4",
+		"  预算: 模型能力 auto-compact token limit",
+		"  恢复: 已自动保存压缩后的上下文，可直接继续下一轮 | history_messages=4",
+	}, "\n") {
+		t.Fatalf("unexpected prompt preflight team.task.failed render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: "team.task.blocked",
+		Payload: map[string]interface{}{
+			"team_id":                                  "team-1",
+			"task_id":                                  "task-42",
+			"assignee":                                 "mate-1",
+			"summary":                                  "waiting on architecture review",
+			"replan_error_type":                        "prompt_preflight",
+			"replan_failure_reason_code":               "active_turn_not_compactable",
+			"replan_resolved_provider":                 "CODEX_LOCAL",
+			"replan_resolved_model":                    "codex-gpt-5.4",
+			"replan_budget_source":                     "model_capability_auto_compact_token_limit",
+			"replan_replacement_history_applied":       true,
+			"replan_replacement_history_message_count": 3,
+		},
+	}); got != strings.Join([]string{
+		"[task] blocked task-42 @mate-1 waiting on architecture review",
+		"  replan: [prompt preflight] 当前轮次里的 active-turn replay 已无法继续压缩",
+		"  replan 模型: CODEX_LOCAL / codex-gpt-5.4",
+		"  replan 预算: 模型能力 auto-compact token limit",
+		"  replan 恢复: 已自动保存压缩后的上下文，可直接继续下一轮 | history_messages=3",
+	}, "\n") {
+		t.Fatalf("unexpected prompt preflight team.task.blocked render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: "team.plan.replan_failed",
+		Payload: map[string]interface{}{
+			"team_id":                           "team-1",
+			"task_id":                           "task-42",
+			"error_type":                        "prompt_preflight",
+			"failure_reason_code":               "prompt_still_exceeds_budget_after_compaction",
+			"resolved_provider":                 "CODEX_LOCAL",
+			"resolved_model":                    "codex-gpt-5.4",
+			"budget_source":                     "model_capability_auto_compact_token_limit",
+			"replacement_history_applied":       true,
+			"replacement_history_message_count": 5,
+		},
+	}); got != strings.Join([]string{
+		"[team replan] failed team-1 task-42 [prompt preflight]",
+		"  原因: active-turn 已压缩，但 prompt 仍然超出预算",
+		"  模型: CODEX_LOCAL / codex-gpt-5.4",
+		"  预算: 模型能力 auto-compact token limit",
+		"  恢复: 已自动保存压缩后的上下文，可直接继续下一轮 | history_messages=5",
+	}, "\n") {
+		t.Fatalf("unexpected prompt preflight team.plan.replan_failed render: %q", got)
+	}
+}
+
+func TestChatRuntimeEvents_RenderSessionCompactTimeline(t *testing.T) {
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionCompactStarted,
+		SessionID: "session-1",
+		TraceID:   "trace-compact",
+		Payload: map[string]interface{}{
+			"phase":               "pre_turn",
+			"mode":                "local",
+			"token_before":        1200,
+			"trigger_token_limit": 900,
+			"max_context_tokens":  10000,
+			"provider":            "CODEX_LOCAL",
+			"model":               "codex-gpt-5.4",
+		},
+	}); got != "[context] session compact started mode=local phase=pre_turn token_before=1200 trigger_token_limit=900 max_context_tokens=10000 target=CODEX_LOCAL/codex-gpt-5.4" {
+		t.Fatalf("unexpected session compact started render: %q", got)
+	}
+
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionCompactCompleted,
+		SessionID: "session-1",
+		TraceID:   "trace-compact",
+		Payload: map[string]interface{}{
+			"phase":               "pre_turn",
+			"mode":                "local",
+			"token_before":        1200,
+			"token_after":         240,
+			"compacted_messages":  6,
+			"message_count_after": 4,
+			"checkpoint_id":       "cp-1",
+		},
+	}); got != "[context] session compact completed mode=local phase=pre_turn token 1200 -> 240 compacted_messages=6 history_messages=4 checkpoint_id=cp-1" {
+		t.Fatalf("unexpected session compact completed render: %q", got)
+	}
+
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionCompactSkipped,
+		SessionID: "session-1",
+		TraceID:   "trace-compact",
+		Payload: map[string]interface{}{
+			"phase":  "pre_turn",
+			"mode":   "local",
+			"reason": "below_limit",
+		},
+	}); got != "[context] session compact skipped mode=local phase=pre_turn reason=below_limit" {
+		t.Fatalf("unexpected session compact skipped render: %q", got)
+	}
+
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionCompactFailed,
+		SessionID: "session-1",
+		TraceID:   "trace-compact",
+		Payload: map[string]interface{}{
+			"phase":  "pre_turn",
+			"mode":   "local",
+			"reason": "summary_generation_failed",
+			"error":  "compact summary failed",
+		},
+	}); got != "[context] session compact failed mode=local phase=pre_turn reason=summary_generation_failed error=compact summary failed" {
+		t.Fatalf("unexpected session compact failed render: %q", got)
 	}
 }
 
@@ -2325,6 +2526,56 @@ func TestChatRuntimeEvents_SkipsDeltaFlushOnSessionEndWhenAlreadyFinalized(t *te
 	if finalized != 1 {
 		t.Fatalf("expected no double-finalize on session_end, got %d", finalized)
 	}
+}
+
+func TestChatRuntimeEvents_SessionEndPromptPreflightStillRendersAfterDeltaFlush(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	finalized := 0
+	var lines []string
+	bridge.writeDelta = func(string) {}
+	bridge.finalizeDelta = func() {
+		finalized++
+	}
+	bridge.writeLine = func(line string) {
+		lines = append(lines, line)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": "Analyzing the issue..."},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "lead-session",
+		TraceID:   "trace-preflight",
+		Payload: map[string]interface{}{
+			"error_type":                        "prompt_preflight",
+			"failure_reason_code":               "prompt_still_exceeds_budget_after_compaction",
+			"suggested_action":                  "请继续收缩上下文层、提高预算，或从新的轮次继续。",
+			"prompt_tokens":                     12000,
+			"prompt_budget":                     10000,
+			"resolved_model":                    "codex-gpt-5.4",
+			"replacement_history_available":     true,
+			"replacement_history_applied":       true,
+			"replacement_history_message_count": 4,
+		},
+	})
+
+	if finalized != 1 {
+		t.Fatalf("expected delta to be finalized on prompt preflight session_end, got %d", finalized)
+	}
+	require.Len(t, lines, 1)
+	require.Contains(t, lines[0], "[prompt preflight] 本地拦截：prompt 12000 > budget 10000")
+	require.Contains(t, lines[0], "原因: active-turn 已压缩，但 prompt 仍然超出预算")
+	require.Contains(t, lines[0], "建议: 请继续收缩上下文层、提高预算，或从新的轮次继续。")
+	require.Contains(t, lines[0], "模型: codex-gpt-5.4")
+	require.Contains(t, lines[0], "恢复: 已自动保存压缩后的上下文，可直接继续下一轮 | history_messages=4")
 }
 
 func TestIsReadOnlyShellCommand_ChainedAndCommands(t *testing.T) {

@@ -70,8 +70,8 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 	}
 
 	// 获取命令输出
-	output, err := cmd.CombinedOutput()
-	outputStr := string(output)
+	capture, err := runtimeexecutor.CaptureCombinedOutput(cmd, runtimeexecutor.DefaultRetainedOutputBytes)
+	outputStr := capture.Output
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {

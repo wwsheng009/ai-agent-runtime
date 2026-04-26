@@ -2,15 +2,21 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const chatcoreReasoningMetadataKey = "chatcore_reasoning_content"
+const sharedChatDefaultAutoCompactRatio = 0.9
 
 // chatSessionImageArtifactDir returns the session-local directory for
 // persisting image attachment copies. Returns empty string if unavailable.
@@ -28,12 +34,29 @@ func chatSessionImageArtifactDir(session *ChatSession) string {
 }
 
 var executeToolLoop = runtimechatcore.ExecuteToolLoop
+var autoCompactSharedChatHistory = maybeAutoCompactSharedChatHistory
 
 type aicliChatExecutor interface {
 	Execute(ctx context.Context, session *ChatSession, prompt string) (string, error)
 }
 
 type aicliSharedChatExecutor struct{}
+
+type sharedChatAutoCompactReport struct {
+	Result *compactruntime.Result
+	Status compactruntime.Status
+}
+
+type sharedChatPromptBudget struct {
+	ActiveTurnMaxTokens                  int
+	BudgetSource                         string
+	BudgetSourceDetail                   string
+	ResolvedProvider                     string
+	ResolvedModel                        string
+	ModelCapabilityMaxContextTokens      int
+	ModelCapabilityAutoCompactRatio      float64
+	ModelCapabilityAutoCompactTokenLimit int
+}
 
 func newAICLISharedChatExecutor() aicliChatExecutor {
 	return &aicliSharedChatExecutor{}
@@ -97,19 +120,52 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 			return currentScope
 		},
 	}
+	if compactedHistory, compactReport, compactErr := autoCompactSharedChatHistory(ctx, session, history); compactErr != nil {
+		emitSharedChatAutoCompactEvent(renderer, compactReport, compactErr)
+		writeSessionDebugInfo(session, formatSharedChatAutoCompactDebug(compactReport, compactErr), true)
+	} else {
+		history = compactedHistory
+		if compactReport != nil && compactReport.Result != nil {
+			emitSharedChatAutoCompactEvent(renderer, compactReport, nil)
+			writeSessionDebugInfo(session, formatSharedChatAutoCompactDebug(compactReport, nil), true)
+		}
+	}
+	promptBudget := resolveSharedChatPromptBudget(session)
 
 	loopResult, err := executeToolLoop(ctx, runtimechatcore.ToolLoopRequest{
-		Prompt:             prompt,
-		ExplicitImagePaths: session.ImagePaths,
-		ImageArtifactDir:   chatSessionImageArtifactDir(session),
-		History:            history,
-		Stream:             session.Stream,
-		Tools:              toolDefinitionsFromSelection(selection),
-		Provider:           provider,
-		ToolExecutor:       toolExec,
-		EventSink:          renderer.Handle,
+		Prompt:                               prompt,
+		ExplicitImagePaths:                   session.ImagePaths,
+		ImageArtifactDir:                     chatSessionImageArtifactDir(session),
+		History:                              history,
+		ActiveTurnMaxTokens:                  promptBudget.ActiveTurnMaxTokens,
+		CountTokens:                          countSharedChatMessagesTokens,
+		PromptBudgetSource:                   promptBudget.BudgetSource,
+		PromptBudgetDetail:                   promptBudget.BudgetSourceDetail,
+		ResolvedProvider:                     promptBudget.ResolvedProvider,
+		ResolvedModel:                        promptBudget.ResolvedModel,
+		ModelCapabilityMaxContextTokens:      promptBudget.ModelCapabilityMaxContextTokens,
+		ModelCapabilityAutoCompactRatio:      promptBudget.ModelCapabilityAutoCompactRatio,
+		ModelCapabilityAutoCompactTokenLimit: promptBudget.ModelCapabilityAutoCompactTokenLimit,
+		Stream:                               session.Stream,
+		Tools:                                toolDefinitionsFromSelection(selection),
+		Provider:                             provider,
+		ToolExecutor:                         toolExec,
+		EventSink:                            renderer.Handle,
 	})
 	if err != nil {
+		if preflightErr, ok := agent.AsPromptPreflightError(err); ok {
+			if replacement := preflightErr.CloneReplacementHistory(); len(replacement) > 0 {
+				messages, buildErr := buildAICLIMessagesFromRuntimeHistory(replacement)
+				if buildErr != nil {
+					err = fmt.Errorf("%w: 应用 prompt preflight 恢复历史失败: %v", err, buildErr)
+				} else {
+					session.Messages = messages
+					warnIfChatSessionSyncFails(session, "shared chatcore preflight recovery sync", syncRuntimeSessionFromChat(session))
+					preflightErr.ReplacementHistoryApplied = true
+				}
+			}
+			return "", humanizeActorExecutorError(session, err)
+		}
 		return "", err
 	}
 	if loopResult == nil || loopResult.Response == nil {
@@ -158,6 +214,310 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	renderer.Finalize(loopResult.Response, finalMessage)
 
 	return loopResult.Response.Output, nil
+}
+
+func resolveSharedChatActiveTurnPromptBudget(session *ChatSession) int {
+	return resolveSharedChatPromptBudget(session).ActiveTurnMaxTokens
+}
+
+func resolveSharedChatPromptBudget(session *ChatSession) sharedChatPromptBudget {
+	budget := sharedChatPromptBudget{}
+	if session == nil {
+		return budget
+	}
+	budget.ResolvedProvider = strings.TrimSpace(session.ProviderName)
+	if budget.ResolvedProvider == "" {
+		budget.ResolvedProvider = strings.TrimSpace(session.Provider.Protocol)
+	}
+	budget.ResolvedModel = strings.TrimSpace(session.Model)
+	capability, ok := runtimellm.ResolveModelCapabilitySpec(session.Model, session.Provider.ModelCapabilities)
+	if !ok {
+		return budget
+	}
+	budget.ModelCapabilityMaxContextTokens = capability.MaxContextTokens
+	budget.ModelCapabilityAutoCompactTokenLimit = capability.AutoCompactTokenLimit
+	if capability.AutoCompactTokenLimit > 0 {
+		budget.ActiveTurnMaxTokens = capability.AutoCompactTokenLimit
+		budget.BudgetSource = "model_capability_auto_compact_token_limit"
+		budget.BudgetSourceDetail = "model capability auto-compact token limit"
+		return budget
+	}
+	if capability.MaxContextTokens <= 0 {
+		return budget
+	}
+	ratio := capability.AutoCompactRatio
+	ratioDetail := fmt.Sprintf("model capability auto-compact ratio %.2f", capability.AutoCompactRatio)
+	if ratio <= 0 || ratio >= 1 {
+		ratio = sharedChatDefaultAutoCompactRatio
+		ratioDetail = fmt.Sprintf("fallback auto-compact ratio %.2f", sharedChatDefaultAutoCompactRatio)
+	}
+	budget.ModelCapabilityAutoCompactRatio = ratio
+	limit := int(math.Floor(float64(capability.MaxContextTokens) * ratio))
+	if limit <= 0 || limit > capability.MaxContextTokens {
+		budget.ActiveTurnMaxTokens = capability.MaxContextTokens
+		budget.BudgetSource = "model_capability_max_context_tokens"
+		budget.BudgetSourceDetail = fmt.Sprintf("model capability max_context_tokens=%d", capability.MaxContextTokens)
+		return budget
+	}
+	budget.ActiveTurnMaxTokens = limit
+	budget.BudgetSource = "model_capability_auto_compact_ratio"
+	budget.BudgetSourceDetail = fmt.Sprintf("%s over max_context_tokens=%d", ratioDetail, capability.MaxContextTokens)
+	return budget
+}
+
+func countSharedChatMessagesTokens(messages []runtimetypes.Message) int {
+	total := 0
+	for _, message := range messages {
+		total += estimateSharedChatTokenCount(message.Role)
+		total += estimateSharedChatTokenCount(message.Content)
+		total += estimateSharedChatTokenCount(message.ToolCallID)
+		total += 4
+		for _, call := range message.ToolCalls {
+			total += estimateSharedChatTokenCount(call.ID)
+			total += estimateSharedChatTokenCount(call.Name)
+			if len(call.Args) == 0 {
+				continue
+			}
+			if payload, err := json.Marshal(call.Args); err == nil {
+				total += estimateSharedChatTokenCount(string(payload))
+			} else {
+				total += estimateSharedChatTokenCount(fmt.Sprintf("%v", call.Args))
+			}
+		}
+	}
+	return total
+}
+
+func estimateSharedChatTokenCount(text string) int {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0
+	}
+	tokens := len([]rune(text)) / 4
+	if tokens <= 0 {
+		return 1
+	}
+	return tokens
+}
+
+func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession, history []runtimetypes.Message) ([]runtimetypes.Message, *sharedChatAutoCompactReport, error) {
+	if session == nil || len(history) == 0 {
+		return history, nil, nil
+	}
+	llmRuntime, err := buildSharedChatAutoCompactRuntime(session)
+	if err != nil {
+		return history, nil, err
+	}
+	if llmRuntime == nil {
+		return history, nil, nil
+	}
+
+	sessionID := ""
+	if session.RuntimeSession != nil {
+		sessionID = strings.TrimSpace(session.RuntimeSession.ID)
+	}
+	result, status, err := compactruntime.New(llmRuntime, nil).MaybeCompact(ctx, compactruntime.Request{
+		SessionID:   sessionID,
+		TaskID:      sessionID,
+		Provider:    strings.TrimSpace(session.ProviderName),
+		Model:       strings.TrimSpace(session.Model),
+		History:     history,
+		Phase:       compactruntime.PhasePreTurn,
+		CountTokens: llmRuntime.CountMessagesTokens,
+	})
+	report := &sharedChatAutoCompactReport{
+		Result: result,
+		Status: status,
+	}
+	if err != nil || result == nil || len(result.ReplacementHistory) == 0 {
+		return history, report, err
+	}
+
+	messages, buildErr := buildAICLIMessagesFromRuntimeHistory(result.ReplacementHistory)
+	if buildErr != nil {
+		return history, report, fmt.Errorf("共享 chat 自动压缩结果转换失败: %w", buildErr)
+	}
+	session.Messages = messages
+	warnIfChatSessionSyncFails(session, "shared chat auto compact sync", syncRuntimeSessionFromChat(session))
+	return cloneSharedChatRuntimeMessages(result.ReplacementHistory), report, nil
+}
+
+func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRuntime, error) {
+	if session == nil {
+		return nil, nil
+	}
+	providerType := strings.TrimSpace(session.Provider.GetType())
+	if providerType == "" {
+		return nil, nil
+	}
+
+	providerName := strings.TrimSpace(session.ProviderName)
+	if providerName == "" {
+		providerName = "shared-chat-provider"
+	}
+	defaultModel := strings.TrimSpace(session.Model)
+	if defaultModel == "" {
+		defaultModel = strings.TrimSpace(session.Provider.DefaultModel)
+	}
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+		DefaultProvider: providerName,
+		DefaultModel:    defaultModel,
+	})
+	provider, err := runtimellm.NewProvider(&runtimellm.ProviderConfig{
+		Type:                    providerType,
+		APIKey:                  session.Provider.GetAPIKey(),
+		BaseURL:                 session.Provider.BaseURL,
+		APIPath:                 session.Provider.APIPath,
+		Timeout:                 session.Provider.Timeout,
+		MaxRetries:              1,
+		DefaultModel:            strings.TrimSpace(session.Provider.DefaultModel),
+		SupportedModels:         append([]string(nil), session.Provider.SupportedModels...),
+		ModelMappings:           cloneStringMap(session.Provider.ModelMappings),
+		ModelCapabilities:       cloneProviderModelCapabilities(session.Provider.ModelCapabilities),
+		Headers:                 cloneStringMap(session.Provider.Headers),
+		HeaderMappings:          cloneStringMap(session.Provider.HeaderMappings),
+		HeaderMappingRules:      cloneHeaderMappingRules(session.Provider.HeaderMappingRules),
+		SupportsMaxOutputTokens: session.Provider.SupportsMaxOutputTokens,
+		Proxy:                   session.Provider.Proxy.Clone(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := llmRuntime.RegisterProvider(providerName, provider); err != nil {
+		return nil, err
+	}
+
+	aliases := []string{session.Model, session.Provider.DefaultModel}
+	aliases = append(aliases, session.Provider.SupportedModels...)
+	for _, alias := range aliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			continue
+		}
+		_ = llmRuntime.RegisterProviderAlias(alias, providerName)
+	}
+	return llmRuntime, nil
+}
+
+func cloneSharedChatRuntimeMessages(messages []runtimetypes.Message) []runtimetypes.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	cloned := make([]runtimetypes.Message, len(messages))
+	for index := range messages {
+		cloned[index] = *messages[index].Clone()
+	}
+	return cloned
+}
+
+func formatSharedChatAutoCompactDebug(report *sharedChatAutoCompactReport, err error) string {
+	if report == nil {
+		if err == nil {
+			return ""
+		}
+		return fmt.Sprintf("[context-debug] shared auto-compact failed: %v", err)
+	}
+	if err != nil {
+		statusReason := strings.TrimSpace(report.Status.Reason)
+		if statusReason == "" {
+			statusReason = "unknown"
+		}
+		return fmt.Sprintf("[context-debug] shared auto-compact failed reason=%s error=%v", statusReason, err)
+	}
+	if report.Result == nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"[context-debug] shared auto-compact applied mode=%s token_before=%d token_after=%d compacted_messages=%d history_messages=%d",
+		report.Result.Mode,
+		report.Result.TokenBefore,
+		report.Result.TokenAfter,
+		report.Result.CompactedMessages,
+		len(report.Result.ReplacementHistory),
+	)
+}
+
+func emitSharedChatAutoCompactEvent(renderer *aicliEventRenderer, report *sharedChatAutoCompactReport, err error) {
+	if renderer == nil {
+		return
+	}
+	event, ok := sharedChatAutoCompactChatEvent(report, err)
+	if !ok {
+		return
+	}
+	renderer.Handle(event)
+}
+
+func sharedChatAutoCompactChatEvent(report *sharedChatAutoCompactReport, err error) (runtimechatcore.ChatEvent, bool) {
+	if report == nil {
+		return runtimechatcore.ChatEvent{}, false
+	}
+	metadata := map[string]interface{}{
+		"category": "context",
+		"name":     "shared_auto_compact",
+	}
+	if err != nil {
+		if reason := strings.TrimSpace(report.Status.Reason); reason != "" {
+			metadata["reason"] = reason
+		}
+		return runtimechatcore.ChatEvent{
+			Type:     runtimechatcore.EventWarning,
+			Content:  formatSharedChatAutoCompactWarning(report, err),
+			Metadata: metadata,
+		}, true
+	}
+	if report.Result == nil {
+		return runtimechatcore.ChatEvent{}, false
+	}
+	metadata["mode"] = report.Result.Mode
+	metadata["token_before"] = report.Result.TokenBefore
+	metadata["token_after"] = report.Result.TokenAfter
+	metadata["compacted_messages"] = report.Result.CompactedMessages
+	metadata["history_messages"] = len(report.Result.ReplacementHistory)
+	return runtimechatcore.ChatEvent{
+		Type:     runtimechatcore.EventWarning,
+		Content:  formatSharedChatAutoCompactApplied(report.Result),
+		Metadata: metadata,
+	}, true
+}
+
+func formatSharedChatAutoCompactApplied(result *compactruntime.Result) string {
+	if result == nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"[context] shared auto-compact applied mode=%s token %d -> %d compacted_messages=%d history_messages=%d",
+		firstNonEmptyChatValue(strings.TrimSpace(result.Mode), compactruntime.ModeLocal),
+		result.TokenBefore,
+		result.TokenAfter,
+		result.CompactedMessages,
+		len(result.ReplacementHistory),
+	)
+}
+
+func formatSharedChatAutoCompactWarning(report *sharedChatAutoCompactReport, err error) string {
+	if err == nil {
+		return ""
+	}
+	reason := "unknown"
+	if report != nil && strings.TrimSpace(report.Status.Reason) != "" {
+		reason = strings.TrimSpace(report.Status.Reason)
+	}
+	return fmt.Sprintf("[context] shared auto-compact failed reason=%s error=%v", reason, err)
+}
+
+func renderSharedChatWarningEvent(event runtimechatcore.ChatEvent) string {
+	if event.Type != runtimechatcore.EventWarning {
+		return ""
+	}
+	if len(event.Metadata) == 0 {
+		return ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(firstNonEmptyString(event.Metadata["category"])), "context") {
+		return ""
+	}
+	return strings.TrimSpace(event.Content)
 }
 
 type aicliEventRenderer struct {
@@ -249,6 +609,14 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 			return
 		}
 		r.clearSpinner()
+		if rendered := renderSharedChatWarningEvent(event); rendered != "" {
+			if r.session.Interaction != nil {
+				r.session.Interaction.RenderAsyncLine(rendered)
+				return
+			}
+			fmt.Println(rendered)
+			return
+		}
 		if r.session.Interaction != nil {
 			r.session.Interaction.RenderAsyncLine(fmt.Sprintf("⚠ %s", event.Content))
 			return

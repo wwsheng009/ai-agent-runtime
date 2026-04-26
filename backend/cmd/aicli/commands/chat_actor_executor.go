@@ -91,6 +91,38 @@ func humanizeActorExecutorError(session *ChatSession, err error) error {
 	if err == nil {
 		return nil
 	}
+	if preflightErr, ok := agent.AsPromptPreflightError(err); ok && preflightErr != nil {
+		message := fmt.Sprintf(
+			"本次请求在发送给模型前已被本地拦截：上下文过大（prompt tokens=%d，budget=%d）。",
+			preflightErr.PromptTokens,
+			preflightErr.PromptBudget,
+		)
+		if strings.TrimSpace(preflightErr.Reason) != "" {
+			message += " 原因：" + strings.TrimSpace(preflightErr.Reason) + "。"
+		}
+		if strings.TrimSpace(preflightErr.SuggestedAction) != "" {
+			message += " 建议：" + strings.TrimSpace(preflightErr.SuggestedAction)
+		}
+		if preflightErr.ReplacementHistoryApplied {
+			message += " 当前会话已自动保存压缩后的上下文，可直接继续下一轮。"
+		} else if len(preflightErr.CloneReplacementHistory()) > 0 {
+			message += " 当前失败已生成一份更紧凑的恢复上下文。"
+		}
+		meta := make([]string, 0, 3)
+		if strings.TrimSpace(preflightErr.ResolvedProvider) != "" {
+			meta = append(meta, "provider="+strings.TrimSpace(preflightErr.ResolvedProvider))
+		}
+		if strings.TrimSpace(preflightErr.ResolvedModel) != "" {
+			meta = append(meta, "model="+strings.TrimSpace(preflightErr.ResolvedModel))
+		}
+		if strings.TrimSpace(preflightErr.BudgetSource) != "" {
+			meta = append(meta, "budget_source="+strings.TrimSpace(preflightErr.BudgetSource))
+		}
+		if len(meta) > 0 {
+			message += " [" + strings.Join(meta, " ") + "]"
+		}
+		return fmt.Errorf("%s", message)
+	}
 	if strings.Contains(err.Error(), "upstream model returned an empty reply: no text and no tool calls") {
 		message := "上游模型返回了空回复：既没有文本，也没有发起工具调用；请重试，或调整提示词/切换模型后再试"
 		if session != nil && session.runtimeHTTPCapture != nil {
