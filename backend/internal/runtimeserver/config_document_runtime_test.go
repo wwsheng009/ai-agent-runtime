@@ -52,6 +52,9 @@ func (f *fakeRuntimeConfigApplyTarget) SetUsagePolicy(policy skillsapi.UsagePoli
 func TestAnalyzeConfigDocumentRuntimeImpactClassifiesChangedPaths(t *testing.T) {
 	current := map[string]interface{}{
 		"providers": map[string]interface{}{
+			"backoff": map[string]interface{}{
+				"initial_interval": "500ms",
+			},
 			"proxy": map[string]interface{}{
 				"http": "http://old-proxy.example.com:8080",
 			},
@@ -60,6 +63,9 @@ func TestAnalyzeConfigDocumentRuntimeImpactClassifiesChangedPaths(t *testing.T) 
 					"base_url": "https://old.example.com",
 				},
 			},
+		},
+		"retry": map[string]interface{}{
+			"default_backoff_multiplier": 1.5,
 		},
 		"skills_runtime": map[string]interface{}{
 			"admin_token": "old-token",
@@ -70,6 +76,9 @@ func TestAnalyzeConfigDocumentRuntimeImpactClassifiesChangedPaths(t *testing.T) 
 	}
 	next := map[string]interface{}{
 		"providers": map[string]interface{}{
+			"backoff": map[string]interface{}{
+				"initial_interval": "750ms",
+			},
 			"proxy": map[string]interface{}{
 				"http": "http://new-proxy.example.com:8080",
 			},
@@ -78,6 +87,9 @@ func TestAnalyzeConfigDocumentRuntimeImpactClassifiesChangedPaths(t *testing.T) 
 					"base_url": "https://new.example.com",
 				},
 			},
+		},
+		"retry": map[string]interface{}{
+			"default_backoff_multiplier": 2.0,
 		},
 		"skills_runtime": map[string]interface{}{
 			"admin_token": "new-token",
@@ -90,15 +102,34 @@ func TestAnalyzeConfigDocumentRuntimeImpactClassifiesChangedPaths(t *testing.T) 
 	impact := analyzeConfigDocumentRuntimeImpact(current, next)
 	require.NotNil(t, impact)
 	require.ElementsMatch(t,
-		[]string{"auth.admin_token", "providers.items.alpha.base_url", "providers.proxy.http", "skills_runtime.admin_token"},
+		[]string{
+			"auth.admin_token",
+			"providers.backoff.initial_interval",
+			"providers.items.alpha.base_url",
+			"providers.proxy.http",
+			"retry.default_backoff_multiplier",
+			"skills_runtime.admin_token",
+		},
 		impact.ChangedPaths,
 	)
 	require.ElementsMatch(t,
-		[]string{"providers.items.alpha.base_url", "providers.proxy.http", "skills_runtime.admin_token"},
+		[]string{
+			"providers.backoff.initial_interval",
+			"providers.items.alpha.base_url",
+			"providers.proxy.http",
+			"retry.default_backoff_multiplier",
+			"skills_runtime.admin_token",
+		},
 		impact.HotReloadPaths,
 	)
 	require.Empty(t, impact.RestartRequiredPaths)
 	require.ElementsMatch(t, []string{"auth.admin_token"}, impact.InactivePaths)
+}
+
+func TestClassifyConfigDocumentPathTreatsRetrySettingsAsHotReload(t *testing.T) {
+	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("providers.backoff.initial_interval"))
+	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("retry.default_backoff_multiplier"))
+	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("retry.rules.0.retry_delay_ms"))
 }
 
 func TestRuntimeConfigHotReloaderAppliesHotReloadableSettings(t *testing.T) {

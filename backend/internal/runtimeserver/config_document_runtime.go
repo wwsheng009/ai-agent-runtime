@@ -71,8 +71,10 @@ var (
 	hotReloadProviderPrefixes = []string{
 		"providers.timeout",
 		"providers.max_retries",
+		"providers.backoff",
 		"providers.proxy",
 		"providers.items",
+		"retry",
 	}
 )
 
@@ -373,7 +375,7 @@ func buildConfigDocumentWarnings(
 		warnings = append(warnings,
 			"保存时会按变更路径区分为即时热重载、需重启和当前进程未使用三类。")
 		warnings = append(warnings,
-			"providers.items.*、providers.timeout、providers.max_retries 会同步刷新运行中 provider 注册表。")
+			"providers.items.*、providers.timeout、providers.max_retries、providers.backoff、retry.* 会同步刷新运行中 provider 注册表。")
 		warnings = append(warnings,
 			"skills_runtime 的治理策略、log、profiles、aicli.mcp 相关配置也会在当前进程内即时应用。")
 		return warnings
