@@ -19,10 +19,11 @@ type CodexAdapter struct{}
 
 const codexResponseOutputItemsKey = "response_output_items"
 const (
-	codexPromptCacheKeyMetadataKey = "prompt_cache_key"
-	codexSessionIDMetadataKey      = "session_id"
-	codexConversationIDMetadataKey = "conversation_id"
-	codexImageGenerationToolType   = "image_generation"
+	codexPromptCacheKeyMetadataKey          = "prompt_cache_key"
+	codexSessionIDMetadataKey               = "session_id"
+	codexConversationIDMetadataKey          = "conversation_id"
+	codexImageGenerationToolType            = "image_generation"
+	codexSupportsMaxOutputTokensMetadataKey = "supports_max_output_tokens"
 )
 
 // Name 返回适配器名称
@@ -101,11 +102,13 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 		request["prompt_cache_key"] = promptCacheKey
 	}
 
-	// 设置 max_output_tokens (Codex 使用 max_output_tokens 而非 max_tokens)
-	if config.MaxTokens > 0 {
-		request["max_output_tokens"] = config.MaxTokens
-	} else {
-		request["max_output_tokens"] = 4096
+	// 设置 max_output_tokens（仅对支持该字段的 Codex 兼容上游发送）
+	if metadataAllowsCodexMaxOutputTokens(config.Metadata) {
+		if config.MaxTokens > 0 {
+			request["max_output_tokens"] = config.MaxTokens
+		} else {
+			request["max_output_tokens"] = 4096
+		}
 	}
 
 	effort := NormalizeCodexReasoningEffort(config.ReasoningEffort)
@@ -174,6 +177,28 @@ func stringFromMetadata(metadata map[string]interface{}, key string) string {
 	default:
 		return fmt.Sprint(typed)
 	}
+}
+
+func metadataAllowsCodexMaxOutputTokens(metadata map[string]interface{}) bool {
+	if len(metadata) == 0 {
+		return true
+	}
+	value, ok := metadata[codexSupportsMaxOutputTokensMetadataKey]
+	if !ok || value == nil {
+		return true
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "false", "0", "no", "off":
+			return false
+		case "true", "1", "yes", "on":
+			return true
+		}
+	}
+	return true
 }
 
 func (a *CodexAdapter) buildCodexInstructionsAndInput(messages []map[string]interface{}) (string, []map[string]interface{}) {
@@ -849,16 +874,53 @@ func (s *CodexStreamState) StreamError() error {
 		if message == "" {
 			message = "unknown codex stream failure"
 		}
-		return fmt.Errorf("codex response failed: %s", message)
+		return &codexResponseError{
+			kind:    "codex response failed",
+			code:    strings.TrimSpace(s.ErrorCode),
+			message: message,
+		}
 	case "incomplete":
 		message := strings.TrimSpace(s.ErrorMessage)
 		if message == "" {
 			message = "unknown codex stream incomplete response"
 		}
-		return fmt.Errorf("codex response incomplete: %s", message)
+		return &codexResponseError{
+			kind:    "codex response incomplete",
+			code:    strings.TrimSpace(s.ErrorCode),
+			message: message,
+		}
 	default:
 		return nil
 	}
+}
+
+type codexResponseError struct {
+	kind    string
+	code    string
+	message string
+}
+
+func (e *codexResponseError) Error() string {
+	if e == nil {
+		return ""
+	}
+	kind := strings.TrimSpace(e.kind)
+	message := strings.TrimSpace(e.message)
+	switch {
+	case kind == "":
+		return message
+	case message == "":
+		return kind
+	default:
+		return fmt.Sprintf("%s: %s", kind, message)
+	}
+}
+
+func (e *codexResponseError) RetryErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return strings.TrimSpace(e.code)
 }
 
 func codexErrorFromEvent(event map[string]interface{}) (string, string) {

@@ -142,20 +142,23 @@ type ChoiceChunk struct {
 
 // ProviderConfig 提供者配置
 type ProviderConfig struct {
-	Type               string                                     `json:"type"` // openai, anthropic, gemini, codex
-	APIKey             string                                     `json:"apiKey"`
-	BaseURL            string                                     `json:"baseUrl"`
-	APIPath            string                                     `json:"apiPath,omitempty"`
-	Timeout            time.Duration                              `json:"timeout"`
-	MaxRetries         int                                        `json:"maxRetries"`
-	DefaultModel       string                                     `json:"defaultModel,omitempty"`
-	SupportedModels    []string                                   `json:"supportedModels,omitempty"`
-	ModelMappings      map[string]string                          `json:"modelMappings,omitempty"`
-	ModelCapabilities  map[string]agentconfig.ModelCapabilitySpec `json:"modelCapabilities,omitempty"`
-	Headers            map[string]string                          `json:"headers,omitempty"`
-	HeaderMappings     map[string]string                          `json:"headerMappings,omitempty"`
-	HeaderMappingRules []HeaderMappingRule                        `json:"headerMappingRules,omitempty"`
-	Proxy              *agentconfig.ProxyConfig                   `json:"proxy,omitempty"`
+	Type                    string                                     `json:"type"` // openai, anthropic, gemini, codex
+	APIKey                  string                                     `json:"apiKey"`
+	BaseURL                 string                                     `json:"baseUrl"`
+	APIPath                 string                                     `json:"apiPath,omitempty"`
+	Timeout                 time.Duration                              `json:"timeout"`
+	MaxRetries              int                                        `json:"maxRetries"`
+	RetryTuning             RetryTuning                                `json:"retryTuning,omitempty"`
+	RetryRules              []RetryRule                                `json:"retryRules,omitempty"`
+	DefaultModel            string                                     `json:"defaultModel,omitempty"`
+	SupportedModels         []string                                   `json:"supportedModels,omitempty"`
+	ModelMappings           map[string]string                          `json:"modelMappings,omitempty"`
+	ModelCapabilities       map[string]agentconfig.ModelCapabilitySpec `json:"modelCapabilities,omitempty"`
+	Headers                 map[string]string                          `json:"headers,omitempty"`
+	HeaderMappings          map[string]string                          `json:"headerMappings,omitempty"`
+	HeaderMappingRules      []HeaderMappingRule                        `json:"headerMappingRules,omitempty"`
+	SupportsMaxOutputTokens *bool                                      `json:"supportsMaxOutputTokens,omitempty"`
+	Proxy                   *agentconfig.ProxyConfig                   `json:"proxy,omitempty"`
 }
 
 // ProviderWrapper Provider 包装器，使用 ProtocolAdapter
@@ -720,12 +723,39 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		return p.callStreamingAggregate(ctx, req)
 	}
 
-	chatResp, err := p.Chat(ctx, p.toChatRequest(req))
-	if err != nil {
-		return nil, err
+	chatReq := p.toChatRequest(req)
+	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.RetryTuning, p.config.RetryRules)
+	var lastErr error
+	startedAt := time.Now()
+
+	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+		chatResp, err := p.Chat(ctx, chatReq)
+		if err == nil {
+			return p.toLLMResponse(chatResp), nil
+		}
+
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		lastErr = err
+		decision := policy.decisionForError(err)
+		if !decision.Retryable {
+			return nil, err
+		}
+		if attempt >= policy.maxAttemptsForDecision(decision) {
+			break
+		}
+		delay := policy.delayForDecision(attempt, decision)
+		if !policy.canRetryAfter(startedAt, time.Now(), delay) {
+			break
+		}
+		if err := waitRetryDelay(ctx, delay); err != nil {
+			return nil, err
+		}
 	}
 
-	return p.toLLMResponse(chatResp), nil
+	return nil, markRetryExhausted("provider call failed after retries", policy.MaxAttempts, lastErr)
 }
 
 func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
@@ -744,24 +774,6 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	}
 
 	url := p.buildURL(p.adapter.GetAPIPath())
-	reportHTTPDebug(ctx, HTTPDebugEvent{
-		Source:           "provider_wrapper",
-		Phase:            "request",
-		Protocol:         p.config.Type,
-		Model:            adapterRequest.Model,
-		Method:           http.MethodPost,
-		URL:              url,
-		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, p.config.Type, requestBody),
-		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
-		RequestBodyBytes: len(bodyBytes),
-		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
-	})
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
 	adapterConfig := adapter.AdapterConfig{
 		Type:        p.config.Type,
 		APIKey:      p.config.APIKey,
@@ -771,28 +783,137 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		Headers:     p.config.Headers,
 	}
 	headers := p.adapter.BuildHeaders(adapterConfig)
-	for key, value := range headers {
-		httpReq.Header.Set(key, value)
-	}
 
 	client := newProviderHTTPClient(p.config.Timeout, p.config.Proxy, true)
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		reportHTTPDebug(ctx, HTTPDebugEvent{
-			Source:   "provider_wrapper",
-			Phase:    "response",
-			Protocol: p.config.Type,
-			Model:    adapterRequest.Model,
-			Method:   http.MethodPost,
-			URL:      url,
-			Error:    err.Error(),
-		})
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
+	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.RetryTuning, p.config.RetryRules)
+	var lastErr error
+	startedAt := time.Now()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
+	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+		reportHTTPDebug(ctx, HTTPDebugEvent{
+			Source:           "provider_wrapper",
+			Phase:            "request",
+			Protocol:         p.config.Type,
+			Model:            adapterRequest.Model,
+			Method:           http.MethodPost,
+			URL:              url,
+			RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, p.config.Type, requestBody),
+			RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+			RequestBodyBytes: len(bodyBytes),
+			RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+		})
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		for key, value := range headers {
+			httpReq.Header.Set(key, value)
+		}
+
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			reportHTTPDebug(ctx, HTTPDebugEvent{
+				Source:   "provider_wrapper",
+				Phase:    "response",
+				Protocol: p.config.Type,
+				Model:    adapterRequest.Model,
+				Method:   http.MethodPost,
+				URL:      url,
+				Error:    err.Error(),
+			})
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			lastErr = fmt.Errorf("failed to send request: %w", err)
+			decision := policy.decisionForError(lastErr)
+			if !decision.Retryable || attempt >= policy.maxAttemptsForDecision(decision) {
+				break
+			}
+			delay := policy.delayForDecision(attempt, decision)
+			if !policy.canRetryAfter(startedAt, time.Now(), delay) {
+				break
+			}
+			if err := waitRetryDelay(ctx, delay); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			responseBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			reportHTTPDebug(ctx, HTTPDebugEvent{
+				Source:              "provider_wrapper",
+				Phase:               "response",
+				Protocol:            p.config.Type,
+				Model:               adapterRequest.Model,
+				Method:              http.MethodPost,
+				URL:                 url,
+				ResponseStatusCode:  resp.StatusCode,
+				ResponseBodyBytes:   len(responseBody),
+				ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
+				ResponseBodyRaw:     append([]byte(nil), responseBody...),
+				Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
+			})
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(responseBody))
+			decision := policy.decisionForError(lastErr)
+			if !decision.Retryable || attempt >= policy.maxAttemptsForDecision(decision) {
+				break
+			}
+			delay := policy.delayForDecision(attempt, decision)
+			if !policy.canRetryAfter(startedAt, time.Now(), delay) {
+				break
+			}
+			if err := waitRetryDelay(ctx, delay); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		emissionState := &streamEmissionState{}
+		callbacks := adapter.StreamCallbacks{
+			OnText: func(content string) {
+				if content == "" {
+					return
+				}
+				emissionState.markText(content)
+				reportStreamChunk(ctx, StreamChunk{
+					Type:    EventTypeText,
+					Content: content,
+					Metadata: map[string]interface{}{
+						"provider": p.config.Type,
+						"model":    adapterRequest.Model,
+					},
+				})
+			},
+			OnReasoning: func(reasoning string) {
+				if reasoning == "" {
+					return
+				}
+				emissionState.markReasoning(reasoning)
+				reportStreamChunk(ctx, StreamChunk{
+					Type:    EventTypeReasoning,
+					Content: reasoning,
+					Metadata: map[string]interface{}{
+						"provider": p.config.Type,
+						"model":    adapterRequest.Model,
+					},
+				})
+			},
+		}
+
+		var responseBuffer bytes.Buffer
+		assistantMsg, handleErr := p.adapter.HandleResponse(true, io.TeeReader(resp.Body, &responseBuffer), callbacks)
+		resp.Body.Close()
+		responseBody := append([]byte(nil), responseBuffer.Bytes()...)
+
+		if handleErr == nil {
+			handleErr = validateStreamingAggregateResponse(p.config.Type, responseBody, assistantMsg)
+		}
 		reportHTTPDebug(ctx, HTTPDebugEvent{
 			Source:              "provider_wrapper",
 			Phase:               "response",
@@ -801,136 +922,112 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			Method:              http.MethodPost,
 			URL:                 url,
 			ResponseStatusCode:  resp.StatusCode,
-			ResponseBodyBytes:   len(body),
-			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
-			ResponseBodyRaw:     append([]byte(nil), body...),
-			Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
+			ResponseBodyBytes:   len(responseBody),
+			ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
+			ResponseBodyRaw:     responseBody,
+			Error:               errorString(handleErr),
 		})
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
 
-	callbacks := adapter.StreamCallbacks{
-		OnText: func(content string) {
-			if content == "" {
-				return
+		if handleErr != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
-			reportStreamChunk(ctx, StreamChunk{
-				Type:    EventTypeText,
-				Content: content,
-				Metadata: map[string]interface{}{
-					"provider": p.config.Type,
-					"model":    adapterRequest.Model,
-				},
-			})
-		},
-		OnReasoning: func(reasoning string) {
-			if reasoning == "" {
-				return
+			lastErr = fmt.Errorf("failed to handle stream response: %w", handleErr)
+			if emissionState.emittedAnything() {
+				return nil, suppressRetry(lastErr)
 			}
-			reportStreamChunk(ctx, StreamChunk{
-				Type:    EventTypeReasoning,
-				Content: reasoning,
-				Metadata: map[string]interface{}{
-					"provider": p.config.Type,
-					"model":    adapterRequest.Model,
-				},
-			})
-		},
-	}
-	var responseBuffer bytes.Buffer
-	assistantMsg, err := p.adapter.HandleResponse(true, io.TeeReader(resp.Body, &responseBuffer), callbacks)
-	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
-	reportHTTPDebug(ctx, HTTPDebugEvent{
-		Source:              "provider_wrapper",
-		Phase:               "response",
-		Protocol:            p.config.Type,
-		Model:               adapterRequest.Model,
-		Method:              http.MethodPost,
-		URL:                 url,
-		ResponseStatusCode:  resp.StatusCode,
-		ResponseBodyBytes:   len(responseBody),
-		ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
-		ResponseBodyRaw:     responseBody,
-		Error:               errorString(err),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to handle stream response: %w", err)
-	}
-	if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
-		if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
-			if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
-				metadata := decodeMapAny(assistantMsg["metadata"])
-				if metadata == nil {
-					metadata = map[string]interface{}{}
+			decision := policy.decisionForError(lastErr)
+			if !decision.Retryable || attempt >= policy.maxAttemptsForDecision(decision) {
+				break
+			}
+			delay := policy.delayForDecision(attempt, decision)
+			if !policy.canRetryAfter(startedAt, time.Now(), delay) {
+				break
+			}
+			if err := waitRetryDelay(ctx, delay); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
+			if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
+				if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
+					metadata := decodeMapAny(assistantMsg["metadata"])
+					if metadata == nil {
+						metadata = map[string]interface{}{}
+					}
+					metadata["generated_images_error"] = imageErr.Error()
+					assistantMsg["metadata"] = metadata
 				}
-				metadata["generated_images_error"] = imageErr.Error()
-				assistantMsg["metadata"] = metadata
 			}
 		}
-	}
 
-	content, _ := assistantMsg["content"].(string)
-	usage, usageSource := resolveUnifiedChatTokenUsage(p.config.Type, responseBody, assistantMsg, request.Messages, content, p.tokenizer)
+		content, _ := assistantMsg["content"].(string)
+		usage, usageSource := resolveUnifiedChatTokenUsage(p.config.Type, responseBody, assistantMsg, request.Messages, content, p.tokenizer)
 
-	response := &ChatResponse{
-		ID:      fmt.Sprintf("chat_%d", time.Now().Unix()),
-		Object:  "chat.completion",
-		Created: time.Now().Unix(),
-		Model:   request.Model,
-		Choices: []Choice{
-			{
-				Index: 0,
-				Message: Message{
-					Role: "assistant",
+		response := &ChatResponse{
+			ID:      fmt.Sprintf("chat_%d", time.Now().Unix()),
+			Object:  "chat.completion",
+			Created: time.Now().Unix(),
+			Model:   request.Model,
+			Choices: []Choice{
+				{
+					Index: 0,
+					Message: Message{
+						Role: "assistant",
+					},
+					FinishReason: "stop",
 				},
-				FinishReason: "stop",
 			},
-		},
-		Usage: chatUsageFromTokenUsage(usage),
-	}
-	response.Choices[0].Message.Content = content
-	if usageSource != "" {
-		response.Metadata = map[string]interface{}{
-			"usage_source": usageSource,
+			Usage: chatUsageFromTokenUsage(usage),
 		}
-	}
-	if metadata := decodeMapAny(assistantMsg["metadata"]); len(metadata) > 0 {
-		response.Choices[0].Message.Metadata = cloneMapStringAny(metadata)
-	}
-	if toolCalls, ok := assistantMsg["tool_calls"]; ok {
-		switch tcSlice := toolCalls.(type) {
-		case []interface{}:
-			if len(tcSlice) > 0 {
-				response.Choices[0].Message.ToolCalls = p.convertToolCalls(tcSlice)
-				response.Choices[0].FinishReason = "tool_calls"
+		response.Choices[0].Message.Content = content
+		if usageSource != "" {
+			response.Metadata = map[string]interface{}{
+				"usage_source": usageSource,
 			}
-		case []map[string]interface{}:
-			if len(tcSlice) > 0 {
-				normalized := make([]interface{}, 0, len(tcSlice))
-				for _, tc := range tcSlice {
-					normalized = append(normalized, tc)
+		}
+		if metadata := decodeMapAny(assistantMsg["metadata"]); len(metadata) > 0 {
+			response.Choices[0].Message.Metadata = cloneMapStringAny(metadata)
+		}
+		if toolCalls, ok := assistantMsg["tool_calls"]; ok {
+			switch tcSlice := toolCalls.(type) {
+			case []interface{}:
+				if len(tcSlice) > 0 {
+					response.Choices[0].Message.ToolCalls = p.convertToolCalls(tcSlice)
+					response.Choices[0].FinishReason = "tool_calls"
 				}
-				response.Choices[0].Message.ToolCalls = p.convertToolCalls(normalized)
-				response.Choices[0].FinishReason = "tool_calls"
+			case []map[string]interface{}:
+				if len(tcSlice) > 0 {
+					normalized := make([]interface{}, 0, len(tcSlice))
+					for _, tc := range tcSlice {
+						normalized = append(normalized, tc)
+					}
+					response.Choices[0].Message.ToolCalls = p.convertToolCalls(normalized)
+					response.Choices[0].FinishReason = "tool_calls"
+				}
 			}
 		}
+		if reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg); reasoningBlock != nil {
+			response.Choices[0].Message.Reasoning = reasoningBlock.DisplayText()
+			if response.Metadata == nil {
+				response.Metadata = make(map[string]interface{})
+			}
+			response.Metadata[assistantReasoningDetailsKey] = reasoningBlock.ToMap()
+		} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok {
+			if response.Metadata == nil {
+				response.Metadata = make(map[string]interface{})
+			}
+			response.Metadata["reasoning_content"] = reasoning
+			if reasoning != "" {
+				response.Choices[0].Message.Reasoning = reasoning
+			}
+		}
+		return p.toLLMResponse(response), nil
 	}
-	if reasoningBlock := extractReasoningFromAssistantMessage(assistantMsg); reasoningBlock != nil {
-		response.Choices[0].Message.Reasoning = reasoningBlock.DisplayText()
-		if response.Metadata == nil {
-			response.Metadata = make(map[string]interface{})
-		}
-		response.Metadata[assistantReasoningDetailsKey] = reasoningBlock.ToMap()
-	} else if reasoning, ok := assistantMsg["reasoning_content"].(string); ok {
-		if response.Metadata == nil {
-			response.Metadata = make(map[string]interface{})
-		}
-		response.Metadata["reasoning_content"] = reasoning
-		if reasoning != "" {
-			response.Choices[0].Message.Reasoning = reasoning
-		}
-	}
-	return p.toLLMResponse(response), nil
+
+	return nil, markRetryExhausted("streaming aggregate call failed after retries", policy.MaxAttempts, lastErr)
 }
 
 // Stream ???? Runtime ????????
@@ -1175,8 +1272,24 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 	for i, msg := range request.Messages {
 		messages[i] = providerMessageToAdapterMessage(msg, p.config.Type, providerHint)
 	}
-	if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
+	switch strings.ToLower(strings.TrimSpace(p.config.Type)) {
+	case "codex":
+		before := len(messages)
 		messages = sanitizeCodexProtocolMessages(messages)
+		if dropped := before - len(messages); dropped > 0 {
+			metadata["tool_replay_sanitized"] = true
+			metadata["tool_replay_dropped_messages"] = dropped
+		}
+		if !providerSupportsCodexMaxOutputTokens(p.config.BaseURL, p.config.SupportsMaxOutputTokens) {
+			metadata[codexSupportsMaxOutputTokensMetadataKey] = false
+		}
+	case "openai":
+		before := len(messages)
+		messages = sanitizeOpenAICompatibleProtocolMessages(messages)
+		if dropped := before - len(messages); dropped > 0 {
+			metadata["tool_replay_sanitized"] = true
+			metadata["tool_replay_dropped_messages"] = dropped
+		}
 	}
 
 	// 转换 Tools（从 OpenAI 嵌套格式转换为协议特定格式）

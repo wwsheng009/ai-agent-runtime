@@ -440,6 +440,80 @@ func RuntimeMessagesToProtocolMessages(messages []types.Message, protocol string
 	return result
 }
 
+func sanitizeOpenAICompatibleProtocolMessages(messages []map[string]interface{}) []map[string]interface{} {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	filtered := make([]map[string]interface{}, 0, len(messages))
+	var (
+		pendingMessages []map[string]interface{}
+		pendingToolIDs  map[string]struct{}
+	)
+
+	flushPending := func() {
+		if len(pendingMessages) == 0 || len(pendingToolIDs) != 0 {
+			return
+		}
+		filtered = append(filtered, pendingMessages...)
+		pendingMessages = nil
+		pendingToolIDs = nil
+	}
+	resetPending := func() {
+		pendingMessages = nil
+		pendingToolIDs = nil
+	}
+
+	for _, msg := range messages {
+		role, _ := msg["role"].(string)
+		role = strings.ToLower(strings.TrimSpace(role))
+
+		if len(pendingToolIDs) > 0 {
+			if role == "tool" {
+				toolCallID, _ := msg["tool_call_id"].(string)
+				toolCallID = strings.TrimSpace(toolCallID)
+				if toolCallID == "" {
+					continue
+				}
+				if _, ok := pendingToolIDs[toolCallID]; !ok {
+					continue
+				}
+				delete(pendingToolIDs, toolCallID)
+				pendingMessages = append(pendingMessages, msg)
+				flushPending()
+				continue
+			}
+
+			// A non-tool message interrupted an unfinished assistant tool replay
+			// block. Drop the entire incomplete block instead of leaking orphan
+			// tool results into the next request.
+			resetPending()
+		}
+
+		switch role {
+		case "assistant":
+			toolIDs := protocolMessageToolCallIDs(msg)
+			if len(toolIDs) > 0 {
+				pendingMessages = []map[string]interface{}{msg}
+				pendingToolIDs = toolIDs
+				continue
+			}
+			filtered = append(filtered, msg)
+		case "tool":
+			// Drop orphan tool messages. OpenAI-compatible providers require tool
+			// messages to be immediate responses to a preceding assistant tool_calls
+			// message.
+			continue
+		default:
+			filtered = append(filtered, msg)
+		}
+	}
+
+	// If the transcript ended with an incomplete assistant tool replay block,
+	// drop it rather than sending an invalid OpenAI-compatible message chain.
+	return filtered
+}
+
 func sanitizeCodexProtocolMessages(messages []map[string]interface{}) []map[string]interface{} {
 	if len(messages) == 0 {
 		return nil
@@ -452,7 +526,7 @@ func sanitizeCodexProtocolMessages(messages []map[string]interface{}) []map[stri
 		switch strings.ToLower(strings.TrimSpace(role)) {
 		case "assistant":
 			filtered = append(filtered, msg)
-			for id := range codexMessageToolCallIDs(msg) {
+			for id := range protocolMessageToolCallIDs(msg) {
 				seenToolCalls[id] = struct{}{}
 			}
 		case "tool":
@@ -472,7 +546,7 @@ func sanitizeCodexProtocolMessages(messages []map[string]interface{}) []map[stri
 	return filtered
 }
 
-func codexMessageToolCallIDs(message map[string]interface{}) map[string]struct{} {
+func protocolMessageToolCallIDs(message map[string]interface{}) map[string]struct{} {
 	ids := make(map[string]struct{})
 	for _, toolCall := range decodeSliceOfMaps(message["tool_calls"]) {
 		if toolCall == nil {

@@ -18,6 +18,8 @@ type RuntimeConfig struct {
 	DefaultModel    string            `yaml:"defaultModel" json:"defaultModel"`
 	DefaultTimeout  time.Duration     `yaml:"defaultTimeout" json:"defaultTimeout"`
 	MaxRetries      int               `yaml:"maxRetries" json:"maxRetries"`
+	RetryTuning     RetryTuning       `yaml:"retryTuning,omitempty" json:"retryTuning,omitempty"`
+	RetryRules      []RetryRule       `yaml:"retryRules,omitempty" json:"retryRules,omitempty"`
 	Providers       map[string]string `yaml:"providers" json:"providers"` // provider name -> type
 	HealthCheck     HealthCheckConfig `yaml:"healthCheck,omitempty" json:"healthCheck,omitempty"`
 }
@@ -104,6 +106,8 @@ func NewLLMRuntime(config *RuntimeConfig) *LLMRuntime {
 			DefaultModel:    "gpt-4-turbo",
 			DefaultTimeout:  60 * time.Second,
 			MaxRetries:      3,
+			RetryTuning:     RetryTuning{},
+			RetryRules:      nil,
 			Providers:       make(map[string]string),
 			HealthCheck:     DefaultHealthCheckConfig(),
 		}
@@ -245,6 +249,8 @@ func (r *LLMRuntime) RegisterGatewayClient(name string, resourceManager Resource
 		if r.config.MaxRetries > 0 {
 			gatewayClient.SetMaxRetries(r.config.MaxRetries)
 		}
+		gatewayClient.SetRetryTuning(r.config.RetryTuning)
+		gatewayClient.SetRetryRules(r.config.RetryRules)
 	}
 
 	return r.RegisterProvider(name, gatewayClient)
@@ -409,29 +415,36 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 		return nil, err
 	}
 
+	policy := newRuntimeRetryPolicy(r.config.MaxRetries, r.config.RetryTuning, r.config.RetryRules)
 	var lastError error
-	maxRetries := r.config.MaxRetries
+	startedAt := time.Now()
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
 		response, err := provider.Call(ctx, req)
 		if err == nil {
 			return response, nil
 		}
 
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
 		lastError = err
-		if !isRetryableProviderCallError(err) {
+		decision := policy.decisionForError(err)
+		if !decision.Retryable {
 			return nil, err
 		}
 
-		if attempt == maxRetries {
+		if attempt >= policy.maxAttemptsForDecision(decision) {
 			break
 		}
 
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * time.Second):
-			continue
+		delay := policy.delayForDecision(attempt, decision)
+		if !policy.canRetryAfter(startedAt, time.Now(), delay) {
+			break
+		}
+		if err := waitRetryDelay(ctx, delay); err != nil {
+			return nil, err
 		}
 	}
 

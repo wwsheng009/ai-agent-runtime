@@ -155,6 +155,64 @@ func TestRuntimeMessagesToProtocolMessages_OpenAIReplaysDeepSeekEmptyReasoningCo
 	}
 }
 
+func TestRuntimeMessagesToProtocolMessages_OpenAIDropsOrphanToolReplayPayload(t *testing.T) {
+	assistant := types.Message{
+		Role: "assistant",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_view", Name: "view"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+	validTool := types.Message{
+		Role:       "tool",
+		Content:    "view result",
+		ToolCallID: "call_view",
+		Metadata:   types.NewMetadata(),
+	}
+
+	messages := sanitizeOpenAICompatibleProtocolMessages([]map[string]interface{}{
+		runtimeMessageToAdapterMessage(*types.NewToolMessage("call_old_1", "old result 1"), "openai", ""),
+		runtimeMessageToAdapterMessage(*types.NewToolMessage("call_old_2", "old result 2"), "openai", ""),
+		runtimeMessageToAdapterMessage(assistant, "openai", ""),
+		runtimeMessageToAdapterMessage(validTool, "openai", ""),
+	})
+
+	if len(messages) != 2 {
+		t.Fatalf("expected orphan tool replay messages to be dropped, got %d messages: %#v", len(messages), messages)
+	}
+
+	if got := messages[0]["role"]; got != "assistant" {
+		t.Fatalf("expected assistant message first after sanitization, got %#v", messages[0])
+	}
+	if got := messages[1]["tool_call_id"]; got != "call_view" {
+		t.Fatalf("expected only valid tool replay to remain, got %#v", messages[1])
+	}
+}
+
+func TestRuntimeMessagesToProtocolMessages_OpenAIDropsIncompleteToolReplayBlock(t *testing.T) {
+	assistant := types.Message{
+		Role: "assistant",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_1", Name: "view"},
+			{ID: "call_2", Name: "grep"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+
+	messages := sanitizeOpenAICompatibleProtocolMessages([]map[string]interface{}{
+		runtimeMessageToAdapterMessage(assistant, "openai", ""),
+		runtimeMessageToAdapterMessage(*types.NewToolMessage("call_2", "grep result"), "openai", ""),
+		runtimeMessageToAdapterMessage(*types.NewUserMessage("继续"), "openai", ""),
+	})
+
+	if len(messages) != 1 {
+		t.Fatalf("expected incomplete assistant tool replay block to be dropped, got %d messages: %#v", len(messages), messages)
+	}
+	if got := messages[0]["role"]; got != "user" {
+		t.Fatalf("expected only the follow-up user message to remain, got %#v", messages[0])
+	}
+}
+
 func TestRuntimeMessagesToProtocolMessages_CodexDropsOrphanToolReplayPayload(t *testing.T) {
 	assistant := types.Message{
 		Role: "assistant",

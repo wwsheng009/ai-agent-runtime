@@ -390,6 +390,42 @@ func TestGatewayClient_CallProvider_SavesGeneratedImagesAndReturnsMetadata(t *te
 	require.NoError(t, statErr)
 }
 
+func TestGatewayClient_CallProvider_OmitsCodexMaxOutputTokensWhenProviderDisablesIt(t *testing.T) {
+	var capturedBody map[string]interface{}
+	disabled := false
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"resp_1","model":"gpt-5.4","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}`)
+	}))
+	defer server.Close()
+
+	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
+	selected := &SelectedResource{
+		Provider: &ProviderResource{
+			Name:                    "codex_cli_gpt",
+			Type:                    "codex",
+			BaseURL:                 server.URL,
+			SupportsMaxOutputTokens: &disabled,
+		},
+		KeyValue: "test-key",
+	}
+
+	_, err := client.callProvider(context.Background(), selected, "gpt-5.4", &LLMRequest{
+		Model: "gpt-5.4",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		MaxTokens: 4096,
+	})
+	require.NoError(t, err)
+
+	_, exists := capturedBody["max_output_tokens"]
+	assert.False(t, exists, "max_output_tokens should not be forwarded")
+}
+
 func TestGatewayClient_CallProvider_WithStreamReportsReasoningDeltas(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -833,6 +869,58 @@ func TestGatewayClientCall_RetriesRetryableHTTPError(t *testing.T) {
 	}
 }
 
+func TestGatewayClientCall_RetryRuleOverridesMaxRetriesForHTTP503(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"error":{"message":"temporary upstream failure"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-5.4","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	rm := &gatewayTestResourceManager{
+		selected: &SelectedResource{
+			Provider: &ProviderResource{
+				Name:    "openai_ee",
+				Type:    "openai",
+				BaseURL: server.URL,
+			},
+			KeyValue: "test-key",
+		},
+	}
+	client := NewGatewayClient(rm, "gpt-5.4-mini")
+	client.SetMaxRetries(1)
+	client.SetRetryRules([]RetryRule{
+		{
+			Name:       "http_5xx_retry",
+			Enabled:    true,
+			MaxRetries: 2,
+			StatusCode: RetryStatusCodeMatcher{Range: "500-504"},
+		},
+	})
+
+	resp, err := client.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "ok", resp.Content)
+	assert.Equal(t, 2, requests)
+	assert.Equal(t, 2, rm.selectCalls)
+	require.Len(t, rm.results, 2)
+	assert.False(t, rm.results[0].success)
+	assert.True(t, rm.results[1].success)
+}
+
 func TestGatewayClientCall_DoesNotRetryInvalidRequestResponseError(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -921,4 +1009,88 @@ func TestGatewayClientCall_DoesNotRetryMissingRequiredParameterResponseError(t *
 	require.Len(t, rm.results, 1)
 	assert.False(t, rm.results[0].success)
 	assert.Equal(t, 0, rm.results[0].statusCode)
+}
+
+func TestGatewayClientCall_WithStream_RetriesIncompleteStreamBeforeFirstDelta(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{}}]}`+"\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	rm := &gatewayTestResourceManager{
+		selected: &SelectedResource{
+			Provider: &ProviderResource{
+				Name:    "openai_ee",
+				Type:    "openai",
+				BaseURL: server.URL,
+			},
+			KeyValue: "test-key",
+		},
+	}
+	client := NewGatewayClient(rm, "gpt-5.4-mini")
+	client.SetMaxRetries(2)
+
+	resp, err := client.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Stream: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "hello", resp.Content)
+	assert.Equal(t, 2, requests)
+	assert.Equal(t, 2, rm.selectCalls)
+	require.Len(t, rm.results, 2)
+	assert.False(t, rm.results[0].success)
+	assert.True(t, rm.results[1].success)
+}
+
+func TestGatewayClientCall_WithStream_DoesNotRetryAfterTextDelta(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}`+"\n\n")
+	}))
+	defer server.Close()
+
+	rm := &gatewayTestResourceManager{
+		selected: &SelectedResource{
+			Provider: &ProviderResource{
+				Name:    "openai_ee",
+				Type:    "openai",
+				BaseURL: server.URL,
+			},
+			KeyValue: "test-key",
+		},
+	}
+	client := NewGatewayClient(rm, "gpt-5.4-mini")
+	client.SetMaxRetries(3)
+
+	_, err := client.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Stream: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to handle stream response")
+	assert.Contains(t, err.Error(), "stream disconnected before completion")
+	assert.Equal(t, 1, requests)
+	assert.Equal(t, 1, rm.selectCalls)
+	require.Len(t, rm.results, 1)
+	assert.False(t, rm.results[0].success)
 }

@@ -175,6 +175,21 @@ func TestCodexBuildRequest_UsesConfiguredStreamFlag(t *testing.T) {
 	}
 }
 
+func TestCodexBuildRequest_OmitsMaxOutputTokensWhenMetadataDisablesIt(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.4",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hello"}},
+		Metadata: map[string]interface{}{
+			"supports_max_output_tokens": false,
+		},
+	})
+
+	if _, exists := req["max_output_tokens"]; exists {
+		t.Fatalf("did not expect max_output_tokens when metadata disables it: %#v", req["max_output_tokens"])
+	}
+}
+
 func TestCodexBuildRequest_MovesSystemMessagesToInstructions(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{

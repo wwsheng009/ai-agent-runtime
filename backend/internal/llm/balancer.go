@@ -31,15 +31,16 @@ type KeyResource struct {
 
 // ProviderResource Provider 资源信息
 type ProviderResource struct {
-	GroupName         string
-	Name              string
-	Type              string
-	BaseURL           string
-	APIPath           string
-	Weight            int
-	Enabled           bool
-	ModelCapabilities map[string]agentconfig.ModelCapabilitySpec
-	Config            interface{} // 原始配置（用于模型映射等）
+	GroupName               string
+	Name                    string
+	Type                    string
+	BaseURL                 string
+	APIPath                 string
+	Weight                  int
+	Enabled                 bool
+	SupportsMaxOutputTokens *bool
+	ModelCapabilities       map[string]agentconfig.ModelCapabilitySpec
+	Config                  interface{} // 原始配置（用于模型映射等）
 }
 
 // RetryInfo 重试上下文信息

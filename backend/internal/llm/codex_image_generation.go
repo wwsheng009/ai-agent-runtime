@@ -316,7 +316,7 @@ func sanitizeGeneratedImageID(value string) string {
 }
 
 func cloneDeepMapStringAny(input map[string]interface{}) map[string]interface{} {
-	if len(input) == 0 {
+	if input == nil {
 		return nil
 	}
 	cloned := make(map[string]interface{}, len(input))
@@ -331,19 +331,30 @@ func cloneDeepInterfaceValue(value interface{}) interface{} {
 	case map[string]interface{}:
 		return cloneDeepMapStringAny(typed)
 	case []interface{}:
+		if typed == nil {
+			return nil
+		}
 		cloned := make([]interface{}, len(typed))
 		for index, item := range typed {
 			cloned[index] = cloneDeepInterfaceValue(item)
 		}
 		return cloned
 	case []map[string]interface{}:
+		if typed == nil {
+			return nil
+		}
 		cloned := make([]map[string]interface{}, len(typed))
 		for index, item := range typed {
 			cloned[index] = cloneDeepMapStringAny(item)
 		}
 		return cloned
 	case []string:
-		return append([]string(nil), typed...)
+		if typed == nil {
+			return nil
+		}
+		cloned := make([]string, len(typed))
+		copy(cloned, typed)
+		return cloned
 	default:
 		return typed
 	}

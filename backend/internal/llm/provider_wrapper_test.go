@@ -187,6 +187,74 @@ func TestProviderWrapper_OpenAICall_ParsesToolCalls(t *testing.T) {
 	assert.Empty(t, resp.Content)
 }
 
+func TestProviderWrapper_OpenAICall_PreservesEmptyRequiredArrayInToolSchema(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:         "openai",
+		BaseURL:      server.URL,
+		DefaultModel: "deepseek-v4-pro",
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "deepseek-v4-pro",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "classify commits",
+		}},
+		Tools: []types.ToolDefinition{{
+			Name:        "ls",
+			Description: "列出目录内容",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path":  map[string]interface{}{"type": "string"},
+					"depth": map[string]interface{}{"type": "integer"},
+				},
+				"required": []string{},
+			},
+		}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ok", resp.Content)
+
+	tools, ok := capturedBody["tools"].([]interface{})
+	require.True(t, ok)
+	var toolMap map[string]interface{}
+	for _, rawTool := range tools {
+		candidate, ok := rawTool.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		functionMap, ok := candidate["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if functionMap["name"] == "ls" {
+			toolMap = candidate
+			break
+		}
+	}
+	require.NotNil(t, toolMap)
+	functionMap, ok := toolMap["function"].(map[string]interface{})
+	require.True(t, ok)
+	params, ok := functionMap["parameters"].(map[string]interface{})
+	require.True(t, ok)
+
+	rawRequired, exists := params["required"]
+	require.True(t, exists, "expected required key to be present")
+	required, ok := rawRequired.([]interface{})
+	require.True(t, ok, "expected required to remain an empty array, got %T (%#v)", rawRequired, rawRequired)
+	require.Len(t, required, 0)
+}
+
 func TestProviderWrapper_CallUsesConfiguredHTTPProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Proxy-Seen") != "true" {
@@ -971,6 +1039,46 @@ func TestProviderWrapper_CodexCall_PropagatesPromptCacheFieldsFromMetadata(t *te
 	assert.Equal(t, "session-123", capturedBody["prompt_cache_key"])
 }
 
+func TestProviderWrapper_CodexCall_StripsMaxOutputTokensWhenProviderDisablesIt(t *testing.T) {
+	var capturedBody map[string]interface{}
+	disabled := false
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/responses", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			"event: response.created",
+			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`,
+			"",
+			"event: response.completed",
+			`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","stop_reason":"end_turn"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:                    "codex",
+		BaseURL:                 server.URL,
+		DefaultModel:            "gpt-5.4",
+		SupportsMaxOutputTokens: &disabled,
+	})
+	require.NoError(t, err)
+
+	_, err = provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+
+	_, exists := capturedBody["max_output_tokens"]
+	assert.False(t, exists, "max_output_tokens should not be forwarded")
+}
+
 func TestProviderWrapper_CodexCall_WithStreamReturnsProviderFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1006,6 +1114,129 @@ func TestProviderWrapper_CodexCall_WithStreamReturnsProviderFailure(t *testing.T
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to handle stream response")
 	assert.Contains(t, err.Error(), "no available resource: no available key/provider")
+}
+
+func TestProviderWrapper_Call_RetryRuleOverridesMaxRetriesForHTTP503(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"error":{"message":"temporary upstream failure"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 1,
+		RetryRules: []RetryRule{
+			{
+				Name:       "http_5xx_retry",
+				Enabled:    true,
+				MaxRetries: 2,
+				StatusCode: RetryStatusCodeMatcher{Range: "500-504"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "ok", resp.Content)
+	assert.Equal(t, 2, requests)
+}
+
+func TestProviderWrapper_CallWithStream_RetriesIncompleteStreamBeforeFirstDelta(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{}}]}`+"\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 2,
+	})
+	require.NoError(t, err)
+
+	var deltas []string
+	ctx := WithStreamReporter(context.Background(), func(chunk StreamChunk) {
+		if chunk.Type == EventTypeText {
+			deltas = append(deltas, chunk.Content)
+		}
+	})
+
+	resp, err := provider.Call(ctx, &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "retry this stream",
+		}},
+		Stream: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "hello", resp.Content)
+	assert.Equal(t, 2, requests)
+	assert.Equal(t, []string{"hello"}, deltas)
+}
+
+func TestProviderWrapper_CallWithStream_DoesNotRetryAfterTextDelta(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}`+"\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 2,
+	})
+	require.NoError(t, err)
+
+	var deltas []string
+	ctx := WithStreamReporter(context.Background(), func(chunk StreamChunk) {
+		if chunk.Type == EventTypeText {
+			deltas = append(deltas, chunk.Content)
+		}
+	})
+
+	_, err = provider.Call(ctx, &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "retry this stream",
+		}},
+		Stream: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to handle stream response")
+	assert.Contains(t, err.Error(), "stream disconnected before completion")
+	assert.Equal(t, 1, requests)
+	assert.Equal(t, []string{"hello"}, deltas)
 }
 
 func TestProviderWrapper_AnthropicCall_PropagatesThinkingToBodyAndHeader(t *testing.T) {

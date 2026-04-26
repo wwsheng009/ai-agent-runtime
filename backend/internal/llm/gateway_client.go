@@ -25,6 +25,8 @@ type GatewayClient struct {
 	defaultModel   string
 	defaultTimeout time.Duration
 	maxRetries     int
+	retryTuning    RetryTuning
+	retryRules     []RetryRule
 
 	// HTTP 客户端
 	httpClient *http.Client
@@ -81,6 +83,16 @@ func (c *GatewayClient) SetTimeout(timeout time.Duration) {
 // SetMaxRetries 设置最大重试次数
 func (c *GatewayClient) SetMaxRetries(maxRetries int) {
 	c.maxRetries = maxRetries
+}
+
+// SetRetryTuning 设置重试退避参数
+func (c *GatewayClient) SetRetryTuning(tuning RetryTuning) {
+	c.retryTuning = tuning
+}
+
+// SetRetryRules 设置细粒度重试规则
+func (c *GatewayClient) SetRetryRules(rules []RetryRule) {
+	c.retryRules = cloneRetryRules(rules)
 }
 
 // SetHTTPClient 自定义 HTTP 客户端
@@ -255,16 +267,18 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 	}
 
 	// 选择 Provider
+	policy := newProviderRetryPolicy(c.maxRetries, c.retryTuning, c.retryRules)
+	startedAt := time.Now()
 	retryInfo := RetryInfo{
 		TargetGroup:      "default",
 		Attempt:          1,
-		MaxAttempts:      c.maxRetries,
+		MaxAttempts:      policy.MaxAttempts,
 		RequestedModel:   model,
 		UseEnhancedRetry: true,
 	}
 
 	var lastError error
-	for attempt := 1; attempt <= c.maxRetries; attempt++ {
+	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
 		retryInfo.Attempt = attempt
 
 		selected, err := c.resourceManager.SelectResource(retryInfo)
@@ -291,6 +305,9 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 			)
 
 			lastError = err
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 
 			// 更新重试信息
 			if selected.GroupName != "" {
@@ -311,12 +328,14 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 			}
 
 			// 等待后重试
-			if attempt < c.maxRetries {
-				backoff := time.Duration(attempt) * 100 * time.Millisecond
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(backoff):
+			decision := policy.decisionForError(err)
+			if attempt < policy.maxAttemptsForDecision(decision) {
+				delay := policy.delayForDecision(attempt, decision)
+				if !policy.canRetryAfter(startedAt, time.Now(), delay) {
+					break
+				}
+				if err := waitRetryDelay(ctx, delay); err != nil {
+					return nil, err
 				}
 			}
 			continue
@@ -338,7 +357,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 		return response, nil
 	}
 
-	return nil, fmt.Errorf("all retry attempts failed: %w", lastError)
+	return nil, markRetryExhausted("all retry attempts failed", policy.MaxAttempts, lastError)
 }
 
 // callProvider 调用指定的 Provider
@@ -451,7 +470,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
-		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body))
+		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), c.retryRules)
 	}
 
 	body, err := io.ReadAll(httpResp.Body)
@@ -506,7 +525,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 
 	assistantMsg, err := adpt.HandleResponse(req.Stream, bytes.NewReader(body), callbacks)
 	if err != nil {
-		return nil, newGatewayResponseError("failed to handle response", err)
+		return nil, newGatewayResponseError("failed to handle response", err, c.retryRules)
 	}
 	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
 		if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
@@ -665,14 +684,16 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			ResponseBodyRaw:     append([]byte(nil), body...),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
-		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body))
+		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), c.retryRules)
 	}
 
+	emissionState := &streamEmissionState{}
 	callbacks := adapter.StreamCallbacks{
 		OnText: func(content string) {
 			if content == "" {
 				return
 			}
+			emissionState.markText(content)
 			reportStreamChunk(ctx, StreamChunk{
 				Type:    EventTypeText,
 				Content: content,
@@ -687,6 +708,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			if reasoning == "" {
 				return
 			}
+			emissionState.markReasoning(reasoning)
 			reportStreamChunk(ctx, StreamChunk{
 				Type:    EventTypeReasoning,
 				Content: reasoning,
@@ -701,6 +723,9 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	var responseBuffer bytes.Buffer
 	assistantMsg, err := adpt.HandleResponse(true, io.TeeReader(httpResp.Body, &responseBuffer), callbacks)
 	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
+	if err == nil {
+		err = validateStreamingAggregateResponse(protocol, responseBody, assistantMsg)
+	}
 	reportHTTPDebug(ctx, HTTPDebugEvent{
 		Source:              "gateway_client",
 		Phase:               "response",
@@ -716,7 +741,17 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		Error:               errorString(err),
 	})
 	if err != nil {
-		return nil, newGatewayResponseError("failed to handle stream response", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if emissionState.emittedAnything() {
+			return nil, &gatewayProviderError{
+				message:   fmt.Sprintf("failed to handle stream response: %v", err),
+				retryable: false,
+				cause:     err,
+			}
+		}
+		return nil, newGatewayResponseError("failed to handle stream response", err, c.retryRules)
 	}
 	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
 		if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
@@ -1034,6 +1069,25 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 
 	// 转换 Tools（根据协议生成正确格式）
 	tools := c.convertTools(req.Tools, protocol, resolvedModel, selectedProviderModelCapabilities(selected))
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "codex":
+		before := len(messages)
+		messages = sanitizeCodexProtocolMessages(messages)
+		if dropped := before - len(messages); dropped > 0 {
+			metadata["tool_replay_sanitized"] = true
+			metadata["tool_replay_dropped_messages"] = dropped
+		}
+		if !selectedProviderSupportsCodexMaxOutputTokens(selected) {
+			metadata[codexSupportsMaxOutputTokensMetadataKey] = false
+		}
+	case "openai":
+		before := len(messages)
+		messages = sanitizeOpenAICompatibleProtocolMessages(messages)
+		if dropped := before - len(messages); dropped > 0 {
+			metadata["tool_replay_sanitized"] = true
+			metadata["tool_replay_dropped_messages"] = dropped
+		}
+	}
 
 	return adapter.RequestConfig{
 		Model:           resolvedModel,
@@ -1163,23 +1217,25 @@ func selectedProviderModelCapabilities(selected *SelectedResource) map[string]ag
 	}
 }
 
-func newGatewayHTTPError(statusCode int, body string) error {
+func newGatewayHTTPError(statusCode int, body string, rules []RetryRule) error {
 	message := fmt.Sprintf("HTTP %d: %s", statusCode, body)
+	decision := classifyRetryableLLMErrorWithRules(fmt.Errorf("%s", message), rules)
 	return &gatewayProviderError{
 		message:    message,
 		statusCode: statusCode,
-		retryable:  isRetryableGatewayHTTPStatus(statusCode),
+		retryable:  decision.Retryable,
 	}
 }
 
-func newGatewayResponseError(prefix string, err error) error {
+func newGatewayResponseError(prefix string, err error, rules []RetryRule) error {
 	message := prefix
 	if err != nil {
 		message = fmt.Sprintf("%s: %v", prefix, err)
 	}
+	decision := classifyRetryableLLMErrorWithRules(err, rules)
 	return &gatewayProviderError{
 		message:   message,
-		retryable: isRetryableGatewayResponseError(err),
+		retryable: decision.Retryable,
 		cause:     err,
 	}
 }

@@ -7,25 +7,21 @@ import (
 )
 
 func isRetryableProviderCallError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	var providerErr *gatewayProviderError
-	if stderrs.As(err, &providerErr) {
-		return providerErr.retryable
-	}
-
-	if statusCode, ok := providerCallHTTPStatus(err); ok {
-		return isRetryableGatewayHTTPStatus(statusCode)
-	}
-
-	return isRetryableProviderResponseError(err)
+	return classifyRetryableLLMError(err).Retryable
 }
 
 func isRetryableProviderResponseError(err error) bool {
 	if err == nil {
 		return true
+	}
+
+	var exhaustedErr *retryExhaustedError
+	if stderrs.As(err, &exhaustedErr) {
+		return false
+	}
+	var suppressedErr *retrySuppressedError
+	if stderrs.As(err, &suppressedErr) {
+		return false
 	}
 
 	lower := strings.ToLower(err.Error())
@@ -38,6 +34,12 @@ func isRetryableProviderResponseError(err error) bool {
 		"unrecognized request argument",
 		"unknown parameter",
 		"unexpected parameter",
+		"context_length_exceeded",
+		"context window exceeded",
+		"maximum context length",
+		"prompt is too long",
+		"invalid api key",
+		"incorrect api key",
 	} {
 		if strings.Contains(lower, needle) {
 			return false

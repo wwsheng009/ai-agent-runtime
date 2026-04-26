@@ -178,6 +178,27 @@ func TestLLMRuntime_Call_RetriesRetryableProviderErrors(t *testing.T) {
 	assert.Equal(t, 3, provider.calls)
 }
 
+func TestLLMRuntime_Call_DoesNotRetryRetryExhaustedErrors(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      3,
+	})
+	provider := &flakyProvider{
+		name: "provider-a",
+		errs: []error{
+			markRetryExhausted("all retry attempts failed", 2, fmt.Errorf("HTTP 500: {\"error\":{\"message\":\"temporary upstream failure\"}}")),
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	_, err := runtime.Call(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.Error(t, err)
+	assert.Equal(t, 1, provider.calls)
+}
+
 type mockResourceManager struct{}
 
 func (m *mockResourceManager) SelectResource(retryInfo RetryInfo) (*SelectedResource, error) {
@@ -191,6 +212,19 @@ func TestLLMRuntime_RegisterGatewayClient(t *testing.T) {
 	runtime := NewLLMRuntime(&RuntimeConfig{
 		DefaultTimeout: 15 * time.Second,
 		MaxRetries:     2,
+		RetryTuning: RetryTuning{
+			BaseDelay:  300 * time.Millisecond,
+			MaxDelay:   2 * time.Second,
+			Multiplier: 1.6,
+		},
+		RetryRules: []RetryRule{
+			{
+				Name:       "http_5xx_retry",
+				Enabled:    true,
+				MaxRetries: 4,
+				StatusCode: RetryStatusCodeMatcher{Range: "500-504"},
+			},
+		},
 	})
 
 	// Use a minimal mock ResourceManager
@@ -207,6 +241,12 @@ func TestLLMRuntime_RegisterGatewayClient(t *testing.T) {
 	assert.Equal(t, "gpt-4o", gatewayProvider.defaultModel)
 	assert.Equal(t, 2, gatewayProvider.maxRetries)
 	assert.Equal(t, 15*time.Second, gatewayProvider.defaultTimeout)
+	assert.Equal(t, 300*time.Millisecond, gatewayProvider.retryTuning.BaseDelay)
+	assert.Equal(t, 2*time.Second, gatewayProvider.retryTuning.MaxDelay)
+	assert.Equal(t, 1.6, gatewayProvider.retryTuning.Multiplier)
+	require.Len(t, gatewayProvider.retryRules, 1)
+	assert.Equal(t, "http_5xx_retry", gatewayProvider.retryRules[0].Name)
+	assert.Equal(t, 4, gatewayProvider.retryRules[0].MaxRetries)
 	assert.Contains(t, runtime.ListProviders(), "gateway-default")
 }
 
