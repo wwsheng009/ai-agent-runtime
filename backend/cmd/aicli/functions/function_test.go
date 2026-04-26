@@ -2,8 +2,13 @@ package functions
 
 import (
 	"context"
+	"os"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
 
@@ -78,5 +83,205 @@ func TestRuntimeToolFunction_ExecuteWithMeta_PreservesProviderMetadata(t *testin
 	}
 	if got := metadata["output_kind"]; got != "text" {
 		t.Fatalf("expected output_kind=text, got %#v", got)
+	}
+}
+
+type inspectShellExecuter struct {
+	output     string
+	err        error
+	lastConfig execConfig
+}
+
+func (e *inspectShellExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (string, error) {
+	cfg := execConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	e.lastConfig = cfg
+	return e.output, e.err
+}
+
+type inspectDetailedShellExecuter struct {
+	result     ShellExecutionResult
+	err        error
+	lastConfig execConfig
+}
+
+func (e *inspectDetailedShellExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (string, error) {
+	cfg := execConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	e.lastConfig = cfg
+	return e.result.Output, e.err
+}
+
+func (e *inspectDetailedShellExecuter) ExecuteDetailed(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (ShellExecutionResult, error) {
+	cfg := execConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	e.lastConfig = cfg
+	return e.result, e.err
+}
+
+func TestShellFunction_PassesOutputCaptureOptions(t *testing.T) {
+	fn := NewShellFunction()
+	inspector := &inspectShellExecuter{output: "ok"}
+	fn.SetExecuter(inspector)
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command":          "git status --short",
+		"output_bytes_cap": 8192,
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected output ok, got %q", output)
+	}
+	if !inspector.lastConfig.hasOutputBytesCap || inspector.lastConfig.outputBytesCap != 8192 {
+		t.Fatalf("expected output_bytes_cap to reach executer, got %+v", inspector.lastConfig)
+	}
+	if inspector.lastConfig.disableOutputCap {
+		t.Fatalf("did not expect disableOutputCap, got %+v", inspector.lastConfig)
+	}
+}
+
+func TestShellFunction_RejectsConflictingOutputCaptureOptions(t *testing.T) {
+	fn := NewShellFunction()
+	fn.SetExecuter(&inspectShellExecuter{output: "ok"})
+
+	_, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command":            "git status --short",
+		"output_bytes_cap":   8192,
+		"disable_output_cap": true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "不能与 disable_output_cap 同时设置") {
+		t.Fatalf("expected conflict error, got %v", err)
+	}
+}
+
+func TestShellFunction_ExecuteWithMeta_PreservesCaptureMetadata(t *testing.T) {
+	fn := NewShellFunction()
+	inspector := &inspectDetailedShellExecuter{
+		result: ShellExecutionResult{
+			Output: "diff output",
+			Metadata: map[string]interface{}{
+				"output_capture_complete":  false,
+				"retained_output_bytes":    4096,
+				"omitted_output_bytes":     2048,
+				"raw_output_artifact_path": `C:\temp\shell-output\function\git_123.txt`,
+			},
+		},
+	}
+	fn.SetExecuter(inspector)
+
+	output, metadata, err := fn.ExecuteWithMeta(context.Background(), map[string]interface{}{
+		"command":          "git diff --stat",
+		"output_bytes_cap": 4096,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteWithMeta failed: %v", err)
+	}
+	if output != "diff output" {
+		t.Fatalf("expected diff output, got %q", output)
+	}
+	if got := metadata["output_capture_complete"]; got != false {
+		t.Fatalf("expected output_capture_complete=false, got %#v", got)
+	}
+	if got := metadata["raw_output_artifact_path"]; got != `C:\temp\shell-output\function\git_123.txt` {
+		t.Fatalf("expected raw_output_artifact_path to be preserved, got %#v", got)
+	}
+	if !inspector.lastConfig.hasOutputBytesCap || inspector.lastConfig.outputBytesCap != 4096 {
+		t.Fatalf("expected output_bytes_cap to reach executer, got %+v", inspector.lastConfig)
+	}
+}
+
+func TestFriendlyHintForCommand_WindowsHeadPipeline(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-specific guidance")
+	}
+	hint := friendlyHintForCommand(
+		`git diff -- internal/gateway/handlers/admin_config.go | head -200`,
+		`head : The term 'head' is not recognized as a name of a cmdlet`,
+		context.DeadlineExceeded,
+	)
+	if !strings.Contains(hint, "Select-Object -First 200") {
+		t.Fatalf("expected head guidance, got %q", hint)
+	}
+}
+
+func TestShellFunction_DescriptionAndParameters_MentionPowerShellHeadGuidance(t *testing.T) {
+	fn := NewShellFunction()
+	description := strings.ToLower(fn.Description())
+	if !strings.Contains(description, "head") || !strings.Contains(description, "select-object") || !strings.Contains(description, "workdir") {
+		t.Fatalf("expected shell function description to mention head guidance and workdir, got %q", fn.Description())
+	}
+
+	params := fn.Parameters()
+	properties, ok := params["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing properties: %#v", params)
+	}
+	commandSchema, ok := properties["command"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing command schema: %#v", properties)
+	}
+	commandDescription := strings.ToLower(commandSchema["description"].(string))
+	if !strings.Contains(commandDescription, "head") || !strings.Contains(commandDescription, "select-object") || !strings.Contains(commandDescription, "get-location") {
+		t.Fatalf("expected shell command schema to mention PowerShell head guidance, got %q", commandDescription)
+	}
+}
+
+func TestBuildShellExecutionMetadata_RecordsSelectedShell(t *testing.T) {
+	metadata := buildShellExecutionMetadata(
+		"git status --short",
+		"ok",
+		runtimeexecutor.CombinedOutputCapture{
+			Output:        "ok",
+			TotalBytes:    2,
+			RetainedBytes: 2,
+		},
+		"",
+		nil,
+		runtimeexecutor.Shell{
+			Type: runtimeexecutor.ShellTypePwsh,
+			Path: `C:\Program Files\PowerShell\7\pwsh.exe`,
+		},
+	)
+
+	if got := metadata["shell_type"]; got != "pwsh" {
+		t.Fatalf("expected shell_type=pwsh, got %#v", got)
+	}
+	if got := metadata["shell_path"]; got != `C:\Program Files\PowerShell\7\pwsh.exe` {
+		t.Fatalf("expected shell_path to be preserved, got %#v", got)
+	}
+	if got := metadata["shell_display"]; got != `pwsh (C:\Program Files\PowerShell\7\pwsh.exe)` {
+		t.Fatalf("expected shell_display to be preserved, got %#v", got)
+	}
+}
+
+func TestEnsureLargeHistoryOutputArtifact_PersistsCompleteLargeOutput(t *testing.T) {
+	artifactRoot := t.TempDir()
+	t.Setenv("AICLI_SHELL_OUTPUT_ARTIFACT_DIR", artifactRoot)
+	capture := runtimeexecutor.CombinedOutputCapture{
+		Output:     strings.Repeat("diff-line-abcdefghijklmnopqrstuvwxyz0123456789\n", 400),
+		TotalBytes: 400 * len("diff-line-abcdefghijklmnopqrstuvwxyz0123456789\n"),
+	}
+
+	artifactPath, artifactErr := ensureLargeHistoryOutputArtifact(capture, "", nil, "function", "git diff")
+	if artifactErr != nil {
+		t.Fatalf("did not expect artifact error, got %v", artifactErr)
+	}
+	if strings.TrimSpace(artifactPath) == "" {
+		t.Fatal("expected artifact path for large complete output")
+	}
+	data, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	if string(data) != capture.Output {
+		t.Fatal("expected artifact to preserve full output")
 	}
 }
