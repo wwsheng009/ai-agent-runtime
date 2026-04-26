@@ -125,3 +125,61 @@ func TestCompactActiveTurnReplayWithCounter_CompactsWhenTokenBudgetExceeded(t *t
 		t.Fatalf("expected latest tool result to remain raw, got %#v", got[3])
 	}
 }
+
+func TestCompactActiveTurnReplay_PreservesEarlierCompactionSummaryAnchor(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 70)
+	anchor := types.NewAssistantMessage("Compacted earlier tool replay in current turn:\n- assistant requested tools: view\n- tool outcomes: prior context anchor")
+	anchor.Metadata["active_turn_compaction"] = true
+	anchor.Metadata["compacted_messages"] = 3
+	anchor.Metadata["compacted_tool_calls"] = 1
+
+	messages := []types.Message{
+		*types.NewUserMessage("continue analysis"),
+		*anchor,
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_2", Name: "view", Args: map[string]interface{}{"file_path": "AGENTS.md"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_2", "AGENTS "+large),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_3", Name: "grep", Args: map[string]interface{}{"pattern": "Decision ledger"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_3", "grep "+large),
+	}
+
+	got, compacted := CompactActiveTurnReplay(messages, 2048)
+	if !compacted {
+		t.Fatalf("expected compaction, got %#v", got)
+	}
+	if len(got) != 5 {
+		t.Fatalf("expected user + preserved anchor + summary + latest assistant + latest tool, got %#v", got)
+	}
+	if got[1].Metadata.GetBool("active_turn_compaction", false) != true {
+		t.Fatalf("expected earlier compaction summary to be preserved, got %#v", got[1].Metadata)
+	}
+	if got[1].Content != anchor.Content {
+		t.Fatalf("expected earlier compaction summary content to be preserved, got %#v", got[1].Content)
+	}
+	if got[2].Metadata.GetBool("active_turn_compaction", false) != true {
+		t.Fatalf("expected new compacted summary at index 2, got %#v", got[2].Metadata)
+	}
+	if strings.Contains(got[2].Content, "prior context anchor") {
+		t.Fatalf("did not expect preserved summary text to be re-summarized, got %q", got[2].Content)
+	}
+	if !strings.Contains(got[2].Content, "assistant requested tools: view") {
+		t.Fatalf("expected new summary to cover later replay, got %q", got[2].Content)
+	}
+	if got[3].Role != "assistant" || got[3].ToolCalls[0].ID != "call_3" {
+		t.Fatalf("expected latest assistant tool call to be preserved, got %#v", got[3])
+	}
+	if got[4].Role != "tool" || got[4].ToolCallID != "call_3" {
+		t.Fatalf("expected latest tool result to be preserved, got %#v", got[4])
+	}
+}

@@ -48,7 +48,15 @@ func CompactActiveTurnReplayWithCounter(messages []types.Message, maxBytes int, 
 		return messages, false
 	}
 
-	compacted := buildActiveTurnReplaySummary(messages[userIndex+1 : preserveStart])
+	compactStart := userIndex + 1
+	if anchorStart := latestCompactionSummaryStart(messages, userIndex, preserveStart); anchorStart >= 0 {
+		if anchorStart+1 >= preserveStart {
+			return messages, false
+		}
+		compactStart = anchorStart + 1
+	}
+
+	compacted := buildActiveTurnReplaySummary(messages[compactStart:preserveStart])
 	if compacted == nil {
 		return messages, false
 	}
@@ -65,8 +73,8 @@ func CompactActiveTurnReplayWithCounter(messages []types.Message, maxBytes int, 
 		compacted.Metadata["active_turn_compaction_reason"] = reason
 	}
 
-	next := make([]types.Message, 0, len(messages)-(preserveStart-(userIndex+1))+1)
-	next = append(next, cloneMessages(messages[:userIndex+1])...)
+	next := make([]types.Message, 0, len(messages)-(preserveStart-compactStart)+1)
+	next = append(next, cloneMessages(messages[:compactStart])...)
 	next = append(next, *compacted)
 	next = append(next, cloneMessages(messages[preserveStart:])...)
 	if counter != nil && maxTokens > 0 && userIndex+1 < len(next) {
@@ -75,6 +83,40 @@ func CompactActiveTurnReplayWithCounter(messages []types.Message, maxBytes int, 
 		}
 	}
 	return next, true
+}
+
+func latestCompactionSummaryStart(messages []types.Message, userIndex, preserveStart int) int {
+	if userIndex < 0 || preserveStart <= userIndex+1 {
+		return -1
+	}
+	for index := preserveStart - 1; index > userIndex; index-- {
+		if !isActiveTurnCompactionSummary(messages[index]) {
+			continue
+		}
+		if strings.TrimSpace(messages[index].Content) != "" {
+			return index
+		}
+	}
+	return -1
+}
+
+// HasActiveTurnCompactionSummary reports whether the current active user turn
+// already contains a compacted replay summary that should be preserved as an
+// anchor instead of being folded into another summary.
+func HasActiveTurnCompactionSummary(messages []types.Message) bool {
+	userIndex := activeUserTurnStart(messages)
+	if userIndex < 0 || userIndex >= len(messages)-1 {
+		return false
+	}
+	return latestCompactionSummaryStart(messages, userIndex, len(messages)) >= 0
+}
+
+func isActiveTurnCompactionSummary(message types.Message) bool {
+	if message.Metadata.GetBool("active_turn_compaction", false) {
+		return true
+	}
+	content := strings.TrimSpace(message.Content)
+	return strings.HasPrefix(content, "Compacted earlier tool replay in current turn:")
 }
 
 func buildActiveTurnReplaySummary(messages []types.Message) *types.Message {
