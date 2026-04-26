@@ -146,6 +146,7 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 		ModelCapabilityMaxContextTokens:      promptBudget.ModelCapabilityMaxContextTokens,
 		ModelCapabilityAutoCompactRatio:      promptBudget.ModelCapabilityAutoCompactRatio,
 		ModelCapabilityAutoCompactTokenLimit: promptBudget.ModelCapabilityAutoCompactTokenLimit,
+		HistoryCompactor:                     buildSharedChatPromptPreflightCompactor(session, renderer),
 		Stream:                               session.Stream,
 		Tools:                                toolDefinitionsFromSelection(selection),
 		Provider:                             provider,
@@ -192,6 +193,8 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 				ToolSource: source,
 				OutputKind: kind,
 			}
+			applyToolExecutionOutputCaptureMetadata(&summary, exec.Metadata)
+			applyToolExecutionShellMetadata(&summary, exec.Metadata)
 			if exec.Success {
 				successCount++
 				summary.ResultPreview = truncateOutputPreview(exec.Output, maxToolResultPreviewLines, maxToolResultPreviewBytes)
@@ -340,6 +343,56 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 	session.Messages = messages
 	warnIfChatSessionSyncFails(session, "shared chat auto compact sync", syncRuntimeSessionFromChat(session))
 	return cloneSharedChatRuntimeMessages(result.ReplacementHistory), report, nil
+}
+
+func buildSharedChatPromptPreflightCompactor(session *ChatSession, renderer *aicliEventRenderer) runtimechatcore.HistoryCompactor {
+	if session == nil {
+		return nil
+	}
+	llmRuntime, err := buildSharedChatAutoCompactRuntime(session)
+	if err != nil || llmRuntime == nil {
+		return nil
+	}
+	compactor := compactruntime.New(llmRuntime, nil)
+
+	sessionID := ""
+	if session.RuntimeSession != nil {
+		sessionID = strings.TrimSpace(session.RuntimeSession.ID)
+	}
+	providerName := strings.TrimSpace(session.ProviderName)
+	model := strings.TrimSpace(session.Model)
+
+	return func(ctx context.Context, history []runtimetypes.Message) ([]runtimetypes.Message, bool, error) {
+		if len(history) == 0 {
+			return history, false, nil
+		}
+		result, status, err := compactor.MaybeCompact(ctx, compactruntime.Request{
+			SessionID:   sessionID,
+			TaskID:      sessionID,
+			Provider:    providerName,
+			Model:       model,
+			Mode:        compactruntime.ModeLocal,
+			Force:       true,
+			History:     history,
+			Phase:       "mid_turn",
+			CountTokens: countSharedChatMessagesTokens,
+		})
+		report := &sharedChatAutoCompactReport{
+			Result: result,
+			Status: status,
+		}
+		if err != nil {
+			emitSharedChatAutoCompactEvent(renderer, report, err)
+			writeSessionDebugInfo(session, formatSharedChatAutoCompactDebug(report, err), true)
+			return history, false, err
+		}
+		if result == nil || len(result.ReplacementHistory) == 0 {
+			return history, false, nil
+		}
+		emitSharedChatAutoCompactEvent(renderer, report, nil)
+		writeSessionDebugInfo(session, formatSharedChatAutoCompactDebug(report, nil), true)
+		return cloneSharedChatRuntimeMessages(result.ReplacementHistory), true, nil
+	}
 }
 
 func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRuntime, error) {

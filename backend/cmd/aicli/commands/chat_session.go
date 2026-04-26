@@ -278,6 +278,9 @@ func printCurrentRuntimeSession(session *ChatSession) {
 	if artifactDir := currentRuntimeHTTPArtifactDir(session); artifactDir != "" {
 		printChatSessionMetaRow("HTTP Artifact Dir:", artifactDir)
 	}
+	if artifactDir := currentLocalShellArtifactDir(session); artifactDir != "" {
+		printChatSessionMetaRow("Shell Artifact Dir:", artifactDir)
+	}
 	if session.runtimeHTTPCapture != nil {
 		snapshot := session.runtimeHTTPCapture.Snapshot()
 		if snapshot.RequestArtifactPath != "" {
@@ -286,6 +289,9 @@ func printCurrentRuntimeSession(session *ChatSession) {
 		if snapshot.ResponseArtifactPath != "" {
 			printChatSessionMetaRow("Last HTTP Resp:", resolveAbsoluteChatPath(snapshot.ResponseArtifactPath))
 		}
+	}
+	if path := currentLastLocalShellArtifactPath(session); path != "" {
+		printChatSessionMetaRow("Last Shell Out:", path)
 	}
 	if preview.Title != "" {
 		printChatSessionMetaRow("Title:", preview.Title)

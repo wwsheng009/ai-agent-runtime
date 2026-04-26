@@ -39,6 +39,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	previousAssistant := latestAssistantResponseText(session)
 	previousTeamID := activeTeamID(session)
 	if bridge := ensureChatRuntimeEventBridge(session); bridge != nil {
+		bridge.PrepareRunPrompt(prompt)
 		bridge.BeginRun()
 		defer bridge.EndRun()
 	}

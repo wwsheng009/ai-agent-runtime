@@ -1667,7 +1667,11 @@ func TestAICLISharedChatExecutor_AppliesPromptPreflightRecoveryHistoryBeforeRetu
 		DisableTools: true,
 		Model:        "shared-model",
 		ProviderName: "shared-provider",
-		Messages:     originalMessages,
+		Provider: config.Provider{
+			Protocol:     "openai",
+			DefaultModel: "shared-model",
+		},
+		Messages: originalMessages,
 	}
 
 	_, err = newAICLISharedChatExecutor().Execute(context.Background(), session, "继续处理")

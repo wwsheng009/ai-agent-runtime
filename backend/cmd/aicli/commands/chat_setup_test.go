@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -16,10 +17,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/stretchr/testify/require"
 )
 
 func TestPrepareChatPersistence_UsesProvidedSessionDir(t *testing.T) {
@@ -450,6 +450,8 @@ func TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance(t *testing.T) {
 
 	for _, want := range []string{
 		"Base prompt.",
+		"Shell guidance:",
+		"Detected user shell:",
 		"Current workspace root: E:\\projects\\ai\\ai-gateway",
 		`Interpret "当前目录", ".", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.`,
 		"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",
@@ -461,6 +463,12 @@ func TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected system prompt to contain %q, got %q", want, got)
+		}
+	}
+	gotLower := strings.ToLower(got)
+	if strings.Contains(gotLower, "powershell") || strings.Contains(gotLower, "pwsh") {
+		if !strings.Contains(got, "Select-Object -First 200") {
+			t.Fatalf("expected PowerShell guidance to mention Select-Object -First 200, got %q", got)
 		}
 	}
 }

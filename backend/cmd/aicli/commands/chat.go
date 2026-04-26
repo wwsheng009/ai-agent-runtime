@@ -32,70 +32,73 @@ const chatSessionMetaLabelWidth = 18
 
 // ChatSession 聊天会话状态
 type ChatSession struct {
-	ProviderName       string
-	Provider           config.Provider
-	Adapter            adapter.ProtocolAdapter
-	Model              string
-	ReasoningEffort    string
-	DisableTools       bool
-	HTTPDebug          bool
-	Stream             bool
-	BaseURL            string
-	Messages           []map[string]interface{} // 支持复杂消息格式
-	HTTPClient         *http.Client
-	cancelCtx          context.Context                    // 可取消的上下文
-	cancelFunc         context.CancelFunc                 // 取消函数
-	interrupted        atomic.Bool                         // 是否被中断（原子操作，避免竞态）
-	FunctionCatalog    *aicliFunctionCatalog              // 统一管理 builtin tools + skills + schema cache
-	FunctionRegistry   *functions.FunctionRegistry        // Function 注册表
-	FunctionBuilder    functions.FunctionCallBuilder      // 协议对应的 function/tool builder
-	BuiltinSchemas     []map[string]interface{}           // 预构建的非 skill function schemas
-	Logger             *ChatLogger                        // 聊天日志记录器
-	Formatter          *formatter.MarkdownFormatter       // Markdown 格式化器
-	Layout             *ui.Layout                         // 屏幕布局
-	InputBox           *ui.InputBox                       // 输入框
-	TokenCount         int                                // Token 计数
-	MsgCount           int                                // 消息计数
-	TurnRequestCount   int                                // 当前 turn 内的请求计数
-	SessionManager     *runtimechat.SessionManager        // 持久化会话管理器
-	RuntimeSession     *runtimechat.Session               // 当前持久化会话
-	SessionUserID      string                             // 当前会话所属用户
-	SessionDir         string                             // 会话存储目录
-	SessionFilter      ChatSessionListFilter              // 会话列表筛选条件
-	NoInteractive      bool                               // 是否为非交互模式
-	JSONOutput         bool                               // 是否输出 JSON
-	JSONEnvelope       bool                               // JSON 输出是否使用 envelope
-	KeyHandler         *ui.KeyHandler                     // 键盘事件处理器（ESC 键中断）
-	MCPEnabled         bool                               // 是否启用 MCP
-	MCPStatus          *MCPStatus                         // MCP 状态
-	SkillsBinding      *skillsRuntimeBinding              // Skills 运行时绑定
-	SkillsMode         string                             // Skills 暴露模式
-	SkillsDebug        bool                               // Skills 调试输出
-	RetryConfig        RetryConfig                        // 重试配置
-	RequestTimeout     time.Duration                      // 请求超时（0 表示不设置）
-	OutputFormat       string                             // 输出格式（interactive|text|json）
-	InputReader        *bufio.Reader                      // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
-	InputQueue         *chatInputQueue                    // interactive line queue fed by stdin pump
-	ProfileName        string                             // 当前 profile 名称
-	ProfileAgent       string                             // 当前 profile agent
-	ProfileRoot        string                             // 当前 profile 根目录
-	SystemPromptText   string                             // 组合后的系统提示
-	RuntimeConfigPath  string                             // 解析后的 runtime 配置路径
-	MCPConfigPath      string                             // 解析后的 MCP 配置路径
-	ResolvedSkillDirs  []string                           // 解析后的 skills 目录
-	ProfileContext     map[string]interface{}             // profile 提供的只读运行时上下文
-	ToolPolicy         *runtimepolicy.ToolExecutionPolicy // profile 解析后的工具策略
-	PermissionMode     runtimepolicy.Mode                 // actor/team run permission mode
-	ApprovalReuseMode  chatApprovalReuseMode              // local actor/team approval reuse policy
-	ActiveTeam         *chatTeamBinding                   // ambient team binding across turns
-	RuntimeEventBridge *chatRuntimeEventBridge            // actor runtime event bridge
-	ActorFirstReady    bool                               // actor-first executor established for this session
-	ChatExecutor       aicliChatExecutor                  // shared chatcore-backed chat executor
-	LocalRuntimeHost   *localChatRuntimeHost              // actor-first local runtime host
-	Interaction        *chatInteractionCoordinator        // unified interactive stdout/prompt coordinator
-	runtimeHTTPCapture *chatRuntimeHTTPCapture            // recent runtime HTTP response diagnostics
-	queuedInputDrain   bool                               // suppress repeated queued-input notices while draining
-	ImagePaths         []string                           // explicit local image attachments for current turn
+	ProviderName               string
+	Provider                   config.Provider
+	Adapter                    adapter.ProtocolAdapter
+	Model                      string
+	ReasoningEffort            string
+	DisableTools               bool
+	HTTPDebug                  bool
+	Stream                     bool
+	BaseURL                    string
+	Messages                   []map[string]interface{} // 支持复杂消息格式
+	HTTPClient                 *http.Client
+	cancelCtx                  context.Context                    // 可取消的上下文
+	cancelFunc                 context.CancelFunc                 // 取消函数
+	interrupted                atomic.Bool                        // 是否被中断（原子操作，避免竞态）
+	FunctionCatalog            *aicliFunctionCatalog              // 统一管理 builtin tools + skills + schema cache
+	FunctionRegistry           *functions.FunctionRegistry        // Function 注册表
+	FunctionBuilder            functions.FunctionCallBuilder      // 协议对应的 function/tool builder
+	BuiltinSchemas             []map[string]interface{}           // 预构建的非 skill function schemas
+	Logger                     *ChatLogger                        // 聊天日志记录器
+	Formatter                  *formatter.MarkdownFormatter       // Markdown 格式化器
+	Layout                     *ui.Layout                         // 屏幕布局
+	InputBox                   *ui.InputBox                       // 输入框
+	TokenCount                 int                                // Token 计数
+	MsgCount                   int                                // 消息计数
+	TurnRequestCount           int                                // 当前 turn 内的请求计数
+	SessionManager             *runtimechat.SessionManager        // 持久化会话管理器
+	RuntimeSession             *runtimechat.Session               // 当前持久化会话
+	SessionUserID              string                             // 当前会话所属用户
+	SessionDir                 string                             // 会话存储目录
+	SessionFilter              ChatSessionListFilter              // 会话列表筛选条件
+	NoInteractive              bool                               // 是否为非交互模式
+	JSONOutput                 bool                               // 是否输出 JSON
+	JSONEnvelope               bool                               // JSON 输出是否使用 envelope
+	KeyHandler                 *ui.KeyHandler                     // 键盘事件处理器（ESC 键中断）
+	MCPEnabled                 bool                               // 是否启用 MCP
+	MCPStatus                  *MCPStatus                         // MCP 状态
+	SkillsBinding              *skillsRuntimeBinding              // Skills 运行时绑定
+	SkillsMode                 string                             // Skills 暴露模式
+	SkillsDebug                bool                               // Skills 调试输出
+	RetryConfig                RetryConfig                        // 重试配置
+	RequestTimeout             time.Duration                      // 请求超时（0 表示不设置）
+	OutputFormat               string                             // 输出格式（interactive|text|json）
+	InputReader                *bufio.Reader                      // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
+	InputQueue                 *chatInputQueue                    // interactive line queue fed by stdin pump
+	ProfileName                string                             // 当前 profile 名称
+	ProfileAgent               string                             // 当前 profile agent
+	ProfileRoot                string                             // 当前 profile 根目录
+	SystemPromptText           string                             // 组合后的系统提示
+	RuntimeConfigPath          string                             // 解析后的 runtime 配置路径
+	MCPConfigPath              string                             // 解析后的 MCP 配置路径
+	ResolvedSkillDirs          []string                           // 解析后的 skills 目录
+	ProfileContext             map[string]interface{}             // profile 提供的只读运行时上下文
+	ToolPolicy                 *runtimepolicy.ToolExecutionPolicy // profile 解析后的工具策略
+	PermissionMode             runtimepolicy.Mode                 // actor/team run permission mode
+	ApprovalReuseMode          chatApprovalReuseMode              // local actor/team approval reuse policy
+	ActiveTeam                 *chatTeamBinding                   // ambient team binding across turns
+	RuntimeEventBridge         *chatRuntimeEventBridge            // actor runtime event bridge
+	ActorFirstReady            bool                               // actor-first executor established for this session
+	ChatExecutor               aicliChatExecutor                  // shared chatcore-backed chat executor
+	LocalRuntimeHost           *localChatRuntimeHost              // actor-first local runtime host
+	Interaction                *chatInteractionCoordinator        // unified interactive stdout/prompt coordinator
+	runtimeHTTPCapture         *chatRuntimeHTTPCapture            // recent runtime HTTP response diagnostics
+	localShellArtifactMu       sync.Mutex
+	localShellArtifactCounter  int
+	lastLocalShellArtifactPath string
+	queuedInputDrain           bool     // suppress repeated queued-input notices while draining
+	ImagePaths                 []string // explicit local image attachments for current turn
 }
 
 type chatRuntimeHTTPCapture struct {
@@ -144,16 +147,18 @@ func (s *ChatSession) IsInterrupted() bool {
 
 // ShellCommandConfig Shell 命令执行配置
 type ShellCommandConfig struct {
-	Timeout       time.Duration // 命令超时时间
-	MaxLines      int           // 最大输出行数
-	MaxOutputSize int           // 最大输出字节数
+	Timeout          time.Duration // 命令超时时间
+	MaxLines         int           // 最大输出行数
+	MaxOutputSize    int           // 兼容字段：未显式设置 OutputBytesCap 时作为输出字节上限使用
+	OutputBytesCap   int           // shell 输出 capture limit（字节）；0 表示回退到 MaxOutputSize / 默认值
+	DisableOutputCap bool          // 关闭 shell 输出 capture limit，尽量保留完整原始输出
 }
 
 // 默认 Shell 命令配置
 const (
 	DefaultShellTimeout       = 30 * time.Second // 默认超时 30 秒
 	DefaultShellMaxLines      = 1000             // 默认最多 1000 行输出
-	DefaultShellMaxOutputSize = 100 * 1024       // 默认最多 100KB 输出
+	DefaultShellMaxOutputSize = 256 * 1024       // 默认最多 256KB capture 输出
 )
 
 // HandleChat 处理 chat 命令
@@ -706,25 +711,27 @@ func shouldPrintChatSessionPreamble(session *ChatSession) bool {
 }
 
 type chatResponsePayload struct {
-	Response             string `json:"response"`
-	Provider             string `json:"provider,omitempty"`
-	Protocol             string `json:"protocol,omitempty"`
-	Model                string `json:"model,omitempty"`
-	Stream               bool   `json:"stream"`
-	SessionID            string `json:"session_id,omitempty"`
-	SessionPath          string `json:"session_path,omitempty"`
-	SessionStore         string `json:"session_store,omitempty"`
-	SessionState         string `json:"session_state,omitempty"`
-	QueuedInputCount     int    `json:"queued_input_count,omitempty"`
-	QueuedInputDraining  bool   `json:"queued_input_draining,omitempty"`
-	ReasoningEffort      string `json:"reasoning_effort,omitempty"`
-	TotalTokens          int    `json:"total_tokens,omitempty"`
-	ResponseTimeMs       int64  `json:"average_response_time_ms,omitempty"`
-	LogPath              string `json:"log_path,omitempty"`
-	DebugLogPath         string `json:"debug_log_path,omitempty"`
-	HTTPArtifactDir      string `json:"http_artifact_dir,omitempty"`
-	LastHTTPRequestPath  string `json:"last_http_request_path,omitempty"`
-	LastHTTPResponsePath string `json:"last_http_response_path,omitempty"`
+	Response                   string `json:"response"`
+	Provider                   string `json:"provider,omitempty"`
+	Protocol                   string `json:"protocol,omitempty"`
+	Model                      string `json:"model,omitempty"`
+	Stream                     bool   `json:"stream"`
+	SessionID                  string `json:"session_id,omitempty"`
+	SessionPath                string `json:"session_path,omitempty"`
+	SessionStore               string `json:"session_store,omitempty"`
+	SessionState               string `json:"session_state,omitempty"`
+	QueuedInputCount           int    `json:"queued_input_count,omitempty"`
+	QueuedInputDraining        bool   `json:"queued_input_draining,omitempty"`
+	ReasoningEffort            string `json:"reasoning_effort,omitempty"`
+	TotalTokens                int    `json:"total_tokens,omitempty"`
+	ResponseTimeMs             int64  `json:"average_response_time_ms,omitempty"`
+	LogPath                    string `json:"log_path,omitempty"`
+	DebugLogPath               string `json:"debug_log_path,omitempty"`
+	HTTPArtifactDir            string `json:"http_artifact_dir,omitempty"`
+	LastHTTPRequestPath        string `json:"last_http_request_path,omitempty"`
+	LastHTTPResponsePath       string `json:"last_http_response_path,omitempty"`
+	LocalShellArtifactDir      string `json:"local_shell_artifact_dir,omitempty"`
+	LastLocalShellArtifactPath string `json:"last_local_shell_artifact_path,omitempty"`
 }
 
 func buildChatResponsePayload(session *ChatSession, response string) chatResponsePayload {
@@ -755,11 +762,13 @@ func buildChatResponsePayload(session *ChatSession, response string) chatRespons
 		payload.DebugLogPath = currentDebugLogFile(session)
 	}
 	payload.HTTPArtifactDir = currentRuntimeHTTPArtifactDir(session)
+	payload.LocalShellArtifactDir = currentLocalShellArtifactDir(session)
 	if session.runtimeHTTPCapture != nil {
 		snapshot := session.runtimeHTTPCapture.Snapshot()
 		payload.LastHTTPRequestPath = resolveAbsoluteChatPath(snapshot.RequestArtifactPath)
 		payload.LastHTTPResponsePath = resolveAbsoluteChatPath(snapshot.ResponseArtifactPath)
 	}
+	payload.LastLocalShellArtifactPath = currentLastLocalShellArtifactPath(session)
 	return payload
 }
 
@@ -887,7 +896,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				continue
 			}
 
-			output, err := executeShellCommand(session, input)
+			result, err := executeShellCommandDetailed(session, input)
 			if err != nil {
 				// 检查是否是用户中断
 				if session.IsInterrupted() {
@@ -905,7 +914,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			}
 
 			// 将命令输出作为消息发送给 AI
-			aiInput := fmt.Sprintf("我执行了命令: %s，输出如下：\n%s", input, output)
+			aiInput := buildShellCommandAIInput(result)
 			response, err := sendMessage(session, aiInput)
 			if err != nil {
 				if session != nil && session.NoInteractive {
