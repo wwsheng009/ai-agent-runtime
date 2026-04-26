@@ -1691,8 +1691,7 @@ func parseRGIntFlag(name, raw, flag string) (*rgFlagValue, bool, error) {
 
 func isNoOpRGFlag(arg string) bool {
 	switch arg {
-	case "-n", "--line-number", "-H", "--with-filename", "-N", "--no-line-number", "--no-filename", "--no-heading", "--heading", "--hidden", "--no-ignore", "-a", "--text", "--binary", "--color", "--color=never", "-u", "-uu", "-uuu":
-	case "--pretty", "--line-buffered", "--no-line-buffered":
+	case "-n", "--line-number", "-H", "--with-filename", "-N", "--no-line-number", "--no-filename", "--no-heading", "--heading", "--hidden", "--no-ignore", "-a", "--text", "--binary", "--color", "--color=never", "-u", "-uu", "-uuu", "--pretty", "--line-buffered", "--no-line-buffered":
 		return true
 	default:
 		if strings.HasPrefix(arg, "--color=") {
@@ -3697,6 +3696,9 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		"follow":                 opts.follow,
 		"column":                 opts.column,
 		"trim":                   opts.trim,
+		"pretty":                 opts.pretty,
+		"line_buffered":          opts.lineBuffered,
+		"no_line_buffered":       opts.noLineBuffered,
 		"max_columns":            opts.maxColumns,
 		"max_columns_explicit":   opts.maxColumnsSet,
 		"max_columns_preview":    opts.maxColumnsPreview,
