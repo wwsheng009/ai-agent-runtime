@@ -23,6 +23,7 @@ type chatRuntimeEventBridge struct {
 	startOnce              sync.Once
 	eventQueue             chan runtimeevents.Event
 	runMu                  sync.Mutex
+	logMu                  sync.Mutex
 	renderMu               sync.Mutex
 	progressMu             sync.Mutex
 	runErr                 error
@@ -34,6 +35,15 @@ type chatRuntimeEventBridge struct {
 	renderedReasoningDelta bool
 	renderedReasoningFinal bool
 	runActive              bool
+	nextRunPrompt          string
+	activeRunPrompt        string
+	requestLogState        map[string]*chatRuntimeRequestLogState
+	traceLatestRequestKey  map[string]string
+	latestRequestKey       string
+	loggedToolCalls        map[string]struct{}
+	loggedToolResults      map[string]struct{}
+	toolExecutionCalls     []aicliToolExecutionCallSummary
+	toolSummaryLogged      bool
 	enqueuedEvents         uint64
 	processedEvents        uint64
 	askApproval            func(*runtimechat.ApprovalRequest) (bool, error)
@@ -47,6 +57,16 @@ type chatRuntimeEventBridge struct {
 	completeReasoning      func(*runtimetypes.ReasoningBlock) bool
 	renderResponse         func(string)
 	writePrompt            func()
+}
+
+type chatRuntimeRequestLogState struct {
+	Scope                   aicliLogScope
+	StartedAt               time.Time
+	FinishedAt              time.Time
+	RequestLogged           bool
+	ResponseLogged          bool
+	AwaitingAssistantResult bool
+	PendingResponseContent  map[string]interface{}
 }
 
 const chatApprovalGrantTTL = 10 * time.Minute
@@ -231,6 +251,17 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.enqueuedEvents = 0
 	b.processedEvents = 0
 	b.progressMu.Unlock()
+	b.logMu.Lock()
+	b.activeRunPrompt = b.nextRunPrompt
+	b.nextRunPrompt = ""
+	b.requestLogState = make(map[string]*chatRuntimeRequestLogState)
+	b.traceLatestRequestKey = make(map[string]string)
+	b.latestRequestKey = ""
+	b.loggedToolCalls = make(map[string]struct{})
+	b.loggedToolResults = make(map[string]struct{})
+	b.toolExecutionCalls = nil
+	b.toolSummaryLogged = false
+	b.logMu.Unlock()
 }
 
 func (b *chatRuntimeEventBridge) EndRun() {
@@ -240,6 +271,15 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
 	b.runActive = false
+}
+
+func (b *chatRuntimeEventBridge) PrepareRunPrompt(prompt string) {
+	if b == nil {
+		return
+	}
+	b.logMu.Lock()
+	defer b.logMu.Unlock()
+	b.nextRunPrompt = prompt
 }
 
 func (b *chatRuntimeEventBridge) RunError() error {
@@ -302,10 +342,406 @@ func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) {
 	}
 }
 
+func (b *chatRuntimeEventBridge) handleStructuredLogEvent(event runtimeevents.Event) {
+	if b == nil || b.session == nil || b.session.Logger == nil {
+		return
+	}
+	if !b.isRunActive() || !b.isPrimarySessionEvent(event) {
+		return
+	}
+	switch event.Type {
+	case runtimechat.EventLLMRequestStarted, "llm.request.started":
+		b.logLLMRequestStarted(event)
+	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
+		b.logLLMRequestFinished(event)
+	case runtimechat.EventToolStarted, "tool.requested":
+		b.logToolRequested(event)
+	case runtimechat.EventToolFinished, "tool.completed":
+		b.logToolCompleted(event)
+	case runtimechat.EventAssistantMessage:
+		b.logAssistantMessage(event)
+	case runtimechat.EventSessionEnd:
+		b.logSessionEnd(event)
+	}
+}
+
+func (b *chatRuntimeEventBridge) logLLMRequestStarted(event runtimeevents.Event) {
+	state, _, prompt := b.ensureRequestLogState(event, true)
+	if state == nil || state.RequestLogged {
+		return
+	}
+	state.StartedAt = runtimeEventTimestamp(event)
+	state.RequestLogged = true
+	b.session.Logger.LogRequest(state.Scope, buildRuntimeEventLogContent(event, prompt))
+}
+
+func (b *chatRuntimeEventBridge) logLLMRequestFinished(event runtimeevents.Event) {
+	state, _, _ := b.ensureRequestLogState(event, false)
+	if state == nil {
+		state, _, _ = b.ensureRequestLogState(event, true)
+	}
+	if state == nil {
+		return
+	}
+	state.FinishedAt = runtimeEventTimestamp(event)
+	if state.ResponseLogged {
+		return
+	}
+	content := buildRuntimeEventLogContent(event, "")
+	success := payloadBoolValue(event.Payload, "success")
+	toolCallCount := intPayloadValue(event.Payload, "tool_call_count")
+	durationMs := runtimeEventDurationMs(state.StartedAt, state.FinishedAt)
+	if !success {
+		err := runtimeEventError(event.Payload)
+		b.session.Logger.LogResponse(state.Scope, content, nil, b.session.Stream, err, durationMs)
+		state.ResponseLogged = true
+		state.AwaitingAssistantResult = false
+		state.PendingResponseContent = nil
+		return
+	}
+	if toolCallCount > 0 {
+		b.session.Logger.LogResponse(state.Scope, content, nil, b.session.Stream, nil, durationMs)
+		state.ResponseLogged = true
+		state.AwaitingAssistantResult = false
+		state.PendingResponseContent = nil
+		return
+	}
+	state.PendingResponseContent = content
+	state.AwaitingAssistantResult = true
+}
+
+func (b *chatRuntimeEventBridge) logToolRequested(event runtimeevents.Event) {
+	scope, ok := b.scopeForEvent(event)
+	if !ok {
+		return
+	}
+	toolCallID := strings.TrimSpace(payloadStringValue(event.Payload["tool_call_id"]))
+	if toolCallID == "" {
+		return
+	}
+	b.logMu.Lock()
+	if _, exists := b.loggedToolCalls[toolCallID]; exists {
+		b.logMu.Unlock()
+		return
+	}
+	b.loggedToolCalls[toolCallID] = struct{}{}
+	b.logMu.Unlock()
+	b.session.Logger.LogToolCall(scope, toolCallID, runtimeEventToolName(event), cloneRuntimeEventLogPayload(event.Payload))
+}
+
+func (b *chatRuntimeEventBridge) logToolCompleted(event runtimeevents.Event) {
+	scope, ok := b.scopeForEvent(event)
+	if !ok {
+		return
+	}
+	toolCallID := strings.TrimSpace(payloadStringValue(event.Payload["tool_call_id"]))
+	if toolCallID == "" {
+		return
+	}
+	resultPayload := cloneRuntimeEventLogPayload(event.Payload)
+	err := runtimeEventError(event.Payload)
+	callSummary := runtimeToolExecutionSummaryCall(event)
+	b.logMu.Lock()
+	if _, exists := b.loggedToolResults[toolCallID]; exists {
+		b.logMu.Unlock()
+		return
+	}
+	b.loggedToolResults[toolCallID] = struct{}{}
+	b.toolExecutionCalls = append(b.toolExecutionCalls, callSummary)
+	b.logMu.Unlock()
+	b.session.Logger.LogToolResult(scope, toolCallID, runtimeEventToolName(event), resultPayload, err)
+}
+
+func (b *chatRuntimeEventBridge) logAssistantMessage(event runtimeevents.Event) {
+	state, _ := b.latestRequestLogState(event)
+	if state == nil || state.ResponseLogged {
+		return
+	}
+	content := cloneRuntimeEventLogPayload(event.Payload)
+	if len(state.PendingResponseContent) > 0 {
+		content = mergeRuntimeEventLogContent(state.PendingResponseContent, content)
+	}
+	b.session.Logger.LogResponse(state.Scope, content, nil, b.session.Stream, nil, runtimeEventDurationMs(state.StartedAt, state.FinishedAt))
+	state.ResponseLogged = true
+	state.AwaitingAssistantResult = false
+	state.PendingResponseContent = nil
+}
+
+func (b *chatRuntimeEventBridge) logSessionEnd(event runtimeevents.Event) {
+	pendingStates := b.pendingAssistantRequestStates(event)
+	if len(pendingStates) > 0 {
+		runErr := error(nil)
+		if !payloadBoolValue(event.Payload, "success") {
+			runErr = runtimeEventError(event.Payload)
+		}
+		for _, state := range pendingStates {
+			if state == nil || state.ResponseLogged {
+				continue
+			}
+			content := cloneRuntimeEventLogPayload(event.Payload)
+			if len(state.PendingResponseContent) > 0 {
+				content = mergeRuntimeEventLogContent(state.PendingResponseContent, content)
+			}
+			b.session.Logger.LogResponse(state.Scope, content, nil, b.session.Stream, runErr, runtimeEventDurationMs(state.StartedAt, state.FinishedAt))
+			state.ResponseLogged = true
+			state.AwaitingAssistantResult = false
+			state.PendingResponseContent = nil
+		}
+	}
+	scope := b.toolExecutionSummaryScope(event)
+	if scope.TurnID == "" && scope.RequestID == "" {
+		return
+	}
+	b.logMu.Lock()
+	if b.toolSummaryLogged || len(b.toolExecutionCalls) == 0 {
+		b.logMu.Unlock()
+		return
+	}
+	calls := append([]aicliToolExecutionCallSummary(nil), b.toolExecutionCalls...)
+	b.toolSummaryLogged = true
+	b.logMu.Unlock()
+	successCount := 0
+	errorCount := 0
+	for _, call := range calls {
+		if call.Success {
+			successCount++
+		} else {
+			errorCount++
+		}
+	}
+	b.session.Logger.LogToolExecutionSummary(scope, buildToolExecutionSummary(calls, successCount, errorCount))
+}
+
+func (b *chatRuntimeEventBridge) ensureRequestLogState(event runtimeevents.Event, allowCreate bool) (*chatRuntimeRequestLogState, string, string) {
+	if b == nil {
+		return nil, "", ""
+	}
+	key := runtimeEventRequestKey(event)
+	traceID := runtimeEventTraceID(event)
+	b.logMu.Lock()
+	defer b.logMu.Unlock()
+	if key == "" && traceID != "" {
+		key = b.traceLatestRequestKey[traceID]
+	}
+	if key == "" {
+		key = b.latestRequestKey
+	}
+	state := b.requestLogState[key]
+	if state != nil || !allowCreate {
+		return state, key, ""
+	}
+	if b.requestLogState == nil {
+		b.requestLogState = make(map[string]*chatRuntimeRequestLogState)
+	}
+	prompt := b.activeRunPrompt
+	state = &chatRuntimeRequestLogState{
+		Scope: newRuntimeEventLogScope(b.session, prompt),
+	}
+	b.requestLogState[key] = state
+	b.latestRequestKey = key
+	if traceID != "" {
+		if b.traceLatestRequestKey == nil {
+			b.traceLatestRequestKey = make(map[string]string)
+		}
+		b.traceLatestRequestKey[traceID] = key
+	}
+	b.activeRunPrompt = ""
+	return state, key, prompt
+}
+
+func (b *chatRuntimeEventBridge) latestRequestLogState(event runtimeevents.Event) (*chatRuntimeRequestLogState, string) {
+	state, key, _ := b.ensureRequestLogState(event, false)
+	if state != nil {
+		return state, key
+	}
+	return b.latestRequestStateForTrace(runtimeEventTraceID(event))
+}
+
+func (b *chatRuntimeEventBridge) latestRequestStateForTrace(traceID string) (*chatRuntimeRequestLogState, string) {
+	if b == nil {
+		return nil, ""
+	}
+	b.logMu.Lock()
+	defer b.logMu.Unlock()
+	key := ""
+	if traceID != "" && b.traceLatestRequestKey != nil {
+		key = b.traceLatestRequestKey[traceID]
+	}
+	if key == "" {
+		key = b.latestRequestKey
+	}
+	if key == "" {
+		return nil, ""
+	}
+	return b.requestLogState[key], key
+}
+
+func (b *chatRuntimeEventBridge) scopeForEvent(event runtimeevents.Event) (aicliLogScope, bool) {
+	state, _ := b.latestRequestLogState(event)
+	if state == nil {
+		return aicliLogScope{}, false
+	}
+	return state.Scope, true
+}
+
+func (b *chatRuntimeEventBridge) pendingAssistantRequestStates(event runtimeevents.Event) []*chatRuntimeRequestLogState {
+	if b == nil {
+		return nil
+	}
+	traceID := runtimeEventTraceID(event)
+	b.logMu.Lock()
+	defer b.logMu.Unlock()
+	states := make([]*chatRuntimeRequestLogState, 0, 1)
+	if traceID != "" && b.traceLatestRequestKey != nil {
+		if key := b.traceLatestRequestKey[traceID]; key != "" {
+			if state := b.requestLogState[key]; state != nil && state.AwaitingAssistantResult && !state.ResponseLogged {
+				states = append(states, state)
+				return states
+			}
+		}
+	}
+	for _, state := range b.requestLogState {
+		if state != nil && state.AwaitingAssistantResult && !state.ResponseLogged {
+			states = append(states, state)
+		}
+	}
+	return states
+}
+
+func (b *chatRuntimeEventBridge) toolExecutionSummaryScope(event runtimeevents.Event) aicliLogScope {
+	if scope, ok := b.scopeForEvent(event); ok {
+		return scope
+	}
+	return aicliLogScope{}
+}
+
+func (b *chatRuntimeEventBridge) isRunActive() bool {
+	if b == nil {
+		return false
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	return b.runActive
+}
+
+func newRuntimeEventLogScope(session *ChatSession, prompt string) aicliLogScope {
+	if session == nil {
+		return aicliLogScope{}
+	}
+	return nextLogScope(session, prompt)
+}
+
+func buildRuntimeEventLogContent(event runtimeevents.Event, prompt string) map[string]interface{} {
+	content := cloneRuntimeEventLogPayload(event.Payload)
+	content["source"] = "actor_runtime_event"
+	content["event_type"] = strings.TrimSpace(event.Type)
+	if traceID := runtimeEventTraceID(event); traceID != "" {
+		content["trace_id"] = traceID
+	}
+	if toolName := runtimeEventToolName(event); toolName != "" {
+		content["tool_name"] = toolName
+	}
+	if strings.TrimSpace(prompt) != "" {
+		content["user_message"] = prompt
+	}
+	return content
+}
+
+func cloneRuntimeEventLogPayload(payload map[string]interface{}) map[string]interface{} {
+	if len(payload) == 0 {
+		return map[string]interface{}{}
+	}
+	cloned := make(map[string]interface{}, len(payload))
+	for key, value := range payload {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func mergeRuntimeEventLogContent(base map[string]interface{}, extra map[string]interface{}) map[string]interface{} {
+	if len(base) == 0 && len(extra) == 0 {
+		return map[string]interface{}{}
+	}
+	merged := cloneRuntimeEventLogPayload(base)
+	for key, value := range extra {
+		merged[key] = value
+	}
+	return merged
+}
+
+func runtimeEventTraceID(event runtimeevents.Event) string {
+	return firstNonEmptyChatValue(strings.TrimSpace(event.TraceID), payloadStringValue(event.Payload["trace_id"]))
+}
+
+func runtimeEventRequestKey(event runtimeevents.Event) string {
+	traceID := runtimeEventTraceID(event)
+	stepLabel := payloadStringValue(event.Payload["step"])
+	if traceID == "" && stepLabel == "" {
+		return ""
+	}
+	if stepLabel == "" {
+		stepLabel = "step"
+	}
+	return traceID + ":" + stepLabel
+}
+
+func runtimeEventTimestamp(event runtimeevents.Event) time.Time {
+	if !event.Timestamp.IsZero() {
+		return event.Timestamp
+	}
+	return time.Now().UTC()
+}
+
+func runtimeEventDurationMs(start time.Time, end time.Time) int64 {
+	if start.IsZero() {
+		return 0
+	}
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	if end.Before(start) {
+		return 0
+	}
+	return end.Sub(start).Milliseconds()
+}
+
+func runtimeEventError(payload map[string]interface{}) error {
+	errText := strings.TrimSpace(payloadStringValue(payload["error"]))
+	if errText == "" {
+		return nil
+	}
+	return fmt.Errorf("%s", errText)
+}
+
+func runtimeEventToolName(event runtimeevents.Event) string {
+	return firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"]))
+}
+
+func runtimeToolExecutionSummaryCall(event runtimeevents.Event) aicliToolExecutionCallSummary {
+	toolCallID := strings.TrimSpace(payloadStringValue(event.Payload["tool_call_id"]))
+	function := runtimeEventToolName(event)
+	success := runtimeEventError(event.Payload) == nil
+	summaryText := strings.Join(chatToolSummaryLines(event.Payload), "\n")
+	summary := aicliToolExecutionCallSummary{
+		ToolCallID:    toolCallID,
+		Function:      function,
+		Success:       success,
+		Error:         payloadStringValue(event.Payload["error"]),
+		ToolSource:    strings.TrimSpace(payloadStringValue(event.Payload[toolresult.SourceKey])),
+		OutputKind:    strings.TrimSpace(payloadStringValue(event.Payload[toolresult.MetadataKey])),
+		ResultPreview: summaryText,
+		ResultBytes:   len(summaryText),
+	}
+	applyToolExecutionOutputCaptureMetadata(&summary, event.Payload)
+	applyToolExecutionShellMetadata(&summary, event.Payload)
+	return summary
+}
+
 func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b == nil || b.session == nil {
 		return
 	}
+	b.handleStructuredLogEvent(event)
 	if b.handleAssistantReasoning(event) {
 		return
 	}
@@ -2142,13 +2578,40 @@ func appendCompactToolDirectory(line string, payload map[string]interface{}) str
 	if line == "" || payload == nil {
 		return line
 	}
+	extras := make([]string, 0, 2)
 	if workdir := truncateChatRuntimeText(payloadStringValue(payload["workdir"]), 160); workdir != "" {
-		return line + "\n  workdir: " + workdir
+		extras = append(extras, "  workdir: "+workdir)
+	} else if cwd := truncateChatRuntimeText(payloadStringValue(payload["cwd"]), 160); cwd != "" {
+		extras = append(extras, "  cwd: "+cwd)
 	}
-	if cwd := truncateChatRuntimeText(payloadStringValue(payload["cwd"]), 160); cwd != "" {
-		return line + "\n  cwd: " + cwd
+	if shell := truncateChatRuntimeText(chatToolShellDisplay(payload), 180); shell != "" {
+		extras = append(extras, "  shell: "+shell)
 	}
-	return line
+	if len(extras) == 0 {
+		return line
+	}
+	return line + "\n" + strings.Join(extras, "\n")
+}
+
+func chatToolShellDisplay(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	if display := strings.TrimSpace(payloadStringValue(payload["shell_display"])); display != "" {
+		return display
+	}
+	shellType := strings.TrimSpace(payloadStringValue(payload["shell_type"]))
+	shellPath := strings.TrimSpace(payloadStringValue(payload["shell_path"]))
+	switch {
+	case shellType != "" && shellPath != "":
+		return shellType + " (" + shellPath + ")"
+	case shellType != "":
+		return shellType
+	case shellPath != "":
+		return shellPath
+	default:
+		return ""
+	}
 }
 
 func chatToolDivider(label string) string {

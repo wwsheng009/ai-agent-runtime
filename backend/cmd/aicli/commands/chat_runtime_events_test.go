@@ -3,7 +3,9 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,12 +17,14 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -31,6 +35,33 @@ func TestFormatInteractiveSupplementPromptLine_PreservesPromptContentWithoutInde
 	}
 	if !strings.Contains(got, "[approval] query=北京 天气预报 未来 7 天") {
 		t.Fatalf("expected approval content to stay visible, got %q", got)
+	}
+}
+
+func TestRenderSharedChatToolEvent_AppendsShellContext(t *testing.T) {
+	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Stage:    "tool_result",
+		ToolName: "execute_shell_command",
+		Arguments: map[string]interface{}{
+			"command": "git status",
+			"workdir": "E:/projects/ai/ai-agent-runtime",
+		},
+		Output:  "On branch main",
+		Success: true,
+		Metadata: map[string]interface{}{
+			toolresult.SourceKey: "toolkit",
+			"shell_display":      `pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
+		},
+	})
+
+	want := strings.Join([]string{
+		"• Ran git status",
+		"  On branch main",
+		"  workdir: E:/projects/ai/ai-agent-runtime",
+		`  shell: pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected shared chat tool render: %q", got)
 	}
 }
 
@@ -221,12 +252,14 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		Payload: map[string]interface{}{
 			"command_text":  "git status",
 			"workdir":       "E:/projects/ai/ai-agent-runtime",
+			"shell_display": `pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
 			"summary_lines": []interface{}{"On branch main"},
 		},
 	}); got != strings.Join([]string{
 		"• Ran git status",
 		"  On branch main",
 		"  workdir: E:/projects/ai/ai-agent-runtime",
+		`  shell: pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
 	}, "\n") {
 		t.Fatalf("unexpected completed tool workdir render: %q", got)
 	}
@@ -3143,5 +3176,272 @@ func TestChatRuntimeEvents_NonInteractiveApprovalReturnsError(t *testing.T) {
 	}
 	if mcpManager.callCount != 0 {
 		t.Fatalf("expected denied approval path to skip tool execution, got %d", mcpManager.callCount)
+	}
+}
+
+func TestChatRuntimeEventBridge_LogsActorRunToChatLogger(t *testing.T) {
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.4", true, "https://example.com")
+	session := &ChatSession{
+		Logger:         logger,
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "session-actor-log"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.PrepareRunPrompt("请修复日志保存问题")
+	bridge.BeginRun()
+	defer bridge.EndRun()
+
+	emitActorLoggingTestRun(bridge, "session-actor-log", "trace-log-1", time.Date(2026, 4, 26, 21, 1, 50, 0, time.UTC))
+
+	if len(logger.sessionLog.Messages) != 7 {
+		t.Fatalf("expected 7 log entries, got %d: %+v", len(logger.sessionLog.Messages), logger.sessionLog.Messages)
+	}
+
+	expectedTypes := []string{
+		"request",
+		"response",
+		"tool_call",
+		"tool_result",
+		"request",
+		"response",
+		"tool_execution_summary",
+	}
+	for i, expected := range expectedTypes {
+		if logger.sessionLog.Messages[i].MessageType != expected {
+			t.Fatalf("expected message %d type %q, got %q", i, expected, logger.sessionLog.Messages[i].MessageType)
+		}
+	}
+
+	firstRequest := logger.sessionLog.Messages[0]
+	if firstRequest.TurnID != "turn-0001" || firstRequest.RequestID != "turn-0001-req-01" {
+		t.Fatalf("unexpected first request scope: %+v", firstRequest)
+	}
+	firstRequestContent, ok := firstRequest.Content.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected first request content map, got %#v", firstRequest.Content)
+	}
+	if firstRequestContent["user_message"] != "请修复日志保存问题" {
+		t.Fatalf("expected prompt to be logged on first request, got %#v", firstRequestContent)
+	}
+
+	toolCall := logger.sessionLog.Messages[2]
+	if toolCall.TurnID != "turn-0001" || toolCall.RequestID != "turn-0001-req-01" || toolCall.ToolCallID != "call-1" {
+		t.Fatalf("unexpected tool_call scope: %+v", toolCall)
+	}
+
+	secondResponse := logger.sessionLog.Messages[5]
+	if secondResponse.TurnID != "turn-0001" || secondResponse.RequestID != "turn-0001-req-02" {
+		t.Fatalf("unexpected second response scope: %+v", secondResponse)
+	}
+	secondResponseContent, ok := secondResponse.Content.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected second response content map, got %#v", secondResponse.Content)
+	}
+	if secondResponseContent["content"] != "已完成检查并整理修复建议。" {
+		t.Fatalf("expected assistant content to be merged into final response log, got %#v", secondResponseContent)
+	}
+
+	summaryEntry := logger.sessionLog.Messages[6]
+	summary, ok := summaryEntry.Content.(*aicliToolExecutionSummary)
+	if !ok || summary == nil {
+		t.Fatalf("expected tool execution summary payload, got %#v", summaryEntry.Content)
+	}
+	if summary.CallCount != 1 || summary.SuccessCount != 1 || summary.ErrorCount != 0 {
+		t.Fatalf("unexpected tool execution summary: %+v", summary)
+	}
+	if len(summary.Calls) != 1 || summary.Calls[0].ToolCallID != "call-1" || summary.Calls[0].Function != "execute_shell_command" {
+		t.Fatalf("unexpected tool execution summary calls: %+v", summary.Calls)
+	}
+	if summary.Calls[0].CaptureLimitReached == nil || !*summary.Calls[0].CaptureLimitReached {
+		t.Fatalf("expected capture_limit_reached=true in summary, got %+v", summary.Calls[0])
+	}
+	if summary.Calls[0].OutputCaptureComplete == nil || *summary.Calls[0].OutputCaptureComplete {
+		t.Fatalf("expected output_capture_complete=false in summary, got %+v", summary.Calls[0])
+	}
+	if summary.Calls[0].OmittedOutputBytes != 2048 || summary.Calls[0].OutputCaptureLimitBytes != 4096 {
+		t.Fatalf("expected capture metadata in summary, got %+v", summary.Calls[0])
+	}
+	if summary.Calls[0].ShellType != "pwsh" || summary.Calls[0].ShellPath != `C:\Program Files\PowerShell\7\pwsh.exe` {
+		t.Fatalf("expected shell metadata in summary, got %+v", summary.Calls[0])
+	}
+
+	currentSummary := logger.CurrentSummary()
+	if currentSummary == nil {
+		t.Fatal("expected current summary")
+	}
+	if currentSummary.TotalRequests != 2 || currentSummary.TotalResponses != 2 || currentSummary.TotalToolCalls != 1 {
+		t.Fatalf("unexpected logger summary: %+v", currentSummary)
+	}
+}
+
+func TestChatRuntimeEventBridge_FlushSessionPersistsActorLogs(t *testing.T) {
+	logDir := t.TempDir()
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.4", true, "https://example.com")
+	if err := logger.SetLogDir(logDir); err != nil {
+		t.Fatalf("set log dir: %v", err)
+	}
+	session := &ChatSession{
+		Logger:         logger,
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "session-actor-flush"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.PrepareRunPrompt("请确认日志是否完整")
+	bridge.BeginRun()
+	defer bridge.EndRun()
+
+	emitActorLoggingTestRun(bridge, "session-actor-flush", "trace-log-2", time.Date(2026, 4, 26, 21, 2, 0, 0, time.UTC))
+
+	if err := logger.FlushSession(); err != nil {
+		t.Fatalf("flush session: %v", err)
+	}
+
+	data, err := os.ReadFile(logger.SessionLogPath())
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+
+	var payload ChatSessionLog
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal chat log: %v", err)
+	}
+	if len(payload.Messages) == 0 {
+		t.Fatalf("expected persisted messages, got %#v", payload)
+	}
+	if payload.SessionSummary == nil {
+		t.Fatalf("expected persisted summary, got %#v", payload)
+	}
+	if payload.SessionSummary.TotalRequests < 2 || payload.SessionSummary.TotalResponses < 2 || payload.SessionSummary.TotalToolCalls < 1 {
+		t.Fatalf("unexpected persisted summary: %+v", payload.SessionSummary)
+	}
+}
+
+func emitActorLoggingTestRun(bridge *chatRuntimeEventBridge, sessionID, traceID string, base time.Time) {
+	events := []runtimeevents.Event{
+		{
+			Type:      "llm.request.started",
+			SessionID: sessionID,
+			TraceID:   traceID,
+			Timestamp: base.Add(10 * time.Millisecond),
+			Payload: map[string]interface{}{
+				"trace_id":      traceID,
+				"step":          1,
+				"provider":      "codex_ee",
+				"model":         "gpt-5.4",
+				"message_count": 3,
+				"tool_count":    1,
+			},
+		},
+		{
+			Type:      "llm.request.finished",
+			SessionID: sessionID,
+			TraceID:   traceID,
+			Timestamp: base.Add(20 * time.Millisecond),
+			Payload: map[string]interface{}{
+				"trace_id":        traceID,
+				"step":            1,
+				"provider":        "codex_ee",
+				"model":           "gpt-5.4",
+				"success":         true,
+				"tool_call_count": 1,
+			},
+		},
+		{
+			Type:      "tool.requested",
+			SessionID: sessionID,
+			TraceID:   traceID,
+			ToolName:  "execute_shell_command",
+			Timestamp: base.Add(25 * time.Millisecond),
+			Payload: map[string]interface{}{
+				"trace_id":     traceID,
+				"step":         1,
+				"tool_call_id": "call-1",
+				"arg_preview":  "command=git diff --stat",
+				"command_text": "git diff --stat",
+				"workdir":      "E:/projects/ai/ai-agent-runtime",
+			},
+		},
+		{
+			Type:      "tool.completed",
+			SessionID: sessionID,
+			TraceID:   traceID,
+			ToolName:  "execute_shell_command",
+			Timestamp: base.Add(35 * time.Millisecond),
+			Payload: map[string]interface{}{
+				"trace_id":                      traceID,
+				"step":                          1,
+				"tool_call_id":                  "call-1",
+				"arg_preview":                   "command=git diff --stat",
+				"command_text":                  "git diff --stat",
+				"workdir":                       "E:/projects/ai/ai-agent-runtime",
+				"summary":                       "2 files changed\n10 insertions(+), 4 deletions(-)",
+				"summary_lines":                 []interface{}{"2 files changed", "10 insertions(+), 4 deletions(-)"},
+				"shell_type":                    "pwsh",
+				"shell_path":                    `C:\Program Files\PowerShell\7\pwsh.exe`,
+				"shell_display":                 `pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
+				"output_capture_complete":       false,
+				"capture_limit_reached":         true,
+				"output_capture_limit_bytes":    4096,
+				"retained_output_bytes":         4096,
+				"omitted_output_bytes":          2048,
+				"output_capture_limit_disabled": false,
+			},
+		},
+		{
+			Type:      "llm.request.started",
+			SessionID: sessionID,
+			TraceID:   traceID,
+			Timestamp: base.Add(45 * time.Millisecond),
+			Payload: map[string]interface{}{
+				"trace_id":      traceID,
+				"step":          2,
+				"provider":      "codex_ee",
+				"model":         "gpt-5.4",
+				"message_count": 5,
+				"tool_count":    0,
+			},
+		},
+		{
+			Type:      "llm.request.finished",
+			SessionID: sessionID,
+			TraceID:   traceID,
+			Timestamp: base.Add(55 * time.Millisecond),
+			Payload: map[string]interface{}{
+				"trace_id":        traceID,
+				"step":            2,
+				"provider":        "codex_ee",
+				"model":           "gpt-5.4",
+				"success":         true,
+				"tool_call_count": 0,
+			},
+		},
+		{
+			Type:      runtimechat.EventAssistantMessage,
+			SessionID: sessionID,
+			TraceID:   traceID,
+			Timestamp: base.Add(60 * time.Millisecond),
+			Payload: map[string]interface{}{
+				"turn_id": "turn-0001",
+				"content": "已完成检查并整理修复建议。",
+				"reasoning": map[string]interface{}{
+					"summary": "先核对日志，再补齐事件到日志桥接。",
+				},
+			},
+		},
+		{
+			Type:      runtimechat.EventSessionEnd,
+			SessionID: sessionID,
+			TraceID:   traceID,
+			Timestamp: base.Add(70 * time.Millisecond),
+			Payload: map[string]interface{}{
+				"trace_id": traceID,
+				"success":  true,
+				"steps":    2,
+				"duration": 70,
+			},
+		},
+	}
+	for _, event := range events {
+		bridge.handleStructuredLogEvent(event)
 	}
 }
