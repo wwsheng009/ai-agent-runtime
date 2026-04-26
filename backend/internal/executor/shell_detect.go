@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -23,6 +24,42 @@ const (
 type Shell struct {
 	Path string
 	Type ShellType
+}
+
+// String returns a human-readable shell label suitable for prompts, logs,
+// and debugging metadata.
+func (s Shell) String() string {
+	typeName := strings.TrimSpace(string(s.Type))
+	path := strings.TrimSpace(s.Path)
+	switch {
+	case typeName != "" && path != "":
+		return fmt.Sprintf("%s (%s)", typeName, path)
+	case typeName != "":
+		return typeName
+	case path != "":
+		return path
+	default:
+		return "unknown"
+	}
+}
+
+// Metadata returns a stable metadata map describing the selected shell.
+func (s Shell) Metadata() map[string]interface{} {
+	typeName := strings.TrimSpace(string(s.Type))
+	path := strings.TrimSpace(s.Path)
+	if typeName == "" && path == "" {
+		return nil
+	}
+	metadata := map[string]interface{}{
+		"shell_display": s.String(),
+	}
+	if typeName != "" {
+		metadata["shell_type"] = typeName
+	}
+	if path != "" {
+		metadata["shell_path"] = path
+	}
+	return metadata
 }
 
 // DeriveExecArgs returns the argv slice needed to execute a command string
