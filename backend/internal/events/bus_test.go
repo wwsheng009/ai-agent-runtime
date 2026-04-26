@@ -327,6 +327,89 @@ func TestBus_RecentTraces_AggregatesPromptLayoutSummary(t *testing.T) {
 	}
 }
 
+func TestBus_RecentTraces_AggregatesRecoverySignals(t *testing.T) {
+	bus := NewBusWithRetention(16)
+
+	bus.Publish(Event{
+		Type:    "session_end",
+		TraceID: "trace-recovery",
+		Payload: map[string]interface{}{
+			"error_type":                    "prompt_preflight",
+			"failure_reason_code":           "active_turn_not_compactable",
+			"replacement_history_available": true,
+		},
+	})
+	bus.Publish(Event{
+		Type:    "team.task.blocked",
+		TraceID: "trace-recovery",
+		Payload: map[string]interface{}{
+			"replan_error_type":                  "prompt_preflight",
+			"replan_failure_reason_code":         "prompt_still_exceeds_budget_after_compaction",
+			"replan_replacement_history_applied": true,
+		},
+	})
+	bus.Publish(Event{
+		Type:    "team.summary.failed",
+		TraceID: "trace-recovery",
+		Payload: map[string]interface{}{
+			"summary_source":              "fallback",
+			"fallback_reason":             "lead_session_error",
+			"error_type":                  "prompt_preflight",
+			"failure_reason_code":         "prompt_still_exceeds_budget_after_compaction",
+			"replacement_history_applied": true,
+		},
+	})
+	bus.Publish(Event{
+		Type:    "team.summary",
+		TraceID: "trace-recovery",
+		Payload: map[string]interface{}{
+			"summary_source":              "fallback",
+			"fallback_reason":             "lead_session_error",
+			"error_type":                  "prompt_preflight",
+			"failure_reason_code":         "prompt_still_exceeds_budget_after_compaction",
+			"replacement_history_applied": true,
+		},
+	})
+	bus.Publish(Event{
+		Type:    "team.summary.generated",
+		TraceID: "trace-recovery",
+		Payload: map[string]interface{}{
+			"summary_source":  "fallback",
+			"fallback_reason": "lead_output_empty",
+		},
+	})
+
+	traces := bus.RecentTraces(TraceFilter{TraceIDPrefix: "trace-", Limit: 10})
+	if len(traces) != 1 {
+		t.Fatalf("expected 1 trace, got %d", len(traces))
+	}
+	trace := traces[0]
+	if trace.Recovery.PromptPreflightEvents != 4 {
+		t.Fatalf("expected 4 prompt preflight events, got %#v", trace.Recovery)
+	}
+	if trace.Recovery.PromptPreflightByEventType["session_end"] != 1 {
+		t.Fatalf("expected session_end preflight count, got %#v", trace.Recovery.PromptPreflightByEventType)
+	}
+	if trace.Recovery.PromptPreflightByEventType["team.task.blocked/replan"] != 1 {
+		t.Fatalf("expected team.task.blocked/replan preflight count, got %#v", trace.Recovery.PromptPreflightByEventType)
+	}
+	if trace.Recovery.PromptPreflightFailureCodes["prompt_still_exceeds_budget_after_compaction"] != 3 {
+		t.Fatalf("expected repeated failure code count, got %#v", trace.Recovery.PromptPreflightFailureCodes)
+	}
+	if trace.Recovery.ReplacementHistoryAvailable != 1 || trace.Recovery.ReplacementHistoryApplied != 3 {
+		t.Fatalf("unexpected replacement history recovery counts: %#v", trace.Recovery)
+	}
+	if trace.Recovery.SummaryFailureEvents != 1 || trace.Recovery.SummaryFailureReasons["lead_session_error"] != 1 {
+		t.Fatalf("unexpected summary failure recovery counts: %#v", trace.Recovery)
+	}
+	if trace.Recovery.SummaryFallbacks != 2 {
+		t.Fatalf("expected 2 summary fallbacks, got %#v", trace.Recovery)
+	}
+	if trace.Recovery.SummaryFallbackReasons["lead_session_error"] != 1 || trace.Recovery.SummaryFallbackReasons["lead_output_empty"] != 1 {
+		t.Fatalf("unexpected summary fallback reasons: %#v", trace.Recovery.SummaryFallbackReasons)
+	}
+}
+
 func TestBus_TraceStats_AggregatesRecentTraces(t *testing.T) {
 	bus := NewBusWithRetention(16)
 
@@ -388,13 +471,30 @@ func TestBus_TraceStats_AggregatesRecentTraces(t *testing.T) {
 			"role": "verifier",
 		},
 	})
+	bus.Publish(Event{
+		Type:    "session_end",
+		TraceID: "trace-2",
+		Payload: map[string]interface{}{
+			"error_type":                    "prompt_preflight",
+			"failure_reason_code":           "active_turn_not_compactable",
+			"replacement_history_available": true,
+		},
+	})
+	bus.Publish(Event{
+		Type:    "team.summary.generated",
+		TraceID: "trace-2",
+		Payload: map[string]interface{}{
+			"summary_source":  "fallback",
+			"fallback_reason": "lead_session_error",
+		},
+	})
 
 	stats := bus.TraceStats(TraceFilter{TraceIDPrefix: "trace-", Limit: 10})
 	if stats.TraceCount != 2 {
 		t.Fatalf("expected 2 traces, got %d", stats.TraceCount)
 	}
-	if stats.EventCount != 8 {
-		t.Fatalf("expected 8 events, got %d", stats.EventCount)
+	if stats.EventCount != 10 {
+		t.Fatalf("expected 10 events, got %d", stats.EventCount)
 	}
 	if stats.EventTypes["tool.requested"] != 1 || stats.EventTypes["tool.completed"] != 1 {
 		t.Fatalf("unexpected event type stats: %#v", stats.EventTypes)
@@ -431,6 +531,18 @@ func TestBus_TraceStats_AggregatesRecentTraces(t *testing.T) {
 	}
 	if stats.Execution.SubagentRoles["verifier"] != 1 {
 		t.Fatalf("unexpected subagent roles: %#v", stats.Execution.SubagentRoles)
+	}
+	if stats.Recovery.PromptPreflightEvents != 1 || stats.Recovery.PromptPreflightByEventType["session_end"] != 1 {
+		t.Fatalf("unexpected prompt preflight recovery stats: %#v", stats.Recovery)
+	}
+	if stats.Recovery.PromptPreflightFailureCodes["active_turn_not_compactable"] != 1 {
+		t.Fatalf("unexpected prompt preflight failure code stats: %#v", stats.Recovery.PromptPreflightFailureCodes)
+	}
+	if stats.Recovery.ReplacementHistoryAvailable != 1 {
+		t.Fatalf("unexpected replacement history stats: %#v", stats.Recovery)
+	}
+	if stats.Recovery.SummaryFallbacks != 1 || stats.Recovery.SummaryFallbackReasons["lead_session_error"] != 1 {
+		t.Fatalf("unexpected summary fallback recovery stats: %#v", stats.Recovery)
 	}
 	if stats.Provenance.ProfileContextInjected != 0 || stats.Provenance.RecallWithSourceRefs != 0 {
 		t.Fatalf("unexpected provenance defaults: %#v", stats.Provenance)

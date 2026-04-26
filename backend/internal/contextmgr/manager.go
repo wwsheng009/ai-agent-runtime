@@ -1266,7 +1266,7 @@ func trimFlexibleMessageCount(rawMessages, dynamicMessages []types.Message, keep
 		keep -= len(dynamicMessages)
 	}
 	if keep < len(unpinnedRaw) {
-		unpinnedRaw = unpinnedRaw[len(unpinnedRaw)-keep:]
+		unpinnedRaw = trimRawMessagesFromFrontByCount(unpinnedRaw, keep)
 	}
 	if len(pinnedRaw) > 0 {
 		unpinnedRaw = append(unpinnedRaw, pinnedRaw...)
@@ -1283,6 +1283,47 @@ func splitPinnedRawMessages(rawMessages []types.Message) ([]types.Message, []typ
 		return rawMessages, nil
 	}
 	return rawMessages[:start], rawMessages[start:]
+}
+
+func trimRawMessagesFromFrontByCount(messages []types.Message, keep int) []types.Message {
+	if keep <= 0 || len(messages) == 0 {
+		return nil
+	}
+	trimmed := messages
+	for len(trimmed) > keep {
+		next := dropLeadingRawTrimUnit(trimmed)
+		if len(next) >= len(trimmed) {
+			break
+		}
+		trimmed = next
+	}
+	return trimmed
+}
+
+func dropLeadingRawTrimUnit(messages []types.Message) []types.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	switch messages[0].Role {
+	case "assistant":
+		if len(messages[0].ToolCalls) == 0 {
+			return messages[1:]
+		}
+		end := 1
+		for end < len(messages) && messages[end].Role == "tool" {
+			end++
+		}
+		return messages[end:]
+	case "tool":
+		end := 1
+		for end < len(messages) && messages[end].Role == "tool" {
+			end++
+		}
+		return messages[end:]
+	default:
+		return messages[1:]
+	}
 }
 
 func assembleManagedMessages(systemMessages, stableMessages, rawMessages, dynamicMessages []types.Message) []types.Message {
@@ -1311,7 +1352,11 @@ func trimByTokenBudget(messages []types.Message, budget Budget, counter TokenCou
 		}
 
 		if len(unpinnedRaw) > 0 {
-			unpinnedRaw = unpinnedRaw[1:]
+			next := dropLeadingRawTrimUnit(unpinnedRaw)
+			if len(next) >= len(unpinnedRaw) {
+				break
+			}
+			unpinnedRaw = next
 			trimmed = assembleManagedMessages(systemMessages, stableMessages, append(unpinnedRaw, pinnedRaw...), dynamicMessages)
 			continue
 		}

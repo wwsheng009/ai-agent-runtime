@@ -1,6 +1,8 @@
 package output
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -83,6 +85,59 @@ func TestRenderToolResultContentForModel_PreservesFullTextWhenExplicitlyMarkedTe
 	}
 }
 
+func TestRenderToolResultContentForModel_TruncatesLargeToolkitTextForHistory(t *testing.T) {
+	envelope := &Envelope{
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindText,
+			"mcp_name":             "toolkit",
+		},
+	}
+	var builder strings.Builder
+	for i := 0; i < 600; i++ {
+		builder.WriteString(fmt.Sprintf("line-%03d-0123456789abcdefghijklmnopqrstuvwxyz\n", i))
+	}
+	content := builder.String()
+
+	got := RenderToolResultContentForModel(content, "", envelope)
+
+	if got == content {
+		t.Fatal("expected large toolkit text to be truncated for model history")
+	}
+	if !strings.Contains(got, "Total output lines: 600") {
+		t.Fatalf("expected total line count header, got %q", got)
+	}
+	if !strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("expected truncation marker, got %q", got)
+	}
+	if !strings.Contains(got, "line-000-") {
+		t.Fatalf("expected output head to be preserved, got %q", got)
+	}
+	if !strings.Contains(got, "line-599-") {
+		t.Fatalf("expected output tail to be preserved, got %q", got)
+	}
+	if len(got) <= modelToolTextByteBudget/2 {
+		t.Fatalf("expected meaningful head/tail payload, got only %d bytes", len(got))
+	}
+}
+
+func TestRenderToolResultContentForModel_TruncatesLargeErrorOutputForHistory(t *testing.T) {
+	envelope := &Envelope{
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}
+	content := strings.Repeat("stderr detail line for failure\n", 700)
+
+	got := RenderToolResultContentForModel(content, "exit status 1", envelope)
+
+	if !strings.Contains(got, "Tool execution failed: exit status 1") {
+		t.Fatalf("expected failure prefix to be preserved, got %q", got)
+	}
+	if !strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("expected truncation marker, got %q", got)
+	}
+}
+
 func TestRenderToolResultContentForModel_ExternalMCPPreservesFullStructuredOutput(t *testing.T) {
 	envelope := &Envelope{
 		Summary: "reduced summary only",
@@ -114,5 +169,24 @@ func TestRenderToolResultContentForModel_ToolkitMCPPreservesStructuredSummary(t 
 	}, "", envelope)
 	if got != "reduced toolkit summary" {
 		t.Fatalf("expected reduced toolkit summary, got %q", got)
+	}
+}
+
+func TestRenderToolResultContentForModel_ExternalMCPPreservesLargeTextOutput(t *testing.T) {
+	envelope := &Envelope{
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindText,
+			"mcp_name":             "remote-filesystem",
+		},
+	}
+	content := strings.Repeat("external-mcp-line\n", 900)
+
+	got := RenderToolResultContentForModel(content, "", envelope)
+
+	if got != strings.TrimSpace(content) {
+		t.Fatalf("expected external MCP text to remain full content, got %q", got)
+	}
+	if strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("did not expect external MCP content to be truncated, got %q", got)
 	}
 }

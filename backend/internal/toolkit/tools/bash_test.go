@@ -9,17 +9,17 @@ import (
 )
 
 type fakeExecuter struct {
-	output string
+	result CommandExecutionResult
 	err    error
 }
 
-func (f fakeExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (string, error) {
-	return f.output, f.err
+func (f fakeExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (CommandExecutionResult, error) {
+	return f.result, f.err
 }
 
 func TestBashTool_EmitsMutatedPaths(t *testing.T) {
 	tool := NewBashTool()
-	tool.executer = fakeExecuter{output: "ok"}
+	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command":       "echo hello",
@@ -43,7 +43,7 @@ func TestBashTool_EmitsMutatedPaths(t *testing.T) {
 
 func TestExecuteShellCommandTool_EmitsMutatedPaths(t *testing.T) {
 	tool := NewExecuteShellCommandTool()
-	tool.BashTool.executer = fakeExecuter{output: "ok"}
+	tool.BashTool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command":       "echo hello",
@@ -88,7 +88,7 @@ func TestExecuteShellCommandTool_DescribesDetectedWindowsShellAndWorkdir(t *test
 
 func TestBashTool_WorkdirParameter(t *testing.T) {
 	tool := NewBashTool()
-	tool.executer = fakeExecuter{output: "ok"}
+	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command": "echo hello",
@@ -123,6 +123,35 @@ func TestResolveWorkdir(t *testing.T) {
 				t.Errorf("resolveWorkdir() = %v, want absolute path", got)
 			}
 		})
+	}
+}
+
+func TestBashTool_AnnotatesTruncatedOutputMetadata(t *testing.T) {
+	tool := NewBashTool()
+	tool.executer = fakeExecuter{result: CommandExecutionResult{
+		Output:     "Total output lines: 200\nTotal output bytes: 9000\n\nhead\n\n[exec output truncated at capture limit: omitted 4000 bytes from the middle]\n\ntail",
+		Truncated:  true,
+		TotalBytes: 9000,
+		TotalLines: 200,
+	}}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "echo hello",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if got := result.Metadata["output_truncated"]; got != true {
+		t.Fatalf("expected output_truncated=true, got %#v", got)
+	}
+	if got := result.Metadata["total_output_bytes"]; got != 9000 {
+		t.Fatalf("expected total_output_bytes=9000, got %#v", got)
+	}
+	if got := result.Metadata["total_output_lines"]; got != 200 {
+		t.Fatalf("expected total_output_lines=200, got %#v", got)
 	}
 }
 

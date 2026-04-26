@@ -77,14 +77,27 @@ type ProvenanceView struct {
 }
 
 type PromptView struct {
-	LayoutsObserved  int            `json:"layouts_observed"`
-	InstructionChars int            `json:"instruction_chars"`
-	TotalChars       int            `json:"total_chars"`
-	InstructionTokens int           `json:"instruction_tokens"`
-	TotalTokens      int            `json:"total_tokens"`
-	Layers           map[string]int `json:"layers"`
-	Sources          []string       `json:"sources,omitempty"`
-	SourceCount      int            `json:"source_count"`
+	LayoutsObserved   int            `json:"layouts_observed"`
+	InstructionChars  int            `json:"instruction_chars"`
+	TotalChars        int            `json:"total_chars"`
+	InstructionTokens int            `json:"instruction_tokens"`
+	TotalTokens       int            `json:"total_tokens"`
+	Layers            map[string]int `json:"layers"`
+	Sources           []string       `json:"sources,omitempty"`
+	SourceCount       int            `json:"source_count"`
+}
+
+// RecoveryView summarizes prompt preflight / fallback recovery signals.
+type RecoveryView struct {
+	PromptPreflightEvents       int            `json:"prompt_preflight_events"`
+	PromptPreflightByEventType  map[string]int `json:"prompt_preflight_by_event_type"`
+	PromptPreflightFailureCodes map[string]int `json:"prompt_preflight_failure_codes"`
+	ReplacementHistoryAvailable int            `json:"replacement_history_available"`
+	ReplacementHistoryApplied   int            `json:"replacement_history_applied"`
+	SummaryFailureEvents        int            `json:"summary_failure_events"`
+	SummaryFailureReasons       map[string]int `json:"summary_failure_reasons"`
+	SummaryFallbacks            int            `json:"summary_fallbacks"`
+	SummaryFallbackReasons      map[string]int `json:"summary_fallback_reasons"`
 }
 
 // TraceSummary 表示一个 trace 的聚合摘要。
@@ -104,6 +117,7 @@ type TraceSummary struct {
 	Execution            ExecutionView  `json:"execution"`
 	Provenance           ProvenanceView `json:"provenance"`
 	Prompt               PromptView     `json:"prompt"`
+	Recovery             RecoveryView   `json:"recovery"`
 	StartedAt            time.Time      `json:"started_at"`
 	EndedAt              time.Time      `json:"ended_at"`
 }
@@ -139,6 +153,7 @@ type TraceStats struct {
 	Execution      ExecutionView  `json:"execution"`
 	Provenance     ProvenanceView `json:"provenance"`
 	Prompt         PromptView     `json:"prompt"`
+	Recovery       RecoveryView   `json:"recovery"`
 	LatestTraceIDs []string       `json:"latest_trace_ids,omitempty"`
 	StartedAt      time.Time      `json:"started_at"`
 	EndedAt        time.Time      `json:"ended_at"`
@@ -359,6 +374,12 @@ func (b *Bus) RecentTraces(filter TraceFilter) []TraceSummary {
 					Prompt: PromptView{
 						Layers: make(map[string]int),
 					},
+					Recovery: RecoveryView{
+						PromptPreflightByEventType:  make(map[string]int),
+						PromptPreflightFailureCodes: make(map[string]int),
+						SummaryFailureReasons:       make(map[string]int),
+						SummaryFallbackReasons:      make(map[string]int),
+					},
 					StartedAt: event.Timestamp,
 					EndedAt:   event.Timestamp,
 				},
@@ -400,6 +421,7 @@ func (b *Bus) RecentTraces(filter TraceFilter) []TraceSummary {
 		applyExecutionEvent(&item.summary.Execution, event)
 		applyProvenanceEvent(&item.summary.Provenance, event)
 		applyPromptEvent(&item.summary.Prompt, event)
+		applyRecoveryEvent(&item.summary.Recovery, event)
 		if mcpName, ok := event.Payload["mcp_name"].(string); ok && strings.TrimSpace(mcpName) != "" {
 			item.mcpSet[strings.TrimSpace(mcpName)] = true
 		}
@@ -465,6 +487,12 @@ func (b *Bus) TraceStats(filter TraceFilter) TraceStats {
 		},
 		Prompt: PromptView{
 			Layers: make(map[string]int),
+		},
+		Recovery: RecoveryView{
+			PromptPreflightByEventType:  make(map[string]int),
+			PromptPreflightFailureCodes: make(map[string]int),
+			SummaryFailureReasons:       make(map[string]int),
+			SummaryFallbackReasons:      make(map[string]int),
 		},
 		LatestTraceIDs: []string{},
 	}
@@ -574,6 +602,23 @@ func (b *Bus) TraceStats(filter TraceFilter) TraceStats {
 			stats.Prompt.Layers[layer] += count
 		}
 		updatePromptDisplay(&stats.Prompt)
+		stats.Recovery.PromptPreflightEvents += trace.Recovery.PromptPreflightEvents
+		stats.Recovery.ReplacementHistoryAvailable += trace.Recovery.ReplacementHistoryAvailable
+		stats.Recovery.ReplacementHistoryApplied += trace.Recovery.ReplacementHistoryApplied
+		stats.Recovery.SummaryFailureEvents += trace.Recovery.SummaryFailureEvents
+		stats.Recovery.SummaryFallbacks += trace.Recovery.SummaryFallbacks
+		for eventType, count := range trace.Recovery.PromptPreflightByEventType {
+			stats.Recovery.PromptPreflightByEventType[eventType] += count
+		}
+		for code, count := range trace.Recovery.PromptPreflightFailureCodes {
+			stats.Recovery.PromptPreflightFailureCodes[code] += count
+		}
+		for reason, count := range trace.Recovery.SummaryFailureReasons {
+			stats.Recovery.SummaryFailureReasons[reason] += count
+		}
+		for reason, count := range trace.Recovery.SummaryFallbackReasons {
+			stats.Recovery.SummaryFallbackReasons[reason] += count
+		}
 	}
 
 	return stats
@@ -948,6 +993,71 @@ func ApplyPromptEventForAPI(summary *PromptView, event Event) {
 	applyPromptEvent(summary, event)
 }
 
+func applyRecoveryEvent(summary *RecoveryView, event Event) {
+	if summary == nil {
+		return
+	}
+	if summary.PromptPreflightByEventType == nil {
+		summary.PromptPreflightByEventType = make(map[string]int)
+	}
+	if summary.PromptPreflightFailureCodes == nil {
+		summary.PromptPreflightFailureCodes = make(map[string]int)
+	}
+	if summary.SummaryFailureReasons == nil {
+		summary.SummaryFailureReasons = make(map[string]int)
+	}
+	if summary.SummaryFallbackReasons == nil {
+		summary.SummaryFallbackReasons = make(map[string]int)
+	}
+
+	if isPromptPreflightPayload(event.Payload, "") {
+		summary.PromptPreflightEvents++
+		summary.PromptPreflightByEventType[event.Type]++
+		if code, ok := stringPayloadValue(event.Payload, "failure_reason_code"); ok {
+			summary.PromptPreflightFailureCodes[code]++
+		}
+		if boolPayloadValue(event.Payload, "replacement_history_available") {
+			summary.ReplacementHistoryAvailable++
+		}
+		if boolPayloadValue(event.Payload, "replacement_history_applied") {
+			summary.ReplacementHistoryApplied++
+		}
+	}
+	if isPromptPreflightPayload(event.Payload, "replan_") {
+		summary.PromptPreflightEvents++
+		summary.PromptPreflightByEventType[event.Type+"/replan"]++
+		if code, ok := stringPayloadValue(event.Payload, "replan_failure_reason_code"); ok {
+			summary.PromptPreflightFailureCodes[code]++
+		}
+		if boolPayloadValue(event.Payload, "replan_replacement_history_available") {
+			summary.ReplacementHistoryAvailable++
+		}
+		if boolPayloadValue(event.Payload, "replan_replacement_history_applied") {
+			summary.ReplacementHistoryApplied++
+		}
+	}
+
+	if event.Type == "team.summary.failed" {
+		summary.SummaryFailureEvents++
+		if reason, ok := stringPayloadValue(event.Payload, "fallback_reason"); ok {
+			summary.SummaryFailureReasons[reason]++
+		}
+	}
+	if source, ok := stringPayloadValue(event.Payload, "summary_source"); ok &&
+		(event.Type == "team.summary" || event.Type == "team.summary.generated") &&
+		strings.EqualFold(source, "fallback") {
+		summary.SummaryFallbacks++
+		if reason, ok := stringPayloadValue(event.Payload, "fallback_reason"); ok {
+			summary.SummaryFallbackReasons[reason]++
+		}
+	}
+}
+
+// ApplyRecoveryEventForAPI exposes recovery aggregation for API-side event list summaries.
+func ApplyRecoveryEventForAPI(summary *RecoveryView, event Event) {
+	applyRecoveryEvent(summary, event)
+}
+
 func isGovernanceDeniedEvent(eventType string) bool {
 	return eventType == "tool.denied" || eventType == "subagent.denied"
 }
@@ -968,6 +1078,14 @@ func stringPayloadValue(payload map[string]interface{}, key string) (string, boo
 	return value, value != ""
 }
 
+func boolPayloadValue(payload map[string]interface{}, key string) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	value, ok := payload[key].(bool)
+	return ok && value
+}
+
 func intPayloadValue(payload map[string]interface{}, key string) int {
 	if len(payload) == 0 {
 		return 0
@@ -986,6 +1104,11 @@ func intPayloadValue(payload map[string]interface{}, key string) int {
 	default:
 		return 0
 	}
+}
+
+func isPromptPreflightPayload(payload map[string]interface{}, prefix string) bool {
+	value, ok := stringPayloadValue(payload, prefix+"error_type")
+	return ok && strings.EqualFold(value, "prompt_preflight")
 }
 
 func stringSlicePayloadValue(payload map[string]interface{}, key string) []string {

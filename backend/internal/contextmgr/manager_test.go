@@ -1222,6 +1222,60 @@ func TestTrimByTokenBudget_KeepsLastUserWhenStableContextExceedsBudget(t *testin
 	assert.Equal(t, "latest user question", trimmed[2].Content)
 }
 
+func TestTrimByTokenBudget_DropsWholeToolReplayBlockInsteadOfLeavingOrphanTools(t *testing.T) {
+	messages := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("previous user turn"),
+		{
+			Role:      "assistant",
+			Content:   "Let me inspect the diff.",
+			ToolCalls: []types.ToolCall{{ID: "call_1", Name: "git_diff"}, {ID: "call_2", Name: "git_diff"}},
+		},
+		*types.NewToolMessage("call_1", "diff part 1"),
+		*types.NewToolMessage("call_2", "diff part 2"),
+		*types.NewUserMessage("继续"),
+	}
+
+	trimmed := trimByTokenBudget(messages, Budget{
+		MaxPromptTokens: 20,
+	}, func(messages []types.Message) int {
+		return len(messages) * 10
+	}, nil)
+
+	require.Len(t, trimmed, 2)
+	assert.Equal(t, "system", trimmed[0].Role)
+	assert.Equal(t, "user", trimmed[1].Role)
+	assert.Equal(t, "继续", trimmed[1].Content)
+	for _, message := range trimmed {
+		assert.NotEqual(t, "tool", message.Role, "trimmed history should not contain orphan tool messages")
+	}
+}
+
+func TestTrimMessageCount_DropsWholeToolReplayBlockInsteadOfLeavingOrphanTools(t *testing.T) {
+	messages := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("previous user turn"),
+		{
+			Role:      "assistant",
+			Content:   "Let me inspect the diff.",
+			ToolCalls: []types.ToolCall{{ID: "call_1", Name: "git_diff"}, {ID: "call_2", Name: "git_diff"}},
+		},
+		*types.NewToolMessage("call_1", "diff part 1"),
+		*types.NewToolMessage("call_2", "diff part 2"),
+		*types.NewUserMessage("继续"),
+	}
+
+	trimmed := trimMessageCount(messages, 4)
+
+	require.Len(t, trimmed, 2)
+	assert.Equal(t, "system", trimmed[0].Role)
+	assert.Equal(t, "user", trimmed[1].Role)
+	assert.Equal(t, "继续", trimmed[1].Content)
+	for _, message := range trimmed {
+		assert.NotEqual(t, "tool", message.Role, "trimmed history should not contain orphan tool messages")
+	}
+}
+
 func ledgerMessagesFromResult(messages []types.Message) []types.Message {
 	ledgers := make([]types.Message, 0)
 	for _, message := range messages {

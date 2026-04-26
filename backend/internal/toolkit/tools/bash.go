@@ -76,6 +76,13 @@ func NewBashTool() *BashTool {
 	}
 }
 
+type CommandExecutionResult struct {
+	Output     string
+	Truncated  bool
+	TotalBytes int
+	TotalLines int
+}
+
 // Execute 实现 Tool 接口
 func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	command, ok := params["command"].(string)
@@ -108,12 +115,13 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	// 使用 executer 执行命令
-	output, err := b.executeCommand(ctx, command, workdir)
+	execResult, err := b.executeCommand(ctx, command, workdir)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Content:    output,
+			Content:    execResult.Output,
+			Metadata:   buildCommandExecutionMetadata(command, mutatedPaths, execResult),
 			Error:      err,
 		}, nil
 	}
@@ -121,26 +129,16 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
-		Content:    output,
-		Metadata: map[string]interface{}{
-			"command":     command,
-			"output_size": len(output),
-			"executed_at": time.Now().Unix(),
-			"mutated_paths": func() []string {
-				if len(mutatedPaths) == 0 {
-					return nil
-				}
-				return mutatedPaths
-			}(),
-		},
+		Content:    execResult.Output,
+		Metadata:   buildCommandExecutionMetadata(command, mutatedPaths, execResult),
 	}, nil
 }
 
-func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string) (string, error) {
+func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string) (CommandExecutionResult, error) {
 	// 解析工作目录
 	resolvedWorkdir, err := resolveWorkdir(workdir)
 	if err != nil {
-		return "", err
+		return CommandExecutionResult{}, err
 	}
 
 	if b.sandbox == nil {
@@ -149,7 +147,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 
 	mainCmd := extractPrimaryCommand(command)
 	if err := b.sandbox.ValidateCommand(mainCmd); err != nil {
-		return "", wrapSandboxPermissionError("sandbox denied command execution", err, map[string]interface{}{
+		return CommandExecutionResult{}, wrapSandboxPermissionError("sandbox denied command execution", err, map[string]interface{}{
 			"policy":    "sandbox",
 			"operation": string(runtimeexecutor.OpExecute),
 			"command":   mainCmd,
@@ -157,7 +155,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	}
 
 	if err := b.sandbox.CheckPermission(runtimeexecutor.OpExecute, resolvedWorkdir); err != nil {
-		return "", wrapSandboxPermissionError("sandbox denied command working directory", err, map[string]interface{}{
+		return CommandExecutionResult{}, wrapSandboxPermissionError("sandbox denied command working directory", err, map[string]interface{}{
 			"policy":      "sandbox",
 			"operation":   string(runtimeexecutor.OpExecute),
 			"target_path": resolvedWorkdir,
@@ -177,7 +175,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	shellCmd := shell.DeriveExecArgs(command, false)
 
 	if err := b.sandbox.CheckCommandDenied(shellCmd[0]); err != nil {
-		return "", wrapSandboxPermissionError("sandbox denied shell launcher", err, map[string]interface{}{
+		return CommandExecutionResult{}, wrapSandboxPermissionError("sandbox denied shell launcher", err, map[string]interface{}{
 			"policy":    "sandbox",
 			"operation": string(runtimeexecutor.OpExecute),
 			"command":   mainCmd,
@@ -194,14 +192,14 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		prefixPowershellUTF8(cmd)
 	}
 
-	output, err := cmd.CombinedOutput()
+	capture, err := runtimeexecutor.CaptureCombinedOutput(cmd, runtimeexecutor.DefaultRetainedOutputBytes)
 	if err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
-			return string(output), fmt.Errorf("命令执行超时（超过 %v）", timeout)
+			return commandExecutionFromCapture(capture), fmt.Errorf("命令执行超时（超过 %v）", timeout)
 		}
-		return string(output), err
+		return commandExecutionFromCapture(capture), err
 	}
-	return string(output), nil
+	return commandExecutionFromCapture(capture), nil
 }
 
 func (b *BashTool) isBlacklisted(command string) bool {
@@ -218,7 +216,7 @@ func (b *BashTool) isBlacklisted(command string) bool {
 
 // CommandExecuter 命令执行器接口
 type CommandExecuter interface {
-	Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (string, error)
+	Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (CommandExecutionResult, error)
 }
 
 // ExecOption configures command execution.
@@ -239,7 +237,7 @@ func WithWorkdir(dir string) ExecOption {
 type DefaultCommandExecuter struct{}
 
 // Execute 实现命令执行
-func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (string, error) {
+func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (CommandExecutionResult, error) {
 	cfg := &execConfig{}
 	for _, opt := range opts {
 		opt(cfg)
@@ -267,25 +265,50 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		prefixPowershellUTF8(cmd)
 	}
 
-	output, err := cmd.CombinedOutput()
+	capture, err := runtimeexecutor.CaptureCombinedOutput(cmd, runtimeexecutor.DefaultRetainedOutputBytes)
 
 	if err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
-			return string(output), fmt.Errorf("命令执行超时（超过 %v）", timeout)
+			return commandExecutionFromCapture(capture), fmt.Errorf("命令执行超时（超过 %v）", timeout)
 		}
 
 		// 检查常见错误并给出友好提示
-		friendlyHint := friendlyHintFor(command, string(output), err)
+		friendlyHint := friendlyHintFor(command, capture.Output, err)
 		if friendlyHint != "" {
-			return string(output), fmt.Errorf("命令执行失败: %w\n%s\n\n当前环境信息:\n%s", err, friendlyHint, GetShellEnvironmentInfo())
+			return commandExecutionFromCapture(capture), fmt.Errorf("命令执行失败: %w\n%s\n\n当前环境信息:\n%s", err, friendlyHint, GetShellEnvironmentInfo())
 		}
-		return string(output), err
+		return commandExecutionFromCapture(capture), err
 	}
 
-	return string(output), nil
+	return commandExecutionFromCapture(capture), nil
 }
 
 // --- Helper functions ---
+
+func commandExecutionFromCapture(capture runtimeexecutor.CombinedOutputCapture) CommandExecutionResult {
+	return CommandExecutionResult{
+		Output:     capture.Output,
+		Truncated:  capture.Truncated,
+		TotalBytes: capture.TotalBytes,
+		TotalLines: capture.TotalLines,
+	}
+}
+
+func buildCommandExecutionMetadata(command string, mutatedPaths []string, result CommandExecutionResult) map[string]interface{} {
+	metadata := map[string]interface{}{
+		"command":               command,
+		"output_size":           len(result.Output),
+		"captured_output_bytes": len(result.Output),
+		"total_output_bytes":    result.TotalBytes,
+		"total_output_lines":    result.TotalLines,
+		"output_truncated":      result.Truncated,
+		"executed_at":           time.Now().Unix(),
+	}
+	if len(mutatedPaths) > 0 {
+		metadata["mutated_paths"] = mutatedPaths
+	}
+	return metadata
+}
 
 // resolveWorkdir resolves the working directory for command execution.
 // If workdir is empty, returns the current working directory.
