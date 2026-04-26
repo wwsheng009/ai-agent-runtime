@@ -282,14 +282,14 @@ func (s *Sandbox) ExecuteCommand(ctx context.Context, command string, args []str
 		cmd.Env = s.FilterEnv(os.Environ())
 	}
 
-	output, err := cmd.CombinedOutput()
+	capture, err := CaptureCombinedOutput(cmd, DefaultRetainedOutputBytes)
 	if err != nil {
 		if execCtx.Err() == context.DeadlineExceeded {
-			return string(output), fmt.Errorf("sandbox command timed out after %v", s.config.MaxExecutionTime)
+			return capture.Output, fmt.Errorf("sandbox command timed out after %v", s.config.MaxExecutionTime)
 		}
-		return string(output), err
+		return capture.Output, err
 	}
-	return string(output), nil
+	return capture.Output, nil
 }
 
 func normalizeCommandName(command string) string {
