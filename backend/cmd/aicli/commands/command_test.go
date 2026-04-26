@@ -13,6 +13,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
@@ -311,6 +312,204 @@ func TestFormatFunctionExposurePreview_JSON(t *testing.T) {
 	}
 }
 
+func TestShellCommandCaptureLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  ShellCommandConfig
+		want int
+	}{
+		{
+			name: "disable output cap",
+			cfg:  ShellCommandConfig{DisableOutputCap: true, OutputBytesCap: 8192, MaxOutputSize: 4096},
+			want: runtimeexecutor.DisableRetainedOutputLimit,
+		},
+		{
+			name: "prefer explicit output bytes cap",
+			cfg:  ShellCommandConfig{OutputBytesCap: 8192, MaxOutputSize: 4096},
+			want: 8192,
+		},
+		{
+			name: "fallback to max output size",
+			cfg:  ShellCommandConfig{MaxOutputSize: 4096},
+			want: 4096,
+		},
+		{
+			name: "fallback to executor default",
+			cfg:  ShellCommandConfig{},
+			want: runtimeexecutor.DefaultRetainedOutputBytes,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shellCommandCaptureLimit(tt.cfg); got != tt.want {
+				t.Fatalf("shellCommandCaptureLimit() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseShellCommandInvocation(t *testing.T) {
+	tests := []struct {
+		name          string
+		raw           string
+		wantCommand   string
+		wantCap       int
+		wantDisabled  bool
+		wantErrSubstr string
+	}{
+		{
+			name:         "plain command",
+			raw:          "git status --short",
+			wantCommand:  "git status --short",
+			wantCap:      runtimeexecutor.DefaultRetainedOutputBytes,
+			wantDisabled: false,
+		},
+		{
+			name:         "bang command with explicit cap",
+			raw:          "! --output-bytes-cap 8192 git diff --stat",
+			wantCommand:  "git diff --stat",
+			wantCap:      8192,
+			wantDisabled: false,
+		},
+		{
+			name:         "equals syntax",
+			raw:          "--output-bytes-cap=16384 git log --oneline",
+			wantCommand:  "git log --oneline",
+			wantCap:      16384,
+			wantDisabled: false,
+		},
+		{
+			name:         "disable output cap",
+			raw:          "--disable-output-cap git diff HEAD -- README.md",
+			wantCommand:  "git diff HEAD -- README.md",
+			wantCap:      runtimeexecutor.DefaultRetainedOutputBytes,
+			wantDisabled: true,
+		},
+		{
+			name:          "conflicting options",
+			raw:           "--disable-output-cap --output-bytes-cap 4096 git status",
+			wantErrSubstr: "不能与 disable-output-cap 同时设置",
+		},
+		{
+			name:          "missing command after options",
+			raw:           "--output-bytes-cap 4096",
+			wantErrSubstr: "需要在 shell 选项后提供要执行的命令",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCommand, gotCfg, err := parseShellCommandInvocation(tt.raw)
+			if tt.wantErrSubstr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErrSubstr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseShellCommandInvocation() error = %v", err)
+			}
+			if gotCommand != tt.wantCommand {
+				t.Fatalf("unexpected command: got %q want %q", gotCommand, tt.wantCommand)
+			}
+			if gotCfg.OutputBytesCap != tt.wantCap {
+				t.Fatalf("unexpected output bytes cap: got %d want %d", gotCfg.OutputBytesCap, tt.wantCap)
+			}
+			if gotCfg.DisableOutputCap != tt.wantDisabled {
+				t.Fatalf("unexpected disable flag: got %t want %t", gotCfg.DisableOutputCap, tt.wantDisabled)
+			}
+		})
+	}
+}
+
+func TestBuildShellCommandAIInputIncludesCaptureStatus(t *testing.T) {
+	result := shellCommandResult{
+		ExecutedCommand: "git diff --stat",
+		Output:          "diff output",
+		Shell: runtimeexecutor.Shell{
+			Type: runtimeexecutor.ShellTypePwsh,
+			Path: `C:\Program Files\PowerShell\7\pwsh.exe`,
+		},
+		Config: ShellCommandConfig{
+			OutputBytesCap: 4096,
+		},
+		Capture: runtimeexecutor.CombinedOutputCapture{
+			Output:            "diff output",
+			Truncated:         true,
+			TotalBytes:        8192,
+			RetainedBytes:     4096,
+			OmittedBytes:      4096,
+			CaptureLimitBytes: 4096,
+		},
+	}
+
+	aiInput := buildShellCommandAIInput(result)
+	for _, expected := range []string{
+		"我执行了命令: git diff --stat",
+		`实际执行 Shell: pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
+		"命令输出捕获状态: complete=false; limit=4096B; retained=4096B; total=8192B; omitted=4096B",
+		"输出如下：",
+		"diff output",
+	} {
+		if !strings.Contains(aiInput, expected) {
+			t.Fatalf("expected %q in AI input:\n%s", expected, aiInput)
+		}
+	}
+}
+
+func TestBuildShellCommandAIInputIncludesArtifactHintWhenTruncated(t *testing.T) {
+	result := shellCommandResult{
+		ExecutedCommand:       "git diff --stat",
+		Output:                "diff output",
+		RawOutputArtifactPath: `E:\logs\shell\001_git.txt`,
+		Shell: runtimeexecutor.Shell{
+			Type: runtimeexecutor.ShellTypePowerShell,
+			Path: `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		},
+		Config: ShellCommandConfig{
+			OutputBytesCap: 4096,
+		},
+		Capture: runtimeexecutor.CombinedOutputCapture{
+			Output:            "diff output",
+			Truncated:         true,
+			TotalBytes:        8192,
+			RetainedBytes:     4096,
+			OmittedBytes:      4096,
+			CaptureLimitBytes: 4096,
+		},
+	}
+
+	aiInput := buildShellCommandAIInput(result)
+	if !strings.Contains(aiInput, "完整原始输出已旁路保存: E:\\logs\\shell\\001_git.txt") {
+		t.Fatalf("expected artifact hint in AI input:\n%s", aiInput)
+	}
+}
+
+func TestShellCommandDebugLineIncludesSelectedShell(t *testing.T) {
+	line := shellCommandDebugLine(shellCommandResult{
+		ExecutedCommand: "git status --short",
+		Shell: runtimeexecutor.Shell{
+			Type: runtimeexecutor.ShellTypePwsh,
+			Path: `C:\Program Files\PowerShell\7\pwsh.exe`,
+		},
+		Capture: runtimeexecutor.CombinedOutputCapture{
+			Output:        "ok",
+			TotalBytes:    2,
+			RetainedBytes: 2,
+		},
+	}, nil)
+
+	for _, expected := range []string{
+		`[shell-debug] local command="git status --short"`,
+		`shell_type="pwsh"`,
+		`shell_path="C:\\Program Files\\PowerShell\\7\\pwsh.exe"`,
+		`success=true`,
+	} {
+		if !strings.Contains(line, expected) {
+			t.Fatalf("expected %q in debug line:\n%s", expected, line)
+		}
+	}
+}
+
 func TestExtractCommandArgumentOptions(t *testing.T) {
 	if arg, jsonOutput := extractCommandArgumentOptions("/functions --json"); arg != "" || !jsonOutput {
 		t.Fatalf("unexpected parse result: arg=%q json=%t", arg, jsonOutput)
@@ -441,16 +640,17 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	runtimeCapture.RecordArtifactPath("response", filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_response_gateway_client.json"))
 
 	payload := buildChatResponsePayload(&ChatSession{
-		ProviderName:       "codex_ee",
-		Provider:           config.Provider{Protocol: "codex"},
-		Model:              "gpt-5.2-code",
-		Stream:             false,
-		ReasoningEffort:    "medium",
-		Logger:             logger,
-		SessionDir:         sessionDir,
-		InputQueue:         queue,
-		queuedInputDrain:   true,
-		runtimeHTTPCapture: runtimeCapture,
+		ProviderName:               "codex_ee",
+		Provider:                   config.Provider{Protocol: "codex"},
+		Model:                      "gpt-5.2-code",
+		Stream:                     false,
+		ReasoningEffort:            "medium",
+		Logger:                     logger,
+		SessionDir:                 sessionDir,
+		InputQueue:                 queue,
+		queuedInputDrain:           true,
+		runtimeHTTPCapture:         runtimeCapture,
+		lastLocalShellArtifactPath: filepath.Join(logger.LocalShellArtifactDir(), "001_git.txt"),
 		RuntimeSession: &runtimechat.Session{
 			ID:    "session-123",
 			State: runtimechat.StateActive,
@@ -487,11 +687,17 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	if payload.HTTPArtifactDir != logger.RuntimeHTTPArtifactDir() {
 		t.Fatalf("unexpected payload HTTP artifact dir: %+v", payload)
 	}
+	if payload.LocalShellArtifactDir != logger.LocalShellArtifactDir() {
+		t.Fatalf("unexpected payload local shell artifact dir: %+v", payload)
+	}
 	if !strings.HasSuffix(payload.LastHTTPRequestPath, "001_request_gateway_client.json") {
 		t.Fatalf("unexpected payload last request artifact: %+v", payload)
 	}
 	if !strings.HasSuffix(payload.LastHTTPResponsePath, "001_response_gateway_client.json") {
 		t.Fatalf("unexpected payload last response artifact: %+v", payload)
+	}
+	if !strings.HasSuffix(payload.LastLocalShellArtifactPath, "001_git.txt") {
+		t.Fatalf("unexpected payload last local shell artifact: %+v", payload)
 	}
 }
 
@@ -537,12 +743,13 @@ func TestBuildChatResponsePayload_ResolvesRelativePathsToAbsolute(t *testing.T) 
 	runtimeCapture.RecordArtifactPath("response", responsePath)
 
 	payload := buildChatResponsePayload(&ChatSession{
-		ProviderName:       "codex_ee",
-		Provider:           config.Provider{Protocol: "codex"},
-		Model:              "gpt-5.2-code",
-		Logger:             logger,
-		SessionDir:         "sessions",
-		runtimeHTTPCapture: runtimeCapture,
+		ProviderName:               "codex_ee",
+		Provider:                   config.Provider{Protocol: "codex"},
+		Model:                      "gpt-5.2-code",
+		Logger:                     logger,
+		SessionDir:                 "sessions",
+		runtimeHTTPCapture:         runtimeCapture,
+		lastLocalShellArtifactPath: filepath.Join(logger.LocalShellArtifactDir(), "001_git.txt"),
 		RuntimeSession: &runtimechat.Session{
 			ID:    "session-123",
 			State: runtimechat.StateActive,
@@ -561,11 +768,17 @@ func TestBuildChatResponsePayload_ResolvesRelativePathsToAbsolute(t *testing.T) 
 	if payload.HTTPArtifactDir != resolveAbsoluteChatPath(logger.RuntimeHTTPArtifactDir()) {
 		t.Fatalf("expected absolute HTTP artifact dir, got %+v", payload)
 	}
+	if payload.LocalShellArtifactDir != resolveAbsoluteChatPath(logger.LocalShellArtifactDir()) {
+		t.Fatalf("expected absolute local shell artifact dir, got %+v", payload)
+	}
 	if payload.LastHTTPRequestPath != resolveAbsoluteChatPath(requestPath) {
 		t.Fatalf("expected absolute last request artifact path, got %+v", payload)
 	}
 	if payload.LastHTTPResponsePath != resolveAbsoluteChatPath(responsePath) {
 		t.Fatalf("expected absolute last response artifact path, got %+v", payload)
+	}
+	if payload.LastLocalShellArtifactPath != resolveAbsoluteChatPath(filepath.Join(logger.LocalShellArtifactDir(), "001_git.txt")) {
+		t.Fatalf("expected absolute last local shell artifact path, got %+v", payload)
 	}
 }
 
@@ -587,6 +800,9 @@ func TestChatLoggerSessionLogPath(t *testing.T) {
 	}
 	if artifactDir := logger.RuntimeHTTPArtifactDir(); artifactDir == "" || filepath.Dir(artifactDir) != logger.SessionDirPath() {
 		t.Fatalf("unexpected runtime HTTP artifact dir: %q", artifactDir)
+	}
+	if artifactDir := logger.LocalShellArtifactDir(); artifactDir == "" || filepath.Dir(artifactDir) != logger.SessionDirPath() {
+		t.Fatalf("unexpected local shell artifact dir: %q", artifactDir)
 	}
 
 	summary := logger.CurrentSummary()

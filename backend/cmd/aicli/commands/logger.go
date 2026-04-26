@@ -347,6 +347,15 @@ func (cl *ChatLogger) RuntimeHTTPArtifactDir() string {
 	return filepath.Join(sessionDir, "runtime-http")
 }
 
+// LocalShellArtifactDir 返回本地 shell 原始输出 artifact 目录。
+func (cl *ChatLogger) LocalShellArtifactDir() string {
+	sessionDir := cl.SessionDirPath()
+	if sessionDir == "" {
+		return ""
+	}
+	return filepath.Join(sessionDir, "local-shell")
+}
+
 // updateSummary 更新会话摘要
 func (cl *ChatLogger) updateSummary(content interface{}, durationMs int64) {
 	// 解析响应中的 usage 信息

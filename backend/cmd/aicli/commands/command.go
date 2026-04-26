@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
@@ -19,22 +20,20 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	// 首先检查 /shell 和 /cmd 命令（带参数）
 	cmdLower := strings.ToLower(strings.TrimSpace(command))
 	if strings.HasPrefix(cmdLower, "/shell") || strings.HasPrefix(cmdLower, "/cmd") {
-		// 提取命令名称和参数
-		parts := strings.Fields(command)
-		if len(parts) < 2 {
+		argument := extractCommandArgument(command)
+		if strings.TrimSpace(argument) == "" {
 			fmt.Println("错误: 需要指定 shell 命令")
-			fmt.Println("用法: /shell <命令> 或 /cmd <命令>")
+			fmt.Println("用法: /shell [--output-bytes-cap <bytes> | --disable-output-cap] <命令>")
+			fmt.Println("      /cmd   [--output-bytes-cap <bytes> | --disable-output-cap] <命令>")
 			return false
 		}
-		// 组合命令参数
-		shellCmd := strings.Join(parts[1:], " ")
-		output, err := executeShellCommand(session, shellCmd)
+		result, err := executeShellCommandDetailed(session, argument)
 		if err != nil {
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
 		// 将命令输出作为消息发送给 AI
-		aiInput := fmt.Sprintf("我执行了命令: %s，输出如下：\n%s", shellCmd, output)
+		aiInput := buildShellCommandAIInput(result)
 		response, err := sendMessage(session, aiInput)
 		if err != nil {
 			fmt.Printf("错误: %v\n", err)
@@ -250,10 +249,15 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("  /help, /?          - 显示此帮助")
 		fmt.Println()
 		fmt.Println("Shell 命令:")
-		fmt.Println("  !<命令>            - 执行 shell 命令并分享输出给 AI")
-		fmt.Println("  /shell <命令>, /cmd <命令>  - 执行 shell 命令并分享输出给 AI")
-		fmt.Println("                      例如: !dir, /shell dir, /cmd cd")
-		fmt.Println("                      安全保护: 超时 30s，最多 1000 行/100KB 输出")
+		fmt.Println("  ![--output-bytes-cap <bytes> | --disable-output-cap] <命令>")
+		fmt.Println("                    - 执行 shell 命令并分享输出给 AI")
+		fmt.Println("  /shell [--output-bytes-cap <bytes> | --disable-output-cap] <命令>")
+		fmt.Println("  /cmd   [--output-bytes-cap <bytes> | --disable-output-cap] <命令>")
+		fmt.Println("                    - 执行 shell 命令并分享输出给 AI")
+		fmt.Println("                      例如: !git status --short")
+		fmt.Println("                            /shell --output-bytes-cap 1048576 git diff --stat")
+		fmt.Println("                            /cmd --disable-output-cap git diff HEAD -- README.md")
+		fmt.Println("                      安全保护: 超时 30s；终端实时输出完整显示，分享给 AI 的 capture 默认保留 256KB，可通过上述参数覆盖")
 		fmt.Println()
 
 	default:
@@ -722,37 +726,239 @@ func prefixPowershellUTF8ForInteractiveCommand(cmd *exec.Cmd) {
 	cmd.Args[lastIdx] = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd.Args[lastIdx]
 }
 
-// executeShellCommand 执行 shell 命令
+type shellCommandResult struct {
+	ExecutedCommand       string
+	Output                string
+	Capture               runtimeexecutor.CombinedOutputCapture
+	Config                ShellCommandConfig
+	RawOutputArtifactPath string
+	Shell                 runtimeexecutor.Shell
+}
+
+func defaultShellCommandConfig() ShellCommandConfig {
+	return ShellCommandConfig{
+		Timeout:        DefaultShellTimeout,
+		MaxLines:       DefaultShellMaxLines,
+		MaxOutputSize:  DefaultShellMaxOutputSize,
+		OutputBytesCap: runtimeexecutor.DefaultRetainedOutputBytes,
+	}
+}
+
+func shellCommandCaptureLimit(cfg ShellCommandConfig) int {
+	if cfg.DisableOutputCap {
+		return runtimeexecutor.DisableRetainedOutputLimit
+	}
+	if cfg.OutputBytesCap > 0 {
+		return cfg.OutputBytesCap
+	}
+	if cfg.MaxOutputSize > 0 {
+		return cfg.MaxOutputSize
+	}
+	return runtimeexecutor.DefaultRetainedOutputBytes
+}
+
+func parseShellCommandInvocation(raw string) (string, ShellCommandConfig, error) {
+	cfg := defaultShellCommandConfig()
+	explicitOutputCap := false
+	command := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "!"))
+	for {
+		command = strings.TrimSpace(command)
+		switch {
+		case strings.HasPrefix(command, "--disable-output-cap"):
+			if len(command) > len("--disable-output-cap") && !isShellCommandOptionSeparator(command[len("--disable-output-cap")]) {
+				return "", cfg, fmt.Errorf("无法解析 shell 选项: %s", command)
+			}
+			cfg.DisableOutputCap = true
+			command = strings.TrimSpace(command[len("--disable-output-cap"):])
+		case strings.HasPrefix(command, "--output-bytes-cap="):
+			token, remaining := splitLeadingShellCommandToken(command)
+			value := strings.TrimSpace(token[len("--output-bytes-cap="):])
+			if value == "" {
+				return "", cfg, fmt.Errorf("output-bytes-cap 需要正整数值")
+			}
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed <= 0 {
+				return "", cfg, fmt.Errorf("output-bytes-cap 需要正整数值，收到 %q", value)
+			}
+			cfg.OutputBytesCap = parsed
+			explicitOutputCap = true
+			command = remaining
+		case strings.HasPrefix(command, "--output-bytes-cap"):
+			if len(command) > len("--output-bytes-cap") && !isShellCommandOptionSeparator(command[len("--output-bytes-cap")]) {
+				return "", cfg, fmt.Errorf("无法解析 shell 选项: %s", command)
+			}
+			valueToken, remaining, err := consumeRequiredShellCommandValue(command[len("--output-bytes-cap"):])
+			if err != nil {
+				return "", cfg, err
+			}
+			parsed, parseErr := strconv.Atoi(valueToken)
+			if parseErr != nil || parsed <= 0 {
+				return "", cfg, fmt.Errorf("output-bytes-cap 需要正整数值，收到 %q", valueToken)
+			}
+			cfg.OutputBytesCap = parsed
+			explicitOutputCap = true
+			command = remaining
+		default:
+			if cfg.DisableOutputCap && explicitOutputCap {
+				return "", cfg, fmt.Errorf("output-bytes-cap 不能与 disable-output-cap 同时设置")
+			}
+			if strings.TrimSpace(command) == "" {
+				return "", cfg, fmt.Errorf("需要在 shell 选项后提供要执行的命令")
+			}
+			return strings.TrimSpace(command), cfg, nil
+		}
+	}
+}
+
+func isShellCommandOptionSeparator(ch byte) bool {
+	return ch == ' ' || ch == '\t'
+}
+
+func splitLeadingShellCommandToken(command string) (string, string) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "", ""
+	}
+	if idx := strings.IndexAny(command, " \t"); idx >= 0 {
+		return command[:idx], strings.TrimSpace(command[idx+1:])
+	}
+	return command, ""
+}
+
+func consumeRequiredShellCommandValue(rest string) (string, string, error) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", "", fmt.Errorf("output-bytes-cap 需要正整数值")
+	}
+	value, remaining := splitLeadingShellCommandToken(rest)
+	if value == "" {
+		return "", "", fmt.Errorf("output-bytes-cap 需要正整数值")
+	}
+	return value, remaining, nil
+}
+
+func buildShellCommandAIInput(result shellCommandResult) string {
+	lines := []string{
+		fmt.Sprintf("我执行了命令: %s", result.ExecutedCommand),
+	}
+	if metadata := result.Shell.Metadata(); len(metadata) > 0 {
+		lines = append(lines, fmt.Sprintf("实际执行 Shell: %s", result.Shell.String()))
+	}
+	lines = append(lines,
+		fmt.Sprintf("命令输出捕获状态: %s", shellCommandCaptureStatusLine(result)),
+	)
+	if result.Capture.Truncated && strings.TrimSpace(result.RawOutputArtifactPath) != "" {
+		lines = append(lines, fmt.Sprintf("完整原始输出已旁路保存: %s", result.RawOutputArtifactPath))
+	}
+	lines = append(lines, "输出如下：", result.Output)
+	return strings.Join(lines, "\n")
+}
+
+func shellCommandCaptureStatusLine(result shellCommandResult) string {
+	retainedBytes := result.Capture.RetainedBytes
+	if retainedBytes == 0 && result.Output != "" {
+		retainedBytes = len(result.Output)
+	}
+	totalBytes := result.Capture.TotalBytes
+	if totalBytes == 0 && result.Output != "" {
+		totalBytes = len(result.Output)
+	}
+	limitValue := "disabled"
+	if !result.Capture.CaptureLimitDisabled {
+		limitBytes := result.Capture.CaptureLimitBytes
+		if limitBytes <= 0 {
+			limitBytes = shellCommandCaptureLimit(result.Config)
+		}
+		limitValue = fmt.Sprintf("%dB", limitBytes)
+	}
+	parts := []string{
+		fmt.Sprintf("complete=%t", !result.Capture.Truncated),
+		fmt.Sprintf("limit=%s", limitValue),
+		fmt.Sprintf("retained=%dB", retainedBytes),
+		fmt.Sprintf("total=%dB", totalBytes),
+	}
+	if result.Capture.OmittedBytes > 0 {
+		parts = append(parts, fmt.Sprintf("omitted=%dB", result.Capture.OmittedBytes))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func logLocalShellCommandDebug(session *ChatSession, result shellCommandResult, err error) {
+	if session == nil {
+		return
+	}
+	writeSessionDebugInfo(session, shellCommandDebugLine(result, err), false)
+}
+
+func shellCommandDebugLine(result shellCommandResult, err error) string {
+	status := shellCommandCaptureStatusLine(result)
+	shellSuffix := ""
+	if metadata := result.Shell.Metadata(); len(metadata) > 0 {
+		shellType, _ := metadata["shell_type"].(string)
+		shellPath, _ := metadata["shell_path"].(string)
+		shellSuffix = fmt.Sprintf(" shell_type=%q shell_path=%q", shellType, shellPath)
+	}
+	artifactSuffix := ""
+	if strings.TrimSpace(result.RawOutputArtifactPath) != "" {
+		artifactSuffix = fmt.Sprintf(" artifact=%q", result.RawOutputArtifactPath)
+	}
+	if err != nil {
+		return fmt.Sprintf("[shell-debug] local command=%q%s success=false capture={%s}%s error=%q", result.ExecutedCommand, shellSuffix, status, artifactSuffix, err.Error())
+	}
+	return fmt.Sprintf("[shell-debug] local command=%q%s success=true capture={%s}%s", result.ExecutedCommand, shellSuffix, status, artifactSuffix)
+}
+
 func executeShellCommand(session *ChatSession, cmdStr string) (string, error) {
-	// 移除 ! 前缀
-	cmdStr = strings.TrimPrefix(strings.TrimSpace(cmdStr), "!")
-	if cmdStr == "" {
-		return "", fmt.Errorf("命令为空")
+	result, err := executeShellCommandDetailed(session, cmdStr)
+	if err != nil {
+		return "", err
+	}
+	return result.Output, nil
+}
+
+// executeShellCommand 执行 shell 命令
+func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellCommandResult, error) {
+	executedCommand, cfg, err := parseShellCommandInvocation(cmdStr)
+	if err != nil {
+		return shellCommandResult{ExecutedCommand: executedCommand, Config: cfg}, err
 	}
 
-	cfg := ShellCommandConfig{
-		Timeout:       DefaultShellTimeout,
-		MaxLines:      DefaultShellMaxLines,
-		MaxOutputSize: DefaultShellMaxOutputSize,
+	result := shellCommandResult{
+		ExecutedCommand: executedCommand,
+		Config:          cfg,
 	}
 
 	// 检查危险命令
-	if isDangerousCommand(cmdStr) {
-		fmt.Printf("\n警告: 检测到可能危险的命令: %s\n", cmdStr)
+	if isDangerousCommand(executedCommand) {
+		fmt.Printf("\n警告: 检测到可能危险的命令: %s\n", executedCommand)
 		fmt.Print("确认执行? (yes/no): ")
 
 		var confirm string
 		_, err := fmt.Scanln(&confirm)
 		if err != nil || strings.ToLower(confirm) != "yes" {
-			return "", fmt.Errorf("命令已取消")
+			return result, fmt.Errorf("命令已取消")
 		}
+	}
+
+	artifactWriter, artifactErr := openLocalShellArtifactWriter(session, executedCommand)
+	if artifactErr != nil {
+		writeSessionDebugInfo(session, fmt.Sprintf("[shell-debug] local shell artifact create failed command=%q error=%q", executedCommand, artifactErr.Error()), false)
+	} else if artifactWriter != nil {
+		result.RawOutputArtifactPath = artifactWriter.Path()
+		artifactFile := artifactWriter
+		defer func() {
+			if closeErr := artifactFile.Close(); closeErr != nil {
+				writeSessionDebugInfo(session, fmt.Sprintf("[shell-debug] local shell artifact close failed path=%q error=%q", artifactFile.Path(), closeErr.Error()), false)
+			}
+		}()
 	}
 
 	// Use the same detected user shell as tool-based command execution.
 	shell := runtimeexecutor.DefaultUserShell()
-	shellCmd := shell.DeriveExecArgs(cmdStr, false)
+	result.Shell = shell
+	shellCmd := shell.DeriveExecArgs(executedCommand, false)
 
-	fmt.Printf("\n执行命令: %s\n", cmdStr)
+	fmt.Printf("\n执行命令: %s\n", executedCommand)
 	fmt.Println("--- 输出 ---")
 
 	// 创建带超时和中断的 context
@@ -768,21 +974,22 @@ func executeShellCommand(session *ChatSession, cmdStr string) (string, error) {
 	// 启动 Goroutine 实时输出命令结果（支持长时间运行的命令）
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("创建标准输出管道失败: %w", err)
+		return result, fmt.Errorf("创建标准输出管道失败: %w", err)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return "", fmt.Errorf("创建标准错误管道失败: %w", err)
+		return result, fmt.Errorf("创建标准错误管道失败: %w", err)
 	}
 
 	// 启动命令
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("启动命令失败: %w", err)
+		return result, fmt.Errorf("启动命令失败: %w", err)
 	}
 
 	// 实时读取输出
-	outputChan := make(chan string, 100)
+	outputChan := make(chan []byte, 100)
 	doneChan := make(chan struct{})
+	captureAccumulator := runtimeexecutor.NewOutputCaptureAccumulator(shellCommandCaptureLimit(cfg))
 
 	go func() {
 		defer close(doneChan)
@@ -794,7 +1001,7 @@ func executeShellCommand(session *ChatSession, cmdStr string) (string, error) {
 		for {
 			n, err := reader.Read(buf)
 			if n > 0 {
-				chunk := string(buf[:n])
+				chunk := append([]byte(nil), buf[:n]...)
 				outputChan <- chunk
 			}
 			if err != nil {
@@ -803,8 +1010,7 @@ func executeShellCommand(session *ChatSession, cmdStr string) (string, error) {
 		}
 	}()
 
-	// 实时打印输出
-	totalOutput := &strings.Builder{}
+	// 实时打印输出，同时按配置保留传递给 AI 的输出窗口
 	for {
 		select {
 		case chunk, ok := <-outputChan:
@@ -814,28 +1020,48 @@ func executeShellCommand(session *ChatSession, cmdStr string) (string, error) {
 				fmt.Println()
 				goto commandDone
 			}
-			fmt.Print(chunk)
-			totalOutput.WriteString(chunk)
+			fmt.Print(string(chunk))
+			_, _ = captureAccumulator.Write(chunk)
+			if artifactWriter != nil {
+				if err := artifactWriter.WriteChunk(chunk); err != nil {
+					writeSessionDebugInfo(session, fmt.Sprintf("[shell-debug] local shell artifact write failed path=%q error=%q", artifactWriter.Path(), err.Error()), false)
+					_ = artifactWriter.Abort()
+					artifactWriter = nil
+					result.RawOutputArtifactPath = ""
+					recordLocalShellArtifactPath(session, "")
+				}
+			}
 
 		case <-ctx.Done():
 			// 检查是否是用户中断
 			if session.IsInterrupted() {
 				cmd.Process.Kill()
 				<-doneChan
+				capture := captureAccumulator.Result()
+				result.Capture = capture
+				result.Output = capture.Output
+				logLocalShellCommandDebug(session, result, fmt.Errorf("用户中断"))
 				fmt.Println("\n[已中断] 命令执行已停止")
-				return totalOutput.String(), fmt.Errorf("用户中断")
+				return result, fmt.Errorf("用户中断")
 			}
 			// 超时
 			cmd.Process.Kill()
 			<-doneChan
+			capture := captureAccumulator.Result()
+			result.Capture = capture
+			result.Output = capture.Output
+			logLocalShellCommandDebug(session, result, fmt.Errorf("命令执行超时（超过 %v）", cfg.Timeout))
 			fmt.Println("\n[超时] 命令执行超时")
-			return totalOutput.String(), fmt.Errorf("命令执行超时（超过 %v）", cfg.Timeout)
+			return result, fmt.Errorf("命令执行超时（超过 %v）", cfg.Timeout)
 		}
 	}
 
 commandDone: // 等待命令完成
 	// 检查命令执行状态
-	outputStr := totalOutput.String()
+	outputCapture := captureAccumulator.Result()
+	outputStr := outputCapture.Output
+	result.Capture = outputCapture
+	result.Output = outputStr
 
 	if err := cmd.Wait(); err != nil {
 		// 命令执行失败（返回非零状态码）
@@ -899,18 +1125,30 @@ commandDone: // 等待命令完成
 		}
 
 		if friendlyHint != "" {
-			return "", fmt.Errorf("命令执行失败: %w\n%s", err, friendlyHint)
+			logLocalShellCommandDebug(session, result, fmt.Errorf("命令执行失败: %w\n%s", err, friendlyHint))
+			return result, fmt.Errorf("命令执行失败: %w\n%s", err, friendlyHint)
 		}
-		return "", fmt.Errorf("命令执行失败: %w", err)
+		logLocalShellCommandDebug(session, result, fmt.Errorf("命令执行失败: %w", err))
+		return result, fmt.Errorf("命令执行失败: %w", err)
 	}
 
 	// 命令执行成功
 	if outputStr == "" {
-		return "", fmt.Errorf("命令执行成功，但没有输出")
+		logLocalShellCommandDebug(session, result, fmt.Errorf("命令执行成功，但没有输出"))
+		return result, fmt.Errorf("命令执行成功，但没有输出")
+	}
+
+	if outputCapture.Truncated {
+		fmt.Printf("[提示] 命令输出较大，传递给 AI 的内容已按 capture limit 截断：total=%dB retained=%dB omitted=%dB limit=%dB\n",
+			outputCapture.TotalBytes, outputCapture.RetainedBytes, outputCapture.OmittedBytes, outputCapture.CaptureLimitBytes)
+		if strings.TrimSpace(result.RawOutputArtifactPath) != "" {
+			fmt.Printf("[提示] 完整原始输出已保存到: %s\n", resolveAbsoluteChatPath(result.RawOutputArtifactPath))
+		}
 	}
 
 	fmt.Println("--- 完成 ---")
 	fmt.Println()
 
-	return outputStr, nil
+	logLocalShellCommandDebug(session, result, nil)
+	return result, nil
 }

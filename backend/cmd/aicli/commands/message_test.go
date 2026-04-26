@@ -82,13 +82,18 @@ func TestBuildRequestLogContent_OmitsFunctionExposureWhenNil(t *testing.T) {
 func TestBuildToolExecutionSummary_IncludesSuccessAndErrorCalls(t *testing.T) {
 	summary := buildToolExecutionSummary([]aicliToolExecutionCallSummary{
 		{
-			ToolCallID:    "call-1",
-			Function:      "skill__alpha",
-			Success:       true,
-			ToolSource:    "mcp",
-			OutputKind:    "text",
-			ResultPreview: "OK",
-			ResultBytes:   2,
+			ToolCallID:              "call-1",
+			Function:                "skill__alpha",
+			Success:                 true,
+			ToolSource:              "mcp",
+			OutputKind:              "text",
+			ResultPreview:           "OK",
+			ResultBytes:             2,
+			OutputCaptureComplete:   boolPointer(true),
+			CaptureLimitReached:     boolPointer(false),
+			RetainedOutputBytes:     2,
+			OutputCaptureLimitBytes: 4096,
+			RawOutputArtifactPath:   `C:\temp\shell-output\toolkit\git_123.txt`,
 		},
 		{
 			ToolCallID: "call-2",
@@ -115,9 +120,22 @@ func TestBuildToolExecutionSummary_IncludesSuccessAndErrorCalls(t *testing.T) {
 	if summary.Calls[0].ToolSource != "mcp" || summary.Calls[0].OutputKind != "text" {
 		t.Fatalf("expected first call metadata, got %+v", summary.Calls[0])
 	}
+	if summary.Calls[0].RawOutputArtifactPath != `C:\temp\shell-output\toolkit\git_123.txt` {
+		t.Fatalf("expected first call artifact path, got %+v", summary.Calls[0])
+	}
+	if summary.Calls[0].OutputCaptureComplete == nil || !*summary.Calls[0].OutputCaptureComplete {
+		t.Fatalf("expected first call output_capture_complete=true, got %+v", summary.Calls[0])
+	}
+	if summary.Calls[0].CaptureLimitReached == nil || *summary.Calls[0].CaptureLimitReached {
+		t.Fatalf("expected first call capture_limit_reached=false, got %+v", summary.Calls[0])
+	}
 	if summary.Calls[1].ToolSource != "meta" || summary.Calls[1].OutputKind != "json" {
 		t.Fatalf("expected second call metadata, got %+v", summary.Calls[1])
 	}
+}
+
+func boolPointer(v bool) *bool {
+	return &v
 }
 
 func TestChatLogger_LogToolExecutionSummary_AppendsMessage(t *testing.T) {
@@ -308,6 +326,9 @@ func TestFormatToolExecutionResultDebug_UsesPreviewAndError(t *testing.T) {
 		map[string]interface{}{
 			toolresult.SourceKey:   toolresult.SourceToolkit,
 			toolresult.MetadataKey: toolresult.KindText,
+			"shell_type":           "pwsh",
+			"shell_path":           `C:\Program Files\PowerShell\7\pwsh.exe`,
+			"shell_display":        `pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
 		},
 	)
 	if !strings.Contains(successReport, "success=true") || !strings.Contains(successReport, `preview="line1`) {
@@ -315,6 +336,9 @@ func TestFormatToolExecutionResultDebug_UsesPreviewAndError(t *testing.T) {
 	}
 	if !strings.Contains(successReport, "source=toolkit") || !strings.Contains(successReport, "kind=text") {
 		t.Fatalf("expected metadata in success report: %s", successReport)
+	}
+	if !strings.Contains(successReport, `shell="pwsh (C:\\Program Files\\PowerShell\\7\\pwsh.exe)"`) {
+		t.Fatalf("expected shell metadata in success report: %s", successReport)
 	}
 
 	errorReport := formatToolExecutionResultDebug(
@@ -341,7 +365,7 @@ func TestFormatToolExecutionSummaryDebug_IncludesCounts(t *testing.T) {
 		ErrorCount:   1,
 		Functions:    []string{"bash", "view"},
 		Calls: []aicliToolExecutionCallSummary{
-			{ToolCallID: "call-1", Function: "bash", Success: true, ToolSource: "toolkit", OutputKind: "text"},
+			{ToolCallID: "call-1", Function: "bash", Success: true, ToolSource: "toolkit", OutputKind: "text", ShellDisplay: `pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`},
 			{ToolCallID: "call-2", Function: "view", Success: false, ToolSource: "meta", OutputKind: "json"},
 		},
 	})
@@ -352,7 +376,7 @@ func TestFormatToolExecutionSummaryDebug_IncludesCounts(t *testing.T) {
 	if !strings.Contains(report, "functions=bash, view") {
 		t.Fatalf("unexpected report: %s", report)
 	}
-	if !strings.Contains(report, "call id=call-1 function=bash success=true source=toolkit kind=text") {
+	if !strings.Contains(report, `call id=call-1 function=bash success=true source=toolkit kind=text shell="pwsh (C:\\Program Files\\PowerShell\\7\\pwsh.exe)"`) {
 		t.Fatalf("expected first call metadata in report: %s", report)
 	}
 	if !strings.Contains(report, "call id=call-2 function=view success=false source=meta kind=json") {
