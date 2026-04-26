@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -803,5 +804,83 @@ triggers:
 	}
 	if len(details.ExposedFunctions) != 1 || details.ExposedFunctions[0] != "skill__alpha" {
 		t.Fatalf("expected skill__alpha exposed, got %v", details.ExposedFunctions)
+	}
+}
+
+func TestBuildSkillsProviderConfigsPropagatesRetryPolicyFromAgentConfig(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			Timeout:    45 * time.Second,
+			MaxRetries: 0,
+			Backoff: config.BackoffConfig{
+				InitialInterval: 300 * time.Millisecond,
+				MaxInterval:     4 * time.Second,
+				MaxElapsedTime:  30 * time.Second,
+				Multiplier:      1.8,
+				Randomization:   0.25,
+			},
+			Items: map[string]config.Provider{
+				"openai-main": {
+					Enabled:      true,
+					Protocol:     "openai",
+					BaseURL:      "https://api.example.com",
+					DefaultModel: "gpt-5",
+				},
+			},
+		},
+		Retry: &config.RetryConfig{
+			Enabled:           true,
+			DefaultMaxRetries: 4,
+			Rules: []config.RetryRuleConfig{
+				{
+					Name:         "http_5xx_retry",
+					Enabled:      true,
+					MaxRetries:   4,
+					RetryDelayMS: 900,
+					StatusCode: config.RetryStatusCodeConfig{
+						Range: "500-504",
+					},
+				},
+			},
+		},
+	}
+
+	result := buildSkillsProviderConfigs(cfg)
+	providerCfg := result["openai-main"]
+	if providerCfg == nil {
+		t.Fatalf("expected provider config to be built")
+	}
+	if providerCfg.Timeout != 45*time.Second {
+		t.Fatalf("expected timeout 45s, got %v", providerCfg.Timeout)
+	}
+	if providerCfg.MaxRetries != 4 {
+		t.Fatalf("expected max retries 4, got %d", providerCfg.MaxRetries)
+	}
+	if providerCfg.RetryTuning.BaseDelay != 300*time.Millisecond {
+		t.Fatalf("expected base delay 300ms, got %v", providerCfg.RetryTuning.BaseDelay)
+	}
+	if providerCfg.RetryTuning.MaxDelay != 4*time.Second {
+		t.Fatalf("expected max delay 4s, got %v", providerCfg.RetryTuning.MaxDelay)
+	}
+	if providerCfg.RetryTuning.MaxElapsedTime != 30*time.Second {
+		t.Fatalf("expected max elapsed time 30s, got %v", providerCfg.RetryTuning.MaxElapsedTime)
+	}
+	if providerCfg.RetryTuning.Multiplier != 1.8 {
+		t.Fatalf("expected multiplier 1.8, got %v", providerCfg.RetryTuning.Multiplier)
+	}
+	if providerCfg.RetryTuning.Randomization != 0.25 {
+		t.Fatalf("expected randomization 0.25, got %v", providerCfg.RetryTuning.Randomization)
+	}
+	if len(providerCfg.RetryRules) != 1 {
+		t.Fatalf("expected 1 retry rule, got %d", len(providerCfg.RetryRules))
+	}
+	if providerCfg.RetryRules[0].Name != "http_5xx_retry" {
+		t.Fatalf("expected retry rule http_5xx_retry, got %s", providerCfg.RetryRules[0].Name)
+	}
+	if providerCfg.RetryRules[0].RetryDelay != 900*time.Millisecond {
+		t.Fatalf("expected retry delay 900ms, got %v", providerCfg.RetryRules[0].RetryDelay)
+	}
+	if providerCfg.RetryRules[0].StatusCode.Range != "500-504" {
+		t.Fatalf("expected status code range 500-504, got %s", providerCfg.RetryRules[0].StatusCode.Range)
 	}
 }
