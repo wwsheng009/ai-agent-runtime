@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 type permissionTestHandler struct {
@@ -404,6 +404,63 @@ func TestExecutor_ExecuteDefault_PropagatesThinkingAndReasoningToLLMRuntime(t *t
 			assert.Equal(t, 8192, *provider.lastRequest.Thinking.BudgetTokens)
 		}
 	}
+}
+
+func TestExecutor_ExecuteDefault_IncludesEnvironmentContextAndShellGuidance(t *testing.T) {
+	provider := &recordingLLMProvider{}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel:   "recording-llm",
+		DefaultTimeout: 10 * time.Second,
+		MaxRetries:     0,
+	})
+	require.NoError(t, runtime.RegisterProvider("recording-llm", provider))
+
+	executor := NewExecutor(NewRegistry(nil), nil, runtime)
+	skillItem := &Skill{
+		Name:         "skill_runtime_environment",
+		Description:  "environment context skill",
+		SystemPrompt: "Use the provided environment context.",
+		UserPrompt:   "Answer the request.",
+	}
+
+	workspacePath := `E:\projects\ai\ai-agent-runtime`
+	req := types.NewRequest("inspect environment")
+	req.Context["workspace_path"] = workspacePath
+
+	result, err := executor.Execute(context.Background(), skillItem, req)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.NotNil(t, provider.lastRequest)
+
+	var sawEnvironmentContext bool
+	var sawShellGuidance bool
+	var sawRuntimeSummary bool
+	for _, message := range provider.lastRequest.Messages {
+		if message.Role != "system" {
+			continue
+		}
+		if strings.Contains(message.Content, "Environment context:") &&
+			strings.Contains(message.Content, "<environment_context>") &&
+			strings.Contains(message.Content, "<cwd>"+workspacePath+"</cwd>") &&
+			strings.Contains(message.Content, "<shell>") &&
+			strings.Contains(message.Content, "<current_date>") &&
+			strings.Contains(message.Content, "<timezone>") {
+			sawEnvironmentContext = true
+		}
+		if strings.Contains(message.Content, "Shell guidance:") &&
+			strings.Contains(message.Content, "Detected user shell:") {
+			sawShellGuidance = true
+		}
+		if strings.Contains(message.Content, "Runtime context summary:") &&
+			strings.Contains(message.Content, `"workspace_path":"E:\\projects\\ai\\ai-agent-runtime"`) {
+			sawRuntimeSummary = true
+		}
+	}
+
+	assert.True(t, sawEnvironmentContext, "expected environment context block in default executor request")
+	assert.True(t, sawShellGuidance, "expected shell guidance in default executor request")
+	assert.True(t, sawRuntimeSummary, "expected runtime context summary in default executor request")
 }
 
 func TestBuildContextSummary_IncludesProfileLayer(t *testing.T) {

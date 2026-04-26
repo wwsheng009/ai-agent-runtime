@@ -12,6 +12,7 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -278,6 +279,12 @@ func (e *Executor) executeDefault(ctx context.Context, skill *Skill, req *types.
 	if systemPrompt != "" {
 		messages = append(messages, *types.NewSystemMessage(systemPrompt))
 	}
+	if environmentContext := buildEnvironmentContextMessage(req); environmentContext != "" {
+		messages = append(messages, *types.NewSystemMessage("Environment context:\n" + environmentContext))
+	}
+	if shellGuidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidance()); shellGuidance != "" {
+		messages = append(messages, *types.NewSystemMessage(shellGuidance))
+	}
 	// 附加精简版上下文摘要（避免把完整 context pack 直接塞进 prompt）
 	if ctxSummary := buildContextSummary(req); ctxSummary != "" {
 		messages = append(messages, *types.NewSystemMessage("Runtime context summary:\n" + ctxSummary))
@@ -382,6 +389,16 @@ func buildContextSummary(req *types.Request) string {
 		raw = append(raw[:contextSummaryMaxBytes], []byte("...")...)
 	}
 	return string(raw)
+}
+
+func buildEnvironmentContextMessage(req *types.Request) string {
+	workspacePath := ""
+	if req != nil && len(req.Context) > 0 {
+		if value, ok := req.Context["workspace_path"].(string); ok {
+			workspacePath = strings.TrimSpace(value)
+		}
+	}
+	return strings.TrimSpace(runtimeprompt.RenderEnvironmentContextBlock(workspacePath))
 }
 
 func shrinkContextPack(pack map[string]interface{}) map[string]interface{} {
