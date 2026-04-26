@@ -101,6 +101,32 @@ func (m *failingMCPManager) ListTools() []skill.ToolInfo {
 	}}
 }
 
+type largeOutputMCPManager struct {
+	output string
+}
+
+func (m *largeOutputMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
+	return skill.ToolInfo{
+		Name:        toolName,
+		Description: "large output tool",
+		MCPName:     "test-mcp",
+		Enabled:     true,
+	}, nil
+}
+
+func (m *largeOutputMCPManager) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
+	return m.output, nil
+}
+
+func (m *largeOutputMCPManager) ListTools() []skill.ToolInfo {
+	return []skill.ToolInfo{{
+		Name:        "read_logs",
+		Description: "returns large logs",
+		MCPName:     "test-mcp",
+		Enabled:     true,
+	}}
+}
+
 type blockingCatalogMCPManager struct {
 	listStarted chan struct{}
 	release     chan struct{}
@@ -737,6 +763,159 @@ func TestAgentChat_ErrorResponseIncludesRequestID(t *testing.T) {
 	assert.Contains(t, payload["error"], "Service temporarily unavailable")
 }
 
+func TestHandlerWriteError_ExposesPromptPreflightMetadata(t *testing.T) {
+	handler := &Handler{}
+	rec := httptest.NewRecorder()
+	rec.Header().Set("X-Request-ID", "req-preflight")
+	rec.Header().Set("X-Trace-ID", "trace-preflight")
+
+	handler.writeError(rec, http.StatusInternalServerError, &agent.PromptPreflightError{
+		PromptTokens:                  1200,
+		PromptBudget:                  800,
+		BudgetSource:                  "context_manager",
+		ResolvedProvider:              "provider-a",
+		ResolvedModel:                 "gpt-5",
+		Code:                          "prompt_still_exceeds_budget_after_compaction",
+		Reason:                        "prompt exceeds configured budget",
+		Detail:                        "compacted replay still exceeds context budget",
+		SuggestedAction:               "start a fresh session or reduce the active replay",
+		CanRetryAfterCompaction:       true,
+		ActiveTurnCompacted:           true,
+		ActiveTurnMessageCount:        6,
+		LatestReplayBlockMessageCount: 3,
+		ReplacementHistory: []types.Message{
+			*types.NewSystemMessage("system"),
+			*types.NewAssistantMessage("summary"),
+		},
+		ReplacementHistoryApplied: true,
+	})
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	assert.Equal(t, "req-preflight", payload["request_id"])
+	assert.Equal(t, "trace-preflight", payload["trace_id"])
+	assert.Equal(t, "prompt_preflight", payload["error_type"])
+	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", payload["failure_reason_code"])
+	assert.Equal(t, "context_manager", payload["budget_source"])
+	assert.Equal(t, "provider-a", payload["resolved_provider"])
+	assert.Equal(t, "gpt-5", payload["resolved_model"])
+	assert.Equal(t, true, payload["replacement_history_available"])
+	assert.Equal(t, true, payload["replacement_history_applied"])
+	assert.Equal(t, float64(2), payload["replacement_history_message_count"])
+}
+
+func TestAgentChat_ReActPromptPreflightPersistsRecoveryHistoryAndReturnsStructuredError(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	mcpManager := &largeOutputMCPManager{output: "LOG " + large}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+		MaxRetries:      0,
+	})
+	provider := &testSequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "先查看第一段日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app-1.log"}},
+				},
+			},
+			{
+				Content: "再查看第二段日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app-2.log"}},
+				},
+			},
+			{
+				Content: "这条响应不应被请求到。",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("test-provider", provider))
+	handler.SetLLMRuntime(runtime)
+
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Agent.DefaultProvider = "test-provider"
+	runtimeConfig.Agent.DefaultModel = "test-model"
+	runtimeConfig.Agent.MaxMaxSteps = 4
+	runtimeConfig.Context.MaxPromptTokens = 620
+	runtimeConfig.Context.MaxMessages = 16
+	runtimeConfig.Context.KeepRecentMessages = 8
+	handler.SetRuntimeConfig(runtimeConfig, "")
+
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
+		TTL:             time.Hour,
+		MaxHistory:      20,
+		CleanupInterval: time.Hour,
+		AutoArchive:     false,
+		IdleTimeout:     time.Hour,
+	})
+	handler.SetSessionManager(sessionManager)
+
+	session, err := sessionManager.CreateSession(context.Background(), "user-preflight")
+	require.NoError(t, err)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	body := []byte(fmt.Sprintf(`{"enable_react":true,"messages":[{"role":"user","content":"继续处理"}],"session_id":"%s","user_id":"user-preflight"}`, session.ID))
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.GreaterOrEqual(t, provider.callCount, 1)
+	require.Less(t, provider.callCount, len(provider.responses))
+
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	traceID, ok := payload["trace_id"].(string)
+	require.True(t, ok)
+	require.NotEmpty(t, traceID)
+	assert.Equal(t, "prompt_preflight", payload["error_type"])
+	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", payload["failure_reason_code"])
+	assert.Equal(t, true, payload["replacement_history_available"])
+	assert.Equal(t, true, payload["replacement_history_applied"])
+
+	events := handler.getRuntimeEventBus().Trace(traceID, 10)
+	require.NotEmpty(t, events)
+	var promptPreflightEvent *runtimeevents.Event
+	for i := range events {
+		if events[i].Type == chat.EventSessionEnd && events[i].SessionID == session.ID {
+			promptPreflightEvent = &events[i]
+			break
+		}
+	}
+	require.NotNil(t, promptPreflightEvent)
+	assert.Equal(t, "prompt_preflight", promptPreflightEvent.Payload["error_type"])
+	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", promptPreflightEvent.Payload["failure_reason_code"])
+	assert.Equal(t, true, promptPreflightEvent.Payload["replacement_history_applied"])
+
+	updated, err := sessionManager.GetSession(context.Background(), session.ID)
+	require.NoError(t, err)
+	messages := updated.GetMessages()
+	require.GreaterOrEqual(t, len(messages), 3)
+
+	foundCompaction := false
+	for _, message := range messages {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			foundCompaction = true
+			require.Contains(t, message.Content, "Compacted earlier tool replay in current turn:")
+			break
+		}
+	}
+	require.True(t, foundCompaction, "expected recovered session history to include compacted active-turn replay summary")
+}
+
 func TestAgentChat_UsesExplicitThinkingAndReasoningForLLMFallback(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)
@@ -1151,6 +1330,26 @@ func TestGetRuntimeTrace_ReturnsEventsForTrace(t *testing.T) {
 			"prompt_sources":       []string{"system.md", "tools.md"},
 		},
 	})
+	handler.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:    "team.summary.failed",
+		TraceID: traceID,
+		Payload: map[string]interface{}{
+			"summary_source":              "fallback",
+			"fallback_reason":             "lead_session_error",
+			"error_type":                  "prompt_preflight",
+			"failure_reason_code":         "prompt_still_exceeds_budget_after_compaction",
+			"replacement_history_applied": true,
+		},
+	})
+	handler.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:    "team.summary.generated",
+		TraceID: traceID,
+		Payload: map[string]interface{}{
+			"summary_source":  "fallback",
+			"fallback_reason": "lead_session_error",
+			"summary":         "fallback summary",
+		},
+	})
 
 	traceReq := httptest.NewRequest(http.MethodGet, "/api/runtime/traces/"+traceID+"?limit=20", nil)
 	traceReq.Header.Set("X-Skills-Admin-Token", "secret-token")
@@ -1186,10 +1385,21 @@ func TestGetRuntimeTrace_ReturnsEventsForTrace(t *testing.T) {
 	promptLayers := prompt["layers"].(map[string]interface{})
 	assert.GreaterOrEqual(t, promptLayers["base/system"], float64(1))
 	assert.GreaterOrEqual(t, promptLayers["developer/developer"], float64(1))
+	recovery := summary["recovery"].(map[string]interface{})
+	assert.Equal(t, float64(1), recovery["prompt_preflight_events"])
+	assert.Equal(t, float64(1), recovery["replacement_history_applied"])
+	assert.Equal(t, float64(1), recovery["summary_failure_events"])
+	assert.Equal(t, float64(1), recovery["summary_fallbacks"])
+	assert.Equal(t, float64(1), recovery["prompt_preflight_by_event_type"].(map[string]interface{})["team.summary.failed"])
+	assert.Equal(t, float64(1), recovery["summary_failure_reasons"].(map[string]interface{})["lead_session_error"])
+	assert.Equal(t, float64(1), recovery["summary_fallback_reasons"].(map[string]interface{})["lead_session_error"])
 	topLevelPrompt := tracePayload["prompt"].(map[string]interface{})
 	assert.GreaterOrEqual(t, topLevelPrompt["layouts_observed"], float64(1))
 	assert.GreaterOrEqual(t, topLevelPrompt["instruction_chars"], float64(88))
 	assert.GreaterOrEqual(t, topLevelPrompt["source_count"], float64(2))
+	topLevelRecovery := tracePayload["recovery"].(map[string]interface{})
+	assert.Equal(t, float64(1), topLevelRecovery["prompt_preflight_events"])
+	assert.Equal(t, float64(1), topLevelRecovery["summary_fallbacks"])
 }
 
 func TestGetRuntimeTrace_SummarizesPatchDecisionAudit(t *testing.T) {
@@ -1367,6 +1577,24 @@ func TestGetRuntimeTraces_ReturnsRecentSummaries(t *testing.T) {
 			"prompt_sources":        []string{"system.md", "AGENTS.md"},
 		},
 	})
+	bus.Publish(runtimeevents.Event{
+		Type:    "session_end",
+		TraceID: "trace-beta",
+		Payload: map[string]interface{}{
+			"error_type":                    "prompt_preflight",
+			"failure_reason_code":           "active_turn_not_compactable",
+			"replacement_history_available": true,
+		},
+	})
+	bus.Publish(runtimeevents.Event{
+		Type:    "team.summary.generated",
+		TraceID: "trace-beta",
+		Payload: map[string]interface{}{
+			"summary_source":  "fallback",
+			"fallback_reason": "lead_session_error",
+			"summary":         "fallback summary",
+		},
+	})
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1386,7 +1614,7 @@ func TestGetRuntimeTraces_ReturnsRecentSummaries(t *testing.T) {
 	require.Len(t, traces, 1)
 	trace := traces[0].(map[string]interface{})
 	assert.Equal(t, "trace-beta", trace["trace_id"])
-	assert.Equal(t, float64(7), trace["event_count"])
+	assert.Equal(t, float64(9), trace["event_count"])
 	assert.Contains(t, trace["mcp_names"].([]interface{}), "echo-test")
 	assert.Contains(t, trace["transport_types"].([]interface{}), "websocket")
 	governance := trace["governance"].(map[string]interface{})
@@ -1423,6 +1651,15 @@ func TestGetRuntimeTraces_ReturnsRecentSummaries(t *testing.T) {
 	promptLayers := prompt["layers"].(map[string]interface{})
 	assert.Equal(t, float64(1), promptLayers["base/system"])
 	assert.Equal(t, float64(1), promptLayers["user/developer"])
+	recovery := trace["recovery"].(map[string]interface{})
+	assert.Equal(t, float64(1), recovery["prompt_preflight_events"])
+	assert.Equal(t, float64(1), recovery["replacement_history_available"])
+	assert.Equal(t, float64(1), recovery["summary_fallbacks"])
+	assert.Equal(t, float64(1), recovery["prompt_preflight_by_event_type"].(map[string]interface{})["session_end"])
+	assert.Equal(t, float64(1), recovery["summary_fallback_reasons"].(map[string]interface{})["lead_session_error"])
+	topLevelRecovery := payload["recovery"].(map[string]interface{})
+	assert.Equal(t, float64(1), topLevelRecovery["prompt_preflight_events"])
+	assert.Equal(t, float64(1), topLevelRecovery["summary_fallbacks"])
 }
 
 func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
@@ -1508,6 +1745,23 @@ func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
 			"prompt_sources":       []string{"system.md"},
 		},
 	})
+	bus.Publish(runtimeevents.Event{
+		Type:    "session_end",
+		TraceID: "trace-beta",
+		Payload: map[string]interface{}{
+			"error_type":                    "prompt_preflight",
+			"failure_reason_code":           "active_turn_not_compactable",
+			"replacement_history_available": true,
+		},
+	})
+	bus.Publish(runtimeevents.Event{
+		Type:    "team.summary.generated",
+		TraceID: "trace-beta",
+		Payload: map[string]interface{}{
+			"summary_source":  "fallback",
+			"fallback_reason": "lead_session_error",
+		},
+	})
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -1523,7 +1777,7 @@ func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	stats := payload["stats"].(map[string]interface{})
 	assert.Equal(t, float64(2), stats["trace_count"])
-	assert.Equal(t, float64(10), stats["event_count"])
+	assert.Equal(t, float64(12), stats["event_count"])
 
 	eventTypes := stats["event_types"].(map[string]interface{})
 	assert.Equal(t, float64(1), eventTypes["tool.requested"])
@@ -1573,6 +1827,16 @@ func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
 	promptLayers := prompt["layers"].(map[string]interface{})
 	assert.Equal(t, float64(1), promptLayers["base/system"])
 	assert.Equal(t, float64(1), promptLayers["developer/developer"])
+	recovery := stats["recovery"].(map[string]interface{})
+	assert.Equal(t, float64(1), recovery["prompt_preflight_events"])
+	assert.Equal(t, float64(1), recovery["replacement_history_available"])
+	assert.Equal(t, float64(1), recovery["summary_fallbacks"])
+	assert.Equal(t, float64(1), recovery["prompt_preflight_by_event_type"].(map[string]interface{})["session_end"])
+	assert.Equal(t, float64(1), recovery["prompt_preflight_failure_codes"].(map[string]interface{})["active_turn_not_compactable"])
+	assert.Equal(t, float64(1), recovery["summary_fallback_reasons"].(map[string]interface{})["lead_session_error"])
+	topLevelRecovery := payload["recovery"].(map[string]interface{})
+	assert.Equal(t, float64(1), topLevelRecovery["prompt_preflight_events"])
+	assert.Equal(t, float64(1), topLevelRecovery["summary_fallbacks"])
 
 	latestTraceIDs := stats["latest_trace_ids"].([]interface{})
 	require.Len(t, latestTraceIDs, 2)

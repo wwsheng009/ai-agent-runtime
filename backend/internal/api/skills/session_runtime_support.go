@@ -38,20 +38,53 @@ func (c *sessionActorClient) SubmitPrompt(ctx context.Context, sessionID, prompt
 		return nil, err
 	}
 	result, err := actor.SubmitPrompt(ctx, prompt, runMeta)
+	sessionResult := sessionResultFromActorRun(result, err)
 	if err != nil {
+		if sessionResult != nil {
+			return sessionResult, err
+		}
 		return nil, err
 	}
-	if result == nil {
+	if sessionResult == nil {
 		return nil, fmt.Errorf("session result is nil")
 	}
-	return &team.SessionResult{
-		Success:      result.Success,
-		Output:       result.Output,
-		Error:        result.Error,
-		TraceID:      result.TraceID,
-		Steps:        result.Steps,
-		Observations: team.SessionObservationsFromRuntime(result.Observations),
-	}, nil
+	return sessionResult, nil
+}
+
+func sessionResultFromActorRun(result *agent.Result, err error) *team.SessionResult {
+	if result == nil && err == nil {
+		return nil
+	}
+	sessionResult := &team.SessionResult{}
+	if result != nil {
+		sessionResult.Success = result.Success
+		sessionResult.Output = result.Output
+		sessionResult.Error = result.Error
+		sessionResult.TraceID = result.TraceID
+		sessionResult.Steps = result.Steps
+		sessionResult.Observations = team.SessionObservationsFromRuntime(result.Observations)
+	}
+	if err != nil {
+		if strings.TrimSpace(sessionResult.Error) == "" {
+			sessionResult.Error = err.Error()
+		}
+		if preflightErr, ok := agent.AsPromptPreflightError(err); ok && preflightErr != nil {
+			sessionResult.ErrorType = "prompt_preflight"
+			sessionResult.ErrorMetadata = cloneSessionErrorMetadata(preflightErr.Metadata())
+		}
+	}
+	return sessionResult
+}
+
+func cloneSessionErrorMetadata(input map[string]interface{}) map[string]interface{} {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 type sessionAgentController struct {

@@ -13,6 +13,9 @@ func buildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm
 		return providerConfigs
 	}
 
+	retryTuning := runtimellm.RetryTuningFromAgentConfig(cfg)
+	retryRules := runtimellm.RetryRulesFromAgentConfig(cfg)
+
 	for name, provider := range cfg.Providers.Items {
 		if !provider.Enabled {
 			continue
@@ -30,26 +33,26 @@ func buildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm
 		if timeout <= 0 {
 			timeout = 60 * time.Second
 		}
-		maxRetries := cfg.Providers.MaxRetries
-		if maxRetries <= 0 {
-			maxRetries = 3
-		}
+		maxRetries := runtimellm.ProviderMaxRetriesFromAgentConfig(cfg)
 
 		providerConfigs[name] = &runtimellm.ProviderConfig{
-			Type:               providerType,
-			APIKey:             provider.GetAPIKey(),
-			BaseURL:            provider.BaseURL,
-			APIPath:            provider.APIPath,
-			Timeout:            timeout,
-			MaxRetries:         maxRetries,
-			DefaultModel:       provider.DefaultModel,
-			SupportedModels:    cloneRuntimeStringSlice(provider.SupportedModels),
-			ModelMappings:      cloneRuntimeStringMap(provider.ModelMappings),
-			ModelCapabilities:  cloneRuntimeModelCapabilities(provider.ModelCapabilities),
-			Headers:            cloneRuntimeStringMap(provider.Headers),
-			HeaderMappings:     cloneRuntimeStringMap(provider.HeaderMappings),
-			HeaderMappingRules: cloneRuntimeHeaderMappingRules(provider.HeaderMappingRules),
-			Proxy:              agentconfig.EffectiveProxyConfig(&cfg.Providers.Proxy, provider.Proxy),
+			Type:                    providerType,
+			APIKey:                  provider.GetAPIKey(),
+			BaseURL:                 provider.BaseURL,
+			APIPath:                 provider.APIPath,
+			Timeout:                 timeout,
+			MaxRetries:              maxRetries,
+			RetryTuning:             retryTuning,
+			RetryRules:              retryRules,
+			DefaultModel:            provider.DefaultModel,
+			SupportedModels:         cloneRuntimeStringSlice(provider.SupportedModels),
+			ModelMappings:           cloneRuntimeStringMap(provider.ModelMappings),
+			ModelCapabilities:       cloneRuntimeModelCapabilities(provider.ModelCapabilities),
+			Headers:                 cloneRuntimeStringMap(provider.Headers),
+			HeaderMappings:          cloneRuntimeStringMap(provider.HeaderMappings),
+			HeaderMappingRules:      cloneRuntimeHeaderMappingRules(provider.HeaderMappingRules),
+			SupportsMaxOutputTokens: provider.SupportsMaxOutputTokens,
+			Proxy:                   agentconfig.EffectiveProxyConfig(&cfg.Providers.Proxy, provider.Proxy),
 		}
 	}
 

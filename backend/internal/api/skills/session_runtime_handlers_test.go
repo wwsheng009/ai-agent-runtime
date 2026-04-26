@@ -112,6 +112,60 @@ type runtimeCommandCapturingMCPManager struct {
 	lastMeta *team.RunMeta
 }
 
+func TestPublishTeamSessionExecutionFailure_UsesWrappedTraceAndMetadata(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	err := team.WrapSessionExecutionError(assert.AnError, &team.SessionResult{
+		TraceID:   "trace-team-plan-preflight",
+		ErrorType: "prompt_preflight",
+		ErrorMetadata: map[string]interface{}{
+			"failure_reason_code":         "prompt_still_exceeds_budget_after_compaction",
+			"replacement_history_applied": true,
+		},
+	})
+	payload := map[string]interface{}{
+		"team_id": "team-1",
+	}
+
+	traceID := handler.publishTeamSessionExecutionFailure("team.plan.failed", "trace-request", payload, err)
+	assert.Equal(t, "trace-team-plan-preflight", traceID)
+
+	events := handler.getRuntimeEventBus().Trace(traceID, 10)
+	require.NotEmpty(t, events)
+	event := events[0]
+	assert.Equal(t, "team.plan.failed", event.Type)
+	assert.Equal(t, "prompt_preflight", event.Payload["error_type"])
+	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", event.Payload["failure_reason_code"])
+	assert.Equal(t, true, event.Payload["replacement_history_applied"])
+}
+
+func TestSessionResultFromActorRun_PromptPreflightCarriesStructuredErrorMetadata(t *testing.T) {
+	sessionResult := sessionResultFromActorRun(&agent.Result{
+		Success: false,
+		Output:  "partial output",
+		Error:   "prompt preflight budget exceeded",
+		TraceID: "trace-session-preflight",
+		Steps:   2,
+	}, &agent.PromptPreflightError{
+		PromptTokens:                  12000,
+		PromptBudget:                  9000,
+		BudgetSource:                  "model_capability_auto_compact_token_limit",
+		ResolvedProvider:              "CODEX_LOCAL",
+		ResolvedModel:                 "codex-gpt-5.4",
+		Code:                          "prompt_still_exceeds_budget_after_compaction",
+		Reason:                        "prompt exceeds configured budget",
+		ReplacementHistoryApplied:     true,
+		ReplacementHistory:            []types.Message{*types.NewSystemMessage("system"), *types.NewAssistantMessage("summary")},
+		ActiveTurnCompacted:           true,
+		ActiveTurnMessageCount:        8,
+		LatestReplayBlockMessageCount: 3,
+	})
+	require.NotNil(t, sessionResult)
+	assert.Equal(t, "trace-session-preflight", sessionResult.TraceID)
+	assert.Equal(t, "prompt_preflight", sessionResult.ErrorType)
+	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", sessionResult.ErrorMetadata["failure_reason_code"])
+	assert.Equal(t, true, sessionResult.ErrorMetadata["replacement_history_applied"])
+}
+
 func (m *runtimeCommandCapturingMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
 	if toolName != "team_echo" {
 		return skill.ToolInfo{}, fmt.Errorf("tool not found: %s", toolName)

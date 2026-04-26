@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/google/uuid"
-	"github.com/gorilla/mux"
 )
 
 // SetTeamStore sets the Team store used by the handler.
@@ -753,16 +753,39 @@ func (h *Handler) GetTeamFinalSummary(w http.ResponseWriter, r *http.Request) {
 	teamID := mux.Vars(r)["id"]
 	hub := h.getSessionHub()
 	planner := &team.LeadPlanner{
-		Sessions: &sessionActorClient{hub: hub},
-		Store:    store,
+		Store: store,
 	}
-	summary, err := planner.FinalSummary(r.Context(), teamID)
+	if hub != nil {
+		planner.Sessions = &sessionActorClient{hub: hub}
+	}
+	summaryResult, err := planner.FinalSummaryDetailed(r.Context(), teamID)
 	if err != nil {
+		traceID, requestID := runtimeTraceIDForRequest(r)
+		payload := map[string]interface{}{
+			"team_id": teamID,
+		}
+		if requestID != "" {
+			payload["request_id"] = requestID
+		}
+		resolvedTraceID := h.publishTeamSessionExecutionFailure("team.summary.failed", traceID, payload, err)
+		if resolvedTraceID != "" {
+			w.Header().Set("X-Trace-ID", resolvedTraceID)
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	summary := ""
+	if summaryResult != nil {
+		summary = strings.TrimSpace(summaryResult.Summary)
+		if traceID := strings.TrimSpace(summaryResult.TraceID); traceID != "" {
+			w.Header().Set("X-Trace-ID", traceID)
+		}
+	}
 	{
 		traceID, requestID := runtimeTraceIDForRequest(r)
+		if summaryResult != nil && strings.TrimSpace(summaryResult.TraceID) != "" {
+			traceID = strings.TrimSpace(summaryResult.TraceID)
+		}
 		payload := map[string]interface{}{
 			"team_id": teamID,
 		}
@@ -773,12 +796,22 @@ func (h *Handler) GetTeamFinalSummary(w http.ResponseWriter, r *http.Request) {
 			payload["summary_present"] = true
 			payload["summary"] = truncateLine(summary, 240)
 		}
+		if summaryResult != nil {
+			team.AppendFinalSummaryMetadata(payload, summaryResult)
+		}
 		h.publishRuntimeEvent("team.summary.generated", traceID, payload)
 	}
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+	response := map[string]interface{}{
 		"team_id": teamID,
 		"summary": summary,
-	})
+	}
+	if summaryResult != nil {
+		team.AppendFinalSummaryMetadata(response, summaryResult)
+		if metadata := summaryResult.CloneErrorMetadata(); len(metadata) > 0 {
+			response["error_metadata"] = metadata
+		}
+	}
+	h.writeJSON(w, http.StatusOK, response)
 }
 
 // ListTeamSummaries returns summary aggregates for multiple teams.
@@ -1394,6 +1427,19 @@ func (h *Handler) PlanTeamTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	planResult, err := planner.InitialPlan(r.Context(), *teamRecord, goal)
 	if err != nil {
+		traceID, requestID := runtimeTraceIDForRequest(r)
+		payload := map[string]interface{}{
+			"team_id":      teamID,
+			"auto_persist": autoPersist,
+			"goal_length":  len(goal),
+		}
+		if requestID != "" {
+			payload["request_id"] = requestID
+		}
+		resolvedTraceID := h.publishTeamSessionExecutionFailure("team.plan.failed", traceID, payload, err)
+		if resolvedTraceID != "" {
+			w.Header().Set("X-Trace-ID", resolvedTraceID)
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -2221,6 +2267,19 @@ func (h *Handler) ReplanTask(w http.ResponseWriter, r *http.Request) {
 	}
 	planResult, err := planner.ReplanOnFailure(r.Context(), *teamRecord, *failedTask)
 	if err != nil {
+		traceID, requestID := runtimeTraceIDForRequest(r)
+		payload := map[string]interface{}{
+			"team_id":      teamID,
+			"task_id":      taskID,
+			"auto_persist": autoPersist,
+		}
+		if requestID != "" {
+			payload["request_id"] = requestID
+		}
+		resolvedTraceID := h.publishTeamSessionExecutionFailure("team.plan.replan_failed", traceID, payload, err)
+		if resolvedTraceID != "" {
+			w.Header().Set("X-Trace-ID", resolvedTraceID)
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -2455,6 +2514,7 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 			}
 			if result.ReplanError != "" {
 				payload["replan_error"] = result.ReplanError
+				appendPrefixedSessionExecutionMetadata(payload, "replan", result.ReplanTraceID, result.ReplanErrorType, result.ReplanErrorMetadata)
 			}
 			if result.PlanResult != nil {
 				payload["planned_tasks"] = len(result.PlanResult.Tasks)
@@ -2470,6 +2530,9 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 			"message_id":   messageID,
 			"auto_replan":  result.AutoReplan,
 			"replan_error": result.ReplanError,
+		}
+		if result.ReplanError != "" {
+			appendPrefixedSessionExecutionMetadata(response, "replan", result.ReplanTraceID, result.ReplanErrorType, result.ReplanErrorMetadata)
 		}
 		if result.HandoffTo != "" {
 			response["handoff_to"] = result.HandoffTo
@@ -3440,6 +3503,58 @@ func runtimeTraceIDForRequest(r *http.Request) (string, string) {
 	return "trace_" + uuid.NewString(), ""
 }
 
+func (h *Handler) publishTeamSessionExecutionFailure(eventType, traceID string, payload map[string]interface{}, err error) string {
+	resolvedTraceID := strings.TrimSpace(traceID)
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	if err != nil {
+		payload["error"] = err.Error()
+	}
+	if sessionErr, ok := team.AsSessionExecutionError(err); ok && sessionErr != nil {
+		if traceValue := strings.TrimSpace(sessionErr.TraceID); traceValue != "" {
+			resolvedTraceID = traceValue
+		}
+		if errorType := strings.TrimSpace(sessionErr.ErrorType); errorType != "" {
+			payload["error_type"] = errorType
+		}
+		for key, value := range sessionErr.CloneMetadata() {
+			if key == "" {
+				continue
+			}
+			if _, exists := payload[key]; exists {
+				continue
+			}
+			payload[key] = value
+		}
+	}
+	h.publishRuntimeEvent(eventType, resolvedTraceID, payload)
+	return resolvedTraceID
+}
+
+func appendPrefixedSessionExecutionMetadata(target map[string]interface{}, prefix, traceID, errorType string, metadata map[string]interface{}) {
+	if len(target) == 0 {
+		return
+	}
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		prefix = "session"
+	}
+	if value := strings.TrimSpace(traceID); value != "" {
+		target[prefix+"_trace_id"] = value
+	}
+	if value := strings.TrimSpace(errorType); value != "" {
+		target[prefix+"_error_type"] = value
+	}
+	for key, value := range metadata {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		target[prefix+"_"+key] = value
+	}
+}
+
 func summarizeAssignments(assignments []team.Assignment) []map[string]interface{} {
 	if len(assignments) == 0 {
 		return nil
@@ -3626,4 +3741,3 @@ func parseIDList(raw string) []string {
 	}
 	return out
 }
-

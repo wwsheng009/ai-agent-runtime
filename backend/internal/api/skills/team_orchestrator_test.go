@@ -18,6 +18,15 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+type promptPreflightSummarySessionClient struct {
+	result *team.SessionResult
+	err    error
+}
+
+func (c *promptPreflightSummarySessionClient) SubmitPrompt(ctx context.Context, sessionID, prompt string, runMeta *team.RunMeta) (*team.SessionResult, error) {
+	return c.result, c.err
+}
+
 func TestGetTeamOrchestratorEnrichesInjectedOrchestrator(t *testing.T) {
 	store, err := team.NewSQLiteStore(&team.StoreConfig{
 		DSN: "file:skills-team-orchestrator-test?mode=memory&cache=shared",
@@ -91,6 +100,86 @@ func TestSyncTeamLifecycleLoopsEnrichesInjectedOrchestratorBeforeStartingLoops(t
 
 	running := handler.teamLifecycleService().HasLoop(teamID)
 	require.True(t, running, "expected team loop to be started for active team")
+}
+
+func TestTerminalTeamSummaryFallbackPublishesStructuredRuntimeEvents(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{
+		DSN: "file:skills-team-terminal-summary-runtime?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		Status:        team.TeamStatusActive,
+		LeadSessionID: "lead-session",
+	})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, team.Task{
+		TeamID:  teamID,
+		Title:   "done task",
+		Status:  team.TaskStatusDone,
+		Summary: "finished",
+	})
+	require.NoError(t, err)
+
+	handler := &Handler{
+		teamStore:        store,
+		teamOrchestrator: team.NewOrchestrator(store, nil, nil),
+	}
+	orchestrator := handler.getTeamOrchestrator()
+	require.NotNil(t, orchestrator)
+	require.NotNil(t, orchestrator.Events)
+	require.NotNil(t, orchestrator.Mailbox)
+	require.NotNil(t, orchestrator.LeadPlanner)
+	planner := &team.LeadPlanner{
+		Sessions: &promptPreflightSummarySessionClient{
+			result: &team.SessionResult{
+				Success:   false,
+				Error:     "prompt preflight budget exceeded",
+				TraceID:   "trace-runtime-terminal-summary",
+				ErrorType: "prompt_preflight",
+				ErrorMetadata: map[string]interface{}{
+					"failure_reason_code":         "prompt_still_exceeds_budget_after_compaction",
+					"replacement_history_applied": true,
+				},
+			},
+			err: assert.AnError,
+		},
+		Store: store,
+	}
+
+	result, err := team.ReconcileTerminalTeamState(ctx, team.TerminalTeamServices{
+		Store:   store,
+		Planner: planner,
+		Mailbox: orchestrator.Mailbox,
+		Events:  orchestrator.Events,
+	}, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, team.FinalSummarySourceFallback, result.SummarySource)
+	assert.Equal(t, team.FinalSummaryFallbackLeadSessionError, result.SummaryFallbackReason)
+	assert.Equal(t, "prompt_preflight", result.SummaryErrorType)
+
+	failedEvents := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		TeamID:    teamID,
+		EventType: "team.summary.failed",
+		Limit:     10,
+	})
+	require.NotEmpty(t, failedEvents)
+	assert.Equal(t, "prompt_preflight", failedEvents[0].Payload["error_type"])
+	assert.Equal(t, team.FinalSummaryFallbackLeadSessionError, failedEvents[0].Payload["fallback_reason"])
+
+	summaryEvents := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		TeamID:    teamID,
+		EventType: "team.summary",
+		Limit:     10,
+	})
+	require.NotEmpty(t, summaryEvents)
+	assert.Equal(t, team.FinalSummarySourceFallback, summaryEvents[0].Payload["summary_source"])
+	assert.Equal(t, true, summaryEvents[0].Payload["used_fallback"])
+	assert.Equal(t, team.FinalSummaryFallbackLeadSessionError, summaryEvents[0].Payload["fallback_reason"])
+	assert.Equal(t, "prompt_preflight", summaryEvents[0].Payload["error_type"])
 }
 
 func TestGetTeamOrchestratorDoesNotStartLoopsAsSideEffect(t *testing.T) {

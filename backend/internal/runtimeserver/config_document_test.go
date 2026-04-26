@@ -203,6 +203,128 @@ providers:
 	require.Equal(t, "http://127.0.0.1:10810", proxy["http"])
 }
 
+func TestLocalConfigDocumentServiceLoadDocumentRecoversSparseProviderItemsSnapshot(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	baseConfig := `
+providers:
+  default_provider: deepseek
+  items:
+    deepseek:
+      enabled: true
+      type: openai
+      base_url: https://api.deepseek.com
+      default_model: deepseek-v4-pro
+      supports_max_output_tokens: true
+      model_capabilities:
+        deepseek-v4-pro:
+          max_context_tokens: 270000
+          auto_compact_token_limit: 200000
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(baseConfig), 0o644))
+
+	snapshotPath := ResolveAgentConfigSnapshotInfo(configPath).SnapshotPath
+	snapshotConfig := `
+providers:
+  items:
+    deepseek:
+      enabled: true
+      type: openai
+      base_url: https://api.deepseek.com
+      default_model: deepseek-v4-pro
+`
+	require.NoError(t, os.WriteFile(snapshotPath, []byte(snapshotConfig), 0o644))
+
+	service := NewLocalConfigDocumentService(configPath)
+	require.NotNil(t, service)
+
+	document, err := service.LoadDocument()
+	require.NoError(t, err)
+	require.Equal(t, resolveAbsolutePath(snapshotPath), document.Path)
+	require.Condition(t, func() bool {
+		for _, warning := range document.Warnings {
+			if strings.Contains(warning, "检测到运行时快照只包含局部节点") {
+				return true
+			}
+		}
+		return false
+	})
+	require.Contains(t, document.Raw, "supports_max_output_tokens: true")
+	require.Contains(t, document.Raw, "model_capabilities:")
+	require.Contains(t, document.Raw, "max_context_tokens: 270000")
+
+	root, ok := document.Parsed.(map[string]interface{})
+	require.True(t, ok)
+	providers, ok := root["providers"].(map[string]interface{})
+	require.True(t, ok)
+	items, ok := providers["items"].(map[string]interface{})
+	require.True(t, ok)
+	deepseek, ok := items["deepseek"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, true, deepseek["supports_max_output_tokens"])
+	modelCapabilities, ok := deepseek["model_capabilities"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, modelCapabilities, "deepseek-v4-pro")
+}
+
+func TestLocalConfigDocumentServiceLoadDocumentRecoversNilProviderSnapshotNode(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	baseConfig := `
+providers:
+  default_provider: deepseek
+  items:
+    deepseek:
+      enabled: true
+      type: openai
+      base_url: https://api.deepseek.com
+      default_model: deepseek-v4-pro
+      supports_max_output_tokens: true
+      model_capabilities:
+        deepseek-v4-pro:
+          max_context_tokens: 270000
+          auto_compact_token_limit: 200000
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(baseConfig), 0o644))
+
+	snapshotPath := ResolveAgentConfigSnapshotInfo(configPath).SnapshotPath
+	snapshotConfig := `
+providers:
+  items:
+    deepseek:
+`
+	require.NoError(t, os.WriteFile(snapshotPath, []byte(snapshotConfig), 0o644))
+
+	service := NewLocalConfigDocumentService(configPath)
+	require.NotNil(t, service)
+
+	document, err := service.LoadDocument()
+	require.NoError(t, err)
+	require.Equal(t, resolveAbsolutePath(snapshotPath), document.Path)
+	require.Condition(t, func() bool {
+		for _, warning := range document.Warnings {
+			if strings.Contains(warning, "检测到运行时快照只包含局部节点") {
+				return true
+			}
+		}
+		return false
+	})
+	require.Contains(t, document.Raw, "supports_max_output_tokens: true")
+	require.Contains(t, document.Raw, "model_capabilities:")
+	require.Contains(t, document.Raw, "max_context_tokens: 270000")
+
+	root, ok := document.Parsed.(map[string]interface{})
+	require.True(t, ok)
+	providers, ok := root["providers"].(map[string]interface{})
+	require.True(t, ok)
+	items, ok := providers["items"].(map[string]interface{})
+	require.True(t, ok)
+	deepseek, ok := items["deepseek"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, true, deepseek["supports_max_output_tokens"])
+	modelCapabilities, ok := deepseek["model_capabilities"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, modelCapabilities, "deepseek-v4-pro")
+}
+
 func ptrToString(value string) *string {
 	return &value
 }

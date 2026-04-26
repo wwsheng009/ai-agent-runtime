@@ -28,6 +28,7 @@ type Config struct {
 	Database       DatabaseConfig       `yaml:"database" mapstructure:"database"`
 	Providers      ProvidersConfig      `yaml:"providers" mapstructure:"providers"`
 	ProviderGroups []ProviderGroup      `yaml:"provider_groups" mapstructure:"provider_groups"`
+	Retry          *RetryConfig         `yaml:"retry" mapstructure:"retry"`
 	AICLI          *AICLIConfig         `yaml:"aicli" mapstructure:"aicli"`
 	Profiles       *ProfilesConfig      `yaml:"profiles" mapstructure:"profiles"`
 	SkillsRuntime  *SkillsRuntimeConfig `yaml:"skills_runtime" mapstructure:"skills_runtime"`
@@ -52,6 +53,43 @@ type BackoffConfig struct {
 	MaxElapsedTime  time.Duration `yaml:"max_elapsed_time" mapstructure:"max_elapsed_time"`
 	Multiplier      float64       `yaml:"multiplier" mapstructure:"multiplier"`
 	Randomization   float64       `yaml:"randomization" mapstructure:"randomization"`
+}
+
+// RetryConfig holds fine-grained retry rule configuration.
+type RetryConfig struct {
+	Enabled                  bool              `yaml:"enabled" mapstructure:"enabled"`
+	DefaultBackoffMultiplier float64           `yaml:"default_backoff_multiplier" mapstructure:"default_backoff_multiplier"`
+	DefaultMaxRetries        int               `yaml:"default_max_retries" mapstructure:"default_max_retries"`
+	DefaultRetryDelayMS      int               `yaml:"default_retry_delay_ms" mapstructure:"default_retry_delay_ms"`
+	Rules                    []RetryRuleConfig `yaml:"rules" mapstructure:"rules"`
+}
+
+type RetryRuleConfig struct {
+	Name              string                `yaml:"name" mapstructure:"name"`
+	Description       string                `yaml:"description" mapstructure:"description"`
+	Enabled           bool                  `yaml:"enabled" mapstructure:"enabled"`
+	MaxRetries        int                   `yaml:"max_retries" mapstructure:"max_retries"`
+	RetryDelayMS      int                   `yaml:"retry_delay_ms" mapstructure:"retry_delay_ms"`
+	BackoffMultiplier float64               `yaml:"backoff_multiplier" mapstructure:"backoff_multiplier"`
+	Keyword           RetryKeywordConfig    `yaml:"keyword" mapstructure:"keyword"`
+	ErrorCode         RetryErrorCodeConfig  `yaml:"error_code" mapstructure:"error_code"`
+	StatusCode        RetryStatusCodeConfig `yaml:"status_code" mapstructure:"status_code"`
+}
+
+type RetryKeywordConfig struct {
+	CaseSensitive bool     `yaml:"case_sensitive" mapstructure:"case_sensitive"`
+	Values        []string `yaml:"values" mapstructure:"values"`
+	Patterns      []string `yaml:"patterns" mapstructure:"patterns"`
+}
+
+type RetryErrorCodeConfig struct {
+	Codes   []string `yaml:"codes" mapstructure:"codes"`
+	Pattern string   `yaml:"pattern" mapstructure:"pattern"`
+}
+
+type RetryStatusCodeConfig struct {
+	Codes []int  `yaml:"codes" mapstructure:"codes"`
+	Range string `yaml:"range" mapstructure:"range"`
 }
 
 // HTTPTimeout holds HTTP timeout configuration.
@@ -93,26 +131,27 @@ type ModelCapabilitySpec struct {
 
 // Provider holds provider configuration.
 type Provider struct {
-	Enabled            bool                           `yaml:"enabled" mapstructure:"enabled" json:"enabled"`
-	Type               string                         `yaml:"type" mapstructure:"type" json:"type"`
-	Protocol           string                         `yaml:"protocol" mapstructure:"protocol" json:"protocol"`
-	BaseURL            string                         `yaml:"base_url" mapstructure:"base_url" json:"base_url"`
-	APIPath            string                         `yaml:"api_path" mapstructure:"api_path" json:"api_path"`
-	ForwardURL         string                         `yaml:"forward_url" mapstructure:"forward_url" json:"forward_url"`
-	APIKey             string                         `yaml:"api_key" mapstructure:"api_key" json:"api_key"`
-	APIKeys            []string                       `yaml:"api_keys" mapstructure:"api_keys" json:"api_keys"`
-	APIKeyRef          string                         `yaml:"api_key_ref" mapstructure:"api_key_ref" json:"api_key_ref"`
-	DefaultModel       string                         `yaml:"default_model" mapstructure:"default_model" json:"default_model"`
-	SupportedModels    []string                       `yaml:"supported_models" mapstructure:"supported_models" json:"supported_models"`
-	Headers            map[string]string              `yaml:"headers" mapstructure:"headers" json:"headers"`
-	HeaderMappings     map[string]string              `yaml:"header_mappings" mapstructure:"header_mappings" json:"header_mappings"`
-	HeaderMappingRules []HeaderMappingRule            `yaml:"header_mapping_rules" mapstructure:"header_mapping_rules" json:"header_mapping_rules"`
-	SupportTypes       []string                       `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
-	ModelMappings      map[string]string              `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
-	ModelCapabilities  map[string]ModelCapabilitySpec `yaml:"model_capabilities" mapstructure:"model_capabilities" json:"model_capabilities"`
-	MaxTokensLimit     int                            `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
-	Timeout            time.Duration                  `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
-	Proxy              *ProxyConfig                   `yaml:"proxy" mapstructure:"proxy" json:"proxy"`
+	Enabled                 bool                           `yaml:"enabled" mapstructure:"enabled" json:"enabled"`
+	Type                    string                         `yaml:"type" mapstructure:"type" json:"type"`
+	Protocol                string                         `yaml:"protocol" mapstructure:"protocol" json:"protocol"`
+	BaseURL                 string                         `yaml:"base_url" mapstructure:"base_url" json:"base_url"`
+	APIPath                 string                         `yaml:"api_path" mapstructure:"api_path" json:"api_path"`
+	ForwardURL              string                         `yaml:"forward_url" mapstructure:"forward_url" json:"forward_url"`
+	APIKey                  string                         `yaml:"api_key" mapstructure:"api_key" json:"api_key"`
+	APIKeys                 []string                       `yaml:"api_keys" mapstructure:"api_keys" json:"api_keys"`
+	APIKeyRef               string                         `yaml:"api_key_ref" mapstructure:"api_key_ref" json:"api_key_ref"`
+	DefaultModel            string                         `yaml:"default_model" mapstructure:"default_model" json:"default_model"`
+	SupportedModels         []string                       `yaml:"supported_models" mapstructure:"supported_models" json:"supported_models"`
+	Headers                 map[string]string              `yaml:"headers" mapstructure:"headers" json:"headers"`
+	HeaderMappings          map[string]string              `yaml:"header_mappings" mapstructure:"header_mappings" json:"header_mappings"`
+	HeaderMappingRules      []HeaderMappingRule            `yaml:"header_mapping_rules" mapstructure:"header_mapping_rules" json:"header_mapping_rules"`
+	SupportTypes            []string                       `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
+	ModelMappings           map[string]string              `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
+	ModelCapabilities       map[string]ModelCapabilitySpec `yaml:"model_capabilities" mapstructure:"model_capabilities" json:"model_capabilities"`
+	MaxTokensLimit          int                            `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
+	SupportsMaxOutputTokens *bool                          `yaml:"supports_max_output_tokens" mapstructure:"supports_max_output_tokens" json:"supports_max_output_tokens"`
+	Timeout                 time.Duration                  `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
+	Proxy                   *ProxyConfig                   `yaml:"proxy" mapstructure:"proxy" json:"proxy"`
 }
 
 // HeaderMappingRule defines a conditional header rewrite rule.

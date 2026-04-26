@@ -1338,7 +1338,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				Temperature:     0.7,
 			})
 			if reactErr != nil {
-				h.writeError(w, http.StatusInternalServerError, reactErr)
+				h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, reactErr, session, requestTraceID)
 				return
 			}
 
@@ -1390,7 +1390,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				PatchApproval:              req.PatchApproval,
 			})
 			if orchErr != nil {
-				h.writeError(w, http.StatusInternalServerError, orchErr)
+				h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, orchErr, session, requestTraceID)
 				return
 			}
 
@@ -1512,7 +1512,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		if req.EnableRoute || plannerPreferred || strings.EqualFold(strings.TrimSpace(effectivePlanningMode), string(agent.OrchestrationRoutePreferred)) {
 			result, routeErr := a.RunWithHistoryAndContext(ctx, lastMessage, historyForAgent, agentContext)
 			if routeErr != nil {
-				h.writeError(w, http.StatusInternalServerError, routeErr)
+				h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, routeErr, session, requestTraceID)
 				return
 			}
 			if shouldUseAgentResult(result, h.llmRuntime) {
@@ -1587,7 +1587,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 		if reactErr != nil {
-			h.writeError(w, http.StatusInternalServerError, reactErr)
+			h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, reactErr, session, requestTraceID)
 			return
 		}
 		reactResult := execResult.ReactResult
@@ -1652,7 +1652,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if orchErr != nil {
-		h.writeError(w, http.StatusInternalServerError, orchErr)
+		h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, orchErr, session, requestTraceID)
 		return
 	}
 	orchResult := execResult.OrchestrationResult
@@ -6894,14 +6894,88 @@ func (h *Handler) writeError(w http.ResponseWriter, statusCode int, err error) {
 	if requestID := strings.TrimSpace(w.Header().Get("X-Request-ID")); requestID != "" {
 		response["request_id"] = requestID
 	}
+	if traceID := strings.TrimSpace(w.Header().Get("X-Trace-ID")); traceID != "" {
+		response["trace_id"] = traceID
+	}
 
 	var runtimeErr *errors.RuntimeError
 	if stderrors.As(err, &runtimeErr) {
 		response["code"] = runtimeErr.Code
 		response["context"] = runtimeErr.GetContext()
 	}
+	if preflightErr, ok := agent.AsPromptPreflightError(err); ok && preflightErr != nil {
+		response["error_type"] = "prompt_preflight"
+		for key, value := range preflightErr.Metadata() {
+			response[key] = value
+		}
+	}
 
 	h.writeJSON(w, statusCode, response)
+}
+
+func (h *Handler) writeAgentChatExecutionError(ctx context.Context, w http.ResponseWriter, statusCode int, err error, session *chat.Session, traceID string) {
+	if err == nil {
+		return
+	}
+	preparedErr, resolvedTraceID := h.prepareAgentChatExecutionError(ctx, err, session, traceID)
+	if resolvedTraceID != "" {
+		w.Header().Set("X-Trace-ID", resolvedTraceID)
+	}
+	h.writeError(w, statusCode, preparedErr)
+}
+
+func (h *Handler) prepareAgentChatExecutionError(ctx context.Context, err error, session *chat.Session, traceID string) (error, string) {
+	resolvedTraceID := strings.TrimSpace(traceID)
+	preflightErr, ok := agent.AsPromptPreflightError(err)
+	if !ok || preflightErr == nil {
+		return err, resolvedTraceID
+	}
+
+	preflightErr.ReplacementHistoryApplied = false
+	replacement := preflightErr.CloneReplacementHistory()
+	if resolvedTraceID == "" {
+		resolvedTraceID = "trace_" + uuid.NewString()
+	}
+	if len(replacement) == 0 || h == nil || session == nil || h.sessionManager == nil {
+		h.publishAgentChatPromptPreflightEvent(resolvedTraceID, session, err)
+		return err, resolvedTraceID
+	}
+
+	originalHistory := session.GetMessages()
+	session.ReplaceHistory(replacement)
+	if updateErr := h.sessionManager.Update(ctx, session); updateErr != nil {
+		session.ReplaceHistory(originalHistory)
+		wrappedErr := fmt.Errorf("%w: failed to persist prompt preflight recovery history: %v", err, updateErr)
+		h.publishAgentChatPromptPreflightEvent(resolvedTraceID, session, wrappedErr)
+		return wrappedErr, resolvedTraceID
+	}
+
+	preflightErr.ReplacementHistoryApplied = true
+	h.publishAgentChatPromptPreflightEvent(resolvedTraceID, session, err)
+	return err, resolvedTraceID
+}
+
+func (h *Handler) publishAgentChatPromptPreflightEvent(traceID string, session *chat.Session, err error) {
+	if h == nil || strings.TrimSpace(traceID) == "" || err == nil {
+		return
+	}
+	preflightErr, ok := agent.AsPromptPreflightError(err)
+	if !ok || preflightErr == nil {
+		return
+	}
+	payload := map[string]interface{}{
+		"success":     false,
+		"error":       err.Error(),
+		"error_type":  "prompt_preflight",
+		"source":      "agent_chat",
+		"entrypoint":  canonicalAgentChatEntrypoint,
+		"session_id":  sessionID(session),
+		"request_end": true,
+	}
+	for key, value := range preflightErr.Metadata() {
+		payload[key] = value
+	}
+	h.publishSessionRuntimeEvent(chat.EventSessionEnd, traceID, sessionID(session), payload)
 }
 
 func runtimeHTTPDebugReporter(ctx context.Context) llm.HTTPDebugReporter {
@@ -7590,6 +7664,7 @@ func (h *Handler) GetRuntimeTraces(w http.ResponseWriter, r *http.Request) {
 	payload := map[string]interface{}{
 		"count":                len(traces),
 		"traces":               traces,
+		"recovery":             buildRecoverySummaryFromTraceSummaries(traces),
 		"team_count":           countTraceTeams(traces),
 		"team_id_limit":        teamIDLimit,
 		"team_id_limit_source": teamIDLimitSource,
@@ -7647,6 +7722,7 @@ func (h *Handler) GetRuntimeTraceStats(w http.ResponseWriter, r *http.Request) {
 	payload := map[string]interface{}{
 		"stats":                stats,
 		"patch_governance":     buildPatchGovernanceSummaryFromView(stats.Governance),
+		"recovery":             buildRecoverySummaryFromView(stats.Recovery),
 		"team_count":           stats.TeamCount,
 		"team_id_limit":        teamLimit,
 		"team_id_limit_source": teamLimitSource,
@@ -7771,20 +7847,34 @@ func (h *Handler) GetRuntimeTrace(w http.ResponseWriter, r *http.Request) {
 		"policies":              map[string]int{},
 	}
 	promptSummary := map[string]interface{}{
-		"layouts_observed":  0,
-		"instruction_chars": 0,
-		"total_chars":       0,
+		"layouts_observed":   0,
+		"instruction_chars":  0,
+		"total_chars":        0,
 		"instruction_tokens": 0,
-		"total_tokens":      0,
-		"layers":            map[string]int{},
-		"sources":           []string{},
-		"source_count":      0,
+		"total_tokens":       0,
+		"layers":             map[string]int{},
+		"sources":            []string{},
+		"source_count":       0,
+	}
+	recoverySummary := map[string]interface{}{
+		"prompt_preflight_events":        0,
+		"prompt_preflight_by_event_type": map[string]int{},
+		"prompt_preflight_failure_codes": map[string]int{},
+		"replacement_history_available":  0,
+		"replacement_history_applied":    0,
+		"summary_failure_events":         0,
+		"summary_failure_reasons":        map[string]int{},
+		"summary_fallbacks":              0,
+		"summary_fallback_reasons":       map[string]int{},
 	}
 	if summaryGovernance, ok := summary["governance"].(map[string]interface{}); ok {
 		patchGovernance = patchGovernanceSummaryFromMap(summaryGovernance)
 	}
 	if summaryPrompt, ok := summary["prompt"].(map[string]interface{}); ok {
 		promptSummary = promptSummaryFromMap(summaryPrompt)
+	}
+	if summaryRecovery, ok := summary["recovery"].(map[string]interface{}); ok {
+		recoverySummary = recoverySummaryFromMap(summaryRecovery)
 	}
 	payload := map[string]interface{}{
 		"trace_id":         traceID,
@@ -7793,6 +7883,7 @@ func (h *Handler) GetRuntimeTrace(w http.ResponseWriter, r *http.Request) {
 		"summary":          summary,
 		"patch_governance": patchGovernance,
 		"prompt":           promptSummary,
+		"recovery":         recoverySummary,
 		"team_count":       countTeamIDsFromSummary(summary),
 		"filters": map[string]interface{}{
 			"session_id": strings.TrimSpace(r.URL.Query().Get("session_id")),
@@ -8192,14 +8283,25 @@ func summarizeRuntimeTrace(events []runtimeevents.Event) map[string]interface{} 
 			"profile_resource_labels":  []string{},
 		},
 		"prompt": map[string]interface{}{
-			"layouts_observed":  0,
-			"instruction_chars": 0,
-			"total_chars":       0,
+			"layouts_observed":   0,
+			"instruction_chars":  0,
+			"total_chars":        0,
 			"instruction_tokens": 0,
-			"total_tokens":      0,
-			"layers":            map[string]int{},
-			"sources":           []string{},
-			"source_count":      0,
+			"total_tokens":       0,
+			"layers":             map[string]int{},
+			"sources":            []string{},
+			"source_count":       0,
+		},
+		"recovery": map[string]interface{}{
+			"prompt_preflight_events":        0,
+			"prompt_preflight_by_event_type": map[string]int{},
+			"prompt_preflight_failure_codes": map[string]int{},
+			"replacement_history_available":  0,
+			"replacement_history_applied":    0,
+			"summary_failure_events":         0,
+			"summary_failure_reasons":        map[string]int{},
+			"summary_fallbacks":              0,
+			"summary_fallback_reasons":       map[string]int{},
 		},
 		"patch_approval_tickets": []string{},
 		"started_at":             nil,
@@ -8252,14 +8354,25 @@ func summarizeRuntimeTrace(events []runtimeevents.Event) map[string]interface{} 
 		"profile_resource_labels":  []string{},
 	}
 	prompt := map[string]interface{}{
-		"layouts_observed":  0,
-		"instruction_chars": 0,
-		"total_chars":       0,
+		"layouts_observed":   0,
+		"instruction_chars":  0,
+		"total_chars":        0,
 		"instruction_tokens": 0,
-		"total_tokens":      0,
-		"layers":            map[string]int{},
-		"sources":           []string{},
-		"source_count":      0,
+		"total_tokens":       0,
+		"layers":             map[string]int{},
+		"sources":            []string{},
+		"source_count":       0,
+	}
+	recovery := map[string]interface{}{
+		"prompt_preflight_events":        0,
+		"prompt_preflight_by_event_type": map[string]int{},
+		"prompt_preflight_failure_codes": map[string]int{},
+		"replacement_history_available":  0,
+		"replacement_history_applied":    0,
+		"summary_failure_events":         0,
+		"summary_failure_reasons":        map[string]int{},
+		"summary_fallbacks":              0,
+		"summary_fallback_reasons":       map[string]int{},
 	}
 	startedAt := events[0].Timestamp
 	endedAt := events[len(events)-1].Timestamp
@@ -8285,6 +8398,7 @@ func summarizeRuntimeTrace(events []runtimeevents.Event) map[string]interface{} 
 		applyTraceExecutionEvent(execution, event)
 		applyTraceProvenanceEvent(provenance, event)
 		applyTracePromptEvent(prompt, event)
+		applyTraceRecoveryEvent(recovery, event)
 	}
 
 	summary["event_types"] = eventTypes
@@ -8295,6 +8409,7 @@ func summarizeRuntimeTrace(events []runtimeevents.Event) map[string]interface{} 
 	summary["governance"] = governance
 	summary["provenance"] = provenance
 	summary["prompt"] = prompt
+	summary["recovery"] = recovery
 	summary["patch_approval_tickets"] = sortedStringKeys(tickets)
 	summary["started_at"] = startedAt
 	summary["ended_at"] = endedAt
@@ -8462,6 +8577,28 @@ func applyTracePromptEvent(prompt map[string]interface{}, event runtimeevents.Ev
 	}
 }
 
+func applyTraceRecoveryEvent(recovery map[string]interface{}, event runtimeevents.Event) {
+	if len(recovery) == 0 {
+		return
+	}
+	summary := runtimeevents.RecoveryView{
+		PromptPreflightEvents:       intMapValueAny(recovery, "prompt_preflight_events"),
+		PromptPreflightByEventType:  cloneIntMapAny(recovery["prompt_preflight_by_event_type"]),
+		PromptPreflightFailureCodes: cloneIntMapAny(recovery["prompt_preflight_failure_codes"]),
+		ReplacementHistoryAvailable: intMapValueAny(recovery, "replacement_history_available"),
+		ReplacementHistoryApplied:   intMapValueAny(recovery, "replacement_history_applied"),
+		SummaryFailureEvents:        intMapValueAny(recovery, "summary_failure_events"),
+		SummaryFailureReasons:       cloneIntMapAny(recovery["summary_failure_reasons"]),
+		SummaryFallbacks:            intMapValueAny(recovery, "summary_fallbacks"),
+		SummaryFallbackReasons:      cloneIntMapAny(recovery["summary_fallback_reasons"]),
+	}
+	runtimeevents.ApplyRecoveryEventForAPI(&summary, event)
+	built := buildRecoverySummaryFromView(summary)
+	for key, value := range built {
+		recovery[key] = value
+	}
+}
+
 func sortedStringKeys(values map[string]bool) []string {
 	if len(values) == 0 {
 		return []string{}
@@ -8546,14 +8683,28 @@ func buildProvenanceSummaryFromView(view runtimeevents.ProvenanceView) map[strin
 
 func buildPromptSummaryFromView(view runtimeevents.PromptView) map[string]interface{} {
 	return map[string]interface{}{
-		"layouts_observed":  view.LayoutsObserved,
-		"instruction_chars": view.InstructionChars,
-		"total_chars":       view.TotalChars,
+		"layouts_observed":   view.LayoutsObserved,
+		"instruction_chars":  view.InstructionChars,
+		"total_chars":        view.TotalChars,
 		"instruction_tokens": view.InstructionTokens,
-		"total_tokens":      view.TotalTokens,
-		"layers":            cloneIntMap(view.Layers),
-		"sources":           append([]string(nil), view.Sources...),
-		"source_count":      view.SourceCount,
+		"total_tokens":       view.TotalTokens,
+		"layers":             cloneIntMap(view.Layers),
+		"sources":            append([]string(nil), view.Sources...),
+		"source_count":       view.SourceCount,
+	}
+}
+
+func buildRecoverySummaryFromView(view runtimeevents.RecoveryView) map[string]interface{} {
+	return map[string]interface{}{
+		"prompt_preflight_events":        view.PromptPreflightEvents,
+		"prompt_preflight_by_event_type": cloneIntMap(view.PromptPreflightByEventType),
+		"prompt_preflight_failure_codes": cloneIntMap(view.PromptPreflightFailureCodes),
+		"replacement_history_available":  view.ReplacementHistoryAvailable,
+		"replacement_history_applied":    view.ReplacementHistoryApplied,
+		"summary_failure_events":         view.SummaryFailureEvents,
+		"summary_failure_reasons":        cloneIntMap(view.SummaryFailureReasons),
+		"summary_fallbacks":              view.SummaryFallbacks,
+		"summary_fallback_reasons":       cloneIntMap(view.SummaryFallbackReasons),
 	}
 }
 
@@ -8669,26 +8820,82 @@ func patchGovernanceSummaryFromMap(governance map[string]interface{}) map[string
 func promptSummaryFromMap(prompt map[string]interface{}) map[string]interface{} {
 	if len(prompt) == 0 {
 		return map[string]interface{}{
-			"layouts_observed":  0,
-			"instruction_chars": 0,
-			"total_chars":       0,
+			"layouts_observed":   0,
+			"instruction_chars":  0,
+			"total_chars":        0,
 			"instruction_tokens": 0,
-			"total_tokens":      0,
-			"layers":            map[string]int{},
-			"sources":           []string{},
-			"source_count":      0,
+			"total_tokens":       0,
+			"layers":             map[string]int{},
+			"sources":            []string{},
+			"source_count":       0,
 		}
 	}
 	return map[string]interface{}{
-		"layouts_observed":  intMapValueAny(prompt, "layouts_observed"),
-		"instruction_chars": intMapValueAny(prompt, "instruction_chars"),
-		"total_chars":       intMapValueAny(prompt, "total_chars"),
+		"layouts_observed":   intMapValueAny(prompt, "layouts_observed"),
+		"instruction_chars":  intMapValueAny(prompt, "instruction_chars"),
+		"total_chars":        intMapValueAny(prompt, "total_chars"),
 		"instruction_tokens": intMapValueAny(prompt, "instruction_tokens"),
-		"total_tokens":      intMapValueAny(prompt, "total_tokens"),
-		"layers":            cloneIntMapAny(prompt["layers"]),
-		"sources":           stringSliceValueAny(prompt["sources"]),
-		"source_count":      intMapValueAny(prompt, "source_count"),
+		"total_tokens":       intMapValueAny(prompt, "total_tokens"),
+		"layers":             cloneIntMapAny(prompt["layers"]),
+		"sources":            stringSliceValueAny(prompt["sources"]),
+		"source_count":       intMapValueAny(prompt, "source_count"),
 	}
+}
+
+func recoverySummaryFromMap(recovery map[string]interface{}) map[string]interface{} {
+	if len(recovery) == 0 {
+		return map[string]interface{}{
+			"prompt_preflight_events":        0,
+			"prompt_preflight_by_event_type": map[string]int{},
+			"prompt_preflight_failure_codes": map[string]int{},
+			"replacement_history_available":  0,
+			"replacement_history_applied":    0,
+			"summary_failure_events":         0,
+			"summary_failure_reasons":        map[string]int{},
+			"summary_fallbacks":              0,
+			"summary_fallback_reasons":       map[string]int{},
+		}
+	}
+	return map[string]interface{}{
+		"prompt_preflight_events":        intMapValueAny(recovery, "prompt_preflight_events"),
+		"prompt_preflight_by_event_type": cloneIntMapAny(recovery["prompt_preflight_by_event_type"]),
+		"prompt_preflight_failure_codes": cloneIntMapAny(recovery["prompt_preflight_failure_codes"]),
+		"replacement_history_available":  intMapValueAny(recovery, "replacement_history_available"),
+		"replacement_history_applied":    intMapValueAny(recovery, "replacement_history_applied"),
+		"summary_failure_events":         intMapValueAny(recovery, "summary_failure_events"),
+		"summary_failure_reasons":        cloneIntMapAny(recovery["summary_failure_reasons"]),
+		"summary_fallbacks":              intMapValueAny(recovery, "summary_fallbacks"),
+		"summary_fallback_reasons":       cloneIntMapAny(recovery["summary_fallback_reasons"]),
+	}
+}
+
+func buildRecoverySummaryFromTraceSummaries(traces []runtimeevents.TraceSummary) map[string]interface{} {
+	view := runtimeevents.RecoveryView{
+		PromptPreflightByEventType:  make(map[string]int),
+		PromptPreflightFailureCodes: make(map[string]int),
+		SummaryFailureReasons:       make(map[string]int),
+		SummaryFallbackReasons:      make(map[string]int),
+	}
+	for _, trace := range traces {
+		view.PromptPreflightEvents += trace.Recovery.PromptPreflightEvents
+		view.ReplacementHistoryAvailable += trace.Recovery.ReplacementHistoryAvailable
+		view.ReplacementHistoryApplied += trace.Recovery.ReplacementHistoryApplied
+		view.SummaryFailureEvents += trace.Recovery.SummaryFailureEvents
+		view.SummaryFallbacks += trace.Recovery.SummaryFallbacks
+		for eventType, count := range trace.Recovery.PromptPreflightByEventType {
+			view.PromptPreflightByEventType[eventType] += count
+		}
+		for code, count := range trace.Recovery.PromptPreflightFailureCodes {
+			view.PromptPreflightFailureCodes[code] += count
+		}
+		for reason, count := range trace.Recovery.SummaryFailureReasons {
+			view.SummaryFailureReasons[reason] += count
+		}
+		for reason, count := range trace.Recovery.SummaryFallbackReasons {
+			view.SummaryFallbackReasons[reason] += count
+		}
+	}
+	return buildRecoverySummaryFromView(view)
 }
 
 func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[string]interface{} {

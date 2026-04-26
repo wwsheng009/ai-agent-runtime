@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
@@ -99,4 +100,53 @@ func TestListTeamEventsHandlerFilters(t *testing.T) {
 	require.Len(t, resp.Events, 1)
 	require.Equal(t, int64(2), resp.Events[0].Seq)
 	require.Equal(t, "team.summary", resp.Events[0].Type)
+}
+
+func TestGetTeamFinalSummaryReturnsFallbackMetadataWhenLeadSessionExecutionFails(t *testing.T) {
+	ctx := context.Background()
+	store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:team-final-summary-handler?mode=memory&cache=shared"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		LeadSessionID: "lead-session",
+	})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, team.Task{
+		TeamID:  teamID,
+		Title:   "done task",
+		Status:  team.TaskStatusDone,
+		Summary: "finished",
+	})
+	require.NoError(t, err)
+
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetTeamStore(store)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/teams/"+teamID+"/summary/final", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, teamID, resp["team_id"])
+	require.Equal(t, "fallback", resp["summary_source"])
+	require.Equal(t, true, resp["used_fallback"])
+	require.Equal(t, "lead_session_error", resp["fallback_reason"])
+	require.Contains(t, resp["summary"], "Team "+teamID+" summary:")
+
+	events := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		TeamID:    teamID,
+		EventType: "team.summary.generated",
+		Limit:     10,
+	})
+	require.NotEmpty(t, events)
+	require.Equal(t, "fallback", events[0].Payload["summary_source"])
+	require.Equal(t, true, events[0].Payload["used_fallback"])
+	require.Equal(t, "lead_session_error", events[0].Payload["fallback_reason"])
 }
