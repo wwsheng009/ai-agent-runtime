@@ -40,3 +40,27 @@ func TestFormatRuntimeHTTPDebugEvent_SurfacesPromptLayoutSeparately(t *testing.T
 		t.Fatalf("expected prompt layout placeholder in request metadata:\n%s", output)
 	}
 }
+
+func TestFormatRuntimeHTTPDebugEvent_IncludesRetryAttemptAndDelay(t *testing.T) {
+	output := formatRuntimeHTTPDebugEvent(runtimellm.HTTPDebugEvent{
+		Source:       "provider_wrapper",
+		Phase:        "retry",
+		Protocol:     "openai",
+		Model:        "gpt-5",
+		Attempt:      1,
+		MaxAttempts:  3,
+		Error:        "HTTP 429: rate limit reached",
+		RetryReason:  "http_429",
+		RetryDelayMS: 25,
+	})
+
+	if !strings.Contains(output, "attempt=1/3") {
+		t.Fatalf("expected attempt label in output:\n%s", output)
+	}
+	if !strings.Contains(output, "retry_reason=http_429") {
+		t.Fatalf("expected retry reason in output:\n%s", output)
+	}
+	if !strings.Contains(output, "next_retry_delay_ms=25") {
+		t.Fatalf("expected retry delay in output:\n%s", output)
+	}
+}

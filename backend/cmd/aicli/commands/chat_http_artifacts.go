@@ -19,11 +19,15 @@ type runtimeHTTPArtifactEnvelope struct {
 	Provider           string                 `json:"provider,omitempty"`
 	Protocol           string                 `json:"protocol,omitempty"`
 	Model              string                 `json:"model,omitempty"`
+	Attempt            int                    `json:"attempt,omitempty"`
+	MaxAttempts        int                    `json:"max_attempts,omitempty"`
 	Method             string                 `json:"method,omitempty"`
 	URL                string                 `json:"url,omitempty"`
 	RequestMetadata    map[string]interface{} `json:"request_metadata,omitempty"`
 	ResponseStatusCode int                    `json:"response_status_code,omitempty"`
 	Error              string                 `json:"error,omitempty"`
+	RetryReason        string                 `json:"retry_reason,omitempty"`
+	RetryDelayMS       int64                  `json:"retry_delay_ms,omitempty"`
 	BodyBytes          int                    `json:"body_bytes,omitempty"`
 	BodyFormat         string                 `json:"body_format,omitempty"`
 	BodyPreview        string                 `json:"body_preview,omitempty"`
@@ -69,11 +73,15 @@ func buildRuntimeHTTPArtifactEnvelope(sequence int, event runtimellm.HTTPDebugEv
 		Provider:           strings.TrimSpace(event.Provider),
 		Protocol:           strings.TrimSpace(event.Protocol),
 		Model:              strings.TrimSpace(event.Model),
+		Attempt:            event.Attempt,
+		MaxAttempts:        event.MaxAttempts,
 		Method:             strings.TrimSpace(event.Method),
 		URL:                strings.TrimSpace(event.URL),
 		RequestMetadata:    cloneRuntimeHTTPArtifactMetadata(event.RequestMetadata),
 		ResponseStatusCode: event.ResponseStatusCode,
 		Error:              strings.TrimSpace(event.Error),
+		RetryReason:        strings.TrimSpace(event.RetryReason),
+		RetryDelayMS:       event.RetryDelayMS,
 	}
 
 	body, preview, byteCount := runtimeHTTPArtifactBody(event)

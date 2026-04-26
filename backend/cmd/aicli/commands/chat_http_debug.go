@@ -50,6 +50,9 @@ func formatRuntimeHTTPDebugEvent(event runtimellm.HTTPDebugEvent) string {
 	if value := strings.TrimSpace(event.Model); value != "" {
 		meta = append(meta, "model="+value)
 	}
+	if attempt := formatRuntimeHTTPAttemptLabel(event); attempt != "" {
+		meta = append(meta, "attempt="+attempt)
+	}
 	if len(meta) > 0 {
 		lines = append(lines, "[http-debug/runtime] "+strings.Join(meta, " "))
 	}
@@ -86,6 +89,16 @@ func formatRuntimeHTTPDebugEvent(event runtimellm.HTTPDebugEvent) string {
 		}
 		lines = append(lines, line)
 	}
+	if reason := strings.TrimSpace(event.RetryReason); reason != "" || event.RetryDelayMS > 0 {
+		line := "[http-debug/runtime] retry"
+		if reason != "" {
+			line += " retry_reason=" + reason
+		}
+		if event.RetryDelayMS > 0 {
+			line += fmt.Sprintf(" next_retry_delay_ms=%d", event.RetryDelayMS)
+		}
+		lines = append(lines, line)
+	}
 	if preview := strings.TrimSpace(event.ResponseBodyPreview); preview != "" {
 		lines = append(lines, fmt.Sprintf("[http-debug/runtime] response_body_preview=%s", truncateUTF8Bytes(preview, 4096)))
 	}
@@ -94,6 +107,16 @@ func formatRuntimeHTTPDebugEvent(event runtimellm.HTTPDebugEvent) string {
 		return "[http-debug/runtime] no details"
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatRuntimeHTTPAttemptLabel(event runtimellm.HTTPDebugEvent) string {
+	if event.Attempt <= 0 {
+		return ""
+	}
+	if event.MaxAttempts > 0 {
+		return fmt.Sprintf("%d/%d", event.Attempt, event.MaxAttempts)
+	}
+	return fmt.Sprintf("%d", event.Attempt)
 }
 
 func compactRuntimeHTTPDebugMetadata(metadata map[string]interface{}) string {
