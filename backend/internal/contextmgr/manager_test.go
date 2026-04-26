@@ -1222,6 +1222,44 @@ func TestTrimByTokenBudget_KeepsLastUserWhenStableContextExceedsBudget(t *testin
 	assert.Equal(t, "latest user question", trimmed[2].Content)
 }
 
+func TestTrimByTokenBudget_PreservesWorkspaceRecallAsStableAnchor(t *testing.T) {
+	messages := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		{
+			Role:    "assistant",
+			Content: "Profile context",
+			Metadata: types.Metadata{
+				"context_stage": "profile",
+			},
+		},
+		{
+			Role:    "assistant",
+			Content: "Workspace recall:\nSummary: workspace summary",
+			Metadata: types.Metadata{
+				"context_stage": "workspace",
+			},
+		},
+		{
+			Role:    "assistant",
+			Content: "recent assistant reply",
+		},
+		*types.NewUserMessage("latest user question"),
+	}
+
+	trimmed := trimByTokenBudget(messages, Budget{
+		MaxPromptTokens: 40,
+	}, func(messages []types.Message) int {
+		return len(messages) * 10
+	}, nil)
+
+	require.Len(t, trimmed, 4)
+	assert.Equal(t, "system", trimmed[0].Role)
+	assert.Equal(t, "profile", trimmed[1].Metadata.GetString("context_stage", ""))
+	assert.Equal(t, "workspace", trimmed[2].Metadata.GetString("context_stage", ""))
+	assert.Equal(t, "user", trimmed[3].Role)
+	assert.Equal(t, "latest user question", trimmed[3].Content)
+}
+
 func TestTrimByTokenBudget_DropsWholeToolReplayBlockInsteadOfLeavingOrphanTools(t *testing.T) {
 	messages := []types.Message{
 		*types.NewSystemMessage("system prompt"),

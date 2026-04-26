@@ -1484,7 +1484,7 @@ func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Me
 		}
 		if stage := message.Metadata.GetString("context_stage", ""); stage != "" {
 			switch stage {
-			case "ledger", "profile", "compaction":
+			case "ledger", "profile", "compaction", "workspace", "team":
 				stableMessages = append(stableMessages, *message.Clone())
 			default:
 				dynamicMessages = append(dynamicMessages, *message.Clone())
