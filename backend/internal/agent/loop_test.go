@@ -2897,6 +2897,7 @@ func (m *MockMutatingMCPManager) ListTools() []skill.ToolInfo {
 type MockRichSequenceMCPManager struct {
 	output string
 	meta   map[string]interface{}
+	err    error
 }
 
 func (m *MockRichSequenceMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
@@ -2908,6 +2909,9 @@ func (m *MockRichSequenceMCPManager) FindTool(toolName string) (skill.ToolInfo, 
 }
 
 func (m *MockRichSequenceMCPManager) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
+	if m.err != nil {
+		return m.output, m.err
+	}
 	if m.output == "" {
 		return nil, fmt.Errorf("no output configured for %s", toolName)
 	}
@@ -2915,6 +2919,9 @@ func (m *MockRichSequenceMCPManager) CallTool(ctx interface{}, mcpName, toolName
 }
 
 func (m *MockRichSequenceMCPManager) CallToolWithMeta(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
+	if m.err != nil {
+		return m.output, m.meta, m.err
+	}
 	if m.output == "" {
 		return nil, nil, fmt.Errorf("no output configured for %s", toolName)
 	}

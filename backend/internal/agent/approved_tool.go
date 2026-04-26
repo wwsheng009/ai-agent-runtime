@@ -97,6 +97,12 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 				}
 			}
 		}
+		if strings.TrimSpace(result.Error) != "" {
+			if message.Metadata == nil {
+				message.Metadata = types.NewMetadata()
+			}
+			message.Metadata["tool_error"] = result.Error
+		}
 		return message
 	}
 
@@ -138,14 +144,7 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 
 	if broker := a.GetToolBroker(); broker != nil && broker.IsBrokerTool(call.Name) {
 		rawOutput, rawMeta, callErr := broker.ExecuteToolCall(ctx, sessionID, call)
-		if callErr != nil {
-			result.Error = callErr.Error()
-		} else {
-			result.Output = rawOutput
-			if len(rawMeta) > 0 {
-				metadata["tool_metadata"] = cloneInterfaceMap(rawMeta)
-			}
-		}
+		recordToolExecutionOutcome(&result, metadata, rawOutput, rawMeta, callErr)
 		return finalize(), nil
 	}
 
@@ -179,11 +178,7 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 	} else {
 		result.Output, err = a.mcpManager.CallTool(ctx, toolInfo.MCPName, call.Name, call.Args)
 	}
-	if err != nil {
-		result.Error = err.Error()
-	} else if len(rawMeta) > 0 {
-		metadata["tool_metadata"] = cloneInterfaceMap(rawMeta)
-	}
+	recordToolExecutionOutcome(&result, metadata, result.Output, rawMeta, err)
 
 	message := finalize()
 	if pending != nil {

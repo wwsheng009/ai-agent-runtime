@@ -891,14 +891,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				callErr   error
 			)
 			rawOutput, rawMeta, callErr = broker.ExecuteToolCall(callCtx, sessionID, tc)
-			if callErr != nil {
-				result.Error = callErr.Error()
-			} else {
-				result.Output = rawOutput
-				if len(rawMeta) > 0 {
-					metadata["tool_metadata"] = cloneInterfaceMap(rawMeta)
-				}
-			}
+			recordToolExecutionOutcome(&result, metadata, rawOutput, rawMeta, callErr)
 
 			envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
 				SessionID:  sessionID,
@@ -1239,14 +1232,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		} else {
 			rawOutput, err = loop.agent.mcpManager.CallTool(ctx, toolInfo.MCPName, tc.Name, tc.Args)
 		}
-		if err != nil {
-			result.Error = err.Error()
-		} else {
-			result.Output = rawOutput
-			if len(rawMeta) > 0 {
-				metadata["tool_metadata"] = cloneInterfaceMap(rawMeta)
-			}
-		}
+		recordToolExecutionOutcome(&result, metadata, rawOutput, rawMeta, err)
 
 		envelope, gatewayErr := gateway.Process(ctx, output.RawToolResult{
 			SessionID:  sessionID,

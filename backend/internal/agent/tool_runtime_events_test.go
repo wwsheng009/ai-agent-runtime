@@ -219,3 +219,36 @@ func TestToolCompletedEventPayloadIncludesToolSource(t *testing.T) {
 		t.Fatalf("expected %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceToolkit, got)
 	}
 }
+
+func TestToolCompletedEventPayloadIncludesShellMetadata(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-shell",
+			Name: "execute_shell_command",
+			Args: map[string]interface{}{"command": "git status"},
+		},
+		Output: "On branch main",
+		Envelope: &output.Envelope{
+			Metadata: map[string]interface{}{
+				toolresult.SourceKey:   toolresult.SourceToolkit,
+				toolresult.MetadataKey: toolresult.KindText,
+				"shell_type":           "pwsh",
+				"shell_path":           `C:\Program Files\PowerShell\7\pwsh.exe`,
+				"shell_display":        `pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
+			},
+		},
+	}, 1, "trace-shell", nil)
+
+	if got := payload[toolresult.MetadataKey]; got != toolresult.KindText {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.MetadataKey, toolresult.KindText, got)
+	}
+	if got := payload["shell_type"]; got != "pwsh" {
+		t.Fatalf("expected shell_type=pwsh, got %#v", got)
+	}
+	if got := payload["shell_path"]; got != `C:\Program Files\PowerShell\7\pwsh.exe` {
+		t.Fatalf("expected shell_path to be preserved, got %#v", got)
+	}
+	if got := payload["shell_display"]; got != `pwsh (C:\Program Files\PowerShell\7\pwsh.exe)` {
+		t.Fatalf("expected shell_display to be preserved, got %#v", got)
+	}
+}

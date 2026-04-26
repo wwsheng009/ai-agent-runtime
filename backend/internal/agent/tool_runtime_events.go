@@ -70,6 +70,10 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 		if source := toolresult.SourceFromMetadata(result.Envelope.Metadata); source != "" {
 			payload[toolresult.SourceKey] = source
 		}
+		if kind := toolresult.KindFromMetadata(result.Envelope.Metadata); kind != "" {
+			payload[toolresult.MetadataKey] = kind
+		}
+		copyToolShellMetadata(payload, result.Envelope.Metadata)
 	}
 	mergeToolEventPayload(payload, extra)
 	return payload
@@ -265,6 +269,18 @@ func toolMetadataFromEnvelope(envelope *output.Envelope) map[string]interface{} 
 		return nil
 	}
 	return raw
+}
+
+func copyToolShellMetadata(payload map[string]interface{}, metadata map[string]interface{}) {
+	if payload == nil || len(metadata) == 0 {
+		return
+	}
+	for _, key := range []string{"shell_type", "shell_path", "shell_display"} {
+		value, _ := metadata[key].(string)
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			payload[key] = trimmed
+		}
+	}
 }
 
 func summarizeToolMetadata(metadata map[string]interface{}) string {
