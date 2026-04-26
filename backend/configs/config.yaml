@@ -293,6 +293,8 @@ providers:
                     native_tools:
                         image_generation: false
                 gpt-5.4:
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
                     input_modalities:
                         - text
                         - image
@@ -347,6 +349,8 @@ providers:
                     native_tools:
                         image_generation: true
                 gpt-5.4:
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
                     input_modalities:
                         - text
                         - image
@@ -413,6 +417,7 @@ providers:
             headers:
                 ChatGPT-Account-Id: ${CHATGPT_ACCOUNT_ID}
             max_tokens_limit: 10000
+            supports_max_output_tokens: false
             model_mappings:
                 '*': gpt-5.4
             model_capabilities:
@@ -428,6 +433,8 @@ providers:
                     native_tools:
                         image_generation: true
                 gpt-5.4:
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
                     input_modalities:
                         - text
                         - image

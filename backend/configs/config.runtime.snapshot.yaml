@@ -436,6 +436,7 @@ providers:
             headers:
                 ChatGPT-Account-Id: ${CHATGPT_ACCOUNT_ID}
             max_tokens_limit: 10000
+            supports_max_output_tokens: false
             model_mappings:
                 '*': gpt-5.4
             model_capabilities:
