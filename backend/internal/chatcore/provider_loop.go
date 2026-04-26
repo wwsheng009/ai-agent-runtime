@@ -35,6 +35,10 @@ type ToolExecutor interface {
 	ExecuteTool(ctx context.Context, call types.ToolCall) ToolResult
 }
 
+// HistoryCompactor optionally replaces oversized prompt history with a more
+// compact continuation-friendly history before the next provider request.
+type HistoryCompactor func(ctx context.Context, history []types.Message) ([]types.Message, bool, error)
+
 // ToolResult captures the normalized output of one tool invocation.
 type ToolResult struct {
 	Content  string                 `json:"content,omitempty"`
@@ -58,6 +62,7 @@ type ToolLoopRequest struct {
 	ModelCapabilityMaxContextTokens      int
 	ModelCapabilityAutoCompactRatio      float64
 	ModelCapabilityAutoCompactTokenLimit int
+	HistoryCompactor                     HistoryCompactor
 	Provider                             ProviderTurnExecutor
 	Tools                                []types.ToolDefinition
 	ToolExecutor                         ToolExecutor
@@ -105,7 +110,7 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 	response := NewChatResult()
 
 	for {
-		compactedHistory, preflightErr := enforceToolLoopPromptPreflight(history, req)
+		compactedHistory, preflightErr := enforceToolLoopPromptPreflight(ctx, history, req)
 		if preflightErr != nil {
 			return nil, preflightErr
 		}
@@ -211,7 +216,7 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 	}
 }
 
-func enforceToolLoopPromptPreflight(history []types.Message, req ToolLoopRequest) ([]types.Message, error) {
+func enforceToolLoopPromptPreflight(ctx context.Context, history []types.Message, req ToolLoopRequest) ([]types.Message, error) {
 	if req.CountTokens == nil || req.ActiveTurnMaxTokens <= 0 {
 		return history, nil
 	}
@@ -221,12 +226,48 @@ func enforceToolLoopPromptPreflight(history []types.Message, req ToolLoopRequest
 		return history, nil
 	}
 
+	alreadyCompacted := historyguard.HasActiveTurnCompactionSummary(history)
+	currentHistory := history
+	currentTokens := promptTokensBefore
+	activeTurnCompacted := false
 	if compacted, changed := compactToolLoopActiveTurnReplay(history, req); changed {
-		promptTokensAfter := req.CountTokens(compacted)
-		if promptTokensAfter <= req.ActiveTurnMaxTokens {
-			return compacted, nil
+		currentHistory = compacted
+		currentTokens = req.CountTokens(compacted)
+		activeTurnCompacted = true
+		if currentTokens <= req.ActiveTurnMaxTokens {
+			return currentHistory, nil
 		}
-		return compacted, newToolLoopPromptPreflightError(req, "prompt_still_exceeds_budget_after_compaction", promptTokensAfter, true, compacted, compacted)
+	} else if alreadyCompacted {
+		activeTurnCompacted = true
+	}
+
+	if req.HistoryCompactor != nil {
+		if compacted, changed, err := req.HistoryCompactor(ctx, currentHistory); err == nil && changed && len(compacted) > 0 {
+			currentHistory = compacted
+			currentTokens = req.CountTokens(compacted)
+			if currentTokens <= req.ActiveTurnMaxTokens {
+				return currentHistory, nil
+			}
+			return currentHistory, newToolLoopPromptPreflightError(
+				req,
+				"prompt_still_exceeds_budget_after_compaction",
+				currentTokens,
+				activeTurnCompacted,
+				currentHistory,
+				currentHistory,
+			)
+		}
+	}
+
+	if activeTurnCompacted {
+		return currentHistory, newToolLoopPromptPreflightError(
+			req,
+			"prompt_still_exceeds_budget_after_compaction",
+			currentTokens,
+			true,
+			currentHistory,
+			currentHistory,
+		)
 	}
 
 	return history, newToolLoopPromptPreflightError(req, "active_turn_not_compactable", promptTokensBefore, false, history, nil)
@@ -259,8 +300,13 @@ func newToolLoopPromptPreflightError(req ToolLoopRequest, code string, promptTok
 		detail = fmt.Sprintf("prompt tokens %d exceed budget %d, and no earlier replay block remains available for compaction", promptTokens, req.ActiveTurnMaxTokens)
 		suggestedAction = "请减少更早历史、提高 prompt 预算，或开启新的用户轮次。"
 	case "prompt_still_exceeds_budget_after_compaction":
-		reason = "prompt budget still exceeded after active-turn compaction"
-		detail = fmt.Sprintf("prompt tokens %d still exceed budget %d after compacting older replay in the current turn", promptTokens, req.ActiveTurnMaxTokens)
+		if activeTurnCompacted {
+			reason = "prompt budget still exceeded after active-turn compaction"
+			detail = fmt.Sprintf("prompt tokens %d still exceed budget %d after compacting older replay in the current turn", promptTokens, req.ActiveTurnMaxTokens)
+		} else {
+			reason = "prompt budget still exceeded after history compaction"
+			detail = fmt.Sprintf("prompt tokens %d still exceed budget %d after compacting the conversation history before the provider request is sent", promptTokens, req.ActiveTurnMaxTokens)
+		}
 		suggestedAction = "请继续收缩上下文层、提高预算，或从新的轮次继续。"
 	}
 

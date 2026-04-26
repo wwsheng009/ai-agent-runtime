@@ -580,6 +580,97 @@ func TestExecuteToolLoop_FailsPromptPreflightAfterCompactionStillExceedsBudget(t
 	}
 }
 
+func TestExecuteToolLoop_UsesWholeHistoryCompactorToContinueAfterPromptPreflight(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	provider := &fakeProviderTurnExecutor{
+		responses: []*ProviderTurnResponse{
+			{
+				Message: &types.Message{
+					Role: "assistant",
+					ToolCalls: []types.ToolCall{
+						{ID: "call_1", Name: "view", Args: map[string]interface{}{"file_path": "README.md"}},
+					},
+				},
+			},
+			{
+				Message: &types.Message{
+					Role: "assistant",
+					ToolCalls: []types.ToolCall{
+						{ID: "call_2", Name: "view", Args: map[string]interface{}{"file_path": "AGENTS.md"}},
+					},
+				},
+			},
+			{
+				Message: types.NewAssistantMessage("Final answer after whole-history compaction"),
+			},
+		},
+	}
+	tools := &fakeToolExecutor{
+		results: map[string]ToolResult{
+			"view": {
+				Content: "AGENTS " + large,
+			},
+		},
+	}
+
+	compactedHistory := []types.Message{
+		*types.NewUserMessage("继续分析当前实现"),
+		*types.NewUserMessage("Compacted context from earlier turns:\n- 已完成多轮文件查看\n- 继续输出最终结论"),
+	}
+	compactedHistory[1].Metadata["context_stage"] = "compaction"
+	compactedHistory[1].Metadata["compact_mode"] = "local"
+
+	compactCalls := 0
+	result, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:              "继续分析当前实现",
+		Provider:            provider,
+		ToolExecutor:        tools,
+		ActiveTurnMaxBytes:  64 * 1024,
+		ActiveTurnMaxTokens: 380,
+		CountTokens: func(messages []types.Message) int {
+			total := 0
+			for _, message := range messages {
+				total += len(message.Content) / 4
+			}
+			return total
+		},
+		HistoryCompactor: func(ctx context.Context, history []types.Message) ([]types.Message, bool, error) {
+			compactCalls++
+			if len(history) == 0 {
+				t.Fatal("expected oversized history to be passed into whole-history compactor")
+			}
+			return cloneMessages(compactedHistory), true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteToolLoop failed: %v", err)
+	}
+	if result == nil || result.Response == nil {
+		t.Fatal("expected loop result after whole-history compaction")
+	}
+	if result.Response.Output != "Final answer after whole-history compaction" {
+		t.Fatalf("unexpected final output: %+v", result.Response)
+	}
+	if compactCalls != 1 {
+		t.Fatalf("expected whole-history compactor to run once, got %d", compactCalls)
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("expected third provider request after compaction, got %d requests", len(provider.requests))
+	}
+	if len(provider.requests[2].Messages) != len(compactedHistory) {
+		t.Fatalf("expected third provider request to use compacted history, got %#v", provider.requests[2].Messages)
+	}
+	if stage := provider.requests[2].Messages[1].Metadata.GetString("context_stage", ""); stage != "compaction" {
+		t.Fatalf("expected compaction marker in third provider request, got %#v", provider.requests[2].Messages)
+	}
+	if len(result.History) != len(compactedHistory)+1 {
+		t.Fatalf("expected final history to keep compacted replacement plus final answer, got %#v", result.History)
+	}
+	if result.History[len(result.History)-1].Content != "Final answer after whole-history compaction" {
+		t.Fatalf("unexpected final history: %#v", result.History)
+	}
+}
+
 func TestExecuteToolLoop_AutoAttachesPromptImagesToHistory(t *testing.T) {
 	imagePath := filepath.Join(t.TempDir(), "diagram.png")
 	writeChatcoreTinyPNG(t, imagePath)
