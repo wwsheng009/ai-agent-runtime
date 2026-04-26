@@ -1208,6 +1208,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		"session_id":       sessionID(session),
 		"reasoning_effort": types.ResolveReasoningEffort(req.ReasoningEffort),
 	}
+	for key, value := range runtimeprompt.CurrentEnvironmentValues() {
+		agentContext[key] = value
+	}
 	if grantedPermissions := h.resolveGrantedSkillPermissions(r); len(grantedPermissions) > 0 {
 		agentContext["permissions"] = grantedPermissions
 	}

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextpack"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
 )
@@ -12,7 +13,13 @@ import (
 const agentContextSummaryMaxBytes = 4096
 
 func buildAgentContextMessages(contextValues map[string]interface{}, workspaceCtx *workspace.WorkspaceContext) []types.Message {
-	messages := make([]types.Message, 0, 2)
+	messages := make([]types.Message, 0, 4)
+	if environment := buildAgentEnvironmentContextMessage(contextValues); environment != nil {
+		messages = append(messages, *environment)
+	}
+	if guidance := buildAgentShellGuidanceMessage(); guidance != nil {
+		messages = append(messages, *guidance)
+	}
 	if workspaceCtx != nil && strings.TrimSpace(workspaceCtx.Summary) != "" {
 		messages = append(messages, *types.NewSystemMessage("Workspace context: " + strings.TrimSpace(workspaceCtx.Summary)))
 	}
@@ -20,6 +27,28 @@ func buildAgentContextMessages(contextValues map[string]interface{}, workspaceCt
 		messages = append(messages, *types.NewSystemMessage("Runtime context summary:\n" + summary))
 	}
 	return messages
+}
+
+func buildAgentEnvironmentContextMessage(contextValues map[string]interface{}) *types.Message {
+	workspacePath := ""
+	if len(contextValues) > 0 {
+		if value, ok := contextValues["workspace_path"].(string); ok {
+			workspacePath = strings.TrimSpace(value)
+		}
+	}
+	block := strings.TrimSpace(runtimeprompt.RenderEnvironmentContextBlock(workspacePath))
+	if block == "" {
+		return nil
+	}
+	return types.NewSystemMessage("Environment context:\n" + block)
+}
+
+func buildAgentShellGuidanceMessage() *types.Message {
+	guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidance())
+	if guidance == "" {
+		return nil
+	}
+	return types.NewSystemMessage(guidance)
 }
 
 func prependContextMessages(history []types.Message, contextMessages []types.Message) []types.Message {
@@ -160,4 +189,3 @@ func agentContextInt(value interface{}) (int, bool) {
 		return 0, false
 	}
 }
-

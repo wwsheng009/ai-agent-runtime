@@ -1073,11 +1073,25 @@ func TestAgentChat_EnableReAct_IncludesWorkspaceContextInModelRequest(t *testing
 	require.Len(t, provider.requests, 1)
 
 	request := provider.requests[0]
+	var sawEnvironmentContext bool
+	var shellGuidance string
 	var sawWorkspaceSummary bool
 	var sawRuntimeSummary bool
 	for _, message := range request.Messages {
 		if message.Role != "system" {
 			continue
+		}
+		if strings.Contains(message.Content, "Environment context:") &&
+			strings.Contains(message.Content, "<environment_context>") &&
+			strings.Contains(message.Content, "<cwd>"+tmpDir+"</cwd>") &&
+			strings.Contains(message.Content, "<shell>") &&
+			strings.Contains(message.Content, "<current_date>") &&
+			strings.Contains(message.Content, "<timezone>") {
+			sawEnvironmentContext = true
+		}
+		if strings.Contains(message.Content, "Shell guidance:") &&
+			strings.Contains(message.Content, "Detected user shell:") {
+			shellGuidance = message.Content
 		}
 		if strings.Contains(message.Content, "Workspace context:") &&
 			strings.Contains(message.Content, `query="search docs"`) &&
@@ -1089,6 +1103,11 @@ func TestAgentChat_EnableReAct_IncludesWorkspaceContextInModelRequest(t *testing
 			strings.Contains(message.Content, `"permissions":["shell"]`) {
 			sawRuntimeSummary = true
 		}
+	}
+	assert.True(t, sawEnvironmentContext, "expected environment context block in ReAct request")
+	assert.NotEmpty(t, shellGuidance, "expected shell guidance in ReAct request")
+	if runtimeexecutor.IsWindows() {
+		assert.Contains(t, strings.ToLower(shellGuidance), "head")
 	}
 	assert.True(t, sawWorkspaceSummary, "expected workspace summary in ReAct request")
 	assert.True(t, sawRuntimeSummary, "expected runtime context summary in ReAct request")
