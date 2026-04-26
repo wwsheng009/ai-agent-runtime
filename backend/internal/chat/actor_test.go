@@ -285,6 +285,40 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 	require.Less(t, assistantIndex, sessionEndIndex)
 }
 
+func TestAppendStructuredRunErrorPayload_UsesPromptPreflightMetadata(t *testing.T) {
+	payload := map[string]interface{}{
+		"error": "prompt preflight budget exceeded",
+	}
+	err := &agent.PromptPreflightError{
+		PromptTokens:                  1400,
+		PromptBudget:                  900,
+		Code:                          "active_turn_not_compactable",
+		Reason:                        "active-turn replay cannot be compacted further",
+		SuggestedAction:               "请开启新一轮对话、减少上下文，或提高预算。",
+		ResolvedProvider:              "test-provider",
+		ResolvedModel:                 "test-model",
+		ActiveTurnMessageCount:        5,
+		LatestReplayBlockMessageCount: 2,
+		ReplacementHistory: []types.Message{
+			*types.NewUserMessage("继续处理"),
+			*types.NewAssistantMessage("Compacted earlier tool replay in current turn: ..."),
+		},
+		ReplacementHistoryApplied: true,
+	}
+
+	appendStructuredRunErrorPayload(payload, err)
+
+	require.Equal(t, "prompt_preflight", payload["error_type"])
+	require.Equal(t, "active_turn_not_compactable", payload["failure_reason_code"])
+	require.Equal(t, "active-turn replay cannot be compacted further", payload["failure_reason"])
+	require.Equal(t, "请开启新一轮对话、减少上下文，或提高预算。", payload["suggested_action"])
+	require.Equal(t, "test-provider", payload["resolved_provider"])
+	require.Equal(t, "test-model", payload["resolved_model"])
+	require.Equal(t, true, payload["replacement_history_available"])
+	require.Equal(t, true, payload["replacement_history_applied"])
+	require.Equal(t, 2, payload["replacement_history_message_count"])
+}
+
 func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()

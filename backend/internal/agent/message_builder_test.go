@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -134,5 +135,97 @@ func TestMessageBuilder_PreservesExplicitEmptyReasoningContentMetadata(t *testin
 	}
 	if got, exists := messages[0].Metadata["reasoning_content"]; !exists || got != "" {
 		t.Fatalf("expected explicit empty reasoning_content metadata, got exists=%v value=%#v", exists, got)
+	}
+}
+
+func TestMessageBuilder_CompactsEarlierActiveTurnReplayWhenOversized(t *testing.T) {
+	builder := NewMessageBuilder([]types.Message{
+		*types.NewUserMessage("继续分析当前实现"),
+	})
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 450)
+
+	firstCalls := builder.AppendAssistantAction("", []types.ToolCall{
+		{
+			ID:   "call_1",
+			Name: "view",
+			Args: map[string]interface{}{"file_path": "README.md"},
+		},
+	}, nil, nil)
+	builder.AppendToolResults(firstCalls, []ToolResultPayload{
+		{ToolCallID: "call_1", Content: "README " + large},
+	})
+
+	secondCalls := builder.AppendAssistantAction("", []types.ToolCall{
+		{
+			ID:   "call_2",
+			Name: "view",
+			Args: map[string]interface{}{"file_path": "AGENTS.md"},
+		},
+	}, nil, nil)
+	builder.AppendToolResults(secondCalls, []ToolResultPayload{
+		{ToolCallID: "call_2", Content: "AGENTS " + large},
+	})
+
+	messages := builder.Messages()
+	if len(messages) != 4 {
+		t.Fatalf("expected user + compacted summary + latest assistant + latest tool, got %#v", messages)
+	}
+	if messages[1].Metadata.GetBool("active_turn_compaction", false) != true {
+		t.Fatalf("expected active turn compaction metadata, got %#v", messages[1].Metadata)
+	}
+	if messages[2].Role != "assistant" || len(messages[2].ToolCalls) != 1 || messages[2].ToolCalls[0].ID != "call_2" {
+		t.Fatalf("expected latest assistant tool call to remain raw, got %#v", messages[2])
+	}
+	if messages[3].Role != "tool" || messages[3].ToolCallID != "call_2" {
+		t.Fatalf("expected latest tool result to remain raw, got %#v", messages[3])
+	}
+	if strings.Contains(messages[3].Content, "README ") {
+		t.Fatalf("did not expect first oversized tool output to remain inline, got %q", messages[3].Content)
+	}
+}
+
+func TestMessageBuilder_CompactsEarlierActiveTurnReplayWhenTokenBudgetExceeded(t *testing.T) {
+	builder := NewMessageBuilder([]types.Message{
+		*types.NewUserMessage("继续分析当前实现"),
+	}).SetActiveTurnReplayCompaction(64*1024, 500, func(messages []types.Message) int {
+		total := 0
+		for _, message := range messages {
+			total += len(message.Content) / 4
+		}
+		return total
+	})
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+
+	firstCalls := builder.AppendAssistantAction("", []types.ToolCall{
+		{
+			ID:   "call_1",
+			Name: "view",
+			Args: map[string]interface{}{"file_path": "README.md"},
+		},
+	}, nil, nil)
+	builder.AppendToolResults(firstCalls, []ToolResultPayload{
+		{ToolCallID: "call_1", Content: "README " + large},
+	})
+
+	secondCalls := builder.AppendAssistantAction("", []types.ToolCall{
+		{
+			ID:   "call_2",
+			Name: "view",
+			Args: map[string]interface{}{"file_path": "AGENTS.md"},
+		},
+	}, nil, nil)
+	builder.AppendToolResults(secondCalls, []ToolResultPayload{
+		{ToolCallID: "call_2", Content: "AGENTS " + large},
+	})
+
+	messages := builder.Messages()
+	if len(messages) != 4 {
+		t.Fatalf("expected user + compacted summary + latest assistant + latest tool, got %#v", messages)
+	}
+	if messages[1].Metadata.GetBool("active_turn_compaction", false) != true {
+		t.Fatalf("expected active turn compaction metadata, got %#v", messages[1].Metadata)
+	}
+	if got := messages[1].Metadata.GetString("active_turn_compaction_reason", ""); !strings.Contains(got, "tokens") {
+		t.Fatalf("expected token-based compaction reason, got %#v", got)
 	}
 }

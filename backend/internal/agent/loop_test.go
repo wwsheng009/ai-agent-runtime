@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -33,10 +34,12 @@ type MockLLMProvider struct {
 }
 
 type SequenceLLMProvider struct {
-	name      string
-	responses []*llm.LLMResponse
-	callCount int
-	requests  []*llm.LLMRequest
+	name              string
+	responses         []*llm.LLMResponse
+	callCount         int
+	requests          []*llm.LLMRequest
+	providerCaps      *llm.ModelCapabilities
+	modelCapabilities map[string]agentconfig.ModelCapabilitySpec
 }
 
 func (m *MockLLMProvider) Name() string {
@@ -106,6 +109,9 @@ func (s *SequenceLLMProvider) CountTokens(text string) int {
 }
 
 func (s *SequenceLLMProvider) GetCapabilities() *llm.ModelCapabilities {
+	if s.providerCaps != nil {
+		return s.providerCaps
+	}
 	return &llm.ModelCapabilities{
 		MaxContextTokens:  128000,
 		MaxOutputTokens:   4096,
@@ -117,6 +123,11 @@ func (s *SequenceLLMProvider) GetCapabilities() *llm.ModelCapabilities {
 
 func (s *SequenceLLMProvider) CheckHealth(ctx context.Context) error {
 	return nil
+}
+
+func (s *SequenceLLMProvider) ResolveModelCapability(requestedModel string) (string, agentconfig.ModelCapabilitySpec, bool) {
+	capability, ok := llm.ResolveModelCapabilitySpec(requestedModel, s.modelCapabilities)
+	return requestedModel, capability, ok
 }
 
 func TestNewReActLoop(t *testing.T) {
@@ -932,6 +943,339 @@ func TestReActLoop_Run_ContextManagerRecallsArtifacts(t *testing.T) {
 	}
 }
 
+func TestReActLoop_Run_PromptBudgetCompactsActiveTurnReplayBeforeThirdRequest(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "先查看一次日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+				},
+			},
+			{
+				Content: "继续查看最新日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+				},
+			},
+			{
+				Content: "已完成分析。",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		MaxSteps:         3,
+		DefaultMaxTokens: 256,
+		SystemPrompt:     "You are a helpful assistant.",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens":    680,
+			"context_max_messages":         16,
+			"context_keep_recent_messages": 8,
+		},
+	}, &MockSequenceMCPManager{output: "LOG " + large}, llmRuntime)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        3,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+
+	result, err := loop.Run(context.Background(), "继续处理")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Len(t, provider.requests, 3)
+
+	foundCompaction := false
+	for _, message := range provider.requests[2].Messages {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			foundCompaction = true
+			break
+		}
+	}
+	require.True(t, foundCompaction, "expected third request to include active-turn compaction")
+	_, ok := provider.requests[2].Metadata["context_preflight"]
+	require.False(t, ok, "expected message builder compaction to avoid a later preflight compaction")
+}
+
+func TestReActLoop_EnforcePromptPreflight_CompactsActiveTurnReplayByTokenBudget(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{name: "test-provider"}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		DefaultMaxTokens: 256,
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens":    680,
+			"context_max_messages":         16,
+			"context_keep_recent_messages": 8,
+		},
+	}, nil, llmRuntime)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{})
+
+	messages := []types.Message{
+		*types.NewUserMessage("继续处理"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_1", Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_1", "LOG "+large),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_2", Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_2", "LOG "+large),
+	}
+
+	compacted, metadata, err := loop.enforcePromptPreflight("trace-1", "session-1", 2, messages, 0)
+	require.NoError(t, err)
+	require.Len(t, compacted, 4)
+	require.NotNil(t, metadata)
+	require.Equal(t, true, metadata["active_turn_compacted"])
+	require.Equal(t, "context_max_prompt_tokens", metadata["budget_source"])
+	require.Equal(t, "test-provider", metadata["resolved_provider"])
+	require.Equal(t, "test-model", metadata["resolved_model"])
+}
+
+func TestReActLoop_Run_PromptPreflightFailsWhenReplayCannotBeCompactedFurther(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "先查看日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+				},
+			},
+			{
+				Content: "这条响应不应被请求到。",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		MaxSteps:         3,
+		DefaultMaxTokens: 256,
+		SystemPrompt:     "You are a helpful assistant.",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens":    250,
+			"context_max_messages":         16,
+			"context_keep_recent_messages": 8,
+		},
+	}, &MockSequenceMCPManager{output: "LOG " + large}, llmRuntime)
+	bus := runtimeevents.NewBus()
+	var failedEvents []runtimeevents.Event
+	bus.Subscribe("context.preflight.failed", func(event runtimeevents.Event) {
+		failedEvents = append(failedEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        3,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+
+	result, err := loop.Run(context.Background(), "继续处理")
+	require.Error(t, err)
+	require.NotNil(t, result)
+	require.Contains(t, err.Error(), "prompt preflight budget exceeded")
+	preflightErr, ok := AsPromptPreflightError(err)
+	require.True(t, ok, "expected prompt preflight error type")
+	require.Equal(t, "active_turn_not_compactable", preflightErr.Code)
+	require.Equal(t, 250, preflightErr.PromptBudget)
+	require.Equal(t, false, preflightErr.ActiveTurnCompacted)
+	require.Len(t, provider.requests, 1)
+	require.NotEmpty(t, failedEvents)
+	payload := failedEvents[len(failedEvents)-1].Payload
+	require.Equal(t, "active-turn replay cannot be compacted further", payload["failure_reason"])
+	require.Equal(t, "active_turn_not_compactable", payload["failure_reason_code"])
+	require.Equal(t, false, payload["can_retry_after_compaction"])
+	require.NotNil(t, payload["active_turn_message_count"])
+	require.NotNil(t, payload["latest_replay_block_message_count"])
+}
+
+func TestReActLoop_RunWithSession_PersistsCompactedHistoryOnPromptPreflightFailure(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "先查看第一段日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app-1.log"}},
+				},
+			},
+			{
+				Content: "再查看第二段日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app-2.log"}},
+				},
+			},
+			{
+				Content: "这条响应不应被请求到。",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		MaxSteps:         4,
+		DefaultMaxTokens: 256,
+		SystemPrompt:     "You are a helpful assistant.",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens":    550,
+			"context_max_messages":         16,
+			"context_keep_recent_messages": 8,
+		},
+	}, &MockSequenceMCPManager{output: "LOG " + large}, llmRuntime)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        4,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+	session := newTestHistorySession("session-preflight-recovery")
+
+	result, err := loop.RunWithSession(context.Background(), "继续处理", session)
+	require.Error(t, err)
+	require.NotNil(t, result)
+	preflightErr, ok := AsPromptPreflightError(err)
+	require.True(t, ok, "expected prompt preflight error type")
+	require.Equal(t, "prompt_still_exceeds_budget_after_compaction", preflightErr.Code)
+	require.True(t, preflightErr.ActiveTurnCompacted)
+	require.True(t, preflightErr.ReplacementHistoryApplied)
+	require.NotEmpty(t, preflightErr.CloneReplacementHistory())
+	require.Len(t, provider.requests, 2)
+
+	messages := session.GetMessages()
+	require.Len(t, messages, 4)
+
+	foundCompaction := false
+	for _, message := range messages {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			foundCompaction = true
+			require.Contains(t, message.Content, "Compacted earlier tool replay in current turn:")
+			break
+		}
+	}
+	require.True(t, foundCompaction, "expected compacted replay summary to be persisted to session history")
+}
+
+func TestResolvePromptPreflightBudget_UsesModelCapabilityThresholdWhenMoreConservative(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+	})
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		providerCaps: &llm.ModelCapabilities{
+			MaxContextTokens: 200000,
+			MaxOutputTokens:  8192,
+		},
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"test-model": {
+				MaxContextTokens: 10000,
+				AutoCompactRatio: 0.75,
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	require.NoError(t, llmRuntime.RegisterProviderAlias("test-model", "test-provider"))
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Provider: "test-provider",
+			Model:    "test-model",
+		},
+		contextMgr: &contextmgr.Manager{
+			Budget: contextmgr.Budget{
+				MaxPromptTokens: 12000,
+			},
+		},
+	}
+
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	require.Equal(t, 7500, budget.PromptBudget)
+	require.Equal(t, "model_capability_context_ratio", budget.BudgetSource)
+	require.Equal(t, 10000, budget.ModelCapabilityMaxContextTokens)
+	require.InDelta(t, 0.75, budget.ModelCapabilityAutoCompactRatio, 0.001)
+	require.Equal(t, 200000, budget.ProviderContextLimit)
+	require.Equal(t, 8192, budget.ProviderOutputLimit)
+}
+
+func TestResolvePromptPreflightBudget_FallsBackToProviderContextLimitWhenCapabilityMissing(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+	})
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		providerCaps: &llm.ModelCapabilities{
+			MaxContextTokens: 8000,
+			MaxOutputTokens:  2048,
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	require.NoError(t, llmRuntime.RegisterProviderAlias("test-model", "test-provider"))
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Provider: "test-provider",
+			Model:    "test-model",
+		},
+		contextMgr: &contextmgr.Manager{
+			Budget: contextmgr.Budget{
+				MaxPromptTokens: 12000,
+			},
+		},
+	}
+
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	require.Equal(t, 7200, budget.PromptBudget)
+	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
+	require.Equal(t, 8000, budget.ProviderContextLimit)
+	require.Equal(t, 2048, budget.ProviderOutputLimit)
+}
+
 func TestReActLoop_Run_EmptyTerminalAssistantResponseFails(t *testing.T) {
 	agent := &Agent{
 		config: &Config{
@@ -1237,11 +1581,11 @@ func TestReActLoop_Run_StopsWhenBudgetExceeded(t *testing.T) {
 		IncludePrompt: true,
 		BudgetTokens:  10,
 	})
-	require.NoError(t, err)
+	require.Error(t, err)
 	require.False(t, result.Success)
 	require.NotNil(t, result.Usage)
-	assert.Equal(t, 12, result.Usage.TotalTokens)
-	assert.Contains(t, result.Error, "token budget exceeded")
+	assert.Equal(t, 0, result.Usage.TotalTokens)
+	assert.Contains(t, result.Error, "prompt preflight budget exceeded")
 }
 
 func TestReActLoop_RunWithSession_PersistsHistoryAcrossRuns(t *testing.T) {
@@ -1519,7 +1863,7 @@ func TestSubagentScheduler_RunChildren_AppliesBudgetAndSessionIsolation(t *testi
 			Role:         "researcher",
 			Goal:         "Inspect the logs.",
 			ReadOnly:     true,
-			BudgetTokens: 64,
+			BudgetTokens: 256,
 		},
 	})
 	require.NoError(t, err)
@@ -1531,7 +1875,7 @@ func TestSubagentScheduler_RunChildren_AppliesBudgetAndSessionIsolation(t *testi
 	assert.Equal(t, results[0].SessionID, startedSessionID)
 	assert.Equal(t, 10.0, completedUsageTotal)
 	require.Len(t, provider.requests, 1)
-	assert.Equal(t, 64, provider.requests[0].MaxTokens)
+	assert.Equal(t, 256, provider.requests[0].MaxTokens)
 }
 
 func TestReActLoop_GetAvailableTools_UsesCatalogSearch(t *testing.T) {

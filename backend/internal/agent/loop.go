@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
@@ -23,6 +25,7 @@ import (
 )
 
 const emptyTerminalAssistantResponseError = "upstream model returned an empty reply: no text and no tool calls"
+const defaultPromptPreflightAutoCompactRatio = 0.9
 
 // LoopReActConfig ReAct 循环配置
 type LoopReActConfig struct {
@@ -183,11 +186,13 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		history = append(history, *types.NewUserMessage(prompt))
 	}
 	builder := NewMessageBuilder(history)
+	loop.configureBuilderActiveTurnCompaction(builder, options.BudgetTokens)
 
 	// 添加系统提示词
 	if loop.agent.config.SystemPrompt != "" && !hasLeadingSystemPrompt(history, loop.agent.config.SystemPrompt) {
 		systemMsg := types.NewSystemMessage(loop.agent.config.SystemPrompt)
 		builder = NewMessageBuilder(append([]types.Message{*systemMsg}, history...))
+		loop.configureBuilderActiveTurnCompaction(builder, options.BudgetTokens)
 	}
 
 	var observations []types.Observation
@@ -228,6 +233,18 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// 1. Think: LLM 推理决定下一步行动
 		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, builder.Messages(), observations, options.ToolWhitelist, remainingBudget)
 		if err != nil {
+			if preflightErr, ok := AsPromptPreflightError(err); ok && options.PersistHistory != nil {
+				if replacement := preflightErr.CloneReplacementHistory(); len(replacement) > 0 {
+					if persistErr := options.PersistHistory(replacement); persistErr != nil {
+						loop.agent.AddError(fmt.Sprintf("persist compacted history after prompt preflight failed: %v", persistErr))
+						result.Error = err.Error()
+						result.Usage = totalUsage.Clone()
+						result.State = loop.agent.GetState()
+						return result, fmt.Errorf("%w: persisted compacted history failed: %v", err, persistErr)
+					}
+					preflightErr.ReplacementHistoryApplied = true
+				}
+			}
 			loop.agent.AddError(fmt.Sprintf("think failed: %v", err))
 			result.Error = err.Error()
 			result.Usage = totalUsage.Clone()
@@ -327,6 +344,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		observations = loop.observe(currentCtx, toolResults, observations, step)
 
 		// 4. 更新对话历史
+		loop.configureBuilderActiveTurnCompaction(builder, remainingBudget)
 		builder.AppendToolResults(normalizedCalls, toolResultsToPayloads(toolResults))
 		if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 			return nil, err
@@ -381,7 +399,14 @@ func stepLimitReachedMessage(maxSteps int) string {
 func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, step int, goal string, history []types.Message, observations []types.Observation, toolWhitelist []string, remainingBudget int) (thought string, action *AgentAction, usage *types.TokenUsage, err error) {
 	action = &AgentAction{}
 	managedHistory := history
-	if manager := loop.agent.GetContextManager(); manager != nil {
+	countTokens := func(messages []types.Message) int {
+		if loop == nil || loop.llmRuntime == nil {
+			return 0
+		}
+		return loop.llmRuntime.CountMessagesTokens(messages)
+	}
+	manager := loop.agent.GetContextManager()
+	if manager != nil {
 		taskID := sessionID
 		teamID := ""
 		var profileContext map[string]interface{}
@@ -402,17 +427,17 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			History:      history,
 			Memory:       loop.agent.GetMemory(),
 			Observations: observations,
-			CountTokens: func(messages []types.Message) int {
-				if loop.llmRuntime == nil {
-					return 0
-				}
-				return loop.llmRuntime.CountMessagesTokens(messages)
-			},
+			CountTokens:  countTokens,
 		})
 		managedHistory = built.Messages
 		action.Metadata = map[string]interface{}{
 			"context": built.Metadata,
 		}
+	}
+	var preflightMetadata map[string]interface{}
+	managedHistory, preflightMetadata, err = loop.enforcePromptPreflight(traceID, sessionID, step, managedHistory, remainingBudget)
+	if err != nil {
+		return "", nil, nil, err
 	}
 
 	// 构建请求
@@ -429,6 +454,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			"session_id":       sessionID,
 			"remaining_budget": remainingBudget,
 		},
+	}
+	if len(preflightMetadata) > 0 {
+		req.Metadata["context_preflight"] = cloneInterfaceMap(preflightMetadata)
 	}
 	if sessionID != "" {
 		req.Metadata["prompt_cache_key"] = sessionID
@@ -517,6 +545,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		"message_count":    len(req.Messages),
 		"tool_count":       len(req.Tools),
 		"remaining_budget": remainingBudget,
+	}
+	if len(preflightMetadata) > 0 {
+		requestPayload["context_preflight"] = cloneInterfaceMap(preflightMetadata)
 	}
 	if promptLayoutSummary != "" {
 		requestPayload["prompt_layout_summary"] = promptLayoutSummary
@@ -1859,6 +1890,477 @@ func mergeHookMetadata(metadata map[string]interface{}, message string, context 
 	for key, value := range context {
 		target[key] = value
 	}
+}
+
+func (loop *ReActLoop) configureBuilderActiveTurnCompaction(builder *MessageBuilder, remainingBudget int) {
+	if builder == nil {
+		return
+	}
+	if loop == nil || loop.llmRuntime == nil {
+		builder.SetActiveTurnReplayCompaction(historyguard.DefaultActiveTurnReplayMaxBytes, 0, nil)
+		return
+	}
+	budget := resolvePromptPreflightBudget(loop.llmRuntime, loop.agent, remainingBudget)
+	if budget.PromptBudget > 0 {
+		builder.SetActiveTurnReplayCompaction(
+			historyguard.DefaultActiveTurnReplayMaxBytes,
+			budget.PromptBudget,
+			loop.llmRuntime.CountMessagesTokens,
+		)
+		return
+	}
+	builder.SetActiveTurnReplayCompaction(historyguard.DefaultActiveTurnReplayMaxBytes, 0, nil)
+}
+
+type promptPreflightBudget struct {
+	PromptBudget                         int
+	BudgetSource                         string
+	BudgetSourceDetail                   string
+	BudgetCandidates                     map[string]interface{}
+	ResolvedProvider                     string
+	ResolvedModel                        string
+	ProviderContextLimit                 int
+	ProviderOutputLimit                  int
+	ModelCapabilityMaxContextTokens      int
+	ModelCapabilityAutoCompactRatio      float64
+	ModelCapabilityAutoCompactTokenLimit int
+}
+
+func (budget promptPreflightBudget) Metadata() map[string]interface{} {
+	metadata := map[string]interface{}{}
+	if budget.PromptBudget > 0 {
+		metadata["prompt_budget"] = budget.PromptBudget
+	}
+	if budget.BudgetSource != "" {
+		metadata["budget_source"] = budget.BudgetSource
+	}
+	if budget.BudgetSourceDetail != "" {
+		metadata["budget_source_detail"] = budget.BudgetSourceDetail
+	}
+	if len(budget.BudgetCandidates) > 0 {
+		metadata["budget_candidates"] = cloneInterfaceMap(budget.BudgetCandidates)
+	}
+	if budget.ResolvedProvider != "" {
+		metadata["resolved_provider"] = budget.ResolvedProvider
+	}
+	if budget.ResolvedModel != "" {
+		metadata["resolved_model"] = budget.ResolvedModel
+	}
+	if budget.ProviderContextLimit > 0 {
+		metadata["provider_context_limit"] = budget.ProviderContextLimit
+	}
+	if budget.ProviderOutputLimit > 0 {
+		metadata["provider_output_limit"] = budget.ProviderOutputLimit
+	}
+	if budget.ModelCapabilityMaxContextTokens > 0 {
+		metadata["model_capability_max_context_tokens"] = budget.ModelCapabilityMaxContextTokens
+	}
+	if budget.ModelCapabilityAutoCompactRatio > 0 {
+		metadata["model_capability_auto_compact_ratio"] = budget.ModelCapabilityAutoCompactRatio
+	}
+	if budget.ModelCapabilityAutoCompactTokenLimit > 0 {
+		metadata["model_capability_auto_compact_token_limit"] = budget.ModelCapabilityAutoCompactTokenLimit
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func (budget *promptPreflightBudget) addCandidate(source string, value int, detail string) {
+	if budget == nil || value <= 0 {
+		return
+	}
+	if budget.BudgetCandidates == nil {
+		budget.BudgetCandidates = make(map[string]interface{})
+	}
+	budget.BudgetCandidates[source] = value
+	if budget.PromptBudget <= 0 || value < budget.PromptBudget {
+		budget.PromptBudget = value
+		budget.BudgetSource = source
+		budget.BudgetSourceDetail = detail
+	}
+}
+
+type promptPreflightFailure struct {
+	Code                          string
+	Reason                        string
+	Detail                        string
+	SuggestedAction               string
+	CanRetryAfterCompaction       bool
+	ActiveTurnMessageCount        int
+	LatestReplayBlockMessageCount int
+}
+
+func (failure promptPreflightFailure) Metadata() map[string]interface{} {
+	metadata := map[string]interface{}{
+		"failure_reason_code": failure.Code,
+		"failure_reason":      failure.Reason,
+	}
+	if failure.Detail != "" {
+		metadata["failure_reason_detail"] = failure.Detail
+	}
+	if failure.SuggestedAction != "" {
+		metadata["suggested_action"] = failure.SuggestedAction
+	}
+	metadata["can_retry_after_compaction"] = failure.CanRetryAfterCompaction
+	if failure.ActiveTurnMessageCount > 0 {
+		metadata["active_turn_message_count"] = failure.ActiveTurnMessageCount
+	}
+	if failure.LatestReplayBlockMessageCount > 0 {
+		metadata["latest_replay_block_message_count"] = failure.LatestReplayBlockMessageCount
+	}
+	return metadata
+}
+
+func newPromptPreflightError(
+	budget promptPreflightBudget,
+	failure promptPreflightFailure,
+	promptTokens int,
+	activeTurnCompacted bool,
+	replacementHistory []types.Message,
+) *PromptPreflightError {
+	return &PromptPreflightError{
+		PromptTokens:                         promptTokens,
+		PromptBudget:                         budget.PromptBudget,
+		BudgetSource:                         budget.BudgetSource,
+		BudgetSourceDetail:                   budget.BudgetSourceDetail,
+		ResolvedProvider:                     budget.ResolvedProvider,
+		ResolvedModel:                        budget.ResolvedModel,
+		ProviderContextLimit:                 budget.ProviderContextLimit,
+		ProviderOutputLimit:                  budget.ProviderOutputLimit,
+		ModelCapabilityMaxContextTokens:      budget.ModelCapabilityMaxContextTokens,
+		ModelCapabilityAutoCompactRatio:      budget.ModelCapabilityAutoCompactRatio,
+		ModelCapabilityAutoCompactTokenLimit: budget.ModelCapabilityAutoCompactTokenLimit,
+		Code:                                 failure.Code,
+		Reason:                               failure.Reason,
+		Detail:                               failure.Detail,
+		SuggestedAction:                      failure.SuggestedAction,
+		CanRetryAfterCompaction:              failure.CanRetryAfterCompaction,
+		ActiveTurnCompacted:                  activeTurnCompacted,
+		ActiveTurnMessageCount:               failure.ActiveTurnMessageCount,
+		LatestReplayBlockMessageCount:        failure.LatestReplayBlockMessageCount,
+		ReplacementHistory:                   cloneMessageHistory(replacementHistory),
+	}
+}
+
+func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step int, messages []types.Message, remainingBudget int) ([]types.Message, map[string]interface{}, error) {
+	if len(messages) == 0 || loop == nil || loop.llmRuntime == nil {
+		return messages, nil, nil
+	}
+
+	budget := resolvePromptPreflightBudget(loop.llmRuntime, loop.agent, remainingBudget)
+	if budget.PromptBudget <= 0 {
+		return messages, nil, nil
+	}
+
+	promptTokensBefore := loop.llmRuntime.CountMessagesTokens(messages)
+	if promptTokensBefore <= 0 || promptTokensBefore <= budget.PromptBudget {
+		return messages, nil, nil
+	}
+
+	startedPayload := budget.Metadata()
+	if startedPayload == nil {
+		startedPayload = map[string]interface{}{}
+	}
+	startedPayload["trace_id"] = traceID
+	startedPayload["step"] = step
+	startedPayload["prompt_tokens"] = promptTokensBefore
+	startedPayload["message_count"] = len(messages)
+	startedPayload["remaining_budget"] = remainingBudget
+	startedPayload["active_turn_replay"] = true
+	loop.agent.emitRuntimeEvent("context.preflight.started", sessionID, "", startedPayload)
+
+	compactedMessages, compacted := historyguard.CompactActiveTurnReplayWithCounter(
+		messages,
+		historyguard.DefaultActiveTurnReplayMaxBytes,
+		budget.PromptBudget,
+		loop.llmRuntime.CountMessagesTokens,
+	)
+
+	preflightMetadata := budget.Metadata()
+	if preflightMetadata == nil {
+		preflightMetadata = map[string]interface{}{}
+	}
+	preflightMetadata["prompt_tokens_before"] = promptTokensBefore
+	preflightMetadata["message_count_before"] = len(messages)
+
+	if compacted {
+		promptTokensAfter := loop.llmRuntime.CountMessagesTokens(compactedMessages)
+		preflightMetadata["active_turn_compacted"] = true
+		preflightMetadata["prompt_tokens_after"] = promptTokensAfter
+		preflightMetadata["message_count_after"] = len(compactedMessages)
+
+		compactedPayload := budget.Metadata()
+		if compactedPayload == nil {
+			compactedPayload = map[string]interface{}{}
+		}
+		compactedPayload["trace_id"] = traceID
+		compactedPayload["step"] = step
+		compactedPayload["prompt_tokens_before"] = promptTokensBefore
+		compactedPayload["prompt_tokens_after"] = promptTokensAfter
+		compactedPayload["message_count_before"] = len(messages)
+		compactedPayload["message_count_after"] = len(compactedMessages)
+		compactedPayload["remaining_budget"] = remainingBudget
+		loop.agent.emitRuntimeEvent("context.preflight.compacted", sessionID, "", compactedPayload)
+		if promptTokensAfter <= budget.PromptBudget {
+			return compactedMessages, preflightMetadata, nil
+		}
+
+		failure := buildPromptPreflightFailure(
+			"prompt_still_exceeds_budget_after_compaction",
+			compactedMessages,
+			promptTokensAfter,
+			budget.PromptBudget,
+		)
+		failureErr := newPromptPreflightError(budget, failure, promptTokensAfter, true, compactedMessages)
+		failedPayload := budget.Metadata()
+		if failedPayload == nil {
+			failedPayload = map[string]interface{}{}
+		}
+		failedPayload["trace_id"] = traceID
+		failedPayload["step"] = step
+		failedPayload["prompt_tokens"] = promptTokensAfter
+		failedPayload["message_count"] = len(compactedMessages)
+		failedPayload["remaining_budget"] = remainingBudget
+		failedPayload["active_turn_compacted"] = true
+		failedPayload["prompt_tokens_before"] = promptTokensBefore
+		failedPayload["message_count_before"] = len(messages)
+		for key, value := range failureErr.Metadata() {
+			failedPayload[key] = value
+			preflightMetadata[key] = value
+		}
+		loop.agent.emitRuntimeEvent("context.preflight.failed", sessionID, "", failedPayload)
+		return nil, preflightMetadata, failureErr
+	}
+
+	preflightMetadata["active_turn_compacted"] = false
+	failure := buildPromptPreflightFailure(
+		"active_turn_not_compactable",
+		messages,
+		promptTokensBefore,
+		budget.PromptBudget,
+	)
+	failureErr := newPromptPreflightError(budget, failure, promptTokensBefore, false, nil)
+	failedPayload := budget.Metadata()
+	if failedPayload == nil {
+		failedPayload = map[string]interface{}{}
+	}
+	failedPayload["trace_id"] = traceID
+	failedPayload["step"] = step
+	failedPayload["prompt_tokens"] = promptTokensBefore
+	failedPayload["message_count"] = len(messages)
+	failedPayload["remaining_budget"] = remainingBudget
+	failedPayload["active_turn_compacted"] = false
+	for key, value := range failureErr.Metadata() {
+		failedPayload[key] = value
+		preflightMetadata[key] = value
+	}
+	loop.agent.emitRuntimeEvent("context.preflight.failed", sessionID, "", failedPayload)
+	return nil, preflightMetadata, failureErr
+}
+
+func buildPromptPreflightFailure(code string, messages []types.Message, promptTokens, promptBudget int) promptPreflightFailure {
+	failure := promptPreflightFailure{
+		Code:                          strings.TrimSpace(code),
+		ActiveTurnMessageCount:        activeTurnMessageCount(messages),
+		LatestReplayBlockMessageCount: latestReplayBlockMessageCount(messages),
+	}
+
+	switch failure.Code {
+	case "active_turn_not_compactable":
+		failure.Reason = "active-turn replay cannot be compacted further"
+		failure.Detail = fmt.Sprintf("prompt tokens %d exceed budget %d, and no earlier replay block remains available for compaction", promptTokens, promptBudget)
+		failure.SuggestedAction = "请减少更早历史、提高 prompt 预算，或开启新的用户轮次。"
+	case "prompt_still_exceeds_budget_after_compaction":
+		failure.Reason = "prompt budget still exceeded after active-turn compaction"
+		failure.Detail = fmt.Sprintf("prompt tokens %d still exceed budget %d after compacting older replay in the current turn", promptTokens, promptBudget)
+		failure.SuggestedAction = "请继续收缩上下文层、提高预算，或从新的轮次继续。"
+	default:
+		failure.Reason = "prompt exceeds budget before send"
+		failure.Detail = fmt.Sprintf("prompt tokens %d exceed budget %d before the provider request is sent", promptTokens, promptBudget)
+		failure.SuggestedAction = "请减少 prompt 尺寸或降低上下文保留。"
+	}
+
+	return failure
+}
+
+func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remainingBudget int) promptPreflightBudget {
+	budget := promptPreflightBudget{}
+	budget.addCandidate(
+		"default_context_max_prompt_tokens",
+		contextmgr.DefaultBudget().MaxPromptTokens,
+		"contextmgr.DefaultBudget().MaxPromptTokens",
+	)
+
+	if agent != nil {
+		if manager := agent.GetContextManager(); manager != nil && manager.Budget.MaxPromptTokens > 0 {
+			budget.addCandidate(
+				"context_max_prompt_tokens",
+				manager.Budget.MaxPromptTokens,
+				"context manager budget max_prompt_tokens",
+			)
+		}
+	}
+
+	resolvedProvider, resolvedModel := resolvePromptPreflightProviderModel(runtime, agent)
+	budget.ResolvedProvider = resolvedProvider
+	budget.ResolvedModel = resolvedModel
+
+	if provider := resolvePromptPreflightProvider(runtime, resolvedProvider, resolvedModel); provider != nil {
+		if caps := provider.GetCapabilities(); caps != nil {
+			budget.ProviderContextLimit = caps.MaxContextTokens
+			budget.ProviderOutputLimit = caps.MaxOutputTokens
+		}
+	}
+
+	if runtime != nil {
+		resolvedCapabilityProvider, resolvedCapabilityModel, capability, ok := llm.ResolveRuntimeModelCapability(runtime, resolvedProvider, resolvedModel)
+		if ok {
+			if resolvedCapabilityProvider != "" {
+				budget.ResolvedProvider = resolvedCapabilityProvider
+			}
+			if resolvedCapabilityModel != "" {
+				budget.ResolvedModel = resolvedCapabilityModel
+			}
+			budget.ModelCapabilityMaxContextTokens = capability.MaxContextTokens
+			budget.ModelCapabilityAutoCompactTokenLimit = capability.AutoCompactTokenLimit
+			if capability.AutoCompactTokenLimit > 0 {
+				value := capability.AutoCompactTokenLimit
+				if capability.MaxContextTokens > 0 && value > capability.MaxContextTokens {
+					value = capability.MaxContextTokens
+				}
+				budget.addCandidate(
+					"model_capability_auto_compact_token_limit",
+					value,
+					"provider/model capability auto_compact_token_limit",
+				)
+			} else if capability.MaxContextTokens > 0 {
+				ratio := capability.AutoCompactRatio
+				if ratio <= 0 || ratio >= 1 {
+					ratio = defaultPromptPreflightAutoCompactRatio
+				}
+				budget.ModelCapabilityAutoCompactRatio = ratio
+				value := int(math.Floor(float64(capability.MaxContextTokens) * ratio))
+				if value <= 0 || value > capability.MaxContextTokens {
+					value = capability.MaxContextTokens
+				}
+				budget.addCandidate(
+					"model_capability_context_ratio",
+					value,
+					fmt.Sprintf("floor(model capability max_context_tokens * %.2f)", ratio),
+				)
+			}
+		} else if budget.ProviderContextLimit > 0 {
+			value := int(math.Floor(float64(budget.ProviderContextLimit) * defaultPromptPreflightAutoCompactRatio))
+			if value <= 0 || value > budget.ProviderContextLimit {
+				value = budget.ProviderContextLimit
+			}
+			budget.addCandidate(
+				"provider_context_limit_default_ratio",
+				value,
+				fmt.Sprintf("floor(provider max_context_tokens * %.2f)", defaultPromptPreflightAutoCompactRatio),
+			)
+		}
+	}
+
+	if remainingBudget > 0 {
+		budget.addCandidate(
+			"remaining_budget",
+			remainingBudget,
+			"remaining token budget for current run",
+		)
+	}
+
+	return budget
+}
+
+func resolvePromptPreflightProviderModel(runtime *llm.LLMRuntime, agent *Agent) (string, string) {
+	providerName := ""
+	model := ""
+	if agent != nil && agent.config != nil {
+		providerName = strings.TrimSpace(agent.config.Provider)
+		model = strings.TrimSpace(agent.config.Model)
+	}
+	if runtime != nil {
+		if resolved := runtime.ResolveProviderName(providerName); resolved != "" {
+			providerName = resolved
+		}
+		if providerName == "" {
+			providerName = runtime.ResolveProviderName(model)
+		}
+		if providerName == "" {
+			providerName = strings.TrimSpace(runtime.DefaultProvider())
+		}
+		if model == "" {
+			model = strings.TrimSpace(runtime.DefaultModel())
+		}
+	}
+	return strings.TrimSpace(providerName), strings.TrimSpace(model)
+}
+
+func resolvePromptPreflightProvider(runtime *llm.LLMRuntime, providerName, model string) llm.Provider {
+	if runtime == nil {
+		return nil
+	}
+	if providerName != "" {
+		if provider, err := runtime.GetProvider(providerName); err == nil && provider != nil {
+			return provider
+		}
+	}
+	if model != "" {
+		if provider, err := runtime.GetProvider(model); err == nil && provider != nil {
+			return provider
+		}
+	}
+	return nil
+}
+
+func latestActiveTurnUserIndex(messages []types.Message) int {
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Role == "user" {
+			return index
+		}
+	}
+	return -1
+}
+
+func activeTurnMessageCount(messages []types.Message) int {
+	userIndex := latestActiveTurnUserIndex(messages)
+	if userIndex < 0 || userIndex >= len(messages)-1 {
+		return 0
+	}
+	return len(messages) - userIndex - 1
+}
+
+func latestReplayBlockMessageCount(messages []types.Message) int {
+	userIndex := latestActiveTurnUserIndex(messages)
+	if userIndex < 0 || userIndex >= len(messages)-1 {
+		return 0
+	}
+	start := latestActiveTurnReplayBlockStart(messages, userIndex)
+	if start < userIndex+1 || start > len(messages) {
+		return 0
+	}
+	return len(messages) - start
+}
+
+func latestActiveTurnReplayBlockStart(messages []types.Message, userIndex int) int {
+	if userIndex < 0 || userIndex >= len(messages)-1 {
+		return len(messages)
+	}
+
+	index := len(messages) - 1
+	for index > userIndex && messages[index].Role == "tool" {
+		index--
+	}
+	if index <= userIndex {
+		return userIndex + 1
+	}
+	if messages[index].Role == "assistant" && len(messages[index].ToolCalls) > 0 {
+		return index
+	}
+	return index
 }
 
 func resolveLoopMaxTokens(defaultMaxTokens int, remainingBudget int) int {

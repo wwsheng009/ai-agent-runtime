@@ -1448,6 +1448,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			"error":    firstNonEmptyError(execErr, result),
 			"duration": durationMillis(result),
 		}
+		appendStructuredRunErrorPayload(payload, execErr)
 		if result != nil {
 			payload["trace_id"] = result.TraceID
 			if result.LimitReached {
@@ -1465,6 +1466,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				"success":    execErr == nil && result != nil && result.Success,
 				"error":      firstNonEmptyError(execErr, result),
 			}
+			appendStructuredRunErrorPayload(hookPayload, execErr)
 			if result != nil {
 				hookPayload["trace_id"] = result.TraceID
 			}
@@ -2659,6 +2661,20 @@ func firstNonEmptyError(err error, result *agent.Result) string {
 		return ""
 	}
 	return strings.TrimSpace(result.Error)
+}
+
+func appendStructuredRunErrorPayload(payload map[string]interface{}, err error) {
+	if len(payload) == 0 || err == nil {
+		return
+	}
+	preflightErr, ok := agent.AsPromptPreflightError(err)
+	if !ok || preflightErr == nil {
+		return
+	}
+	payload["error_type"] = "prompt_preflight"
+	for key, value := range preflightErr.Metadata() {
+		payload[key] = value
+	}
 }
 
 func firstNonEmpty(values ...string) string {

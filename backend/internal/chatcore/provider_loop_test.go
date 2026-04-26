@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -313,6 +315,268 @@ func TestExecuteToolLoop_PreservesToolResultMetadataInHistory(t *testing.T) {
 	}
 	if got := result.Response.ToolExecutions[0].Metadata["tool_source"]; got != "broker" {
 		t.Fatalf("expected tool execution metadata tool_source=broker, got %#v", got)
+	}
+}
+
+func TestExecuteToolLoop_CompactsEarlierActiveTurnReplayWhenToolLoopExpands(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 450)
+	provider := &fakeProviderTurnExecutor{
+		responses: []*ProviderTurnResponse{
+			{
+				Message: &types.Message{
+					Role: "assistant",
+					ToolCalls: []types.ToolCall{
+						{ID: "call_1", Name: "view", Args: map[string]interface{}{"file_path": "README.md"}},
+					},
+				},
+			},
+			{
+				Message: &types.Message{
+					Role: "assistant",
+					ToolCalls: []types.ToolCall{
+						{ID: "call_2", Name: "view", Args: map[string]interface{}{"file_path": "AGENTS.md"}},
+					},
+				},
+			},
+			{
+				Message: types.NewAssistantMessage("Done"),
+			},
+		},
+	}
+	tools := &fakeToolExecutor{
+		results: map[string]ToolResult{
+			"view": {
+				Content: "AGENTS " + large,
+			},
+		},
+	}
+
+	result, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:       "继续分析当前实现",
+		Provider:     provider,
+		ToolExecutor: tools,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteToolLoop failed: %v", err)
+	}
+	if result == nil || len(result.History) < 5 {
+		t.Fatalf("expected replayed history, got %#v", result)
+	}
+	foundCompaction := false
+	for _, message := range result.History {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			foundCompaction = true
+			break
+		}
+	}
+	if !foundCompaction {
+		t.Fatalf("expected active turn compaction to appear in final history, got %#v", result.History)
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("expected 3 provider requests, got %d", len(provider.requests))
+	}
+	var compactedInReplay bool
+	for _, message := range provider.requests[2].Messages {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			compactedInReplay = true
+			break
+		}
+	}
+	if !compactedInReplay {
+		t.Fatalf("expected third provider request to include active turn compaction, got %#v", provider.requests[2].Messages)
+	}
+}
+
+func TestExecuteToolLoop_CompactsEarlierActiveTurnReplayWhenTokenBudgetExceeded(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	provider := &fakeProviderTurnExecutor{
+		responses: []*ProviderTurnResponse{
+			{
+				Message: &types.Message{
+					Role: "assistant",
+					ToolCalls: []types.ToolCall{
+						{ID: "call_1", Name: "view", Args: map[string]interface{}{"file_path": "README.md"}},
+					},
+				},
+			},
+			{
+				Message: &types.Message{
+					Role: "assistant",
+					ToolCalls: []types.ToolCall{
+						{ID: "call_2", Name: "view", Args: map[string]interface{}{"file_path": "AGENTS.md"}},
+					},
+				},
+			},
+			{
+				Message: types.NewAssistantMessage("Done"),
+			},
+		},
+	}
+	tools := &fakeToolExecutor{
+		results: map[string]ToolResult{
+			"view": {
+				Content: "AGENTS " + large,
+			},
+		},
+	}
+
+	result, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:              "继续分析当前实现",
+		Provider:            provider,
+		ToolExecutor:        tools,
+		ActiveTurnMaxBytes:  64 * 1024,
+		ActiveTurnMaxTokens: 500,
+		CountTokens: func(messages []types.Message) int {
+			total := 0
+			for _, message := range messages {
+				total += len(message.Content) / 4
+			}
+			return total
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteToolLoop failed: %v", err)
+	}
+	if result == nil || len(result.History) < 5 {
+		t.Fatalf("expected replayed history, got %#v", result)
+	}
+	foundCompaction := false
+	for _, message := range result.History {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			foundCompaction = true
+			if got := message.Metadata.GetString("active_turn_compaction_reason", ""); !strings.Contains(got, "tokens") {
+				t.Fatalf("expected token compaction reason, got %#v", got)
+			}
+			break
+		}
+	}
+	if !foundCompaction {
+		t.Fatalf("expected active turn compaction to appear in final history, got %#v", result.History)
+	}
+}
+
+func TestExecuteToolLoop_FailsPromptPreflightBeforeProviderWhenHistoryCannotBeCompacted(t *testing.T) {
+	provider := &fakeProviderTurnExecutor{}
+	prompt := strings.Repeat("0123456789", 80)
+
+	_, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:              prompt,
+		History:             []types.Message{*types.NewSystemMessage("You are helpful.")},
+		Provider:            provider,
+		ActiveTurnMaxTokens: 40,
+		CountTokens: func(messages []types.Message) int {
+			total := 0
+			for _, message := range messages {
+				total += len(message.Content) / 4
+			}
+			return total
+		},
+		PromptBudgetSource: "model_capability_auto_compact_token_limit",
+		ResolvedProvider:   "test-provider",
+		ResolvedModel:      "test-model",
+	})
+	if err == nil {
+		t.Fatal("expected prompt preflight failure")
+	}
+	preflightErr, ok := agent.AsPromptPreflightError(err)
+	if !ok || preflightErr == nil {
+		t.Fatalf("expected PromptPreflightError, got %v", err)
+	}
+	if preflightErr.Code != "active_turn_not_compactable" {
+		t.Fatalf("expected active_turn_not_compactable, got %+v", preflightErr)
+	}
+	if preflightErr.PromptBudget != 40 {
+		t.Fatalf("expected prompt budget 40, got %+v", preflightErr)
+	}
+	if preflightErr.ResolvedProvider != "test-provider" || preflightErr.ResolvedModel != "test-model" {
+		t.Fatalf("expected provider/model metadata, got %+v", preflightErr)
+	}
+	if replacement := preflightErr.CloneReplacementHistory(); len(replacement) != 0 {
+		t.Fatalf("expected no replacement history when replay cannot be compacted, got %#v", replacement)
+	}
+	if len(provider.requests) != 0 {
+		t.Fatalf("expected no provider requests before preflight failure, got %d", len(provider.requests))
+	}
+}
+
+func TestExecuteToolLoop_FailsPromptPreflightAfterCompactionStillExceedsBudget(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	provider := &fakeProviderTurnExecutor{
+		responses: []*ProviderTurnResponse{
+			{
+				Message: &types.Message{
+					Role: "assistant",
+					ToolCalls: []types.ToolCall{
+						{ID: "call_1", Name: "view", Args: map[string]interface{}{"file_path": "README.md"}},
+					},
+				},
+			},
+			{
+				Message: &types.Message{
+					Role: "assistant",
+					ToolCalls: []types.ToolCall{
+						{ID: "call_2", Name: "view", Args: map[string]interface{}{"file_path": "AGENTS.md"}},
+					},
+				},
+			},
+		},
+	}
+	tools := &fakeToolExecutor{
+		results: map[string]ToolResult{
+			"view": {
+				Content: "AGENTS " + large,
+			},
+		},
+	}
+
+	_, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:              "继续分析当前实现",
+		Provider:            provider,
+		ToolExecutor:        tools,
+		ActiveTurnMaxBytes:  64 * 1024,
+		ActiveTurnMaxTokens: 380,
+		CountTokens: func(messages []types.Message) int {
+			total := 0
+			for _, message := range messages {
+				total += len(message.Content) / 4
+			}
+			return total
+		},
+		PromptBudgetSource: "model_capability_auto_compact_ratio",
+		ResolvedModel:      "test-model",
+	})
+	if err == nil {
+		t.Fatal("expected prompt preflight failure after compaction")
+	}
+	preflightErr, ok := agent.AsPromptPreflightError(err)
+	if !ok || preflightErr == nil {
+		t.Fatalf("expected PromptPreflightError, got %v", err)
+	}
+	if preflightErr.Code != "prompt_still_exceeds_budget_after_compaction" {
+		t.Fatalf("expected prompt_still_exceeds_budget_after_compaction, got %+v", preflightErr)
+	}
+	if !preflightErr.ActiveTurnCompacted {
+		t.Fatalf("expected active turn to be marked compacted, got %+v", preflightErr)
+	}
+	replacement := preflightErr.CloneReplacementHistory()
+	if len(replacement) == 0 {
+		t.Fatalf("expected replacement history after compaction failure, got %#v", preflightErr)
+	}
+	foundCompaction := false
+	for _, message := range replacement {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			foundCompaction = true
+			if !strings.Contains(message.Content, "Compacted earlier tool replay in current turn:") {
+				t.Fatalf("expected compacted summary content, got %#v", message)
+			}
+			break
+		}
+	}
+	if !foundCompaction {
+		t.Fatalf("expected replacement history to include compacted replay summary, got %#v", replacement)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected preflight to stop before third provider call, got %d requests", len(provider.requests))
 	}
 }
 

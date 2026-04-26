@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -16,18 +17,33 @@ type ToolResultPayload struct {
 
 // MessageBuilder 负责构建并修复 tool_use/tool_result 历史。
 type MessageBuilder struct {
-	history []types.Message
+	history                []types.Message
+	activeTurnMaxBytes     int
+	activeTurnMaxTokens    int
+	activeTurnTokenCounter func([]types.Message) int
 }
 
 // NewMessageBuilder 创建一个新的 message builder。
 func NewMessageBuilder(history []types.Message) *MessageBuilder {
 	builder := &MessageBuilder{
-		history: make([]types.Message, 0, len(history)),
+		history:            make([]types.Message, 0, len(history)),
+		activeTurnMaxBytes: historyguard.DefaultActiveTurnReplayMaxBytes,
 	}
 	for _, message := range history {
 		builder.history = append(builder.history, *message.Clone())
 	}
 	return builder
+}
+
+// SetActiveTurnReplayCompaction 配置 active turn replay 压缩预算。
+func (b *MessageBuilder) SetActiveTurnReplayCompaction(maxBytes, maxTokens int, counter func([]types.Message) int) *MessageBuilder {
+	if b == nil {
+		return nil
+	}
+	b.activeTurnMaxBytes = maxBytes
+	b.activeTurnMaxTokens = maxTokens
+	b.activeTurnTokenCounter = counter
+	return b
 }
 
 // Messages 返回已构建的消息历史。
@@ -71,6 +87,28 @@ func (b *MessageBuilder) AppendToolResults(toolCalls []types.ToolCall, results [
 		}
 		b.history = append(b.history, *message)
 	}
+	if compacted, changed := b.compactActiveTurnReplay(); changed {
+		b.history = compacted
+	}
+}
+
+func (b *MessageBuilder) compactActiveTurnReplay() ([]types.Message, bool) {
+	if b == nil {
+		return nil, false
+	}
+	maxBytes := b.activeTurnMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = historyguard.DefaultActiveTurnReplayMaxBytes
+	}
+	if b.activeTurnTokenCounter != nil && b.activeTurnMaxTokens > 0 {
+		return historyguard.CompactActiveTurnReplayWithCounter(
+			b.history,
+			maxBytes,
+			b.activeTurnMaxTokens,
+			b.activeTurnTokenCounter,
+		)
+	}
+	return historyguard.CompactActiveTurnReplay(b.history, maxBytes)
 }
 
 func normalizeToolCalls(toolCalls []types.ToolCall) []types.ToolCall {
