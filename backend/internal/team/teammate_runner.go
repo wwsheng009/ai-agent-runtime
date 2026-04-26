@@ -17,12 +17,14 @@ type SessionClient interface {
 
 // SessionResult captures the outcome of a session prompt.
 type SessionResult struct {
-	Success      bool
-	Output       string
-	Error        string
-	TraceID      string
-	Steps        int
-	Observations []SessionObservation
+	Success       bool
+	Output        string
+	Error         string
+	ErrorType     string
+	ErrorMetadata map[string]interface{}
+	TraceID       string
+	Steps         int
+	Observations  []SessionObservation
 }
 
 // TaskRunResult captures the outcome of a teammate task execution.
@@ -31,6 +33,8 @@ type TaskRunResult struct {
 	Output         string
 	Summary        string
 	Error          string
+	ErrorType      string
+	ErrorMetadata  map[string]interface{}
 	TraceID        string
 	Blocked        bool
 	Outcome        TaskOutcomeStatus
@@ -119,10 +123,18 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 		},
 	})
 	if err != nil {
-		return &TaskRunResult{
-			Success: false,
-			Error:   err.Error(),
-		}, err
+		run := buildTaskRunResult(result)
+		if run == nil {
+			run = &TaskRunResult{}
+		}
+		run.Success = false
+		if strings.TrimSpace(run.Error) == "" {
+			run.Error = strings.TrimSpace(err.Error())
+		}
+		if strings.TrimSpace(run.Summary) == "" {
+			run.Summary = truncateLine(firstNonEmptyString(run.Error, err.Error()), 240)
+		}
+		return run, err
 	}
 	if result == nil {
 		return &TaskRunResult{
@@ -131,19 +143,7 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 		}, fmt.Errorf("session result is nil")
 	}
 
-	run := &TaskRunResult{
-		Success: result.Success,
-		Output:  strings.TrimSpace(result.Output),
-		Error:   strings.TrimSpace(firstNonEmptyString(result.Error)),
-		TraceID: result.TraceID,
-	}
-	run.Summary = extractTaskSummary(run.Output)
-	if run.Summary == "" && run.Error != "" {
-		run.Summary = truncateLine(run.Error, 240)
-	}
-	if run.Summary == "" {
-		run.Summary = truncateLine(run.Output, 240)
-	}
+	run := buildTaskRunResult(result)
 	applyObservedTaskOutcome(run, result.Observations)
 	if !run.OutcomeApplied {
 		applyStructuredTaskOutcome(run, run.Output)
@@ -296,6 +296,39 @@ func (r *TeammateRunner) recoverStructuredTaskOutcome(ctx context.Context, taskI
 	run.Structured = true
 	run.OutcomeApplied = true
 	run.ProtocolError = ""
+}
+
+func buildTaskRunResult(result *SessionResult) *TaskRunResult {
+	if result == nil {
+		return nil
+	}
+	run := &TaskRunResult{
+		Success:       result.Success,
+		Output:        strings.TrimSpace(result.Output),
+		Error:         strings.TrimSpace(firstNonEmptyString(result.Error)),
+		ErrorType:     strings.TrimSpace(result.ErrorType),
+		ErrorMetadata: cloneStructuredErrorMetadata(result.ErrorMetadata),
+		TraceID:       strings.TrimSpace(result.TraceID),
+	}
+	run.Summary = extractTaskSummary(run.Output)
+	if run.Summary == "" && run.Error != "" {
+		run.Summary = truncateLine(run.Error, 240)
+	}
+	if run.Summary == "" {
+		run.Summary = truncateLine(run.Output, 240)
+	}
+	return run
+}
+
+func cloneStructuredErrorMetadata(input map[string]interface{}) map[string]interface{} {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func extractTaskSummary(output string) string {

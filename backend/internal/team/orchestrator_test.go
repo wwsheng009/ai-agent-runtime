@@ -366,6 +366,73 @@ func TestOrchestratorExecuteAssignmentFailsProtocolErrorOutput(t *testing.T) {
 	assert.Equal(t, TeammateStateIdle, mate.State)
 }
 
+func TestOrchestratorExecuteAssignmentPublishesPromptPreflightFailureMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-1",
+		TeamID:    teamID,
+		SessionID: "mate-session",
+		State:     TeammateStateBusy,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "preflight task",
+		Status: TaskStatusRunning,
+	})
+	require.NoError(t, err)
+
+	orchestrator := NewOrchestrator(store, nil, nil)
+	orchestrator.Runner = &TeammateRunner{
+		Sessions: &staticSessionClient{
+			result: &SessionResult{
+				Success:   false,
+				Error:     "prompt preflight budget exceeded",
+				TraceID:   "trace-team-preflight",
+				ErrorType: "prompt_preflight",
+				ErrorMetadata: map[string]interface{}{
+					"failure_reason_code":               "prompt_still_exceeds_budget_after_compaction",
+					"replacement_history_applied":       true,
+					"replacement_history_available":     true,
+					"replacement_history_message_count": 4,
+				},
+			},
+			err: assert.AnError,
+		},
+	}
+	orchestrator.Events = NewTeamEventBus()
+
+	var failedEvent *TeamEvent
+	orchestrator.Events.Subscribe("task.failed", func(event TeamEvent) {
+		cloned := event
+		failedEvent = &cloned
+	})
+
+	orchestrator.executeAssignment(ctx, teamID, Assignment{
+		Task: Task{
+			ID:     taskID,
+			TeamID: teamID,
+			Title:  "preflight task",
+		},
+		Teammate: Teammate{
+			ID:        "mate-1",
+			TeamID:    teamID,
+			SessionID: "mate-session",
+		},
+	})
+
+	require.NotNil(t, failedEvent)
+	assert.Equal(t, "task.failed", failedEvent.Type)
+	assert.Equal(t, "trace-team-preflight", failedEvent.Payload["trace_id"])
+	assert.Equal(t, "prompt_preflight", failedEvent.Payload["error_type"])
+	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", failedEvent.Payload["failure_reason_code"])
+	assert.Equal(t, true, failedEvent.Payload["replacement_history_applied"])
+}
+
 func TestOrchestratorExecuteAssignmentMarksTeamDoneWhenLastTaskCompletes(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

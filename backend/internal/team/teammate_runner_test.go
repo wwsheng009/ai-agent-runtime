@@ -102,6 +102,42 @@ func TestTeammateRunnerParsesStructuredJSONOutcome(t *testing.T) {
 	assert.Equal(t, "mate-2", result.HandoffTo)
 }
 
+func TestTeammateRunnerPreservesStructuredSessionErrorMetadata(t *testing.T) {
+	runner := &TeammateRunner{
+		Sessions: &staticSessionClient{
+			result: &SessionResult{
+				Success:   false,
+				Error:     "prompt preflight budget exceeded",
+				TraceID:   "trace-task-preflight",
+				ErrorType: "prompt_preflight",
+				ErrorMetadata: map[string]interface{}{
+					"failure_reason_code":           "prompt_still_exceeds_budget_after_compaction",
+					"replacement_history_applied":   true,
+					"replacement_history_available": true,
+				},
+			},
+			err: assert.AnError,
+		},
+	}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-1",
+		SessionID: "session-1",
+	}, Task{
+		ID:     "task-1",
+		TeamID: "team-1",
+		Title:  "task-1",
+	})
+	require.Error(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Success)
+	assert.Equal(t, "trace-task-preflight", result.TraceID)
+	assert.Equal(t, "prompt_preflight", result.ErrorType)
+	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", result.ErrorMetadata["failure_reason_code"])
+	assert.Equal(t, true, result.ErrorMetadata["replacement_history_applied"])
+	assert.Contains(t, result.Summary, "prompt preflight")
+}
+
 func TestTeammateRunnerMarksMailboxDigestReadWhenInjected(t *testing.T) {
 	store, err := NewSQLiteStore(&StoreConfig{
 		DSN: "file:teammate-runner-mailbox-test?mode=memory&cache=shared",

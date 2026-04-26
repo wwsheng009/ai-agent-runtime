@@ -148,6 +148,73 @@ func TestApplyBlockedTaskOutcomeHandoffSkipsReplan(t *testing.T) {
 	assert.Equal(t, "handoff", result.Message.Kind)
 }
 
+func TestApplyBlockedTaskOutcomeCapturesStructuredReplanFailure(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{
+		LeadSessionID: "lead-session",
+	})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-1",
+		TeamID:    teamID,
+		SessionID: "mate-session",
+		State:     TeammateStateBusy,
+	})
+	require.NoError(t, err)
+	assignee := "mate-1"
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID:   teamID,
+		Title:    "blocked task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
+	})
+	require.NoError(t, err)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+
+	result, err := ApplyBlockedTaskOutcome(ctx, TaskOutcomeApplyServices{
+		Store:   store,
+		Mailbox: NewMailboxService(store),
+		Planner: &LeadPlanner{
+			Sessions: &staticSessionClient{
+				result: &SessionResult{
+					Success:   false,
+					Error:     "prompt preflight budget exceeded",
+					TraceID:   "trace-replan-preflight",
+					ErrorType: "prompt_preflight",
+					ErrorMetadata: map[string]interface{}{
+						"failure_reason_code":         "prompt_still_exceeds_budget_after_compaction",
+						"replacement_history_applied": true,
+					},
+				},
+				err: assert.AnError,
+			},
+			Store: store,
+		},
+	}, BlockedTaskOutcomeRequest{
+		Team: Team{
+			ID:            teamID,
+			LeadSessionID: "lead-session",
+		},
+		Task:       *task,
+		TeammateID: "mate-1",
+		Outcome: TaskOutcomeContract{
+			Summary: "waiting on architecture review",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "trace-replan-preflight", result.ReplanTraceID)
+	assert.Equal(t, "prompt_preflight", result.ReplanErrorType)
+	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", result.ReplanErrorMetadata["failure_reason_code"])
+	assert.Equal(t, true, result.ReplanErrorMetadata["replacement_history_applied"])
+	assert.Contains(t, result.ReplanError, "assert.AnError")
+	assert.Nil(t, result.PlanResult)
+}
+
 func TestApplyTerminalTaskOutcomeReleasesTaskAndSetsResultRef(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

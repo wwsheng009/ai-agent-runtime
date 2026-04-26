@@ -63,7 +63,7 @@ func (p *LeadPlanner) InitialPlan(ctx context.Context, team Team, goal string) (
 	prompt := buildPlanPrompt(goal, nil, p.buildTeamContext(ctx, teamID, ""))
 	result, err := p.Sessions.SubmitPrompt(ctx, leadSession, prompt, buildLeadRunMeta(teamID, ""))
 	if err != nil {
-		return nil, err
+		return nil, WrapSessionExecutionError(err, result)
 	}
 	payload, err := parsePlanPayload(result)
 	if err != nil {
@@ -92,7 +92,7 @@ func (p *LeadPlanner) ReplanOnFailure(ctx context.Context, team Team, failed Tas
 	prompt := buildPlanPrompt("", &failed, p.buildTeamContext(ctx, teamID, failed.ID))
 	result, err := p.Sessions.SubmitPrompt(ctx, leadSession, prompt, buildLeadRunMeta(teamID, failed.ID))
 	if err != nil {
-		return nil, err
+		return nil, WrapSessionExecutionError(err, result)
 	}
 	payload, err := parsePlanPayload(result)
 	if err != nil {
@@ -103,12 +103,25 @@ func (p *LeadPlanner) ReplanOnFailure(ctx context.Context, team Team, failed Tas
 
 // FinalSummary returns a team summary, optionally using the lead session.
 func (p *LeadPlanner) FinalSummary(ctx context.Context, teamID string) (string, error) {
+	result, err := p.FinalSummaryDetailed(ctx, teamID)
+	if err != nil {
+		return "", err
+	}
+	if result == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(result.Summary), nil
+}
+
+// FinalSummaryDetailed returns the final summary together with whether the lead
+// summary path succeeded or a structured fallback path was used instead.
+func (p *LeadPlanner) FinalSummaryDetailed(ctx context.Context, teamID string) (*FinalSummaryResult, error) {
 	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
-		return "", fmt.Errorf("team id is required")
+		return nil, fmt.Errorf("team id is required")
 	}
 	if p == nil {
-		return "", fmt.Errorf("lead planner is nil")
+		return nil, fmt.Errorf("lead planner is nil")
 	}
 	var (
 		team  *Team
@@ -117,30 +130,100 @@ func (p *LeadPlanner) FinalSummary(ctx context.Context, teamID string) (string, 
 	if p.Store != nil {
 		loaded, err := p.Store.GetTeam(ctx, teamID)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		team = loaded
 		list, err := p.Store.ListTasks(ctx, TaskFilter{TeamID: teamID})
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		tasks = list
 	}
 
 	fallback := buildSummaryFallback(teamID, tasks)
-	if p.Sessions == nil || team == nil || strings.TrimSpace(team.LeadSessionID) == "" {
-		return fallback, nil
+	if p.Sessions == nil {
+		return &FinalSummaryResult{
+			Summary:        fallback,
+			SummarySource:  FinalSummarySourceFallback,
+			UsedFallback:   true,
+			FallbackReason: FinalSummaryFallbackSessionsNotConfigured,
+		}, nil
+	}
+	if team == nil {
+		return &FinalSummaryResult{
+			Summary:        fallback,
+			SummarySource:  FinalSummarySourceFallback,
+			UsedFallback:   true,
+			FallbackReason: FinalSummaryFallbackTeamNotAvailable,
+		}, nil
+	}
+	leadSessionID := strings.TrimSpace(team.LeadSessionID)
+	if leadSessionID == "" {
+		return &FinalSummaryResult{
+			Summary:        fallback,
+			SummarySource:  FinalSummarySourceFallback,
+			UsedFallback:   true,
+			FallbackReason: FinalSummaryFallbackLeadSessionMissing,
+		}, nil
 	}
 
 	prompt := buildSummaryPrompt(teamID, tasks, p.buildTeamContext(ctx, teamID, ""))
-	result, err := p.Sessions.SubmitPrompt(ctx, team.LeadSessionID, prompt, buildLeadRunMeta(teamID, ""))
+	result, err := p.Sessions.SubmitPrompt(ctx, leadSessionID, prompt, buildLeadRunMeta(teamID, ""))
 	if err != nil {
-		return fallback, nil
+		detailed := &FinalSummaryResult{
+			Summary:        fallback,
+			SummarySource:  FinalSummarySourceFallback,
+			UsedFallback:   true,
+			FallbackReason: FinalSummaryFallbackLeadSessionError,
+		}
+		applyFinalSummarySessionError(detailed, buildFinalSummarySessionError(err, result))
+		return detailed, nil
 	}
 	if result != nil && strings.TrimSpace(result.Output) != "" {
-		return strings.TrimSpace(result.Output), nil
+		return &FinalSummaryResult{
+			Summary:       strings.TrimSpace(result.Output),
+			SummarySource: FinalSummarySourceLead,
+			TraceID:       strings.TrimSpace(result.TraceID),
+		}, nil
 	}
-	return fallback, nil
+	detailed := &FinalSummaryResult{
+		Summary:        fallback,
+		SummarySource:  FinalSummarySourceFallback,
+		UsedFallback:   true,
+		FallbackReason: FinalSummaryFallbackLeadOutputEmpty,
+		TraceID:        strings.TrimSpace(result.TraceID),
+	}
+	applyFinalSummarySessionError(detailed, buildFinalSummarySessionError(nil, result))
+	return detailed, nil
+}
+
+func buildFinalSummarySessionError(err error, result *SessionResult) error {
+	if err != nil {
+		return WrapSessionExecutionError(err, result)
+	}
+	if result == nil {
+		return nil
+	}
+	if strings.TrimSpace(result.Error) == "" && strings.TrimSpace(result.ErrorType) == "" && len(result.ErrorMetadata) == 0 {
+		return nil
+	}
+	return WrapSessionExecutionError(fmt.Errorf("%s", firstNonEmptyString(strings.TrimSpace(result.Error), "lead summary generation failed")), result)
+}
+
+func applyFinalSummarySessionError(target *FinalSummaryResult, err error) {
+	if target == nil || err == nil {
+		return
+	}
+	target.SessionError = err
+	if sessionErr, ok := AsSessionExecutionError(err); ok && sessionErr != nil {
+		target.TraceID = strings.TrimSpace(sessionErr.TraceID)
+		target.ErrorType = strings.TrimSpace(sessionErr.ErrorType)
+		target.ErrorMetadata = sessionErr.CloneMetadata()
+		return
+	}
+	target.TraceID = ""
+	target.ErrorType = ""
+	target.ErrorMetadata = nil
 }
 
 func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payload *planPayload) (*PlanResult, error) {

@@ -338,12 +338,14 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 		case TaskOutcomeFailed:
 			o.setTeammateState(ctx, assignment.Teammate.ID, TeammateStateIdle)
 			o.sendLeadProgress(ctx, teamID, assignment, "failed", summary)
-			o.publish("task.failed", teamID, map[string]interface{}{
+			payload := map[string]interface{}{
 				"task_id":  assignment.Task.ID,
 				"assignee": assignment.Teammate.ID,
 				"summary":  summary,
 				"trace_id": resultTraceID(result),
-			})
+			}
+			appendStructuredTaskRunErrorPayload(payload, result)
+			o.publish("task.failed", teamID, payload)
 			if termErr := o.checkTerminalState(context.Background(), teamID); termErr != nil {
 				logger.Debug("team orchestrator: terminal check failed",
 					logger.String("team_id", teamID),
@@ -375,12 +377,14 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 		summary := summarizeRunFailure(result, err)
 		_ = o.FailTask(ctx, assignment, summary)
 		o.sendLeadProgress(ctx, teamID, assignment, "failed", summary)
-		o.publish("task.failed", teamID, map[string]interface{}{
+		payload := map[string]interface{}{
 			"task_id":  assignment.Task.ID,
 			"assignee": assignment.Teammate.ID,
 			"summary":  summary,
 			"trace_id": resultTraceID(result),
-		})
+		}
+		appendStructuredTaskRunErrorPayload(payload, result)
+		o.publish("task.failed", teamID, payload)
 		if termErr := o.checkTerminalState(context.Background(), teamID); termErr != nil {
 			logger.Debug("team orchestrator: terminal check failed",
 				logger.String("team_id", teamID),
@@ -635,6 +639,27 @@ func resultTraceID(result *TaskRunResult) string {
 		return ""
 	}
 	return strings.TrimSpace(result.TraceID)
+}
+
+func appendStructuredTaskRunErrorPayload(payload map[string]interface{}, result *TaskRunResult) {
+	if len(payload) == 0 || result == nil {
+		return
+	}
+	if errorType := strings.TrimSpace(result.ErrorType); errorType != "" {
+		payload["error_type"] = errorType
+	}
+	if strings.TrimSpace(result.Error) != "" {
+		payload["error"] = strings.TrimSpace(result.Error)
+	}
+	for key, value := range result.ErrorMetadata {
+		if key == "" {
+			continue
+		}
+		if _, exists := payload[key]; exists {
+			continue
+		}
+		payload[key] = value
+	}
 }
 
 func errorString(err error) string {

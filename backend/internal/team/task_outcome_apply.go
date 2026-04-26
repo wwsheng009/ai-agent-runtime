@@ -29,14 +29,17 @@ type BlockedTaskOutcomeRequest struct {
 
 // BlockedTaskOutcomeResult captures the side effects produced by a blocked or handoff outcome.
 type BlockedTaskOutcomeResult struct {
-	Task        Task
-	Outcome     TaskOutcomeContract
-	Summary     string
-	HandoffTo   string
-	Message     *MailMessage
-	AutoReplan  bool
-	PlanResult  *PlanResult
-	ReplanError string
+	Task                Task
+	Outcome             TaskOutcomeContract
+	Summary             string
+	HandoffTo           string
+	Message             *MailMessage
+	AutoReplan          bool
+	PlanResult          *PlanResult
+	ReplanError         string
+	ReplanTraceID       string
+	ReplanErrorType     string
+	ReplanErrorMetadata map[string]interface{}
 }
 
 // Replanned reports whether follow-up work was created.
@@ -317,6 +320,11 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 		planResult, err := planner.ReplanOnFailure(ctx, teamRecord, blockedTask)
 		if err != nil {
 			result.ReplanError = err.Error()
+			if sessionErr, ok := AsSessionExecutionError(err); ok && sessionErr != nil {
+				result.ReplanTraceID = strings.TrimSpace(sessionErr.TraceID)
+				result.ReplanErrorType = strings.TrimSpace(sessionErr.ErrorType)
+				result.ReplanErrorMetadata = sessionErr.CloneMetadata()
+			}
 		} else {
 			result.PlanResult = planResult
 		}
