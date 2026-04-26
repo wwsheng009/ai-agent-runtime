@@ -38,6 +38,8 @@ var defaultBlacklist = []string{
 	"> /dev/hda",
 }
 
+const modelHistoryArtifactThresholdBytes = 12 * 1024
+
 // NewBashTool 创建 Bash 工具
 func NewBashTool() *BashTool {
 	parameters := map[string]interface{}{
@@ -45,11 +47,19 @@ func NewBashTool() *BashTool {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "Shell command. On Windows this tool uses the detected user shell, usually PowerShell/pwsh rather than cmd.exe. Prefer the workdir parameter for directory changes; use pwd/Get-Location to print the current directory and do not use bare cd for that purpose.",
+				"description": "Shell command. On Windows this tool uses the detected user shell, usually PowerShell/pwsh rather than cmd.exe. Prefer the workdir parameter for directory changes; use pwd/Get-Location to print the current directory and do not use bare cd for that purpose. Windows PowerShell/pwsh does not provide `head` by default; when you need to limit output, prefer `... | Select-Object -First 200`.",
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
 				"description": "可选：命令执行的工作目录。绝对路径直接使用，相对路径基于当前工作目录解析。默认为当前工作目录。",
+			},
+			"output_bytes_cap": map[string]interface{}{
+				"type":        "integer",
+				"description": "可选：stdout/stderr 合并输出的保留上限（字节）。用于覆盖默认 256KB capture limit；必须为正整数，不能与 disable_output_cap 同时设置。",
+			},
+			"disable_output_cap": map[string]interface{}{
+				"type":        "boolean",
+				"description": "可选：设为 true 时关闭 shell 输出 capture limit，尽量保留完整原始输出；不能与 output_bytes_cap 同时设置。",
 			},
 			"mutated_paths": map[string]interface{}{
 				"type":        "array",
@@ -65,8 +75,8 @@ func NewBashTool() *BashTool {
 	return &BashTool{
 		BaseTool: toolkit.NewBaseTool(
 			"bash",
-			"执行 Shell 命令并返回输出",
-			"1.0.0",
+			"执行 Shell 命令并返回输出。Windows 下优先使用检测到的 PowerShell/pwsh；切换目录优先使用 workdir 参数；PowerShell/pwsh 默认没有 `head`，限制输出请使用 `Select-Object -First N`。",
+			"1.1.0",
 			parameters,
 			true, // 支持直接调用
 		),
@@ -77,10 +87,24 @@ func NewBashTool() *BashTool {
 }
 
 type CommandExecutionResult struct {
-	Output     string
-	Truncated  bool
-	TotalBytes int
-	TotalLines int
+	Output                 string
+	Truncated              bool
+	TotalBytes             int
+	TotalLines             int
+	RetainedBytes          int
+	OmittedBytes           int
+	CaptureLimitBytes      int
+	CaptureLimitDisabled   bool
+	RawOutputArtifactPath  string
+	RawOutputArtifactError string
+	ShellType              string
+	ShellPath              string
+}
+
+type outputCaptureSettings struct {
+	outputBytesCap    int
+	hasOutputBytesCap bool
+	disableOutputCap  bool
 }
 
 // Execute 实现 Tool 接口
@@ -104,6 +128,14 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 	mutatedPaths := extractStringList(params["mutated_paths"])
 	workdir := extractString(params["workdir"])
+	captureSettings, err := parseOutputCaptureSettings(params)
+	if err != nil {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
+		}, nil
+	}
 
 	// 检查黑名单
 	if b.isBlacklisted(command) {
@@ -115,7 +147,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	// 使用 executer 执行命令
-	execResult, err := b.executeCommand(ctx, command, workdir)
+	execResult, err := b.executeCommand(ctx, command, workdir, captureSettings)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -134,7 +166,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}, nil
 }
 
-func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string) (CommandExecutionResult, error) {
+func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string, captureSettings outputCaptureSettings) (CommandExecutionResult, error) {
 	// 解析工作目录
 	resolvedWorkdir, err := resolveWorkdir(workdir)
 	if err != nil {
@@ -142,7 +174,14 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	}
 
 	if b.sandbox == nil {
-		return b.executer.Execute(ctx, command, b.timeout, WithWorkdir(resolvedWorkdir))
+		opts := []ExecOption{WithWorkdir(resolvedWorkdir)}
+		if captureSettings.hasOutputBytesCap {
+			opts = append(opts, WithOutputBytesCap(captureSettings.outputBytesCap))
+		}
+		if captureSettings.disableOutputCap {
+			opts = append(opts, WithDisableOutputCap())
+		}
+		return b.executer.Execute(ctx, command, b.timeout, opts...)
 	}
 
 	mainCmd := extractPrimaryCommand(command)
@@ -192,14 +231,33 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		prefixPowershellUTF8(cmd)
 	}
 
-	capture, err := runtimeexecutor.CaptureCombinedOutput(cmd, runtimeexecutor.DefaultRetainedOutputBytes)
+	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifact(cmd, captureSettings.captureLimitBytes(), "toolkit", command, "")
+	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command)
 	if err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
-			return commandExecutionFromCapture(capture), fmt.Errorf("命令执行超时（超过 %v）", timeout)
+			result := commandExecutionFromCapture(capture)
+			result.RawOutputArtifactPath = artifactPath
+			if artifactErr != nil {
+				result.RawOutputArtifactError = artifactErr.Error()
+			}
+			applyCommandExecutionShell(result, shell)
+			return result, fmt.Errorf("命令执行超时（超过 %v）", timeout)
 		}
-		return commandExecutionFromCapture(capture), err
+		result := commandExecutionFromCapture(capture)
+		result.RawOutputArtifactPath = artifactPath
+		if artifactErr != nil {
+			result.RawOutputArtifactError = artifactErr.Error()
+		}
+		applyCommandExecutionShell(result, shell)
+		return result, err
 	}
-	return commandExecutionFromCapture(capture), nil
+	result := commandExecutionFromCapture(capture)
+	result.RawOutputArtifactPath = artifactPath
+	if artifactErr != nil {
+		result.RawOutputArtifactError = artifactErr.Error()
+	}
+	applyCommandExecutionShell(result, shell)
+	return result, nil
 }
 
 func (b *BashTool) isBlacklisted(command string) bool {
@@ -223,13 +281,31 @@ type CommandExecuter interface {
 type ExecOption func(*execConfig)
 
 type execConfig struct {
-	workdir string
+	workdir           string
+	outputBytesCap    int
+	hasOutputBytesCap bool
+	disableOutputCap  bool
 }
 
 // WithWorkdir sets the working directory for command execution.
 func WithWorkdir(dir string) ExecOption {
 	return func(c *execConfig) {
 		c.workdir = dir
+	}
+}
+
+// WithOutputBytesCap overrides the retained output cap for shell capture.
+func WithOutputBytesCap(bytes int) ExecOption {
+	return func(c *execConfig) {
+		c.outputBytesCap = bytes
+		c.hasOutputBytesCap = true
+	}
+}
+
+// WithDisableOutputCap disables shell output capture truncation.
+func WithDisableOutputCap() ExecOption {
+	return func(c *execConfig) {
+		c.disableOutputCap = true
 	}
 }
 
@@ -265,49 +341,133 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		prefixPowershellUTF8(cmd)
 	}
 
-	capture, err := runtimeexecutor.CaptureCombinedOutput(cmd, runtimeexecutor.DefaultRetainedOutputBytes)
+	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifact(cmd, captureLimitBytesFromExecConfig(cfg), "toolkit", command, "")
+	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command)
 
 	if err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
-			return commandExecutionFromCapture(capture), fmt.Errorf("命令执行超时（超过 %v）", timeout)
+			result := commandExecutionFromCapture(capture)
+			result.RawOutputArtifactPath = artifactPath
+			if artifactErr != nil {
+				result.RawOutputArtifactError = artifactErr.Error()
+			}
+			applyCommandExecutionShell(result, shell)
+			return result, fmt.Errorf("命令执行超时（超过 %v）", timeout)
 		}
 
 		// 检查常见错误并给出友好提示
 		friendlyHint := friendlyHintFor(command, capture.Output, err)
 		if friendlyHint != "" {
-			return commandExecutionFromCapture(capture), fmt.Errorf("命令执行失败: %w\n%s\n\n当前环境信息:\n%s", err, friendlyHint, GetShellEnvironmentInfo())
+			result := commandExecutionFromCapture(capture)
+			result.RawOutputArtifactPath = artifactPath
+			if artifactErr != nil {
+				result.RawOutputArtifactError = artifactErr.Error()
+			}
+			applyCommandExecutionShell(result, shell)
+			return result, fmt.Errorf("命令执行失败: %w\n%s\n\n当前环境信息:\n%s", err, friendlyHint, GetShellEnvironmentInfo())
 		}
-		return commandExecutionFromCapture(capture), err
+		result := commandExecutionFromCapture(capture)
+		result.RawOutputArtifactPath = artifactPath
+		if artifactErr != nil {
+			result.RawOutputArtifactError = artifactErr.Error()
+		}
+		applyCommandExecutionShell(result, shell)
+		return result, err
 	}
 
-	return commandExecutionFromCapture(capture), nil
+	result := commandExecutionFromCapture(capture)
+	result.RawOutputArtifactPath = artifactPath
+	if artifactErr != nil {
+		result.RawOutputArtifactError = artifactErr.Error()
+	}
+	applyCommandExecutionShell(result, shell)
+	return result, nil
 }
 
 // --- Helper functions ---
 
 func commandExecutionFromCapture(capture runtimeexecutor.CombinedOutputCapture) CommandExecutionResult {
 	return CommandExecutionResult{
-		Output:     capture.Output,
-		Truncated:  capture.Truncated,
-		TotalBytes: capture.TotalBytes,
-		TotalLines: capture.TotalLines,
+		Output:               capture.Output,
+		Truncated:            capture.Truncated,
+		TotalBytes:           capture.TotalBytes,
+		TotalLines:           capture.TotalLines,
+		RetainedBytes:        capture.RetainedBytes,
+		OmittedBytes:         capture.OmittedBytes,
+		CaptureLimitBytes:    capture.CaptureLimitBytes,
+		CaptureLimitDisabled: capture.CaptureLimitDisabled,
 	}
 }
 
+func applyCommandExecutionShell(result CommandExecutionResult, shell runtimeexecutor.Shell) CommandExecutionResult {
+	result.ShellType = strings.TrimSpace(string(shell.Type))
+	result.ShellPath = strings.TrimSpace(shell.Path)
+	return result
+}
+
 func buildCommandExecutionMetadata(command string, mutatedPaths []string, result CommandExecutionResult) map[string]interface{} {
+	retainedBytes := result.RetainedBytes
+	if retainedBytes == 0 && result.Output != "" {
+		retainedBytes = len(result.Output)
+	}
+	totalBytes := result.TotalBytes
+	if totalBytes == 0 && result.Output != "" {
+		totalBytes = len(result.Output)
+	}
+	totalLines := result.TotalLines
+	if totalLines == 0 && strings.TrimSpace(result.Output) != "" {
+		totalLines = strings.Count(strings.ReplaceAll(result.Output, "\r\n", "\n"), "\n") + 1
+	}
 	metadata := map[string]interface{}{
-		"command":               command,
-		"output_size":           len(result.Output),
-		"captured_output_bytes": len(result.Output),
-		"total_output_bytes":    result.TotalBytes,
-		"total_output_lines":    result.TotalLines,
-		"output_truncated":      result.Truncated,
-		"executed_at":           time.Now().Unix(),
+		"command":                       command,
+		"output_size":                   len(result.Output),
+		"captured_output_bytes":         retainedBytes,
+		"retained_output_bytes":         retainedBytes,
+		"total_output_bytes":            totalBytes,
+		"total_output_lines":            totalLines,
+		"output_capture_complete":       !result.Truncated,
+		"output_truncated":              result.Truncated,
+		"capture_limit_reached":         result.Truncated,
+		"output_capture_limit_disabled": result.CaptureLimitDisabled,
+		"executed_at":                   time.Now().Unix(),
+	}
+	if !result.CaptureLimitDisabled && result.CaptureLimitBytes > 0 {
+		metadata["output_capture_limit_bytes"] = result.CaptureLimitBytes
+	}
+	if result.OmittedBytes > 0 {
+		metadata["omitted_output_bytes"] = result.OmittedBytes
+	}
+	if strings.TrimSpace(result.RawOutputArtifactPath) != "" {
+		metadata["raw_output_artifact_path"] = result.RawOutputArtifactPath
+	}
+	if strings.TrimSpace(result.RawOutputArtifactError) != "" {
+		metadata["raw_output_artifact_error"] = result.RawOutputArtifactError
+	}
+	shell := runtimeexecutor.Shell{
+		Type: runtimeexecutor.ShellType(strings.TrimSpace(result.ShellType)),
+		Path: strings.TrimSpace(result.ShellPath),
+	}
+	for key, value := range shell.Metadata() {
+		metadata[key] = value
 	}
 	if len(mutatedPaths) > 0 {
 		metadata["mutated_paths"] = mutatedPaths
 	}
 	return metadata
+}
+
+func ensureLargeHistoryOutputArtifact(capture runtimeexecutor.CombinedOutputCapture, artifactPath string, artifactErr error, scope string, command string) (string, error) {
+	if strings.TrimSpace(artifactPath) != "" || artifactErr != nil || capture.Truncated {
+		return artifactPath, artifactErr
+	}
+	if capture.TotalBytes <= modelHistoryArtifactThresholdBytes || strings.TrimSpace(capture.Output) == "" {
+		return artifactPath, artifactErr
+	}
+	path, err := runtimeexecutor.PersistShellOutputArtifact(scope, command, "", capture.Output)
+	if err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // resolveWorkdir resolves the working directory for command execution.
@@ -361,6 +521,11 @@ func friendlyHintFor(command string, output string, err error) string {
 			return "提示: cmd.exe 下请使用 `cd` 或 `echo %cd%` 查看当前目录；PowerShell/pwsh 下请使用 `pwd` 或 `Get-Location`。"
 		}
 		return ""
+	case runtime.GOOS == "windows" &&
+		(strings.Contains(cmdLower, "| head") ||
+			mainCmd == "head" ||
+			strings.Contains(strings.ToLower(output), "the term 'head' is not recognized")):
+		return "提示: Windows PowerShell/pwsh 默认没有 `head`；请改用 `Select-Object -First 200`，例如 `git diff ... | Select-Object -First 200`。"
 	case mainCmd == "ls" && runtime.GOOS == "windows":
 		return "提示: Windows 下请使用 `dir` 查看目录内容"
 	case mainCmd == "uname" && runtime.GOOS == "windows":
@@ -389,6 +554,58 @@ func GetShellEnvironmentInfo() string {
 	return strings.Join(parts, "\n")
 }
 
+func (s outputCaptureSettings) captureLimitBytes() int {
+	if s.disableOutputCap {
+		return runtimeexecutor.DisableRetainedOutputLimit
+	}
+	if s.hasOutputBytesCap {
+		return s.outputBytesCap
+	}
+	return runtimeexecutor.DefaultRetainedOutputBytes
+}
+
+func captureLimitBytesFromExecConfig(cfg *execConfig) int {
+	if cfg == nil {
+		return runtimeexecutor.DefaultRetainedOutputBytes
+	}
+	settings := outputCaptureSettings{
+		outputBytesCap:    cfg.outputBytesCap,
+		hasOutputBytesCap: cfg.hasOutputBytesCap,
+		disableOutputCap:  cfg.disableOutputCap,
+	}
+	return settings.captureLimitBytes()
+}
+
+func parseOutputCaptureSettings(params map[string]interface{}) (outputCaptureSettings, error) {
+	settings := outputCaptureSettings{}
+	if params == nil {
+		return settings, nil
+	}
+
+	if rawDisable, ok := params["disable_output_cap"]; ok {
+		disable, ok := rawDisable.(bool)
+		if !ok {
+			return settings, fmt.Errorf("disable_output_cap 参数必须是布尔值")
+		}
+		settings.disableOutputCap = disable
+	}
+
+	if rawCap, ok := params["output_bytes_cap"]; ok {
+		value, err := extractPositiveInt(rawCap)
+		if err != nil {
+			return settings, fmt.Errorf("output_bytes_cap 参数无效: %w", err)
+		}
+		settings.outputBytesCap = value
+		settings.hasOutputBytesCap = true
+	}
+
+	if settings.disableOutputCap && settings.hasOutputBytesCap {
+		return settings, fmt.Errorf("output_bytes_cap 不能与 disable_output_cap 同时设置")
+	}
+
+	return settings, nil
+}
+
 // extractString extracts a string value from a map, returning "" if not found.
 func extractString(value interface{}) string {
 	if value == nil {
@@ -398,6 +615,38 @@ func extractString(value interface{}) string {
 		return strings.TrimSpace(s)
 	}
 	return ""
+}
+
+func extractPositiveInt(value interface{}) (int, error) {
+	switch typed := value.(type) {
+	case int:
+		if typed <= 0 {
+			return 0, fmt.Errorf("必须为正整数")
+		}
+		return typed, nil
+	case int32:
+		if typed <= 0 {
+			return 0, fmt.Errorf("必须为正整数")
+		}
+		return int(typed), nil
+	case int64:
+		if typed <= 0 {
+			return 0, fmt.Errorf("必须为正整数")
+		}
+		return int(typed), nil
+	case float32:
+		if typed <= 0 || float32(int(typed)) != typed {
+			return 0, fmt.Errorf("必须为正整数")
+		}
+		return int(typed), nil
+	case float64:
+		if typed <= 0 || float64(int(typed)) != typed {
+			return 0, fmt.Errorf("必须为正整数")
+		}
+		return int(typed), nil
+	default:
+		return 0, fmt.Errorf("必须为正整数")
+	}
 }
 
 func extractStringList(value interface{}) []string {
