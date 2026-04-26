@@ -3,6 +3,7 @@ package tools
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -70,11 +71,26 @@ type grepOptions struct {
 	lineRegexp           bool
 	invertMatch          bool
 	onlyMatching         bool
+	countMatches         bool
+	stats                bool
+	jsonOutput           bool
+	follow               bool
+	column               bool
+	trim                 bool
+	pretty               bool
+	lineBuffered          bool
+	noLineBuffered        bool
+	maxColumns           int
+	maxColumnsSet        bool
+	maxColumnsPreview    bool
+	noMaxColumnsPreview  bool
 	context              int
 	beforeContext        int
 	afterContext         int
 	fileType             string
 	excludeType          string
+	sortBy               string
+	sortReverseBy        string
 	maxDepth             int
 	maxDepthSet          bool
 	maxCount             int
@@ -83,6 +99,8 @@ type grepOptions struct {
 	maxFileBytes         int64
 	requiresRipgrep      bool
 	rgOnlyArgs           []string
+	ignoredRGArgs        []string
+	ignoredPresentation  []string
 	mode                 grepMode
 }
 
@@ -129,8 +147,17 @@ var fileTypeToGlob = map[string]string{
 }
 
 var (
-	ripgrepMatchLinePattern   = regexp.MustCompile(`^(.*):([0-9]+):(.*)$`)
-	ripgrepContextLinePattern = regexp.MustCompile(`^(.*)-([0-9]+)-(.*)$`)
+	ripgrepMatchLineWithColumnPattern = regexp.MustCompile(`^(.*):([0-9]+):([0-9]+):(.*)$`)
+	ripgrepMatchLinePattern           = regexp.MustCompile(`^(.*):([0-9]+):(.*)$`)
+	ripgrepContextLinePattern         = regexp.MustCompile(`^(.*)-([0-9]+)-(.*)$`)
+	ripgrepStatsMatchesPattern        = regexp.MustCompile(`^\d+ matches$`)
+	ripgrepStatsMatchedLinesPattern   = regexp.MustCompile(`^\d+ matched lines$`)
+	ripgrepStatsFilesWithPattern      = regexp.MustCompile(`^\d+ files contained matches$`)
+	ripgrepStatsFilesSearchedPattern  = regexp.MustCompile(`^\d+ files searched$`)
+	ripgrepStatsBytesPrintedPattern   = regexp.MustCompile(`^\d+ bytes printed$`)
+	ripgrepStatsBytesSearchedPattern  = regexp.MustCompile(`^\d+ bytes searched$`)
+	ripgrepStatsSearchSecsPattern     = regexp.MustCompile(`^[0-9.]+ seconds spent searching$`)
+	ripgrepStatsTotalSecsPattern      = regexp.MustCompile(`^[0-9.]+ seconds total$`)
 )
 
 func stringOrStringArraySchema(description string) map[string]interface{} {
@@ -235,6 +262,90 @@ func NewGrepTool() *GrepTool {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --only-matching/-o：仅输出匹配到的文本片段。若与 invert_match 一起使用，则回退行为会近似 rg，输出整行未命中内容。",
 			},
+			"count_matches": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --count-matches：进入 count 模式，并统计每个文件中的匹配次数而不是匹配行数。",
+			},
+			"pcre2": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --pcre2/-P：使用 PCRE2 引擎；该能力当前仅在可用 ripgrep/rg 时支持。",
+			},
+			"engine": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --engine；例如 default、auto-hybrid-regex、pcre2。该能力当前仅在可用 ripgrep/rg 时支持。",
+			},
+			"multiline": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --multiline/-U：启用跨行匹配；该能力当前仅在可用 ripgrep/rg 时支持。",
+			},
+			"multiline_dotall": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --multiline-dotall：让 . 在多行模式下匹配换行；该能力当前仅在可用 ripgrep/rg 时支持。",
+			},
+			"replace": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --replace/-r：输出替换后的文本；该能力当前仅在可用 ripgrep/rg 时支持。",
+			},
+			"passthru": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --passthru：在上下文中穿透输出未匹配行；该能力当前仅在可用 ripgrep/rg 时支持。",
+			},
+			"crlf": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --crlf：按 CRLF 行尾语义处理；该能力当前仅在可用 ripgrep/rg 时支持。",
+			},
+			"auto_hybrid_regex": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --auto-hybrid-regex：自动选择正则引擎；该能力当前仅在可用 ripgrep/rg 时支持。",
+			},
+			"stats": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --stats：返回稳定的统计摘要（如 matches、matched_lines、files_searched、bytes_searched），并在 metadata 中附带结构化 stats。",
+			},
+			"json": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --json：返回 rg 风格 JSON Lines 事件流（begin/match/context/end/summary）。该能力当前仅在可用 ripgrep/rg 时支持；启用后结果会按 rg 原始语义透传，不再规范化为 path:line[:column]: content。",
+			},
+			"json_output": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容别名；等价于 json=true，用于按 rg --json 心智请求 JSON Lines 输出。",
+			},
+			"follow": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --follow/-L：跟随符号链接搜索。该能力当前仅在可用 ripgrep/rg 时支持；无 rg 时会明确提示。",
+			},
+			"column": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --column：输出 path:line:column: content 形式的列号信息。对 only_matching 会为每个片段输出各自列号；对 invert/context 等无法确定列号的行，会尽量保持稳定格式。",
+			},
+			"trim": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --trim：仅在输出时去掉匹配行/上下文行前导空白，不改变实际匹配语义；若同时开启 column，列号仍按原始行位置计算。",
+			},
+			"pretty": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --pretty：这是一个输出展示便利开关；grep 会接受这个熟悉写法，但默认仍保持稳定的结构化输出骨架。",
+			},
+			"line_buffered": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --line-buffered：逐行缓冲输出。grep 会接受这个熟悉写法，但稳定的工具输出本身不依赖这个开关。",
+			},
+			"no_line_buffered": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-line-buffered：关闭逐行缓冲。grep 会接受这个熟悉写法，但稳定的工具输出本身不依赖这个开关。",
+			},
+			"max_columns": map[string]interface{}{
+				"type":        "integer",
+				"description": "兼容 rg 的 --max-columns/-M：当行内容过长时省略或预览长行。grep 会尽量模拟 rg 的长行省略语义；若提供 preview 相关开关，则保留前缀预览。",
+			},
+			"max_columns_preview": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --max-columns-preview：与 max_columns/-M 配合时显示长行预览而非完全省略。",
+			},
+			"no_max_columns_preview": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-max-columns-preview：显式关闭长行预览。",
+			},
 			"context": map[string]interface{}{
 				"type":        "integer",
 				"description": "显示匹配行前后各 N 行上下文（兼容 rg 的 --context/-C）。",
@@ -259,6 +370,26 @@ func NewGrepTool() *GrepTool {
 				"type":        "string",
 				"description": "兼容 rg 的 --type-not/-T：排除某类文件类型，例如 test/py/go。",
 			},
+			"sort": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --sort。常用值如 path/modified/accessed/created/none；内置回退引擎原生支持 path 排序，其它时间类排序需要 rg。",
+			},
+			"sortr": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --sortr（倒序排序）。常用值如 path/modified/accessed/created/none；内置回退引擎原生支持 path 倒序，其它时间类排序需要 rg。",
+			},
+			"sort_reverse": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容别名；等价于 sortr。",
+			},
+			"sort_files": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --sort-files。true 时等价于 sort=path；grep 会保持稳定路径排序输出。",
+			},
+			"no_sort_files": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-sort-files。仅用于抵消 sort_files/--sort-files 这类熟悉写法；默认输出本就不是强制路径排序。",
+			},
 			"max_depth": map[string]interface{}{
 				"type":        "integer",
 				"description": "目录搜索最大深度（兼容 rg 的 --max-depth）。",
@@ -278,11 +409,47 @@ func NewGrepTool() *GrepTool {
 			},
 			"files_without_match": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --files-without-match/-L；等价于 mode=files_without。",
+				"description": "兼容 rg 的 --files-without-match；等价于 mode=files_without。",
 			},
 			"count": map[string]interface{}{
 				"type":        "boolean",
 				"description": "兼容 rg 的 --count/-c；等价于 mode=count。",
+			},
+			"line_number": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --line-number/-n。grep 输出默认就包含行号，因此该参数仅作为熟悉写法接受，不改变稳定输出骨架。",
+			},
+			"heading": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --heading：按文件分组显示标题。grep 会接受这个熟悉写法，但默认仍保持稳定的结构化输出骨架。",
+			},
+			"no_heading": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-heading：关闭文件标题。grep 会接受这个熟悉写法，但默认仍保持稳定的结构化输出骨架。",
+			},
+			"with_filename": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --with-filename/-H。grep 输出默认就包含路径/文件名，因此该参数仅作为熟悉写法接受。",
+			},
+			"no_line_number": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-line-number/-N。为保持稳定结构化输出，该参数会被接受但不会去掉行号。",
+			},
+			"no_filename": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-filename。为保持稳定结构化输出，该参数会被接受但不会去掉路径/文件名。",
+			},
+			"color": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --color=never/always/ansi。grep 输出默认关闭颜色并保持纯文本稳定结构；该参数仅作为熟悉写法接受。",
+			},
+			"text": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --text/-a。当前 grep 默认按文本扫描常见文件，因此该参数仅作为熟悉写法接受。",
+			},
+			"binary": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --binary。当前 grep 会尽量保持稳定文本输出；该参数仅作为熟悉写法接受。",
 			},
 			"hidden": map[string]interface{}{
 				"type":        "boolean",
@@ -297,7 +464,7 @@ func NewGrepTool() *GrepTool {
 				"items": map[string]interface{}{
 					"type": "string",
 				},
-				"description": "可选：ripgrep/rg 风格参数列表。支持常见选项与位置参数，例如 [\"-g\", \"*.go\", \"-i\", \"-w\", \"-C\", \"2\", \"pattern\", \"backend\"]、多模式 [\"-e\", \"foo\", \"-e\", \"bar\", \"backend\"]，以及 pattern file [\"-f\", \"patterns.txt\", \"backend\"]。",
+				"description": "可选：ripgrep/rg 风格参数列表。支持常见选项与位置参数，例如 [\"-g\", \"*.go\", \"-i\", \"-w\", \"-C\", \"2\", \"pattern\", \"backend\"]、多模式 [\"-e\", \"foo\", \"-e\", \"bar\", \"backend\"]、pattern file [\"-f\", \"patterns.txt\", \"backend\"]、列号/裁剪 [\"--column\", \"--trim\", \"foo\", \"backend\"]、路径排序 [\"--sort\", \"path\", \"foo\", \"backend\"]、计数次数 [\"--count-matches\", \"foo\", \"backend\"] 等；像 -n/-H/-N/--no-filename/--color 这类展示层参数也会被兼容接收。",
 			},
 		},
 		"anyOf": []map[string]interface{}{
@@ -325,8 +492,8 @@ func NewGrepTool() *GrepTool {
 	return &GrepTool{
 		BaseTool: toolkit.NewBaseTool(
 			"grep",
-			"文件内容搜索（优先使用 ripgrep/rg，不可用时回退到内置扫描；支持常见 rg 风格参数、多路径/单文件路径、路径感知 glob/iglob、glob_case_insensitive、pattern_file/-f、pcre2/-P、multiline/-U、replace/-r、-e 多模式、-v/-x/-L/-o、--max-filesize 与 rg_args 兼容层）",
-			"2.9.0",
+			"文件内容搜索（优先使用 ripgrep/rg，不可用时回退到内置扫描；支持常见 rg 风格参数、多路径/单文件路径、路径感知 glob/iglob、glob_case_insensitive、pattern_file/-f、pcre2/-P、multiline/-U、replace/-r、column/trim、count_matches、stats、json、follow、sort/sortr/sort_files、-e 多模式、-v/-x/-l/-o、--files-without-match、--max-filesize 与 rg_args 兼容层）",
+			"3.2.0",
 			parameters,
 			true,
 		),
@@ -339,9 +506,9 @@ func NewGrepTool() *GrepTool {
 // Description returns a dynamic description based on ripgrep availability.
 func (g *GrepTool) Description() string {
 	if g.isRgAvailable() {
-		return "文件内容搜索（使用 ripgrep/rg 引擎，高性能正则和字面搜索）。支持常见 rg 风格参数与别名：glob≈-g、iglob≈--iglob、glob_case_insensitive≈--glob-case-insensitive、pattern_file/pattern_files≈-f/--file、pcre2≈-P/--pcre2、multiline≈-U/--multiline、replace≈-r/--replace、fixed_strings≈-F、ignore_case≈-i、word_regexp≈-w、line_regexp≈-x、invert_match≈-v、only_matching≈-o、context/before_context/after_context≈-C/-B/-A、type≈-t、type_not≈-T、files_with_matches≈-l、files_without_match≈-L、count≈-c、max_count≈-m、max_filesize≈--max-filesize、patterns/regexp≈多次 -e；支持目录、单文件 path、多路径 paths、路径感知 glob（如 src/**/*.go）、pattern file（每行一个 pattern；空文件按 rg 语义返回无匹配，空行可能匹配所有行，如 -f patterns.txt）、max_depth/max_count 显式 0 语义以及常见短参数组合；也支持通过 rg_args 传入常见 rg 参数列表，例如 rg -P 'foo.*bar' backend，像 pcre2/engine/multiline/replace/passthru/crlf 这类 rg-only 能力会在有 rg 时透传。"
+		return "文件内容搜索（使用 ripgrep/rg 引擎，高性能正则和字面搜索）。支持常见 rg 风格参数与别名：glob≈-g、iglob≈--iglob、glob_case_insensitive≈--glob-case-insensitive、pattern_file/pattern_files≈-f/--file、pcre2≈-P/--pcre2、engine≈--engine、multiline≈-U/--multiline、multiline_dotall≈--multiline-dotall、replace≈-r/--replace、passthru≈--passthru、crlf≈--crlf、auto_hybrid_regex≈--auto-hybrid-regex、column≈--column、trim≈--trim、pretty≈--pretty、line_buffered≈--line-buffered、max_columns≈-M/--max-columns、max_columns_preview≈--max-columns-preview、count_matches≈--count-matches、stats≈--stats、json≈--json、follow≈-L/--follow、sort/sortr≈--sort/--sortr、sort_files≈--sort-files、fixed_strings≈-F、ignore_case≈-i、word_regexp≈-w、line_regexp≈-x、invert_match≈-v、only_matching≈-o、context/before_context/after_context≈-C/-B/-A、type≈-t、type_not≈-T、files_with_matches≈-l、files_without_match≈--files-without-match、count≈-c、max_count≈-m、max_filesize≈--max-filesize、patterns/regexp≈多次 -e；支持目录、单文件 path、多路径 paths、路径感知 glob（如 src/**/*.go）、pattern file（每行一个 pattern；空文件按 rg 语义返回无匹配，空行可能匹配所有行，如 -f patterns.txt）、path 排序/倒序、匹配次数统计、stats 摘要、max_depth/max_count 显式 0 语义以及常见短参数组合；也支持通过 rg_args 传入常见 rg 参数列表，例如 rg -P 'foo.*bar' backend、rg --column --trim foo backend、rg --sort path foo backend、rg --count-matches foo backend、rg --stats foo backend、rg --json foo backend。默认结果输出会规范化为稳定的 path:line[:column]: content 形态；像 -n/-H/-N/--no-filename/--color 这类展示层参数会被兼容接收但不改变输出骨架；当请求 json/--json 时，会改为按 rg 原始 JSON Lines 事件流透传输出；像 pcre2/engine/multiline/multiline_dotall/replace/passthru/crlf/auto_hybrid_regex 这类 rg-only 能力会在有 rg 时透传。"
 	}
-	return "文件内容搜索（使用内置扫描引擎；安装 ripgrep/rg 可获得更好性能）。支持常见 rg 风格参数与别名、多路径/单文件 path、路径感知 glob/iglob、glob_case_insensitive、pattern_file/-f、-e 多模式、-v/-x/-L/-o、--max-filesize、max_depth/max_count 显式 0 语义，以及常见短参数组合，并兼容 rg_args 传参；像 pcre2/-P、engine、multiline/-U、replace/-r、passthru、crlf 这类仅 rg 支持的参数会在无 rg 时明确提示；回退引擎会尽量模拟 rg 的常见行为。"
+	return "文件内容搜索（使用内置扫描引擎；安装 ripgrep/rg 可获得更好性能）。支持常见 rg 风格参数与别名、多路径/单文件 path、路径感知 glob/iglob、glob_case_insensitive、pattern_file/-f、column/trim、pretty、line_buffered、max_columns/-M/--max-columns、max_columns_preview/--max-columns-preview、count_matches、stats、path 排序/倒序、sort_files、-e 多模式、-v/-x/-l/-o、--files-without-match、--max-filesize、max_depth/max_count 显式 0 语义，以及常见短参数组合，并兼容 rg_args 传参；输出会规范化为稳定的 path:line[:column]: content 形态，因此像 -n/-H/-N/--no-filename/--color、line_number/heading/no_heading/with_filename/no_filename/color 这类展示层参数会被容忍或忽略；像 json/--json、pcre2/-P、engine、multiline/-U、multiline_dotall、replace/-r、passthru、crlf、auto_hybrid_regex、follow/-L/--follow 以及非 path 的时间类 sort/sortr 这类仅 rg 支持的参数会在无 rg 时明确提示；回退引擎会尽量模拟 rg 的常见行为。"
 }
 
 // isRgAvailable checks if ripgrep is available on the system, caching the result.
@@ -411,10 +578,14 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 	if opts.requiresRipgrep && !g.isRgAvailable() {
+		required := strings.Join(requiredRipgrepFeatures(opts), "、")
+		if required == "" {
+			required = "当前请求中的部分参数"
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("当前搜索请求包含仅 ripgrep/rg 支持的参数（如 pcre2/engine）；请在安装 rg 后重试"),
+			Error:      fmt.Errorf("当前搜索请求包含仅 ripgrep/rg 支持的参数（%s）；请在安装 rg 后重试", required),
 		}, nil
 	}
 	if len(opts.patterns) == 0 {
@@ -427,7 +598,7 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 		} else if used {
 			return result, nil
 		}
-		return buildGrepResult(opts, nil, 0, false), nil
+		return buildGrepResult(opts, nil, 0, false, nil), nil
 	}
 
 	// Compile regex for builtin engine (rg engine handles pattern natively)
@@ -475,6 +646,30 @@ type rgCompatArgs struct {
 	hasInvertMatch         bool
 	onlyMatching           bool
 	hasOnlyMatching        bool
+	countMatches           bool
+	hasCountMatches        bool
+	stats                  bool
+	hasStats               bool
+	jsonOutput             bool
+	hasJSONOutput          bool
+	follow                 bool
+	hasFollow              bool
+	column                 bool
+	hasColumn              bool
+	trim                   bool
+	hasTrim                bool
+	pretty                 bool
+	hasPretty              bool
+	lineBuffered           bool
+	hasLineBuffered        bool
+	noLineBuffered         bool
+	hasNoLineBuffered      bool
+	maxColumns             int
+	hasMaxColumns          bool
+	maxColumnsPreview      bool
+	hasMaxColumnsPreview   bool
+	noMaxColumnsPreview    bool
+	hasNoMaxColumnsPreview bool
 	context                int
 	hasContext             bool
 	beforeContext          int
@@ -485,6 +680,10 @@ type rgCompatArgs struct {
 	hasFileType            bool
 	excludeType            string
 	hasExcludeType         bool
+	sortBy                 string
+	hasSortBy              bool
+	sortReverseBy          string
+	hasSortReverseBy       bool
 	globCaseInsensitive    bool
 	hasGlobCaseInsensitive bool
 	maxDepth               int
@@ -495,6 +694,7 @@ type rgCompatArgs struct {
 	hasMaxFilesize         bool
 	requiresRipgrep        bool
 	rgOnlyArgs             []string
+	ignoredArgs            []string
 	mode                   grepMode
 	hasMode                bool
 }
@@ -631,6 +831,97 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	if value, ok := resolveBoolParam(params, "only_matching"); ok {
 		onlyMatching = value
 	}
+	countMatches := compat.countMatches
+	if value, ok := resolveBoolParam(params, "count_matches"); ok {
+		countMatches = value
+	}
+	statsRequested := compat.stats
+	if value, ok := resolveBoolParam(params, "stats"); ok {
+		statsRequested = value
+	}
+	pcre2Requested := false
+	if value, ok := resolveBoolParam(params, "pcre2"); ok && value {
+		pcre2Requested = true
+		compat.requiresRipgrep = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--pcre2")
+	}
+	if value, ok := resolveStringParam(params, "engine"); ok && strings.TrimSpace(value) != "" {
+		compat.requiresRipgrep = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--engine", strings.TrimSpace(value))
+	}
+	if value, ok := resolveBoolParam(params, "multiline"); ok && value {
+		compat.requiresRipgrep = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--multiline")
+	}
+	if value, ok := resolveBoolParam(params, "multiline_dotall"); ok && value {
+		compat.requiresRipgrep = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--multiline-dotall")
+	}
+	if value, ok := resolveStringParam(params, "replace"); ok && strings.TrimSpace(value) != "" {
+		compat.requiresRipgrep = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--replace", strings.TrimSpace(value))
+	}
+	if value, ok := resolveBoolParam(params, "passthru"); ok && value {
+		compat.requiresRipgrep = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--passthru")
+	}
+	if value, ok := resolveBoolParam(params, "crlf"); ok && value {
+		compat.requiresRipgrep = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--crlf")
+	}
+	if value, ok := resolveBoolParam(params, "auto_hybrid_regex"); ok && value {
+		compat.requiresRipgrep = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--auto-hybrid-regex")
+	}
+	jsonOutput := compat.jsonOutput
+	if value, ok := resolveBoolParam(params, "json", "json_output"); ok {
+		jsonOutput = value
+	}
+	followSymlinks := compat.follow
+	if value, ok := resolveBoolParam(params, "follow"); ok {
+		followSymlinks = value
+	}
+	column := compat.column
+	if value, ok := resolveBoolParam(params, "column"); ok {
+		column = value
+	}
+	trimOutput := compat.trim
+	if value, ok := resolveBoolParam(params, "trim"); ok {
+		trimOutput = value
+	}
+	pretty := compat.pretty
+	if value, ok := resolveBoolParam(params, "pretty"); ok {
+		pretty = value
+	}
+	lineBuffered := compat.lineBuffered
+	if value, ok := resolveBoolParam(params, "line_buffered"); ok {
+		lineBuffered = value
+	}
+	noLineBuffered := compat.noLineBuffered
+	if value, ok := resolveBoolParam(params, "no_line_buffered"); ok {
+		noLineBuffered = value
+		if value {
+			lineBuffered = false
+		}
+	}
+	maxColumns := compat.maxColumns
+	maxColumnsSet := compat.hasMaxColumns
+	if value, ok := resolveIntParam(params, "max_columns"); ok {
+		maxColumns = value
+		maxColumnsSet = true
+	}
+	if maxColumns < 0 {
+		maxColumns = 0
+	}
+	maxColumnsPreview := compat.maxColumnsPreview
+	if value, ok := resolveBoolParam(params, "max_columns_preview"); ok {
+		maxColumnsPreview = value
+	}
+	noMaxColumnsPreview := compat.noMaxColumnsPreview
+	if value, ok := resolveBoolParam(params, "no_max_columns_preview"); ok && value {
+		maxColumnsPreview = false
+		noMaxColumnsPreview = true
+	}
 
 	contextLines := 0
 	if compat.hasContext {
@@ -667,6 +958,40 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	excludeType := strings.TrimSpace(compat.excludeType)
 	if value, ok := resolveStringParam(params, "type_not"); ok && strings.TrimSpace(value) != "" {
 		excludeType = strings.TrimSpace(value)
+	}
+	sortBy, err := normalizeRGSortValue(compat.sortBy)
+	if err != nil {
+		return nil, err
+	}
+	sortReverseBy, err := normalizeRGSortValue(compat.sortReverseBy)
+	if err != nil {
+		return nil, err
+	}
+	if value, ok := resolveStringParam(params, "sort"); ok && strings.TrimSpace(value) != "" {
+		sortBy, err = normalizeRGSortValue(value)
+		if err != nil {
+			return nil, err
+		}
+		sortReverseBy = ""
+	}
+	if value, ok := resolveStringParam(params, "sortr", "sort_reverse"); ok && strings.TrimSpace(value) != "" {
+		sortReverseBy, err = normalizeRGSortValue(value)
+		if err != nil {
+			return nil, err
+		}
+		sortBy = ""
+	}
+	if value, ok := resolveBoolParam(params, "sort_files"); ok && value {
+		sortBy = "path"
+		sortReverseBy = ""
+	}
+	if value, ok := resolveBoolParam(params, "no_sort_files"); ok && value {
+		if sortBy == "path" {
+			sortBy = ""
+		}
+		if sortReverseBy == "path" {
+			sortReverseBy = ""
+		}
 	}
 
 	maxDepth := compat.maxDepth
@@ -717,9 +1042,37 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	if value, ok := resolveBoolParam(params, "count"); ok && value {
 		mode = grepModeCount
 	}
+	if countMatches {
+		mode = grepModeCount
+	}
+	modeParam := ""
 	if value, ok := resolveStringParam(params, "mode"); ok && strings.TrimSpace(value) != "" {
+		modeParam = strings.TrimSpace(value)
 		mode = normalizeGrepMode(value)
 	}
+	switch strings.TrimSpace(strings.ToLower(modeParam)) {
+	case "count_matches", "count-matches":
+		countMatches = true
+	case "count":
+		countMatches = false
+	}
+	if mode != grepModeCount {
+		countMatches = false
+	}
+	requiresRipgrep := compat.requiresRipgrep
+	if requiresRipgrepForSort(sortBy) || requiresRipgrepForSort(sortReverseBy) {
+		requiresRipgrep = true
+	}
+	if jsonOutput {
+		requiresRipgrep = true
+	}
+	if pcre2Requested {
+		requiresRipgrep = true
+	}
+	if followSymlinks {
+		requiresRipgrep = true
+	}
+	ignoredPresentation := collectIgnoredPresentationParams(params)
 
 	return &grepOptions{
 		pattern:              pattern,
@@ -745,19 +1098,36 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 		lineRegexp:           lineRegexp,
 		invertMatch:          invertMatch,
 		onlyMatching:         onlyMatching,
+		countMatches:         countMatches,
+		stats:                statsRequested,
+		jsonOutput:           jsonOutput,
+		follow:               followSymlinks,
+		column:               column,
+		trim:                 trimOutput,
+		pretty:               pretty,
+		lineBuffered:         lineBuffered,
+		noLineBuffered:       noLineBuffered,
+		maxColumns:           maxColumns,
+		maxColumnsSet:        maxColumnsSet,
+		maxColumnsPreview:    maxColumnsPreview,
+		noMaxColumnsPreview:  noMaxColumnsPreview,
 		context:              contextLines,
 		beforeContext:        beforeContext,
 		afterContext:         afterContext,
 		fileType:             fileType,
 		excludeType:          excludeType,
+		sortBy:               sortBy,
+		sortReverseBy:        sortReverseBy,
 		maxDepth:             maxDepth,
 		maxDepthSet:          maxDepthSet,
 		maxCount:             maxCount,
 		maxCountSet:          maxCountSet,
 		maxFilesize:          maxFilesize,
 		maxFileBytes:         maxFileBytes,
-		requiresRipgrep:      compat.requiresRipgrep,
+		requiresRipgrep:      requiresRipgrep,
 		rgOnlyArgs:           append([]string(nil), compat.rgOnlyArgs...),
+		ignoredRGArgs:        normalizePatternList(compat.ignoredArgs),
+		ignoredPresentation:  ignoredPresentation,
 		mode:                 mode,
 	}, nil
 }
@@ -875,7 +1245,10 @@ func parseRGCompatArgs(params map[string]interface{}) (*rgCompatArgs, error) {
 			break
 		}
 
-		if isNoOpRGFlag(arg) {
+		if handled, err := consumeNoOpRGFlag(args, &i, arg, compat); handled {
+			if err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -904,6 +1277,32 @@ func parseRGCompatArgs(params map[string]interface{}) (*rgCompatArgs, error) {
 	}
 
 	return compat, nil
+}
+
+func consumeNoOpRGFlag(args []string, index *int, arg string, compat *rgCompatArgs) (bool, error) {
+	switch arg {
+	case "--color":
+		if *index+1 >= len(args) {
+			return true, fmt.Errorf("rg_args 选项缺少值: %s", arg)
+		}
+		next := strings.TrimSpace(args[*index+1])
+		if next == "" || strings.HasPrefix(next, "-") {
+			return true, fmt.Errorf("rg_args 选项缺少值: %s", arg)
+		}
+		if compat != nil {
+			compat.ignoredArgs = appendUniqueString(compat.ignoredArgs, arg+"="+next)
+		}
+		*index = *index + 1
+		return true, nil
+	default:
+		if isNoOpRGFlag(arg) {
+			if compat != nil {
+				compat.ignoredArgs = appendUniqueString(compat.ignoredArgs, arg)
+			}
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 type rgFlagValue struct {
@@ -938,6 +1337,42 @@ func applyRGBooleanFlag(compat *rgCompatArgs, arg string) bool {
 	case "-o", "--only-matching", "--only_matching":
 		compat.onlyMatching = true
 		compat.hasOnlyMatching = true
+	case "--count-matches":
+		compat.mode = grepModeCount
+		compat.hasMode = true
+		compat.countMatches = true
+		compat.hasCountMatches = true
+	case "--stats":
+		compat.stats = true
+		compat.hasStats = true
+	case "--json":
+		compat.jsonOutput = true
+		compat.hasJSONOutput = true
+		compat.requiresRipgrep = true
+	case "-L", "--follow":
+		compat.follow = true
+		compat.hasFollow = true
+	case "--column":
+		compat.column = true
+		compat.hasColumn = true
+	case "--trim":
+		compat.trim = true
+		compat.hasTrim = true
+	case "--pretty":
+		compat.pretty = true
+		compat.hasPretty = true
+	case "--line-buffered":
+		compat.lineBuffered = true
+		compat.hasLineBuffered = true
+	case "--no-line-buffered":
+		compat.noLineBuffered = true
+		compat.hasNoLineBuffered = true
+	case "--max-columns-preview":
+		compat.maxColumnsPreview = true
+		compat.hasMaxColumnsPreview = true
+	case "--no-max-columns-preview":
+		compat.maxColumnsPreview = false
+		compat.hasNoMaxColumnsPreview = true
 	case "-U", "--multiline":
 		compat.requiresRipgrep = true
 		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--multiline")
@@ -953,12 +1388,14 @@ func applyRGBooleanFlag(compat *rgCompatArgs, arg string) bool {
 	case "-l", "--files-with-matches", "--files_with_matches":
 		compat.mode = grepModeFiles
 		compat.hasMode = true
-	case "-L", "--files-without-match", "--files_without_match":
+	case "--files-without-match", "--files_without_match":
 		compat.mode = grepModeFilesWithout
 		compat.hasMode = true
 	case "-c", "--count":
 		compat.mode = grepModeCount
 		compat.hasMode = true
+		compat.countMatches = false
+		compat.hasCountMatches = true
 	case "-P", "--pcre2":
 		compat.requiresRipgrep = true
 		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--pcre2")
@@ -970,6 +1407,16 @@ func applyRGBooleanFlag(compat *rgCompatArgs, arg string) bool {
 		compat.hasGlobCaseInsensitive = true
 		compat.include = setGlobPatternsCaseInsensitive(compat.include, true)
 		compat.exclude = setGlobPatternsCaseInsensitive(compat.exclude, true)
+	case "--sort-files":
+		compat.sortBy = "path"
+		compat.sortReverseBy = ""
+		compat.hasSortBy = true
+		compat.hasSortReverseBy = false
+	case "--no-sort-files":
+		compat.sortBy = ""
+		compat.sortReverseBy = ""
+		compat.hasSortBy = true
+		compat.hasSortReverseBy = true
 	default:
 		return false
 	}
@@ -1015,6 +1462,8 @@ func parseRGShortFlagCluster(args []string, index *int, arg string, compat *rgCo
 			valueName = "type_not"
 		case "-m":
 			valueName = "max_count"
+		case "-M":
+			valueName = "max_columns"
 		default:
 			return true, fmt.Errorf("暂不支持的 rg_args 选项: %s", flag)
 		}
@@ -1030,7 +1479,7 @@ func parseRGShortFlagCluster(args []string, index *int, arg string, compat *rgCo
 
 		value := &rgFlagValue{name: valueName, value: rawValue}
 		switch valueName {
-		case "context", "before_context", "after_context", "max_count":
+		case "context", "before_context", "after_context", "max_count", "max_columns":
 			parsed, _, err := parseRGIntFlag(valueName, rawValue, flag)
 			if err != nil {
 				return true, err
@@ -1073,6 +1522,16 @@ func applyRGFlagValue(compat *rgCompatArgs, value *rgFlagValue) {
 	case "type_not":
 		compat.excludeType = value.value
 		compat.hasExcludeType = true
+	case "sort":
+		compat.sortBy = value.value
+		compat.sortReverseBy = ""
+		compat.hasSortBy = true
+		compat.hasSortReverseBy = false
+	case "sortr":
+		compat.sortReverseBy = value.value
+		compat.sortBy = ""
+		compat.hasSortReverseBy = true
+		compat.hasSortBy = false
 	case "max_depth":
 		compat.maxDepth = value.intValue
 		compat.hasMaxDepth = true
@@ -1085,6 +1544,9 @@ func applyRGFlagValue(compat *rgCompatArgs, value *rgFlagValue) {
 	case "max_count":
 		compat.maxCount = value.intValue
 		compat.hasMaxCount = true
+	case "max_columns":
+		compat.maxColumns = value.intValue
+		compat.hasMaxColumns = true
 	case "max_filesize":
 		compat.maxFilesize = value.value
 		compat.hasMaxFilesize = true
@@ -1122,6 +1584,12 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 	if raw, ok := strings.CutPrefix(arg, "--type-not="); ok {
 		return &rgFlagValue{name: "type_not", value: raw}, true, nil
 	}
+	if raw, ok := strings.CutPrefix(arg, "--sort="); ok {
+		return &rgFlagValue{name: "sort", value: raw}, true, nil
+	}
+	if raw, ok := strings.CutPrefix(arg, "--sortr="); ok {
+		return &rgFlagValue{name: "sortr", value: raw}, true, nil
+	}
 	if raw, ok := strings.CutPrefix(arg, "--max-depth="); ok {
 		return parseRGIntFlag("max_depth", raw, arg)
 	}
@@ -1131,12 +1599,15 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 	if raw, ok := strings.CutPrefix(arg, "--max-count="); ok {
 		return parseRGIntFlag("max_count", raw, arg)
 	}
+	if raw, ok := strings.CutPrefix(arg, "--max-columns="); ok {
+		return parseRGIntFlag("max_columns", raw, arg)
+	}
 	if raw, ok := strings.CutPrefix(arg, "--max-filesize="); ok {
 		return &rgFlagValue{name: "max_filesize", value: raw}, true, nil
 	}
 
 	switch arg {
-	case "-e", "--regexp", "-f", "--file", "-r", "--replace", "-g", "--glob", "--iglob", "-C", "--context", "-B", "--before-context", "-A", "--after-context", "-t", "--type", "-T", "--type-not", "-m", "--max-count", "--max-depth", "--max-filesize", "--engine":
+	case "-e", "--regexp", "-f", "--file", "-r", "--replace", "-g", "--glob", "--iglob", "-C", "--context", "-B", "--before-context", "-A", "--after-context", "-t", "--type", "-T", "--type-not", "-m", "--max-count", "-M", "--max-columns", "--max-depth", "--max-filesize", "--engine", "--sort", "--sortr":
 		if *index+1 >= len(args) {
 			return nil, true, fmt.Errorf("rg_args 选项缺少值: %s", arg)
 		}
@@ -1163,8 +1634,14 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 			return &rgFlagValue{name: "file_type", value: next}, true, nil
 		case "-T", "--type-not":
 			return &rgFlagValue{name: "type_not", value: next}, true, nil
+		case "--sort":
+			return &rgFlagValue{name: "sort", value: next}, true, nil
+		case "--sortr":
+			return &rgFlagValue{name: "sortr", value: next}, true, nil
 		case "-m", "--max-count":
 			return parseRGIntFlag("max_count", next, arg)
+		case "-M", "--max-columns":
+			return parseRGIntFlag("max_columns", next, arg)
 		case "--max-depth":
 			return parseRGIntFlag("max_depth", next, arg)
 		case "--max-filesize":
@@ -1196,6 +1673,8 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 			return &rgFlagValue{name: "type_not", value: arg[2:]}, true, nil
 		case strings.HasPrefix(arg, "-m"):
 			return parseRGIntFlag("max_count", arg[2:], arg)
+		case strings.HasPrefix(arg, "-M"):
+			return parseRGIntFlag("max_columns", arg[2:], arg)
 		}
 	}
 
@@ -1212,7 +1691,8 @@ func parseRGIntFlag(name, raw, flag string) (*rgFlagValue, bool, error) {
 
 func isNoOpRGFlag(arg string) bool {
 	switch arg {
-	case "-n", "--line-number", "--with-filename", "--no-heading", "--heading", "--hidden", "--no-ignore", "--color", "--color=never", "-u", "-uu", "-uuu":
+	case "-n", "--line-number", "-H", "--with-filename", "-N", "--no-line-number", "--no-filename", "--no-heading", "--heading", "--hidden", "--no-ignore", "-a", "--text", "--binary", "--color", "--color=never", "-u", "-uu", "-uuu":
+	case "--pretty", "--line-buffered", "--no-line-buffered":
 		return true
 	default:
 		if strings.HasPrefix(arg, "--color=") {
@@ -1490,6 +1970,66 @@ func normalizePatternList(values []string) []string {
 	return result
 }
 
+func appendUniqueString(values []string, raw string) []string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func collectIgnoredPresentationParams(params map[string]interface{}) []string {
+	flags := make([]string, 0, 8)
+	if value, ok := resolveBoolParam(params, "line_number"); ok && value {
+		flags = appendUniqueString(flags, "line_number")
+	}
+	if value, ok := resolveBoolParam(params, "heading"); ok && value {
+		flags = appendUniqueString(flags, "heading")
+	}
+	if value, ok := resolveBoolParam(params, "no_heading"); ok && value {
+		flags = appendUniqueString(flags, "no_heading")
+	}
+	if value, ok := resolveBoolParam(params, "with_filename"); ok && value {
+		flags = appendUniqueString(flags, "with_filename")
+	}
+	if value, ok := resolveBoolParam(params, "no_line_number"); ok && value {
+		flags = appendUniqueString(flags, "no_line_number")
+	}
+	if value, ok := resolveBoolParam(params, "no_filename"); ok && value {
+		flags = appendUniqueString(flags, "no_filename")
+	}
+	if value, ok := resolveBoolParam(params, "pretty"); ok && value {
+		flags = appendUniqueString(flags, "pretty")
+	}
+	if value, ok := resolveBoolParam(params, "line_buffered"); ok && value {
+		flags = appendUniqueString(flags, "line_buffered")
+	}
+	if value, ok := resolveBoolParam(params, "no_line_buffered"); ok && value {
+		flags = appendUniqueString(flags, "no_line_buffered")
+	}
+	if value, ok := resolveStringParam(params, "color"); ok && strings.TrimSpace(value) != "" {
+		flags = appendUniqueString(flags, "color="+strings.TrimSpace(value))
+	}
+	if value, ok := resolveBoolParam(params, "text"); ok && value {
+		flags = appendUniqueString(flags, "text")
+	}
+	if value, ok := resolveBoolParam(params, "binary"); ok && value {
+		flags = appendUniqueString(flags, "binary")
+	}
+	if value, ok := resolveBoolParam(params, "hidden"); ok && value {
+		flags = appendUniqueString(flags, "hidden")
+	}
+	if value, ok := resolveBoolParam(params, "no_ignore"); ok && value {
+		flags = appendUniqueString(flags, "no_ignore")
+	}
+	return flags
+}
+
 func parseSizeString(raw string) (int64, error) {
 	value := strings.TrimSpace(strings.ToUpper(raw))
 	if value == "" {
@@ -1519,13 +2059,35 @@ func parseSizeString(raw string) (int64, error) {
 	return base * multiplier, nil
 }
 
+func normalizeRGSortValue(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return "", nil
+	}
+	switch value {
+	case "none", "path", "modified", "accessed", "created":
+		return value, nil
+	default:
+		return "", fmt.Errorf("sort/sortr 参数无效: %q（仅支持 none/path/modified/accessed/created）", raw)
+	}
+}
+
+func requiresRipgrepForSort(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "", "none", "path":
+		return false
+	default:
+		return true
+	}
+}
+
 func normalizeGrepMode(value string) grepMode {
 	switch strings.TrimSpace(value) {
 	case string(grepModeFiles), "files-with-matches", "files_with_matches":
 		return grepModeFiles
 	case string(grepModeFilesWithout), "files-without-match", "files_without_match", "files_without_matches":
 		return grepModeFilesWithout
-	case string(grepModeCount):
+	case string(grepModeCount), "count-matches", "count_matches":
 		return grepModeCount
 	default:
 		return grepModeContent
@@ -1576,13 +2138,75 @@ func lineSatisfiesMatch(re *regexp.Regexp, line string, invert bool) bool {
 	return matched
 }
 
-func extractRenderedMatches(re *regexp.Regexp, line string, onlyMatching, invert bool) []string {
-	if !onlyMatching || invert {
-		return []string{line}
+type grepRenderedMatch struct {
+	text   string
+	column int
+}
+
+func trimGrepRenderedText(text string) string {
+	return strings.TrimLeftFunc(text, unicode.IsSpace)
+}
+
+func truncateGrepTextByBytes(text string, limit int) string {
+	if limit <= 0 {
+		return ""
 	}
-	matches := re.FindAllString(line, -1)
-	if len(matches) == 0 {
-		return []string{line}
+	raw := []byte(text)
+	if len(raw) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && (raw[cut]&0xC0) == 0x80 {
+		cut--
+	}
+	if cut <= 0 {
+		return ""
+	}
+	return string(raw[:cut])
+}
+
+func applyMaxColumnsToRenderedText(opts *grepOptions, text string) string {
+	if opts == nil || !opts.maxColumnsSet || opts.maxColumns <= 0 {
+		return text
+	}
+	if len([]byte(text)) <= opts.maxColumns {
+		return text
+	}
+	if opts.maxColumnsPreview {
+		return truncateGrepTextByBytes(text, opts.maxColumns) + " [... omitted end of long line]"
+	}
+	return "[Omitted long matching line]"
+}
+
+func extractRenderedMatches(re *regexp.Regexp, line string, onlyMatching, invert, trim bool) []grepRenderedMatch {
+	if !onlyMatching || invert {
+		text := line
+		if trim {
+			text = trimGrepRenderedText(text)
+		}
+		column := 0
+		if !invert {
+			if loc := re.FindStringIndex(line); len(loc) == 2 {
+				column = loc[0] + 1
+			}
+		}
+		return []grepRenderedMatch{{text: text, column: column}}
+	}
+	indices := re.FindAllStringIndex(line, -1)
+	if len(indices) == 0 {
+		text := line
+		if trim {
+			text = trimGrepRenderedText(text)
+		}
+		return []grepRenderedMatch{{text: text}}
+	}
+	matches := make([]grepRenderedMatch, 0, len(indices))
+	for _, loc := range indices {
+		text := line[loc[0]:loc[1]]
+		if trim {
+			text = trimGrepRenderedText(text)
+		}
+		matches = append(matches, grepRenderedMatch{text: text, column: loc[0] + 1})
 	}
 	return matches
 }
@@ -1591,11 +2215,29 @@ func countRenderedMatches(re *regexp.Regexp, line string, onlyMatching, invert b
 	if !onlyMatching || invert {
 		return 1
 	}
-	matches := re.FindAllString(line, -1)
+	matches := re.FindAllStringIndex(line, -1)
 	if len(matches) == 0 {
 		return 1
 	}
 	return len(matches)
+}
+
+func countActualRegexMatches(re *regexp.Regexp, line string, invert bool) int {
+	if invert {
+		return 0
+	}
+	matches := re.FindAllStringIndex(line, -1)
+	if len(matches) == 0 {
+		return 0
+	}
+	return len(matches)
+}
+
+func formatGrepContentLine(filePath string, lineNum, column int, text string, includeColumn bool) string {
+	if includeColumn && column > 0 {
+		return fmt.Sprintf("%s:%d:%d: %s", filePath, lineNum, column, text)
+	}
+	return fmt.Sprintf("%s:%d: %s", filePath, lineNum, text)
 }
 
 // --- Ripgrep engine ---
@@ -1612,15 +2254,63 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 	allLines := make([]string, 0, 32)
 	totalMatchCount := 0
 	truncated := false
+	var aggregatedStats *grepStats
 
 	for _, scope := range opts.searchScopes {
 		args := buildRipgrepArgs(opts, scope, g.maxMatches)
 		output, err := g.runCommand(ctx, rgPath, scope.workingDir, args)
+		if opts.jsonOutput {
+			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, false, ctxErr
+				}
+				if !isRipgrepNoMatch(err) {
+					if opts.requiresRipgrep {
+						return nil, false, fmt.Errorf("ripgrep/rg 执行失败: %w", err)
+					}
+					return nil, false, nil
+				}
+			}
+
+			lines, stats := normalizeRipgrepJSONOutput(output, scope, opts.mode)
+			if stats != nil {
+				if aggregatedStats == nil {
+					aggregatedStats = &grepStats{}
+				}
+				aggregatedStats.add(stats)
+			}
+			if stats != nil {
+				totalMatchCount += stats.Matches
+			}
+			if len(allLines) < g.maxMatches {
+				remaining := g.maxMatches - len(allLines)
+				if len(lines) > remaining {
+					allLines = append(allLines, lines[:remaining]...)
+					truncated = true
+				} else {
+					allLines = append(allLines, lines...)
+				}
+			} else if len(lines) > 0 {
+				truncated = true
+			}
+			continue
+		}
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, false, ctxErr
 			}
 			if isRipgrepNoMatch(err) {
+				if opts.stats && len(output) > 0 {
+					lines, stats := normalizeRipgrepOutputWithStats(output)
+					lines = prefixRipgrepLinesForScope(scope, opts.mode, lines)
+					totalMatchCount += countRipgrepResults(opts.mode, lines)
+					if stats != nil {
+						if aggregatedStats == nil {
+							aggregatedStats = &grepStats{}
+						}
+						aggregatedStats.add(stats)
+					}
+				}
 				continue
 			}
 			if opts.requiresRipgrep {
@@ -1629,9 +2319,15 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 			return nil, false, nil
 		}
 
-		lines := normalizeRipgrepOutput(output)
+		lines, stats := normalizeRipgrepOutputWithStats(output)
 		lines = prefixRipgrepLinesForScope(scope, opts.mode, lines)
 		totalMatchCount += countRipgrepResults(opts.mode, lines)
+		if stats != nil {
+			if aggregatedStats == nil {
+				aggregatedStats = &grepStats{}
+			}
+			aggregatedStats.add(stats)
+		}
 		if len(allLines) < g.maxMatches {
 			remaining := g.maxMatches - len(allLines)
 			if len(lines) > remaining {
@@ -1646,9 +2342,9 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 	}
 
 	if totalMatchCount == 0 && len(allLines) == 0 {
-		return buildGrepResultWithEngine(opts, nil, 0, false, "rg"), true, nil
+		return buildGrepResultWithEngine(opts, nil, 0, false, aggregatedStats, "rg"), true, nil
 	}
-	return buildGrepResultWithEngine(opts, allLines, totalMatchCount, truncated, "rg"), true, nil
+	return buildGrepResultWithEngine(opts, allLines, totalMatchCount, truncated, aggregatedStats, "rg"), true, nil
 }
 
 func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) []string {
@@ -1694,6 +2390,30 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 	if opts.onlyMatching {
 		args = append(args, "--only-matching")
 	}
+	if opts.jsonOutput {
+		args = append(args, "--json")
+	}
+	if opts.column {
+		args = append(args, "--column")
+	}
+	if opts.trim {
+		args = append(args, "--trim")
+	}
+	if opts.maxColumnsSet {
+		args = append(args, "--max-columns", fmt.Sprintf("%d", opts.maxColumns))
+	}
+	if opts.maxColumnsPreview {
+		args = append(args, "--max-columns-preview")
+	}
+	if opts.noMaxColumnsPreview {
+		args = append(args, "--no-max-columns-preview")
+	}
+	if opts.follow {
+		args = append(args, "--follow")
+	}
+	if opts.stats {
+		args = append(args, "--stats")
+	}
 
 	// File type (rg native)
 	if opts.fileType != "" {
@@ -1701,6 +2421,12 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 	}
 	if opts.excludeType != "" {
 		args = append(args, "--type-not", opts.excludeType)
+	}
+	if opts.sortBy != "" {
+		args = append(args, "--sort", opts.sortBy)
+	}
+	if opts.sortReverseBy != "" {
+		args = append(args, "--sortr", opts.sortReverseBy)
 	}
 	if opts.globCaseInsensitive {
 		args = append(args, "--glob-case-insensitive")
@@ -1737,7 +2463,11 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 	case grepModeFilesWithout:
 		args = append(args, "--files-without-match")
 	case grepModeCount:
-		args = append(args, "--count")
+		if opts.countMatches {
+			args = append(args, "--count-matches")
+		} else {
+			args = append(args, "--count")
+		}
 		if opts.maxCountSet {
 			args = append(args, "--max-count", fmt.Sprintf("%d", opts.maxCount))
 		}
@@ -1786,12 +2516,127 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 	return args
 }
 
-func normalizeRipgrepOutput(output []byte) []string {
-	trimmed := strings.TrimSpace(strings.ReplaceAll(string(output), "\r\n", "\n"))
-	if trimmed == "" {
+type grepStats struct {
+	Matches          int
+	MatchedLines     int
+	FilesWithMatches int
+	FilesSearched    int
+	BytesSearched    int64
+}
+
+func (s *grepStats) add(other *grepStats) {
+	if s == nil || other == nil {
+		return
+	}
+	s.Matches += other.Matches
+	s.MatchedLines += other.MatchedLines
+	s.FilesWithMatches += other.FilesWithMatches
+	s.FilesSearched += other.FilesSearched
+	s.BytesSearched += other.BytesSearched
+}
+
+func (s *grepStats) metadataMap() map[string]interface{} {
+	if s == nil {
 		return nil
 	}
-	rawLines := strings.Split(trimmed, "\n")
+	return map[string]interface{}{
+		"matches":            s.Matches,
+		"matched_lines":      s.MatchedLines,
+		"files_with_matches": s.FilesWithMatches,
+		"files_searched":     s.FilesSearched,
+		"bytes_searched":     s.BytesSearched,
+	}
+}
+
+func (s *grepStats) renderSummary() string {
+	if s == nil {
+		return ""
+	}
+	lines := []string{
+		"-- stats --",
+		fmt.Sprintf("matches: %d", s.Matches),
+		fmt.Sprintf("matched_lines: %d", s.MatchedLines),
+		fmt.Sprintf("files_with_matches: %d", s.FilesWithMatches),
+		fmt.Sprintf("files_searched: %d", s.FilesSearched),
+		fmt.Sprintf("bytes_searched: %d", s.BytesSearched),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func normalizeRipgrepOutput(output []byte) []string {
+	lines, _ := normalizeRipgrepOutputWithStats(output)
+	return lines
+}
+
+func normalizeRipgrepJSONOutput(output []byte, scope grepSearchScope, mode grepMode) ([]string, *grepStats) {
+	normalized := strings.TrimRight(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n")
+	if strings.TrimSpace(normalized) == "" {
+		return nil, nil
+	}
+
+	rawLines := strings.Split(normalized, "\n")
+	lines := make([]string, 0, len(rawLines))
+	var aggregatedStats *grepStats
+
+	for _, rawLine := range rawLines {
+		if strings.TrimSpace(rawLine) == "" {
+			continue
+		}
+		if stats := parseRipgrepJSONSummaryLine(rawLine); stats != nil {
+			if aggregatedStats == nil {
+				aggregatedStats = &grepStats{}
+			}
+			aggregatedStats.add(stats)
+		}
+
+		rewritten := rawLine
+		if scope.displayPath != "" {
+			if scopedLine, changed := rewriteRipgrepJSONLineForScope(rawLine, scope); changed {
+				rewritten = scopedLine
+			} else if !isJSONOutputLine(rawLine) {
+				rewritten = prefixRipgrepLineForScope(scope, mode, rawLine)
+			} else {
+				rewritten = rawLine
+			}
+		}
+		lines = append(lines, rewritten)
+	}
+
+	return lines, aggregatedStats
+}
+
+func normalizeRipgrepOutputWithStats(output []byte) ([]string, *grepStats) {
+	normalized := strings.TrimRight(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n")
+	if strings.TrimSpace(normalized) == "" {
+		return nil, nil
+	}
+	rawLines := strings.Split(normalized, "\n")
+	contentLines, statsLines := splitRipgrepStatsLines(rawLines)
+	lines := normalizeRipgrepContentLines(contentLines)
+	stats := parseRipgrepStatsLines(statsLines)
+	return lines, stats
+}
+
+func splitRipgrepStatsLines(rawLines []string) ([]string, []string) {
+	end := len(rawLines)
+	for end > 0 && strings.TrimSpace(rawLines[end-1]) == "" {
+		end--
+	}
+	start := end
+	for start > 0 && isRipgrepStatsLine(strings.TrimSpace(rawLines[start-1])) {
+		start--
+	}
+	if start == end {
+		return rawLines[:end], nil
+	}
+	contentEnd := start
+	for contentEnd > 0 && strings.TrimSpace(rawLines[contentEnd-1]) == "" {
+		contentEnd--
+	}
+	return rawLines[:contentEnd], rawLines[start:end]
+}
+
+func normalizeRipgrepContentLines(rawLines []string) []string {
 	lines := make([]string, 0, len(rawLines))
 	for _, line := range rawLines {
 		if line == "" {
@@ -1801,7 +2646,9 @@ func normalizeRipgrepOutput(output []byte) []string {
 		if line == "--" {
 			continue
 		}
-		if matches := ripgrepMatchLinePattern.FindStringSubmatch(line); len(matches) == 4 {
+		if matches := ripgrepMatchLineWithColumnPattern.FindStringSubmatch(line); len(matches) == 5 {
+			line = fmt.Sprintf("%s:%s:%s: %s", matches[1], matches[2], matches[3], matches[4])
+		} else if matches := ripgrepMatchLinePattern.FindStringSubmatch(line); len(matches) == 4 {
 			line = fmt.Sprintf("%s:%s: %s", matches[1], matches[2], matches[3])
 		} else if matches := ripgrepContextLinePattern.FindStringSubmatch(line); len(matches) == 4 {
 			line = fmt.Sprintf("%s:%s: %s", matches[1], matches[2], matches[3])
@@ -1809,6 +2656,157 @@ func normalizeRipgrepOutput(output []byte) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+func isRipgrepStatsLine(line string) bool {
+	line = strings.TrimSpace(line)
+	switch {
+	case ripgrepStatsMatchesPattern.MatchString(line):
+		return true
+	case ripgrepStatsMatchedLinesPattern.MatchString(line):
+		return true
+	case ripgrepStatsFilesWithPattern.MatchString(line):
+		return true
+	case ripgrepStatsFilesSearchedPattern.MatchString(line):
+		return true
+	case ripgrepStatsBytesPrintedPattern.MatchString(line):
+		return true
+	case ripgrepStatsBytesSearchedPattern.MatchString(line):
+		return true
+	case ripgrepStatsSearchSecsPattern.MatchString(line):
+		return true
+	case ripgrepStatsTotalSecsPattern.MatchString(line):
+		return true
+	default:
+		return false
+	}
+}
+
+func parseRipgrepStatsLines(lines []string) *grepStats {
+	if len(lines) == 0 {
+		return nil
+	}
+	stats := &grepStats{}
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasSuffix(line, " matches"):
+			stats.Matches = parseLeadingInt(line)
+		case strings.HasSuffix(line, " matched lines"):
+			stats.MatchedLines = parseLeadingInt(line)
+		case strings.HasSuffix(line, " files contained matches"):
+			stats.FilesWithMatches = parseLeadingInt(line)
+		case strings.HasSuffix(line, " files searched"):
+			stats.FilesSearched = parseLeadingInt(line)
+		case strings.HasSuffix(line, " bytes searched"):
+			stats.BytesSearched = int64(parseLeadingInt(line))
+		}
+	}
+	return stats
+}
+
+func parseRipgrepJSONSummaryLine(line string) *grepStats {
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(line), &payload); err != nil {
+		return nil
+	}
+	typeValue, _ := payload["type"].(string)
+	if typeValue != "summary" {
+		return nil
+	}
+	data, _ := payload["data"].(map[string]interface{})
+	statsMap, _ := data["stats"].(map[string]interface{})
+	return parseRipgrepJSONStatsObject(statsMap)
+}
+
+func parseRipgrepJSONStatsObject(statsMap map[string]interface{}) *grepStats {
+	if len(statsMap) == 0 {
+		return nil
+	}
+	return &grepStats{
+		Matches:          jsonNumberToInt(statsMap["matches"]),
+		MatchedLines:     jsonNumberToInt(statsMap["matched_lines"]),
+		FilesWithMatches: jsonNumberToInt(statsMap["searches_with_match"]),
+		FilesSearched:    jsonNumberToInt(statsMap["searches"]),
+		BytesSearched:    jsonNumberToInt64(statsMap["bytes_searched"]),
+	}
+}
+
+func rewriteRipgrepJSONLineForScope(line string, scope grepSearchScope) (string, bool) {
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(line), &payload); err != nil {
+		return "", false
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok || data == nil {
+		return "", false
+	}
+	pathMap, ok := data["path"].(map[string]interface{})
+	if !ok || pathMap == nil {
+		return "", false
+	}
+	text, _ := pathMap["text"].(string)
+	if strings.TrimSpace(text) == "" {
+		return "", false
+	}
+	pathMap["text"] = composeScopeDisplayPath(scope, text)
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return "", false
+	}
+	return string(rewritten), true
+}
+
+func isJSONOutputLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return trimmed != "" && strings.HasPrefix(trimmed, "{") && json.Valid([]byte(trimmed))
+}
+
+func parseLeadingInt(line string) int {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) == 0 {
+		return 0
+	}
+	raw := strings.ReplaceAll(fields[0], ",", "")
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+func jsonNumberToInt(value interface{}) int {
+	switch v := value.(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case json.Number:
+		parsed, err := v.Int64()
+		if err == nil {
+			return int(parsed)
+		}
+	}
+	return 0
+}
+
+func jsonNumberToInt64(value interface{}) int64 {
+	switch v := value.(type) {
+	case float64:
+		return int64(v)
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case json.Number:
+		parsed, err := v.Int64()
+		if err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func prefixRipgrepLinesForScope(scope grepSearchScope, mode grepMode, lines []string) []string {
@@ -1833,6 +2831,9 @@ func prefixRipgrepLineForScope(scope grepSearchScope, mode grepMode, line string
 		}
 		return composeScopeDisplayPath(scope, line[:idx]) + line[idx:]
 	default:
+		if matches := ripgrepMatchLineWithColumnPattern.FindStringSubmatch(line); len(matches) == 5 {
+			return fmt.Sprintf("%s:%s:%s: %s", composeScopeDisplayPath(scope, matches[1]), matches[2], matches[3], matches[4])
+		}
 		if matches := ripgrepMatchLinePattern.FindStringSubmatch(line); len(matches) == 4 {
 			return fmt.Sprintf("%s:%s: %s", composeScopeDisplayPath(scope, matches[1]), matches[2], matches[3])
 		}
@@ -1879,6 +2880,7 @@ type grepMatch struct {
 	filePath string // relative path
 	absPath  string
 	lineNum  int
+	column   int
 	line     string
 }
 
@@ -1903,23 +2905,49 @@ func (g *GrepTool) searchWithWalker(opts *grepOptions, re *regexp.Regexp) *toolk
 func (g *GrepTool) walkerSearchContent(opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
 	matches := make([]grepMatch, 0, 16)
 	matchCount := 0
+	var stats *grepStats
+	if opts.stats {
+		stats = &grepStats{}
+	}
 
 	err := g.walkFiles(opts, func(path string, relPath string) error {
 		if hasExplicitZeroMaxCount(opts) {
+			if stats != nil {
+				if info, statErr := os.Stat(path); statErr == nil {
+					stats.FilesSearched++
+					stats.BytesSearched += info.Size()
+				}
+			}
 			return nil
 		}
 		lines, err := readFileLines(path)
 		if err != nil {
 			return nil
 		}
+		if stats != nil {
+			if info, statErr := os.Stat(path); statErr == nil {
+				stats.FilesSearched++
+				stats.BytesSearched += info.Size()
+			}
+		}
 
 		perFileCount := 0
+		matchedLinesThisFile := 0
+		actualMatchesThisFile := 0
 		for i, line := range lines {
 			if !lineSatisfiesMatch(re, line, opts.invertMatch) {
 				continue
 			}
-			for _, rendered := range extractRenderedMatches(re, line, opts.onlyMatching, opts.invertMatch) {
-				matches = append(matches, grepMatch{filePath: relPath, absPath: path, lineNum: i + 1, line: rendered})
+			matchedLinesThisFile++
+			actualMatchesThisFile += countActualRegexMatches(re, line, opts.invertMatch)
+			for _, rendered := range extractRenderedMatches(re, line, opts.onlyMatching, opts.invertMatch, opts.trim) {
+				matches = append(matches, grepMatch{
+					filePath: relPath,
+					absPath:  path,
+					lineNum:  i + 1,
+					column:   rendered.column,
+					line:     rendered.text,
+				})
 				matchCount++
 				perFileCount++
 				if matchCount >= g.maxMatches {
@@ -1935,6 +2963,11 @@ func (g *GrepTool) walkerSearchContent(opts *grepOptions, re *regexp.Regexp) *to
 			if hasReachedMaxCount(opts, perFileCount) {
 				break
 			}
+		}
+		if stats != nil && matchedLinesThisFile > 0 {
+			stats.FilesWithMatches++
+			stats.MatchedLines += matchedLinesThisFile
+			stats.Matches += actualMatchesThisFile
 		}
 		return nil
 	})
@@ -1954,19 +2987,31 @@ func (g *GrepTool) walkerSearchContent(opts *grepOptions, re *regexp.Regexp) *to
 	} else {
 		results = make([]string, len(matches))
 		for i, m := range matches {
-			results[i] = fmt.Sprintf("%s:%d: %s", m.filePath, m.lineNum, m.line)
+			renderedLine := applyMaxColumnsToRenderedText(opts, m.line)
+			results[i] = formatGrepContentLine(m.filePath, m.lineNum, m.column, renderedLine, opts.column)
 		}
 	}
 
 	truncated := errors.Is(err, errGrepLimitReached)
-	return buildGrepResult(opts, results, matchCount, truncated)
+	return buildGrepResult(opts, results, matchCount, truncated, stats)
 }
 
 func (g *GrepTool) walkerSearchFiles(opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
 	fileSet := make(map[string]struct{})
+	results := make([]string, 0, 16)
+	var stats *grepStats
+	if opts.stats {
+		stats = &grepStats{}
+	}
 
 	err := g.walkFiles(opts, func(path string, relPath string) error {
 		if hasExplicitZeroMaxCount(opts) {
+			if stats != nil {
+				if info, statErr := os.Stat(path); statErr == nil {
+					stats.FilesSearched++
+					stats.BytesSearched += info.Size()
+				}
+			}
 			return nil
 		}
 		file, err := os.Open(path)
@@ -1974,13 +3019,34 @@ func (g *GrepTool) walkerSearchFiles(opts *grepOptions, re *regexp.Regexp) *tool
 			return nil
 		}
 		defer file.Close()
+		if stats != nil {
+			if info, statErr := os.Stat(path); statErr == nil {
+				stats.FilesSearched++
+				stats.BytesSearched += info.Size()
+			}
+		}
 
 		scanner := bufio.NewScanner(file)
+		matchedLinesThisFile := 0
+		actualMatchesThisFile := 0
 		for scanner.Scan() {
-			if lineSatisfiesMatch(re, scanner.Text(), opts.invertMatch) {
-				fileSet[relPath] = struct{}{}
-				return nil // found at least one match, no need to scan further
+			line := scanner.Text()
+			if lineSatisfiesMatch(re, line, opts.invertMatch) {
+				if _, exists := fileSet[relPath]; !exists {
+					fileSet[relPath] = struct{}{}
+					results = append(results, relPath)
+				}
+				if stats == nil {
+					return nil // found at least one match, no need to scan further
+				}
+				matchedLinesThisFile++
+				actualMatchesThisFile += countActualRegexMatches(re, line, opts.invertMatch)
 			}
+		}
+		if stats != nil && matchedLinesThisFile > 0 {
+			stats.FilesWithMatches++
+			stats.MatchedLines += matchedLinesThisFile
+			stats.Matches += actualMatchesThisFile
 		}
 		return nil
 	})
@@ -1993,21 +3059,29 @@ func (g *GrepTool) walkerSearchFiles(opts *grepOptions, re *regexp.Regexp) *tool
 		}
 	}
 
-	results := make([]string, 0, len(fileSet))
-	for f := range fileSet {
-		results = append(results, f)
-	}
-	sort.Strings(results)
-
-	return buildGrepResult(opts, results, len(results), false)
+	return buildGrepResult(opts, results, len(results), false, stats)
 }
 
 func (g *GrepTool) walkerSearchFilesWithout(opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
 	fileSet := make(map[string]struct{})
+	results := make([]string, 0, 16)
+	var stats *grepStats
+	if opts.stats {
+		stats = &grepStats{}
+	}
 
 	err := g.walkFiles(opts, func(path string, relPath string) error {
 		if hasExplicitZeroMaxCount(opts) {
-			fileSet[relPath] = struct{}{}
+			if stats != nil {
+				if info, statErr := os.Stat(path); statErr == nil {
+					stats.FilesSearched++
+					stats.BytesSearched += info.Size()
+				}
+			}
+			if _, exists := fileSet[relPath]; !exists {
+				fileSet[relPath] = struct{}{}
+				results = append(results, relPath)
+			}
 			return nil
 		}
 		file, err := os.Open(path)
@@ -2015,17 +3089,38 @@ func (g *GrepTool) walkerSearchFilesWithout(opts *grepOptions, re *regexp.Regexp
 			return nil
 		}
 		defer file.Close()
+		if stats != nil {
+			if info, statErr := os.Stat(path); statErr == nil {
+				stats.FilesSearched++
+				stats.BytesSearched += info.Size()
+			}
+		}
 
 		hasMatch := false
 		scanner := bufio.NewScanner(file)
+		matchedLinesThisFile := 0
+		actualMatchesThisFile := 0
 		for scanner.Scan() {
-			if lineSatisfiesMatch(re, scanner.Text(), opts.invertMatch) {
+			line := scanner.Text()
+			if lineSatisfiesMatch(re, line, opts.invertMatch) {
 				hasMatch = true
-				break
+				if stats == nil {
+					break
+				}
+				matchedLinesThisFile++
+				actualMatchesThisFile += countActualRegexMatches(re, line, opts.invertMatch)
 			}
 		}
+		if stats != nil && matchedLinesThisFile > 0 {
+			stats.FilesWithMatches++
+			stats.MatchedLines += matchedLinesThisFile
+			stats.Matches += actualMatchesThisFile
+		}
 		if !hasMatch {
-			fileSet[relPath] = struct{}{}
+			if _, exists := fileSet[relPath]; !exists {
+				fileSet[relPath] = struct{}{}
+				results = append(results, relPath)
+			}
 		}
 		return nil
 	})
@@ -2038,20 +3133,24 @@ func (g *GrepTool) walkerSearchFilesWithout(opts *grepOptions, re *regexp.Regexp
 		}
 	}
 
-	results := make([]string, 0, len(fileSet))
-	for f := range fileSet {
-		results = append(results, f)
-	}
-	sort.Strings(results)
-
-	return buildGrepResult(opts, results, len(results), false)
+	return buildGrepResult(opts, results, len(results), false, stats)
 }
 
 func (g *GrepTool) walkerSearchCount(opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
 	counts := make([]fileMatchCount, 0, 16)
+	var stats *grepStats
+	if opts.stats {
+		stats = &grepStats{}
+	}
 
 	err := g.walkFiles(opts, func(path string, relPath string) error {
 		if hasExplicitZeroMaxCount(opts) {
+			if stats != nil {
+				if info, statErr := os.Stat(path); statErr == nil {
+					stats.FilesSearched++
+					stats.BytesSearched += info.Size()
+				}
+			}
 			return nil
 		}
 		file, err := os.Open(path)
@@ -2059,17 +3158,36 @@ func (g *GrepTool) walkerSearchCount(opts *grepOptions, re *regexp.Regexp) *tool
 			return nil
 		}
 		defer file.Close()
+		if stats != nil {
+			if info, statErr := os.Stat(path); statErr == nil {
+				stats.FilesSearched++
+				stats.BytesSearched += info.Size()
+			}
+		}
 
 		count := 0
 		scanner := bufio.NewScanner(file)
+		matchedLinesThisFile := 0
+		actualMatchesThisFile := 0
 		for scanner.Scan() {
 			line := scanner.Text()
 			if lineSatisfiesMatch(re, line, opts.invertMatch) {
-				count += countRenderedMatches(re, line, opts.onlyMatching, opts.invertMatch)
+				matchedLinesThisFile++
+				actualMatchesThisFile += countActualRegexMatches(re, line, opts.invertMatch)
+				if opts.countMatches {
+					count += countRenderedMatches(re, line, true, opts.invertMatch)
+				} else {
+					count += countRenderedMatches(re, line, opts.onlyMatching, opts.invertMatch)
+				}
 				if hasReachedMaxCount(opts, count) {
 					break
 				}
 			}
+		}
+		if stats != nil && matchedLinesThisFile > 0 {
+			stats.FilesWithMatches++
+			stats.MatchedLines += matchedLinesThisFile
+			stats.Matches += actualMatchesThisFile
 		}
 		if count > 0 {
 			counts = append(counts, fileMatchCount{filePath: relPath, count: count})
@@ -2092,7 +3210,7 @@ func (g *GrepTool) walkerSearchCount(opts *grepOptions, re *regexp.Regexp) *tool
 		totalMatches += fc.count
 	}
 
-	return buildGrepResult(opts, results, totalMatches, false)
+	return buildGrepResult(opts, results, totalMatches, false, stats)
 }
 
 // buildContextOutput produces output with context lines around each match.
@@ -2157,13 +3275,26 @@ func (g *GrepTool) buildContextOutput(opts *grepOptions, matches []grepMatch) []
 				results = append(results, fmt.Sprintf("%s--", fg.relPath))
 			}
 			prefix := " "
+			matchColumn := 0
 			for _, m := range fg.matches {
 				if m.lineNum == lineNum {
 					prefix = ">" // marker for match line
+					if m.column > 0 && (matchColumn == 0 || m.column < matchColumn) {
+						matchColumn = m.column
+					}
 					break
 				}
 			}
-			results = append(results, fmt.Sprintf("%s%s%d: %s", fg.relPath, prefix, lineNum, fg.lines[lineNum-1]))
+			renderedLine := fg.lines[lineNum-1]
+			if opts.trim {
+				renderedLine = trimGrepRenderedText(renderedLine)
+			}
+			renderedLine = applyMaxColumnsToRenderedText(opts, renderedLine)
+			if opts.column && prefix == ">" && matchColumn > 0 {
+				results = append(results, fmt.Sprintf("%s%s%d:%d: %s", fg.relPath, prefix, lineNum, matchColumn, renderedLine))
+			} else {
+				results = append(results, fmt.Sprintf("%s%s%d: %s", fg.relPath, prefix, lineNum, renderedLine))
+			}
 			prevLine = lineNum
 		}
 	}
@@ -2171,26 +3302,46 @@ func (g *GrepTool) buildContextOutput(opts *grepOptions, matches []grepMatch) []
 	return results
 }
 
+type grepFileCandidate struct {
+	path    string
+	relPath string
+}
+
 // walkFiles walks the directory tree, calling fn for each file that passes filters.
 func (g *GrepTool) walkFiles(opts *grepOptions, fn func(path string, relPath string) error) error {
+	candidates, err := g.collectFileCandidates(opts)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		if err := fn(candidate.path, candidate.relPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *GrepTool) collectFileCandidates(opts *grepOptions) ([]grepFileCandidate, error) {
 	includeGlobs := resolveIncludeGlobs(opts)
 	excludeGlobs := resolveExcludeGlobs(opts)
+	candidates := make([]grepFileCandidate, 0, 32)
 	for _, scope := range opts.searchScopes {
 		if scope.searchTarget != "" {
 			targetPath := filepath.Join(scope.workingDir, scope.searchTarget)
 			info, err := os.Stat(targetPath)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if info.IsDir() {
-				return fmt.Errorf("搜索目标不是文件: %s", targetPath)
+				return nil, fmt.Errorf("搜索目标不是文件: %s", targetPath)
 			}
 			if !shouldIncludeFileByInfo(targetPath, scope.searchTarget, info, includeGlobs, excludeGlobs, opts.maxFileBytes) {
 				continue
 			}
-			if err := fn(targetPath, composeScopeDisplayPath(scope, scope.searchTarget)); err != nil {
-				return err
-			}
+			candidates = append(candidates, grepFileCandidate{
+				path:    targetPath,
+				relPath: composeScopeDisplayPath(scope, scope.searchTarget),
+			})
 			continue
 		}
 
@@ -2227,14 +3378,34 @@ func (g *GrepTool) walkFiles(opts *grepOptions, fn func(path string, relPath str
 				return nil
 			}
 
-			return fn(path, composeScopeDisplayPath(scope, relPath))
+			candidates = append(candidates, grepFileCandidate{
+				path:    path,
+				relPath: composeScopeDisplayPath(scope, relPath),
+			})
+			return nil
 		})
 		if walkErr != nil {
-			return walkErr
+			return nil, walkErr
 		}
 	}
-
-	return nil
+	if opts.sortBy == "path" || opts.sortReverseBy == "path" {
+		reverse := opts.sortReverseBy == "path"
+		sort.SliceStable(candidates, func(i, j int) bool {
+			left := normalizeGlobPath(candidates[i].relPath)
+			right := normalizeGlobPath(candidates[j].relPath)
+			if left == right {
+				if reverse {
+					return candidates[i].path > candidates[j].path
+				}
+				return candidates[i].path < candidates[j].path
+			}
+			if reverse {
+				return left > right
+			}
+			return left < right
+		})
+	}
+	return candidates, nil
 }
 
 // resolveIncludeGlobs builds the include glob list from include and type parameters.
@@ -2364,12 +3535,135 @@ func readFileLines(path string) ([]string, error) {
 
 // --- Result building ---
 
-func buildGrepResult(opts *grepOptions, results []string, matchCount int, truncated bool) *toolkit.ToolResult {
+func grepCaseMode(opts *grepOptions) string {
+	switch {
+	case opts == nil:
+		return "default"
+	case opts.caseSensitive:
+		return "case_sensitive"
+	case opts.smartCase:
+		return "smart_case"
+	case opts.ignoreCaseRequested || opts.ignoreCase:
+		return "ignore_case"
+	default:
+		return "default"
+	}
+}
+
+func grepPatternSource(opts *grepOptions) string {
+	if opts == nil {
+		return "direct"
+	}
+	hasDirect := len(opts.directPatterns) > 0
+	hasPatternFiles := len(opts.patternFiles) > 0
+	switch {
+	case hasDirect && hasPatternFiles:
+		return "mixed"
+	case hasPatternFiles:
+		return "pattern_file"
+	case len(opts.directPatterns) > 1:
+		return "multiple_patterns"
+	default:
+		return "direct"
+	}
+}
+
+func grepSearchScopeKind(opts *grepOptions) string {
+	if opts == nil || len(opts.searchScopes) == 0 {
+		return "none"
+	}
+	if len(opts.searchScopes) > 1 {
+		return "multi_path"
+	}
+	if opts.searchScopes[0].searchTarget != "" {
+		return "single_file"
+	}
+	return "single_path"
+}
+
+func grepOutputFormat(opts *grepOptions) string {
+	if opts == nil {
+		return "normalized_text"
+	}
+	if opts.jsonOutput {
+		return "rg_passthrough"
+	}
+	return "normalized_text"
+}
+
+func requiredRipgrepFeatures(opts *grepOptions) []string {
+	if opts == nil {
+		return nil
+	}
+	features := make([]string, 0, 8)
+	if opts.jsonOutput {
+		features = appendUniqueString(features, "json/--json")
+	}
+	if opts.follow {
+		features = appendUniqueString(features, "follow/-L/--follow")
+	}
+	if requiresRipgrepForSort(opts.sortBy) {
+		features = appendUniqueString(features, "sort="+opts.sortBy)
+	}
+	if requiresRipgrepForSort(opts.sortReverseBy) {
+		features = appendUniqueString(features, "sortr="+opts.sortReverseBy)
+	}
+	for i := 0; i < len(opts.rgOnlyArgs); i++ {
+		arg := strings.TrimSpace(opts.rgOnlyArgs[i])
+		if arg == "" {
+			continue
+		}
+		switch arg {
+		case "--pcre2":
+			features = appendUniqueString(features, "pcre2/-P/--pcre2")
+		case "--engine":
+			if i+1 < len(opts.rgOnlyArgs) {
+				features = appendUniqueString(features, "engine="+strings.TrimSpace(opts.rgOnlyArgs[i+1]))
+				i++
+			} else {
+				features = appendUniqueString(features, "engine")
+			}
+		case "--replace":
+			if i+1 < len(opts.rgOnlyArgs) {
+				features = appendUniqueString(features, "replace/-r")
+				i++
+			} else {
+				features = appendUniqueString(features, "replace/-r")
+			}
+		case "--multiline":
+			features = appendUniqueString(features, "multiline/-U/--multiline")
+		case "--multiline-dotall":
+			features = appendUniqueString(features, "multiline-dotall")
+		case "--passthru":
+			features = appendUniqueString(features, "passthru")
+		case "--crlf":
+			features = appendUniqueString(features, "crlf")
+		case "--auto-hybrid-regex":
+			features = appendUniqueString(features, "auto-hybrid-regex")
+		default:
+			features = appendUniqueString(features, arg)
+		}
+	}
+	return features
+}
+
+func buildGrepResult(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats) *toolkit.ToolResult {
 	output := "未找到匹配的内容"
+	if opts != nil && opts.jsonOutput {
+		output = ""
+	}
 	if len(results) > 0 {
 		output = strings.Join(results, "\n")
-		if truncated {
+		if truncated && (opts == nil || !opts.jsonOutput) {
 			output += fmt.Sprintf("\n\n(结果已截断，显示前 %d 个匹配)", len(results))
+		}
+	}
+	if opts != nil && opts.stats && opts.jsonOutput {
+		// json/--json 模式下保留 rg 原始 JSON Lines 语义，不再追加自定义 stats 摘要块。
+	} else if opts != nil && opts.stats && stats != nil {
+		summary := stats.renderSummary()
+		if summary != "" {
+			output += "\n\n" + summary
 		}
 	}
 
@@ -2379,40 +3673,65 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	}
 
 	metadata := map[string]interface{}{
-		"pattern":               opts.pattern,
-		"patterns":              opts.patterns,
-		"pattern_files":         opts.patternFiles,
-		"path":                  opts.searchPath,
-		"paths":                 opts.searchPaths,
-		"include":               opts.include,
-		"exclude":               opts.exclude,
-		"glob_case_insensitive": opts.globCaseInsensitive,
-		"literal":               opts.literal,
-		"fixed_strings":         opts.literal,
-		"ignore_case":           opts.ignoreCase,
-		"case_sensitive":        opts.caseSensitive,
-		"smart_case":            opts.smartCase,
-		"word":                  opts.word,
-		"word_regexp":           opts.word,
-		"line_regexp":           opts.lineRegexp,
-		"invert_match":          opts.invertMatch,
-		"only_matching":         opts.onlyMatching,
-		"context":               opts.context,
-		"before_context":        opts.beforeContext,
-		"after_context":         opts.afterContext,
-		"type":                  opts.fileType,
-		"type_not":              opts.excludeType,
-		"max_depth":             opts.maxDepth,
-		"max_depth_explicit":    opts.maxDepthSet,
-		"max_count":             opts.maxCount,
-		"max_count_explicit":    opts.maxCountSet,
-		"max_filesize":          opts.maxFilesize,
-		"requires_ripgrep":      opts.requiresRipgrep,
-		"rg_only_args":          opts.rgOnlyArgs,
-		"mode":                  string(opts.mode),
-		"match_count":           matchCount,
-		"truncated":             truncated,
-		"engine":                engine,
+		"pattern":                opts.pattern,
+		"patterns":               opts.patterns,
+		"pattern_files":          opts.patternFiles,
+		"path":                   opts.searchPath,
+		"paths":                  opts.searchPaths,
+		"include":                opts.include,
+		"exclude":                opts.exclude,
+		"glob_case_insensitive":  opts.globCaseInsensitive,
+		"literal":                opts.literal,
+		"fixed_strings":          opts.literal,
+		"ignore_case":            opts.ignoreCase,
+		"case_sensitive":         opts.caseSensitive,
+		"smart_case":             opts.smartCase,
+		"word":                   opts.word,
+		"word_regexp":            opts.word,
+		"line_regexp":            opts.lineRegexp,
+		"invert_match":           opts.invertMatch,
+		"only_matching":          opts.onlyMatching,
+		"count_matches":          opts.countMatches,
+		"stats_requested":        opts.stats,
+		"json_output_requested":  opts.jsonOutput,
+		"follow":                 opts.follow,
+		"column":                 opts.column,
+		"trim":                   opts.trim,
+		"max_columns":            opts.maxColumns,
+		"max_columns_explicit":   opts.maxColumnsSet,
+		"max_columns_preview":    opts.maxColumnsPreview,
+		"no_max_columns_preview": opts.noMaxColumnsPreview,
+		"context":                opts.context,
+		"before_context":         opts.beforeContext,
+		"after_context":          opts.afterContext,
+		"type":                   opts.fileType,
+		"type_not":               opts.excludeType,
+		"sort":                   opts.sortBy,
+		"sortr":                  opts.sortReverseBy,
+		"sort_files":             opts.sortBy == "path" && opts.sortReverseBy == "",
+		"max_depth":              opts.maxDepth,
+		"max_depth_explicit":     opts.maxDepthSet,
+		"max_count":              opts.maxCount,
+		"max_count_explicit":     opts.maxCountSet,
+		"max_filesize":           opts.maxFilesize,
+		"requires_ripgrep":       opts.requiresRipgrep,
+		"rg_only_args":           opts.rgOnlyArgs,
+		"ignored_rg_args":        opts.ignoredRGArgs,
+		"ignored_presentation":   opts.ignoredPresentation,
+		"case_mode":              grepCaseMode(opts),
+		"pattern_source":         grepPatternSource(opts),
+		"pattern_count":          len(opts.patterns),
+		"search_scope_count":     len(opts.searchScopes),
+		"search_scope_kind":      grepSearchScopeKind(opts),
+		"normalized_output":      !opts.jsonOutput,
+		"output_format":          grepOutputFormat(opts),
+		"mode":                   string(opts.mode),
+		"match_count":            matchCount,
+		"truncated":              truncated,
+		"engine":                 engine,
+	}
+	if stats != nil {
+		metadata["stats"] = stats.metadataMap()
 	}
 
 	return &toolkit.ToolResult{
@@ -2423,8 +3742,8 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	}
 }
 
-func buildGrepResultWithEngine(opts *grepOptions, results []string, matchCount int, truncated bool, engine string) *toolkit.ToolResult {
-	result := buildGrepResult(opts, results, matchCount, truncated)
+func buildGrepResultWithEngine(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats, engine string) *toolkit.ToolResult {
+	result := buildGrepResult(opts, results, matchCount, truncated, stats)
 	result.Metadata["engine"] = engine
 	return result
 }
