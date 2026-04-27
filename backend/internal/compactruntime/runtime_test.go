@@ -2,8 +2,10 @@ package compactruntime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
@@ -13,10 +15,12 @@ import (
 )
 
 type compactTestProvider struct {
-	name         string
-	callCount    int
-	capabilities map[string]agentconfig.ModelCapabilitySpec
-	lastRequest  *llm.LLMRequest
+	name              string
+	callCount         int
+	capabilities      map[string]agentconfig.ModelCapabilitySpec
+	lastRequest       *llm.LLMRequest
+	responseContent   string
+	responseReasoning string
 }
 
 type compactRemoteProvider struct {
@@ -30,9 +34,14 @@ func (p *compactTestProvider) Name() string { return p.name }
 func (p *compactTestProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
 	p.callCount++
 	p.lastRequest = cloneLLMRequest(req)
+	content := p.responseContent
+	if content == "" && strings.TrimSpace(p.responseReasoning) == "" {
+		content = "User goal preserved. Key tool results preserved. Continue from the latest turns."
+	}
 	return &llm.LLMResponse{
-		Content: "User goal preserved. Key tool results preserved. Continue from the latest turns.",
-		Model:   req.Model,
+		Content:   content,
+		Reasoning: p.responseReasoning,
+		Model:     req.Model,
 	}, nil
 }
 
@@ -114,6 +123,45 @@ func TestMaybeCompactUsesModelSpecificLimit(t *testing.T) {
 	require.Equal(t, "compaction", result.ReplacementHistory[3].Metadata["context_stage"])
 	require.Equal(t, ModeLocal, result.ReplacementHistory[3].Metadata["compact_mode"])
 	require.Equal(t, 2, result.CompactedMessages)
+}
+
+func TestMaybeCompactUsesModelSpecificCompactSettings(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "deepseek-v4-pro",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"deepseek-v4-pro": {
+				MaxContextTokens:       272000,
+				MaxTokens:              4096,
+				AutoCompactTokenLimit:  200,
+				CompactReasoningEffort: "none",
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("deepseek-v4-pro", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, _, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:          "session-compact-settings",
+		Provider:           "provider-a",
+		Model:              "deepseek-v4-pro",
+		History:            compactTestHistory(),
+		KeepRecentMessages: 2,
+		Phase:              PhasePreTurn,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 60
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, provider.lastRequest)
+	assert.Equal(t, 4096, provider.lastRequest.MaxTokens)
+	assert.Equal(t, "none", provider.lastRequest.ReasoningEffort)
 }
 
 func TestMaybeCompactFallsBackToWildcardAndSkipsBelowLimit(t *testing.T) {
@@ -428,6 +476,48 @@ func TestMaybeCompactLocalRequestUsesOriginalMessagesAndCompactPrompt(t *testing
 	}
 }
 
+func TestMaybeCompactUsesReasoningFallbackWhenContentIsEmpty(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name:              "provider-a",
+		responseContent:   "",
+		responseReasoning: "User goal preserved. Key tool results preserved. Continue from the latest turns.",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {
+				AutoCompactTokenLimit: 100,
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, _, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:          "session-compact-reasoning-fallback",
+		Model:              "gpt-5",
+		History:            compactTestHistory(),
+		KeepRecentMessages: 2,
+		Phase:              PhasePreTurn,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 60
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 1, provider.callCount)
+	require.NotEmpty(t, result.ReplacementHistory)
+
+	summaryMessage := result.ReplacementHistory[len(result.ReplacementHistory)-1]
+	require.Equal(t, "user", summaryMessage.Role)
+	require.Equal(t, "compaction", summaryMessage.Metadata["context_stage"])
+	require.Contains(t, summaryMessage.Content, localSummaryHeading)
+	require.Contains(t, summaryMessage.Content, "User goal preserved. Key tool results preserved.")
+}
+
 func TestMaybeCompactKeepsTrailingActiveUserAfterSummary(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "provider-a",
@@ -492,6 +582,7 @@ func cloneLLMRequest(req *llm.LLMRequest) *llm.LLMRequest {
 	}
 	cloned := *req
 	cloned.Messages = cloneMessages(req.Messages)
+	cloned.Tools = append([]types.ToolDefinition(nil), req.Tools...)
 	if len(req.Metadata) > 0 {
 		cloned.Metadata = make(map[string]interface{}, len(req.Metadata))
 		for key, value := range req.Metadata {

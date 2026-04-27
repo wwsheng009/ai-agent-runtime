@@ -19,6 +19,7 @@ const (
 	localSummaryTextKey          = "summary_text"
 	localSummaryHeading          = "Compacted context from earlier turns:"
 	localRetainedUserMaxTokens   = 20000
+	localCompactDefaultMaxTokens = 2048
 	localCompactionPrompt        = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
 Include:
@@ -45,7 +46,7 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		return nil, "no_non_system_history", nil
 	}
 
-	summaryMessage, checkpointIDs, err := a.buildSummaryMessage(ctx, req, systemMessages, nonSystemMessages)
+	summaryMessage, checkpointIDs, usage, usageSource, err := a.buildSummaryMessage(ctx, req, systemMessages, nonSystemMessages)
 	if err != nil {
 		return nil, "summary_generation_failed", err
 	}
@@ -70,29 +71,34 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		MaxContextTokens:   threshold.MaxContextTokens,
 		TokenBefore:        counter(req.History),
 		TokenAfter:         counter(replacement),
+		Usage:              usage,
+		UsageSource:        usageSource,
 		CompactedMessages:  compactedMessages,
 		CheckpointIDs:      append([]string(nil), checkpointIDs...),
 		ReplacementHistory: replacement,
 	}, "", nil
 }
 
-func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, systemMessages, history []types.Message) (*types.Message, []string, error) {
+func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, systemMessages, history []types.Message) (*types.Message, []string, *types.TokenUsage, string, error) {
 	if message, checkpointID := a.findReusableSummaryCheckpoint(ctx, req.SessionID, req.Phase, history); message != nil {
 		if checkpointID == "" {
-			return message, nil, nil
+			return message, nil, nil, "", nil
 		}
-		return message, []string{checkpointID}, nil
+		return message, []string{checkpointID}, nil, "", nil
 	}
 	if a == nil || a.llmRuntime == nil {
-		return nil, nil, fmt.Errorf("llm runtime is not configured")
+		return nil, nil, nil, "", fmt.Errorf("llm runtime is not configured")
 	}
 
+	maxTokens, reasoningEffort := resolveCompactSummaryRequestSettings(a.llmRuntime, req.Provider, req.Model)
+
 	response, err := a.llmRuntime.Call(ctx, &llm.LLMRequest{
-		Provider:    strings.TrimSpace(req.Provider),
-		Model:       strings.TrimSpace(req.Model),
-		Messages:    buildLocalCompactionRequest(systemMessages, history),
-		MaxTokens:   1024,
-		Temperature: 0,
+		Provider:        strings.TrimSpace(req.Provider),
+		Model:           strings.TrimSpace(req.Model),
+		Messages:        buildLocalCompactionRequest(systemMessages, history),
+		MaxTokens:       maxTokens,
+		Temperature:     0,
+		ReasoningEffort: reasoningEffort,
 		Metadata: map[string]interface{}{
 			"internal_operation": "compact",
 			"compact_mode":       ModeLocal,
@@ -101,23 +107,48 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, sys
 		},
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, "", err
 	}
 
-	summaryText := ensureSummaryHeading(response.Content)
+	summaryText := extractCompactSummaryText(response)
 	if strings.TrimSpace(summaryText) == "" {
-		return nil, nil, fmt.Errorf("compact summary response is empty")
+		return nil, nil, nil, "", fmt.Errorf("compact summary response is empty")
 	}
 
 	checkpointID := a.saveSummaryCheckpoint(ctx, req.SessionID, req.TaskID, history, summaryText)
 	message := buildCompactionMessage(summaryText, checkpointID, 0, len(history), req.Phase)
 	if message == nil {
-		return nil, nil, fmt.Errorf("failed to build compaction message")
+		return nil, nil, nil, "", fmt.Errorf("failed to build compaction message")
+	}
+	var usage *types.TokenUsage
+	if response != nil && response.Usage != nil {
+		usage = response.Usage.Clone()
+	}
+	usageSource := ""
+	if response != nil && response.Metadata != nil {
+		usageSource = strings.TrimSpace(fmt.Sprintf("%v", response.Metadata["usage_source"]))
 	}
 	if checkpointID == "" {
-		return message, nil, nil
+		return message, nil, usage, usageSource, nil
 	}
-	return message, []string{checkpointID}, nil
+	return message, []string{checkpointID}, usage, usageSource, nil
+}
+
+func extractCompactSummaryText(response *llm.LLMResponse) string {
+	if response == nil {
+		return ""
+	}
+
+	summaryText := strings.TrimSpace(response.Content)
+	if summaryText == "" {
+		summaryText = strings.TrimSpace(response.Reasoning)
+	}
+	if summaryText == "" && len(response.Metadata) > 0 {
+		if reasoning, ok := response.Metadata["reasoning_content"].(string); ok {
+			summaryText = strings.TrimSpace(reasoning)
+		}
+	}
+	return ensureSummaryHeading(summaryText)
 }
 
 func buildLocalCompactionRequest(systemMessages, history []types.Message) []types.Message {
@@ -205,6 +236,28 @@ func ensureSummaryHeading(summary string) string {
 		return summary
 	}
 	return localSummaryHeading + "\n" + summary
+}
+
+func resolveCompactSummaryRequestSettings(runtime *llm.LLMRuntime, providerName, model string) (int, string) {
+	maxTokens := localCompactDefaultMaxTokens
+	reasoningEffort := "none"
+	if runtime == nil {
+		return maxTokens, reasoningEffort
+	}
+
+	_, _, capability, ok := llm.ResolveRuntimeModelCapability(runtime, providerName, model)
+	if !ok {
+		return maxTokens, reasoningEffort
+	}
+
+	if resolvedMaxTokens, resolvedReasoningEffort := llm.CompactSummarySettings(capability); resolvedMaxTokens > 0 {
+		maxTokens = resolvedMaxTokens
+		if strings.TrimSpace(resolvedReasoningEffort) != "" {
+			reasoningEffort = strings.TrimSpace(resolvedReasoningEffort)
+		}
+	}
+
+	return maxTokens, reasoningEffort
 }
 
 func buildCompactionMessage(summaryText, checkpointID string, segmentStart, segmentEnd int, phase string) *types.Message {

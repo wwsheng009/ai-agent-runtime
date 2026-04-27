@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type RemoteAdapter struct {
@@ -50,6 +51,10 @@ func (a *RemoteAdapter) Compact(ctx context.Context, req Request, limit threshol
 	}
 
 	replacement := cloneMessages(response.ReplacementHistory)
+	var usage *types.TokenUsage
+	if response.Usage != nil {
+		usage = response.Usage.Clone()
+	}
 	return &Result{
 		Mode:               ModeRemote,
 		Phase:              normalizedPhase(req.Phase),
@@ -59,6 +64,8 @@ func (a *RemoteAdapter) Compact(ctx context.Context, req Request, limit threshol
 		MaxContextTokens:   limit.MaxContextTokens,
 		TokenBefore:        counter(req.History),
 		TokenAfter:         counter(replacement),
+		Usage:              usage,
+		UsageSource:        strings.TrimSpace(response.UsageSource),
 		CompactedMessages:  maxInt(0, response.CompactedMessages),
 		CheckpointIDs:      append([]string(nil), response.CheckpointIDs...),
 		ReplacementHistory: replacement,

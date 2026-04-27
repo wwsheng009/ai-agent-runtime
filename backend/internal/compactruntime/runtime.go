@@ -48,6 +48,8 @@ type Result struct {
 	MaxContextTokens   int
 	TokenBefore        int
 	TokenAfter         int
+	Usage              *types.TokenUsage
+	UsageSource        string
 	CompactedMessages  int
 	CheckpointIDs      []string
 	ReplacementHistory []types.Message
