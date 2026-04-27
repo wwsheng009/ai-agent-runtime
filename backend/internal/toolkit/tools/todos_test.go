@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -55,8 +56,8 @@ func TestTodosTool(t *testing.T) {
 			wantError: true,
 		},
 		{
-			name: "missing todos",
-			params: map[string]interface{}{},
+			name:      "missing todos",
+			params:    map[string]interface{}{},
 			wantError: true,
 		},
 		{
@@ -127,5 +128,28 @@ func TestTodosTool_Interface(t *testing.T) {
 
 	if !tool.CanDirectCall() {
 		t.Error("todos tool should support direct call")
+	}
+}
+
+func TestTodosTool_DescriptionGuidesSplittingLargeLists(t *testing.T) {
+	tool := NewTodosTool()
+
+	desc := tool.Description()
+	if !strings.Contains(desc, "拆分") || !strings.Contains(desc, "多个更小") {
+		t.Fatalf("expected todos tool description to guide splitting, got %q", desc)
+	}
+
+	params := tool.Parameters()
+	props, ok := params["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected properties in schema, got %#v", params)
+	}
+	todosSchema, ok := props["todos"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected todos schema in properties, got %#v", props)
+	}
+	todosDesc, _ := todosSchema["description"].(string)
+	if !strings.Contains(todosDesc, "拆分") || !strings.Contains(todosDesc, "超长") {
+		t.Fatalf("expected todos description to guide splitting, got %q", todosDesc)
 	}
 }

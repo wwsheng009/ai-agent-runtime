@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -69,6 +70,26 @@ func TestGlobTool(t *testing.T) {
 			wantCount: 2, // file1.go, file2.go
 			wantError: false,
 			wantPaths: []string{"file1.go", "file2.go"},
+		},
+		{
+			name: "match exact root file",
+			params: map[string]interface{}{
+				"pattern": "file3.txt",
+				"path":    tmpDir,
+			},
+			wantCount: 1,
+			wantError: false,
+			wantPaths: []string{"file3.txt"},
+		},
+		{
+			name: "match single file path",
+			params: map[string]interface{}{
+				"pattern": "**/*.txt",
+				"path":    filepath.Join(tmpDir, "file3.txt"),
+			},
+			wantCount: 1,
+			wantError: false,
+			wantPaths: []string{"file3.txt"},
 		},
 		{
 			name: "match txt files",
@@ -174,6 +195,91 @@ func TestGlobTool(t *testing.T) {
 	}
 }
 
+func TestGlobTool_MissingSearchPath(t *testing.T) {
+	tool := NewGlobTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "*.go",
+		"path":    filepath.Join(t.TempDir(), "missing"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected missing path to fail, got success: %s", result.Content)
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "搜索路径不可用") {
+		t.Fatalf("expected searchable path error, got: %v", result.Error)
+	}
+}
+
+func TestGlobTool_LimitTruncation(t *testing.T) {
+	tmpDir := t.TempDir()
+	for i := 0; i < 5; i++ {
+		name := filepath.Join(tmpDir, "file"+string(rune('0'+i))+".go")
+		if err := os.WriteFile(name, []byte("test"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tool := NewGlobTool()
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "*.go",
+		"path":    tmpDir,
+		"limit":   2,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+
+	files, ok := result.Metadata["files"].([]string)
+	if !ok {
+		t.Fatalf("expected files metadata, got: %#v", result.Metadata)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files after truncation, got %d: %v", len(files), files)
+	}
+	if truncated, ok := result.Metadata["truncated"].(bool); !ok || !truncated {
+		t.Fatalf("expected truncated metadata to be true, got: %#v", result.Metadata["truncated"])
+	}
+	if limitHit, ok := result.Metadata["limit_hit"].(bool); !ok || !limitHit {
+		t.Fatalf("expected limit_hit metadata to be true, got: %#v", result.Metadata["limit_hit"])
+	}
+	if !strings.Contains(result.Content, "结果已截断") {
+		t.Fatalf("expected truncation hint in content, got: %s", result.Content)
+	}
+	if limit, ok := result.Metadata["limit"].(int); !ok || limit != 2 {
+		t.Fatalf("expected limit metadata to be 2, got: %#v", result.Metadata["limit"])
+	}
+	if returnedCount, ok := result.Metadata["returned_count"].(int); !ok || returnedCount != 2 {
+		t.Fatalf("expected returned_count metadata to be 2, got: %#v", result.Metadata["returned_count"])
+	}
+	if count, ok := result.Metadata["count"].(int); !ok || count != 2 {
+		t.Fatalf("expected count metadata to be 2, got: %#v", result.Metadata["count"])
+	}
+}
+
+func TestGlobTool_InvalidLimit(t *testing.T) {
+	tool := NewGlobTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "*.go",
+		"path":    t.TempDir(),
+		"limit":   0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected invalid limit to fail, got success: %s", result.Content)
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "limit 参数必须大于 0") {
+		t.Fatalf("expected limit validation error, got: %v", result.Error)
+	}
+}
+
 func requireNoError(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
@@ -210,5 +316,28 @@ func TestGlobTool_Interface(t *testing.T) {
 
 	if params["type"] != "object" {
 		t.Error("parameters should be of type object")
+	}
+}
+
+func TestGlobTool_DescriptionGuidesSingleTargetFocus(t *testing.T) {
+	tool := NewGlobTool()
+
+	desc := tool.Description()
+	if !strings.Contains(desc, "拆分") || !strings.Contains(desc, "每次只聚焦一个模式") {
+		t.Fatalf("expected glob description to guide single-target focus, got %q", desc)
+	}
+
+	params := tool.Parameters()
+	props, ok := params["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected properties in schema, got %#v", params)
+	}
+	patternSchema, ok := props["pattern"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected pattern schema in properties, got %#v", props)
+	}
+	patternDesc, _ := patternSchema["description"].(string)
+	if !strings.Contains(patternDesc, "拆分") || !strings.Contains(patternDesc, "多个不同目标") {
+		t.Fatalf("expected pattern description to guide single-target focus, got %q", patternDesc)
 	}
 }

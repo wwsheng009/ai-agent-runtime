@@ -27,15 +27,15 @@ func NewEditTool() *EditTool {
 		"properties": map[string]interface{}{
 			"file_path": map[string]interface{}{
 				"type":        "string",
-				"description": "要修改的文件绝对路径",
+				"description": "要修改的文件绝对路径。若需要改写多个文件，请拆分为多次 edit 调用，每次只聚焦一个文件和一个替换目标。",
 			},
 			"old_string": map[string]interface{}{
 				"type":        "string",
-				"description": "要替换的文本（必须精确匹配，包括空格和换行）",
+				"description": "要替换的文本（必须精确匹配，包括空格和换行）。若需要替换很长的片段或多个位置，请拆分为更小的定位块，避免单次参数过长导致工具调用被截断。",
 			},
 			"new_string": map[string]interface{}{
 				"type":        "string",
-				"description": "替换后的文本",
+				"description": "替换后的文本。若新内容较长，请拆分为多个更小的 edit/write 调用，每次只聚焦一个替换目标，按块逐步替换或重建。",
 			},
 			"replace_all": map[string]interface{}{
 				"type":        "boolean",
@@ -48,7 +48,7 @@ func NewEditTool() *EditTool {
 	return &EditTool{
 		BaseTool: toolkit.NewBaseTool(
 			"edit",
-			"编辑文件：使用 new_string 替换文件中的 old_string",
+			"编辑单个文件：使用 new_string 替换文件中的 old_string；适合小范围精确替换。若要改写多个文件或大段内容，请拆分为多个更小的 edit/write 调用，每次只聚焦一个文件和一个替换目标，按章节或按块逐步处理，避免单次参数过大导致截断。",
 			"1.0.0",
 			parameters,
 			true,
@@ -67,6 +67,10 @@ type EditParams struct {
 // Execute 实现 Tool 接口
 func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	var p EditParams
+
+	if result, truncated := truncatedToolArgsResult(params); truncated {
+		return result, nil
+	}
 
 	// 解析参数
 	filePath, ok := params["file_path"].(string)
@@ -98,6 +102,17 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 	p.NewString = newString
+	if err := validateInlineFileMutationPayload(
+		"edit",
+		inlineMutationSegment{Name: "old_string", Value: p.OldString},
+		inlineMutationSegment{Name: "new_string", Value: p.NewString},
+	); err != nil {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
+		}, nil
+	}
 
 	if replaceAll, ok := params["replace_all"].(bool); ok {
 		p.ReplaceAll = replaceAll

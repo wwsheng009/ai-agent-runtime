@@ -34,11 +34,11 @@ func NewLsTool() *LsTool {
 		"properties": map[string]interface{}{
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "目录路径（默认为当前目录）",
+				"description": "目录路径（默认为当前目录）。若需要查看多个目录，请拆分为多次 ls 调用，每次聚焦一个目录。",
 			},
 			"depth": map[string]interface{}{
 				"type":        "integer",
-				"description": "递归深度（默认为 1，只显示当前目录）",
+				"description": "递归深度（默认为 1，只显示当前目录）。若目录结构很大，建议保持较小深度并分次查看不同目录。",
 			},
 		},
 		"required": []string{},
@@ -47,7 +47,7 @@ func NewLsTool() *LsTool {
 	return &LsTool{
 		BaseTool: toolkit.NewBaseTool(
 			"ls",
-			"列出目录内容",
+			"列出目录内容。若需要查看多个目录，请拆分为多次 ls 调用，每次只聚焦一个目录或一个较小的目录子树。",
 			"1.0.0",
 			parameters,
 			true,

@@ -28,7 +28,7 @@ func NewWebSearchTool() *WebSearchTool {
 		"properties": map[string]interface{}{
 			"query": map[string]interface{}{
 				"type":        "string",
-				"description": "搜索关键词或问题",
+				"description": "搜索关键词或问题。若包含多个不同搜索意图，请拆分为多个更小的 query 调用，每次只聚焦一个搜索目标。",
 			},
 			"count": map[string]interface{}{
 				"type":        "integer",
@@ -42,7 +42,7 @@ func NewWebSearchTool() *WebSearchTool {
 	return &WebSearchTool{
 		BaseTool: toolkit.NewBaseTool(
 			"web_search",
-			"使用 DuckDuckGo 搜索网络信息，返回相关网页标题、链接和摘要",
+			"使用 DuckDuckGo 搜索网络信息，返回相关网页标题、链接和摘要。若有多个不同搜索意图，请拆分为多个更小的 web_search 调用，每次只聚焦一个搜索目标。",
 			"1.0.0",
 			parameters,
 			true,

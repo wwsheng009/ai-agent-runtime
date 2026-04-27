@@ -38,7 +38,7 @@ func NewApplyPatchTool() *ApplyPatchTool {
 		"properties": map[string]interface{}{
 			"patch": map[string]interface{}{
 				"type":        "string",
-				"description": "要应用的补丁文本。必须使用 Codex apply_patch 格式，例如 *** Begin Patch / *** Update File / *** Add File / *** Delete File / *** End Patch。",
+				"description": "要应用的补丁文本。必须使用 Codex apply_patch 格式，例如 *** Begin Patch / *** Update File / *** Add File / *** Delete File / *** End Patch。若补丁很大或包含多个独立变更，请拆分为多个更小的补丁块，每次只聚焦一个文件或一个变更区域，避免单次参数过长导致截断。",
 			},
 		},
 		"required": []string{"patch"},
@@ -47,7 +47,7 @@ func NewApplyPatchTool() *ApplyPatchTool {
 	return &ApplyPatchTool{
 		BaseTool: toolkit.NewBaseTool(
 			"apply_patch",
-			"应用 Codex 风格补丁到工作区文件，支持新增、更新、删除和重命名文件。",
+			"应用 Codex 风格补丁到工作区文件，支持新增、更新、删除和重命名文件。若需要处理很大的变更或多个独立目标，请拆分为多个更小的 apply_patch 调用，每次只聚焦一个文件或一个变更区域，避免单次参数过大导致截断。",
 			"1.0.0",
 			parameters,
 			true,

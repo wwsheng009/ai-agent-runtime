@@ -31,7 +31,7 @@ func NewDownloadTool() *DownloadTool {
 		"properties": map[string]interface{}{
 			"url": map[string]interface{}{
 				"type":        "string",
-				"description": "要下载的文件 URL",
+				"description": "要下载的文件 URL。若需要下载多个文件，请拆分为多次 download 调用，每次只聚焦一个 URL，避免一次性拼入过多参数。",
 			},
 			"file_path": map[string]interface{}{
 				"type":        "string",
@@ -49,7 +49,7 @@ func NewDownloadTool() *DownloadTool {
 	return &DownloadTool{
 		BaseTool: toolkit.NewBaseTool(
 			"download",
-			"从 URL 下载文件到本地，支持大文件流式下载，自动创建父目录",
+			"从单个 URL 下载文件到本地，支持大文件流式下载，自动创建父目录。若需要批量下载多个文件，请拆分为多次 download 调用，每次只聚焦一个 URL。",
 			"1.0.0",
 			parameters,
 			true,

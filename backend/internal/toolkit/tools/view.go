@@ -26,15 +26,15 @@ func NewViewTool() *ViewTool {
 		"properties": map[string]interface{}{
 			"file_path": map[string]interface{}{
 				"type":        "string",
-				"description": "要查看的文件路径",
+				"description": "要查看的文件路径。若需要查看多个文件，请拆分为多次 view 调用，每次只聚焦一个文件。",
 			},
 			"offset": map[string]interface{}{
 				"type":        "integer",
-				"description": "开始读取的行号（0-based，默认为 0）",
+				"description": "开始读取的行号（0-based，默认为 0）。大文件建议配合 limit 分段查看。",
 			},
 			"limit": map[string]interface{}{
 				"type":        "integer",
-				"description": "读取的行数（默认为 2000）",
+				"description": "读取的行数（默认为 2000）。若文件较大，建议保持较小的单次读取范围并分次查看。",
 			},
 		},
 		"required": []string{"file_path"},
@@ -43,7 +43,7 @@ func NewViewTool() *ViewTool {
 	return &ViewTool{
 		BaseTool: toolkit.NewBaseTool(
 			"view",
-			"查看文件内容",
+			"查看文件内容。若需要查看多个文件，请拆分为多次 view 调用，每次只聚焦一个文件；大文件建议按 offset/limit 分段查看。",
 			"1.0.0",
 			parameters,
 			true,

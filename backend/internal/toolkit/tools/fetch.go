@@ -26,7 +26,7 @@ func NewFetchTool() *FetchTool {
 		"properties": map[string]interface{}{
 			"url": map[string]interface{}{
 				"type":        "string",
-				"description": "要获取内容的 URL",
+				"description": "要获取内容的 URL。若需要获取多个页面，请拆分为多次 fetch 调用，每次只处理一个 URL。",
 			},
 			"format": map[string]interface{}{
 				"type":        "string",
@@ -46,7 +46,7 @@ func NewFetchTool() *FetchTool {
 	return &FetchTool{
 		BaseTool: toolkit.NewBaseTool(
 			"fetch",
-			"获取 URL 内容，返回原始文本、HTML 或 Markdown 格式",
+			"获取 URL 内容，返回原始文本、HTML 或 Markdown 格式。若需要获取多个页面，请拆分为多次 fetch 调用，每次只处理一个 URL。",
 			"1.0.0",
 			parameters,
 			true,

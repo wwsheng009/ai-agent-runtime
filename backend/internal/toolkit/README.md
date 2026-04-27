@@ -26,6 +26,7 @@ internal/toolkit/
     ├── view.go       # 文件查看
     ├── edit.go       # 文件编辑
     ├── write.go      # 文件写入
+    ├── apply_patch.go # 补丁应用
     ├── glob.go       # 文件名模式匹配
     ├── grep.go       # 文件内容搜索
     ├── ls.go         # 目录列表
@@ -41,19 +42,20 @@ internal/toolkit/
 
 | 工具 | 优先级 | 描述 |
 |------|--------|------|
-| bash | P0 | 执行 Shell 命令，支持跨平台 |
-| view | P0 | 查看文件内容，支持偏移量和限制 |
-| edit | P0 | 文件编辑，单处文本替换 |
-| write | P0 | 文件写入，自动创建父目录 |
-| glob | P1 | 文件名模式匹配，支持 ** 通配符 |
-| grep | P1 | 文件内容搜索，支持正则表达式 |
-| ls | P1 | 目录列表，树形结构展示 |
-| download | P2 | 从 URL 下载文件到本地 |
-| fetch | P2 | 获取 URL 内容，支持 text/markdown/html |
-| multiedit | P3 | 多处编辑，按顺序应用编辑操作 |
-| todos | P3 | 任务管理，结构化任务列表 |
-| sourcegraph | P3 | 代码搜索，使用 Sourcegraph API |
-| web_search | P3 | 网络搜索，使用 DuckDuckGo |
+| bash | P0 | 执行 Shell 命令，支持跨平台；多步骤请拆分为多次 bash 调用 |
+| view | P0 | 查看单个文件内容；多文件请拆分为多次 view 调用 |
+| edit | P0 | 单文件精确替换；大段内容请拆分为多次 edit 调用 |
+| write | P0 | 单文件写入或覆盖；长内容请拆分为多次 write 调用 |
+| apply_patch | P0 | 应用 Codex 风格补丁；大补丁请拆分为多次 apply_patch 调用 |
+| glob | P1 | 文件名模式匹配；多模式请拆分为多次 glob 调用 |
+| grep | P1 | 文件内容搜索；复杂条件请拆分为多次 grep 调用 |
+| ls | P1 | 目录列表；多目录请拆分为多次 ls 调用 |
+| download | P2 | 单 URL 文件下载；批量下载请拆分为多次 download 调用 |
+| fetch | P2 | 单 URL 内容获取；多 URL 请拆分为多次 fetch 调用 |
+| multiedit | P3 | 单文件多处编辑；长内容请拆分为多次 multiedit 调用 |
+| todos | P3 | 结构化任务列表；长列表请拆分为多次 todos 调用 |
+| sourcegraph | P3 | 代码搜索；复杂查询请拆分为多次 sourcegraph 调用 |
+| web_search | P3 | 网络搜索；多意图查询请拆分为多次 web_search 调用 |
 
 ## 快速开始
 
@@ -77,6 +79,7 @@ func main() {
     registry.Register(tools.NewViewTool())
     registry.Register(tools.NewEditTool())
     registry.Register(tools.NewWriteTool())
+    registry.Register(tools.NewApplyPatchTool())
 
     // 注册 P1 工具
     registry.Register(tools.NewGlobTool())

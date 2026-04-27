@@ -45,63 +45,138 @@ type GrepTool struct {
 
 // grepOptions holds all parsed search options.
 type grepOptions struct {
-	pattern              string
-	directPatterns       []string
-	patterns             []string
-	searchPath           string
-	searchPaths          []string
-	resolvedPath         string
-	resolvedPaths        []string
-	patternFiles         []string
-	resolvedPatternFiles []string
-	workingDir           string
-	searchTarget         string
-	searchScopes         []grepSearchScope
-	include              string
-	exclude              string
-	includeSpecs         []grepGlobPattern
-	excludeSpecs         []grepGlobPattern
-	globCaseInsensitive  bool
-	literal              bool
-	ignoreCase           bool
-	ignoreCaseRequested  bool
-	caseSensitive        bool
-	smartCase            bool
-	word                 bool
-	lineRegexp           bool
-	invertMatch          bool
-	onlyMatching         bool
-	countMatches         bool
-	stats                bool
-	jsonOutput           bool
-	follow               bool
-	column               bool
-	trim                 bool
-	pretty               bool
-	lineBuffered          bool
-	noLineBuffered        bool
-	maxColumns           int
-	maxColumnsSet        bool
-	maxColumnsPreview    bool
-	noMaxColumnsPreview  bool
-	context              int
-	beforeContext        int
-	afterContext         int
-	fileType             string
-	excludeType          string
-	sortBy               string
-	sortReverseBy        string
-	maxDepth             int
-	maxDepthSet          bool
-	maxCount             int
-	maxCountSet          bool
-	maxFilesize          string
-	maxFileBytes         int64
-	requiresRipgrep      bool
-	rgOnlyArgs           []string
-	ignoredRGArgs        []string
-	ignoredPresentation  []string
-	mode                 grepMode
+	pattern                      string
+	directPatterns               []string
+	patterns                     []string
+	searchPath                   string
+	searchPaths                  []string
+	resolvedPath                 string
+	resolvedPaths                []string
+	patternFiles                 []string
+	resolvedPatternFiles         []string
+	workingDir                   string
+	searchTarget                 string
+	searchScopes                 []grepSearchScope
+	include                      string
+	exclude                      string
+	includeSpecs                 []grepGlobPattern
+	excludeSpecs                 []grepGlobPattern
+	ignoreSpecs                  []grepIgnorePattern
+	ignoreFiles                  []string
+	ignoreFileCaseInsensitive    bool
+	ignoreFileCaseInsensitiveSet bool
+	noIgnoreFiles                bool
+	noIgnoreFilesSet             bool
+	noIgnore                     bool
+	noIgnoreSet                  bool
+	unrestrictedLevel            int
+	unrestrictedLevelSet         bool
+	noConfig                     bool
+	noConfigSet                  bool
+	oneFileSystem                bool
+	oneFileSystemSet             bool
+	noMessages                   bool
+	noMessagesSet                bool
+	globCaseInsensitive          bool
+	globCaseInsensitiveSet       bool
+	literal                      bool
+	literalSet                   bool
+	ignoreCase                   bool
+	ignoreCaseSet                bool
+	ignoreCaseRequested          bool
+	caseSensitive                bool
+	caseSensitiveSet             bool
+	smartCase                    bool
+	smartCaseSet                 bool
+	word                         bool
+	wordSet                      bool
+	lineRegexp                   bool
+	lineRegexpSet                bool
+	invertMatch                  bool
+	invertMatchSet               bool
+	onlyMatching                 bool
+	onlyMatchingSet              bool
+	countMatches                 bool
+	countMatchesSet              bool
+	stats                        bool
+	statsSet                     bool
+	jsonOutput                   bool
+	jsonOutputSet                bool
+	follow                       bool
+	followSet                    bool
+	column                       bool
+	columnSet                    bool
+	trim                         bool
+	trimSet                      bool
+	pretty                       bool
+	prettySet                    bool
+	lineBuffered                 bool
+	lineBufferedSet              bool
+	noLineBuffered               bool
+	noLineBufferedSet            bool
+	blockBuffered                bool
+	blockBufferedSet             bool
+	noBlockBuffered              bool
+	noBlockBufferedSet           bool
+	nullOutput                   bool
+	nullOutputSet                bool
+	nullData                     bool
+	nullDataSet                  bool
+	fieldContextSeparator        string
+	fieldContextSeparatorSet     bool
+	pathSeparator                string
+	pathSeparatorSet             bool
+	contextSeparator             string
+	contextSeparatorSet          bool
+	noContextSeparator           bool
+	maxColumns                   int
+	maxColumnsSet                bool
+	maxColumnsPreview            bool
+	maxColumnsPreviewSet         bool
+	noMaxColumnsPreview          bool
+	noMaxColumnsPreviewSet       bool
+	context                      int
+	beforeContext                int
+	afterContext                 int
+	fileType                     string
+	excludeType                  string
+	typeAdd                      []string
+	structuredTypeAdd            []string
+	typeAddSet                   bool
+	typeClear                    []string
+	structuredTypeClear          []string
+	typeClearSet                 bool
+	noIgnoreParent               bool
+	noIgnoreParentSet            bool
+	noIgnoreVCS                  bool
+	noIgnoreVCSSet               bool
+	noIgnoreGlobal               bool
+	noIgnoreGlobalSet            bool
+	noIgnoreDot                  bool
+	noIgnoreDotSet               bool
+	sortBy                       string
+	sortBySet                    bool
+	sortReverseBy                string
+	sortReverseBySet             bool
+	sortFilesSet                 bool
+	noSortFilesSet               bool
+	maxDepth                     int
+	maxDepthSet                  bool
+	maxCount                     int
+	maxCountSet                  bool
+	maxFilesize                  string
+	maxFilesizeSet               bool
+	maxFileBytes                 int64
+	hidden                       bool
+	hiddenSet                    bool
+	noHidden                     bool
+	noHiddenSet                  bool
+	requiresRipgrep              bool
+	rgOnlyArgs                   []string
+	ignoredRGArgs                []string
+	ignoredPresentation          []string
+	mode                         grepMode
+	modeSet                      bool
 }
 
 type grepSearchScope struct {
@@ -113,6 +188,13 @@ type grepSearchScope struct {
 type grepGlobPattern struct {
 	pattern         string
 	caseInsensitive bool
+}
+
+type grepIgnorePattern struct {
+	pattern         string
+	caseInsensitive bool
+	negate          bool
+	scopeDir        string
 }
 
 // fileTypeToGlob maps rg --type names to glob patterns for the builtin engine.
@@ -160,6 +242,8 @@ var (
 	ripgrepStatsTotalSecsPattern      = regexp.MustCompile(`^[0-9.]+ seconds total$`)
 )
 
+var fileSystemIdentityFn = fileSystemIdentity
+
 func stringOrStringArraySchema(description string) map[string]interface{} {
 	return map[string]interface{}{
 		"anyOf": []map[string]interface{}{
@@ -198,13 +282,13 @@ func NewGrepTool() *GrepTool {
 		"properties": map[string]interface{}{
 			"pattern": map[string]interface{}{
 				"type":        "string",
-				"description": "搜索模式。默认按正则表达式处理；若 literal/fixed_strings=true，则按字面文本处理。若提供 rg_args，也可把 pattern 作为第一个位置参数放在 rg_args 中。",
+				"description": "搜索模式。默认按正则表达式处理；若 literal/fixed_strings=true，则按字面文本处理。若搜索目标很多，请拆分为多个更小的 grep 调用，每次只聚焦一个目标；若提供 rg_args，也可把 pattern 作为第一个位置参数放在 rg_args 中。",
 			},
 			"regexp": map[string]interface{}{
 				"type":        "string",
 				"description": "兼容 rg 的 --regexp/-e 单模式写法；等价于 pattern。",
 			},
-			"patterns": stringOrStringArraySchema("兼容多模式搜索。可传多个 pattern/regexp，等价于多次使用 rg -e/--regexp。多个模式按 OR 语义匹配。"),
+			"patterns": stringOrStringArraySchema("兼容多模式搜索。可传多个 pattern/regexp，等价于多次使用 rg -e/--regexp。多个模式按 OR 语义匹配；若模式很多，建议拆分为多个更小的 grep 调用，每次只聚焦一个目标。"),
 			"pattern_file": map[string]interface{}{
 				"type":        "string",
 				"description": "兼容 rg 的 --file/-f 单文件写法。文件中每行视作一个 pattern；空行会按 rg 语义视为空正则，可能匹配所有行。",
@@ -214,7 +298,7 @@ func NewGrepTool() *GrepTool {
 				"type":        "string",
 				"description": "搜索路径（默认为当前目录）。若提供 rg_args，也可把 path 作为第二个位置参数放在 rg_args 中。",
 			},
-			"paths":   stringOrStringArraySchema("兼容 rg 的多个搜索根路径。可传字符串数组，等价于 rg pattern path1 path2 ...；也可与 rg_args 的多个位置路径配合使用。"),
+			"paths":   stringOrStringArraySchema("兼容 rg 的多个搜索根路径。可传字符串数组，等价于 rg pattern path1 path2 ...；若路径很多，建议拆分为多个更小的 grep 调用，避免一次性塞入过多条件；也可与 rg_args 的多个位置路径配合使用。"),
 			"include": stringOrStringArraySchema("包含的文件名 glob 模式，例如 *.go。支持字符串、字符串数组，或逗号分隔多个模式。"),
 			"exclude": stringOrStringArraySchema("排除的文件名 glob 模式，例如 *.test.ts。支持字符串、字符串数组，或逗号分隔多个模式。"),
 			"glob":    stringOrStringArraySchema("兼容 rg 的 --glob/-g。可直接按 ripgrep 思路传 glob；以 ! 开头的模式会视为排除模式。"),
@@ -334,6 +418,38 @@ func NewGrepTool() *GrepTool {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --no-line-buffered：关闭逐行缓冲。grep 会接受这个熟悉写法，但稳定的工具输出本身不依赖这个开关。",
 			},
+			"block_buffered": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --block-buffered：按块缓冲输出。grep 会接受这个熟悉写法，但稳定的工具输出本身不依赖这个开关。",
+			},
+			"no_block_buffered": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-block-buffered：关闭按块缓冲。grep 会接受这个熟悉写法，但稳定的工具输出本身不依赖这个开关。",
+			},
+			"null": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --null：以 NUL 分隔路径/记录。grep 会接受这个熟悉写法，但为了保持稳定文本输出骨架会将其视为兼容提示。",
+			},
+			"null_data": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --null-data：按 NUL 作为输入记录分隔。grep 会接受这个熟悉写法，但为了保持稳定文本输出骨架会将其视为兼容提示。",
+			},
+			"field_context_separator": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --field-context-separator：指定 field-context 输出中的分隔符。grep 会接受这个熟悉写法，但默认仍保持稳定的结构化输出骨架。",
+			},
+			"path_separator": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --path-separator：指定路径分隔符。grep 会接受这个熟悉写法，但默认仍保持稳定的结构化输出骨架。",
+			},
+			"context_separator": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --context-separator：指定上下文块之间的分隔字符串。grep 会尽量模拟该行为，默认值仍保持为 --。",
+			},
+			"no_context_separator": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-context-separator：关闭上下文块之间的分隔字符串。grep 会尽量模拟该行为。",
+			},
 			"max_columns": map[string]interface{}{
 				"type":        "integer",
 				"description": "兼容 rg 的 --max-columns/-M：当行内容过长时省略或预览长行。grep 会尽量模拟 rg 的长行省略语义；若提供 preview 相关开关，则保留前缀预览。",
@@ -369,6 +485,33 @@ func NewGrepTool() *GrepTool {
 			"type_not": map[string]interface{}{
 				"type":        "string",
 				"description": "兼容 rg 的 --type-not/-T：排除某类文件类型，例如 test/py/go。",
+			},
+			"type_add":    stringOrStringArraySchema("兼容 rg 的 --type-add：添加自定义文件类型规则，例如 type_add='foo:*.foo'。该能力当前仅在可用 ripgrep/rg 时支持；可传单个字符串或字符串数组。"),
+			"type_clear":  stringOrStringArraySchema("兼容 rg 的 --type-clear：清除内置/自定义文件类型规则，例如 type_clear='foo'。该能力当前仅在可用 ripgrep/rg 时支持；可传单个字符串或字符串数组。"),
+			"ignore_file": stringOrStringArraySchema("兼容 rg 的 --ignore-file：额外指定 ignore 文件列表。grep 会尽量接受这种熟悉写法；当 rg 可用时会透传给 rg。"),
+			"ignore_file_case_insensitive": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --ignore-file-case-insensitive：只让显式 ignore_file 的规则按大小写不敏感匹配；它不会影响 .ignore/.rgignore/.gitignore/.git/info/exclude 这类本地/祖先 ignore 文件，而且在 no_ignore_files=true 时会被压制。grep 会尽量接受这种熟悉写法；当 rg 可用时会透传给 rg。",
+			},
+			"no_ignore_files": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore-files：禁用通过 --ignore-file 指定的 ignore 文件（即使显式提供了 ignore_file 也会被压制）。grep 会尽量接受这种熟悉写法；当 rg 可用时会透传给 rg。",
+			},
+			"no_ignore_parent": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore-parent：忽略父目录中的 ignore 文件。grep 会接受这种熟悉写法，并在 rg 可用时透传。",
+			},
+			"no_ignore_vcs": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore-vcs：忽略版本控制系统的 ignore 规则。grep 会接受这种熟悉写法，并在 rg 可用时透传。",
+			},
+			"no_ignore_global": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore-global：忽略全局 ignore 文件。grep 会接受这种熟悉写法，并在 rg 可用时透传。",
+			},
+			"no_ignore_dot": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore-dot：忽略 .ignore/.rgignore 等 dot ignore 规则。grep 会接受这种熟悉写法，并在 rg 可用时透传。",
 			},
 			"sort": map[string]interface{}{
 				"type":        "string",
@@ -453,18 +596,38 @@ func NewGrepTool() *GrepTool {
 			},
 			"hidden": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --hidden。当前 grep 工具默认已经搜索隐藏文件，无需额外指定。",
+				"description": "兼容 rg 的 --hidden：允许搜索以 . 开头的隐藏文件/目录；它只影响 hidden 层，不会自动关闭 ignore 文件过滤。若同时开启 no_hidden，则 no_hidden 优先，并且在 rg_args 冲突时 no_hidden 也优先。",
+			},
+			"no_hidden": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-hidden：显式禁止搜索隐藏文件/目录。该选项会覆盖 hidden=true，也会覆盖 -uu 这类放宽隐藏过滤的心智；如果 rg_args 里同时出现 --hidden 和 --no-hidden，则 --no-hidden 仍然优先。",
 			},
 			"no_ignore": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-ignore。当前 grep 工具默认已经忽略 .git/node_modules 之外的大多数 ignore 规则，无需额外指定。",
+				"description": "兼容 rg 的 --no-ignore：关闭 ignore 文件驱动的过滤。与 hidden/no_hidden 互相独立；默认不会自动放开 hidden 目录，若要搜索隐藏文件/目录请显式使用 hidden=true 或更高层级的 unrestricted 设置。",
+			},
+			"unrestricted_level": map[string]interface{}{
+				"type":        "integer",
+				"description": "兼容 rg 的 -u/-uu/-uuu/--unrestricted 语义层级：0=默认，1=放宽 ignore 过滤但仍保留 hidden 默认，2=继续放宽 hidden 文件/目录，3=继续放宽二进制文件。grep 会尽量按这个层级模拟 rg 的过滤顺序，并在 rg 可用时原样透传。",
+			},
+			"no_config": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-config：禁止读取 ripgrep 配置文件。grep 回退引擎本身不读取 rg 配置，因此该参数主要用于和 rg 心智对齐，并在 rg 可用时透传。",
+			},
+			"one_file_system": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --one-file-system：限制递归在单一文件系统内。它主要影响递归遍历；当与 follow/-L/--follow 同时使用时，完整语义依赖 rg 的 symlink 跟随实现。grep 会接受这个熟悉写法并在 rg 可用时透传；回退引擎会尽量保持现有目录遍历行为。",
+			},
+			"no_messages": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-messages：尽量抑制非致命的文件读取/遍历提示。grep 会在回退引擎中尽量安静地跳过读取失败项，并在 rg 可用时透传。",
 			},
 			"rg_args": map[string]interface{}{
 				"type": "array",
 				"items": map[string]interface{}{
 					"type": "string",
 				},
-				"description": "可选：ripgrep/rg 风格参数列表。支持常见选项与位置参数，例如 [\"-g\", \"*.go\", \"-i\", \"-w\", \"-C\", \"2\", \"pattern\", \"backend\"]、多模式 [\"-e\", \"foo\", \"-e\", \"bar\", \"backend\"]、pattern file [\"-f\", \"patterns.txt\", \"backend\"]、列号/裁剪 [\"--column\", \"--trim\", \"foo\", \"backend\"]、路径排序 [\"--sort\", \"path\", \"foo\", \"backend\"]、计数次数 [\"--count-matches\", \"foo\", \"backend\"] 等；像 -n/-H/-N/--no-filename/--color 这类展示层参数也会被兼容接收。",
+				"description": "可选：ripgrep/rg 风格参数列表。支持常见选项与位置参数，例如 [\"-g\", \"*.go\", \"-i\", \"-w\", \"-C\", \"2\", \"pattern\", \"backend\"]、多模式 [\"-e\", \"foo\", \"-e\", \"bar\", \"backend\"]、pattern file [\"-f\", \"patterns.txt\", \"backend\"]、ignore file [\"--ignore-file\", \"ignore.txt\", \"backend\"]、列号/裁剪 [\"--column\", \"--trim\", \"foo\", \"backend\"]、路径排序 [\"--sort\", \"path\", \"foo\", \"backend\"]、计数次数 [\"--count-matches\", \"foo\", \"backend\"] 等；若搜索条件很多，请先拆分成多个更小的 grep 调用，每次聚焦一个目标，再组合结果；像 -n/-H/-N/--no-filename/--color 以及 null/null_data/block_buffered/field_context_separator/path_separator 这类展示层参数也会被兼容接收；像 --no-ignore-parent/--no-ignore-vcs/--no-ignore-global/--no-ignore-dot/--ignore-file-case-insensitive 这类 ignore 相关参数、以及 -u/-uu/-uuu/--unrestricted 这类放宽过滤参数（-u 主要放宽 ignore，-uu 进一步放宽 hidden，-uuu 再进一步放宽 binary）、以及 --no-messages 这类安静模式参数，也可按 rg 心智迁移；rg_args 内部冲突时，no_hidden 优先于 hidden，no_ignore_files 优先于 ignore_file，ignore_file_case_insensitive 只作用于显式 ignore_file，follow + one_file_system 这类 symlink/遍历组合依赖 rg 的完整实现；结构化参数优先于 rg_args，冲突时以结构化参数为准。",
 			},
 		},
 		"anyOf": []map[string]interface{}{
@@ -492,7 +655,7 @@ func NewGrepTool() *GrepTool {
 	return &GrepTool{
 		BaseTool: toolkit.NewBaseTool(
 			"grep",
-			"文件内容搜索（优先使用 ripgrep/rg，不可用时回退到内置扫描；支持常见 rg 风格参数、多路径/单文件路径、路径感知 glob/iglob、glob_case_insensitive、pattern_file/-f、pcre2/-P、multiline/-U、replace/-r、column/trim、count_matches、stats、json、follow、sort/sortr/sort_files、-e 多模式、-v/-x/-l/-o、--files-without-match、--max-filesize 与 rg_args 兼容层）",
+			"文件内容搜索（优先使用 ripgrep/rg，不可用时回退到内置扫描；支持常见 rg 风格参数、多路径/单文件路径、路径感知 glob/iglob、glob_case_insensitive、pattern_file/-f、ignore_file/--ignore-file、ignore_file_case_insensitive、no_ignore_files、no_ignore_parent/vcs/global/dot、hidden/no_hidden、-u/-uu/-uuu/--unrestricted、pcre2/-P、multiline/-U、replace/-r、column/trim、count_matches、stats、json、follow、sort/sortr/sort_files、type_add/type_clear、-e 多模式、-v/-x/-l/-o、--files-without-match、--max-filesize、null/null-data/block-buffered、field-context-separator/path-separator 与 rg_args 兼容层）",
 			"3.2.0",
 			parameters,
 			true,
@@ -506,9 +669,9 @@ func NewGrepTool() *GrepTool {
 // Description returns a dynamic description based on ripgrep availability.
 func (g *GrepTool) Description() string {
 	if g.isRgAvailable() {
-		return "文件内容搜索（使用 ripgrep/rg 引擎，高性能正则和字面搜索）。支持常见 rg 风格参数与别名：glob≈-g、iglob≈--iglob、glob_case_insensitive≈--glob-case-insensitive、pattern_file/pattern_files≈-f/--file、pcre2≈-P/--pcre2、engine≈--engine、multiline≈-U/--multiline、multiline_dotall≈--multiline-dotall、replace≈-r/--replace、passthru≈--passthru、crlf≈--crlf、auto_hybrid_regex≈--auto-hybrid-regex、column≈--column、trim≈--trim、pretty≈--pretty、line_buffered≈--line-buffered、max_columns≈-M/--max-columns、max_columns_preview≈--max-columns-preview、count_matches≈--count-matches、stats≈--stats、json≈--json、follow≈-L/--follow、sort/sortr≈--sort/--sortr、sort_files≈--sort-files、fixed_strings≈-F、ignore_case≈-i、word_regexp≈-w、line_regexp≈-x、invert_match≈-v、only_matching≈-o、context/before_context/after_context≈-C/-B/-A、type≈-t、type_not≈-T、files_with_matches≈-l、files_without_match≈--files-without-match、count≈-c、max_count≈-m、max_filesize≈--max-filesize、patterns/regexp≈多次 -e；支持目录、单文件 path、多路径 paths、路径感知 glob（如 src/**/*.go）、pattern file（每行一个 pattern；空文件按 rg 语义返回无匹配，空行可能匹配所有行，如 -f patterns.txt）、path 排序/倒序、匹配次数统计、stats 摘要、max_depth/max_count 显式 0 语义以及常见短参数组合；也支持通过 rg_args 传入常见 rg 参数列表，例如 rg -P 'foo.*bar' backend、rg --column --trim foo backend、rg --sort path foo backend、rg --count-matches foo backend、rg --stats foo backend、rg --json foo backend。默认结果输出会规范化为稳定的 path:line[:column]: content 形态；像 -n/-H/-N/--no-filename/--color 这类展示层参数会被兼容接收但不改变输出骨架；当请求 json/--json 时，会改为按 rg 原始 JSON Lines 事件流透传输出；像 pcre2/engine/multiline/multiline_dotall/replace/passthru/crlf/auto_hybrid_regex 这类 rg-only 能力会在有 rg 时透传。"
+		return "文件内容搜索（使用 ripgrep/rg 引擎，高性能正则和字面搜索）。支持常见 rg 风格参数与别名：glob≈-g、iglob≈--iglob、glob_case_insensitive≈--glob-case-insensitive、pattern_file/pattern_files≈-f/--file、ignore_file≈--ignore-file、ignore_file_case_insensitive≈--ignore-file-case-insensitive、no_ignore_files≈--no-ignore-files、no_ignore_parent/vcs/global/dot≈--no-ignore-parent/--no-ignore-vcs/--no-ignore-global/--no-ignore-dot、hidden/no_hidden≈--hidden/--no-hidden、-u/-uu/-uuu/--unrestricted（-u 主要放宽 ignore，-uu 进一步放宽 hidden，-uuu 再进一步放宽 binary）、no_config≈--no-config、one_file_system≈--one-file-system、no_messages≈--no-messages、pcre2≈-P/--pcre2、engine≈--engine、multiline≈-U/--multiline、multiline_dotall≈--multiline-dotall、replace≈-r/--replace、passthru≈--passthru、crlf≈--crlf、auto_hybrid_regex≈--auto-hybrid-regex、column≈--column、trim≈--trim、pretty≈--pretty、line_buffered≈--line-buffered、block_buffered≈--block-buffered、null/null_data≈--null/--null-data、field_context_separator≈--field-context-separator、path_separator≈--path-separator、context_separator≈--context-separator、max_columns≈-M/--max-columns、max_columns_preview≈--max-columns-preview、count_matches≈--count-matches、stats≈--stats、json≈--json、follow≈-L/--follow、sort/sortr≈--sort/--sortr、sort_files≈--sort-files、fixed_strings≈-F、ignore_case≈-i、word_regexp≈-w、line_regexp≈-x、invert_match≈-v、only_matching≈-o、context/before_context/after_context≈-C/-B/-A、type≈-t、type_not≈-T、type_add/type_clear≈--type-add/--type-clear、files_with_matches≈-l、files_without_match≈--files-without-match、count≈-c、max_count≈-m、max_filesize≈--max-filesize、patterns/regexp≈多次 -e；支持目录、单文件 path、多路径 paths、路径感知 glob（如 src/**/*.go）、pattern file（每行一个 pattern；空文件按 rg 语义返回无匹配，空行可能匹配所有行，如 -f patterns.txt）、path 排序/倒序、匹配次数统计、stats 摘要、max_depth/max_count 显式 0 语义以及常见短参数组合；也支持通过 rg_args 传入常见 rg 参数列表，例如 rg -P 'foo.*bar' backend、rg --column --trim foo backend、rg --sort path foo backend、rg --count-matches foo backend、rg --stats foo backend、rg --json foo backend。默认结果输出会规范化为稳定的 path:line[:column]: content 形态；像 -n/-H/-N/--no-filename/--color 以及 null/null_data/block_buffered/field_context_separator/path_separator 这类展示层参数会被兼容接收但不改变输出骨架；当请求 json/--json 时，会改为按 rg 原始 JSON Lines 事件流透传输出；像 pcre2/engine/multiline/multiline_dotall/replace/passthru/crlf/auto_hybrid_regex 这类 rg-only 能力会在有 rg 时透传。"
 	}
-	return "文件内容搜索（使用内置扫描引擎；安装 ripgrep/rg 可获得更好性能）。支持常见 rg 风格参数与别名、多路径/单文件 path、路径感知 glob/iglob、glob_case_insensitive、pattern_file/-f、column/trim、pretty、line_buffered、max_columns/-M/--max-columns、max_columns_preview/--max-columns-preview、count_matches、stats、path 排序/倒序、sort_files、-e 多模式、-v/-x/-l/-o、--files-without-match、--max-filesize、max_depth/max_count 显式 0 语义，以及常见短参数组合，并兼容 rg_args 传参；输出会规范化为稳定的 path:line[:column]: content 形态，因此像 -n/-H/-N/--no-filename/--color、line_number/heading/no_heading/with_filename/no_filename/color 这类展示层参数会被容忍或忽略；像 json/--json、pcre2/-P、engine、multiline/-U、multiline_dotall、replace/-r、passthru、crlf、auto_hybrid_regex、follow/-L/--follow 以及非 path 的时间类 sort/sortr 这类仅 rg 支持的参数会在无 rg 时明确提示；回退引擎会尽量模拟 rg 的常见行为。"
+	return "文件内容搜索（使用内置扫描引擎；安装 ripgrep/rg 可获得更好性能）。支持常见 rg 风格参数与别名、多路径/单文件 path、路径感知 glob/iglob、glob_case_insensitive、pattern_file/-f、ignore_file、ignore_file_case_insensitive、no_ignore_parent/vcs/global/dot、hidden/no_hidden、-u/-uu/-uuu/--unrestricted、no_config≈--no-config、one_file_system≈--one-file-system、no_messages≈--no-messages、column/trim、pretty、line_buffered、block_buffered、null/null_data、field_context_separator/path_separator、context_separator、max_columns/-M/--max-columns、max_columns_preview/--max-columns-preview、count_matches、stats、path 排序/倒序、sort_files、-e 多模式、-v/-x/-l/-o、--files-without-match、--max-filesize、max_depth/max_count 显式 0 语义，以及常见短参数组合，并兼容 rg_args 传参；输出会规范化为稳定的 path:line[:column]: content 形态，因此像 -n/-H/-N/--no-filename/--color、line_number/heading/no_heading/with_filename/no_filename/color 以及 null/null_data/block_buffered/field_context_separator/path_separator 这类展示层参数会被容忍或忽略；像 json/--json、pcre2/-P、engine、multiline/-U、multiline_dotall、replace/-r、passthru、crlf、auto_hybrid_regex、follow/-L/--follow、type_add/type_clear/--type-add/--type-clear 以及非 path 的时间类 sort/sortr 这类仅 rg 支持的参数会在无 rg 时明确提示；回退引擎会尽量模拟 rg 的常见行为。"
 }
 
 // isRgAvailable checks if ripgrep is available on the system, caching the result.
@@ -625,78 +788,127 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 }
 
 type rgCompatArgs struct {
-	positionals            []string
-	patterns               []string
-	patternFiles           []string
-	include                []grepGlobPattern
-	exclude                []grepGlobPattern
-	literal                bool
-	hasLiteral             bool
-	ignoreCase             bool
-	hasIgnoreCase          bool
-	caseSensitive          bool
-	hasCaseSensitive       bool
-	smartCase              bool
-	hasSmartCase           bool
-	word                   bool
-	hasWord                bool
-	lineRegexp             bool
-	hasLineRegexp          bool
-	invertMatch            bool
-	hasInvertMatch         bool
-	onlyMatching           bool
-	hasOnlyMatching        bool
-	countMatches           bool
-	hasCountMatches        bool
-	stats                  bool
-	hasStats               bool
-	jsonOutput             bool
-	hasJSONOutput          bool
-	follow                 bool
-	hasFollow              bool
-	column                 bool
-	hasColumn              bool
-	trim                   bool
-	hasTrim                bool
-	pretty                 bool
-	hasPretty              bool
-	lineBuffered           bool
-	hasLineBuffered        bool
-	noLineBuffered         bool
-	hasNoLineBuffered      bool
-	maxColumns             int
-	hasMaxColumns          bool
-	maxColumnsPreview      bool
-	hasMaxColumnsPreview   bool
-	noMaxColumnsPreview    bool
-	hasNoMaxColumnsPreview bool
-	context                int
-	hasContext             bool
-	beforeContext          int
-	hasBeforeContext       bool
-	afterContext           int
-	hasAfterContext        bool
-	fileType               string
-	hasFileType            bool
-	excludeType            string
-	hasExcludeType         bool
-	sortBy                 string
-	hasSortBy              bool
-	sortReverseBy          string
-	hasSortReverseBy       bool
-	globCaseInsensitive    bool
-	hasGlobCaseInsensitive bool
-	maxDepth               int
-	hasMaxDepth            bool
-	maxCount               int
-	hasMaxCount            bool
-	maxFilesize            string
-	hasMaxFilesize         bool
-	requiresRipgrep        bool
-	rgOnlyArgs             []string
-	ignoredArgs            []string
-	mode                   grepMode
-	hasMode                bool
+	positionals                  []string
+	patterns                     []string
+	patternFiles                 []string
+	include                      []grepGlobPattern
+	exclude                      []grepGlobPattern
+	literal                      bool
+	hasLiteral                   bool
+	ignoreCase                   bool
+	hasIgnoreCase                bool
+	caseSensitive                bool
+	hasCaseSensitive             bool
+	smartCase                    bool
+	hasSmartCase                 bool
+	word                         bool
+	hasWord                      bool
+	lineRegexp                   bool
+	hasLineRegexp                bool
+	invertMatch                  bool
+	hasInvertMatch               bool
+	onlyMatching                 bool
+	hasOnlyMatching              bool
+	countMatches                 bool
+	hasCountMatches              bool
+	stats                        bool
+	hasStats                     bool
+	jsonOutput                   bool
+	hasJSONOutput                bool
+	follow                       bool
+	hasFollow                    bool
+	column                       bool
+	hasColumn                    bool
+	trim                         bool
+	hasTrim                      bool
+	pretty                       bool
+	hasPretty                    bool
+	lineBuffered                 bool
+	hasLineBuffered              bool
+	noLineBuffered               bool
+	hasNoLineBuffered            bool
+	blockBuffered                bool
+	hasBlockBuffered             bool
+	noBlockBuffered              bool
+	hasNoBlockBuffered           bool
+	nullOutput                   bool
+	hasNullOutput                bool
+	nullData                     bool
+	hasNullData                  bool
+	fieldContextSeparator        string
+	hasFieldContextSeparator     bool
+	pathSeparator                string
+	hasPathSeparator             bool
+	contextSeparator             string
+	hasContextSeparator          bool
+	noContextSeparator           bool
+	hasNoContextSeparator        bool
+	maxColumns                   int
+	hasMaxColumns                bool
+	maxColumnsPreview            bool
+	hasMaxColumnsPreview         bool
+	noMaxColumnsPreview          bool
+	hasNoMaxColumnsPreview       bool
+	context                      int
+	hasContext                   bool
+	beforeContext                int
+	hasBeforeContext             bool
+	afterContext                 int
+	hasAfterContext              bool
+	fileType                     string
+	hasFileType                  bool
+	excludeType                  string
+	hasExcludeType               bool
+	typeAdd                      []string
+	hasTypeAdd                   bool
+	typeClear                    []string
+	hasTypeClear                 bool
+	ignoreFiles                  []string
+	hasIgnoreFiles               bool
+	ignoreFileCaseInsensitive    bool
+	hasIgnoreFileCaseInsensitive bool
+	ignoreFileCaseInsensitiveSet bool
+	noIgnoreFiles                bool
+	hasNoIgnoreFiles             bool
+	noIgnore                     bool
+	hasNoIgnore                  bool
+	unrestrictedLevel            int
+	hasUnrestrictedLevel         bool
+	noConfig                     bool
+	hasNoConfig                  bool
+	oneFileSystem                bool
+	hasOneFileSystem             bool
+	noMessages                   bool
+	hasNoMessages                bool
+	noIgnoreParent               bool
+	hasNoIgnoreParent            bool
+	noIgnoreVCS                  bool
+	hasNoIgnoreVCS               bool
+	noIgnoreGlobal               bool
+	hasNoIgnoreGlobal            bool
+	noIgnoreDot                  bool
+	hasNoIgnoreDot               bool
+	hidden                       bool
+	hasHidden                    bool
+	noHidden                     bool
+	hasNoHidden                  bool
+	sortBy                       string
+	hasSortBy                    bool
+	sortReverseBy                string
+	hasSortReverseBy             bool
+	globCaseInsensitive          bool
+	hasGlobCaseInsensitive       bool
+	maxDepth                     int
+	hasMaxDepth                  bool
+	maxCount                     int
+	hasMaxCount                  bool
+	maxFilesize                  string
+	hasMaxFilesize               bool
+	requiresRipgrep              bool
+	rgOnlyArgs                   []string
+	ignoredArgs                  []string
+	mode                         grepMode
+	hasMode                      bool
 }
 
 // parseOptions extracts and validates all search parameters.
@@ -761,8 +973,10 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	}
 
 	globCaseInsensitive := compat.globCaseInsensitive
+	globCaseInsensitiveSet := false
 	if value, ok := resolveBoolParam(params, "glob_case_insensitive"); ok {
 		globCaseInsensitive = value
+		globCaseInsensitiveSet = true
 	}
 
 	includeSpecs := append([]grepGlobPattern(nil), compat.include...)
@@ -788,21 +1002,29 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	excludePatterns := globPatternStrings(excludeSpecs)
 
 	literal := compat.literal
+	literalSet := false
 	if value, ok := resolveLiteralSearchParam(params); ok {
 		literal = value
+		literalSet = true
 	}
 
 	ignoreCaseFlag := compat.ignoreCase
 	caseSensitiveFlag := compat.caseSensitive
 	smartCaseFlag := compat.smartCase
+	ignoreCaseSet := false
+	caseSensitiveSet := false
+	smartCaseSet := false
 	if value, ok := resolveBoolParam(params, "ignore_case"); ok {
 		ignoreCaseFlag = value
+		ignoreCaseSet = true
 	}
 	if value, ok := resolveBoolParam(params, "case_sensitive"); ok {
 		caseSensitiveFlag = value
+		caseSensitiveSet = true
 	}
 	if value, ok := resolveBoolParam(params, "smart_case"); ok {
 		smartCaseFlag = value
+		smartCaseSet = true
 	}
 
 	ignoreCase := false
@@ -816,28 +1038,40 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	}
 
 	word := compat.word
+	wordSet := false
 	if value, ok := resolveBoolParam(params, "word", "word_regexp"); ok {
 		word = value
+		wordSet = true
 	}
 	lineRegexp := compat.lineRegexp
+	lineRegexpSet := false
 	if value, ok := resolveBoolParam(params, "line_regexp"); ok {
 		lineRegexp = value
+		lineRegexpSet = true
 	}
 	invertMatch := compat.invertMatch
+	invertMatchSet := false
 	if value, ok := resolveBoolParam(params, "invert_match"); ok {
 		invertMatch = value
+		invertMatchSet = true
 	}
 	onlyMatching := compat.onlyMatching
+	onlyMatchingSet := false
 	if value, ok := resolveBoolParam(params, "only_matching"); ok {
 		onlyMatching = value
+		onlyMatchingSet = true
 	}
 	countMatches := compat.countMatches
+	countMatchesSet := false
 	if value, ok := resolveBoolParam(params, "count_matches"); ok {
 		countMatches = value
+		countMatchesSet = true
 	}
 	statsRequested := compat.stats
+	statsRequestedSet := false
 	if value, ok := resolveBoolParam(params, "stats"); ok {
 		statsRequested = value
+		statsRequestedSet = true
 	}
 	pcre2Requested := false
 	if value, ok := resolveBoolParam(params, "pcre2"); ok && value {
@@ -874,34 +1108,101 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--auto-hybrid-regex")
 	}
 	jsonOutput := compat.jsonOutput
+	jsonOutputSet := false
 	if value, ok := resolveBoolParam(params, "json", "json_output"); ok {
 		jsonOutput = value
+		jsonOutputSet = true
 	}
 	followSymlinks := compat.follow
+	followSet := false
 	if value, ok := resolveBoolParam(params, "follow"); ok {
 		followSymlinks = value
+		followSet = true
 	}
 	column := compat.column
+	columnSet := false
 	if value, ok := resolveBoolParam(params, "column"); ok {
 		column = value
+		columnSet = true
 	}
 	trimOutput := compat.trim
+	trimSet := false
 	if value, ok := resolveBoolParam(params, "trim"); ok {
 		trimOutput = value
+		trimSet = true
 	}
 	pretty := compat.pretty
+	prettySet := false
 	if value, ok := resolveBoolParam(params, "pretty"); ok {
 		pretty = value
+		prettySet = true
 	}
 	lineBuffered := compat.lineBuffered
+	lineBufferedSet := false
 	if value, ok := resolveBoolParam(params, "line_buffered"); ok {
 		lineBuffered = value
+		lineBufferedSet = true
 	}
 	noLineBuffered := compat.noLineBuffered
+	noLineBufferedSet := false
 	if value, ok := resolveBoolParam(params, "no_line_buffered"); ok {
 		noLineBuffered = value
+		noLineBufferedSet = true
 		if value {
 			lineBuffered = false
+		}
+	}
+	blockBuffered := compat.blockBuffered
+	blockBufferedSet := false
+	if value, ok := resolveBoolParam(params, "block_buffered"); ok {
+		blockBuffered = value
+		blockBufferedSet = true
+	}
+	noBlockBuffered := compat.noBlockBuffered
+	noBlockBufferedSet := false
+	if value, ok := resolveBoolParam(params, "no_block_buffered"); ok {
+		noBlockBuffered = value
+		noBlockBufferedSet = true
+		if value {
+			blockBuffered = false
+		}
+	}
+	nullOutput := compat.nullOutput
+	nullOutputSet := false
+	if value, ok := resolveBoolParam(params, "null"); ok {
+		nullOutput = value
+		nullOutputSet = true
+	}
+	nullData := compat.nullData
+	nullDataSet := false
+	if value, ok := resolveBoolParam(params, "null_data"); ok {
+		nullData = value
+		nullDataSet = true
+	}
+	fieldContextSeparator := compat.fieldContextSeparator
+	fieldContextSeparatorSet := compat.hasFieldContextSeparator
+	if value, ok := resolveStringParam(params, "field_context_separator"); ok {
+		fieldContextSeparator = strings.TrimSpace(value)
+		fieldContextSeparatorSet = true
+	}
+	pathSeparator := compat.pathSeparator
+	pathSeparatorSet := compat.hasPathSeparator
+	if value, ok := resolveStringParam(params, "path_separator"); ok {
+		pathSeparator = strings.TrimSpace(value)
+		pathSeparatorSet = true
+	}
+	contextSeparator := compat.contextSeparator
+	contextSeparatorSet := compat.hasContextSeparator
+	if value, ok := resolveStringParam(params, "context_separator"); ok {
+		contextSeparator = strings.TrimSpace(value)
+		contextSeparatorSet = true
+	}
+	noContextSeparator := compat.noContextSeparator
+	if value, ok := resolveBoolParam(params, "no_context_separator"); ok {
+		noContextSeparator = value
+		if value {
+			contextSeparator = ""
+			contextSeparatorSet = true
 		}
 	}
 	maxColumns := compat.maxColumns
@@ -914,13 +1215,17 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 		maxColumns = 0
 	}
 	maxColumnsPreview := compat.maxColumnsPreview
+	maxColumnsPreviewSet := false
 	if value, ok := resolveBoolParam(params, "max_columns_preview"); ok {
 		maxColumnsPreview = value
+		maxColumnsPreviewSet = true
 	}
 	noMaxColumnsPreview := compat.noMaxColumnsPreview
+	noMaxColumnsPreviewSet := false
 	if value, ok := resolveBoolParam(params, "no_max_columns_preview"); ok && value {
 		maxColumnsPreview = false
 		noMaxColumnsPreview = true
+		noMaxColumnsPreviewSet = true
 	}
 
 	contextLines := 0
@@ -959,20 +1264,160 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	if value, ok := resolveStringParam(params, "type_not"); ok && strings.TrimSpace(value) != "" {
 		excludeType = strings.TrimSpace(value)
 	}
+	typeAdd := append([]string(nil), compat.typeAdd...)
+	structuredTypeAdd := []string(nil)
+	if values, ok := resolveStringListParam(params, "type_add"); ok {
+		structuredTypeAdd = append([]string(nil), values...)
+		typeAdd = append([]string(nil), values...)
+	}
+	typeClear := append([]string(nil), compat.typeClear...)
+	structuredTypeClear := []string(nil)
+	if values, ok := resolveStringListParam(params, "type_clear"); ok {
+		structuredTypeClear = append([]string(nil), values...)
+		typeClear = append([]string(nil), values...)
+	}
+	ignoreFiles := append([]string(nil), compat.ignoreFiles...)
+	if values, ok := resolveSearchPathListParam(params, "ignore_file"); ok {
+		ignoreFiles = append(ignoreFiles, values...)
+	}
+	ignoreFileCaseInsensitive := compat.ignoreFileCaseInsensitive
+	ignoreFileCaseInsensitiveSet := false
+	if value, ok := resolveBoolParam(params, "ignore_file_case_insensitive"); ok {
+		ignoreFileCaseInsensitive = value
+		ignoreFileCaseInsensitiveSet = true
+	}
+	noIgnoreFiles := compat.noIgnoreFiles
+	noIgnoreFilesSet := false
+	if value, ok := resolveBoolParam(params, "no_ignore_files"); ok {
+		noIgnoreFiles = value
+		noIgnoreFilesSet = true
+	}
+	if noIgnoreFiles {
+		ignoreFileCaseInsensitive = false
+	}
+	noIgnoreParent := compat.noIgnoreParent
+	noIgnoreParentSet := false
+	if value, ok := resolveBoolParam(params, "no_ignore_parent"); ok {
+		noIgnoreParent = value
+		noIgnoreParentSet = true
+	}
+	noIgnoreVCS := compat.noIgnoreVCS
+	noIgnoreVCSSet := false
+	if value, ok := resolveBoolParam(params, "no_ignore_vcs"); ok {
+		noIgnoreVCS = value
+		noIgnoreVCSSet = true
+	}
+	noIgnoreGlobal := compat.noIgnoreGlobal
+	noIgnoreGlobalSet := false
+	if value, ok := resolveBoolParam(params, "no_ignore_global"); ok {
+		noIgnoreGlobal = value
+		noIgnoreGlobalSet = true
+	}
+	noIgnoreDot := compat.noIgnoreDot
+	noIgnoreDotSet := false
+	if value, ok := resolveBoolParam(params, "no_ignore_dot"); ok {
+		noIgnoreDot = value
+		noIgnoreDotSet = true
+	}
+	noIgnore := compat.noIgnore
+	noIgnoreSet := false
+	if value, ok := resolveBoolParam(params, "no_ignore"); ok {
+		noIgnore = value
+		noIgnoreSet = true
+	}
+	unrestrictedLevel := compat.unrestrictedLevel
+	unrestrictedLevelSet := false
+	if value, ok := resolveIntParam(params, "unrestricted_level"); ok {
+		if value < 0 {
+			value = 0
+		}
+		if value > 3 {
+			value = 3
+		}
+		unrestrictedLevel = value
+		unrestrictedLevelSet = true
+	}
+	if unrestrictedLevelSet {
+		noIgnore = unrestrictedLevel > 0
+	} else if noIgnoreSet {
+		if noIgnore {
+			unrestrictedLevel = 1
+		} else {
+			unrestrictedLevel = 0
+		}
+	} else {
+		if noIgnore && unrestrictedLevel < 1 {
+			unrestrictedLevel = 1
+		}
+		if unrestrictedLevel > 0 {
+			noIgnore = true
+		}
+	}
+	hidden := compat.hidden
+	hiddenSet := false
+	structuredHidden := false
+	if value, ok := resolveBoolParam(params, "hidden"); ok {
+		hidden = value
+		structuredHidden = value
+		hiddenSet = true
+	}
+	noHidden := compat.noHidden
+	noHiddenSet := false
+	if value, ok := resolveBoolParam(params, "no_hidden"); ok {
+		noHidden = value
+		noHiddenSet = true
+	}
+	if unrestrictedLevelSet {
+		hidden = unrestrictedLevel >= 2
+	} else if noIgnoreSet {
+		hidden = false
+	} else if unrestrictedLevel >= 2 {
+		hidden = true
+	}
+	if hiddenSet {
+		hidden = structuredHidden
+	}
+	if (hiddenSet || noIgnoreSet || unrestrictedLevelSet) && !noHiddenSet {
+		noHidden = false
+	}
+	if noHiddenSet {
+		hidden = false
+	}
+	noConfig := compat.noConfig
+	noConfigSet := false
+	if value, ok := resolveBoolParam(params, "no_config"); ok {
+		noConfig = value
+		noConfigSet = true
+	}
+	oneFileSystem := compat.oneFileSystem
+	oneFileSystemSet := false
+	if value, ok := resolveBoolParam(params, "one_file_system"); ok {
+		oneFileSystem = value
+		oneFileSystemSet = true
+	}
+	noMessages := compat.noMessages
+	noMessagesSet := false
+	if value, ok := resolveBoolParam(params, "no_messages"); ok {
+		noMessages = value
+		noMessagesSet = true
+	}
 	sortBy, err := normalizeRGSortValue(compat.sortBy)
 	if err != nil {
 		return nil, err
 	}
+	sortBySet := compat.hasSortBy
 	sortReverseBy, err := normalizeRGSortValue(compat.sortReverseBy)
 	if err != nil {
 		return nil, err
 	}
+	sortReverseBySet := compat.hasSortReverseBy
 	if value, ok := resolveStringParam(params, "sort"); ok && strings.TrimSpace(value) != "" {
 		sortBy, err = normalizeRGSortValue(value)
 		if err != nil {
 			return nil, err
 		}
 		sortReverseBy = ""
+		sortBySet = true
 	}
 	if value, ok := resolveStringParam(params, "sortr", "sort_reverse"); ok && strings.TrimSpace(value) != "" {
 		sortReverseBy, err = normalizeRGSortValue(value)
@@ -980,17 +1425,33 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 			return nil, err
 		}
 		sortBy = ""
+		sortReverseBySet = true
 	}
-	if value, ok := resolveBoolParam(params, "sort_files"); ok && value {
-		sortBy = "path"
-		sortReverseBy = ""
-	}
-	if value, ok := resolveBoolParam(params, "no_sort_files"); ok && value {
-		if sortBy == "path" {
-			sortBy = ""
-		}
-		if sortReverseBy == "path" {
+	sortFilesSet := false
+	if value, ok := resolveBoolParam(params, "sort_files"); ok {
+		sortFilesSet = true
+		if value {
+			sortBy = "path"
 			sortReverseBy = ""
+			sortBySet = true
+			sortReverseBySet = false
+		} else {
+			sortBy = ""
+			sortReverseBy = ""
+		}
+	}
+	noSortFilesSet := false
+	if value, ok := resolveBoolParam(params, "no_sort_files"); ok {
+		noSortFilesSet = true
+		if value {
+			if sortBy == "path" {
+				sortBy = ""
+			}
+			if sortReverseBy == "path" {
+				sortReverseBy = ""
+			}
+			sortBySet = false
+			sortReverseBySet = false
 		}
 	}
 
@@ -1020,6 +1481,7 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	} else if ok {
 		maxFilesize = value
 	}
+	maxFilesizeSet := strings.TrimSpace(maxFilesize) != ""
 	maxFileBytes := int64(0)
 	if maxFilesize != "" {
 		parsed, err := parseSizeString(maxFilesize)
@@ -1033,22 +1495,35 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	if compat.hasMode {
 		mode = compat.mode
 	}
+	modeSet := compat.hasMode
 	if value, ok := resolveBoolParam(params, "files_with_matches"); ok && value {
 		mode = grepModeFiles
+		modeSet = true
 	}
 	if value, ok := resolveBoolParam(params, "files_without_match", "files_without_matches"); ok && value {
 		mode = grepModeFilesWithout
+		modeSet = true
+	}
+	countSet := false
+	if _, ok := resolveBoolParam(params, "count"); ok {
+		countSet = true
 	}
 	if value, ok := resolveBoolParam(params, "count"); ok && value {
 		mode = grepModeCount
+		modeSet = true
 	}
 	if countMatches {
 		mode = grepModeCount
+		modeSet = true
 	}
 	modeParam := ""
 	if value, ok := resolveStringParam(params, "mode"); ok && strings.TrimSpace(value) != "" {
 		modeParam = strings.TrimSpace(value)
 		mode = normalizeGrepMode(value)
+		modeSet = true
+	}
+	if strings.TrimSpace(modeParam) == "" && countSet {
+		modeSet = true
 	}
 	switch strings.TrimSpace(strings.ToLower(modeParam)) {
 	case "count_matches", "count-matches":
@@ -1072,63 +1547,140 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	if followSymlinks {
 		requiresRipgrep = true
 	}
+	if len(typeAdd) > 0 || len(typeClear) > 0 {
+		requiresRipgrep = true
+	}
 	ignoredPresentation := collectIgnoredPresentationParams(params)
 
 	return &grepOptions{
-		pattern:              pattern,
-		directPatterns:       append([]string(nil), patternList...),
-		patterns:             patternList,
-		searchPath:           searchPath,
-		searchPaths:          append([]string(nil), searchPaths...),
-		resolvedPath:         resolvedPath,
-		resolvedPaths:        append([]string(nil), resolvedPaths...),
-		patternFiles:         append([]string(nil), patternFiles...),
-		resolvedPatternFiles: append([]string(nil), resolvedPatternFiles...),
-		include:              strings.Join(includePatterns, ","),
-		exclude:              strings.Join(excludePatterns, ","),
-		includeSpecs:         append([]grepGlobPattern(nil), includeSpecs...),
-		excludeSpecs:         append([]grepGlobPattern(nil), excludeSpecs...),
-		globCaseInsensitive:  globCaseInsensitive,
-		literal:              literal,
-		ignoreCase:           ignoreCase,
-		ignoreCaseRequested:  ignoreCaseFlag,
-		caseSensitive:        caseSensitiveFlag,
-		smartCase:            smartCaseFlag,
-		word:                 word,
-		lineRegexp:           lineRegexp,
-		invertMatch:          invertMatch,
-		onlyMatching:         onlyMatching,
-		countMatches:         countMatches,
-		stats:                statsRequested,
-		jsonOutput:           jsonOutput,
-		follow:               followSymlinks,
-		column:               column,
-		trim:                 trimOutput,
-		pretty:               pretty,
-		lineBuffered:         lineBuffered,
-		noLineBuffered:       noLineBuffered,
-		maxColumns:           maxColumns,
-		maxColumnsSet:        maxColumnsSet,
-		maxColumnsPreview:    maxColumnsPreview,
-		noMaxColumnsPreview:  noMaxColumnsPreview,
-		context:              contextLines,
-		beforeContext:        beforeContext,
-		afterContext:         afterContext,
-		fileType:             fileType,
-		excludeType:          excludeType,
-		sortBy:               sortBy,
-		sortReverseBy:        sortReverseBy,
-		maxDepth:             maxDepth,
-		maxDepthSet:          maxDepthSet,
-		maxCount:             maxCount,
-		maxCountSet:          maxCountSet,
-		maxFilesize:          maxFilesize,
-		maxFileBytes:         maxFileBytes,
-		requiresRipgrep:      requiresRipgrep,
-		rgOnlyArgs:           append([]string(nil), compat.rgOnlyArgs...),
-		ignoredRGArgs:        normalizePatternList(compat.ignoredArgs),
-		ignoredPresentation:  ignoredPresentation,
-		mode:                 mode,
+		pattern:                      pattern,
+		directPatterns:               append([]string(nil), patternList...),
+		patterns:                     patternList,
+		searchPath:                   searchPath,
+		searchPaths:                  append([]string(nil), searchPaths...),
+		resolvedPath:                 resolvedPath,
+		resolvedPaths:                append([]string(nil), resolvedPaths...),
+		patternFiles:                 append([]string(nil), patternFiles...),
+		resolvedPatternFiles:         append([]string(nil), resolvedPatternFiles...),
+		include:                      strings.Join(includePatterns, ","),
+		exclude:                      strings.Join(excludePatterns, ","),
+		includeSpecs:                 append([]grepGlobPattern(nil), includeSpecs...),
+		excludeSpecs:                 append([]grepGlobPattern(nil), excludeSpecs...),
+		globCaseInsensitive:          globCaseInsensitive,
+		globCaseInsensitiveSet:       globCaseInsensitiveSet,
+		literal:                      literal,
+		literalSet:                   literalSet,
+		ignoreCase:                   ignoreCase,
+		ignoreCaseSet:                ignoreCaseSet,
+		ignoreCaseRequested:          ignoreCaseFlag,
+		caseSensitive:                caseSensitiveFlag,
+		caseSensitiveSet:             caseSensitiveSet,
+		smartCase:                    smartCaseFlag,
+		smartCaseSet:                 smartCaseSet,
+		word:                         word,
+		wordSet:                      wordSet,
+		lineRegexp:                   lineRegexp,
+		lineRegexpSet:                lineRegexpSet,
+		invertMatch:                  invertMatch,
+		invertMatchSet:               invertMatchSet,
+		onlyMatching:                 onlyMatching,
+		onlyMatchingSet:              onlyMatchingSet,
+		countMatches:                 countMatches,
+		countMatchesSet:              countMatchesSet,
+		stats:                        statsRequested,
+		statsSet:                     statsRequestedSet,
+		jsonOutput:                   jsonOutput,
+		jsonOutputSet:                jsonOutputSet,
+		follow:                       followSymlinks,
+		followSet:                    followSet,
+		column:                       column,
+		columnSet:                    columnSet,
+		trim:                         trimOutput,
+		trimSet:                      trimSet,
+		pretty:                       pretty,
+		prettySet:                    prettySet,
+		lineBuffered:                 lineBuffered,
+		lineBufferedSet:              lineBufferedSet,
+		noLineBuffered:               noLineBuffered,
+		noLineBufferedSet:            noLineBufferedSet,
+		blockBuffered:                blockBuffered,
+		blockBufferedSet:             blockBufferedSet,
+		noBlockBuffered:              noBlockBuffered,
+		noBlockBufferedSet:           noBlockBufferedSet,
+		nullOutput:                   nullOutput,
+		nullOutputSet:                nullOutputSet,
+		nullData:                     nullData,
+		nullDataSet:                  nullDataSet,
+		fieldContextSeparator:        fieldContextSeparator,
+		fieldContextSeparatorSet:     fieldContextSeparatorSet,
+		pathSeparator:                pathSeparator,
+		pathSeparatorSet:             pathSeparatorSet,
+		contextSeparator:             contextSeparator,
+		contextSeparatorSet:          contextSeparatorSet,
+		noContextSeparator:           noContextSeparator,
+		maxColumns:                   maxColumns,
+		maxColumnsSet:                maxColumnsSet,
+		maxColumnsPreview:            maxColumnsPreview,
+		maxColumnsPreviewSet:         maxColumnsPreviewSet,
+		noMaxColumnsPreview:          noMaxColumnsPreview,
+		noMaxColumnsPreviewSet:       noMaxColumnsPreviewSet,
+		context:                      contextLines,
+		beforeContext:                beforeContext,
+		afterContext:                 afterContext,
+		fileType:                     fileType,
+		excludeType:                  excludeType,
+		typeAdd:                      normalizePatternList(typeAdd),
+		structuredTypeAdd:            normalizePatternList(structuredTypeAdd),
+		typeAddSet:                   len(typeAdd) > 0,
+		typeClear:                    normalizePatternList(typeClear),
+		structuredTypeClear:          normalizePatternList(structuredTypeClear),
+		typeClearSet:                 len(typeClear) > 0,
+		ignoreFiles:                  normalizeSearchPathList(ignoreFiles),
+		ignoreFileCaseInsensitive:    ignoreFileCaseInsensitive,
+		ignoreFileCaseInsensitiveSet: ignoreFileCaseInsensitiveSet,
+		noIgnoreFiles:                noIgnoreFiles,
+		noIgnoreFilesSet:             noIgnoreFilesSet,
+		noIgnore:                     noIgnore,
+		noIgnoreSet:                  noIgnoreSet,
+		unrestrictedLevel:            unrestrictedLevel,
+		unrestrictedLevelSet:         unrestrictedLevelSet,
+		noConfig:                     noConfig,
+		noConfigSet:                  noConfigSet,
+		oneFileSystem:                oneFileSystem,
+		oneFileSystemSet:             oneFileSystemSet,
+		noMessages:                   noMessages,
+		noMessagesSet:                noMessagesSet,
+		hidden:                       hidden,
+		hiddenSet:                    hiddenSet,
+		noHidden:                     noHidden,
+		noHiddenSet:                  noHiddenSet,
+		noIgnoreParent:               noIgnoreParent,
+		noIgnoreParentSet:            noIgnoreParentSet,
+		noIgnoreVCS:                  noIgnoreVCS,
+		noIgnoreVCSSet:               noIgnoreVCSSet,
+		noIgnoreGlobal:               noIgnoreGlobal,
+		noIgnoreGlobalSet:            noIgnoreGlobalSet,
+		noIgnoreDot:                  noIgnoreDot,
+		noIgnoreDotSet:               noIgnoreDotSet,
+		sortBy:                       sortBy,
+		sortBySet:                    sortBySet,
+		sortReverseBy:                sortReverseBy,
+		sortReverseBySet:             sortReverseBySet,
+		sortFilesSet:                 sortFilesSet,
+		noSortFilesSet:               noSortFilesSet,
+		maxDepth:                     maxDepth,
+		maxDepthSet:                  maxDepthSet,
+		maxCount:                     maxCount,
+		maxCountSet:                  maxCountSet,
+		maxFilesize:                  maxFilesize,
+		maxFilesizeSet:               maxFilesizeSet,
+		maxFileBytes:                 maxFileBytes,
+		requiresRipgrep:              requiresRipgrep,
+		rgOnlyArgs:                   append([]string(nil), compat.rgOnlyArgs...),
+		ignoredRGArgs:                normalizePatternList(compat.ignoredArgs),
+		ignoredPresentation:          ignoredPresentation,
+		mode:                         mode,
+		modeSet:                      modeSet,
 	}, nil
 }
 
@@ -1176,6 +1728,9 @@ func (g *GrepTool) loadPatternFiles(opts *grepOptions) error {
 	for _, filePath := range opts.resolvedPatternFiles {
 		lines, err := readFileLines(filePath)
 		if err != nil {
+			if opts.noMessages {
+				continue
+			}
 			return fmt.Errorf("读取 pattern_file 失败 %s: %w", filePath, err)
 		}
 		effective = append(effective, lines...)
@@ -1281,6 +1836,19 @@ func parseRGCompatArgs(params map[string]interface{}) (*rgCompatArgs, error) {
 
 func consumeNoOpRGFlag(args []string, index *int, arg string, compat *rgCompatArgs) (bool, error) {
 	switch arg {
+	case "--field-context-separator", "--path-separator":
+		if *index+1 >= len(args) {
+			return true, fmt.Errorf("rg_args 选项缺少值: %s", arg)
+		}
+		next := strings.TrimSpace(args[*index+1])
+		if next == "" || strings.HasPrefix(next, "-") {
+			return true, fmt.Errorf("rg_args 选项缺少值: %s", arg)
+		}
+		if compat != nil {
+			compat.ignoredArgs = appendUniqueString(compat.ignoredArgs, arg+"="+next)
+		}
+		*index = *index + 1
+		return true, nil
 	case "--color":
 		if *index+1 >= len(args) {
 			return true, fmt.Errorf("rg_args 选项缺少值: %s", arg)
@@ -1367,6 +1935,70 @@ func applyRGBooleanFlag(compat *rgCompatArgs, arg string) bool {
 	case "--no-line-buffered":
 		compat.noLineBuffered = true
 		compat.hasNoLineBuffered = true
+	case "--block-buffered":
+		compat.blockBuffered = true
+		compat.hasBlockBuffered = true
+	case "--no-block-buffered":
+		compat.noBlockBuffered = true
+		compat.hasNoBlockBuffered = true
+	case "--null":
+		compat.nullOutput = true
+		compat.hasNullOutput = true
+	case "--null-data":
+		compat.nullData = true
+		compat.hasNullData = true
+	case "--no-messages":
+		compat.noMessages = true
+		compat.hasNoMessages = true
+	case "--hidden":
+		compat.hidden = true
+		compat.hasHidden = true
+	case "--no-hidden":
+		compat.noHidden = true
+		compat.hasNoHidden = true
+	case "--no-ignore-parent":
+		compat.noIgnoreParent = true
+		compat.hasNoIgnoreParent = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--no-ignore-parent")
+	case "--no-ignore-vcs":
+		compat.noIgnoreVCS = true
+		compat.hasNoIgnoreVCS = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--no-ignore-vcs")
+	case "--no-ignore-global":
+		compat.noIgnoreGlobal = true
+		compat.hasNoIgnoreGlobal = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--no-ignore-global")
+	case "--no-ignore-dot":
+		compat.noIgnoreDot = true
+		compat.hasNoIgnoreDot = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--no-ignore-dot")
+	case "--no-ignore":
+		compat.noIgnore = true
+		compat.hasNoIgnore = true
+	case "-u", "--unrestricted":
+		compat.noIgnore = true
+		compat.hasNoIgnore = true
+		compat.unrestrictedLevel++
+		compat.hasUnrestrictedLevel = true
+	case "--no-config":
+		compat.noConfig = true
+		compat.hasNoConfig = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--no-config")
+	case "--one-file-system":
+		compat.oneFileSystem = true
+		compat.hasOneFileSystem = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--one-file-system")
+	case "--ignore-file-case-insensitive":
+		compat.ignoreFileCaseInsensitive = true
+		compat.hasIgnoreFileCaseInsensitive = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--ignore-file-case-insensitive")
+	case "--no-ignore-files":
+		compat.noIgnoreFiles = true
+		compat.hasNoIgnoreFiles = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--no-ignore-files")
+	case "--no-context-separator":
+		compat.noContextSeparator = true
+		compat.hasNoContextSeparator = true
 	case "--max-columns-preview":
 		compat.maxColumnsPreview = true
 		compat.hasMaxColumnsPreview = true
@@ -1522,6 +2154,40 @@ func applyRGFlagValue(compat *rgCompatArgs, value *rgFlagValue) {
 	case "type_not":
 		compat.excludeType = value.value
 		compat.hasExcludeType = true
+	case "type_add":
+		compat.typeAdd = append(compat.typeAdd, value.value)
+		compat.hasTypeAdd = true
+		compat.requiresRipgrep = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--type-add", value.value)
+	case "type_clear":
+		compat.typeClear = append(compat.typeClear, value.value)
+		compat.hasTypeClear = true
+		compat.requiresRipgrep = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--type-clear", value.value)
+	case "ignore_file":
+		compat.ignoreFiles = append(compat.ignoreFiles, value.value)
+		compat.hasIgnoreFiles = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--ignore-file", value.value)
+	case "ignore_file_case_insensitive":
+		compat.ignoreFileCaseInsensitive = true
+		compat.hasIgnoreFileCaseInsensitive = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--ignore-file-case-insensitive")
+	case "no_ignore_parent":
+		compat.noIgnoreParent = true
+		compat.hasNoIgnoreParent = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--no-ignore-parent")
+	case "no_ignore_vcs":
+		compat.noIgnoreVCS = true
+		compat.hasNoIgnoreVCS = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--no-ignore-vcs")
+	case "no_ignore_global":
+		compat.noIgnoreGlobal = true
+		compat.hasNoIgnoreGlobal = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--no-ignore-global")
+	case "no_ignore_dot":
+		compat.noIgnoreDot = true
+		compat.hasNoIgnoreDot = true
+		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--no-ignore-dot")
 	case "sort":
 		compat.sortBy = value.value
 		compat.sortReverseBy = ""
@@ -1535,6 +2201,15 @@ func applyRGFlagValue(compat *rgCompatArgs, value *rgFlagValue) {
 	case "max_depth":
 		compat.maxDepth = value.intValue
 		compat.hasMaxDepth = true
+	case "context_separator":
+		compat.contextSeparator = value.value
+		compat.hasContextSeparator = true
+	case "field_context_separator":
+		compat.fieldContextSeparator = value.value
+		compat.hasFieldContextSeparator = true
+	case "path_separator":
+		compat.pathSeparator = value.value
+		compat.hasPathSeparator = true
 	case "engine":
 		compat.requiresRipgrep = true
 		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--engine", value.value)
@@ -1560,6 +2235,9 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 	if raw, ok := strings.CutPrefix(arg, "--file="); ok {
 		return &rgFlagValue{name: "pattern_file", value: raw}, true, nil
 	}
+	if raw, ok := strings.CutPrefix(arg, "--ignore-file="); ok {
+		return &rgFlagValue{name: "ignore_file", value: raw}, true, nil
+	}
 	if raw, ok := strings.CutPrefix(arg, "--replace="); ok {
 		return &rgFlagValue{name: "replace", value: raw}, true, nil
 	}
@@ -1584,6 +2262,15 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 	if raw, ok := strings.CutPrefix(arg, "--type-not="); ok {
 		return &rgFlagValue{name: "type_not", value: raw}, true, nil
 	}
+	if raw, ok := strings.CutPrefix(arg, "--type-add="); ok {
+		return &rgFlagValue{name: "type_add", value: raw}, true, nil
+	}
+	if raw, ok := strings.CutPrefix(arg, "--type-clear="); ok {
+		return &rgFlagValue{name: "type_clear", value: raw}, true, nil
+	}
+	if raw, ok := strings.CutPrefix(arg, "--ignore-file="); ok {
+		return &rgFlagValue{name: "ignore_file", value: raw}, true, nil
+	}
 	if raw, ok := strings.CutPrefix(arg, "--sort="); ok {
 		return &rgFlagValue{name: "sort", value: raw}, true, nil
 	}
@@ -1602,12 +2289,21 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 	if raw, ok := strings.CutPrefix(arg, "--max-columns="); ok {
 		return parseRGIntFlag("max_columns", raw, arg)
 	}
+	if raw, ok := strings.CutPrefix(arg, "--context-separator="); ok {
+		return &rgFlagValue{name: "context_separator", value: raw}, true, nil
+	}
+	if raw, ok := strings.CutPrefix(arg, "--field-context-separator="); ok {
+		return &rgFlagValue{name: "field_context_separator", value: raw}, true, nil
+	}
+	if raw, ok := strings.CutPrefix(arg, "--path-separator="); ok {
+		return &rgFlagValue{name: "path_separator", value: raw}, true, nil
+	}
 	if raw, ok := strings.CutPrefix(arg, "--max-filesize="); ok {
 		return &rgFlagValue{name: "max_filesize", value: raw}, true, nil
 	}
 
 	switch arg {
-	case "-e", "--regexp", "-f", "--file", "-r", "--replace", "-g", "--glob", "--iglob", "-C", "--context", "-B", "--before-context", "-A", "--after-context", "-t", "--type", "-T", "--type-not", "-m", "--max-count", "-M", "--max-columns", "--max-depth", "--max-filesize", "--engine", "--sort", "--sortr":
+	case "-e", "--regexp", "-f", "--file", "-r", "--replace", "-g", "--glob", "--iglob", "-C", "--context", "-B", "--before-context", "-A", "--after-context", "-t", "--type", "-T", "--type-not", "--type-add", "--type-clear", "--ignore-file", "-m", "--max-count", "-M", "--max-columns", "--context-separator", "--field-context-separator", "--path-separator", "--max-depth", "--max-filesize", "--engine", "--sort", "--sortr":
 		if *index+1 >= len(args) {
 			return nil, true, fmt.Errorf("rg_args 选项缺少值: %s", arg)
 		}
@@ -1618,6 +2314,8 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 			return &rgFlagValue{name: "pattern", value: next}, true, nil
 		case "-f", "--file":
 			return &rgFlagValue{name: "pattern_file", value: next}, true, nil
+		case "--ignore-file":
+			return &rgFlagValue{name: "ignore_file", value: next}, true, nil
 		case "-r", "--replace":
 			return &rgFlagValue{name: "replace", value: next}, true, nil
 		case "-g", "--glob":
@@ -1634,6 +2332,10 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 			return &rgFlagValue{name: "file_type", value: next}, true, nil
 		case "-T", "--type-not":
 			return &rgFlagValue{name: "type_not", value: next}, true, nil
+		case "--type-add":
+			return &rgFlagValue{name: "type_add", value: next}, true, nil
+		case "--type-clear":
+			return &rgFlagValue{name: "type_clear", value: next}, true, nil
 		case "--sort":
 			return &rgFlagValue{name: "sort", value: next}, true, nil
 		case "--sortr":
@@ -1642,6 +2344,12 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 			return parseRGIntFlag("max_count", next, arg)
 		case "-M", "--max-columns":
 			return parseRGIntFlag("max_columns", next, arg)
+		case "--context-separator":
+			return &rgFlagValue{name: "context_separator", value: next}, true, nil
+		case "--field-context-separator":
+			return &rgFlagValue{name: "field_context_separator", value: next}, true, nil
+		case "--path-separator":
+			return &rgFlagValue{name: "path_separator", value: next}, true, nil
 		case "--max-depth":
 			return parseRGIntFlag("max_depth", next, arg)
 		case "--max-filesize":
@@ -1671,6 +2379,12 @@ func parseRGFlagWithValue(args []string, index *int, arg string) (*rgFlagValue, 
 			return &rgFlagValue{name: "file_type", value: arg[2:]}, true, nil
 		case strings.HasPrefix(arg, "-T"):
 			return &rgFlagValue{name: "type_not", value: arg[2:]}, true, nil
+		case strings.HasPrefix(arg, "--type-add"):
+			return &rgFlagValue{name: "type_add", value: arg[10:]}, true, nil
+		case strings.HasPrefix(arg, "--type-clear"):
+			return &rgFlagValue{name: "type_clear", value: arg[12:]}, true, nil
+		case strings.HasPrefix(arg, "--ignore-file"):
+			return &rgFlagValue{name: "ignore_file", value: arg[13:]}, true, nil
 		case strings.HasPrefix(arg, "-m"):
 			return parseRGIntFlag("max_count", arg[2:], arg)
 		case strings.HasPrefix(arg, "-M"):
@@ -1691,7 +2405,7 @@ func parseRGIntFlag(name, raw, flag string) (*rgFlagValue, bool, error) {
 
 func isNoOpRGFlag(arg string) bool {
 	switch arg {
-	case "-n", "--line-number", "-H", "--with-filename", "-N", "--no-line-number", "--no-filename", "--no-heading", "--heading", "--hidden", "--no-ignore", "-a", "--text", "--binary", "--color", "--color=never", "-u", "-uu", "-uuu", "--pretty", "--line-buffered", "--no-line-buffered":
+	case "-n", "--line-number", "-H", "--with-filename", "-N", "--no-line-number", "--no-filename", "--no-heading", "--heading", "-a", "--text", "--binary", "--color", "--color=never", "--pretty", "--line-buffered", "--no-line-buffered", "--block-buffered", "--no-block-buffered", "--null", "--null-data":
 		return true
 	default:
 		if strings.HasPrefix(arg, "--color=") {
@@ -1876,6 +2590,213 @@ func normalizeSearchPathList(values []string) []string {
 	return result
 }
 
+func loadIgnorePatternsForScope(opts *grepOptions, scope grepSearchScope) ([]grepIgnorePattern, error) {
+	if opts == nil || opts.noIgnore {
+		return nil, nil
+	}
+	patterns := make([]grepIgnorePattern, 0, 16)
+	if !opts.noIgnoreParent {
+		ancestorPatterns, err := loadAncestorIgnorePatterns(opts, scope.workingDir)
+		if err != nil {
+			return nil, err
+		}
+		patterns = append(patterns, ancestorPatterns...)
+	}
+	if !opts.noIgnoreGlobal {
+		globalPatterns, err := loadGlobalIgnorePatterns(opts)
+		if err != nil {
+			return nil, err
+		}
+		patterns = append(patterns, globalPatterns...)
+	}
+	if !opts.noIgnoreFiles {
+		explicitPatterns, err := loadExplicitIgnorePatterns(opts, scope.workingDir)
+		if err != nil {
+			return nil, err
+		}
+		patterns = append(patterns, explicitPatterns...)
+	}
+	return normalizeIgnorePatterns(patterns), nil
+}
+
+func loadLocalIgnorePatternsForDir(opts *grepOptions, dir string) ([]grepIgnorePattern, error) {
+	if opts == nil || opts.noIgnore {
+		return nil, nil
+	}
+	patterns := make([]grepIgnorePattern, 0, 8)
+	if !opts.noIgnoreDot {
+		for _, rel := range []string{".ignore", ".rgignore"} {
+			loaded, err := loadIgnorePatternFile(filepath.Join(dir, rel), false, true, opts.noMessages)
+			if err != nil {
+				return nil, err
+			}
+			patterns = append(patterns, withIgnorePatternScope(loaded, dir)...)
+		}
+	}
+	if !opts.noIgnoreVCS {
+		for _, rel := range []string{".gitignore", filepath.Join(".git", "info", "exclude")} {
+			loaded, err := loadIgnorePatternFile(filepath.Join(dir, rel), false, true, opts.noMessages)
+			if err != nil {
+				return nil, err
+			}
+			patterns = append(patterns, withIgnorePatternScope(loaded, dir)...)
+		}
+	}
+	return normalizeIgnorePatterns(patterns), nil
+}
+
+func loadAncestorIgnorePatterns(opts *grepOptions, workingDir string) ([]grepIgnorePattern, error) {
+	if opts == nil || opts.noIgnore || workingDir == "" {
+		return nil, nil
+	}
+	ancestors := make([]string, 0, 8)
+	current := filepath.Clean(workingDir)
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		ancestors = append(ancestors, parent)
+		current = parent
+	}
+	// Load from root to immediate parent so that deeper rules can override earlier ones.
+	for i, j := 0, len(ancestors)-1; i < j; i, j = i+1, j-1 {
+		ancestors[i], ancestors[j] = ancestors[j], ancestors[i]
+	}
+	patterns := make([]grepIgnorePattern, 0, len(ancestors)*2)
+	for _, ancestor := range ancestors {
+		loaded, err := loadLocalIgnorePatternsForDir(opts, ancestor)
+		if err != nil {
+			return nil, err
+		}
+		patterns = append(patterns, loaded...)
+	}
+	return normalizeIgnorePatterns(patterns), nil
+}
+
+func loadGlobalIgnorePatterns(opts *grepOptions) ([]grepIgnorePattern, error) {
+	if opts == nil || opts.noIgnore || opts.noIgnoreGlobal {
+		return nil, nil
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(homeDir) == "" {
+		if opts.noMessages {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("获取用户主目录失败: %w", err)
+		}
+		return nil, nil
+	}
+	candidates := []string{
+		filepath.Join(homeDir, ".config", "git", "ignore"),
+		filepath.Join(homeDir, ".gitignore_global"),
+	}
+	patterns := make([]grepIgnorePattern, 0, len(candidates)*4)
+	for _, candidate := range candidates {
+		loaded, err := loadIgnorePatternFile(candidate, false, true, opts.noMessages)
+		if err != nil {
+			return nil, err
+		}
+		patterns = append(patterns, loaded...)
+	}
+	return normalizeIgnorePatterns(patterns), nil
+}
+
+func loadExplicitIgnorePatterns(opts *grepOptions, workingDir string) ([]grepIgnorePattern, error) {
+	if opts == nil || opts.noIgnore || opts.noIgnoreFiles || len(opts.ignoreFiles) == 0 {
+		return nil, nil
+	}
+	patterns := make([]grepIgnorePattern, 0, len(opts.ignoreFiles)*4)
+	for _, ignoreFile := range normalizeSearchPathList(opts.ignoreFiles) {
+		resolved := ignoreFile
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(workingDir, resolved)
+		}
+		loaded, err := loadIgnorePatternFile(resolved, opts.ignoreFileCaseInsensitive, false, opts.noMessages)
+		if err != nil {
+			return nil, err
+		}
+		patterns = append(patterns, withIgnorePatternScope(loaded, filepath.Dir(resolved))...)
+	}
+	return normalizeIgnorePatterns(patterns), nil
+}
+
+func loadIgnorePatternFile(filePath string, caseInsensitive bool, missingAllowed bool, noMessages bool) ([]grepIgnorePattern, error) {
+	lines, err := readFileLines(filePath)
+	if err != nil {
+		if missingAllowed && os.IsNotExist(err) {
+			return nil, nil
+		}
+		if noMessages {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读取 ignore_file 失败 %s: %w", filePath, err)
+	}
+	patterns := make([]grepIgnorePattern, 0, len(lines))
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, `\#`) {
+			line = strings.TrimPrefix(line, `\`)
+		} else if strings.HasPrefix(line, `\!`) {
+			line = strings.TrimPrefix(line, `\`)
+		} else if strings.HasPrefix(line, "#") {
+			continue
+		}
+		negate := false
+		if strings.HasPrefix(line, "!") {
+			negate = true
+			line = strings.TrimSpace(strings.TrimPrefix(line, "!"))
+		}
+		if line == "" {
+			continue
+		}
+		patterns = append(patterns, grepIgnorePattern{
+			pattern:         line,
+			caseInsensitive: caseInsensitive,
+			negate:          negate,
+		})
+	}
+	return normalizeIgnorePatterns(patterns), nil
+}
+
+func normalizeIgnorePatterns(values []grepIgnorePattern) []grepIgnorePattern {
+	result := make([]grepIgnorePattern, 0, len(values))
+	for _, value := range values {
+		value.pattern = strings.TrimSpace(value.pattern)
+		if value.pattern == "" {
+			continue
+		}
+		value.scopeDir = normalizeIgnoreScopeDir(value.scopeDir)
+		result = append(result, value)
+	}
+	return result
+}
+
+func withIgnorePatternScope(values []grepIgnorePattern, scopeDir string) []grepIgnorePattern {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]grepIgnorePattern, len(values))
+	copy(result, values)
+	scopeDir = normalizeIgnoreScopeDir(scopeDir)
+	for i := range result {
+		result[i].scopeDir = scopeDir
+	}
+	return result
+}
+
+func normalizeIgnoreScopeDir(scopeDir string) string {
+	scopeDir = strings.TrimSpace(scopeDir)
+	if scopeDir == "" {
+		return ""
+	}
+	return filepath.Clean(scopeDir)
+}
+
 func normalizeDisplayPath(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -2011,6 +2932,24 @@ func collectIgnoredPresentationParams(params map[string]interface{}) []string {
 	if value, ok := resolveBoolParam(params, "no_line_buffered"); ok && value {
 		flags = appendUniqueString(flags, "no_line_buffered")
 	}
+	if value, ok := resolveBoolParam(params, "block_buffered"); ok && value {
+		flags = appendUniqueString(flags, "block_buffered")
+	}
+	if value, ok := resolveBoolParam(params, "no_block_buffered"); ok && value {
+		flags = appendUniqueString(flags, "no_block_buffered")
+	}
+	if value, ok := resolveBoolParam(params, "null"); ok && value {
+		flags = appendUniqueString(flags, "null")
+	}
+	if value, ok := resolveBoolParam(params, "null_data"); ok && value {
+		flags = appendUniqueString(flags, "null_data")
+	}
+	if value, ok := resolveStringParam(params, "field_context_separator"); ok && strings.TrimSpace(value) != "" {
+		flags = appendUniqueString(flags, "field_context_separator="+strings.TrimSpace(value))
+	}
+	if value, ok := resolveStringParam(params, "path_separator"); ok && strings.TrimSpace(value) != "" {
+		flags = appendUniqueString(flags, "path_separator="+strings.TrimSpace(value))
+	}
 	if value, ok := resolveStringParam(params, "color"); ok && strings.TrimSpace(value) != "" {
 		flags = appendUniqueString(flags, "color="+strings.TrimSpace(value))
 	}
@@ -2019,12 +2958,6 @@ func collectIgnoredPresentationParams(params map[string]interface{}) []string {
 	}
 	if value, ok := resolveBoolParam(params, "binary"); ok && value {
 		flags = appendUniqueString(flags, "binary")
-	}
-	if value, ok := resolveBoolParam(params, "hidden"); ok && value {
-		flags = appendUniqueString(flags, "hidden")
-	}
-	if value, ok := resolveBoolParam(params, "no_ignore"); ok && value {
-		flags = appendUniqueString(flags, "no_ignore")
 	}
 	return flags
 }
@@ -2352,10 +3285,15 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 		"--with-filename",
 		"--color=never",
 		"--no-heading",
-		"--hidden",
-		"--no-ignore",
-		"--glob", "!.git/**",
-		"--glob", "!node_modules/**",
+	}
+	if shouldIncludeHiddenFiles(opts) {
+		args = append(args, "--hidden")
+	}
+	if opts.noHidden {
+		args = append(args, "--no-hidden")
+	}
+	if opts.noIgnore || opts.unrestrictedLevel > 0 {
+		args = append(args, "--no-ignore")
 	}
 
 	// Context lines
@@ -2368,6 +3306,13 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 		}
 		if opts.afterContext > 0 {
 			args = append(args, "--after-context", fmt.Sprintf("%d", opts.afterContext))
+		}
+	}
+	if opts.contextSeparatorSet {
+		if opts.noContextSeparator {
+			args = append(args, "--no-context-separator")
+		} else if opts.contextSeparator != "" {
+			args = append(args, "--context-separator", opts.contextSeparator)
 		}
 	}
 
@@ -2421,6 +3366,24 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 	if opts.excludeType != "" {
 		args = append(args, "--type-not", opts.excludeType)
 	}
+	typeAddValues := opts.typeAdd
+	if len(opts.structuredTypeAdd) > 0 {
+		typeAddValues = opts.structuredTypeAdd
+	}
+	for _, typeAdd := range typeAddValues {
+		if strings.TrimSpace(typeAdd) != "" {
+			args = append(args, "--type-add", strings.TrimSpace(typeAdd))
+		}
+	}
+	typeClearValues := opts.typeClear
+	if len(opts.structuredTypeClear) > 0 {
+		typeClearValues = opts.structuredTypeClear
+	}
+	for _, typeClear := range typeClearValues {
+		if strings.TrimSpace(typeClear) != "" {
+			args = append(args, "--type-clear", strings.TrimSpace(typeClear))
+		}
+	}
 	if opts.sortBy != "" {
 		args = append(args, "--sort", opts.sortBy)
 	}
@@ -2437,6 +3400,38 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 	}
 	if opts.maxFilesize != "" {
 		args = append(args, "--max-filesize", opts.maxFilesize)
+	}
+	if opts.ignoreFileCaseInsensitive {
+		args = append(args, "--ignore-file-case-insensitive")
+	}
+	if opts.noIgnoreFiles {
+		args = append(args, "--no-ignore-files")
+	}
+	if !opts.noIgnoreFiles {
+		for _, ignoreFile := range normalizeSearchPathList(opts.ignoreFiles) {
+			args = append(args, "--ignore-file", ignoreFile)
+		}
+	}
+	if opts.noIgnoreParent {
+		args = append(args, "--no-ignore-parent")
+	}
+	if opts.noIgnoreVCS {
+		args = append(args, "--no-ignore-vcs")
+	}
+	if opts.noIgnoreGlobal {
+		args = append(args, "--no-ignore-global")
+	}
+	if opts.noIgnoreDot {
+		args = append(args, "--no-ignore-dot")
+	}
+	if opts.noConfig {
+		args = append(args, "--no-config")
+	}
+	if opts.oneFileSystem {
+		args = append(args, "--one-file-system")
+	}
+	if opts.noMessages {
+		args = append(args, "--no-messages")
 	}
 
 	// Include / exclude glob
@@ -2491,7 +3486,7 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 		args = append(args, "-F")
 	}
 	if len(opts.rgOnlyArgs) > 0 {
-		args = append(args, opts.rgOnlyArgs...)
+		args = append(args, filterRGOnlyArgs(opts)...)
 	}
 
 	for _, patternFile := range opts.resolvedPatternFiles {
@@ -2520,6 +3515,7 @@ type grepStats struct {
 	MatchedLines     int
 	FilesWithMatches int
 	FilesSearched    int
+	BytesPrinted     int64
 	BytesSearched    int64
 }
 
@@ -2531,6 +3527,7 @@ func (s *grepStats) add(other *grepStats) {
 	s.MatchedLines += other.MatchedLines
 	s.FilesWithMatches += other.FilesWithMatches
 	s.FilesSearched += other.FilesSearched
+	s.BytesPrinted += other.BytesPrinted
 	s.BytesSearched += other.BytesSearched
 }
 
@@ -2543,6 +3540,7 @@ func (s *grepStats) metadataMap() map[string]interface{} {
 		"matched_lines":      s.MatchedLines,
 		"files_with_matches": s.FilesWithMatches,
 		"files_searched":     s.FilesSearched,
+		"bytes_printed":      s.BytesPrinted,
 		"bytes_searched":     s.BytesSearched,
 	}
 }
@@ -2554,10 +3552,11 @@ func (s *grepStats) renderSummary() string {
 	lines := []string{
 		"-- stats --",
 		fmt.Sprintf("matches: %d", s.Matches),
-		fmt.Sprintf("matched_lines: %d", s.MatchedLines),
-		fmt.Sprintf("files_with_matches: %d", s.FilesWithMatches),
-		fmt.Sprintf("files_searched: %d", s.FilesSearched),
-		fmt.Sprintf("bytes_searched: %d", s.BytesSearched),
+		fmt.Sprintf("matched lines: %d", s.MatchedLines),
+		fmt.Sprintf("files contained matches: %d", s.FilesWithMatches),
+		fmt.Sprintf("files searched: %d", s.FilesSearched),
+		fmt.Sprintf("bytes printed: %d", s.BytesPrinted),
+		fmt.Sprintf("bytes searched: %d", s.BytesSearched),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -2697,6 +3696,8 @@ func parseRipgrepStatsLines(lines []string) *grepStats {
 			stats.FilesWithMatches = parseLeadingInt(line)
 		case strings.HasSuffix(line, " files searched"):
 			stats.FilesSearched = parseLeadingInt(line)
+		case strings.HasSuffix(line, " bytes printed"):
+			stats.BytesPrinted = int64(parseLeadingInt(line))
 		case strings.HasSuffix(line, " bytes searched"):
 			stats.BytesSearched = int64(parseLeadingInt(line))
 		}
@@ -2727,6 +3728,7 @@ func parseRipgrepJSONStatsObject(statsMap map[string]interface{}) *grepStats {
 		MatchedLines:     jsonNumberToInt(statsMap["matched_lines"]),
 		FilesWithMatches: jsonNumberToInt(statsMap["searches_with_match"]),
 		FilesSearched:    jsonNumberToInt(statsMap["searches"]),
+		BytesPrinted:     jsonNumberToInt64(statsMap["bytes_printed"]),
 		BytesSearched:    jsonNumberToInt64(statsMap["bytes_searched"]),
 	}
 }
@@ -3241,11 +4243,17 @@ func (g *GrepTool) buildContextOutput(opts *grepOptions, matches []grepMatch) []
 	results := make([]string, 0, len(matches)*2)
 	before := opts.beforeContext
 	after := opts.afterContext
+	contextSeparator := "--"
+	if opts != nil && opts.contextSeparatorSet {
+		contextSeparator = opts.contextSeparator
+	}
 
 	for _, fname := range fileOrder {
 		fg := fileGroups[fname]
-		if len(results) > 0 {
-			results = append(results, "--")
+		if len(results) > 0 && !opts.noContextSeparator {
+			if contextSeparator != "" {
+				results = append(results, contextSeparator)
+			}
 		}
 
 		// Collect all line numbers to display (match lines + context)
@@ -3270,8 +4278,10 @@ func (g *GrepTool) buildContextOutput(opts *grepOptions, matches []grepMatch) []
 			if !showLines[lineNum] {
 				continue
 			}
-			if prevLine > 0 && lineNum > prevLine+1 {
-				results = append(results, fmt.Sprintf("%s--", fg.relPath))
+			if prevLine > 0 && lineNum > prevLine+1 && !opts.noContextSeparator {
+				if contextSeparator != "" {
+					results = append(results, fmt.Sprintf("%s%s", fg.relPath, contextSeparator))
+				}
 			}
 			prefix := " "
 			matchColumn := 0
@@ -3325,16 +4335,47 @@ func (g *GrepTool) collectFileCandidates(opts *grepOptions) ([]grepFileCandidate
 	excludeGlobs := resolveExcludeGlobs(opts)
 	candidates := make([]grepFileCandidate, 0, 32)
 	for _, scope := range opts.searchScopes {
+		baseIgnorePatterns, err := loadIgnorePatternsForScope(opts, scope)
+		if err != nil {
+			return nil, err
+		}
+		dirIgnorePatterns := map[string][]grepIgnorePattern{}
+		dirIgnorePatterns[scope.workingDir] = append([]grepIgnorePattern(nil), baseIgnorePatterns...)
+		rootFSID := ""
+		if opts.oneFileSystem {
+			rootFSID, err = fileSystemIdentityFn(scope.workingDir)
+			if err != nil {
+				if opts.noMessages {
+					rootFSID = ""
+				} else {
+					return nil, fmt.Errorf("确定文件系统边界失败 %s: %w", scope.workingDir, err)
+				}
+			}
+		}
 		if scope.searchTarget != "" {
 			targetPath := filepath.Join(scope.workingDir, scope.searchTarget)
 			info, err := os.Stat(targetPath)
 			if err != nil {
+				if opts != nil && opts.noMessages {
+					continue
+				}
 				return nil, err
 			}
 			if info.IsDir() {
 				return nil, fmt.Errorf("搜索目标不是文件: %s", targetPath)
 			}
-			if !shouldIncludeFileByInfo(targetPath, scope.searchTarget, info, includeGlobs, excludeGlobs, opts.maxFileBytes) {
+			if shouldSkipHiddenPath(scope.searchTarget, opts) {
+				continue
+			}
+			if localPatterns, err := loadLocalIgnorePatternsForDir(opts, scope.workingDir); err != nil {
+				if opts.noMessages {
+					continue
+				}
+				return nil, err
+			} else {
+				baseIgnorePatterns = append(baseIgnorePatterns, localPatterns...)
+			}
+			if !shouldIncludeFileByInfo(targetPath, scope.searchTarget, info, includeGlobs, excludeGlobs, baseIgnorePatterns, opts.maxFileBytes) {
 				continue
 			}
 			candidates = append(candidates, grepFileCandidate{
@@ -3351,9 +4392,48 @@ func (g *GrepTool) collectFileCandidates(opts *grepOptions) ([]grepFileCandidate
 			if info == nil {
 				return nil
 			}
+			relPath, err := filepath.Rel(scope.workingDir, path)
+			if err != nil {
+				relPath = path
+			}
+			parentDir := filepath.Dir(path)
+			parentIgnorePatterns := dirIgnorePatterns[parentDir]
+			if path == scope.workingDir {
+				parentIgnorePatterns = append([]grepIgnorePattern(nil), baseIgnorePatterns...)
+			}
+			if rootFSID != "" && path != scope.workingDir {
+				currentFSID, fsErr := fileSystemIdentityFn(path)
+				if fsErr != nil {
+					if opts.noMessages {
+						return nil
+					}
+					return fsErr
+				}
+				if currentFSID != rootFSID {
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+			}
 
 			if info.IsDir() {
-				if shouldSkipGrepDir(info.Name()) {
+				if shouldSkipGrepDir(info.Name(), opts) {
+					return filepath.SkipDir
+				}
+				if shouldSkipHiddenPath(relPath, opts) {
+					return filepath.SkipDir
+				}
+				localPatterns, err := loadLocalIgnorePatternsForDir(opts, path)
+				if err != nil {
+					if opts.noMessages {
+						return filepath.SkipDir
+					}
+					return err
+				}
+				currentIgnorePatterns := append(append([]grepIgnorePattern(nil), parentIgnorePatterns...), localPatterns...)
+				dirIgnorePatterns[path] = currentIgnorePatterns
+				if shouldIgnoreByPatterns(path, relPath, currentIgnorePatterns) {
 					return filepath.SkipDir
 				}
 				// Check max_depth
@@ -3369,11 +4449,11 @@ func (g *GrepTool) collectFileCandidates(opts *grepOptions) ([]grepFileCandidate
 				return nil
 			}
 
-			relPath, err := filepath.Rel(scope.workingDir, path)
-			if err != nil {
-				relPath = path
+			if shouldSkipHiddenPath(relPath, opts) {
+				return nil
 			}
-			if !shouldIncludeFileByInfo(path, relPath, info, includeGlobs, excludeGlobs, opts.maxFileBytes) {
+			fileIgnorePatterns := parentIgnorePatterns
+			if !shouldIncludeFileByInfo(path, relPath, info, includeGlobs, excludeGlobs, fileIgnorePatterns, opts.maxFileBytes) {
 				return nil
 			}
 
@@ -3440,7 +4520,7 @@ func appendFileTypeGlobs(globs []grepGlobPattern, fileType string) []grepGlobPat
 	return append(globs, grepGlobPattern{pattern: "*." + fileType})
 }
 
-func shouldIncludeFileByInfo(path string, relPath string, info os.FileInfo, includeGlobs, excludeGlobs []grepGlobPattern, maxFileBytes int64) bool {
+func shouldIncludeFileByInfo(path string, relPath string, info os.FileInfo, includeGlobs, excludeGlobs []grepGlobPattern, ignorePatterns []grepIgnorePattern, maxFileBytes int64) bool {
 	if info == nil {
 		return false
 	}
@@ -3449,6 +4529,9 @@ func shouldIncludeFileByInfo(path string, relPath string, info os.FileInfo, incl
 	}
 	if strings.TrimSpace(relPath) == "" {
 		relPath = filepath.Base(path)
+	}
+	if shouldIgnoreByPatterns(path, relPath, ignorePatterns) {
+		return false
 	}
 	if !matchAnyGlob(relPath, includeGlobs) {
 		return false
@@ -3472,6 +4555,66 @@ func matchAnyGlob(relPath string, patterns []grepGlobPattern) bool {
 		}
 	}
 	return false
+}
+
+func shouldIgnoreByPatterns(absPath, relPath string, patterns []grepIgnorePattern) bool {
+	if len(patterns) == 0 {
+		return false
+	}
+	relPath = normalizeGlobPath(relPath)
+	absPath = filepath.Clean(absPath)
+	ignored := false
+	for _, pattern := range patterns {
+		pat := normalizeGlobPath(pattern.pattern)
+		if pat == "" {
+			continue
+		}
+		candidatePath := relPath
+		if scopeDir := normalizeIgnoreScopeDir(pattern.scopeDir); scopeDir != "" {
+			scopedPath, ok := relativePathWithinScope(scopeDir, absPath)
+			if !ok {
+				continue
+			}
+			candidatePath = scopedPath
+		}
+		candidateBase := path.Base(candidatePath)
+		if pattern.caseInsensitive {
+			pat = strings.ToLower(pat)
+			candidatePath = strings.ToLower(candidatePath)
+			candidateBase = strings.ToLower(candidateBase)
+		}
+		matched := false
+		if strings.Contains(pat, "/") || strings.Contains(pat, "**") {
+			ok, err := matchGlobPattern(pat, candidatePath)
+			matched = err == nil && ok
+		} else {
+			ok, err := path.Match(pat, candidateBase)
+			matched = err == nil && ok
+		}
+		if matched {
+			ignored = !pattern.negate
+		}
+	}
+	return ignored
+}
+
+func relativePathWithinScope(scopeDir, absPath string) (string, bool) {
+	scopeDir = normalizeIgnoreScopeDir(scopeDir)
+	if scopeDir == "" {
+		return "", false
+	}
+	rel, err := filepath.Rel(scopeDir, absPath)
+	if err != nil {
+		return "", false
+	}
+	rel = filepath.Clean(rel)
+	if rel == "." {
+		return "", true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
 }
 
 func matchGrepGlobPattern(relPath string, pattern grepGlobPattern) bool {
@@ -3504,13 +4647,297 @@ func normalizeGlobPath(value string) string {
 	return path.Clean(value)
 }
 
-func shouldSkipGrepDir(name string) bool {
-	switch strings.TrimSpace(name) {
-	case ".git", "node_modules":
-		return true
-	default:
+func shouldSkipGrepDir(name string, opts *grepOptions) bool {
+	return false
+}
+
+func shouldSkipHiddenPath(relPath string, opts *grepOptions) bool {
+	if opts == nil {
 		return false
 	}
+	if shouldIncludeHiddenFiles(opts) {
+		return false
+	}
+	relPath = normalizeGlobPath(relPath)
+	if relPath == "" {
+		return false
+	}
+	for _, segment := range strings.Split(filepath.ToSlash(relPath), "/") {
+		segment = strings.TrimSpace(segment)
+		if segment == "" || segment == "." || segment == ".." {
+			continue
+		}
+		if strings.HasPrefix(segment, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldIncludeHiddenFiles(opts *grepOptions) bool {
+	if opts == nil {
+		return false
+	}
+	if opts.noHidden {
+		return false
+	}
+	if opts.hidden {
+		return true
+	}
+	return opts.unrestrictedLevel >= 2
+}
+
+func filterRGOnlyArgs(opts *grepOptions) []string {
+	if opts == nil || len(opts.rgOnlyArgs) == 0 {
+		return nil
+	}
+	structuredSortSet := opts.sortBySet || opts.sortReverseBySet || opts.sortFilesSet || opts.noSortFilesSet
+	filtered := make([]string, 0, len(opts.rgOnlyArgs))
+	skipNext := false
+	for i := 0; i < len(opts.rgOnlyArgs); i++ {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		arg := strings.TrimSpace(opts.rgOnlyArgs[i])
+		if arg == "" {
+			continue
+		}
+		switch arg {
+		case "-F", "--fixed-strings", "--fixed_strings":
+			if opts.literalSet {
+				continue
+			}
+		case "-i", "--ignore-case", "--ignore_case":
+			if opts.ignoreCaseSet {
+				continue
+			}
+		case "-s", "--case-sensitive", "--case_sensitive":
+			if opts.caseSensitiveSet {
+				continue
+			}
+		case "-S", "--smart-case", "--smart_case":
+			if opts.smartCaseSet {
+				continue
+			}
+		case "-w", "--word-regexp", "--word_regexp":
+			if opts.wordSet {
+				continue
+			}
+		case "-x", "--line-regexp", "--line_regexp":
+			if opts.lineRegexpSet {
+				continue
+			}
+		case "-v", "--invert-match", "--invert_match":
+			if opts.invertMatchSet {
+				continue
+			}
+		case "-o", "--only-matching", "--only_matching":
+			if opts.onlyMatchingSet {
+				continue
+			}
+		case "--count-matches":
+			if opts.countMatchesSet {
+				continue
+			}
+		case "--files-with-matches":
+			if opts.modeSet {
+				continue
+			}
+		case "--files-without-match":
+			if opts.modeSet {
+				continue
+			}
+		case "--count":
+			if opts.modeSet {
+				continue
+			}
+		case "--max-count":
+			if opts.maxCountSet {
+				skipNext = true
+				continue
+			}
+		case "-u", "-uu", "-uuu", "--unrestricted":
+			if opts.noIgnoreSet || opts.unrestrictedLevelSet || opts.hiddenSet || opts.noHiddenSet {
+				continue
+			}
+		case "--stats":
+			if opts.statsSet {
+				continue
+			}
+		case "--json":
+			if opts.jsonOutputSet {
+				continue
+			}
+		case "--follow":
+			if opts.followSet {
+				continue
+			}
+		case "--no-config":
+			if opts.noConfigSet {
+				continue
+			}
+		case "--one-file-system":
+			if opts.oneFileSystemSet {
+				continue
+			}
+		case "--no-messages":
+			if opts.noMessagesSet {
+				continue
+			}
+		case "--max-columns-preview":
+			if opts.maxColumnsPreviewSet {
+				continue
+			}
+		case "--no-max-columns-preview":
+			if opts.noMaxColumnsPreviewSet {
+				continue
+			}
+		case "--max-columns":
+			if opts.maxColumnsSet {
+				continue
+			}
+		case "--max-depth":
+			if opts.maxDepthSet {
+				continue
+			}
+		case "--max-filesize":
+			if opts.maxFilesizeSet {
+				skipNext = true
+				continue
+			}
+		case "--column":
+			if opts.columnSet {
+				continue
+			}
+		case "--trim":
+			if opts.trimSet {
+				continue
+			}
+		case "--pretty":
+			if opts.prettySet {
+				continue
+			}
+		case "--line-buffered":
+			if opts.lineBufferedSet {
+				continue
+			}
+		case "--no-line-buffered":
+			if opts.noLineBufferedSet {
+				continue
+			}
+		case "--block-buffered":
+			if opts.blockBufferedSet {
+				continue
+			}
+		case "--no-block-buffered":
+			if opts.noBlockBufferedSet {
+				continue
+			}
+		case "--null":
+			if opts.nullOutputSet {
+				continue
+			}
+		case "--null-data":
+			if opts.nullDataSet {
+				continue
+			}
+		case "--glob-case-insensitive":
+			if opts.globCaseInsensitiveSet {
+				continue
+			}
+		case "--sort":
+			if structuredSortSet {
+				skipNext = true
+				continue
+			}
+		case "--sortr":
+			if structuredSortSet {
+				skipNext = true
+				continue
+			}
+		case "--sort-files":
+			if structuredSortSet {
+				continue
+			}
+		case "--no-sort-files":
+			if structuredSortSet {
+				continue
+			}
+		case "--type-add":
+			if len(opts.structuredTypeAdd) > 0 {
+				skipNext = true
+				continue
+			}
+			if opts.typeAddSet {
+				skipNext = true
+				continue
+			}
+		case "--type-clear":
+			if len(opts.structuredTypeClear) > 0 {
+				skipNext = true
+				continue
+			}
+			if opts.typeClearSet {
+				skipNext = true
+				continue
+			}
+		case "--no-ignore":
+			if opts.noIgnoreSet || opts.unrestrictedLevelSet {
+				continue
+			}
+		case "--hidden", "--no-hidden":
+			if opts.hiddenSet || opts.noHiddenSet || opts.unrestrictedLevelSet {
+				continue
+			}
+		case "--no-ignore-files":
+			if opts.noIgnoreFilesSet {
+				continue
+			}
+		case "--ignore-file-case-insensitive":
+			if opts.ignoreFileCaseInsensitiveSet || opts.noIgnoreFiles {
+				continue
+			}
+		case "--ignore-file":
+			if opts.noIgnoreFiles {
+				skipNext = true
+				continue
+			}
+		case "--no-ignore-parent":
+			if opts.noIgnoreParentSet {
+				continue
+			}
+		case "--no-ignore-vcs":
+			if opts.noIgnoreVCSSet {
+				continue
+			}
+		case "--no-ignore-global":
+			if opts.noIgnoreGlobalSet {
+				continue
+			}
+		case "--no-ignore-dot":
+			if opts.noIgnoreDotSet {
+				continue
+			}
+		}
+		if strings.HasPrefix(arg, "--ignore-file=") {
+			if opts.noIgnoreFiles {
+				continue
+			}
+		}
+		if strings.HasPrefix(arg, "--type-add=") {
+			if len(opts.structuredTypeAdd) > 0 {
+				continue
+			}
+		}
+		if strings.HasPrefix(arg, "--type-clear=") {
+			if len(opts.structuredTypeClear) > 0 {
+				continue
+			}
+		}
+		filtered = append(filtered, arg)
+	}
+	return filtered
 }
 
 // readFileLines reads an entire file into a slice of lines.
@@ -3599,7 +5026,11 @@ func requiredRipgrepFeatures(opts *grepOptions) []string {
 		features = appendUniqueString(features, "json/--json")
 	}
 	if opts.follow {
-		features = appendUniqueString(features, "follow/-L/--follow")
+		if opts.oneFileSystem {
+			features = appendUniqueString(features, "follow/-L/--follow + one_file_system/--one-file-system")
+		} else {
+			features = appendUniqueString(features, "follow/-L/--follow")
+		}
 	}
 	if requiresRipgrepForSort(opts.sortBy) {
 		features = appendUniqueString(features, "sort="+opts.sortBy)
@@ -3657,6 +5088,10 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 			output += fmt.Sprintf("\n\n(结果已截断，显示前 %d 个匹配)", len(results))
 		}
 	}
+	if opts != nil && opts.stats && stats != nil && !opts.jsonOutput {
+		basePrinted := output
+		stats.BytesPrinted = int64(len([]byte(basePrinted)))
+	}
 	if opts != nil && opts.stats && opts.jsonOutput {
 		// json/--json 模式下保留 rg 原始 JSON Lines 语义，不再追加自定义 stats 摘要块。
 	} else if opts != nil && opts.stats && stats != nil {
@@ -3672,65 +5107,92 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	}
 
 	metadata := map[string]interface{}{
-		"pattern":                opts.pattern,
-		"patterns":               opts.patterns,
-		"pattern_files":          opts.patternFiles,
-		"path":                   opts.searchPath,
-		"paths":                  opts.searchPaths,
-		"include":                opts.include,
-		"exclude":                opts.exclude,
-		"glob_case_insensitive":  opts.globCaseInsensitive,
-		"literal":                opts.literal,
-		"fixed_strings":          opts.literal,
-		"ignore_case":            opts.ignoreCase,
-		"case_sensitive":         opts.caseSensitive,
-		"smart_case":             opts.smartCase,
-		"word":                   opts.word,
-		"word_regexp":            opts.word,
-		"line_regexp":            opts.lineRegexp,
-		"invert_match":           opts.invertMatch,
-		"only_matching":          opts.onlyMatching,
-		"count_matches":          opts.countMatches,
-		"stats_requested":        opts.stats,
-		"json_output_requested":  opts.jsonOutput,
-		"follow":                 opts.follow,
-		"column":                 opts.column,
-		"trim":                   opts.trim,
-		"pretty":                 opts.pretty,
-		"line_buffered":          opts.lineBuffered,
-		"no_line_buffered":       opts.noLineBuffered,
-		"max_columns":            opts.maxColumns,
-		"max_columns_explicit":   opts.maxColumnsSet,
-		"max_columns_preview":    opts.maxColumnsPreview,
-		"no_max_columns_preview": opts.noMaxColumnsPreview,
-		"context":                opts.context,
-		"before_context":         opts.beforeContext,
-		"after_context":          opts.afterContext,
-		"type":                   opts.fileType,
-		"type_not":               opts.excludeType,
-		"sort":                   opts.sortBy,
-		"sortr":                  opts.sortReverseBy,
-		"sort_files":             opts.sortBy == "path" && opts.sortReverseBy == "",
-		"max_depth":              opts.maxDepth,
-		"max_depth_explicit":     opts.maxDepthSet,
-		"max_count":              opts.maxCount,
-		"max_count_explicit":     opts.maxCountSet,
-		"max_filesize":           opts.maxFilesize,
-		"requires_ripgrep":       opts.requiresRipgrep,
-		"rg_only_args":           opts.rgOnlyArgs,
-		"ignored_rg_args":        opts.ignoredRGArgs,
-		"ignored_presentation":   opts.ignoredPresentation,
-		"case_mode":              grepCaseMode(opts),
-		"pattern_source":         grepPatternSource(opts),
-		"pattern_count":          len(opts.patterns),
-		"search_scope_count":     len(opts.searchScopes),
-		"search_scope_kind":      grepSearchScopeKind(opts),
-		"normalized_output":      !opts.jsonOutput,
-		"output_format":          grepOutputFormat(opts),
-		"mode":                   string(opts.mode),
-		"match_count":            matchCount,
-		"truncated":              truncated,
-		"engine":                 engine,
+		"pattern":                          opts.pattern,
+		"patterns":                         opts.patterns,
+		"pattern_files":                    opts.patternFiles,
+		"path":                             opts.searchPath,
+		"paths":                            opts.searchPaths,
+		"include":                          opts.include,
+		"exclude":                          opts.exclude,
+		"glob_case_insensitive":            opts.globCaseInsensitive,
+		"literal":                          opts.literal,
+		"fixed_strings":                    opts.literal,
+		"ignore_case":                      opts.ignoreCase,
+		"case_sensitive":                   opts.caseSensitive,
+		"smart_case":                       opts.smartCase,
+		"word":                             opts.word,
+		"word_regexp":                      opts.word,
+		"line_regexp":                      opts.lineRegexp,
+		"invert_match":                     opts.invertMatch,
+		"only_matching":                    opts.onlyMatching,
+		"count_matches":                    opts.countMatches,
+		"stats_requested":                  opts.stats,
+		"json_output_requested":            opts.jsonOutput,
+		"follow":                           opts.follow,
+		"column":                           opts.column,
+		"trim":                             opts.trim,
+		"pretty":                           opts.pretty,
+		"line_buffered":                    opts.lineBuffered,
+		"no_line_buffered":                 opts.noLineBuffered,
+		"block_buffered":                   opts.blockBuffered,
+		"no_block_buffered":                opts.noBlockBuffered,
+		"null":                             opts.nullOutput,
+		"null_data":                        opts.nullData,
+		"field_context_separator":          opts.fieldContextSeparator,
+		"field_context_separator_explicit": opts.fieldContextSeparatorSet,
+		"path_separator":                   opts.pathSeparator,
+		"path_separator_explicit":          opts.pathSeparatorSet,
+		"context_separator":                opts.contextSeparator,
+		"context_separator_explicit":       opts.contextSeparatorSet,
+		"no_context_separator":             opts.noContextSeparator,
+		"max_columns":                      opts.maxColumns,
+		"max_columns_explicit":             opts.maxColumnsSet,
+		"max_columns_preview":              opts.maxColumnsPreview,
+		"no_max_columns_preview":           opts.noMaxColumnsPreview,
+		"context":                          opts.context,
+		"before_context":                   opts.beforeContext,
+		"after_context":                    opts.afterContext,
+		"type":                             opts.fileType,
+		"type_not":                         opts.excludeType,
+		"type_add":                         opts.typeAdd,
+		"type_clear":                       opts.typeClear,
+		"ignore_files":                     opts.ignoreFiles,
+		"ignore_file_case_insensitive":     opts.ignoreFileCaseInsensitive,
+		"no_ignore_files":                  opts.noIgnoreFiles,
+		"no_ignore":                        opts.noIgnore,
+		"unrestricted_level":               opts.unrestrictedLevel,
+		"no_config":                        opts.noConfig,
+		"one_file_system":                  opts.oneFileSystem,
+		"no_messages":                      opts.noMessages,
+		"hidden":                           opts.hidden,
+		"no_hidden":                        opts.noHidden,
+		"no_ignore_parent":                 opts.noIgnoreParent,
+		"no_ignore_vcs":                    opts.noIgnoreVCS,
+		"no_ignore_global":                 opts.noIgnoreGlobal,
+		"no_ignore_dot":                    opts.noIgnoreDot,
+		"sort":                             opts.sortBy,
+		"sortr":                            opts.sortReverseBy,
+		"sort_files":                       opts.sortBy == "path" && opts.sortReverseBy == "",
+		"max_depth":                        opts.maxDepth,
+		"max_depth_explicit":               opts.maxDepthSet,
+		"max_count":                        opts.maxCount,
+		"max_count_explicit":               opts.maxCountSet,
+		"max_filesize":                     opts.maxFilesize,
+		"requires_ripgrep":                 opts.requiresRipgrep,
+		"rg_only_args":                     opts.rgOnlyArgs,
+		"ignored_rg_args":                  opts.ignoredRGArgs,
+		"ignored_presentation":             opts.ignoredPresentation,
+		"case_mode":                        grepCaseMode(opts),
+		"pattern_source":                   grepPatternSource(opts),
+		"pattern_count":                    len(opts.patterns),
+		"search_scope_count":               len(opts.searchScopes),
+		"search_scope_kind":                grepSearchScopeKind(opts),
+		"normalized_output":                !opts.jsonOutput,
+		"output_format":                    grepOutputFormat(opts),
+		"mode":                             string(opts.mode),
+		"match_count":                      matchCount,
+		"truncated":                        truncated,
+		"engine":                           engine,
 	}
 	if stats != nil {
 		metadata["stats"] = stats.metadataMap()

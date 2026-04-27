@@ -47,13 +47,13 @@ func NewTodosTool() *TodosTool {
 		"properties": map[string]interface{}{
 			"todos": map[string]interface{}{
 				"type":        "array",
-				"description": "任务列表，每个任务包含 content（任务描述）、status（状态：pending/in_progress/completed）、active_form（执行时显示的文本）",
+				"description": "任务列表，每个任务包含 content（任务描述）、status（状态：pending/in_progress/completed）、active_form（执行时显示的文本）。如果任务很多或描述很长，请拆分为多个更小的 todos 调用，每次只聚焦一组相关任务，避免一次性生成超长结构化参数。",
 				"items": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"content": map[string]interface{}{
 							"type":        "string",
-							"description": "任务描述（祈使句，如 '运行测试'）",
+							"description": "任务描述（祈使句，如 '运行测试'）。若任务说明较长，请拆分为更小的任务条目，每次只聚焦一个任务。",
 						},
 						"status": map[string]interface{}{
 							"type":        "string",
@@ -62,7 +62,7 @@ func NewTodosTool() *TodosTool {
 						},
 						"active_form": map[string]interface{}{
 							"type":        "string",
-							"description": "执行时显示的文本（如 '运行测试中'）",
+							"description": "执行时显示的文本（如 '运行测试中'）。若内容较长，请尽量简短并与 content 保持一致。",
 						},
 					},
 					"required": []string{"content", "status", "active_form"},
@@ -75,7 +75,7 @@ func NewTodosTool() *TodosTool {
 	return &TodosTool{
 		BaseTool: toolkit.NewBaseTool(
 			"todos",
-			"创建和管理结构化任务列表，用于跟踪复杂多步骤任务。状态：pending（未开始）、in_progress（进行中）、completed（已完成）。同一时间只能有一个任务为 in_progress。",
+			"创建和管理结构化任务列表，用于跟踪复杂多步骤任务。状态：pending（未开始）、in_progress（进行中）、completed（已完成）。同一时间只能有一个任务为 in_progress。若任务列表较长，请拆分为多个更小的 todos 调用，每次只聚焦一组相关任务。",
 			"1.0.0",
 			parameters,
 			true,

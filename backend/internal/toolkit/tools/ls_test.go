@@ -142,3 +142,26 @@ func TestLsTool_PreservesParentPathForNestedEntries(t *testing.T) {
 		t.Fatalf("expected nested directory not to be rendered as ambiguous base name, got:\n%s", result.Content)
 	}
 }
+
+func TestLsTool_DescriptionGuidesSingleTargetFocus(t *testing.T) {
+	tool := NewLsTool()
+
+	desc := tool.Description()
+	if !strings.Contains(desc, "拆分") || !strings.Contains(desc, "每次只聚焦一个目录") {
+		t.Fatalf("expected ls description to guide single-target focus, got %q", desc)
+	}
+
+	params := tool.Parameters()
+	props, ok := params["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected properties in schema, got %#v", params)
+	}
+	pathSchema, ok := props["path"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected path schema in properties, got %#v", props)
+	}
+	pathDesc, _ := pathSchema["description"].(string)
+	if !strings.Contains(pathDesc, "拆分") || !strings.Contains(pathDesc, "多个目录") {
+		t.Fatalf("expected path description to guide single-target focus, got %q", pathDesc)
+	}
+}

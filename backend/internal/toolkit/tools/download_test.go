@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -31,6 +32,29 @@ func TestDownloadTool_Interface(t *testing.T) {
 	params := tool.Parameters()
 	if params == nil {
 		t.Error("parameters should not be nil")
+	}
+}
+
+func TestDownloadTool_DescriptionGuidesBatchSplitting(t *testing.T) {
+	tool := NewDownloadTool()
+
+	desc := tool.Description()
+	if !strings.Contains(desc, "拆分") || !strings.Contains(desc, "多次 download") {
+		t.Fatalf("expected download tool description to guide batch splitting, got %q", desc)
+	}
+
+	params := tool.Parameters()
+	props, ok := params["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected properties in schema, got %#v", params)
+	}
+	urlSchema, ok := props["url"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected url schema in properties, got %#v", props)
+	}
+	urlDesc, _ := urlSchema["description"].(string)
+	if !strings.Contains(urlDesc, "拆分") || !strings.Contains(urlDesc, "多次 download") {
+		t.Fatalf("expected url description to guide batch splitting, got %q", urlDesc)
 	}
 }
 

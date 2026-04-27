@@ -47,7 +47,7 @@ func NewBashTool() *BashTool {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "Shell command. On Windows this tool uses the detected user shell, usually PowerShell/pwsh rather than cmd.exe. Prefer the workdir parameter for directory changes; use pwd/Get-Location to print the current directory and do not use bare cd for that purpose. Windows PowerShell/pwsh does not provide `head` by default; when you need to limit output, prefer `... | Select-Object -First 200`.",
+				"description": "Shell command. On Windows this tool uses the detected user shell, usually PowerShell/pwsh rather than cmd.exe. Prefer the workdir parameter for directory changes; use pwd/Get-Location to print the current directory and do not use bare cd for that purpose. If the task contains multiple steps or multiple independent goals, split it into multiple bash calls and keep each call focused on one clear command goal. Windows PowerShell/pwsh does not provide `head` by default; when you need to limit output, prefer `... | Select-Object -First 200`.",
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
@@ -75,7 +75,7 @@ func NewBashTool() *BashTool {
 	return &BashTool{
 		BaseTool: toolkit.NewBaseTool(
 			"bash",
-			"执行 Shell 命令并返回输出。Windows 下优先使用检测到的 PowerShell/pwsh；切换目录优先使用 workdir 参数；PowerShell/pwsh 默认没有 `head`，限制输出请使用 `Select-Object -First N`。",
+			"执行 Shell 命令并返回输出。Windows 下优先使用检测到的 PowerShell/pwsh；切换目录优先使用 workdir 参数；如果命令包含多个步骤或多个独立目标，请拆分为多次 bash 调用，每次只聚焦一个明确的命令目标。PowerShell/pwsh 默认没有 `head`，限制输出请使用 `Select-Object -First N`。",
 			"1.1.0",
 			parameters,
 			true, // 支持直接调用

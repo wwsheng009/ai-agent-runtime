@@ -86,6 +86,29 @@ func TestApplyPatchTool_RejectsMalformedPatch(t *testing.T) {
 	}
 }
 
+func TestApplyPatchTool_DescriptionGuidesPatchSplitting(t *testing.T) {
+	tool := NewApplyPatchTool()
+
+	desc := tool.Description()
+	if !strings.Contains(desc, "拆分") || !strings.Contains(desc, "patch") {
+		t.Fatalf("expected apply_patch description to guide patch splitting, got %q", desc)
+	}
+
+	params := tool.Parameters()
+	props, ok := params["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected properties in schema, got %#v", params)
+	}
+	patchSchema, ok := props["patch"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected patch schema in properties, got %#v", props)
+	}
+	patchDesc, _ := patchSchema["description"].(string)
+	if !strings.Contains(patchDesc, "拆分") || !strings.Contains(patchDesc, "截断") {
+		t.Fatalf("expected patch description to guide patch splitting, got %q", patchDesc)
+	}
+}
+
 func requireWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

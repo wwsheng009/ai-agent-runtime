@@ -32,21 +32,21 @@ func NewMultieditTool() *MultieditTool {
 		"properties": map[string]interface{}{
 			"file_path": map[string]interface{}{
 				"type":        "string",
-				"description": "要编辑的文件绝对路径",
+				"description": "要编辑的文件绝对路径。若需要修改多个文件，请拆分为多次 multiedit 调用，每次只聚焦一个文件。",
 			},
 			"edits": map[string]interface{}{
 				"type":        "array",
-				"description": "编辑操作数组，每个操作包含 old_string（要替换的文本）、new_string（替换后的文本）、replace_all（是否替换所有匹配，默认 false）",
+				"description": "编辑操作数组，每个操作包含 old_string（要替换的文本）、new_string（替换后的文本）、replace_all（是否替换所有匹配，默认 false）。若需要处理大段内容，请拆分为多个更小的 edits 或改用多个 write/edit 调用，每次只聚焦一组局部替换，避免单次参数过大导致截断。",
 				"items": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"old_string": map[string]interface{}{
 							"type":        "string",
-							"description": "要替换的文本（必须精确匹配，包括空格和缩进）",
+							"description": "要替换的文本（必须精确匹配，包括空格和缩进）。若片段较长，请拆分为更小的定位块，每次只聚焦一个替换目标。",
 						},
 						"new_string": map[string]interface{}{
 							"type":        "string",
-							"description": "替换后的文本",
+							"description": "替换后的文本。若新内容较长，请拆分为多个更小的 edits/write 调用，按块逐步替换或重建。",
 						},
 						"replace_all": map[string]interface{}{
 							"type":        "boolean",
@@ -63,7 +63,7 @@ func NewMultieditTool() *MultieditTool {
 	return &MultieditTool{
 		BaseTool: toolkit.NewBaseTool(
 			"multiedit",
-			"在单个文件中执行多次文本替换操作。按顺序应用每个编辑，后续编辑基于前面编辑的结果。",
+			"在单个文件中执行多次文本替换操作。按顺序应用每个编辑，后续编辑基于前面编辑的结果。若需要一次性处理很长的内容或多个独立目标，请先拆分为多个更小的 multiedit/write/edit 调用，每次只聚焦一个文件和一组局部编辑，避免单次参数过大导致截断。",
 			"1.0.0",
 			parameters,
 			true,
@@ -73,6 +73,10 @@ func NewMultieditTool() *MultieditTool {
 
 // Execute 实现 Tool 接口
 func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	if result, truncated := truncatedToolArgsResult(params); truncated {
+		return result, nil
+	}
+
 	// 解析文件路径
 	filePath, ok := params["file_path"].(string)
 	if !ok || filePath == "" {
@@ -95,6 +99,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 
 	// 解析每个编辑操作
 	edits := make([]EditOperation, 0, len(editsRaw))
+	segments := make([]inlineMutationSegment, 0, len(editsRaw)*2)
 	for i, editRaw := range editsRaw {
 		editMap, ok := editRaw.(map[string]interface{})
 		if !ok {
@@ -124,11 +129,23 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 			replaceAll = ra
 		}
 
+		segments = append(segments,
+			inlineMutationSegment{Name: fmt.Sprintf("edits[%d].old_string", i), Value: oldStr},
+			inlineMutationSegment{Name: fmt.Sprintf("edits[%d].new_string", i), Value: newStr},
+		)
+
 		edits = append(edits, EditOperation{
 			OldString:  oldStr,
 			NewString:  newStr,
 			ReplaceAll: replaceAll,
 		})
+	}
+	if err := validateInlineFileMutationPayload("multiedit", segments...); err != nil {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
+		}, nil
 	}
 	resolvedPath := m.resolvePath(filePath)
 

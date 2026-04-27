@@ -24,11 +24,11 @@ func NewWriteTool() *WriteTool {
 		"properties": map[string]interface{}{
 			"file_path": map[string]interface{}{
 				"type":        "string",
-				"description": "要写入的文件路径",
+				"description": "要写入的文件路径。若需要写入多个文件，请拆分为多次 write 调用，每次只聚焦一个文件。",
 			},
 			"content": map[string]interface{}{
 				"type":        "string",
-				"description": "文件内容",
+				"description": "文件内容。若内容较长，请拆分为多个更小的写入块，按章节或按块逐步写入，避免一次性生成超长参数导致工具调用被截断。",
 			},
 		},
 		"required": []string{"file_path", "content"},
@@ -37,7 +37,7 @@ func NewWriteTool() *WriteTool {
 	return &WriteTool{
 		BaseTool: toolkit.NewBaseTool(
 			"write",
-			"创建或覆盖文件内容",
+			"创建或覆盖单个文件内容；适合写入完整文件或较小分块。若需要写入多个文件或较长内容，请拆分为多个更小的 write/edit 调用，每次只聚焦一个文件和一个写入目标，按章节或按块逐步写入，避免单次工具参数过大导致截断。",
 			"1.0.0",
 			parameters,
 			true,
@@ -53,6 +53,10 @@ type WriteParams struct {
 // Execute 实现 Tool 接口
 func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	var p WriteParams
+
+	if result, truncated := truncatedToolArgsResult(params); truncated {
+		return result, nil
+	}
 
 	// 解析参数
 	filePath, ok := params["file_path"].(string)
@@ -74,6 +78,16 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 		}, nil
 	}
 	p.Content = content
+	if err := validateInlineFileMutationPayload("write", inlineMutationSegment{
+		Name:  "content",
+		Value: p.Content,
+	}); err != nil {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
+		}, nil
+	}
 	resolvedPath := w.resolvePath(p.FilePath)
 
 	if err := w.checkPath(runtimeexecutor.OpWrite, resolvedPath); err != nil {

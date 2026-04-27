@@ -13,6 +13,15 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestGrepTool(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "grep-test-*")
 	if err != nil {
@@ -200,6 +209,490 @@ func TestGrepTool_FallsBackWhenRipgrepUnavailable(t *testing.T) {
 	}
 }
 
+func TestGrepTool_NoIgnoreAndUnrestrictedBuiltin(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".hidden.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write hidden file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".git", "tracked.go"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write hidden file: %v", err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	baseResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "needle",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(baseResult.Content, ".hidden.txt") || strings.Contains(baseResult.Content, ".git/tracked.go") {
+		t.Fatalf("expected baseline search to skip hidden paths, got %q", baseResult.Content)
+	}
+
+	noIgnoreResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":   "needle",
+		"path":      tmpDir,
+		"no_ignore": true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(noIgnoreResult.Content, ".hidden.txt") || strings.Contains(noIgnoreResult.Content, ".git/tracked.go") {
+		t.Fatalf("expected no_ignore to keep hidden filtering, got %q", noIgnoreResult.Content)
+	}
+	if noIgnoreResult.Metadata["no_ignore"] != true {
+		t.Fatalf("expected no_ignore metadata, got %#v", noIgnoreResult.Metadata["no_ignore"])
+	}
+	if noIgnoreResult.Metadata["unrestricted_level"] != 1 {
+		t.Fatalf("expected unrestricted_level=1 for no_ignore, got %#v", noIgnoreResult.Metadata["unrestricted_level"])
+	}
+
+	unrestrictedHiddenResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"rg_args": []interface{}{"-uu", "needle", tmpDir},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(unrestrictedHiddenResult.Content, ".hidden.txt:1: needle") || !strings.Contains(unrestrictedHiddenResult.Content, ".git/tracked.go:1: needle") {
+		t.Fatalf("expected -uu to search hidden paths, got %q", unrestrictedHiddenResult.Content)
+	}
+	if unrestrictedHiddenResult.Metadata["unrestricted_level"] != 2 {
+		t.Fatalf("expected unrestricted_level=2 for -uu, got %#v", unrestrictedHiddenResult.Metadata["unrestricted_level"])
+	}
+
+	unrestrictedResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"rg_args": []interface{}{"-uuu", "needle", tmpDir},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(unrestrictedResult.Content, ".hidden.txt:1: needle") || !strings.Contains(unrestrictedResult.Content, ".git/tracked.go:1: needle") {
+		t.Fatalf("expected -uuu to search .git directory, got %q", unrestrictedResult.Content)
+	}
+	if unrestrictedResult.Metadata["no_ignore"] != true {
+		t.Fatalf("expected unrestricted metadata to imply no_ignore, got %#v", unrestrictedResult.Metadata["no_ignore"])
+	}
+	if unrestrictedResult.Metadata["unrestricted_level"] != 3 {
+		t.Fatalf("expected unrestricted_level=3 for -uuu, got %#v", unrestrictedResult.Metadata["unrestricted_level"])
+	}
+}
+
+func TestGrepTool_HiddenAndNoHiddenBuiltin(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "visible.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write visible file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".hidden.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write hidden file: %v", err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	baseResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "needle",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(baseResult.Content, ".hidden.txt") {
+		t.Fatalf("expected default search to skip hidden file, got %q", baseResult.Content)
+	}
+
+	hiddenResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "needle",
+		"path":    tmpDir,
+		"hidden":  true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(hiddenResult.Content, ".hidden.txt:1: needle") {
+		t.Fatalf("expected hidden=true to include hidden file, got %q", hiddenResult.Content)
+	}
+
+	noHiddenResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":   "needle",
+		"path":      tmpDir,
+		"hidden":    true,
+		"no_hidden": true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(noHiddenResult.Content, ".hidden.txt") {
+		t.Fatalf("expected no_hidden to win over hidden=true, got %q", noHiddenResult.Content)
+	}
+
+	unrestrictedNoHiddenResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":            "needle",
+		"path":               tmpDir,
+		"unrestricted_level": 2,
+		"no_hidden":          true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(unrestrictedNoHiddenResult.Content, ".hidden.txt") {
+		t.Fatalf("expected no_hidden to win over unrestricted_level=2, got %q", unrestrictedNoHiddenResult.Content)
+	}
+}
+
+func TestGrepTool_NodeModulesAreNotSpecialHiddenBuiltin(t *testing.T) {
+	tmpDir := t.TempDir()
+	nodeModules := filepath.Join(tmpDir, "node_modules", "pkg")
+	if err := os.MkdirAll(nodeModules, 0o755); err != nil {
+		t.Fatalf("mkdir node_modules: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nodeModules, "index.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write node_modules file: %v", err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "needle",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result.Content, "node_modules/pkg/index.txt:1: needle") {
+		t.Fatalf("expected node_modules to be searchable by default, got %q", result.Content)
+	}
+}
+
+func TestGrepTool_NoConfigAndOneFileSystemCompatibility(t *testing.T) {
+	tool := NewGrepTool()
+	var gotArgs []string
+
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":         "needle",
+		"path":            t.TempDir(),
+		"no_config":       true,
+		"one_file_system": true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	argsStr := strings.Join(gotArgs, " ")
+	if !strings.Contains(argsStr, "--no-config") {
+		t.Fatalf("expected --no-config in rg args, got %v", gotArgs)
+	}
+	if !strings.Contains(argsStr, "--one-file-system") {
+		t.Fatalf("expected --one-file-system in rg args, got %v", gotArgs)
+	}
+	if result.Metadata["no_config"] != true {
+		t.Fatalf("expected no_config metadata, got %#v", result.Metadata["no_config"])
+	}
+	if result.Metadata["one_file_system"] != true {
+		t.Fatalf("expected one_file_system metadata, got %#v", result.Metadata["one_file_system"])
+	}
+}
+
+func TestGrepTool_OneFileSystemBuiltinSkipsCrossDeviceDirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("mkdir sub dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "root.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write root file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "sub.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write sub file: %v", err)
+	}
+
+	origFSID := fileSystemIdentityFn
+	defer func() { fileSystemIdentityFn = origFSID }()
+	subPrefix := filepath.ToSlash(subDir)
+	fileSystemIdentityFn = func(path string) (string, error) {
+		cleaned := filepath.ToSlash(filepath.Clean(path))
+		if strings.HasPrefix(cleaned, subPrefix) {
+			return "other-fs", nil
+		}
+		return "root-fs", nil
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	baseResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "needle",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(baseResult.Content, "sub/sub.txt:1: needle") {
+		t.Fatalf("expected baseline search to include subdir file, got %q", baseResult.Content)
+	}
+
+	oneFSResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":         "needle",
+		"path":            tmpDir,
+		"one_file_system": true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(oneFSResult.Content, "sub/sub.txt") {
+		t.Fatalf("expected one_file_system to skip cross-device subdir, got %q", oneFSResult.Content)
+	}
+	if !strings.Contains(oneFSResult.Content, "root.txt:1: needle") {
+		t.Fatalf("expected root file to remain searchable, got %q", oneFSResult.Content)
+	}
+
+	directFile := filepath.Join(tmpDir, "external.txt")
+	if err := os.WriteFile(directFile, []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write direct file: %v", err)
+	}
+	fileSystemIdentityFn = func(path string) (string, error) {
+		cleaned := filepath.ToSlash(filepath.Clean(path))
+		switch cleaned {
+		case filepath.ToSlash(directFile):
+			return "other-fs", nil
+		default:
+			return "root-fs", nil
+		}
+	}
+	directResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":         "needle",
+		"path":            directFile,
+		"one_file_system": true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(directResult.Content, "external.txt:1: needle") {
+		t.Fatalf("expected explicit file path to remain searchable across filesystem boundary, got %q", directResult.Content)
+	}
+
+	linkFile := filepath.Join(tmpDir, "link.txt")
+	if err := os.Symlink(directFile, linkFile); err == nil {
+		fileSystemIdentityFn = func(path string) (string, error) {
+			cleaned := filepath.ToSlash(filepath.Clean(path))
+			switch cleaned {
+			case filepath.ToSlash(linkFile):
+				return "other-fs", nil
+			default:
+				return "root-fs", nil
+			}
+		}
+		linkResult, err := tool.Execute(context.Background(), map[string]interface{}{
+			"pattern":         "needle",
+			"path":            linkFile,
+			"one_file_system": true,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(linkResult.Content, "link.txt:1: needle") {
+			t.Fatalf("expected explicit symlink path to remain searchable across filesystem boundary, got %q", linkResult.Content)
+		}
+	} else {
+		t.Logf("skipping symlink boundary check: %v", err)
+	}
+}
+
+func TestGrepTool_BuiltinIgnoreFileAppliesPatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "keep.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write keep file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "skip.log"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write skip file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".rgignore"), []byte("*.log\n"), 0o644); err != nil {
+		t.Fatalf("write ignore file: %v", err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":     "needle",
+		"path":        tmpDir,
+		"ignore_file": ".rgignore",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	if !strings.Contains(result.Content, "keep.txt:1: needle") {
+		t.Fatalf("expected keep.txt to match, got %q", result.Content)
+	}
+	if strings.Contains(result.Content, "skip.log") {
+		t.Fatalf("expected skip.log to be ignored by ignore_file, got %q", result.Content)
+	}
+	if got, ok := result.Metadata["ignore_files"].([]string); !ok || len(got) != 1 || got[0] != ".rgignore" {
+		t.Fatalf("expected ignore_files metadata, got %#v", result.Metadata["ignore_files"])
+	}
+}
+
+func TestGrepTool_IgnoreHierarchyFlagsBuiltin(t *testing.T) {
+	outerDir := t.TempDir()
+	rootDir := filepath.Join(outerDir, "project")
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		t.Fatalf("mkdir root dir: %v", err)
+	}
+	subDir := filepath.Join(rootDir, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("mkdir sub dir: %v", err)
+	}
+
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("USERPROFILE", tempHome)
+	if err := os.MkdirAll(filepath.Join(tempHome, ".config", "git"), 0o755); err != nil {
+		t.Fatalf("mkdir global ignore dir: %v", err)
+	}
+
+	files := map[string]string{
+		filepath.Join(rootDir, "keep.txt"):   "needle\n",
+		filepath.Join(rootDir, "dot.txt"):    "needle\n",
+		filepath.Join(rootDir, "vcs.txt"):    "needle\n",
+		filepath.Join(rootDir, "global.txt"): "needle\n",
+		filepath.Join(rootDir, "parent.txt"): "needle\n",
+		filepath.Join(subDir, "nested.txt"):  "needle\n",
+	}
+	for filePath, content := range files {
+		if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", filePath, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(outerDir, ".rgignore"), []byte("parent.txt\n"), 0o644); err != nil {
+		t.Fatalf("write parent ignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootDir, ".ignore"), []byte("dot.txt\n"), 0o644); err != nil {
+		t.Fatalf("write dot ignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootDir, ".gitignore"), []byte("vcs.txt\n"), 0o644); err != nil {
+		t.Fatalf("write vcs ignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, ".gitignore"), []byte("nested.txt\n"), 0o644); err != nil {
+		t.Fatalf("write nested vcs ignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempHome, ".config", "git", "ignore"), []byte("global.txt\n"), 0o644); err != nil {
+		t.Fatalf("write global ignore: %v", err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	baseResult, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "needle",
+		"path":    rootDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"keep.txt:1: needle"} {
+		if !strings.Contains(baseResult.Content, want) {
+			t.Fatalf("expected base search to keep %q, got %q", want, baseResult.Content)
+		}
+	}
+	for _, ignored := range []string{"parent.txt", "dot.txt", "vcs.txt", "global.txt", "sub/nested.txt"} {
+		if strings.Contains(baseResult.Content, ignored) {
+			t.Fatalf("expected %q to be ignored by default, got %q", ignored, baseResult.Content)
+		}
+	}
+
+	tests := []struct {
+		name      string
+		params    map[string]interface{}
+		wantMatch string
+	}{
+		{name: "parent", params: map[string]interface{}{"no_ignore_parent": true}, wantMatch: "parent.txt:1: needle"},
+		{name: "dot", params: map[string]interface{}{"no_ignore_dot": true}, wantMatch: "dot.txt:1: needle"},
+		{name: "vcs", params: map[string]interface{}{"no_ignore_vcs": true}, wantMatch: "vcs.txt:1: needle"},
+		{name: "nested vcs", params: map[string]interface{}{"no_ignore_vcs": true}, wantMatch: "sub/nested.txt:1: needle"},
+		{name: "global", params: map[string]interface{}{"no_ignore_global": true}, wantMatch: "global.txt:1: needle"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := map[string]interface{}{
+				"pattern": "needle",
+				"path":    rootDir,
+			}
+			for k, v := range tt.params {
+				params[k] = v
+			}
+			result, err := tool.Execute(context.Background(), params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !strings.Contains(result.Content, tt.wantMatch) {
+				t.Fatalf("expected %s to be searchable, got %q", tt.wantMatch, result.Content)
+			}
+		})
+	}
+}
+
+func TestGrepTool_NoMessagesSuppressesMissingPatternFileError(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "keep.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write keep file: %v", err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":      "needle",
+		"path":         tmpDir,
+		"pattern_file": "missing-patterns.txt",
+		"no_messages":  true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success with no_messages, got error %v", result.Error)
+	}
+	if !strings.Contains(result.Content, "keep.txt:1: needle") {
+		t.Fatalf("expected search to continue despite missing pattern_file, got %q", result.Content)
+	}
+	if result.Metadata["no_messages"] != true {
+		t.Fatalf("expected no_messages metadata, got %#v", result.Metadata["no_messages"])
+	}
+}
+
 func TestGrepTool_Interface(t *testing.T) {
 	tool := NewGrepTool()
 
@@ -354,6 +847,37 @@ func TestGrepTool_ContextLines(t *testing.T) {
 	// Should mark the match line
 	if !strings.Contains(result.Content, ">") {
 		t.Fatalf("expected match marker '>' in context output, got %q", result.Content)
+	}
+}
+
+func TestGrepTool_ContextSeparatorBuiltin(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("one\nTARGET\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("two\nTARGET\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":           "TARGET",
+		"path":              tmpDir,
+		"context":           1,
+		"context_separator": "~~~",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	if !strings.Contains(result.Content, "~~~") {
+		t.Fatalf("expected custom context separator in output, got %q", result.Content)
 	}
 }
 
@@ -626,6 +1150,39 @@ func TestGrepTool_RgArgsContextAndWord(t *testing.T) {
 	}
 }
 
+func TestGrepTool_RgArgsContextSeparatorTranslateToRipgrep(t *testing.T) {
+	tool := NewGrepTool()
+	var gotArgs []string
+
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("main.go:1: foo\n"), nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "foo",
+		"path":    t.TempDir(),
+		"context": 1,
+		"rg_args": []interface{}{"--context-separator", "~~~"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	argsStr := strings.Join(gotArgs, " ")
+	if !strings.Contains(argsStr, "--context-separator ~~~") {
+		t.Fatalf("expected context separator to translate to rg args, got %v", gotArgs)
+	}
+	if result.Metadata["context_separator"] != "~~~" {
+		t.Fatalf("expected context_separator metadata, got %#v", result.Metadata["context_separator"])
+	}
+}
+
 func TestGrepTool_RgModeFiles(t *testing.T) {
 	tool := NewGrepTool()
 	var gotArgs []string
@@ -795,6 +1352,15 @@ func TestGrepTool_DescriptionMentionsRgArgsCompatibility(t *testing.T) {
 	if !strings.Contains(desc, "pattern_file/pattern_files≈-f/--file") {
 		t.Fatalf("expected description to mention pattern_file compatibility, got %q", desc)
 	}
+	if !strings.Contains(desc, "ignore_file≈--ignore-file") {
+		t.Fatalf("expected description to mention ignore_file compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "ignore_file_case_insensitive≈--ignore-file-case-insensitive") {
+		t.Fatalf("expected description to mention ignore_file_case_insensitive compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "no_ignore_files≈--no-ignore-files") {
+		t.Fatalf("expected description to mention no_ignore_files compatibility, got %q", desc)
+	}
 	if !strings.Contains(desc, "pcre2≈-P/--pcre2") {
 		t.Fatalf("expected description to mention pcre2 compatibility, got %q", desc)
 	}
@@ -822,6 +1388,42 @@ func TestGrepTool_DescriptionMentionsRgArgsCompatibility(t *testing.T) {
 	if !strings.Contains(desc, "trim≈--trim") {
 		t.Fatalf("expected description to mention trim compatibility, got %q", desc)
 	}
+	if !strings.Contains(desc, "pretty≈--pretty") {
+		t.Fatalf("expected description to mention pretty compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "line_buffered≈--line-buffered") {
+		t.Fatalf("expected description to mention line_buffered compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "block_buffered≈--block-buffered") {
+		t.Fatalf("expected description to mention block_buffered compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "null/null_data≈--null/--null-data") {
+		t.Fatalf("expected description to mention null/null_data compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "no_ignore_parent/vcs/global/dot≈--no-ignore-parent/--no-ignore-vcs/--no-ignore-global/--no-ignore-dot") {
+		t.Fatalf("expected description to mention no_ignore_* compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "-u/-uu/-uuu/--unrestricted") {
+		t.Fatalf("expected description to mention unrestricted compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "no_config≈--no-config") {
+		t.Fatalf("expected description to mention no_config compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "one_file_system≈--one-file-system") {
+		t.Fatalf("expected description to mention one_file_system compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "no_messages≈--no-messages") {
+		t.Fatalf("expected description to mention no_messages compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "field_context_separator≈--field-context-separator") {
+		t.Fatalf("expected description to mention field_context_separator compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "path_separator≈--path-separator") {
+		t.Fatalf("expected description to mention path_separator compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "context_separator≈--context-separator") {
+		t.Fatalf("expected description to mention context_separator compatibility, got %q", desc)
+	}
 	if !strings.Contains(desc, "max_columns≈-M/--max-columns") {
 		t.Fatalf("expected description to mention max_columns compatibility, got %q", desc)
 	}
@@ -845,6 +1447,9 @@ func TestGrepTool_DescriptionMentionsRgArgsCompatibility(t *testing.T) {
 	}
 	if !strings.Contains(desc, "sort_files≈--sort-files") {
 		t.Fatalf("expected description to mention sort-files compatibility, got %q", desc)
+	}
+	if !strings.Contains(desc, "type_add/type_clear≈--type-add/--type-clear") {
+		t.Fatalf("expected description to mention type_add/type_clear compatibility, got %q", desc)
 	}
 	if !strings.Contains(desc, "-e") {
 		t.Fatalf("expected description to mention repeated -e pattern compatibility, got %q", desc)
@@ -878,6 +1483,37 @@ func TestGrepTool_DescriptionMentionsRgArgsCompatibility(t *testing.T) {
 	}
 	if !strings.Contains(desc, "rg-only") {
 		t.Fatalf("expected description to mention rg-only passthrough behavior, got %q", desc)
+	}
+}
+
+func TestGrepTool_ParametersGuideSingleTargetFocus(t *testing.T) {
+	tool := NewGrepTool()
+	params := tool.Parameters()
+
+	props, ok := params["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected properties in schema, got %#v", params)
+	}
+
+	patternSchema, ok := props["pattern"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected pattern schema in properties, got %#v", props)
+	}
+	patternDesc, _ := patternSchema["description"].(string)
+	if !strings.Contains(patternDesc, "拆分") || !strings.Contains(patternDesc, "每次只聚焦一个目标") {
+		t.Fatalf("expected pattern description to guide single-target focus, got %q", patternDesc)
+	}
+
+	rgArgsSchema, ok := props["rg_args"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected rg_args schema in properties, got %#v", props)
+	}
+	rgArgsDesc, _ := rgArgsSchema["description"].(string)
+	if !strings.Contains(rgArgsDesc, "拆分") || !strings.Contains(rgArgsDesc, "每次聚焦一个目标") {
+		t.Fatalf("expected rg_args description to guide single-target focus, got %q", rgArgsDesc)
+	}
+	if !strings.Contains(rgArgsDesc, "结构化参数优先于 rg_args") {
+		t.Fatalf("expected rg_args description to mention structured priority, got %q", rgArgsDesc)
 	}
 }
 
@@ -1881,6 +2517,100 @@ func TestGrepTool_RgOnlyArgsTranslateToRipgrep(t *testing.T) {
 	}
 }
 
+func TestGrepTool_RgArgsUnrestrictedDropsDefaultIgnoreGlobs(t *testing.T) {
+	tool := NewGrepTool()
+	var gotArgs []string
+
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"rg_args": []interface{}{"-uuu", "needle", t.TempDir()},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	argsStr := strings.Join(gotArgs, " ")
+	if strings.Contains(argsStr, "--glob !.git/**") || strings.Contains(argsStr, "--glob !node_modules/**") {
+		t.Fatalf("expected unrestricted search to avoid project-specific ignore globs, got %v", gotArgs)
+	}
+	if result.Metadata["unrestricted_level"] != 3 {
+		t.Fatalf("expected unrestricted_level=3, got %#v", result.Metadata["unrestricted_level"])
+	}
+	if result.Metadata["no_ignore"] != true {
+		t.Fatalf("expected no_ignore metadata for unrestricted search, got %#v", result.Metadata["no_ignore"])
+	}
+}
+
+func TestGrepTool_RgArgsHiddenAndUnrestrictedTranslateToRipgrep(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	check := func(name string, params map[string]interface{}, wantHidden bool, wantNoHidden bool) {
+		t.Helper()
+		gotArgs = nil
+		result, err := tool.Execute(context.Background(), params)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+		if !result.Success {
+			t.Fatalf("%s: expected success, got %v", name, result.Error)
+		}
+		argsStr := strings.Join(gotArgs, " ")
+		if wantHidden && !strings.Contains(argsStr, "--hidden") {
+			t.Fatalf("%s: expected --hidden in rg args, got %v", name, gotArgs)
+		}
+		if !wantHidden && strings.Contains(argsStr, "--hidden") {
+			t.Fatalf("%s: expected no --hidden in rg args, got %v", name, gotArgs)
+		}
+		if wantNoHidden && !strings.Contains(argsStr, "--no-hidden") {
+			t.Fatalf("%s: expected --no-hidden in rg args, got %v", name, gotArgs)
+		}
+		if !wantNoHidden && strings.Contains(argsStr, "--no-hidden") {
+			t.Fatalf("%s: expected no --no-hidden in rg args, got %v", name, gotArgs)
+		}
+	}
+
+	check("unrestricted_level=1", map[string]interface{}{
+		"rg_args": []interface{}{"-u", "needle", tmpDir},
+	}, false, false)
+	check("unrestricted_level=2", map[string]interface{}{
+		"rg_args": []interface{}{"-uu", "needle", tmpDir},
+	}, true, false)
+	check("unrestricted_level=3", map[string]interface{}{
+		"rg_args": []interface{}{"-uuu", "needle", tmpDir},
+	}, true, false)
+	check("hidden", map[string]interface{}{
+		"rg_args": []interface{}{"--hidden", "needle", tmpDir},
+	}, true, false)
+	check("no_hidden", map[string]interface{}{
+		"rg_args": []interface{}{"--no-hidden", "needle", tmpDir},
+	}, false, true)
+	check("hidden_then_no_hidden", map[string]interface{}{
+		"rg_args": []interface{}{"--hidden", "--no-hidden", "needle", tmpDir},
+	}, false, true)
+	check("no_hidden_then_hidden", map[string]interface{}{
+		"rg_args": []interface{}{"--no-hidden", "--hidden", "needle", tmpDir},
+	}, false, true)
+}
+
 func TestGrepTool_RgOnlyArgsRequireRipgrep(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmpDir, "sample.txt"), []byte("foo\n"), 0o644); err != nil {
@@ -2159,6 +2889,9 @@ func TestGrepTool_RgStatsNoMatchesStillReturnsSummary(t *testing.T) {
 	if !strings.Contains(result.Content, "未找到匹配的内容") || !strings.Contains(result.Content, "matches: 0") {
 		t.Fatalf("expected no-match output plus stats summary, got %q", result.Content)
 	}
+	if !strings.Contains(result.Content, "bytes printed:") {
+		t.Fatalf("expected rg-style bytes printed line in stats summary, got %q", result.Content)
+	}
 }
 
 func TestGrepTool_JSONRequiresRipgrepWhenUnavailable(t *testing.T) {
@@ -2236,6 +2969,22 @@ func TestGrepTool_JSONPassthroughPreservesRawSummaryAndMetadata(t *testing.T) {
 	}
 	if stats["matches"] != 2 || stats["matched_lines"] != 1 || stats["files_searched"] != 1 || stats["files_with_matches"] != 1 {
 		t.Fatalf("unexpected json stats metadata: %#v", stats)
+	}
+	switch got := stats["bytes_printed"].(type) {
+	case int:
+		if got != 0 {
+			t.Fatalf("expected bytes_printed in json stats metadata, got %#v", stats["bytes_printed"])
+		}
+	case int64:
+		if got != 0 {
+			t.Fatalf("expected bytes_printed in json stats metadata, got %#v", stats["bytes_printed"])
+		}
+	case float64:
+		if got != 0 {
+			t.Fatalf("expected bytes_printed in json stats metadata, got %#v", stats["bytes_printed"])
+		}
+	default:
+		t.Fatalf("unexpected bytes_printed type in json stats metadata: %#v", stats["bytes_printed"])
 	}
 }
 
@@ -2318,7 +3067,100 @@ func TestGrepTool_JSONMultiPathRewritesRelativeJSONPaths(t *testing.T) {
 	}
 }
 
-func TestGrepTool_StructuredRgOnlyFlagsTranslateToRipgrep(t *testing.T) {
+func TestGrepTool_JSONEventFlowRewritesBeginContextEndPaths(t *testing.T) {
+	rootDir := t.TempDir()
+	leftDir := filepath.Join(rootDir, "left")
+	rightDir := filepath.Join(rootDir, "right")
+	if err := os.MkdirAll(leftDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rightDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		switch workingDir {
+		case leftDir:
+			return []byte("{\"type\":\"begin\",\"data\":{\"path\":{\"text\":\"a.txt\"}}}\n{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"a.txt\"},\"lines\":{\"text\":\"ctx\\n\"},\"line_number\":1}}\n{\"type\":\"end\",\"data\":{\"path\":{\"text\":\"a.txt\"}}}\n{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"human\":\"0.001000s\",\"nanos\":1000000,\"secs\":0},\"stats\":{\"bytes_printed\":0,\"bytes_searched\":4,\"elapsed\":{\"human\":\"0.000100s\",\"nanos\":100000,\"secs\":0},\"matched_lines\":1,\"matches\":1,\"searches\":1,\"searches_with_match\":1}}}\n"), nil
+		case rightDir:
+			return []byte("{\"type\":\"begin\",\"data\":{\"path\":{\"text\":\"b.txt\"}}}\n{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"b.txt\"},\"lines\":{\"text\":\"foo\\n\"},\"line_number\":1,\"absolute_offset\":0,\"submatches\":[{\"match\":{\"text\":\"foo\"},\"start\":0,\"end\":3}]}}\n{\"type\":\"end\",\"data\":{\"path\":{\"text\":\"b.txt\"}}}\n{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"human\":\"0.001000s\",\"nanos\":1000000,\"secs\":0},\"stats\":{\"bytes_printed\":120,\"bytes_searched\":4,\"elapsed\":{\"human\":\"0.000100s\",\"nanos\":100000,\"secs\":0},\"matched_lines\":1,\"matches\":1,\"searches\":1,\"searches_with_match\":1}}}\n"), nil
+		default:
+			t.Fatalf("unexpected working dir %q", workingDir)
+			return nil, nil
+		}
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "foo",
+		"paths":   []interface{}{leftDir, rightDir},
+		"json":    true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+
+	lines := strings.Split(strings.TrimSpace(result.Content), "\n")
+	if len(lines) < 8 {
+		t.Fatalf("expected full json event stream, got %q", result.Content)
+	}
+
+	var first map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("expected first line to remain valid json, got %q: %v", lines[0], err)
+	}
+	firstData, _ := first["data"].(map[string]interface{})
+	firstPath, _ := firstData["path"].(map[string]interface{})
+	if got := firstPath["text"]; got != filepath.ToSlash(filepath.Join(leftDir, "a.txt")) {
+		t.Fatalf("expected begin path to be rewritten, got %#v", got)
+	}
+
+	var second map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
+		t.Fatalf("expected second line to remain valid json, got %q: %v", lines[1], err)
+	}
+	secondData, _ := second["data"].(map[string]interface{})
+	secondPath, _ := secondData["path"].(map[string]interface{})
+	if got := secondPath["text"]; got != filepath.ToSlash(filepath.Join(leftDir, "a.txt")) {
+		t.Fatalf("expected context path to be rewritten, got %#v", got)
+	}
+
+	var fifth map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[4]), &fifth); err != nil {
+		t.Fatalf("expected fifth line to remain valid json, got %q: %v", lines[4], err)
+	}
+	fifthData, _ := fifth["data"].(map[string]interface{})
+	fifthPath, _ := fifthData["path"].(map[string]interface{})
+	if got := fifthPath["text"]; got != filepath.ToSlash(filepath.Join(rightDir, "b.txt")) {
+		t.Fatalf("expected right-side begin path to be rewritten, got %#v", got)
+	}
+
+	var sixth map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[5]), &sixth); err != nil {
+		t.Fatalf("expected sixth line to remain valid json, got %q: %v", lines[5], err)
+	}
+	sixthData, _ := sixth["data"].(map[string]interface{})
+	sixthPath, _ := sixthData["path"].(map[string]interface{})
+	if got := sixthPath["text"]; got != filepath.ToSlash(filepath.Join(rightDir, "b.txt")) {
+		t.Fatalf("expected match path to be rewritten, got %#v", got)
+	}
+
+	stats, ok := result.Metadata["stats"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected aggregated stats metadata, got %#v", result.Metadata["stats"])
+	}
+	if stats["matches"] != 2 || stats["matched_lines"] != 2 || stats["files_searched"] != 2 {
+		t.Fatalf("unexpected aggregated json stats metadata: %#v", stats)
+	}
+}
+
+func TestGrepTool_StructuredRgOnlyFlagMatrixTranslateToRipgrep(t *testing.T) {
 	tool := NewGrepTool()
 	var gotArgs []string
 
@@ -2342,6 +3184,8 @@ func TestGrepTool_StructuredRgOnlyFlagsTranslateToRipgrep(t *testing.T) {
 		"passthru":          true,
 		"crlf":              true,
 		"auto_hybrid_regex": true,
+		"type_add":          []interface{}{"foo:*.foo"},
+		"type_clear":        "foo",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -2355,11 +3199,864 @@ func TestGrepTool_StructuredRgOnlyFlagsTranslateToRipgrep(t *testing.T) {
 			t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
 		}
 	}
+	for _, want := range []string{"--type-add foo:*.foo", "--type-clear foo"} {
+		if !strings.Contains(argsStr, want) {
+			t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
+		}
+	}
 	if result.Metadata["requires_ripgrep"] != true {
 		t.Fatalf("expected structured rg-only flags to require rg, got %#v", result.Metadata["requires_ripgrep"])
 	}
 	if !strings.Contains(strings.Join(result.Metadata["rg_only_args"].([]string), " "), "--pcre2") {
 		t.Fatalf("expected rg_only_args metadata to record rg-only passthrough args, got %#v", result.Metadata["rg_only_args"])
+	}
+	if got, ok := result.Metadata["type_add"].([]string); !ok || len(got) != 1 || got[0] != "foo:*.foo" {
+		t.Fatalf("expected type_add metadata to capture structured value, got %#v", result.Metadata["type_add"])
+	}
+	if got, ok := result.Metadata["type_clear"].([]string); !ok || len(got) != 1 || got[0] != "foo" {
+		t.Fatalf("expected type_clear metadata to capture structured value, got %#v", result.Metadata["type_clear"])
+	}
+}
+
+func TestGrepTool_RgArgsTypeAddAndClearTranslateToRipgrep(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "sample.foo"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGrepTool()
+	var gotArgs []string
+
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.foo:1:needle\n"), nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"rg_args": []interface{}{"--type-add", "foo:*.foo", "--type-clear", "foo", "needle", tmpDir},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	argsStr := strings.Join(gotArgs, " ")
+	for _, want := range []string{"--type-add foo:*.foo", "--type-clear foo"} {
+		if !strings.Contains(argsStr, want) {
+			t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
+		}
+	}
+	if got, ok := result.Metadata["type_add"].([]string); !ok || len(got) != 1 || got[0] != "foo:*.foo" {
+		t.Fatalf("expected type_add metadata from rg_args, got %#v", result.Metadata["type_add"])
+	}
+	if got, ok := result.Metadata["type_clear"].([]string); !ok || len(got) != 1 || got[0] != "foo" {
+		t.Fatalf("expected type_clear metadata from rg_args, got %#v", result.Metadata["type_clear"])
+	}
+}
+
+func TestGrepTool_IgnoreFileAndNoIgnoreFlagsTranslateToRipgrep(t *testing.T) {
+	tmpDir := t.TempDir()
+	ignoreOne := filepath.Join(tmpDir, ".gitignore")
+	ignoreTwo := filepath.Join(tmpDir, ".rgignore")
+	if err := os.WriteFile(ignoreOne, []byte("ignored.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ignoreTwo, []byte("*.tmp\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGrepTool()
+	var gotArgs []string
+
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":                      "needle",
+		"path":                         tmpDir,
+		"ignore_file":                  []interface{}{ignoreOne, ignoreTwo},
+		"ignore_file_case_insensitive": true,
+		"no_ignore_files":              true,
+		"no_ignore_parent":             true,
+		"no_ignore_vcs":                true,
+		"no_ignore_global":             true,
+		"no_ignore_dot":                true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	argsStr := strings.Join(gotArgs, " ")
+	for _, want := range []string{
+		"--no-ignore-files",
+		"--no-ignore-parent",
+		"--no-ignore-vcs",
+		"--no-ignore-global",
+		"--no-ignore-dot",
+	} {
+		if !strings.Contains(argsStr, want) {
+			t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
+		}
+	}
+	if strings.Contains(argsStr, "--ignore-file "+ignoreOne) || strings.Contains(argsStr, "--ignore-file "+ignoreTwo) {
+		t.Fatalf("expected explicit ignore_file values to be suppressed by no_ignore_files, got %v", gotArgs)
+	}
+	if got, ok := result.Metadata["ignore_files"].([]string); !ok || len(got) != 2 {
+		t.Fatalf("expected ignore_files metadata, got %#v", result.Metadata["ignore_files"])
+	}
+	if result.Metadata["ignore_file_case_insensitive"] != false {
+		t.Fatalf("expected ignore_file_case_insensitive to be suppressed by no_ignore_files, got %#v", result.Metadata["ignore_file_case_insensitive"])
+	}
+	if result.Metadata["no_ignore_files"] != true || result.Metadata["no_ignore_parent"] != true || result.Metadata["no_ignore_vcs"] != true || result.Metadata["no_ignore_global"] != true || result.Metadata["no_ignore_dot"] != true {
+		t.Fatalf("expected no_ignore_* metadata, got %#v", result.Metadata)
+	}
+}
+
+func TestGrepTool_IgnoreFileCaseInsensitiveStructuredParamsOverrideRgArgs(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	cases := []struct {
+		name     string
+		params   map[string]interface{}
+		wantFlag bool
+	}{
+		{
+			name: "structured false suppresses rg_args true",
+			params: map[string]interface{}{
+				"rg_args":                      []interface{}{"--ignore-file-case-insensitive", "needle", tmpDir},
+				"ignore_file_case_insensitive": false,
+			},
+			wantFlag: false,
+		},
+		{
+			name: "structured true adds flag over rg_args false",
+			params: map[string]interface{}{
+				"rg_args":                      []interface{}{"needle", tmpDir},
+				"ignore_file_case_insensitive": true,
+			},
+			wantFlag: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotArgs = nil
+			result, err := tool.Execute(context.Background(), tc.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got error %v", result.Error)
+			}
+			argsStr := strings.Join(gotArgs, " ")
+			if tc.wantFlag && !strings.Contains(argsStr, "--ignore-file-case-insensitive") {
+				t.Fatalf("expected --ignore-file-case-insensitive in rg args, got %v", gotArgs)
+			}
+			if !tc.wantFlag && strings.Contains(argsStr, "--ignore-file-case-insensitive") {
+				t.Fatalf("expected structured param to suppress --ignore-file-case-insensitive, got %v", gotArgs)
+			}
+		})
+	}
+}
+
+func TestGrepTool_StructuredIgnoreHiddenAndUnrestrictedParamsOverrideRgArgs(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	cases := []struct {
+		name           string
+		params         map[string]interface{}
+		wantContains   []string
+		wantNotContain []string
+	}{
+		{
+			name: "hidden true suppresses rg_args no-hidden",
+			params: map[string]interface{}{
+				"rg_args": []interface{}{"--no-hidden", "needle", tmpDir},
+				"hidden":  true,
+			},
+			wantContains:   []string{"--hidden"},
+			wantNotContain: []string{"--no-hidden"},
+		},
+		{
+			name: "hidden false suppresses rg_args hidden",
+			params: map[string]interface{}{
+				"rg_args": []interface{}{"--hidden", "needle", tmpDir},
+				"hidden":  false,
+			},
+			wantNotContain: []string{"--hidden"},
+		},
+		{
+			name: "no_hidden true suppresses rg_args hidden",
+			params: map[string]interface{}{
+				"rg_args":   []interface{}{"--hidden", "needle", tmpDir},
+				"no_hidden": true,
+			},
+			wantContains:   []string{"--no-hidden"},
+			wantNotContain: []string{"--hidden"},
+		},
+		{
+			name: "no_ignore false suppresses rg_args no-ignore",
+			params: map[string]interface{}{
+				"rg_args":   []interface{}{"-u", "needle", tmpDir},
+				"no_ignore": false,
+			},
+			wantNotContain: []string{"--no-ignore"},
+		},
+		{
+			name: "unrestricted_level zero suppresses rg_args unrestricted flags",
+			params: map[string]interface{}{
+				"rg_args":            []interface{}{"-uu", "needle", tmpDir},
+				"unrestricted_level": 0,
+			},
+			wantNotContain: []string{"--no-ignore", "--hidden", "--no-hidden"},
+		},
+		{
+			name: "ignore scope false suppresses rg_args no-ignore-parent family",
+			params: map[string]interface{}{
+				"rg_args":          []interface{}{"--no-ignore-parent", "--no-ignore-vcs", "--no-ignore-global", "--no-ignore-dot", "needle", tmpDir},
+				"no_ignore_parent": false,
+				"no_ignore_vcs":    false,
+				"no_ignore_global": false,
+				"no_ignore_dot":    false,
+			},
+			wantNotContain: []string{"--no-ignore-parent", "--no-ignore-vcs", "--no-ignore-global", "--no-ignore-dot"},
+		},
+		{
+			name: "no_ignore_files false suppresses rg_args no-ignore-files",
+			params: map[string]interface{}{
+				"rg_args":         []interface{}{"--no-ignore-files", "needle", tmpDir},
+				"no_ignore_files": false,
+				"ignore_file":     "custom.ignore",
+			},
+			wantNotContain: []string{"--no-ignore-files"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotArgs = nil
+			result, err := tool.Execute(context.Background(), tc.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got error %v", result.Error)
+			}
+			argsStr := strings.Join(gotArgs, " ")
+			for _, want := range tc.wantContains {
+				if !strings.Contains(argsStr, want) {
+					t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
+				}
+			}
+			for _, notWant := range tc.wantNotContain {
+				if strings.Contains(argsStr, notWant) {
+					t.Fatalf("expected %q to be filtered from rg args, got %v", notWant, gotArgs)
+				}
+			}
+		})
+	}
+}
+
+func TestGrepTool_StructuredNoIgnoreScopeFlagsTranslateToRipgrep(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	cases := []struct {
+		name      string
+		params    map[string]interface{}
+		wantFlag  string
+		wantCount int
+		metaKey   string
+	}{
+		{
+			name: "no_ignore_parent true emits rg flag once",
+			params: map[string]interface{}{
+				"rg_args":          []interface{}{"--no-ignore-parent"},
+				"no_ignore_parent": true,
+				"pattern":          "needle",
+				"path":             tmpDir,
+			},
+			wantFlag:  "--no-ignore-parent",
+			wantCount: 1,
+			metaKey:   "no_ignore_parent",
+		},
+		{
+			name: "no_ignore_vcs true emits rg flag once",
+			params: map[string]interface{}{
+				"rg_args":       []interface{}{"--no-ignore-vcs"},
+				"no_ignore_vcs": true,
+				"pattern":       "needle",
+				"path":          tmpDir,
+			},
+			wantFlag:  "--no-ignore-vcs",
+			wantCount: 1,
+			metaKey:   "no_ignore_vcs",
+		},
+		{
+			name: "no_ignore_global true emits rg flag once",
+			params: map[string]interface{}{
+				"rg_args":          []interface{}{"--no-ignore-global"},
+				"no_ignore_global": true,
+				"pattern":          "needle",
+				"path":             tmpDir,
+			},
+			wantFlag:  "--no-ignore-global",
+			wantCount: 1,
+			metaKey:   "no_ignore_global",
+		},
+		{
+			name: "no_ignore_dot true emits rg flag once",
+			params: map[string]interface{}{
+				"rg_args":       []interface{}{"--no-ignore-dot"},
+				"no_ignore_dot": true,
+				"pattern":       "needle",
+				"path":          tmpDir,
+			},
+			wantFlag:  "--no-ignore-dot",
+			wantCount: 1,
+			metaKey:   "no_ignore_dot",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotArgs = nil
+			result, err := tool.Execute(context.Background(), tc.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got error %v", result.Error)
+			}
+			argsStr := strings.Join(gotArgs, " ")
+			if strings.Count(argsStr, tc.wantFlag) != tc.wantCount {
+				t.Fatalf("expected %s to appear %d time(s), got %v", tc.wantFlag, tc.wantCount, gotArgs)
+			}
+			if result.Metadata[tc.metaKey] != true {
+				t.Fatalf("expected %s metadata to be true, got %#v", tc.metaKey, result.Metadata[tc.metaKey])
+			}
+		})
+	}
+}
+
+func TestGrepTool_StructuredDisplayAndExecutionFlagsOverrideRgArgs(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":                "needle",
+		"path":                   tmpDir,
+		"rg_args":                []interface{}{"--stats", "--json", "--follow", "--no-config", "--one-file-system", "--no-messages", "--max-columns-preview", "--no-max-columns-preview", "--column", "--trim", "--pretty", "--line-buffered", "--no-line-buffered", "--block-buffered", "--no-block-buffered", "--null", "--null-data", "--glob-case-insensitive", "-F", "-i", "-s", "-S", "-w", "-x", "-v", "-o", "--count-matches", "--max-columns", "20", "--max-depth", "1"},
+		"stats":                  false,
+		"json":                   false,
+		"follow":                 false,
+		"no_config":              false,
+		"one_file_system":        false,
+		"no_messages":            false,
+		"max_columns_preview":    false,
+		"no_max_columns_preview": false,
+		"column":                 false,
+		"trim":                   false,
+		"pretty":                 false,
+		"line_buffered":          false,
+		"no_line_buffered":       false,
+		"block_buffered":         false,
+		"no_block_buffered":      false,
+		"null":                   false,
+		"null_data":              false,
+		"glob_case_insensitive":  false,
+		"literal":                false,
+		"ignore_case":            false,
+		"case_sensitive":         false,
+		"smart_case":             false,
+		"word_regexp":            false,
+		"line_regexp":            false,
+		"invert_match":           false,
+		"only_matching":          false,
+		"count_matches":          false,
+		"max_columns":            0,
+		"max_depth":              0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	hasFlag := func(flag string) bool {
+		for _, arg := range gotArgs {
+			if arg == flag || strings.HasPrefix(arg, flag+"=") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, notWant := range []string{
+		"--stats", "--json", "--follow", "--no-config", "--one-file-system", "--no-messages",
+		"--max-columns-preview", "--no-max-columns-preview", "--column", "--trim", "--pretty",
+		"--line-buffered", "--no-line-buffered", "--block-buffered", "--no-block-buffered",
+		"--null", "--null-data", "--glob-case-insensitive", "-F", "-i", "-s", "-S", "-w", "-x", "-v", "-o", "--count-matches",
+	} {
+		if hasFlag(notWant) {
+			t.Fatalf("expected %q to be filtered from rg args, got %v", notWant, gotArgs)
+		}
+	}
+}
+
+func TestGrepTool_StructuredBufferedAndNullFlagsRecordAndSuppressRgArgs(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	cases := []struct {
+		name           string
+		params         map[string]interface{}
+		wantNotContain []string
+		metaKey        string
+	}{
+		{
+			name: "line_buffered true suppresses rg_args no-line-buffered",
+			params: map[string]interface{}{
+				"rg_args":       []interface{}{"--no-line-buffered"},
+				"line_buffered": true,
+				"pattern":       "needle",
+				"path":          tmpDir,
+			},
+			wantNotContain: []string{"--no-line-buffered"},
+			metaKey:        "line_buffered",
+		},
+		{
+			name: "block_buffered true suppresses rg_args no-block-buffered",
+			params: map[string]interface{}{
+				"rg_args":        []interface{}{"--no-block-buffered"},
+				"block_buffered": true,
+				"pattern":        "needle",
+				"path":           tmpDir,
+			},
+			wantNotContain: []string{"--no-block-buffered"},
+			metaKey:        "block_buffered",
+		},
+		{
+			name: "null true emits rg flag once",
+			params: map[string]interface{}{
+				"rg_args": []interface{}{"--null"},
+				"null":    true,
+				"pattern": "needle",
+				"path":    tmpDir,
+			},
+			metaKey: "null",
+		},
+		{
+			name: "null_data true emits rg flag once",
+			params: map[string]interface{}{
+				"rg_args":   []interface{}{"--null-data"},
+				"null_data": true,
+				"pattern":   "needle",
+				"path":      tmpDir,
+			},
+			metaKey: "null_data",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotArgs = nil
+			result, err := tool.Execute(context.Background(), tc.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got error %v", result.Error)
+			}
+			argsStr := strings.Join(gotArgs, " ")
+			for _, notWant := range tc.wantNotContain {
+				if strings.Contains(argsStr, notWant) {
+					t.Fatalf("expected %q to be filtered, got %v", notWant, gotArgs)
+				}
+			}
+			if result.Metadata[tc.metaKey] != true {
+				t.Fatalf("expected %s metadata to be true, got %#v", tc.metaKey, result.Metadata[tc.metaKey])
+			}
+		})
+	}
+}
+
+func TestGrepTool_StructuredMaxColumnsPreviewFlagsOverrideRgArgs(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	cases := []struct {
+		name           string
+		params         map[string]interface{}
+		wantContains   []string
+		wantNotContain []string
+	}{
+		{
+			name: "max_columns_preview true suppresses rg_args no-max-columns-preview",
+			params: map[string]interface{}{
+				"rg_args":             []interface{}{"--no-max-columns-preview"},
+				"pattern":             "needle",
+				"path":                tmpDir,
+				"max_columns_preview": true,
+			},
+			wantContains:   []string{"--max-columns-preview"},
+			wantNotContain: []string{"--no-max-columns-preview"},
+		},
+		{
+			name: "no_max_columns_preview true suppresses rg_args max-columns-preview",
+			params: map[string]interface{}{
+				"rg_args":                []interface{}{"--max-columns-preview"},
+				"pattern":                "needle",
+				"path":                   tmpDir,
+				"no_max_columns_preview": true,
+			},
+			wantContains:   []string{"--no-max-columns-preview"},
+			wantNotContain: []string{"--max-columns-preview"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotArgs = nil
+			result, err := tool.Execute(context.Background(), tc.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got error %v", result.Error)
+			}
+			argsStr := strings.Join(gotArgs, " ")
+			for _, want := range tc.wantContains {
+				if !strings.Contains(argsStr, want) {
+					t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
+				}
+			}
+			for _, notWant := range tc.wantNotContain {
+				if strings.Contains(argsStr, notWant) {
+					t.Fatalf("expected %q to be filtered from rg args, got %v", notWant, gotArgs)
+				}
+			}
+			if tc.name == "max_columns_preview true suppresses rg_args no-max-columns-preview" {
+				if result.Metadata["max_columns_preview"] != true || result.Metadata["no_max_columns_preview"] != false {
+					t.Fatalf("expected max_columns_preview metadata to be true and no_max_columns_preview false, got %#v", result.Metadata)
+				}
+			}
+			if tc.name == "no_max_columns_preview true suppresses rg_args max-columns-preview" {
+				if result.Metadata["max_columns_preview"] != false || result.Metadata["no_max_columns_preview"] != true {
+					t.Fatalf("expected no_max_columns_preview metadata to be true and max_columns_preview false, got %#v", result.Metadata)
+				}
+			}
+		})
+	}
+}
+
+func TestGrepTool_StructuredPriorityOverridesRemainingRgArgsConflicts(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	cases := []struct {
+		name           string
+		params         map[string]interface{}
+		wantContains   []string
+		wantNotContain []string
+	}{
+		{
+			name: "structured sort suppresses rg_args sort family",
+			params: map[string]interface{}{
+				"pattern": "needle",
+				"path":    tmpDir,
+				"rg_args": []interface{}{"--sort", "modified", "--sort-files", "--no-sort-files"},
+				"sort":    "path",
+			},
+			wantContains:   []string{"--sort path"},
+			wantNotContain: []string{"--sort modified", "--sort-files", "--no-sort-files"},
+		},
+		{
+			name: "structured mode suppresses rg_args count family",
+			params: map[string]interface{}{
+				"pattern": "needle",
+				"path":    tmpDir,
+				"rg_args": []interface{}{"--count", "--files-with-matches", "--files-without-match"},
+				"mode":    "files",
+			},
+			wantContains:   []string{"--files-with-matches"},
+			wantNotContain: []string{"--count", "--files-without-match"},
+		},
+		{
+			name: "structured type flags suppress rg_args type family",
+			params: map[string]interface{}{
+				"pattern":    "needle",
+				"path":       tmpDir,
+				"rg_args":    []interface{}{"--type-add", "foo:*.foo", "--type-clear", "foo"},
+				"type_add":   []interface{}{"bar:*.bar"},
+				"type_clear": []interface{}{"bar"},
+			},
+			wantContains:   []string{"--type-add bar:*.bar", "--type-clear bar"},
+			wantNotContain: []string{"--type-add foo:*.foo", "--type-clear foo"},
+		},
+		{
+			name: "structured type flags replace rg_args type family",
+			params: map[string]interface{}{
+				"pattern":    "needle",
+				"path":       tmpDir,
+				"rg_args":    []interface{}{"--type-add", "foo:*.foo", "--type-clear", "foo"},
+				"type_add":   []interface{}{"bar:*.bar"},
+				"type_clear": []interface{}{"bar"},
+			},
+			wantContains:   []string{"--type-add bar:*.bar", "--type-clear bar"},
+			wantNotContain: []string{"foo:*.foo", "foo"},
+		},
+		{
+			name: "structured size and depth suppress rg_args numeric family",
+			params: map[string]interface{}{
+				"pattern":      "needle",
+				"path":         tmpDir,
+				"rg_args":      []interface{}{"--max-depth", "1", "--max-count", "2", "--max-filesize", "1K"},
+				"max_depth":    2,
+				"max_count":    3,
+				"max_filesize": "2K",
+			},
+			wantContains:   []string{"--max-depth 2", "--max-count 3", "--max-filesize 2K"},
+			wantNotContain: []string{"--max-depth 1", "--max-count 2", "--max-filesize 1K"},
+		},
+		{
+			name: "structured max columns preview family overrides rg_args opposite flag",
+			params: map[string]interface{}{
+				"pattern":             "needle",
+				"path":                tmpDir,
+				"rg_args":             []interface{}{"--no-max-columns-preview"},
+				"max_columns_preview": true,
+			},
+			wantContains:   []string{"--max-columns-preview"},
+			wantNotContain: []string{"--no-max-columns-preview"},
+		},
+		{
+			name: "structured no max columns preview family overrides rg_args opposite flag",
+			params: map[string]interface{}{
+				"pattern":                "needle",
+				"path":                   tmpDir,
+				"rg_args":                []interface{}{"--max-columns-preview"},
+				"no_max_columns_preview": true,
+			},
+			wantContains:   []string{"--no-max-columns-preview"},
+			wantNotContain: []string{"--max-columns-preview"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotArgs = nil
+			result, err := tool.Execute(context.Background(), tc.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got error %v", result.Error)
+			}
+			argsStr := strings.Join(gotArgs, " ")
+			for _, want := range tc.wantContains {
+				if !strings.Contains(argsStr, want) {
+					t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
+				}
+			}
+			for _, notWant := range tc.wantNotContain {
+				if strings.Contains(argsStr, notWant) {
+					t.Fatalf("expected %q to be filtered from rg args, got %v", notWant, gotArgs)
+				}
+			}
+		})
+	}
+}
+
+func TestGrepTool_NoIgnoreFilesOverridesExplicitIgnoreFileBuiltinAndRipgrep(t *testing.T) {
+	tmpDir := t.TempDir()
+	ignorePath := filepath.Join(tmpDir, "custom.ignore")
+	if err := os.WriteFile(ignorePath, []byte("ignored.txt\n"), 0o644); err != nil {
+		t.Fatalf("write ignore file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "ignored.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write ignored file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "kept.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write kept file: %v", err)
+	}
+
+	t.Run("builtin", func(t *testing.T) {
+		tool := NewGrepTool()
+		tool.lookPath = func(name string) (string, error) {
+			return "", os.ErrNotExist
+		}
+
+		withIgnore, err := tool.Execute(context.Background(), map[string]interface{}{
+			"pattern":     "needle",
+			"path":        tmpDir,
+			"ignore_file": "custom.ignore",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(withIgnore.Content, "kept.txt:1: needle") || strings.Contains(withIgnore.Content, "ignored.txt") {
+			t.Fatalf("expected ignore_file to hide ignored.txt, got %q", withIgnore.Content)
+		}
+
+		noIgnoreFiles, err := tool.Execute(context.Background(), map[string]interface{}{
+			"pattern":         "needle",
+			"path":            tmpDir,
+			"ignore_file":     "custom.ignore",
+			"no_ignore_files": true,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(noIgnoreFiles.Content, "ignored.txt:1: needle") || !strings.Contains(noIgnoreFiles.Content, "kept.txt:1: needle") {
+			t.Fatalf("expected no_ignore_files to override explicit ignore_file, got %q", noIgnoreFiles.Content)
+		}
+	})
+
+	t.Run("rg_args", func(t *testing.T) {
+		tool := NewGrepTool()
+		var gotArgs []string
+		tool.lookPath = func(name string) (string, error) {
+			return "rg", nil
+		}
+		tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+			gotArgs = append([]string(nil), args...)
+			return []byte("kept.txt:1:needle\n"), nil
+		}
+
+		result, err := tool.Execute(context.Background(), map[string]interface{}{
+			"rg_args":         []interface{}{"--no-ignore-files", "--ignore-file-case-insensitive", "--ignore-file", ignorePath, "needle", tmpDir},
+			"no_ignore_files": true,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("expected success, got error %v", result.Error)
+		}
+		argsStr := strings.Join(gotArgs, " ")
+		if !strings.Contains(argsStr, "--no-ignore-files") {
+			t.Fatalf("expected --no-ignore-files in rg args, got %v", gotArgs)
+		}
+		if strings.Contains(argsStr, "--ignore-file") {
+			t.Fatalf("expected explicit ignore-file to be suppressed when no_ignore_files is set, got %v", gotArgs)
+		}
+		if strings.Contains(argsStr, "--ignore-file-case-insensitive") {
+			t.Fatalf("expected ignore-file case-insensitive flag to be suppressed when no_ignore_files is set, got %v", gotArgs)
+		}
+	})
+}
+
+func TestGrepTool_IgnoreFileCaseInsensitiveOnlyAppliesToExplicitIgnoreFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	explicitIgnore := filepath.Join(tmpDir, "custom.ignore")
+	if err := os.WriteFile(explicitIgnore, []byte("EXPLICIT-ONLY.TXT\n"), 0o644); err != nil {
+		t.Fatalf("write explicit ignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "explicit-only.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write explicit target: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "local-git-only.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write dot target: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("LOCAL-GIT-ONLY.TXT\n"), 0o644); err != nil {
+		t.Fatalf("write gitignore: %v", err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":                      "needle",
+		"path":                         tmpDir,
+		"ignore_file":                  "custom.ignore",
+		"ignore_file_case_insensitive": true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result.Content, "explicit-only.txt:1: needle") {
+		t.Fatalf("expected explicit ignore_file case-insensitive match to hide explicit-only.txt, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "local-git-only.txt:1: needle") {
+		t.Fatalf("expected local .gitignore to remain case-sensitive and not hide local-git-only.txt, got %q", result.Content)
 	}
 }
 
@@ -2472,6 +4169,38 @@ func TestGrepTool_RgArgsFollowTranslateToRipgrep(t *testing.T) {
 	}
 }
 
+func TestGrepTool_RgArgsFollowAndOneFileSystemTranslateToRipgrep(t *testing.T) {
+	tool := NewGrepTool()
+	var gotArgs []string
+
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:foo\n"), nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"rg_args": []interface{}{"-L", "--one-file-system", "foo", t.TempDir()},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	argsStr := strings.Join(gotArgs, " ")
+	for _, want := range []string{"--follow", "--one-file-system"} {
+		if !strings.Contains(argsStr, want) {
+			t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
+		}
+	}
+	if result.Metadata["follow"] != true || result.Metadata["one_file_system"] != true || result.Metadata["requires_ripgrep"] != true {
+		t.Fatalf("expected follow/one_file_system metadata to require rg, got %#v", result.Metadata)
+	}
+}
+
 func TestGrepTool_FollowRequiresRipgrepWhenUnavailable(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmpDir, "sample.txt"), []byte("foo\n"), 0o644); err != nil {
@@ -2484,9 +4213,10 @@ func TestGrepTool_FollowRequiresRipgrepWhenUnavailable(t *testing.T) {
 	}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"pattern": "foo",
-		"path":    tmpDir,
-		"follow":  true,
+		"pattern":         "foo",
+		"path":            tmpDir,
+		"follow":          true,
+		"one_file_system": true,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -2499,6 +4229,126 @@ func TestGrepTool_FollowRequiresRipgrepWhenUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(result.Error.Error(), "follow") {
 		t.Fatalf("expected follow requirement to appear in error, got %v", result.Error)
+	}
+	if !strings.Contains(result.Error.Error(), "one_file_system") {
+		t.Fatalf("expected combined one_file_system requirement to appear in error, got %v", result.Error)
+	}
+}
+
+func TestGrepTool_StructuredRgOnlyFlagsTranslateToRipgrep(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		if containsString(args, "--json") {
+			return []byte("{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"human\":\"0.001000s\",\"nanos\":1000000,\"secs\":0},\"stats\":{\"bytes_printed\":0,\"bytes_searched\":14,\"elapsed\":{\"human\":\"0.000100s\",\"nanos\":100000,\"secs\":0},\"matched_lines\":1,\"matches\":2,\"searches\":1,\"searches_with_match\":1}}}\n"), nil
+		}
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	cases := []struct {
+		name       string
+		params     map[string]interface{}
+		wantArgs   []string
+		assertions func(t *testing.T, result *toolkit.ToolResult)
+	}{
+		{
+			name: "stats true emits --stats",
+			params: map[string]interface{}{
+				"pattern": "needle",
+				"path":    tmpDir,
+				"stats":   true,
+			},
+			wantArgs: []string{"--stats"},
+			assertions: func(t *testing.T, result *toolkit.ToolResult) {
+				t.Helper()
+				if result.Metadata["stats_requested"] != true {
+					t.Fatalf("expected stats_requested metadata to be true, got %#v", result.Metadata["stats_requested"])
+				}
+			},
+		},
+		{
+			name: "json true emits --json and keeps rg passthrough metadata",
+			params: map[string]interface{}{
+				"pattern": "needle",
+				"path":    tmpDir,
+				"json":    true,
+			},
+			wantArgs: []string{"--json"},
+			assertions: func(t *testing.T, result *toolkit.ToolResult) {
+				t.Helper()
+				if result.Metadata["json_output_requested"] != true || result.Metadata["normalized_output"] != false {
+					t.Fatalf("expected json output metadata to be marked correctly, got %#v", result.Metadata)
+				}
+				if result.Metadata["output_format"] != "rg_passthrough" {
+					t.Fatalf("expected rg_passthrough output_format, got %#v", result.Metadata["output_format"])
+				}
+				if result.Metadata["requires_ripgrep"] != true {
+					t.Fatalf("expected json mode to require ripgrep, got %#v", result.Metadata["requires_ripgrep"])
+				}
+				if !strings.Contains(result.Content, "\"type\":\"summary\"") {
+					t.Fatalf("expected raw rg json summary content, got %q", result.Content)
+				}
+			},
+		},
+		{
+			name: "follow true emits --follow",
+			params: map[string]interface{}{
+				"pattern": "needle",
+				"path":    tmpDir,
+				"follow":  true,
+			},
+			wantArgs: []string{"--follow"},
+			assertions: func(t *testing.T, result *toolkit.ToolResult) {
+				t.Helper()
+				if result.Metadata["follow"] != true || result.Metadata["requires_ripgrep"] != true {
+					t.Fatalf("expected follow metadata to be true and require rg, got %#v", result.Metadata)
+				}
+			},
+		},
+		{
+			name: "follow plus one_file_system emits both rg-only flags",
+			params: map[string]interface{}{
+				"pattern":         "needle",
+				"path":            tmpDir,
+				"follow":          true,
+				"one_file_system": true,
+			},
+			wantArgs: []string{"--follow", "--one-file-system"},
+			assertions: func(t *testing.T, result *toolkit.ToolResult) {
+				t.Helper()
+				if result.Metadata["follow"] != true || result.Metadata["one_file_system"] != true || result.Metadata["requires_ripgrep"] != true {
+					t.Fatalf("expected follow/one_file_system metadata to require rg, got %#v", result.Metadata)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotArgs = nil
+			result, err := tool.Execute(context.Background(), tc.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got error %v", result.Error)
+			}
+			argsStr := strings.Join(gotArgs, " ")
+			for _, want := range tc.wantArgs {
+				if !strings.Contains(argsStr, want) {
+					t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
+				}
+			}
+			if tc.assertions != nil {
+				tc.assertions(t, result)
+			}
+		})
 	}
 }
 
@@ -2543,7 +4393,21 @@ func TestGrepTool_RgArgsDisplayNoOpFlagsBuiltin(t *testing.T) {
 	}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"rg_args": []interface{}{"-N", "--no-filename", "foo", tmpDir},
+		"rg_args": []interface{}{
+			"-N",
+			"--no-filename",
+			"--pretty",
+			"--line-buffered",
+			"--no-line-buffered",
+			"--block-buffered",
+			"--no-block-buffered",
+			"--null",
+			"--null-data",
+			"--field-context-separator", ":::",
+			"--path-separator", "/",
+			"foo",
+			tmpDir,
+		},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -2555,8 +4419,13 @@ func TestGrepTool_RgArgsDisplayNoOpFlagsBuiltin(t *testing.T) {
 		t.Fatalf("expected display no-op flags to preserve normalized output skeleton, got %q", result.Content)
 	}
 	ignored, ok := result.Metadata["ignored_rg_args"].([]string)
-	if !ok || len(ignored) < 2 {
+	if !ok || len(ignored) < 10 {
 		t.Fatalf("expected ignored_rg_args metadata for display flags, got %#v", result.Metadata["ignored_rg_args"])
+	}
+	for _, want := range []string{"--block-buffered", "--no-block-buffered", "--null", "--null-data", "--field-context-separator=:::", "--path-separator=/"} {
+		if !containsString(ignored, want) {
+			t.Fatalf("expected ignored_rg_args to include %s, got %#v", want, ignored)
+		}
 	}
 }
 
@@ -2572,19 +4441,28 @@ func TestGrepTool_StructuredPresentationFlagsIgnoredMetadata(t *testing.T) {
 	}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"pattern":        "foo",
-		"path":           tmpDir,
-		"line_number":    true,
-		"heading":        true,
-		"no_heading":     true,
-		"with_filename":  true,
-		"no_filename":    true,
-		"no_line_number": true,
-		"color":          "always",
-		"text":           true,
-		"binary":         true,
-		"hidden":         true,
-		"no_ignore":      true,
+		"pattern":                 "foo",
+		"path":                    tmpDir,
+		"line_number":             true,
+		"heading":                 true,
+		"no_heading":              true,
+		"with_filename":           true,
+		"no_filename":             true,
+		"no_line_number":          true,
+		"color":                   "always",
+		"pretty":                  true,
+		"line_buffered":           true,
+		"no_line_buffered":        true,
+		"block_buffered":          true,
+		"no_block_buffered":       true,
+		"null":                    true,
+		"null_data":               true,
+		"field_context_separator": ":::",
+		"path_separator":          "/",
+		"text":                    true,
+		"binary":                  true,
+		"hidden":                  true,
+		"no_ignore":               true,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -2596,8 +4474,13 @@ func TestGrepTool_StructuredPresentationFlagsIgnoredMetadata(t *testing.T) {
 		t.Fatalf("expected structured presentation flags to preserve normalized output, got %q", result.Content)
 	}
 	ignored, ok := result.Metadata["ignored_presentation"].([]string)
-	if !ok || len(ignored) < 6 {
+	if !ok || len(ignored) < 13 {
 		t.Fatalf("expected ignored_presentation metadata, got %#v", result.Metadata["ignored_presentation"])
+	}
+	for _, want := range []string{"block_buffered", "no_block_buffered", "null", "null_data", "field_context_separator=:::", "path_separator=/"} {
+		if !containsString(ignored, want) {
+			t.Fatalf("expected ignored_presentation to include %s, got %#v", want, ignored)
+		}
 	}
 }
 
@@ -2701,5 +4584,126 @@ func TestGrepTool_SortReversePathBuiltin(t *testing.T) {
 	}
 	if result.Metadata["sortr"] != "path" {
 		t.Fatalf("expected sortr metadata to be path, got %#v", result.Metadata["sortr"])
+	}
+}
+
+func TestGrepTool_StructuredSortFamilyTranslateToRipgrep(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("sample.txt:1:needle\n"), nil
+	}
+
+	cases := []struct {
+		name       string
+		params     map[string]interface{}
+		wantArgs   []string
+		assertions func(t *testing.T, result *toolkit.ToolResult)
+	}{
+		{
+			name: "sort path emits --sort path",
+			params: map[string]interface{}{
+				"pattern": "needle",
+				"path":    tmpDir,
+				"sort":    "path",
+			},
+			wantArgs: []string{"--sort path"},
+			assertions: func(t *testing.T, result *toolkit.ToolResult) {
+				t.Helper()
+				gotSort, _ := result.Metadata["sort"].(string)
+				gotSortr, _ := result.Metadata["sortr"].(string)
+				gotSortFiles, _ := result.Metadata["sort_files"].(bool)
+				if gotSort != "path" || gotSortr != "" || !gotSortFiles {
+					t.Fatalf("expected sort metadata to align with path ordering, got %#v", result.Metadata)
+				}
+			},
+		},
+		{
+			name: "sortr path emits --sortr path",
+			params: map[string]interface{}{
+				"pattern": "needle",
+				"path":    tmpDir,
+				"sortr":   "path",
+			},
+			wantArgs: []string{"--sortr path"},
+			assertions: func(t *testing.T, result *toolkit.ToolResult) {
+				t.Helper()
+				gotSort, _ := result.Metadata["sort"].(string)
+				gotSortr, _ := result.Metadata["sortr"].(string)
+				gotSortFiles, _ := result.Metadata["sort_files"].(bool)
+				if gotSort != "" || gotSortr != "path" || gotSortFiles {
+					t.Fatalf("expected sortr metadata to align with reverse path ordering, got %#v", result.Metadata)
+				}
+			},
+		},
+		{
+			name: "sort_files true emits path ordering",
+			params: map[string]interface{}{
+				"pattern":    "needle",
+				"path":       tmpDir,
+				"sort_files": true,
+			},
+			wantArgs: []string{"--sort path"},
+			assertions: func(t *testing.T, result *toolkit.ToolResult) {
+				t.Helper()
+				gotSort, _ := result.Metadata["sort"].(string)
+				gotSortFiles, _ := result.Metadata["sort_files"].(bool)
+				if gotSort != "path" || !gotSortFiles {
+					t.Fatalf("expected sort_files metadata to align with path ordering, got %#v", result.Metadata)
+				}
+			},
+		},
+		{
+			name: "no_sort_files clears structured path ordering",
+			params: map[string]interface{}{
+				"pattern":       "needle",
+				"path":          tmpDir,
+				"sort_files":    true,
+				"no_sort_files": true,
+				"sort":          "path",
+			},
+			assertions: func(t *testing.T, result *toolkit.ToolResult) {
+				t.Helper()
+				gotSort, _ := result.Metadata["sort"].(string)
+				gotSortr, _ := result.Metadata["sortr"].(string)
+				gotSortFiles, _ := result.Metadata["sort_files"].(bool)
+				if gotSort != "" || gotSortr != "" || gotSortFiles {
+					t.Fatalf("expected no_sort_files to clear sort family metadata, got %#v", result.Metadata)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotArgs = nil
+			result, err := tool.Execute(context.Background(), tc.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got error %v", result.Error)
+			}
+			argsStr := strings.Join(gotArgs, " ")
+			for _, want := range tc.wantArgs {
+				if !strings.Contains(argsStr, want) {
+					t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
+				}
+			}
+			if tc.name == "no_sort_files clears structured path ordering" {
+				if strings.Contains(argsStr, "--sort") || strings.Contains(argsStr, "--sortr") {
+					t.Fatalf("expected no_sort_files to remove sort flags, got %v", gotArgs)
+				}
+			}
+			if tc.assertions != nil {
+				tc.assertions(t, result)
+			}
+		})
 	}
 }

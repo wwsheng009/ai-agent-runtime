@@ -30,7 +30,7 @@ func NewSourcegraphTool() *SourcegraphTool {
 		"properties": map[string]interface{}{
 			"query": map[string]interface{}{
 				"type":        "string",
-				"description": "搜索查询，使用 Sourcegraph 语法。例如: 'func main' 搜索函数, 'file:.go' 限制 Go 文件, 'repo:org/repo' 限定仓库",
+				"description": "搜索查询，使用 Sourcegraph 语法。例如: 'func main' 搜索函数, 'file:.go' 限制 Go 文件, 'repo:org/repo' 限定仓库。若查询条件很多，请拆分成多个更小的 query 调用，每次只聚焦一个搜索目标。",
 			},
 			"count": map[string]interface{}{
 				"type":        "integer",
@@ -49,7 +49,7 @@ func NewSourcegraphTool() *SourcegraphTool {
 	return &SourcegraphTool{
 		BaseTool: toolkit.NewBaseTool(
 			"sourcegraph",
-			"使用 Sourcegraph 搜索公共代码仓库。支持: file:.go 限定文件类型, repo:org/repo 限定仓库, type:symbol 搜索符号定义",
+			"使用 Sourcegraph 搜索公共代码仓库。支持: file:.go 限定文件类型, repo:org/repo 限定仓库, type:symbol 搜索符号定义。若查询条件很多，请拆分为多个更小的 sourcegraph 调用，每次只聚焦一个搜索目标。",
 			"1.0.0",
 			parameters,
 			true,
