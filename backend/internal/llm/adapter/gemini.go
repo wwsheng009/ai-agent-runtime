@@ -91,7 +91,11 @@ func (a *GeminiAdapter) BuildRequest(config RequestConfig) map[string]interface{
 	// temperature
 	generationConfig["temperature"] = config.Temperature
 
-	if thinkingConfig := deriveGeminiThinkingConfig(config.ReasoningEffort, config.Thinking); len(thinkingConfig) > 0 {
+	thinkingConfig := buildGeminiThinkingConfigFromThinking(config.Thinking, config.ReasoningEffortBudgets)
+	if len(thinkingConfig) == 0 {
+		thinkingConfig = buildGeminiThinkingConfigFromReasoningEffort(config.ReasoningEffort, config.ReasoningEffortBudgets)
+	}
+	if len(thinkingConfig) > 0 {
 		generationConfig["thinkingConfig"] = thinkingConfig
 	}
 

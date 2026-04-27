@@ -35,13 +35,16 @@ func TestAnthropicBuildRequest_UsesExplicitThinkingConfig(t *testing.T) {
 	}
 }
 
-func TestAnthropicBuildRequest_MapsReasoningEffortToAdaptiveThinkingFor46Model(t *testing.T) {
+func TestAnthropicBuildRequest_UsesExplicitReasoningEffortAsEnabledThinking(t *testing.T) {
 	a := &AnthropicAdapter{}
 
 	req := a.BuildRequest(RequestConfig{
 		Model:           "claude-sonnet-4-6",
 		Messages:        []map[string]interface{}{{"role": "user", "content": "hello"}},
 		ReasoningEffort: "high",
+		ReasoningEffortBudgets: map[string]int{
+			"high": 16384,
+		},
 	})
 
 	rawThinking, ok := req["thinking"]
@@ -52,11 +55,11 @@ func TestAnthropicBuildRequest_MapsReasoningEffortToAdaptiveThinkingFor46Model(t
 	if !ok {
 		t.Fatalf("expected anthropic thinking struct, got %T", rawThinking)
 	}
-	if thinking.Type != "adaptive" {
-		t.Fatalf("expected adaptive thinking for sonnet 4.6, got %q", thinking.Type)
+	if thinking.Type != "enabled" {
+		t.Fatalf("expected enabled thinking, got %q", thinking.Type)
 	}
-	if thinking.Effort != "high" {
-		t.Fatalf("expected adaptive effort high, got %q", thinking.Effort)
+	if thinking.BudgetTokens == nil || *thinking.BudgetTokens != 16384 {
+		t.Fatalf("expected enabled thinking budget 16384, got %#v", thinking.BudgetTokens)
 	}
 }
 

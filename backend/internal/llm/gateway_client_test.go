@@ -734,6 +734,13 @@ func TestGatewayClient_CallProvider_AnthropicReasoningEffortMapsToThinking(t *te
 			Name:    "anthropic_ee",
 			Type:    "anthropic",
 			BaseURL: server.URL,
+			ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+				"claude-sonnet-4-6": {
+					ReasoningEffortBudgets: map[string]int{
+						"high": 16384,
+					},
+				},
+			},
 		},
 		KeyValue: "test-key",
 	}
@@ -751,12 +758,12 @@ func TestGatewayClient_CallProvider_AnthropicReasoningEffortMapsToThinking(t *te
 
 	rawThinking, ok := capturedBody["thinking"].(map[string]interface{})
 	require.True(t, ok)
-	assert.Equal(t, "adaptive", rawThinking["type"])
-	assert.Equal(t, "high", rawThinking["effort"])
-	assert.Empty(t, capturedBeta)
+	assert.Equal(t, "enabled", rawThinking["type"])
+	assert.Equal(t, float64(16384), rawThinking["budget_tokens"])
+	assert.Equal(t, "interleaved-thinking-2025-05-14", capturedBeta)
 }
 
-func TestGatewayClient_CallProvider_OpenAINormalizesReasoningEffort(t *testing.T) {
+func TestGatewayClient_CallProvider_OpenAIPreservesReasoningEffort(t *testing.T) {
 	var capturedBody map[string]interface{}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -786,7 +793,48 @@ func TestGatewayClient_CallProvider_OpenAINormalizesReasoningEffort(t *testing.T
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "ok", resp.Content)
-	assert.Equal(t, "high", capturedBody["reasoning_effort"])
+	assert.Equal(t, "xhigh", capturedBody["reasoning_effort"])
+}
+
+func TestGatewayClient_CallProvider_UsesConfiguredReasoningModelFlag(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"deepseek-v4-pro","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
+	selected := &SelectedResource{
+		Provider: &ProviderResource{
+			Name:    "deepseek_openai",
+			Type:    "openai",
+			BaseURL: server.URL,
+			ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+				"deepseek-v4-pro": {
+					ReasoningModel:   true,
+					ReasoningEfforts: []string{"high", "max"},
+				},
+			},
+		},
+		KeyValue: "test-key",
+	}
+
+	resp, err := client.callProvider(context.Background(), selected, "deepseek-v4-pro", &LLMRequest{
+		Model:           "deepseek-v4-pro",
+		ReasoningEffort: "max",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	if _, exists := capturedBody["temperature"]; exists {
+		t.Fatalf("expected temperature to be omitted for configured reasoning model, got %#v", capturedBody["temperature"])
+	}
 }
 
 func TestGatewayClientCall_DoesNotRetryInvalidRequestHTTPError(t *testing.T) {
@@ -978,7 +1026,7 @@ func TestGatewayClientCall_UsesRetryAfterHeaderAndReportsRetryDebugEvent(t *test
 	assert.Equal(t, 429, events[1].ResponseStatusCode)
 	assert.Equal(t, 1, events[1].Attempt)
 	assert.Equal(t, "retry", events[2].Phase)
-	assert.Equal(t, "http_429", events[2].RetryReason)
+	assert.Equal(t, "rate_limit", events[2].RetryReason)
 	assert.EqualValues(t, 25, events[2].RetryDelayMS)
 	assert.Equal(t, 1, events[2].Attempt)
 	assert.Equal(t, 2, events[2].MaxAttempts)
@@ -995,7 +1043,7 @@ func TestGatewayClientCall_UsesRetryAfterHeaderAndReportsRetryDebugEvent(t *test
 	assert.Equal(t, "gpt-5.4-mini", retryEvents[0].Model)
 	assert.Equal(t, 1, retryEvents[0].Attempt)
 	assert.Equal(t, 2, retryEvents[0].MaxAttempts)
-	assert.Equal(t, "http_429", retryEvents[0].RetryReason)
+	assert.Equal(t, "rate_limit", retryEvents[0].RetryReason)
 	assert.EqualValues(t, 25, retryEvents[0].RetryDelayMS)
 	assert.Contains(t, retryEvents[0].Error, "HTTP 429")
 }
@@ -1172,4 +1220,50 @@ func TestGatewayClientCall_WithStream_DoesNotRetryAfterTextDelta(t *testing.T) {
 	assert.Equal(t, 1, rm.selectCalls)
 	require.Len(t, rm.results, 1)
 	assert.False(t, rm.results[0].success)
+}
+
+func TestGatewayClientCall_WithStream_RetriesAfterReasoningOnlyDeltaWithoutContent(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"reasoning_content":"先确认上下文。"},"finish_reason":"stop"}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	rm := &gatewayTestResourceManager{
+		selected: &SelectedResource{
+			Provider: &ProviderResource{
+				Name:    "openai_ee",
+				Type:    "openai",
+				BaseURL: server.URL,
+			},
+			KeyValue: "test-key",
+		},
+	}
+	client := NewGatewayClient(rm, "gpt-5.4-mini")
+	client.SetMaxRetries(2)
+
+	resp, err := client.Call(context.Background(), &LLMRequest{
+		Model: "gpt-5.4-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "retry reasoning only",
+		}},
+		Stream: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "hello", resp.Content)
+	assert.Equal(t, 2, requests)
+	assert.Equal(t, 2, rm.selectCalls)
+	require.Len(t, rm.results, 2)
+	assert.False(t, rm.results[0].success)
+	assert.True(t, rm.results[1].success)
 }

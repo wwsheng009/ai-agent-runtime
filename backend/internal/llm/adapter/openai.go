@@ -31,12 +31,13 @@ func (a *OpenAIAdapter) BuildRequest(config RequestConfig) map[string]interface{
 		request["max_tokens"] = config.MaxTokens
 	}
 
-	if effort := deriveOpenAIReasoningEffort(config.Model, config.ReasoningEffort, config.Thinking); effort != "" {
+	if effort := strings.TrimSpace(config.ReasoningEffort); effort != "" {
 		request["reasoning_effort"] = effort
 	}
 
-	// Reasoning models use temperature 0
-	if !a.IsReasoningModel(config.Model) {
+	// Temperature only gets suppressed when the caller has explicitly marked
+	// the request as targeting a reasoning-capable model.
+	if !config.ReasoningModel {
 		request["temperature"] = config.Temperature
 	}
 
@@ -46,6 +47,10 @@ func (a *OpenAIAdapter) BuildRequest(config RequestConfig) map[string]interface{
 	}
 
 	applyOpenAICompatibleRequestMetadata(request, config)
+
+	if config.Thinking != nil {
+		request["thinking"] = config.Thinking
+	}
 
 	if config.Functions != nil {
 		if _, exists := request["tool_choice"]; !exists {
@@ -545,6 +550,9 @@ func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, callba
 		reasoning, _ := streamData["reasoning"].(string)
 		_, reasoningPresent := streamData["reasoning"]
 		assistantMsg := a.buildAssistantMessageWithReasoningPresence(content, toolCalls, reasoning, reasoningPresent)
+		if finishReason, _ := streamData["finish_reason"].(string); strings.TrimSpace(finishReason) != "" {
+			assistantMsg["finish_reason"] = finishReason
+		}
 		var reasoningBlock *runtimetypes.ReasoningBlock
 		if strings.TrimSpace(reasoning) != "" {
 			reasoningBlock = &runtimetypes.ReasoningBlock{
@@ -762,9 +770,10 @@ func (a *OpenAIAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]inter
 	return toolCalls
 }
 
-// IsReasoningModel checks if model is a reasoning model
+// IsReasoningModel is retained for legacy callers only. Request assembly and
+// session display now prefer explicit capability flags from configuration.
 func (a *OpenAIAdapter) IsReasoningModel(model string) bool {
-	return isReasoningModelPrefix(model)
+	return isDeepSeekOpenAIModel(model) || isReasoningModelPrefix(model)
 }
 
 // GetAPIPath returns default API path
@@ -817,4 +826,9 @@ func (a *OpenAIAdapter) AccumulateStreamData(streamData map[string]interface{}, 
 	}
 
 	return false
+}
+
+func isDeepSeekOpenAIModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(model, "deepseek")
 }

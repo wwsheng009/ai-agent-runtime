@@ -149,12 +149,22 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 		raw["output_tokens"],
 		raw["candidatesTokenCount"],
 	)
+	cachedTokens := firstPositiveInt(
+		raw["cached_tokens"],
+		raw["cache_tokens"],
+		raw["prompt_cached_tokens"],
+	)
+	reasoningTokens := firstPositiveInt(
+		raw["reasoning_tokens"],
+		raw["reasoningTokenCount"],
+		raw["thinking_tokens"],
+	)
 	totalTokens := firstPositiveInt(
 		raw["total_tokens"],
 		raw["totalTokenCount"],
 	)
 
-	if promptTokens == 0 && completionTokens == 0 && totalTokens == 0 {
+	if promptTokens == 0 && completionTokens == 0 && totalTokens == 0 && cachedTokens == 0 && reasoningTokens == 0 {
 		return nil
 	}
 	if totalTokens == 0 {
@@ -171,6 +181,8 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
 		TotalTokens:      totalTokens,
+		CachedTokens:     cachedTokens,
+		ReasoningTokens:  reasoningTokens,
 	}
 }
 
@@ -220,6 +232,8 @@ func chatUsageFromTokenUsage(usage *types.TokenUsage) Usage {
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
 		TotalTokens:      usage.TotalTokens,
+		CachedTokens:     usage.CachedTokens,
+		ReasoningTokens:  usage.ReasoningTokens,
 	}
 }
 

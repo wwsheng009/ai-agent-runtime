@@ -112,17 +112,6 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 	}
 
 	effort := NormalizeCodexReasoningEffort(config.ReasoningEffort)
-	if effort == "" {
-		effort = NormalizeCodexReasoningEffort(stringFromMetadata(config.Metadata, "reasoning_effort"))
-	}
-	if effort == "" {
-		if reasoning, ok := config.Metadata["reasoning"].(map[string]interface{}); ok {
-			effort = NormalizeCodexReasoningEffort(stringFromMetadata(reasoning, "effort"))
-		}
-	}
-	if !IsValidCodexReasoningEffort(effort) && config.Thinking != nil {
-		effort = NormalizeCodexReasoningEffort(mapAnthropicThinkingToReasoningEffort(config.Model, config.Thinking))
-	}
 	if IsValidCodexReasoningEffort(effort) {
 		request["reasoning"] = map[string]interface{}{
 			"effort":  effort,
@@ -229,9 +218,9 @@ func (a *CodexAdapter) buildCodexInstructionsAndInput(messages []map[string]inte
 	return strings.Join(instructionParts, "\n\n"), a.convertMessagesToCodexInput(inputMessages)
 }
 
-// NormalizeCodexReasoningEffort 规范化 Codex reasoning effort。
+// NormalizeCodexReasoningEffort 仅去除 Codex reasoning effort 的首尾空白。
 func NormalizeCodexReasoningEffort(effort string) string {
-	return strings.ToLower(strings.TrimSpace(effort))
+	return strings.TrimSpace(effort)
 }
 
 // IsValidCodexReasoningEffort 判断是否为支持的 Codex reasoning effort。

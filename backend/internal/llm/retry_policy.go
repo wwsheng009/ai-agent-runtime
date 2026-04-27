@@ -151,7 +151,10 @@ func (s *streamEmissionState) emittedAnything() bool {
 	if s == nil {
 		return false
 	}
-	return s.emittedText || s.emittedReasoning
+	// 只有真正发出了可见正文时才算“已经输出过内容”。
+	// reasoning-only 片段不应阻止后续的空回复重试，
+	// 否则会把“只吐了思考过程、但最终没有正文”的场景误判为已完成。
+	return s.emittedText
 }
 
 func (c RetryTuning) normalized() RetryTuning {
@@ -408,6 +411,7 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 		return retryDecision{Retryable: false, Reason: "non_retryable_response"}
 	}
 
+	lower := strings.ToLower(err.Error())
 	if statusCode, ok := providerCallHTTPStatus(err); ok {
 		switch statusCode {
 		case http.StatusRequestTimeout, http.StatusConflict:
@@ -417,11 +421,32 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 				Reason:    fmt.Sprintf("http_%d", statusCode),
 			}
 		case http.StatusTooManyRequests:
+			if containsAny(lower, "rate limit", "rate_limit_exceeded", "too many requests", "slow_down") {
+				return retryDecision{
+					Retryable: true,
+					Delay:     decisionDelayFromServerHint(err),
+					Reason:    "rate_limit",
+				}
+			}
 			return retryDecision{
 				Retryable: true,
 				Delay:     decisionDelayFromServerHint(err),
 				Reason:    "http_429",
 			}
+		case http.StatusBadRequest:
+			if containsAny(lower, "data_inspection_failed", "content_inspection_failed", "inappropriate content") {
+				return retryDecision{
+					Retryable: false,
+					Reason:    "content_inspection_failed",
+				}
+			}
+			if containsAny(lower, "invalid_request_error", "missing required parameter", "unsupported parameter", "unrecognized request argument", "unknown parameter", "unexpected parameter") {
+				return retryDecision{
+					Retryable: false,
+					Reason:    "invalid_request",
+				}
+			}
+			return retryDecision{Retryable: false, Reason: fmt.Sprintf("http_%d", statusCode)}
 		default:
 			if statusCode >= 500 {
 				return retryDecision{
@@ -434,7 +459,39 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 		}
 	}
 
-	lower := strings.ToLower(err.Error())
+	if containsAny(lower, "data_inspection_failed", "content_inspection_failed", "inappropriate content") {
+		return retryDecision{
+			Retryable: false,
+			Reason:    "content_inspection_failed",
+		}
+	}
+	if containsAny(lower, "truncated_tool_call", "incomplete tool call markup", "truncated before completing a tool call") {
+		return retryDecision{
+			Retryable: false,
+			Reason:    "truncated_tool_call",
+		}
+	}
+	if containsAny(lower, "reasoning_only_empty_reply", "reasoning-only empty reply", "reasoning only empty reply") {
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "reasoning_only_empty_reply",
+		}
+	}
+	if containsAny(lower, "stream_interrupted", "stream disconnected before completion", "stream closed before response.completed", "stream closed before completion") {
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "stream_interrupted",
+		}
+	}
+	if containsAny(lower, "empty_reply", "empty_stream_response", "stream ended without substantive output") {
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "empty_reply",
+		}
+	}
 	if isRetryableTransportError(err, lower) {
 		return retryDecision{
 			Retryable: true,
@@ -799,6 +856,12 @@ func extractRetryErrorCode(err error) string {
 	}
 
 	message := err.Error()
+	if idx := strings.Index(message, ":"); idx > 0 {
+		prefix := strings.ToLower(strings.TrimSpace(message[:idx]))
+		if isRetryCodePrefix(prefix) {
+			return prefix
+		}
+	}
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\b(?:error_?code|code)\b["'=:\s\[]+([a-z0-9_]+)`),
 		regexp.MustCompile(`(?i)\b(request_timeout|rate_limit_exceeded|slow_down|context_length_exceeded|invalid_request_error|missing_required_parameter)\b`),
@@ -810,6 +873,22 @@ func extractRetryErrorCode(err error) string {
 		}
 	}
 	return ""
+}
+
+func isRetryCodePrefix(value string) bool {
+	if value == "" || !strings.Contains(value, "_") {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func isRetryableTransportError(err error, lower string) bool {
@@ -886,18 +965,30 @@ func maxRetryPolicyInt(a int, b int) int {
 func validateStreamingAggregateResponse(protocol string, responseBody []byte, assistantMsg map[string]interface{}) error {
 	body := strings.TrimSpace(string(responseBody))
 	if body == "" {
-		return fmt.Errorf("empty_stream_response: empty response body")
+		return fmt.Errorf("stream_interrupted: empty response body")
+	}
+
+	if detail, ok := streamBodyHasContentInspectionFailure(body); ok {
+		return fmt.Errorf("content_inspection_failed: %s", detail)
 	}
 
 	if streamBodyLooksIncomplete(protocol, body) {
 		if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
-			return fmt.Errorf("stream closed before response.completed")
+			return fmt.Errorf("stream_interrupted: stream closed before response.completed")
 		}
-		return fmt.Errorf("stream disconnected before completion")
+		return fmt.Errorf("stream_interrupted: stream disconnected before completion")
+	}
+
+	if assistantMessageHasReasoningOnlyOutput(assistantMsg) {
+		return fmt.Errorf("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output")
+	}
+
+	if assistantMessageHasTruncatedToolCall(assistantMsg) {
+		return fmt.Errorf("truncated_tool_call: incomplete tool call markup in aggregated assistant response")
 	}
 
 	if !assistantMessageHasSubstantiveOutput(assistantMsg) {
-		return fmt.Errorf("empty_stream_response: stream ended without substantive output")
+		return fmt.Errorf("empty_reply: stream ended without substantive output")
 	}
 
 	return nil
@@ -925,8 +1016,25 @@ func assistantMessageHasSubstantiveOutput(assistantMsg map[string]interface{}) b
 	if content, ok := assistantMsg["content"].(string); ok && content != "" {
 		return true
 	}
-	if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && reasoning != "" {
+	switch toolCalls := assistantMsg["tool_calls"].(type) {
+	case []interface{}:
+		return len(toolCalls) > 0
+	case []map[string]interface{}:
+		return len(toolCalls) > 0
+	}
+	return false
+}
+
+func assistantMessageHasTruncatedToolCall(assistantMsg map[string]interface{}) bool {
+	if len(assistantMsg) == 0 {
+		return false
+	}
+	if content, ok := assistantMsg["content"].(string); ok && hasIncompleteToolCallMarkup(content) {
 		return true
+	}
+	finishReason, _ := assistantMsg["finish_reason"].(string)
+	if !strings.EqualFold(strings.TrimSpace(finishReason), "length") {
+		return false
 	}
 	switch toolCalls := assistantMsg["tool_calls"].(type) {
 	case []interface{}:
@@ -935,4 +1043,52 @@ func assistantMessageHasSubstantiveOutput(assistantMsg map[string]interface{}) b
 		return len(toolCalls) > 0
 	}
 	return false
+}
+
+func hasIncompleteToolCallMarkup(content string) bool {
+	if !strings.Contains(content, "<tool_call>") {
+		return false
+	}
+	return !strings.Contains(content, "</tool_call>")
+}
+
+func assistantMessageHasReasoningOnlyOutput(assistantMsg map[string]interface{}) bool {
+	if len(assistantMsg) == 0 {
+		return false
+	}
+	if content, ok := assistantMsg["content"].(string); ok && content != "" {
+		return false
+	}
+	switch toolCalls := assistantMsg["tool_calls"].(type) {
+	case []interface{}:
+		if len(toolCalls) > 0 {
+			return false
+		}
+	case []map[string]interface{}:
+		if len(toolCalls) > 0 {
+			return false
+		}
+	}
+	if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && strings.TrimSpace(reasoning) != "" {
+		return true
+	}
+	return false
+}
+
+func streamBodyHasContentInspectionFailure(body string) (string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(body))
+	if lower == "" {
+		return "", false
+	}
+	if !containsAny(lower, "data_inspection_failed", "content_inspection_failed", "inappropriate content") {
+		return "", false
+	}
+	switch {
+	case containsAny(lower, "input data may contain inappropriate content", "input may contain inappropriate content"):
+		return "input data may contain inappropriate content", true
+	case containsAny(lower, "output data may contain inappropriate content", "output may contain inappropriate content"):
+		return "output data may contain inappropriate content", true
+	default:
+		return "data may contain inappropriate content", true
+	}
 }

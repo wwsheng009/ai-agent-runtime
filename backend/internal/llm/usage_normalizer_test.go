@@ -23,6 +23,24 @@ func TestResolveUnifiedTokenUsage_OpenAIJSON(t *testing.T) {
 	require.Equal(t, 7, usage.TotalTokens)
 }
 
+func TestResolveUnifiedTokenUsage_OpenAIJSONWithCachedAndReasoningTokens(t *testing.T) {
+	usage, source := resolveUnifiedTokenUsage(
+		"openai",
+		[]byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7,"cached_tokens":2,"reasoning_tokens":1}}`),
+		nil,
+		nil,
+		"",
+		NewTokenizer("openai"),
+	)
+	require.NotNil(t, usage)
+	require.Equal(t, usageSourceProviderReported, source)
+	require.Equal(t, 3, usage.PromptTokens)
+	require.Equal(t, 4, usage.CompletionTokens)
+	require.Equal(t, 7, usage.TotalTokens)
+	require.Equal(t, 2, usage.CachedTokens)
+	require.Equal(t, 1, usage.ReasoningTokens)
+}
+
 func TestResolveUnifiedTokenUsage_AnthropicJSON(t *testing.T) {
 	usage, source := resolveUnifiedTokenUsage(
 		"anthropic",

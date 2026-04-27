@@ -3,6 +3,7 @@ package llm
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +21,17 @@ func TestClassifyRetryableLLMError_UsesRetryAfterHint(t *testing.T) {
 	decision := classifyRetryableLLMError(fmt.Errorf("HTTP 429: rate limit reached, please try again in 1.5s"))
 	assert.True(t, decision.Retryable)
 	assert.Equal(t, 1500*time.Millisecond, decision.Delay)
+	assert.Equal(t, "rate_limit", decision.Reason)
+}
+
+func TestClassifyRetryableLLMError_TreatsInsufficientQuotaAsRetryable(t *testing.T) {
+	decision := classifyRetryableLLMError(fmt.Errorf("HTTP 429: {\"error\":{\"code\":\"insufficient_quota\",\"message\":\"You exceeded your current quota\"}}"))
+	assert.True(t, decision.Retryable)
 	assert.Equal(t, "http_429", decision.Reason)
+
+	decision = classifyRetryableLLMError(fmt.Errorf("HTTP 429: {\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"rate limit reached\"}}"))
+	assert.True(t, decision.Retryable)
+	assert.Equal(t, "rate_limit", decision.Reason)
 }
 
 func TestParseRetryAfterHeaderValue_ParsesSecondsAndHTTPDate(t *testing.T) {
@@ -133,6 +144,56 @@ func TestClassifyRetryableLLMErrorWithRules_MatchesErrorCodeRule(t *testing.T) {
 	assert.True(t, decision.Retryable)
 	assert.Equal(t, "rate_limit_retry", decision.Reason)
 	assert.Equal(t, 10, decision.MaxAttempts)
+}
+
+func TestValidateStreamingAggregateResponse_ClassifiesReasoningOnlyContentInspectionAndEmptyReply(t *testing.T) {
+	reasoningOnlyErr := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"reasoning_content":"先确认上下文。"},"finish_reason":"stop"}]}`,
+		"data: [DONE]",
+	}, "\n\n")), map[string]interface{}{
+		"reasoning_content": "先确认上下文。",
+	})
+	require.Error(t, reasoningOnlyErr)
+	assert.Contains(t, reasoningOnlyErr.Error(), "reasoning_only_empty_reply")
+	assert.True(t, classifyRetryableLLMError(reasoningOnlyErr).Retryable)
+	assert.Equal(t, "reasoning_only_empty_reply", classifyRetryableLLMError(reasoningOnlyErr).Reason)
+
+	streamInterruptedErr := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{}}]}`,
+	}, "\n\n")), map[string]interface{}{})
+	require.Error(t, streamInterruptedErr)
+	assert.Contains(t, streamInterruptedErr.Error(), "stream_interrupted")
+	assert.True(t, classifyRetryableLLMError(streamInterruptedErr).Retryable)
+	assert.Equal(t, "stream_interrupted", classifyRetryableLLMError(streamInterruptedErr).Reason)
+
+	contentInspectionErr := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
+		`data: {"error":{"code":"data_inspection_failed","message":"Output data may contain inappropriate content."}}`,
+	}, "\n\n")), map[string]interface{}{})
+	require.Error(t, contentInspectionErr)
+	assert.Contains(t, contentInspectionErr.Error(), "content_inspection_failed")
+	assert.False(t, classifyRetryableLLMError(contentInspectionErr).Retryable)
+	assert.Equal(t, "content_inspection_failed", classifyRetryableLLMError(contentInspectionErr).Reason)
+
+	emptyReplyErr := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"data: [DONE]",
+	}, "\n\n")), map[string]interface{}{})
+	require.Error(t, emptyReplyErr)
+	assert.Contains(t, emptyReplyErr.Error(), "empty_reply")
+	assert.True(t, classifyRetryableLLMError(emptyReplyErr).Retryable)
+	assert.Equal(t, "empty_reply", classifyRetryableLLMError(emptyReplyErr).Reason)
+
+	truncatedToolCallErr := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"content":"<tool_call>write<arg_key>file_path</arg_key><arg_value>C:\\temp\\chapter7.md</arg_value><arg_key>content</arg_key><arg_value># 第7章"},"finish_reason":"length"}]}`,
+		"data: [DONE]",
+	}, "\n\n")), map[string]interface{}{
+		"content":       `<tool_call>write<arg_key>file_path</arg_key><arg_value>C:\temp\chapter7.md</arg_value><arg_key>content</arg_key><arg_value># 第7章`,
+		"finish_reason": "length",
+	})
+	require.Error(t, truncatedToolCallErr)
+	assert.Contains(t, truncatedToolCallErr.Error(), "truncated_tool_call")
+	assert.False(t, classifyRetryableLLMError(truncatedToolCallErr).Retryable)
+	assert.Equal(t, "truncated_tool_call", classifyRetryableLLMError(truncatedToolCallErr).Reason)
 }
 
 type retryPolicyTestError struct {

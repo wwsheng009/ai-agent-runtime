@@ -40,16 +40,18 @@ type LegacyChatProvider interface {
 
 // ChatRequest 聊天请求
 type ChatRequest struct {
-	Model           string                 `json:"model"`
-	Messages        []Message              `json:"messages"`
-	MaxTokens       int                    `json:"max_tokens,omitempty"`
-	Temperature     float64                `json:"temperature,omitempty"`
-	ReasoningEffort string                 `json:"reasoning_effort,omitempty"`
-	Thinking        *ThinkingConfig        `json:"thinking,omitempty"`
-	Stream          bool                   `json:"stream,omitempty"`
-	Tools           []Tool                 `json:"tools,omitempty"`
-	ToolChoice      string                 `json:"tool_choice,omitempty"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	Model                  string                 `json:"model"`
+	Messages               []Message              `json:"messages"`
+	MaxTokens              int                    `json:"max_tokens,omitempty"`
+	Temperature            float64                `json:"temperature,omitempty"`
+	ReasoningEffort        string                 `json:"reasoning_effort,omitempty"`
+	ReasoningEffortBudgets map[string]int         `json:"reasoning_effort_budgets,omitempty"`
+	ReasoningModel         bool                   `json:"reasoning_model,omitempty"`
+	Thinking               *ThinkingConfig        `json:"thinking,omitempty"`
+	Stream                 bool                   `json:"stream,omitempty"`
+	Tools                  []Tool                 `json:"tools,omitempty"`
+	ToolChoice             string                 `json:"tool_choice,omitempty"`
+	Metadata               map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // Message 消息
@@ -122,6 +124,8 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	CachedTokens     int `json:"cached_tokens,omitempty"`
+	ReasoningTokens  int `json:"reasoning_tokens,omitempty"`
 }
 
 // ChatChunk 聊天流式响应块
@@ -166,6 +170,14 @@ type ProviderWrapper struct {
 	config    *ProviderConfig
 	adapter   adapter.ProtocolAdapter
 	tokenizer *Tokenizer
+}
+
+// ListModelCapabilities returns a detached copy of the configured model capability map.
+func (p *ProviderWrapper) ListModelCapabilities() map[string]agentconfig.ModelCapabilitySpec {
+	if p == nil || p.config == nil || len(p.config.ModelCapabilities) == 0 {
+		return nil
+	}
+	return CloneModelCapabilityMap(p.config.ModelCapabilities)
 }
 
 // ResolveModelCapability exposes provider/model capability metadata for runtime
@@ -426,6 +438,9 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	if err != nil {
 		return nil, fmt.Errorf("failed to handle response: %w", err)
 	}
+	if assistantMessageHasTruncatedToolCall(assistantMsg) {
+		return nil, fmt.Errorf("truncated_tool_call: model output was truncated before completing a tool call; split long file writes into smaller chunks and retry")
+	}
 	if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
 		if outputDir := strings.TrimSpace(stringValue(request.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
 			if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
@@ -651,6 +666,9 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	if err != nil {
 		return fmt.Errorf("failed to handle stream response: %w", err)
 	}
+	if assistantMessageHasTruncatedToolCall(assistantMsg) {
+		return fmt.Errorf("truncated_tool_call: model output was truncated before completing a tool call; split long file writes into smaller chunks and retry")
+	}
 
 	// 发送结束块（如果完成原因不是 stop）
 	if finishReason, ok := assistantMsg["finish_reason"].(string); ok && finishReason != "" {
@@ -733,7 +751,13 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
 		chatResp, err := p.Chat(attemptCtx, chatReq)
 		if err == nil {
-			return p.toLLMResponse(chatResp), nil
+			if chatResp == nil {
+				err = fmt.Errorf("empty provider response")
+			} else if reasoningErr := newReasoningOnlyEmptyReplyError(chatResp); reasoningErr != nil {
+				err = reasoningErr
+			} else {
+				return p.toLLMResponse(chatResp), nil
+			}
 		}
 
 		lastErr = err
@@ -754,6 +778,54 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	}
 
 	return nil, markRetryExhausted("provider call failed after retries", policy.MaxAttempts, lastErr)
+}
+
+type reasoningOnlyEmptyReplyError struct {
+	finishReason string
+}
+
+func (e *reasoningOnlyEmptyReplyError) Error() string {
+	if e == nil {
+		return ""
+	}
+	parts := []string{"reasoning_only_empty_reply"}
+	if reason := strings.TrimSpace(e.finishReason); reason != "" {
+		parts = append(parts, fmt.Sprintf("finish_reason=%s", reason))
+	}
+	parts = append(parts, "reasoning_present=true", "content_empty=true", "tool_calls=0")
+	return strings.Join(parts, ": ")
+}
+
+func (e *reasoningOnlyEmptyReplyError) RetryErrorCode() string {
+	return "reasoning_only_empty_reply"
+}
+
+func newReasoningOnlyEmptyReplyError(resp *ChatResponse) error {
+	if resp == nil || len(resp.Choices) == 0 {
+		return nil
+	}
+
+	choice := resp.Choices[0]
+	message := choice.Message
+	if strings.TrimSpace(message.Content) != "" || len(message.ToolCalls) > 0 {
+		return nil
+	}
+
+	reasoning := strings.TrimSpace(message.Reasoning)
+	if reasoning == "" && len(message.Metadata) > 0 {
+		if metaReasoning, ok := message.Metadata["reasoning_content"].(string); ok {
+			reasoning = strings.TrimSpace(metaReasoning)
+		}
+	}
+	if reasoning == "" {
+		return nil
+	}
+
+	finishReason := strings.TrimSpace(choice.FinishReason)
+	if finishReason == "" {
+		finishReason = strings.TrimSpace(resp.FinishReason)
+	}
+	return &reasoningOnlyEmptyReplyError{finishReason: finishReason}
 }
 
 func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
@@ -1109,6 +1181,10 @@ func (p *ProviderWrapper) CheckHealth(ctx context.Context) error {
 
 func (p *ProviderWrapper) toChatRequest(req *LLMRequest) ChatRequest {
 	messages := make([]Message, 0, len(req.Messages))
+	reasoningConfig := resolveRequestReasoningConfig(req.ReasoningEffort, req.Thinking, req.Metadata)
+	resolvedModel := p.resolveModel(req.Model)
+	capability, _ := ResolveModelCapabilitySpec(resolvedModel, p.config.ModelCapabilities)
+	reasoningModel := ReasoningModelEnabled(capability, req.ReasoningModel)
 	for _, msg := range req.Messages {
 		toolCalls := make([]ToolCall, 0, len(msg.ToolCalls))
 		for _, call := range msg.ToolCalls {
@@ -1145,15 +1221,17 @@ func (p *ProviderWrapper) toChatRequest(req *LLMRequest) ChatRequest {
 	}
 
 	return ChatRequest{
-		Model:           req.Model,
-		Messages:        messages,
-		MaxTokens:       req.MaxTokens,
-		Temperature:     req.Temperature,
-		ReasoningEffort: resolveReasoningEffort(req.ReasoningEffort, req.Metadata),
-		Thinking:        resolveThinkingConfig(req.Thinking, req.Metadata),
-		Stream:          req.Stream,
-		Tools:           tools,
-		Metadata:        req.Metadata,
+		Model:                  req.Model,
+		Messages:               messages,
+		MaxTokens:              req.MaxTokens,
+		Temperature:            req.Temperature,
+		ReasoningEffort:        reasoningConfig.ReasoningEffort,
+		ReasoningEffortBudgets: capability.ReasoningEffortBudgets,
+		ReasoningModel:         reasoningModel,
+		Thinking:               reasoningConfig.Thinking,
+		Stream:                 req.Stream,
+		Tools:                  tools,
+		Metadata:               req.Metadata,
 	}
 }
 
@@ -1173,6 +1251,8 @@ func (p *ProviderWrapper) toLLMResponse(resp *ChatResponse) *LLMResponse {
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
+			CachedTokens:     resp.Usage.CachedTokens,
+			ReasoningTokens:  resp.Usage.ReasoningTokens,
 		},
 	}
 	if len(resp.Choices) == 0 {
@@ -1285,17 +1365,22 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 	// 转换 Tools（从 OpenAI 嵌套格式转换为协议特定格式）
 	tools := p.convertTools(request.Tools, p.config.Type, resolvedModel)
 
+	reasoningConfig := resolveRequestReasoningConfig(request.ReasoningEffort, request.Thinking, request.Metadata)
+	reasoningModel := request.ReasoningModel
+
 	return adapter.RequestConfig{
-		Model:           resolvedModel,
-		Messages:        messages,
-		Stream:          request.Stream,
-		MaxTokens:       request.MaxTokens,
-		ReasoningEffort: resolveReasoningEffort(request.ReasoningEffort, request.Metadata),
-		Thinking:        resolveThinkingConfig(request.Thinking, request.Metadata),
-		Temperature:     request.Temperature,
-		Functions:       tools,
-		Timeout:         p.config.Timeout,
-		Metadata:        metadata,
+		Model:                  resolvedModel,
+		Messages:               messages,
+		Stream:                 request.Stream,
+		MaxTokens:              request.MaxTokens,
+		ReasoningEffort:        reasoningConfig.ReasoningEffort,
+		ReasoningEffortBudgets: request.ReasoningEffortBudgets,
+		ReasoningModel:         reasoningModel,
+		Thinking:               reasoningConfig.Thinking,
+		Temperature:            request.Temperature,
+		Functions:              tools,
+		Timeout:                p.config.Timeout,
+		Metadata:               metadata,
 	}
 }
 

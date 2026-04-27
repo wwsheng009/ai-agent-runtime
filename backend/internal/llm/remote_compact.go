@@ -33,6 +33,8 @@ type RemoteCompactResponse struct {
 	ReplacementHistory []types.Message
 	CompactedMessages  int
 	CheckpointIDs      []string
+	Usage              *types.TokenUsage
+	UsageSource        string
 }
 
 type RemoteCompactionProvider interface {
@@ -93,9 +95,19 @@ func decodeCodexRemoteCompactResponse(history []types.Message, body []byte) (*Re
 	if addedMessages == 0 {
 		return nil, fmt.Errorf("remote compact response produced no replayable messages")
 	}
+	var usage *types.TokenUsage
+	if rawUsage, ok := payload["usage"]; ok {
+		usage = normalizeUsageValue(rawUsage)
+	}
+	usageSource := ""
+	if rawSource, ok := payload["usage_source"]; ok {
+		usageSource = strings.TrimSpace(fmt.Sprintf("%v", rawSource))
+	}
 	return &RemoteCompactResponse{
 		ReplacementHistory: replacement,
 		CompactedMessages:  maxRemoteCompactedMessages(len(history), len(replacement)),
+		Usage:              usage,
+		UsageSource:        usageSource,
 	}, nil
 }
 

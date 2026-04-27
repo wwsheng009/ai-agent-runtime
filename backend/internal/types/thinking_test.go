@@ -59,3 +59,17 @@ func TestResolveThinkingConfigAndReasoningEffortFromContainers(t *testing.T) {
 		t.Fatalf("expected reasoning effort medium, got %q", effort)
 	}
 }
+
+func TestResolveReasoningEffort_PreservesRawValue(t *testing.T) {
+	options := map[string]interface{}{
+		"reasoning_effort": "  XHIGH  ",
+	}
+
+	if effort := ResolveReasoningEffort("", options); effort != "XHIGH" {
+		t.Fatalf("expected raw reasoning effort XHIGH, got %q", effort)
+	}
+
+	if effort := ResolveReasoningEffort("  Max  "); effort != "Max" {
+		t.Fatalf("expected explicit reasoning effort Max, got %q", effort)
+	}
+}

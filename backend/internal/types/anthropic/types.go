@@ -351,5 +351,5 @@ type ContentBlockWithToolResult struct {
 type Thinking struct {
 	Type         string `json:"type"`                    // "enabled", "disabled", "adaptive", "low", "medium", "high"
 	BudgetTokens *int   `json:"budget_tokens,omitempty"` // 最大推理 token 数
-	Effort       string `json:"effort,omitempty"`        // adaptive 模式下的力度提示，如 low/medium/high/max
+	Effort       string `json:"effort,omitempty"`        // adaptive 模式下的 effort 原值（由上游协议定义）
 }

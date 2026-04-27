@@ -23,16 +23,18 @@ type ToolCallFunction struct {
 
 // RequestConfig 请求配置
 type RequestConfig struct {
-	Model           string
-	Messages        []map[string]interface{} // 支持复杂消息格式（Function Call 等）
-	Stream          bool
-	MaxTokens       int
-	ReasoningEffort string
-	Thinking        *anthropictypes.Thinking
-	Temperature     float64
-	Timeout         time.Duration
-	Functions       interface{} // Function Call 配置（tools, tools 等）
-	Metadata        map[string]interface{}
+	Model                  string
+	Messages               []map[string]interface{} // 支持复杂消息格式（Function Call 等）
+	Stream                 bool
+	MaxTokens              int
+	ReasoningEffort        string
+	ReasoningEffortBudgets map[string]int
+	ReasoningModel         bool
+	Thinking               *anthropictypes.Thinking
+	Temperature            float64
+	Timeout                time.Duration
+	Functions              interface{} // Function Call 配置（tools, tools 等）
+	Metadata               map[string]interface{}
 }
 
 // AdapterConfig 适配器配置

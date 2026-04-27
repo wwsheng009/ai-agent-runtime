@@ -78,5 +78,18 @@ func TestResolveRuntimeModelCapabilityUsesResolvedProviderAlias(t *testing.T) {
 	require.Equal(t, 272000, capability.MaxContextTokens)
 }
 
+func TestReasoningModelEnabledUsesExplicitCapabilityFlag(t *testing.T) {
+	capability := agentconfig.ModelCapabilitySpec{ReasoningModel: true}
+	if !ReasoningModelEnabled(capability, false) {
+		t.Fatal("expected explicit capability flag to enable reasoning model")
+	}
+	if !ReasoningModelEnabled(agentconfig.ModelCapabilitySpec{}, true) {
+		t.Fatal("expected explicit request override to enable reasoning model")
+	}
+	if ReasoningModelEnabled(agentconfig.ModelCapabilitySpec{}, false) {
+		t.Fatal("expected reasoning model to remain disabled without capability or override")
+	}
+}
+
 var _ Provider = (*capabilityProvider)(nil)
 var _ ModelCapabilityResolver = (*capabilityProvider)(nil)

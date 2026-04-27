@@ -31,6 +31,9 @@ func TestOpenAIHandleResponse_StreamPreservesToolIdentityAcrossEmptyDeltas(t *te
 	if got, _ := toolCalls[0]["id"].(string); got != "call_1" {
 		t.Fatalf("expected tool call id call_1, got %q", got)
 	}
+	if got, _ := msg["finish_reason"].(string); got != "tool_calls" {
+		t.Fatalf("expected finish_reason tool_calls, got %#v", msg["finish_reason"])
+	}
 	if got, _ := toolCalls[0]["type"].(string); got != "function" {
 		t.Fatalf("expected tool call type function, got %q", got)
 	}

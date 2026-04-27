@@ -3,8 +3,6 @@ package adapter
 import (
 	"strings"
 	"testing"
-
-	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
 
 func TestCodexBuildRequest_AddsToolChoice(t *testing.T) {
@@ -280,7 +278,7 @@ func TestCodexBuildRequest_AddsReasoningConfig(t *testing.T) {
 		Model:           "gpt-5.2",
 		Messages:        []map[string]interface{}{{"role": "user", "content": "test"}},
 		MaxTokens:       2000,
-		ReasoningEffort: " HIGH ",
+		ReasoningEffort: "high",
 	})
 
 	reasoning, ok := req["reasoning"].(map[string]interface{})
@@ -309,22 +307,15 @@ func TestCodexBuildRequest_AddsReasoningConfig(t *testing.T) {
 	}
 }
 
-func TestCodexBuildRequest_UsesReasoningMetadataFallback(t *testing.T) {
+func TestCodexBuildRequest_OmitsReasoningConfigWithoutExplicitEffort(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{
 		Model:    "gpt-5.2",
 		Messages: []map[string]interface{}{{"role": "user", "content": "test"}},
-		Metadata: map[string]interface{}{
-			"reasoning_effort": "medium",
-		},
 	})
 
-	reasoning, ok := req["reasoning"].(map[string]interface{})
-	if !ok || reasoning == nil {
-		t.Fatalf("expected reasoning config from metadata fallback, got %T", req["reasoning"])
-	}
-	if reasoning["effort"] != "medium" {
-		t.Fatalf("expected reasoning effort medium, got %v", reasoning["effort"])
+	if _, exists := req["reasoning"]; exists {
+		t.Fatalf("did not expect reasoning config without explicit effort: %#v", req["reasoning"])
 	}
 }
 
@@ -338,28 +329,6 @@ func TestCodexBuildRequest_OmitsReasoningConfigWhenInvalid(t *testing.T) {
 
 	if _, exists := req["reasoning"]; exists {
 		t.Fatalf("did not expect reasoning config for invalid effort: %#v", req["reasoning"])
-	}
-}
-
-func TestCodexBuildRequest_DerivesReasoningFromAnthropicThinking(t *testing.T) {
-	a := &CodexAdapter{}
-	budget := 32000
-
-	req := a.BuildRequest(RequestConfig{
-		Model:    "claude-sonnet-4-6",
-		Messages: []map[string]interface{}{{"role": "user", "content": "test"}},
-		Thinking: &anthropictypes.Thinking{
-			Type:         "enabled",
-			BudgetTokens: &budget,
-		},
-	})
-
-	reasoning, ok := req["reasoning"].(map[string]interface{})
-	if !ok || reasoning == nil {
-		t.Fatalf("expected reasoning config, got %T", req["reasoning"])
-	}
-	if reasoning["effort"] != "xhigh" {
-		t.Fatalf("expected derived reasoning effort xhigh, got %v", reasoning["effort"])
 	}
 }
 

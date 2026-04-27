@@ -13,6 +13,7 @@ func TestOpenAIBuildRequest_IncludesExplicitReasoningEffortForReasoningModel(t *
 		Model:           "gpt-5.4",
 		Messages:        []map[string]interface{}{{"role": "user", "content": "hello"}},
 		ReasoningEffort: "high",
+		ReasoningModel:  true,
 	})
 
 	if got := req["reasoning_effort"]; got != "high" {
@@ -23,27 +24,29 @@ func TestOpenAIBuildRequest_IncludesExplicitReasoningEffortForReasoningModel(t *
 	}
 }
 
-func TestOpenAIBuildRequest_NormalizesXHighReasoningEffort(t *testing.T) {
+func TestOpenAIBuildRequest_PreservesXHighReasoningEffort(t *testing.T) {
 	a := &OpenAIAdapter{}
 
 	req := a.BuildRequest(RequestConfig{
 		Model:           "gpt-5.4",
 		Messages:        []map[string]interface{}{{"role": "user", "content": "hello"}},
 		ReasoningEffort: "xhigh",
+		ReasoningModel:  true,
 	})
 
-	if got := req["reasoning_effort"]; got != "high" {
-		t.Fatalf("expected reasoning_effort high after normalization, got %#v", got)
+	if got := req["reasoning_effort"]; got != "xhigh" {
+		t.Fatalf("expected reasoning_effort xhigh, got %#v", got)
 	}
 }
 
-func TestOpenAIBuildRequest_DeepSeekNormalizesReasoningEffort(t *testing.T) {
+func TestOpenAIBuildRequest_PreservesDeepSeekReasoningEffort(t *testing.T) {
 	a := &OpenAIAdapter{}
 
 	req := a.BuildRequest(RequestConfig{
 		Model:           "deepseek-v4-pro",
 		Messages:        []map[string]interface{}{{"role": "user", "content": "hello"}},
-		ReasoningEffort: "xhigh",
+		ReasoningEffort: "max",
+		ReasoningModel:  true,
 	})
 
 	if got := req["reasoning_effort"]; got != "max" {
@@ -51,7 +54,25 @@ func TestOpenAIBuildRequest_DeepSeekNormalizesReasoningEffort(t *testing.T) {
 	}
 }
 
-func TestOpenAIBuildRequest_DeepSeekDerivesHighReasoningEffortFromThinking(t *testing.T) {
+func TestOpenAIBuildRequest_PreservesModelScopeDeepSeekReasoningEffort(t *testing.T) {
+	a := &OpenAIAdapter{}
+
+	req := a.BuildRequest(RequestConfig{
+		Model:           "deepseek-ai/DeepSeek-V4-Pro",
+		Messages:        []map[string]interface{}{{"role": "user", "content": "hello"}},
+		ReasoningEffort: "max",
+		ReasoningModel:  true,
+	})
+
+	if got := req["reasoning_effort"]; got != "max" {
+		t.Fatalf("expected modelscope deepseek reasoning_effort max, got %#v", got)
+	}
+	if _, exists := req["temperature"]; exists {
+		t.Fatalf("did not expect temperature for deepseek modelscope reasoning request")
+	}
+}
+
+func TestOpenAIBuildRequest_PropagatesExplicitThinkingWithoutReasoningEffortDerivation(t *testing.T) {
 	a := &OpenAIAdapter{}
 
 	req := a.BuildRequest(RequestConfig{
@@ -62,26 +83,11 @@ func TestOpenAIBuildRequest_DeepSeekDerivesHighReasoningEffortFromThinking(t *te
 		},
 	})
 
-	if got := req["reasoning_effort"]; got != "high" {
-		t.Fatalf("expected deepseek reasoning_effort high, got %#v", got)
+	if _, exists := req["reasoning_effort"]; exists {
+		t.Fatalf("did not expect reasoning_effort to be derived from thinking: %#v", req["reasoning_effort"])
 	}
-}
-
-func TestOpenAIBuildRequest_DerivesReasoningEffortFromAnthropicThinking(t *testing.T) {
-	a := &OpenAIAdapter{}
-	budget := 32000
-
-	req := a.BuildRequest(RequestConfig{
-		Model:    "gpt-5.4",
-		Messages: []map[string]interface{}{{"role": "user", "content": "hello"}},
-		Thinking: &anthropictypes.Thinking{
-			Type:         "enabled",
-			BudgetTokens: &budget,
-		},
-	})
-
-	if got := req["reasoning_effort"]; got != "high" {
-		t.Fatalf("expected derived reasoning_effort high, got %#v", got)
+	if got := req["thinking"]; got == nil {
+		t.Fatal("expected explicit thinking to be propagated")
 	}
 }
 
@@ -94,8 +100,8 @@ func TestOpenAIBuildRequest_OmitsReasoningEffortForNonReasoningModel(t *testing.
 		ReasoningEffort: "high",
 	})
 
-	if _, exists := req["reasoning_effort"]; exists {
-		t.Fatalf("did not expect reasoning_effort for non-reasoning model: %#v", req["reasoning_effort"])
+	if got := req["reasoning_effort"]; got != "high" {
+		t.Fatalf("expected explicit reasoning_effort to be preserved, got %#v", got)
 	}
 	if got := req["temperature"]; got != 0.0 {
 		t.Fatalf("expected temperature to remain on non-reasoning model, got %#v", got)

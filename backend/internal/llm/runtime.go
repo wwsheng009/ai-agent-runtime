@@ -58,6 +58,7 @@ type LLMRequest struct {
 	MaxTokens       int                    `json:"maxTokens,omitempty" yaml:"maxTokens,omitempty"`
 	Temperature     float64                `json:"temperature,omitempty" yaml:"temperature,omitempty"`
 	ReasoningEffort string                 `json:"reasoning_effort,omitempty" yaml:"reasoning_effort,omitempty"`
+	ReasoningModel  bool                   `json:"reasoning_model,omitempty" yaml:"reasoning_model,omitempty"`
 	Thinking        *ThinkingConfig        `json:"thinking,omitempty" yaml:"thinking,omitempty"`
 	Stream          bool                   `json:"stream,omitempty" yaml:"stream,omitempty"`
 	Metadata        map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`

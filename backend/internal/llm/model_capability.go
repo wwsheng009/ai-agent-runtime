@@ -6,6 +6,9 @@ import (
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
+const defaultCompactMaxTokens = 2048
+const defaultCompactReasoningEffort = "none"
+
 // ModelCapabilityResolver allows runtime providers to expose provider/model
 // capability metadata without forcing callers to know the concrete provider type.
 type ModelCapabilityResolver interface {
@@ -36,7 +39,53 @@ func CloneModelCapabilitySpec(input agentconfig.ModelCapabilitySpec) agentconfig
 	if len(input.InputModalities) > 0 {
 		cloned.InputModalities = append([]string(nil), input.InputModalities...)
 	}
+	if len(input.ReasoningEfforts) > 0 {
+		cloned.ReasoningEfforts = append([]string(nil), input.ReasoningEfforts...)
+	}
+	if len(input.ReasoningEffortBudgets) > 0 {
+		cloned.ReasoningEffortBudgets = make(map[string]int, len(input.ReasoningEffortBudgets))
+		for key, value := range input.ReasoningEffortBudgets {
+			cloned.ReasoningEffortBudgets[key] = value
+		}
+	}
 	return cloned
+}
+
+// CloneModelCapabilityMap returns a detached copy of the capability map.
+func CloneModelCapabilityMap(input map[string]agentconfig.ModelCapabilitySpec) map[string]agentconfig.ModelCapabilitySpec {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]agentconfig.ModelCapabilitySpec, len(input))
+	for key, value := range input {
+		output[key] = CloneModelCapabilitySpec(value)
+	}
+	return output
+}
+
+// ReasoningModelEnabled returns the explicit reasoning-model flag from config,
+// with an explicit request override for legacy callers that still pass it
+// separately.
+func ReasoningModelEnabled(capability agentconfig.ModelCapabilitySpec, explicit bool) bool {
+	if capability.ReasoningModel {
+		return true
+	}
+	return explicit
+}
+
+// CompactSummarySettings resolves compact-specific request settings from a
+// model capability with safe defaults when the capability does not define them.
+func CompactSummarySettings(capability agentconfig.ModelCapabilitySpec) (maxTokens int, reasoningEffort string) {
+	maxTokens = capability.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = defaultCompactMaxTokens
+	}
+
+	reasoningEffort = strings.TrimSpace(capability.CompactReasoningEffort)
+	if reasoningEffort == "" {
+		reasoningEffort = defaultCompactReasoningEffort
+	}
+	return maxTokens, reasoningEffort
 }
 
 // ResolveRuntimeModelCapability resolves the effective provider/model pair for

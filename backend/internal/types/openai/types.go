@@ -32,7 +32,7 @@ type ChatCompletionRequest struct {
 	LogProbs            *bool            `json:"logprobs,omitempty"` // 是否返回对数概率
 	TopLogProbs         *int             `json:"top_logprobs,omitempty"` // 返回顶部对数概率数量（0-5）
 	EncodingFormat      json.RawMessage  `json:"encoding_format,omitempty"` // token 编码格式
-	ReasoningEffort     string           `json:"reasoning_effort,omitempty"` // 推理力度（o1/gpt-5）
+	ReasoningEffort     string           `json:"reasoning_effort,omitempty"` // OpenAI reasoning_effort 原样透传字段
 	Reasoning           *Reasoning       `json:"reasoning,omitempty"` // 推理参数
 	WebSearchOptions    *WebSearchOptions `json:"web_search_options,omitempty"` // Web搜索选项
 	ResponseFormat      *ResponseFormat  `json:"response_format,omitempty"` // 响应格式（JSON 模式、结构化输出）

@@ -43,8 +43,8 @@ func (a *AnthropicAdapter) BuildRequest(config RequestConfig) map[string]interfa
 	}
 
 	thinking := cloneAnthropicThinking(config.Thinking)
-	if thinking == nil && normalizeRuntimeReasoningEffort(config.ReasoningEffort) != "" {
-		thinking = mapReasoningEffortToAnthropicThinking(config.Model, config.ReasoningEffort)
+	if thinking == nil {
+		thinking = buildAnthropicThinkingFromReasoningEffort(config.ReasoningEffort, config.ReasoningEffortBudgets)
 	}
 	if thinking != nil && (normalizeAnthropicThinkingType(thinking.Type) != "" || normalizeAnthropicThinkingEffort(thinking.Effort) != "") {
 		request["thinking"] = thinking

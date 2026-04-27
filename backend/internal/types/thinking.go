@@ -31,7 +31,7 @@ func CloneThinkingConfig(thinking *ThinkingConfig) *ThinkingConfig {
 }
 
 func NormalizeReasoningEffort(effort string) string {
-	return strings.ToLower(strings.TrimSpace(effort))
+	return strings.TrimSpace(effort)
 }
 
 func ResolveThinkingConfig(explicit *ThinkingConfig, containers ...map[string]interface{}) *ThinkingConfig {

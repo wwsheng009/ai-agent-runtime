@@ -31,215 +31,78 @@ func normalizeRuntimeReasoningEffort(effort string) string {
 	return strings.ToLower(strings.TrimSpace(effort))
 }
 
-func supportsAnthropicAdaptiveThinking(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.Contains(model, "claude-opus-4-6") || strings.Contains(model, "claude-sonnet-4-6")
-}
-
-func mapAnthropicThinkingToReasoningEffort(model string, thinking *anthropictypes.Thinking) string {
-	if thinking == nil {
-		return ""
-	}
-
-	if effort := anthropicAdaptiveEffortToReasoningEffort(thinking.Effort); effort != "" {
-		return effort
-	}
-
-	switch normalizeAnthropicThinkingType(thinking.Type) {
-	case "":
-		return ""
-	case "disabled":
-		return "none"
-	case "adaptive":
-		if supportsAnthropicAdaptiveThinking(model) {
-			return "xhigh"
-		}
-		return "high"
-	case "low", "medium", "high":
-		return normalizeAnthropicThinkingType(thinking.Type)
-	case "minimal":
-		return "low"
-	case "enabled":
-		return mapThinkingBudgetToReasoningEffort(thinking.BudgetTokens)
-	default:
-		return "medium"
-	}
-}
-
-func mapReasoningEffortToAnthropicThinking(model, effort string) *anthropictypes.Thinking {
+func buildAnthropicThinkingFromReasoningEffort(effort string, budgets map[string]int) *anthropictypes.Thinking {
 	switch normalizeRuntimeReasoningEffort(effort) {
-	case "", "none":
+	case "":
+		return nil
+	case "none":
 		return &anthropictypes.Thinking{Type: "disabled"}
-	case "low", "medium", "high", "xhigh":
-		if supportsAnthropicAdaptiveThinking(model) {
-			thinking := &anthropictypes.Thinking{Type: "adaptive"}
-			if adaptiveEffort := reasoningEffortToAnthropicAdaptive(effort); adaptiveEffort != "" {
-				thinking.Effort = adaptiveEffort
-			}
-			return thinking
-		}
-		return &anthropictypes.Thinking{
-			Type:         "enabled",
-			BudgetTokens: mapReasoningEffortToThinkingBudget(effort),
-		}
-	default:
-		return &anthropictypes.Thinking{
-			Type:         "enabled",
-			BudgetTokens: mapReasoningEffortToThinkingBudget("medium"),
-		}
-	}
-}
-
-func mapThinkingBudgetToReasoningEffort(budget *int) string {
-	if budget == nil {
-		return "medium"
 	}
 
-	switch {
-	case *budget <= 0:
-		return "medium"
-	case *budget <= 1024:
-		return "low"
-	case *budget <= 8192:
-		return "medium"
-	case *budget <= 16384:
-		return "high"
-	default:
-		return "xhigh"
-	}
-}
-
-func mapReasoningEffortToThinkingBudget(effort string) *int {
-	var budget int
-	switch normalizeRuntimeReasoningEffort(effort) {
-	case "low":
-		budget = 1024
-	case "medium":
-		budget = 8192
-	case "high":
-		budget = 16384
-	case "xhigh":
-		budget = 32000
-	default:
-		budget = 8192
-	}
-	return &budget
-}
-
-func anthropicAdaptiveEffortToReasoningEffort(effort string) string {
-	switch normalizeAnthropicThinkingEffort(effort) {
-	case "":
-		return ""
-	case "minimal", "low":
-		return "low"
-	case "medium":
-		return "medium"
-	case "high":
-		return "high"
-	case "max", "xhigh":
-		return "xhigh"
-	case "disabled", "none":
-		return "none"
-	default:
-		return ""
-	}
-}
-
-func reasoningEffortToAnthropicAdaptive(effort string) string {
-	switch normalizeRuntimeReasoningEffort(effort) {
-	case "low":
-		return "low"
-	case "medium":
-		return "medium"
-	case "high":
-		return "high"
-	case "xhigh":
-		return "max"
-	default:
-		return ""
-	}
-}
-
-func normalizeOpenAIReasoningEffort(effort string) string {
-	switch normalizeRuntimeReasoningEffort(effort) {
-	case "", "none":
-		return ""
-	case "low", "medium", "high":
-		return normalizeRuntimeReasoningEffort(effort)
-	case "xhigh":
-		return "high"
-	default:
-		return "medium"
-	}
-}
-
-func isDeepSeekOpenAIModel(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.HasPrefix(model, "deepseek")
-}
-
-func normalizeDeepSeekReasoningEffort(effort string) string {
-	switch normalizeRuntimeReasoningEffort(effort) {
-	case "", "none":
-		return ""
-	case "low", "medium", "high":
-		return "high"
-	case "xhigh", "max":
-		return "max"
-	default:
-		return "high"
-	}
-}
-
-func deriveOpenAIReasoningEffort(model, explicit string, thinking *anthropictypes.Thinking) string {
-	model = strings.ToLower(strings.TrimSpace(model))
-	if isDeepSeekOpenAIModel(model) {
-		if normalized := normalizeDeepSeekReasoningEffort(explicit); normalized != "" {
-			return normalized
-		}
-		if thinking == nil {
-			return ""
-		}
-		return normalizeDeepSeekReasoningEffort(mapAnthropicThinkingToReasoningEffort(model, thinking))
-	}
-
-	if !isReasoningModelPrefix(model) {
-		return ""
-	}
-
-	if normalized := normalizeOpenAIReasoningEffort(explicit); normalized != "" {
-		return normalized
-	}
-	if thinking == nil {
-		return ""
-	}
-	return normalizeOpenAIReasoningEffort(mapAnthropicThinkingToReasoningEffort(model, thinking))
-}
-
-func deriveGeminiThinkingConfig(explicit string, thinking *anthropictypes.Thinking) map[string]interface{} {
-	effort := normalizeRuntimeReasoningEffort(explicit)
-	if effort == "" && thinking != nil {
-		effort = normalizeRuntimeReasoningEffort(mapAnthropicThinkingToReasoningEffort("", thinking))
-	}
-	if effort == "" || effort == "none" {
+	budget, ok := resolveConfiguredReasoningEffortBudget(effort, budgets)
+	if !ok || budget <= 0 {
 		return nil
 	}
 
-	var budget int
-	switch effort {
-	case "low":
-		budget = 1024
-	case "medium":
-		budget = 8192
-	case "high":
-		budget = 16384
-	case "xhigh":
-		budget = 24576
-	default:
-		budget = 8192
+	return &anthropictypes.Thinking{
+		Type:         "enabled",
+		Effort:       normalizeRuntimeReasoningEffort(effort),
+		BudgetTokens: &budget,
 	}
+}
+
+// resolveConfiguredReasoningEffortBudget only accepts budgets that are
+// explicitly declared in config (exact match, "*" or "default").
+func resolveConfiguredReasoningEffortBudget(effort string, budgets map[string]int) (int, bool) {
+	normalized := normalizeRuntimeReasoningEffort(effort)
+	if normalized == "" {
+		return 0, false
+	}
+
+	for _, key := range []string{normalized, "*", "default"} {
+		if budget, ok := budgets[key]; ok && budget > 0 {
+			return budget, true
+		}
+	}
+
+	return 0, false
+}
+
+func buildGeminiThinkingConfigFromReasoningEffort(effort string, budgets map[string]int) map[string]interface{} {
+	switch normalizeRuntimeReasoningEffort(effort) {
+	case "":
+		return nil
+	case "none":
+		return nil
+	}
+
+	budget, ok := resolveConfiguredReasoningEffortBudget(effort, budgets)
+	if !ok || budget <= 0 {
+		return nil
+	}
+
 	return map[string]interface{}{
 		"includeThoughts": true,
 		"thinkingBudget":  budget,
 	}
+}
+
+func buildGeminiThinkingConfigFromThinking(thinking *anthropictypes.Thinking, budgets map[string]int) map[string]interface{} {
+	if thinking == nil {
+		return nil
+	}
+	switch normalizeAnthropicThinkingType(thinking.Type) {
+	case "", "disabled", "none":
+		return nil
+	}
+	if thinking.BudgetTokens != nil {
+		return map[string]interface{}{
+			"includeThoughts": true,
+			"thinkingBudget":  *thinking.BudgetTokens,
+		}
+	}
+	if effort := normalizeRuntimeReasoningEffort(thinking.Effort); effort != "" {
+		return buildGeminiThinkingConfigFromReasoningEffort(effort, budgets)
+	}
+	return nil
 }

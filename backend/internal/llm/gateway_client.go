@@ -1069,6 +1069,9 @@ func (c *GatewayClient) CheckHealth(ctx context.Context) error {
 func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selected *SelectedResource, protocol string) adapter.RequestConfig {
 	resolvedModel := resolveGatewaySelectedModel(selected, model)
 	metadata := cloneMapStringAny(req.Metadata)
+	modelCapabilities := selectedProviderModelCapabilities(selected)
+	capability, _ := ResolveModelCapabilitySpec(resolvedModel, modelCapabilities)
+	reasoningModel := ReasoningModelEnabled(capability, req.ReasoningModel)
 
 	// 转换 Messages
 	messages := make([]map[string]interface{}, len(req.Messages))
@@ -1102,17 +1105,21 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 		}
 	}
 
+	reasoningConfig := resolveRequestReasoningConfig(req.ReasoningEffort, req.Thinking, req.Metadata)
+
 	return adapter.RequestConfig{
-		Model:           resolvedModel,
-		Messages:        messages,
-		Stream:          req.Stream,
-		MaxTokens:       req.MaxTokens,
-		ReasoningEffort: resolveReasoningEffort(req.ReasoningEffort, req.Metadata),
-		Thinking:        resolveThinkingConfig(req.Thinking, req.Metadata),
-		Temperature:     req.Temperature,
-		Functions:       tools,
-		Timeout:         c.defaultTimeout,
-		Metadata:        metadata,
+		Model:                  resolvedModel,
+		Messages:               messages,
+		Stream:                 req.Stream,
+		MaxTokens:              req.MaxTokens,
+		ReasoningEffort:        reasoningConfig.ReasoningEffort,
+		ReasoningEffortBudgets: capability.ReasoningEffortBudgets,
+		ReasoningModel:         reasoningModel,
+		Thinking:               reasoningConfig.Thinking,
+		Temperature:            req.Temperature,
+		Functions:              tools,
+		Timeout:                c.defaultTimeout,
+		Metadata:               metadata,
 	}
 }
 
