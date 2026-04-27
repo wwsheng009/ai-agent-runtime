@@ -601,7 +601,7 @@ func (a *Agent) buildPreferredPlan(ctx context.Context, req *OrchestrationReques
 		if strings.TrimSpace(req.Model) != "" {
 			a.planner.model = strings.TrimSpace(req.Model)
 		}
-		a.planner.reasoningEffort = strings.TrimSpace(req.ReasoningEffort)
+		a.planner.reasoningEffort = types.NormalizeReasoningEffort(req.ReasoningEffort)
 		a.planner.thinking = types.CloneThinkingConfig(req.Thinking)
 		defer func() {
 			a.planner.provider = prevProvider
@@ -719,7 +719,7 @@ func (a *Agent) callLLM(ctx context.Context, req *OrchestrationRequest) (*llm.LL
 		Messages:        messages,
 		MaxTokens:       maxTokens,
 		Temperature:     temperature,
-		ReasoningEffort: req.ReasoningEffort,
+		ReasoningEffort: types.NormalizeReasoningEffort(req.ReasoningEffort),
 		Thinking:        types.CloneThinkingConfig(req.Thinking),
 		Metadata:        llmMetadata,
 	})

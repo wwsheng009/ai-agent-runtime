@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
@@ -212,6 +213,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	}
 	remainingBudget := options.BudgetTokens
 	currentCtx := ensureTurnToolSurfaceSnapshot(ctx)
+	sessionCompactionRecoveryStep := 0
 
 	// ReAct 循环：Think - Act - Observe
 	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
@@ -234,6 +236,28 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, builder.Messages(), observations, options.ToolWhitelist, remainingBudget)
 		if err != nil {
 			if preflightErr, ok := AsPromptPreflightError(err); ok && options.PersistHistory != nil {
+				recoveryHistory := builder.Messages()
+				if replacement := preflightErr.CloneReplacementHistory(); len(replacement) > 0 {
+					recoveryHistory = replacement
+				}
+				if sessionCompactionRecoveryStep != step {
+					recoveredHistory, recovered, recoveryErr := loop.trySessionCompactionRecovery(ctx, sessionID, traceID, step, recoveryHistory, preflightErr.Metadata())
+					if recoveryErr != nil {
+						loop.agent.AddError(fmt.Sprintf("session compaction recovery failed: %v", recoveryErr))
+					} else if recovered && len(recoveredHistory) > 0 {
+						if persistErr := options.PersistHistory(recoveredHistory); persistErr != nil {
+							loop.agent.AddError(fmt.Sprintf("persist compacted history after prompt preflight failed: %v", persistErr))
+							result.Error = err.Error()
+							result.Usage = totalUsage.Clone()
+							result.State = loop.agent.GetState()
+							return result, fmt.Errorf("%w: persisted compacted history failed: %v", err, persistErr)
+						}
+						builder = NewMessageBuilder(recoveredHistory)
+						loop.configureBuilderActiveTurnCompaction(builder, options.BudgetTokens)
+						sessionCompactionRecoveryStep = step
+						continue
+					}
+				}
 				if replacement := preflightErr.CloneReplacementHistory(); len(replacement) > 0 {
 					if persistErr := options.PersistHistory(replacement); persistErr != nil {
 						loop.agent.AddError(fmt.Sprintf("persist compacted history after prompt preflight failed: %v", persistErr))
@@ -550,6 +574,36 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if len(preflightMetadata) > 0 {
 		requestPayload["context_preflight"] = cloneInterfaceMap(preflightMetadata)
 	}
+	if totalMessageTokens > 0 {
+		requestPayload["context_prompt_tokens"] = totalMessageTokens
+	}
+	if budgetValue, ok := preflightMetadata["prompt_budget"]; ok {
+		if value := intValue(budgetValue); value > 0 {
+			requestPayload["prompt_budget"] = value
+		}
+	}
+	if sourceValue, ok := preflightMetadata["budget_source"]; ok {
+		if value := strings.TrimSpace(stringValue(sourceValue)); value != "" {
+			requestPayload["budget_source"] = value
+		}
+	}
+	if sourceDetailValue, ok := preflightMetadata["budget_source_detail"]; ok {
+		if value := strings.TrimSpace(stringValue(sourceDetailValue)); value != "" {
+			requestPayload["budget_source_detail"] = value
+		}
+	}
+	if candidates, ok := preflightMetadata["budget_candidates"].(map[string]interface{}); ok && len(candidates) > 0 {
+		requestPayload["budget_candidates"] = cloneInterfaceMap(candidates)
+	}
+	if windowValue, ok := preflightMetadata["model_capability_max_context_tokens"]; ok {
+		if value := intValue(windowValue); value > 0 {
+			requestPayload["context_window_tokens"] = value
+		}
+	} else if windowValue, ok := preflightMetadata["provider_context_limit"]; ok {
+		if value := intValue(windowValue); value > 0 {
+			requestPayload["context_window_tokens"] = value
+		}
+	}
 	if promptLayoutSummary != "" {
 		requestPayload["prompt_layout_summary"] = promptLayoutSummary
 	}
@@ -578,24 +632,102 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	loop.agent.emitRuntimeEvent("llm.request.started", sessionID, "", requestPayload)
 	response, err := loop.llmRuntime.Call(callCtx, req)
 	if err != nil {
-		loop.agent.emitRuntimeEvent("llm.request.finished", sessionID, "", map[string]interface{}{
+		finishedPayload := map[string]interface{}{
 			"trace_id": traceID,
 			"step":     step,
 			"model":    req.Model,
 			"provider": req.Provider,
 			"success":  false,
 			"error":    err.Error(),
-		})
+		}
+		if totalMessageTokens > 0 {
+			finishedPayload["context_prompt_tokens"] = totalMessageTokens
+		}
+		if budgetValue, ok := preflightMetadata["prompt_budget"]; ok {
+			if value := intValue(budgetValue); value > 0 {
+				finishedPayload["prompt_budget"] = value
+			}
+		}
+		if sourceValue, ok := preflightMetadata["budget_source"]; ok {
+			if value := strings.TrimSpace(stringValue(sourceValue)); value != "" {
+				finishedPayload["budget_source"] = value
+			}
+		}
+		if sourceDetailValue, ok := preflightMetadata["budget_source_detail"]; ok {
+			if value := strings.TrimSpace(stringValue(sourceDetailValue)); value != "" {
+				finishedPayload["budget_source_detail"] = value
+			}
+		}
+		if candidates, ok := preflightMetadata["budget_candidates"].(map[string]interface{}); ok && len(candidates) > 0 {
+			finishedPayload["budget_candidates"] = cloneInterfaceMap(candidates)
+		}
+		if windowValue, ok := preflightMetadata["model_capability_max_context_tokens"]; ok {
+			if value := intValue(windowValue); value > 0 {
+				finishedPayload["context_window_tokens"] = value
+			}
+		} else if windowValue, ok := preflightMetadata["provider_context_limit"]; ok {
+			if value := intValue(windowValue); value > 0 {
+				finishedPayload["context_window_tokens"] = value
+			}
+		}
+		loop.agent.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
 		return "", nil, nil, err
 	}
-	loop.agent.emitRuntimeEvent("llm.request.finished", sessionID, "", map[string]interface{}{
+	finishedPayload := map[string]interface{}{
 		"trace_id":        traceID,
 		"step":            step,
 		"model":           req.Model,
 		"provider":        req.Provider,
 		"success":         true,
 		"tool_call_count": len(response.ToolCalls),
-	})
+	}
+	if totalMessageTokens > 0 {
+		finishedPayload["context_prompt_tokens"] = totalMessageTokens
+	}
+	if budgetValue, ok := preflightMetadata["prompt_budget"]; ok {
+		if value := intValue(budgetValue); value > 0 {
+			finishedPayload["prompt_budget"] = value
+		}
+	}
+	if sourceValue, ok := preflightMetadata["budget_source"]; ok {
+		if value := strings.TrimSpace(stringValue(sourceValue)); value != "" {
+			finishedPayload["budget_source"] = value
+		}
+	}
+	if sourceDetailValue, ok := preflightMetadata["budget_source_detail"]; ok {
+		if value := strings.TrimSpace(stringValue(sourceDetailValue)); value != "" {
+			finishedPayload["budget_source_detail"] = value
+		}
+	}
+	if candidates, ok := preflightMetadata["budget_candidates"].(map[string]interface{}); ok && len(candidates) > 0 {
+		finishedPayload["budget_candidates"] = cloneInterfaceMap(candidates)
+	}
+	if windowValue, ok := preflightMetadata["model_capability_max_context_tokens"]; ok {
+		if value := intValue(windowValue); value > 0 {
+			finishedPayload["context_window_tokens"] = value
+		}
+	} else if windowValue, ok := preflightMetadata["provider_context_limit"]; ok {
+		if value := intValue(windowValue); value > 0 {
+			finishedPayload["context_window_tokens"] = value
+		}
+	}
+	if response != nil && response.Usage != nil {
+		finishedPayload["usage_prompt_tokens"] = response.Usage.PromptTokens
+		finishedPayload["usage_completion_tokens"] = response.Usage.CompletionTokens
+		finishedPayload["usage_total_tokens"] = response.Usage.TotalTokens
+		if response.Usage.CachedTokens > 0 {
+			finishedPayload["usage_cached_tokens"] = response.Usage.CachedTokens
+		}
+		if response.Usage.ReasoningTokens > 0 {
+			finishedPayload["usage_reasoning_tokens"] = response.Usage.ReasoningTokens
+		}
+	}
+	if response != nil && response.Metadata != nil {
+		if source := strings.TrimSpace(stringValue(response.Metadata["usage_source"])); source != "" {
+			finishedPayload["usage_source"] = source
+		}
+	}
+	loop.agent.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
 
 	// 解析响应
 	action.Content = response.Content
@@ -2198,6 +2330,118 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 	}
 	loop.agent.emitRuntimeEvent("context.preflight.failed", sessionID, "", failedPayload)
 	return nil, preflightMetadata, failureErr
+}
+
+func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, sessionID, traceID string, step int, history []types.Message, budgetMetadata map[string]interface{}) ([]types.Message, bool, error) {
+	if loop == nil || loop.agent == nil || loop.llmRuntime == nil || len(history) == 0 {
+		return nil, false, nil
+	}
+
+	runtime := compactruntime.New(loop.llmRuntime, loop.agent.GetContextManager())
+	provider := ""
+	model := ""
+	if loop.agent.config != nil {
+		provider = loop.agent.config.Provider
+		model = loop.agent.config.Model
+	}
+
+	startedPayload := map[string]interface{}{
+		"session_id":    sessionID,
+		"trace_id":      traceID,
+		"step":          step,
+		"phase":         compactruntime.PhasePreTurn,
+		"mode":          compactruntime.ModeLocal,
+		"reason":        "prompt_preflight_recovery",
+		"provider":      provider,
+		"model":         model,
+		"message_count": len(history),
+		"token_before":  loop.llmRuntime.CountMessagesTokens(history),
+	}
+	for key, value := range budgetMetadata {
+		if value == nil {
+			continue
+		}
+		startedPayload[key] = value
+	}
+	if window := firstPositiveBudgetMetadataInt(
+		budgetMetadata["context_window_tokens"],
+		budgetMetadata["max_context_tokens"],
+		budgetMetadata["model_capability_max_context_tokens"],
+		budgetMetadata["provider_context_limit"],
+	); window > 0 {
+		startedPayload["context_window_tokens"] = window
+	}
+	loop.agent.emitRuntimeEvent("session_compact_started", sessionID, "", startedPayload)
+
+	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
+		SessionID: sessionID,
+		TaskID:    sessionID,
+		Provider:  provider,
+		Model:     model,
+		Mode:      compactruntime.ModeLocal,
+		Force:     true,
+		History:   cloneMessageHistory(history),
+		Phase:     compactruntime.PhasePreTurn,
+		CountTokens: func(messages []types.Message) int {
+			return loop.llmRuntime.CountMessagesTokens(messages)
+		},
+	})
+	if err != nil {
+		failedPayload := cloneInterfaceMap(startedPayload)
+		failedPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "session_compaction_failed")
+		failedPayload["error"] = err.Error()
+		failedPayload["trigger_token_limit"] = status.TriggerTokenLimit
+		failedPayload["max_context_tokens"] = status.MaxContextTokens
+		loop.agent.emitRuntimeEvent("session_compact_failed", sessionID, "", failedPayload)
+		return nil, false, err
+	}
+	if result == nil || len(result.ReplacementHistory) == 0 {
+		skippedPayload := cloneInterfaceMap(startedPayload)
+		skippedPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "no_replacement_history")
+		skippedPayload["trigger_token_limit"] = status.TriggerTokenLimit
+		skippedPayload["max_context_tokens"] = status.MaxContextTokens
+		loop.agent.emitRuntimeEvent("session_compact_skipped", sessionID, "", skippedPayload)
+		return nil, false, nil
+	}
+
+	completedPayload := cloneInterfaceMap(startedPayload)
+	completedPayload["mode"] = firstNonEmptyTrimmed(result.Mode, status.Mode)
+	completedPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "recovered")
+	completedPayload["token_after"] = result.TokenAfter
+	completedPayload["compacted_messages"] = result.CompactedMessages
+	completedPayload["message_count_after"] = len(result.ReplacementHistory)
+	completedPayload["trigger_token_limit"] = result.TriggerTokenLimit
+	completedPayload["max_context_tokens"] = result.MaxContextTokens
+	if result.Usage != nil {
+		completedPayload["usage_prompt_tokens"] = result.Usage.PromptTokens
+		completedPayload["usage_completion_tokens"] = result.Usage.CompletionTokens
+		completedPayload["usage_total_tokens"] = result.Usage.TotalTokens
+		if result.Usage.CachedTokens > 0 {
+			completedPayload["usage_cached_tokens"] = result.Usage.CachedTokens
+		}
+		if result.Usage.ReasoningTokens > 0 {
+			completedPayload["usage_reasoning_tokens"] = result.Usage.ReasoningTokens
+		}
+	}
+	if result.UsageSource != "" {
+		completedPayload["usage_source"] = result.UsageSource
+	}
+	if len(result.CheckpointIDs) > 0 {
+		completedPayload["checkpoint_ids"] = append([]string(nil), result.CheckpointIDs...)
+		completedPayload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]
+	}
+	loop.agent.emitRuntimeEvent("session_compact_completed", sessionID, "", completedPayload)
+
+	return cloneMessageHistory(result.ReplacementHistory), true, nil
+}
+
+func firstPositiveBudgetMetadataInt(values ...interface{}) int {
+	for _, value := range values {
+		if number := intValue(value); number > 0 {
+			return number
+		}
+	}
+	return 0
 }
 
 func buildPromptPreflightFailure(code string, messages []types.Message, promptTokens, promptBudget int) promptPreflightFailure {

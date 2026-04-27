@@ -1419,6 +1419,11 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			result, execErr = a.continueLoop(runCtx, session)
 		} else {
 			result, execErr = a.runLoop(runCtx, prompt, session)
+			if preflightErr, ok := agent.AsPromptPreflightError(execErr); ok && preflightErr != nil {
+				if compactResult, _, compactErr := a.runManualCompact(ctx, session, compactruntime.ModeLocal); compactErr == nil && compactResult != nil {
+					result, execErr = a.runLoop(runCtx, prompt, session)
+				}
+			}
 		}
 		cancel()
 		a.clearActiveCancel()

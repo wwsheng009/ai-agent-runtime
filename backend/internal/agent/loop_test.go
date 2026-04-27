@@ -527,7 +527,7 @@ func TestReActLoop_RunWithSession_EmitsLLMRetryRuntimeEvent(t *testing.T) {
 	assert.Equal(t, "test-model", retryEvent.Payload["model"])
 	assert.EqualValues(t, 1, retryEvent.Payload["attempt"])
 	assert.EqualValues(t, 2, retryEvent.Payload["max_attempts"])
-	assert.Equal(t, "http_429", retryEvent.Payload["retry_reason"])
+	assert.Equal(t, "rate_limit", retryEvent.Payload["retry_reason"])
 	assert.EqualValues(t, 1, retryEvent.Payload["retry_delay_ms"])
 	assert.Contains(t, retryEvent.Payload["error"], "HTTP 429")
 }
@@ -1242,7 +1242,7 @@ func TestReActLoop_Run_PromptPreflightFailsWhenReplayCannotBeCompactedFurther(t 
 	require.NotNil(t, payload["latest_replay_block_message_count"])
 }
 
-func TestReActLoop_RunWithSession_PersistsCompactedHistoryOnPromptPreflightFailure(t *testing.T) {
+func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPreflightFailure(t *testing.T) {
 	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
 	llmRuntime := llm.NewLLMRuntime(nil)
 	provider := &SequenceLLMProvider{
@@ -1263,7 +1263,11 @@ func TestReActLoop_RunWithSession_PersistsCompactedHistoryOnPromptPreflightFailu
 				},
 			},
 			{
-				Content: "这条响应不应被请求到。",
+				Content: "压缩后整理上下文。",
+				Model:   "test-model",
+			},
+			{
+				Content: "恢复后的最终回答。",
 				Model:   "test-model",
 			},
 		},
@@ -1284,6 +1288,16 @@ func TestReActLoop_RunWithSession_PersistsCompactedHistoryOnPromptPreflightFailu
 		},
 	}, &MockSequenceMCPManager{output: "LOG " + large}, llmRuntime)
 
+	bus := runtimeevents.NewBus()
+	var compactionEvents []runtimeevents.Event
+	bus.Subscribe("session_compact_started", func(event runtimeevents.Event) {
+		compactionEvents = append(compactionEvents, event)
+	})
+	bus.Subscribe("session_compact_completed", func(event runtimeevents.Event) {
+		compactionEvents = append(compactionEvents, event)
+	})
+	agent.SetEventBus(bus)
+
 	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
 		MaxSteps:        4,
 		EnableThought:   true,
@@ -1292,28 +1306,30 @@ func TestReActLoop_RunWithSession_PersistsCompactedHistoryOnPromptPreflightFailu
 	session := newTestHistorySession("session-preflight-recovery")
 
 	result, err := loop.RunWithSession(context.Background(), "继续处理", session)
-	require.Error(t, err)
 	require.NotNil(t, result)
-	preflightErr, ok := AsPromptPreflightError(err)
-	require.True(t, ok, "expected prompt preflight error type")
-	require.Equal(t, "prompt_still_exceeds_budget_after_compaction", preflightErr.Code)
-	require.True(t, preflightErr.ActiveTurnCompacted)
-	require.True(t, preflightErr.ReplacementHistoryApplied)
-	require.NotEmpty(t, preflightErr.CloneReplacementHistory())
-	require.Len(t, provider.requests, 2)
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, "恢复后的最终回答。", result.Output)
+	require.Len(t, provider.requests, 4)
+	require.Len(t, compactionEvents, 2)
+	require.Equal(t, "session_compact_started", compactionEvents[0].Type)
+	require.Equal(t, "session_compact_completed", compactionEvents[1].Type)
+	require.Equal(t, "session-preflight-recovery", compactionEvents[0].SessionID)
+	require.Equal(t, "session-preflight-recovery", compactionEvents[1].SessionID)
+	require.NotNil(t, compactionEvents[1].Payload["message_count_after"])
 
 	messages := session.GetMessages()
-	require.Len(t, messages, 4)
+	require.NotEmpty(t, messages)
 
 	foundCompaction := false
 	for _, message := range messages {
-		if message.Metadata.GetBool("active_turn_compaction", false) {
+		if message.Metadata.GetString("context_stage", "") == "compaction" {
 			foundCompaction = true
-			require.Contains(t, message.Content, "Compacted earlier tool replay in current turn:")
+			require.Contains(t, message.Content, "Compacted context from earlier turns:")
 			break
 		}
 	}
-	require.True(t, foundCompaction, "expected compacted replay summary to be persisted to session history")
+	require.True(t, foundCompaction, "expected session-level compacted summary to be persisted to session history")
 }
 
 func TestResolvePromptPreflightBudget_UsesModelCapabilityThresholdWhenMoreConservative(t *testing.T) {
