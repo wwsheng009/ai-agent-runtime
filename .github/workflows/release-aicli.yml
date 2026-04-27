@@ -1,0 +1,183 @@
+name: Release aicli
+
+# 触发条件：
+# 1. 推送形如 v*（含 v1.2.3、v1.2.3-rc.1、aicli-v1.2.3 等）的 tag 时自动编译并发布 Release
+# 2. 手动在 Actions 页面触发（可选自定义版本号，不发布 Release，只产出工件）
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'aicli-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '自定义版本号（可选，默认使用 short SHA）'
+        required: false
+        default: ''
+      publish_release:
+        description: '是否创建 GitHub Release（仅手动触发时可选）'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.24'
+  CMD_PATH: ./cmd/aicli
+  BIN_NAME: aicli
+  WORKDIR: backend
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.WORKDIR }}/go.sum
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build_time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION} build_time=${BUILD_TIME}"
+
+      - name: Build
+        shell: bash
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          set -euo pipefail
+          EXT=""
+          if [[ "${GOOS}" == "windows" ]]; then EXT=".exe"; fi
+          ARTIFACT="${BIN_NAME}-${GOOS}-${GOARCH}${EXT}"
+          OUTDIR="../dist"
+          mkdir -p "${OUTDIR}"
+          LDFLAGS="-s -w -X main.version=${{ steps.ver.outputs.version }} -X main.buildTime=${{ steps.ver.outputs.build_time }}"
+          echo "Building ${ARTIFACT} with ldflags: ${LDFLAGS}"
+          go build -trimpath -ldflags "${LDFLAGS}" -o "${OUTDIR}/${ARTIFACT}" ${CMD_PATH}
+          ls -lh "${OUTDIR}/${ARTIFACT}"
+
+      - name: Package artifact
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOOS="${{ matrix.goos }}"
+          GOARCH="${{ matrix.goarch }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          EXT=""
+          if [[ "${GOOS}" == "windows" ]]; then EXT=".exe"; fi
+          BIN="${BIN_NAME}-${GOOS}-${GOARCH}${EXT}"
+          BASENAME="${BIN_NAME}-${VERSION}-${GOOS}-${GOARCH}"
+          mkdir -p dist/release
+          cp "dist/${BIN}" "dist/release/${BIN_NAME}${EXT}"
+          # 复制可选的 README / LICENSE（如果存在）
+          [ -f README.md ] && cp README.md dist/release/ || true
+          [ -f LICENSE ] && cp LICENSE dist/release/ || true
+          cd dist/release
+          if [[ "${GOOS}" == "windows" ]]; then
+            ARCHIVE="../${BASENAME}.zip"
+            zip -9 "${ARCHIVE}" ./*
+          else
+            ARCHIVE="../${BASENAME}.tar.gz"
+            tar -czf "${ARCHIVE}" ./*
+          fi
+          cd ..
+          # 生成 sha256 校验
+          ARCHIVE_NAME="$(basename "${ARCHIVE}")"
+          sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          rm -rf release
+          ls -lh
+          echo "archive=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "basename=${BASENAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.basename }}
+          path: |
+            dist/${{ steps.pkg.outputs.archive }}
+            dist/${{ steps.pkg.outputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish_release == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lhR dist
+
+      - name: Aggregate checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          : > SHA256SUMS.txt
+          for f in *.sha256; do
+            cat "$f" >> SHA256SUMS.txt
+          done
+          cat SHA256SUMS.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

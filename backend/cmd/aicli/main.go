@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -12,6 +13,38 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
+
+// 默认配置文件搜索路径（首个存在即采用），可被 -c/--config 显式覆盖。
+// 顺序：
+//  1. $HOME/.aicli/config.yaml      —— 用户级全局配置
+//  2. <cwd>/.aicli/config.yaml      —— 项目级 .aicli 目录
+//  3. <cwd>/aicli.yaml              —— 项目级单文件
+//  4. <cwd>/configs/config.yaml     —— 旧版默认路径（向后兼容）
+func defaultConfigSearchPaths() []string {
+	paths := make([]string, 0, 4)
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths, filepath.Join(home, ".aicli", "config.yaml"))
+	}
+	paths = append(paths,
+		filepath.Join(".aicli", "config.yaml"),
+		"aicli.yaml",
+		filepath.Join("configs", "config.yaml"),
+	)
+	return paths
+}
+
+// resolveConfigPath 在搜索路径中返回首个存在的文件；都不存在时返回空串（由 InitGlobalConfig 容忍）。
+func resolveConfigPath(paths []string) string {
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
 
 var (
 	version     = "dev"
@@ -68,8 +101,9 @@ func main() {
 	}
 
 	// 全局 flags
-	configPath := "./configs/config.yaml"
-	rootCmd.PersistentFlags().StringP("config", "c", "./configs/config.yaml", "配置文件路径")
+	// 默认空串：未显式 -c 时按 defaultConfigSearchPaths() 顺序查找
+	var configPath string
+	rootCmd.PersistentFlags().StringP("config", "c", "", "配置文件路径（未指定时按 $HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml 顺序查找）")
 	rootCmd.PersistentFlags().StringVarP(&logFilePath, "logfile", "l", "", "日志文件路径（默认使用 aicli.log.file_path 或 log.file_path）")
 	rootCmd.PersistentFlags().String("theme", "", "输出主题（classic|focus|contrast|mono，留空使用配置或默认）")
 	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
@@ -77,10 +111,15 @@ func main() {
 	// 解析配置后初始化
 	cobra.OnInitialize(func() {
 		// 读取配置文件路径
-		if cfgPath, err := rootCmd.Flags().GetString("config"); err == nil {
-			configPath = cfgPath
+		cfgFlag, _ := rootCmd.Flags().GetString("config")
+		if cfgFlag != "" {
+			// 用户显式 -c：使用指定路径，不再回退
+			configPath = cfgFlag
+		} else {
+			// 未显式指定：按搜索顺序找首个存在的配置文件
+			configPath = resolveConfigPath(defaultConfigSearchPaths())
 		}
-		// 加载配置
+		// 加载配置（configPath 为空时 InitGlobalConfig 会返回空配置而不报错）
 		loadedConfig, err := config.InitGlobalConfig(configPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Failed to load config: %v\n", err)
