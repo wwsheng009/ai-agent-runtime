@@ -87,6 +87,15 @@ func cloneRuntimeModelCapabilities(input map[string]agentconfig.ModelCapabilityS
 		if len(value.InputModalities) > 0 {
 			cloned.InputModalities = append([]string(nil), value.InputModalities...)
 		}
+		if len(value.ReasoningEfforts) > 0 {
+			cloned.ReasoningEfforts = append([]string(nil), value.ReasoningEfforts...)
+		}
+		if len(value.ReasoningEffortBudgets) > 0 {
+			cloned.ReasoningEffortBudgets = make(map[string]int, len(value.ReasoningEffortBudgets))
+			for key, budget := range value.ReasoningEffortBudgets {
+				cloned.ReasoningEffortBudgets[key] = budget
+			}
+		}
 		output[key] = cloned
 	}
 	return output

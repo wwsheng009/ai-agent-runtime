@@ -142,7 +142,7 @@ nullable
 
 **Possible values:** [`high`, `max`]
 
-控制模型的推理强度。对普通请求，默认为 `high`。对一些复杂 Agent 类请求（如 Claude Code、OpenCode），自动设置为 `max`。出于兼容考虑 `low`、`medium` 会映射为 `high`, `xhigh` 会映射为 `max`。
+控制模型的推理强度。请按模型支持的 `reasoning_effort` 原值传入；本仓库不再做额外的语义映射。
 
 **frequency_penalty** numbernullable
 

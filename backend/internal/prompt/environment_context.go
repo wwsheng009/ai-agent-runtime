@@ -82,6 +82,27 @@ func RenderShellExecutionGuidance() string {
 	return strings.Join(rendered, "\n")
 }
 
+// RenderFileEditingGuidance renders guardrails that steer the model toward
+// dedicated file-editing tools instead of shell-based file writes.
+func RenderFileEditingGuidance() string {
+	lines := []string{
+		"Prefer the dedicated file tools for workspace mutations.",
+		"Use `write` for full-file writes, `edit` for small replacements, and `apply_patch` for structured multi-hunk edits.",
+		"Do not use shell redirection, here-strings, or inline `Set-Content`/`Out-File`/`Add-Content` commands for large file writes.",
+		"For long content, split the work into smaller file-tool calls instead of building one huge shell command.",
+	}
+
+	rendered := make([]string, 0, len(lines)+1)
+	rendered = append(rendered, "File editing guidance:")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		rendered = append(rendered, "- "+line)
+	}
+	return strings.Join(rendered, "\n")
+}
+
 func detectedShellName(shell runtimeexecutor.Shell) string {
 	if text := strings.TrimSpace(string(shell.Type)); text != "" {
 		return text
