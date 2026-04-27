@@ -599,7 +599,9 @@ func TestExecutor_ExecuteDefault_RetriesWithoutSystemRoleWhenHistoryStartsWithAs
 	assert.Equal(t, "user", provider.lastMessages[0].Role)
 	assert.Equal(t, "assistant", provider.lastMessages[1].Role)
 	assert.Equal(t, "user", provider.lastMessages[2].Role)
-	assert.Equal(t, "System instructions:\nAlways answer with USER_FIRST_OK", provider.lastMessages[0].Content)
+	assert.Contains(t, provider.lastMessages[0].Content, "System instructions:\nAlways answer with USER_FIRST_OK")
+	assert.Contains(t, provider.lastMessages[0].Content, "Environment context:")
+	assert.Contains(t, provider.lastMessages[0].Content, "Shell guidance:")
 }
 
 func TestExecutor_PrepareArgs_RendersWorkflowTemplates(t *testing.T) {

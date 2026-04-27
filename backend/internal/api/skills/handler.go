@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -5985,6 +5986,16 @@ func runtimeModelsSnapshot(runtime *llm.LLMRuntime) map[string]interface{} {
 				providerPayload["supports_streaming"] = caps.SupportsStreaming
 				providerPayload["max_context_tokens"] = caps.MaxContextTokens
 				providerPayload["max_output_tokens"] = caps.MaxOutputTokens
+			}
+
+			if provider, err := runtime.GetProvider(name); err == nil && provider != nil {
+				if lister, ok := provider.(interface {
+					ListModelCapabilities() map[string]agentconfig.ModelCapabilitySpec
+				}); ok {
+					if modelCapabilities := lister.ListModelCapabilities(); len(modelCapabilities) > 0 {
+						providerPayload["model_capabilities"] = modelCapabilities
+					}
+				}
 			}
 
 			providersPayload = append(providersPayload, providerPayload)

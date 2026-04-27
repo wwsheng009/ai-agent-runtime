@@ -20,6 +20,9 @@ func buildAgentContextMessages(contextValues map[string]interface{}, workspaceCt
 	if guidance := buildAgentShellGuidanceMessage(); guidance != nil {
 		messages = append(messages, *guidance)
 	}
+	if guidance := buildAgentFileEditingGuidanceMessage(); guidance != nil {
+		messages = append(messages, *guidance)
+	}
 	if workspaceCtx != nil && strings.TrimSpace(workspaceCtx.Summary) != "" {
 		messages = append(messages, *types.NewSystemMessage("Workspace context: " + strings.TrimSpace(workspaceCtx.Summary)))
 	}
@@ -45,6 +48,14 @@ func buildAgentEnvironmentContextMessage(contextValues map[string]interface{}) *
 
 func buildAgentShellGuidanceMessage() *types.Message {
 	guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidance())
+	if guidance == "" {
+		return nil
+	}
+	return types.NewSystemMessage(guidance)
+}
+
+func buildAgentFileEditingGuidanceMessage() *types.Message {
+	guidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidance())
 	if guidance == "" {
 		return nil
 	}

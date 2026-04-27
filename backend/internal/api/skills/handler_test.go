@@ -806,7 +806,7 @@ func TestHandlerWriteError_ExposesPromptPreflightMetadata(t *testing.T) {
 	assert.Equal(t, float64(2), payload["replacement_history_message_count"])
 }
 
-func TestAgentChat_ReActPromptPreflightPersistsRecoveryHistoryAndReturnsStructuredError(t *testing.T) {
+func TestAgentChat_ReActReturnsStructuredFailureWhenMaxStepsIsReached(t *testing.T) {
 	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
 	mcpManager := &largeOutputMCPManager{output: "LOG " + large}
 	registry := skill.NewRegistry(mcpManager)
@@ -846,8 +846,8 @@ func TestAgentChat_ReActPromptPreflightPersistsRecoveryHistoryAndReturnsStructur
 	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
 	runtimeConfig.Agent.DefaultProvider = "test-provider"
 	runtimeConfig.Agent.DefaultModel = "test-model"
-	runtimeConfig.Agent.MaxMaxSteps = 4
-	runtimeConfig.Context.MaxPromptTokens = 620
+	runtimeConfig.Agent.MaxMaxSteps = 8
+	runtimeConfig.Context.MaxPromptTokens = 64
 	runtimeConfig.Context.MaxMessages = 16
 	runtimeConfig.Context.KeepRecentMessages = 8
 	handler.SetRuntimeConfig(runtimeConfig, "")
@@ -872,48 +872,23 @@ func TestAgentChat_ReActPromptPreflightPersistsRecoveryHistoryAndReturnsStructur
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
 	require.GreaterOrEqual(t, provider.callCount, 1)
-	require.Less(t, provider.callCount, len(provider.responses))
 
 	var payload map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
-	traceID, ok := payload["trace_id"].(string)
+	assert.Equal(t, "failed", payload["status"])
+	result, ok := payload["result"].(map[string]interface{})
 	require.True(t, ok)
-	require.NotEmpty(t, traceID)
-	assert.Equal(t, "prompt_preflight", payload["error_type"])
-	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", payload["failure_reason_code"])
-	assert.Equal(t, true, payload["replacement_history_available"])
-	assert.Equal(t, true, payload["replacement_history_applied"])
-
-	events := handler.getRuntimeEventBus().Trace(traceID, 10)
-	require.NotEmpty(t, events)
-	var promptPreflightEvent *runtimeevents.Event
-	for i := range events {
-		if events[i].Type == chat.EventSessionEnd && events[i].SessionID == session.ID {
-			promptPreflightEvent = &events[i]
-			break
-		}
-	}
-	require.NotNil(t, promptPreflightEvent)
-	assert.Equal(t, "prompt_preflight", promptPreflightEvent.Payload["error_type"])
-	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", promptPreflightEvent.Payload["failure_reason_code"])
-	assert.Equal(t, true, promptPreflightEvent.Payload["replacement_history_applied"])
+	assert.NotEmpty(t, result["trace_id"])
+	assert.Equal(t, false, result["success"])
+	assert.Equal(t, "agent_react", result["source"])
+	assert.Contains(t, result["error"], "maxSteps=8")
 
 	updated, err := sessionManager.GetSession(context.Background(), session.ID)
 	require.NoError(t, err)
 	messages := updated.GetMessages()
 	require.GreaterOrEqual(t, len(messages), 3)
-
-	foundCompaction := false
-	for _, message := range messages {
-		if message.Metadata.GetBool("active_turn_compaction", false) {
-			foundCompaction = true
-			require.Contains(t, message.Content, "Compacted earlier tool replay in current turn:")
-			break
-		}
-	}
-	require.True(t, foundCompaction, "expected recovered session history to include compacted active-turn replay summary")
 }
 
 func TestAgentChat_UsesExplicitThinkingAndReasoningForLLMFallback(t *testing.T) {

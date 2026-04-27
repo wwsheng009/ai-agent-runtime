@@ -285,6 +285,9 @@ func (e *Executor) executeDefault(ctx context.Context, skill *Skill, req *types.
 	if shellGuidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidance()); shellGuidance != "" {
 		messages = append(messages, *types.NewSystemMessage(shellGuidance))
 	}
+	if fileEditingGuidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidance()); fileEditingGuidance != "" {
+		messages = append(messages, *types.NewSystemMessage(fileEditingGuidance))
+	}
 	// 附加精简版上下文摘要（避免把完整 context pack 直接塞进 prompt）
 	if ctxSummary := buildContextSummary(req); ctxSummary != "" {
 		messages = append(messages, *types.NewSystemMessage("Runtime context summary:\n" + ctxSummary))
@@ -314,7 +317,7 @@ func (e *Executor) executeDefault(ctx context.Context, skill *Skill, req *types.
 		Tools:           tools,
 		MaxTokens:       4096,
 		Temperature:     0.7,
-		ReasoningEffort: req.ReasoningEffort,
+		ReasoningEffort: types.NormalizeReasoningEffort(req.ReasoningEffort),
 		Thinking:        types.CloneThinkingConfig(req.Thinking),
 	}
 
