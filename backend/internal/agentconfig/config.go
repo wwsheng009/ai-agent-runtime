@@ -120,13 +120,22 @@ type NativeToolCapabilities struct {
 
 // ModelCapabilitySpec declares per-model input modalities and native tool support.
 type ModelCapabilitySpec struct {
-	InputModalities       []string               `yaml:"input_modalities" mapstructure:"input_modalities" json:"input_modalities"`
-	NativeTools           NativeToolCapabilities `yaml:"native_tools" mapstructure:"native_tools" json:"native_tools"`
-	MaxContextTokens      int                    `yaml:"max_context_tokens" mapstructure:"max_context_tokens" json:"max_context_tokens"`
-	AutoCompactRatio      float64                `yaml:"auto_compact_ratio" mapstructure:"auto_compact_ratio" json:"auto_compact_ratio"`
-	AutoCompactTokenLimit int                    `yaml:"auto_compact_token_limit" mapstructure:"auto_compact_token_limit" json:"auto_compact_token_limit"`
-	AutoCompactMode       string                 `yaml:"auto_compact_mode" mapstructure:"auto_compact_mode" json:"auto_compact_mode"`
-	SupportsRemoteCompact bool                   `yaml:"supports_remote_compact" mapstructure:"supports_remote_compact" json:"supports_remote_compact"`
+	InputModalities []string               `yaml:"input_modalities" mapstructure:"input_modalities" json:"input_modalities"`
+	NativeTools     NativeToolCapabilities `yaml:"native_tools" mapstructure:"native_tools" json:"native_tools"`
+	// ReasoningModel 显式声明该模型是否属于 reasoning/thinking 模型。
+	// 运行时不再根据 reasoning_efforts / budgets 做隐式推断。
+	ReasoningModel         bool           `yaml:"reasoning_model" mapstructure:"reasoning_model" json:"reasoning_model"`
+	ReasoningEfforts       []string       `yaml:"reasoning_efforts" mapstructure:"reasoning_efforts" json:"reasoning_efforts"`
+	ReasoningEffortBudgets map[string]int `yaml:"reasoning_effort_budgets" mapstructure:"reasoning_effort_budgets" json:"reasoning_effort_budgets"`
+	// DefaultReasoningEffort 保留兼容字段；当前运行时不再依赖它做默认推断。
+	DefaultReasoningEffort string  `yaml:"default_reasoning_effort" mapstructure:"default_reasoning_effort" json:"default_reasoning_effort"`
+	MaxContextTokens       int     `yaml:"max_context_tokens" mapstructure:"max_context_tokens" json:"max_context_tokens"`
+	MaxTokens              int     `yaml:"max_tokens" mapstructure:"max_tokens" json:"max_tokens"`
+	AutoCompactRatio       float64 `yaml:"auto_compact_ratio" mapstructure:"auto_compact_ratio" json:"auto_compact_ratio"`
+	AutoCompactTokenLimit  int     `yaml:"auto_compact_token_limit" mapstructure:"auto_compact_token_limit" json:"auto_compact_token_limit"`
+	AutoCompactMode        string  `yaml:"auto_compact_mode" mapstructure:"auto_compact_mode" json:"auto_compact_mode"`
+	SupportsRemoteCompact  bool    `yaml:"supports_remote_compact" mapstructure:"supports_remote_compact" json:"supports_remote_compact"`
+	CompactReasoningEffort string  `yaml:"compact_reasoning_effort" mapstructure:"compact_reasoning_effort" json:"compact_reasoning_effort"`
 }
 
 // Provider holds provider configuration.
@@ -149,6 +158,7 @@ type Provider struct {
 	ModelMappings           map[string]string              `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
 	ModelCapabilities       map[string]ModelCapabilitySpec `yaml:"model_capabilities" mapstructure:"model_capabilities" json:"model_capabilities"`
 	MaxTokensLimit          int                            `yaml:"max_tokens_limit" mapstructure:"max_tokens_limit" json:"max_tokens_limit"`
+	MaxToken                int                            `yaml:"max_token" mapstructure:"max_token" json:"max_token"`
 	SupportsMaxOutputTokens *bool                          `yaml:"supports_max_output_tokens" mapstructure:"supports_max_output_tokens" json:"supports_max_output_tokens"`
 	Timeout                 time.Duration                  `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
 	Proxy                   *ProxyConfig                   `yaml:"proxy" mapstructure:"proxy" json:"proxy"`
@@ -182,6 +192,22 @@ func (p *Provider) GetProtocol() string {
 // GetAPIPath returns the API path prefix.
 func (p *Provider) GetAPIPath() string {
 	return p.APIPath
+}
+
+// GetMaxTokensLimit returns the preferred max-token budget for provider requests.
+// max_token is treated as the new preferred alias, while max_tokens_limit remains
+// as a backward-compatible fallback.
+func (p *Provider) GetMaxTokensLimit() int {
+	if p == nil {
+		return 0
+	}
+	if p.MaxToken > 0 {
+		return p.MaxToken
+	}
+	if p.MaxTokensLimit > 0 {
+		return p.MaxTokensLimit
+	}
+	return 0
 }
 
 // ProxyConfig holds proxy configuration.

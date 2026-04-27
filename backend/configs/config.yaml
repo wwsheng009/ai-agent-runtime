@@ -292,6 +292,12 @@ providers:
                         - text
                     native_tools:
                         image_generation: false
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - low
+                        - medium
+                        - high
+                        - xhigh
                 gpt-5.4:
                     max_context_tokens: 270000
                     auto_compact_token_limit: 200000
@@ -300,6 +306,13 @@ providers:
                         - image
                     native_tools:
                         image_generation: true
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - xhigh
             protocol: codex
             support_types:
                 - gemini
@@ -342,6 +355,13 @@ providers:
                         - text
                     native_tools:
                         image_generation: false
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - xhigh
                 gpt-5.4-mini:
                     input_modalities:
                         - text
@@ -356,6 +376,13 @@ providers:
                         - image
                     native_tools:
                         image_generation: true
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - xhigh
             protocol: codex
             support_types:
                 - gemini
@@ -440,6 +467,13 @@ providers:
                         - image
                     native_tools:
                         image_generation: true
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - xhigh
             protocol: codex
             support_types:
                 - gemini
@@ -483,6 +517,13 @@ providers:
                         - text
                     native_tools:
                         image_generation: false
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - xhigh
                 gpt-5.4-mini:
                     max_context_tokens: 270000
                     auto_compact_token_limit: 200000
@@ -499,6 +540,13 @@ providers:
                         - image
                     native_tools:
                         image_generation: true
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - xhigh
             protocol: codex
             support_types:
                 - gemini
@@ -532,6 +580,12 @@ providers:
                 deepseek-v4-flash: deepseek-v4-flash
                 o1-mini: deepseek-v4-flash
                 o1-preview: deepseek-v4-pro
+            model_capabilities:
+                deepseek-v4-pro:
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - high
+                        - max
             protocol: openai
             support_types:
                 - openai
@@ -568,6 +622,11 @@ providers:
                         image_generation: false
                     max_context_tokens: 270000
                     auto_compact_token_limit: 200000
+                deepseek-ai/DeepSeek-V4-Pro:
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - high
+                        - max
             protocol: openai
             support_types:
                 - openai
@@ -597,6 +656,12 @@ providers:
                 o1: deepseek-v4-pro
                 o1-mini: deepseek-v4-flash
                 o1-preview: deepseek-v4-pro
+            model_capabilities:
+                deepseek-v4-pro:
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - high
+                        - max
             protocol: openai
             support_types:
                 - openai
