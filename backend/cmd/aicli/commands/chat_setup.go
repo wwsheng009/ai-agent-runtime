@@ -17,6 +17,7 @@ import (
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState *chatProfileState, persistenceState *chatPersistenceState, runtimeState *chatRuntimeState) (*ChatSession, func(), error) {
@@ -62,7 +63,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		Provider:           runtimeState.provider,
 		Adapter:            runtimeState.adapter,
 		Model:              runtimeState.modelName,
-		ReasoningEffort:    runtimeState.reasoningEffort,
+		ReasoningEffort:    runtimetypes.NormalizeReasoningEffort(runtimeState.reasoningEffort),
 		DisableTools:       opts.DisableTools,
 		HTTPDebug:          opts.HTTPDebug,
 		Stream:             runtimeState.shouldStream,

@@ -89,6 +89,39 @@ func (cl *ChatLogger) SetLogDir(dir string) error {
 		return fmt.Errorf("创建日志目录失败: %w", err)
 	}
 	cl.logDir = dir
+	if err := cl.ensureSessionArtifactLayout(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (cl *ChatLogger) ensureSessionArtifactLayout() error {
+	if cl == nil || strings.TrimSpace(cl.logDir) == "" || cl.sessionLog == nil {
+		return nil
+	}
+
+	sessionDir := filepath.Join(cl.logDir, cl.sessionID)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return fmt.Errorf("创建会话目录失败: %w", err)
+	}
+
+	for _, subDir := range []string{
+		filepath.Join(sessionDir, "runtime-http"),
+		filepath.Join(sessionDir, "local-shell"),
+	} {
+		if err := os.MkdirAll(subDir, 0755); err != nil {
+			return fmt.Errorf("创建会话 artifact 目录失败: %w", err)
+		}
+	}
+
+	debugLogPath := filepath.Join(sessionDir, "debug.log")
+	file, err := os.OpenFile(debugLogPath, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("创建调试日志文件失败: %w", err)
+	}
+	if closeErr := file.Close(); closeErr != nil {
+		return fmt.Errorf("关闭调试日志文件失败: %w", closeErr)
+	}
 	return nil
 }
 

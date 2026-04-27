@@ -26,6 +26,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const chatSessionMetaLabelWidth = 18
@@ -452,52 +453,6 @@ func selectStreamModeWithReader(reader *bufio.Reader) bool {
 	}
 }
 
-func selectReasoningEffort(current string) string {
-	return selectReasoningEffortWithReader(current, bufio.NewReader(os.Stdin))
-}
-
-func selectReasoningEffortWithReader(current string, reader *bufio.Reader) string {
-	ui.PrintSection("选择推理强度")
-
-	if !adapter.IsValidCodexReasoningEffort(current) {
-		current = "medium"
-	}
-
-	options := []string{"low", "medium", "high", "xhigh"}
-	for i, option := range options {
-		if option == current {
-			fmt.Printf("  [%d] %s %s\n", i+1, option, ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
-		} else {
-			fmt.Printf("  [%d] %s\n", i+1, option)
-		}
-	}
-	ui.PrintEmptyLine()
-
-	for {
-		fmt.Print("请输入选项 (或直接回车使用默认): ")
-		input, _ := reader.ReadString('\n')
-		input = adapter.NormalizeCodexReasoningEffort(input)
-
-		if input == "" {
-			return current
-		}
-
-		if num, err := strconv.Atoi(input); err == nil {
-			if num >= 1 && num <= len(options) {
-				return options[num-1]
-			}
-			ui.PrintWarning("无效的选择，请重新输入")
-			continue
-		}
-
-		if adapter.IsValidCodexReasoningEffort(input) {
-			return input
-		}
-
-		ui.PrintWarning("无效的选择，请重新输入")
-	}
-}
-
 // printSessionInfo 打印会话信息
 func printSessionInfo(session *ChatSession) {
 	ui.PrintSessionInfo(buildChatSessionInfo(session))
@@ -514,8 +469,8 @@ func printSessionInfo(session *ChatSession) {
 		}
 		printChatSessionMetaRow("Profile:", profileValue)
 	}
-	if session.ReasoningEffort != "" {
-		printChatSessionMetaRow("Reasoning Effort:", session.ReasoningEffort)
+	if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
+		printChatSessionMetaRow("Reasoning Effort:", reasoningEffort)
 	}
 	if session.LocalRuntimeHost != nil {
 		printChatSessionMetaRow("Permission Mode:", string(session.PermissionMode))
@@ -549,42 +504,6 @@ func printChatSessionMetaRow(label, value string) {
 	}
 	theme := ui.GetTheme(ui.ThemeAuto)
 	fmt.Printf("%-*s %s\n", chatSessionMetaLabelWidth, theme.ColorizeLabel(label), theme.ColorizeSecondary(value))
-}
-
-func resolveChatReasoningEffort(protocol, raw string, explicit bool) (string, string, error) {
-	protocol = strings.TrimSpace(protocol)
-	effort := adapter.NormalizeCodexReasoningEffort(raw)
-	if !explicit && effort == "" {
-		if chatProtocolSupportsReasoningEffort(protocol) {
-			return chatDefaultReasoningEffort(protocol), "", nil
-		}
-		return "", "", nil
-	}
-	if !adapter.IsValidCodexReasoningEffort(effort) {
-		return "", "", fmt.Errorf("无效的 reasoning-effort: %s（可选值: low|medium|high|xhigh）", raw)
-	}
-	if !chatProtocolSupportsReasoningEffort(protocol) {
-		return "", fmt.Sprintf("Warning: reasoning-effort 当前协议未启用，protocol=%s，已忽略", protocol), nil
-	}
-	return effort, "", nil
-}
-
-func chatProtocolSupportsReasoningEffort(protocol string) bool {
-	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case "codex", "openai", "anthropic", "gemini":
-		return true
-	default:
-		return false
-	}
-}
-
-func chatDefaultReasoningEffort(protocol string) string {
-	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case "codex", "openai", "anthropic", "gemini":
-		return "medium"
-	default:
-		return ""
-	}
 }
 
 func resolvedChatSkillsMode(session *ChatSession, binding *skillsRuntimeBinding) string {
@@ -745,7 +664,7 @@ func buildChatResponsePayload(session *ChatSession, response string) chatRespons
 	payload.Protocol = session.Provider.GetProtocol()
 	payload.Model = session.Model
 	payload.Stream = session.Stream
-	payload.ReasoningEffort = session.ReasoningEffort
+	payload.ReasoningEffort = runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
 	if session.RuntimeSession != nil {
 		payload.SessionID = session.RuntimeSession.ID
 		payload.SessionPath = currentRuntimeSessionPath(session)

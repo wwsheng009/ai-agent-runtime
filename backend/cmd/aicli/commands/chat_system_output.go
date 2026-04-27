@@ -9,9 +9,10 @@ import (
 )
 
 type chatSystemOutputWriter struct {
-	writer io.Writer
-	buffer strings.Builder
-	mu     sync.Mutex
+	writer    io.Writer
+	buffer    strings.Builder
+	mu        sync.Mutex
+	lastBlank bool
 }
 
 func newChatSystemOutputWriter(writer io.Writer) io.Writer {
@@ -39,7 +40,19 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 		remaining := content[index+1:]
 		w.buffer.Reset()
 		w.buffer.WriteString(remaining)
-		if _, err := io.WriteString(w.writer, ui.FormatAssistantSupplementBlock(line)+"\n"); err != nil {
+		rendered := ui.FormatAssistantSupplementBlock(line)
+		if strings.TrimSpace(rendered) == "" {
+			if w.lastBlank {
+				continue
+			}
+			w.lastBlank = true
+			if _, err := io.WriteString(w.writer, "\n"); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		w.lastBlank = false
+		if _, err := io.WriteString(w.writer, rendered+"\n"); err != nil {
 			return 0, err
 		}
 	}

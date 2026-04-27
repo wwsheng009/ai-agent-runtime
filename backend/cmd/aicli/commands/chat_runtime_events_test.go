@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
@@ -137,6 +138,45 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		t.Fatalf("expected dotted successful llm finished render to be suppressed, got %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:    "llm.request.finished",
+		TraceID: "trace-usage",
+		Payload: map[string]interface{}{
+			"success":                 true,
+			"provider":                "CODEX_LOCAL",
+			"model":                   "codex-gpt-5.4",
+			"context_prompt_tokens":   23099,
+			"prompt_budget":           200000,
+			"context_window_tokens":   270000,
+			"usage_prompt_tokens":     23099,
+			"usage_completion_tokens": 1663,
+			"usage_total_tokens":      24762,
+			"usage_cached_tokens":     2048,
+			"usage_reasoning_tokens":  512,
+			"budget_source":           "model_capability_auto_compact_token_limit",
+			"budget_source_detail":    "provider/model capability auto-compact token limit",
+			"usage_source":            "provider_reported",
+			"budget_candidates": map[string]interface{}{
+				"context_max_prompt_tokens":                 200000,
+				"default_context_max_prompt_tokens":         4096,
+				"model_capability_auto_compact_token_limit": 200000,
+				"remaining_budget":                          176901,
+			},
+		},
+	}); got != strings.Join([]string{
+		"[thinking] request finished CODEX_LOCAL/codex-gpt-5.4",
+		"  context: prompt=23099 budget=200000 window=270000",
+		"  usage  : in=23099 out=1663 total=24762 cached=2048 reasoning=512 source=provider_reported",
+		"  budget : source=模型能力 auto-compact token limit",
+		"           detail    : provider/model capability auto-compact token limit",
+		"           candidates: 4 option(s)",
+		"             - context manager prompt 预算=200000",
+		"             - 默认 prompt 预算=4096",
+		"             - 模型能力 auto-compact token limit=200000（选中）",
+		"             - 当前轮剩余预算=176901",
+	}, "\n") {
+		t.Fatalf("unexpected successful llm finished usage render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:    "llm.retry",
 		TraceID: "trace-1",
 		Payload: map[string]interface{}{
@@ -147,11 +187,11 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"model":          "gpt-5.4",
 			"attempt":        1,
 			"max_attempts":   3,
-			"retry_reason":   "http_429",
+			"retry_reason":   "rate_limit",
 			"retry_delay_ms": int64(25),
 			"error":          "HTTP 429: rate limit reached",
 		},
-	}); got != "[retry] step=2 provider-a / openai / gpt-5.4 attempt=1/3 reason=http_429 delay=25ms source=llm_runtime error=HTTP 429: rate limit reached" {
+	}); got != "[retry] step=2 provider-a / openai / gpt-5.4 attempt=1/3 reason=rate_limit delay=25ms source=llm_runtime error=HTTP 429: rate limit reached" {
 		t.Fatalf("unexpected llm retry render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "planning.started"}); got != "" {
@@ -374,6 +414,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		"  模型: CODEX_LOCAL / codex-gpt-5.4",
 		"  预算: 模型能力 auto-compact token limit",
 		"  恢复: 已自动保存压缩后的上下文，可直接继续下一轮 | history_messages=2",
+		"  budget : source=模型能力 auto-compact token limit",
 	}, "\n") {
 		t.Fatalf("unexpected fallback team summary render: %q", got)
 	}
@@ -427,6 +468,8 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		"  预算: 模型能力 auto-compact token limit",
 		"  active-turn: messages=12, latest_replay_block=4, compacted=false",
 		"  恢复: 已生成压缩后的恢复上下文 | history_messages=6",
+		"  context: prompt=8192 budget=4096",
+		"  budget : source=模型能力 auto-compact token limit",
 	}, "\n") {
 		t.Fatalf("unexpected prompt preflight session_end render: %q", got)
 	}
@@ -451,6 +494,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		"  模型: CODEX_LOCAL / codex-gpt-5.4",
 		"  预算: 模型能力 auto-compact token limit",
 		"  恢复: 已自动保存压缩后的上下文，可直接继续下一轮 | history_messages=4",
+		"  budget : source=模型能力 auto-compact token limit",
 	}, "\n") {
 		t.Fatalf("unexpected prompt preflight team.task.failed render: %q", got)
 	}
@@ -475,6 +519,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		"  replan 模型: CODEX_LOCAL / codex-gpt-5.4",
 		"  replan 预算: 模型能力 auto-compact token limit",
 		"  replan 恢复: 已自动保存压缩后的上下文，可直接继续下一轮 | history_messages=3",
+		"  budget : source=模型能力 auto-compact token limit",
 	}, "\n") {
 		t.Fatalf("unexpected prompt preflight team.task.blocked render: %q", got)
 	}
@@ -497,6 +542,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		"  模型: CODEX_LOCAL / codex-gpt-5.4",
 		"  预算: 模型能力 auto-compact token limit",
 		"  恢复: 已自动保存压缩后的上下文，可直接继续下一轮 | history_messages=5",
+		"  budget : source=模型能力 auto-compact token limit",
 	}, "\n") {
 		t.Fatalf("unexpected prompt preflight team.plan.replan_failed render: %q", got)
 	}
@@ -516,7 +562,10 @@ func TestChatRuntimeEvents_RenderSessionCompactTimeline(t *testing.T) {
 			"provider":            "CODEX_LOCAL",
 			"model":               "codex-gpt-5.4",
 		},
-	}); got != "[context] session compact started mode=local phase=pre_turn token_before=1200 trigger_token_limit=900 max_context_tokens=10000 target=CODEX_LOCAL/codex-gpt-5.4" {
+	}); got != strings.Join([]string{
+		"[context] session compact started mode=local phase=pre_turn token_before=1200 trigger_token_limit=900 max_context_tokens=10000 target=CODEX_LOCAL/codex-gpt-5.4",
+		"  context: prompt=1200 budget=900 window=10000",
+	}, "\n") {
 		t.Fatalf("unexpected session compact started render: %q", got)
 	}
 
@@ -533,8 +582,88 @@ func TestChatRuntimeEvents_RenderSessionCompactTimeline(t *testing.T) {
 			"message_count_after": 4,
 			"checkpoint_id":       "cp-1",
 		},
-	}); got != "[context] session compact completed mode=local phase=pre_turn token 1200 -> 240 compacted_messages=6 history_messages=4 checkpoint_id=cp-1" {
+	}); got != strings.Join([]string{
+		"[context] session compact completed mode=local phase=pre_turn token 1200 -> 240 compacted_messages=6 history_messages=4 checkpoint_id=cp-1",
+		"  context: prompt=240",
+	}, "\n") {
 		t.Fatalf("unexpected session compact completed render: %q", got)
+	}
+
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionCompactStarted,
+		SessionID: "session-2",
+		TraceID:   "trace-compact-2",
+		Payload: map[string]interface{}{
+			"phase":                 "pre_turn",
+			"mode":                  "local",
+			"token_before":          23099,
+			"prompt_budget":         200000,
+			"context_window_tokens": 270000,
+			"provider":              "CODEX_LOCAL",
+			"model":                 "codex-gpt-5.4",
+			"budget_source":         "model_capability_auto_compact_token_limit",
+			"budget_source_detail":  "provider/model capability auto-compact token limit",
+			"budget_candidates": map[string]interface{}{
+				"context_max_prompt_tokens":                 200000,
+				"default_context_max_prompt_tokens":         4096,
+				"model_capability_auto_compact_token_limit": 200000,
+				"remaining_budget":                          176901,
+			},
+		},
+	}); got != strings.Join([]string{
+		"[context] session compact started mode=local phase=pre_turn token_before=23099 trigger_token_limit=200000 max_context_tokens=270000 target=CODEX_LOCAL/codex-gpt-5.4",
+		"  context: prompt=23099 budget=200000 window=270000",
+		"  budget : source=模型能力 auto-compact token limit",
+		"           detail    : provider/model capability auto-compact token limit",
+		"           candidates: 4 option(s)",
+		"             - context manager prompt 预算=200000",
+		"             - 默认 prompt 预算=4096",
+		"             - 模型能力 auto-compact token limit=200000（选中）",
+		"             - 当前轮剩余预算=176901",
+	}, "\n") {
+		t.Fatalf("unexpected session compact started render with budget metadata: %q", got)
+	}
+
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionCompactCompleted,
+		SessionID: "session-3",
+		TraceID:   "trace-compact-3",
+		Payload: map[string]interface{}{
+			"phase":                   "pre_turn",
+			"mode":                    "local",
+			"token_before":            23099,
+			"token_after":             1892,
+			"compacted_messages":      33,
+			"message_count_after":     4,
+			"checkpoint_id":           "chk-usage-1",
+			"usage_prompt_tokens":     23099,
+			"usage_completion_tokens": 512,
+			"usage_total_tokens":      23611,
+			"usage_cached_tokens":     2048,
+			"usage_reasoning_tokens":  256,
+			"usage_source":            "provider_reported",
+			"budget_source":           "model_capability_auto_compact_token_limit",
+			"budget_source_detail":    "provider/model capability auto-compact token limit",
+			"budget_candidates": map[string]interface{}{
+				"context_max_prompt_tokens":                 200000,
+				"default_context_max_prompt_tokens":         4096,
+				"model_capability_auto_compact_token_limit": 200000,
+				"remaining_budget":                          176901,
+			},
+		},
+	}); got != strings.Join([]string{
+		"[context] session compact completed mode=local phase=pre_turn token 23099 -> 1892 compacted_messages=33 history_messages=4 checkpoint_id=chk-usage-1",
+		"  context: prompt=1892",
+		"  usage  : in=23099 out=512 total=23611 cached=2048 reasoning=256 source=provider_reported",
+		"  budget : source=模型能力 auto-compact token limit",
+		"           detail    : provider/model capability auto-compact token limit",
+		"           candidates: 4 option(s)",
+		"             - context manager prompt 预算=200000",
+		"             - 默认 prompt 预算=4096",
+		"             - 模型能力 auto-compact token limit=200000（选中）",
+		"             - 当前轮剩余预算=176901",
+	}, "\n") {
+		t.Fatalf("unexpected session compact completed render with usage: %q", got)
 	}
 
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
@@ -563,6 +692,49 @@ func TestChatRuntimeEvents_RenderSessionCompactTimeline(t *testing.T) {
 	}); got != "[context] session compact failed mode=local phase=pre_turn reason=summary_generation_failed error=compact summary failed" {
 		t.Fatalf("unexpected session compact failed render: %q", got)
 	}
+}
+
+func TestChatRuntimeEvents_RenderBudgetPanelWrapsLongLines(t *testing.T) {
+	got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:    "llm.request.finished",
+		TraceID: "trace-wrap",
+		Payload: map[string]interface{}{
+			"success":               true,
+			"provider":              "CODEX_LOCAL",
+			"model":                 "codex-gpt-5.4",
+			"context_prompt_tokens": 23099,
+			"prompt_budget":         200000,
+			"context_window_tokens": 270000,
+			"budget_source":         "model_capability_auto_compact_token_limit",
+			"budget_source_detail":  "provider/model capability auto-compact token limit is selected because the model needs enough headroom to preserve a stable handoff summary, keep recent tool outputs visible, and avoid repeated re-compaction during the next turn",
+			"budget_candidates": map[string]interface{}{
+				"model_capability_auto_compact_token_limit": "the chosen source is intentionally larger because the runtime wants to keep the next turn readable while still leaving room for tools, summaries, and follow-up reasoning across several more messages",
+				"remaining_budget":                          176901,
+			},
+		},
+	})
+
+	lines := strings.Split(got, "\n")
+	require.GreaterOrEqual(t, len(lines), 5)
+	require.Equal(t, "[thinking] request finished CODEX_LOCAL/codex-gpt-5.4", lines[0])
+	require.Equal(t, "  context: prompt=23099 budget=200000 window=270000", lines[1])
+	require.Equal(t, "  budget : source=模型能力 auto-compact token limit", lines[2])
+
+	detailContinuationIndent := strings.Repeat(" ", len("           detail    : "))
+	candidateContinuationIndent := strings.Repeat(" ", len("             - "))
+
+	hasDetailContinuation := false
+	hasCandidateContinuation := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, detailContinuationIndent) && !strings.Contains(line, "detail") {
+			hasDetailContinuation = true
+		}
+		if strings.HasPrefix(line, candidateContinuationIndent) && !strings.Contains(line, "- ") {
+			hasCandidateContinuation = true
+		}
+	}
+	require.True(t, hasDetailContinuation, "expected long budget detail to wrap onto continuation lines: %v", lines)
+	require.True(t, hasCandidateContinuation, "expected long budget candidate to wrap onto continuation lines: %v", lines)
 }
 
 func TestChatRuntimeEvents_DedupesStableTimelineEventsPerRun(t *testing.T) {
@@ -2627,6 +2799,7 @@ func TestChatRuntimeEvents_SessionEndPromptPreflightStillRendersAfterDeltaFlush(
 	require.Contains(t, lines[0], "建议: 请继续收缩上下文层、提高预算，或从新的轮次继续。")
 	require.Contains(t, lines[0], "模型: codex-gpt-5.4")
 	require.Contains(t, lines[0], "恢复: 已自动保存压缩后的上下文，可直接继续下一轮 | history_messages=4")
+	require.Contains(t, lines[0], "context: prompt=12000 budget=10000")
 }
 
 func TestIsReadOnlyShellCommand_ChainedAndCommands(t *testing.T) {
@@ -3271,6 +3444,44 @@ func TestChatRuntimeEventBridge_LogsActorRunToChatLogger(t *testing.T) {
 	}
 	if currentSummary.TotalRequests != 2 || currentSummary.TotalResponses != 2 || currentSummary.TotalToolCalls != 1 {
 		t.Fatalf("unexpected logger summary: %+v", currentSummary)
+	}
+}
+
+func TestChatRuntimeEventBridge_BeginRunResetsSupplementSeparator(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+		_ = ui.SetThemePreset(ui.ThemePresetFocus)
+	}()
+
+	if err := ui.SetThemePreset(ui.ThemePresetContrast); err != nil {
+		t.Fatalf("SetThemePreset: %v", err)
+	}
+
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	session.Interaction = coord
+
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+
+	bridge.writeLine("[tool] first")
+	if !strings.Contains(output.String(), "[tool] first") {
+		t.Fatalf("expected first supplement block to render, got %q", output.String())
+	}
+
+	bridge.BeginRun()
+	bridge.writeLine("[tool] second")
+
+	rendered := output.String()
+	if strings.Contains(rendered, "[tool] first\n\n[tool] second") {
+		t.Fatalf("expected BeginRun to reset block separator state, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "[tool] first\n[tool] second") {
+		t.Fatalf("expected adjacent runs to stay compact, got %q", rendered)
 	}
 }
 

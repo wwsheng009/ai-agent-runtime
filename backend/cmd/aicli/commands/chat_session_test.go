@@ -257,6 +257,114 @@ func TestRuntimeMessageFromAICLIMessage_RecoversMissingToolCallsFromCodexOutputI
 	}
 }
 
+func TestBuildAICLIMessagesFromRuntimeHistory_RepairsTruncatedAssistantToolCall(t *testing.T) {
+	raw := map[string]interface{}{
+		"role":          "assistant",
+		"content":       "前文内容<tool_call>write<arg_key>file_path</arg_key><arg_value>E:\\temp\\demo.txt</arg_value>",
+		"finish_reason": "length",
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal raw: %v", err)
+	}
+
+	message := runtimetypes.Message{
+		Role:     "assistant",
+		Content:  raw["content"].(string),
+		Metadata: runtimetypes.NewMetadata(),
+	}
+	message.Metadata.Set(chatRuntimeMessageRawJSONKey, string(data))
+
+	restored, err := buildAICLIMessagesFromRuntimeHistory([]runtimetypes.Message{message})
+	if err != nil {
+		t.Fatalf("buildAICLIMessagesFromRuntimeHistory: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("expected repaired assistant message, got %#v", restored)
+	}
+	if got := restored[0]["content"]; got != "前文内容" {
+		t.Fatalf("expected truncated tool-call fragment to be stripped, got %#v", got)
+	}
+	metadata, _ := restored[0]["metadata"].(map[string]interface{})
+	if metadata["session_repaired"] != "truncated_tool_call" {
+		t.Fatalf("expected repair marker metadata, got %#v", metadata)
+	}
+	if _, exists := restored[0]["tool_calls"]; exists {
+		t.Fatalf("did not expect repaired message to keep tool_calls, got %#v", restored[0]["tool_calls"])
+	}
+}
+
+func TestBuildAICLIMessagesFromRuntimeHistory_DropsEmptyTruncatedAssistantAndOrphanTool(t *testing.T) {
+	assistantRaw := map[string]interface{}{
+		"role":          "assistant",
+		"content":       "<tool_call>write<arg_key>file_path</arg_key><arg_value>E:\\temp\\demo.txt</arg_value>",
+		"finish_reason": "length",
+	}
+	assistantData, err := json.Marshal(assistantRaw)
+	if err != nil {
+		t.Fatalf("marshal assistant raw: %v", err)
+	}
+
+	assistant := runtimetypes.Message{
+		Role:     "assistant",
+		Content:  assistantRaw["content"].(string),
+		Metadata: runtimetypes.NewMetadata(),
+	}
+	assistant.Metadata.Set(chatRuntimeMessageRawJSONKey, string(assistantData))
+
+	tool := runtimetypes.Message{
+		Role:       "tool",
+		Content:    "写入完成",
+		ToolCallID: "call-truncated",
+		Metadata:   runtimetypes.NewMetadata(),
+	}
+
+	restored, err := buildAICLIMessagesFromRuntimeHistory([]runtimetypes.Message{assistant, tool})
+	if err != nil {
+		t.Fatalf("buildAICLIMessagesFromRuntimeHistory: %v", err)
+	}
+	if len(restored) != 0 {
+		t.Fatalf("expected truncated assistant and orphan tool to be dropped, got %#v", restored)
+	}
+}
+
+func TestBuildRuntimeHistoryFromAICLIMessages_DropsOrphanToolMessages(t *testing.T) {
+	history, err := buildRuntimeHistoryFromAICLIMessages([]map[string]interface{}{
+		{
+			"role":         "tool",
+			"tool_call_id": "missing-call",
+			"content":      "tool output",
+		},
+		{
+			"role":    "user",
+			"content": "继续",
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRuntimeHistoryFromAICLIMessages: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected orphan tool message to be dropped, got %#v", history)
+	}
+	if history[0].Role != "user" || history[0].Content != "继续" {
+		t.Fatalf("unexpected remaining history: %#v", history)
+	}
+}
+
+func TestDecodeToolArguments_RecordsParseError(t *testing.T) {
+	args := decodeToolArguments(`{"file_path":"E:\\projects\\ai\\ai-agent-runtime\\backend\\out.txt","content":"hello`)
+
+	if got := args["_raw"]; got == "" {
+		t.Fatal("expected raw arguments to be preserved")
+	}
+	if got := args["_parse_error"]; got == "" {
+		t.Fatal("expected parse error marker to be recorded")
+	}
+	if _, ok := args["file_path"]; ok {
+		t.Fatal("expected invalid JSON not to be treated as a parsed object")
+	}
+}
+
 func TestLoadRequestedRuntimeSessionReturnsLatestForResume(t *testing.T) {
 	storage, err := runtimechat.NewFileStorage(t.TempDir())
 	if err != nil {

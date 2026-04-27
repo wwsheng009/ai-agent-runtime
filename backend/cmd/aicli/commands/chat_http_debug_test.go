@@ -50,14 +50,14 @@ func TestFormatRuntimeHTTPDebugEvent_IncludesRetryAttemptAndDelay(t *testing.T) 
 		Attempt:      1,
 		MaxAttempts:  3,
 		Error:        "HTTP 429: rate limit reached",
-		RetryReason:  "http_429",
+		RetryReason:  "rate_limit",
 		RetryDelayMS: 25,
 	})
 
 	if !strings.Contains(output, "attempt=1/3") {
 		t.Fatalf("expected attempt label in output:\n%s", output)
 	}
-	if !strings.Contains(output, "retry_reason=http_429") {
+	if !strings.Contains(output, "retry_reason=rate_limit") {
 		t.Fatalf("expected retry reason in output:\n%s", output)
 	}
 	if !strings.Contains(output, "next_retry_delay_ms=25") {

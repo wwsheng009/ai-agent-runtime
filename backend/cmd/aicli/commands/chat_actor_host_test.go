@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -132,6 +133,30 @@ func TestBuildLocalChatAgent_UsesSignalsWorkspaceContextForActorChat(t *testing.
 	}
 	if got := cfg.Options["context_min_workspace_query_length"]; got != 4 {
 		t.Fatalf("expected context_min_workspace_query_length=4, got %#v", got)
+	}
+}
+
+func TestBuildLocalChatAgent_UsesProviderMaxTokensLimitAsDefault(t *testing.T) {
+	session := &ChatSession{
+		Provider: agentconfig.Provider{
+			MaxTokensLimit: 10000,
+		},
+	}
+	host := &localChatRuntimeHost{
+		Bootstrap: &runtimebootstrap.Manager{},
+	}
+
+	apiAgent := buildLocalChatAgent(session, host, nil, "", "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+
+	cfg := apiAgent.GetConfig()
+	if cfg == nil {
+		t.Fatal("expected agent config")
+	}
+	if cfg.DefaultMaxTokens != 10000 {
+		t.Fatalf("expected DefaultMaxTokens=10000, got %d", cfg.DefaultMaxTokens)
 	}
 }
 

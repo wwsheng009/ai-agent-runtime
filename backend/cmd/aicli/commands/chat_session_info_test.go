@@ -74,6 +74,29 @@ func TestBuildChatSessionInfo_FallsBackToResolvedEndpoint(t *testing.T) {
 	}
 }
 
+func TestBuildChatSessionInfo_UsesConfiguredReasoningCapability(t *testing.T) {
+	session := &ChatSession{
+		ProviderName: "deepseek",
+		Provider: config.Provider{
+			Enabled:  true,
+			Protocol: "openai",
+			BaseURL:  "https://api.deepseek.com",
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"deepseek-v4-pro": {
+					ReasoningModel:   true,
+					ReasoningEfforts: []string{"high", "max"},
+				},
+			},
+		},
+		Model: "deepseek-v4-pro",
+	}
+
+	info := buildChatSessionInfo(session)
+	if !info.ReasoningEnabled {
+		t.Fatal("expected configured reasoning capability to be reflected in session info")
+	}
+}
+
 func TestPrintSessionInfo_RendersProviderEndpointDetails(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true
@@ -163,6 +186,42 @@ func TestPrintSessionInfo_AlignsFollowupMetadataRows(t *testing.T) {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected aligned metadata row %q, got:\n%s", expected, output)
 		}
+	}
+}
+
+func TestPrintSessionInfo_RendersExplicitReasoningCapability(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{
+		ProviderName: "deepseek",
+		Provider: config.Provider{
+			Enabled:  true,
+			Protocol: "openai",
+			BaseURL:  "https://api.deepseek.com",
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"deepseek-v4-pro": {
+					ReasoningModel:   true,
+					ReasoningEfforts: []string{"high", "max"},
+				},
+			},
+		},
+		Model: "deepseek-v4-pro",
+	}
+
+	output := captureStdout(t, func() {
+		printSessionInfo(session)
+	})
+
+	if !strings.Contains(output, "Reasoning:") {
+		t.Fatalf("expected output to contain explicit reasoning label, got:\n%s", output)
+	}
+	if strings.Contains(output, "推理模型") || strings.Contains(output, "禁用 temperature") {
+		t.Fatalf("expected output to avoid semantic reasoning-model description, got:\n%s", output)
 	}
 }
 

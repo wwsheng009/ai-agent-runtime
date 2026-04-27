@@ -17,7 +17,7 @@ type SessionInfo struct {
 	KeyCount         int
 	Timeout          string
 	IsStream         bool
-	IsReasoningModel bool
+	ReasoningEnabled bool
 }
 
 // PrintSessionInfo 打印会话信息
@@ -57,9 +57,9 @@ func PrintSessionInfo(info SessionInfo) bool {
 	}
 	printSessionInfoRow(theme.SystemIcon+" ", "Stream:", streamStatus, theme.ColorizeLabel)
 
-	// 推理模型标识
-	if info.IsReasoningModel {
-		printSessionInfoRow(theme.SystemIcon+" ", "Type:", theme.WarningColor.Sprint("推理模型 (禁用 temperature)"), theme.ColorizeLabel)
+	// reasoning 能力标识：只展示显式配置结果，不做模型名语义解释。
+	if info.ReasoningEnabled {
+		printSessionInfoRow(theme.SystemIcon+" ", "Reasoning:", theme.WarningColor.Sprint("enabled"), theme.ColorizeLabel)
 	}
 
 	PrintThickSeparator()

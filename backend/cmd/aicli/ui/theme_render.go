@@ -31,11 +31,48 @@ func FormatAssistantSupplementBlock(text string) string {
 	if text == "" {
 		return ""
 	}
+	text = normalizeSupplementBlockText(text)
+	if text == "" {
+		return ""
+	}
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
 		lines[i] = StyleAssistantSupplementLine(line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func normalizeSupplementBlockText(text string) string {
+	if text == "" {
+		return ""
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.Trim(text, "\n")
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	normalized := make([]string, 0, len(lines))
+	blankRun := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			blankRun++
+			if blankRun > 1 {
+				continue
+			}
+			normalized = append(normalized, "")
+			continue
+		}
+		blankRun = 0
+		normalized = append(normalized, line)
+	}
+	for len(normalized) > 0 && normalized[0] == "" {
+		normalized = normalized[1:]
+	}
+	for len(normalized) > 0 && normalized[len(normalized)-1] == "" {
+		normalized = normalized[:len(normalized)-1]
+	}
+	return strings.Join(normalized, "\n")
 }
 
 func (t *Theme) StyleAssistantSupplementLine(line string) string {

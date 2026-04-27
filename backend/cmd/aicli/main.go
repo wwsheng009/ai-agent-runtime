@@ -226,7 +226,7 @@ func main() {
 	chatCmd.Flags().StringP("message", "M", "", "非交互模式下发送的消息")
 	chatCmd.Flags().StringP("log-dir", "", "./chat-logs", "保存会话日志到指定目录（默认: ./chat-logs）")
 	chatCmd.Flags().String("request-timeout", "", "单次请求超时（例如 60s、2m，留空使用配置）")
-	chatCmd.Flags().String("reasoning-effort", "", "Codex 协议的推理强度（low|medium|high|xhigh，默认: medium）")
+	chatCmd.Flags().String("reasoning-effort", "", "当前模型配置显式支持的 reasoning_effort 值（留空则不注入，由配置和交互流程决定）")
 	chatCmd.Flags().String("session", "", "加载指定 chat 会话 ID")
 	chatCmd.Flags().Bool("resume", false, "恢复最近一次 chat 会话")
 	chatCmd.Flags().Bool("list-sessions", false, "列出当前用户的 chat 会话并退出")

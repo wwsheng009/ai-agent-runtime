@@ -97,7 +97,7 @@ func TestSelectModelWithReader_RetriesAfterInvalidNumericChoice(t *testing.T) {
 func TestSelectReasoningEffortWithReader_RetriesAfterInvalidChoice(t *testing.T) {
 	var selected string
 	output := captureStdout(t, func() {
-		selected = selectReasoningEffortWithReader("medium", bufio.NewReader(strings.NewReader("0\nhigh\n")))
+		selected = selectReasoningEffortWithReader("medium", []string{"low", "medium", "high", "xhigh"}, bufio.NewReader(strings.NewReader("9\nhigh\n")))
 	})
 
 	if selected != "high" {
@@ -105,6 +105,34 @@ func TestSelectReasoningEffortWithReader_RetriesAfterInvalidChoice(t *testing.T)
 	}
 	if !strings.Contains(output, "无效的选择，请重新输入") {
 		t.Fatalf("expected invalid-choice warning, got:\n%s", output)
+	}
+}
+
+func TestSelectReasoningEffortWithReader_UsesDeepSeekCatalog(t *testing.T) {
+	var selected string
+	output := captureStdout(t, func() {
+		selected = selectReasoningEffortWithReader("high", []string{"high", "max"}, bufio.NewReader(strings.NewReader("\n")))
+	})
+
+	if selected != "high" {
+		t.Fatalf("expected current high effort to be preserved, got %q", selected)
+	}
+	if !strings.Contains(output, "max") || !strings.Contains(output, "(当前)") {
+		t.Fatalf("expected deepseek catalog output, got:\n%s", output)
+	}
+}
+
+func TestSelectReasoningEffortWithReader_PreservesCaseInsensitiveMatch(t *testing.T) {
+	var selected string
+	output := captureStdout(t, func() {
+		selected = selectReasoningEffortWithReader("medium", []string{"low", "medium", "high", "xhigh"}, bufio.NewReader(strings.NewReader("HIGH\n")))
+	})
+
+	if selected != "high" {
+		t.Fatalf("expected canonical option high, got %q", selected)
+	}
+	if strings.Contains(output, "无效的选择，请重新输入") {
+		t.Fatalf("did not expect invalid-choice warning, got:\n%s", output)
 	}
 }
 

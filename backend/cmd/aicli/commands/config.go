@@ -5,8 +5,8 @@ import (
 	"os"
 	"sort"
 
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/spf13/cobra"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
 type configCommandResult struct {
@@ -159,7 +159,7 @@ func displayProvider(cfg *config.Config, providerName string, showModels bool) {
 	}
 	fmt.Printf("API Key:         %s\n", apiKeyDisplay)
 	fmt.Printf("Default Model:   %s\n", provider.DefaultModel)
-	fmt.Printf("Max Tokens:      %d\n", provider.MaxTokensLimit)
+	fmt.Printf("Max Tokens:      %d\n", provider.GetMaxTokensLimit())
 	fmt.Println()
 
 	// 支持的协议类型

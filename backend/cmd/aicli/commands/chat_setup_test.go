@@ -105,8 +105,14 @@ func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 	if session.RuntimeSession == nil {
 		t.Fatal("expected runtime session to be restored")
 	}
-	if len(session.Messages) != 1 {
+	if len(session.Messages) != 2 {
 		t.Fatalf("expected restored messages, got %d", len(session.Messages))
+	}
+	if session.Messages[0]["role"] != "system" {
+		t.Fatalf("expected restored system prompt to be prepended, got %#v", session.Messages[0])
+	}
+	if got := session.Messages[0]["content"]; got != composeChatSystemPromptWithGuidance(session) {
+		t.Fatalf("expected restored system prompt to include runtime guidance, got %#v", got)
 	}
 	if session.RuntimeSession.Metadata.Title != "restored title" {
 		t.Fatalf("expected updated session title, got %q", session.RuntimeSession.Metadata.Title)
@@ -452,6 +458,8 @@ func TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance(t *testing.T) {
 		"Base prompt.",
 		"Shell guidance:",
 		"Detected user shell:",
+		"File editing guidance:",
+		"Prefer the dedicated file tools for workspace mutations.",
 		"Current workspace root: E:\\projects\\ai\\ai-gateway",
 		`Interpret "当前目录", ".", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.`,
 		"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",

@@ -470,6 +470,110 @@ func TestAICLIProviderTurnExecutor_ReplaysDeepSeekEmptyReasoningContentForToolCa
 	}
 }
 
+func TestAICLIProviderTurnExecutor_RejectsTruncatedToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+
+	recordingAdapter := &recordingProtocolAdapter{
+		response: map[string]interface{}{
+			"role":          "assistant",
+			"content":       "",
+			"finish_reason": "length",
+			"tool_calls": []map[string]interface{}{
+				{
+					"id":   "call_1",
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "write",
+						"arguments": `{"file_path":"E:\\projects\\ai\\ai-agent-runtime\\backend\\out.txt","content":"hello`,
+					},
+				},
+			},
+		},
+	}
+
+	session := &ChatSession{
+		ProviderName:  "deepseek",
+		Provider:      config.Provider{Protocol: "openai", BaseURL: server.URL},
+		Adapter:       recordingAdapter,
+		Model:         "deepseek-v4-flash",
+		BaseURL:       server.URL,
+		HTTPClient:    server.Client(),
+		cancelCtx:     context.Background(),
+		NoInteractive: true,
+	}
+
+	executor := &aicliProviderTurnExecutor{session: session}
+	turn, err := executor.Complete(context.Background(), runtimechatcore.ProviderTurnRequest{
+		Messages: []types.Message{
+			{
+				Role:     "user",
+				Content:  "write a large file",
+				Metadata: types.NewMetadata(),
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected truncated tool call response to fail")
+	}
+	if !strings.Contains(err.Error(), "被 token 限制截断") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn != nil {
+		t.Fatalf("expected no turn response, got %#v", turn)
+	}
+}
+
+func TestAICLIProviderTurnExecutor_RejectsUnclosedTruncatedToolCallMarkup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+
+	recordingAdapter := &recordingProtocolAdapter{
+		response: map[string]interface{}{
+			"role":          "assistant",
+			"content":       "前文内容<tool_call>write<arg_key>path</arg_key><arg_value>E:\\projects\\ai\\agent.txt",
+			"finish_reason": "length",
+		},
+	}
+
+	session := &ChatSession{
+		ProviderName:  "deepseek",
+		Provider:      config.Provider{Protocol: "openai", BaseURL: server.URL},
+		Adapter:       recordingAdapter,
+		Model:         "deepseek-v4-flash",
+		BaseURL:       server.URL,
+		HTTPClient:    server.Client(),
+		cancelCtx:     context.Background(),
+		NoInteractive: true,
+	}
+
+	executor := &aicliProviderTurnExecutor{session: session}
+	turn, err := executor.Complete(context.Background(), runtimechatcore.ProviderTurnRequest{
+		Messages: []types.Message{
+			{
+				Role:     "user",
+				Content:  "write a large file",
+				Metadata: types.NewMetadata(),
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected truncated tool call markup to fail")
+	}
+	if !strings.Contains(err.Error(), "被 token 限制截断") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if turn != nil {
+		t.Fatalf("expected no turn response, got %#v", turn)
+	}
+}
+
 func TestToolDefinitionsFromSelection_SortsDefinitionsByName(t *testing.T) {
 	selection := &aicliFunctionSelection{
 		Schemas: []map[string]interface{}{
@@ -978,6 +1082,42 @@ func TestAICLIToolExecutor_ExecuteTool_PreservesMetadataOnError(t *testing.T) {
 	}
 	if got := metadata[toolresult.MetadataKey]; got != toolresult.KindText {
 		t.Fatalf("expected logged %s=%q, got %#v", toolresult.MetadataKey, toolresult.KindText, got)
+	}
+}
+
+func TestAICLIToolExecutor_RejectsTruncatedArgumentsBeforeCatalogExecution(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("codex", registry)
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: "write"}, runtimetools.ToolDescriptor{
+		Name:        "write",
+		Description: "write file",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+
+	session := &ChatSession{
+		FunctionRegistry: registry,
+		FunctionCatalog:  catalog,
+		cancelCtx:        context.Background(),
+	}
+	executor := &aicliToolExecutor{session: session}
+
+	result := executor.ExecuteTool(context.Background(), types.ToolCall{
+		ID:   "call-truncated",
+		Name: "write",
+		Args: map[string]interface{}{
+			"_raw":         `{"file_path":"E:\\projects\\ai\\ai-agent-runtime\\backend\\out.txt","content":"hello`,
+			"_parse_error": "unexpected end of JSON input",
+		},
+	})
+
+	if result.Error == "" {
+		t.Fatal("expected truncated arguments to fail")
+	}
+	if !strings.Contains(result.Error, "被截断") {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if strings.Contains(result.Content, "ok") {
+		t.Fatalf("expected catalog execution to be skipped, got %q", result.Content)
 	}
 }
 

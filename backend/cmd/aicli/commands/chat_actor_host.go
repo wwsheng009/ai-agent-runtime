@@ -17,7 +17,6 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
-	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -198,6 +197,11 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		SystemPrompt: composeLocalChatSystemPrompt(session, workspaceRoot),
 		MaxSteps:     0,
 	}
+	if session != nil {
+		if maxTokens := session.Provider.GetMaxTokensLimit(); maxTokens > 0 {
+			agentConfig.DefaultMaxTokens = maxTokens
+		}
+	}
 	if strings.TrimSpace(requestedModel) != "" {
 		agentConfig.Model = strings.TrimSpace(requestedModel)
 	}
@@ -209,8 +213,8 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		if session.Stream {
 			agentConfig.Options["stream"] = true
 		}
-		if strings.TrimSpace(session.ReasoningEffort) != "" {
-			agentConfig.Options["reasoning_effort"] = strings.TrimSpace(session.ReasoningEffort)
+		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
+			agentConfig.Options["reasoning_effort"] = reasoningEffort
 		}
 		if workspaceRoot != "" {
 			agentConfig.Options["workspace_path"] = workspaceRoot
@@ -285,17 +289,11 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 }
 
 func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) string {
-	base := ""
-	if session != nil {
-		base = strings.TrimSpace(session.SystemPromptText)
-	}
+	base := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
 
 	lines := []string{}
 	if base != "" {
 		lines = append(lines, base)
-	}
-	if guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidance()); guidance != "" {
-		lines = append(lines, guidance)
 	}
 	workspaceRoot = strings.TrimSpace(workspaceRoot)
 	if workspaceRoot != "" {
@@ -354,8 +352,10 @@ func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *
 	if runtimeConfig != nil {
 		config.MaxSteps = agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps)
 	}
-	if session != nil && strings.TrimSpace(session.ReasoningEffort) != "" {
-		config.ReasoningEffort = strings.TrimSpace(session.ReasoningEffort)
+	if session != nil {
+		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
+			config.ReasoningEffort = reasoningEffort
+		}
 	}
 	return config
 }

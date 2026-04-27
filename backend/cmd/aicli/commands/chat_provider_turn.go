@@ -233,7 +233,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 
 	finishReason, _ := assistantMsg["finish_reason"].(string)
 	if finishReason == "length" {
-		warnMsg := "[输出因 token 限制被截断，可配置 max_tokens_limit 增大上限]"
+		warnMsg := "[输出因 token 限制被截断，可配置 max_token / max_tokens_limit 增大上限]"
 		if req.EventSink != nil && shouldRenderInteractiveOutput(session) {
 			req.EventSink(runtimechatcore.ChatEvent{
 				Type:    runtimechatcore.EventWarning,
@@ -245,6 +245,9 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 			logpkg.String("model", session.Model),
 			logpkg.String("finish_reason", finishReason),
 		)
+	}
+	if responseHasTruncatedToolCalls(assistantMsg) {
+		return nil, fmt.Errorf("模型输出在工具调用前被 token 限制截断，请缩短写入内容后重试")
 	}
 
 	if session.Logger != nil && session.Logger.logDir != "" {
@@ -281,9 +284,30 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	}, nil
 }
 
+func responseHasTruncatedToolCalls(msg map[string]interface{}) bool {
+	if len(msg) == 0 {
+		return false
+	}
+	content := payloadStringValue(msg["content"])
+	if hasIncompleteToolCallMarkup(content) {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(payloadStringValue(msg["finish_reason"])), "length") {
+		return false
+	}
+	return len(normalizeMapSlice(msg["tool_calls"])) > 0
+}
+
+func hasIncompleteToolCallMarkup(content string) bool {
+	if !strings.Contains(content, "<tool_call>") {
+		return false
+	}
+	return !strings.Contains(content, "</tool_call>")
+}
+
 func resolveMaxTokens(session *ChatSession) int {
-	if session.Provider.MaxTokensLimit > 0 {
-		return session.Provider.MaxTokensLimit
+	if limit := session.Provider.GetMaxTokensLimit(); limit > 0 {
+		return limit
 	}
 	switch strings.ToLower(strings.TrimSpace(session.Provider.GetProtocol())) {
 	case "anthropic":
@@ -301,12 +325,12 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 		Messages:        messages,
 		Stream:          req.Stream,
 		MaxTokens:       resolveMaxTokens(session),
-		ReasoningEffort: session.ReasoningEffort,
+		ReasoningEffort: runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort),
 		Temperature:     0.7,
 	}
 	config.Metadata = map[string]interface{}{}
-	if strings.TrimSpace(session.ReasoningEffort) != "" {
-		config.Metadata["reasoning_effort"] = strings.TrimSpace(session.ReasoningEffort)
+	if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
+		config.Metadata["reasoning_effort"] = reasoningEffort
 	}
 	if session.RuntimeSession != nil && strings.TrimSpace(session.RuntimeSession.ID) != "" {
 		config.Metadata["prompt_cache_key"] = strings.TrimSpace(session.RuntimeSession.ID)

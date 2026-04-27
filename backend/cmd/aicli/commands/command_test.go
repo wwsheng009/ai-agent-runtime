@@ -523,64 +523,113 @@ func TestExtractCommandArgumentOptions(t *testing.T) {
 }
 
 func TestResolveChatReasoningEffort(t *testing.T) {
-	effort, warning, err := resolveChatReasoningEffort("codex", " HIGH ", true)
+	effort, warning, err := resolveChatReasoningEffort(config.Provider{
+		ModelCapabilities: map[string]config.ModelCapabilitySpec{
+			"*": {
+				ReasoningEfforts: []string{"HIGH", "max"},
+			},
+		},
+	}, "gpt-5.4", " HIGH ", true)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
 	if warning != "" {
 		t.Fatalf("expected empty warning, got %q", warning)
 	}
-	if effort != "high" {
-		t.Fatalf("expected effort high, got %q", effort)
+	if effort != "HIGH" {
+		t.Fatalf("expected effort HIGH, got %q", effort)
 	}
 }
 
 func TestResolveChatReasoningEffort_InvalidValue(t *testing.T) {
-	_, _, err := resolveChatReasoningEffort("codex", "fast", true)
-	if err == nil {
-		t.Fatal("expected invalid reasoning-effort error")
+	effort, warning, err := resolveChatReasoningEffort(config.Provider{}, "gpt-5.4", "fast", true)
+	if err != nil {
+		t.Fatalf("expected nil error without configured capabilities, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "low|medium|high|xhigh") {
-		t.Fatalf("unexpected error: %v", err)
+	if effort != "fast" {
+		t.Fatalf("expected raw effort fast, got %q", effort)
+	}
+	if warning != "" {
+		t.Fatalf("expected no warning without configured capabilities, got %q", warning)
 	}
 }
 
 func TestResolveChatReasoningEffort_OpenAIProtocol(t *testing.T) {
-	effort, warning, err := resolveChatReasoningEffort("openai", "medium", true)
+	effort, warning, err := resolveChatReasoningEffort(config.Provider{}, "gpt-5.4", "medium", true)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
-	}
-	if effort != "medium" {
-		t.Fatalf("expected medium effort for openai protocol, got %q", effort)
-	}
-	if warning != "" {
-		t.Fatalf("expected empty warning, got %q", warning)
-	}
-}
-
-func TestResolveChatReasoningEffort_DefaultsToMediumForCodex(t *testing.T) {
-	effort, warning, err := resolveChatReasoningEffort("codex", "", false)
-	if err != nil {
-		t.Fatalf("expected nil error, got %v", err)
-	}
-	if warning != "" {
-		t.Fatalf("expected empty warning, got %q", warning)
-	}
-	if effort != "medium" {
-		t.Fatalf("expected default effort medium, got %q", effort)
-	}
-}
-
-func TestResolveChatReasoningEffort_DefaultsToMediumForOpenAI(t *testing.T) {
-	effort, warning, err := resolveChatReasoningEffort("openai", "", false)
-	if err != nil {
-		t.Fatalf("expected nil error, got %v", err)
-	}
-	if warning != "" {
-		t.Fatalf("expected empty warning, got %q", warning)
 	}
 	if effort != "medium" {
 		t.Fatalf("expected medium effort, got %q", effort)
+	}
+	if warning != "" {
+		t.Fatalf("expected empty warning, got %q", warning)
+	}
+}
+
+func TestResolveChatReasoningEffort_WithoutCapabilityDoesNotInjectDefault(t *testing.T) {
+	effort, warning, err := resolveChatReasoningEffort(config.Provider{}, "gpt-5.4", "", false)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if effort != "" {
+		t.Fatalf("expected empty effort without capability, got %q", effort)
+	}
+	if warning != "" {
+		t.Fatalf("expected empty warning, got %q", warning)
+	}
+}
+
+func TestResolveChatReasoningEffort_LeavesBlankWhenNoExplicitValue(t *testing.T) {
+	provider := config.Provider{
+		ModelCapabilities: map[string]config.ModelCapabilitySpec{
+			"*": {
+				ReasoningEfforts: []string{"low", "medium", "high", "xhigh"},
+			},
+		},
+	}
+	effort, warning, err := resolveChatReasoningEffort(provider, "gpt-5.4", "", false)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if effort != "" {
+		t.Fatalf("expected empty effort without explicit value, got %q", effort)
+	}
+	if warning != "" {
+		t.Fatalf("expected empty warning, got %q", warning)
+	}
+}
+
+func TestResolveChatReasoningEffort_UsesDeepSeekModelCapabilities(t *testing.T) {
+	provider := config.Provider{
+		Protocol: "openai",
+		ModelCapabilities: map[string]config.ModelCapabilitySpec{
+			"*": {
+				ReasoningEfforts: []string{"high", "max"},
+			},
+		},
+	}
+
+	effort, warning, err := resolveChatReasoningEffort(provider, "deepseek-ai/DeepSeek-V4-Pro", "", false)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if effort != "" {
+		t.Fatalf("expected empty effort without explicit value, got %q", effort)
+	}
+	if warning != "" {
+		t.Fatalf("expected empty warning, got %q", warning)
+	}
+
+	effort, warning, err = resolveChatReasoningEffort(provider, "deepseek-ai/DeepSeek-V4-Pro", "max", true)
+	if err != nil {
+		t.Fatalf("expected nil error for deepseek max, got %v", err)
+	}
+	if warning != "" {
+		t.Fatalf("expected empty warning for deepseek max, got %q", warning)
+	}
+	if effort != "max" {
+		t.Fatalf("expected deepseek max effort, got %q", effort)
 	}
 }
 
@@ -814,6 +863,55 @@ func TestChatLoggerSessionLogPath(t *testing.T) {
 	}
 	if summary.TotalDurationMs < 0 || summary.AverageResponseTimeMs < 0 {
 		t.Fatalf("unexpected summary durations: %+v at %s", summary, time.Now())
+	}
+}
+
+func TestChatLoggerSetLogDirEnsuresSessionArtifacts(t *testing.T) {
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, "https://example.com")
+	logDir := t.TempDir()
+	if err := logger.SetLogDir(logDir); err != nil {
+		t.Fatalf("set log dir: %v", err)
+	}
+
+	for _, path := range []string{
+		logger.SessionDirPath(),
+		logger.RuntimeHTTPArtifactDir(),
+		logger.LocalShellArtifactDir(),
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("expected artifact directory %q to exist: %v", path, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("expected %q to be a directory", path)
+		}
+	}
+
+	debugPath := logger.DebugLogPath()
+	info, err := os.Stat(debugPath)
+	if err != nil {
+		t.Fatalf("expected debug log file %q to exist: %v", debugPath, err)
+	}
+	if info.IsDir() {
+		t.Fatalf("expected %q to be a file", debugPath)
+	}
+}
+
+func TestWriteSessionDebugInfo_PersistsFileWithoutDebugFlags(t *testing.T) {
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, "https://example.com")
+	if err := logger.SetLogDir(t.TempDir()); err != nil {
+		t.Fatalf("set log dir: %v", err)
+	}
+
+	session := &ChatSession{Logger: logger}
+	writeSessionDebugInfo(session, "[tool-debug] hello world", false)
+
+	data, err := os.ReadFile(logger.DebugLogPath())
+	if err != nil {
+		t.Fatalf("read debug log: %v", err)
+	}
+	if !strings.Contains(string(data), "[tool-debug] hello world") {
+		t.Fatalf("expected debug log to contain the written line, got:\n%s", string(data))
 	}
 }
 
@@ -1070,5 +1168,40 @@ func TestPrepareChatRuntimeState(t *testing.T) {
 	}
 	if !state.retryCfg.DisableRetries || state.requestTimeout != 45*time.Second {
 		t.Fatalf("unexpected runtime state retry/timeout: %+v", state)
+	}
+}
+
+func TestPrepareChatRuntimeState_PreservesReasoningEffortOnRestore(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "alpha",
+			Items: map[string]config.Provider{
+				"alpha": {
+					Enabled:      true,
+					Protocol:     "codex",
+					BaseURL:      "https://example.com",
+					DefaultModel: "gpt-5.2-code",
+				},
+			},
+		},
+	}
+	loaded := runtimechat.NewSession("tester")
+	loaded.Metadata.Context = map[string]interface{}{
+		chatRuntimeContextReasoningEffort: "  HIGH  ",
+	}
+	state, details, err := prepareChatRuntimeState(cfg, &chatCommandOptions{
+		ProviderFlag:  "alpha",
+		ModelFlag:     "gpt-5.2-code",
+		NoInteractive: true,
+		OutputFormat:  "json",
+	}, loaded)
+	if err != nil {
+		t.Fatalf("prepareChatRuntimeState: %v", err)
+	}
+	if details != nil {
+		t.Fatalf("expected nil details, got %+v", details)
+	}
+	if state.reasoningEffort != "HIGH" {
+		t.Fatalf("expected restored reasoning effort HIGH, got %q", state.reasoningEffort)
 	}
 }

@@ -48,3 +48,22 @@ func TestFormatAssistantSupplementBlock_PreservesPlainLayoutWithoutColor(t *test
 		t.Fatalf("expected plain layout to be preserved, got %q", got)
 	}
 }
+
+func TestFormatAssistantSupplementBlock_CollapsesRedundantBlankLines(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+		_ = SetThemePreset(ThemePresetFocus)
+	}()
+
+	if err := SetThemePreset(ThemePresetContrast); err != nil {
+		t.Fatalf("SetThemePreset: %v", err)
+	}
+
+	raw := "\n\n[prompt] layers=unknown/system\n\n\n(instruction 471 / total 2490 tokens)\n\n\n"
+	want := "[prompt] layers=unknown/system\n\n(instruction 471 / total 2490 tokens)"
+	if got := FormatAssistantSupplementBlock(raw); got != want {
+		t.Fatalf("expected redundant blank lines to collapse, got %q", got)
+	}
+}

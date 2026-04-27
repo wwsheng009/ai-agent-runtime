@@ -15,6 +15,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -216,7 +217,7 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	runtimeSession.Metadata.Context[chatRuntimeContextProviderName] = session.ProviderName
 	runtimeSession.Metadata.Context[chatRuntimeContextProtocol] = session.Provider.GetProtocol()
 	runtimeSession.Metadata.Context[chatRuntimeContextModel] = session.Model
-	runtimeSession.Metadata.Context[chatRuntimeContextReasoningEffort] = session.ReasoningEffort
+	runtimeSession.Metadata.Context[chatRuntimeContextReasoningEffort] = runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
 	runtimeSession.Metadata.Context[chatRuntimeContextApprovalReuse] = string(session.ApprovalReuseMode)
 	runtimeSession.Metadata.Context[chatRuntimeContextStream] = session.Stream
 	runtimeSession.Metadata.Context[chatRuntimeContextDisableTools] = session.DisableTools
@@ -676,8 +677,9 @@ func buildRuntimeHistoryFromAICLIMessages(messages []map[string]interface{}) ([]
 		return nil, nil
 	}
 
-	history := make([]runtimetypes.Message, 0, len(messages))
-	for _, raw := range messages {
+	sanitized := sanitizeAICLIHistoryMessages(messages)
+	history := make([]runtimetypes.Message, 0, len(sanitized))
+	for _, raw := range sanitized {
 		message, err := runtimeMessageFromAICLIMessage(raw)
 		if err != nil {
 			return nil, err
@@ -691,7 +693,7 @@ func ensureChatSystemPromptMessage(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	prompt := strings.TrimSpace(session.SystemPromptText)
+	prompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
 	if prompt == "" {
 		return
 	}
@@ -711,6 +713,23 @@ func ensureChatSystemPromptMessage(session *ChatSession) {
 	session.Messages = append([]map[string]interface{}{systemMessage}, session.Messages...)
 }
 
+func composeChatSystemPromptWithGuidance(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	lines := make([]string, 0, 3)
+	if base := strings.TrimSpace(session.SystemPromptText); base != "" {
+		lines = append(lines, base)
+	}
+	if guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidance()); guidance != "" {
+		lines = append(lines, guidance)
+	}
+	if guidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidance()); guidance != "" {
+		lines = append(lines, guidance)
+	}
+	return strings.Join(lines, "\n\n")
+}
+
 func buildAICLIMessagesFromRuntimeHistory(history []runtimetypes.Message) ([]map[string]interface{}, error) {
 	if len(history) == 0 {
 		return []map[string]interface{}{}, nil
@@ -724,7 +743,86 @@ func buildAICLIMessagesFromRuntimeHistory(history []runtimetypes.Message) ([]map
 		}
 		messages = append(messages, raw)
 	}
-	return messages, nil
+	return sanitizeAICLIHistoryMessages(messages), nil
+}
+
+func sanitizeAICLIHistoryMessages(messages []map[string]interface{}) []map[string]interface{} {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	sanitized := make([]map[string]interface{}, 0, len(messages))
+	validToolCallIDs := make(map[string]struct{})
+
+	for _, raw := range messages {
+		repaired, keep := sanitizeAICLIHistoryMessage(raw)
+		if !keep || len(repaired) == 0 {
+			continue
+		}
+
+		role := strings.ToLower(strings.TrimSpace(payloadStringValue(repaired["role"])))
+		if role == "tool" {
+			toolCallID := strings.TrimSpace(payloadStringValue(repaired["tool_call_id"]))
+			if toolCallID != "" {
+				if _, ok := validToolCallIDs[toolCallID]; !ok {
+					continue
+				}
+			}
+		}
+
+		if role == "assistant" {
+			for _, call := range decodeRuntimeToolCalls(repaired["tool_calls"]) {
+				if callID := strings.TrimSpace(call.ID); callID != "" {
+					validToolCallIDs[callID] = struct{}{}
+				}
+			}
+		}
+
+		sanitized = append(sanitized, repaired)
+	}
+
+	return sanitized
+}
+
+func sanitizeAICLIHistoryMessage(raw map[string]interface{}) (map[string]interface{}, bool) {
+	normalized := normalizeAICLIMessageMap(raw)
+	if len(normalized) == 0 {
+		return normalized, false
+	}
+
+	role := strings.ToLower(strings.TrimSpace(payloadStringValue(normalized["role"])))
+	if role != "assistant" || !responseHasTruncatedToolCalls(normalized) {
+		return normalized, true
+	}
+
+	content := payloadStringValue(normalized["content"])
+	trimmedContent := strings.TrimSpace(content)
+	if index := strings.Index(content, "<tool_call>"); index >= 0 {
+		trimmedContent = strings.TrimSpace(content[:index])
+	}
+
+	delete(normalized, "tool_calls")
+	normalized["content"] = trimmedContent
+	annotateAICLIMessageRepair(normalized, "truncated_tool_call")
+
+	if trimmedContent == "" {
+		return nil, false
+	}
+	return normalized, true
+}
+
+func annotateAICLIMessageRepair(raw map[string]interface{}, reason string) {
+	if len(raw) == 0 || strings.TrimSpace(reason) == "" {
+		return
+	}
+	metadata, _ := raw["metadata"].(map[string]interface{})
+	if metadata == nil {
+		metadata = make(map[string]interface{})
+		raw["metadata"] = metadata
+	}
+	if _, exists := metadata["session_repaired"]; !exists {
+		metadata["session_repaired"] = strings.TrimSpace(reason)
+	}
 }
 
 func runtimeMessageFromAICLIMessage(raw map[string]interface{}) (runtimetypes.Message, error) {
@@ -1037,7 +1135,10 @@ func decodeToolArguments(raw string) map[string]interface{} {
 	}
 	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return map[string]interface{}{"_raw": raw}
+		return map[string]interface{}{
+			"_raw":         raw,
+			"_parse_error": err.Error(),
+		}
 	}
 	return args
 }

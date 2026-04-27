@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/spf13/cobra"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 )
 
 type contextCommandResult struct {
@@ -93,7 +93,7 @@ func runContextCommand(cfg *config.Config, providerFlag, modelFlag string, opts 
 		fmt.Printf("Provider:       %s\n", providerName)
 		fmt.Printf("Model:          %s\n", modelName)
 		fmt.Printf("Type:           %s\n", provider.GetProtocol())
-		fmt.Printf("Max Tokens:     %d\n", provider.MaxTokensLimit)
+		fmt.Printf("Max Tokens:     %d\n", provider.GetMaxTokensLimit())
 		fmt.Printf("Timeout:        %d seconds\n", opts.TimeoutSec)
 		fmt.Printf("Retries:        %d\n", opts.Retries)
 		fmt.Println()
@@ -118,7 +118,7 @@ func testContextWindow(cfg *config.Config, provider config.Provider, llmAdapter 
 		Mode:               "context_window",
 		Protocol:           provider.GetProtocol(),
 		Model:              modelName,
-		ConfiguredMaxLimit: provider.MaxTokensLimit,
+		ConfiguredMaxLimit: provider.GetMaxTokensLimit(),
 		TimeoutSeconds:     timeout,
 		Retries:            retries,
 	}
@@ -132,7 +132,7 @@ func testContextWindow(cfg *config.Config, provider config.Provider, llmAdapter 
 	// 如果未指定结束值，使用 provider 的限制
 	maxLimit := end
 	if maxLimit == 0 {
-		maxLimit = provider.MaxTokensLimit
+		maxLimit = provider.GetMaxTokensLimit()
 		if maxLimit == 0 {
 			maxLimit = 128000 // 默认最大值
 		}
@@ -218,7 +218,7 @@ func testMaxOutputTokens(cfg *config.Config, provider config.Provider, llmAdapte
 		Mode:               "max_output",
 		Protocol:           provider.GetProtocol(),
 		Model:              modelName,
-		ConfiguredMaxLimit: provider.MaxTokensLimit,
+		ConfiguredMaxLimit: provider.GetMaxTokensLimit(),
 		TimeoutSeconds:     timeout,
 		Retries:            retries,
 	}
@@ -230,7 +230,7 @@ func testMaxOutputTokens(cfg *config.Config, provider config.Provider, llmAdapte
 	}
 
 	// 如果配置有限制，使用配置的限制
-	configuredLimit := provider.MaxTokensLimit
+	configuredLimit := provider.GetMaxTokensLimit()
 	if configuredLimit > 0 && end > configuredLimit {
 		end = configuredLimit
 		if verbose {

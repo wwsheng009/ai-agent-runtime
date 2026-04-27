@@ -44,7 +44,7 @@ func isSessionDebugEnabled(session *ChatSession) bool {
 }
 
 func writeSessionDebugInfo(session *ChatSession, debugInfo string, printToConsole bool) {
-	if !isSessionDebugEnabled(session) || strings.TrimSpace(debugInfo) == "" {
+	if strings.TrimSpace(debugInfo) == "" {
 		return
 	}
 	if session != nil && session.Logger != nil && session.Logger.logDir != "" {
@@ -52,7 +52,7 @@ func writeSessionDebugInfo(session *ChatSession, debugInfo string, printToConsol
 			fmt.Fprintf(os.Stderr, "[调试日志写入失败] %v\n", err)
 		}
 	}
-	if printToConsole {
+	if printToConsole && isSessionDebugEnabled(session) {
 		fmt.Printf("\n%s\n", debugInfo)
 	}
 }

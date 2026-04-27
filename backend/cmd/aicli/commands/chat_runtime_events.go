@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -262,6 +263,9 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.toolExecutionCalls = nil
 	b.toolSummaryLogged = false
 	b.logMu.Unlock()
+	if b.session != nil && b.session.Interaction != nil {
+		b.session.Interaction.ResetRunState()
+	}
 }
 
 func (b *chatRuntimeEventBridge) EndRun() {
@@ -1524,13 +1528,7 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		}
 		return chatRuntimeTimelineEvent{}
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
-		if payloadBoolValue(event.Payload, "success") {
-			return chatRuntimeTimelineEvent{}
-		}
-		return chatRuntimeTimelineEvent{
-			Line:     fmt.Sprintf("[thinking] model error %s", payloadStringValue(event.Payload["error"])),
-			DedupKey: llmRequestDedupKey(event, "llm.request.finished"),
-		}
+		return renderLLMRequestFinishedTimelineEvent(event)
 	case "llm.retry":
 		return renderLLMRetryTimelineEvent(event)
 	case runtimechat.EventAssistantReasoning, "assistant.reasoning":
@@ -1633,6 +1631,9 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			if recovery := promptPreflightRecoverySummary(event.Payload); recovery != "" {
 				lines = append(lines, "  恢复: "+recovery)
 			}
+			if extras := runtimeContextSummaryLines(event.Payload, false); len(extras) > 0 {
+				lines = append(lines, extras...)
+			}
 		} else if action == "blocked" && strings.EqualFold(strings.TrimSpace(payloadStringValue(event.Payload["replan_error_type"])), "prompt_preflight") {
 			replanPayload := extractPrefixedRuntimePayload(event.Payload, "replan")
 			if reason := promptPreflightReasonSummary(replanPayload); reason != "" {
@@ -1646,6 +1647,9 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			}
 			if recovery := promptPreflightRecoverySummary(replanPayload); recovery != "" {
 				lines = append(lines, "  replan 恢复: "+recovery)
+			}
+			if extras := runtimeContextSummaryLines(replanPayload, false); len(extras) > 0 {
+				lines = append(lines, extras...)
 			}
 		}
 		return chatRuntimeTimelineEvent{Line: strings.Join(lines, "\n"), DedupKey: fmt.Sprintf("%s:%s:%s", strings.TrimSpace(event.Type), teamID, taskID)}
@@ -1683,6 +1687,9 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			}
 			if recovery := promptPreflightRecoverySummary(event.Payload); recovery != "" {
 				lines = append(lines, "  恢复: "+recovery)
+			}
+			if extras := runtimeContextSummaryLines(event.Payload, false); len(extras) > 0 {
+				lines = append(lines, extras...)
 			}
 		} else if summary := truncateChatRuntimeText(payloadStringValue(event.Payload["error"]), 160); summary != "" {
 			lines = append(lines, "  错误: "+summary)
@@ -1793,6 +1800,318 @@ func renderLLMRetryTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineE
 	}
 }
 
+func renderLLMRequestFinishedTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
+	payload := event.Payload
+	if payload == nil {
+		return chatRuntimeTimelineEvent{}
+	}
+	if !payloadBoolValue(payload, "success") {
+		return chatRuntimeTimelineEvent{
+			Line:     fmt.Sprintf("[thinking] model error %s", payloadStringValue(payload["error"])),
+			DedupKey: llmRequestDedupKey(event, "llm.request.finished"),
+		}
+	}
+	headline := "[thinking] request finished"
+	if target := strings.TrimSpace(chatLLMRequestTargetSummary(payload)); target != "" {
+		headline += " " + target
+	}
+	lines := []string{headline}
+	if extras := runtimeContextSummaryLines(payload, true); len(extras) > 0 {
+		lines = append(lines, extras...)
+	} else {
+		return chatRuntimeTimelineEvent{}
+	}
+	return chatRuntimeTimelineEvent{
+		Line:     strings.Join(lines, "\n"),
+		DedupKey: llmRequestDedupKey(event, "llm.request.finished"),
+	}
+}
+
+func runtimeContextSummaryLines(payload map[string]interface{}, includeUsage bool) []string {
+	if payload == nil {
+		return nil
+	}
+	lines := make([]string, 0, 8)
+
+	contextParts := make([]string, 0, 4)
+	if current := firstPositivePayloadInt(payload, "context_prompt_tokens", "prompt_tokens_after", "token_after", "prompt_tokens", "token_before", "prompt_tokens_before"); current > 0 {
+		contextParts = append(contextParts, fmt.Sprintf("prompt=%d", current))
+	}
+	if budget := firstPositivePayloadInt(payload, "prompt_budget", "trigger_token_limit"); budget > 0 {
+		contextParts = append(contextParts, fmt.Sprintf("budget=%d", budget))
+	}
+	if window := firstPositivePayloadInt(payload, "context_window_tokens", "max_context_tokens"); window > 0 {
+		contextParts = append(contextParts, fmt.Sprintf("window=%d", window))
+	}
+	if len(contextParts) > 0 {
+		lines = append(lines, formatRuntimePanelLine("context", strings.Join(contextParts, " ")))
+	}
+
+	if includeUsage {
+		usageParts := make([]string, 0, 4)
+		if prompt := firstPositivePayloadInt(payload, "usage_prompt_tokens"); prompt > 0 {
+			usageParts = append(usageParts, fmt.Sprintf("in=%d", prompt))
+		}
+		if completion := firstPositivePayloadInt(payload, "usage_completion_tokens"); completion > 0 {
+			usageParts = append(usageParts, fmt.Sprintf("out=%d", completion))
+		}
+		if total := firstPositivePayloadInt(payload, "usage_total_tokens"); total > 0 {
+			usageParts = append(usageParts, fmt.Sprintf("total=%d", total))
+		}
+		if cached := firstPositivePayloadInt(payload, "usage_cached_tokens"); cached > 0 {
+			usageParts = append(usageParts, fmt.Sprintf("cached=%d", cached))
+		}
+		if reasoning := firstPositivePayloadInt(payload, "usage_reasoning_tokens"); reasoning > 0 {
+			usageParts = append(usageParts, fmt.Sprintf("reasoning=%d", reasoning))
+		}
+		if source := strings.TrimSpace(payloadStringValue(payload["usage_source"])); source != "" {
+			usageParts = append(usageParts, "source="+source)
+		}
+		if len(usageParts) > 0 {
+			lines = append(lines, formatRuntimePanelLine("usage", strings.Join(usageParts, " ")))
+		}
+	}
+	if budgetLines := budgetSummaryLines(payload); len(budgetLines) > 0 {
+		lines = append(lines, budgetLines...)
+	}
+
+	return lines
+}
+
+func formatRuntimePanelLine(label string, value string) string {
+	label = strings.TrimSpace(label)
+	value = strings.TrimSpace(value)
+	if label == "" {
+		return "  " + value
+	}
+	return fmt.Sprintf("  %-7s: %s", label, value)
+}
+
+func formatRuntimePanelSubLine(label string, value string) string {
+	label = strings.TrimSpace(label)
+	value = strings.TrimSpace(value)
+	if label == "" {
+		return "           " + value
+	}
+	return fmt.Sprintf("           %-10s: %s", label, value)
+}
+
+func formatRuntimePanelBullet(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return "             - " + value
+}
+
+func formatRuntimePanelWrappedLines(prefix, text string, limit int) []string {
+	text = strings.TrimSpace(strings.Join(strings.Fields(text), " "))
+	if text == "" {
+		return nil
+	}
+	if limit <= 0 || len([]rune(text)) <= limit {
+		return []string{prefix + text}
+	}
+
+	indent := strings.Repeat(" ", len(prefix))
+	words := strings.Fields(text)
+	lines := make([]string, 0, len(words))
+	current := ""
+	firstLine := true
+	appendCurrent := func() {
+		if current == "" {
+			return
+		}
+		if firstLine {
+			lines = append(lines, prefix+current)
+			firstLine = false
+		} else {
+			lines = append(lines, indent+current)
+		}
+		current = ""
+	}
+	flush := func() {
+		appendCurrent()
+	}
+	for _, word := range words {
+		wordRunes := []rune(word)
+		if len(wordRunes) > limit {
+			flush()
+			for len(wordRunes) > limit {
+				chunk := string(wordRunes[:limit])
+				if firstLine {
+					lines = append(lines, prefix+chunk)
+					firstLine = false
+				} else {
+					lines = append(lines, indent+chunk)
+				}
+				wordRunes = wordRunes[limit:]
+			}
+			if len(wordRunes) > 0 {
+				current = string(wordRunes)
+			}
+			continue
+		}
+		candidate := word
+		if current != "" {
+			candidate = current + " " + word
+		}
+		if len([]rune(candidate)) <= limit {
+			current = candidate
+			continue
+		}
+		flush()
+		current = word
+	}
+	flush()
+	if len(lines) == 0 {
+		return nil
+	}
+	return lines
+}
+
+func budgetSummaryLines(payload map[string]interface{}) []string {
+	if payload == nil {
+		return nil
+	}
+	lines := make([]string, 0, 6)
+	sourceKey := strings.TrimSpace(payloadStringValue(payload["budget_source"]))
+	detail := strings.TrimSpace(payloadStringValue(payload["budget_source_detail"]))
+	if source := budgetSourceSummary(sourceKey, detail); source != "" {
+		lines = append(lines, formatRuntimePanelLine("budget", "source="+source))
+	}
+	if sourceKey != "" && detail != "" {
+		lines = append(lines, budgetDetailLines(detail)...)
+	}
+	if candidateLines := budgetCandidateLines(payload); len(candidateLines) > 0 {
+		lines = append(lines, candidateLines...)
+	}
+	return lines
+}
+
+func budgetDetailLines(detail string) []string {
+	lines := formatRuntimePanelWrappedLines("           detail    : ", detail, 96)
+	if len(lines) == 0 {
+		return nil
+	}
+	return lines
+}
+
+func budgetCandidateLines(payload map[string]interface{}) []string {
+	if payload == nil {
+		return nil
+	}
+	raw, ok := payload["budget_candidates"].(map[string]interface{})
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	selectedSource := strings.TrimSpace(payloadStringValue(payload["budget_source"]))
+	keys := make([]string, 0, len(raw))
+	for key := range raw {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys)+1)
+	lines = append(lines, formatRuntimePanelSubLine("candidates", fmt.Sprintf("%d option(s)", len(keys))))
+	for _, key := range keys {
+		value := raw[key]
+		if line := budgetCandidateLine(key, value, selectedSource); line != "" {
+			lines = append(lines, formatRuntimePanelWrappedLines("             - ", line, 88)...)
+		}
+	}
+	return lines
+}
+
+func budgetCandidateLine(key string, value interface{}, selectedSource string) string {
+	label := budgetCandidateLabel(key)
+	selectedSuffix := ""
+	if selectedSource != "" && strings.TrimSpace(key) == selectedSource {
+		selectedSuffix = "（选中）"
+	}
+	switch num := value.(type) {
+	case int:
+		if num > 0 {
+			return fmt.Sprintf("%s=%d%s", label, num, selectedSuffix)
+		}
+	case int64:
+		if num > 0 {
+			return fmt.Sprintf("%s=%d%s", label, num, selectedSuffix)
+		}
+	case float64:
+		if num > 0 {
+			return fmt.Sprintf("%s=%d%s", label, int(num), selectedSuffix)
+		}
+	}
+	if text := strings.TrimSpace(payloadStringValue(value)); text != "" {
+		return fmt.Sprintf("%s=%s%s", label, truncateChatRuntimeText(text, 60), selectedSuffix)
+	}
+	return fmt.Sprintf("%s=%v%s", label, value, selectedSuffix)
+}
+
+func budgetCandidateLabel(key string) string {
+	switch strings.TrimSpace(key) {
+	case "default_context_max_prompt_tokens":
+		return "默认 prompt 预算"
+	case "context_max_prompt_tokens":
+		return "context manager prompt 预算"
+	case "model_capability_auto_compact_token_limit":
+		return "模型能力 auto-compact token limit"
+	case "model_capability_context_ratio":
+		return "模型能力 auto-compact ratio"
+	case "provider_context_limit_default_ratio":
+		return "provider context limit 默认比例"
+	case "remaining_budget":
+		return "当前轮剩余预算"
+	default:
+		return key
+	}
+}
+
+func budgetSourceSummary(source, detail string) string {
+	switch strings.TrimSpace(source) {
+	case "default_context_max_prompt_tokens":
+		return "默认 context prompt 预算"
+	case "context_max_prompt_tokens":
+		return "context manager 的 max_prompt_tokens"
+	case "remaining_budget":
+		return "本轮剩余 prompt 预算"
+	case "model_capability_auto_compact_token_limit":
+		return "模型能力 auto-compact token limit"
+	case "model_capability_auto_compact_ratio":
+		return "模型能力 auto-compact ratio"
+	case "model_capability_max_context_tokens":
+		return "模型能力 max_context_tokens"
+	case "provider_context_limit":
+		return "provider context limit"
+	case "":
+		return truncateChatRuntimeText(detail, 120)
+	default:
+		return source
+	}
+}
+
+func chatLLMRequestTargetSummary(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	provider := strings.TrimSpace(payloadStringValue(payload["provider"]))
+	model := strings.TrimSpace(payloadStringValue(payload["model"]))
+	switch {
+	case provider != "" && model != "":
+		return provider + "/" + model
+	case provider != "":
+		return provider
+	default:
+		return model
+	}
+}
+
 func renderSessionCompactTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
 	payload := event.Payload
 	if payload == nil {
@@ -1806,12 +2125,18 @@ func renderSessionCompactTimelineEvent(event runtimeevents.Event) chatRuntimeTim
 
 	switch event.Type {
 	case runtimechat.EventSessionCompactStarted:
+		lines := []string{
+			fmt.Sprintf("[context] session compact started mode=%s phase=%s %s", mode, phase, sessionCompactBudgetSummary(payload)),
+		}
+		if extras := runtimeContextSummaryLines(payload, false); len(extras) > 0 {
+			lines = append(lines, extras...)
+		}
 		return chatRuntimeTimelineEvent{
-			Line:     fmt.Sprintf("[context] session compact started mode=%s phase=%s %s", mode, phase, sessionCompactBudgetSummary(payload)),
+			Line:     strings.Join(lines, "\n"),
 			DedupKey: dedupKeyBase,
 		}
 	case runtimechat.EventSessionCompactCompleted:
-		line := fmt.Sprintf(
+		lines := []string{fmt.Sprintf(
 			"[context] session compact completed mode=%s phase=%s token %d -> %d compacted_messages=%d history_messages=%d",
 			mode,
 			phase,
@@ -1819,12 +2144,15 @@ func renderSessionCompactTimelineEvent(event runtimeevents.Event) chatRuntimeTim
 			intPayloadValue(payload, "token_after"),
 			intPayloadValue(payload, "compacted_messages"),
 			intPayloadValue(payload, "message_count_after"),
-		)
+		)}
 		if checkpointID := truncateChatRuntimeText(payloadStringValue(payload["checkpoint_id"]), 80); checkpointID != "" {
-			line += " checkpoint_id=" + checkpointID
+			lines[0] += " checkpoint_id=" + checkpointID
+		}
+		if extras := runtimeContextSummaryLines(payload, true); len(extras) > 0 {
+			lines = append(lines, extras...)
 		}
 		return chatRuntimeTimelineEvent{
-			Line:     line,
+			Line:     strings.Join(lines, "\n"),
 			DedupKey: dedupKeyBase,
 		}
 	case runtimechat.EventSessionCompactSkipped:
@@ -1851,8 +2179,8 @@ func sessionCompactBudgetSummary(payload map[string]interface{}) string {
 		return ""
 	}
 	tokenBefore := intPayloadValue(payload, "token_before")
-	triggerLimit := intPayloadValue(payload, "trigger_token_limit")
-	maxContext := intPayloadValue(payload, "max_context_tokens")
+	triggerLimit := firstPositivePayloadInt(payload, "trigger_token_limit", "prompt_budget")
+	maxContext := firstPositivePayloadInt(payload, "max_context_tokens", "context_window_tokens", "model_capability_max_context_tokens", "provider_context_limit")
 	model := sessionCompactModelSummary(payload)
 	parts := make([]string, 0, 4)
 	if tokenBefore > 0 {
@@ -1948,6 +2276,9 @@ func renderPromptPreflightSessionEndTimelineEvent(event runtimeevents.Event) cha
 	if recovery := promptPreflightRecoverySummary(payload); recovery != "" {
 		lines = append(lines, "  恢复: "+recovery)
 	}
+	if extras := runtimeContextSummaryLines(payload, false); len(extras) > 0 {
+		lines = append(lines, extras...)
+	}
 
 	traceID := firstNonEmptyChatValue(strings.TrimSpace(event.TraceID), payloadStringValue(payload["trace_id"]))
 	failureCode := firstNonEmptyChatValue(payloadStringValue(payload["failure_reason_code"]), "prompt_preflight")
@@ -1984,27 +2315,10 @@ func promptPreflightModelSummary(payload map[string]interface{}) string {
 }
 
 func promptPreflightBudgetSourceSummary(payload map[string]interface{}) string {
-	source := strings.TrimSpace(payloadStringValue(payload["budget_source"]))
-	switch source {
-	case "default_context_max_prompt_tokens":
-		return "默认 context prompt 预算"
-	case "context_max_prompt_tokens":
-		return "context manager 的 max_prompt_tokens"
-	case "remaining_budget":
-		return "本轮剩余 prompt 预算"
-	case "model_capability_auto_compact_token_limit":
-		return "模型能力 auto-compact token limit"
-	case "model_capability_auto_compact_ratio":
-		return "模型能力 auto-compact ratio"
-	case "model_capability_max_context_tokens":
-		return "模型能力 max_context_tokens"
-	case "provider_context_limit":
-		return "provider context limit"
-	case "":
-		return truncateChatRuntimeText(payloadStringValue(payload["budget_source_detail"]), 120)
-	default:
-		return source
-	}
+	return budgetSourceSummary(
+		payloadStringValue(payload["budget_source"]),
+		payloadStringValue(payload["budget_source_detail"]),
+	)
 }
 
 func promptPreflightActiveTurnSummary(payload map[string]interface{}) string {
@@ -2100,6 +2414,9 @@ func renderTeamSummaryTimelineEvent(event runtimeevents.Event, teamID string) ch
 			if recovery := promptPreflightRecoverySummary(event.Payload); recovery != "" {
 				lines = append(lines, "  恢复: "+recovery)
 			}
+			if extras := runtimeContextSummaryLines(event.Payload, false); len(extras) > 0 {
+				lines = append(lines, extras...)
+			}
 		} else if reason := teamSummaryFallbackReasonSummary(payloadStringValue(event.Payload["fallback_reason"])); reason != "" {
 			lines = append(lines, "  fallback: "+reason)
 		}
@@ -2175,6 +2492,18 @@ func intPayloadValue(payload map[string]interface{}, key string) int {
 	default:
 		return 0
 	}
+}
+
+func firstPositivePayloadInt(payload map[string]interface{}, keys ...string) int {
+	if payload == nil {
+		return 0
+	}
+	for _, key := range keys {
+		if value := intPayloadValue(payload, key); value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func sanitizeInteractiveAsyncTeamLaunchResponse(content string) string {
@@ -2749,6 +3078,19 @@ func chatLLMRequestPromptLayoutHint(payload map[string]interface{}) string {
 		line += fmt.Sprintf(" (%d chars)", instructionChars)
 	} else if totalChars > 0 {
 		line += fmt.Sprintf(" (total %d chars)", totalChars)
+	}
+	extras := make([]string, 0, 3)
+	if budget := intPayloadValue(payload, "prompt_budget"); budget > 0 {
+		extras = append(extras, fmt.Sprintf("budget=%d", budget))
+	}
+	if window := intPayloadValue(payload, "context_window_tokens"); window > 0 {
+		extras = append(extras, fmt.Sprintf("window=%d", window))
+	}
+	if source := strings.TrimSpace(payloadStringValue(payload["budget_source"])); source != "" {
+		extras = append(extras, "source="+truncateChatRuntimeText(source, 40))
+	}
+	if len(extras) > 0 {
+		line += " [" + strings.Join(extras, " ") + "]"
 	}
 	return truncateChatRuntimeText(line, 200)
 }

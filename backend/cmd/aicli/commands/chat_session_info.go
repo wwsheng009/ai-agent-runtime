@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 )
 
 func buildChatSessionInfo(session *ChatSession) ui.SessionInfo {
@@ -17,9 +18,9 @@ func buildChatSessionInfo(session *ChatSession) ui.SessionInfo {
 		endpointURL = buildChatSessionEndpoint(session)
 	}
 
-	isReasoningModel := false
-	if session.Adapter != nil {
-		isReasoningModel = session.Adapter.IsReasoningModel(session.Model)
+	reasoningEnabled := false
+	if capability, ok := runtimellm.ResolveModelCapabilitySpec(session.Model, session.Provider.ModelCapabilities); ok {
+		reasoningEnabled = capability.ReasoningModel
 	}
 
 	return ui.SessionInfo{
@@ -31,7 +32,7 @@ func buildChatSessionInfo(session *ChatSession) ui.SessionInfo {
 		KeyCount:         len(session.Provider.GetAllAPIKeys()),
 		Timeout:          formatChatSessionTimeout(session),
 		IsStream:         session.Stream,
-		IsReasoningModel: isReasoningModel,
+		ReasoningEnabled: reasoningEnabled,
 	}
 }
 

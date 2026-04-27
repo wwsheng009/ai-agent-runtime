@@ -35,10 +35,11 @@ func collectVisibleChatHistory(session *ChatSession) []chatHistoryEntry {
 		return nil
 	}
 
-	hiddenSystemPrompt := strings.TrimSpace(session.SystemPromptText)
+	hiddenSystemPrompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
+	rawSystemPrompt := strings.TrimSpace(session.SystemPromptText)
 	entries := make([]chatHistoryEntry, 0, len(session.Messages))
 	for _, raw := range session.Messages {
-		entry, ok := buildChatHistoryEntry(raw, hiddenSystemPrompt)
+		entry, ok := buildChatHistoryEntry(raw, hiddenSystemPrompt, rawSystemPrompt)
 		if !ok {
 			continue
 		}
@@ -47,7 +48,7 @@ func collectVisibleChatHistory(session *ChatSession) []chatHistoryEntry {
 	return entries
 }
 
-func buildChatHistoryEntry(raw map[string]interface{}, hiddenSystemPrompt string) (chatHistoryEntry, bool) {
+func buildChatHistoryEntry(raw map[string]interface{}, hiddenSystemPrompt string, rawSystemPrompt string) (chatHistoryEntry, bool) {
 	if len(raw) == 0 {
 		return chatHistoryEntry{}, false
 	}
@@ -62,7 +63,7 @@ func buildChatHistoryEntry(raw map[string]interface{}, hiddenSystemPrompt string
 
 	switch role {
 	case "system":
-		if content == "" || (hiddenSystemPrompt != "" && content == hiddenSystemPrompt) {
+		if content == "" || (hiddenSystemPrompt != "" && content == hiddenSystemPrompt) || (rawSystemPrompt != "" && content == rawSystemPrompt) {
 			return chatHistoryEntry{}, false
 		}
 	case "assistant":

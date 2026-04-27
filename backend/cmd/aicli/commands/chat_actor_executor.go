@@ -125,7 +125,22 @@ func humanizeActorExecutorError(session *ChatSession, err error) error {
 		return fmt.Errorf("%s", message)
 	}
 	if strings.Contains(err.Error(), "upstream model returned an empty reply: no text and no tool calls") {
+		lower := strings.ToLower(err.Error())
 		message := "上游模型返回了空回复：既没有文本，也没有发起工具调用；请重试，或调整提示词/切换模型后再试"
+		switch {
+		case strings.Contains(lower, "content_inspection_failed"):
+			message = "上游内容审核拦截了这次请求：输入或输出包含不符合策略的内容；请改写为更安全的表达后再试"
+		case strings.Contains(lower, "quota_exhausted"):
+			message = "上游额度已用尽或配额不足，当前请求无法继续；请检查模型额度后再试"
+		case strings.Contains(lower, "rate_limit"):
+			message = "上游触发了限流，当前请求暂时无法稳定完成；请稍后重试"
+		case strings.Contains(lower, "stream_interrupted"):
+			message = "上游流式响应中断，可能是网络波动或服务端临时异常；请稍后重试"
+		case strings.Contains(lower, "reasoning_only_empty_reply"):
+			message = "上游只返回了思考过程，没有最终正文；请重试或调整提示词"
+		case strings.Contains(lower, "empty_reply"):
+			message = "上游模型返回了真正的空回复：没有正文，也没有工具调用；请重试或切换模型"
+		}
 		if session != nil && session.runtimeHTTPCapture != nil {
 			snapshot := session.runtimeHTTPCapture.Snapshot()
 			details := make([]string, 0, 4)
