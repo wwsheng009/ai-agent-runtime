@@ -534,6 +534,23 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 				},
 			})
 		},
+		OnImage: func(metadata map[string]interface{}) {
+			if !req.Stream || len(metadata) == 0 {
+				return
+			}
+			chunkMetadata := map[string]interface{}{
+				"provider": selected.Provider.Name,
+				"protocol": protocol,
+				"model":    adapterRequest.Model,
+			}
+			for key, value := range metadata {
+				chunkMetadata[key] = value
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:     EventTypeImage,
+				Metadata: chunkMetadata,
+			})
+		},
 	}
 
 	assistantMsg, err := adpt.HandleResponse(req.Stream, bytes.NewReader(body), callbacks)
@@ -730,6 +747,24 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 					"protocol": protocol,
 					"model":    adapterRequest.Model,
 				},
+			})
+		},
+		OnImage: func(metadata map[string]interface{}) {
+			if len(metadata) == 0 {
+				return
+			}
+			emissionState.markImage(metadata)
+			chunkMetadata := map[string]interface{}{
+				"provider": selected.Provider.Name,
+				"protocol": protocol,
+				"model":    adapterRequest.Model,
+			}
+			for key, value := range metadata {
+				chunkMetadata[key] = value
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:     EventTypeImage,
+				Metadata: chunkMetadata,
 			})
 		},
 	}
@@ -991,6 +1026,23 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 					}
 				}
 			},
+			OnImage: func(metadata map[string]interface{}) {
+				if len(metadata) == 0 {
+					return
+				}
+				chunkMetadata := map[string]interface{}{
+					"provider": selected.Provider.Name,
+					"protocol": protocol,
+					"model":    adapterRequest.Model,
+				}
+				for key, value := range metadata {
+					chunkMetadata[key] = value
+				}
+				ch <- StreamChunk{
+					Type:     EventTypeImage,
+					Metadata: chunkMetadata,
+				}
+			},
 		}
 
 		// 使用 adapter 处理流式响应
@@ -1185,7 +1237,10 @@ func parseToolCallArgs(argsStr string) map[string]interface{} {
 func parseToolArguments(argsStr string) map[string]interface{} {
 	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
-		return make(map[string]interface{})
+		if strings.TrimSpace(argsStr) == "" {
+			return make(map[string]interface{})
+		}
+		return map[string]interface{}{"_raw": argsStr}
 	}
 	return args
 }
