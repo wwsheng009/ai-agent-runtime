@@ -29,6 +29,12 @@ type Tool interface {
 	CanDirectCall() bool
 }
 
+// ToolDefinitionMetadataProvider allows tools to expose extra definition
+// metadata without changing the base Tool interface.
+type ToolDefinitionMetadataProvider interface {
+	DefinitionMetadata() map[string]interface{}
+}
+
 // ToolResult 工具执行结果
 type ToolResult struct {
 	// Success 是否执行成功

@@ -25,6 +25,26 @@ const (
 	defaultPatchedFileMode = 0o644
 )
 
+const applyPatchLarkGrammar = `start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change?
+
+filename: /(.+)/
+add_line: "+" /(.*)/ LF -> line
+
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+
+%import common.LF`
+
 // ApplyPatchTool applies Codex-style patch payloads directly to workspace files.
 type ApplyPatchTool struct {
 	*toolkit.BaseTool
@@ -55,10 +75,29 @@ func NewApplyPatchTool() *ApplyPatchTool {
 	}
 }
 
+func (t *ApplyPatchTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		"freeform": map[string]interface{}{
+			"type":       "grammar",
+			"syntax":     "lark",
+			"definition": applyPatchLarkGrammar,
+		},
+	}
+}
+
 // Execute implements the Tool interface.
 func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	if result, truncated := truncatedToolArgsResult(params); truncated {
+		return result, nil
+	}
+
 	rawPatch, ok := params["patch"].(string)
-	if !ok || strings.TrimSpace(rawPatch) == "" {
+	if (!ok || strings.TrimSpace(rawPatch) == "") && len(params) > 0 {
+		if raw, ok := params["_raw"].(string); ok {
+			rawPatch = raw
+		}
+	}
+	if strings.TrimSpace(rawPatch) == "" {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,

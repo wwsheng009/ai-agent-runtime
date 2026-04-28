@@ -105,6 +105,11 @@ func (r *Registry) GetToolSchemas() []map[string]interface{} {
 			"description": tool.Description(),
 			"parameters":  tool.Parameters(),
 		}
+		if provider, ok := tool.(ToolDefinitionMetadataProvider); ok {
+			if metadata := provider.DefinitionMetadata(); len(metadata) > 0 {
+				schema["metadata"] = metadata
+			}
+		}
 		schemas = append(schemas, schema)
 	}
 	return schemas

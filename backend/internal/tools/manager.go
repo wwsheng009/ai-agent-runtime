@@ -23,6 +23,7 @@ type ToolDescriptor struct {
 	Name        string
 	Description string
 	Parameters  map[string]interface{}
+	Metadata    map[string]interface{}
 }
 
 // Manager unifies toolkit tools and MCP tools.
@@ -95,10 +96,15 @@ func (m *Manager) ListTools() []ToolDescriptor {
 				continue
 			}
 			seen[name] = struct{}{}
+			metadata := map[string]interface{}(nil)
+			if provider, ok := tool.(toolkit.ToolDefinitionMetadataProvider); ok {
+				metadata = provider.DefinitionMetadata()
+			}
 			toolsList = append(toolsList, ToolDescriptor{
 				Name:        name,
 				Description: tool.Description(),
 				Parameters:  normalizeParameters(tool.Parameters()),
+				Metadata:    metadata,
 			})
 		}
 	}
@@ -263,6 +269,7 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	register(tools.NewViewTool())
 	register(tools.NewEditTool())
 	register(tools.NewWriteTool())
+	register(tools.NewAppendWriteTool())
 	register(tools.NewGlobTool())
 	register(tools.NewGrepTool())
 	register(tools.NewLsTool())

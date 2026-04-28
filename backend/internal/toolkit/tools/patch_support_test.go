@@ -294,3 +294,60 @@ func TestMultieditTool_DescriptionGuidesChunkedWrites(t *testing.T) {
 		t.Fatalf("expected edits description to guide chunked writes, got %q", editsDesc)
 	}
 }
+
+func TestAppendWriteTool_AppendsChunks(t *testing.T) {
+	path := os.TempDir() + "\\append-write-tool.txt"
+	_ = os.Remove(path)
+	defer os.Remove(path)
+
+	tool := NewAppendWriteTool()
+	first, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path":      path,
+		"content":        "第一段",
+		"truncate_first": true,
+	})
+	if err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if !first.Success {
+		t.Fatalf("expected first chunk success, got error: %v", first.Error)
+	}
+
+	second, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": path,
+		"content":   "\n第二段",
+	})
+	if err != nil {
+		t.Fatalf("second Execute returned error: %v", err)
+	}
+	if !second.Success {
+		t.Fatalf("expected second chunk success, got error: %v", second.Error)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if string(data) != "第一段\n第二段" {
+		t.Fatalf("unexpected appended content: %q", string(data))
+	}
+	if got := second.Metadata["transport_backend"]; got != "local_filetransport" {
+		t.Fatalf("expected transport_backend metadata, got %#v", got)
+	}
+}
+
+func TestApplyPatchTool_DefinitionMetadata_AdvertisesFreeformGrammar(t *testing.T) {
+	tool := NewApplyPatchTool()
+
+	metadata := tool.DefinitionMetadata()
+	freeform, ok := metadata["freeform"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected freeform metadata, got %#v", metadata)
+	}
+	if got := freeform["syntax"]; got != "lark" {
+		t.Fatalf("expected freeform syntax=lark, got %#v", got)
+	}
+	if definition, _ := freeform["definition"].(string); !strings.Contains(definition, "*** Begin Patch") {
+		t.Fatalf("expected apply_patch grammar definition, got %q", definition)
+	}
+}
