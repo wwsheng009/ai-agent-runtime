@@ -116,6 +116,7 @@ type Handler struct {
 	runtimeConfigResolver          func(UsageScope) *runtimecfg.RuntimeConfig
 	configDocumentService          ConfigDocumentService
 	serviceControlService          RuntimeServiceControlService
+	fileTransferService            FileTransferService
 	logFilePath                    string
 	profileRegistry                *profilesys.Registry
 	profileDefaultRef              string
@@ -506,6 +507,9 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/config/document", h.UpdateConfigDocument).Methods(http.MethodPut)
 	runtimeRouter.HandleFunc("/service", h.GetRuntimeServiceStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/service/restart", h.RestartRuntimeService).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/fs/read-file", h.ReadRuntimeFile).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/fs/write-file", h.WriteRuntimeFile).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/fs/append-file", h.AppendRuntimeFile).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/debug/prompt-layout", h.withRouteHeaders(h.PreviewPromptLayout, routeHeaderOptions{
 		canonicalEntrypoint: canonicalRuntimeEntrypoint + "/debug/prompt-layout",
 		mode:                "admin-debug",
@@ -555,6 +559,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/close", h.CloseSessionAgent).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/resume", h.ResumeSessionAgent).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/generated-images/{name}", h.GetSessionGeneratedImage).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints", h.ListSessionCheckpoints).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/files", h.GetCheckpointFiles).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/preview", h.PreviewSessionCheckpoint).Methods(http.MethodPost)
@@ -6163,6 +6168,9 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 			}
 			emitter.Emit(streamEventName(chunk.Type), payload)
 			emitter.Emit("chunk", payload)
+		case llm.EventTypeImage:
+			payload := buildStreamChunkPayload(chunk, chunkIndex, builder.Len())
+			emitter.Emit("chunk", payload)
 		case llm.EventTypeError:
 			h.publishSessionRuntimeEvent("llm.request.finished", traceID, sessionID(session), map[string]interface{}{
 				"model":   model,
@@ -9134,6 +9142,29 @@ func (h *Handler) resolveRuntimeConfig(scope UsageScope) *runtimecfg.RuntimeConf
 		}
 	}
 	return h.runtimeConfig
+}
+
+func (h *Handler) generatedImageCacheMaxAge() time.Duration {
+	if h == nil {
+		return time.Hour
+	}
+	if cfg := h.resolveRuntimeConfig(UsageScope{}); cfg != nil {
+		cacheMaxAge := cfg.Images.CacheMaxAge
+		if cacheMaxAge > 0 {
+			return cacheMaxAge
+		}
+		if cacheMaxAge == 0 {
+			return 0
+		}
+	}
+	return time.Hour
+}
+
+func cacheControlHeader(cacheMaxAge time.Duration) string {
+	if cacheMaxAge <= 0 {
+		return "no-store"
+	}
+	return fmt.Sprintf("private, max-age=%d", int(cacheMaxAge.Seconds()))
 }
 
 func (h *Handler) resolvePlanningMode(requested string, config *runtimecfg.RuntimeConfig) string {
