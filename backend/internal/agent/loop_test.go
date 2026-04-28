@@ -355,6 +355,58 @@ func TestReActLoop_RunWithSession_PropagatesStreamOptionToLLMRequest(t *testing.
 	}
 }
 
+func TestReActLoop_RunWithSession_ForcesStreamForImageGenerationCapability(t *testing.T) {
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "image reply",
+				Model:   "test-model",
+				Usage: &types.TokenUsage{
+					PromptTokens:     10,
+					CompletionTokens: 5,
+					TotalTokens:      15,
+				},
+			},
+		},
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"test-model": {
+				InputModalities: []string{"text", "image"},
+				NativeTools: agentconfig.NativeToolCapabilities{
+					ImageGeneration: true,
+				},
+			},
+		},
+	}
+	llmRuntime := llm.NewLLMRuntime(nil)
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Provider:     "test-provider",
+			Model:        "test-model",
+			SystemPrompt: "You are a helpful assistant.",
+		},
+		state: AgentState{},
+	}
+	session := newTestHistorySession("session-image-stream")
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        3,
+		EnableThought:   true,
+		EnableToolCalls: false,
+	})
+
+	result, err := loop.RunWithSession(context.Background(), "draw a square", session)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "image reply", result.Output)
+	require.Len(t, provider.requests, 1)
+	if !provider.requests[0].Stream {
+		t.Fatalf("expected stream=true on provider request for image-generation capable model, got %#v", provider.requests[0])
+	}
+}
+
 func TestReActLoop_RunWithSession_AddsGeneratedImageOutputDirToLLMMetadata(t *testing.T) {
 	provider := &SequenceLLMProvider{
 		name: "test-provider",
@@ -1997,7 +2049,7 @@ func TestSubagentScheduler_RunChildren_AppliesBudgetAndSessionIsolation(t *testi
 			Role:         "researcher",
 			Goal:         "Inspect the logs.",
 			ReadOnly:     true,
-			BudgetTokens: 256,
+			BudgetTokens: 1024,
 		},
 	})
 	require.NoError(t, err)
@@ -2009,7 +2061,7 @@ func TestSubagentScheduler_RunChildren_AppliesBudgetAndSessionIsolation(t *testi
 	assert.Equal(t, results[0].SessionID, startedSessionID)
 	assert.Equal(t, 10.0, completedUsageTotal)
 	require.Len(t, provider.requests, 1)
-	assert.Equal(t, 256, provider.requests[0].MaxTokens)
+	assert.Equal(t, 1024, provider.requests[0].MaxTokens)
 }
 
 func TestReActLoop_GetAvailableTools_UsesCatalogSearch(t *testing.T) {

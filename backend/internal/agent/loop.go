@@ -21,6 +21,7 @@ import (
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -515,6 +516,25 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if loop.agent != nil && loop.agent.config != nil && boolValue(optionValue(loop.agent.config.Options, "stream")) {
 		req.Stream = true
 	}
+	if !req.Stream && loop.llmRuntime != nil {
+		_, _, capability, ok := llm.ResolveRuntimeModelCapability(loop.llmRuntime, req.Provider, req.Model)
+		if ok && capability.NativeTools.ImageGeneration {
+			hasText := false
+			hasImage := false
+			for _, modality := range capability.InputModalities {
+				switch strings.ToLower(strings.TrimSpace(modality)) {
+				case "text":
+					hasText = true
+				case "image":
+					hasImage = true
+				}
+			}
+			// Codex 图片生成只在流式响应里稳定暴露 image_generation_call。
+			if hasText && hasImage {
+				req.Stream = true
+			}
+		}
+	}
 	callCtx := ctx
 	streamedReasoning := false
 	if req.Stream {
@@ -800,7 +820,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		if source := resolveToolSourceForRequest(loop.agent, tc.Name); source != "" {
 			metadata[toolresult.SourceKey] = source
 		}
-		callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, tc.ID, results[:i]), results[:i])
+		callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, tc.ID, results[:i], loop.agent, sessionID), results[:i])
 		loop.agent.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, toolRequestedEventSourcePayload(loop.agent, tc.Name)))
 		if err := loop.agent.runPreToolUseHooks(ctx, sessionID, tc); err != nil {
 			result.Error = err.Error()
@@ -1897,11 +1917,19 @@ func toolResultsToPayloads(results []toolExecutionResult) []ToolResultPayload {
 	return payloads
 }
 
-func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToolCallID string, completed []toolExecutionResult) context.Context {
+func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToolCallID string, completed []toolExecutionResult, agent *Agent, sessionID string) context.Context {
 	if batch, ok := ToolBatchContextFromContext(ctx); ok && len(batch.ToolCalls) > 0 {
-		return WithToolBatchContext(ctx, batch.ToolCalls, currentToolCallID, batch.CompletedToolMessages)
+		ctx = WithToolBatchContext(ctx, batch.ToolCalls, currentToolCallID, batch.CompletedToolMessages)
+	} else {
+		ctx = WithToolBatchContext(ctx, toolCalls, currentToolCallID, toolMessagesFromResults(completed))
 	}
-	return WithToolBatchContext(ctx, toolCalls, currentToolCallID, toolMessagesFromResults(completed))
+	if strings.TrimSpace(sessionID) != "" {
+		ctx = toolctx.WithSessionID(ctx, sessionID)
+	}
+	if outputDir := generatedImageOutputDirForAgentSession(agent, sessionID); strings.TrimSpace(outputDir) != "" {
+		ctx = toolctx.WithGeneratedImageOutputDir(ctx, outputDir)
+	}
+	return ctx
 }
 
 func toolMessagesFromResults(results []toolExecutionResult) []types.Message {
