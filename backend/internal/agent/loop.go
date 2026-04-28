@@ -546,6 +546,15 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					"step":      step,
 					"reasoning": reasoning.ToMap(),
 				})
+			case llm.EventTypeImage:
+				if len(chunk.Metadata) == 0 {
+					return
+				}
+				loop.agent.emitRuntimeEvent("assistant.image_progress", sessionID, "", map[string]interface{}{
+					"trace_id": traceID,
+					"step":     step,
+					"image":    chunk.Metadata,
+				})
 			}
 		})
 	}

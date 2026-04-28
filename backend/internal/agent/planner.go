@@ -312,6 +312,10 @@ Rules:
 2. Use dependsOn to specify dependencies between steps
 3. Steps with no dependencies can be executed in parallel
 4. Set appropriate priority (higher = more important)
+5. When the task involves creating or editing a long file, DO NOT plan a single huge full-file write
+6. Prefer this order for long file generation: skeleton -> append_write chunk(s) -> apply_patch/edit cleanup
+7. Prefer append_write for long text chunks, write for small full-file writes, edit for targeted replacements, and apply_patch for structured multi-hunk edits
+8. If content could exceed one tool-call payload, explicitly split it into multiple chunked append_write steps
 `, goal, strings.Join(toolDescriptions, "\n"))
 }
 
@@ -406,6 +410,9 @@ func hasCycle(steps []PlanStep) bool {
 }
 
 func (p *Planner) createHeuristicPlan(goal string, availableTools []skill.ToolInfo) *Plan {
+	if plan := createHeuristicLongFilePlan(goal, availableTools); plan != nil {
+		return plan
+	}
 	selected := selectHeuristicTools(goal, availableTools, 3)
 	steps := make([]PlanStep, 0, len(selected))
 	for idx, tool := range selected {
@@ -511,6 +518,9 @@ func heuristicToolScore(tool skill.ToolInfo, goalTokens []string) int {
 	}
 
 	switch {
+	case strings.Contains(name, "append_write"),
+		strings.Contains(name, "write_chunk"):
+		score += 5
 	case strings.Contains(name, "read"),
 		strings.Contains(name, "search"),
 		strings.Contains(name, "grep"),
@@ -538,6 +548,79 @@ func heuristicToolScore(tool skill.ToolInfo, goalTokens []string) int {
 		score++
 	}
 	return score
+}
+
+func createHeuristicLongFilePlan(goal string, availableTools []skill.ToolInfo) *Plan {
+	if !goalSuggestsLongFileGeneration(goal) {
+		return nil
+	}
+	writeTool, hasWrite := findPlanningTool(availableTools, "write")
+	appendTool, hasAppend := findPlanningTool(availableTools, "append_write")
+	patchTool, hasPatch := findPlanningTool(availableTools, "apply_patch")
+	if !hasWrite || !hasAppend {
+		return nil
+	}
+
+	steps := []PlanStep{
+		{
+			ID:          "step_skeleton",
+			Description: "Use write to create a small skeleton or first minimal draft file instead of a huge one-shot write.",
+			Tool:        writeTool.Name,
+			Args:        heuristicStepArgs(goal, writeTool),
+			Priority:    3,
+		},
+		{
+			ID:          "step_chunks",
+			Description: "Use append_write to add the main long content in multiple smaller chunks.",
+			Tool:        appendTool.Name,
+			Args:        heuristicStepArgs(goal, appendTool),
+			DependsOn:   []string{"step_skeleton"},
+			Priority:    2,
+		},
+	}
+	if hasPatch {
+		steps = append(steps, PlanStep{
+			ID:          "step_cleanup",
+			Description: "Use apply_patch for final cleanup, structured fixes, and local refinements after chunked writing.",
+			Tool:        patchTool.Name,
+			Args:        heuristicStepArgs(goal, patchTool),
+			DependsOn:   []string{"step_chunks"},
+			Priority:    1,
+		})
+	}
+
+	return &Plan{
+		Goal:  goal,
+		Steps: steps,
+	}
+}
+
+func goalSuggestsLongFileGeneration(goal string) bool {
+	text := strings.ToLower(strings.TrimSpace(goal))
+	if text == "" {
+		return false
+	}
+	keywords := []string{
+		"长文本", "long text", "长文件", "large file", "小说", "chapter", "章节",
+		"markdown", ".md", "write file", "生成文件", "generate file", "全文",
+		"完整文章", "full article", "大段", "分块",
+	}
+	for _, keyword := range keywords {
+		if strings.Contains(text, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func findPlanningTool(tools []skill.ToolInfo, target string) (skill.ToolInfo, bool) {
+	target = strings.TrimSpace(target)
+	for _, tool := range tools {
+		if strings.EqualFold(strings.TrimSpace(tool.Name), target) {
+			return tool, true
+		}
+	}
+	return skill.ToolInfo{}, false
 }
 
 func heuristicStepDescription(stepIndex int, toolName, goal string) string {

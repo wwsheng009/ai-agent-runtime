@@ -28,6 +28,8 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask) s
 	lines = append(lines, "Focus only on your assigned subtask and return a concise final report.")
 	lines = append(lines, "The parent receives only your compressed report, not your full transcript.")
 	lines = append(lines, "Do not change the overall plan unless the subtask requires it.")
+	lines = append(lines, "When writing or editing files, prefer small patches and chunked file-tool calls over one huge inline payload.")
+	lines = append(lines, "For long file generation, prefer skeleton first, then append_write chunks, then apply_patch/edit cleanup.")
 
 	if task.ReadOnly {
 		lines = append(lines, "This is a read-only subagent. Never perform or propose direct workspace mutations.")
