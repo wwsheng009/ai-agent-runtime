@@ -115,7 +115,8 @@ type HTTPTimeout struct {
 
 // NativeToolCapabilities declares provider-native tool support for one model.
 type NativeToolCapabilities struct {
-	ImageGeneration bool `yaml:"image_generation" mapstructure:"image_generation" json:"image_generation"`
+	ImageGeneration      bool `yaml:"image_generation" mapstructure:"image_generation" json:"image_generation"`
+	ImagesGenerationsAPI bool `yaml:"images_generations_api" mapstructure:"images_generations_api" json:"images_generations_api"`
 }
 
 // ModelCapabilitySpec declares per-model input modalities and native tool support.
