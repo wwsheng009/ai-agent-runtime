@@ -26,6 +26,12 @@ type FunctionWithMetadata interface {
 	ExecuteWithMeta(ctx context.Context, args map[string]interface{}) (string, map[string]interface{}, error)
 }
 
+// FunctionDefinitionMetadataProvider allows functions to expose extra tool
+// definition metadata while keeping the base Function interface stable.
+type FunctionDefinitionMetadataProvider interface {
+	DefinitionMetadata() map[string]interface{}
+}
+
 // FunctionRegistry Function 注册表
 type FunctionRegistry struct {
 	functions map[string]Function
@@ -66,6 +72,11 @@ func (r *FunctionRegistry) GetFunctionSchemas() []map[string]interface{} {
 			"name":        fn.Name(),
 			"description": fn.Description(),
 			"parameters":  fn.Parameters(),
+		}
+		if provider, ok := fn.(FunctionDefinitionMetadataProvider); ok {
+			if metadata := provider.DefinitionMetadata(); len(metadata) > 0 {
+				schema["metadata"] = metadata
+			}
 		}
 		schemas = append(schemas, schema)
 	}

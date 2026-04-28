@@ -70,6 +70,20 @@ func resolveDefaultChatSessionDir() string {
 	return filepath.Join(homeDir, ".aicli", "sessions")
 }
 
+func resolveDefaultChatLogDir() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(homeDir) == "" {
+		return filepath.Join(".", ".aicli", "chat-logs")
+	}
+	return filepath.Join(homeDir, ".aicli", "chat-logs")
+}
+
+// ResolveDefaultChatLogDir exposes the default chat log directory for command flags and callers
+// outside the commands package.
+func ResolveDefaultChatLogDir() string {
+	return resolveDefaultChatLogDir()
+}
+
 func resolveChatSessionUserID() string {
 	if current, err := osuser.Current(); err == nil {
 		if username := strings.TrimSpace(current.Username); username != "" {

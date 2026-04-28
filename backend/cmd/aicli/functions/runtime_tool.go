@@ -46,6 +46,14 @@ func (f *RuntimeToolFunction) Parameters() map[string]interface{} {
 	return f.desc.Parameters
 }
 
+// DefinitionMetadata returns optional extra definition metadata.
+func (f *RuntimeToolFunction) DefinitionMetadata() map[string]interface{} {
+	if f == nil {
+		return nil
+	}
+	return f.desc.Metadata
+}
+
 // Execute runs the tool through the runtime provider.
 func (f *RuntimeToolFunction) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	return f.provider.Execute(ctx, f.desc.Name, args)

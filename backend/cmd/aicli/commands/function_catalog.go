@@ -347,11 +347,17 @@ func buildFunctionSchema(fn functions.Function) map[string]interface{} {
 	if fn == nil {
 		return nil
 	}
-	return map[string]interface{}{
+	schema := map[string]interface{}{
 		"name":        fn.Name(),
 		"description": fn.Description(),
 		"parameters":  fn.Parameters(),
 	}
+	if provider, ok := fn.(functions.FunctionDefinitionMetadataProvider); ok {
+		if metadata := provider.DefinitionMetadata(); len(metadata) > 0 {
+			schema["metadata"] = cloneFunctionSchema(metadata)
+		}
+	}
+	return schema
 }
 
 func buildGenericFunctionDescriptor(fn functions.Function) *capability.Descriptor {

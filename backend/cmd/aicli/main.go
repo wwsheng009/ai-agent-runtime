@@ -254,6 +254,7 @@ func main() {
 			commands.HandleChat(cmd, cfg)
 		},
 	}
+	defaultChatLogDir := commands.ResolveDefaultChatLogDir()
 	chatCmd.Flags().String("profile", "", "profile 名称或目录路径（按 profiles 配置或显式路径解析）")
 	chatCmd.Flags().String("agent", "", "profile 内 agent 标识（留空时使用 profile.default_agent）")
 	chatCmd.Flags().StringP("provider", "p", "", "指定 provider 名称")
@@ -263,7 +264,7 @@ func main() {
 	chatCmd.Flags().String("output", "", "非交互模式输出格式（text|json）")
 	chatCmd.Flags().BoolP("json", "j", false, "兼容选项：等价于 --output json")
 	chatCmd.Flags().StringP("message", "M", "", "非交互模式下发送的消息")
-	chatCmd.Flags().StringP("log-dir", "", "./chat-logs", "保存会话日志到指定目录（默认: ./chat-logs）")
+	chatCmd.Flags().StringP("log-dir", "", defaultChatLogDir, fmt.Sprintf("保存会话日志到指定目录（默认: %s）", defaultChatLogDir))
 	chatCmd.Flags().String("request-timeout", "", "单次请求超时（例如 60s、2m，留空使用配置）")
 	chatCmd.Flags().String("reasoning-effort", "", "当前模型配置显式支持的 reasoning_effort 值（留空则不注入，由配置和交互流程决定）")
 	chatCmd.Flags().String("session", "", "加载指定 chat 会话 ID")

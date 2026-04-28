@@ -866,6 +866,24 @@ func TestChatLoggerSessionLogPath(t *testing.T) {
 	}
 }
 
+func TestNewChatLogger_UsesDefaultChatLogDir(t *testing.T) {
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, "https://example.com")
+	defaultDir := ResolveDefaultChatLogDir()
+
+	if logger.logDir != defaultDir {
+		t.Fatalf("expected logger default dir %q, got %q", defaultDir, logger.logDir)
+	}
+	if got, want := logger.SessionDirPath(), filepath.Join(defaultDir, logger.sessionID); got != want {
+		t.Fatalf("unexpected session dir path: got %q want %q", got, want)
+	}
+	if got := logger.SessionLogPath(); got == "" || filepath.Dir(got) != logger.SessionDirPath() {
+		t.Fatalf("unexpected session log path: %q", got)
+	}
+	if got := logger.DebugLogPath(); got == "" || filepath.Dir(got) != logger.SessionDirPath() {
+		t.Fatalf("unexpected debug log path: %q", got)
+	}
+}
+
 func TestChatLoggerSetLogDirEnsuresSessionArtifacts(t *testing.T) {
 	logger := NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, "https://example.com")
 	logDir := t.TempDir()
@@ -941,7 +959,7 @@ func TestParseChatCommandOptions(t *testing.T) {
 	cmd.Flags().Bool("stream", false, "")
 	cmd.Flags().Bool("no-interactive", false, "")
 	cmd.Flags().String("message", "", "")
-	cmd.Flags().String("log-dir", "", "")
+	cmd.Flags().String("log-dir", ResolveDefaultChatLogDir(), "")
 	cmd.Flags().String("request-timeout", "", "")
 	cmd.Flags().String("reasoning-effort", "", "")
 	cmd.Flags().Bool("disable-tools", false, "")
@@ -983,6 +1001,9 @@ func TestParseChatCommandOptions(t *testing.T) {
 	}
 	if opts.ApprovalReuseMode != chatApprovalReuseSessionReadOnlyShell {
 		t.Fatalf("unexpected approval reuse mode: %+v", opts)
+	}
+	if opts.LogDir != ResolveDefaultChatLogDir() {
+		t.Fatalf("unexpected default log dir: %+v", opts.LogDir)
 	}
 }
 

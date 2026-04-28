@@ -67,7 +67,7 @@ func NewChatLogger(provider, protocol, model string, stream bool, baseURL string
 	sessionID := time.Now().Format("20060102_150405")
 	return &ChatLogger{
 		sessionID: sessionID,
-		logDir:    "", // 默认不保存，需要调用 SetLogDir 来设置
+		logDir:    resolveDefaultChatLogDir(),
 		sessionLog: &ChatSessionLog{
 			SessionID: sessionID,
 			StartTime: time.Now(),

@@ -86,6 +86,39 @@ func TestRuntimeToolFunction_ExecuteWithMeta_PreservesProviderMetadata(t *testin
 	}
 }
 
+func TestFunctionRegistry_GetFunctionSchemas_PreservesDefinitionMetadata(t *testing.T) {
+	registry := NewFunctionRegistry()
+	registry.Register(NewRuntimeToolFunction(&richRuntimeToolProvider{
+		output: "ok",
+	}, runtimetools.ToolDescriptor{
+		Name:        "apply_patch",
+		Description: "apply patch",
+		Parameters:  map[string]interface{}{"type": "object"},
+		Metadata: map[string]interface{}{
+			"freeform": map[string]interface{}{
+				"type":   "grammar",
+				"syntax": "lark",
+			},
+		},
+	}))
+
+	schemas := registry.GetFunctionSchemas()
+	if len(schemas) != 1 {
+		t.Fatalf("expected 1 schema, got %d", len(schemas))
+	}
+	metadata, ok := schemas[0]["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected metadata map, got %#v", schemas[0]["metadata"])
+	}
+	freeform, ok := metadata["freeform"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected freeform metadata, got %#v", metadata)
+	}
+	if got := freeform["syntax"]; got != "lark" {
+		t.Fatalf("expected freeform syntax=lark, got %#v", got)
+	}
+}
+
 type inspectShellExecuter struct {
 	output     string
 	err        error
