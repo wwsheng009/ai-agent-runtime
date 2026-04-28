@@ -20,7 +20,9 @@ import {
 } from "@/lib/runtime-api";
 import {
   appendArtifactToMessage,
-  buildStreamingMessageSegments,
+  buildAssistantMessageSegments,
+  buildGeneratedImageAttachments,
+  buildGeneratedImagePlaceholderSegment,
   buildTurnJsonArtifact,
   createStreamingAssistantMessage,
   getErrorMessage,
@@ -28,6 +30,7 @@ import {
   getToolName,
   isRuntimePayload,
   mergeUniqueStrings,
+  upsertGeneratedImageSegment,
   updateThreadMessage,
   upsertArtifact,
   upsertArtifacts,
@@ -166,7 +169,14 @@ export function useWorkspaceAgentChatTurn({
           ...message,
           author,
           label,
-          segments: buildStreamingMessageSegments(content, currentSource, reasoningText),
+          segments: buildAssistantMessageSegments(
+            content,
+            currentSource,
+            reasoningText,
+            {
+              existingSegments: message.segments,
+            },
+          ),
         })),
       );
     };
@@ -224,7 +234,14 @@ export function useWorkspaceAgentChatTurn({
           ...currentMessage,
           author: "Runtime error",
           label: "error",
-          segments: buildStreamingMessageSegments(content, currentSource, reasoningText),
+          segments: buildAssistantMessageSegments(
+            content,
+            currentSource,
+            reasoningText,
+            {
+              existingSegments: currentMessage.segments,
+            },
+          ),
         })),
       );
     };
@@ -264,6 +281,11 @@ export function useWorkspaceAgentChatTurn({
         streamedText = payload.content;
       }
 
+      const generatedImageAttachments = buildGeneratedImageAttachments(
+        currentSessionId,
+        finalResult?.metadata ?? null,
+      );
+
       const stopped = options?.stopped === true;
       const terminalPayload: AgentChatStreamDonePayload = {
         session_id: currentSessionId,
@@ -286,6 +308,7 @@ export function useWorkspaceAgentChatTurn({
         observationPayloads,
         subagentPayloads,
         toolPayloads,
+        generatedImageAttachments.artifacts,
       );
 
       const finalText =
@@ -320,11 +343,15 @@ export function useWorkspaceAgentChatTurn({
               ? "Runtime agent"
               : "Runtime stream",
           label: stopped ? "stopped" : currentSource || "runtime",
-          segments: buildStreamingMessageSegments(
+          segments: buildAssistantMessageSegments(
             finalText,
             currentSource,
             reasoningText,
-            stopped ? { status: "stopped" } : undefined,
+            {
+              status: stopped ? "stopped" : undefined,
+              existingSegments: message.segments,
+              generatedImages: generatedImageAttachments,
+            },
           ),
           relatedArtifactIds: mergeUniqueStrings(
             ...(message.relatedArtifactIds ?? []),
@@ -443,6 +470,27 @@ export function useWorkspaceAgentChatTurn({
             },
             onChunk: (payload) => {
               receivedRuntimeActivity = true;
+              if (payload.type === "image") {
+                const imageProgress = buildGeneratedImagePlaceholderSegment(
+                  payload.metadata,
+                );
+                if (imageProgress) {
+                  updateCurrentThread((thread) =>
+                    updateThreadMessage(thread, assistantMessageId, (message) => ({
+                      ...message,
+                      segments: upsertGeneratedImageSegment(
+                        message.segments,
+                        imageProgress,
+                      ),
+                    })),
+                  );
+                  updateCurrentThread((thread) => ({
+                    ...thread,
+                    lastRuntimeEventType: `assistant.image_progress:${imageProgress.phase}`,
+                  }));
+                }
+                return;
+              }
               const delta = getStreamTextDelta(payload);
               if (!delta) {
                 return;
@@ -783,6 +831,7 @@ function buildFinalArtifacts(
   observationPayloads: Record<string, unknown>[],
   subagentPayloads: Record<string, unknown>[],
   toolPayloads: AgentChatStreamChunkPayload[],
+  generatedImageArtifacts: Artifact[],
 ) {
   const artifacts: Artifact[] = [
     buildTurnJsonArtifact(
@@ -864,6 +913,10 @@ function buildFinalArtifacts(
         subagentPayloads,
       ),
     );
+  }
+
+  if (generatedImageArtifacts.length > 0) {
+    artifacts.push(...generatedImageArtifacts);
   }
 
   return artifacts;

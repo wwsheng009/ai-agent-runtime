@@ -3,6 +3,7 @@ import {
   FileJsonIcon,
   GlobeIcon,
   HistoryIcon,
+  ImageIcon,
   SparklesIcon,
 } from "lucide-react";
 import {
@@ -39,6 +40,9 @@ type ArtifactPanelProps = {
 };
 
 function iconForArtifact(kind: Artifact["kind"]) {
+  if (kind === "image") {
+    return ImageIcon;
+  }
   if (kind === "html") {
     return GlobeIcon;
   }
@@ -199,6 +203,9 @@ export function ArtifactPanel({
           const Icon = iconForArtifact(artifact.kind);
           const category = classifyArtifactCategory(artifact);
           const isActive = artifact.id === selectedArtifactId;
+          const showImageThumbnail =
+            artifact.kind === "image" &&
+            (!artifact.mimeType || artifact.mimeType.toLowerCase().startsWith("image/"));
 
           return (
             <button
@@ -214,23 +221,50 @@ export function ArtifactPanel({
                   : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/8",
               )}
             >
-              <div className="flex items-center gap-2">
-                <span
-                  className={cn(
-                    "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[0.55rem] border",
-                    category === "evidence"
-                      ? "border-[#8fd0c6]/18 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-                      : isActive
-                        ? "border-[#f0c77b]/25 bg-[#f0c77b]/12 text-[#f0c77b]"
-                        : "border-white/10 bg-black/20 text-[var(--muted-foreground)]",
-                  )}
-                >
-                  <Icon size={12} />
-                </span>
+              <div className="flex items-center gap-2.5">
+                {showImageThumbnail ? (
+                  <span
+                    className={cn(
+                      "inline-flex h-10 w-10 shrink-0 overflow-hidden rounded-[0.7rem] border",
+                      category === "evidence"
+                        ? "border-[#8fd0c6]/18 bg-[#8fd0c6]/10"
+                        : isActive
+                          ? "border-[#f0c77b]/25 bg-[#f0c77b]/12"
+                          : "border-white/10 bg-black/20",
+                    )}
+                  >
+                    <img
+                      alt={artifact.revisedPrompt ?? artifact.name}
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                      src={artifact.content}
+                    />
+                  </span>
+                ) : (
+                  <span
+                    className={cn(
+                      "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[0.7rem] border",
+                      category === "evidence"
+                        ? "border-[#8fd0c6]/18 bg-[#8fd0c6]/10 text-[#8fd0c6]"
+                        : isActive
+                          ? "border-[#f0c77b]/25 bg-[#f0c77b]/12 text-[#f0c77b]"
+                          : "border-white/10 bg-black/20 text-[var(--muted-foreground)]",
+                    )}
+                  >
+                    <Icon size={16} />
+                  </span>
+                )}
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="truncate app-text-12 font-semibold leading-5">
-                      {artifact.name}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate app-text-12 font-semibold leading-5">
+                        {artifact.name}
+                      </div>
+                      <div className="mt-0.5 truncate app-text-11 text-[var(--muted-foreground)]">
+                        {artifact.kind === "image" && artifact.byteCount != null
+                          ? formatBytes(artifact.byteCount)
+                          : artifact.summary}
+                      </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
                       <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
@@ -239,7 +273,11 @@ export function ArtifactPanel({
                       <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
                         {artifact.kind}
                       </span>
-                      {artifact.previewHtml ? (
+                      {artifact.kind === "image" && artifact.byteCount != null ? (
+                        <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                          {formatBytes(artifact.byteCount)}
+                        </span>
+                      ) : artifact.previewHtml ? (
                         <span className="inline-flex h-4 w-4 items-center justify-center rounded-[0.45rem] border border-white/10 bg-black/20 text-[var(--muted-foreground)]">
                           <SparklesIcon size={8} />
                         </span>
@@ -418,4 +456,21 @@ function ArtifactPanelCheckpointFallback() {
       </div>
     </div>
   );
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value < 0) {
+    return "—";
+  }
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  const units = ["KB", "MB", "GB", "TB"];
+  let current = value / 1024;
+  let unitIndex = 0;
+  while (current >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024;
+    unitIndex++;
+  }
+  return `${current.toFixed(current >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 }

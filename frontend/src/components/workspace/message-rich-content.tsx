@@ -3,6 +3,7 @@ import {
   ChevronDownIcon,
   CheckIcon,
   InfoIcon,
+  LoaderCircleIcon,
   PaperclipIcon,
   TriangleAlertIcon,
 } from "lucide-react";
@@ -17,6 +18,7 @@ type RichMessageSegment = Exclude<MessageSegment, { type: "text" }>;
 
 type MessageRichSegmentProps = {
   segment: RichMessageSegment;
+  onSelectArtifact?: (artifactId: string) => void;
 };
 
 type MessageRelatedArtifactsProps = {
@@ -24,10 +26,127 @@ type MessageRelatedArtifactsProps = {
   relatedArtifacts: Artifact[];
 };
 
-export function MessageRichSegment({ segment }: MessageRichSegmentProps) {
+export function MessageRichSegment({
+  onSelectArtifact,
+  segment,
+}: MessageRichSegmentProps) {
   const baseId = useId();
   const titleId = `${baseId}-title`;
   const descriptionId = `${baseId}-description`;
+
+  if (segment.type === "image-placeholder") {
+    const isFailed = segment.phase === "failed";
+    const progress =
+      typeof segment.progress === "number" && Number.isFinite(segment.progress)
+        ? Math.max(0, Math.min(1, segment.progress))
+        : null;
+    const phaseLabel =
+      segment.phase === "started"
+        ? "图片正在生成"
+        : segment.phase === "partial"
+          ? "图片生成中"
+          : segment.phase === "completed"
+            ? "图片已生成，正在保存"
+            : "图片生成失败";
+
+    return (
+      <section
+        aria-describedby={descriptionId}
+        aria-labelledby={titleId}
+        className={cn(
+          "mt-2 overflow-hidden rounded-[0.85rem] border p-3",
+          isFailed
+            ? "border-[#f0c77b]/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]"
+            : "border-[var(--border)] bg-[var(--surface-softer)]",
+        )}
+        role="status"
+      >
+        <div className="flex items-start gap-3">
+          <div
+            className={cn(
+              "inline-flex size-10 shrink-0 items-center justify-center rounded-[0.85rem] border",
+              isFailed
+                ? "border-[#f0c77b]/24 bg-[#f0c77b]/12 text-[#f0c77b]"
+                : "border-[#8fd0c6]/18 bg-[#8fd0c6]/10 text-[#8fd0c6]",
+            )}
+          >
+            {isFailed ? (
+              <TriangleAlertIcon size={16} />
+            ) : (
+              <LoaderCircleIcon className="animate-spin" size={16} />
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div
+              className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+              id={titleId}
+            >
+              {phaseLabel}
+            </div>
+            <div
+              className="mt-1.5 app-text-13 font-semibold text-[var(--foreground)]"
+              id={descriptionId}
+            >
+              {segment.caption || "等待生成结果写入会话。"}
+            </div>
+            {progress !== null ? (
+              <div className="mt-2.5 h-2 overflow-hidden rounded-full bg-[var(--surface-soft)]">
+                <div
+                  className={cn(
+                    "h-full rounded-full transition-[width] duration-300",
+                    isFailed
+                      ? "bg-[#f0c77b]"
+                      : "bg-[linear-gradient(90deg,#8fd0c6,#f0c77b)]",
+                  )}
+                  style={{ width: `${Math.max(progress, 0.04) * 100}%` }}
+                />
+              </div>
+            ) : (
+              <div className="mt-2.5 h-2 overflow-hidden rounded-full bg-[var(--surface-soft)]">
+                <div className="h-full w-1/3 animate-pulse rounded-full bg-[linear-gradient(90deg,rgba(143,208,198,0.15),rgba(240,199,123,0.35),rgba(143,208,198,0.15))]" />
+              </div>
+            )}
+            {segment.errorMessage ? (
+              <div className="mt-2.5 rounded-[0.7rem] border border-[#f0c77b]/16 bg-[#f0c77b]/8 px-3 py-2 app-text-11 text-[#f0c77b]">
+                {segment.errorMessage}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (segment.type === "image") {
+    const isClickable = Boolean(segment.artifactId && onSelectArtifact);
+
+    return (
+      <figure className="mt-2 overflow-hidden rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)]">
+        <button
+          type="button"
+          onClick={() => {
+            if (segment.artifactId && onSelectArtifact) {
+              onSelectArtifact(segment.artifactId);
+            }
+          }}
+          disabled={!isClickable}
+          className="block w-full text-left disabled:cursor-default"
+        >
+          <img
+            alt={segment.alt ?? segment.caption ?? "Generated image"}
+            className="block h-auto w-full max-h-[18rem] bg-black/40 object-contain"
+            loading="lazy"
+            src={segment.src}
+          />
+        </button>
+        {segment.caption ? (
+          <figcaption className="px-3 py-2 app-text-11 text-[var(--muted-foreground)]">
+            {segment.caption}
+          </figcaption>
+        ) : null}
+      </figure>
+    );
+  }
 
   if (segment.type === "code") {
     return (

@@ -21,6 +21,58 @@ function extractAttribute(markup: string, attribute: string) {
 }
 
 describe("MessageRichSegment", () => {
+  it("renders generated image segments with captions and accessible alt text", () => {
+    const image: MessageSegment = {
+      type: "image",
+      src: "/api/runtime/sessions/session-1/generated-images/image_1",
+      alt: "a tiny robot",
+      caption: "a tiny robot",
+      artifactId: "generated-image:session-1:image_1",
+      imageId: "image_1",
+    };
+
+    const markup = renderToStaticMarkup(
+      <MessageRichSegment segment={image} />,
+    );
+
+    expect(markup).toContain("generated-images/image_1");
+    expect(markup).toContain('alt="a tiny robot"');
+    expect(markup).toContain("a tiny robot");
+    expect(markup).toContain("figure");
+  });
+
+  it("renders image placeholders with progress and failure state", () => {
+    const placeholder: MessageSegment = {
+      type: "image-placeholder",
+      imageId: "image_1",
+      phase: "partial",
+      progress: 0.5,
+      caption: "a tiny robot",
+    };
+
+    const markup = renderToStaticMarkup(
+      <MessageRichSegment segment={placeholder} />,
+    );
+
+    expect(markup).toContain("图片生成中");
+    expect(markup).toContain("a tiny robot");
+    expect(markup).toContain("width:50%");
+
+    const failed: MessageSegment = {
+      type: "image-placeholder",
+      imageId: "image_2",
+      phase: "failed",
+      errorMessage: "image save warning",
+    };
+
+    const failedMarkup = renderToStaticMarkup(
+      <MessageRichSegment segment={failed} />,
+    );
+
+    expect(failedMarkup).toContain("图片生成失败");
+    expect(failedMarkup).toContain("image save warning");
+  });
+
   it("adds labels to checklist sections", () => {
     const checklist: MessageSegment = {
       type: "checklist",

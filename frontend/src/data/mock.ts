@@ -28,6 +28,24 @@ export type MessageSegment =
       title: string;
       content: string;
       tone?: "info" | "warning" | "success";
+    }
+  | {
+      type: "image";
+      src: string;
+      alt?: string;
+      caption?: string;
+      width?: number;
+      height?: number;
+      artifactId?: string;
+      imageId?: string;
+    }
+  | {
+      type: "image-placeholder";
+      imageId: string;
+      phase: "started" | "partial" | "completed" | "failed";
+      progress?: number;
+      caption?: string;
+      errorMessage?: string;
     };
 
 export type ChatMessage = {
@@ -44,10 +62,14 @@ export type Artifact = {
   name: string;
   path: string;
   summary: string;
-  kind: "code" | "html" | "json";
-  language: "json" | "tsx" | "ts" | "html";
+  kind: "code" | "html" | "json" | "image";
+  language?: "json" | "tsx" | "ts" | "html";
   content: string;
   previewHtml?: string;
+  mimeType?: string;
+  byteCount?: number;
+  sha256?: string;
+  revisedPrompt?: string;
 };
 
 export type Thread = {

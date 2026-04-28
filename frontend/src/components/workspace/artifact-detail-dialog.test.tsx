@@ -89,6 +89,49 @@ describe("ArtifactDetailDialog", () => {
     );
   });
 
+  it("renders image artifacts with a preview and image metadata", () => {
+    const artifact: Artifact = {
+      id: "artifact-image-1",
+      name: "image_1.png",
+      path: "runtime/generated-images/image_1.png",
+      summary: "Generated image preview",
+      kind: "image",
+      content: "/api/runtime/sessions/session-1/generated-images/image_1",
+      mimeType: "image/png",
+      byteCount: 4096,
+      sha256: "abc123",
+      revisedPrompt: "a tiny robot",
+    };
+
+    renderDialog(artifact);
+
+    expect(document.body.textContent).toContain("Rendered image");
+    expect(document.body.textContent).toContain("a tiny robot");
+    expect(document.body.textContent).toContain("SHA-256");
+    expect(document.body.textContent).toContain("image/png");
+    expect(document.body.querySelector('img[alt="a tiny robot"]')).toBeInstanceOf(
+      HTMLImageElement,
+    );
+  });
+
+  it("falls back to a generic view when the image MIME type is not renderable", () => {
+    const artifact: Artifact = {
+      id: "artifact-image-2",
+      name: "image_2.bin",
+      path: "runtime/generated-images/image_2.bin",
+      summary: "Unsupported image artifact",
+      kind: "image",
+      content: "https://example.com/raw-image.bin",
+      mimeType: "application/octet-stream",
+    };
+
+    renderDialog(artifact);
+
+    expect(document.body.textContent).toContain("Image unavailable");
+    expect(document.body.textContent).toContain("cannot be rendered inline");
+    expect(document.body.textContent).toContain("Open raw file");
+  });
+
   it("switches preview artifacts between preview and source tabs", () => {
     const artifact: Artifact = {
       id: "artifact-2",

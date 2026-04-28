@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import type { Thread } from "@/data/mock";
 import {
+  applyRuntimeEventToThread,
   applySessionHistoryToThread,
+  buildAssistantMessageSegments,
+  buildGeneratedImagePlaceholderSegment,
   buildStreamingMessageSegments,
   mergeRuntimeSessionsIntoThreads,
   mergeRuntimeEvent,
+  upsertGeneratedImageSegment,
 } from "@/lib/workspace-thread-state";
 import type {
   RuntimeSessionRecord,
@@ -155,6 +159,298 @@ describe("thread-runtime", () => {
         }),
       ]),
     );
+  });
+
+  it("restores generated images from assistant metadata into inline segments and artifacts", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Generated image",
+          metadata: {
+            generated_images: [
+              {
+                id: "image:1",
+                status: "completed",
+                revised_prompt: "a tiny robot",
+                mime_type: "image/png",
+                saved_path: "C:/temp/image_1.png",
+                sha256: "abc123",
+                byte_count: 42,
+              },
+            ],
+            generated_images_error: "image save warning",
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(
+      {
+        ...createThread(),
+        messages: [],
+        artifacts: [],
+      },
+      response,
+    );
+
+    expect(nextThread.messages).toHaveLength(1);
+    expect(nextThread.messages[0].relatedArtifactIds).toEqual([
+      "generated-image:session-1:image_1",
+    ]);
+    expect(nextThread.messages[0].segments).toEqual([
+      {
+        type: "text",
+        content: "Generated image",
+      },
+      {
+        type: "image",
+        src: expect.stringContaining(
+          "/api/runtime/sessions/session-1/generated-images/image_1",
+        ),
+        alt: "a tiny robot",
+        caption: "a tiny robot",
+        artifactId: "generated-image:session-1:image_1",
+        imageId: "image_1",
+      },
+      {
+        type: "callout",
+        title: "图片保存失败",
+        tone: "warning",
+        content: "image save warning",
+      },
+    ]);
+
+    expect(nextThread.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "generated-image:session-1:image_1",
+          kind: "image",
+          name: "image_1.png",
+          path: "runtime/generated-images/image_1.png",
+          content: expect.stringContaining(
+            "/api/runtime/sessions/session-1/generated-images/image_1",
+          ),
+          mimeType: "image/png",
+          sha256: "abc123",
+          byteCount: 42,
+          revisedPrompt: "a tiny robot",
+        }),
+      ]),
+    );
+  });
+
+  it("merges assistant image progress into the live assistant message", () => {
+    const event: SessionRuntimeEvent = {
+      type: "assistant.image_progress",
+      timestamp: "2026-03-31T00:00:10Z",
+      payload: {
+        trace_id: "trace-1",
+        step: 1,
+        image: {
+          phase: "partial",
+          image_id: "image:1",
+          sanitized_id: "image_1",
+          progress: 0.5,
+          revised_prompt: "a tiny robot",
+        },
+      },
+    };
+
+    const nextThread = applyRuntimeEventToThread(
+      createThread(),
+      "session-1",
+      [event],
+      event,
+    );
+
+    expect(nextThread.lastRuntimeEventType).toBe("assistant.image_progress");
+    expect(nextThread.runtimeEventCount).toBe(1);
+    expect(nextThread.messages[0].segments).toEqual([
+      {
+        type: "text",
+        content: "Merged answer",
+      },
+      {
+        type: "code",
+        language: "json",
+        title: "Reasoning snapshot",
+        code: '{"ok":true}',
+      },
+      {
+        type: "image-placeholder",
+        imageId: "image_1",
+        phase: "partial",
+        progress: 0.5,
+        caption: "a tiny robot",
+      },
+    ]);
+  });
+
+  it("replaces image placeholders with generated images when building final assistant segments", () => {
+    const placeholder = buildGeneratedImagePlaceholderSegment({
+      phase: "partial",
+      image_id: "image:1",
+      sanitized_id: "image_1",
+      progress: 0.5,
+      revised_prompt: "a tiny robot",
+    });
+
+    expect(placeholder).not.toBeNull();
+
+    const segments = buildAssistantMessageSegments(
+      "Merged answer",
+      "runtime",
+      "Need a follow-up step",
+      {
+        existingSegments: [
+          {
+            type: "text",
+            content: "Merged answer",
+          },
+          placeholder!,
+        ],
+        generatedImages: {
+          artifacts: [],
+          segments: [
+            {
+              type: "image",
+              src: "/api/runtime/sessions/session-1/generated-images/image_1",
+              alt: "a tiny robot",
+              caption: "a tiny robot",
+              artifactId: "generated-image:session-1:image_1",
+              imageId: "image_1",
+            },
+          ],
+        },
+      },
+    );
+
+    expect(segments).toEqual([
+      {
+        type: "text",
+        content: "Merged answer",
+      },
+      {
+        type: "code",
+        language: "json",
+        title: "Reasoning snapshot",
+        code: JSON.stringify(
+          {
+            source: "runtime",
+            reasoning: "Need a follow-up step",
+          },
+          null,
+          2,
+        ),
+      },
+      {
+        type: "image",
+        src: "/api/runtime/sessions/session-1/generated-images/image_1",
+        alt: "a tiny robot",
+        caption: "a tiny robot",
+        artifactId: "generated-image:session-1:image_1",
+        imageId: "image_1",
+      },
+    ]);
+  });
+
+  it("keeps a final image when a stale placeholder update arrives later", () => {
+    const finalSegments = upsertGeneratedImageSegment(
+      [
+        {
+          type: "text",
+          content: "Merged answer",
+        },
+        {
+          type: "image",
+          src: "/api/runtime/sessions/session-1/generated-images/image_1",
+          alt: "a tiny robot",
+          caption: "a tiny robot",
+          artifactId: "generated-image:session-1:image_1",
+          imageId: "image_1",
+        },
+      ],
+      {
+        type: "image-placeholder",
+        imageId: "image_1",
+        phase: "partial",
+        progress: 0.2,
+      },
+    );
+
+    expect(finalSegments).toEqual([
+      {
+        type: "text",
+        content: "Merged answer",
+      },
+      {
+        type: "image",
+        src: "/api/runtime/sessions/session-1/generated-images/image_1",
+        alt: "a tiny robot",
+        caption: "a tiny robot",
+        artifactId: "generated-image:session-1:image_1",
+        imageId: "image_1",
+      },
+    ]);
+  });
+
+  it("preserves image artifacts recovered from persisted history metadata", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Recovered image",
+          metadata: {
+            workspace_related_artifacts: [
+              {
+                name: "figure.png",
+                path: "runtime/figure.png",
+                kind: "image",
+                content: "https://example.com/figure.png",
+                mime_type: "image/png",
+                revised_prompt: "reference figure",
+                sha256: "hash-123",
+                byte_count: 77,
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(
+      {
+        ...createThread(),
+        messages: [],
+        artifacts: [],
+      },
+      response,
+    );
+
+    const imageArtifact = nextThread.artifacts.find(
+      (artifact) => artifact.kind === "image",
+    );
+
+    expect(imageArtifact).toEqual(
+      expect.objectContaining({
+        kind: "image",
+        name: "figure.png",
+        path: "runtime/figure.png",
+        content: "https://example.com/figure.png",
+        mimeType: "image/png",
+        revisedPrompt: "reference figure",
+        sha256: "hash-123",
+        byteCount: 77,
+      }),
+    );
+    expect(nextThread.messages[0].relatedArtifactIds).toEqual([
+      "persisted-history:session-1:0:0:figure-png",
+    ]);
   });
 
   it("deduplicates runtime events and keeps the newest 100 entries", () => {

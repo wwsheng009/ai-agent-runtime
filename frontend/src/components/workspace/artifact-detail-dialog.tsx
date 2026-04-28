@@ -88,17 +88,48 @@ function handleHorizontalTabKeyDown(
 }
 
 function buildMetaItems(artifact: Artifact, view: "preview" | "source") {
-  const lines = artifact.content.split(/\r?\n/).length;
+  const lines = artifact.kind === "image" ? null : artifact.content.split(/\r?\n/).length;
   const category = classifyArtifactCategory(artifact);
+  const readingMode =
+    artifact.kind === "image"
+      ? "Image"
+      : view === "preview"
+        ? "Preview"
+        : "Source";
 
   return [
     { label: "Category", value: formatArtifactCategory(category) },
     { label: "Path", value: artifact.path },
-    { label: "Language", value: artifact.language },
+    { label: "Language", value: artifact.language ?? "—" },
     { label: "Format", value: artifact.kind },
-    { label: "Reading mode", value: view === "preview" ? "Preview" : "Source" },
-    { label: "Lines", value: `${lines}` },
+    { label: "Reading mode", value: readingMode },
+    {
+      label: artifact.kind === "image" ? "Byte count" : "Lines",
+      value:
+        artifact.kind === "image"
+          ? artifact.byteCount != null
+            ? formatBytes(artifact.byteCount)
+            : "—"
+          : `${lines}`,
+    },
   ];
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value < 0) {
+    return "—";
+  }
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  const units = ["KB", "MB", "GB", "TB"];
+  let current = value / 1024;
+  let unitIndex = 0;
+  while (current >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024;
+    unitIndex++;
+  }
+  return `${current.toFixed(current >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 export function ArtifactDetailDialog({
@@ -174,6 +205,31 @@ export function ArtifactDetailDialog({
       })
     : null;
   const metaItems = buildMetaItems(artifact, view);
+  const isImageArtifact = artifact.kind === "image";
+  const isRenderableImage =
+    isImageArtifact &&
+    (!artifact.mimeType || artifact.mimeType.toLowerCase().startsWith("image/"));
+  const imageDetails = isImageArtifact
+    ? [
+        {
+          label: "Revised prompt",
+          value: artifact.revisedPrompt?.trim() || "—",
+        },
+        {
+          label: "MIME type",
+          value: artifact.mimeType?.trim() || "image/png",
+        },
+        {
+          label: "SHA-256",
+          value: artifact.sha256?.trim() || "—",
+        },
+        {
+          label: "Byte count",
+          value:
+            artifact.byteCount != null ? formatBytes(artifact.byteCount) : "—",
+        },
+      ]
+    : [];
 
   return createPortal(
     <div
@@ -324,7 +380,78 @@ export function ArtifactDetailDialog({
             ) : null}
 
             <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto p-4">
-              {artifact.previewHtml ? (
+              {isImageArtifact ? (
+                isRenderableImage ? (
+                  <div className="overflow-hidden rounded-[0.95rem] border border-[var(--border)] bg-black/20">
+                    <div className="border-b border-[var(--border)] px-3.5 py-3">
+                      <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                        Rendered image
+                      </div>
+                      <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+                        Inspect the generated image at full width. Use the metadata below for prompt and integrity details.
+                      </div>
+                    </div>
+                    <div className="p-4">
+                      <div className="flex min-h-[18rem] items-center justify-center rounded-[0.9rem] border border-white/8 bg-black/40 p-4">
+                        <img
+                          alt={artifact.revisedPrompt?.trim() || artifact.name}
+                          className="max-h-[70vh] max-w-full rounded-[0.75rem] border border-white/10 object-contain"
+                          src={artifact.content}
+                        />
+                      </div>
+                      <div className="mt-4 grid gap-2">
+                        {imageDetails.map((item) => (
+                          <div
+                            key={`${artifact.id}-${item.label}`}
+                            className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-2.5"
+                          >
+                            <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                              {item.label}
+                            </div>
+                            <div className="mt-1.5 break-all text-sm text-[var(--foreground)]">
+                              {item.value}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="overflow-hidden rounded-[0.95rem] border border-[var(--border)] bg-black/20">
+                    <div className="border-b border-[var(--border)] px-3.5 py-3">
+                      <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                        Image unavailable
+                      </div>
+                      <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+                        This artifact was recorded as an image, but the MIME type is not renderable inline.
+                      </div>
+                    </div>
+                    <div className="p-4">
+                      <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3.5 py-3">
+                        <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                          File name
+                        </div>
+                        <div className="mt-1.5 break-all text-sm text-[var(--foreground)]">
+                          {artifact.name}
+                        </div>
+                        <div className="mt-3 app-text-11 text-[var(--muted-foreground)]">
+                          MIME type {artifact.mimeType?.trim() || "unknown"} cannot be rendered inline.
+                        </div>
+                        <div className="mt-4">
+                          <Button
+                            onClick={() => {
+                              window.open(artifact.content, "_blank", "noopener,noreferrer");
+                            }}
+                            variant="secondary"
+                          >
+                            Open raw file
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              ) : artifact.previewHtml ? (
                 <>
                   <div
                     aria-labelledby={previewTabId}
@@ -372,7 +499,7 @@ export function ArtifactDetailDialog({
                     <div className="p-4">
                       <CodeBlock
                         code={artifact.content}
-                        language={artifact.language}
+                        language={artifact.language ?? "json"}
                         title={artifact.path}
                       />
                     </div>
@@ -391,7 +518,7 @@ export function ArtifactDetailDialog({
                   <div className="p-4">
                     <CodeBlock
                       code={artifact.content}
-                      language={artifact.language}
+                      language={artifact.language ?? "json"}
                       title={artifact.path}
                     />
                   </div>

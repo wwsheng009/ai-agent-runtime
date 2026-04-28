@@ -133,6 +133,7 @@ export function MessageList({
                       <div key={`${message.id}-${segment.type}-${index}`}>
                         {renderMessageSegment(segment, {
                           streaming: message.id === streamingMessageId,
+                          onSelectArtifact,
                         })}
                       </div>
                     ))}
@@ -177,6 +178,7 @@ export function MessageList({
                           <div key={`${message.id}-${segment.type}-${index}`}>
                             {renderMessageSegment(segment, {
                               streaming: message.id === streamingMessageId,
+                              onSelectArtifact,
                             })}
                           </div>
                         ))}
@@ -214,6 +216,7 @@ function renderMessageSegment(
   segment: MessageSegment,
   options?: {
     streaming?: boolean;
+    onSelectArtifact?: (artifactId: string) => void;
   },
 ) {
   if (segment.type === "text") {
@@ -227,7 +230,10 @@ function renderMessageSegment(
 
   return (
     <Suspense fallback={<MessageSegmentFallback segment={segment} />}>
-      <MessageRichSegment segment={segment} />
+      <MessageRichSegment
+        onSelectArtifact={options?.onSelectArtifact}
+        segment={segment}
+      />
     </Suspense>
   );
 }
@@ -255,6 +261,14 @@ function MessageSegmentFallback({
 }: {
   segment: Exclude<MessageSegment, { type: "text" }>;
 }) {
+  const label =
+    segment.type === "code"
+      ? "代码块"
+      : segment.type === "image"
+        ? "图片"
+        : segment.type === "image-placeholder"
+          ? "图片生成占位"
+        : segment.title;
   return (
     <div
       aria-atomic="true"
@@ -262,7 +276,7 @@ function MessageSegmentFallback({
       className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-3 text-sm text-[var(--muted-foreground)]"
       role="status"
     >
-      正在加载 {segment.type === "code" ? "代码块" : segment.title}…
+      正在加载 {label}…
     </div>
   );
 }
