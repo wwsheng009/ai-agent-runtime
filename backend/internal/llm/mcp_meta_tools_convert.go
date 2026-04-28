@@ -44,11 +44,11 @@ func buildToolDefinitionsForProtocol(tools []map[string]interface{}, protocol st
 	}
 
 	for _, tool := range tools {
-		addTool(tool)
+		addTool(prepareToolDefinitionForProtocol(tool, protocol))
 	}
 	if includeMeta {
 		for _, tool := range adapter.BuildMCPMetaTools() {
-			addTool(tool)
+			addTool(prepareToolDefinitionForProtocol(tool, protocol))
 		}
 	}
 
@@ -78,6 +78,55 @@ func buildToolDefinitionsForProtocol(tools []map[string]interface{}, protocol st
 		return convertNamedToolsToGemini(combined)
 	default:
 		return convertNamedToolsToOpenAI(combined)
+	}
+}
+
+func prepareToolDefinitionForProtocol(tool map[string]interface{}, protocol string) map[string]interface{} {
+	if len(tool) == 0 {
+		return nil
+	}
+	normalizedProtocol := strings.ToLower(strings.TrimSpace(protocol))
+	if normalizedProtocol == "codex" {
+		if custom := buildCodexFreeformToolDefinition(tool); custom != nil {
+			return custom
+		}
+	}
+
+	cloned := make(map[string]interface{}, len(tool))
+	for key, value := range tool {
+		if key == "metadata" {
+			continue
+		}
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func buildCodexFreeformToolDefinition(tool map[string]interface{}) map[string]interface{} {
+	metadata, _ := tool["metadata"].(map[string]interface{})
+	if len(metadata) == 0 {
+		return nil
+	}
+	freeform, _ := metadata["freeform"].(map[string]interface{})
+	if len(freeform) == 0 {
+		return nil
+	}
+
+	name, _ := tool["name"].(string)
+	description, _ := tool["description"].(string)
+	if strings.TrimSpace(name) == "" || strings.TrimSpace(description) == "" {
+		return nil
+	}
+
+	format := cloneDeepMapStringAny(freeform)
+	if len(format) == 0 {
+		return nil
+	}
+	return map[string]interface{}{
+		"type":        "custom",
+		"name":        strings.TrimSpace(name),
+		"description": strings.TrimSpace(description),
+		"format":      format,
 	}
 }
 

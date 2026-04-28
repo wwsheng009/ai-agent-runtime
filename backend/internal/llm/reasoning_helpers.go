@@ -188,6 +188,10 @@ func canonicalizeCodexOutputItem(item map[string]interface{}) map[string]interfa
 		return canonicalizeCodexFunctionCallOutputItem(item)
 	case "function_call_output":
 		return canonicalizeCodexFunctionCallResultOutputItem(item)
+	case "custom_tool_call":
+		return canonicalizeCodexCustomToolCallOutputItem(item)
+	case "custom_tool_call_output":
+		return canonicalizeCodexCustomToolCallResultOutputItem(item)
 	default:
 		return cloneCodexOutputMapDroppingKeys(item, "id", "status", "phase")
 	}
@@ -299,6 +303,47 @@ func canonicalizeCodexFunctionCallResultOutputItem(item map[string]interface{}) 
 		"call_id": callID,
 		"output":  item["output"],
 	}
+}
+
+func canonicalizeCodexCustomToolCallOutputItem(item map[string]interface{}) map[string]interface{} {
+	callID, _ := item["call_id"].(string)
+	if strings.TrimSpace(callID) == "" {
+		callID, _ = item["id"].(string)
+	}
+	name, _ := item["name"].(string)
+	input, _ := item["input"].(string)
+
+	callID = strings.TrimSpace(callID)
+	name = strings.TrimSpace(name)
+	if callID == "" || name == "" {
+		return cloneCodexOutputMapDroppingKeys(item, "id", "status", "phase")
+	}
+	return map[string]interface{}{
+		"type":    "custom_tool_call",
+		"call_id": callID,
+		"name":    name,
+		"input":   input,
+	}
+}
+
+func canonicalizeCodexCustomToolCallResultOutputItem(item map[string]interface{}) map[string]interface{} {
+	callID, _ := item["call_id"].(string)
+	if strings.TrimSpace(callID) == "" {
+		callID, _ = item["id"].(string)
+	}
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return cloneCodexOutputMapDroppingKeys(item, "id", "status", "phase")
+	}
+	out := map[string]interface{}{
+		"type":    "custom_tool_call_output",
+		"call_id": callID,
+		"output":  item["output"],
+	}
+	if name, _ := item["name"].(string); strings.TrimSpace(name) != "" {
+		out["name"] = strings.TrimSpace(name)
+	}
+	return out
 }
 
 func canonicalizeCodexSummaryParts(raw interface{}) []map[string]interface{} {
@@ -565,7 +610,8 @@ func protocolMessageToolCallIDs(message map[string]interface{}) map[string]struc
 			continue
 		}
 		itemType, _ := item["type"].(string)
-		if !strings.EqualFold(strings.TrimSpace(itemType), "function_call") {
+		normalizedType := strings.ToLower(strings.TrimSpace(itemType))
+		if normalizedType != "function_call" && normalizedType != "custom_tool_call" {
 			continue
 		}
 		if id, ok := item["call_id"].(string); ok && strings.TrimSpace(id) != "" {
@@ -610,8 +656,6 @@ func buildProtocolMessageMap(role, content string, contentParts []types.ContentP
 		return buildOpenAIProtocolMessage(role, content, toolCalls, toolCallID, reasoning, providerHint, messageMetadata)
 	}
 }
-
-
 
 func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]interface{}, toolCallID string, reasoning *types.ReasoningBlock, providerHint string, messageMetadata map[string]interface{}) map[string]interface{} {
 	message := map[string]interface{}{
@@ -839,6 +883,11 @@ func codexProtocolFunctionCallItem(toolCall map[string]interface{}) map[string]i
 	}
 
 	function, _ := toolCall["function"].(map[string]interface{})
+	toolType, _ := toolCall["type"].(string)
+	toolType = strings.TrimSpace(toolType)
+	if toolType == "" {
+		toolType = "function_call"
+	}
 	name, _ := function["name"].(string)
 	if strings.TrimSpace(name) == "" {
 		name, _ = toolCall["name"].(string)
@@ -861,8 +910,21 @@ func codexProtocolFunctionCallItem(toolCall map[string]interface{}) map[string]i
 	if strings.TrimSpace(arguments) == "" {
 		arguments, _ = toolCall["arguments"].(string)
 	}
+	input, _ := toolCall["input"].(string)
 	if strings.TrimSpace(arguments) == "" {
 		arguments = "{}"
+	}
+
+	if toolType == "custom_tool_call" {
+		if strings.TrimSpace(input) == "" {
+			input = arguments
+		}
+		return map[string]interface{}{
+			"type":    "custom_tool_call",
+			"call_id": callID,
+			"name":    name,
+			"input":   input,
+		}
 	}
 
 	return map[string]interface{}{
@@ -954,8 +1016,8 @@ func buildAnthropicProtocolMessage(role, content string, toolCalls []map[string]
 			mediaType = strings.TrimSuffix(header[idx+1:], ";base64")
 		}
 		blocks = append(blocks, map[string]interface{}{
-			"type":       "image",
-			"source":     map[string]interface{}{"type": "base64", "media_type": mediaType, "data": encoded},
+			"type":   "image",
+			"source": map[string]interface{}{"type": "base64", "media_type": mediaType, "data": encoded},
 		})
 	}
 	if len(blocks) > 0 {

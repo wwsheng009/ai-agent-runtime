@@ -51,6 +51,7 @@ type AdapterConfig struct {
 type StreamCallbacks struct {
 	OnText      func(string)
 	OnReasoning func(string)
+	OnImage     func(map[string]interface{})
 }
 
 // EmitText 发出正文增量。
@@ -67,6 +68,14 @@ func (c StreamCallbacks) EmitReasoning(reasoning string) {
 		return
 	}
 	c.OnReasoning(reasoning)
+}
+
+// EmitImage 发出图片进度或结果元数据。
+func (c StreamCallbacks) EmitImage(metadata map[string]interface{}) {
+	if c.OnImage == nil {
+		return
+	}
+	c.OnImage(metadata)
 }
 
 // ProtocolAdapter 协议适配器接口

@@ -383,6 +383,45 @@ func TestCodexHandleResponse_StreamWithOutputIndexToolCall(t *testing.T) {
 	}
 }
 
+func TestCodexHandleResponse_StreamWithCustomToolCall(t *testing.T) {
+	a := &CodexAdapter{}
+	sseData := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_custom","model":"gpt-5.4"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"item_1","call_id":"call_patch_1","name":"apply_patch","input":"","status":"in_progress"}}`,
+		"",
+		"event: response.custom_tool_call_input.delta",
+		`data: {"type":"response.custom_tool_call_input.delta","item_id":"item_1","call_id":"call_patch_1","delta":"*** Begin Patch\n"}`,
+		"",
+		"event: response.custom_tool_call_input.delta",
+		`data: {"type":"response.custom_tool_call_input.delta","item_id":"item_1","call_id":"call_patch_1","delta":"*** End Patch"}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","item":{"type":"custom_tool_call","id":"item_1","call_id":"call_patch_1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch","status":"completed"}}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"id":"resp_custom","status":"completed","stop_reason":"end_turn"}}`,
+		"",
+	}, "\n")
+
+	msg, err := a.HandleResponse(true, strings.NewReader(sseData), StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("HandleResponse failed: %v", err)
+	}
+	toolCalls, ok := msg["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("expected 1 custom tool call, got %T %#v", msg["tool_calls"], msg["tool_calls"])
+	}
+	if toolCalls[0]["type"] != "custom_tool_call" {
+		t.Fatalf("expected custom_tool_call type, got %#v", toolCalls[0])
+	}
+	if toolCalls[0]["arguments"] != "*** Begin Patch\n*** End Patch" {
+		t.Fatalf("unexpected custom tool input: %#v", toolCalls[0])
+	}
+}
+
 func TestCodexHandleResponse_StreamPreservesAllSparseIndexedToolCalls(t *testing.T) {
 	a := &CodexAdapter{}
 	sseData := strings.Join([]string{
@@ -674,6 +713,63 @@ func TestCodexHandleResponse_StreamReturnsErrorOnFailedResponse(t *testing.T) {
 	}
 }
 
+func TestCodexHandleResponse_StreamEmitsImageProgressCallbacks(t *testing.T) {
+	a := &CodexAdapter{}
+	var phases []string
+	var progressValues []float64
+	var sanitizedIDs []string
+
+	sseData := strings.Join([]string{
+		"event: response.created",
+		`data: {"type":"response.created","response":{"id":"resp_image","model":"gpt-5.4"}}`,
+		"",
+		"event: response.output_item.added",
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"image_generation_call","id":"img:1","status":"in_progress","revised_prompt":"a tiny robot"}}`,
+		"",
+		"event: response.image_generation_call.partial_image",
+		`data: {"type":"response.image_generation_call.partial_image","output_index":0,"index":1,"count":4,"item":{"type":"image_generation_call","id":"img:1","status":"in_progress","revised_prompt":"a tiny robot"}}`,
+		"",
+		"event: response.output_item.done",
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"image_generation_call","id":"img:1","status":"completed","revised_prompt":"a tiny robot"}}`,
+		"",
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"id":"resp_image","status":"completed","stop_reason":"end_turn"}}`,
+		"",
+	}, "\n")
+
+	msg, err := a.HandleResponse(true, strings.NewReader(sseData), StreamCallbacks{
+		OnImage: func(metadata map[string]interface{}) {
+			if metadata == nil {
+				t.Fatal("expected image metadata")
+			}
+			if phase, _ := metadata["phase"].(string); phase != "" {
+				phases = append(phases, phase)
+			}
+			if value, ok := metadata["progress"].(float64); ok {
+				progressValues = append(progressValues, value)
+			}
+			if value, _ := metadata["sanitized_id"].(string); value != "" {
+				sanitizedIDs = append(sanitizedIDs, value)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleResponse failed: %v", err)
+	}
+	if msg["content"] != "" {
+		t.Fatalf("expected empty content, got %#v", msg["content"])
+	}
+	if joined := strings.Join(phases, ","); joined != "started,partial,completed" {
+		t.Fatalf("unexpected phases: %v", phases)
+	}
+	if len(progressValues) != 1 || progressValues[0] != 0.25 {
+		t.Fatalf("unexpected progress values: %#v", progressValues)
+	}
+	if len(sanitizedIDs) != 3 || sanitizedIDs[0] != "img_1" {
+		t.Fatalf("unexpected sanitized ids: %#v", sanitizedIDs)
+	}
+}
+
 func TestCodexBuildRequest_SanitizesOptionalPropertiesToNullableRequired(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{
@@ -872,6 +968,44 @@ func TestCodexBuildRequest_FollowUpToolCallUsesOutputItems(t *testing.T) {
 	}
 	if input[3]["type"] != "function_call_output" || input[3]["call_id"] != "call_1" {
 		t.Fatalf("unexpected function_call_output item: %#v", input[3])
+	}
+}
+
+func TestCodexBuildRequest_FollowUpCustomToolCallUsesCustomOutputItems(t *testing.T) {
+	a := &CodexAdapter{}
+	assistant := a.BuildAssistantMessage(
+		"",
+		[]map[string]interface{}{
+			{
+				"id":        "call_patch_1",
+				"type":      "custom_tool_call",
+				"name":      "apply_patch",
+				"arguments": "*** Begin Patch\n*** End Patch",
+				"input":     "*** Begin Patch\n*** End Patch",
+			},
+		},
+		"",
+	)
+
+	req := a.BuildRequest(RequestConfig{
+		Model: "gpt-5.4",
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "修复文件"},
+			assistant,
+			{"role": "tool", "tool_call_id": "call_patch_1", "content": "补丁已应用"},
+		},
+		Stream: false,
+	})
+
+	input := req["input"].([]map[string]interface{})
+	if len(input) != 3 {
+		t.Fatalf("expected 3 input items, got %d: %#v", len(input), input)
+	}
+	if input[1]["type"] != "custom_tool_call" || input[1]["name"] != "apply_patch" {
+		t.Fatalf("unexpected custom tool call item: %#v", input[1])
+	}
+	if input[2]["type"] != "custom_tool_call_output" || input[2]["call_id"] != "call_patch_1" {
+		t.Fatalf("unexpected custom tool output item: %#v", input[2])
 	}
 }
 

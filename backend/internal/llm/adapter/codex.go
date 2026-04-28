@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -23,6 +24,7 @@ const (
 	codexSessionIDMetadataKey               = "session_id"
 	codexConversationIDMetadataKey          = "conversation_id"
 	codexImageGenerationToolType            = "image_generation"
+	codexImageGenerationCallType            = "image_generation_call"
 	codexSupportsMaxOutputTokensMetadataKey = "supports_max_output_tokens"
 )
 
@@ -39,6 +41,7 @@ type CodexStreamState struct {
 	Content      strings.Builder
 	Reasoning    strings.Builder
 	ToolCalls    map[int]*CodexToolCall // index -> tool call
+	ToolItemKeys map[string]int
 	OutputItems  map[int]map[string]interface{}
 	FinishReason string
 	Usage        map[string]int64
@@ -49,6 +52,7 @@ type CodexStreamState struct {
 	CurrentItemIndex   int
 	CurrentItemType    string // "message", "function_call", "reasoning"
 	CurrentItemStarted bool
+	NextSyntheticIndex int
 
 	// 追踪 reasoning summary
 	SummaryIndex   int
@@ -60,6 +64,7 @@ type CodexStreamState struct {
 type CodexToolCall struct {
 	CallID    string
 	Name      string
+	Kind      string
 	Arguments strings.Builder
 }
 
@@ -73,9 +78,11 @@ var validCodexReasoningEfforts = map[string]struct{}{
 // NewCodexStreamState 创建新的 Codex 流式状态
 func NewCodexStreamState() *CodexStreamState {
 	return &CodexStreamState{
-		ToolCalls:   make(map[int]*CodexToolCall),
-		OutputItems: make(map[int]map[string]interface{}),
-		Usage:       make(map[string]int64),
+		ToolCalls:          make(map[int]*CodexToolCall),
+		ToolItemKeys:       make(map[string]int),
+		OutputItems:        make(map[int]map[string]interface{}),
+		Usage:              make(map[string]int64),
+		NextSyntheticIndex: 1000000,
 	}
 }
 
@@ -238,9 +245,11 @@ func IsValidCodexReasoningEffort(effort string) bool {
 //	或 {"type": "function_call_output", "call_id": "...", "output": "..."}
 func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interface{}) []map[string]interface{} {
 	input := make([]map[string]interface{}, 0, len(messages))
+	toolCallKinds := make(map[string]string)
 
 	for _, msg := range messages {
 		if outputItems := decodeSliceOfMaps(msg[codexResponseOutputItemsKey]); len(outputItems) > 0 {
+			registerCodexToolKindsFromOutputItems(toolCallKinds, outputItems)
 			input = append(input, outputItems...)
 			continue
 		}
@@ -281,6 +290,7 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 				if toolCallsRaw := decodeSliceOfMaps(msg["tool_calls"]); len(toolCallsRaw) > 0 {
 					for _, tc := range toolCallsRaw {
 						if item := buildCodexFunctionCallItem(tc); item != nil {
+							registerCodexToolKind(toolCallKinds, item)
 							input = append(input, item)
 						}
 					}
@@ -291,16 +301,61 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 			// 处理工具调用结果消息
 			toolCallID, _ := msg["tool_call_id"].(string)
 			content, _ := msg["content"].(string)
-
-			input = append(input, map[string]interface{}{
-				"type":    "function_call_output",
+			itemType := "function_call_output"
+			if kind := strings.TrimSpace(toolCallKinds[strings.TrimSpace(toolCallID)]); kind == "custom_tool_call" {
+				itemType = "custom_tool_call_output"
+			}
+			item := map[string]interface{}{
+				"type":    itemType,
 				"call_id": toolCallID,
 				"output":  content,
-			})
+			}
+			if itemType == "custom_tool_call_output" {
+				if name := codexToolNameForCallID(toolCallKinds, toolCallID); name != "" {
+					item["name"] = name
+				}
+			}
+			input = append(input, item)
 		}
 	}
 
 	return input
+}
+
+func registerCodexToolKindsFromOutputItems(kinds map[string]string, items []map[string]interface{}) {
+	for _, item := range items {
+		registerCodexToolKind(kinds, item)
+	}
+}
+
+func registerCodexToolKind(kinds map[string]string, item map[string]interface{}) {
+	if kinds == nil || len(item) == 0 {
+		return
+	}
+	itemType, _ := item["type"].(string)
+	normalizedType := strings.TrimSpace(itemType)
+	if normalizedType != "function_call" && normalizedType != "custom_tool_call" {
+		return
+	}
+	callID, _ := item["call_id"].(string)
+	if strings.TrimSpace(callID) == "" {
+		callID, _ = item["id"].(string)
+	}
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return
+	}
+	kinds[callID] = normalizedType
+	if name, _ := item["name"].(string); strings.TrimSpace(name) != "" {
+		kinds[callID+"#name"] = strings.TrimSpace(name)
+	}
+}
+
+func codexToolNameForCallID(kinds map[string]string, callID string) string {
+	if len(kinds) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(kinds[strings.TrimSpace(callID)+"#name"])
 }
 
 // BuildHeaders 构建请求头
@@ -429,13 +484,19 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 		a.handleResponseCreated(state, event)
 
 	case "response.output_item.added":
-		a.handleOutputItemAdded(state, event)
+		a.handleOutputItemAdded(state, event, callbacks)
+
+	case "response.image_generation_call.partial_image":
+		a.handleImageGenerationCallPartialImage(state, event, callbacks)
 
 	case "response.output_text.delta":
 		a.handleOutputTextDelta(state, event, callbacks)
 
 	case "response.function_call_arguments.delta":
 		a.handleFunctionCallArgumentsDelta(state, event)
+
+	case "response.custom_tool_call_input.delta":
+		a.handleCustomToolCallInputDelta(state, event)
 
 	case "response.reasoning_summary_part.added":
 		a.handleReasoningSummaryPartAdded(state, event)
@@ -450,19 +511,19 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 		a.handleReasoningTextDelta(state, event, callbacks)
 
 	case "response.output_item.done":
-		a.handleOutputItemDone(state, event)
+		a.handleOutputItemDone(state, event, callbacks)
 
 	case "response.completed":
 		a.handleResponseCompleted(state, event)
 
 	case "response.failed":
-		a.handleResponseFailed(state, event)
+		a.handleResponseFailed(state, event, callbacks)
 
 	case "response.incomplete":
-		a.handleResponseIncomplete(state, event)
+		a.handleResponseIncomplete(state, event, callbacks)
 
 	case "error":
-		a.handleErrorEvent(state, event)
+		a.handleErrorEvent(state, event, callbacks)
 
 	case "response.done":
 		// 增量响应结束信号
@@ -490,33 +551,68 @@ func (a *CodexAdapter) handleResponseCreated(state *CodexStreamState, event map[
 }
 
 // handleOutputItemAdded 处理 response.output_item.added 事件
-func (a *CodexAdapter) handleOutputItemAdded(state *CodexStreamState, event map[string]interface{}) {
-	index := getIntIndex(event)
-	if index == -1 {
-		return
-	}
-
+func (a *CodexAdapter) handleOutputItemAdded(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
 	item, ok := event["item"].(map[string]interface{})
 	if !ok {
 		return
 	}
 
 	itemType, _ := item["type"].(string)
+	index := getIntIndex(event)
+	if index == -1 {
+		if itemType == "custom_tool_call" {
+			key := codexToolItemKeyFromItem(item)
+			if key == "" {
+				key = codexToolItemKeyFromEvent(event)
+			}
+			if existing, ok := state.ToolItemKeys[key]; ok {
+				index = existing
+			} else {
+				index = state.NextSyntheticIndex
+				state.NextSyntheticIndex++
+				if key != "" {
+					state.ToolItemKeys[key] = index
+				}
+			}
+		} else if itemType == codexImageGenerationCallType {
+			index = state.CurrentItemIndex
+			if index == -1 {
+				index = state.NextSyntheticIndex
+				state.NextSyntheticIndex++
+			}
+		} else {
+			return
+		}
+	}
+
 	state.CurrentItemIndex = index
 	state.CurrentItemType = itemType
 	state.CurrentItemStarted = true
 	state.OutputItems[index] = cloneInterfaceMap(item)
 
 	// 如果是 function_call，初始化 ToolCall
-	if itemType == "function_call" {
-		tc := &CodexToolCall{}
+	if itemType == "function_call" || itemType == "custom_tool_call" {
+		tc := &CodexToolCall{Kind: itemType}
 		if callID, ok := item["call_id"].(string); ok {
 			tc.CallID = callID
 		}
 		if name, ok := item["name"].(string); ok {
 			tc.Name = name
 		}
+		if itemType == "custom_tool_call" {
+			if input, ok := item["input"].(string); ok && input != "" {
+				tc.Arguments.WriteString(input)
+			}
+			for _, key := range codexToolItemKeys(item) {
+				state.ToolItemKeys[key] = index
+			}
+		}
 		state.ToolCalls[index] = tc
+		return
+	}
+
+	if itemType == codexImageGenerationCallType {
+		a.emitCodexImageProgress(callbacks, state, item, event, "started")
 	}
 }
 
@@ -547,6 +643,37 @@ func (a *CodexAdapter) handleFunctionCallArgumentsDelta(state *CodexStreamState,
 	if !exists {
 		tc = &CodexToolCall{}
 		state.ToolCalls[index] = tc
+	}
+	tc.Arguments.WriteString(delta)
+}
+
+func (a *CodexAdapter) handleCustomToolCallInputDelta(state *CodexStreamState, event map[string]interface{}) {
+	key := codexToolItemKeyFromEvent(event)
+	if key == "" {
+		return
+	}
+	index, ok := state.ToolItemKeys[key]
+	if !ok {
+		index = state.NextSyntheticIndex
+		state.NextSyntheticIndex++
+		state.ToolItemKeys[key] = index
+	}
+
+	delta, _ := event["delta"].(string)
+	if delta == "" {
+		return
+	}
+
+	tc, exists := state.ToolCalls[index]
+	if !exists {
+		tc = &CodexToolCall{Kind: "custom_tool_call"}
+		if callID, _ := event["call_id"].(string); strings.TrimSpace(callID) != "" {
+			tc.CallID = strings.TrimSpace(callID)
+		}
+		state.ToolCalls[index] = tc
+	}
+	if tc.Kind == "" {
+		tc.Kind = "custom_tool_call"
 	}
 	tc.Arguments.WriteString(delta)
 }
@@ -585,18 +712,46 @@ func (a *CodexAdapter) handleReasoningTextDelta(state *CodexStreamState, event m
 }
 
 // handleOutputItemDone 处理 response.output_item.done 事件
-func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[string]interface{}) {
+func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
 	index := getIntIndex(event)
+	item, _ := event["item"].(map[string]interface{})
+	itemType, _ := item["type"].(string)
+	if index == -1 && itemType == "custom_tool_call" {
+		key := codexToolItemKeyFromItem(item)
+		if key == "" {
+			key = codexToolItemKeyFromEvent(event)
+		}
+		if existing, ok := state.ToolItemKeys[key]; ok {
+			index = existing
+		} else {
+			index = state.NextSyntheticIndex
+			state.NextSyntheticIndex++
+			if key != "" {
+				state.ToolItemKeys[key] = index
+			}
+		}
+	}
+	if index == -1 {
+		if itemType == codexImageGenerationCallType {
+			index = state.CurrentItemIndex
+			if index == -1 {
+				index = state.NextSyntheticIndex
+				state.NextSyntheticIndex++
+			}
+		}
+	}
 	if index == -1 {
 		return
 	}
 
-	item, _ := event["item"].(map[string]interface{})
-	if itemType, _ := item["type"].(string); itemType == "function_call" {
+	if itemType == "function_call" || itemType == "custom_tool_call" {
 		tc, exists := state.ToolCalls[index]
 		if !exists {
-			tc = &CodexToolCall{}
+			tc = &CodexToolCall{Kind: itemType}
 			state.ToolCalls[index] = tc
+		}
+		if tc.Kind == "" {
+			tc.Kind = itemType
 		}
 		if callID, ok := item["call_id"].(string); ok && tc.CallID == "" {
 			tc.CallID = callID
@@ -604,9 +759,20 @@ func (a *CodexAdapter) handleOutputItemDone(state *CodexStreamState, event map[s
 		if name, ok := item["name"].(string); ok && tc.Name == "" {
 			tc.Name = name
 		}
-		if args, ok := item["arguments"].(string); ok && tc.Arguments.Len() == 0 {
-			tc.Arguments.WriteString(args)
+		if itemType == "function_call" {
+			if args, ok := item["arguments"].(string); ok && tc.Arguments.Len() == 0 {
+				tc.Arguments.WriteString(args)
+			}
+		} else {
+			if input, ok := item["input"].(string); ok && tc.Arguments.Len() == 0 {
+				tc.Arguments.WriteString(input)
+			}
+			for _, key := range codexToolItemKeys(item) {
+				state.ToolItemKeys[key] = index
+			}
 		}
+	} else if itemType == codexImageGenerationCallType {
+		a.emitCodexImageProgress(callbacks, state, item, event, "completed")
 	}
 	state.OutputItems[index] = cloneInterfaceMap(item)
 
@@ -635,22 +801,215 @@ func (a *CodexAdapter) handleResponseCompleted(state *CodexStreamState, event ma
 }
 
 // handleResponseFailed 处理 response.failed 事件
-func (a *CodexAdapter) handleResponseFailed(state *CodexStreamState, event map[string]interface{}) {
+func (a *CodexAdapter) handleResponseFailed(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	if a.shouldEmitFailedImageProgress(state) {
+		a.emitCodexImageProgress(callbacks, state, nil, event, "failed")
+	}
 	state.FinishReason = "failed"
 	code, message := codexErrorFromEvent(event)
 	state.SetError(code, message)
 }
 
 // handleResponseIncomplete 处理 response.incomplete 事件
-func (a *CodexAdapter) handleResponseIncomplete(state *CodexStreamState, event map[string]interface{}) {
+func (a *CodexAdapter) handleResponseIncomplete(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	if a.shouldEmitFailedImageProgress(state) {
+		a.emitCodexImageProgress(callbacks, state, nil, event, "failed")
+	}
 	state.FinishReason = "incomplete"
 	code, message := codexIncompleteMessage(event)
 	state.SetError(code, message)
 }
 
-func (a *CodexAdapter) handleErrorEvent(state *CodexStreamState, event map[string]interface{}) {
+func (a *CodexAdapter) handleErrorEvent(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	if a.shouldEmitFailedImageProgress(state) {
+		a.emitCodexImageProgress(callbacks, state, nil, event, "failed")
+	}
 	code, message := codexErrorFromEvent(event)
 	state.SetError(code, message)
+}
+
+func (a *CodexAdapter) handleImageGenerationCallPartialImage(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
+	if !a.isCurrentImageGenerationCall(state) {
+		return
+	}
+	item := decodeMap(event["item"])
+	if item == nil && state != nil {
+		item = cloneInterfaceMap(state.OutputItems[state.CurrentItemIndex])
+	}
+	a.emitCodexImageProgress(callbacks, state, item, event, "partial")
+}
+
+func (a *CodexAdapter) emitCodexImageProgress(callbacks StreamCallbacks, state *CodexStreamState, item map[string]interface{}, event map[string]interface{}, phase string) {
+	if callbacks.OnImage == nil {
+		return
+	}
+
+	metadata := map[string]interface{}{
+		"phase": strings.TrimSpace(phase),
+	}
+	if state != nil {
+		if state.ResponseID != "" {
+			metadata["response_id"] = state.ResponseID
+		}
+		if index := state.CurrentItemIndex; index >= 0 {
+			metadata["output_index"] = index
+		}
+	}
+
+	source := item
+	if source == nil {
+		source = decodeMap(event)
+	}
+	if source != nil {
+		if value, ok := source["id"].(string); ok {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				metadata["image_id"] = value
+				metadata["sanitized_id"] = sanitizeGeneratedImageID(value)
+			}
+		} else if value, ok := source["call_id"].(string); ok {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				metadata["image_id"] = value
+				metadata["sanitized_id"] = sanitizeGeneratedImageID(value)
+			}
+		}
+		if value, ok := source["item_id"].(string); ok {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				metadata["item_id"] = value
+				if _, exists := metadata["image_id"]; !exists {
+					metadata["image_id"] = value
+					metadata["sanitized_id"] = sanitizeGeneratedImageID(value)
+				}
+			}
+		}
+		if prompt := strings.TrimSpace(asCodexString(source["revised_prompt"])); prompt != "" {
+			metadata["revised_prompt"] = prompt
+		}
+		if prompt := strings.TrimSpace(asCodexString(source["prompt"])); prompt != "" && metadata["revised_prompt"] == nil {
+			metadata["revised_prompt"] = prompt
+		}
+	}
+
+	if progress, ok := codexImageProgressValue(event); ok {
+		metadata["progress"] = progress
+	}
+	if errorCode, message := codexErrorFromEvent(event); strings.TrimSpace(message) != "" {
+		metadata["error"] = strings.TrimSpace(message)
+		if strings.TrimSpace(errorCode) != "" {
+			metadata["error_code"] = strings.TrimSpace(errorCode)
+		}
+	}
+
+	callbacks.EmitImage(metadata)
+}
+
+func (a *CodexAdapter) isCurrentImageGenerationCall(state *CodexStreamState) bool {
+	if state == nil {
+		return false
+	}
+	return state.CurrentItemStarted && strings.EqualFold(strings.TrimSpace(state.CurrentItemType), codexImageGenerationCallType)
+}
+
+func sanitizeGeneratedImageID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "generated_image"
+	}
+
+	var builder strings.Builder
+	for _, ch := range value {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			builder.WriteRune(ch)
+		case ch >= 'A' && ch <= 'Z':
+			builder.WriteRune(ch)
+		case ch >= '0' && ch <= '9':
+			builder.WriteRune(ch)
+		case ch == '-' || ch == '_':
+			builder.WriteRune(ch)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+
+	result := builder.String()
+	if result == "" {
+		return "generated_image"
+	}
+	return result
+}
+
+func (a *CodexAdapter) shouldEmitFailedImageProgress(state *CodexStreamState) bool {
+	return a.isCurrentImageGenerationCall(state)
+}
+
+func codexImageProgressValue(event map[string]interface{}) (float64, bool) {
+	if len(event) == 0 {
+		return 0, false
+	}
+	if value, ok := numericValue(event["progress"]); ok {
+		return clampFloat64(value, 0, 1), true
+	}
+	if value, ok := numericValue(event["progress_ratio"]); ok {
+		return clampFloat64(value, 0, 1), true
+	}
+	index, indexOK := numericValue(firstPresentValue(event, "index", "output_index", "item_index"))
+	total, totalOK := numericValue(firstPresentValue(event, "count", "total", "total_count", "image_count"))
+	if indexOK && totalOK && total > 0 {
+		return clampFloat64(index/total, 0, 1), true
+	}
+	if value, ok := numericValue(event["partial_image"]); ok {
+		return clampFloat64(value, 0, 1), true
+	}
+	return 0, false
+}
+
+func firstPresentValue(values map[string]interface{}, keys ...string) interface{} {
+	for _, key := range keys {
+		if value, ok := values[key]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func numericValue(value interface{}) (float64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case float32:
+		return float64(typed), true
+	case float64:
+		return typed, true
+	case json.Number:
+		if parsed, err := typed.Float64(); err == nil {
+			return parsed, true
+		}
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return 0, false
+		}
+		if parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func clampFloat64(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 // handleCodexNonStreamResponse 处理非流式响应
@@ -731,6 +1090,22 @@ func (a *CodexAdapter) handleCodexNonStreamResponse(respBody io.Reader, callback
 			}
 			toolCalls = append(toolCalls, tc)
 
+		case "custom_tool_call":
+			tc := map[string]interface{}{
+				"type": itemType,
+			}
+			if callID, ok := itemMap["call_id"].(string); ok {
+				tc["id"] = callID
+			}
+			if name, ok := itemMap["name"].(string); ok {
+				tc["name"] = name
+			}
+			if input, ok := itemMap["input"].(string); ok {
+				tc["input"] = input
+				tc["arguments"] = input
+			}
+			toolCalls = append(toolCalls, tc)
+
 		case "reasoning":
 			// 提取推理内容
 			if summary, ok := itemMap["summary"].([]interface{}); ok {
@@ -800,11 +1175,18 @@ func (s *CodexStreamState) ToMap() map[string]interface{} {
 		toolCalls := make([]map[string]interface{}, 0, len(keys))
 		for _, index := range keys {
 			tc := s.ToolCalls[index]
-			toolCalls = append(toolCalls, map[string]interface{}{
+			call := map[string]interface{}{
 				"id":        tc.CallID,
 				"name":      tc.Name,
 				"arguments": tc.Arguments.String(),
-			})
+			}
+			if strings.TrimSpace(tc.Kind) != "" {
+				call["type"] = tc.Kind
+			}
+			if tc.Kind == "custom_tool_call" {
+				call["input"] = tc.Arguments.String()
+			}
+			toolCalls = append(toolCalls, call)
 		}
 		if len(toolCalls) > 0 {
 			result["tool_calls"] = toolCalls
@@ -993,6 +1375,49 @@ func getIntIndex(event map[string]interface{}) int {
 		return int(outputIndex)
 	}
 	return -1
+}
+
+func codexToolItemKeyFromEvent(event map[string]interface{}) string {
+	if key, _ := event["item_id"].(string); strings.TrimSpace(key) != "" {
+		return strings.TrimSpace(key)
+	}
+	if key, _ := event["call_id"].(string); strings.TrimSpace(key) != "" {
+		return strings.TrimSpace(key)
+	}
+	if item := decodeMap(event["item"]); item != nil {
+		return codexToolItemKeyFromItem(item)
+	}
+	return ""
+}
+
+func codexToolItemKeyFromItem(item map[string]interface{}) string {
+	if item == nil {
+		return ""
+	}
+	if key, _ := item["id"].(string); strings.TrimSpace(key) != "" {
+		return strings.TrimSpace(key)
+	}
+	if key, _ := item["call_id"].(string); strings.TrimSpace(key) != "" {
+		return strings.TrimSpace(key)
+	}
+	return ""
+}
+
+func codexToolItemKeys(item map[string]interface{}) []string {
+	if item == nil {
+		return nil
+	}
+	keys := make([]string, 0, 2)
+	if key, _ := item["id"].(string); strings.TrimSpace(key) != "" {
+		keys = append(keys, strings.TrimSpace(key))
+	}
+	if key, _ := item["call_id"].(string); strings.TrimSpace(key) != "" {
+		trimmed := strings.TrimSpace(key)
+		if len(keys) == 0 || keys[0] != trimmed {
+			keys = append(keys, trimmed)
+		}
+	}
+	return keys
 }
 
 func mergeCodexTools(groups ...interface{}) []map[string]interface{} {
@@ -1683,6 +2108,11 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 		return nil
 	}
 
+	toolType, _ := raw["type"].(string)
+	toolType = strings.TrimSpace(toolType)
+	if toolType == "" {
+		toolType = "function_call"
+	}
 	callID, _ := raw["call_id"].(string)
 	if callID == "" {
 		callID, _ = raw["id"].(string)
@@ -1690,6 +2120,7 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 
 	name, _ := raw["name"].(string)
 	arguments, _ := raw["arguments"].(string)
+	input, _ := raw["input"].(string)
 
 	if fnObj, ok := raw["function"].(map[string]interface{}); ok {
 		if name == "" {
@@ -1702,6 +2133,18 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 
 	if callID == "" || name == "" {
 		return nil
+	}
+
+	if toolType == "custom_tool_call" {
+		if input == "" {
+			input = arguments
+		}
+		return map[string]interface{}{
+			"type":    "custom_tool_call",
+			"call_id": callID,
+			"name":    name,
+			"input":   input,
+		}
 	}
 
 	return map[string]interface{}{
@@ -1738,6 +2181,8 @@ func (a *CodexAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]interf
 		if nameVal, ok := raw["name"].(string); ok {
 			name = nameVal
 		}
+		toolType, _ := raw["type"].(string)
+		toolType = strings.TrimSpace(toolType)
 
 		if argsStr, ok := raw["arguments"].(string); ok {
 			// 直接使用 arguments 字符串（已经是 JSON）
@@ -1746,6 +2191,11 @@ func (a *CodexAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]interf
 			// 如果是 map，序列化为 JSON 字符串
 			if jsonBytes, err := json.Marshal(argsMap); err == nil {
 				argsJSON = string(jsonBytes)
+			}
+		}
+		if toolType == "custom_tool_call" {
+			if input, ok := raw["input"].(string); ok {
+				argsJSON = input
 			}
 		}
 

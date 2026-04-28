@@ -51,11 +51,15 @@ func BuildToolDefinitionsForRequest(
 
 	normalized := make([]map[string]interface{}, 0, len(tools)+1)
 	for _, tool := range tools {
-		normalized = append(normalized, map[string]interface{}{
+		definition := map[string]interface{}{
 			"name":        tool.Name,
 			"description": tool.Description,
 			"parameters":  cloneDeepMapStringAny(tool.Parameters),
-		})
+		}
+		if len(tool.Metadata) > 0 {
+			definition["metadata"] = cloneDeepMapStringAny(tool.Metadata)
+		}
+		normalized = append(normalized, definition)
 	}
 	if CodexImageGenerationEnabled(protocol, model, modelCapabilities) {
 		normalized = append(normalized, map[string]interface{}{
