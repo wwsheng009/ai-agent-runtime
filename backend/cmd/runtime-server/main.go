@@ -21,6 +21,7 @@ import (
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/filetransport"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -567,6 +568,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 
 	handler := skillsapi.NewHandler(bootstrapManager.Registry(), bootstrapManager.Loader(), mcpAdapter)
 	bootstrapManager.ApplyToSkillsHandler(handler)
+	handler.SetFileTransferService(filetransport.NewLocalService())
 	handler.SetRuntimeConfig(runtimeManager.Get(), runtimeManager.GetFilePath())
 	handler.SetRuntimeLogFilePath(strings.TrimSpace(cfg.Log.FilePath))
 	handler.SetRuntimeConfigResolver(func(scope skillsapi.UsageScope) *runtimecfg.RuntimeConfig {

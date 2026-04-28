@@ -23,8 +23,10 @@ func main() {
 	allTools := []toolkit.Tool{
 		tools.NewBashTool(),
 		tools.NewViewTool(),
+		tools.NewApplyPatchTool(),
 		tools.NewEditTool(),
 		tools.NewWriteTool(),
+		tools.NewAppendWriteTool(),
 		tools.NewGlobTool(),
 		tools.NewGrepTool(),
 		tools.NewLsTool(),
