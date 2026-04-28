@@ -1,97 +1,128 @@
 # ai-agent-runtime
 
-通用 Multi-Agent 执行运行时，现已作为独立服务与 CLI 仓库维护，承载 `aicli`、`/api/agent`、`/api/runtime` 等 agent / runtime 能力。
+通用 Multi-Agent 执行运行时，提供：
 
-## 项目结构
+- **`aicli`** —— 命令行工具，对接 AI Gateway，支持配置查看、端点测试、上下文测试、MCP、管道模式等
+- **`runtime-server`** —— Skills / Agent HTTP 服务（`/api/agent`、`/api/runtime`、`/healthz`）
+- **`frontend/`** —— React + TypeScript 控制台
 
-```
-ai-agent-runtime/
-├── backend/                  # Go 后端（module: github.com/wwsheng009/ai-agent-runtime）
-│   ├── go.mod
-│   ├── cmd/
-│   │   ├── runtime-server/   # Skills / Agent HTTP 服务入口
-│   │   ├── skillsapi-demo/   # Skills API 客户端示例
-│   │   └── aicli/            # 命令行工具
-│   └── internal/
-│       ├── agent/            # 核心：orchestrator、ReAct loop、planner、scheduler
-│       ├── team/             # 多 agent 团队协作
-│       ├── llm/              # LLM provider 抽象（ProviderBalancer 接口）
-│       ├── skill/            # 技能路由、DAG、embedding router
-│       ├── toolkit/          # 工具实现集合
-│       ├── mcp/              # MCP 协议（protocol/transport/client/server/registry）
-│       ├── chat/             # 对话 actor
-│       ├── chatcore/         # 对话核心逻辑
-│       ├── workspace/        # 工作区上下文
-│       ├── executor/         # 并行执行器、沙盒
-│       ├── memory/           # 记忆管理
-│       ├── checkpoint/       # 状态持久化
-│       ├── artifact/         # checkpoint 文件存储
-│       ├── embedding/        # embedding 模型抽象
-│       ├── types/            # 共享类型定义
-│       ├── errors/           # 错误类型
-│       └── pkg/logger/       # 日志工具（zap 封装）
-│
-├── frontend/                 # React + TypeScript 前端控制台
-│   └── src/
-│
-├── docs/                     # 文档
-├── configs/                  # 配置示例
-├── scripts/                  # 构建/部署脚本
-├── Makefile
-├── MIGRATION.md              # 迁移指南
-└── README.md
-```
+后端 module：`github.com/wwsheng009/ai-agent-runtime`
 
-当前后端 module 路径为 `github.com/wwsheng009/ai-agent-runtime`。
+---
 
 ## 快速开始
 
-### 后端
+### 安装 aicli
+
+**Linux / macOS**
 
 ```bash
-cd backend
-go mod tidy
-go build ./...
-go test ./...
-go run ./cmd/runtime-server --listen 127.0.0.1:8101
+curl -fsSL https://raw.githubusercontent.com/wwsheng009/ai-agent-runtime/main/scripts/install-aicli.sh | bash
 ```
 
-启动后，runtime 服务会独立承载：
+**Windows (PowerShell)**
 
-- `POST /api/agent/chat`
-- `/api/runtime/*`
-- `GET /healthz`
+```powershell
+iwr -useb https://raw.githubusercontent.com/wwsheng009/ai-agent-runtime/main/scripts/install-aicli.ps1 | iex
+```
 
-### 前端
+**源码编译**
 
 ```bash
+git clone https://github.com/wwsheng009/ai-agent-runtime.git
+cd ai-agent-runtime
+make install-aicli
+```
+
+📖 **完整安装与配置说明**：[docs/aicli/install.md](./docs/aicli/install.md)
+
+涵盖：一键脚本 / `make install-aicli` / `go install` 三种安装方式、配置文件查找顺序、最小配置示例、环境变量、常用命令、卸载等。
+
+### 验证
+
+```bash
+aicli version
+aicli config
+```
+
+---
+
+## 运行 runtime-server / 前端（可选）
+
+仅当你需要 HTTP 服务或 Web 控制台时才用到。
+
+```bash
+# 后端 HTTP 服务
+cd backend
+go run ./cmd/runtime-server --listen 127.0.0.1:8101
+# 提供 POST /api/agent/chat、/api/runtime/*、GET /healthz
+```
+
+```bash
+# 前端控制台（默认监听 http://0.0.0.0:5193，代理到 127.0.0.1:8101）
 cd frontend
 pnpm install
 pnpm dev
 ```
 
-前端开发服务器默认监听 `http://0.0.0.0:5193`，并会把 `/api`、`/healthz` 代理到 `http://127.0.0.1:8101`。如果需要通过自定义域名或反向代理访问，可在 [frontend/.env.example](./frontend/.env.example) 对应的 `VITE_DEV_PUBLIC_ORIGIN`、`VITE_DEV_ALLOWED_HOSTS`、`VITE_DEV_HMR_*` 变量中覆盖。
+前端环境变量见 [`frontend/.env.example`](./frontend/.env.example)。
+
+---
+
+## 项目结构
+
+```
+ai-agent-runtime/
+├── backend/                # Go 后端（module: github.com/wwsheng009/ai-agent-runtime）
+│   ├── cmd/
+│   │   ├── aicli/          # 命令行工具
+│   │   ├── runtime-server/ # Agent / Skills HTTP 服务
+│   │   ├── echo-mcp-server/
+│   │   ├── toolkit-mcp-server/
+│   │   └── skillsapi-demo/
+│   ├── configs/            # 配置示例
+│   └── internal/           # agent / llm / toolkit / mcp / skill / ...
+├── frontend/               # React + TS 控制台
+├── docs/
+│   └── aicli/              # aicli 安装与配置文档
+├── scripts/
+│   ├── install-aicli.sh    # Linux / macOS 安装脚本
+│   └── install-aicli.ps1   # Windows 安装脚本
+├── .github/workflows/
+│   └── release-aicli.yml   # tag 触发的跨平台 Release
+├── Makefile
+├── MIGRATION.md            # 从 ai-gateway 拆分的迁移指南
+└── README.md
+```
+
+---
+
+## 发布新版本（维护者）
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+# .github/workflows/release-aicli.yml 自动编译 6 平台并发布 GitHub Release
+```
+
+支持的 tag 模式：`v*`、`aicli-v*`。包含 `-rc / -beta / -alpha` 的 tag 会被自动标记为 prerelease。
+
+---
 
 ## 与 ai-gateway 的关系
 
-`ai-agent-runtime` 已从 `ai-gateway` 中独立出来。当前约定是：
+`ai-agent-runtime` 已从 [`ai-gateway`](https://github.com/wwsheng009/ai-gateway) 中独立：
 
 - `ai-agent-runtime` 负责 `aicli`、agent/runtime HTTP API、多 agent runtime
-- `ai-gateway` 只保留网关与代理能力，不再暴露 `/api/agent`、`/api/runtime`
+- `ai-gateway` 仅保留网关与代理能力
 
-详细迁移步骤见 [MIGRATION.md](./MIGRATION.md)。
+迁移细节见 [MIGRATION.md](./MIGRATION.md)。
 
-## 核心解耦接口
+---
 
-### ProviderBalancer
+## 文档导航
 
-`llm` 包依赖此接口而非直接依赖网关 loadbalancer：
-
-```go
-type ProviderBalancer interface {
-    SelectProvider(ctx context.Context, model string, opts BalancerOptions) (*ProviderEndpoint, error)
-    ReportResult(ctx context.Context, endpoint *ProviderEndpoint, success bool, latency time.Duration)
-}
-```
-
-网关侧实现 `GatewayBalancer` 并在初始化时注入。
+- [aicli 安装与配置](./docs/aicli/install.md)
+- [项目文档目录](./docs/README.md)
+- [迁移指南](./MIGRATION.md)
+- [Roadmap](./docs/roadmap.md)
