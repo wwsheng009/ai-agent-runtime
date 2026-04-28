@@ -158,6 +158,32 @@ func TestValidateStreamingAggregateResponse_ClassifiesReasoningOnlyContentInspec
 	assert.True(t, classifyRetryableLLMError(reasoningOnlyErr).Retryable)
 	assert.Equal(t, "reasoning_only_empty_reply", classifyRetryableLLMError(reasoningOnlyErr).Reason)
 
+	codexReasoningOnlyErr := validateStreamingAggregateResponse("codex", []byte(strings.Join([]string{
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"id":"resp_1","stop_reason":"stop"}}`,
+	}, "\n\n")), map[string]interface{}{
+		"reasoning": "先确认上下文。",
+	})
+	require.Error(t, codexReasoningOnlyErr)
+	assert.Contains(t, codexReasoningOnlyErr.Error(), "reasoning_only_empty_reply")
+	assert.True(t, classifyRetryableLLMError(codexReasoningOnlyErr).Retryable)
+	assert.Equal(t, "reasoning_only_empty_reply", classifyRetryableLLMError(codexReasoningOnlyErr).Reason)
+
+	codexImageGenerationErr := validateStreamingAggregateResponse("codex", []byte(strings.Join([]string{
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"id":"resp_img_1","stop_reason":"stop"}}`,
+	}, "\n\n")), map[string]interface{}{
+		"response_output_items": []map[string]interface{}{
+			{
+				"type":           "image_generation_call",
+				"id":             "img:1",
+				"status":         "completed",
+				"revised_prompt": "a tiny robot",
+			},
+		},
+	})
+	require.NoError(t, codexImageGenerationErr)
+
 	streamInterruptedErr := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
 		`data: {"choices":[{"index":0,"delta":{}}]}`,
 	}, "\n\n")), map[string]interface{}{})

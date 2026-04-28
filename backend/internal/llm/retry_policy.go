@@ -1021,7 +1021,7 @@ func assistantMessageHasSubstantiveOutput(assistantMsg map[string]interface{}) b
 	if len(assistantMsg) == 0 {
 		return false
 	}
-	if content, ok := assistantMsg["content"].(string); ok && content != "" {
+	if content, ok := assistantMsg["content"].(string); ok && strings.TrimSpace(content) != "" {
 		return true
 	}
 	switch toolCalls := assistantMsg["tool_calls"].(type) {
@@ -1029,6 +1029,11 @@ func assistantMessageHasSubstantiveOutput(assistantMsg map[string]interface{}) b
 		return len(toolCalls) > 0
 	case []map[string]interface{}:
 		return len(toolCalls) > 0
+	}
+	for _, item := range assistantMessageOutputItems(assistantMsg) {
+		if assistantOutputItemHasSubstantiveOutput(item) {
+			return true
+		}
 	}
 	return false
 }
@@ -1064,20 +1069,66 @@ func assistantMessageHasReasoningOnlyOutput(assistantMsg map[string]interface{})
 	if len(assistantMsg) == 0 {
 		return false
 	}
-	if content, ok := assistantMsg["content"].(string); ok && content != "" {
+	if assistantMessageHasSubstantiveOutput(assistantMsg) {
 		return false
 	}
-	switch toolCalls := assistantMsg["tool_calls"].(type) {
-	case []interface{}:
-		if len(toolCalls) > 0 {
-			return false
-		}
-	case []map[string]interface{}:
-		if len(toolCalls) > 0 {
+	if reasoning := assistantMessageReasoningText(assistantMsg); strings.TrimSpace(reasoning) != "" {
+		return true
+	}
+	outputItems := assistantMessageOutputItems(assistantMsg)
+	if len(outputItems) == 0 {
+		return false
+	}
+	for _, item := range outputItems {
+		if !strings.EqualFold(strings.TrimSpace(stringValue(item["type"])), "reasoning") {
 			return false
 		}
 	}
+	return true
+}
+
+func assistantMessageOutputItems(assistantMsg map[string]interface{}) []map[string]interface{} {
+	if len(assistantMsg) == 0 {
+		return nil
+	}
+	return canonicalizeCodexOutputItems(extractCodexOutputItems(assistantMsg))
+}
+
+func assistantMessageReasoningText(assistantMsg map[string]interface{}) string {
+	if len(assistantMsg) == 0 {
+		return ""
+	}
+	if reasoning, ok := assistantMsg["reasoning"].(string); ok && strings.TrimSpace(reasoning) != "" {
+		return strings.TrimSpace(reasoning)
+	}
 	if reasoning, ok := assistantMsg["reasoning_content"].(string); ok && strings.TrimSpace(reasoning) != "" {
+		return strings.TrimSpace(reasoning)
+	}
+	if metadata := decodeMapAny(assistantMsg["metadata"]); metadata != nil {
+		if reasoning, ok := metadata["reasoning_content"].(string); ok && strings.TrimSpace(reasoning) != "" {
+			return strings.TrimSpace(reasoning)
+		}
+	}
+	return ""
+}
+
+func assistantOutputItemHasSubstantiveOutput(item map[string]interface{}) bool {
+	if len(item) == 0 {
+		return false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(stringValue(item["type"]))) {
+	case "message":
+		switch content := item["content"].(type) {
+		case string:
+			return strings.TrimSpace(content) != ""
+		case []interface{}:
+			return len(content) > 0
+		case []map[string]interface{}:
+			return len(content) > 0
+		}
+		return false
+	case "function_call", "custom_tool_call", "image_generation_call":
 		return true
 	}
 	return false

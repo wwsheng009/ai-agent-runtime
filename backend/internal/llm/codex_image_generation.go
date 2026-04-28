@@ -1,17 +1,14 @@
 package llm
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/imagegen"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -21,19 +18,10 @@ const (
 	codexImageGenerationToolType       = "image_generation"
 	codexImageGenerationCallType       = "image_generation_call"
 	defaultGeneratedImageFormat        = "png"
-	defaultGeneratedImageMimeType      = "image/png"
 )
 
 // GeneratedImage stores local metadata for one saved image_generation result.
-type GeneratedImage struct {
-	ID            string `json:"id,omitempty"`
-	Status        string `json:"status,omitempty"`
-	RevisedPrompt string `json:"revised_prompt,omitempty"`
-	MimeType      string `json:"mime_type,omitempty"`
-	SavedPath     string `json:"saved_path,omitempty"`
-	SHA256        string `json:"sha256,omitempty"`
-	ByteCount     int    `json:"byte_count,omitempty"`
-}
+type GeneratedImage = imagegen.SavedImage
 
 // BuildToolDefinitionsForRequest converts local tool definitions into protocol
 // request payloads and appends Codex native tools when the selected model
@@ -262,61 +250,13 @@ func saveGeneratedImage(outputDir string, item map[string]interface{}) (Generate
 	if payload == "" {
 		return GeneratedImage{}, fmt.Errorf("image_generation %s returned empty payload", id)
 	}
-	if strings.HasPrefix(strings.ToLower(payload), "data:") {
-		return GeneratedImage{}, fmt.Errorf("image_generation %s returned unsupported data URL payload", id)
-	}
-
-	bytes, err := base64.StdEncoding.DecodeString(payload)
+	saved, err := imagegen.SaveBase64Image(outputDir, id, payload, defaultGeneratedImageFormat)
 	if err != nil {
-		return GeneratedImage{}, fmt.Errorf("image_generation %s returned invalid base64 payload: %w", id, err)
+		return GeneratedImage{}, fmt.Errorf("image_generation %s: %w", id, err)
 	}
-
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return GeneratedImage{}, fmt.Errorf("create generated image directory: %w", err)
-	}
-
-	path := filepath.Join(outputDir, sanitizeGeneratedImageID(id)+"."+defaultGeneratedImageFormat)
-	if err := os.WriteFile(path, bytes, 0o644); err != nil {
-		return GeneratedImage{}, fmt.Errorf("write generated image %s: %w", id, err)
-	}
-
-	sum := sha256.Sum256(bytes)
-	return GeneratedImage{
-		ID:            id,
-		Status:        strings.TrimSpace(stringValue(item["status"])),
-		RevisedPrompt: strings.TrimSpace(stringValue(item["revised_prompt"])),
-		MimeType:      defaultGeneratedImageMimeType,
-		SavedPath:     path,
-		SHA256:        hex.EncodeToString(sum[:]),
-		ByteCount:     len(bytes),
-	}, nil
-}
-
-func sanitizeGeneratedImageID(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "generated_image"
-	}
-	var builder strings.Builder
-	for _, ch := range value {
-		switch {
-		case ch >= 'a' && ch <= 'z':
-			builder.WriteRune(ch)
-		case ch >= 'A' && ch <= 'Z':
-			builder.WriteRune(ch)
-		case ch >= '0' && ch <= '9':
-			builder.WriteRune(ch)
-		case ch == '-' || ch == '_':
-			builder.WriteRune(ch)
-		default:
-			builder.WriteByte('_')
-		}
-	}
-	result := builder.String()
-	if result == "" {
-		return "generated_image"
-	}
-	return result
+	saved.Status = strings.TrimSpace(stringValue(item["status"]))
+	saved.RevisedPrompt = strings.TrimSpace(stringValue(item["revised_prompt"]))
+	return saved, nil
 }
 
 func cloneDeepMapStringAny(input map[string]interface{}) map[string]interface{} {
