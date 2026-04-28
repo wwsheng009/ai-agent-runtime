@@ -1,4 +1,7 @@
 version: "v1"
 
+images:
+  cacheMaxAge: 1h
+
 sessions:
   dir: "../data/runtime/sessions"

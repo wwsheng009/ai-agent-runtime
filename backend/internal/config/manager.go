@@ -36,6 +36,7 @@ type RuntimeConfig struct {
 	SessionRuntime SessionRuntimeConfig      `yaml:"sessionRuntime" json:"sessionRuntime"`
 	Checkpoint     CheckpointConfig          `yaml:"checkpoint" json:"checkpoint"`
 	Background     BackgroundConfig          `yaml:"background" json:"background"`
+	Images         ImagesConfig              `yaml:"images" json:"images"`
 
 	// 性能配置
 	Performance PerformanceConfig `yaml:"performance" json:"performance"`
@@ -153,6 +154,11 @@ type BackgroundConfig struct {
 	DefaultTimeout    time.Duration `yaml:"defaultTimeout" json:"defaultTimeout"`
 }
 
+// ImagesConfig controls HTTP behavior for runtime-generated images.
+type ImagesConfig struct {
+	CacheMaxAge time.Duration `yaml:"cacheMaxAge" json:"cacheMaxAge"`
+}
+
 // PerformanceConfig 性能配置
 type PerformanceConfig struct {
 	MaxConcurrency int           `yaml:"maxConcurrency" json:"maxConcurrency"`
@@ -265,6 +271,9 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		Background: BackgroundConfig{
 			MaxOutputBytes:    1 * 1024 * 1024,
 			MaxConcurrentJobs: 2,
+		},
+		Images: ImagesConfig{
+			CacheMaxAge: time.Hour,
 		},
 		Performance: PerformanceConfig{
 			MaxConcurrency: 10,

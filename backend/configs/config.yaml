@@ -604,6 +604,7 @@ providers:
             forward_url: /v1/chat/completions
             max_tokens_limit: 8000
             model_mappings:
+                deepseek-ai/DeepSeek-V4-Pro: deepseek-ai/DeepSeek-V4-Pro
                 '*': deepseek-ai/DeepSeek-V4-Flash
                 "claude*": deepseek-ai/DeepSeek-V4-Pro
                 glm-4-plus: deepseek-ai/DeepSeek-V4-Pro
