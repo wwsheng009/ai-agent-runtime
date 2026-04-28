@@ -131,6 +131,7 @@ func (e *retrySuppressedError) Unwrap() error {
 type streamEmissionState struct {
 	emittedText      bool
 	emittedReasoning bool
+	emittedImage     bool
 }
 
 func (s *streamEmissionState) markText(content string) {
@@ -147,6 +148,13 @@ func (s *streamEmissionState) markReasoning(content string) {
 	s.emittedReasoning = true
 }
 
+func (s *streamEmissionState) markImage(metadata map[string]interface{}) {
+	if s == nil || len(metadata) == 0 {
+		return
+	}
+	s.emittedImage = true
+}
+
 func (s *streamEmissionState) emittedAnything() bool {
 	if s == nil {
 		return false
@@ -154,7 +162,7 @@ func (s *streamEmissionState) emittedAnything() bool {
 	// 只有真正发出了可见正文时才算“已经输出过内容”。
 	// reasoning-only 片段不应阻止后续的空回复重试，
 	// 否则会把“只吐了思考过程、但最终没有正文”的场景误判为已完成。
-	return s.emittedText
+	return s.emittedText || s.emittedImage
 }
 
 func (c RetryTuning) normalized() RetryTuning {

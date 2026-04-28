@@ -433,6 +433,22 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 				},
 			})
 		},
+		OnImage: func(metadata map[string]interface{}) {
+			if !request.Stream || len(metadata) == 0 {
+				return
+			}
+			chunkMetadata := map[string]interface{}{
+				"provider": p.config.Type,
+				"model":    adapterRequest.Model,
+			}
+			for key, value := range metadata {
+				chunkMetadata[key] = value
+			}
+			reportStreamChunk(ctx, StreamChunk{
+				Type:     EventTypeImage,
+				Metadata: chunkMetadata,
+			})
+		},
 	}
 	assistantMsg, err := p.adapter.HandleResponse(request.Stream, bytes.NewReader(body), callbacks)
 	if err != nil {
@@ -963,13 +979,30 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				reportStreamChunk(attemptCtx, StreamChunk{
 					Type:    EventTypeReasoning,
 					Content: reasoning,
-					Metadata: map[string]interface{}{
-						"provider": p.config.Type,
-						"model":    adapterRequest.Model,
-					},
-				})
-			},
-		}
+				Metadata: map[string]interface{}{
+					"provider": p.config.Type,
+					"model":    adapterRequest.Model,
+				},
+			})
+		},
+		OnImage: func(metadata map[string]interface{}) {
+			if len(metadata) == 0 {
+				return
+			}
+			emissionState.markImage(metadata)
+			chunkMetadata := map[string]interface{}{
+				"provider": p.config.Type,
+				"model":    adapterRequest.Model,
+			}
+			for key, value := range metadata {
+				chunkMetadata[key] = value
+			}
+			reportStreamChunk(attemptCtx, StreamChunk{
+				Type:     EventTypeImage,
+				Metadata: chunkMetadata,
+			})
+		},
+	}
 
 		var responseBuffer bytes.Buffer
 		assistantMsg, handleErr := p.adapter.HandleResponse(true, io.TeeReader(resp.Body, &responseBuffer), callbacks)

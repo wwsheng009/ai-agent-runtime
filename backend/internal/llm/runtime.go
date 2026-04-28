@@ -94,6 +94,7 @@ const (
 	EventTypeToolCall  StreamEventType = "tool_call"
 	EventTypeToolStart StreamEventType = "tool_start"
 	EventTypeToolEnd   StreamEventType = "tool_end"
+	EventTypeImage     StreamEventType = "image"
 	EventTypeDone      StreamEventType = "done"
 	EventTypeError     StreamEventType = "error"
 	EventTypeReasoning StreamEventType = "reasoning"
