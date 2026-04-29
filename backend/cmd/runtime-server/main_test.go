@@ -6,12 +6,32 @@ import (
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 )
 
 func TestResolvePathFromConfigFile(t *testing.T) {
 	configFile := filepath.Join("backend", "configs", "runtime.yaml")
 	resolved := resolvePathFromConfigFile(configFile, "../data/runtime/sessions")
+
+	expected := filepath.Clean(filepath.Join("backend", "data", "runtime", "sessions"))
+	if resolved != expected {
+		t.Fatalf("expected %q, got %q", expected, resolved)
+	}
+}
+
+func TestResolveRuntimeServerSessionDir_UsesAICLIDefaultWhenUnset(t *testing.T) {
+	configFile := filepath.Join("backend", "configs", "runtime.yaml")
+	resolved := resolveRuntimeServerSessionDir(configFile, "")
+
+	if resolved != aiclipaths.DefaultSessionsDir() {
+		t.Fatalf("expected default session dir %q, got %q", aiclipaths.DefaultSessionsDir(), resolved)
+	}
+}
+
+func TestResolveRuntimeServerSessionDir_ResolvesConfiguredRelativePathFromConfigFile(t *testing.T) {
+	configFile := filepath.Join("backend", "configs", "runtime.yaml")
+	resolved := resolveRuntimeServerSessionDir(configFile, "../data/runtime/sessions")
 
 	expected := filepath.Clean(filepath.Join("backend", "data", "runtime", "sessions"))
 	if resolved != expected {

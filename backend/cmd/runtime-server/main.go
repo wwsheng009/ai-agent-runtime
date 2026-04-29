@@ -18,6 +18,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/spf13/pflag"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -32,7 +33,7 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-const defaultRuntimeServerConfigPath = "./configs/config.yaml"
+const runtimeServerDefaultConfigName = "config.yaml"
 
 type runtimeServerCommandOptions struct {
 	ConfigPath string
@@ -40,6 +41,21 @@ type runtimeServerCommandOptions struct {
 	PIDFile    string
 	PID        int
 	Wait       time.Duration
+}
+
+type runtimeServerStartConflict struct {
+	PID                 int
+	ListenAddr          string
+	PIDFile             string
+	RequestedConfigPath string
+	RunningConfigPath   string
+	Reason              string
+}
+
+type runtimeServerStartupLogCapture struct {
+	Path        string
+	InitialSize int64
+	Existed     bool
 }
 
 func main() {
@@ -86,6 +102,7 @@ func printRuntimeServerRootUsage() {
 	fmt.Fprintln(os.Stdout, "  - 不带子命令时，等价于 `serve`，以前的启动方式保持兼容。")
 	fmt.Fprintln(os.Stdout, "  - `start` 会在后台启动服务并写入 PID 文件。")
 	fmt.Fprintln(os.Stdout, "  - `stop` 优先使用 PID 文件停止受管实例，也支持 `--pid` 直接停止指定进程。")
+	fmt.Fprintln(os.Stdout, "  - 未指定 `--config` 时，按 $HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./config.yaml -> ./configs/config.yaml 顺序查找。")
 	fmt.Fprintln(os.Stdout, "  - 默认 PID 文件为 ./logs/runtime-server.pid。")
 }
 
@@ -97,11 +114,10 @@ func newRuntimeServerFlagSet(name string) *pflag.FlagSet {
 
 func parseServeOptions(args []string) (runtimeServerCommandOptions, error) {
 	opts := runtimeServerCommandOptions{
-		ConfigPath: defaultRuntimeServerConfigPath,
-		PIDFile:    runtimeserver.DefaultPIDFile,
+		PIDFile: runtimeserver.DefaultPIDFile,
 	}
 	flags := newRuntimeServerFlagSet("runtime-server serve")
-	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径")
+	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径；未指定时按默认搜索顺序查找 config.yaml")
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
 	return opts, flags.Parse(args)
@@ -109,12 +125,11 @@ func parseServeOptions(args []string) (runtimeServerCommandOptions, error) {
 
 func parseStartOptions(args []string) (runtimeServerCommandOptions, error) {
 	opts := runtimeServerCommandOptions{
-		ConfigPath: defaultRuntimeServerConfigPath,
-		PIDFile:    runtimeserver.DefaultPIDFile,
-		Wait:       30 * time.Second,
+		PIDFile: runtimeserver.DefaultPIDFile,
+		Wait:    30 * time.Second,
 	}
 	flags := newRuntimeServerFlagSet("runtime-server start")
-	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径")
+	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径；未指定时按默认搜索顺序查找 config.yaml")
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
 	flags.DurationVar(&opts.Wait, "wait", opts.Wait, "等待后台进程完成启动的超时时间")
@@ -135,11 +150,10 @@ func parseStopOptions(args []string) (runtimeServerCommandOptions, error) {
 
 func parseStatusOptions(args []string) (runtimeServerCommandOptions, error) {
 	opts := runtimeServerCommandOptions{
-		ConfigPath: defaultRuntimeServerConfigPath,
-		PIDFile:    runtimeserver.DefaultPIDFile,
+		PIDFile: runtimeserver.DefaultPIDFile,
 	}
 	flags := newRuntimeServerFlagSet("runtime-server status")
-	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径")
+	flags.StringVarP(&opts.ConfigPath, "config", "c", opts.ConfigPath, "配置文件路径；未指定时按默认搜索顺序查找 config.yaml")
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
 	return opts, flags.Parse(args)
@@ -147,49 +161,43 @@ func parseStatusOptions(args []string) (runtimeServerCommandOptions, error) {
 
 func resolveRuntimeServerConfigPath(configPath string) string {
 	configPath = strings.TrimSpace(configPath)
-	if configPath == "" {
-		configPath = defaultRuntimeServerConfigPath
+	if configPath != "" {
+		return resolveRuntimeServerConfigCandidate(configPath)
 	}
 
-	cleaned := filepath.Clean(configPath)
-	candidates := make([]string, 0, 2)
-	seen := make(map[string]struct{}, 2)
-	appendCandidate := func(path string) {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return
-		}
-		path = filepath.Clean(path)
-		if _, ok := seen[path]; ok {
-			return
-		}
-		seen[path] = struct{}{}
-		candidates = append(candidates, path)
-	}
-
-	appendCandidate(cleaned)
-	if !filepath.IsAbs(cleaned) {
-		relative := strings.TrimPrefix(cleaned, "."+string(filepath.Separator))
-		normalizedRelative := filepath.ToSlash(relative)
-		switch {
-		case normalizedRelative == "" || normalizedRelative == ".":
-		case strings.HasPrefix(normalizedRelative, "backend/"):
-			appendCandidate(filepath.FromSlash(strings.TrimPrefix(normalizedRelative, "backend/")))
-		default:
-			appendCandidate(filepath.Join("backend", relative))
-		}
-	}
-
-	for _, candidate := range candidates {
-		resolved := runtimeserver.ResolveUpwardPath(candidate)
+	for _, candidate := range defaultRuntimeServerConfigSearchPaths() {
+		resolved := resolveRuntimeServerConfigCandidate(candidate)
 		if info, err := os.Stat(resolved); err == nil && !info.IsDir() {
-			if absolutePath, absErr := filepath.Abs(resolved); absErr == nil {
-				return absolutePath
-			}
 			return resolved
 		}
 	}
+	return ""
+}
 
+func defaultRuntimeServerConfigSearchPaths() []string {
+	paths := make([]string, 0, 4)
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		paths = append(paths, filepath.Join(home, ".aicli", runtimeServerDefaultConfigName))
+	}
+	paths = append(paths,
+		filepath.Join(".aicli", runtimeServerDefaultConfigName),
+		runtimeServerDefaultConfigName,
+		filepath.Join("configs", runtimeServerDefaultConfigName),
+	)
+	return paths
+}
+
+func resolveRuntimeServerConfigCandidate(configPath string) string {
+	cleaned := filepath.Clean(strings.TrimSpace(configPath))
+	if cleaned == "" {
+		return ""
+	}
+	if filepath.IsAbs(cleaned) {
+		return cleaned
+	}
+	if absolutePath, err := filepath.Abs(cleaned); err == nil {
+		return absolutePath
+	}
 	return cleaned
 }
 
@@ -316,12 +324,14 @@ func runStart(args []string) int {
 	opts.ConfigPath = resolveRuntimeServerConfigPath(opts.ConfigPath)
 
 	pidFile := runtimeserver.ResolvePIDFilePath(opts.PIDFile)
-	if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil {
-		if runtimeserver.ProcessRunning(info.PID) {
-			fmt.Fprintf(os.Stdout, "runtime-server 已在运行: pid=%d listen=%s pid_file=%s\n", info.PID, strings.TrimSpace(info.ListenAddr), pidFile)
-			return 1
-		}
-		_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, info.PID)
+	conflict, err := detectRuntimeServerStartConflict(opts.ConfigPath, opts.ListenAddr, pidFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "检查 runtime-server 运行状态失败: %v\n", err)
+		return 1
+	}
+	if conflict != nil {
+		fmt.Fprintln(os.Stdout, formatRuntimeServerStartConflict(conflict))
+		return 1
 	}
 
 	executable, err := os.Executable()
@@ -332,6 +342,11 @@ func runStart(args []string) int {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to resolve working directory: %v\n", err)
+		return 1
+	}
+	logCapture, err := prepareRuntimeServerStartupLogCapture(opts.ConfigPath, cwd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to resolve runtime-server log file: %v\n", err)
 		return 1
 	}
 
@@ -375,17 +390,233 @@ func runStart(args []string) int {
 		select {
 		case err := <-exitCh:
 			if err == nil {
-				fmt.Fprintf(os.Stderr, "runtime-server 进程在写入 PID 文件前已退出，请检查日志文件。\n")
+				fmt.Fprintln(os.Stderr, buildRuntimeServerStartFailureMessage(
+					"runtime-server 进程在写入 PID 文件前已退出。",
+					nil,
+					logCapture,
+				))
 			} else {
-				fmt.Fprintf(os.Stderr, "runtime-server 启动失败，请检查日志文件: %v\n", err)
+				fmt.Fprintln(os.Stderr, buildRuntimeServerStartFailureMessage(
+					"runtime-server 启动失败。",
+					err,
+					logCapture,
+				))
 			}
 			return 1
 		case <-deadline.C:
-			fmt.Fprintf(os.Stderr, "runtime-server 启动超时，未在 %s 内写入 PID 文件: %s\n", opts.Wait, pidFile)
+			fmt.Fprintln(os.Stderr, buildRuntimeServerStartFailureMessage(
+				fmt.Sprintf("runtime-server 启动超时，未在 %s 内写入 PID 文件: %s", opts.Wait, pidFile),
+				nil,
+				logCapture,
+			))
 			return 1
 		case <-ticker.C:
 		}
 	}
+}
+
+func detectRuntimeServerStartConflict(configPath, listenOverride, pidFile string) (*runtimeServerStartConflict, error) {
+	pidFile = runtimeserver.ResolvePIDFilePath(pidFile)
+	requestedConfigPath := strings.TrimSpace(configPath)
+	if info, err := runtimeserver.ReadInstanceInfo(pidFile); err == nil {
+		if runtimeserver.ProcessRunning(info.PID) {
+			return &runtimeServerStartConflict{
+				PID:                 info.PID,
+				ListenAddr:          strings.TrimSpace(info.ListenAddr),
+				PIDFile:             pidFile,
+				RequestedConfigPath: requestedConfigPath,
+				RunningConfigPath:   strings.TrimSpace(info.ConfigPath),
+				Reason:              "managed_instance",
+			}, nil
+		}
+		_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, info.PID)
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	listenAddr, err := resolveListenAddrForCommand(configPath, listenOverride)
+	if err != nil {
+		return nil, err
+	}
+	if pid, err := runtimeserver.FindListeningPID(listenAddr); err == nil && pid > 0 {
+		return &runtimeServerStartConflict{
+			PID:                 pid,
+			ListenAddr:          strings.TrimSpace(listenAddr),
+			PIDFile:             pidFile,
+			RequestedConfigPath: requestedConfigPath,
+			Reason:              "listen_addr_in_use",
+		}, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	return nil, nil
+}
+
+func formatRuntimeServerStartConflict(conflict *runtimeServerStartConflict) string {
+	if conflict == nil {
+		return "runtime-server 已在运行"
+	}
+
+	listenAddr := strings.TrimSpace(conflict.ListenAddr)
+	pidFile := strings.TrimSpace(conflict.PIDFile)
+	requestedConfig := strings.TrimSpace(conflict.RequestedConfigPath)
+	runningConfig := strings.TrimSpace(conflict.RunningConfigPath)
+
+	switch conflict.Reason {
+	case "listen_addr_in_use":
+		return fmt.Sprintf(
+			"runtime-server 启动已拒绝: 目标监听地址已被现有实例占用; pid=%d listen=%s pid_file=%s requested_config=%s",
+			conflict.PID,
+			listenAddr,
+			pidFile,
+			fallbackDisplayValue(requestedConfig, "<auto>"),
+		)
+	default:
+		message := fmt.Sprintf(
+			"runtime-server 已在运行: pid=%d listen=%s pid_file=%s running_config=%s requested_config=%s",
+			conflict.PID,
+			listenAddr,
+			pidFile,
+			fallbackDisplayValue(runningConfig, "<unknown>"),
+			fallbackDisplayValue(requestedConfig, "<auto>"),
+		)
+		if sameRuntimeServerConfigPath(runningConfig, requestedConfig) {
+			return message + " 当前实例尚未停止，本次 start 不会重新加载配置。"
+		}
+		return message + " 当前运行实例与本次请求配置不同；请先 stop 或 restart，避免继续使用旧实例。"
+	}
+}
+
+func sameRuntimeServerConfigPath(left, right string) bool {
+	left = resolveRuntimeServerConfigCandidate(left)
+	right = resolveRuntimeServerConfigCandidate(right)
+	return left != "" && right != "" && strings.EqualFold(left, right)
+}
+
+func fallbackDisplayValue(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func prepareRuntimeServerStartupLogCapture(configPath, cwd string) (runtimeServerStartupLogCapture, error) {
+	logPath, err := resolveRuntimeServerLogPath(configPath, cwd)
+	if err != nil {
+		return runtimeServerStartupLogCapture{}, err
+	}
+	capture := runtimeServerStartupLogCapture{
+		Path: strings.TrimSpace(logPath),
+	}
+	if capture.Path == "" {
+		return capture, nil
+	}
+	if info, err := os.Stat(capture.Path); err == nil && !info.IsDir() {
+		capture.Existed = true
+		capture.InitialSize = info.Size()
+	}
+	return capture, nil
+}
+
+func resolveRuntimeServerLogPath(configPath, cwd string) (string, error) {
+	cfg, _, err := runtimeserver.LoadRuntimeAgentConfig(configPath)
+	if err != nil {
+		return "", err
+	}
+	logPath := strings.TrimSpace(cfg.Log.FilePath)
+	if logPath == "" {
+		return "", nil
+	}
+	if filepath.IsAbs(logPath) {
+		return filepath.Clean(logPath), nil
+	}
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		if resolved, err := os.Getwd(); err == nil {
+			cwd = resolved
+		}
+	}
+	if cwd == "" {
+		return filepath.Clean(logPath), nil
+	}
+	return filepath.Clean(filepath.Join(cwd, logPath)), nil
+}
+
+func buildRuntimeServerStartFailureMessage(prefix string, startErr error, capture runtimeServerStartupLogCapture) string {
+	prefix = strings.TrimSpace(prefix)
+	lines := make([]string, 0, 6)
+	if prefix != "" {
+		if startErr != nil {
+			lines = append(lines, fmt.Sprintf("%s %v", prefix, startErr))
+		} else {
+			lines = append(lines, prefix)
+		}
+	} else if startErr != nil {
+		lines = append(lines, startErr.Error())
+	}
+
+	logTail, logPath, tailMode, err := readRuntimeServerStartupLogTail(capture, 40)
+	if err != nil {
+		lines = append(lines, fmt.Sprintf("读取启动日志失败: %v", err))
+		return strings.Join(lines, "\n")
+	}
+	if strings.TrimSpace(logPath) == "" {
+		lines = append(lines, "未配置日志文件路径，无法输出启动失败日志。")
+		return strings.Join(lines, "\n")
+	}
+
+	lines = append(lines, fmt.Sprintf("日志文件: %s", logPath))
+	if strings.TrimSpace(logTail) == "" {
+		lines = append(lines, "未读取到本次启动失败对应的日志输出。")
+		return strings.Join(lines, "\n")
+	}
+
+	switch tailMode {
+	case "full_tail":
+		lines = append(lines, "日志尾部:")
+	default:
+		lines = append(lines, "本次启动新增日志:")
+	}
+	lines = append(lines, logTail)
+	return strings.Join(lines, "\n")
+}
+
+func readRuntimeServerStartupLogTail(capture runtimeServerStartupLogCapture, maxLines int) (string, string, string, error) {
+	logPath := strings.TrimSpace(capture.Path)
+	if logPath == "" {
+		return "", "", "", nil
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", logPath, "", nil
+		}
+		return "", logPath, "", err
+	}
+
+	content := raw
+	mode := "new_tail"
+	if capture.Existed && capture.InitialSize >= 0 && int64(len(raw)) > capture.InitialSize {
+		content = raw[capture.InitialSize:]
+	} else {
+		mode = "full_tail"
+	}
+	return tailTextLines(string(content), maxLines), logPath, mode, nil
+}
+
+func tailTextLines(content string, maxLines int) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	if maxLines <= 0 || len(lines) <= maxLines {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[len(lines)-maxLines:], "\n")
 }
 
 func runStop(args []string) int {
@@ -533,10 +764,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		return nil, fmt.Errorf("failed to load runtime config: %w", err)
 	}
 	runtimeConfig := runtimeManager.Get()
-	runtimeConfig.Sessions.Dir = resolvePathFromConfigFile(
-		runtimeManager.GetFilePath(),
-		runtimeConfig.Sessions.Dir,
-	)
+	runtimeConfig.Sessions.Dir = resolveRuntimeServerSessionDir(runtimeManager.GetFilePath(), runtimeConfig.Sessions.Dir)
 
 	mcpAdapter, manager, err := buildSkillsMCPManager(ctx, cfg, runtimeConfig)
 	if err != nil {
@@ -608,6 +836,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	}
 
 	router := mux.NewRouter()
+	router.UseEncodedPath()
 	router.HandleFunc("/", runtimeInfoHandler).Methods(http.MethodGet)
 	router.HandleFunc("/healthz", runtimeInfoHandler).Methods(http.MethodGet)
 	handler.RegisterRoutes(router)
@@ -637,6 +866,14 @@ func resolvePathFromConfigFile(configFile, target string) string {
 		return filepath.Clean(target)
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(configFile), target))
+}
+
+func resolveRuntimeServerSessionDir(configFile, target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return aiclipaths.DefaultSessionsDir()
+	}
+	return resolvePathFromConfigFile(configFile, target)
 }
 
 func (a *runtimeServerApp) configureServiceControl(pidFile, listenAddr, configPath, cwd string) {

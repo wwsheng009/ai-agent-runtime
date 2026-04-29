@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
@@ -259,10 +260,43 @@ func writeFilePreserveMode(path string, data []byte) error {
 			return fmt.Errorf("create config directory: %w", err)
 		}
 	}
+	if err := backupConfigFile(path, mode); err != nil {
+		return err
+	}
 	if err := os.WriteFile(path, data, mode); err != nil {
 		return fmt.Errorf("write config file: %w", err)
 	}
 	return nil
+}
+
+func backupConfigFile(path string, mode os.FileMode) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+
+	original, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read config file for backup: %w", err)
+	}
+
+	backupPath := buildTimestampedBackupPath(path, time.Now().UTC())
+	if err := os.WriteFile(backupPath, original, mode); err != nil {
+		return fmt.Errorf("write config backup file: %w", err)
+	}
+	return nil
+}
+
+func buildTimestampedBackupPath(path string, now time.Time) string {
+	timestamp := now.UTC().Format("20060102T150405.000000000Z")
+	backupPath := fmt.Sprintf("%s.%s.bak", path, timestamp)
+	for attempt := 1; fileExists(backupPath); attempt++ {
+		backupPath = fmt.Sprintf("%s.%s-%d.bak", path, timestamp, attempt)
+	}
+	return backupPath
 }
 
 func cloneSkillsRuntimeConfig(current *config.SkillsRuntimeConfig) *config.SkillsRuntimeConfig {

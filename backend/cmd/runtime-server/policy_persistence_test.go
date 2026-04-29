@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -14,7 +15,6 @@ import (
 
 func TestSkillsRuntimePolicyPersister_PersistsYAMLSectionOnly(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	snapshotPath := runtimeserver.ResolveAgentConfigSnapshotInfo(configPath).SnapshotPath
 	initial := `
 server:
   host: "${SERVER_HOST:-127.0.0.1}"
@@ -104,18 +104,20 @@ skills_runtime:
 	require.NoError(t, err)
 	require.Contains(t, string(baseRaw), `${OPENAI_API_KEY:-secret}`)
 	require.Contains(t, string(baseRaw), `${SERVER_HOST:-127.0.0.1}`)
+	require.Contains(t, string(baseRaw), "read_only: true")
 
-	raw, err := os.ReadFile(snapshotPath)
+	backupPath := requireSingleBackupFile(t, configPath)
+	backupRaw, err := os.ReadFile(backupPath)
 	require.NoError(t, err)
-	require.Contains(t, string(raw), `${OPENAI_API_KEY:-secret}`)
-	require.Contains(t, string(raw), `${SERVER_HOST:-127.0.0.1}`)
+	require.Contains(t, string(backupRaw), `${OPENAI_API_KEY:-secret}`)
+	require.Contains(t, string(backupRaw), `${SERVER_HOST:-127.0.0.1}`)
 
 	var persisted struct {
 		Server        map[string]interface{}     `yaml:"server"`
 		Providers     map[string]interface{}     `yaml:"providers"`
 		SkillsRuntime config.SkillsRuntimeConfig `yaml:"skills_runtime"`
 	}
-	require.NoError(t, yaml.Unmarshal(raw, &persisted))
+	require.NoError(t, yaml.Unmarshal(baseRaw, &persisted))
 	require.NotNil(t, persisted.Server)
 	require.NotNil(t, persisted.Providers)
 
@@ -137,4 +139,13 @@ skills_runtime:
 
 func intPtr(value int) *int {
 	return &value
+}
+
+func requireSingleBackupFile(t *testing.T, configPath string) string {
+	t.Helper()
+	matches, err := filepath.Glob(configPath + ".*.bak")
+	require.NoError(t, err)
+	require.NotEmpty(t, matches)
+	sort.Strings(matches)
+	return matches[len(matches)-1]
 }

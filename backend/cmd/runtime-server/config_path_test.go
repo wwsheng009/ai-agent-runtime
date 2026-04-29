@@ -6,17 +6,14 @@ import (
 	"testing"
 )
 
-func TestResolveRuntimeServerConfigPathFallsBackToBackendLayoutFromRepoRoot(t *testing.T) {
+func TestResolveRuntimeServerConfigPathUsesConfigsConfigFromCurrentDir(t *testing.T) {
 	root := t.TempDir()
-	configPath := filepath.Join(root, "backend", "configs", "config.yaml")
+	configPath := filepath.Join(root, "configs", "config.yaml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
 	if err := os.WriteFile(configPath, []byte("server:\n  port: 8101\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "configs"), 0o755); err != nil {
-		t.Fatalf("mkdir legacy configs dir: %v", err)
 	}
 
 	originalWD, err := os.Getwd()
@@ -32,7 +29,7 @@ func TestResolveRuntimeServerConfigPathFallsBackToBackendLayoutFromRepoRoot(t *t
 		}
 	})
 
-	resolved := resolveRuntimeServerConfigPath("./configs/config.yaml")
+	resolved := resolveRuntimeServerConfigPath("")
 	expected, err := filepath.Abs(configPath)
 	if err != nil {
 		t.Fatalf("abs expected: %v", err)
@@ -42,21 +39,50 @@ func TestResolveRuntimeServerConfigPathFallsBackToBackendLayoutFromRepoRoot(t *t
 	}
 }
 
-func TestResolveRuntimeServerConfigPathPrefersExistingLegacyPath(t *testing.T) {
+func TestResolveRuntimeServerConfigPathPrefersProjectConfigYAMLOverConfigsDir(t *testing.T) {
 	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("server:\n  port: 8101\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	legacyPath := filepath.Join(root, "configs", "config.yaml")
 	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
 		t.Fatalf("mkdir legacy dir: %v", err)
 	}
-	if err := os.WriteFile(legacyPath, []byte("server:\n  port: 8101\n"), 0o644); err != nil {
+	if err := os.WriteFile(legacyPath, []byte("server:\n  port: 8102\n"), 0o644); err != nil {
 		t.Fatalf("write legacy config: %v", err)
 	}
 
-	backendPath := filepath.Join(root, "backend", "configs", "config.yaml")
-	if err := os.MkdirAll(filepath.Dir(backendPath), 0o755); err != nil {
-		t.Fatalf("mkdir backend dir: %v", err)
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
 	}
-	if err := os.WriteFile(backendPath, []byte("server:\n  port: 8102\n"), 0o644); err != nil {
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir root: %v", err)
+	}
+	t.Cleanup(func() {
+		if chdirErr := os.Chdir(originalWD); chdirErr != nil {
+			t.Fatalf("restore wd: %v", chdirErr)
+		}
+	})
+
+	resolved := resolveRuntimeServerConfigPath("")
+	expected, err := filepath.Abs(configPath)
+	if err != nil {
+		t.Fatalf("abs expected: %v", err)
+	}
+	if resolved != expected {
+		t.Fatalf("expected %q, got %q", expected, resolved)
+	}
+}
+
+func TestResolveRuntimeServerConfigPathDoesNotRemapExplicitConfigPath(t *testing.T) {
+	root := t.TempDir()
+	backendConfigPath := filepath.Join(root, "backend", "configs", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(backendConfigPath), 0o755); err != nil {
+		t.Fatalf("mkdir backend config dir: %v", err)
+	}
+	if err := os.WriteFile(backendConfigPath, []byte("server:\n  port: 8101\n"), 0o644); err != nil {
 		t.Fatalf("write backend config: %v", err)
 	}
 
@@ -73,46 +99,8 @@ func TestResolveRuntimeServerConfigPathPrefersExistingLegacyPath(t *testing.T) {
 		}
 	})
 
-	resolved := resolveRuntimeServerConfigPath("./configs/config.yaml")
-	expected, err := filepath.Abs(legacyPath)
-	if err != nil {
-		t.Fatalf("abs expected: %v", err)
-	}
-	if resolved != expected {
-		t.Fatalf("expected %q, got %q", expected, resolved)
-	}
-}
-
-func TestResolveRuntimeServerConfigPathReturnsAbsolutePathFromBackendDir(t *testing.T) {
-	root := t.TempDir()
-	configPath := filepath.Join(root, "backend", "configs", "config.yaml")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		t.Fatalf("mkdir config dir: %v", err)
-	}
-	if err := os.WriteFile(configPath, []byte("server:\n  port: 8101\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	backendDir := filepath.Join(root, "backend")
-	if err := os.MkdirAll(backendDir, 0o755); err != nil {
-		t.Fatalf("mkdir backend dir: %v", err)
-	}
-
-	originalWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(backendDir); err != nil {
-		t.Fatalf("chdir backend: %v", err)
-	}
-	t.Cleanup(func() {
-		if chdirErr := os.Chdir(originalWD); chdirErr != nil {
-			t.Fatalf("restore wd: %v", chdirErr)
-		}
-	})
-
-	resolved := resolveRuntimeServerConfigPath("./configs/config.yaml")
-	expected, err := filepath.Abs(filepath.Join(backendDir, "configs", "config.yaml"))
+	resolved := resolveRuntimeServerConfigPath(filepath.Join(".", "configs", "config.yaml"))
+	expected, err := filepath.Abs(filepath.Join(root, "configs", "config.yaml"))
 	if err != nil {
 		t.Fatalf("abs expected: %v", err)
 	}
