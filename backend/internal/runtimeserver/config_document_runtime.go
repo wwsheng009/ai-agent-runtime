@@ -2,6 +2,7 @@ package runtimeserver
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 type runtimeConfigPathDisposition string
@@ -465,7 +467,7 @@ func normalizeSkillsRuntimeConfigForHotReload(cfg *agentconfig.Config) *agentcon
 		skillsCfg.ConfigFile = "backend/configs/runtime.yaml"
 	}
 	if strings.TrimSpace(skillsCfg.SkillDir) == "" {
-		skillsCfg.SkillDir = "./docs/skill_runtime/skills"
+		skillsCfg.SkillDir = "./.agents/skills"
 	}
 	if strings.TrimSpace(skillsCfg.GatewayProviderName) == "" {
 		skillsCfg.GatewayProviderName = "gateway"
@@ -556,6 +558,13 @@ func resolvedExtraSkillDirsForHotReload(cfg *agentconfig.SkillsRuntimeConfig) []
 	}
 	for _, dir := range cfg.ExtraSkillDirs {
 		addDir(dir)
+	}
+	if configFile := strings.TrimSpace(cfg.ConfigFile); configFile != "" {
+		if resolvedConfigFile := ResolveUpwardPath(configFile); strings.TrimSpace(resolvedConfigFile) != "" {
+			for _, dir := range skill.DiscoverCodexCompatibleSkillDirs(filepath.Dir(resolvedConfigFile), resolvedConfigFile) {
+				addDir(dir)
+			}
+		}
 	}
 	return dirs
 }

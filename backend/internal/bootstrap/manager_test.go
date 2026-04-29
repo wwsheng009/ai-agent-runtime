@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -322,6 +323,52 @@ tools: ["echo_tool"]
 	require.NotNil(t, extraSkill.Source)
 	assert.Equal(t, skill.SkillSourceLayerExternal, extraSkill.Source.Layer)
 	assert.Equal(t, extraDir, extraSkill.Source.Dir)
+}
+
+func TestManager_NewManager_AutoLoadsCodexSkillMdOnStartup(t *testing.T) {
+	mcpManager := &bootstrapMCPManager{}
+	skillDir := t.TempDir()
+	codexSkillDir := filepath.Join(skillDir, "codex-auto-skill")
+	metadataDir := filepath.Join(codexSkillDir, "agents")
+
+	require.NoError(t, os.MkdirAll(metadataDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(codexSkillDir, "SKILL.md"), []byte(`---
+name: codex-auto-skill
+description: codex auto load test
+metadata:
+  short-description: auto load summary
+---
+You are an auto-loaded Codex skill.
+`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDir, "openai.yaml"), []byte(`interface:
+  display_name: Codex Auto Skill
+  default_prompt: Use the Codex auto skill.
+`), 0o644))
+
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = false
+
+	manager, err := NewManager(&Options{
+		Config:     cfg,
+		SkillDir:   skillDir,
+		MCPManager: mcpManager,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	assert.Nil(t, manager.HotReload())
+	assert.Equal(t, 1, manager.Registry().Count())
+
+	loadedSkill, ok := manager.Registry().Get("codex-auto-skill")
+	require.True(t, ok)
+	require.NotNil(t, loadedSkill)
+	require.NotNil(t, loadedSkill.Source)
+	assert.Equal(t, skill.SkillSourceFormatCodex, loadedSkill.Source.Format)
+	assert.Equal(t, filepath.Join(codexSkillDir, "SKILL.md"), loadedSkill.Source.Path)
+	assert.Equal(t, filepath.Join(codexSkillDir, "agents", "openai.yaml"), loadedSkill.Source.MetadataPath)
+	assert.Equal(t, "You are an auto-loaded Codex skill.", strings.TrimSpace(loadedSkill.SystemPrompt))
+	assert.Equal(t, "auto load summary", loadedSkill.ShortDescription)
+	assert.Equal(t, "Codex Auto Skill", loadedSkill.Codex.Interface.DisplayName)
 }
 
 func TestManager_NewManager_PersistsSessionsWhenSessionsDirConfigured(t *testing.T) {

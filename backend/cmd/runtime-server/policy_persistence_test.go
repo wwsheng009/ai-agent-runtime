@@ -25,7 +25,7 @@ providers:
 skills_runtime:
   enabled: true
   config_file: "configs/runtime.yaml"
-  skill_dir: "./docs/skill_runtime/skills"
+  skill_dir: "./.agents/skills"
   reindex_cooldown: "30s"
   usage_tracking_enabled: true
   usage_ledger_enabled: false

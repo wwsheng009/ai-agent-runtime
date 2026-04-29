@@ -932,7 +932,7 @@ func normalizeSkillsRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfi
 		cfg.SkillsRuntime.ConfigFile = "backend/configs/runtime.yaml"
 	}
 	if strings.TrimSpace(cfg.SkillsRuntime.SkillDir) == "" {
-		cfg.SkillsRuntime.SkillDir = "./docs/skill_runtime/skills"
+		cfg.SkillsRuntime.SkillDir = "./.agents/skills"
 	}
 	if strings.TrimSpace(cfg.SkillsRuntime.GatewayProviderName) == "" {
 		cfg.SkillsRuntime.GatewayProviderName = "gateway"
@@ -1200,6 +1200,13 @@ func resolvedExtraSkillDirs(cfg *config.SkillsRuntimeConfig) []string {
 	for _, dir := range cfg.ExtraSkillDirs {
 		addDir(dir)
 	}
+	if configFile := strings.TrimSpace(cfg.ConfigFile); configFile != "" {
+		if resolvedConfigFile := runtimeserver.ResolveUpwardPath(configFile); strings.TrimSpace(resolvedConfigFile) != "" {
+			for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(filepath.Dir(resolvedConfigFile), resolvedConfigFile) {
+				addDir(dir)
+			}
+		}
+	}
 	return dirs
 }
 
@@ -1207,11 +1214,25 @@ func allConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig) []string {
 	if cfg == nil {
 		return nil
 	}
-	result := make([]string, 0, 1+len(cfg.SkillDirs)+len(cfg.ExtraSkillDirs))
-	if trimmed := strings.TrimSpace(cfg.SkillDir); trimmed != "" {
-		result = append(result, trimmed)
+	seen := make(map[string]struct{})
+	result := make([]string, 0, 1+len(cfg.SkillDirs)+len(cfg.ExtraSkillDirs)+6)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, exists := seen[value]; exists {
+			return
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
 	}
-	result = append(result, resolvedExtraSkillDirs(cfg)...)
+	if trimmed := strings.TrimSpace(cfg.SkillDir); trimmed != "" {
+		add(trimmed)
+	}
+	for _, dir := range resolvedExtraSkillDirs(cfg) {
+		add(dir)
+	}
 	return result
 }
 
