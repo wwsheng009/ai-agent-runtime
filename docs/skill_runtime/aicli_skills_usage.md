@@ -16,6 +16,11 @@
 
 - `docs/skill_runtime/skill_invocation_mechanism.md`
 
+如果你需要更偏“CLI 使用面”的说明，例如安装、配置加载顺序、`aicli chat` 常用命令、`/call`、`/tool`、`/skill` 这类 chat 斜杠命令，请同时阅读：
+
+- `docs/aicli/README.md`
+- `docs/aicli/install.md`
+
 ## Skills 来源
 
 - 系统级 skills：`skills_runtime.skill_dir`
