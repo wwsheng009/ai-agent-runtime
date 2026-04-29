@@ -34,7 +34,7 @@ func (a *AnthropicAdapter) BuildRequest(config RequestConfig) map[string]interfa
 	if config.MaxTokens > 0 {
 		request["max_tokens"] = config.MaxTokens
 	} else {
-		request["max_tokens"] = 4096
+		request["max_tokens"] = 16384
 	}
 
 	// 添加 Function Call (Anthropic 使用 tools)
@@ -46,8 +46,33 @@ func (a *AnthropicAdapter) BuildRequest(config RequestConfig) map[string]interfa
 	if thinking == nil {
 		thinking = buildAnthropicThinkingFromReasoningEffort(config.ReasoningEffort, config.ReasoningEffortBudgets)
 	}
+	thinkingEnabled := false
 	if thinking != nil && (normalizeAnthropicThinkingType(thinking.Type) != "" || normalizeAnthropicThinkingEffort(thinking.Effort) != "") {
 		request["thinking"] = thinking
+		thinkingEnabled = normalizeAnthropicThinkingType(thinking.Type) != "disabled"
+		// For adaptive thinking, add output_config with effort level
+		if normalizeAnthropicThinkingType(thinking.Type) == "adaptive" && thinking.Effort != "" {
+			request["output_config"] = map[string]interface{}{
+				"effort": thinking.Effort,
+			}
+		}
+	}
+
+	// Anthropic forbids temperature changes when thinking is enabled
+	if !thinkingEnabled && config.Temperature != 0 {
+		request["temperature"] = config.Temperature
+	}
+
+	// stop_sequences: prefer explicit field, fall back to metadata
+	if len(config.StopSequences) > 0 {
+		request["stop_sequences"] = config.StopSequences
+	} else if ss, ok := config.Metadata["stop_sequences"]; ok {
+		request["stop_sequences"] = ss
+	}
+
+	// tool_choice
+	if config.ToolChoice != nil {
+		request["tool_choice"] = config.ToolChoice
 	}
 
 	return request
@@ -116,7 +141,7 @@ func (a *AnthropicAdapter) BuildHeaders(cfg AdapterConfig) map[string]string {
 }
 
 func requiresAnthropicInterleavedThinkingBeta(model string, body map[string]interface{}) bool {
-	if !isAnthropicSonnet46Model(model) {
+	if !isAnthropicSonnet46Model(model) && !isClaudeOpus46Model(model) {
 		return false
 	}
 
@@ -131,6 +156,11 @@ func requiresAnthropicInterleavedThinkingBeta(model string, body map[string]inte
 func isAnthropicSonnet46Model(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	return strings.Contains(model, "claude-sonnet-4-6")
+}
+
+func isClaudeOpus46Model(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(model, "claude-opus-4-6")
 }
 
 type anthropicThinkingHeaderProbe struct {
@@ -680,6 +710,22 @@ func (a *AnthropicAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]in
 
 // IsReasoningModel 判断是否为推理模型
 func (a *AnthropicAdapter) IsReasoningModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	reasoningModels := []string{
+		"claude-opus-4-6",
+		"claude-sonnet-4-6",
+		"claude-opus-4-5",
+		"claude-sonnet-4-5",
+		"claude-opus-4",
+		"claude-sonnet-4",
+		"claude-haiku-4-5",
+		"claude-sonnet-3-7",
+	}
+	for _, rm := range reasoningModels {
+		if strings.Contains(model, rm) {
+			return true
+		}
+	}
 	return false
 }
 

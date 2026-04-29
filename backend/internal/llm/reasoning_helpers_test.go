@@ -541,3 +541,71 @@ func TestRuntimeMessagesToProtocolMessages_CodexHydratesSavedImageGenerationResu
 		t.Fatalf("expected hydrated image_generation_call result from saved image, got %#v", outputItems[0]["result"])
 	}
 }
+
+func TestEnforceAnthropicMessageAlternation_MergesConsecutiveUserMessages(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "hello"},
+		{"role": "user", "content": "world"},
+		{"role": "assistant", "content": "response"},
+	}
+
+	result := enforceAnthropicMessageAlternation(messages)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages after merge, got %d", len(result))
+	}
+
+	// First message should be merged user content
+	if result[0]["role"] != "user" {
+		t.Fatalf("expected user role, got %v", result[0]["role"])
+	}
+	blocks, ok := result[0]["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected content blocks, got %T", result[0]["content"])
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 content blocks after merge, got %d", len(blocks))
+	}
+
+	if result[1]["role"] != "assistant" {
+		t.Fatalf("expected assistant role, got %v", result[1]["role"])
+	}
+}
+
+func TestEnforceAnthropicMessageAlternation_MergesConsecutiveAssistantMessages(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "hello"},
+		{"role": "assistant", "content": "part1"},
+		{"role": "assistant", "content": "part2"},
+	}
+
+	result := enforceAnthropicMessageAlternation(messages)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages after merge, got %d", len(result))
+	}
+	if result[0]["role"] != "user" {
+		t.Fatalf("expected user role first, got %v", result[0]["role"])
+	}
+	if result[1]["role"] != "assistant" {
+		t.Fatalf("expected assistant role, got %v", result[1]["role"])
+	}
+	blocks, ok := result[1]["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected content blocks, got %T", result[1]["content"])
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 content blocks after merge, got %d", len(blocks))
+	}
+}
+
+func TestEnforceAnthropicMessageAlternation_PreservesAlreadyAlternating(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "hello"},
+		{"role": "assistant", "content": "hi"},
+		{"role": "user", "content": "bye"},
+	}
+
+	result := enforceAnthropicMessageAlternation(messages)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 messages preserved, got %d", len(result))
+	}
+}

@@ -3,6 +3,7 @@ package llm
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 
@@ -481,6 +482,8 @@ func RuntimeMessagesToProtocolMessages(messages []types.Message, protocol string
 	}
 	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
 		result = sanitizeCodexProtocolMessages(result)
+	} else if strings.EqualFold(strings.TrimSpace(protocol), "anthropic") {
+		result = sanitizeAnthropicProtocolMessages(result)
 	}
 	return result
 }
@@ -589,6 +592,169 @@ func sanitizeCodexProtocolMessages(messages []map[string]interface{}) []map[stri
 		}
 	}
 	return filtered
+}
+
+// sanitizeAnthropicProtocolMessages converts OpenAI-style tool role messages
+// into Anthropic-compatible user messages with tool_result content blocks.
+// The Anthropic API only accepts "user" and "assistant" roles; tool results
+// must be embedded as content blocks inside user messages.
+func sanitizeAnthropicProtocolMessages(messages []map[string]interface{}) []map[string]interface{} {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	// Collect all tool_use IDs declared by assistant messages.
+	knownToolUseIDs := make(map[string]struct{})
+	for _, msg := range messages {
+		role, _ := msg["role"].(string)
+		if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+			continue
+		}
+		// tool_use blocks in assistant content (Anthropic format)
+		for _, block := range decodeSliceOfMaps(msg["content"]) {
+			blockType, _ := block["type"].(string)
+			if strings.ToLower(strings.TrimSpace(blockType)) != "tool_use" {
+				continue
+			}
+			if id, ok := block["id"].(string); ok && strings.TrimSpace(id) != "" {
+				knownToolUseIDs[strings.TrimSpace(id)] = struct{}{}
+			}
+		}
+		// OpenAI-style tool_calls on assistant messages
+		for id := range protocolMessageToolCallIDs(msg) {
+			knownToolUseIDs[id] = struct{}{}
+		}
+	}
+
+	result := make([]map[string]interface{}, 0, len(messages))
+	for _, msg := range messages {
+		role, _ := msg["role"].(string)
+		role = strings.ToLower(strings.TrimSpace(role))
+
+		if role != "tool" {
+			result = append(result, msg)
+			continue
+		}
+
+		// Convert tool message to Anthropic user message with tool_result block.
+		toolCallID := strings.TrimSpace(msgValueString(msg, "tool_call_id"))
+		if toolCallID == "" {
+			// No tool_call_id – drop the orphan.
+			continue
+		}
+
+		contentText := msgValueString(msg, "content")
+		toolResultBlock := map[string]interface{}{
+			"type":        "tool_result",
+			"tool_use_id": toolCallID,
+			"content":     contentText,
+		}
+		// Preserve tool_name if present so the Anthropic adapter can map it.
+		if name := strings.TrimSpace(msgValueString(msg, "name")); name != "" {
+			toolResultBlock["name"] = name
+		}
+
+		// Merge consecutive tool results into a single user message when possible.
+		if last := lastAppendedUserRole(result); last != nil {
+			if existingContent, ok := last["content"].([]interface{}); ok {
+				last["content"] = append(existingContent, toolResultBlock)
+			} else {
+				last["content"] = []interface{}{toolResultBlock}
+			}
+		} else {
+			result = append(result, map[string]interface{}{
+				"role":    "user",
+				"content": []interface{}{toolResultBlock},
+			})
+		}
+	}
+	return enforceAnthropicMessageAlternation(result)
+}
+
+// enforceAnthropicMessageAlternation merges consecutive same-role messages
+// so that the Anthropic API receives strictly alternating user/assistant turns.
+func enforceAnthropicMessageAlternation(messages []map[string]interface{}) []map[string]interface{} {
+	if len(messages) <= 1 {
+		return messages
+	}
+
+	result := make([]map[string]interface{}, 0, len(messages))
+	for _, msg := range messages {
+		role, _ := msg["role"].(string)
+		role = strings.ToLower(strings.TrimSpace(role))
+
+		if len(result) > 0 {
+			last := result[len(result)-1]
+			lastRole, _ := last["role"].(string)
+			lastRole = strings.ToLower(strings.TrimSpace(lastRole))
+
+			if role == lastRole {
+				// Merge into previous message
+				mergeAnthropicSameRoleMessage(last, msg)
+				continue
+			}
+		}
+		result = append(result, msg)
+	}
+	return result
+}
+
+// mergeAnthropicSameRoleMessage merges content from src into dst when both
+// share the same role. Handles both string and []interface{} content.
+func mergeAnthropicSameRoleMessage(dst, src map[string]interface{}) {
+	srcContent := src["content"]
+	dstContent := dst["content"]
+
+	// Normalize both to []interface{} of content blocks
+	dstBlocks := normalizeToContentBlocks(dstContent)
+	srcBlocks := normalizeToContentBlocks(srcContent)
+
+	dst["content"] = append(dstBlocks, srcBlocks...)
+}
+
+// normalizeToContentBlocks converts content (string or []interface{}) into a
+// uniform []interface{} of content blocks.
+func normalizeToContentBlocks(content interface{}) []interface{} {
+	switch c := content.(type) {
+	case nil:
+		return nil
+	case string:
+		if c == "" {
+			return nil
+		}
+		return []interface{}{map[string]interface{}{"type": "text", "text": c}}
+	case []interface{}:
+		return c
+	default:
+		return []interface{}{map[string]interface{}{"type": "text", "text": fmt.Sprintf("%v", c)}}
+	}
+}
+
+func msgValueString(msg map[string]interface{}, key string) string {
+	if msg == nil {
+		return ""
+	}
+	value, ok := msg[key]
+	if !ok || value == nil {
+		return ""
+	}
+	s, ok := value.(string)
+	if ok {
+		return s
+	}
+	return fmt.Sprintf("%v", value)
+}
+
+func lastAppendedUserRole(messages []map[string]interface{}) map[string]interface{} {
+	if len(messages) == 0 {
+		return nil
+	}
+	last := messages[len(messages)-1]
+	role, _ := last["role"].(string)
+	if !strings.EqualFold(strings.TrimSpace(role), "user") {
+		return nil
+	}
+	return last
 }
 
 func protocolMessageToolCallIDs(message map[string]interface{}) map[string]struct{} {

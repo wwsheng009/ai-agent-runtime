@@ -149,3 +149,55 @@ func TestOpenAIBuildHeaders_MergesCustomHeaders(t *testing.T) {
 		t.Fatalf("expected custom trace header, got %q", got)
 	}
 }
+
+func TestAnthropicIsReasoningModel_ReturnsTrueForClaudeModels(t *testing.T) {
+	a := &AnthropicAdapter{}
+
+	reasoningModels := []string{
+		"claude-opus-4-6",
+		"claude-sonnet-4-6",
+		"claude-opus-4-5",
+		"claude-sonnet-4-5",
+		"claude-opus-4",
+		"claude-sonnet-4",
+		"claude-haiku-4-5",
+		"claude-sonnet-3-7",
+	}
+	for _, model := range reasoningModels {
+		if !a.IsReasoningModel(model) {
+			t.Errorf("expected IsReasoningModel(%q) to be true", model)
+		}
+	}
+
+	nonReasoningModels := []string{
+		"claude-3-5-sonnet",
+		"claude-3-haiku",
+		"gpt-4",
+		"deepseek-v4",
+		"",
+	}
+	for _, model := range nonReasoningModels {
+		if a.IsReasoningModel(model) {
+			t.Errorf("expected IsReasoningModel(%q) to be false", model)
+		}
+	}
+}
+
+func TestAnthropicBuildHeaders_InjectsInterleavedThinkingBetaForOpus46(t *testing.T) {
+	a := &AnthropicAdapter{}
+
+	headers := a.BuildHeaders(AdapterConfig{
+		APIKey: "test-key",
+		Model:  "claude-opus-4-6",
+		RequestBody: map[string]interface{}{
+			"model": "claude-opus-4-6",
+			"thinking": map[string]interface{}{
+				"type": "enabled",
+			},
+		},
+	})
+
+	if got := getHeaderValueCaseInsensitive(headers, "anthropic-beta"); got != anthropicInterleavedThinkingBeta {
+		t.Fatalf("expected anthropic-beta %q for opus 4.6, got %q", anthropicInterleavedThinkingBeta, got)
+	}
+}

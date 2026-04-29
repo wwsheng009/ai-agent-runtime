@@ -7,8 +7,16 @@ import (
 )
 
 func TestBuildAnthropicThinkingFromReasoningEffortRequiresExplicitBudgetConfig(t *testing.T) {
-	if got := buildAnthropicThinkingFromReasoningEffort("high", nil); got != nil {
-		t.Fatalf("expected nil thinking without explicit budget config, got %#v", got)
+	// When no budgets are configured, should default to adaptive thinking
+	adaptive := buildAnthropicThinkingFromReasoningEffort("high", nil)
+	if adaptive == nil {
+		t.Fatal("expected adaptive thinking when no budgets configured")
+	}
+	if adaptive.Type != "adaptive" {
+		t.Fatalf("expected adaptive thinking, got %q", adaptive.Type)
+	}
+	if adaptive.Effort != "high" {
+		t.Fatalf("expected effort high, got %q", adaptive.Effort)
 	}
 
 	thinking := buildAnthropicThinkingFromReasoningEffort("high", map[string]int{

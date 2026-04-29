@@ -1164,9 +1164,31 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 			metadata["tool_replay_sanitized"] = true
 			metadata["tool_replay_dropped_messages"] = dropped
 		}
+	case "anthropic":
+		before := len(messages)
+		messages = sanitizeAnthropicProtocolMessages(messages)
+		if dropped := before - len(messages); dropped > 0 {
+			metadata["tool_replay_sanitized"] = true
+			metadata["tool_replay_dropped_messages"] = dropped
+		}
 	}
 
 	reasoningConfig := resolveRequestReasoningConfig(req.ReasoningEffort, req.Thinking, req.Metadata)
+
+	// Extract stop_sequences and tool_choice from metadata if present
+	var stopSequences []string
+	if ss, ok := metadata["stop_sequences"]; ok {
+		if ssSlice, ok := ss.([]interface{}); ok {
+			for _, s := range ssSlice {
+				if str, ok := s.(string); ok {
+					stopSequences = append(stopSequences, str)
+				}
+			}
+		} else if ssStrings, ok := ss.([]string); ok {
+			stopSequences = ssStrings
+		}
+	}
+	var toolChoice interface{} = metadata["tool_choice"]
 
 	return adapter.RequestConfig{
 		Model:                  resolvedModel,
@@ -1179,6 +1201,8 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 		Thinking:               reasoningConfig.Thinking,
 		Temperature:            req.Temperature,
 		Functions:              tools,
+		ToolChoice:             toolChoice,
+		StopSequences:          stopSequences,
 		Timeout:                c.defaultTimeout,
 		Metadata:               metadata,
 	}

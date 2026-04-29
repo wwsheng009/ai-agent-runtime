@@ -39,8 +39,21 @@ func buildAnthropicThinkingFromReasoningEffort(effort string, budgets map[string
 		return &anthropictypes.Thinking{Type: "disabled"}
 	}
 
+	// Check for adaptive mode (used by Opus 4.6)
+	if t := buildAnthropicAdaptiveThinking(effort, budgets); t != nil {
+		return t
+	}
+
 	budget, ok := resolveConfiguredReasoningEffortBudget(effort, budgets)
 	if !ok || budget <= 0 {
+		// If a valid effort is specified but no budgets are configured at all,
+		// default to adaptive thinking — let the model decide depth.
+		if len(budgets) == 0 {
+			return &anthropictypes.Thinking{
+				Type:   "adaptive",
+				Effort: normalizeRuntimeReasoningEffort(effort),
+			}
+		}
 		return nil
 	}
 
@@ -49,6 +62,31 @@ func buildAnthropicThinkingFromReasoningEffort(effort string, budgets map[string
 		Effort:       normalizeRuntimeReasoningEffort(effort),
 		BudgetTokens: &budget,
 	}
+}
+
+// buildAnthropicAdaptiveThinking returns a Thinking config with type "adaptive"
+// for models that support it (Opus 4.6). Returns nil if adaptive mode is not
+// applicable or no budget is configured.
+func buildAnthropicAdaptiveThinking(effort string, budgets map[string]int) *anthropictypes.Thinking {
+	normalized := normalizeRuntimeReasoningEffort(effort)
+	if normalized == "" {
+		return nil
+	}
+
+	// Only use adaptive if the effort maps to a configured budget (i.e. the
+	// provider has declared reasoning support for this effort level) but the
+	// budget itself is 0 or unspecified — indicating "let the model decide".
+	// In practice this is used for Opus 4.6 which auto-selects thinking depth.
+	for _, key := range []string{normalized, "*", "default"} {
+		if budget, ok := budgets[key]; ok && budget == 0 {
+			return &anthropictypes.Thinking{
+				Type:   "adaptive",
+				Effort: normalized,
+			}
+		}
+	}
+
+	return nil
 }
 
 // resolveConfiguredReasoningEffortBudget only accepts budgets that are

@@ -34,6 +34,8 @@ type RequestConfig struct {
 	Temperature            float64
 	Timeout                time.Duration
 	Functions              interface{} // Function Call 配置（tools, tools 等）
+	ToolChoice             interface{} // Anthropic: {"type":"auto"}, OpenAI: "auto"/"required"/etc.
+	StopSequences          []string
 	Metadata               map[string]interface{}
 }
 

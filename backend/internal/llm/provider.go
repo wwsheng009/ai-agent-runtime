@@ -1457,6 +1457,13 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 			metadata["tool_replay_sanitized"] = true
 			metadata["tool_replay_dropped_messages"] = dropped
 		}
+	case "anthropic":
+		before := len(messages)
+		messages = sanitizeAnthropicProtocolMessages(messages)
+		if dropped := before - len(messages); dropped > 0 {
+			metadata["tool_replay_sanitized"] = true
+			metadata["tool_replay_dropped_messages"] = dropped
+		}
 	}
 
 	// 转换 Tools（从 OpenAI 嵌套格式转换为协议特定格式）
