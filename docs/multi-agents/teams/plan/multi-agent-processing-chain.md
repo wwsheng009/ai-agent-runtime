@@ -179,7 +179,7 @@ Override options:
 
 - Enable skills runtime in `configs/config.yaml`:
   - `skills_runtime.enabled: true`
-  - default `skill_dir` already points to `./docs/skill_runtime/skills`
+  - default `skill_dir` already points to `./.agents/skills`
 - Ensure MCP toolkit is enabled:
   - `configs/mcp.yaml` has `toolkit` enabled and `bin/toolkit-mcp.exe` exists.
 
@@ -187,7 +187,7 @@ Override options:
 
 Run:
 ```
-.\aicli.exe chat --skills-dir docs/skill_runtime/skills --skills-mode prefer --skills-debug --no-interactive --message "smoke test"
+.\aicli.exe chat --skills-dir .\.agents\skills --skills-mode prefer --skills-debug --no-interactive --message "smoke test"
 ```
 
 Expected:

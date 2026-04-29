@@ -1134,7 +1134,7 @@ skills_runtime:
         - X-Role
         - X-Authenticated-Role
     scope_resolver_enabled: ${SKILLS_RUNTIME_SCOPE_RESOLVER_ENABLED:-true}
-    skill_dir: ${SKILLS_RUNTIME_SKILL_DIR:-./docs/skill_runtime/skills}
+    skill_dir: ${SKILLS_RUNTIME_SKILL_DIR:-./.agents/skills}
     tenant_claims:
         - tenant_id
         - tenant

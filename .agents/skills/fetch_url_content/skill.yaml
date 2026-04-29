@@ -1,0 +1,36 @@
+name: fetch_url_content
+description: Fetch content from a URL through the managed fetch MCP tool. The prompt must be an absolute HTTP or HTTPS URL.
+version: 1.0.0
+category: network
+capabilities:
+  - url_fetch
+  - remote_content
+tags:
+  - fetch
+  - http
+  - network
+triggers:
+  - type: keyword
+    values:
+      - fetch url
+      - get url
+      - fetch page
+      - retrieve url
+    weight: 1.0
+tools:
+  - fetch
+workflow:
+  steps:
+    - id: fetch_content
+      name: Fetch URL content
+      tool: fetch
+      args:
+        url: "{{prompt}}"
+        format: "text"
+        timeout: 30
+context:
+  files: []
+  environment: []
+  symbols: []
+permissions:
+  - network

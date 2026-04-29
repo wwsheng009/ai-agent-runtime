@@ -151,7 +151,7 @@ func PrintHelp() {
 		{"/compact [mode]", "手动触发会话压缩"},
 		{"/exit, /quit", "退出程序"},
 		{"/provider [name]", "选择或查看提供商"},
-		{"/model [name]", "选择或查看模型"},
+		{"/model [name]", "查看或切换模型，并调整 thinking_effort"},
 		{"/stream [on|off]", "切换流式输出"},
 		{"/token", "显示 token 使用情况"},
 		{"/history", "显示消息历史"},

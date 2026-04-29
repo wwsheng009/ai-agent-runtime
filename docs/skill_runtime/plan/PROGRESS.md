@@ -178,7 +178,7 @@
      - skill function 复用当前 chat 会话的 provider/model 元数据与最近对话历史，执行链为 `aicli chat -> FunctionRegistry -> SkillFunction -> skill.Executor`
      - 新增 `backend/cmd/aicli/commands/skills_integration_test.go` 覆盖 skill function schema、请求构建与注册流程
 - 43. `aicli chat` 已完成真实 provider + skill function 联调：
-     - 新增默认 smoke skill：`docs/skill_runtime/skills/skill_runtime_smoke/skill.yaml`
+     - 新增默认 smoke skill：`.agents/skills/skill_runtime_smoke/skill.yaml`
      - 2026-03-09 已基于 `nvidia` / `z-ai/glm4.7` 实测跑通 `aicli chat -> skill__skill_runtime_smoke -> skill.Executor -> LLMRuntime -> final answer`
      - 同时修复了对不接受 `system` 角色的上游兼容问题：`backend/internal/skill/executor.go` 现在会在命中相关 400 错误时，把 system prompt 合并进 user 消息后重试
      - 新增 `backend/internal/skill/executor_test.go` 覆盖该兼容回退逻辑
@@ -187,9 +187,9 @@
      - workflow 步骤现在可以把用户输入和前置步骤结果安全地映射到 MCP tool 参数
      - 新增 `backend/internal/skill/executor_test.go` 覆盖模板渲染与单步输出格式化
 - 45. 已补充首批可实际使用的通用 workflow skills：
-     - `docs/skill_runtime/skills/run_shell_command/skill.yaml`
-     - `docs/skill_runtime/skills/fetch_url_content/skill.yaml`
-     - `docs/skill_runtime/skills/view_file_content/skill.yaml`
+     - `.agents/skills/run_shell_command/skill.yaml`
+     - `.agents/skills/fetch_url_content/skill.yaml`
+     - `.agents/skills/view_file_content/skill.yaml`
      - 当前默认 skill pack 数量提升到 4 个（含 smoke skill）
 - 46. `aicli chat` 已基于真实 `nvidia` provider 完成 `run_shell_command` live 验证：
      - 2026-03-09 已实测跑通 `aicli chat -> skill__run_shell_command -> workflow -> toolkit MCP bash`
@@ -198,7 +198,7 @@
      - `skills_runtime.skill_dir` 保留为系统级 skills 目录，仅放平台通用功能
      - 新增 `skills_runtime.extra_skill_dirs`，用于加载外部或业务域 skill pack
      - `aicli chat` 新增 `--skills-dir` 参数，可按会话追加外部 skills 目录
-     - 新增 `docs/skill_runtime/skills/README.md` 明确：ABAP / ERP 等垂直能力不应放入系统 skill 目录
+     - 新增 `.agents/skills/README.md` 明确：ABAP / ERP 等垂直能力不应放入系统 skill 目录
 - 48. 已完成外部目录 live 验证：
      - 2026-03-09 使用临时目录 + `aicli chat --skills-dir <dir>` 实测加载外部 skill
      - 基于 `nvidia` / `z-ai/glm4.7` 跑通 `aicli chat -> skill__external_runtime_smoke -> final answer`
@@ -208,6 +208,10 @@
      - `HotReload` 已支持 `StartMany()`，并能对多目录执行 reload / stats
      - `runtime/bootstrap` 现在会把系统目录与扩展目录一起接入 loader 与 hot reload
      - `skills API` 的 `GetStats` 与 `hot-reload/start` 响应现在会显式返回 `skill_dirs / dirs`
+- 50. 系统 skills 目录已从 `docs/skill_runtime/skills` 迁移到 `.agents/skills`：
+     - `backend/configs/config.yaml` 与 `backend/configs/config.runtime.snapshot.yaml` 的默认 `skill_dir` 已切换为 `./.agents/skills`
+     - `docs/skill_runtime/skills` 旧目录已删除，`.agents/skills` 下的新 system skills 清单已落地
+     - 2026-04-29 已回归验证：`internal/bootstrap` 的 `SKILL.md` 自动加载测试、`internal/runtimeserver` 路径解析测试、`cmd/runtime-server` 与 `cmd/aicli/commands` 相关测试全部通过
 - 50. skills 来源元数据已接入 runtime/API：
      - `skill.Skill` 新增运行时 `source` 字段，包含 `path / dir / layer`
      - loader / hot reload 会为文件加载的 skills 标记 `system` 或 `external`

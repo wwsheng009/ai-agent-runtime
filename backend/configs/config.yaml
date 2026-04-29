@@ -649,6 +649,11 @@ providers:
                 o1-mini: deepseek-v4-flash
                 o1-preview: deepseek-v4-pro
             model_capabilities:
+                deepseek-v4-flash:
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - high
+                        - max
                 deepseek-v4-pro:
                     reasoning_model: true
                     reasoning_efforts:
@@ -691,6 +696,11 @@ providers:
                         image_generation: false
                     max_context_tokens: 270000
                     auto_compact_token_limit: 200000
+                deepseek-ai/DeepSeek-V4-Flash:
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - high
+                        - max
                 deepseek-ai/DeepSeek-V4-Pro:
                     reasoning_model: true
                     reasoning_efforts:
@@ -757,6 +767,58 @@ providers:
             supported_models:
                 - deepseek-v4-flash
                 - deepseek-v4-pro
+            timeout: 300s
+            truncation_adapter: anthropic_local
+        mimo_anthropic:
+            api_key: ${MIMO_ANTHROPIC_API_KEY:-}
+            api_path: /v1/messages
+            base_url: https://token-plan-cn.xiaomimimo.com/anthropic
+            default_model: mimo-v2.5-pro
+            enabled: true
+            forward_url: /v1/messages
+            max_tokens_limit: 8000
+            model_capabilities:
+                '*':
+                    input_modalities:
+                        - text
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - max
+                    reasoning_effort_budgets:
+                        none: 0
+                        low: 0
+                        medium: 0
+                        high: 0
+                        max: 0
+                mimo-v2.5-pro:
+                    input_modalities:
+                        - text
+                        - image
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - max
+                    reasoning_effort_budgets:
+                        none: 0
+                        low: 0
+                        medium: 0
+                        high: 0
+                        max: 0
+            model_mappings:
+                '*': mimo-v2.5-pro
+                mimo-*: $0
+            protocol: anthropic
+            support_types:
+                - anthropic
+            supported_models:
+                - mimo-v2.5-pro
             timeout: 300s
             truncation_adapter: anthropic_local
         gemini_local:
@@ -1104,7 +1166,7 @@ skills_runtime:
         - X-Role
         - X-Authenticated-Role
     scope_resolver_enabled: ${SKILLS_RUNTIME_SCOPE_RESOLVER_ENABLED:-true}
-    skill_dir: ${SKILLS_RUNTIME_SKILL_DIR:-./docs/skill_runtime/skills}
+    skill_dir: ${SKILLS_RUNTIME_SKILL_DIR:-./.agents/skills}
     tenant_claims:
         - tenant_id
         - tenant

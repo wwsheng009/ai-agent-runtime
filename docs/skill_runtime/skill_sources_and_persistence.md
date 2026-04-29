@@ -85,7 +85,7 @@
 ```yaml
 skills_runtime:
   enabled: true
-  skill_dir: ./docs/skill_runtime/skills
+  skill_dir: ./.agents/skills
   extra_skill_dirs:
     - ./custom-skills
     - ./domain-skills
@@ -309,7 +309,7 @@ curl -X POST "http://127.0.0.1:8081/api/skills?persist=true&target_dir=C:/team-s
 curl -X POST http://127.0.0.1:8081/api/runtime/skills/reload \
   -H "Content-Type: application/json" \
   -d '{
-    "dirs": ["./docs/skill_runtime/skills", "./custom-skills"]
+    "dirs": ["./.agents/skills", "./custom-skills"]
   }'
 ```
 

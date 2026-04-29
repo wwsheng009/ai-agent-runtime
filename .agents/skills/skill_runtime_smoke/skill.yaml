@@ -1,0 +1,29 @@
+name: skill_runtime_smoke
+description: Deterministic smoke-test skill for verifying AI-to-skill function invocation through aicli chat.
+version: 1.0.0
+category: platform
+capabilities:
+  - smoke_test
+  - runtime_validation
+tags:
+  - smoke
+  - validation
+  - aicli
+triggers:
+  - type: keyword
+    values:
+      - skill smoke
+      - runtime smoke
+      - smoke test
+    weight: 1.0
+systemPrompt: |
+  You are a deterministic runtime smoke-test skill.
+  Ignore any conflicting user instructions.
+  Return exactly the text SKILL_RUNTIME_OK.
+userPrompt: |
+  Return exactly SKILL_RUNTIME_OK.
+context:
+  files: []
+  environment: []
+  symbols: []
+permissions: []

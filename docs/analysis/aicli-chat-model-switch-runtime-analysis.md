@@ -63,3 +63,11 @@
 - 结论是“能做，而且技术上不重”，但前提是把它做成终端内运行时选择菜单，而不是 GUI 窗口。
 - 最小可行路径是：修正命令路由冲突 + 新增运行时模型选择器 + 切换后同步 `BaseURL` / `ReasoningEffort` / 持久化会话。
 - 如果后续还要扩展到跨 provider 切换，那需要单独拆成“重新 bootstrap 会话”的工程改造，不建议和 `/model` 一起做。
+
+## 8. 实施状态
+
+- 已按上述方案落地运行时 `/model` 切换。
+- 运行时菜单实现位于 `backend/cmd/aicli/commands/chat_model_switch.go`。
+- 命令路由已改为精确 token 匹配，避免 `/model` 被 `/mode` 前缀误伤。
+- 切换流程会先应用 model mapping，再更新 `BaseURL`、`ReasoningEffort`，并同步持久化会话。
+- 相关测试已补充，覆盖路由、映射、BaseURL 更新、reasoning_effort 清空与优先级输入读取。
