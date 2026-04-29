@@ -723,6 +723,15 @@ func normalizeToContentBlocks(content interface{}) []interface{} {
 			return nil
 		}
 		return []interface{}{map[string]interface{}{"type": "text", "text": c}}
+	case []map[string]interface{}:
+		result := make([]interface{}, 0, len(c))
+		for _, item := range c {
+			if item == nil {
+				continue
+			}
+			result = append(result, item)
+		}
+		return result
 	case []interface{}:
 		return c
 	default:

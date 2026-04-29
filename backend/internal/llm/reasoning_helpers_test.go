@@ -609,3 +609,47 @@ func TestEnforceAnthropicMessageAlternation_PreservesAlreadyAlternating(t *testi
 		t.Fatalf("expected 3 messages preserved, got %d", len(result))
 	}
 }
+
+func TestEnforceAnthropicMessageAlternation_PreservesStructuredAssistantBlocks(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "hello"},
+		{
+			"role": "assistant",
+			"content": []map[string]interface{}{
+				{"type": "thinking", "thinking": "plan first"},
+				{"type": "text", "text": "I will inspect the repo."},
+				{"type": "tool_use", "id": "call_1", "name": "execute_shell_command", "input": map[string]interface{}{"command": "pwd"}},
+			},
+		},
+		{"role": "assistant", "content": "follow-up"},
+	}
+
+	result := enforceAnthropicMessageAlternation(messages)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages after merge, got %d", len(result))
+	}
+	if result[1]["role"] != "assistant" {
+		t.Fatalf("expected assistant role, got %v", result[1]["role"])
+	}
+
+	blocks, ok := result[1]["content"].([]interface{})
+	if !ok {
+		t.Fatalf("expected assistant content blocks, got %T %#v", result[1]["content"], result[1]["content"])
+	}
+	if len(blocks) != 4 {
+		t.Fatalf("expected 4 assistant content blocks after merge, got %d", len(blocks))
+	}
+
+	first, ok := blocks[0].(map[string]interface{})
+	if !ok || first["type"] != "thinking" {
+		t.Fatalf("expected first block to remain thinking, got %#v", blocks[0])
+	}
+	third, ok := blocks[2].(map[string]interface{})
+	if !ok || third["type"] != "tool_use" {
+		t.Fatalf("expected tool_use block to remain structured, got %#v", blocks[2])
+	}
+	last, ok := blocks[3].(map[string]interface{})
+	if !ok || last["type"] != "text" || last["text"] != "follow-up" {
+		t.Fatalf("expected appended text block, got %#v", blocks[3])
+	}
+}
