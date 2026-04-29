@@ -87,7 +87,7 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, sys
 		return message, []string{checkpointID}, nil, "", nil
 	}
 	if a == nil || a.llmRuntime == nil {
-		return nil, nil, nil, "", fmt.Errorf("llm runtime is not configured")
+		return a.buildDeterministicSummaryMessage(ctx, req, history, "llm runtime is not configured")
 	}
 
 	maxTokens, reasoningEffort := resolveCompactSummaryRequestSettings(a.llmRuntime, req.Provider, req.Model)
@@ -100,19 +100,24 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, sys
 		Temperature:     0,
 		ReasoningEffort: reasoningEffort,
 		Metadata: map[string]interface{}{
-			"internal_operation": "compact",
-			"compact_mode":       ModeLocal,
-			"compact_phase":      normalizedPhase(req.Phase),
-			"session_id":         strings.TrimSpace(req.SessionID),
+			llm.MetadataKeyInternalOperation: "compact",
+			llm.MetadataKeyDisableTools:      true,
+			llm.MetadataKeyDisableMetaTools:  true,
+			"compact_mode":                   ModeLocal,
+			"compact_phase":                  normalizedPhase(req.Phase),
+			"session_id":                     strings.TrimSpace(req.SessionID),
 		},
 	})
 	if err != nil {
-		return nil, nil, nil, "", err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, nil, nil, "", ctxErr
+		}
+		return a.buildDeterministicSummaryMessage(ctx, req, history, err.Error())
 	}
 
 	summaryText := extractCompactSummaryText(response)
 	if strings.TrimSpace(summaryText) == "" {
-		return nil, nil, nil, "", fmt.Errorf("compact summary response is empty")
+		return a.buildDeterministicSummaryMessage(ctx, req, history, "compact summary response is empty")
 	}
 
 	checkpointID := a.saveSummaryCheckpoint(ctx, req.SessionID, req.TaskID, history, summaryText)
@@ -132,6 +137,87 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, sys
 		return message, nil, usage, usageSource, nil
 	}
 	return message, []string{checkpointID}, usage, usageSource, nil
+}
+
+func (a *LocalAdapter) buildDeterministicSummaryMessage(ctx context.Context, req Request, history []types.Message, reason string) (*types.Message, []string, *types.TokenUsage, string, error) {
+	summaryText := buildDeterministicCompactSummary(history, reason)
+	checkpointID := a.saveSummaryCheckpoint(ctx, req.SessionID, req.TaskID, history, summaryText)
+	message := buildCompactionMessage(summaryText, checkpointID, 0, len(history), req.Phase)
+	if message == nil {
+		return nil, nil, nil, "", fmt.Errorf("failed to build deterministic compaction message")
+	}
+	message.Metadata["summary_source"] = "deterministic_fallback"
+	if strings.TrimSpace(reason) != "" {
+		message.Metadata["summary_fallback_reason"] = summarizeCompactLine(reason, 240)
+	}
+	if checkpointID == "" {
+		return message, nil, nil, "deterministic_fallback", nil
+	}
+	return message, []string{checkpointID}, nil, "deterministic_fallback", nil
+}
+
+func buildDeterministicCompactSummary(history []types.Message, reason string) string {
+	lines := []string{
+		"Fallback summary generated locally because provider compact summary was unavailable.",
+	}
+	if trimmed := strings.TrimSpace(reason); trimmed != "" {
+		lines = append(lines, "Fallback reason: "+summarizeCompactLine(trimmed, 240))
+	}
+
+	userItems := make([]string, 0, 4)
+	assistantItems := make([]string, 0, 5)
+	toolItems := make([]string, 0, 8)
+	for _, message := range history {
+		content := strings.TrimSpace(message.Content)
+		switch message.Role {
+		case "user":
+			if strings.EqualFold(message.Metadata.GetString("context_stage", ""), "compaction") {
+				continue
+			}
+			if content != "" {
+				userItems = appendLimited(userItems, summarizeCompactLine(content, 220), 4)
+			}
+		case "assistant":
+			if len(message.ToolCalls) > 0 {
+				names := make([]string, 0, len(message.ToolCalls))
+				for _, call := range message.ToolCalls {
+					if name := strings.TrimSpace(call.Name); name != "" {
+						names = append(names, name)
+					}
+				}
+				if len(names) > 0 {
+					assistantItems = appendLimited(assistantItems, "requested tools: "+strings.Join(names, ", "), 5)
+				}
+			} else if content != "" {
+				assistantItems = appendLimited(assistantItems, summarizeCompactLine(content, 220), 5)
+			}
+		case "tool":
+			if content != "" {
+				toolItems = appendLimited(toolItems, summarizeCompactLine(content, 240), 8)
+			}
+		}
+	}
+
+	if len(userItems) > 0 {
+		lines = append(lines, "Recent user requests:")
+		for _, item := range userItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(assistantItems) > 0 {
+		lines = append(lines, "Assistant progress:")
+		for _, item := range assistantItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(toolItems) > 0 {
+		lines = append(lines, "Tool outcomes:")
+		for _, item := range toolItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	lines = append(lines, "Next step: continue from the retained latest user request and use checkpoints or artifacts for full raw outputs when needed.")
+	return ensureSummaryHeading(strings.Join(lines, "\n"))
 }
 
 func extractCompactSummaryText(response *llm.LLMResponse) string {
@@ -238,9 +324,31 @@ func ensureSummaryHeading(summary string) string {
 	return localSummaryHeading + "\n" + summary
 }
 
+func appendLimited(items []string, item string, limit int) []string {
+	if strings.TrimSpace(item) == "" || len(items) >= limit {
+		return items
+	}
+	return append(items, item)
+}
+
+func summarizeCompactLine(text string, limit int) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))), " ")
+	if text == "" || limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	if limit <= 3 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-3]) + "..."
+}
+
 func resolveCompactSummaryRequestSettings(runtime *llm.LLMRuntime, providerName, model string) (int, string) {
 	maxTokens := localCompactDefaultMaxTokens
-	reasoningEffort := "none"
+	reasoningEffort := ""
 	if runtime == nil {
 		return maxTokens, reasoningEffort
 	}

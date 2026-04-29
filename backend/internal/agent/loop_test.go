@@ -1427,6 +1427,82 @@ func TestResolvePromptPreflightBudget_UsesModelCapabilityThresholdWhenMoreConser
 	require.Equal(t, 8192, budget.ProviderOutputLimit)
 }
 
+func TestResolvePromptPreflightBudget_DoesNotLetDefaultBudgetOverrideKnownCapability(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "modelscope",
+		DefaultModel:    "deepseek-ai/DeepSeek-V4-Flash",
+	})
+	provider := &SequenceLLMProvider{
+		name: "modelscope",
+		providerCaps: &llm.ModelCapabilities{
+			MaxContextTokens: 270000,
+			MaxOutputTokens:  8192,
+		},
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"*": {
+				MaxContextTokens:      270000,
+				AutoCompactTokenLimit: 200000,
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("modelscope", provider))
+	require.NoError(t, llmRuntime.RegisterProviderAlias("deepseek-ai/DeepSeek-V4-Flash", "modelscope"))
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Provider: "modelscope",
+			Model:    "deepseek-ai/DeepSeek-V4-Flash",
+		},
+		contextMgr: &contextmgr.Manager{
+			Budget: contextmgr.DefaultBudget(),
+		},
+	}
+
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	require.Equal(t, 200000, budget.PromptBudget)
+	require.Equal(t, "model_capability_auto_compact_token_limit", budget.BudgetSource)
+	require.Equal(t, 200000, budget.ModelCapabilityAutoCompactTokenLimit)
+	require.NotContains(t, budget.BudgetCandidates, "default_context_max_prompt_tokens")
+}
+
+func TestResolvePromptPreflightBudget_ExplicitContextBudgetStillConstrainsCapability(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+	})
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"test-model": {
+				MaxContextTokens:      270000,
+				AutoCompactTokenLimit: 200000,
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	require.NoError(t, llmRuntime.RegisterProviderAlias("test-model", "test-provider"))
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Provider: "test-provider",
+			Model:    "test-model",
+			Options: map[string]interface{}{
+				"context_max_prompt_tokens": 12000,
+			},
+		},
+		contextMgr: &contextmgr.Manager{
+			Budget: contextmgr.DefaultBudget(),
+		},
+	}
+
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	require.Equal(t, 12000, budget.PromptBudget)
+	require.Equal(t, "context_max_prompt_tokens", budget.BudgetSource)
+	require.Equal(t, 200000, budget.ModelCapabilityAutoCompactTokenLimit)
+}
+
 func TestResolvePromptPreflightBudget_FallsBackToProviderContextLimitWhenCapabilityMissing(t *testing.T) {
 	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "test-provider",

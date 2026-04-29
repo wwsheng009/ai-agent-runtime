@@ -2,6 +2,7 @@ package compactruntime
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -21,6 +22,8 @@ type compactTestProvider struct {
 	lastRequest       *llm.LLMRequest
 	responseContent   string
 	responseReasoning string
+	responseErr       error
+	allowEmpty        bool
 }
 
 type compactRemoteProvider struct {
@@ -34,8 +37,11 @@ func (p *compactTestProvider) Name() string { return p.name }
 func (p *compactTestProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
 	p.callCount++
 	p.lastRequest = cloneLLMRequest(req)
+	if p.responseErr != nil {
+		return nil, p.responseErr
+	}
 	content := p.responseContent
-	if content == "" && strings.TrimSpace(p.responseReasoning) == "" {
+	if content == "" && strings.TrimSpace(p.responseReasoning) == "" && !p.allowEmpty {
 		content = "User goal preserved. Key tool results preserved. Continue from the latest turns."
 	}
 	return &llm.LLMResponse{
@@ -162,6 +168,125 @@ func TestMaybeCompactUsesModelSpecificCompactSettings(t *testing.T) {
 	require.NotNil(t, provider.lastRequest)
 	assert.Equal(t, 4096, provider.lastRequest.MaxTokens)
 	assert.Equal(t, "none", provider.lastRequest.ReasoningEffort)
+}
+
+func TestMaybeCompactDefaultCompactRequestDisablesToolsAndOmitsReasoningEffort(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "deepseek-v4-flash",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"deepseek-v4-flash": {
+				MaxContextTokens:      272000,
+				AutoCompactTokenLimit: 200,
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("deepseek-v4-flash", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, _, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:          "session-compact-request-shape",
+		Provider:           "provider-a",
+		Model:              "deepseek-v4-flash",
+		History:            compactTestHistory(),
+		KeepRecentMessages: 2,
+		Phase:              PhasePreTurn,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 60
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, provider.lastRequest)
+	assert.Empty(t, provider.lastRequest.ReasoningEffort)
+	assert.Equal(t, "compact", provider.lastRequest.Metadata[llm.MetadataKeyInternalOperation])
+	assert.Equal(t, true, provider.lastRequest.Metadata[llm.MetadataKeyDisableTools])
+	assert.Equal(t, true, provider.lastRequest.Metadata[llm.MetadataKeyDisableMetaTools])
+}
+
+func TestMaybeCompactFallsBackToDeterministicSummaryWhenProviderSummaryEmpty(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name:       "provider-a",
+		allowEmpty: true,
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {
+				MaxContextTokens:      272000,
+				AutoCompactTokenLimit: 200,
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, status, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:          "session-compact-fallback-empty",
+		Provider:           "provider-a",
+		Model:              "gpt-5",
+		History:            compactTestHistory(),
+		KeepRecentMessages: 2,
+		Phase:              PhasePreTurn,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 60
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotEmpty(t, result.ReplacementHistory)
+	require.Equal(t, "", status.Reason)
+	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
+	require.Equal(t, "compaction", summary.Metadata.GetString("context_stage", ""))
+	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
+	require.Contains(t, summary.Content, "Fallback summary generated locally")
+	require.Equal(t, "deterministic_fallback", result.UsageSource)
+}
+
+func TestMaybeCompactFallsBackToDeterministicSummaryWhenProviderErrors(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name:        "provider-a",
+		responseErr: errors.New("upstream compact failed"),
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {
+				MaxContextTokens:      272000,
+				AutoCompactTokenLimit: 200,
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, _, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:          "session-compact-fallback-error",
+		Provider:           "provider-a",
+		Model:              "gpt-5",
+		History:            compactTestHistory(),
+		KeepRecentMessages: 2,
+		Phase:              PhasePreTurn,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 60
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
+	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
+	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "upstream compact failed")
 }
 
 func TestMaybeCompactFallsBackToWildcardAndSkipsBelowLimit(t *testing.T) {

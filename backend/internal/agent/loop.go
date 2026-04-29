@@ -2508,20 +2508,44 @@ func buildPromptPreflightFailure(code string, messages []types.Message, promptTo
 
 func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remainingBudget int) promptPreflightBudget {
 	budget := promptPreflightBudget{}
-	budget.addCandidate(
-		"default_context_max_prompt_tokens",
-		contextmgr.DefaultBudget().MaxPromptTokens,
-		"contextmgr.DefaultBudget().MaxPromptTokens",
-	)
 
+	managerBudget := 0
+	hasManagerBudget := false
+	explicitContextBudget := hasPromptPreflightContextBudgetOverride(agent)
 	if agent != nil {
 		if manager := agent.GetContextManager(); manager != nil && manager.Budget.MaxPromptTokens > 0 {
+			managerBudget = manager.Budget.MaxPromptTokens
+			hasManagerBudget = true
+		}
+	}
+	if hasManagerBudget && explicitContextBudget {
+		budget.addCandidate(
+			"context_max_prompt_tokens",
+			managerBudget,
+			"context manager budget max_prompt_tokens",
+		)
+	}
+
+	hasResolvedPromptLimit := budget.PromptBudget > 0
+	if hasManagerBudget && explicitContextBudget {
+		hasResolvedPromptLimit = true
+	}
+
+	defaultPromptBudget := contextmgr.DefaultBudget().MaxPromptTokens
+	addFallbackPromptBudget := func() {
+		if hasManagerBudget {
 			budget.addCandidate(
 				"context_max_prompt_tokens",
-				manager.Budget.MaxPromptTokens,
-				"context manager budget max_prompt_tokens",
+				managerBudget,
+				"context manager budget max_prompt_tokens fallback",
 			)
+			return
 		}
+		budget.addCandidate(
+			"default_context_max_prompt_tokens",
+			defaultPromptBudget,
+			"contextmgr.DefaultBudget().MaxPromptTokens fallback",
+		)
 	}
 
 	resolvedProvider, resolvedModel := resolvePromptPreflightProviderModel(runtime, agent)
@@ -2556,6 +2580,7 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remaini
 					value,
 					"provider/model capability auto_compact_token_limit",
 				)
+				hasResolvedPromptLimit = true
 			} else if capability.MaxContextTokens > 0 {
 				ratio := capability.AutoCompactRatio
 				if ratio <= 0 || ratio >= 1 {
@@ -2571,6 +2596,7 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remaini
 					value,
 					fmt.Sprintf("floor(model capability max_context_tokens * %.2f)", ratio),
 				)
+				hasResolvedPromptLimit = true
 			}
 		} else if budget.ProviderContextLimit > 0 {
 			value := int(math.Floor(float64(budget.ProviderContextLimit) * defaultPromptPreflightAutoCompactRatio))
@@ -2582,7 +2608,12 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remaini
 				value,
 				fmt.Sprintf("floor(provider max_context_tokens * %.2f)", defaultPromptPreflightAutoCompactRatio),
 			)
+			hasResolvedPromptLimit = true
 		}
+	}
+
+	if !hasResolvedPromptLimit {
+		addFallbackPromptBudget()
 	}
 
 	if remainingBudget > 0 {
@@ -2594,6 +2625,19 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remaini
 	}
 
 	return budget
+}
+
+func hasPromptPreflightContextBudgetOverride(agent *Agent) bool {
+	if agent == nil || agent.config == nil || len(agent.config.Options) == 0 {
+		return false
+	}
+	if _, ok := contextOptionInt(agent.config.Options, "context_max_prompt_tokens"); ok {
+		return true
+	}
+	if profile, ok := agent.config.Options["context_profile"].(string); ok && strings.TrimSpace(profile) != "" {
+		return true
+	}
+	return false
 }
 
 func resolvePromptPreflightProviderModel(runtime *llm.LLMRuntime, agent *Agent) (string, string) {

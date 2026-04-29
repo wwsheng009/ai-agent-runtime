@@ -638,6 +638,15 @@ func GetGlobalConfig() *Config {
 	return globalConfig
 }
 
+// SetGlobalConfig replaces the process-wide global config reference.
+func SetGlobalConfig(cfg *Config) {
+	if cfg == nil {
+		globalConfig = &Config{}
+		return
+	}
+	globalConfig = cfg
+}
+
 // expandEnvVars replaces ${VAR} and ${VAR:-default} patterns with environment variable values.
 func expandEnvVars(content string) string {
 	re := regexp.MustCompile(`\$\{([^}:]+)(:-([^}]*))?\}`)

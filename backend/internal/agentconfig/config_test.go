@@ -3,6 +3,7 @@ package agentconfig
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -46,5 +47,44 @@ providers:
 	}
 	if got := both.GetMaxTokensLimit(); got != 12000 {
 		t.Fatalf("both max tokens = %d, want 12000", got)
+	}
+}
+
+func TestInitGlobalConfigIncludesOpenAIImageProviderForImageGenerations(t *testing.T) {
+	t.Setenv("CODEX_04_API_KEYS", "shared-codex-key")
+	t.Setenv("CODEX_04_BASE_URL", "https://shared-codex.example.com")
+
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "..", ".."))
+	configPath := filepath.Join(repoRoot, "configs", "config.yaml")
+
+	previous := globalConfig
+	t.Cleanup(func() {
+		globalConfig = previous
+	})
+
+	cfg, err := InitGlobalConfig(configPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig failed: %v", err)
+	}
+
+	selection, err := SelectImagesGenerationsProvider(cfg, ImagesGenerationsHint{Model: "gpt-image-2"})
+	if err != nil {
+		t.Fatalf("SelectImagesGenerationsProvider failed: %v", err)
+	}
+	if selection.ProviderName != "OPENAI_IMAGE" {
+		t.Fatalf("expected OPENAI_IMAGE provider, got %+v", selection)
+	}
+	if selection.Model != "gpt-image-2" {
+		t.Fatalf("expected gpt-image-2 model, got %+v", selection)
+	}
+	if selection.Provider.BaseURL != "https://shared-codex.example.com" {
+		t.Fatalf("expected shared CODEX_04 base URL, got %q", selection.Provider.BaseURL)
+	}
+	if got := selection.Provider.GetAPIKey(); got != "shared-codex-key" {
+		t.Fatalf("expected shared CODEX_04 API key, got %q", got)
 	}
 }
