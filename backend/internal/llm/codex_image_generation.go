@@ -9,14 +9,15 @@ import (
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/imagegen"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const (
 	MetadataKeyGeneratedImageOutputDir = "generated_image_output_dir"
 	MetadataKeyGeneratedImages         = "generated_images"
-	codexImageGenerationToolType       = "image_generation"
-	codexImageGenerationCallType       = "image_generation_call"
+	codexImageGenerationToolType       = toolnames.CodexNativeImageGenerationToolType
+	codexImageGenerationCallType       = toolnames.CodexNativeImageGenerationCallType
 	defaultGeneratedImageFormat        = "png"
 )
 
@@ -33,7 +34,9 @@ func BuildToolDefinitionsForRequest(
 	modelCapabilities map[string]agentconfig.ModelCapabilitySpec,
 	includeMeta bool,
 ) interface{} {
-	if len(tools) == 0 && !CodexImageGenerationEnabled(protocol, model, modelCapabilities) && !includeMeta {
+	nativeImageGenerationEnabled := CodexImageGenerationEnabled(protocol, model, modelCapabilities)
+	tools = filterOpenAIImageGenerateToolForCodexNative(tools, nativeImageGenerationEnabled)
+	if len(tools) == 0 && !nativeImageGenerationEnabled && !includeMeta {
 		return nil
 	}
 
@@ -49,7 +52,7 @@ func BuildToolDefinitionsForRequest(
 		}
 		normalized = append(normalized, definition)
 	}
-	if CodexImageGenerationEnabled(protocol, model, modelCapabilities) {
+	if nativeImageGenerationEnabled {
 		normalized = append(normalized, map[string]interface{}{
 			"type":          codexImageGenerationToolType,
 			"output_format": defaultGeneratedImageFormat,
@@ -57,6 +60,20 @@ func BuildToolDefinitionsForRequest(
 	}
 
 	return buildToolDefinitionsForProtocol(normalized, protocol, includeMeta)
+}
+
+func filterOpenAIImageGenerateToolForCodexNative(tools []types.ToolDefinition, nativeImageGenerationEnabled bool) []types.ToolDefinition {
+	if !nativeImageGenerationEnabled || len(tools) == 0 {
+		return tools
+	}
+	filtered := make([]types.ToolDefinition, 0, len(tools))
+	for _, tool := range tools {
+		if toolnames.IsOpenAIImageGenerateToolName(tool.Name) {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
 }
 
 // CodexImageGenerationEnabled reports whether the configured provider/model pair

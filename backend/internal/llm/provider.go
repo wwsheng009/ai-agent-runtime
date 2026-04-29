@@ -404,6 +404,9 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 		ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
 		ResponseBodyRaw:     append([]byte(nil), body...),
 	})
+	if err := validateNonStreamingChatResponseBody(p.config.Type, body); err != nil {
+		return nil, err
+	}
 
 	// 使用 adapter 处理响应
 	callbacks := adapter.StreamCallbacks{
@@ -769,6 +772,8 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		if err == nil {
 			if chatResp == nil {
 				err = fmt.Errorf("empty provider response")
+			} else if choicesErr := newEmptyProviderChoicesError(chatResp); choicesErr != nil {
+				err = choicesErr
 			} else if reasoningErr := newReasoningOnlyEmptyReplyError(chatResp); reasoningErr != nil {
 				err = reasoningErr
 			} else {
@@ -794,6 +799,65 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	}
 
 	return nil, markRetryExhausted("provider call failed after retries", policy.MaxAttempts, lastErr)
+}
+
+type emptyProviderChoicesError struct {
+	model string
+}
+
+func (e *emptyProviderChoicesError) Error() string {
+	if e == nil {
+		return ""
+	}
+	parts := []string{"empty_provider_choices"}
+	if model := strings.TrimSpace(e.model); model != "" {
+		parts = append(parts, fmt.Sprintf("model=%s", model))
+	}
+	return strings.Join(parts, ": ")
+}
+
+func (e *emptyProviderChoicesError) RetryErrorCode() string {
+	return "empty_provider_choices"
+}
+
+func newEmptyProviderChoicesError(resp *ChatResponse) error {
+	if resp == nil || len(resp.Choices) > 0 {
+		return nil
+	}
+	return &emptyProviderChoicesError{model: resp.Model}
+}
+
+func validateNonStreamingChatResponseBody(protocol string, body []byte) error {
+	if !strings.EqualFold(strings.TrimSpace(protocol), "openai") {
+		return nil
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil
+	}
+	rawChoices, exists := payload["choices"]
+	if !exists {
+		return &emptyProviderChoicesError{}
+	}
+	if len(rawChoices) == 0 || strings.EqualFold(strings.TrimSpace(string(rawChoices)), "null") {
+		return &emptyProviderChoicesError{model: stringFromRawJSON(payload["model"])}
+	}
+	var choices []json.RawMessage
+	if err := json.Unmarshal(rawChoices, &choices); err == nil && len(choices) == 0 {
+		return &emptyProviderChoicesError{model: stringFromRawJSON(payload["model"])}
+	}
+	return nil
+}
+
+func stringFromRawJSON(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
 }
 
 type reasoningOnlyEmptyReplyError struct {
@@ -979,30 +1043,30 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				reportStreamChunk(attemptCtx, StreamChunk{
 					Type:    EventTypeReasoning,
 					Content: reasoning,
-				Metadata: map[string]interface{}{
+					Metadata: map[string]interface{}{
+						"provider": p.config.Type,
+						"model":    adapterRequest.Model,
+					},
+				})
+			},
+			OnImage: func(metadata map[string]interface{}) {
+				if len(metadata) == 0 {
+					return
+				}
+				emissionState.markImage(metadata)
+				chunkMetadata := map[string]interface{}{
 					"provider": p.config.Type,
 					"model":    adapterRequest.Model,
-				},
-			})
-		},
-		OnImage: func(metadata map[string]interface{}) {
-			if len(metadata) == 0 {
-				return
-			}
-			emissionState.markImage(metadata)
-			chunkMetadata := map[string]interface{}{
-				"provider": p.config.Type,
-				"model":    adapterRequest.Model,
-			}
-			for key, value := range metadata {
-				chunkMetadata[key] = value
-			}
-			reportStreamChunk(attemptCtx, StreamChunk{
-				Type:     EventTypeImage,
-				Metadata: chunkMetadata,
-			})
-		},
-	}
+				}
+				for key, value := range metadata {
+					chunkMetadata[key] = value
+				}
+				reportStreamChunk(attemptCtx, StreamChunk{
+					Type:     EventTypeImage,
+					Metadata: chunkMetadata,
+				})
+			},
+		}
 
 		var responseBuffer bytes.Buffer
 		assistantMsg, handleErr := p.adapter.HandleResponse(true, io.TeeReader(resp.Body, &responseBuffer), callbacks)
@@ -1396,7 +1460,10 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 	}
 
 	// 转换 Tools（从 OpenAI 嵌套格式转换为协议特定格式）
-	tools := p.convertTools(request.Tools, p.config.Type, resolvedModel)
+	var tools interface{}
+	if !metadataDisablesTools(metadata) {
+		tools = p.convertTools(request.Tools, p.config.Type, resolvedModel, !metadataDisablesMetaTools(metadata))
+	}
 
 	reasoningConfig := resolveRequestReasoningConfig(request.ReasoningEffort, request.Thinking, request.Metadata)
 	reasoningModel := request.ReasoningModel
@@ -1418,7 +1485,7 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 }
 
 // convertTools 转换工具定义（从 OpenAI 嵌套格式转换为协议特定格式）
-func (p *ProviderWrapper) convertTools(tools []Tool, protocol string, model string) interface{} {
+func (p *ProviderWrapper) convertTools(tools []Tool, protocol string, model string, includeMeta bool) interface{} {
 	normalized := make([]types.ToolDefinition, 0, len(tools))
 	for _, tool := range tools {
 		normalized = append(normalized, types.ToolDefinition{
@@ -1432,7 +1499,7 @@ func (p *ProviderWrapper) convertTools(tools []Tool, protocol string, model stri
 		protocol,
 		model,
 		p.config.ModelCapabilities,
-		true,
+		includeMeta,
 	)
 }
 

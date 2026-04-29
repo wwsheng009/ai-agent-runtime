@@ -51,7 +51,7 @@ func TestGatewayClient_ConvertTools_CodexIncludesRuntimeTools(t *testing.T) {
 		{Name: "bash", Description: "执行 Shell 命令", Parameters: map[string]interface{}{"type": "object"}},
 	}
 
-	got := client.convertTools(tools, "codex", "", nil)
+	got := client.convertTools(tools, "codex", "", nil, true)
 	if got == nil {
 		t.Fatal("expected tools, got nil")
 	}
@@ -87,7 +87,7 @@ func TestGatewayClient_ConvertTools_CodexAddsImageGenerationWhenModelCapabilityA
 				ImageGeneration: true,
 			},
 		},
-	})
+	}, true)
 	if got == nil {
 		t.Fatal("expected tools, got nil")
 	}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -59,6 +60,79 @@ func TestBuildToolDefinitionsForRequest_DoesNotAddImageGenerationWithoutTextImag
 	}, false)
 
 	require.Nil(t, got)
+}
+
+func TestBuildToolDefinitionsForRequest_CodexNativeImageHidesOpenAIImageGenerateTool(t *testing.T) {
+	defs := []types.ToolDefinition{
+		{
+			Name:        "bash",
+			Description: "run shell",
+			Parameters:  map[string]interface{}{"type": "object"},
+		},
+		{
+			Name:        toolnames.OpenAIImageGenerateToolName,
+			Description: "generate image",
+			Parameters:  map[string]interface{}{"type": "object"},
+		},
+		{
+			Name:        toolnames.LegacyImageGenerateToolName,
+			Description: "legacy generate image",
+			Parameters:  map[string]interface{}{"type": "object"},
+		},
+	}
+
+	got := BuildToolDefinitionsForRequest(defs, "codex", "gpt-5.4", map[string]agentconfig.ModelCapabilitySpec{
+		"gpt-5.4": {
+			InputModalities: []string{"text", "image"},
+			NativeTools: agentconfig.NativeToolCapabilities{
+				ImageGeneration: true,
+			},
+		},
+	}, false)
+
+	toolList, ok := got.([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, toolList, 2)
+
+	var sawBash bool
+	var sawNativeImageGeneration bool
+	for _, tool := range toolList {
+		require.NotEqual(t, toolnames.OpenAIImageGenerateToolName, tool["name"])
+		require.NotEqual(t, toolnames.LegacyImageGenerateToolName, tool["name"])
+		if tool["name"] == "bash" {
+			sawBash = true
+		}
+		if tool["type"] == "image_generation" {
+			sawNativeImageGeneration = true
+		}
+	}
+
+	require.True(t, sawBash)
+	require.True(t, sawNativeImageGeneration)
+}
+
+func TestBuildToolDefinitionsForRequest_KeepsOpenAIImageGenerateToolWhenCodexNativeUnavailable(t *testing.T) {
+	defs := []types.ToolDefinition{
+		{
+			Name:        toolnames.OpenAIImageGenerateToolName,
+			Description: "generate image",
+			Parameters:  map[string]interface{}{"type": "object"},
+		},
+	}
+
+	got := BuildToolDefinitionsForRequest(defs, "codex", "gpt-5.4", map[string]agentconfig.ModelCapabilitySpec{
+		"gpt-5.4": {
+			InputModalities: []string{"text"},
+			NativeTools: agentconfig.NativeToolCapabilities{
+				ImageGeneration: true,
+			},
+		},
+	}, false)
+
+	toolList, ok := got.([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, toolList, 1)
+	require.Equal(t, toolnames.OpenAIImageGenerateToolName, toolList[0]["name"])
 }
 
 func TestProcessCodexAssistantImageGeneration_SavesImagesAndSanitizesReplayMetadata(t *testing.T) {

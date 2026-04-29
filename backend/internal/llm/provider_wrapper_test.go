@@ -57,6 +57,69 @@ func TestNewProvider_WorksWithUnifiedRuntimeInterface(t *testing.T) {
 	assert.NotEmpty(t, catalogProvider.SupportedModels())
 }
 
+func TestProviderWrapper_InternalCompactRequestDisablesTools(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"compact summary"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 0,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "summarize",
+		}},
+		Tools: []types.ToolDefinition{{
+			Name:        "list_mcp_resources",
+			Description: "List resources",
+			Parameters:  map[string]interface{}{"type": "object"},
+		}},
+		Metadata: map[string]interface{}{
+			MetadataKeyInternalOperation: "compact",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "compact summary", resp.Content)
+	require.NotContains(t, capturedBody, "tools")
+	require.NotContains(t, capturedBody, "tool_choice")
+}
+
+func TestProviderWrapper_CallRejectsEmptyChoices(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-empty","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":null,"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 0,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.Error(t, err)
+	require.Nil(t, resp)
+	require.Contains(t, err.Error(), "empty_provider_choices")
+}
+
 func TestNewProvider_UsesConfiguredAPIPathOverride(t *testing.T) {
 	var capturedPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

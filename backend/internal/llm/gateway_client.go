@@ -1136,7 +1136,16 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 	}
 
 	// 转换 Tools（根据协议生成正确格式）
-	tools := c.convertTools(req.Tools, protocol, resolvedModel, selectedProviderModelCapabilities(selected))
+	var tools interface{}
+	if !metadataDisablesTools(metadata) {
+		tools = c.convertTools(
+			req.Tools,
+			protocol,
+			resolvedModel,
+			selectedProviderModelCapabilities(selected),
+			!metadataDisablesMetaTools(metadata),
+		)
+	}
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "codex":
 		before := len(messages)
@@ -1182,8 +1191,9 @@ func (c *GatewayClient) convertTools(
 	protocol string,
 	model string,
 	modelCapabilities map[string]agentconfig.ModelCapabilitySpec,
+	includeMeta bool,
 ) interface{} {
-	return BuildToolDefinitionsForRequest(tools, protocol, model, modelCapabilities, true)
+	return BuildToolDefinitionsForRequest(tools, protocol, model, modelCapabilities, includeMeta)
 }
 
 // convertToolCalls 转换 tool_calls 格式

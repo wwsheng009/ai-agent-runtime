@@ -7,7 +7,6 @@ import (
 )
 
 const defaultCompactMaxTokens = 2048
-const defaultCompactReasoningEffort = "none"
 
 // ModelCapabilityResolver allows runtime providers to expose provider/model
 // capability metadata without forcing callers to know the concrete provider type.
@@ -82,9 +81,6 @@ func CompactSummarySettings(capability agentconfig.ModelCapabilitySpec) (maxToke
 	}
 
 	reasoningEffort = strings.TrimSpace(capability.CompactReasoningEffort)
-	if reasoningEffort == "" {
-		reasoningEffort = defaultCompactReasoningEffort
-	}
 	return maxTokens, reasoningEffort
 }
 
