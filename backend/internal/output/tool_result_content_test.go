@@ -72,6 +72,44 @@ func TestRenderToolResultContentForModel_PreservesStructuredEnvelopeSummary(t *t
 	}
 }
 
+func TestRenderToolResultContentForModel_TaskOutputPreservesRawStructuredOutput(t *testing.T) {
+	envelope := &Envelope{
+		ToolName: "task_output",
+		Summary:  "Parsed JSON object with 5 keys.",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+		},
+	}
+	content := map[string]interface{}{
+		"job_id":      "job_ref_42",
+		"next_offset": 128,
+		"output":      "line 1\nline 2",
+		"status":      "completed",
+	}
+
+	got := RenderToolResultContentForModel(content, "", envelope)
+	want := RenderFullToolResultContent(content, "")
+
+	if got != want {
+		t.Fatalf("expected task_output to preserve raw structured output, got %q", got)
+	}
+	if got == envelope.Summary {
+		t.Fatalf("expected task_output to bypass envelope summary, got %q", got)
+	}
+	if !strings.Contains(got, `"job_id": "job_ref_42"`) {
+		t.Fatalf("expected job_id in raw output, got %q", got)
+	}
+	if !strings.Contains(got, `"next_offset": 128`) {
+		t.Fatalf("expected next_offset in raw output, got %q", got)
+	}
+	if !strings.Contains(got, `"output": "line 1\nline 2"`) {
+		t.Fatalf("expected output payload in raw output, got %q", got)
+	}
+	if !strings.Contains(got, `"status": "completed"`) {
+		t.Fatalf("expected status in raw output, got %q", got)
+	}
+}
+
 func TestRenderToolResultContentForModel_PreservesFullTextWhenExplicitlyMarkedText(t *testing.T) {
 	envelope := &Envelope{
 		Summary: "line 1",
