@@ -56,6 +56,26 @@ const runtimeModelsCatalog: RuntimeModelsResponse = {
   count: 3,
 };
 
+const overlappingRuntimeModelsCatalog: RuntimeModelsResponse = {
+  default_provider: "CODEX_04",
+  default_model: "gpt-5.4",
+  providers: [
+    {
+      name: "CODEX_04",
+      default_model: "gpt-5.4",
+      models: ["gpt-5.2-codex", "gpt-5.4", "gpt-5.4-mini"],
+      model_count: 3,
+    },
+    {
+      name: "codex_fox",
+      default_model: "gpt-5.2-codex",
+      models: ["gpt-5.2-codex", "gpt-5.4", "gpt-5.4-mini"],
+      model_count: 3,
+    },
+  ],
+  count: 6,
+};
+
 describe("runtime model catalog helpers", () => {
   it("resolves the provider from a stored model alias", () => {
     expect(findProviderForModel(runtimeModelsCatalog.providers, "gpt-4.1")).toBe(
@@ -87,6 +107,18 @@ describe("runtime model catalog helpers", () => {
     ).toEqual({
       provider: "anthropic",
       model: "claude-3-7-sonnet",
+    });
+  });
+
+  it("keeps the preferred provider when the selected model is shared", () => {
+    expect(
+      resolveRuntimeModelSelection(overlappingRuntimeModelsCatalog, {
+        provider: "codex_fox",
+        model: "gpt-5.4-mini",
+      }),
+    ).toEqual({
+      provider: "codex_fox",
+      model: "gpt-5.4-mini",
     });
   });
 

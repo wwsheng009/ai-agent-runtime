@@ -101,6 +101,21 @@ function getProviderModels(
   );
 }
 
+function providerSupportsModel(
+  provider: RuntimeModelProviderRecord | null | undefined,
+  modelName: string,
+) {
+  const normalizedModelName = normalizeSelectionValue(modelName);
+  if (!provider || !normalizedModelName) {
+    return false;
+  }
+
+  return (
+    getProviderModels(provider).includes(normalizedModelName) ||
+    normalizeSelectionValue(provider.default_model) === normalizedModelName
+  );
+}
+
 export function findProviderForModel(
   providers: RuntimeModelProviderRecord[],
   modelName: string,
@@ -164,12 +179,24 @@ export function resolveRuntimeModelSelection(
   const preferredModel = normalizeSelectionValue(preferredSelection?.model);
   const defaultProvider = normalizeSelectionValue(catalog.default_provider);
   const defaultModel = normalizeSelectionValue(catalog.default_model);
+  const preferredProviderRecord = findRuntimeProviderRecord(
+    catalog.providers,
+    preferredProvider,
+  );
 
-  let providerName = findProviderForModel(catalog.providers, preferredModel);
+  let providerName =
+    preferredProviderRecord &&
+    (!preferredModel ||
+      providerSupportsModel(preferredProviderRecord, preferredModel))
+      ? preferredProvider
+      : "";
+  if (!providerName) {
+    providerName = findProviderForModel(catalog.providers, preferredModel);
+  }
   if (
     !providerName &&
     preferredProvider &&
-    findRuntimeProviderRecord(catalog.providers, preferredProvider)
+    preferredProviderRecord
   ) {
     providerName = preferredProvider;
   }
@@ -276,11 +303,12 @@ export function useRuntimeModelCatalog() {
     setSelection((currentSelection) =>
       resolveRuntimeModelSelection(runtimeModels, {
         provider: providerName,
-        model:
-          findProviderForModel(providerRecords, currentSelection.model) ===
-          providerName
-            ? currentSelection.model
-            : "",
+        model: providerSupportsModel(
+          findRuntimeProviderRecord(providerRecords, providerName),
+          currentSelection.model,
+        )
+          ? currentSelection.model
+          : "",
       }),
     );
   }
