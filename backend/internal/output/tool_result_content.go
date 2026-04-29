@@ -43,6 +43,9 @@ func RenderToolResultContentForModel(content interface{}, toolErr string, envelo
 	if isExternalMCPToolResult(envelope) {
 		return RenderFullToolResultContent(content, toolErr)
 	}
+	if isTaskOutputToolResult(envelope) {
+		return renderToolTextForModelHistory(content, toolErr, envelope)
+	}
 	if kind := toolResultKindForModel(content, envelope); kind != "" {
 		switch kind {
 		case toolresult.KindText, toolresult.KindEmpty:
@@ -65,6 +68,13 @@ func RenderToolResultContentForModel(content interface{}, toolErr string, envelo
 		}
 	}
 	return RenderFullToolResultContent(content, toolErr)
+}
+
+func isTaskOutputToolResult(envelope *Envelope) bool {
+	if envelope == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(envelope.ToolName), "task_output")
 }
 
 func toolResultKindForModel(content interface{}, envelope *Envelope) string {
