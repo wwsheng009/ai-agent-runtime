@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -33,13 +33,15 @@ type skillExecutor interface {
 }
 
 type skillsRuntimeBinding struct {
-	manager        *runtimebootstrap.Manager
-	count          int
-	exposureTopK   int
-	exposureMode   string
-	exposureRouter *runtimeskill.Router
-	catalog        *aicliFunctionCatalog
-	skillFunctions map[string]*SkillFunction
+	manager              *runtimebootstrap.Manager
+	count                int
+	exposureTopK         int
+	exposureMode         string
+	exposureRouter       *runtimeskill.Router
+	catalog              *aicliFunctionCatalog
+	skillFunctions       map[string]*SkillFunction
+	skillFunctionsByPath map[string]*SkillFunction
+	skillNameCounts      map[string]int
 }
 
 type skillExposureCandidate struct {
@@ -127,14 +129,15 @@ func (b *skillsRuntimeBinding) AnalyzeSkillExposure(session *ChatSession, prompt
 			if result == nil || result.Skill == nil {
 				continue
 			}
+			functionName := b.functionNameForSkill(result.Skill)
 			details.Candidates = append(details.Candidates, skillExposureCandidate{
-				FunctionName: buildSkillFunctionName(result.Skill.Name),
+				FunctionName: functionName,
 				SkillName:    result.Skill.Name,
 				Score:        result.Score,
 				MatchedBy:    result.MatchedBy,
 				Details:      result.Details,
 			})
-			addFunction(buildSkillFunctionName(result.Skill.Name))
+			addFunction(functionName)
 		}
 	}
 
@@ -191,9 +194,87 @@ func (b *skillsRuntimeBinding) findExplicitSkillMentions(prompt string) []string
 	return uniqueStrings(matches)
 }
 
+func (b *skillsRuntimeBinding) functionNameForSkill(skill *runtimeskill.Skill) string {
+	if b == nil || skill == nil {
+		return ""
+	}
+
+	if sourcePath := skillSourcePath(skill); sourcePath != "" {
+		if fn := b.skillFunctionByPath(sourcePath); fn != nil {
+			return fn.Name()
+		}
+	}
+
+	skillName := strings.TrimSpace(skill.Name)
+	if skillName == "" {
+		return ""
+	}
+	if fn := b.skillFunctionByName(skillName); fn != nil {
+		return fn.Name()
+	}
+	return buildSkillFunctionName(skillName)
+}
+
+func (b *skillsRuntimeBinding) skillFunctionByPath(path string) *SkillFunction {
+	if b == nil {
+		return nil
+	}
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" || path == "." {
+		return nil
+	}
+	if fn, ok := b.skillFunctionsByPath[path]; ok {
+		return fn
+	}
+	return nil
+}
+
+func (b *skillsRuntimeBinding) skillFunctionByName(skillName string) *SkillFunction {
+	if b == nil {
+		return nil
+	}
+	skillName = strings.TrimSpace(skillName)
+	if skillName == "" {
+		return nil
+	}
+
+	var candidate *SkillFunction
+	for _, fn := range b.skillFunctions {
+		if fn == nil {
+			continue
+		}
+		currentName := ""
+		if fn.summary != nil {
+			currentName = strings.TrimSpace(fn.summary.Name)
+		} else if fn.skill != nil {
+			currentName = strings.TrimSpace(fn.skill.Name)
+		}
+		if !strings.EqualFold(currentName, skillName) {
+			continue
+		}
+		if candidate != nil {
+			return nil
+		}
+		candidate = fn
+	}
+	return candidate
+}
+
+func skillSourcePath(skill *runtimeskill.Skill) string {
+	if skill == nil || skill.Source == nil {
+		return ""
+	}
+	path := filepath.Clean(strings.TrimSpace(skill.Source.Path))
+	if path == "" || path == "." {
+		return ""
+	}
+	return path
+}
+
 type SkillFunction struct {
 	summary          *runtimeskill.SkillSummary
 	functionName     string
+	sourcePath       string
 	skill            *runtimeskill.Skill
 	skillResolver    func() (*runtimeskill.Skill, error)
 	executor         skillExecutor
@@ -439,11 +520,30 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 	}
 
 	sort.Slice(summaries, func(i, j int) bool {
+		leftPath := ""
+		rightPath := ""
+		if summaries[i].Source != nil {
+			leftPath = strings.TrimSpace(summaries[i].Source.Path)
+		}
+		if summaries[j].Source != nil {
+			rightPath = strings.TrimSpace(summaries[j].Source.Path)
+		}
+		if summaries[i].Name == summaries[j].Name {
+			return leftPath < rightPath
+		}
 		return summaries[i].Name < summaries[j].Name
 	})
 
 	executor := runtimeskill.NewExecutor(manager.Registry(), mcpRuntime, manager.LLMRuntime())
+	skillNameCounts := make(map[string]int, len(summaries))
+	for _, summaryItem := range summaries {
+		if summaryItem == nil {
+			continue
+		}
+		skillNameCounts[strings.ToLower(strings.TrimSpace(summaryItem.Name))]++
+	}
 	skillFunctions := make(map[string]*SkillFunction, len(summaries))
+	skillFunctionsByPath := make(map[string]*SkillFunction, len(summaries))
 	for _, summaryItem := range summaries {
 		if summaryItem == nil {
 			continue
@@ -451,9 +551,12 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 		summaryRef := summaryItem
 		skillRef := summaryRef.ToSkillStub()
 		skillName := summaryRef.Name
+		sourcePath := ""
+		if summaryRef.Source != nil {
+			sourcePath = strings.TrimSpace(summaryRef.Source.Path)
+		}
 		var resolver func() (*runtimeskill.Skill, error)
-		if source := summaryRef.Source; source != nil && strings.TrimSpace(source.Path) != "" {
-			sourcePath := strings.TrimSpace(source.Path)
+		if source := summaryRef.Source; source != nil && sourcePath != "" {
 			sourceDir := strings.TrimSpace(source.Dir)
 			sourceLayer := strings.TrimSpace(source.Layer)
 			promptPath := strings.TrimSpace(source.PromptPath)
@@ -475,15 +578,19 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 				return loaded, nil
 			}
 		}
+		functionName := buildSkillFunctionNameForSummary(summaryRef, skillNameCounts)
 		fn := &SkillFunction{
-			summary:          summaryRef,
-			functionName:     buildSkillFunctionName(summaryRef.Name),
-			skill:            skillRef,
-			skillResolver:    resolver,
-			executor:         executor,
-			historyProvider:  func() []runtimetypes.Message { return buildRuntimeHistory(session.Messages) },
-			contextProvider:  func() map[string]interface{} { return cloneSkillContextMap(session.ProfileContext) },
-			metadataProvider: func() runtimetypes.Metadata { return buildSkillMetadata(session, skillName) },
+			summary:         summaryRef,
+			functionName:    functionName,
+			sourcePath:      sourcePath,
+			skill:           skillRef,
+			skillResolver:   resolver,
+			executor:        executor,
+			historyProvider: func() []runtimetypes.Message { return buildRuntimeHistory(session.Messages) },
+			contextProvider: func() map[string]interface{} { return cloneSkillContextMap(session.ProfileContext) },
+			metadataProvider: func() runtimetypes.Metadata {
+				return buildSkillMetadata(session, skillName, functionName, sourcePath)
+			},
 		}
 		fn.schema = map[string]interface{}{
 			"name":        fn.Name(),
@@ -492,6 +599,9 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 		}
 		catalog.RegisterSkillFunction(fn)
 		skillFunctions[fn.functionName] = fn
+		if fn.sourcePath != "" {
+			skillFunctionsByPath[filepath.Clean(fn.sourcePath)] = fn
+		}
 	}
 
 	exposureTopK := resolveConfiguredSkillExposureTopK(cfg.SkillsRuntime, cliSkillsTopK)
@@ -505,13 +615,15 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 	}
 
 	binding := &skillsRuntimeBinding{
-		manager:        manager,
-		count:          len(summaries),
-		exposureTopK:   exposureTopK,
-		exposureMode:   resolveConfiguredSkillExposureMode(cfg.SkillsRuntime, cliSkillsMode),
-		exposureRouter: exposureRouter,
-		catalog:        catalog,
-		skillFunctions: skillFunctions,
+		manager:              manager,
+		count:                len(summaries),
+		exposureTopK:         exposureTopK,
+		exposureMode:         resolveConfiguredSkillExposureMode(cfg.SkillsRuntime, cliSkillsMode),
+		exposureRouter:       exposureRouter,
+		catalog:              catalog,
+		skillFunctions:       skillFunctions,
+		skillFunctionsByPath: skillFunctionsByPath,
+		skillNameCounts:      skillNameCounts,
 	}
 	catalog.SetSkillsBinding(binding)
 	session.SkillsBinding = binding
@@ -531,29 +643,36 @@ func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []
 	}
 
 	seen := make(map[string]struct{})
-	resolved := make([]string, 0, 1+len(cfg.ExtraSkillDirs)+len(cliSkillDirs))
+	resolved := make([]string, 0, 1+len(cfg.SkillDirs)+len(cfg.ExtraSkillDirs)+len(cliSkillDirs)+6)
 
 	addDir := func(dir string) {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
+		resolvedDir := resolveExistingPathValue(dir, true)
+		if resolvedDir == "" {
 			return
 		}
-		if _, exists := seen[dir]; exists {
+		if _, exists := seen[resolvedDir]; exists {
 			return
 		}
-		if _, err := os.Stat(dir); err != nil {
-			return
-		}
-		seen[dir] = struct{}{}
-		resolved = append(resolved, dir)
+		seen[resolvedDir] = struct{}{}
+		resolved = append(resolved, resolvedDir)
 	}
 
 	addDir(cfg.SkillDir)
+	for _, dir := range cfg.SkillDirs {
+		addDir(dir)
+	}
 	for _, dir := range cfg.ExtraSkillDirs {
 		addDir(dir)
 	}
 	for _, dir := range cliSkillDirs {
 		addDir(dir)
+	}
+	if configFile := strings.TrimSpace(cfg.ConfigFile); configFile != "" {
+		if resolvedConfigFile := resolveExistingPathValue(configFile, false); resolvedConfigFile != "" {
+			for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(filepath.Dir(resolvedConfigFile), resolvedConfigFile) {
+				addDir(dir)
+			}
+		}
 	}
 
 	return resolved
@@ -712,6 +831,53 @@ func buildSkillFunctionName(skillName string) string {
 	return skillFunctionPrefix + name[:baseLimit] + suffix
 }
 
+func buildSkillFunctionNameForSummary(summary *runtimeskill.SkillSummary, nameCounts map[string]int) string {
+	if summary == nil {
+		return buildSkillFunctionName("")
+	}
+
+	skillName := strings.TrimSpace(summary.Name)
+	if skillName == "" {
+		return buildSkillFunctionName("")
+	}
+	countKey := strings.ToLower(skillName)
+	if nameCounts == nil || nameCounts[countKey] <= 1 {
+		return buildSkillFunctionName(skillName)
+	}
+
+	sourcePath := ""
+	if summary.Source != nil {
+		sourcePath = strings.TrimSpace(summary.Source.Path)
+	}
+	if sourcePath == "" {
+		return buildSkillFunctionName(skillName)
+	}
+
+	return buildSkillFunctionNameFromIdentity(skillName, sourcePath)
+}
+
+func buildSkillFunctionNameFromIdentity(skillName, identity string) string {
+	baseName := buildSkillFunctionName(skillName)
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return baseName
+	}
+
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(filepath.Clean(identity)))
+	suffix := fmt.Sprintf("_%08x", hash.Sum32())
+	baseLimit := maxSkillFunctionName - len(suffix)
+	if baseLimit < 1 {
+		baseLimit = 1
+	}
+
+	prefix := baseName
+	if len(prefix) > baseLimit {
+		prefix = prefix[:baseLimit]
+	}
+	return prefix + suffix
+}
+
 func resolveSkillPrompt(args map[string]interface{}) string {
 	for _, key := range []string{"prompt", "request", "input", "task"} {
 		if value, ok := args[key].(string); ok {
@@ -858,7 +1024,7 @@ func trimRuntimeHistory(history []runtimetypes.Message) []runtimetypes.Message {
 	return append([]runtimetypes.Message(nil), history[len(history)-maxSkillHistoryWindow:]...)
 }
 
-func buildSkillMetadata(session *ChatSession, skillName string) runtimetypes.Metadata {
+func buildSkillMetadata(session *ChatSession, skillName, functionName, sourcePath string) runtimetypes.Metadata {
 	metadata := runtimetypes.NewMetadata()
 	metadata.Set("source", "aicli_chat_skill_function")
 	metadata.Set("skill_name", skillName)
@@ -876,6 +1042,12 @@ func buildSkillMetadata(session *ChatSession, skillName string) runtimetypes.Met
 	}
 	if session.Stream {
 		metadata.Set("chat_stream", true)
+	}
+	if strings.TrimSpace(functionName) != "" {
+		metadata.Set("skill_function_name", functionName)
+	}
+	if strings.TrimSpace(sourcePath) != "" {
+		metadata.Set("skill_path", filepath.Clean(strings.TrimSpace(sourcePath)))
 	}
 
 	return metadata

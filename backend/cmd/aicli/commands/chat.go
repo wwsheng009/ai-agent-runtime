@@ -227,7 +227,7 @@ func loadRuntimeToolConfig(cfg *config.Config, session *ChatSession) *runtimecfg
 	if session != nil && strings.TrimSpace(session.RuntimeConfigPath) != "" {
 		configPath = strings.TrimSpace(session.RuntimeConfigPath)
 	} else if cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
-		configPath = strings.TrimSpace(cfg.SkillsRuntime.ConfigFile)
+		configPath = resolveGlobalRuntimeConfigPath(cfg)
 	}
 	if configPath == "" {
 		resolved := runtimecfg.DefaultRuntimeConfig()

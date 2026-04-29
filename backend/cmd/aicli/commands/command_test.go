@@ -1043,6 +1043,9 @@ func TestHandleCommand_PermissionModeAndApprovalReuse(t *testing.T) {
 		if quit := handleCommand(session, "/permission-mode", false); quit {
 			t.Fatal("expected permission-mode command not to exit")
 		}
+		if quit := handleCommand(session, "/mode", false); quit {
+			t.Fatal("expected mode alias command not to exit")
+		}
 		if quit := handleCommand(session, "/approval-reuse off", false); quit {
 			t.Fatal("expected approval-reuse command not to exit")
 		}

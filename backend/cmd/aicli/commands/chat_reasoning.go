@@ -3,6 +3,7 @@ package commands
 import (
 	"bufio"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -79,7 +80,50 @@ func normalizeReasoningEffortOptions(values []string) []string {
 		seen[key] = struct{}{}
 		options = append(options, normalized)
 	}
+	sortReasoningEffortOptions(options)
 	return options
+}
+
+func sortReasoningEffortOptions(options []string) {
+	if len(options) < 2 {
+		return
+	}
+	sort.SliceStable(options, func(i, j int) bool {
+		leftRank, leftKnown := reasoningEffortSortRank(options[i])
+		rightRank, rightKnown := reasoningEffortSortRank(options[j])
+		switch {
+		case leftKnown && rightKnown:
+			if leftRank != rightRank {
+				return leftRank < rightRank
+			}
+		case leftKnown != rightKnown:
+			return leftKnown
+		}
+
+		left := strings.ToLower(strings.TrimSpace(options[i]))
+		right := strings.ToLower(strings.TrimSpace(options[j]))
+		if left == right {
+			return strings.TrimSpace(options[i]) < strings.TrimSpace(options[j])
+		}
+		return left < right
+	})
+}
+
+func reasoningEffortSortRank(value string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "low":
+		return 0, true
+	case "medium":
+		return 1, true
+	case "high":
+		return 2, true
+	case "max":
+		return 3, true
+	case "xhigh":
+		return 4, true
+	default:
+		return 0, false
+	}
 }
 
 func reasoningEffortAllowed(value string, options []string) bool {
@@ -113,6 +157,11 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 
 	normalizedOptions := normalizeReasoningEffortOptions(options)
 	normalizedCurrent := runtimetypes.NormalizeReasoningEffort(current)
+	currentMatch, currentValid := reasoningEffortOptionMatch(normalizedCurrent, normalizedOptions)
+	defaultOption := ""
+	if !currentValid && len(normalizedOptions) > 0 {
+		defaultOption = normalizedOptions[0]
+	}
 
 	if len(normalizedOptions) == 0 {
 		if normalizedCurrent != "" {
@@ -132,8 +181,10 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 	}
 
 	for i, option := range normalizedOptions {
-		if option == normalizedCurrent {
+		if currentValid && option == currentMatch {
 			fmt.Printf("  [%d] %-*s  %s\n", i+1, maxLabelLen, labels[i], ui.GetTheme(ui.ThemeAuto).Dimmed("(当前)"))
+		} else if defaultOption != "" && option == defaultOption {
+			fmt.Printf("  [%d] %-*s  %s\n", i+1, maxLabelLen, labels[i], ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
 		} else {
 			fmt.Printf("  [%d] %-*s\n", i+1, maxLabelLen, labels[i])
 		}
@@ -141,19 +192,33 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 	ui.PrintEmptyLine()
 
 	for {
-		defaultHint := normalizedCurrent
-		if defaultHint == "" {
-			defaultHint = "无"
+		if currentValid {
+			fmt.Printf("请输入选项 (回车保留当前: %s / 输入 0 清空): ", currentMatch)
+		} else if defaultOption != "" {
+			fmt.Printf("请输入选项 (回车默认: %s / 输入 0 清空): ", defaultOption)
+		} else {
+			fmt.Print("请输入选项 (回车清空当前无效值 / 输入 0 清空): ")
 		}
-		fmt.Printf("请输入选项 (回车保留当前: %s): ", defaultHint)
 		input, _ := reader.ReadString('\n')
-		input = runtimetypes.NormalizeReasoningEffort(input)
+		input = strings.TrimSpace(input)
+		normalizedInput := runtimetypes.NormalizeReasoningEffort(input)
 
-		if input == "" {
-			return normalizedCurrent
+		if normalizedInput == "" {
+			if currentValid {
+				return currentMatch
+			}
+			if defaultOption != "" {
+				return defaultOption
+			}
+			return ""
 		}
 
-		if num, err := strconv.Atoi(input); err == nil {
+		switch strings.ToLower(normalizedInput) {
+		case "0", "clear", "none", "off", "清空", "无":
+			return ""
+		}
+
+		if num, err := strconv.Atoi(normalizedInput); err == nil {
 			switch {
 			case num >= 1 && num <= len(normalizedOptions):
 				return normalizedOptions[num-1]
@@ -163,7 +228,7 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 			}
 		}
 
-		if matched, ok := reasoningEffortOptionMatch(input, normalizedOptions); ok {
+		if matched, ok := reasoningEffortOptionMatch(normalizedInput, normalizedOptions); ok {
 			return matched
 		}
 

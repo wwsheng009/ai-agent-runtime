@@ -109,6 +109,75 @@ sandbox:
 	}
 }
 
+func TestResolveGlobalRuntimeConfigPath_ResolvesUpwardRelativePath(t *testing.T) {
+	root := t.TempDir()
+	runtimeConfig := filepath.Join(root, "backend", "configs", "runtime.yaml")
+	writeTestFile(t, runtimeConfig, "agent:\n  defaultModel: custom\n")
+
+	backendDir := filepath.Join(root, "backend")
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(backendDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWD); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+
+	cfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{
+			ConfigFile: "backend/configs/runtime.yaml",
+		},
+	}
+
+	got := resolveGlobalRuntimeConfigPath(cfg)
+	if got != runtimeConfig {
+		t.Fatalf("unexpected runtime config path: %q", got)
+	}
+}
+
+func TestResolveChatSkillDirs_ResolvesUpwardRelativeSessionAndCLIPaths(t *testing.T) {
+	root := t.TempDir()
+	sessionSkillDir := filepath.Join(root, ".agents", "skills")
+	cliSkillDir := filepath.Join(root, "team-skills")
+	writeTestFile(t, filepath.Join(sessionSkillDir, "skill.yaml"), "name: test\ntriggers:\n  - type: keyword\n    values: [test]\n")
+	mustMkdir(t, cliSkillDir)
+
+	backendDir := filepath.Join(root, "backend")
+	mustMkdir(t, backendDir)
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(backendDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWD); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+
+	session := &ChatSession{
+		ResolvedSkillDirs: []string{"./.agents/skills"},
+	}
+	got := resolveChatSkillDirs(nil, session, []string{"./team-skills"})
+	if len(got) != 2 {
+		t.Fatalf("unexpected resolved dir count: %d (%#v)", len(got), got)
+	}
+	if got[0] != sessionSkillDir {
+		t.Fatalf("unexpected resolved session dir: %q", got[0])
+	}
+	if got[1] != cliSkillDir {
+		t.Fatalf("unexpected resolved cli dir: %q", got[1])
+	}
+}
+
 func TestEnsureChatSystemPromptMessage_PrependsAndReplaces(t *testing.T) {
 	session := &ChatSession{
 		SystemPromptText: "Profile system prompt.",

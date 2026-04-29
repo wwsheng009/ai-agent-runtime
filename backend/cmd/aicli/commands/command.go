@@ -129,7 +129,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if strings.HasPrefix(cmdLower, "/compact") {
 		return handleCompactCommand(session, command)
 	}
-	if strings.HasPrefix(cmdLower, "/permission-mode") || strings.HasPrefix(cmdLower, "/mode") {
+	if commandMatches(cmdLower, "/model") {
+		return handleModelCommand(session, command, noInteractive)
+	}
+	if commandMatches(cmdLower, "/permission-mode") || commandMatches(cmdLower, "/mode") {
 		return handlePermissionModeCommand(session, command)
 	}
 	if strings.HasPrefix(cmdLower, "/approval-reuse") {
@@ -238,6 +241,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("  /load <id>         - 加载指定会话")
 		fmt.Println("  /resume            - 恢复最近会话")
 		fmt.Println("  /title <text>      - 更新当前会话标题")
+		fmt.Println("  /model [name]      - 查看或切换模型，并在支持时调整 thinking_effort")
 		fmt.Println("  /image [path]      - 查看/添加图片附件（支持 PNG/JPEG/GIF/WebP）")
 		fmt.Println("  /image clear       - 清空待发送图片附件")
 		fmt.Println("  /queue             - 查看当前排队输入状态")
@@ -400,6 +404,23 @@ func handleApprovalReuseCommand(session *ChatSession, command string) bool {
 	return false
 }
 
+func commandMatches(commandLower, name string) bool {
+	commandLower = strings.TrimSpace(strings.ToLower(commandLower))
+	name = strings.TrimSpace(strings.ToLower(name))
+	if commandLower == name {
+		return true
+	}
+	if !strings.HasPrefix(commandLower, name) || len(commandLower) <= len(name) {
+		return false
+	}
+	switch commandLower[len(name)] {
+	case ' ', '\t':
+		return true
+	default:
+		return false
+	}
+}
+
 func extractCommandArgument(command string) string {
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -476,6 +497,9 @@ func formatFunctionCatalogSummary(session *ChatSession, jsonOutput bool) string 
 		line := fmt.Sprintf("  - %s [%s]", item.FunctionName, descriptor.Kind)
 		if source, _ := descriptor.Metadata["source"].(string); source != "" {
 			line += " source=" + source
+		}
+		if skillPath, _ := descriptor.Metadata["skill_path"].(string); skillPath != "" {
+			line += " path=" + skillPath
 		}
 		if descriptor.Category != "" {
 			line += " category=" + descriptor.Category
@@ -595,7 +619,12 @@ func formatFunctionDescriptor(session *ChatSession, name string, jsonOutput bool
 		return formatCommandError("Function Catalog: 未初始化", jsonOutput)
 	}
 
-	descriptor := catalog.Descriptor(name)
+	resolvedName, _, err := resolveDirectCallableFunctionName(session, name, false)
+	if err != nil {
+		return formatCommandError("错误: "+err.Error(), jsonOutput)
+	}
+
+	descriptor := catalog.Descriptor(resolvedName)
 	if descriptor == nil {
 		return formatCommandError(fmt.Sprintf("错误: 未找到 function: %s", name), jsonOutput)
 	}

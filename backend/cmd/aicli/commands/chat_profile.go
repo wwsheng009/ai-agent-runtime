@@ -2,12 +2,11 @@ package commands
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 )
 
@@ -106,6 +105,9 @@ func applyProfileDefaultsToChatOptions(opts *chatCommandOptions, state *chatProf
 
 func resolveGlobalRuntimeConfigPath(cfg *config.Config) string {
 	if cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
+		if resolved := resolveExistingPathValue(cfg.SkillsRuntime.ConfigFile, false); resolved != "" {
+			return resolved
+		}
 		return strings.TrimSpace(cfg.SkillsRuntime.ConfigFile)
 	}
 	return "configs/runtime.yaml"
@@ -113,6 +115,9 @@ func resolveGlobalRuntimeConfigPath(cfg *config.Config) string {
 
 func resolveConfiguredMCPConfigPath(cfg *config.Config) string {
 	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil && strings.TrimSpace(cfg.AICLI.MCP.ConfigFile) != "" {
+		if resolved := resolveExistingPathValue(cfg.AICLI.MCP.ConfigFile, false); resolved != "" {
+			return resolved
+		}
 		return strings.TrimSpace(cfg.AICLI.MCP.ConfigFile)
 	}
 	return ""
@@ -136,14 +141,11 @@ func appendUniqueExistingDirs(base []string, extra []string) []string {
 	seen := make(map[string]struct{}, len(base)+len(extra))
 	result := make([]string, 0, len(base)+len(extra))
 	addDir := func(dir string) {
-		dir = strings.TrimSpace(dir)
+		dir = resolveExistingPathValue(dir, true)
 		if dir == "" {
 			return
 		}
 		if _, exists := seen[dir]; exists {
-			return
-		}
-		if _, err := os.Stat(dir); err != nil {
 			return
 		}
 		seen[dir] = struct{}{}

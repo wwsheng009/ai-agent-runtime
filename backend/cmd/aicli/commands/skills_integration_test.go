@@ -4,12 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
@@ -51,6 +53,142 @@ func TestBuildSkillFunctionName(t *testing.T) {
 	name := buildSkillFunctionName("ABAP/Search Object")
 	if name != "skill__abap_search_object" {
 		t.Fatalf("unexpected function name: %s", name)
+	}
+}
+
+func TestBuildSkillFunctionNameForSummary_UsesSourcePathWhenNamesCollide(t *testing.T) {
+	counts := map[string]int{"shared-codex": 2}
+	firstPath := filepath.Join(t.TempDir(), "first", "SKILL.md")
+	secondPath := filepath.Join(t.TempDir(), "second", "SKILL.md")
+
+	first := &runtimeskill.SkillSummary{
+		Name: "shared-codex",
+		Source: &runtimeskill.SkillSource{
+			Path: firstPath,
+		},
+	}
+	second := &runtimeskill.SkillSummary{
+		Name: "shared-codex",
+		Source: &runtimeskill.SkillSource{
+			Path: secondPath,
+		},
+	}
+
+	firstName := buildSkillFunctionNameForSummary(first, counts)
+	secondName := buildSkillFunctionNameForSummary(second, counts)
+
+	if firstName == secondName {
+		t.Fatalf("expected distinct function names for different paths, got %q", firstName)
+	}
+	if firstName == buildSkillFunctionName("shared-codex") || secondName == buildSkillFunctionName("shared-codex") {
+		t.Fatalf("expected path-aware aliases, got %q and %q", firstName, secondName)
+	}
+}
+
+func TestSkillsRuntimeBinding_FunctionNameForSkillUsesPathIdentity(t *testing.T) {
+	firstPath := filepath.Join(t.TempDir(), "first", "SKILL.md")
+	secondPath := filepath.Join(t.TempDir(), "second", "SKILL.md")
+	firstName := buildSkillFunctionNameFromIdentity("shared-codex", firstPath)
+	secondName := buildSkillFunctionNameFromIdentity("shared-codex", secondPath)
+
+	firstFn := &SkillFunction{
+		functionName: firstName,
+		sourcePath:   firstPath,
+		skill: &runtimeskill.Skill{
+			Name: "shared-codex",
+			Source: &runtimeskill.SkillSource{
+				Path: firstPath,
+			},
+		},
+	}
+	secondFn := &SkillFunction{
+		functionName: secondName,
+		sourcePath:   secondPath,
+		skill: &runtimeskill.Skill{
+			Name: "shared-codex",
+			Source: &runtimeskill.SkillSource{
+				Path: secondPath,
+			},
+		},
+	}
+
+	binding := &skillsRuntimeBinding{
+		skillFunctions: map[string]*SkillFunction{
+			firstName:  firstFn,
+			secondName: secondFn,
+		},
+		skillFunctionsByPath: map[string]*SkillFunction{
+			filepath.Clean(firstPath):  firstFn,
+			filepath.Clean(secondPath): secondFn,
+		},
+	}
+
+	if got := binding.functionNameForSkill(firstFn.skill); got != firstName {
+		t.Fatalf("expected first path alias %q, got %q", firstName, got)
+	}
+	if got := binding.functionNameForSkill(secondFn.skill); got != secondName {
+		t.Fatalf("expected second path alias %q, got %q", secondName, got)
+	}
+}
+
+func TestResolveDirectCallableFunctionName_UsesPathAndRejectsAmbiguousPlainName(t *testing.T) {
+	firstPath := filepath.Join(t.TempDir(), "first", "SKILL.md")
+	secondPath := filepath.Join(t.TempDir(), "second", "SKILL.md")
+	firstName := buildSkillFunctionNameFromIdentity("shared-codex", firstPath)
+	secondName := buildSkillFunctionNameFromIdentity("shared-codex", secondPath)
+
+	session := &ChatSession{
+		FunctionRegistry: functions.NewFunctionRegistry(),
+	}
+	catalog := ensureFunctionCatalog(session)
+	if catalog == nil {
+		t.Fatal("expected function catalog")
+	}
+
+	firstFn := &SkillFunction{
+		functionName: firstName,
+		sourcePath:   firstPath,
+		skill: &runtimeskill.Skill{
+			Name: "shared-codex",
+			Source: &runtimeskill.SkillSource{
+				Path: firstPath,
+			},
+		},
+	}
+	secondFn := &SkillFunction{
+		functionName: secondName,
+		sourcePath:   secondPath,
+		skill: &runtimeskill.Skill{
+			Name: "shared-codex",
+			Source: &runtimeskill.SkillSource{
+				Path: secondPath,
+			},
+		},
+	}
+	catalog.RegisterSkillFunction(firstFn)
+	catalog.RegisterSkillFunction(secondFn)
+	session.SkillsBinding = &skillsRuntimeBinding{
+		catalog: catalog,
+		skillFunctions: map[string]*SkillFunction{
+			firstName:  firstFn,
+			secondName: secondFn,
+		},
+		skillFunctionsByPath: map[string]*SkillFunction{
+			filepath.Clean(firstPath):  firstFn,
+			filepath.Clean(secondPath): secondFn,
+		},
+	}
+
+	resolved, isSkill, err := resolveDirectCallableFunctionName(session, firstPath, true)
+	if err != nil {
+		t.Fatalf("expected path-based resolution to succeed: %v", err)
+	}
+	if resolved != firstName || !isSkill {
+		t.Fatalf("unexpected path resolution result: %s skill=%t", resolved, isSkill)
+	}
+
+	if _, _, err := resolveDirectCallableFunctionName(session, "shared-codex", true); err == nil {
+		t.Fatalf("expected ambiguous plain skill name to fail")
 	}
 }
 
@@ -392,6 +530,121 @@ func TestResolveConfiguredSkillDirs_AppendsCLIAndConfigDirs(t *testing.T) {
 	}
 	if resolved[0] != systemDir || resolved[1] != extraDir || resolved[2] != cliDir {
 		t.Fatalf("unexpected resolved order: %#v", resolved)
+	}
+}
+
+func TestResolveConfiguredSkillDirs_ResolvesUpwardRelativePaths(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".agents", "skills")
+	extraDir := filepath.Join(root, "extra-skills")
+	cliDir := filepath.Join(root, "cli-skills")
+
+	mustMkdirAll := func(path string) {
+		t.Helper()
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+	}
+	mustMkdirAll(skillDir)
+	mustMkdirAll(extraDir)
+	mustMkdirAll(cliDir)
+
+	backendDir := filepath.Join(root, "backend")
+	mustMkdirAll(backendDir)
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(backendDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWD); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+
+	resolved := resolveConfiguredSkillDirs(&config.SkillsRuntimeConfig{
+		SkillDir:       "./.agents/skills",
+		SkillDirs:      []string{"./.agents/skills"},
+		ExtraSkillDirs: []string{"./extra-skills"},
+	}, []string{"./.agents/skills", "./cli-skills"})
+
+	if len(resolved) != 3 {
+		t.Fatalf("unexpected resolved dir count: %d (%#v)", len(resolved), resolved)
+	}
+	if resolved[0] != skillDir {
+		t.Fatalf("unexpected resolved system dir: %q", resolved[0])
+	}
+	if resolved[1] != extraDir {
+		t.Fatalf("unexpected resolved extra dir: %q", resolved[1])
+	}
+	if resolved[2] != cliDir {
+		t.Fatalf("unexpected resolved cli dir: %q", resolved[2])
+	}
+}
+
+func TestInitSkillFunctions_LoadsImagegenSkillWithResolvedPaths(t *testing.T) {
+	t.Setenv("CODEX_04_API_KEYS", "test-key")
+	t.Setenv("CODEX_04_BASE_URL", "https://example.com")
+	homeRoot := filepath.Join(t.TempDir(), "home")
+	t.Setenv("HOME", homeRoot)
+	t.Setenv("USERPROFILE", homeRoot)
+
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	backendDir := filepath.Clean(filepath.Join(filepath.Dir(testFile), "..", "..", ".."))
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(backendDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWD); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+
+	if _, err := config.InitGlobalConfig(filepath.Join("configs", "config.yaml")); err != nil {
+		t.Fatalf("InitGlobalConfig failed: %v", err)
+	}
+
+	session := &ChatSession{
+		FunctionRegistry: functions.NewFunctionRegistry(),
+	}
+	catalog := ensureFunctionCatalog(session)
+	if catalog == nil {
+		t.Fatal("expected function catalog")
+	}
+
+	toolManager := runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimecfg.DefaultRuntimeConfig())
+	binding, err := initSkillFunctions(&config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{
+			Enabled:        true,
+			SkillDir:       "./.agents/skills",
+			ConfigFile:     filepath.Join("configs", "runtime.yaml"),
+			ExtraSkillDirs: nil,
+		},
+	}, session, toolManager, nil, 0, "")
+	if err != nil {
+		t.Fatalf("initSkillFunctions failed: %v", err)
+	}
+	if binding == nil {
+		t.Fatal("expected skill binding")
+	}
+	defer func() { _ = binding.Close() }()
+
+	if _, ok := binding.skillFunctions["skill__imagegen"]; !ok {
+		t.Fatalf("expected imagegen skill to be registered, got %v", binding.skillFunctions)
+	}
+	if _, ok := catalog.Registry().Get("skill__imagegen"); !ok {
+		t.Fatal("expected imagegen skill to be registered in function catalog")
 	}
 }
 

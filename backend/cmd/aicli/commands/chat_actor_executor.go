@@ -3,6 +3,9 @@ package commands
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -10,6 +13,8 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type aicliActorChatExecutor struct{}
@@ -57,6 +62,9 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if err != nil {
 		warnIfChatSessionSyncFails(session, "actor error sync", syncRuntimeSessionBackIntoCLI(session))
 		warnIfChatSessionSyncFails(session, "actor error team lifecycle sync", syncAmbientTeamLifecycleState(session))
+		if response, ok := attemptDirectImageGenerationFallback(ctx, session, prompt, err.Error()); ok {
+			return response, nil
+		}
 		return "", humanizeActorExecutorError(session, err)
 	}
 	if bridge := session.RuntimeEventBridge; bridge != nil {
@@ -84,7 +92,10 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	renderAsyncTeamLaunchNotice(session, previousTeamID)
 	response := resolveActorExecutorResponse(result.Output, session, previousAssistant)
 	if response == "" {
-		response = fallbackActorExecutorResponse(result)
+		if fallbackResponse, ok := attemptDirectImageGenerationFallback(ctx, session, prompt, result.Error); ok {
+			return fallbackResponse, nil
+		}
+		response = fallbackActorExecutorResponse(result, session)
 	}
 	return response, nil
 }
@@ -258,7 +269,7 @@ func resolveActorExecutorResponse(output string, session *ChatSession, previousA
 	return current
 }
 
-func fallbackActorExecutorResponse(result *agent.Result) string {
+func fallbackActorExecutorResponse(result *agent.Result, session *ChatSession) string {
 	if result == nil {
 		return ""
 	}
@@ -266,14 +277,197 @@ func fallbackActorExecutorResponse(result *agent.Result) string {
 		return ""
 	}
 	errText := strings.TrimSpace(result.Error)
+	lines := []string{"这次处理没有生成后续回复。"}
+	if paths := recentGeneratedImageArtifactPaths(session); len(paths) > 0 {
+		if len(paths) == 1 {
+			lines = append(lines, "但已检测到生成图片已保存: "+paths[0])
+		} else {
+			lines = append(lines, fmt.Sprintf("但已检测到 %d 张生成图片已保存，最新一张: %s", len(paths), paths[0]))
+		}
+	}
 	if errText == "" {
-		return "这次处理没有生成后续回复，请重试。"
+		lines = append(lines, "请根据上面的信息重试，或调整请求后再试。")
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, "原因: "+truncateChatRuntimeText(errText, 240))
+	lines = append(lines, "请根据上面的信息重试，或调整请求后再试。")
+	return strings.Join(lines, "\n")
+}
+
+func attemptDirectImageGenerationFallback(ctx context.Context, session *ChatSession, prompt string, failure string) (string, bool) {
+	if !shouldAttemptDirectImageGenerationFallback(session, prompt, failure) {
+		return "", false
+	}
+	report, err := executeDirectImageGenerationFallback(ctx, session, prompt)
+	if err != nil {
+		writeSessionDebugInfo(session, fmt.Sprintf("[image-fallback] direct image generation failed after actor failure: %v", err), true)
+		return "", false
+	}
+	persistDirectImageGenerationFallbackAssistant(session, report)
+	output := strings.TrimSpace(report.Output)
+	if output == "" {
+		output = formatDirectFunctionInvokeReport(report, false)
+	}
+	if output == "" {
+		return "", false
 	}
 	return strings.Join([]string{
-		"这次处理没有生成后续回复。",
-		"原因: " + truncateChatRuntimeText(errText, 240),
-		"请根据上面的信息重试，或调整请求后再试。",
-	}, "\n")
+		"主聊天模型响应失败，已直接改用图片生成工具完成请求。",
+		output,
+	}, "\n\n"), true
+}
+
+func shouldAttemptDirectImageGenerationFallback(session *ChatSession, prompt string, failure string) bool {
+	if strings.TrimSpace(prompt) == "" || !promptLooksLikeImageGenerationIntent(prompt) {
+		return false
+	}
+	if len(recentGeneratedImageArtifactPaths(session)) > 0 {
+		return false
+	}
+	normalizedFailure := strings.ToLower(strings.TrimSpace(failure))
+	if normalizedFailure == "" {
+		return true
+	}
+	for _, blocked := range []string{
+		"content_inspection",
+		"content_filter",
+		"moderation",
+		"policy",
+		"safety",
+		"forbidden",
+		"http 400",
+		"http 401",
+		"http 403",
+	} {
+		if strings.Contains(normalizedFailure, blocked) {
+			return false
+		}
+	}
+	for _, transient := range []string{
+		"http 5",
+		"502",
+		"503",
+		"504",
+		"timeout",
+		"timed out",
+		"stream disconnected",
+		"stream_interrupted",
+		"internal_server_error",
+		"server_error",
+		"cdn",
+		"源服务器超时",
+	} {
+		if strings.Contains(normalizedFailure, transient) {
+			return true
+		}
+	}
+	return false
+}
+
+func executeDirectImageGenerationFallback(ctx context.Context, session *ChatSession, prompt string) (*directFunctionInvokeReport, error) {
+	resolvedName, _, err := resolveDirectCallableFunctionName(session, toolnames.OpenAIImageGenerateToolName, false)
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = generatedImageToolContext(ctx, session)
+	args := map[string]interface{}{"prompt": prompt}
+	if session != nil && session.Logger != nil {
+		session.Logger.LogToolCall(aicliLogScope{TurnID: "image-fallback", RequestID: "image-fallback-req-01"}, "direct-image-fallback", resolvedName, args)
+	}
+	catalog := ensureFunctionCatalog(session)
+	if catalog == nil || catalog.Registry() == nil {
+		return nil, fmt.Errorf("function registry 未初始化")
+	}
+	output, metadata, err := catalog.Registry().ExecuteFunctionWithMeta(ctx, resolvedName, args)
+	if session != nil && session.Logger != nil {
+		session.Logger.LogToolResult(aicliLogScope{TurnID: "image-fallback", RequestID: "image-fallback-req-01"}, "direct-image-fallback", resolvedName, toolExecutionLogPayload(output, metadata), err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &directFunctionInvokeReport{
+		RequestedName: toolnames.OpenAIImageGenerateToolName,
+		FunctionName:  resolvedName,
+		Output:        output,
+		Metadata:      metadata,
+	}, nil
+}
+
+func persistDirectImageGenerationFallbackAssistant(session *ChatSession, report *directFunctionInvokeReport) {
+	if session == nil || report == nil || strings.TrimSpace(report.Output) == "" {
+		return
+	}
+	message := runtimetypes.NewAssistantMessage(strings.TrimSpace(report.Output))
+	for key, value := range report.Metadata {
+		message.Metadata[key] = value
+	}
+	message.Metadata["direct_image_generation_fallback"] = true
+	message.Metadata["fallback_function"] = report.FunctionName
+	if session.RuntimeSession != nil {
+		session.RuntimeSession.AddMessage(*message)
+		if messages, err := buildAICLIMessagesFromRuntimeHistory(session.RuntimeSession.History); err == nil {
+			session.Messages = messages
+		}
+		warnIfChatSessionSyncFails(session, "direct image fallback sync", syncRuntimeSessionFromChat(session))
+		return
+	}
+	raw := map[string]interface{}{
+		"role":     "assistant",
+		"content":  message.Content,
+		"metadata": map[string]interface{}(message.Metadata),
+	}
+	session.Messages = append(session.Messages, raw)
+	warnIfChatSessionSyncFails(session, "direct image fallback sync", syncRuntimeSessionFromChat(session))
+}
+
+type generatedImageArtifactInfo struct {
+	path    string
+	modTime time.Time
+}
+
+func recentGeneratedImageArtifactPaths(session *ChatSession) []string {
+	dir := strings.TrimSpace(currentGeneratedImageArtifactDir(session))
+	if dir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	images := make([]generatedImageArtifactInfo, 0, len(entries))
+	for _, entry := range entries {
+		if entry == nil || entry.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		switch ext {
+		case ".png", ".jpg", ".jpeg", ".webp":
+		default:
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() <= 0 {
+			continue
+		}
+		images = append(images, generatedImageArtifactInfo{
+			path:    resolveAbsoluteChatPath(filepath.Join(dir, entry.Name())),
+			modTime: info.ModTime(),
+		})
+	}
+	sort.Slice(images, func(i, j int) bool {
+		if images[i].modTime.Equal(images[j].modTime) {
+			return images[i].path < images[j].path
+		}
+		return images[i].modTime.After(images[j].modTime)
+	})
+	paths := make([]string, 0, len(images))
+	for _, image := range images {
+		paths = append(paths, image.path)
+	}
+	return paths
 }
 
 func renderAsyncTeamLaunchNotice(session *ChatSession, previousTeamID string) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
@@ -393,6 +394,12 @@ func buildSkillFunctionDescriptor(fn *SkillFunction) *capability.Descriptor {
 	}
 	descriptor.Metadata["function_name"] = fn.Name()
 	descriptor.Metadata["source"] = "aicli_skill_function"
+	if skillName := strings.TrimSpace(fn.skill.Name); skillName != "" {
+		descriptor.Metadata["skill_name"] = skillName
+	}
+	if fn.sourcePath != "" {
+		descriptor.Metadata["skill_path"] = fn.sourcePath
+	}
 	return descriptor
 }
 

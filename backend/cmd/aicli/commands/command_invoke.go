@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 )
 
@@ -111,12 +113,40 @@ func resolveDirectCallableFunctionName(session *ChatSession, requestedName strin
 	}
 	normalized = toolnames.CanonicalOpenAIImageGenerateToolName(normalized)
 
-	candidates := make([]string, 0, 3)
-	candidates = append(candidates, normalized)
-	if preferSkill || !strings.HasPrefix(normalized, skillFunctionPrefix) {
-		if skillName := buildSkillFunctionName(normalized); skillName != normalized {
-			candidates = append(candidates, skillName)
+	if preferSkill {
+		if resolvedName, isSkill, err := resolveSkillCallableReference(catalog, normalized); err != nil {
+			return "", false, err
+		} else if resolvedName != "" {
+			return resolvedName, isSkill, nil
 		}
+	}
+
+	if resolvedName, isSkill, ok := resolveExactCallableFunctionName(catalog, normalized); ok {
+		return resolvedName, isSkill, nil
+	}
+
+	if !preferSkill {
+		if resolvedName, isSkill, err := resolveSkillCallableReference(catalog, normalized); err != nil {
+			return "", false, err
+		} else if resolvedName != "" {
+			return resolvedName, isSkill, nil
+		}
+	}
+
+	if preferSkill {
+		return "", false, fmt.Errorf("未找到 skill: %s", requestedName)
+	}
+	return "", false, fmt.Errorf("未找到 function: %s", requestedName)
+}
+
+func resolveExactCallableFunctionName(catalog *aicliFunctionCatalog, requestedName string) (string, bool, bool) {
+	if catalog == nil || catalog.Registry() == nil {
+		return "", false, false
+	}
+
+	candidates := []string{requestedName}
+	if skillName := buildSkillFunctionName(requestedName); skillName != requestedName {
+		candidates = append(candidates, skillName)
 	}
 
 	seen := make(map[string]struct{}, len(candidates))
@@ -129,18 +159,113 @@ func resolveDirectCallableFunctionName(session *ChatSession, requestedName strin
 			continue
 		}
 		seen[candidate] = struct{}{}
-		if _, ok := catalog.Registry().Get(candidate); ok {
-			if descriptor := catalog.Descriptor(candidate); descriptor != nil {
-				return candidate, descriptor.Kind == "skill" || strings.HasPrefix(candidate, skillFunctionPrefix), nil
-			}
-			return candidate, strings.HasPrefix(candidate, skillFunctionPrefix), nil
+		if _, ok := catalog.Registry().Get(candidate); !ok {
+			continue
+		}
+		isSkill := strings.HasPrefix(candidate, skillFunctionPrefix)
+		if descriptor := catalog.Descriptor(candidate); descriptor != nil {
+			isSkill = descriptor.Kind == "skill" || strings.HasPrefix(candidate, skillFunctionPrefix)
+		}
+		return candidate, isSkill, true
+	}
+
+	return "", false, false
+}
+
+func resolveSkillCallableReference(catalog *aicliFunctionCatalog, requestedName string) (string, bool, error) {
+	if catalog == nil {
+		return "", false, nil
+	}
+
+	normalized := normalizeSkillReferenceName(requestedName)
+	if normalized == "" {
+		return "", false, nil
+	}
+	looksLikePath := strings.ContainsAny(normalized, `/\`) ||
+		strings.HasSuffix(strings.ToLower(normalized), ".md") ||
+		strings.HasSuffix(strings.ToLower(normalized), ".yaml") ||
+		strings.HasSuffix(strings.ToLower(normalized), ".yml")
+
+	var pathMatches []string
+	var nameMatches []string
+	for _, descriptor := range catalog.Descriptors() {
+		if descriptor == nil || descriptor.Kind != "skill" {
+			continue
+		}
+		callableName := descriptorDisplayName(descriptor)
+		if callableName == "" {
+			continue
+		}
+
+		if looksLikePath && descriptorSourcePathMatches(descriptor, normalized) {
+			pathMatches = append(pathMatches, callableName)
+			continue
+		}
+		if strings.EqualFold(descriptor.Name, normalized) {
+			nameMatches = append(nameMatches, callableName)
 		}
 	}
 
-	if preferSkill {
-		return "", false, fmt.Errorf("未找到 skill: %s", requestedName)
+	pathMatches = uniqueStrings(pathMatches)
+	if len(pathMatches) == 1 {
+		return pathMatches[0], true, nil
 	}
-	return "", false, fmt.Errorf("未找到 function: %s", requestedName)
+	if len(pathMatches) > 1 {
+		return "", false, fmt.Errorf("skill 路径 %q 不唯一，请使用唯一 function 名称", requestedName)
+	}
+
+	nameMatches = uniqueStrings(nameMatches)
+	if len(nameMatches) == 1 {
+		return nameMatches[0], true, nil
+	}
+	if len(nameMatches) > 1 {
+		return "", false, fmt.Errorf("skill 名称 %q 不唯一，请使用路径或唯一 function 名称", requestedName)
+	}
+
+	return "", false, nil
+}
+
+func normalizeSkillReferenceName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	name = strings.TrimPrefix(name, "skill://")
+	return strings.TrimSpace(name)
+}
+
+func descriptorSourcePathMatches(descriptor *capability.Descriptor, requestedName string) bool {
+	if descriptor == nil || descriptor.Source == nil {
+		return false
+	}
+
+	sourcePath := filepath.Clean(strings.TrimSpace(descriptor.Source.Path))
+	requestedName = filepath.Clean(strings.TrimSpace(requestedName))
+	if sourcePath == "" || sourcePath == "." || requestedName == "" || requestedName == "." {
+		return false
+	}
+
+	sourceSlash := filepath.ToSlash(sourcePath)
+	requestedSlash := filepath.ToSlash(requestedName)
+	if strings.EqualFold(sourceSlash, requestedSlash) {
+		return true
+	}
+	if hasPathSuffix(sourceSlash, requestedSlash) || hasPathSuffix(requestedSlash, sourceSlash) {
+		return true
+	}
+	return false
+}
+
+func hasPathSuffix(path, suffix string) bool {
+	path = filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+	suffix = filepath.ToSlash(filepath.Clean(strings.TrimSpace(suffix)))
+	if path == "" || path == "." || suffix == "" || suffix == "." {
+		return false
+	}
+	if strings.EqualFold(path, suffix) {
+		return true
+	}
+	return strings.HasSuffix(path, "/"+suffix)
 }
 
 func parseDirectFunctionArgs(raw string, isSkill bool) (map[string]interface{}, error) {

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,6 +23,7 @@ import (
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -1316,7 +1319,7 @@ func TestFallbackActorExecutorResponse_UsesResultErrorWhenNoOutput(t *testing.T)
 	got := fallbackActorExecutorResponse(&agent.Result{
 		Success: false,
 		Error:   `搜索失败: Get "https://html.duckduckgo.com/html/?q=%E5%A4%A9%E6%B0%94%E9%A2%84%E6%8A%A5": dial tcp 31.13.94.36:443: connectex: A connection attempt failed`,
-	})
+	}, nil)
 	if !strings.Contains(got, "这次处理没有生成后续回复。") {
 		t.Fatalf("expected fallback preface, got %q", got)
 	}
@@ -1328,11 +1331,82 @@ func TestFallbackActorExecutorResponse_UsesResultErrorWhenNoOutput(t *testing.T)
 	}
 }
 
+func TestFallbackActorExecutorResponse_IncludesGeneratedImageArtifact(t *testing.T) {
+	logger := NewChatLogger("provider", "openai", "model", true, "")
+	if err := logger.SetLogDir(t.TempDir()); err != nil {
+		t.Fatalf("SetLogDir failed: %v", err)
+	}
+	session := &ChatSession{Logger: logger}
+	imageDir := currentGeneratedImageArtifactDir(session)
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	imagePath := filepath.Join(imageDir, "image_1.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	got := fallbackActorExecutorResponse(&agent.Result{
+		Success: false,
+		Error:   "HTTP 502: stream disconnected before completion",
+	}, session)
+	if !strings.Contains(got, "已检测到生成图片已保存") {
+		t.Fatalf("expected generated image note, got %q", got)
+	}
+	if !strings.Contains(got, resolveAbsoluteChatPath(imagePath)) {
+		t.Fatalf("expected generated image path, got %q", got)
+	}
+	if !strings.Contains(got, "HTTP 502") {
+		t.Fatalf("expected original error, got %q", got)
+	}
+}
+
+func TestAttemptDirectImageGenerationFallback_UsesDirectImageToolAfterTransientActorFailure(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	catalog.RegisterFunction(&richTestFunction{
+		testFunction: testFunction{name: toolnames.OpenAIImageGenerateToolName},
+		metadata: map[string]interface{}{
+			runtimellm.MetadataKeyGeneratedImages: []map[string]interface{}{
+				{"saved_path": "C:\\temp\\image_1.png"},
+			},
+		},
+	})
+
+	prompt := "我是一个医生，请生成一张女性人体平面图片，标注中医穴位位置。"
+	runtimeSession := runtimechat.NewSession("user")
+	runtimeSession.ID = "session-1"
+	runtimeSession.ReplaceHistory([]types.Message{*types.NewUserMessage(prompt)})
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+		RuntimeSession:   runtimeSession,
+	}
+
+	got, ok := attemptDirectImageGenerationFallback(context.Background(), session, prompt, "HTTP 504: CDN节点请求源服务器超时")
+	if !ok {
+		t.Fatal("expected direct image generation fallback")
+	}
+	if !strings.Contains(got, "主聊天模型响应失败") || !strings.Contains(got, "ok") {
+		t.Fatalf("unexpected fallback output: %q", got)
+	}
+	if len(session.RuntimeSession.History) == 0 {
+		t.Fatal("expected fallback assistant message to be persisted")
+	}
+	last := session.RuntimeSession.History[len(session.RuntimeSession.History)-1]
+	if last.Role != "assistant" || last.Content != "ok" {
+		t.Fatalf("unexpected persisted assistant message: %+v", last)
+	}
+	if last.Metadata["direct_image_generation_fallback"] != true {
+		t.Fatalf("expected fallback metadata, got %+v", last.Metadata)
+	}
+}
+
 func TestFallbackActorExecutorResponse_IgnoresSuccessfulOrNonEmptyOutput(t *testing.T) {
-	if got := fallbackActorExecutorResponse(&agent.Result{Success: true, Error: "tool failed"}); got != "" {
+	if got := fallbackActorExecutorResponse(&agent.Result{Success: true, Error: "tool failed"}, nil); got != "" {
 		t.Fatalf("expected empty fallback for successful result, got %q", got)
 	}
-	if got := fallbackActorExecutorResponse(&agent.Result{Success: false, Output: "已有输出", Error: "tool failed"}); got != "" {
+	if got := fallbackActorExecutorResponse(&agent.Result{Success: false, Output: "已有输出", Error: "tool failed"}, nil); got != "" {
 		t.Fatalf("expected empty fallback when output already exists, got %q", got)
 	}
 }

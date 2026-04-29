@@ -108,10 +108,24 @@ func TestSelectReasoningEffortWithReader_RetriesAfterInvalidChoice(t *testing.T)
 	}
 }
 
+func TestSelectReasoningEffortWithReader_DefaultsToFirstOnInitialSelection(t *testing.T) {
+	var selected string
+	output := captureStdout(t, func() {
+		selected = selectReasoningEffortWithReader("", []string{"high", "max"}, bufio.NewReader(strings.NewReader("\n")))
+	})
+
+	if selected != "high" {
+		t.Fatalf("expected blank input to default to first option high, got %q", selected)
+	}
+	if !strings.Contains(output, "(默认)") || !strings.Contains(output, "请输入选项 (回车默认: high / 输入 0 清空): ") {
+		t.Fatalf("expected default-first prompt output, got:\n%s", output)
+	}
+}
+
 func TestSelectReasoningEffortWithReader_UsesDeepSeekCatalog(t *testing.T) {
 	var selected string
 	output := captureStdout(t, func() {
-		selected = selectReasoningEffortWithReader("high", []string{"high", "max"}, bufio.NewReader(strings.NewReader("\n")))
+		selected = selectReasoningEffortWithReader("high", []string{"max", "high"}, bufio.NewReader(strings.NewReader("\n")))
 	})
 
 	if selected != "high" {
@@ -119,6 +133,11 @@ func TestSelectReasoningEffortWithReader_UsesDeepSeekCatalog(t *testing.T) {
 	}
 	if !strings.Contains(output, "max") || !strings.Contains(output, "(当前)") {
 		t.Fatalf("expected deepseek catalog output, got:\n%s", output)
+	}
+	first := strings.Index(output, "[1] high")
+	second := strings.Index(output, "[2] max")
+	if first == -1 || second == -1 || first > second {
+		t.Fatalf("expected stable high->max order, got:\n%s", output)
 	}
 }
 

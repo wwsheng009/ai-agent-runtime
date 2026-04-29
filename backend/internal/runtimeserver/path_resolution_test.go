@@ -10,7 +10,7 @@ import (
 
 func TestResolveUpwardPath_FindsParentMatch(t *testing.T) {
 	root := t.TempDir()
-	target := filepath.Join(root, "docs", "skill_runtime", "skills")
+	target := filepath.Join(root, ".agents", "skills")
 	require.NoError(t, os.MkdirAll(target, 0o755))
 
 	workdir := filepath.Join(root, "backend")
@@ -23,14 +23,14 @@ func TestResolveUpwardPath_FindsParentMatch(t *testing.T) {
 		require.NoError(t, os.Chdir(originalWD))
 	})
 
-	resolved := ResolveUpwardPath("./docs/skill_runtime/skills")
+	resolved := ResolveUpwardPath("./.agents/skills")
 	require.Equal(t, target, resolved)
 }
 
 func TestResolveUpwardPath_PreservesExistingRelativePath(t *testing.T) {
 	root := t.TempDir()
 	workdir := filepath.Join(root, "backend")
-	target := filepath.Join(workdir, "docs", "skill_runtime", "skills")
+	target := filepath.Join(workdir, ".agents", "skills")
 	require.NoError(t, os.MkdirAll(target, 0o755))
 
 	originalWD, err := os.Getwd()
@@ -40,6 +40,6 @@ func TestResolveUpwardPath_PreservesExistingRelativePath(t *testing.T) {
 		require.NoError(t, os.Chdir(originalWD))
 	})
 
-	resolved := ResolveUpwardPath("./docs/skill_runtime/skills")
-	require.Equal(t, filepath.Clean("./docs/skill_runtime/skills"), resolved)
+	resolved := ResolveUpwardPath("./.agents/skills")
+	require.Equal(t, filepath.Clean("./.agents/skills"), resolved)
 }
