@@ -338,6 +338,30 @@ func TestBashTool_RejectsConflictingOutputCaptureOptions(t *testing.T) {
 	}
 }
 
+func TestBashTool_IgnoresNullOutputCaptureOptions(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":            "echo hello",
+		"output_bytes_cap":   nil,
+		"disable_output_cap": nil,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if inspector.lastConfig.hasOutputBytesCap {
+		t.Fatalf("did not expect output_bytes_cap when null, got %+v", inspector.lastConfig)
+	}
+	if inspector.lastConfig.disableOutputCap {
+		t.Fatalf("did not expect disable_output_cap when null, got %+v", inspector.lastConfig)
+	}
+}
+
 func TestFriendlyHintFor_WindowsHeadPipeline(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("windows-specific guidance")

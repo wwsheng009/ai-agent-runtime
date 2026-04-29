@@ -583,20 +583,24 @@ func parseOutputCaptureSettings(params map[string]interface{}) (outputCaptureSet
 	}
 
 	if rawDisable, ok := params["disable_output_cap"]; ok {
-		disable, ok := rawDisable.(bool)
-		if !ok {
-			return settings, fmt.Errorf("disable_output_cap 参数必须是布尔值")
+		if rawDisable != nil {
+			disable, ok := rawDisable.(bool)
+			if !ok {
+				return settings, fmt.Errorf("disable_output_cap 参数必须是布尔值")
+			}
+			settings.disableOutputCap = disable
 		}
-		settings.disableOutputCap = disable
 	}
 
 	if rawCap, ok := params["output_bytes_cap"]; ok {
-		value, err := extractPositiveInt(rawCap)
-		if err != nil {
-			return settings, fmt.Errorf("output_bytes_cap 参数无效: %w", err)
+		if rawCap != nil {
+			value, err := extractPositiveInt(rawCap)
+			if err != nil {
+				return settings, fmt.Errorf("output_bytes_cap 参数无效: %w", err)
+			}
+			settings.outputBytesCap = value
+			settings.hasOutputBytesCap = true
 		}
-		settings.outputBytesCap = value
-		settings.hasOutputBytesCap = true
 	}
 
 	if settings.disableOutputCap && settings.hasOutputBytesCap {

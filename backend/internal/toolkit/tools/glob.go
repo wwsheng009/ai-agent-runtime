@@ -104,7 +104,7 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	if limit <= 0 {
 		limit = defaultGlobLimit
 	}
-	if rawLimit, ok := params["limit"]; ok {
+	if rawLimit, ok := params["limit"]; ok && rawLimit != nil {
 		parsedLimit, err := parseGlobLimit(rawLimit)
 		if err != nil {
 			return &toolkit.ToolResult{

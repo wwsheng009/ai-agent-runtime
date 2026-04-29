@@ -1517,6 +1517,18 @@ func TestGrepTool_ParametersGuideSingleTargetFocus(t *testing.T) {
 	}
 }
 
+func TestGrepTool_ParametersAreOpenAiCompatible(t *testing.T) {
+	tool := NewGrepTool()
+	params := tool.Parameters()
+
+	if params["additionalProperties"] != false {
+		t.Fatalf("expected top-level additionalProperties=false, got %#v", params["additionalProperties"])
+	}
+	if _, ok := params["anyOf"]; ok {
+		t.Fatalf("expected top-level anyOf to be removed for codex compatibility, got %#v", params["anyOf"])
+	}
+}
+
 func TestGrepTool_MultiplePatternsBuiltin(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("foo\n"), 0o644); err != nil {
@@ -1956,6 +1968,40 @@ func TestGrepTool_MaxFilesizeBuiltin(t *testing.T) {
 	}
 	if strings.Contains(result.Content, "large.txt") {
 		t.Fatalf("expected large.txt to be skipped by max_filesize, got %q", result.Content)
+	}
+}
+
+func TestGrepTool_NullMaxFilesizeIgnored(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "small.txt"), []byte("foo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "large.txt"), []byte(strings.Repeat("foo", 10)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":      "foo",
+		"path":         tmpDir,
+		"mode":         "files",
+		"max_filesize": nil,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	if !strings.Contains(result.Content, "small.txt") {
+		t.Fatalf("expected small.txt in result, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "large.txt") {
+		t.Fatalf("expected large.txt in result when null max_filesize is ignored, got %q", result.Content)
 	}
 }
 

@@ -630,26 +630,7 @@ func NewGrepTool() *GrepTool {
 				"description": "可选：ripgrep/rg 风格参数列表。支持常见选项与位置参数，例如 [\"-g\", \"*.go\", \"-i\", \"-w\", \"-C\", \"2\", \"pattern\", \"backend\"]、多模式 [\"-e\", \"foo\", \"-e\", \"bar\", \"backend\"]、pattern file [\"-f\", \"patterns.txt\", \"backend\"]、ignore file [\"--ignore-file\", \"ignore.txt\", \"backend\"]、列号/裁剪 [\"--column\", \"--trim\", \"foo\", \"backend\"]、路径排序 [\"--sort\", \"path\", \"foo\", \"backend\"]、计数次数 [\"--count-matches\", \"foo\", \"backend\"] 等；若搜索条件很多，请先拆分成多个更小的 grep 调用，每次聚焦一个目标，再组合结果；像 -n/-H/-N/--no-filename/--color 以及 null/null_data/block_buffered/field_context_separator/path_separator 这类展示层参数也会被兼容接收；像 --no-ignore-parent/--no-ignore-vcs/--no-ignore-global/--no-ignore-dot/--ignore-file-case-insensitive 这类 ignore 相关参数、以及 -u/-uu/-uuu/--unrestricted 这类放宽过滤参数（-u 主要放宽 ignore，-uu 进一步放宽 hidden，-uuu 再进一步放宽 binary）、以及 --no-messages 这类安静模式参数，也可按 rg 心智迁移；rg_args 内部冲突时，no_hidden 优先于 hidden，no_ignore_files 优先于 ignore_file，ignore_file_case_insensitive 只作用于显式 ignore_file，follow + one_file_system 这类 symlink/遍历组合依赖 rg 的完整实现；结构化参数优先于 rg_args，冲突时以结构化参数为准。",
 			},
 		},
-		"anyOf": []map[string]interface{}{
-			{
-				"required": []string{"pattern"},
-			},
-			{
-				"required": []string{"regexp"},
-			},
-			{
-				"required": []string{"patterns"},
-			},
-			{
-				"required": []string{"pattern_file"},
-			},
-			{
-				"required": []string{"pattern_files"},
-			},
-			{
-				"required": []string{"rg_args"},
-			},
-		},
+		"additionalProperties": false,
 	}
 
 	return &GrepTool{
@@ -2552,6 +2533,9 @@ func resolveSizeParam(params map[string]interface{}, keys ...string) (string, bo
 		raw, exists := params[key]
 		if !exists {
 			continue
+		}
+		if raw == nil {
+			return "", false, nil
 		}
 		switch value := raw.(type) {
 		case string:

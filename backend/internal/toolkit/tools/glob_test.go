@@ -280,6 +280,36 @@ func TestGlobTool_InvalidLimit(t *testing.T) {
 	}
 }
 
+func TestGlobTool_NullLimitIgnored(t *testing.T) {
+	tmpDir := t.TempDir()
+	for i := 0; i < 3; i++ {
+		name := filepath.Join(tmpDir, "file"+string(rune('0'+i))+".go")
+		if err := os.WriteFile(name, []byte("test"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tool := NewGlobTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "*.go",
+		"path":    tmpDir,
+		"limit":   nil,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	files, ok := result.Metadata["files"].([]string)
+	if !ok {
+		t.Fatalf("expected files metadata, got: %#v", result.Metadata)
+	}
+	if len(files) != 3 {
+		t.Fatalf("expected 3 files when null limit is ignored, got %d: %v", len(files), files)
+	}
+}
+
 func requireNoError(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
