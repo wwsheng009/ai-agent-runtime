@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 )
 
 // AgentAdapter exposes runtime tools through the skill.MCPManager shape used by Agent.
@@ -48,8 +49,12 @@ func (a *AgentAdapter) FindTool(toolName string) (skill.ToolInfo, error) {
 	if toolName == "" {
 		return skill.ToolInfo{}, fmt.Errorf("tool name is required")
 	}
+	canonicalName := toolnames.CanonicalOpenAIImageGenerateToolName(toolName)
+	if canonicalName == "" {
+		canonicalName = toolName
+	}
 	for _, info := range a.ListTools() {
-		if info.Name == toolName {
+		if info.Name == canonicalName {
 			return info, nil
 		}
 	}

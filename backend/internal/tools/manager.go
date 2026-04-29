@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
@@ -15,6 +16,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
@@ -28,9 +30,10 @@ type ToolDescriptor struct {
 
 // Manager unifies toolkit tools and MCP tools.
 type Manager struct {
-	toolkit *toolkit.Registry
-	mcp     manager.Manager
-	sandbox *runtimeexecutor.Sandbox
+	toolkit       *toolkit.Registry
+	mcp           manager.Manager
+	sandbox       *runtimeexecutor.Sandbox
+	runtimeConfig *runtimecfg.RuntimeConfig
 }
 
 const toolkitMCPName = "toolkit"
@@ -56,11 +59,12 @@ func NewDefaultManagerWithRuntimeConfig(mcp manager.Manager, config *runtimecfg.
 		sandbox = runtimeexecutor.NewSandbox(&config.Sandbox)
 		workspaceRoot = strings.TrimSpace(config.Workspace.Root)
 	}
-	registerBuiltinToolkitTools(registry, sandbox, workspaceRoot)
+	registerBuiltinToolkitTools(registry, sandbox, workspaceRoot, config)
 	return &Manager{
-		toolkit: registry,
-		mcp:     mcp,
-		sandbox: sandbox,
+		toolkit:       registry,
+		mcp:           mcp,
+		sandbox:       sandbox,
+		runtimeConfig: config,
 	}
 }
 
@@ -139,9 +143,10 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 		return output, metadata, err
 	}
 
+	lookupName := canonicalManagedToolName(name)
 	if m.toolkit != nil {
-		if tool, ok := m.toolkit.Get(name); ok {
-			if m.shouldPreferLocalToolkitTool(name) {
+		if tool, ok := m.toolkit.Get(lookupName); ok {
+			if m.shouldPreferLocalToolkitTool(lookupName) {
 				result, err := tool.Execute(ctx, args)
 				if err != nil {
 					return "", nil, err
@@ -154,8 +159,8 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 	if m.mcp != nil {
 		info, err := m.mcp.FindTool(name)
 		if err == nil && info != nil {
-			if m.shouldPreferLocalToolkit(info.MCPName, name) && m.toolkit != nil {
-				if tool, ok := m.toolkit.Get(name); ok {
+			if m.shouldPreferLocalToolkit(info.MCPName, lookupName) && m.toolkit != nil {
+				if tool, ok := m.toolkit.Get(lookupName); ok {
 					result, execErr := tool.Execute(ctx, args)
 					if execErr != nil {
 						return "", nil, execErr
@@ -172,7 +177,7 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 	}
 
 	if m.toolkit != nil {
-		if tool, ok := m.toolkit.Get(name); ok {
+		if tool, ok := m.toolkit.Get(lookupName); ok {
 			result, err := tool.Execute(ctx, args)
 			if err != nil {
 				return "", nil, err
@@ -192,22 +197,23 @@ func (m *Manager) resolveToolSource(name string) string {
 	if name == "list_mcp_resources" {
 		return toolresult.SourceMeta
 	}
+	lookupName := canonicalManagedToolName(name)
 	if m.toolkit != nil {
-		if _, ok := m.toolkit.Get(name); ok && m.shouldPreferLocalToolkitTool(name) {
+		if _, ok := m.toolkit.Get(lookupName); ok && m.shouldPreferLocalToolkitTool(lookupName) {
 			return toolresult.SourceToolkit
 		}
 	}
 	if m.mcp != nil {
 		info, err := m.mcp.FindTool(name)
 		if err == nil && info != nil {
-			if m.shouldPreferLocalToolkit(info.MCPName, name) {
+			if m.shouldPreferLocalToolkit(info.MCPName, lookupName) {
 				return toolresult.SourceToolkit
 			}
 			return toolresult.SourceMCP
 		}
 	}
 	if m.toolkit != nil {
-		if _, ok := m.toolkit.Get(name); ok {
+		if _, ok := m.toolkit.Get(lookupName); ok {
 			return toolresult.SourceToolkit
 		}
 	}
@@ -247,7 +253,15 @@ func (m *Manager) shouldPreferLocalToolkitTool(toolName string) bool {
 	return m.shouldPreferLocalToolkit(toolkitMCPName, toolName)
 }
 
-func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexecutor.Sandbox, workspaceRoot string) {
+func canonicalManagedToolName(name string) string {
+	canonical := toolnames.CanonicalOpenAIImageGenerateToolName(name)
+	if canonical != "" {
+		return canonical
+	}
+	return strings.TrimSpace(name)
+}
+
+func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexecutor.Sandbox, workspaceRoot string, runtimeConfig *runtimecfg.RuntimeConfig) {
 	register := func(tool toolkit.Tool) {
 		if configurable, ok := tool.(interface {
 			SetSandbox(*runtimeexecutor.Sandbox)
@@ -279,6 +293,28 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	register(tools.NewTodosTool())
 	register(tools.NewSourcegraphTool())
 	register(tools.NewWebSearchTool())
+	if shouldRegisterOpenAIImageGenerateTool(runtimeConfig) {
+		register(tools.NewOpenAIImageGenerateTool(runtimeConfig))
+	}
+}
+
+func shouldRegisterOpenAIImageGenerateTool(runtimeConfig *runtimecfg.RuntimeConfig) bool {
+	globalCfg := agentconfig.GetGlobalConfig()
+	if globalCfg == nil {
+		return false
+	}
+	resolvedRuntime := runtimeConfig
+	if resolvedRuntime == nil {
+		resolvedRuntime = runtimecfg.DefaultRuntimeConfig()
+	}
+	defaultModel := strings.TrimSpace(resolvedRuntime.Images.Generations.DefaultModel)
+	if defaultModel != "" {
+		if _, err := agentconfig.SelectImagesGenerationsProvider(globalCfg, agentconfig.ImagesGenerationsHint{Model: defaultModel}); err == nil {
+			return true
+		}
+	}
+	_, err := agentconfig.SelectImagesGenerationsProvider(globalCfg, agentconfig.ImagesGenerationsHint{})
+	return err == nil
 }
 
 func formatToolkitResult(result *toolkit.ToolResult) (string, map[string]interface{}, error) {

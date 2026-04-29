@@ -75,6 +75,47 @@ func TestCompactActiveTurnReplay_CompactsEarlierReplayAndKeepsLatestBlock(t *tes
 	}
 }
 
+func TestCompactActiveTurnReplay_ReducesLatestReplayToolResultWithoutBreakingToolPair(t *testing.T) {
+	large := strings.Repeat("line with artifact_refs: runtime-http/request.json\n", 200)
+	messages := []types.Message{
+		*types.NewUserMessage("continue analysis"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_1", Name: "read_file", Args: map[string]interface{}{"path": "debug.log"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_1", large),
+	}
+
+	got, compacted := CompactActiveTurnReplay(messages, 2048)
+	if !compacted {
+		t.Fatalf("expected latest replay tool result reduction, got %#v", got)
+	}
+	if len(got) != len(messages) {
+		t.Fatalf("expected message shape to be preserved, got %#v", got)
+	}
+	if got[1].Role != "assistant" || got[1].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("expected assistant tool call to remain adjacent, got %#v", got[1])
+	}
+	if got[2].Role != "tool" || got[2].ToolCallID != "call_1" {
+		t.Fatalf("expected tool result id to be preserved, got %#v", got[2])
+	}
+	if !got[2].Metadata.GetBool("active_turn_tool_result_reduced", false) {
+		t.Fatalf("expected reduction metadata, got %#v", got[2].Metadata)
+	}
+	if !strings.Contains(got[2].Content, "Tool result content compacted for prompt budget.") {
+		t.Fatalf("expected compacted tool result content, got %q", got[2].Content)
+	}
+	if !strings.Contains(got[2].Content, "artifact_refs") {
+		t.Fatalf("expected artifact reference line to be preserved, got %q", got[2].Content)
+	}
+	if len(got[2].Content) >= len(large) {
+		t.Fatalf("expected reduced content to be shorter")
+	}
+}
+
 func TestCompactActiveTurnReplayWithCounter_CompactsWhenTokenBudgetExceeded(t *testing.T) {
 	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
 	messages := []types.Message{

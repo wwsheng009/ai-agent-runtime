@@ -3,16 +3,19 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
@@ -282,6 +285,92 @@ func TestManagerListTools_ReturnsSortedNames(t *testing.T) {
 	}
 	if !sort.StringsAreSorted(names) {
 		t.Fatalf("expected sorted tool names, got %v", names)
+	}
+}
+
+func TestNewDefaultManagerWithRuntimeConfig_RegistersOpenAIImageGenerateToolWhenProviderSupportsImagesGenerationsAPI(t *testing.T) {
+	t.Cleanup(func() {
+		_, _ = agentconfig.InitGlobalConfig("")
+	})
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := strings.TrimSpace(`
+providers:
+  items:
+    openai_image:
+      enabled: true
+      type: openai
+      base_url: https://api.openai.com
+      api_key: test-key
+      default_model: gpt-image-2
+      supported_models:
+        - gpt-image-2
+      model_capabilities:
+        gpt-image-2:
+          native_tools:
+            images_generations_api: true
+`)
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	if _, err := agentconfig.InitGlobalConfig(configPath); err != nil {
+		t.Fatalf("InitGlobalConfig failed: %v", err)
+	}
+
+	manager := NewDefaultManagerWithRuntimeConfig(nil, runtimecfg.DefaultRuntimeConfig())
+	if _, ok := manager.toolkit.Get(toolnames.OpenAIImageGenerateToolName); !ok {
+		t.Fatalf("expected %s tool to be registered", toolnames.OpenAIImageGenerateToolName)
+	}
+}
+
+func TestNewDefaultManagerWithRuntimeConfig_SkipsOpenAIImageGenerateToolWithoutImagesGenerationsAPI(t *testing.T) {
+	t.Cleanup(func() {
+		_, _ = agentconfig.InitGlobalConfig("")
+	})
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := strings.TrimSpace(`
+providers:
+  items:
+    openai_image:
+      enabled: true
+      type: openai
+      base_url: https://api.openai.com
+      api_key: test-key
+      default_model: gpt-image-2
+      supported_models:
+        - gpt-image-2
+      model_capabilities:
+        gpt-image-2:
+          native_tools:
+            image_generation: true
+`)
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	if _, err := agentconfig.InitGlobalConfig(configPath); err != nil {
+		t.Fatalf("InitGlobalConfig failed: %v", err)
+	}
+
+	manager := NewDefaultManagerWithRuntimeConfig(nil, runtimecfg.DefaultRuntimeConfig())
+	if _, ok := manager.toolkit.Get(toolnames.OpenAIImageGenerateToolName); ok {
+		t.Fatalf("expected %s tool to be skipped", toolnames.OpenAIImageGenerateToolName)
+	}
+}
+
+func TestManager_ResolveToolSource_CanonicalizesLegacyImageGenerateAlias(t *testing.T) {
+	registry := toolkit.NewRegistry()
+	if err := registry.Register(toolkitSuccessToolStub{
+		name:       toolnames.OpenAIImageGenerateToolName,
+		content:    "ok",
+		outputKind: toolresult.KindText,
+	}); err != nil {
+		t.Fatalf("register stub tool: %v", err)
+	}
+
+	manager := &Manager{toolkit: registry}
+	if got := manager.resolveToolSource(toolnames.LegacyImageGenerateToolName); got != toolresult.SourceToolkit {
+		t.Fatalf("expected legacy alias to resolve to toolkit source, got %q", got)
 	}
 }
 
