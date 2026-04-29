@@ -2,6 +2,10 @@ version: "v1"
 
 images:
   cacheMaxAge: 1h
-
-sessions:
-  dir: "../data/runtime/sessions"
+  generations:
+    default_model: gpt-image-2
+    default_size: "1024x1024"
+    default_quality: medium
+    default_output_format: png
+    request_timeout: 5m
+    max_n: 4

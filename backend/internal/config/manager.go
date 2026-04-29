@@ -156,7 +156,18 @@ type BackgroundConfig struct {
 
 // ImagesConfig controls HTTP behavior for runtime-generated images.
 type ImagesConfig struct {
-	CacheMaxAge time.Duration `yaml:"cacheMaxAge" json:"cacheMaxAge"`
+	CacheMaxAge time.Duration           `yaml:"cacheMaxAge" json:"cacheMaxAge"`
+	Generations ImagesGenerationsConfig `yaml:"generations" json:"generations"`
+}
+
+// ImagesGenerationsConfig controls defaults for the image generations tool.
+type ImagesGenerationsConfig struct {
+	DefaultModel        string        `yaml:"default_model" json:"default_model"`
+	DefaultSize         string        `yaml:"default_size" json:"default_size"`
+	DefaultQuality      string        `yaml:"default_quality" json:"default_quality"`
+	DefaultOutputFormat string        `yaml:"default_output_format" json:"default_output_format"`
+	RequestTimeout      time.Duration `yaml:"request_timeout" json:"request_timeout"`
+	MaxN                int           `yaml:"max_n" json:"max_n"`
 }
 
 // PerformanceConfig 性能配置
@@ -274,6 +285,14 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		},
 		Images: ImagesConfig{
 			CacheMaxAge: time.Hour,
+			Generations: ImagesGenerationsConfig{
+				DefaultModel:        "gpt-image-2",
+				DefaultSize:         "1024x1024",
+				DefaultQuality:      "medium",
+				DefaultOutputFormat: "png",
+				RequestTimeout:      5 * time.Minute,
+				MaxN:                4,
+			},
 		},
 		Performance: PerformanceConfig{
 			MaxConcurrency: 10,

@@ -346,9 +346,10 @@ providers:
                 X-Gateway-Provider: openai_codex
             max_tokens_limit: 10000
             model_mappings:
-                '*': gpt-5.2-codex
+                '*': gpt-5.4-mini
+                gpt-5.4-mini: gpt-5.4-mini
                 gpt-5.4: gpt-5.4
-                gpt-5.2-codex: gpt-5.4
+                gpt-5.2-codex: gpt-5.4-mini
             model_capabilities:
                 '*':
                     input_modalities:
@@ -362,12 +363,36 @@ providers:
                         - medium
                         - high
                         - xhigh
+                gpt-5.2-codex:
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
+                    input_modalities:
+                        - text
+                        - image
+                    native_tools:
+                        image_generation: false
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - xhigh
                 gpt-5.4-mini:
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
                     input_modalities:
                         - text
                         - image
                     native_tools:
                         image_generation: true
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - xhigh
                 gpt-5.4:
                     max_context_tokens: 270000
                     auto_compact_token_limit: 200000
@@ -392,7 +417,50 @@ providers:
             supported_models:
                 - gpt-5.2-codex
                 - gpt-5.4
+                - gpt-5.4-mini
                 - '*'
+            timeout: 300s
+        OPENAI_IMAGE:
+            api_key: ${CODEX_04_API_KEYS:-}
+            api_path: /v1/images/generations
+            base_url: ${CODEX_04_BASE_URL:-https://api.openai.com}
+            default_model: gpt-image-2
+            enabled: true
+            forward_url: /v1/images/generations
+            header_mappings:
+                X-Gateway-Provider: openai_image
+            model_capabilities:
+                '*':
+                    input_modalities:
+                        - text
+                    native_tools:
+                        image_generation: false
+                        images_generations_api: false
+                gpt-image-1:
+                    input_modalities:
+                        - text
+                    native_tools:
+                        image_generation: false
+                        images_generations_api: true
+                gpt-image-1.5:
+                    input_modalities:
+                        - text
+                    native_tools:
+                        image_generation: false
+                        images_generations_api: true
+                gpt-image-2:
+                    input_modalities:
+                        - text
+                    native_tools:
+                        image_generation: false
+                        images_generations_api: true
+            protocol: openai
+            support_types:
+                - openai
+            supported_models:
+                - gpt-image-1
+                - gpt-image-1.5
+                - gpt-image-2
             timeout: 300s
         bigmodel:
             api_key: ${BIGMODEL_API_KEYS:-}

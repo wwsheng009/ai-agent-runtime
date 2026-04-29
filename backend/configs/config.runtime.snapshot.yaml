@@ -35,8 +35,8 @@ concurrency:
     per_provider_limits:
         bigmodel: 150
         deepseek: 50
-        deepseek_beta: 50
         deepseek_anthropic: 50
+        deepseek_beta: 50
         default: 50
         gemini_local: 40
         nvidia: 100
@@ -314,34 +314,34 @@ providers:
             header_mappings:
                 X-Gateway-Provider: openai_codex
             max_tokens_limit: 10000
-            model_mappings:
-                '*': gpt-5.2-codex
-                gpt-5.4: gpt-5.4
             model_capabilities:
                 '*':
                     input_modalities:
                         - text
                     native_tools:
                         image_generation: false
-                    reasoning_model: true
                     reasoning_efforts:
                         - low
                         - medium
                         - high
                         - xhigh
+                    reasoning_model: true
                 gpt-5.4:
                     input_modalities:
                         - text
                         - image
                     native_tools:
                         image_generation: true
-                    reasoning_model: true
                     reasoning_efforts:
                         - none
                         - low
                         - medium
                         - high
                         - xhigh
+                    reasoning_model: true
+            model_mappings:
+                '*': gpt-5.2-codex
+                gpt-5.4: gpt-5.4
             protocol: codex
             support_types:
                 - gemini
@@ -373,35 +373,69 @@ providers:
             header_mappings:
                 X-Gateway-Provider: openai_codex
             max_tokens_limit: 10000
-            model_mappings:
-                '*': gpt-5.2-codex
-                gpt-5.2-codex: gpt-5.4
             model_capabilities:
                 '*':
                     input_modalities:
                         - text
                     native_tools:
                         image_generation: false
-                    reasoning_model: true
                     reasoning_efforts:
                         - none
                         - low
                         - medium
                         - high
                         - xhigh
-                gpt-5.4:
+                    reasoning_model: true
+                gpt-5.2-codex:
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
+                    input_modalities:
+                        - text
+                        - image
+                    native_tools:
+                        image_generation: false
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - xhigh
+                    reasoning_model: true
+                gpt-5.4-mini:
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
                     input_modalities:
                         - text
                         - image
                     native_tools:
                         image_generation: true
-                    reasoning_model: true
                     reasoning_efforts:
                         - none
                         - low
                         - medium
                         - high
                         - xhigh
+                    reasoning_model: true
+                gpt-5.4:
+                    max_context_tokens: 270000
+                    auto_compact_token_limit: 200000
+                    input_modalities:
+                        - text
+                        - image
+                    native_tools:
+                        image_generation: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - xhigh
+                    reasoning_model: true
+            model_mappings:
+                '*': gpt-5.4-mini
+                gpt-5.2-codex: gpt-5.4-mini
+                gpt-5.4-mini: gpt-5.4-mini
+                gpt-5.4: gpt-5.4
             protocol: codex
             support_types:
                 - gemini
@@ -411,6 +445,7 @@ providers:
             supported_models:
                 - gpt-5.2-codex
                 - gpt-5.4
+                - gpt-5.4-mini
                 - '*'
             timeout: 300s
         bigmodel:
@@ -463,35 +498,34 @@ providers:
             headers:
                 ChatGPT-Account-Id: ${CHATGPT_ACCOUNT_ID}
             max_tokens_limit: 10000
-            supports_max_output_tokens: false
-            model_mappings:
-                '*': gpt-5.4
             model_capabilities:
                 '*':
                     input_modalities:
                         - text
                     native_tools:
                         image_generation: false
-                    reasoning_model: true
                     reasoning_efforts:
                         - none
                         - low
                         - medium
                         - high
                         - xhigh
+                    reasoning_model: true
                 gpt-5.4:
                     input_modalities:
                         - text
                         - image
                     native_tools:
                         image_generation: true
-                    reasoning_model: true
                     reasoning_efforts:
                         - none
                         - low
                         - medium
                         - high
                         - xhigh
+                    reasoning_model: true
+            model_mappings:
+                '*': gpt-5.4
             protocol: codex
             support_types:
                 - gemini
@@ -503,6 +537,7 @@ providers:
                 - gpt-5.2-codex
                 - gpt-5.3
                 - '*'
+            supports_max_output_tokens: false
             timeout: 300s
         codex_ee:
             api_key: ${CODEX_API_KEYS:-}
@@ -570,37 +605,37 @@ providers:
             header_mappings:
                 X-Gateway-Provider: openai_codex
             max_tokens_limit: 10000
-            model_mappings:
-                '*': gpt-5.4
-                gpt-5.2-codex: gpt-5.2-codex
-                gpt-5.4-mini: gpt-5.4-mini
-                gpt-5.4-nano: gpt-5.4-nano
             model_capabilities:
                 '*':
                     input_modalities:
                         - text
                     native_tools:
                         image_generation: false
-                    reasoning_model: true
                     reasoning_efforts:
                         - none
                         - low
                         - medium
                         - high
                         - xhigh
+                    reasoning_model: true
                 gpt-5.4:
                     input_modalities:
                         - text
                         - image
                     native_tools:
                         image_generation: true
-                    reasoning_model: true
                     reasoning_efforts:
                         - none
                         - low
                         - medium
                         - high
                         - xhigh
+                    reasoning_model: true
+            model_mappings:
+                '*': gpt-5.4
+                gpt-5.2-codex: gpt-5.2-codex
+                gpt-5.4-mini: gpt-5.4-mini
+                gpt-5.4-nano: gpt-5.4-nano
             protocol: codex
             support_types:
                 - gemini
@@ -634,10 +669,6 @@ providers:
                 X-Gateway-Provider: openai_codex
             headers: {}
             max_tokens_limit: 10000
-            model_mappings:
-                '*': gpt-5.2-codex
-                gpt-5.4-mini: gpt-5.4-mini
-                gpt-5.4-nano: gpt-5.4-nano
             model_capabilities:
                 '*':
                     input_modalities:
@@ -650,6 +681,10 @@ providers:
                         - image
                     native_tools:
                         image_generation: true
+            model_mappings:
+                '*': gpt-5.2-codex
+                gpt-5.4-mini: gpt-5.4-mini
+                gpt-5.4-nano: gpt-5.4-nano
             protocol: codex
             support_types:
                 - gemini
@@ -672,9 +707,15 @@ providers:
             enabled: true
             forward_url: /v1/chat/completions
             max_tokens_limit: 8000
+            model_capabilities:
+                deepseek-v4-pro:
+                    reasoning_efforts:
+                        - high
+                        - max
+                    reasoning_model: true
             model_mappings:
                 '*': deepseek-v4-flash
-                "claude*": deepseek-v4-flash
+                claude*: deepseek-v4-flash
                 glm-4-plus: deepseek-v4-flash
                 glm-4.7: deepseek-v4-flash
                 gpt-3.5-turbo: deepseek-v4-flash
@@ -684,47 +725,6 @@ providers:
                 o1: deepseek-v4-pro
                 o1-mini: deepseek-v4-flash
                 o1-preview: deepseek-v4-pro
-            model_capabilities:
-                deepseek-v4-pro:
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - high
-                        - max
-            protocol: openai
-            support_types:
-                - openai
-                - anthropic
-            supported_models:
-                - deepseek-v4-flash
-                - deepseek-v4-pro
-            timeout: 300s
-            truncation_adapter: openai_local
-        deepseek_beta:
-            api_key: ${DEEPSEEK_API_KEY:-}
-            api_path: /v1/chat/completions
-            base_url: ${DEEPSEEK_BETA_BASE_URL:-https://api.deepseek.com/beta}
-            default_model: deepseek-v4-flash
-            enabled: true
-            forward_url: /v1/chat/completions
-            max_tokens_limit: 8000
-            model_mappings:
-                '*': deepseek-v4-flash
-                "claude*": deepseek-v4-flash
-                glm-4-plus: deepseek-v4-flash
-                glm-4.7: deepseek-v4-flash
-                gpt-3.5-turbo: deepseek-v4-flash
-                gpt-4: deepseek-v4-flash
-                gpt-4o: deepseek-v4-flash
-                gpt-4-turbo: deepseek-v4-flash
-                o1: deepseek-v4-pro
-                o1-mini: deepseek-v4-flash
-                o1-preview: deepseek-v4-pro
-            model_capabilities:
-                deepseek-v4-pro:
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - high
-                        - max
             protocol: openai
             support_types:
                 - openai
@@ -753,6 +753,41 @@ providers:
                 - deepseek-v4-pro
             timeout: 300s
             truncation_adapter: anthropic_local
+        deepseek_beta:
+            api_key: ${DEEPSEEK_API_KEY:-}
+            api_path: /v1/chat/completions
+            base_url: ${DEEPSEEK_BETA_BASE_URL:-https://api.deepseek.com/beta}
+            default_model: deepseek-v4-flash
+            enabled: true
+            forward_url: /v1/chat/completions
+            max_tokens_limit: 8000
+            model_capabilities:
+                deepseek-v4-pro:
+                    reasoning_efforts:
+                        - high
+                        - max
+                    reasoning_model: true
+            model_mappings:
+                '*': deepseek-v4-flash
+                claude*: deepseek-v4-flash
+                glm-4-plus: deepseek-v4-flash
+                glm-4.7: deepseek-v4-flash
+                gpt-3.5-turbo: deepseek-v4-flash
+                gpt-4: deepseek-v4-flash
+                gpt-4o: deepseek-v4-flash
+                gpt-4-turbo: deepseek-v4-flash
+                o1: deepseek-v4-pro
+                o1-mini: deepseek-v4-flash
+                o1-preview: deepseek-v4-pro
+            protocol: openai
+            support_types:
+                - openai
+                - anthropic
+            supported_models:
+                - deepseek-v4-flash
+                - deepseek-v4-pro
+            timeout: 300s
+            truncation_adapter: openai_local
         gemini_local:
             api_key: ${GEMINI_API_KEY:-}
             api_path: /v1beta/models
