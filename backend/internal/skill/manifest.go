@@ -49,6 +49,15 @@ func (p *ManifestParser) SetCompanionPromptLoadMode(mode CompanionPromptLoadMode
 
 // ParseFile 从文件解析 Manifest
 func (p *ManifestParser) ParseFile(filePath string) (*Skill, error) {
+	if isCodexSkillPath(filePath) {
+		skill, err := p.parseCodexFile(filePath, true)
+		if err != nil {
+			return nil, err
+		}
+		skill.SetSourceLayer(SkillSourceLayerUnknown)
+		return skill, nil
+	}
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, errors.Wrap(errors.ErrConfigNotFound,
@@ -75,6 +84,23 @@ func (p *ManifestParser) ParseFile(filePath string) (*Skill, error) {
 
 // ParseSummaryFile 从文件解析轻量 skill 摘要。
 func (p *ManifestParser) ParseSummaryFile(filePath string) (*SkillSummary, error) {
+	if isCodexSkillPath(filePath) {
+		summary, err := p.parseCodexSummaryFile(filePath)
+		if err != nil {
+			return nil, err
+		}
+		if summary.Source == nil {
+			summary.Source = &SkillSource{}
+		}
+		summary.Source.Path = filepath.Clean(filePath)
+		summary.Source.Dir = filepath.Dir(filePath)
+		summary.Source.Layer = SkillSourceLayerUnknown
+		summary.Source.Format = SkillSourceFormatCodex
+		summary.Source.MetadataPath = codexMetadataPathForSkillPath(filePath)
+		summary.Source.DiscoveryOnly = true
+		return summary, nil
+	}
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, errors.Wrap(errors.ErrConfigNotFound,
@@ -190,30 +216,20 @@ func (p *ManifestParser) ParseSummaryBytes(data []byte) (*SkillSummary, error) {
 func (p *ManifestParser) ParseDir(dirPath string) ([]*Skill, error) {
 	var skills []*Skill
 
-	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			// 跳过隐藏目录
-			if info.Name()[0] == '.' {
-				return filepath.SkipDir
-			}
+	err := walkSkillTree(dirPath, !isCodexSystemSkillRoot(dirPath), func(entry skillTreeEntry) error {
+		if entry.Info == nil || entry.Info.IsDir() {
 			return nil
 		}
 
-		// 只解析 .yaml 或 .yml 文件
-		ext := filepath.Ext(path)
-		if ext != ".yaml" && ext != ".yml" {
+		// 只解析 legacy manifest 或 Codex SKILL.md 入口。
+		if !shouldParseSkillManifest(entry.Path) {
 			return nil
 		}
 
-		// 解析文件
-		skill, err := p.ParseFile(path)
+		skill, err := p.ParseFile(entry.Path)
 		if err != nil {
-			// 记录错误但继续解析其他文件
-			fmt.Printf("Warning: failed to parse %s: %v\n", path, err)
+			// 记录错误但继续解析其他文件。
+			fmt.Printf("Warning: failed to parse %s: %v\n", entry.Path, err)
 			return nil
 		}
 
@@ -232,26 +248,18 @@ func (p *ManifestParser) ParseDir(dirPath string) ([]*Skill, error) {
 func (p *ManifestParser) ParseSummaryDir(dirPath string) ([]*SkillSummary, error) {
 	var summaries []*SkillSummary
 
-	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			if info.Name()[0] == '.' {
-				return filepath.SkipDir
-			}
+	err := walkSkillTree(dirPath, !isCodexSystemSkillRoot(dirPath), func(entry skillTreeEntry) error {
+		if entry.Info == nil || entry.Info.IsDir() {
 			return nil
 		}
 
-		ext := filepath.Ext(path)
-		if ext != ".yaml" && ext != ".yml" {
+		if !shouldParseSkillManifest(entry.Path) {
 			return nil
 		}
 
-		summary, err := p.ParseSummaryFile(path)
+		summary, err := p.ParseSummaryFile(entry.Path)
 		if err != nil {
-			fmt.Printf("Warning: failed to parse summary %s: %v\n", path, err)
+			fmt.Printf("Warning: failed to parse summary %s: %v\n", entry.Path, err)
 			return nil
 		}
 
@@ -273,9 +281,17 @@ func (p *ManifestParser) validate(s *Skill) error {
 		return errors.New(errors.ErrValidationFailed, "skill name is required")
 	}
 
+	if strings.TrimSpace(s.Description) == "" {
+		return errors.New(errors.ErrValidationFailed, "skill description is required")
+	}
+
 	if s.Version == "" {
 		// 设置默认版本
 		s.Version = "1.0.0"
+	}
+
+	if isCodexSkillSource(s) {
+		return nil
 	}
 
 	// 验证触发规则
@@ -345,6 +361,9 @@ func compilePattern(pattern string) (interface{}, error) {
 }
 
 func (p *ManifestParser) loadCompanionPrompt(skill *Skill, skillDir string) error {
+	if isCodexSkillSource(skill) {
+		return nil
+	}
 	if skill == nil || strings.TrimSpace(skillDir) == "" {
 		return nil
 	}
@@ -372,6 +391,9 @@ func (p *ManifestParser) loadCompanionPrompt(skill *Skill, skillDir string) erro
 }
 
 func (p *ManifestParser) discoverCompanionPromptSummary(summary *SkillSummary, skillDir string) error {
+	if summary != nil && summary.Source != nil && summary.Source.Format == SkillSourceFormatCodex {
+		return nil
+	}
 	if summary == nil || strings.TrimSpace(skillDir) == "" {
 		return nil
 	}
@@ -392,6 +414,9 @@ func (p *ManifestParser) discoverCompanionPromptSummary(summary *SkillSummary, s
 }
 
 func (p *ManifestParser) discoverCompanionPrompt(skill *Skill, skillDir string) error {
+	if isCodexSkillSource(skill) {
+		return nil
+	}
 	if skill == nil || strings.TrimSpace(skillDir) == "" {
 		return nil
 	}
@@ -415,6 +440,12 @@ func resolveSkillPrompts(skill *Skill) (string, string, error) {
 
 	systemPrompt := strings.TrimSpace(skill.SystemPrompt)
 	userPrompt := strings.TrimSpace(skill.UserPrompt)
+	if isCodexSkillSource(skill) {
+		if systemPrompt == "" {
+			systemPrompt = strings.TrimSpace(skill.Body)
+		}
+		return systemPrompt, userPrompt, nil
+	}
 	promptPath := ""
 	if skill.Source != nil {
 		promptPath = strings.TrimSpace(skill.Source.PromptPath)
@@ -444,6 +475,57 @@ func resolveSkillPrompts(skill *Skill) (string, string, error) {
 
 func discoverPromptPath(skillDir string) string {
 	return filepath.Join(skillDir, "prompt.md")
+}
+
+func shouldParseSkillManifest(path string) bool {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" || path == "." {
+		return false
+	}
+	base := filepath.Base(path)
+	if base == "" {
+		return false
+	}
+	if strings.EqualFold(base, "openai.yaml") {
+		return false
+	}
+	if isSkillResourcePath(path) {
+		return false
+	}
+	if strings.EqualFold(base, "SKILL.md") {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(base))
+	return ext == ".yaml" || ext == ".yml"
+}
+
+func isSkillResourcePath(path string) bool {
+	path = filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+	if path == "" || path == "." {
+		return false
+	}
+
+	for _, segment := range strings.Split(path, "/") {
+		switch strings.ToLower(strings.TrimSpace(segment)) {
+		case "agents", "assets", "references", "scripts":
+			return true
+		}
+	}
+	return false
+}
+
+func isHiddenFileOrDir(name string) bool {
+	return strings.HasPrefix(name, ".") && name != "."
+}
+
+func isCodexSkillSource(skill *Skill) bool {
+	if skill == nil || skill.Source == nil {
+		return false
+	}
+	if skill.Source.Format == SkillSourceFormatCodex {
+		return true
+	}
+	return isCodexSkillPath(skill.Source.Path)
 }
 
 func parsePromptMarkdown(content string) (string, string) {

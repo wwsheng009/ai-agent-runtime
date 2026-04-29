@@ -103,3 +103,49 @@ triggers:
 	registry.mu.RUnlock()
 	assert.Nil(t, entry)
 }
+
+func TestRegistry_RegisterAllowsCodexSkillsWithSameNameDifferentPaths(t *testing.T) {
+	registry := NewRegistry(nil)
+
+	firstPath := filepath.Join(t.TempDir(), "first", "SKILL.md")
+	secondPath := filepath.Join(t.TempDir(), "second", "SKILL.md")
+
+	first := &Skill{
+		Name:        "shared-codex",
+		Description: "first codex skill",
+		Source: &SkillSource{
+			Path:   firstPath,
+			Dir:    filepath.Dir(firstPath),
+			Format: SkillSourceFormatCodex,
+		},
+	}
+	second := &Skill{
+		Name:        "shared-codex",
+		Description: "second codex skill",
+		Source: &SkillSource{
+			Path:   secondPath,
+			Dir:    filepath.Dir(secondPath),
+			Format: SkillSourceFormatCodex,
+		},
+	}
+
+	require.NoError(t, registry.Register(first))
+	require.NoError(t, registry.Register(second))
+
+	require.Equal(t, 2, registry.Count())
+
+	gotFirst, ok := registry.GetByPath(firstPath)
+	require.True(t, ok)
+	require.Same(t, first, gotFirst)
+
+	gotSecond, ok := registry.GetByPath(secondPath)
+	require.True(t, ok)
+	require.Same(t, second, gotSecond)
+
+	gotByName, ok := registry.Get("shared-codex")
+	require.True(t, ok)
+	require.Same(t, first, gotByName)
+
+	list := registry.List()
+	require.Len(t, list, 2)
+}

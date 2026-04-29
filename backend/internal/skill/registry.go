@@ -2,6 +2,7 @@ package skill
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -31,7 +32,9 @@ type ToolInfo struct {
 type Registry struct {
 	mu          sync.RWMutex
 	skills      map[string]*Skill
+	skillsByPath map[string]*Skill
 	summaries   map[string]*SkillSummary
+	summariesByPath map[string]*SkillSummary
 	loadedCache map[string]*hydratedSkillCacheEntry
 
 	// 按触发类型索引
@@ -46,13 +49,15 @@ type Registry struct {
 // NewRegistry 创建注册表
 func NewRegistry(mcpManager MCPManager) *Registry {
 	return &Registry{
-		skills:       make(map[string]*Skill),
-		summaries:    make(map[string]*SkillSummary),
-		loadedCache:  make(map[string]*hydratedSkillCacheEntry),
-		keywordIndex: make(map[string][]*Skill),
-		patternIndex: make(map[string][]*Skill),
-		weightIndex:  make(map[*Skill]float64),
-		mcpManager:   mcpManager,
+		skills:          make(map[string]*Skill),
+		skillsByPath:    make(map[string]*Skill),
+		summaries:       make(map[string]*SkillSummary),
+		summariesByPath: make(map[string]*SkillSummary),
+		loadedCache:     make(map[string]*hydratedSkillCacheEntry),
+		keywordIndex:    make(map[string][]*Skill),
+		patternIndex:    make(map[string][]*Skill),
+		weightIndex:     make(map[*Skill]float64),
+		mcpManager:      mcpManager,
 	}
 }
 
@@ -66,9 +71,42 @@ func (r *Registry) Register(s *Skill) error {
 		return err
 	}
 
+	pathKey := skillIdentityPath(s)
+	if pathKey == "" {
+		pathKey = s.Name
+	}
+
+	incomingFormat := skillSourceFormat(s)
+
+	if existing, ok := r.skillsByPath[pathKey]; ok && existing != nil {
+		r.removeSkillLocked(existing)
+	} else if existing, ok := r.skills[s.Name]; ok && existing != nil && skillIdentityPath(existing) != pathKey {
+		existingFormat := skillSourceFormat(existing)
+		if existingFormat != SkillSourceFormatCodex && incomingFormat != SkillSourceFormatCodex {
+			return nil
+		}
+		if existingFormat == SkillSourceFormatLegacy && incomingFormat == SkillSourceFormatCodex {
+			// Keep the legacy primary name mapping stable while allowing the Codex skill
+			// to coexist by path.
+		}
+	}
+
 	// 存储 Skill
-	r.skills[s.Name] = s
+	r.skillsByPath[pathKey] = s
 	r.storeSummaryLocked(s)
+
+	// 维护 name 索引的兼容语义。
+	if incomingFormat != SkillSourceFormatCodex {
+		r.skills[s.Name] = s
+		if summary := r.summariesByPath[pathKey]; summary != nil {
+			r.summaries[s.Name] = summary
+		}
+	} else if _, exists := r.skills[s.Name]; !exists {
+		r.skills[s.Name] = s
+		if summary := r.summariesByPath[pathKey]; summary != nil {
+			r.summaries[s.Name] = summary
+		}
+	}
 
 	// 构建索引
 	r.buildIndex(s)
@@ -82,11 +120,17 @@ func (r *Registry) Unregister(name string) {
 	defer r.mu.Unlock()
 
 	if s, ok := r.skills[name]; ok {
-		r.removeFromIndex(s)
-		delete(r.skills, name)
-		delete(r.summaries, name)
-		delete(r.loadedCache, name)
-		delete(r.weightIndex, s)
+		r.removeSkillLocked(s)
+	}
+}
+
+// UnregisterByPath 按路径注销 Skill。
+func (r *Registry) UnregisterByPath(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if s, ok := r.skillsByPath[filepath.Clean(strings.TrimSpace(path))]; ok {
+		r.removeSkillLocked(s)
 	}
 }
 
@@ -99,13 +143,26 @@ func (r *Registry) Get(name string) (*Skill, bool) {
 	return s, ok
 }
 
+// GetByPath 获取指定路径的 Skill。
+func (r *Registry) GetByPath(path string) (*Skill, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	s, ok := r.skillsByPath[filepath.Clean(strings.TrimSpace(path))]
+	return s, ok
+}
+
 // List 列出所有 Skills
 func (r *Registry) List() []*Skill {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	skills := make([]*Skill, 0, len(r.skills))
-	for _, s := range r.skills {
+	source := r.skillsByPath
+	if len(source) == 0 {
+		source = r.skills
+	}
+	skills := make([]*Skill, 0, len(source))
+	for _, s := range source {
 		skills = append(skills, s)
 	}
 	return skills
@@ -123,13 +180,29 @@ func (r *Registry) GetSummary(name string) (*SkillSummary, bool) {
 	return cloneSkillSummary(summary), true
 }
 
+// GetSummaryByPath 获取指定路径的 Skill 摘要。
+func (r *Registry) GetSummaryByPath(path string) (*SkillSummary, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	summary, ok := r.summariesByPath[filepath.Clean(strings.TrimSpace(path))]
+	if !ok || summary == nil {
+		return nil, false
+	}
+	return cloneSkillSummary(summary), true
+}
+
 // ListSummaries 列出所有 Skill 摘要。
 func (r *Registry) ListSummaries() []*SkillSummary {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	summaries := make([]*SkillSummary, 0, len(r.summaries))
-	for _, summary := range r.summaries {
+	source := r.summariesByPath
+	if len(source) == 0 {
+		source = r.summaries
+	}
+	summaries := make([]*SkillSummary, 0, len(source))
+	for _, summary := range source {
 		if summary == nil {
 			continue
 		}
@@ -202,19 +275,11 @@ func (r *Registry) SearchWithContext(text string, context map[string]interface{}
 
 // RegisterBatch 批量注册 Skills
 func (r *Registry) RegisterBatch(skills []*Skill) []error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	var errs []error
 	for _, skill := range skills {
-		if err := r.validate(skill); err != nil {
+		if err := r.Register(skill); err != nil {
 			errs = append(errs, err)
-			continue
 		}
-
-		r.skills[skill.Name] = skill
-		r.storeSummaryLocked(skill)
-		r.buildIndex(skill)
 	}
 
 	return errs
@@ -226,7 +291,9 @@ func (r *Registry) Clear() {
 	defer r.mu.Unlock()
 
 	r.skills = make(map[string]*Skill)
+	r.skillsByPath = make(map[string]*Skill)
 	r.summaries = make(map[string]*SkillSummary)
+	r.summariesByPath = make(map[string]*SkillSummary)
 	r.loadedCache = make(map[string]*hydratedSkillCacheEntry)
 	r.keywordIndex = make(map[string][]*Skill)
 	r.patternIndex = make(map[string][]*Skill)
@@ -237,6 +304,9 @@ func (r *Registry) Clear() {
 func (r *Registry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if len(r.skillsByPath) > 0 {
+		return len(r.skillsByPath)
+	}
 	return len(r.skills)
 }
 
@@ -247,9 +317,12 @@ func (r *Registry) validate(s *Skill) error {
 		return errors.New(errors.ErrValidationFailed, "skill name is required")
 	}
 
-	// 检查是否已存在
-	if _, exists := r.skills[s.Name]; exists {
-		return errors.New(errors.ErrValidationFailed, fmt.Sprintf("skill already registered: %s", s.Name))
+	if strings.TrimSpace(s.Description) == "" {
+		return errors.New(errors.ErrValidationFailed, "skill description is required")
+	}
+
+	if isCodexSkillSource(s) {
+		return nil
 	}
 
 	// 验证工具是否存在（如果启用了 验证）
@@ -324,8 +397,15 @@ func deduplicateSkills(skills []*Skill) []*Skill {
 	var result []*Skill
 
 	for _, s := range skills {
-		if !seen[s.Name] {
-			seen[s.Name] = true
+		if s == nil {
+			continue
+		}
+		key := skillIdentityPath(s)
+		if key == "" {
+			key = s.Name
+		}
+		if !seen[key] {
+			seen[key] = true
 			result = append(result, s)
 		}
 	}
@@ -358,7 +438,11 @@ func (r *Registry) FindSkillsByTool(toolName string) []*Skill {
 	defer r.mu.RUnlock()
 
 	var results []*Skill
-	for _, s := range r.skills {
+	source := r.skillsByPath
+	if len(source) == 0 {
+		source = r.skills
+	}
+	for _, s := range source {
 		for _, tool := range s.Tools {
 			if tool == toolName {
 				results = append(results, s)
@@ -393,14 +477,18 @@ func (r *Registry) storeSummaryLocked(item *Skill) {
 	if summary == nil {
 		return
 	}
-	r.summaries[item.Name] = summary
+	pathKey := skillIdentityPath(item)
+	if pathKey == "" {
+		pathKey = item.Name
+	}
+	r.summariesByPath[pathKey] = summary
 }
 
-func (r *Registry) getLoadedSkill(name string, manifest hydratedSkillFileStamp, prompt hydratedSkillFileStamp) *Skill {
+func (r *Registry) getLoadedSkill(key string, manifest hydratedSkillFileStamp, prompt hydratedSkillFileStamp) *Skill {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	entry, ok := r.loadedCache[strings.TrimSpace(name)]
+	entry, ok := r.loadedCache[strings.TrimSpace(key)]
 	if !ok || entry == nil || entry.skill == nil {
 		return nil
 	}
@@ -424,4 +512,93 @@ func (r *Registry) putLoadedSkill(name string, manifest hydratedSkillFileStamp, 
 		skill:    cloneSkill(item),
 	}
 	r.mu.Unlock()
+}
+
+func (r *Registry) removeSkillLocked(item *Skill) {
+	if item == nil {
+		return
+	}
+
+	pathKey := skillIdentityPath(item)
+	if pathKey == "" {
+		pathKey = item.Name
+	}
+	nameKey := strings.TrimSpace(item.Name)
+
+	r.removeFromIndex(item)
+	delete(r.skillsByPath, pathKey)
+	delete(r.loadedCache, pathKey)
+	if nameKey != "" && nameKey != pathKey {
+		delete(r.loadedCache, nameKey)
+	}
+	delete(r.weightIndex, item)
+
+	if current, ok := r.skills[item.Name]; ok && current == item {
+		delete(r.skills, item.Name)
+		r.refreshPrimarySkillForNameLocked(item.Name)
+	}
+
+	if summary, ok := r.summariesByPath[pathKey]; ok && summary != nil {
+		delete(r.summariesByPath, pathKey)
+		if current, ok := r.summaries[item.Name]; ok && current == summary {
+			delete(r.summaries, item.Name)
+			r.refreshPrimarySummaryForNameLocked(item.Name)
+		}
+	}
+}
+
+func (r *Registry) refreshPrimarySkillForNameLocked(name string) {
+	var legacyCandidate *Skill
+	var codexCandidate *Skill
+	for _, item := range r.skillsByPath {
+		if item == nil || item.Name != name {
+			continue
+		}
+		if skillSourceFormat(item) == SkillSourceFormatCodex {
+			if codexCandidate == nil {
+				codexCandidate = item
+			}
+			continue
+		}
+		if legacyCandidate == nil {
+			legacyCandidate = item
+		}
+	}
+
+	switch {
+	case legacyCandidate != nil:
+		r.skills[name] = legacyCandidate
+	case codexCandidate != nil:
+		r.skills[name] = codexCandidate
+	default:
+		delete(r.skills, name)
+	}
+}
+
+func (r *Registry) refreshPrimarySummaryForNameLocked(name string) {
+	var legacyCandidate *SkillSummary
+	var codexCandidate *SkillSummary
+	for _, item := range r.summariesByPath {
+		if item == nil || item.Name != name {
+			continue
+		}
+		if skillSummarySourceFormat(item) == SkillSourceFormatCodex {
+			if codexCandidate == nil {
+				codexCandidate = item
+			}
+			continue
+		}
+		if legacyCandidate == nil {
+			legacyCandidate = item
+		}
+	}
+
+	switch {
+	case legacyCandidate != nil:
+		r.summaries[name] = legacyCandidate
+	case codexCandidate != nil:
+		r.summaries[name] = codexCandidate
+	default:
+		delete(r.summaries, name)
+	}
 }

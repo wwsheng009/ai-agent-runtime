@@ -14,6 +14,7 @@ type WorkflowStepSummary struct {
 type SkillSummary struct {
 	Name              string                `yaml:"name" json:"name"`
 	Description       string                `yaml:"description" json:"description"`
+	ShortDescription   string                `yaml:"shortDescription,omitempty" json:"shortDescription,omitempty"`
 	Version           string                `yaml:"version,omitempty" json:"version,omitempty"`
 	Category          string                `yaml:"category,omitempty" json:"category,omitempty"`
 	Capabilities      []string              `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
@@ -26,6 +27,7 @@ type SkillSummary struct {
 	WorkflowStepCount int                   `yaml:"workflow_step_count,omitempty" json:"workflow_step_count,omitempty"`
 	Handler           SkillHandler          `yaml:"-" json:"-"`
 	Source            *SkillSource          `yaml:"-" json:"source,omitempty"`
+	Codex             *CodexSkillMetadata   `yaml:"-" json:"-"`
 }
 
 // HasWorkflow 返回摘要是否声明 workflow。
@@ -45,6 +47,7 @@ func SummaryFromSkill(item *Skill) *SkillSummary {
 	summary := &SkillSummary{
 		Name:         item.Name,
 		Description:  item.Description,
+		ShortDescription: item.ShortDescription,
 		Version:      item.Version,
 		Category:     item.Category,
 		Capabilities: append([]string(nil), item.Capabilities...),
@@ -79,6 +82,9 @@ func SummaryFromSkill(item *Skill) *SkillSummary {
 		sourceCopy := *item.Source
 		summary.Source = &sourceCopy
 	}
+	if item.Codex != nil {
+		summary.Codex = item.Codex.CloneWithoutBody()
+	}
 
 	return summary
 }
@@ -92,6 +98,7 @@ func (s *SkillSummary) ToSkillStub() *Skill {
 	stub := &Skill{
 		Name:         s.Name,
 		Description:  s.Description,
+		ShortDescription: s.ShortDescription,
 		Version:      s.Version,
 		Category:     s.Category,
 		Capabilities: append([]string(nil), s.Capabilities...),
@@ -127,6 +134,9 @@ func (s *SkillSummary) ToSkillStub() *Skill {
 		sourceCopy.DiscoveryOnly = true
 		stub.Source = &sourceCopy
 	}
+	if s.Codex != nil {
+		stub.Codex = s.Codex.CloneWithoutBody()
+	}
 
 	return stub
 }
@@ -151,6 +161,7 @@ func cloneSkillSummary(item *SkillSummary) *SkillSummary {
 		return nil
 	}
 	cloned := *item
+	cloned.ShortDescription = item.ShortDescription
 	cloned.Capabilities = append([]string(nil), item.Capabilities...)
 	cloned.Tags = append([]string(nil), item.Tags...)
 	cloned.Triggers = cloneTriggers(item.Triggers)
@@ -178,6 +189,9 @@ func cloneSkillSummary(item *SkillSummary) *SkillSummary {
 	if item.Source != nil {
 		sourceCopy := *item.Source
 		cloned.Source = &sourceCopy
+	}
+	if item.Codex != nil {
+		cloned.Codex = item.Codex.Clone()
 	}
 	return &cloned
 }

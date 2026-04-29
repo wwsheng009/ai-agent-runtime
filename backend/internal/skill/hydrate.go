@@ -44,21 +44,28 @@ func HydrateSkillWithRegistry(item *Skill, registry *Registry) (*Skill, error) {
 		return nil, err
 	}
 
-	promptPath := strings.TrimSpace(item.Source.PromptPath)
-	if promptPath == "" {
-		promptPath = discoverPromptPath(filepath.Dir(manifestPath))
+	companionPath := strings.TrimSpace(item.Source.PromptPath)
+	if companionPath == "" {
+		if isCodexSkillSource(item) {
+			companionPath = strings.TrimSpace(item.Source.MetadataPath)
+			if companionPath == "" {
+				companionPath = codexMetadataPathForSkillPath(manifestPath)
+			}
+		} else {
+			companionPath = discoverPromptPath(filepath.Dir(manifestPath))
+		}
 	}
-	promptStamp, err := statHydratedSkillFile(promptPath)
+	promptStamp, err := statHydratedSkillFile(companionPath)
 	if err != nil {
 		return nil, err
 	}
 
 	if registry != nil {
-		if cached := registry.getLoadedSkill(item.Name, manifestStamp, promptStamp); cached != nil {
+		if cached := registry.getLoadedSkill(skillHydrationCacheKey(item), manifestStamp, promptStamp); cached != nil {
 			return mergeHydratedSkillMetadata(cloneSkill(cached), item), nil
 		}
 	} else {
-		if cached := getHydratedSkillCacheEntry(manifestPath, manifestStamp, promptStamp); cached != nil {
+		if cached := getHydratedSkillCacheEntry(skillHydrationCacheKey(item), manifestStamp, promptStamp); cached != nil {
 			return mergeHydratedSkillMetadata(cloneSkill(cached), item), nil
 		}
 	}
@@ -75,9 +82,9 @@ func HydrateSkillWithRegistry(item *Skill, registry *Registry) (*Skill, error) {
 
 	loaded = mergeHydratedSkillMetadata(loaded, item)
 	if registry != nil {
-		registry.putLoadedSkill(item.Name, manifestStamp, promptStamp, loaded)
+		registry.putLoadedSkill(skillHydrationCacheKey(item), manifestStamp, promptStamp, loaded)
 	} else {
-		putHydratedSkillCacheEntry(manifestPath, manifestStamp, promptStamp, loaded)
+		putHydratedSkillCacheEntry(skillHydrationCacheKey(item), manifestStamp, promptStamp, loaded)
 	}
 	return cloneSkill(loaded), nil
 }
@@ -167,10 +174,21 @@ func mergeHydratedSkillMetadata(loaded *Skill, source *Skill) *Skill {
 		loaded.Source.Dir = firstNonEmptyString(loaded.Source.Dir, source.Source.Dir)
 		loaded.Source.Layer = firstNonEmptyString(source.Source.Layer, loaded.Source.Layer)
 		loaded.Source.PromptPath = firstNonEmptyString(loaded.Source.PromptPath, source.Source.PromptPath)
+		loaded.Source.MetadataPath = firstNonEmptyString(loaded.Source.MetadataPath, source.Source.MetadataPath)
+		loaded.Source.Format = firstNonEmptyString(loaded.Source.Format, source.Source.Format)
 	}
 	loaded.Source.DiscoveryOnly = false
 	if source != nil && loaded.Handler == nil {
 		loaded.Handler = source.Handler
+	}
+	if source != nil && strings.TrimSpace(loaded.ShortDescription) == "" {
+		loaded.ShortDescription = strings.TrimSpace(source.ShortDescription)
+	}
+	if source != nil && strings.TrimSpace(loaded.Body) == "" {
+		loaded.Body = strings.TrimSpace(source.Body)
+	}
+	if loaded.Codex == nil && source != nil && source.Codex != nil {
+		loaded.Codex = source.Codex.Clone()
 	}
 	return loaded
 }
@@ -180,11 +198,13 @@ func cloneSkill(item *Skill) *Skill {
 		return nil
 	}
 	cloned := *item
+	cloned.ShortDescription = item.ShortDescription
 	cloned.Capabilities = append([]string(nil), item.Capabilities...)
 	cloned.Tags = append([]string(nil), item.Tags...)
 	cloned.Triggers = cloneTriggers(item.Triggers)
 	cloned.Tools = append([]string(nil), item.Tools...)
 	cloned.Permissions = append([]string(nil), item.Permissions...)
+	cloned.Body = item.Body
 	cloned.Context = ContextConfig{
 		Files:       append([]string(nil), item.Context.Files...),
 		Environment: append([]string(nil), item.Context.Environment...),
@@ -207,6 +227,9 @@ func cloneSkill(item *Skill) *Skill {
 	if item.Source != nil {
 		sourceCopy := *item.Source
 		cloned.Source = &sourceCopy
+	}
+	if item.Codex != nil {
+		cloned.Codex = item.Codex.Clone()
 	}
 	return &cloned
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -263,9 +264,8 @@ func (h *HotReload) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// 只处理 skill.yaml 和 skill.yml
-	ext := filepath.Ext(event.Name)
-	if ext != ".yaml" && ext != ".yml" {
+	manifestPath, kind := skillManifestPathForWatchedFile(event.Name)
+	if manifestPath == "" {
 		return
 	}
 
@@ -284,7 +284,7 @@ func (h *HotReload) handleEvent(event fsnotify.Event) {
 
 	// 延迟后处理，确保文件写入完成
 	time.AfterFunc(debounceTime, func() {
-		h.processFile(event.Name, event.Op)
+		h.processFile(manifestPath, kind, event.Op)
 	})
 
 	// 处理目录创建事件（监听新创建的子目录）
@@ -298,13 +298,87 @@ func (h *HotReload) handleDirectoryCreate(path string) {
 	// fsnotify.Watcher 不提供直接检查是否监听的方法
 	// 直接尝试添加目录监听，如果已监听 fsnotify 会返回错误
 	if err := h.watcher.Add(path); err == nil {
+		_ = h.addSubdirectories(path)
 		return // 成功添加
 	}
 	// 添加失败通常意味着已经在监听，忽略错误
 }
 
+type skillManifestKind int
+
+const (
+	skillManifestKindUnknown skillManifestKind = iota
+	skillManifestKindManifest
+	skillManifestKindCompanion
+)
+
+func skillManifestPathForWatchedFile(path string) (string, skillManifestKind) {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" || path == "." {
+		return "", skillManifestKindUnknown
+	}
+
+	base := filepath.Base(path)
+	switch {
+	case strings.EqualFold(base, "prompt.md"):
+		if manifest := locateLegacySkillManifest(path); manifest != "" {
+			return manifest, skillManifestKindCompanion
+		}
+		return "", skillManifestKindUnknown
+	case strings.EqualFold(base, "openai.yaml") && strings.EqualFold(filepath.Base(filepath.Dir(path)), "agents"):
+		return codexSkillPathForMetadataPath(path), skillManifestKindCompanion
+	default:
+		if shouldParseSkillManifest(path) {
+			return path, skillManifestKindManifest
+		}
+		return "", skillManifestKindUnknown
+	}
+}
+
+func locateLegacySkillManifest(path string) string {
+	dir := filepath.Dir(filepath.Clean(strings.TrimSpace(path)))
+	for _, candidate := range []string{
+		"skill.yaml",
+		"skill.yml",
+		"system.yaml",
+		"system.yml",
+		"extra.yaml",
+		"extra.yml",
+	} {
+		manifest := filepath.Join(dir, candidate)
+		if info, err := os.Stat(manifest); err == nil && !info.IsDir() {
+			return manifest
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+
+	candidates := make([]string, 0)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.EqualFold(name, "prompt.md") || strings.EqualFold(name, "SKILL.md") || strings.EqualFold(name, "openai.yaml") {
+			continue
+		}
+		manifest := filepath.Join(dir, name)
+		if !shouldParseSkillManifest(manifest) {
+			continue
+		}
+		candidates = append(candidates, manifest)
+	}
+	sort.Strings(candidates)
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
+}
+
 // processFile 处理文件变更
-func (h *HotReload) processFile(filePath string, op fsnotify.Op) {
+func (h *HotReload) processFile(manifestPath string, kind skillManifestKind, op fsnotify.Op) {
 	h.mu.Lock()
 	enabled := h.enabled
 	h.mu.Unlock()
@@ -315,7 +389,11 @@ func (h *HotReload) processFile(filePath string, op fsnotify.Op) {
 
 	// 如果是删除事件
 	if op&fsnotify.Remove == fsnotify.Remove {
-		h.removeSkillByFile(filePath)
+		if kind == skillManifestKindManifest {
+			h.removeSkillByManifest(manifestPath)
+			return
+		}
+		h.reloadSkill(manifestPath)
 		return
 	}
 
@@ -324,7 +402,7 @@ func (h *HotReload) processFile(filePath string, op fsnotify.Op) {
 		op&fsnotify.Write == fsnotify.Write ||
 		op&fsnotify.Rename == fsnotify.Rename {
 		// 重加载 skill
-		h.reloadSkill(filePath)
+		h.reloadSkill(manifestPath)
 	}
 }
 
@@ -356,7 +434,9 @@ func (h *HotReload) discoverSkillStub(filePath string) (*Skill, error) {
 
 // reloadSkill 重加载单个 skill
 func (h *HotReload) reloadSkill(filePath string) {
-	InvalidateHydratedSkill(filePath)
+	if h.registry == nil {
+		return
+	}
 	// discovery skill stub
 	skill, err := h.discoverSkillStub(filePath)
 	if err != nil {
@@ -368,69 +448,56 @@ func (h *HotReload) reloadSkill(filePath string) {
 		})
 		return
 	}
+	InvalidateHydratedSkill(skillHydrationCacheKey(skill))
 	if h.registry != nil {
-		h.registry.InvalidateLoadedSkill(skill.Name)
+		h.registry.InvalidateLoadedSkill(skillHydrationCacheKey(skill))
 	}
 
-	// 检查是否已存在
-	existing, exists := h.registry.Get(skill.Name)
+	existing, exists := h.registry.GetByPath(filePath)
+	if !exists && skillSourceFormat(skill) != SkillSourceFormatCodex {
+		if existingByName, ok := h.registry.Get(skill.Name); ok {
+			if !h.shouldReplaceExistingSkill(existingByName, filePath) {
+				return
+			}
+			if existingByName != nil && existingByName.Source != nil {
+				h.registry.UnregisterByPath(skillIdentityPath(existingByName))
+			} else {
+				h.registry.Unregister(skill.Name)
+			}
+		}
+	} else if exists && existing != nil {
+		h.registry.UnregisterByPath(filePath)
+	}
 
+	if err := h.registry.Register(skill); err != nil {
+		h.emitEvent(&ReloadEvent{
+			Type:      ReloadEventError,
+			SkillName: skill.Name,
+			FilePath:  filePath,
+			Error:     fmt.Sprintf("failed to register skill: %v", err),
+			Timestamp: time.Now(),
+		})
+		return
+	}
+
+	h.mu.Lock()
+	h.skillFiles[filePath] = skill.Name
+	h.mu.Unlock()
+
+	eventType := ReloadEventSkillAdded
 	if exists {
-		if !h.shouldReplaceExistingSkill(existing, filePath) {
-			return
-		}
-
-		// 更新 skill - 先删除再重新注册
-		h.registry.Unregister(skill.Name)
-		if err := h.registry.Register(skill); err != nil {
-			h.emitEvent(&ReloadEvent{
-				Type:      ReloadEventError,
-				SkillName: skill.Name,
-				FilePath:  filePath,
-				Error:     fmt.Sprintf("failed to update skill: %v", err),
-				Timestamp: time.Now(),
-			})
-			return
-		}
-
-		h.mu.Lock()
-		h.skillFiles[filePath] = skill.Name
-		h.mu.Unlock()
-
-		h.emitEvent(&ReloadEvent{
-			Type:      ReloadEventSkillUpdated,
-			SkillName: skill.Name,
-			FilePath:  filePath,
-			Timestamp: time.Now(),
-		})
-	} else {
-		// 新增 skill
-		if err := h.registry.Register(skill); err != nil {
-			h.emitEvent(&ReloadEvent{
-				Type:      ReloadEventError,
-				SkillName: skill.Name,
-				FilePath:  filePath,
-				Error:     fmt.Sprintf("failed to register skill: %v", err),
-				Timestamp: time.Now(),
-			})
-			return
-		}
-
-		h.mu.Lock()
-		h.skillFiles[filePath] = skill.Name
-		h.mu.Unlock()
-
-		h.emitEvent(&ReloadEvent{
-			Type:      ReloadEventSkillAdded,
-			SkillName: skill.Name,
-			FilePath:  filePath,
-			Timestamp: time.Now(),
-		})
+		eventType = ReloadEventSkillUpdated
 	}
+
+	h.emitEvent(&ReloadEvent{
+		Type:      eventType,
+		SkillName: skill.Name,
+		FilePath:  filePath,
+		Timestamp: time.Now(),
+	})
 }
 
-func (h *HotReload) removeSkillByFile(filePath string) {
-	InvalidateHydratedSkill(filePath)
+func (h *HotReload) removeSkillByManifest(filePath string) {
 	h.mu.Lock()
 	skillName, exists := h.skillFiles[filePath]
 	if exists {
@@ -438,20 +505,28 @@ func (h *HotReload) removeSkillByFile(filePath string) {
 	}
 	h.mu.Unlock()
 
+	InvalidateHydratedSkill(filePath)
+	InvalidateHydratedSkill(skillName)
+
 	if !exists || skillName == "" {
-		h.emitEvent(&ReloadEvent{
-			Type:      ReloadEventError,
-			FilePath:  filePath,
-			Error:     "skill file removed but mapping not found",
-			Timestamp: time.Now(),
-		})
-		return
+		if h.registry != nil {
+			if tracked, ok := h.registry.GetByPath(filePath); ok && tracked != nil {
+				skillName = tracked.Name
+				exists = true
+			} else {
+				return
+			}
+		} else {
+			return
+		}
 	}
 
 	if h.registry != nil {
+		h.registry.InvalidateLoadedSkill(filePath)
 		h.registry.InvalidateLoadedSkill(skillName)
+		h.registry.UnregisterByPath(filePath)
+		h.registry.Unregister(skillName)
 	}
-	h.registry.Unregister(skillName)
 	h.emitEvent(&ReloadEvent{
 		Type:      ReloadEventSkillRemoved,
 		SkillName: skillName,
@@ -476,33 +551,30 @@ func (h *HotReload) reloadAllSkills(skillDirs []string) error {
 	}
 
 	loaded := make([]fileSkill, 0)
-	seenSkillNames := make(map[string]struct{})
+	seenSkillPaths := make(map[string]struct{})
 	for _, skillDir := range normalized {
-		err := filepath.Walk(skillDir, func(path string, info os.FileInfo, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if info.IsDir() {
-				if info.Name() != "" && info.Name()[0] == '.' {
-					return filepath.SkipDir
-				}
+		err := walkSkillTree(skillDir, !isCodexSystemSkillRoot(skillDir), func(entry skillTreeEntry) error {
+			if entry.Info == nil || entry.Info.IsDir() {
 				return nil
 			}
 
-			ext := filepath.Ext(path)
-			if ext != ".yaml" && ext != ".yml" {
+			if !shouldParseSkillManifest(entry.Path) {
 				return nil
 			}
 
-			skill, loadErr := h.discoverSkillStub(path)
+			skill, loadErr := h.discoverSkillStub(entry.Path)
 			if loadErr != nil {
 				return loadErr
 			}
-			if _, exists := seenSkillNames[skill.Name]; exists {
+			pathKey := skillIdentityPath(skill)
+			if pathKey == "" {
+				pathKey = entry.Path
+			}
+			if _, exists := seenSkillPaths[pathKey]; exists {
 				return nil
 			}
-			seenSkillNames[skill.Name] = struct{}{}
-			loaded = append(loaded, fileSkill{filePath: path, skill: skill})
+			seenSkillPaths[pathKey] = struct{}{}
+			loaded = append(loaded, fileSkill{filePath: entry.Path, skill: skill})
 			return nil
 		})
 		if err != nil {
@@ -510,11 +582,17 @@ func (h *HotReload) reloadAllSkills(skillDirs []string) error {
 		}
 	}
 
+	if h.registry == nil {
+		return fmt.Errorf("registry is not configured")
+	}
 	h.registry.Clear()
 	newSkillFiles := make(map[string]string, len(loaded))
 	for _, item := range loaded {
 		if err := h.registry.Register(item.skill); err != nil {
 			return err
+		}
+		if stored, ok := h.registry.GetByPath(item.filePath); !ok || stored != item.skill {
+			continue
 		}
 		newSkillFiles[item.filePath] = item.skill.Name
 	}
@@ -530,6 +608,9 @@ func (h *HotReload) sourceLayerForFile(path string) string {
 	for index, dir := range h.skillDirs {
 		normalizedDir := filepath.Clean(dir)
 		if normalizedPath == normalizedDir || strings.HasPrefix(normalizedPath, normalizedDir+string(os.PathSeparator)) {
+			if isCodexSystemSkillRoot(normalizedDir) {
+				return SkillSourceLayerSystem
+			}
 			if index == 0 {
 				return SkillSourceLayerSystem
 			}
@@ -596,26 +677,13 @@ func (h *HotReload) emitEvent(event *ReloadEvent) {
 
 // addSubdirectories 递归添加子目录
 func (h *HotReload) addSubdirectories(dir string) error {
-	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// 跳过隐藏目录
-		if filepath.Base(path)[0] == '.' {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
+	return walkSkillTree(dir, !isCodexSystemSkillRoot(dir), func(entry skillTreeEntry) error {
+		if entry.Info == nil || !entry.Info.IsDir() {
 			return nil
 		}
-
-		// 添加目录监听
-		if info.IsDir() {
-			if err := h.watcher.Add(path); err != nil {
-				// 忽略错误，可能是权限问题
-			}
+		if err := h.watcher.Add(entry.Path); err != nil {
+			// 忽略错误，可能是权限问题或已监听。
 		}
-
 		return nil
 	})
 }

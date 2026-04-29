@@ -1,6 +1,8 @@
 package skill
 
 import (
+	"strings"
+
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -17,6 +19,8 @@ type SkillSource struct {
 	Dir           string `yaml:"-" json:"dir,omitempty"`
 	Layer         string `yaml:"-" json:"layer,omitempty"`
 	PromptPath    string `yaml:"-" json:"prompt_path,omitempty"`
+	MetadataPath  string `yaml:"-" json:"metadata_path,omitempty"`
+	Format        string `yaml:"-" json:"format,omitempty"`
 	DiscoveryOnly bool   `yaml:"-" json:"-"`
 }
 
@@ -25,6 +29,7 @@ type Skill struct {
 	// 基本信息
 	Name         string   `yaml:"name" json:"name"`
 	Description  string   `yaml:"description" json:"description"`
+	ShortDescription string `yaml:"shortDescription,omitempty" json:"shortDescription,omitempty"`
 	Version      string   `yaml:"version" json:"version"`
 	Category     string   `yaml:"category" json:"category"`
 	Capabilities []string `yaml:"capabilities" json:"capabilities"`
@@ -39,6 +44,7 @@ type Skill struct {
 	// Prompt 模板
 	SystemPrompt string `yaml:"systemPrompt,omitempty" json:"systemPrompt,omitempty"`
 	UserPrompt   string `yaml:"userPrompt,omitempty" json:"userPrompt,omitempty"`
+	Body         string `yaml:"-" json:"-"`
 
 	// 工作流定义 (可选)
 	Workflow *Workflow `yaml:"workflow,omitempty" json:"workflow,omitempty"`
@@ -54,6 +60,8 @@ type Skill struct {
 
 	// 运行时来源信息
 	Source *SkillSource `yaml:"-" json:"source,omitempty"`
+	// Codex-style metadata captured during discovery/hydration.
+	Codex *CodexSkillMetadata `yaml:"-" json:"-"`
 }
 
 // Trigger 触发规则
@@ -114,14 +122,22 @@ func (s *Skill) SetSource(path, dir, layer string) {
 		return
 	}
 	promptPath := ""
+	metadataPath := ""
+	format := SkillSourceFormatLegacy
 	if s.Source != nil {
 		promptPath = s.Source.PromptPath
+		metadataPath = s.Source.MetadataPath
+		if strings.TrimSpace(s.Source.Format) != "" {
+			format = s.Source.Format
+		}
 	}
 	s.Source = &SkillSource{
 		Path:          path,
 		Dir:           dir,
 		Layer:         layer,
 		PromptPath:    promptPath,
+		MetadataPath:  metadataPath,
+		Format:        format,
 		DiscoveryOnly: false,
 	}
 }

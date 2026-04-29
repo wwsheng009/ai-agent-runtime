@@ -5089,6 +5089,12 @@ tools: ["echo_tool"]
 	assert.Contains(t, startRec.Body.String(), `"started":true`)
 	assert.Contains(t, startRec.Body.String(), `"watching":true`)
 	assert.Contains(t, startRec.Body.String(), `"skillCount":1`)
+	events := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		EventType: "skills.changed",
+		Limit:     10,
+	})
+	require.Len(t, events, 1)
+	assert.Equal(t, skillMutationActionHotReloadStart, events[0].Payload["action"])
 	require.Equal(t, 1, registry.Count())
 	loadedSkill, ok := registry.Get("hot-skill")
 	require.True(t, ok)
@@ -5127,6 +5133,12 @@ tools: ["echo_tool"]
 	assert.Contains(t, reloadRec.Body.String(), `"reloaded":true`)
 	_, exists := registry.Get("hot-skill-updated")
 	assert.True(t, exists)
+	events = handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		EventType: "skills.changed",
+		Limit:     10,
+	})
+	require.Len(t, events, 2)
+	assert.Equal(t, skillMutationActionHotReloadRun, events[1].Payload["action"])
 
 	stopReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/stop", nil)
 	stopReq.RemoteAddr = "127.0.0.1:1234"
@@ -5135,6 +5147,48 @@ tools: ["echo_tool"]
 	require.Equal(t, http.StatusOK, stopRec.Code)
 	assert.Contains(t, stopRec.Body.String(), `"stopped":true`)
 	assert.Contains(t, stopRec.Body.String(), `"watching":false`)
+	events = handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		EventType: "skills.changed",
+		Limit:     10,
+	})
+	require.Len(t, events, 3)
+	assert.Equal(t, skillMutationActionHotReloadStop, events[2].Payload["action"])
+}
+
+func TestPublishHotReloadSkillChangedEvent_PublishesRuntimeEvent(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	loader := skill.NewLoader(mcpManager)
+	systemDir := t.TempDir()
+	externalDir := t.TempDir()
+	loader.SetSkillDirs([]string{systemDir, externalDir})
+	handler := NewHandler(registry, loader, mcpManager)
+
+	registeredSkill := &skill.Skill{
+		Name:        "hot-event-skill",
+		Description: "hot event test",
+		Triggers:    []skill.Trigger{{Type: "keyword", Values: []string{"hot"}, Weight: 1}},
+	}
+	registeredSkill.SetSource(filepath.Join(externalDir, "hot-event-skill", "SKILL.md"), filepath.Join(externalDir, "hot-event-skill"), skill.SkillSourceLayerExternal)
+	require.NoError(t, registry.Register(registeredSkill))
+
+	handler.publishHotReloadSkillChangedEvent(&skill.ReloadEvent{
+		Type:      skill.ReloadEventSkillUpdated,
+		SkillName: "hot-event-skill",
+		FilePath:  registeredSkill.Source.Path,
+		Timestamp: time.Now(),
+	})
+
+	events := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		EventType: "skills.changed",
+		Limit:     10,
+	})
+	require.Len(t, events, 1)
+	assert.Equal(t, skillHotReloadActionUpdated, events[0].Payload["action"])
+	assert.Equal(t, "hot-event-skill", events[0].Payload["skill_name"])
+	assert.Equal(t, registeredSkill.Source.Path, events[0].Payload["skill_path"])
+	assert.Equal(t, skill.SkillSourceLayerExternal, events[0].Payload["source_layer"])
+	assert.Equal(t, 1, events[0].Payload["affected_count"])
 }
 
 func TestGetStats_IncludesSkillDirs(t *testing.T) {
@@ -5358,6 +5412,47 @@ func TestCreateSkill_AssignsRuntimeSource(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, skillItem.Source)
 	assert.Equal(t, skill.SkillSourceLayerRuntime, skillItem.Source.Layer)
+}
+
+func TestCreateSkill_PublishesSkillsChangedEventAndListRuntimeEvents(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	body := `{
+		"name":"runtime-event-skill",
+		"description":"runtime event test",
+		"triggers":[{"type":"keyword","values":["event"],"weight":1}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills", bytes.NewReader([]byte(body)))
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/events?event_type=skills.changed&limit=10", nil)
+	eventsReq.RemoteAddr = "127.0.0.1:1234"
+	eventsRec := httptest.NewRecorder()
+	router.ServeHTTP(eventsRec, eventsReq)
+	require.Equal(t, http.StatusOK, eventsRec.Code)
+
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(eventsRec.Body.Bytes(), &payload))
+	rawEvents, ok := payload["events"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, rawEvents, 1)
+
+	event := rawEvents[0].(map[string]interface{})
+	assert.Equal(t, "skills.changed", event["type"])
+	rawEventPayload, ok := event["payload"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "skill_create", rawEventPayload["action"])
+	assert.Equal(t, "success", rawEventPayload["status"])
+	assert.Equal(t, "runtime-event-skill", rawEventPayload["skill_name"])
+	assert.Equal(t, float64(1), rawEventPayload["count"])
 }
 
 func TestCreateSkill_PersistsToExternalDir(t *testing.T) {
@@ -5588,6 +5683,14 @@ tools: ["echo_tool"]
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, 2, registry.Count())
 	assert.Contains(t, rec.Body.String(), `"total_skills":2`)
+
+	events := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		EventType: "skills.changed",
+		Limit:     10,
+	})
+	require.Len(t, events, 1)
+	assert.Equal(t, skillMutationActionReload, events[0].Payload["action"])
+	assert.Equal(t, "success", events[0].Payload["status"])
 }
 
 func TestExportSkills_HydratesDiscoveryOnlySkills(t *testing.T) {

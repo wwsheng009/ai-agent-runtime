@@ -202,7 +202,13 @@ func (r *Router) deduplicateAndSort(results []*RouteResult) []*RouteResult {
 	seen := make(map[string]bool)
 	unique := make([]*RouteResult, 0)
 	for _, result := range results {
-		key := result.Skill.Name
+		key := ""
+		if result != nil && result.Skill != nil {
+			key = skillIdentityPath(result.Skill)
+			if key == "" {
+				key = result.Skill.Name
+			}
+		}
 		if !seen[key] {
 			seen[key] = true
 			unique = append(unique, result)

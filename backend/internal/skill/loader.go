@@ -25,7 +25,7 @@ func NewLoader(mcpManager MCPManager) *Loader {
 	return &Loader{
 		parser:       parser,
 		mcpManager:   mcpManager,
-		filePatterns: []string{"skill.yaml", "skill.yml"},
+		filePatterns: []string{"skill.yaml", "skill.yml", "SKILL.md"},
 	}
 }
 
@@ -69,7 +69,7 @@ func (l *Loader) LoadAll(dirs []string) ([]*Skill, error) {
 		skills = append(skills, loaded...)
 	}
 
-	return dedupeSkillsByName(skills), nil
+	return dedupeSkillsByPath(skills), nil
 }
 
 // Discover 从目录发现轻量 Skills 摘要。
@@ -111,7 +111,7 @@ func (l *Loader) DiscoverAll(dirs []string) ([]*SkillSummary, error) {
 		summaries = append(summaries, discovered...)
 	}
 
-	return dedupeSkillSummariesByName(summaries), nil
+	return dedupeSkillSummariesByPath(summaries), nil
 }
 
 // LoadFile 加载单个 Skill 文件
@@ -166,28 +166,22 @@ func (l *Loader) LoadByName(dir, name string) (*Skill, error) {
 			return err
 		}
 
-		// 检查文件名是否匹配
-		baseName := filepath.Base(path)
-		for _, pattern := range l.filePatterns {
-			if baseName == pattern {
-				// 读取文件验证名称
-				skill, err := l.parser.ParseFile(path)
-				if err == nil && skill.Name == name {
-					foundFile = path
-					return filepath.SkipDir
-				}
-			}
+		if !shouldParseSkillManifest(path) {
+			return nil
+		}
+
+		// 读取文件验证名称
+		skill, err := l.parser.ParseFile(path)
+		if err == nil && skill.Name == name {
+			foundFile = path
+			return filepath.SkipDir
 		}
 
 		// 检查是否在 name 目录下
 		parentDir := filepath.Dir(path)
 		if filepath.Base(parentDir) == name {
-			for _, pattern := range l.filePatterns {
-				if baseName == pattern {
-					foundFile = path
-					return filepath.SkipDir
-				}
-			}
+			foundFile = path
+			return filepath.SkipDir
 		}
 
 		return nil
@@ -529,7 +523,7 @@ func (l *Loader) annotateSummaryLayers(summaries []*SkillSummary, dir, layer str
 	}
 }
 
-func dedupeSkillsByName(skills []*Skill) []*Skill {
+func dedupeSkillsByPath(skills []*Skill) []*Skill {
 	seen := make(map[string]struct{})
 	deduped := make([]*Skill, 0, len(skills))
 
@@ -537,17 +531,21 @@ func dedupeSkillsByName(skills []*Skill) []*Skill {
 		if skill == nil {
 			continue
 		}
-		if _, exists := seen[skill.Name]; exists {
+		key := skillIdentityPath(skill)
+		if key == "" {
+			key = skill.Name
+		}
+		if _, exists := seen[key]; exists {
 			continue
 		}
-		seen[skill.Name] = struct{}{}
+		seen[key] = struct{}{}
 		deduped = append(deduped, skill)
 	}
 
 	return deduped
 }
 
-func dedupeSkillSummariesByName(summaries []*SkillSummary) []*SkillSummary {
+func dedupeSkillSummariesByPath(summaries []*SkillSummary) []*SkillSummary {
 	seen := make(map[string]struct{})
 	deduped := make([]*SkillSummary, 0, len(summaries))
 
@@ -555,10 +553,14 @@ func dedupeSkillSummariesByName(summaries []*SkillSummary) []*SkillSummary {
 		if summary == nil {
 			continue
 		}
-		if _, exists := seen[summary.Name]; exists {
+		key := skillSummaryIdentityPath(summary)
+		if key == "" {
+			key = summary.Name
+		}
+		if _, exists := seen[key]; exists {
 			continue
 		}
-		seen[summary.Name] = struct{}{}
+		seen[key] = struct{}{}
 		deduped = append(deduped, summary)
 	}
 

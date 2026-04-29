@@ -225,3 +225,48 @@ func TestManifestParser_SaveFile_RemovesCompanionPromptWhenEmpty(t *testing.T) {
 	_, err := os.Stat(filepath.Join(dir, "prompt.md"))
 	assert.True(t, os.IsNotExist(err))
 }
+
+func TestManifestParser_ParseSummaryDir_RespectsCodexTraversalBoundaries(t *testing.T) {
+	root := t.TempDir()
+
+	visibleDir := filepath.Join(root, "l1", "l2", "l3", "l4", "l5")
+	require.NoError(t, os.MkdirAll(visibleDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(visibleDir, "SKILL.md"), []byte(`---
+name: visible-skill
+description: visible skill
+---
+Visible body.
+`), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(visibleDir, "scripts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(visibleDir, "scripts", "helper.yaml"), []byte(`name: helper
+description: helper
+triggers:
+  - type: keyword
+    values: ["helper"]
+    weight: 1
+`), 0o644))
+
+	tooDeepDir := filepath.Join(visibleDir, "l6", "l7")
+	require.NoError(t, os.MkdirAll(tooDeepDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tooDeepDir, "SKILL.md"), []byte(`---
+name: too-deep-skill
+description: too deep skill
+---
+Too deep body.
+`), 0o644))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".hidden"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".hidden", "SKILL.md"), []byte(`---
+name: hidden-skill
+description: hidden skill
+---
+Hidden body.
+`), 0o644))
+
+	parser := NewManifestParser()
+	summaries, err := parser.ParseSummaryDir(root)
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	assert.Equal(t, "visible-skill", summaries[0].Name)
+	assert.Equal(t, filepath.Join(visibleDir, "SKILL.md"), summaries[0].Source.Path)
+}

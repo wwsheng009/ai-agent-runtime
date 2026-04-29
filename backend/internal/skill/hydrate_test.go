@@ -41,7 +41,8 @@ triggers:
 	assert.Equal(t, "You are cached.", hydrated1.SystemPrompt)
 
 	hydratedSkillCache.mu.RLock()
-	entry := hydratedSkillCache.items[filepath.Clean(manifestPath)]
+	cacheKey := skillHydrationCacheKey(stub)
+	entry := hydratedSkillCache.items[cacheKey]
 	cacheLen := len(hydratedSkillCache.items)
 	hydratedSkillCache.mu.RUnlock()
 	require.Equal(t, 1, cacheLen)
@@ -50,7 +51,7 @@ triggers:
 
 	hydrated1.SystemPrompt = "mutated by caller"
 	hydratedSkillCache.mu.RLock()
-	assert.Equal(t, "You are cached.", hydratedSkillCache.items[filepath.Clean(manifestPath)].skill.SystemPrompt)
+	assert.Equal(t, "You are cached.", hydratedSkillCache.items[cacheKey].skill.SystemPrompt)
 	hydratedSkillCache.mu.RUnlock()
 
 	require.NoError(t, os.WriteFile(promptPath, []byte("You are updated."), 0o644))
@@ -63,7 +64,7 @@ triggers:
 	assert.Equal(t, "You are updated.", hydrated2.SystemPrompt)
 
 	hydratedSkillCache.mu.RLock()
-	entry = hydratedSkillCache.items[filepath.Clean(manifestPath)]
+	entry = hydratedSkillCache.items[cacheKey]
 	cacheLen = len(hydratedSkillCache.items)
 	hydratedSkillCache.mu.RUnlock()
 	require.Equal(t, 1, cacheLen)

@@ -112,14 +112,24 @@ func (r *SemanticEmbeddingRouter) Route(ctx context.Context, prompt string) ([]*
 	for _, result := range results {
 		// 从元数据中提取 Skill 信息
 		metadata := result.Metadata
-		skillName, ok := metadata["skill_name"].(string)
-		if !ok {
-			// 如果没有 Skill 名称，跳过
+		skillName, _ := metadata["skill_name"].(string)
+		skillPath, _ := metadata["skill_path"].(string)
+		if skillName == "" && skillPath == "" {
+			// 如果没有可用身份，跳过
 			continue
 		}
 
 		// 从注册表中获取 Skill
-		skill, exists := r.registry.Get(skillName)
+		var (
+			skill  *Skill
+			exists bool
+		)
+		if skillPath != "" {
+			skill, exists = r.registry.GetByPath(skillPath)
+		}
+		if !exists && skillName != "" {
+			skill, exists = r.registry.Get(skillName)
+		}
 		if !exists {
 			continue
 		}
@@ -153,12 +163,14 @@ func (r *SemanticEmbeddingRouter) IndexSkills() error {
 
 		// 构建元数据
 		metadata := map[string]any{
-			"skill_name":   skill.Name,
-			"description":  skill.Description,
-			"category":     skill.Category,
-			"tools":        skill.Tools,
-			"capabilities": skill.Capabilities,
-			"tags":         skill.Tags,
+			"skill_name":        skill.Name,
+			"skill_path":        skillIdentityPath(skill),
+			"description":       skill.Description,
+			"short_description": skill.ShortDescription,
+			"category":          skill.Category,
+			"tools":             skill.Tools,
+			"capabilities":      skill.Capabilities,
+			"tags":              skill.Tags,
 		}
 
 		items = append(items, struct {
@@ -192,12 +204,14 @@ func (r *SemanticEmbeddingRouter) IncrementalIndex(skill *Skill) error {
 	id := r.buildSkillID(skill)
 
 	metadata := map[string]any{
-		"skill_name":   skill.Name,
-		"description":  skill.Description,
-		"category":     skill.Category,
-		"tools":        skill.Tools,
-		"capabilities": skill.Capabilities,
-		"tags":         skill.Tags,
+		"skill_name":        skill.Name,
+		"skill_path":        skillIdentityPath(skill),
+		"description":       skill.Description,
+		"short_description": skill.ShortDescription,
+		"category":          skill.Category,
+		"tools":             skill.Tools,
+		"capabilities":      skill.Capabilities,
+		"tags":              skill.Tags,
 	}
 
 	// 查找现有索引项
@@ -220,9 +234,12 @@ func (r *SemanticEmbeddingRouter) RemoveIndex(skill *Skill) error {
 // buildSkillText 构建用于索引的 Skill 文本
 func (r *SemanticEmbeddingRouter) buildSkillText(skill *Skill) string {
 	text := skill.Name + " "
-
 	if skill.Description != "" {
 		text += skill.Description + " "
+	}
+
+	if skill.ShortDescription != "" {
+		text += skill.ShortDescription + " "
 	}
 
 	if skill.Category != "" {
@@ -249,12 +266,27 @@ func (r *SemanticEmbeddingRouter) buildSkillText(skill *Skill) string {
 		text += "tag: " + tag + " "
 	}
 
+	if strings.TrimSpace(skill.Body) != "" {
+		text += summarizeEmbeddingText(skill.Body, 800) + " "
+	}
+
 	return text
 }
 
 // buildSkillID 构建 Skill ID
 func (r *SemanticEmbeddingRouter) buildSkillID(skill *Skill) string {
-	return embedding.GenerateID("skill", skill.Name)
+	return embedding.GenerateID("skill", skillIdentityPath(skill))
+}
+
+func summarizeEmbeddingText(value string, limit int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if value == "" || limit <= 0 || len(value) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return value[:limit]
+	}
+	return value[:limit-3] + "..."
 }
 
 // GetStats 获取路由统计信息
@@ -292,17 +324,24 @@ func (r *Router) RouteWithEmbedding(ctx context.Context, prompt string, embeddin
 			// 合并结果
 			merged := make(map[string]*RouteResult)
 			for _, result := range results {
-				merged[result.Skill.Name] = result
+				key := routeResultIdentityKey(result)
+				if key != "" {
+					merged[key] = result
+				}
 			}
 			for _, result := range embeddingResults {
-				if existing, exists := merged[result.Skill.Name]; exists {
+				key := routeResultIdentityKey(result)
+				if key == "" {
+					continue
+				}
+				if existing, exists := merged[key]; exists {
 					// 提高分数（考虑两个方法的匹配）
 					if result.Score > existing.Score {
 						existing.Score = result.Score
 						existing.MatchedBy = existing.MatchedBy + "+" + result.MatchedBy
 					}
 				} else {
-					merged[result.Skill.Name] = result
+					merged[key] = result
 				}
 			}
 
@@ -318,6 +357,16 @@ func (r *Router) RouteWithEmbedding(ctx context.Context, prompt string, embeddin
 	}
 
 	return results
+}
+
+func routeResultIdentityKey(result *RouteResult) string {
+	if result == nil || result.Skill == nil {
+		return ""
+	}
+	if key := skillIdentityPath(result.Skill); key != "" {
+		return key
+	}
+	return strings.TrimSpace(result.Skill.Name)
 }
 
 // sortResults 对结果排序（辅助方法）

@@ -73,6 +73,10 @@ const (
 	skillMutationActionHotReloadStart = "skill_hot_reload_start"
 	skillMutationActionHotReloadStop  = "skill_hot_reload_stop"
 	skillMutationActionHotReloadRun   = "skill_hot_reload_reload"
+	skillHotReloadActionAdded         = "skill_hot_reload_added"
+	skillHotReloadActionUpdated       = "skill_hot_reload_updated"
+	skillHotReloadActionRemoved       = "skill_hot_reload_removed"
+	skillsChangedEventType            = "skills.changed"
 
 	apiProfileContextReference = "profile_reference"
 	apiProfileContextName      = "profile_name"
@@ -472,6 +476,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 
 	// Skills 管理与执行
 	runtimeRouter.HandleFunc("/skills", h.ListSkills).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/list", h.ListCodexSkills).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/skills", h.CreateSkill).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/skills/search", h.SearchSkills).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/skills/search/stats", h.GetSearchStats).Methods(http.MethodGet)
@@ -704,6 +709,12 @@ func (h *Handler) CreateSkill(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	skillChange := skillChangePayloadFromSkill(&newSkill, handlerSkillDirs(h.skillLoader))
+	skillChange["action"] = skillMutationActionCreate
+	skillChange["status"] = "success"
+	skillChange["affected_count"] = 1
+	skillChange["count"] = h.currentSkillCount()
+	h.publishSkillsChangedEvent(r, skillChange)
 	h.auditSkillMutation(r, skillMutationActionCreate, "success",
 		logger.String("skill", newSkill.Name),
 		logger.String("source_layer", newSkill.Source.Layer))
@@ -774,6 +785,12 @@ func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	skillChange := skillChangePayloadFromSkill(&updatedSkill, handlerSkillDirs(h.skillLoader))
+	skillChange["action"] = skillMutationActionUpdate
+	skillChange["status"] = "success"
+	skillChange["affected_count"] = 1
+	skillChange["count"] = h.currentSkillCount()
+	h.publishSkillsChangedEvent(r, skillChange)
 	h.auditSkillMutation(r, skillMutationActionUpdate, "success",
 		logger.String("skill", updatedSkill.Name),
 		logger.String("source_layer", updatedSkill.Source.Layer))
@@ -827,6 +844,12 @@ func (h *Handler) DeleteSkill(w http.ResponseWriter, r *http.Request) {
 
 	h.removeEmbeddingIndex(skillItem)
 	h.skillRegistry.Unregister(name)
+	skillChange := skillChangePayloadFromSkill(skillItem, handlerSkillDirs(h.skillLoader))
+	skillChange["action"] = skillMutationActionDelete
+	skillChange["status"] = "success"
+	skillChange["affected_count"] = 1
+	skillChange["count"] = h.currentSkillCount()
+	h.publishSkillsChangedEvent(r, skillChange)
 	h.auditSkillMutation(r, skillMutationActionDelete, "success", logger.String("skill", name))
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -939,6 +962,8 @@ func (h *Handler) BatchCreateSkills(w http.ResponseWriter, r *http.Request) {
 
 	results := make([]map[string]interface{}, 0, len(skills))
 	var errorsList []error
+	successCount := 0
+	var firstChangedSkill *skill.Skill
 
 	for i, skillData := range skills {
 		// 解析 YAML
@@ -979,6 +1004,10 @@ func (h *Handler) BatchCreateSkills(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
+		if firstChangedSkill == nil {
+			firstChangedSkill = skillItem
+		}
+		successCount++
 
 		results = append(results, map[string]interface{}{
 			"index":   i,
@@ -1001,6 +1030,15 @@ func (h *Handler) BatchCreateSkills(w http.ResponseWriter, r *http.Request) {
 	outcome := "success"
 	if len(errorsList) > 0 {
 		outcome = "partial_success"
+	}
+	if successCount > 0 {
+		skillChange := skillChangePayloadFromSkill(firstChangedSkill, handlerSkillDirs(h.skillLoader))
+		skillChange["action"] = skillMutationActionBatchCreate
+		skillChange["status"] = outcome
+		skillChange["affected_count"] = successCount
+		skillChange["failed_count"] = len(errorsList)
+		skillChange["count"] = h.currentSkillCount()
+		h.publishSkillsChangedEvent(r, skillChange)
 	}
 	h.auditSkillMutation(r, skillMutationActionBatchCreate, outcome,
 		logger.Int("total", len(skills)),
@@ -2223,6 +2261,14 @@ func (h *Handler) StartHotReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.rebuildEmbeddingIndex()
+	h.publishSkillsChangedEvent(r, map[string]interface{}{
+		"action":         skillMutationActionHotReloadStart,
+		"status":         "success",
+		"affected_count": len(skillDirs),
+		"count":          h.currentSkillCount(),
+		"watching":       true,
+		"skill_dirs":     append([]string{}, skillDirs...),
+	})
 	h.auditSkillMutation(r, skillMutationActionHotReloadStart, "success", logger.Int("dir_count", len(skillDirs)))
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -2258,6 +2304,14 @@ func (h *Handler) StopHotReload(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	h.publishSkillsChangedEvent(r, map[string]interface{}{
+		"action":         skillMutationActionHotReloadStop,
+		"status":         "success",
+		"affected_count": 0,
+		"count":          h.currentSkillCount(),
+		"watching":       false,
+		"skill_dirs":     append([]string{}, handlerSkillDirs(h.skillLoader)...),
+	})
 	h.auditSkillMutation(r, skillMutationActionHotReloadStop, "success")
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -2292,6 +2346,22 @@ func (h *Handler) ReloadHotReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.rebuildEmbeddingIndex()
+	if skills := h.skillRegistry.List(); len(skills) > 0 {
+		skillChange := skillChangePayloadFromSkill(skills[0], handlerSkillDirs(h.skillLoader))
+		skillChange["action"] = skillMutationActionHotReloadRun
+		skillChange["status"] = "success"
+		skillChange["affected_count"] = h.currentSkillCount()
+		skillChange["count"] = h.currentSkillCount()
+		h.publishSkillsChangedEvent(r, skillChange)
+	} else {
+		h.publishSkillsChangedEvent(r, map[string]interface{}{
+			"action":         skillMutationActionHotReloadRun,
+			"status":         "success",
+			"affected_count": h.currentSkillCount(),
+			"count":          h.currentSkillCount(),
+			"skill_dirs":     append([]string(nil), handlerSkillDirs(h.skillLoader)...),
+		})
+	}
 	h.auditSkillMutation(r, skillMutationActionHotReloadRun, "success")
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -6901,13 +6971,185 @@ func (h *Handler) attachEmbeddingHotReloadSync() {
 			if registeredSkill, ok := h.skillRegistry.Get(event.SkillName); ok {
 				_ = h.embeddingRouter.IncrementalIndex(registeredSkill)
 			}
+			h.publishHotReloadSkillChangedEvent(event)
 		case skill.ReloadEventSkillRemoved:
 			_ = h.embeddingRouter.RemoveIndex(&skill.Skill{Name: event.SkillName})
+			h.publishHotReloadSkillChangedEvent(event)
 		case skill.ReloadEventReloadDone:
 			_ = h.embeddingRouter.RebuildIndex()
 		}
 	})
 	h.embeddingHotReloadSyncAttached = true
+}
+
+func (h *Handler) publishSkillsChangedEvent(r *http.Request, payload map[string]interface{}) {
+	if h == nil {
+		return
+	}
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	if _, ok := payload["skill_dirs"]; !ok {
+		skillDirs := handlerSkillDirs(h.skillLoader)
+		if skillDirs == nil {
+			skillDirs = []string{}
+		}
+		payload["skill_dirs"] = append([]string{}, skillDirs...)
+	}
+	if _, ok := payload["count"]; !ok {
+		payload["count"] = h.currentSkillCount()
+	}
+
+	traceID := ""
+	if r != nil {
+		traceID = strings.TrimSpace(logger.GetRequestID(r.Context()))
+		if traceID != "" {
+			payload["trace_id"] = traceID
+		}
+	}
+
+	h.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:      skillsChangedEventType,
+		TraceID:   traceID,
+		AgentName: "skills-runtime",
+		Payload:   payload,
+	})
+}
+
+func (h *Handler) publishHotReloadSkillChangedEvent(event *skill.ReloadEvent) {
+	if h == nil || event == nil {
+		return
+	}
+
+	action := hotReloadActionForEventType(event.Type)
+	if action == "" {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"action":         action,
+		"status":         "success",
+		"affected_count": 1,
+	}
+	if name := strings.TrimSpace(event.SkillName); name != "" {
+		payload["skill_name"] = name
+	}
+	if path := strings.TrimSpace(event.FilePath); path != "" {
+		payload["skill_path"] = path
+		if layer := h.skillSourceLayerForPath(path); layer != skill.SkillSourceLayerUnknown {
+			payload["source_layer"] = layer
+		}
+	}
+	if h.skillRegistry != nil {
+		if registeredSkill, ok := h.skillRegistry.Get(event.SkillName); ok && registeredSkill != nil {
+			if name := strings.TrimSpace(registeredSkill.Name); name != "" {
+				payload["skill_name"] = name
+			}
+			if registeredSkill.Source != nil {
+				if path := strings.TrimSpace(registeredSkill.Source.Path); path != "" {
+					payload["skill_path"] = path
+				}
+				if layer := strings.TrimSpace(registeredSkill.Source.Layer); layer != "" {
+					payload["source_layer"] = layer
+				}
+			}
+		}
+	}
+
+	h.publishSkillsChangedEvent(nil, payload)
+}
+
+func hotReloadActionForEventType(eventType skill.ReloadEventType) string {
+	switch eventType {
+	case skill.ReloadEventSkillAdded:
+		return skillHotReloadActionAdded
+	case skill.ReloadEventSkillUpdated:
+		return skillHotReloadActionUpdated
+	case skill.ReloadEventSkillRemoved:
+		return skillHotReloadActionRemoved
+	default:
+		return ""
+	}
+}
+
+func (h *Handler) skillSourceLayerForPath(path string) string {
+	skillDirs := handlerSkillDirs(h.skillLoader)
+	if len(skillDirs) == 0 {
+		return skill.SkillSourceLayerUnknown
+	}
+
+	normalizedPath := filepath.Clean(strings.TrimSpace(path))
+	if normalizedPath == "." || normalizedPath == "" {
+		return skill.SkillSourceLayerUnknown
+	}
+
+	for index, dir := range skillDirs {
+		normalizedDir := filepath.Clean(strings.TrimSpace(dir))
+		if normalizedDir == "." || normalizedDir == "" {
+			continue
+		}
+		if normalizedPath == normalizedDir || strings.HasPrefix(normalizedPath, normalizedDir+string(os.PathSeparator)) {
+			if index == 0 {
+				return skill.SkillSourceLayerSystem
+			}
+			return skill.SkillSourceLayerExternal
+		}
+	}
+
+	return skill.SkillSourceLayerUnknown
+}
+
+func (h *Handler) currentSkillCount() int {
+	if h == nil || h.skillRegistry == nil {
+		return 0
+	}
+	return h.skillRegistry.Count()
+}
+
+func skillChangePayloadFromSkill(skillItem *skill.Skill, skillDirs []string) map[string]interface{} {
+	payload := make(map[string]interface{})
+	if skillItem == nil {
+		return payload
+	}
+	if name := strings.TrimSpace(skillItem.Name); name != "" {
+		payload["skill_name"] = name
+	}
+	if skillItem.Source != nil {
+		if path := strings.TrimSpace(skillItem.Source.Path); path != "" {
+			payload["skill_path"] = path
+		}
+		if layer := strings.TrimSpace(skillItem.Source.Layer); layer != "" {
+			payload["source_layer"] = layer
+		}
+	}
+	if _, ok := payload["source_layer"]; !ok {
+		if path, _ := payload["skill_path"].(string); path != "" {
+			if layer := skillSourceLayerForPath(path, skillDirs); layer != skill.SkillSourceLayerUnknown {
+				payload["source_layer"] = layer
+			}
+		}
+	}
+	return payload
+}
+
+func skillSourceLayerForPath(path string, skillDirs []string) string {
+	normalizedPath := filepath.Clean(strings.TrimSpace(path))
+	if normalizedPath == "." || normalizedPath == "" {
+		return skill.SkillSourceLayerUnknown
+	}
+	for index, dir := range skillDirs {
+		normalizedDir := filepath.Clean(strings.TrimSpace(dir))
+		if normalizedDir == "." || normalizedDir == "" {
+			continue
+		}
+		if normalizedPath == normalizedDir || strings.HasPrefix(normalizedPath, normalizedDir+string(os.PathSeparator)) {
+			if index == 0 {
+				return skill.SkillSourceLayerSystem
+			}
+			return skill.SkillSourceLayerExternal
+		}
+	}
+	return skill.SkillSourceLayerUnknown
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, err error) {
@@ -10014,6 +10256,23 @@ func (h *Handler) ReloadSkills(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.rebuildEmbeddingIndex()
+	if skills := h.skillRegistry.List(); len(skills) > 0 {
+		skillChange := skillChangePayloadFromSkill(skills[0], dirs)
+		skillChange["action"] = skillMutationActionReload
+		skillChange["status"] = "success"
+		skillChange["affected_count"] = h.currentSkillCount()
+		skillChange["count"] = h.currentSkillCount()
+		skillChange["skill_dirs"] = append([]string(nil), dirs...)
+		h.publishSkillsChangedEvent(r, skillChange)
+	} else {
+		h.publishSkillsChangedEvent(r, map[string]interface{}{
+			"action":         skillMutationActionReload,
+			"status":         "success",
+			"affected_count": h.currentSkillCount(),
+			"count":          h.currentSkillCount(),
+			"skill_dirs":     append([]string(nil), dirs...),
+		})
+	}
 	h.auditSkillMutation(r, skillMutationActionReload, "success", logger.Int("dir_count", len(dirs)))
 
 	response := map[string]interface{}{
@@ -10126,6 +10385,7 @@ func (h *Handler) ImportSkills(w http.ResponseWriter, r *http.Request) {
 	errs := make([]error, 0)
 	imported := 0
 	persisted := 0
+	var firstImportedSkill *skill.Skill
 	for _, skillItem := range importData.Skills {
 		if skillItem == nil {
 			errs = append(errs, errors.New(errors.ErrValidationFailed, "skill entry cannot be nil"))
@@ -10146,6 +10406,9 @@ func (h *Handler) ImportSkills(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.updateEmbeddingIndex(skillItem)
+		if firstImportedSkill == nil {
+			firstImportedSkill = skillItem
+		}
 		imported++
 	}
 
@@ -10163,6 +10426,17 @@ func (h *Handler) ImportSkills(w http.ResponseWriter, r *http.Request) {
 	outcome := "success"
 	if len(errs) > 0 {
 		outcome = "partial_success"
+	}
+	if imported > 0 {
+		skillChange := skillChangePayloadFromSkill(firstImportedSkill, handlerSkillDirs(h.skillLoader))
+		skillChange["action"] = skillMutationActionImport
+		skillChange["status"] = outcome
+		skillChange["affected_count"] = imported
+		skillChange["imported"] = imported
+		skillChange["persisted"] = persisted
+		skillChange["failed_count"] = len(errs)
+		skillChange["count"] = h.currentSkillCount()
+		h.publishSkillsChangedEvent(r, skillChange)
 	}
 	h.auditSkillMutation(r, skillMutationActionImport, outcome,
 		logger.Int("imported", imported),
