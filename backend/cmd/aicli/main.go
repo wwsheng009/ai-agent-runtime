@@ -80,7 +80,12 @@ func main() {
 功能包括：
   - 列出当前配置信息（providers, provider_groups）
   - 对不同端点进行测试
-  - 测试模型的最大上下文窗口和最大生成长度`,
+  - 测试模型的最大上下文窗口和最大生成长度
+
+文档入口：
+  - docs/aicli/README.md
+  - docs/aicli/install.md
+  - docs/skill_runtime/aicli_skills_usage.md`,
 		Example: `  # 列出配置信息
   aicli config
   aicli config --provider nvidia
@@ -238,7 +243,17 @@ func main() {
 	chatCmd := &cobra.Command{
 		Use:   "chat",
 		Short: "交互式聊天",
-		Long:  `与 AI 模型进行交互式对话。`,
+		Long: `与 AI 模型进行交互式对话。
+
+进入 chat 后可使用斜杠命令：
+  - /functions <prompt>
+  - /call <function> [args-json]
+  - /tool <function> [args-json]
+  - /skill <skill> <prompt>
+
+更完整说明见：
+  - docs/aicli/install.md
+  - docs/skill_runtime/aicli_skills_usage.md`,
 		Example: `  aicli chat                              # 交互式聊天
   aicli chat --profile dev                  # 使用命名 profile
   aicli chat --profile ./profiles/dev --agent coder
@@ -249,7 +264,12 @@ func main() {
   aicli chat --list-sessions              # 列出会话
   aicli chat --list-sessions --session-provider nvidia --session-query review
   aicli chat --no-interactive --message "Hello"  # 非交互模式
-  aicli chat --no-interactive --output json -M "Hello"  # JSON 输出`,
+  aicli chat --no-interactive --output json -M "Hello"  # JSON 输出
+
+  # chat 内斜杠命令
+  /functions 帮我生成一张图片
+  /call openai_image_generate {"prompt":"帮我生成一张海边日落照片"}
+  /skill imagegen 帮我生成一张海边日落照片`,
 		Run: func(cmd *cobra.Command, args []string) {
 			commands.HandleChat(cmd, cfg)
 		},

@@ -68,6 +68,12 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println(formatFunctionExposurePreview(session, prompt, jsonOutput))
 		return false
 	}
+	if strings.HasPrefix(cmdLower, "/call ") || strings.HasPrefix(cmdLower, "/tool ") {
+		return handleDirectFunctionCommand(session, command)
+	}
+	if strings.HasPrefix(cmdLower, "/skill ") {
+		return handleDirectSkillCommand(session, command)
+	}
 	if strings.HasPrefix(cmdLower, "/sessions ") {
 		filter := session.SessionFilter
 		filter.Query = strings.TrimSpace(extractCommandArgument(command))
@@ -246,6 +252,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("  /functions <prompt> --json - 以 JSON 输出 exposure report")
 		fmt.Println("  /function <name>   - 显示单个 function 的详情")
 		fmt.Println("  /function <name> --json - 以 JSON 输出单个 function descriptor")
+		fmt.Println("  /call <name> [args-json] - 直接执行指定 function（tool 或 skill function）")
+		fmt.Println("  /tool <name> [args-json] - /call 的别名，便于直接执行 tool")
+		fmt.Println("  /skill <name> <prompt> - 直接执行指定 skill，例如 /skill imagegen 帮我生成一张图片")
 		fmt.Println("  /help, /?          - 显示此帮助")
 		fmt.Println()
 		fmt.Println("Shell 命令:")

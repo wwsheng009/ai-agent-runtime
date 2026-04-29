@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -17,6 +18,30 @@ import (
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
+
+type directMetadataFunction struct {
+	name     string
+	output   string
+	metadata map[string]interface{}
+}
+
+func (f *directMetadataFunction) Name() string { return f.name }
+
+func (f *directMetadataFunction) Description() string { return "direct metadata function" }
+
+func (f *directMetadataFunction) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+	}
+}
+
+func (f *directMetadataFunction) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	return f.output, nil
+}
+
+func (f *directMetadataFunction) ExecuteWithMeta(ctx context.Context, args map[string]interface{}) (string, map[string]interface{}, error) {
+	return f.output, f.metadata, nil
+}
 
 func TestFormatFunctionCatalogSummary_IncludesBuiltinAndSkillGroups(t *testing.T) {
 	registry := functions.NewFunctionRegistry()
@@ -1110,6 +1135,79 @@ func TestHandleCommand_Compact(t *testing.T) {
 	})
 	if !strings.Contains(output, "压缩完成") || !strings.Contains(output, "mode=remote") {
 		t.Fatalf("expected compact command output, got %q", output)
+	}
+}
+
+func TestHandleCommand_DirectFunctionCall_JSON(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	catalog.RegisterFunction(&directMetadataFunction{
+		name:   "openai_image_generate",
+		output: "Generated image saved to file:///tmp/demo.png",
+		metadata: map[string]interface{}{
+			"provider":   "OPENAI_IMAGE",
+			"saved_path": "E:/tmp/demo.png",
+		},
+	})
+
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, `/call openai_image_generate {"prompt":"hi"} --json`, false); quit {
+			t.Fatal("expected call command not to exit")
+		}
+	})
+
+	var payload directFunctionInvokeReport
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &payload); err != nil {
+		t.Fatalf("expected JSON output, got error: %v\n%s", err, output)
+	}
+	if payload.FunctionName != "openai_image_generate" {
+		t.Fatalf("unexpected function name: %+v", payload)
+	}
+	if payload.Metadata["provider"] != "OPENAI_IMAGE" {
+		t.Fatalf("unexpected metadata: %+v", payload.Metadata)
+	}
+}
+
+func TestHandleCommand_DirectSkillCall_UsesPromptShortcut(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	executor := &fakeSkillExecutor{
+		result: &runtimeskill.ExecuteResult{
+			SkillName: "imagegen",
+			Success:   true,
+			Output:    "Generated image saved to file:///tmp/skill-image.png",
+		},
+	}
+	catalog.RegisterSkillFunction(&SkillFunction{
+		functionName: "skill__imagegen",
+		skill: &runtimeskill.Skill{
+			Name:        "imagegen",
+			Description: "Generate image",
+		},
+		executor: executor,
+	})
+
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, `/skill imagegen 帮我生成一张风景图`, false); quit {
+			t.Fatal("expected skill command not to exit")
+		}
+	})
+
+	if executor.lastReq == nil || executor.lastReq.Prompt != "帮我生成一张风景图" {
+		t.Fatalf("expected prompt shortcut to reach skill executor, got %#v", executor.lastReq)
+	}
+	if !strings.Contains(output, "Generated image saved to") {
+		t.Fatalf("unexpected output: %s", output)
 	}
 }
 

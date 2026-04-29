@@ -271,22 +271,26 @@ func buildOutputCaptureExecOptions(args map[string]interface{}) ([]ExecOption, e
 
 	disableOutputCap := false
 	if rawDisable, ok := args["disable_output_cap"]; ok {
-		disable, ok := rawDisable.(bool)
-		if !ok {
-			return nil, fmt.Errorf("disable_output_cap 参数必须是布尔值")
+		if rawDisable != nil {
+			disable, ok := rawDisable.(bool)
+			if !ok {
+				return nil, fmt.Errorf("disable_output_cap 参数必须是布尔值")
+			}
+			disableOutputCap = disable
 		}
-		disableOutputCap = disable
 	}
 
 	hasOutputBytesCap := false
 	outputBytesCap := 0
 	if rawCap, ok := args["output_bytes_cap"]; ok {
-		value, err := extractPositiveInt(rawCap)
-		if err != nil {
-			return nil, fmt.Errorf("output_bytes_cap 参数无效: %w", err)
+		if rawCap != nil {
+			value, err := extractPositiveInt(rawCap)
+			if err != nil {
+				return nil, fmt.Errorf("output_bytes_cap 参数无效: %w", err)
+			}
+			outputBytesCap = value
+			hasOutputBytesCap = true
 		}
-		outputBytesCap = value
-		hasOutputBytesCap = true
 	}
 
 	if disableOutputCap && hasOutputBytesCap {

@@ -195,6 +195,30 @@ func TestShellFunction_RejectsConflictingOutputCaptureOptions(t *testing.T) {
 	}
 }
 
+func TestShellFunction_IgnoresNullOutputCaptureOptions(t *testing.T) {
+	fn := NewShellFunction()
+	inspector := &inspectShellExecuter{output: "ok"}
+	fn.SetExecuter(inspector)
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command":            "git status --short",
+		"output_bytes_cap":   nil,
+		"disable_output_cap": nil,
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected output ok, got %q", output)
+	}
+	if inspector.lastConfig.hasOutputBytesCap {
+		t.Fatalf("did not expect output_bytes_cap when null, got %+v", inspector.lastConfig)
+	}
+	if inspector.lastConfig.disableOutputCap {
+		t.Fatalf("did not expect disableOutputCap when null, got %+v", inspector.lastConfig)
+	}
+}
+
 func TestShellFunction_ExecuteWithMeta_PreservesCaptureMetadata(t *testing.T) {
 	fn := NewShellFunction()
 	inspector := &inspectDetailedShellExecuter{

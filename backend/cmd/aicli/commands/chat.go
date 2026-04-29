@@ -868,6 +868,9 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			if handleCommand(session, input, noInteractive) {
 				break
 			}
+			if noInteractive {
+				break
+			}
 			continue
 		}
 

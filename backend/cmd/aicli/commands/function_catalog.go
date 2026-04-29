@@ -294,6 +294,7 @@ func (c *aicliFunctionCatalog) SelectRequestFunctions(session *ChatSession, prom
 	if selection == nil {
 		return &aicliFunctionSelection{Mode: exposureMode}, exposureDetails
 	}
+	selection = filterImageGenerationToolExposure(session, prompt, selection, exposureDetails)
 	return selection, exposureDetails
 }
 

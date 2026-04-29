@@ -11,6 +11,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
+	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -302,7 +304,7 @@ triggers:
 		},
 	}
 
-	binding, err := initSkillFunctions(cfg, session, nil, 0, "")
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
 	if err != nil {
 		t.Fatalf("initSkillFunctions failed: %v", err)
 	}
@@ -354,7 +356,7 @@ triggers:
 		},
 	}
 
-	binding, err := initSkillFunctions(cfg, session, nil, 0, "")
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
 	if err != nil {
 		t.Fatalf("initSkillFunctions failed: %v", err)
 	}
@@ -440,7 +442,7 @@ triggers:
 		},
 	}
 
-	binding, err := initSkillFunctions(cfg, session, nil, 0, "")
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
 	if err != nil {
 		t.Fatalf("initSkillFunctions failed: %v", err)
 	}
@@ -589,7 +591,7 @@ triggers:
 		},
 	}
 
-	binding, err := initSkillFunctions(cfg, session, nil, 0, "")
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
 	if err != nil {
 		t.Fatalf("initSkillFunctions failed: %v", err)
 	}
@@ -647,7 +649,7 @@ triggers:
 		},
 	}
 
-	binding, err := initSkillFunctions(cfg, session, nil, 0, "")
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
 	if err != nil {
 		t.Fatalf("initSkillFunctions failed: %v", err)
 	}
@@ -697,7 +699,7 @@ triggers:
 		},
 	}
 
-	binding, err := initSkillFunctions(cfg, session, nil, 0, "")
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
 	if err != nil {
 		t.Fatalf("initSkillFunctions failed: %v", err)
 	}
@@ -773,7 +775,7 @@ triggers:
 		},
 	}
 
-	binding, err := initSkillFunctions(cfg, session, nil, 0, "")
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
 	if err != nil {
 		t.Fatalf("initSkillFunctions failed: %v", err)
 	}
@@ -804,6 +806,156 @@ triggers:
 	}
 	if len(details.ExposedFunctions) != 1 || details.ExposedFunctions[0] != "skill__alpha" {
 		t.Fatalf("expected skill__alpha exposed, got %v", details.ExposedFunctions)
+	}
+}
+
+func TestBuildRequestFunctionSchemas_ImagegenSkillSuppressesOpenAIImageGenerateTool(t *testing.T) {
+	tempDir := t.TempDir()
+	skillDir := filepath.Join(tempDir, "imagegen")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	skillYAML := `name: imagegen
+description: Generate an image by calling openai_image_generate
+triggers:
+  - type: pattern
+    values:
+      - (?:生成|创建|画|绘制|做|出).{0,20}(?:图片|图像|插画|海报|头像|壁纸|封面|照片)
+    weight: 2
+tools:
+  - openai_image_generate
+workflow:
+  steps:
+    - id: generate_image
+      name: Generate image
+      tool: openai_image_generate
+      args:
+        prompt: "{{prompt}}"
+`
+	if err := os.WriteFile(filepath.Join(skillDir, "skill.yaml"), []byte(skillYAML), 0o644); err != nil {
+		t.Fatalf("write skill failed: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:     "nvidia",
+		Model:            "z-ai/glm4.7",
+		FunctionRegistry: functions.NewFunctionRegistry(),
+	}
+	catalog := ensureFunctionCatalog(session)
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: toolnames.OpenAIImageGenerateToolName}, runtimetools.ToolDescriptor{
+		Name:        toolnames.OpenAIImageGenerateToolName,
+		Description: "generate image via /v1/images/generations",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+
+	cfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{
+			Enabled:  true,
+			SkillDir: tempDir,
+		},
+	}
+
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
+	if err != nil {
+		t.Fatalf("initSkillFunctions failed: %v", err)
+	}
+	if binding == nil {
+		t.Fatal("expected skill binding")
+	}
+	defer func() { _ = binding.Close() }()
+	session.SkillsBinding = binding
+
+	schemas := buildRequestFunctionSchemas(session, "帮我生成一个美女图片")
+	names := make([]string, 0, len(schemas))
+	for _, schema := range schemas {
+		names = append(names, schema["name"].(string))
+	}
+
+	if len(names) != 1 {
+		t.Fatalf("expected only imagegen skill, got %v", names)
+	}
+	if names[0] != imagegenSkillFunctionName {
+		t.Fatalf("expected %s, got %v", imagegenSkillFunctionName, names[0])
+	}
+	if strings.Contains(strings.Join(names, ","), toolnames.OpenAIImageGenerateToolName) {
+		t.Fatalf("did not expect %s when imagegen skill is exposed: %v", toolnames.OpenAIImageGenerateToolName, names)
+	}
+}
+
+func TestBuildRequestFunctionSchemas_CodexNativeImageSuppressesImagegenSkillAndOpenAIImageTool(t *testing.T) {
+	tempDir := t.TempDir()
+	skillDir := filepath.Join(tempDir, "imagegen")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	skillYAML := `name: imagegen
+description: Generate an image by calling openai_image_generate
+triggers:
+  - type: pattern
+    values:
+      - (?:生成|创建|画|绘制|做|出).{0,20}(?:图片|图像|插画|海报|头像|壁纸|封面|照片)
+    weight: 2
+tools:
+  - openai_image_generate
+workflow:
+  steps:
+    - id: generate_image
+      name: Generate image
+      tool: openai_image_generate
+      args:
+        prompt: "{{prompt}}"
+`
+	if err := os.WriteFile(filepath.Join(skillDir, "skill.yaml"), []byte(skillYAML), 0o644); err != nil {
+		t.Fatalf("write skill failed: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:     "codex_fox",
+		Model:            "gpt-5.4-mini",
+		FunctionRegistry: functions.NewFunctionRegistry(),
+		Provider: config.Provider{
+			Protocol: "codex",
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"gpt-5.4-mini": {
+					InputModalities: []string{"text", "image"},
+					NativeTools: config.NativeToolCapabilities{
+						ImageGeneration: true,
+					},
+				},
+			},
+		},
+	}
+	catalog := ensureFunctionCatalog(session)
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: toolnames.OpenAIImageGenerateToolName}, runtimetools.ToolDescriptor{
+		Name:        toolnames.OpenAIImageGenerateToolName,
+		Description: "generate image via /v1/images/generations",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+
+	cfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{
+			Enabled:  true,
+			SkillDir: tempDir,
+		},
+	}
+
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
+	if err != nil {
+		t.Fatalf("initSkillFunctions failed: %v", err)
+	}
+	if binding == nil {
+		t.Fatal("expected skill binding")
+	}
+	defer func() { _ = binding.Close() }()
+	session.SkillsBinding = binding
+
+	schemas := buildRequestFunctionSchemas(session, "帮我生成一个美女图片")
+	if len(schemas) != 0 {
+		names := make([]string, 0, len(schemas))
+		for _, schema := range schemas {
+			names = append(names, schema["name"].(string))
+		}
+		t.Fatalf("expected local image tool/skill exposure to be suppressed when codex native image is available, got %v", names)
 	}
 }
 

@@ -104,6 +104,33 @@ func resolveChatMCPConfigPath(cfg *config.Config, session *ChatSession) string {
 	return findMCPConfigPath()
 }
 
+func configuredChatMCPAutoConnect(cfg *config.Config) bool {
+	return cfg != nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil && cfg.AICLI.MCP.AutoConnect
+}
+
+func resolveChatMCPStartupConfigPath(cfg *config.Config, session *ChatSession) (string, bool) {
+	configPath := strings.TrimSpace(resolveChatMCPConfigPath(cfg, session))
+	if configPath == "" {
+		return "", false
+	}
+
+	if _, err := os.Stat(configPath); err == nil {
+		return configPath, true
+	} else if os.IsNotExist(err) && !configuredChatMCPAutoConnect(cfg) {
+		return "", false
+	}
+
+	return configPath, true
+}
+
+func prepareChatMCPManager(cfg *config.Config, session *ChatSession) error {
+	configPath, shouldInit := resolveChatMCPStartupConfigPath(cfg, session)
+	if !shouldInit {
+		return StopMCPManager()
+	}
+	return initMCPManager(configPath)
+}
+
 // registerMCPTools 注册 MCP 工具到 FunctionRegistry
 func registerMCPTools(registry *functions.FunctionRegistry) error {
 	if MCPManagerInstance == nil {

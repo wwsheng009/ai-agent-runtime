@@ -6,8 +6,10 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
@@ -296,5 +298,86 @@ func TestAICLIFunctionCatalog_ExecuteFunctionWithMeta_PreservesMetadata(t *testi
 	}
 	if got := metadata[toolresult.MetadataKey]; got != toolresult.KindText {
 		t.Fatalf("expected %s=%q, got %#v", toolresult.MetadataKey, toolresult.KindText, got)
+	}
+}
+
+func TestAICLIFunctionCatalog_SelectRequestFunctions_HidesOpenAIImageGenerateWithoutImageIntent(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: toolnames.OpenAIImageGenerateToolName}, runtimetools.ToolDescriptor{
+		Name:        toolnames.OpenAIImageGenerateToolName,
+		Description: "generate image via /v1/images/generations",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+	}
+
+	selection, _ := catalog.SelectRequestFunctions(session, "inspect config and explain startup")
+	if selection == nil {
+		t.Fatal("expected function selection")
+	}
+	if selectionContainsFunction(selection, toolnames.OpenAIImageGenerateToolName) {
+		t.Fatalf("did not expect %s to be exposed for non-image prompt: %+v", toolnames.OpenAIImageGenerateToolName, selection.FinalFunctionNames)
+	}
+}
+
+func TestAICLIFunctionCatalog_SelectRequestFunctions_ExposesOpenAIImageGenerateForImageIntent(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: toolnames.OpenAIImageGenerateToolName}, runtimetools.ToolDescriptor{
+		Name:        toolnames.OpenAIImageGenerateToolName,
+		Description: "generate image via /v1/images/generations",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+	}
+
+	selection, _ := catalog.SelectRequestFunctions(session, "帮我生成一个美女图片")
+	if selection == nil {
+		t.Fatal("expected function selection")
+	}
+	if !selectionContainsFunction(selection, toolnames.OpenAIImageGenerateToolName) {
+		t.Fatalf("expected %s to be exposed for image prompt: %+v", toolnames.OpenAIImageGenerateToolName, selection.FinalFunctionNames)
+	}
+}
+
+func TestAICLIFunctionCatalog_SelectRequestFunctions_HidesOpenAIImageGenerateWhenCodexNativeImageAvailable(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("codex", registry)
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: toolnames.OpenAIImageGenerateToolName}, runtimetools.ToolDescriptor{
+		Name:        toolnames.OpenAIImageGenerateToolName,
+		Description: "generate image via /v1/images/generations",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+		Model:            "gpt-5.4",
+		Provider: config.Provider{
+			Protocol: "codex",
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"gpt-5.4": {
+					InputModalities: []string{"text", "image"},
+					NativeTools: config.NativeToolCapabilities{
+						ImageGeneration: true,
+					},
+				},
+			},
+		},
+	}
+
+	selection, _ := catalog.SelectRequestFunctions(session, "帮我生成一个美女图片")
+	if selection == nil {
+		t.Fatal("expected function selection")
+	}
+	if selectionContainsFunction(selection, toolnames.OpenAIImageGenerateToolName) {
+		t.Fatalf("did not expect %s when codex native image tool is available: %+v", toolnames.OpenAIImageGenerateToolName, selection.FinalFunctionNames)
 	}
 }

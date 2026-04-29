@@ -31,6 +31,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = generatedImageToolContext(ctx, session)
 
 	actor, err := session.LocalRuntimeHost.SessionHub.GetOrCreate(session.RuntimeSession.ID)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -382,7 +383,7 @@ func (f *SkillFunction) metadata() runtimetypes.Metadata {
 	return metadata.Clone()
 }
 
-func initSkillFunctions(cfg *config.Config, session *ChatSession, cliSkillDirs []string, cliSkillsTopK int, cliSkillsMode string) (*skillsRuntimeBinding, error) {
+func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *runtimetools.Manager, cliSkillDirs []string, cliSkillsTopK int, cliSkillsMode string) (*skillsRuntimeBinding, error) {
 	catalog := ensureFunctionCatalog(session)
 	if cfg == nil || session == nil || catalog == nil || catalog.Registry() == nil {
 		return nil, nil
@@ -408,7 +409,9 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, cliSkillDirs [
 	}
 
 	var mcpRuntime runtimeskill.MCPManager
-	if MCPManagerInstance != nil {
+	if toolManager != nil {
+		mcpRuntime = runtimetools.NewAgentAdapter(toolManager)
+	} else if MCPManagerInstance != nil {
 		mcpRuntime = runtimeskill.NewMCPAdapter(MCPManagerInstance)
 	}
 

@@ -45,6 +45,7 @@ func (e *aicliToolExecutor) ExecuteTool(ctx context.Context, call runtimetypes.T
 	}
 	writeSessionDebugInfo(session, formatToolExecutionStartDebug(toolCallFromRuntime(call)), true)
 
+	ctx = generatedImageToolContext(ctx, session)
 	catalog := ensureFunctionCatalog(session)
 	output, meta, err := catalog.ExecuteFunctionWithMeta(ctx, call.Name, call.Args)
 	if err != nil {

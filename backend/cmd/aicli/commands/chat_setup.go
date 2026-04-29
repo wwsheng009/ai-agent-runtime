@@ -181,7 +181,7 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 	if session.DisableTools {
 		logpkg.Info("AICLI chat tools exposure disabled by flag")
 	} else {
-		if err := initMCPManager(resolveChatMCPConfigPath(cfg, session)); err != nil {
+		if err := prepareChatMCPManager(cfg, session); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: 初始化 MCP 失败: %v\n", err)
 			logpkg.Warnf("AICLI MCP init failed: %v", err)
 		}
@@ -207,7 +207,7 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 		}
 
 		var err error
-		skillsBinding, err = initSkillFunctions(cfg, session, opts.CLISkillDirs, opts.CLISkillsTopK, opts.CLISkillsMode)
+		skillsBinding, err = initSkillFunctions(cfg, session, toolManager, opts.CLISkillDirs, opts.CLISkillsTopK, opts.CLISkillsMode)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: 初始化 Skills 失败: %v\n", err)
 		} else if skillsBinding != nil {

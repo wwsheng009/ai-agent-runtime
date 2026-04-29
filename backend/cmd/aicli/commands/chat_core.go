@@ -83,6 +83,7 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = generatedImageToolContext(ctx, session)
 
 	history, err := buildRuntimeHistoryFromAICLIMessages(session.Messages)
 	if err != nil {

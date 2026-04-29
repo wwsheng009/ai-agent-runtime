@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
@@ -63,19 +64,11 @@ func newChatSessionManager(dir string) (*runtimechat.SessionManager, string, str
 }
 
 func resolveDefaultChatSessionDir() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(homeDir) == "" {
-		return filepath.Join(".", ".aicli", "sessions")
-	}
-	return filepath.Join(homeDir, ".aicli", "sessions")
+	return aiclipaths.DefaultSessionsDir()
 }
 
 func resolveDefaultChatLogDir() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(homeDir) == "" {
-		return filepath.Join(".", ".aicli", "chat-logs")
-	}
-	return filepath.Join(homeDir, ".aicli", "chat-logs")
+	return aiclipaths.DefaultChatLogsDir()
 }
 
 // ResolveDefaultChatLogDir exposes the default chat log directory for command flags and callers
