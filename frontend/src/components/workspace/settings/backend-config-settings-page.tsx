@@ -21,6 +21,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -230,99 +231,99 @@ type EditorMode =
   | "source";
 
 const modeMenuEntries: Array<{
-  description: string;
+  descriptionKey: string;
   icon: LucideIcon;
-  label: string;
+  labelKey: string;
   mode: EditorMode;
 }> = [
   {
     mode: "providers",
-    label: "Provider 配置",
-    description: "用表格和弹出表单管理 provider 主配置。",
+    labelKey: "runtimeConfig.editor.modes.providers.label",
+    descriptionKey: "runtimeConfig.editor.modes.providers.description",
     icon: BotIcon,
   },
   {
     mode: "providerGroups",
-    label: "Provider Groups",
-    description: "维护路由分组、故障切换、截断策略和成员列表。",
+    labelKey: "runtimeConfig.editor.modes.providerGroups.label",
+    descriptionKey: "runtimeConfig.editor.modes.providerGroups.description",
     icon: RouteIcon,
   },
   {
     mode: "networkProxy",
-    label: "网络代理",
-    description: "维护 runtime 上游 HTTP/HTTPS/SOCKS5 代理与 no_proxy。",
+    labelKey: "runtimeConfig.editor.modes.networkProxy.label",
+    descriptionKey: "runtimeConfig.editor.modes.networkProxy.description",
     icon: RouteIcon,
   },
   {
     mode: "auth",
-    label: "Auth 配置",
-    description: "维护 JWT、管理端和 Access Key 鉴权配置。",
+    labelKey: "runtimeConfig.editor.modes.auth.label",
+    descriptionKey: "runtimeConfig.editor.modes.auth.description",
     icon: Settings2Icon,
   },
   {
     mode: "routing",
-    label: "Routing 配置",
-    description: "维护 routing 根配置和 routes 列表顺序。",
+    labelKey: "runtimeConfig.editor.modes.routing.label",
+    descriptionKey: "runtimeConfig.editor.modes.routing.description",
     icon: RouteIcon,
   },
   {
     mode: "rateLimit",
-    label: "Rate Limit",
-    description: "维护根限流、API Key 规则和路径级覆盖。",
+    labelKey: "runtimeConfig.editor.modes.rateLimit.label",
+    descriptionKey: "runtimeConfig.editor.modes.rateLimit.description",
     icon: GaugeIcon,
   },
   {
     mode: "resourceManager",
-    label: "Resource Manager",
-    description: "维护资源管理开关、默认算法、健康检查和统计保留。",
+    labelKey: "runtimeConfig.editor.modes.resourceManager.label",
+    descriptionKey: "runtimeConfig.editor.modes.resourceManager.description",
     icon: RouteIcon,
   },
   {
     mode: "providerQueue",
-    label: "Provider Queue",
-    description: "维护 provider 级槽位、溢出策略、等待心跳和覆盖规则。",
+    labelKey: "runtimeConfig.editor.modes.providerQueue.label",
+    descriptionKey: "runtimeConfig.editor.modes.providerQueue.description",
     icon: GaugeIcon,
   },
   {
     mode: "concurrency",
-    label: "Concurrency",
-    description: "维护全局并发上限、队列参数和 provider 级并发限制。",
+    labelKey: "runtimeConfig.editor.modes.concurrency.label",
+    descriptionKey: "runtimeConfig.editor.modes.concurrency.description",
     icon: GaugeIcon,
   },
   {
     mode: "retry",
-    label: "Retry",
-    description: "维护全局重试默认值、增强策略和规则顺序。",
+    labelKey: "runtimeConfig.editor.modes.retry.label",
+    descriptionKey: "runtimeConfig.editor.modes.retry.description",
     icon: RefreshCcwIcon,
   },
   {
     mode: "monitor",
-    label: "Monitor",
-    description: "维护 metrics、tracing、alert、pprof 和 memory 监控配置。",
+    labelKey: "runtimeConfig.editor.modes.monitor.label",
+    descriptionKey: "runtimeConfig.editor.modes.monitor.description",
     icon: ActivityIcon,
   },
   {
     mode: "websocket",
-    label: "WebSocket",
-    description: "维护 responses / realtime WebSocket 与 bridge 相关配置。",
+    labelKey: "runtimeConfig.editor.modes.websocket.label",
+    descriptionKey: "runtimeConfig.editor.modes.websocket.description",
     icon: WifiIcon,
   },
   {
     mode: "circuitBreaker",
-    label: "Circuit Breaker",
-    description: "维护熔断阈值、时间窗口和半开恢复参数。",
+    labelKey: "runtimeConfig.editor.modes.circuitBreaker.label",
+    descriptionKey: "runtimeConfig.editor.modes.circuitBreaker.description",
     icon: ActivityIcon,
   },
   {
     mode: "transformer",
-    label: "Transformer",
-    description: "维护 HTTPTransformer 开关和 request/response body modifier。",
+    labelKey: "runtimeConfig.editor.modes.transformer.label",
+    descriptionKey: "runtimeConfig.editor.modes.transformer.description",
     icon: Settings2Icon,
   },
   {
     mode: "source",
-    label: "原始 YAML",
-    description: "保留注释、空行和原始排版，作为兜底编辑模式。",
+    labelKey: "runtimeConfig.editor.modes.source.label",
+    descriptionKey: "runtimeConfig.editor.modes.source.description",
     icon: FileTextIcon,
   },
 ];
@@ -347,8 +348,11 @@ function formatTimestamp(value?: string) {
   }).format(new Date(value));
 }
 
-function getModeLabel(mode: EditorMode) {
-  return modeMenuEntries.find((entry) => entry.mode === mode)?.label ?? mode;
+function getModeLabel(
+  mode: EditorMode,
+  entries: Array<{ label: string; mode: EditorMode }>,
+) {
+  return entries.find((entry) => entry.mode === mode)?.label ?? mode;
 }
 
 function sleep(ms: number) {
@@ -738,6 +742,7 @@ function MenuButton({
 }
 
 export function BackendConfigSettingsPage() {
+  const { t } = useTranslation("runtimeConfig");
   const [document, setDocument] = useState<RuntimeConfigDocument | null>(null);
   const [draftParsed, setDraftParsed] = useState<unknown>(null);
   const [draftRaw, setDraftRaw] = useState("");
@@ -846,6 +851,15 @@ export function BackendConfigSettingsPage() {
   const defaultProvider = useMemo(
     () => getRuntimeDefaultProvider(draftParsed),
     [draftParsed],
+  );
+  const translatedModeMenuEntries = useMemo(
+    () =>
+      modeMenuEntries.map((entry) => ({
+        ...entry,
+        description: t(entry.descriptionKey),
+        label: t(entry.labelKey),
+      })),
+    [t],
   );
 
   const hasDomainChanges =
@@ -2584,24 +2598,23 @@ export function BackendConfigSettingsPage() {
   return (
     <div className="space-y-6">
       <SettingsSection
-        title="后端配置工作台"
-        description="独立维护 runtime 后端配置，专用表单优先，YAML 作为兜底。"
+        title={t("editor.title")}
+        description={t("editor.description")}
       >
         <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge>独立后端配置页</Badge>
-              <Badge>{getModeLabel(mode)}</Badge>
-              {hasUnsavedChanges ? <Badge>有未保存草稿</Badge> : null}
+              <Badge>{t("editor.independentBadge")}</Badge>
+              <Badge>{getModeLabel(mode, translatedModeMenuEntries)}</Badge>
+              {hasUnsavedChanges ? <Badge>{t("editor.unsavedBadge")}</Badge> : null}
             </div>
             <details className="rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-1.5">
               <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-[var(--muted-foreground)]">
                 <InfoIcon size={14} className="text-[var(--accent-primary)]" />
-                使用说明
+                {t("editor.usage.title")}
               </summary>
               <div className="mt-2.5 max-w-[32rem] text-sm leading-6 text-[var(--muted-foreground)]">
-                结构化配置树已经移除。常用配置域使用专用控件维护；碰到未覆盖字段，再切到
-                YAML 模式补充。
+                {t("editor.usage.body")}
               </div>
             </details>
           </div>
@@ -2777,20 +2790,20 @@ export function BackendConfigSettingsPage() {
             <div className="flex flex-wrap items-center gap-2">
               <Badge>{hasUnsavedChanges ? "未保存草稿" : "已同步"}</Badge>
               <Badge>
-                {mode === "source" ? "原始 YAML 模式" : "专用配置域模式"}
+                {mode === "source" ? t("editor.sourceFocus") : t("editor.structuredFocus")}
               </Badge>
               {previewDocument ? (
                 <Badge>
                   {isPreviewFresh
-                    ? `预览 ${previewDiff.length} 行`
-                    : "预览已过期"}
+                    ? `${t("editor.preview.latest")} ${previewDiff.length} 行`
+                    : t("editor.preview.expired")}
                 </Badge>
               ) : null}
-              {previewRequiresRestart ? <Badge>预览含需重启项</Badge> : null}
+              {previewRequiresRestart ? <Badge>{t("editor.preview.needsRestart")}</Badge> : null}
               {savedRequiresRestart && !hasUnsavedChanges ? (
-                <Badge>最近保存待重启</Badge>
+                <Badge>{t("editor.preview.needsRestart")}</Badge>
               ) : null}
-              {isModeSwitching ? <Badge>正在同步视图</Badge> : null}
+              {isModeSwitching ? <Badge>{t("editor.usage.title")}</Badge> : null}
               {mode === "providers" ? (
                 <Badge>{`${enabledProviderCount} 已启用`}</Badge>
               ) : null}
@@ -2807,7 +2820,7 @@ export function BackendConfigSettingsPage() {
                 ) : (
                   <RefreshCcwIcon size={14} />
                 )}
-                重新加载
+                {t("editor.controls.reload")}
               </Button>
               <Button
                 variant="secondary"
@@ -2820,7 +2833,7 @@ export function BackendConfigSettingsPage() {
                 ) : (
                   <FileTextIcon size={14} />
                 )}
-                生成预览
+                {t("editor.controls.preview")}
               </Button>
               <Button
                 size="sm"
@@ -2832,7 +2845,7 @@ export function BackendConfigSettingsPage() {
                 ) : (
                   <HardDriveDownloadIcon size={14} />
                 )}
-                保存到文件
+                {t("editor.controls.save")}
               </Button>
               <Button
                 variant={
@@ -2850,13 +2863,16 @@ export function BackendConfigSettingsPage() {
                   <RotateCcwIcon size={14} />
                 )}
                 {savedRequiresRestart && !hasUnsavedChanges
-                  ? "重启使配置生效"
-                  : "重启 runtime-server"}
+                  ? t("editor.controls.restartWithEffect")
+                  : t("editor.controls.restart")}
               </Button>
             </div>
           </div>
           <div className="mt-2.5 text-xs text-[var(--muted-foreground)]">
-            当前焦点：{mode === "source" ? "源码兜底编辑" : getModeLabel(mode)}
+            {t("editor.currentFocusPrefix")}
+            {mode === "source"
+              ? t("editor.sourceFocus")
+              : getModeLabel(mode, translatedModeMenuEntries)}
           </div>
           {statusMessage ? (
             <div className="mt-2.5 rounded-[0.75rem] border border-[#8fd0c6]/24 bg-[#8fd0c6]/10 px-3 py-2.5 text-sm">
@@ -2882,17 +2898,17 @@ export function BackendConfigSettingsPage() {
       ) : null}
 
       <SettingsSection
-        title="配置编辑区"
-        description="左侧切换配置域，右侧使用专用控件编辑。"
+        title={t("editor.panels.editorTitle")}
+        description={t("editor.panels.editorDescription")}
       >
         <div className="grid gap-3 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[17rem_minmax(0,1fr)]">
           <div className="min-w-0 space-y-2.5 lg:sticky lg:top-[8.5rem] lg:self-start">
             <ControlPanel
-              title="配置域"
-              description="切换专用编辑器或源码模式。"
+              title={t("editor.panels.modeTitle")}
+              description={t("editor.panels.modeDescription")}
             >
               <div className="grid gap-2">
-                {modeMenuEntries.map((entry) => (
+                {translatedModeMenuEntries.map((entry) => (
                   <MenuButton
                     key={entry.mode}
                     active={mode === entry.mode}
@@ -2910,8 +2926,8 @@ export function BackendConfigSettingsPage() {
             </ControlPanel>
 
             <ControlPanel
-              title="草稿摘要"
-              description="显示当前草稿规模、预览状态和关键配置摘要。"
+              title={t("editor.panels.summaryTitle")}
+              description={t("editor.panels.summaryDescription")}
             >
               <div className="flex flex-wrap gap-2">
                 <SummaryPill label="lines" value={`${draftLineCount}`} />
@@ -2976,7 +2992,11 @@ export function BackendConfigSettingsPage() {
           <div className="min-w-0 space-y-3">
             {mode === "providers" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="Provider 配置" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.providers.label")}
+                  />
+                }
               >
                 <RuntimeProviderDomainEditor
                   defaultProvider={defaultProvider}
@@ -2990,7 +3010,11 @@ export function BackendConfigSettingsPage() {
 
             {mode === "providerGroups" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="Provider Groups" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.providerGroups.label")}
+                  />
+                }
               >
                 <RuntimeProviderGroupsDomainEditor
                   groups={providerGroups}
@@ -3002,7 +3026,13 @@ export function BackendConfigSettingsPage() {
             ) : null}
 
             {mode === "networkProxy" ? (
-              <Suspense fallback={<ConfigEditorLoadingCard label="网络代理" />}>
+              <Suspense
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.networkProxy.label")}
+                  />
+                }
+              >
                 <RuntimeProxyDomainEditor
                   config={proxyConfig}
                   onChange={handleProxyConfigChange}
@@ -3012,7 +3042,11 @@ export function BackendConfigSettingsPage() {
 
             {mode === "auth" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="Auth 配置" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.auth.label")}
+                  />
+                }
               >
                 <RuntimeAuthDomainEditor
                   authConfig={authConfig}
@@ -3023,7 +3057,11 @@ export function BackendConfigSettingsPage() {
 
             {mode === "routing" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="Routing 配置" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.routing.label")}
+                  />
+                }
               >
                 <RuntimeRoutingDomainEditor
                   availableGroups={providerGroups.map((group) => group.name)}
@@ -3039,7 +3077,11 @@ export function BackendConfigSettingsPage() {
 
             {mode === "rateLimit" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="Rate Limit" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.rateLimit.label")}
+                  />
+                }
               >
                 <RuntimeRateLimitDomainEditor
                   apiKeyLimits={apiKeyLimits}
@@ -3056,7 +3098,11 @@ export function BackendConfigSettingsPage() {
 
             {mode === "resourceManager" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="Resource Manager" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.resourceManager.label")}
+                  />
+                }
               >
                 <RuntimeResourceManagerDomainEditor
                   config={resourceManagerConfig}
@@ -3067,7 +3113,11 @@ export function BackendConfigSettingsPage() {
 
             {mode === "providerQueue" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="Provider Queue" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.providerQueue.label")}
+                  />
+                }
               >
                 <RuntimeProviderQueueDomainEditor
                   config={providerQueueConfig}
@@ -3081,7 +3131,11 @@ export function BackendConfigSettingsPage() {
 
             {mode === "concurrency" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="Concurrency" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.concurrency.label")}
+                  />
+                }
               >
                 <RuntimeConcurrencyDomainEditor
                   config={concurrencyConfig}
@@ -3094,7 +3148,13 @@ export function BackendConfigSettingsPage() {
             ) : null}
 
             {mode === "retry" ? (
-              <Suspense fallback={<ConfigEditorLoadingCard label="Retry" />}>
+              <Suspense
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.retry.label")}
+                  />
+                }
+              >
                 <RuntimeRetryDomainEditor
                   config={retryConfig}
                   onChangeConfig={handleRetryConfigChange}
@@ -3107,7 +3167,13 @@ export function BackendConfigSettingsPage() {
             ) : null}
 
             {mode === "monitor" ? (
-              <Suspense fallback={<ConfigEditorLoadingCard label="Monitor" />}>
+              <Suspense
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.monitor.label")}
+                  />
+                }
+              >
                 <RuntimeMonitorDomainEditor
                   config={monitorConfig}
                   onChange={handleMonitorConfigChange}
@@ -3117,7 +3183,11 @@ export function BackendConfigSettingsPage() {
 
             {mode === "websocket" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="WebSocket" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.websocket.label")}
+                  />
+                }
               >
                 <RuntimeWebsocketDomainEditor
                   config={websocketConfig}
@@ -3128,7 +3198,11 @@ export function BackendConfigSettingsPage() {
 
             {mode === "circuitBreaker" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="Circuit Breaker" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.circuitBreaker.label")}
+                  />
+                }
               >
                 <RuntimeCircuitBreakerDomainEditor
                   config={circuitBreakerConfig}
@@ -3139,7 +3213,11 @@ export function BackendConfigSettingsPage() {
 
             {mode === "transformer" ? (
               <Suspense
-                fallback={<ConfigEditorLoadingCard label="Transformer" />}
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("runtimeConfig.editor.modes.transformer.label")}
+                  />
+                }
               >
                 <RuntimeTransformerDomainEditor
                   config={transformerConfig}
@@ -3159,11 +3237,11 @@ export function BackendConfigSettingsPage() {
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex flex-wrap items-center gap-2">
                       <div className="text-base font-semibold text-[var(--foreground)]">
-                        原始 YAML 草稿
+                        {t("editor.source.title")}
                       </div>
                       <SummaryPill label="lines" value={`${draftLineCount}`} />
                       <SummaryPill label="chars" value={`${draftRaw.length}`} />
-                      <Badge>保留注释</Badge>
+                      <Badge>{t("editor.source.preserveComments")}</Badge>
                     </div>
                     <details className="rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-1.5">
                       <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-[var(--muted-foreground)]">
@@ -3171,10 +3249,10 @@ export function BackendConfigSettingsPage() {
                           size={14}
                           className="text-[var(--accent-primary)]"
                         />
-                        YAML 说明
+                        {t("editor.source.helpTitle")}
                       </summary>
                       <div className="mt-2.5 max-w-[30rem] text-sm leading-6 text-[var(--muted-foreground)]">
-                        当专用控件尚未覆盖某些配置域，或者你需要完整保留注释和排版时，可在这里直接编辑源码。
+                        {t("editor.source.helpBody")}
                       </div>
                     </details>
                   </div>
@@ -3198,15 +3276,18 @@ export function BackendConfigSettingsPage() {
       </SettingsSection>
 
       {previewDocument ? (
-        <SettingsSection title="变更预览" description="保存前先看文本 diff。">
+        <SettingsSection
+          title={t("editor.preview.title")}
+          description={t("editor.preview.description")}
+        >
           <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2.5">
               <div className="flex flex-wrap items-center gap-2">
-                <SummaryPill label="新增" value={`${previewAdditions}`} />
-                <SummaryPill label="删除" value={`${previewRemovals}`} />
-                <Badge>{isPreviewFresh ? "最新预览" : "预览已过期"}</Badge>
+                <SummaryPill label={t("editor.preview.added")} value={`${previewAdditions}`} />
+                <SummaryPill label={t("editor.preview.removed")} value={`${previewRemovals}`} />
+                <Badge>{isPreviewFresh ? t("editor.preview.latest") : t("editor.preview.expired")}</Badge>
                 {previewDocument.restart_required ? (
-                  <Badge>保存后需重启</Badge>
+                  <Badge>{t("editor.preview.needsRestart")}</Badge>
                 ) : null}
               </div>
               <details className="rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-1.5">
@@ -3215,12 +3296,12 @@ export function BackendConfigSettingsPage() {
                     size={14}
                     className="text-[var(--accent-primary)]"
                   />
-                  预览说明
+                  {t("editor.preview.helpTitle")}
                 </summary>
                 <div className="mt-2.5 max-w-[30rem] text-sm leading-6 text-[var(--muted-foreground)]">
                   {isPreviewFresh
-                    ? "当前 diff 对应最新草稿，可以直接保存。"
-                    : "草稿在预览后发生过修改，建议重新生成预览。"}
+                    ? t("editor.preview.helpFresh")
+                    : t("editor.preview.helpStale")}
                 </div>
               </details>
             </div>
@@ -3265,10 +3346,8 @@ export function BackendConfigSettingsPage() {
           <div className="rounded-[0.9rem] border border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] px-3 py-2.5">
             <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge>未保存草稿</Badge>
-                <div className="text-sm text-[var(--muted-foreground)]">
-                  建议先预览差异，再保存到当前 runtime 配置文档。
-                </div>
+                <Badge>{t("editor.sticky.unsaved")}</Badge>
+                <div className="text-sm text-[var(--muted-foreground)]">{t("editor.sticky.hint")}</div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Button
@@ -3282,7 +3361,7 @@ export function BackendConfigSettingsPage() {
                   ) : (
                     <FileTextIcon size={14} />
                   )}
-                  先看预览
+                  {t("editor.sticky.previewButton")}
                 </Button>
                 <Button
                   variant={canSaveAndRestart ? "secondary" : "primary"}
@@ -3295,7 +3374,7 @@ export function BackendConfigSettingsPage() {
                   ) : (
                     <HardDriveDownloadIcon size={14} />
                   )}
-                  直接保存
+                  {t("editor.sticky.saveButton")}
                 </Button>
                 {canSaveAndRestart ? (
                   <Button
@@ -3308,7 +3387,7 @@ export function BackendConfigSettingsPage() {
                     ) : (
                       <RotateCcwIcon size={14} />
                     )}
-                    保存并重启
+                    {t("editor.sticky.saveAndRestartButton")}
                   </Button>
                 ) : null}
               </div>

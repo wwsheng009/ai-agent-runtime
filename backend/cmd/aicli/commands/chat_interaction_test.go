@@ -148,6 +148,46 @@ func TestPrepareInteractiveRead_HoldsPromptWhileConfirmedDraftExists(t *testing.
 	}
 }
 
+func TestChatSession_InterruptClearsPromptAndDraftState(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	session.Interaction = coord
+	session.InputQueue = newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	session.InputQueue.stageDraft("first\nsecond")
+
+	coord.PrintPrompt()
+	if !strings.Contains(output.String(), "你> ") {
+		t.Fatalf("expected initial prompt to render, got %q", output.String())
+	}
+
+	session.Interrupt()
+
+	if session.InputQueue.hasDraft() {
+		t.Fatal("expected interrupt to clear staged draft")
+	}
+	if session.InputQueue.hasReadySubmission() {
+		t.Fatal("expected interrupt to clear ready submission")
+	}
+
+	showPrompt, notice, err := prepareInteractiveRead(session)
+	if err != nil {
+		t.Fatalf("prepareInteractiveRead after interrupt: %v", err)
+	}
+	if !showPrompt {
+		t.Fatal("expected prompt to become visible again after interrupt")
+	}
+	if notice != "" {
+		t.Fatalf("expected no queued-input notice after interrupt, got %q", notice)
+	}
+
+	coord.PrintPrompt()
+	if strings.Count(output.String(), "你> ") != 2 {
+		t.Fatalf("expected prompt to be redrawn after interrupt, got %q", output.String())
+	}
+}
+
 func TestChatInteractionCoordinator_RenderAsyncLineSupportsMultilineToolSummary(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)

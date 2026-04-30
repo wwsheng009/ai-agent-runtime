@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 
 // setupSignalHandler 设置信号处理器（Windows 特定）
 // Windows: 只支持 Ctrl+C (SIGINT)
-func setupSignalHandler(session *ChatSession, sigChan chan os.Signal, sigCountChan chan<- int) {
+func setupSignalHandler(session *ChatSession, sigChan chan os.Signal, sigCountChan chan<- int, shouldExit *atomic.Bool) {
 	// Windows: 只支持 SIGINT (Ctrl+C)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -45,6 +46,10 @@ func setupSignalHandler(session *ChatSession, sigChan chan os.Signal, sigCountCh
 
 			if sigCount >= 2 {
 				// 第二次 Ctrl+C：正常退出循环（会保存日志）
+				session.Interrupt()
+				if shouldExit != nil {
+					shouldExit.Store(true)
+				}
 				fmt.Println("\n正在退出...")
 				session.interrupted.Store(true)
 				close(sigCountChan)

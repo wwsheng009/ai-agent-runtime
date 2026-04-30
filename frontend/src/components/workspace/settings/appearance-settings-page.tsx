@@ -87,6 +87,7 @@ function FontSizeControlCard({
   onChange,
 }: FontSizeControlCardProps) {
   const { t } = useTranslation("settings");
+  const { t: tCommon } = useTranslation("common");
   const decrementDisabled = value <= FONT_SIZE_LIMITS.min;
   const incrementDisabled = value >= FONT_SIZE_LIMITS.max;
 
@@ -181,14 +182,14 @@ function FontSizeControlCard({
               : "border-[var(--border)] bg-[var(--surface-solid)] text-[var(--foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
           )}
         >
-          {t("actions.reset")} {formatFontSizePx(defaultValue)}
+          {tCommon("actions.reset")} {formatFontSizePx(defaultValue)}
         </button>
       </div>
 
       <div className="text-xs leading-5 text-[var(--muted-foreground)]">
         {t("appearance.sizeHint", {
-          min: FONT_SIZE_LIMITS.min,
-          max: FONT_SIZE_LIMITS.max,
+          min: String(FONT_SIZE_LIMITS.min),
+          max: String(FONT_SIZE_LIMITS.max),
         })}
       </div>
     </SettingsPanelCard>

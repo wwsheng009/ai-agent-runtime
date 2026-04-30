@@ -406,6 +406,134 @@ export const enUS = {
       backToWorkspace: "Back to workspace",
       logs: "Logs",
     },
+    editor: {
+      title: "Backend config workspace",
+      description:
+        "Manage runtime backend configuration separately, with dedicated forms first and YAML as the fallback.",
+      independentBadge: "Independent backend config page",
+      unsavedBadge: "Unsaved draft",
+      usage: {
+        title: "How to use it",
+        body:
+          "The structured config tree is gone. Use the dedicated controls for common config areas; switch to YAML mode when you need to fill in fields that are not covered.",
+      },
+      currentFocusPrefix: "Current focus:",
+      sourceFocus: "Source fallback editor",
+      structuredFocus: "Dedicated config mode",
+      controls: {
+        reload: "Reload",
+        preview: "Generate preview",
+        save: "Save to file",
+        restartWithEffect: "Restart to apply",
+        restart: "Restart runtime-server",
+      },
+      panels: {
+        editorTitle: "Config editor",
+        editorDescription: "Switch config areas on the left and edit with dedicated controls on the right.",
+        modeTitle: "Config areas",
+        modeDescription: "Switch between dedicated editors and source mode.",
+        summaryTitle: "Draft summary",
+        summaryDescription:
+          "Shows draft size, preview state, and the key configuration summary.",
+      },
+      source: {
+        title: "Raw YAML draft",
+        preserveComments: "Preserve comments",
+        helpTitle: "YAML help",
+        helpBody:
+          "When dedicated controls do not yet cover a config area, or when you need to preserve comments and formatting exactly, edit the source directly here.",
+      },
+      preview: {
+        title: "Change preview",
+        description: "Inspect the text diff before saving.",
+        added: "Added",
+        removed: "Removed",
+        latest: "Latest preview",
+        expired: "Preview expired",
+        needsRestart: "Restart required after save",
+        helpTitle: "Preview help",
+        helpFresh: "This diff matches the latest draft and can be saved directly.",
+        helpStale:
+          "The draft changed after the preview was generated; regenerate the preview.",
+      },
+      sticky: {
+        unsaved: "Unsaved draft",
+        hint: "Preview the diff first, then save it to the current runtime config document.",
+        previewButton: "Preview first",
+        saveButton: "Save now",
+        saveAndRestartButton: "Save and restart",
+      },
+      modes: {
+        providers: {
+          label: "Provider config",
+          description: "Manage the main provider config with tables and popup forms.",
+        },
+        providerGroups: {
+          label: "Provider Groups",
+          description: "Maintain routing groups, failover, truncation strategy, and member lists.",
+        },
+        networkProxy: {
+          label: "Network proxy",
+          description: "Maintain runtime upstream HTTP/HTTPS/SOCKS5 proxies and no_proxy.",
+        },
+        auth: {
+          label: "Auth config",
+          description: "Maintain JWT, admin, and Access Key authentication settings.",
+        },
+        routing: {
+          label: "Routing config",
+          description: "Maintain the routing root config and route ordering.",
+        },
+        rateLimit: {
+          label: "Rate Limit",
+          description: "Maintain root rate limiting, API key rules, and path overrides.",
+        },
+        resourceManager: {
+          label: "Resource Manager",
+          description:
+            "Maintain the resource manager switch, default algorithms, health checks, and stats retention.",
+        },
+        providerQueue: {
+          label: "Provider Queue",
+          description:
+            "Maintain provider-level slots, overflow strategy, heartbeat waits, and override rules.",
+        },
+        concurrency: {
+          label: "Concurrency",
+          description:
+            "Maintain the global concurrency cap, queue parameters, and provider-level limits.",
+        },
+        retry: {
+          label: "Retry",
+          description: "Maintain the global retry default, enhancement strategy, and rule order.",
+        },
+        monitor: {
+          label: "Monitor",
+          description:
+            "Maintain metrics, tracing, alert, pprof, and memory monitoring config.",
+        },
+        websocket: {
+          label: "WebSocket",
+          description:
+            "Maintain responses / realtime WebSocket and bridge-related config.",
+        },
+        circuitBreaker: {
+          label: "Circuit Breaker",
+          description:
+            "Maintain failure thresholds, time windows, and half-open recovery parameters.",
+        },
+        transformer: {
+          label: "Transformer",
+          description:
+            "Maintain HTTPTransformer switches and request/response body modifiers.",
+        },
+        source: {
+          label: "Raw YAML",
+          description:
+            "Keep comments, blank lines, and the original layout as the fallback editor mode.",
+        },
+      },
+    },
   },
   settings: {
     dialog: {
@@ -686,8 +814,8 @@ export const enUS = {
         "Settings are stored in browser localStorage and are not written back to the repo config file.",
       settingsKey: "settings localStorage key",
       runtimeClientKey: "runtime client localStorage key",
-      selectedProvider: "Selected provider",
-      selectedModel: "Selected model",
+      selectedProvider: "Available providers",
+      selectedModel: "Current model",
       sessionCount: "Session count",
       recoverableSessions: "Recoverable sessions",
       activeTeams: "Active teams",

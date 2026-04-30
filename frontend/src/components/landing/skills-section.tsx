@@ -14,17 +14,17 @@ export function SkillsSection() {
     {
       title: t("skills.columns.understand.title"),
       description: t("skills.columns.understand.description"),
-      items: t("skills.columns.understand.items", { returnObjects: true }) as string[],
+      items: t("skills.columns.understand.items", { returnObjects: true }) as unknown as string[],
     },
     {
       title: t("skills.columns.coordinate.title"),
       description: t("skills.columns.coordinate.description"),
-      items: t("skills.columns.coordinate.items", { returnObjects: true }) as string[],
+      items: t("skills.columns.coordinate.items", { returnObjects: true }) as unknown as string[],
     },
     {
       title: t("skills.columns.deliver.title"),
       description: t("skills.columns.deliver.description"),
-      items: t("skills.columns.deliver.items", { returnObjects: true }) as string[],
+      items: t("skills.columns.deliver.items", { returnObjects: true }) as unknown as string[],
     },
   ];
 
@@ -50,7 +50,7 @@ export function SkillsSection() {
                 <div className="absolute top-0 left-0 h-full w-1 bg-gradient-to-b from-[#f0c77b] via-[#8fd0c6] to-transparent" />
                 <div className="pl-4">
                   <div className="app-text-11 uppercase tracking-[0.2em] text-[#f0c77b]">
-                    {t("skills.stageLabel", { index: index + 1 })}
+                    {t("skills.stageLabel", { index: String(index + 1) })}
                   </div>
                   <div className="mt-2 text-xl font-semibold">{column.title}</div>
                   <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">

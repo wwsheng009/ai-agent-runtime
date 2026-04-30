@@ -160,8 +160,8 @@ export function AboutSettingsPage({
             label={t("about.recoverableSessions")}
             value={`${runtimeSessionsSummary.recoverableCount}`}
             detail={t("about.sessionBreakdown", {
-              active: runtimeSessionsSummary.activeCount,
-              archived: runtimeSessionsSummary.archivedCount,
+              active: String(runtimeSessionsSummary.activeCount),
+              archived: String(runtimeSessionsSummary.archivedCount),
             })}
           />
           <StatCard

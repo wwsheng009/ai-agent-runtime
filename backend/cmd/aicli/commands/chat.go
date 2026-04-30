@@ -120,8 +120,17 @@ type chatRuntimeHTTPCapture struct {
 
 // Interrupt 中断当前操作
 func (s *ChatSession) Interrupt() {
+	if s == nil {
+		return
+	}
 	if s.cancelFunc != nil {
 		s.cancelFunc()
+	}
+	// 中断语义是“取消当前输入/当前轮次”，因此需要同时清掉尚未提交的输入草稿
+	// 和已渲染但尚未重绘的 prompt 状态，避免下一轮仍被旧状态挡住。
+	_ = discardPendingInteractiveInput(s)
+	if s.Interaction != nil {
+		s.Interaction.ResetPromptState()
 	}
 	s.interrupted.Store(true)
 }
@@ -720,10 +729,10 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 	// 设置信号处理（平台特定：Unix 支持 Ctrl+C Ctrl+Break ESC; Windows 仅 Ctrl+C）
 	sigChan := make(chan os.Signal, 1)
 	sigCountChan := make(chan int, 1)
-	setupSignalHandler(session, sigChan, sigCountChan)
+	var shouldExit atomic.Bool
+	setupSignalHandler(session, sigChan, sigCountChan, &shouldExit)
 
 	// 监听二次 Ctrl+C，触发优雅退出
-	var shouldExit atomic.Bool
 	go func() {
 		for range sigCountChan {
 		}
@@ -745,6 +754,10 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			session.cancelFunc()
 		}
 		session.cancelCtx, session.cancelFunc = context.WithCancel(context.Background())
+		if shouldExit.Load() {
+			fmt.Println()
+			break
+		}
 
 		var input string
 		var err error
@@ -768,6 +781,10 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					}
 					continue
 				}
+				if shouldExit.Load() {
+					fmt.Println()
+					break
+				}
 				if notice != "" {
 					if session.Interaction != nil {
 						session.Interaction.RenderAsyncLine(notice)
@@ -775,12 +792,20 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 						fmt.Println(notice)
 					}
 				}
+				if shouldExit.Load() {
+					fmt.Println()
+					break
+				}
 				if showPrompt {
 					if session.Interaction != nil {
 						session.Interaction.PrintPrompt()
 					} else {
 						fmt.Print(ui.FormatUserPromptWithAttachments(len(session.ImagePaths)))
 					}
+				}
+				if shouldExit.Load() {
+					fmt.Println()
+					break
 				}
 			}
 

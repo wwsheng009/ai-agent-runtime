@@ -46,6 +46,7 @@ export function ChatSettingsPage({
   selectedProvider,
 }: ChatSettingsPageProps) {
   const { t } = useTranslation("settings");
+  const { t: tCommon } = useTranslation("common");
   const { settings, updateSection } = useAppSettings();
   const providerSelectOptions = providerOptions.map((provider) => ({
     value: provider,
@@ -145,9 +146,9 @@ export function ChatSettingsPage({
               : runtimeModelsLoading
                 ? t("chat.summaryLoading")
                 : t("chat.summaryTemplate", {
-                    providerCount: providerOptions.length,
-                    provider: selectedProvider || t("common.states.none"),
-                    model: selectedModel || t("common.states.none"),
+                    providerCount: String(providerOptions.length),
+                    provider: selectedProvider || tCommon("states.none"),
+                    model: selectedModel || tCommon("states.none"),
                   })
           }
         />

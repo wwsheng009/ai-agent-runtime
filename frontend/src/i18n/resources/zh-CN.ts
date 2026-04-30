@@ -389,6 +389,122 @@ export const zhCN = {
       backToWorkspace: "返回工作台",
       logs: "日志",
     },
+    editor: {
+      title: "后端配置工作台",
+      description: "独立维护 runtime 后端配置，专用表单优先，YAML 作为兜底。",
+      independentBadge: "独立后端配置页",
+      unsavedBadge: "有未保存草稿",
+      usage: {
+        title: "使用说明",
+        body: "结构化配置树已经移除。常用配置域使用专用控件维护；碰到未覆盖字段，再切到 YAML 模式补充。",
+      },
+      currentFocusPrefix: "当前焦点：",
+      sourceFocus: "源码兜底编辑",
+      structuredFocus: "专用配置域模式",
+      controls: {
+        reload: "重新加载",
+        preview: "生成预览",
+        save: "保存到文件",
+        restartWithEffect: "重启使配置生效",
+        restart: "重启 runtime-server",
+      },
+      panels: {
+        editorTitle: "配置编辑区",
+        editorDescription: "左侧切换配置域，右侧使用专用控件编辑。",
+        modeTitle: "配置域",
+        modeDescription: "切换专用编辑器或源码模式。",
+        summaryTitle: "草稿摘要",
+        summaryDescription: "显示当前草稿规模、预览状态和关键配置摘要。",
+      },
+      source: {
+        title: "原始 YAML 草稿",
+        preserveComments: "保留注释",
+        helpTitle: "YAML 说明",
+        helpBody:
+          "当专用控件尚未覆盖某些配置域，或者你需要完整保留注释和排版时，可在这里直接编辑源码。",
+      },
+      preview: {
+        title: "变更预览",
+        description: "保存前先看文本 diff。",
+        added: "新增",
+        removed: "删除",
+        latest: "最新预览",
+        expired: "预览已过期",
+        needsRestart: "保存后需重启",
+        helpTitle: "预览说明",
+        helpFresh: "当前 diff 对应最新草稿，可以直接保存。",
+        helpStale: "草稿在预览后发生过修改，建议重新生成预览。",
+      },
+      sticky: {
+        unsaved: "未保存草稿",
+        hint: "建议先预览差异，再保存到当前 runtime 配置文档。",
+        previewButton: "先看预览",
+        saveButton: "直接保存",
+        saveAndRestartButton: "保存并重启",
+      },
+      modes: {
+        providers: {
+          label: "Provider 配置",
+          description: "用表格和弹出表单管理 provider 主配置。",
+        },
+        providerGroups: {
+          label: "Provider Groups",
+          description: "维护路由分组、故障切换、截断策略和成员列表。",
+        },
+        networkProxy: {
+          label: "网络代理",
+          description: "维护 runtime 上游 HTTP/HTTPS/SOCKS5 代理与 no_proxy。",
+        },
+        auth: {
+          label: "Auth 配置",
+          description: "维护 JWT、管理端和 Access Key 鉴权配置。",
+        },
+        routing: {
+          label: "Routing 配置",
+          description: "维护 routing 根配置和 routes 列表顺序。",
+        },
+        rateLimit: {
+          label: "Rate Limit",
+          description: "维护根限流、API Key 规则和路径级覆盖。",
+        },
+        resourceManager: {
+          label: "Resource Manager",
+          description: "维护资源管理开关、默认算法、健康检查和统计保留。",
+        },
+        providerQueue: {
+          label: "Provider Queue",
+          description: "维护 provider 级槽位、溢出策略、等待心跳和覆盖规则。",
+        },
+        concurrency: {
+          label: "Concurrency",
+          description: "维护全局并发上限、队列参数和 provider 级并发限制。",
+        },
+        retry: {
+          label: "Retry",
+          description: "维护全局重试默认值、增强策略和规则顺序。",
+        },
+        monitor: {
+          label: "Monitor",
+          description: "维护 metrics、tracing、alert、pprof 和 memory 监控配置。",
+        },
+        websocket: {
+          label: "WebSocket",
+          description: "维护 responses / realtime WebSocket 与 bridge 相关配置。",
+        },
+        circuitBreaker: {
+          label: "Circuit Breaker",
+          description: "维护熔断阈值、时间窗口和半开恢复参数。",
+        },
+        transformer: {
+          label: "Transformer",
+          description: "维护 HTTPTransformer 开关和 request/response body modifier。",
+        },
+        source: {
+          label: "原始 YAML",
+          description: "保留注释、空行和原始排版，作为兜底编辑模式。",
+        },
+      },
+    },
   },
   settings: {
     dialog: {
@@ -668,13 +784,13 @@ export const zhCN = {
         "设置数据存于浏览器 localStorage，不会写回仓库配置文件。",
       settingsKey: "settings localStorage 键",
       runtimeClientKey: "runtime client localStorage 键",
-      selectedProvider: "当前 provider",
+      selectedProvider: "可选 provider",
       selectedModel: "当前 model",
       sessionCount: "会话数",
       recoverableSessions: "可恢复会话",
       activeTeams: "运行中团队",
       activeTeamsSummary: "共加载 {{count}} 个团队摘要",
-      sessionBreakdown: "{{active}} 在线 / {{archived}} 已归档",
+      sessionBreakdown: "{{active}} 活跃 / {{archived}} 已归档",
       latestUpdated: "最近更新 {{time}}",
       noSessions: "尚未发现会话",
       runtimeDefault: "运行时默认",

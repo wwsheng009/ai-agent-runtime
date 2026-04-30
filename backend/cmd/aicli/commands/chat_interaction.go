@@ -428,6 +428,16 @@ func (c *chatInteractionCoordinator) ClearPrompt() {
 	c.promptVisible = false
 }
 
+func (c *chatInteractionCoordinator) ResetPromptState() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.promptSeq++
+	c.promptVisible = false
+}
+
 func (c *chatInteractionCoordinator) ResetRunState() {
 	if c == nil {
 		return
