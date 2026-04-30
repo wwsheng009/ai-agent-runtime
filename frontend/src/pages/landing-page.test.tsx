@@ -12,13 +12,13 @@ describe("LandingPage", () => {
       </MemoryRouter>,
     );
 
-    expect(markup).toContain("Enter workspace");
-    expect(markup).toContain("Research, orchestrate, and ship");
+    expect(markup).toContain("进入工作台");
+    expect(markup).toContain("研究、编排并交付");
     expect(markup).not.toContain(
-      "See how the workspace turns agent work into something reviewable",
+      "看工作区如何把 Agent 工作变成可审阅的内容",
     );
     expect(markup).not.toContain(
-      "Bring teams, evidence, and runtime control into one flow",
+      "把团队、证据和运行时控制放进同一条流程",
     );
   });
 });

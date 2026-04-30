@@ -1,5 +1,6 @@
 import { BotIcon, RouteIcon } from "lucide-react";
 import { Link } from "react-router-dom";
+import { Trans, useTranslation } from "react-i18next";
 
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Select } from "@/components/ui/select";
@@ -25,38 +26,6 @@ type ChatSettingsPageProps = {
   selectedProvider: string;
 };
 
-const reasoningOptions: Array<{
-  value: ReasoningEffort;
-  label: string;
-  description: string;
-}> = [
-  {
-    value: "",
-    label: "运行时默认",
-    description: "把推理强度完全交给后端默认策略处理。",
-  },
-  {
-    value: "minimal",
-    label: "Minimal",
-    description: "最省推理预算，适合简单追问和极短回合。",
-  },
-  {
-    value: "low",
-    label: "Low",
-    description: "更快返回，适合普通问答与小改动。",
-  },
-  {
-    value: "medium",
-    label: "Medium",
-    description: "兼顾速度和质量，适合绝大多数日常任务。",
-  },
-  {
-    value: "high",
-    label: "High",
-    description: "更偏向复杂拆解和多步推理。",
-  },
-] as const;
-
 function clampMaxSteps(value: string) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
@@ -76,6 +45,7 @@ export function ChatSettingsPage({
   selectedModel,
   selectedProvider,
 }: ChatSettingsPageProps) {
+  const { t } = useTranslation("settings");
   const { settings, updateSection } = useAppSettings();
   const providerSelectOptions = providerOptions.map((provider) => ({
     value: provider,
@@ -85,25 +55,58 @@ export function ChatSettingsPage({
     value: model,
     label: model,
   }));
+  const reasoningOptions: Array<{
+    value: ReasoningEffort;
+    label: string;
+    description: string;
+  }> = [
+    {
+      value: "",
+      label: t("chat.reasoningOptions.default.label"),
+      description: t("chat.reasoningOptions.default.description"),
+    },
+    {
+      value: "minimal",
+      label: t("chat.reasoningOptions.minimal.label"),
+      description: t("chat.reasoningOptions.minimal.description"),
+    },
+    {
+      value: "low",
+      label: t("chat.reasoningOptions.low.label"),
+      description: t("chat.reasoningOptions.low.description"),
+    },
+    {
+      value: "medium",
+      label: t("chat.reasoningOptions.medium.label"),
+      description: t("chat.reasoningOptions.medium.description"),
+    },
+    {
+      value: "high",
+      label: t("chat.reasoningOptions.high.label"),
+      description: t("chat.reasoningOptions.high.description"),
+    },
+  ];
 
   return (
     <div className="space-y-6">
       <SettingsSection
-        title="默认模型路由"
-        description="这里修改的是工作区发送新回合时默认附带的 provider 和 model。"
+        title={t("chat.title")}
+        description={t("chat.description")}
       >
         <div className="grid gap-3 md:grid-cols-2">
           <SettingsFieldCard
-            title="Provider"
+            title={t("chat.defaultProvider")}
             icon={<BotIcon size={16} className="text-[var(--accent-primary)]" />}
           >
             <Select
-              ariaLabel="默认 Provider"
+              ariaLabel={t("chat.defaultProvider")}
               value={selectedProvider}
               onChange={onProviderChange}
               options={providerSelectOptions}
               placeholder={
-                runtimeModelsLoading ? "正在加载 provider..." : "暂无 provider"
+                runtimeModelsLoading
+                  ? t("chat.loadingProvider")
+                  : t("chat.noProvider")
               }
               disabled={runtimeModelsLoading || providerOptions.length === 0}
               className="w-full"
@@ -113,16 +116,18 @@ export function ChatSettingsPage({
           </SettingsFieldCard>
 
           <SettingsFieldCard
-            title="Model"
+            title={t("chat.defaultModel")}
             icon={<RouteIcon size={16} className="text-[var(--accent-secondary)]" />}
           >
             <Select
-              ariaLabel="默认 Model"
+              ariaLabel={t("chat.defaultModel")}
               value={selectedModel}
               onChange={onModelChange}
               options={modelSelectOptions}
               placeholder={
-                runtimeModelsLoading ? "正在加载模型..." : "当前 provider 没有可选模型"
+                runtimeModelsLoading
+                  ? t("chat.loadingModel")
+                  : t("chat.noModel")
               }
               disabled={runtimeModelsLoading || modelOptions.length === 0}
               className="w-full"
@@ -138,8 +143,12 @@ export function ChatSettingsPage({
             runtimeModelsError
               ? runtimeModelsError
               : runtimeModelsLoading
-                ? "运行时模型目录加载中。"
-                : `当前已识别 ${providerOptions.length} 个 provider，当前默认会话路由到 ${selectedProvider || "runtime default"} / ${selectedModel || "runtime default"}。`
+                ? t("chat.summaryLoading")
+                : t("chat.summaryTemplate", {
+                    providerCount: providerOptions.length,
+                    provider: selectedProvider || t("common.states.none"),
+                    model: selectedModel || t("common.states.none"),
+                  })
           }
         />
 
@@ -148,20 +157,20 @@ export function ChatSettingsPage({
             to="/runtime/config"
             className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
           >
-            打开后端配置页
+            {t("chat.openBackendConfig")}
           </Link>
           <Link
             to="/runtime/config"
             className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
           >
-            管理 Provider 列表
+            {t("chat.manageProviders")}
           </Link>
         </div>
       </SettingsSection>
 
       <SettingsSection
-        title="执行模式"
-        description="控制工作区聊天是否进入后端 ReAct 工具循环。"
+        title={t("chat.executionMode")}
+        description={t("chat.executionModeDescription")}
       >
         <SettingsToggleCard
           checked={settings.chat.enableReact}
@@ -170,12 +179,13 @@ export function ChatSettingsPage({
               enableReact: checked,
             })
           }
-          title="启用 ReAct 工具循环"
+          title={t("chat.enableReact")}
           description={
-            <>
-              开启后，请求会携带 <code>enable_react: true</code>，后端会把工具定义暴露给模型并进入工具调用循环。
-              关闭后，仍可做 skill route 或直接 LLM fallback，但模型本身不会触发工具调用。
-            </>
+            <Trans
+              t={t}
+              i18nKey="chat.enableReactDescription"
+              components={{ code: <code /> }}
+            />
           }
         />
 
@@ -183,9 +193,11 @@ export function ChatSettingsPage({
           size="compact"
           description={
             <>
-              当前模式:{" "}
+              {t("chat.currentMode")}:{" "}
               <span className="text-[var(--foreground)]">
-                {settings.chat.enableReact ? "ReAct 工具模式" : "路由 / 直连模式"}
+                {settings.chat.enableReact
+                  ? t("chat.reactMode")
+                  : t("chat.routeDirectMode")}
               </span>
               。
             </>
@@ -194,8 +206,8 @@ export function ChatSettingsPage({
       </SettingsSection>
 
       <SettingsSection
-        title="推理强度"
-        description="这些值会在发送到 `/api/agent/chat` 的请求里携带。"
+        title={t("chat.reasoning")}
+        description={t("chat.reasoningDescription")}
       >
         <div className="grid gap-2.5 lg:grid-cols-2">
           {reasoningOptions.map((option) => {
@@ -222,8 +234,8 @@ export function ChatSettingsPage({
       </SettingsSection>
 
       <SettingsSection
-        title="最大步骤数"
-        description="用于限制单轮里最多允许的规划 / 路由 / 工具执行步数。"
+        title={t("chat.maxSteps")}
+        description={t("chat.maxStepsDescription")}
       >
         <SettingsPanelCard>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -241,8 +253,8 @@ export function ChatSettingsPage({
               className={cn(editorControlClassName, "sm:max-w-[10rem]")}
             />
             <p className="text-sm leading-6 text-[var(--muted-foreground)]">
-              当前值为 <span className="text-[var(--foreground)]">{settings.chat.maxSteps}</span>。
-              通常 8 到 12 足够覆盖常见工作区任务，复杂编排可以提高到 15 到 20。
+              {t("chat.currentMaxSteps", { count: settings.chat.maxSteps })}{" "}
+              {t("chat.maxStepsAdvice")}
             </p>
           </div>
         </SettingsPanelCard>

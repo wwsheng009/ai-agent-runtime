@@ -17,10 +17,12 @@ import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessi
 import { type RuntimeClientIdentity } from "@/lib/runtime-client";
 import { type RuntimeTeamRecord } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { AboutSettingsPage } from "./about-settings-page";
 import { AppearanceSettingsPage } from "./appearance-settings-page";
 import { ChatSettingsPage } from "./chat-settings-page";
+import { LocalizationSettings } from "./localization-settings";
 import { NotificationSettingsPage } from "./notification-settings-page";
 import { WorkspaceSettingsPage } from "./workspace-settings-page";
 
@@ -74,6 +76,7 @@ export function SettingsDialog({
   selectedProvider,
 }: SettingsDialogProps) {
   const { resetSettings } = useAppSettings();
+  const { t } = useTranslation("settings");
   const [activeSection, setActiveSection] =
     useState<SettingsSectionId>(defaultSection);
 
@@ -129,36 +132,36 @@ export function SettingsDialog({
     () => [
       {
         id: "appearance",
-        label: "外观",
-        description: "强调色与动效",
+        label: t("sections.appearance.label"),
+        description: t("sections.appearance.description"),
         icon: PaletteIcon,
       },
       {
         id: "workspace",
-        label: "工作区",
-        description: "布局与文件栏行为",
+        label: t("sections.workspace.label"),
+        description: t("sections.workspace.description"),
         icon: Settings2Icon,
       },
       {
         id: "chat",
-        label: "聊天默认值",
-        description: "provider、model、推理强度",
+        label: t("sections.chat.label"),
+        description: t("sections.chat.description"),
         icon: SlidersHorizontalIcon,
       },
       {
         id: "notifications",
-        label: "通知",
-        description: "桌面提醒与权限",
+        label: t("sections.notifications.label"),
+        description: t("sections.notifications.description"),
         icon: BellIcon,
       },
       {
         id: "about",
-        label: "关于",
-        description: "运行时摘要与本地存储",
+        label: t("sections.about.label"),
+        description: t("sections.about.description"),
         icon: InfoIcon,
       },
     ],
-    [],
+    [t],
   );
 
   if (!open) {
@@ -178,13 +181,13 @@ export function SettingsDialog({
         <div className="flex items-start justify-between gap-3 px-3.5 py-3 sm:px-4">
           <div>
             <div className="app-text-11 uppercase tracking-[0.16em] text-[var(--accent-primary)]">
-              Workspace settings
+              {t("dialog.eyebrow")}
             </div>
             <h2 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-[var(--foreground)]">
-              前端工作区设置
+              {t("dialog.title")}
             </h2>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--muted-foreground)]">
-              这里只保留前端本地设置。后端 `config.yaml` 已迁移到独立的 Runtime Config 页面，避免和前端配置混在同一个对话框里。
+              {t("dialog.description")}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -193,16 +196,16 @@ export function SettingsDialog({
               className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
               onClick={onClose}
             >
-              后端配置页
+              {t("dialog.backendConfig")}
             </Link>
             <Button variant="ghost" size="sm" onClick={resetSettings}>
-              恢复前端默认
+              {t("dialog.resetFrontendDefaults")}
             </Button>
             <Button
               variant="ghost"
               size="icon"
               onClick={onClose}
-              aria-label="关闭设置"
+              aria-label={t("dialog.close")}
             >
               <XIcon size={16} />
             </Button>
@@ -255,6 +258,7 @@ export function SettingsDialog({
           </nav>
 
           <div className="min-h-0 overflow-y-auto px-3.5 py-3.5 sm:px-4">
+            <LocalizationSettings />
             {activeSection === "appearance" ? <AppearanceSettingsPage /> : null}
             {activeSection === "workspace" ? <WorkspaceSettingsPage /> : null}
             {activeSection === "chat" ? (
@@ -285,8 +289,7 @@ export function SettingsDialog({
         </div>
 
         <div className="border-t border-[var(--border)] px-3.5 py-2.5 text-xs leading-5 text-[var(--muted-foreground)] sm:px-4">
-          前端设置会立即写入当前浏览器的 localStorage。后端配置请使用独立的
-          Runtime Config 页面。工作区中可用 `Ctrl/Cmd + ,` 快速再次打开此面板。
+          {t("dialog.localStorageFooter")}
         </div>
       </div>
     </div>

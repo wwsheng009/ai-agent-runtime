@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { type Thread } from "@/data/mock";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 type MessageComposerProps = {
   density: "comfortable" | "compact";
@@ -54,22 +55,29 @@ export function MessageComposer({
   onStop,
   onSubmit,
 }: MessageComposerProps) {
+  const { t } = useTranslation("workspace");
   const isCompact = density === "compact";
   const promptMenuRef = useRef<HTMLDivElement | null>(null);
   const [promptMenuOpen, setPromptMenuOpen] = useState(false);
   const transportLabel =
-    transport === "live" ? "live runtime" : transport === "error" ? "runtime error" : "seeded";
-  const sessionStateLabel = hasSession ? "session attached" : "new session";
+    transport === "live"
+      ? t("composer.transport.live")
+      : transport === "error"
+        ? t("composer.transport.error")
+        : t("composer.transport.seeded");
+  const sessionStateLabel = hasSession
+    ? t("composer.sessionState.attached")
+    : t("composer.sessionState.new");
   const placeholder = isNewThread
-    ? "Ask the workspace to inspect, build, review, or coordinate the next step..."
-    : "Ask the workspace to research, change, verify, or coordinate the next step...";
+    ? t("composer.placeholder.newThread")
+    : t("composer.placeholder.thread");
   const submitButtonLabel = isResponding
-    ? "Stop response"
+    ? t("composer.submit.stopResponse")
     : isNewThread
-      ? "Start new thread"
+      ? t("composer.submit.startNewThread")
       : hasSession
-        ? "Send turn"
-        : "Start thread";
+        ? t("composer.submit.sendTurn")
+        : t("composer.submit.startThread");
   const showProviderPicker = providerOptions.length > 1;
   const showModelPicker = modelOptions.length > 0;
   const providerSelectOptions = providerOptions.map((provider) => ({
@@ -81,12 +89,12 @@ export function MessageComposer({
     label: model,
   }));
   const runtimeModelStatusLabel = runtimeModelsLoading
-    ? "loading models"
+    ? t("composer.loadingModels")
     : runtimeModelsError
-      ? "model catalog unavailable"
+      ? t("composer.modelCatalogUnavailable")
       : selectedModel
-        ? `model ${selectedModel}`
-        : "runtime default model";
+        ? t("composer.modelWithName", { model: selectedModel })
+        : t("composer.runtimeDefaultModel");
 
   useEffect(() => {
     if (!promptMenuOpen) {
@@ -127,10 +135,10 @@ export function MessageComposer({
           isCompact ? "py-1" : "py-1.5",
         )}
       >
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
           <span>{transportLabel}</span>
           <span className="size-1 rounded-full bg-[var(--border-strong)]" />
-          <span>{selectedArtifactCount} files</span>
+          <span>{t("composer.filesCount", { count: selectedArtifactCount })}</span>
           <span className="size-1 rounded-full bg-[var(--border-strong)]" />
           <span>{sessionStateLabel}</span>
           {prompts.length > 0 ? (
@@ -149,7 +157,7 @@ export function MessageComposer({
                   aria-expanded={promptMenuOpen}
                   aria-haspopup="menu"
                 >
-                  <span>prompt tips</span>
+                  <span>{t("composer.promptTips")}</span>
                   <span className="text-[var(--placeholder-foreground)]">
                     {prompts.length}
                   </span>
@@ -165,7 +173,7 @@ export function MessageComposer({
                 {promptMenuOpen ? (
                   <div className="absolute left-0 top-full z-20 mt-2 w-80 max-w-[calc(100vw-4rem)] rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-overlay)] p-1.5 shadow-[0_10px_24px_rgba(0,0,0,0.24)]">
                     <div className="px-2 py-1 app-text-9 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
-                      Prompt tips
+                      {t("composer.promptTipsMenuTitle")}
                     </div>
                     <div className="flex max-h-64 flex-col overflow-y-auto">
                       {prompts.map((prompt) => (
@@ -190,7 +198,7 @@ export function MessageComposer({
           {isResponding ? (
             <>
               <span className="size-1 rounded-full bg-[var(--accent-secondary-border)]" />
-              <span className="text-[var(--accent-secondary)]">response active</span>
+              <span className="text-[var(--accent-secondary)]">{t("composer.responseActive")}</span>
             </>
           ) : null}
         </div>
@@ -227,9 +235,9 @@ export function MessageComposer({
           <div className="min-w-0 flex flex-wrap items-center gap-2 app-text-9 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
             {showProviderPicker ? (
               <label className="inline-flex items-center gap-1.5">
-                <span>Provider</span>
+                <span>{t("composer.provider")}</span>
                 <Select
-                  ariaLabel="Provider"
+                  ariaLabel={t("composer.provider")}
                   value={selectedProvider}
                   onChange={onProviderChange}
                   options={providerSelectOptions}
@@ -243,9 +251,9 @@ export function MessageComposer({
             ) : null}
             {showModelPicker ? (
               <label className="inline-flex items-center gap-1.5">
-                <span>Model</span>
+                <span>{t("composer.model")}</span>
                 <Select
-                  ariaLabel="Model"
+                  ariaLabel={t("composer.model")}
                   value={selectedModel}
                   onChange={onModelChange}
                   options={modelSelectOptions}
@@ -259,9 +267,9 @@ export function MessageComposer({
             ) : null}
             <span className="truncate">{runtimeModelStatusLabel}</span>
             <span className="size-1 shrink-0 rounded-full bg-[var(--border-strong)]" />
-            <span className="truncate">Ctrl/Cmd + Enter</span>
+            <span className="truncate">{t("composer.shortcuts")}</span>
             <span className="size-1 shrink-0 rounded-full bg-[var(--border-strong)]" />
-            <span className="truncate">{isResponding ? "stop" : "submit"}</span>
+            <span className="truncate">{isResponding ? t("composer.stop") : t("composer.submitShort")}</span>
             {runtimeModelsError ? (
               <>
                 <span className="size-1 shrink-0 rounded-full bg-[#d8a66d]/40" />

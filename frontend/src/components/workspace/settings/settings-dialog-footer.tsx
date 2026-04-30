@@ -1,4 +1,5 @@
 import { type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button, type ButtonProps } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -22,12 +23,15 @@ export function SettingsDialogFooter({
   onConfirm,
   actionsBefore,
   buttonSize,
-  cancelLabel = "取消",
+  cancelLabel,
   className,
   confirmVariant,
   note,
   noteClassName,
 }: SettingsDialogFooterProps) {
+  const { t } = useTranslation("common");
+  const resolvedCancelLabel = cancelLabel ?? t("actions.cancel");
+
   return (
     <div
       className={cn(
@@ -44,7 +48,7 @@ export function SettingsDialogFooter({
       <div className="flex flex-wrap items-center gap-2">
         {actionsBefore}
         <Button variant="ghost" size={buttonSize} onClick={onCancel}>
-          {cancelLabel}
+          {resolvedCancelLabel}
         </Button>
         <Button variant={confirmVariant} size={buttonSize} onClick={onConfirm}>
           {confirmLabel}

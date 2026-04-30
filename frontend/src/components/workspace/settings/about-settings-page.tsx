@@ -8,16 +8,17 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useLocation } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import { APP_SETTINGS_STORAGE_KEY } from "@/core/settings";
+import { APP_SETTINGS_STORAGE_KEY, useAppSettings } from "@/core/settings";
+import { formatRelativeTimestamp } from "@/i18n/format";
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
 import {
   RUNTIME_CLIENT_STORAGE_KEY,
   type RuntimeClientIdentity,
 } from "@/lib/runtime-client";
 import { type RuntimeTeamRecord } from "@/lib/runtime-api";
-import { formatRelativeTimestamp } from "@/lib/utils";
 
 import { SettingsInfoCard } from "./settings-info-card";
 import { SettingsSection } from "./settings-section";
@@ -32,9 +33,9 @@ type AboutSettingsPageProps = {
   selectedProvider: string;
 };
 
-function resolveApiBaseLabel() {
+function resolveApiBaseLabel(fallbackLabel: string) {
   const configured = import.meta.env.VITE_API_BASE_URL?.trim();
-  return configured ? configured : "same-origin /api proxy";
+  return configured ? configured : fallbackLabel;
 }
 
 export function AboutSettingsPage({
@@ -46,29 +47,32 @@ export function AboutSettingsPage({
   selectedModel,
   selectedProvider,
 }: AboutSettingsPageProps) {
+  const { t } = useTranslation("settings");
+  const { resolvedLocale } = useAppSettings();
   const location = useLocation();
   const liveTeamCount = runtimeTeams.filter(
     (team) => (team.status || "").trim().toLowerCase() === "active",
   ).length;
+  const apiBaseLabel = resolveApiBaseLabel(t("about.apiBaseFallback"));
 
   return (
     <div className="space-y-6">
       <SettingsSection
-        title="当前工作区"
-        description="这些信息用于快速确认当前前端会把请求发到哪里，以及本地设置保存在什么位置。"
+        title={t("about.currentWorkspace")}
+        description={t("about.description")}
       >
         <div className="grid gap-3 lg:grid-cols-2">
           <SettingsInfoCard
             tone="softer"
-            title="API 基址"
+            title={t("about.apiBase")}
             icon={<RouteIcon size={16} className="text-[var(--accent-primary)]" />}
-            description={resolveApiBaseLabel()}
+            description={apiBaseLabel}
             descriptionClassName="break-all"
           />
 
           <SettingsInfoCard
             tone="softer"
-            title="当前路由"
+            title={t("about.currentRoute")}
             icon={
               <PanelsTopLeftIcon
                 size={16}
@@ -82,13 +86,13 @@ export function AboutSettingsPage({
       </SettingsSection>
 
       <SettingsSection
-        title="Runtime identity"
-        description="前端会为当前浏览器生成一个持久化 runtime client id，并用它派生 userId。重置后会切换到新的会话命名空间。"
+        title={t("about.runtimeIdentity")}
+        description={t("about.runtimeIdentityDescription")}
       >
         <div className="grid gap-3 lg:grid-cols-2">
           <SettingsInfoCard
             tone="softer"
-            title="Runtime user id"
+            title={t("about.runtimeUserId")}
             icon={
               <FingerprintIcon
                 size={16}
@@ -100,17 +104,17 @@ export function AboutSettingsPage({
               {runtimeClient.userId}
             </p>
             <div className="mt-3 text-xs leading-6 text-[var(--muted-foreground)]">
-              scope: {runtimeClient.workspaceScope}
+              {t("about.scopeLabel")}: {runtimeClient.workspaceScope}
             </div>
           </SettingsInfoCard>
 
           <SettingsInfoCard
             tone="softer"
-            title="Workspace path"
+            title={t("about.workspacePath")}
             icon={<RouteIcon size={16} className="text-[var(--accent-secondary)]" />}
           >
             <p className="app-inline-mono break-all text-[var(--muted-foreground)]">
-              {runtimeClient.workspacePath || "not set"}
+              {runtimeClient.workspacePath || t("about.notSet")}
             </p>
             <Button
               variant="secondary"
@@ -119,55 +123,63 @@ export function AboutSettingsPage({
               onClick={onResetRuntimeClientIdentity}
             >
               <RotateCcwIcon size={14} />
-              重置本地 runtime client id
+              {t("about.resetRuntimeClientId")}
             </Button>
           </SettingsInfoCard>
         </div>
       </SettingsSection>
 
       <SettingsSection
-        title="运行时概览"
-        description="这里读的是当前页面已经加载到的运行时摘要，不会额外发新请求。"
+        title={t("about.runtimeOverview")}
+        description={t("about.runtimeOverviewDescription")}
       >
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <StatCard
             icon={<DatabaseIcon size={16} className="text-[var(--accent-primary)]" />}
-            label="可选 provider"
+            label={t("about.selectedProvider")}
             value={`${providerOptions.length}`}
-            detail={`${selectedProvider || "runtime default"} / ${selectedModel || "runtime default"}`}
+            detail={`${selectedProvider || t("about.runtimeDefault")} / ${selectedModel || t("about.runtimeDefault")}`}
           />
           <StatCard
             icon={<HardDriveDownloadIcon size={16} className="text-[var(--accent-secondary)]" />}
-            label="会话数"
+            label={t("about.sessionCount")}
             value={`${runtimeSessionsSummary.totalCount}`}
             detail={
               runtimeSessionsSummary.latestUpdatedAt
-                ? `最近更新 ${formatRelativeTimestamp(runtimeSessionsSummary.latestUpdatedAt)}`
-                : "尚未发现会话"
+                ? t("about.latestUpdated", {
+                    time: formatRelativeTimestamp(
+                      resolvedLocale,
+                      runtimeSessionsSummary.latestUpdatedAt,
+                    ),
+                  })
+                : t("about.noSessions")
             }
           />
           <StatCard
             icon={<PanelsTopLeftIcon size={16} className="text-[var(--accent-primary)]" />}
-            label="可恢复会话"
+            label={t("about.recoverableSessions")}
             value={`${runtimeSessionsSummary.recoverableCount}`}
-            detail={`${runtimeSessionsSummary.activeCount} active / ${runtimeSessionsSummary.archivedCount} archived`}
+            detail={t("about.sessionBreakdown", {
+              active: runtimeSessionsSummary.activeCount,
+              archived: runtimeSessionsSummary.archivedCount,
+            })}
           />
           <StatCard
             icon={<RouteIcon size={16} className="text-[var(--accent-secondary)]" />}
-            label="运行中团队"
+            label={t("about.activeTeams")}
             value={`${liveTeamCount}`}
-            detail={`共加载 ${runtimeTeams.length} 个团队摘要`}
+            detail={t("about.activeTeamsSummary", { count: runtimeTeams.length })}
           />
         </div>
       </SettingsSection>
 
       <SettingsSection
-        title="本地存储"
-        description="设置数据存于浏览器 localStorage，不会写回仓库配置文件。"
+        title={t("about.localStorage")}
+        description={t("about.localStorageDescription")}
       >
         <div className="grid gap-3 lg:grid-cols-2">
           <SettingsInfoCard
-            title="settings localStorage key"
+            title={t("about.settingsKey")}
             className="rounded-[0.9rem]"
           >
             <p className="app-inline-mono break-all text-[var(--muted-foreground)]">
@@ -176,7 +188,7 @@ export function AboutSettingsPage({
           </SettingsInfoCard>
 
           <SettingsInfoCard
-            title="runtime client localStorage key"
+            title={t("about.runtimeClientKey")}
             className="rounded-[0.9rem]"
           >
             <p className="app-inline-mono break-all text-[var(--muted-foreground)]">

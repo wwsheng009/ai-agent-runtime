@@ -4,6 +4,7 @@ import {
   MonitorSmartphoneIcon,
 } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { useAppSettings } from "@/core/settings";
@@ -22,6 +23,7 @@ function readNotificationPermission() {
 }
 
 export function NotificationSettingsPage() {
+  const { t } = useTranslation("settings");
   const { settings, updateSection } = useAppSettings();
   const [permission, setPermission] = useState(readNotificationPermission);
 
@@ -41,8 +43,8 @@ export function NotificationSettingsPage() {
   return (
     <div className="space-y-6">
       <SettingsSection
-        title="工作区通知"
-        description="仅在当前标签页不可见时，用于提醒一轮响应完成或运行时出错。"
+        title={t("notifications.title")}
+        description={t("notifications.description")}
       >
         <SettingsToggleCard
           checked={settings.notification.enabled}
@@ -51,8 +53,8 @@ export function NotificationSettingsPage() {
               enabled: checked,
             })
           }
-          title="启用通知能力"
-          description="关闭后，即便浏览器权限已授权，也不会弹出桌面提醒。"
+          title={t("notifications.desktop")}
+          description={t("notifications.desktopDescription")}
           icon={
             settings.notification.enabled ? (
               <BellDotIcon size={16} />
@@ -64,11 +66,11 @@ export function NotificationSettingsPage() {
       </SettingsSection>
 
       <SettingsSection
-        title="桌面提醒"
-        description="需要浏览器授权。若当前页面可见，则不会打断你。"
+        title={t("notifications.permission")}
+        description={t("notifications.permissionDescription")}
       >
         <SettingsPanelCard
-          title="权限状态"
+          title={t("notifications.permission")}
           icon={
             <MonitorSmartphoneIcon
               size={16}
@@ -77,12 +79,12 @@ export function NotificationSettingsPage() {
           }
           description={
             permission === "granted"
-              ? "已授权，可以在后台收到完成或错误通知。"
+              ? t("notifications.permissionStates.granted")
               : permission === "denied"
-                ? "已被浏览器阻止，需要在站点权限中手动重新允许。"
+                ? t("notifications.permissionStates.denied")
                 : permission === "default"
-                  ? "尚未授权，点击右侧按钮向浏览器申请通知权限。"
-                  : "当前环境不支持浏览器桌面通知。"
+                  ? t("notifications.permissionStates.default")
+                  : t("notifications.permissionStates.unsupported")
           }
           headerClassName="flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"
           asideClassName="w-full lg:w-auto"
@@ -98,7 +100,9 @@ export function NotificationSettingsPage() {
                 }
                 disabled={!desktopSupported || !settings.notification.enabled}
               >
-                {settings.notification.desktop ? "关闭桌面提醒" : "开启桌面提醒"}
+                {settings.notification.desktop
+                  ? t("notifications.disableDesktop")
+                  : t("notifications.enableDesktop")}
               </Button>
               <Button
                 variant="ghost"
@@ -106,7 +110,7 @@ export function NotificationSettingsPage() {
                 onClick={() => void requestPermission()}
                 disabled={!desktopSupported || desktopReady}
               >
-                请求权限
+                {t("notifications.requestPermission")}
               </Button>
             </div>
           }
@@ -114,24 +118,28 @@ export function NotificationSettingsPage() {
 
         <div className="grid gap-3 md:grid-cols-2">
           <SettingsInfoCard
-            title="当前配置"
+            title={t("notifications.currentConfig")}
             description={
               <>
-                通知总开关:{" "}
+                {t("notifications.currentConfigMasterSwitch")}:{" "}
                 <span className="text-[var(--foreground)]">
-                  {settings.notification.enabled ? "开启" : "关闭"}
+                  {settings.notification.enabled
+                    ? t("notifications.enabled")
+                    : t("notifications.disabled")}
                 </span>
                 <br />
-                桌面提醒:{" "}
+                {t("notifications.currentConfigDesktopSwitch")}:{" "}
                 <span className="text-[var(--foreground)]">
-                  {settings.notification.desktop ? "开启" : "关闭"}
+                  {settings.notification.desktop
+                    ? t("notifications.enabled")
+                    : t("notifications.disabled")}
                 </span>
               </>
             }
           />
           <SettingsInfoCard
-            title="实际生效条件"
-            description="只有在总开关开启、桌面提醒开启、权限为 granted 且页面处于后台时，通知才会真正弹出。"
+            title={t("notifications.effectiveCondition")}
+            description={t("notifications.effectiveConditionDescription")}
           />
         </div>
       </SettingsSection>

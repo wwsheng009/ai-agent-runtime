@@ -5,8 +5,11 @@ import { BackendConfigSettingsPage } from "@/components/workspace/settings/backe
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 export function RuntimeConfigPage() {
+  const { t } = useTranslation("runtimeConfig");
+
   return (
     <div className="min-h-screen [background:var(--workspace-shell-bg)] text-[var(--foreground)]">
       <div className="mx-auto flex min-h-screen w-full max-w-[1760px] flex-col gap-2 px-2.5 py-2.5 sm:px-3">
@@ -17,16 +20,16 @@ export function RuntimeConfigPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <Badge className="border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]">
                   <DatabaseIcon size={13} />
-                  Runtime config
+                  {t("page.badge")}
                 </Badge>
-                <Badge>独立页面</Badge>
+                <Badge>{t("page.independentPage")}</Badge>
               </div>
               <div>
                 <h1 className="text-base font-semibold tracking-[-0.03em] sm:text-[1.1rem]">
-                  后端配置工作台
+                  {t("page.title")}
                 </h1>
                 <p className="mt-1 max-w-3xl text-sm leading-6 text-[var(--muted-foreground)]">
-                  独立处理 runtime 后端配置，并为 provider 提供专门入口。
+                  {t("page.description")}
                 </p>
               </div>
             </div>
@@ -37,14 +40,14 @@ export function RuntimeConfigPage() {
                 className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
               >
                 <ArrowLeftIcon size={14} />
-                返回工作台
+                {t("page.backToWorkspace")}
               </Link>
               <Link
                 to="/logs"
                 className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
               >
                 <TerminalSquareIcon size={14} />
-                日志
+                {t("page.logs")}
               </Link>
             </div>
           </div>

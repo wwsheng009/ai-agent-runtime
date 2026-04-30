@@ -443,7 +443,7 @@ export function applyRuntimeEventToThread(
   const transport: Thread["transport"] =
     thread.transport === "error" ? "error" : "live";
   const nextArtifact = buildSessionRuntimeEventsArtifact(sessionId, events);
-  let nextThread = {
+  let nextThread: Thread = {
     ...thread,
     updatedAt: new Date().toISOString(),
     sessionId,

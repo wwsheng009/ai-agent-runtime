@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { editorToggleRowClassName } from "./editor-control-class";
 import { SettingsMiniCard } from "./settings-mini-card";
 
@@ -15,13 +17,17 @@ export function SettingsMiniToggleCard({
   description,
   label,
   onCheckedChange,
-  checkedLabel = "已启用",
-  uncheckedLabel = "已关闭",
+  checkedLabel,
+  uncheckedLabel,
 }: SettingsMiniToggleCardProps) {
+  const { t } = useTranslation("common");
+  const resolvedCheckedLabel = checkedLabel ?? t("states.enabled");
+  const resolvedUncheckedLabel = uncheckedLabel ?? t("states.disabled");
+
   return (
     <SettingsMiniCard title={label} description={description}>
       <label className={`mt-3 ${editorToggleRowClassName}`}>
-        <span>{checked ? checkedLabel : uncheckedLabel}</span>
+        <span>{checked ? resolvedCheckedLabel : resolvedUncheckedLabel}</span>
         <input
           type="checkbox"
           className="h-4 w-4 accent-[var(--accent-primary)]"
