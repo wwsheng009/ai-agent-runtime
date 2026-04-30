@@ -476,6 +476,7 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 			Headers:           nil,
 			HeaderMappings:    cloneStringMap(session.Provider.HeaderMappings),
 			Proxy:             session.Provider.Proxy.Clone(),
+			RequestsPerMinute: session.Provider.RequestsPerMinute,
 		})
 		if buildErr != nil {
 			return buildErr
@@ -559,9 +560,29 @@ func resolveLocalWorkspacePath(runtimeConfig *runtimecfg.RuntimeConfig, session 
 		return strings.TrimSpace(session.ProfileRoot)
 	}
 	if cwd, err := os.Getwd(); err == nil {
+		if gitRoot := findGitRoot(cwd); gitRoot != "" {
+			return gitRoot
+		}
 		return cwd
 	}
 	return ""
+}
+
+// findGitRoot walks upward from start looking for a .git directory or file
+// (worktrees use a file). Returns the first ancestor containing .git, or "".
+func findGitRoot(start string) string {
+	dir := filepath.Clean(start)
+	for {
+		gitPath := filepath.Join(dir, ".git")
+		if _, err := os.Stat(gitPath); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 func resolveLocalChatAgentProvider(session *ChatSession, host *localChatRuntimeHost) string {

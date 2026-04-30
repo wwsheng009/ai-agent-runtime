@@ -8,6 +8,9 @@ import (
 
 var discardPendingConsoleInput = platformDiscardPendingConsoleInput
 var pendingConsoleInputCount = platformPendingConsoleInputCount
+var pendingConsoleLineInput = platformPendingConsoleLineInput
+var pendingConsoleTextInput = platformPendingConsoleTextInput
+var inputPasteSettleDelay = platformInputPasteSettleDelay
 var shouldDiscardPendingInput = canDiscardPendingInteractiveInput
 
 func discardPendingInteractiveInput(session *ChatSession) int {
@@ -68,4 +71,12 @@ func discardPendingInteractiveInputForPriorityPrompt(session *ChatSession, promp
 		promptKind = "交互提示"
 	}
 	return "[input] 检测到之前排队的输入内容；为避免误用，已在" + promptKind + "前丢弃这些输入。"
+}
+
+// notifyChatInputDraftState 只保留状态钩子，不向终端输出任何提示。
+// 多行粘贴进入 draft 后，用户应保持在当前输入流程中，直到按 Enter 确认提交。
+func notifyChatInputDraftState(session *ChatSession, active bool, lines int) {
+	_ = session
+	_ = active
+	_ = lines
 }

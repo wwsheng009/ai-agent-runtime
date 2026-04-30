@@ -50,6 +50,9 @@ func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
 	if err := waitForInteractivePromptReady(session); err != nil {
 		return false, "", err
 	}
+	if session.InputQueue != nil && (session.InputQueue.hasDraft() || session.InputQueue.hasReadySubmission()) {
+		return false, "", nil
+	}
 	if pending := pendingInteractiveInputCount(session); pending > 0 {
 		notice := ""
 		if !session.queuedInputDrain {

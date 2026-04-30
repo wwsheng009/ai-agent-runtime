@@ -196,8 +196,12 @@ func TestHandleCommand_ModelPromptKeepsCurrentModelAndUsesPriorityReasoningSelec
 			},
 		},
 	}
-	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("\n2\n")))
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
 	queue.lines <- chatQueuedInput{Text: "stale-input\n", Source: "stdin"}
+	// Pre-load priority inputs for model selector (empty = accept default)
+	// and reasoning effort selector ("2" = select second option).
+	queue.priorityLines <- chatQueuedInput{Text: "", Source: "stdin"}
+	queue.priorityLines <- chatQueuedInput{Text: "2", Source: "stdin"}
 
 	session := &ChatSession{
 		ProviderName:    "alpha",

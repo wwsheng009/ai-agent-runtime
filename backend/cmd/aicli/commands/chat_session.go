@@ -687,6 +687,9 @@ func buildRuntimeHistoryFromAICLIMessages(messages []map[string]interface{}) ([]
 	sanitized := sanitizeAICLIHistoryMessages(messages)
 	history := make([]runtimetypes.Message, 0, len(sanitized))
 	for _, raw := range sanitized {
+		if shouldDropRuntimeNoticeMessage(raw) {
+			continue
+		}
 		message, err := runtimeMessageFromAICLIMessage(raw)
 		if err != nil {
 			return nil, err
@@ -748,9 +751,40 @@ func buildAICLIMessagesFromRuntimeHistory(history []runtimetypes.Message) ([]map
 		if err != nil {
 			return nil, err
 		}
+		if shouldDropRuntimeNoticeMessage(raw) {
+			continue
+		}
 		messages = append(messages, raw)
 	}
 	return sanitizeAICLIHistoryMessages(messages), nil
+}
+
+func shouldDropRuntimeNoticeMessage(raw map[string]interface{}) bool {
+	normalized := normalizeAICLIMessageMap(raw)
+	if len(normalized) == 0 {
+		return false
+	}
+
+	role := strings.ToLower(strings.TrimSpace(payloadStringValue(normalized["role"])))
+	if role != "user" {
+		return false
+	}
+
+	content := strings.TrimSpace(payloadStringValue(normalized["content"]))
+	if content == "" {
+		return false
+	}
+
+	for _, prefix := range []string{
+		"[context] session compact ",
+		"[context] shared auto-compact ",
+		"[prompt preflight]",
+	} {
+		if strings.HasPrefix(content, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeAICLIHistoryMessages(messages []map[string]interface{}) []map[string]interface{} {

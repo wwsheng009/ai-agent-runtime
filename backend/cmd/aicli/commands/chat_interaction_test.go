@@ -81,6 +81,73 @@ func TestChatInteractionCoordinator_RenderAsyncLineClearsVisiblePromptInInteract
 	}
 }
 
+func TestNotifyChatInputDraftState_IsSilent(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	output := &terminalCaptureWriter{}
+	coord.SetWriter(output)
+	session.Interaction = coord
+
+	notifyChatInputDraftState(session, true, 2)
+
+	rendered := output.String()
+	if rendered != "" {
+		t.Fatalf("expected draft state notification to be silent, got %q", rendered)
+	}
+}
+
+func TestPrepareInteractiveRead_HoldsPromptWhileDraftExists(t *testing.T) {
+	session := &ChatSession{}
+	session.InputQueue = newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	session.InputQueue.stageDraft("first\nsecond")
+
+	showPrompt, notice, err := prepareInteractiveRead(session)
+	if err != nil {
+		t.Fatalf("prepareInteractiveRead: %v", err)
+	}
+	if showPrompt {
+		t.Fatal("expected prompt to remain hidden while draft exists")
+	}
+	if notice != "" {
+		t.Fatalf("expected no notice while draft exists, got %q", notice)
+	}
+}
+
+func TestPrepareInteractiveRead_HoldsPromptWhileConfirmedDraftExists(t *testing.T) {
+	session := &ChatSession{}
+	session.InputQueue = newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	session.InputQueue.stageDraft("first\nsecond")
+	if !session.InputQueue.confirmDraft() {
+		t.Fatal("expected staged draft to become a ready submission")
+	}
+
+	showPrompt, notice, err := prepareInteractiveRead(session)
+	if err != nil {
+		t.Fatalf("prepareInteractiveRead: %v", err)
+	}
+	if showPrompt {
+		t.Fatal("expected prompt to remain hidden while confirmed draft exists")
+	}
+	if notice != "" {
+		t.Fatalf("expected no notice while confirmed draft exists, got %q", notice)
+	}
+
+	line, err := chatInteractiveReadLine(session, context.Background())
+	if err != nil {
+		t.Fatalf("chatInteractiveReadLine: %v", err)
+	}
+	if strings.TrimSpace(line) != "first\nsecond" {
+		t.Fatalf("unexpected confirmed draft text: %q", line)
+	}
+}
+
 func TestChatInteractionCoordinator_RenderAsyncLineSupportsMultilineToolSummary(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)

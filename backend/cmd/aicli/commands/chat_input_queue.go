@@ -21,9 +21,17 @@ type chatInputQueue struct {
 	lines         chan chatQueuedInput
 	priorityLines chan chatQueuedInput
 	errs          chan error
+	readySignal   chan struct{}
 	start         sync.Once
 	mu            sync.RWMutex
 	priorityMode  bool
+
+	draftMu     sync.RWMutex
+	draftNotify func(active bool, lines int)
+	draftText   string
+	draftLines  int
+	draftActive bool
+	readyText   string
 }
 
 func newChatInputQueue(reader *bufio.Reader) *chatInputQueue {
@@ -35,6 +43,7 @@ func newChatInputQueue(reader *bufio.Reader) *chatInputQueue {
 		lines:         make(chan chatQueuedInput, 32),
 		priorityLines: make(chan chatQueuedInput, 4),
 		errs:          make(chan error, 1),
+		readySignal:   make(chan struct{}, 1),
 	}
 }
 
@@ -45,6 +54,9 @@ func ensureChatInputQueue(session *ChatSession) *chatInputQueue {
 	if session.InputQueue == nil {
 		session.InputQueue = newChatInputQueue(chatSessionInputReader(session))
 	}
+	session.InputQueue.setDraftNotifier(func(active bool, lines int) {
+		notifyChatInputDraftState(session, active, lines)
+	})
 	session.InputQueue.startPump()
 	return session.InputQueue
 }
@@ -58,36 +70,349 @@ func (q *chatInputQueue) startPump() {
 		if q.reader == nil {
 			q.reader = newChatInputReader()
 		}
-		go func() {
-			for {
-				line, err := q.reader.ReadString('\n')
-				if line != "" {
-					q.routeLine(chatQueuedInput{
-						Text:       line,
-						Source:     "stdin",
-						EnqueuedAt: time.Now().UTC(),
-					})
-				}
-				if err != nil {
-					// EOF（Ctrl+D/Ctrl+Z）：静默忽略，不放入 errs 通道，
-					// 避免抢占 ctx.Done() 导致 Ctrl+C 中断失效
-					if errors.Is(err, io.EOF) {
-						continue
-					}
-					// 将错误通知给等待方，但不退出泵 goroutine。
-					// 在 Ctrl+C（SIGINT）场景下，ReadString 可能因终端中断返回临时错误，
-					// 泵应继续读取后续输入而非永久退出。
-					select {
-					case q.errs <- err:
-					default:
-					}
-					// 其他错误短暂睡眠避免空转，然后继续读取
-					time.Sleep(50 * time.Millisecond)
-					continue
+		go q.stdinPump()
+	})
+}
+
+type stdinLineEvent struct {
+	Text string
+	Err  error
+}
+
+// stdinPump 读取 stdin，把短时间内连续到达的行归并成一个 batch。
+//
+// 规则很直接：
+// 1. 单行输入在 settle 窗口后直接投递给聊天循环。
+// 2. batch 中有多行时，先暂存为 draft，不直接发送。
+// 3. draft 存在时，后续非空输入会继续追加到 draft。
+// 4. 用户再按一次独立的空 Enter 时，draft 被确认并等待读取。
+//
+// 这里不再依赖 `bufio.Reader.Buffered()` 或并发读同一个 reader。
+func (q *chatInputQueue) stdinPump() {
+	events := make(chan stdinLineEvent, 8)
+	go q.stdinReadLoop(events)
+
+	settle := inputPasteSettleDelay()
+	if settle <= 0 {
+		settle = 75 * time.Millisecond
+	}
+
+	var batch strings.Builder
+	var timer *time.Timer
+	var timerC <-chan time.Time
+
+	stopTimer := func() {
+		if timer != nil {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
 				}
 			}
-		}()
+			timer = nil
+		}
+		timerC = nil
+	}
+
+	resetTimer := func() {
+		stopTimer()
+		timer = time.NewTimer(settle)
+		timerC = timer.C
+	}
+
+	flushBatch := func() {
+		if batch.Len() == 0 {
+			return
+		}
+		text := normalizeBatchText(batch.String())
+		batch.Reset()
+		if strings.TrimSpace(text) == "" {
+			if q.hasDraft() {
+				q.confirmDraft()
+			}
+			return
+		}
+
+		if q.hasDraft() {
+			if isSubmissionCommand(strings.TrimSpace(text)) {
+				q.routeInputText(text)
+				return
+			}
+			q.appendDraft(text)
+			return
+		}
+
+		if q.shouldStageBufferedInput(text) {
+			q.stageDraft(text)
+			return
+		}
+
+		q.routeInputText(text)
+	}
+
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				stopTimer()
+				flushBatch()
+				return
+			}
+			text := normalizeBatchText(ev.Text)
+			if strings.TrimSpace(text) == "" {
+				stopTimer()
+				if batch.Len() == 0 {
+					if q.hasDraft() {
+						q.confirmDraft()
+					}
+				} else {
+					batch.WriteString(ev.Text)
+					resetTimer()
+				}
+				if ev.Err != nil && !errors.Is(ev.Err, io.EOF) {
+					q.handlePumpError(ev.Err)
+				}
+				continue
+			}
+
+			batch.WriteString(ev.Text)
+			resetTimer()
+			if ev.Err != nil && !errors.Is(ev.Err, io.EOF) {
+				q.handlePumpError(ev.Err)
+			}
+		case <-timerC:
+			stopTimer()
+			flushBatch()
+		}
+	}
+}
+
+func (q *chatInputQueue) stdinReadLoop(events chan<- stdinLineEvent) {
+	defer close(events)
+	for {
+		line, err := q.reader.ReadString('\n')
+		if line == "" && err != nil {
+			if !errors.Is(err, io.EOF) {
+				events <- stdinLineEvent{Err: err}
+			}
+			return
+		}
+		events <- stdinLineEvent{Text: line, Err: err}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (q *chatInputQueue) routeInputText(text string) {
+	q.routeLine(chatQueuedInput{
+		Text:       text,
+		Source:     "stdin",
+		EnqueuedAt: time.Now().UTC(),
 	})
+}
+
+func (q *chatInputQueue) stageDraft(text string) {
+	text = normalizeBatchText(text)
+	if text == "" {
+		return
+	}
+	q.draftMu.Lock()
+	notify := !q.draftActive
+	q.draftText = text
+	q.draftLines = countInputLines(text)
+	q.draftActive = true
+	lines := q.draftLines
+	fn := q.draftNotify
+	q.draftMu.Unlock()
+	if notify && fn != nil {
+		fn(true, lines)
+	}
+}
+
+func (q *chatInputQueue) appendDraft(text string) {
+	text = normalizeBatchText(text)
+	if text == "" {
+		return
+	}
+	q.draftMu.Lock()
+	notify := !q.draftActive
+	if q.draftText == "" {
+		q.draftText = text
+	} else {
+		q.draftText = q.draftText + text
+	}
+	q.draftLines = countInputLines(q.draftText)
+	q.draftActive = true
+	lines := q.draftLines
+	fn := q.draftNotify
+	q.draftMu.Unlock()
+	if notify && fn != nil {
+		fn(true, lines)
+	}
+}
+
+func (q *chatInputQueue) consumeDraft() (string, bool) {
+	q.draftMu.Lock()
+	if !q.draftActive || strings.TrimSpace(q.draftText) == "" {
+		q.draftText = ""
+		q.draftLines = 0
+		q.draftActive = false
+		q.draftMu.Unlock()
+		return "", false
+	}
+	text := q.draftText
+	q.draftText = ""
+	q.draftLines = 0
+	q.draftActive = false
+	fn := q.draftNotify
+	q.draftMu.Unlock()
+	if fn != nil {
+		fn(false, 0)
+	}
+	return text, true
+}
+
+func (q *chatInputQueue) confirmDraft() bool {
+	text, ok := q.consumeDraft()
+	if !ok {
+		return false
+	}
+	q.draftMu.Lock()
+	if q.readyText == "" {
+		q.readyText = text
+	} else {
+		q.readyText += text
+	}
+	q.draftMu.Unlock()
+	q.signalReadySubmission()
+	return true
+}
+
+func (q *chatInputQueue) discardDraft() int {
+	q.draftMu.Lock()
+	if !q.draftActive && q.draftText == "" {
+		q.draftLines = 0
+		q.draftMu.Unlock()
+		return 0
+	}
+	count := q.draftLines
+	if count <= 0 && strings.TrimSpace(q.draftText) != "" {
+		count = 1
+	}
+	q.draftText = ""
+	q.draftLines = 0
+	q.draftActive = false
+	fn := q.draftNotify
+	q.draftMu.Unlock()
+	if fn != nil {
+		fn(false, 0)
+	}
+	return count
+}
+
+func (q *chatInputQueue) discardReadySubmission() int {
+	q.draftMu.Lock()
+	if strings.TrimSpace(q.readyText) == "" {
+		q.readyText = ""
+		q.draftMu.Unlock()
+		return 0
+	}
+	q.readyText = ""
+	q.draftMu.Unlock()
+	return 1
+}
+
+func (q *chatInputQueue) draftCount() int {
+	if q == nil {
+		return 0
+	}
+	q.draftMu.RLock()
+	defer q.draftMu.RUnlock()
+	if !q.draftActive || strings.TrimSpace(q.draftText) == "" {
+		return 0
+	}
+	if q.draftLines > 0 {
+		return q.draftLines
+	}
+	return 1
+}
+
+func (q *chatInputQueue) hasDraft() bool {
+	return q.draftCount() > 0
+}
+
+func (q *chatInputQueue) hasReadySubmission() bool {
+	if q == nil {
+		return false
+	}
+	q.draftMu.RLock()
+	defer q.draftMu.RUnlock()
+	return strings.TrimSpace(q.readyText) != ""
+}
+
+func (q *chatInputQueue) setDraftNotifier(fn func(active bool, lines int)) {
+	if q == nil {
+		return
+	}
+	q.draftMu.Lock()
+	q.draftNotify = fn
+	q.draftMu.Unlock()
+}
+
+func (q *chatInputQueue) shouldStageBufferedInput(text string) bool {
+	if q == nil {
+		return false
+	}
+	if len(normalizeInputLines(text)) > 1 {
+		return true
+	}
+	if pending, err := pendingConsoleLineInput(); err == nil && pending {
+		return true
+	}
+	if pending, err := pendingConsoleTextInput(); err == nil && pending {
+		return true
+	}
+	return false
+}
+
+func normalizeBatchText(text string) string {
+	if text == "" {
+		return ""
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return text
+}
+
+func normalizeInputLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(text, "\r\n"), "\n")
+}
+
+func countInputLines(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
+}
+
+func isSubmissionCommand(text string) bool {
+	text = strings.TrimSpace(text)
+	return strings.HasPrefix(text, "/") || strings.HasPrefix(text, "!")
+}
+
+func (q *chatInputQueue) handlePumpError(err error) {
+	if errors.Is(err, io.EOF) {
+		return
+	}
+	select {
+	case q.errs <- err:
+	default:
+	}
+	time.Sleep(50 * time.Millisecond)
 }
 
 func (q *chatInputQueue) readLine(ctx context.Context) (string, error) {
@@ -96,6 +421,9 @@ func (q *chatInputQueue) readLine(ctx context.Context) (string, error) {
 	}
 	q.startPump()
 	for {
+		if text, ok := q.takeReadySubmission(); ok {
+			return text, nil
+		}
 		select {
 		case item := <-q.lines:
 			return item.Text, nil
@@ -111,6 +439,8 @@ func (q *chatInputQueue) readLine(ctx context.Context) (string, error) {
 			default:
 			}
 			return "", err
+		case <-q.readySignal:
+			continue
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}
@@ -125,6 +455,9 @@ func (q *chatInputQueue) readPriorityLine(ctx context.Context) (string, error) {
 	defer q.setPriorityMode(false)
 	q.startPump()
 	for {
+		if text, ok := q.takeReadySubmission(); ok {
+			return text, nil
+		}
 		select {
 		case item := <-q.priorityLines:
 			return item.Text, nil
@@ -140,6 +473,8 @@ func (q *chatInputQueue) readPriorityLine(ctx context.Context) (string, error) {
 			default:
 			}
 			return "", err
+		case <-q.readySignal:
+			continue
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}
@@ -151,6 +486,8 @@ func (q *chatInputQueue) pendingCount() int {
 		return 0
 	}
 	q.ensureChannels()
+	// 这里只统计已经进入队列、等待消费的输入。
+	// draft 只表示“暂存中、等待用户确认”，不能影响 prompt / drain 判断。
 	return len(q.lines)
 }
 
@@ -165,7 +502,7 @@ func (q *chatInputQueue) discardPending() int {
 		case <-q.lines:
 			discarded++
 		default:
-			return discarded
+			return discarded + q.discardDraft() + q.discardReadySubmission()
 		}
 	}
 }
@@ -221,6 +558,30 @@ func normalizeQueuedInputLine(line string) string {
 	return strings.TrimRight(line, "\r\n")
 }
 
+func (q *chatInputQueue) takeReadySubmission() (string, bool) {
+	q.draftMu.Lock()
+	if strings.TrimSpace(q.readyText) == "" {
+		q.readyText = ""
+		q.draftMu.Unlock()
+		return "", false
+	}
+	text := q.readyText
+	q.readyText = ""
+	q.draftMu.Unlock()
+	return text, true
+}
+
+func (q *chatInputQueue) signalReadySubmission() {
+	if q == nil {
+		return
+	}
+	q.ensureChannels()
+	select {
+	case q.readySignal <- struct{}{}:
+	default:
+	}
+}
+
 func (q *chatInputQueue) ensureChannels() {
 	if q.lines == nil {
 		q.lines = make(chan chatQueuedInput, 32)
@@ -230,6 +591,9 @@ func (q *chatInputQueue) ensureChannels() {
 	}
 	if q.errs == nil {
 		q.errs = make(chan error, 1)
+	}
+	if q.readySignal == nil {
+		q.readySignal = make(chan struct{}, 1)
 	}
 }
 

@@ -328,6 +328,32 @@ func TestBuildAICLIMessagesFromRuntimeHistory_DropsEmptyTruncatedAssistantAndOrp
 	}
 }
 
+func TestBuildAICLIMessagesFromRuntimeHistory_DropsSyntheticRuntimeNoticeMessages(t *testing.T) {
+	history := []runtimetypes.Message{
+		{
+			Role:     "user",
+			Content:  "[context] session compact skipped mode=local phase=pre_turn reason=missing_model_capability",
+			Metadata: runtimetypes.NewMetadata(),
+		},
+		{
+			Role:     "assistant",
+			Content:  "继续下一步",
+			Metadata: runtimetypes.NewMetadata(),
+		},
+	}
+
+	restored, err := buildAICLIMessagesFromRuntimeHistory(history)
+	if err != nil {
+		t.Fatalf("buildAICLIMessagesFromRuntimeHistory: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("expected runtime notice message to be dropped, got %#v", restored)
+	}
+	if restored[0]["role"] != "assistant" || restored[0]["content"] != "继续下一步" {
+		t.Fatalf("unexpected remaining message: %#v", restored[0])
+	}
+}
+
 func TestBuildRuntimeHistoryFromAICLIMessages_DropsOrphanToolMessages(t *testing.T) {
 	history, err := buildRuntimeHistoryFromAICLIMessages([]map[string]interface{}{
 		{
@@ -345,6 +371,28 @@ func TestBuildRuntimeHistoryFromAICLIMessages_DropsOrphanToolMessages(t *testing
 	}
 	if len(history) != 1 {
 		t.Fatalf("expected orphan tool message to be dropped, got %#v", history)
+	}
+	if history[0].Role != "user" || history[0].Content != "继续" {
+		t.Fatalf("unexpected remaining history: %#v", history)
+	}
+}
+
+func TestBuildRuntimeHistoryFromAICLIMessages_DropsSyntheticRuntimeNoticeMessages(t *testing.T) {
+	history, err := buildRuntimeHistoryFromAICLIMessages([]map[string]interface{}{
+		{
+			"role":    "user",
+			"content": "[context] shared auto-compact skipped mode=local reason=missing_model_capability",
+		},
+		{
+			"role":    "user",
+			"content": "继续",
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRuntimeHistoryFromAICLIMessages: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected runtime notice message to be dropped, got %#v", history)
 	}
 	if history[0].Role != "user" || history[0].Content != "继续" {
 		t.Fatalf("unexpected remaining history: %#v", history)

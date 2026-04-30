@@ -434,6 +434,7 @@ func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRun
 		HeaderMappingRules:      cloneHeaderMappingRules(session.Provider.HeaderMappingRules),
 		SupportsMaxOutputTokens: session.Provider.SupportsMaxOutputTokens,
 		Proxy:                   session.Provider.Proxy.Clone(),
+		RequestsPerMinute:       session.Provider.RequestsPerMinute,
 	})
 	if err != nil {
 		return nil, err

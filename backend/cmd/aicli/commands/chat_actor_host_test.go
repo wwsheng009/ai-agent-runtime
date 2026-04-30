@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -536,4 +537,25 @@ func (c *recordingTeamLifecycleService) SyncLoops() {
 
 func (c *recordingTeamLifecycleService) StopLoops() {
 	c.stopCalls++
+}
+
+func TestFindGitRoot(t *testing.T) {
+	// The repo itself has a .git at the root.
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	// testFile is backend/cmd/aicli/commands/chat_actor_host_test.go
+	// Walk up to the git root (E:\projects\ai\ai-agent-runtime)
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "..", "..", "..", ".."))
+
+	got := findGitRoot(filepath.Dir(testFile))
+	if filepath.Clean(got) != repoRoot {
+		t.Fatalf("findGitRoot from test dir = %q, want %q", got, repoRoot)
+	}
+
+	got = findGitRoot(filepath.Join(t.TempDir(), "a", "b"))
+	if got != "" {
+		t.Fatalf("findGitRoot in temp dir = %q, want empty", got)
+	}
 }
