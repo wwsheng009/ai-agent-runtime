@@ -40,6 +40,7 @@ import {
   type RuntimeTeamSummaryEntry,
 } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 const RuntimeTeamsDialog = lazy(() =>
   import("@/components/workspace/runtime-teams-dialog").then((module) => ({
@@ -75,11 +76,27 @@ type SidebarStateIconSpec = {
   toneClassName: string;
 };
 
-function getThreadWorkflowIcon(thread: Thread): SidebarStateIconSpec {
+type WorkspaceSidebarIconLabels = {
+  threadReview: string;
+  threadDraft: string;
+  threadActive: string;
+  sessionError: string;
+  sessionRestored: string;
+  sessionAttached: string;
+  sessionPending: string;
+};
+
+function getThreadWorkflowIcon(
+  thread: Thread,
+  labels: Pick<
+    WorkspaceSidebarIconLabels,
+    "threadReview" | "threadDraft" | "threadActive"
+  >,
+): SidebarStateIconSpec {
   if (thread.status === "review") {
     return {
       icon: SearchIcon,
-      label: "等待复核",
+      label: labels.threadReview,
       toneClassName:
         "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]",
     };
@@ -88,7 +105,7 @@ function getThreadWorkflowIcon(thread: Thread): SidebarStateIconSpec {
   if (thread.status === "draft") {
     return {
       icon: Clock3Icon,
-      label: "草稿线程",
+      label: labels.threadDraft,
       toneClassName:
         "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)]",
     };
@@ -96,7 +113,7 @@ function getThreadWorkflowIcon(thread: Thread): SidebarStateIconSpec {
 
   return {
     icon: SparklesIcon,
-    label: "活跃线程",
+    label: labels.threadActive,
     toneClassName:
       "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)] text-[var(--accent-secondary)]",
   };
@@ -104,11 +121,15 @@ function getThreadWorkflowIcon(thread: Thread): SidebarStateIconSpec {
 
 function getSessionStatusIcon(
   label: ThreadSessionDescriptor["label"],
+  labels: Pick<
+    WorkspaceSidebarIconLabels,
+    "sessionError" | "sessionRestored" | "sessionAttached" | "sessionPending"
+  >,
 ): SidebarStateIconSpec {
   if (label === "error") {
     return {
       icon: TriangleAlertIcon,
-      label: "会话同步异常",
+      label: labels.sessionError,
       toneClassName: "border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#f59e7d]",
     };
   }
@@ -116,7 +137,7 @@ function getSessionStatusIcon(
   if (label === "restored") {
     return {
       icon: HistoryIcon,
-      label: "已恢复会话",
+      label: labels.sessionRestored,
       toneClassName: "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]",
     };
   }
@@ -124,14 +145,14 @@ function getSessionStatusIcon(
   if (label === "attached") {
     return {
       icon: CheckIcon,
-      label: "已附着运行时会话",
+      label: labels.sessionAttached,
       toneClassName: "border-[#f0c77b]/24 bg-[#f0c77b]/10 text-[#f0c77b]",
     };
   }
 
   return {
     icon: LoaderCircleIcon,
-    label: "尚未附着会话",
+    label: labels.sessionPending,
     toneClassName:
       "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)]",
   };
@@ -221,6 +242,7 @@ export function WorkspaceSidebar({
   selectedThreadId,
   onSelectThread,
 }: WorkspaceSidebarProps) {
+  const { t } = useTranslation("workspace");
   const isCompact = density === "compact";
   const [query, setQuery] = useState("");
   const [runtimeTeamsDialogOpen, setRuntimeTeamsDialogOpen] = useState(false);
@@ -269,6 +291,21 @@ export function WorkspaceSidebar({
   const liveTeamCount = runtimeTeams.filter(
     (team) => (team.status || "").trim().toLowerCase() === "active",
   ).length;
+  const sidebarLabels: WorkspaceSidebarIconLabels = {
+    threadReview: t("sidebar.threadStatuses.review"),
+    threadDraft: t("sidebar.threadStatuses.draft"),
+    threadActive: t("sidebar.threadStatuses.active"),
+    sessionError: t("sidebar.sessionStatuses.error"),
+    sessionRestored: t("sidebar.sessionStatuses.restored"),
+    sessionAttached: t("sidebar.sessionStatuses.attached"),
+    sessionPending: t("sidebar.sessionStatuses.pending"),
+  };
+  const threadSessionDetails = {
+    pending: t("sidebar.emptyChats.default"),
+    error: t("sidebar.sessionDetails.error"),
+    restored: t("sidebar.sessionDetails.restored"),
+    attached: t("sidebar.sessionDetails.attached"),
+  };
 
   useEffect(() => {
     if (!deferredQuery) {
@@ -315,9 +352,9 @@ export function WorkspaceSidebar({
             </span>
             <div>
               <div className="app-text-10 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
-                Workspace
+                {t("sidebar.workspaceLabel")}
               </div>
-              <div className="mt-0.5 text-sm font-semibold">AI Agent Runtime</div>
+              <div className="mt-0.5 text-sm font-semibold">{t("sidebar.appName")}</div>
             </div>
           </Link>
           <div className="flex items-center gap-1">
@@ -326,7 +363,7 @@ export function WorkspaceSidebar({
               size="icon"
               onClick={onRefreshRuntimeTeams}
               disabled={!onRefreshRuntimeTeams}
-              aria-label="Refresh runtime teams"
+              aria-label={t("sidebar.refreshRuntimeTeams")}
             >
               <SparklesIcon size={16} />
             </Button>
@@ -334,7 +371,7 @@ export function WorkspaceSidebar({
               variant="ghost"
               size="icon"
               onClick={onOpenSettings}
-              aria-label="Open settings"
+              aria-label={t("sidebar.openSettings")}
             >
               <Settings2Icon size={16} />
             </Button>
@@ -356,7 +393,7 @@ export function WorkspaceSidebar({
             size={16}
             className="text-[var(--accent-primary)]"
           />
-          Start new chat
+          {t("sidebar.startNewChat")}
         </button>
 
         <div
@@ -370,7 +407,7 @@ export function WorkspaceSidebar({
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search threads"
+              placeholder={t("sidebar.searchPlaceholder")}
               className="w-full bg-transparent outline-none"
             />
           </div>
@@ -388,21 +425,24 @@ export function WorkspaceSidebar({
             id="chats"
             icon={MessagesSquareIcon}
             iconClassName="text-[var(--accent-primary)]"
-            title="Local chats"
+            title={t("sidebar.sections.chats")}
             count={<Badge>{chatThreads.length}</Badge>}
             isOpen={openSections.chats}
             onToggle={toggleSection}
           >
-            <div className="space-y-1">
-              {chatThreads.length > 0 ? (
-                chatThreads.map((thread) => {
-                  const isActive = thread.id === selectedThreadId;
-                  const sessionDescriptor = describeThreadSession(thread);
-                  const itemStatusIcons = [
-                    getThreadWorkflowIcon(thread),
-                    getSessionStatusIcon(sessionDescriptor.label),
-                  ];
-                  const title = [
+                <div className="space-y-1">
+                  {chatThreads.length > 0 ? (
+                    chatThreads.map((thread) => {
+                      const isActive = thread.id === selectedThreadId;
+                      const sessionDescriptor = describeThreadSession(
+                        thread,
+                        threadSessionDetails,
+                      );
+                      const itemStatusIcons = [
+                        getThreadWorkflowIcon(thread, sidebarLabels),
+                        getSessionStatusIcon(sessionDescriptor.label, sidebarLabels),
+                      ];
+                      const title = [
                     thread.title,
                     ...itemStatusIcons.map((item) => item.label),
                   ].join(" · ");
@@ -437,8 +477,8 @@ export function WorkspaceSidebar({
               ) : (
                 <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
                   {deferredQuery
-                    ? "No local chats match the current search."
-                    : "Local-only chats will appear here before runtime session attachment."}
+                    ? t("sidebar.emptyChats.search")
+                    : t("sidebar.emptyChats.default")}
                 </div>
               )}
             </div>
@@ -449,7 +489,7 @@ export function WorkspaceSidebar({
               id="sessions"
               icon={HistoryIcon}
               iconClassName="text-[var(--accent-secondary)]"
-              title="Sessions"
+              title={t("sidebar.sections.sessions")}
               count={<Badge>{sessionThreads.length}</Badge>}
               isOpen={openSections.sessions}
               onToggle={toggleSection}
@@ -458,9 +498,13 @@ export function WorkspaceSidebar({
                 {sessionThreads.length > 0 ? (
                   sessionThreads.map((thread) => {
                     const isActive = thread.id === selectedThreadId;
-                    const sessionDescriptor = describeThreadSession(thread);
+                    const sessionDescriptor = describeThreadSession(
+                      thread,
+                      threadSessionDetails,
+                    );
                     const sessionStatusIcon = getSessionStatusIcon(
                       sessionDescriptor.label,
+                      sidebarLabels,
                     );
 
                     return (
@@ -486,41 +530,47 @@ export function WorkspaceSidebar({
                 ) : (
                   <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
                     {deferredQuery
-                      ? "No sessions match the current search."
-                      : "Recoverable runtime sessions will appear here after loading."}
+                      ? t("sidebar.emptySessions.search")
+                      : t("sidebar.emptySessions.default")}
                   </div>
                 )}
               </div>
             </SidebarSection>
           ) : null}
 
-          <SidebarSection
-            id="runtime"
-            icon={CompassIcon}
-            iconClassName="text-[var(--accent-secondary)]"
-            title="Runtime overview"
-            count={<Badge>{liveTeamCount} active</Badge>}
-            isOpen={openSections.runtime}
-            onToggle={toggleSection}
-          >
-            <section className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-              <div className="flex flex-wrap gap-1.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
-                  {runtimeSessionsSummary.totalCount} sessions
-                </span>
-                <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
-                  {runtimeSessionsSummary.recoverableCount} recoverable
-                </span>
-                <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
-                  {sessionRailSummary.pendingCount} pending
-                </span>
-                {runtimeSessionsLoading || runtimeSessionsRefreshing ? (
-                  <span className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
-                    <LoaderCircleIcon size={12} className="animate-spin" />
-                    syncing
+            <SidebarSection
+              id="runtime"
+              icon={CompassIcon}
+              iconClassName="text-[var(--accent-secondary)]"
+              title={t("sidebar.sections.runtime")}
+              count={<Badge>{t("sidebar.active", { count: liveTeamCount })}</Badge>}
+              isOpen={openSections.runtime}
+              onToggle={toggleSection}
+            >
+              <section className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+                <div className="flex flex-wrap gap-1.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+                  {t("sidebar.runtimeStats.sessions", {
+                    count: runtimeSessionsSummary.totalCount,
+                  })}
                   </span>
-                ) : null}
-              </div>
+                  <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+                  {t("sidebar.runtimeStats.recoverable", {
+                    count: runtimeSessionsSummary.recoverableCount,
+                  })}
+                  </span>
+                  <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+                  {t("sidebar.runtimeStats.pending", {
+                    count: sessionRailSummary.pendingCount,
+                  })}
+                  </span>
+                  {runtimeSessionsLoading || runtimeSessionsRefreshing ? (
+                    <span className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+                      <LoaderCircleIcon size={12} className="animate-spin" />
+                      {t("sidebar.runtimeStats.syncing")}
+                    </span>
+                  ) : null}
+                </div>
 
               {runtimeSessionsError ? (
                 <div className="mt-3 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
@@ -538,13 +588,13 @@ export function WorkspaceSidebar({
                       {team.id}
                     </div>
                     <span className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                      {team.status || "unknown"}
+                      {team.status || t("sidebar.unknown")}
                     </span>
                   </div>
                 ))}
                 {!runtimeTeamsLoading && runtimeTeams.length === 0 ? (
                   <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
-                    No runtime teams available.
+                    {t("sidebar.runtimeTeamsUnavailable")}
                   </div>
                 ) : null}
               </div>
@@ -555,7 +605,7 @@ export function WorkspaceSidebar({
                 className="mt-3 w-full"
                 onClick={() => setRuntimeTeamsDialogOpen(true)}
               >
-                Open runtime team details
+                {t("sidebar.openRuntimeTeamDetails")}
               </Button>
               <Link
                 to="/runtime/config"
@@ -564,7 +614,7 @@ export function WorkspaceSidebar({
                   "mt-2 w-full",
                 )}
               >
-                后端配置页
+                {t("sidebar.backendConfigPage")}
               </Link>
             </section>
           </SidebarSection>
@@ -592,7 +642,7 @@ function RuntimeTeamsDialogFallback() {
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[var(--dialog-backdrop)] px-3 py-4 backdrop-blur-sm">
       <div className="rounded-[0.9rem] border border-[var(--border)] [background:var(--dialog-bg)] px-3.5 py-2.5 text-sm text-[var(--muted-foreground)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
-        正在加载 runtime teams 面板…
+        Loading runtime teams panel...
       </div>
     </div>
   );

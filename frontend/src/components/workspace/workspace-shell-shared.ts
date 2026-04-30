@@ -1,57 +1,118 @@
 import { type Thread } from "@/data/mock";
 
-export function getThreadTransportLabel(thread: Thread) {
+export type WorkspaceThreadTransportLabels = {
+  live: string;
+  error: string;
+  seeded: string;
+};
+
+export type WorkspaceThreadCommandStateLabels = {
+  runtimeStreamActive: string;
+  readyForNextTurn: string;
+  readyToStartRuntimeSession: string;
+  readyToStartNewSession: string;
+};
+
+export type WorkspaceThreadStatusLabels = {
+  sessionAttached: string;
+  previewThread: string;
+  newThread: string;
+};
+
+export type WorkspaceThreadSubtitleLabels = {
+  needsRestoreWithSession: (sessionId: string) => string;
+  needsRestore: string;
+  viaSource: (transportLabel: string, source: string) => string;
+  session: (sessionId: string) => string;
+};
+
+const defaultTransportLabels: WorkspaceThreadTransportLabels = {
+  live: "Live runtime",
+  error: "Runtime degraded",
+  seeded: "Seeded preview",
+};
+
+const defaultCommandStateLabels: WorkspaceThreadCommandStateLabels = {
+  runtimeStreamActive: "Runtime stream active",
+  readyForNextTurn: "Ready for the next turn",
+  readyToStartRuntimeSession: "Ready to start runtime session",
+  readyToStartNewSession: "Ready to start a new session",
+};
+
+const defaultStatusLabels: WorkspaceThreadStatusLabels = {
+  sessionAttached: "Session attached",
+  previewThread: "Preview thread",
+  newThread: "New thread",
+};
+
+const defaultSubtitleLabels: WorkspaceThreadSubtitleLabels = {
+  needsRestoreWithSession: (sessionId) =>
+    `Session ${sessionId} needs restore attention`,
+  needsRestore: "Runtime restore needs attention",
+  viaSource: (transportLabel, source) => `${transportLabel} via ${source}`,
+  session: (sessionId) => `Session ${sessionId}`,
+};
+
+export function getThreadTransportLabel(
+  thread: Thread,
+  labels: WorkspaceThreadTransportLabels = defaultTransportLabels,
+) {
   if (thread.transport === "live") {
-    return "Live runtime";
+    return labels.live;
   }
   if (thread.transport === "error") {
-    return "Runtime degraded";
+    return labels.error;
   }
-  return "Seeded preview";
+  return labels.seeded;
 }
 
 export function getCommandStateLabel(
   thread: Thread,
   isResponding: boolean,
+  labels: WorkspaceThreadCommandStateLabels = defaultCommandStateLabels,
 ) {
   if (isResponding) {
-    return "Runtime stream active";
+    return labels.runtimeStreamActive;
   }
   if (thread.sessionId) {
-    return "Ready for the next turn";
+    return labels.readyForNextTurn;
   }
   if (thread.messages.length > 0) {
-    return "Ready to start runtime session";
+    return labels.readyToStartRuntimeSession;
   }
-  return "Ready to start a new session";
+  return labels.readyToStartNewSession;
 }
 
-export function getThreadStatusLabel(thread: Thread) {
+export function getThreadStatusLabel(
+  thread: Thread,
+  labels: WorkspaceThreadStatusLabels = defaultStatusLabels,
+) {
   if (thread.sessionId) {
-    return "Session attached";
+    return labels.sessionAttached;
   }
   if (thread.messages.length > 0) {
-    return "Preview thread";
+    return labels.previewThread;
   }
-  return "New thread";
+  return labels.newThread;
 }
 
 export function getThreadTopbarSubtitle(
   thread: Thread,
   transportLabel: string,
+  labels: WorkspaceThreadSubtitleLabels = defaultSubtitleLabels,
 ) {
   if (thread.transport === "error") {
     return thread.sessionId
-      ? `Session ${thread.sessionId} needs restore attention`
-      : "Runtime restore needs attention";
+      ? labels.needsRestoreWithSession(thread.sessionId)
+      : labels.needsRestore;
   }
 
   if (thread.sessionId && thread.runtimeSource) {
-    return `${transportLabel} via ${thread.runtimeSource}`;
+    return labels.viaSource(transportLabel, thread.runtimeSource);
   }
 
   if (thread.sessionId) {
-    return `Session ${thread.sessionId}`;
+    return labels.session(thread.sessionId);
   }
 
   return transportLabel;

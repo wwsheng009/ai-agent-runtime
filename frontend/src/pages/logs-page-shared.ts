@@ -40,6 +40,18 @@ export type RuntimeLogsActiveChip = {
   value: string;
 };
 
+export type RuntimeLogsTextLabels = {
+  activeChips?: Partial<Record<RuntimeLogsActiveChip["key"], string>>;
+  activeChipValues?: Partial<Record<RuntimeLogsActiveChip["key"], string>>;
+  identifiers?: Partial<Record<RuntimeLogIdentifierRow["key"], string>>;
+  levelStats?: Partial<
+    Record<
+      RuntimeLogLevelKey,
+      Partial<Pick<RuntimeLogLevelStat, "label" | "shortLabel">>
+    >
+  >;
+};
+
 const runtimeLogsUrlKeys = {
   cursor: "cursor",
   follow: "follow",
@@ -64,6 +76,15 @@ const runtimeLogLevelStatLabels: Record<
   info: { label: "Info", shortLabel: "INF" },
   debug: { label: "Debug", shortLabel: "DBG" },
   other: { label: "Other", shortLabel: "LOG" },
+};
+
+const runtimeLogIdentifierLabels: Record<
+  RuntimeLogIdentifierRow["key"],
+  string
+> = {
+  request_id: "Request ID",
+  trace_id: "Trace ID",
+  session_id: "Session ID",
 };
 
 export function normalizeRuntimeLogLevel(level?: string): RuntimeLogLevelKey {
@@ -100,6 +121,7 @@ export function normalizeRuntimeLogLevelFilter(
 
 export function buildRuntimeLogLevelStats(
   entries: RuntimeLogEntry[],
+  labels?: RuntimeLogsTextLabels,
 ): RuntimeLogLevelStat[] {
   const counts: Record<RuntimeLogLevelKey, number> = {
     error: 0,
@@ -115,14 +137,16 @@ export function buildRuntimeLogLevelStats(
 
   return runtimeLogLevelStatOrder.map((key) => ({
     key,
-    label: runtimeLogLevelStatLabels[key].label,
-    shortLabel: runtimeLogLevelStatLabels[key].shortLabel,
+    label: labels?.levelStats?.[key]?.label ?? runtimeLogLevelStatLabels[key].label,
+    shortLabel:
+      labels?.levelStats?.[key]?.shortLabel ?? runtimeLogLevelStatLabels[key].shortLabel,
     count: counts[key],
   }));
 }
 
 export function buildRuntimeLogIdentifierRows(
   entry: RuntimeLogEntry | null,
+  labels?: RuntimeLogsTextLabels,
 ): RuntimeLogIdentifierRow[] {
   if (!entry) {
     return [];
@@ -132,21 +156,21 @@ export function buildRuntimeLogIdentifierRows(
   if (entry.request_id?.trim()) {
     identifiers.push({
       key: "request_id",
-      label: "Request ID",
+      label: labels?.identifiers?.request_id ?? runtimeLogIdentifierLabels.request_id,
       value: entry.request_id.trim(),
     });
   }
   if (entry.trace_id?.trim()) {
     identifiers.push({
       key: "trace_id",
-      label: "Trace ID",
+      label: labels?.identifiers?.trace_id ?? runtimeLogIdentifierLabels.trace_id,
       value: entry.trace_id.trim(),
     });
   }
   if (entry.session_id?.trim()) {
     identifiers.push({
       key: "session_id",
-      label: "Session ID",
+      label: labels?.identifiers?.session_id ?? runtimeLogIdentifierLabels.session_id,
       value: entry.session_id.trim(),
     });
   }
@@ -234,13 +258,14 @@ export function writeRuntimeLogsUrlState(
 export function buildRuntimeLogsActiveChips(
   state: RuntimeLogsUrlState,
   newestCursor: number | null,
+  labels?: RuntimeLogsTextLabels,
 ): RuntimeLogsActiveChip[] {
   const chips: RuntimeLogsActiveChip[] = [];
 
   if (state.query.trim()) {
     chips.push({
       key: "query",
-      label: "搜索",
+      label: labels?.activeChips?.query ?? "搜索",
       value: state.query.trim(),
     });
   }
@@ -248,7 +273,7 @@ export function buildRuntimeLogsActiveChips(
   if (state.level) {
     chips.push({
       key: "level",
-      label: "级别",
+      label: labels?.activeChips?.level ?? "级别",
       value: state.level,
     });
   }
@@ -256,8 +281,8 @@ export function buildRuntimeLogsActiveChips(
   if (!state.follow) {
     chips.push({
       key: "follow",
-      label: "Follow",
-      value: "off",
+      label: labels?.activeChips?.follow ?? "Follow",
+      value: labels?.activeChipValues?.follow ?? "off",
     });
   }
 
@@ -267,7 +292,7 @@ export function buildRuntimeLogsActiveChips(
   ) {
     chips.push({
       key: "cursor",
-      label: "Cursor",
+      label: labels?.activeChips?.cursor ?? "Cursor",
       value: String(state.cursor),
     });
   }

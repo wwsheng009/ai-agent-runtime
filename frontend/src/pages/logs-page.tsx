@@ -16,10 +16,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Select } from "@/components/ui/select";
+import { useAppSettings } from "@/core/settings";
 import {
   type RuntimeLogsConnectionState,
   useRuntimeLogs,
 } from "@/hooks/use-runtime-logs";
+import { formatLogTimestamp as formatLogTimestampWithLocale } from "@/i18n/format";
+import { useTranslation } from "react-i18next";
 import {
   buildRuntimeLogsActiveChips,
   buildRuntimeLogIdentifierRows,
@@ -32,6 +35,7 @@ import {
   type RuntimeLogsUrlState,
   writeRuntimeLogsUrlState,
 } from "@/pages/logs-page-shared";
+import type { LogsPageDetailLabels } from "@/pages/logs-page-detail-panel.i18n";
 import type { RuntimeLogEntry } from "@/types/runtime";
 import { cn } from "@/lib/utils";
 
@@ -41,28 +45,11 @@ const LogsPageDetailPanel = lazy(() =>
   })),
 );
 
-function formatLogTimestamp(value?: string) {
-  if (!value) {
-    return "No timestamp";
-  }
-
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-
-  return parsed.toLocaleString("zh-CN", {
-    hour12: false,
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
-function formatListTimestamp(value?: string) {
-  const formatted = formatLogTimestamp(value);
+function formatListTimestamp(
+  locale: "zh-CN" | "en-US",
+  value?: string,
+) {
+  const formatted = formatLogTimestampWithLocale(locale, value);
   const parts = formatted.split(" ");
   if (parts.length >= 2) {
     return {
@@ -76,9 +63,9 @@ function formatListTimestamp(value?: string) {
   };
 }
 
-function formatDetailValue(value: unknown) {
+function formatDetailValue(value: unknown, noneLabel: string) {
   if (value === undefined || value === null || value === "") {
-    return "None";
+    return noneLabel;
   }
   if (typeof value === "string") {
     return value;
@@ -123,52 +110,67 @@ function levelStatTone(level: RuntimeLogLevelKey) {
   return levelTone(level);
 }
 
-function connectionTone(state: RuntimeLogsConnectionState) {
+function connectionTone(
+  state: RuntimeLogsConnectionState,
+  labels: {
+    connecting: string;
+    error: string;
+    idle: string;
+    live: string;
+    reconnecting: string;
+  },
+) {
   switch (state) {
     case "open":
       return {
         badgeClassName: "border-emerald-500/30 bg-emerald-500/12 text-emerald-200",
         icon: <WifiIcon size={14} />,
-        label: "Live",
+        label: labels.live,
       };
     case "connecting":
       return {
         badgeClassName: "border-sky-500/30 bg-sky-500/12 text-sky-200",
         icon: <RefreshCwIcon size={14} className="animate-spin" />,
-        label: "Connecting",
+        label: labels.connecting,
       };
     case "reconnecting":
       return {
         badgeClassName: "border-amber-500/30 bg-amber-500/12 text-amber-200",
         icon: <RefreshCwIcon size={14} className="animate-spin" />,
-        label: "Reconnecting",
+        label: labels.reconnecting,
       };
     case "error":
       return {
         badgeClassName: "border-red-500/30 bg-red-500/12 text-red-200",
         icon: <WifiOffIcon size={14} />,
-        label: "Stream error",
+        label: labels.error,
       };
     default:
       return {
         badgeClassName: "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)]",
         icon: <WifiOffIcon size={14} />,
-        label: "Idle",
+        label: labels.idle,
       };
   }
 }
 
-function buildEntrySubtitle(entry: RuntimeLogEntry) {
+function buildEntrySubtitle(
+  entry: RuntimeLogEntry,
+  labels: Pick<
+    LogsPageDetailLabels,
+    "requestPrefix" | "runtimeLogFallback" | "statusPrefix"
+  >,
+) {
   const parts = [
-    entry.request_id?.trim() ? `request ${entry.request_id}` : "",
+    entry.request_id?.trim() ? `${labels.requestPrefix} ${entry.request_id}` : "",
     entry.provider?.trim() ? `${entry.provider}${entry.model ? ` / ${entry.model}` : ""}` : "",
     typeof entry.response_status_code === "number"
-      ? `status ${entry.response_status_code}`
+      ? `${labels.statusPrefix} ${entry.response_status_code}`
       : "",
   ].filter(Boolean);
 
   if (parts.length === 0) {
-    return entry.module?.trim() || "runtime log";
+    return entry.module?.trim() || labels.runtimeLogFallback;
   }
   return parts.join("  ·  ");
 }
@@ -191,40 +193,42 @@ function buildEntryContext(entry: RuntimeLogEntry) {
   ].filter(Boolean).join("  ·  ");
 }
 
-function detailRows(entry: RuntimeLogEntry | null) {
+function detailRows(entry: RuntimeLogEntry | null, labels: LogsPageDetailLabels) {
   if (!entry) {
     return [];
   }
   return [
-    ["Timestamp", entry.timestamp],
-    ["Level", entry.level],
-    ["Module", entry.module],
-    ["Caller", entry.caller],
-    ["Request ID", entry.request_id],
-    ["Trace ID", entry.trace_id],
-    ["Session ID", entry.session_id],
-    ["Provider", entry.provider],
-    ["Model", entry.model],
-    ["Method", entry.method],
-    ["URL", entry.url],
+    [labels.timestamp, entry.timestamp],
+    [labels.level, entry.level],
+    [labels.module, entry.module],
+    [labels.caller, entry.caller],
+    [labels.requestId, entry.request_id],
+    [labels.traceId, entry.trace_id],
+    [labels.sessionId, entry.session_id],
+    [labels.provider, entry.provider],
+    [labels.model, entry.model],
+    [labels.method, entry.method],
+    [labels.url, entry.url],
     [
-      "Response Status",
+      labels.responseStatus,
       typeof entry.response_status_code === "number"
         ? String(entry.response_status_code)
         : "",
     ],
-    ["Upstream Error", entry.upstream_error],
+    [labels.upstreamError, entry.upstream_error],
   ].filter(([, value]) => String(value ?? "").trim() !== "");
 }
 
 type CopyActionButtonProps = {
   copied: boolean;
+  copiedLabel: string;
   label: string;
   onClick: () => void;
 };
 
 function CopyActionButton({
   copied,
+  copiedLabel,
   label,
   onClick,
 }: CopyActionButtonProps) {
@@ -236,28 +240,23 @@ function CopyActionButton({
       onClick={onClick}
     >
       {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
-      {copied ? "已复制" : label}
+      {copied ? copiedLabel : label}
     </Button>
   );
 }
 
-function LogsPageDetailPanelFallback() {
+function LogsPageDetailPanelFallback({ message }: { message: string }) {
   return (
     <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-[var(--muted-foreground)]">
-      正在加载日志详情…
+      {message}
     </div>
   );
 }
 
-const levelFilterOptions = [
-  { value: "", label: "全部" },
-  { value: "error", label: "error" },
-  { value: "warn", label: "warn" },
-  { value: "info", label: "info" },
-  { value: "debug", label: "debug" },
-] as const;
-
 export function LogsPage() {
+  const { resolvedLocale } = useAppSettings();
+  const { t } = useTranslation("logs");
+  const { t: tCommon } = useTranslation("common");
   const [searchParams, setSearchParams] = useSearchParams();
   const urlState = readRuntimeLogsUrlState(searchParams);
   const {
@@ -282,35 +281,114 @@ export function LogsPage() {
   });
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
 
-  const connection = connectionTone(connectionState);
+  const connection = connectionTone(connectionState, {
+    connecting: t("connectionConnecting"),
+    error: t("connectionError"),
+    idle: t("connectionIdle"),
+    live: t("connectionLive"),
+    reconnecting: t("connectionReconnecting"),
+  });
   const follow = urlState.follow;
   const level = urlState.level;
   const query = urlState.query;
   const selectedCursor = urlState.cursor;
-  const metadataRows = detailRows(selectedEntry);
+  const subtitleLabels = {
+    requestPrefix: t("requestPrefix"),
+    runtimeLogFallback: t("runtimeLogFallback"),
+    statusPrefix: t("statusPrefix"),
+  } as const;
+  const detailLabels: LogsPageDetailLabels = {
+    copied: tCommon("actions.copied"),
+    summary: t("copiedLog"),
+    identifiers: t("identifiers"),
+    metadata: t("metadata"),
+    responsePreview: t("responsePreview"),
+    extraFields: t("extraFields"),
+    rawJson: t("rawJson"),
+    clearSearch: tCommon("actions.clearSearch"),
+    copyValue: tCommon("actions.copyValue"),
+    copyMetadata: tCommon("actions.copyMetadata"),
+    copyPreview: tCommon("actions.copyPreview"),
+    copyFields: tCommon("actions.copyFields"),
+    copyJson: tCommon("actions.copyJson"),
+    cancelFilter: t("cancelFilter"),
+    filterSameValue: t("filterSameValue"),
+    copiedLog: t("copiedLog"),
+    identifiersHelp: t("identifiersHelp"),
+    cursorLabel: t("cursorLabel"),
+    levelFallback: t("levelFallback"),
+    requestPrefix: t("requestPrefix"),
+    runtimeLogFallback: t("runtimeLogFallback"),
+    statusPrefix: t("statusPrefix"),
+    timestamp: t("timestamp"),
+    level: t("level"),
+    module: t("module"),
+    caller: t("caller"),
+    requestId: t("requestId"),
+    traceId: t("traceId"),
+    sessionId: t("sessionId"),
+    provider: t("provider"),
+    model: t("model"),
+    method: t("method"),
+    url: t("url"),
+    responseStatus: t("responseStatus"),
+    upstreamError: t("upstreamError"),
+  };
+  const metadataRows = detailRows(selectedEntry, detailLabels);
   const formattedMetadataRows = metadataRows.map(([label, value]) => ({
     label: label ?? "",
-    value: formatDetailValue(value),
+    value: formatDetailValue(value, tCommon("states.none")),
   }));
-  const identifierRows = buildRuntimeLogIdentifierRows(selectedEntry);
-  const levelStats = buildRuntimeLogLevelStats(entries);
+  const identifierRows = buildRuntimeLogIdentifierRows(selectedEntry, {
+    identifiers: {
+      request_id: t("identifierRequest"),
+      trace_id: t("identifierTrace"),
+      session_id: t("identifierSession"),
+    },
+  });
+  const levelStats = buildRuntimeLogLevelStats(entries, {
+    levelStats: {
+      error: { label: t("levelError"), shortLabel: t("levelShortError") },
+      warn: { label: t("levelWarn"), shortLabel: t("levelShortWarn") },
+      info: { label: t("levelInfo"), shortLabel: t("levelShortInfo") },
+      debug: { label: t("levelDebug"), shortLabel: t("levelShortDebug") },
+      other: { label: t("levelOther"), shortLabel: t("levelShortOther") },
+    },
+  });
   const newestCursor = entries[0]?.cursor ?? null;
-  const activeChips = buildRuntimeLogsActiveChips(urlState, newestCursor);
+  const activeChips = buildRuntimeLogsActiveChips(urlState, newestCursor, {
+    activeChips: {
+      query: t("chipQuery"),
+      level: t("chipLevel"),
+      follow: t("chipFollow"),
+      cursor: t("chipCursor"),
+    },
+    activeChipValues: {
+      follow: t("activeChipOff"),
+    },
+  });
   const shareState = buildRuntimeLogsShareState(urlState, newestCursor);
   const rawJsonText = selectedEntry?.raw
     ? JSON.stringify(selectedEntry.raw, null, 2)
     : (selectedEntry?.raw_text ?? "");
   const metadataText = metadataRows
-    .map(([label, value]) => `${label}: ${formatDetailValue(value)}`)
+    .map(([label, value]) => `${label}: ${formatDetailValue(value, tCommon("states.none"))}`)
     .join("\n");
   const responsePreviewText = selectedEntry?.response_body_preview ?? "";
   const extraFieldsText = selectedEntry?.fields
     ? JSON.stringify(selectedEntry.fields, null, 2)
     : "";
   const selectedEntrySubtitle = selectedEntry
-    ? buildEntrySubtitle(selectedEntry)
+    ? buildEntrySubtitle(selectedEntry, subtitleLabels)
     : "";
   const selectedLevelTone = selectedEntry ? levelTone(selectedEntry.level) : "";
+  const levelFilterOptions = [
+    { value: "", label: t("allLevels") },
+    { value: "error", label: t("levelError") },
+    { value: "warn", label: t("levelWarn") },
+    { value: "info", label: t("levelInfo") },
+    { value: "debug", label: t("levelDebug") },
+  ] as const;
   const shareSearchParams = writeRuntimeLogsUrlState(
     searchParams,
     shareState,
@@ -446,27 +524,29 @@ export function LogsPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge className="border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]">
                     <TerminalSquareIcon size={13} />
-                    Runtime logs
+                    {t("title")}
                   </Badge>
                   <Badge className={connection.badgeClassName}>
                     {connection.icon}
                     {connection.label}
                   </Badge>
-                  <Badge
-                    className={cn(
-                      logFileExists
-                        ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-200"
-                        : "border-amber-500/25 bg-amber-500/10 text-amber-200",
-                    )}
-                  >
-                    {logFileExists ? "File detected" : "Waiting for log file"}
-                  </Badge>
+                <Badge
+                  className={cn(
+                    logFileExists
+                      ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-200"
+                      : "border-amber-500/25 bg-amber-500/10 text-amber-200",
+                  )}
+                >
+                  {logFileExists
+                    ? tCommon("states.fileDetected")
+                    : tCommon("states.waitingForLogFile")}
+                </Badge>
                   <div className="hidden h-4 w-px bg-[var(--border)] sm:block" />
                   <h1 className="text-base font-semibold tracking-[-0.03em] sm:text-[1.05rem]">
-                    实时日志查看
+                    {t("title")}
                   </h1>
                   <span className="app-text-10 uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-                    Tail + Stream
+                    {t("subtitle")}
                   </span>
                 </div>
               </div>
@@ -476,13 +556,13 @@ export function LogsPage() {
                   className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
                 >
                   <ArrowLeftIcon size={14} />
-                  返回工作台
+                  {t("backToWorkspace")}
                 </Link>
                 <Link
                   to="/"
                   className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
                 >
-                  首页
+                  {t("home")}
                 </Link>
               </div>
             </div>
@@ -496,17 +576,17 @@ export function LogsPage() {
                 <input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="搜索 request_id、trace_id、session_id、message、provider、raw JSON"
+                  placeholder={t("searchPlaceholder")}
                   className="h-8 w-full rounded-[0.7rem] border border-[var(--border)] bg-black/15 pl-10 pr-4 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent-primary-border)] focus:ring-2 focus:ring-[var(--ring)]"
                 />
               </label>
 
               <label className="flex h-8 min-w-[8.5rem] items-center gap-2 rounded-[0.7rem] border border-[var(--border)] bg-black/10 px-3">
                 <span className="app-text-11 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
-                  Level
+                  {t("levelLabel")}
                 </span>
                 <Select
-                  ariaLabel="日志级别筛选"
+                  ariaLabel={t("levelLabel")}
                   value={level}
                   onChange={(value) => setLevel(value as RuntimeLogLevelFilter)}
                   options={levelFilterOptions}
@@ -519,13 +599,13 @@ export function LogsPage() {
               <label className="flex h-8 min-w-[11rem] flex-1 items-center gap-2 rounded-[0.7rem] border border-[var(--border)] bg-black/10 px-3 sm:flex-none">
                 <span className="flex items-center gap-1.5 app-text-11 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
                   <ShieldIcon size={12} />
-                  Token
+                  {t("tokenLabel")}
                 </span>
                 <input
                   type="password"
                   value={adminToken}
                   onChange={(event) => setAdminToken(event.target.value)}
-                  placeholder="远程部署时可填写"
+                  placeholder={t("tokenPlaceholder")}
                   className="min-w-0 flex-1 bg-transparent text-sm text-[var(--foreground)] outline-none"
                 />
               </label>
@@ -541,17 +621,18 @@ export function LogsPage() {
                     size={15}
                     className={refreshing ? "animate-spin" : undefined}
                   />
-                  刷新
+                  {t("refresh")}
                 </Button>
                 <CopyActionButton
                   copied={copiedSection === "view_link"}
-                  label="复制链接"
+                  copiedLabel={tCommon("actions.copied")}
+                  label={t("copyLink")}
                   onClick={() => handleCopy("view_link", shareUrl)}
                 />
               </div>
 
               <label className="flex h-8 items-center gap-2.5 rounded-[0.7rem] border border-[var(--border)] bg-black/10 px-3 whitespace-nowrap">
-                <span className="app-text-13 font-medium">Follow 最新</span>
+                <span className="app-text-13 font-medium">{t("followLatest")}</span>
                 <input
                   type="checkbox"
                   checked={follow}
@@ -563,28 +644,28 @@ export function LogsPage() {
 
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 app-text-11 text-[var(--muted-foreground)]">
               <span className="min-w-0 flex-1 truncate">
-                日志文件:
+                {t("fileLabel")}
                 {" "}
-                {filePath || "尚未配置 runtime log file_path"}
+                {filePath || t("fileFallback")}
               </span>
               {streamError ? (
-                <span className="text-amber-200">流连接提示: {streamError}</span>
+                <span className="text-amber-200">{t("streamHint")} {streamError}</span>
               ) : null}
-              {error ? <span className="text-red-200">加载失败: {error}</span> : null}
+              {error ? <span className="text-red-200">{t("loadError")} {error}</span> : null}
             </div>
 
             {activeChips.length > 0 ? (
               <div className="flex flex-wrap items-center gap-2 rounded-[0.8rem] border border-[var(--border)]/70 bg-black/8 px-2.5 py-1.5">
                 <span className="app-text-10 uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-                  当前视图
+                  {t("currentView")}
                 </span>
                 {activeChips.map((chip) => (
-                  <button
-                    key={`${chip.key}:${chip.value}`}
-                    type="button"
-                    onClick={() => clearActiveChip(chip.key)}
+                    <button
+                      key={`${chip.key}:${chip.value}`}
+                      type="button"
+                      onClick={() => clearActiveChip(chip.key)}
                     className="inline-flex items-center gap-2 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2.5 py-1 text-base text-[var(--foreground)] transition hover:border-[var(--accent-primary-border)] hover:bg-[var(--accent-primary-soft)]"
-                    title={`清除 ${chip.label}`}
+                    title={`${t("clearSearch")} ${chip.label}`}
                   >
                     <span className="uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
                       {chip.label}
@@ -599,7 +680,7 @@ export function LogsPage() {
                   className="h-7 rounded-[0.65rem] border border-[var(--border)] bg-black/10 px-2.5 text-[var(--muted-foreground)] hover:bg-black/20 hover:text-[var(--foreground)]"
                   onClick={clearAllActiveState}
                 >
-                  清除全部
+                  {t("clearAll")}
                 </Button>
               </div>
             ) : null}
@@ -611,10 +692,10 @@ export function LogsPage() {
             <div className="flex items-center justify-between border-b border-[var(--border)] px-3 py-2">
               <div>
                 <div className="app-text-13 font-semibold tracking-[-0.02em]">
-                  日志列表
+                  {t("listTitle")}
                 </div>
                 <div className="app-text-11 text-[var(--muted-foreground)]">
-                  以最小宽度完成扫描和定位。
+                  {t("listSubtitle")}
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   {levelStats
@@ -629,7 +710,7 @@ export function LogsPage() {
                           disabled={!canFilter}
                           title={
                             canFilter
-                              ? `${active ? "清除" : "只看"} ${stat.label}`
+                              ? `${active ? t("clearSearch") : t("showOnly")} ${stat.label}`
                               : stat.label
                           }
                           onClick={() => {
@@ -653,34 +734,37 @@ export function LogsPage() {
                     })}
                 </div>
               </div>
-              <Badge>{loading ? "Loading" : `${entries.length} entries`}</Badge>
+              <Badge>{loading ? t("loading") : `${entries.length} ${t("entries")}`}</Badge>
             </div>
             <div className="grid grid-cols-[4.1rem_2.15rem_minmax(0,1fr)] gap-2 border-b border-[var(--border)]/70 px-3 py-2 font-mono app-text-10 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
-              <div className="text-right">Time</div>
-              <div className="text-center">Lv</div>
-              <div>Event</div>
+              <div className="text-right">{t("time")}</div>
+              <div className="text-center">{t("levelShort")}</div>
+              <div>{t("event")}</div>
             </div>
 
             <div className="flex-1 overflow-y-auto px-1.5 py-1.5">
               {loading ? (
                 <div className="flex h-full items-center justify-center text-sm text-[var(--muted-foreground)]">
-                  正在读取日志...
+                  {t("readingLogs")}
                 </div>
               ) : error ? (
                 <div className="mx-2 rounded-[0.9rem] border border-red-500/20 bg-red-500/8 p-4 text-sm text-red-100">
-                  <div className="font-medium">日志加载失败</div>
+                  <div className="font-medium">{t("logLoadFailed")}</div>
                   <div className="mt-2 break-words text-red-100/80">{error}</div>
                 </div>
               ) : entries.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-[var(--muted-foreground)]">
                   <TerminalSquareIcon size={22} />
-                  <div>当前筛选条件下没有可展示的日志。</div>
+                  <div>{t("noLogs")}</div>
                 </div>
               ) : (
                 <div className="space-y-2">
                   {entries.map((entry) => {
                     const active = entry.cursor === selectedCursor;
-                    const timestamp = formatListTimestamp(entry.timestamp);
+                    const timestamp = formatListTimestamp(
+                      resolvedLocale,
+                      entry.timestamp,
+                    );
                     return (
                       <button
                         key={entry.cursor}
@@ -712,7 +796,7 @@ export function LogsPage() {
                             {entry.message || entry.raw_text}
                           </div>
                           <div className="mt-0.5 truncate font-mono app-text-10-5 leading-4 text-[var(--muted-foreground)]">
-                            {buildEntryMeta(entry) || buildEntrySubtitle(entry)}
+                            {buildEntryMeta(entry) || buildEntrySubtitle(entry, subtitleLabels)}
                           </div>
                           {buildEntryContext(entry) ? (
                             <div className="mt-0.5 truncate app-text-10 leading-4 text-[var(--muted-foreground)]/75">
@@ -730,18 +814,18 @@ export function LogsPage() {
 
           <div className="surface-panel flex min-h-[22rem] flex-col overflow-hidden rounded-[0.95rem] lg:min-h-0">
             <div className="border-b border-[var(--border)] px-3.5 py-2">
-              <div className="app-text-13 font-semibold tracking-[-0.02em]">日志详情</div>
+              <div className="app-text-13 font-semibold tracking-[-0.02em]">{t("detailsTitle")}</div>
               <div className="mt-1 app-text-11 text-[var(--muted-foreground)]">
-                这里承担长文本、JSON 和错误体阅读。
+                {t("detailsDescription")}
               </div>
             </div>
 
             {!selectedEntry ? (
               <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-[var(--muted-foreground)]">
-                从左侧选择一条日志查看详细字段。
+                {t("selectPrompt")}
               </div>
             ) : (
-              <Suspense fallback={<LogsPageDetailPanelFallback />}>
+              <Suspense fallback={<LogsPageDetailPanelFallback message={t("detailsLoading")} />}>
                 <LogsPageDetailPanel
                   copiedSection={copiedSection}
                   extraFieldsText={extraFieldsText}
@@ -757,6 +841,7 @@ export function LogsPage() {
                   selectedEntry={selectedEntry}
                   selectedEntrySubtitle={selectedEntrySubtitle}
                   selectedLevelTone={selectedLevelTone}
+                  labels={detailLabels}
                 />
               </Suspense>
             )}

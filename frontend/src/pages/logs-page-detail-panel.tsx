@@ -6,6 +6,7 @@ import {
   isRuntimeLogIdentifierQueryActive,
 } from "@/pages/logs-page-shared";
 import type { RuntimeLogEntry } from "@/types/runtime";
+import type { LogsPageDetailLabels } from "./logs-page-detail-panel.i18n";
 
 type LogsPageDetailIdentifierRow = {
   key: string;
@@ -33,6 +34,14 @@ type LogsPageDetailPanelProps = {
   selectedEntry: RuntimeLogEntry;
   selectedEntrySubtitle: string;
   selectedLevelTone: string;
+  labels: LogsPageDetailLabels;
+};
+
+type CopyActionButtonProps = {
+  copied: boolean;
+  copiedLabel: string;
+  label: string;
+  onClick: () => void;
 };
 
 export function LogsPageDetailPanel({
@@ -50,6 +59,7 @@ export function LogsPageDetailPanel({
   selectedEntry,
   selectedEntrySubtitle,
   selectedLevelTone,
+  labels,
 }: LogsPageDetailPanelProps) {
   return (
     <div className="flex-1 space-y-2.5 overflow-y-auto px-3 py-3">
@@ -62,15 +72,16 @@ export function LogsPageDetailPanel({
                 selectedLevelTone,
               )}
             >
-              {selectedEntry.level || "log"}
+              {selectedEntry.level || labels.levelFallback}
             </span>
             <span className="app-text-12 text-[var(--muted-foreground)]">
-              cursor {selectedEntry.cursor}
+              {labels.cursorLabel} {selectedEntry.cursor}
             </span>
           </div>
           <CopyActionButton
             copied={copiedSection === "summary"}
-            label="复制日志"
+            copiedLabel={labels.copied}
+            label={labels.summary}
             onClick={() => onCopy("summary", rawJsonText)}
           />
         </div>
@@ -87,10 +98,10 @@ export function LogsPageDetailPanel({
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                Identifiers
+                {labels.identifiers}
               </div>
               <div className="mt-1 app-text-11 text-[var(--muted-foreground)]">
-                复制标识，或把当前值直接写回顶部搜索框继续追踪。
+                {labels.identifiersHelp}
               </div>
             </div>
             {query.trim() ? (
@@ -100,7 +111,7 @@ export function LogsPageDetailPanel({
                 className="h-7 rounded-[0.65rem] border border-[var(--border)] bg-black/10 px-2.5 text-[var(--muted-foreground)] hover:bg-black/20 hover:text-[var(--foreground)]"
                 onClick={onClearQuery}
               >
-                清除搜索
+                {labels.clearSearch}
               </Button>
             ) : null}
           </div>
@@ -129,7 +140,8 @@ export function LogsPageDetailPanel({
                   <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                     <CopyActionButton
                       copied={copiedSection === `identifier:${row.key}`}
-                      label="复制值"
+                      copiedLabel={labels.copied}
+                      label={labels.copyValue}
                       onClick={() => onCopy(`identifier:${row.key}`, row.value)}
                     />
                     <Button
@@ -143,7 +155,7 @@ export function LogsPageDetailPanel({
                       )}
                       onClick={() => onToggleIdentifierQuery(row.value)}
                     >
-                      {active ? "取消过滤" : "过滤同值"}
+                      {active ? labels.cancelFilter : labels.filterSameValue}
                     </Button>
                   </div>
                 </div>
@@ -156,11 +168,12 @@ export function LogsPageDetailPanel({
       <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
         <div className="flex items-center justify-between gap-3">
           <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-            Metadata
+            {labels.metadata}
           </div>
           <CopyActionButton
             copied={copiedSection === "metadata"}
-            label="复制元数据"
+            copiedLabel={labels.copied}
+            label={labels.copyMetadata}
             onClick={() => onCopy("metadata", metadataText)}
           />
         </div>
@@ -185,11 +198,12 @@ export function LogsPageDetailPanel({
         <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-              Response Preview
+              {labels.responsePreview}
             </div>
             <CopyActionButton
               copied={copiedSection === "response_preview"}
-              label="复制预览"
+              copiedLabel={labels.copied}
+              label={labels.copyPreview}
               onClick={() => onCopy("response_preview", responsePreviewText)}
             />
           </div>
@@ -203,11 +217,12 @@ export function LogsPageDetailPanel({
         <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-              Extra Fields
+              {labels.extraFields}
             </div>
             <CopyActionButton
               copied={copiedSection === "extra_fields"}
-              label="复制字段"
+              copiedLabel={labels.copied}
+              label={labels.copyFields}
               onClick={() => onCopy("extra_fields", extraFieldsText)}
             />
           </div>
@@ -220,11 +235,12 @@ export function LogsPageDetailPanel({
       <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
         <div className="flex items-center justify-between gap-3">
           <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-            Raw JSON
+            {labels.rawJson}
           </div>
           <CopyActionButton
             copied={copiedSection === "raw_json"}
-            label="复制 JSON"
+            copiedLabel={labels.copied}
+            label={labels.copyJson}
             onClick={() => onCopy("raw_json", rawJsonText)}
           />
         </div>
@@ -238,14 +254,9 @@ export function LogsPageDetailPanel({
   );
 }
 
-type CopyActionButtonProps = {
-  copied: boolean;
-  label: string;
-  onClick: () => void;
-};
-
 function CopyActionButton({
   copied,
+  copiedLabel,
   label,
   onClick,
 }: CopyActionButtonProps) {
@@ -257,7 +268,7 @@ function CopyActionButton({
       onClick={onClick}
     >
       {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
-      {copied ? "已复制" : label}
+      {copied ? copiedLabel : label}
     </Button>
   );
 }

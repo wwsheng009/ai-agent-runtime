@@ -13,6 +13,7 @@ import { type SettingsSectionId } from "@/components/workspace/settings";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import {
   getThreadStatusLabel,
+  getThreadTopbarSubtitle,
   getThreadTransportLabel,
 } from "@/components/workspace/workspace-shell-shared";
 import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-topbar";
@@ -26,6 +27,7 @@ import {
   type RuntimeTeamSummaryEntry,
 } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 const SettingsDialog = lazy(() =>
   import("@/components/workspace/settings/settings-dialog").then((module) => ({
@@ -111,6 +113,7 @@ export function WorkspaceShell({
   selectedProvider,
 }: WorkspaceShellProps) {
   const { settings } = useAppSettings();
+  const { t } = useTranslation("workspace");
   const isNewThread = selectedThread.id === NEW_THREAD_ID;
   const isCompact = settings.workspace.density === "compact";
   const composerOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -123,8 +126,27 @@ export function WorkspaceShell({
   );
   const artifactRailOpen = !isNewThread && artifactRailManualOpen;
 
-  const transportLabel = getThreadTransportLabel(selectedThread);
-  const threadStatusLabel = getThreadStatusLabel(selectedThread);
+  const transportLabel = getThreadTransportLabel(selectedThread, {
+    live: t("topbar.threadTransport.live"),
+    error: t("topbar.threadTransport.error"),
+    seeded: t("topbar.threadTransport.seeded"),
+  });
+  const threadStatusLabel = getThreadStatusLabel(selectedThread, {
+    sessionAttached: t("topbar.threadStatus.sessionAttached"),
+    previewThread: t("topbar.threadStatus.previewThread"),
+    newThread: t("topbar.threadStatus.newThread"),
+  });
+  const threadSubtitle = getThreadTopbarSubtitle(selectedThread, transportLabel, {
+    needsRestoreWithSession: (sessionId) =>
+      t("topbar.subtitle.needsRestoreWithSession", { sessionId }),
+    needsRestore: t("topbar.subtitle.needsRestore"),
+    viaSource: (transportLabelValue, source) =>
+      t("topbar.subtitle.viaSource", {
+        transportLabel: transportLabelValue,
+        source,
+      }),
+    session: (sessionId) => t("topbar.subtitle.session", { sessionId }),
+  });
 
   const liveTeamCount = runtimeTeams.filter(
     (team) => (team.status || "").trim().toLowerCase() === "active",
@@ -231,6 +253,7 @@ export function WorkspaceShell({
             onOpenSettings={() => openSettings("appearance")}
             onToggleArtifactRail={() => setArtifactRailManualOpen((current) => !current)}
             selectedThread={selectedThread}
+            threadSubtitle={threadSubtitle}
             threadStatusLabel={threadStatusLabel}
             transportLabel={transportLabel}
           />
@@ -273,14 +296,13 @@ export function WorkspaceShell({
                 <div className="mx-auto flex w-full max-w-[44rem] flex-1 flex-col justify-center">
                   <div className="ide-panel rounded-[1rem] px-4 py-4 sm:px-5">
                     <div className="app-text-11 uppercase tracking-[0.22em] text-[var(--accent-secondary)]">
-                      New workspace chat
+                      {t("shell.newChatEyebrow")}
                     </div>
                     <h1 className="mt-2 text-[1.45rem] font-semibold tracking-[-0.03em] text-[var(--foreground)] sm:text-[1.65rem]">
-                      Start from a blank thread, then let runtime state attach as work begins.
+                      {t("shell.newChatTitle")}
                     </h1>
                     <p className="mt-3 text-sm leading-6 text-[var(--muted-foreground)]">
-                      This route now behaves like a real new chat entry without
-                      depending on seeded mock threads.
+                      {t("shell.newChatBody")}
                     </p>
                   </div>
                 </div>
@@ -333,7 +355,7 @@ export function WorkspaceShell({
         </section>
 
         {artifactRailOpen && !isNewThread ? (
-          <Suspense fallback={<ArtifactPanelFallback />}>
+          <Suspense fallback={<ArtifactPanelFallback message={t("shell.loadingArtifactPanel")} />}>
             <ArtifactPanel
               artifacts={selectedThread.artifacts}
               lastRuntimeEventType={selectedThread.lastRuntimeEventType}
@@ -345,7 +367,7 @@ export function WorkspaceShell({
         ) : null}
       </div>
       {artifactDialogOpen && selectedArtifact ? (
-        <Suspense fallback={<ArtifactDialogFallback />}>
+        <Suspense fallback={<ArtifactDialogFallback message={t("shell.loadingArtifactDetails")} />}>
           <ArtifactDetailDialog
             artifact={selectedArtifact}
             onClose={() => setArtifactDialogOpen(false)}
@@ -354,7 +376,7 @@ export function WorkspaceShell({
         </Suspense>
       ) : null}
       {settingsDialogOpen ? (
-        <Suspense fallback={<SettingsDialogFallback />}>
+        <Suspense fallback={<SettingsDialogFallback message={t("shell.loadingSettingsPanel")} />}>
           <SettingsDialog
             defaultSection={settingsSection}
             modelOptions={modelOptions}
@@ -378,31 +400,31 @@ export function WorkspaceShell({
   );
 }
 
-function SettingsDialogFallback() {
+function SettingsDialogFallback({ message }: { message: string }) {
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[var(--dialog-backdrop)] px-3 py-4 backdrop-blur-sm">
       <div className="rounded-[0.9rem] border border-[var(--border)] [background:var(--dialog-bg)] px-3.5 py-2.5 text-sm text-[var(--muted-foreground)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
-        正在加载设置面板…
+        {message}
       </div>
     </div>
   );
 }
 
-function ArtifactPanelFallback() {
+function ArtifactPanelFallback({ message }: { message: string }) {
   return (
     <aside className="hidden h-full min-h-0 flex-col overflow-hidden border-l border-white/8 [background:var(--workspace-sidebar-bg)] xl:flex">
       <div className="flex h-full items-center justify-center px-4 text-sm text-[var(--muted-foreground)]">
-        正在加载 artifact 面板…
+        {message}
       </div>
     </aside>
   );
 }
 
-function ArtifactDialogFallback() {
+function ArtifactDialogFallback({ message }: { message: string }) {
   return (
     <div className="fixed inset-0 z-[130] flex items-center justify-center bg-[var(--dialog-backdrop)] px-3 py-4 backdrop-blur-sm">
       <div className="rounded-[0.9rem] border border-[var(--border)] [background:var(--dialog-bg)] px-3.5 py-2.5 text-sm text-[var(--muted-foreground)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
-        正在加载 artifact 详情…
+        {message}
       </div>
     </div>
   );

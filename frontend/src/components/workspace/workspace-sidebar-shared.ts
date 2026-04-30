@@ -6,6 +6,13 @@ export type ThreadSessionDescriptor = {
   tone: string;
 };
 
+export type ThreadSessionDetailLabels = {
+  pending: string;
+  error: string;
+  restored: string;
+  attached: string;
+};
+
 export type SessionRailSummary = {
   attachedCount: number;
   errorCount: number;
@@ -14,10 +21,20 @@ export type SessionRailSummary = {
   restoredCount: number;
 };
 
-export function describeThreadSession(thread: Thread): ThreadSessionDescriptor {
+const defaultThreadSessionDetailLabels: ThreadSessionDetailLabels = {
+  pending: "No runtime session attached yet.",
+  error: "The session exists, but the latest sync failed and needs another restore attempt.",
+  restored: "Recovered from runtime session history and ready to continue.",
+  attached: "Attached to a live runtime session from the active workspace flow.",
+};
+
+export function describeThreadSession(
+  thread: Thread,
+  labels: ThreadSessionDetailLabels = defaultThreadSessionDetailLabels,
+): ThreadSessionDescriptor {
   if (!thread.sessionId) {
     return {
-      detail: "No runtime session attached yet.",
+      detail: labels.pending,
       label: "pending",
       tone: "border-white/10 bg-white/6 text-[var(--muted-foreground)]",
     };
@@ -25,7 +42,7 @@ export function describeThreadSession(thread: Thread): ThreadSessionDescriptor {
 
   if (thread.transport === "error") {
     return {
-      detail: "The session exists, but the latest sync failed and needs another restore attempt.",
+      detail: labels.error,
       label: "error",
       tone: "border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#f59e7d]",
     };
@@ -33,14 +50,14 @@ export function describeThreadSession(thread: Thread): ThreadSessionDescriptor {
 
   if (thread.tags.includes("runtime-session") || thread.tags.includes("restored")) {
     return {
-      detail: "Recovered from runtime session history and ready to continue.",
+      detail: labels.restored,
       label: "restored",
       tone: "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]",
     };
   }
 
   return {
-    detail: "Attached to a live runtime session from the active workspace flow.",
+    detail: labels.attached,
     label: "attached",
     tone: "border-[#f0c77b]/24 bg-[#f0c77b]/10 text-[#f0c77b]",
   };

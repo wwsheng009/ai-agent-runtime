@@ -14,7 +14,7 @@ import { buttonVariants } from "@/components/ui/button-variants";
 import { Button } from "@/components/ui/button";
 import { type Thread } from "@/data/mock";
 import { cn } from "@/lib/utils";
-import { getThreadTopbarSubtitle } from "@/components/workspace/workspace-shell-shared";
+import { useTranslation } from "react-i18next";
 
 type WorkspaceShellTopbarProps = {
   artifactRailOpen: boolean;
@@ -26,6 +26,7 @@ type WorkspaceShellTopbarProps = {
   selectedThread: Thread;
   threadStatusLabel: string;
   transportLabel: string;
+  threadSubtitle: string;
 };
 
 export function WorkspaceShellTopbar({
@@ -36,10 +37,12 @@ export function WorkspaceShellTopbar({
   onOpenSettings,
   onToggleArtifactRail,
   selectedThread,
+  threadSubtitle,
   threadStatusLabel,
   transportLabel,
 }: WorkspaceShellTopbarProps) {
   const isCompact = density === "compact";
+  const { t } = useTranslation("workspace");
 
   return (
     <header className="absolute inset-x-0 top-0 z-30 flex justify-center px-3 pt-1.5 sm:px-4">
@@ -53,10 +56,10 @@ export function WorkspaceShellTopbar({
           <Link
             to="/"
             className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
-            aria-label="Back to landing"
+            aria-label={t("topbar.home")}
           >
             <HomeIcon size={14} />
-            <span className="hidden sm:inline">Home</span>
+            <span className="hidden sm:inline">{t("topbar.home")}</span>
           </Link>
           {!isNewThread ? (
             <Link
@@ -64,18 +67,16 @@ export function WorkspaceShellTopbar({
               className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
             >
               <MessageSquarePlusIcon size={14} />
-              <span className="hidden sm:inline">New chat</span>
+              <span className="hidden sm:inline">{t("topbar.newChat")}</span>
             </Link>
           ) : null}
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate app-text-13 font-semibold tracking-[-0.02em]">
-            {isNewThread ? "New chat" : selectedThread.title}
+            {isNewThread ? t("topbar.newThreadTitle") : selectedThread.title}
           </div>
           <div className="truncate app-text-10 text-[var(--muted-foreground)]">
-            {isNewThread
-              ? "Start a thread, then let runtime state attach as work begins."
-              : getThreadTopbarSubtitle(selectedThread, transportLabel)}
+            {isNewThread ? t("topbar.newThreadSubtitle") : threadSubtitle}
           </div>
         </div>
         <div className="hidden items-center gap-2.5 md:flex">
@@ -85,7 +86,7 @@ export function WorkspaceShellTopbar({
           </div>
           {liveTeamCount > 0 ? (
             <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-              {liveTeamCount} live teams
+              {t("sidebar.active", { count: liveTeamCount })}
             </div>
           ) : null}
         </div>
@@ -94,24 +95,24 @@ export function WorkspaceShellTopbar({
           className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
         >
           <TerminalSquareIcon size={16} />
-          <span className="hidden sm:inline">Logs</span>
+          <span className="hidden sm:inline">{t("topbar.logs")}</span>
         </Link>
         <Link
           to="/runtime/config"
           className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
         >
           <DatabaseIcon size={16} />
-          <span className="hidden sm:inline">Runtime</span>
+          <span className="hidden sm:inline">{t("topbar.runtime")}</span>
         </Link>
         <Button
           variant="ghost"
           size="sm"
           className="px-2.5"
           onClick={onOpenSettings}
-          aria-label="Open settings"
+          aria-label={t("topbar.settings")}
         >
           <Settings2Icon size={16} />
-          <span className="hidden sm:inline">Settings</span>
+          <span className="hidden sm:inline">{t("topbar.settings")}</span>
         </Button>
         {!isNewThread ? (
           <Button
@@ -119,7 +120,7 @@ export function WorkspaceShellTopbar({
             size="sm"
             className="px-2.5"
             onClick={onToggleArtifactRail}
-            aria-label={artifactRailOpen ? "Hide artifact rail" : "Show artifact rail"}
+            aria-label={artifactRailOpen ? t("topbar.hideFiles") : t("topbar.showFiles")}
           >
             {artifactRailOpen ? (
               <PanelRightCloseIcon size={16} />
@@ -127,7 +128,7 @@ export function WorkspaceShellTopbar({
               <PanelRightOpenIcon size={16} />
             )}
             <span className="hidden sm:inline">
-              {artifactRailOpen ? "Hide files" : "Show files"}
+              {artifactRailOpen ? t("topbar.hideFiles") : t("topbar.showFiles")}
             </span>
           </Button>
         ) : null}
