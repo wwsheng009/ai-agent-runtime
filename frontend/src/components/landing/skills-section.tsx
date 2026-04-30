@@ -4,49 +4,42 @@ import {
   RocketIcon,
   WrenchIcon,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Section } from "@/components/landing/section";
 
-const skillColumns = [
-  {
-    title: "Understand",
-    description:
-      "Start with the thread, repository, and supporting evidence that matter, so the workspace stays focused on the job instead of dumping raw context everywhere.",
-    items: ["Repository scan", "Targeted reads", "Evidence-first context"],
-  },
-  {
-    title: "Coordinate",
-    description:
-      "Keep active tasks, teammate state, and runtime signals aligned so the whole team can see what is blocked, what is running, and what needs attention.",
-    items: ["Thread planning", "Team handoff", "Runtime checkpoints"],
-  },
-  {
-    title: "Deliver",
-    description:
-      "Edit, inspect, and verify from the same workspace, with artifacts and execution detail staying next to the messages that created them.",
-    items: ["Code changes", "Artifact previews", "Verification loops"],
-  },
-];
-
 export function SkillsSection() {
+  const { t } = useTranslation("landing");
+  const skillColumns = [
+    {
+      title: t("skills.columns.understand.title"),
+      description: t("skills.columns.understand.description"),
+      items: t("skills.columns.understand.items", { returnObjects: true }) as string[],
+    },
+    {
+      title: t("skills.columns.coordinate.title"),
+      description: t("skills.columns.coordinate.description"),
+      items: t("skills.columns.coordinate.items", { returnObjects: true }) as string[],
+    },
+    {
+      title: t("skills.columns.deliver.title"),
+      description: t("skills.columns.deliver.description"),
+      items: t("skills.columns.deliver.items", { returnObjects: true }) as string[],
+    },
+  ];
+
   return (
     <Section
       className="w-full"
-      eyebrow="Core capabilities"
-      title="Capabilities that stay visible while agents work"
-      subtitle={
-        <>
-          AI Agent Runtime keeps the workflow legible as work moves from
-          understanding to coordination to delivery. The same workspace holds
-          the thread, the supporting context, and the runtime evidence.
-        </>
-      }
+      eyebrow={t("skills.eyebrow")}
+      title={t("skills.title")}
+      subtitle={t("skills.subtitle")}
     >
       <div className="grid gap-4 lg:grid-cols-[0.92fr_1.08fr]">
         <div className="rounded-[1.9rem] border border-white/8 bg-black/22 p-6">
           <div className="flex items-center gap-3 text-sm font-semibold text-[#8fd0c6]">
             <BookMarkedIcon size={18} />
-            Capability ladder
+            {t("skills.ladderLabel")}
           </div>
           <div className="mt-6 space-y-4">
             {skillColumns.map((column, index) => (
@@ -57,7 +50,7 @@ export function SkillsSection() {
                 <div className="absolute top-0 left-0 h-full w-1 bg-gradient-to-b from-[#f0c77b] via-[#8fd0c6] to-transparent" />
                 <div className="pl-4">
                   <div className="app-text-11 uppercase tracking-[0.2em] text-[#f0c77b]">
-                    Stage {index + 1}
+                    {t("skills.stageLabel", { index: index + 1 })}
                   </div>
                   <div className="mt-2 text-xl font-semibold">{column.title}</div>
                   <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">

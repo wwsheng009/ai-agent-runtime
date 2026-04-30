@@ -7,6 +7,7 @@ import {
   UsersIcon,
 } from "lucide-react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 import { buttonVariants } from "@/components/ui/button";
 import { CardTitle } from "@/components/ui/card";
@@ -14,64 +15,59 @@ import { CardTitle } from "@/components/ui/card";
 import { Section } from "@/components/landing/section";
 import { cn } from "@/lib/utils";
 
-const caseStudies = [
-  {
-    accent: "from-[#7dcfff]/35 via-[#0f172a] to-transparent",
-    description:
-      "Trace a live agent turn from submit to completion while session history and runtime events keep feeding the same thread.",
-    icon: RadioTowerIcon,
-    label: "Live execution",
-    title: "Follow the full turn lifecycle in one workspace",
-  },
-  {
-    accent: "from-[#f0c77b]/35 via-[#201812] to-transparent",
-    description:
-      "Keep multi-team summaries, teammate readiness, and dispatch detail visible without leaving the working thread.",
-    icon: UsersIcon,
-    label: "Team coordination",
-    title: "Coordinate multiple runtime teammates from the same control rail",
-  },
-  {
-    accent: "from-[#8fd0c6]/28 via-[#091717] to-transparent",
-    description:
-      "Switch between source and preview without losing the thread, so evidence and output stay close to the messages that produced them.",
-    icon: LayoutTemplateIcon,
-    label: "Artifact detail",
-    title: "Inspect outputs like a product surface, not a JSON dump",
-  },
-  {
-    accent: "from-[#8fd0c6]/22 via-[#0d1117] to-transparent",
-    description:
-      "Map planning, routing, orchestration, and tool events into a readable message stream with attached receipts.",
-    icon: BotIcon,
-    label: "Agent reasoning",
-    title: "See how the assistant moved from plan to execution",
-  },
-  {
-    accent: "from-[#f0c77b]/25 via-[#160f0f] to-transparent",
-    description:
-      "Expose chat, session, and runtime capabilities through a clear product surface with explicit operational controls.",
-    icon: FileSearchIcon,
-    label: "Operational clarity",
-    title: "Keep the runtime legible without hiding the underlying system",
-  },
-  {
-    accent: "from-[#f97316]/24 via-[#1a1010] to-transparent",
-    description:
-      "Treat the landing page and workspace as connected surfaces: one explains the value, the other lets teams act on it.",
-    icon: ArrowUpRightIcon,
-    label: "Product experience",
-    title: "Keep the website and workspace visually connected",
-  },
-];
-
 export function CaseStudySection() {
+  const { t } = useTranslation("landing");
+  const caseStudies = [
+    {
+      accent: "from-[#7dcfff]/35 via-[#0f172a] to-transparent",
+      description: t("caseStudy.cards.liveExecution.description"),
+      icon: RadioTowerIcon,
+      label: t("caseStudy.cards.liveExecution.label"),
+      title: t("caseStudy.cards.liveExecution.title"),
+    },
+    {
+      accent: "from-[#f0c77b]/35 via-[#201812] to-transparent",
+      description: t("caseStudy.cards.teamCoordination.description"),
+      icon: UsersIcon,
+      label: t("caseStudy.cards.teamCoordination.label"),
+      title: t("caseStudy.cards.teamCoordination.title"),
+    },
+    {
+      accent: "from-[#8fd0c6]/28 via-[#091717] to-transparent",
+      description: t("caseStudy.cards.artifactDetail.description"),
+      icon: LayoutTemplateIcon,
+      label: t("caseStudy.cards.artifactDetail.label"),
+      title: t("caseStudy.cards.artifactDetail.title"),
+    },
+    {
+      accent: "from-[#8fd0c6]/22 via-[#0d1117] to-transparent",
+      description: t("caseStudy.cards.agentReasoning.description"),
+      icon: BotIcon,
+      label: t("caseStudy.cards.agentReasoning.label"),
+      title: t("caseStudy.cards.agentReasoning.title"),
+    },
+    {
+      accent: "from-[#f0c77b]/25 via-[#160f0f] to-transparent",
+      description: t("caseStudy.cards.operationalClarity.description"),
+      icon: FileSearchIcon,
+      label: t("caseStudy.cards.operationalClarity.label"),
+      title: t("caseStudy.cards.operationalClarity.title"),
+    },
+    {
+      accent: "from-[#f97316]/24 via-[#1a1010] to-transparent",
+      description: t("caseStudy.cards.productExperience.description"),
+      icon: ArrowUpRightIcon,
+      label: t("caseStudy.cards.productExperience.label"),
+      title: t("caseStudy.cards.productExperience.title"),
+    },
+  ];
+
   return (
     <Section
       className="pt-0"
-      eyebrow="Product highlights"
-      title="See how the workspace turns agent work into something reviewable"
-      subtitle="Each card maps to a real surface in AI Agent Runtime: active threads, runtime teams, streamed execution, and artifact detail that stays attached to the work."
+      eyebrow={t("caseStudy.eyebrow")}
+      title={t("caseStudy.title")}
+      subtitle={t("caseStudy.subtitle")}
     >
       <div id="product-highlights" className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {caseStudies.map(({ accent, description, icon: Icon, label, title }) => (
@@ -112,7 +108,7 @@ export function CaseStudySection() {
                     "border-[var(--border)] bg-[var(--panel-strong-bg)] hover:bg-[var(--surface-soft-hover)]",
                   )}
                 >
-                  Explore in workspace
+                  {t("caseStudy.exploreInWorkspace")}
                 </span>
               </div>
             </div>

@@ -6,22 +6,23 @@ import {
 } from "lucide-react";
 import { useEffect, useEffectEvent, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 import { buttonVariants } from "@/components/ui/button";
 import { Card, CardDescription, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-const rotatingWords = [
-  "Deep Research",
-  "Agent Workspaces",
-  "Artifact Reviews",
-  "Runtime Teams",
-];
-
 export function Hero() {
+  const { t } = useTranslation("landing");
   const [index, setIndex] = useState(0);
+  const rotatingWords = [
+    t("hero.rotatingWord1"),
+    t("hero.rotatingWord2"),
+    t("hero.rotatingWord3"),
+    t("hero.rotatingWord4"),
+  ];
   const rotateWord = useEffectEvent(() => {
-    setIndex((current) => (current + 1) % rotatingWords.length);
+    setIndex((current) => (current + 1) % 4);
   });
 
   useEffect(() => {
@@ -41,64 +42,60 @@ export function Hero() {
         <div className="max-w-4xl animate-[var(--animate-fade-up)]">
           <div className="eyebrow">
             <SparklesIcon size={14} />
-            Browser-native AI workspace for research, execution, and review
+            {t("hero.eyebrow")}
           </div>
           <h1 className="section-title mt-7 max-w-4xl">
-            Research, orchestrate, and ship{" "}
-            <span className="text-[var(--accent-primary)]">{rotatingWords[index]}</span>
+            {t("hero.titlePrefix")}{" "}
+            <span className="text-[var(--accent-primary)]">
+              {rotatingWords[index]}
+            </span>
             <br />
-            from one browser-native workspace.
+            {t("hero.titleSuffix")}
           </h1>
           <p className="mt-6 max-w-3xl text-lg leading-8 text-[var(--muted-foreground)] md:text-xl">
-            AI Agent Runtime brings live threads, runtime events, artifact
-            evidence, and teammate coordination into a single product surface.
-            Start from the landing page, enter the workspace, and keep the full
-            path from request to verified output visible in one place.
+            {t("hero.body")}
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <Link
               to="/workspace"
               className={cn(buttonVariants({ variant: "primary", size: "lg" }))}
             >
-              Enter workspace
+              {t("hero.primaryCta")}
               <ArrowRightIcon size={18} />
             </Link>
             <a
               href="#product-highlights"
               className={cn(buttonVariants({ variant: "secondary", size: "lg" }))}
             >
-              See product highlights
+              {t("hero.secondaryCta")}
             </a>
           </div>
           <div className="mt-10 grid max-w-4xl gap-4 sm:grid-cols-3">
             <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--surface-soft)] p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-[var(--accent-primary)]">
                 <CompassIcon size={16} />
-                Unified flow
+                {t("hero.unifiedFlowTitle")}
               </div>
               <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
-                Move from prompt to action to review without jumping across
-                disconnected tools or hidden execution surfaces.
+                {t("hero.unifiedFlowBody")}
               </p>
             </div>
             <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--surface-soft)] p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-[var(--accent-secondary)]">
                 <GitBranchPlusIcon size={16} />
-                Team-ready workspace
+                {t("hero.teamReadyTitle")}
               </div>
               <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
-                Keep thread context, runtime teams, and operational detail in
-                the same shell so handoffs stay readable.
+                {t("hero.teamReadyBody")}
               </p>
             </div>
             <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--surface-soft)] p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-[var(--accent-primary)]">
                 <ArrowRightIcon size={16} />
-                Verifiable output
+                {t("hero.verifiableOutputTitle")}
               </div>
               <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
-                Inspect artifacts, stream runtime events, and keep the evidence
-                next to the work that produced it.
+                {t("hero.verifiableOutputBody")}
               </p>
             </div>
           </div>
@@ -107,45 +104,41 @@ export function Hero() {
         <Card className="relative overflow-hidden rounded-[2rem] border-[var(--border)] bg-[var(--panel-strong-bg)] p-0">
           <div className="border-b border-[var(--border)] px-6 py-5">
             <div className="eyebrow border-[var(--border)] bg-[var(--surface-soft)] text-[var(--foreground)]">
-              Product snapshot
+              {t("hero.snapshotEyebrow")}
             </div>
-            <CardTitle className="mt-4 text-2xl">One shell, three visible layers</CardTitle>
+            <CardTitle className="mt-4 text-2xl">{t("hero.snapshotTitle")}</CardTitle>
             <CardDescription className="mt-2">
-              Keep discovery, active work, and runtime evidence legible at the
-              same time: the product story up front, the active thread in the
-              middle, and the operational detail around it.
+              {t("hero.snapshotBody")}
             </CardDescription>
           </div>
           <div className="grid gap-4 p-6">
             <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--panel-strong-bg)] p-4">
               <div className="flex items-center gap-3">
                 <SparklesIcon className="text-[var(--accent-primary)]" size={18} />
-                <div className="text-sm font-semibold">Product site</div>
+                <div className="text-sm font-semibold">{t("hero.productSiteTitle")}</div>
               </div>
               <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
-                A clear product narrative explains what the workspace does,
-                where it fits, and why teams can trust the output.
+                {t("hero.productSiteBody")}
               </p>
             </div>
             <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--panel-strong-bg)] p-4">
               <div className="flex items-center gap-3">
                 <CompassIcon className="text-[var(--accent-secondary)]" size={18} />
-                <div className="text-sm font-semibold">Workspace entry</div>
+                <div className="text-sm font-semibold">{t("hero.workspaceEntryTitle")}</div>
               </div>
               <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
-                Start with <code className="app-inline-mono">/workspace</code> and land directly in an active
-                thread, so the app feels immediate instead of route-driven.
+                {t("hero.workspaceEntryBody")}
               </p>
             </div>
             <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--panel-strong-bg)] p-4">
               <div className="flex items-center gap-3">
                 <GitBranchPlusIcon className="text-[var(--accent-primary)]" size={18} />
-                <div className="text-sm font-semibold">Runtime evidence</div>
+                <div className="text-sm font-semibold">{t("hero.runtimeEvidenceTitle")}</div>
               </div>
               <div className="app-terminal-copy mt-3 space-y-2 text-[var(--muted-foreground)]">
-                <div>Chat turns and replies stay attached to the thread.</div>
-                <div>History sync keeps the workspace aligned with the session.</div>
-                <div>Runtime streams expose tool calls, routes, and artifacts.</div>
+                <div>{t("hero.runtimeEvidenceBody1")}</div>
+                <div>{t("hero.runtimeEvidenceBody2")}</div>
+                <div>{t("hero.runtimeEvidenceBody3")}</div>
               </div>
             </div>
           </div>

@@ -6,60 +6,56 @@ import {
   MessageSquareMoreIcon,
   RouteIcon,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Section } from "@/components/landing/section";
 
-const featureCards = [
-  {
-    description:
-      "A clear sequence of hero, highlights, capabilities, runtime detail, and CTA helps explain the product before a user enters the workspace.",
-    icon: LayoutDashboardIcon,
-    label: "Product shell",
-    title: "Structured for first-time understanding",
-  },
-  {
-    description:
-      "Primary calls to action now land on /workspace, reducing route noise and getting users into the active work surface faster.",
-    icon: RouteIcon,
-    label: "Workspace entry",
-    title: "A cleaner path into active work",
-  },
-  {
-    description:
-      "Prompt submission, session history sync, and runtime streaming keep the thread current while work is still in flight.",
-    icon: MessageSquareMoreIcon,
-    label: "Runtime",
-    title: "Live signals stay attached to the thread",
-  },
-  {
-    description:
-      "Planning, orchestration, route, subagent, and tool payloads stay attached back into inspectable artifacts and receipts.",
-    icon: FileJsonIcon,
-    label: "Artifacts",
-    title: "Evidence remains inspectable",
-  },
-  {
-    description:
-      "The message surface keeps focusing on the selected thread instead of scattering execution state across disconnected screens.",
-    icon: BrainCircuitIcon,
-    label: "Conversation",
-    title: "Thread-first workspace flow",
-  },
-  {
-    description:
-      "The structure leaves room for richer markdown, deeper artifact review, and more advanced team controls without changing the core flow.",
-    icon: BlocksIcon,
-    label: "Extension",
-    title: "Ready to grow with the runtime",
-  },
-];
-
 export function WhatsNewSection() {
+  const { t } = useTranslation("landing");
+  const featureCards = [
+    {
+      description: t("whatsNew.cards.productShell.description"),
+      icon: LayoutDashboardIcon,
+      label: t("whatsNew.cards.productShell.label"),
+      title: t("whatsNew.cards.productShell.title"),
+    },
+    {
+      description: t("whatsNew.cards.workspaceEntry.description"),
+      icon: RouteIcon,
+      label: t("whatsNew.cards.workspaceEntry.label"),
+      title: t("whatsNew.cards.workspaceEntry.title"),
+    },
+    {
+      description: t("whatsNew.cards.runtimeSignal.description"),
+      icon: MessageSquareMoreIcon,
+      label: t("whatsNew.cards.runtimeSignal.label"),
+      title: t("whatsNew.cards.runtimeSignal.title"),
+    },
+    {
+      description: t("whatsNew.cards.artifactEvidence.description"),
+      icon: FileJsonIcon,
+      label: t("whatsNew.cards.artifactEvidence.label"),
+      title: t("whatsNew.cards.artifactEvidence.title"),
+    },
+    {
+      description: t("whatsNew.cards.conversation.description"),
+      icon: BrainCircuitIcon,
+      label: t("whatsNew.cards.conversation.label"),
+      title: t("whatsNew.cards.conversation.title"),
+    },
+    {
+      description: t("whatsNew.cards.extension.description"),
+      icon: BlocksIcon,
+      label: t("whatsNew.cards.extension.label"),
+      title: t("whatsNew.cards.extension.title"),
+    },
+  ];
+
   return (
     <Section
-      eyebrow="Why it works"
-      title="Everything needed to move from prompt to verified output"
-      subtitle="The landing page now explains the product in user terms: how you enter the workspace, how execution stays visible, and how artifacts remain tied to the thread that produced them."
+      eyebrow={t("whatsNew.eyebrow")}
+      title={t("whatsNew.title")}
+      subtitle={t("whatsNew.subtitle")}
     >
       <div className="grid gap-4 lg:grid-cols-3">
         {featureCards.map((card, index) => (
