@@ -35,5 +35,6 @@ build/
 # Temp
 tmp/
 backend/.tmp/
+.backups/
 .env
 backend/chat-logs/
