@@ -1056,6 +1056,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			HeaderMappings:     cloneStringMap(provider.HeaderMappings),
 			HeaderMappingRules: cloneHeaderMappingRules(provider.HeaderMappingRules),
 			Proxy:              config.EffectiveProxyConfig(&cfg.Providers.Proxy, provider.Proxy),
+			RequestsPerMinute:  provider.RequestsPerMinute,
 		}
 	}
 

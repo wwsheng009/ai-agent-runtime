@@ -163,6 +163,9 @@ type Provider struct {
 	SupportsMaxOutputTokens *bool                          `yaml:"supports_max_output_tokens" mapstructure:"supports_max_output_tokens" json:"supports_max_output_tokens"`
 	Timeout                 time.Duration                  `yaml:"timeout" mapstructure:"timeout" json:"timeout"`
 	Proxy                   *ProxyConfig                   `yaml:"proxy" mapstructure:"proxy" json:"proxy"`
+	// RequestsPerMinute caps the number of provider API calls per rolling minute.
+	// Zero means no client-side rate limiting.
+	RequestsPerMinute int `yaml:"requests_per_minute" mapstructure:"requests_per_minute" json:"requests_per_minute"`
 }
 
 // HeaderMappingRule defines a conditional header rewrite rule.

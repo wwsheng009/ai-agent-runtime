@@ -776,7 +776,8 @@ providers:
             default_model: mimo-v2.5-pro
             enabled: true
             forward_url: /v1/messages
-            max_tokens_limit: 8000
+            requests_per_minute: 100
+            max_tokens_limit: 131072
             model_capabilities:
                 '*':
                     input_modalities:
@@ -798,6 +799,27 @@ providers:
                     input_modalities:
                         - text
                         - image
+                    max_context_tokens: 1000000
+                    max_tokens: 131072
+                    reasoning_model: true
+                    reasoning_efforts:
+                        - none
+                        - low
+                        - medium
+                        - high
+                        - max
+                    reasoning_effort_budgets:
+                        none: 0
+                        low: 0
+                        medium: 0
+                        high: 0
+                        max: 0
+                mimo-v2-pro:
+                    input_modalities:
+                        - text
+                        - image
+                    max_context_tokens: 1000000
+                    max_tokens: 131072
                     reasoning_model: true
                     reasoning_efforts:
                         - none
@@ -819,6 +841,7 @@ providers:
                 - anthropic
             supported_models:
                 - mimo-v2.5-pro
+                - mimo-v2-pro
             timeout: 300s
             truncation_adapter: anthropic_local
         gemini_local:
