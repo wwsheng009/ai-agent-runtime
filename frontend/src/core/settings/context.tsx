@@ -24,6 +24,8 @@ import {
   type AppSettings,
   type ResolvedTheme,
 } from "@/core/settings/local";
+import { initI18n } from "@/i18n";
+import { resolveLocalePreference } from "@/i18n/locale";
 
 function getBrowserStorage() {
   if (typeof window === "undefined") {
@@ -38,6 +40,10 @@ export function SettingsProvider({ children }: PropsWithChildren) {
     getStoredAppSettings(getBrowserStorage()),
   );
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
+  const [systemLanguage, setSystemLanguage] = useState<string | undefined>(() =>
+    typeof navigator === "undefined" ? undefined : navigator.language,
+  );
+  const resolvedLocale = resolveLocalePreference(settings.localization.locale, systemLanguage);
   const resolvedTheme = resolveThemeMode(
     settings.appearance.themeMode,
     systemTheme,
@@ -58,8 +64,12 @@ export function SettingsProvider({ children }: PropsWithChildren) {
   }, []);
 
   useLayoutEffect(() => {
-    applyDocumentSettings(settings, resolvedTheme);
-  }, [resolvedTheme, settings]);
+    applyDocumentSettings(settings, resolvedTheme, resolvedLocale);
+  }, [resolvedLocale, resolvedTheme, settings]);
+
+  useEffect(() => {
+    void initI18n(resolvedLocale).changeLanguage(resolvedLocale);
+  }, [resolvedLocale]);
 
   useEffect(() => {
     const storage = getBrowserStorage();
@@ -88,6 +98,22 @@ export function SettingsProvider({ children }: PropsWithChildren) {
       return;
     }
 
+    const handleLanguageChange = () => {
+      setSystemLanguage(window.navigator.language);
+    };
+
+    handleLanguageChange();
+    window.addEventListener("languagechange", handleLanguageChange);
+    return () => {
+      window.removeEventListener("languagechange", handleLanguageChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
     const handleStorage = (event: StorageEvent) => {
       if (event.key !== APP_SETTINGS_STORAGE_KEY) {
         return;
@@ -106,11 +132,19 @@ export function SettingsProvider({ children }: PropsWithChildren) {
     () => ({
       settings,
       resetSettings,
+      resolvedLocale,
       resolvedTheme,
       systemTheme,
       updateSection,
     }),
-    [resetSettings, resolvedTheme, settings, systemTheme, updateSection],
+    [
+      resetSettings,
+      resolvedLocale,
+      resolvedTheme,
+      settings,
+      systemTheme,
+      updateSection,
+    ],
   );
 
   return (

@@ -1,3 +1,5 @@
+import type { LocalePreference } from "@/i18n/locale";
+
 export const APP_SETTINGS_STORAGE_KEY = "ai-agent-runtime.workspace.settings";
 
 export type AccentTone = "gold" | "cyan" | "violet";
@@ -67,6 +69,9 @@ const LEGACY_CODE_FONT_SIZE_PRESETS = {
 } as const;
 
 export interface AppSettings {
+  localization: {
+    locale: LocalePreference;
+  };
   appearance: {
     accentTone: AccentTone;
     chatTextSize: number;
@@ -93,6 +98,7 @@ export interface AppSettings {
 }
 
 export type PartialAppSettings = {
+  localization?: Partial<AppSettings["localization"]>;
   appearance?: Partial<AppSettings["appearance"]>;
   workspace?: Partial<AppSettings["workspace"]>;
   notification?: Partial<AppSettings["notification"]>;
@@ -100,6 +106,9 @@ export type PartialAppSettings = {
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
+  localization: {
+    locale: "system",
+  },
   appearance: {
     accentTone: "gold",
     chatTextSize: CHAT_FONT_SIZE_DEFAULT,
@@ -127,6 +136,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
 
 function normalizeAccentTone(value: unknown): AccentTone {
   return value === "cyan" || value === "violet" ? value : "gold";
+}
+
+function normalizeLocalePreference(value: unknown): LocalePreference {
+  return value === "zh-CN" || value === "en-US" ? value : "system";
 }
 
 function normalizeCodeFontPreset(value: unknown): CodeFontPreset {
@@ -209,6 +222,9 @@ export function mergeAppSettings(
   value: PartialAppSettings | null | undefined,
 ): AppSettings {
   return {
+    localization: {
+      locale: normalizeLocalePreference(value?.localization?.locale),
+    },
     appearance: {
       accentTone: normalizeAccentTone(value?.appearance?.accentTone),
       chatTextSize: normalizeFontSize(

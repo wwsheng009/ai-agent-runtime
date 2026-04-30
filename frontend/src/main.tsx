@@ -7,7 +7,10 @@ import {
   getSystemTheme,
   resolveThemeMode,
   SettingsProvider,
+  type AppSettings,
 } from "@/core/settings";
+import { initI18n } from "@/i18n";
+import { resolveLocalePreference } from "@/i18n/locale";
 
 import App from "./App";
 import "./styles/globals.css";
@@ -17,14 +20,18 @@ function bootstrapDocumentSettings() {
     return;
   }
 
-  const settings = getStoredAppSettings(window.localStorage);
+  const settings = getStoredAppSettings(window.localStorage) satisfies AppSettings;
   const systemTheme = getSystemTheme();
+  const resolvedLocale = resolveLocalePreference(
+    settings.localization.locale,
+  );
   const resolvedTheme = resolveThemeMode(
     settings.appearance.themeMode,
     systemTheme,
   );
 
-  applyDocumentSettings(settings, resolvedTheme);
+  initI18n(resolvedLocale);
+  applyDocumentSettings(settings, resolvedTheme, resolvedLocale);
 }
 
 bootstrapDocumentSettings();

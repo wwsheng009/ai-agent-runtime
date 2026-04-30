@@ -6,6 +6,7 @@ import {
   type AppSettings,
   type ResolvedTheme,
 } from "@/core/settings/local";
+import { type ResolvedLocale } from "@/i18n/locale";
 
 export function getSystemTheme(): ResolvedTheme {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
@@ -20,12 +21,14 @@ export function getSystemTheme(): ResolvedTheme {
 export function applyDocumentSettings(
   settings: AppSettings,
   resolvedTheme: ResolvedTheme,
+  resolvedLocale: ResolvedLocale,
 ) {
   if (typeof document === "undefined") {
     return;
   }
 
   const root = document.documentElement;
+  root.lang = resolvedLocale;
   root.dataset.accentTone = settings.appearance.accentTone;
   root.dataset.reducedMotion = settings.appearance.reducedMotion ? "true" : "false";
   root.dataset.theme = resolvedTheme;
