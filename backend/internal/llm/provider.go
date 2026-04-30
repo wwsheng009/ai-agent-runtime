@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -163,6 +164,64 @@ type ProviderConfig struct {
 	HeaderMappingRules      []HeaderMappingRule                        `json:"headerMappingRules,omitempty"`
 	SupportsMaxOutputTokens *bool                                      `json:"supportsMaxOutputTokens,omitempty"`
 	Proxy                   *agentconfig.ProxyConfig                   `json:"proxy,omitempty"`
+	RequestsPerMinute       int                                        `json:"requestsPerMinute,omitempty"`
+}
+
+// tokenBucketLimiter implements a simple sliding-window rate limiter.
+// It tracks request timestamps and blocks when the per-minute cap is reached.
+type tokenBucketLimiter struct {
+	limit int
+	mu    struct {
+		sync.Mutex
+		timestamps []time.Time
+	}
+}
+
+func newTokenBucketLimiter(rpm int) *tokenBucketLimiter {
+	if rpm <= 0 {
+		return nil
+	}
+	return &tokenBucketLimiter{limit: rpm}
+}
+
+// Wait blocks until a request slot is available or ctx is cancelled.
+func (l *tokenBucketLimiter) Wait(ctx context.Context) error {
+	if l == nil {
+		return nil
+	}
+	for {
+		if l.tryAcquire() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func (l *tokenBucketLimiter) tryAcquire() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	windowStart := now.Add(-time.Minute)
+
+	// evict expired entries
+	valid := l.mu.timestamps[:0]
+	for _, ts := range l.mu.timestamps {
+		if ts.After(windowStart) {
+			valid = append(valid, ts)
+		}
+	}
+	l.mu.timestamps = valid
+
+	if len(l.mu.timestamps) >= l.limit {
+		return false
+	}
+	l.mu.timestamps = append(l.mu.timestamps, now)
+	return true
 }
 
 // ProviderWrapper Provider 包装器，使用 ProtocolAdapter
@@ -170,6 +229,7 @@ type ProviderWrapper struct {
 	config    *ProviderConfig
 	adapter   adapter.ProtocolAdapter
 	tokenizer *Tokenizer
+	limiter   *tokenBucketLimiter // nil when RequestsPerMinute <= 0
 }
 
 // ListModelCapabilities returns a detached copy of the configured model capability map.
@@ -302,6 +362,7 @@ func NewProvider(config *ProviderConfig) (LegacyChatProvider, error) {
 		config:    config,
 		adapter:   a,
 		tokenizer: NewTokenizer(providerTokenizerStrategy(config.Type)),
+		limiter:   newTokenBucketLimiter(config.RequestsPerMinute),
 	}, nil
 }
 
@@ -755,6 +816,9 @@ func (p *ProviderWrapper) resolveModel(model string) string {
 func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("request is required")
+	}
+	if err := p.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit wait cancelled: %w", err)
 	}
 	if req.Stream {
 		return p.callStreamingAggregate(ctx, req)
