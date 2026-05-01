@@ -309,7 +309,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			return
 		}
 		promoteDraft()
-		cursor = deletePreviousWordStart(line, cursor)
+		cursor = previousWordStart(line, cursor)
 		redraw()
 	}
 
@@ -978,6 +978,17 @@ func deletePreviousWordStart(line []rune, cursor int) int {
 		start--
 	}
 	for start > 0 && unicode.IsSpace(line[start-1]) {
+		start--
+	}
+	return start
+}
+
+func previousWordStart(line []rune, cursor int) int {
+	start := cursor
+	for start > 0 && unicode.IsSpace(line[start-1]) {
+		start--
+	}
+	for start > 0 && !unicode.IsSpace(line[start-1]) {
 		start--
 	}
 	return start

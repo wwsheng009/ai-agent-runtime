@@ -193,7 +193,7 @@ func TestReadInteractiveLine_AltBackspaceDeletesPreviousWord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readInteractiveLine: %v", err)
 	}
-	if line != "hello X" {
+	if line != "helloX" {
 		t.Fatalf("expected alt+backspace to delete the previous word, got %q", line)
 	}
 }
