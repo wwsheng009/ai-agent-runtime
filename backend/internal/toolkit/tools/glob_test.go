@@ -310,6 +310,186 @@ func TestGlobTool_NullLimitIgnored(t *testing.T) {
 	}
 }
 
+func TestGlobTool_UsesRipgrepFilesWhenAvailable(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGlobTool()
+
+	var gotWorkingDir string
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		if name != "rg" {
+			t.Fatalf("expected rg lookup, got %q", name)
+		}
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		if binaryPath != "rg" {
+			t.Fatalf("expected rg binary, got %q", binaryPath)
+		}
+		gotWorkingDir = workingDir
+		gotArgs = append([]string(nil), args...)
+		return []byte("subdir\\file.go\nsubdir\\file.txt\nother.go\n"), nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "**/*.go",
+		"path":    tmpDir,
+		"limit":   1,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if gotWorkingDir != tmpDir {
+		t.Fatalf("expected rg working dir %q, got %q", tmpDir, gotWorkingDir)
+	}
+	wantArgs := []string{"--files", "--hidden", "--no-ignore", "--glob", "**/*.go"}
+	if strings.Join(gotArgs, "\x00") != strings.Join(wantArgs, "\x00") {
+		t.Fatalf("unexpected rg args: got %v want %v", gotArgs, wantArgs)
+	}
+	files := result.Metadata["files"].([]string)
+	if len(files) != 1 || filepath.Clean(files[0]) != filepath.Clean("subdir/file.go") {
+		t.Fatalf("expected first matching go file only, got %v", files)
+	}
+	if engine := result.Metadata["engine"]; engine != "rg" {
+		t.Fatalf("expected rg engine metadata, got %#v", engine)
+	}
+	if truncated, ok := result.Metadata["truncated"].(bool); !ok || !truncated {
+		t.Fatalf("expected rg result to be truncated, got %#v", result.Metadata["truncated"])
+	}
+}
+
+func TestGlobTool_CaseInsensitiveUsesRipgrepIglob(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGlobTool()
+
+	var gotArgs []string
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		gotArgs = append([]string(nil), args...)
+		return []byte("pages\\BotsPage.tsx\n"), nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":          "**/*bot*page*.tsx",
+		"path":             tmpDir,
+		"case_insensitive": true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if strings.Join(gotArgs, "\x00") != strings.Join([]string{"--files", "--hidden", "--no-ignore", "--iglob", "**/*bot*page*.tsx"}, "\x00") {
+		t.Fatalf("unexpected rg args: %v", gotArgs)
+	}
+	files := result.Metadata["files"].([]string)
+	if len(files) != 1 || filepath.Clean(files[0]) != filepath.Clean("pages/BotsPage.tsx") {
+		t.Fatalf("expected case-insensitive match, got %v", files)
+	}
+	if caseInsensitive := result.Metadata["case_insensitive"]; caseInsensitive != true {
+		t.Fatalf("expected case_insensitive metadata true, got %#v", caseInsensitive)
+	}
+}
+
+func TestGlobTool_FallsBackToWalkerWhenRipgrepUnavailable(t *testing.T) {
+	tmpDir := t.TempDir()
+	requireNoError(t, os.MkdirAll(filepath.Join(tmpDir, "subdir"), 0755))
+	requireNoError(t, os.WriteFile(filepath.Join(tmpDir, "subdir", "file.go"), []byte("test"), 0644))
+
+	tool := NewGlobTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		t.Fatalf("rg command should not run when rg is unavailable")
+		return nil, nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "**/*.go",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	files := result.Metadata["files"].([]string)
+	if len(files) != 1 || filepath.Clean(files[0]) != filepath.Clean("subdir/file.go") {
+		t.Fatalf("expected builtin walker match, got %v", files)
+	}
+	if engine := result.Metadata["engine"]; engine != "builtin" {
+		t.Fatalf("expected builtin engine metadata, got %#v", engine)
+	}
+}
+
+func TestGlobTool_CaseInsensitiveWalkerMatchesStaticPrefixCaseDifferences(t *testing.T) {
+	tmpDir := t.TempDir()
+	requireNoError(t, os.MkdirAll(filepath.Join(tmpDir, "Src"), 0755))
+	requireNoError(t, os.WriteFile(filepath.Join(tmpDir, "Src", "File.GO"), []byte("test"), 0644))
+
+	tool := NewGlobTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":          "src/file.go",
+		"path":             tmpDir,
+		"case_insensitive": true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	files := result.Metadata["files"].([]string)
+	if len(files) != 1 || filepath.Clean(files[0]) != filepath.Clean("Src/File.GO") {
+		t.Fatalf("expected case-insensitive walker match, got %v", files)
+	}
+}
+
+func TestGlobTool_DirectoryPatternUsesBuiltinWalker(t *testing.T) {
+	tmpDir := t.TempDir()
+	requireNoError(t, os.MkdirAll(filepath.Join(tmpDir, "docs"), 0755))
+	requireNoError(t, os.MkdirAll(filepath.Join(tmpDir, "nested", "docs"), 0755))
+
+	tool := NewGlobTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		t.Fatalf("directory glob should use builtin walker")
+		return nil, nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "**/docs",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	files := result.Metadata["files"].([]string)
+	if len(files) != 2 {
+		t.Fatalf("expected two docs directories, got %v", files)
+	}
+	if engine := result.Metadata["engine"]; engine != "builtin" {
+		t.Fatalf("expected builtin engine metadata, got %#v", engine)
+	}
+}
+
 func requireNoError(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
@@ -353,8 +533,8 @@ func TestGlobTool_DescriptionGuidesSingleTargetFocus(t *testing.T) {
 	tool := NewGlobTool()
 
 	desc := tool.Description()
-	if !strings.Contains(desc, "拆分") || !strings.Contains(desc, "每次只聚焦一个模式") {
-		t.Fatalf("expected glob description to guide single-target focus, got %q", desc)
+	if !strings.Contains(desc, "rg --files") || !strings.Contains(desc, "case_insensitive") || strings.Contains(desc, "文件内容") && !strings.Contains(desc, "不搜索文件内容") {
+		t.Fatalf("expected glob description to guide fast path and path-only usage, got %q", desc)
 	}
 
 	params := tool.Parameters()
@@ -367,7 +547,15 @@ func TestGlobTool_DescriptionGuidesSingleTargetFocus(t *testing.T) {
 		t.Fatalf("expected pattern schema in properties, got %#v", props)
 	}
 	patternDesc, _ := patternSchema["description"].(string)
-	if !strings.Contains(patternDesc, "拆分") || !strings.Contains(patternDesc, "多个不同目标") {
-		t.Fatalf("expected pattern description to guide single-target focus, got %q", patternDesc)
+	if !strings.Contains(patternDesc, "不搜索文件内容") || !strings.Contains(patternDesc, "case_insensitive") {
+		t.Fatalf("expected pattern description to guide path-only case-insensitive usage, got %q", patternDesc)
+	}
+	caseSchema, ok := props["case_insensitive"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected case_insensitive schema in properties, got %#v", props)
+	}
+	caseDesc, _ := caseSchema["description"].(string)
+	if !strings.Contains(caseDesc, "大小写") {
+		t.Fatalf("expected case_insensitive description, got %q", caseDesc)
 	}
 }
