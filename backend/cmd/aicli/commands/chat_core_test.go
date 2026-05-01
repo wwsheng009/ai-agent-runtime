@@ -260,6 +260,9 @@ func TestAICLIProviderTurnExecutor_UsesSanitizedProtocolMessagesForSharedReplay(
 	if turn == nil || turn.Message == nil || turn.Message.Content != "done" {
 		t.Fatalf("unexpected turn response: %#v", turn)
 	}
+	if session.TurnContextTokenCount <= 0 {
+		t.Fatalf("expected provider turn to record live turn aggregate tokens, got %d", session.TurnContextTokenCount)
+	}
 
 	messages, ok := capturedBody["messages"].([]interface{})
 	if !ok || len(messages) != 2 {

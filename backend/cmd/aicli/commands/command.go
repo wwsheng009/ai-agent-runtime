@@ -150,10 +150,14 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		session.Messages = []map[string]interface{}{}
 		session.MsgCount = 0
 		session.TurnRequestCount = 0
+		resetChatConversationTokenUsage(session)
 		ensureChatSystemPromptMessage(session)
 		if err := syncRuntimeSessionFromChat(session); err != nil {
 			fmt.Printf("错误: %v\n", err)
 			return false
+		}
+		if session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
 		}
 		fmt.Println("当前会话历史已清空")
 

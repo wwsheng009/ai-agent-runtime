@@ -188,11 +188,27 @@ func TestChatLogger_LogToolEvents_PropagateToolCallID(t *testing.T) {
 }
 
 func TestNextLogScope_IncrementsPerTurnAndPerRequest(t *testing.T) {
-	session := &ChatSession{}
+	session := &ChatSession{
+		TurnContextTokenCount:   999,
+		ContextTokenCount:       888,
+		ContextWindowTokenCount: 777,
+	}
 
 	scope1 := nextLogScope(session, "first turn")
+	if session.TurnContextTokenCount != 0 || session.ContextTokenCount != 0 || session.ContextWindowTokenCount != 0 {
+		t.Fatalf("expected new turn to reset turn token usage, got %+v", session)
+	}
+	session.TurnContextTokenCount = 42
+	session.ContextTokenCount = 24
+	session.ContextWindowTokenCount = 2048
 	scope2 := nextLogScope(session, "")
+	if session.TurnContextTokenCount != 42 || session.ContextTokenCount != 24 || session.ContextWindowTokenCount != 2048 {
+		t.Fatalf("expected same turn to preserve turn token usage, got %+v", session)
+	}
 	scope3 := nextLogScope(session, "second turn")
+	if session.TurnContextTokenCount != 0 || session.ContextTokenCount != 0 || session.ContextWindowTokenCount != 0 {
+		t.Fatalf("expected second turn to reset turn token usage, got %+v", session)
+	}
 
 	if scope1.TurnID != "turn-0001" || scope1.RequestID != "turn-0001-req-01" {
 		t.Fatalf("unexpected first scope: %+v", scope1)
@@ -202,6 +218,23 @@ func TestNextLogScope_IncrementsPerTurnAndPerRequest(t *testing.T) {
 	}
 	if scope3.TurnID != "turn-0002" || scope3.RequestID != "turn-0002-req-01" {
 		t.Fatalf("unexpected third scope: %+v", scope3)
+	}
+}
+
+func TestApplyChatTurnContextTokens_AccumulatesWithinTurn(t *testing.T) {
+	session := &ChatSession{}
+
+	applyChatTurnContextTokens(session, 100, 1000, false)
+	applyChatTurnContextTokens(session, 250, 1000, false)
+
+	if session.ContextTokenCount != 250 {
+		t.Fatalf("expected latest request context tokens to be 250, got %d", session.ContextTokenCount)
+	}
+	if session.TurnContextTokenCount != 350 {
+		t.Fatalf("expected turn aggregate context tokens to be 350, got %d", session.TurnContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 1000 {
+		t.Fatalf("expected context window token count to be 1000, got %d", session.ContextWindowTokenCount)
 	}
 }
 
@@ -266,7 +299,7 @@ func TestSendHTTPRequest_FailFastCapturesRetryableResponse(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 
-	resp, body, report, err := sendHTTPRequest(server.Client(), req, RetryConfig{DisableRetries: true})
+	resp, body, report, err := sendHTTPRequest(server.Client(), req, RetryConfig{DisableRetries: true}, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}

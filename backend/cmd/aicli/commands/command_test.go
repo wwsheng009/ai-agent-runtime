@@ -1106,6 +1106,103 @@ func TestHandleCommand_QueueStatusAndClear(t *testing.T) {
 	}
 }
 
+func TestHandleCommand_ClearResetsConversationTokenUsage(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+
+	session := &ChatSession{
+		SessionManager:          manager,
+		SessionUserID:           userID,
+		RuntimeSession:          runtimeSession,
+		TokenCount:              12345,
+		ContextTokenCount:       888,
+		ContextWindowTokenCount: 777,
+		TurnContextTokenCount:   666,
+		MsgCount:                3,
+		TurnRequestCount:        2,
+		Messages: []map[string]interface{}{
+			{"role": "system", "content": "previous system prompt"},
+			{"role": "user", "content": "hello"},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/clear", false); quit {
+			t.Fatal("expected clear command not to exit")
+		}
+	})
+
+	if !strings.Contains(output, "当前会话历史已清空") {
+		t.Fatalf("expected clear confirmation, got %q", output)
+	}
+	if session.TokenCount != 0 {
+		t.Fatalf("expected token count to reset, got %d", session.TokenCount)
+	}
+	if session.ContextTokenCount != 0 || session.ContextWindowTokenCount != 0 || session.TurnContextTokenCount != 0 {
+		t.Fatalf("expected turn-level token usage to reset, got ctx=%d window=%d turn=%d",
+			session.ContextTokenCount, session.ContextWindowTokenCount, session.TurnContextTokenCount)
+	}
+	if session.MsgCount != 0 || session.TurnRequestCount != 0 {
+		t.Fatalf("expected message counters to reset, got msgs=%d turnRequests=%d", session.MsgCount, session.TurnRequestCount)
+	}
+	if got, ok := runtimeSessionContextInt(session.RuntimeSession, chatRuntimeContextTokenCount); ok {
+		t.Fatalf("expected token count metadata to be removed, got %d", got)
+	}
+}
+
+func TestCreateNewRuntimeConversationResetsConversationTokenUsage(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	existingSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+
+	session := &ChatSession{
+		SessionManager:          manager,
+		SessionUserID:           userID,
+		RuntimeSession:          existingSession,
+		TokenCount:              54321,
+		ContextTokenCount:       444,
+		ContextWindowTokenCount: 333,
+		TurnContextTokenCount:   222,
+		MsgCount:                5,
+		TurnRequestCount:        4,
+	}
+
+	if err := createNewRuntimeConversation(session, ""); err != nil {
+		t.Fatalf("createNewRuntimeConversation: %v", err)
+	}
+	if session.RuntimeSession == nil {
+		t.Fatal("expected runtime session to be created")
+	}
+	if session.TokenCount != 0 {
+		t.Fatalf("expected token count to reset, got %d", session.TokenCount)
+	}
+	if session.ContextTokenCount != 0 || session.ContextWindowTokenCount != 0 || session.TurnContextTokenCount != 0 {
+		t.Fatalf("expected turn-level token usage to reset, got ctx=%d window=%d turn=%d",
+			session.ContextTokenCount, session.ContextWindowTokenCount, session.TurnContextTokenCount)
+	}
+	if session.MsgCount != 0 || session.TurnRequestCount != 0 {
+		t.Fatalf("expected message counters to reset, got msgs=%d turnRequests=%d", session.MsgCount, session.TurnRequestCount)
+	}
+	if got, ok := runtimeSessionContextInt(session.RuntimeSession, chatRuntimeContextTokenCount); ok {
+		t.Fatalf("expected token count metadata to be removed, got %d", got)
+	}
+}
+
 func TestHandleCommand_Compact(t *testing.T) {
 	originalRunner := runManualChatCompact
 	defer func() {
