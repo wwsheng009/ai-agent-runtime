@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"os"
@@ -17,6 +18,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type directMetadataFunction struct {
@@ -1128,11 +1130,11 @@ func TestHandleCommand_ClearResetsConversationTokenUsage(t *testing.T) {
 		TurnContextTokenCount:   666,
 		MsgCount:                3,
 		TurnRequestCount:        2,
-		Messages: []map[string]interface{}{
-			{"role": "system", "content": "previous system prompt"},
-			{"role": "user", "content": "hello"},
-		},
 	}
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("previous system prompt"),
+		*runtimetypes.NewUserMessage("hello"),
+	})
 
 	output := captureStdout(t, func() {
 		if quit := handleCommand(session, "/clear", false); quit {
@@ -1308,6 +1310,21 @@ func TestHandleCommand_DirectSkillCall_UsesPromptShortcut(t *testing.T) {
 	}
 	if !strings.Contains(output, "Generated image saved to") {
 		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+func TestExecuteShellCommandDetailed_DangerousCommandCancelsOnEOF(t *testing.T) {
+	session := &ChatSession{
+		cancelCtx:  context.Background(),
+		InputQueue: newChatInputQueue(bufio.NewReader(strings.NewReader(""))),
+	}
+
+	_, err := executeShellCommandDetailed(session, "rm -rf /tmp/test-shell-confirm")
+	if err == nil {
+		t.Fatal("expected dangerous shell confirmation to cancel on EOF")
+	}
+	if err.Error() != "命令已取消" {
+		t.Fatalf("expected command cancellation, got %v", err)
 	}
 }
 

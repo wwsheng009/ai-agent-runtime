@@ -132,6 +132,12 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/model") {
 		return handleModelCommand(session, command, noInteractive)
 	}
+	if commandMatches(cmdLower, "/stream") {
+		return applyStreamCommand(session, command)
+	}
+	if commandMatches(cmdLower, "/resume") {
+		return handleResumeCommand(session, command)
+	}
 	if commandMatches(cmdLower, "/permission-mode") || commandMatches(cmdLower, "/mode") {
 		return handlePermissionModeCommand(session, command)
 	}
@@ -147,7 +153,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		return true
 
 	case "/clear", "/cls":
-		session.Messages = []map[string]interface{}{}
+		if err := replaceRuntimeMessages(session, nil); err != nil {
+			fmt.Printf("错误: %v\n", err)
+			return false
+		}
 		session.MsgCount = 0
 		session.TurnRequestCount = 0
 		resetChatConversationTokenUsage(session)
@@ -169,15 +178,11 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("已创建新会话")
 		printCurrentRuntimeSession(session)
 
-	case "/stream", "/s":
-		session.Stream = true
-		warnIfChatSessionSyncFails(session, "toggle stream", syncRuntimeSessionFromChat(session))
-		fmt.Println("提示: 已切换到流式模式")
+	case "/s":
+		return applyStreamShortcut(session, true)
 
 	case "/normal", "/n":
-		session.Stream = false
-		warnIfChatSessionSyncFails(session, "toggle normal mode", syncRuntimeSessionFromChat(session))
-		fmt.Println("提示: 已切换到普通模式")
+		return applyStreamShortcut(session, false)
 
 	case "/history", "/h":
 		if printVisibleChatHistory(session, "对话历史") == 0 {
@@ -202,18 +207,6 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			fmt.Printf("错误: %v\n", err)
 		}
 
-	case "/resume":
-		if err := resumeLatestRuntimeConversation(session); err != nil {
-			fmt.Printf("错误: %v\n", err)
-			return false
-		}
-		fmt.Println("已恢复最近会话")
-		printCurrentRuntimeSession(session)
-		if hasVisibleChatHistory(session) {
-			fmt.Println()
-			printVisibleChatHistory(session, "已加载历史会话")
-		}
-
 	case "/yolo":
 		if session == nil {
 			fmt.Println("错误: 当前没有活动会话")
@@ -235,17 +228,24 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("  /exit, /quit, /q   - 退出聊天")
 		fmt.Println("  /clear, /cls       - 清空当前会话历史")
 		fmt.Println("  /new               - 创建新会话")
-		fmt.Println("  /stream, /s        - 切换到流式模式")
-		fmt.Println("  /normal, /n        - 切换到普通模式")
+		fmt.Println("  /stream            - 切换流式/普通输出模式（无参数即翻转）并保存偏好")
+		fmt.Println("  /stream on|off|toggle|status - 显式设置或查看当前输出模式")
+		fmt.Println("  /s                 - 快捷开启流式模式（等价于 /stream on）")
+		fmt.Println("  /normal, /n        - 快捷切换到普通模式（等价于 /stream off）")
 		fmt.Println("  /history, /h       - 显示对话历史")
 		fmt.Println("  /session           - 显示当前会话信息")
 		fmt.Println("  /compact [mode]    - 手动触发会话压缩（auto|local|remote）")
 		fmt.Println("  /sessions          - 按当前筛选条件列出可恢复会话")
 		fmt.Println("  /sessions <query>  - 按关键字筛选会话")
 		fmt.Println("  /load <id>         - 加载指定会话")
-		fmt.Println("  /resume            - 恢复最近会话")
+		fmt.Println("  /resume            - 弹出会话选择菜单（恢复最近 / 选择历史 / 取消）")
+		fmt.Println("  /resume latest     - 直接恢复最近一次会话")
+		fmt.Println("  /resume <id>       - 直接加载指定会话（等价于 /load <id>）")
 		fmt.Println("  /title <text>      - 更新当前会话标题")
-		fmt.Println("  /model [name]      - 查看或切换模型，并在支持时调整 thinking_effort")
+		fmt.Println("  /model [name]      - 查看或切换 provider/model/thinking_effort")
+		fmt.Println("  /model status      - 查看当前 provider/model/thinking_effort/baseURL")
+		fmt.Println("  /model --provider <p> --model <m> --reasoning-effort <e> - 直接修改并保存默认偏好")
+		fmt.Println("  /model clear-reasoning - 清空 reasoning_effort 并保存")
 		fmt.Println("  /image [path]      - 查看/添加图片附件（支持 PNG/JPEG/GIF/WebP）")
 		fmt.Println("  /image clear       - 清空待发送图片附件")
 		fmt.Println("  /queue             - 查看当前排队输入状态")
@@ -972,12 +972,12 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 
 	// 检查危险命令
 	if isDangerousCommand(executedCommand) {
+		beginDirectInteractiveOutput(session)
 		fmt.Printf("\n警告: 检测到可能危险的命令: %s\n", executedCommand)
 		fmt.Print("确认执行? (yes/no): ")
 
-		var confirm string
-		_, err := fmt.Scanln(&confirm)
-		if err != nil || strings.ToLower(confirm) != "yes" {
+		confirm, err := chatInteractiveReadTransientLine(session, context.Background())
+		if err != nil || strings.ToLower(strings.TrimSpace(normalizeQueuedInputLine(confirm))) != "yes" {
 			return result, fmt.Errorf("命令已取消")
 		}
 	}

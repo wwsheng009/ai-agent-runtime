@@ -1,0 +1,201 @@
+package commands
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+)
+
+// handleResumeCommand implements the /resume slash command.
+//
+// Behavior:
+//   - /resume                  -> interactive menu (latest / pick from list / cancel).
+//                                 Falls back to latest when interaction is unavailable.
+//   - /resume latest           -> legacy "resume latest" behavior.
+//   - /resume <session-id>     -> load that session by ID (alias of /load).
+//
+// The function never exits the chat loop, mirroring the rest of the slash commands.
+func handleResumeCommand(session *ChatSession, command string) bool {
+	if session == nil {
+		fmt.Println("错误: 当前没有活动会话")
+		return false
+	}
+	if session.SessionManager == nil {
+		fmt.Println("错误: 会话管理未启用")
+		return false
+	}
+
+	arg := strings.TrimSpace(extractCommandArgument(command))
+	switch strings.ToLower(arg) {
+	case "":
+		return resumeInteractiveSelect(session)
+	case "latest", "last", "--latest", "-l":
+		return resumeLatestAndPrint(session)
+	}
+
+	if err := loadRuntimeConversation(session, arg); err != nil {
+		fmt.Printf("错误: %v\n", err)
+		return false
+	}
+	printResumeSuccess(session)
+	return false
+}
+
+func resumeLatestAndPrint(session *ChatSession) bool {
+	if err := resumeLatestRuntimeConversation(session); err != nil {
+		fmt.Printf("错误: %v\n", err)
+		return false
+	}
+	fmt.Println("已恢复最近会话")
+	printResumeSuccess(session)
+	return false
+}
+
+func resumeInteractiveSelect(session *ChatSession) bool {
+	// Non-interactive contexts (JSON output, no-interactive mode) keep the
+	// legacy "resume latest" behavior so scripts are unaffected.
+	if session.NoInteractive || session.JSONOutput {
+		return resumeLatestAndPrint(session)
+	}
+
+	sessions, err := listFilteredChatSessions(session.SessionManager, session.SessionUserID, session.SessionFilter)
+	if err != nil {
+		fmt.Printf("错误: %v\n", err)
+		return false
+	}
+	if len(sessions) == 0 {
+		fmt.Println("当前没有可恢复的历史会话")
+		return false
+	}
+
+	beginDirectInteractiveOutput(session)
+	uiPrintSessionSelectionSummary(len(sessions), session.SessionFilter)
+	optionWidth := startupSessionOptionLabelWidth()
+
+	choice, err := readResumeMenuChoice(session, optionWidth)
+	if err != nil {
+		fmt.Printf("错误: %v\n", err)
+		return false
+	}
+	switch choice {
+	case resumeChoiceLatest:
+		return resumeLatestAndPrint(session)
+	case resumeChoiceCancel:
+		fmt.Println("已取消恢复，可继续在新会话中输入或使用 /new、/sessions、/load")
+		return false
+	case resumeChoicePick:
+		picked, err := readResumeSessionPick(session, sessions)
+		if err != nil {
+			fmt.Printf("错误: %v\n", err)
+			return false
+		}
+		if picked == nil {
+			fmt.Println("已取消恢复")
+			return false
+		}
+		if err := loadRuntimeConversation(session, picked.ID); err != nil {
+			fmt.Printf("错误: %v\n", err)
+			return false
+		}
+		printResumeSuccess(session)
+		return false
+	}
+	return false
+}
+
+type resumeMenuChoice int
+
+const (
+	resumeChoiceLatest resumeMenuChoice = iota
+	resumeChoicePick
+	resumeChoiceCancel
+)
+
+func readResumeMenuChoice(session *ChatSession, optionWidth int) (resumeMenuChoice, error) {
+	for {
+		fmt.Printf("  %-*s %s\n", optionWidth, "[1]", "恢复最近会话")
+		fmt.Printf("  %-*s %s\n", optionWidth, "[2]", "选择历史会话")
+		fmt.Printf("  %-*s %s\n", optionWidth, "[3]", "取消（返回当前会话）")
+
+		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), "请输入选项 (默认: 1): ")
+		if err != nil {
+			return resumeChoiceCancel, err
+		}
+		choice := strings.TrimSpace(normalizeQueuedInputLine(text))
+		switch choice {
+		case "", "1":
+			return resumeChoiceLatest, nil
+		case "2":
+			return resumeChoicePick, nil
+		case "3", "q", "quit", "cancel", "exit":
+			return resumeChoiceCancel, nil
+		default:
+			ui.PrintWarning("无效的选择，请重新输入")
+		}
+	}
+}
+
+func readResumeSessionPick(session *ChatSession, sessions []*runtimechat.Session) (*runtimechat.Session, error) {
+	fmt.Println("历史会话:")
+	now := time.Now()
+	idWidth := startupSessionListIDWidth(sessions)
+	stateWidth := startupSessionStateWidth(sessions)
+	for index, item := range sessions {
+		if item == nil {
+			continue
+		}
+		preview := item.BuildPreview()
+		title := preview.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		fmt.Printf("  [%-2d] %-*s [%-*s] 最后使用: %s\n",
+			index+1,
+			idWidth, item.ID,
+			stateWidth, item.State,
+			formatSessionLastUsed(item.UpdatedAt, now))
+		fmt.Printf("       %s\n", title)
+	}
+
+	for {
+		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), "请输入编号或会话 ID (默认: 1，输入 q 取消): ")
+		if err != nil {
+			return nil, err
+		}
+		choice := strings.TrimSpace(normalizeQueuedInputLine(text))
+		if choice == "" || choice == "1" {
+			return sessions[0], nil
+		}
+		if choice == "q" || choice == "quit" || choice == "cancel" || choice == "exit" {
+			return nil, nil
+		}
+
+		var index int
+		if _, err := fmt.Sscanf(choice, "%d", &index); err == nil {
+			if index >= 1 && index <= len(sessions) {
+				return sessions[index-1], nil
+			}
+			ui.PrintWarning("无效的选择，请重新输入")
+			continue
+		}
+
+		for _, item := range sessions {
+			if item != nil && item.ID == choice {
+				return item, nil
+			}
+		}
+		ui.PrintWarning("未找到会话，请重新输入")
+	}
+}
+
+func printResumeSuccess(session *ChatSession) {
+	printCurrentRuntimeSession(session)
+	if hasVisibleChatHistory(session) {
+		fmt.Println()
+		printVisibleChatHistory(session, "已加载历史会话")
+	}
+}
