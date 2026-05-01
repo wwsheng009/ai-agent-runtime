@@ -1,6 +1,8 @@
 package logger
 
 import (
+	"io"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,6 +82,49 @@ func TestInitLogger_Stdout_JSON(t *testing.T) {
 
 	// Clean up
 	Sync()
+}
+
+func TestInitLogger_ConsoleWritesToStderr(t *testing.T) {
+	originalStdout := os.Stdout
+	originalStderr := os.Stderr
+
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	assert.NoError(t, err)
+	stderrReader, stderrWriter, err := os.Pipe()
+	assert.NoError(t, err)
+
+	os.Stdout = stdoutWriter
+	os.Stderr = stderrWriter
+	defer func() {
+		os.Stdout = originalStdout
+		os.Stderr = originalStderr
+	}()
+
+	globalLogger = nil
+	globalSugar = nil
+
+	cfg := &LogConfig{
+		Level:  "info",
+		Format: "json",
+		Output: "stdout",
+	}
+
+	err = InitLogger(cfg)
+	assert.NoError(t, err)
+
+	Info("stderr only log", String("key", "value"))
+
+	assert.NoError(t, stdoutWriter.Close())
+	assert.NoError(t, stderrWriter.Close())
+
+	stdoutData, err := io.ReadAll(stdoutReader)
+	assert.NoError(t, err)
+	stderrData, err := io.ReadAll(stderrReader)
+	assert.NoError(t, err)
+
+	assert.Empty(t, string(stdoutData))
+	assert.Contains(t, string(stderrData), `"message":"stderr only log"`)
+	assert.Contains(t, string(stderrData), `"key":"value"`)
 }
 
 func TestInitLogger_File_SkipOnWindows(t *testing.T) {

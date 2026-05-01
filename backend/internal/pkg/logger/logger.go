@@ -97,7 +97,8 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, error) {
 	var cores []zapcore.Core
 
 	if targets.Stdout {
-		cores = append(cores, zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), level))
+		// 控制台日志走 stderr，避免与 CLI 的主输出流（stdout）混在一起。
+		cores = append(cores, zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stderr), level))
 	}
 
 	if targets.File {
@@ -121,7 +122,7 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, error) {
 	}
 
 	if len(cores) == 0 {
-		cores = append(cores, zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), level))
+		cores = append(cores, zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stderr), level))
 	}
 
 	// 合并所有 cores

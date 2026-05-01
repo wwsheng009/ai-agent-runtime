@@ -7,7 +7,7 @@ This module provides structured logging capabilities for the AI Gateway using Za
 - **Structured Logging**: JSON and text formats with customizable fields
 - **Context Awareness**: Automatic correlation of request-scoped fields (request_id, user_id, etc.)
 - **Log Rotation**: Automatic log file rotation with lumberjack
-- **Multiple Outputs**: Support for stdout, file, or simultaneous stdout+file outputs
+- **Multiple Outputs**: Support for console(stderr), file, or simultaneous console+file outputs
 - **Configurable Levels**: Debug, Info, Warn, Error levels
 - **Performance**: Zero-allocation logging for hot paths
 
@@ -137,7 +137,7 @@ logger.Panic("Panic, calls panic()")
 |--------|------|---------|-------------|
 | Level | string | info | Log level: debug, info, warn, error |
 | Format | string | json | Log format: json, text |
-| Output | string | stdout | Output target: stdout, file, both |
+| Output | string | stdout | Output target: stdout, file, both (console logs are emitted to stderr) |
 | FilePath | string | ./logs/gateway.log | Log file path (when output=file or both) |
 | MaxSize | int | 100 | Max log file size in MB |
 | MaxBackups | int | 3 | Max number of old log files |
@@ -160,6 +160,8 @@ export LOG__FILE_PATH=/var/log/gateway/gateway.log
 export LOG__OUTPUT=file
 export LOG__FILE_PATH=/var/log/gateway/gateway.log
 ```
+
+Note: console logs are written to `stderr` so they do not mix with the primary `stdout` stream used by CLI commands.
 
 ## Context Keys
 
