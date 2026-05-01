@@ -1235,6 +1235,37 @@ func TestChatRuntimeEvents_DoesNotRedrawPromptWhileRunActive(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeEvents_IgnoresLatePrimaryAssistantEventsAfterRunEnds(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeDelta = func(delta string) {
+		rendered = append(rendered, "delta:"+delta)
+	}
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, "line:"+line)
+	}
+
+	bridge.BeginRun()
+	bridge.EndRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": "late delta"},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"content": "late message"},
+	})
+
+	if len(rendered) != 0 {
+		t.Fatalf("expected late primary assistant events to be ignored after run end, got %v", rendered)
+	}
+}
+
 func TestChatRuntimeEvents_DoesNotRedrawPromptWhileTeamStillActiveAfterRun(t *testing.T) {
 	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
 	require.NoError(t, runtimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{

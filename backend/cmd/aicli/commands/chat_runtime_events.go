@@ -35,6 +35,7 @@ type chatRuntimeEventBridge struct {
 	renderedAssistantFinal bool
 	renderedReasoningDelta bool
 	renderedReasoningFinal bool
+	runStarted             bool
 	runActive              bool
 	nextRunPrompt          string
 	activeRunPrompt        string
@@ -248,6 +249,7 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.renderedAssistantFinal = false
 	b.renderedReasoningDelta = false
 	b.renderedReasoningFinal = false
+	b.runStarted = true
 	b.runActive = true
 	b.renderMu.Unlock()
 	b.progressMu.Lock()
@@ -749,6 +751,9 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	}
 	b.handleStructuredLogEvent(event)
 	b.applyLLMRequestStatus(event)
+	if b.shouldSuppressLatePrimaryRunEvent(event) {
+		return
+	}
 	if b.handleAssistantReasoning(event) {
 		return
 	}
@@ -850,6 +855,34 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		if err := actor.AnswerQuestion(context.Background(), questionID, answer); err != nil {
 			b.setRunError(err)
 		}
+	}
+}
+
+func (b *chatRuntimeEventBridge) shouldSuppressLatePrimaryRunEvent(event runtimeevents.Event) bool {
+	if b == nil || b.session == nil || !b.runStarted || b.isRunActive() || !b.isPrimarySessionEvent(event) {
+		return false
+	}
+	switch event.Type {
+	case runtimechat.EventLLMRequestStarted, "llm.request.started":
+		return true
+	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
+		return true
+	case runtimechat.EventAssistantReasoning, "assistant.reasoning":
+		return true
+	case runtimechat.EventAssistantDelta:
+		return true
+	case runtimechat.EventAssistantMessage:
+		return true
+	case runtimechat.EventApprovalRequested:
+		return true
+	case runtimechat.EventQuestionAsked:
+		return true
+	case runtimechat.EventToolStarted, "tool.requested":
+		return true
+	case runtimechat.EventToolFinished, "tool.completed":
+		return true
+	default:
+		return false
 	}
 }
 

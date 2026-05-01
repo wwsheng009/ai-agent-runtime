@@ -31,6 +31,8 @@ type chatInputQueue struct {
 	start         sync.Once
 	mu            sync.RWMutex
 	priorityMode  bool
+	terminalMu    sync.RWMutex
+	terminalErr   error
 
 	draftMu     sync.RWMutex
 	draftNotify func(active bool, lines int, text string)
@@ -106,6 +108,7 @@ func (q *chatInputQueue) stdinPump() {
 
 	var batch strings.Builder
 	var batchHasBufferedInput bool
+	var terminalErr error
 	var timer *time.Timer
 	var timerC <-chan time.Time
 
@@ -167,9 +170,15 @@ func (q *chatInputQueue) stdinPump() {
 			if !ok {
 				stopTimer()
 				flushBatch()
+				if terminalErr != nil {
+					q.setTerminalError(terminalErr)
+				}
 				return
 			}
 			text := normalizeBatchText(ev.Text)
+			if ev.Err != nil && terminalErr == nil {
+				terminalErr = ev.Err
+			}
 			if strings.TrimSpace(text) == "" {
 				stopTimer()
 				if batch.Len() == 0 {
@@ -183,9 +192,6 @@ func (q *chatInputQueue) stdinPump() {
 					}
 					resetTimer()
 				}
-				if ev.Err != nil && !errors.Is(ev.Err, io.EOF) {
-					q.handlePumpError(ev.Err)
-				}
 				continue
 			}
 
@@ -194,9 +200,6 @@ func (q *chatInputQueue) stdinPump() {
 				batchHasBufferedInput = true
 			}
 			resetTimer()
-			if ev.Err != nil && !errors.Is(ev.Err, io.EOF) {
-				q.handlePumpError(ev.Err)
-			}
 		case <-timerC:
 			stopTimer()
 			flushBatch()
@@ -209,9 +212,7 @@ func (q *chatInputQueue) stdinReadLoop(events chan<- stdinLineEvent) {
 	for {
 		line, err := q.reader.ReadString('\n')
 		if line == "" && err != nil {
-			if !errors.Is(err, io.EOF) {
-				events <- stdinLineEvent{Err: err}
-			}
+			events <- stdinLineEvent{Err: err}
 			return
 		}
 		buffered := 0
@@ -429,14 +430,13 @@ func isSubmissionCommand(text string) bool {
 }
 
 func (q *chatInputQueue) handlePumpError(err error) {
-	if errors.Is(err, io.EOF) {
+	if q == nil || err == nil {
 		return
 	}
-	select {
-	case q.errs <- err:
-	default:
+	q.setTerminalError(err)
+	if !errors.Is(err, io.EOF) {
+		time.Sleep(50 * time.Millisecond)
 	}
-	time.Sleep(50 * time.Millisecond)
 }
 
 func (q *chatInputQueue) readLine(ctx context.Context) (string, error) {
@@ -452,6 +452,9 @@ func (q *chatInputQueue) readLine(ctx context.Context) (string, error) {
 		case item := <-q.lines:
 			return item.Text, nil
 		default:
+		}
+		if terminalErr := q.terminalError(); terminalErr != nil {
+			return "", terminalErr
 		}
 		select {
 		case item := <-q.lines:
@@ -486,6 +489,9 @@ func (q *chatInputQueue) readPriorityLine(ctx context.Context) (string, error) {
 		case item := <-q.priorityLines:
 			return item.Text, nil
 		default:
+		}
+		if terminalErr := q.terminalError(); terminalErr != nil {
+			return "", terminalErr
 		}
 		select {
 		case item := <-q.priorityLines:
@@ -551,15 +557,22 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 		}
 		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
 			session.Interrupt()
+			if session.Interaction != nil {
+				session.Interaction.ResetPromptState()
+			}
 			return "", io.EOF
 		}
-		if session.Interaction != nil && !errors.Is(err, io.EOF) {
+		if session.Interaction != nil && err != nil {
 			session.Interaction.ResetPromptState()
 		}
 		return line, err
 	}
 	if session != nil && session.InputQueue != nil {
-		return session.InputQueue.readLine(ctx)
+		line, err := session.InputQueue.readLine(ctx)
+		if session.Interaction != nil && err != nil {
+			session.Interaction.ResetPromptState()
+		}
+		return line, err
 	}
 	reader := chatSessionInputReader(session)
 	line, err := reader.ReadString('\n')
@@ -582,7 +595,11 @@ func chatInteractiveReadPriorityLine(session *ChatSession, ctx context.Context) 
 
 func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context) (string, error) {
 	if session != nil && session.InputQueue != nil {
-		return session.InputQueue.readPriorityLine(ctx)
+		line, err := session.InputQueue.readPriorityLine(ctx)
+		if session.Interaction != nil && err != nil {
+			session.Interaction.ResetPromptState()
+		}
+		return line, err
 	}
 	if session != nil && session.InputBox != nil {
 		line, err := session.InputBox.ReadTransientLine(nil)
@@ -595,9 +612,12 @@ func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context)
 		}
 		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
 			session.Interrupt()
+			if session.Interaction != nil {
+				session.Interaction.ResetPromptState()
+			}
 			return "", io.EOF
 		}
-		if session.Interaction != nil && !errors.Is(err, io.EOF) {
+		if session.Interaction != nil && err != nil {
 			session.Interaction.ResetPromptState()
 		}
 		return line, err
@@ -612,7 +632,11 @@ func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context)
 
 func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context.Context, prompt string) (string, error) {
 	if session != nil && session.InputQueue != nil {
-		return session.InputQueue.readPriorityLine(ctx)
+		line, err := session.InputQueue.readPriorityLine(ctx)
+		if session.Interaction != nil && err != nil {
+			session.Interaction.ResetPromptState()
+		}
+		return line, err
 	}
 	if session != nil && session.InputBox != nil {
 		trackPromptInput := session == nil || session.Surface == nil || !session.Surface.Enabled()
@@ -633,9 +657,12 @@ func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context
 		}
 		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
 			session.Interrupt()
+			if session.Interaction != nil {
+				session.Interaction.ResetPromptState()
+			}
 			return "", io.EOF
 		}
-		if session.Interaction != nil && !errors.Is(err, io.EOF) {
+		if session.Interaction != nil && err != nil {
 			session.Interaction.ResetPromptState()
 		}
 		return line, err
@@ -712,6 +739,38 @@ func (q *chatInputQueue) ensureChannels() {
 	if q.readySignal == nil {
 		q.readySignal = make(chan struct{}, 1)
 	}
+}
+
+func (q *chatInputQueue) signalReadError(err error) {
+	if q == nil || err == nil {
+		return
+	}
+	q.ensureChannels()
+	select {
+	case q.errs <- err:
+	default:
+	}
+}
+
+func (q *chatInputQueue) setTerminalError(err error) {
+	if q == nil || err == nil {
+		return
+	}
+	q.terminalMu.Lock()
+	if q.terminalErr == nil {
+		q.terminalErr = err
+	}
+	q.terminalMu.Unlock()
+	q.signalReadySubmission()
+}
+
+func (q *chatInputQueue) terminalError() error {
+	if q == nil {
+		return io.EOF
+	}
+	q.terminalMu.RLock()
+	defer q.terminalMu.RUnlock()
+	return q.terminalErr
 }
 
 func (q *chatInputQueue) setPriorityMode(active bool) {
