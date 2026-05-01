@@ -108,7 +108,7 @@
 
 当前代码已经在会话持久化和回放上做了不少铺垫：
 
-- runtime message metadata 中会保存 `aicli_raw_message_json`；
+- runtime message metadata 中已经保留结构化的 `reasoning_details`、`response_output_items` 等字段；
 - assistant reasoning metadata 中会保留 `response_output_items`；
 - 即便 `tool_calls` 没直接落到标准字段，也能从 Codex output items 中恢复；
 - 对图片生成结果，保存到磁盘后会把 replay metadata 里的大块 base64 去掉，避免历史膨胀；
