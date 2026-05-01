@@ -94,6 +94,7 @@ type ChatSession struct {
 	ChatExecutor               aicliChatExecutor                  // shared chatcore-backed chat executor
 	LocalRuntimeHost           *localChatRuntimeHost              // actor-first local runtime host
 	Interaction                *chatInteractionCoordinator        // unified interactive stdout/prompt coordinator
+	Surface                    *ui.FixedBottomSurface             // optional fixed-bottom terminal surface
 	runtimeHTTPCapture         *chatRuntimeHTTPCapture            // recent runtime HTTP response diagnostics
 	localShellArtifactMu       sync.Mutex
 	localShellArtifactCounter  int
@@ -226,6 +227,7 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 
 	presentChatSession(session)
 	if persistenceState.loadedRuntimeSession != nil && shouldPrintChatSessionPreamble(session) && hasVisibleChatHistory(session) {
+		beginDirectInteractiveOutput(session)
 		fmt.Println()
 		printVisibleChatHistory(session, "已加载历史会话")
 	}
@@ -752,6 +754,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 	for {
 		// 检查二次终止信号
 		if shouldExit.Load() {
+			beginDirectInteractiveOutput(session)
 			fmt.Println()
 			break
 		}
@@ -764,6 +767,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		}
 		session.cancelCtx, session.cancelFunc = context.WithCancel(context.Background())
 		if shouldExit.Load() {
+			beginDirectInteractiveOutput(session)
 			fmt.Println()
 			break
 		}
@@ -791,6 +795,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					continue
 				}
 				if shouldExit.Load() {
+					beginDirectInteractiveOutput(session)
 					fmt.Println()
 					break
 				}
@@ -802,6 +807,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					}
 				}
 				if shouldExit.Load() {
+					beginDirectInteractiveOutput(session)
 					fmt.Println()
 					break
 				}
@@ -813,6 +819,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					}
 				}
 				if shouldExit.Load() {
+					beginDirectInteractiveOutput(session)
 					fmt.Println()
 					break
 				}
@@ -821,6 +828,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			input, err = chatInteractiveReadLine(session, session.cancelCtx)
 			if err != nil {
 				if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
+					beginDirectInteractiveOutput(session)
 					fmt.Println("正在退出...")
 					break
 				}
@@ -837,6 +845,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				if session != nil && session.NoInteractive {
 					exitCommandError("chat", session.OutputFormat, fmt.Errorf("读取输入失败"), nil)
 				}
+				beginDirectInteractiveOutput(session)
 				fmt.Println("\n" + ui.FormatErrorMessage("读取输入失败"))
 				break
 			}
@@ -893,10 +902,10 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			// 实时保存会话日志
 			if session.Logger.logDir != "" {
 				if err := session.Logger.FlushSession(); err != nil {
-					fmt.Fprintf(os.Stderr, "[日志保存失败] %v", err)
+					writeChatLogSaveError(session, err)
 				}
 			} else {
-				fmt.Fprint(os.Stderr, "💾") // 小图标提示日志已记录在内存中
+				writeChatLogBufferedMarker(session)
 			}
 			continue
 		}
@@ -948,6 +957,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			renderChatResponse(session, response)
 		} else if session.Stream && !noInteractive && !handledByStreamFinalize {
 			// 流式模式下添加换行
+			beginDirectInteractiveOutput(session)
 			fmt.Println()
 		}
 
@@ -957,10 +967,10 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		// 实时保存会话日志
 		if session.Logger.logDir != "" {
 			if err := session.Logger.FlushSession(); err != nil {
-				fmt.Fprintf(os.Stderr, "[日志保存失败] %v", err)
+				writeChatLogSaveError(session, err)
 			}
 		} else {
-			fmt.Fprint(os.Stderr, "💾") // 小图标提示日志已记录在内存中
+			writeChatLogBufferedMarker(session)
 		}
 
 		// 非交互模式下，发送一条消息后退出

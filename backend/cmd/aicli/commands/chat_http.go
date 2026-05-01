@@ -29,6 +29,7 @@ type RetryConfig struct {
 	SlowRetryInterval time.Duration
 	DisableRetries    bool
 	Streaming         bool
+	RetryNotice       func(string)
 }
 
 type httpAttemptReport struct {
@@ -180,7 +181,7 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 			}
 
 			if isNetworkError(lastErr) {
-				fmt.Printf("\n[重试 %d] 网络连接失败，%s后重试... (已耗时 %.1fs) ", attempt, intervalDesc, elapsed.Seconds())
+				emitRetryNotice(retryCfg, fmt.Sprintf("[重试 %d] 网络连接失败，%s后重试... (已耗时 %.1fs)", attempt, intervalDesc, elapsed.Seconds()))
 			} else if lastResp != nil {
 				var errorType string
 				if lastResp.StatusCode >= 400 && lastResp.StatusCode < 500 {
@@ -190,7 +191,7 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 				} else {
 					errorType = fmt.Sprintf("HTTP %d", lastResp.StatusCode)
 				}
-				fmt.Printf("\n[重试 %d] %s (%d)，%s后重试... (已耗时 %.1fs) ", attempt, errorType, lastResp.StatusCode, intervalDesc, elapsed.Seconds())
+				emitRetryNotice(retryCfg, fmt.Sprintf("[重试 %d] %s (%d)，%s后重试... (已耗时 %.1fs)", attempt, errorType, lastResp.StatusCode, intervalDesc, elapsed.Seconds()))
 			}
 
 			time.Sleep(retryInterval)
@@ -289,6 +290,18 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 		report.LastResponsePreview = truncateUTF8Bytes(string(body), 2048)
 		return resp, body, report, nil
 	}
+}
+
+func emitRetryNotice(retryCfg RetryConfig, notice string) {
+	notice = strings.TrimSpace(notice)
+	if notice == "" {
+		return
+	}
+	if retryCfg.RetryNotice != nil {
+		retryCfg.RetryNotice(notice)
+		return
+	}
+	fmt.Printf("\n%s ", notice)
 }
 
 func buildRequestLogContent(baseURL string, requestBody map[string]interface{}, exposureReport *aicliFunctionExposureReport) map[string]interface{} {

@@ -53,6 +53,7 @@ func writeSessionDebugInfo(session *ChatSession, debugInfo string, printToConsol
 		}
 	}
 	if printToConsole && isSessionDebugEnabled(session) {
+		beginDirectInteractiveOutput(session)
 		fmt.Printf("\n%s\n", debugInfo)
 	}
 }

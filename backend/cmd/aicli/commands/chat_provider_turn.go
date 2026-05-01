@@ -88,6 +88,12 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	if req.Stream {
 		retryCfg.Streaming = true
 	}
+	if shouldRenderInteractiveOutput(session) && session.Interaction != nil {
+		retryCfg.RetryNotice = func(notice string) {
+			session.Interaction.RefreshStatus("Retrying")
+			session.Interaction.RenderAsyncLine(notice)
+		}
+	}
 
 	resp, responseBody, httpReport, err := sendHTTPRequest(session.HTTPClient, httpReq, retryCfg)
 	if err != nil {
@@ -278,9 +284,17 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		runtimeMessage.Metadata.Set(chatcoreReasoningMetadataKey, reasoning)
 	}
 
+	usage := tokenUsageFromResponseBody(responseBody)
+	if usage != nil && usage.TotalTokens > 0 {
+		session.TokenCount += usage.TotalTokens
+		if session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
+		}
+	}
+
 	return &runtimechatcore.ProviderTurnResponse{
 		Message: &runtimeMessage,
-		Usage:   tokenUsageFromResponseBody(responseBody),
+		Usage:   usage,
 	}, nil
 }
 

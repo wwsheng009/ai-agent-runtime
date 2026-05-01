@@ -15,6 +15,7 @@ import (
 type chatInteractionCoordinator struct {
 	session *ChatSession
 	writer  io.Writer
+	surface *ui.FixedBottomSurface
 
 	mu                 sync.Mutex
 	promptVisible      bool
@@ -57,6 +58,16 @@ func (c *chatInteractionCoordinator) SetWriter(writer io.Writer) {
 		return
 	}
 	c.writer = writer
+}
+
+func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.surface = surface
+	c.updateSurfaceStatusLocked("Ready")
 }
 
 func (c *chatInteractionCoordinator) SupportsLiveStream() bool {
@@ -122,6 +133,55 @@ func promptDisplayText(session *ChatSession) string {
 	return fmt.Sprintf("%s你> [📎%d] ", ui.GetTheme(ui.ThemeAuto).UserIcon, attachmentCount)
 }
 
+func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
+	if c == nil || c.surface == nil {
+		return
+	}
+	state = strings.TrimSpace(state)
+	if state == "" {
+		state = "Ready"
+	}
+	parts := []string{state}
+	if c.session != nil {
+		if model := strings.TrimSpace(c.session.Model); model != "" {
+			parts = append(parts, "model "+model)
+		}
+		if provider := strings.TrimSpace(c.session.ProviderName); provider != "" {
+			parts = append(parts, provider)
+		}
+		if c.session.MsgCount > 0 {
+			parts = append(parts, fmt.Sprintf("msgs %d", c.session.MsgCount))
+		}
+		if c.session.TokenCount > 0 {
+			parts = append(parts, fmt.Sprintf("tokens %d", c.session.TokenCount))
+		}
+	}
+	c.surface.SetStatusLine(strings.Join(parts, " | "))
+}
+
+func (c *chatInteractionCoordinator) RefreshStatus(state string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	state = strings.TrimSpace(state)
+	if state == "" {
+		state = c.currentSurfaceStateLocked()
+	}
+	c.updateSurfaceStatusLocked(state)
+}
+
+func (c *chatInteractionCoordinator) currentSurfaceStateLocked() string {
+	if c.streamingActive {
+		return "Streaming"
+	}
+	if c.thinkingActive || c.reasoningActive {
+		return "Thinking"
+	}
+	return "Ready"
+}
+
 func (c *chatInteractionCoordinator) StartThinking() {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
 		return
@@ -130,6 +190,7 @@ func (c *chatInteractionCoordinator) StartThinking() {
 	defer c.mu.Unlock()
 	c.beginMessageLocked()
 	c.thinkingActive = true
+	c.updateSurfaceStatusLocked("Thinking")
 }
 
 func (c *chatInteractionCoordinator) ClearThinking() {
@@ -143,6 +204,7 @@ func (c *chatInteractionCoordinator) ClearThinking() {
 	}
 	c.clearThinkingLocked()
 	c.thinkingActive = false
+	c.updateSurfaceStatusLocked("Ready")
 }
 
 func (c *chatInteractionCoordinator) RenderAssistant(response string) {
@@ -206,6 +268,7 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 			c.beginMessageLocked()
 		}
 		c.streamingActive = true
+		c.updateSurfaceStatusLocked("Streaming")
 		c.streamRendered = false
 		c.streamMode = assistantStreamModeUnknown
 		c.streamTrailingLF = false
@@ -471,6 +534,7 @@ func (c *chatInteractionCoordinator) ResetRunState() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.completeBlockOutput = false
+	c.updateSurfaceStatusLocked("Ready")
 }
 
 func (c *chatInteractionCoordinator) beginMessageLocked() {
@@ -490,6 +554,9 @@ func (c *chatInteractionCoordinator) beginMessageLocked() {
 	if c.promptVisible {
 		c.clearVisiblePromptLocked()
 		c.promptVisible = false
+	}
+	if c.surface != nil {
+		c.surface.BeginOutput()
 	}
 }
 
@@ -558,12 +625,31 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 		termWidth = 80
 	}
 	// 当 prompt+输入已经折行时，先把光标上移到输入起始行，
-	// 再从当前列回到行首并清掉后续屏幕，避免上一行残影。
+	// 再逐行清理 prompt/input 曾占用的区域，避免清掉固定底部状态栏。
 	if rows := interactivePromptDisplayRows(promptLine, termWidth); rows > 1 {
 		fmt.Fprintf(c.writer, "\x1b[%dA", rows-1)
 	}
-	fmt.Fprint(c.writer, "\r\x1b[0J")
+	clearPromptDisplayRows(c.writer, interactivePromptDisplayRows(promptLine, termWidth))
 	c.promptInput = ""
+}
+
+func clearPromptDisplayRows(writer io.Writer, rows int) {
+	if writer == nil {
+		return
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	fmt.Fprint(writer, "\r")
+	for i := 0; i < rows; i++ {
+		fmt.Fprint(writer, "\x1b[K")
+		if i < rows-1 {
+			fmt.Fprint(writer, "\x1b[1B\r")
+		}
+	}
+	if rows > 1 {
+		fmt.Fprintf(writer, "\x1b[%dA\r", rows-1)
+	}
 }
 
 func interactivePromptDisplayRows(text string, termWidth int) int {
@@ -624,6 +710,9 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.streamLines = 0
 	c.streamDisplayLines = 0
 	c.streamBuffer.Reset()
+	if !c.thinkingActive && !c.reasoningActive {
+		c.updateSurfaceStatusLocked("Ready")
+	}
 }
 
 func (c *chatInteractionCoordinator) resetReasoningLocked() {
@@ -632,6 +721,9 @@ func (c *chatInteractionCoordinator) resetReasoningLocked() {
 	c.reasoningTrailingLF = false
 	c.reasoningMeta = ""
 	c.reasoningBuffer.Reset()
+	if !c.thinkingActive && !c.streamingActive {
+		c.updateSurfaceStatusLocked("Ready")
+	}
 }
 
 func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, suppressSeparator bool) {

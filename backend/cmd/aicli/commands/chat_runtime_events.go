@@ -176,6 +176,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			fmt.Print(ui.FormatUserPromptWithAttachments(len(session.ImagePaths)))
 		},
 		askApproval: func(approval *runtimechat.ApprovalRequest) (bool, error) {
+			beginDirectInteractiveOutput(session)
 			if notice := discardPendingInteractiveInputForPriorityPrompt(session, "审批提示"); notice != "" {
 				fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine(notice))
 			}
@@ -201,6 +202,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			return text == "y" || text == "yes", nil
 		},
 		askQuestion: func(prompt string, suggestions []string, required bool) (string, error) {
+			beginDirectInteractiveOutput(session)
 			if notice := discardPendingInteractiveInputForPriorityPrompt(session, "问题提示"); notice != "" {
 				fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine(notice))
 			}

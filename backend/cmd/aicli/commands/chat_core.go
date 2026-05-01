@@ -98,6 +98,7 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 			selection, exposureDetails = catalog.SelectRequestFunctions(session, prompt)
 			exposureReport = buildFunctionExposureReport(catalog, prompt, selection, exposureDetails)
 			if session.SkillsDebug {
+				beginDirectInteractiveOutput(session)
 				fmt.Printf("\n%s\n", formatSkillExposureDebug(exposureReport))
 			}
 		}

@@ -401,12 +401,7 @@ func (q *chatInputQueue) shouldStageBufferedInput(text string, bufferedInput boo
 }
 
 func normalizeBatchText(text string) string {
-	if text == "" {
-		return ""
-	}
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	return text
+	return ui.NormalizePastedText(text)
 }
 
 func normalizeInputLines(text string) []string {

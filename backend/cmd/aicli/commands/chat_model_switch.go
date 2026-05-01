@@ -47,6 +47,7 @@ func printRuntimeModelState(session *ChatSession) {
 	if session == nil {
 		return
 	}
+	beginDirectInteractiveOutput(session)
 	model := effectiveRuntimeModel(session)
 	if model == "" {
 		model = "(无)"
@@ -78,6 +79,7 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 	}
 
 	if !strings.EqualFold(requestedModel, resolvedModel) {
+		beginDirectInteractiveOutput(session)
 		fmt.Printf("提示: 模型已映射 %s -> %s\n", requestedModel, resolvedModel)
 	}
 
@@ -106,6 +108,9 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 	session.BaseURL = buildProviderURL(session.Provider, apiPath, resolvedModel)
 	syncChatLoggerModelState(session)
 	warnIfChatSessionSyncFails(session, "toggle model", syncRuntimeSessionFromChat(session))
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
 	return nil
 }
 
@@ -120,6 +125,7 @@ func syncChatLoggerModelState(session *ChatSession) {
 }
 
 func promptRuntimeModelSelection(session *ChatSession) (string, error) {
+	beginDirectInteractiveOutput(session)
 	currentModel := effectiveRuntimeModel(session)
 	options := runtimeModelSelectionOptions(session)
 
@@ -182,6 +188,7 @@ func promptRuntimeModelSelection(session *ChatSession) (string, error) {
 }
 
 func selectRuntimeReasoningEffort(session *ChatSession, current string, options []string) (string, error) {
+	beginDirectInteractiveOutput(session)
 	normalizedOptions := normalizeReasoningEffortOptions(options)
 	currentEffort := runtimetypes.NormalizeReasoningEffort(current)
 	currentMatch, currentValid := reasoningEffortOptionMatch(currentEffort, normalizedOptions)

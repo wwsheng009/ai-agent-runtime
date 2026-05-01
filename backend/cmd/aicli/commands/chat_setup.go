@@ -39,23 +39,27 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		logger.SetInitialMessage(opts.Message)
 	}
 
-	if opts.NoInteractive {
-		mcpmanager.SetStatusOutput(io.Discard)
-	} else {
-		mcpmanager.SetStatusOutput(newChatSystemOutputWriter(os.Stdout))
-	}
-
 	var (
 		layout     *ui.Layout
 		inputBox   *ui.InputBox
 		keyHandler *ui.KeyHandler
+		surface    *ui.FixedBottomSurface
 	)
-	if !opts.NoInteractive {
+	if shouldInitializeChatInteractiveUI(opts) {
 		layout = ui.NewLayout(ui.LayoutAdvanced)
 		layout.Enable()
 		inputBox = ui.NewInputBox(layout)
 		keyHandler = ui.NewKeyHandler()
 		keyHandler.Start()
+		surface = ui.NewFixedBottomSurface(layout.Terminal())
+		if !surface.Enable() {
+			surface = nil
+		}
+	}
+	if opts.NoInteractive || opts.OutputFormat == "json" {
+		mcpmanager.SetStatusOutput(io.Discard)
+	} else {
+		mcpmanager.SetStatusOutput(newChatSystemOutputWriterWithSurface(os.Stdout, surface))
 	}
 
 	session := &ChatSession{
@@ -103,10 +107,12 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		PermissionMode:     opts.PermissionMode,
 		ApprovalReuseMode:  opts.ApprovalReuseMode,
 		ChatExecutor:       newAICLISharedChatExecutor(),
+		Surface:            surface,
 		runtimeHTTPCapture: &chatRuntimeHTTPCapture{},
 		ImagePaths:         opts.ImagePaths,
 	}
 	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction.SetSurface(surface)
 	if profileState != nil && profileState.Active() {
 		session.ProfileName = profileState.Resolved.ProfileName
 		session.ProfileAgent = profileState.Resolved.AgentID
@@ -127,9 +133,23 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		if keyHandler != nil {
 			keyHandler.Stop()
 		}
+		if surface != nil {
+			surface.Disable()
+		}
 	}
 
 	return session, cleanup, nil
+}
+
+func shouldInitializeChatInteractiveUI(opts *chatCommandOptions) bool {
+	if opts == nil || opts.NoInteractive || opts.OutputFormat == "json" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AICLI_TUI"))) {
+	case "0", "false", "off", "legacy", "plain":
+		return false
+	}
+	return ui.IsInteractiveTerminal()
 }
 
 func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPersistenceState, opts *chatCommandOptions) error {
@@ -302,6 +322,7 @@ func presentChatSession(session *ChatSession) {
 		return
 	}
 
+	beginDirectInteractiveOutput(session)
 	printSessionInfo(session)
 	printCurrentRuntimeSession(session)
 	if !session.DisableTools && session.SkillsBinding != nil && session.SkillsBinding.Count() > 0 {
@@ -322,6 +343,7 @@ func finalizeChatSession(session *ChatSession) {
 		if err := session.Logger.SaveSession(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to save chat logs: %v\n", err)
 		} else if shouldPrintChatSessionPreamble(session) {
+			beginDirectInteractiveOutput(session)
 			fmt.Printf("会话日志已保存到: %s\n", resolveAbsoluteChatPath(session.Logger.logDir))
 		}
 	}

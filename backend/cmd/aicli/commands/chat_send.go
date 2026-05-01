@@ -71,6 +71,9 @@ func nextLogScope(session *ChatSession, userMessage string) aicliLogScope {
 		turnIndex = 1
 	}
 	session.TurnRequestCount++
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
 
 	turnID := fmt.Sprintf("turn-%04d", turnIndex)
 	return aicliLogScope{

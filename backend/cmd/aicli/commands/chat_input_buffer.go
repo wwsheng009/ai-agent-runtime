@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -76,7 +77,15 @@ func discardPendingInteractiveInputForPriorityPrompt(session *ChatSession, promp
 // notifyChatInputDraftState 只保留状态钩子，不向终端输出任何提示。
 // 多行粘贴进入 draft 后，用户应保持在当前输入流程中，直到按 Enter 确认提交。
 func notifyChatInputDraftState(session *ChatSession, active bool, lines int) {
-	_ = session
-	_ = active
-	_ = lines
+	if session == nil || session.Interaction == nil {
+		return
+	}
+	if active {
+		if lines < 1 {
+			lines = 1
+		}
+		session.Interaction.RefreshStatus(fmt.Sprintf("Paste draft %d lines", lines))
+		return
+	}
+	session.Interaction.RefreshStatus("")
 }
