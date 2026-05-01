@@ -849,11 +849,13 @@ func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirec
 	}()
 
 	session := &ChatSession{
-		Model:           "gpt-5.4-code",
-		ReasoningEffort: "HIGH",
-		ProviderName:    "openai",
-		MsgCount:        17,
-		TokenCount:      123456,
+		Model:                 "gpt-5.4-code",
+		ReasoningEffort:       "HIGH",
+		ProviderName:          "openai",
+		MsgCount:              17,
+		TokenCount:            123456,
+		ContextTokenCount:     4096,
+		TurnContextTokenCount: 28640,
 		Provider: config.Provider{
 			ModelCapabilities: map[string]config.ModelCapabilitySpec{
 				"gpt-5.4-code": {
@@ -870,7 +872,7 @@ func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirec
 		"Thinking",
 		"model gpt-5.4-code",
 		"thinking_effort " + runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort),
-		"ctx 128000 used 123456 96%",
+		"ctx 128000 used 28640 22%",
 		"openai",
 		"msgs 17",
 	} {
@@ -880,6 +882,9 @@ func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirec
 	}
 	if strings.Contains(status, "tokens ") {
 		t.Fatalf("expected status line to omit duplicate tokens field, got %q", status)
+	}
+	if strings.Contains(status, "123456") || strings.Contains(status, "4096") {
+		t.Fatalf("expected ctx used to reflect turn aggregate tokens, not cumulative or last-request usage, got %q", status)
 	}
 	if !strings.Contains(status, "cwd ") || !strings.Contains(status, "...") {
 		t.Fatalf("expected cwd to be shortened in status line, got %q", status)

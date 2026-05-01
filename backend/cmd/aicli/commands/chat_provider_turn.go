@@ -45,6 +45,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	protocolMessages := runtimellm.RuntimeMessagesToProtocolMessages(req.Messages, session.Provider.GetProtocol(), session.ProviderName, session.Model)
 	config := adapterRequestConfig(session, protocolMessages, req)
 	requestBody := session.Adapter.BuildRequest(config)
+	requestContextTokens := countChatContextTokensForMessages(session, req.Messages)
 
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
@@ -95,7 +96,12 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		}
 	}
 
-	resp, responseBody, httpReport, err := sendHTTPRequest(session.HTTPClient, httpReq, retryCfg)
+	resp, responseBody, httpReport, err := sendHTTPRequest(session.HTTPClient, httpReq, retryCfg, func(_ int) {
+		if requestContextTokens <= 0 {
+			return
+		}
+		applyChatTurnContextTokens(session, requestContextTokens, 0, false)
+	})
 	if err != nil {
 		durationMs := time.Since(startTime).Milliseconds()
 		logpkg.Error("AICLI chat request failed",
@@ -329,13 +335,27 @@ func resolveMaxTokens(session *ChatSession) int {
 }
 
 func adapterRequestConfig(session *ChatSession, messages []map[string]interface{}, req runtimechatcore.ProviderTurnRequest) adapter.RequestConfig {
+	reasoningCapability, hasCapability := runtimellm.ResolveModelCapabilitySpec(session.Model, session.Provider.ModelCapabilities)
+	reasoningModel := reasoningCapability.ReasoningModel
+	if session.Adapter != nil {
+		reasoningModel = reasoningModel || session.Adapter.IsReasoningModel(session.Model)
+	}
+
 	config := adapter.RequestConfig{
-		Model:           session.Model,
-		Messages:        messages,
-		Stream:          req.Stream,
-		MaxTokens:       resolveMaxTokens(session),
-		ReasoningEffort: runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort),
-		Temperature:     0.7,
+		Model:                  session.Model,
+		Messages:               messages,
+		Stream:                 req.Stream,
+		MaxTokens:              resolveMaxTokens(session),
+		ReasoningEffort:        runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort),
+		ReasoningModel:         reasoningModel,
+		ReasoningEffortBudgets: nil,
+		Temperature:            0.7,
+	}
+	if hasCapability && len(reasoningCapability.ReasoningEffortBudgets) > 0 {
+		config.ReasoningEffortBudgets = make(map[string]int, len(reasoningCapability.ReasoningEffortBudgets))
+		for key, value := range reasoningCapability.ReasoningEffortBudgets {
+			config.ReasoningEffortBudgets[key] = value
+		}
 	}
 	config.Metadata = map[string]interface{}{}
 	for key, value := range req.Metadata {
