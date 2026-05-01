@@ -33,7 +33,7 @@ type chatInputQueue struct {
 	priorityMode  bool
 
 	draftMu     sync.RWMutex
-	draftNotify func(active bool, lines int)
+	draftNotify func(active bool, lines int, text string)
 	draftText   string
 	draftLines  int
 	draftActive bool
@@ -60,8 +60,8 @@ func ensureChatInputQueue(session *ChatSession) *chatInputQueue {
 	if session.InputQueue == nil {
 		session.InputQueue = newChatInputQueue(chatSessionInputReader(session))
 	}
-	session.InputQueue.setDraftNotifier(func(active bool, lines int) {
-		notifyChatInputDraftState(session, active, lines)
+	session.InputQueue.setDraftNotifier(func(active bool, lines int, text string) {
+		notifyChatInputDraftState(session, active, lines, text)
 	})
 	session.InputQueue.startPump()
 	return session.InputQueue
@@ -239,15 +239,14 @@ func (q *chatInputQueue) stageDraft(text string) {
 		return
 	}
 	q.draftMu.Lock()
-	notify := !q.draftActive
 	q.draftText = text
 	q.draftLines = countInputLines(text)
 	q.draftActive = true
 	lines := q.draftLines
 	fn := q.draftNotify
 	q.draftMu.Unlock()
-	if notify && fn != nil {
-		fn(true, lines)
+	if fn != nil {
+		fn(true, lines, text)
 	}
 }
 
@@ -257,7 +256,6 @@ func (q *chatInputQueue) appendDraft(text string) {
 		return
 	}
 	q.draftMu.Lock()
-	notify := !q.draftActive
 	if q.draftText == "" {
 		q.draftText = text
 	} else {
@@ -266,10 +264,11 @@ func (q *chatInputQueue) appendDraft(text string) {
 	q.draftLines = countInputLines(q.draftText)
 	q.draftActive = true
 	lines := q.draftLines
+	currentText := q.draftText
 	fn := q.draftNotify
 	q.draftMu.Unlock()
-	if notify && fn != nil {
-		fn(true, lines)
+	if fn != nil {
+		fn(true, lines, currentText)
 	}
 }
 
@@ -289,7 +288,7 @@ func (q *chatInputQueue) consumeDraft() (string, bool) {
 	fn := q.draftNotify
 	q.draftMu.Unlock()
 	if fn != nil {
-		fn(false, 0)
+		fn(false, 0, "")
 	}
 	return text, true
 }
@@ -327,7 +326,7 @@ func (q *chatInputQueue) discardDraft() int {
 	fn := q.draftNotify
 	q.draftMu.Unlock()
 	if fn != nil {
-		fn(false, 0)
+		fn(false, 0, "")
 	}
 	return count
 }
@@ -372,7 +371,7 @@ func (q *chatInputQueue) hasReadySubmission() bool {
 	return strings.TrimSpace(q.readyText) != ""
 }
 
-func (q *chatInputQueue) setDraftNotifier(fn func(active bool, lines int)) {
+func (q *chatInputQueue) setDraftNotifier(fn func(active bool, lines int, text string)) {
 	if q == nil {
 		return
 	}
@@ -405,17 +404,23 @@ func normalizeBatchText(text string) string {
 }
 
 func normalizeInputLines(text string) []string {
+	text = normalizeBatchText(text)
 	if text == "" {
 		return nil
 	}
-	return strings.Split(strings.TrimRight(text, "\r\n"), "\n")
+	text = strings.TrimSuffix(text, "\n")
+	if text == "" {
+		return []string{""}
+	}
+	return strings.Split(text, "\n")
 }
 
 func countInputLines(text string) int {
-	if text == "" {
+	lines := normalizeInputLines(text)
+	if len(lines) == 0 {
 		return 0
 	}
-	return strings.Count(text, "\n") + 1
+	return len(lines)
 }
 
 func isSubmissionCommand(text string) bool {
@@ -568,17 +573,74 @@ func shouldUseInteractiveLineEditor(session *ChatSession) bool {
 	if session == nil || session.InputBox == nil {
 		return false
 	}
-	if chatRuntimeGOOS == "windows" {
-		return false
-	}
 	return chatIsInteractiveTerminal()
 }
 
 func chatInteractiveReadPriorityLine(session *ChatSession, ctx context.Context) (string, error) {
+	return chatInteractiveReadTransientLine(session, ctx)
+}
+
+func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context) (string, error) {
 	if session != nil && session.InputQueue != nil {
 		return session.InputQueue.readPriorityLine(ctx)
 	}
-	return chatInteractiveReadLine(session, ctx)
+	if session != nil && session.InputBox != nil {
+		line, err := session.InputBox.ReadTransientLine(nil)
+		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
+			session.Interrupt()
+			if session.Interaction != nil {
+				session.Interaction.ResetPromptState()
+			}
+			return "", ui.ErrInteractiveInputExitRequested
+		}
+		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
+			session.Interrupt()
+			return "", io.EOF
+		}
+		if session.Interaction != nil && !errors.Is(err, io.EOF) {
+			session.Interaction.ResetPromptState()
+		}
+		return line, err
+	}
+	reader := chatSessionInputReader(session)
+	line, err := reader.ReadString('\n')
+	if line != "" {
+		return line, nil
+	}
+	return "", err
+}
+
+func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context.Context, prompt string) (string, error) {
+	if session != nil && session.InputQueue != nil {
+		return session.InputQueue.readPriorityLine(ctx)
+	}
+	if session != nil && session.InputBox != nil {
+		trackPromptInput := session == nil || session.Surface == nil || !session.Surface.Enabled()
+		if trackPromptInput && session.Interaction != nil {
+			session.Interaction.SetPromptInput("")
+		}
+		line, err := session.InputBox.ReadTransientPrompt(prompt, func(text string) {
+			if trackPromptInput && session.Interaction != nil {
+				session.Interaction.SetPromptInput(text)
+			}
+		})
+		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
+			session.Interrupt()
+			if session.Interaction != nil {
+				session.Interaction.ResetPromptState()
+			}
+			return "", ui.ErrInteractiveInputExitRequested
+		}
+		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
+			session.Interrupt()
+			return "", io.EOF
+		}
+		if session.Interaction != nil && !errors.Is(err, io.EOF) {
+			session.Interaction.ResetPromptState()
+		}
+		return line, err
+	}
+	return chatInteractiveReadTransientLine(session, ctx)
 }
 
 func chatInputQueueHasQueuedLines(session *ChatSession) bool {

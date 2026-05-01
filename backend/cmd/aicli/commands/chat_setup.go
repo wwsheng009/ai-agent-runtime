@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
@@ -130,6 +131,12 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 
 	cleanup := func() {
 		mcpmanager.SetStatusOutput(os.Stdout)
+		if session.Interaction != nil {
+			session.Interaction.Shutdown()
+		}
+		if layout != nil {
+			layout.Disable()
+		}
 		if keyHandler != nil {
 			keyHandler.Stop()
 		}
@@ -277,17 +284,13 @@ func bootstrapChatSession(cfg *config.Config, opts *chatCommandOptions, profileS
 	}
 
 	if err := restoreChatPersistenceState(session, persistenceState, opts); err != nil {
-		if cleanupSession != nil {
-			cleanupSession()
-		}
+		buildChatFinalCleanup(session, cleanupSession)()
 		return nil, nil, err
 	}
 
 	_, cleanupCapabilities, err := initializeChatCapabilities(cfg, opts, session)
 	if err != nil {
-		if cleanupSession != nil {
-			cleanupSession()
-		}
+		buildChatFinalCleanup(session, cleanupSession)()
 		return nil, nil, err
 	}
 
@@ -301,6 +304,26 @@ func bootstrapChatSession(cfg *config.Config, opts *chatCommandOptions, profileS
 	}
 
 	return session, cleanup, nil
+}
+
+func buildChatFinalCleanup(session *ChatSession, cleanupSession func()) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if session != nil && session.Interaction != nil {
+				session.Interaction.Shutdown()
+			}
+			if cleanupSession != nil {
+				cleanupSession()
+			}
+			if session == nil || session.NoInteractive || session.JSONOutput || session.Layout == nil {
+				return
+			}
+			if term := session.Layout.Terminal(); term != nil {
+				term.CleanupOnExit(true)
+			}
+		})
+	}
 }
 
 func restoreLocalRuntimeHostTeamState(session *ChatSession) {

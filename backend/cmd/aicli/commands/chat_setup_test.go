@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -89,6 +90,36 @@ func TestBuildChatSession_NoInteractive(t *testing.T) {
 	}
 }
 
+func TestBuildChatFinalCleanup_ClearsScreenAndStopsPromptRedraw(t *testing.T) {
+	cleanupCalls := 0
+
+	output := captureStdout(t, func() {
+		session := &ChatSession{}
+		session.Layout = ui.NewLayout(ui.LayoutSimple)
+		session.Interaction = newChatInteractionCoordinator(session)
+		session.Interaction.promptDelay = 10 * time.Millisecond
+		session.Interaction.SchedulePromptRedraw()
+
+		finalCleanup := buildChatFinalCleanup(session, func() {
+			cleanupCalls++
+		})
+
+		finalCleanup()
+		time.Sleep(40 * time.Millisecond)
+		finalCleanup()
+	})
+
+	if cleanupCalls != 1 {
+		t.Fatalf("expected cleanup session to run once, got %d", cleanupCalls)
+	}
+	if !strings.Contains(output, "\x1b[2J") {
+		t.Fatalf("expected final cleanup to clear the screen, got %q", output)
+	}
+	if strings.Contains(output, ui.UserPromptText(0)) {
+		t.Fatalf("expected prompt redraw to be suppressed after shutdown, got %q", output)
+	}
+}
+
 func TestShouldInitializeChatInteractiveUI_DisabledForJSONAndLegacyMode(t *testing.T) {
 	if shouldInitializeChatInteractiveUI(&chatCommandOptions{OutputFormat: "json"}) {
 		t.Fatal("expected JSON output to disable interactive UI")
@@ -103,6 +134,10 @@ func TestShouldInitializeChatInteractiveUI_DisabledForJSONAndLegacyMode(t *testi
 func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	runtimeSession.AddMessage(*runtimetypes.NewUserMessage("hello"))
+	if runtimeSession.Metadata.Context == nil {
+		runtimeSession.Metadata.Context = make(map[string]interface{})
+	}
+	runtimeSession.Metadata.Context[chatRuntimeContextTokenCount] = 987
 
 	session := &ChatSession{}
 	err := restoreChatPersistenceState(session, &chatPersistenceState{
@@ -127,6 +162,51 @@ func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 	}
 	if session.RuntimeSession.Metadata.Title != "restored title" {
 		t.Fatalf("expected updated session title, got %q", session.RuntimeSession.Metadata.Title)
+	}
+	if session.TokenCount != 987 {
+		t.Fatalf("expected restored token count 987, got %d", session.TokenCount)
+	}
+}
+
+func TestSyncAndRestoreChatTokenCountRoundTrip(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:   "codex_ee",
+		Provider:       config.Provider{Protocol: "codex"},
+		Model:          "gpt-5.2-code",
+		SessionManager: manager,
+		RuntimeSession: runtimeSession,
+		TokenCount:     1234,
+	}
+
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		t.Fatalf("syncRuntimeSessionFromChat: %v", err)
+	}
+
+	cloned, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if got, ok := runtimeSessionContextInt(cloned, chatRuntimeContextTokenCount); !ok || got != 1234 {
+		t.Fatalf("expected persisted token count 1234, got ok=%v value=%d", ok, got)
+	}
+
+	restored := &ChatSession{}
+	if err := restoreChatStateFromRuntimeSession(restored, cloned); err != nil {
+		t.Fatalf("restoreChatStateFromRuntimeSession: %v", err)
+	}
+	if restored.TokenCount != 1234 {
+		t.Fatalf("expected restored token count 1234, got %d", restored.TokenCount)
 	}
 }
 
