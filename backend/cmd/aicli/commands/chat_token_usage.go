@@ -21,6 +21,79 @@ func applyChatTokenUsage(session *ChatSession, usage *runtimetypes.TokenUsage) {
 	}
 }
 
+func resetChatTurnTokenUsage(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	session.ContextTokenCount = 0
+	session.ContextWindowTokenCount = 0
+	session.TurnContextTokenCount = 0
+}
+
+func resetChatConversationTokenUsage(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	resetChatTurnTokenUsage(session)
+	session.TokenCount = 0
+}
+
+func applyChatContextTokens(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool) {
+	if session == nil {
+		return
+	}
+	changed := false
+	if promptTokens > 0 && session.ContextTokenCount != promptTokens {
+		session.ContextTokenCount = promptTokens
+		changed = true
+	}
+	if windowTokens > 0 && session.ContextWindowTokenCount != windowTokens {
+		session.ContextWindowTokenCount = windowTokens
+		changed = true
+	}
+	if (changed || forceRefresh) && session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
+}
+
+func applyChatTurnContextTokens(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool) {
+	if session == nil {
+		return
+	}
+	changed := false
+	if promptTokens > 0 {
+		session.ContextTokenCount = promptTokens
+		session.TurnContextTokenCount += promptTokens
+		changed = true
+	}
+	if windowTokens > 0 && session.ContextWindowTokenCount != windowTokens {
+		session.ContextWindowTokenCount = windowTokens
+		changed = true
+	}
+	if (changed || forceRefresh) && session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
+}
+
+func applyChatTurnContextTokensFromMessages(session *ChatSession, messages []runtimetypes.Message, forceRefresh bool) int {
+	promptTokens := countChatContextTokensForMessages(session, messages)
+	applyChatTurnContextTokens(session, promptTokens, 0, forceRefresh)
+	return promptTokens
+}
+
+func countChatContextTokensForMessages(session *ChatSession, messages []runtimetypes.Message) int {
+	if len(messages) == 0 {
+		return 0
+	}
+	llmRuntime, err := buildSharedChatAutoCompactRuntime(session)
+	if err == nil && llmRuntime != nil {
+		if count := llmRuntime.CountMessagesTokens(messages); count > 0 {
+			return count
+		}
+	}
+	return countSharedChatMessagesTokens(messages)
+}
+
 func restoreChatTokenCount(session *ChatSession, runtimeSession *runtimechat.Session) {
 	if session == nil {
 		return

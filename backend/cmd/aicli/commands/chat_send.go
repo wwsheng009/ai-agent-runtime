@@ -16,6 +16,7 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	}
 	ensureChatSystemPromptMessage(session)
 	executor := ensureChatExecutor(session)
+	resetChatTurnTokenUsage(session)
 
 	if !session.NoInteractive && shouldShowInitialThinkingIndicator(session, executor) {
 		if session.Interaction != nil {
@@ -64,6 +65,7 @@ func nextLogScope(session *ChatSession, userMessage string) aicliLogScope {
 	if strings.TrimSpace(userMessage) != "" {
 		session.MsgCount++
 		session.TurnRequestCount = 0
+		resetChatTurnTokenUsage(session)
 	}
 
 	turnIndex := session.MsgCount
