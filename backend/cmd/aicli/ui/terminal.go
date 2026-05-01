@@ -8,6 +8,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // Terminal 终端控制组件
@@ -258,8 +260,14 @@ func RawMode() func() {
 		return func() {}
 	}
 
-	// 简化处理，实际应该使用 termios
-	return func() {}
+	fd := int(os.Stdin.Fd())
+	state, err := term.MakeRaw(fd)
+	if err != nil {
+		return func() {}
+	}
+	return func() {
+		_ = term.Restore(fd, state)
+	}
 }
 
 // DisableEcho 禁用回显（用于密码输入）
@@ -271,6 +279,12 @@ func DisableEcho() func() {
 
 	// Unix-like: 简化处理
 	return func() {}
+}
+
+// IsInteractiveTerminal 返回 stdin/stdout 是否都连接到交互式终端
+// 用于仅在 TTY 场景启用逐键 line editor。
+func IsInteractiveTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 // FlushOutput 刷新输出缓冲区

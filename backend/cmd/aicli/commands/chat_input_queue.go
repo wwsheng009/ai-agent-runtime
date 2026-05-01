@@ -5,10 +5,16 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
+
+var chatRuntimeGOOS = runtime.GOOS
+var chatIsInteractiveTerminal = ui.IsInteractiveTerminal
 
 type chatQueuedInput struct {
 	Text       string
@@ -75,8 +81,9 @@ func (q *chatInputQueue) startPump() {
 }
 
 type stdinLineEvent struct {
-	Text string
-	Err  error
+	Text     string
+	Err      error
+	Buffered int
 }
 
 // stdinPump 读取 stdin，把短时间内连续到达的行归并成一个 batch。
@@ -98,6 +105,7 @@ func (q *chatInputQueue) stdinPump() {
 	}
 
 	var batch strings.Builder
+	var batchHasBufferedInput bool
 	var timer *time.Timer
 	var timerC <-chan time.Time
 
@@ -122,10 +130,13 @@ func (q *chatInputQueue) stdinPump() {
 
 	flushBatch := func() {
 		if batch.Len() == 0 {
+			batchHasBufferedInput = false
 			return
 		}
 		text := normalizeBatchText(batch.String())
+		hasBufferedInput := batchHasBufferedInput
 		batch.Reset()
+		batchHasBufferedInput = false
 		if strings.TrimSpace(text) == "" {
 			if q.hasDraft() {
 				q.confirmDraft()
@@ -142,7 +153,7 @@ func (q *chatInputQueue) stdinPump() {
 			return
 		}
 
-		if q.shouldStageBufferedInput(text) {
+		if q.shouldStageBufferedInput(text, hasBufferedInput) {
 			q.stageDraft(text)
 			return
 		}
@@ -167,6 +178,9 @@ func (q *chatInputQueue) stdinPump() {
 					}
 				} else {
 					batch.WriteString(ev.Text)
+					if ev.Buffered > 0 {
+						batchHasBufferedInput = true
+					}
 					resetTimer()
 				}
 				if ev.Err != nil && !errors.Is(ev.Err, io.EOF) {
@@ -176,6 +190,9 @@ func (q *chatInputQueue) stdinPump() {
 			}
 
 			batch.WriteString(ev.Text)
+			if ev.Buffered > 0 {
+				batchHasBufferedInput = true
+			}
 			resetTimer()
 			if ev.Err != nil && !errors.Is(ev.Err, io.EOF) {
 				q.handlePumpError(ev.Err)
@@ -197,7 +214,11 @@ func (q *chatInputQueue) stdinReadLoop(events chan<- stdinLineEvent) {
 			}
 			return
 		}
-		events <- stdinLineEvent{Text: line, Err: err}
+		buffered := 0
+		if q.reader != nil {
+			buffered = q.reader.Buffered()
+		}
+		events <- stdinLineEvent{Text: line, Err: err, Buffered: buffered}
 		if err != nil {
 			return
 		}
@@ -360,11 +381,14 @@ func (q *chatInputQueue) setDraftNotifier(fn func(active bool, lines int)) {
 	q.draftMu.Unlock()
 }
 
-func (q *chatInputQueue) shouldStageBufferedInput(text string) bool {
+func (q *chatInputQueue) shouldStageBufferedInput(text string, bufferedInput bool) bool {
 	if q == nil {
 		return false
 	}
 	if len(normalizeInputLines(text)) > 1 {
+		return true
+	}
+	if bufferedInput && shouldDiscardPendingInput() {
 		return true
 	}
 	if pending, err := pendingConsoleLineInput(); err == nil && pending {
@@ -508,6 +532,32 @@ func (q *chatInputQueue) discardPending() int {
 }
 
 func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string, error) {
+	if shouldUseInteractiveLineEditor(session) {
+		prompt := formatSessionUserPrompt(session)
+		if session.Interaction != nil {
+			session.Interaction.SetPromptInput("")
+		}
+		line, err := session.InputBox.ReadWithHistoryPrompt(prompt, func(text string) {
+			if session.Interaction != nil {
+				session.Interaction.SetPromptInput(text)
+			}
+		})
+		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
+			session.Interrupt()
+			if session.Interaction != nil {
+				session.Interaction.ResetPromptState()
+			}
+			return "", ui.ErrInteractiveInputExitRequested
+		}
+		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
+			session.Interrupt()
+			return "", io.EOF
+		}
+		if session.Interaction != nil && !errors.Is(err, io.EOF) {
+			session.Interaction.ResetPromptState()
+		}
+		return line, err
+	}
 	if session != nil && session.InputQueue != nil {
 		return session.InputQueue.readLine(ctx)
 	}
@@ -517,6 +567,16 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 		return line, nil
 	}
 	return "", err
+}
+
+func shouldUseInteractiveLineEditor(session *ChatSession) bool {
+	if session == nil || session.InputBox == nil {
+		return false
+	}
+	if chatRuntimeGOOS == "windows" {
+		return false
+	}
+	return chatIsInteractiveTerminal()
 }
 
 func chatInteractiveReadPriorityLine(session *ChatSession, ctx context.Context) (string, error) {

@@ -150,9 +150,7 @@ func (ib *InputBox) ReadMultiLine() (string, error) {
 // ReadWithHistory 读取输入（支持历史记录导航）
 func (ib *InputBox) ReadWithHistory() (string, error) {
 	ib.Show()
-
-	// 简化版本，实际应该实现上下箭头键导航
-	return ib.Read()
+	return ib.ReadWithHistoryPrompt(ib.GetPrompt(), nil)
 }
 
 // AddToHistory 添加到历史记录
@@ -234,10 +232,10 @@ func (ib *InputBox) Validate(input string) bool {
 func (ib *InputBox) Sanitize(input string) string {
 	// 清理特殊字符
 	input = strings.TrimSpace(input)
-	
+
 	// 可以添加更多的清理逻辑
 	// 例如：移除控制字符、标准化换行符等
-	
+
 	return input
 }
 
@@ -265,7 +263,7 @@ func (ib *InputBox) Cursor(pos int) {
 		// 计算实际位置
 		promptLen := len(ib.GetPrompt())
 		actualPos := promptLen + pos + 1 // +1 因为列是 1-based
-		
+
 		ib.terminal.SaveCursor()
 		ib.terminal.MoveTo(ib.layout.InputArea().Row, actualPos)
 		ib.terminal.RestoreCursor()

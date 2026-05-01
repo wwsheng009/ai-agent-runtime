@@ -18,6 +18,7 @@ type chatInteractionCoordinator struct {
 
 	mu                 sync.Mutex
 	promptVisible      bool
+	promptInput        string
 	thinkingActive     bool
 	streamingActive    bool
 	streamRendered     bool
@@ -94,6 +95,7 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.promptSeq++
+	c.promptInput = ""
 	if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 		return
 	}
@@ -107,6 +109,17 @@ func formatSessionUserPrompt(session *ChatSession) string {
 		attachmentCount = len(session.ImagePaths)
 	}
 	return ui.FormatUserPromptWithAttachments(attachmentCount)
+}
+
+func promptDisplayText(session *ChatSession) string {
+	attachmentCount := 0
+	if session != nil {
+		attachmentCount = len(session.ImagePaths)
+	}
+	if attachmentCount <= 0 {
+		return ui.GetTheme(ui.ThemeAuto).UserIcon + "你> "
+	}
+	return fmt.Sprintf("%s你> [📎%d] ", ui.GetTheme(ui.ThemeAuto).UserIcon, attachmentCount)
 }
 
 func (c *chatInteractionCoordinator) StartThinking() {
@@ -421,11 +434,12 @@ func (c *chatInteractionCoordinator) ClearPrompt() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.promptVisible && c.shouldAdvanceAfterPromptLocked() {
-		fmt.Fprintln(c.writer)
+	if c.promptVisible {
+		c.clearVisiblePromptLocked()
 	}
 	c.promptSeq++
 	c.promptVisible = false
+	c.promptInput = ""
 }
 
 func (c *chatInteractionCoordinator) ResetPromptState() {
@@ -436,6 +450,18 @@ func (c *chatInteractionCoordinator) ResetPromptState() {
 	defer c.mu.Unlock()
 	c.promptSeq++
 	c.promptVisible = false
+	c.promptInput = ""
+}
+
+func (c *chatInteractionCoordinator) SetPromptInput(input string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	input = strings.ReplaceAll(input, "\r\n", "\n")
+	input = strings.ReplaceAll(input, "\r", "\n")
+	c.promptInput = input
 }
 
 func (c *chatInteractionCoordinator) ResetRunState() {
@@ -520,15 +546,49 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	if c == nil {
 		return
 	}
+	promptText := promptDisplayText(c.session)
+	promptLine := promptText + c.promptInput
 	if c.shouldAdvanceAfterPromptLocked() {
 		fmt.Fprint(c.writer, "\r\n")
+		c.promptInput = ""
 		return
 	}
-	clearWidth := ui.DisplayWidth(promptDisplayText())
-	if clearWidth <= 0 {
-		clearWidth = len([]rune(promptDisplayText()))
+	termWidth := ui.GetTerminalWidth()
+	if termWidth <= 0 {
+		termWidth = 80
 	}
-	fmt.Fprint(c.writer, "\r"+strings.Repeat(" ", clearWidth)+"\r")
+	// 当 prompt+输入已经折行时，先把光标上移到输入起始行，
+	// 再从当前列回到行首并清掉后续屏幕，避免上一行残影。
+	if rows := interactivePromptDisplayRows(promptLine, termWidth); rows > 1 {
+		fmt.Fprintf(c.writer, "\x1b[%dA", rows-1)
+	}
+	fmt.Fprint(c.writer, "\r\x1b[0J")
+	c.promptInput = ""
+}
+
+func interactivePromptDisplayRows(text string, termWidth int) int {
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+	row, col := 0, 0
+	for _, r := range text {
+		switch r {
+		case '\r', '\n':
+			row++
+			col = 0
+			continue
+		}
+		width := ui.DisplayWidth(string(r))
+		if width <= 0 {
+			continue
+		}
+		col += width
+		if col >= termWidth {
+			row += col / termWidth
+			col %= termWidth
+		}
+	}
+	return row + 1
 }
 
 func (c *chatInteractionCoordinator) finalizeReasoningLocked() {
@@ -604,11 +664,6 @@ func (c *chatInteractionCoordinator) shouldAdvanceAfterPromptLocked() bool {
 		return false
 	}
 	return stdoutInfo.Mode()&os.ModeCharDevice == 0
-}
-
-func promptDisplayText() string {
-	theme := ui.GetTheme(ui.ThemeAuto)
-	return theme.UserIcon + "你> "
 }
 
 func (c *chatInteractionCoordinator) writeIndentedStreamingDeltaLocked(delta, indent string, rendered *bool, trailingLF *bool) {

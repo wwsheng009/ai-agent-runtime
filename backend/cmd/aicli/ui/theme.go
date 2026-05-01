@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/fatih/color"
+	"golang.org/x/term"
 )
 
 // ThemeType 主题类型
@@ -311,11 +312,10 @@ func (t *Theme) Dimmed(text string) string {
 
 // GetTerminalWidth 获取终端宽度（用于自适应布局）
 func GetTerminalWidth() int {
-	// 默认宽度
 	defaultWidth := 80
-
-	// 尝试通过 os.Stdout 获取宽度（需要 syscall 支持，Windows 下可能不可用）
-	// 这里使用简单的方法，返回默认宽度
+	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
+		return width
+	}
 	return defaultWidth
 }
 

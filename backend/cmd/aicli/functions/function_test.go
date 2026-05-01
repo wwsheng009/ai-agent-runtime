@@ -3,6 +3,7 @@ package functions
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -263,9 +264,76 @@ func TestFriendlyHintForCommand_WindowsHeadPipeline(t *testing.T) {
 		`git diff -- internal/gateway/handlers/admin_config.go | head -200`,
 		`head : The term 'head' is not recognized as a name of a cmdlet`,
 		context.DeadlineExceeded,
+		"",
 	)
 	if !strings.Contains(hint, "Select-Object -First 200") {
 		t.Fatalf("expected head guidance, got %q", hint)
+	}
+}
+
+func TestFriendlyHintForCommand_FileMissingIncludesWorkdir(t *testing.T) {
+	hint := friendlyHintForCommand(
+		"cat missing.txt",
+		"cannot find the path",
+		os.ErrNotExist,
+		"E:/projects/ai/ai-agent-runtime/backend",
+	)
+	if !strings.Contains(hint, "workdir=E:/projects/ai/ai-agent-runtime/backend") {
+		t.Fatalf("expected workdir guidance, got %q", hint)
+	}
+}
+
+func TestFriendlyHintForCommand_FileMissingIncludesSuggestion(t *testing.T) {
+	root := t.TempDir()
+	workdir := filepath.Join(root, "backend")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+
+	suggested := filepath.Join(workdir, "frontend", "src", "pages", "settings", "runtime.yaml")
+	if err := os.MkdirAll(filepath.Dir(suggested), 0o755); err != nil {
+		t.Fatalf("mkdir suggested path: %v", err)
+	}
+	if err := os.WriteFile(suggested, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("write suggested file: %v", err)
+	}
+
+	hint := friendlyHintForCommand(
+		"cat frontend/src/pages/setting/runtime.yaml",
+		"cannot find the path",
+		os.ErrNotExist,
+		workdir,
+	)
+	normalized := strings.ReplaceAll(hint, `\`, `/`)
+	if !strings.Contains(normalized, "frontend/src/pages/settings/runtime.yaml") {
+		t.Fatalf("expected path suggestion, got %q", hint)
+	}
+}
+
+func TestFriendlyHintForCommand_FileMissingIncludesQuotedPathSuggestion(t *testing.T) {
+	root := t.TempDir()
+	workdir := filepath.Join(root, "backend")
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+
+	suggested := filepath.Join(workdir, "frontend", "src", "pages", "settings", "runtime file.yaml")
+	if err := os.MkdirAll(filepath.Dir(suggested), 0o755); err != nil {
+		t.Fatalf("mkdir suggested path: %v", err)
+	}
+	if err := os.WriteFile(suggested, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("write suggested file: %v", err)
+	}
+
+	hint := friendlyHintForCommand(
+		`cat "frontend/src/pages/setting/runtime file.yaml"`,
+		"cannot find the path",
+		os.ErrNotExist,
+		workdir,
+	)
+	normalized := strings.ReplaceAll(hint, `\`, `/`)
+	if !strings.Contains(normalized, "frontend/src/pages/settings/runtime file.yaml") {
+		t.Fatalf("expected quoted path suggestion, got %q", hint)
 	}
 }
 
@@ -292,6 +360,7 @@ func TestShellFunction_DescriptionAndParameters_MentionPowerShellHeadGuidance(t 
 }
 
 func TestBuildShellExecutionMetadata_RecordsSelectedShell(t *testing.T) {
+	workdir := "E:/projects/ai/ai-agent-runtime/backend"
 	metadata := buildShellExecutionMetadata(
 		"git status --short",
 		"ok",
@@ -306,6 +375,7 @@ func TestBuildShellExecutionMetadata_RecordsSelectedShell(t *testing.T) {
 			Type: runtimeexecutor.ShellTypePwsh,
 			Path: `C:\Program Files\PowerShell\7\pwsh.exe`,
 		},
+		workdir,
 	)
 
 	if got := metadata["shell_type"]; got != "pwsh" {
@@ -316,6 +386,12 @@ func TestBuildShellExecutionMetadata_RecordsSelectedShell(t *testing.T) {
 	}
 	if got := metadata["shell_display"]; got != `pwsh (C:\Program Files\PowerShell\7\pwsh.exe)` {
 		t.Fatalf("expected shell_display to be preserved, got %#v", got)
+	}
+	if got := metadata["workdir"]; got != workdir {
+		t.Fatalf("expected workdir to be preserved, got %#v", got)
+	}
+	if got := metadata["command_length_bytes"]; got != len("git status --short") {
+		t.Fatalf("expected command_length_bytes to be preserved, got %#v", got)
 	}
 }
 

@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/fatih/color"
 	"github.com/stretchr/testify/require"
@@ -78,6 +81,58 @@ func TestChatInteractionCoordinator_RenderAsyncLineClearsVisiblePromptInInteract
 	}
 	if !strings.Contains(rendered, strings.TrimRight(ui.FormatAssistantSupplementBlock("[tool] view"), " ")) {
 		t.Fatalf("expected async line in output, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_ClearPromptClearsWrappedInput(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.promptAdvanceFn = func() bool { return false }
+	output := &terminalCaptureWriter{}
+	coord.SetWriter(output)
+
+	longInput := strings.Repeat("x", ui.GetTerminalWidth()+12)
+	coord.PrintPrompt()
+	fmt.Fprint(output, longInput)
+	coord.SetPromptInput(longInput)
+	coord.ClearPrompt()
+
+	rendered := output.String()
+	if rendered != "" {
+		t.Fatalf("expected wrapped prompt to be fully cleared, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_ClearPromptClearsMultilineInput(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.promptAdvanceFn = func() bool { return false }
+	output := &terminalCaptureWriter{}
+	coord.SetWriter(output)
+
+	input := "Session File: /tmp/session.json\nSession Store: /tmp/sessions\nChat Log File: /tmp/chat.json"
+	coord.PrintPrompt()
+	fmt.Fprint(output, strings.ReplaceAll(input, "\n", "\r\n"))
+	coord.SetPromptInput(input)
+	coord.ClearPrompt()
+
+	rendered := output.String()
+	if rendered != "" {
+		t.Fatalf("expected multiline prompt to be fully cleared, got %q", rendered)
 	}
 }
 
@@ -767,7 +822,7 @@ func TestChatInteractionCoordinator_ClearPromptAdvancesLineForBufferedWriters(t 
 	coord.StartThinking()
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "你> \n") {
+	if !strings.Contains(rendered, ui.FormatUserPromptWithAttachments(0)+"\r\n") {
 		t.Fatalf("expected buffered prompt to advance to next line, got %q", rendered)
 	}
 	if strings.Contains(rendered, "助手正在思考...") {
@@ -1361,39 +1416,178 @@ func TestChatInteractionCoordinator_DoesNotRedrawPromptDuringStreaming(t *testin
 }
 
 type terminalCaptureWriter struct {
-	lines  []string
-	line   []rune
-	cursor int
+	rows     []string
+	row      int
+	col      int
+	savedRow int
+	savedCol int
+	hasSaved bool
 }
 
 func (w *terminalCaptureWriter) Write(p []byte) (int, error) {
-	for _, r := range string(p) {
+	for i := 0; i < len(p); {
+		if p[i] == '\x1b' {
+			if consumed := w.consumeEscape(p[i:]); consumed > 0 {
+				i += consumed
+				continue
+			}
+		}
+		r, size := utf8.DecodeRune(p[i:])
 		switch r {
 		case '\r':
-			w.cursor = 0
+			w.col = 0
 		case '\n':
-			w.lines = append(w.lines, strings.TrimRight(string(w.line), " "))
-			w.line = nil
-			w.cursor = 0
+			w.row++
+			w.col = 0
 		default:
-			for len(w.line) < w.cursor {
-				w.line = append(w.line, ' ')
-			}
-			if w.cursor < len(w.line) {
-				w.line[w.cursor] = r
-			} else {
-				w.line = append(w.line, r)
-			}
-			w.cursor++
+			w.writeRune(r)
 		}
+		i += size
 	}
 	return len(p), nil
 }
 
 func (w *terminalCaptureWriter) String() string {
-	lines := append([]string(nil), w.lines...)
-	if len(w.line) > 0 {
-		lines = append(lines, strings.TrimRight(string(w.line), " "))
+	rows := append([]string(nil), w.rows...)
+	for len(rows) > 0 && rows[len(rows)-1] == "" {
+		rows = rows[:len(rows)-1]
 	}
-	return strings.Join(lines, "\n")
+	for i, row := range rows {
+		rows[i] = strings.TrimRight(row, " ")
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (w *terminalCaptureWriter) consumeEscape(p []byte) int {
+	if len(p) < 2 {
+		return 0
+	}
+	if p[1] != '[' {
+		switch p[1] {
+		case '7':
+			w.savedRow = w.row
+			w.savedCol = w.col
+			w.hasSaved = true
+			return 2
+		case '8':
+			if w.hasSaved {
+				w.row = w.savedRow
+				w.col = w.savedCol
+			}
+			return 2
+		default:
+			return 1
+		}
+	}
+
+	j := 2
+	for j < len(p) {
+		b := p[j]
+		if (b >= '0' && b <= '9') || b == ';' || b == '?' {
+			j++
+			continue
+		}
+		break
+	}
+	if j >= len(p) {
+		return 0
+	}
+
+	final := p[j]
+	param := 0
+	if j > 2 {
+		if parsed, err := strconv.Atoi(strings.TrimLeft(strings.TrimRight(string(p[2:j]), ";?"), "?")); err == nil {
+			param = parsed
+		}
+	}
+	if param <= 0 {
+		param = 1
+	}
+
+	switch final {
+	case 'A':
+		w.row -= param
+		if w.row < 0 {
+			w.row = 0
+		}
+	case 'B':
+		w.row += param
+	case 'C':
+		w.col += param
+	case 'D':
+		w.col -= param
+		if w.col < 0 {
+			w.col = 0
+		}
+	case 'K':
+		w.clearLineFromCursor()
+	case 'J':
+		w.clearScreenFromCursor()
+	case 's':
+		w.savedRow = w.row
+		w.savedCol = w.col
+		w.hasSaved = true
+	case 'u':
+		if w.hasSaved {
+			w.row = w.savedRow
+			w.col = w.savedCol
+		}
+	}
+
+	return j + 1
+}
+
+func (w *terminalCaptureWriter) ensureRow(row int) {
+	for len(w.rows) <= row {
+		w.rows = append(w.rows, "")
+	}
+}
+
+func (w *terminalCaptureWriter) writeRune(r rune) {
+	if w.row < 0 {
+		w.row = 0
+	}
+	if w.col < 0 {
+		w.col = 0
+	}
+	w.ensureRow(w.row)
+	current := []rune(w.rows[w.row])
+	for len(current) < w.col {
+		current = append(current, ' ')
+	}
+	if w.col < len(current) {
+		current[w.col] = r
+	} else {
+		current = append(current, r)
+	}
+	w.rows[w.row] = string(current)
+	width := ui.DisplayWidth(string(r))
+	if width <= 0 {
+		width = 1
+	}
+	w.col += width
+	termWidth := ui.GetTerminalWidth()
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+	if w.col >= termWidth {
+		w.row++
+		w.col = 0
+	}
+}
+
+func (w *terminalCaptureWriter) clearLineFromCursor() {
+	w.ensureRow(w.row)
+	current := []rune(w.rows[w.row])
+	if w.col < len(current) {
+		current = current[:w.col]
+	}
+	w.rows[w.row] = string(current)
+}
+
+func (w *terminalCaptureWriter) clearScreenFromCursor() {
+	w.clearLineFromCursor()
+	if w.row+1 < len(w.rows) {
+		w.rows = w.rows[:w.row+1]
+	}
 }

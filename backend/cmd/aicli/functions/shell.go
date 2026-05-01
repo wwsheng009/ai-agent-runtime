@@ -110,7 +110,7 @@ func (e *DefaultCommandExecuter) ExecuteDetailed(ctx context.Context, command st
 	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifact(cmd, captureLimitBytesFromExecConfig(cfg), "function", command, "")
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "function", command)
 	outputStr := capture.Output
-	metadata := buildShellExecutionMetadata(command, outputStr, capture, artifactPath, artifactErr, shell)
+	metadata := buildShellExecutionMetadata(command, outputStr, capture, artifactPath, artifactErr, shell, cfg.workdir)
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -118,7 +118,7 @@ func (e *DefaultCommandExecuter) ExecuteDetailed(ctx context.Context, command st
 		}
 
 		// 针对常见错误给出友好提示
-		friendlyHint := friendlyHintForCommand(command, outputStr, err)
+		friendlyHint := friendlyHintForCommand(command, outputStr, err, cfg.workdir)
 		if friendlyHint != "" {
 			return ShellExecutionResult{Output: outputStr, Metadata: metadata}, fmt.Errorf("命令执行失败: %w\n%s\n\n当前环境信息:\n%s", err, friendlyHint, getShellEnvironmentInfo())
 		}
@@ -138,9 +138,10 @@ func prefixPowershellUTF8ForCmd(cmd *exec.Cmd) {
 }
 
 // friendlyHintForCommand returns a user-friendly hint when a command fails.
-func friendlyHintForCommand(command string, output string, err error) string {
+func friendlyHintForCommand(command string, output string, err error, workdir string) string {
 	cmdLower := strings.ToLower(command)
-	cmdParts := strings.Fields(command)
+	outputLower := strings.ToLower(output)
+	cmdParts := runtimeexecutor.SplitCommandTokens(command)
 
 	mainCmd := ""
 	if len(cmdParts) > 0 {
@@ -153,13 +154,13 @@ func friendlyHintForCommand(command string, output string, err error) string {
 	}
 
 	switch {
-	case cmdLower == "pwd" && runtimeexecutor.IsWindows():
+	case mainCmd == "pwd" && runtimeexecutor.IsWindows():
 		if runtimeexecutor.DefaultUserShell().Type == runtimeexecutor.ShellTypeCmd {
 			return "提示: cmd.exe 下请使用 `cd` 或 `echo %cd%` 查看当前目录；PowerShell/pwsh 下请使用 `pwd` 或 `Get-Location`。"
 		}
 		return ""
 	case runtimeexecutor.IsWindows() &&
-		(strings.Contains(cmdLower, "| head") ||
+		(runtimeexecutor.HasPipedHeadToken(cmdParts) ||
 			mainCmd == "head" ||
 			strings.Contains(strings.ToLower(output), "the term 'head' is not recognized")):
 		return "提示: Windows PowerShell/pwsh 默认没有 `head`；请改用 `Select-Object -First 200`，例如 `git diff ... | Select-Object -First 200`。"
@@ -171,11 +172,19 @@ func friendlyHintForCommand(command string, output string, err error) string {
 		return "提示: Windows 下请使用 `type` 查看文件内容"
 	case exitCode == 127:
 		return "提示: 命令未找到，请检查命令拼写或确认命令是否已安装"
-	case strings.Contains(strings.ToLower(output), "permission") ||
-		strings.Contains(strings.ToLower(output), "access") && strings.Contains(strings.ToLower(output), "denied"):
+	case strings.Contains(outputLower, "permission") ||
+		strings.Contains(outputLower, "access") && strings.Contains(outputLower, "denied"):
 		return "提示: 权限不足，请检查是否有执行该命令的权限"
-	case strings.Contains(output, "no such file or directory") ||
-		strings.Contains(output, "cannot find the path"):
+	case strings.Contains(outputLower, "no such file or directory") ||
+		strings.Contains(outputLower, "cannot find the path") ||
+		strings.Contains(outputLower, "cannot find the file specified") ||
+		strings.Contains(outputLower, "path not found"):
+		if hint := runtimeexecutor.BuildPathNotFoundHintFromTokens(cmdParts, workdir); hint != "" {
+			return hint
+		}
+		if trimmed := strings.TrimSpace(workdir); trimmed != "" {
+			return fmt.Sprintf("提示: 文件或目录不存在，请先确认当前 workdir=%s 以及相对路径是否正确", trimmed)
+		}
 		return "提示: 文件或目录不存在"
 	}
 	return ""
@@ -193,7 +202,7 @@ func GetEnvironmentInfo() string {
 	return getShellEnvironmentInfo()
 }
 
-func buildShellExecutionMetadata(command string, output string, capture runtimeexecutor.CombinedOutputCapture, artifactPath string, artifactErr error, shell runtimeexecutor.Shell) map[string]interface{} {
+func buildShellExecutionMetadata(command string, output string, capture runtimeexecutor.CombinedOutputCapture, artifactPath string, artifactErr error, shell runtimeexecutor.Shell, workdir string) map[string]interface{} {
 	retainedBytes := capture.RetainedBytes
 	if retainedBytes == 0 && output != "" {
 		retainedBytes = len(output)
@@ -208,6 +217,7 @@ func buildShellExecutionMetadata(command string, output string, capture runtimee
 	}
 	metadata := map[string]interface{}{
 		"command":                       command,
+		"command_length_bytes":          len(command),
 		"output_size":                   len(output),
 		"captured_output_bytes":         retainedBytes,
 		"retained_output_bytes":         retainedBytes,
@@ -218,6 +228,9 @@ func buildShellExecutionMetadata(command string, output string, capture runtimee
 		"capture_limit_reached":         capture.Truncated,
 		"output_capture_limit_disabled": capture.CaptureLimitDisabled,
 		"executed_at":                   time.Now().Unix(),
+	}
+	if trimmed := strings.TrimSpace(workdir); trimmed != "" {
+		metadata["workdir"] = trimmed
 	}
 	if !capture.CaptureLimitDisabled && capture.CaptureLimitBytes > 0 {
 		metadata["output_capture_limit_bytes"] = capture.CaptureLimitBytes
@@ -353,7 +366,7 @@ func (f *ShellFunction) Name() string {
 
 // Description 返回 Function 描述
 func (f *ShellFunction) Description() string {
-	return "在指定工作目录执行 shell 命令并返回输出结果。系统会自动检测最优 shell（Windows: PowerShell Core > PowerShell > cmd；Unix: $SHELL > zsh > bash > sh）。切换目录优先使用 workdir 参数；不要用裸 cd 验证当前目录。Windows PowerShell/pwsh 默认没有 `head`，需要截断输出时请改用 `Select-Object -First N`。路径建议使用正斜杠格式（如 E:/projects/foo）以确保跨平台兼容。"
+	return "在指定工作目录执行 shell 命令并返回输出结果。系统会自动检测最优 shell（Windows: PowerShell Core > PowerShell > cmd；Unix: $SHELL > zsh > bash > sh）。切换目录优先使用 workdir 参数；不要用裸 cd 验证当前目录。Windows PowerShell/pwsh 默认没有 `head`，需要截断输出时请改用 `Select-Object -First N`。路径建议使用正斜杠格式（如 E:/projects/foo）以确保跨平台兼容；路径不存在时会尽量给出候选路径建议。"
 }
 
 // Parameters 返回 Function 参数的 JSON Schema 描述
@@ -363,7 +376,7 @@ func (f *ShellFunction) Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "要执行的 shell 命令。系统会自动检测可用 shell（Windows 通常是 PowerShell/pwsh，回退到 cmd）。切换目录优先使用 workdir 参数；查看当前目录用 pwd/Get-Location（PowerShell/pwsh）或 cd/echo %cd%（cmd），不要用裸 cd 来验证目录。Windows PowerShell/pwsh 默认没有 `head`，需要截断输出时请改用 `Select-Object -First N`。路径请使用正斜杠（如 E:/projects/foo）。",
+				"description": "要执行的 shell 命令。系统会自动检测可用 shell（Windows 通常是 PowerShell/pwsh，回退到 cmd）。切换目录优先使用 workdir 参数；查看当前目录用 pwd/Get-Location（PowerShell/pwsh）或 cd/echo %cd%（cmd），不要用裸 cd 来验证目录。Windows PowerShell/pwsh 默认没有 `head`，需要截断输出时请改用 `Select-Object -First N`。路径请使用正斜杠（如 E:/projects/foo）；路径不存在时会尽量给出候选路径建议。",
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",

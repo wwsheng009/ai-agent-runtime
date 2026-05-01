@@ -178,6 +178,10 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 		exitCommandError("chat", "json", err, nil)
 	}
 
+	if restoreLogger := suppressChatConsoleLogger(cfg); restoreLogger != nil {
+		defer restoreLogger()
+	}
+
 	profileState, err := resolveChatProfileState(cfg, opts)
 	if err != nil {
 		exitCommandError("chat", opts.OutputFormat, err, nil)
@@ -723,7 +727,12 @@ func renderChatResponse(session *ChatSession, response string) {
 // runChatLoop 运行聊天循环
 func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string) {
 	if !noInteractive {
-		ensureChatInputQueue(session)
+		if shouldUseInteractiveLineEditor(session) {
+			// Unix TTY 场景使用逐键 line editor，不再走按行队列。
+			session.InputQueue = nil
+		} else {
+			ensureChatInputQueue(session)
+		}
 	}
 
 	// 设置信号处理（平台特定：Unix 支持 Ctrl+C Ctrl+Break ESC; Windows 仅 Ctrl+C）
@@ -811,6 +820,10 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 
 			input, err = chatInteractiveReadLine(session, session.cancelCtx)
 			if err != nil {
+				if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
+					fmt.Println("正在退出...")
+					break
+				}
 				// Ctrl+D (EOF)：静默忽略，不中断也不退出
 				if errors.Is(err, io.EOF) {
 					continue

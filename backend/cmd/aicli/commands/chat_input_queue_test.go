@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
 type scriptedLineReader struct {
@@ -102,6 +104,71 @@ func TestChatInputQueue_MultilinePasteStaysDraftUntilEnter(t *testing.T) {
 	reader.Close()
 }
 
+func TestChatInputQueue_BufferedReadAheadStaysDraftUntilEnter(t *testing.T) {
+	oldDelay := inputPasteSettleDelay
+	oldShouldDiscard := shouldDiscardPendingInput
+	oldPendingLineInput := pendingConsoleLineInput
+	oldPendingTextInput := pendingConsoleTextInput
+	inputPasteSettleDelay = func() time.Duration {
+		return 5 * time.Millisecond
+	}
+	shouldDiscardPendingInput = func() bool {
+		return true
+	}
+	pendingConsoleLineInput = func() (bool, error) {
+		return false, nil
+	}
+	pendingConsoleTextInput = func() (bool, error) {
+		return false, nil
+	}
+	defer func() {
+		inputPasteSettleDelay = oldDelay
+		shouldDiscardPendingInput = oldShouldDiscard
+		pendingConsoleLineInput = oldPendingLineInput
+		pendingConsoleTextInput = oldPendingTextInput
+	}()
+
+	reader := newScriptedLineReader()
+	queue := newChatInputQueue(bufio.NewReader(reader))
+	events := make(chan struct{}, 1)
+	queue.setDraftNotifier(func(active bool, lines int) {
+		if active && lines >= 1 {
+			events <- struct{}{}
+		}
+	})
+	queue.startPump()
+
+	reader.Push("first\nsecond\n")
+
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for buffered draft state")
+	}
+
+	select {
+	case item := <-queue.lines:
+		t.Fatalf("unexpected auto submission before explicit enter: %q", item.Text)
+	default:
+	}
+
+	if !queue.hasDraft() {
+		t.Fatal("expected buffered read-ahead line to remain staged before explicit enter")
+	}
+
+	reader.Push("\n")
+
+	line, err := queue.readLine(context.Background())
+	if err != nil {
+		t.Fatalf("readLine after confirm: %v", err)
+	}
+	if strings.TrimSpace(line) != "first\nsecond" {
+		t.Fatalf("unexpected confirmed paste: %q", line)
+	}
+
+	reader.Close()
+}
+
 func TestChatInputQueue_StagesBufferedSingleLineWhenConsoleStillHasLineInput(t *testing.T) {
 	oldPendingLineInput := pendingConsoleLineInput
 	oldPendingTextInput := pendingConsoleTextInput
@@ -171,5 +238,39 @@ func TestChatInputQueue_PendingCountIgnoresDraft(t *testing.T) {
 	}
 	if !queue.hasDraft() {
 		t.Fatal("expected draft to remain staged")
+	}
+}
+
+func TestShouldUseInteractiveLineEditor_DisabledOnWindowsTTY(t *testing.T) {
+	oldGOOS := chatRuntimeGOOS
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatRuntimeGOOS = oldGOOS
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	chatRuntimeGOOS = "windows"
+	chatIsInteractiveTerminal = func() bool { return true }
+	session := &ChatSession{InputBox: ui.NewInputBox(nil)}
+
+	if shouldUseInteractiveLineEditor(session) {
+		t.Fatal("expected Windows TTY to use the input queue instead of the line editor")
+	}
+}
+
+func TestShouldUseInteractiveLineEditor_EnabledOnUnixTTY(t *testing.T) {
+	oldGOOS := chatRuntimeGOOS
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatRuntimeGOOS = oldGOOS
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	chatRuntimeGOOS = "linux"
+	chatIsInteractiveTerminal = func() bool { return true }
+	session := &ChatSession{InputBox: ui.NewInputBox(nil)}
+
+	if !shouldUseInteractiveLineEditor(session) {
+		t.Fatal("expected Unix TTY to use the line editor")
 	}
 }
