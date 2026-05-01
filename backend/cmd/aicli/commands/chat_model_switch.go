@@ -20,26 +20,32 @@ func handleModelCommand(session *ChatSession, command string, noInteractive bool
 	}
 
 	requestedModel := strings.TrimSpace(extractCommandArgument(command))
+	popupUsed := false
 	if requestedModel == "" {
 		if noInteractive {
 			printRuntimeModelState(session)
 			return false
 		}
 
-		selectedModel, err := promptRuntimeModelSelection(session)
+		selectedModel, usedPopup, err := promptRuntimeModelSelection(session)
 		if err != nil {
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
+		popupUsed = popupUsed || usedPopup
 		requestedModel = selectedModel
 	}
 
-	if err := applyRuntimeModelSwitch(session, requestedModel, !noInteractive); err != nil {
+	usedPopup, err := applyRuntimeModelSwitch(session, requestedModel, !noInteractive)
+	popupUsed = popupUsed || usedPopup
+	if err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
 
-	printRuntimeModelState(session)
+	if !popupUsed {
+		printRuntimeModelState(session)
+	}
 	return false
 }
 
@@ -60,9 +66,9 @@ func printRuntimeModelState(session *ChatSession) {
 	fmt.Printf("当前 reasoning_effort: %s\n", reasoning)
 }
 
-func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, interactive bool) error {
+func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, interactive bool) (bool, error) {
 	if session == nil {
-		return fmt.Errorf("当前没有活动会话")
+		return false, fmt.Errorf("当前没有活动会话")
 	}
 
 	requestedModel = strings.TrimSpace(requestedModel)
@@ -70,12 +76,12 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 		requestedModel = effectiveRuntimeModel(session)
 	}
 	if requestedModel == "" {
-		return fmt.Errorf("未指定可切换的模型")
+		return false, fmt.Errorf("未指定可切换的模型")
 	}
 
 	resolvedModel := strings.TrimSpace(config.ApplyModelMapping(&session.Provider, requestedModel))
 	if resolvedModel == "" {
-		return fmt.Errorf("未指定可切换的模型")
+		return false, fmt.Errorf("未指定可切换的模型")
 	}
 
 	if !strings.EqualFold(requestedModel, resolvedModel) {
@@ -85,12 +91,14 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 
 	reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
 	catalog := reasoningEffortCatalogForModel(session.Provider, resolvedModel)
+	popupUsed := false
 	if catalog.supported {
 		if interactive {
-			selectedReasoning, err := selectRuntimeReasoningEffort(session, reasoningEffort, catalog.options)
+			selectedReasoning, usedPopup, err := selectRuntimeReasoningEffort(session, reasoningEffort, catalog.options)
 			if err != nil {
-				return err
+				return usedPopup, err
 			}
+			popupUsed = popupUsed || usedPopup
 			reasoningEffort = selectedReasoning
 		} else if reasoningEffort != "" && !reasoningEffortAllowed(reasoningEffort, catalog.options) {
 			fmt.Fprintf(os.Stderr, "Warning: reasoning_effort %q 不被模型 %s 支持，已清空\n", reasoningEffort, resolvedModel)
@@ -111,7 +119,7 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
-	return nil
+	return popupUsed, nil
 }
 
 func syncChatLoggerModelState(session *ChatSession) {
@@ -124,7 +132,44 @@ func syncChatLoggerModelState(session *ChatSession) {
 	session.Logger.sessionLog.BaseURL = strings.TrimSpace(session.BaseURL)
 }
 
-func promptRuntimeModelSelection(session *ChatSession) (string, error) {
+func promptRuntimeModelSelection(session *ChatSession) (string, bool, error) {
+	if useRuntimeSelectionPopup(session) {
+		return promptRuntimeModelSelectionPopup(session)
+	}
+	return promptRuntimeModelSelectionLegacy(session)
+}
+
+func promptRuntimeModelSelectionPopup(session *ChatSession) (string, bool, error) {
+	if session == nil {
+		return "", false, fmt.Errorf("当前没有活动会话")
+	}
+
+	currentModel := effectiveRuntimeModel(session)
+	options := runtimeModelSelectionOptions(session)
+	currentMatch, _ := matchCaseInsensitive(options, currentModel)
+	notice := discardPendingInteractiveInputForPriorityPrompt(session, "模型选择")
+	hint := "  提示: 输入编号、模型名，回车保持当前"
+	popupLines := renderSelectionPopupLines("选择模型", "模型", currentModel, options, currentMatch, "", hint, notice, "")
+	prompt := "请输入选项 (回车保持当前): "
+	showRuntimeSelectionPopup(session, popupLines, prompt)
+	defer clearRuntimeSelectionPopup(session)
+
+	for {
+		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
+		if err != nil {
+			return "", true, err
+		}
+		text = strings.TrimSpace(normalizeQueuedInputLine(text))
+		selected, ok := resolveRuntimeSelectionInput(text, currentModel, "", options, true, false)
+		if ok {
+			return selected, true, nil
+		}
+		popupLines = renderSelectionPopupLines("选择模型", "模型", currentModel, options, currentMatch, "", hint, notice, "  无效的选择，请重新输入")
+		showRuntimeSelectionPopup(session, popupLines, prompt)
+	}
+}
+
+func promptRuntimeModelSelectionLegacy(session *ChatSession) (string, bool, error) {
 	beginDirectInteractiveOutput(session)
 	currentModel := effectiveRuntimeModel(session)
 	options := runtimeModelSelectionOptions(session)
@@ -159,35 +204,79 @@ func promptRuntimeModelSelection(session *ChatSession) (string, error) {
 		fmt.Println("  提示: 也可以直接输入自定义模型名")
 	}
 
+	prompt := "请输入选项 (回车保持当前): "
 	ui.PrintEmptyLine()
 	for {
-		fmt.Print("请输入选项 (回车保持当前): ")
-		text, err := chatInteractiveReadPriorityLine(session, context.Background())
+		fmt.Print(prompt)
+		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		text = strings.TrimSpace(normalizeQueuedInputLine(text))
 		if text == "" {
-			return currentModel, nil
+			return currentModel, false, nil
 		}
 
 		if num, err := strconv.Atoi(text); err == nil {
 			if num >= 1 && num <= len(options) {
-				return options[num-1], nil
+				return options[num-1], false, nil
 			}
 			ui.PrintWarning("无效的选择，请重新输入")
 			continue
 		}
 
 		if matched, ok := matchCaseInsensitive(options, text); ok {
-			return matched, nil
+			return matched, false, nil
 		}
 
-		return text, nil
+		return text, false, nil
 	}
 }
 
-func selectRuntimeReasoningEffort(session *ChatSession, current string, options []string) (string, error) {
+func selectRuntimeReasoningEffort(session *ChatSession, current string, options []string) (string, bool, error) {
+	if useRuntimeSelectionPopup(session) {
+		return selectRuntimeReasoningEffortPopup(session, current, options)
+	}
+	return selectRuntimeReasoningEffortLegacy(session, current, options)
+}
+
+func selectRuntimeReasoningEffortPopup(session *ChatSession, current string, options []string) (string, bool, error) {
+	if session == nil {
+		return "", false, fmt.Errorf("当前没有活动会话")
+	}
+
+	normalizedOptions := normalizeReasoningEffortOptions(options)
+	currentEffort := runtimetypes.NormalizeReasoningEffort(current)
+	currentMatch, currentValid := reasoningEffortOptionMatch(currentEffort, normalizedOptions)
+	defaultOption := ""
+	if !currentValid && len(normalizedOptions) > 0 {
+		defaultOption = normalizedOptions[0]
+	}
+
+	notice := discardPendingInteractiveInputForPriorityPrompt(session, "reasoning_effort 选择")
+	hint := "  提示: 输入编号或名称，回车保留当前，输入 0 清空"
+	popupLines := renderSelectionPopupLines("选择 reasoning_effort 值", "reasoning_effort", currentEffort, normalizedOptions, currentMatch, defaultOption, hint, notice, "")
+	prompt := reasoningEffortSelectionPrompt(currentValid, defaultOption)
+	showRuntimeSelectionPopup(session, popupLines, prompt)
+	defer clearRuntimeSelectionPopup(session)
+
+	for {
+		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
+		if err != nil {
+			return "", true, err
+		}
+		text = strings.TrimSpace(normalizeQueuedInputLine(text))
+		normalized := runtimetypes.NormalizeReasoningEffort(text)
+		selected, ok := resolveRuntimeReasoningEffortInput(normalized, currentMatch, currentValid, defaultOption, normalizedOptions)
+		if ok {
+			return selected, true, nil
+		}
+		popupLines = renderSelectionPopupLines("选择 reasoning_effort 值", "reasoning_effort", currentEffort, normalizedOptions, currentMatch, defaultOption, hint, notice, "  无效的选择，请重新输入")
+		showRuntimeSelectionPopup(session, popupLines, prompt)
+	}
+}
+
+func selectRuntimeReasoningEffortLegacy(session *ChatSession, current string, options []string) (string, bool, error) {
 	beginDirectInteractiveOutput(session)
 	normalizedOptions := normalizeReasoningEffortOptions(options)
 	currentEffort := runtimetypes.NormalizeReasoningEffort(current)
@@ -229,50 +318,191 @@ func selectRuntimeReasoningEffort(session *ChatSession, current string, options 
 		}
 	}
 	fmt.Println("  [0] 清空 reasoning_effort")
+	prompt := reasoningEffortSelectionPrompt(currentValid, defaultOption)
 	ui.PrintEmptyLine()
 
 	for {
-		if currentValid {
-			fmt.Print("请输入选项 (回车保留当前 / 输入 0 清空): ")
-		} else if defaultOption != "" {
-			fmt.Printf("请输入选项 (回车默认: %s / 输入 0 清空): ", defaultOption)
-		} else {
-			fmt.Print("请输入选项 (回车清空当前无效值 / 输入 0 清空): ")
-		}
-		text, err := chatInteractiveReadPriorityLine(session, context.Background())
+		fmt.Print(prompt)
+		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		text = strings.TrimSpace(normalizeQueuedInputLine(text))
 		normalized := runtimetypes.NormalizeReasoningEffort(text)
 		if normalized == "" {
 			if currentValid {
-				return currentMatch, nil
+				return currentMatch, false, nil
 			}
 			if defaultOption != "" {
-				return defaultOption, nil
+				return defaultOption, false, nil
 			}
-			return "", nil
+			return "", false, nil
 		}
 
 		switch strings.ToLower(normalized) {
 		case "0", "clear", "none", "off", "清空", "无":
-			return "", nil
+			return "", false, nil
 		}
 
 		if num, err := strconv.Atoi(normalized); err == nil {
 			if num >= 1 && num <= len(normalizedOptions) {
-				return normalizedOptions[num-1], nil
+				return normalizedOptions[num-1], false, nil
 			}
 			ui.PrintWarning("无效的选择，请重新输入")
 			continue
 		}
 
 		if matched, ok := reasoningEffortOptionMatch(normalized, normalizedOptions); ok {
-			return matched, nil
+			return matched, false, nil
 		}
 
 		ui.PrintWarning("无效的选择，请重新输入")
+	}
+}
+
+func useRuntimeSelectionPopup(session *ChatSession) bool {
+	return session != nil && session.Surface != nil && session.Surface.Enabled()
+}
+
+func showRuntimeSelectionPopup(session *ChatSession, lines []string, prompt string) {
+	if !useRuntimeSelectionPopup(session) {
+		return
+	}
+	beginDirectInteractiveOutput(session)
+	session.Surface.ShowPopupInput(lines, prompt)
+}
+
+func clearRuntimeSelectionPopup(session *ChatSession) {
+	if session == nil || session.Surface == nil {
+		if session != nil && session.Interaction != nil {
+			session.Interaction.ResetPromptState()
+		}
+		return
+	}
+	session.Surface.ClearPopup()
+	if session.Interaction != nil {
+		session.Interaction.ResetPromptState()
+	}
+}
+
+func renderSelectionPopupLines(title, currentLabel, currentValue string, options []string, currentMatch, defaultOption, hint, notice, warning string) []string {
+	lines := make([]string, 0, 3+len(options))
+	if title = strings.TrimSpace(title); title != "" {
+		lines = append(lines, title)
+	}
+	if notice = strings.TrimSpace(notice); notice != "" {
+		lines = append(lines, notice)
+	}
+	currentLabel = strings.TrimSpace(currentLabel)
+	if currentLabel != "" {
+		currentValue = strings.TrimSpace(currentValue)
+		if currentValue == "" {
+			currentValue = "(无)"
+		}
+		lines = append(lines, fmt.Sprintf("当前%s: %s", currentLabel, currentValue))
+	}
+	if warning = strings.TrimSpace(warning); warning != "" {
+		lines = append(lines, warning)
+	}
+	if len(options) > 0 {
+		maxLen := 0
+		for _, option := range options {
+			if len(option) > maxLen {
+				maxLen = len(option)
+			}
+		}
+		for i, option := range options {
+			switch {
+			case strings.EqualFold(option, currentMatch):
+				lines = append(lines, fmt.Sprintf("  [%d] %-*s  (当前)", i+1, maxLen, option))
+			case defaultOption != "" && strings.EqualFold(option, defaultOption):
+				lines = append(lines, fmt.Sprintf("  [%d] %-*s  (默认)", i+1, maxLen, option))
+			default:
+				lines = append(lines, fmt.Sprintf("  [%d] %-*s", i+1, maxLen, option))
+			}
+		}
+	}
+	if hint = strings.TrimSpace(hint); hint != "" {
+		lines = append(lines, hint)
+	}
+	return lines
+}
+
+func resolveRuntimeSelectionInput(input, current, defaultOption string, options []string, allowCustom, allowClear bool) (string, bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		if current != "" {
+			return current, true
+		}
+		if defaultOption != "" {
+			return defaultOption, true
+		}
+		return "", true
+	}
+
+	normalized := strings.ToLower(input)
+	if allowClear {
+		switch normalized {
+		case "0", "clear", "none", "off", "清空", "无":
+			return "", true
+		}
+	}
+
+	if num, err := strconv.Atoi(input); err == nil {
+		if num >= 1 && num <= len(options) {
+			return options[num-1], true
+		}
+		return "", false
+	}
+
+	if matched, ok := matchCaseInsensitive(options, input); ok {
+		return matched, true
+	}
+
+	if allowCustom {
+		return input, true
+	}
+	return "", false
+}
+
+func resolveRuntimeReasoningEffortInput(input, currentMatch string, currentValid bool, defaultOption string, options []string) (string, bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		if currentValid {
+			return currentMatch, true
+		}
+		if defaultOption != "" {
+			return defaultOption, true
+		}
+		return "", true
+	}
+
+	switch strings.ToLower(input) {
+	case "0", "clear", "none", "off", "清空", "无":
+		return "", true
+	}
+
+	if num, err := strconv.Atoi(input); err == nil {
+		if num >= 1 && num <= len(options) {
+			return options[num-1], true
+		}
+		return "", false
+	}
+
+	if matched, ok := reasoningEffortOptionMatch(input, options); ok {
+		return matched, true
+	}
+	return "", false
+}
+
+func reasoningEffortSelectionPrompt(currentValid bool, defaultOption string) string {
+	switch {
+	case currentValid:
+		return "请输入选项 (回车保留当前 / 输入 0 清空): "
+	case defaultOption != "":
+		return fmt.Sprintf("请输入选项 (回车默认: %s / 输入 0 清空): ", defaultOption)
+	default:
+		return "请输入选项 (回车清空当前无效值 / 输入 0 清空): "
 	}
 }
 

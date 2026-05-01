@@ -51,9 +51,13 @@ func TestSelectRuntimeReasoningEffort_DefaultsToFirstOnInitialSelection(t *testi
 	var selected string
 	output := captureStdout(t, func() {
 		var err error
-		selected, err = selectRuntimeReasoningEffort(session, "", []string{"high", "max"})
+		var usedPopup bool
+		selected, usedPopup, err = selectRuntimeReasoningEffort(session, "", []string{"high", "max"})
 		if err != nil {
 			t.Fatalf("selectRuntimeReasoningEffort: %v", err)
+		}
+		if usedPopup {
+			t.Fatal("expected legacy reasoning selection path without popup")
 		}
 	})
 
@@ -93,6 +97,72 @@ func TestRuntimeModelSelectionOptions_UsesStableOrdering(t *testing.T) {
 	}
 	if options[0] != "deepseek-ai/DeepSeek-V4-Flash" || options[1] != "deepseek-ai/DeepSeek-V4-Pro" {
 		t.Fatalf("expected stable sorted order after model switch, got %v", options)
+	}
+}
+
+func TestRenderSelectionPopupLines_ShowsCurrentValueAndHint(t *testing.T) {
+	lines := renderSelectionPopupLines(
+		"选择模型",
+		"模型",
+		"gpt-4.1",
+		[]string{"gpt-4.1", "gpt-4.1-mini"},
+		"gpt-4.1",
+		"",
+		"  提示: 输入编号、模型名，回车保持当前",
+		"  [input] 检测到之前排队的输入内容；为避免误用，已在模型选择前丢弃这些输入。",
+		"",
+	)
+
+	rendered := strings.Join(lines, "\n")
+	for _, expected := range []string{
+		"选择模型",
+		"当前模型: gpt-4.1",
+		"[1] gpt-4.1",
+		"(当前)",
+		"[2] gpt-4.1-mini",
+		"提示: 输入编号、模型名，回车保持当前",
+		"模型选择前丢弃这些输入",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("expected popup lines to contain %q, got:\n%s", expected, rendered)
+		}
+	}
+}
+
+func TestResolveRuntimeSelectionInput_SupportsNumericCustomAndBlank(t *testing.T) {
+	options := []string{"gpt-4.1", "gpt-4.1-mini"}
+
+	if got, ok := resolveRuntimeSelectionInput("", "gpt-4.1", "", options, true, false); !ok || got != "gpt-4.1" {
+		t.Fatalf("expected blank input to keep current model, got %q ok=%v", got, ok)
+	}
+	if got, ok := resolveRuntimeSelectionInput("2", "gpt-4.1", "", options, true, false); !ok || got != "gpt-4.1-mini" {
+		t.Fatalf("expected numeric selection to pick second option, got %q ok=%v", got, ok)
+	}
+	if got, ok := resolveRuntimeSelectionInput("custom-model", "gpt-4.1", "", options, true, false); !ok || got != "custom-model" {
+		t.Fatalf("expected custom input to pass through, got %q ok=%v", got, ok)
+	}
+	if _, ok := resolveRuntimeSelectionInput("9", "gpt-4.1", "", options, true, false); ok {
+		t.Fatal("expected out-of-range numeric choice to be rejected")
+	}
+}
+
+func TestResolveRuntimeReasoningEffortInput_SupportsBlankDefaultAndClear(t *testing.T) {
+	options := []string{"high", "max"}
+
+	if got, ok := resolveRuntimeReasoningEffortInput("", "high", true, "", options); !ok || got != "high" {
+		t.Fatalf("expected blank input to keep current effort, got %q ok=%v", got, ok)
+	}
+	if got, ok := resolveRuntimeReasoningEffortInput("", "", false, "high", options); !ok || got != "high" {
+		t.Fatalf("expected blank input to pick default effort, got %q ok=%v", got, ok)
+	}
+	if got, ok := resolveRuntimeReasoningEffortInput("0", "high", true, "", options); !ok || got != "" {
+		t.Fatalf("expected clear token to empty effort, got %q ok=%v", got, ok)
+	}
+	if got, ok := resolveRuntimeReasoningEffortInput("2", "high", true, "", options); !ok || got != "max" {
+		t.Fatalf("expected numeric selection to pick max, got %q ok=%v", got, ok)
+	}
+	if _, ok := resolveRuntimeReasoningEffortInput("medium", "high", true, "", options); ok {
+		t.Fatal("expected unsupported effort to be rejected")
 	}
 }
 
