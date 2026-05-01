@@ -47,6 +47,8 @@ const (
 	editorKeyRedraw
 	editorKeyYank
 	editorKeyTranspose
+	editorKeyBackwardWord
+	editorKeyForwardWord
 	editorKeyReverseSearch
 	editorKeyAbortSearch
 	editorKeyPasteStart
@@ -299,6 +301,24 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 		line[cursor-1], line[cursor] = line[cursor], line[cursor-1]
 		cursor++
 		notifyChange()
+		redraw()
+	}
+
+	moveBackwardWord := func() {
+		if cursor <= 0 || len(line) == 0 {
+			return
+		}
+		promoteDraft()
+		cursor = deletePreviousWordStart(line, cursor)
+		redraw()
+	}
+
+	moveForwardWord := func() {
+		if cursor >= len(line) || len(line) == 0 {
+			return
+		}
+		promoteDraft()
+		cursor = nextWordEnd(line, cursor)
 		redraw()
 	}
 
@@ -602,6 +622,14 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			flushPlainBurst()
 			clearReverseSearchState()
 			transposeChars()
+		case editorKeyBackwardWord:
+			flushPlainBurst()
+			clearReverseSearchState()
+			moveBackwardWord()
+		case editorKeyForwardWord:
+			flushPlainBurst()
+			clearReverseSearchState()
+			moveForwardWord()
 		case editorKeyReverseSearch:
 			flushPlainBurst()
 			beginReverseSearch()
@@ -852,7 +880,15 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 		return decodedInteractiveKey{}, false
 	}
 	if pending[1] != '[' && pending[1] != 'O' {
-		// Bare ESC or an alt-modified key. Drop the ESC and keep processing.
+		switch pending[1] {
+		case 'b', 'B':
+			return decodedInteractiveKey{key: editorKey{kind: editorKeyBackwardWord}, consumed: 2}, true
+		case 'f', 'F':
+			return decodedInteractiveKey{key: editorKey{kind: editorKeyForwardWord}, consumed: 2}, true
+		case '\b', 127:
+			return decodedInteractiveKey{key: editorKey{kind: editorKeyDeleteWord}, consumed: 2}, true
+		}
+		// Bare ESC or an unhandled alt-modified key. Drop the ESC and keep processing.
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyIgnore}, consumed: 1}, true
 	}
 
@@ -869,8 +905,14 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 			case 'B':
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyDown}, consumed: i + 1}, true
 			case 'C':
+				if isWordMovementModifierSequence(pending[2:i]) {
+					return decodedInteractiveKey{key: editorKey{kind: editorKeyForwardWord}, consumed: i + 1}, true
+				}
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyRight}, consumed: i + 1}, true
 			case 'D':
+				if isWordMovementModifierSequence(pending[2:i]) {
+					return decodedInteractiveKey{key: editorKey{kind: editorKeyBackwardWord}, consumed: i + 1}, true
+				}
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyLeft}, consumed: i + 1}, true
 			case 'H':
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyHome}, consumed: i + 1}, true
@@ -915,6 +957,14 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 	return decodedInteractiveKey{}, false
 }
 
+func isWordMovementModifierSequence(params []byte) bool {
+	if len(params) == 0 {
+		return false
+	}
+	text := string(params)
+	return strings.Contains(text, ";3") || strings.Contains(text, ";5")
+}
+
 func isEscapeFinalByte(b byte) bool {
 	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '~'
 }
@@ -931,6 +981,17 @@ func deletePreviousWordStart(line []rune, cursor int) int {
 		start--
 	}
 	return start
+}
+
+func nextWordEnd(line []rune, cursor int) int {
+	end := cursor
+	for end < len(line) && unicode.IsSpace(line[end]) {
+		end++
+	}
+	for end < len(line) && !unicode.IsSpace(line[end]) {
+		end++
+	}
+	return end
 }
 
 func findReverseHistoryMatch(history []string, query string, before int) (int, string, bool) {
