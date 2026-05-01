@@ -3,6 +3,7 @@ package runtimeserver
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -81,4 +82,41 @@ func TestLocalRuntimeServiceControlStatusUsesMatchingPIDFileMetadata(t *testing.
 	require.Equal(t, resolveAbsolutePath(pidCwd), status.Cwd)
 	require.Equal(t, startedAt.Format(time.RFC3339), status.StartedAt)
 	require.False(t, strings.Contains(status.Note, "不一致"))
+}
+
+func TestLocalRuntimeServiceControlWriteRestartHelperScript(t *testing.T) {
+	executable, err := os.Executable()
+	require.NoError(t, err)
+
+	control := NewLocalRuntimeServiceControl(
+		executable,
+		t.TempDir(),
+		filepath.Join(t.TempDir(), "runtime-server.pid"),
+		filepath.Join(t.TempDir(), "runtime-config.yaml"),
+		"127.0.0.1:8101",
+	)
+
+	scriptPath, err := control.writeRestartHelperScript()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = os.Remove(scriptPath)
+	})
+
+	data, err := os.ReadFile(scriptPath)
+	require.NoError(t, err)
+	content := string(data)
+
+	if runtime.GOOS == "windows" {
+		require.Contains(t, content, "$scriptPath = $PSCommandPath")
+		require.Contains(t, content, "Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue")
+		require.Contains(t, content, "Set-Location -LiteralPath")
+		require.Contains(t, content, "Start-Sleep -Milliseconds 700")
+		require.NotContains(t, content, "-Command")
+	} else {
+		require.Contains(t, content, "#!/bin/sh")
+		require.Contains(t, content, `trap 'rm -f "$0"' EXIT`)
+		require.Contains(t, content, "sleep 0.7")
+		require.Contains(t, content, "sleep 0.5")
+		require.NotContains(t, content, "-lc")
+	}
 }

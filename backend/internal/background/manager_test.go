@@ -28,6 +28,9 @@ func TestManagerDispatchesByPriorityWithinCapacity(t *testing.T) {
 			mu.Unlock()
 		},
 	})
+	defer func() {
+		require.NoError(t, manager.Close())
+	}()
 
 	blocker, err := manager.SubmitShell(ctx, "session-1", BackgroundTaskArgs{
 		Command:  shellDelayCommand(350*time.Millisecond, "blocker"),
@@ -92,7 +95,10 @@ func TestManagerRecoversPendingAndFailsInterruptedRunningJobs(t *testing.T) {
 		CreatedAt: time.Now().Add(-2 * time.Second).UTC(),
 		LogPath:   pendingLogPath,
 		Metadata: map[string]interface{}{
-			"timeout_sec": 3,
+			// Detached recovery on Windows can take a few seconds to start the
+			// helper process chain, so keep the timeout generous enough to avoid
+			// flaking under full-suite load.
+			"timeout_sec": 15,
 		},
 	}
 	require.NoError(t, store.SaveJob(ctx, pendingJob))
@@ -117,11 +123,9 @@ func TestManagerRecoversPendingAndFailsInterruptedRunningJobs(t *testing.T) {
 		LogDir:            logDir,
 		MaxConcurrentJobs: 1,
 	})
-	if closer, ok := manager.store.(interface{ Close() error }); ok {
-		defer func() {
-			require.NoError(t, closer.Close())
-		}()
-	}
+	defer func() {
+		require.NoError(t, manager.Close())
+	}()
 
 	require.NoError(t, waitForJobStatus(ctx, manager, pendingJob.ID, StatusCompleted, backgroundTestTimeout(20*time.Second)))
 
@@ -176,11 +180,9 @@ func TestManagerRecoversRunningJobWithRerunPolicy(t *testing.T) {
 		LogDir:            logDir,
 		MaxConcurrentJobs: 1,
 	})
-	if closer, ok := manager.store.(interface{ Close() error }); ok {
-		defer func() {
-			require.NoError(t, closer.Close())
-		}()
-	}
+	defer func() {
+		require.NoError(t, manager.Close())
+	}()
 
 	require.NoError(t, waitForJobStatus(ctx, manager, runningJob.ID, StatusCompleted, backgroundTestTimeout(20*time.Second)))
 
@@ -249,6 +251,8 @@ func TestManagerRecoversDetachedRunningJobAcrossRestart(t *testing.T) {
 
 func waitForJobStatus(ctx context.Context, manager *Manager, jobID string, status JobStatus, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var lastStatus JobStatus
+	var lastMessage string
 	for time.Now().Before(deadline) {
 		job, err := manager.GetJob(ctx, jobID)
 		if err != nil {
@@ -257,9 +261,16 @@ func waitForJobStatus(ctx context.Context, manager *Manager, jobID string, statu
 		if job != nil && job.Status == status {
 			return nil
 		}
+		if job != nil {
+			lastStatus = job.Status
+			lastMessage = job.Message
+		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	return fmt.Errorf("job %s did not reach status %s within %s", jobID, status, timeout)
+	if lastMessage != "" {
+		return fmt.Errorf("job %s did not reach status %s within %s (last status=%s, message=%q)", jobID, status, timeout, lastStatus, lastMessage)
+	}
+	return fmt.Errorf("job %s did not reach status %s within %s (last status=%s)", jobID, status, timeout, lastStatus)
 }
 
 func backgroundTestTimeout(base time.Duration) time.Duration {

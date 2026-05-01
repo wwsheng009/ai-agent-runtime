@@ -121,11 +121,17 @@ func (s *LocalRuntimeServiceControl) Restart() (*skillsapi.RuntimeServiceRestart
 		return nil, fmt.Errorf("restart is not supported for the current runtime process")
 	}
 
-	command, args := s.restartHelperCommand()
+	command, args, scriptPath, err := s.restartHelperCommand()
+	if err != nil {
+		return nil, fmt.Errorf("prepare restart helper: %w", err)
+	}
 	if command == "" {
 		return nil, fmt.Errorf("restart helper command is empty")
 	}
 	if _, err := StartDetachedProcess(command, args, os.Environ()); err != nil {
+		if strings.TrimSpace(scriptPath) != "" {
+			_ = os.Remove(scriptPath)
+		}
 		return nil, fmt.Errorf("start restart helper: %w", err)
 	}
 
@@ -146,19 +152,22 @@ func (s *LocalRuntimeServiceControl) canRestart() bool {
 	return true
 }
 
-func (s *LocalRuntimeServiceControl) restartHelperCommand() (string, []string) {
+func (s *LocalRuntimeServiceControl) restartHelperCommand() (string, []string, string, error) {
+	scriptPath, err := s.writeRestartHelperScript()
+	if err != nil {
+		return "", nil, "", err
+	}
 	if runtime.GOOS == "windows" {
-		return "powershell", []string{
+		return windowsPowerShellHost(), []string{
 			"-NoProfile",
 			"-NonInteractive",
-			"-Command",
-			s.buildPowerShellRestartScript(),
-		}
+			"-ExecutionPolicy",
+			"Bypass",
+			"-File",
+			scriptPath,
+		}, scriptPath, nil
 	}
-	return "sh", []string{
-		"-lc",
-		s.buildShellRestartScript(),
-	}
+	return "sh", []string{scriptPath}, scriptPath, nil
 }
 
 func (s *LocalRuntimeServiceControl) buildPowerShellRestartScript() string {
@@ -194,6 +203,48 @@ func (s *LocalRuntimeServiceControl) buildShellRestartScript() string {
 			s.restartStartArgs(),
 		),
 	}, " && ")
+}
+
+func (s *LocalRuntimeServiceControl) buildRestartHelperScriptContent() string {
+	if runtime.GOOS == "windows" {
+		lines := []string{
+			"$scriptPath = $PSCommandPath",
+			"try {",
+			"  " + s.buildPowerShellRestartScript(),
+			"} finally {",
+			"  if ($scriptPath) { Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue }",
+			"}",
+		}
+		return strings.Join(lines, "\r\n") + "\r\n"
+	}
+	lines := []string{
+		"#!/bin/sh",
+		"set +e",
+		`trap 'rm -f "$0"' EXIT`,
+		s.buildShellRestartScript(),
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func (s *LocalRuntimeServiceControl) writeRestartHelperScript() (string, error) {
+	pattern := "aicli-runtime-restart-*.sh"
+	if runtime.GOOS == "windows" {
+		pattern = "aicli-runtime-restart-*.ps1"
+	}
+	file, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(s.buildRestartHelperScriptContent()), 0o644); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
 }
 
 func (s *LocalRuntimeServiceControl) restartStartArgs() string {

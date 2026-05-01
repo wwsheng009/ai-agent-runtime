@@ -43,3 +43,17 @@ func TestResolveUpwardPath_PreservesExistingRelativePath(t *testing.T) {
 	resolved := ResolveUpwardPath("./.agents/skills")
 	require.Equal(t, filepath.Clean("./.agents/skills"), resolved)
 }
+
+func TestResolveUpwardPathDetailInWorkdir_SuggestsSimilarSibling(t *testing.T) {
+	root := t.TempDir()
+	workdir := filepath.Join(root, "backend")
+	require.NoError(t, os.MkdirAll(workdir, 0o755))
+
+	suggested := filepath.Join(workdir, "frontend", "src", "pages", "settings", "runtime.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(suggested), 0o755))
+	require.NoError(t, os.WriteFile(suggested, []byte("ok"), 0o644))
+
+	detail := ResolveUpwardPathDetailInWorkdir("frontend/src/pages/setting/runtime.yaml", workdir)
+	require.Empty(t, detail.Resolved)
+	require.Contains(t, detail.Candidates, suggested)
+}

@@ -190,6 +190,10 @@ func (r *RuntimeConfigHotReloader) Apply(
 		}
 	}
 
+	if pathWarnings := buildRuntimeConfigPathWarnings(nextCfg, hotPaths); len(pathWarnings) > 0 {
+		result.Warnings = append(result.Warnings, pathWarnings...)
+	}
+
 	r.updateCurrentConfig(nextCfg)
 	result.AppliedPaths = mapKeysSorted(appliedSet)
 	return result
@@ -400,6 +404,66 @@ func buildConfigDocumentWarnings(
 	}
 	warnings = append(warnings, applyWarnings...)
 	return warnings
+}
+
+func buildRuntimeConfigPathWarnings(cfg *agentconfig.Config, hotPaths []string) []string {
+	if cfg == nil || len(hotPaths) == 0 {
+		return nil
+	}
+
+	warnings := make([]string, 0, 4)
+	addWarning := func(label, path string) {
+		if len(warnings) >= 4 {
+			return
+		}
+		if warning := buildRuntimeConfigPathWarning(label, path); warning != "" {
+			warnings = append(warnings, warning)
+		}
+	}
+
+	if hasAnyPrefixInSet(hotPaths, restartRequiredSkillsRuntimePrefixes) && cfg.SkillsRuntime != nil {
+		addWarning("skills_runtime.config_file", cfg.SkillsRuntime.ConfigFile)
+		addWarning("skills_runtime.skill_dir", cfg.SkillsRuntime.SkillDir)
+		for index, path := range cfg.SkillsRuntime.SkillDirs {
+			if len(warnings) >= 4 {
+				break
+			}
+			addWarning(fmt.Sprintf("skills_runtime.skill_dirs[%d]", index), path)
+		}
+		for index, path := range cfg.SkillsRuntime.ExtraSkillDirs {
+			if len(warnings) >= 4 {
+				break
+			}
+			addWarning(fmt.Sprintf("skills_runtime.extra_skill_dirs[%d]", index), path)
+		}
+	}
+
+	if hasAnyConfigPathPrefix(hotPaths, "aicli.mcp.config_file") && cfg.AICLI != nil && cfg.AICLI.MCP != nil {
+		addWarning("aicli.mcp.config_file", cfg.AICLI.MCP.ConfigFile)
+	}
+
+	return warnings
+}
+
+func buildRuntimeConfigPathWarning(label, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+
+	detail := ResolveUpwardPathDetail(path)
+	if strings.TrimSpace(detail.Resolved) != "" {
+		return ""
+	}
+	if len(detail.Candidates) == 0 {
+		return fmt.Sprintf("%s 路径不存在: %s", label, path)
+	}
+	return fmt.Sprintf(
+		"%s 路径不存在: %s，可能的候选路径: %s",
+		label,
+		path,
+		strings.Join(detail.Candidates, ", "),
+	)
 }
 
 func applySkillsRuntimePoliciesToTarget(

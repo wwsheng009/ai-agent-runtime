@@ -2,58 +2,27 @@ package runtimeserver
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
+
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
+type PathResolution = runtimeexecutor.PathResolution
+
 func ResolveUpwardPath(path string) string {
-	trimmed := strings.TrimSpace(path)
-	if trimmed == "" {
-		return ""
-	}
-
-	cleaned := filepath.Clean(trimmed)
-	if filepath.IsAbs(cleaned) {
-		return cleaned
-	}
-	if pathExists(cleaned) {
-		return cleaned
-	}
-
-	relative := strings.TrimPrefix(cleaned, "."+string(filepath.Separator))
-	if relative == "." || relative == "" {
-		return cleaned
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return cleaned
-	}
-
-	for dir := cwd; dir != ""; {
-		candidate := filepath.Join(dir, relative)
-		if pathExists(candidate) {
-			return candidate
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-
-	return cleaned
+	return runtimeexecutor.ResolveUpwardPath(path)
 }
 
 func ResolveUpwardPaths(paths []string) []string {
-	if len(paths) == 0 {
-		return nil
-	}
-	resolved := make([]string, 0, len(paths))
-	for _, path := range paths {
-		resolved = append(resolved, ResolveUpwardPath(path))
-	}
-	return resolved
+	return runtimeexecutor.ResolveUpwardPaths(paths)
+}
+
+func ResolveUpwardPathDetail(path string) PathResolution {
+	return runtimeexecutor.ResolveUpwardPathDetail(path)
+}
+
+func ResolveUpwardPathDetailInWorkdir(path, workdir string) PathResolution {
+	return runtimeexecutor.ResolveUpwardPathDetailInWorkdir(path, workdir)
 }
 
 func pathExists(path string) bool {

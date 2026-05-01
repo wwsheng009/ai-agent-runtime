@@ -3,6 +3,7 @@ package runtimeserver
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,6 +170,41 @@ func TestRuntimeConfigHotReloaderAppliesHotReloadableSettings(t *testing.T) {
 	require.Equal(t, "new-admin-token", target.adminToken)
 	require.Equal(t, "dev", target.profileSupport.DefaultProfile)
 	require.Equal(t, "dev", currentCfg.Profiles.DefaultProfile)
+}
+
+func TestRuntimeConfigHotReloaderReportsPathSuggestionsForMissingConfigFiles(t *testing.T) {
+	root := t.TempDir()
+	workdir := filepath.Join(root, "backend")
+	require.NoError(t, os.MkdirAll(workdir, 0o755))
+
+	suggested := filepath.Join(workdir, "frontend", "src", "pages", "settings", "runtime.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(suggested), 0o755))
+	require.NoError(t, os.WriteFile(suggested, []byte("ok"), 0o644))
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(workdir))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chdir(originalWD))
+	})
+
+	currentCfg := &agentconfig.Config{}
+	target := &fakeRuntimeConfigApplyTarget{}
+	reloader := NewRuntimeConfigHotReloader(target, currentCfg, nil)
+	require.NotNil(t, reloader)
+
+	nextCfg := &agentconfig.Config{
+		SkillsRuntime: &agentconfig.SkillsRuntimeConfig{
+			ConfigFile: "frontend/src/pages/setting/runtime.yaml",
+		},
+	}
+
+	result := reloader.Apply(nextCfg, []string{"skills_runtime.config_file"})
+	require.NotEmpty(t, result.Warnings)
+
+	normalizedWarnings := strings.ReplaceAll(strings.Join(result.Warnings, "\n"), `\`, "/")
+	require.Contains(t, normalizedWarnings, "skills_runtime.config_file")
+	require.Contains(t, normalizedWarnings, "frontend/src/pages/settings/runtime.yaml")
 }
 
 func TestLocalConfigDocumentServiceSaveClassifiesAndAppliesChanges(t *testing.T) {

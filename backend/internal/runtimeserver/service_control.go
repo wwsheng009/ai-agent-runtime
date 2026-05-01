@@ -104,7 +104,8 @@ func ProcessRunning(pid int) bool {
 		return false
 	}
 	if runtime.GOOS == "windows" {
-		cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", fmt.Sprintf("if (Get-Process -Id %d -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }", pid))
+		host := windowsPowerShellHost()
+		cmd := exec.Command(host, "-NoProfile", "-NonInteractive", "-Command", fmt.Sprintf("if (Get-Process -Id %d -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }", pid))
 		return cmd.Run() == nil
 	}
 	return exec.Command("/bin/sh", "-c", fmt.Sprintf("kill -0 %d 2>/dev/null", pid)).Run() == nil
@@ -158,8 +159,9 @@ func TerminateProcess(pid int, timeout time.Duration) error {
 	}
 
 	if runtime.GOOS == "windows" {
+		host := windowsPowerShellHost()
 		stopScript := fmt.Sprintf("Stop-Process -Id %d -Force -ErrorAction SilentlyContinue", pid)
-		if err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", stopScript).Run(); err != nil && !ProcessRunning(pid) {
+		if err := exec.Command(host, "-NoProfile", "-NonInteractive", "-Command", stopScript).Run(); err != nil && !ProcessRunning(pid) {
 			return nil
 		}
 		if waitForProcessExit(pid, timeout) {
@@ -183,6 +185,16 @@ func TerminateProcess(pid int, timeout time.Duration) error {
 		return nil
 	}
 	return fmt.Errorf("process %d still running after SIGKILL", pid)
+}
+
+func windowsPowerShellHost() string {
+	if path, err := exec.LookPath("pwsh"); err == nil {
+		return path
+	}
+	if path, err := exec.LookPath("powershell"); err == nil {
+		return path
+	}
+	return "powershell"
 }
 
 func waitForProcessExit(pid int, timeout time.Duration) bool {
