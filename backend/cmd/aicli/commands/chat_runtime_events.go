@@ -277,8 +277,9 @@ func (b *chatRuntimeEventBridge) EndRun() {
 		return
 	}
 	b.renderMu.Lock()
-	defer b.renderMu.Unlock()
 	b.runActive = false
+	b.renderMu.Unlock()
+	b.writePromptIfIdle()
 }
 
 func (b *chatRuntimeEventBridge) PrepareRunPrompt(prompt string) {
@@ -1517,7 +1518,7 @@ func (b *chatRuntimeEventBridge) asyncTeamAssistantResponse(event runtimeevents.
 }
 
 func (b *chatRuntimeEventBridge) writePromptIfIdle() {
-	if b == nil || b.writePrompt == nil || b.session == nil || b.session.RuntimeSession == nil || b.session.LocalRuntimeHost == nil || b.session.LocalRuntimeHost.RuntimeStore == nil {
+	if b == nil || b.writePrompt == nil || b.session == nil {
 		return
 	}
 	b.renderMu.Lock()
@@ -1529,12 +1530,11 @@ func (b *chatRuntimeEventBridge) writePromptIfIdle() {
 	if !shouldDisplayInteractivePrompt(b.session) {
 		return
 	}
-	state, err := b.session.LocalRuntimeHost.RuntimeStore.LoadState(context.Background(), strings.TrimSpace(b.session.RuntimeSession.ID))
-	if err != nil || state == nil {
-		return
-	}
-	if state.Status != runtimechat.SessionIdle {
-		return
+	if b.session.RuntimeSession != nil && b.session.LocalRuntimeHost != nil && b.session.LocalRuntimeHost.RuntimeStore != nil {
+		state, err := b.session.LocalRuntimeHost.RuntimeStore.LoadState(context.Background(), strings.TrimSpace(b.session.RuntimeSession.ID))
+		if err == nil && state != nil && state.Status != runtimechat.SessionIdle {
+			return
+		}
 	}
 	if b.session.Interaction != nil {
 		b.session.Interaction.SchedulePromptRedraw()

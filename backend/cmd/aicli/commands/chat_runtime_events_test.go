@@ -1199,6 +1199,22 @@ func TestChatRuntimeEvents_RedrawsPromptAfterAsyncRenderWhenSessionIdle(t *testi
 	}
 }
 
+func TestChatRuntimeEvents_RestoresPromptWithoutRuntimeStoreAfterRunEnds(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writePrompt = func() {
+		rendered = append(rendered, "PROMPT")
+	}
+
+	bridge.BeginRun()
+	bridge.EndRun()
+
+	require.Equal(t, []string{"PROMPT"}, rendered)
+}
+
 func TestChatRuntimeEvents_DoesNotRedrawPromptWhileRunActive(t *testing.T) {
 	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
 	require.NoError(t, runtimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{
@@ -1264,6 +1280,34 @@ func TestChatRuntimeEvents_IgnoresLatePrimaryAssistantEventsAfterRunEnds(t *test
 	if len(rendered) != 0 {
 		t.Fatalf("expected late primary assistant events to be ignored after run end, got %v", rendered)
 	}
+}
+
+func TestChatRuntimeEvents_RestoresPromptAfterLatePrimaryEventsAreSuppressed(t *testing.T) {
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
+	require.NoError(t, runtimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{
+		SessionID: "lead-session",
+		Status:    runtimechat.SessionIdle,
+	}))
+
+	session := &ChatSession{
+		RuntimeSession:   &runtimechat.Session{ID: "lead-session"},
+		LocalRuntimeHost: &localChatRuntimeHost{RuntimeStore: runtimeStore},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writePrompt = func() {
+		rendered = append(rendered, "PROMPT")
+	}
+
+	bridge.BeginRun()
+	bridge.EndRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"content": "late message"},
+	})
+
+	require.Equal(t, []string{"PROMPT"}, rendered)
 }
 
 func TestChatRuntimeEvents_DoesNotRedrawPromptWhileTeamStillActiveAfterRun(t *testing.T) {
@@ -2770,18 +2814,29 @@ func TestChatRuntimeEvents_ApprovedShellDoesNotCoverDangerousCommands(t *testing
 }
 
 func TestChatRuntimeEvents_FlushesBufferedDeltaOnSessionEnd(t *testing.T) {
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
+	require.NoError(t, runtimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{
+		SessionID: "lead-session",
+		Status:    runtimechat.SessionIdle,
+	}))
+
 	session := &ChatSession{
-		Stream:         true,
-		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+		Stream:           true,
+		RuntimeSession:   &runtimechat.Session{ID: "lead-session"},
+		LocalRuntimeHost: &localChatRuntimeHost{RuntimeStore: runtimeStore},
 	}
 	bridge := newChatRuntimeEventBridge(session)
-	var deltas []string
+	var rendered []string
 	finalized := 0
 	bridge.writeDelta = func(delta string) {
-		deltas = append(deltas, delta)
+		rendered = append(rendered, "delta:"+delta)
 	}
 	bridge.finalizeDelta = func() {
+		rendered = append(rendered, "finalize")
 		finalized++
+	}
+	bridge.writePrompt = func() {
+		rendered = append(rendered, "PROMPT")
 	}
 
 	bridge.BeginRun()
@@ -2797,15 +2852,14 @@ func TestChatRuntimeEvents_FlushesBufferedDeltaOnSessionEnd(t *testing.T) {
 		SessionID: "lead-session",
 		Payload:   map[string]interface{}{"success": true},
 	})
+	bridge.EndRun()
 
-	if len(deltas) != 1 || deltas[0] != "Analyzing the issue..." {
-		t.Fatalf("expected buffered delta to be written, got %v", deltas)
+	require.Equal(t, []string{"delta:Analyzing the issue...", "finalize", "PROMPT"}, rendered)
+	if !bridge.HasRenderedAssistantFinal() {
+		t.Fatal("expected assistant final flag after session_end flush")
 	}
 	if finalized != 1 {
 		t.Fatalf("expected delta to be finalized on session_end, got %d finalizations", finalized)
-	}
-	if !bridge.HasRenderedAssistantFinal() {
-		t.Fatal("expected assistant final flag after session_end flush")
 	}
 }
 
