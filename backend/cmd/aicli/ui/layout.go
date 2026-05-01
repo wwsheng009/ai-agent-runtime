@@ -66,6 +66,10 @@ func (l *Layout) SetTerminal(term *Terminal) *Layout {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.terminal = term
+	l.calculateAreas()
+	if l.statusBar != nil && l.statusArea != nil {
+		l.statusBar.SetTerminal(term).SetRow(l.statusArea.Row)
+	}
 	return l
 }
 
@@ -120,14 +124,33 @@ func (l *Layout) IsEnabled() bool {
 
 // calculateAreas 计算各区域位置
 func (l *Layout) calculateAreas() {
+	if l.terminal == nil {
+		l.terminal = NewTerminal()
+	}
+	l.terminal.RefreshSize()
 	height := l.terminal.Height()
 	width := l.terminal.Width()
+	if height <= 0 {
+		height = 24
+	}
+	if width <= 0 {
+		width = 80
+	}
 
 	// 从底部开始计算
 	// 底部: 状态栏 + 输入框
 	bottomRows := l.statusBarHeight
 	if l.layoutType == LayoutAdvanced {
 		bottomRows += l.inputHeight
+	}
+	if bottomRows < 1 {
+		bottomRows = 1
+	}
+	if bottomRows >= height {
+		bottomRows = height - 1
+	}
+	if bottomRows < 1 {
+		bottomRows = 1
 	}
 
 	// 状态栏区域（底部）
@@ -192,6 +215,7 @@ func (l *Layout) Render() {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.calculateAreas()
 
 	// 保存当前光标位置
 	l.terminal.SaveCursor()
@@ -252,6 +276,7 @@ func (l *Layout) RenderInputArea(prompt, input string) {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.calculateAreas()
 
 	l.terminal.SaveCursor()
 

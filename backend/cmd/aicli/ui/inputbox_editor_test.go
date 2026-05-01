@@ -412,8 +412,38 @@ func TestReadInteractiveLine_BuffersBracketedPasteIntoSingleRedraw(t *testing.T)
 	if count := strings.Count(rendered, prompt); count != 1 {
 		t.Fatalf("expected prompt to be rendered once, got %d in %q", count, rendered)
 	}
-	if count := strings.Count(rendered, cursorRestoreSequence); count != 1 {
-		t.Fatalf("expected one redraw after buffered paste, got %d in %q", count, rendered)
+	if count := strings.Count(rendered, cursorRestoreSequence); count != 2 {
+		t.Fatalf("expected one bounded redraw after buffered paste, got %d cursor restores in %q", count, rendered)
+	}
+}
+
+func TestReadInteractiveLine_LargeBracketedPasteUsesPlaceholderButSubmitsFullText(t *testing.T) {
+	var output bytes.Buffer
+	prompt := "你> "
+	output.WriteString(prompt)
+	output.WriteString(cursorSaveSequence)
+
+	large := strings.Repeat("a", LargePasteCharThreshold+1)
+	line, err := readInteractiveLine(
+		strings.NewReader("\x1b[200~"+large+"\x1b[201~\n"),
+		&output,
+		prompt,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != large {
+		t.Fatalf("expected submitted text to expand large paste, len=%d", len(line))
+	}
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "[Pasted Content 1001 chars]") {
+		t.Fatalf("expected visible placeholder for large paste, got %q", rendered)
+	}
+	if strings.Contains(rendered, large) {
+		t.Fatalf("expected rendered input to avoid full large paste")
 	}
 }
 
@@ -442,8 +472,25 @@ func TestReadInteractiveLine_BuffersRapidPlainInputIntoSingleRedraw(t *testing.T
 	if count := strings.Count(rendered, prompt); count != 1 {
 		t.Fatalf("expected prompt to be rendered once, got %d in %q", count, rendered)
 	}
-	if count := strings.Count(rendered, cursorRestoreSequence); count != 1 {
-		t.Fatalf("expected one redraw after buffered plain input, got %d in %q", count, rendered)
+	if count := strings.Count(rendered, cursorRestoreSequence); count != 2 {
+		t.Fatalf("expected one bounded redraw after buffered plain input, got %d cursor restores in %q", count, rendered)
+	}
+}
+
+func TestReadInteractiveLine_RedrawDoesNotClearToScreenEnd(t *testing.T) {
+	var output bytes.Buffer
+	_, err := readInteractiveLine(
+		strings.NewReader("first\nsecond\x1b[D\x1b[C\n"),
+		&output,
+		"你> ",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if strings.Contains(output.String(), clearToEndSequence) {
+		t.Fatalf("expected redraw to avoid clear-to-screen-end, got %q", output.String())
 	}
 }
 

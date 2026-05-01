@@ -24,8 +24,22 @@ const (
 	cursorSaveSequence            = "\x1b[s"
 	cursorRestoreSequence         = "\x1b[u"
 	clearToEndSequence            = "\x1b[J"
-	plainInputBurstFlushDelay     = 12 * time.Millisecond
 )
+
+var plainInputBurstFlushDelay = defaultPlainInputBurstFlushDelay()
+
+func defaultPlainInputBurstFlushDelay() time.Duration {
+	if runtime.GOOS == "windows" {
+		return 60 * time.Millisecond
+	}
+	if strings.TrimSpace(os.Getenv("WSL_DISTRO_NAME")) != "" || strings.TrimSpace(os.Getenv("WSL_INTEROP")) != "" {
+		return 35 * time.Millisecond
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TERM_PROGRAM")), "vscode") {
+		return 35 * time.Millisecond
+	}
+	return 12 * time.Millisecond
+}
 
 type editorKeyKind int
 
@@ -193,6 +207,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 	_ = prompt
 
 	line := make([]rune, 0, 64)
+	composer := NewComposerState()
 	cursor := 0
 	historyPos := len(history)
 	var draft []rune
@@ -211,6 +226,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 	pending := make([]byte, 0, 16)
 	pasteActive := false
 	stdinFile, _ := reader.(*os.File)
+	lastRenderedRows := 1
 
 	if onChange != nil {
 		onChange("")
@@ -224,10 +240,15 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			termWidth = 80
 		}
 		promptWidth := terminalVisibleWidth(prompt)
+		renderedRows := interactiveInputDisplayRows(line, promptWidth, termWidth)
+		clearRows := renderedRows
+		if lastRenderedRows > clearRows {
+			clearRows = lastRenderedRows
+		}
 		var builder strings.Builder
 		builder.Grow(len(line)*4 + 24)
 		builder.WriteString(cursorRestoreSequence)
-		builder.WriteString(clearToEndSequence)
+		appendClearInteractiveInputRows(&builder, clearRows)
 		builder.WriteString(renderInteractiveInputForTerminal(line))
 		if cursor < len(line) {
 			endPos := interactiveInputVisualPosition(line, len(line), promptWidth, termWidth)
@@ -240,6 +261,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 				fmt.Fprintf(&builder, "\x1b[%dC", cursorPos.col)
 			}
 		}
+		lastRenderedRows = renderedRows
 		fmt.Fprint(writer, builder.String())
 	}
 
@@ -268,6 +290,27 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 		cursor += len(chars)
 		notifyChange()
 		redraw()
+	}
+
+	insertPastedText := func(text string) {
+		text = NormalizePastedText(text)
+		if text == "" {
+			return
+		}
+		reverseSearchActive = false
+		reverseSearchQuery = reverseSearchQuery[:0]
+		reverseSearchStart = len(history)
+		promoteDraft()
+		composer.SetText(string(line))
+		cursor = composer.HandlePasteAt(cursor, text)
+		line = []rune(composer.Text())
+		notifyChange()
+		redraw()
+	}
+
+	submittedText := func() string {
+		composer.SetText(string(line))
+		return strings.TrimRight(composer.SubmitText(), "\r\n")
 	}
 
 	storeKill := func(chars []rune) {
@@ -374,7 +417,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 
 	flushPlainBurst := func() {
 		if chars := plainBurst.flush(); len(chars) > 0 {
-			insertRunes(chars)
+			insertPastedText(string(chars))
 		}
 	}
 
@@ -442,7 +485,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 		}
 		if key.kind == editorKeyPasteEnd {
 			if pasteActive && len(pasteBuffer) > 0 {
-				insertRunes(append([]rune(nil), pasteBuffer...))
+				insertPastedText(string(pasteBuffer))
 				pasteBuffer = pasteBuffer[:0]
 			}
 			pasteActive = false
@@ -467,7 +510,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 				return "", ErrInteractiveInputInterrupted
 			case editorKeyEOF:
 				if len(pasteBuffer) > 0 {
-					insertRunes(append([]rune(nil), pasteBuffer...))
+					insertPastedText(string(pasteBuffer))
 					pasteBuffer = pasteBuffer[:0]
 				}
 				if len(line) == 0 {
@@ -507,7 +550,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			if onChange != nil {
 				onChange("")
 			}
-			return strings.TrimRight(string(line), "\r\n"), nil
+			return submittedText(), nil
 		case editorKeyBackspace:
 			flushPlainBurst()
 			clearReverseSearchState()
@@ -709,6 +752,27 @@ func renderInteractiveInputForTerminal(line []rune) string {
 		}
 	}
 	return builder.String()
+}
+
+func appendClearInteractiveInputRows(builder *strings.Builder, rows int) {
+	if builder == nil {
+		return
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	for i := 0; i < rows; i++ {
+		builder.WriteString("\x1b[K")
+		if i < rows-1 {
+			builder.WriteString("\x1b[1B\r")
+		}
+	}
+	builder.WriteString(cursorRestoreSequence)
+}
+
+func interactiveInputDisplayRows(line []rune, startCol, termWidth int) int {
+	pos := interactiveInputVisualPosition(line, len(line), startCol, termWidth)
+	return pos.row + 1
 }
 
 func interactiveInputVisualPosition(line []rune, cursor, startCol, termWidth int) interactiveInputPosition {

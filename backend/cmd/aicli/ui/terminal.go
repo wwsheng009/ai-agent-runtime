@@ -17,12 +17,14 @@ type Terminal struct {
 	width  int
 	height int
 	theme  *Theme
+	driver *TerminalDriver
 }
 
 // NewTerminal 创建新的终端控制组件
 func NewTerminal() *Terminal {
 	term := &Terminal{
-		theme: GetTheme(ThemeAuto),
+		theme:  GetTheme(ThemeAuto),
+		driver: NewTerminalDriver(os.Stdin, os.Stdout),
 	}
 	term.updateSize()
 	return term
@@ -30,8 +32,39 @@ func NewTerminal() *Terminal {
 
 // updateSize 更新终端尺寸
 func (t *Terminal) updateSize() {
-	t.width = GetTerminalWidth()
-	t.height = 24 // 默认高度，后续可以通过 escape code 获取实际高度
+	if t.driver != nil {
+		t.driver.RefreshCapabilities()
+		if width, height, err := t.driver.Size(); err == nil {
+			t.width = width
+			t.height = height
+			return
+		}
+	}
+	width, height := GetTerminalSize()
+	t.width = width
+	t.height = height
+}
+
+// RefreshSize 刷新终端尺寸并返回当前宽高。
+func (t *Terminal) RefreshSize() (width, height int) {
+	if t == nil {
+		return 80, 24
+	}
+	t.updateSize()
+	return t.width, t.height
+}
+
+// Capabilities 返回最近一次探测到的终端能力。
+func (t *Terminal) Capabilities() TerminalCapabilities {
+	if t == nil || t.driver == nil {
+		return TerminalCapabilities{Width: 80, Height: 24}
+	}
+	return t.driver.Capabilities()
+}
+
+// SupportsANSI 返回当前终端是否适合启用 ANSI 控制型 UI。
+func (t *Terminal) SupportsANSI() bool {
+	return t != nil && t.driver != nil && t.driver.SupportsANSI()
 }
 
 // Width 获取终端宽度
@@ -60,14 +93,25 @@ func (t *Terminal) ClearFromCursorToEnd() {
 	fmt.Print("\033[0J")
 }
 
+// ClearLine 清除当前行光标之后的内容。
+func (t *Terminal) ClearLine() {
+	fmt.Print("\033[K")
+}
+
 // MoveTo 移动光标到指定行列（1-based）
 func (t *Terminal) MoveTo(row, col int) {
+	if row < 1 {
+		row = 1
+	}
+	if col < 1 {
+		col = 1
+	}
 	fmt.Printf("\033[%d;%dH", row, col)
 }
 
 // MoveToRow 移动光标到指定行
 func (t *Terminal) MoveToRow(row int) {
-	fmt.Printf("\033[%d;0H", row)
+	t.MoveTo(row, 1)
 }
 
 // MoveUp 向上移动 n 行
@@ -142,6 +186,45 @@ func (t *Terminal) DisableLineWrap() {
 	fmt.Print("\033[?7l")
 }
 
+// SetScrollRegion 设置终端滚动区域（1-based，包含 top/bottom）。
+func (t *Terminal) SetScrollRegion(top, bottom int) {
+	if top < 1 {
+		top = 1
+	}
+	if bottom < top {
+		bottom = top
+	}
+	fmt.Printf("\033[%d;%dr", top, bottom)
+	t.MoveTo(top, 1)
+}
+
+// ResetScrollRegion 恢复整屏为滚动区域。
+func (t *Terminal) ResetScrollRegion() {
+	fmt.Print("\033[r")
+}
+
+// EnableBracketedPaste 启用 bracketed paste。
+func (t *Terminal) EnableBracketedPaste() {
+	fmt.Print("\033[?2004h")
+}
+
+// DisableBracketedPaste 关闭 bracketed paste。
+func (t *Terminal) DisableBracketedPaste() {
+	fmt.Print("\033[?2004l")
+}
+
+// SetTitle 设置终端标题。
+func (t *Terminal) SetTitle(title string) {
+	title = strings.ReplaceAll(title, "\x1b", "")
+	title = strings.ReplaceAll(title, "\a", "")
+	fmt.Printf("\033]0;%s\a", title)
+}
+
+// ClearTitle 清空由应用设置的终端标题。
+func (t *Terminal) ClearTitle() {
+	fmt.Print("\033]0;\a")
+}
+
 // NewLine 插入新行
 func (t *Terminal) NewLine() {
 	fmt.Println()
@@ -211,14 +294,14 @@ func (t *Terminal) DrawBox(row, col, width, height int, title string) {
 
 // GetTerminalSize 获取终端实际大小（通过 escape code 查询）
 func GetTerminalSize() (width, height int) {
-	if runtime.GOOS == "windows" {
-		// Windows: 使用默认值
-		return 80, 24
+	width, height, err := term.GetSize(int(os.Stdout.Fd()))
+	if err == nil && width > 0 && height > 0 {
+		return width, height
 	}
-
-	// Unix-like: 使用 ANSI escape code 查询
-	// 注意：这需要终端支持，可能在某些环境下不工作
-	return 80, 24
+	if width = GetTerminalWidth(); width <= 0 {
+		width = 80
+	}
+	return width, 24
 }
 
 // SetupTerminal 设置终端，支持退出时还原
@@ -233,6 +316,10 @@ func SetupTerminal() (cleanup func()) {
 	cleanup = func() {
 		// 恢复光标
 		fmt.Print("\033[?25h")
+		// 恢复滚动区域
+		fmt.Print("\033[r")
+		// 关闭 bracketed paste
+		fmt.Print("\033[?2004l")
 		// 禁用备用屏幕
 		fmt.Print("\033[?1049l")
 	}
