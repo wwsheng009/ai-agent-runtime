@@ -442,7 +442,11 @@ func (m *Manager) metaToolDescriptor() *ToolDescriptor {
 
 func (m *Manager) listMCPResources(ctx context.Context, args map[string]interface{}) (string, error) {
 	if m.mcp == nil {
-		return "", fmt.Errorf("mcp manager not configured")
+		payload := map[string]interface{}{
+			"servers": map[string]interface{}{},
+		}
+		data, _ := json.Marshal(payload)
+		return string(data), nil
 	}
 
 	var server string

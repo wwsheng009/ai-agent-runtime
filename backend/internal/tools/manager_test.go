@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -227,6 +228,36 @@ func TestExecuteWithMeta_ListMCPResources_ExposesExplicitTextOutputKind(t *testi
 	}
 	if got := metadata["output_size"]; got == nil {
 		t.Fatal("expected output_size metadata")
+	}
+}
+
+func TestExecuteWithMeta_ListMCPResources_ReturnsEmptyListWithoutMCPManager(t *testing.T) {
+	manager := NewDefaultManager(nil)
+
+	output, metadata, err := manager.ExecuteWithMeta(context.Background(), "list_mcp_resources", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("ExecuteWithMeta failed: %v", err)
+	}
+	if metadata == nil {
+		t.Fatal("expected metadata, got nil")
+	}
+	if got := metadata[toolresult.MetadataKey]; got != toolresult.KindText {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.MetadataKey, toolresult.KindText, got)
+	}
+	if got := metadata[toolresult.SourceKey]; got != toolresult.SourceMeta {
+		t.Fatalf("expected %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceMeta, got)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("expected JSON output, got %q: %v", output, err)
+	}
+	servers, ok := payload["servers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected servers map, got %T %#v", payload["servers"], payload["servers"])
+	}
+	if len(servers) != 0 {
+		t.Fatalf("expected empty servers map, got %#v", servers)
 	}
 }
 
