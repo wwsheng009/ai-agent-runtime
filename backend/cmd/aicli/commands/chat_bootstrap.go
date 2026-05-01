@@ -10,7 +10,6 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
-	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type chatPersistenceState struct {
@@ -85,7 +84,7 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 		return nil, nil, fmt.Errorf("chat options is nil")
 	}
 
-	providerName := resolveChatProviderName(cfg, opts, loadedRuntimeSession)
+	providerName, providerSource := resolveChatProviderChoice(cfg, opts, loadedRuntimeSession)
 	providerContext, details, err := resolveProviderExecutionContext(cfg, providerName, "")
 	if err != nil {
 		return nil, details, err
@@ -103,15 +102,7 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 		}
 	}
 
-	reasoningSource := runtimetypes.NormalizeReasoningEffort(opts.ReasoningEffortFlag)
-	if !opts.ReasoningEffortChanged && loadedRuntimeSession != nil {
-		if storedEffort := runtimetypes.NormalizeReasoningEffort(runtimeSessionContextString(loadedRuntimeSession, chatRuntimeContextReasoningEffort)); storedEffort != "" {
-			reasoningSource = storedEffort
-		}
-	}
-	reasoningExplicit := opts.ReasoningEffortChanged
-
-	modelName := resolveChatModelName(provider, opts, loadedRuntimeSession)
+	modelName, modelSource := resolveChatModelChoice(cfg, provider, opts, loadedRuntimeSession)
 	finalContext, details, err := resolveProviderExecutionContext(cfg, providerName, modelName)
 	if err != nil {
 		return nil, details, err
@@ -121,19 +112,14 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 	adapter := finalContext.Adapter
 
 	shouldStream := resolveChatStreamMode(opts, loadedRuntimeSession)
-	reasoningEffort, warningMessage, err := resolveChatReasoningEffort(provider, modelName, reasoningSource, reasoningExplicit)
+	reasoningEffort, reasoningSource, warningMessage, err := resolveChatReasoningChoice(cfg, provider, modelName, opts, loadedRuntimeSession)
 	if err != nil {
 		return nil, nil, err
 	}
 	if warningMessage != "" {
 		fmt.Fprintln(os.Stderr, warningMessage)
 	}
-	if !reasoningExplicit && !opts.NoInteractive {
-		catalog := reasoningEffortCatalogForModel(provider, modelName)
-		if catalog.supported {
-			reasoningEffort = selectReasoningEffortWithReader(reasoningEffort, catalog.options, chatOptionInputReader(opts))
-		}
-	}
+	persistChatPreferencesIfNeeded(cfg, opts, loadedRuntimeSession, providerSource, modelSource, reasoningSource, warningMessage, providerName, modelName, reasoningEffort)
 	if opts.OutputFormat == "json" && shouldStream {
 		return nil, nil, fmt.Errorf("--output json 暂不支持与 --stream 同时使用")
 	}

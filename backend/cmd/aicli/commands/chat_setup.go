@@ -101,6 +101,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		MCPEnabled:         false,
 		SkillsMode:         opts.CLISkillsMode,
 		SkillsDebug:        opts.CLISkillsDebug,
+		Config:             cfg,
 		RetryConfig:        runtimeState.retryCfg,
 		RequestTimeout:     runtimeState.requestTimeout,
 		OutputFormat:       opts.OutputFormat,

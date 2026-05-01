@@ -168,22 +168,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 }
 
 func resolveChatProviderName(cfg *config.Config, opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session) string {
-	if opts == nil {
-		return ""
-	}
-
-	providerName := opts.ProviderFlag
-	if !opts.ProviderChanged && loadedRuntimeSession != nil {
-		if storedProvider := runtimeSessionContextString(loadedRuntimeSession, chatRuntimeContextProviderName); storedProvider != "" {
-			providerName = storedProvider
-		}
-	}
-	if providerName == "" && !opts.NoInteractive {
-		providerName = selectProviderWithReader(cfg, chatOptionInputReader(opts))
-	}
-	if providerName == "" && cfg != nil {
-		providerName = cfg.Providers.DefaultProvider
-	}
+	providerName, _ := resolveChatProviderChoice(cfg, opts, loadedRuntimeSession)
 	return providerName
 }
 

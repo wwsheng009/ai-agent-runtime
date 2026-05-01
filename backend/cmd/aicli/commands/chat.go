@@ -55,7 +55,10 @@ type ChatSession struct {
 	Formatter                  *formatter.MarkdownFormatter       // Markdown 格式化器
 	Layout                     *ui.Layout                         // 屏幕布局
 	InputBox                   *ui.InputBox                       // 输入框
-	TokenCount                 int                                // Token 计数
+	TokenCount                 int                                // 累计 token 使用量
+	ContextTokenCount          int                                // 最近一次 API 请求的上下文 token 占用
+	ContextWindowTokenCount    int                                // 最近一次 API 请求对应的上下文窗口大小
+	TurnContextTokenCount      int                                // 当前 turn 内累计的上下文 token 占用
 	MsgCount                   int                                // 消息计数
 	TurnRequestCount           int                                // 当前 turn 内的请求计数
 	SessionManager             *runtimechat.SessionManager        // 持久化会话管理器
@@ -72,6 +75,7 @@ type ChatSession struct {
 	SkillsBinding              *skillsRuntimeBinding              // Skills 运行时绑定
 	SkillsMode                 string                             // Skills 暴露模式
 	SkillsDebug                bool                               // Skills 调试输出
+	Config                     *config.Config                     // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
 	RetryConfig                RetryConfig                        // 重试配置
 	RequestTimeout             time.Duration                      // 请求超时（0 表示不设置）
 	OutputFormat               string                             // 输出格式（interactive|text|json）

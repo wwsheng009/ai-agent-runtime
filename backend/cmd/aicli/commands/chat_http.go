@@ -112,7 +112,7 @@ func isNetworkError(err error) bool {
 }
 
 // sendHTTPRequest 发送 HTTP 请求（支持重试）
-func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfig) (*http.Response, []byte, *httpRequestReport, error) {
+func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfig, onAttemptStart func(attempt int)) (*http.Response, []byte, *httpRequestReport, error) {
 	var lastErr error
 	var lastResp *http.Response
 	var body []byte
@@ -199,6 +199,9 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 		}
 
 		attemptStart := time.Now()
+		if onAttemptStart != nil {
+			onAttemptStart(attempt + 1)
+		}
 		newReq, err := http.NewRequest(req.Method, req.URL.String(), bytes.NewReader(originalBody))
 		if err != nil {
 			report.FinalError = fmt.Sprintf("创建重试请求失败: %v", err)
