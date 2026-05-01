@@ -208,7 +208,7 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 		return
 	}
 
-	if !opts.NoInteractive {
+	if shouldShowChatStartupBanner(opts) {
 		printWelcome()
 	}
 
@@ -231,11 +231,13 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	registerExitCleanup(finalCleanup)
 	defer runExitCleanup()
 
-	presentChatSession(session)
-	if persistenceState.loadedRuntimeSession != nil && shouldPrintChatSessionPreamble(session) && hasVisibleChatHistory(session) {
-		beginDirectInteractiveOutput(session)
-		fmt.Println()
-		printVisibleChatHistory(session, "已加载历史会话")
+	if shouldShowChatSessionStartupPreamble(opts) {
+		presentChatSession(session)
+		if persistenceState.loadedRuntimeSession != nil && shouldPrintChatSessionPreamble(session) && hasVisibleChatHistory(session) {
+			beginDirectInteractiveOutput(session)
+			fmt.Println()
+			printVisibleChatHistory(session, "已加载历史会话")
+		}
 	}
 
 	// 开始聊天循环

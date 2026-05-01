@@ -131,6 +131,54 @@ func TestShouldInitializeChatInteractiveUI_DisabledForJSONAndLegacyMode(t *testi
 	}
 }
 
+func TestShouldShowChatStartupBanner_SkipsInTUI(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	chatIsInteractiveTerminal = func() bool { return true }
+	if shouldShowChatStartupBanner(&chatCommandOptions{OutputFormat: "interactive"}) {
+		t.Fatal("expected startup banner to be skipped in TUI mode")
+	}
+}
+
+func TestShouldShowChatStartupBanner_ShowsInLegacyInteractiveMode(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	chatIsInteractiveTerminal = func() bool { return false }
+	if !shouldShowChatStartupBanner(&chatCommandOptions{OutputFormat: "interactive"}) {
+		t.Fatal("expected startup banner to show in legacy interactive mode")
+	}
+}
+
+func TestShouldShowChatSessionStartupPreamble_SkipsInTUI(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	chatIsInteractiveTerminal = func() bool { return true }
+	if shouldShowChatSessionStartupPreamble(&chatCommandOptions{OutputFormat: "interactive"}) {
+		t.Fatal("expected startup preamble to be skipped in TUI mode")
+	}
+}
+
+func TestShouldShowChatSessionStartupPreamble_ShowsInLegacyInteractiveMode(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	chatIsInteractiveTerminal = func() bool { return false }
+	if !shouldShowChatSessionStartupPreamble(&chatCommandOptions{OutputFormat: "interactive"}) {
+		t.Fatal("expected startup preamble to show in legacy interactive mode")
+	}
+}
+
 func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	runtimeSession.AddMessage(*runtimetypes.NewUserMessage("hello"))

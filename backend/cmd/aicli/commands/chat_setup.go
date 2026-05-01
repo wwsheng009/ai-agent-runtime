@@ -157,7 +157,20 @@ func shouldInitializeChatInteractiveUI(opts *chatCommandOptions) bool {
 	case "0", "false", "off", "legacy", "plain":
 		return false
 	}
-	return ui.IsInteractiveTerminal()
+	return chatIsInteractiveTerminal()
+}
+
+func shouldShowChatStartupBanner(opts *chatCommandOptions) bool {
+	if opts == nil || opts.NoInteractive {
+		return false
+	}
+	// TUI 模式会在 bootstrap 后接管屏幕，欢迎页没有必要先打印。
+	return !shouldInitializeChatInteractiveUI(opts)
+}
+
+func shouldShowChatSessionStartupPreamble(opts *chatCommandOptions) bool {
+	// 启动前置信息和欢迎页使用同一套 TUI 判定，避免两条路径出现分叉。
+	return shouldShowChatStartupBanner(opts)
 }
 
 func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPersistenceState, opts *chatCommandOptions) error {
