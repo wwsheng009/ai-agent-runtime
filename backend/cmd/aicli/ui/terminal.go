@@ -225,6 +225,20 @@ func (t *Terminal) ClearTitle() {
 	fmt.Print("\033]0;\a")
 }
 
+// CleanupOnExit 恢复终端状态并可选清屏。
+func (t *Terminal) CleanupOnExit(clear bool) {
+	if t == nil {
+		return
+	}
+	t.ShowCursor()
+	t.ResetScrollRegion()
+	t.DisableBracketedPaste()
+	t.DisableAltScreen()
+	if clear {
+		t.Clear()
+	}
+}
+
 // NewLine 插入新行
 func (t *Terminal) NewLine() {
 	fmt.Println()

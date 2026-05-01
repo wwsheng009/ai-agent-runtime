@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	leftToRightIsolate  = '\u2066'
+	leftToRightIsolate    = '\u2066'
 	popDirectionalIsolate = '\u2069'
-	arabicLetterMark    = '\u061C'
+	arabicLetterMark      = '\u061C'
 )
 
 // MessageType 消息类型
@@ -85,8 +85,8 @@ func (m *Message) Format() string {
 			plainPrefix = m.theme.UserIcon + " "
 			prefix = m.theme.FormatUser("")
 		} else {
-			plainPrefix = "你> "
-			prefix = "你> "
+			plainPrefix = "> "
+			prefix = "> "
 		}
 		coloredContent = m.theme.ColorizeUser(safeContent)
 

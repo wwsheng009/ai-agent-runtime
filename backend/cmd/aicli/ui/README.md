@@ -37,7 +37,7 @@ cmd/aicli/
 - 提供 GetIcon(name) 方法获取图标
 
 ### 3. input.go - 输入提示符组件
-- PromptUser() - 用户输入提示符（带图标和颜色）
+- PromptUser() - 用户输入提示符（仅保留 `>` 前缀，带颜色）
 - PromptAssistant() - 助手输入提示符（通常不使用，但保留扩展性）
 - 输入框高亮和光标支持
 
@@ -131,7 +131,7 @@ cmd/aicli/
 - chat 启动后追加的 `MCP / Reasoning Effort / Session / Title / History / Skills / Skills Mode / Skills Top-K` 使用另一组固定 label 宽度，保持纵向对齐
 
 ### 3. 消息区 Gutter
-- `👤你>`、`🤖`、`ℹ️`、`🔧工具>`、`❌` 等前缀视为独立 gutter 列
+- `👤`、`>`、`🤖`、`ℹ️`、`🔧工具>`、`❌` 等前缀视为独立 gutter 列
 - 首行格式为 `前缀列 + 内容列`
 - 多行消息的续行必须直接对齐到首行内容列，而不是简单补两个空格
 - assistant 内容列宽由 `AssistantContentIndent()` / `IndentAssistantContent()` 统一提供，避免不同调用方各自计算
@@ -142,7 +142,7 @@ cmd/aicli/
 - actor 模式下如果已经发生 assistant delta 渲染，最终响应应走统一收口逻辑，不再整段 fallback 重打
 
 ### 5. Prompt / Thinking / Timeline
-- 在管道或重定向场景中，`你>` 提示符输出后要先换行，再显示 thinking 或 assistant 内容
+- 在管道或重定向场景中，`>` 提示符输出后要先换行，再显示 thinking 或 assistant 内容
 - `[thinking] ...` 和异步 timeline 行共享 assistant gutter
 - thinking、timeline、assistant 正文需要落在同一内容列，避免图标列和正文列交错
 

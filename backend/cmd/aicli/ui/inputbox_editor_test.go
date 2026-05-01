@@ -3,8 +3,13 @@ package ui
 import (
 	"bytes"
 	"errors"
+	"io"
+	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestReadInteractiveLine_HandlesArrowKeysAndEditing(t *testing.T) {
@@ -12,7 +17,7 @@ func TestReadInteractiveLine_HandlesArrowKeysAndEditing(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("ab\x1b[DZ\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -29,7 +34,7 @@ func TestReadInteractiveLine_CtrlUClearsCurrentLine(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("hello\x15world\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -46,7 +51,7 @@ func TestReadInteractiveLine_CtrlWDeletesPreviousWord(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("hello world\x17\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -63,7 +68,7 @@ func TestReadInteractiveLine_CtrlKDeletesSuffixFromCursor(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("hello world\x1b[D\x1b[D\x1b[D\x0b\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -80,7 +85,7 @@ func TestReadInteractiveLine_CtrlLRedrawsCurrentLine(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("abc\x0c\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -101,7 +106,7 @@ func TestReadInteractiveLine_CtrlYYanksLastKilledText(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("hello world\x17\x19\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -118,7 +123,7 @@ func TestReadInteractiveLine_CtrlTTransposesLastTwoCharacters(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("abc\x14\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -135,7 +140,7 @@ func TestReadInteractiveLine_CtrlRSearchesHistoryAndCyclesBackward(t *testing.T)
 	line, err := readInteractiveLine(
 		strings.NewReader("alpha\x12\x12\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		[]string{"first alpha", "beta", "second alpha"},
 		nil,
 	)
@@ -152,7 +157,7 @@ func TestReadInteractiveLine_CtrlPNavigateHistory(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("draft\x10\x0e\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		[]string{"first", "second"},
 		nil,
 	)
@@ -169,7 +174,7 @@ func TestReadInteractiveLine_AltBMovesBackwardByWord(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("hello world\x1bbX\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -186,7 +191,7 @@ func TestReadInteractiveLine_AltBackspaceDeletesPreviousWord(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("hello world\x1b\x7fX\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -216,7 +221,7 @@ func TestReadInteractiveLine_CtrlDeleteDeletesForwardWord(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("hello world\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[3;5~X\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -233,7 +238,7 @@ func TestReadInteractiveLine_AltDeleteDeletesForwardWord(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("hello world\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[3;3~X\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -250,7 +255,7 @@ func TestReadInteractiveLine_CtrlArrowMovesByWord(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("hello world\x1b[1;5D\x1b[1;5CX\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -267,7 +272,7 @@ func TestReadInteractiveLine_CtrlGAbortsReverseSearchAndRestoresDraft(t *testing
 	line, err := readInteractiveLine(
 		strings.NewReader("alpha\x12\x12\x07\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		[]string{"first alpha", "beta", "second alpha"},
 		nil,
 	)
@@ -306,7 +311,7 @@ func TestReadInteractiveLine_RestoresDraftAfterHistoryNavigation(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("draft\x1b[A\x1b[B\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		[]string{"first", "second"},
 		nil,
 	)
@@ -323,7 +328,7 @@ func TestReadInteractiveLine_HandlesBracketedPasteAsAtomicMultiLineInput(t *test
 	line, err := readInteractiveLine(
 		strings.NewReader("\x1b[200~first\nsecond\x1b[201~\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -340,7 +345,7 @@ func TestReadInteractiveLine_RendersMultilinePasteWithCarriageReturns(t *testing
 	line, err := readInteractiveLine(
 		strings.NewReader("\x1b[200~first\nsecond\x1b[201~\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -365,7 +370,7 @@ func TestReadInteractiveLine_OnChangeReceivesRealMultilineInput(t *testing.T) {
 	line, err := readInteractiveLine(
 		strings.NewReader("\x1b[200~first\nsecond\x1b[201~\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		func(text string) {
 			changes = append(changes, text)
@@ -387,7 +392,7 @@ func TestReadInteractiveLine_OnChangeReceivesRealMultilineInput(t *testing.T) {
 
 func TestReadInteractiveLine_BuffersBracketedPasteIntoSingleRedraw(t *testing.T) {
 	var output bytes.Buffer
-	prompt := "你> "
+	prompt := UserPromptText(0)
 	output.WriteString(prompt)
 	output.WriteString(cursorSaveSequence)
 
@@ -419,7 +424,7 @@ func TestReadInteractiveLine_BuffersBracketedPasteIntoSingleRedraw(t *testing.T)
 
 func TestReadInteractiveLine_LargeBracketedPasteUsesPlaceholderButSubmitsFullText(t *testing.T) {
 	var output bytes.Buffer
-	prompt := "你> "
+	prompt := UserPromptText(0)
 	output.WriteString(prompt)
 	output.WriteString(cursorSaveSequence)
 
@@ -449,17 +454,19 @@ func TestReadInteractiveLine_LargeBracketedPasteUsesPlaceholderButSubmitsFullTex
 
 func TestReadInteractiveLine_BuffersRapidPlainInputIntoSingleRedraw(t *testing.T) {
 	var output bytes.Buffer
-	prompt := "你> "
+	prompt := UserPromptText(0)
 	output.WriteString(prompt)
 	output.WriteString(cursorSaveSequence)
 
 	longInput := strings.Repeat("a", 96) + "\n"
-	line, err := readInteractiveLine(
+	line, err := readInteractiveLineWithOptions(
 		strings.NewReader(longInput),
 		&output,
 		prompt,
 		nil,
 		nil,
+		true,
+		true,
 	)
 	if err != nil {
 		t.Fatalf("readInteractiveLine: %v", err)
@@ -477,12 +484,131 @@ func TestReadInteractiveLine_BuffersRapidPlainInputIntoSingleRedraw(t *testing.T
 	}
 }
 
+func TestDefaultPasteBurstHoldFirstRunePlatformPolicy(t *testing.T) {
+	got := defaultPasteBurstHoldFirstRune()
+	if runtime.GOOS == "windows" && !got {
+		t.Fatal("expected Windows to keep hold-first paste burst mode")
+	}
+	if runtime.GOOS != "windows" && got {
+		t.Fatalf("expected %s to echo the first rune without hold-first mode", runtime.GOOS)
+	}
+}
+
+func TestReadInteractiveLine_ComposerNoHoldEchoesFirstRuneImmediately(t *testing.T) {
+	readerR, readerW := io.Pipe()
+	defer func() {
+		_ = readerR.Close()
+		_ = readerW.Close()
+	}()
+
+	output := &notifyingBuffer{
+		notify: make(chan struct{}),
+		match:  "x",
+	}
+
+	done := make(chan struct{})
+	var (
+		line string
+		err  error
+	)
+	go func() {
+		line, err = readInteractiveLineWithOptions(readerR, output, UserPromptText(0), nil, nil, true, false)
+		close(done)
+	}()
+
+	if _, err := readerW.Write([]byte("x")); err != nil {
+		t.Fatalf("write first rune: %v", err)
+	}
+
+	select {
+	case <-output.notify:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for first rune to echo in no-hold composer")
+	}
+
+	if _, err := readerW.Write([]byte("\n")); err != nil {
+		t.Fatalf("write newline: %v", err)
+	}
+	if err := readerW.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for no-hold composer to finish")
+	}
+
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithOptions: %v", err)
+	}
+	if line != "x" {
+		t.Fatalf("expected no-hold composer line to submit x, got %q", line)
+	}
+}
+
+func TestReadInteractiveLine_TransientNoHoldEchoesFirstRuneImmediately(t *testing.T) {
+	readerR, readerW := io.Pipe()
+	defer func() {
+		_ = readerR.Close()
+		_ = readerW.Close()
+	}()
+
+	output := &notifyingBuffer{
+		notify: make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	var (
+		line string
+		err  error
+	)
+	go func() {
+		line, err = readInteractiveLineWithOptions(readerR, output, UserPromptText(0), nil, nil, false, false)
+		close(done)
+	}()
+
+	if _, err := readerW.Write([]byte("1")); err != nil {
+		t.Fatalf("write first rune: %v", err)
+	}
+
+	select {
+	case <-output.notify:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for first rune to echo in transient prompt")
+	}
+
+	if got := output.String(); !strings.Contains(got, "1") {
+		t.Fatalf("expected transient prompt to echo first rune immediately, got %q", got)
+	}
+
+	if _, err := readerW.Write([]byte("\n")); err != nil {
+		t.Fatalf("write newline: %v", err)
+	}
+	if err := readerW.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for transient prompt to finish")
+	}
+
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithOptions: %v", err)
+	}
+	if line != "1" {
+		t.Fatalf("expected transient prompt line to submit 1, got %q", line)
+	}
+}
+
 func TestReadInteractiveLine_RedrawDoesNotClearToScreenEnd(t *testing.T) {
 	var output bytes.Buffer
 	_, err := readInteractiveLine(
 		strings.NewReader("first\nsecond\x1b[D\x1b[C\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -499,7 +625,7 @@ func TestReadInteractiveLine_PreservesNonBracketedPasteNewlineWhenMoreInputIsPen
 	line, err := readInteractiveLine(
 		strings.NewReader("first\nsecond\x1b[D\x1b[C\n"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -511,12 +637,31 @@ func TestReadInteractiveLine_PreservesNonBracketedPasteNewlineWhenMoreInputIsPen
 	}
 }
 
+func TestReadInteractiveLine_NoHoldPreservesNonBracketedPasteNewlineWhenMoreInputIsPending(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLineWithOptions(
+		strings.NewReader("first\nsecond\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithOptions: %v", err)
+	}
+	if line != "first\nsecond" {
+		t.Fatalf("expected no-hold non-bracketed pasted newline to stay intact, got %q", line)
+	}
+}
+
 func TestReadInteractiveLine_CtrlCOnEmptyLineRequestsExit(t *testing.T) {
 	var output bytes.Buffer
 	_, err := readInteractiveLine(
 		strings.NewReader("\x03"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -530,7 +675,7 @@ func TestReadInteractiveLine_CtrlCWithTypedContentCancelsInput(t *testing.T) {
 	_, err := readInteractiveLine(
 		strings.NewReader("hello\x03"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
@@ -544,11 +689,88 @@ func TestReadInteractiveLine_CtrlDOnEmptyLineRequestsExit(t *testing.T) {
 	_, err := readInteractiveLine(
 		strings.NewReader("\x04"),
 		&output,
-		"你> ",
+		UserPromptText(0),
 		nil,
 		nil,
 	)
 	if !errors.Is(err, ErrInteractiveInputExitRequested) {
 		t.Fatalf("expected exit request error, got %v", err)
+	}
+}
+
+type notifyingBuffer struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	notify chan struct{}
+	match  string
+	sent   bool
+}
+
+func (b *notifyingBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n, err := b.buf.Write(p)
+	match := b.match
+	if match == "" {
+		match = "1"
+	}
+	if !b.sent && strings.Contains(b.buf.String(), match) {
+		b.sent = true
+		close(b.notify)
+	}
+	return n, err
+}
+
+func (b *notifyingBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestReadTransientLine_DoesNotAddToHistory(t *testing.T) {
+	oldStdin := os.Stdin
+	oldStdout := os.Stdout
+	stdinRead, stdinWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe stdin: %v", err)
+	}
+	stdoutRead, stdoutWrite, err := os.Pipe()
+	if err != nil {
+		_ = stdinRead.Close()
+		_ = stdinWrite.Close()
+		t.Fatalf("os.Pipe stdout: %v", err)
+	}
+	defer func() {
+		os.Stdin = oldStdin
+		os.Stdout = oldStdout
+		_ = stdinRead.Close()
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
+	}()
+
+	os.Stdin = stdinRead
+	os.Stdout = stdoutWrite
+	if _, err := stdinWrite.WriteString("choice\n"); err != nil {
+		t.Fatalf("write transient stdin: %v", err)
+	}
+	if err := stdinWrite.Close(); err != nil {
+		t.Fatalf("close transient stdin writer: %v", err)
+	}
+
+	ib := NewInputBox(nil)
+	ib.AddToHistory("keep")
+
+	line, err := ib.ReadTransientLine(nil)
+	if err != nil {
+		t.Fatalf("ReadTransientLine: %v", err)
+	}
+	if line != "choice" {
+		t.Fatalf("expected transient line choice, got %q", line)
+	}
+	if got := ib.GetHistorySize(); got != 1 {
+		t.Fatalf("expected transient read not to add history, got size %d", got)
+	}
+	if stored, ok := ib.GetHistoryAt(0); !ok || stored != "keep" {
+		t.Fatalf("expected existing history to remain unchanged, got %q ok=%v", stored, ok)
 	}
 }

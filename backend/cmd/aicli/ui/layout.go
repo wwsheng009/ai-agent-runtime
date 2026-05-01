@@ -395,7 +395,7 @@ func (l *Layout) MoveToInput() {
 	}
 
 	l.terminal.SaveCursor()
-	l.terminal.MoveTo(l.inputArea.Row, len("👤你> ")+1) // 跳过提示符
+	l.terminal.MoveTo(l.inputArea.Row, DisplayWidth(UserPromptText(0))+1) // 跳过提示符
 	l.terminal.RestoreCursor()
 }
 

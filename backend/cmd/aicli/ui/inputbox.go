@@ -64,10 +64,10 @@ func (ib *InputBox) SetMaxLines(maxLines int) *InputBox {
 func (ib *InputBox) Show() {
 	if ib.layout != nil && ib.layout.IsEnabled() {
 		// 使用布局渲染
-		ib.layout.RenderInputArea(ib.theme.UserColor.Sprintf("👤你> "), "")
+		ib.layout.RenderInputArea(ib.GetPrompt(), "")
 	} else {
 		// 直接打印
-		fmt.Print(ib.theme.UserColor.Sprintf("👤你> "))
+		fmt.Print(ib.theme.UserColor.Sprint(ib.GetPrompt()))
 	}
 }
 
@@ -102,7 +102,7 @@ func (ib *InputBox) ReadMultiLine() (string, error) {
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		prompt := "👤你> "
+		prompt := ib.GetPrompt()
 		if lineCount > 0 {
 			prompt = "   ...> "
 		}
@@ -213,13 +213,13 @@ func (ib *InputBox) Clear() {
 // Update 更新输入显示
 func (ib *InputBox) Update(input string) {
 	if ib.layout != nil && ib.layout.IsEnabled() {
-		ib.layout.RenderInputArea(ib.theme.UserColor.Sprintf("👤you> "), input)
+		ib.layout.RenderInputArea(ib.GetPrompt(), input)
 	}
 }
 
 // GetPrompt 获取提示符字符串
 func (ib *InputBox) GetPrompt() string {
-	return ib.theme.UserColor.Sprintf("👤你> ")
+	return UserPromptText(0)
 }
 
 // Validate 验证输入
@@ -250,7 +250,7 @@ func (ib *InputBox) Complete(input string, pos int) (string, []string) {
 
 // FormatPrompt 格式化带上下文的提示符
 func (ib *InputBox) FormatPrompt(context string) string {
-	prompt := ib.theme.UserColor.Sprintf("👤you> ")
+	prompt := ib.theme.UserColor.Sprint(ib.GetPrompt())
 	if context != "" {
 		prompt = fmt.Sprintf("%s ", ib.theme.Dimmed(context))
 	}
@@ -261,7 +261,7 @@ func (ib *InputBox) FormatPrompt(context string) string {
 func (ib *InputBox) Cursor(pos int) {
 	if ib.layout != nil && ib.layout.IsEnabled() {
 		// 计算实际位置
-		promptLen := len(ib.GetPrompt())
+		promptLen := terminalVisibleWidth(ib.GetPrompt())
 		actualPos := promptLen + pos + 1 // +1 因为列是 1-based
 
 		ib.terminal.SaveCursor()

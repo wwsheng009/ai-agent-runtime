@@ -11,9 +11,9 @@ import (
 type InputType int
 
 const (
-	InputDefault InputType = iota // 默认输入
-	InputCommand                  // 命令输入
-	InputPassword                 // 密码输入（暂不实现）
+	InputDefault  InputType = iota // 默认输入
+	InputCommand                   // 命令输入
+	InputPassword                  // 密码输入（暂不实现）
 )
 
 // Input 组件
@@ -25,12 +25,22 @@ type Input struct {
 	readOnly    bool
 }
 
+const defaultUserPrompt = "> "
+
+// UserPromptText returns the plain user prompt text.
+func UserPromptText(attachmentCount int) string {
+	if attachmentCount <= 0 {
+		return defaultUserPrompt
+	}
+	return fmt.Sprintf("> [📎%d] ", attachmentCount)
+}
+
 // NewInput 创建新的输入组件
 func NewInput(inputType InputType) *Input {
 	return &Input{
 		theme:     GetTheme(ThemeAuto),
 		inputType: inputType,
-		prefix:    "你> ",
+		prefix:    defaultUserPrompt,
 	}
 }
 
@@ -69,13 +79,12 @@ func (i *Input) Show() {
 	case InputCommand:
 		fmt.Printf("%s ", i.theme.CommandColor.Sprint(i.theme.CommandIcon))
 	default:
-		fmt.Printf("%s ", i.theme.UserColor.Sprint(i.userIconPrefix()))
+		prompt := i.prefix
+		if strings.TrimSpace(prompt) == "" {
+			prompt = defaultUserPrompt
+		}
+		fmt.Print(i.theme.UserColor.Sprint(prompt))
 	}
-}
-
-// userIconPrefix 用户图标前缀
-func (i *Input) userIconPrefix() string {
-	return fmt.Sprintf("%s你>", i.theme.UserIcon)
 }
 
 // Read 读取用户输入
@@ -104,10 +113,7 @@ func Prompt(prompt string) (string, error) {
 
 // PromptUser 用户输入提示符
 func PromptUser() string {
-	i := NewInput(InputDefault)
-	i.SetPrefix(fmt.Sprintf("%s你> ", GetTheme(ThemeAuto).UserColor.Sprint(GetTheme(ThemeAuto).UserIcon)))
-
-	input, err := i.Read()
+	input, err := NewInput(InputDefault).Read()
 	if err != nil {
 		return ""
 	}
@@ -124,16 +130,13 @@ func PromptAssistant(message string) {
 // FormatUserPrompt 格式化用户输入提示
 func FormatUserPrompt() string {
 	theme := GetTheme(ThemeAuto)
-	return theme.UserColor.Sprintf("%s你> ", theme.UserIcon)
+	return theme.UserColor.Sprint(UserPromptText(0))
 }
 
 // FormatUserPromptWithAttachments 格式化带附件数量的用户输入提示
 func FormatUserPromptWithAttachments(attachmentCount int) string {
 	theme := GetTheme(ThemeAuto)
-	if attachmentCount <= 0 {
-		return FormatUserPrompt()
-	}
-	return theme.UserColor.Sprintf("%s你> [📎%d] ", theme.UserIcon, attachmentCount)
+	return theme.UserColor.Sprint(UserPromptText(attachmentCount))
 }
 
 // FormatAssistantPrompt 格式化助手输出提示

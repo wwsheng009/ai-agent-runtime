@@ -26,19 +26,12 @@ const (
 	clearToEndSequence            = "\x1b[J"
 )
 
-var plainInputBurstFlushDelay = defaultPlainInputBurstFlushDelay()
-
-func defaultPlainInputBurstFlushDelay() time.Duration {
-	if runtime.GOOS == "windows" {
-		return 60 * time.Millisecond
-	}
-	if strings.TrimSpace(os.Getenv("WSL_DISTRO_NAME")) != "" || strings.TrimSpace(os.Getenv("WSL_INTEROP")) != "" {
-		return 35 * time.Millisecond
-	}
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("TERM_PROGRAM")), "vscode") {
-		return 35 * time.Millisecond
-	}
-	return 12 * time.Millisecond
+func defaultPasteBurstHoldFirstRune() bool {
+	// Unix PTY / WSL 下 poll readiness 对 raw stdin 的行为更容易受终端
+	// 与多路复用器影响。首字符不能依赖异步 flush，否则会表现为输入被
+	// 缓存但不回显；Windows console 继续使用 hold-first 以保持现有
+	// paste burst 聚合路径。
+	return runtime.GOOS == "windows"
 }
 
 type editorKeyKind int
@@ -77,56 +70,35 @@ type editorKey struct {
 	r    rune
 }
 
-type plainInputBurst struct {
-	runes    []rune
-	deadline time.Time
-}
-
-func (b *plainInputBurst) empty() bool {
-	return b == nil || len(b.runes) == 0
-}
-
-func (b *plainInputBurst) add(r rune, now time.Time) {
-	if b == nil {
-		return
-	}
-	b.runes = append(b.runes, r)
-	b.deadline = now.Add(plainInputBurstFlushDelay)
-}
-
-func (b *plainInputBurst) containsNewline() bool {
-	if b == nil {
-		return false
-	}
-	for _, r := range b.runes {
-		if r == '\n' {
-			return true
-		}
-	}
-	return false
-}
-
-func (b *plainInputBurst) flush() []rune {
-	if b == nil || len(b.runes) == 0 {
-		return nil
-	}
-	out := append([]rune(nil), b.runes...)
-	b.runes = b.runes[:0]
-	b.deadline = time.Time{}
-	return out
-}
-
 // ReadWithHistoryPrompt reads a single line using a local line editor.
 //
 // The caller is expected to have already rendered the prompt when running in
 // interactive chat mode. This method therefore only redraws the active line and
 // keeps the history state on the InputBox.
 func (ib *InputBox) ReadWithHistoryPrompt(prompt string, onChange func(string)) (string, error) {
+	return ib.readPrompt(prompt, onChange, true, true, true, defaultPasteBurstHoldFirstRune())
+}
+
+// ReadTransientPrompt reads a single line with the same editing surface as
+// ReadWithHistoryPrompt, but it does not add the submitted text to history,
+// suppresses the final submit newline echo, and keeps the first character
+// visible immediately for modal prompts.
+func (ib *InputBox) ReadTransientPrompt(prompt string, onChange func(string)) (string, error) {
+	return ib.readPrompt(prompt, onChange, false, false, true, false)
+}
+
+// ReadTransientLine reads a transient response without a visible prompt label.
+// This is used by modal questions that already printed their own prompt text.
+func (ib *InputBox) ReadTransientLine(onChange func(string)) (string, error) {
+	return ib.readPrompt("", onChange, false, false, false, false)
+}
+
+func (ib *InputBox) readPrompt(prompt string, onChange func(string), keepHistory bool, echoSubmit bool, useDefaultPrompt bool, holdFirstRune bool) (string, error) {
 	if ib == nil {
 		return "", io.EOF
 	}
 
-	if prompt == "" {
+	if prompt == "" && useDefaultPrompt {
 		prompt = ib.GetPrompt()
 	}
 
@@ -137,10 +109,10 @@ func (ib *InputBox) ReadWithHistoryPrompt(prompt string, onChange func(string)) 
 		onChange("")
 	}
 
-	// Windows retains the current line-buffered behavior for now.
-	if runtime.GOOS == "windows" || !IsInteractiveTerminal() {
+	// Non-interactive terminals keep line-buffered behavior.
+	if !IsInteractiveTerminal() {
 		line, err := readBufferedLine(os.Stdin)
-		if err == nil && strings.TrimSpace(line) != "" {
+		if err == nil && keepHistory && strings.TrimSpace(line) != "" {
 			ib.AddToHistory(line)
 		}
 		if onChange != nil {
@@ -172,8 +144,8 @@ func (ib *InputBox) ReadWithHistoryPrompt(prompt string, onChange func(string)) 
 	// 这里保存当前光标位置，后续重绘只刷新输入区，避免折行后重复残留。
 	fmt.Fprint(os.Stdout, cursorSaveSequence)
 
-	line, readErr := readInteractiveLine(os.Stdin, os.Stdout, prompt, ib.history, onChange)
-	if readErr == nil && strings.TrimSpace(line) != "" {
+	line, readErr := readInteractiveLineWithOptions(os.Stdin, os.Stdout, prompt, ib.history, onChange, echoSubmit, holdFirstRune)
+	if readErr == nil && keepHistory && strings.TrimSpace(line) != "" {
 		ib.AddToHistory(line)
 	}
 	if onChange != nil {
@@ -198,6 +170,10 @@ func readBufferedLine(reader io.Reader) (string, error) {
 }
 
 func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string)) (string, error) {
+	return readInteractiveLineWithOptions(reader, writer, prompt, history, onChange, true, defaultPasteBurstHoldFirstRune())
+}
+
+func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string), echoSubmit bool, holdFirstRune bool) (string, error) {
 	if reader == nil {
 		return "", io.EOF
 	}
@@ -215,9 +191,9 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 	// Bracketed paste arrives as a bounded burst; keep it in-memory until the
 	// closing marker so the terminal only redraws once for the whole paste.
 	var pasteBuffer []rune
-	// Plain input that arrives in a rapid burst is buffered briefly so WSL and
-	// other non-bracketed terminals do not redraw the prompt on every rune.
-	var plainBurst plainInputBurst
+	// Plain input that arrives in a rapid burst is classified by the same
+	// PasteBurst state machine used by the higher-level composer.
+	var pasteBurst PasteBurst
 	var yankBuffer []rune
 	var reverseSearchQuery []rune
 	var reverseSearchOriginal []rune
@@ -304,6 +280,20 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 		composer.SetText(string(line))
 		cursor = composer.HandlePasteAt(cursor, text)
 		line = []rune(composer.Text())
+		notifyChange()
+		redraw()
+	}
+
+	insertTypedRune := func(ch rune) {
+		if ch == 0 {
+			return
+		}
+		reverseSearchActive = false
+		reverseSearchQuery = reverseSearchQuery[:0]
+		reverseSearchStart = len(history)
+		promoteDraft()
+		line = append(line[:cursor], append([]rune{ch}, line[cursor:]...)...)
+		cursor++
 		notifyChange()
 		redraw()
 	}
@@ -415,19 +405,28 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 		clearReverseSearchState()
 	}
 
-	flushPlainBurst := func() {
-		if chars := plainBurst.flush(); len(chars) > 0 {
-			insertPastedText(string(chars))
+	flushPasteBurst := func() {
+		switch result := pasteBurst.FlushIfDue(time.Now()); result.Kind {
+		case FlushResultPaste:
+			insertPastedText(result.Text)
+		case FlushResultTyped:
+			insertTypedRune(result.Ch)
 		}
 	}
 
-	waitForPlainBurstWindow := func() error {
-		if plainBurst.empty() || stdinFile == nil || len(pending) > 0 {
+	flushPasteBurstBeforeModifiedInput := func() {
+		if pasted := pasteBurst.FlushBeforeModifiedInput(); pasted != "" {
+			insertPastedText(pasted)
+		}
+	}
+
+	waitForPasteBurstWindow := func() error {
+		if !pasteBurst.IsActive() || stdinFile == nil || len(pending) > 0 {
 			return nil
 		}
-		timeout := time.Until(plainBurst.deadline)
+		timeout := time.Until(pasteBurst.Deadline())
 		if timeout <= 0 {
-			flushPlainBurst()
+			flushPasteBurst()
 			return nil
 		}
 		ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
@@ -435,22 +434,39 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			return err
 		}
 		if !ready {
-			flushPlainBurst()
+			flushPasteBurst()
 		}
 		return nil
 	}
 
-	plainBurstEnterShouldInsertNewline := func() (bool, error) {
-		if plainBurst.empty() {
+	pasteBurstEnterShouldInsertNewline := func() (bool, error) {
+		if !pasteBurst.IsActive() {
 			return false, nil
 		}
-		if plainBurst.containsNewline() || len(pending) > 0 {
+		if pasteBurst.ContainsNewline() || len(pending) > 0 {
 			return true, nil
 		}
 		if stdinFile == nil {
 			return false, nil
 		}
-		timeout := time.Until(plainBurst.deadline)
+		timeout := time.Until(pasteBurst.Deadline())
+		if timeout <= 0 {
+			return false, nil
+		}
+		return waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
+	}
+
+	plainPasteEnterShouldInsertNewline := func() (bool, error) {
+		if holdFirstRune {
+			return false, nil
+		}
+		if len(pending) > 0 {
+			return true, nil
+		}
+		if stdinFile == nil {
+			return false, nil
+		}
+		timeout := time.Until(pasteBurst.PlainContinuationDeadline())
 		if timeout <= 0 {
 			return false, nil
 		}
@@ -465,19 +481,19 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 	}
 
 	for {
-		if err := waitForPlainBurstWindow(); err != nil {
+		if err := waitForPasteBurstWindow(); err != nil {
 			return "", err
 		}
 		key, ok, readErr := nextInteractiveKey(reader, &pending)
 		if readErr != nil {
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			return "", readErr
 		}
 		if !ok || key.kind == editorKeyIgnore {
 			continue
 		}
 		if key.kind == editorKeyPasteStart {
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			pasteActive = true
 			pasteBuffer = pasteBuffer[:0]
@@ -531,28 +547,96 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			if unicode.IsControl(key.r) && key.r != '\n' {
 				continue
 			}
-			plainBurst.add(key.r, time.Now())
+			now := time.Now()
+			if key.r == '\n' {
+				insertTypedRune('\n')
+				pasteBurst.ClearWindowAfterNonChar()
+				continue
+			}
+			var decision CharDecision
+			if holdFirstRune {
+				decision = pasteBurst.OnPlainChar(key.r, now)
+			} else {
+				decision = pasteBurst.OnPlainCharNoHold(now)
+			}
+			switch decision.Kind {
+			case CharDecisionBufferAppend:
+				pasteBurst.AppendCharToBuffer(key.r, now)
+				continue
+			case CharDecisionBeginBuffer:
+				safeCursor := cursor
+				if safeCursor < 0 {
+					safeCursor = 0
+				}
+				if safeCursor > len(line) {
+					safeCursor = len(line)
+				}
+				before := string(line[:safeCursor])
+				if grab := pasteBurst.DecideBeginBuffer(now, before, decision.RetroChars); grab != nil {
+					if grab.StartByte < safeCursor {
+						line = append(line[:grab.StartByte], line[safeCursor:]...)
+						cursor = grab.StartByte
+						notifyChange()
+						redraw()
+					}
+					pasteBurst.AppendCharToBuffer(key.r, now)
+					continue
+				}
+				insertTypedRune(key.r)
+				continue
+			case CharDecisionBeginBufferFromPending:
+				pasteBurst.AppendCharToBuffer(key.r, now)
+				continue
+			case CharDecisionRetainFirstChar:
+				continue
+			}
+			insertTypedRune(key.r)
 		case editorKeyEnter:
-			if !plainBurst.empty() {
+			if pasteBurst.IsActive() {
 				// If more bytes are already queued, this Enter belongs to a
 				// non-bracketed paste and must stay in the editable text.
-				insertNewline, err := plainBurstEnterShouldInsertNewline()
+				insertNewline, err := pasteBurstEnterShouldInsertNewline()
 				if err != nil {
 					return "", err
 				}
 				if insertNewline {
-					plainBurst.add('\n', time.Now())
+					now := time.Now()
+					if pasteBurst.HasPendingFirstChar() && !pasteBurst.HasBufferedText() {
+						if pasteBurst.BeginBufferFromPending(now) {
+							pasteBurst.AppendCharToBuffer('\n', now)
+							continue
+						}
+					}
+					if pasteBurst.HasBufferedText() {
+						pasteBurst.AppendCharToBuffer('\n', now)
+						continue
+					}
+					insertTypedRune('\n')
+					pasteBurst.ClearWindowAfterNonChar()
 					continue
 				}
-				flushPlainBurst()
+				flushPasteBurstBeforeModifiedInput()
 			}
-			fmt.Fprint(writer, "\r\n")
+			insertPlainPasteNewline, err := plainPasteEnterShouldInsertNewline()
+			if err != nil {
+				return "", err
+			}
+			if insertPlainPasteNewline {
+				now := time.Now()
+				pasteBurst.ClearWindowAfterNonChar()
+				insertTypedRune('\n')
+				pasteBurst.ExtendWindow(now)
+				continue
+			}
+			if echoSubmit {
+				fmt.Fprint(writer, "\r\n")
+			}
 			if onChange != nil {
 				onChange("")
 			}
 			return submittedText(), nil
 		case editorKeyBackspace:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if cursor <= 0 {
 				continue
@@ -563,7 +647,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			notifyChange()
 			redraw()
 		case editorKeyDelete:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if cursor >= len(line) {
 				continue
@@ -573,35 +657,35 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			notifyChange()
 			redraw()
 		case editorKeyLeft:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if cursor > 0 {
 				cursor--
 				redraw()
 			}
 		case editorKeyRight:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if cursor < len(line) {
 				cursor++
 				redraw()
 			}
 		case editorKeyHome:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if cursor != 0 {
 				cursor = 0
 				redraw()
 			}
 		case editorKeyEnd:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if cursor != len(line) {
 				cursor = len(line)
 				redraw()
 			}
 		case editorKeyUp:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if len(history) == 0 {
 				continue
@@ -614,7 +698,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 				setLine([]rune(history[historyPos]))
 			}
 		case editorKeyDown:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if len(history) == 0 {
 				continue
@@ -633,7 +717,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 				}
 			}
 		case editorKeyClearLine:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if len(line) == 0 {
 				continue
@@ -645,7 +729,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			notifyChange()
 			redraw()
 		case editorKeyDeleteWord:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if cursor <= 0 || len(line) == 0 {
 				continue
@@ -661,7 +745,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			notifyChange()
 			redraw()
 		case editorKeyKillToEnd:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if cursor >= len(line) {
 				continue
@@ -672,38 +756,41 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			notifyChange()
 			redraw()
 		case editorKeyDeleteForwardWord:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			deleteForwardWord()
 		case editorKeyRedraw:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			redraw()
 		case editorKeyYank:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			yankKilledText()
 		case editorKeyTranspose:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			transposeChars()
 		case editorKeyBackwardWord:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			moveBackwardWord()
 		case editorKeyForwardWord:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			moveForwardWord()
 		case editorKeyReverseSearch:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			beginReverseSearch()
 		case editorKeyAbortSearch:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			abortReverseSearch()
 		case editorKeyInterrupt:
-			hadTypedContent := len(line) > 0 || !plainBurst.empty()
-			plainBurst = plainInputBurst{}
-			fmt.Fprint(writer, "\r\n")
+			flushPasteBurstBeforeModifiedInput()
+			hadTypedContent := len(line) > 0 || pasteBurst.IsActive()
+			pasteBurst.ClearAfterExplicitPaste()
+			if echoSubmit {
+				fmt.Fprint(writer, "\r\n")
+			}
 			if onChange != nil {
 				onChange("")
 			}
@@ -712,7 +799,7 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			}
 			return "", ErrInteractiveInputInterrupted
 		case editorKeyEOF:
-			flushPlainBurst()
+			flushPasteBurstBeforeModifiedInput()
 			if len(line) == 0 {
 				if onChange != nil {
 					onChange("")
