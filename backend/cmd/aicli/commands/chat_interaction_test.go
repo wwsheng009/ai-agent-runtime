@@ -654,16 +654,22 @@ func TestPrepareInteractiveRead_PrefersQueuedInputAfterTeamSettles(t *testing.T)
 
 	oldDiscard := discardPendingConsoleInput
 	oldPendingCount := pendingConsoleInputCount
+	oldPendingLineInput := pendingConsoleLineInput
+	oldPendingTextInput := pendingConsoleTextInput
 	oldShouldDiscard := shouldDiscardPendingInput
 	oldNewReader := newChatInputReader
 	defer func() {
 		discardPendingConsoleInput = oldDiscard
 		pendingConsoleInputCount = oldPendingCount
+		pendingConsoleLineInput = oldPendingLineInput
+		pendingConsoleTextInput = oldPendingTextInput
 		shouldDiscardPendingInput = oldShouldDiscard
 		newChatInputReader = oldNewReader
 	}()
 	discardPendingConsoleInput = func() (int, error) { return 2, nil }
 	pendingConsoleInputCount = func() (int, error) { return 2, nil }
+	pendingConsoleLineInput = func() (bool, error) { return true, nil }
+	pendingConsoleTextInput = func() (bool, error) { return false, nil }
 	shouldDiscardPendingInput = func() bool { return true }
 	newChatInputReader = func() *bufio.Reader { return bufio.NewReader(strings.NewReader("")) }
 
@@ -681,6 +687,40 @@ func TestPrepareInteractiveRead_PrefersQueuedInputAfterTeamSettles(t *testing.T)
 	}
 	if !strings.Contains(notice, "现将优先处理这些输入") {
 		t.Fatalf("expected queued-input notice, got %q", notice)
+	}
+}
+
+func TestPrepareInteractiveRead_IgnoresConsoleNoiseWithoutUserInput(t *testing.T) {
+	session := &ChatSession{}
+
+	oldDiscard := discardPendingConsoleInput
+	oldPendingCount := pendingConsoleInputCount
+	oldPendingLineInput := pendingConsoleLineInput
+	oldPendingTextInput := pendingConsoleTextInput
+	oldShouldDiscard := shouldDiscardPendingInput
+	defer func() {
+		discardPendingConsoleInput = oldDiscard
+		pendingConsoleInputCount = oldPendingCount
+		pendingConsoleLineInput = oldPendingLineInput
+		pendingConsoleTextInput = oldPendingTextInput
+		shouldDiscardPendingInput = oldShouldDiscard
+	}()
+
+	discardPendingConsoleInput = func() (int, error) { return 0, nil }
+	pendingConsoleInputCount = func() (int, error) { return 4, nil }
+	pendingConsoleLineInput = func() (bool, error) { return false, nil }
+	pendingConsoleTextInput = func() (bool, error) { return false, nil }
+	shouldDiscardPendingInput = func() bool { return true }
+
+	showPrompt, notice, err := prepareInteractiveRead(session)
+	if err != nil {
+		t.Fatalf("prepareInteractiveRead: %v", err)
+	}
+	if !showPrompt {
+		t.Fatal("expected prompt to remain visible when only console noise is pending")
+	}
+	if notice != "" {
+		t.Fatalf("expected no notice for console noise, got %q", notice)
 	}
 }
 

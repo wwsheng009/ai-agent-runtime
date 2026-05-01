@@ -54,8 +54,29 @@ func pendingInteractiveInputCount(session *ChatSession) int {
 	if !shouldDiscardPendingInput() {
 		return 0
 	}
+	if !hasPendingConsoleUserInput() {
+		return 0
+	}
 	count, _ := pendingConsoleInputCount()
-	return count
+	if count > 0 {
+		return count
+	}
+	return 1
+}
+
+// hasPendingConsoleUserInput 只把真正会影响聊天交互的键盘输入当成“有待处理输入”。
+// Windows 控制台在启动阶段会混入 focus / resize 等噪声事件，如果直接按事件总数判断，
+// 就会把首个 prompt 误压住，导致用户必须先按一次回车才能看到 ">"。
+func hasPendingConsoleUserInput() bool {
+	pending, err := pendingConsoleLineInput()
+	if err == nil && pending {
+		return true
+	}
+	pending, err = pendingConsoleTextInput()
+	if err == nil && pending {
+		return true
+	}
+	return false
 }
 
 func discardPendingInteractiveInputForPriorityPrompt(session *ChatSession, promptKind string) string {
