@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
@@ -34,6 +35,13 @@ type codexSkillsListResponse struct {
 	Count       int                    `json:"count"`
 	GroupCount  int                    `json:"group_count"`
 	ForceReload bool                   `json:"force_reload"`
+	CacheHit    bool                   `json:"cache_hit,omitempty"`
+}
+
+type codexSkillsListPlan struct {
+	Cwd        string
+	Roots      []string
+	ExtraRoots []string
 }
 
 // ListCodexSkills 返回 Codex 风格的 skills 发现结果，按 cwd 分组并携带 errors。
@@ -62,15 +70,37 @@ func (h *Handler) ListCodexSkills(w http.ResponseWriter, r *http.Request) {
 		configFile = resolveCodexListUpwardPath(configFile)
 	}
 
-	results := make([]codexSkillsListGroup, 0, len(cwds))
-	total := 0
+	plans := make([]codexSkillsListPlan, 0, len(cwds))
 	for _, cwd := range cwds {
 		anchor := resolveCodexListCwdPath(cwd)
-		roots := resolveCodexListRoots(anchor, configFile, req, r)
-		outcome := skill.DiscoverCodexSkillLoadOutcome(anchor, configFile, resolveCodexListExtraRoots(anchor, req))
+		extraRoots := resolveCodexListExtraRoots(anchor, req, r)
+		roots := resolveCodexListRoots(anchor, configFile, extraRoots)
+		plans = append(plans, codexSkillsListPlan{
+			Cwd:        anchor,
+			Roots:      roots,
+			ExtraRoots: extraRoots,
+		})
+	}
+
+	cacheVersion := h.currentCodexSkillsListCacheVersion()
+	cacheKey := buildCodexSkillsListCacheKey(configFile, plans)
+	if !req.ForceReload {
+		if cached, ok := h.getCodexSkillsListCache(cacheKey); ok {
+			cached.ForceReload = false
+			cached.CacheHit = true
+			h.auditCodexSkillsList(r, cached)
+			h.writeJSON(w, http.StatusOK, cached)
+			return
+		}
+	}
+
+	results := make([]codexSkillsListGroup, 0, len(plans))
+	total := 0
+	for _, plan := range plans {
+		outcome := skill.DiscoverCodexSkillLoadOutcome(plan.Cwd, configFile, plan.ExtraRoots)
 		group := codexSkillsListGroup{
-			Cwd:    anchor,
-			Roots:  roots,
+			Cwd:    plan.Cwd,
+			Roots:  plan.Roots,
 			Skills: outcome.Skills,
 			Errors: outcome.Errors,
 			Count:  len(outcome.Skills),
@@ -84,9 +114,37 @@ func (h *Handler) ListCodexSkills(w http.ResponseWriter, r *http.Request) {
 		Count:       total,
 		GroupCount:  len(results),
 		ForceReload: req.ForceReload,
+		CacheHit:    false,
+	}
+	h.setCodexSkillsListCache(cacheKey, response, cacheVersion)
+	h.auditCodexSkillsList(r, response)
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) auditCodexSkillsList(r *http.Request, response codexSkillsListResponse) {
+	outcome := "cache_miss"
+	if response.CacheHit {
+		outcome = "cache_hit"
 	}
 
-	h.writeJSON(w, http.StatusOK, response)
+	requestID := ""
+	if r != nil {
+		requestID = logger.GetRequestID(r.Context())
+	}
+
+	fields := []interface{}{
+		logger.String("action", "skills_list"),
+		logger.String("outcome", outcome),
+		logger.Bool("cache_hit", response.CacheHit),
+		logger.Bool("force_reload", response.ForceReload),
+		logger.Int("count", response.Count),
+		logger.Int("group_count", response.GroupCount),
+	}
+	if requestID != "" {
+		fields = append(fields, logger.RequestID(requestID))
+	}
+
+	logger.Admin().Named("codex_skills_list").Info("codex skills list", fieldsToZap(fields)...)
 }
 
 func decodeCodexSkillsListRequest(r *http.Request) (*codexSkillsListRequest, error) {
@@ -156,28 +214,28 @@ func resolveCodexListCwdPath(path string) string {
 	return filepath.Clean(resolved)
 }
 
-func resolveCodexListRoots(cwd, configFile string, req *codexSkillsListRequest, r *http.Request) []string {
+func resolveCodexListRoots(cwd, configFile string, extraRoots []string) []string {
 	roots := skill.DiscoverCodexCompatibleSkillDirs(cwd, configFile)
-	roots = append(roots, resolveCodexListExtraRoots(cwd, req)...)
-	if r != nil && r.URL != nil {
-		if rawRoots := r.URL.Query()["extra_root"]; len(rawRoots) > 0 {
-			roots = append(roots, resolveCodexListExtraRootsFromValues(cwd, rawRoots)...)
-		}
-	}
+	roots = append(roots, extraRoots...)
 	return dedupeCodexListRoots(roots)
 }
 
-func resolveCodexListExtraRoots(cwd string, req *codexSkillsListRequest) []string {
-	if req == nil {
-		return nil
-	}
-	extraRoots := append([]string(nil), req.ExtraRoots...)
-	if len(req.PerCwdExtraUserRoots) > 0 {
-		if cwdRoots, ok := req.PerCwdExtraUserRoots[cwd]; ok {
-			extraRoots = append(extraRoots, cwdRoots...)
+func resolveCodexListExtraRoots(cwd string, req *codexSkillsListRequest, r *http.Request) []string {
+	extraRoots := make([]string, 0, 8)
+	if req != nil {
+		extraRoots = append(extraRoots, req.ExtraRoots...)
+		if len(req.PerCwdExtraUserRoots) > 0 {
+			if cwdRoots, ok := req.PerCwdExtraUserRoots[cwd]; ok {
+				extraRoots = append(extraRoots, cwdRoots...)
+			}
+			if cwdRoots, ok := req.PerCwdExtraUserRoots[filepath.Clean(cwd)]; ok {
+				extraRoots = append(extraRoots, cwdRoots...)
+			}
 		}
-		if cwdRoots, ok := req.PerCwdExtraUserRoots[filepath.Clean(cwd)]; ok {
-			extraRoots = append(extraRoots, cwdRoots...)
+	}
+	if r != nil && r.URL != nil {
+		if rawRoots := r.URL.Query()["extra_root"]; len(rawRoots) > 0 {
+			extraRoots = append(extraRoots, rawRoots...)
 		}
 	}
 	return resolveCodexListExtraRootsFromValues(cwd, extraRoots)

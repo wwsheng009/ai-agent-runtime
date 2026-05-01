@@ -70,6 +70,7 @@ const (
 	skillMutationActionBatchCreate    = "skill_batch_create"
 	skillMutationActionImport         = "skill_import"
 	skillMutationActionReload         = "skill_reload"
+	skillMutationActionConfigWrite    = "skill_config_write"
 	skillMutationActionHotReloadStart = "skill_hot_reload_start"
 	skillMutationActionHotReloadStop  = "skill_hot_reload_stop"
 	skillMutationActionHotReloadRun   = "skill_hot_reload_reload"
@@ -145,6 +146,10 @@ type Handler struct {
 	backgroundMu        sync.Mutex
 	backgroundManager   *background.Manager
 	backgroundConfigKey string
+
+	codexSkillsListMu           sync.RWMutex
+	codexSkillsListCache        map[string]codexSkillsListResponse
+	codexSkillsListCacheVersion uint64
 }
 
 type searchTelemetry struct {
@@ -296,11 +301,13 @@ func NewHandler(
 	mcpManager skill.MCPManager,
 ) *Handler {
 	return &Handler{
-		skillRegistry:         registry,
-		skillLoader:           loader,
-		mcpManager:            mcpManager,
-		runtimeEventBus:       runtimeevents.NewBusWithRetention(2048),
-		searchReindexCooldown: 30 * time.Second,
+		skillRegistry:               registry,
+		skillLoader:                 loader,
+		mcpManager:                  mcpManager,
+		runtimeEventBus:             runtimeevents.NewBusWithRetention(2048),
+		searchReindexCooldown:       30 * time.Second,
+		codexSkillsListCache:        make(map[string]codexSkillsListResponse),
+		codexSkillsListCacheVersion: 0,
 		usageTracker: &usageTracker{
 			users: make(map[string]*UsageSnapshot),
 		},
@@ -510,6 +517,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/config/document", h.GetConfigDocument).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/config/document/preview", h.PreviewConfigDocument).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/config/document", h.UpdateConfigDocument).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/skills/config/write", h.WriteConfigDocument).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/service", h.GetRuntimeServiceStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/service/restart", h.RestartRuntimeService).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/fs/read-file", h.ReadRuntimeFile).Methods(http.MethodPost)
@@ -6986,6 +6994,7 @@ func (h *Handler) publishSkillsChangedEvent(r *http.Request, payload map[string]
 	if h == nil {
 		return
 	}
+	h.invalidateCodexSkillsListCache()
 	if payload == nil {
 		payload = map[string]interface{}{}
 	}
@@ -6998,6 +7007,9 @@ func (h *Handler) publishSkillsChangedEvent(r *http.Request, payload map[string]
 	}
 	if _, ok := payload["count"]; !ok {
 		payload["count"] = h.currentSkillCount()
+	}
+	if _, ok := payload["codex_list_cache_version"]; !ok {
+		payload["codex_list_cache_version"] = h.currentCodexSkillsListCacheVersion()
 	}
 
 	traceID := ""

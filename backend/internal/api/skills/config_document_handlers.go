@@ -73,6 +73,14 @@ func (h *Handler) GetConfigDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) UpdateConfigDocument(w http.ResponseWriter, r *http.Request) {
+	h.handleConfigDocumentSave(w, r, "save", true)
+}
+
+func (h *Handler) WriteConfigDocument(w http.ResponseWriter, r *http.Request) {
+	h.handleConfigDocumentSave(w, r, "write", true)
+}
+
+func (h *Handler) handleConfigDocumentSave(w http.ResponseWriter, r *http.Request, action string, publishSkillsChanged bool) {
 	if h.configDocumentService == nil {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "config document service not configured"))
 		return
@@ -80,12 +88,12 @@ func (h *Handler) UpdateConfigDocument(w http.ResponseWriter, r *http.Request) {
 
 	req := &ConfigDocumentSaveRequest{}
 	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
-		h.auditConfigDocumentAction(r, "save", "invalid_request", nil, nil, logger.String("reason", "invalid_json"))
+		h.auditConfigDocumentAction(r, action, "invalid_request", nil, nil, logger.String("reason", "invalid_json"))
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid config document payload"))
 		return
 	}
 	if req.Raw == nil && req.Parsed == nil {
-		h.auditConfigDocumentAction(r, "save", "invalid_request", req, nil, logger.String("reason", "missing_content"))
+		h.auditConfigDocumentAction(r, action, "invalid_request", req, nil, logger.String("reason", "missing_content"))
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "raw or parsed config document content is required"))
 		return
 	}
@@ -93,11 +101,14 @@ func (h *Handler) UpdateConfigDocument(w http.ResponseWriter, r *http.Request) {
 
 	document, err := h.configDocumentService.SaveDocument(*req)
 	if err != nil {
-		h.auditConfigDocumentAction(r, "save", "failed", req, nil, logger.Err(err))
+		h.auditConfigDocumentAction(r, action, "failed", req, nil, logger.Err(err))
 		h.writeError(w, http.StatusBadRequest, errors.Wrap(errors.ErrConfigInvalid, "failed to save config document", err))
 		return
 	}
-	h.auditConfigDocumentAction(r, "save", "success", req, document)
+	h.auditConfigDocumentAction(r, action, "success", req, document)
+	if publishSkillsChanged {
+		h.publishSkillsChangedEvent(r, buildConfigDocumentWriteSkillsChangedPayload(req, document))
+	}
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"saved":    true,
@@ -135,6 +146,55 @@ func (h *Handler) PreviewConfigDocument(w http.ResponseWriter, r *http.Request) 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"document": document,
 	})
+}
+
+func buildConfigDocumentWriteSkillsChangedPayload(req *ConfigDocumentSaveRequest, document *ConfigDocument) map[string]interface{} {
+	payload := map[string]interface{}{
+		"action":         skillMutationActionConfigWrite,
+		"status":         "success",
+		"affected_count": 1,
+	}
+
+	if req != nil {
+		if mode := configDocumentRequestMode(req); mode != "" {
+			payload["mode"] = mode
+		}
+		if changedBy := strings.TrimSpace(req.ChangedBy); changedBy != "" {
+			payload["changed_by"] = changedBy
+		}
+	}
+
+	if document == nil {
+		return payload
+	}
+
+	if path := strings.TrimSpace(document.Path); path != "" {
+		payload["document_path"] = path
+	}
+	if format := strings.TrimSpace(document.Format); format != "" {
+		payload["document_format"] = format
+	}
+	payload["restart_required"] = document.RestartRequired
+
+	if impact := document.RuntimeImpact; impact != nil {
+		if len(impact.ChangedPaths) > 0 {
+			payload["changed_paths"] = append([]string(nil), impact.ChangedPaths...)
+		}
+		if len(impact.HotReloadPaths) > 0 {
+			payload["hot_reload_paths"] = append([]string(nil), impact.HotReloadPaths...)
+		}
+		if len(impact.RestartRequiredPaths) > 0 {
+			payload["restart_required_paths"] = append([]string(nil), impact.RestartRequiredPaths...)
+		}
+		if len(impact.InactivePaths) > 0 {
+			payload["inactive_paths"] = append([]string(nil), impact.InactivePaths...)
+		}
+		if len(impact.AppliedPaths) > 0 {
+			payload["applied_paths"] = append([]string(nil), impact.AppliedPaths...)
+		}
+	}
+
+	return payload
 }
 
 func (h *Handler) auditConfigDocumentAction(

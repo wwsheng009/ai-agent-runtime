@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
@@ -92,6 +93,53 @@ func TestUpdateConfigDocument(t *testing.T) {
 	providers, ok := root["providers"].(map[string]interface{})
 	require.True(t, ok)
 	require.Equal(t, "codex_fox", providers["default_provider"])
+}
+
+func TestWriteConfigDocument_PublishesSkillsChangedEvent(t *testing.T) {
+	service := &fakeConfigDocumentService{
+		document: &ConfigDocument{
+			Path:            "E:/projects/ai/ai-agent-runtime/backend/configs/config.yaml",
+			Format:          "yaml",
+			Raw:             "server:\n  host: 0.0.0.0\n",
+			RestartRequired: true,
+			RuntimeImpact: &ConfigDocumentRuntimeImpact{
+				AppliedPaths: []string{"skills_runtime.aicli_skill_exposure_mode"},
+			},
+		},
+	}
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetConfigDocumentService(service)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	body := []byte(`{"mode":"structured","changed_by":"tester","parsed":{"providers":{"default_provider":"codex_fox"}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/config/write", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "structured", service.saved.Mode)
+	require.Equal(t, "tester", service.saved.ChangedBy)
+
+	events := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+		EventType: "skills.changed",
+		Limit:     10,
+	})
+	require.Len(t, events, 1)
+
+	payload := events[0].Payload
+	require.Equal(t, skillMutationActionConfigWrite, payload["action"])
+	require.Equal(t, "success", payload["status"])
+	require.Equal(t, 1, payload["affected_count"])
+	require.Equal(t, "structured", payload["mode"])
+	require.Equal(t, "tester", payload["changed_by"])
+	require.Equal(t, "E:/projects/ai/ai-agent-runtime/backend/configs/config.yaml", payload["document_path"])
+	require.Equal(t, "yaml", payload["document_format"])
+	require.Equal(t, true, payload["restart_required"])
+	require.Equal(t, []string{"skills_runtime.aicli_skill_exposure_mode"}, payload["applied_paths"])
 }
 
 func TestPreviewConfigDocument(t *testing.T) {

@@ -5453,6 +5453,7 @@ func TestCreateSkill_PublishesSkillsChangedEventAndListRuntimeEvents(t *testing.
 	assert.Equal(t, "success", rawEventPayload["status"])
 	assert.Equal(t, "runtime-event-skill", rawEventPayload["skill_name"])
 	assert.Equal(t, float64(1), rawEventPayload["count"])
+	assert.Contains(t, rawEventPayload, "codex_list_cache_version")
 }
 
 func TestCreateSkill_PersistsToExternalDir(t *testing.T) {
