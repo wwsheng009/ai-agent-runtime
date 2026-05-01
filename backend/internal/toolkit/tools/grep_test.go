@@ -724,8 +724,8 @@ func TestGrepTool_DescriptionRgAvailable(t *testing.T) {
 	if !strings.Contains(desc, "ripgrep/rg") {
 		t.Fatalf("expected description to mention ripgrep/rg when rg is available, got %q", desc)
 	}
-	if strings.Contains(desc, "内置扫描") {
-		t.Fatalf("expected description NOT to mention built-in scanner when rg is available, got %q", desc)
+	if !strings.Contains(desc, "内置扫描") || !strings.Contains(desc, "工具定义保持静态") {
+		t.Fatalf("expected stable description to mention builtin fallback and static tool definition, got %q", desc)
 	}
 }
 
@@ -741,6 +741,24 @@ func TestGrepTool_DescriptionRgUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(desc, "ripgrep/rg") {
 		t.Fatalf("expected description to mention ripgrep/rg installation hint when rg is unavailable, got %q", desc)
+	}
+	if !strings.Contains(desc, "工具定义保持静态") {
+		t.Fatalf("expected description to be stable across rg availability, got %q", desc)
+	}
+}
+
+func TestGrepTool_DescriptionStableAcrossRgAvailability(t *testing.T) {
+	withRg := NewGrepTool()
+	withRg.lookPath = func(name string) (string, error) {
+		return "/usr/bin/rg", nil
+	}
+	withoutRg := NewGrepTool()
+	withoutRg.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	if withRg.Description() != withoutRg.Description() {
+		t.Fatalf("expected grep tool description to stay stable across rg availability")
 	}
 }
 
