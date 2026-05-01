@@ -239,7 +239,6 @@ func TestAICLIProviderTurnExecutor_UsesSanitizedProtocolMessagesForSharedReplay(
 		Streamable: true,
 		Visibility: types.ReasoningVisibilitySummary,
 	})
-	assistantMsg.Metadata.Set(chatRuntimeMessageRawJSONKey, `{"role":"assistant","content":"我来查看当前目录。","metadata":{"reasoning_details":{"summary":"raw reasoning"}},"tool_calls":[{"id":"call_1","type":"function","function":{"name":"ls","arguments":"{\"raw\":true}"}}]}`)
 
 	toolMsg := types.Message{
 		Role:       "tool",
@@ -248,7 +247,6 @@ func TestAICLIProviderTurnExecutor_UsesSanitizedProtocolMessagesForSharedReplay(
 		Metadata:   types.NewMetadata(),
 	}
 	toolMsg.Metadata["artifact_refs"] = []string{"art_1"}
-	toolMsg.Metadata.Set(chatRuntimeMessageRawJSONKey, `{"role":"tool","content":"目录: .","tool_call_id":"call_1","metadata":{"artifact_refs":["art_1"]}}`)
 
 	executor := &aicliProviderTurnExecutor{session: session}
 	turn, err := executor.Complete(context.Background(), runtimechatcore.ProviderTurnRequest{
@@ -1940,7 +1938,7 @@ func TestAICLISharedChatExecutor_AppliesPromptPreflightRecoveryHistoryBeforeRetu
 		}
 	}
 
-	originalMessages, err := buildAICLIMessagesFromRuntimeHistory([]types.Message{
+	originalMessages := []types.Message{
 		*types.NewUserMessage("继续处理"),
 		{
 			Role: "assistant",
@@ -1958,9 +1956,6 @@ func TestAICLISharedChatExecutor_AppliesPromptPreflightRecoveryHistoryBeforeRetu
 			Metadata: types.NewMetadata(),
 		},
 		*types.NewToolMessage("call_2", "AGENTS ..."),
-	})
-	if err != nil {
-		t.Fatalf("buildAICLIMessagesFromRuntimeHistory failed: %v", err)
 	}
 
 	session := &ChatSession{
@@ -1974,15 +1969,14 @@ func TestAICLISharedChatExecutor_AppliesPromptPreflightRecoveryHistoryBeforeRetu
 		Messages: originalMessages,
 	}
 
-	_, err = newAICLISharedChatExecutor().Execute(context.Background(), session, "继续处理")
+	_, err := newAICLISharedChatExecutor().Execute(context.Background(), session, "继续处理")
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if len(session.Messages) != 4 {
 		t.Fatalf("expected replacement history to be applied to session messages, got %#v", session.Messages)
 	}
-	metadata, _ := session.Messages[1]["metadata"].(map[string]interface{})
-	if metadata == nil || metadata["active_turn_compaction"] != true {
+	if got := session.Messages[1].Metadata.GetBool("active_turn_compaction", false); !got {
 		t.Fatalf("expected compacted assistant summary metadata in session messages, got %#v", session.Messages[1])
 	}
 	if !strings.Contains(err.Error(), "当前会话已自动保存压缩后的上下文，可直接继续下一轮。") {
@@ -2038,13 +2032,10 @@ func TestAICLISharedChatExecutor_AutoCompactsHistoryBeforeToolLoop(t *testing.T)
 		}, nil
 	}
 
-	originalMessages, err := buildAICLIMessagesFromRuntimeHistory([]types.Message{
+	originalMessages := []types.Message{
 		*types.NewUserMessage("很早之前的问题"),
 		*types.NewAssistantMessage("很早之前的回答"),
 		*types.NewUserMessage("较新的问题"),
-	})
-	if err != nil {
-		t.Fatalf("buildAICLIMessagesFromRuntimeHistory failed: %v", err)
 	}
 
 	session := &ChatSession{
@@ -2101,16 +2092,11 @@ func TestAICLISharedChatExecutor_AutoCompactFailureDoesNotBlockRequest(t *testin
 		*types.NewUserMessage("原始问题"),
 		*types.NewAssistantMessage("原始回答"),
 	}
-	originalMessages, err := buildAICLIMessagesFromRuntimeHistory(originalHistory)
-	if err != nil {
-		t.Fatalf("buildAICLIMessagesFromRuntimeHistory failed: %v", err)
-	}
-
 	session := &ChatSession{
 		DisableTools: true,
 		Model:        "shared-model",
 		ProviderName: "shared-provider",
-		Messages:     originalMessages,
+		Messages:     originalHistory,
 	}
 
 	output, err := newAICLISharedChatExecutor().Execute(context.Background(), session, "继续处理")

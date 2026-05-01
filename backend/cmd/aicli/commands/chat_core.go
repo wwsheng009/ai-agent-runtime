@@ -85,9 +85,9 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	}
 	ctx = generatedImageToolContext(ctx, session)
 
-	history, err := buildRuntimeHistoryFromAICLIMessages(session.Messages)
-	if err != nil {
-		return "", fmt.Errorf("构建共享 chat history 失败: %w", err)
+	history := cloneRuntimeMessages(session.Messages)
+	if len(history) == 0 && session.RuntimeSession != nil && len(session.RuntimeSession.History) > 0 {
+		history = cloneRuntimeMessages(session.RuntimeSession.History)
 	}
 
 	var selection *aicliFunctionSelection
@@ -159,11 +159,9 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	if err != nil {
 		if preflightErr, ok := agent.AsPromptPreflightError(err); ok {
 			if replacement := preflightErr.CloneReplacementHistory(); len(replacement) > 0 {
-				messages, buildErr := buildAICLIMessagesFromRuntimeHistory(replacement)
-				if buildErr != nil {
-					err = fmt.Errorf("%w: 应用 prompt preflight 恢复历史失败: %v", err, buildErr)
+				if replaceErr := replaceRuntimeMessages(session, replacement); replaceErr != nil {
+					err = fmt.Errorf("%w: 应用 prompt preflight 恢复历史失败: %v", err, replaceErr)
 				} else {
-					session.Messages = messages
 					warnIfChatSessionSyncFails(session, "shared chatcore preflight recovery sync", syncRuntimeSessionFromChat(session))
 					preflightErr.ReplacementHistoryApplied = true
 				}
@@ -176,11 +174,9 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 		return "", fmt.Errorf("共享 chatcore 未返回结果")
 	}
 
-	messages, err := buildAICLIMessagesFromRuntimeHistory(loopResult.History)
-	if err != nil {
-		return "", fmt.Errorf("共享 chat history 转回 CLI 消息失败: %w", err)
+	if err := replaceRuntimeMessages(session, loopResult.History); err != nil {
+		return "", fmt.Errorf("共享 chat history 更新失败: %w", err)
 	}
-	session.Messages = messages
 	warnIfChatSessionSyncFails(session, "shared chatcore sync", syncRuntimeSessionFromChat(session))
 
 	if session.Logger != nil && len(loopResult.Response.ToolExecutions) > 0 {
@@ -339,11 +335,9 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 		return history, report, err
 	}
 
-	messages, buildErr := buildAICLIMessagesFromRuntimeHistory(result.ReplacementHistory)
-	if buildErr != nil {
-		return history, report, fmt.Errorf("共享 chat 自动压缩结果转换失败: %w", buildErr)
+	if err := replaceRuntimeMessages(session, result.ReplacementHistory); err != nil {
+		return history, report, fmt.Errorf("共享 chat 自动压缩结果更新失败: %w", err)
 	}
-	session.Messages = messages
 	warnIfChatSessionSyncFails(session, "shared chat auto compact sync", syncRuntimeSessionFromChat(session))
 	return cloneSharedChatRuntimeMessages(result.ReplacementHistory), report, nil
 }

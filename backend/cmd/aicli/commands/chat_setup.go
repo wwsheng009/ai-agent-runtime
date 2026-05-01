@@ -73,7 +73,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		HTTPDebug:          opts.HTTPDebug,
 		Stream:             runtimeState.shouldStream,
 		BaseURL:            runtimeState.baseURL,
-		Messages:           []map[string]interface{}{},
+		Messages:           nil,
 		HTTPClient:         httpclient.GetHTTPClientWithProvider(cfg, &runtimeState.provider),
 		cancelCtx:          cancelCtx,
 		cancelFunc:         cancelFunc,

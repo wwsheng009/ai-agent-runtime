@@ -728,21 +728,6 @@ triggers:
 func TestBuildRequestFunctionSchemas_RetainsPreviouslyCalledSkillWhenPromptEmpty(t *testing.T) {
 	session := &ChatSession{
 		FunctionRegistry: functions.NewFunctionRegistry(),
-		Messages: []map[string]interface{}{
-			{
-				"role": "assistant",
-				"tool_calls": []map[string]interface{}{
-					{
-						"id":   "call-1",
-						"type": "function",
-						"function": map[string]interface{}{
-							"name":      "skill__abap_search",
-							"arguments": `{"prompt":"search z*"}`,
-						},
-					},
-				},
-			},
-		},
 		SkillsBinding: &skillsRuntimeBinding{
 			skillFunctions: map[string]*SkillFunction{
 				"skill__abap_search": {
@@ -752,6 +737,15 @@ func TestBuildRequestFunctionSchemas_RetainsPreviouslyCalledSkillWhenPromptEmpty
 			},
 		},
 	}
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []runtimetypes.ToolCall{
+				{ID: "call-1", Name: "skill__abap_search", Args: map[string]interface{}{"prompt": "search z*"}},
+			},
+			Metadata: runtimetypes.NewMetadata(),
+		},
+	})
 	session.FunctionRegistry.Register(session.SkillsBinding.skillFunctions["skill__abap_search"])
 	session.FunctionRegistry.Register(&testFunction{name: "builtin__diagnose"})
 

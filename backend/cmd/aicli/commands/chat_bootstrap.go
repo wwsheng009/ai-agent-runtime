@@ -20,15 +20,20 @@ type chatPersistenceState struct {
 }
 
 type chatRuntimeState struct {
-	providerName    string
-	provider        config.Provider
-	adapter         adapter.ProtocolAdapter
-	modelName       string
-	reasoningEffort string
-	shouldStream    bool
-	baseURL         string
-	retryCfg        RetryConfig
-	requestTimeout  time.Duration
+	providerName     string
+	providerSource   chatPreferenceSource
+	provider         config.Provider
+	adapter          adapter.ProtocolAdapter
+	modelName        string
+	modelSource      chatPreferenceSource
+	reasoningEffort  string
+	reasoningSource  chatPreferenceSource
+	reasoningWarning string
+	shouldStream     bool
+	streamSource     chatPreferenceSource
+	baseURL          string
+	retryCfg         RetryConfig
+	requestTimeout   time.Duration
 }
 
 func prepareChatPersistence(opts *chatCommandOptions) (*chatPersistenceState, error) {
@@ -111,7 +116,7 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 	modelName = finalContext.Model
 	adapter := finalContext.Adapter
 
-	shouldStream := resolveChatStreamMode(opts, loadedRuntimeSession)
+	shouldStream, streamSource := resolveChatStreamChoice(cfg, opts, loadedRuntimeSession)
 	reasoningEffort, reasoningSource, warningMessage, err := resolveChatReasoningChoice(cfg, provider, modelName, opts, loadedRuntimeSession)
 	if err != nil {
 		return nil, nil, err
@@ -119,7 +124,6 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 	if warningMessage != "" {
 		fmt.Fprintln(os.Stderr, warningMessage)
 	}
-	persistChatPreferencesIfNeeded(cfg, opts, loadedRuntimeSession, providerSource, modelSource, reasoningSource, warningMessage, providerName, modelName, reasoningEffort)
 	if opts.OutputFormat == "json" && shouldStream {
 		return nil, nil, fmt.Errorf("--output json 暂不支持与 --stream 同时使用")
 	}
@@ -140,14 +144,19 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 	}
 
 	return &chatRuntimeState{
-		providerName:    providerName,
-		provider:        provider,
-		adapter:         adapter,
-		modelName:       modelName,
-		reasoningEffort: reasoningEffort,
-		shouldStream:    shouldStream,
-		baseURL:         buildProviderURL(provider, adapter.GetAPIPath(), modelName),
-		retryCfg:        retryCfg,
-		requestTimeout:  requestTimeout,
+		providerName:     providerName,
+		providerSource:   providerSource,
+		provider:         provider,
+		adapter:          adapter,
+		modelName:        modelName,
+		modelSource:      modelSource,
+		reasoningEffort:  reasoningEffort,
+		reasoningSource:  reasoningSource,
+		reasoningWarning: warningMessage,
+		shouldStream:     shouldStream,
+		streamSource:     streamSource,
+		baseURL:          buildProviderURL(provider, adapter.GetAPIPath(), modelName),
+		retryCfg:         retryCfg,
+		requestTimeout:   requestTimeout,
 	}, nil, nil
 }

@@ -32,7 +32,6 @@ const (
 	chatRuntimeContextProfileName     = "aicli_profile_name"
 	chatRuntimeContextProfileAgent    = "aicli_profile_agent"
 	chatRuntimeContextProfileRoot     = "aicli_profile_root"
-	chatRuntimeMessageRawJSONKey      = "aicli_raw_message_json"
 )
 
 type ChatSessionListFilter struct {
@@ -126,14 +125,11 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 		return nil
 	}
 
-	messages, err := buildAICLIMessagesFromRuntimeHistory(runtimeSession.History)
-	if err != nil {
+	if err := replaceRuntimeMessages(session, runtimeSession.History); err != nil {
 		return err
 	}
-
-	session.Messages = messages
 	session.RuntimeSession = runtimeSession.Clone()
-	session.MsgCount = countUserMessages(messages)
+	session.MsgCount = countRuntimeUserMessages(session.Messages)
 	session.TurnRequestCount = 0
 	resetChatTurnTokenUsage(session)
 	restoreChatRuntimeContext(session, session.RuntimeSession)
@@ -154,7 +150,9 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 		runtimeSession.UpdateTitle(title)
 	}
 
-	session.Messages = []map[string]interface{}{}
+	if err := replaceRuntimeMessages(session, nil); err != nil {
+		return err
+	}
 	session.MsgCount = 0
 	session.TurnRequestCount = 0
 	resetChatConversationTokenUsage(session)
@@ -215,10 +213,7 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 		return nil
 	}
 
-	history, err := buildRuntimeHistoryFromAICLIMessages(session.Messages)
-	if err != nil {
-		return err
-	}
+	history := cloneRuntimeMessages(session.Messages)
 
 	runtimeSession := session.RuntimeSession.Clone()
 	if runtimeSession == nil {
@@ -265,6 +260,16 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	}
 	session.RuntimeSession = runtimeSession
 	return nil
+}
+
+func countRuntimeUserMessages(messages []runtimetypes.Message) int {
+	count := 0
+	for _, message := range messages {
+		if strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+			count++
+		}
+	}
+	return count
 }
 
 func warnIfChatSessionSyncFails(session *ChatSession, operation string, err error) {
@@ -693,48 +698,8 @@ func runtimeSessionContextBool(session *runtimechat.Session, key string) (bool, 
 	return boolean, ok
 }
 
-func buildRuntimeHistoryFromAICLIMessages(messages []map[string]interface{}) ([]runtimetypes.Message, error) {
-	if len(messages) == 0 {
-		return nil, nil
-	}
-
-	sanitized := sanitizeAICLIHistoryMessages(messages)
-	history := make([]runtimetypes.Message, 0, len(sanitized))
-	for _, raw := range sanitized {
-		if shouldDropRuntimeNoticeMessage(raw) {
-			continue
-		}
-		message, err := runtimeMessageFromAICLIMessage(raw)
-		if err != nil {
-			return nil, err
-		}
-		history = append(history, message)
-	}
-	return history, nil
-}
-
 func ensureChatSystemPromptMessage(session *ChatSession) {
-	if session == nil {
-		return
-	}
-	prompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
-	if prompt == "" {
-		return
-	}
-	systemMessage := map[string]interface{}{
-		"role":    "system",
-		"content": prompt,
-	}
-	if len(session.Messages) == 0 {
-		session.Messages = []map[string]interface{}{systemMessage}
-		return
-	}
-	role, _ := session.Messages[0]["role"].(string)
-	if role == "system" {
-		session.Messages[0]["content"] = prompt
-		return
-	}
-	session.Messages = append([]map[string]interface{}{systemMessage}, session.Messages...)
+	syncChatSystemPromptMessage(session)
 }
 
 func composeChatSystemPromptWithGuidance(session *ChatSession) string {
@@ -754,132 +719,6 @@ func composeChatSystemPromptWithGuidance(session *ChatSession) string {
 	return strings.Join(lines, "\n\n")
 }
 
-func buildAICLIMessagesFromRuntimeHistory(history []runtimetypes.Message) ([]map[string]interface{}, error) {
-	if len(history) == 0 {
-		return []map[string]interface{}{}, nil
-	}
-
-	messages := make([]map[string]interface{}, 0, len(history))
-	for _, item := range history {
-		raw, err := aicliMessageFromRuntimeMessage(item)
-		if err != nil {
-			return nil, err
-		}
-		if shouldDropRuntimeNoticeMessage(raw) {
-			continue
-		}
-		messages = append(messages, raw)
-	}
-	return sanitizeAICLIHistoryMessages(messages), nil
-}
-
-func shouldDropRuntimeNoticeMessage(raw map[string]interface{}) bool {
-	normalized := normalizeAICLIMessageMap(raw)
-	if len(normalized) == 0 {
-		return false
-	}
-
-	role := strings.ToLower(strings.TrimSpace(payloadStringValue(normalized["role"])))
-	if role != "user" {
-		return false
-	}
-
-	content := strings.TrimSpace(payloadStringValue(normalized["content"]))
-	if content == "" {
-		return false
-	}
-
-	for _, prefix := range []string{
-		"[context] session compact ",
-		"[context] shared auto-compact ",
-		"[prompt preflight]",
-	} {
-		if strings.HasPrefix(content, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func sanitizeAICLIHistoryMessages(messages []map[string]interface{}) []map[string]interface{} {
-	if len(messages) == 0 {
-		return nil
-	}
-
-	sanitized := make([]map[string]interface{}, 0, len(messages))
-	validToolCallIDs := make(map[string]struct{})
-
-	for _, raw := range messages {
-		repaired, keep := sanitizeAICLIHistoryMessage(raw)
-		if !keep || len(repaired) == 0 {
-			continue
-		}
-
-		role := strings.ToLower(strings.TrimSpace(payloadStringValue(repaired["role"])))
-		if role == "tool" {
-			toolCallID := strings.TrimSpace(payloadStringValue(repaired["tool_call_id"]))
-			if toolCallID != "" {
-				if _, ok := validToolCallIDs[toolCallID]; !ok {
-					continue
-				}
-			}
-		}
-
-		if role == "assistant" {
-			for _, call := range decodeRuntimeToolCalls(repaired["tool_calls"]) {
-				if callID := strings.TrimSpace(call.ID); callID != "" {
-					validToolCallIDs[callID] = struct{}{}
-				}
-			}
-		}
-
-		sanitized = append(sanitized, repaired)
-	}
-
-	return sanitized
-}
-
-func sanitizeAICLIHistoryMessage(raw map[string]interface{}) (map[string]interface{}, bool) {
-	normalized := normalizeAICLIMessageMap(raw)
-	if len(normalized) == 0 {
-		return normalized, false
-	}
-
-	role := strings.ToLower(strings.TrimSpace(payloadStringValue(normalized["role"])))
-	if role != "assistant" || !responseHasTruncatedToolCalls(normalized) {
-		return normalized, true
-	}
-
-	content := payloadStringValue(normalized["content"])
-	trimmedContent := strings.TrimSpace(content)
-	if index := strings.Index(content, "<tool_call>"); index >= 0 {
-		trimmedContent = strings.TrimSpace(content[:index])
-	}
-
-	delete(normalized, "tool_calls")
-	normalized["content"] = trimmedContent
-	annotateAICLIMessageRepair(normalized, "truncated_tool_call")
-
-	if trimmedContent == "" {
-		return nil, false
-	}
-	return normalized, true
-}
-
-func annotateAICLIMessageRepair(raw map[string]interface{}, reason string) {
-	if len(raw) == 0 || strings.TrimSpace(reason) == "" {
-		return
-	}
-	metadata, _ := raw["metadata"].(map[string]interface{})
-	if metadata == nil {
-		metadata = make(map[string]interface{})
-		raw["metadata"] = metadata
-	}
-	if _, exists := metadata["session_repaired"]; !exists {
-		metadata["session_repaired"] = strings.TrimSpace(reason)
-	}
-}
-
 func runtimeMessageFromAICLIMessage(raw map[string]interface{}) (runtimetypes.Message, error) {
 	normalized := normalizeAICLIMessageMap(raw)
 	recoverAssistantToolCallsFromReasoning(normalized)
@@ -887,11 +726,6 @@ func runtimeMessageFromAICLIMessage(raw map[string]interface{}) (runtimetypes.Me
 	role = strings.TrimSpace(role)
 	if role == "" {
 		return runtimetypes.Message{}, fmt.Errorf("message role cannot be empty")
-	}
-
-	data, err := json.Marshal(normalized)
-	if err != nil {
-		return runtimetypes.Message{}, err
 	}
 
 	message := runtimetypes.Message{
@@ -928,7 +762,6 @@ func runtimeMessageFromAICLIMessage(raw map[string]interface{}) (runtimetypes.Me
 			Visibility: runtimetypes.ReasoningVisibilitySummary,
 		})
 	}
-	message.Metadata.Set(chatRuntimeMessageRawJSONKey, string(data))
 	return message, nil
 }
 
@@ -1008,17 +841,12 @@ func decodeRuntimeToolCallsFromCodexOutputItems(normalized map[string]interface{
 }
 
 func aicliMessageFromRuntimeMessage(message runtimetypes.Message) (map[string]interface{}, error) {
-	if rawJSON := message.Metadata.GetString(chatRuntimeMessageRawJSONKey, ""); rawJSON != "" {
-		var raw map[string]interface{}
-		if err := json.Unmarshal([]byte(rawJSON), &raw); err != nil {
-			return nil, err
-		}
-		mergeAICLIMessageMetadata(raw, message.Metadata)
-		return normalizeAICLIMessageMap(raw), nil
+	if strings.TrimSpace(message.Role) == "" {
+		return nil, fmt.Errorf("message role cannot be empty")
 	}
 
 	raw := map[string]interface{}{
-		"role":    message.Role,
+		"role":    strings.TrimSpace(message.Role),
 		"content": message.Content,
 	}
 	if message.ToolCallID != "" {
@@ -1026,6 +854,20 @@ func aicliMessageFromRuntimeMessage(message runtimetypes.Message) (map[string]in
 	}
 	if len(message.ToolCalls) > 0 {
 		raw["tool_calls"] = encodeRuntimeToolCalls(message.ToolCalls)
+	}
+	if block := runtimetypes.GetReasoningBlock(message.Metadata); block != nil {
+		if encoded := block.ToMap(); len(encoded) > 0 {
+			raw["reasoning_details"] = encoded
+		}
+		if text := strings.TrimSpace(block.DisplayText()); text != "" {
+			raw["reasoning_content"] = text
+		}
+	}
+	if value, exists := message.Metadata["reasoning_content"]; exists {
+		raw["reasoning_content"] = value
+	}
+	if value, exists := message.Metadata["finish_reason"]; exists {
+		raw["finish_reason"] = value
 	}
 	mergeAICLIMessageMetadata(raw, message.Metadata)
 	return raw, nil
@@ -1101,7 +943,7 @@ func exportRuntimeMessageMetadata(metadata runtimetypes.Metadata) map[string]int
 	exported := make(map[string]interface{}, len(metadata))
 	for key, value := range metadata {
 		key = strings.TrimSpace(key)
-		if key == "" || key == chatRuntimeMessageRawJSONKey {
+		if key == "" {
 			continue
 		}
 		exported[key] = value
@@ -1196,17 +1038,6 @@ func decodeToolArguments(raw string) map[string]interface{} {
 		}
 	}
 	return args
-}
-
-func countUserMessages(messages []map[string]interface{}) int {
-	count := 0
-	for _, message := range messages {
-		role, _ := message["role"].(string)
-		if role == "user" {
-			count++
-		}
-	}
-	return count
 }
 
 func blankToDash(value string) string {

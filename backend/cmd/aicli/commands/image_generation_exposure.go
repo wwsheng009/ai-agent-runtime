@@ -92,39 +92,13 @@ func hasPreviouslyCalledImageGenerationFunction(session *ChatSession) bool {
 		return false
 	}
 	for _, message := range session.Messages {
-		rawCalls, ok := message["tool_calls"]
-		if !ok {
-			continue
-		}
-		switch typed := rawCalls.(type) {
-		case []map[string]interface{}:
-			for _, call := range typed {
-				if rawCallInvokesImageGenerationFunction(call) {
-					return true
-				}
-			}
-		case []interface{}:
-			for _, item := range typed {
-				call, ok := item.(map[string]interface{})
-				if ok && rawCallInvokesImageGenerationFunction(call) {
-					return true
-				}
+		for _, call := range message.ToolCalls {
+			if toolnames.IsOpenAIImageGenerateToolName(call.Name) {
+				return true
 			}
 		}
 	}
 	return false
-}
-
-func rawCallInvokesImageGenerationFunction(raw map[string]interface{}) bool {
-	if raw == nil {
-		return false
-	}
-	functionBlock, ok := raw["function"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	name, _ := functionBlock["name"].(string)
-	return toolnames.IsOpenAIImageGenerateToolName(name)
 }
 
 func sessionHasCodexNativeImageGeneration(session *ChatSession) bool {

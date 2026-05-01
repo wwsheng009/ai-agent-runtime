@@ -7,6 +7,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestPrintVisibleChatHistory_RendersRestoredMessagesWithToolSummary(t *testing.T) {
@@ -18,38 +19,22 @@ func TestPrintVisibleChatHistory_RendersRestoredMessagesWithToolSummary(t *testi
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{
-		Formatter: formatter.NewMarkdownFormatter(true),
-		Messages: []map[string]interface{}{
-			{
-				"role":    "system",
-				"content": "You are a helpful assistant.",
-			},
-			{
-				"role":    "user",
-				"content": "查看当前目录",
-			},
-			{
-				"role":    "assistant",
-				"content": "我来查看当前目录。",
-				"tool_calls": []map[string]interface{}{
-					{
-						"id":   "call-1",
-						"type": "function",
-						"function": map[string]interface{}{
-							"name":      "shell_command",
-							"arguments": `{"command":"dir"}`,
-						},
-					},
-				},
-			},
-			{
-				"role":         "tool",
-				"tool_call_id": "call-1",
-				"content":      "目录: backend",
-			},
-		},
+		Formatter:        formatter.NewMarkdownFormatter(true),
 		SystemPromptText: "You are a helpful assistant.",
 	}
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("You are a helpful assistant."),
+		*runtimetypes.NewUserMessage("查看当前目录"),
+		{
+			Role:    "assistant",
+			Content: "我来查看当前目录。",
+			ToolCalls: []runtimetypes.ToolCall{
+				{ID: "call-1", Name: "shell_command", Args: map[string]interface{}{"command": "dir"}},
+			},
+			Metadata: runtimetypes.NewMetadata(),
+		},
+		*runtimetypes.NewToolMessage("call-1", "目录: backend"),
+	})
 
 	output := captureStdout(t, func() {
 		count := printVisibleChatHistory(session, "已加载历史会话")
@@ -83,14 +68,11 @@ func TestPrintVisibleChatHistory_ReturnsZeroWhenOnlyHiddenSystemPromptExists(t *
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{
-		Messages: []map[string]interface{}{
-			{
-				"role":    "system",
-				"content": "Profile system prompt.",
-			},
-		},
 		SystemPromptText: "Profile system prompt.",
 	}
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("Profile system prompt."),
+	})
 
 	output := captureStdout(t, func() {
 		count := printVisibleChatHistory(session, "已加载历史会话")
@@ -122,15 +104,10 @@ func TestPrintVisibleChatHistory_TruncatesToolOutputForCLI(t *testing.T) {
 		"line 7",
 	}, "\n")
 
-	session := &ChatSession{
-		Messages: []map[string]interface{}{
-			{
-				"role":         "tool",
-				"tool_call_id": "call-1",
-				"content":      longOutput,
-			},
-		},
-	}
+	session := &ChatSession{}
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewToolMessage("call-1", longOutput),
+	})
 
 	output := captureStdout(t, func() {
 		count := printVisibleChatHistory(session, "已加载历史会话")
@@ -147,5 +124,72 @@ func TestPrintVisibleChatHistory_TruncatesToolOutputForCLI(t *testing.T) {
 	}
 	if strings.Contains(output, "line 7") {
 		t.Fatalf("did not expect full tool output in CLI history, got:\n%s", output)
+	}
+}
+
+func TestAICLIMessageHelpers_AppendReplaceAndTruncate(t *testing.T) {
+	session := &ChatSession{}
+
+	appendRuntimeMessage(session, *runtimetypes.NewUserMessage("one"))
+	if len(session.Messages) != 1 {
+		t.Fatalf("expected 1 appended message, got %d", len(session.Messages))
+	}
+
+	original := []runtimetypes.Message{
+		*runtimetypes.NewUserMessage("two"),
+		*runtimetypes.NewAssistantMessage("three"),
+	}
+	replaceRuntimeMessages(session, original)
+	if len(session.Messages) != 2 {
+		t.Fatalf("expected 2 replaced messages, got %d", len(session.Messages))
+	}
+	original[0] = *runtimetypes.NewUserMessage("mutated")
+	if got := session.Messages[0].Content; got != "two" {
+		t.Fatalf("expected replacement to copy slice contents, got %#v", got)
+	}
+
+	truncateAICLIMessages(session, 1)
+	if len(session.Messages) != 1 {
+		t.Fatalf("expected 1 truncated message, got %d", len(session.Messages))
+	}
+	if got := session.Messages[0].Content; got != "two" {
+		t.Fatalf("unexpected truncated message content: %#v", got)
+	}
+
+	truncateAICLIMessages(session, 0)
+	if len(session.Messages) != 0 {
+		t.Fatalf("expected messages to clear when truncating to zero, got %d", len(session.Messages))
+	}
+}
+
+func TestAICLIMessageHelpers_MaintainRuntimeMirror(t *testing.T) {
+	session := &ChatSession{}
+
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewUserMessage("hello"),
+		{
+			Role:    "assistant",
+			Content: "done",
+			ToolCalls: []runtimetypes.ToolCall{
+				{ID: "call-1", Name: "echo", Args: map[string]interface{}{"text": "ok"}},
+			},
+			Metadata: runtimetypes.NewMetadata(),
+		},
+	})
+	if len(session.Messages) != 2 {
+		t.Fatalf("expected history to be populated, got %d", len(session.Messages))
+	}
+	if session.Messages[1].Role != "assistant" || len(session.Messages[1].ToolCalls) != 1 {
+		t.Fatalf("unexpected history content: %#v", session.Messages[1])
+	}
+
+	truncateAICLIMessages(session, 1)
+	if len(session.Messages) != 1 {
+		t.Fatalf("expected history to truncate with messages, got %d", len(session.Messages))
+	}
+
+	appendRuntimeMessage(session, *session.Messages[0].Clone())
+	if len(session.Messages) != 2 {
+		t.Fatalf("expected appendRuntimeMessage to update history, got len=%d", len(session.Messages))
 	}
 }

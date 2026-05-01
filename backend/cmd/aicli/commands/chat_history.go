@@ -5,11 +5,89 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type chatHistoryEntry struct {
 	Role    string
 	Content string
+}
+
+func truncateAICLIMessages(session *ChatSession, keep int) {
+	if session == nil {
+		return
+	}
+	if keep <= 0 {
+		session.Messages = nil
+		return
+	}
+	if keep >= len(session.Messages) {
+		return
+	}
+	truncated := make([]runtimetypes.Message, keep)
+	for index := 0; index < keep; index++ {
+		truncated[index] = *session.Messages[index].Clone()
+	}
+	session.Messages = truncated
+}
+
+func syncChatSystemPromptMessage(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	prompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
+	if prompt == "" {
+		return
+	}
+	systemMessage := *runtimetypes.NewSystemMessage(prompt)
+	if len(session.Messages) == 0 {
+		replaceRuntimeMessages(session, []runtimetypes.Message{systemMessage})
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(session.Messages[0].Role), "system") {
+		replaced := make([]runtimetypes.Message, len(session.Messages))
+		copy(replaced, session.Messages)
+		updatedSystem := *replaced[0].Clone()
+		updatedSystem.Content = prompt
+		replaced[0] = updatedSystem
+		replaceRuntimeMessages(session, replaced)
+		return
+	}
+	messages := make([]runtimetypes.Message, 0, len(session.Messages)+1)
+	messages = append(messages, systemMessage)
+	messages = append(messages, session.Messages...)
+	replaceRuntimeMessages(session, messages)
+}
+
+func appendRuntimeMessage(session *ChatSession, message runtimetypes.Message) {
+	if session == nil {
+		return
+	}
+	session.Messages = append(cloneRuntimeMessages(session.Messages), *message.Clone())
+}
+
+func replaceRuntimeMessages(session *ChatSession, messages []runtimetypes.Message) error {
+	if session == nil {
+		return nil
+	}
+	for _, message := range messages {
+		if strings.TrimSpace(message.Role) == "" {
+			return fmt.Errorf("message role cannot be empty")
+		}
+	}
+	session.Messages = cloneRuntimeMessages(messages)
+	return nil
+}
+
+func cloneRuntimeMessages(messages []runtimetypes.Message) []runtimetypes.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	cloned := make([]runtimetypes.Message, len(messages))
+	for index := range messages {
+		cloned[index] = *messages[index].Clone()
+	}
+	return cloned
 }
 
 func printVisibleChatHistory(session *ChatSession, header string) int {
@@ -38,8 +116,8 @@ func collectVisibleChatHistory(session *ChatSession) []chatHistoryEntry {
 	hiddenSystemPrompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
 	rawSystemPrompt := strings.TrimSpace(session.SystemPromptText)
 	entries := make([]chatHistoryEntry, 0, len(session.Messages))
-	for _, raw := range session.Messages {
-		entry, ok := buildChatHistoryEntry(raw, hiddenSystemPrompt, rawSystemPrompt)
+	for _, message := range session.Messages {
+		entry, ok := buildChatHistoryEntry(message, hiddenSystemPrompt, rawSystemPrompt)
 		if !ok {
 			continue
 		}
@@ -48,18 +126,14 @@ func collectVisibleChatHistory(session *ChatSession) []chatHistoryEntry {
 	return entries
 }
 
-func buildChatHistoryEntry(raw map[string]interface{}, hiddenSystemPrompt string, rawSystemPrompt string) (chatHistoryEntry, bool) {
-	if len(raw) == 0 {
+func buildChatHistoryEntry(message runtimetypes.Message, hiddenSystemPrompt string, rawSystemPrompt string) (chatHistoryEntry, bool) {
+	if strings.TrimSpace(message.Role) == "" {
 		return chatHistoryEntry{}, false
 	}
 
-	role := strings.ToLower(strings.TrimSpace(chatHistoryString(raw["role"])))
-	if role == "" {
-		return chatHistoryEntry{}, false
-	}
-
-	content := strings.TrimSpace(chatHistoryString(raw["content"]))
-	toolSummary := chatHistoryToolSummary(raw["tool_calls"])
+	role := strings.ToLower(strings.TrimSpace(message.Role))
+	content := strings.TrimSpace(message.Content)
+	toolSummary := chatHistoryToolSummary(message.ToolCalls)
 
 	switch role {
 	case "system":
@@ -80,7 +154,7 @@ func buildChatHistoryEntry(raw map[string]interface{}, hiddenSystemPrompt string
 			return chatHistoryEntry{}, false
 		}
 		content = truncateOutputPreview(content, maxToolResultPreviewLines, maxToolResultPreviewBytes)
-		if toolCallID := strings.TrimSpace(chatHistoryString(raw["tool_call_id"])); toolCallID != "" {
+		if toolCallID := strings.TrimSpace(message.ToolCallID); toolCallID != "" {
 			content = fmt.Sprintf("[%s] %s", toolCallID, content)
 		}
 	default:
@@ -116,62 +190,23 @@ func printVisibleChatHistoryEntry(session *ChatSession, entry chatHistoryEntry) 
 	}
 }
 
-func chatHistoryString(value interface{}) string {
-	switch typed := value.(type) {
-	case string:
-		return typed
-	case fmt.Stringer:
-		return typed.String()
-	case nil:
-		return ""
-	default:
-		return fmt.Sprintf("%v", typed)
-	}
-}
-
-func chatHistoryToolSummary(raw interface{}) string {
-	names := chatHistoryToolNames(raw)
+func chatHistoryToolSummary(toolCalls []runtimetypes.ToolCall) string {
+	names := chatHistoryToolNames(toolCalls)
 	if len(names) == 0 {
 		return ""
 	}
 	return strings.Join(names, ", ")
 }
 
-func chatHistoryToolNames(raw interface{}) []string {
-	switch typed := raw.(type) {
-	case []map[string]interface{}:
-		names := make([]string, 0, len(typed))
-		for _, item := range typed {
-			if name := chatHistoryToolName(item); name != "" {
-				names = append(names, name)
-			}
-		}
-		return names
-	case []interface{}:
-		names := make([]string, 0, len(typed))
-		for _, item := range typed {
-			itemMap, ok := item.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if name := chatHistoryToolName(itemMap); name != "" {
-				names = append(names, name)
-			}
-		}
-		return names
-	default:
+func chatHistoryToolNames(toolCalls []runtimetypes.ToolCall) []string {
+	if len(toolCalls) == 0 {
 		return nil
 	}
-}
-
-func chatHistoryToolName(raw map[string]interface{}) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	if function, ok := raw["function"].(map[string]interface{}); ok {
-		if name := strings.TrimSpace(chatHistoryString(function["name"])); name != "" {
-			return name
+	names := make([]string, 0, len(toolCalls))
+	for _, call := range toolCalls {
+		if name := strings.TrimSpace(call.Name); name != "" {
+			names = append(names, name)
 		}
 	}
-	return strings.TrimSpace(chatHistoryString(raw["name"]))
+	return names
 }

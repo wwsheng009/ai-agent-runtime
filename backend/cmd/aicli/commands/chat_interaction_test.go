@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -242,6 +244,138 @@ func TestChatSession_InterruptClearsPromptAndDraftState(t *testing.T) {
 	if strings.Count(output.String(), ui.UserPromptText(0)) != 2 {
 		t.Fatalf("expected prompt to be redrawn after interrupt, got %q", output.String())
 	}
+}
+
+func TestChatInteractiveReadLine_ResetsPromptStateOnEOF(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	oldStdin := os.Stdin
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+		os.Stdin = oldStdin
+	}()
+
+	chatIsInteractiveTerminal = func() bool { return true }
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	os.Stdin = reader
+
+	session := &ChatSession{
+		InputBox: ui.NewInputBox(nil),
+	}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	session.Interaction = coord
+
+	coord.PrintPrompt()
+	if !coord.promptVisible {
+		t.Fatal("expected prompt to be visible before read")
+	}
+
+	_, readErr := chatInteractiveReadLine(session, context.Background())
+	if !errors.Is(readErr, io.EOF) {
+		t.Fatalf("expected EOF, got %v", readErr)
+	}
+	if coord.promptVisible {
+		t.Fatal("expected prompt state to be reset after EOF")
+	}
+}
+
+func TestChatInteractiveReadLine_ResetsPromptStateOnQueueEOF(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	chatIsInteractiveTerminal = func() bool { return false }
+
+	session := &ChatSession{
+		InputQueue: newChatInputQueue(bufio.NewReader(strings.NewReader(""))),
+	}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	session.Interaction = coord
+
+	coord.PrintPrompt()
+	if !coord.promptVisible {
+		t.Fatal("expected prompt to be visible before queue EOF read")
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := chatInteractiveReadLine(session, context.Background())
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("expected EOF from queue read, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for queue EOF read")
+	}
+
+	if coord.promptVisible {
+		t.Fatal("expected prompt state to be reset after queue EOF")
+	}
+}
+
+func TestChatInteractiveReadLine_ResetsPromptStateOnQueueError(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	chatIsInteractiveTerminal = func() bool { return false }
+
+	readErr := errors.New("boom")
+	session := &ChatSession{
+		InputQueue: newChatInputQueue(bufio.NewReader(errorReader{err: readErr})),
+	}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	session.Interaction = coord
+
+	coord.PrintPrompt()
+	if !coord.promptVisible {
+		t.Fatal("expected prompt to be visible before queue error read")
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := chatInteractiveReadLine(session, context.Background())
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, readErr) {
+			t.Fatalf("expected queue error %v, got %v", readErr, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for queue error read")
+	}
+
+	if coord.promptVisible {
+		t.Fatal("expected prompt state to be reset after queue error")
+	}
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read(p []byte) (int, error) {
+	return 0, r.err
 }
 
 func TestChatInteractionCoordinator_RenderAsyncLineSupportsMultilineToolSummary(t *testing.T) {

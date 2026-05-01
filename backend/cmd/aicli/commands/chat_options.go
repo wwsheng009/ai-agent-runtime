@@ -6,10 +6,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
-	"github.com/spf13/cobra"
 )
 
 type chatCommandOptions struct {
@@ -193,18 +193,32 @@ func resolveChatModelName(provider config.Provider, opts *chatCommandOptions, lo
 }
 
 func resolveChatStreamMode(opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session) bool {
+	stream, _ := resolveChatStreamChoice(nil, opts, loadedRuntimeSession)
+	return stream
+}
+
+func resolveChatStreamChoice(cfg *config.Config, opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session) (bool, chatPreferenceSource) {
 	if opts == nil {
-		return false
+		return false, chatPreferenceSourceDefault
 	}
 
-	shouldStream := opts.StreamFlag
-	if !opts.StreamChanged && loadedRuntimeSession != nil {
+	if opts.StreamChanged {
+		return opts.StreamFlag, chatPreferenceSourceFlag
+	}
+
+	if loadedRuntimeSession != nil {
 		if storedStream, ok := runtimeSessionContextBool(loadedRuntimeSession, chatRuntimeContextStream); ok {
-			shouldStream = storedStream
+			return storedStream, chatPreferenceSourceSession
 		}
 	}
-	if !opts.StreamChanged && loadedRuntimeSession == nil && !opts.NoInteractive {
-		shouldStream = selectStreamModeWithReader(chatOptionInputReader(opts))
+
+	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.Chat != nil && cfg.AICLI.Chat.Stream != nil {
+		return *cfg.AICLI.Chat.Stream, chatPreferenceSourceConfig
 	}
-	return shouldStream
+
+	if loadedRuntimeSession == nil && !opts.NoInteractive {
+		return selectStreamModeWithReader(chatOptionInputReader(opts)), chatPreferenceSourceInteractive
+	}
+
+	return opts.StreamFlag, chatPreferenceSourceDefault
 }

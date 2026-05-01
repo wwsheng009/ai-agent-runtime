@@ -19,31 +19,23 @@ func handleModelCommand(session *ChatSession, command string, noInteractive bool
 		return false
 	}
 
-	requestedModel := strings.TrimSpace(extractCommandArgument(command))
-	popupUsed := false
-	if requestedModel == "" {
-		if noInteractive {
-			printRuntimeModelState(session)
-			return false
-		}
-
-		selectedModel, usedPopup, err := promptRuntimeModelSelection(session)
-		if err != nil {
-			fmt.Printf("错误: %v\n", err)
-			return false
-		}
-		popupUsed = popupUsed || usedPopup
-		requestedModel = selectedModel
-	}
-
-	usedPopup, err := applyRuntimeModelSwitch(session, requestedModel, !noInteractive)
-	popupUsed = popupUsed || usedPopup
+	request, err := parseModelCommandRequest(command)
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
 
-	if !popupUsed {
+	if request.ShowStatus && !request.HasMutation() {
+		printRuntimeModelState(session)
+		return false
+	}
+
+	if err := executeModelCommand(session, request, !noInteractive); err != nil {
+		fmt.Printf("错误: %v\n", err)
+		return false
+	}
+
+	if !request.ShowStatus {
 		printRuntimeModelState(session)
 	}
 	return false
@@ -54,7 +46,15 @@ func printRuntimeModelState(session *ChatSession) {
 		return
 	}
 	beginDirectInteractiveOutput(session)
-	model := effectiveRuntimeModel(session)
+	providerName := strings.TrimSpace(session.ProviderName)
+	if providerName == "" {
+		providerName = "(无)"
+	}
+	protocol := strings.TrimSpace(session.Provider.GetProtocol())
+	if protocol == "" {
+		protocol = "(无)"
+	}
+	model := strings.TrimSpace(session.Model)
 	if model == "" {
 		model = "(无)"
 	}
@@ -62,8 +62,15 @@ func printRuntimeModelState(session *ChatSession) {
 	if reasoning == "" {
 		reasoning = "(无)"
 	}
+	baseURL := strings.TrimSpace(session.BaseURL)
+	if baseURL == "" {
+		baseURL = "(无)"
+	}
+	fmt.Printf("当前 provider: %s\n", providerName)
+	fmt.Printf("当前 protocol: %s\n", protocol)
 	fmt.Printf("当前模型: %s\n", model)
 	fmt.Printf("当前 reasoning_effort: %s\n", reasoning)
+	fmt.Printf("当前 baseURL: %s\n", baseURL)
 }
 
 func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, interactive bool) (bool, error) {

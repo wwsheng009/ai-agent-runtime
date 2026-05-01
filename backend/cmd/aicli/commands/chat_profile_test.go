@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestResolveChatProfileState_AppliesDefaultsPromptAndPolicy(t *testing.T) {
@@ -181,17 +182,17 @@ func TestResolveChatSkillDirs_ResolvesUpwardRelativeSessionAndCLIPaths(t *testin
 func TestEnsureChatSystemPromptMessage_PrependsAndReplaces(t *testing.T) {
 	session := &ChatSession{
 		SystemPromptText: "Profile system prompt.",
-		Messages: []map[string]interface{}{
-			{"role": "user", "content": "hello"},
-		},
 	}
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewUserMessage("hello"),
+	})
 
 	ensureChatSystemPromptMessage(session)
 	if len(session.Messages) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(session.Messages))
 	}
 	expected := composeChatSystemPromptWithGuidance(session)
-	if session.Messages[0]["role"] != "system" || session.Messages[0]["content"] != expected {
+	if session.Messages[0].Role != "system" || session.Messages[0].Content != expected {
 		t.Fatalf("unexpected leading system message: %#v", session.Messages[0])
 	}
 
@@ -201,8 +202,8 @@ func TestEnsureChatSystemPromptMessage_PrependsAndReplaces(t *testing.T) {
 		t.Fatalf("expected no duplicate system message, got %d", len(session.Messages))
 	}
 	expected = composeChatSystemPromptWithGuidance(session)
-	if session.Messages[0]["content"] != expected {
-		t.Fatalf("expected system prompt update, got %#v", session.Messages[0]["content"])
+	if session.Messages[0].Content != expected {
+		t.Fatalf("expected system prompt update, got %#v", session.Messages[0].Content)
 	}
 }
 

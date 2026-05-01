@@ -412,18 +412,11 @@ func persistDirectImageGenerationFallbackAssistant(session *ChatSession, report 
 	message.Metadata["fallback_function"] = report.FunctionName
 	if session.RuntimeSession != nil {
 		session.RuntimeSession.AddMessage(*message)
-		if messages, err := buildAICLIMessagesFromRuntimeHistory(session.RuntimeSession.History); err == nil {
-			session.Messages = messages
-		}
+		_ = replaceRuntimeMessages(session, session.RuntimeSession.History)
 		warnIfChatSessionSyncFails(session, "direct image fallback sync", syncRuntimeSessionFromChat(session))
 		return
 	}
-	raw := map[string]interface{}{
-		"role":     "assistant",
-		"content":  message.Content,
-		"metadata": map[string]interface{}(message.Metadata),
-	}
-	session.Messages = append(session.Messages, raw)
+	appendRuntimeMessage(session, *message)
 	warnIfChatSessionSyncFails(session, "direct image fallback sync", syncRuntimeSessionFromChat(session))
 }
 

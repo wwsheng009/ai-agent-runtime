@@ -42,7 +42,7 @@ type ChatSession struct {
 	HTTPDebug                  bool
 	Stream                     bool
 	BaseURL                    string
-	Messages                   []map[string]interface{} // 支持复杂消息格式
+	Messages                   []runtimetypes.Message
 	HTTPClient                 *http.Client
 	cancelCtx                  context.Context                    // 可取消的上下文
 	cancelFunc                 context.CancelFunc                 // 取消函数
@@ -212,9 +212,10 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 		printWelcome()
 	}
 
-	if err := maybeSelectStartupSession(opts, persistenceState); err != nil {
-		exitCommandError("chat", opts.OutputFormat, err, nil)
-	}
+	// 启动时不再弹出历史会话选择菜单：默认直接进入新会话，用户可在聊天中通过
+	// /resume 恢复最近会话、/sessions [query] 浏览历史、/load <id> 加载指定会话、
+	// /new 创建新会话。`--session <id>`、`--resume`、`--list-sessions` 等显式
+	// 命令行参数仍然按原有语义生效。
 
 	runtimeState, details, err := prepareChatRuntimeState(cfg, opts, persistenceState.loadedRuntimeSession)
 	if err != nil {
@@ -225,6 +226,7 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	if err != nil {
 		exitCommandError("chat", opts.OutputFormat, err, nil)
 	}
+	persistChatStartupPreferences(cfg, opts, persistenceState.loadedRuntimeSession, runtimeState)
 	finalCleanup := buildChatFinalCleanup(session, cleanupSession)
 	registerExitCleanup(finalCleanup)
 	defer runExitCleanup()
@@ -830,14 +832,22 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			}
 
 			input, err = chatInteractiveReadLine(session, session.cancelCtx)
+			if session.Interaction != nil {
+				session.Interaction.ClearPrompt()
+			}
 			if err != nil {
 				if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
 					beginDirectInteractiveOutput(session)
 					fmt.Println("正在退出...")
 					break
 				}
-				// Ctrl+D (EOF)：静默忽略，不中断也不退出
+				// Ctrl+D (EOF)：交互行编辑器场景静默忽略；队列/普通 reader 场景在输入结束后退出循环，避免空转。
 				if errors.Is(err, io.EOF) {
+					if !shouldUseInteractiveLineEditor(session) {
+						beginDirectInteractiveOutput(session)
+						fmt.Println()
+						break
+					}
 					continue
 				}
 				// 读取失败通常是因为用户按了 Ctrl+C
@@ -854,9 +864,6 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				break
 			}
 			input = strings.TrimSpace(normalizeQueuedInputLine(input))
-			if session.Interaction != nil {
-				session.Interaction.ClearPrompt()
-			}
 		}
 
 		// 处理 Shell 命令（! 前缀）

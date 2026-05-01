@@ -154,10 +154,10 @@ func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 	if len(session.Messages) != 2 {
 		t.Fatalf("expected restored messages, got %d", len(session.Messages))
 	}
-	if session.Messages[0]["role"] != "system" {
+	if session.Messages[0].Role != "system" {
 		t.Fatalf("expected restored system prompt to be prepended, got %#v", session.Messages[0])
 	}
-	if got := session.Messages[0]["content"]; got != composeChatSystemPromptWithGuidance(session) {
+	if got := session.Messages[0].Content; got != composeChatSystemPromptWithGuidance(session) {
 		t.Fatalf("expected restored system prompt to include runtime guidance, got %#v", got)
 	}
 	if session.RuntimeSession.Metadata.Title != "restored title" {

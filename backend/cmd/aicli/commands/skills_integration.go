@@ -121,7 +121,7 @@ func (b *skillsRuntimeBinding) AnalyzeSkillExposure(session *ChatSession, prompt
 
 	routingPrompt := strings.TrimSpace(prompt)
 	if routingPrompt == "" && session != nil {
-		routingPrompt = deriveRoutingPrompt(session.Messages)
+		routingPrompt = deriveRoutingPrompt(cloneRuntimeMessages(session.Messages))
 	}
 	details.RoutingPrompt = routingPrompt
 	if routingPrompt != "" && b.exposureRouter != nil {
@@ -142,7 +142,7 @@ func (b *skillsRuntimeBinding) AnalyzeSkillExposure(session *ChatSession, prompt
 	}
 
 	if session != nil {
-		previouslyCalled := extractPreviouslyCalledSkillFunctions(session.Messages)
+		previouslyCalled := extractPreviouslyCalledSkillFunctions(cloneRuntimeMessages(session.Messages))
 		for name := range previouslyCalled {
 			details.PreviouslyCalled = append(details.PreviouslyCalled, name)
 			addFunction(name)
@@ -586,7 +586,7 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 			skill:           skillRef,
 			skillResolver:   resolver,
 			executor:        executor,
-			historyProvider: func() []runtimetypes.Message { return buildRuntimeHistory(session.Messages) },
+			historyProvider: func() []runtimetypes.Message { return runtimeHistorySnapshot(session) },
 			contextProvider: func() map[string]interface{} { return cloneSkillContextMap(session.ProfileContext) },
 			metadataProvider: func() runtimetypes.Metadata {
 				return buildSkillMetadata(session, skillName, functionName, sourcePath)
@@ -987,35 +987,14 @@ func ensureProfileContextPack(context map[string]interface{}) {
 	context["context_pack"] = pack
 }
 
-func buildRuntimeHistory(rawMessages []map[string]interface{}) []runtimetypes.Message {
-	if len(rawMessages) == 0 {
+func runtimeHistorySnapshot(session *ChatSession) []runtimetypes.Message {
+	if session == nil {
 		return nil
 	}
-
-	history := make([]runtimetypes.Message, 0, len(rawMessages))
-	for _, raw := range rawMessages {
-		role, _ := raw["role"].(string)
-		role = strings.TrimSpace(role)
-		if role == "" {
-			continue
-		}
-
-		msg := runtimetypes.Message{
-			Role:     role,
-			Metadata: runtimetypes.NewMetadata(),
-		}
-
-		if content, ok := raw["content"].(string); ok {
-			msg.Content = content
-		}
-		if toolCallID, ok := raw["tool_call_id"].(string); ok {
-			msg.ToolCallID = toolCallID
-		}
-
-		history = append(history, msg)
+	if history := cloneRuntimeMessages(session.Messages); len(history) > 0 {
+		return history
 	}
-
-	return trimRuntimeHistory(history)
+	return nil
 }
 
 func trimRuntimeHistory(history []runtimetypes.Message) []runtimetypes.Message {
@@ -1099,59 +1078,30 @@ func resolveSkillExposureTopK(topK int) int {
 	return defaultSkillExposureK
 }
 
-func deriveRoutingPrompt(messages []map[string]interface{}) string {
+func deriveRoutingPrompt(messages []runtimetypes.Message) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
-		role, _ := msg["role"].(string)
-		if role != "user" {
+		if strings.TrimSpace(msg.Role) != "user" {
 			continue
 		}
-		if content, ok := msg["content"].(string); ok {
-			if trimmed := strings.TrimSpace(content); trimmed != "" {
-				return trimmed
-			}
+		if trimmed := strings.TrimSpace(msg.Content); trimmed != "" {
+			return trimmed
 		}
 	}
 	return ""
 }
 
-func extractPreviouslyCalledSkillFunctions(messages []map[string]interface{}) map[string]struct{} {
+func extractPreviouslyCalledSkillFunctions(messages []runtimetypes.Message) map[string]struct{} {
 	result := make(map[string]struct{})
 	for _, message := range messages {
-		rawCalls, ok := message["tool_calls"]
-		if !ok {
-			continue
-		}
-		switch typed := rawCalls.(type) {
-		case []map[string]interface{}:
-			for _, call := range typed {
-				addSkillFunctionFromRawCall(result, call)
-			}
-		case []interface{}:
-			for _, item := range typed {
-				if call, ok := item.(map[string]interface{}); ok {
-					addSkillFunctionFromRawCall(result, call)
-				}
+		for _, call := range message.ToolCalls {
+			name := strings.TrimSpace(call.Name)
+			if strings.HasPrefix(name, skillFunctionPrefix) {
+				result[name] = struct{}{}
 			}
 		}
 	}
 	return result
-}
-
-func addSkillFunctionFromRawCall(target map[string]struct{}, raw map[string]interface{}) {
-	if raw == nil {
-		return
-	}
-	functionBlock, ok := raw["function"].(map[string]interface{})
-	if !ok {
-		return
-	}
-	name, _ := functionBlock["name"].(string)
-	name = strings.TrimSpace(name)
-	if !strings.HasPrefix(name, skillFunctionPrefix) {
-		return
-	}
-	target[name] = struct{}{}
 }
 
 func analyzeRequestFunctionSchemas(session *ChatSession, prompt string) ([]map[string]interface{}, *skillExposureDetails) {

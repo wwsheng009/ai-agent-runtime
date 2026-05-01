@@ -35,7 +35,7 @@ func resolveChatReasoningEffort(provider config.Provider, modelName, raw string,
 		if explicit {
 			return "", "", fmt.Errorf("无效的 reasoning-effort: %s（当前模型可选值: %s）", raw, allowed)
 		}
-		return normalized, fmt.Sprintf("Warning: reasoning-effort %q 不在当前模型支持列表中，已原样透传", normalized), nil
+		return "", fmt.Sprintf("Warning: reasoning-effort %q 不在当前模型支持列表中，已清空", normalized), nil
 	}
 
 	return normalized, "", nil
