@@ -990,18 +990,6 @@ func isWordMovementModifierSequence(params []byte) bool {
 	return strings.Contains(text, ";3") || strings.Contains(text, ";5")
 }
 
-func isWordDeleteModifierSequence(params []byte) bool {
-	if len(params) == 0 {
-		return false
-	}
-	switch string(params) {
-	case "3;3", "3;5":
-		return true
-	default:
-		return false
-	}
-}
-
 func isEscapeFinalByte(b byte) bool {
 	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '~'
 }

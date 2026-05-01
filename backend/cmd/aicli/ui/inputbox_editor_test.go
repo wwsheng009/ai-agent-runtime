@@ -228,6 +228,23 @@ func TestReadInteractiveLine_CtrlDeleteDeletesForwardWord(t *testing.T) {
 	}
 }
 
+func TestReadInteractiveLine_AltDeleteDeletesForwardWord(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("hello world\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[3;3~X\n"),
+		&output,
+		"你> ",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != "hello X" {
+		t.Fatalf("expected alt+delete to delete the word after the cursor, got %q", line)
+	}
+}
+
 func TestReadInteractiveLine_CtrlArrowMovesByWord(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLine(
