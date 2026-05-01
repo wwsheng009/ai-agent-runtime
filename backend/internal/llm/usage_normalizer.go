@@ -14,6 +14,46 @@ const (
 	usageSourceLocalEstimate    = "local_estimate"
 )
 
+// ExtractTokenUsageFromResponseBody 从上游响应体中提取统一后的 token usage。
+// 它会处理常见的顶层 usage、嵌套 response.usage、Gemini usageMetadata，
+// 以及 SSE 流里最后一个携带 usage 的事件。
+func ExtractTokenUsageFromResponseBody(body []byte) *types.TokenUsage {
+	return extractUsageFromResponseBody(body)
+}
+
+// ExtractTokenUsageFromValue 从任意嵌套值中提取统一后的 token usage。
+func ExtractTokenUsageFromValue(value interface{}) *types.TokenUsage {
+	return normalizeUsageValue(value)
+}
+
+// TokenUsageToMap converts a normalized token usage into a map that preserves
+// common provider aliases such as prompt/input and completion/output.
+func TokenUsageToMap(usage *types.TokenUsage) map[string]interface{} {
+	if usage == nil || usage.IsZero() {
+		return nil
+	}
+
+	result := make(map[string]interface{}, 8)
+	if usage.PromptTokens > 0 {
+		result["prompt_tokens"] = usage.PromptTokens
+		result["input_tokens"] = usage.PromptTokens
+	}
+	if usage.CompletionTokens > 0 {
+		result["completion_tokens"] = usage.CompletionTokens
+		result["output_tokens"] = usage.CompletionTokens
+	}
+	if usage.TotalTokens > 0 {
+		result["total_tokens"] = usage.TotalTokens
+	}
+	if usage.CachedTokens > 0 {
+		result["cached_tokens"] = usage.CachedTokens
+	}
+	if usage.ReasoningTokens > 0 {
+		result["reasoning_tokens"] = usage.ReasoningTokens
+	}
+	return result
+}
+
 func resolveUnifiedTokenUsage(
 	protocol string,
 	body []byte,

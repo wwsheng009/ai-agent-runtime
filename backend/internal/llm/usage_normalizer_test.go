@@ -128,3 +128,22 @@ func TestResolveUnifiedTokenUsage_FallsBackToLocalEstimate(t *testing.T) {
 	require.Greater(t, usage.CompletionTokens, 0)
 	require.Equal(t, usage.PromptTokens+usage.CompletionTokens, usage.TotalTokens)
 }
+
+func TestTokenUsageToMap_PreservesCanonicalAndAliasFields(t *testing.T) {
+	usageMap := TokenUsageToMap(&types.TokenUsage{
+		PromptTokens:     11,
+		CompletionTokens: 4,
+		TotalTokens:      15,
+		CachedTokens:     2,
+		ReasoningTokens:  3,
+	})
+
+	require.NotNil(t, usageMap)
+	require.Equal(t, 11, usageMap["prompt_tokens"])
+	require.Equal(t, 11, usageMap["input_tokens"])
+	require.Equal(t, 4, usageMap["completion_tokens"])
+	require.Equal(t, 4, usageMap["output_tokens"])
+	require.Equal(t, 15, usageMap["total_tokens"])
+	require.Equal(t, 2, usageMap["cached_tokens"])
+	require.Equal(t, 3, usageMap["reasoning_tokens"])
+}
