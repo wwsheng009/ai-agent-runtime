@@ -198,6 +198,36 @@ func TestReadInteractiveLine_AltBackspaceDeletesPreviousWord(t *testing.T) {
 	}
 }
 
+func TestDecodeEscapeInteractiveKey_AltDDeletesForwardWord(t *testing.T) {
+	decoded, ok := decodeEscapeInteractiveKey([]byte{27, 'd'})
+	if !ok {
+		t.Fatal("expected alt+d to decode as an interactive key")
+	}
+	if decoded.key.kind != editorKeyDeleteForwardWord {
+		t.Fatalf("expected alt+d to map to delete-forward-word, got %#v", decoded.key.kind)
+	}
+	if decoded.consumed != 2 {
+		t.Fatalf("expected alt+d to consume 2 bytes, got %d", decoded.consumed)
+	}
+}
+
+func TestReadInteractiveLine_CtrlDeleteDeletesForwardWord(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("hello world\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[3;5~X\n"),
+		&output,
+		"你> ",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != "hello X" {
+		t.Fatalf("expected ctrl+delete to delete the word after the cursor, got %q", line)
+	}
+}
+
 func TestReadInteractiveLine_CtrlArrowMovesByWord(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLine(

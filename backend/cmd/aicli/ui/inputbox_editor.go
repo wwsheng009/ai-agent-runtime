@@ -44,6 +44,7 @@ const (
 	editorKeyClearLine
 	editorKeyDeleteWord
 	editorKeyKillToEnd
+	editorKeyDeleteForwardWord
 	editorKeyRedraw
 	editorKeyYank
 	editorKeyTranspose
@@ -319,6 +320,22 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 		}
 		promoteDraft()
 		cursor = nextWordEnd(line, cursor)
+		redraw()
+	}
+
+	deleteForwardWord := func() {
+		if cursor >= len(line) || len(line) == 0 {
+			return
+		}
+		start := cursor
+		end := nextWordEnd(line, cursor)
+		if end <= start {
+			return
+		}
+		promoteDraft()
+		storeKill(append([]rune(nil), line[start:end]...))
+		line = append(line[:start], line[end:]...)
+		notifyChange()
 		redraw()
 	}
 
@@ -611,6 +628,10 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 			line = line[:cursor]
 			notifyChange()
 			redraw()
+		case editorKeyDeleteForwardWord:
+			flushPlainBurst()
+			clearReverseSearchState()
+			deleteForwardWord()
 		case editorKeyRedraw:
 			flushPlainBurst()
 			redraw()
@@ -885,6 +906,8 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 			return decodedInteractiveKey{key: editorKey{kind: editorKeyBackwardWord}, consumed: 2}, true
 		case 'f', 'F':
 			return decodedInteractiveKey{key: editorKey{kind: editorKeyForwardWord}, consumed: 2}, true
+		case 'd', 'D':
+			return decodedInteractiveKey{key: editorKey{kind: editorKeyDeleteForwardWord}, consumed: 2}, true
 		case '\b', 127:
 			return decodedInteractiveKey{key: editorKey{kind: editorKeyDeleteWord}, consumed: 2}, true
 		}
@@ -924,6 +947,8 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 					return decodedInteractiveKey{key: editorKey{kind: editorKeyHome}, consumed: i + 1}, true
 				case "3":
 					return decodedInteractiveKey{key: editorKey{kind: editorKeyDelete}, consumed: i + 1}, true
+				case "3;3", "3;5":
+					return decodedInteractiveKey{key: editorKey{kind: editorKeyDeleteForwardWord}, consumed: i + 1}, true
 				case "4", "8":
 					return decodedInteractiveKey{key: editorKey{kind: editorKeyEnd}, consumed: i + 1}, true
 				case "200":
@@ -963,6 +988,18 @@ func isWordMovementModifierSequence(params []byte) bool {
 	}
 	text := string(params)
 	return strings.Contains(text, ";3") || strings.Contains(text, ";5")
+}
+
+func isWordDeleteModifierSequence(params []byte) bool {
+	if len(params) == 0 {
+		return false
+	}
+	switch string(params) {
+	case "3;3", "3;5":
+		return true
+	default:
+		return false
+	}
 }
 
 func isEscapeFinalByte(b byte) bool {
