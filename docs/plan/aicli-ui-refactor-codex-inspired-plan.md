@@ -1,8 +1,109 @@
 # aicli UI 重构计划：参考 Codex TUI 的分阶段高级能力方案
 
-状态: **draft**
+状态: **implementing**
 
 更新时间: **2026-05-01**
+
+## 当前实施进度
+
+截至 2026-05-01，Phase 0 和 Phase 1 的最小闭环已经开始落地：
+
+- 已新增终端能力探测和 `FixedBottomSurface`，在支持 ANSI scroll region 的交互终端中预留底部状态行。
+- 已修复 `StatusBar`、prompt 清理和 line editor redraw 的跨区域清屏问题，避免使用清到屏幕底部的 `ESC[J` 破坏固定底部区域。
+- 已将 `chatInteractionCoordinator` 接入 fixed-bottom surface，并在 Thinking、Streaming、Ready、Retrying、模型切换、消息数和 token 变化时刷新状态行。
+- 已将 MCP/system status output、HTTP retry notice、debug output、运行期 priority prompt 的直接输出路径接入 surface-aware 输出入口。
+- 已新增 `ui.ComposerState`，让 bracketed paste 和 plain burst flush 通过统一 paste handler；大粘贴显示 `[Pasted Content N chars]` 占位符，提交时展开真实内容。
+- 已把 WSL/VS Code terminal 的 plain paste burst settle 窗口放宽，并让 Windows line-queue draft 通过状态栏显示 `Paste draft N lines`。
+- 保留非交互、JSON、pipe、legacy TUI 的降级路径，不在这些模式启用固定底部 UI。
+
+仍需继续完成：
+
+- 分析并实现弹出框组件渲染不占用信息流的机制，优先将 `/model` 迁移为 bottom pane modal/popup。
+- 引入真正的 bottom pane/composer，替换当前 prompt 与状态行分别维护的过渡实现。
+- 将当前 plain burst 过渡实现升级为完整 Codex 风格 paste burst 状态机，包括 pending-first-char、retro-capture、enter suppression window 和 UI tick flush。
+- 将 Windows paste 从“按行暂存 draft”进一步升级为 composer 级 paste burst，让 Windows 和 Unix/WSL 进入同一 paste handler。
+- 把 `Paste draft N lines` 从状态栏提示升级为 bottom pane 里的 pending paste preview。
+- 增加真实终端级集成测试或快照测试，覆盖 Windows Terminal、PowerShell、WSL Ubuntu、Linux terminal、VS Code terminal。
+
+## 近期新增任务与实现分析
+
+### 1. 弹出框组件渲染不占用信息流
+
+目标：弹出框、选择器和临时提示不应写入聊天 transcript，也不应通过普通 `fmt.Println` 进入终端 scrollback。它们应作为 bottom pane 的临时视图渲染，关闭后由下一帧重绘覆盖，不污染信息流。
+
+实现原则：
+
+- Popup 属于 UI state，不属于 chat history/message stream。
+- 交互模式下 popup 渲染必须走统一 surface，而不是业务函数直接写 stdout。
+- Popup 占用 bottom pane 或 modal overlay 的保留区域，通过 scroll region/viewport 与滚动信息流隔离。
+- 普通输出写入前必须调用 surface 的 output cursor 恢复逻辑，确保不会写到底部 popup 区域。
+- popup 关闭时只清理 popup 自己占用的行并恢复底部状态/composer，不使用 `ESC[J` 清到屏幕底部。
+- 非交互、JSON、pipe、legacy terminal 必须降级为当前线性选择器输出。
+
+短期实现方案：
+
+- 在 `FixedBottomSurface` 上增加动态 bottom rows 能力，例如 `ShowPopup(lines []string, prompt string)` 和 `ClearPopup()`。
+- 当 popup 打开时，将 `bottomRows` 从 1 行状态栏扩展为 `popupHeight + statusRows`，重设 scroll region 为 `1..height-bottomRows`。
+- popup 内容渲染在底部保留区域内，状态行仍位于最底部或 popup footer 行。
+- `BeginOutput()` 继续保证聊天输出只写入 scroll region，不覆盖 popup。
+- popup 输入读取先复用 `chatInteractiveReadPriorityLine`，后续再迁移到真正 composer key event。
+- popup renderer 只接收状态和宽度，返回字符串行数组，便于单元测试。
+
+中期实现方案：
+
+- 引入 `BottomPaneView` stack，参考 Codex 的 bottom pane modal/popup 模型。
+- `Composer`、`StatusLine`、`Footer`、`PendingPastePreview`、`ApprovalOverlay`、`ModelSelectorPopup` 都是 bottom pane renderable。
+- 每次状态变化只更新 UI state 并 request redraw，不由业务路径直接移动光标。
+- 在 Phase 4 frame renderer 落地后，popup 由 diff buffer 增量刷新，避免闪烁和重复输出。
+
+### 2. `/model` 功能改为弹出框
+
+当前问题：
+
+- `/model` 的模型列表、reasoning 选择和提示语直接写 stdout，会进入 scrollback。
+- 在 fixed-bottom surface 启用后，直接输出虽然可通过 `BeginOutput()` 降低覆盖风险，但仍不是真正 popup。
+- 模型选择属于临时交互状态，不应该成为聊天信息流的一部分。
+
+目标行为：
+
+- 用户输入 `/model` 后，底部打开模型选择 popup。
+- popup 显示当前模型、可选模型列表、当前项标记、输入提示和错误提示。
+- 用户可输入编号、完整模型名或自定义模型名。
+- 空 Enter 保持当前模型。
+- 选择模型后，如果该模型有 reasoning_effort 限制，再打开 reasoning_effort popup。
+- 选择完成后关闭 popup，只刷新状态栏，不向信息流打印“当前模型”列表。
+- 如果 terminal 不支持 fixed-bottom popup，则保留当前线性输出 fallback。
+
+建议数据结构：
+
+- `ModelSelectorState`：包含 `Title`、`CurrentModel`、`Options`、`SelectedIndex`、`AllowCustom`、`Prompt`、`Error`。
+- `ReasoningSelectorState`：包含 `CurrentEffort`、`Options`、`DefaultOption`、`AllowClear`、`Prompt`、`Error`。
+- `PopupResult`：包含 `SubmittedText`、`Cancelled`、`NeedsRedraw`。
+
+建议改造路径：
+
+- 将 `promptRuntimeModelSelection(session)` 拆分为纯渲染函数和输入解析函数。
+- 新增 `renderModelSelectorPopup(state,width) []string`，单元测试覆盖宽度截断、当前项标记、自定义提示。
+- 新增 `readModelSelectorPopup(session,state)`，优先使用 `session.Surface` 渲染 popup；不可用时回落到当前 stdout 选择器。
+- `handleModelCommand` 在交互模式下优先走 popup 路径；`noInteractive` 和 JSON 保持现有行为。
+- `printRuntimeModelState` 在 popup 成功后不再强制进入信息流，改为 `Interaction.RefreshStatus("")`；legacy fallback 仍打印摘要。
+
+验收标准：
+
+- `/model` popup 打开和关闭不会在聊天历史 scrollback 留下模型列表。
+- popup 打开时 assistant streaming、MCP/status 异步输出不会覆盖底部区域。
+- 空 Enter、编号、自定义模型名、无效编号重试都能工作。
+- 模型切换后状态栏立即显示新模型。
+- legacy terminal、NoInteractive、JSON 输出行为不变。
+
+### 3. PasteBurst 后续任务
+
+后续任务必须按以下顺序推进，避免继续用平台 if-else 修补粘贴问题：
+
+1. 实现完整 Codex 风格 `PasteBurst` 状态机，替换当前较简单的 `plainInputBurst`。
+2. 把 Windows paste 从“按行暂存 draft”进一步升级为 composer 级 paste burst，让 Windows 和 Unix/WSL 进入同一 paste handler。
+3. 把 `Paste draft N lines` 从状态栏提示升级为 bottom pane 里的 pending paste preview。
+4. 增加真实终端级集成测试或快照测试，覆盖 Windows Terminal、PowerShell、WSL Ubuntu、Linux terminal、VS Code terminal。
 
 ## 背景
 
@@ -787,4 +888,3 @@ P3 后续增强：
 `aicli` 可以实现 Codex 风格高级 UI，但正确路线不是继续强化现有 `StatusBar.Render()` 或 `Layout.PrintMessage()`，而是逐步建立统一 UI surface。短期通过输出收敛、真实终端尺寸和 scroll region 实现固定底部；中期通过 composer、paste burst、状态面和 footer 解决跨平台输入与状态展示；长期通过 frame renderer、render tree 和 diff buffer 达到 Codex 的稳定性和可扩展性。
 
 最重要的工程边界是：交互模式下终端只有一个所有者。只要仍允许多个组件各自移动光标、清屏、打印 prompt，高级 UI 就会在 Windows、Linux、WSL 和终端复用器中反复出现错位、重复、自动提交和覆盖问题。
-

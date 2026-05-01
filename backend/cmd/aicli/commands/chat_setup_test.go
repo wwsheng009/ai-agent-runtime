@@ -89,6 +89,17 @@ func TestBuildChatSession_NoInteractive(t *testing.T) {
 	}
 }
 
+func TestShouldInitializeChatInteractiveUI_DisabledForJSONAndLegacyMode(t *testing.T) {
+	if shouldInitializeChatInteractiveUI(&chatCommandOptions{OutputFormat: "json"}) {
+		t.Fatal("expected JSON output to disable interactive UI")
+	}
+
+	t.Setenv("AICLI_TUI", "legacy")
+	if shouldInitializeChatInteractiveUI(&chatCommandOptions{OutputFormat: "interactive"}) {
+		t.Fatal("expected AICLI_TUI=legacy to disable interactive UI")
+	}
+}
+
 func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	runtimeSession.AddMessage(*runtimetypes.NewUserMessage("hello"))
