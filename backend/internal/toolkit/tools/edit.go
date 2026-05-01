@@ -137,8 +137,38 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 
+	fileInfo, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      e.buildPathNotFoundError("读取文件失败", p.FilePath),
+			}, nil
+		}
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("读取文件失败: %w", err),
+		}, nil
+	}
+	if fileInfo.IsDir() {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      e.buildPathKindMismatchError("路径是目录，不是文件", p.FilePath),
+		}, nil
+	}
+
 	content, err := os.ReadFile(absPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      e.buildPathNotFoundError("读取文件失败", p.FilePath),
+			}, nil
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,

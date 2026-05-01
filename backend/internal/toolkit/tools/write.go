@@ -115,6 +115,13 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	if fileInfo, err := os.Stat(absPath); err == nil {
 		fileExists = true
 		oldSize = fileInfo.Size()
+		if fileInfo.IsDir() {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      w.buildPathKindMismatchError("路径是目录，不是文件", p.FilePath),
+			}, nil
+		}
 		if !fileInfo.Mode().IsRegular() {
 			return &toolkit.ToolResult{
 				Success:    false,

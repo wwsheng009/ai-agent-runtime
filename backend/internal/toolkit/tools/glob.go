@@ -101,6 +101,13 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 	searchPathInfo, err := os.Stat(resolvedSearchPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      g.buildPathNotFoundError("搜索路径不可用", searchPath),
+			}, nil
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,

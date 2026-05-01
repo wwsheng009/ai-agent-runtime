@@ -483,7 +483,7 @@ func (a *patchApplier) applyDelete(operation patchOperation) error {
 		return err
 	}
 	if !file.Exists {
-		return fmt.Errorf("文件不存在，无法删除: %s", absPath)
+		return a.tool.buildPathNotFoundError("文件不存在，无法删除", operation.Path)
 	}
 
 	file.Exists = false
@@ -502,7 +502,7 @@ func (a *patchApplier) applyUpdate(operation patchOperation) (bool, error) {
 		return false, err
 	}
 	if !source.Exists {
-		return false, fmt.Errorf("文件不存在，无法更新: %s", sourcePath)
+		return false, a.tool.buildPathNotFoundError("文件不存在，无法更新", operation.Path)
 	}
 
 	content := source.Content
@@ -580,7 +580,7 @@ func (a *patchApplier) load(path string) (*stagedFile, error) {
 	switch {
 	case err == nil:
 		if info.IsDir() {
-			return nil, fmt.Errorf("路径是目录，不支持补丁操作: %s", path)
+			return nil, a.tool.buildPathKindMismatchError("路径是目录，不支持补丁操作", path)
 		}
 		content, readErr := os.ReadFile(path)
 		if readErr != nil {

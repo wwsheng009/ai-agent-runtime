@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -356,7 +355,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		}
 
 		// 检查常见错误并给出友好提示
-		friendlyHint := friendlyHintFor(command, capture.Output, err)
+		friendlyHint := friendlyHintFor(command, capture.Output, err, cfg.workdir)
 		if friendlyHint != "" {
 			result := commandExecutionFromCapture(capture)
 			result.RawOutputArtifactPath = artifactPath
@@ -501,10 +500,11 @@ func prefixPowershellUTF8(cmd *exec.Cmd) {
 }
 
 // friendlyHintFor returns a user-friendly hint when a command fails.
-func friendlyHintFor(command string, output string, err error) string {
+func friendlyHintFor(command string, output string, err error, workdir string) string {
 	cmdLower := strings.ToLower(command)
+	outputLower := strings.ToLower(output)
+	cmdParts := runtimeexecutor.SplitCommandTokens(command)
 	mainCmd := ""
-	cmdParts := strings.Fields(command)
 	if len(cmdParts) > 0 {
 		mainCmd = strings.ToLower(cmdParts[0])
 	}
@@ -515,30 +515,38 @@ func friendlyHintFor(command string, output string, err error) string {
 	}
 
 	switch {
-	case cmdLower == "pwd" && runtime.GOOS == "windows":
+	case mainCmd == "pwd" && runtimeexecutor.IsWindows():
 		shell := runtimeexecutor.DefaultUserShell()
 		if shell.Type == runtimeexecutor.ShellTypeCmd {
 			return "提示: cmd.exe 下请使用 `cd` 或 `echo %cd%` 查看当前目录；PowerShell/pwsh 下请使用 `pwd` 或 `Get-Location`。"
 		}
 		return ""
-	case runtime.GOOS == "windows" &&
-		(strings.Contains(cmdLower, "| head") ||
+	case runtimeexecutor.IsWindows() &&
+		(runtimeexecutor.HasPipedHeadToken(cmdParts) ||
 			mainCmd == "head" ||
-			strings.Contains(strings.ToLower(output), "the term 'head' is not recognized")):
+			strings.Contains(outputLower, "the term 'head' is not recognized")):
 		return "提示: Windows PowerShell/pwsh 默认没有 `head`；请改用 `Select-Object -First 200`，例如 `git diff ... | Select-Object -First 200`。"
-	case mainCmd == "ls" && runtime.GOOS == "windows":
+	case mainCmd == "ls" && runtimeexecutor.IsWindows():
 		return "提示: Windows 下请使用 `dir` 查看目录内容"
-	case mainCmd == "uname" && runtime.GOOS == "windows":
+	case mainCmd == "uname" && runtimeexecutor.IsWindows():
 		return "提示: Windows 下请使用 `ver` 或 `systeminfo` 查看系统信息"
-	case mainCmd == "cat" && runtime.GOOS == "windows" && !strings.Contains(cmdLower, "."):
+	case mainCmd == "cat" && runtimeexecutor.IsWindows() && !strings.Contains(cmdLower, "."):
 		return "提示: Windows 下请使用 `type` 查看文件内容"
 	case exitCode == 127:
 		return "提示: 命令未找到，请检查命令拼写或确认命令是否已安装"
-	case strings.Contains(strings.ToLower(output), "permission") ||
-		strings.Contains(strings.ToLower(output), "access") && strings.Contains(strings.ToLower(output), "denied"):
+	case strings.Contains(outputLower, "permission") ||
+		strings.Contains(outputLower, "access") && strings.Contains(outputLower, "denied"):
 		return "提示: 权限不足，请检查是否有执行该命令的权限"
-	case strings.Contains(output, "no such file or directory") ||
-		strings.Contains(output, "cannot find the path"):
+	case strings.Contains(outputLower, "no such file or directory") ||
+		strings.Contains(outputLower, "cannot find the path") ||
+		strings.Contains(outputLower, "cannot find the file specified") ||
+		strings.Contains(outputLower, "path not found"):
+		if hint := runtimeexecutor.BuildPathNotFoundHintFromTokens(cmdParts, workdir); hint != "" {
+			return hint
+		}
+		if trimmed := strings.TrimSpace(workdir); trimmed != "" {
+			return fmt.Sprintf("提示: 文件或目录不存在，请先确认当前 workdir=%s 以及相对路径是否正确", trimmed)
+		}
 		return "提示: 文件或目录不存在"
 	}
 	return ""
@@ -549,7 +557,7 @@ func friendlyHintFor(command string, output string, err error) string {
 func GetShellEnvironmentInfo() string {
 	shell := runtimeexecutor.DefaultUserShell()
 	var parts []string
-	parts = append(parts, fmt.Sprintf("系统类型: %s", runtime.GOOS))
+	parts = append(parts, fmt.Sprintf("系统类型: %s", runtimeexecutor.GoOS()))
 	parts = append(parts, fmt.Sprintf("Shell: %s (%s)", shell.Type, shell.Path))
 	return strings.Join(parts, "\n")
 }
@@ -681,7 +689,7 @@ func extractStringList(value interface{}) []string {
 }
 
 func extractPrimaryCommand(command string) string {
-	parts := strings.Fields(strings.TrimSpace(command))
+	parts := runtimeexecutor.SplitCommandTokens(command)
 	if len(parts) == 0 {
 		return ""
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -367,12 +368,41 @@ func TestFriendlyHintFor_WindowsHeadPipeline(t *testing.T) {
 		t.Skip("windows-specific guidance")
 	}
 	hint := friendlyHintFor(
-		`git diff -- internal/gateway/handlers/admin_config.go | head -200`,
+		`git diff -- internal/gateway/handlers/admin_config.go |head -200`,
 		`head : The term 'head' is not recognized as a name of a cmdlet`,
 		fmt.Errorf("exit status 1"),
+		"",
 	)
 	if !strings.Contains(hint, "Select-Object -First 200") {
 		t.Fatalf("expected head guidance, got %q", hint)
+	}
+}
+
+func TestFriendlyHintFor_PathNotFoundIncludesWorkdirCandidates(t *testing.T) {
+	root := t.TempDir()
+	workdir := filepath.Join(root, "backend")
+	candidate := filepath.Join(workdir, "frontend", "src", "pages", "settings", "runtime.yaml")
+	if err := os.MkdirAll(filepath.Dir(candidate), 0o755); err != nil {
+		t.Fatalf("mkdir candidate tree: %v", err)
+	}
+	if err := os.WriteFile(candidate, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("write candidate file: %v", err)
+	}
+
+	hint := friendlyHintFor(
+		`git diff -- "frontend/src/pages/setting/runtime.yaml"`,
+		`cannot find the file specified`,
+		fmt.Errorf("exit status 1"),
+		workdir,
+	)
+	if !strings.Contains(hint, "workdir=") {
+		t.Fatalf("expected workdir guidance, got %q", hint)
+	}
+	if !strings.Contains(hint, candidate) {
+		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
+	}
+	if !strings.Contains(hint, "frontend/src/pages/setting/runtime.yaml") {
+		t.Fatalf("expected quoted path token in hint, got %q", hint)
 	}
 }
 

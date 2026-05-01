@@ -91,10 +91,17 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 	// 检查路径是否存在
 	info, err := os.Stat(resolvedPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      l.buildPathNotFoundError("路径不存在", path),
+			}, nil
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("路径不存在: %w", err),
+			Error:      fmt.Errorf("无法访问路径 %s: %w", path, err),
 		}, nil
 	}
 

@@ -92,6 +92,37 @@ func TestLsTool(t *testing.T) {
 	}
 }
 
+func TestLsTool_PathNotFoundIncludesCandidateHint(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "project", "settings")
+	if err := os.MkdirAll(candidate, 0o755); err != nil {
+		t.Fatalf("mkdir candidate tree: %v", err)
+	}
+
+	tool := NewLsTool()
+	tool.SetBasePath(root)
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"path": "project/setting",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success with content %q", result.Content)
+	}
+	if result.Error == nil {
+		t.Fatal("expected path error, got nil")
+	}
+	hint := result.Error.Error()
+	if !strings.Contains(hint, "路径不存在") {
+		t.Fatalf("expected missing path message, got %q", hint)
+	}
+	if !strings.Contains(hint, candidate) {
+		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
+	}
+}
+
 func TestLsTool_Interface(t *testing.T) {
 	tool := NewLsTool()
 

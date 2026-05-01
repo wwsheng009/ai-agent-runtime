@@ -126,6 +126,23 @@ func (d *DownloadTool) Execute(ctx context.Context, params map[string]interface{
 		}, nil
 	}
 
+	if fileInfo, err := os.Stat(absPath); err == nil {
+		if fileInfo.IsDir() {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      d.buildPathKindMismatchError("目标路径是目录，不是文件", filePath),
+			}, nil
+		}
+		if !fileInfo.Mode().IsRegular() {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("路径已存在但不是常规文件: %s", absPath),
+			}, nil
+		}
+	}
+
 	// 创建父目录
 	parentDir := filepath.Dir(absPath)
 	if err := os.MkdirAll(parentDir, 0755); err != nil {

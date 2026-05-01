@@ -209,6 +209,59 @@ func TestGrepTool_FallsBackWhenRipgrepUnavailable(t *testing.T) {
 	}
 }
 
+func TestGrepTool_DefaultEngineFallsBackWhenRipgrepUnavailable(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "sample.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		params map[string]interface{}
+	}{
+		{
+			name: "structured engine",
+			params: map[string]interface{}{
+				"pattern": "needle",
+				"path":    tmpDir,
+				"engine":  "default",
+			},
+		},
+		{
+			name: "rg_args engine",
+			params: map[string]interface{}{
+				"rg_args": []interface{}{"--engine", "default", "needle", tmpDir},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := NewGrepTool()
+			tool.lookPath = func(name string) (string, error) {
+				return "", os.ErrNotExist
+			}
+
+			result, err := tool.Execute(context.Background(), tc.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got error %v", result.Error)
+			}
+			if result.Metadata["engine"] != "builtin" {
+				t.Fatalf("expected builtin engine fallback, got %#v", result.Metadata["engine"])
+			}
+			if result.Metadata["requires_ripgrep"] != false {
+				t.Fatalf("expected default engine to avoid requiring ripgrep, got %#v", result.Metadata["requires_ripgrep"])
+			}
+			if !strings.Contains(result.Content, "sample.txt:1: needle") {
+				t.Fatalf("expected builtin search to find needle, got %q", result.Content)
+			}
+		})
+	}
+}
+
 func TestGrepTool_NoIgnoreAndUnrestrictedBuiltin(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
@@ -690,6 +743,70 @@ func TestGrepTool_NoMessagesSuppressesMissingPatternFileError(t *testing.T) {
 	}
 	if result.Metadata["no_messages"] != true {
 		t.Fatalf("expected no_messages metadata, got %#v", result.Metadata["no_messages"])
+	}
+}
+
+func TestGrepTool_PathNotFoundIncludesCandidateHint(t *testing.T) {
+	root := t.TempDir()
+	candidateDir := filepath.Join(root, "project", "settings")
+	if err := os.MkdirAll(candidateDir, 0o755); err != nil {
+		t.Fatalf("mkdir candidate dir: %v", err)
+	}
+	candidatePattern := filepath.Join(candidateDir, "patterns.txt")
+	if err := os.WriteFile(candidatePattern, []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("write candidate pattern file: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		params      map[string]interface{}
+		wantContain string
+	}{
+		{
+			name: "missing search path",
+			params: map[string]interface{}{
+				"pattern": "needle",
+				"path":    "project/setting",
+			},
+			wantContain: candidateDir,
+		},
+		{
+			name: "missing pattern file",
+			params: map[string]interface{}{
+				"pattern":      "needle",
+				"path":         root,
+				"pattern_file": "project/setting/patterns.txt",
+			},
+			wantContain: candidatePattern,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := NewGrepTool()
+			tool.SetBasePath(root)
+			tool.lookPath = func(name string) (string, error) {
+				return "", os.ErrNotExist
+			}
+
+			result, err := tool.Execute(context.Background(), tt.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Success {
+				t.Fatalf("expected failure, got success with content %q", result.Content)
+			}
+			if result.Error == nil {
+				t.Fatal("expected path error, got nil")
+			}
+			hint := result.Error.Error()
+			if !strings.Contains(hint, "不存在") {
+				t.Fatalf("expected missing path message, got %q", hint)
+			}
+			if !strings.Contains(hint, tt.wantContain) {
+				t.Fatalf("expected candidate path %q in hint, got %q", tt.wantContain, hint)
+			}
+		})
 	}
 }
 

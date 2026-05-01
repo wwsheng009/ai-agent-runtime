@@ -356,7 +356,7 @@ func NewGrepTool() *GrepTool {
 			},
 			"engine": map[string]interface{}{
 				"type":        "string",
-				"description": "兼容 rg 的 --engine；例如 default、auto-hybrid-regex、pcre2。该能力当前仅在可用 ripgrep/rg 时支持。",
+				"description": "兼容 rg 的 --engine；例如 default、auto-hybrid-regex、pcre2。default 会被内置引擎忽略，不会强制要求 rg；auto-hybrid-regex、pcre2 等非默认值仍需要 ripgrep/rg。",
 			},
 			"multiline": map[string]interface{}{
 				"type":        "boolean",
@@ -698,7 +698,7 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}
 	}
 
-	searchScopes, err := resolveSearchScopes(opts.searchPaths, opts.resolvedPaths)
+	searchScopes, err := resolveSearchScopes(opts.searchPaths, opts.resolvedPaths, g.basePath)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -1058,8 +1058,11 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--pcre2")
 	}
 	if value, ok := resolveStringParam(params, "engine"); ok && strings.TrimSpace(value) != "" {
-		compat.requiresRipgrep = true
-		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--engine", strings.TrimSpace(value))
+		engineValue := strings.TrimSpace(value)
+		if requiresRipgrepForEngine(engineValue) {
+			compat.requiresRipgrep = true
+			compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--engine", engineValue)
+		}
 	}
 	if value, ok := resolveBoolParam(params, "multiline"); ok && value {
 		compat.requiresRipgrep = true
@@ -1703,11 +1706,21 @@ func (g *GrepTool) loadPatternFiles(opts *grepOptions) error {
 	}
 
 	effective := append([]string(nil), opts.directPatterns...)
-	for _, filePath := range opts.resolvedPatternFiles {
+	for i, filePath := range opts.resolvedPatternFiles {
 		lines, err := readFileLines(filePath)
 		if err != nil {
 			if opts.noMessages {
 				continue
+			}
+			if os.IsNotExist(err) {
+				originalPath := filePath
+				if i < len(opts.patternFiles) && strings.TrimSpace(opts.patternFiles[i]) != "" {
+					originalPath = opts.patternFiles[i]
+				}
+				if hint := runtimeexecutor.BuildPathNotFoundHintForPath(originalPath, g.basePath); hint != "" {
+					return fmt.Errorf("读取 pattern_file 失败 %s\n%s", originalPath, hint)
+				}
+				return fmt.Errorf("读取 pattern_file 失败 %s", originalPath)
 			}
 			return fmt.Errorf("读取 pattern_file 失败 %s: %w", filePath, err)
 		}
@@ -1735,14 +1748,21 @@ func (g *GrepTool) applyEffectiveCaseMode(opts *grepOptions) {
 	}
 }
 
-func resolveSearchScopes(searchPaths, resolvedPaths []string) ([]grepSearchScope, error) {
+func resolveSearchScopes(searchPaths, resolvedPaths []string, workdir string) ([]grepSearchScope, error) {
 	scopes := make([]grepSearchScope, 0, len(resolvedPaths))
 	prefixOutputs := len(resolvedPaths) > 1
 	for i, resolvedPath := range resolvedPaths {
 		info, err := os.Stat(resolvedPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return nil, fmt.Errorf("搜索路径不存在: %s", resolvedPath)
+				originalPath := resolvedPath
+				if i < len(searchPaths) && strings.TrimSpace(searchPaths[i]) != "" {
+					originalPath = searchPaths[i]
+				}
+				if hint := runtimeexecutor.BuildPathNotFoundHintForPath(originalPath, workdir); hint != "" {
+					return nil, fmt.Errorf("搜索路径不存在 %s\n%s", originalPath, hint)
+				}
+				return nil, fmt.Errorf("搜索路径不存在: %s", originalPath)
 			}
 			return nil, fmt.Errorf("无法访问搜索路径 %s: %w", resolvedPath, err)
 		}
@@ -2189,8 +2209,10 @@ func applyRGFlagValue(compat *rgCompatArgs, value *rgFlagValue) {
 		compat.pathSeparator = value.value
 		compat.hasPathSeparator = true
 	case "engine":
-		compat.requiresRipgrep = true
-		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--engine", value.value)
+		if requiresRipgrepForEngine(value.value) {
+			compat.requiresRipgrep = true
+			compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--engine", value.value)
+		}
 	case "replace":
 		compat.requiresRipgrep = true
 		compat.rgOnlyArgs = append(compat.rgOnlyArgs, "--replace", value.value)
@@ -2988,6 +3010,15 @@ func normalizeRGSortValue(raw string) (string, error) {
 func requiresRipgrepForSort(value string) bool {
 	switch strings.TrimSpace(value) {
 	case "", "none", "path":
+		return false
+	default:
+		return true
+	}
+}
+
+func requiresRipgrepForEngine(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "default":
 		return false
 	default:
 		return true

@@ -8,43 +8,23 @@ import (
 	"testing"
 )
 
-func TestViewTool_DescriptionGuidesSingleFileFocus(t *testing.T) {
-	tool := NewViewTool()
-
-	desc := tool.Description()
-	if !strings.Contains(desc, "拆分") || !strings.Contains(desc, "每次只聚焦一个文件") {
-		t.Fatalf("expected view description to guide single-file focus, got %q", desc)
-	}
-
-	params := tool.Parameters()
-	props, ok := params["properties"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected properties in schema, got %#v", params)
-	}
-	pathSchema, ok := props["file_path"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected file_path schema in properties, got %#v", props)
-	}
-	pathDesc, _ := pathSchema["description"].(string)
-	if !strings.Contains(pathDesc, "拆分") || !strings.Contains(pathDesc, "多个文件") {
-		t.Fatalf("expected file_path description to guide single-file focus, got %q", pathDesc)
-	}
-}
-
-func TestViewTool_PathNotFoundIncludesCandidateHint(t *testing.T) {
+func TestEditTool_PathNotFoundIncludesCandidateHint(t *testing.T) {
 	root := t.TempDir()
-	candidate := filepath.Join(root, "project", "settings", "file.txt")
+	candidate := filepath.Join(root, "project", "settings", "runtime.yaml")
 	if err := os.MkdirAll(filepath.Dir(candidate), 0o755); err != nil {
 		t.Fatalf("mkdir candidate tree: %v", err)
 	}
-	if err := os.WriteFile(candidate, []byte("ok"), 0o644); err != nil {
+	if err := os.WriteFile(candidate, []byte("old"), 0o644); err != nil {
 		t.Fatalf("write candidate file: %v", err)
 	}
 
-	tool := NewViewTool()
+	tool := NewEditTool()
 	tool.SetBasePath(root)
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"file_path": "project/setting/file.txt",
+		"file_path":   "project/setting/runtime.yaml",
+		"old_string":  "old",
+		"new_string":  "new",
+		"replace_all": false,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -61,7 +41,7 @@ func TestViewTool_PathNotFoundIncludesCandidateHint(t *testing.T) {
 	}
 }
 
-func TestViewTool_DirectoryPathIncludesKindMismatchHint(t *testing.T) {
+func TestEditTool_DirectoryPathIncludesKindMismatchHint(t *testing.T) {
 	root := t.TempDir()
 	candidate := filepath.Join(root, "project", "settings")
 	if err := os.MkdirAll(candidate, 0o755); err != nil {
@@ -71,10 +51,12 @@ func TestViewTool_DirectoryPathIncludesKindMismatchHint(t *testing.T) {
 		t.Fatalf("mkdir directory path: %v", err)
 	}
 
-	tool := NewViewTool()
+	tool := NewEditTool()
 	tool.SetBasePath(root)
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"file_path": "project/setting",
+		"file_path":  "project/setting",
+		"old_string": "old",
+		"new_string": "new",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

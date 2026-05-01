@@ -45,6 +45,34 @@ func (p *sandboxPolicy) resolvePath(targetPath string) string {
 	return filepath.Clean(filepath.Join(p.basePath, targetPath))
 }
 
+func (p *sandboxPolicy) buildPathNotFoundHint(targetPath string) string {
+	if p == nil {
+		return runtimeexecutor.BuildPathNotFoundHintForPath(targetPath, "")
+	}
+	return runtimeexecutor.BuildPathNotFoundHintForPath(targetPath, p.basePath)
+}
+
+func (p *sandboxPolicy) buildPathNotFoundError(prefix, targetPath string) error {
+	if hint := p.buildPathNotFoundHint(targetPath); hint != "" {
+		return fmt.Errorf("%s: %s\n%s", prefix, targetPath, hint)
+	}
+	return fmt.Errorf("%s: %s", prefix, targetPath)
+}
+
+func (p *sandboxPolicy) buildPathKindMismatchHint(targetPath string) string {
+	if p == nil {
+		return runtimeexecutor.BuildPathKindMismatchHintForPath(targetPath, "")
+	}
+	return runtimeexecutor.BuildPathKindMismatchHintForPath(targetPath, p.basePath)
+}
+
+func (p *sandboxPolicy) buildPathKindMismatchError(prefix, targetPath string) error {
+	if hint := p.buildPathKindMismatchHint(targetPath); hint != "" {
+		return fmt.Errorf("%s: %s\n%s", prefix, targetPath, hint)
+	}
+	return fmt.Errorf("%s: %s", prefix, targetPath)
+}
+
 func (p *sandboxPolicy) checkPath(op runtimeexecutor.PermissionOp, targetPath string) error {
 	if p == nil || p.sandbox == nil {
 		return nil

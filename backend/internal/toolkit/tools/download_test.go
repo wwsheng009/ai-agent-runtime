@@ -137,3 +137,42 @@ func TestDownloadTool_EmitsMutatedPathsMetadata(t *testing.T) {
 		t.Fatalf("expected mutated_paths metadata, got %#v", raw)
 	}
 }
+
+func TestDownloadTool_DirectoryPathIncludesKindMismatchHint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("download should fail before issuing the network request")
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	candidate := filepath.Join(root, "project", "settings")
+	if err := os.MkdirAll(candidate, 0o755); err != nil {
+		t.Fatalf("mkdir candidate tree: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "project", "setting"), 0o755); err != nil {
+		t.Fatalf("mkdir directory path: %v", err)
+	}
+
+	tool := NewDownloadTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"url":       server.URL,
+		"file_path": "project/setting",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success with content %q", result.Content)
+	}
+	if result.Error == nil {
+		t.Fatal("expected path error, got nil")
+	}
+	hint := result.Error.Error()
+	if !strings.Contains(hint, "目标路径是目录，不是文件") {
+		t.Fatalf("expected kind mismatch guidance, got %q", hint)
+	}
+	if !strings.Contains(hint, candidate) {
+		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
+	}
+}

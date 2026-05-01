@@ -167,8 +167,38 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		}, nil
 	}
 
+	fileInfo, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      m.buildPathNotFoundError("读取文件失败", filePath),
+			}, nil
+		}
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("无法读取文件: %w", err),
+		}, nil
+	}
+	if fileInfo.IsDir() {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      m.buildPathKindMismatchError("路径是目录，不是文件", filePath),
+		}, nil
+	}
+
 	content, err := os.ReadFile(absPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      m.buildPathNotFoundError("读取文件失败", filePath),
+			}, nil
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,

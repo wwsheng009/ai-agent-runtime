@@ -103,6 +103,13 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 	fileInfo, err := os.Stat(resolvedPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      v.buildPathNotFoundError("路径不存在", p.FilePath),
+			}, nil
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
@@ -115,7 +122,7 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("路径是目录，不是文件: %s", p.FilePath),
+			Error:      v.buildPathKindMismatchError("路径是目录，不是文件", p.FilePath),
 		}, nil
 	}
 
@@ -131,6 +138,13 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// 读取文件
 	content, err := v.readFile(resolvedPath, p.Offset, p.Limit)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      v.buildPathNotFoundError("读取文件失败", p.FilePath),
+			}, nil
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,

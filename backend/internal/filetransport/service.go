@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 // WriteResult describes one filesystem transfer mutation.
@@ -135,6 +137,9 @@ func ensureWritableFileTarget(absPath string) (sizeBefore int64, created bool, e
 	info, statErr := os.Stat(absPath)
 	switch {
 	case statErr == nil:
+		if info.IsDir() {
+			return 0, false, pathKindMismatchError(absPath)
+		}
 		if !info.Mode().IsRegular() {
 			return 0, false, fmt.Errorf("目标路径不是常规文件: %s", absPath)
 		}
@@ -156,4 +161,11 @@ func actionForWrite(created bool) string {
 		return "create"
 	}
 	return "overwrite"
+}
+
+func pathKindMismatchError(path string) error {
+	if hint := runtimeexecutor.BuildPathKindMismatchHintForPath(path, ""); hint != "" {
+		return fmt.Errorf("目标路径是目录，不是文件: %s\n%s", path, hint)
+	}
+	return fmt.Errorf("目标路径是目录，不是文件: %s", path)
 }

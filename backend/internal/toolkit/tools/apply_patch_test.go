@@ -109,6 +109,107 @@ func TestApplyPatchTool_DescriptionGuidesPatchSplitting(t *testing.T) {
 	}
 }
 
+func TestApplyPatchTool_MissingUpdatePathIncludesCandidateHint(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "project", "settings", "runtime.yaml")
+	requireWriteFile(t, candidate, "hello\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: project/setting/runtime.yaml",
+		"@@",
+		"-hello",
+		"+HELLO",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success with content %q", result.Content)
+	}
+	if result.Error == nil {
+		t.Fatal("expected path error, got nil")
+	}
+	hint := result.Error.Error()
+	if !strings.Contains(hint, candidate) {
+		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
+	}
+}
+
+func TestApplyPatchTool_MissingDeletePathIncludesCandidateHint(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "project", "settings", "runtime.yaml")
+	requireWriteFile(t, candidate, "hello\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Delete File: project/setting/runtime.yaml",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success with content %q", result.Content)
+	}
+	if result.Error == nil {
+		t.Fatal("expected path error, got nil")
+	}
+	hint := result.Error.Error()
+	if !strings.Contains(hint, candidate) {
+		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
+	}
+}
+
+func TestApplyPatchTool_DirectoryPathIncludesKindMismatchHint(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "project", "settings")
+	if err := os.MkdirAll(candidate, 0o755); err != nil {
+		t.Fatalf("mkdir candidate tree: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "project", "setting"), 0o755); err != nil {
+		t.Fatalf("mkdir directory path: %v", err)
+	}
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: project/setting",
+		"@@",
+		"-placeholder",
+		"+UPDATED",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success with content %q", result.Content)
+	}
+	if result.Error == nil {
+		t.Fatal("expected path error, got nil")
+	}
+	hint := result.Error.Error()
+	if !strings.Contains(hint, "路径是目录，不是文件") {
+		t.Fatalf("expected kind mismatch guidance, got %q", hint)
+	}
+	if !strings.Contains(hint, candidate) {
+		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
+	}
+}
+
 func requireWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

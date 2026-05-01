@@ -212,6 +212,37 @@ func TestGlobTool_MissingSearchPath(t *testing.T) {
 	}
 }
 
+func TestGlobTool_MissingSearchPathIncludesCandidateHint(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "project", "settings")
+	if err := os.MkdirAll(candidate, 0o755); err != nil {
+		t.Fatalf("mkdir candidate tree: %v", err)
+	}
+
+	tool := NewGlobTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "*.go",
+		"path":    "project/setting",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected missing path to fail, got success: %s", result.Content)
+	}
+	if result.Error == nil {
+		t.Fatal("expected path error, got nil")
+	}
+	hint := result.Error.Error()
+	if !strings.Contains(hint, "搜索路径不可用") {
+		t.Fatalf("expected searchable path error, got: %v", result.Error)
+	}
+	if !strings.Contains(hint, candidate) {
+		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
+	}
+}
+
 func TestGlobTool_LimitTruncation(t *testing.T) {
 	tmpDir := t.TempDir()
 	for i := 0; i < 5; i++ {
