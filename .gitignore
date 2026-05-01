@@ -1,5 +1,6 @@
 # Go
 backend/bin/
+backend/aicli
 backend/*.exe
 backend/*.exe~
 backend/*.dll
