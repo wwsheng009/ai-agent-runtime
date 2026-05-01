@@ -653,3 +653,43 @@ func TestEnforceAnthropicMessageAlternation_PreservesStructuredAssistantBlocks(t
 		t.Fatalf("expected appended text block, got %#v", blocks[3])
 	}
 }
+
+func TestAnthropicToolUseBlock_DefaultsEmptyInputForNoArgToolCall(t *testing.T) {
+	block := anthropicToolUseBlock(map[string]interface{}{
+		"id":   "call_1",
+		"name": "list_mcp_resources",
+	})
+	if block == nil {
+		t.Fatal("expected tool_use block, got nil")
+	}
+
+	input, ok := block["input"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected input map, got %T %#v", block["input"], block["input"])
+	}
+	if len(input) != 0 {
+		t.Fatalf("expected empty input map, got %#v", input)
+	}
+}
+
+func TestGeminiFunctionCallPart_DefaultsEmptyArgsForNoArgToolCall(t *testing.T) {
+	part := geminiFunctionCallPart(map[string]interface{}{
+		"id":   "call_1",
+		"name": "list_mcp_resources",
+	})
+	if part == nil {
+		t.Fatal("expected functionCall part, got nil")
+	}
+
+	functionCall, ok := part["functionCall"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected functionCall map, got %T %#v", part["functionCall"], part["functionCall"])
+	}
+	args, ok := functionCall["args"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected args map, got %T %#v", functionCall["args"], functionCall["args"])
+	}
+	if len(args) != 0 {
+		t.Fatalf("expected empty args map, got %#v", args)
+	}
+}

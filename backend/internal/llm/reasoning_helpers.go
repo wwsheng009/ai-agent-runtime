@@ -1220,6 +1220,9 @@ func anthropicToolUseBlock(toolCall map[string]interface{}) map[string]interface
 	if len(args) == 0 {
 		args = decodeJSONObject(toolCall["arguments"])
 	}
+	if len(args) == 0 {
+		args = map[string]interface{}{}
+	}
 	return map[string]interface{}{
 		"type":  "tool_use",
 		"id":    id,
@@ -1330,6 +1333,9 @@ func geminiFunctionCallPart(toolCall map[string]interface{}) map[string]interfac
 	args := decodeJSONObject(function["arguments"])
 	if len(args) == 0 {
 		args = decodeJSONObject(toolCall["arguments"])
+	}
+	if len(args) == 0 {
+		args = map[string]interface{}{}
 	}
 	part := map[string]interface{}{
 		"functionCall": map[string]interface{}{
