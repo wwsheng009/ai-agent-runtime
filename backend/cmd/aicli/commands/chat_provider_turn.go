@@ -329,6 +329,9 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 		Temperature:     0.7,
 	}
 	config.Metadata = map[string]interface{}{}
+	for key, value := range req.Metadata {
+		config.Metadata[key] = value
+	}
 	if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
 		config.Metadata["reasoning_effort"] = reasoningEffort
 	}

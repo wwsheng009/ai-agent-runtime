@@ -16,6 +16,7 @@ type ProviderTurnRequest struct {
 	Messages  []types.Message        `json:"messages,omitempty"`
 	Tools     []types.ToolDefinition `json:"tools,omitempty"`
 	Stream    bool                   `json:"stream,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 	EventSink func(ChatEvent)        `json:"-"`
 }
 
@@ -63,6 +64,7 @@ type ToolLoopRequest struct {
 	ModelCapabilityAutoCompactRatio      float64
 	ModelCapabilityAutoCompactTokenLimit int
 	HistoryCompactor                     HistoryCompactor
+	Metadata                             map[string]interface{}
 	Provider                             ProviderTurnExecutor
 	Tools                                []types.ToolDefinition
 	ToolExecutor                         ToolExecutor
@@ -120,6 +122,7 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 			Messages:  cloneMessages(history),
 			Tools:     cloneToolDefinitions(req.Tools),
 			Stream:    req.Stream,
+			Metadata:  cloneInterfaceMap(req.Metadata),
 			EventSink: req.EventSink,
 		})
 		if err != nil {

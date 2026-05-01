@@ -1216,6 +1216,52 @@ func buildFunctionExposureReportForPrompt(session *ChatSession, prompt string) *
 	return buildFunctionExposureReport(catalog, prompt, selection, details)
 }
 
+func buildToolLoopRequestMetadataFromExposureReport(report *aicliFunctionExposureReport) map[string]interface{} {
+	if report == nil {
+		return nil
+	}
+	return runtimeskill.BuildSkillExposureMetadata(buildSkillExposureProjectionFromReport(report))
+}
+
+func buildSkillExposureProjectionFromReport(report *aicliFunctionExposureReport) runtimeskill.ExposureProjection {
+	projection := runtimeskill.ExposureProjection{}
+	if report == nil {
+		return projection
+	}
+
+	projection.Mode = report.Mode
+	projection.IncludeBuiltin = report.IncludeBuiltin
+	projection.BuiltinFunctions = append([]string(nil), report.BuiltinFunctions...)
+	projection.SkillFunctions = append([]string(nil), report.SkillFunctions...)
+	projection.FinalFunctionNames = append([]string(nil), report.FinalFunctionNames...)
+	projection.TopK = report.TopK
+	projection.RoutedSkills = append([]string(nil), report.RoutedSkills...)
+	projection.ExplicitMentions = append([]string(nil), report.ExplicitMentions...)
+	projection.PreviouslyCalled = append([]string(nil), report.PreviouslyCalled...)
+	projection.CatalogTotalFunctions = report.CatalogStats.TotalFunctions
+	projection.CatalogBuiltinTools = report.CatalogStats.BuiltinTools
+	projection.CatalogSkillFunctions = report.CatalogStats.SkillFunctions
+	projection.BuiltinFunctionCount = len(report.BuiltinFunctions)
+	projection.SkillFunctionCount = len(report.SkillFunctions)
+	projection.FinalFunctionCount = len(report.FinalFunctionNames)
+	projection.RoutedSkillCount = len(report.RoutedSkills)
+	projection.CandidateCount = len(report.Candidates)
+	if len(report.Candidates) > 0 {
+		projection.Candidates = make([]runtimeskill.ExposureCandidate, 0, len(report.Candidates))
+		for _, candidate := range report.Candidates {
+			projection.Candidates = append(projection.Candidates, runtimeskill.ExposureCandidate{
+				FunctionName: candidate.FunctionName,
+				SkillName:    candidate.SkillName,
+				Score:        candidate.Score,
+				MatchedBy:    candidate.MatchedBy,
+				Details:      candidate.Details,
+			})
+		}
+	}
+
+	return projection
+}
+
 func formatSkillExposureDebug(report *aicliFunctionExposureReport) string {
 	if report == nil {
 		return "[skills-debug] no function exposure details"

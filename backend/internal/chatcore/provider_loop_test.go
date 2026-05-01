@@ -21,8 +21,9 @@ type fakeProviderTurnExecutor struct {
 
 func (f *fakeProviderTurnExecutor) Complete(ctx context.Context, req ProviderTurnRequest) (*ProviderTurnResponse, error) {
 	cloned := ProviderTurnRequest{
-		Stream: req.Stream,
-		Tools:  cloneToolDefinitions(req.Tools),
+		Stream:   req.Stream,
+		Tools:    cloneToolDefinitions(req.Tools),
+		Metadata: cloneInterfaceMap(req.Metadata),
 	}
 	if len(req.Messages) > 0 {
 		cloned.Messages = cloneMessages(req.Messages)
@@ -128,6 +129,39 @@ func TestExecuteToolLoop_ReplaysToolCallsUntilFinalAssistantMessage(t *testing.T
 	}
 	if len(tools.calls) != 1 || tools.calls[0].Name != "read_file" {
 		t.Fatalf("unexpected tool calls: %+v", tools.calls)
+	}
+}
+
+func TestExecuteToolLoop_PropagatesRequestMetadataToProvider(t *testing.T) {
+	provider := &fakeProviderTurnExecutor{
+		responses: []*ProviderTurnResponse{
+			{
+				Message: types.NewAssistantMessage("Final answer"),
+			},
+		},
+	}
+
+	_, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
+		Prompt:   "Summarize the repo",
+		History:  []types.Message{*types.NewSystemMessage("You are helpful.")},
+		Metadata: map[string]interface{}{"skill_exposure": map[string]interface{}{"mode": "prefer"}},
+		Provider: provider,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteToolLoop failed: %v", err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected 1 provider request, got %d", len(provider.requests))
+	}
+	if provider.requests[0].Metadata == nil {
+		t.Fatal("expected metadata to be propagated to provider")
+	}
+	exposure, ok := provider.requests[0].Metadata["skill_exposure"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected skill_exposure metadata map, got %#v", provider.requests[0].Metadata["skill_exposure"])
+	}
+	if got := exposure["mode"]; got != "prefer" {
+		t.Fatalf("expected propagated exposure mode prefer, got %#v", got)
 	}
 }
 

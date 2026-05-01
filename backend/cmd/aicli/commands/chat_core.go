@@ -148,6 +148,7 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 		ModelCapabilityAutoCompactRatio:      promptBudget.ModelCapabilityAutoCompactRatio,
 		ModelCapabilityAutoCompactTokenLimit: promptBudget.ModelCapabilityAutoCompactTokenLimit,
 		HistoryCompactor:                     buildSharedChatPromptPreflightCompactor(session, renderer),
+		Metadata:                             buildToolLoopRequestMetadataFromExposureReport(exposureReport),
 		Stream:                               session.Stream,
 		Tools:                                toolDefinitionsFromSelection(selection),
 		Provider:                             provider,

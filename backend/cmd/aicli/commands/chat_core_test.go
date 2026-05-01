@@ -1143,6 +1143,89 @@ func TestAdapterRequestConfig_PropagatesReasoningEffortMetadata(t *testing.T) {
 	}
 }
 
+func TestAdapterRequestConfig_MergesProviderTurnMetadata(t *testing.T) {
+	session := &ChatSession{
+		Provider:        config.Provider{Protocol: "codex"},
+		Model:           "gpt-5.4-mini",
+		ReasoningEffort: "medium",
+	}
+
+	req := adapterRequestConfig(session, nil, runtimechatcore.ProviderTurnRequest{
+		Metadata: map[string]interface{}{
+			"skill_exposure": map[string]interface{}{
+				"mode": "prefer",
+			},
+		},
+	})
+	if req.Metadata == nil {
+		t.Fatal("expected metadata to be populated")
+	}
+	exposure, ok := req.Metadata["skill_exposure"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected skill_exposure metadata map, got %#v", req.Metadata["skill_exposure"])
+	}
+	if got := exposure["mode"]; got != "prefer" {
+		t.Fatalf("expected propagated skill exposure mode prefer, got %#v", got)
+	}
+	if got := req.Metadata["reasoning_effort"]; got != "medium" {
+		t.Fatalf("expected reasoning_effort metadata medium, got %#v", got)
+	}
+}
+
+func TestBuildToolLoopRequestMetadataFromExposureReport_IncludesTelemetryCounts(t *testing.T) {
+	metadata := buildToolLoopRequestMetadataFromExposureReport(&aicliFunctionExposureReport{
+		Mode:               skillExposurePrefer,
+		IncludeBuiltin:     true,
+		BuiltinFunctions:   []string{"builtin__search"},
+		SkillFunctions:     []string{"skill__alpha", "skill__beta"},
+		FinalFunctionNames: []string{"builtin__search", "skill__alpha"},
+		TopK:               4,
+		RoutedSkills:       []string{"skill__alpha"},
+		Candidates: []skillExposureCandidate{
+			{FunctionName: "skill__alpha", SkillName: "alpha", Score: 0.9},
+		},
+		CatalogStats: aicliFunctionCatalogStats{
+			TotalFunctions: 12,
+			BuiltinTools:   5,
+			SkillFunctions: 7,
+		},
+	})
+	if metadata == nil {
+		t.Fatal("expected metadata to be built")
+	}
+	exposure, ok := metadata["skill_exposure"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected skill_exposure metadata map, got %#v", metadata["skill_exposure"])
+	}
+	if got := exposure["mode"]; got != skillExposurePrefer {
+		t.Fatalf("expected mode prefer, got %#v", got)
+	}
+	if got := exposure["catalog_total_functions"]; got != 12 {
+		t.Fatalf("expected catalog_total_functions=12, got %#v", got)
+	}
+	if got := exposure["catalog_builtin_tools"]; got != 5 {
+		t.Fatalf("expected catalog_builtin_tools=5, got %#v", got)
+	}
+	if got := exposure["catalog_skill_functions"]; got != 7 {
+		t.Fatalf("expected catalog_skill_functions=7, got %#v", got)
+	}
+	if got := exposure["builtin_function_count"]; got != 1 {
+		t.Fatalf("expected builtin_function_count=1, got %#v", got)
+	}
+	if got := exposure["skill_function_count"]; got != 2 {
+		t.Fatalf("expected skill_function_count=2, got %#v", got)
+	}
+	if got := exposure["final_function_count"]; got != 2 {
+		t.Fatalf("expected final_function_count=2, got %#v", got)
+	}
+	if got := exposure["routed_skill_count"]; got != 1 {
+		t.Fatalf("expected routed_skill_count=1, got %#v", got)
+	}
+	if got := exposure["candidate_count"]; got != 1 {
+		t.Fatalf("expected candidate_count=1, got %#v", got)
+	}
+}
+
 func TestAdapterRequestConfig_CodexInjectsImageGenerationToolWhenModelCapabilityAllows(t *testing.T) {
 	session := &ChatSession{
 		Provider: config.Provider{
