@@ -6,6 +6,7 @@ export {
   previewRuntimeConfigDocument,
   restartRuntimeService,
   saveRuntimeConfigDocument,
+  writeRuntimeConfigDocument,
 } from "./config";
 export { sendAgentChat } from "./agent-chat";
 export {

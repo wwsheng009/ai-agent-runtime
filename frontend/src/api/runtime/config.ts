@@ -10,6 +10,7 @@ import { buildRuntimeUrl, fetchRuntimeJson } from "./shared";
 
 const runtimeConfigDocumentUrl = buildRuntimeUrl("/api/runtime/config/document");
 const runtimeConfigPreviewUrl = buildRuntimeUrl("/api/runtime/config/document/preview");
+const runtimeSkillsConfigWriteUrl = buildRuntimeUrl("/api/runtime/skills/config/write");
 const runtimeServiceUrl = buildRuntimeUrl("/api/runtime/service");
 const runtimeServiceRestartUrl = buildRuntimeUrl("/api/runtime/service/restart");
 
@@ -27,6 +28,22 @@ export async function saveRuntimeConfigDocument(
     runtimeConfigDocumentUrl,
     {
       method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    },
+  );
+  return response.document;
+}
+
+export async function writeRuntimeConfigDocument(
+  request: RuntimeConfigDocumentSaveRequest,
+) {
+  const response = await fetchRuntimeJson<RuntimeConfigDocumentSaveResponse>(
+    runtimeSkillsConfigWriteUrl,
+    {
+      method: "POST",
       headers: {
         "Content-Type": "application/json",
       },

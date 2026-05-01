@@ -105,7 +105,6 @@ import {
   buildRuntimeProxyRecord,
   getRuntimeProxyConfig,
   hasRuntimeProxyConfig,
-  summarizeRuntimeProxyConfig,
   type RuntimeProxyConfigSummary,
 } from "./runtime-proxy-domain-utils";
 import {
@@ -141,6 +140,8 @@ import {
   type TransformerModifierScope,
 } from "./runtime-transformer-domain-utils";
 import { SettingsSection } from "./settings-section";
+
+type Translator = any;
 
 const RuntimeProviderDomainEditor = lazy(() =>
   import("./runtime-provider-domain-editor").then((module) => ({
@@ -238,92 +239,92 @@ const modeMenuEntries: Array<{
 }> = [
   {
     mode: "providers",
-    labelKey: "runtimeConfig.editor.modes.providers.label",
-    descriptionKey: "runtimeConfig.editor.modes.providers.description",
+    labelKey: "editor.modes.providers.label",
+    descriptionKey: "editor.modes.providers.description",
     icon: BotIcon,
   },
   {
     mode: "providerGroups",
-    labelKey: "runtimeConfig.editor.modes.providerGroups.label",
-    descriptionKey: "runtimeConfig.editor.modes.providerGroups.description",
+    labelKey: "editor.modes.providerGroups.label",
+    descriptionKey: "editor.modes.providerGroups.description",
     icon: RouteIcon,
   },
   {
     mode: "networkProxy",
-    labelKey: "runtimeConfig.editor.modes.networkProxy.label",
-    descriptionKey: "runtimeConfig.editor.modes.networkProxy.description",
+    labelKey: "editor.modes.networkProxy.label",
+    descriptionKey: "editor.modes.networkProxy.description",
     icon: RouteIcon,
   },
   {
     mode: "auth",
-    labelKey: "runtimeConfig.editor.modes.auth.label",
-    descriptionKey: "runtimeConfig.editor.modes.auth.description",
+    labelKey: "editor.modes.auth.label",
+    descriptionKey: "editor.modes.auth.description",
     icon: Settings2Icon,
   },
   {
     mode: "routing",
-    labelKey: "runtimeConfig.editor.modes.routing.label",
-    descriptionKey: "runtimeConfig.editor.modes.routing.description",
+    labelKey: "editor.modes.routing.label",
+    descriptionKey: "editor.modes.routing.description",
     icon: RouteIcon,
   },
   {
     mode: "rateLimit",
-    labelKey: "runtimeConfig.editor.modes.rateLimit.label",
-    descriptionKey: "runtimeConfig.editor.modes.rateLimit.description",
+    labelKey: "editor.modes.rateLimit.label",
+    descriptionKey: "editor.modes.rateLimit.description",
     icon: GaugeIcon,
   },
   {
     mode: "resourceManager",
-    labelKey: "runtimeConfig.editor.modes.resourceManager.label",
-    descriptionKey: "runtimeConfig.editor.modes.resourceManager.description",
+    labelKey: "editor.modes.resourceManager.label",
+    descriptionKey: "editor.modes.resourceManager.description",
     icon: RouteIcon,
   },
   {
     mode: "providerQueue",
-    labelKey: "runtimeConfig.editor.modes.providerQueue.label",
-    descriptionKey: "runtimeConfig.editor.modes.providerQueue.description",
+    labelKey: "editor.modes.providerQueue.label",
+    descriptionKey: "editor.modes.providerQueue.description",
     icon: GaugeIcon,
   },
   {
     mode: "concurrency",
-    labelKey: "runtimeConfig.editor.modes.concurrency.label",
-    descriptionKey: "runtimeConfig.editor.modes.concurrency.description",
+    labelKey: "editor.modes.concurrency.label",
+    descriptionKey: "editor.modes.concurrency.description",
     icon: GaugeIcon,
   },
   {
     mode: "retry",
-    labelKey: "runtimeConfig.editor.modes.retry.label",
-    descriptionKey: "runtimeConfig.editor.modes.retry.description",
+    labelKey: "editor.modes.retry.label",
+    descriptionKey: "editor.modes.retry.description",
     icon: RefreshCcwIcon,
   },
   {
     mode: "monitor",
-    labelKey: "runtimeConfig.editor.modes.monitor.label",
-    descriptionKey: "runtimeConfig.editor.modes.monitor.description",
+    labelKey: "editor.modes.monitor.label",
+    descriptionKey: "editor.modes.monitor.description",
     icon: ActivityIcon,
   },
   {
     mode: "websocket",
-    labelKey: "runtimeConfig.editor.modes.websocket.label",
-    descriptionKey: "runtimeConfig.editor.modes.websocket.description",
+    labelKey: "editor.modes.websocket.label",
+    descriptionKey: "editor.modes.websocket.description",
     icon: WifiIcon,
   },
   {
     mode: "circuitBreaker",
-    labelKey: "runtimeConfig.editor.modes.circuitBreaker.label",
-    descriptionKey: "runtimeConfig.editor.modes.circuitBreaker.description",
+    labelKey: "editor.modes.circuitBreaker.label",
+    descriptionKey: "editor.modes.circuitBreaker.description",
     icon: ActivityIcon,
   },
   {
     mode: "transformer",
-    labelKey: "runtimeConfig.editor.modes.transformer.label",
-    descriptionKey: "runtimeConfig.editor.modes.transformer.description",
+    labelKey: "editor.modes.transformer.label",
+    descriptionKey: "editor.modes.transformer.description",
     icon: Settings2Icon,
   },
   {
     mode: "source",
-    labelKey: "runtimeConfig.editor.modes.source.label",
-    descriptionKey: "runtimeConfig.editor.modes.source.description",
+    labelKey: "editor.modes.source.label",
+    descriptionKey: "editor.modes.source.description",
     icon: FileTextIcon,
   },
 ];
@@ -338,11 +339,40 @@ function formatBytes(value: number) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function formatTimestamp(value?: string) {
-  if (!value) {
-    return "未写入";
+function formatRuntimeProxySummary(
+  config: RuntimeProxyConfigSummary,
+  t: Translator,
+  tCommon: Translator,
+) {
+  if (!hasRuntimeProxyConfig(config)) {
+    return t("editor.proxySummary.fallback");
   }
-  return new Intl.DateTimeFormat("zh-CN", {
+
+  const parts: string[] = [];
+  if (config.http.trim()) {
+    parts.push("HTTP");
+  }
+  if (config.https.trim()) {
+    parts.push("HTTPS");
+  }
+  if (config.noProxy.trim()) {
+    parts.push("NO_PROXY");
+  }
+
+  if (parts.length === 0) {
+    return config.enabled
+      ? tCommon("states.enabled")
+      : tCommon("states.disabled");
+  }
+
+  return parts.join(" + ");
+}
+
+function formatTimestamp(value: string | undefined, locale: string) {
+  if (!value) {
+    return "";
+  }
+  return new Intl.DateTimeFormat(locale, {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
@@ -425,8 +455,11 @@ function countImpactPaths(paths?: string[]) {
   return Array.isArray(paths) ? paths.length : 0;
 }
 
-function buildSaveStatusMessage(document: RuntimeConfigDocument) {
-  const targetPath = document.path?.trim() || "当前 runtime 配置文档";
+function buildSaveStatusMessage(
+  t: Translator,
+  document: RuntimeConfigDocument,
+) {
+  const targetPath = document.path?.trim() || t("editor.validation.defaultPath");
   const impact = document.runtime_impact;
   const appliedCount = countImpactPaths(impact?.applied_paths);
   const hotReloadCount = countImpactPaths(impact?.hot_reload_paths);
@@ -435,21 +468,24 @@ function buildSaveStatusMessage(document: RuntimeConfigDocument) {
 
   const parts: string[] = [];
   if (appliedCount > 0) {
-    parts.push(`${appliedCount} 处改动已即时应用`);
+    parts.push(t("editor.saveStatus.applied", { count: appliedCount }));
   } else if (hotReloadCount > 0) {
-    parts.push(`${hotReloadCount} 处改动支持热重载`);
+    parts.push(t("editor.saveStatus.hotReload", { count: hotReloadCount }));
   }
   if (restartCount > 0) {
-    parts.push(`${restartCount} 处改动仍需重启`);
+    parts.push(t("editor.saveStatus.restart", { count: restartCount }));
   }
   if (inactiveCount > 0) {
-    parts.push(`${inactiveCount} 处改动当前不会影响 runtime-server`);
+    parts.push(t("editor.saveStatus.inactive", { count: inactiveCount }));
   }
 
   if (parts.length === 0) {
-    return `配置已写回 ${targetPath}。`;
+    return t("editor.saveStatus.basic", { targetPath });
   }
-  return `配置已写回 ${targetPath}。${parts.join("，")}。`;
+  return t("editor.saveStatus.detailed", {
+    details: parts.join(t("editor.saveStatus.separator")),
+    targetPath,
+  });
 }
 
 function ImpactStat({
@@ -491,6 +527,7 @@ function ImpactPathList({
   title: string;
   toneClassName: string;
 }) {
+  const { t } = useTranslation("runtimeConfig");
   const visiblePaths = Array.isArray(paths) ? paths.slice(0, 6) : [];
   const hiddenCount = Math.max(
     0,
@@ -499,11 +536,13 @@ function ImpactPathList({
 
   return (
     <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-solid)] p-3">
-      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center justify-between gap-3">
         <div className="text-sm font-semibold text-[var(--foreground)]">
           {title}
         </div>
-        <Badge className={toneClassName}>{countImpactPaths(paths)} 项</Badge>
+        <Badge className={toneClassName}>
+          {t("editor.counts.pathCount", { count: countImpactPaths(paths) })}
+        </Badge>
       </div>
       {visiblePaths.length > 0 ? (
         <div className="mt-2 grid gap-1.5">
@@ -517,7 +556,7 @@ function ImpactPathList({
           ))}
           {hiddenCount > 0 ? (
             <div className="text-xs text-[var(--muted-foreground)]">
-              还有 {hiddenCount} 项未展开。
+              {t("editor.counts.hiddenCount", { count: hiddenCount })}
             </div>
           ) : null}
         </div>
@@ -539,6 +578,7 @@ function RuntimeImpactPanel({
   onRestart: () => void;
   serviceRunning: boolean;
 }) {
+  const { t } = useTranslation("runtimeConfig");
   const impact = document.runtime_impact;
   if (!impact || countImpactPaths(impact.changed_paths) === 0) {
     return null;
@@ -549,32 +589,37 @@ function RuntimeImpactPanel({
   const restartCount = countImpactPaths(impact.restart_required_paths);
   const inactiveCount = countImpactPaths(impact.inactive_paths);
   const appliedCount = countImpactPaths(impact.applied_paths);
-  const warnings = document.warnings ?? [];
-  const isPreview = Boolean(
-    document !== null &&
-    document.updated_at == null &&
-    warnings[0] === "这是预览结果，尚未写入磁盘。",
+  const previewWarning = t("editor.validation.previewWarning");
+  const warnings = (document.warnings ?? []).filter(
+    (warning) => warning !== previewWarning,
   );
+  const isPreview = document.updated_at == null;
 
   return (
     <SettingsSection
-      title={isPreview ? "预览影响" : "运行时影响"}
+      title={
+        isPreview
+          ? t("editor.impact.previewTitle")
+          : t("editor.impact.runtimeTitle")
+      }
       description={
         isPreview
-          ? "这次草稿若保存，会有多少配置即时生效、多少仍需重启。"
-          : "这里展示最近一次已保存配置对当前 runtime-server 的实际影响。"
+          ? t("editor.impact.previewDescription")
+          : t("editor.impact.runtimeDescription")
       }
     >
       <div className="rounded-[0.95rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge>{isPreview ? "基于预览" : "最近保存结果"}</Badge>
-            <Badge>{`${changedCount} 处变更`}</Badge>
+            <Badge>{isPreview ? t("editor.impact.previewBadge") : t("editor.impact.savedBadge")}</Badge>
+            <Badge>{t("editor.impact.changedCount", { count: changedCount })}</Badge>
             <Badge>
-              {document.restart_required ? "含需重启项" : "无需重启"}
+              {document.restart_required
+                ? t("editor.impact.needsRestart")
+                : t("editor.impact.noRestart")}
             </Badge>
             {appliedCount > 0 ? (
-              <Badge>{`${appliedCount} 处已热应用`}</Badge>
+              <Badge>{t("editor.impact.appliedCount", { count: appliedCount })}</Badge>
             ) : null}
           </div>
           {document.restart_required ? (
@@ -584,65 +629,65 @@ function RuntimeImpactPanel({
               onClick={onRestart}
             >
               <RotateCcwIcon size={14} />
-              重启使配置生效
+              {t("editor.impact.restartToApply")}
             </Button>
           ) : null}
         </div>
 
         <div className="mt-3 grid gap-2.5 md:grid-cols-2 xl:grid-cols-4">
           <ImpactStat
-            label="Changed"
+            label={t("editor.impact.stats.changed")}
             value={`${changedCount}`}
-            detail="这次配置差异命中的总路径数。"
+            detail={t("editor.impact.details.changed")}
             accentClassName="text-[var(--foreground)]"
           />
           <ImpactStat
-            label="Hot Reload"
+            label={t("editor.impact.stats.hotReload")}
             value={`${hotReloadCount}`}
             detail={
               appliedCount > 0
-                ? "这些路径已在当前进程中立即应用。"
-                : "这些路径支持即时热重载。"
+                ? t("editor.impact.details.hotReloadApplied")
+                : t("editor.impact.details.hotReload")
             }
             accentClassName="text-[#8fd0c6]"
           />
           <ImpactStat
-            label="Restart"
+            label={t("editor.impact.stats.restart")}
             value={`${restartCount}`}
-            detail="这些路径属于启动期注入配置，仍需重启。"
+            detail={t("editor.impact.details.restart")}
             accentClassName="text-[#f59e7d]"
           />
           <ImpactStat
-            label="Inactive"
+            label={t("editor.impact.stats.inactive")}
             value={`${inactiveCount}`}
-            detail="这些路径当前不会影响 runtime-server 进程。"
+            detail={t("editor.impact.details.inactive")}
             accentClassName="text-[#e7d58c]"
           />
         </div>
 
         <div className="mt-3 grid gap-3 xl:grid-cols-2">
           <ImpactPathList
-            title="即时应用"
+            title={t("editor.impact.paths.applied")}
             paths={impact.applied_paths}
-            emptyText="本次保存没有即时应用的运行时路径。"
+            emptyText={t("editor.impact.paths.emptyApplied")}
             toneClassName="border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#d6fff6]"
           />
           <ImpactPathList
-            title="需重启"
+            title={t("editor.impact.paths.restart")}
             paths={impact.restart_required_paths}
-            emptyText="本次变更没有命中需重启的路径。"
+            emptyText={t("editor.impact.paths.emptyRestart")}
             toneClassName="border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#ffd9ce]"
           />
           <ImpactPathList
-            title="可热重载"
+            title={t("editor.impact.paths.hotReload")}
             paths={impact.hot_reload_paths}
-            emptyText="本次变更没有命中热重载路径。"
+            emptyText={t("editor.impact.paths.emptyHotReload")}
             toneClassName="border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#d6fff6]"
           />
           <ImpactPathList
-            title="当前不生效"
+            title={t("editor.impact.paths.inactive")}
             paths={impact.inactive_paths}
-            emptyText="本次变更没有命中 inactive 路径。"
+            emptyText={t("editor.impact.paths.emptyInactive")}
             toneClassName="border-[#e7d58c]/24 bg-[#e7d58c]/10 text-[#fff3c4]"
           />
         </div>
@@ -650,7 +695,7 @@ function RuntimeImpactPanel({
         {warnings.length > 0 ? (
           <div className="mt-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-solid)] p-3">
             <div className="text-sm font-semibold text-[var(--foreground)]">
-              后端提示
+              {t("editor.impact.warningsTitle")}
             </div>
             <div className="mt-2 grid gap-2">
               {warnings.map((warning, index) => (
@@ -742,7 +787,11 @@ function MenuButton({
 }
 
 export function BackendConfigSettingsPage() {
-  const { t } = useTranslation("runtimeConfig");
+  const { i18n, t } = useTranslation("runtimeConfig");
+  const { t: tCommon } = useTranslation("common");
+  const resolvedLocale = i18n.resolvedLanguage?.startsWith("zh")
+    ? "zh-CN"
+    : "en-US";
   const [document, setDocument] = useState<RuntimeConfigDocument | null>(null);
   const [draftParsed, setDraftParsed] = useState<unknown>(null);
   const [draftRaw, setDraftRaw] = useState("");
@@ -856,8 +905,8 @@ export function BackendConfigSettingsPage() {
     () =>
       modeMenuEntries.map((entry) => ({
         ...entry,
-        description: t(entry.descriptionKey),
-        label: t(entry.labelKey),
+        description: t(entry.descriptionKey as never) as string,
+        label: t(entry.labelKey as never) as string,
       })),
     [t],
   );
@@ -875,79 +924,98 @@ export function BackendConfigSettingsPage() {
   function getModeBadge(modeValue: EditorMode) {
     switch (modeValue) {
       case "providers":
-        return `${providers.length} 个`;
+        return t("editor.counts.providers", { count: providers.length });
       case "providerGroups":
-        return `${providerGroups.length} 组`;
+        return t("editor.counts.providerGroups", {
+          count: providerGroups.length,
+        });
       case "networkProxy":
-        return summarizeRuntimeProxyConfig(proxyConfig);
+        return formatRuntimeProxySummary(proxyConfig, t, tCommon);
       case "routing":
-        return `${routes.length} 条`;
+        return t("editor.counts.routes", { count: routes.length });
       case "rateLimit":
-        return `${apiKeyLimits.length + pathLimits.length} 条`;
+        return t("editor.counts.rules", {
+          count: apiKeyLimits.length + pathLimits.length,
+        });
       case "resourceManager":
-        return resourceManagerConfig.enabled ? "已启用" : "已关闭";
+        return resourceManagerConfig.enabled
+          ? tCommon("states.enabled")
+          : tCommon("states.disabled");
       case "providerQueue":
         return providerQueueConfig.enabled
-          ? `${providerQueueProviders.length} 条`
-          : "已关闭";
+          ? t("editor.counts.providerQueueProviders", {
+              count: providerQueueProviders.length,
+            })
+          : tCommon("states.disabled");
       case "concurrency":
         return concurrencyConfig.enabled
-          ? `${concurrencyProviderLimits.length} 条`
-          : "已关闭";
+          ? t("editor.counts.concurrencyProviders", {
+              count: concurrencyProviderLimits.length,
+            })
+          : tCommon("states.disabled");
       case "retry":
-        return retryConfig.enabled ? `${retryRules.length} 条` : "已关闭";
+        return retryConfig.enabled
+          ? t("editor.counts.retryRules", { count: retryRules.length })
+          : tCommon("states.disabled");
       case "monitor":
-        return monitorConfig.enabled ? "已启用" : "已关闭";
+        return monitorConfig.enabled
+          ? tCommon("states.enabled")
+          : tCommon("states.disabled");
       case "websocket":
-        return websocketConfig.enabled ? "已启用" : "已关闭";
+        return websocketConfig.enabled
+          ? tCommon("states.enabled")
+          : tCommon("states.disabled");
       case "circuitBreaker":
         return circuitBreakerConfig.failureThreshold || "--";
       case "transformer":
-        return `${
-          requestTransformerModifiers.length +
-          responseTransformerModifiers.length
-        } 条`;
+        return t("editor.counts.transformerModifiers", {
+          count:
+            requestTransformerModifiers.length +
+            responseTransformerModifiers.length,
+        });
       case "auth":
-        return authConfig.accessAuthEnabled ? "已启用" : "已关闭";
+        return authConfig.accessAuthEnabled
+          ? tCommon("states.enabled")
+          : tCommon("states.disabled");
       case "source":
       default:
-        return `${draftLineCount} 行`;
+        return t("editor.counts.lines", { count: draftLineCount });
     }
   }
 
   function getModeSummary(modeValue: EditorMode) {
     switch (modeValue) {
       case "providers":
-        return "Provider 改动优先走列表和弹窗表单，默认 provider 也在表格内维护。";
+        return t("editor.summary.providers");
       case "providerGroups":
-        return "Provider group 用成员列表编辑，复杂 root 级扩展字段仍可保留在 JSON 区。";
+        return t("editor.summary.groups");
       case "networkProxy":
-        return "网络代理支持全局 HTTP / HTTPS / SOCKS5 代理与 no_proxy；留空并关闭时可回退到环境变量。";
+        return t("editor.summary.proxy");
       case "routing":
-        return "Routing 同时维护根配置和 route 顺序，命中优先级不再需要回 YAML 手工调数组。";
+        return t("editor.summary.routes");
       case "rateLimit":
-        return "Rate Limit 现在可直接维护默认/全局限流，以及 API Key 和路径级覆盖规则。";
+        return t("editor.summary.limits");
       case "resourceManager":
-        return "Resource Manager 现在可直接维护默认算法、跨 Provider Key 选择、健康检查和统计保留。";
+        return t("editor.summary.resourceManager");
       case "providerQueue":
-        return "Provider Queue 现在可直接维护默认槽位、overflow、wait_heartbeat，以及 provider 级覆盖。";
+        return t("editor.summary.providerQueue");
       case "concurrency":
-        return "Concurrency 现在可直接维护全局并发上限、排队参数和 provider 级并发限制。";
+        return t("editor.summary.concurrency");
       case "retry":
-        return "Retry 现在可直接维护默认重试策略、增强策略，以及按顺序匹配的 retry rules。";
+        return t("editor.summary.retry");
       case "monitor":
-        return "Monitor 现在可直接维护 metrics、tracing、alert、pprof 和 memory 五组配置。";
+        return t("editor.summary.monitor");
       case "websocket":
-        return "WebSocket 现在可直接维护 responses / realtime、HTTP bridge 和握手失败处理。";
+        return t("editor.summary.websocket");
       case "circuitBreaker":
-        return "Circuit Breaker 现在可直接维护熔断阈值、失败率、时间窗口和半开恢复参数。";
+        return t("editor.summary.circuitBreaker");
       case "transformer":
-        return "Transformer 现在可直接维护 HTTPTransformer 开关，以及 request/response body modifier 列表。";
+        return t("editor.summary.transformer");
       case "auth":
-        return "Auth 走专用表单，未覆盖字段会继续保留在原有 auth 节点中。";
+        return t("editor.modes.auth.description");
       case "source":
       default:
-        return "YAML 模式保留注释和原始排版，适合作为最后兜底。";
+        return t("editor.modes.source.label");
     }
   }
 
@@ -997,7 +1065,7 @@ export function BackendConfigSettingsPage() {
             setServiceError(
               serviceLoadError instanceof Error
                 ? serviceLoadError.message
-                : "加载服务状态失败",
+                : t("editor.messages.loadServiceStatusFailed"),
             );
             return null;
           }),
@@ -1009,7 +1077,9 @@ export function BackendConfigSettingsPage() {
         setServiceStatus(nextService);
       } catch (loadError) {
         setError(
-          loadError instanceof Error ? loadError.message : "加载后端配置失败",
+          loadError instanceof Error
+            ? loadError.message
+            : t("editor.messages.loadBackendConfigFailed"),
         );
       } finally {
         setIsLoading(false);
@@ -1051,14 +1121,14 @@ export function BackendConfigSettingsPage() {
       setMode(nextMode);
       setStatusMessage(
         nextMode === "source"
-          ? "已根据当前配置域草稿同步 YAML 视图。"
-          : "已根据当前 YAML 草稿同步专用配置视图。",
+          ? t("editor.messages.syncedToSource")
+          : t("editor.messages.syncedToStructured"),
       );
     } catch (switchError) {
       setError(
         switchError instanceof Error
           ? switchError.message
-          : "切换编辑模式前同步草稿失败",
+          : t("editor.messages.switchSyncFailed"),
       );
     } finally {
       setIsModeSwitching(false);
@@ -1068,7 +1138,7 @@ export function BackendConfigSettingsPage() {
   async function reloadDocument() {
     if (
       hasUnsavedChanges &&
-      !window.confirm("重新加载会丢弃未保存的草稿，是否继续？")
+      !window.confirm(t("editor.messages.reloadConfirm"))
     ) {
       return;
     }
@@ -1080,10 +1150,12 @@ export function BackendConfigSettingsPage() {
       setDraftParsed(nextDocument.parsed);
       setDraftRaw(nextDocument.raw);
       setPreviewDocument(null);
-      setStatusMessage("已从磁盘重新加载后端配置。");
+      setStatusMessage(t("editor.messages.reloadedFromDisk"));
     } catch (loadError) {
       setError(
-        loadError instanceof Error ? loadError.message : "重新加载后端配置失败",
+        loadError instanceof Error
+          ? loadError.message
+          : t("editor.messages.reloadFailed"),
       );
     } finally {
       setIsLoading(false);
@@ -1109,12 +1181,12 @@ export function BackendConfigSettingsPage() {
       setPreviewDocument(null);
       notifyRuntimeModelCatalogChanged();
       if (!options?.suppressStatusMessage) {
-        setStatusMessage(buildSaveStatusMessage(nextDocument));
+        setStatusMessage(buildSaveStatusMessage(t, nextDocument));
       }
       return nextDocument;
     } catch (saveError) {
       setError(
-        saveError instanceof Error ? saveError.message : "保存后端配置失败",
+        saveError instanceof Error ? saveError.message : t("editor.messages.saveFailed"),
       );
       return null;
     } finally {
@@ -1138,7 +1210,9 @@ export function BackendConfigSettingsPage() {
       setPreviewDocument(nextPreview);
     } catch (previewError) {
       setError(
-        previewError instanceof Error ? previewError.message : "生成预览失败",
+        previewError instanceof Error
+          ? previewError.message
+          : t("editor.messages.previewFailed"),
       );
     } finally {
       setIsPreviewLoading(false);
@@ -1151,7 +1225,7 @@ export function BackendConfigSettingsPage() {
   }) {
     if (
       !options?.skipConfirm &&
-      !window.confirm("runtime-server 会短暂中断连接后重启，是否继续？")
+      !window.confirm(t("editor.messages.restartConfirm"))
     ) {
       return false;
     }
@@ -1177,20 +1251,20 @@ export function BackendConfigSettingsPage() {
               }
             }
             notifyRuntimeModelCatalogChanged();
-            setStatusMessage("runtime-server 已重新连通。");
+            setStatusMessage(t("editor.messages.runtimeServerReconnected"));
             return true;
           }
         } catch {
           // ignore poll errors while service restarts
         }
       }
-      setStatusMessage("已发起 runtime-server 重启，请稍后确认服务状态。");
+      setStatusMessage(t("editor.messages.restartRequested"));
       return true;
     } catch (restartError) {
       setServiceError(
         restartError instanceof Error
           ? restartError.message
-          : "重启 runtime-server 失败",
+          : t("editor.messages.restartFailed"),
       );
       return false;
     } finally {
@@ -1200,9 +1274,7 @@ export function BackendConfigSettingsPage() {
 
   async function saveAndRestartDocument() {
     if (
-      !window.confirm(
-        "保存配置后将自动重启 runtime-server。需要重启的变更会在新进程中生效，是否继续？",
-      )
+      !window.confirm(t("editor.messages.saveAndRestartConfirm"))
     ) {
       return;
     }
@@ -1213,7 +1285,7 @@ export function BackendConfigSettingsPage() {
     }
 
     if (!nextDocument.restart_required) {
-      setStatusMessage(buildSaveStatusMessage(nextDocument));
+      setStatusMessage(buildSaveStatusMessage(t, nextDocument));
       return;
     }
 
@@ -1222,9 +1294,7 @@ export function BackendConfigSettingsPage() {
       refreshDocument: true,
     });
     if (restarted) {
-      setStatusMessage(
-        "配置已保存并已重启 runtime-server，需要重启的变更已进入新进程。",
-      );
+      setStatusMessage(t("editor.messages.saveAndRestartDone"));
     }
   }
 
@@ -1232,7 +1302,7 @@ export function BackendConfigSettingsPage() {
     setDraftParsed((current: unknown) =>
       setConfigValueAtPath(current, ["providers", "default_provider"], name),
     );
-    setStatusMessage(`已将默认 provider 草稿切换为 "${name}"。`);
+    setStatusMessage(t("editor.messages.defaultProviderSet", { name }));
   }
 
   function handleProxyConfigChange(nextProxyConfig: RuntimeProxyConfigSummary) {
@@ -1249,8 +1319,10 @@ export function BackendConfigSettingsPage() {
     });
     setStatusMessage(
       hasRuntimeProxyConfig(nextProxyConfig)
-        ? `已更新全局代理草稿：${summarizeRuntimeProxyConfig(nextProxyConfig)}。`
-        : "已清空全局代理草稿，运行时将回退到环境变量或直连。",
+        ? t("editor.messages.globalProxyUpdated", {
+            summary: formatRuntimeProxySummary(nextProxyConfig, t, tCommon),
+          })
+        : t("editor.messages.globalProxyCleared"),
     );
   }
 
@@ -1260,19 +1332,19 @@ export function BackendConfigSettingsPage() {
   ) {
     const name = draft.name.trim();
     if (!name) {
-      return "Provider 名称不能为空。";
+      return t("editor.validation.providerNameRequired");
     }
     if (
       providers.some(
         (provider) => provider.name === name && provider.name !== previousName,
       )
     ) {
-      return `Provider "${name}" 已存在，请更换一个名称。`;
+      return t("editor.validation.providerExists", { name });
     }
 
     const nextProvider = buildProviderRecordFromDraft(draft);
     if (!nextProvider.record) {
-      return nextProvider.error ?? "Provider 配置无效。";
+      return nextProvider.error ?? t("editor.validation.providerInvalid");
     }
 
     setDraftParsed((current: unknown) => {
@@ -1306,8 +1378,8 @@ export function BackendConfigSettingsPage() {
     setError(null);
     setStatusMessage(
       previousName
-        ? `已更新 provider "${name}" 草稿。`
-        : `已创建 provider "${name}" 草稿。`,
+        ? t("editor.messages.providerUpdated", { name })
+        : t("editor.messages.providerCreated", { name }),
     );
     return null;
   }
@@ -1318,9 +1390,11 @@ export function BackendConfigSettingsPage() {
     );
     const relatedHint =
       relatedGroups.length > 0
-        ? ` 它仍被 ${relatedGroups.length} 个 provider group 引用。`
+        ? t("editor.messages.relatedProviderGroups", {
+            count: relatedGroups.length,
+          })
         : "";
-    if (!window.confirm(`确认删除 provider "${name}" 吗？${relatedHint}`)) {
+    if (!window.confirm(t("editor.messages.confirmDeleteProvider", { name, relatedHint }))) {
       return;
     }
 
@@ -1340,7 +1414,7 @@ export function BackendConfigSettingsPage() {
       }
       return nextValue;
     });
-    setStatusMessage(`已从草稿中删除 provider "${name}"。`);
+    setStatusMessage(t("editor.messages.providerDeleted", { name }));
   }
 
   function handleSaveProviderGroup(
@@ -1353,13 +1427,13 @@ export function BackendConfigSettingsPage() {
         (group) => group.name === name && group.name !== previousName,
       )
     ) {
-      return `Provider group "${name}" 已存在，请更换一个名称。`;
+      return t("editor.validation.providerGroupExists", { name });
     }
 
     const nextGroup = buildProviderGroupRecordFromDraft(draft);
     const groupRecord = nextGroup.record;
     if (!groupRecord) {
-      return nextGroup.error ?? "Provider group 配置无效。";
+      return nextGroup.error ?? t("editor.validation.providerGroupInvalid");
     }
 
     setDraftParsed((current: unknown) =>
@@ -1374,20 +1448,20 @@ export function BackendConfigSettingsPage() {
     setError(null);
     setStatusMessage(
       previousName
-        ? `已更新 provider group "${name}" 草稿。`
-        : `已创建 provider group "${name}" 草稿。`,
+        ? t("editor.messages.providerGroupUpdated", { name })
+        : t("editor.messages.providerGroupCreated", { name }),
     );
     return null;
   }
 
   function handleDeleteProviderGroup(name: string) {
-    if (!window.confirm(`确认删除 provider group "${name}" 吗？`)) {
+    if (!window.confirm(t("editor.messages.confirmDeleteProviderGroup", { name }))) {
       return;
     }
     setDraftParsed((current: unknown) =>
       removeNamedArrayRecord(current, "provider_groups", name),
     );
-    setStatusMessage(`已从草稿中删除 provider group "${name}"。`);
+    setStatusMessage(t("editor.messages.providerGroupDeleted", { name }));
   }
 
   function handleAuthChange(nextAuthConfig: RuntimeAuthConfigSummary) {
@@ -1444,7 +1518,7 @@ export function BackendConfigSettingsPage() {
     const nextRoute = buildRouteRecordFromDraft(draft);
     const routeRecord = nextRoute.record;
     if (!routeRecord) {
-      return nextRoute.error ?? "Route 配置无效。";
+      return nextRoute.error ?? t("editor.validation.routeInvalid");
     }
 
     setDraftParsed((current: unknown) => {
@@ -1470,14 +1544,14 @@ export function BackendConfigSettingsPage() {
     setError(null);
     setStatusMessage(
       editingIndex == null
-        ? "已创建 routing route 草稿。"
-        : `已更新 Route #${editingIndex + 1} 草稿。`,
+        ? t("editor.messages.routeCreated")
+        : t("editor.messages.routeUpdated", { index: String(editingIndex + 1) }),
     );
     return null;
   }
 
   function handleDeleteRoute(index: number) {
-    if (!window.confirm(`确认删除 Route #${index + 1} 吗？`)) {
+    if (!window.confirm(t("editor.messages.confirmDeleteRoute", { index: String(index + 1) }))) {
       return;
     }
 
@@ -1496,7 +1570,7 @@ export function BackendConfigSettingsPage() {
         routes: currentRoutes,
       });
     });
-    setStatusMessage(`已从草稿中删除 Route #${index + 1}。`);
+    setStatusMessage(t("editor.messages.routeDeleted", { index: String(index + 1) }));
   }
 
   function handleMoveRoute(index: number, direction: "up" | "down") {
@@ -1529,8 +1603,8 @@ export function BackendConfigSettingsPage() {
     });
     setStatusMessage(
       direction === "up"
-        ? `已上移 Route #${index + 1}。`
-        : `已下移 Route #${index + 1}。`,
+        ? t("editor.messages.routeMovedUp", { index: String(index + 1) })
+        : t("editor.messages.routeMovedDown", { index: String(index + 1) }),
     );
   }
 
@@ -1591,7 +1665,7 @@ export function BackendConfigSettingsPage() {
     const nextLimit = buildRateLimitApiKeyRecordFromDraft(draft);
     const limitRecord = nextLimit.record;
     if (!limitRecord) {
-      return nextLimit.error ?? "API Key 限流规则无效。";
+      return nextLimit.error ?? t("editor.validation.apiKeyLimitInvalid");
     }
 
     setDraftParsed((current: unknown) => {
@@ -1619,14 +1693,18 @@ export function BackendConfigSettingsPage() {
     setError(null);
     setStatusMessage(
       editingIndex == null
-        ? "已创建 API Key 限流规则草稿。"
-        : `已更新 API Key 规则 #${editingIndex + 1} 草稿。`,
+        ? t("editor.messages.apiKeyLimitCreated")
+        : t("editor.messages.apiKeyLimitUpdated", { index: String(editingIndex + 1) }),
     );
     return null;
   }
 
   function handleDeleteApiKeyLimit(index: number) {
-    if (!window.confirm(`确认删除 API Key 规则 #${index + 1} 吗？`)) {
+    if (
+      !window.confirm(
+        t("editor.messages.confirmDeleteApiKeyLimit", { index: String(index + 1) }),
+      )
+    ) {
       return;
     }
 
@@ -1647,7 +1725,9 @@ export function BackendConfigSettingsPage() {
         api_key_limits: currentLimits,
       });
     });
-    setStatusMessage(`已从草稿中删除 API Key 规则 #${index + 1}。`);
+    setStatusMessage(
+      t("editor.messages.apiKeyLimitDeleted", { index: String(index + 1) }),
+    );
   }
 
   function handleSavePathLimit(
@@ -1658,14 +1738,14 @@ export function BackendConfigSettingsPage() {
     const limitPath = nextPathLimit.path;
     const limitRecord = nextPathLimit.record;
     if (!limitPath || !limitRecord) {
-      return nextPathLimit.error ?? "路径限流规则无效。";
+      return nextPathLimit.error ?? t("editor.validation.pathLimitInvalid");
     }
     if (
       pathLimits.some(
         (item) => item.path === limitPath && item.path !== previousPath,
       )
     ) {
-      return `路径规则 "${limitPath}" 已存在。`;
+      return t("editor.validation.pathLimitExists", { path: limitPath });
     }
 
     setDraftParsed((current: unknown) => {
@@ -1692,14 +1772,14 @@ export function BackendConfigSettingsPage() {
     setError(null);
     setStatusMessage(
       previousPath
-        ? `已更新路径限流规则 "${limitPath}"。`
-        : `已创建路径限流规则 "${limitPath}"。`,
+        ? t("editor.messages.pathLimitUpdated", { path: limitPath })
+        : t("editor.messages.pathLimitCreated", { path: limitPath }),
     );
     return null;
   }
 
   function handleDeletePathLimit(path: string) {
-    if (!window.confirm(`确认删除路径规则 "${path}" 吗？`)) {
+    if (!window.confirm(t("editor.messages.confirmDeletePathLimit", { path }))) {
       return;
     }
 
@@ -1720,7 +1800,7 @@ export function BackendConfigSettingsPage() {
         path_limits: currentPathLimits,
       });
     });
-    setStatusMessage(`已从草稿中删除路径限流规则 "${path}"。`);
+    setStatusMessage(t("editor.messages.pathLimitDeleted", { path }));
   }
 
   function handleResourceManagerConfigChange(
@@ -1829,7 +1909,7 @@ export function BackendConfigSettingsPage() {
     const providerName = nextProvider.provider;
     const providerRecord = nextProvider.record;
     if (!providerName || !providerRecord) {
-      return nextProvider.error ?? "Provider queue 覆盖配置无效。";
+      return nextProvider.error ?? t("editor.validation.providerQueueInvalid");
     }
     if (
       providerQueueProviders.some(
@@ -1864,14 +1944,22 @@ export function BackendConfigSettingsPage() {
     setError(null);
     setStatusMessage(
       previousProvider
-        ? `已更新 provider queue 覆盖 "${providerName}"。`
-        : `已创建 provider queue 覆盖 "${providerName}"。`,
+        ? t("editor.messages.providerQueueUpdated", { provider: providerName })
+        : t("editor.messages.providerQueueCreated", {
+            provider: providerName,
+          }),
     );
     return null;
   }
 
   function handleDeleteProviderQueueProvider(provider: string) {
-    if (!window.confirm(`确认删除 provider queue 覆盖 "${provider}" 吗？`)) {
+    if (
+      !window.confirm(
+        t("editor.messages.confirmDeleteProviderQueueProvider", {
+          provider,
+        }),
+      )
+    ) {
       return;
     }
 
@@ -1892,7 +1980,7 @@ export function BackendConfigSettingsPage() {
         providers: currentProviders,
       });
     });
-    setStatusMessage(`已从草稿中删除 provider queue 覆盖 "${provider}"。`);
+    setStatusMessage(t("editor.messages.providerQueueDeleted", { provider }));
   }
 
   function handleConcurrencyConfigChange(
@@ -1924,7 +2012,7 @@ export function BackendConfigSettingsPage() {
   ) {
     const provider = draft.provider.trim();
     if (!provider) {
-      return "Provider 名称不能为空。";
+      return t("editor.validation.providerNameRequired");
     }
     if (
       concurrencyProviderLimits.some(
@@ -1932,12 +2020,14 @@ export function BackendConfigSettingsPage() {
           item.provider === provider && item.provider !== previousProvider,
       )
     ) {
-      return `Provider "${provider}" 已存在并发限制。`;
+      return t("editor.validation.concurrencyProviderExists", {
+        provider,
+      });
     }
 
     const limit = draft.limit.trim();
     if (!limit) {
-      return "并发限制不能为空。";
+      return t("editor.validation.concurrencyLimitRequired");
     }
 
     setDraftParsed((current: unknown) => {
@@ -1966,14 +2056,22 @@ export function BackendConfigSettingsPage() {
     setError(null);
     setStatusMessage(
       previousProvider
-        ? `已更新 provider 并发限制 "${provider}"。`
-        : `已创建 provider 并发限制 "${provider}"。`,
+        ? t("editor.messages.concurrencyLimitUpdated", {
+            provider,
+          })
+        : t("editor.messages.concurrencyLimitCreated", {
+            provider,
+          }),
     );
     return null;
   }
 
   function handleDeleteConcurrencyProviderLimit(provider: string) {
-    if (!window.confirm(`确认删除 provider 并发限制 "${provider}" 吗？`)) {
+    if (
+      !window.confirm(
+        t("editor.messages.confirmDeleteConcurrencyLimit", { provider }),
+      )
+    ) {
       return;
     }
 
@@ -1996,7 +2094,7 @@ export function BackendConfigSettingsPage() {
         per_provider_limits: currentLimits,
       });
     });
-    setStatusMessage(`已从草稿中删除 provider 并发限制 "${provider}"。`);
+    setStatusMessage(t("editor.messages.concurrencyLimitDeleted", { provider }));
   }
 
   function handleRetryConfigChange(nextRetryConfig: RuntimeRetryConfigSummary) {
@@ -2059,14 +2157,14 @@ export function BackendConfigSettingsPage() {
   ) {
     const name = draft.name.trim();
     if (!name) {
-      return "规则名称不能为空。";
+      return t("editor.validation.retryRuleNameRequired");
     }
     if (
       retryRules.some(
         (rule) => rule.name === name && rule.index !== editingIndex,
       )
     ) {
-      return `规则 "${name}" 已存在。`;
+      return t("editor.validation.retryRuleExists", { name });
     }
 
     setDraftParsed((current: unknown) => {
@@ -2177,14 +2275,14 @@ export function BackendConfigSettingsPage() {
     setError(null);
     setStatusMessage(
       editingIndex == null
-        ? `已创建 retry 规则 "${name}"。`
-        : `已更新 retry 规则 "${name}"。`,
+        ? t("editor.messages.retryRuleCreated", { name })
+        : t("editor.messages.retryRuleUpdated", { name }),
     );
     return null;
   }
 
   function handleDeleteRetryRule(index: number) {
-    if (!window.confirm(`确认删除 Retry 规则 #${index + 1} 吗？`)) {
+    if (!window.confirm(t("editor.messages.confirmDeleteRetryRule", { index: String(index + 1) }))) {
       return;
     }
 
@@ -2203,7 +2301,7 @@ export function BackendConfigSettingsPage() {
         rules: currentRules,
       });
     });
-    setStatusMessage(`已从草稿中删除 Retry 规则 #${index + 1}。`);
+    setStatusMessage(t("editor.messages.retryRuleDeleted", { index: String(index + 1) }));
   }
 
   function handleMoveRetryRule(index: number, direction: "up" | "down") {
@@ -2236,8 +2334,8 @@ export function BackendConfigSettingsPage() {
     });
     setStatusMessage(
       direction === "up"
-        ? `已上移 Retry 规则 #${index + 1}。`
-        : `已下移 Retry 规则 #${index + 1}。`,
+        ? t("editor.messages.retryRuleMovedUp", { index: String(index + 1) })
+        : t("editor.messages.retryRuleMovedDown", { index: String(index + 1) }),
     );
   }
 
@@ -2271,7 +2369,7 @@ export function BackendConfigSettingsPage() {
     const nextModifier = buildTransformerModifierRecordFromDraft(draft, scope);
     const modifierRecord = nextModifier.record;
     if (!modifierRecord) {
-      return nextModifier.error ?? "Transformer modifier 配置无效。";
+      return nextModifier.error ?? t("editor.validation.transformerModifierInvalid");
     }
 
     setDraftParsed((current: unknown) => {
@@ -2307,8 +2405,13 @@ export function BackendConfigSettingsPage() {
     setError(null);
     setStatusMessage(
       editingIndex == null
-        ? `已创建 ${scope === "request" ? "请求" : "响应"} transformer modifier。`
-        : `已更新 ${scope === "request" ? "请求" : "响应"} transformer modifier #${editingIndex + 1}。`,
+        ? t("editor.messages.transformerModifierCreated", {
+            scopeLabel: t(`editor.scopes.${scope}`),
+          })
+        : t("editor.messages.transformerModifierUpdated", {
+            scopeLabel: t(`editor.scopes.${scope}`),
+            index: String(editingIndex + 1),
+          }),
     );
     return null;
   }
@@ -2319,7 +2422,10 @@ export function BackendConfigSettingsPage() {
   ) {
     if (
       !window.confirm(
-        `确认删除${scope === "request" ? "请求" : "响应"} modifier #${index + 1} 吗？`,
+        t("editor.messages.confirmDeleteTransformerModifier", {
+          index: String(index + 1),
+          scopeLabel: t(`editor.scopes.${scope}`),
+        }),
       )
     ) {
       return;
@@ -2351,7 +2457,10 @@ export function BackendConfigSettingsPage() {
       });
     });
     setStatusMessage(
-      `已从草稿中删除${scope === "request" ? "请求" : "响应"} modifier #${index + 1}。`,
+      t("editor.messages.transformerModifierDeleted", {
+        scopeLabel: t(`editor.scopes.${scope}`),
+        index: String(index + 1),
+      }),
     );
   }
 
@@ -2399,8 +2508,14 @@ export function BackendConfigSettingsPage() {
     });
     setStatusMessage(
       direction === "up"
-        ? `已上移${scope === "request" ? "请求" : "响应"} modifier #${index + 1}。`
-        : `已下移${scope === "request" ? "请求" : "响应"} modifier #${index + 1}。`,
+        ? t("editor.messages.transformerModifierMovedUp", {
+            scopeLabel: t(`editor.scopes.${scope}`),
+            index: String(index + 1),
+          })
+        : t("editor.messages.transformerModifierMovedDown", {
+            scopeLabel: t(`editor.scopes.${scope}`),
+            index: String(index + 1),
+          }),
     );
   }
 
@@ -2623,164 +2738,256 @@ export function BackendConfigSettingsPage() {
         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-12">
           <StatCard
             icon={BotIcon}
-            label="Provider"
+            label={t("editor.cards.provider")}
             value={`${providers.length}`}
             detail={
               defaultProvider
-                ? `默认 provider: ${defaultProvider}`
-                : "尚未设置默认 provider"
+                ? t("editor.cards.providerDefault", {
+                    defaultProvider,
+                  })
+                : t("editor.cards.providerEmpty")
             }
           />
           <StatCard
             icon={RouteIcon}
-            label="Provider Group"
+            label={t("editor.cards.providerGroup")}
             value={`${providerGroups.length}`}
             detail={
               providerGroups.length > 0
-                ? `${providerGroups.reduce((total, group) => total + group.providerCount, 0)} 个成员引用`
-                : "尚未创建 provider group"
+                ? t("editor.cards.providerGroupSummary", {
+                    count: providerGroups.reduce(
+                      (total, group) => total + group.providerCount,
+                      0,
+                    ),
+                  })
+                : t("editor.cards.providerGroupEmpty")
             }
           />
           <StatCard
             icon={Settings2Icon}
-            label="Auth"
-            value={
-              authConfig.accessAuthEnabled ? "Access 鉴权开" : "Access 鉴权关"
-            }
+            label={t("editor.cards.auth")}
+            value={authConfig.accessAuthEnabled ? tCommon("states.enabled") : tCommon("states.disabled")}
             detail={
               authConfig.adminAuthEnabled
-                ? "管理端鉴权已启用"
-                : "管理端鉴权未启用"
+                ? t("editor.cards.authAdminEnabled")
+                : t("editor.cards.authAdminDisabled")
             }
           />
           <StatCard
             icon={RouteIcon}
-            label="Routing"
+            label={t("editor.cards.routing")}
             value={`${routes.length} 条`}
             detail={
               routingConfig.strategy
-                ? `strategy: ${routingConfig.strategy}`
-                : "尚未设置 routing.strategy"
+                ? t("editor.cards.routingStrategy", {
+                    strategy: routingConfig.strategy,
+                  })
+                : t("editor.cards.routingEmpty")
             }
           />
           <StatCard
             icon={GaugeIcon}
-            label="Rate Limit"
-            value={rateLimitConfig.enabled ? "已启用" : "已关闭"}
+            label={t("editor.cards.rateLimit")}
+            value={
+              rateLimitConfig.enabled
+                ? tCommon("states.enabled")
+                : tCommon("states.disabled")
+            }
             detail={
               apiKeyLimits.length > 0 || pathLimits.length > 0
-                ? `${apiKeyLimits.length} 条 API Key 规则 · ${pathLimits.length} 条路径规则`
-                : "尚未配置覆盖规则"
+                ? t("editor.cards.rateLimitSummary", {
+                    apiKeyCount: String(apiKeyLimits.length),
+                    pathCount: String(pathLimits.length),
+                  })
+                : t("editor.cards.rateLimitEmpty")
             }
           />
           <StatCard
             icon={RouteIcon}
-            label="Resource Manager"
-            value={resourceManagerConfig.enabled ? "已启用" : "已关闭"}
+            label={t("editor.cards.resourceManager")}
+            value={
+              resourceManagerConfig.enabled
+                ? tCommon("states.enabled")
+                : tCommon("states.disabled")
+            }
             detail={
               resourceManagerConfig.enabled
-                ? `${resourceManagerConfig.defaultGroupAlgorithm || "--"} / ${resourceManagerConfig.defaultProviderAlgorithm || "--"} / ${resourceManagerConfig.defaultKeyAlgorithm || "--"}`
-                : "当前仍使用传统负载均衡路径"
+                ? t("editor.cards.resourceManagerSummary", {
+                    groupAlgorithm:
+                      resourceManagerConfig.defaultGroupAlgorithm || "--",
+                    providerAlgorithm:
+                      resourceManagerConfig.defaultProviderAlgorithm || "--",
+                    keyAlgorithm:
+                      resourceManagerConfig.defaultKeyAlgorithm || "--",
+                  })
+                : t("editor.cards.resourceManagerEmpty")
             }
           />
           <StatCard
             icon={GaugeIcon}
-            label="Provider Queue"
-            value={providerQueueConfig.enabled ? "已启用" : "已关闭"}
+            label={t("editor.cards.providerQueue")}
+            value={
+              providerQueueConfig.enabled
+                ? tCommon("states.enabled")
+                : tCommon("states.disabled")
+            }
             detail={
               providerQueueProviders.length > 0
-                ? `${providerQueueProviders.length} 条 provider 覆盖 · 默认并发 ${providerQueueConfig.defaultMaxConcurrency || "--"}`
+                ? t("editor.cards.providerQueueSummary", {
+                    count: providerQueueProviders.length,
+                    defaultMaxConcurrency:
+                      providerQueueConfig.defaultMaxConcurrency || "--",
+                  })
                 : providerQueueConfig.waitHeartbeatEnabled
-                  ? `wait_heartbeat ${providerQueueConfig.waitHeartbeatInterval || "--"}`
-                  : "尚未配置 provider 级覆盖"
+                  ? t("editor.cards.providerQueueHeartbeat", {
+                      interval: providerQueueConfig.waitHeartbeatInterval || "--",
+                    })
+                  : t("editor.cards.providerQueueEmpty")
             }
           />
           <StatCard
             icon={GaugeIcon}
-            label="Concurrency"
-            value={concurrencyConfig.enabled ? "已启用" : "已关闭"}
+            label={t("editor.cards.concurrency")}
+            value={
+              concurrencyConfig.enabled
+                ? tCommon("states.enabled")
+                : tCommon("states.disabled")
+            }
             detail={
               concurrencyProviderLimits.length > 0
-                ? `global ${concurrencyConfig.maxConcurrentRequests || "--"} · ${concurrencyProviderLimits.length} 条 provider 限制`
+                ? t("editor.cards.concurrencySummary", {
+                    maxConcurrentRequests:
+                      concurrencyConfig.maxConcurrentRequests || "--",
+                    count: concurrencyProviderLimits.length,
+                  })
                 : concurrencyConfig.queueTimeout
-                  ? `queue_timeout ${concurrencyConfig.queueTimeout}`
-                  : "尚未配置 provider 级并发限制"
+                  ? t("editor.cards.concurrencyQueueTimeout", {
+                      queueTimeout: concurrencyConfig.queueTimeout,
+                    })
+                  : t("editor.cards.concurrencyEmpty")
             }
           />
           <StatCard
             icon={RefreshCcwIcon}
-            label="Retry"
-            value={retryConfig.enabled ? "已启用" : "已关闭"}
+            label={t("editor.cards.retry")}
+            value={
+              retryConfig.enabled
+                ? tCommon("states.enabled")
+                : tCommon("states.disabled")
+            }
             detail={
               retryRules.length > 0
-                ? `${retryRules.length} 条规则 · default ${retryConfig.defaultMaxRetries || "--"} 次`
-                : "尚未配置 retry 规则"
+                ? t("editor.cards.retrySummary", {
+                    count: retryRules.length,
+                    defaultMaxRetries: retryConfig.defaultMaxRetries || "--",
+                  })
+                : t("editor.cards.retryEmpty")
             }
           />
           <StatCard
             icon={ActivityIcon}
-            label="Monitor"
-            value={monitorConfig.enabled ? "已启用" : "已关闭"}
+            label={t("editor.cards.monitor")}
+            value={
+              monitorConfig.enabled
+                ? tCommon("states.enabled")
+                : tCommon("states.disabled")
+            }
             detail={
               monitorConfig.metricsEnabled || monitorConfig.tracingEnabled
-                ? `metrics ${monitorConfig.metricsEnabled ? "开" : "关"} · tracing ${monitorConfig.tracingEnabled ? "开" : "关"}`
-                : "metrics 与 tracing 当前都未启用"
+                ? t("editor.cards.monitorSummary", {
+                    metricsState: monitorConfig.metricsEnabled
+                      ? tCommon("states.enabled")
+                      : tCommon("states.disabled"),
+                    tracingState: monitorConfig.tracingEnabled
+                      ? tCommon("states.enabled")
+                      : tCommon("states.disabled"),
+                  })
+                : t("editor.cards.monitorEmpty")
             }
           />
           <StatCard
             icon={WifiIcon}
-            label="WebSocket"
-            value={websocketConfig.enabled ? "已启用" : "已关闭"}
+            label={t("editor.cards.websocket")}
+            value={
+              websocketConfig.enabled
+                ? tCommon("states.enabled")
+                : tCommon("states.disabled")
+            }
             detail={
               websocketConfig.enabled
-                ? `responses ${websocketConfig.responsesIngressEnabled ? "开" : "关"} · realtime ${websocketConfig.realtimeIngressEnabled ? "开" : "关"}`
-                : "WebSocket 当前整体关闭"
+                ? t("editor.cards.websocketSummary", {
+                    responsesState: websocketConfig.responsesIngressEnabled
+                      ? tCommon("states.enabled")
+                      : tCommon("states.disabled"),
+                    realtimeState: websocketConfig.realtimeIngressEnabled
+                      ? tCommon("states.enabled")
+                      : tCommon("states.disabled"),
+                  })
+                : t("editor.cards.websocketEmpty")
             }
           />
           <StatCard
             icon={ActivityIcon}
-            label="Circuit Breaker"
+            label={t("editor.cards.circuitBreaker")}
             value={circuitBreakerConfig.failureThreshold || "--"}
             detail={
               circuitBreakerConfig.openTimeout
-                ? `open_timeout ${circuitBreakerConfig.openTimeout} · failure_rate ${circuitBreakerConfig.failureRate || "--"}`
-                : "尚未配置熔断时间参数"
+                ? t("editor.cards.circuitBreakerSummary", {
+                    openTimeout: circuitBreakerConfig.openTimeout,
+                    failureRate: circuitBreakerConfig.failureRate || "--",
+                  })
+                : t("editor.cards.circuitBreakerEmpty")
             }
           />
           <StatCard
             icon={Settings2Icon}
-            label="Transformer"
+            label={t("editor.cards.transformer")}
             value={
               transformerConfig.httpTransformStageEnabled
-                ? "HTTP Stage 开"
-                : "HTTP Stage 关"
+                ? tCommon("states.enabled")
+                : tCommon("states.disabled")
             }
             detail={
               requestTransformerModifiers.length +
                 responseTransformerModifiers.length >
               0
-                ? `${requestTransformerModifiers.length} 条 request modifier · ${responseTransformerModifiers.length} 条 response modifier`
+                ? t("editor.cards.transformerSummary", {
+                    requestCount: String(requestTransformerModifiers.length),
+                    responseCount: String(responseTransformerModifiers.length),
+                  })
                 : transformerConfig.highPerf
-                  ? "高性能转换模式已启用"
-                  : "尚未配置 body modifier"
+                  ? t("editor.cards.transformerHighPerf")
+                  : t("editor.cards.transformerEmpty")
             }
           />
           <StatCard
             icon={HardDriveDownloadIcon}
-            label="配置文件"
+            label={t("editor.cards.configFile")}
             value={document ? formatBytes(document.size_bytes) : "--"}
             detail={
               document?.updated_at
-                ? `${document.path} · ${formatTimestamp(document.updated_at)}`
-                : (document?.path ?? "尚未加载")
+                ? t("editor.cards.configFileLoaded", {
+                    path: document.path,
+                    timestamp: formatTimestamp(
+                      document.updated_at,
+                      resolvedLocale,
+                    ),
+                  })
+                : (document?.path ?? t("editor.cards.configFileEmpty"))
             }
           />
           <StatCard
             icon={RefreshCcwIcon}
-            label="runtime-server"
-            value={serviceStatus?.running ? "在线" : "离线"}
+            label={t("editor.cards.runtimeServer")}
+            value={
+              serviceStatus?.running
+                ? tCommon("states.online")
+                : tCommon("states.offline")
+            }
             detail={
-              serviceStatus?.listen_addr || serviceError || "尚未返回监听信息"
+              serviceStatus?.listen_addr ||
+              serviceError ||
+              t("editor.cards.runtimeServerEmpty")
             }
           />
         </div>
@@ -2788,14 +2995,20 @@ export function BackendConfigSettingsPage() {
         <div className="sticky top-2 z-20 mt-2.5 rounded-[0.95rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
           <div className="flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge>{hasUnsavedChanges ? "未保存草稿" : "已同步"}</Badge>
+              <Badge>
+                {hasUnsavedChanges
+                  ? tCommon("states.unsynced")
+                  : tCommon("states.synced")}
+              </Badge>
               <Badge>
                 {mode === "source" ? t("editor.sourceFocus") : t("editor.structuredFocus")}
               </Badge>
               {previewDocument ? (
                 <Badge>
                   {isPreviewFresh
-                    ? `${t("editor.preview.latest")} ${previewDiff.length} 行`
+                    ? t("editor.preview.latestWithCount", {
+                        count: previewDiff.length,
+                      })
                     : t("editor.preview.expired")}
                 </Badge>
               ) : null}
@@ -2803,9 +3016,13 @@ export function BackendConfigSettingsPage() {
               {savedRequiresRestart && !hasUnsavedChanges ? (
                 <Badge>{t("editor.preview.needsRestart")}</Badge>
               ) : null}
-              {isModeSwitching ? <Badge>{t("editor.usage.title")}</Badge> : null}
+              {isModeSwitching ? <Badge>{t("editor.status.switchingMode")}</Badge> : null}
               {mode === "providers" ? (
-                <Badge>{`${enabledProviderCount} 已启用`}</Badge>
+                <Badge>
+                  {t("editor.counts.enabledProviders", {
+                    count: enabledProviderCount,
+                  })}
+                </Badge>
               ) : null}
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -2930,57 +3147,89 @@ export function BackendConfigSettingsPage() {
               description={t("editor.panels.summaryDescription")}
             >
               <div className="flex flex-wrap gap-2">
-                <SummaryPill label="lines" value={`${draftLineCount}`} />
-                <SummaryPill label="providers" value={`${providers.length}`} />
                 <SummaryPill
-                  label="groups"
+                  label={t("editor.summary.lines")}
+                  value={`${draftLineCount}`}
+                />
+                <SummaryPill
+                  label={t("editor.summary.providers")}
+                  value={`${providers.length}`}
+                />
+                <SummaryPill
+                  label={t("editor.summary.groups")}
                   value={`${providerGroups.length}`}
                 />
                 <SummaryPill
-                  label="proxy"
-                  value={summarizeRuntimeProxyConfig(proxyConfig)}
+                  label={t("editor.summary.proxy")}
+                  value={formatRuntimeProxySummary(proxyConfig, t, tCommon)}
                 />
-                <SummaryPill label="routes" value={`${routes.length}`} />
                 <SummaryPill
-                  label="limits"
+                  label={t("editor.summary.routes")}
+                  value={`${routes.length}`}
+                />
+                <SummaryPill
+                  label={t("editor.summary.limits")}
                   value={`${apiKeyLimits.length + pathLimits.length}`}
                 />
                 <SummaryPill
-                  label="rm"
-                  value={resourceManagerConfig.enabled ? "on" : "off"}
-                />
-                <SummaryPill
-                  label="pq"
+                  label={t("editor.summary.resourceManager")}
                   value={
-                    providerQueueConfig.enabled
-                      ? `${providerQueueProviders.length}`
-                      : "off"
+                    resourceManagerConfig.enabled
+                      ? tCommon("states.enabled")
+                      : tCommon("states.disabled")
                   }
                 />
                 <SummaryPill
-                  label="conc"
-                  value={concurrencyConfig.enabled ? "on" : "off"}
-                />
-                <SummaryPill label="retry" value={`${retryRules.length}`} />
-                <SummaryPill
-                  label="monitor"
-                  value={monitorConfig.enabled ? "on" : "off"}
-                />
-                <SummaryPill
-                  label="ws"
-                  value={websocketConfig.enabled ? "on" : "off"}
+                  label={t("editor.summary.providerQueue")}
+                  value={
+                    providerQueueConfig.enabled
+                      ? `${providerQueueProviders.length}`
+                      : tCommon("states.disabled")
+                  }
                 />
                 <SummaryPill
-                  label="cb"
+                  label={t("editor.summary.concurrency")}
+                  value={
+                    concurrencyConfig.enabled
+                      ? tCommon("states.enabled")
+                      : tCommon("states.disabled")
+                  }
+                />
+                <SummaryPill
+                  label={t("editor.summary.retry")}
+                  value={`${retryRules.length}`}
+                />
+                <SummaryPill
+                  label={t("editor.summary.monitor")}
+                  value={
+                    monitorConfig.enabled
+                      ? tCommon("states.enabled")
+                      : tCommon("states.disabled")
+                  }
+                />
+                <SummaryPill
+                  label={t("editor.summary.websocket")}
+                  value={
+                    websocketConfig.enabled
+                      ? tCommon("states.enabled")
+                      : tCommon("states.disabled")
+                  }
+                />
+                <SummaryPill
+                  label={t("editor.summary.circuitBreaker")}
                   value={circuitBreakerConfig.failureThreshold || "--"}
                 />
                 <SummaryPill
-                  label="xform"
+                  label={t("editor.summary.transformer")}
                   value={`${requestTransformerModifiers.length + responseTransformerModifiers.length}`}
                 />
                 <SummaryPill
-                  label="preview"
-                  value={previewDocument ? "已生成" : "未生成"}
+                  label={t("editor.summary.preview")}
+                  value={
+                    previewDocument
+                      ? tCommon("states.generated")
+                      : tCommon("states.notGenerated")
+                  }
                 />
               </div>
               <div className="mt-2.5 rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
@@ -2994,7 +3243,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.providers.label")}
+                    label={t("editor.modes.providers.label")}
                   />
                 }
               >
@@ -3012,7 +3261,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.providerGroups.label")}
+                    label={t("editor.modes.providerGroups.label")}
                   />
                 }
               >
@@ -3029,7 +3278,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.networkProxy.label")}
+                    label={t("editor.modes.networkProxy.label")}
                   />
                 }
               >
@@ -3044,7 +3293,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.auth.label")}
+                    label={t("editor.modes.auth.label")}
                   />
                 }
               >
@@ -3059,7 +3308,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.routing.label")}
+                    label={t("editor.modes.routing.label")}
                   />
                 }
               >
@@ -3079,7 +3328,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.rateLimit.label")}
+                    label={t("editor.modes.rateLimit.label")}
                   />
                 }
               >
@@ -3100,7 +3349,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.resourceManager.label")}
+                    label={t("editor.modes.resourceManager.label")}
                   />
                 }
               >
@@ -3115,7 +3364,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.providerQueue.label")}
+                    label={t("editor.modes.providerQueue.label")}
                   />
                 }
               >
@@ -3133,7 +3382,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.concurrency.label")}
+                    label={t("editor.modes.concurrency.label")}
                   />
                 }
               >
@@ -3151,7 +3400,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.retry.label")}
+                    label={t("editor.modes.retry.label")}
                   />
                 }
               >
@@ -3170,7 +3419,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.monitor.label")}
+                    label={t("editor.modes.monitor.label")}
                   />
                 }
               >
@@ -3185,7 +3434,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.websocket.label")}
+                    label={t("editor.modes.websocket.label")}
                   />
                 }
               >
@@ -3200,7 +3449,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.circuitBreaker.label")}
+                    label={t("editor.modes.circuitBreaker.label")}
                   />
                 }
               >
@@ -3215,7 +3464,7 @@ export function BackendConfigSettingsPage() {
               <Suspense
                 fallback={
                   <ConfigEditorLoadingCard
-                    label={t("runtimeConfig.editor.modes.transformer.label")}
+                    label={t("editor.modes.transformer.label")}
                   />
                 }
               >
@@ -3239,8 +3488,14 @@ export function BackendConfigSettingsPage() {
                       <div className="text-base font-semibold text-[var(--foreground)]">
                         {t("editor.source.title")}
                       </div>
-                      <SummaryPill label="lines" value={`${draftLineCount}`} />
-                      <SummaryPill label="chars" value={`${draftRaw.length}`} />
+                      <SummaryPill
+                        label={t("editor.source.lines")}
+                        value={`${draftLineCount}`}
+                      />
+                      <SummaryPill
+                        label={t("editor.source.chars")}
+                        value={`${draftRaw.length}`}
+                      />
                       <Badge>{t("editor.source.preserveComments")}</Badge>
                     </div>
                     <details className="rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-1.5">
@@ -3283,9 +3538,19 @@ export function BackendConfigSettingsPage() {
           <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2.5">
               <div className="flex flex-wrap items-center gap-2">
-                <SummaryPill label={t("editor.preview.added")} value={`${previewAdditions}`} />
-                <SummaryPill label={t("editor.preview.removed")} value={`${previewRemovals}`} />
-                <Badge>{isPreviewFresh ? t("editor.preview.latest") : t("editor.preview.expired")}</Badge>
+                <SummaryPill
+                  label={t("editor.preview.added")}
+                  value={`${previewAdditions}`}
+                />
+                <SummaryPill
+                  label={t("editor.preview.removed")}
+                  value={`${previewRemovals}`}
+                />
+                <Badge>
+                  {isPreviewFresh
+                    ? t("editor.preview.latest")
+                    : t("editor.preview.expired")}
+                </Badge>
                 {previewDocument.restart_required ? (
                   <Badge>{t("editor.preview.needsRestart")}</Badge>
                 ) : null}
@@ -3400,13 +3665,14 @@ export function BackendConfigSettingsPage() {
 }
 
 function ConfigEditorLoadingCard({ label }: { label: string }) {
+  const { t } = useTranslation("runtimeConfig");
   return (
     <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-4">
       <div className="text-sm font-semibold text-[var(--foreground)]">
-        正在加载 {label} 编辑器…
+        {t("editor.loadingCard.title", { label })}
       </div>
       <div className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">
-        当前只会按需加载正在查看的配置域，未打开的编辑器不会进入首批页面资源。
+        {t("editor.loadingCard.body")}
       </div>
     </div>
   );
