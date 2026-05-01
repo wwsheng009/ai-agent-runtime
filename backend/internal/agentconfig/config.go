@@ -377,6 +377,8 @@ type AICLIChatConfig struct {
 	DefaultProvider string `yaml:"default_provider,omitempty" mapstructure:"default_provider"`
 	DefaultModel    string `yaml:"default_model,omitempty" mapstructure:"default_model"`
 	ReasoningEffort string `yaml:"reasoning_effort,omitempty" mapstructure:"reasoning_effort"`
+	// Stream 记录用户偏好的输出模式（流式/普通）。使用指针以便区分“未配置”与“显式 false”。
+	Stream *bool `yaml:"stream,omitempty" mapstructure:"stream"`
 }
 
 // ProfilesConfig holds profile topology configuration.

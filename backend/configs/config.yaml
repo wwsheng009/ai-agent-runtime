@@ -1,1269 +1,1274 @@
 aicli:
-    log:
-        file_path: ${AICLI_LOG_FILE_PATH:-./logs/aicli.log}
-    mcp:
-        auto_connect: ${MCP_AUTO_CONNECT:-false}
-        config_file: ${MCP_CONFIG_FILE:-configs/mcp.yaml}
-    retry:
-        fast_retry_count: ${AICLI_RETRY_FAST_COUNT:-5}
-        fast_retry_interval: ${AICLI_RETRY_FAST_INTERVAL:-2s}
-        max_total_time: ${AICLI_RETRY_MAX_TOTAL_TIME:-60s}
-        slow_retry_interval: ${AICLI_RETRY_SLOW_INTERVAL:-5s}
-    timeout:
-        request_timeout: ${AICLI_REQUEST_TIMEOUT:-0s}
+  log:
+    file_path: ${AICLI_LOG_FILE_PATH:-./logs/aicli.log}
+  mcp:
+    auto_connect: ${MCP_AUTO_CONNECT:-false}
+    config_file: ${MCP_CONFIG_FILE:-configs/mcp.yaml}
+  retry:
+    fast_retry_count: ${AICLI_RETRY_FAST_COUNT:-5}
+    fast_retry_interval: ${AICLI_RETRY_FAST_INTERVAL:-2s}
+    max_total_time: ${AICLI_RETRY_MAX_TOTAL_TIME:-60s}
+    slow_retry_interval: ${AICLI_RETRY_SLOW_INTERVAL:-5s}
+  timeout:
+    request_timeout: ${AICLI_REQUEST_TIMEOUT:-0s}
+  chat:
+    default_provider: modelscope
+    default_model: deepseek-ai/DeepSeek-V4-Pro
+    reasoning_effort: max
+    stream: true
 auth:
-    access_auth:
-        allow_anonymous: ${AUTH_ACCESS_ALLOW_ANONYMOUS:-true}
-        enabled: ${AUTH_ACCESS_ENABLED:-false}
-    access_key_secret: ${AUTH_ACCESS_KEY_SECRET:-}
-    admin_auth_enabled: ${AUTH_ADMIN_ENABLED:-false}
-    admin_token: ${AUTH_ADMIN_TOKEN:-}
-    jwt_expire: ${JWT_EXPIRE:-24h}
-    jwt_secret: ${AUTH_JWT_SECRET:-change-this-in-production}
-    max_api_create_times: ${AUTH_MAX_API_CREATE_TIMES:-100}
-    session_timeout: ${AUTH_SESSION_TIMEOUT:-30m}
+  access_auth:
+    allow_anonymous: ${AUTH_ACCESS_ALLOW_ANONYMOUS:-true}
+    enabled: ${AUTH_ACCESS_ENABLED:-false}
+  access_key_secret: ${AUTH_ACCESS_KEY_SECRET:-}
+  admin_auth_enabled: ${AUTH_ADMIN_ENABLED:-false}
+  admin_token: ${AUTH_ADMIN_TOKEN:-}
+  jwt_expire: ${JWT_EXPIRE:-24h}
+  jwt_secret: ${AUTH_JWT_SECRET:-change-this-in-production}
+  max_api_create_times: ${AUTH_MAX_API_CREATE_TIMES:-100}
+  session_timeout: ${AUTH_SESSION_TIMEOUT:-30m}
 circuit_breaker:
-    failure_rate: ${CB_FAILURE_RATE:-0.5}
-    failure_threshold: ${CB_FAILURE_THRESHOLD:-3}
-    half_open_max_calls: ${CB_HALF_OPEN_MAX_CALLS:-1}
-    open_timeout: ${CB_OPEN_TIMEOUT:-60s}
-    sample_threshold: ${CB_SAMPLE_THRESHOLD:-10}
-    window_duration: ${CB_WINDOW_DURATION:-10s}
+  failure_rate: ${CB_FAILURE_RATE:-0.5}
+  failure_threshold: ${CB_FAILURE_THRESHOLD:-3}
+  half_open_max_calls: ${CB_HALF_OPEN_MAX_CALLS:-1}
+  open_timeout: ${CB_OPEN_TIMEOUT:-60s}
+  sample_threshold: ${CB_SAMPLE_THRESHOLD:-10}
+  window_duration: ${CB_WINDOW_DURATION:-10s}
 concurrency:
-    enabled: ${CONCURRENCY_ENABLED:-true}
-    max_concurrent_requests: ${CONCURRENCY_MAX_REQUESTS:-200}
-    per_provider_limits:
-        bigmodel: 150
-        deepseek: 50
-        deepseek_beta: 50
-        deepseek_anthropic: 50
-        default: 50
-        gemini_local: 40
-        nvidia: 100
-    queue_size: ${CONCURRENCY_QUEUE_SIZE:-500}
-    queue_timeout: ${CONCURRENCY_QUEUE_TIMEOUT:-5s}
+  enabled: ${CONCURRENCY_ENABLED:-true}
+  max_concurrent_requests: ${CONCURRENCY_MAX_REQUESTS:-200}
+  per_provider_limits:
+    bigmodel: 150
+    deepseek: 50
+    deepseek_beta: 50
+    deepseek_anthropic: 50
+    default: 50
+    gemini_local: 40
+    nvidia: 100
+  queue_size: ${CONCURRENCY_QUEUE_SIZE:-500}
+  queue_timeout: ${CONCURRENCY_QUEUE_TIMEOUT:-5s}
 database:
-    auto_migrate: true
-    conn_max_lifetime: 3600
-    driver: ${DATABASE_DRIVER:-sqlite}
-    dsn: ${DATABASE_DSN:-./data/gateway.db}
-    log_level: ${DATABASE_LOG_LEVEL:-info}
-    max_idle_conns: 10
-    max_open_conns: 100
-    prefix: ""
-    sqlite:
-        auto_vacuum: ${SQLITE_AUTO_VACUUM:-incremental}
-        bootstrap_auto_vacuum: ${SQLITE_BOOTSTRAP_AUTO_VACUUM:-false}
-        busy_timeout_ms: ${SQLITE_BUSY_TIMEOUT_MS:-5000}
-        checkpoint_on_maintenance: ${SQLITE_CHECKPOINT_ON_MAINTENANCE:-true}
-        foreign_keys: ${SQLITE_FOREIGN_KEYS:-true}
-        incremental_vacuum_min_free_pages: ${SQLITE_INCREMENTAL_VACUUM_MIN_FREE_PAGES:-1024}
-        incremental_vacuum_min_free_ratio: ${SQLITE_INCREMENTAL_VACUUM_MIN_FREE_RATIO:-0.10}
-        incremental_vacuum_pages: ${SQLITE_INCREMENTAL_VACUUM_PAGES:-4096}
-        journal_mode: ${SQLITE_JOURNAL_MODE:-WAL}
-        maintenance_interval: ${SQLITE_MAINTENANCE_INTERVAL:-10m}
-        synchronous: ${SQLITE_SYNCHRONOUS:-NORMAL}
-        wal_auto_checkpoint_pages: ${SQLITE_WAL_AUTO_CHECKPOINT_PAGES:-1000}
+  auto_migrate: true
+  conn_max_lifetime: 3600
+  driver: ${DATABASE_DRIVER:-sqlite}
+  dsn: ${DATABASE_DSN:-./data/gateway.db}
+  log_level: ${DATABASE_LOG_LEVEL:-info}
+  max_idle_conns: 10
+  max_open_conns: 100
+  prefix: ""
+  sqlite:
+    auto_vacuum: ${SQLITE_AUTO_VACUUM:-incremental}
+    bootstrap_auto_vacuum: ${SQLITE_BOOTSTRAP_AUTO_VACUUM:-false}
+    busy_timeout_ms: ${SQLITE_BUSY_TIMEOUT_MS:-5000}
+    checkpoint_on_maintenance: ${SQLITE_CHECKPOINT_ON_MAINTENANCE:-true}
+    foreign_keys: ${SQLITE_FOREIGN_KEYS:-true}
+    incremental_vacuum_min_free_pages: ${SQLITE_INCREMENTAL_VACUUM_MIN_FREE_PAGES:-1024}
+    incremental_vacuum_min_free_ratio: ${SQLITE_INCREMENTAL_VACUUM_MIN_FREE_RATIO:-0.10}
+    incremental_vacuum_pages: ${SQLITE_INCREMENTAL_VACUUM_PAGES:-4096}
+    journal_mode: ${SQLITE_JOURNAL_MODE:-WAL}
+    maintenance_interval: ${SQLITE_MAINTENANCE_INTERVAL:-10m}
+    synchronous: ${SQLITE_SYNCHRONOUS:-NORMAL}
+    wal_auto_checkpoint_pages: ${SQLITE_WAL_AUTO_CHECKPOINT_PAGES:-1000}
 log:
-    compress: true
-    enable_console: ${LOG_ENABLE_CONSOLE:-false}
-    file_path: ${LOG_FILE_PATH:-./logs/gateway.log}
-    format: ${LOG_FORMAT:-json}
-    level: ${LOG_LEVEL:-debug}
-    max_age: ${LOG_MAX_AGE:-7}
-    max_backups: ${LOG_MAX_BACKUPS:-3}
-    max_size: ${LOG_MAX_SIZE:-100}
-    output: ${LOG_OUTPUT:-both}
-    request_log:
-        mask_sensitive_fields: ${LOG_REQUEST_MASK_SENSITIVE_FIELDS:-true}
+  compress: true
+  enable_console: ${LOG_ENABLE_CONSOLE:-false}
+  file_path: ${LOG_FILE_PATH:-./logs/gateway.log}
+  format: ${LOG_FORMAT:-json}
+  level: ${LOG_LEVEL:-debug}
+  max_age: ${LOG_MAX_AGE:-7}
+  max_backups: ${LOG_MAX_BACKUPS:-3}
+  max_size: ${LOG_MAX_SIZE:-100}
+  output: ${LOG_OUTPUT:-both}
+  request_log:
+    mask_sensitive_fields: ${LOG_REQUEST_MASK_SENSITIVE_FIELDS:-true}
 monitor:
-    alert:
-        channels:
-            - webhook
-        enabled: ${ALERT_ENABLED:-false}
-        min_threshold: ${ALERT_MIN_THRESHOLD:-5}
-        severity: ${ALERT_SEVERITY:-warning}
-        webhook_url: ${ALERT_WEBHOOK_URL:-}
-    enabled: true
-    memory:
-        alert_threshold_mb: ${MEMORY_ALERT_THRESHOLD:-1024}
-        enabled: ${MEMORY_ENABLED:-true}
-        leak_threshold_percent: ${MEMORY_LEAK_THRESHOLD:-50}
-        sample_interval: ${MEMORY_SAMPLE_INTERVAL:-15s}
-    metrics:
-        aggregation: true
-        enabled: ${METRICS_ENABLED:-false}
-        path: ${METRICS_PATH:-/metrics}
-    pprof:
-        enabled: ${PPROF_ENABLED:-true}
-        gc_interval: ${PPROF_GC_INTERVAL:-30s}
-        listen_addr: :6060
-    tracing:
-        enabled: ${TRACING_ENABLED:-false}
-        exporter: ${TRACING_EXPORTER:-stdout}
-        sampler: ${TRACING_SAMPLER:-0.1}
-        server_addr: ${TRACING_SERVER_ADDR:-localhost:4318}
+  alert:
+    channels:
+      - webhook
+    enabled: ${ALERT_ENABLED:-false}
+    min_threshold: ${ALERT_MIN_THRESHOLD:-5}
+    severity: ${ALERT_SEVERITY:-warning}
+    webhook_url: ${ALERT_WEBHOOK_URL:-}
+  enabled: true
+  memory:
+    alert_threshold_mb: ${MEMORY_ALERT_THRESHOLD:-1024}
+    enabled: ${MEMORY_ENABLED:-true}
+    leak_threshold_percent: ${MEMORY_LEAK_THRESHOLD:-50}
+    sample_interval: ${MEMORY_SAMPLE_INTERVAL:-15s}
+  metrics:
+    aggregation: true
+    enabled: ${METRICS_ENABLED:-false}
+    path: ${METRICS_PATH:-/metrics}
+  pprof:
+    enabled: ${PPROF_ENABLED:-true}
+    gc_interval: ${PPROF_GC_INTERVAL:-30s}
+    listen_addr: :6060
+  tracing:
+    enabled: ${TRACING_ENABLED:-false}
+    exporter: ${TRACING_EXPORTER:-stdout}
+    sampler: ${TRACING_SAMPLER:-0.1}
+    server_addr: ${TRACING_SERVER_ADDR:-localhost:4318}
 provider_groups:
-    - failover:
-        enabled: true
-        mode: primary_standby
-        scope: model_key
-      max_retries: 3
-      name: anthropic_group
-      providers:
-        - enabled: true
-          name: codex_fox
-          role: standby
-          weight: 100
-      retry_delay: 1s
-      strategy: round_robin
-      truncation:
-        enabled: false
-        max_retries: 3
-        step: 10
-        strategy: percentage
-    - failover:
-        enabled: true
-        mode: primary_standby
-        scope: model_key
-      max_retries: 3
-      name: anthropic_group_second
-      providers:
-        - enabled: true
-          name: codex_fox
-          role: standby
-          weight: 100
-      retry_delay: 1s
-      strategy: round_robin
-      truncation:
-        enabled: false
-        max_retries: 3
-        step: 10
-        strategy: percentage
-    - failover:
-        enabled: true
-        mode: primary_standby
-        scope: model_key
-      max_retries: 3
-      name: openai_group
-      providers:
-        - enabled: false
-          name: nvidia
-          weight: 100
-        - enabled: false
-          name: gemini_local
-          weight: 100
-        - enabled: false
-          name: deepseek
-          weight: 80
-        - enabled: false
-          name: deepseek_beta
-          weight: 80
-      retry_delay: 1s
-      strategy: round_robin
-      truncation:
-        enabled: false
-        max_retries: 6
-        step: 20
-        strategy: percentage
-    - failover:
-        enabled: true
-        mode: primary_standby
-        scope: model_key
-      max_retries: 2
-      name: codex_group
-      providers:
-        - enabled: true
-          name: codex_fox
-          role: standby
-          weight: 100
-        - enabled: true
-          name: CODEX_LOCAL
-          role: standby
-          weight: 100
-        - enabled: false
-          name: nvidia
-          weight: 100
-        - enabled: false
-          name: deepseek_anthropic
-          weight: 100
-      retry_delay: 1s
-      strategy: round_robin
-    - failover:
-        enabled: true
-        mode: primary_standby
-        scope: model_key
-      max_retries: 2
-      name: codex_group_54
-      providers:
-        - enabled: true
-          name: codex_fox
-          role: standby
-          weight: 100
-      retry_delay: 1s
-    - max_retries: 2
-      name: gemini_group
-      providers:
-        - enabled: false
-          name: nvidia
-          weight: 100
-        - enabled: true
-          name: codex_fox
-          weight: 100
-      retry_delay: 2s
-      strategy: round_robin
-provider_queue:
-    default_slot:
-        max_concurrency: 3
-        overflow_strategy: overflow
-        queue_size: 10
-        queue_timeout: 30s
-    enabled: ${PROVIDER_QUEUE_ENABLED:-true}
-    overflow:
-        enabled: true
-        max_attempts: 3
-        strategy: prefer_empty
+  - failover:
+      enabled: true
+      mode: primary_standby
+      scope: model_key
+    max_retries: 3
+    name: anthropic_group
     providers:
-        deepseek:
-            max_concurrency: 5
-            queue_size: 15
-            queue_timeout: 30s
-        deepseek_beta:
-            max_concurrency: 5
-            queue_size: 15
-            queue_timeout: 30s
-        nvidia:
-            max_concurrency: 5
-            queue_size: 20
-            queue_timeout: 60s
-    wait_heartbeat:
-        comment: ': queue heartbeat'
-        enabled: true
-        interval: 5s
-        max_wait_time: 120s
-providers:
-    default_provider: ${PROVIDERS_DEFAULT:-nvidia}
-    http_timeout:
-        body_read_timeout: ${PROVIDERS_BODY_READ_TIMEOUT:-60s}
-        dial_timeout: ${PROVIDERS_DIAL_TIMEOUT:-5s}
-        disable_connection_pooling: ${DISABLE_CONNECTION_POOLING:-false}
-        dns_cache_ttl: ${HTTP_DNS_CACHE_TTL:-600s}
-        dns_server: ${HTTP_DNS_SERVER:-8.8.8.8}
-        fallback_delay: ${HTTP_FALLBACK_DELAY:-50ms}
-        http_version: ${HTTP_VERSION:-2}
-        idle_conn_timeout: ${PROVIDERS_IDLE_CONN_TIMEOUT:-30s}
-        keep_alive: ${PROVIDERS_KEEP_ALIVE:-120s}
-        max_conns_per_host: ${PROVIDERS_MAX_CONNS_PER_HOST:-300}
-        max_idle_conns: ${PROVIDERS_MAX_IDLE_CONNS:-1000}
-        max_idle_conns_per_host: ${PROVIDERS_MAX_IDLE_CONNS_PER_HOST:-200}
-        prefer_ipv4: ${HTTP_PREFER_IPV4:-true}
-        response_header_timeout: ${PROVIDERS_RESPONSE_HEADER_TIMEOUT:-60s}
-        stream_read_timeout: ${PROVIDERS_STREAM_READ_TIMEOUT:-120s}
-        tls_handshake_timeout: ${PROVIDERS_TLS_HANDSHAKE_TIMEOUT:-15s}
-        upstream_accept_encoding: ${HTTP_UPSTREAM_ACCEPT_ENCODING:-auto}
-    items:
-        CODEX_LOCAL:
-            api_key: ${CODEX_LOCAL_API_KEYS:-}
-            api_path: /v1/responses
-            base_url: ${CODEX_LOCAL_BASE_URL}
-            context_window:
-                default: ${CONTEXT_WINDOW_CODEX_LOCAL_DEFAULT:-400000}
-                models:
-                    gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_LOCAL_GPT_5_2_CODEX:-400000}
-                    gpt-5.4: ${CONTEXT_WINDOW_CODEX_LOCAL_GPT_5_4:-1050000}
-                    gpt-5.4-mini: ${CONTEXT_WINDOW_CODEX_LOCAL_GPT_5_4:-400000}
-            default_model: gpt-5.4-mini
-            enabled: true
-            forward_url: /v1/responses
-            header_mapping_rules:
-                - header: User-Agent
-                  match: ^OpenAI/JS\s+(.+)$
-                  match_type: regex
-                  replace_with: OpenAI JS $1
-            header_mappings:
-                X-Gateway-Provider: openai_codex
-            max_tokens_limit: 10000
-            model_mappings:
-                '*': gpt-5.4-mini
-                gpt-5.4: gpt-5.4
-            model_capabilities:
-                '*':
-                    input_modalities:
-                        - text
-                    native_tools:
-                        image_generation: false
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - low
-                        - medium
-                        - high
-                        - xhigh
-                gpt-5.4:
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
-                    input_modalities:
-                        - text
-                        - image
-                    native_tools:
-                        image_generation: true
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - xhigh
-            protocol: codex
-            support_types:
-                - gemini
-                - openai
-                - anthropic
-                - codex
-            supported_models:
-                - gpt-5.2-codex
-                - gpt-5.4
-                - gpt-5.4-mini
-                - '*'
-            timeout: 300s
-        CODEX_04:
-            api_key: ${CODEX_04_API_KEYS:-}
-            api_path: /v1/responses
-            base_url: ${CODEX_04_BASE_URL}
-            context_window:
-                default: ${CONTEXT_WINDOW_CODEX_04_DEFAULT:-1050000}
-                models:
-                    gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_04_GPT_5_2_CODEX:-400000}
-                    gpt-5.4: ${CONTEXT_WINDOW_CODEX_04_GPT_5_4:-1050000}
-            default_model: gpt-5.4
-            enabled: true
-            forward_url: /v1/responses
-            header_mapping_rules:
-                - header: User-Agent
-                  match: ^OpenAI/JS\s+(.+)$
-                  match_type: regex
-                  replace_with: OpenAI JS $1
-            header_mappings:
-                X-Gateway-Provider: openai_codex
-            max_tokens_limit: 10000
-            model_mappings:
-                '*': gpt-5.4-mini
-                gpt-5.4-mini: gpt-5.4-mini
-                gpt-5.4: gpt-5.4
-                gpt-5.2-codex: gpt-5.4-mini
-            model_capabilities:
-                '*':
-                    input_modalities:
-                        - text
-                    native_tools:
-                        image_generation: false
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - xhigh
-                gpt-5.2-codex:
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
-                    input_modalities:
-                        - text
-                        - image
-                    native_tools:
-                        image_generation: false
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - xhigh
-                gpt-5.4-mini:
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
-                    input_modalities:
-                        - text
-                        - image
-                    native_tools:
-                        image_generation: true
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - xhigh
-                gpt-5.4:
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
-                    input_modalities:
-                        - text
-                        - image
-                    native_tools:
-                        image_generation: true
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - xhigh
-            protocol: codex
-            support_types:
-                - gemini
-                - openai
-                - anthropic
-                - codex
-            supported_models:
-                - gpt-5.2-codex
-                - gpt-5.4
-                - gpt-5.4-mini
-                - '*'
-            timeout: 300s
-        OPENAI_IMAGE:
-            api_key: ${CODEX_04_API_KEYS:-}
-            api_path: /v1/images/generations
-            base_url: ${CODEX_04_BASE_URL:-https://api.openai.com}
-            default_model: gpt-image-2
-            enabled: true
-            forward_url: /v1/images/generations
-            header_mappings:
-                X-Gateway-Provider: openai_image
-            model_capabilities:
-                '*':
-                    input_modalities:
-                        - text
-                    native_tools:
-                        image_generation: false
-                        images_generations_api: false
-                gpt-image-1:
-                    input_modalities:
-                        - text
-                    native_tools:
-                        image_generation: false
-                        images_generations_api: true
-                gpt-image-1.5:
-                    input_modalities:
-                        - text
-                    native_tools:
-                        image_generation: false
-                        images_generations_api: true
-                gpt-image-2:
-                    input_modalities:
-                        - text
-                    native_tools:
-                        image_generation: false
-                        images_generations_api: true
-            protocol: openai
-            support_types:
-                - openai
-            supported_models:
-                - gpt-image-1
-                - gpt-image-1.5
-                - gpt-image-2
-            timeout: 300s
-        bigmodel:
-            api_key: ${BIGMODEL_API_KEYS:-}
-            api_key_config:
-                enabled: true
-                fallback_mode: ${BIGMODEL_FALLBACK_MODE:-random}
-                max_retries_per_key: ${BIGMODEL_MAX_RETRIES_PER_KEY:-1}
-                selection_mode: ${BIGMODEL_KEY_SELECTION_MODE:-health_based}
-            api_path: /v1/messages
-            base_url: https://open.bigmodel.cn/api/anthropic
-            default_model: glm-5
-            enabled: true
-            forward_url: /v1/messages
-            max_tokens_limit: 10000
-            model_mappings:
-                '*': glm-5
-            path_mappings: null
-            protocol: anthropic
-            support_types:
-                - anthropic
-                - openai
-                - codex
-            supported_models:
-                - glm-5
-                - glm-4.7
-                - glm-4-plus
-                - glm-4-air
-                - glm-4-flash
-            timeout: 300s
-            truncation_adapter: anthropic_local
-        codex_cli_gpt:
-            api_key: ${CODEX_CLI_API_KEYS}
-            api_path: /responses
-            base_url: https://chatgpt.com/backend-api/codex/responses
-            context_window:
-                default: ${CONTEXT_WINDOW_CODEX_CLI_GPT_DEFAULT:-1050000}
-                models:
-                    gpt-5.4: ${CONTEXT_WINDOW_CODEX_CLI_GPT_GPT_5_4:-1050000}
-            default_model: gpt-5.4
-            enabled: true
-            forward_url: /responses
-            header_mapping_rules:
-                - header: User-Agent
-                  match: ^OpenAI/JS\s+(.+)$
-                  match_type: regex
-                  replace_with: codex_cli_rs/0.112.0 (Windows 10.0.26200; x86_64) WindowsTerminal
-            header_mappings:
-                X-Gateway-Provider: openai_codex
-            headers:
-                ChatGPT-Account-Id: ${CHATGPT_ACCOUNT_ID}
-            max_tokens_limit: 10000
-            supports_max_output_tokens: false
-            model_mappings:
-                '*': gpt-5.4
-            model_capabilities:
-                '*':
-                    input_modalities:
-                        - text
-                    native_tools:
-                        image_generation: false
-                gpt-5.4-mini:
-                    input_modalities:
-                        - text
-                        - image
-                    native_tools:
-                        image_generation: true
-                gpt-5.4:
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
-                    input_modalities:
-                        - text
-                        - image
-                    native_tools:
-                        image_generation: true
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - xhigh
-            protocol: codex
-            support_types:
-                - gemini
-                - openai
-                - anthropic
-                - codex
-            supported_models:
-                - gpt-5.5
-                - gpt-5.2-codex
-                - gpt-5.3
-                - '*'
-            timeout: 300s
-        codex_fox:
-            api_key: ${CODEX2_API_KEYS:-}
-            api_path: /v1/responses
-            base_url: https://beecode.cc
-            context_window:
-                default: ${CONTEXT_WINDOW_CODEX_FOX_DEFAULT:-400000}
-                models:
-                    gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_FOX_GPT_5_2_CODEX:-400000}
-            default_model: gpt-5.2-codex
-            enabled: true
-            forward_url: /v1/responses
-            header_mapping_rules:
-                - header: User-Agent
-                  match: ^OpenAI/JS\s+(.+)$
-                  match_type: regex
-                  replace_with: OpenAI JS $1
-            header_mappings:
-                X-Gateway-Provider: openai_codex
-            headers: {}
-            max_tokens_limit: 10000
-            model_mappings:
-                '*': gpt-5.4
-                gpt-5.4: gpt-5.4
-                gpt-5.5: gpt-5.5
-                gpt-5.4-mini: gpt-5.4-mini
-            model_capabilities:
-                '*':
-                    input_modalities:
-                        - text
-                    native_tools:
-                        image_generation: false
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - xhigh
-                gpt-5.4-mini:
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
-                    input_modalities:
-                        - text
-                        - image
-                    native_tools:
-                        image_generation: true
-                gpt-5.4:
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
-                    input_modalities:
-                        - text
-                        - image
-                    native_tools:
-                        image_generation: true
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - xhigh
-            protocol: codex
-            support_types:
-                - gemini
-                - openai
-                - anthropic
-                - codex
-            supported_models:
-                - gpt-5.2-codex
-                - gpt-5.4
-                - gpt-5.4-mini
-                - gpt-5.5
-                - '*'
-            timeout: 300s
-            truncation_adapter: ""
-        deepseek:
-            api_key: ${DEEPSEEK_API_KEY:-}
-            api_path: /v1/chat/completions
-            base_url: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-            default_model: deepseek-v4-flash
-            enabled: true
-            forward_url: /v1/chat/completions
-            max_tokens_limit: 8000
-            model_mappings:
-                '*': deepseek-v4-flash
-                "claude*": deepseek-v4-flash
-                glm-4-plus: deepseek-v4-flash
-                glm-4.7: deepseek-v4-flash
-                gpt*: deepseek-v4-pro
-                o1: deepseek-v4-pro
-                deepseek-v4-pro: deepseek-v4-pro
-                deepseek-v4-flash: deepseek-v4-flash
-                o1-mini: deepseek-v4-flash
-                o1-preview: deepseek-v4-pro
-            model_capabilities:
-                deepseek-v4-flash:
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - high
-                        - max
-                deepseek-v4-pro:
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - high
-                        - max
-            protocol: openai
-            support_types:
-                - openai
-                - anthropic
-            supported_models:
-                - deepseek-v4-flash
-                - deepseek-v4-pro
-            timeout: 300s
-            truncation_adapter: openai_local
-        modelscope:
-            api_key: ${MODELSCOPE_API_KEY:-}
-            api_path: /v1/chat/completions
-            base_url: ${MODELSCOPE_BASE_URL:-https://api-inference.modelscope.cn}
-            default_model: deepseek-ai/DeepSeek-V4-Pro
-            enabled: true
-            forward_url: /v1/chat/completions
-            max_tokens_limit: 8000
-            model_mappings:
-                deepseek-ai/DeepSeek-V4-Pro: deepseek-ai/DeepSeek-V4-Pro
-                '*': deepseek-ai/DeepSeek-V4-Flash
-                "claude*": deepseek-ai/DeepSeek-V4-Pro
-                glm-4-plus: deepseek-ai/DeepSeek-V4-Pro
-                glm-4.7: deepseek-ai/DeepSeek-V4-Pro
-                gpt*: deepseek-ai/DeepSeek-V4-Pro
-                o1: deepseek-ai/DeepSeek-V4-Pro
-                deepseek-v4-pro: deepseek-ai/DeepSeek-V4-Pro
-                deepseek-v4-flash: deepseek-ai/DeepSeek-V4-Flash
-                o1-mini: deepseek-ai/DeepSeek-V4-Pro
-                o1-preview: deepseek-ai/DeepSeek-V4-Pro
-            model_capabilities:
-                '*':
-                    input_modalities:
-                        - text
-                    native_tools:
-                        image_generation: false
-                    max_context_tokens: 270000
-                    auto_compact_token_limit: 200000
-                deepseek-ai/DeepSeek-V4-Flash:
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - high
-                        - max
-                deepseek-ai/DeepSeek-V4-Pro:
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - high
-                        - max
-            protocol: openai
-            support_types:
-                - openai
-                - anthropic
-            supported_models:
-                - deepseek-ai/DeepSeek-V4-Flash
-                - deepseek-ai/DeepSeek-V4-Pro
-            timeout: 300s
-            truncation_adapter: openai_local
-        deepseek_beta:
-            api_key: ${DEEPSEEK_API_KEY:-}
-            api_path: /v1/chat/completions
-            base_url: ${DEEPSEEK_BETA_BASE_URL:-https://api.deepseek.com/beta}
-            default_model: deepseek-v4-flash
-            enabled: true
-            forward_url: /v1/chat/completions
-            max_tokens_limit: 8000
-            model_mappings:
-                '*': deepseek-v4-flash
-                "claude*": deepseek-v4-flash
-                glm-4-plus: deepseek-v4-flash
-                glm-4.7: deepseek-v4-flash
-                gpt-3.5-turbo: deepseek-v4-flash
-                gpt-4: deepseek-v4-flash
-                gpt-4o: deepseek-v4-flash
-                gpt-4-turbo: deepseek-v4-flash
-                o1: deepseek-v4-pro
-                o1-mini: deepseek-v4-flash
-                o1-preview: deepseek-v4-pro
-            model_capabilities:
-                deepseek-v4-pro:
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - high
-                        - max
-            protocol: openai
-            support_types:
-                - openai
-                - anthropic
-            supported_models:
-                - deepseek-v4-flash
-                - deepseek-v4-pro
-            timeout: 300s
-            truncation_adapter: openai_local
-        deepseek_anthropic:
-            api_key: ${DEEPSEEK_API_KEY:-}
-            api_path: /v1/messages
-            base_url: ${DEEPSEEK_ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}
-            default_model: deepseek-v4-flash
-            enabled: true
-            forward_url: /v1/messages
-            max_tokens_limit: 8000
-            model_mappings:
-                '*': deepseek-v4-flash
-                claude-*: deepseek-v4-flash
-            protocol: anthropic
-            support_types:
-                - anthropic
-            supported_models:
-                - deepseek-v4-flash
-                - deepseek-v4-pro
-            timeout: 300s
-            truncation_adapter: anthropic_local
-        mimo_anthropic:
-            api_key: ${MIMO_ANTHROPIC_API_KEY:-}
-            api_path: /v1/messages
-            base_url: https://token-plan-cn.xiaomimimo.com/anthropic
-            default_model: mimo-v2.5-pro
-            enabled: true
-            forward_url: /v1/messages
-            requests_per_minute: 100
-            max_tokens_limit: 131072
-            model_capabilities:
-                '*':
-                    input_modalities:
-                        - text
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - max
-                    reasoning_effort_budgets:
-                        none: 0
-                        low: 0
-                        medium: 0
-                        high: 0
-                        max: 0
-                mimo-v2.5-pro:
-                    input_modalities:
-                        - text
-                        - image
-                    max_context_tokens: 1000000
-                    max_tokens: 131072
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - max
-                    reasoning_effort_budgets:
-                        none: 0
-                        low: 0
-                        medium: 0
-                        high: 0
-                        max: 0
-                mimo-v2-pro:
-                    input_modalities:
-                        - text
-                        - image
-                    max_context_tokens: 1000000
-                    max_tokens: 131072
-                    reasoning_model: true
-                    reasoning_efforts:
-                        - none
-                        - low
-                        - medium
-                        - high
-                        - max
-                    reasoning_effort_budgets:
-                        none: 0
-                        low: 0
-                        medium: 0
-                        high: 0
-                        max: 0
-            model_mappings:
-                '*': mimo-v2.5-pro
-                mimo-*: $0
-            protocol: anthropic
-            support_types:
-                - anthropic
-            supported_models:
-                - mimo-v2.5-pro
-                - mimo-v2-pro
-            timeout: 300s
-            truncation_adapter: anthropic_local
-        gemini_local:
-            api_key: ${GEMINI_API_KEY:-}
-            api_path: /v1beta/models
-            base_url: ${GOOGLE_GEMINI_BASE_URL:-http://127.0.0.1:8045}
-            default_model: gemini-3.1-pro-high
-            enabled: true
-            forward_url: /v1beta/models/{model}:streamGenerateContent?alt=sse
-            max_tokens_limit: 10000
-            model_mappings:
-                '*': gemini-3.1-pro-high
-                claude-*: gemini-3.1-pro-high
-                glm-*: gemini-3.1-pro-high
-                gpt-*: gemini-3.1-flash
-                gpt-4: gemini-3.1-pro-high
-            protocol: gemini
-            support_types:
-                - gemini
-                - openai
-                - anthropic
-                - codex
-            supported_models:
-                - gemini-3.1-pro-high
-                - gemini-3.1-flash
-            timeout: 300s
-            truncation_adapter: gemini_local
-        nvidia:
-            api_key: ${NVIDIA_API_KEYS:-}
-            api_path: ""
-            base_url: ${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com}
-            default_model: z-ai/glm-5.1
-            enabled: true
-            forward_url: /v1/chat/completions
-            max_tokens_limit: 10000
-            # model_mappings:
-            #     '*': z-ai/glm-5.1
-            protocol: openai
-            support_types:
-                - openai
-                - anthropic
-                - codex
-            supported_models:
-                - z-ai/glm4.7
-                - z-ai/glm5
-                - z-ai/glm-5.1
-            timeout: 300s
-            truncation_adapter: openai_local
-    proxy:
-        enabled: ${PROXY_ENABLED:-false}
-        http: ${HTTP_PROXY:-http://127.0.0.1:10810}
-        https: ${HTTPS_PROXY:-http://127.0.0.1:10810}
-        no_proxy: ${NO_PROXY:-localhost,127.0.0.1}
-    sse_heartbeat:
-        check_interval: ${SSE_HEARTBEAT_CHECK_INTERVAL:-10s}
-        enabled: ${SSE_HEARTBEAT_ENABLED:-true}
-        heartbeat_comment: '${SSE_HEARTBEAT_COMMENT:-: heartbeat}'
-        send_heartbeat: ${SSE_SEND_HEARTBEAT:-true}
-        timeout: ${SSE_HEARTBEAT_TIMEOUT:-2m}
-    timeout: 300s
-rate_limit:
-    algorithm: ${RATE_LIMIT_ALGORITHM:-token_bucket}
-    api_key_limits:
-        - api_key_pattern: sk-
-          block_duration: 60s
-          qpd: 100000
-          qpm: 600
-          qps: 10
-        - api_key_pattern: sk-ant-
-          block_duration: 60s
-          qpd: 150000
-          qpm: 900
-          qps: 15
-        - api_key_pattern: nvapi-
-          block_duration: 60s
-          qpd: 200000
-          qpm: 1200
-          qps: 20
-    default_limits:
-        daily_tokens: ${RATE_LIMIT_DAILY_TOKENS:-1000000}
-        monthly_tokens: ${RATE_LIMIT_MONTHLY_TOKENS:-30000000}
-        qps: ${RATE_LIMIT_QPS:-10}
-        tpm: ${RATE_LIMIT_TPM:-10000}
-    enabled: ${RATE_LIMIT_ENABLED:-false}
-    global_limits:
-        global_daily_tokens: ${RATE_LIMIT_GLOBAL_DAILY_TOKENS:-100000000}
-        global_monthly_tokens: ${RATE_LIMIT_GLOBAL_MONTHLY_TOKENS:-3000000000}
-        global_qps: ${RATE_LIMIT_GLOBAL_QPS:-1000}
-        global_tpm: ${RATE_LIMIT_GLOBAL_TPM:-1000000}
-    path_limits:
-        /v1/audio/speech:
-            burst: 20
-            requests_per_minute: 100
-        /v1/audio/transcriptions:
-            burst: 10
-            requests_per_minute: 50
-        /v1/audio/translations:
-            burst: 10
-            requests_per_minute: 50
-        /v1/images/edits:
-            burst: 5
-            requests_per_minute: 30
-        /v1/images/generations:
-            burst: 5
-            requests_per_minute: 30
-        /v1/images/variations:
-            burst: 5
-            requests_per_minute: 30
-        /v1/realtime:
-            burst: 10
-            requests_per_minute: 60
-        /v1/rerank:
-            burst: 50
-            requests_per_minute: 200
-        /v1/responses:
-            burst: 15
-            requests_per_minute: 60
-    storage: ${RATE_LIMIT_STORAGE:-memory}
-redis:
-    addr: ${REDIS_ADDR:-localhost:6379}
-    db: ${REDIS_DB:-0}
-    dial_timeout: 5
-    enabled: ${REDIS_ENABLED:-false}
-    min_idle_conns: 10
-    password: ${REDIS_PASSWORD:-}
-    pool_size: 100
-    read_timeout: 3
-    write_timeout: 3
-resource_manager:
-    cross_provider_key_selection: ${CROSS_PROVIDER_KEY_SELECTION:-true}
-    default_group_algorithm: tiered
-    default_key_algorithm: health_based
-    default_provider_algorithm: round_robin
-    enable_stats: ${RESOURCE_MANAGER_ENABLE_STATS:-true}
-    enabled: ${RESOURCE_MANAGER_ENABLED:-true}
-    health_check:
-        auto_recovery: ${RESOURCE_MANAGER_AUTO_RECOVERY:-true}
-        enabled: ${RESOURCE_MANAGER_HEALTH_CHECK_ENABLED:-true}
-        interval: ${RESOURCE_MANAGER_HEALTH_CHECK_INTERVAL:-60s}
-        recovery_threshold: ${RESOURCE_MANAGER_RECOVERY_THRESHOLD:-0.90}
-    stats_retention: ${RESOURCE_MANAGER_STATS_RETENTION:-24h}
-retry:
-    default_backoff_multiplier: 2
-    default_max_retries: ${RETRY_DEFAULT_MAX_RETRIES:-3}
-    default_retry_delay_ms: ${RETRY_DEFAULT_DELAY_MS:-1000}
-    enabled: ${RETRY_ENABLED:-true}
-    enhanced_strategy:
-        enabled: ${ENHANCED_STRATEGY_ENABLED:-true}
-        fallback_threshold: 4
-        primary_min_score: 40
-        secondary_excluded_score: 10
-        secondary_threshold: 2
-    invalid_encrypted_content_recovery:
-        strip_client_state_once: ${RETRY_INVALID_ENCRYPTED_CONTENT_STRIP_CLIENT_STATE_ONCE:-false}
-    rules:
-        - backoff_multiplier: 1.5
-          description: SSE 空流响应自动重试（只有 ping/waiting 事件）
-          enabled: true
-          keyword:
-            case_sensitive: false
-            values:
-                - empty_stream_response
-                - only ping events
-          max_retries: 3
-          name: empty_stream_response
-          retry_delay_ms: 2000
-        - backoff_multiplier: 1.5
-          description: SSE 流式响应心跳超时自动重试
-          enabled: true
-          keyword:
-            case_sensitive: false
-            values:
-                - heartbeat timeout
-          max_retries: 3
-          name: sse_heartbeat_timeout
-          retry_delay_ms: 5000
-        - backoff_multiplier: 2
-          description: Codex 流式响应在 response.completed 前断开时自动重试
-          enabled: true
-          error_code:
-            codes:
-                - request_timeout
-          keyword:
-            case_sensitive: false
-            values:
-                - stream disconnected before completion
-                - stream closed before response.completed
-                - request timeout
-          max_retries: 3
-          name: codex_request_timeout_retry
-          retry_delay_ms: 1000
-        - backoff_multiplier: 2
-          description: HTTP 5xx 服务器错误重试
-          enabled: true
-          max_retries: 3
-          name: http_5xx_retry
-          retry_delay_ms: 1000
-          status_code:
-            range: 500-504
-        - backoff_multiplier: 1.5
-          description: 上下文长度超限自动重试（触发截断逻辑）
-          enabled: true
-          error_code:
-            pattern: ^13.*
-          max_retries: 5
-          name: context_limit_retry
-          retry_delay_ms: 500
-        - backoff_multiplier: 2
-          description: 速率限制错误重试（429 Too Many Requests）
-          enabled: true
-          error_code:
-            codes:
-                - "1302"
-                - rate_limit_exceeded
-                - slow_down
-          keyword:
-            case_sensitive: false
-            patterns:
-                - (?i)(rate.?limit|限流|频率限制)
-                - (?i)(too.?many.?requests|请求过多)
-                - (?i)(quota.?exceeded|配额超限)
-                - (?i)(api.?calls?.?(limit|exceeded)|API调用限制)
-            values:
-                - rate limit
-                - too many requests
-                - 速率限制
-                - 限流
-                - 频率限制
-          max_retries: 10
-          name: rate_limit_retry
-          retry_delay_ms: 2000
-routing:
-    failover: true
-    routes:
-        - group: openai_group
-          match_path: /v1/chat
-          match_type: prefix
-        - group: anthropic_group
-          match_models:
-            - claude-opus-4-6
-          match_path: /v1/messages
-          match_type: prefix
-        - exclude_models:
-            - claude-opus-4-6
-          group: anthropic_group_second
-          match_path: /v1/messages
-          match_type: prefix
-        - group: openai_group
-          match_path: /v1/debug/chat
-          match_type: prefix
-        - group: anthropic_group
-          match_path: /v1/debug/messages
-          match_type: prefix
-        - group: openai_group
-          match_path: /v1/completions
-          match_type: exact
-        - group: openai_group
-          match_path: /v1/embeddings
-          match_type: exact
-        - group: codex_group
-          match_path: /v1/responses
-          match_type: prefix
-          priority: 10
-          protocol: codex
-        - group: codex_group_54
-          match_models:
-            - gpt-5.4
-          match_path: /v1/responses
-          match_type: prefix
-          priority: 10
-          protocol: codex
-        - group: gemini_group
-          match_path: /v1beta
-          match_type: prefix
-        - group: openai_group
-          match_path: /v1/audio/speech
-          match_type: exact
-        - group: openai_group
-          match_path: /v1/audio/transcriptions
-          match_type: exact
-        - group: openai_group
-          match_path: /v1/audio/translations
-          match_type: exact
-        - group: openai_group
-          match_path: /v1/images/generations
-          match_type: exact
-        - group: openai_group
-          match_path: /v1/images/edits
-          match_type: exact
-        - group: openai_group
-          match_path: /v1/images/variations
-          match_type: exact
-    strategy: health
-server:
-    admin_host: ${SERVER_ADMIN_HOST:-127.0.0.1}
-    admin_port: ${SERVER_ADMIN_PORT:-8101}
-    development: ${SERVER_DEVELOPMENT:-true}
-    graceful_stop: true
-    host: ${SERVER_HOST:-0.0.0.0}
-    idle_timeout: ${SERVER_IDLE_TIMEOUT:-60s}
-    name: ai-gateway
-    port: ${SERVER_PORT:-8101}
-    read_timeout: 60s
-    shutdown_time: 30s
-    write_timeout: 300s
-skills_runtime:
-    admin_roles: []
-    admin_token: ${SKILLS_RUNTIME_ADMIN_TOKEN:-}
-    aicli_skill_exposure_mode: ${SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_MODE:-auto}
-    aicli_skill_exposure_top_k: ${SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_TOP_K:-5}
-    api_key_scopes: {}
-    config_file: ${SKILLS_RUNTIME_CONFIG_FILE:-backend/configs/runtime.yaml}
-    default_max_requests: ${SKILLS_RUNTIME_DEFAULT_MAX_REQUESTS:-0}
-    default_max_tokens: ${SKILLS_RUNTIME_DEFAULT_MAX_TOKENS:-0}
-    disable_hot_reload_ops: ${SKILLS_RUNTIME_DISABLE_HOT_RELOAD_OPS:-false}
-    disable_import: ${SKILLS_RUNTIME_DISABLE_IMPORT:-false}
-    disable_persist: ${SKILLS_RUNTIME_DISABLE_PERSIST:-false}
-    disable_reload_ops: ${SKILLS_RUNTIME_DISABLE_RELOAD_OPS:-false}
-    enabled: ${SKILLS_RUNTIME_ENABLED:-true}
-    extra_skill_dirs: []
-    gateway_provider_name: ${SKILLS_RUNTIME_GATEWAY_PROVIDER_NAME:-gateway}
-    jwt_claims_enabled: ${SKILLS_RUNTIME_JWT_CLAIMS_ENABLED:-false}
-    project_claims:
-        - project_id
-        - project
-        - pid
-    project_headers:
-        - X-Skills-Project
-        - X-Skills-Auth-Project
-        - X-Project-ID
-        - X-Authenticated-Project
-    quota_enabled: ${SKILLS_RUNTIME_QUOTA_ENABLED:-false}
-    quota_policies:
-        projects: {}
-        tenants: {}
-        users: {}
-    read_only: ${SKILLS_RUNTIME_READ_ONLY:-false}
-    reindex_cooldown: ${SKILLS_RUNTIME_REINDEX_COOLDOWN:-30s}
-    role_claims:
-        - role
-        - roles
-    role_headers:
-        - X-Skills-Role
-        - X-Skills-Auth-Role
-        - X-Role
-        - X-Authenticated-Role
-    scope_resolver_enabled: ${SKILLS_RUNTIME_SCOPE_RESOLVER_ENABLED:-true}
-    skill_dir: ${SKILLS_RUNTIME_SKILL_DIR:-./.agents/skills}
-    tenant_claims:
-        - tenant_id
-        - tenant
-        - tid
-    tenant_headers:
-        - X-Skills-Tenant
-        - X-Skills-Auth-Tenant
-        - X-Tenant-ID
-        - X-Authenticated-Tenant
-    usage_ledger_enabled: ${SKILLS_RUNTIME_USAGE_LEDGER_ENABLED:-false}
-    usage_tracking_enabled: ${SKILLS_RUNTIME_USAGE_TRACKING_ENABLED:-true}
-    user_claims:
-        - user_id
-        - user
-        - uid
-        - sub
-    user_headers:
-        - X-Skills-User
-        - X-Skills-Auth-User
-        - X-User-ID
-        - X-Authenticated-User
-special_apis:
-    logging:
-        enabled: ${SPECIAL_APIS_LOGGING_ENABLED:-true}
-        log_headers: true
-        log_request: true
-        log_request_payload: ${SPECIAL_APIS_LOG_REQUEST_PAYLOAD:-false}
-        log_response: true
-        log_response_payload: ${SPECIAL_APIS_LOG_RESPONSE_PAYLOAD:-false}
-        max_payload_size: ${SPECIAL_APIS_LOG_MAX_PAYLOAD_SIZE:-4096}
-        sensitive_headers:
-            - authorization
-            - x-api-key
-            - cookie
-            - set-cookie
-    metrics:
-        enabled: ${SPECIAL_APIS_METRICS_ENABLED:-true}
-        namespace: ai_gateway
-        subsystem: special_apis
-transformer:
-    body_modifiers:
-        request: null
-        response: null
-    cache_adapters: ${TRANSFORMER_CACHE_ADAPTERS:-true}
-    high_perf: ${TRANSFORMER_HIGH_PERF:-true}
-    http_transform_stage_enabled: ${TRANSFORMER_HTTP_TRANSFORM_STAGE_ENABLED:-true}
-    stream_null_filter: ${TRANSFORMER_STREAM_NULL_FILTER:-true}
-vendors:
-    enabled: false
-    vendors: []
-websocket:
+      - enabled: true
+        name: codex_fox
+        role: standby
+        weight: 100
+    retry_delay: 1s
+    strategy: round_robin
+    truncation:
+      enabled: false
+      max_retries: 3
+      step: 10
+      strategy: percentage
+  - failover:
+      enabled: true
+      mode: primary_standby
+      scope: model_key
+    max_retries: 3
+    name: anthropic_group_second
+    providers:
+      - enabled: true
+        name: codex_fox
+        role: standby
+        weight: 100
+    retry_delay: 1s
+    strategy: round_robin
+    truncation:
+      enabled: false
+      max_retries: 3
+      step: 10
+      strategy: percentage
+  - failover:
+      enabled: true
+      mode: primary_standby
+      scope: model_key
+    max_retries: 3
+    name: openai_group
+    providers:
+      - enabled: false
+        name: nvidia
+        weight: 100
+      - enabled: false
+        name: gemini_local
+        weight: 100
+      - enabled: false
+        name: deepseek
+        weight: 80
+      - enabled: false
+        name: deepseek_beta
+        weight: 80
+    retry_delay: 1s
+    strategy: round_robin
+    truncation:
+      enabled: false
+      max_retries: 6
+      step: 20
+      strategy: percentage
+  - failover:
+      enabled: true
+      mode: primary_standby
+      scope: model_key
+    max_retries: 2
+    name: codex_group
+    providers:
+      - enabled: true
+        name: codex_fox
+        role: standby
+        weight: 100
+      - enabled: true
+        name: CODEX_LOCAL
+        role: standby
+        weight: 100
+      - enabled: false
+        name: nvidia
+        weight: 100
+      - enabled: false
+        name: deepseek_anthropic
+        weight: 100
+    retry_delay: 1s
+    strategy: round_robin
+  - failover:
+      enabled: true
+      mode: primary_standby
+      scope: model_key
+    max_retries: 2
+    name: codex_group_54
+    providers:
+      - enabled: true
+        name: codex_fox
+        role: standby
+        weight: 100
+    retry_delay: 1s
+  - max_retries: 2
+    name: gemini_group
+    providers:
+      - enabled: false
+        name: nvidia
+        weight: 100
+      - enabled: true
+        name: codex_fox
+        weight: 100
+    retry_delay: 2s
+    strategy: round_robin
+provider_queue:
+  default_slot:
+    max_concurrency: 3
+    overflow_strategy: overflow
+    queue_size: 10
+    queue_timeout: 30s
+  enabled: ${PROVIDER_QUEUE_ENABLED:-true}
+  overflow:
     enabled: true
-    realtime:
-        capacity:
-            max_active_connections: 0
-        failover_on_handshake_error: true
-        handshake_max_retries: 1
-        ingress_enabled: true
-        metrics:
-            close_code_labels_enabled: true
-            enabled: true
-    responses:
-        affinity_ttl: 65m
-        allow_passthrough_only: false
-        capacity:
-            max_active_connections: 0
-        compat_bridge_enabled: false
-        compat_bridge_source_protocols: []
-        connection_pooling_enabled: true
-        failover_on_handshake_error: true
-        handshake_max_retries: 2
-        http_bridge_enabled: false
-        ingress_enabled: true
-        metrics:
-            close_code_labels_enabled: true
-            enabled: true
-        pre_first_event_retry_once: true
+    max_attempts: 3
+    strategy: prefer_empty
+  providers:
+    deepseek:
+      max_concurrency: 5
+      queue_size: 15
+      queue_timeout: 30s
+    deepseek_beta:
+      max_concurrency: 5
+      queue_size: 15
+      queue_timeout: 30s
+    nvidia:
+      max_concurrency: 5
+      queue_size: 20
+      queue_timeout: 60s
+  wait_heartbeat:
+    comment: ': queue heartbeat'
+    enabled: true
+    interval: 5s
+    max_wait_time: 120s
+providers:
+  default_provider: ${PROVIDERS_DEFAULT:-nvidia}
+  http_timeout:
+    body_read_timeout: ${PROVIDERS_BODY_READ_TIMEOUT:-60s}
+    dial_timeout: ${PROVIDERS_DIAL_TIMEOUT:-5s}
+    disable_connection_pooling: ${DISABLE_CONNECTION_POOLING:-false}
+    dns_cache_ttl: ${HTTP_DNS_CACHE_TTL:-600s}
+    dns_server: ${HTTP_DNS_SERVER:-8.8.8.8}
+    fallback_delay: ${HTTP_FALLBACK_DELAY:-50ms}
+    http_version: ${HTTP_VERSION:-2}
+    idle_conn_timeout: ${PROVIDERS_IDLE_CONN_TIMEOUT:-30s}
+    keep_alive: ${PROVIDERS_KEEP_ALIVE:-120s}
+    max_conns_per_host: ${PROVIDERS_MAX_CONNS_PER_HOST:-300}
+    max_idle_conns: ${PROVIDERS_MAX_IDLE_CONNS:-1000}
+    max_idle_conns_per_host: ${PROVIDERS_MAX_IDLE_CONNS_PER_HOST:-200}
+    prefer_ipv4: ${HTTP_PREFER_IPV4:-true}
+    response_header_timeout: ${PROVIDERS_RESPONSE_HEADER_TIMEOUT:-60s}
+    stream_read_timeout: ${PROVIDERS_STREAM_READ_TIMEOUT:-120s}
+    tls_handshake_timeout: ${PROVIDERS_TLS_HANDSHAKE_TIMEOUT:-15s}
+    upstream_accept_encoding: ${HTTP_UPSTREAM_ACCEPT_ENCODING:-auto}
+  items:
+    CODEX_LOCAL:
+      api_key: ${CODEX_LOCAL_API_KEYS:-}
+      api_path: /v1/responses
+      base_url: ${CODEX_LOCAL_BASE_URL}
+      context_window:
+        default: ${CONTEXT_WINDOW_CODEX_LOCAL_DEFAULT:-400000}
+        models:
+          gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_LOCAL_GPT_5_2_CODEX:-400000}
+          gpt-5.4: ${CONTEXT_WINDOW_CODEX_LOCAL_GPT_5_4:-1050000}
+          gpt-5.4-mini: ${CONTEXT_WINDOW_CODEX_LOCAL_GPT_5_4:-400000}
+      default_model: gpt-5.4-mini
+      enabled: true
+      forward_url: /v1/responses
+      header_mapping_rules:
+        - header: User-Agent
+          match: ^OpenAI/JS\s+(.+)$
+          match_type: regex
+          replace_with: OpenAI JS $1
+      header_mappings:
+        X-Gateway-Provider: openai_codex
+      max_tokens_limit: 10000
+      model_mappings:
+        '*': gpt-5.4-mini
+        gpt-5.4: gpt-5.4
+      model_capabilities:
+        '*':
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+          reasoning_model: true
+          reasoning_efforts:
+            - low
+            - medium
+            - high
+            - xhigh
+        gpt-5.4:
+          max_context_tokens: 270000
+          auto_compact_token_limit: 200000
+          input_modalities:
+            - text
+            - image
+          native_tools:
+            image_generation: true
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - xhigh
+      protocol: codex
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      supported_models:
+        - gpt-5.2-codex
+        - gpt-5.4
+        - gpt-5.4-mini
+        - '*'
+      timeout: 300s
+    CODEX_04:
+      api_key: ${CODEX_04_API_KEYS:-}
+      api_path: /v1/responses
+      base_url: ${CODEX_04_BASE_URL}
+      context_window:
+        default: ${CONTEXT_WINDOW_CODEX_04_DEFAULT:-1050000}
+        models:
+          gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_04_GPT_5_2_CODEX:-400000}
+          gpt-5.4: ${CONTEXT_WINDOW_CODEX_04_GPT_5_4:-1050000}
+      default_model: gpt-5.4
+      enabled: true
+      forward_url: /v1/responses
+      header_mapping_rules:
+        - header: User-Agent
+          match: ^OpenAI/JS\s+(.+)$
+          match_type: regex
+          replace_with: OpenAI JS $1
+      header_mappings:
+        X-Gateway-Provider: openai_codex
+      max_tokens_limit: 10000
+      model_mappings:
+        '*': gpt-5.4-mini
+        gpt-5.4-mini: gpt-5.4-mini
+        gpt-5.4: gpt-5.4
+        gpt-5.2-codex: gpt-5.4-mini
+      model_capabilities:
+        '*':
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - xhigh
+        gpt-5.2-codex:
+          max_context_tokens: 270000
+          auto_compact_token_limit: 200000
+          input_modalities:
+            - text
+            - image
+          native_tools:
+            image_generation: false
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - xhigh
+        gpt-5.4-mini:
+          max_context_tokens: 270000
+          auto_compact_token_limit: 200000
+          input_modalities:
+            - text
+            - image
+          native_tools:
+            image_generation: true
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - xhigh
+        gpt-5.4:
+          max_context_tokens: 270000
+          auto_compact_token_limit: 200000
+          input_modalities:
+            - text
+            - image
+          native_tools:
+            image_generation: true
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - xhigh
+      protocol: codex
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      supported_models:
+        - gpt-5.2-codex
+        - gpt-5.4
+        - gpt-5.4-mini
+        - '*'
+      timeout: 300s
+    OPENAI_IMAGE:
+      api_key: ${CODEX_04_API_KEYS:-}
+      api_path: /v1/images/generations
+      base_url: ${CODEX_04_BASE_URL:-https://api.openai.com}
+      default_model: gpt-image-2
+      enabled: true
+      forward_url: /v1/images/generations
+      header_mappings:
+        X-Gateway-Provider: openai_image
+      model_capabilities:
+        '*':
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+            images_generations_api: false
+        gpt-image-1:
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+            images_generations_api: true
+        gpt-image-1.5:
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+            images_generations_api: true
+        gpt-image-2:
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+            images_generations_api: true
+      protocol: openai
+      support_types:
+        - openai
+      supported_models:
+        - gpt-image-1
+        - gpt-image-1.5
+        - gpt-image-2
+      timeout: 300s
+    bigmodel:
+      api_key: ${BIGMODEL_API_KEYS:-}
+      api_key_config:
+        enabled: true
+        fallback_mode: ${BIGMODEL_FALLBACK_MODE:-random}
+        max_retries_per_key: ${BIGMODEL_MAX_RETRIES_PER_KEY:-1}
+        selection_mode: ${BIGMODEL_KEY_SELECTION_MODE:-health_based}
+      api_path: /v1/messages
+      base_url: https://open.bigmodel.cn/api/anthropic
+      default_model: glm-5
+      enabled: true
+      forward_url: /v1/messages
+      max_tokens_limit: 10000
+      model_mappings:
+        '*': glm-5
+      path_mappings: null
+      protocol: anthropic
+      support_types:
+        - anthropic
+        - openai
+        - codex
+      supported_models:
+        - glm-5
+        - glm-4.7
+        - glm-4-plus
+        - glm-4-air
+        - glm-4-flash
+      timeout: 300s
+      truncation_adapter: anthropic_local
+    codex_cli_gpt:
+      api_key: ${CODEX_CLI_API_KEYS}
+      api_path: /responses
+      base_url: https://chatgpt.com/backend-api/codex/responses
+      context_window:
+        default: ${CONTEXT_WINDOW_CODEX_CLI_GPT_DEFAULT:-1050000}
+        models:
+          gpt-5.4: ${CONTEXT_WINDOW_CODEX_CLI_GPT_GPT_5_4:-1050000}
+      default_model: gpt-5.4
+      enabled: true
+      forward_url: /responses
+      header_mapping_rules:
+        - header: User-Agent
+          match: ^OpenAI/JS\s+(.+)$
+          match_type: regex
+          replace_with: codex_cli_rs/0.112.0 (Windows 10.0.26200; x86_64) WindowsTerminal
+      header_mappings:
+        X-Gateway-Provider: openai_codex
+      headers:
+        ChatGPT-Account-Id: ${CHATGPT_ACCOUNT_ID}
+      max_tokens_limit: 10000
+      supports_max_output_tokens: false
+      model_mappings:
+        '*': gpt-5.4
+      model_capabilities:
+        '*':
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+        gpt-5.4-mini:
+          input_modalities:
+            - text
+            - image
+          native_tools:
+            image_generation: true
+        gpt-5.4:
+          max_context_tokens: 270000
+          auto_compact_token_limit: 200000
+          input_modalities:
+            - text
+            - image
+          native_tools:
+            image_generation: true
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - xhigh
+      protocol: codex
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      supported_models:
+        - gpt-5.5
+        - gpt-5.2-codex
+        - gpt-5.3
+        - '*'
+      timeout: 300s
+    codex_fox:
+      api_key: ${CODEX2_API_KEYS:-}
+      api_path: /v1/responses
+      base_url: https://beecode.cc
+      context_window:
+        default: ${CONTEXT_WINDOW_CODEX_FOX_DEFAULT:-400000}
+        models:
+          gpt-5.2-codex: ${CONTEXT_WINDOW_CODEX_FOX_GPT_5_2_CODEX:-400000}
+      default_model: gpt-5.2-codex
+      enabled: true
+      forward_url: /v1/responses
+      header_mapping_rules:
+        - header: User-Agent
+          match: ^OpenAI/JS\s+(.+)$
+          match_type: regex
+          replace_with: OpenAI JS $1
+      header_mappings:
+        X-Gateway-Provider: openai_codex
+      headers: {}
+      max_tokens_limit: 10000
+      model_mappings:
+        '*': gpt-5.4
+        gpt-5.4: gpt-5.4
+        gpt-5.5: gpt-5.5
+        gpt-5.4-mini: gpt-5.4-mini
+      model_capabilities:
+        '*':
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - xhigh
+        gpt-5.4-mini:
+          max_context_tokens: 270000
+          auto_compact_token_limit: 200000
+          input_modalities:
+            - text
+            - image
+          native_tools:
+            image_generation: true
+        gpt-5.4:
+          max_context_tokens: 270000
+          auto_compact_token_limit: 200000
+          input_modalities:
+            - text
+            - image
+          native_tools:
+            image_generation: true
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - xhigh
+      protocol: codex
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      supported_models:
+        - gpt-5.2-codex
+        - gpt-5.4
+        - gpt-5.4-mini
+        - gpt-5.5
+        - '*'
+      timeout: 300s
+      truncation_adapter: ""
+    deepseek:
+      api_key: ${DEEPSEEK_API_KEY:-}
+      api_path: /v1/chat/completions
+      base_url: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      default_model: deepseek-v4-flash
+      enabled: true
+      forward_url: /v1/chat/completions
+      max_tokens_limit: 8000
+      model_mappings:
+        '*': deepseek-v4-flash
+        "claude*": deepseek-v4-flash
+        glm-4-plus: deepseek-v4-flash
+        glm-4.7: deepseek-v4-flash
+        gpt*: deepseek-v4-pro
+        o1: deepseek-v4-pro
+        deepseek-v4-pro: deepseek-v4-pro
+        deepseek-v4-flash: deepseek-v4-flash
+        o1-mini: deepseek-v4-flash
+        o1-preview: deepseek-v4-pro
+      model_capabilities:
+        deepseek-v4-flash:
+          reasoning_model: true
+          reasoning_efforts:
+            - high
+            - max
+        deepseek-v4-pro:
+          reasoning_model: true
+          reasoning_efforts:
+            - high
+            - max
+      protocol: openai
+      support_types:
+        - openai
+        - anthropic
+      supported_models:
+        - deepseek-v4-flash
+        - deepseek-v4-pro
+      timeout: 300s
+      truncation_adapter: openai_local
+    modelscope:
+      api_key: ${MODELSCOPE_API_KEY:-}
+      api_path: /v1/chat/completions
+      base_url: ${MODELSCOPE_BASE_URL:-https://api-inference.modelscope.cn}
+      default_model: deepseek-ai/DeepSeek-V4-Pro
+      enabled: true
+      forward_url: /v1/chat/completions
+      max_tokens_limit: 8000
+      model_mappings:
+        deepseek-ai/DeepSeek-V4-Pro: deepseek-ai/DeepSeek-V4-Pro
+        '*': deepseek-ai/DeepSeek-V4-Flash
+        "claude*": deepseek-ai/DeepSeek-V4-Pro
+        glm-4-plus: deepseek-ai/DeepSeek-V4-Pro
+        glm-4.7: deepseek-ai/DeepSeek-V4-Pro
+        gpt*: deepseek-ai/DeepSeek-V4-Pro
+        o1: deepseek-ai/DeepSeek-V4-Pro
+        deepseek-v4-pro: deepseek-ai/DeepSeek-V4-Pro
+        deepseek-v4-flash: deepseek-ai/DeepSeek-V4-Flash
+        o1-mini: deepseek-ai/DeepSeek-V4-Pro
+        o1-preview: deepseek-ai/DeepSeek-V4-Pro
+      model_capabilities:
+        '*':
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+          max_context_tokens: 270000
+          auto_compact_token_limit: 200000
+        deepseek-ai/DeepSeek-V4-Flash:
+          reasoning_model: true
+          reasoning_efforts:
+            - high
+            - max
+        deepseek-ai/DeepSeek-V4-Pro:
+          reasoning_model: true
+          reasoning_efforts:
+            - high
+            - max
+      protocol: openai
+      support_types:
+        - openai
+        - anthropic
+      supported_models:
+        - deepseek-ai/DeepSeek-V4-Flash
+        - deepseek-ai/DeepSeek-V4-Pro
+      timeout: 300s
+      truncation_adapter: openai_local
+    deepseek_beta:
+      api_key: ${DEEPSEEK_API_KEY:-}
+      api_path: /v1/chat/completions
+      base_url: ${DEEPSEEK_BETA_BASE_URL:-https://api.deepseek.com/beta}
+      default_model: deepseek-v4-flash
+      enabled: true
+      forward_url: /v1/chat/completions
+      max_tokens_limit: 8000
+      model_mappings:
+        '*': deepseek-v4-flash
+        "claude*": deepseek-v4-flash
+        glm-4-plus: deepseek-v4-flash
+        glm-4.7: deepseek-v4-flash
+        gpt-3.5-turbo: deepseek-v4-flash
+        gpt-4: deepseek-v4-flash
+        gpt-4o: deepseek-v4-flash
+        gpt-4-turbo: deepseek-v4-flash
+        o1: deepseek-v4-pro
+        o1-mini: deepseek-v4-flash
+        o1-preview: deepseek-v4-pro
+      model_capabilities:
+        deepseek-v4-pro:
+          reasoning_model: true
+          reasoning_efforts:
+            - high
+            - max
+      protocol: openai
+      support_types:
+        - openai
+        - anthropic
+      supported_models:
+        - deepseek-v4-flash
+        - deepseek-v4-pro
+      timeout: 300s
+      truncation_adapter: openai_local
+    deepseek_anthropic:
+      api_key: ${DEEPSEEK_API_KEY:-}
+      api_path: /v1/messages
+      base_url: ${DEEPSEEK_ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}
+      default_model: deepseek-v4-flash
+      enabled: true
+      forward_url: /v1/messages
+      max_tokens_limit: 8000
+      model_mappings:
+        '*': deepseek-v4-flash
+        claude-*: deepseek-v4-flash
+      protocol: anthropic
+      support_types:
+        - anthropic
+      supported_models:
+        - deepseek-v4-flash
+        - deepseek-v4-pro
+      timeout: 300s
+      truncation_adapter: anthropic_local
+    mimo_anthropic:
+      api_key: ${MIMO_ANTHROPIC_API_KEY:-}
+      api_path: /v1/messages
+      base_url: https://token-plan-cn.xiaomimimo.com/anthropic
+      default_model: mimo-v2.5-pro
+      enabled: true
+      forward_url: /v1/messages
+      requests_per_minute: 100
+      max_tokens_limit: 131072
+      model_capabilities:
+        '*':
+          input_modalities:
+            - text
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - max
+          reasoning_effort_budgets:
+            none: 0
+            low: 0
+            medium: 0
+            high: 0
+            max: 0
+        mimo-v2.5-pro:
+          input_modalities:
+            - text
+            - image
+          max_context_tokens: 1000000
+          max_tokens: 131072
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - max
+          reasoning_effort_budgets:
+            none: 0
+            low: 0
+            medium: 0
+            high: 0
+            max: 0
+        mimo-v2-pro:
+          input_modalities:
+            - text
+            - image
+          max_context_tokens: 1000000
+          max_tokens: 131072
+          reasoning_model: true
+          reasoning_efforts:
+            - none
+            - low
+            - medium
+            - high
+            - max
+          reasoning_effort_budgets:
+            none: 0
+            low: 0
+            medium: 0
+            high: 0
+            max: 0
+      model_mappings:
+        '*': mimo-v2.5-pro
+        mimo-*: $0
+      protocol: anthropic
+      support_types:
+        - anthropic
+      supported_models:
+        - mimo-v2.5-pro
+        - mimo-v2-pro
+      timeout: 300s
+      truncation_adapter: anthropic_local
+    gemini_local:
+      api_key: ${GEMINI_API_KEY:-}
+      api_path: /v1beta/models
+      base_url: ${GOOGLE_GEMINI_BASE_URL:-http://127.0.0.1:8045}
+      default_model: gemini-3.1-pro-high
+      enabled: true
+      forward_url: /v1beta/models/{model}:streamGenerateContent?alt=sse
+      max_tokens_limit: 10000
+      model_mappings:
+        '*': gemini-3.1-pro-high
+        claude-*: gemini-3.1-pro-high
+        glm-*: gemini-3.1-pro-high
+        gpt-*: gemini-3.1-flash
+        gpt-4: gemini-3.1-pro-high
+      protocol: gemini
+      support_types:
+        - gemini
+        - openai
+        - anthropic
+        - codex
+      supported_models:
+        - gemini-3.1-pro-high
+        - gemini-3.1-flash
+      timeout: 300s
+      truncation_adapter: gemini_local
+    nvidia:
+      api_key: ${NVIDIA_API_KEYS:-}
+      api_path: ""
+      base_url: ${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com}
+      default_model: z-ai/glm-5.1
+      enabled: true
+      forward_url: /v1/chat/completions
+      max_tokens_limit: 10000
+      # model_mappings:
+      #     '*': z-ai/glm-5.1
+      protocol: openai
+      support_types:
+        - openai
+        - anthropic
+        - codex
+      supported_models:
+        - z-ai/glm4.7
+        - z-ai/glm5
+        - z-ai/glm-5.1
+      timeout: 300s
+      truncation_adapter: openai_local
+  proxy:
+    enabled: ${PROXY_ENABLED:-false}
+    http: ${HTTP_PROXY:-http://127.0.0.1:10810}
+    https: ${HTTPS_PROXY:-http://127.0.0.1:10810}
+    no_proxy: ${NO_PROXY:-localhost,127.0.0.1}
+  sse_heartbeat:
+    check_interval: ${SSE_HEARTBEAT_CHECK_INTERVAL:-10s}
+    enabled: ${SSE_HEARTBEAT_ENABLED:-true}
+    heartbeat_comment: '${SSE_HEARTBEAT_COMMENT:-: heartbeat}'
+    send_heartbeat: ${SSE_SEND_HEARTBEAT:-true}
+    timeout: ${SSE_HEARTBEAT_TIMEOUT:-2m}
+  timeout: 300s
+rate_limit:
+  algorithm: ${RATE_LIMIT_ALGORITHM:-token_bucket}
+  api_key_limits:
+    - api_key_pattern: sk-
+      block_duration: 60s
+      qpd: 100000
+      qpm: 600
+      qps: 10
+    - api_key_pattern: sk-ant-
+      block_duration: 60s
+      qpd: 150000
+      qpm: 900
+      qps: 15
+    - api_key_pattern: nvapi-
+      block_duration: 60s
+      qpd: 200000
+      qpm: 1200
+      qps: 20
+  default_limits:
+    daily_tokens: ${RATE_LIMIT_DAILY_TOKENS:-1000000}
+    monthly_tokens: ${RATE_LIMIT_MONTHLY_TOKENS:-30000000}
+    qps: ${RATE_LIMIT_QPS:-10}
+    tpm: ${RATE_LIMIT_TPM:-10000}
+  enabled: ${RATE_LIMIT_ENABLED:-false}
+  global_limits:
+    global_daily_tokens: ${RATE_LIMIT_GLOBAL_DAILY_TOKENS:-100000000}
+    global_monthly_tokens: ${RATE_LIMIT_GLOBAL_MONTHLY_TOKENS:-3000000000}
+    global_qps: ${RATE_LIMIT_GLOBAL_QPS:-1000}
+    global_tpm: ${RATE_LIMIT_GLOBAL_TPM:-1000000}
+  path_limits:
+    /v1/audio/speech:
+      burst: 20
+      requests_per_minute: 100
+    /v1/audio/transcriptions:
+      burst: 10
+      requests_per_minute: 50
+    /v1/audio/translations:
+      burst: 10
+      requests_per_minute: 50
+    /v1/images/edits:
+      burst: 5
+      requests_per_minute: 30
+    /v1/images/generations:
+      burst: 5
+      requests_per_minute: 30
+    /v1/images/variations:
+      burst: 5
+      requests_per_minute: 30
+    /v1/realtime:
+      burst: 10
+      requests_per_minute: 60
+    /v1/rerank:
+      burst: 50
+      requests_per_minute: 200
+    /v1/responses:
+      burst: 15
+      requests_per_minute: 60
+  storage: ${RATE_LIMIT_STORAGE:-memory}
+redis:
+  addr: ${REDIS_ADDR:-localhost:6379}
+  db: ${REDIS_DB:-0}
+  dial_timeout: 5
+  enabled: ${REDIS_ENABLED:-false}
+  min_idle_conns: 10
+  password: ${REDIS_PASSWORD:-}
+  pool_size: 100
+  read_timeout: 3
+  write_timeout: 3
+resource_manager:
+  cross_provider_key_selection: ${CROSS_PROVIDER_KEY_SELECTION:-true}
+  default_group_algorithm: tiered
+  default_key_algorithm: health_based
+  default_provider_algorithm: round_robin
+  enable_stats: ${RESOURCE_MANAGER_ENABLE_STATS:-true}
+  enabled: ${RESOURCE_MANAGER_ENABLED:-true}
+  health_check:
+    auto_recovery: ${RESOURCE_MANAGER_AUTO_RECOVERY:-true}
+    enabled: ${RESOURCE_MANAGER_HEALTH_CHECK_ENABLED:-true}
+    interval: ${RESOURCE_MANAGER_HEALTH_CHECK_INTERVAL:-60s}
+    recovery_threshold: ${RESOURCE_MANAGER_RECOVERY_THRESHOLD:-0.90}
+  stats_retention: ${RESOURCE_MANAGER_STATS_RETENTION:-24h}
+retry:
+  default_backoff_multiplier: 2
+  default_max_retries: ${RETRY_DEFAULT_MAX_RETRIES:-3}
+  default_retry_delay_ms: ${RETRY_DEFAULT_DELAY_MS:-1000}
+  enabled: ${RETRY_ENABLED:-true}
+  enhanced_strategy:
+    enabled: ${ENHANCED_STRATEGY_ENABLED:-true}
+    fallback_threshold: 4
+    primary_min_score: 40
+    secondary_excluded_score: 10
+    secondary_threshold: 2
+  invalid_encrypted_content_recovery:
+    strip_client_state_once: ${RETRY_INVALID_ENCRYPTED_CONTENT_STRIP_CLIENT_STATE_ONCE:-false}
+  rules:
+    - backoff_multiplier: 1.5
+      description: SSE 空流响应自动重试（只有 ping/waiting 事件）
+      enabled: true
+      keyword:
+        case_sensitive: false
+        values:
+          - empty_stream_response
+          - only ping events
+      max_retries: 3
+      name: empty_stream_response
+      retry_delay_ms: 2000
+    - backoff_multiplier: 1.5
+      description: SSE 流式响应心跳超时自动重试
+      enabled: true
+      keyword:
+        case_sensitive: false
+        values:
+          - heartbeat timeout
+      max_retries: 3
+      name: sse_heartbeat_timeout
+      retry_delay_ms: 5000
+    - backoff_multiplier: 2
+      description: Codex 流式响应在 response.completed 前断开时自动重试
+      enabled: true
+      error_code:
+        codes:
+          - request_timeout
+      keyword:
+        case_sensitive: false
+        values:
+          - stream disconnected before completion
+          - stream closed before response.completed
+          - request timeout
+      max_retries: 3
+      name: codex_request_timeout_retry
+      retry_delay_ms: 1000
+    - backoff_multiplier: 2
+      description: HTTP 5xx 服务器错误重试
+      enabled: true
+      max_retries: 3
+      name: http_5xx_retry
+      retry_delay_ms: 1000
+      status_code:
+        range: 500-504
+    - backoff_multiplier: 1.5
+      description: 上下文长度超限自动重试（触发截断逻辑）
+      enabled: true
+      error_code:
+        pattern: ^13.*
+      max_retries: 5
+      name: context_limit_retry
+      retry_delay_ms: 500
+    - backoff_multiplier: 2
+      description: 速率限制错误重试（429 Too Many Requests）
+      enabled: true
+      error_code:
+        codes:
+          - "1302"
+          - rate_limit_exceeded
+          - slow_down
+      keyword:
+        case_sensitive: false
+        patterns:
+          - (?i)(rate.?limit|限流|频率限制)
+          - (?i)(too.?many.?requests|请求过多)
+          - (?i)(quota.?exceeded|配额超限)
+          - (?i)(api.?calls?.?(limit|exceeded)|API调用限制)
+        values:
+          - rate limit
+          - too many requests
+          - 速率限制
+          - 限流
+          - 频率限制
+      max_retries: 10
+      name: rate_limit_retry
+      retry_delay_ms: 2000
+routing:
+  failover: true
+  routes:
+    - group: openai_group
+      match_path: /v1/chat
+      match_type: prefix
+    - group: anthropic_group
+      match_models:
+        - claude-opus-4-6
+      match_path: /v1/messages
+      match_type: prefix
+    - exclude_models:
+        - claude-opus-4-6
+      group: anthropic_group_second
+      match_path: /v1/messages
+      match_type: prefix
+    - group: openai_group
+      match_path: /v1/debug/chat
+      match_type: prefix
+    - group: anthropic_group
+      match_path: /v1/debug/messages
+      match_type: prefix
+    - group: openai_group
+      match_path: /v1/completions
+      match_type: exact
+    - group: openai_group
+      match_path: /v1/embeddings
+      match_type: exact
+    - group: codex_group
+      match_path: /v1/responses
+      match_type: prefix
+      priority: 10
+      protocol: codex
+    - group: codex_group_54
+      match_models:
+        - gpt-5.4
+      match_path: /v1/responses
+      match_type: prefix
+      priority: 10
+      protocol: codex
+    - group: gemini_group
+      match_path: /v1beta
+      match_type: prefix
+    - group: openai_group
+      match_path: /v1/audio/speech
+      match_type: exact
+    - group: openai_group
+      match_path: /v1/audio/transcriptions
+      match_type: exact
+    - group: openai_group
+      match_path: /v1/audio/translations
+      match_type: exact
+    - group: openai_group
+      match_path: /v1/images/generations
+      match_type: exact
+    - group: openai_group
+      match_path: /v1/images/edits
+      match_type: exact
+    - group: openai_group
+      match_path: /v1/images/variations
+      match_type: exact
+  strategy: health
+server:
+  admin_host: ${SERVER_ADMIN_HOST:-127.0.0.1}
+  admin_port: ${SERVER_ADMIN_PORT:-8101}
+  development: ${SERVER_DEVELOPMENT:-true}
+  graceful_stop: true
+  host: ${SERVER_HOST:-0.0.0.0}
+  idle_timeout: ${SERVER_IDLE_TIMEOUT:-60s}
+  name: ai-gateway
+  port: ${SERVER_PORT:-8101}
+  read_timeout: 60s
+  shutdown_time: 30s
+  write_timeout: 300s
+skills_runtime:
+  admin_roles: []
+  admin_token: ${SKILLS_RUNTIME_ADMIN_TOKEN:-}
+  aicli_skill_exposure_mode: ${SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_MODE:-auto}
+  aicli_skill_exposure_top_k: ${SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_TOP_K:-5}
+  api_key_scopes: {}
+  config_file: ${SKILLS_RUNTIME_CONFIG_FILE:-backend/configs/runtime.yaml}
+  default_max_requests: ${SKILLS_RUNTIME_DEFAULT_MAX_REQUESTS:-0}
+  default_max_tokens: ${SKILLS_RUNTIME_DEFAULT_MAX_TOKENS:-0}
+  disable_hot_reload_ops: ${SKILLS_RUNTIME_DISABLE_HOT_RELOAD_OPS:-false}
+  disable_import: ${SKILLS_RUNTIME_DISABLE_IMPORT:-false}
+  disable_persist: ${SKILLS_RUNTIME_DISABLE_PERSIST:-false}
+  disable_reload_ops: ${SKILLS_RUNTIME_DISABLE_RELOAD_OPS:-false}
+  enabled: ${SKILLS_RUNTIME_ENABLED:-true}
+  extra_skill_dirs: []
+  gateway_provider_name: ${SKILLS_RUNTIME_GATEWAY_PROVIDER_NAME:-gateway}
+  jwt_claims_enabled: ${SKILLS_RUNTIME_JWT_CLAIMS_ENABLED:-false}
+  project_claims:
+    - project_id
+    - project
+    - pid
+  project_headers:
+    - X-Skills-Project
+    - X-Skills-Auth-Project
+    - X-Project-ID
+    - X-Authenticated-Project
+  quota_enabled: ${SKILLS_RUNTIME_QUOTA_ENABLED:-false}
+  quota_policies:
+    projects: {}
+    tenants: {}
+    users: {}
+  read_only: ${SKILLS_RUNTIME_READ_ONLY:-false}
+  reindex_cooldown: ${SKILLS_RUNTIME_REINDEX_COOLDOWN:-30s}
+  role_claims:
+    - role
+    - roles
+  role_headers:
+    - X-Skills-Role
+    - X-Skills-Auth-Role
+    - X-Role
+    - X-Authenticated-Role
+  scope_resolver_enabled: ${SKILLS_RUNTIME_SCOPE_RESOLVER_ENABLED:-true}
+  skill_dir: ${SKILLS_RUNTIME_SKILL_DIR:-./.agents/skills}
+  tenant_claims:
+    - tenant_id
+    - tenant
+    - tid
+  tenant_headers:
+    - X-Skills-Tenant
+    - X-Skills-Auth-Tenant
+    - X-Tenant-ID
+    - X-Authenticated-Tenant
+  usage_ledger_enabled: ${SKILLS_RUNTIME_USAGE_LEDGER_ENABLED:-false}
+  usage_tracking_enabled: ${SKILLS_RUNTIME_USAGE_TRACKING_ENABLED:-true}
+  user_claims:
+    - user_id
+    - user
+    - uid
+    - sub
+  user_headers:
+    - X-Skills-User
+    - X-Skills-Auth-User
+    - X-User-ID
+    - X-Authenticated-User
+special_apis:
+  logging:
+    enabled: ${SPECIAL_APIS_LOGGING_ENABLED:-true}
+    log_headers: true
+    log_request: true
+    log_request_payload: ${SPECIAL_APIS_LOG_REQUEST_PAYLOAD:-false}
+    log_response: true
+    log_response_payload: ${SPECIAL_APIS_LOG_RESPONSE_PAYLOAD:-false}
+    max_payload_size: ${SPECIAL_APIS_LOG_MAX_PAYLOAD_SIZE:-4096}
+    sensitive_headers:
+      - authorization
+      - x-api-key
+      - cookie
+      - set-cookie
+  metrics:
+    enabled: ${SPECIAL_APIS_METRICS_ENABLED:-true}
+    namespace: ai_gateway
+    subsystem: special_apis
+transformer:
+  body_modifiers:
+    request: null
+    response: null
+  cache_adapters: ${TRANSFORMER_CACHE_ADAPTERS:-true}
+  high_perf: ${TRANSFORMER_HIGH_PERF:-true}
+  http_transform_stage_enabled: ${TRANSFORMER_HTTP_TRANSFORM_STAGE_ENABLED:-true}
+  stream_null_filter: ${TRANSFORMER_STREAM_NULL_FILTER:-true}
+vendors:
+  enabled: false
+  vendors: []
+websocket:
+  enabled: true
+  realtime:
+    capacity:
+      max_active_connections: 0
+    failover_on_handshake_error: true
+    handshake_max_retries: 1
+    ingress_enabled: true
+    metrics:
+      close_code_labels_enabled: true
+      enabled: true
+  responses:
+    affinity_ttl: 65m
+    allow_passthrough_only: false
+    capacity:
+      max_active_connections: 0
+    compat_bridge_enabled: false
+    compat_bridge_source_protocols: []
+    connection_pooling_enabled: true
+    failover_on_handshake_error: true
+    handshake_max_retries: 2
+    http_bridge_enabled: false
+    ingress_enabled: true
+    metrics:
+      close_code_labels_enabled: true
+      enabled: true
+    pre_first_event_retry_once: true
