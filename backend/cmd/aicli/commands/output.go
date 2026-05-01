@@ -1,15 +1,36 @@
 package commands
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 )
+
+var (
+	exitCleanupMu sync.Mutex
+	exitCleanupFn func()
+)
+
+func registerExitCleanup(cleanup func()) {
+	exitCleanupMu.Lock()
+	defer exitCleanupMu.Unlock()
+	exitCleanupFn = cleanup
+}
+
+func runExitCleanup() {
+	exitCleanupMu.Lock()
+	cleanup := exitCleanupFn
+	exitCleanupFn = nil
+	exitCleanupMu.Unlock()
+	if cleanup != nil {
+		cleanup()
+	}
+}
 
 func normalizeOutputFormat(raw string, fallback string, allowed ...string) (string, error) {
 	value := strings.ToLower(strings.TrimSpace(raw))
@@ -189,39 +210,10 @@ func emitCommandError(command, outputFormat string, err error, details map[strin
 
 func exitCommandError(command, outputFormat string, err error, details map[string]interface{}) {
 	emitCommandError(command, outputFormat, err, details)
+	runExitCleanup()
 	os.Exit(1)
 }
 
 func extractUsageFromAnyResponseBody(raw []byte) map[string]interface{} {
-	if usage := extractUsageFromResponseBody(raw); len(usage) > 0 {
-		return usage
-	}
-
-	scanner := bufio.NewScanner(bytes.NewReader(raw))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
-		if data == "" || data == "[DONE]" || !json.Valid([]byte(data)) {
-			continue
-		}
-
-		var payload map[string]interface{}
-		if err := json.Unmarshal([]byte(data), &payload); err != nil {
-			continue
-		}
-
-		if usage, ok := payload["usage"].(map[string]interface{}); ok && len(usage) > 0 {
-			return usage
-		}
-		if response, ok := payload["response"].(map[string]interface{}); ok {
-			if usage, ok := response["usage"].(map[string]interface{}); ok && len(usage) > 0 {
-				return usage
-			}
-		}
-	}
-
-	return nil
+	return runtimellm.TokenUsageToMap(runtimellm.ExtractTokenUsageFromResponseBody(raw))
 }

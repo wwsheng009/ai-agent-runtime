@@ -115,7 +115,7 @@ func TestExtractUsageFromAnyResponseBody(t *testing.T) {
 	sse := []byte("event: response.completed\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"total_tokens\":32}}}\n")
 	usage := extractUsageFromAnyResponseBody(sse)
-	if usage == nil || usage["total_tokens"] != float64(32) {
+	if usage == nil || usage["total_tokens"] != 32 {
 		t.Fatalf("unexpected usage from sse: %#v", usage)
 	}
 }
