@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -10,10 +9,10 @@ import (
 
 // StatusItem 状态栏的一项
 type StatusItem struct {
-	Key   string      // 键名
-	Value interface{} // 值
+	Key   string              // 键名
+	Value interface{}         // 值
 	Color func(string) string // 颜色函数
-	Width int         // 最小宽度
+	Width int                 // 最小宽度
 }
 
 // StatusBar 状态栏组件
@@ -21,8 +20,8 @@ type StatusBar struct {
 	terminal *Terminal
 	theme    *Theme
 	items    []*StatusItem
-	row      int    // 状态栏所在的行号
-	height   int    // 状态栏高度
+	row      int // 状态栏所在的行号
+	height   int // 状态栏高度
 	mu       sync.RWMutex
 	force    bool // 是否强制刷新
 }
@@ -154,12 +153,10 @@ func (s *StatusBar) Render() {
 	// 保存当前光标位置
 	s.terminal.SaveCursor()
 
-	// 移动到状态栏位置
-	s.terminal.ClearFromCursorToEnd() // 清除状态栏区域到屏幕底部
-
 	// 计算每个项目的显示
 	for i := 0; i < s.height; i++ {
-		s.terminal.MoveToRow(s.row + i)
+		s.terminal.MoveTo(s.row+i, 1)
+		s.terminal.ClearLine()
 
 		if i < len(s.items) {
 			item := s.items[i]
@@ -179,7 +176,7 @@ func (s *StatusBar) Render() {
 
 			fmt.Print(display)
 		}
-		fmt.Print("\033[K") // 清除到行尾
+		s.terminal.ClearLine()
 	}
 
 	// 恢复光标位置
@@ -200,9 +197,8 @@ func (s *StatusBar) RenderWithLayout() bool {
 	// 清除状态栏区域
 	s.terminal.SaveCursor()
 	for i := 0; i < s.height; i++ {
-		s.terminal.MoveToRow(row + i)
-		s.terminal.ClearFromCursor()
-		fmt.Print("\033[K")
+		s.terminal.MoveTo(row+i, 1)
+		s.terminal.ClearLine()
 	}
 
 	// 构建状态行
@@ -248,8 +244,8 @@ func (s *StatusBar) RenderSimple() {
 	s.terminal.SaveCursor()
 
 	// 清除并移动到状态栏行
-	s.terminal.MoveToRow(s.row)
-	s.terminal.ClearFromCursor()
+	s.terminal.MoveTo(s.row, 1)
+	s.terminal.ClearLine()
 
 	// 构建显示字符串
 	var parts []string
@@ -264,7 +260,7 @@ func (s *StatusBar) RenderSimple() {
 
 	line := strings.Join(parts, " | ")
 	fmt.Print(line)
-	fmt.Print("\033[K") // 清除到行尾
+	s.terminal.ClearLine()
 
 	// 恢复光标
 	s.terminal.RestoreCursor()
@@ -330,21 +326,16 @@ func (s *StatusBar) WithDefaultStatus() *StatusBar {
 
 // WithAIThinking 设置 AI 思考状态
 func (s *StatusBar) WithAIThinking(thinking bool) *StatusBar {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if thinking {
 		warnColor := s.theme.WarningColor
-		s.Update("Status", "Thinking...", func(text string) string {
+		return s.Update("Status", "Thinking...", func(text string) string {
 			return warnColor.Sprint(text)
 		})
-	} else {
-		successColor := s.theme.SuccessColor
-		s.Update("Status", "Ready", func(text string) string {
-			return successColor.Sprint(text)
-		})
 	}
-	return s
+	successColor := s.theme.SuccessColor
+	return s.Update("Status", "Ready", func(text string) string {
+		return successColor.Sprint(text)
+	})
 }
 
 // RenderIfChanged 如果内容有变化则渲染
@@ -435,53 +426,14 @@ func (s *StatusBar) SetStreamMode(enabled bool) *StatusBar {
 
 // SetThinking 设置 AI 思考状态
 func (s *StatusBar) SetThinking(thinking bool) *StatusBar {
-	// 获取状态值用于打印
-	var model, streamMode string
-	var tokens, msgCount int
-	var statusText string
-
-	s.mu.RLock()
-	model = s.GetModel()
-	tokens = s.GetTokens()
-	msgCount = s.GetMsgCount()
-
-	// 获取 Stream 状态
-	for _, item := range s.items {
-		if item.Key == "Stream" {
-			streamMode = formatValue(item.Value)
-			if item.Color != nil {
-				streamMode = item.Color(streamMode)
-			}
-			break
-		}
-	}
-	s.mu.RUnlock()
-
-	// 更新状态
 	if thinking {
 		warnColor := s.theme.WarningColor
-		s.Update("Status", "Thinking...", func(text string) string {
+		return s.Update("Status", "Thinking...", func(text string) string {
 			return warnColor.Sprint(text)
 		})
-		statusText = "Thinking..."
-
-		// 使用 \r 回到行首在同一行更新状态
-		fmt.Fprintf(os.Stderr, "\r[状态] %s Tokens:%d Msgs:%d %v Stream:%s",
-			model, tokens, msgCount, warnColor.Sprint("Status:"+statusText), streamMode)
-	} else {
-		successColor := s.theme.SuccessColor
-		s.Update("Status", "Ready", func(text string) string {
-			return successColor.Sprint(text)
-		})
-		statusText = "Ready"
-
-		// 使用 \r 回到行首在同一行更新状态
-		fmt.Fprintf(os.Stderr, "\r[状态] %s Tokens:%d Msgs:%d %v Stream:%s",
-			model, tokens, msgCount, successColor.Sprint("Status:"+statusText), streamMode)
 	}
-
-	return s
+	successColor := s.theme.SuccessColor
+	return s.Update("Status", "Ready", func(text string) string {
+		return successColor.Sprint(text)
+	})
 }
-
-
-
