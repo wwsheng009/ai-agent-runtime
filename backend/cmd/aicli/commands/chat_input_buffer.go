@@ -74,18 +74,30 @@ func discardPendingInteractiveInputForPriorityPrompt(session *ChatSession, promp
 	return "[input] 检测到之前排队的输入内容；为避免误用，已在" + promptKind + "前丢弃这些输入。"
 }
 
-// notifyChatInputDraftState 只保留状态钩子，不向终端输出任何提示。
-// 多行粘贴进入 draft 后，用户应保持在当前输入流程中，直到按 Enter 确认提交。
-func notifyChatInputDraftState(session *ChatSession, active bool, lines int) {
-	if session == nil || session.Interaction == nil {
+// notifyChatInputDraftState 通过 surface 展示 pending paste preview；
+// 没有 surface 时才回退到旧的状态栏提示。
+func notifyChatInputDraftState(session *ChatSession, active bool, lines int, text string) {
+	if session == nil {
 		return
 	}
 	if active {
 		if lines < 1 {
 			lines = 1
 		}
-		session.Interaction.RefreshStatus(fmt.Sprintf("Paste draft %d lines", lines))
+		if session.Surface != nil && session.Surface.Enabled() {
+			session.Surface.ShowPendingPastePreview(lines, text)
+			return
+		}
+		if session.Interaction != nil {
+			session.Interaction.RefreshStatus(fmt.Sprintf("Paste draft %d lines", lines))
+		}
 		return
 	}
-	session.Interaction.RefreshStatus("")
+	if session.Surface != nil && session.Surface.Enabled() {
+		session.Surface.ClearPendingPastePreview()
+		return
+	}
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
 }

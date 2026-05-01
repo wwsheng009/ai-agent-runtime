@@ -256,6 +256,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		return nil, fmt.Errorf("模型输出在工具调用前被 token 限制截断，请缩短写入内容后重试")
 	}
 
+	usage := tokenUsageFromResponse(assistantMsg, responseBody)
 	if session.Logger != nil && session.Logger.logDir != "" {
 		logContent := map[string]interface{}{"streamed": req.Stream}
 		if content != "" {
@@ -267,8 +268,8 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		if hasToolCalls {
 			logContent["tool_calls"] = rawToolCalls
 		}
-		if usage := extractUsageFromResponseBody(responseBody); len(usage) > 0 {
-			logContent["usage"] = usage
+		if usageMap := runtimellm.TokenUsageToMap(usage); len(usageMap) > 0 {
+			logContent["usage"] = usageMap
 		}
 		if session.HTTPDebug && httpReport != nil {
 			logContent["http_debug"] = httpReport
@@ -284,13 +285,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		runtimeMessage.Metadata.Set(chatcoreReasoningMetadataKey, reasoning)
 	}
 
-	usage := tokenUsageFromResponseBody(responseBody)
-	if usage != nil && usage.TotalTokens > 0 {
-		session.TokenCount += usage.TotalTokens
-		if session.Interaction != nil {
-			session.Interaction.RefreshStatus("")
-		}
-	}
+	applyChatTokenUsage(session, usage)
 
 	return &runtimechatcore.ProviderTurnResponse{
 		Message: &runtimeMessage,
@@ -390,27 +385,12 @@ func adapterAdapterConfig(session *ChatSession) adapter.AdapterConfig {
 	}
 }
 
-func tokenUsageFromResponseBody(raw []byte) *runtimetypes.TokenUsage {
-	usage := extractUsageFromResponseBody(raw)
-	if len(usage) == 0 {
-		return nil
+func tokenUsageFromResponse(assistantMsg map[string]interface{}, raw []byte) *runtimetypes.TokenUsage {
+	if usage := runtimellm.ExtractTokenUsageFromResponseBody(raw); usage != nil {
+		return usage
 	}
-	result := &runtimetypes.TokenUsage{}
-	if value, ok := usage["input_tokens"].(float64); ok {
-		result.PromptTokens = int(value)
-	} else if value, ok := usage["prompt_tokens"].(float64); ok {
-		result.PromptTokens = int(value)
+	if usage := runtimellm.ExtractTokenUsageFromValue(assistantMsg["usage"]); usage != nil {
+		return usage
 	}
-	if value, ok := usage["output_tokens"].(float64); ok {
-		result.CompletionTokens = int(value)
-	} else if value, ok := usage["completion_tokens"].(float64); ok {
-		result.CompletionTokens = int(value)
-	}
-	if value, ok := usage["total_tokens"].(float64); ok {
-		result.TotalTokens = int(value)
-	}
-	if result.TotalTokens == 0 {
-		result.TotalTokens = result.PromptTokens + result.CompletionTokens
-	}
-	return result
+	return nil
 }

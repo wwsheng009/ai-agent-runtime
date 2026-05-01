@@ -85,6 +85,10 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
 		return "", err
 	}
+	if result != nil {
+		applyChatTokenUsage(session, result.Usage)
+	}
+	warnIfChatSessionSyncFails(session, "actor usage sync", syncRuntimeSessionFromChat(session))
 	warnIfChatSessionSyncFails(session, "actor team lifecycle sync", syncAmbientTeamLifecycleState(session))
 	if result == nil {
 		return "", nil

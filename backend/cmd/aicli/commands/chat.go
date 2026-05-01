@@ -221,9 +221,9 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	if err != nil {
 		exitCommandError("chat", opts.OutputFormat, err, nil)
 	}
-	if cleanupSession != nil {
-		defer cleanupSession()
-	}
+	finalCleanup := buildChatFinalCleanup(session, cleanupSession)
+	registerExitCleanup(finalCleanup)
+	defer runExitCleanup()
 
 	presentChatSession(session)
 	if persistenceState.loadedRuntimeSession != nil && shouldPrintChatSessionPreamble(session) && hasVisibleChatHistory(session) {
@@ -730,7 +730,7 @@ func renderChatResponse(session *ChatSession, response string) {
 func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string) {
 	if !noInteractive {
 		if shouldUseInteractiveLineEditor(session) {
-			// Unix TTY 场景使用逐键 line editor，不再走按行队列。
+			// 交互 TTY 场景使用逐键 line editor，不再走按行队列。
 			session.InputQueue = nil
 		} else {
 			ensureChatInputQueue(session)

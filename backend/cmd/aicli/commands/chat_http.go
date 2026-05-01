@@ -3,7 +3,6 @@ package commands
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 )
 
 const (
@@ -362,20 +363,7 @@ func sanitizeHeadersForDebug(header http.Header) map[string][]string {
 }
 
 func extractUsageFromResponseBody(raw []byte) map[string]interface{} {
-	if len(raw) == 0 || !json.Valid(raw) {
-		return nil
-	}
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil
-	}
-
-	usage, _ := payload["usage"].(map[string]interface{})
-	if len(usage) == 0 {
-		return nil
-	}
-	return usage
+	return runtimellm.TokenUsageToMap(runtimellm.ExtractTokenUsageFromResponseBody(raw))
 }
 
 func redactAuthorizationValue(value string) string {
