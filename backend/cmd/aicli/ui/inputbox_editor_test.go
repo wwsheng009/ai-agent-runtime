@@ -164,6 +164,57 @@ func TestReadInteractiveLine_CtrlPNavigateHistory(t *testing.T) {
 	}
 }
 
+func TestReadInteractiveLine_AltBMovesBackwardByWord(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("hello world\x1bbX\n"),
+		&output,
+		"你> ",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != "hello Xworld" {
+		t.Fatalf("expected alt+b to move backward by word, got %q", line)
+	}
+}
+
+func TestReadInteractiveLine_AltBackspaceDeletesPreviousWord(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("hello world\x1b\x7fX\n"),
+		&output,
+		"你> ",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != "hello X" {
+		t.Fatalf("expected alt+backspace to delete the previous word, got %q", line)
+	}
+}
+
+func TestReadInteractiveLine_CtrlArrowMovesByWord(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("hello world\x1b[1;5D\x1b[1;5CX\n"),
+		&output,
+		"你> ",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != "hello worldX" {
+		t.Fatalf("expected ctrl+arrow word movement to preserve the word boundary, got %q", line)
+	}
+}
+
 func TestReadInteractiveLine_CtrlGAbortsReverseSearchAndRestoresDraft(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLine(
