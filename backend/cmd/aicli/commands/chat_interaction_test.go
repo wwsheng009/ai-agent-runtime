@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,7 +51,7 @@ func TestChatInteractionCoordinator_RendersPromptAndAsyncLineOnSameWriter(t *tes
 	coord.RenderAsyncLine("[task] started task-1 @planner")
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "你> ") {
+	if !strings.Contains(rendered, ui.UserPromptText(0)) {
 		t.Fatalf("expected prompt in output, got %q", rendered)
 	}
 	if !strings.Contains(rendered, ui.FormatAssistantSupplementBlock("[task] started task-1 @planner")) {
@@ -76,7 +77,7 @@ func TestChatInteractionCoordinator_RenderAsyncLineClearsVisiblePromptInInteract
 	coord.RenderAsyncLine("[tool] view")
 
 	rendered := output.String()
-	if strings.Contains(rendered, "你> ") {
+	if strings.Contains(rendered, ui.UserPromptText(0)) {
 		t.Fatalf("expected prompt to be cleared before async line, got %q", rendered)
 	}
 	if !strings.Contains(rendered, strings.TrimRight(ui.FormatAssistantSupplementBlock("[tool] view"), " ")) {
@@ -150,7 +151,7 @@ func TestNotifyChatInputDraftState_IsSilent(t *testing.T) {
 	coord.SetWriter(output)
 	session.Interaction = coord
 
-	notifyChatInputDraftState(session, true, 2)
+	notifyChatInputDraftState(session, true, 2, "first\nsecond")
 
 	rendered := output.String()
 	if rendered != "" {
@@ -213,7 +214,7 @@ func TestChatSession_InterruptClearsPromptAndDraftState(t *testing.T) {
 	session.InputQueue.stageDraft("first\nsecond")
 
 	coord.PrintPrompt()
-	if !strings.Contains(output.String(), "你> ") {
+	if !strings.Contains(output.String(), ui.UserPromptText(0)) {
 		t.Fatalf("expected initial prompt to render, got %q", output.String())
 	}
 
@@ -238,7 +239,7 @@ func TestChatSession_InterruptClearsPromptAndDraftState(t *testing.T) {
 	}
 
 	coord.PrintPrompt()
-	if strings.Count(output.String(), "你> ") != 2 {
+	if strings.Count(output.String(), ui.UserPromptText(0)) != 2 {
 		t.Fatalf("expected prompt to be redrawn after interrupt, got %q", output.String())
 	}
 }
@@ -307,7 +308,7 @@ func TestChatInteractionCoordinator_PrintPromptSuppressesWhileActiveTeamRunning(
 		t.Fatalf("UpdateTeamStatus: %v", err)
 	}
 	coord.PrintPrompt()
-	if !strings.Contains(output.String(), "你> ") {
+	if !strings.Contains(output.String(), ui.UserPromptText(0)) {
 		t.Fatalf("expected prompt after team completion, got %q", output.String())
 	}
 }
@@ -357,7 +358,7 @@ func TestChatInteractionCoordinator_PrintPromptUsesAmbientRuntimeTeamBinding(t *
 
 	require.NoError(t, store.UpdateTeamStatus(context.Background(), teamID, team.TeamStatusDone))
 	coord.PrintPrompt()
-	if !strings.Contains(output.String(), "你> ") {
+	if !strings.Contains(output.String(), ui.UserPromptText(0)) {
 		t.Fatalf("expected prompt after ambient runtime team completion, got %q", output.String())
 	}
 }
@@ -396,7 +397,7 @@ func TestChatInteractionCoordinator_PrintPromptUsesTeamStoreLeadBindingFallback(
 
 	require.NoError(t, store.UpdateTeamStatus(context.Background(), teamID, team.TeamStatusDone))
 	coord.PrintPrompt()
-	if !strings.Contains(output.String(), "你> ") {
+	if !strings.Contains(output.String(), ui.UserPromptText(0)) {
 		t.Fatalf("expected prompt after team-store fallback completion, got %q", output.String())
 	}
 }
@@ -745,7 +746,7 @@ func TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt(t *testing.T)
 	if !strings.Contains(rendered, "现将优先处理这些输入") {
 		t.Fatalf("expected queued-input notice, got %q", rendered)
 	}
-	if strings.Contains(rendered, "你> ") {
+	if strings.Contains(rendered, ui.UserPromptText(0)) {
 		t.Fatalf("expected no prompt before queued lines drain, got %q", rendered)
 	}
 }
@@ -830,6 +831,98 @@ func TestChatInteractionCoordinator_ClearPromptAdvancesLineForBufferedWriters(t 
 	}
 }
 
+func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirectory(t *testing.T) {
+	previousWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	workspaceRoot := t.TempDir()
+	nested := filepath.Join(workspaceRoot, "alpha", "beta", "gamma", "delta", "epsilon")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("os.MkdirAll: %v", err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatalf("os.Chdir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(previousWD)
+	}()
+
+	session := &ChatSession{
+		Model:           "gpt-5.4-code",
+		ReasoningEffort: "HIGH",
+		ProviderName:    "openai",
+		MsgCount:        17,
+		TokenCount:      123456,
+		Provider: config.Provider{
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"gpt-5.4-code": {
+					MaxContextTokens:      128000,
+					AutoCompactTokenLimit: 96000,
+				},
+			},
+		},
+	}
+
+	status := buildChatSurfaceStatusLine(session, "Thinking")
+
+	for _, want := range []string{
+		"Thinking",
+		"model gpt-5.4-code",
+		"thinking_effort " + runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort),
+		"ctx 128000 used 123456 96%",
+		"openai",
+		"msgs 17",
+	} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("expected status line to contain %q, got %q", want, status)
+		}
+	}
+	if strings.Contains(status, "tokens ") {
+		t.Fatalf("expected status line to omit duplicate tokens field, got %q", status)
+	}
+	if !strings.Contains(status, "cwd ") || !strings.Contains(status, "...") {
+		t.Fatalf("expected cwd to be shortened in status line, got %q", status)
+	}
+	if strings.Contains(status, workspaceRoot) {
+		t.Fatalf("expected cwd to be shortened, got %q", status)
+	}
+}
+
+func TestResolveChatStatusCurrentDirectory_UsesProfileRootWhenPresent(t *testing.T) {
+	previousWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	baseDir := t.TempDir()
+	if err := os.Chdir(baseDir); err != nil {
+		t.Fatalf("os.Chdir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(previousWD)
+	}()
+
+	session := &ChatSession{ProfileRoot: filepath.Join("profiles", "demo")}
+	got := resolveChatStatusCurrentDirectory(session)
+	want := filepath.Clean(filepath.Join(baseDir, "profiles", "demo"))
+	if got != want {
+		t.Fatalf("expected current directory %q, got %q", want, got)
+	}
+}
+
+func TestCompactStatusPath_PreservesTailSegments(t *testing.T) {
+	path := filepath.Join("alpha", "beta", "gamma", "delta", "epsilon", "zeta", "theta")
+	got := compactStatusPath(path, 30)
+	if !strings.HasPrefix(got, "...") {
+		t.Fatalf("expected compact path to start with ellipsis, got %q", got)
+	}
+	for _, want := range []string{"delta", "epsilon", "zeta", "theta"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected compact path to preserve %q, got %q", want, got)
+		}
+	}
+}
+
 func TestChatInteractionCoordinator_AdvanceAfterPromptWhenStdinIsPiped(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
@@ -864,11 +957,11 @@ func TestChatInteractionCoordinator_DebouncesPromptRedraw(t *testing.T) {
 	coord.SchedulePromptRedraw()
 
 	require.Eventually(t, func() bool {
-		return strings.Count(output.String(), "你> ") == 1
+		return strings.Count(output.String(), ui.UserPromptText(0)) == 1
 	}, 200*time.Millisecond, 10*time.Millisecond)
 
 	rendered := output.String()
-	if strings.Count(rendered, "你> ") != 1 {
+	if strings.Count(rendered, ui.UserPromptText(0)) != 1 {
 		t.Fatalf("expected exactly one prompt redraw, got %q", rendered)
 	}
 }
@@ -1394,11 +1487,11 @@ func TestChatInteractionCoordinator_DoesNotRedrawPromptDuringStreaming(t *testin
 	coord.SchedulePromptRedraw()
 
 	require.Never(t, func() bool {
-		return strings.Contains(output.String(), "你> ")
+		return strings.Contains(output.String(), ui.UserPromptText(0))
 	}, 80*time.Millisecond, 10*time.Millisecond)
 
 	rendered := output.String()
-	if strings.Contains(rendered, "你> ") {
+	if strings.Contains(rendered, ui.UserPromptText(0)) {
 		t.Fatalf("expected no prompt redraw during active stream, got %q", rendered)
 	}
 
@@ -1406,11 +1499,11 @@ func TestChatInteractionCoordinator_DoesNotRedrawPromptDuringStreaming(t *testin
 	coord.SchedulePromptRedraw()
 
 	require.Eventually(t, func() bool {
-		return strings.Count(output.String(), "你> ") == 1
+		return strings.Count(output.String(), ui.UserPromptText(0)) == 1
 	}, 200*time.Millisecond, 10*time.Millisecond)
 
 	rendered = output.String()
-	if strings.Count(rendered, "你> ") != 1 {
+	if strings.Count(rendered, ui.UserPromptText(0)) != 1 {
 		t.Fatalf("expected one prompt redraw after stream finalization, got %q", rendered)
 	}
 }

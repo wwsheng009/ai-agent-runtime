@@ -3,7 +3,9 @@ package commands
 import (
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +43,7 @@ type chatInteractionCoordinator struct {
 	reasoningMeta       string
 	reasoningBuffer     strings.Builder
 	completeBlockOutput bool
+	shutdown            bool
 }
 
 func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordinator {
@@ -66,8 +69,11 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
 	c.surface = surface
-	c.updateSurfaceStatusLocked("Ready")
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 }
 
 func (c *chatInteractionCoordinator) SupportsLiveStream() bool {
@@ -76,11 +82,14 @@ func (c *chatInteractionCoordinator) SupportsLiveStream() bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.shutdown {
+		return false
+	}
 	return c.supportsLiveStreamLocked()
 }
 
 func (c *chatInteractionCoordinator) supportsLiveStreamLocked() bool {
-	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
+	if c == nil || c.shutdown || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
 		return false
 	}
 	if c.liveStreamFn != nil {
@@ -105,6 +114,9 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
 	c.promptSeq++
 	c.promptInput = ""
 	if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
@@ -127,36 +139,14 @@ func promptDisplayText(session *ChatSession) string {
 	if session != nil {
 		attachmentCount = len(session.ImagePaths)
 	}
-	if attachmentCount <= 0 {
-		return ui.GetTheme(ui.ThemeAuto).UserIcon + "你> "
-	}
-	return fmt.Sprintf("%s你> [📎%d] ", ui.GetTheme(ui.ThemeAuto).UserIcon, attachmentCount)
+	return ui.UserPromptText(attachmentCount)
 }
 
 func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
-	if c == nil || c.surface == nil {
+	if c == nil || c.surface == nil || c.shutdown {
 		return
 	}
-	state = strings.TrimSpace(state)
-	if state == "" {
-		state = "Ready"
-	}
-	parts := []string{state}
-	if c.session != nil {
-		if model := strings.TrimSpace(c.session.Model); model != "" {
-			parts = append(parts, "model "+model)
-		}
-		if provider := strings.TrimSpace(c.session.ProviderName); provider != "" {
-			parts = append(parts, provider)
-		}
-		if c.session.MsgCount > 0 {
-			parts = append(parts, fmt.Sprintf("msgs %d", c.session.MsgCount))
-		}
-		if c.session.TokenCount > 0 {
-			parts = append(parts, fmt.Sprintf("tokens %d", c.session.TokenCount))
-		}
-	}
-	c.surface.SetStatusLine(strings.Join(parts, " | "))
+	c.surface.SetStatusLine(buildChatSurfaceStatusLine(c.session, state))
 }
 
 func (c *chatInteractionCoordinator) RefreshStatus(state string) {
@@ -182,15 +172,277 @@ func (c *chatInteractionCoordinator) currentSurfaceStateLocked() string {
 	return "Ready"
 }
 
+func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		state = "Ready"
+	}
+
+	parts := make([]string, 0, 8)
+	parts = append(parts, state)
+
+	if session != nil {
+		if model := compactStatusValue(strings.TrimSpace(session.Model), 28); model != "" {
+			parts = append(parts, "model "+model)
+		}
+
+		reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
+		if reasoningEffort == "" {
+			reasoningEffort = "-"
+		}
+		parts = append(parts, "thinking_effort "+compactStatusValueOrDash(reasoningEffort, 12))
+
+		if budget := resolveSharedChatPromptBudget(session); budget.ActiveTurnMaxTokens > 0 || budget.ModelCapabilityMaxContextTokens > 0 || session.TokenCount > 0 {
+			if ctxSummary := formatChatContextWindowSummary(session, budget); ctxSummary != "" {
+				parts = append(parts, "ctx "+ctxSummary)
+			}
+		}
+
+		if cwd := resolveChatStatusCurrentDirectory(session); cwd != "" {
+			parts = append(parts, "cwd "+compactStatusPath(cwd, 28))
+		}
+
+		provider := strings.TrimSpace(session.ProviderName)
+		if provider == "" {
+			provider = strings.TrimSpace(session.Provider.GetProtocol())
+		}
+		if provider = compactStatusValue(provider, 20); provider != "" {
+			parts = append(parts, provider)
+		}
+		if session.MsgCount > 0 {
+			parts = append(parts, "msgs "+compactStatusCount(session.MsgCount))
+		}
+	}
+
+	return strings.Join(parts, " | ")
+}
+
+func resolveChatStatusCurrentDirectory(session *ChatSession) string {
+	if session != nil {
+		if root := strings.TrimSpace(session.ProfileRoot); root != "" {
+			if filepath.IsAbs(root) {
+				return root
+			}
+			if cwd, err := os.Getwd(); err == nil {
+				return filepath.Clean(filepath.Join(cwd, root))
+			}
+			return root
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
+	}
+	return ""
+}
+
+func formatChatContextWindowSummary(session *ChatSession, budget sharedChatPromptBudget) string {
+	totalWindow := budget.ModelCapabilityMaxContextTokens
+	if totalWindow <= 0 {
+		totalWindow = budget.ActiveTurnMaxTokens
+	}
+	usedTokens := 0
+	if session != nil && session.TokenCount > 0 {
+		usedTokens = session.TokenCount
+	}
+	if totalWindow <= 0 {
+		if usedTokens > 0 {
+			return fmt.Sprintf("used %d", usedTokens)
+		}
+		return ""
+	}
+
+	percent := 0
+	if usedTokens > 0 {
+		percent = int(math.Round(float64(usedTokens) * 100 / float64(totalWindow)))
+		if percent < 0 {
+			percent = 0
+		}
+	}
+	return fmt.Sprintf("%d used %d %d%%", totalWindow, usedTokens, percent)
+}
+
+func compactStatusValue(value string, maxWidth int) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if maxWidth > 0 && ui.DisplayWidth(value) > maxWidth {
+		return truncateStatusValue(value, maxWidth)
+	}
+	return value
+}
+
+func compactStatusValueOrDash(value string, maxWidth int) string {
+	value = compactStatusValue(value, maxWidth)
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func compactStatusCount(value int) string {
+	switch {
+	case value < 1000:
+		return fmt.Sprintf("%d", value)
+	case value < 10_000:
+		return trimStatusFloat(fmt.Sprintf("%.1f", float64(value)/1000)) + "k"
+	case value < 1_000_000:
+		return fmt.Sprintf("%dk", value/1000)
+	case value < 10_000_000:
+		return trimStatusFloat(fmt.Sprintf("%.1f", float64(value)/1_000_000)) + "m"
+	default:
+		return fmt.Sprintf("%dm", value/1_000_000)
+	}
+}
+
+func trimStatusFloat(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimRight(value, "0")
+	value = strings.TrimRight(value, ".")
+	if value == "" {
+		return "0"
+	}
+	return value
+}
+
+func compactStatusPath(path string, maxWidth int) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "-"
+	}
+	path = filepath.Clean(path)
+	if ui.DisplayWidth(path) <= maxWidth || maxWidth <= 0 {
+		return path
+	}
+
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		homeDir = filepath.Clean(strings.TrimSpace(homeDir))
+		if homeDir != "" {
+			if rel, relErr := filepath.Rel(homeDir, path); relErr == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+				path = "~" + string(filepath.Separator) + rel
+			} else if path == homeDir {
+				path = "~"
+			}
+		}
+	}
+
+	if ui.DisplayWidth(path) <= maxWidth {
+		return path
+	}
+
+	prefix, tailParts := splitStatusPathPrefix(path)
+	if len(tailParts) == 0 {
+		return truncateStatusValue(path, maxWidth)
+	}
+
+	joinTail := func(parts []string) string {
+		if len(parts) == 0 {
+			return ""
+		}
+		return prefix + strings.Join(parts, string(filepath.Separator))
+	}
+
+	if candidate := joinTail(tailParts); ui.DisplayWidth(candidate) <= maxWidth {
+		return candidate
+	}
+
+	for keep := len(tailParts); keep >= 2; keep-- {
+		parts := tailParts[len(tailParts)-keep:]
+		candidate := prefix + "..." + string(filepath.Separator) + strings.Join(parts, string(filepath.Separator))
+		if ui.DisplayWidth(candidate) <= maxWidth {
+			return candidate
+		}
+	}
+
+	candidate := prefix + "..." + string(filepath.Separator) + tailParts[len(tailParts)-1]
+	if ui.DisplayWidth(candidate) <= maxWidth {
+		return candidate
+	}
+	return truncateStatusValue(candidate, maxWidth)
+}
+
+func splitStatusPathPrefix(path string) (string, []string) {
+	if path == "" {
+		return "", nil
+	}
+	sep := string(filepath.Separator)
+	altSep := "/"
+	if filepath.Separator == '/' {
+		altSep = "\\"
+	}
+
+	prefix := ""
+	rest := path
+	if strings.HasPrefix(rest, "~"+sep) {
+		prefix = "~" + sep
+		rest = strings.TrimPrefix(rest, "~"+sep)
+	} else if rest == "~" {
+		return "~", nil
+	}
+	if volume := filepath.VolumeName(rest); volume != "" {
+		prefix = volume
+		rest = strings.TrimPrefix(rest, volume)
+	}
+
+	if strings.HasPrefix(rest, sep) {
+		prefix += sep
+		rest = strings.TrimPrefix(rest, sep)
+	}
+	rest = strings.ReplaceAll(rest, altSep, sep)
+	rest = strings.Trim(rest, sep)
+	if rest == "" {
+		return prefix, nil
+	}
+	parts := strings.Split(rest, sep)
+	filtered := parts[:0]
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			filtered = append(filtered, part)
+		}
+	}
+	return prefix, filtered
+}
+
+func truncateStatusValue(line string, width int) string {
+	if width <= 0 {
+		width = 80
+	}
+	if ui.DisplayWidth(line) <= width {
+		return line
+	}
+	if width <= 3 {
+		return ""
+	}
+	var builder strings.Builder
+	current := 0
+	limit := width - 3
+	for _, r := range line {
+		w := ui.DisplayWidth(string(r))
+		if w <= 0 {
+			continue
+		}
+		if current+w > limit {
+			break
+		}
+		builder.WriteRune(r)
+		current += w
+	}
+	builder.WriteString("...")
+	return builder.String()
+}
+
 func (c *chatInteractionCoordinator) StartThinking() {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.beginMessageLocked()
+	if !c.beginMessageLocked() {
+		return
+	}
 	c.thinkingActive = true
-	c.updateSurfaceStatusLocked("Thinking")
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 }
 
 func (c *chatInteractionCoordinator) ClearThinking() {
@@ -204,7 +456,7 @@ func (c *chatInteractionCoordinator) ClearThinking() {
 	}
 	c.clearThinkingLocked()
 	c.thinkingActive = false
-	c.updateSurfaceStatusLocked("Ready")
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 }
 
 func (c *chatInteractionCoordinator) RenderAssistant(response string) {
@@ -214,7 +466,9 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	promptWasVisible := c.promptVisible
-	c.beginMessageLocked()
+	if !c.beginMessageLocked() {
+		return
+	}
 	response = sanitizeInteractiveAsyncTeamLaunchResponse(response)
 	formatted := response
 	if c.session.Formatter != nil {
@@ -234,7 +488,9 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.reasoningActive {
-		c.beginMessageLocked()
+		if !c.beginMessageLocked() {
+			return
+		}
 		c.reasoningActive = true
 		c.reasoningRendered = false
 		c.reasoningTrailingLF = false
@@ -246,6 +502,7 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 		} else {
 			c.reasoningMeta = ""
 		}
+		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	}
 	delta := normalizeAssistantStreamDelta(c.reasoningBuffer.String(), display)
 	if delta == "" {
@@ -265,7 +522,9 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 	defer c.mu.Unlock()
 	if !c.streamingActive {
 		if !c.reasoningActive {
-			c.beginMessageLocked()
+			if !c.beginMessageLocked() {
+				return
+			}
 		}
 		c.streamingActive = true
 		c.updateSurfaceStatusLocked("Streaming")
@@ -274,6 +533,7 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		c.streamTrailingLF = false
 		c.streamLines = 0
 		c.streamBuffer.Reset()
+		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	}
 	delta = normalizeAssistantStreamDelta(c.streamBuffer.String(), delta)
 	if delta == "" {
@@ -476,7 +736,9 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	promptWasVisible := c.promptVisible
-	c.beginMessageLocked()
+	if !c.beginMessageLocked() {
+		return
+	}
 	c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(line), promptWasVisible)
 }
 
@@ -487,7 +749,9 @@ func (c *chatInteractionCoordinator) RenderError(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	promptWasVisible := c.promptVisible
-	c.beginMessageLocked()
+	if !c.beginMessageLocked() {
+		return
+	}
 	c.writeCompleteBlockLocked(ui.FormatErrorMessage(fmt.Sprintf("操作错误: %v", err)), promptWasVisible)
 }
 
@@ -497,6 +761,9 @@ func (c *chatInteractionCoordinator) ClearPrompt() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
 	if c.promptVisible {
 		c.clearVisiblePromptLocked()
 	}
@@ -511,6 +778,9 @@ func (c *chatInteractionCoordinator) ResetPromptState() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
 	c.promptSeq++
 	c.promptVisible = false
 	c.promptInput = ""
@@ -533,11 +803,38 @@ func (c *chatInteractionCoordinator) ResetRunState() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
 	c.completeBlockOutput = false
 	c.updateSurfaceStatusLocked("Ready")
 }
 
-func (c *chatInteractionCoordinator) beginMessageLocked() {
+// Shutdown 停止所有后续 prompt 重绘和状态栏更新，供最终退出使用。
+func (c *chatInteractionCoordinator) Shutdown() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
+	c.shutdown = true
+	c.promptSeq++
+	c.promptVisible = false
+	c.promptInput = ""
+	c.thinkingActive = false
+	c.streamingActive = false
+	c.reasoningActive = false
+	c.completeBlockOutput = false
+	c.surface = nil
+}
+
+func (c *chatInteractionCoordinator) beginMessageLocked() bool {
+	if c == nil || c.shutdown {
+		return false
+	}
 	c.promptSeq++
 	if c.thinkingActive {
 		c.clearThinkingLocked()
@@ -558,6 +855,7 @@ func (c *chatInteractionCoordinator) beginMessageLocked() {
 	if c.surface != nil {
 		c.surface.BeginOutput()
 	}
+	return true
 }
 
 func (c *chatInteractionCoordinator) clearThinkingLocked() {
@@ -877,6 +1175,10 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 		return
 	}
 	c.mu.Lock()
+	if c.shutdown {
+		c.mu.Unlock()
+		return
+	}
 	c.promptSeq++
 	seq := c.promptSeq
 	delay := c.promptDelay
@@ -888,6 +1190,9 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		if c.shutdown {
+			return
+		}
 		if seq != c.promptSeq {
 			return
 		}

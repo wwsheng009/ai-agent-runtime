@@ -9,6 +9,9 @@ func beginDirectInteractiveOutput(session *ChatSession) {
 	if session == nil || session.NoInteractive || session.JSONOutput {
 		return
 	}
+	if session.Interaction != nil {
+		session.Interaction.ClearPrompt()
+	}
 	if session.Surface != nil {
 		session.Surface.BeginOutput()
 	}

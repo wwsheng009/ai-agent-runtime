@@ -136,6 +136,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	session.MsgCount = countUserMessages(messages)
 	session.TurnRequestCount = 0
 	restoreChatRuntimeContext(session, session.RuntimeSession)
+	restoreChatTokenCount(session, session.RuntimeSession)
 	return nil
 }
 
@@ -229,6 +230,11 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	runtimeSession.Metadata.Context[chatRuntimeContextStream] = session.Stream
 	runtimeSession.Metadata.Context[chatRuntimeContextDisableTools] = session.DisableTools
 	runtimeSession.Metadata.Context[chatRuntimeContextMessageCount] = len(session.Messages)
+	if session.TokenCount > 0 {
+		runtimeSession.Metadata.Context[chatRuntimeContextTokenCount] = session.TokenCount
+	} else {
+		delete(runtimeSession.Metadata.Context, chatRuntimeContextTokenCount)
+	}
 	if strings.TrimSpace(session.ProfileName) != "" {
 		runtimeSession.Metadata.Context[chatRuntimeContextProfileName] = session.ProfileName
 	}
