@@ -4266,6 +4266,53 @@ func TestValidateRuntimeConfig_IncludesConfigFileWarnings(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), escapedPath)
 }
 
+func TestValidateRuntimeConfig_IncludesPathSuggestions(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "frontend", "src", "pages", "settings"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "configs", "settings"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, "configs", "settings", "runtime.yaml"),
+		[]byte("ok"),
+		0o644,
+	))
+
+	originalWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(root))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chdir(originalWD))
+	})
+
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetAdminToken("secret-token")
+
+	loader := skill.NewLoader(mcpManager)
+	loader.SetSkillDirs([]string{"frontend/src/pages/setting"})
+	handler.skillLoader = loader
+
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	handler.SetRuntimeConfig(runtimeConfig, "configs/setting/runtime.yaml")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/validate", nil)
+	req.Header.Set("X-Forwarded-For", "10.0.0.5")
+	req.Header.Set("X-Skills-Admin-Token", "secret-token")
+	rec := httptest.NewRecorder()
+
+	handler.ValidateRuntimeConfig(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	body := strings.ReplaceAll(rec.Body.String(), "\\", "/")
+	for strings.Contains(body, "//") {
+		body = strings.ReplaceAll(body, "//", "/")
+	}
+	assert.Contains(t, body, "runtime config file not found")
+	assert.Contains(t, body, "configs/settings/runtime.yaml")
+	assert.Contains(t, body, "skill directory not found")
+	assert.Contains(t, body, "frontend/src/pages/settings")
+}
+
 func TestGetSearchStats_TracksModesAndEmbeddingUsage(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)

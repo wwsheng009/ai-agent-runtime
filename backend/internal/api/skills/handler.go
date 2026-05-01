@@ -7696,7 +7696,11 @@ func (h *Handler) runtimeValidationSnapshot() map[string]interface{} {
 				continue
 			}
 			if _, err := os.Stat(dir); err != nil {
-				warnings = append(warnings, fmt.Sprintf("skill directory not accessible: %s", dir))
+				if os.IsNotExist(err) {
+					warnings = append(warnings, buildMissingPathMessage("skill directory not found", dir))
+				} else {
+					warnings = append(warnings, fmt.Sprintf("skill directory not accessible: %s", dir))
+				}
 			}
 		}
 	}
@@ -7750,7 +7754,7 @@ func (h *Handler) runtimeValidationSnapshot() map[string]interface{} {
 		info, err := os.Stat(h.runtimeConfigFile)
 		if err != nil {
 			if os.IsNotExist(err) {
-				configWarnings = append(configWarnings, fmt.Sprintf("runtime config file not found: %s", h.runtimeConfigFile))
+				configWarnings = append(configWarnings, buildMissingPathMessage("runtime config file not found", h.runtimeConfigFile))
 			} else {
 				configIssues = append(configIssues, fmt.Sprintf("runtime config file not accessible: %s", h.runtimeConfigFile))
 			}
@@ -7775,14 +7779,22 @@ func (h *Handler) runtimeValidationSnapshot() map[string]interface{} {
 		workspaceRoot := strings.TrimSpace(h.runtimeConfig.Workspace.Root)
 		if workspaceRoot != "" {
 			if _, err := os.Stat(workspaceRoot); err != nil {
-				configWarnings = append(configWarnings, fmt.Sprintf("workspace root not accessible: %s", workspaceRoot))
+				if os.IsNotExist(err) {
+					configWarnings = append(configWarnings, buildMissingPathMessage("workspace root not found", workspaceRoot))
+				} else {
+					configWarnings = append(configWarnings, fmt.Sprintf("workspace root not accessible: %s", workspaceRoot))
+				}
 			}
 		}
 		if h.runtimeConfig.Rollout.Enabled {
 			candidateFile := strings.TrimSpace(h.runtimeConfig.Rollout.CandidateFile)
 			if candidateFile != "" {
 				if _, err := os.Stat(candidateFile); err != nil {
-					configWarnings = append(configWarnings, fmt.Sprintf("rollout candidate file not accessible: %s", candidateFile))
+					if os.IsNotExist(err) {
+						configWarnings = append(configWarnings, buildMissingPathMessage("rollout candidate file not found", candidateFile))
+					} else {
+						configWarnings = append(configWarnings, fmt.Sprintf("rollout candidate file not accessible: %s", candidateFile))
+					}
 				}
 			}
 		}
