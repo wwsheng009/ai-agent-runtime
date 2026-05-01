@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -19,6 +20,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
@@ -653,6 +655,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	if len(promptLayoutSources) > 0 {
 		requestPayload["prompt_sources"] = promptLayoutSources
+	}
+	if surface := summarizeToolSurface(req.Tools); len(surface) > 0 {
+		req.Metadata["tool_surface"] = surface
+		requestPayload["tool_surface"] = surface
 	}
 	if availability := summarizeToolAvailability(req.Tools); len(availability) > 0 {
 		req.Metadata["tool_availability"] = cloneInterfaceMap(availability)
@@ -1690,11 +1696,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	seen := make(map[string]bool)
 
 	if loop.agent.mcpManager != nil {
-		selectedTools := loop.agent.GetToolCatalog().Search(goal, 6)
-		if len(selectedTools) == 0 {
-			selectedTools = loop.agent.mcpManager.ListTools()
-		}
-		for _, mt := range selectedTools {
+		for _, mt := range loop.agent.mcpManager.ListTools() {
 			if len(allowed) > 0 && !allowed[mt.Name] {
 				continue
 			}
@@ -1722,7 +1724,11 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
 		if (len(allowed) == 0 || allowed["spawn_subagents"]) &&
 			(loop.agent.GetToolExecutionPolicy() == nil || loop.agent.GetToolExecutionPolicy().AllowsDefinition("spawn_subagents")) {
-			tools = append(tools, spawnSubagentsToolDefinition())
+			definition := spawnSubagentsToolDefinition()
+			if !seen[definition.Name] {
+				seen[definition.Name] = true
+				tools = append(tools, definition)
+			}
 		}
 	}
 
@@ -1742,7 +1748,19 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 		}
 	}
 
+	sortToolDefinitionsByName(tools)
 	return tools, nil
+}
+
+func sortToolDefinitionsByName(tools []types.ToolDefinition) {
+	sort.SliceStable(tools, func(i, j int) bool {
+		left := strings.TrimSpace(tools[i].Name)
+		right := strings.TrimSpace(tools[j].Name)
+		if left == right {
+			return tools[i].Description < tools[j].Description
+		}
+		return left < right
+	})
 }
 
 func promoteTeamRunContext(ctx context.Context, results []toolExecutionResult) context.Context {
@@ -3039,6 +3057,10 @@ func summarizeToolAvailability(tools []types.ToolDefinition) map[string]interfac
 		summary["deferred_tools"] = deferredTools
 	}
 	return summary
+}
+
+func summarizeToolSurface(tools []types.ToolDefinition) map[string]interface{} {
+	return runtimeskill.BuildToolSurfaceSummary(tools)
 }
 
 func stringValue(value interface{}) string {

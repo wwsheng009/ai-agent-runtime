@@ -18,7 +18,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
-	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -2140,7 +2139,7 @@ func TestSubagentScheduler_RunChildren_AppliesBudgetAndSessionIsolation(t *testi
 	assert.Equal(t, 1024, provider.requests[0].MaxTokens)
 }
 
-func TestReActLoop_GetAvailableTools_UsesCatalogSearch(t *testing.T) {
+func TestReActLoop_GetAvailableTools_ExposesStableManagerToolsAcrossGoals(t *testing.T) {
 	agent := &Agent{
 		config: &Config{
 			Name:     "test-agent",
@@ -2149,9 +2148,6 @@ func TestReActLoop_GetAvailableTools_UsesCatalogSearch(t *testing.T) {
 		},
 		mcpManager: &MockCatalogMCPManager{},
 	}
-	catalog := mcpcatalog.New()
-	catalog.Refresh(agent.mcpManager.ListTools())
-	agent.SetToolCatalog(catalog)
 
 	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{})
 	tools, err := loop.getAvailableTools(context.Background(), "inspect recent logs and errors", nil)
@@ -2159,14 +2155,51 @@ func TestReActLoop_GetAvailableTools_UsesCatalogSearch(t *testing.T) {
 		t.Fatalf("get available tools: %v", err)
 	}
 	if len(tools) == 0 {
-		t.Fatal("expected tools from catalog search")
+		t.Fatal("expected tools from manager")
 	}
-	if tools[0].Name != "read_logs" {
-		t.Fatalf("expected read_logs to rank first, got %s", tools[0].Name)
+	names := toolDefinitionNames(tools)
+	assert.Contains(t, names, "read_file")
+	assert.Contains(t, names, "read_logs")
+	assert.Contains(t, names, "run_tests")
+
+	otherTools, err := loop.getAvailableTools(context.Background(), "run the test suite", nil)
+	require.NoError(t, err)
+	assert.Equal(t, names, toolDefinitionNames(otherTools), "tool surface should not vary by goal text")
+
+	for _, tool := range tools {
+		if tool.Name == "read_logs" {
+			if got := tool.Metadata[toolresult.SourceKey]; got != toolresult.SourceToolkit {
+				t.Fatalf("expected read_logs %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceToolkit, got)
+			}
+			return
+		}
 	}
-	if got := tools[0].Metadata[toolresult.SourceKey]; got != toolresult.SourceToolkit {
-		t.Fatalf("expected read_logs %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceToolkit, got)
+	t.Fatal("expected read_logs to be exposed")
+}
+
+func TestReActLoop_GetAvailableTools_AlwaysExposesCoreFileTools(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Model:    "test-provider",
+			MaxSteps: 1,
+		},
+		mcpManager: runtimetools.NewAgentAdapter(runtimetools.NewDefaultManager(nil)),
 	}
+
+	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{})
+	tools, err := loop.getAvailableTools(context.Background(), "分析 项目 e:/projects/ai/codex-server 中 botspage.jsx 是否需要进行优化", nil)
+	require.NoError(t, err)
+
+	names := toolDefinitionNames(tools)
+	assert.Contains(t, names, "glob")
+	assert.Contains(t, names, "grep")
+	assert.Contains(t, names, "ls")
+	assert.Contains(t, names, "view")
+
+	otherTools, err := loop.getAvailableTools(context.Background(), "summarize the current implementation", nil)
+	require.NoError(t, err)
+	assert.Equal(t, names, toolDefinitionNames(otherTools), "core local tool surface should remain stable across goals")
 }
 
 func TestReActLoop_GetAvailableTools_PreservesMetaToolkitAndBrokerSourceMetadata(t *testing.T) {
@@ -2201,6 +2234,51 @@ func TestReActLoop_GetAvailableTools_PreservesMetaToolkitAndBrokerSourceMetadata
 	assert.Equal(t, toolresult.SourceMeta, metaSource)
 	assert.Equal(t, toolresult.SourceToolkit, toolkitSource)
 	assert.Equal(t, toolresult.SourceBroker, brokerSource)
+}
+
+func TestReActLoop_Run_AttachesToolSurfaceMetadataToLLMRequest(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Model:        "test-provider",
+			MaxSteps:     1,
+			SystemPrompt: "You are a helpful assistant.",
+		},
+		mcpManager: &MockCatalogMCPManager{},
+	}
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "Done.",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        1,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+
+	result, err := loop.Run(context.Background(), "inspect recent logs and errors")
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Len(t, provider.requests, 1)
+
+	request := provider.requests[0]
+	require.NotEmpty(t, request.Tools)
+
+	surface, ok := request.Metadata["tool_surface"].(map[string]interface{})
+	require.True(t, ok, "expected tool_surface metadata to be attached")
+	assert.Equal(t, len(request.Tools), surface["count"])
+
+	names, ok := surface["names"].([]string)
+	require.True(t, ok, "expected tool_surface.names to be a []string")
+	assert.Equal(t, toolDefinitionNames(request.Tools), names)
 }
 
 func TestResolveToolSourceForRequest_PrefersResolvedRuntimeSource(t *testing.T) {
