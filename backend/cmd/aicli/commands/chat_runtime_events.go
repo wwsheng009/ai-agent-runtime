@@ -194,7 +194,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				promptLine += fmt.Sprintf(" (%s)", strings.TrimSpace(reason))
 			}
 			fmt.Printf("\n%s? [y/N]: ", formatInteractiveSupplementPromptLine(promptLine))
-			text, err := chatInteractiveReadPriorityLine(session, context.Background())
+			text, err := chatInteractiveReadTransientLine(session, context.Background())
 			if err != nil {
 				return false, err
 			}
@@ -215,7 +215,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			} else {
 				fmt.Print("> (optional) ")
 			}
-			text, err := chatInteractiveReadPriorityLine(session, context.Background())
+			text, err := chatInteractiveReadTransientLine(session, context.Background())
 			if err != nil {
 				return "", err
 			}
