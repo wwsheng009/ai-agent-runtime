@@ -13,17 +13,19 @@
 - 已将 `chatInteractionCoordinator` 接入 fixed-bottom surface，并在 Thinking、Streaming、Ready、Retrying、模型切换、消息数和 token 变化时刷新状态行。
 - 已将 MCP/system status output、HTTP retry notice、debug output、运行期 priority prompt 的直接输出路径接入 surface-aware 输出入口。
 - 已新增 `ui.ComposerState`，让 bracketed paste 和 plain burst flush 通过统一 paste handler；大粘贴显示 `[Pasted Content N chars]` 占位符，提交时展开真实内容。
-- 已把 WSL/VS Code terminal 的 plain paste burst settle 窗口放宽，并让 Windows line-queue draft 通过状态栏显示 `Paste draft N lines`。
+- 已把 WSL/VS Code terminal 的 plain paste burst settle 窗口放宽，并让 Windows 交互输入收敛到同一 raw editor / paste burst 路径，避免 Windows 继续单独走行缓冲。
+- 已实现 `FixedBottomSurface` 的 popup 层和 composer 预览层，底部现在能分别承载 popup / composer / status 三类临时视图，不再写入 transcript；popup 行数会按终端高度裁剪，避免压没输出区。
+- 已把 `Paste draft N lines` 从状态栏提示升级为 bottom pane 里的 pending paste preview，并保持在底部临时视图内渲染。
+- 已把 `/model` 迁移到 popup-first 选择器：模型选择和 reasoning_effort 选择优先走 popup，legacy stdout 菜单仅作为降级路径。
+- 已将 modal priority prompt 的读取切到 transient line/prompt 路径，避免选择数字、审批回答和问题回答回写到普通聊天 history 或共享输入流。
+- 已补充 transient prompt 回归测试，覆盖 `ReadTransientLine`、popup priority prompt 和共享 `InputReader` 隔离。
+- 已补充终端 profile matrix snapshot 测试，覆盖 Windows Terminal、PowerShell、WSL Ubuntu、Linux terminal、VS Code terminal、legacy console 和 Zellij 的启用/回退分支。
 - 保留非交互、JSON、pipe、legacy TUI 的降级路径，不在这些模式启用固定底部 UI。
 
 仍需继续完成：
 
-- 分析并实现弹出框组件渲染不占用信息流的机制，优先将 `/model` 迁移为 bottom pane modal/popup。
-- 引入真正的 bottom pane/composer，替换当前 prompt 与状态行分别维护的过渡实现。
-- 将当前 plain burst 过渡实现升级为完整 Codex 风格 paste burst 状态机，包括 pending-first-char、retro-capture、enter suppression window 和 UI tick flush。
-- 将 Windows paste 从“按行暂存 draft”进一步升级为 composer 级 paste burst，让 Windows 和 Unix/WSL 进入同一 paste handler。
-- 把 `Paste draft N lines` 从状态栏提示升级为 bottom pane 里的 pending paste preview。
-- 增加真实终端级集成测试或快照测试，覆盖 Windows Terminal、PowerShell、WSL Ubuntu、Linux terminal、VS Code terminal。
+- 引入真正的 bottom pane/composer 输入栈，把 composer preview 进一步接到真实编辑器和 modal stack。
+- 补更真实的终端级集成测试或手工 smoke 测试，覆盖实际 PTY/ConPTY 环境，而不只是 profile matrix snapshot。
 
 ## 近期新增任务与实现分析
 
@@ -98,12 +100,12 @@
 
 ### 3. PasteBurst 后续任务
 
-后续任务必须按以下顺序推进，避免继续用平台 if-else 修补粘贴问题：
+当前落地状态：
 
-1. 实现完整 Codex 风格 `PasteBurst` 状态机，替换当前较简单的 `plainInputBurst`。
-2. 把 Windows paste 从“按行暂存 draft”进一步升级为 composer 级 paste burst，让 Windows 和 Unix/WSL 进入同一 paste handler。
-3. 把 `Paste draft N lines` 从状态栏提示升级为 bottom pane 里的 pending paste preview。
-4. 增加真实终端级集成测试或快照测试，覆盖 Windows Terminal、PowerShell、WSL Ubuntu、Linux terminal、VS Code terminal。
+1. 完整 Codex 风格 `PasteBurst` 状态机已经落地，并接入 `InputBox` 的逐键编辑器主路径。
+2. Windows 交互输入已经收敛到同一 raw editor / paste burst 路径，和 Unix/WSL 共享同一套粘贴处理逻辑。
+3. `Paste draft N lines` 已从状态栏提示升级为 bottom pane 里的 pending paste preview。
+4. 仍需补充真实终端级集成测试或快照测试，覆盖 Windows Terminal、PowerShell、WSL Ubuntu、Linux terminal、VS Code terminal。
 
 ## 背景
 

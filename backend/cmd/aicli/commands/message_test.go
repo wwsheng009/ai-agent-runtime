@@ -309,8 +309,11 @@ func TestExtractUsageFromResponseBody(t *testing.T) {
 	if usage == nil {
 		t.Fatal("expected usage payload")
 	}
-	if total, ok := usage["total_tokens"].(float64); !ok || total != 42 {
+	if total, ok := usage["total_tokens"].(int); !ok || total != 42 {
 		t.Fatalf("unexpected total_tokens: %#v", usage)
+	}
+	if input, ok := usage["input_tokens"].(int); !ok || input != 21 {
+		t.Fatalf("unexpected input_tokens: %#v", usage)
 	}
 
 	if usage := extractUsageFromResponseBody([]byte(`not-json`)); usage != nil {

@@ -604,7 +604,7 @@ func TestAICLIChatActorExecutor_LiveDocsPromptClearsPromptBeforeAsyncTimeline(t 
 	for {
 		rendered := capture.String()
 		if (strings.Contains(rendered, "• Running ") || strings.Contains(rendered, "• Ran ") || strings.Contains(rendered, "[task] ") || strings.Contains(rendered, "[team summary] ")) &&
-			strings.Contains(rendered, "你>") {
+			strings.Contains(rendered, ui.UserPromptText(0)) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -631,7 +631,7 @@ func TestAICLIChatActorExecutor_LiveDocsPromptClearsPromptBeforeAsyncTimeline(t 
 	}
 	promptCount := 0
 	for index, line := range lines {
-		if !strings.Contains(line, "你>") {
+		if !strings.Contains(line, ui.UserPromptText(0)) {
 			continue
 		}
 		promptCount++
