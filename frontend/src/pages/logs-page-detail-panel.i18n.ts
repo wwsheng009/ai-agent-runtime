@@ -1,6 +1,8 @@
 export type LogsPageDetailLabels = {
   copied: string;
   summary: string;
+  insights: string;
+  insightsHelp: string;
   identifiers: string;
   metadata: string;
   responsePreview: string;
@@ -34,4 +36,12 @@ export type LogsPageDetailLabels = {
   url: string;
   responseStatus: string;
   upstreamError: string;
+  cacheHit: string;
+  cacheHitValueHit: string;
+  cacheHitValueMiss: string;
+  skillExposureMode: string;
+  finalFunctionCount: string;
+  routedSkillCount: string;
+  candidateCount: string;
+  exposedFunctionCount: string;
 };

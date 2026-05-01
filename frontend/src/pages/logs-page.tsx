@@ -300,6 +300,8 @@ export function LogsPage() {
   const detailLabels: LogsPageDetailLabels = {
     copied: tCommon("actions.copied"),
     summary: t("copiedLog"),
+    insights: t("insights"),
+    insightsHelp: t("insightsHelp"),
     identifiers: t("identifiers"),
     metadata: t("metadata"),
     responsePreview: t("responsePreview"),
@@ -333,6 +335,14 @@ export function LogsPage() {
     url: t("url"),
     responseStatus: t("responseStatus"),
     upstreamError: t("upstreamError"),
+    cacheHit: t("cacheHit"),
+    cacheHitValueHit: t("cacheHitValueHit"),
+    cacheHitValueMiss: t("cacheHitValueMiss"),
+    skillExposureMode: t("skillExposureMode"),
+    finalFunctionCount: t("finalFunctionCount"),
+    routedSkillCount: t("routedSkillCount"),
+    candidateCount: t("candidateCount"),
+    exposedFunctionCount: t("exposedFunctionCount"),
   };
   const metadataRows = detailRows(selectedEntry, detailLabels);
   const formattedMetadataRows = metadataRows.map(([label, value]) => ({
