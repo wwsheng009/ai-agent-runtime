@@ -39,6 +39,70 @@ func TestFormatInteractiveSupplementPromptLine_PreservesPromptContentWithoutInde
 	}
 }
 
+func TestChatRuntimeEventBridge_LLMRequestStartedAccumulatesTurnContextTokens(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	session := &ChatSession{
+		RuntimeSession: runtimeSession,
+		NoInteractive:  true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "llm.request.started",
+		SessionID: runtimeSession.ID,
+		Payload: map[string]interface{}{
+			"success":               true,
+			"context_prompt_tokens": 23099,
+			"context_window_tokens": 270000,
+			"usage_total_tokens":    24762,
+		},
+	})
+
+	if session.ContextTokenCount != 23099 {
+		t.Fatalf("expected live context token count 23099, got %d", session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 270000 {
+		t.Fatalf("expected context window token count 270000, got %d", session.ContextWindowTokenCount)
+	}
+	if session.TurnContextTokenCount != 23099 {
+		t.Fatalf("expected turn aggregate token count 23099, got %d", session.TurnContextTokenCount)
+	}
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "llm.request.started",
+		SessionID: runtimeSession.ID,
+		Payload: map[string]interface{}{
+			"success":               true,
+			"context_prompt_tokens": 1200,
+			"context_window_tokens": 270000,
+			"usage_total_tokens":    1400,
+		},
+	})
+
+	if session.ContextTokenCount != 1200 {
+		t.Fatalf("expected latest request context token count 1200, got %d", session.ContextTokenCount)
+	}
+	if session.TurnContextTokenCount != 24299 {
+		t.Fatalf("expected turn aggregate token count 24299 after second request, got %d", session.TurnContextTokenCount)
+	}
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "llm.request.finished",
+		SessionID: runtimeSession.ID,
+		Payload: map[string]interface{}{
+			"success":               true,
+			"context_prompt_tokens": 1200,
+			"context_window_tokens": 270000,
+			"usage_total_tokens":    1400,
+		},
+	})
+
+	if session.TurnContextTokenCount != 24299 {
+		t.Fatalf("expected finished event not to double count turn aggregate tokens, got %d", session.TurnContextTokenCount)
+	}
+}
+
 func TestRenderSharedChatToolEvent_AppendsShellContext(t *testing.T) {
 	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
 		Stage:    "tool_result",

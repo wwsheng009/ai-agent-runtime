@@ -748,6 +748,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		return
 	}
 	b.handleStructuredLogEvent(event)
+	b.applyLLMRequestStatus(event)
 	if b.handleAssistantReasoning(event) {
 		return
 	}
@@ -849,6 +850,24 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		if err := actor.AnswerQuestion(context.Background(), questionID, answer); err != nil {
 			b.setRunError(err)
 		}
+	}
+}
+
+func (b *chatRuntimeEventBridge) applyLLMRequestStatus(event runtimeevents.Event) {
+	if b == nil || b.session == nil || !b.isRunActive() || !b.isPrimarySessionEvent(event) {
+		return
+	}
+	switch event.Type {
+	case runtimechat.EventLLMRequestStarted, "llm.request.started":
+		promptTokens := firstPositivePayloadInt(event.Payload, "context_prompt_tokens", "prompt_tokens_after", "token_after", "prompt_tokens", "token_before", "prompt_tokens_before")
+		windowTokens := firstPositivePayloadInt(event.Payload, "context_window_tokens", "max_context_tokens", "model_capability_max_context_tokens", "provider_context_limit")
+		applyChatTurnContextTokens(b.session, promptTokens, windowTokens, true)
+	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
+		promptTokens := firstPositivePayloadInt(event.Payload, "context_prompt_tokens", "prompt_tokens_after", "token_after", "prompt_tokens", "token_before", "prompt_tokens_before")
+		windowTokens := firstPositivePayloadInt(event.Payload, "context_window_tokens", "max_context_tokens", "model_capability_max_context_tokens", "provider_context_limit")
+		applyChatContextTokens(b.session, promptTokens, windowTokens, true)
+	default:
+		return
 	}
 }
 
