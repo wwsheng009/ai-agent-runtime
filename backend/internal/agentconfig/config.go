@@ -33,6 +33,7 @@ type Config struct {
 	Profiles       *ProfilesConfig      `yaml:"profiles" mapstructure:"profiles"`
 	SkillsRuntime  *SkillsRuntimeConfig `yaml:"skills_runtime" mapstructure:"skills_runtime"`
 	Log            logger.LogConfig     `yaml:"log" mapstructure:"log"`
+	ConfigFilePath string               `yaml:"-" mapstructure:"-"`
 }
 
 // ProvidersConfig holds the provider collection configuration.
@@ -339,6 +340,7 @@ type AICLIConfig struct {
 	Retry   *AICLIRetryConfig   `yaml:"retry" mapstructure:"retry"`
 	Timeout *AICLITimeoutConfig `yaml:"timeout" mapstructure:"timeout"`
 	Theme   *AICLIThemeConfig   `yaml:"theme" mapstructure:"theme"`
+	Chat    *AICLIChatConfig    `yaml:"chat" mapstructure:"chat"`
 }
 
 // AICLIMCPConfig holds aicli MCP configuration.
@@ -368,6 +370,13 @@ type AICLITimeoutConfig struct {
 // AICLIThemeConfig holds aicli terminal theme preferences.
 type AICLIThemeConfig struct {
 	Name string `yaml:"name" mapstructure:"name" env:"AICLI_THEME"`
+}
+
+// AICLIChatConfig holds aicli chat preference defaults.
+type AICLIChatConfig struct {
+	DefaultProvider string `yaml:"default_provider,omitempty" mapstructure:"default_provider"`
+	DefaultModel    string `yaml:"default_model,omitempty" mapstructure:"default_model"`
+	ReasoningEffort string `yaml:"reasoning_effort,omitempty" mapstructure:"reasoning_effort"`
 }
 
 // ProfilesConfig holds profile topology configuration.
@@ -621,6 +630,9 @@ func (m *Manager) Config() *Config {
 func InitGlobalConfig(configPath string) (*Config, error) {
 	cfg := &Config{}
 	if configPath != "" {
+		if absPath, err := filepath.Abs(configPath); err == nil && absPath != "" {
+			configPath = absPath
+		}
 		data, err := os.ReadFile(configPath)
 		if err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
@@ -632,6 +644,7 @@ func InitGlobalConfig(configPath string) (*Config, error) {
 			}
 		}
 	}
+	cfg.ConfigFilePath = configPath
 	globalConfig = cfg
 	return cfg, nil
 }
