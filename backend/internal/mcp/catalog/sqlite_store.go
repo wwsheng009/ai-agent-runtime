@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
 
 // SQLiteSnapshotStore 使用 SQLite 持久化 catalog 快照。

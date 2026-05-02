@@ -13,7 +13,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
 	"github.com/google/uuid"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
 
 // SQLiteStore persists team data in SQLite.

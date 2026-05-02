@@ -15,7 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
 
 // StoreConfig 控制 artifact store 的持久化方式。

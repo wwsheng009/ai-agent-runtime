@@ -12,7 +12,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
 
 // Config describes how the usage ledger store should connect.

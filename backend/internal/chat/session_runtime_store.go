@@ -18,7 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
 
 // RuntimeStateStore persists per-session runtime state.

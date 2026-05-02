@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
