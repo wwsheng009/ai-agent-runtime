@@ -13,6 +13,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const (
@@ -73,6 +74,12 @@ func NewGlobTool() *GlobTool {
 		limit:      defaultGlobLimit,
 		lookPath:   exec.LookPath,
 		runCommand: runGrepCommand,
+	}
+}
+
+func (g *GlobTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: true,
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // WriteTool 文件写入工具
@@ -42,6 +43,12 @@ func NewWriteTool() *WriteTool {
 			parameters,
 			true,
 		),
+	}
+}
+
+func (w *WriteTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }
 

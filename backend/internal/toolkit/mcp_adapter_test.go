@@ -12,6 +12,7 @@ type stubTool struct {
 	description string
 	parameters  map[string]interface{}
 	result      *ToolResult
+	metadata    map[string]interface{}
 }
 
 func (s stubTool) Name() string { return s.name }
@@ -27,6 +28,8 @@ func (s stubTool) Execute(ctx context.Context, params map[string]interface{}) (*
 }
 
 func (s stubTool) CanDirectCall() bool { return true }
+
+func (s stubTool) DefinitionMetadata() map[string]interface{} { return s.metadata }
 
 func TestMCPAdapter_ExecuteAsMCP_PreservesOutputKindMetadata(t *testing.T) {
 	adapter := NewMCPAdapter(stubTool{
@@ -87,5 +90,24 @@ func TestMCPAdapter_ExecuteAsMCP_MapsBinaryContent(t *testing.T) {
 	}
 	if got := result.Meta[toolresult.MetadataKey]; got != toolresult.KindBinary {
 		t.Fatalf("expected %s=%q, got %#v", toolresult.MetadataKey, toolresult.KindBinary, got)
+	}
+}
+
+func TestMCPAdapter_ToMCPTool_PreservesDefinitionMetadata(t *testing.T) {
+	adapter := NewMCPAdapter(stubTool{
+		name:        "parallel_read",
+		description: "parallel-safe read tool",
+		parameters:  map[string]interface{}{"type": "object"},
+		metadata: map[string]interface{}{
+			"supports_parallel": true,
+		},
+	})
+
+	tool := adapter.ToMCPTool()
+	if tool == nil {
+		t.Fatal("expected tool definition")
+	}
+	if got := tool.Metadata["supports_parallel"]; got != true {
+		t.Fatalf("expected supports_parallel=true, got %#v", got)
 	}
 }

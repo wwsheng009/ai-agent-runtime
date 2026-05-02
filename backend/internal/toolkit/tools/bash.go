@@ -12,6 +12,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // BashTool Bash 命令执行工具
@@ -82,6 +83,12 @@ func NewBashTool() *BashTool {
 		executer:  &DefaultCommandExecuter{},
 		timeout:   30 * time.Second,
 		blacklist: defaultBlacklist,
+	}
+}
+
+func (b *BashTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }
 

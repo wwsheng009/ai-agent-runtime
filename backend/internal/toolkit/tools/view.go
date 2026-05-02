@@ -10,6 +10,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // ViewTool 文件查看工具
@@ -49,6 +50,12 @@ func NewViewTool() *ViewTool {
 			true,
 		),
 		maxReadSize: 5 * 1024 * 1024, // 5MB
+	}
+}
+
+func (v *ViewTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: true,
 	}
 }
 

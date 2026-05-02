@@ -19,6 +19,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 var errGrepLimitReached = errors.New("grep match limit reached")
@@ -650,6 +651,12 @@ func NewGrepTool() *GrepTool {
 // Description returns a static tool description so provider-side tool caching is stable.
 func (g *GrepTool) Description() string {
 	return "文件内容搜索（优先使用 ripgrep/rg 引擎；rg 不可用时回退内置扫描）。工具定义保持静态，不随本机 rg 可用性变化；实际执行时在 metadata.engine 中标记 rg 或 builtin。支持常见 rg 风格参数与别名：glob≈-g、iglob≈--iglob、glob_case_insensitive≈--glob-case-insensitive、pattern_file/pattern_files≈-f/--file、ignore_file≈--ignore-file、ignore_file_case_insensitive≈--ignore-file-case-insensitive、no_ignore_files≈--no-ignore-files、no_ignore_parent/vcs/global/dot≈--no-ignore-parent/--no-ignore-vcs/--no-ignore-global/--no-ignore-dot、hidden/no_hidden≈--hidden/--no-hidden、-u/-uu/-uuu/--unrestricted、no_config≈--no-config、one_file_system≈--one-file-system、no_messages≈--no-messages、pcre2≈-P/--pcre2、engine≈--engine、multiline≈-U/--multiline、multiline_dotall≈--multiline-dotall、replace≈-r/--replace、passthru≈--passthru、crlf≈--crlf、auto_hybrid_regex≈--auto-hybrid-regex、column≈--column、trim≈--trim、pretty≈--pretty、line_buffered≈--line-buffered、block_buffered≈--block-buffered、null/null_data≈--null/--null-data、field_context_separator≈--field-context-separator、path_separator≈--path-separator、context_separator≈--context-separator、max_columns≈-M/--max-columns、max_columns_preview≈--max-columns-preview、count_matches≈--count-matches、stats≈--stats、json≈--json、follow≈-L/--follow、sort/sortr≈--sort/--sortr、sort_files≈--sort-files、fixed_strings≈-F、ignore_case≈-i、word_regexp≈-w、line_regexp≈-x、invert_match≈-v、only_matching≈-o、context/before_context/after_context≈-C/-B/-A、type≈-t、type_not≈-T、type_add/type_clear≈--type-add/--type-clear、files_with_matches≈-l、files_without_match≈--files-without-match、count≈-c、max_count≈-m、max_filesize≈--max-filesize、patterns/regexp≈多次 -e；支持目录、单文件 path、多路径 paths、路径感知 glob（如 src/**/*.go）、pattern file（如 -f patterns.txt）、path 排序/倒序、匹配次数统计、stats 摘要、max_depth/max_count 显式 0 语义以及 rg_args，例如 rg -P 'foo.*bar' backend。默认输出规范化为稳定的 path:line[:column]: content；json/--json 会透传 rg 原始 JSON Lines；rg-only 能力在无 rg 时会明确提示。"
+}
+
+func (g *GrepTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: true,
+	}
 }
 
 // isRgAvailable checks if ripgrep is available on the system, caching the result.

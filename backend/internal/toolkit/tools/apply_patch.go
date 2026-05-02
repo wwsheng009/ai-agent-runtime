@@ -12,6 +12,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const (
@@ -82,6 +83,7 @@ func (t *ApplyPatchTool) DefinitionMetadata() map[string]interface{} {
 			"syntax":     "lark",
 			"definition": applyPatchLarkGrammar,
 		},
+		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }
 

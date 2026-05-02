@@ -13,6 +13,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // DownloadTool 文件下载工具
@@ -59,6 +60,12 @@ func NewDownloadTool() *DownloadTool {
 		},
 		maxSize:  100 * 1024 * 1024, // 100MB
 		maxRetry: 3,
+	}
+}
+
+func (d *DownloadTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }
 

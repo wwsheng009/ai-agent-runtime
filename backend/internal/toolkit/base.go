@@ -61,6 +61,11 @@ func (b *BaseTool) CanDirectCall() bool {
 	return b.directCall
 }
 
+// DefinitionMetadata returns optional schema metadata for the tool definition.
+func (b *BaseTool) DefinitionMetadata() map[string]interface{} {
+	return nil
+}
+
 // Execute 抽象方法，由子类实现
 func (b *BaseTool) Execute(ctx context.Context, params map[string]interface{}) (*ToolResult, error) {
 	return nil, fmt.Errorf("method not implemented")

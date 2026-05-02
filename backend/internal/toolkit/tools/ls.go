@@ -11,6 +11,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // LsTool 列出目录工具
@@ -54,6 +55,12 @@ func NewLsTool() *LsTool {
 		),
 		maxDepth: 10,
 		limit:    1000,
+	}
+}
+
+func (l *LsTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: true,
 	}
 }
 

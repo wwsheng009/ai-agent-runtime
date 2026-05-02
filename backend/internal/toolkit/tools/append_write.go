@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/filetransport"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // AppendWriteTool appends one chunk of text to a file, with optional truncate-first
@@ -55,6 +56,12 @@ func NewAppendWriteTool() *AppendWriteTool {
 			true,
 		),
 		transport: filetransport.NewLocalService(),
+	}
+}
+
+func (w *AppendWriteTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }
 

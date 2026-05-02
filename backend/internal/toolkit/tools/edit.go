@@ -11,6 +11,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // EditTool 文件编辑工具（单处替换）
@@ -54,6 +55,12 @@ func NewEditTool() *EditTool {
 			true,
 		),
 		backupDir: ".backups",
+	}
+}
+
+func (e *EditTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }
 

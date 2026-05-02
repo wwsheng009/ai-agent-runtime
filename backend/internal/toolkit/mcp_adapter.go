@@ -18,11 +18,17 @@ func NewMCPAdapter(tool Tool) MCPAdapter {
 
 // ToMCPTool 转换为 MCP Tool 格式
 func (a *MCPAdapter) ToMCPTool() *protocol.Tool {
-	return &protocol.Tool{
+	tool := &protocol.Tool{
 		Name:        a.tool.Name(),
 		Description: a.tool.Description(),
 		InputSchema: a.tool.Parameters(),
 	}
+	if provider, ok := a.tool.(ToolDefinitionMetadataProvider); ok {
+		if metadata := provider.DefinitionMetadata(); len(metadata) > 0 {
+			tool.Metadata = cloneMetadataMap(metadata)
+		}
+	}
+	return tool
 }
 
 // ExecuteAsMCP 转换 MCP 调用结果为 MCP 格式
@@ -61,4 +67,15 @@ func RegistryToMCPTools(registry *Registry) []*protocol.Tool {
 	}
 
 	return mcpTools
+}
+
+func cloneMetadataMap(metadata map[string]interface{}) map[string]interface{} {
+	if len(metadata) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(metadata))
+	for key, value := range metadata {
+		cloned[key] = value
+	}
+	return cloned
 }
