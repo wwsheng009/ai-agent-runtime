@@ -27,13 +27,15 @@ func (a *MCPAdapter) FindTool(toolName string) (ToolInfo, error) {
 	}
 
 	return ToolInfo{
-		Name:          info.Tool.Name,
-		Description:   info.Tool.Description,
-		InputSchema:   cloneInputSchema(info.Tool.InputSchema),
-		MCPName:       info.MCPName,
-		MCPTrustLevel: a.resolveTrustLevel(info.MCPName),
-		ExecutionMode: a.resolveExecutionMode(info.MCPName),
-		Enabled:       info.Enabled,
+		Name:             info.Tool.Name,
+		Description:      info.Tool.Description,
+		InputSchema:      cloneInputSchema(info.Tool.InputSchema),
+		Metadata:         cloneMeta(info.Metadata),
+		MCPName:          info.MCPName,
+		MaxParallelCalls: a.resolveMaxParallelCalls(info.MCPName),
+		MCPTrustLevel:    a.resolveTrustLevel(info.MCPName),
+		ExecutionMode:    a.resolveExecutionMode(info.MCPName),
+		Enabled:          info.Enabled,
 	}, nil
 }
 
@@ -83,13 +85,15 @@ func (a *MCPAdapter) ListTools() []ToolInfo {
 
 	for i, t := range tools {
 		result[i] = ToolInfo{
-			Name:          t.Tool.Name,
-			Description:   t.Tool.Description,
-			InputSchema:   cloneInputSchema(t.Tool.InputSchema),
-			MCPName:       t.MCPName,
-			MCPTrustLevel: a.resolveTrustLevel(t.MCPName),
-			ExecutionMode: a.resolveExecutionMode(t.MCPName),
-			Enabled:       t.Enabled,
+			Name:             t.Tool.Name,
+			Description:      t.Tool.Description,
+			InputSchema:      cloneInputSchema(t.Tool.InputSchema),
+			Metadata:         cloneMeta(t.Metadata),
+			MCPName:          t.MCPName,
+			MaxParallelCalls: a.resolveMaxParallelCalls(t.MCPName),
+			MCPTrustLevel:    a.resolveTrustLevel(t.MCPName),
+			ExecutionMode:    a.resolveExecutionMode(t.MCPName),
+			Enabled:          t.Enabled,
 		}
 	}
 
@@ -159,4 +163,15 @@ func (a *MCPAdapter) resolveExecutionMode(mcpName string) string {
 		return ""
 	}
 	return status.ExecutionMode
+}
+
+func (a *MCPAdapter) resolveMaxParallelCalls(mcpName string) int {
+	if a == nil || a.manager == nil || mcpName == "" {
+		return 0
+	}
+	status, err := a.manager.GetMCPStatus(mcpName)
+	if err != nil || status == nil {
+		return 0
+	}
+	return status.MaxParallelCalls
 }

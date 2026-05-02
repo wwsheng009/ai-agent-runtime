@@ -12,15 +12,24 @@ import (
 
 type fakeManager struct {
 	result *protocol.CallToolResult
+	tools  []*mcpregistry.ToolInfo
 }
 
 func (f *fakeManager) LoadConfig(configPath string) error { return nil }
 func (f *fakeManager) Start(ctx context.Context) error    { return nil }
 func (f *fakeManager) Stop() error                        { return nil }
-func (f *fakeManager) ListTools() []*mcpregistry.ToolInfo { return nil }
+func (f *fakeManager) ListTools() []*mcpregistry.ToolInfo { return f.tools }
 func (f *fakeManager) FindTool(toolName string) (*mcpregistry.ToolInfo, error) {
 	return &mcpregistry.ToolInfo{
-		Tool:    &protocol.Tool{Name: toolName},
+		Tool: &protocol.Tool{
+			Name: toolName,
+			Metadata: map[string]interface{}{
+				"supports_parallel": true,
+			},
+		},
+		Metadata: map[string]interface{}{
+			"supports_parallel": true,
+		},
 		MCPName: "fake-mcp",
 		Enabled: true,
 	}, nil
@@ -65,5 +74,35 @@ func TestMCPAdapter_CallToolWithMeta_PreservesMetadata(t *testing.T) {
 	}
 	if meta["action"] != "created" {
 		t.Fatalf("expected action metadata, got %#v", meta)
+	}
+}
+
+func TestMCPAdapter_ListTools_PreservesDefinitionMetadata(t *testing.T) {
+	adapter := NewMCPAdapter(&fakeManager{
+		tools: []*mcpregistry.ToolInfo{
+			{
+				Tool: &protocol.Tool{
+					Name:        "read_a",
+					Description: "read a",
+					InputSchema: map[string]interface{}{"type": "object"},
+					Metadata: map[string]interface{}{
+						"supports_parallel": true,
+					},
+				},
+				Metadata: map[string]interface{}{
+					"supports_parallel": true,
+				},
+				MCPName: "fake-mcp",
+				Enabled: true,
+			},
+		},
+	})
+
+	tools := adapter.ListTools()
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+	if got := tools[0].Metadata["supports_parallel"]; got != true {
+		t.Fatalf("expected supports_parallel=true, got %#v", got)
 	}
 }

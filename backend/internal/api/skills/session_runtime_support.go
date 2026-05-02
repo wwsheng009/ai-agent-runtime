@@ -9,6 +9,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -627,11 +628,31 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		StateStore:   h.getSessionRuntimeStore(),
 		EventStore:   h.getSessionEventStore(),
 		EventBus:     h.getRuntimeEventBus(),
+		LoopConfig:   buildSessionLoopConfig(selectedConfig),
 	})
 	if err != nil {
 		return nil, err
 	}
 	return actor, nil
+}
+
+func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig) *agent.LoopReActConfig {
+	config := &agent.LoopReActConfig{
+		MaxSteps:             0,
+		EnableThought:        true,
+		EnableToolCalls:      true,
+		EnableParallelTools:  false,
+		MaxParallelToolCalls: 1,
+		Temperature:          0.7,
+	}
+	if selectedConfig != nil {
+		config.MaxSteps = agent.NormalizeMaxSteps(selectedConfig.Agent.MaxMaxSteps)
+		config.EnableParallelTools = selectedConfig.Agent.EnableParallelTools
+		if selectedConfig.Agent.MaxParallelToolCalls > 0 {
+			config.MaxParallelToolCalls = selectedConfig.Agent.MaxParallelToolCalls
+		}
+	}
+	return config
 }
 
 func (h *Handler) getSessionRuntimeStore() chat.RuntimeStateStore {

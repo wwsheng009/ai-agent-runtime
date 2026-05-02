@@ -2546,6 +2546,18 @@ agents:
 	assert.True(t, profileContextFound, "expected explicit profile context layer in session actor request")
 }
 
+func TestBuildSessionLoopConfig_PropagatesParallelToolConfig(t *testing.T) {
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Agent.EnableParallelTools = true
+	runtimeConfig.Agent.MaxParallelToolCalls = 4
+
+	config := buildSessionLoopConfig(runtimeConfig)
+	require.NotNil(t, config)
+	assert.True(t, config.EnableParallelTools)
+	assert.Equal(t, 4, config.MaxParallelToolCalls)
+	assert.Equal(t, agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps), config.MaxSteps)
+}
+
 func TestBuildSessionActor_DoesNotAutoScanDefaultWorkspace(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package demo\nfunc SearchDocs() {}\n"), 0o644))

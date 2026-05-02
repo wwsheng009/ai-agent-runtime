@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // MCPManager MCP 管理器接口
@@ -19,23 +20,31 @@ type MCPManager interface {
 
 // ToolInfo 工具信息（简化版）
 type ToolInfo struct {
-	Name          string
-	Description   string
-	InputSchema   map[string]interface{}
-	MCPName       string
-	MCPTrustLevel string
-	ExecutionMode string
-	Enabled       bool
+	Name             string
+	Description      string
+	InputSchema      map[string]interface{}
+	Metadata         map[string]interface{}
+	MCPName          string
+	MaxParallelCalls int
+	MCPTrustLevel    string
+	ExecutionMode    string
+	Enabled          bool
+}
+
+// ParallelSupport returns the explicit parallel support flag when it is
+// declared in tool metadata.
+func (t ToolInfo) ParallelSupport() (bool, bool) {
+	return runtimetypes.BoolMetadataValue(t.Metadata, runtimetypes.ToolMetadataSupportsParallelKey)
 }
 
 // Registry Skill 注册表
 type Registry struct {
-	mu          sync.RWMutex
-	skills      map[string]*Skill
-	skillsByPath map[string]*Skill
-	summaries   map[string]*SkillSummary
+	mu              sync.RWMutex
+	skills          map[string]*Skill
+	skillsByPath    map[string]*Skill
+	summaries       map[string]*SkillSummary
 	summariesByPath map[string]*SkillSummary
-	loadedCache map[string]*hydratedSkillCacheEntry
+	loadedCache     map[string]*hydratedSkillCacheEntry
 
 	// 按触发类型索引
 	keywordIndex map[string][]*Skill

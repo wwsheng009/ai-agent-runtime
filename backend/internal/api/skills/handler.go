@@ -1385,9 +1385,16 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			execSession.AddMessage(*types.NewUserMessage(lastMessage))
 
 			reactResult, reactErr := a.RunReActWithSession(ctx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
-				MaxSteps:        agentConfig.MaxSteps,
-				EnableThought:   true,
-				EnableToolCalls: true,
+				MaxSteps:            agentConfig.MaxSteps,
+				EnableThought:       true,
+				EnableToolCalls:     true,
+				EnableParallelTools: selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
+				MaxParallelToolCalls: func() int {
+					if selectedConfig != nil && selectedConfig.Agent.MaxParallelToolCalls > 0 {
+						return selectedConfig.Agent.MaxParallelToolCalls
+					}
+					return 1
+				}(),
 				ReasoningEffort: types.ResolveReasoningEffort(req.ReasoningEffort),
 				Thinking:        types.ResolveThinkingConfig(req.Thinking),
 				Temperature:     0.7,
@@ -1633,9 +1640,16 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			PreparedHistory: prependContextMessages(historyForAgent, buildAgentContextMessages(agentContext, workspaceCtx)),
 			EnableReAct:     true,
 			ReActConfig: &agent.LoopReActConfig{
-				MaxSteps:        agentConfig.MaxSteps,
-				EnableThought:   true,
-				EnableToolCalls: true,
+				MaxSteps:            agentConfig.MaxSteps,
+				EnableThought:       true,
+				EnableToolCalls:     true,
+				EnableParallelTools: selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
+				MaxParallelToolCalls: func() int {
+					if selectedConfig != nil && selectedConfig.Agent.MaxParallelToolCalls > 0 {
+						return selectedConfig.Agent.MaxParallelToolCalls
+					}
+					return 1
+				}(),
 				ReasoningEffort: types.ResolveReasoningEffort(req.ReasoningEffort),
 				Thinking:        types.ResolveThinkingConfig(req.Thinking),
 				Temperature:     0.7,
