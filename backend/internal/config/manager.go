@@ -53,15 +53,17 @@ type RuntimeConfig struct {
 
 // AgentConfig Agent 配置
 type AgentConfig struct {
-	MaxMaxSteps         int           `yaml:"maxSteps" json:"maxSteps"`
-	DefaultProvider     string        `yaml:"defaultProvider,omitempty" json:"defaultProvider,omitempty"`
-	DefaultModel        string        `yaml:"defaultModel" json:"defaultModel"`
-	EnableMemory        bool          `yaml:"enableMemory" json:"enableMemory"`
-	EnablePlanning      bool          `yaml:"enablePlanning" json:"enablePlanning"`
-	EnableRouter        bool          `yaml:"enableRouter" json:"enableRouter"`
-	MaxMemorySize       int           `yaml:"maxMemorySize" json:"maxMemorySize"`
-	Timeout             time.Duration `yaml:"timeout" json:"timeout"`
-	DefaultPlanningMode string        `yaml:"defaultPlanningMode,omitempty" json:"defaultPlanningMode,omitempty"`
+	MaxMaxSteps          int           `yaml:"maxSteps" json:"maxSteps"`
+	DefaultProvider      string        `yaml:"defaultProvider,omitempty" json:"defaultProvider,omitempty"`
+	DefaultModel         string        `yaml:"defaultModel" json:"defaultModel"`
+	EnableMemory         bool          `yaml:"enableMemory" json:"enableMemory"`
+	EnablePlanning       bool          `yaml:"enablePlanning" json:"enablePlanning"`
+	EnableRouter         bool          `yaml:"enableRouter" json:"enableRouter"`
+	EnableParallelTools  bool          `yaml:"enableParallelTools" json:"enableParallelTools"`
+	MaxMemorySize        int           `yaml:"maxMemorySize" json:"maxMemorySize"`
+	MaxParallelToolCalls int           `yaml:"maxParallelToolCalls" json:"maxParallelToolCalls"`
+	Timeout              time.Duration `yaml:"timeout" json:"timeout"`
+	DefaultPlanningMode  string        `yaml:"defaultPlanningMode,omitempty" json:"defaultPlanningMode,omitempty"`
 }
 
 // RouterConfig 路由器配置
@@ -227,15 +229,17 @@ func NewRuntimeManager(filePath string) *RuntimeManager {
 func DefaultRuntimeConfig() *RuntimeConfig {
 	return &RuntimeConfig{
 		Agent: AgentConfig{
-			MaxMaxSteps:         0,
-			DefaultProvider:     "",
-			DefaultModel:        "claude-3-5-sonnet",
-			EnableMemory:        true,
-			EnablePlanning:      true,
-			EnableRouter:        true,
-			MaxMemorySize:       1000,
-			Timeout:             5 * time.Minute,
-			DefaultPlanningMode: "",
+			MaxMaxSteps:          0,
+			DefaultProvider:      "",
+			DefaultModel:         "claude-3-5-sonnet",
+			EnableMemory:         true,
+			EnablePlanning:       true,
+			EnableRouter:         true,
+			EnableParallelTools:  false,
+			MaxMemorySize:        1000,
+			MaxParallelToolCalls: 1,
+			Timeout:              5 * time.Minute,
+			DefaultPlanningMode:  "",
 		},
 		Router: RouterConfig{
 			MinScore:        0.0,
@@ -763,6 +767,9 @@ func ValidateAgentConfig(config *AgentConfig) error {
 		default:
 			return errors.New(errors.ErrValidationFailed, "defaultPlanningMode must be planner_preferred, route_preferred, agent_only, or llm_only")
 		}
+	}
+	if config.MaxParallelToolCalls < 0 {
+		return errors.New(errors.ErrValidationFailed, "maxParallelToolCalls cannot be negative")
 	}
 	return nil
 }

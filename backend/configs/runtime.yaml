@@ -1,5 +1,9 @@
 version: "v1"
 
+agent:
+  enableParallelTools: true
+  maxParallelToolCalls: 4
+
 images:
   cacheMaxAge: 1h
   generations:

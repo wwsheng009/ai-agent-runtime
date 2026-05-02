@@ -104,6 +104,27 @@ func RenderFileEditingGuidance() string {
 	return strings.Join(rendered, "\n")
 }
 
+// RenderParallelToolGuidance renders guidance that encourages batching
+// independent read-only inspections into the same assistant turn.
+func RenderParallelToolGuidance() string {
+	lines := []string{
+		"Use this only for independent read-only inspections.",
+		"When a tool definition explicitly marks supports_parallel=true, prefer batching it with other independent calls in the same assistant turn.",
+		"When several inspections do not depend on each other, request them in the same assistant turn so the runtime can batch them in parallel.",
+		"Keep dependent tool calls serial and wait for the earlier result before planning the next dependent step.",
+	}
+
+	rendered := make([]string, 0, len(lines)+1)
+	rendered = append(rendered, "Parallel tool guidance:")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		rendered = append(rendered, "- "+line)
+	}
+	return strings.Join(rendered, "\n")
+}
+
 func detectedShellName(shell runtimeexecutor.Shell) string {
 	if text := strings.TrimSpace(string(shell.Type)); text != "" {
 		return text
