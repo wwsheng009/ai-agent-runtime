@@ -180,7 +180,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"instruction_tokens":    33,
 			"total_tokens":          512,
 		},
-	}); got != "[prompt] layers=base/system -> developer/developer | sources=system.md, tools.md (instruction 33 / total 512 tokens, 132 / 2048 chars)" {
+	}); got != "" {
 		t.Fatalf("unexpected llm started prompt layout render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
@@ -192,7 +192,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"prompt_layout_length":  132,
 			"instruction_tokens":    33,
 		},
-	}); got != "[prompt] layers=base/system -> developer/developer | sources=system.md, tools.md (33 tokens, 132 chars)" {
+	}); got != "" {
 		t.Fatalf("unexpected llm started prompt layout render without total: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestFinished, TraceID: "trace-1", Payload: map[string]interface{}{"success": true}}); got != "" {
@@ -3503,6 +3503,9 @@ func TestChatRuntimeEvents_NonInteractiveApprovalReturnsError(t *testing.T) {
 
 func TestChatRuntimeEventBridge_LogsActorRunToChatLogger(t *testing.T) {
 	logger := NewChatLogger("codex_ee", "codex", "gpt-5.4", true, "https://example.com")
+	if err := logger.SetLogDir(t.TempDir()); err != nil {
+		t.Fatalf("set log dir: %v", err)
+	}
 	session := &ChatSession{
 		Logger:         logger,
 		Stream:         true,
@@ -3594,6 +3597,21 @@ func TestChatRuntimeEventBridge_LogsActorRunToChatLogger(t *testing.T) {
 	if currentSummary.TotalRequests != 2 || currentSummary.TotalResponses != 2 || currentSummary.TotalToolCalls != 1 {
 		t.Fatalf("unexpected logger summary: %+v", currentSummary)
 	}
+	if currentSummary.TotalTokens != 26162 {
+		t.Fatalf("expected accumulated total tokens 26162, got %+v", currentSummary)
+	}
+
+	debugData, err := os.ReadFile(logger.DebugLogPath())
+	if err != nil {
+		t.Fatalf("read debug log: %v", err)
+	}
+	debugText := string(debugData)
+	if !strings.Contains(debugText, "prompt_layout_summary=layers=base/system -> developer/developer | sources=system.md, tools.md") {
+		t.Fatalf("expected prompt layout summary in debug log, got:\n%s", debugText)
+	}
+	if !strings.Contains(debugText, "usage_total_tokens=24762") || !strings.Contains(debugText, "usage_total_tokens=1400") {
+		t.Fatalf("expected per-round usage totals in debug log, got:\n%s", debugText)
+	}
 }
 
 func TestChatRuntimeEventBridge_BeginRunResetsSupplementSeparator(t *testing.T) {
@@ -3684,12 +3702,21 @@ func emitActorLoggingTestRun(bridge *chatRuntimeEventBridge, sessionID, traceID 
 			TraceID:   traceID,
 			Timestamp: base.Add(10 * time.Millisecond),
 			Payload: map[string]interface{}{
-				"trace_id":      traceID,
-				"step":          1,
-				"provider":      "codex_ee",
-				"model":         "gpt-5.4",
-				"message_count": 3,
-				"tool_count":    1,
+				"trace_id":              traceID,
+				"step":                  1,
+				"provider":              "codex_ee",
+				"model":                 "gpt-5.4",
+				"message_count":         3,
+				"tool_count":            1,
+				"prompt_layout_summary": "layers=base/system -> developer/developer | sources=system.md, tools.md",
+				"instruction_tokens":    33,
+				"total_tokens":          512,
+				"prompt_layout_length":  132,
+				"total_message_chars":   2048,
+				"prompt_budget":         200000,
+				"context_window_tokens": 270000,
+				"budget_source":         "model_capability_auto_compact_token_limit",
+				"budget_source_detail":  "provider/model capability auto-compact token limit",
 			},
 		},
 		{
@@ -3698,12 +3725,18 @@ func emitActorLoggingTestRun(bridge *chatRuntimeEventBridge, sessionID, traceID 
 			TraceID:   traceID,
 			Timestamp: base.Add(20 * time.Millisecond),
 			Payload: map[string]interface{}{
-				"trace_id":        traceID,
-				"step":            1,
-				"provider":        "codex_ee",
-				"model":           "gpt-5.4",
-				"success":         true,
-				"tool_call_count": 1,
+				"trace_id":                traceID,
+				"step":                    1,
+				"provider":                "codex_ee",
+				"model":                   "gpt-5.4",
+				"success":                 true,
+				"tool_call_count":         1,
+				"usage_prompt_tokens":     23099,
+				"usage_completion_tokens": 1663,
+				"usage_total_tokens":      24762,
+				"usage_cached_tokens":     2048,
+				"usage_reasoning_tokens":  512,
+				"usage_source":            "provider_reported",
 			},
 		},
 		{
@@ -3767,12 +3800,18 @@ func emitActorLoggingTestRun(bridge *chatRuntimeEventBridge, sessionID, traceID 
 			TraceID:   traceID,
 			Timestamp: base.Add(55 * time.Millisecond),
 			Payload: map[string]interface{}{
-				"trace_id":        traceID,
-				"step":            2,
-				"provider":        "codex_ee",
-				"model":           "gpt-5.4",
-				"success":         true,
-				"tool_call_count": 0,
+				"trace_id":                traceID,
+				"step":                    2,
+				"provider":                "codex_ee",
+				"model":                   "gpt-5.4",
+				"success":                 true,
+				"tool_call_count":         0,
+				"usage_prompt_tokens":     1200,
+				"usage_completion_tokens": 200,
+				"usage_total_tokens":      1400,
+				"usage_cached_tokens":     0,
+				"usage_reasoning_tokens":  0,
+				"usage_source":            "provider_reported",
 			},
 		},
 		{

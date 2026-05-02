@@ -382,6 +382,9 @@ func (b *chatRuntimeEventBridge) logLLMRequestStarted(event runtimeevents.Event)
 	state.StartedAt = runtimeEventTimestamp(event)
 	state.RequestLogged = true
 	b.session.Logger.LogRequest(state.Scope, buildRuntimeEventLogContent(event, prompt))
+	if debugInfo := formatRuntimeLLMRequestDebugInfo(event); debugInfo != "" {
+		writeSessionDebugInfo(b.session, debugInfo, false)
+	}
 }
 
 func (b *chatRuntimeEventBridge) logLLMRequestFinished(event runtimeevents.Event) {
@@ -413,10 +416,16 @@ func (b *chatRuntimeEventBridge) logLLMRequestFinished(event runtimeevents.Event
 		state.ResponseLogged = true
 		state.AwaitingAssistantResult = false
 		state.PendingResponseContent = nil
+		if debugInfo := formatRuntimeLLMRequestDebugInfo(event); debugInfo != "" {
+			writeSessionDebugInfo(b.session, debugInfo, false)
+		}
 		return
 	}
 	state.PendingResponseContent = content
 	state.AwaitingAssistantResult = true
+	if debugInfo := formatRuntimeLLMRequestDebugInfo(event); debugInfo != "" {
+		writeSessionDebugInfo(b.session, debugInfo, false)
+	}
 }
 
 func (b *chatRuntimeEventBridge) logToolRequested(event runtimeevents.Event) {
@@ -2120,6 +2129,8 @@ func budgetCandidateLabel(key string) string {
 		return "模型能力 auto-compact ratio"
 	case "provider_context_limit_default_ratio":
 		return "provider context limit 默认比例"
+	case "default_context_window_default_ratio":
+		return "默认 context window 比例"
 	case "remaining_budget":
 		return "当前轮剩余预算"
 	default:
@@ -2143,6 +2154,8 @@ func budgetSourceSummary(source, detail string) string {
 		return "模型能力 max_context_tokens"
 	case "provider_context_limit":
 		return "provider context limit"
+	case "default_context_window_default_ratio":
+		return "默认 context window 的自动压缩比例"
 	case "":
 		return truncateChatRuntimeText(detail, 120)
 	default:
@@ -3093,60 +3106,100 @@ func chatLLMRequestToolAvailabilityHint(payload map[string]interface{}) string {
 }
 
 func chatLLMRequestPromptLayoutHint(payload map[string]interface{}) string {
-	if payload == nil {
+	return ""
+}
+
+func formatRuntimeLLMRequestDebugInfo(event runtimeevents.Event) string {
+	switch event.Type {
+	case runtimechat.EventLLMRequestStarted, "llm.request.started":
+		return formatRuntimeLLMRequestStartedDebugInfo(event)
+	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
+		return formatRuntimeLLMRequestFinishedDebugInfo(event)
+	default:
 		return ""
 	}
-	summary := payloadStringValue(payload["prompt_layout_summary"])
-	if summary == "" {
-		summary = payloadStringValue(payload["prompt_layout"])
-	}
-	if summary == "" {
+}
+
+func formatRuntimeLLMRequestStartedDebugInfo(event runtimeevents.Event) string {
+	if len(event.Payload) == 0 {
 		return ""
 	}
-	line := "[prompt] " + summary
-	instructionTokens := intPayloadValue(payload, "instruction_tokens")
-	totalTokens := intPayloadValue(payload, "total_tokens")
-	instructionChars := intPayloadValue(payload, "prompt_layout_length")
-	totalChars := intPayloadValue(payload, "total_message_chars")
-	if instructionTokens > 0 && totalTokens > 0 && totalTokens != instructionTokens {
-		line += fmt.Sprintf(" (instruction %d / total %d tokens", instructionTokens, totalTokens)
-		if instructionChars > 0 && totalChars > 0 {
-			line += fmt.Sprintf(", %d / %d chars", instructionChars, totalChars)
-		}
-		line += ")"
-	} else if instructionTokens > 0 {
-		line += fmt.Sprintf(" (%d tokens", instructionTokens)
-		if instructionChars > 0 {
-			line += fmt.Sprintf(", %d chars", instructionChars)
-		}
-		line += ")"
-	} else if totalTokens > 0 {
-		line += fmt.Sprintf(" (total %d tokens", totalTokens)
-		if totalChars > 0 {
-			line += fmt.Sprintf(", %d chars", totalChars)
-		}
-		line += ")"
-	} else if instructionChars > 0 && totalChars > 0 && totalChars != instructionChars {
-		line += fmt.Sprintf(" (instruction %d / total %d chars)", instructionChars, totalChars)
-	} else if instructionChars > 0 {
-		line += fmt.Sprintf(" (%d chars)", instructionChars)
-	} else if totalChars > 0 {
-		line += fmt.Sprintf(" (total %d chars)", totalChars)
+	parts := make([]string, 0, 8)
+	if traceID := strings.TrimSpace(firstNonEmptyChatValue(event.TraceID, payloadStringValue(event.Payload["trace_id"]))); traceID != "" {
+		parts = append(parts, "trace_id="+traceID)
 	}
-	extras := make([]string, 0, 3)
-	if budget := intPayloadValue(payload, "prompt_budget"); budget > 0 {
-		extras = append(extras, fmt.Sprintf("budget=%d", budget))
+	if step := strings.TrimSpace(payloadStringValue(event.Payload["step"])); step != "" {
+		parts = append(parts, "step="+step)
 	}
-	if window := intPayloadValue(payload, "context_window_tokens"); window > 0 {
-		extras = append(extras, fmt.Sprintf("window=%d", window))
+	if summary := firstNonEmptyChatValue(
+		strings.TrimSpace(payloadStringValue(event.Payload["prompt_layout_summary"])),
+		strings.TrimSpace(payloadStringValue(event.Payload["prompt_layout"])),
+	); summary != "" {
+		parts = append(parts, "prompt_layout_summary="+truncateChatRuntimeText(summary, 200))
 	}
-	if source := strings.TrimSpace(payloadStringValue(payload["budget_source"])); source != "" {
-		extras = append(extras, "source="+truncateChatRuntimeText(source, 40))
+	if instructionTokens := intPayloadValue(event.Payload, "instruction_tokens"); instructionTokens > 0 {
+		parts = append(parts, fmt.Sprintf("prompt_layout_instruction_tokens=%d", instructionTokens))
 	}
-	if len(extras) > 0 {
-		line += " [" + strings.Join(extras, " ") + "]"
+	if totalTokens := intPayloadValue(event.Payload, "total_tokens"); totalTokens > 0 {
+		parts = append(parts, fmt.Sprintf("prompt_layout_total_tokens=%d", totalTokens))
 	}
-	return truncateChatRuntimeText(line, 200)
+	if layoutLength := intPayloadValue(event.Payload, "prompt_layout_length"); layoutLength > 0 {
+		parts = append(parts, fmt.Sprintf("prompt_layout_length=%d", layoutLength))
+	}
+	if totalChars := intPayloadValue(event.Payload, "total_message_chars"); totalChars > 0 {
+		parts = append(parts, fmt.Sprintf("total_message_chars=%d", totalChars))
+	}
+	if budget := intPayloadValue(event.Payload, "prompt_budget"); budget > 0 {
+		parts = append(parts, fmt.Sprintf("prompt_budget=%d", budget))
+	}
+	if window := intPayloadValue(event.Payload, "context_window_tokens"); window > 0 {
+		parts = append(parts, fmt.Sprintf("context_window_tokens=%d", window))
+	}
+	if source := strings.TrimSpace(payloadStringValue(event.Payload["budget_source"])); source != "" {
+		parts = append(parts, "budget_source="+truncateChatRuntimeText(source, 80))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[llm-debug] request_started " + strings.Join(parts, " ")
+}
+
+func formatRuntimeLLMRequestFinishedDebugInfo(event runtimeevents.Event) string {
+	if len(event.Payload) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 8)
+	if traceID := strings.TrimSpace(firstNonEmptyChatValue(event.TraceID, payloadStringValue(event.Payload["trace_id"]))); traceID != "" {
+		parts = append(parts, "trace_id="+traceID)
+	}
+	if step := strings.TrimSpace(payloadStringValue(event.Payload["step"])); step != "" {
+		parts = append(parts, "step="+step)
+	}
+	if _, ok := event.Payload["success"]; ok {
+		parts = append(parts, fmt.Sprintf("success=%t", payloadBoolValue(event.Payload, "success")))
+	}
+	if promptTokens := intPayloadValue(event.Payload, "usage_prompt_tokens"); promptTokens > 0 {
+		parts = append(parts, fmt.Sprintf("usage_prompt_tokens=%d", promptTokens))
+	}
+	if completionTokens := intPayloadValue(event.Payload, "usage_completion_tokens"); completionTokens > 0 {
+		parts = append(parts, fmt.Sprintf("usage_completion_tokens=%d", completionTokens))
+	}
+	if totalTokens := intPayloadValue(event.Payload, "usage_total_tokens"); totalTokens > 0 {
+		parts = append(parts, fmt.Sprintf("usage_total_tokens=%d", totalTokens))
+	}
+	if cachedTokens := intPayloadValue(event.Payload, "usage_cached_tokens"); cachedTokens > 0 {
+		parts = append(parts, fmt.Sprintf("usage_cached_tokens=%d", cachedTokens))
+	}
+	if reasoningTokens := intPayloadValue(event.Payload, "usage_reasoning_tokens"); reasoningTokens > 0 {
+		parts = append(parts, fmt.Sprintf("usage_reasoning_tokens=%d", reasoningTokens))
+	}
+	if source := strings.TrimSpace(payloadStringValue(event.Payload["usage_source"])); source != "" {
+		parts = append(parts, "usage_source="+truncateChatRuntimeText(source, 80))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[llm-debug] request_finished " + strings.Join(parts, " ")
 }
 
 func chatToolPostCommandHint(payload map[string]interface{}) string {
