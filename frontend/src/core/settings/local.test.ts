@@ -64,6 +64,9 @@ describe("app settings storage helpers", () => {
         },
       }),
     ).toEqual({
+      localization: {
+        locale: "system",
+      },
       appearance: {
         accentTone: "cyan",
         chatTextSize: 18,

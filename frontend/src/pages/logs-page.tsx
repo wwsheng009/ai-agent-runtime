@@ -9,10 +9,9 @@ import {
   WifiIcon,
   WifiOffIcon,
 } from "lucide-react";
-import { lazy, startTransition, Suspense, useState } from "react";
+import { lazy, startTransition, Suspense, useState, type ComponentProps } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Select } from "@/components/ui/select";
@@ -44,6 +43,19 @@ const LogsPageDetailPanel = lazy(() =>
     default: module.LogsPageDetailPanel,
   })),
 );
+
+function LogHeaderBadge({ className, children }: ComponentProps<"span">) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5 app-text-9 font-semibold uppercase tracking-[0.12em] text-[var(--muted-foreground)]",
+        className,
+      )}
+    >
+      {children}
+    </span>
+  );
+}
 
 function formatListTimestamp(
   locale: "zh-CN" | "en-US",
@@ -532,30 +544,30 @@ export function LogsPage() {
             <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
               <div className="min-w-0 space-y-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge className="border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]">
+                  <LogHeaderBadge className="border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]">
                     <TerminalSquareIcon size={13} />
                     {t("title")}
-                  </Badge>
-                  <Badge className={connection.badgeClassName}>
+                  </LogHeaderBadge>
+                  <LogHeaderBadge className={connection.badgeClassName}>
                     {connection.icon}
                     {connection.label}
-                  </Badge>
-                <Badge
-                  className={cn(
-                    logFileExists
-                      ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-200"
-                      : "border-amber-500/25 bg-amber-500/10 text-amber-200",
-                  )}
-                >
+                  </LogHeaderBadge>
+                  <LogHeaderBadge
+                    className={cn(
+                      logFileExists
+                        ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-200"
+                        : "border-amber-500/25 bg-amber-500/10 text-amber-200",
+                    )}
+                  >
                   {logFileExists
                     ? tCommon("states.fileDetected")
                     : tCommon("states.waitingForLogFile")}
-                </Badge>
+                  </LogHeaderBadge>
                   <div className="hidden h-4 w-px bg-[var(--border)] sm:block" />
-                  <h1 className="text-base font-semibold tracking-[-0.03em] sm:text-[1.05rem]">
+                  <h1 className="app-text-12 font-semibold tracking-[-0.03em]">
                     {t("title")}
                   </h1>
-                  <span className="app-text-10 uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                  <span className="app-text-9 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
                     {t("subtitle")}
                   </span>
                 </div>
@@ -587,12 +599,12 @@ export function LogsPage() {
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder={t("searchPlaceholder")}
-                  className="h-8 w-full rounded-[0.7rem] border border-[var(--border)] bg-black/15 pl-10 pr-4 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent-primary-border)] focus:ring-2 focus:ring-[var(--ring)]"
+                  className="h-8 w-full rounded-[0.7rem] border border-[var(--border)] bg-black/15 pl-10 pr-4 app-text-11 text-[var(--foreground)] outline-none transition focus:border-[var(--accent-primary-border)] focus:ring-2 focus:ring-[var(--ring)]"
                 />
               </label>
 
               <label className="flex h-8 min-w-[8.5rem] items-center gap-2 rounded-[0.7rem] border border-[var(--border)] bg-black/10 px-3">
-                <span className="app-text-11 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+                <span className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
                   {t("levelLabel")}
                 </span>
                 <Select
@@ -601,13 +613,13 @@ export function LogsPage() {
                   onChange={(value) => setLevel(value as RuntimeLogLevelFilter)}
                   options={levelFilterOptions}
                   className="min-w-0 flex-1"
-                  triggerClassName="h-full w-full border-0 bg-transparent px-0 py-0 text-base shadow-none hover:border-transparent hover:bg-transparent focus-visible:ring-0"
-                  optionClassName="font-mono text-base"
+                  triggerClassName="h-full w-full border-0 bg-transparent px-0 py-0 app-text-11 shadow-none hover:border-transparent hover:bg-transparent focus-visible:ring-0"
+                  optionClassName="font-mono app-text-11"
                 />
               </label>
 
               <label className="flex h-8 min-w-[11rem] flex-1 items-center gap-2 rounded-[0.7rem] border border-[var(--border)] bg-black/10 px-3 sm:flex-none">
-                <span className="flex items-center gap-1.5 app-text-11 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+                <span className="flex items-center gap-1.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
                   <ShieldIcon size={12} />
                   {t("tokenLabel")}
                 </span>
@@ -616,7 +628,7 @@ export function LogsPage() {
                   value={adminToken}
                   onChange={(event) => setAdminToken(event.target.value)}
                   placeholder={t("tokenPlaceholder")}
-                  className="min-w-0 flex-1 bg-transparent text-sm text-[var(--foreground)] outline-none"
+                  className="min-w-0 flex-1 bg-transparent app-text-11 text-[var(--foreground)] outline-none"
                 />
               </label>
 
@@ -642,7 +654,7 @@ export function LogsPage() {
               </div>
 
               <label className="flex h-8 items-center gap-2.5 rounded-[0.7rem] border border-[var(--border)] bg-black/10 px-3 whitespace-nowrap">
-                <span className="app-text-13 font-medium">{t("followLatest")}</span>
+                <span className="app-text-11 font-medium">{t("followLatest")}</span>
                 <input
                   type="checkbox"
                   checked={follow}
@@ -666,15 +678,15 @@ export function LogsPage() {
 
             {activeChips.length > 0 ? (
               <div className="flex flex-wrap items-center gap-2 rounded-[0.8rem] border border-[var(--border)]/70 bg-black/8 px-2.5 py-1.5">
-                <span className="app-text-10 uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                <span className="app-text-9 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
                   {t("currentView")}
                 </span>
                 {activeChips.map((chip) => (
-                    <button
-                      key={`${chip.key}:${chip.value}`}
-                      type="button"
-                      onClick={() => clearActiveChip(chip.key)}
-                    className="inline-flex items-center gap-2 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2.5 py-1 text-base text-[var(--foreground)] transition hover:border-[var(--accent-primary-border)] hover:bg-[var(--accent-primary-soft)]"
+                  <button
+                    key={`${chip.key}:${chip.value}`}
+                    type="button"
+                    onClick={() => clearActiveChip(chip.key)}
+                    className="inline-flex items-center gap-2 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2.5 py-1 app-text-10 text-[var(--foreground)] transition hover:border-[var(--accent-primary-border)] hover:bg-[var(--accent-primary-soft)]"
                     title={`${t("clearSearch")} ${chip.label}`}
                   >
                     <span className="uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
@@ -701,10 +713,10 @@ export function LogsPage() {
           <div className="surface-panel flex min-h-[22rem] flex-col overflow-hidden rounded-[0.95rem] lg:min-h-0">
             <div className="flex items-center justify-between border-b border-[var(--border)] px-3 py-2">
               <div>
-                <div className="app-text-13 font-semibold tracking-[-0.02em]">
+                <div className="app-text-12 font-semibold tracking-[-0.02em]">
                   {t("listTitle")}
                 </div>
-                <div className="app-text-11 text-[var(--muted-foreground)]">
+                <div className="app-text-10 text-[var(--muted-foreground)]">
                   {t("listSubtitle")}
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -730,7 +742,7 @@ export function LogsPage() {
                             setLevel(active ? "" : (stat.key as RuntimeLogLevelFilter));
                           }}
                           className={cn(
-                            "inline-flex items-center gap-1 rounded-[0.65rem] border px-2 py-1 font-mono text-base uppercase tracking-[0.14em] transition",
+                            "inline-flex items-center gap-1 rounded-[0.65rem] border px-2 py-1 font-mono app-text-9 font-medium uppercase tracking-[0.09em] transition",
                             levelStatTone(stat.key),
                             stat.count === 0 ? "opacity-45" : "",
                             canFilter ? "hover:-translate-y-px" : "cursor-default",
@@ -744,7 +756,7 @@ export function LogsPage() {
                     })}
                 </div>
               </div>
-              <Badge>{loading ? t("loading") : `${entries.length} ${t("entries")}`}</Badge>
+              <LogHeaderBadge>{loading ? t("loading") : `${entries.length} ${t("entries")}`}</LogHeaderBadge>
             </div>
             <div className="grid grid-cols-[4.1rem_2.15rem_minmax(0,1fr)] gap-2 border-b border-[var(--border)]/70 px-3 py-2 font-mono app-text-10 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
               <div className="text-right">{t("time")}</div>
