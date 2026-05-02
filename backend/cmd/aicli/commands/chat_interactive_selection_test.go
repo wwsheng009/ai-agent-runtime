@@ -199,7 +199,7 @@ func TestPromptStartupSessionSelectionWithReader_RetriesAfterInvalidChoice(t *te
 	}
 	for _, expected := range []string{
 		"匹配会话:",
-		"[1]  恢复最近会话",
+		"[1]  恢复最近可恢复会话",
 		"[2]  选择历史会话",
 		"[3]  新建会话",
 	} {

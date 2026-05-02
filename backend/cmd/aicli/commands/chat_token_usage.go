@@ -10,6 +10,9 @@ import (
 )
 
 const chatRuntimeContextTokenCount = "aicli_token_count"
+const chatRuntimeContextContextTokenCount = "aicli_context_token_count"
+const chatRuntimeContextContextWindowTokenCount = "aicli_context_window_token_count"
+const chatRuntimeContextTurnContextTokenCount = "aicli_turn_context_token_count"
 
 func applyChatTokenUsage(session *ChatSession, usage *runtimetypes.TokenUsage) {
 	if session == nil || usage == nil || usage.TotalTokens <= 0 {
@@ -100,6 +103,21 @@ func restoreChatTokenCount(session *ChatSession, runtimeSession *runtimechat.Ses
 	}
 	if count, ok := runtimeSessionContextInt(runtimeSession, chatRuntimeContextTokenCount); ok {
 		session.TokenCount = count
+	}
+}
+
+func restoreChatContextTokenUsage(session *ChatSession, runtimeSession *runtimechat.Session) {
+	if session == nil {
+		return
+	}
+	if count, ok := runtimeSessionContextInt(runtimeSession, chatRuntimeContextContextTokenCount); ok {
+		session.ContextTokenCount = count
+	}
+	if count, ok := runtimeSessionContextInt(runtimeSession, chatRuntimeContextContextWindowTokenCount); ok {
+		session.ContextWindowTokenCount = count
+	}
+	if count, ok := runtimeSessionContextInt(runtimeSession, chatRuntimeContextTurnContextTokenCount); ok {
+		session.TurnContextTokenCount = count
 	}
 }
 

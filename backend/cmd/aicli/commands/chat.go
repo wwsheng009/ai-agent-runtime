@@ -213,7 +213,7 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	}
 
 	// 启动时不再弹出历史会话选择菜单：默认直接进入新会话，用户可在聊天中通过
-	// /resume 恢复最近会话、/sessions [query] 浏览历史、/load <id> 加载指定会话、
+	// /resume 恢复最近可恢复会话、/sessions [query] 浏览历史、/load <id> 加载指定会话、
 	// /new 创建新会话。`--session <id>`、`--resume`、`--list-sessions` 等显式
 	// 命令行参数仍然按原有语义生效。
 

@@ -246,7 +246,7 @@ func TestDecodeToolArguments_RecordsParseError(t *testing.T) {
 	}
 }
 
-func TestLoadRequestedRuntimeSessionReturnsLatestForResume(t *testing.T) {
+func TestLoadRequestedRuntimeSessionReturnsLatestMeaningfulSessionForResume(t *testing.T) {
 	storage, err := runtimechat.NewFileStorage(t.TempDir())
 	if err != nil {
 		t.Fatalf("new file storage: %v", err)
@@ -279,12 +279,93 @@ func TestLoadRequestedRuntimeSessionReturnsLatestForResume(t *testing.T) {
 		t.Fatalf("update second session: %v", err)
 	}
 
+	time.Sleep(10 * time.Millisecond)
+
+	third, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create third session: %v", err)
+	}
+	third.ReplaceHistory([]runtimetypes.Message{
+		{
+			Role:     "system",
+			Content:  "system placeholder",
+			Metadata: runtimetypes.NewMetadata(),
+		},
+	})
+	if err := manager.Update(ctx, third); err != nil {
+		t.Fatalf("update third session: %v", err)
+	}
+
 	loaded, err := loadRequestedRuntimeSession(ctx, manager, "tester", "", true)
 	if err != nil {
 		t.Fatalf("loadRequestedRuntimeSession: %v", err)
 	}
 	if loaded == nil || loaded.ID != second.ID {
 		t.Fatalf("expected latest session %s, got %#v", second.ID, loaded)
+	}
+	if loaded.ID == third.ID {
+		t.Fatalf("did not expect system-only session %s to be selected", third.ID)
+	}
+}
+
+func TestResumeLatestRuntimeConversationSkipsSystemOnlySession(t *testing.T) {
+	storage, err := runtimechat.NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file storage: %v", err)
+	}
+	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
+		TTL:             24 * time.Hour,
+		MaxHistory:      20,
+		CleanupInterval: 0,
+		AutoArchive:     false,
+	})
+
+	ctx := context.Background()
+	first, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create first session: %v", err)
+	}
+	first.ReplaceHistory([]runtimetypes.Message{{Role: "user", Content: "first", Metadata: runtimetypes.NewMetadata()}})
+	if err := manager.Update(ctx, first); err != nil {
+		t.Fatalf("update first session: %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	second, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create second session: %v", err)
+	}
+	second.ReplaceHistory([]runtimetypes.Message{
+		{
+			Role:     "system",
+			Content:  "system placeholder",
+			Metadata: runtimetypes.NewMetadata(),
+		},
+	})
+	if err := manager.Update(ctx, second); err != nil {
+		t.Fatalf("update second session: %v", err)
+	}
+
+	session := &ChatSession{
+		SessionManager: manager,
+		SessionUserID:  "tester",
+	}
+
+	if err := resumeLatestRuntimeConversation(session); err != nil {
+		t.Fatalf("resumeLatestRuntimeConversation: %v", err)
+	}
+	if session.RuntimeSession == nil {
+		t.Fatal("expected runtime session to be restored")
+	}
+	if session.RuntimeSession.ID != first.ID {
+		t.Fatalf("expected latest meaningful session %s, got %s", first.ID, session.RuntimeSession.ID)
+	}
+	if len(session.Messages) < 2 {
+		t.Fatalf("expected restored chat history to include system prompt and user message, got %#v", session.Messages)
+	}
+	if session.Messages[1].Content != "first" {
+		t.Fatalf("expected restored chat history from first session, got %#v", session.Messages)
 	}
 }
 

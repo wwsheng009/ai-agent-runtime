@@ -50,6 +50,7 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 		ProfileContext:  map[string]interface{}{"collaboration_mode": "default"},
 		RuntimeSession:  &runtimechat.Session{ID: "019de76b-2481-7130-b902-f6166e6d2b96", State: runtimechat.StateActive},
 		Logger:          logger,
+		TokenCount:      2137949,
 		Messages:        nil,
 	}
 
@@ -80,6 +81,8 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 		"Default",
 		"Session:",
 		"019de76b-2481-7130-b902-f6166e6d2b96",
+		"Token count:",
+		"2.1m",
 		"Token usage:",
 		"34 total (21 input + 13 output)",
 		"Limits:",
@@ -92,5 +95,13 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 	}
 	if !strings.Contains(output, "╭") || !strings.Contains(output, "╰") {
 		t.Fatalf("expected boxed status output, got:\n%s", output)
+	}
+}
+
+func TestBuildChatStatusTokenCountValue_FormatsCumulativeCount(t *testing.T) {
+	session := &ChatSession{TokenCount: 2137949}
+
+	if got := buildChatStatusTokenCountValue(session); got != "2.1m" {
+		t.Fatalf("expected compact cumulative token count, got %q", got)
 	}
 }

@@ -270,13 +270,14 @@ func resolveChatStatusUsedTokens(session *ChatSession) int {
 	if session == nil {
 		return 0
 	}
-	if session.TokenCount > 0 {
-		return session.TokenCount
+	if session.ContextTokenCount > 0 {
+		return session.ContextTokenCount
 	}
-	if session.Logger != nil {
-		if summary := session.Logger.CurrentSummary(); summary != nil && summary.TotalTokens > 0 {
-			return summary.TotalTokens
-		}
+	if session.TurnContextTokenCount > 0 {
+		return session.TurnContextTokenCount
+	}
+	if count := countChatContextTokensForMessages(session, session.Messages); count > 0 {
+		return count
 	}
 	return 0
 }

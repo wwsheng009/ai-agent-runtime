@@ -14,8 +14,8 @@ import (
 //
 // Behavior:
 //   - /resume                  -> interactive menu (latest / pick from list / cancel).
-//                                 Falls back to latest when interaction is unavailable.
-//   - /resume latest           -> legacy "resume latest" behavior.
+//     Falls back to the latest resumable session when interaction is unavailable.
+//   - /resume latest           -> legacy "resume latest" behavior, resolved as the latest resumable session.
 //   - /resume <session-id>     -> load that session by ID (alias of /load).
 //
 // The function never exits the chat loop, mirroring the rest of the slash commands.
@@ -50,14 +50,15 @@ func resumeLatestAndPrint(session *ChatSession) bool {
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
-	fmt.Println("已恢复最近会话")
+	fmt.Println("已恢复最近可恢复会话")
 	printResumeSuccess(session)
 	return false
 }
 
 func resumeInteractiveSelect(session *ChatSession) bool {
 	// Non-interactive contexts (JSON output, no-interactive mode) keep the
-	// legacy "resume latest" behavior so scripts are unaffected.
+	// legacy "resume latest" behavior so scripts are unaffected, but the
+	// selection still skips system-only placeholder sessions.
 	if session.NoInteractive || session.JSONOutput {
 		return resumeLatestAndPrint(session)
 	}
@@ -117,7 +118,7 @@ const (
 
 func readResumeMenuChoice(session *ChatSession, optionWidth int) (resumeMenuChoice, error) {
 	for {
-		fmt.Printf("  %-*s %s\n", optionWidth, "[1]", "恢复最近会话")
+		fmt.Printf("  %-*s %s\n", optionWidth, "[1]", "恢复最近可恢复会话")
 		fmt.Printf("  %-*s %s\n", optionWidth, "[2]", "选择历史会话")
 		fmt.Printf("  %-*s %s\n", optionWidth, "[3]", "取消（返回当前会话）")
 

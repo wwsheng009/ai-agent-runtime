@@ -229,12 +229,15 @@ func TestSyncAndRestoreChatTokenCountRoundTrip(t *testing.T) {
 	}
 
 	session := &ChatSession{
-		ProviderName:   "codex_ee",
-		Provider:       config.Provider{Protocol: "codex"},
-		Model:          "gpt-5.2-code",
-		SessionManager: manager,
-		RuntimeSession: runtimeSession,
-		TokenCount:     1234,
+		ProviderName:            "codex_ee",
+		Provider:                config.Provider{Protocol: "codex"},
+		Model:                   "gpt-5.2-code",
+		SessionManager:          manager,
+		RuntimeSession:          runtimeSession,
+		TokenCount:              1234,
+		ContextTokenCount:       321,
+		ContextWindowTokenCount: 128000,
+		TurnContextTokenCount:   654,
 	}
 
 	if err := syncRuntimeSessionFromChat(session); err != nil {
@@ -248,6 +251,15 @@ func TestSyncAndRestoreChatTokenCountRoundTrip(t *testing.T) {
 	if got, ok := runtimeSessionContextInt(cloned, chatRuntimeContextTokenCount); !ok || got != 1234 {
 		t.Fatalf("expected persisted token count 1234, got ok=%v value=%d", ok, got)
 	}
+	if got, ok := runtimeSessionContextInt(cloned, chatRuntimeContextContextTokenCount); !ok || got != 321 {
+		t.Fatalf("expected persisted context token count 321, got ok=%v value=%d", ok, got)
+	}
+	if got, ok := runtimeSessionContextInt(cloned, chatRuntimeContextContextWindowTokenCount); !ok || got != 128000 {
+		t.Fatalf("expected persisted context window token count 128000, got ok=%v value=%d", ok, got)
+	}
+	if got, ok := runtimeSessionContextInt(cloned, chatRuntimeContextTurnContextTokenCount); !ok || got != 654 {
+		t.Fatalf("expected persisted turn context token count 654, got ok=%v value=%d", ok, got)
+	}
 
 	restored := &ChatSession{}
 	if err := restoreChatStateFromRuntimeSession(restored, cloned); err != nil {
@@ -255,6 +267,10 @@ func TestSyncAndRestoreChatTokenCountRoundTrip(t *testing.T) {
 	}
 	if restored.TokenCount != 1234 {
 		t.Fatalf("expected restored token count 1234, got %d", restored.TokenCount)
+	}
+	if restored.ContextTokenCount != 321 || restored.ContextWindowTokenCount != 128000 || restored.TurnContextTokenCount != 654 {
+		t.Fatalf("expected restored context token usage, got ctx=%d window=%d turn=%d",
+			restored.ContextTokenCount, restored.ContextWindowTokenCount, restored.TurnContextTokenCount)
 	}
 }
 

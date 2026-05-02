@@ -562,6 +562,9 @@ func TestChatSlashArgumentCompletionModelAndResume(t *testing.T) {
 	if !containsSlashCandidate(resumeController.state.Candidates, "latest") {
 		t.Fatalf("expected resume popup to include latest shortcut, got %#v", resumeController.state.Candidates)
 	}
+	if candidate := findSlashCandidate(resumeController.state.Candidates, "latest"); candidate == nil || candidate.Summary != "直接恢复最近可恢复会话" {
+		t.Fatalf("expected latest shortcut summary to describe resumable sessions, got %#v", candidate)
+	}
 	if !containsSlashCandidate(resumeController.state.Candidates, "resume-1") || !containsSlashCandidate(resumeController.state.Candidates, "resume-2") {
 		t.Fatalf("expected resume popup to include cached session ids, got %#v", resumeController.state.Candidates)
 	}
@@ -632,6 +635,9 @@ func TestBuildChatSlashHelpLinesUsesCatalog(t *testing.T) {
 			t.Fatalf("expected help text to include %q, got %#v", label, lines)
 		}
 	}
+	if !strings.Contains(joined, "恢复最近可恢复会话或弹出恢复菜单") {
+		t.Fatalf("expected help text to use resumable-session wording, got %#v", lines)
+	}
 }
 
 type countingSessionStorage struct {
@@ -680,6 +686,15 @@ func containsSlashCandidate(candidates []chatSlashCompletionCandidate, command s
 		}
 	}
 	return false
+}
+
+func findSlashCandidate(candidates []chatSlashCompletionCandidate, command string) *chatSlashCompletionCandidate {
+	for i := range candidates {
+		if strings.EqualFold(candidates[i].Command, command) {
+			return &candidates[i]
+		}
+	}
+	return nil
 }
 
 func extractHandleCommandRouteSet(t *testing.T) map[string]struct{} {

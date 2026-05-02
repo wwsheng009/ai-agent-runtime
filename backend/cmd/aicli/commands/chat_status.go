@@ -84,6 +84,7 @@ func buildChatStatusBoxLines(session *ChatSession, contentWidth int) []string {
 		{Label: "Agents.md", Value: buildChatStatusAgentsMarkdownValue(session)},
 		{Label: "Collaboration mode", Value: buildChatStatusCollaborationModeValue(session)},
 		{Label: "Session", Value: buildChatStatusSessionValue(session)},
+		{Label: "Token count", Value: buildChatStatusTokenCountValue(session)},
 		{Label: "Token usage", Value: buildChatStatusTokenUsageValue(session)},
 		{Label: "Limits", Value: buildChatStatusLimitsValue(session)},
 	}
@@ -334,6 +335,13 @@ func buildChatStatusSessionValue(session *ChatSession) string {
 		return "<none>"
 	}
 	return sessionID
+}
+
+func buildChatStatusTokenCountValue(session *ChatSession) string {
+	if session == nil {
+		return "<none>"
+	}
+	return compactStatusCount(session.TokenCount)
 }
 
 func buildChatStatusTokenUsageValue(session *ChatSession) string {

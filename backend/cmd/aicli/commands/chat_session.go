@@ -110,7 +110,7 @@ func loadRequestedRuntimeSession(ctx context.Context, manager *runtimechat.Sessi
 		return nil, nil
 	}
 
-	session, err := manager.GetLatest(ctx, userID)
+	session, err := loadLatestResumableRuntimeSession(ctx, manager, userID)
 	if err != nil {
 		if errors.Is(err, runtimechat.ErrSessionNotFound) {
 			return nil, nil
@@ -133,6 +133,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	session.TurnRequestCount = 0
 	resetChatTurnTokenUsage(session)
 	restoreChatRuntimeContext(session, session.RuntimeSession)
+	restoreChatContextTokenUsage(session, session.RuntimeSession)
 	restoreChatTokenCount(session, session.RuntimeSession)
 	return nil
 }
@@ -194,7 +195,7 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 		return fmt.Errorf("会话管理未启用")
 	}
 
-	runtimeSession, err := session.SessionManager.GetLatest(context.Background(), session.SessionUserID)
+	runtimeSession, err := loadLatestResumableRuntimeSession(context.Background(), session.SessionManager, session.SessionUserID)
 	if err != nil {
 		return err
 	}
@@ -206,6 +207,50 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 	}
 	ensureChatSystemPromptMessage(session)
 	return syncRuntimeSessionFromChat(session)
+}
+
+// loadLatestResumableRuntimeSession returns the newest session that actually contains
+// conversation content. It skips system-only shell sessions created during startup so
+// /resume latest lands on the last meaningful thread instead of a blank placeholder.
+func loadLatestResumableRuntimeSession(ctx context.Context, manager *runtimechat.SessionManager, userID string) (*runtimechat.Session, error) {
+	if manager == nil {
+		return nil, nil
+	}
+
+	sessions, err := manager.List(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if len(sessions) == 0 {
+		return nil, runtimechat.ErrSessionNotFound
+	}
+
+	for _, session := range sessions {
+		if runtimeSessionHasConversation(session) {
+			return session, nil
+		}
+	}
+
+	for _, session := range sessions {
+		if session != nil {
+			return session, nil
+		}
+	}
+
+	return nil, runtimechat.ErrSessionNotFound
+}
+
+func runtimeSessionHasConversation(session *runtimechat.Session) bool {
+	if session == nil {
+		return false
+	}
+
+	for _, message := range session.GetMessages() {
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "system") {
+			return true
+		}
+	}
+	return false
 }
 
 func syncRuntimeSessionFromChat(session *ChatSession) error {
@@ -237,6 +282,21 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 		runtimeSession.Metadata.Context[chatRuntimeContextTokenCount] = session.TokenCount
 	} else {
 		delete(runtimeSession.Metadata.Context, chatRuntimeContextTokenCount)
+	}
+	if session.ContextTokenCount > 0 {
+		runtimeSession.Metadata.Context[chatRuntimeContextContextTokenCount] = session.ContextTokenCount
+	} else {
+		delete(runtimeSession.Metadata.Context, chatRuntimeContextContextTokenCount)
+	}
+	if session.ContextWindowTokenCount > 0 {
+		runtimeSession.Metadata.Context[chatRuntimeContextContextWindowTokenCount] = session.ContextWindowTokenCount
+	} else {
+		delete(runtimeSession.Metadata.Context, chatRuntimeContextContextWindowTokenCount)
+	}
+	if session.TurnContextTokenCount > 0 {
+		runtimeSession.Metadata.Context[chatRuntimeContextTurnContextTokenCount] = session.TurnContextTokenCount
+	} else {
+		delete(runtimeSession.Metadata.Context, chatRuntimeContextTurnContextTokenCount)
 	}
 	if strings.TrimSpace(session.ProfileName) != "" {
 		runtimeSession.Metadata.Context[chatRuntimeContextProfileName] = session.ProfileName
@@ -468,7 +528,7 @@ func promptStartupSessionSelectionWithReader(manager *runtimechat.SessionManager
 	optionWidth := startupSessionOptionLabelWidth()
 
 	for {
-		fmt.Printf("  %-*s %s\n", optionWidth, "[1]", "恢复最近会话")
+		fmt.Printf("  %-*s %s\n", optionWidth, "[1]", "恢复最近可恢复会话")
 		fmt.Printf("  %-*s %s\n", optionWidth, "[2]", "选择历史会话")
 		fmt.Printf("  %-*s %s\n", optionWidth, "[3]", "新建会话")
 		fmt.Print("请输入选项 (默认: 1): ")

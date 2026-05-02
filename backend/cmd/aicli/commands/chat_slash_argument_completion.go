@@ -519,7 +519,7 @@ func (p *chatSlashArgumentCompletionProvider) cachedSessionArgumentCandidates(se
 	if includeLatest {
 		candidates = append(candidates, chatSlashCompletionCandidate{
 			Command:     "latest",
-			Summary:     "直接恢复最近会话",
+			Summary:     "直接恢复最近可恢复会话",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: false,
 		})
