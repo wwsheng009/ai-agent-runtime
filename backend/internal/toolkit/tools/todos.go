@@ -14,6 +14,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // TodosTool 任务管理工具
@@ -81,6 +82,12 @@ func NewTodosTool() *TodosTool {
 			true,
 		),
 		storage: filepath.Join(os.TempDir(), "aicli-todos.json"),
+	}
+}
+
+func (t *TodosTool) DefinitionMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }
 

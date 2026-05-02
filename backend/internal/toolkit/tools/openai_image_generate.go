@@ -16,6 +16,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // OpenAIImageGenerateTool performs an OpenAI-compatible image generations request and
@@ -193,6 +194,7 @@ func (t *OpenAIImageGenerateTool) DefinitionMetadata() map[string]interface{} {
 		"tool_class":     "image_generation",
 		"upstream_path":  "/v1/images/generations",
 		"provider_scope": "images_generations_api",
+		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }
 
