@@ -22,6 +22,7 @@ type chatInteractionCoordinator struct {
 	mu                 sync.Mutex
 	promptVisible      bool
 	promptInput        string
+	promptPasteActive  bool
 	thinkingActive     bool
 	streamingActive    bool
 	streamRendered     bool
@@ -119,6 +120,7 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	}
 	c.promptSeq++
 	c.promptInput = ""
+	c.promptPasteActive = false
 	if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 		return
 	}
@@ -689,6 +691,7 @@ func (c *chatInteractionCoordinator) ClearPrompt() {
 	c.promptSeq++
 	c.promptVisible = false
 	c.promptInput = ""
+	c.promptPasteActive = false
 }
 
 func (c *chatInteractionCoordinator) ResetPromptState() {
@@ -703,17 +706,32 @@ func (c *chatInteractionCoordinator) ResetPromptState() {
 	c.promptSeq++
 	c.promptVisible = false
 	c.promptInput = ""
+	c.promptPasteActive = false
 }
 
 func (c *chatInteractionCoordinator) SetPromptInput(input string) {
+	c.SetPromptInputSnapshot(ui.LineEditorSnapshot{Text: input})
+}
+
+func (c *chatInteractionCoordinator) SetPromptInputSnapshot(snapshot ui.LineEditorSnapshot) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	input = strings.ReplaceAll(input, "\r\n", "\n")
+	input := strings.ReplaceAll(snapshot.Text, "\r\n", "\n")
 	input = strings.ReplaceAll(input, "\r", "\n")
 	c.promptInput = input
+	c.promptPasteActive = snapshot.PasteActive
+}
+
+func (c *chatInteractionCoordinator) IsPromptPasteActive() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.promptPasteActive
 }
 
 func (c *chatInteractionCoordinator) ResetRunState() {
@@ -743,6 +761,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.promptSeq++
 	c.promptVisible = false
 	c.promptInput = ""
+	c.promptPasteActive = false
 	c.thinkingActive = false
 	c.streamingActive = false
 	c.reasoningActive = false

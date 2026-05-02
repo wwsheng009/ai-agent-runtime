@@ -543,6 +543,56 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 		if session.Interaction != nil {
 			session.Interaction.SetPromptInput("")
 		}
+		if shouldEnableSlashCompletion(session) {
+			completion := newChatSlashCompletionController(session)
+			defer completion.Clear()
+			line, err := session.InputBox.ReadWithHistoryPromptWithHooks(prompt, ui.LineEditorHooks{
+				OnChange: func(snapshot ui.LineEditorSnapshot) {
+					if session.Interaction != nil {
+						session.Interaction.SetPromptInputSnapshot(snapshot)
+					}
+					completion.UpdateSnapshot(snapshot)
+				},
+				OnComplete: func(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
+					nextText, nextCursor, ok := completion.ApplyCompletion(snapshot.Text, snapshot.Cursor)
+					if !ok {
+						return ui.LineEditorReplacement{}, false
+					}
+					return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
+				},
+				OnNavigate: func(snapshot ui.LineEditorSnapshot, delta int) bool {
+					return completion.Navigate(delta)
+				},
+				OnSubmit: func(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
+					nextText, nextCursor, ok := completion.ApplySubmission(snapshot.Text, snapshot.Cursor)
+					if !ok {
+						return ui.LineEditorReplacement{}, false
+					}
+					return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
+				},
+				OnCancelPopup: func(snapshot ui.LineEditorSnapshot) bool {
+					return completion.Cancel()
+				},
+			})
+			if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
+				session.Interrupt()
+				if session.Interaction != nil {
+					session.Interaction.ResetPromptState()
+				}
+				return "", ui.ErrInteractiveInputExitRequested
+			}
+			if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
+				session.Interrupt()
+				if session.Interaction != nil {
+					session.Interaction.ResetPromptState()
+				}
+				return "", io.EOF
+			}
+			if session.Interaction != nil && err != nil {
+				session.Interaction.ResetPromptState()
+			}
+			return line, err
+		}
 		line, err := session.InputBox.ReadWithHistoryPrompt(prompt, func(text string) {
 			if session.Interaction != nil {
 				session.Interaction.SetPromptInput(text)
@@ -587,6 +637,13 @@ func shouldUseInteractiveLineEditor(session *ChatSession) bool {
 		return false
 	}
 	return chatIsInteractiveTerminal()
+}
+
+func shouldEnableSlashCompletion(session *ChatSession) bool {
+	if session == nil || session.Surface == nil {
+		return false
+	}
+	return session.Surface.Enabled()
 }
 
 func chatInteractiveReadPriorityLine(session *ChatSession, ctx context.Context) (string, error) {

@@ -182,6 +182,7 @@ func (s *FixedBottomSurface) SetStatusLine(line string) {
 	s.applyLayoutLocked()
 	s.renderPopupLocked()
 	s.renderStatusLocked()
+	s.moveToOutputLocked()
 }
 
 // SetComposerPreview 在底部固定区额外保留一行 composer 预览。
@@ -263,7 +264,6 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 		return
 	}
 	state := s.bottomPaneStateLocked()
-	s.terminal.SaveCursor()
 	s.terminal.MoveTo(s.statusRowLocked(), 1)
 	s.terminal.ClearLine()
 	line := truncateFixedStatusLine(state.StatusLine, s.terminal.Width())
@@ -271,7 +271,6 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 		fmt.Print(GetTheme(ThemeAuto).Dimmed(line))
 	}
 	s.terminal.ClearLine()
-	s.terminal.RestoreCursor()
 }
 
 func (s *FixedBottomSurface) renderPopupLocked() {
@@ -297,7 +296,6 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 	if startRow < 1 {
 		startRow = 1
 	}
-	s.terminal.SaveCursor()
 	for i, line := range visibleLines {
 		row := startRow + i
 		if row >= s.statusRowLocked() {
@@ -321,7 +319,6 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 			}
 		}
 	}
-	s.terminal.RestoreCursor()
 	s.popupRenderedRows = rows
 }
 
@@ -423,12 +420,10 @@ func (s *FixedBottomSurface) clearPopupAreaLocked(rows int) {
 	if startRow < 1 {
 		startRow = 1
 	}
-	s.terminal.SaveCursor()
 	for row := startRow; row < s.statusRowLocked(); row++ {
 		s.terminal.MoveTo(row, 1)
 		s.terminal.ClearLine()
 	}
-	s.terminal.RestoreCursor()
 }
 
 type BottomPaneState struct {

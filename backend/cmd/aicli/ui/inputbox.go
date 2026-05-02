@@ -153,6 +153,21 @@ func (ib *InputBox) ReadWithHistory() (string, error) {
 	return ib.ReadWithHistoryPrompt(ib.GetPrompt(), nil)
 }
 
+// ReadWithHistoryPromptWithHooks reads a line with history and editor hooks.
+func (ib *InputBox) ReadWithHistoryPromptWithHooks(prompt string, hooks LineEditorHooks) (string, error) {
+	return ib.readPromptWithHooks(prompt, hooks, true, true, true, defaultPasteBurstHoldFirstRune())
+}
+
+// ReadTransientPromptWithHooks reads a transient prompt with editor hooks.
+func (ib *InputBox) ReadTransientPromptWithHooks(prompt string, hooks LineEditorHooks) (string, error) {
+	return ib.readPromptWithHooks(prompt, hooks, false, false, true, false)
+}
+
+// ReadTransientLineWithHooks reads a transient line without a visible prompt.
+func (ib *InputBox) ReadTransientLineWithHooks(hooks LineEditorHooks) (string, error) {
+	return ib.readPromptWithHooks("", hooks, false, false, false, false)
+}
+
 // AddToHistory 添加到历史记录
 func (ib *InputBox) AddToHistory(input string) {
 	if input != "" {

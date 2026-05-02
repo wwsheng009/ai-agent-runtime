@@ -52,6 +52,30 @@ func TestFixedBottomSurface_ShowPopupClampsToViewportHeight(t *testing.T) {
 	}
 }
 
+func TestFixedBottomSurface_ShowPopupDoesNotUseCursorSaveRestore(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+
+	output := captureUIStdout(t, func() {
+		surface.ShowPopup([]string{
+			"命令补全",
+			"> /model",
+			"提示: Tab/Enter 接受",
+		})
+		surface.ClearPopup()
+	})
+
+	if strings.Contains(output, cursorSaveSequence) {
+		t.Fatalf("expected popup render not to save cursor state, got %q", output)
+	}
+	if strings.Contains(output, cursorRestoreSequence) {
+		t.Fatalf("expected popup render not to restore cursor state, got %q", output)
+	}
+}
+
 func TestFixedBottomSurface_ClearPopupKeepsStatusLine(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true

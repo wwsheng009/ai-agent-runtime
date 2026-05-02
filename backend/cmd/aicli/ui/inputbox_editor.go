@@ -24,6 +24,7 @@ const (
 	cursorSaveSequence            = "\x1b[s"
 	cursorRestoreSequence         = "\x1b[u"
 	clearToEndSequence            = "\x1b[J"
+	escapeSequenceWait            = 30 * time.Millisecond
 )
 
 func defaultPasteBurstHoldFirstRune() bool {
@@ -40,6 +41,8 @@ const (
 	editorKeyIgnore editorKeyKind = iota
 	editorKeyRune
 	editorKeyEnter
+	editorKeyComplete
+	editorKeyCancelPopup
 	editorKeyBackspace
 	editorKeyDelete
 	editorKeyLeft
@@ -154,6 +157,49 @@ func (ib *InputBox) readPrompt(prompt string, onChange func(string), keepHistory
 	return line, readErr
 }
 
+func (ib *InputBox) readPromptWithHooks(prompt string, hooks LineEditorHooks, keepHistory bool, echoSubmit bool, useDefaultPrompt bool, holdFirstRune bool) (string, error) {
+	if ib == nil {
+		return "", io.EOF
+	}
+
+	if prompt == "" && useDefaultPrompt {
+		prompt = ib.GetPrompt()
+	}
+
+	// Keep history navigation stable even if the read is cancelled.
+	ib.historyPos = len(ib.history)
+
+	if !IsInteractiveTerminal() {
+		line, err := readBufferedLine(os.Stdin)
+		if err == nil && keepHistory && strings.TrimSpace(line) != "" {
+			ib.AddToHistory(line)
+		}
+		return line, err
+	}
+
+	fd := int(os.Stdin.Fd())
+	state, err := term.MakeRaw(fd)
+	if err != nil {
+		line, readErr := readBufferedLine(os.Stdin)
+		if readErr == nil && keepHistory && strings.TrimSpace(line) != "" {
+			ib.AddToHistory(line)
+		}
+		return line, readErr
+	}
+	defer func() {
+		fmt.Fprint(os.Stdout, bracketedPasteDisableSequence)
+		_ = term.Restore(fd, state)
+	}()
+	fmt.Fprint(os.Stdout, bracketedPasteEnableSequence)
+	fmt.Fprint(os.Stdout, cursorSaveSequence)
+
+	line, readErr := readInteractiveLineWithHooks(os.Stdin, os.Stdout, prompt, ib.history, nil, &hooks, echoSubmit, holdFirstRune)
+	if readErr == nil && keepHistory && strings.TrimSpace(line) != "" {
+		ib.AddToHistory(line)
+	}
+	return line, readErr
+}
+
 func readBufferedLine(reader io.Reader) (string, error) {
 	if reader == nil {
 		return "", io.EOF
@@ -174,6 +220,10 @@ func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, hist
 }
 
 func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string), echoSubmit bool, holdFirstRune bool) (string, error) {
+	return readInteractiveLineWithHooks(reader, writer, prompt, history, onChange, nil, echoSubmit, holdFirstRune)
+}
+
+func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string), hooks *LineEditorHooks, echoSubmit bool, holdFirstRune bool) (string, error) {
 	if reader == nil {
 		return "", io.EOF
 	}
@@ -203,14 +253,48 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 	pasteActive := false
 	stdinFile, _ := reader.(*os.File)
 	lastRenderedRows := 1
+	var redraw func()
+	snapshot := func() LineEditorSnapshot {
+		return LineEditorSnapshot{
+			Text:        string(line),
+			Cursor:      cursor,
+			Prompt:      prompt,
+			HistoryPos:  historyPos,
+			PasteActive: pasteActive,
+		}
+	}
+	emitChange := func() {
+		if onChange != nil {
+			onChange(string(line))
+		}
+		if hooks != nil && hooks.OnChange != nil {
+			hooks.OnChange(snapshot())
+		}
+	}
+	applyReplacement := func(repl LineEditorReplacement) {
+		promoteDraft()
+		line = []rune(repl.Text)
+		cursor = repl.Cursor
+		if cursor < 0 {
+			cursor = len(line)
+		}
+		if cursor > len(line) {
+			cursor = len(line)
+		}
+		emitChange()
+		redraw()
+	}
 
 	if onChange != nil {
 		onChange("")
 	}
+	if hooks != nil && hooks.OnChange != nil {
+		hooks.OnChange(snapshot())
+	}
 
 	// 调用方会在提示符渲染完成后保存输入锚点。
 	// 这里每次都回到锚点，只重绘可编辑输入区，避免折行残留。
-	redraw := func() {
+	redraw = func() {
 		termWidth := GetTerminalWidth()
 		if termWidth <= 0 {
 			termWidth = 80
@@ -241,16 +325,10 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 		fmt.Fprint(writer, builder.String())
 	}
 
-	notifyChange := func() {
-		if onChange != nil {
-			onChange(string(line))
-		}
-	}
-
 	setLine := func(next []rune) {
 		line = append(line[:0], next...)
 		cursor = len(line)
-		notifyChange()
+		emitChange()
 		redraw()
 	}
 
@@ -264,7 +342,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 		promoteDraft()
 		line = append(line[:cursor], append(chars, line[cursor:]...)...)
 		cursor += len(chars)
-		notifyChange()
+		emitChange()
 		redraw()
 	}
 
@@ -280,7 +358,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 		composer.SetText(string(line))
 		cursor = composer.HandlePasteAt(cursor, text)
 		line = []rune(composer.Text())
-		notifyChange()
+		emitChange()
 		redraw()
 	}
 
@@ -294,7 +372,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 		promoteDraft()
 		line = append(line[:cursor], append([]rune{ch}, line[cursor:]...)...)
 		cursor++
-		notifyChange()
+		emitChange()
 		redraw()
 	}
 
@@ -328,13 +406,13 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 		if cursor >= len(line) {
 			line[len(line)-2], line[len(line)-1] = line[len(line)-1], line[len(line)-2]
 			cursor = len(line)
-			notifyChange()
+			emitChange()
 			redraw()
 			return
 		}
 		line[cursor-1], line[cursor] = line[cursor], line[cursor-1]
 		cursor++
-		notifyChange()
+		emitChange()
 		redraw()
 	}
 
@@ -343,7 +421,12 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			return
 		}
 		promoteDraft()
-		cursor = previousWordStart(line, cursor)
+		nextCursor := previousWordStart(line, cursor)
+		if nextCursor == cursor {
+			return
+		}
+		cursor = nextCursor
+		emitChange()
 		redraw()
 	}
 
@@ -352,7 +435,12 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			return
 		}
 		promoteDraft()
-		cursor = nextWordEnd(line, cursor)
+		nextCursor := nextWordEnd(line, cursor)
+		if nextCursor == cursor {
+			return
+		}
+		cursor = nextCursor
+		emitChange()
 		redraw()
 	}
 
@@ -368,7 +456,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 		promoteDraft()
 		storeKill(append([]rune(nil), line[start:end]...))
 		line = append(line[:start], line[end:]...)
-		notifyChange()
+		emitChange()
 		redraw()
 	}
 
@@ -484,7 +572,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 		if err := waitForPasteBurstWindow(); err != nil {
 			return "", err
 		}
-		key, ok, readErr := nextInteractiveKey(reader, &pending)
+		key, ok, readErr := nextInteractiveKey(reader, &pending, stdinFile)
 		if readErr != nil {
 			flushPasteBurstBeforeModifiedInput()
 			return "", readErr
@@ -516,6 +604,8 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			switch key.kind {
 			case editorKeyRune:
 				pasteBuffer = append(pasteBuffer, key.r)
+			case editorKeyComplete:
+				pasteBuffer = append(pasteBuffer, '\t')
 			case editorKeyEnter:
 				pasteBuffer = append(pasteBuffer, '\n')
 			case editorKeyInterrupt:
@@ -576,7 +666,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 					if grab.StartByte < safeCursor {
 						line = append(line[:grab.StartByte], line[safeCursor:]...)
 						cursor = grab.StartByte
-						notifyChange()
+						emitChange()
 						redraw()
 					}
 					pasteBurst.AppendCharToBuffer(key.r, now)
@@ -591,6 +681,21 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 				continue
 			}
 			insertTypedRune(key.r)
+		case editorKeyComplete:
+			flushPasteBurstBeforeModifiedInput()
+			clearReverseSearchState()
+			if hooks != nil && hooks.OnComplete != nil {
+				if repl, ok := hooks.OnComplete(snapshot()); ok {
+					applyReplacement(repl)
+					continue
+				}
+			}
+		case editorKeyCancelPopup:
+			flushPasteBurstBeforeModifiedInput()
+			clearReverseSearchState()
+			if hooks != nil && hooks.OnCancelPopup != nil && hooks.OnCancelPopup(snapshot()) {
+				continue
+			}
 		case editorKeyEnter:
 			if pasteBurst.IsActive() {
 				// If more bytes are already queued, this Enter belongs to a
@@ -628,6 +733,12 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 				pasteBurst.ExtendWindow(now)
 				continue
 			}
+			if hooks != nil && hooks.OnSubmit != nil {
+				if repl, ok := hooks.OnSubmit(snapshot()); ok {
+					applyReplacement(repl)
+					continue
+				}
+			}
 			if echoSubmit {
 				fmt.Fprint(writer, "\r\n")
 			}
@@ -644,7 +755,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			promoteDraft()
 			line = append(line[:cursor-1], line[cursor:]...)
 			cursor--
-			notifyChange()
+			emitChange()
 			redraw()
 		case editorKeyDelete:
 			flushPasteBurstBeforeModifiedInput()
@@ -654,13 +765,14 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			}
 			promoteDraft()
 			line = append(line[:cursor], line[cursor+1:]...)
-			notifyChange()
+			emitChange()
 			redraw()
 		case editorKeyLeft:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if cursor > 0 {
 				cursor--
+				emitChange()
 				redraw()
 			}
 		case editorKeyRight:
@@ -668,6 +780,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			clearReverseSearchState()
 			if cursor < len(line) {
 				cursor++
+				emitChange()
 				redraw()
 			}
 		case editorKeyHome:
@@ -675,6 +788,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			clearReverseSearchState()
 			if cursor != 0 {
 				cursor = 0
+				emitChange()
 				redraw()
 			}
 		case editorKeyEnd:
@@ -682,11 +796,15 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			clearReverseSearchState()
 			if cursor != len(line) {
 				cursor = len(line)
+				emitChange()
 				redraw()
 			}
 		case editorKeyUp:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
+			if hooks != nil && hooks.OnNavigate != nil && hooks.OnNavigate(snapshot(), -1) {
+				continue
+			}
 			if len(history) == 0 {
 				continue
 			}
@@ -700,6 +818,9 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 		case editorKeyDown:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
+			if hooks != nil && hooks.OnNavigate != nil && hooks.OnNavigate(snapshot(), 1) {
+				continue
+			}
 			if len(history) == 0 {
 				continue
 			}
@@ -726,7 +847,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			storeKill(append([]rune(nil), line...))
 			line = line[:0]
 			cursor = 0
-			notifyChange()
+			emitChange()
 			redraw()
 		case editorKeyDeleteWord:
 			flushPasteBurstBeforeModifiedInput()
@@ -742,7 +863,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			storeKill(append([]rune(nil), line[start:cursor]...))
 			line = append(line[:start], line[cursor:]...)
 			cursor = start
-			notifyChange()
+			emitChange()
 			redraw()
 		case editorKeyKillToEnd:
 			flushPasteBurstBeforeModifiedInput()
@@ -753,7 +874,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			promoteDraft()
 			storeKill(append([]rune(nil), line[cursor:]...))
 			line = line[:cursor]
-			notifyChange()
+			emitChange()
 			redraw()
 		case editorKeyDeleteForwardWord:
 			flushPasteBurstBeforeModifiedInput()
@@ -811,7 +932,7 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 			}
 			promoteDraft()
 			line = append(line[:cursor], line[cursor+1:]...)
-			notifyChange()
+			emitChange()
 			redraw()
 		}
 	}
@@ -954,11 +1075,25 @@ func consumeTerminalEscapeSequence(text string) int {
 	return len(text)
 }
 
-func nextInteractiveKey(reader io.Reader, pending *[]byte) (editorKey, bool, error) {
+func nextInteractiveKey(reader io.Reader, pending *[]byte, stdinFile *os.File) (editorKey, bool, error) {
 	for {
 		if decoded, ok := decodeInteractiveKey(*pending); ok {
 			*pending = (*pending)[decoded.consumed:]
 			return decoded.key, true, nil
+		}
+		if len(*pending) == 1 && (*pending)[0] == '\x1b' {
+			if stdinFile == nil {
+				*pending = (*pending)[:0]
+				return editorKey{kind: editorKeyCancelPopup}, true, nil
+			}
+			ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), escapeSequenceWait)
+			if err != nil {
+				return editorKey{}, false, err
+			}
+			if !ready {
+				*pending = (*pending)[:0]
+				return editorKey{kind: editorKeyCancelPopup}, true, nil
+			}
 		}
 
 		var buf [64]byte
@@ -971,6 +1106,10 @@ func nextInteractiveKey(reader io.Reader, pending *[]byte) (editorKey, bool, err
 			if errors.Is(err, io.EOF) {
 				if len(*pending) == 0 {
 					return editorKey{kind: editorKeyEOF}, true, nil
+				}
+				if len(*pending) == 1 && (*pending)[0] == '\x1b' {
+					*pending = (*pending)[:0]
+					return editorKey{kind: editorKeyCancelPopup}, true, nil
 				}
 				// Best-effort drain of any remaining bytes when the source ends.
 				*pending = (*pending)[1:]
@@ -999,6 +1138,8 @@ func decodeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter}, consumed: 1}, true
 	case '\n':
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter}, consumed: 1}, true
+	case '\t':
+		return decodedInteractiveKey{key: editorKey{kind: editorKeyComplete}, consumed: 1}, true
 	case '\b', 127:
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyBackspace}, consumed: 1}, true
 	case 1:
