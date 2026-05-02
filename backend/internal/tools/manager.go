@@ -89,6 +89,7 @@ func (m *Manager) ListTools() []ToolDescriptor {
 				Name:        info.Tool.Name,
 				Description: info.Tool.Description,
 				Parameters:  normalizeParameters(info.Tool.InputSchema),
+				Metadata:    cloneMetadataMap(info.Metadata),
 			})
 		}
 	}
@@ -108,7 +109,7 @@ func (m *Manager) ListTools() []ToolDescriptor {
 				Name:        name,
 				Description: tool.Description(),
 				Parameters:  normalizeParameters(tool.Parameters()),
-				Metadata:    metadata,
+				Metadata:    cloneMetadataMap(metadata),
 			})
 		}
 	}

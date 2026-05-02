@@ -275,6 +275,7 @@ func (s *InMemoryRuntimeStore) ListEvents(ctx context.Context, sessionID string,
 
 // SQLiteRuntimeStore persists runtime data in sqlite.
 type SQLiteRuntimeStore struct {
+	mu sync.Mutex
 	db *sql.DB
 }
 
@@ -651,6 +652,8 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 	if err != nil {
 		return 0, fmt.Errorf("marshal event payload: %w", err)
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin event tx: %w", err)

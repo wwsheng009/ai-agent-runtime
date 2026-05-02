@@ -31,10 +31,12 @@ func (a *AgentAdapter) ListTools() []skill.ToolInfo {
 			Name:        descriptor.Name,
 			Description: descriptor.Description,
 			InputSchema: normalizeParameters(descriptor.Parameters),
+			Metadata:    cloneMetadataMap(descriptor.Metadata),
 			Enabled:     true,
 		}
 		if mcpInfo, ok := a.lookupMCPTool(descriptor.Name); ok {
 			info.MCPName = mcpInfo.MCPName
+			info.MaxParallelCalls = mcpInfo.MaxParallelCalls
 			info.MCPTrustLevel = mcpInfo.MCPTrustLevel
 			info.ExecutionMode = mcpInfo.ExecutionMode
 		}
@@ -106,10 +108,23 @@ func (a *AgentAdapter) lookupMCPTool(toolName string) (skill.ToolInfo, bool) {
 		return skill.ToolInfo{}, false
 	}
 	return skill.ToolInfo{
-		Name:        info.Tool.Name,
-		Description: info.Tool.Description,
-		InputSchema: normalizeParameters(info.Tool.InputSchema),
-		MCPName:     info.MCPName,
-		Enabled:     info.Enabled,
+		Name:             info.Tool.Name,
+		Description:      info.Tool.Description,
+		InputSchema:      normalizeParameters(info.Tool.InputSchema),
+		Metadata:         cloneMetadataMap(info.Metadata),
+		MCPName:          info.MCPName,
+		MaxParallelCalls: a.resolveMCPMaxParallelCalls(info.MCPName),
+		Enabled:          info.Enabled,
 	}, true
+}
+
+func (a *AgentAdapter) resolveMCPMaxParallelCalls(mcpName string) int {
+	if a == nil || a.manager == nil || a.manager.mcp == nil || strings.TrimSpace(mcpName) == "" {
+		return 0
+	}
+	status, err := a.manager.mcp.GetMCPStatus(mcpName)
+	if err != nil || status == nil {
+		return 0
+	}
+	return status.MaxParallelCalls
 }

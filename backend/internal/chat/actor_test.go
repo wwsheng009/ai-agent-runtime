@@ -223,6 +223,33 @@ func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
 	require.NotEmpty(t, events)
 }
 
+func TestNewSessionActor_DefaultLoopConfigDisablesParallelTools(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	apiAgent := agent.NewAgent(&agent.Config{
+		Name:         "actor-fallback-test",
+		Model:        "test-model",
+		MaxSteps:     3,
+		SystemPrompt: "You are a helpful assistant.",
+	}, nil)
+
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		SessionStore: storage,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, actor)
+	require.NotNil(t, actor.loopConfig)
+	assert.False(t, actor.loopConfig.EnableParallelTools)
+	assert.Equal(t, 1, actor.loopConfig.MaxParallelToolCalls)
+}
+
 func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()

@@ -207,6 +207,42 @@ func TestNewDefaultManagerWithRuntimeConfig_AllBuiltinToolkitToolsExposeOutputKi
 	}
 }
 
+func TestNewDefaultManagerWithRuntimeConfig_PreservesParallelDefinitionMetadata(t *testing.T) {
+	manager := NewDefaultManagerWithRuntimeConfig(nil, runtimecfg.DefaultRuntimeConfig())
+	tools := manager.ListTools()
+
+	want := map[string]bool{
+		"view":  true,
+		"ls":    true,
+		"glob":  true,
+		"grep":  true,
+		"write": false,
+	}
+	found := make(map[string]map[string]interface{})
+	for _, tool := range tools {
+		if _, ok := want[tool.Name]; ok {
+			found[tool.Name] = tool.Metadata
+		}
+	}
+
+	for name, expected := range want {
+		metadata, ok := found[name]
+		if !ok {
+			t.Fatalf("expected tool %s in manager list", name)
+		}
+		value, exists := metadata["supports_parallel"]
+		if expected {
+			if !exists || value != true {
+				t.Fatalf("expected %s supports_parallel=true, got %#v", name, metadata)
+			}
+		} else {
+			if !exists || value != false {
+				t.Fatalf("expected %s supports_parallel=false, got %#v", name, metadata)
+			}
+		}
+	}
+}
+
 func TestExecuteWithMeta_ListMCPResources_ExposesExplicitTextOutputKind(t *testing.T) {
 	manager := NewDefaultManager(newMetaResourcesMCPManager())
 

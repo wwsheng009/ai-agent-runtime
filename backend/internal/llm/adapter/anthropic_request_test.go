@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"strings"
 	"testing"
 
 	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
@@ -99,8 +100,8 @@ func TestAnthropicBuildRequest_OmitsTemperatureWhenZero(t *testing.T) {
 func TestAnthropicBuildRequest_AdaptiveThinkingGeneratesCorrectBody(t *testing.T) {
 	a := &AnthropicAdapter{}
 	req := a.BuildRequest(RequestConfig{
-		Model:    "claude-opus-4-6",
-		Messages: []map[string]interface{}{{"role": "user", "content": "hello"}},
+		Model:           "claude-opus-4-6",
+		Messages:        []map[string]interface{}{{"role": "user", "content": "hello"}},
 		ReasoningEffort: "high",
 		ReasoningEffortBudgets: map[string]int{
 			"high": 0, // 0 budget signals adaptive mode
@@ -150,6 +151,36 @@ func TestAnthropicBuildRequest_ToolChoiceIsPropagated(t *testing.T) {
 	}
 	if tc["type"] != "auto" {
 		t.Fatalf("expected tool_choice type auto, got %v", tc["type"])
+	}
+}
+
+func TestAnthropicBuildAssistantMessage_NormalizesToolUseBlocks(t *testing.T) {
+	a := &AnthropicAdapter{}
+	msg := a.BuildAssistantMessage("", []map[string]interface{}{
+		{
+			"type": "tool_use",
+			"id":   "call-1",
+			"name": "view",
+			"input": map[string]interface{}{
+				"file_path": "README.md",
+			},
+		},
+	}, "")
+
+	toolCalls, ok := msg["tool_calls"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("expected normalized tool_calls slice, got %T", msg["tool_calls"])
+	}
+	if len(toolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(toolCalls))
+	}
+	fn, _ := toolCalls[0]["function"].(map[string]interface{})
+	if fn["name"] != "view" {
+		t.Fatalf("unexpected function name: %#v", fn["name"])
+	}
+	args, _ := fn["arguments"].(string)
+	if !strings.Contains(args, `"file_path":"README.md"`) {
+		t.Fatalf("expected file_path in normalized arguments, got %q", args)
 	}
 }
 

@@ -638,7 +638,21 @@ func (a *AnthropicAdapter) BuildAssistantMessage(content string, toolCalls []map
 	}
 
 	if len(toolCalls) > 0 {
-		msg["tool_calls"] = toolCalls
+		normalized := a.ExtractToolCallsFromRawCalls(toolCalls)
+		if len(normalized) > 0 {
+			converted := make([]map[string]interface{}, 0, len(normalized))
+			for _, tc := range normalized {
+				converted = append(converted, map[string]interface{}{
+					"id":   tc.ID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      tc.Function.Name,
+						"arguments": tc.Function.Arguments,
+					},
+				})
+			}
+			msg["tool_calls"] = converted
+		}
 	}
 
 	if reasoning != "" {

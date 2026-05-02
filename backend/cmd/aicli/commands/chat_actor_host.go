@@ -344,13 +344,19 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 
 func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *ChatSession) *agent.LoopReActConfig {
 	config := &agent.LoopReActConfig{
-		MaxSteps:        0,
-		EnableThought:   true,
-		EnableToolCalls: true,
-		Temperature:     0.7,
+		MaxSteps:             0,
+		EnableThought:        true,
+		EnableToolCalls:      true,
+		EnableParallelTools:  false,
+		MaxParallelToolCalls: 1,
+		Temperature:          0.7,
 	}
 	if runtimeConfig != nil {
 		config.MaxSteps = agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps)
+		config.EnableParallelTools = runtimeConfig.Agent.EnableParallelTools
+		if runtimeConfig.Agent.MaxParallelToolCalls > 0 {
+			config.MaxParallelToolCalls = runtimeConfig.Agent.MaxParallelToolCalls
+		}
 	}
 	if session != nil {
 		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {

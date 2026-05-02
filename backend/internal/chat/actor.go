@@ -82,10 +82,12 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 	if loopConfig == nil && cfg.Agent != nil {
 		if agentConfig := cfg.Agent.GetConfig(); agentConfig != nil {
 			loopConfig = &agent.LoopReActConfig{
-				MaxSteps:        agent.NormalizeMaxSteps(agentConfig.MaxSteps),
-				EnableThought:   true,
-				EnableToolCalls: true,
-				Temperature:     agentConfig.Temperature,
+				MaxSteps:             agent.NormalizeMaxSteps(agentConfig.MaxSteps),
+				EnableThought:        true,
+				EnableToolCalls:      true,
+				EnableParallelTools:  false,
+				MaxParallelToolCalls: 1,
+				Temperature:          agentConfig.Temperature,
 			}
 		}
 	}

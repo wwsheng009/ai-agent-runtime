@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -77,6 +79,57 @@ func TestSQLiteRuntimeStorePersistsAmbientRunMeta(t *testing.T) {
 	assert.Equal(t, "team-ambient", loaded.AmbientRunMeta.Team.TeamID)
 	assert.Equal(t, "lead", loaded.AmbientRunMeta.Team.AgentID)
 	assert.Equal(t, SessionIdle, loaded.Status)
+}
+
+func TestSQLiteRuntimeStoreAppendEventIsSerialized(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "runtime-events.db")
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: dbPath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	const (
+		sessionID = "session-event-serial"
+		total     = 32
+	)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errCh := make(chan error, total)
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			_, appendErr := store.AppendEvent(context.Background(), runtimeevents.Event{
+				Type:      "tool.completed",
+				SessionID: sessionID,
+				ToolName:  "read_a",
+				Payload: map[string]interface{}{
+					"index": index,
+				},
+			})
+			if appendErr != nil {
+				errCh <- appendErr
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+
+	for appendErr := range errCh {
+		require.NoError(t, appendErr)
+	}
+
+	events, err := store.ListEvents(context.Background(), sessionID, 0, 0)
+	require.NoError(t, err)
+	require.Len(t, events, total)
+	for idx, event := range events {
+		require.NotNil(t, event.Payload)
+		assert.Equal(t, int64(idx+1), event.Payload["seq"])
+	}
 }
 
 func TestSQLiteRuntimeStoreMigratesCurrentRunMetaColumn(t *testing.T) {

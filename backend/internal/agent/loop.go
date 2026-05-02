@@ -33,15 +33,17 @@ const defaultPromptPreflightAutoCompactRatio = 0.9
 
 // LoopReActConfig ReAct 循环配置
 type LoopReActConfig struct {
-	MaxSteps        int                   `yaml:"maxSteps"`
-	EnableThought   bool                  `yaml:"enableThought"`
-	EnableToolCalls bool                  `yaml:"enableToolCalls"`
-	Verbose         bool                  `yaml:"verbose"`
-	Temperature     float64               `yaml:"temperature"`
-	ReasoningEffort string                `yaml:"reasoningEffort"`
-	Thinking        *types.ThinkingConfig `yaml:"thinking"`
-	StopOnSuccess   bool                  `yaml:"stopOnSuccess"`
-	MaxIterations   int                   `yaml:"maxIterations"`
+	MaxSteps             int                   `yaml:"maxSteps"`
+	EnableThought        bool                  `yaml:"enableThought"`
+	EnableToolCalls      bool                  `yaml:"enableToolCalls"`
+	EnableParallelTools  bool                  `yaml:"enableParallelTools"`
+	MaxParallelToolCalls int                   `yaml:"maxParallelToolCalls"`
+	Verbose              bool                  `yaml:"verbose"`
+	Temperature          float64               `yaml:"temperature"`
+	ReasoningEffort      string                `yaml:"reasoningEffort"`
+	Thinking             *types.ThinkingConfig `yaml:"thinking"`
+	StopOnSuccess        bool                  `yaml:"stopOnSuccess"`
+	MaxIterations        int                   `yaml:"maxIterations"`
 }
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
@@ -89,16 +91,24 @@ type HistorySession interface {
 func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActConfig) *ReActLoop {
 	if config == nil {
 		config = &LoopReActConfig{
-			MaxSteps:        0,
-			EnableThought:   true,
-			EnableToolCalls: true,
-			Verbose:         false,
-			Temperature:     0.7,
-			StopOnSuccess:   true,
-			MaxIterations:   10,
+			MaxSteps:             0,
+			EnableThought:        true,
+			EnableToolCalls:      true,
+			EnableParallelTools:  false,
+			MaxParallelToolCalls: 1,
+			Verbose:              false,
+			Temperature:          0.7,
+			StopOnSuccess:        true,
+			MaxIterations:        10,
 		}
 	}
 	config.MaxSteps = NormalizeMaxSteps(config.MaxSteps)
+	if config.MaxParallelToolCalls <= 0 {
+		config.MaxParallelToolCalls = 1
+	}
+	if parallelToolsDisabledByEnv() {
+		config.EnableParallelTools = false
+	}
 	if agent != nil && agent.llmRuntime == nil && llmRuntime != nil {
 		agent.llmRuntime = llmRuntime
 	}
@@ -807,6 +817,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 // act 行动阶段：执行工具调用
 func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step int, depth int, historySnapshot []types.Message, toolCalls []types.ToolCall, toolWhitelist []string) ([]toolExecutionResult, error) {
 	results := make([]toolExecutionResult, len(toolCalls))
+	if plan := loop.buildParallelToolBatchPlan(toolCalls, toolWhitelist); plan != nil {
+		return loop.runParallelToolBatch(ctx, traceID, sessionID, step, toolCalls, plan), nil
+	}
 	gateway := loop.agent.GetOutputGateway()
 	allowedTools := whitelistSet(toolWhitelist)
 	var pendingCheckpoints map[string]*runtimecheckpoint.PendingCheckpoint

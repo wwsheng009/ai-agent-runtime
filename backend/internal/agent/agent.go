@@ -680,10 +680,12 @@ func (a *Agent) Validate() error {
 func (a *Agent) RunReAct(ctx context.Context, llmRuntime *llm.LLMRuntime, prompt string) (*Result, error) {
 	// 创建 ReAct 循环配置
 	loopConfig := &LoopReActConfig{
-		MaxSteps:        a.config.MaxSteps,
-		EnableThought:   true,
-		EnableToolCalls: true,
-		Temperature:     a.config.Temperature,
+		MaxSteps:             a.config.MaxSteps,
+		EnableThought:        true,
+		EnableToolCalls:      true,
+		EnableParallelTools:  false,
+		MaxParallelToolCalls: 1,
+		Temperature:          a.config.Temperature,
 	}
 
 	// 创建 ReAct 循环
@@ -697,10 +699,12 @@ func (a *Agent) RunReAct(ctx context.Context, llmRuntime *llm.LLMRuntime, prompt
 func (a *Agent) RunReActWithConfig(ctx context.Context, llmRuntime *llm.LLMRuntime, prompt string, loopConfig *LoopReActConfig) (*Result, error) {
 	if loopConfig == nil {
 		loopConfig = &LoopReActConfig{
-			MaxSteps:        a.config.MaxSteps,
-			EnableThought:   true,
-			EnableToolCalls: true,
-			Temperature:     a.config.Temperature,
+			MaxSteps:             a.config.MaxSteps,
+			EnableThought:        true,
+			EnableToolCalls:      true,
+			EnableParallelTools:  false,
+			MaxParallelToolCalls: 1,
+			Temperature:          a.config.Temperature,
 		}
 	}
 
@@ -712,10 +716,12 @@ func (a *Agent) RunReActWithConfig(ctx context.Context, llmRuntime *llm.LLMRunti
 func (a *Agent) RunReActWithSession(ctx context.Context, llmRuntime *llm.LLMRuntime, prompt string, session HistorySession, loopConfig *LoopReActConfig) (*Result, error) {
 	if loopConfig == nil {
 		loopConfig = &LoopReActConfig{
-			MaxSteps:        a.config.MaxSteps,
-			EnableThought:   true,
-			EnableToolCalls: true,
-			Temperature:     a.config.Temperature,
+			MaxSteps:             a.config.MaxSteps,
+			EnableThought:        true,
+			EnableToolCalls:      true,
+			EnableParallelTools:  false,
+			MaxParallelToolCalls: 1,
+			Temperature:          a.config.Temperature,
 		}
 	}
 

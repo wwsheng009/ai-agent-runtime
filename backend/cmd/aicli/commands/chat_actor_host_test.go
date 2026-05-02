@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -170,6 +171,23 @@ func TestBuildLocalChatLoopConfig_PropagatesReasoningEffort(t *testing.T) {
 	}
 	if got := config.ReasoningEffort; got != "high" {
 		t.Fatalf("expected loop reasoning_effort=high, got %#v", got)
+	}
+}
+
+func TestBuildLocalChatLoopConfig_PropagatesParallelToolConfig(t *testing.T) {
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Agent.EnableParallelTools = true
+	runtimeConfig.Agent.MaxParallelToolCalls = 4
+
+	config := buildLocalChatLoopConfig(runtimeConfig, &ChatSession{})
+	if config == nil {
+		t.Fatal("expected loop config")
+	}
+	if !config.EnableParallelTools {
+		t.Fatal("expected parallel tools to be enabled")
+	}
+	if config.MaxParallelToolCalls != 4 {
+		t.Fatalf("expected MaxParallelToolCalls=4, got %d", config.MaxParallelToolCalls)
 	}
 }
 
