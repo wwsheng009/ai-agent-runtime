@@ -199,7 +199,7 @@ func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
 		}
 
 		if cwd := resolveChatStatusCurrentDirectory(session); cwd != "" {
-			parts = append(parts, "cwd "+compactStatusPath(cwd, 28))
+			parts = append(parts, "cwd "+cwd)
 		}
 
 		provider := strings.TrimSpace(session.ProviderName)
@@ -321,105 +321,6 @@ func trimStatusFloat(value string) string {
 		return "0"
 	}
 	return value
-}
-
-func compactStatusPath(path string, maxWidth int) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "-"
-	}
-	path = filepath.Clean(path)
-	if ui.DisplayWidth(path) <= maxWidth || maxWidth <= 0 {
-		return path
-	}
-
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		homeDir = filepath.Clean(strings.TrimSpace(homeDir))
-		if homeDir != "" {
-			if rel, relErr := filepath.Rel(homeDir, path); relErr == nil && rel != "." && !strings.HasPrefix(rel, "..") {
-				path = "~" + string(filepath.Separator) + rel
-			} else if path == homeDir {
-				path = "~"
-			}
-		}
-	}
-
-	if ui.DisplayWidth(path) <= maxWidth {
-		return path
-	}
-
-	prefix, tailParts := splitStatusPathPrefix(path)
-	if len(tailParts) == 0 {
-		return truncateStatusValue(path, maxWidth)
-	}
-
-	joinTail := func(parts []string) string {
-		if len(parts) == 0 {
-			return ""
-		}
-		return prefix + strings.Join(parts, string(filepath.Separator))
-	}
-
-	if candidate := joinTail(tailParts); ui.DisplayWidth(candidate) <= maxWidth {
-		return candidate
-	}
-
-	for keep := len(tailParts); keep >= 2; keep-- {
-		parts := tailParts[len(tailParts)-keep:]
-		candidate := prefix + "..." + string(filepath.Separator) + strings.Join(parts, string(filepath.Separator))
-		if ui.DisplayWidth(candidate) <= maxWidth {
-			return candidate
-		}
-	}
-
-	candidate := prefix + "..." + string(filepath.Separator) + tailParts[len(tailParts)-1]
-	if ui.DisplayWidth(candidate) <= maxWidth {
-		return candidate
-	}
-	return truncateStatusValue(candidate, maxWidth)
-}
-
-func splitStatusPathPrefix(path string) (string, []string) {
-	if path == "" {
-		return "", nil
-	}
-	sep := string(filepath.Separator)
-	altSep := "/"
-	if filepath.Separator == '/' {
-		altSep = "\\"
-	}
-
-	prefix := ""
-	rest := path
-	if strings.HasPrefix(rest, "~"+sep) {
-		prefix = "~" + sep
-		rest = strings.TrimPrefix(rest, "~"+sep)
-	} else if rest == "~" {
-		return "~", nil
-	}
-	if volume := filepath.VolumeName(rest); volume != "" {
-		prefix = volume
-		rest = strings.TrimPrefix(rest, volume)
-	}
-
-	if strings.HasPrefix(rest, sep) {
-		prefix += sep
-		rest = strings.TrimPrefix(rest, sep)
-	}
-	rest = strings.ReplaceAll(rest, altSep, sep)
-	rest = strings.Trim(rest, sep)
-	if rest == "" {
-		return prefix, nil
-	}
-	parts := strings.Split(rest, sep)
-	filtered := parts[:0]
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			filtered = append(filtered, part)
-		}
-	}
-	return prefix, filtered
 }
 
 func truncateStatusValue(line string, width int) string {

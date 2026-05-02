@@ -1058,11 +1058,12 @@ func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirec
 	if strings.Contains(status, "4096") || strings.Contains(status, "123456") {
 		t.Fatalf("expected ctx used to reflect total token usage, got %q", status)
 	}
-	if !strings.Contains(status, "cwd ") || !strings.Contains(status, "...") {
-		t.Fatalf("expected cwd to be shortened in status line, got %q", status)
+	wantCwd := filepath.Clean(nested)
+	if !strings.Contains(status, "cwd "+wantCwd) {
+		t.Fatalf("expected cwd to keep full absolute path %q, got %q", wantCwd, status)
 	}
-	if strings.Contains(status, workspaceRoot) {
-		t.Fatalf("expected cwd to be shortened, got %q", status)
+	if strings.Contains(status, "...") {
+		t.Fatalf("expected cwd to avoid ellipsis shortening, got %q", status)
 	}
 }
 
@@ -1152,19 +1153,6 @@ func TestResolveChatStatusCurrentDirectory_UsesProfileRootWhenPresent(t *testing
 	want := filepath.Clean(filepath.Join(baseDir, "profiles", "demo"))
 	if got != want {
 		t.Fatalf("expected current directory %q, got %q", want, got)
-	}
-}
-
-func TestCompactStatusPath_PreservesTailSegments(t *testing.T) {
-	path := filepath.Join("alpha", "beta", "gamma", "delta", "epsilon", "zeta", "theta")
-	got := compactStatusPath(path, 30)
-	if !strings.HasPrefix(got, "...") {
-		t.Fatalf("expected compact path to start with ellipsis, got %q", got)
-	}
-	for _, want := range []string{"delta", "epsilon", "zeta", "theta"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("expected compact path to preserve %q, got %q", want, got)
-		}
 	}
 }
 
