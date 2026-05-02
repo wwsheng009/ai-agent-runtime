@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -366,6 +367,117 @@ func TestPrintCurrentRuntimeSession_ResolvesRelativePathsToAbsolute(t *testing.T
 		"Last HTTP Req:     " + resolveAbsoluteChatPath(requestPath),
 		"Last HTTP Resp:    " + resolveAbsoluteChatPath(responsePath),
 	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	baseDir := t.TempDir()
+	sessionDir := filepath.Join(baseDir, "sessions")
+	logDir := filepath.Join(baseDir, "chat-logs")
+	runtimeConfigPath := filepath.Join(baseDir, "runtime.yaml")
+	mcpConfigPath := filepath.Join(baseDir, "mcp.yaml")
+	skillsDir := filepath.Join(baseDir, "skills")
+	profileRoot := filepath.Join(baseDir, "workspace")
+
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, "https://example.com")
+	if err := logger.SetLogDir(logDir); err != nil {
+		t.Fatalf("set log dir: %v", err)
+	}
+	runtimeCapture := &chatRuntimeHTTPCapture{}
+	runtimeCapture.SetArtifactDir(logger.RuntimeHTTPArtifactDir())
+	requestPath := filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_request_gateway_client.json")
+	responsePath := filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_response_gateway_client.json")
+	runtimeCapture.RecordArtifactPath("request", requestPath)
+	runtimeCapture.RecordArtifactPath("response", responsePath)
+
+	queue := &chatInputQueue{
+		lines: make(chan chatQueuedInput, 4),
+		errs:  make(chan error, 1),
+	}
+
+	session := &ChatSession{
+		ProviderName:               "codex_ee",
+		Provider:                   config.Provider{Enabled: true, Protocol: "openai", BaseURL: "https://example.com", APIKeys: []string{"key-1"}},
+		Model:                      "gpt-5.2-code",
+		ReasoningEffort:            "medium",
+		HTTPDebug:                  true,
+		Stream:                     true,
+		NoInteractive:              true,
+		JSONOutput:                 true,
+		JSONEnvelope:               true,
+		MCPEnabled:                 true,
+		MCPStatus:                  &MCPStatus{Enabled: true, ToolCount: 7, MCPCount: 2},
+		SkillsDebug:                true,
+		OutputFormat:               "json",
+		ProfileName:                "debug-profile",
+		ProfileAgent:               "agent-x",
+		ProfileRoot:                profileRoot,
+		RuntimeConfigPath:          runtimeConfigPath,
+		MCPConfigPath:              mcpConfigPath,
+		ResolvedSkillDirs:          []string{skillsDir},
+		PermissionMode:             "default",
+		ApprovalReuseMode:          chatApprovalReuseTeamReadOnlyShell,
+		SessionDir:                 sessionDir,
+		InputQueue:                 queue,
+		RuntimeSession:             &runtimechat.Session{ID: "session-1", State: runtimechat.StateActive},
+		Logger:                     logger,
+		runtimeHTTPCapture:         runtimeCapture,
+		lastLocalShellArtifactPath: filepath.Join(logger.LocalShellArtifactDir(), "001_git.txt"),
+		Interaction: &chatInteractionCoordinator{
+			promptVisible:       true,
+			promptPasteActive:   true,
+			thinkingActive:      true,
+			streamingActive:     true,
+			reasoningActive:     true,
+			completeBlockOutput: true,
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/debug", false); quit {
+			t.Fatal("expected debug command not to exit")
+		}
+	})
+
+	expectedFragments := []string{
+		"Session:           session-1 [active]",
+		"Session File:      " + filepath.Join(sessionDir, "session-1.json"),
+		"Session Store:     " + sessionDir,
+		"Chat Log File:     " + logger.SessionLogPath(),
+		"Debug Log File:    " + logger.DebugLogPath(),
+		fmt.Sprintf("%-18s %s", "HTTP Artifact Dir:", logger.RuntimeHTTPArtifactDir()),
+		fmt.Sprintf("%-18s %s", "Shell Artifact Dir:", logger.LocalShellArtifactDir()),
+		fmt.Sprintf("%-18s %s", "Generated Image Artifact Dir:", filepath.Join(logger.SessionDirPath(), "generated-images")),
+		fmt.Sprintf("%-18s %s", "Last HTTP Req:", requestPath),
+		fmt.Sprintf("%-18s %s", "Last HTTP Resp:", responsePath),
+		fmt.Sprintf("%-18s %s", "Last Shell Out:", filepath.Join(logger.LocalShellArtifactDir(), "001_git.txt")),
+		fmt.Sprintf("%-18s %s", "Profile Root:", profileRoot),
+		fmt.Sprintf("%-18s %s", "Runtime Config Path:", runtimeConfigPath),
+		fmt.Sprintf("%-18s %s", "MCP Config Path:", mcpConfigPath),
+		fmt.Sprintf("%-18s %s", "Resolved Skill Dirs:", skillsDir),
+		fmt.Sprintf("%-18s %s", "Output Format:", "json"),
+		fmt.Sprintf("%-18s %s", "No Interactive:", "on"),
+		fmt.Sprintf("%-18s %s", "JSON Output:", "on"),
+		fmt.Sprintf("%-18s %s", "JSON Envelope:", "on"),
+		fmt.Sprintf("%-18s %s", "MCP Enabled:", "on"),
+		fmt.Sprintf("%-18s %s", "Skills Debug:", "on"),
+		fmt.Sprintf("%-18s %s", "Permission Mode:", "default"),
+		fmt.Sprintf("%-18s %s", "Approval Reuse:", "team_readonly_shell"),
+		fmt.Sprintf("%-18s %s", "Queued Input:", "0 pending"),
+		fmt.Sprintf("%-18s %s", "Interaction:", "prompt_visible=true prompt_paste_active=true thinking_active=true streaming_active=true reasoning_active=true complete_block_output=true shutdown=false"),
+		fmt.Sprintf("%-18s %s", "Surface:", "<none>"),
+	}
+	for _, expected := range expectedFragments {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
 		}

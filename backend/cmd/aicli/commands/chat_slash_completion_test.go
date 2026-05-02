@@ -87,7 +87,7 @@ func TestMatchSlashCommandCandidates(t *testing.T) {
 		{
 			name:  "slash s prefix order",
 			query: "/s",
-			want:  []string{"/s", "/session", "/sessions", "/stream", "/skill", "/shell"},
+			want:  []string{"/s", "/session", "/sessions", "/status", "/stream", "/skill", "/shell"},
 		},
 		{
 			name:  "exact alias outranks prefix",
@@ -329,6 +329,8 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/clear", forms: []string{"/clear", "/cls"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/new", forms: []string{"/new"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/session", forms: []string{"/session"}, acceptsArgs: false, requiresArgs: false},
+		{canonical: "/status", forms: []string{"/status"}, acceptsArgs: false, requiresArgs: false},
+		{canonical: "/debug", forms: []string{"/debug"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/sessions", forms: []string{"/sessions"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/load", forms: []string{"/load"}, acceptsArgs: true, requiresArgs: true},
 		{canonical: "/resume", forms: []string{"/resume"}, acceptsArgs: true, requiresArgs: false},

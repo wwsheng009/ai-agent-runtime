@@ -716,6 +716,9 @@ func composeChatSystemPromptWithGuidance(session *ChatSession) string {
 	if guidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidance()); guidance != "" {
 		lines = append(lines, guidance)
 	}
+	if guidance := strings.TrimSpace(runtimeprompt.RenderParallelToolGuidance()); guidance != "" {
+		lines = append(lines, guidance)
+	}
 	return strings.Join(lines, "\n\n")
 }
 
@@ -972,6 +975,13 @@ func decodeRuntimeToolCalls(raw interface{}) []runtimetypes.ToolCall {
 		}
 		if name, ok := item["name"].(string); ok {
 			call.Name = name
+		}
+
+		switch args := item["input"].(type) {
+		case map[string]interface{}:
+			call.Args = args
+		case string:
+			call.Args = decodeToolArguments(args)
 		}
 
 		switch args := item["arguments"].(type) {

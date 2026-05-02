@@ -199,6 +199,12 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		}
 		printCurrentRuntimeSession(session)
 
+	case "/status":
+		return handleStatusCommand(session, command)
+
+	case "/debug":
+		printChatDebugInfo(session)
+
 	case "/compact":
 		return handleCompactCommand(session, command)
 

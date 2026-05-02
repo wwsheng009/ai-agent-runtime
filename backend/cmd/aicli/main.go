@@ -71,6 +71,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Warning: .env file not found in %v\n", envPaths)
 	}
 
+	commands.SetChatStatusBuildInfo(version, buildTime)
+
 	// 创建 root 命令
 	rootCmd := &cobra.Command{
 		Use:   "aicli [子命令]",

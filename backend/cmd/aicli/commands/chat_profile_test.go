@@ -207,6 +207,20 @@ func TestEnsureChatSystemPromptMessage_PrependsAndReplaces(t *testing.T) {
 	}
 }
 
+func TestComposeChatSystemPromptWithGuidance_IncludesParallelToolGuidance(t *testing.T) {
+	session := &ChatSession{
+		SystemPromptText: "Profile system prompt.",
+	}
+
+	prompt := composeChatSystemPromptWithGuidance(session)
+	if !strings.Contains(prompt, "Parallel tool guidance:") {
+		t.Fatalf("expected parallel tool guidance, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "same assistant turn") {
+		t.Fatalf("expected batching guidance, got:\n%s", prompt)
+	}
+}
+
 func writeTestFile(t *testing.T, path string, contents string) {
 	t.Helper()
 	mustMkdir(t, filepath.Dir(path))

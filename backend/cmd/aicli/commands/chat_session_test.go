@@ -48,6 +48,67 @@ func TestAICLIMessageRoundTripPreservesTypedToolCalls(t *testing.T) {
 	}
 }
 
+func TestRuntimeMessageFromAICLIMessage_DecodesAnthropicToolUseInput(t *testing.T) {
+	raw := map[string]interface{}{
+		"role":    "assistant",
+		"content": "",
+		"tool_calls": []map[string]interface{}{
+			{
+				"type": "tool_use",
+				"id":   "call-1",
+				"name": "view",
+				"input": map[string]interface{}{
+					"file_path": "E:/projects/ai/ai-agent-runtime/backend/internal/agent/tool_parallel_scheduler.go",
+					"limit":     220,
+				},
+			},
+		},
+	}
+
+	message, err := runtimeMessageFromAICLIMessage(raw)
+	if err != nil {
+		t.Fatalf("runtimeMessageFromAICLIMessage: %v", err)
+	}
+	if len(message.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(message.ToolCalls))
+	}
+	call := message.ToolCalls[0]
+	if call.Name != "view" {
+		t.Fatalf("unexpected tool name: %q", call.Name)
+	}
+	if got := call.Args["file_path"]; got != "E:/projects/ai/ai-agent-runtime/backend/internal/agent/tool_parallel_scheduler.go" {
+		t.Fatalf("unexpected file_path: %#v", got)
+	}
+	switch got := call.Args["limit"].(type) {
+	case int:
+		if got != 220 {
+			t.Fatalf("unexpected limit: %#v", got)
+		}
+	case float64:
+		if got != 220 {
+			t.Fatalf("unexpected limit: %#v", got)
+		}
+	default:
+		t.Fatalf("unexpected limit type: %T (%#v)", got, got)
+	}
+
+	restored, err := aicliMessageFromRuntimeMessage(message)
+	if err != nil {
+		t.Fatalf("aicliMessageFromRuntimeMessage: %v", err)
+	}
+	toolCalls, ok := restored["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("expected one restored tool call, got %#v", restored["tool_calls"])
+	}
+	function, _ := toolCalls[0]["function"].(map[string]interface{})
+	if function["name"] != "view" {
+		t.Fatalf("unexpected restored function payload: %#v", function)
+	}
+	if got := function["arguments"]; got == "" {
+		t.Fatal("expected restored arguments to be preserved")
+	}
+}
+
 func TestAICLIMessageRoundTripPreservesToolMetadata(t *testing.T) {
 	message := runtimetypes.Message{
 		Role:       "tool",

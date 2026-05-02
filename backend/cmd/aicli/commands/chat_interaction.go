@@ -734,6 +734,24 @@ func (c *chatInteractionCoordinator) IsPromptPasteActive() bool {
 	return c.promptPasteActive
 }
 
+func (c *chatInteractionCoordinator) DebugSummary() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	parts := []string{
+		fmt.Sprintf("prompt_visible=%t", c.promptVisible),
+		fmt.Sprintf("prompt_paste_active=%t", c.promptPasteActive),
+		fmt.Sprintf("thinking_active=%t", c.thinkingActive),
+		fmt.Sprintf("streaming_active=%t", c.streamingActive),
+		fmt.Sprintf("reasoning_active=%t", c.reasoningActive),
+		fmt.Sprintf("complete_block_output=%t", c.completeBlockOutput),
+		fmt.Sprintf("shutdown=%t", c.shutdown),
+	}
+	return strings.Join(parts, " ")
+}
+
 func (c *chatInteractionCoordinator) ResetRunState() {
 	if c == nil {
 		return
