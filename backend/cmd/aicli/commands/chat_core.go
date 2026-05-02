@@ -17,6 +17,7 @@ import (
 
 const chatcoreReasoningMetadataKey = "chatcore_reasoning_content"
 const sharedChatDefaultAutoCompactRatio = 0.9
+const sharedChatDefaultContextWindowTokens = 256000
 
 // chatSessionImageArtifactDir returns the session-local directory for
 // persisting image attachment copies. Returns empty string if unavailable.
@@ -53,6 +54,7 @@ type sharedChatPromptBudget struct {
 	BudgetSourceDetail                   string
 	ResolvedProvider                     string
 	ResolvedModel                        string
+	ProviderContextLimit                 int
 	ModelCapabilityMaxContextTokens      int
 	ModelCapabilityAutoCompactRatio      float64
 	ModelCapabilityAutoCompactTokenLimit int
@@ -177,6 +179,7 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	if err := replaceRuntimeMessages(session, loopResult.History); err != nil {
 		return "", fmt.Errorf("共享 chat history 更新失败: %w", err)
 	}
+	applyChatTokenUsage(session, loopResult.Response.Usage)
 	warnIfChatSessionSyncFails(session, "shared chatcore sync", syncRuntimeSessionFromChat(session))
 
 	if session.Logger != nil && len(loopResult.Response.ToolExecutions) > 0 {
@@ -233,37 +236,44 @@ func resolveSharedChatPromptBudget(session *ChatSession) sharedChatPromptBudget 
 	}
 	budget.ResolvedModel = strings.TrimSpace(session.Model)
 	capability, ok := runtimellm.ResolveModelCapabilitySpec(session.Model, session.Provider.ModelCapabilities)
-	if !ok {
-		return budget
+	if ok {
+		budget.ModelCapabilityMaxContextTokens = capability.MaxContextTokens
+		budget.ModelCapabilityAutoCompactTokenLimit = capability.AutoCompactTokenLimit
+		if capability.AutoCompactTokenLimit > 0 {
+			budget.ActiveTurnMaxTokens = capability.AutoCompactTokenLimit
+			budget.BudgetSource = "model_capability_auto_compact_token_limit"
+			budget.BudgetSourceDetail = "model capability auto-compact token limit"
+			return budget
+		}
+		if capability.MaxContextTokens > 0 {
+			ratio := capability.AutoCompactRatio
+			ratioDetail := fmt.Sprintf("model capability auto-compact ratio %.2f", capability.AutoCompactRatio)
+			if ratio <= 0 || ratio >= 1 {
+				ratio = sharedChatDefaultAutoCompactRatio
+				ratioDetail = fmt.Sprintf("fallback auto-compact ratio %.2f", sharedChatDefaultAutoCompactRatio)
+			}
+			budget.ModelCapabilityAutoCompactRatio = ratio
+			limit := int(math.Floor(float64(capability.MaxContextTokens) * ratio))
+			if limit <= 0 || limit > capability.MaxContextTokens {
+				budget.ActiveTurnMaxTokens = capability.MaxContextTokens
+				budget.BudgetSource = "model_capability_max_context_tokens"
+				budget.BudgetSourceDetail = fmt.Sprintf("model capability max_context_tokens=%d", capability.MaxContextTokens)
+				return budget
+			}
+			budget.ActiveTurnMaxTokens = limit
+			budget.BudgetSource = "model_capability_auto_compact_ratio"
+			budget.BudgetSourceDetail = fmt.Sprintf("%s over max_context_tokens=%d", ratioDetail, capability.MaxContextTokens)
+			return budget
+		}
 	}
-	budget.ModelCapabilityMaxContextTokens = capability.MaxContextTokens
-	budget.ModelCapabilityAutoCompactTokenLimit = capability.AutoCompactTokenLimit
-	if capability.AutoCompactTokenLimit > 0 {
-		budget.ActiveTurnMaxTokens = capability.AutoCompactTokenLimit
-		budget.BudgetSource = "model_capability_auto_compact_token_limit"
-		budget.BudgetSourceDetail = "model capability auto-compact token limit"
-		return budget
-	}
-	if capability.MaxContextTokens <= 0 {
-		return budget
-	}
-	ratio := capability.AutoCompactRatio
-	ratioDetail := fmt.Sprintf("model capability auto-compact ratio %.2f", capability.AutoCompactRatio)
-	if ratio <= 0 || ratio >= 1 {
-		ratio = sharedChatDefaultAutoCompactRatio
-		ratioDetail = fmt.Sprintf("fallback auto-compact ratio %.2f", sharedChatDefaultAutoCompactRatio)
-	}
-	budget.ModelCapabilityAutoCompactRatio = ratio
-	limit := int(math.Floor(float64(capability.MaxContextTokens) * ratio))
-	if limit <= 0 || limit > capability.MaxContextTokens {
-		budget.ActiveTurnMaxTokens = capability.MaxContextTokens
-		budget.BudgetSource = "model_capability_max_context_tokens"
-		budget.BudgetSourceDetail = fmt.Sprintf("model capability max_context_tokens=%d", capability.MaxContextTokens)
-		return budget
+	budget.ProviderContextLimit = sharedChatDefaultContextWindowTokens
+	limit := int(math.Floor(float64(budget.ProviderContextLimit) * sharedChatDefaultAutoCompactRatio))
+	if limit <= 0 || limit > budget.ProviderContextLimit {
+		limit = budget.ProviderContextLimit
 	}
 	budget.ActiveTurnMaxTokens = limit
-	budget.BudgetSource = "model_capability_auto_compact_ratio"
-	budget.BudgetSourceDetail = fmt.Sprintf("%s over max_context_tokens=%d", ratioDetail, capability.MaxContextTokens)
+	budget.BudgetSource = "default_context_window_default_ratio"
+	budget.BudgetSourceDetail = fmt.Sprintf("floor(default context window * %.2f)", sharedChatDefaultAutoCompactRatio)
 	return budget
 }
 

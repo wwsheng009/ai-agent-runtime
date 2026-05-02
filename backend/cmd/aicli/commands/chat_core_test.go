@@ -1861,6 +1861,27 @@ func TestAICLISharedChatExecutor_PassesActiveTurnTokenBudgetToToolLoop(t *testin
 	}
 }
 
+func TestResolveSharedChatPromptBudget_FallsBackToDefaultContextWindow(t *testing.T) {
+	session := &ChatSession{
+		Model:    "provider-only-model",
+		Provider: config.Provider{MaxToken: 8000},
+	}
+
+	budget := resolveSharedChatPromptBudget(session)
+	if budget.ProviderContextLimit != 256000 {
+		t.Fatalf("expected default context window 256000, got %d", budget.ProviderContextLimit)
+	}
+	if budget.ActiveTurnMaxTokens != 230400 {
+		t.Fatalf("expected active turn budget 230400, got %d", budget.ActiveTurnMaxTokens)
+	}
+	if budget.BudgetSource != "default_context_window_default_ratio" {
+		t.Fatalf("expected default context window budget source, got %q", budget.BudgetSource)
+	}
+	if budget.BudgetSourceDetail == "" {
+		t.Fatal("expected default context window budget detail to be populated")
+	}
+}
+
 func TestAICLISharedChatExecutor_HumanizesPromptPreflightFailureFromToolLoop(t *testing.T) {
 	original := executeToolLoop
 	defer func() {
