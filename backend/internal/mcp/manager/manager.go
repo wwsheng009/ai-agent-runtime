@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/client"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
-	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
 var statusOutput io.Writer = os.Stdout
@@ -392,11 +392,12 @@ func (m *manager) GetMCPStatus(name string) (*config.MCPStatus, error) {
 	}
 
 	status := &config.MCPStatus{
-		Name:          name,
-		Type:          mcpCfg.Type,
-		TrustLevel:    mcpCfg.ResolvedTrustLevel(),
-		ExecutionMode: mcpCfg.ExecutionMode(),
-		Enabled:       mcpCfg.IsEnabled(),
+		Name:             name,
+		Type:             mcpCfg.Type,
+		TrustLevel:       mcpCfg.ResolvedTrustLevel(),
+		ExecutionMode:    mcpCfg.ExecutionMode(),
+		MaxParallelCalls: mcpCfg.MaxParallelCalls,
+		Enabled:          mcpCfg.IsEnabled(),
 	}
 	if runtimeStatus, ok := m.status[name]; ok && runtimeStatus != nil {
 		status.LastError = runtimeStatus.LastError
@@ -472,6 +473,7 @@ func (m *manager) ensureStatusLocked(name string, mcpCfg *config.MCPConfig) *con
 		status.Type = mcpCfg.Type
 		status.TrustLevel = mcpCfg.ResolvedTrustLevel()
 		status.ExecutionMode = mcpCfg.ExecutionMode()
+		status.MaxParallelCalls = mcpCfg.MaxParallelCalls
 		status.Enabled = mcpCfg.IsEnabled()
 	}
 	return status

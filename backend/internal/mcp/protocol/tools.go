@@ -5,15 +5,16 @@ type Tool struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	InputSchema map[string]interface{} `json:"inputSchema"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // Resource MCP 资源定义
 type Resource struct {
-	URI         string                 `json:"uri"`
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	MIMEType    string                 `json:"mimeType,omitempty"`
-	Annotations *ResourceAnnotations    `json:"annotations,omitempty"`
+	URI         string               `json:"uri"`
+	Name        string               `json:"name"`
+	Description string               `json:"description,omitempty"`
+	MIMEType    string               `json:"mimeType,omitempty"`
+	Annotations *ResourceAnnotations `json:"annotations,omitempty"`
 }
 
 // ResourceAnnotations 资源注解
@@ -26,9 +27,9 @@ type ResourceAnnotations struct {
 
 // Prompt MCP 提示定义
 type Prompt struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description,omitempty"`
-	Arguments   []PromptArgument  `json:"arguments,omitempty"`
+	Name        string           `json:"name"`
+	Description string           `json:"description,omitempty"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
 }
 
 // PromptArgument 提示参数

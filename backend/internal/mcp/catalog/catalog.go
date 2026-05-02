@@ -416,6 +416,12 @@ func cloneTool(tool skill.ToolInfo) skill.ToolInfo {
 			cloned.InputSchema[key] = value
 		}
 	}
+	if len(tool.Metadata) > 0 {
+		cloned.Metadata = make(map[string]interface{}, len(tool.Metadata))
+		for key, value := range tool.Metadata {
+			cloned.Metadata[key] = value
+		}
+	}
 	return cloned
 }
 
@@ -457,6 +463,7 @@ func toolSignature(tool skill.ToolInfo) string {
 		Name          string                 `json:"name"`
 		Description   string                 `json:"description"`
 		InputSchema   map[string]interface{} `json:"input_schema,omitempty"`
+		Metadata      map[string]interface{} `json:"metadata,omitempty"`
 		MCPName       string                 `json:"mcp_name"`
 		MCPTrustLevel string                 `json:"mcp_trust_level"`
 		ExecutionMode string                 `json:"execution_mode"`
@@ -465,6 +472,7 @@ func toolSignature(tool skill.ToolInfo) string {
 		Name:          tool.Name,
 		Description:   tool.Description,
 		InputSchema:   tool.InputSchema,
+		Metadata:      tool.Metadata,
 		MCPName:       tool.MCPName,
 		MCPTrustLevel: tool.MCPTrustLevel,
 		ExecutionMode: tool.ExecutionMode,

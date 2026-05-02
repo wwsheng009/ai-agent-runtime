@@ -23,6 +23,7 @@ func (s *managerToolSource) ListTools() []skill.ToolInfo {
 			Name:        tool.Tool.Name,
 			Description: tool.Tool.Description,
 			InputSchema: cloneSchema(tool.Tool.InputSchema),
+			Metadata:    cloneSchema(tool.Metadata),
 			MCPName:     tool.MCPName,
 			Enabled:     tool.Enabled,
 		})

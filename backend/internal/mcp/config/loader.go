@@ -106,6 +106,9 @@ func (l *Loader) setDefaults(config *Config) {
 		if mcp.MaxRetry == 0 {
 			mcp.MaxRetry = 3
 		}
+		if mcp.MaxParallelCalls <= 0 {
+			mcp.MaxParallelCalls = 1
+		}
 		// 如果都没有启用字段，则默认启用
 		if !mcp.Enabled && !mcp.Disabled {
 			mcp.Enabled = true
@@ -210,6 +213,9 @@ func (l *Loader) validate(config *Config) error {
 		case MCPTrustLevelLocal, MCPTrustLevelTrustedRemote, MCPTrustLevelUntrusted:
 		default:
 			return fmt.Errorf("无效的 trustLevel '%s' (MCP: %s)，支持: local, trusted_remote, untrusted_remote", mcp.TrustLevel, name)
+		}
+		if mcp.MaxParallelCalls < 0 {
+			return fmt.Errorf("maxParallelCalls cannot be negative (MCP: %s)", name)
 		}
 	}
 

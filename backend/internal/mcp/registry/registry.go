@@ -11,9 +11,10 @@ import (
 
 // ToolInfo 工具信息
 type ToolInfo struct {
-	Tool    *protocol.Tool
-	MCPName string
-	Enabled bool
+	Tool     *protocol.Tool
+	MCPName  string
+	Enabled  bool
+	Metadata map[string]interface{}
 }
 
 // Registry MCP 工具注册表
@@ -62,9 +63,10 @@ func (r *Registry) RegisterTool(mcpName string, tool *protocol.Tool, enabled boo
 
 	key := r.makeToolKey(mcpName, tool.Name)
 	r.tools[key] = &ToolInfo{
-		Tool:    tool,
-		MCPName: mcpName,
-		Enabled: enabled,
+		Tool:     tool,
+		MCPName:  mcpName,
+		Enabled:  enabled,
+		Metadata: cloneMetadata(tool.Metadata),
 	}
 }
 
@@ -229,4 +231,15 @@ func (r *Registry) Clear() {
 // makeToolKey 生成工具键
 func (r *Registry) makeToolKey(mcpName, toolName string) string {
 	return fmt.Sprintf("%s_%s", mcpName, toolName)
+}
+
+func cloneMetadata(metadata map[string]interface{}) map[string]interface{} {
+	if len(metadata) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(metadata))
+	for key, value := range metadata {
+		cloned[key] = value
+	}
+	return cloned
 }

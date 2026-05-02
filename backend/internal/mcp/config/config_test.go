@@ -51,6 +51,9 @@ func TestConfig_SetDefaultsWithMCPServers(t *testing.T) {
 	if testMCP.MaxRetry != 3 {
 		t.Errorf("Expected default maxRetry 3, got %d", testMCP.MaxRetry)
 	}
+	if testMCP.MaxParallelCalls != 1 {
+		t.Errorf("Expected default maxParallelCalls 1, got %d", testMCP.MaxParallelCalls)
+	}
 	if testMCP.TrustLevel != MCPTrustLevelLocal {
 		t.Errorf("Expected stdio MCP default trust level local, got %s", testMCP.TrustLevel)
 	}
@@ -62,6 +65,9 @@ func TestConfig_SetDefaultsWithMCPServers(t *testing.T) {
 
 	if testMCP2.MaxRetry != 3 {
 		t.Errorf("Expected default maxRetry 3, got %d", testMCP2.MaxRetry)
+	}
+	if testMCP2.MaxParallelCalls != 1 {
+		t.Errorf("Expected default maxParallelCalls 1, got %d", testMCP2.MaxParallelCalls)
 	}
 	if testMCP2.TrustLevel != MCPTrustLevelUntrusted {
 		t.Errorf("Expected remote MCP default trust level untrusted_remote, got %s", testMCP2.TrustLevel)
@@ -497,16 +503,17 @@ func TestLoadConfig_FileNotFound(t *testing.T) {
 
 func TestConfig_MCPStatus(t *testing.T) {
 	status := MCPStatus{
-		Name:          "test_mcp",
-		Type:          "stdio",
-		TrustLevel:    MCPTrustLevelLocal,
-		ExecutionMode: "local_mcp",
-		Enabled:       true,
-		Connected:     true,
-		ToolCount:     5,
-		LastError:     "",
-		LastConnect:   time.Now(),
-		HealthCheck:   time.Now(),
+		Name:             "test_mcp",
+		Type:             "stdio",
+		TrustLevel:       MCPTrustLevelLocal,
+		ExecutionMode:    "local_mcp",
+		MaxParallelCalls: 2,
+		Enabled:          true,
+		Connected:        true,
+		ToolCount:        5,
+		LastError:        "",
+		LastConnect:      time.Now(),
+		HealthCheck:      time.Now(),
 	}
 
 	if status.Name != "test_mcp" {
@@ -530,6 +537,9 @@ func TestConfig_MCPStatus(t *testing.T) {
 	if status.ExecutionMode != "local_mcp" {
 		t.Errorf("Expected execution mode local_mcp, got %s", status.ExecutionMode)
 	}
+	if status.MaxParallelCalls != 2 {
+		t.Errorf("Expected MaxParallelCalls 2, got %d", status.MaxParallelCalls)
+	}
 }
 
 func TestConfig_ToolInfo(t *testing.T) {
@@ -543,11 +553,12 @@ func TestConfig_ToolInfo(t *testing.T) {
 	}
 
 	info := ToolInfo{
-		Name:        "test_tool",
-		Description: "A test tool",
-		MCPName:     "test_mcp",
-		Enabled:     true,
-		InputSchema: schema,
+		Name:             "test_tool",
+		Description:      "A test tool",
+		MCPName:          "test_mcp",
+		MaxParallelCalls: 3,
+		Enabled:          true,
+		InputSchema:      schema,
 	}
 
 	if info.Name != "test_tool" {
@@ -568,5 +579,8 @@ func TestConfig_ToolInfo(t *testing.T) {
 
 	if info.InputSchema == nil {
 		t.Error("Expected InputSchema to be set")
+	}
+	if info.MaxParallelCalls != 3 {
+		t.Errorf("Expected MaxParallelCalls 3, got %d", info.MaxParallelCalls)
 	}
 }
