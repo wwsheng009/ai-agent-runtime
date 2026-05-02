@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -392,25 +393,18 @@ func (cl *ChatLogger) LocalShellArtifactDir() string {
 // updateSummary 更新会话摘要
 func (cl *ChatLogger) updateSummary(content interface{}, durationMs int64) {
 	// 解析响应中的 usage 信息
-	if resp, ok := content.(map[string]interface{}); ok {
-		if usage, ok := resp["usage"].(map[string]interface{}); ok {
-			if cl.sessionLog.SessionSummary == nil {
-				cl.sessionLog.SessionSummary = &ChatSessionSummary{
-					UsageInfo: make(map[string]int),
-				}
-			} else if cl.sessionLog.SessionSummary.UsageInfo == nil {
-				cl.sessionLog.SessionSummary.UsageInfo = make(map[string]int)
-			}
-
-			// 累加 tokens
-			if totalTokens, ok := usage["total_tokens"].(float64); ok {
-				cl.sessionLog.SessionSummary.TotalTokens += int(totalTokens)
-			}
-			if totalTokens, ok := usage["total_tokens"].(int); ok {
-				cl.sessionLog.SessionSummary.TotalTokens += totalTokens
-			}
-		}
+	totalTokens := usageTotalTokensFromLogContent(content)
+	if totalTokens <= 0 {
+		return
 	}
+	if cl.sessionLog.SessionSummary == nil {
+		cl.sessionLog.SessionSummary = &ChatSessionSummary{
+			UsageInfo: make(map[string]int),
+		}
+	} else if cl.sessionLog.SessionSummary.UsageInfo == nil {
+		cl.sessionLog.SessionSummary.UsageInfo = make(map[string]int)
+	}
+	cl.sessionLog.SessionSummary.TotalTokens += totalTokens
 }
 
 // calculateSummary 计算会话摘要
@@ -490,12 +484,12 @@ func (cl *ChatLogger) extractTotalTokensFromMessages() int {
 		if msg.MessageType != "response" {
 			continue
 		}
-		if usage := extractUsageFromLogContent(msg.Content); len(usage) > 0 {
-			total += usageTotalTokens(usage)
+		if usageTotal := usageTotalTokensFromLogContent(msg.Content); usageTotal > 0 {
+			total += usageTotal
 			continue
 		}
-		if usage := extractUsageFromRawJSON(msg.RawContentJSON); len(usage) > 0 {
-			total += usageTotalTokens(usage)
+		if usageTotal := usageTotalTokensFromRawJSON(msg.RawContentJSON); usageTotal > 0 {
+			total += usageTotal
 		}
 	}
 	return total
@@ -506,8 +500,15 @@ func extractUsageFromLogContent(content interface{}) map[string]interface{} {
 	if !ok || payload == nil {
 		return nil
 	}
-	usage, _ := payload["usage"].(map[string]interface{})
-	return usage
+	if usage, ok := payload["usage"].(map[string]interface{}); ok && len(usage) > 0 {
+		return usage
+	}
+	if total, ok := payloadIntValue(payload["usage_total_tokens"]); ok && total > 0 {
+		return map[string]interface{}{
+			"total_tokens": total,
+		}
+	}
+	return nil
 }
 
 func extractUsageFromRawJSON(raw json.RawMessage) map[string]interface{} {
@@ -518,8 +519,7 @@ func extractUsageFromRawJSON(raw json.RawMessage) map[string]interface{} {
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil
 	}
-	usage, _ := payload["usage"].(map[string]interface{})
-	return usage
+	return extractUsageFromLogContent(payload)
 }
 
 func usageTotalTokens(usage map[string]interface{}) int {
@@ -533,4 +533,50 @@ func usageTotalTokens(usage map[string]interface{}) int {
 		return total
 	}
 	return 0
+}
+
+func usageTotalTokensFromLogContent(content interface{}) int {
+	return usageTotalTokens(extractUsageFromLogContent(content))
+}
+
+func usageTotalTokensFromRawJSON(raw json.RawMessage) int {
+	return usageTotalTokens(extractUsageFromRawJSON(raw))
+}
+
+func payloadIntValue(value interface{}) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int8:
+		return int(typed), true
+	case int16:
+		return int(typed), true
+	case int32:
+		return int(typed), true
+	case int64:
+		return int(typed), true
+	case uint:
+		return int(typed), true
+	case uint8:
+		return int(typed), true
+	case uint16:
+		return int(typed), true
+	case uint32:
+		return int(typed), true
+	case uint64:
+		return int(typed), true
+	case float32:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return int(parsed), true
+		}
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
 }
