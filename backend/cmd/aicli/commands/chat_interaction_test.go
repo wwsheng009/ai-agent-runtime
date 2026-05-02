@@ -1023,13 +1023,11 @@ func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirec
 	}()
 
 	session := &ChatSession{
-		Model:                 "gpt-5.4-code",
-		ReasoningEffort:       "HIGH",
-		ProviderName:          "openai",
-		MsgCount:              17,
-		TokenCount:            123456,
-		ContextTokenCount:     4096,
-		TurnContextTokenCount: 28640,
+		Model:           "gpt-5.4-code",
+		ReasoningEffort: "HIGH",
+		ProviderName:    "openai",
+		MsgCount:        17,
+		TokenCount:      28640,
 		Provider: config.Provider{
 			ModelCapabilities: map[string]config.ModelCapabilitySpec{
 				"gpt-5.4-code": {
@@ -1057,14 +1055,82 @@ func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirec
 	if strings.Contains(status, "tokens ") {
 		t.Fatalf("expected status line to omit duplicate tokens field, got %q", status)
 	}
-	if strings.Contains(status, "123456") || strings.Contains(status, "4096") {
-		t.Fatalf("expected ctx used to reflect turn aggregate tokens, not cumulative or last-request usage, got %q", status)
+	if strings.Contains(status, "4096") || strings.Contains(status, "123456") {
+		t.Fatalf("expected ctx used to reflect total token usage, got %q", status)
 	}
 	if !strings.Contains(status, "cwd ") || !strings.Contains(status, "...") {
 		t.Fatalf("expected cwd to be shortened in status line, got %q", status)
 	}
 	if strings.Contains(status, workspaceRoot) {
 		t.Fatalf("expected cwd to be shortened, got %q", status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_IncludesContextWindowWhenOnlyRuntimeCountsAreKnown(t *testing.T) {
+	session := &ChatSession{
+		TokenCount:              28640,
+		ContextWindowTokenCount: 128000,
+	}
+
+	status := buildChatSurfaceStatusLine(session, "Ready")
+	if !strings.Contains(status, "ctx 128000 used 28640 22%") {
+		t.Fatalf("expected status line to include context window summary, got %q", status)
+	}
+	if strings.Contains(status, "Thinking") {
+		t.Fatalf("expected status line to keep supplied state only, got %q", status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_FallsBackToDefaultContextWindowWhenNoCapabilityExists(t *testing.T) {
+	session := &ChatSession{
+		TokenCount: 28640,
+	}
+
+	status := buildChatSurfaceStatusLine(session, "Ready")
+	if !strings.Contains(status, "ctx 256000 used 28640 11%") {
+		t.Fatalf("expected default context window summary, got %q", status)
+	}
+	if strings.Contains(status, "8000") {
+		t.Fatalf("expected status line to avoid small output-limit fallback, got %q", status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_FallsBackToLoggerSummaryWhenTokenCountIsMissing(t *testing.T) {
+	logger := NewChatLogger("openai", "openai", "gpt-5.4-code", false, "")
+	logger.sessionLog.Messages = append(logger.sessionLog.Messages,
+		ChatLogDetail{
+			MessageType: "response",
+			Content: map[string]interface{}{
+				"usage_total_tokens": 12000,
+			},
+		},
+		ChatLogDetail{
+			MessageType: "response",
+			Content: map[string]interface{}{
+				"usage_total_tokens": 19415,
+			},
+		},
+	)
+
+	session := &ChatSession{
+		Model:        "gpt-5.4-code",
+		ProviderName: "openai",
+		Logger:       logger,
+		Provider: config.Provider{
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"gpt-5.4-code": {
+					MaxContextTokens: 128000,
+				},
+			},
+		},
+	}
+
+	status := buildChatSurfaceStatusLine(session, "Ready")
+	if strings.Contains(status, "used 0") {
+		t.Fatalf("expected status line to use logger summary total tokens, got %q", status)
+	}
+	if !strings.Contains(status, "ctx 128000 used 31415 25%") {
+		t.Fatalf("expected context summary to use logger summary total tokens, got %q", status)
 	}
 }
 

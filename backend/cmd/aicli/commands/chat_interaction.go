@@ -192,7 +192,7 @@ func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
 		}
 		parts = append(parts, "thinking_effort "+compactStatusValueOrDash(reasoningEffort, 12))
 
-		if budget := resolveSharedChatPromptBudget(session); budget.ActiveTurnMaxTokens > 0 || budget.ModelCapabilityMaxContextTokens > 0 || session.TurnContextTokenCount > 0 || session.ContextTokenCount > 0 {
+		if budget := resolveSharedChatPromptBudget(session); budget.ActiveTurnMaxTokens > 0 || budget.ModelCapabilityMaxContextTokens > 0 || budget.ProviderContextLimit > 0 || session.ContextWindowTokenCount > 0 || session.TurnContextTokenCount > 0 || session.ContextTokenCount > 0 {
 			if ctxSummary := formatChatContextWindowSummary(session, budget); ctxSummary != "" {
 				parts = append(parts, "ctx "+ctxSummary)
 			}
@@ -240,15 +240,13 @@ func formatChatContextWindowSummary(session *ChatSession, budget sharedChatPromp
 	if session != nil && session.ContextWindowTokenCount > 0 {
 		totalWindow = session.ContextWindowTokenCount
 	}
+	if totalWindow <= 0 && budget.ProviderContextLimit > 0 {
+		totalWindow = budget.ProviderContextLimit
+	}
 	if totalWindow <= 0 {
 		totalWindow = budget.ActiveTurnMaxTokens
 	}
-	usedTokens := 0
-	if session != nil && session.TurnContextTokenCount > 0 {
-		usedTokens = session.TurnContextTokenCount
-	} else if session != nil && session.ContextTokenCount > 0 {
-		usedTokens = session.ContextTokenCount
-	}
+	usedTokens := resolveChatStatusUsedTokens(session)
 	if totalWindow <= 0 {
 		if usedTokens > 0 {
 			return fmt.Sprintf("used %d", usedTokens)
@@ -264,6 +262,21 @@ func formatChatContextWindowSummary(session *ChatSession, budget sharedChatPromp
 		}
 	}
 	return fmt.Sprintf("%d used %d %d%%", totalWindow, usedTokens, percent)
+}
+
+func resolveChatStatusUsedTokens(session *ChatSession) int {
+	if session == nil {
+		return 0
+	}
+	if session.TokenCount > 0 {
+		return session.TokenCount
+	}
+	if session.Logger != nil {
+		if summary := session.Logger.CurrentSummary(); summary != nil && summary.TotalTokens > 0 {
+			return summary.TotalTokens
+		}
+	}
+	return 0
 }
 
 func compactStatusValue(value string, maxWidth int) string {
