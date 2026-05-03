@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
 	"github.com/google/uuid"
+	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
@@ -1529,9 +1529,23 @@ func ensureSQLiteDSNOptions(dsn string) string {
 	if dsn == "" {
 		return dsn
 	}
+	dsn = normalizeSQLiteDSN(dsn)
 	dsn = ensureSQLiteDSNOption(dsn, "_txlock", "immediate")
 	dsn = ensureSQLiteDSNOption(dsn, "_busy_timeout", "5000")
 	return dsn
+}
+
+func normalizeSQLiteDSN(dsn string) string {
+	lower := strings.ToLower(strings.TrimSpace(dsn))
+	if lower == "" || lower == ":memory:" || strings.HasPrefix(lower, "file:") {
+		return dsn
+	}
+	pathPart, queryPart, hasQuery := strings.Cut(dsn, "?")
+	uri := "file:" + filepath.ToSlash(filepath.Clean(pathPart))
+	if hasQuery {
+		return uri + "?" + queryPart
+	}
+	return uri
 }
 
 func ensureSQLiteDSNOption(dsn, key, value string) string {
