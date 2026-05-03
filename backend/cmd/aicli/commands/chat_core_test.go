@@ -302,6 +302,39 @@ func TestAICLIProviderTurnExecutor_UsesSanitizedProtocolMessagesForSharedReplay(
 	}
 }
 
+func TestAICLIProviderTurnExecutor_AccumulatesProviderUsageTotalTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		ProviderName: "nvidia",
+		Provider:     config.Provider{Protocol: "openai", BaseURL: server.URL},
+		Adapter:      &recordingProtocolAdapter{},
+		Model:        "z-ai/glm4.7",
+		BaseURL:      server.URL,
+		HTTPClient:   server.Client(),
+		cancelCtx:    context.Background(),
+		TokenCount:   7,
+	}
+
+	executor := &aicliProviderTurnExecutor{session: session}
+	turn, err := executor.Complete(context.Background(), runtimechatcore.ProviderTurnRequest{
+		Messages: []types.Message{*types.NewUserMessage("hello")},
+	})
+	if err != nil {
+		t.Fatalf("Complete failed: %v", err)
+	}
+	if turn == nil || turn.Usage == nil || turn.Usage.TotalTokens != 15 {
+		t.Fatalf("expected provider usage total 15, got %#v", turn)
+	}
+	if session.TokenCount != 22 {
+		t.Fatalf("expected cumulative used tokens 22, got %d", session.TokenCount)
+	}
+}
+
 func TestAICLIProviderTurnExecutor_ReplaysDeepSeekReasoningContentAfterToolTurns(t *testing.T) {
 	var capturedBody map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2078,6 +2111,10 @@ func TestAICLISharedChatExecutor_AutoCompactsHistoryBeforeToolLoop(t *testing.T)
 	}
 	if stage := captured.History[1].Metadata.GetString("context_stage", ""); stage != "compaction" {
 		t.Fatalf("expected compacted history marker in tool loop request, got %#v", captured.History)
+	}
+	expectedContextTokens := countChatContextTokensForMessages(session, session.Messages)
+	if session.ContextTokenCount != expectedContextTokens {
+		t.Fatalf("expected final context usage to be recomputed from compacted session history, got %d want %d", session.ContextTokenCount, expectedContextTokens)
 	}
 }
 

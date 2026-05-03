@@ -244,6 +244,7 @@ func syncRuntimeSessionBackIntoCLI(session *ChatSession) error {
 	if session == nil || session.SessionManager == nil || session.RuntimeSession == nil {
 		return nil
 	}
+	previousContextWindowTokens := session.ContextWindowTokenCount
 	runtimeSession, err := session.SessionManager.Get(context.Background(), session.RuntimeSession.ID)
 	if err != nil {
 		return err
@@ -258,6 +259,7 @@ func syncRuntimeSessionBackIntoCLI(session *ChatSession) error {
 	if session.LocalRuntimeHost != nil {
 		validateAmbientTeamBinding(session, session.LocalRuntimeHost.TeamStore)
 	}
+	refreshChatContextTokenSnapshotFromMessages(session, previousContextWindowTokens, true)
 	return syncRuntimeSessionFromChat(session)
 }
 

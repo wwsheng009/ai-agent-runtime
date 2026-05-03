@@ -360,6 +360,7 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 		*types.NewUserMessage(strings.Repeat("recent user context ", 80)),
 		*types.NewAssistantMessage(strings.Repeat("recent assistant context ", 80)),
 	})
+	setRuntimeSessionObservedTokenUsage(session, 140)
 	require.NoError(t, storage.Update(ctx, session))
 
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
@@ -410,6 +411,7 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 	require.Equal(t, "user", updated.History[2].Role)
 	require.Equal(t, "user", updated.History[3].Role)
 	require.Equal(t, "compaction", updated.History[3].Metadata["context_stage"])
+	require.Equal(t, 0, runtimeSessionObservedTokenUsage(updated))
 	require.Equal(t, 1, provider.callCount)
 
 	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
@@ -420,6 +422,75 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 	}
 	require.Contains(t, eventTypes, EventSessionCompactStarted)
 	require.Contains(t, eventTypes, EventSessionCompactCompleted)
+}
+
+func TestSessionActorMaybeAutoCompactSessionSkipsWhenObservedUsageIsZero(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-compact-zero-used")
+	require.NoError(t, err)
+	session.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("You are a helpful assistant."),
+		*types.NewUserMessage(strings.Repeat("older user context ", 80)),
+		*types.NewAssistantMessage(strings.Repeat("older assistant context ", 80)),
+		*types.NewUserMessage(strings.Repeat("recent user context ", 80)),
+		*types.NewAssistantMessage(strings.Repeat("recent assistant context ", 80)),
+	})
+	setRuntimeSessionObservedTokenUsage(session, 0)
+	require.NoError(t, storage.Update(ctx, session))
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "compact-provider",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &capturingSequenceProvider{
+		name: "compact-provider",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 120},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("compact-provider", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "compact-provider"))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-compact-zero-used-test",
+		Provider: "compact-provider",
+		Model:    "gpt-5",
+		Options: map[string]interface{}{
+			"context_keep_recent_messages": 1,
+		},
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	loaded, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	actor.maybeAutoCompactSession(ctx, loaded, "trace-compact-zero", nil, false)
+
+	updated, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.Len(t, updated.History, 5)
+	require.Equal(t, 0, runtimeSessionObservedTokenUsage(updated))
+	require.Equal(t, 0, provider.callCount)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	require.Equal(t, EventSessionCompactSkipped, last.Type)
+	require.Equal(t, "below_limit", last.Payload["reason"])
+	require.Equal(t, 0, last.Payload["token_before"])
 }
 
 func TestSessionActorMaybeAutoCompactSessionSkipsPendingToolState(t *testing.T) {
@@ -558,6 +629,7 @@ func TestSessionActorCompactForcesCompaction(t *testing.T) {
 	require.Len(t, updated.History, 4)
 	require.Equal(t, "compaction", updated.History[2].Metadata["context_stage"])
 	require.Equal(t, "user", updated.History[3].Role)
+	require.Equal(t, 0, runtimeSessionObservedTokenUsage(updated))
 }
 
 func TestSessionActorSubmitPrompt_EmitsLimitNoticeToSessionAndEvents(t *testing.T) {

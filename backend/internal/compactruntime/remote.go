@@ -62,7 +62,7 @@ func (a *RemoteAdapter) Compact(ctx context.Context, req Request, limit threshol
 		ResolvedModel:      limit.ResolvedModel,
 		TriggerTokenLimit:  limit.TriggerTokenLimit,
 		MaxContextTokens:   limit.MaxContextTokens,
-		TokenBefore:        counter(req.History),
+		TokenBefore:        resolveObservedTokenCount(req, counter),
 		TokenAfter:         counter(replacement),
 		Usage:              usage,
 		UsageSource:        strings.TrimSpace(response.UsageSource),

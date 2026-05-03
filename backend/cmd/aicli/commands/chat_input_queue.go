@@ -727,6 +727,41 @@ func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context
 	return chatInteractiveReadTransientLine(session, ctx)
 }
 
+func chatInteractiveReadPrioritySecretWithPrompt(session *ChatSession, ctx context.Context, prompt string) (string, error) {
+	if notice := discardPendingInteractiveInputForPriorityPrompt(session, "密钥输入"); notice != "" {
+		beginDirectInteractiveOutput(session)
+		ui.PrintWarning("%s", notice)
+	}
+	if session != nil && session.InputBox != nil {
+		if session.Interaction != nil {
+			session.Interaction.SetPromptInput("")
+		}
+		line, err := session.InputBox.ReadTransientSecretPrompt(prompt)
+		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
+			session.Interrupt()
+			if session.Interaction != nil {
+				session.Interaction.ResetPromptState()
+			}
+			return "", ui.ErrInteractiveInputExitRequested
+		}
+		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
+			session.Interrupt()
+			if session.Interaction != nil {
+				session.Interaction.ResetPromptState()
+			}
+			return "", io.EOF
+		}
+		if session.Interaction != nil {
+			session.Interaction.ResetPromptState()
+		}
+		return line, err
+	}
+	if chatIsInteractiveTerminal() {
+		return ui.NewInputBox(nil).ReadTransientSecretPrompt(prompt)
+	}
+	return chatInteractiveReadTransientLine(session, ctx)
+}
+
 func chatInputQueueHasQueuedLines(session *ChatSession) bool {
 	if session == nil || session.InputQueue == nil {
 		return false

@@ -3,6 +3,7 @@ package compactruntime
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 
@@ -321,6 +322,111 @@ func TestMaybeCompactFallsBackToWildcardAndSkipsBelowLimit(t *testing.T) {
 	require.Equal(t, 0, provider.callCount)
 }
 
+func TestMaybeCompactUsesObservedTokensForTrigger(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {MaxContextTokens: 100, AutoCompactTokenLimit: 90},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, status, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:         "session-observed",
+		Provider:          "provider-a",
+		Model:             "gpt-5",
+		History:           compactTestHistory(),
+		Phase:             PhasePreTurn,
+		ObservedTokens:    95,
+		HasObservedTokens: true,
+		CountTokens: func(messages []types.Message) int {
+			return 10
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 95, status.TokenBefore)
+	require.Equal(t, 95, result.TokenBefore)
+	require.Equal(t, 1, provider.callCount)
+}
+
+func TestMaybeCompactSkipsWhenObservedTokensBelowLimitEvenIfHistoryEstimateIsHigh(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {MaxContextTokens: 100, AutoCompactTokenLimit: 90},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, status, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:         "session-observed-skip",
+		Provider:          "provider-a",
+		Model:             "gpt-5",
+		History:           compactTestHistory(),
+		Phase:             PhasePreTurn,
+		ObservedTokens:    80,
+		HasObservedTokens: true,
+		CountTokens: func(messages []types.Message) int {
+			return 1000
+		},
+	})
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.Equal(t, "below_limit", status.Reason)
+	require.Equal(t, 80, status.TokenBefore)
+	require.Equal(t, 0, provider.callCount)
+}
+
+func TestMaybeCompactTreatsExplicitZeroObservedTokensAsCurrentUsage(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {MaxContextTokens: 100, AutoCompactTokenLimit: 90},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, status, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:         "session-observed-zero",
+		Provider:          "provider-a",
+		Model:             "gpt-5",
+		History:           compactTestHistory(),
+		Phase:             PhasePreTurn,
+		ObservedTokens:    0,
+		HasObservedTokens: true,
+		CountTokens: func(messages []types.Message) int {
+			return 1000
+		},
+	})
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.Equal(t, "below_limit", status.Reason)
+	require.Equal(t, 0, status.TokenBefore)
+	require.Equal(t, 0, provider.callCount)
+}
+
 func TestMaybeCompactReusesSummaryCheckpointWithoutSecondLLMCall(t *testing.T) {
 	store, err := artifact.NewStore(nil)
 	require.NoError(t, err)
@@ -486,7 +592,7 @@ func TestMaybeCompactForceBypassesBelowLimit(t *testing.T) {
 	require.Equal(t, 1, provider.callCount)
 }
 
-func TestMaybeCompactMissingCapabilityReportsResolvedProviderAndModel(t *testing.T) {
+func TestMaybeCompactMissingCapabilityUsesDefaultWindowAndReportsResolvedProviderAndModel(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "provider-a",
 		DefaultModel:    "gpt-5.5",
@@ -506,15 +612,97 @@ func TestMaybeCompactMissingCapabilityReportsResolvedProviderAndModel(t *testing
 		History:   compactTestHistory(),
 		Phase:     PhasePreTurn,
 		CountTokens: func(messages []types.Message) int {
-			return len(messages) * 60
+			return defaultAutoCompactContextWindow
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "", status.Reason)
+	require.Equal(t, "provider-a", status.ResolvedProvider)
+	require.Equal(t, "gpt-5.5", status.ResolvedModel)
+	require.Equal(t, defaultAutoCompactContextWindow, status.TokenBefore)
+	require.Equal(t, defaultAutoCompactContextWindow, status.MaxContextTokens)
+	require.Equal(t, int(math.Floor(float64(defaultAutoCompactContextWindow)*defaultAutoCompactRatio)), status.TriggerTokenLimit)
+	require.Equal(t, 1, provider.callCount)
+}
+
+func TestMaybeCompactMissingCapabilitySkipsBelowDefaultWindow(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name:         "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5.5", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, status, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:         "session-compact-missing-capability-below-default",
+		Model:             "gpt-5.5",
+		History:           compactTestHistory(),
+		Phase:             PhasePreTurn,
+		ObservedTokens:    0,
+		HasObservedTokens: true,
+		CountTokens: func(messages []types.Message) int {
+			return defaultAutoCompactContextWindow
 		},
 	})
 	require.NoError(t, err)
 	require.Nil(t, result)
-	require.Equal(t, "missing_model_capability", status.Reason)
+	require.Equal(t, "below_limit", status.Reason)
 	require.Equal(t, "provider-a", status.ResolvedProvider)
 	require.Equal(t, "gpt-5.5", status.ResolvedModel)
-	require.Equal(t, len(compactTestHistory())*60, status.TokenBefore)
+	require.Equal(t, 0, status.TokenBefore)
+	require.Equal(t, defaultAutoCompactContextWindow, status.MaxContextTokens)
+	require.Equal(t, 0, provider.callCount)
+}
+
+func TestMaybeCompactCapabilityWithoutContextLimitFallsBackToDefaultWindow(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "deepseek-v4-pro",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"deepseek-v4-pro": {
+				ReasoningModel: true,
+				ReasoningEfforts: []string{
+					"high",
+					"max",
+				},
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("deepseek-v4-pro", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, status, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:         "session-compact-partial-capability",
+		Model:             "deepseek-v4-pro",
+		History:           compactTestHistory(),
+		Phase:             PhasePreTurn,
+		ObservedTokens:    defaultAutoCompactContextWindow,
+		HasObservedTokens: true,
+		CountTokens: func(messages []types.Message) int {
+			return 10
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "", status.Reason)
+	require.Equal(t, "provider-a", status.ResolvedProvider)
+	require.Equal(t, "deepseek-v4-pro", status.ResolvedModel)
+	require.Equal(t, defaultAutoCompactContextWindow, status.TokenBefore)
+	require.Equal(t, defaultAutoCompactContextWindow, status.MaxContextTokens)
+	require.Equal(t, int(math.Floor(float64(defaultAutoCompactContextWindow)*defaultAutoCompactRatio)), status.TriggerTokenLimit)
+	require.Equal(t, 1, provider.callCount)
 }
 
 func TestMaybeCompactForceLocalDoesNotRequireModelCapability(t *testing.T) {

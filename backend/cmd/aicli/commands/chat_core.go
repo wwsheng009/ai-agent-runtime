@@ -164,6 +164,7 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 				if replaceErr := replaceRuntimeMessages(session, replacement); replaceErr != nil {
 					err = fmt.Errorf("%w: 应用 prompt preflight 恢复历史失败: %v", err, replaceErr)
 				} else {
+					applyChatContextTokensFromMessages(session, replacement, promptBudget.ModelCapabilityMaxContextTokens, true)
 					warnIfChatSessionSyncFails(session, "shared chatcore preflight recovery sync", syncRuntimeSessionFromChat(session))
 					preflightErr.ReplacementHistoryApplied = true
 				}
@@ -179,7 +180,7 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	if err := replaceRuntimeMessages(session, loopResult.History); err != nil {
 		return "", fmt.Errorf("共享 chat history 更新失败: %w", err)
 	}
-	applyChatTokenUsage(session, loopResult.Response.Usage)
+	applyChatContextTokensFromMessages(session, loopResult.History, promptBudget.ModelCapabilityMaxContextTokens, true)
 	warnIfChatSessionSyncFails(session, "shared chatcore sync", syncRuntimeSessionFromChat(session))
 
 	if session.Logger != nil && len(loopResult.Response.ToolExecutions) > 0 {
@@ -329,27 +330,60 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 		sessionID = strings.TrimSpace(session.RuntimeSession.ID)
 	}
 	result, status, err := compactruntime.New(llmRuntime, nil).MaybeCompact(ctx, compactruntime.Request{
-		SessionID:   sessionID,
-		TaskID:      sessionID,
-		Provider:    strings.TrimSpace(session.ProviderName),
-		Model:       strings.TrimSpace(session.Model),
-		History:     history,
-		Phase:       compactruntime.PhasePreTurn,
-		CountTokens: llmRuntime.CountMessagesTokens,
+		SessionID:         sessionID,
+		TaskID:            sessionID,
+		Provider:          strings.TrimSpace(session.ProviderName),
+		Model:             strings.TrimSpace(session.Model),
+		History:           history,
+		Phase:             compactruntime.PhasePreTurn,
+		CountTokens:       llmRuntime.CountMessagesTokens,
+		ObservedTokens:    session.TokenCount,
+		HasObservedTokens: true,
 	})
 	report := &sharedChatAutoCompactReport{
 		Result: result,
 		Status: status,
 	}
 	if err != nil || result == nil || len(result.ReplacementHistory) == 0 {
+		applyChatCompactContextUsage(session, result, status, false)
 		return history, report, err
 	}
 
 	if err := replaceRuntimeMessages(session, result.ReplacementHistory); err != nil {
 		return history, report, fmt.Errorf("共享 chat 自动压缩结果更新失败: %w", err)
 	}
+	applyChatCompactContextUsage(session, result, status, true)
 	warnIfChatSessionSyncFails(session, "shared chat auto compact sync", syncRuntimeSessionFromChat(session))
 	return cloneSharedChatRuntimeMessages(result.ReplacementHistory), report, nil
+}
+
+func applyChatCompactContextUsage(session *ChatSession, result *compactruntime.Result, status compactruntime.Status, forceRefresh bool) {
+	if session == nil {
+		return
+	}
+	windowTokens := status.MaxContextTokens
+	if result != nil {
+		session.TokenCount = 0
+		session.TurnContextTokenCount = 0
+		contextTokens := result.TokenAfter
+		if contextTokens <= 0 && len(result.ReplacementHistory) > 0 {
+			contextTokens = countChatContextTokensForMessages(session, result.ReplacementHistory)
+		}
+		if contextTokens > 0 {
+			applyChatContextTokens(session, contextTokens, windowTokens, forceRefresh)
+			return
+		}
+		if forceRefresh && session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
+		}
+		return
+	}
+	if windowTokens > 0 && session.ContextWindowTokenCount != windowTokens {
+		session.ContextWindowTokenCount = windowTokens
+		if forceRefresh && session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
+		}
+	}
 }
 
 func buildSharedChatPromptPreflightCompactor(session *ChatSession, renderer *aicliEventRenderer) runtimechatcore.HistoryCompactor {

@@ -409,6 +409,43 @@ func TestChatInteractiveReadPriorityLineWithPrompt_UsesTransientInputBoxWithoutS
 	}
 }
 
+func TestChatInteractiveReadPrioritySecretWithPrompt_UsesSecretInputBoxWithoutSharedReader(t *testing.T) {
+	restore := withTransientStdio(t, "secret-value\n")
+	defer restore()
+
+	queue := &chatInputQueue{
+		lines: make(chan chatQueuedInput, 1),
+	}
+	queue.lines <- chatQueuedInput{Text: "queued\n", Source: "stdin"}
+	session := &ChatSession{
+		InputBox:    ui.NewInputBox(nil),
+		InputReader: bufio.NewReader(strings.NewReader("stale\n")),
+		InputQueue:  queue,
+	}
+	session.InputBox.AddToHistory("keep")
+
+	line, err := chatInteractiveReadPrioritySecretWithPrompt(session, context.Background(), "API key: ")
+	if err != nil {
+		t.Fatalf("chatInteractiveReadPrioritySecretWithPrompt: %v", err)
+	}
+	if normalizeQueuedInputLine(line) != "secret-value" {
+		t.Fatalf("expected secret input, got %q", line)
+	}
+	if got := session.InputBox.GetHistorySize(); got != 1 {
+		t.Fatalf("expected secret input not to add history, got size %d", got)
+	}
+	nextLine, err := session.InputReader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("expected shared reader to remain untouched: %v", err)
+	}
+	if nextLine != "stale\n" {
+		t.Fatalf("expected shared reader input to remain untouched, got %q", nextLine)
+	}
+	if session.InputQueue.pendingCount() != 0 {
+		t.Fatalf("expected queued input to be discarded before secret prompt")
+	}
+}
+
 func withTransientStdio(t *testing.T, input string) func() {
 	t.Helper()
 

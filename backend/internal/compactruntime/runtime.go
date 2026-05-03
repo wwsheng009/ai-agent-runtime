@@ -17,8 +17,9 @@ const (
 
 	PhasePreTurn = "pre_turn"
 
-	defaultAutoCompactRatio   = 0.9
-	defaultKeepRecentMessages = 8
+	defaultAutoCompactRatio         = 0.9
+	defaultAutoCompactContextWindow = 256000
+	defaultKeepRecentMessages       = 8
 )
 
 // TokenCounter estimates message token usage for trigger decisions.
@@ -36,6 +37,8 @@ type Request struct {
 	KeepRecentMessages int
 	Phase              string
 	CountTokens        TokenCounter
+	ObservedTokens     int
+	HasObservedTokens  bool
 }
 
 // Result captures a successful history replacement.
@@ -136,7 +139,7 @@ func (r *Runtime) MaybeCompact(ctx context.Context, req Request) (*Result, Statu
 	if !ok {
 		status.Reason = "missing_model_capability"
 		status.ResolvedProvider, status.ResolvedModel = resolveRuntimeProviderModel(r.llmRuntime, req.Provider, req.Model)
-		status.TokenBefore = counter(req.History)
+		status.TokenBefore = resolveObservedTokenCount(req, counter)
 		return nil, status, nil
 	}
 	status.Mode = limit.Mode
@@ -144,7 +147,7 @@ func (r *Runtime) MaybeCompact(ctx context.Context, req Request) (*Result, Statu
 	status.ResolvedModel = limit.ResolvedModel
 	status.TriggerTokenLimit = limit.TriggerTokenLimit
 	status.MaxContextTokens = limit.MaxContextTokens
-	status.TokenBefore = counter(req.History)
+	status.TokenBefore = resolveObservedTokenCount(req, counter)
 	if !req.Force && status.TokenBefore <= limit.TriggerTokenLimit {
 		status.Reason = "below_limit"
 		return nil, status, nil
@@ -180,10 +183,21 @@ func (r *Runtime) MaybeCompact(ctx context.Context, req Request) (*Result, Statu
 	return result, status, err
 }
 
+func resolveObservedTokenCount(req Request, counter TokenCounter) int {
+	if req.HasObservedTokens {
+		return req.ObservedTokens
+	}
+	if counter == nil {
+		return 0
+	}
+	return counter(req.History)
+}
+
 func resolveAutoCompactThreshold(runtime *llm.LLMRuntime, providerName, model, requestedMode string) (threshold, bool) {
 	resolvedProvider, resolvedModel, capability, ok := llm.ResolveRuntimeModelCapability(runtime, providerName, model)
 	if !ok {
-		return threshold{}, false
+		resolvedProvider, resolvedModel = resolveRuntimeProviderModel(runtime, providerName, model)
+		return defaultAutoCompactThreshold(resolvedProvider, resolvedModel, requestedMode), true
 	}
 
 	limit := threshold{
@@ -206,9 +220,21 @@ func resolveAutoCompactThreshold(runtime *llm.LLMRuntime, providerName, model, r
 		limit.TriggerTokenLimit = capability.MaxContextTokens
 	}
 	if limit.TriggerTokenLimit <= 0 {
-		return threshold{}, false
+		fallback := defaultAutoCompactThreshold(resolvedProvider, resolvedModel, requestedMode)
+		fallback.Mode = resolveAutoCompactMode(requestedMode, capability.AutoCompactMode, capability.SupportsRemoteCompact)
+		return fallback, true
 	}
 	return limit, true
+}
+
+func defaultAutoCompactThreshold(providerName, model, requestedMode string) threshold {
+	return threshold{
+		ResolvedProvider:  strings.TrimSpace(providerName),
+		ResolvedModel:     strings.TrimSpace(model),
+		Mode:              resolveAutoCompactMode(requestedMode, "", false),
+		MaxContextTokens:  defaultAutoCompactContextWindow,
+		TriggerTokenLimit: int(math.Floor(float64(defaultAutoCompactContextWindow) * defaultAutoCompactRatio)),
+	}
 }
 
 func resolveForcedLocalThreshold(runtime *llm.LLMRuntime, providerName, model string) threshold {

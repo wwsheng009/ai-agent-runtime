@@ -28,8 +28,6 @@ func resetChatTurnTokenUsage(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	session.ContextTokenCount = 0
-	session.ContextWindowTokenCount = 0
 	session.TurnContextTokenCount = 0
 }
 
@@ -37,8 +35,17 @@ func resetChatConversationTokenUsage(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	resetChatTurnTokenUsage(session)
+	resetChatContextTokenUsage(session)
 	session.TokenCount = 0
+}
+
+func resetChatContextTokenUsage(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	session.ContextTokenCount = 0
+	session.ContextWindowTokenCount = 0
+	session.TurnContextTokenCount = 0
 }
 
 func applyChatContextTokens(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool) {
@@ -59,13 +66,56 @@ func applyChatContextTokens(session *ChatSession, promptTokens int, windowTokens
 	}
 }
 
+func applyChatContextTokensFromMessages(session *ChatSession, messages []runtimetypes.Message, windowTokens int, forceRefresh bool) int {
+	promptTokens := countChatContextTokensForMessages(session, messages)
+	if promptTokens > 0 {
+		applyChatContextTokens(session, promptTokens, windowTokens, forceRefresh)
+		return promptTokens
+	}
+	if len(messages) == 0 {
+		resetChatContextTokenUsage(session)
+		if forceRefresh && session != nil && session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
+		}
+	}
+	return 0
+}
+
+func refreshChatContextTokenSnapshotFromMessages(session *ChatSession, windowTokens int, forceRefresh bool) int {
+	if session == nil {
+		return 0
+	}
+	if !chatMessagesHaveConversation(session.Messages) {
+		if len(session.Messages) == 0 {
+			resetChatContextTokenUsage(session)
+			if forceRefresh && session.Interaction != nil {
+				session.Interaction.RefreshStatus("")
+			}
+		}
+		return 0
+	}
+	if windowTokens <= 0 {
+		windowTokens = session.ContextWindowTokenCount
+	}
+	if windowTokens <= 0 {
+		budget := resolveSharedChatPromptBudget(session)
+		windowTokens = budget.ModelCapabilityMaxContextTokens
+		if windowTokens <= 0 {
+			windowTokens = budget.ProviderContextLimit
+		}
+		if windowTokens <= 0 {
+			windowTokens = budget.ActiveTurnMaxTokens
+		}
+	}
+	return applyChatContextTokensFromMessages(session, session.Messages, windowTokens, forceRefresh)
+}
+
 func applyChatTurnContextTokens(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool) {
 	if session == nil {
 		return
 	}
 	changed := false
 	if promptTokens > 0 {
-		session.ContextTokenCount = promptTokens
 		session.TurnContextTokenCount += promptTokens
 		changed = true
 	}
@@ -103,6 +153,8 @@ func restoreChatTokenCount(session *ChatSession, runtimeSession *runtimechat.Ses
 	}
 	if count, ok := runtimeSessionContextInt(runtimeSession, chatRuntimeContextTokenCount); ok {
 		session.TokenCount = count
+	} else {
+		session.TokenCount = 0
 	}
 }
 
@@ -110,6 +162,7 @@ func restoreChatContextTokenUsage(session *ChatSession, runtimeSession *runtimec
 	if session == nil {
 		return
 	}
+	resetChatContextTokenUsage(session)
 	if count, ok := runtimeSessionContextInt(runtimeSession, chatRuntimeContextContextTokenCount); ok {
 		session.ContextTokenCount = count
 	}

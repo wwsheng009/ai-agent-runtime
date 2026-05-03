@@ -39,7 +39,7 @@ func TestFormatInteractiveSupplementPromptLine_PreservesPromptContentWithoutInde
 	}
 }
 
-func TestChatRuntimeEventBridge_LLMRequestStartedAccumulatesTurnContextTokens(t *testing.T) {
+func TestChatRuntimeEventBridge_LLMRequestStartedUpdatesActiveContextSnapshot(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	session := &ChatSession{
 		RuntimeSession: runtimeSession,
@@ -59,8 +59,8 @@ func TestChatRuntimeEventBridge_LLMRequestStartedAccumulatesTurnContextTokens(t 
 		},
 	})
 
-	if session.ContextTokenCount != 23099 {
-		t.Fatalf("expected live context token count 23099, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 0 {
+		t.Fatalf("expected request event not to overwrite ctx used source, got context=%d", session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 270000 {
 		t.Fatalf("expected context window token count 270000, got %d", session.ContextWindowTokenCount)
@@ -74,17 +74,17 @@ func TestChatRuntimeEventBridge_LLMRequestStartedAccumulatesTurnContextTokens(t 
 		SessionID: runtimeSession.ID,
 		Payload: map[string]interface{}{
 			"success":               true,
-			"context_prompt_tokens": 1200,
+			"context_prompt_tokens": 24299,
 			"context_window_tokens": 270000,
 			"usage_total_tokens":    1400,
 		},
 	})
 
-	if session.ContextTokenCount != 1200 {
-		t.Fatalf("expected latest request context token count 1200, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 0 {
+		t.Fatalf("expected request event not to overwrite ctx used source, got context=%d", session.ContextTokenCount)
 	}
-	if session.TurnContextTokenCount != 24299 {
-		t.Fatalf("expected turn aggregate token count 24299 after second request, got %d", session.TurnContextTokenCount)
+	if session.TurnContextTokenCount != 47398 {
+		t.Fatalf("expected turn diagnostic aggregate 47398 after second request, got %d", session.TurnContextTokenCount)
 	}
 
 	bridge.handleEvent(runtimeevents.Event{
@@ -92,14 +92,49 @@ func TestChatRuntimeEventBridge_LLMRequestStartedAccumulatesTurnContextTokens(t 
 		SessionID: runtimeSession.ID,
 		Payload: map[string]interface{}{
 			"success":               true,
-			"context_prompt_tokens": 1200,
+			"context_prompt_tokens": 24299,
 			"context_window_tokens": 270000,
 			"usage_total_tokens":    1400,
 		},
 	})
 
-	if session.TurnContextTokenCount != 24299 {
+	if session.TurnContextTokenCount != 47398 {
 		t.Fatalf("expected finished event not to double count turn aggregate tokens, got %d", session.TurnContextTokenCount)
+	}
+}
+
+func TestChatRuntimeEventBridge_SessionCompactCompletedResetsContextUsageToTokenAfter(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	session := &ChatSession{
+		RuntimeSession:          runtimeSession,
+		TokenCount:              9999,
+		ContextTokenCount:       23099,
+		TurnContextTokenCount:   24299,
+		ContextWindowTokenCount: 270000,
+		NoInteractive:           true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionCompactCompleted,
+		SessionID: runtimeSession.ID,
+		Payload: map[string]interface{}{
+			"token_after":        1200,
+			"max_context_tokens": 270000,
+		},
+	})
+
+	if session.ContextTokenCount != 1200 {
+		t.Fatalf("expected compact completion to set context token count to token_after, got %d", session.ContextTokenCount)
+	}
+	if session.TokenCount != 0 {
+		t.Fatalf("expected compact completion to reset cumulative ctx used token count, got %d", session.TokenCount)
+	}
+	if session.TurnContextTokenCount != 0 {
+		t.Fatalf("expected compact completion to clear turn aggregate context usage, got %d", session.TurnContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 270000 {
+		t.Fatalf("expected compact completion to preserve context window token count, got %d", session.ContextWindowTokenCount)
 	}
 }
 

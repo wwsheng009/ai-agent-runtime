@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+const aicliRuntimeContextTokenCountKey = "aicli_token_count"
 
 // SessionActorConfig configures a SessionActor instance.
 type SessionActorConfig struct {
@@ -1086,6 +1089,71 @@ func shouldAppendUserPromptMessage(last *runtimetypes.Message, prepared *runtime
 	return llm.MessageHasLocalInputImages(prepared) && !llm.MessageHasLocalInputImages(last)
 }
 
+func runtimeSessionObservedTokenUsage(session *Session) int {
+	if session == nil {
+		return 0
+	}
+	value, ok := session.GetContext(aicliRuntimeContextTokenCountKey)
+	if !ok {
+		return 0
+	}
+	return runtimeContextIntValue(value)
+}
+
+func setRuntimeSessionObservedTokenUsage(session *Session, value int) {
+	if session == nil {
+		return
+	}
+	if session.Metadata.Context == nil {
+		session.Metadata.Context = make(map[string]interface{})
+	}
+	if value > 0 {
+		session.Metadata.Context[aicliRuntimeContextTokenCountKey] = value
+		return
+	}
+	delete(session.Metadata.Context, aicliRuntimeContextTokenCountKey)
+}
+
+func runtimeContextIntValue(value interface{}) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int8:
+		return int(typed)
+	case int16:
+		return int(typed)
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case uint:
+		return int(typed)
+	case uint8:
+		return int(typed)
+	case uint16:
+		return int(typed)
+	case uint32:
+		return int(typed)
+	case uint64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return int(parsed)
+		}
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+			return parsed
+		}
+	default:
+		return 0
+	}
+	return 0
+}
+
 func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Session, turnID string, runMeta *team.RunMeta, resume bool) {
 	if a == nil || session == nil || a.llmRuntime == nil || a.agent == nil {
 		return
@@ -1149,6 +1217,8 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		KeepRecentMessages: keepRecent,
 		Phase:              compactruntime.PhasePreTurn,
 		CountTokens:        a.llmRuntime.CountMessagesTokens,
+		ObservedTokens:     runtimeSessionObservedTokenUsage(session),
+		HasObservedTokens:  true,
 	})
 	payload["reason"] = status.Reason
 	payload["mode"] = status.Mode
@@ -1188,9 +1258,12 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	}
 
 	originalHistory := history
+	originalObservedTokens := runtimeSessionObservedTokenUsage(session)
 	session.ReplaceHistory(result.ReplacementHistory)
+	setRuntimeSessionObservedTokenUsage(session, 0)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
 		session.ReplaceHistory(originalHistory)
+		setRuntimeSessionObservedTokenUsage(session, originalObservedTokens)
 		payload["error"] = persistErr.Error()
 		a.publish(runtimeevents.Event{
 			Type:      EventSessionCompactFailed,
@@ -1286,6 +1359,8 @@ func (a *SessionActor) runManualCompact(
 		KeepRecentMessages: keepRecent,
 		Phase:              compactruntime.PhasePreTurn,
 		CountTokens:        a.llmRuntime.CountMessagesTokens,
+		ObservedTokens:     runtimeSessionObservedTokenUsage(session),
+		HasObservedTokens:  true,
 	})
 	status = resolvedStatus
 	payload["reason"] = status.Reason
@@ -1324,9 +1399,12 @@ func (a *SessionActor) runManualCompact(
 	}
 
 	originalHistory := session.GetMessages()
+	originalObservedTokens := runtimeSessionObservedTokenUsage(session)
 	session.ReplaceHistory(result.ReplacementHistory)
+	setRuntimeSessionObservedTokenUsage(session, 0)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
 		session.ReplaceHistory(originalHistory)
+		setRuntimeSessionObservedTokenUsage(session, originalObservedTokens)
 		payload["error"] = persistErr.Error()
 		a.publish(runtimeevents.Event{
 			Type:      EventSessionCompactFailed,

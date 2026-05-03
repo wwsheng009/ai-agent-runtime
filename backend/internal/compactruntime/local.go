@@ -69,7 +69,7 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		ResolvedModel:      threshold.ResolvedModel,
 		TriggerTokenLimit:  threshold.TriggerTokenLimit,
 		MaxContextTokens:   threshold.MaxContextTokens,
-		TokenBefore:        counter(req.History),
+		TokenBefore:        resolveObservedTokenCount(req, counter),
 		TokenAfter:         counter(replacement),
 		Usage:              usage,
 		UsageSource:        usageSource,
