@@ -9,16 +9,17 @@ import (
 // FixedBottomSurface reserves the last terminal row for lightweight status
 // while normal chat output scrolls in the region above it.
 type FixedBottomSurface struct {
-	terminal          *Terminal
-	mu                sync.Mutex
-	enabled           bool
-	statusLine        string
-	popupLines        []string
-	composerLine      string
-	popupRenderedRows int
-	lastWidth         int
-	lastHeight        int
-	lastBottomRows    int
+	terminal             *Terminal
+	mu                   sync.Mutex
+	enabled              bool
+	statusLine           string
+	popupLines           []string
+	composerLine         string
+	popupRenderedRows    int
+	popupRenderedGapRows int
+	lastWidth            int
+	lastHeight           int
+	lastBottomRows       int
 }
 
 func NewFixedBottomSurface(term *Terminal) *FixedBottomSurface {
@@ -59,11 +60,12 @@ func (s *FixedBottomSurface) Disable() {
 	}
 	s.terminal.SaveCursor()
 	s.terminal.ResetScrollRegion()
-	s.clearPopupAreaLocked(maxInt(1, s.popupRenderedRows))
+	s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
 	s.terminal.MoveTo(s.statusRowLocked(), 1)
 	s.terminal.ClearLine()
 	s.terminal.RestoreCursor()
 	s.popupRenderedRows = 0
+	s.popupRenderedGapRows = 0
 	s.popupLines = nil
 	s.composerLine = ""
 	s.enabled = false
@@ -156,11 +158,13 @@ func (s *FixedBottomSurface) ClearPopup() {
 	s.composerLine = ""
 	if !s.enabled {
 		s.popupRenderedRows = 0
+		s.popupRenderedGapRows = 0
 		return
 	}
 	s.applyLayoutLocked()
-	s.clearPopupAreaLocked(maxInt(1, s.popupRenderedRows))
+	s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
 	s.popupRenderedRows = 0
+	s.popupRenderedGapRows = 0
 	s.renderStatusLocked()
 	s.moveToOutputLocked()
 }
@@ -217,11 +221,13 @@ func (s *FixedBottomSurface) ClearComposerPreview() {
 	s.composerLine = ""
 	if !s.enabled {
 		s.popupRenderedRows = 0
+		s.popupRenderedGapRows = 0
 		return
 	}
 	s.applyLayoutLocked()
-	s.clearPopupAreaLocked(maxInt(1, s.popupRenderedRows))
+	s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
 	s.popupRenderedRows = 0
+	s.popupRenderedGapRows = 0
 	s.renderPopupLocked()
 	s.renderStatusLocked()
 	s.moveToOutputLocked()
@@ -279,20 +285,21 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 	}
 	state := s.bottomPaneStateLocked()
 	visibleLines := state.VisiblePopupLines(s.terminal.Height())
-	rows := len(visibleLines) + state.composerVisibleRowCount()
+	composerRows := state.composerVisibleRowCount()
+	gapRows := state.popupInputGapRowCount()
+	rows := len(visibleLines) + composerRows
 	if rows == 0 {
 		if s.popupRenderedRows > 0 {
-			s.clearPopupAreaLocked(s.popupRenderedRows)
+			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
 			s.popupRenderedRows = 0
+			s.popupRenderedGapRows = 0
 		}
 		return
 	}
-	if s.popupRenderedRows > rows {
-		s.clearPopupAreaLocked(s.popupRenderedRows)
-	} else if s.popupRenderedRows < rows {
-		s.clearPopupAreaLocked(rows)
+	if s.popupRenderedRows > 0 && (s.popupRenderedRows != rows || s.popupRenderedGapRows != gapRows) {
+		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
 	}
-	startRow := s.popupStartRowLocked(rows)
+	startRow := s.popupStartRowLocked(rows, gapRows)
 	if startRow < 1 {
 		startRow = 1
 	}
@@ -320,6 +327,7 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 		}
 	}
 	s.popupRenderedRows = rows
+	s.popupRenderedGapRows = gapRows
 }
 
 func (s *FixedBottomSurface) moveToOutputLocked() {
@@ -334,7 +342,7 @@ func (s *FixedBottomSurface) moveToPopupInputLocked() {
 		s.moveToOutputLocked()
 		return
 	}
-	row := s.popupStartRowLocked(len(visibleLines)+composerRows) + len(visibleLines) + composerRows - 1
+	row := s.popupStartRowLocked(len(visibleLines)+composerRows, state.popupInputGapRowCount()) + len(visibleLines) + composerRows - 1
 	if row < 1 {
 		row = 1
 	}
@@ -378,8 +386,8 @@ func (s *FixedBottomSurface) statusRowLocked() int {
 	return row
 }
 
-func (s *FixedBottomSurface) popupStartRowLocked(rows int) int {
-	row := s.statusRowLocked() - rows
+func (s *FixedBottomSurface) popupStartRowLocked(rows int, gapRows int) int {
+	row := s.statusRowLocked() - gapRows - rows
 	if row < 1 {
 		return 1
 	}
@@ -388,7 +396,7 @@ func (s *FixedBottomSurface) popupStartRowLocked(rows int) int {
 
 func (s *FixedBottomSurface) bottomRowsLocked() int {
 	state := s.bottomPaneStateLocked()
-	rows := 1 + state.popupVisibleRowCount(s.terminal.Height()) + state.composerVisibleRowCount()
+	rows := 1 + state.popupVisibleRowCount(s.terminal.Height()) + state.composerVisibleRowCount() + state.popupInputGapRowCount()
 	if rows < 1 {
 		rows = 1
 	}
@@ -404,7 +412,8 @@ func (s *FixedBottomSurface) popupVisibleRowCountLocked() int {
 }
 
 func (s *FixedBottomSurface) maxPopupRowsLocked() int {
-	return maxBottomPanePopupRows(s.terminal.Height(), s.bottomPaneStateLocked().composerVisibleRowCount())
+	state := s.bottomPaneStateLocked()
+	return maxBottomPanePopupRows(s.terminal.Height(), state.composerVisibleRowCount(), state.popupInputGapRowCount())
 }
 
 func (s *FixedBottomSurface) popupVisibleLinesLocked() []string {
@@ -412,15 +421,19 @@ func (s *FixedBottomSurface) popupVisibleLinesLocked() []string {
 	return state.VisiblePopupLines(s.terminal.Height())
 }
 
-func (s *FixedBottomSurface) clearPopupAreaLocked(rows int) {
+func (s *FixedBottomSurface) clearPopupAreaLocked(rows int, gapRows int) {
 	if rows < 1 {
 		return
 	}
-	startRow := s.statusRowLocked() - rows
+	endRow := s.statusRowLocked() - gapRows
+	if endRow < 1 {
+		return
+	}
+	startRow := endRow - rows
 	if startRow < 1 {
 		startRow = 1
 	}
-	for row := startRow; row < s.statusRowLocked(); row++ {
+	for row := startRow; row < endRow; row++ {
 		s.terminal.MoveTo(row, 1)
 		s.terminal.ClearLine()
 	}
@@ -443,8 +456,15 @@ func (s BottomPaneState) composerVisibleRowCount() int {
 	return 1
 }
 
+func (s BottomPaneState) popupInputGapRowCount() int {
+	if len(s.PopupLines) == 0 || s.composerVisibleRowCount() > 0 {
+		return 0
+	}
+	return 1
+}
+
 func (s BottomPaneState) popupVisibleRowCount(height int) int {
-	maxRows := maxBottomPanePopupRows(height, s.composerVisibleRowCount())
+	maxRows := maxBottomPanePopupRows(height, s.composerVisibleRowCount(), s.popupInputGapRowCount())
 	if maxRows <= 0 || len(s.PopupLines) == 0 {
 		return 0
 	}
@@ -480,11 +500,11 @@ func (s BottomPaneState) VisiblePopupLines(height int) []string {
 	return out
 }
 
-func maxBottomPanePopupRows(height int, composerRows int) int {
+func maxBottomPanePopupRows(height int, composerRows int, gapRows int) int {
 	if height <= 2 {
 		return 0
 	}
-	rows := height - 2 - composerRows
+	rows := height - 2 - composerRows - gapRows
 	if rows < 0 {
 		return 0
 	}

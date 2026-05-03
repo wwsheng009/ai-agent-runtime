@@ -38,17 +38,55 @@ func TestFixedBottomSurface_ShowPopupClampsToViewportHeight(t *testing.T) {
 		surface.ShowPopup(lines)
 	})
 
-	if got := surface.popupRenderedRows; got != 22 {
-		t.Fatalf("expected popup to clamp to 22 visible rows, got %d", got)
+	if got := surface.popupRenderedRows; got != 21 {
+		t.Fatalf("expected popup to clamp to 21 visible rows, got %d", got)
 	}
 	if got := surface.bottomRowsLocked(); got != 23 {
 		t.Fatalf("expected bottom rows to reserve one output row, got %d", got)
+	}
+	if got := surface.popupRenderedGapRows; got != 1 {
+		t.Fatalf("expected popup to reserve one input gap row, got %d", got)
 	}
 	if surface.popupLines == nil || len(surface.popupLines) != 40 {
 		t.Fatalf("expected popupLines to retain full payload, got %#v", surface.popupLines)
 	}
 	if !strings.Contains(output, "选择模型") && !strings.Contains(output, "x") {
 		t.Fatalf("expected popup render to emit visible popup content, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ShowPopupReservesInputRowBelowPopup(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+
+	output := captureUIStdout(t, func() {
+		surface.ShowPopup([]string{
+			"命令补全: /",
+			"> /help",
+			"提示: ↑↓ 选择，Tab/Enter 接受，Esc 关闭",
+		})
+	})
+
+	if surface.popupRenderedRows != 3 {
+		t.Fatalf("expected three popup rows, got %d", surface.popupRenderedRows)
+	}
+	if surface.popupRenderedGapRows != 1 {
+		t.Fatalf("expected one reserved input gap row, got %d", surface.popupRenderedGapRows)
+	}
+	if surface.bottomRowsLocked() != 5 {
+		t.Fatalf("expected popup rows + input gap + status, got %d", surface.bottomRowsLocked())
+	}
+	if got := surface.popupStartRowLocked(surface.popupRenderedRows, surface.popupRenderedGapRows); got != 20 {
+		t.Fatalf("expected popup to start at row 20 so row 23 remains for input, got %d", got)
+	}
+	if strings.Contains(output, "\x1b[23;1H提示") {
+		t.Fatalf("expected hint line not to render on input row 23, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[22;1H") {
+		t.Fatalf("expected last popup line to render on row 22, got %q", output)
 	}
 }
 
