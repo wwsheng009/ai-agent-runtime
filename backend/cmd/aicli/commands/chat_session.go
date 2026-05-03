@@ -244,13 +244,7 @@ func runtimeSessionHasConversation(session *runtimechat.Session) bool {
 	if session == nil {
 		return false
 	}
-
-	for _, message := range session.GetMessages() {
-		if !strings.EqualFold(strings.TrimSpace(message.Role), "system") {
-			return true
-		}
-	}
-	return false
+	return chatMessagesHaveConversation(session.GetMessages())
 }
 
 func syncRuntimeSessionFromChat(session *ChatSession) error {
@@ -409,28 +403,8 @@ func printChatSessionSummaries(manager *runtimechat.SessionManager, userID, curr
 			continue
 		}
 
-		preview := item.BuildPreview()
-		title := preview.Title
-		if title == "" {
-			title = "(untitled)"
-		}
-
-		lastUsed := formatSessionLastUsed(item.UpdatedAt, now)
-		line := fmt.Sprintf("  %s [%s] 最后使用: %s", item.ID, item.State, lastUsed)
-		if currentID != "" && item.ID == currentID {
-			line += " current"
-		}
-
-		provider := runtimeSessionContextString(item, chatRuntimeContextProviderName)
-		model := runtimeSessionContextString(item, chatRuntimeContextModel)
-		if provider != "" || model != "" {
-			line += fmt.Sprintf(" provider=%s model=%s", blankToDash(provider), blankToDash(model))
-		}
-
-		fmt.Println(line)
-		fmt.Printf("    %s\n", title)
-		if preview.Summary != "" && preview.Summary != title {
-			fmt.Printf("    %s\n", preview.Summary)
+		for _, line := range clampSessionSummaryLines(renderRuntimeSessionSummaryLines(item, currentID, now), ui.GetTerminalWidth()) {
+			fmt.Println(line)
 		}
 	}
 	return nil
@@ -555,23 +529,20 @@ func promptSelectSessionFromList(reader *bufio.Reader, sessions []*runtimechat.S
 
 	fmt.Println("历史会话:")
 	now := time.Now()
-	idWidth := startupSessionListIDWidth(sessions)
-	stateWidth := startupSessionStateWidth(sessions)
 	for index, session := range sessions {
 		if session == nil {
 			continue
 		}
-		preview := session.BuildPreview()
-		title := preview.Title
-		if title == "" {
-			title = "(untitled)"
+		lines := clampSessionSummaryLines(renderRuntimeSessionSummaryLines(session, "", now), ui.GetTerminalWidth())
+		if len(lines) == 0 {
+			continue
 		}
-		fmt.Printf("  [%-2d] %-*s [%-*s] 最后使用: %s\n",
-			index+1,
-			idWidth, session.ID,
-			stateWidth, session.State,
-			formatSessionLastUsed(session.UpdatedAt, now))
-		fmt.Printf("       %s\n", title)
+		if len(lines) > 0 {
+			lines[0] = fmt.Sprintf("  [%-2d] %s", index+1, strings.TrimSpace(lines[0]))
+		}
+		for _, line := range lines {
+			fmt.Println(line)
+		}
 	}
 
 	for {
@@ -634,19 +605,6 @@ func startupSessionListIDWidth(sessions []*runtimechat.Session) int {
 			continue
 		}
 		if length := len(session.ID); length > width {
-			width = length
-		}
-	}
-	return width
-}
-
-func startupSessionStateWidth(sessions []*runtimechat.Session) int {
-	width := len("active")
-	for _, session := range sessions {
-		if session == nil {
-			continue
-		}
-		if length := len(session.State); length > width {
 			width = length
 		}
 	}
@@ -1117,6 +1075,42 @@ func blankToDash(value string) string {
 	return value
 }
 
+func renderRuntimeSessionSummaryLines(session *runtimechat.Session, currentID string, now time.Time) []string {
+	if session == nil {
+		return nil
+	}
+
+	preview := session.BuildPreview()
+	title := strings.TrimSpace(preview.Title)
+	if title == "" {
+		title = "(untitled)"
+	}
+
+	protocol := strings.TrimSpace(runtimeSessionContextString(session, chatRuntimeContextProtocol))
+	provider := strings.TrimSpace(runtimeSessionContextString(session, chatRuntimeContextProviderName))
+	model := strings.TrimSpace(runtimeSessionContextString(session, chatRuntimeContextModel))
+	lastUsed := formatSessionRelativeTime(session.UpdatedAt, now)
+
+	header := fmt.Sprintf("  %s [%s]", session.ID, session.State)
+	if currentID != "" && session.ID == currentID {
+		header += " 【当前】"
+	}
+	header += fmt.Sprintf(" 协议=%s 最后使用=%s",
+		blankToDash(protocol),
+		lastUsed,
+	)
+	if provider != "" || model != "" {
+		header += fmt.Sprintf(" provider=%s model=%s", blankToDash(provider), blankToDash(model))
+	}
+
+	lines := []string{header}
+	lines = append(lines, fmt.Sprintf("    标题: %s", title))
+	if preview.Summary != "" && strings.TrimSpace(preview.Summary) != title {
+		lines = append(lines, fmt.Sprintf("    摘要: %s", strings.TrimSpace(preview.Summary)))
+	}
+	return lines
+}
+
 func formatSessionLastUsed(updatedAt time.Time, now time.Time) string {
 	if updatedAt.IsZero() {
 		return "-"
@@ -1148,4 +1142,18 @@ func formatSessionRelativeTime(updatedAt time.Time, now time.Time) string {
 		return fmt.Sprintf("%d小时%s", int(delta.Hours()), suffix)
 	}
 	return fmt.Sprintf("%d天%s", int(delta.Hours()/24), suffix)
+}
+
+func clampSessionSummaryLines(lines []string, width int) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	if width <= 0 {
+		width = 80
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, truncateStatusValue(line, width))
+	}
+	return out
 }

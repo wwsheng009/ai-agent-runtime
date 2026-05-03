@@ -340,6 +340,7 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/s", forms: []string{"/s"}, acceptsArgs: false, requiresArgs: false, shortcutOf: "/stream"},
 		{canonical: "/normal", forms: []string{"/normal", "/n"}, acceptsArgs: false, requiresArgs: false, shortcutOf: "/stream"},
 		{canonical: "/model", forms: []string{"/model"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/login", forms: []string{"/login"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/compact", forms: []string{"/compact"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/image", forms: []string{"/image"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/queue", forms: []string{"/queue"}, acceptsArgs: true, requiresArgs: false},

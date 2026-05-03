@@ -1023,12 +1023,11 @@ func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirec
 	}()
 
 	session := &ChatSession{
-		Model:             "gpt-5.4-code",
-		ReasoningEffort:   "HIGH",
-		ProviderName:      "openai",
-		MsgCount:          17,
-		TokenCount:        28640_000,
-		ContextTokenCount: 28640,
+		Model:           "gpt-5.4-code",
+		ReasoningEffort: "HIGH",
+		ProviderName:    "openai",
+		MsgCount:        17,
+		TokenCount:      28640,
 		Provider: config.Provider{
 			ModelCapabilities: map[string]config.ModelCapabilitySpec{
 				"gpt-5.4-code": {
@@ -1056,8 +1055,8 @@ func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirec
 	if strings.Contains(status, "tokens ") {
 		t.Fatalf("expected status line to omit duplicate tokens field, got %q", status)
 	}
-	if strings.Contains(status, "4096") || strings.Contains(status, "28640000") {
-		t.Fatalf("expected ctx used to reflect current context token usage, got %q", status)
+	if strings.Contains(status, "4096") {
+		t.Fatalf("expected ctx used to avoid small output-limit fallback, got %q", status)
 	}
 	wantCwd := filepath.Clean(nested)
 	if !strings.Contains(status, "cwd "+wantCwd) {
@@ -1068,14 +1067,14 @@ func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirec
 	}
 }
 
-func TestBuildChatSurfaceStatusLine_IncludesContextWindowWhenOnlyRuntimeCountsAreKnown(t *testing.T) {
+func TestBuildChatSurfaceStatusLine_IncludesContextWindowWhenOnlyWindowIsKnown(t *testing.T) {
 	session := &ChatSession{
 		ContextTokenCount:       28640,
 		ContextWindowTokenCount: 128000,
 	}
 
 	status := buildChatSurfaceStatusLine(session, "Ready")
-	if !strings.Contains(status, "ctx 128000 used 28640 22%") {
+	if !strings.Contains(status, "ctx 128000 used 0 0%") {
 		t.Fatalf("expected status line to include context window summary, got %q", status)
 	}
 	if strings.Contains(status, "Thinking") {
@@ -1085,7 +1084,7 @@ func TestBuildChatSurfaceStatusLine_IncludesContextWindowWhenOnlyRuntimeCountsAr
 
 func TestBuildChatSurfaceStatusLine_FallsBackToDefaultContextWindowWhenNoCapabilityExists(t *testing.T) {
 	session := &ChatSession{
-		ContextTokenCount: 28640,
+		TokenCount: 28640,
 	}
 
 	status := buildChatSurfaceStatusLine(session, "Ready")
@@ -1097,7 +1096,7 @@ func TestBuildChatSurfaceStatusLine_FallsBackToDefaultContextWindowWhenNoCapabil
 	}
 }
 
-func TestBuildChatSurfaceStatusLine_UsesCurrentMessagesWhenCountersAreMissing(t *testing.T) {
+func TestBuildChatSurfaceStatusLine_UsesZeroWhenCountersAreMissing(t *testing.T) {
 	messages := []runtimetypes.Message{
 		*runtimetypes.NewSystemMessage("system prompt"),
 		*runtimetypes.NewUserMessage("用户问题"),
@@ -1117,16 +1116,12 @@ func TestBuildChatSurfaceStatusLine_UsesCurrentMessagesWhenCountersAreMissing(t 
 	}
 
 	status := buildChatSurfaceStatusLine(session, "Ready")
-	expectedUsed := countChatContextTokensForMessages(session, messages)
-	if !strings.Contains(status, fmt.Sprintf("ctx 128000 used %d", expectedUsed)) {
-		t.Fatalf("expected context summary to use current message tokens, got %q", status)
-	}
-	if strings.Contains(status, "used 0") {
-		t.Fatalf("expected status line to avoid zero-token fallback when messages exist, got %q", status)
+	if !strings.Contains(status, "ctx 128000 used 0 0%") {
+		t.Fatalf("expected status line to show zero used when counters are missing, got %q", status)
 	}
 }
 
-func TestResolveChatStatusUsedTokens_IgnoresCumulativeTokenCount(t *testing.T) {
+func TestResolveChatStatusUsedTokens_UsesCumulativeTokenCount(t *testing.T) {
 	session := &ChatSession{
 		TokenCount:        500000,
 		ContextTokenCount: 28640,
@@ -1138,30 +1133,39 @@ func TestResolveChatStatusUsedTokens_IgnoresCumulativeTokenCount(t *testing.T) {
 		},
 	}
 
-	if got := resolveChatStatusUsedTokens(session); got != 28640 {
-		t.Fatalf("expected current context token count, got %d", got)
+	if got := resolveChatStatusUsedTokens(session); got != 500000 {
+		t.Fatalf("expected cumulative token count, got %d", got)
 	}
 }
 
-func TestResolveChatStatusUsedTokens_IgnoresTokenCountOnly(t *testing.T) {
+func TestResolveChatStatusUsedTokens_UsesTokenCountOnly(t *testing.T) {
 	session := &ChatSession{
 		TokenCount: 500000,
 	}
 
-	if got := resolveChatStatusUsedTokens(session); got != 0 {
-		t.Fatalf("expected cumulative token count to be ignored, got %d", got)
+	if got := resolveChatStatusUsedTokens(session); got != 500000 {
+		t.Fatalf("expected cumulative token count, got %d", got)
 	}
 }
 
-func TestResolveChatStatusUsedTokens_FallsBackToMessagesWhenCountersMissing(t *testing.T) {
+func TestResolveChatStatusUsedTokens_IgnoresTurnAggregateOnly(t *testing.T) {
+	session := &ChatSession{
+		TurnContextTokenCount: 500000,
+	}
+
+	if got := resolveChatStatusUsedTokens(session); got != 0 {
+		t.Fatalf("expected turn aggregate token count to be ignored, got %d", got)
+	}
+}
+
+func TestResolveChatStatusUsedTokens_ReturnsZeroWhenCountersMissing(t *testing.T) {
 	messages := []runtimetypes.Message{
 		*runtimetypes.NewSystemMessage("system prompt"),
 		*runtimetypes.NewUserMessage("用户问题"),
 		*runtimetypes.NewAssistantMessage("模型回答"),
 	}
 	session := &ChatSession{
-		TokenCount: 500000,
-		Messages:   messages,
+		Messages: messages,
 		Provider: config.Provider{
 			ModelCapabilities: map[string]config.ModelCapabilitySpec{
 				"gpt-5.4-code": {MaxContextTokens: 128000},
@@ -1169,9 +1173,8 @@ func TestResolveChatStatusUsedTokens_FallsBackToMessagesWhenCountersMissing(t *t
 		},
 	}
 
-	want := countChatContextTokensForMessages(session, messages)
-	if got := resolveChatStatusUsedTokens(session); got != want {
-		t.Fatalf("expected message-based token count %d, got %d", want, got)
+	if got := resolveChatStatusUsedTokens(session); got != 0 {
+		t.Fatalf("expected zero when no explicit context token count is available, got %d", got)
 	}
 }
 

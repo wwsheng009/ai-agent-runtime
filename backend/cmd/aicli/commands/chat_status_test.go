@@ -81,6 +81,8 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 		"Default",
 		"Session:",
 		"019de76b-2481-7130-b902-f6166e6d2b96",
+		"Context used:",
+		"2137949 / 256000 (835%)",
 		"Token count:",
 		"2.1m",
 		"Token usage:",
@@ -103,5 +105,16 @@ func TestBuildChatStatusTokenCountValue_FormatsCumulativeCount(t *testing.T) {
 
 	if got := buildChatStatusTokenCountValue(session); got != "2.1m" {
 		t.Fatalf("expected compact cumulative token count, got %q", got)
+	}
+}
+
+func TestBuildChatStatusContextUsedValue_UsesContextWindow(t *testing.T) {
+	session := &ChatSession{
+		TokenCount:              90000,
+		ContextWindowTokenCount: 100000,
+	}
+
+	if got := buildChatStatusContextUsedValue(session); got != "90000 / 100000 (90%)" {
+		t.Fatalf("expected context usage percentage, got %q", got)
 	}
 }

@@ -84,6 +84,7 @@ func buildChatStatusBoxLines(session *ChatSession, contentWidth int) []string {
 		{Label: "Agents.md", Value: buildChatStatusAgentsMarkdownValue(session)},
 		{Label: "Collaboration mode", Value: buildChatStatusCollaborationModeValue(session)},
 		{Label: "Session", Value: buildChatStatusSessionValue(session)},
+		{Label: "Context used", Value: buildChatStatusContextUsedValue(session)},
 		{Label: "Token count", Value: buildChatStatusTokenCountValue(session)},
 		{Label: "Token usage", Value: buildChatStatusTokenUsageValue(session)},
 		{Label: "Limits", Value: buildChatStatusLimitsValue(session)},
@@ -342,6 +343,35 @@ func buildChatStatusTokenCountValue(session *ChatSession) string {
 		return "<none>"
 	}
 	return compactStatusCount(session.TokenCount)
+}
+
+func buildChatStatusContextUsedValue(session *ChatSession) string {
+	if session == nil {
+		return "<none>"
+	}
+	usedTokens := resolveChatStatusUsedTokens(session)
+	budget := resolveSharedChatPromptBudget(session)
+	windowTokens := budget.ModelCapabilityMaxContextTokens
+	if session.ContextWindowTokenCount > 0 {
+		windowTokens = session.ContextWindowTokenCount
+	}
+	if windowTokens <= 0 && budget.ProviderContextLimit > 0 {
+		windowTokens = budget.ProviderContextLimit
+	}
+	if windowTokens <= 0 {
+		if usedTokens > 0 {
+			return fmt.Sprintf("%d", usedTokens)
+		}
+		return "0"
+	}
+	percent := 0
+	if usedTokens > 0 {
+		percent = int(float64(usedTokens)*100/float64(windowTokens) + 0.5)
+		if percent < 0 {
+			percent = 0
+		}
+	}
+	return fmt.Sprintf("%d / %d (%d%%)", usedTokens, windowTokens, percent)
 }
 
 func buildChatStatusTokenUsageValue(session *ChatSession) string {

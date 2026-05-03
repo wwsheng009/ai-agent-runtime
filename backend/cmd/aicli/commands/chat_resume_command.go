@@ -117,16 +117,40 @@ const (
 )
 
 func readResumeMenuChoice(session *ChatSession, optionWidth int) (resumeMenuChoice, error) {
+	prompt := "选项 (回车=1): "
+	usePopup := useRuntimeSelectionPopup(session)
+	if usePopup {
+		defer clearRuntimeSelectionPopup(session)
+	}
+	warning := ""
 	for {
-		fmt.Printf("  %-*s %s\n", optionWidth, "[1]", "恢复最近可恢复会话")
-		fmt.Printf("  %-*s %s\n", optionWidth, "[2]", "选择历史会话")
-		fmt.Printf("  %-*s %s\n", optionWidth, "[3]", "取消（返回当前会话）")
+		lines := []string{
+			fmt.Sprintf("  %-*s %s", optionWidth, "[1]", "恢复最近可恢复会话"),
+			fmt.Sprintf("  %-*s %s", optionWidth, "[2]", "选择历史会话"),
+			fmt.Sprintf("  %-*s %s", optionWidth, "[3]", "取消（返回当前会话）"),
+		}
+		if usePopup {
+			popupLines := append([]string(nil), lines...)
+			if warning != "" {
+				popupLines = append(popupLines, warning)
+			}
+			showRuntimeSelectionPopup(session, popupLines, prompt)
+		} else {
+			for _, line := range lines {
+				fmt.Println(line)
+			}
+			fmt.Print(prompt)
+		}
 
-		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), "请输入选项 (默认: 1): ")
+		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
+		if !usePopup {
+			fmt.Println()
+		}
 		if err != nil {
 			return resumeChoiceCancel, err
 		}
 		choice := strings.TrimSpace(normalizeQueuedInputLine(text))
+		warning = ""
 		switch choice {
 		case "", "1":
 			return resumeChoiceLatest, nil
@@ -135,39 +159,61 @@ func readResumeMenuChoice(session *ChatSession, optionWidth int) (resumeMenuChoi
 		case "3", "q", "quit", "cancel", "exit":
 			return resumeChoiceCancel, nil
 		default:
-			ui.PrintWarning("无效的选择，请重新输入")
+			if usePopup {
+				warning = "  无效的选择，请重新输入"
+			} else {
+				ui.PrintWarning("无效的选择，请重新输入")
+			}
 		}
 	}
 }
 
 func readResumeSessionPick(session *ChatSession, sessions []*runtimechat.Session) (*runtimechat.Session, error) {
-	fmt.Println("历史会话:")
+	prompt := "编号/ID (回车=1, q取消): "
+	usePopup := useRuntimeSelectionPopup(session)
+	if usePopup {
+		defer clearRuntimeSelectionPopup(session)
+	}
 	now := time.Now()
-	idWidth := startupSessionListIDWidth(sessions)
-	stateWidth := startupSessionStateWidth(sessions)
+	lines := []string{"历史会话:"}
 	for index, item := range sessions {
 		if item == nil {
 			continue
 		}
-		preview := item.BuildPreview()
-		title := preview.Title
-		if title == "" {
-			title = "(untitled)"
+		itemLines := clampSessionSummaryLines(renderRuntimeSessionSummaryLines(item, currentRuntimeSessionID(session), now), ui.GetTerminalWidth())
+		if len(itemLines) == 0 {
+			continue
 		}
-		fmt.Printf("  [%-2d] %-*s [%-*s] 最后使用: %s\n",
-			index+1,
-			idWidth, item.ID,
-			stateWidth, item.State,
-			formatSessionLastUsed(item.UpdatedAt, now))
-		fmt.Printf("       %s\n", title)
+		itemLines[0] = fmt.Sprintf("  [%-2d] %s", index+1, strings.TrimSpace(itemLines[0]))
+		lines = append(lines, itemLines...)
+	}
+	if !usePopup {
+		for _, line := range lines {
+			fmt.Println(line)
+		}
 	}
 
+	warning := ""
 	for {
-		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), "请输入编号或会话 ID (默认: 1，输入 q 取消): ")
+		if usePopup {
+			popupLines := append([]string(nil), lines...)
+			if warning != "" {
+				popupLines = append(popupLines, warning)
+			}
+			showRuntimeSelectionPopup(session, popupLines, prompt)
+		} else {
+			fmt.Print(prompt)
+		}
+
+		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
+		if !usePopup {
+			fmt.Println()
+		}
 		if err != nil {
 			return nil, err
 		}
 		choice := strings.TrimSpace(normalizeQueuedInputLine(text))
+		warning = ""
 		if choice == "" || choice == "1" {
 			return sessions[0], nil
 		}
@@ -180,7 +226,11 @@ func readResumeSessionPick(session *ChatSession, sessions []*runtimechat.Session
 			if index >= 1 && index <= len(sessions) {
 				return sessions[index-1], nil
 			}
-			ui.PrintWarning("无效的选择，请重新输入")
+			if usePopup {
+				warning = "  无效的选择，请重新输入"
+			} else {
+				ui.PrintWarning("无效的选择，请重新输入")
+			}
 			continue
 		}
 
@@ -189,7 +239,11 @@ func readResumeSessionPick(session *ChatSession, sessions []*runtimechat.Session
 				return item, nil
 			}
 		}
-		ui.PrintWarning("未找到会话，请重新输入")
+		if usePopup {
+			warning = "  未找到会话，请重新输入"
+		} else {
+			ui.PrintWarning("未找到会话，请重新输入")
+		}
 	}
 }
 

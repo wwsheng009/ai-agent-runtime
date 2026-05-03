@@ -214,6 +214,32 @@ func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 	if session.TokenCount != 987 {
 		t.Fatalf("expected restored token count 987, got %d", session.TokenCount)
 	}
+	if session.ContextTokenCount != 0 || session.ContextWindowTokenCount != 0 || session.TurnContextTokenCount != 0 {
+		t.Fatalf("expected missing explicit context usage to restore as zero, got ctx=%d window=%d turn=%d",
+			session.ContextTokenCount, session.ContextWindowTokenCount, session.TurnContextTokenCount)
+	}
+}
+
+func TestRestoreChatPersistenceState_LoadedSessionRestoresExplicitContextUsage(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	if runtimeSession.Metadata.Context == nil {
+		runtimeSession.Metadata.Context = make(map[string]interface{})
+	}
+	runtimeSession.Metadata.Context[chatRuntimeContextContextTokenCount] = 4321
+	runtimeSession.Metadata.Context[chatRuntimeContextContextWindowTokenCount] = 128000
+	runtimeSession.Metadata.Context[chatRuntimeContextTurnContextTokenCount] = 987
+
+	session := &ChatSession{}
+	err := restoreChatPersistenceState(session, &chatPersistenceState{
+		loadedRuntimeSession: runtimeSession,
+	}, &chatCommandOptions{})
+	if err != nil {
+		t.Fatalf("restoreChatPersistenceState: %v", err)
+	}
+	if session.ContextTokenCount != 4321 || session.ContextWindowTokenCount != 128000 || session.TurnContextTokenCount != 987 {
+		t.Fatalf("expected explicit restored context usage, got ctx=%d window=%d turn=%d",
+			session.ContextTokenCount, session.ContextWindowTokenCount, session.TurnContextTokenCount)
+	}
 }
 
 func TestSyncAndRestoreChatTokenCountRoundTrip(t *testing.T) {
@@ -238,6 +264,10 @@ func TestSyncAndRestoreChatTokenCountRoundTrip(t *testing.T) {
 		ContextTokenCount:       321,
 		ContextWindowTokenCount: 128000,
 		TurnContextTokenCount:   654,
+		Messages: []runtimetypes.Message{
+			*runtimetypes.NewUserMessage("hello"),
+			*runtimetypes.NewAssistantMessage("world"),
+		},
 	}
 
 	if err := syncRuntimeSessionFromChat(session); err != nil {
@@ -269,8 +299,133 @@ func TestSyncAndRestoreChatTokenCountRoundTrip(t *testing.T) {
 		t.Fatalf("expected restored token count 1234, got %d", restored.TokenCount)
 	}
 	if restored.ContextTokenCount != 321 || restored.ContextWindowTokenCount != 128000 || restored.TurnContextTokenCount != 654 {
-		t.Fatalf("expected restored context token usage, got ctx=%d window=%d turn=%d",
+		t.Fatalf("expected restored explicit context token usage, got ctx=%d window=%d turn=%d",
 			restored.ContextTokenCount, restored.ContextWindowTokenCount, restored.TurnContextTokenCount)
+	}
+}
+
+func TestRestoreChatStateFromRuntimeSessionClearsMissingTokenCount(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.AddMessage(*runtimetypes.NewUserMessage("hello"))
+	if runtimeSession.Metadata.Context == nil {
+		runtimeSession.Metadata.Context = make(map[string]interface{})
+	}
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextTokenCount)
+
+	session := &ChatSession{TokenCount: 98765}
+	if err := restoreChatStateFromRuntimeSession(session, runtimeSession); err != nil {
+		t.Fatalf("restoreChatStateFromRuntimeSession: %v", err)
+	}
+	if session.TokenCount != 0 {
+		t.Fatalf("expected missing token metadata to clear cumulative used tokens, got %d", session.TokenCount)
+	}
+}
+
+func TestSyncRuntimeSessionBackIntoCLI_RecomputesContextSnapshotFromRuntimeHistory(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	runtimeSession.ReplaceHistory([]runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("You are helpful."),
+		*runtimetypes.NewUserMessage("hello"),
+		*runtimetypes.NewAssistantMessage("world"),
+	})
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextContextTokenCount)
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextContextWindowTokenCount)
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextTurnContextTokenCount)
+	if err := manager.Update(context.Background(), runtimeSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:            "test-provider",
+		Provider:                config.Provider{Protocol: "openai"},
+		Model:                   "test-model",
+		SessionManager:          manager,
+		RuntimeSession:          runtimeSession,
+		SessionUserID:           userID,
+		ContextTokenCount:       23099,
+		ContextWindowTokenCount: 270000,
+		TurnContextTokenCount:   23099,
+	}
+
+	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
+		t.Fatalf("syncRuntimeSessionBackIntoCLI: %v", err)
+	}
+
+	expectedContextTokens := countChatContextTokensForMessages(session, session.Messages)
+	if expectedContextTokens <= 0 {
+		t.Fatalf("expected test history to produce context tokens, got %d", expectedContextTokens)
+	}
+	if session.ContextTokenCount != expectedContextTokens {
+		t.Fatalf("expected context snapshot from runtime history, got %d want %d", session.ContextTokenCount, expectedContextTokens)
+	}
+	if session.ContextWindowTokenCount != 270000 {
+		t.Fatalf("expected runtime-observed context window to survive restore, got %d", session.ContextWindowTokenCount)
+	}
+
+	stored, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextTokenCount); !ok || got != expectedContextTokens {
+		t.Fatalf("expected persisted context token count %d, got ok=%v value=%d", expectedContextTokens, ok, got)
+	}
+	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextWindowTokenCount); !ok || got != 270000 {
+		t.Fatalf("expected persisted context window token count 270000, got ok=%v value=%d", ok, got)
+	}
+}
+
+func TestSyncRuntimeSessionBackIntoCLIClearsTokenCountWhenRuntimeMetadataCleared(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	runtimeSession.ReplaceHistory([]runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("You are helpful."),
+		*runtimetypes.NewUserMessage("hello"),
+		*runtimetypes.NewAssistantMessage("world"),
+	})
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextTokenCount)
+	if err := manager.Update(context.Background(), runtimeSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:   "test-provider",
+		Provider:       config.Provider{Protocol: "openai"},
+		Model:          "test-model",
+		SessionManager: manager,
+		RuntimeSession: runtimeSession,
+		SessionUserID:  userID,
+		TokenCount:     98765,
+	}
+
+	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
+		t.Fatalf("syncRuntimeSessionBackIntoCLI: %v", err)
+	}
+	if session.TokenCount != 0 {
+		t.Fatalf("expected cleared runtime token metadata to reset cumulative used tokens, got %d", session.TokenCount)
+	}
+	stored, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextTokenCount); ok {
+		t.Fatalf("expected synced runtime session to omit cleared token metadata, got %d", got)
 	}
 }
 
