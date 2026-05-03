@@ -194,7 +194,7 @@ func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
 		}
 		parts = append(parts, "thinking_effort "+compactStatusValueOrDash(reasoningEffort, 12))
 
-		if budget := resolveSharedChatPromptBudget(session); budget.ActiveTurnMaxTokens > 0 || budget.ModelCapabilityMaxContextTokens > 0 || budget.ProviderContextLimit > 0 || session.ContextWindowTokenCount > 0 || session.TurnContextTokenCount > 0 || session.ContextTokenCount > 0 {
+		if budget := resolveSharedChatPromptBudget(session); budget.ActiveTurnMaxTokens > 0 || budget.ModelCapabilityMaxContextTokens > 0 || budget.ProviderContextLimit > 0 || session.ContextWindowTokenCount > 0 || session.TokenCount > 0 {
 			if ctxSummary := formatChatContextWindowSummary(session, budget); ctxSummary != "" {
 				parts = append(parts, "ctx "+ctxSummary)
 			}
@@ -270,14 +270,8 @@ func resolveChatStatusUsedTokens(session *ChatSession) int {
 	if session == nil {
 		return 0
 	}
-	if session.ContextTokenCount > 0 {
-		return session.ContextTokenCount
-	}
-	if session.TurnContextTokenCount > 0 {
-		return session.TurnContextTokenCount
-	}
-	if count := countChatContextTokensForMessages(session, session.Messages); count > 0 {
-		return count
+	if session.TokenCount > 0 {
+		return session.TokenCount
 	}
 	return 0
 }

@@ -59,6 +59,8 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 	switch command {
 	case "/model":
 		return completeModelSlashArgs(session, argsText, cursor)
+	case "/login":
+		return completeLoginSlashArgs(session, argsText, cursor)
 	case "/stream":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "on", Summary: "开启流式输出", Group: string(chatSlashCommandGroupModel)},
@@ -138,6 +140,42 @@ func completeModelSlashArgs(session *ChatSession, argsText string, cursor int) [
 		candidates = append(candidates, providerNameArgumentCandidates(session)...)
 		candidates = append(candidates, runtimeModelArgumentCandidates(session)...)
 		candidates = append(candidates, reasoningEffortArgumentCandidates(session)...)
+		return matchSlashArgumentCandidates(dedupeSlashArgumentCandidates(candidates), query)
+	}
+}
+
+func completeLoginSlashArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {
+	ctx := parseSlashArgumentContext(argsText, cursor)
+	query := slashLoginArgumentQuery(ctx)
+	staticCandidates := []chatSlashCompletionCandidate{
+		{Command: "--provider", Summary: "provider 名称", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
+		{Command: "--protocol", Summary: "登录协议", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
+		{Command: "--mode", Summary: "认证模式", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
+		{Command: "--base-url", Summary: "provider base URL", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
+		{Command: "--api-key", Summary: "API key", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
+		{Command: "--models-path", Summary: "models endpoint", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
+		{Command: "--default-model", Summary: "默认模型", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
+		{Command: "--set-default", Summary: "设为默认 provider", Group: string(chatSlashCommandGroupModel)},
+		{Command: "--dry-run", Summary: "只校验不写配置", Group: string(chatSlashCommandGroupModel)},
+		{Command: "--switch", Summary: "登录后切换当前会话", Group: string(chatSlashCommandGroupModel)},
+	}
+	switch slashLoginArgumentFocus(ctx) {
+	case "provider":
+		return matchSlashArgumentCandidates(providerNameArgumentCandidates(session), query)
+	case "protocol":
+		return matchSlashArgumentCandidates(loginProtocolArgumentCandidates(), query)
+	case "mode":
+		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "apikey", Summary: "API key", Group: string(chatSlashCommandGroupModel)},
+			{Command: "oauth", Summary: "OAuth", Group: string(chatSlashCommandGroupModel)},
+		}, query)
+	case "flags":
+		return matchSlashArgumentCandidates(staticCandidates, query)
+	default:
+		candidates := make([]chatSlashCompletionCandidate, 0, len(staticCandidates)+16)
+		candidates = append(candidates, staticCandidates...)
+		candidates = append(candidates, providerNameArgumentCandidates(session)...)
+		candidates = append(candidates, loginProtocolArgumentCandidates()...)
 		return matchSlashArgumentCandidates(dedupeSlashArgumentCandidates(candidates), query)
 	}
 }
@@ -293,10 +331,47 @@ func slashModelArgumentFocus(ctx slashArgumentContext) string {
 	return "general"
 }
 
+func slashLoginArgumentFocus(ctx slashArgumentContext) string {
+	current := strings.TrimSpace(ctx.Current.Text)
+	previous := strings.TrimSpace(ctx.Previous.Text)
+	switch {
+	case strings.HasPrefix(current, "--provider=") || strings.HasPrefix(current, "-p="):
+		return "provider"
+	case strings.HasPrefix(current, "--protocol="):
+		return "protocol"
+	case strings.HasPrefix(current, "--mode="):
+		return "mode"
+	case current == "--provider" || current == "-p" || current == "--protocol" || current == "--mode":
+		return "flags"
+	}
+	switch previous {
+	case "--provider", "-p":
+		return "provider"
+	case "--protocol":
+		return "protocol"
+	case "--mode":
+		return "mode"
+	}
+	return "general"
+}
+
 func slashModelArgumentQuery(ctx slashArgumentContext) string {
 	current := strings.TrimSpace(ctx.Current.Text)
 	switch slashModelArgumentFocus(ctx) {
 	case "provider", "model", "reasoning":
+		if value := slashArgumentAssignmentValue(current); value != "" || strings.Contains(current, "=") {
+			return value
+		}
+		return activeSlashArgumentQuery(ctx)
+	default:
+		return activeSlashArgumentQuery(ctx)
+	}
+}
+
+func slashLoginArgumentQuery(ctx slashArgumentContext) string {
+	current := strings.TrimSpace(ctx.Current.Text)
+	switch slashLoginArgumentFocus(ctx) {
+	case "provider", "protocol", "mode":
 		if value := slashArgumentAssignmentValue(current); value != "" || strings.Contains(current, "=") {
 			return value
 		}
@@ -333,6 +408,19 @@ func providerNameArgumentCandidates(session *ChatSession) []chatSlashCompletionC
 			Summary:     "provider",
 			Group:       string(chatSlashCommandGroupModel),
 			AcceptsArgs: true,
+		})
+	}
+	return candidates
+}
+
+func loginProtocolArgumentCandidates() []chatSlashCompletionCandidate {
+	values := []string{"openai", "codex-apikey", "anthropic", "gemini", "codex-oauth"}
+	candidates := make([]chatSlashCompletionCandidate, 0, len(values))
+	for _, value := range values {
+		candidates = append(candidates, chatSlashCompletionCandidate{
+			Command: value,
+			Summary: "login protocol",
+			Group:   string(chatSlashCommandGroupModel),
 		})
 	}
 	return candidates

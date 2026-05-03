@@ -774,3 +774,51 @@ func TestReadTransientLine_DoesNotAddToHistory(t *testing.T) {
 		t.Fatalf("expected existing history to remain unchanged, got %q ok=%v", stored, ok)
 	}
 }
+
+func TestReadTransientSecretPrompt_DoesNotAddToHistory(t *testing.T) {
+	oldStdin := os.Stdin
+	oldStdout := os.Stdout
+	stdinRead, stdinWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe stdin: %v", err)
+	}
+	stdoutRead, stdoutWrite, err := os.Pipe()
+	if err != nil {
+		_ = stdinRead.Close()
+		_ = stdinWrite.Close()
+		t.Fatalf("os.Pipe stdout: %v", err)
+	}
+	defer func() {
+		os.Stdin = oldStdin
+		os.Stdout = oldStdout
+		_ = stdinRead.Close()
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
+	}()
+
+	os.Stdin = stdinRead
+	os.Stdout = stdoutWrite
+	if _, err := stdinWrite.WriteString("secret-value\n"); err != nil {
+		t.Fatalf("write secret stdin: %v", err)
+	}
+	if err := stdinWrite.Close(); err != nil {
+		t.Fatalf("close secret stdin writer: %v", err)
+	}
+
+	ib := NewInputBox(nil)
+	ib.AddToHistory("keep")
+
+	line, err := ib.ReadTransientSecretPrompt("API key: ")
+	if err != nil {
+		t.Fatalf("ReadTransientSecretPrompt: %v", err)
+	}
+	if line != "secret-value" {
+		t.Fatalf("expected secret value, got %q", line)
+	}
+	if got := ib.GetHistorySize(); got != 1 {
+		t.Fatalf("expected secret read not to add history, got size %d", got)
+	}
+	if stored, ok := ib.GetHistoryAt(0); !ok || stored != "keep" {
+		t.Fatalf("expected existing history to remain unchanged, got %q ok=%v", stored, ok)
+	}
+}

@@ -55,10 +55,10 @@ type ChatSession struct {
 	Formatter                  *formatter.MarkdownFormatter       // Markdown 格式化器
 	Layout                     *ui.Layout                         // 屏幕布局
 	InputBox                   *ui.InputBox                       // 输入框
-	TokenCount                 int                                // 累计 token 使用量
-	ContextTokenCount          int                                // 最近一次 API 请求的上下文 token 占用
-	ContextWindowTokenCount    int                                // 最近一次 API 请求对应的上下文窗口大小
-	TurnContextTokenCount      int                                // 当前 turn 内累计的上下文 token 占用
+	TokenCount                 int                                // 当前压缩周期内累计的真实 LLM API token 使用量，用于 ctx used 与 auto compact
+	ContextTokenCount          int                                // 当前会话上下文本地估算快照，仅用于调试/兼容，不驱动 ctx used
+	ContextWindowTokenCount    int                                // 当前模型上下文窗口大小
+	TurnContextTokenCount      int                                // 当前 turn 内请求上下文 token 诊断累计，不用于 ctx used 百分比
 	MsgCount                   int                                // 消息计数
 	TurnRequestCount           int                                // 当前 turn 内的请求计数
 	SessionManager             *runtimechat.SessionManager        // 持久化会话管理器

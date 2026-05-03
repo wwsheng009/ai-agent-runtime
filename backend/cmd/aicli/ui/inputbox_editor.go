@@ -90,6 +90,29 @@ func (ib *InputBox) ReadTransientPrompt(prompt string, onChange func(string)) (s
 	return ib.readPrompt(prompt, onChange, false, false, true, false)
 }
 
+// ReadTransientSecretPrompt reads a secret value for modal prompts. Interactive
+// terminals use the platform password reader so the submitted text is not
+// echoed or added to history; non-interactive input stays line-buffered for
+// tests and piped usage.
+func (ib *InputBox) ReadTransientSecretPrompt(prompt string) (string, error) {
+	if ib == nil {
+		return "", io.EOF
+	}
+	ib.historyPos = len(ib.history)
+	if prompt != "" {
+		fmt.Fprint(os.Stdout, prompt)
+	}
+	if !IsInteractiveTerminal() {
+		return readBufferedLine(os.Stdin)
+	}
+	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stdout)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
 // ReadTransientLine reads a transient response without a visible prompt label.
 // This is used by modal questions that already printed their own prompt text.
 func (ib *InputBox) ReadTransientLine(onChange func(string)) (string, error) {

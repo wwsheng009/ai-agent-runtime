@@ -178,6 +178,20 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			AcceptsArgs: true,
 		},
 		{
+			Name:        "/login",
+			Usage:       "/login [provider|--provider ... --base-url ... --api-key ...]",
+			Summary:     "新增或更新 provider 登录凭证并刷新 models",
+			Group:       string(chatSlashCommandGroupModel),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "--provider", Summary: "provider 名称"},
+				{Token: "--protocol", Summary: "openai|anthropic|gemini|codex-apikey|codex-oauth"},
+				{Token: "--base-url", Summary: "provider base URL"},
+				{Token: "--api-key", Summary: "API key"},
+				{Token: "--switch", Summary: "登录成功后切换当前会话"},
+			},
+		},
+		{
 			Name:        "/compact",
 			Usage:       "/compact [auto|local|remote]",
 			Summary:     "手动触发会话压缩",

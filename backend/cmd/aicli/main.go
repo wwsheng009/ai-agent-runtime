@@ -214,6 +214,11 @@ func main() {
 	testCmd.Flags().StringP("save", "", "", "保存测试数据到指定目录（原始请求和响应）")
 	rootCmd.AddCommand(testCmd)
 
+	// login 子命令
+	rootCmd.AddCommand(commands.NewLoginCommand(func() *config.Config {
+		return cfg
+	}))
+
 	// context 子命令
 	contextCmd := &cobra.Command{
 		Use:   "context",

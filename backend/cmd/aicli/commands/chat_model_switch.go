@@ -121,6 +121,7 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 	session.Model = resolvedModel
 	session.ReasoningEffort = reasoningEffort
 	session.BaseURL = buildProviderURL(session.Provider, apiPath, resolvedModel)
+	session.ContextWindowTokenCount = 0
 	syncChatLoggerModelState(session)
 	warnIfChatSessionSyncFails(session, "toggle model", syncRuntimeSessionFromChat(session))
 	if session.Interaction != nil {

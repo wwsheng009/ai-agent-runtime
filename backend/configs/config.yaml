@@ -12,9 +12,9 @@ aicli:
   timeout:
     request_timeout: ${AICLI_REQUEST_TIMEOUT:-0s}
   chat:
-    default_provider: deepseek
-    default_model: deepseek-v4-pro
-    reasoning_effort: max
+    default_provider: CODEX_04
+    default_model: gpt-5.4-mini
+    reasoning_effort: xhigh
     stream: true
 auth:
   access_auth:

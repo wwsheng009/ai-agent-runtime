@@ -151,6 +151,10 @@ type Provider struct {
 	APIKey                  string                         `yaml:"api_key" mapstructure:"api_key" json:"api_key"`
 	APIKeys                 []string                       `yaml:"api_keys" mapstructure:"api_keys" json:"api_keys"`
 	APIKeyRef               string                         `yaml:"api_key_ref" mapstructure:"api_key_ref" json:"api_key_ref"`
+	AuthMode                string                         `yaml:"auth_mode,omitempty" mapstructure:"auth_mode" json:"auth_mode,omitempty"`
+	AuthRef                 string                         `yaml:"auth_ref,omitempty" mapstructure:"auth_ref" json:"auth_ref,omitempty"`
+	ModelsPath              string                         `yaml:"models_path,omitempty" mapstructure:"models_path" json:"models_path,omitempty"`
+	ModelsVerifiedAt        string                         `yaml:"models_verified_at,omitempty" mapstructure:"models_verified_at" json:"models_verified_at,omitempty"`
 	DefaultModel            string                         `yaml:"default_model" mapstructure:"default_model" json:"default_model"`
 	SupportedModels         []string                       `yaml:"supported_models" mapstructure:"supported_models" json:"supported_models"`
 	Headers                 map[string]string              `yaml:"headers" mapstructure:"headers" json:"headers"`
@@ -527,6 +531,11 @@ func (p *Provider) GetAPIKey() string {
 
 // GetAllAPIKeys returns all configured API keys.
 func (p *Provider) GetAllAPIKeys() []string {
+	if p != nil && strings.EqualFold(strings.TrimSpace(p.AuthMode), "oauth") && strings.TrimSpace(p.AuthRef) != "" {
+		if record, err := LoadProviderAuth(strings.TrimSpace(p.AuthRef)); err == nil && record != nil && strings.TrimSpace(record.AccessToken) != "" {
+			return []string{strings.TrimSpace(record.AccessToken)}
+		}
+	}
 	if len(p.APIKeys) > 0 {
 		return p.APIKeys
 	}
