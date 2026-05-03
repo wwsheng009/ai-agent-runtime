@@ -14,7 +14,7 @@ type chatCompactReport struct {
 	Status        compactruntime.Status
 }
 
-const compactTokenSourceLocalEstimate = "local_estimate"
+const compactTokenSourceObservedUsage = "observed_usage"
 
 var runManualChatCompact = executeManualChatCompact
 
@@ -47,6 +47,14 @@ func executeManualChatCompact(session *ChatSession, requestedMode string) (*chat
 		}, err
 	}
 	if syncErr := syncRuntimeSessionBackIntoCLI(session); syncErr != nil {
+		return &chatCompactReport{
+			RequestedMode: requestedMode,
+			Result:        result,
+			Status:        status,
+		}, syncErr
+	}
+	applyChatCompactContextUsage(session, result, status, true)
+	if syncErr := syncRuntimeSessionFromChat(session); syncErr != nil {
 		return &chatCompactReport{
 			RequestedMode: requestedMode,
 			Result:        result,
@@ -98,7 +106,7 @@ func formatChatCompactReport(report *chatCompactReport) string {
 		}
 		if report.Status.TokenBefore > 0 {
 			parts = append(parts, fmt.Sprintf("token_before=%d", report.Status.TokenBefore))
-			parts = append(parts, "token_source="+compactTokenSourceLocalEstimate)
+			parts = append(parts, "token_source="+compactTokenSourceObservedUsage)
 		}
 		if report.Status.TriggerTokenLimit > 0 {
 			parts = append(parts, fmt.Sprintf("trigger_token_limit=%d", report.Status.TriggerTokenLimit))
@@ -119,7 +127,7 @@ func formatChatCompactReport(report *chatCompactReport) string {
 	parts = append(parts,
 		fmt.Sprintf("token_before=%d", report.Result.TokenBefore),
 		fmt.Sprintf("token_after=%d", report.Result.TokenAfter),
-		"token_source="+compactTokenSourceLocalEstimate,
+		"token_source="+compactTokenSourceObservedUsage,
 		fmt.Sprintf("compacted_messages=%d", report.Result.CompactedMessages),
 		fmt.Sprintf("history_messages=%d", len(report.Result.ReplacementHistory)),
 	)

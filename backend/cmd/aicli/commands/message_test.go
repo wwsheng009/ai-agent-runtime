@@ -195,8 +195,11 @@ func TestNextLogScope_IncrementsPerTurnAndPerRequest(t *testing.T) {
 	}
 
 	scope1 := nextLogScope(session, "first turn")
-	if session.TurnContextTokenCount != 0 || session.ContextTokenCount != 0 || session.ContextWindowTokenCount != 0 {
+	if session.TurnContextTokenCount != 0 {
 		t.Fatalf("expected new turn to reset turn token usage, got %+v", session)
+	}
+	if session.ContextTokenCount != 888 || session.ContextWindowTokenCount != 777 {
+		t.Fatalf("expected new turn to preserve session context usage, got %+v", session)
 	}
 	session.TurnContextTokenCount = 42
 	session.ContextTokenCount = 24
@@ -206,8 +209,11 @@ func TestNextLogScope_IncrementsPerTurnAndPerRequest(t *testing.T) {
 		t.Fatalf("expected same turn to preserve turn token usage, got %+v", session)
 	}
 	scope3 := nextLogScope(session, "second turn")
-	if session.TurnContextTokenCount != 0 || session.ContextTokenCount != 0 || session.ContextWindowTokenCount != 0 {
+	if session.TurnContextTokenCount != 0 {
 		t.Fatalf("expected second turn to reset turn token usage, got %+v", session)
+	}
+	if session.ContextTokenCount != 24 || session.ContextWindowTokenCount != 2048 {
+		t.Fatalf("expected second turn to preserve session context usage, got %+v", session)
 	}
 
 	if scope1.TurnID != "turn-0001" || scope1.RequestID != "turn-0001-req-01" {
@@ -221,14 +227,14 @@ func TestNextLogScope_IncrementsPerTurnAndPerRequest(t *testing.T) {
 	}
 }
 
-func TestApplyChatTurnContextTokens_AccumulatesWithinTurn(t *testing.T) {
-	session := &ChatSession{}
+func TestApplyChatTurnContextTokens_DoesNotOverwriteSessionContextSnapshot(t *testing.T) {
+	session := &ChatSession{ContextTokenCount: 900}
 
 	applyChatTurnContextTokens(session, 100, 1000, false)
 	applyChatTurnContextTokens(session, 250, 1000, false)
 
-	if session.ContextTokenCount != 250 {
-		t.Fatalf("expected latest request context tokens to be 250, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 900 {
+		t.Fatalf("expected turn aggregate tracking to preserve session context snapshot, got %d", session.ContextTokenCount)
 	}
 	if session.TurnContextTokenCount != 350 {
 		t.Fatalf("expected turn aggregate context tokens to be 350, got %d", session.TurnContextTokenCount)

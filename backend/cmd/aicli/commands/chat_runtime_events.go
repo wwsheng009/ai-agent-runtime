@@ -761,6 +761,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	}
 	b.handleStructuredLogEvent(event)
 	b.applyLLMRequestStatus(event)
+	b.applySessionCompactStatus(event)
 	if b.shouldSuppressLatePrimaryRunEvent(event) {
 		return
 	}
@@ -902,15 +903,40 @@ func (b *chatRuntimeEventBridge) applyLLMRequestStatus(event runtimeevents.Event
 	}
 	switch event.Type {
 	case runtimechat.EventLLMRequestStarted, "llm.request.started":
-		promptTokens := firstPositivePayloadInt(event.Payload, "context_prompt_tokens", "prompt_tokens_after", "token_after", "prompt_tokens", "token_before", "prompt_tokens_before")
+		promptTokens := firstPositivePayloadInt(event.Payload, "context_prompt_tokens", "total_tokens")
 		windowTokens := firstPositivePayloadInt(event.Payload, "context_window_tokens", "max_context_tokens", "model_capability_max_context_tokens", "provider_context_limit")
 		applyChatTurnContextTokens(b.session, promptTokens, windowTokens, true)
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
-		promptTokens := firstPositivePayloadInt(event.Payload, "context_prompt_tokens", "prompt_tokens_after", "token_after", "prompt_tokens", "token_before", "prompt_tokens_before")
 		windowTokens := firstPositivePayloadInt(event.Payload, "context_window_tokens", "max_context_tokens", "model_capability_max_context_tokens", "provider_context_limit")
-		applyChatContextTokens(b.session, promptTokens, windowTokens, true)
+		applyChatTurnContextTokens(b.session, 0, windowTokens, true)
 	default:
 		return
+	}
+}
+
+func (b *chatRuntimeEventBridge) applySessionCompactStatus(event runtimeevents.Event) {
+	if b == nil || b.session == nil || !b.isPrimarySessionEvent(event) {
+		return
+	}
+	switch event.Type {
+	case runtimechat.EventSessionCompactCompleted:
+		contextTokens := firstPositivePayloadInt(event.Payload, "token_after", "context_prompt_tokens", "prompt_tokens_after")
+		windowTokens := firstPositivePayloadInt(event.Payload, "max_context_tokens", "context_window_tokens")
+		b.session.TokenCount = 0
+		b.session.TurnContextTokenCount = 0
+		if contextTokens > 0 {
+			applyChatContextTokens(b.session, contextTokens, windowTokens, true)
+		} else if b.session.Interaction != nil {
+			b.session.Interaction.RefreshStatus("")
+		}
+	case runtimechat.EventSessionCompactStarted, runtimechat.EventSessionCompactSkipped, runtimechat.EventSessionCompactFailed:
+		windowTokens := firstPositivePayloadInt(event.Payload, "max_context_tokens", "context_window_tokens")
+		if windowTokens > 0 && b.session.ContextWindowTokenCount != windowTokens {
+			b.session.ContextWindowTokenCount = windowTokens
+			if b.session.Interaction != nil {
+				b.session.Interaction.RefreshStatus("")
+			}
+		}
 	}
 }
 

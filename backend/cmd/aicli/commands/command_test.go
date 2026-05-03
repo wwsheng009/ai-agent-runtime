@@ -1230,13 +1230,23 @@ func TestHandleCommand_Compact(t *testing.T) {
 		}, nil
 	}
 
+	session := &ChatSession{TokenCount: 5000, TurnContextTokenCount: 999}
 	output := captureStdout(t, func() {
-		if quit := handleCommand(&ChatSession{}, "/compact remote", false); quit {
+		if quit := handleCommand(session, "/compact remote", false); quit {
 			t.Fatal("expected compact command not to exit")
 		}
 	})
 	if !strings.Contains(output, "压缩完成") || !strings.Contains(output, "mode=remote") {
 		t.Fatalf("expected compact command output, got %q", output)
+	}
+	if session.ContextTokenCount != 120 {
+		t.Fatalf("expected compact command to reset context usage to token_after, got %d", session.ContextTokenCount)
+	}
+	if session.TokenCount != 0 {
+		t.Fatalf("expected compact command to reset cumulative used tokens, got %d", session.TokenCount)
+	}
+	if session.TurnContextTokenCount != 0 {
+		t.Fatalf("expected compact command to clear turn aggregate context usage, got %d", session.TurnContextTokenCount)
 	}
 }
 

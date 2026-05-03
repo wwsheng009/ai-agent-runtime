@@ -90,6 +90,15 @@ func cloneRuntimeMessages(messages []runtimetypes.Message) []runtimetypes.Messag
 	return cloned
 }
 
+func chatMessagesHaveConversation(messages []runtimetypes.Message) bool {
+	for _, message := range messages {
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "system") {
+			return true
+		}
+	}
+	return false
+}
+
 func printVisibleChatHistory(session *ChatSession, header string) int {
 	entries := collectVisibleChatHistory(session)
 	if len(entries) == 0 {

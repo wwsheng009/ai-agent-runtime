@@ -30,12 +30,12 @@ func TestFormatChatCompactReport_MissingModelCapabilityIncludesConfigHint(t *tes
 	if !strings.Contains(output, "`max_context_tokens` / `auto_compact_token_limit`") {
 		t.Fatalf("expected compact config fields hint, got %q", output)
 	}
-	if !strings.Contains(output, "token_source="+compactTokenSourceLocalEstimate) {
+	if !strings.Contains(output, "token_source="+compactTokenSourceObservedUsage) {
 		t.Fatalf("expected token source hint, got %q", output)
 	}
 }
 
-func TestFormatChatCompactReport_SuccessIncludesLocalTokenSource(t *testing.T) {
+func TestFormatChatCompactReport_SuccessIncludesObservedUsageTokenSource(t *testing.T) {
 	report := &chatCompactReport{
 		Result: &compactruntime.Result{
 			Mode:               compactruntime.ModeLocal,
@@ -47,7 +47,7 @@ func TestFormatChatCompactReport_SuccessIncludesLocalTokenSource(t *testing.T) {
 	}
 
 	output := formatChatCompactReport(report)
-	if !strings.Contains(output, "token_source="+compactTokenSourceLocalEstimate) {
+	if !strings.Contains(output, "token_source="+compactTokenSourceObservedUsage) {
 		t.Fatalf("expected token source hint, got %q", output)
 	}
 }

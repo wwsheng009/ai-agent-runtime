@@ -132,6 +132,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/model") {
 		return handleModelCommand(session, command, noInteractive)
 	}
+	if commandMatches(cmdLower, "/login") {
+		return handleLoginCommand(session, command, noInteractive)
+	}
 	if commandMatches(cmdLower, "/stream") {
 		return applyStreamCommand(session, command)
 	}
@@ -333,6 +336,7 @@ func handleCompactCommand(session *ChatSession, command string) bool {
 
 	report, err := runManualChatCompact(session, mode)
 	if report != nil {
+		applyChatCompactContextUsage(session, report.Result, report.Status, true)
 		fmt.Println(formatChatCompactReport(report))
 	}
 	if err != nil {
