@@ -822,12 +822,61 @@ func attachWorkspaceContext(manager *contextmgr.Manager, cfg *Config) {
 	if path == "" {
 		return
 	}
-	scanner := workspace.NewScanner(wsCfg)
-	scan, err := scanner.Scan(path)
-	if err != nil {
-		return
+	manager.Workspace = newLazyWorkspaceContextBuilder(path, wsCfg)
+}
+
+type lazyWorkspaceContextBuilder struct {
+	path    string
+	config  *workspace.WorkspaceConfig
+	once    sync.Once
+	builder *workspace.ContextBuilder
+}
+
+func newLazyWorkspaceContextBuilder(path string, config *workspace.WorkspaceConfig) *lazyWorkspaceContextBuilder {
+	return &lazyWorkspaceContextBuilder{
+		path:   strings.TrimSpace(path),
+		config: cloneWorkspaceConfig(config),
 	}
-	manager.Workspace = workspace.NewContextBuilder(scan, nil)
+}
+
+func (b *lazyWorkspaceContextBuilder) Build(query string) *workspace.WorkspaceContext {
+	ctx := emptyWorkspaceContext(query)
+	if b == nil || b.path == "" {
+		return ctx
+	}
+
+	b.once.Do(func() {
+		scanner := workspace.NewScanner(b.config)
+		scan, err := scanner.Scan(b.path)
+		if err != nil {
+			return
+		}
+		b.builder = workspace.NewContextBuilder(scan, nil)
+	})
+	if b.builder == nil {
+		return ctx
+	}
+	return b.builder.Build(query)
+}
+
+func emptyWorkspaceContext(query string) *workspace.WorkspaceContext {
+	return &workspace.WorkspaceContext{
+		Query:      query,
+		References: make(map[string][]workspace.Reference),
+	}
+}
+
+func cloneWorkspaceConfig(config *workspace.WorkspaceConfig) *workspace.WorkspaceConfig {
+	if config == nil {
+		return nil
+	}
+	return &workspace.WorkspaceConfig{
+		MaxFileSize:     config.MaxFileSize,
+		MaxChunkSize:    config.MaxChunkSize,
+		ChunkOverlap:    config.ChunkOverlap,
+		IncludePatterns: append([]string(nil), config.IncludePatterns...),
+		ExcludePatterns: append([]string(nil), config.ExcludePatterns...),
+	}
 }
 
 func contextOptionInt(options map[string]interface{}, key string) (int, bool) {

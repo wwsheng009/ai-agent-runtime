@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,6 +64,68 @@ func TestNewProvider_WorksWithUnifiedRuntimeInterface(t *testing.T) {
 	catalogProvider, ok := provider.(ModelCatalogProvider)
 	require.True(t, ok)
 	assert.NotEmpty(t, catalogProvider.SupportedModels())
+}
+
+func TestNewProvider_ReusesHTTPConnectionAcrossCalls(t *testing.T) {
+	var mu sync.Mutex
+	newConnections := 0
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state != http.StateNew {
+			return
+		}
+		mu.Lock()
+		newConnections++
+		mu.Unlock()
+	}
+	server.Start()
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 0,
+	})
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		resp, err := provider.Call(context.Background(), &LLMRequest{
+			Model: "gpt-4o-mini",
+			Messages: []types.Message{{
+				Role:    "user",
+				Content: "hello",
+			}},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "ok", resp.Content)
+	}
+
+	mu.Lock()
+	got := newConnections
+	mu.Unlock()
+	require.Equal(t, 1, got, "expected ProviderWrapper to reuse the same upstream connection")
+}
+
+func TestNewProvider_SharesTransportBetweenStreamingAndNonStreamingClients(t *testing.T) {
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: "https://api.example.com",
+		Timeout: 5 * time.Second,
+	})
+	require.NoError(t, err)
+
+	wrapper, ok := provider.(*ProviderWrapper)
+	require.True(t, ok)
+	require.NotNil(t, wrapper.httpClient)
+	require.NotNil(t, wrapper.streamHTTPClient)
+	require.NotNil(t, wrapper.httpClient.Transport)
+	require.Same(t, wrapper.httpClient.Transport, wrapper.streamHTTPClient.Transport)
+	require.Equal(t, time.Duration(0), wrapper.streamHTTPClient.Timeout)
 }
 
 func TestProviderWrapper_InternalCompactRequestDisablesTools(t *testing.T) {

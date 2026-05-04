@@ -161,6 +161,7 @@ func refreshLocalRuntimeAfterModelSelection(session *ChatSession) error {
 		return nil
 	}
 
+	setChatActorWarmup(session, nil)
 	var errs []string
 	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.SessionHub != nil && session.RuntimeSession != nil {
 		session.LocalRuntimeHost.SessionHub.Stop(session.RuntimeSession.ID)
@@ -178,6 +179,7 @@ func refreshLocalRuntimeAfterModelSelection(session *ChatSession) error {
 	if len(errs) > 0 {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
+	startChatActorWarmup(session)
 	return nil
 }
 
@@ -396,18 +398,25 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 		return
 	}
 	ctxCfg := runtimeConfig.Context
-	if strings.TrimSpace(ctxCfg.Profile) == "" &&
-		strings.TrimSpace(ctxCfg.CompactionMode) == "" &&
-		strings.TrimSpace(ctxCfg.RecallMode) == "" &&
-		strings.TrimSpace(ctxCfg.ObservationMode) == "" &&
-		ctxCfg.MinCompactionMessages <= 0 &&
-		ctxCfg.MinRecallQueryLength <= 0 &&
-		ctxCfg.LedgerLoadLimit <= 0 &&
-		ctxCfg.MaxPromptTokens <= 0 &&
-		ctxCfg.MaxMessages <= 0 &&
-		ctxCfg.KeepRecentMessages <= 0 &&
-		ctxCfg.MaxRecallResults <= 0 &&
-		ctxCfg.MaxObservationItems <= 0 {
+	wsCfg := runtimeConfig.Workspace
+	hasContextOptions := strings.TrimSpace(ctxCfg.Profile) != "" ||
+		strings.TrimSpace(ctxCfg.CompactionMode) != "" ||
+		strings.TrimSpace(ctxCfg.RecallMode) != "" ||
+		strings.TrimSpace(ctxCfg.ObservationMode) != "" ||
+		ctxCfg.MinCompactionMessages > 0 ||
+		ctxCfg.MinRecallQueryLength > 0 ||
+		ctxCfg.LedgerLoadLimit > 0 ||
+		ctxCfg.MaxPromptTokens > 0 ||
+		ctxCfg.MaxMessages > 0 ||
+		ctxCfg.KeepRecentMessages > 0 ||
+		ctxCfg.MaxRecallResults > 0 ||
+		ctxCfg.MaxObservationItems > 0
+	hasWorkspaceOptions := wsCfg.MaxFileSize > 0 ||
+		wsCfg.MaxChunkSize > 0 ||
+		wsCfg.ChunkOverlap > 0 ||
+		len(wsCfg.Include) > 0 ||
+		len(wsCfg.Exclude) > 0
+	if !hasContextOptions && !hasWorkspaceOptions {
 		return
 	}
 	if agentConfig.Options == nil {
@@ -448,6 +457,22 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 	}
 	if ctxCfg.MaxObservationItems > 0 {
 		agentConfig.Options["context_max_observation_items"] = ctxCfg.MaxObservationItems
+	}
+
+	if wsCfg.MaxFileSize > 0 {
+		agentConfig.Options["workspace_max_file_size"] = wsCfg.MaxFileSize
+	}
+	if wsCfg.MaxChunkSize > 0 {
+		agentConfig.Options["workspace_max_chunk_size"] = wsCfg.MaxChunkSize
+	}
+	if wsCfg.ChunkOverlap > 0 {
+		agentConfig.Options["workspace_chunk_overlap"] = wsCfg.ChunkOverlap
+	}
+	if len(wsCfg.Include) > 0 {
+		agentConfig.Options["workspace_include"] = append([]string(nil), wsCfg.Include...)
+	}
+	if len(wsCfg.Exclude) > 0 {
+		agentConfig.Options["workspace_exclude"] = append([]string(nil), wsCfg.Exclude...)
 	}
 }
 

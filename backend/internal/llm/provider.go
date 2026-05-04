@@ -226,10 +226,13 @@ func (l *tokenBucketLimiter) tryAcquire() bool {
 
 // ProviderWrapper Provider 包装器，使用 ProtocolAdapter
 type ProviderWrapper struct {
-	config    *ProviderConfig
-	adapter   adapter.ProtocolAdapter
-	tokenizer *Tokenizer
-	limiter   *tokenBucketLimiter // nil when RequestsPerMinute <= 0
+	config           *ProviderConfig
+	adapter          adapter.ProtocolAdapter
+	tokenizer        *Tokenizer
+	limiter          *tokenBucketLimiter // nil when RequestsPerMinute <= 0
+	httpClientMu     sync.Mutex
+	httpClient       *http.Client
+	streamHTTPClient *http.Client
 }
 
 // ListModelCapabilities returns a detached copy of the configured model capability map.
@@ -320,7 +323,7 @@ func (p *ProviderWrapper) RemoteCompact(ctx context.Context, req RemoteCompactRe
 	})
 
 	headers := buildCodexRemoteCompactHeaders(p.config.APIKey, p.config.Timeout, requestBody, p.config.Headers)
-	client := newProviderHTTPClient(p.config.Timeout, p.config.Proxy, false)
+	client := p.providerHTTPClient(false)
 	responseBody, statusCode, err := sendRemoteCompactRequest(ctx, client, url, headers, requestBody)
 	if err != nil {
 		reportHTTPDebug(ctx, HTTPDebugEvent{
@@ -366,12 +369,53 @@ func NewProvider(config *ProviderConfig) (LegacyChatProvider, error) {
 		return nil, fmt.Errorf("failed to create adapter: %w", err)
 	}
 
+	httpClient, streamHTTPClient := newProviderWrapperHTTPClients(config)
 	return &ProviderWrapper{
-		config:    config,
-		adapter:   a,
-		tokenizer: NewTokenizer(providerTokenizerStrategy(config.Type)),
-		limiter:   newTokenBucketLimiter(config.RequestsPerMinute),
+		config:           config,
+		adapter:          a,
+		tokenizer:        NewTokenizer(providerTokenizerStrategy(config.Type)),
+		limiter:          newTokenBucketLimiter(config.RequestsPerMinute),
+		httpClient:       httpClient,
+		streamHTTPClient: streamHTTPClient,
 	}, nil
+}
+
+func newProviderWrapperHTTPClients(config *ProviderConfig) (*http.Client, *http.Client) {
+	var timeout time.Duration
+	var proxy *agentconfig.ProxyConfig
+	if config != nil {
+		timeout = config.Timeout
+		proxy = config.Proxy
+	}
+
+	client := newProviderHTTPClient(timeout, proxy, false)
+	streamClient := &http.Client{
+		Transport: client.Transport,
+	}
+	return client, streamClient
+}
+
+func (p *ProviderWrapper) providerHTTPClient(stream bool) *http.Client {
+	if p == nil {
+		return newProviderHTTPClient(0, nil, stream)
+	}
+	if stream {
+		if p.streamHTTPClient != nil {
+			return p.streamHTTPClient
+		}
+	} else if p.httpClient != nil {
+		return p.httpClient
+	}
+
+	p.httpClientMu.Lock()
+	defer p.httpClientMu.Unlock()
+	if p.httpClient == nil || p.streamHTTPClient == nil {
+		p.httpClient, p.streamHTTPClient = newProviderWrapperHTTPClients(p.config)
+	}
+	if stream {
+		return p.streamHTTPClient
+	}
+	return p.httpClient
 }
 
 // Chat 执行聊天请求
@@ -422,7 +466,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	}
 
 	// 发送请求
-	client := newProviderHTTPClient(p.config.Timeout, p.config.Proxy, false)
+	client := p.providerHTTPClient(false)
 	resp, err := client.Do(req)
 	if err != nil {
 		reportHTTPDebug(ctx, HTTPDebugEvent{
@@ -660,7 +704,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	}
 
 	// 发送请求
-	client := newProviderHTTPClient(p.config.Timeout, p.config.Proxy, true)
+	client := p.providerHTTPClient(true)
 	resp, err := client.Do(req)
 	if err != nil {
 		reportHTTPDebug(ctx, HTTPDebugEvent{
@@ -1006,7 +1050,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	}
 	headers := p.adapter.BuildHeaders(adapterConfig)
 
-	client := newProviderHTTPClient(p.config.Timeout, p.config.Proxy, true)
+	client := p.providerHTTPClient(true)
 	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.RetryTuning, p.config.RetryRules)
 	var lastErr error
 	startedAt := time.Now()

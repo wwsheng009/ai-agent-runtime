@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -135,6 +136,44 @@ func TestBuildLocalChatAgent_UsesSignalsWorkspaceContextForActorChat(t *testing.
 	}
 	if got := cfg.Options["context_min_workspace_query_length"]; got != 4 {
 		t.Fatalf("expected context_min_workspace_query_length=4, got %#v", got)
+	}
+}
+
+func TestBuildLocalChatAgent_PropagatesRuntimeWorkspaceOptions(t *testing.T) {
+	session := &ChatSession{}
+	host := &localChatRuntimeHost{
+		Bootstrap: &runtimebootstrap.Manager{},
+	}
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Workspace.Include = []string{"*.go", "*.ts"}
+	runtimeConfig.Workspace.Exclude = []string{"node_modules", "vendor", ".git"}
+	runtimeConfig.Workspace.MaxFileSize = 1234
+	runtimeConfig.Workspace.MaxChunkSize = 321
+	runtimeConfig.Workspace.ChunkOverlap = 12
+
+	apiAgent := buildLocalChatAgent(session, host, runtimeConfig, t.TempDir(), "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+
+	cfg := apiAgent.GetConfig()
+	if cfg == nil || cfg.Options == nil {
+		t.Fatal("expected agent options")
+	}
+	if got := cfg.Options["workspace_max_file_size"]; got != int64(1234) {
+		t.Fatalf("expected workspace_max_file_size=1234, got %#v", got)
+	}
+	if got := cfg.Options["workspace_max_chunk_size"]; got != 321 {
+		t.Fatalf("expected workspace_max_chunk_size=321, got %#v", got)
+	}
+	if got := cfg.Options["workspace_chunk_overlap"]; got != 12 {
+		t.Fatalf("expected workspace_chunk_overlap=12, got %#v", got)
+	}
+	if got := cfg.Options["workspace_include"]; !reflect.DeepEqual(got, []string{"*.go", "*.ts"}) {
+		t.Fatalf("expected workspace_include to be propagated, got %#v", got)
+	}
+	if got := cfg.Options["workspace_exclude"]; !reflect.DeepEqual(got, []string{"node_modules", "vendor", ".git"}) {
+		t.Fatalf("expected workspace_exclude to be propagated, got %#v", got)
 	}
 }
 

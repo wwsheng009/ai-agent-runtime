@@ -359,6 +359,37 @@ func main() {}`},
 	}
 }
 
+func TestScanner_ScanDirectorySkipsNestedIgnoredDirs(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "src")
+	nodeModulesDir := filepath.Join(tmpDir, "frontend", "node_modules", "pkg")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatalf("Failed to create src dir: %v", err)
+	}
+	if err := os.MkdirAll(nodeModulesDir, 0755); err != nil {
+		t.Fatalf("Failed to create node_modules dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte("package main"), 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nodeModulesDir, "index.js"), []byte("export const value = 1"), 0644); err != nil {
+		t.Fatalf("Failed to create node_modules file: %v", err)
+	}
+
+	scanner := NewScanner(nil)
+	result, err := scanner.Scan(tmpDir)
+	if err != nil {
+		t.Fatalf("Scan() returned error: %v", err)
+	}
+
+	if len(result.Files) != 1 {
+		t.Fatalf("Files count = %v, want 1: %v", len(result.Files), result.Files)
+	}
+	if filepath.Base(result.Files[0]) != "main.go" {
+		t.Fatalf("expected only main.go to be scanned, got %v", result.Files)
+	}
+}
+
 func TestScanner_ShouldIgnore(t *testing.T) {
 	scanner := NewScanner(nil)
 
@@ -369,11 +400,46 @@ func TestScanner_ShouldIgnore(t *testing.T) {
 		{".git/config", true},
 		{".idea/workspace.xml", true},
 		{"node_modules/package/index.js", true},
+		{"frontend/node_modules/package/index.js", true},
 		{"vendor/github.com/user/repo/file.go", true},
+		{"services/api/vendor/github.com/user/repo/file.go", true},
 		{"dist/bundle.js", true},
+		{"frontend/build/bundle.js", true},
+		{"pkg/.git/config", true},
 		{"src/main.go", false},
+		{"src/building/model.go", false},
 		{"utils/helper.py", false},
 		{"test_file_test.go", false}, // Test files are ignored in default patterns, not by this method
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := scanner.shouldIgnore(tt.path)
+			if got != tt.ignored {
+				t.Errorf("shouldIgnore(%q) = %v, want %v", tt.path, got, tt.ignored)
+			}
+		})
+	}
+}
+
+func TestScanner_ShouldIgnoreNestedCustomExclude(t *testing.T) {
+	scanner := NewScanner(&WorkspaceConfig{
+		MaxFileSize:     10 * 1024 * 1024,
+		MaxChunkSize:    5000,
+		ChunkOverlap:    200,
+		ExcludePatterns: []string{"cache", "generated/**", "*_gen.go"},
+	})
+
+	tests := []struct {
+		path    string
+		ignored bool
+	}{
+		{"frontend/cache/index.js", true},
+		{"generated/client.ts", true},
+		{"generated/nested/client.ts", true},
+		{"src/model_gen.go", true},
+		{"src/cacheable/model.go", false},
+		{"src/generated_client.ts", false},
 	}
 
 	for _, tt := range tests {

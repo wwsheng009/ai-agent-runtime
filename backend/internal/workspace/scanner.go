@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -60,6 +61,17 @@ var (
 		regexp.MustCompile(`^\.DS_Store`),
 		regexp.MustCompile(`.*\.test\.(go|py|js|ts)$`), // 测试文件
 		regexp.MustCompile(`^_\w+`),                    // Go 生成文件
+	}
+	ignorePathComponents = map[string]struct{}{
+		".git":         {},
+		".idea":        {},
+		".vscode":      {},
+		"node_modules": {},
+		"vendor":       {},
+		"dist":         {},
+		"build":        {},
+		"__pycache__":  {},
+		".DS_Store":    {},
 	}
 	goFuncPattern          = regexp.MustCompile(`^func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)`)
 	goStructPattern        = regexp.MustCompile(`^type\s+(\w+)\s+struct`)
@@ -295,6 +307,15 @@ func (s *Scanner) scanFile(filePath string) (*ScanResult, error) {
 
 // shouldIgnore 检查是否应该忽略文件/目录
 func (s *Scanner) shouldIgnore(path string) bool {
+	path = normalizeScanPath(path)
+	if path == "" || path == "." {
+		return false
+	}
+
+	if hasIgnoredPathComponent(path) {
+		return true
+	}
+
 	// 使用正则表达式检查
 	for _, pattern := range ignorePatterns {
 		if pattern.MatchString(path) {
@@ -304,13 +325,70 @@ func (s *Scanner) shouldIgnore(path string) bool {
 
 	// 检查自定义排除模式
 	for _, pattern := range s.config.ExcludePatterns {
-		matched, err := filepath.Match(pattern, path)
-		if err == nil && matched {
+		if excludePatternMatches(pattern, path) {
 			return true
 		}
 	}
 
 	return false
+}
+
+func normalizeScanPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Clean(value))
+}
+
+func hasIgnoredPathComponent(value string) bool {
+	for _, part := range strings.Split(value, "/") {
+		if _, ok := ignorePathComponents[part]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func excludePatternMatches(patternValue, value string) bool {
+	patternValue = normalizeScanPattern(patternValue)
+	if patternValue == "" {
+		return false
+	}
+
+	if strings.HasSuffix(patternValue, "/**") {
+		prefix := strings.TrimSuffix(patternValue, "/**")
+		if value == prefix || strings.HasPrefix(value, prefix+"/") {
+			return true
+		}
+	}
+
+	if matched, err := path.Match(patternValue, value); err == nil && matched {
+		return true
+	}
+
+	base := path.Base(value)
+	if matched, err := path.Match(patternValue, base); err == nil && matched {
+		return true
+	}
+
+	if !strings.Contains(patternValue, "/") {
+		for _, part := range strings.Split(value, "/") {
+			if matched, err := path.Match(patternValue, part); err == nil && matched {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func normalizeScanPattern(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return filepath.ToSlash(value)
 }
 
 // isCodeFile 检查是否是代码文件
