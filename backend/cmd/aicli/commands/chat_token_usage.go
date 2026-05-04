@@ -87,17 +87,6 @@ func applyChatContextTokensFromUsage(session *ChatSession, usage *runtimetypes.T
 	if contextTokens <= 0 {
 		return 0
 	}
-	if session.ContextTokenCount > 0 && contextTokens < session.ContextTokenCount {
-		changed := false
-		if windowTokens > 0 && session.ContextWindowTokenCount != windowTokens {
-			session.ContextWindowTokenCount = windowTokens
-			changed = true
-		}
-		if (changed || forceRefresh) && session.Interaction != nil {
-			session.Interaction.RefreshStatus("")
-		}
-		return session.ContextTokenCount
-	}
 	session.providerContextTokenCount = contextTokens
 	session.providerContextWindowTokenCount = windowTokens
 	applyChatContextTokensLocked(session, contextTokens, windowTokens, forceRefresh, true)
@@ -183,9 +172,9 @@ func applyChatTurnContextTokens(session *ChatSession, promptTokens int, windowTo
 	changed := false
 	if promptTokens > 0 {
 		session.TurnContextTokenCount += promptTokens
-		session.providerContextTokenCount = 0
-		session.providerContextWindowTokenCount = 0
-		if session.ContextTokenCount <= 0 || promptTokens > session.ContextTokenCount {
+		if session.ContextTokenCount <= 0 {
+			session.providerContextTokenCount = 0
+			session.providerContextWindowTokenCount = 0
 			session.ContextTokenCount = promptTokens
 			changed = true
 		}

@@ -258,17 +258,18 @@ func TestNextLogScope_ConsumesPrecountedUserTurn(t *testing.T) {
 	}
 }
 
-func TestApplyChatTurnContextTokens_DoesNotLowerLiveSessionContextSnapshot(t *testing.T) {
+func TestApplyChatTurnContextTokens_DoesNotReplaceExistingSessionContextSnapshot(t *testing.T) {
 	session := &ChatSession{ContextTokenCount: 900}
 
 	applyChatTurnContextTokens(session, 100, 1000, false)
 	applyChatTurnContextTokens(session, 250, 1000, false)
+	applyChatTurnContextTokens(session, 1200, 1000, false)
 
 	if session.ContextTokenCount != 900 {
-		t.Fatalf("expected smaller live request contexts not to lower session snapshot, got %d", session.ContextTokenCount)
+		t.Fatalf("expected request-start estimates not to replace session snapshot, got %d", session.ContextTokenCount)
 	}
-	if session.TurnContextTokenCount != 350 {
-		t.Fatalf("expected turn aggregate context tokens to be 350, got %d", session.TurnContextTokenCount)
+	if session.TurnContextTokenCount != 1550 {
+		t.Fatalf("expected turn aggregate context tokens to be 1550, got %d", session.TurnContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 1000 {
 		t.Fatalf("expected context window token count to be 1000, got %d", session.ContextWindowTokenCount)
@@ -307,7 +308,7 @@ func TestApplyChatContextTokensFromUsage_FallsBackToInputPlusOutput(t *testing.T
 	}
 }
 
-func TestApplyChatContextTokensFromUsage_DoesNotLowerExistingActiveContextSnapshot(t *testing.T) {
+func TestApplyChatContextTokensFromUsage_RefreshesProviderSnapshotEvenWhenLower(t *testing.T) {
 	session := &ChatSession{ContextTokenCount: 1320}
 
 	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
@@ -316,8 +317,8 @@ func TestApplyChatContextTokensFromUsage_DoesNotLowerExistingActiveContextSnapsh
 		TotalTokens:      40,
 	}, 256000, false)
 
-	if got != 1320 || session.ContextTokenCount != 1320 {
-		t.Fatalf("expected smaller request usage not to lower active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	if got != 40 || session.ContextTokenCount != 40 {
+		t.Fatalf("expected latest provider usage to refresh active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 256000 {
 		t.Fatalf("expected window tokens to still update, got %d", session.ContextWindowTokenCount)
