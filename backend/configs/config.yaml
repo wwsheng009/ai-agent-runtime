@@ -12,8 +12,8 @@ aicli:
   timeout:
     request_timeout: ${AICLI_REQUEST_TIMEOUT:-0s}
   chat:
-    default_provider: modelscope
-    default_model: deepseek-ai/DeepSeek-V4-Pro
+    default_provider: mimo_anthropic
+    default_model: mimo-v2.5-pro
     reasoning_effort: max
     stream: true
 auth:
