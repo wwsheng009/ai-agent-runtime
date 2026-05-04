@@ -804,6 +804,39 @@ func TestGatewayClient_CallProvider_OpenAIPreservesReasoningEffort(t *testing.T)
 	assert.Equal(t, "xhigh", capturedBody["reasoning_effort"])
 }
 
+func TestGatewayClient_CallProvider_NVIDIADropsUnsupportedReasoningEffort(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"z-ai/glm4.7","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
+	selected := &SelectedResource{
+		Provider: &ProviderResource{
+			Name:    "nvidia",
+			Type:    "openai",
+			BaseURL: server.URL,
+		},
+		KeyValue: "test-key",
+	}
+
+	resp, err := client.callProvider(context.Background(), selected, "z-ai/glm4.7", &LLMRequest{
+		Model:           "z-ai/glm4.7",
+		ReasoningEffort: "max",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	assert.NotContains(t, capturedBody, "reasoning_effort")
+}
+
 func TestGatewayClient_CallProvider_UsesConfiguredReasoningModelFlag(t *testing.T) {
 	var capturedBody map[string]interface{}
 

@@ -51,6 +51,15 @@ func reasoningEffortCatalogForModel(provider config.Provider, modelName string) 
 			}
 		}
 	}
+	if capability, ok := fallbackReasoningEffortCapabilityForProvider("", provider); ok {
+		options := normalizeReasoningEffortOptions(capability.ReasoningEfforts)
+		if len(options) > 0 {
+			return reasoningEffortCatalog{
+				options:   options,
+				supported: true,
+			}
+		}
+	}
 
 	return reasoningEffortCatalog{}
 }

@@ -1107,7 +1107,7 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 	resolvedModel := resolveGatewaySelectedModel(selected, model)
 	metadata := cloneMapStringAny(req.Metadata)
 	modelCapabilities := selectedProviderModelCapabilities(selected)
-	capability, _ := ResolveModelCapabilitySpec(resolvedModel, modelCapabilities)
+	capability, hasCapability := ResolveModelCapabilitySpec(resolvedModel, modelCapabilities)
 	reasoningModel := ReasoningModelEnabled(capability, req.ReasoningModel)
 
 	// 转换 Messages
@@ -1159,6 +1159,7 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 	}
 
 	reasoningConfig := resolveRequestReasoningConfig(req.ReasoningEffort, req.Thinking, req.Metadata)
+	requestReasoningEffort := supportedProviderReasoningEffort(reasoningConfig.ReasoningEffort, capability, hasCapability)
 
 	// Extract stop_sequences and tool_choice from metadata if present
 	var stopSequences []string
@@ -1180,7 +1181,7 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 		Messages:               messages,
 		Stream:                 req.Stream,
 		MaxTokens:              req.MaxTokens,
-		ReasoningEffort:        reasoningConfig.ReasoningEffort,
+		ReasoningEffort:        requestReasoningEffort,
 		ReasoningEffortBudgets: capability.ReasoningEffortBudgets,
 		ReasoningModel:         reasoningModel,
 		Thinking:               reasoningConfig.Thinking,
@@ -1313,17 +1314,33 @@ func selectedProviderModelCapabilities(selected *SelectedResource) map[string]ag
 	if selected == nil || selected.Provider == nil {
 		return nil
 	}
-	if len(selected.Provider.ModelCapabilities) > 0 {
-		return selected.Provider.ModelCapabilities
-	}
+	providerName := strings.TrimSpace(selected.Provider.Name)
+	protocol := strings.TrimSpace(selected.Provider.Type)
+	baseURL := strings.TrimSpace(selected.Provider.BaseURL)
+	modelCapabilities := selected.Provider.ModelCapabilities
 	switch cfg := selected.Provider.Config.(type) {
 	case *agentconfig.Provider:
-		return cfg.ModelCapabilities
+		if protocol == "" {
+			protocol = cfg.GetProtocol()
+		}
+		if baseURL == "" {
+			baseURL = cfg.BaseURL
+		}
+		if len(modelCapabilities) == 0 {
+			modelCapabilities = cfg.ModelCapabilities
+		}
 	case agentconfig.Provider:
-		return cfg.ModelCapabilities
-	default:
-		return nil
+		if protocol == "" {
+			protocol = cfg.GetProtocol()
+		}
+		if baseURL == "" {
+			baseURL = cfg.BaseURL
+		}
+		if len(modelCapabilities) == 0 {
+			modelCapabilities = cfg.ModelCapabilities
+		}
 	}
+	return providerModelCapabilitiesWithFallback(modelCapabilities, providerName, protocol, baseURL)
 }
 
 func newGatewayHTTPError(statusCode int, body string, header http.Header, rules []RetryRule) error {

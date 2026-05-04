@@ -240,6 +240,13 @@ func (p *ProviderWrapper) ListModelCapabilities() map[string]agentconfig.ModelCa
 	return CloneModelCapabilityMap(p.config.ModelCapabilities)
 }
 
+func (p *ProviderWrapper) modelCapabilities() map[string]agentconfig.ModelCapabilitySpec {
+	if p == nil || p.config == nil {
+		return nil
+	}
+	return providerModelCapabilitiesWithFallback(p.config.ModelCapabilities, "", p.config.Type, p.config.BaseURL)
+}
+
 // ResolveModelCapability exposes provider/model capability metadata for runtime
 // features such as auto compaction.
 func (p *ProviderWrapper) ResolveModelCapability(requestedModel string) (string, agentconfig.ModelCapabilitySpec, bool) {
@@ -272,8 +279,9 @@ func (p *ProviderWrapper) ResolveModelCapability(requestedModel string) (string,
 		}
 	}
 
+	modelCapabilities := p.modelCapabilities()
 	for _, candidate := range candidates {
-		if capability, ok := ResolveModelCapabilitySpec(candidate, p.config.ModelCapabilities); ok {
+		if capability, ok := ResolveModelCapabilitySpec(candidate, modelCapabilities); ok {
 			return candidate, capability, true
 		}
 	}
@@ -1344,8 +1352,9 @@ func (p *ProviderWrapper) toChatRequest(req *LLMRequest) ChatRequest {
 	messages := make([]Message, 0, len(req.Messages))
 	reasoningConfig := resolveRequestReasoningConfig(req.ReasoningEffort, req.Thinking, req.Metadata)
 	resolvedModel := p.resolveModel(req.Model)
-	capability, _ := ResolveModelCapabilitySpec(resolvedModel, p.config.ModelCapabilities)
+	capability, hasCapability := ResolveModelCapabilitySpec(resolvedModel, p.modelCapabilities())
 	reasoningModel := ReasoningModelEnabled(capability, req.ReasoningModel)
+	requestReasoningEffort := supportedProviderReasoningEffort(reasoningConfig.ReasoningEffort, capability, hasCapability)
 	for _, msg := range req.Messages {
 		toolCalls := make([]ToolCall, 0, len(msg.ToolCalls))
 		for _, call := range msg.ToolCalls {
@@ -1386,7 +1395,7 @@ func (p *ProviderWrapper) toChatRequest(req *LLMRequest) ChatRequest {
 		Messages:               messages,
 		MaxTokens:              req.MaxTokens,
 		Temperature:            req.Temperature,
-		ReasoningEffort:        reasoningConfig.ReasoningEffort,
+		ReasoningEffort:        requestReasoningEffort,
 		ReasoningEffortBudgets: capability.ReasoningEffortBudgets,
 		ReasoningModel:         reasoningModel,
 		Thinking:               reasoningConfig.Thinking,
@@ -1496,6 +1505,7 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 		}
 	}
 	resolvedModel := p.resolveModel(request.Model)
+	capability, hasCapability := ResolveModelCapabilitySpec(resolvedModel, p.modelCapabilities())
 
 	// 转换 Messages
 	messages := make([]map[string]interface{}, len(request.Messages))
@@ -1537,15 +1547,20 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 	}
 
 	reasoningConfig := resolveRequestReasoningConfig(request.ReasoningEffort, request.Thinking, request.Metadata)
-	reasoningModel := request.ReasoningModel
+	requestReasoningEffort := supportedProviderReasoningEffort(reasoningConfig.ReasoningEffort, capability, hasCapability)
+	reasoningModel := ReasoningModelEnabled(capability, request.ReasoningModel)
+	reasoningEffortBudgets := request.ReasoningEffortBudgets
+	if len(reasoningEffortBudgets) == 0 && hasCapability {
+		reasoningEffortBudgets = capability.ReasoningEffortBudgets
+	}
 
 	return adapter.RequestConfig{
 		Model:                  resolvedModel,
 		Messages:               messages,
 		Stream:                 request.Stream,
 		MaxTokens:              request.MaxTokens,
-		ReasoningEffort:        reasoningConfig.ReasoningEffort,
-		ReasoningEffortBudgets: request.ReasoningEffortBudgets,
+		ReasoningEffort:        requestReasoningEffort,
+		ReasoningEffortBudgets: reasoningEffortBudgets,
 		ReasoningModel:         reasoningModel,
 		Thinking:               reasoningConfig.Thinking,
 		Temperature:            request.Temperature,

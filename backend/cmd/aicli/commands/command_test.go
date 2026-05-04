@@ -594,6 +594,32 @@ func TestResolveChatReasoningEffort_OpenAIProtocol(t *testing.T) {
 	}
 }
 
+func TestResolveChatReasoningEffort_UsesNVIDIAFallbackCapability(t *testing.T) {
+	provider := config.Provider{
+		Protocol: "openai",
+		BaseURL:  "https://integrate.api.nvidia.com",
+	}
+
+	effort, warning, err := resolveChatReasoningEffort(provider, "z-ai/glm4.7", "max", false)
+	if err != nil {
+		t.Fatalf("expected nil error for stored unsupported effort, got %v", err)
+	}
+	if effort != "" {
+		t.Fatalf("expected unsupported nvidia effort to be cleared, got %q", effort)
+	}
+	if !strings.Contains(warning, "已清空") {
+		t.Fatalf("expected clear warning, got %q", warning)
+	}
+
+	effort, warning, err = resolveChatReasoningEffort(provider, "z-ai/glm4.7", "max", true)
+	if err == nil {
+		t.Fatal("expected explicit unsupported nvidia effort to fail")
+	}
+	if effort != "" || warning != "" {
+		t.Fatalf("expected empty effort/warning on explicit error, got effort=%q warning=%q", effort, warning)
+	}
+}
+
 func TestResolveChatReasoningEffort_WithoutCapabilityDoesNotInjectDefault(t *testing.T) {
 	effort, warning, err := resolveChatReasoningEffort(config.Provider{}, "gpt-5.4", "", false)
 	if err != nil {

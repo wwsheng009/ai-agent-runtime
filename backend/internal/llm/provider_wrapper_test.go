@@ -100,6 +100,71 @@ func TestProviderWrapper_InternalCompactRequestDisablesTools(t *testing.T) {
 	require.NotContains(t, capturedBody, "tool_choice")
 }
 
+func TestProviderWrapper_CallDropsUnsupportedReasoningEffortFromCapability(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"z-ai/glm4.7","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 0,
+		ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"*": {
+				ReasoningModel:   true,
+				ReasoningEfforts: []string{"minimal", "low", "medium", "high"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model:           "z-ai/glm4.7",
+		ReasoningEffort: "max",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	assert.NotContains(t, capturedBody, "reasoning_effort")
+}
+
+func TestProviderWrapper_ConvertRequestUsesNVIDIAFallbackCapability(t *testing.T) {
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: "https://integrate.api.nvidia.com",
+		ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"z-ai/glm-5.1": {
+				ReasoningModel:   true,
+				ReasoningEfforts: []string{"minimal", "low", "medium", "high"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	wrapper := provider.(*ProviderWrapper)
+
+	cfg := wrapper.convertRequest(ChatRequest{
+		Model:           "z-ai/glm4.7",
+		ReasoningEffort: "max",
+		Messages: []Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	if cfg.ReasoningEffort != "" {
+		t.Fatalf("expected unsupported nvidia reasoning_effort to be omitted, got %q", cfg.ReasoningEffort)
+	}
+
+	body := wrapper.adapter.BuildRequest(cfg)
+	assert.NotContains(t, body, "reasoning_effort")
+}
+
 func TestProviderWrapper_CallRejectsEmptyChoices(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
