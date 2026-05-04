@@ -96,6 +96,27 @@ func TestChatRuntimeEventBridge_LLMRequestStartedUpdatesActiveContextSnapshot(t 
 	}
 
 	bridge.handleEvent(runtimeevents.Event{
+		Type:      "llm.request.started",
+		SessionID: runtimeSession.ID,
+		Payload: map[string]interface{}{
+			"message_count":         15,
+			"success":               true,
+			"context_prompt_tokens": 22080,
+			"context_window_tokens": 270000,
+		},
+	})
+
+	if session.ContextTokenCount != 24299 {
+		t.Fatalf("expected smaller request-start prompt not to lower live ctx snapshot, got %d", session.ContextTokenCount)
+	}
+	if session.TurnContextTokenCount != 69478 {
+		t.Fatalf("expected turn diagnostic aggregate to include smaller request prompt, got %d", session.TurnContextTokenCount)
+	}
+	if session.StatusMessageCount != 15 {
+		t.Fatalf("expected smaller request event to keep refreshing status message count, got %d", session.StatusMessageCount)
+	}
+
+	bridge.handleEvent(runtimeevents.Event{
 		Type:      "llm.request.finished",
 		SessionID: runtimeSession.ID,
 		Payload: map[string]interface{}{
@@ -106,7 +127,7 @@ func TestChatRuntimeEventBridge_LLMRequestStartedUpdatesActiveContextSnapshot(t 
 		},
 	})
 
-	if session.TurnContextTokenCount != 47398 {
+	if session.TurnContextTokenCount != 69478 {
 		t.Fatalf("expected finished event not to double count turn aggregate tokens, got %d", session.TurnContextTokenCount)
 	}
 	if session.ContextTokenCount != 24299 {

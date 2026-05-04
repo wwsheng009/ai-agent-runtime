@@ -391,7 +391,6 @@ func TestSyncRuntimeSessionBackIntoCLI_RecomputesContextSnapshotFromRuntimeHisto
 		SessionUserID:           userID,
 		ContextTokenCount:       23099,
 		ContextWindowTokenCount: 270000,
-		TurnContextTokenCount:   23099,
 	}
 
 	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
@@ -418,6 +417,61 @@ func TestSyncRuntimeSessionBackIntoCLI_RecomputesContextSnapshotFromRuntimeHisto
 	}
 	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextWindowTokenCount); !ok || got != 270000 {
 		t.Fatalf("expected persisted context window token count 270000, got ok=%v value=%d", ok, got)
+	}
+}
+
+func TestSyncRuntimeSessionBackIntoCLI_PreservesLiveContextSnapshotAfterHistorySync(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	runtimeSession.ReplaceHistory([]runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("You are helpful."),
+		*runtimetypes.NewUserMessage("hello"),
+		*runtimetypes.NewAssistantMessage("world"),
+	})
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextContextTokenCount)
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextContextWindowTokenCount)
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextTurnContextTokenCount)
+	if err := manager.Update(context.Background(), runtimeSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:            "test-provider",
+		Provider:                config.Provider{Protocol: "openai"},
+		Model:                   "test-model",
+		SessionManager:          manager,
+		RuntimeSession:          runtimeSession,
+		SessionUserID:           userID,
+		ContextTokenCount:       23099,
+		ContextWindowTokenCount: 270000,
+		TurnContextTokenCount:   23099,
+	}
+
+	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
+		t.Fatalf("syncRuntimeSessionBackIntoCLI: %v", err)
+	}
+
+	if session.ContextTokenCount != 23099 {
+		t.Fatalf("expected live request context snapshot to survive lower history estimate, got %d", session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 270000 {
+		t.Fatalf("expected runtime-observed context window to survive restore, got %d", session.ContextWindowTokenCount)
+	}
+
+	stored, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextTokenCount); !ok || got != 23099 {
+		t.Fatalf("expected persisted live context token count 23099, got ok=%v value=%d", ok, got)
 	}
 }
 

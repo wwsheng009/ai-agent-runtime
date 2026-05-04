@@ -258,6 +258,7 @@ func syncRuntimeSessionBackIntoCLIWithOptions(session *ChatSession, refreshConte
 	}
 	previousContextWindowTokens := session.ContextWindowTokenCount
 	previousContextTokens := session.ContextTokenCount
+	previousTurnContextTokens := session.TurnContextTokenCount
 	providerContextTokens := session.providerContextTokenCount
 	providerContextWindowTokens := session.providerContextWindowTokenCount
 	runtimeSession, err := session.SessionManager.Get(context.Background(), session.RuntimeSession.ID)
@@ -275,7 +276,10 @@ func syncRuntimeSessionBackIntoCLIWithOptions(session *ChatSession, refreshConte
 		validateAmbientTeamBinding(session, session.LocalRuntimeHost.TeamStore)
 	}
 	if refreshContextFromHistory {
-		refreshChatContextTokenSnapshotFromMessages(session, previousContextWindowTokens, true)
+		historyContextTokens := refreshChatContextTokenSnapshotFromMessages(session, previousContextWindowTokens, true)
+		if previousTurnContextTokens > 0 && previousContextTokens > historyContextTokens {
+			applyChatContextTokens(session, previousContextTokens, previousContextWindowTokens, true)
+		}
 	} else if previousContextTokens > 0 || previousContextWindowTokens > 0 {
 		applyChatContextTokens(session, previousContextTokens, previousContextWindowTokens, true)
 	}

@@ -185,10 +185,10 @@ func applyChatTurnContextTokens(session *ChatSession, promptTokens int, windowTo
 		session.TurnContextTokenCount += promptTokens
 		session.providerContextTokenCount = 0
 		session.providerContextWindowTokenCount = 0
-		if session.ContextTokenCount != promptTokens {
+		if session.ContextTokenCount <= 0 || promptTokens > session.ContextTokenCount {
 			session.ContextTokenCount = promptTokens
+			changed = true
 		}
-		changed = true
 	}
 	if windowTokens > 0 && session.ContextWindowTokenCount != windowTokens {
 		session.ContextWindowTokenCount = windowTokens

@@ -258,14 +258,14 @@ func TestNextLogScope_ConsumesPrecountedUserTurn(t *testing.T) {
 	}
 }
 
-func TestApplyChatTurnContextTokens_UpdatesLiveSessionContextSnapshot(t *testing.T) {
+func TestApplyChatTurnContextTokens_DoesNotLowerLiveSessionContextSnapshot(t *testing.T) {
 	session := &ChatSession{ContextTokenCount: 900}
 
 	applyChatTurnContextTokens(session, 100, 1000, false)
 	applyChatTurnContextTokens(session, 250, 1000, false)
 
-	if session.ContextTokenCount != 250 {
-		t.Fatalf("expected live request context to update session context snapshot, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 900 {
+		t.Fatalf("expected smaller live request contexts not to lower session snapshot, got %d", session.ContextTokenCount)
 	}
 	if session.TurnContextTokenCount != 350 {
 		t.Fatalf("expected turn aggregate context tokens to be 350, got %d", session.TurnContextTokenCount)
