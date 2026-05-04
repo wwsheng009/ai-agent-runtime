@@ -9273,6 +9273,9 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[strin
 	if strings.TrimSpace(ctxCfg.ObservationMode) != "" {
 		options["context_observation_mode"] = strings.TrimSpace(ctxCfg.ObservationMode)
 	}
+	if strings.TrimSpace(ctxCfg.WorkspaceMode) != "" {
+		options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(ctxCfg.WorkspaceMode))
+	}
 	if ctxCfg.MinCompactionMessages > 0 {
 		options["context_min_compaction_messages"] = ctxCfg.MinCompactionMessages
 	}
@@ -9298,6 +9301,9 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[strin
 		options["context_max_observation_items"] = ctxCfg.MaxObservationItems
 	}
 	wsCfg := config.Workspace
+	if strings.TrimSpace(ctxCfg.WorkspaceMode) == "" && strings.TrimSpace(wsCfg.Mode) != "" {
+		options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(wsCfg.Mode))
+	}
 	if wsCfg.MaxFileSize > 0 {
 		options["workspace_max_file_size"] = wsCfg.MaxFileSize
 	}

@@ -103,6 +103,9 @@ func TestValidateSandboxConfig(t *testing.T) {
 func TestValidateContextConfig(t *testing.T) {
 	cfg := DefaultRuntimeConfig()
 	require.Equal(t, "balanced", cfg.Context.Profile)
+	require.False(t, cfg.Workspace.Enabled)
+	require.Empty(t, cfg.Workspace.Mode)
+	require.Empty(t, cfg.Context.WorkspaceMode)
 
 	cfg.Context.Profile = "compact"
 	cfg.Context.MaxMessages = 12
@@ -123,6 +126,30 @@ func TestValidateContextConfig(t *testing.T) {
 
 	cfg.Context.Profile = "cold"
 	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Context.WorkspaceMode = "signals"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.Context.WorkspaceMode = "invalid"
+	err = ValidateRuntimeConfig(cfg)
+	require.Error(t, err)
+}
+
+func TestValidateWorkspaceConfig(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	cfg.Workspace.Enabled = true
+	cfg.Workspace.Mode = "broad"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.Workspace.Mode = "invalid"
+	err := ValidateRuntimeConfig(cfg)
+	require.Error(t, err)
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Workspace.MaxFileSize = -1
+	err = ValidateRuntimeConfig(cfg)
+	require.Error(t, err)
 }
 
 func TestValidateCatalogConfig(t *testing.T) {

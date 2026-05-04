@@ -235,7 +235,9 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	if runtimeConfig != nil {
 		agentConfig.MaxSteps = agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps)
 	}
-	if session.Stream || workspaceRoot != "" || len(session.ProfileContext) > 0 {
+	workspaceMode := resolveLocalChatWorkspaceMode(runtimeConfig)
+	workspaceContextEnabled := workspaceMode != "" && !strings.EqualFold(workspaceMode, contextmgr.WorkspaceModeDisabled)
+	if session.Stream || (workspaceRoot != "" && workspaceContextEnabled) || len(session.ProfileContext) > 0 {
 		agentConfig.Options = make(map[string]interface{})
 		if session.Stream {
 			agentConfig.Options["stream"] = true
@@ -243,9 +245,9 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
 			agentConfig.Options["reasoning_effort"] = reasoningEffort
 		}
-		if workspaceRoot != "" {
+		if workspaceRoot != "" && workspaceContextEnabled {
 			agentConfig.Options["workspace_path"] = workspaceRoot
-			agentConfig.Options["context_workspace_mode"] = contextmgr.WorkspaceModeSignals
+			agentConfig.Options["context_workspace_mode"] = workspaceMode
 			agentConfig.Options["context_min_workspace_query_length"] = 4
 		}
 		if len(session.ProfileContext) > 0 {
@@ -313,6 +315,22 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 
 	return apiAgent
+}
+
+func resolveLocalChatWorkspaceMode(runtimeConfig *runtimecfg.RuntimeConfig) string {
+	if runtimeConfig == nil {
+		return ""
+	}
+	if mode := strings.TrimSpace(runtimeConfig.Context.WorkspaceMode); mode != "" {
+		return strings.ToLower(mode)
+	}
+	if mode := strings.TrimSpace(runtimeConfig.Workspace.Mode); mode != "" {
+		return strings.ToLower(mode)
+	}
+	if runtimeConfig.Workspace.Enabled {
+		return contextmgr.WorkspaceModeSignals
+	}
+	return ""
 }
 
 func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) string {
@@ -403,6 +421,7 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 		strings.TrimSpace(ctxCfg.CompactionMode) != "" ||
 		strings.TrimSpace(ctxCfg.RecallMode) != "" ||
 		strings.TrimSpace(ctxCfg.ObservationMode) != "" ||
+		strings.TrimSpace(ctxCfg.WorkspaceMode) != "" ||
 		ctxCfg.MinCompactionMessages > 0 ||
 		ctxCfg.MinRecallQueryLength > 0 ||
 		ctxCfg.LedgerLoadLimit > 0 ||
@@ -412,6 +431,7 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 		ctxCfg.MaxRecallResults > 0 ||
 		ctxCfg.MaxObservationItems > 0
 	hasWorkspaceOptions := wsCfg.MaxFileSize > 0 ||
+		strings.TrimSpace(wsCfg.Mode) != "" ||
 		wsCfg.MaxChunkSize > 0 ||
 		wsCfg.ChunkOverlap > 0 ||
 		len(wsCfg.Include) > 0 ||
@@ -433,6 +453,11 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 	}
 	if strings.TrimSpace(ctxCfg.ObservationMode) != "" {
 		agentConfig.Options["context_observation_mode"] = strings.TrimSpace(ctxCfg.ObservationMode)
+	}
+	if strings.TrimSpace(ctxCfg.WorkspaceMode) != "" {
+		agentConfig.Options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(ctxCfg.WorkspaceMode))
+	} else if strings.TrimSpace(wsCfg.Mode) != "" {
+		agentConfig.Options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(wsCfg.Mode))
 	}
 	if ctxCfg.MinCompactionMessages > 0 {
 		agentConfig.Options["context_min_compaction_messages"] = ctxCfg.MinCompactionMessages

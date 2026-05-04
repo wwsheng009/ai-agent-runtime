@@ -90,6 +90,8 @@ type EmbeddingConfig struct {
 
 // WorkspaceConfig 工作区配置
 type WorkspaceConfig struct {
+	Enabled      bool     `yaml:"enabled" json:"enabled"`
+	Mode         string   `yaml:"mode" json:"mode"`
 	Root         string   `yaml:"root" json:"root"`
 	Exclude      []string `yaml:"exclude" json:"exclude"`
 	Include      []string `yaml:"include" json:"include"`
@@ -103,6 +105,7 @@ type ContextConfig struct {
 	CompactionMode        string `yaml:"compactionMode" json:"compactionMode"`
 	RecallMode            string `yaml:"recallMode" json:"recallMode"`
 	ObservationMode       string `yaml:"observationMode" json:"observationMode"`
+	WorkspaceMode         string `yaml:"workspaceMode" json:"workspaceMode"`
 	MinCompactionMessages int    `yaml:"minCompactionMessages" json:"minCompactionMessages"`
 	MinRecallQueryLength  int    `yaml:"minRecallQueryLength" json:"minRecallQueryLength"`
 	LedgerLoadLimit       int    `yaml:"ledgerLoadLimit" json:"ledgerLoadLimit"`
@@ -570,6 +573,9 @@ func ValidateRuntimeConfig(config *RuntimeConfig) error {
 	if err := ValidateContextConfig(&config.Context); err != nil {
 		return err
 	}
+	if err := ValidateWorkspaceConfig(&config.Workspace); err != nil {
+		return err
+	}
 	if err := ValidateCatalogConfig(&config.Catalog); err != nil {
 		return err
 	}
@@ -691,6 +697,32 @@ func ValidateTraceConfig(config *TraceConfig) error {
 	return nil
 }
 
+func ValidateWorkspaceConfig(config *WorkspaceConfig) error {
+	if config == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(config.Mode)) {
+	case "", runtimecontext.WorkspaceModeDisabled, runtimecontext.WorkspaceModeSignals, runtimecontext.WorkspaceModeBroad:
+	default:
+		return errors.New(errors.ErrValidationFailed, "workspace.mode must be disabled, signals, or broad")
+	}
+	for _, item := range []struct {
+		name  string
+		value int
+	}{
+		{"maxChunkSize", config.MaxChunkSize},
+		{"chunkOverlap", config.ChunkOverlap},
+	} {
+		if item.value < 0 {
+			return errors.New(errors.ErrValidationFailed, fmt.Sprintf("workspace.%s cannot be negative", item.name))
+		}
+	}
+	if config.MaxFileSize < 0 {
+		return errors.New(errors.ErrValidationFailed, "workspace.maxFileSize cannot be negative")
+	}
+	return nil
+}
+
 func ValidateContextConfig(config *ContextConfig) error {
 	if config == nil {
 		return nil
@@ -731,6 +763,7 @@ func ValidateContextConfig(config *ContextConfig) error {
 		{"compactionMode", strings.TrimSpace(config.CompactionMode), []string{"", runtimecontext.CompactionModeSummary, runtimecontext.CompactionModeLedgerPreferred}},
 		{"recallMode", strings.TrimSpace(config.RecallMode), []string{"", runtimecontext.RecallModeDisabled, runtimecontext.RecallModeSignals, runtimecontext.RecallModeBroad}},
 		{"observationMode", strings.TrimSpace(config.ObservationMode), []string{"", runtimecontext.ObservationModeAll, runtimecontext.ObservationModeFailures}},
+		{"workspaceMode", strings.TrimSpace(config.WorkspaceMode), []string{"", runtimecontext.WorkspaceModeDisabled, runtimecontext.WorkspaceModeSignals, runtimecontext.WorkspaceModeBroad}},
 	} {
 		if item.value == "" {
 			continue

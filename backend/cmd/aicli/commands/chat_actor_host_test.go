@@ -14,6 +14,7 @@ import (
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -116,7 +117,7 @@ func TestBuildLocalChatAgent_PropagatesReasoningEffortToAgentOptions(t *testing.
 	}
 }
 
-func TestBuildLocalChatAgent_UsesSignalsWorkspaceContextForActorChat(t *testing.T) {
+func TestBuildLocalChatAgent_DisablesWorkspaceContextByDefaultForActorChat(t *testing.T) {
 	session := &ChatSession{}
 	host := &localChatRuntimeHost{
 		Bootstrap: &runtimebootstrap.Manager{},
@@ -128,14 +129,69 @@ func TestBuildLocalChatAgent_UsesSignalsWorkspaceContextForActorChat(t *testing.
 	}
 
 	cfg := apiAgent.GetConfig()
+	if cfg == nil {
+		t.Fatal("expected agent config")
+	}
+	if cfg.Options != nil {
+		if got := cfg.Options["workspace_path"]; got != nil {
+			t.Fatalf("expected workspace_path to be disabled by default, got %#v", got)
+		}
+		if got := cfg.Options["context_workspace_mode"]; got != nil {
+			t.Fatalf("expected context_workspace_mode to be disabled by default, got %#v", got)
+		}
+	}
+}
+
+func TestBuildLocalChatAgent_UsesSignalsWorkspaceContextWhenWorkspaceEnabled(t *testing.T) {
+	session := &ChatSession{}
+	host := &localChatRuntimeHost{
+		Bootstrap: &runtimebootstrap.Manager{},
+	}
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Workspace.Enabled = true
+
+	apiAgent := buildLocalChatAgent(session, host, runtimeConfig, t.TempDir(), "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+
+	cfg := apiAgent.GetConfig()
 	if cfg == nil || cfg.Options == nil {
 		t.Fatal("expected agent options")
 	}
-	if got := cfg.Options["context_workspace_mode"]; got != "signals" {
+	if got := cfg.Options["workspace_path"]; got == nil {
+		t.Fatal("expected workspace_path when workspace is enabled")
+	}
+	if got := cfg.Options["context_workspace_mode"]; got != contextmgr.WorkspaceModeSignals {
 		t.Fatalf("expected context_workspace_mode=signals, got %#v", got)
 	}
 	if got := cfg.Options["context_min_workspace_query_length"]; got != 4 {
 		t.Fatalf("expected context_min_workspace_query_length=4, got %#v", got)
+	}
+}
+
+func TestBuildLocalChatAgent_UsesConfiguredWorkspaceModeForActorChat(t *testing.T) {
+	session := &ChatSession{}
+	host := &localChatRuntimeHost{
+		Bootstrap: &runtimebootstrap.Manager{},
+	}
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Context.WorkspaceMode = contextmgr.WorkspaceModeBroad
+
+	apiAgent := buildLocalChatAgent(session, host, runtimeConfig, t.TempDir(), "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+
+	cfg := apiAgent.GetConfig()
+	if cfg == nil || cfg.Options == nil {
+		t.Fatal("expected agent options")
+	}
+	if got := cfg.Options["workspace_path"]; got == nil {
+		t.Fatal("expected workspace_path when workspace mode is configured")
+	}
+	if got := cfg.Options["context_workspace_mode"]; got != contextmgr.WorkspaceModeBroad {
+		t.Fatalf("expected context_workspace_mode=broad, got %#v", got)
 	}
 }
 
