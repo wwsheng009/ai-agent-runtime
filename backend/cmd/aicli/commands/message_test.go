@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -258,15 +259,15 @@ func TestNextLogScope_ConsumesPrecountedUserTurn(t *testing.T) {
 	}
 }
 
-func TestApplyChatTurnContextTokens_DoesNotReplaceExistingSessionContextSnapshot(t *testing.T) {
-	session := &ChatSession{ContextTokenCount: 900}
+func TestApplyChatTurnContextTokens_DoesNotDisplayEstimatedContextSnapshot(t *testing.T) {
+	session := &ChatSession{}
 
 	applyChatTurnContextTokens(session, 100, 1000, false)
 	applyChatTurnContextTokens(session, 250, 1000, false)
 	applyChatTurnContextTokens(session, 1200, 1000, false)
 
-	if session.ContextTokenCount != 900 {
-		t.Fatalf("expected request-start estimates not to replace session snapshot, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 0 {
+		t.Fatalf("expected request-start estimates not to display as session snapshot, got %d", session.ContextTokenCount)
 	}
 	if session.TurnContextTokenCount != 1550 {
 		t.Fatalf("expected turn aggregate context tokens to be 1550, got %d", session.TurnContextTokenCount)
@@ -276,26 +277,26 @@ func TestApplyChatTurnContextTokens_DoesNotReplaceExistingSessionContextSnapshot
 	}
 }
 
-func TestApplyChatContextTokensFromUsage_UsesTotalTokensAsActiveContextSnapshot(t *testing.T) {
-	session := &ChatSession{}
+func TestApplyChatContextTokensFromUsage_UsesProviderPromptContextSnapshot(t *testing.T) {
+	session := &ChatSession{Provider: config.Provider{Protocol: "openai"}}
 
 	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
 		PromptTokens:     100,
 		CompletionTokens: 25,
 		TotalTokens:      130,
-		CachedTokens:     80,
+		CachedTokens:     5,
 		ReasoningTokens:  20,
 	}, 1000, false)
 
-	if got != 130 || session.ContextTokenCount != 130 {
-		t.Fatalf("expected total tokens to become active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	if got != 100 || session.ContextTokenCount != 100 {
+		t.Fatalf("expected provider prompt context to become active snapshot, got return=%d context=%d", got, session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 1000 {
 		t.Fatalf("expected context window token count to be 1000, got %d", session.ContextWindowTokenCount)
 	}
 }
 
-func TestApplyChatContextTokensFromUsage_FallsBackToInputPlusOutput(t *testing.T) {
+func TestApplyChatContextTokensFromUsage_UsesPromptTokensWithoutTotal(t *testing.T) {
 	session := &ChatSession{}
 
 	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
@@ -303,12 +304,12 @@ func TestApplyChatContextTokensFromUsage_FallsBackToInputPlusOutput(t *testing.T
 		CompletionTokens: 25,
 	}, 0, false)
 
-	if got != 125 || session.ContextTokenCount != 125 {
-		t.Fatalf("expected prompt+completion fallback to become active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	if got != 100 || session.ContextTokenCount != 100 {
+		t.Fatalf("expected prompt tokens to become active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
 	}
 }
 
-func TestApplyChatContextTokensFromUsage_RefreshesProviderSnapshotEvenWhenLower(t *testing.T) {
+func TestApplyChatContextTokensFromUsage_DoesNotLowerDisplayedSnapshot(t *testing.T) {
 	session := &ChatSession{ContextTokenCount: 1320}
 
 	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
@@ -317,10 +318,41 @@ func TestApplyChatContextTokensFromUsage_RefreshesProviderSnapshotEvenWhenLower(
 		TotalTokens:      40,
 	}, 256000, false)
 
-	if got != 40 || session.ContextTokenCount != 40 {
-		t.Fatalf("expected latest provider usage to refresh active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	if got != 12 || session.ContextTokenCount != 1320 {
+		t.Fatalf("expected lower provider usage not to reduce active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 256000 {
+		t.Fatalf("expected window tokens to still update, got %d", session.ContextWindowTokenCount)
+	}
+}
+
+func TestApplyChatContextTokensReset_AllowsCompactToLowerDisplayedSnapshot(t *testing.T) {
+	session := &ChatSession{ContextTokenCount: 1320}
+
+	applyChatContextTokensReset(session, 120, 256000, false)
+
+	if session.ContextTokenCount != 120 {
+		t.Fatalf("expected compact/reset update to lower active context snapshot, got %d", session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 256000 {
+		t.Fatalf("expected window tokens to update, got %d", session.ContextWindowTokenCount)
+	}
+}
+
+func TestApplyChatContextTokensFromUsage_AddsAnthropicCacheReadToPromptContext(t *testing.T) {
+	session := &ChatSession{Provider: config.Provider{Protocol: "anthropic"}}
+
+	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
+		PromptTokens:     1702,
+		CompletionTokens: 81,
+		TotalTokens:      18167,
+		CachedTokens:     16384,
+	}, 1000000, false)
+
+	if got != 18086 || session.ContextTokenCount != 18086 {
+		t.Fatalf("expected cached input to count toward prompt context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 1000000 {
 		t.Fatalf("expected window tokens to still update, got %d", session.ContextWindowTokenCount)
 	}
 }

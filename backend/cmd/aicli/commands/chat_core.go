@@ -164,7 +164,6 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 				if replaceErr := replaceRuntimeMessages(session, replacement); replaceErr != nil {
 					err = fmt.Errorf("%w: 应用 prompt preflight 恢复历史失败: %v", err, replaceErr)
 				} else {
-					applyChatContextTokensFromMessages(session, replacement, promptBudget.ModelCapabilityMaxContextTokens, true)
 					warnIfChatSessionSyncFails(session, "shared chatcore preflight recovery sync", syncRuntimeSessionFromChat(session))
 					preflightErr.ReplacementHistoryApplied = true
 				}
@@ -180,8 +179,9 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	if err := replaceRuntimeMessages(session, loopResult.History); err != nil {
 		return "", fmt.Errorf("共享 chat history 更新失败: %w", err)
 	}
-	applyChatContextTokensFromMessages(session, loopResult.History, promptBudget.ModelCapabilityMaxContextTokens, true)
-	applyChatContextTokensFromUsage(session, loopResult.Response.Usage, promptBudget.ModelCapabilityMaxContextTokens, true)
+	if applied := applyChatContextTokensFromUsage(session, loopResult.Response.Usage, promptBudget.ModelCapabilityMaxContextTokens, true); applied <= 0 {
+		applyChatContextTokensFromMessages(session, loopResult.History, promptBudget.ModelCapabilityMaxContextTokens, true)
+	}
 	warnIfChatSessionSyncFails(session, "shared chatcore sync", syncRuntimeSessionFromChat(session))
 
 	if session.Logger != nil && len(loopResult.Response.ToolExecutions) > 0 {
@@ -370,7 +370,7 @@ func applyChatCompactContextUsage(session *ChatSession, result *compactruntime.R
 			contextTokens = countChatContextTokensForMessages(session, result.ReplacementHistory)
 		}
 		if contextTokens > 0 {
-			applyChatContextTokens(session, contextTokens, windowTokens, forceRefresh)
+			applyChatContextTokensReset(session, contextTokens, windowTokens, forceRefresh)
 			return
 		}
 		if forceRefresh && session.Interaction != nil {

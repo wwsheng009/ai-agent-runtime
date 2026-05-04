@@ -916,8 +916,14 @@ func (b *chatRuntimeEventBridge) applyLLMRequestStatus(event runtimeevents.Event
 			PromptTokens:     firstPositivePayloadInt(event.Payload, "usage_prompt_tokens", "prompt_tokens", "input_tokens"),
 			CompletionTokens: firstPositivePayloadInt(event.Payload, "usage_completion_tokens", "completion_tokens", "output_tokens"),
 			TotalTokens:      firstPositivePayloadInt(event.Payload, "usage_total_tokens"),
+			CachedTokens:     firstPositivePayloadInt(event.Payload, "usage_cached_tokens", "cached_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"),
+			ReasoningTokens:  firstPositivePayloadInt(event.Payload, "usage_reasoning_tokens", "reasoning_tokens", "thinking_tokens"),
 		}
-		applyChatContextTokensFromUsage(b.session, usage, windowTokens, true)
+		if applied := applyChatContextTokensFromUsage(b.session, usage, windowTokens, true); applied <= 0 {
+			if estimateTokens := firstPositivePayloadInt(event.Payload, "context_prompt_tokens", "total_tokens"); estimateTokens > 0 {
+				applyChatContextTokens(b.session, estimateTokens, windowTokens, true)
+			}
+		}
 	default:
 		return
 	}
@@ -933,7 +939,7 @@ func (b *chatRuntimeEventBridge) applySessionCompactStatus(event runtimeevents.E
 		windowTokens := firstPositivePayloadInt(event.Payload, "max_context_tokens", "context_window_tokens")
 		b.session.TurnContextTokenCount = 0
 		if contextTokens > 0 {
-			applyChatContextTokens(b.session, contextTokens, windowTokens, true)
+			applyChatContextTokensReset(b.session, contextTokens, windowTokens, true)
 		} else if b.session.Interaction != nil {
 			b.session.Interaction.RefreshStatus("")
 		}

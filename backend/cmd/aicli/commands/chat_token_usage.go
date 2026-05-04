@@ -51,10 +51,14 @@ func resetChatContextTokenUsage(session *ChatSession) {
 }
 
 func applyChatContextTokens(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool) {
-	applyChatContextTokensLocked(session, promptTokens, windowTokens, forceRefresh, false)
+	applyChatContextTokensLocked(session, promptTokens, windowTokens, forceRefresh, false, true)
 }
 
-func applyChatContextTokensLocked(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool, providerReported bool) {
+func applyChatContextTokensReset(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool) {
+	applyChatContextTokensLocked(session, promptTokens, windowTokens, forceRefresh, false, false)
+}
+
+func applyChatContextTokensLocked(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool, providerReported bool, monotonic bool) {
 	if session == nil {
 		return
 	}
@@ -63,7 +67,7 @@ func applyChatContextTokensLocked(session *ChatSession, promptTokens int, window
 		session.providerContextTokenCount = 0
 		session.providerContextWindowTokenCount = 0
 	}
-	if promptTokens > 0 && session.ContextTokenCount != promptTokens {
+	if promptTokens > 0 && (!monotonic || session.ContextTokenCount <= 0 || promptTokens > session.ContextTokenCount) {
 		session.ContextTokenCount = promptTokens
 		changed = true
 	}
@@ -80,17 +84,47 @@ func applyChatContextTokensFromUsage(session *ChatSession, usage *runtimetypes.T
 	if session == nil || usage == nil {
 		return 0
 	}
-	contextTokens := usage.TotalTokens
-	if contextTokens <= 0 {
-		contextTokens = usage.PromptTokens + usage.CompletionTokens
-	}
+	contextTokens := chatContextTokensFromProviderUsage(session, usage)
 	if contextTokens <= 0 {
 		return 0
 	}
 	session.providerContextTokenCount = contextTokens
 	session.providerContextWindowTokenCount = windowTokens
-	applyChatContextTokensLocked(session, contextTokens, windowTokens, forceRefresh, true)
+	applyChatContextTokensLocked(session, contextTokens, windowTokens, forceRefresh, true, true)
 	return contextTokens
+}
+
+func chatContextTokensFromProviderUsage(session *ChatSession, usage *runtimetypes.TokenUsage) int {
+	if usage == nil {
+		return 0
+	}
+	if usage.PromptTokens > 0 {
+		contextTokens := usage.PromptTokens
+		if chatProviderUsageReportsCacheOutsidePrompt(session, usage) {
+			contextTokens += usage.CachedTokens
+		}
+		return contextTokens
+	}
+	if usage.TotalTokens > 0 {
+		if usage.CompletionTokens > 0 && usage.TotalTokens > usage.CompletionTokens {
+			return usage.TotalTokens - usage.CompletionTokens
+		}
+		return usage.TotalTokens
+	}
+	return 0
+}
+
+func chatProviderUsageReportsCacheOutsidePrompt(session *ChatSession, usage *runtimetypes.TokenUsage) bool {
+	if session == nil || usage == nil || usage.CachedTokens <= 0 {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(session.Provider.GetProtocol()), "anthropic") {
+		return false
+	}
+	if usage.TotalTokens <= 0 {
+		return true
+	}
+	return usage.TotalTokens >= usage.PromptTokens+usage.CompletionTokens+usage.CachedTokens
 }
 
 func applyChatContextTokensFromMessages(session *ChatSession, messages []runtimetypes.Message, windowTokens int, forceRefresh bool) int {
@@ -172,12 +206,6 @@ func applyChatTurnContextTokens(session *ChatSession, promptTokens int, windowTo
 	changed := false
 	if promptTokens > 0 {
 		session.TurnContextTokenCount += promptTokens
-		if session.ContextTokenCount <= 0 {
-			session.providerContextTokenCount = 0
-			session.providerContextWindowTokenCount = 0
-			session.ContextTokenCount = promptTokens
-			changed = true
-		}
 	}
 	if windowTokens > 0 && session.ContextWindowTokenCount != windowTokens {
 		session.ContextWindowTokenCount = windowTokens

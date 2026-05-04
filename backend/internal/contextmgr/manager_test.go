@@ -102,12 +102,13 @@ func TestManager_BuildCompactsAndRecalls(t *testing.T) {
 	manager.Agent = "test-agent"
 
 	result := manager.Build(context.Background(), BuildInput{
-		TraceID:     "trace_ctx_1",
-		SessionID:   "session-ctx",
-		Goal:        "Find the error stack trace",
-		History:     history,
-		Memory:      mem,
-		CountTokens: func(messages []types.Message) int { return len(messages) * 20 },
+		TraceID:                "trace_ctx_1",
+		SessionID:              "session-ctx",
+		Goal:                   "Find the error stack trace",
+		History:                history,
+		Memory:                 mem,
+		CountTokens:            func(messages []types.Message) int { return len(messages) * 20 },
+		EnablePromptCompaction: true,
 	})
 
 	if len(result.Messages) == 0 {
@@ -172,6 +173,61 @@ func TestManager_BuildCompactsAndRecalls(t *testing.T) {
 	if len(entries) == 0 {
 		t.Fatal("expected persisted memory entries after build")
 	}
+}
+
+func TestManager_BuildPreservesFullHistoryByDefault(t *testing.T) {
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	manager := NewManager(Budget{
+		MaxPromptTokens:     80,
+		MaxMessages:         5,
+		KeepRecentMessages:  2,
+		MaxRecallResults:    0,
+		MaxObservationItems: 0,
+	}, store)
+	manager.Strategy.RecallMode = RecallModeDisabled
+	manager.Strategy.WorkspaceMode = WorkspaceModeDisabled
+
+	bus := runtimeevents.NewBus()
+	var eventTypes []string
+	bus.Subscribe("", func(event runtimeevents.Event) {
+		eventTypes = append(eventTypes, event.Type)
+	})
+	manager.Events = bus
+
+	history := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("first request"),
+		*types.NewAssistantMessage("first answer"),
+		*types.NewUserMessage("second request"),
+		*types.NewAssistantMessage("second answer"),
+		*types.NewUserMessage("latest request"),
+	}
+
+	result := manager.Build(context.Background(), BuildInput{
+		TraceID:     "trace-default",
+		SessionID:   "session-default",
+		Goal:        "latest request",
+		History:     history,
+		CountTokens: func(messages []types.Message) int { return len(messages) * 100 },
+	})
+
+	require.Len(t, result.Messages, len(history))
+	for index := range history {
+		assert.Equal(t, history[index].Role, result.Messages[index].Role)
+		assert.Equal(t, history[index].Content, result.Messages[index].Content)
+	}
+	_, compacted := result.Metadata["compacted_messages"]
+	assert.False(t, compacted)
+	assert.NotContains(t, eventTypes, "context.compact.started")
+	assert.NotContains(t, eventTypes, "context.compact.completed")
+	metrics := result.Metadata["context_layer_metrics"].(map[string]interface{})
+	hot := metrics["hot"].(map[string]interface{})
+	cold := metrics["cold"].(map[string]interface{})
+	assert.Equal(t, false, cold["compact_enabled"])
+	assert.Equal(t, 0, hot["trimmed_messages"])
 }
 
 func TestManager_BuildRecallsFallbackQueryWhenInitialSearchErrors(t *testing.T) {
@@ -259,12 +315,13 @@ func TestManager_Build_CompactProfilePrefersSummaryAndSkipsRecall(t *testing.T) 
 	}
 
 	result := manager.Build(context.Background(), BuildInput{
-		TraceID:      "trace_ctx_compact",
-		SessionID:    "session-compact",
-		Goal:         "Find the error stack trace",
-		History:      history,
-		Observations: observations,
-		CountTokens:  func(messages []types.Message) int { return len(messages) * 20 },
+		TraceID:                "trace_ctx_compact",
+		SessionID:              "session-compact",
+		Goal:                   "Find the error stack trace",
+		History:                history,
+		Observations:           observations,
+		CountTokens:            func(messages []types.Message) int { return len(messages) * 20 },
+		EnablePromptCompaction: true,
 	})
 
 	var foundSummary bool
@@ -326,10 +383,11 @@ func TestManager_BuildAppendsCompactionSegmentsInsteadOfRewritingPrefix(t *testi
 	}
 
 	first := manager.Build(context.Background(), BuildInput{
-		SessionID: "session-compaction-segments",
-		TaskID:    "task-compaction-segments",
-		Goal:      "Summarize the root cause",
-		History:   baseHistory,
+		SessionID:              "session-compaction-segments",
+		TaskID:                 "task-compaction-segments",
+		Goal:                   "Summarize the root cause",
+		History:                baseHistory,
+		EnablePromptCompaction: true,
 	})
 
 	firstCompactions := compactionMessagesFromResult(first.Messages)
@@ -343,10 +401,11 @@ func TestManager_BuildAppendsCompactionSegmentsInsteadOfRewritingPrefix(t *testi
 	)
 
 	second := manager.Build(context.Background(), BuildInput{
-		SessionID: "session-compaction-segments",
-		TaskID:    "task-compaction-segments",
-		Goal:      "Summarize the updated root cause",
-		History:   extendedHistory,
+		SessionID:              "session-compaction-segments",
+		TaskID:                 "task-compaction-segments",
+		Goal:                   "Summarize the updated root cause",
+		History:                extendedHistory,
+		EnablePromptCompaction: true,
 	})
 
 	secondCompactions := compactionMessagesFromResult(second.Messages)
@@ -489,10 +548,11 @@ func TestManager_Build_DoesNotSplitToolCallHistoryAtRecentBoundary(t *testing.T)
 	}
 
 	result := manager.Build(context.Background(), BuildInput{
-		SessionID:   "session-tool-boundary",
-		Goal:        "你好，创建两个团队成员，分别探索docs目录文件并汇报进度",
-		History:     history,
-		CountTokens: func(messages []types.Message) int { return len(messages) * 20 },
+		SessionID:              "session-tool-boundary",
+		Goal:                   "你好，创建两个团队成员，分别探索docs目录文件并汇报进度",
+		History:                history,
+		CountTokens:            func(messages []types.Message) int { return len(messages) * 20 },
+		EnablePromptCompaction: true,
 	})
 
 	require.NotEmpty(t, result.Messages)
@@ -631,11 +691,12 @@ func TestManager_Build_DoesNotCompactActiveUserTurn(t *testing.T) {
 	}
 
 	result := manager.Build(context.Background(), BuildInput{
-		SessionID:   "session-active-turn",
-		TaskID:      "task-active-turn",
-		Goal:        "继续分析当前实现",
-		History:     history,
-		CountTokens: func(messages []types.Message) int { return len(messages) * 20 },
+		SessionID:              "session-active-turn",
+		TaskID:                 "task-active-turn",
+		Goal:                   "继续分析当前实现",
+		History:                history,
+		CountTokens:            func(messages []types.Message) int { return len(messages) * 20 },
+		EnablePromptCompaction: true,
 	})
 
 	for _, message := range result.Messages {
@@ -819,10 +880,11 @@ func TestManager_BuildReusesCheckpointWithoutDuplicatingLedger(t *testing.T) {
 		MaxObservationItems: 2,
 	}, store)
 	input := BuildInput{
-		SessionID: "session-ledger",
-		TaskID:    "task-ledger",
-		Goal:      "Find the error stack trace",
-		History:   history,
+		SessionID:              "session-ledger",
+		TaskID:                 "task-ledger",
+		Goal:                   "Find the error stack trace",
+		History:                history,
+		EnablePromptCompaction: true,
 	}
 
 	first := manager.Build(context.Background(), input)
@@ -874,10 +936,11 @@ func TestManager_BuildAppendsLedgerSegmentsInsteadOfRewritingPrefix(t *testing.T
 	}
 
 	first := manager.Build(context.Background(), BuildInput{
-		SessionID: "session-ledger-segments",
-		TaskID:    "task-ledger-segments",
-		Goal:      "Summarize the root cause",
-		History:   baseHistory,
+		SessionID:              "session-ledger-segments",
+		TaskID:                 "task-ledger-segments",
+		Goal:                   "Summarize the root cause",
+		History:                baseHistory,
+		EnablePromptCompaction: true,
 	})
 
 	firstLedgers := ledgerMessagesFromResult(first.Messages)
@@ -891,10 +954,11 @@ func TestManager_BuildAppendsLedgerSegmentsInsteadOfRewritingPrefix(t *testing.T
 	)
 
 	second := manager.Build(context.Background(), BuildInput{
-		SessionID: "session-ledger-segments",
-		TaskID:    "task-ledger-segments",
-		Goal:      "Summarize the updated root cause",
-		History:   extendedHistory,
+		SessionID:              "session-ledger-segments",
+		TaskID:                 "task-ledger-segments",
+		Goal:                   "Summarize the updated root cause",
+		History:                extendedHistory,
+		EnablePromptCompaction: true,
 	})
 
 	secondLedgers := ledgerMessagesFromResult(second.Messages)
@@ -984,9 +1048,10 @@ func TestManager_Build_PersistsProfileSourceRefsIntoLedger(t *testing.T) {
 	}, store)
 
 	result := manager.Build(context.Background(), BuildInput{
-		SessionID: "session-profile-ledger",
-		TaskID:    "task-profile-ledger",
-		Goal:      "Review the failure history",
+		SessionID:              "session-profile-ledger",
+		TaskID:                 "task-profile-ledger",
+		Goal:                   "Review the failure history",
+		EnablePromptCompaction: true,
 		History: []types.Message{
 			*types.NewSystemMessage("system prompt"),
 			*types.NewUserMessage("Investigate the profile guidance"),
@@ -1133,13 +1198,14 @@ func TestManager_Build_LongSessionLayerMetricsDifferAcrossProfiles(t *testing.T)
 	extendedManager := NewManagerWithProfile(BudgetProfileCold, ResolveBudget(BudgetProfileCold, Budget{}), store)
 
 	input := BuildInput{
-		TraceID:      "trace_ctx_profiles",
-		SessionID:    "session-long",
-		TaskID:       "task-long",
-		Goal:         "Find the error stack trace from archived evidence",
-		History:      history,
-		Observations: observations,
-		CountTokens:  func(messages []types.Message) int { return len(messages) * 20 },
+		TraceID:                "trace_ctx_profiles",
+		SessionID:              "session-long",
+		TaskID:                 "task-long",
+		Goal:                   "Find the error stack trace from archived evidence",
+		History:                history,
+		Observations:           observations,
+		CountTokens:            func(messages []types.Message) int { return len(messages) * 20 },
+		EnablePromptCompaction: true,
 	}
 
 	compactResult := compactManager.Build(context.Background(), input)

@@ -112,6 +112,7 @@ type BuildInput struct {
 	PromptBudget             int
 	PromptBudgetSource       string
 	PromptBudgetSourceDetail string
+	EnablePromptCompaction   bool
 }
 
 // BuildResult 返回上下文装配结果和元信息。
@@ -372,6 +373,7 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"context_profile":                 m.Strategy.Profile,
 			"context_strategy": map[string]interface{}{
 				"compaction_mode":            m.Strategy.CompactionMode,
+				"prompt_compaction_enabled":  input.EnablePromptCompaction,
 				"recall_mode":                m.Strategy.RecallMode,
 				"observation_mode":           m.Strategy.ObservationMode,
 				"workspace_mode":             m.Strategy.WorkspaceMode,
@@ -390,8 +392,12 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		result.Metadata["budget_max_prompt_tokens_source_detail"] = detail
 	}
 
-	recent := keepRecent(nonSystemMessages, budget.KeepRecentMessages)
-	older := dropRecent(nonSystemMessages, budget.KeepRecentMessages)
+	recent := cloneMessages(nonSystemMessages)
+	var older []types.Message
+	if input.EnablePromptCompaction {
+		recent = keepRecent(nonSystemMessages, budget.KeepRecentMessages)
+		older = dropRecent(nonSystemMessages, budget.KeepRecentMessages)
+	}
 
 	layerMetrics := map[string]interface{}{
 		"hot": map[string]interface{}{
@@ -410,6 +416,7 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		},
 		"cold": map[string]interface{}{
 			"compaction_mode":  m.Strategy.CompactionMode,
+			"compact_enabled":  input.EnablePromptCompaction,
 			"recall_mode":      m.Strategy.RecallMode,
 			"older_messages":   len(older),
 			"compacted":        false,
@@ -640,8 +647,13 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		}
 	}
 
-	managed = trimMessageCount(managed, budget.MaxMessages)
-	managed = trimByTokenBudget(managed, budget, input.CountTokens, result.Metadata)
+	if input.EnablePromptCompaction {
+		managed = trimMessageCount(managed, budget.MaxMessages)
+		managed = trimByTokenBudget(managed, budget, input.CountTokens, result.Metadata)
+	} else if input.CountTokens != nil {
+		result.Metadata["estimated_tokens"] = input.CountTokens(managed)
+		result.Metadata["final_message_count"] = len(managed)
+	}
 	layerMetrics["hot"].(map[string]interface{})["final_messages"] = len(managed)
 	result.Messages = managed
 

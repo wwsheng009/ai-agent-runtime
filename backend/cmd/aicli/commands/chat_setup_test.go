@@ -359,7 +359,7 @@ func TestRestoreChatStateFromRuntimeSessionClearsMissingTokenCount(t *testing.T)
 	}
 }
 
-func TestSyncRuntimeSessionBackIntoCLI_RecomputesContextSnapshotFromRuntimeHistory(t *testing.T) {
+func TestSyncRuntimeSessionBackIntoCLI_DoesNotLowerObservedContextSnapshotFromHistory(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
 		t.Fatalf("newChatSessionManager: %v", err)
@@ -397,12 +397,8 @@ func TestSyncRuntimeSessionBackIntoCLI_RecomputesContextSnapshotFromRuntimeHisto
 		t.Fatalf("syncRuntimeSessionBackIntoCLI: %v", err)
 	}
 
-	expectedContextTokens := countChatContextTokensForMessages(session, session.Messages)
-	if expectedContextTokens <= 0 {
-		t.Fatalf("expected test history to produce context tokens, got %d", expectedContextTokens)
-	}
-	if session.ContextTokenCount != expectedContextTokens {
-		t.Fatalf("expected context snapshot from runtime history, got %d want %d", session.ContextTokenCount, expectedContextTokens)
+	if session.ContextTokenCount != 23099 {
+		t.Fatalf("expected observed context snapshot to survive lower history estimate, got %d", session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 270000 {
 		t.Fatalf("expected runtime-observed context window to survive restore, got %d", session.ContextWindowTokenCount)
@@ -412,11 +408,60 @@ func TestSyncRuntimeSessionBackIntoCLI_RecomputesContextSnapshotFromRuntimeHisto
 	if err != nil {
 		t.Fatalf("manager.Get: %v", err)
 	}
-	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextTokenCount); !ok || got != expectedContextTokens {
-		t.Fatalf("expected persisted context token count %d, got ok=%v value=%d", expectedContextTokens, ok, got)
+	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextTokenCount); !ok || got != 23099 {
+		t.Fatalf("expected persisted context token count 23099, got ok=%v value=%d", ok, got)
 	}
 	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextWindowTokenCount); !ok || got != 270000 {
 		t.Fatalf("expected persisted context window token count 270000, got ok=%v value=%d", ok, got)
+	}
+}
+
+func TestSyncRuntimeSessionBackIntoCLI_RecomputesContextSnapshotWhenNoObservedUsage(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	runtimeSession.ReplaceHistory([]runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("You are helpful."),
+		*runtimetypes.NewUserMessage("hello"),
+		*runtimetypes.NewAssistantMessage("world"),
+	})
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextContextTokenCount)
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextContextWindowTokenCount)
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextTurnContextTokenCount)
+	if err := manager.Update(context.Background(), runtimeSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:            "test-provider",
+		Provider:                config.Provider{Protocol: "openai"},
+		Model:                   "test-model",
+		SessionManager:          manager,
+		RuntimeSession:          runtimeSession,
+		SessionUserID:           userID,
+		ContextWindowTokenCount: 270000,
+	}
+
+	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
+		t.Fatalf("syncRuntimeSessionBackIntoCLI: %v", err)
+	}
+
+	expectedContextTokens := countChatContextTokensForMessages(session, session.Messages)
+	if expectedContextTokens <= 0 {
+		t.Fatalf("expected test history to produce context tokens, got %d", expectedContextTokens)
+	}
+	if session.ContextTokenCount != expectedContextTokens {
+		t.Fatalf("expected context snapshot from runtime history, got %d want %d", session.ContextTokenCount, expectedContextTokens)
+	}
+	if session.ContextWindowTokenCount != 270000 {
+		t.Fatalf("expected runtime-observed context window to survive restore, got %d", session.ContextWindowTokenCount)
 	}
 }
 

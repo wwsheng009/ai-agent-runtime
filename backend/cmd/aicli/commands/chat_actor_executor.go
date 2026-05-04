@@ -258,7 +258,6 @@ func syncRuntimeSessionBackIntoCLIWithOptions(session *ChatSession, refreshConte
 	}
 	previousContextWindowTokens := session.ContextWindowTokenCount
 	previousContextTokens := session.ContextTokenCount
-	previousTurnContextTokens := session.TurnContextTokenCount
 	providerContextTokens := session.providerContextTokenCount
 	providerContextWindowTokens := session.providerContextWindowTokenCount
 	runtimeSession, err := session.SessionManager.Get(context.Background(), session.RuntimeSession.ID)
@@ -277,7 +276,7 @@ func syncRuntimeSessionBackIntoCLIWithOptions(session *ChatSession, refreshConte
 	}
 	if refreshContextFromHistory {
 		historyContextTokens := refreshChatContextTokenSnapshotFromMessages(session, previousContextWindowTokens, true)
-		if previousTurnContextTokens > 0 && previousContextTokens > historyContextTokens {
+		if previousContextTokens > historyContextTokens {
 			applyChatContextTokens(session, previousContextTokens, previousContextWindowTokens, true)
 		}
 	} else if previousContextTokens > 0 || previousContextWindowTokens > 0 {

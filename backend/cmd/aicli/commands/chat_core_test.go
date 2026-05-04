@@ -333,8 +333,8 @@ func TestAICLIProviderTurnExecutor_AccumulatesProviderUsageTotalTokens(t *testin
 	if session.TokenCount != 22 {
 		t.Fatalf("expected cumulative used tokens 22, got %d", session.TokenCount)
 	}
-	if session.ContextTokenCount != 15 {
-		t.Fatalf("expected provider usage to update active context snapshot 15, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 10 {
+		t.Fatalf("expected provider prompt usage to update active context snapshot 10, got %d", session.ContextTokenCount)
 	}
 }
 
@@ -374,7 +374,7 @@ func TestAICLISharedChatExecutor_DoesNotDoubleCountLoopResultUsage(t *testing.T)
 	if session.TokenCount != 7 {
 		t.Fatalf("expected shared executor not to re-apply final loop usage, got %d", session.TokenCount)
 	}
-	if session.ContextTokenCount != 15 {
+	if session.ContextTokenCount != 10 {
 		t.Fatalf("expected final provider usage to update active context snapshot, got %d", session.ContextTokenCount)
 	}
 }

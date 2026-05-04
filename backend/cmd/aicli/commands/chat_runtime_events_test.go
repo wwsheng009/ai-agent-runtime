@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -39,7 +40,7 @@ func TestFormatInteractiveSupplementPromptLine_PreservesPromptContentWithoutInde
 	}
 }
 
-func TestChatRuntimeEventBridge_LLMRequestStartedSeedsActiveContextSnapshot(t *testing.T) {
+func TestChatRuntimeEventBridge_LLMRequestStartedDoesNotDisplayEstimateBeforeFinished(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	session := &ChatSession{
 		RuntimeSession: runtimeSession,
@@ -60,8 +61,8 @@ func TestChatRuntimeEventBridge_LLMRequestStartedSeedsActiveContextSnapshot(t *t
 		},
 	})
 
-	if session.ContextTokenCount != 23099 {
-		t.Fatalf("expected request event to update live ctx used source, got context=%d", session.ContextTokenCount)
+	if session.ContextTokenCount != 0 {
+		t.Fatalf("expected request-start estimate not to display as ctx used before finish, got context=%d", session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 270000 {
 		t.Fatalf("expected context window token count 270000, got %d", session.ContextWindowTokenCount)
@@ -85,8 +86,8 @@ func TestChatRuntimeEventBridge_LLMRequestStartedSeedsActiveContextSnapshot(t *t
 		},
 	})
 
-	if session.ContextTokenCount != 23099 {
-		t.Fatalf("expected second request-start estimate not to replace existing ctx used source, got context=%d", session.ContextTokenCount)
+	if session.ContextTokenCount != 0 {
+		t.Fatalf("expected second request-start estimate not to display as ctx used before finish, got context=%d", session.ContextTokenCount)
 	}
 	if session.TurnContextTokenCount != 47398 {
 		t.Fatalf("expected turn diagnostic aggregate 47398 after second request, got %d", session.TurnContextTokenCount)
@@ -106,8 +107,8 @@ func TestChatRuntimeEventBridge_LLMRequestStartedSeedsActiveContextSnapshot(t *t
 		},
 	})
 
-	if session.ContextTokenCount != 23099 {
-		t.Fatalf("expected later request-start estimate not to replace live ctx snapshot, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 0 {
+		t.Fatalf("expected later request-start estimate not to display as ctx used before finish, got %d", session.ContextTokenCount)
 	}
 	if session.TurnContextTokenCount != 69478 {
 		t.Fatalf("expected turn diagnostic aggregate to include smaller request prompt, got %d", session.TurnContextTokenCount)
@@ -138,7 +139,7 @@ func TestChatRuntimeEventBridge_LLMRequestStartedSeedsActiveContextSnapshot(t *t
 	}
 }
 
-func TestChatRuntimeEventBridge_LLMRequestFinishedRefreshesProviderSnapshot(t *testing.T) {
+func TestChatRuntimeEventBridge_LLMRequestFinishedDoesNotLowerProviderSnapshot(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	session := &ChatSession{
 		RuntimeSession:    runtimeSession,
@@ -161,8 +162,66 @@ func TestChatRuntimeEventBridge_LLMRequestFinishedRefreshesProviderSnapshot(t *t
 		},
 	})
 
-	if session.ContextTokenCount != 40 {
-		t.Fatalf("expected finished provider usage to refresh active context snapshot, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 1320 {
+		t.Fatalf("expected lower provider usage not to reduce active context snapshot, got %d", session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 256000 {
+		t.Fatalf("expected context window to update, got %d", session.ContextWindowTokenCount)
+	}
+}
+
+func TestChatRuntimeEventBridge_LLMRequestFinishedAddsAnthropicCachedInput(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	session := &ChatSession{
+		RuntimeSession: runtimeSession,
+		Provider:       config.Provider{Protocol: "anthropic"},
+		NoInteractive:  true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "llm.request.finished",
+		SessionID: runtimeSession.ID,
+		Payload: map[string]interface{}{
+			"success":                 true,
+			"context_window_tokens":   1000000,
+			"usage_prompt_tokens":     176,
+			"usage_completion_tokens": 240,
+			"usage_total_tokens":      18400,
+			"usage_cached_tokens":     17984,
+		},
+	})
+
+	if session.ContextTokenCount != 18160 {
+		t.Fatalf("expected anthropic cached input to count toward active context snapshot, got %d", session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 1000000 {
+		t.Fatalf("expected context window to update, got %d", session.ContextWindowTokenCount)
+	}
+}
+
+func TestChatRuntimeEventBridge_LLMRequestFinishedFallsBackToEstimateWhenUsageMissing(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	session := &ChatSession{
+		RuntimeSession: runtimeSession,
+		NoInteractive:  true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "llm.request.finished",
+		SessionID: runtimeSession.ID,
+		Payload: map[string]interface{}{
+			"success":               false,
+			"context_prompt_tokens": 1322,
+			"context_window_tokens": 256000,
+		},
+	})
+
+	if session.ContextTokenCount != 1322 {
+		t.Fatalf("expected missing usage to fall back to request estimate after finish, got %d", session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 256000 {
 		t.Fatalf("expected context window to update, got %d", session.ContextWindowTokenCount)

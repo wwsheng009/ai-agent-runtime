@@ -268,16 +268,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 						continue
 					}
 				}
-				if replacement := preflightErr.CloneReplacementHistory(); len(replacement) > 0 {
-					if persistErr := options.PersistHistory(replacement); persistErr != nil {
-						loop.agent.AddError(fmt.Sprintf("persist compacted history after prompt preflight failed: %v", persistErr))
-						result.Error = err.Error()
-						result.Usage = totalUsage.Clone()
-						result.State = loop.agent.GetState()
-						return result, fmt.Errorf("%w: persisted compacted history failed: %v", err, persistErr)
-					}
-					preflightErr.ReplacementHistoryApplied = true
-				}
 			}
 			loop.agent.AddError(fmt.Sprintf("think failed: %v", err))
 			result.Error = err.Error()

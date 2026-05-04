@@ -126,6 +126,9 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 			}
 			session.Logger.LogResponse(logScope, content, responseBody, req.Stream, err, durationMs)
 		}
+		if requestContextTokens > 0 {
+			applyChatContextTokens(session, requestContextTokens, 0, true)
+		}
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}
 
@@ -292,7 +295,9 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	}
 
 	applyChatTokenUsage(session, usage)
-	applyChatContextTokensFromUsage(session, usage, 0, true)
+	if applied := applyChatContextTokensFromUsage(session, usage, 0, true); applied <= 0 && requestContextTokens > 0 {
+		applyChatContextTokens(session, requestContextTokens, 0, true)
+	}
 
 	return &runtimechatcore.ProviderTurnResponse{
 		Message: &runtimeMessage,
