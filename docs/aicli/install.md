@@ -2,6 +2,8 @@
 
 `aicli` 是 `ai-agent-runtime` 提供的命令行工具，用于对接 AI Gateway，支持配置查看、端点测试、上下文测试、MCP、管道模式等。
 
+直接运行 `aicli` 会默认进入交互式 chat 模式；`aicli chat` 仍然是显式且等价的入口。
+
 本文档涵盖：
 
 - [一、安装](#一安装)
@@ -206,7 +208,11 @@ echo "Hello" | aicli pipe --model gpt-4 --timeout 120
 # MCP 子命令
 aicli mcp --help
 
-# chat
+# 交互式聊天（默认）
+aicli
+aicli --provider CODEX_04 --model gpt-5.4-mini
+
+# 显式进入 chat（与直接运行 aicli 等价）
 aicli chat --provider CODEX_04 --model gpt-5.4-mini
 
 # chat 中查看当前请求会暴露哪些 functions / skills
@@ -236,7 +242,7 @@ aicli --help
 
 ### chat 内置斜杠命令补充
 
-`aicli chat` 除了普通对话，还支持直接在聊天输入中执行命令：
+进入交互式聊天后（无论是直接运行 `aicli` 还是显式执行 `aicli chat`），还支持直接在聊天输入中执行命令：
 
 | 命令 | 用途 |
 |---|---|

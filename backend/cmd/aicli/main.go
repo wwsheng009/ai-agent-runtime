@@ -35,13 +35,15 @@ func main() {
 	// 创建 root 命令
 	rootCmd := &cobra.Command{
 		Use:   "aicli [子命令]",
-		Short: "AI API Gateway 测试工具",
+		Short: "AI API Gateway 测试工具，默认进入 chat",
 		Long: `AI CLI 是一个用于测试 AI Gateway 的命令行工具。
 
 功能包括：
   - 列出当前配置信息（providers, provider_groups）
   - 对不同端点进行测试
   - 测试模型的最大上下文窗口和最大生成长度
+
+直接运行 ` + "`aicli`" + ` 会默认进入交互式 chat 模式。
 
 文档入口：
   - docs/aicli/README.md
@@ -51,6 +53,10 @@ func main() {
   aicli config
   aicli config --provider nvidia
   aicli config --groups
+
+  # 直接进入交互式聊天（默认）
+  aicli
+  aicli chat
 
   # 测试端点
   aicli test --model gpt-4 --message "Hello"
@@ -341,6 +347,8 @@ func main() {
 	// mcp 子命令
 	mcpCmd := commands.MCPCommand()
 	rootCmd.AddCommand(mcpCmd)
+
+	rootCmd.SetArgs(prependDefaultChatCommand(os.Args[1:], rootCmd.PersistentFlags(), chatCmd.Flags()))
 
 	// 执行
 	if err := rootCmd.Execute(); err != nil {

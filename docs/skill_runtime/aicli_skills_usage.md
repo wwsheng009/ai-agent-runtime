@@ -1,4 +1,4 @@
-# `aicli chat` 与 Skills 使用说明
+# `aicli` / `aicli chat` 与 Skills 使用说明
 
 > 迁移说明（2026-03-30）：
 > - 当前 `aicli` 实现在 `E:\projects\ai\ai-agent-runtime\backend\cmd\aicli`
@@ -6,17 +6,17 @@
 
 ## 目标
 
-`aicli chat` 现在支持把 skills 作为 AI 可调用 functions 暴露给模型。
+`aicli`（默认进入 chat）和 `aicli chat` 现在都支持把 skills 作为 AI 可调用 functions 暴露给模型。
 
 当前链路：
 
-`aicli chat -> route candidate skills -> model tool selection -> skill executor -> workflow / MCP / LLM`
+`aicli` / `aicli chat` -> route candidate skills -> model tool selection -> skill executor -> workflow / MCP / LLM
 
 如果你想看更底层的“模型如何感知 skill、如何发起 `skill__*` 调用、`prompt` 在哪里被消费”，请同时阅读：
 
 - `docs/skill_runtime/skill_invocation_mechanism.md`
 
-如果你需要更偏“CLI 使用面”的说明，例如安装、配置加载顺序、`aicli chat` 常用命令、`/call`、`/tool`、`/skill` 这类 chat 斜杠命令，请同时阅读：
+如果你需要更偏“CLI 使用面”的说明，例如安装、配置加载顺序、`aicli` 默认 chat / `aicli chat` 常用命令、`/call`、`/tool`、`/skill` 这类 chat 斜杠命令，请同时阅读：
 
 - `docs/aicli/README.md`
 - `docs/aicli/install.md`
@@ -25,11 +25,11 @@
 
 - 系统级 skills：`skills_runtime.skill_dir`
 - 外部扩展 skills：`skills_runtime.extra_skill_dirs`
-- 临时追加目录：`aicli chat --skills-dir <dir>`
+- 临时追加目录：`aicli --skills-dir <dir>`（等价于 `aicli chat --skills-dir <dir>`）
 
-## `aicli chat` 加载顺序
+## `aicli` / `aicli chat` 加载顺序
 
-当前 `aicli chat` 会按下面顺序装配可调用能力：
+当前 `aicli` / `aicli chat` 会按下面顺序装配可调用能力：
 
 1. 初始化 `FunctionRegistry`
 2. 加载 runtime toolkit tools

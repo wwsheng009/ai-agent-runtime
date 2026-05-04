@@ -11,7 +11,7 @@ Migration notes:
 
 Main sections:
 
-- `aicli/` - CLI behavior, tool output rendering, metadata propagation, and provider integration notes
+- `aicli/` - CLI behavior, default `aicli` -> `chat` startup, tool output rendering, metadata propagation, and provider integration notes
 - `codex/` - Codex provider behavior, native tool exposure, and image generation diagnostics
 - `skill_runtime/` - runtime APIs, governance, contracts, search, persistence, and design notes
 - `multi-agents/` - multi-agent design, profile, team, and rollout plans
