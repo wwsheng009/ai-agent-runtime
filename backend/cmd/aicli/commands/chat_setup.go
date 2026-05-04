@@ -268,6 +268,7 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 		session.ActorFirstReady = true
 		restoreLocalRuntimeHostTeamState(session)
 		session.ChatExecutor = newAICLIActorChatExecutor()
+		startChatActorWarmup(session)
 	}
 
 	refreshBuiltinFunctionSchemas(session)

@@ -29,15 +29,15 @@ func executeManualChatCompact(session *ChatSession, requestedMode string) (*chat
 		return nil, fmt.Errorf("当前会话未初始化本地 runtime host，无法执行 /compact")
 	}
 
-	actor, err := session.LocalRuntimeHost.SessionHub.GetOrCreate(session.RuntimeSession.ID)
-	if err != nil {
-		return nil, err
-	}
-
 	ctx := session.cancelCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	actor, err := chatActorForSession(ctx, session)
+	if err != nil {
+		return nil, err
+	}
+
 	result, status, err := actor.Compact(ctx, requestedMode)
 	if err != nil {
 		return &chatCompactReport{

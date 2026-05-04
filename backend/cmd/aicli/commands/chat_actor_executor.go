@@ -42,7 +42,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		ctx = runtimeexecutor.WithOutputMirror(ctx, newChatSystemOutputWriterWithSurface(os.Stdout, session.Surface))
 	}
 
-	actor, err := session.LocalRuntimeHost.SessionHub.GetOrCreate(session.RuntimeSession.ID)
+	actor, err := chatActorForSession(ctx, session)
 	if err != nil {
 		return "", err
 	}

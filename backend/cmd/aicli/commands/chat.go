@@ -99,9 +99,11 @@ type ChatSession struct {
 	ActorFirstReady                 bool                               // actor-first executor established for this session
 	ChatExecutor                    aicliChatExecutor                  // shared chatcore-backed chat executor
 	LocalRuntimeHost                *localChatRuntimeHost              // actor-first local runtime host
-	Interaction                     *chatInteractionCoordinator        // unified interactive stdout/prompt coordinator
-	Surface                         *ui.FixedBottomSurface             // optional fixed-bottom terminal surface
-	runtimeHTTPCapture              *chatRuntimeHTTPCapture            // recent runtime HTTP response diagnostics
+	actorWarmupMu                   sync.Mutex
+	actorWarmup                     *chatActorWarmup
+	Interaction                     *chatInteractionCoordinator // unified interactive stdout/prompt coordinator
+	Surface                         *ui.FixedBottomSurface      // optional fixed-bottom terminal surface
+	runtimeHTTPCapture              *chatRuntimeHTTPCapture     // recent runtime HTTP response diagnostics
 	localShellArtifactMu            sync.Mutex
 	localShellArtifactCounter       int
 	lastLocalShellArtifactPath      string
