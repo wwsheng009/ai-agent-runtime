@@ -54,9 +54,10 @@ func (f *MarkdownFormatter) IsMarkdown(text string) bool {
 	// 检查列表项（\n- 或 \n* 前缀）
 	lines := strings.Split(text, "\n")
 	listPrefixRE := regexp.MustCompile(`^\s*[-*]\s+`)
+	orderedListPrefixRE := regexp.MustCompile(`^\s*\d+\.\s+`)
 	for _, line := range lines {
 		trimmed := strings.TrimLeft(line, " \t")
-		if listPrefixRE.MatchString(line) {
+		if listPrefixRE.MatchString(line) || orderedListPrefixRE.MatchString(line) {
 			return true
 		}
 		if strings.HasPrefix(trimmed, "# ") || strings.HasPrefix(trimmed, "## ") || strings.HasPrefix(trimmed, "### ") {

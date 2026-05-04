@@ -1590,6 +1590,147 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_StreamsImmediatelyWhenL
 	}
 }
 
+func TestChatInteractionCoordinator_CompleteAssistantResponse_BuffersMarkdownWhenLiveOutputEnabled(t *testing.T) {
+	session := &ChatSession{
+		Formatter: formatter.NewMarkdownFormatter(false),
+	}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAssistantDelta("- 第一项\n")
+	coord.RenderAssistantDelta("- 第二项")
+
+	if output.String() != "" {
+		t.Fatalf("expected markdown stream to stay buffered before completion, got %q", output.String())
+	}
+
+	if !coord.CompleteAssistantResponse("- 第一项\n- 第二项") {
+		t.Fatal("expected markdown stream completion to succeed")
+	}
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "• 第一项") || !strings.Contains(rendered, "• 第二项") {
+		t.Fatalf("expected finalized markdown output, got %q", rendered)
+	}
+	if strings.Contains(rendered, "- 第一项") || strings.Contains(rendered, "- 第二项") {
+		t.Fatalf("expected raw markdown list syntax to be formatted away, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_CompleteAssistantResponse_UpgradesLiveIntroToMarkdown(t *testing.T) {
+	session := &ChatSession{
+		Formatter: formatter.NewMarkdownFormatter(false),
+	}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	intro := "下面是列表：\n\n"
+	markdown := "- 第一项\n- 第二项"
+	coord.RenderAssistantDelta(intro)
+
+	if !strings.Contains(output.String(), "下面是列表：") {
+		t.Fatalf("expected plain intro to stream immediately, got %q", output.String())
+	}
+
+	coord.RenderAssistantDelta(markdown)
+	if strings.Contains(output.String(), "- 第一项") || strings.Contains(output.String(), "- 第二项") {
+		t.Fatalf("expected markdown suffix to stay buffered after upgrade, got %q", output.String())
+	}
+
+	if !coord.CompleteAssistantResponse(intro + markdown) {
+		t.Fatal("expected upgraded markdown stream completion to succeed")
+	}
+
+	rendered := output.String()
+	if strings.Count(rendered, "下面是列表：") != 1 {
+		t.Fatalf("expected intro to render once, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "• 第一项") || !strings.Contains(rendered, "• 第二项") {
+		t.Fatalf("expected markdown suffix to be formatted, got %q", rendered)
+	}
+	if strings.Contains(rendered, "- 第一项") || strings.Contains(rendered, "- 第二项") {
+		t.Fatalf("expected raw markdown suffix to be formatted away, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_CompleteAssistantResponse_FormatsLiveInlineMarkdownSuffix(t *testing.T) {
+	session := &ChatSession{
+		Formatter: formatter.NewMarkdownFormatter(false),
+	}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	prefix := "This is "
+	suffix := "**bold**"
+	coord.RenderAssistantDelta(prefix)
+	coord.RenderAssistantDelta(suffix)
+
+	if strings.Contains(output.String(), "**bold**") {
+		t.Fatalf("expected inline markdown suffix to stay buffered, got %q", output.String())
+	}
+
+	if !coord.CompleteAssistantResponse(prefix + suffix) {
+		t.Fatal("expected inline markdown stream completion to succeed")
+	}
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "This is bold") {
+		t.Fatalf("expected inline markdown suffix to continue the streamed line, got %q", rendered)
+	}
+	if strings.Contains(rendered, "**bold**") {
+		t.Fatalf("expected raw inline markdown syntax to be formatted away, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_FinalizeReasoningDelta_FormatsBufferedMarkdownAssistantStream(t *testing.T) {
+	session := &ChatSession{
+		Formatter: formatter.NewMarkdownFormatter(false),
+	}
+	coord := newChatInteractionCoordinator(session)
+	coord.liveStreamFn = func() bool { return true }
+	coord.streamRuneDelay = 0
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.reasoningActive = true
+	coord.RenderAssistantDelta("- 第一项\n")
+	coord.RenderAssistantDelta("- 第二项")
+
+	if output.String() != "" {
+		t.Fatalf("expected assistant stream to stay buffered during reasoning, got %q", output.String())
+	}
+
+	coord.FinalizeReasoningDelta()
+
+	if strings.Contains(output.String(), "• 第一项") || strings.Contains(output.String(), "• 第二项") {
+		t.Fatalf("expected assistant markdown to remain buffered after reasoning finalization, got %q", output.String())
+	}
+	if !strings.Contains(output.String(), chatToolDivider("end reasoning")) {
+		t.Fatalf("expected reasoning divider to be rendered, got %q", output.String())
+	}
+
+	if !coord.CompleteAssistantResponse("- 第一项\n- 第二项") {
+		t.Fatal("expected markdown stream completion after reasoning to succeed")
+	}
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "• 第一项") || !strings.Contains(rendered, "• 第二项") {
+		t.Fatalf("expected finalized markdown output after completion, got %q", rendered)
+	}
+	if strings.Contains(rendered, "- 第一项") || strings.Contains(rendered, "- 第二项") {
+		t.Fatalf("expected raw markdown list syntax to be formatted away after completion, got %q", rendered)
+	}
+}
+
 func TestChatInteractionCoordinator_RenderAssistantDelta_PreservesLeadingWhitespaceBetweenChunks(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)

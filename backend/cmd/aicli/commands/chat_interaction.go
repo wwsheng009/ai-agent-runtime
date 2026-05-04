@@ -19,24 +19,25 @@ type chatInteractionCoordinator struct {
 	writer  io.Writer
 	surface *ui.FixedBottomSurface
 
-	mu                 sync.Mutex
-	promptVisible      bool
-	promptInput        string
-	promptPasteActive  bool
-	thinkingActive     bool
-	streamingActive    bool
-	streamRendered     bool
-	streamMode         assistantStreamMode
-	streamTrailingLF   bool
-	streamLines        int
-	streamDisplayLines int
-	streamBuffer       strings.Builder
-	streamRuneDelay    time.Duration
-	maxChunkDelay      time.Duration
-	promptDelay        time.Duration
-	promptSeq          uint64
-	promptAdvanceFn    func() bool
-	liveStreamFn       func() bool
+	mu                      sync.Mutex
+	promptVisible           bool
+	promptInput             string
+	promptPasteActive       bool
+	thinkingActive          bool
+	streamingActive         bool
+	streamRendered          bool
+	streamMode              assistantStreamMode
+	streamRenderedPrefixLen int
+	streamTrailingLF        bool
+	streamLines             int
+	streamDisplayLines      int
+	streamBuffer            strings.Builder
+	streamRuneDelay         time.Duration
+	maxChunkDelay           time.Duration
+	promptDelay             time.Duration
+	promptSeq               uint64
+	promptAdvanceFn         func() bool
+	liveStreamFn            func() bool
 
 	reasoningActive     bool
 	reasoningRendered   bool
@@ -446,6 +447,7 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		c.updateSurfaceStatusLocked("Streaming")
 		c.streamRendered = false
 		c.streamMode = assistantStreamModeUnknown
+		c.streamRenderedPrefixLen = 0
 		c.streamTrailingLF = false
 		c.streamLines = 0
 		c.streamBuffer.Reset()
@@ -455,11 +457,32 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 	if delta == "" {
 		return
 	}
-	if c.supportsLiveStreamLocked() && !c.reasoningActive {
-		c.writeIndentedStreamingDeltaLocked(delta, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
-	}
+	previousContent := c.streamBuffer.String()
+	previousMode := c.streamMode
 	c.streamBuffer.WriteString(delta)
 	c.streamLines += strings.Count(delta, "\n")
+	if c.streamMode != assistantStreamModeMarkdown {
+		nextMode := c.classifyAssistantStreamModeLocked(c.streamBuffer.String())
+		if nextMode == assistantStreamModeMarkdown {
+			if previousMode != assistantStreamModeMarkdown && c.streamRendered && c.streamRenderedPrefixLen == 0 {
+				c.streamRenderedPrefixLen = len(previousContent)
+			}
+			c.streamMode = assistantStreamModeMarkdown
+		} else if c.streamMode == assistantStreamModeUnknown && nextMode == assistantStreamModeText {
+			c.streamMode = assistantStreamModeText
+		}
+	}
+
+	if c.supportsLiveStreamLocked() && !c.reasoningActive {
+		if c.streamMode == assistantStreamModeMarkdown {
+			return
+		}
+		if !c.streamRendered {
+			c.writeIndentedStreamingDeltaLocked(c.streamBuffer.String(), ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+			return
+		}
+		c.writeIndentedStreamingDeltaLocked(delta, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
+	}
 }
 
 func normalizeAssistantStreamDelta(existing, incoming string) string {
@@ -470,6 +493,25 @@ func normalizeAssistantStreamDelta(existing, incoming string) string {
 		return incoming[len(existing):]
 	}
 	return incoming
+}
+
+func (c *chatInteractionCoordinator) classifyAssistantStreamModeLocked(content string) assistantStreamMode {
+	if c == nil {
+		return assistantStreamModeUnknown
+	}
+	if strings.TrimSpace(content) == "" {
+		return assistantStreamModeUnknown
+	}
+	if c.session != nil && c.session.Formatter != nil && c.session.Formatter.IsMarkdown(content) {
+		return assistantStreamModeMarkdown
+	}
+	if looksLikeStreamingMarkdown(content) || looksLikeStreamingMarkdownLead(content) {
+		return assistantStreamModeMarkdown
+	}
+	if !shouldStartTextStreaming(content) {
+		return assistantStreamModeUnknown
+	}
+	return assistantStreamModeText
 }
 
 func resolveStreamCompletionSuffix(existing, final string) string {
@@ -525,6 +567,17 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 		return true
 	}
 	finalContent = sanitizeInteractiveAsyncTeamLaunchResponse(finalContent)
+	if c.streamMode != assistantStreamModeMarkdown && c.classifyAssistantStreamModeLocked(finalContent) == assistantStreamModeMarkdown {
+		if c.streamRendered && c.streamRenderedPrefixLen == 0 {
+			c.streamRenderedPrefixLen = len(c.streamBuffer.String())
+		}
+		c.streamMode = assistantStreamModeMarkdown
+	}
+	if c.streamMode == assistantStreamModeMarkdown {
+		c.renderFormattedAssistantStreamLocked(finalContent)
+		c.resetStreamLocked()
+		return true
+	}
 	if c.supportsLiveStreamLocked() {
 		suffix := resolveStreamCompletionSuffix(c.streamBuffer.String(), finalContent)
 		if suffix != "" {
@@ -598,6 +651,12 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 	}
 	content := c.streamBuffer.String()
 	if c.supportsLiveStreamLocked() {
+		if c.streamMode == assistantStreamModeMarkdown {
+			content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
+			c.renderFormattedAssistantStreamLocked(content)
+			c.resetStreamLocked()
+			return
+		}
 		if c.streamRendered && !c.streamTrailingLF {
 			fmt.Fprintln(c.writer)
 		}
@@ -818,6 +877,18 @@ func (c *chatInteractionCoordinator) clearThinkingLocked() {
 // intermediate assistant deltas are never finalized via FinalizeAssistantDelta.
 func (c *chatInteractionCoordinator) flushStreamLocked() {
 	if c.supportsLiveStreamLocked() {
+		if c.streamMode == assistantStreamModeMarkdown {
+			content := c.streamBuffer.String()
+			if strings.TrimSpace(content) == "" {
+				if !c.streamTrailingLF {
+					fmt.Fprintln(c.writer)
+				}
+				return
+			}
+			content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
+			c.renderFormattedAssistantStreamLocked(content)
+			return
+		}
 		c.renderBufferedAssistantStreamLocked()
 		if c.streamRendered && !c.streamTrailingLF {
 			fmt.Fprintln(c.writer)
@@ -947,14 +1018,82 @@ func (c *chatInteractionCoordinator) renderBufferedAssistantStreamLocked() {
 	if content == "" {
 		return
 	}
+	if c.streamMode == assistantStreamModeMarkdown {
+		return
+	}
 	c.writeIndentedStreamingDeltaLocked(content, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
 	c.completeBlockOutput = false
+}
+
+func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(content string) {
+	if c == nil {
+		return
+	}
+	if c.streamRendered && c.streamRenderedPrefixLen > 0 {
+		suffix := c.unrenderedAssistantStreamSuffixLocked(content)
+		if strings.TrimSpace(suffix) == "" {
+			if !c.streamTrailingLF {
+				fmt.Fprintln(c.writer)
+			}
+			c.completeBlockOutput = true
+			return
+		}
+		formatted := suffix
+		if c.session != nil && c.session.Formatter != nil {
+			formatted = c.session.Formatter.Format(suffix)
+		}
+		inlineContinuation := !c.streamTrailingLF && !strings.HasPrefix(suffix, "\n") && !strings.Contains(formatted, "\n")
+		formatted = strings.TrimLeft(formatted, "\n")
+		if strings.TrimSpace(formatted) == "" {
+			if !c.streamTrailingLF {
+				fmt.Fprintln(c.writer)
+			}
+			c.completeBlockOutput = true
+			return
+		}
+		if inlineContinuation {
+			fmt.Fprintln(c.writer, formatted)
+			c.completeBlockOutput = true
+			return
+		}
+		if !c.streamTrailingLF {
+			fmt.Fprintln(c.writer)
+		}
+		fmt.Fprintln(c.writer, ui.IndentAssistantContent(formatted))
+		c.completeBlockOutput = true
+		return
+	}
+
+	formatted := content
+	if c.session != nil && c.session.Formatter != nil {
+		formatted = c.session.Formatter.Format(content)
+	}
+	c.writeCompleteBlockLocked(ui.FormatAssistantMessage(formatted), false)
+}
+
+func (c *chatInteractionCoordinator) unrenderedAssistantStreamSuffixLocked(content string) string {
+	if c == nil || c.streamRenderedPrefixLen <= 0 {
+		return content
+	}
+	buffered := c.streamBuffer.String()
+	if c.streamRenderedPrefixLen > len(buffered) {
+		return content
+	}
+	prefix := buffered[:c.streamRenderedPrefixLen]
+	if strings.HasPrefix(content, prefix) {
+		return content[c.streamRenderedPrefixLen:]
+	}
+	if strings.HasPrefix(buffered, prefix) {
+		return buffered[c.streamRenderedPrefixLen:]
+	}
+	return content
 }
 
 func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.streamingActive = false
 	c.streamRendered = false
 	c.streamMode = assistantStreamModeUnknown
+	c.streamRenderedPrefixLen = 0
 	c.streamTrailingLF = false
 	c.streamLines = 0
 	c.streamDisplayLines = 0
@@ -1070,27 +1209,49 @@ const (
 )
 
 func looksLikeStreamingMarkdown(content string) bool {
-	trimmed := strings.TrimLeft(content, " \t")
-	if trimmed == "" {
+	if strings.TrimSpace(content) == "" {
 		return false
 	}
-	if strings.HasPrefix(trimmed, "# ") || strings.HasPrefix(trimmed, "##") || strings.HasPrefix(trimmed, "> ") || strings.HasPrefix(trimmed, "```") {
+	if strings.Contains(content, "```") || strings.Contains(content, "**") || strings.Count(content, "`") >= 2 {
 		return true
 	}
-	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
-		return true
-	}
-	if strings.Contains(content, "\n# ") || strings.Contains(content, "\n##") || strings.Contains(content, "\n- ") || strings.Contains(content, "\n* ") || strings.Contains(content, "\n> ") || strings.Contains(content, "```") {
-		return true
-	}
-	if strings.Contains(content, "**") || strings.Contains(content, "`") {
-		return true
+	for _, line := range strings.Split(content, "\n") {
+		if isStreamingMarkdownLine(strings.TrimLeft(line, " \t")) {
+			return true
+		}
 	}
 	return false
 }
 
 func looksLikeStreamingMarkdownLead(content string) bool {
-	trimmed := strings.TrimLeft(content, " \t")
+	if strings.TrimSpace(content) == "" {
+		return false
+	}
+	for _, line := range strings.Split(content, "\n") {
+		if isStreamingMarkdownLeadLine(strings.TrimLeft(line, " \t")) {
+			return true
+		}
+	}
+	return false
+}
+
+func isStreamingMarkdownLine(trimmed string) bool {
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "# ") || strings.HasPrefix(trimmed, "## ") || strings.HasPrefix(trimmed, "### ") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "> ") || strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+		return true
+	}
+	if isStreamingOrderedListLine(trimmed) {
+		return true
+	}
+	return strings.HasPrefix(trimmed, "|") && strings.HasSuffix(strings.TrimSpace(trimmed), "|")
+}
+
+func isStreamingMarkdownLeadLine(trimmed string) bool {
 	if trimmed == "" {
 		return false
 	}
@@ -1100,7 +1261,31 @@ func looksLikeStreamingMarkdownLead(content string) bool {
 	if strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, "`") || strings.HasPrefix(trimmed, "|") {
 		return true
 	}
-	return false
+	return isStreamingOrderedListLeadLine(trimmed)
+}
+
+func isStreamingOrderedListLine(trimmed string) bool {
+	dot := orderedListDotIndex(trimmed)
+	return dot > 0 && dot+1 < len(trimmed) && (trimmed[dot+1] == ' ' || trimmed[dot+1] == '\t')
+}
+
+func isStreamingOrderedListLeadLine(trimmed string) bool {
+	dot := orderedListDotIndex(trimmed)
+	if dot <= 0 {
+		return false
+	}
+	return dot+1 == len(trimmed) || trimmed[dot+1] == ' ' || trimmed[dot+1] == '\t'
+}
+
+func orderedListDotIndex(trimmed string) int {
+	i := 0
+	for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+		i++
+	}
+	if i == 0 || i >= len(trimmed) || trimmed[i] != '.' {
+		return -1
+	}
+	return i
 }
 
 func shouldStartTextStreaming(content string) bool {

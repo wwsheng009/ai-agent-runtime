@@ -18,6 +18,7 @@ func TestIsMarkdown(t *testing.T) {
 		{"标题", "# 标题一\n## 标题二", true},
 		{"粗体", "这是 **粗体** 文字", true},
 		{"列表", "- 项目1\n- 项目2", true},
+		{"有序列表", "1. 项目1\n2. 项目2", true},
 		{"引用", "> 这是引用\n> 第二行", true},
 		{"缩进引用", "  > 这是引用\n  > 第二行", true},
 		{"链接", "[链接](https://example.com)", true},
