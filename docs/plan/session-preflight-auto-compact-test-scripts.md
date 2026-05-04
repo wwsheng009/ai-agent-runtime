@@ -10,6 +10,8 @@
 - OpenAI-compatible provider 返回 `choices=null` 或空数组时，应进入明确错误/重试链路，而不是变成空 `LLMResponse`。
 - latest replay block 中超大的 tool result 应被内容级降载，同时保留 assistant tool-call 与 tool-result 的邻接结构。
 - compact provider 返回空 summary 或失败时，应启用 deterministic fallback summary，使恢复链路继续推进。
+- 普通 `contextmgr.Manager.Build()` 默认保留完整原始 history，不应被 `MaxMessages`、`KeepRecentMessages`、默认 12k 或 recent-window 裁剪；recent-window / ledger / summary prompt compaction 只能由显式 `BuildInput.EnablePromptCompaction=true` 触发。
+- `aicli` 状态栏 `ctx used` 只展示 provider usage 确认后的 sent-context 快照；request-start 本地估算不提前显示，普通请求不允许从大变小，compact/reset/new/clear 边界才允许降低。
 
 ## 前置条件
 
@@ -87,13 +89,14 @@ go test ./internal/background
 
 ### 预算语义
 
-验证默认 12k 不覆盖已知模型能力，同时显式 context 预算仍能约束。
+验证默认 12k 不覆盖已知模型能力，普通 context manager Build 默认保留完整 history，同时显式 context 预算仍能约束。
 
 ```powershell
 $ErrorActionPreference = "Stop"
 Set-Location "E:\projects\ai\ai-agent-runtime\backend"
 
 go test ./internal/agent -run "TestResolvePromptPreflightBudget|TestResolveContextBuildPromptBudget|TestReActLoop_ThinkPreservesOlderHistoryWithCapabilityBuildBudget"
+go test ./internal/contextmgr -run "TestManager_BuildPreservesFullHistoryByDefault|TestManager_BuildCompactsAndRecalls"
 ```
 
 关键断言：
@@ -101,7 +104,9 @@ go test ./internal/agent -run "TestResolvePromptPreflightBudget|TestResolveConte
 - `TestResolvePromptPreflightBudget_DoesNotLetDefaultBudgetOverrideKnownCapability` 应通过。
 - 对 `auto_compact_token_limit=200000` 的模型，`PromptBudget` 应解析为 `200000`。
 - `BudgetCandidates` 不应包含 `default_context_max_prompt_tokens`。
-- `TestResolveContextBuildPromptBudget_ContextProfileDoesNotConstrainKnownCapability` 应通过，context manager Build 阶段应使用模型能力预算而不是 balanced profile 的 12k。
+- `TestResolveContextBuildPromptBudget_ContextProfileDoesNotConstrainKnownCapability` 应通过，agent 传给 context manager 的预算应使用模型能力预算而不是 balanced profile 的 12k。
+- `TestManager_BuildPreservesFullHistoryByDefault` 应通过，普通 Build 即使配置了很小的 `MaxPromptTokens`、`MaxMessages`、`KeepRecentMessages`，也应保留完整 raw history，且不发出 `context.compact.*` 事件。
+- `TestManager_BuildCompactsAndRecalls` 应通过，显式 `EnablePromptCompaction=true` 时仍可执行 recent-window / ledger / summary prompt-view compaction。
 - `TestResolvePromptPreflightBudget_UsesConfigurableFallbackForUnknownCapability` 应通过，未知模型兜底预算应读取 `context.fallbackMaxPromptTokens`。
 - `TestResolvePromptPreflightBudget_UsesDefaultFallbackForUnknownCapability` 应通过，未配置兜底预算时应使用内置默认 `32000`。
 - `TestResolvePromptPreflightBudget_ExplicitContextBudgetStillConstrainsCapability` 应通过。
@@ -201,6 +206,24 @@ go test ./internal/chatcore -run "TestExecuteToolLoop_UsesWholeHistoryCompactorT
 - compact 后仍超限时，应返回 `prompt_still_exceeds_budget_after_compaction`。
 - 不应出现 provider request 在 preflight 失败后继续被发送的情况。
 
+### aicli ctx used 状态栏
+
+验证 `ctx used` 只展示 provider usage 确认后的 sent-context 快照，避免 request-start 预估值先大后小造成抖动。
+
+```powershell
+$ErrorActionPreference = "Stop"
+Set-Location "E:\projects\ai\ai-agent-runtime\backend"
+
+go test ./cmd/aicli/commands -run "TestApplyChatTurnContextTokens_DoesNotDisplayEstimatedContextSnapshot|TestApplyChatContextTokensFromUsage_DoesNotLowerDisplayedSnapshot|TestApplyChatContextTokensReset_AllowsCompactToLowerDisplayedSnapshot|TestApplyChatContextTokensFromUsage_AddsAnthropicCacheReadToPromptContext"
+```
+
+关键断言：
+
+- `llm.request.started` 的 `context_prompt_tokens` 只更新 `TurnContextTokenCount`，不能提前写入 `ContextTokenCount`。
+- 普通 `llm.request.finished` 的 provider usage 即使小于当前显示值，也不能降低 `ctx used`。
+- `session_compact_completed` / reset 路径使用 `applyChatContextTokensReset`，允许把 `ctx used` 降到 compact 后的 `token_after`。
+- Anthropic/Mimo-style provider 把 cache read / cache creation input 作为 prompt 之外字段返回时，`ctx used` 应按 `PromptTokens + CachedTokens` 计算。
+
 ## HTTP artifact 检查脚本
 
 该脚本用于检查真实运行后产生的 provider wrapper request artifact，确认 compact 请求不再携带工具面。
@@ -262,6 +285,8 @@ Get-ChildItem -Path $ArtifactDir -Filter "*request_provider_wrapper.json" |
 3. 如果没有显式设置 12k，预期不再被默认 12k 本地拦截。
 4. 如果显式设置较小 `context_max_prompt_tokens`，预期优先执行 active-turn compaction 或 latest replay tool result 降载。
 5. 如果 provider compact 返回空 summary，预期 session history 中出现 `summary_source=deterministic_fallback` 的 compaction message。
+6. 普通 LLM 请求过程中，状态栏 `ctx used` 不应在 `llm.request.started` 后先显示本地预估值；应等 `llm.request.finished` provider usage 可解析后再更新。
+7. 如果 provider usage 小于当前 `ctx used` 快照，普通请求状态栏不应回落；只有 `session_compact_completed`、`/compact`、`/new`、`/clear` 后可以降低。
 
 关键通过标准：
 
@@ -270,6 +295,8 @@ Get-ChildItem -Path $ArtifactDir -Filter "*request_provider_wrapper.json" |
 - compact 请求不应携带 `tools` 或 `tool_choice=auto`。
 - provider 空 choices 不应静默变成空 summary。
 - 自动恢复成功后，应继续当前任务或给出明确的 compact recovery 失败原因。
+- compact 之前的普通请求中，`ctx used` 应随 provider 确认的 sent context 单调递增。
+- prompt-only preflight compaction 不应默认持久化 replacement history；只有 session-level compact 成功后才替换并保存 session history。
 
 ## 日志和事件检查建议
 

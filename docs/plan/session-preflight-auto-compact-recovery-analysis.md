@@ -232,6 +232,8 @@ Codex 的关键行为：
 4. compact provider 返回空 choices 时视为错误并进入 retry/降级路径。
 5. latest replay block 即使需要保留协议结构，也能压缩 tool result content。
 6. preflight 失败后系统能自动恢复：先压缩并重试当前 loop；若 provider compact 不可用，则使用本地确定性 fallback summary，避免直接把用户卡死。
+7. 普通 `contextmgr.Manager.Build()` 默认保留完整原始 history；`MaxMessages`、`KeepRecentMessages`、`MaxPromptTokens` 和 recent-window / ledger / summary 重组只在显式 `BuildInput.EnablePromptCompaction=true` 时参与 prompt-view compaction。
+8. prompt-only preflight compaction 只修改当次发送给 LLM API 的 prompt view，不默认回写或持久化 replacement history；只有 session-level compact recovery、显式 `/compact`、`/new`、`/clear` 这类边界允许替换历史并让 `ctx used` 降低。
 
 ## 修复方案
 
@@ -414,7 +416,7 @@ LLM compact 失败时，不应直接让 preflight 卡死。建议增加 determin
 
 - pre-turn compact 以 model auto compact limit 为触发线。
 - mid-turn compact 发生后能继续当前 tool loop。
-- replacement history 原子替换并持久化。
+- session-level compact 的 replacement history 原子替换并持久化；prompt-only preflight compaction 不应把 replacement history 默认回写到 session store。
 - compact 失败时有明确错误事件，不静默退化为空 summary。
 
 ## 风险与取舍
@@ -439,16 +441,18 @@ LLM compact 失败时，不应直接让 preflight 卡死。建议增加 determin
 - `backend/internal/llm/provider.go`、`backend/internal/llm/request_tools.go`、`backend/internal/llm/gateway_client.go`：`internal_operation=compact` 自动禁用普通工具和 MCP meta tools；OpenAI-compatible 非流式响应的 `choices=null` 或空数组会作为 `empty_provider_choices` 错误进入 retry/error 链路。
 - `backend/internal/llm/model_capability.go`：`CompactSummarySettings()` 默认只保留 `max_tokens=2048`，不再默认返回 `reasoning_effort=none`；仅在 capability 显式配置 `compact_reasoning_effort` 时发送。
 - `backend/internal/historyguard/active_turn.go`：新增 latest replay block tool result 内容降载。超大 tool result 会保留消息结构、`tool_call_id` 和 head/tail/关键 artifact 引用，避免破坏 provider 的 tool-call/tool-result 邻接约束。
-- `backend/internal/contextmgr/manager.go`、`backend/internal/agent/loop.go`：ReAct 在 context manager Build 前解析有效 prompt 预算，并传入 `BuildInput`；Build 阶段记录 `budget_max_prompt_tokens_source`，不再先按 balanced profile 的 12k 裁剪已知大上下文模型的历史。
+- `backend/internal/contextmgr/manager.go`、`backend/internal/agent/loop.go`：ReAct 在 context manager Build 前解析有效 prompt 预算，并传入 `BuildInput`；Build 阶段记录 `budget_max_prompt_tokens_source`。普通 Build 默认保留完整原始 history，不再按 balanced profile 的 12k、`MaxMessages` 或 recent-window 裁剪；只有显式 `EnablePromptCompaction=true` 时才启用 recent-window / ledger / summary prompt-view compaction。
 - `backend/internal/config/manager.go`、`backend/configs/runtime.yaml`：新增 `context.fallbackMaxPromptTokens`，默认 `32000`，用于无法解析 model capability/provider context limit 时的兜底 prompt 预算；该值不是已知模型的硬上限。
 
 已补充覆盖测试：
 
-- budget 测试覆盖 ModelScope/DeepSeek 类 `auto_compact_token_limit=200000` 不再被默认 12k 截断、context manager Build 阶段不再被 balanced profile 默认 12k 提前裁剪、`context.fallbackMaxPromptTokens` 可配置未知模型兜底预算，以及显式 `context_max_prompt_tokens=12000` 仍可约束。
+- budget 测试覆盖 ModelScope/DeepSeek 类 `auto_compact_token_limit=200000` 不再被默认 12k 截断、普通 `contextmgr.Manager.Build()` 默认保留完整 history 且不被 balanced profile 默认 12k / `MaxMessages` / recent-window 提前裁剪、`context.fallbackMaxPromptTokens` 可配置未知模型兜底预算，以及显式 `context_max_prompt_tokens=12000` 仍可约束。
+- context manager 测试覆盖显式 `EnablePromptCompaction=true` 时仍可触发 recent-window / ledger / summary prompt-view compaction，默认关闭时不发出 `context.compact.*` 事件。
 - compact 请求形态测试覆盖禁用 tools/meta tools 和默认省略 reasoning effort。
 - provider wrapper 测试覆盖 compact 请求不再发送 `tools`/`tool_choice`，以及空 choices 被识别为错误。
 - active-turn 测试覆盖 latest replay tool result 降载且不破坏 tool call 配对。
 - compactruntime 测试覆盖 provider 空 summary/错误时 deterministic fallback summary 生效。
+- aicli 状态栏测试覆盖 request-start 本地估算不提前显示为 `ctx used`、普通 provider usage 不降低已显示快照、Anthropic/Mimo cache-read/cache-creation input 计入 prompt context、compact/reset 路径允许降低为 compact 后的 `token_after`。
 
 验证结果：
 
