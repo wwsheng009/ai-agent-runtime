@@ -1242,8 +1242,8 @@ func TestHandleCommand_Compact(t *testing.T) {
 	if session.ContextTokenCount != 120 {
 		t.Fatalf("expected compact command to reset context usage to token_after, got %d", session.ContextTokenCount)
 	}
-	if session.TokenCount != 0 {
-		t.Fatalf("expected compact command to reset cumulative used tokens, got %d", session.TokenCount)
+	if session.TokenCount != 5000 {
+		t.Fatalf("expected compact command to preserve cumulative API token count, got %d", session.TokenCount)
 	}
 	if session.TurnContextTokenCount != 0 {
 		t.Fatalf("expected compact command to clear turn aggregate context usage, got %d", session.TurnContextTokenCount)

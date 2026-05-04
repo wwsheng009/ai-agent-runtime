@@ -174,6 +174,52 @@ func TestManager_BuildCompactsAndRecalls(t *testing.T) {
 	}
 }
 
+func TestManager_BuildRecallsFallbackQueryWhenInitialSearchErrors(t *testing.T) {
+	store, err := artifact.NewStore(nil)
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	_, err = store.Put(context.Background(), artifact.Record{
+		SessionID: "session-recall-fallback",
+		ToolName:  "read_logs",
+		Content:   "header\nunique-stack-trace\nframe 1\nframe 2",
+		Summary:   "stack trace summary",
+	})
+	require.NoError(t, err)
+
+	manager := NewManager(Budget{
+		MaxPromptTokens:     8000,
+		MaxMessages:         12,
+		KeepRecentMessages:  6,
+		MaxRecallResults:    2,
+		MaxObservationItems: 2,
+	}, store)
+	manager.Strategy.WorkspaceMode = WorkspaceModeDisabled
+
+	result := manager.Build(context.Background(), BuildInput{
+		SessionID: "session-recall-fallback",
+		Goal:      "Find the error stack trace.",
+		History: []types.Message{
+			*types.NewSystemMessage("system prompt"),
+			*types.NewUserMessage("Find the error stack trace."),
+			*types.NewAssistantMessage("I will inspect the logs."),
+			*types.NewToolMessage("call-1", "reduced log output"),
+		},
+		CountTokens: func(messages []types.Message) int { return len(messages) * 20 },
+	})
+
+	var foundRecall bool
+	for _, message := range result.Messages {
+		if strings.Contains(message.Content, "Relevant recalled artifacts:") &&
+			strings.Contains(message.Content, "unique-stack-trace") {
+			foundRecall = true
+			break
+		}
+	}
+	require.True(t, foundRecall, "expected fallback recall query to inject artifact preview")
+	require.Equal(t, true, result.Metadata["recall_injected"])
+}
+
 func TestManager_Build_CompactProfilePrefersSummaryAndSkipsRecall(t *testing.T) {
 	store, err := artifact.NewStore(nil)
 	if err != nil {

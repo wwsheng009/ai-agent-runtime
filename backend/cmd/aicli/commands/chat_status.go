@@ -349,7 +349,7 @@ func buildChatStatusContextUsedValue(session *ChatSession) string {
 	if session == nil {
 		return "<none>"
 	}
-	usedTokens := resolveChatStatusUsedTokens(session)
+	usedTokens := resolveChatStatusContextUsedTokens(session)
 	budget := resolveSharedChatPromptBudget(session)
 	windowTokens := budget.ModelCapabilityMaxContextTokens
 	if session.ContextWindowTokenCount > 0 {
@@ -372,6 +372,16 @@ func buildChatStatusContextUsedValue(session *ChatSession) string {
 		}
 	}
 	return fmt.Sprintf("%d / %d (%d%%)", usedTokens, windowTokens, percent)
+}
+
+func resolveChatStatusContextUsedTokens(session *ChatSession) int {
+	if session == nil {
+		return 0
+	}
+	if session.ContextTokenCount > 0 {
+		return session.ContextTokenCount
+	}
+	return resolveChatContextSnapshotTokens(session, nil)
 }
 
 func buildChatStatusTokenUsageValue(session *ChatSession) string {

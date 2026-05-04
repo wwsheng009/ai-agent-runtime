@@ -106,8 +106,13 @@ func (e *DefaultCommandExecuter) ExecuteDetailed(ctx context.Context, command st
 		prefixPowershellUTF8ForCmd(cmd)
 	}
 
+	outputMirror := runtimeexecutor.OutputMirrorFromContext(ctx)
+	if outputMirror != nil {
+		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
+	}
+
 	// 获取命令输出
-	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifact(cmd, captureLimitBytesFromExecConfig(cfg), "function", command, "")
+	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureLimitBytesFromExecConfig(cfg), "function", command, "", outputMirror)
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "function", command)
 	outputStr := capture.Output
 	metadata := buildShellExecutionMetadata(command, outputStr, capture, artifactPath, artifactErr, shell, cfg.workdir)

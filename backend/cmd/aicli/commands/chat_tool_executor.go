@@ -3,10 +3,13 @@ package commands
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -46,6 +49,7 @@ func (e *aicliToolExecutor) ExecuteTool(ctx context.Context, call runtimetypes.T
 	writeSessionDebugInfo(session, formatToolExecutionStartDebug(toolCallFromRuntime(call)), true)
 
 	ctx = generatedImageToolContext(ctx, session)
+	ctx = withLiveChatToolOutput(ctx, session, call.Name)
 	catalog := ensureFunctionCatalog(session)
 	output, meta, err := catalog.ExecuteFunctionWithMeta(ctx, call.Name, call.Args)
 	if err != nil {
@@ -66,6 +70,14 @@ func (e *aicliToolExecutor) ExecuteTool(ctx context.Context, call runtimetypes.T
 	}
 	writeSessionDebugInfo(session, formatToolExecutionResultDebug(toolCallFromRuntime(call), output, nil, meta), true)
 	return result
+}
+
+func withLiveChatToolOutput(ctx context.Context, session *ChatSession, toolName string) context.Context {
+	if !shouldRenderInteractiveOutput(session) || !runtimepolicy.IsShellLikeToolName(toolName) {
+		return ctx
+	}
+	beginDirectInteractiveOutput(session)
+	return runtimeexecutor.WithOutputMirror(ctx, newChatSystemOutputWriterWithSurface(os.Stdout, session.Surface))
 }
 
 func toolArgsTruncatedError(args map[string]interface{}) string {

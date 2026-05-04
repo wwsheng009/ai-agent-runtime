@@ -33,78 +33,80 @@ const chatSessionMetaLabelWidth = 18
 
 // ChatSession 聊天会话状态
 type ChatSession struct {
-	ProviderName               string
-	Provider                   config.Provider
-	Adapter                    adapter.ProtocolAdapter
-	Model                      string
-	ReasoningEffort            string
-	DisableTools               bool
-	HTTPDebug                  bool
-	Stream                     bool
-	BaseURL                    string
-	Messages                   []runtimetypes.Message
-	HTTPClient                 *http.Client
-	cancelCtx                  context.Context                    // 可取消的上下文
-	cancelFunc                 context.CancelFunc                 // 取消函数
-	interrupted                atomic.Bool                        // 是否被中断（原子操作，避免竞态）
-	FunctionCatalog            *aicliFunctionCatalog              // 统一管理 builtin tools + skills + schema cache
-	FunctionRegistry           *functions.FunctionRegistry        // Function 注册表
-	FunctionBuilder            functions.FunctionCallBuilder      // 协议对应的 function/tool builder
-	BuiltinSchemas             []map[string]interface{}           // 预构建的非 skill function schemas
-	Logger                     *ChatLogger                        // 聊天日志记录器
-	Formatter                  *formatter.MarkdownFormatter       // Markdown 格式化器
-	Layout                     *ui.Layout                         // 屏幕布局
-	InputBox                   *ui.InputBox                       // 输入框
-	TokenCount                 int                                // 当前压缩周期内累计的真实 LLM API token 使用量，用于 ctx used 与 auto compact
-	ContextTokenCount          int                                // 当前会话上下文本地估算快照，仅用于调试/兼容，不驱动 ctx used
-	ContextWindowTokenCount    int                                // 当前模型上下文窗口大小
-	TurnContextTokenCount      int                                // 当前 turn 内请求上下文 token 诊断累计，不用于 ctx used 百分比
-	MsgCount                   int                                // 消息计数
-	TurnRequestCount           int                                // 当前 turn 内的请求计数
-	SessionManager             *runtimechat.SessionManager        // 持久化会话管理器
-	RuntimeSession             *runtimechat.Session               // 当前持久化会话
-	SessionUserID              string                             // 当前会话所属用户
-	SessionDir                 string                             // 会话存储目录
-	SessionFilter              ChatSessionListFilter              // 会话列表筛选条件
-	NoInteractive              bool                               // 是否为非交互模式
-	JSONOutput                 bool                               // 是否输出 JSON
-	JSONEnvelope               bool                               // JSON 输出是否使用 envelope
-	KeyHandler                 *ui.KeyHandler                     // 键盘事件处理器（ESC 键中断）
-	MCPEnabled                 bool                               // 是否启用 MCP
-	MCPStatus                  *MCPStatus                         // MCP 状态
-	SkillsBinding              *skillsRuntimeBinding              // Skills 运行时绑定
-	SkillsMode                 string                             // Skills 暴露模式
-	SkillsDebug                bool                               // Skills 调试输出
-	Config                     *config.Config                     // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
-	RetryConfig                RetryConfig                        // 重试配置
-	RequestTimeout             time.Duration                      // 请求超时（0 表示不设置）
-	OutputFormat               string                             // 输出格式（interactive|text|json）
-	InputReader                *bufio.Reader                      // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
-	InputQueue                 *chatInputQueue                    // interactive line queue fed by stdin pump
-	ProfileName                string                             // 当前 profile 名称
-	ProfileAgent               string                             // 当前 profile agent
-	ProfileRoot                string                             // 当前 profile 根目录
-	SystemPromptText           string                             // 组合后的系统提示
-	RuntimeConfigPath          string                             // 解析后的 runtime 配置路径
-	MCPConfigPath              string                             // 解析后的 MCP 配置路径
-	ResolvedSkillDirs          []string                           // 解析后的 skills 目录
-	ProfileContext             map[string]interface{}             // profile 提供的只读运行时上下文
-	ToolPolicy                 *runtimepolicy.ToolExecutionPolicy // profile 解析后的工具策略
-	PermissionMode             runtimepolicy.Mode                 // actor/team run permission mode
-	ApprovalReuseMode          chatApprovalReuseMode              // local actor/team approval reuse policy
-	ActiveTeam                 *chatTeamBinding                   // ambient team binding across turns
-	RuntimeEventBridge         *chatRuntimeEventBridge            // actor runtime event bridge
-	ActorFirstReady            bool                               // actor-first executor established for this session
-	ChatExecutor               aicliChatExecutor                  // shared chatcore-backed chat executor
-	LocalRuntimeHost           *localChatRuntimeHost              // actor-first local runtime host
-	Interaction                *chatInteractionCoordinator        // unified interactive stdout/prompt coordinator
-	Surface                    *ui.FixedBottomSurface             // optional fixed-bottom terminal surface
-	runtimeHTTPCapture         *chatRuntimeHTTPCapture            // recent runtime HTTP response diagnostics
-	localShellArtifactMu       sync.Mutex
-	localShellArtifactCounter  int
-	lastLocalShellArtifactPath string
-	queuedInputDrain           bool     // suppress repeated queued-input notices while draining
-	ImagePaths                 []string // explicit local image attachments for current turn
+	ProviderName                    string
+	Provider                        config.Provider
+	Adapter                         adapter.ProtocolAdapter
+	Model                           string
+	ReasoningEffort                 string
+	DisableTools                    bool
+	HTTPDebug                       bool
+	Stream                          bool
+	BaseURL                         string
+	Messages                        []runtimetypes.Message
+	HTTPClient                      *http.Client
+	cancelCtx                       context.Context                    // 可取消的上下文
+	cancelFunc                      context.CancelFunc                 // 取消函数
+	interrupted                     atomic.Bool                        // 是否被中断（原子操作，避免竞态）
+	FunctionCatalog                 *aicliFunctionCatalog              // 统一管理 builtin tools + skills + schema cache
+	FunctionRegistry                *functions.FunctionRegistry        // Function 注册表
+	FunctionBuilder                 functions.FunctionCallBuilder      // 协议对应的 function/tool builder
+	BuiltinSchemas                  []map[string]interface{}           // 预构建的非 skill function schemas
+	Logger                          *ChatLogger                        // 聊天日志记录器
+	Formatter                       *formatter.MarkdownFormatter       // Markdown 格式化器
+	Layout                          *ui.Layout                         // 屏幕布局
+	InputBox                        *ui.InputBox                       // 输入框
+	TokenCount                      int                                // 当前会话累计的真实 LLM API token 使用量，用于 /status 的 Token usage
+	ContextTokenCount               int                                // 当前活跃上下文的 token 快照，用于 ctx used 与 compact 观察值
+	ContextWindowTokenCount         int                                // 当前模型上下文窗口大小
+	TurnContextTokenCount           int                                // 当前 turn 内请求上下文 token 诊断累计，仅用于调试
+	providerContextTokenCount       int                                // provider usage 返回的当前活跃上下文快照，等待 runtime history 同步后保留
+	providerContextWindowTokenCount int                                // provider usage 对应的上下文窗口大小
+	MsgCount                        int                                // 消息计数
+	TurnRequestCount                int                                // 当前 turn 内的请求计数
+	SessionManager                  *runtimechat.SessionManager        // 持久化会话管理器
+	RuntimeSession                  *runtimechat.Session               // 当前持久化会话
+	SessionUserID                   string                             // 当前会话所属用户
+	SessionDir                      string                             // 会话存储目录
+	SessionFilter                   ChatSessionListFilter              // 会话列表筛选条件
+	NoInteractive                   bool                               // 是否为非交互模式
+	JSONOutput                      bool                               // 是否输出 JSON
+	JSONEnvelope                    bool                               // JSON 输出是否使用 envelope
+	KeyHandler                      *ui.KeyHandler                     // 键盘事件处理器（ESC 键中断）
+	MCPEnabled                      bool                               // 是否启用 MCP
+	MCPStatus                       *MCPStatus                         // MCP 状态
+	SkillsBinding                   *skillsRuntimeBinding              // Skills 运行时绑定
+	SkillsMode                      string                             // Skills 暴露模式
+	SkillsDebug                     bool                               // Skills 调试输出
+	Config                          *config.Config                     // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
+	RetryConfig                     RetryConfig                        // 重试配置
+	RequestTimeout                  time.Duration                      // 请求超时（0 表示不设置）
+	OutputFormat                    string                             // 输出格式（interactive|text|json）
+	InputReader                     *bufio.Reader                      // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
+	InputQueue                      *chatInputQueue                    // interactive line queue fed by stdin pump
+	ProfileName                     string                             // 当前 profile 名称
+	ProfileAgent                    string                             // 当前 profile agent
+	ProfileRoot                     string                             // 当前 profile 根目录
+	SystemPromptText                string                             // 组合后的系统提示
+	RuntimeConfigPath               string                             // 解析后的 runtime 配置路径
+	MCPConfigPath                   string                             // 解析后的 MCP 配置路径
+	ResolvedSkillDirs               []string                           // 解析后的 skills 目录
+	ProfileContext                  map[string]interface{}             // profile 提供的只读运行时上下文
+	ToolPolicy                      *runtimepolicy.ToolExecutionPolicy // profile 解析后的工具策略
+	PermissionMode                  runtimepolicy.Mode                 // actor/team run permission mode
+	ApprovalReuseMode               chatApprovalReuseMode              // local actor/team approval reuse policy
+	ActiveTeam                      *chatTeamBinding                   // ambient team binding across turns
+	RuntimeEventBridge              *chatRuntimeEventBridge            // actor runtime event bridge
+	ActorFirstReady                 bool                               // actor-first executor established for this session
+	ChatExecutor                    aicliChatExecutor                  // shared chatcore-backed chat executor
+	LocalRuntimeHost                *localChatRuntimeHost              // actor-first local runtime host
+	Interaction                     *chatInteractionCoordinator        // unified interactive stdout/prompt coordinator
+	Surface                         *ui.FixedBottomSurface             // optional fixed-bottom terminal surface
+	runtimeHTTPCapture              *chatRuntimeHTTPCapture            // recent runtime HTTP response diagnostics
+	localShellArtifactMu            sync.Mutex
+	localShellArtifactCounter       int
+	lastLocalShellArtifactPath      string
+	queuedInputDrain                bool     // suppress repeated queued-input notices while draining
+	ImagePaths                      []string // explicit local image attachments for current turn
 }
 
 type chatRuntimeHTTPCapture struct {
@@ -183,7 +185,7 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 		exitCommandError("chat", "json", err, nil)
 	}
 
-	if restoreLogger := suppressChatConsoleLogger(cfg); restoreLogger != nil {
+	if restoreLogger := suppressChatConsoleLogger(cfg, opts); restoreLogger != nil {
 		defer restoreLogger()
 	}
 
@@ -283,7 +285,7 @@ func selectProvider(cfg *config.Config) string {
 }
 
 func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
-	ui.PrintSection("选择 Provider")
+	printChatSelectionSection("选择 Provider")
 	theme := ui.GetTheme(ui.ThemeAuto)
 
 	// 列出可用的 providers
@@ -296,7 +298,7 @@ func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
 	sort.Strings(providers)
 
 	if len(providers) == 0 {
-		ui.PrintError("没有可用的 providers")
+		ui.PrintErrorTo(os.Stderr, "没有可用的 providers")
 		return ""
 	}
 
@@ -314,22 +316,22 @@ func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
 		}
 		if p == cfg.Providers.DefaultProvider {
 			if summary != "" {
-				fmt.Printf("  [%d] %-*s  %s %s\n", i+1, maxNameLen, p, theme.Dimmed(summary), theme.Dimmed("(默认)"))
+				printChatSelectionLine("  [%d] %-*s  %s %s", i+1, maxNameLen, p, theme.Dimmed(summary), theme.Dimmed("(默认)"))
 			} else {
-				fmt.Printf("  [%d] %-*s  %s\n", i+1, maxNameLen, p, theme.Dimmed("(默认)"))
+				printChatSelectionLine("  [%d] %-*s  %s", i+1, maxNameLen, p, theme.Dimmed("(默认)"))
 			}
 		} else {
 			if summary != "" {
-				fmt.Printf("  [%d] %-*s  %s\n", i+1, maxNameLen, p, theme.Dimmed(summary))
+				printChatSelectionLine("  [%d] %-*s  %s", i+1, maxNameLen, p, theme.Dimmed(summary))
 			} else {
-				fmt.Printf("  [%d] %s\n", i+1, p)
+				printChatSelectionLine("  [%d] %s", i+1, p)
 			}
 		}
 	}
-	ui.PrintEmptyLine()
+	printChatSelectionBlankLine()
 
 	for {
-		fmt.Print("请输入选项 (或直接回车使用默认): ")
+		printChatSelectionPrompt("请输入选项 (或直接回车使用默认): ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 
@@ -341,7 +343,7 @@ func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
 			if num >= 1 && num <= len(providers) {
 				return providers[num-1]
 			}
-			ui.PrintWarning("无效的选择，请重新输入")
+			printChatSelectionWarning("无效的选择，请重新输入")
 			continue
 		}
 
@@ -351,7 +353,7 @@ func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
 			}
 		}
 
-		ui.PrintWarning("无效的选择，请重新输入")
+		printChatSelectionWarning("无效的选择，请重新输入")
 	}
 }
 
@@ -401,7 +403,7 @@ func selectModel(provider config.Provider) string {
 }
 
 func selectModelWithReader(provider config.Provider, reader *bufio.Reader) string {
-	ui.PrintSection("选择 Model")
+	printChatSelectionSection("选择 Model")
 
 	if len(provider.SupportedModels) == 0 {
 		return ""
@@ -410,15 +412,15 @@ func selectModelWithReader(provider config.Provider, reader *bufio.Reader) strin
 	sort.Strings(provider.SupportedModels)
 	for i, m := range provider.SupportedModels {
 		if m == provider.DefaultModel {
-			fmt.Printf("  [%d] %s %s\n", i+1, m, ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
+			printChatSelectionLine("  [%d] %s %s", i+1, m, ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
 		} else {
-			fmt.Printf("  [%d] %s\n", i+1, m)
+			printChatSelectionLine("  [%d] %s", i+1, m)
 		}
 	}
-	ui.PrintEmptyLine()
+	printChatSelectionBlankLine()
 
 	for {
-		fmt.Print("请输入选项 (或直接回车使用默认): ")
+		printChatSelectionPrompt("请输入选项 (或直接回车使用默认): ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 
@@ -430,7 +432,7 @@ func selectModelWithReader(provider config.Provider, reader *bufio.Reader) strin
 			if num >= 1 && num <= len(provider.SupportedModels) {
 				return provider.SupportedModels[num-1]
 			}
-			ui.PrintWarning("无效的选择，请重新输入")
+			printChatSelectionWarning("无效的选择，请重新输入")
 			continue
 		}
 
@@ -450,14 +452,14 @@ func selectStreamMode() bool {
 }
 
 func selectStreamModeWithReader(reader *bufio.Reader) bool {
-	ui.PrintSection("选择输出模式")
+	printChatSelectionSection("选择输出模式")
 
-	fmt.Println("  [1] 普通 (等待完整响应)")
-	fmt.Printf("  [2] %s (实时输出) %s\n", ui.GetTheme(ui.ThemeAuto).SuccessColor.Sprint("流式"), ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
-	ui.PrintEmptyLine()
+	printChatSelectionLine("  [1] 普通 (等待完整响应)")
+	printChatSelectionLine("  [2] %s (实时输出) %s", ui.GetTheme(ui.ThemeAuto).SuccessColor.Sprint("流式"), ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
+	printChatSelectionBlankLine()
 
 	for {
-		fmt.Print("请输入选项 (默认: 流式): ")
+		printChatSelectionPrompt("请输入选项 (默认: 流式): ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 
@@ -472,7 +474,7 @@ func selectStreamModeWithReader(reader *bufio.Reader) bool {
 			return true
 		}
 
-		ui.PrintWarning("无效的选择，请重新输入")
+		printChatSelectionWarning("无效的选择，请重新输入")
 	}
 }
 

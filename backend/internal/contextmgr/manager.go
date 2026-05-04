@@ -1113,6 +1113,9 @@ func (m *Manager) searchRecallHits(ctx context.Context, sessionID, goal string, 
 		}
 	}
 
+	if len(merged) > 0 {
+		return merged, nil
+	}
 	return merged, err
 }
 

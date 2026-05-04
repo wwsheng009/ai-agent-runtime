@@ -292,6 +292,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	}
 
 	applyChatTokenUsage(session, usage)
+	applyChatContextTokensFromUsage(session, usage, 0, true)
 
 	return &runtimechatcore.ProviderTurnResponse{
 		Message: &runtimeMessage,
@@ -335,18 +336,19 @@ func resolveMaxTokens(session *ChatSession) int {
 }
 
 func adapterRequestConfig(session *ChatSession, messages []map[string]interface{}, req runtimechatcore.ProviderTurnRequest) adapter.RequestConfig {
-	reasoningCapability, hasCapability := runtimellm.ResolveModelCapabilitySpec(session.Model, session.Provider.ModelCapabilities)
+	reasoningCapability, hasCapability := reasoningEffortCapabilityForRequest(session)
 	reasoningModel := reasoningCapability.ReasoningModel
 	if session.Adapter != nil {
 		reasoningModel = reasoningModel || session.Adapter.IsReasoningModel(session.Model)
 	}
 
+	requestReasoningEffort := supportedReasoningEffortForRequest(session.ReasoningEffort, reasoningCapability, hasCapability)
 	config := adapter.RequestConfig{
 		Model:                  session.Model,
 		Messages:               messages,
 		Stream:                 req.Stream,
 		MaxTokens:              resolveMaxTokens(session),
-		ReasoningEffort:        runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort),
+		ReasoningEffort:        requestReasoningEffort,
 		ReasoningModel:         reasoningModel,
 		ReasoningEffortBudgets: nil,
 		Temperature:            0.7,
@@ -361,8 +363,8 @@ func adapterRequestConfig(session *ChatSession, messages []map[string]interface{
 	for key, value := range req.Metadata {
 		config.Metadata[key] = value
 	}
-	if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
-		config.Metadata["reasoning_effort"] = reasoningEffort
+	if requestReasoningEffort != "" {
+		config.Metadata["reasoning_effort"] = requestReasoningEffort
 	}
 	if session.RuntimeSession != nil && strings.TrimSpace(session.RuntimeSession.ID) != "" {
 		config.Metadata["prompt_cache_key"] = strings.TrimSpace(session.RuntimeSession.ID)

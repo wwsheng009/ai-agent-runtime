@@ -120,6 +120,44 @@ func TestBuildChatFinalCleanup_ClearsScreenAndStopsPromptRedraw(t *testing.T) {
 	}
 }
 
+func TestPresentChatSession_WritesStartupPreambleAndSkillsToStderr(t *testing.T) {
+	session := &ChatSession{
+		ProviderName:   "codex_ee",
+		Provider:       config.Provider{Protocol: "codex", BaseURL: "https://example.com"},
+		Model:          "gpt-5.2-code",
+		Stream:         true,
+		RequestTimeout: 30 * time.Second,
+		SkillsBinding:  &skillsRuntimeBinding{count: 2, exposureMode: "prefer", exposureTopK: 7},
+		DisableTools:   false,
+	}
+
+	stdout, stderr := captureStdoutStderr(t, func() {
+		presentChatSession(session)
+	})
+
+	if stdout != "" {
+		t.Fatalf("expected no stdout output, got:\n%s", stdout)
+	}
+	for _, expected := range []string{
+		"Provider:",
+		"Model:",
+		"Stream:",
+		"Skills:",
+		"Skills Mode:",
+		"Skills Top-K:",
+	} {
+		if !strings.Contains(stderr, expected) {
+			t.Fatalf("expected stderr to contain %q, got:\n%s", expected, stderr)
+		}
+	}
+	if !strings.Contains(stderr, "已启用 (2 个 AI 可调用 skills)") {
+		t.Fatalf("expected skills summary on stderr, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "prefer") || !strings.Contains(stderr, "7") {
+		t.Fatalf("expected skills mode/top-k details on stderr, got:\n%s", stderr)
+	}
+}
+
 func TestShouldInitializeChatInteractiveUI_DisabledForJSONAndLegacyMode(t *testing.T) {
 	if shouldInitializeChatInteractiveUI(&chatCommandOptions{OutputFormat: "json"}) {
 		t.Fatal("expected JSON output to disable interactive UI")
@@ -380,6 +418,103 @@ func TestSyncRuntimeSessionBackIntoCLI_RecomputesContextSnapshotFromRuntimeHisto
 	}
 	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextWindowTokenCount); !ok || got != 270000 {
 		t.Fatalf("expected persisted context window token count 270000, got ok=%v value=%d", ok, got)
+	}
+}
+
+func TestSyncRuntimeSessionBackIntoCLI_PreservesProviderContextSnapshotAfterHistorySync(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	runtimeSession.ReplaceHistory([]runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("You are helpful."),
+		*runtimetypes.NewUserMessage("hello"),
+		*runtimetypes.NewAssistantMessage("world"),
+	})
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextContextTokenCount)
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextContextWindowTokenCount)
+	if err := manager.Update(context.Background(), runtimeSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:                    "test-provider",
+		Provider:                        config.Provider{Protocol: "openai"},
+		Model:                           "test-model",
+		SessionManager:                  manager,
+		RuntimeSession:                  runtimeSession,
+		SessionUserID:                   userID,
+		ContextWindowTokenCount:         270000,
+		providerContextTokenCount:       24762,
+		providerContextWindowTokenCount: 270000,
+	}
+
+	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
+		t.Fatalf("syncRuntimeSessionBackIntoCLI: %v", err)
+	}
+
+	if session.ContextTokenCount != 24762 {
+		t.Fatalf("expected provider usage snapshot to survive history sync, got %d", session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 270000 {
+		t.Fatalf("expected provider context window to survive history sync, got %d", session.ContextWindowTokenCount)
+	}
+	stored, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextTokenCount); !ok || got != 24762 {
+		t.Fatalf("expected persisted provider context token count 24762, got ok=%v value=%d", ok, got)
+	}
+}
+
+func TestSyncRuntimeSessionBackIntoCLIAfterFailureDoesNotInferContextFromFailedPrompt(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	runtimeSession.ReplaceHistory([]runtimetypes.Message{
+		*runtimetypes.NewUserMessage("failed prompt that never reached a usable provider response"),
+	})
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextContextTokenCount)
+	delete(runtimeSession.Metadata.Context, chatRuntimeContextContextWindowTokenCount)
+	if err := manager.Update(context.Background(), runtimeSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:   "CODEX_04",
+		Provider:       config.Provider{Protocol: "codex"},
+		Model:          "gpt-5.4",
+		SessionManager: manager,
+		RuntimeSession: runtimeSession,
+		SessionUserID:  userID,
+	}
+
+	if err := syncRuntimeSessionBackIntoCLIAfterFailure(session); err != nil {
+		t.Fatalf("syncRuntimeSessionBackIntoCLIAfterFailure: %v", err)
+	}
+	if session.ContextTokenCount != 0 {
+		t.Fatalf("expected failed provider request not to infer active context from prompt history, got %d", session.ContextTokenCount)
+	}
+	stored, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextTokenCount); ok {
+		t.Fatalf("expected persisted failed session to omit active context token count, got %d", got)
 	}
 }
 

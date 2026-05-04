@@ -9,9 +9,9 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 const (
@@ -169,6 +169,12 @@ func syncChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Se
 		runtimeSession.Metadata.Context = make(map[string]interface{})
 	}
 	runtimeSession.Metadata.Context[chatRuntimeContextPermissionMode] = string(session.PermissionMode)
+	requestedModel := strings.TrimSpace(session.Model)
+	if requestedModel != "" {
+		runtimeSession.Metadata.Context[toolbroker.AgentSessionContextRequestedModel] = requestedModel
+	} else {
+		delete(runtimeSession.Metadata.Context, toolbroker.AgentSessionContextRequestedModel)
+	}
 	delete(runtimeSession.Metadata.Context, chatRuntimeContextActiveTeamID)
 	delete(runtimeSession.Metadata.Context, chatRuntimeContextActiveAgentID)
 	delete(runtimeSession.Metadata.Context, chatRuntimeContextActiveTaskID)

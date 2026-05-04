@@ -1174,8 +1174,88 @@ func TestReActLoop_Run_PromptBudgetCompactsActiveTurnReplayBeforeThirdRequest(t 
 		}
 	}
 	require.True(t, foundCompaction, "expected third request to include active-turn compaction")
-	_, ok := provider.requests[2].Metadata["context_preflight"]
-	require.False(t, ok, "expected message builder compaction to avoid a later preflight compaction")
+	rawPreflight, ok := provider.requests[2].Metadata["context_preflight"]
+	require.True(t, ok, "expected prompt preflight metadata on prompt-only compaction")
+	preflight, ok := rawPreflight.(map[string]interface{})
+	require.True(t, ok, "expected context_preflight metadata map, got %T", rawPreflight)
+	require.Equal(t, true, preflight["active_turn_prompt_only"])
+	require.Equal(t, true, preflight["active_turn_compacted"])
+}
+
+func TestReActLoop_RunWithSession_PromptOnlyActiveTurnCompactionDoesNotPersist(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "先查看一次日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+				},
+			},
+			{
+				Content: "继续查看最新日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+				},
+			},
+			{
+				Content: "已完成分析。",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		MaxSteps:         3,
+		DefaultMaxTokens: 256,
+		SystemPrompt:     "You are a helpful assistant.",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens":    680,
+			"context_max_messages":         16,
+			"context_keep_recent_messages": 8,
+		},
+	}, &MockSequenceMCPManager{output: "LOG " + large}, llmRuntime)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        3,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+	session := newTestHistorySession("session-prompt-only-compaction")
+
+	result, err := loop.RunWithSession(context.Background(), "继续处理", session)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Len(t, provider.requests, 3)
+
+	foundPromptOnlyCompaction := false
+	for _, message := range provider.requests[2].Messages {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			foundPromptOnlyCompaction = true
+			break
+		}
+	}
+	require.True(t, foundPromptOnlyCompaction, "expected provider prompt view to include active-turn compaction")
+
+	messages := session.GetMessages()
+	require.Len(t, messages, 6)
+	for _, message := range messages {
+		require.False(t, message.Metadata.GetBool("active_turn_compaction", false), "did not expect prompt-only compaction in persisted history: %#v", messages)
+	}
+	require.Equal(t, "tool", messages[2].Role)
+	require.Equal(t, "tool", messages[4].Role)
+	require.Contains(t, messages[2].Content, "LOG ")
+	require.Contains(t, messages[4].Content, "LOG ")
+	require.Equal(t, "已完成分析。", messages[5].Content)
 }
 
 func TestReActLoop_EnforcePromptPreflight_CompactsActiveTurnReplayByTokenBudget(t *testing.T) {

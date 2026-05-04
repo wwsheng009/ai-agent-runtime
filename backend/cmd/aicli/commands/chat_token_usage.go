@@ -46,13 +46,23 @@ func resetChatContextTokenUsage(session *ChatSession) {
 	session.ContextTokenCount = 0
 	session.ContextWindowTokenCount = 0
 	session.TurnContextTokenCount = 0
+	session.providerContextTokenCount = 0
+	session.providerContextWindowTokenCount = 0
 }
 
 func applyChatContextTokens(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool) {
+	applyChatContextTokensLocked(session, promptTokens, windowTokens, forceRefresh, false)
+}
+
+func applyChatContextTokensLocked(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool, providerReported bool) {
 	if session == nil {
 		return
 	}
 	changed := false
+	if !providerReported {
+		session.providerContextTokenCount = 0
+		session.providerContextWindowTokenCount = 0
+	}
 	if promptTokens > 0 && session.ContextTokenCount != promptTokens {
 		session.ContextTokenCount = promptTokens
 		changed = true
@@ -64,6 +74,34 @@ func applyChatContextTokens(session *ChatSession, promptTokens int, windowTokens
 	if (changed || forceRefresh) && session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
+}
+
+func applyChatContextTokensFromUsage(session *ChatSession, usage *runtimetypes.TokenUsage, windowTokens int, forceRefresh bool) int {
+	if session == nil || usage == nil {
+		return 0
+	}
+	contextTokens := usage.TotalTokens
+	if contextTokens <= 0 {
+		contextTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	if contextTokens <= 0 {
+		return 0
+	}
+	if session.ContextTokenCount > 0 && contextTokens < session.ContextTokenCount {
+		changed := false
+		if windowTokens > 0 && session.ContextWindowTokenCount != windowTokens {
+			session.ContextWindowTokenCount = windowTokens
+			changed = true
+		}
+		if (changed || forceRefresh) && session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
+		}
+		return session.ContextTokenCount
+	}
+	session.providerContextTokenCount = contextTokens
+	session.providerContextWindowTokenCount = windowTokens
+	applyChatContextTokensLocked(session, contextTokens, windowTokens, forceRefresh, true)
+	return contextTokens
 }
 
 func applyChatContextTokensFromMessages(session *ChatSession, messages []runtimetypes.Message, windowTokens int, forceRefresh bool) int {
@@ -86,11 +124,9 @@ func refreshChatContextTokenSnapshotFromMessages(session *ChatSession, windowTok
 		return 0
 	}
 	if !chatMessagesHaveConversation(session.Messages) {
-		if len(session.Messages) == 0 {
-			resetChatContextTokenUsage(session)
-			if forceRefresh && session.Interaction != nil {
-				session.Interaction.RefreshStatus("")
-			}
+		resetChatContextTokenUsage(session)
+		if forceRefresh && session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
 		}
 		return 0
 	}
@@ -108,6 +144,36 @@ func refreshChatContextTokenSnapshotFromMessages(session *ChatSession, windowTok
 		}
 	}
 	return applyChatContextTokensFromMessages(session, session.Messages, windowTokens, forceRefresh)
+}
+
+func resolveChatContextSnapshotTokens(session *ChatSession, fallbackMessages []runtimetypes.Message) int {
+	if session == nil {
+		return 0
+	}
+	if session.ContextTokenCount > 0 {
+		return session.ContextTokenCount
+	}
+	messages := fallbackMessages
+	if len(messages) == 0 && len(session.Messages) > 0 {
+		messages = session.Messages
+	}
+	if len(messages) == 0 && session.RuntimeSession != nil && len(session.RuntimeSession.History) > 0 {
+		messages = session.RuntimeSession.History
+	}
+	if !chatMessagesHaveConversation(messages) {
+		return 0
+	}
+	return countChatContextTokensForMessages(session, messages)
+}
+
+func resolveChatObservedTokenUsage(session *ChatSession, fallbackMessages []runtimetypes.Message) int {
+	if session == nil {
+		return 0
+	}
+	if session.ContextTokenCount > 0 {
+		return session.ContextTokenCount
+	}
+	return resolveChatContextSnapshotTokens(session, fallbackMessages)
 }
 
 func applyChatTurnContextTokens(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool) {

@@ -101,6 +101,43 @@ func TestChatRuntimeEventBridge_LLMRequestStartedUpdatesActiveContextSnapshot(t 
 	if session.TurnContextTokenCount != 47398 {
 		t.Fatalf("expected finished event not to double count turn aggregate tokens, got %d", session.TurnContextTokenCount)
 	}
+	if session.ContextTokenCount != 1400 {
+		t.Fatalf("expected finished usage total to update active context snapshot, got %d", session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 270000 {
+		t.Fatalf("expected finished event to preserve context window token count 270000, got %d", session.ContextWindowTokenCount)
+	}
+}
+
+func TestChatRuntimeEventBridge_LLMRequestFinishedDoesNotLowerActiveContextSnapshot(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	session := &ChatSession{
+		RuntimeSession:    runtimeSession,
+		ContextTokenCount: 1320,
+		NoInteractive:     true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "llm.request.finished",
+		SessionID: runtimeSession.ID,
+		Payload: map[string]interface{}{
+			"success":                 true,
+			"context_prompt_tokens":   1322,
+			"context_window_tokens":   256000,
+			"usage_prompt_tokens":     12,
+			"usage_completion_tokens": 28,
+			"usage_total_tokens":      40,
+		},
+	})
+
+	if session.ContextTokenCount != 1320 {
+		t.Fatalf("expected smaller request usage not to lower active context snapshot, got %d", session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 256000 {
+		t.Fatalf("expected context window to update, got %d", session.ContextWindowTokenCount)
+	}
 }
 
 func TestChatRuntimeEventBridge_SessionCompactCompletedResetsContextUsageToTokenAfter(t *testing.T) {
@@ -127,8 +164,8 @@ func TestChatRuntimeEventBridge_SessionCompactCompletedResetsContextUsageToToken
 	if session.ContextTokenCount != 1200 {
 		t.Fatalf("expected compact completion to set context token count to token_after, got %d", session.ContextTokenCount)
 	}
-	if session.TokenCount != 0 {
-		t.Fatalf("expected compact completion to reset cumulative ctx used token count, got %d", session.TokenCount)
+	if session.TokenCount != 9999 {
+		t.Fatalf("expected compact completion to preserve cumulative API token count, got %d", session.TokenCount)
 	}
 	if session.TurnContextTokenCount != 0 {
 		t.Fatalf("expected compact completion to clear turn aggregate context usage, got %d", session.TurnContextTokenCount)

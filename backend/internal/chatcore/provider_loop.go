@@ -78,6 +78,11 @@ type ToolLoopResult struct {
 	History  []types.Message
 }
 
+type promptPreflightHistory struct {
+	PromptHistory    []types.Message
+	CanonicalHistory []types.Message
+}
+
 // ExecuteToolLoop replays provider tool calls until the provider returns a final assistant message.
 func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult, error) {
 	if req.Provider == nil {
@@ -112,14 +117,20 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 	response := NewChatResult()
 
 	for {
-		compactedHistory, preflightErr := enforceToolLoopPromptPreflight(ctx, history, req)
+		preflightHistory, preflightErr := enforceToolLoopPromptPreflight(ctx, history, req)
 		if preflightErr != nil {
 			return nil, preflightErr
 		}
-		history = compactedHistory
+		promptHistory := history
+		if len(preflightHistory.PromptHistory) > 0 {
+			promptHistory = preflightHistory.PromptHistory
+		}
+		if len(preflightHistory.CanonicalHistory) > 0 {
+			history = preflightHistory.CanonicalHistory
+		}
 
 		turn, err := req.Provider.Complete(ctx, ProviderTurnRequest{
-			Messages:  cloneMessages(history),
+			Messages:  cloneMessages(promptHistory),
 			Tools:     cloneToolDefinitions(req.Tools),
 			Stream:    req.Stream,
 			Metadata:  cloneInterfaceMap(req.Metadata),
@@ -191,9 +202,6 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 				}
 			}
 			history = append(history, *toolMessage)
-			if compacted, changed := compactToolLoopActiveTurnReplay(history, req); changed {
-				history = compacted
-			}
 
 			emitChatEvent(req.EventSink, ChatEvent{
 				Type:       EventTool,
@@ -219,14 +227,42 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 	}
 }
 
-func enforceToolLoopPromptPreflight(ctx context.Context, history []types.Message, req ToolLoopRequest) ([]types.Message, error) {
+func enforceToolLoopPromptPreflight(ctx context.Context, history []types.Message, req ToolLoopRequest) (promptPreflightHistory, error) {
+	result := promptPreflightHistory{
+		PromptHistory: cloneMessages(history),
+	}
 	if req.CountTokens == nil || req.ActiveTurnMaxTokens <= 0 {
-		return history, nil
+		if compacted, changed := compactToolLoopActiveTurnReplay(history, req); changed {
+			return promptPreflightHistory{
+				PromptHistory: cloneMessages(compacted),
+			}, nil
+		}
+		return result, nil
 	}
 
 	promptTokensBefore := req.CountTokens(history)
 	if promptTokensBefore <= req.ActiveTurnMaxTokens {
-		return history, nil
+		return result, nil
+	}
+
+	if req.HistoryCompactor != nil {
+		if compacted, changed, err := req.HistoryCompactor(ctx, history); err == nil && changed && len(compacted) > 0 {
+			currentTokens := req.CountTokens(compacted)
+			if currentTokens <= req.ActiveTurnMaxTokens {
+				return promptPreflightHistory{
+					PromptHistory:    cloneMessages(compacted),
+					CanonicalHistory: cloneMessages(compacted),
+				}, nil
+			}
+			return result, newToolLoopPromptPreflightError(
+				req,
+				"prompt_still_exceeds_budget_after_compaction",
+				currentTokens,
+				false,
+				compacted,
+				compacted,
+			)
+		}
 	}
 
 	alreadyCompacted := historyguard.HasActiveTurnCompactionSummary(history)
@@ -238,42 +274,26 @@ func enforceToolLoopPromptPreflight(ctx context.Context, history []types.Message
 		currentTokens = req.CountTokens(compacted)
 		activeTurnCompacted = true
 		if currentTokens <= req.ActiveTurnMaxTokens {
-			return currentHistory, nil
+			return promptPreflightHistory{
+				PromptHistory: cloneMessages(currentHistory),
+			}, nil
 		}
 	} else if alreadyCompacted {
 		activeTurnCompacted = true
 	}
 
-	if req.HistoryCompactor != nil {
-		if compacted, changed, err := req.HistoryCompactor(ctx, currentHistory); err == nil && changed && len(compacted) > 0 {
-			currentHistory = compacted
-			currentTokens = req.CountTokens(compacted)
-			if currentTokens <= req.ActiveTurnMaxTokens {
-				return currentHistory, nil
-			}
-			return currentHistory, newToolLoopPromptPreflightError(
-				req,
-				"prompt_still_exceeds_budget_after_compaction",
-				currentTokens,
-				activeTurnCompacted,
-				currentHistory,
-				currentHistory,
-			)
-		}
-	}
-
 	if activeTurnCompacted {
-		return currentHistory, newToolLoopPromptPreflightError(
+		return result, newToolLoopPromptPreflightError(
 			req,
 			"prompt_still_exceeds_budget_after_compaction",
 			currentTokens,
 			true,
 			currentHistory,
-			currentHistory,
+			nil,
 		)
 	}
 
-	return history, newToolLoopPromptPreflightError(req, "active_turn_not_compactable", promptTokensBefore, false, history, nil)
+	return result, newToolLoopPromptPreflightError(req, "active_turn_not_compactable", promptTokensBefore, false, history, nil)
 }
 
 func compactToolLoopActiveTurnReplay(history []types.Message, req ToolLoopRequest) ([]types.Message, bool) {

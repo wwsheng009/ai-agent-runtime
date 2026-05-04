@@ -181,6 +181,7 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 		return "", fmt.Errorf("共享 chat history 更新失败: %w", err)
 	}
 	applyChatContextTokensFromMessages(session, loopResult.History, promptBudget.ModelCapabilityMaxContextTokens, true)
+	applyChatContextTokensFromUsage(session, loopResult.Response.Usage, promptBudget.ModelCapabilityMaxContextTokens, true)
 	warnIfChatSessionSyncFails(session, "shared chatcore sync", syncRuntimeSessionFromChat(session))
 
 	if session.Logger != nil && len(loopResult.Response.ToolExecutions) > 0 {
@@ -337,7 +338,7 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 		History:           history,
 		Phase:             compactruntime.PhasePreTurn,
 		CountTokens:       llmRuntime.CountMessagesTokens,
-		ObservedTokens:    session.TokenCount,
+		ObservedTokens:    resolveChatContextSnapshotTokens(session, history),
 		HasObservedTokens: true,
 	})
 	report := &sharedChatAutoCompactReport{
@@ -363,7 +364,6 @@ func applyChatCompactContextUsage(session *ChatSession, result *compactruntime.R
 	}
 	windowTokens := status.MaxContextTokens
 	if result != nil {
-		session.TokenCount = 0
 		session.TurnContextTokenCount = 0
 		contextTokens := result.TokenAfter
 		if contextTokens <= 0 && len(result.ReplacementHistory) > 0 {
@@ -408,15 +408,17 @@ func buildSharedChatPromptPreflightCompactor(session *ChatSession, renderer *aic
 			return history, false, nil
 		}
 		result, status, err := compactor.MaybeCompact(ctx, compactruntime.Request{
-			SessionID:   sessionID,
-			TaskID:      sessionID,
-			Provider:    providerName,
-			Model:       model,
-			Mode:        compactruntime.ModeLocal,
-			Force:       true,
-			History:     history,
-			Phase:       "mid_turn",
-			CountTokens: countSharedChatMessagesTokens,
+			SessionID:         sessionID,
+			TaskID:            sessionID,
+			Provider:          providerName,
+			Model:             model,
+			Mode:              compactruntime.ModeLocal,
+			Force:             true,
+			History:           history,
+			Phase:             "mid_turn",
+			CountTokens:       countSharedChatMessagesTokens,
+			ObservedTokens:    resolveChatContextSnapshotTokens(session, history),
+			HasObservedTokens: true,
 		})
 		report := &sharedChatAutoCompactReport{
 			Result: result,

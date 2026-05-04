@@ -9,6 +9,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 func TestHandleCommand_ModelDoesNotFallThroughToPermissionMode(t *testing.T) {
@@ -232,6 +233,9 @@ func TestHandleCommand_ModelSwitchAppliesMappingAndClearsUnsupportedReasoning(t 
 	}
 	if got := runtimeSessionContextString(stored, chatRuntimeContextModel); got != "canonical-model" {
 		t.Fatalf("expected stored model canonical-model, got %q", got)
+	}
+	if got := runtimeSessionContextString(stored, toolbroker.AgentSessionContextRequestedModel); got != "canonical-model" {
+		t.Fatalf("expected stored requested model canonical-model, got %q", got)
 	}
 	if got := runtimeSessionContextString(stored, chatRuntimeContextReasoningEffort); got != "" {
 		t.Fatalf("expected stored reasoning effort to be cleared, got %q", got)

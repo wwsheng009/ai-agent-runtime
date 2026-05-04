@@ -237,7 +237,8 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		prefixPowershellUTF8(cmd)
 	}
 
-	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifact(cmd, captureSettings.captureLimitBytes(), "toolkit", command, "")
+	outputMirror := runtimeexecutor.OutputMirrorFromContext(ctx)
+	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureSettings.captureLimitBytes(), "toolkit", command, "", outputMirror)
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command)
 	if err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
@@ -347,7 +348,12 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		prefixPowershellUTF8(cmd)
 	}
 
-	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifact(cmd, captureLimitBytesFromExecConfig(cfg), "toolkit", command, "")
+	outputMirror := runtimeexecutor.OutputMirrorFromContext(ctx)
+	if outputMirror != nil {
+		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
+	}
+
+	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureLimitBytesFromExecConfig(cfg), "toolkit", command, "", outputMirror)
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command)
 
 	if err != nil {

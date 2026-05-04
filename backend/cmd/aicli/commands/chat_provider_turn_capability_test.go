@@ -51,6 +51,65 @@ func TestAdapterRequestConfig_PopulatesModelCapabilityFields(t *testing.T) {
 	}
 }
 
+func TestAdapterRequestConfig_OmitsUnsupportedReasoningEffortWhenCapabilityRestrictsIt(t *testing.T) {
+	session := &ChatSession{
+		ProviderName: "nvidia",
+		Provider: config.Provider{
+			Enabled:  true,
+			Protocol: "openai",
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"*": {
+					ReasoningModel:   true,
+					ReasoningEfforts: []string{"minimal", "low", "medium", "high"},
+				},
+			},
+		},
+		Adapter:         adapter.GetAdapterOrDefault("openai"),
+		Model:           "z-ai/glm4.7",
+		ReasoningEffort: "max",
+	}
+
+	cfg := adapterRequestConfig(session, nil, runtimechatcore.ProviderTurnRequest{Stream: true})
+	if cfg.ReasoningEffort != "" {
+		t.Fatalf("expected unsupported reasoning_effort to be omitted, got %q", cfg.ReasoningEffort)
+	}
+	if got := cfg.Metadata["reasoning_effort"]; got != nil {
+		t.Fatalf("expected unsupported reasoning_effort metadata to be omitted, got %#v", got)
+	}
+
+	body := session.Adapter.BuildRequest(cfg)
+	if got := body["reasoning_effort"]; got != nil {
+		t.Fatalf("expected OpenAI request to omit unsupported reasoning_effort, got %#v", got)
+	}
+}
+
+func TestAdapterRequestConfig_OmitsNVIDIAUnsupportedReasoningEffortWithoutConfiguredCapability(t *testing.T) {
+	session := &ChatSession{
+		ProviderName: "nvidia",
+		Provider: config.Provider{
+			Enabled:  true,
+			Protocol: "openai",
+			BaseURL:  "https://integrate.api.nvidia.com",
+		},
+		Adapter:         adapter.GetAdapterOrDefault("openai"),
+		Model:           "z-ai/glm4.7",
+		ReasoningEffort: "max",
+	}
+
+	cfg := adapterRequestConfig(session, nil, runtimechatcore.ProviderTurnRequest{Stream: true})
+	if cfg.ReasoningEffort != "" {
+		t.Fatalf("expected nvidia unsupported reasoning_effort to be omitted, got %q", cfg.ReasoningEffort)
+	}
+	if got := cfg.Metadata["reasoning_effort"]; got != nil {
+		t.Fatalf("expected nvidia unsupported reasoning_effort metadata to be omitted, got %#v", got)
+	}
+
+	body := session.Adapter.BuildRequest(cfg)
+	if got := body["reasoning_effort"]; got != nil {
+		t.Fatalf("expected OpenAI request to omit nvidia unsupported reasoning_effort, got %#v", got)
+	}
+}
+
 // TestAdapterRequestConfig_AnthropicBuildRequestDerivesThinking 验证 Anthropic
 // adapter 在请求层使用 ReasoningEffort + ReasoningEffortBudgets 生成 thinking 配置，
 // 而不是依赖会话层直接传入协议特定字段。

@@ -3,6 +3,7 @@ package commands
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -45,7 +46,7 @@ func TestSuppressChatConsoleLoggerRoutesLogsToFileOnly(t *testing.T) {
 			FilePath:      filePath,
 			EnableConsole: true,
 		},
-	})
+	}, nil)
 	if restoreLogger == nil {
 		t.Fatal("expected chat console logger suppression to be applied")
 	}
@@ -92,5 +93,88 @@ func TestSuppressChatConsoleLoggerRoutesLogsToFileOnly(t *testing.T) {
 	}
 	if !strings.Contains(string(fileData), "\"scope\":\"chat\"") {
 		t.Fatalf("expected file log to contain structured field, got %q", string(fileData))
+	}
+}
+
+func TestSuppressChatConsoleLoggerCreatesFallbackFileWhenFilePathMissing(t *testing.T) {
+	logDir := t.TempDir()
+
+	originalStdout := os.Stdout
+	originalStderr := os.Stderr
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+
+	os.Stdout = stdoutWriter
+	os.Stderr = stderrWriter
+	defer func() {
+		os.Stdout = originalStdout
+		os.Stderr = originalStderr
+	}()
+
+	restoreLogger := suppressChatConsoleLogger(&config.Config{
+		Log: logpkg.LogConfig{
+			Level:         "info",
+			Format:        "json",
+			Output:        "stdout",
+			FilePath:      "",
+			EnableConsole: true,
+		},
+	}, &chatCommandOptions{LogDir: logDir})
+	if restoreLogger == nil {
+		t.Fatal("expected chat console logger suppression to be applied with fallback file path")
+	}
+	defer restoreLogger()
+
+	logpkg.Info("chat logger fallback test", logpkg.String("scope", "chat"))
+	if err := logpkg.Sync(); err != nil {
+		t.Fatalf("sync logger: %v", err)
+	}
+
+	if err := stdoutWriter.Close(); err != nil {
+		t.Fatalf("close stdout writer: %v", err)
+	}
+	if err := stderrWriter.Close(); err != nil {
+		t.Fatalf("close stderr writer: %v", err)
+	}
+
+	stdoutData, err := io.ReadAll(stdoutReader)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	stderrData, err := io.ReadAll(stderrReader)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+
+	if strings.Contains(string(stdoutData), "chat logger fallback test") {
+		t.Fatalf("expected no chat log on stdout, got %q", string(stdoutData))
+	}
+	if strings.Contains(string(stderrData), "chat logger fallback test") {
+		t.Fatalf("expected no chat log on stderr, got %q", string(stderrData))
+	}
+
+	fallbackFiles, err := filepath.Glob(filepath.Join(logDir, "chat-console-*.log"))
+	if err != nil {
+		t.Fatalf("glob fallback log files: %v", err)
+	}
+	if len(fallbackFiles) != 1 {
+		t.Fatalf("expected one fallback log file, got %d: %v", len(fallbackFiles), fallbackFiles)
+	}
+
+	fileData, err := os.ReadFile(fallbackFiles[0])
+	if err != nil {
+		t.Fatalf("read fallback log file: %v", err)
+	}
+	if !strings.Contains(string(fileData), "chat logger fallback test") {
+		t.Fatalf("expected fallback file log to contain chat message, got %q", string(fileData))
+	}
+	if !strings.Contains(string(fileData), "\"scope\":\"chat\"") {
+		t.Fatalf("expected fallback file log to contain structured field, got %q", string(fileData))
 	}
 }

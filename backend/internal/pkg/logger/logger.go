@@ -2,6 +2,7 @@ package logger
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,22 +15,25 @@ import (
 )
 
 var (
-	globalLogger *zap.Logger
-	globalSugar  *zap.SugaredLogger
-	loggerMu     sync.RWMutex
+	globalLogger  *zap.Logger
+	globalSugar   *zap.SugaredLogger
+	globalClosers []io.Closer
+	loggerMu      sync.RWMutex
 )
 
 // InitLogger initializes the global logger
 func InitLogger(cfg *LogConfig) error {
-	logger, sugar, err := buildLogger(cfg)
+	logger, sugar, closers, err := buildLogger(cfg)
 	if err != nil {
 		return err
 	}
 
 	loggerMu.Lock()
 	oldLogger := globalLogger
+	oldClosers := globalClosers
 	globalLogger = logger
 	globalSugar = sugar
+	globalClosers = closers
 	loggerMu.Unlock()
 
 	// 初始化或刷新模块日志管理器
@@ -38,13 +42,14 @@ func InitLogger(cfg *LogConfig) error {
 	if oldLogger != nil {
 		_ = oldLogger.Sync()
 	}
+	closeLoggerClosers(oldClosers)
 
 	return nil
 }
 
-func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, error) {
+func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, []io.Closer, error) {
 	if cfg == nil {
-		return nil, nil, fmt.Errorf("log config is required")
+		return nil, nil, nil, fmt.Errorf("log config is required")
 	}
 
 	// 复制一份配置，避免运行时热更新时意外修改外部配置快照。
@@ -55,7 +60,7 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, error) {
 
 	targets, err := resolveOutputTargets(&effectiveCfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Create encoder config (基础配置)
@@ -95,6 +100,7 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, error) {
 	}
 
 	var cores []zapcore.Core
+	var closers []io.Closer
 
 	if targets.Stdout {
 		// 控制台日志走 stderr，避免与 CLI 的主输出流（stdout）混在一起。
@@ -103,22 +109,23 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, error) {
 
 	if targets.File {
 		if strings.TrimSpace(effectiveCfg.FilePath) == "" {
-			return nil, nil, fmt.Errorf("file_writer: file_path is required")
+			return nil, nil, nil, fmt.Errorf("file_writer: file_path is required")
 		}
 
 		dir := dirPath(effectiveCfg.FilePath)
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, nil, fmt.Errorf("failed to create log directory: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to create log directory: %w", err)
 		}
 
-		fileWriter := zapcore.AddSync(&lumberjack.Logger{
+		fileWriter := &lumberjack.Logger{
 			Filename:   effectiveCfg.FilePath,
 			MaxSize:    effectiveCfg.MaxSize,
 			MaxBackups: effectiveCfg.MaxBackups,
 			MaxAge:     effectiveCfg.MaxAge,
 			Compress:   effectiveCfg.Compress,
-		})
-		cores = append(cores, zapcore.NewCore(fileEncoder, fileWriter, level))
+		}
+		closers = append(closers, fileWriter)
+		cores = append(cores, zapcore.NewCore(fileEncoder, zapcore.AddSync(fileWriter), level))
 	}
 
 	if len(cores) == 0 {
@@ -137,7 +144,16 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, error) {
 	}
 
 	logger := zap.New(core, opts...)
-	return logger, logger.Sugar(), nil
+	return logger, logger.Sugar(), closers, nil
+}
+
+func closeLoggerClosers(closers []io.Closer) {
+	for i := len(closers) - 1; i >= 0; i-- {
+		if closers[i] == nil {
+			continue
+		}
+		_ = closers[i].Close()
+	}
 }
 
 type outputTargets struct {

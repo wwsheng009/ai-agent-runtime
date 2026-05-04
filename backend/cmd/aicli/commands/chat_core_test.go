@@ -333,6 +333,50 @@ func TestAICLIProviderTurnExecutor_AccumulatesProviderUsageTotalTokens(t *testin
 	if session.TokenCount != 22 {
 		t.Fatalf("expected cumulative used tokens 22, got %d", session.TokenCount)
 	}
+	if session.ContextTokenCount != 15 {
+		t.Fatalf("expected provider usage to update active context snapshot 15, got %d", session.ContextTokenCount)
+	}
+}
+
+func TestAICLISharedChatExecutor_DoesNotDoubleCountLoopResultUsage(t *testing.T) {
+	originalExecute := executeToolLoop
+	defer func() {
+		executeToolLoop = originalExecute
+	}()
+
+	executeToolLoop = func(ctx context.Context, req runtimechatcore.ToolLoopRequest) (*runtimechatcore.ToolLoopResult, error) {
+		return &runtimechatcore.ToolLoopResult{
+			Response: &runtimechatcore.ChatResult{
+				Output: "done",
+				Usage:  &types.TokenUsage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+			},
+			History: append(append([]types.Message(nil), req.History...),
+				*types.NewUserMessage(req.Prompt),
+				*types.NewAssistantMessage("done"),
+			),
+		}, nil
+	}
+
+	session := &ChatSession{
+		DisableTools: true,
+		Model:        "shared-model",
+		ProviderName: "shared-provider",
+		TokenCount:   7,
+	}
+
+	output, err := newAICLISharedChatExecutor().Execute(context.Background(), session, "hello")
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "done" {
+		t.Fatalf("unexpected output: %q", output)
+	}
+	if session.TokenCount != 7 {
+		t.Fatalf("expected shared executor not to re-apply final loop usage, got %d", session.TokenCount)
+	}
+	if session.ContextTokenCount != 15 {
+		t.Fatalf("expected final provider usage to update active context snapshot, got %d", session.ContextTokenCount)
+	}
 }
 
 func TestAICLIProviderTurnExecutor_ReplaysDeepSeekReasoningContentAfterToolTurns(t *testing.T) {
@@ -921,13 +965,13 @@ func TestHumanizeActorExecutorError_NoticesRecoveredPromptPreflightHistory(t *te
 		PromptTokens:              1400,
 		PromptBudget:              900,
 		Code:                      "prompt_still_exceeds_budget_after_compaction",
-		Reason:                    "prompt budget still exceeded after active-turn compaction",
+		Reason:                    "prompt budget still exceeded after history compaction",
 		SuggestedAction:           "请继续收缩上下文层、提高预算，或从新的轮次继续。",
 		ResolvedProvider:          "test-provider",
 		ResolvedModel:             "test-model",
 		BudgetSource:              "context_max_prompt_tokens",
 		ReplacementHistoryApplied: true,
-		ReplacementHistory:        []types.Message{*types.NewUserMessage("继续处理"), *types.NewAssistantMessage("Compacted earlier tool replay in current turn: ...")},
+		ReplacementHistory:        []types.Message{*types.NewUserMessage("继续处理"), *types.NewUserMessage("Compacted context from earlier turns: ...")},
 	})
 	if err == nil {
 		t.Fatal("expected error")
@@ -1961,34 +2005,26 @@ func TestAICLISharedChatExecutor_AppliesPromptPreflightRecoveryHistoryBeforeRetu
 	}()
 	autoCompactSharedChatHistory = maybeAutoCompactSharedChatHistory
 
-	compacted := types.NewAssistantMessage("Compacted earlier tool replay in current turn:\n- earlier tool output summarized")
-	compacted.Metadata["active_turn_compaction"] = true
+	compacted := types.NewUserMessage("Compacted context from earlier turns:\n- earlier tool output summarized")
+	compacted.Metadata["context_stage"] = "compaction"
+	compacted.Metadata["compact_mode"] = "local"
 
 	replacementHistory := []types.Message{
 		*types.NewUserMessage("继续处理"),
 		*compacted,
-		{
-			Role: "assistant",
-			ToolCalls: []types.ToolCall{
-				{ID: "call_2", Name: "view", Args: map[string]interface{}{"file_path": "AGENTS.md"}},
-			},
-			Metadata: types.NewMetadata(),
-		},
-		*types.NewToolMessage("call_2", "AGENTS ..."),
 	}
 
 	executeToolLoop = func(ctx context.Context, req runtimechatcore.ToolLoopRequest) (*runtimechatcore.ToolLoopResult, error) {
 		return nil, &agent.PromptPreflightError{
-			PromptTokens:        1600,
-			PromptBudget:        900,
-			Code:                "prompt_still_exceeds_budget_after_compaction",
-			Reason:              "prompt budget still exceeded after active-turn compaction",
-			SuggestedAction:     "请继续收缩上下文层、提高预算，或从新的轮次继续。",
-			ResolvedProvider:    "shared-provider",
-			ResolvedModel:       "shared-model",
-			BudgetSource:        "model_capability_auto_compact_token_limit",
-			ActiveTurnCompacted: true,
-			ReplacementHistory:  replacementHistory,
+			PromptTokens:       1600,
+			PromptBudget:       900,
+			Code:               "prompt_still_exceeds_budget_after_compaction",
+			Reason:             "prompt budget still exceeded after history compaction",
+			SuggestedAction:    "请继续收缩上下文层、提高预算，或从新的轮次继续。",
+			ResolvedProvider:   "shared-provider",
+			ResolvedModel:      "shared-model",
+			BudgetSource:       "model_capability_auto_compact_token_limit",
+			ReplacementHistory: replacementHistory,
 		}
 	}
 
@@ -2027,11 +2063,11 @@ func TestAICLISharedChatExecutor_AppliesPromptPreflightRecoveryHistoryBeforeRetu
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if len(session.Messages) != 4 {
+	if len(session.Messages) != 2 {
 		t.Fatalf("expected replacement history to be applied to session messages, got %#v", session.Messages)
 	}
-	if got := session.Messages[1].Metadata.GetBool("active_turn_compaction", false); !got {
-		t.Fatalf("expected compacted assistant summary metadata in session messages, got %#v", session.Messages[1])
+	if got := session.Messages[1].Metadata.GetString("context_stage", ""); got != "compaction" {
+		t.Fatalf("expected persisted session compaction metadata in session messages, got %#v", session.Messages[1])
 	}
 	if !strings.Contains(err.Error(), "当前会话已自动保存压缩后的上下文，可直接继续下一轮。") {
 		t.Fatalf("expected recovery-applied hint in humanized error, got %v", err)

@@ -57,6 +57,23 @@ func TestResolveUnifiedTokenUsage_AnthropicJSON(t *testing.T) {
 	require.Equal(t, 10, usage.TotalTokens)
 }
 
+func TestResolveUnifiedTokenUsage_AnthropicCacheReadTokensCountTowardTotal(t *testing.T) {
+	usage, source := resolveUnifiedTokenUsage(
+		"anthropic",
+		[]byte(`{"usage":{"input_tokens":780,"output_tokens":28,"cache_read_input_tokens":512}}`),
+		nil,
+		nil,
+		"",
+		NewTokenizer("anthropic"),
+	)
+	require.NotNil(t, usage)
+	require.Equal(t, usageSourceProviderReported, source)
+	require.Equal(t, 780, usage.PromptTokens)
+	require.Equal(t, 28, usage.CompletionTokens)
+	require.Equal(t, 512, usage.CachedTokens)
+	require.Equal(t, 1320, usage.TotalTokens)
+}
+
 func TestResolveUnifiedTokenUsage_GeminiJSON(t *testing.T) {
 	usage, source := resolveUnifiedTokenUsage(
 		"gemini",

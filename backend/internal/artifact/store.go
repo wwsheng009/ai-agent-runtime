@@ -248,6 +248,13 @@ func (s *Store) Search(ctx context.Context, sessionID, query string, limit int) 
 		return nil, fmt.Errorf("search artifacts: %w", err)
 	}
 	results, err := scanSearchResults(rows, limit)
+	if err != nil && s.ftsEnabled && strings.TrimSpace(query) != "" {
+		rows, fallbackErr := searchWithFallback(false)
+		if fallbackErr != nil {
+			return nil, fmt.Errorf("search artifacts fallback: %w", fallbackErr)
+		}
+		return scanSearchResults(rows, limit)
+	}
 	if err != nil {
 		return nil, err
 	}

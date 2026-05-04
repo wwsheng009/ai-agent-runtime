@@ -156,6 +156,31 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	return host, nil
 }
 
+func refreshLocalRuntimeAfterModelSelection(session *ChatSession) error {
+	if session == nil {
+		return nil
+	}
+
+	var errs []string
+	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.SessionHub != nil && session.RuntimeSession != nil {
+		session.LocalRuntimeHost.SessionHub.Stop(session.RuntimeSession.ID)
+	}
+	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.Bootstrap != nil && session.Config != nil {
+		if err := session.LocalRuntimeHost.Bootstrap.ReloadProviderConfigs(buildSkillsProviderConfigs(session.Config)); err != nil {
+			errs = append(errs, fmt.Sprintf("reload providers: %v", err))
+		}
+	}
+	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.Bootstrap != nil {
+		if err := ensureLocalRuntimeProvider(session.LocalRuntimeHost.Bootstrap.LLMRuntime(), session); err != nil {
+			errs = append(errs, fmt.Sprintf("ensure session provider: %v", err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
 func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *ChatSession, sessionStore runtimechat.SessionStorage, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string) (*runtimechat.SessionActor, error) {
 	childAgentType := ""
 	requestedModel := ""

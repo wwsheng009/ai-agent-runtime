@@ -11,6 +11,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
@@ -37,6 +38,9 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		ctx = context.Background()
 	}
 	ctx = generatedImageToolContext(ctx, session)
+	if shouldRenderInteractiveOutput(session) {
+		ctx = runtimeexecutor.WithOutputMirror(ctx, newChatSystemOutputWriterWithSurface(os.Stdout, session.Surface))
+	}
 
 	actor, err := session.LocalRuntimeHost.SessionHub.GetOrCreate(session.RuntimeSession.ID)
 	if err != nil {
@@ -60,7 +64,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		ImageArtifactDir: chatSessionImageArtifactDir(session),
 	})
 	if err != nil {
-		warnIfChatSessionSyncFails(session, "actor error sync", syncRuntimeSessionBackIntoCLI(session))
+		warnIfChatSessionSyncFails(session, "actor error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
 		warnIfChatSessionSyncFails(session, "actor error team lifecycle sync", syncAmbientTeamLifecycleState(session))
 		if response, ok := attemptDirectImageGenerationFallback(ctx, session, prompt, err.Error()); ok {
 			return response, nil
@@ -77,7 +81,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		}
 		bridge.WaitForCurrentEvents(waitTimeout)
 		if runErr := bridge.RunError(); runErr != nil {
-			warnIfChatSessionSyncFails(session, "actor runtime error sync", syncRuntimeSessionBackIntoCLI(session))
+			warnIfChatSessionSyncFails(session, "actor runtime error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
 			warnIfChatSessionSyncFails(session, "actor runtime error team lifecycle sync", syncAmbientTeamLifecycleState(session))
 			return "", humanizeActorExecutorError(session, runErr)
 		}
@@ -241,10 +245,21 @@ func shouldPropagateTeamRunMeta(session *ChatSession, binding *chatTeamBinding) 
 }
 
 func syncRuntimeSessionBackIntoCLI(session *ChatSession) error {
+	return syncRuntimeSessionBackIntoCLIWithOptions(session, true)
+}
+
+func syncRuntimeSessionBackIntoCLIAfterFailure(session *ChatSession) error {
+	return syncRuntimeSessionBackIntoCLIWithOptions(session, false)
+}
+
+func syncRuntimeSessionBackIntoCLIWithOptions(session *ChatSession, refreshContextFromHistory bool) error {
 	if session == nil || session.SessionManager == nil || session.RuntimeSession == nil {
 		return nil
 	}
 	previousContextWindowTokens := session.ContextWindowTokenCount
+	previousContextTokens := session.ContextTokenCount
+	providerContextTokens := session.providerContextTokenCount
+	providerContextWindowTokens := session.providerContextWindowTokenCount
 	runtimeSession, err := session.SessionManager.Get(context.Background(), session.RuntimeSession.ID)
 	if err != nil {
 		return err
@@ -259,7 +274,17 @@ func syncRuntimeSessionBackIntoCLI(session *ChatSession) error {
 	if session.LocalRuntimeHost != nil {
 		validateAmbientTeamBinding(session, session.LocalRuntimeHost.TeamStore)
 	}
-	refreshChatContextTokenSnapshotFromMessages(session, previousContextWindowTokens, true)
+	if refreshContextFromHistory {
+		refreshChatContextTokenSnapshotFromMessages(session, previousContextWindowTokens, true)
+	} else if previousContextTokens > 0 || previousContextWindowTokens > 0 {
+		applyChatContextTokens(session, previousContextTokens, previousContextWindowTokens, true)
+	}
+	if providerContextTokens > 0 {
+		if providerContextWindowTokens <= 0 {
+			providerContextWindowTokens = previousContextWindowTokens
+		}
+		applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{TotalTokens: providerContextTokens}, providerContextWindowTokens, true)
+	}
 	return syncRuntimeSessionFromChat(session)
 }
 

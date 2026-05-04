@@ -129,12 +129,14 @@ func persistStreamCommandPreference(session *ChatSession) {
 	if session == nil || session.Config == nil {
 		return
 	}
-	if strings.TrimSpace(session.Config.ConfigFilePath) == "" {
+	configPath, err := ensureWritableAICLIConfigPath(session.Config, session.Config.ConfigFilePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: 保存 /stream 偏好失败: %v\n", err)
 		return
 	}
 	value := session.Stream
 	innerPtr := &value
-	if _, err := config.UpdateAICLIChatPreferences(session.Config.ConfigFilePath, config.AICLIChatPreferenceUpdate{
+	if _, err := config.UpdateAICLIChatPreferences(configPath, config.AICLIChatPreferenceUpdate{
 		Stream: &innerPtr,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: 保存 /stream 偏好失败: %v\n", err)

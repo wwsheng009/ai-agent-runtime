@@ -11,6 +11,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type failingRichTestFunction struct {
@@ -241,6 +242,55 @@ func TestApplyChatTurnContextTokens_DoesNotOverwriteSessionContextSnapshot(t *te
 	}
 	if session.ContextWindowTokenCount != 1000 {
 		t.Fatalf("expected context window token count to be 1000, got %d", session.ContextWindowTokenCount)
+	}
+}
+
+func TestApplyChatContextTokensFromUsage_UsesTotalTokensAsActiveContextSnapshot(t *testing.T) {
+	session := &ChatSession{}
+
+	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
+		PromptTokens:     100,
+		CompletionTokens: 25,
+		TotalTokens:      130,
+		CachedTokens:     80,
+		ReasoningTokens:  20,
+	}, 1000, false)
+
+	if got != 130 || session.ContextTokenCount != 130 {
+		t.Fatalf("expected total tokens to become active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 1000 {
+		t.Fatalf("expected context window token count to be 1000, got %d", session.ContextWindowTokenCount)
+	}
+}
+
+func TestApplyChatContextTokensFromUsage_FallsBackToInputPlusOutput(t *testing.T) {
+	session := &ChatSession{}
+
+	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
+		PromptTokens:     100,
+		CompletionTokens: 25,
+	}, 0, false)
+
+	if got != 125 || session.ContextTokenCount != 125 {
+		t.Fatalf("expected prompt+completion fallback to become active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	}
+}
+
+func TestApplyChatContextTokensFromUsage_DoesNotLowerExistingActiveContextSnapshot(t *testing.T) {
+	session := &ChatSession{ContextTokenCount: 1320}
+
+	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
+		PromptTokens:     12,
+		CompletionTokens: 28,
+		TotalTokens:      40,
+	}, 256000, false)
+
+	if got != 1320 || session.ContextTokenCount != 1320 {
+		t.Fatalf("expected smaller request usage not to lower active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	}
+	if session.ContextWindowTokenCount != 256000 {
+		t.Fatalf("expected window tokens to still update, got %d", session.ContextWindowTokenCount)
 	}
 }
 

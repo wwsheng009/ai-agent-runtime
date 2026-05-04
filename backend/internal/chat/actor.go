@@ -1089,6 +1089,33 @@ func shouldAppendUserPromptMessage(last *runtimetypes.Message, prepared *runtime
 	return llm.MessageHasLocalInputImages(prepared) && !llm.MessageHasLocalInputImages(last)
 }
 
+func countRuntimeChatContextTokens(llmRuntime *llm.LLMRuntime, messages []runtimetypes.Message) int {
+	if len(messages) == 0 {
+		return 0
+	}
+	if llmRuntime != nil {
+		if count := llmRuntime.CountMessagesTokens(messages); count > 0 {
+			return count
+		}
+	}
+	total := 0
+	for _, message := range messages {
+		total += len(message.Role)/4 + len(message.Content)/4 + len(message.ToolCallID)/4 + 4
+		for _, call := range message.ToolCalls {
+			total += len(call.ID)/4 + len(call.Name)/4 + 4
+			if len(call.Args) > 0 {
+				if payload, err := json.Marshal(call.Args); err == nil {
+					total += len(payload) / 4
+				}
+			}
+		}
+	}
+	if total <= 0 {
+		return 0
+	}
+	return total + 8
+}
+
 func runtimeSessionObservedTokenUsage(session *Session) int {
 	if session == nil {
 		return 0
@@ -1217,7 +1244,7 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		KeepRecentMessages: keepRecent,
 		Phase:              compactruntime.PhasePreTurn,
 		CountTokens:        a.llmRuntime.CountMessagesTokens,
-		ObservedTokens:     runtimeSessionObservedTokenUsage(session),
+		ObservedTokens:     countRuntimeChatContextTokens(a.llmRuntime, history),
 		HasObservedTokens:  true,
 	})
 	payload["reason"] = status.Reason
@@ -1258,12 +1285,9 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	}
 
 	originalHistory := history
-	originalObservedTokens := runtimeSessionObservedTokenUsage(session)
 	session.ReplaceHistory(result.ReplacementHistory)
-	setRuntimeSessionObservedTokenUsage(session, 0)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
 		session.ReplaceHistory(originalHistory)
-		setRuntimeSessionObservedTokenUsage(session, originalObservedTokens)
 		payload["error"] = persistErr.Error()
 		a.publish(runtimeevents.Event{
 			Type:      EventSessionCompactFailed,
@@ -1359,7 +1383,7 @@ func (a *SessionActor) runManualCompact(
 		KeepRecentMessages: keepRecent,
 		Phase:              compactruntime.PhasePreTurn,
 		CountTokens:        a.llmRuntime.CountMessagesTokens,
-		ObservedTokens:     runtimeSessionObservedTokenUsage(session),
+		ObservedTokens:     countRuntimeChatContextTokens(a.llmRuntime, session.GetMessages()),
 		HasObservedTokens:  true,
 	})
 	status = resolvedStatus
@@ -1399,12 +1423,9 @@ func (a *SessionActor) runManualCompact(
 	}
 
 	originalHistory := session.GetMessages()
-	originalObservedTokens := runtimeSessionObservedTokenUsage(session)
 	session.ReplaceHistory(result.ReplacementHistory)
-	setRuntimeSessionObservedTokenUsage(session, 0)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
 		session.ReplaceHistory(originalHistory)
-		setRuntimeSessionObservedTokenUsage(session, originalObservedTokens)
 		payload["error"] = persistErr.Error()
 		a.publish(runtimeevents.Event{
 			Type:      EventSessionCompactFailed,

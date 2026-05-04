@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -30,6 +31,29 @@ type CombinedOutputCapture struct {
 	CaptureLimitDisabled bool
 }
 
+type outputMirrorContextKey struct{}
+
+// WithOutputMirror attaches a best-effort live output mirror to command
+// execution contexts. The normal retained capture is still preserved.
+func WithOutputMirror(ctx context.Context, writer io.Writer) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if writer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, outputMirrorContextKey{}, writer)
+}
+
+// OutputMirrorFromContext resolves a live command output mirror, if configured.
+func OutputMirrorFromContext(ctx context.Context) io.Writer {
+	if ctx == nil {
+		return nil
+	}
+	writer, _ := ctx.Value(outputMirrorContextKey{}).(io.Writer)
+	return writer
+}
+
 // OutputCaptureAccumulator incrementally captures combined command output using
 // the same truncation policy as CaptureCombinedOutput.
 type OutputCaptureAccumulator struct {
@@ -43,11 +67,20 @@ func NewOutputCaptureAccumulator(maxBytes int) *OutputCaptureAccumulator {
 }
 
 func CaptureCombinedOutput(cmd *exec.Cmd, maxBytes int) (CombinedOutputCapture, error) {
+	return CaptureCombinedOutputWithMirror(cmd, maxBytes, nil)
+}
+
+func CaptureCombinedOutputWithMirror(cmd *exec.Cmd, maxBytes int, mirror io.Writer) (CombinedOutputCapture, error) {
 	writer := newCombinedOutputWriter(maxBytes)
-	cmd.Stdout = writer
-	cmd.Stderr = writer
+	outputWriter := io.Writer(writer)
+	if mirror != nil {
+		outputWriter = newMirrorCombinedOutputWriter(writer, mirror)
+	}
+	cmd.Stdout = outputWriter
+	cmd.Stderr = outputWriter
 
 	err := cmd.Run()
+	flushOutputMirror(mirror)
 	return writer.Result(), err
 }
 
@@ -57,21 +90,32 @@ func CaptureCombinedOutput(cmd *exec.Cmd, maxBytes int) (CombinedOutputCapture, 
 // It returns the retained capture, the kept artifact path when available, the command
 // execution error, and a best-effort artifact error that does not fail the command.
 func CaptureCombinedOutputWithArtifact(cmd *exec.Cmd, maxBytes int, scope string, command string, preferredRoot string) (CombinedOutputCapture, string, error, error) {
+	return CaptureCombinedOutputWithArtifactAndMirror(cmd, maxBytes, scope, command, preferredRoot, nil)
+}
+
+// CaptureCombinedOutputWithArtifactAndMirror captures command output for model
+// history/artifacts while also teeing raw chunks to a live output mirror.
+func CaptureCombinedOutputWithArtifactAndMirror(cmd *exec.Cmd, maxBytes int, scope string, command string, preferredRoot string, mirror io.Writer) (CombinedOutputCapture, string, error, error) {
 	if maxBytes == DisableRetainedOutputLimit {
-		capture, err := CaptureCombinedOutput(cmd, maxBytes)
+		capture, err := CaptureCombinedOutputWithMirror(cmd, maxBytes, mirror)
 		return capture, "", err, nil
 	}
 
 	path, artifactFile, artifactOpenErr := openShellOutputArtifactFile(scope, command, preferredRoot)
 	if artifactOpenErr != nil || artifactFile == nil {
-		capture, err := CaptureCombinedOutput(cmd, maxBytes)
+		capture, err := CaptureCombinedOutputWithMirror(cmd, maxBytes, mirror)
 		return capture, "", err, artifactOpenErr
 	}
 
 	writer := newArtifactTeeCombinedOutputWriter(maxBytes, artifactFile)
-	cmd.Stdout = writer
-	cmd.Stderr = writer
+	outputWriter := io.Writer(writer)
+	if mirror != nil {
+		outputWriter = newMirrorCombinedOutputWriter(writer, mirror)
+	}
+	cmd.Stdout = outputWriter
+	cmd.Stderr = outputWriter
 	runErr := cmd.Run()
+	flushOutputMirror(mirror)
 	capture := writer.Result()
 	artifactErr := writer.ArtifactError()
 	if closeErr := artifactFile.Close(); closeErr != nil && artifactErr == nil {
@@ -155,6 +199,13 @@ type artifactTeeCombinedOutputWriter struct {
 	artifactErr error
 }
 
+type mirrorCombinedOutputWriter struct {
+	mu sync.Mutex
+
+	primary io.Writer
+	mirror  io.Writer
+}
+
 func newCappedCombinedWriter(maxBytes int) *cappedCombinedWriter {
 	if maxBytes <= 0 {
 		maxBytes = DefaultRetainedOutputBytes
@@ -189,6 +240,13 @@ func newArtifactTeeCombinedOutputWriter(maxBytes int, artifact io.Writer) *artif
 	return &artifactTeeCombinedOutputWriter{
 		primary:  newCombinedOutputWriter(maxBytes),
 		artifact: artifact,
+	}
+}
+
+func newMirrorCombinedOutputWriter(primary io.Writer, mirror io.Writer) *mirrorCombinedOutputWriter {
+	return &mirrorCombinedOutputWriter{
+		primary: primary,
+		mirror:  mirror,
 	}
 }
 
@@ -243,6 +301,32 @@ func (w *artifactTeeCombinedOutputWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+func (w *mirrorCombinedOutputWriter) Write(p []byte) (int, error) {
+	if w == nil || w.primary == nil {
+		return len(p), nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	n, err := w.primary.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if w.mirror != nil && len(p) > 0 {
+		_, _ = w.mirror.Write(p)
+	}
+	return len(p), nil
+}
+
+func flushOutputMirror(writer io.Writer) {
+	if writer == nil {
+		return
+	}
+	if flusher, ok := writer.(interface{ Flush() error }); ok {
+		_ = flusher.Flush()
+	}
 }
 
 func (w *cappedCombinedWriter) appendHeadTail(p []byte) {

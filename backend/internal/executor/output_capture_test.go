@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,6 +25,43 @@ func TestCaptureCombinedOutput_ReturnsOriginalWhenWithinBudget(t *testing.T) {
 	}
 	if strings.Contains(capture.Output, "exec output truncated at capture limit") {
 		t.Fatalf("did not expect truncation marker, got %q", capture.Output)
+	}
+}
+
+type flushTrackingWriter struct {
+	bytes.Buffer
+	flushed bool
+}
+
+func (w *flushTrackingWriter) Flush() error {
+	w.flushed = true
+	return nil
+}
+
+func TestCaptureCombinedOutputWithMirror_TeesLiveOutputAndRetainsCapture(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=TestCaptureCombinedOutputWithArtifact_HelperProcess", "--")
+	cmd.Env = append(os.Environ(),
+		"GO_WANT_CAPTURE_ARTIFACT_HELPER=1",
+		"CAPTURE_ARTIFACT_HELPER_LINES=3",
+	)
+	var mirror flushTrackingWriter
+
+	capture, err := CaptureCombinedOutputWithMirror(cmd, 4096, &mirror)
+	if err != nil {
+		t.Fatalf("CaptureCombinedOutputWithMirror failed: %v", err)
+	}
+
+	mirrored := mirror.String()
+	for _, expected := range []string{"line-0-", "line-1-", "line-2-"} {
+		if !strings.Contains(capture.Output, expected) {
+			t.Fatalf("expected capture to contain %q, got %q", expected, capture.Output)
+		}
+		if !strings.Contains(mirrored, expected) {
+			t.Fatalf("expected mirror to contain %q, got %q", expected, mirrored)
+		}
+	}
+	if !mirror.flushed {
+		t.Fatalf("expected mirror to be flushed when command completes")
 	}
 }
 

@@ -2,6 +2,7 @@ package artifact
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -109,5 +110,34 @@ func TestStore_SearchReturnsMetadataAndSourceRefs(t *testing.T) {
 	}
 	if results[0].Metadata["profile"] != "dev" {
 		t.Fatalf("expected metadata to be preserved, got %#v", results[0].Metadata)
+	}
+}
+
+func TestStore_SearchFallsBackWhenFTSQueryUsesHyphen(t *testing.T) {
+	store, err := NewStore(nil)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	_, err = store.Put(context.Background(), Record{
+		SessionID: "session-hyphen",
+		ToolName:  "read_logs",
+		Summary:   "needle summary",
+		Content:   "output contains unique-needle marker",
+	})
+	if err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+
+	results, err := store.Search(context.Background(), "session-hyphen", "unique-needle", 5)
+	if err != nil {
+		t.Fatalf("search artifacts: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 search result, got %d", len(results))
+	}
+	if !strings.Contains(results[0].Preview, "unique-needle") {
+		t.Fatalf("expected search preview to include hyphenated query, got %#v", results[0])
 	}
 }

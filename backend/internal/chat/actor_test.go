@@ -411,7 +411,7 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 	require.Equal(t, "user", updated.History[2].Role)
 	require.Equal(t, "user", updated.History[3].Role)
 	require.Equal(t, "compaction", updated.History[3].Metadata["context_stage"])
-	require.Equal(t, 0, runtimeSessionObservedTokenUsage(updated))
+	require.Equal(t, 140, runtimeSessionObservedTokenUsage(updated))
 	require.Equal(t, 1, provider.callCount)
 
 	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
@@ -424,7 +424,7 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 	require.Contains(t, eventTypes, EventSessionCompactCompleted)
 }
 
-func TestSessionActorMaybeAutoCompactSessionSkipsWhenObservedUsageIsZero(t *testing.T) {
+func TestSessionActorMaybeAutoCompactSessionSkipsWhenContextBelowLimit(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()
 	manager := NewSessionManager(storage, nil)
@@ -449,7 +449,7 @@ func TestSessionActorMaybeAutoCompactSessionSkipsWhenObservedUsageIsZero(t *test
 	provider := &capturingSequenceProvider{
 		name: "compact-provider",
 		capabilities: map[string]agentconfig.ModelCapabilitySpec{
-			"gpt-5": {AutoCompactTokenLimit: 120},
+			"gpt-5": {AutoCompactTokenLimit: 100000},
 		},
 	}
 	require.NoError(t, runtime.RegisterProvider("compact-provider", provider))
@@ -490,7 +490,9 @@ func TestSessionActorMaybeAutoCompactSessionSkipsWhenObservedUsageIsZero(t *test
 	last := events[len(events)-1]
 	require.Equal(t, EventSessionCompactSkipped, last.Type)
 	require.Equal(t, "below_limit", last.Payload["reason"])
-	require.Equal(t, 0, last.Payload["token_before"])
+	tokenBefore, ok := last.Payload["token_before"].(int)
+	require.True(t, ok)
+	require.Greater(t, tokenBefore, 0)
 }
 
 func TestSessionActorMaybeAutoCompactSessionSkipsPendingToolState(t *testing.T) {

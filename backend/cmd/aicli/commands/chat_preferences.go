@@ -146,11 +146,12 @@ func persistChatPreferences(cfg *config.Config, providerName, modelName, reasoni
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
 	}
-	if strings.TrimSpace(cfg.ConfigFilePath) == "" {
-		return fmt.Errorf("config file path is not available")
+	configPath, err := ensureWritableAICLIConfigPath(cfg, cfg.ConfigFilePath)
+	if err != nil {
+		return err
 	}
 
-	_, err := config.UpdateAICLIChatPreferences(cfg.ConfigFilePath, config.AICLIChatPreferenceUpdate{
+	_, err = config.UpdateAICLIChatPreferences(configPath, config.AICLIChatPreferenceUpdate{
 		DefaultProvider: stringValuePtr(strings.TrimSpace(providerName)),
 		DefaultModel:    stringValuePtr(strings.TrimSpace(modelName)),
 		ReasoningEffort: stringValuePtr(runtimetypes.NormalizeReasoningEffort(reasoningEffort)),
@@ -178,7 +179,12 @@ func persistChatPreferencesIfNeeded(cfg *config.Config, opts *chatCommandOptions
 	if update.DefaultProvider == nil && update.DefaultModel == nil && update.ReasoningEffort == nil && update.Stream == nil {
 		return
 	}
-	if _, err := config.UpdateAICLIChatPreferences(cfg.ConfigFilePath, update); err != nil {
+	configPath, err := ensureWritableAICLIConfigPath(cfg, cfg.ConfigFilePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: 保存 aicli.chat 偏好失败: %v\n", err)
+		return
+	}
+	if _, err := config.UpdateAICLIChatPreferences(configPath, update); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: 保存 aicli.chat 偏好失败: %v\n", err)
 	}
 }

@@ -282,7 +282,7 @@ func (s *Sandbox) ExecuteCommand(ctx context.Context, command string, args []str
 		cmd.Env = s.FilterEnv(os.Environ())
 	}
 
-	capture, err := CaptureCombinedOutput(cmd, DefaultRetainedOutputBytes)
+	capture, err := CaptureCombinedOutputWithMirror(cmd, DefaultRetainedOutputBytes, OutputMirrorFromContext(ctx))
 	if err != nil {
 		if execCtx.Err() == context.DeadlineExceeded {
 			return capture.Output, fmt.Errorf("sandbox command timed out after %v", s.config.MaxExecutionTime)

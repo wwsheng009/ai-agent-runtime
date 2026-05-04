@@ -360,13 +360,161 @@ func presentChatSession(session *ChatSession) {
 	}
 
 	beginDirectInteractiveOutput(session)
-	printSessionInfo(session)
-	printCurrentRuntimeSession(session)
+	printChatSessionPreamble(session)
 	if !session.DisableTools && session.SkillsBinding != nil && session.SkillsBinding.Count() > 0 {
-		printChatSessionMetaRow("Skills:", fmt.Sprintf("已启用 (%d 个 AI 可调用 skills)", session.SkillsBinding.Count()))
-		printChatSessionMetaRow("Skills Mode:", resolvedChatSkillsMode(session, session.SkillsBinding))
-		printChatSessionMetaRow("Skills Top-K:", fmt.Sprintf("%d", resolvedChatSkillsTopK(session.SkillsBinding)))
+		printChatSessionInfoRow(os.Stderr, "Skills:", fmt.Sprintf("已启用 (%d 个 AI 可调用 skills)", session.SkillsBinding.Count()), chatSessionMetaLabelWidth)
+		printChatSessionInfoRow(os.Stderr, "Skills Mode:", resolvedChatSkillsMode(session, session.SkillsBinding), chatSessionMetaLabelWidth)
+		printChatSessionInfoRow(os.Stderr, "Skills Top-K:", fmt.Sprintf("%d", resolvedChatSkillsTopK(session.SkillsBinding)), chatSessionMetaLabelWidth)
 	}
+}
+
+func printChatSessionPreamble(session *ChatSession) {
+	if session == nil {
+		return
+	}
+
+	info := buildChatSessionInfo(session)
+	theme := ui.GetTheme(ui.ThemeAuto)
+
+	printChatSelectionBlankLine()
+	fmt.Fprintln(os.Stderr, ui.NewSeparator().SetType(ui.SeparatorThick).Build())
+	printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Provider:", theme.SuccessColor.Sprint("( "+info.ProviderName+" )"), theme.ColorizeLabel)
+	if info.Protocol != "" {
+		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Protocol:", theme.Dimmed(info.Protocol), theme.ColorizeLabel)
+	}
+	if info.EndpointURL != "" {
+		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Endpoint:", theme.Dimmed(info.EndpointURL), theme.ColorizeLabel)
+	}
+	if info.Host != "" {
+		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Host:", theme.Dimmed(info.Host), theme.ColorizeLabel)
+	}
+	if info.KeyCount > 0 {
+		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Auth Keys:", theme.Dimmed(fmt.Sprintf("%d", info.KeyCount)), theme.ColorizeLabel)
+	}
+	if info.Timeout != "" {
+		printChatSessionInfoLine(os.Stderr, strings.Repeat(" ", ui.DisplayWidth(theme.SystemIcon+" ")), "Timeout:", theme.Dimmed(info.Timeout), theme.ColorizeLabel)
+	}
+	printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Model:", theme.SuccessColor.Sprint(info.ModelName), theme.ColorizeLabel)
+	if info.IsStream {
+		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Stream:", theme.SuccessColor.Sprint("on"), theme.ColorizeLabel)
+	} else {
+		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Stream:", theme.Dimmed("off"), theme.ColorizeLabel)
+	}
+	if info.ReasoningEnabled {
+		printChatSessionInfoLine(os.Stderr, theme.SystemIcon+" ", "Reasoning:", theme.WarningColor.Sprint("enabled"), theme.ColorizeLabel)
+	}
+
+	if session.MCPEnabled && session.MCPStatus != nil {
+		printChatSessionInfoRow(os.Stderr, "MCP:", fmt.Sprintf("已启用 (%d 个工具, %d 个 MCP 服务器)",
+			session.MCPStatus.ToolCount, session.MCPStatus.MCPCount), chatSessionMetaLabelWidth)
+	}
+	if session.ProfileName != "" {
+		profileValue := session.ProfileName
+		if session.ProfileAgent != "" {
+			profileValue += fmt.Sprintf(" (agent=%s)", session.ProfileAgent)
+		}
+		printChatSessionInfoRow(os.Stderr, "Profile:", profileValue, chatSessionMetaLabelWidth)
+	}
+	if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
+		printChatSessionInfoRow(os.Stderr, "Reasoning Effort:", reasoningEffort, chatSessionMetaLabelWidth)
+	}
+	if session.LocalRuntimeHost != nil {
+		printChatSessionInfoRow(os.Stderr, "Permission Mode:", string(session.PermissionMode), chatSessionMetaLabelWidth)
+		printChatSessionInfoRow(os.Stderr, "Approval Reuse:", formatChatApprovalReuseMode(session.ApprovalReuseMode), chatSessionMetaLabelWidth)
+	}
+	if queuedCount, draining := queuedInteractiveInputState(session); queuedCount > 0 || draining {
+		value := fmt.Sprintf("%d pending", queuedCount)
+		if draining {
+			value += " (draining)"
+		}
+		printChatSessionInfoRow(os.Stderr, "Queued Input:", value, chatSessionMetaLabelWidth)
+	}
+	if session.DisableTools {
+		printChatSessionInfoRow(os.Stderr, "Tools:", "disabled", chatSessionMetaLabelWidth)
+	} else if session.ToolPolicy != nil {
+		if names := session.ToolPolicy.AllowedToolNames(); len(names) > 0 {
+			printChatSessionInfoRow(os.Stderr, "Tools Allowlist:", strings.Join(names, ", "), chatSessionMetaLabelWidth)
+		}
+	}
+	if session.HTTPDebug {
+		printChatSessionInfoRow(os.Stderr, "HTTP Debug:", "on", chatSessionMetaLabelWidth)
+	}
+	if session.RetryConfig.DisableRetries {
+		printChatSessionInfoRow(os.Stderr, "Retry Mode:", "fail-fast", chatSessionMetaLabelWidth)
+	}
+
+	printChatSelectionBlankLine()
+	fmt.Fprintln(os.Stderr, ui.NewSeparator().SetType(ui.SeparatorThick).Build())
+	printChatSelectionBlankLine()
+
+	if session.RuntimeSession != nil {
+		printChatCurrentRuntimeSessionStderr(session)
+	}
+}
+
+func printChatSessionInfoLine(writer *os.File, prefix, label, value string, colorizeLabel func(string) string) {
+	if colorizeLabel == nil {
+		colorizeLabel = func(text string) string { return text }
+	}
+	labelText := fmt.Sprintf("%-*s", chatSessionMetaLabelWidth, label)
+	fmt.Fprintf(writer, "%s%s %s\n", prefix, colorizeLabel(labelText), value)
+}
+
+func printChatCurrentRuntimeSessionStderr(session *ChatSession) {
+	if session == nil || session.RuntimeSession == nil {
+		return
+	}
+
+	preview := session.RuntimeSession.BuildPreview()
+	if preview == nil {
+		return
+	}
+
+	printChatSessionInfoRow(os.Stderr, "Session:", fmt.Sprintf("%s [%s]", preview.ID, preview.State), chatSessionMetaLabelWidth)
+	if sessionPath := currentRuntimeSessionPath(session); sessionPath != "" {
+		printChatSessionInfoRow(os.Stderr, "Session File:", sessionPath, chatSessionMetaLabelWidth)
+	}
+	if store := currentRuntimeSessionStoreSummary(session); store != "" {
+		printChatSessionInfoRow(os.Stderr, "Session Store:", store, chatSessionMetaLabelWidth)
+	}
+	if logPath := currentChatLogFile(session); logPath != "" {
+		printChatSessionInfoRow(os.Stderr, "Chat Log File:", logPath, chatSessionMetaLabelWidth)
+	}
+	if debugPath := currentDebugLogFile(session); debugPath != "" {
+		printChatSessionInfoRow(os.Stderr, "Debug Log File:", debugPath, chatSessionMetaLabelWidth)
+	}
+	if artifactDir := currentRuntimeHTTPArtifactDir(session); artifactDir != "" {
+		printChatSessionInfoRow(os.Stderr, "HTTP Artifact Dir:", artifactDir, chatSessionMetaLabelWidth)
+	}
+	if artifactDir := currentLocalShellArtifactDir(session); artifactDir != "" {
+		printChatSessionInfoRow(os.Stderr, "Shell Artifact Dir:", artifactDir, chatSessionMetaLabelWidth)
+	}
+	if session.runtimeHTTPCapture != nil {
+		snapshot := session.runtimeHTTPCapture.Snapshot()
+		if snapshot.RequestArtifactPath != "" {
+			printChatSessionInfoRow(os.Stderr, "Last HTTP Req:", resolveAbsoluteChatPath(snapshot.RequestArtifactPath), chatSessionMetaLabelWidth)
+		}
+		if snapshot.ResponseArtifactPath != "" {
+			printChatSessionInfoRow(os.Stderr, "Last HTTP Resp:", resolveAbsoluteChatPath(snapshot.ResponseArtifactPath), chatSessionMetaLabelWidth)
+		}
+	}
+	if path := currentLastLocalShellArtifactPath(session); path != "" {
+		printChatSessionInfoRow(os.Stderr, "Last Shell Out:", path, chatSessionMetaLabelWidth)
+	}
+	if preview.Title != "" {
+		printChatSessionInfoRow(os.Stderr, "Title:", preview.Title, chatSessionMetaLabelWidth)
+	}
+	if preview.MessageCount > 0 {
+		printChatSessionInfoRow(os.Stderr, "History:", fmt.Sprintf("%d messages", preview.MessageCount), chatSessionMetaLabelWidth)
+	}
+}
+
+func printChatSessionInfoRow(writer *os.File, label, value string, width int) {
+	if writer == nil || strings.TrimSpace(label) == "" {
+		return
+	}
+	theme := ui.GetTheme(ui.ThemeAuto)
+	fmt.Fprintf(writer, "%-*s %s\n", width, theme.ColorizeLabel(label), theme.ColorizeSecondary(value))
 }
 
 func finalizeChatSession(session *ChatSession) {

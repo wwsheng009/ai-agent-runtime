@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
@@ -81,5 +82,45 @@ func TestChatSystemOutputWriter_BeginsSurfaceOutputForVisibleBlankLine(t *testin
 
 	if got := surface.count.Load(); got != 3 {
 		t.Fatalf("expected collapsed visible lines to begin surface output, got %d", got)
+	}
+}
+
+func TestChatSystemOutputWriter_FlushesPartialLineAfterDelay(t *testing.T) {
+	var output bytes.Buffer
+	writer := newChatSystemOutputWriter(&output).(*chatSystemOutputWriter)
+	writer.partialFlushDelay = 10 * time.Millisecond
+
+	if _, err := writer.Write([]byte("progress 10%")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if strings.Contains(output.String(), ui.FormatAssistantSupplementBlock("progress 10%")) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected partial line to flush after delay, got %q", output.String())
+}
+
+func TestChatSystemOutputWriter_TreatsCarriageReturnAsProgressLine(t *testing.T) {
+	var output bytes.Buffer
+	writer := newChatSystemOutputWriter(&output)
+
+	if _, err := writer.Write([]byte("progress 10%\rprogress 20%")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if flusher, ok := writer.(interface{ Flush() error }); ok {
+		if err := flusher.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+	}
+
+	rendered := output.String()
+	for _, expected := range []string{"progress 10%", "progress 20%"} {
+		if !strings.Contains(rendered, ui.FormatAssistantSupplementBlock(expected)) {
+			t.Fatalf("expected rendered output to contain %q, got %q", expected, rendered)
+		}
 	}
 }

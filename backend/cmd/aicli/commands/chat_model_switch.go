@@ -124,6 +124,9 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 	session.ContextWindowTokenCount = 0
 	syncChatLoggerModelState(session)
 	warnIfChatSessionSyncFails(session, "toggle model", syncRuntimeSessionFromChat(session))
+	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+		warnIfChatSessionSyncFails(session, "refresh local runtime after model switch", err)
+	}
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}

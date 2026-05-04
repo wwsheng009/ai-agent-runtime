@@ -502,10 +502,10 @@ func promptStartupSessionSelectionWithReader(manager *runtimechat.SessionManager
 	optionWidth := startupSessionOptionLabelWidth()
 
 	for {
-		fmt.Printf("  %-*s %s\n", optionWidth, "[1]", "恢复最近可恢复会话")
-		fmt.Printf("  %-*s %s\n", optionWidth, "[2]", "选择历史会话")
-		fmt.Printf("  %-*s %s\n", optionWidth, "[3]", "新建会话")
-		fmt.Print("请输入选项 (默认: 1): ")
+		printChatSelectionLine("  %-*s %s", optionWidth, "[1]", "恢复最近可恢复会话")
+		printChatSelectionLine("  %-*s %s", optionWidth, "[2]", "选择历史会话")
+		printChatSelectionLine("  %-*s %s", optionWidth, "[3]", "新建会话")
+		printChatSelectionPrompt("请输入选项 (默认: 1): ")
 
 		input, _ := reader.ReadString('\n')
 		choice := strings.TrimSpace(input)
@@ -517,7 +517,7 @@ func promptStartupSessionSelectionWithReader(manager *runtimechat.SessionManager
 		case "3":
 			return nil, true, nil
 		default:
-			ui.PrintWarning("无效的选择，请重新输入")
+			printChatSelectionWarning("无效的选择，请重新输入")
 		}
 	}
 }
@@ -527,7 +527,7 @@ func promptSelectSessionFromList(reader *bufio.Reader, sessions []*runtimechat.S
 		return nil, true, nil
 	}
 
-	fmt.Println("历史会话:")
+	printChatSelectionLine("历史会话:")
 	now := time.Now()
 	for index, session := range sessions {
 		if session == nil {
@@ -541,12 +541,12 @@ func promptSelectSessionFromList(reader *bufio.Reader, sessions []*runtimechat.S
 			lines[0] = fmt.Sprintf("  [%-2d] %s", index+1, strings.TrimSpace(lines[0]))
 		}
 		for _, line := range lines {
-			fmt.Println(line)
+			printChatSelectionLine("%s", line)
 		}
 	}
 
 	for {
-		fmt.Print("请输入编号或会话 ID (默认: 1): ")
+		printChatSelectionPrompt("请输入编号或会话 ID (默认: 1): ")
 
 		input, _ := reader.ReadString('\n')
 		choice := strings.TrimSpace(input)
@@ -559,7 +559,7 @@ func promptSelectSessionFromList(reader *bufio.Reader, sessions []*runtimechat.S
 			if index >= 1 && index <= len(sessions) {
 				return sessions[index-1], false, nil
 			}
-			ui.PrintWarning("无效的选择，请重新输入")
+			printChatSelectionWarning("无效的选择，请重新输入")
 			continue
 		}
 
@@ -569,28 +569,28 @@ func promptSelectSessionFromList(reader *bufio.Reader, sessions []*runtimechat.S
 			}
 		}
 
-		ui.PrintWarning("未找到会话，请重新输入")
+		printChatSelectionWarning("未找到会话，请重新输入")
 	}
 }
 
 func uiPrintSessionSelectionSummary(count int, filter ChatSessionListFilter) {
-	fmt.Println()
-	fmt.Println("检测到历史会话:")
-	fmt.Printf("  %-12s %d\n", "匹配会话:", count)
+	printChatSelectionBlankLine()
+	printChatSelectionLine("检测到历史会话:")
+	printChatSelectionLine("  %-12s %d", "匹配会话:", count)
 	if filter.State != "" {
-		fmt.Printf("  %-12s %s\n", "state:", filter.State)
+		printChatSelectionLine("  %-12s %s", "state:", filter.State)
 	}
 	if filter.Protocol != "" {
-		fmt.Printf("  %-12s %s\n", "protocol:", filter.Protocol)
+		printChatSelectionLine("  %-12s %s", "protocol:", filter.Protocol)
 	}
 	if filter.Provider != "" {
-		fmt.Printf("  %-12s %s\n", "provider:", filter.Provider)
+		printChatSelectionLine("  %-12s %s", "provider:", filter.Provider)
 	}
 	if filter.Model != "" {
-		fmt.Printf("  %-12s %s\n", "model:", filter.Model)
+		printChatSelectionLine("  %-12s %s", "model:", filter.Model)
 	}
 	if filter.Query != "" {
-		fmt.Printf("  %-12s %s\n", "query:", filter.Query)
+		printChatSelectionLine("  %-12s %s", "query:", filter.Query)
 	}
 }
 

@@ -909,6 +909,12 @@ func (b *chatRuntimeEventBridge) applyLLMRequestStatus(event runtimeevents.Event
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		windowTokens := firstPositivePayloadInt(event.Payload, "context_window_tokens", "max_context_tokens", "model_capability_max_context_tokens", "provider_context_limit")
 		applyChatTurnContextTokens(b.session, 0, windowTokens, true)
+		usage := &runtimetypes.TokenUsage{
+			PromptTokens:     firstPositivePayloadInt(event.Payload, "usage_prompt_tokens", "prompt_tokens", "input_tokens"),
+			CompletionTokens: firstPositivePayloadInt(event.Payload, "usage_completion_tokens", "completion_tokens", "output_tokens"),
+			TotalTokens:      firstPositivePayloadInt(event.Payload, "usage_total_tokens"),
+		}
+		applyChatContextTokensFromUsage(b.session, usage, windowTokens, true)
 	default:
 		return
 	}
@@ -922,7 +928,6 @@ func (b *chatRuntimeEventBridge) applySessionCompactStatus(event runtimeevents.E
 	case runtimechat.EventSessionCompactCompleted:
 		contextTokens := firstPositivePayloadInt(event.Payload, "token_after", "context_prompt_tokens", "prompt_tokens_after")
 		windowTokens := firstPositivePayloadInt(event.Payload, "max_context_tokens", "context_window_tokens")
-		b.session.TokenCount = 0
 		b.session.TurnContextTokenCount = 0
 		if contextTokens > 0 {
 			applyChatContextTokens(b.session, contextTokens, windowTokens, true)

@@ -138,7 +138,7 @@ func TestMessageBuilder_PreservesExplicitEmptyReasoningContentMetadata(t *testin
 	}
 }
 
-func TestMessageBuilder_CompactsEarlierActiveTurnReplayWhenOversized(t *testing.T) {
+func TestMessageBuilder_PreservesActiveTurnReplayWhenOversized(t *testing.T) {
 	builder := NewMessageBuilder([]types.Message{
 		*types.NewUserMessage("继续分析当前实现"),
 	})
@@ -167,32 +167,31 @@ func TestMessageBuilder_CompactsEarlierActiveTurnReplayWhenOversized(t *testing.
 	})
 
 	messages := builder.Messages()
-	if len(messages) != 4 {
-		t.Fatalf("expected user + compacted summary + latest assistant + latest tool, got %#v", messages)
+	if len(messages) != 5 {
+		t.Fatalf("expected full user + two assistant/tool replay blocks, got %#v", messages)
 	}
-	if messages[1].Metadata.GetBool("active_turn_compaction", false) != true {
-		t.Fatalf("expected active turn compaction metadata, got %#v", messages[1].Metadata)
+	for _, message := range messages {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			t.Fatalf("did not expect MessageBuilder to persist active-turn compaction, got %#v", messages)
+		}
 	}
-	if messages[2].Role != "assistant" || len(messages[2].ToolCalls) != 1 || messages[2].ToolCalls[0].ID != "call_2" {
-		t.Fatalf("expected latest assistant tool call to remain raw, got %#v", messages[2])
+	if messages[1].Role != "assistant" || len(messages[1].ToolCalls) != 1 || messages[1].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("expected first assistant tool call to remain raw, got %#v", messages[1])
 	}
-	if messages[3].Role != "tool" || messages[3].ToolCallID != "call_2" {
-		t.Fatalf("expected latest tool result to remain raw, got %#v", messages[3])
+	if messages[2].Role != "tool" || messages[2].ToolCallID != "call_1" || !strings.Contains(messages[2].Content, "README ") {
+		t.Fatalf("expected first tool result to remain raw, got %#v", messages[2])
 	}
-	if strings.Contains(messages[3].Content, "README ") {
-		t.Fatalf("did not expect first oversized tool output to remain inline, got %q", messages[3].Content)
+	if messages[3].Role != "assistant" || len(messages[3].ToolCalls) != 1 || messages[3].ToolCalls[0].ID != "call_2" {
+		t.Fatalf("expected latest assistant tool call to remain raw, got %#v", messages[3])
+	}
+	if messages[4].Role != "tool" || messages[4].ToolCallID != "call_2" || !strings.Contains(messages[4].Content, "AGENTS ") {
+		t.Fatalf("expected latest tool result to remain raw, got %#v", messages[4])
 	}
 }
 
-func TestMessageBuilder_CompactsEarlierActiveTurnReplayWhenTokenBudgetExceeded(t *testing.T) {
+func TestMessageBuilder_PreservesActiveTurnReplayWhenTokenBudgetExceeded(t *testing.T) {
 	builder := NewMessageBuilder([]types.Message{
 		*types.NewUserMessage("继续分析当前实现"),
-	}).SetActiveTurnReplayCompaction(64*1024, 500, func(messages []types.Message) int {
-		total := 0
-		for _, message := range messages {
-			total += len(message.Content) / 4
-		}
-		return total
 	})
 	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
 
@@ -219,13 +218,18 @@ func TestMessageBuilder_CompactsEarlierActiveTurnReplayWhenTokenBudgetExceeded(t
 	})
 
 	messages := builder.Messages()
-	if len(messages) != 4 {
-		t.Fatalf("expected user + compacted summary + latest assistant + latest tool, got %#v", messages)
+	if len(messages) != 5 {
+		t.Fatalf("expected full user + two assistant/tool replay blocks, got %#v", messages)
 	}
-	if messages[1].Metadata.GetBool("active_turn_compaction", false) != true {
-		t.Fatalf("expected active turn compaction metadata, got %#v", messages[1].Metadata)
+	for _, message := range messages {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			t.Fatalf("did not expect MessageBuilder to persist active-turn compaction, got %#v", messages)
+		}
 	}
-	if got := messages[1].Metadata.GetString("active_turn_compaction_reason", ""); !strings.Contains(got, "tokens") {
-		t.Fatalf("expected token-based compaction reason, got %#v", got)
+	if messages[2].Role != "tool" || messages[2].ToolCallID != "call_1" || !strings.Contains(messages[2].Content, "README ") {
+		t.Fatalf("expected first tool result to remain raw, got %#v", messages[2])
+	}
+	if messages[4].Role != "tool" || messages[4].ToolCallID != "call_2" || !strings.Contains(messages[4].Content, "AGENTS ") {
+		t.Fatalf("expected latest tool result to remain raw, got %#v", messages[4])
 	}
 }

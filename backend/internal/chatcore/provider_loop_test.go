@@ -352,7 +352,7 @@ func TestExecuteToolLoop_PreservesToolResultMetadataInHistory(t *testing.T) {
 	}
 }
 
-func TestExecuteToolLoop_CompactsEarlierActiveTurnReplayWhenToolLoopExpands(t *testing.T) {
+func TestExecuteToolLoop_UsesPromptOnlyActiveTurnCompactionWhenToolLoopExpands(t *testing.T) {
 	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 450)
 	provider := &fakeProviderTurnExecutor{
 		responses: []*ProviderTurnResponse{
@@ -396,15 +396,19 @@ func TestExecuteToolLoop_CompactsEarlierActiveTurnReplayWhenToolLoopExpands(t *t
 	if result == nil || len(result.History) < 5 {
 		t.Fatalf("expected replayed history, got %#v", result)
 	}
-	foundCompaction := false
 	for _, message := range result.History {
 		if message.Metadata.GetBool("active_turn_compaction", false) {
-			foundCompaction = true
-			break
+			t.Fatalf("did not expect active turn compaction to appear in final canonical history, got %#v", result.History)
 		}
 	}
-	if !foundCompaction {
-		t.Fatalf("expected active turn compaction to appear in final history, got %#v", result.History)
+	if result.History[2].Role != "tool" || result.History[2].ToolCallID != "call_1" {
+		t.Fatalf("expected first raw tool result to remain in final history, got %#v", result.History)
+	}
+	if !strings.Contains(result.History[2].Content, "AGENTS ") {
+		t.Fatalf("expected first raw tool content to remain in final history, got %q", result.History[2].Content)
+	}
+	if result.History[4].Role != "tool" || result.History[4].ToolCallID != "call_2" {
+		t.Fatalf("expected second raw tool result to remain in final history, got %#v", result.History)
 	}
 	if len(provider.requests) != 3 {
 		t.Fatalf("expected 3 provider requests, got %d", len(provider.requests))
@@ -421,7 +425,7 @@ func TestExecuteToolLoop_CompactsEarlierActiveTurnReplayWhenToolLoopExpands(t *t
 	}
 }
 
-func TestExecuteToolLoop_CompactsEarlierActiveTurnReplayWhenTokenBudgetExceeded(t *testing.T) {
+func TestExecuteToolLoop_UsesPromptOnlyActiveTurnCompactionWhenTokenBudgetExceeded(t *testing.T) {
 	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
 	provider := &fakeProviderTurnExecutor{
 		responses: []*ProviderTurnResponse{
@@ -474,8 +478,16 @@ func TestExecuteToolLoop_CompactsEarlierActiveTurnReplayWhenTokenBudgetExceeded(
 	if result == nil || len(result.History) < 5 {
 		t.Fatalf("expected replayed history, got %#v", result)
 	}
-	foundCompaction := false
 	for _, message := range result.History {
+		if message.Metadata.GetBool("active_turn_compaction", false) {
+			t.Fatalf("did not expect active turn compaction to appear in final canonical history, got %#v", result.History)
+		}
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("expected 3 provider requests, got %d", len(provider.requests))
+	}
+	foundCompaction := false
+	for _, message := range provider.requests[2].Messages {
 		if message.Metadata.GetBool("active_turn_compaction", false) {
 			foundCompaction = true
 			if got := message.Metadata.GetString("active_turn_compaction_reason", ""); !strings.Contains(got, "tokens") {
@@ -485,7 +497,7 @@ func TestExecuteToolLoop_CompactsEarlierActiveTurnReplayWhenTokenBudgetExceeded(
 		}
 	}
 	if !foundCompaction {
-		t.Fatalf("expected active turn compaction to appear in final history, got %#v", result.History)
+		t.Fatalf("expected third provider request to include prompt-only active turn compaction, got %#v", provider.requests[2].Messages)
 	}
 }
 
@@ -593,21 +605,8 @@ func TestExecuteToolLoop_FailsPromptPreflightAfterCompactionStillExceedsBudget(t
 		t.Fatalf("expected active turn to be marked compacted, got %+v", preflightErr)
 	}
 	replacement := preflightErr.CloneReplacementHistory()
-	if len(replacement) == 0 {
-		t.Fatalf("expected replacement history after compaction failure, got %#v", preflightErr)
-	}
-	foundCompaction := false
-	for _, message := range replacement {
-		if message.Metadata.GetBool("active_turn_compaction", false) {
-			foundCompaction = true
-			if !strings.Contains(message.Content, "Compacted earlier tool replay in current turn:") {
-				t.Fatalf("expected compacted summary content, got %#v", message)
-			}
-			break
-		}
-	}
-	if !foundCompaction {
-		t.Fatalf("expected replacement history to include compacted replay summary, got %#v", replacement)
+	if len(replacement) != 0 {
+		t.Fatalf("expected no replacement history for prompt-only active-turn compaction failure, got %#v", replacement)
 	}
 	if len(provider.requests) != 2 {
 		t.Fatalf("expected preflight to stop before third provider call, got %d requests", len(provider.requests))

@@ -14,15 +14,18 @@ import (
 
 func TestSelectStreamModeWithReader_DefaultsToStream(t *testing.T) {
 	var selected bool
-	output := captureStdout(t, func() {
+	stdout, stderr := captureStdoutStderr(t, func() {
 		selected = selectStreamModeWithReader(bufio.NewReader(strings.NewReader("\n")))
 	})
 
 	if !selected {
 		t.Fatal("expected blank input to default to stream mode")
 	}
-	if !strings.Contains(output, "默认: 流式") {
-		t.Fatalf("expected prompt to advertise stream default, got:\n%s", output)
+	if stdout != "" {
+		t.Fatalf("expected no stdout output, got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "默认: 流式") {
+		t.Fatalf("expected prompt to advertise stream default on stderr, got:\n%s", stderr)
 	}
 }
 
@@ -38,21 +41,24 @@ func TestSelectProviderWithReader_RetriesAfterInvalidChoice(t *testing.T) {
 	}
 
 	var selected string
-	output := captureStdout(t, func() {
+	stdout, stderr := captureStdoutStderr(t, func() {
 		selected = selectProviderWithReader(cfg, bufio.NewReader(strings.NewReader("9\nbeta\n")))
 	})
 
 	if selected != "beta" {
 		t.Fatalf("expected retry to return beta, got %q", selected)
 	}
-	if !strings.Contains(output, "无效的选择，请重新输入") {
-		t.Fatalf("expected invalid-choice warning, got:\n%s", output)
+	if stdout != "" {
+		t.Fatalf("expected no stdout output, got:\n%s", stdout)
 	}
-	if !strings.Contains(output, "host=alpha.example.com") || !strings.Contains(output, "model=gpt-4.1") {
-		t.Fatalf("expected provider summary to include host/model, got:\n%s", output)
+	if !strings.Contains(stderr, "无效的选择，请重新输入") {
+		t.Fatalf("expected invalid-choice warning on stderr, got:\n%s", stderr)
 	}
-	if !strings.Contains(output, "alpha  protocol=openai | host=alpha.example.com | model=gpt-4.1") {
-		t.Fatalf("expected provider name and summary on one line, got:\n%s", output)
+	if !strings.Contains(stderr, "host=alpha.example.com") || !strings.Contains(stderr, "model=gpt-4.1") {
+		t.Fatalf("expected provider summary to include host/model, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "alpha  protocol=openai | host=alpha.example.com | model=gpt-4.1") {
+		t.Fatalf("expected provider name and summary on one line, got:\n%s", stderr)
 	}
 }
 
@@ -82,76 +88,91 @@ func TestSelectModelWithReader_RetriesAfterInvalidNumericChoice(t *testing.T) {
 	}
 
 	var selected string
-	output := captureStdout(t, func() {
+	stdout, stderr := captureStdoutStderr(t, func() {
 		selected = selectModelWithReader(provider, bufio.NewReader(strings.NewReader("7\n2\n")))
 	})
 
 	if selected != "gpt-4.1-mini" {
 		t.Fatalf("expected retry to return gpt-4.1-mini, got %q", selected)
 	}
-	if !strings.Contains(output, "无效的选择，请重新输入") {
-		t.Fatalf("expected invalid-choice warning, got:\n%s", output)
+	if stdout != "" {
+		t.Fatalf("expected no stdout output, got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "无效的选择，请重新输入") {
+		t.Fatalf("expected invalid-choice warning on stderr, got:\n%s", stderr)
 	}
 }
 
 func TestSelectReasoningEffortWithReader_RetriesAfterInvalidChoice(t *testing.T) {
 	var selected string
-	output := captureStdout(t, func() {
+	stdout, stderr := captureStdoutStderr(t, func() {
 		selected = selectReasoningEffortWithReader("medium", []string{"low", "medium", "high", "xhigh"}, bufio.NewReader(strings.NewReader("9\nhigh\n")))
 	})
 
 	if selected != "high" {
 		t.Fatalf("expected retry to return high, got %q", selected)
 	}
-	if !strings.Contains(output, "无效的选择，请重新输入") {
-		t.Fatalf("expected invalid-choice warning, got:\n%s", output)
+	if stdout != "" {
+		t.Fatalf("expected no stdout output, got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "无效的选择，请重新输入") {
+		t.Fatalf("expected invalid-choice warning on stderr, got:\n%s", stderr)
 	}
 }
 
 func TestSelectReasoningEffortWithReader_DefaultsToFirstOnInitialSelection(t *testing.T) {
 	var selected string
-	output := captureStdout(t, func() {
+	stdout, stderr := captureStdoutStderr(t, func() {
 		selected = selectReasoningEffortWithReader("", []string{"high", "max"}, bufio.NewReader(strings.NewReader("\n")))
 	})
 
 	if selected != "high" {
 		t.Fatalf("expected blank input to default to first option high, got %q", selected)
 	}
-	if !strings.Contains(output, "(默认)") || !strings.Contains(output, "请输入选项 (回车默认: high / 输入 0 清空): ") {
-		t.Fatalf("expected default-first prompt output, got:\n%s", output)
+	if stdout != "" {
+		t.Fatalf("expected no stdout output, got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "(默认)") || !strings.Contains(stderr, "请输入选项 (回车默认: high / 输入 0 清空): ") {
+		t.Fatalf("expected default-first prompt output on stderr, got:\n%s", stderr)
 	}
 }
 
 func TestSelectReasoningEffortWithReader_UsesDeepSeekCatalog(t *testing.T) {
 	var selected string
-	output := captureStdout(t, func() {
+	stdout, stderr := captureStdoutStderr(t, func() {
 		selected = selectReasoningEffortWithReader("high", []string{"max", "high"}, bufio.NewReader(strings.NewReader("\n")))
 	})
 
 	if selected != "high" {
 		t.Fatalf("expected current high effort to be preserved, got %q", selected)
 	}
-	if !strings.Contains(output, "max") || !strings.Contains(output, "(当前)") {
-		t.Fatalf("expected deepseek catalog output, got:\n%s", output)
+	if stdout != "" {
+		t.Fatalf("expected no stdout output, got:\n%s", stdout)
 	}
-	first := strings.Index(output, "[1] high")
-	second := strings.Index(output, "[2] max")
+	if !strings.Contains(stderr, "max") || !strings.Contains(stderr, "(当前)") {
+		t.Fatalf("expected deepseek catalog output on stderr, got:\n%s", stderr)
+	}
+	first := strings.Index(stderr, "[1] high")
+	second := strings.Index(stderr, "[2] max")
 	if first == -1 || second == -1 || first > second {
-		t.Fatalf("expected stable high->max order, got:\n%s", output)
+		t.Fatalf("expected stable high->max order, got:\n%s", stderr)
 	}
 }
 
 func TestSelectReasoningEffortWithReader_PreservesCaseInsensitiveMatch(t *testing.T) {
 	var selected string
-	output := captureStdout(t, func() {
+	stdout, stderr := captureStdoutStderr(t, func() {
 		selected = selectReasoningEffortWithReader("medium", []string{"low", "medium", "high", "xhigh"}, bufio.NewReader(strings.NewReader("HIGH\n")))
 	})
 
 	if selected != "high" {
 		t.Fatalf("expected canonical option high, got %q", selected)
 	}
-	if strings.Contains(output, "无效的选择，请重新输入") {
-		t.Fatalf("did not expect invalid-choice warning, got:\n%s", output)
+	if stdout != "" {
+		t.Fatalf("expected no stdout output, got:\n%s", stdout)
+	}
+	if strings.Contains(stderr, "无效的选择，请重新输入") {
+		t.Fatalf("did not expect invalid-choice warning, got:\n%s", stderr)
 	}
 }
 
@@ -182,7 +203,7 @@ func TestPromptStartupSessionSelectionWithReader_RetriesAfterInvalidChoice(t *te
 		selected  *runtimechat.Session
 		createNew bool
 	)
-	output := captureStdout(t, func() {
+	stdout, stderr := captureStdoutStderr(t, func() {
 		selected, createNew, err = promptStartupSessionSelectionWithReader(manager, "tester", ChatSessionListFilter{}, bufio.NewReader(strings.NewReader("9\n1\n")))
 	})
 	if err != nil {
@@ -194,8 +215,11 @@ func TestPromptStartupSessionSelectionWithReader_RetriesAfterInvalidChoice(t *te
 	if selected == nil || selected.ID != session.ID {
 		t.Fatalf("expected selected session %q, got %#v", session.ID, selected)
 	}
-	if !strings.Contains(output, "无效的选择，请重新输入") {
-		t.Fatalf("expected invalid-choice warning, got:\n%s", output)
+	if stdout != "" {
+		t.Fatalf("expected no stdout output, got:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "无效的选择，请重新输入") {
+		t.Fatalf("expected invalid-choice warning on stderr, got:\n%s", stderr)
 	}
 	for _, expected := range []string{
 		"匹配会话:",
@@ -203,8 +227,8 @@ func TestPromptStartupSessionSelectionWithReader_RetriesAfterInvalidChoice(t *te
 		"[2]  选择历史会话",
 		"[3]  新建会话",
 	} {
-		if !strings.Contains(output, expected) {
-			t.Fatalf("expected aligned startup selection output to contain %q, got:\n%s", expected, output)
+		if !strings.Contains(stderr, expected) {
+			t.Fatalf("expected aligned startup selection output to contain %q, got:\n%s", expected, stderr)
 		}
 	}
 }
@@ -227,21 +251,24 @@ func TestPromptSelectSessionFromList_RetriesAfterInvalidChoice(t *testing.T) {
 	}
 
 	var selected *runtimechat.Session
-	output := captureStdout(t, func() {
+	stdout, stderr := captureStdoutStderr(t, func() {
 		selected, _, _ = promptSelectSessionFromList(bufio.NewReader(strings.NewReader("9\n2\n")), sessions)
 	})
 
 	if selected == nil || selected.ID != "session-2" {
 		t.Fatalf("expected session-2 after retry, got %#v", selected)
 	}
-	if !strings.Contains(output, "无效的选择，请重新输入") {
-		t.Fatalf("expected invalid-choice warning, got:\n%s", output)
+	if stdout != "" {
+		t.Fatalf("expected no stdout output, got:\n%s", stdout)
 	}
-	if !strings.Contains(output, "[1 ] session-1") || !strings.Contains(output, "[2 ] session-2") {
-		t.Fatalf("expected aligned session rows, got:\n%s", output)
+	if !strings.Contains(stderr, "无效的选择，请重新输入") {
+		t.Fatalf("expected invalid-choice warning on stderr, got:\n%s", stderr)
 	}
-	if !strings.Contains(output, "[idle") || !strings.Contains(output, "[active") {
-		t.Fatalf("expected aligned state column, got:\n%s", output)
+	if !strings.Contains(stderr, "[1 ] session-1") || !strings.Contains(stderr, "[2 ] session-2") {
+		t.Fatalf("expected aligned session rows, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "[idle") || !strings.Contains(stderr, "[active") {
+		t.Fatalf("expected aligned state column, got:\n%s", stderr)
 	}
 }
 

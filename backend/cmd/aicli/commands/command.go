@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
@@ -970,6 +971,7 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
 		prefixPowershellUTF8ForInteractiveCommand(cmd)
 	}
+	runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
 
 	// 启动 Goroutine 实时输出命令结果（支持长时间运行的命令）
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -991,13 +993,10 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 	doneChan := make(chan struct{})
 	captureAccumulator := runtimeexecutor.NewOutputCaptureAccumulator(shellCommandCaptureLimit(cfg))
 
-	go func() {
-		defer close(doneChan)
-		defer close(outputChan) // 确保关闭输出通道
+	var wg sync.WaitGroup
+	readPipe := func(reader io.Reader) {
+		defer wg.Done()
 		buf := make([]byte, 1024)
-
-		// 合并 stdout 和 stderr
-		reader := io.MultiReader(stdoutPipe, stderrPipe)
 		for {
 			n, err := reader.Read(buf)
 			if n > 0 {
@@ -1008,6 +1007,15 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 				break
 			}
 		}
+	}
+
+	wg.Add(2)
+	go readPipe(stdoutPipe)
+	go readPipe(stderrPipe)
+	go func() {
+		wg.Wait()
+		close(outputChan)
+		close(doneChan)
 	}()
 
 	// 实时打印输出，同时按配置保留传递给 AI 的输出窗口

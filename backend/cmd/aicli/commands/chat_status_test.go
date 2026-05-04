@@ -40,18 +40,19 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 	})
 
 	session := &ChatSession{
-		ProviderName:    "OpenAI-go-away",
-		Provider:        config.Provider{Enabled: true, Protocol: "openai", BaseURL: "http://localhost:8080"},
-		Model:           "gpt-5.4-mini",
-		ReasoningEffort: "xhigh",
-		BaseURL:         "http://localhost:8080/v1",
-		PermissionMode:  runtimepolicy.ModeBypassPermissions,
-		ProfileRoot:     workspaceRoot,
-		ProfileContext:  map[string]interface{}{"collaboration_mode": "default"},
-		RuntimeSession:  &runtimechat.Session{ID: "019de76b-2481-7130-b902-f6166e6d2b96", State: runtimechat.StateActive},
-		Logger:          logger,
-		TokenCount:      2137949,
-		Messages:        nil,
+		ProviderName:      "OpenAI-go-away",
+		Provider:          config.Provider{Enabled: true, Protocol: "openai", BaseURL: "http://localhost:8080"},
+		Model:             "gpt-5.4-mini",
+		ReasoningEffort:   "xhigh",
+		BaseURL:           "http://localhost:8080/v1",
+		PermissionMode:    runtimepolicy.ModeBypassPermissions,
+		ProfileRoot:       workspaceRoot,
+		ProfileContext:    map[string]interface{}{"collaboration_mode": "default"},
+		RuntimeSession:    &runtimechat.Session{ID: "019de76b-2481-7130-b902-f6166e6d2b96", State: runtimechat.StateActive},
+		Logger:            logger,
+		TokenCount:        2137949,
+		ContextTokenCount: 3277,
+		Messages:          nil,
 	}
 
 	beforeMessages := len(session.Messages)
@@ -82,7 +83,7 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 		"Session:",
 		"019de76b-2481-7130-b902-f6166e6d2b96",
 		"Context used:",
-		"2137949 / 256000 (835%)",
+		"3277 / 256000 (1%)",
 		"Token count:",
 		"2.1m",
 		"Token usage:",
@@ -111,6 +112,7 @@ func TestBuildChatStatusTokenCountValue_FormatsCumulativeCount(t *testing.T) {
 func TestBuildChatStatusContextUsedValue_UsesContextWindow(t *testing.T) {
 	session := &ChatSession{
 		TokenCount:              90000,
+		ContextTokenCount:       90000,
 		ContextWindowTokenCount: 100000,
 	}
 

@@ -62,6 +62,34 @@ func reasoningEffortCapabilityForModel(provider config.Provider, modelName strin
 	return runtimellm.ResolveModelCapabilitySpec(modelName, provider.ModelCapabilities)
 }
 
+func reasoningEffortCapabilityForRequest(session *ChatSession) (config.ModelCapabilitySpec, bool) {
+	if session == nil {
+		return config.ModelCapabilitySpec{}, false
+	}
+	if capability, ok := reasoningEffortCapabilityForModel(session.Provider, session.Model); ok {
+		return capability, true
+	}
+	if capability, ok := fallbackReasoningEffortCapabilityForProvider(session.ProviderName, session.Provider); ok {
+		return capability, true
+	}
+	return config.ModelCapabilitySpec{}, false
+}
+
+func fallbackReasoningEffortCapabilityForProvider(providerName string, provider config.Provider) (config.ModelCapabilitySpec, bool) {
+	if !strings.EqualFold(strings.TrimSpace(provider.GetProtocol()), "openai") {
+		return config.ModelCapabilitySpec{}, false
+	}
+	name := strings.ToLower(strings.TrimSpace(providerName))
+	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
+	if name != "nvidia" && !strings.Contains(baseURL, "integrate.api.nvidia.com") {
+		return config.ModelCapabilitySpec{}, false
+	}
+	return config.ModelCapabilitySpec{
+		ReasoningModel:   true,
+		ReasoningEfforts: []string{"minimal", "low", "medium", "high"},
+	}, true
+}
+
 func normalizeReasoningEffortOptions(values []string) []string {
 	if len(values) == 0 {
 		return nil
@@ -82,6 +110,20 @@ func normalizeReasoningEffortOptions(values []string) []string {
 	}
 	sortReasoningEffortOptions(options)
 	return options
+}
+
+func supportedReasoningEffortForRequest(raw string, capability config.ModelCapabilitySpec, hasCapability bool) string {
+	effort := runtimetypes.NormalizeReasoningEffort(raw)
+	if effort == "" {
+		return ""
+	}
+	if !hasCapability || len(capability.ReasoningEfforts) == 0 {
+		return effort
+	}
+	if reasoningEffortAllowed(effort, normalizeReasoningEffortOptions(capability.ReasoningEfforts)) {
+		return effort
+	}
+	return ""
 }
 
 func sortReasoningEffortOptions(options []string) {
@@ -111,16 +153,18 @@ func sortReasoningEffortOptions(options []string) {
 
 func reasoningEffortSortRank(value string) (int, bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "low":
+	case "minimal":
 		return 0, true
-	case "medium":
+	case "low":
 		return 1, true
-	case "high":
+	case "medium":
 		return 2, true
-	case "max":
+	case "high":
 		return 3, true
-	case "xhigh":
+	case "max":
 		return 4, true
+	case "xhigh":
+		return 5, true
 	default:
 		return 0, false
 	}
@@ -153,7 +197,7 @@ func reasoningEffortOptionMatch(value string, options []string) (string, bool) {
 }
 
 func selectReasoningEffortWithReader(current string, options []string, reader *bufio.Reader) string {
-	ui.PrintSection("选择 reasoning_effort 值")
+	printChatSelectionSection("选择 reasoning_effort 值")
 
 	normalizedOptions := normalizeReasoningEffortOptions(options)
 	normalizedCurrent := runtimetypes.NormalizeReasoningEffort(current)
@@ -165,9 +209,9 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 
 	if len(normalizedOptions) == 0 {
 		if normalizedCurrent != "" {
-			fmt.Printf("  [1] %s %s\n", normalizedCurrent, ui.GetTheme(ui.ThemeAuto).Dimmed("(当前)"))
+			printChatSelectionLine("  [1] %s %s", normalizedCurrent, ui.GetTheme(ui.ThemeAuto).Dimmed("(当前)"))
 		}
-		ui.PrintEmptyLine()
+		printChatSelectionBlankLine()
 		return normalizedCurrent
 	}
 
@@ -182,22 +226,22 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 
 	for i, option := range normalizedOptions {
 		if currentValid && option == currentMatch {
-			fmt.Printf("  [%d] %-*s  %s\n", i+1, maxLabelLen, labels[i], ui.GetTheme(ui.ThemeAuto).Dimmed("(当前)"))
+			printChatSelectionLine("  [%d] %-*s  %s", i+1, maxLabelLen, labels[i], ui.GetTheme(ui.ThemeAuto).Dimmed("(当前)"))
 		} else if defaultOption != "" && option == defaultOption {
-			fmt.Printf("  [%d] %-*s  %s\n", i+1, maxLabelLen, labels[i], ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
+			printChatSelectionLine("  [%d] %-*s  %s", i+1, maxLabelLen, labels[i], ui.GetTheme(ui.ThemeAuto).Dimmed("(默认)"))
 		} else {
-			fmt.Printf("  [%d] %-*s\n", i+1, maxLabelLen, labels[i])
+			printChatSelectionLine("  [%d] %-*s", i+1, maxLabelLen, labels[i])
 		}
 	}
-	ui.PrintEmptyLine()
+	printChatSelectionBlankLine()
 
 	for {
 		if currentValid {
-			fmt.Printf("请输入选项 (回车保留当前: %s / 输入 0 清空): ", currentMatch)
+			printChatSelectionPrompt("请输入选项 (回车保留当前: %s / 输入 0 清空): ", currentMatch)
 		} else if defaultOption != "" {
-			fmt.Printf("请输入选项 (回车默认: %s / 输入 0 清空): ", defaultOption)
+			printChatSelectionPrompt("请输入选项 (回车默认: %s / 输入 0 清空): ", defaultOption)
 		} else {
-			fmt.Print("请输入选项 (回车清空当前无效值 / 输入 0 清空): ")
+			printChatSelectionPrompt("请输入选项 (回车清空当前无效值 / 输入 0 清空): ")
 		}
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
@@ -223,7 +267,7 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 			case num >= 1 && num <= len(normalizedOptions):
 				return normalizedOptions[num-1]
 			default:
-				ui.PrintWarning("无效的选择，请重新输入")
+				printChatSelectionWarning("无效的选择，请重新输入")
 				continue
 			}
 		}
@@ -232,6 +276,6 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 			return matched
 		}
 
-		ui.PrintWarning("无效的选择，请重新输入")
+		printChatSelectionWarning("无效的选择，请重新输入")
 	}
 }

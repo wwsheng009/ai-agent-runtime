@@ -200,13 +200,11 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		history = append(history, *types.NewUserMessage(prompt))
 	}
 	builder := NewMessageBuilder(history)
-	loop.configureBuilderActiveTurnCompaction(builder, options.BudgetTokens)
 
 	// 添加系统提示词
 	if loop.agent.config.SystemPrompt != "" && !hasLeadingSystemPrompt(history, loop.agent.config.SystemPrompt) {
 		systemMsg := types.NewSystemMessage(loop.agent.config.SystemPrompt)
 		builder = NewMessageBuilder(append([]types.Message{*systemMsg}, history...))
-		loop.configureBuilderActiveTurnCompaction(builder, options.BudgetTokens)
 	}
 
 	var observations []types.Observation
@@ -266,7 +264,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 							return result, fmt.Errorf("%w: persisted compacted history failed: %v", err, persistErr)
 						}
 						builder = NewMessageBuilder(recoveredHistory)
-						loop.configureBuilderActiveTurnCompaction(builder, options.BudgetTokens)
 						sessionCompactionRecoveryStep = step
 						continue
 					}
@@ -381,7 +378,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		observations = loop.observe(currentCtx, toolResults, observations, step)
 
 		// 4. 更新对话历史
-		loop.configureBuilderActiveTurnCompaction(builder, remainingBudget)
 		builder.AppendToolResults(normalizedCalls, toolResultsToPayloads(toolResults))
 		if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 			return nil, err
@@ -2132,26 +2128,6 @@ func mergeHookMetadata(metadata map[string]interface{}, message string, context 
 	}
 }
 
-func (loop *ReActLoop) configureBuilderActiveTurnCompaction(builder *MessageBuilder, remainingBudget int) {
-	if builder == nil {
-		return
-	}
-	if loop == nil || loop.llmRuntime == nil {
-		builder.SetActiveTurnReplayCompaction(historyguard.DefaultActiveTurnReplayMaxBytes, 0, nil)
-		return
-	}
-	budget := resolvePromptPreflightBudget(loop.llmRuntime, loop.agent, remainingBudget)
-	if budget.PromptBudget > 0 {
-		builder.SetActiveTurnReplayCompaction(
-			historyguard.DefaultActiveTurnReplayMaxBytes,
-			budget.PromptBudget,
-			loop.llmRuntime.CountMessagesTokens,
-		)
-		return
-	}
-	builder.SetActiveTurnReplayCompaction(historyguard.DefaultActiveTurnReplayMaxBytes, 0, nil)
-}
-
 type promptPreflightBudget struct {
 	PromptBudget                         int
 	BudgetSource                         string
@@ -2328,6 +2304,7 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 	if compacted {
 		promptTokensAfter := loop.llmRuntime.CountMessagesTokens(compactedMessages)
 		preflightMetadata["active_turn_compacted"] = true
+		preflightMetadata["active_turn_prompt_only"] = true
 		preflightMetadata["prompt_tokens_after"] = promptTokensAfter
 		preflightMetadata["message_count_after"] = len(compactedMessages)
 
@@ -2342,6 +2319,7 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 		compactedPayload["message_count_before"] = len(messages)
 		compactedPayload["message_count_after"] = len(compactedMessages)
 		compactedPayload["remaining_budget"] = remainingBudget
+		compactedPayload["prompt_only"] = true
 		loop.agent.emitRuntimeEvent("context.preflight.compacted", sessionID, "", compactedPayload)
 		if promptTokensAfter <= budget.PromptBudget {
 			return compactedMessages, preflightMetadata, nil
@@ -2353,7 +2331,7 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 			promptTokensAfter,
 			budget.PromptBudget,
 		)
-		failureErr := newPromptPreflightError(budget, failure, promptTokensAfter, true, compactedMessages)
+		failureErr := newPromptPreflightError(budget, failure, promptTokensAfter, true, nil)
 		failedPayload := budget.Metadata()
 		if failedPayload == nil {
 			failedPayload = map[string]interface{}{}
