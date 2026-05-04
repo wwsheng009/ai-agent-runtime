@@ -131,6 +131,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	session.RuntimeSession = runtimeSession.Clone()
 	session.MsgCount = countRuntimeUserMessages(session.Messages)
 	session.TurnRequestCount = 0
+	session.turnPrimed = false
 	resetChatTurnTokenUsage(session)
 	restoreChatRuntimeContext(session, session.RuntimeSession)
 	restoreChatContextTokenUsage(session, session.RuntimeSession)
@@ -156,6 +157,7 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	}
 	session.MsgCount = 0
 	session.TurnRequestCount = 0
+	session.turnPrimed = false
 	resetChatConversationTokenUsage(session)
 	session.RuntimeSession = runtimeSession
 	ensureChatSystemPromptMessage(session)
@@ -272,6 +274,7 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	runtimeSession.Metadata.Context[chatRuntimeContextStream] = session.Stream
 	runtimeSession.Metadata.Context[chatRuntimeContextDisableTools] = session.DisableTools
 	runtimeSession.Metadata.Context[chatRuntimeContextMessageCount] = len(session.Messages)
+	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 	if session.TokenCount > 0 {
 		runtimeSession.Metadata.Context[chatRuntimeContextTokenCount] = session.TokenCount
 	} else {

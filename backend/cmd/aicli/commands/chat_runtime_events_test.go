@@ -52,6 +52,7 @@ func TestChatRuntimeEventBridge_LLMRequestStartedUpdatesActiveContextSnapshot(t 
 		Type:      "llm.request.started",
 		SessionID: runtimeSession.ID,
 		Payload: map[string]interface{}{
+			"message_count":         11,
 			"success":               true,
 			"context_prompt_tokens": 23099,
 			"context_window_tokens": 270000,
@@ -59,8 +60,8 @@ func TestChatRuntimeEventBridge_LLMRequestStartedUpdatesActiveContextSnapshot(t 
 		},
 	})
 
-	if session.ContextTokenCount != 0 {
-		t.Fatalf("expected request event not to overwrite ctx used source, got context=%d", session.ContextTokenCount)
+	if session.ContextTokenCount != 23099 {
+		t.Fatalf("expected request event to update live ctx used source, got context=%d", session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 270000 {
 		t.Fatalf("expected context window token count 270000, got %d", session.ContextWindowTokenCount)
@@ -68,11 +69,15 @@ func TestChatRuntimeEventBridge_LLMRequestStartedUpdatesActiveContextSnapshot(t 
 	if session.TurnContextTokenCount != 23099 {
 		t.Fatalf("expected turn aggregate token count 23099, got %d", session.TurnContextTokenCount)
 	}
+	if session.StatusMessageCount != 11 {
+		t.Fatalf("expected request event to update status message count, got %d", session.StatusMessageCount)
+	}
 
 	bridge.handleEvent(runtimeevents.Event{
 		Type:      "llm.request.started",
 		SessionID: runtimeSession.ID,
 		Payload: map[string]interface{}{
+			"message_count":         13,
 			"success":               true,
 			"context_prompt_tokens": 24299,
 			"context_window_tokens": 270000,
@@ -80,11 +85,14 @@ func TestChatRuntimeEventBridge_LLMRequestStartedUpdatesActiveContextSnapshot(t 
 		},
 	})
 
-	if session.ContextTokenCount != 0 {
-		t.Fatalf("expected request event not to overwrite ctx used source, got context=%d", session.ContextTokenCount)
+	if session.ContextTokenCount != 24299 {
+		t.Fatalf("expected request event to refresh live ctx used source, got context=%d", session.ContextTokenCount)
 	}
 	if session.TurnContextTokenCount != 47398 {
 		t.Fatalf("expected turn diagnostic aggregate 47398 after second request, got %d", session.TurnContextTokenCount)
+	}
+	if session.StatusMessageCount != 13 {
+		t.Fatalf("expected second request event to refresh status message count, got %d", session.StatusMessageCount)
 	}
 
 	bridge.handleEvent(runtimeevents.Event{
@@ -101,8 +109,8 @@ func TestChatRuntimeEventBridge_LLMRequestStartedUpdatesActiveContextSnapshot(t 
 	if session.TurnContextTokenCount != 47398 {
 		t.Fatalf("expected finished event not to double count turn aggregate tokens, got %d", session.TurnContextTokenCount)
 	}
-	if session.ContextTokenCount != 1400 {
-		t.Fatalf("expected finished usage total to update active context snapshot, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 24299 {
+		t.Fatalf("expected smaller finished usage not to lower live context snapshot, got %d", session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 270000 {
 		t.Fatalf("expected finished event to preserve context window token count 270000, got %d", session.ContextWindowTokenCount)

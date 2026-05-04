@@ -212,8 +212,8 @@ func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
 		if provider = compactStatusValue(provider, 20); provider != "" {
 			parts = append(parts, provider)
 		}
-		if session.MsgCount > 0 {
-			parts = append(parts, "msgs "+compactStatusCount(session.MsgCount))
+		if messageCount := resolveChatStatusMessageCount(session); messageCount > 0 {
+			parts = append(parts, "msgs "+compactStatusCount(messageCount))
 		}
 	}
 
@@ -275,6 +275,30 @@ func resolveChatStatusUsedTokens(session *ChatSession) int {
 		return session.ContextTokenCount
 	}
 	return resolveChatContextSnapshotTokens(session, nil)
+}
+
+func resolveChatStatusMessageCount(session *ChatSession) int {
+	if session == nil {
+		return 0
+	}
+	if session.StatusMessageCount > 0 {
+		return session.StatusMessageCount
+	}
+	if count := countChatStatusMessages(session.Messages); count > 0 {
+		return count
+	}
+	return session.MsgCount
+}
+
+func applyChatStatusMessageCount(session *ChatSession, count int, forceRefresh bool) {
+	if session == nil || count <= 0 {
+		return
+	}
+	changed := session.StatusMessageCount != count
+	session.StatusMessageCount = count
+	if (changed || forceRefresh) && session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
 }
 
 func compactStatusValue(value string, maxWidth int) string {

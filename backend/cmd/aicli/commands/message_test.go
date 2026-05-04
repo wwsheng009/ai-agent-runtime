@@ -228,14 +228,44 @@ func TestNextLogScope_IncrementsPerTurnAndPerRequest(t *testing.T) {
 	}
 }
 
-func TestApplyChatTurnContextTokens_DoesNotOverwriteSessionContextSnapshot(t *testing.T) {
+func TestNextLogScope_ConsumesPrecountedUserTurn(t *testing.T) {
+	session := &ChatSession{
+		Messages: []runtimetypes.Message{
+			*runtimetypes.NewSystemMessage("system"),
+			*runtimetypes.NewUserMessage("previous"),
+			*runtimetypes.NewAssistantMessage("answer"),
+		},
+	}
+
+	beginChatUserTurn(session, "first turn")
+	if session.MsgCount != 1 || session.TurnRequestCount != 0 {
+		t.Fatalf("expected user turn to be pre-counted, got msgs=%d requests=%d", session.MsgCount, session.TurnRequestCount)
+	}
+	if session.StatusMessageCount != 3 {
+		t.Fatalf("expected status message count to include visible history plus pending prompt, got %d", session.StatusMessageCount)
+	}
+
+	scope := nextLogScope(session, "first turn")
+
+	if scope.TurnID != "turn-0001" || scope.RequestID != "turn-0001-req-01" {
+		t.Fatalf("unexpected scope for pre-counted turn: %+v", scope)
+	}
+	if session.MsgCount != 1 || session.TurnRequestCount != 1 {
+		t.Fatalf("expected request scope not to double-count pre-counted turn, got msgs=%d requests=%d", session.MsgCount, session.TurnRequestCount)
+	}
+	if session.turnPrimed {
+		t.Fatalf("expected first request scope to consume the pre-counted turn marker")
+	}
+}
+
+func TestApplyChatTurnContextTokens_UpdatesLiveSessionContextSnapshot(t *testing.T) {
 	session := &ChatSession{ContextTokenCount: 900}
 
 	applyChatTurnContextTokens(session, 100, 1000, false)
 	applyChatTurnContextTokens(session, 250, 1000, false)
 
-	if session.ContextTokenCount != 900 {
-		t.Fatalf("expected turn aggregate tracking to preserve session context snapshot, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 250 {
+		t.Fatalf("expected live request context to update session context snapshot, got %d", session.ContextTokenCount)
 	}
 	if session.TurnContextTokenCount != 350 {
 		t.Fatalf("expected turn aggregate context tokens to be 350, got %d", session.TurnContextTokenCount)

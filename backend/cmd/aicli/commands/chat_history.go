@@ -64,6 +64,7 @@ func appendRuntimeMessage(session *ChatSession, message runtimetypes.Message) {
 		return
 	}
 	session.Messages = append(cloneRuntimeMessages(session.Messages), *message.Clone())
+	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 }
 
 func replaceRuntimeMessages(session *ChatSession, messages []runtimetypes.Message) error {
@@ -76,6 +77,7 @@ func replaceRuntimeMessages(session *ChatSession, messages []runtimetypes.Messag
 		}
 	}
 	session.Messages = cloneRuntimeMessages(messages)
+	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 	return nil
 }
 
@@ -97,6 +99,17 @@ func chatMessagesHaveConversation(messages []runtimetypes.Message) bool {
 		}
 	}
 	return false
+}
+
+func countChatStatusMessages(messages []runtimetypes.Message) int {
+	count := 0
+	for _, message := range messages {
+		role := strings.TrimSpace(message.Role)
+		if role != "" && !strings.EqualFold(role, "system") {
+			count++
+		}
+	}
+	return count
 }
 
 func printVisibleChatHistory(session *ChatSession, header string) int {

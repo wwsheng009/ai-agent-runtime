@@ -166,6 +166,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		}
 		session.MsgCount = 0
 		session.TurnRequestCount = 0
+		session.turnPrimed = false
 		resetChatConversationTokenUsage(session)
 		ensureChatSystemPromptMessage(session)
 		if err := syncRuntimeSessionFromChat(session); err != nil {

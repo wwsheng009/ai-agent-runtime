@@ -15,6 +15,7 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 		return "", fmt.Errorf("用户中断")
 	}
 	ensureChatSystemPromptMessage(session)
+	beginChatUserTurn(session, userMessage)
 	executor := ensureChatExecutor(session)
 	resetChatTurnTokenUsage(session)
 
@@ -63,9 +64,12 @@ func nextLogScope(session *ChatSession, userMessage string) aicliLogScope {
 		return aicliLogScope{}
 	}
 	if strings.TrimSpace(userMessage) != "" {
-		session.MsgCount++
-		session.TurnRequestCount = 0
-		resetChatTurnTokenUsage(session)
+		if session.turnPrimed && session.TurnRequestCount == 0 {
+			session.turnPrimed = false
+		} else {
+			beginChatUserTurn(session, userMessage)
+			session.turnPrimed = false
+		}
 	}
 
 	turnIndex := session.MsgCount
@@ -81,5 +85,19 @@ func nextLogScope(session *ChatSession, userMessage string) aicliLogScope {
 	return aicliLogScope{
 		TurnID:    turnID,
 		RequestID: fmt.Sprintf("%s-req-%02d", turnID, session.TurnRequestCount),
+	}
+}
+
+func beginChatUserTurn(session *ChatSession, userMessage string) {
+	if session == nil || strings.TrimSpace(userMessage) == "" {
+		return
+	}
+	session.MsgCount++
+	session.TurnRequestCount = 0
+	session.turnPrimed = true
+	session.StatusMessageCount = countChatStatusMessages(session.Messages) + 1
+	resetChatTurnTokenUsage(session)
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
 	}
 }

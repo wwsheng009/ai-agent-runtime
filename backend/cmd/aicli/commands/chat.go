@@ -62,7 +62,9 @@ type ChatSession struct {
 	providerContextTokenCount       int                                // provider usage 返回的当前活跃上下文快照，等待 runtime history 同步后保留
 	providerContextWindowTokenCount int                                // provider usage 对应的上下文窗口大小
 	MsgCount                        int                                // 消息计数
+	StatusMessageCount              int                                // 状态栏展示的当前上下文消息数
 	TurnRequestCount                int                                // 当前 turn 内的请求计数
+	turnPrimed                      bool                               // 当前用户 turn 已在 sendMessage 入口计数，等待首个 request scope 消费
 	SessionManager                  *runtimechat.SessionManager        // 持久化会话管理器
 	RuntimeSession                  *runtimechat.Session               // 当前持久化会话
 	SessionUserID                   string                             // 当前会话所属用户

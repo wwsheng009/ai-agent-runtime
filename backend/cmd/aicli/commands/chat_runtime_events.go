@@ -903,6 +903,9 @@ func (b *chatRuntimeEventBridge) applyLLMRequestStatus(event runtimeevents.Event
 	}
 	switch event.Type {
 	case runtimechat.EventLLMRequestStarted, "llm.request.started":
+		if messageCount := firstPositivePayloadInt(event.Payload, "message_count"); messageCount > 0 {
+			applyChatStatusMessageCount(b.session, messageCount, true)
+		}
 		promptTokens := firstPositivePayloadInt(event.Payload, "context_prompt_tokens", "total_tokens")
 		windowTokens := firstPositivePayloadInt(event.Payload, "context_window_tokens", "max_context_tokens", "model_capability_max_context_tokens", "provider_context_limit")
 		applyChatTurnContextTokens(b.session, promptTokens, windowTokens, true)

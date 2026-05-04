@@ -1082,6 +1082,21 @@ func TestBuildChatSurfaceStatusLine_IncludesContextWindowWhenOnlyWindowIsKnown(t
 	}
 }
 
+func TestBuildChatSurfaceStatusLine_UsesLiveStatusMessageCount(t *testing.T) {
+	session := &ChatSession{
+		MsgCount:           2,
+		StatusMessageCount: 37,
+	}
+
+	status := buildChatSurfaceStatusLine(session, "Ready")
+	if !strings.Contains(status, "msgs 37") {
+		t.Fatalf("expected status line to use live context message count, got %q", status)
+	}
+	if strings.Contains(status, "msgs 2") {
+		t.Fatalf("expected status line not to fall back to turn count when live count exists, got %q", status)
+	}
+}
+
 func TestBuildChatSurfaceStatusLine_FallsBackToDefaultContextWindowWhenNoCapabilityExists(t *testing.T) {
 	session := &ChatSession{
 		TokenCount:        500000,
