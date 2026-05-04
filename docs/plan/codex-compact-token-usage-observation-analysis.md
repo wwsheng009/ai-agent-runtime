@@ -22,10 +22,12 @@ Codex 结论先行:
 本项目最新需求与 Codex 的 compact 观察值语义对齐。`aicli chat` 的 `ctx used` 明确采用:
 
 ```text
-ctx used = 当前活跃上下文 token 快照
+ctx used = 最近已发送给 LLM API 的 prompt context token 快照
 ```
 
-它与模型 context window 比较, 达到或超过自动压缩阈值时触发 session-level compact。当前项目没有完整复刻 Codex 的 `TokenUsageInfo.last_token_usage + pending items` 数据结构, 因此用 `ContextTokenCount` 表示该 active-context 快照, 在缺失显式快照时才用当前 history 的本地 token 估算兜底。
+它与模型 context window 比较, 达到或超过自动压缩阈值时触发 session-level compact。当前项目没有完整复刻 Codex 的 `TokenUsageInfo.last_token_usage + pending items` 数据结构, 因此用 `ContextTokenCount` 表示最近一次 provider 确认的 prompt context 快照, 在缺失显式快照时才用当前 history 的本地 token 估算兜底。
+
+这与 Codex 的 `last_token_usage.total_tokens + pending items` 口径并不逐字段相同。`aicli` 状态栏面向的是“发送给 LLM 的 context 大小”, 所以优先使用 provider 返回的 prompt/input context 字段; completion/output 只进入累计 API usage, 不再作为 `ctx used` 的常规来源。普通请求在 compact 前从逻辑上只会让 context 增大, 所以状态栏更新必须单调递增; 只有 session compact、手动 `/compact`、`/new`、`/clear` 或 reset 边界允许降低。
 
 如果把 `total_token_usage` 或本项目的 `TokenCount` 当成 compact 观察值, 很容易出现两类错误:
 
@@ -454,18 +456,18 @@ total_token_usage.total_tokens
 
 当前项目按 Codex 口径对齐后的最终约定如下:
 
-1. **主观察值**: 当前活跃上下文 token 快照, 即 `ContextTokenCount`。
+1. **主观察值**: 最近已发送给 LLM API 的 prompt context token 快照, 即 `ContextTokenCount`。
 2. **重置边界**: `/new`、`/clear` 清空 `TokenCount`、`ContextTokenCount`、`TurnContextTokenCount`; 成功 `/compact` 或成功 auto compact 只更新 `ContextTokenCount` 并清空 `TurnContextTokenCount`, 不清空 `TokenCount`。
-3. **恢复边界**: resume / history replay 分别从 runtime session metadata 恢复 `aicli_token_count` 与 `aicli_context_token_count`; context metadata 缺失时必须清掉旧快照, 再按当前 history 需要重算。
+3. **恢复边界**: resume / history replay 分别从 runtime session metadata 恢复 `aicli_token_count` 与 `aicli_context_token_count`; context metadata 缺失时可以按当前 history 估算初始化, 但普通 history sync 不允许把已有的 provider-confirmed context 快照刷小。
 4. **compact 判断**: `ContextTokenCount >= auto_compact_token_limit`; 若没有显式 `ContextTokenCount`, 使用当前 history 的 token 估算作为 active-context fallback。若没有显式 limit, 则使用 `max_context_tokens * auto_compact_ratio`, 默认 ratio 为 `0.9`; 若 provider/model 没有声明能力, 使用与 TUI 状态行一致的默认窗口 `256000` 和默认 ratio `0.9`。
 5. **禁止混用**: `TokenCount`、`TurnContextTokenCount`、quota `usedPercent` 都不能作为 `ctx used` 主来源。
-6. **精确修正优先级**: compact `token_after` > provider `usage.TotalTokens` / `usage_total_tokens` > provider `PromptTokens + CompletionTokens + Anthropic cache-read/cache-creation input` > 当前 history 本地估算 > `0`。
-7. **usage 明细边界**: `ContextTokenCount` 使用 provider total 作为 post-response active-context 快照; OpenAI-style cached tokens 不扣减, Anthropic-style cache-read/cache-creation input 在缺少 explicit total 时计入合成 total, reasoning tokens 不单独追加。`context_prompt_tokens` 是 request prompt 诊断值, 只进入 `TurnContextTokenCount`。
+6. **精确修正优先级**: compact `token_after` / compact 后 history 估算可以重置显示值; 普通 provider usage 使用 prompt/input context 确认值并按单调递增写入; provider usage 缺失或无法解析时才使用 request `context_prompt_tokens` / 当前 history 本地估算兜底。
+7. **usage 明细边界**: `ContextTokenCount` 使用 provider prompt/input context 作为 post-response sent-context 快照。OpenAI-style cached tokens 通常已包含在 prompt/input tokens 中, 不重复追加; Anthropic/Mimo-style cache-read/cache-creation input 若在 provider usage 中作为 prompt 之外的字段返回, 需要加回 prompt context。reasoning / completion tokens 不单独追加到 `ctx used`。`context_prompt_tokens` 是 request prompt 诊断值, request-start 时只进入 `TurnContextTokenCount`, 不提前显示。
 
 保留字段含义:
 
 - `TokenCount`: 当前会话累计真实 LLM API token usage。它是展示/记账值, 不驱动 `ctx used` 和 auto compact。
-- `ContextTokenCount`: 当前活跃上下文 token 快照。它驱动状态行 `ctx used`、`/status Context used` 和 auto compact。
+- `ContextTokenCount`: 最近已发送给 LLM API 的 prompt context token 快照。它驱动状态行 `ctx used`、`/status Context used` 和 auto compact。
 - `TurnContextTokenCount`: 当前 turn 内请求 prompt token 诊断累计, 不驱动状态行百分比, 不参与 compact。
 - `RateLimitUsedPercent`: quota / rate limit 窗口消费比例, 不参与 context compact。
 
@@ -474,7 +476,7 @@ total_token_usage.total_tokens
 本项目在 `backend/cmd/aicli/commands` 里存在三个容易混淆的计数:
 
 - `TokenCount`: 当前会话累计 API token usage。它用于 `/status` 的 `Token count` / `Token usage` fallback 和调试, 不参与 compact 阈值。
-- `ContextTokenCount`: 当前活动会话上下文 token 快照。它是 TUI 状态行 `ctx <window> used <n> <pct>%`、`/status Context used` 和 auto compact 的主来源。
+- `ContextTokenCount`: 最近已发送给 LLM API 的 prompt context token 快照。它是 TUI 状态行 `ctx <window> used <n> <pct>%`、`/status Context used` 和 auto compact 的主来源。
 - `TurnContextTokenCount`: 当前 turn 内请求 prompt token 的诊断累计。它只用于 debug / 观测请求链路, 不参与 status 百分比, 不参与 session-level compact。
 
 这三个值不能互相 fallback。尤其不能用 `TokenCount` 或 `TurnContextTokenCount` 填充 `ContextTokenCount`, 否则会出现:
@@ -487,14 +489,15 @@ total_token_usage.total_tokens
 
 1. 只有真实 LLM API 响应里的 `usage.TotalTokens` / `usage_total_tokens` 可以累加到 `TokenCount`。
 2. `llm.request.started` / `llm.request.finished` 的 `context_prompt_tokens` 只能用于 request/turn 诊断, 不能写入 `TokenCount`, 也不能直接成为 `ctx used`。
-3. `ContextTokenCount` 在 provider usage 可用时按 `usage.TotalTokens` 精确修正; 若 provider 不返回 total, 使用 `PromptTokens + CompletionTokens + Anthropic cache-read/cache-creation input` 兜底。这里不能只取 input/prompt tokens, 因为当前 active context 已包含本轮 assistant 输出。
+3. `ContextTokenCount` 在 provider usage 可用时按 prompt/input context 精确修正; OpenAI-style provider 使用 `PromptTokens` / input tokens, Anthropic/Mimo-style provider 在 cache read / cache creation tokens 作为 prompt 之外字段返回时使用 `PromptTokens + CachedTokens`。如果 provider 只返回 total 且没有 prompt/input 字段, 才用 `TotalTokens - CompletionTokens` 或 `TotalTokens` 兜底。
 4. `ctx used` 和 `/status Context used` 读取 `ContextTokenCount`; 缺失显式快照时可以用当前 history 的本地估算兜底, 但空会话或只有 system prompt 时必须为 0。
 5. session-level auto compact 使用同一个 active-context 观察值 `ContextTokenCount` / 当前 history 估算, 不使用 runtime metadata `aicli_token_count`。
 6. 成功 compact 后, `ContextTokenCount` 记录 `token_after` 或压缩后 history 估算值; `TokenCount` 保持累计 API usage 不变。
 7. `/new`、`/clear` 清空 `TokenCount`、`ContextTokenCount`、`TurnContextTokenCount`。
 8. `ContextTokenCount=0` 是有效观察值; 新会话、刚 `/clear` 或 system-only history 不能因为 system prompt 本地估算值误显示为已使用。
+9. 普通请求路径的 `ContextTokenCount` 写入是单调递增的。即使 provider usage 或 history sync 给出更小估算值, 也不能降低状态栏显示; 只有 compact / reset 边界可以降低。
 
-当前实现与需求的核心差异曾经在于: request 事件和 provider usage、history 估算被混到同一个显示值里, 于是 `ctx used` 有时表现成“当前 request / turn”, 有时又表现成“整会话 API usage 累计”。修正后, `ctx used` 读取 `ContextTokenCount` 或当前 history 的 active-context 估算; request prompt 只保留在 `TurnContextTokenCount` 诊断字段中, `TokenCount` 只做累计 API usage 记账。
+当前实现与需求的核心差异曾经在于: request 事件和 provider usage、history 估算被混到同一个显示值里, 于是 `ctx used` 有时表现成“当前 request / turn”, 有时又表现成“整会话 API usage 累计”。修正后, `ctx used` 读取 `ContextTokenCount` 或当前 history 的 active-context 估算; request prompt 只保留在 `TurnContextTokenCount` 诊断字段中, `TokenCount` 只做累计 API usage 记账。普通 `contextmgr.Build` 也不再默认按 recent-window 裁掉旧 history, 避免在 session compact 前让 sent context 变小并导致状态栏从大到小抖动。
 
 ## 参考代码
 

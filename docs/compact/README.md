@@ -11,6 +11,8 @@
 - 先做 `pre-turn auto compact`，不做 `mid-turn`。
 - 压缩结果不是临时 prompt 注入，而是直接替换并持久化 session history。
 - 压缩阈值按 `provider -> model_capabilities -> model` 解析，不再使用全局固定 token limit。
+- 普通 prompt 组装不再默认执行 recent-window / ledger / summary 重组；只有显式 compact、达到阈值的 session compact 或发送前 preflight 压缩才允许缩短要发送的 prompt。
+- `aicli` 状态栏里的 `ctx used` 表示已经发送给 LLM API 的 prompt context 大小，由 provider usage 确认；普通请求只允许递增，只有 compact / reset / new / clear 允许降低。
 
 ## Codex 自动压缩机制分析
 
@@ -118,7 +120,9 @@ providers:
 
 ### Prompt 预算与 context manager
 
-自动压缩阈值和发送前的 prompt 预算使用同一组 provider/model capability 语义。ReAct 每次发起模型请求前，会先解析一个有效 prompt 预算，并把它传给 `contextmgr.Manager.Build()`，避免 context manager 在 Build 阶段先用 balanced profile 的保守默认值裁掉长会话目标。
+自动压缩阈值和发送前的 prompt 预算使用同一组 provider/model capability 语义。ReAct 每次发起模型请求前，会先解析一个有效 prompt 预算，并把它传给 `contextmgr.Manager.Build()` 作为观测和后续 preflight 的预算来源。
+
+当前实现里，普通 `contextmgr.Manager.Build()` 默认保留完整原始 history，不会因为 balanced profile 的 `MaxPromptTokens=12000`、`MaxMessages` 或 `KeepRecentMessages` 提前裁掉长会话目标。recent-window / ledger / summary 重组由 `BuildInput.EnablePromptCompaction` 显式打开；生产请求路径默认关闭这条 prompt-view compaction，避免在 session-level compact 前破坏 provider prompt cache 或导致 `ctx used` 从大到小抖动。
 
 解析顺序：
 
@@ -128,7 +132,7 @@ providers:
 4. 否则如果 provider 暴露了 `MaxContextTokens`，按 provider context limit 的默认比例 `0.9` 计算。
 5. 最后才使用 `context.fallbackMaxPromptTokens`；如果该配置为空，则使用内置默认 `32000`。
 
-`context.profile` 仍然控制组织策略，例如 recent messages、recall 数量、observation 数量和 ledger/summary 策略；它不再单独把已知大上下文模型的 prompt 预算压到 12k。需要主动限制请求大小时，应配置 `context.maxPromptTokens`。
+`context.profile` 仍然控制组织策略，例如 recall 数量、observation 数量和 ledger/summary 策略；但 recent-window / ledger / summary 对原始 history 的重组只在显式允许 prompt compaction 时生效。它不再单独把已知大上下文模型的 prompt 预算压到 12k，也不在普通请求里缩短历史。需要主动限制请求大小时，应配置 `context.maxPromptTokens`，并依赖 preflight / session compact 在发送前处理。
 
 兜底预算可在 `backend/configs/runtime.yaml` 中配置：
 
@@ -158,14 +162,14 @@ context:
 
 `runtime config` 下的 `context` 配置仍然保留，但职责变为：
 
-- `keepRecentMessages`
-- `maxMessages`
+- `keepRecentMessages`（compact 后保留窗口或显式 prompt compaction 窗口）
+- `maxMessages`（仅显式 prompt compaction / trim 路径使用）
 - `compactionMode`
 - `recall / observation` 等上下文治理参数
 
 它不再负责 auto compact 的 token trigger line。
 
-第一阶段里，`context.keepRecentMessages` 只影响“压缩后保留多少近期原始消息”。
+当前正式语义里，`context.keepRecentMessages` 不会让普通请求自动丢弃旧 history；它只影响“压缩后保留多少近期原始消息”或显式开启 prompt compaction 时的 recent-window 大小。
 
 ## 第一阶段落地架构
 
@@ -391,7 +395,9 @@ compaction message 的 metadata 包含：
 - pending 状态跳过
 - `agent_chat` session 路径压缩
 - provider config 中 model capability 透传
-- context manager Build 阶段使用同一有效 prompt 预算，不再被 balanced profile 默认 12k 提前裁剪
+- context manager Build 阶段使用同一有效 prompt 预算做观测，普通 Build 默认保留完整 history，不再被 balanced profile 默认 12k、MaxMessages 或 recent-window 提前裁剪
+- 显式 `EnablePromptCompaction` 时仍保留 ledger / summary / recent-window 能力，默认关闭时不会发出 `context.compact.*` 事件
+- `aicli` `ctx used` 普通 provider usage 更新单调递增，`session_compact_completed` / `/compact` 才允许降低为 compact 后的 `token_after`
 - `context.fallbackMaxPromptTokens` 只在无法解析 capability/provider context limit 时作为兜底预算
 - Codex remote compact endpoint 路径构造
 - 远端 `compaction` item 的持久化与回放
@@ -430,7 +436,9 @@ go test ./internal/llm ./internal/compactruntime ./internal/chat ./internal/api/
 
 - 触发阈值按具体模型能力解析。
 - 默认阈值是 `max_context_tokens * 0.9`。
-- `context` 只负责保留窗口等上下文治理参数。
+- `context` 只负责保留窗口等上下文治理参数；普通 prompt Build 不会默认 recent-window 裁剪历史。
 - 当前已支持本地 `pre-turn` 压缩，以及 Codex 远端 `pre-turn` 压缩，并直接替换持久化 session history。
+- prompt-only preflight 压缩只修改当次发送给模型的 prompt view；只有 session-level compact 成功后才替换并持久化 session history。
+- `aicli` `ctx used` 是发送给 LLM API 的 prompt context 观察值，由 provider usage 确认。普通请求路径不提前显示本地预估，也不会因 provider 返回较小值而回落；本地预估只在请求失败或 usage 无法解析时作为兜底。
 
 这条链路已经为后续远程压缩预留好适配层，不需要再重做 session 语义。

@@ -360,12 +360,13 @@ toolkit / MCP / broker tool
 5. **shared chat 路径在进入 tool loop 前，也会基于 model capability 尝试一次 pre-turn auto compaction；如果整段会话历史已经明显逼近上下文窗口，会先把更早 turns 压成 summary，再继续当前请求。shared renderer 也会输出对应的 `[context] shared auto-compact ...` 提示，方便观察是否已提前压缩。**
 6. **在真正发起 LLM 请求前，还会执行一次 prompt preflight budget gate。若 prompt token 仍超预算，会优先尝试基于 token 的 active turn replay 压缩；若压缩后仍超限，则直接在本地失败，不再把超大请求发给模型。预算推导已开始结合 provider / model capability（`MaxContextTokens`、`AutoCompactRatio`、`AutoCompactTokenLimit`）与 provider fallback context limit。**
 7. **preflight fail-fast 现在会返回结构化的 `PromptPreflightError`，上层 actor / shared chat CLI 可以直接消费其中的失败码、建议动作、provider/model/budget source 等信息；runtime timeline 也能基于 `session_end` payload 渲染更清晰的本地拦截提示，而不再只能靠字符串匹配。**
-8. **如果 preflight 在“已完成 active-turn compaction 但仍超预算”后失败，错误对象还会携带 replacement history；actor loop 会先把这份更紧凑的 history 持久化回 session，shared chat CLI 也会在返回错误前把压缩后的 history 同步回当前 chat state。**
+8. **如果 preflight 在“已完成 active-turn compaction 但仍超预算”后失败，错误对象可以携带 replacement history 作为恢复参考；prompt-only 压缩只影响当次发送视图，不再默认回写持久化 session history。只有 session-level compact recovery 或显式 `/compact` 成功后，才会替换并持久化 session history。**
 9. **CLI 仍然可以独立截断。**
 10. **`tool_source` / `output_kind` 已在 legacy `aicli` 路径和 shared `chatcore` 路径中端到端透传。**
 11. **success / error 两条路径都保留 metadata。**
 12. **内置 toolkit 工具显式声明 `OutputKind`，减少误判。**
 13. **外部 MCP 工具当前优先保留完整输出。**
+14. **`aicli` 状态栏的 `ctx used` 表示已发送给 LLM API 的 prompt context 大小，由 provider usage 确认；request-start 本地预估不会提前显示，普通请求只允许单调递增，compact / reset / new / clear 才允许降低。**
 
 ## 11. 后续建议
 
@@ -392,9 +393,9 @@ toolkit / MCP / broker tool
 
 ### 11.3 继续增强 preflight gate 的 provider 感知与恢复策略
 
-这次修复后，preflight gate 已经不再只看 context manager 预算；它还会综合：
+当前实现里，preflight gate 不再只看 context manager 预算；它还会综合：
 
-- context manager 的 prompt 预算
+- context manager 传入的有效 prompt 预算
 - 当前剩余 token budget
 - runtime 侧的通用 token 计数
 - provider / model capability 的 `MaxContextTokens`
@@ -424,7 +425,7 @@ toolkit / MCP / broker tool
 - runtime trace 聚合层现在还会把这些信号汇总进 `recovery` 视图：包括 `prompt_preflight_events`、失败码分布、`replacement_history_*` 次数，以及 `team.summary(.generated)` 的 fallback 次数/原因；因此 `GET /api/runtime/traces/{trace_id}`、`GET /api/runtime/traces`、`GET /api/runtime/traces/stats` 都可以直接用于更高层诊断，而不必手工逐条扫事件
 - 其中 `GET /api/runtime/traces` 现在也会在顶层返回一份针对当前返回 trace 列表的聚合 `recovery` 摘要，便于列表页/后台面板直接展示“最近这些 traces 是否集中发生 prompt preflight / summary fallback”
 - shared chat / actor 两条 CLI 路径都可以直接把失败原因和恢复建议 humanize 给用户
-- 当“压缩过但仍超限”时，还可以把 replacement history 回写到 session / chat state，避免下一轮又从臃肿 history 重新起步
+- 当“压缩过但仍超限”时，prompt-only replacement history 只作为恢复参考；如果需要让后续轮次从紧凑 history 起步，应通过 session-level compact recovery 或显式 `/compact` 完成一次真正的 history replacement
 - 上层不必再依赖 `strings.Contains(err.Error(), "...")` 这类脆弱分支
 - actor / skills 侧原有的 `session_compact_*` 事件也已可在 runtime timeline 中直接看见 started/completed/skipped/failed
 
