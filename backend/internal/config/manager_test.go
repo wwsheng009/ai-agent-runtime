@@ -103,12 +103,14 @@ func TestValidateSandboxConfig(t *testing.T) {
 func TestValidateContextConfig(t *testing.T) {
 	cfg := DefaultRuntimeConfig()
 	require.Equal(t, "balanced", cfg.Context.Profile)
+	require.Equal(t, 32000, cfg.Context.FallbackMaxPromptTokens)
 	require.False(t, cfg.Workspace.Enabled)
 	require.Empty(t, cfg.Workspace.Mode)
 	require.Empty(t, cfg.Context.WorkspaceMode)
 
 	cfg.Context.Profile = "compact"
 	cfg.Context.MaxMessages = 12
+	cfg.Context.FallbackMaxPromptTokens = 32000
 	require.NoError(t, ValidateRuntimeConfig(cfg))
 
 	cfg.Context.Profile = "invalid"
@@ -117,6 +119,11 @@ func TestValidateContextConfig(t *testing.T) {
 
 	cfg = DefaultRuntimeConfig()
 	cfg.Context.MaxRecallResults = -1
+	err = ValidateRuntimeConfig(cfg)
+	require.Error(t, err)
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Context.FallbackMaxPromptTokens = -1
 	err = ValidateRuntimeConfig(cfg)
 	require.Error(t, err)
 

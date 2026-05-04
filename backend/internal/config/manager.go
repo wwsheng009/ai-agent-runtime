@@ -101,19 +101,20 @@ type WorkspaceConfig struct {
 }
 
 type ContextConfig struct {
-	Profile               string `yaml:"profile" json:"profile"`
-	CompactionMode        string `yaml:"compactionMode" json:"compactionMode"`
-	RecallMode            string `yaml:"recallMode" json:"recallMode"`
-	ObservationMode       string `yaml:"observationMode" json:"observationMode"`
-	WorkspaceMode         string `yaml:"workspaceMode" json:"workspaceMode"`
-	MinCompactionMessages int    `yaml:"minCompactionMessages" json:"minCompactionMessages"`
-	MinRecallQueryLength  int    `yaml:"minRecallQueryLength" json:"minRecallQueryLength"`
-	LedgerLoadLimit       int    `yaml:"ledgerLoadLimit" json:"ledgerLoadLimit"`
-	MaxPromptTokens       int    `yaml:"maxPromptTokens" json:"maxPromptTokens"`
-	MaxMessages           int    `yaml:"maxMessages" json:"maxMessages"`
-	KeepRecentMessages    int    `yaml:"keepRecentMessages" json:"keepRecentMessages"`
-	MaxRecallResults      int    `yaml:"maxRecallResults" json:"maxRecallResults"`
-	MaxObservationItems   int    `yaml:"maxObservationItems" json:"maxObservationItems"`
+	Profile                 string `yaml:"profile" json:"profile"`
+	CompactionMode          string `yaml:"compactionMode" json:"compactionMode"`
+	RecallMode              string `yaml:"recallMode" json:"recallMode"`
+	ObservationMode         string `yaml:"observationMode" json:"observationMode"`
+	WorkspaceMode           string `yaml:"workspaceMode" json:"workspaceMode"`
+	MinCompactionMessages   int    `yaml:"minCompactionMessages" json:"minCompactionMessages"`
+	MinRecallQueryLength    int    `yaml:"minRecallQueryLength" json:"minRecallQueryLength"`
+	LedgerLoadLimit         int    `yaml:"ledgerLoadLimit" json:"ledgerLoadLimit"`
+	MaxPromptTokens         int    `yaml:"maxPromptTokens" json:"maxPromptTokens"`
+	FallbackMaxPromptTokens int    `yaml:"fallbackMaxPromptTokens" json:"fallbackMaxPromptTokens"`
+	MaxMessages             int    `yaml:"maxMessages" json:"maxMessages"`
+	KeepRecentMessages      int    `yaml:"keepRecentMessages" json:"keepRecentMessages"`
+	MaxRecallResults        int    `yaml:"maxRecallResults" json:"maxRecallResults"`
+	MaxObservationItems     int    `yaml:"maxObservationItems" json:"maxObservationItems"`
 }
 
 type CatalogConfig struct {
@@ -271,7 +272,8 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			ChunkOverlap: 200,
 		},
 		Context: ContextConfig{
-			Profile: runtimecontext.BudgetProfileBalanced,
+			Profile:                 runtimecontext.BudgetProfileBalanced,
+			FallbackMaxPromptTokens: runtimecontext.DefaultFallbackMaxPromptTokens,
 		},
 		Catalog: CatalogConfig{
 			Backend: "memory",
@@ -746,6 +748,7 @@ func ValidateContextConfig(config *ContextConfig) error {
 		{"minRecallQueryLength", config.MinRecallQueryLength},
 		{"ledgerLoadLimit", config.LedgerLoadLimit},
 		{"maxPromptTokens", config.MaxPromptTokens},
+		{"fallbackMaxPromptTokens", config.FallbackMaxPromptTokens},
 		{"maxMessages", config.MaxMessages},
 		{"keepRecentMessages", config.KeepRecentMessages},
 		{"maxRecallResults", config.MaxRecallResults},

@@ -2155,8 +2155,12 @@ func budgetCandidateLabel(key string) string {
 	switch strings.TrimSpace(key) {
 	case "default_context_max_prompt_tokens":
 		return "默认 prompt 预算"
+	case "default_context_fallback_max_prompt_tokens":
+		return "默认 context fallback prompt 预算"
 	case "context_max_prompt_tokens":
 		return "context manager prompt 预算"
+	case "context_fallback_max_prompt_tokens":
+		return "context fallback prompt 预算"
 	case "model_capability_auto_compact_token_limit":
 		return "模型能力 auto-compact token limit"
 	case "model_capability_context_ratio":
@@ -2176,8 +2180,12 @@ func budgetSourceSummary(source, detail string) string {
 	switch strings.TrimSpace(source) {
 	case "default_context_max_prompt_tokens":
 		return "默认 context prompt 预算"
+	case "default_context_fallback_max_prompt_tokens":
+		return "默认 runtime context fallbackMaxPromptTokens"
 	case "context_max_prompt_tokens":
 		return "context manager 的 max_prompt_tokens"
+	case "context_fallback_max_prompt_tokens":
+		return "runtime context fallbackMaxPromptTokens"
 	case "remaining_budget":
 		return "本轮剩余 prompt 预算"
 	case "model_capability_auto_compact_token_limit":

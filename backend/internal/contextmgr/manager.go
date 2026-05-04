@@ -23,6 +23,8 @@ const (
 	BudgetProfileCold = "cold"
 )
 
+const DefaultFallbackMaxPromptTokens = 32000
+
 const (
 	CompactionModeSummary         = "summary"
 	CompactionModeLedgerPreferred = "ledger_preferred"
@@ -106,6 +108,10 @@ type BuildInput struct {
 	Memory       *memory.Memory
 	Observations []types.Observation
 	CountTokens  TokenCounter
+
+	PromptBudget             int
+	PromptBudgetSource       string
+	PromptBudgetSourceDetail string
 }
 
 // BuildResult 返回上下文装配结果和元信息。
@@ -348,13 +354,22 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 	if budget.MaxPromptTokens <= 0 || budget.MaxMessages <= 0 || budget.KeepRecentMessages <= 0 {
 		budget = DefaultBudget()
 	}
+	baseMaxPromptTokens := budget.MaxPromptTokens
+	if input.PromptBudget > 0 {
+		budget.MaxPromptTokens = input.PromptBudget
+	}
+	promptBudgetSource := strings.TrimSpace(input.PromptBudgetSource)
+	if promptBudgetSource == "" {
+		promptBudgetSource = "context_manager_budget"
+	}
 
 	systemMessages, nonSystemMessages := splitMessages(input.History)
 	result := BuildResult{
 		Metadata: map[string]interface{}{
-			"budget_max_prompt_tokens": budget.MaxPromptTokens,
-			"budget_max_messages":      budget.MaxMessages,
-			"context_profile":          m.Strategy.Profile,
+			"budget_max_prompt_tokens":        budget.MaxPromptTokens,
+			"budget_max_prompt_tokens_source": promptBudgetSource,
+			"budget_max_messages":             budget.MaxMessages,
+			"context_profile":                 m.Strategy.Profile,
 			"context_strategy": map[string]interface{}{
 				"compaction_mode":            m.Strategy.CompactionMode,
 				"recall_mode":                m.Strategy.RecallMode,
@@ -367,6 +382,12 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			},
 			"context_layers": ResolvedLayerPlan(m.Strategy.Profile, budget, m.Strategy),
 		},
+	}
+	if baseMaxPromptTokens > 0 && baseMaxPromptTokens != budget.MaxPromptTokens {
+		result.Metadata["budget_profile_max_prompt_tokens"] = baseMaxPromptTokens
+	}
+	if detail := strings.TrimSpace(input.PromptBudgetSourceDetail); detail != "" {
+		result.Metadata["budget_max_prompt_tokens_source_detail"] = detail
 	}
 
 	recent := keepRecent(nonSystemMessages, budget.KeepRecentMessages)

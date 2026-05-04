@@ -9288,6 +9288,9 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[strin
 	if ctxCfg.MaxPromptTokens > 0 {
 		options["context_max_prompt_tokens"] = ctxCfg.MaxPromptTokens
 	}
+	if ctxCfg.FallbackMaxPromptTokens > 0 {
+		options["context_fallback_max_prompt_tokens"] = ctxCfg.FallbackMaxPromptTokens
+	}
 	if ctxCfg.MaxMessages > 0 {
 		options["context_max_messages"] = ctxCfg.MaxMessages
 	}
@@ -9330,17 +9333,18 @@ func contextSnapshotFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[stri
 		budget := runtimecontext.ResolveBudget(runtimecontext.BudgetProfileBalanced, runtimecontext.Budget{})
 		strategy := runtimecontext.ResolveStrategy(runtimecontext.BudgetProfileBalanced, runtimecontext.Strategy{})
 		return map[string]interface{}{
-			"profile":               runtimecontext.BudgetProfileBalanced,
-			"resolved_profile":      strategy.Profile,
-			"compaction_mode":       strategy.CompactionMode,
-			"recall_mode":           strategy.RecallMode,
-			"observation_mode":      strategy.ObservationMode,
-			"max_prompt_tokens":     budget.MaxPromptTokens,
-			"max_messages":          budget.MaxMessages,
-			"keep_recent_messages":  budget.KeepRecentMessages,
-			"max_recall_results":    budget.MaxRecallResults,
-			"max_observation_items": budget.MaxObservationItems,
-			"layers":                runtimecontext.ResolvedLayerPlan(runtimecontext.BudgetProfileBalanced, budget, strategy),
+			"profile":                    runtimecontext.BudgetProfileBalanced,
+			"resolved_profile":           strategy.Profile,
+			"compaction_mode":            strategy.CompactionMode,
+			"recall_mode":                strategy.RecallMode,
+			"observation_mode":           strategy.ObservationMode,
+			"max_prompt_tokens":          budget.MaxPromptTokens,
+			"fallback_max_prompt_tokens": runtimecontext.DefaultFallbackMaxPromptTokens,
+			"max_messages":               budget.MaxMessages,
+			"keep_recent_messages":       budget.KeepRecentMessages,
+			"max_recall_results":         budget.MaxRecallResults,
+			"max_observation_items":      budget.MaxObservationItems,
+			"layers":                     runtimecontext.ResolvedLayerPlan(runtimecontext.BudgetProfileBalanced, budget, strategy),
 		}
 	}
 	ctxCfg := config.Context
@@ -9355,6 +9359,10 @@ func contextSnapshotFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[stri
 		MaxRecallResults:    ctxCfg.MaxRecallResults,
 		MaxObservationItems: ctxCfg.MaxObservationItems,
 	})
+	fallbackMaxPromptTokens := ctxCfg.FallbackMaxPromptTokens
+	if fallbackMaxPromptTokens <= 0 {
+		fallbackMaxPromptTokens = runtimecontext.DefaultFallbackMaxPromptTokens
+	}
 	strategy := runtimecontext.ResolveStrategy(profile, runtimecontext.Strategy{
 		CompactionMode:        ctxCfg.CompactionMode,
 		RecallMode:            ctxCfg.RecallMode,
@@ -9364,20 +9372,21 @@ func contextSnapshotFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[stri
 		LedgerLoadLimit:       ctxCfg.LedgerLoadLimit,
 	})
 	return map[string]interface{}{
-		"profile":                 profile,
-		"resolved_profile":        strategy.Profile,
-		"compaction_mode":         strategy.CompactionMode,
-		"recall_mode":             strategy.RecallMode,
-		"observation_mode":        strategy.ObservationMode,
-		"min_compaction_messages": strategy.MinCompactionMessages,
-		"min_recall_query_length": strategy.MinRecallQueryLength,
-		"ledger_load_limit":       strategy.LedgerLoadLimit,
-		"max_prompt_tokens":       budget.MaxPromptTokens,
-		"max_messages":            budget.MaxMessages,
-		"keep_recent_messages":    budget.KeepRecentMessages,
-		"max_recall_results":      budget.MaxRecallResults,
-		"max_observation_items":   budget.MaxObservationItems,
-		"layers":                  runtimecontext.ResolvedLayerPlan(profile, budget, strategy),
+		"profile":                    profile,
+		"resolved_profile":           strategy.Profile,
+		"compaction_mode":            strategy.CompactionMode,
+		"recall_mode":                strategy.RecallMode,
+		"observation_mode":           strategy.ObservationMode,
+		"min_compaction_messages":    strategy.MinCompactionMessages,
+		"min_recall_query_length":    strategy.MinRecallQueryLength,
+		"ledger_load_limit":          strategy.LedgerLoadLimit,
+		"max_prompt_tokens":          budget.MaxPromptTokens,
+		"fallback_max_prompt_tokens": fallbackMaxPromptTokens,
+		"max_messages":               budget.MaxMessages,
+		"keep_recent_messages":       budget.KeepRecentMessages,
+		"max_recall_results":         budget.MaxRecallResults,
+		"max_observation_items":      budget.MaxObservationItems,
+		"layers":                     runtimecontext.ResolvedLayerPlan(profile, budget, strategy),
 	}
 }
 

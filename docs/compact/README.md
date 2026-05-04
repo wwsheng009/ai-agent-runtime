@@ -116,6 +116,27 @@ providers:
 
 `max_context_tokens * 90%`
 
+### Prompt 预算与 context manager
+
+自动压缩阈值和发送前的 prompt 预算使用同一组 provider/model capability 语义。ReAct 每次发起模型请求前，会先解析一个有效 prompt 预算，并把它传给 `contextmgr.Manager.Build()`，避免 context manager 在 Build 阶段先用 balanced profile 的保守默认值裁掉长会话目标。
+
+解析顺序：
+
+1. 如果配置了 `context.maxPromptTokens`，它表示用户显式硬上限，优先级最高。
+2. 否则如果模型 capability 配置了 `auto_compact_token_limit`，使用该值。
+3. 否则如果模型 capability 配置了 `max_context_tokens`，按 `max_context_tokens * auto_compact_ratio` 计算。
+4. 否则如果 provider 暴露了 `MaxContextTokens`，按 provider context limit 的默认比例 `0.9` 计算。
+5. 最后才使用 `context.fallbackMaxPromptTokens`；如果该配置为空，则使用内置默认 `32000`。
+
+`context.profile` 仍然控制组织策略，例如 recent messages、recall 数量、observation 数量和 ledger/summary 策略；它不再单独把已知大上下文模型的 prompt 预算压到 12k。需要主动限制请求大小时，应配置 `context.maxPromptTokens`。
+
+兜底预算可在 `backend/configs/runtime.yaml` 中配置：
+
+```yaml
+context:
+  fallbackMaxPromptTokens: 32000
+```
+
 ### 模式解析规则
 
 压缩模式也按 model capability 解析，但它和 token trigger line 是两件事。
@@ -262,6 +283,7 @@ compaction message 的 metadata 包含：
 
 - `context.keepRecentMessages`
 - `context.maxPromptTokens`
+- `context.fallbackMaxPromptTokens`
 - `context.profile`
 - `context.compactionMode`
 - 其他 context 相关覆盖项
@@ -369,6 +391,8 @@ compaction message 的 metadata 包含：
 - pending 状态跳过
 - `agent_chat` session 路径压缩
 - provider config 中 model capability 透传
+- context manager Build 阶段使用同一有效 prompt 预算，不再被 balanced profile 默认 12k 提前裁剪
+- `context.fallbackMaxPromptTokens` 只在无法解析 capability/provider context limit 时作为兜底预算
 - Codex remote compact endpoint 路径构造
 - 远端 `compaction` item 的持久化与回放
 - gateway 路径下的 remote compact

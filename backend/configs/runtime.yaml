@@ -4,6 +4,11 @@ agent:
   enableParallelTools: true
   maxParallelToolCalls: 4
 
+context:
+  # Used only when neither provider/model capability nor context.maxPromptTokens
+  # can provide an effective prompt budget.
+  fallbackMaxPromptTokens: 32000
+
 images:
   cacheMaxAge: 1h
   generations:

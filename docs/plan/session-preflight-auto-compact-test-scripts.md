@@ -93,7 +93,7 @@ go test ./internal/background
 $ErrorActionPreference = "Stop"
 Set-Location "E:\projects\ai\ai-agent-runtime\backend"
 
-go test ./internal/agent -run "TestResolvePromptPreflightBudget"
+go test ./internal/agent -run "TestResolvePromptPreflightBudget|TestResolveContextBuildPromptBudget|TestReActLoop_ThinkPreservesOlderHistoryWithCapabilityBuildBudget"
 ```
 
 关键断言：
@@ -101,6 +101,9 @@ go test ./internal/agent -run "TestResolvePromptPreflightBudget"
 - `TestResolvePromptPreflightBudget_DoesNotLetDefaultBudgetOverrideKnownCapability` 应通过。
 - 对 `auto_compact_token_limit=200000` 的模型，`PromptBudget` 应解析为 `200000`。
 - `BudgetCandidates` 不应包含 `default_context_max_prompt_tokens`。
+- `TestResolveContextBuildPromptBudget_ContextProfileDoesNotConstrainKnownCapability` 应通过，context manager Build 阶段应使用模型能力预算而不是 balanced profile 的 12k。
+- `TestResolvePromptPreflightBudget_UsesConfigurableFallbackForUnknownCapability` 应通过，未知模型兜底预算应读取 `context.fallbackMaxPromptTokens`。
+- `TestResolvePromptPreflightBudget_UsesDefaultFallbackForUnknownCapability` 应通过，未配置兜底预算时应使用内置默认 `32000`。
 - `TestResolvePromptPreflightBudget_ExplicitContextBudgetStillConstrainsCapability` 应通过。
 - 显式 `context_max_prompt_tokens=12000` 时，`PromptBudget` 应保持 `12000`。
 

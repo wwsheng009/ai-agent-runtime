@@ -245,7 +245,7 @@ Codex 的关键行为：
 2. 如果解析到 `model_capability.auto_compact_token_limit`，使用它作为主要 prompt preflight budget。
 3. 如果没有显式 token limit，但有 `model_capability.max_context_tokens`，用 `max_context_tokens * auto_compact_ratio`。
 4. 如果只有 provider `MaxContextTokens`，用 provider context limit 的 ratio。
-5. 只有无法解析 provider/model capability 时，才 fallback 到 `contextmgr.DefaultBudget().MaxPromptTokens=12000`。
+5. 只有无法解析 provider/model capability 时，才 fallback 到 `context.fallbackMaxPromptTokens`；未配置时使用内置默认 `32000`。
 6. `remainingBudget` 如果存在，仍可作为更小的运行期上限。
 
 需要改动：
@@ -259,7 +259,7 @@ Codex 的关键行为：
 
 - capability 为 `auto_compact_token_limit=200000` 且用户未显式设置 context max 时，preflight budget 应为 200000，不是 12000。
 - 用户显式设置 `context_max_prompt_tokens=12000` 时，仍应以 12000 拦截。
-- capability 缺失时，仍 fallback 12000。
+- capability 缺失时，fallback 到可配置的 `context.fallbackMaxPromptTokens`，默认 `32000`。
 
 ### P0：隔离内部 compact 请求的工具面
 
@@ -419,7 +419,7 @@ LLM compact 失败时，不应直接让 preflight 卡死。建议增加 determin
 
 ## 风险与取舍
 
-- 放宽默认 12k 后，请求可能更大；但对已有 `max_context_tokens/auto_compact_token_limit` 的 provider 是合理的。未知 provider 仍保留 12k fallback。
+- 放宽默认 12k 后，请求可能更大；但对已有 `max_context_tokens/auto_compact_token_limit` 的 provider 是合理的。未知 provider 使用 `context.fallbackMaxPromptTokens`，当前默认 `32000`。
 - latest block content reducer 会牺牲模型对完整工具输出的直接可见性；通过 artifact path 和关键片段可以补偿。
 - deterministic fallback summary 质量不如 LLM summary，但比直接中断更可恢复，且只用于 provider compact 失败场景。
 - 内部 compact 禁用工具后，summary 不能主动读取 MCP 资源；这是正确的，因为 compact 应只总结已在 history 中出现的信息。
@@ -434,15 +434,17 @@ LLM compact 失败时，不应直接让 preflight 卡死。建议增加 determin
 
 本次已完成 P0/P1 核心修复：
 
-- `backend/internal/agent/loop.go`：调整 `resolvePromptPreflightBudget()` 语义。已知 model capability 或 provider context limit 时，不再让 `contextmgr.DefaultBudget().MaxPromptTokens=12000` 参与最小值竞争；显式 `context_max_prompt_tokens` 和显式 context profile 仍作为硬限制；未知模型/provider 仍保留默认 12k fallback。
+- `backend/internal/agent/loop.go`：调整 `resolvePromptPreflightBudget()` 语义。已知 model capability 或 provider context limit 时，不再让 `contextmgr.DefaultBudget().MaxPromptTokens=12000` 参与最小值竞争；显式 `context_max_prompt_tokens` 仍作为硬限制；`context_profile` 只控制上下文组织策略。未知模型/provider 使用可配置的 `context.fallbackMaxPromptTokens`，未配置时使用内置默认 `32000`。
 - `backend/internal/compactruntime/local.go`：内部 compact 请求增加 `internal_operation=compact`、`disable_tools=true`、`disable_meta_tools=true`；未显式配置时不再发送 `reasoning_effort=none`；compact provider 报错或返回空 summary 时生成 deterministic fallback summary。
 - `backend/internal/llm/provider.go`、`backend/internal/llm/request_tools.go`、`backend/internal/llm/gateway_client.go`：`internal_operation=compact` 自动禁用普通工具和 MCP meta tools；OpenAI-compatible 非流式响应的 `choices=null` 或空数组会作为 `empty_provider_choices` 错误进入 retry/error 链路。
 - `backend/internal/llm/model_capability.go`：`CompactSummarySettings()` 默认只保留 `max_tokens=2048`，不再默认返回 `reasoning_effort=none`；仅在 capability 显式配置 `compact_reasoning_effort` 时发送。
 - `backend/internal/historyguard/active_turn.go`：新增 latest replay block tool result 内容降载。超大 tool result 会保留消息结构、`tool_call_id` 和 head/tail/关键 artifact 引用，避免破坏 provider 的 tool-call/tool-result 邻接约束。
+- `backend/internal/contextmgr/manager.go`、`backend/internal/agent/loop.go`：ReAct 在 context manager Build 前解析有效 prompt 预算，并传入 `BuildInput`；Build 阶段记录 `budget_max_prompt_tokens_source`，不再先按 balanced profile 的 12k 裁剪已知大上下文模型的历史。
+- `backend/internal/config/manager.go`、`backend/configs/runtime.yaml`：新增 `context.fallbackMaxPromptTokens`，默认 `32000`，用于无法解析 model capability/provider context limit 时的兜底 prompt 预算；该值不是已知模型的硬上限。
 
 已补充覆盖测试：
 
-- budget 测试覆盖 ModelScope/DeepSeek 类 `auto_compact_token_limit=200000` 不再被默认 12k 截断，以及显式 `context_max_prompt_tokens=12000` 仍可约束。
+- budget 测试覆盖 ModelScope/DeepSeek 类 `auto_compact_token_limit=200000` 不再被默认 12k 截断、context manager Build 阶段不再被 balanced profile 默认 12k 提前裁剪、`context.fallbackMaxPromptTokens` 可配置未知模型兜底预算，以及显式 `context_max_prompt_tokens=12000` 仍可约束。
 - compact 请求形态测试覆盖禁用 tools/meta tools 和默认省略 reasoning effort。
 - provider wrapper 测试覆盖 compact 请求不再发送 `tools`/`tool_choice`，以及空 choices 被识别为错误。
 - active-turn 测试覆盖 latest replay tool result 降载且不破坏 tool call 配对。

@@ -426,6 +426,7 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 		ctxCfg.MinRecallQueryLength > 0 ||
 		ctxCfg.LedgerLoadLimit > 0 ||
 		ctxCfg.MaxPromptTokens > 0 ||
+		ctxCfg.FallbackMaxPromptTokens > 0 ||
 		ctxCfg.MaxMessages > 0 ||
 		ctxCfg.KeepRecentMessages > 0 ||
 		ctxCfg.MaxRecallResults > 0 ||
@@ -470,6 +471,9 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 	}
 	if ctxCfg.MaxPromptTokens > 0 {
 		agentConfig.Options["context_max_prompt_tokens"] = ctxCfg.MaxPromptTokens
+	}
+	if ctxCfg.FallbackMaxPromptTokens > 0 {
+		agentConfig.Options["context_fallback_max_prompt_tokens"] = ctxCfg.FallbackMaxPromptTokens
 	}
 	if ctxCfg.MaxMessages > 0 {
 		agentConfig.Options["context_max_messages"] = ctxCfg.MaxMessages

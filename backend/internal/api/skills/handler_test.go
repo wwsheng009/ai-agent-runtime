@@ -4065,6 +4065,7 @@ func TestContextSnapshotFromRuntimeConfig_ResolvesLayers(t *testing.T) {
 	config.Context.KeepRecentMessages = 4
 	config.Context.MaxObservationItems = 7
 	config.Context.MaxRecallResults = 6
+	config.Context.FallbackMaxPromptTokens = 32000
 
 	snapshot := contextSnapshotFromRuntimeConfig(config)
 	assert.Equal(t, runtimecontext.BudgetProfileHot, snapshot["profile"])
@@ -4074,6 +4075,7 @@ func TestContextSnapshotFromRuntimeConfig_ResolvesLayers(t *testing.T) {
 	assert.Equal(t, 4, snapshot["keep_recent_messages"])
 	assert.Equal(t, 7, snapshot["max_observation_items"])
 	assert.Equal(t, 6, snapshot["max_recall_results"])
+	assert.Equal(t, 32000, snapshot["fallback_max_prompt_tokens"])
 
 	layers, ok := snapshot["layers"].(runtimecontext.LayerPlan)
 	require.True(t, ok)

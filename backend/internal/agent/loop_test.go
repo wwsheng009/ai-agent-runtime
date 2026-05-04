@@ -1545,6 +1545,195 @@ func TestResolvePromptPreflightBudget_DoesNotLetDefaultBudgetOverrideKnownCapabi
 	require.NotContains(t, budget.BudgetCandidates, "default_context_max_prompt_tokens")
 }
 
+func TestResolvePromptPreflightBudget_ContextProfileDoesNotConstrainKnownCapability(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "mimo_anthropic",
+		DefaultModel:    "mimo-v2.5-pro",
+	})
+	provider := &SequenceLLMProvider{
+		name: "mimo_anthropic",
+		providerCaps: &llm.ModelCapabilities{
+			MaxContextTokens: 128000,
+			MaxOutputTokens:  8192,
+		},
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"mimo-v2.5-pro": {
+				MaxContextTokens: 1000000,
+				AutoCompactRatio: 0.9,
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("mimo_anthropic", provider))
+	require.NoError(t, llmRuntime.RegisterProviderAlias("mimo-v2.5-pro", "mimo_anthropic"))
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Provider: "mimo_anthropic",
+			Model:    "mimo-v2.5-pro",
+			Options: map[string]interface{}{
+				"context_profile": contextmgr.BudgetProfileBalanced,
+			},
+		},
+		contextMgr: &contextmgr.Manager{
+			Budget: contextmgr.DefaultBudget(),
+		},
+	}
+
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	require.Equal(t, 900000, budget.PromptBudget)
+	require.Equal(t, "model_capability_context_ratio", budget.BudgetSource)
+	require.Equal(t, 1000000, budget.ModelCapabilityMaxContextTokens)
+	require.InDelta(t, 0.9, budget.ModelCapabilityAutoCompactRatio, 0.001)
+	require.NotContains(t, budget.BudgetCandidates, "context_max_prompt_tokens")
+	require.NotContains(t, budget.BudgetCandidates, "default_context_max_prompt_tokens")
+}
+
+func TestResolveContextBuildPromptBudget_ContextProfileDoesNotConstrainKnownCapability(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "mimo_anthropic",
+		DefaultModel:    "mimo-v2.5-pro",
+	})
+	provider := &SequenceLLMProvider{
+		name: "mimo_anthropic",
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"mimo-v2.5-pro": {
+				MaxContextTokens: 1000000,
+				AutoCompactRatio: 0.9,
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("mimo_anthropic", provider))
+	require.NoError(t, llmRuntime.RegisterProviderAlias("mimo-v2.5-pro", "mimo_anthropic"))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:     "test-agent",
+		Provider: "mimo_anthropic",
+		Model:    "mimo-v2.5-pro",
+		Options: map[string]interface{}{
+			"context_profile": contextmgr.BudgetProfileBalanced,
+		},
+	}, &MockMCPManager{}, llmRuntime)
+
+	contextBudget := resolveContextBuildPromptBudget(llmRuntime, agent)
+	require.Equal(t, 900000, contextBudget.PromptBudget)
+	require.Equal(t, "model_capability_context_ratio", contextBudget.BudgetSource)
+
+	manager := agent.GetContextManager()
+	require.NotNil(t, manager)
+	result := manager.Build(context.Background(), contextmgr.BuildInput{
+		History:                  []types.Message{*types.NewUserMessage(strings.Repeat("abcd", 15000))},
+		CountTokens:              llmRuntime.CountMessagesTokens,
+		PromptBudget:             contextBudget.PromptBudget,
+		PromptBudgetSource:       contextBudget.BudgetSource,
+		PromptBudgetSourceDetail: contextBudget.BudgetSourceDetail,
+	})
+
+	require.Len(t, result.Messages, 1)
+	require.Equal(t, 900000, result.Metadata["budget_max_prompt_tokens"])
+	require.Equal(t, "model_capability_context_ratio", result.Metadata["budget_max_prompt_tokens_source"])
+	require.Equal(t, 12000, result.Metadata["budget_profile_max_prompt_tokens"])
+}
+
+func TestReActLoop_ThinkPreservesOlderHistoryWithCapabilityBuildBudget(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "mimo_anthropic",
+		DefaultModel:    "mimo-v2.5-pro",
+	})
+	provider := &SequenceLLMProvider{
+		name: "mimo_anthropic",
+		responses: []*llm.LLMResponse{
+			{Content: "继续处理。", Model: "mimo-v2.5-pro"},
+		},
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"mimo-v2.5-pro": {
+				MaxContextTokens: 1000000,
+				AutoCompactRatio: 0.9,
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("mimo_anthropic", provider))
+	require.NoError(t, llmRuntime.RegisterProviderAlias("mimo-v2.5-pro", "mimo_anthropic"))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:     "test-agent",
+		Provider: "mimo_anthropic",
+		Model:    "mimo-v2.5-pro",
+		Options: map[string]interface{}{
+			"context_profile": contextmgr.BudgetProfileBalanced,
+		},
+	}, &MockMCPManager{}, llmRuntime)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 1})
+	objective := "original objective: inspect docs and fix stale content " + strings.Repeat("abcd", 15000)
+	history := []types.Message{
+		*types.NewUserMessage(objective),
+		*types.NewAssistantMessage("ack"),
+		*types.NewUserMessage("继续"),
+	}
+
+	_, _, _, err := loop.think(context.Background(), "trace-capability-build", "session-capability-build", 1, "继续", history, nil, nil, 0)
+	require.NoError(t, err)
+	require.Len(t, provider.requests, 1)
+	foundObjective := false
+	for _, message := range provider.requests[0].Messages {
+		if strings.Contains(message.Content, "original objective: inspect docs") {
+			foundObjective = true
+			break
+		}
+	}
+	require.True(t, foundObjective, "expected context manager to preserve older objective under capability budget")
+}
+
+func TestResolvePromptPreflightBudget_UsesConfigurableFallbackForUnknownCapability(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+	})
+	provider := &SequenceLLMProvider{
+		name:         "test-provider",
+		providerCaps: &llm.ModelCapabilities{},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:     "test-agent",
+		Provider: "test-provider",
+		Model:    "test-model",
+		Options: map[string]interface{}{
+			"context_fallback_max_prompt_tokens": 32000,
+		},
+	}, &MockMCPManager{}, llmRuntime)
+
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	require.Equal(t, 32000, budget.PromptBudget)
+	require.Equal(t, "context_fallback_max_prompt_tokens", budget.BudgetSource)
+	require.Equal(t, 12000, agent.GetContextManager().Budget.MaxPromptTokens)
+	require.NotContains(t, budget.BudgetCandidates, "default_context_max_prompt_tokens")
+}
+
+func TestResolvePromptPreflightBudget_UsesDefaultFallbackForUnknownCapability(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+	})
+	provider := &SequenceLLMProvider{
+		name:         "test-provider",
+		providerCaps: &llm.ModelCapabilities{},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:     "test-agent",
+		Provider: "test-provider",
+		Model:    "test-model",
+	}, &MockMCPManager{}, llmRuntime)
+
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	require.Equal(t, contextmgr.DefaultFallbackMaxPromptTokens, budget.PromptBudget)
+	require.Equal(t, "default_context_fallback_max_prompt_tokens", budget.BudgetSource)
+	require.NotContains(t, budget.BudgetCandidates, "default_context_max_prompt_tokens")
+}
+
 func TestResolvePromptPreflightBudget_ExplicitContextBudgetStillConstrainsCapability(t *testing.T) {
 	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "test-provider",
@@ -1572,7 +1761,7 @@ func TestResolvePromptPreflightBudget_ExplicitContextBudgetStillConstrainsCapabi
 			},
 		},
 		contextMgr: &contextmgr.Manager{
-			Budget: contextmgr.DefaultBudget(),
+			Budget: contextmgr.Budget{MaxPromptTokens: 50000},
 		},
 	}
 

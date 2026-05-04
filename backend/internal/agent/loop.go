@@ -450,17 +450,21 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			teamID = optionString(loop.agent.config.Options, "team_id")
 			profileContext = optionMap(loop.agent.config.Options, "profile_context")
 		}
+		contextBudget := resolveContextBuildPromptBudget(loop.llmRuntime, loop.agent)
 		built := manager.Build(ctx, contextmgr.BuildInput{
-			TraceID:      traceID,
-			SessionID:    sessionID,
-			TaskID:       taskID,
-			TeamID:       teamID,
-			Profile:      profileContext,
-			Goal:         goal,
-			History:      history,
-			Memory:       loop.agent.GetMemory(),
-			Observations: observations,
-			CountTokens:  countTokens,
+			TraceID:                  traceID,
+			SessionID:                sessionID,
+			TaskID:                   taskID,
+			TeamID:                   teamID,
+			Profile:                  profileContext,
+			Goal:                     goal,
+			History:                  history,
+			Memory:                   loop.agent.GetMemory(),
+			Observations:             observations,
+			CountTokens:              countTokens,
+			PromptBudget:             contextBudget.PromptBudget,
+			PromptBudgetSource:       contextBudget.BudgetSource,
+			PromptBudgetSourceDetail: contextBudget.BudgetSourceDetail,
 		})
 		managedHistory = built.Messages
 		action.Metadata = map[string]interface{}{
@@ -2515,46 +2519,41 @@ func buildPromptPreflightFailure(code string, messages []types.Message, promptTo
 	return failure
 }
 
+func resolveContextBuildPromptBudget(runtime *llm.LLMRuntime, agent *Agent) promptPreflightBudget {
+	return resolvePromptPreflightBudget(runtime, agent, 0)
+}
+
 func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remainingBudget int) promptPreflightBudget {
 	budget := promptPreflightBudget{}
 
 	managerBudget := 0
 	hasManagerBudget := false
-	explicitContextBudget := hasPromptPreflightContextBudgetOverride(agent)
+	explicitContextBudget, hasExplicitContextBudget := promptPreflightContextBudgetOverride(agent)
 	if agent != nil {
 		if manager := agent.GetContextManager(); manager != nil && manager.Budget.MaxPromptTokens > 0 {
 			managerBudget = manager.Budget.MaxPromptTokens
 			hasManagerBudget = true
 		}
 	}
-	if hasManagerBudget && explicitContextBudget {
+	if hasExplicitContextBudget {
 		budget.addCandidate(
 			"context_max_prompt_tokens",
-			managerBudget,
-			"context manager budget max_prompt_tokens",
+			explicitContextBudget,
+			"runtime context maxPromptTokens",
 		)
 	}
 
 	hasResolvedPromptLimit := budget.PromptBudget > 0
-	if hasManagerBudget && explicitContextBudget {
+	if hasExplicitContextBudget {
 		hasResolvedPromptLimit = true
 	}
 
-	defaultPromptBudget := contextmgr.DefaultBudget().MaxPromptTokens
 	addFallbackPromptBudget := func() {
-		if hasManagerBudget {
-			budget.addCandidate(
-				"context_max_prompt_tokens",
-				managerBudget,
-				"context manager budget max_prompt_tokens fallback",
-			)
+		source, value, detail := resolvePromptFallbackBudget(agent, managerBudget, hasManagerBudget)
+		if value <= 0 {
 			return
 		}
-		budget.addCandidate(
-			"default_context_max_prompt_tokens",
-			defaultPromptBudget,
-			"contextmgr.DefaultBudget().MaxPromptTokens fallback",
-		)
+		budget.addCandidate(source, value, detail)
 	}
 
 	resolvedProvider, resolvedModel := resolvePromptPreflightProviderModel(runtime, agent)
@@ -2636,17 +2635,28 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remaini
 	return budget
 }
 
+func resolvePromptFallbackBudget(agent *Agent, managerBudget int, hasManagerBudget bool) (string, int, string) {
+	if agent != nil && agent.config != nil {
+		if value, ok := contextOptionInt(agent.config.Options, "context_fallback_max_prompt_tokens"); ok {
+			return "context_fallback_max_prompt_tokens", value, "runtime context fallbackMaxPromptTokens"
+		}
+	}
+	if hasManagerBudget && managerBudget > contextmgr.DefaultFallbackMaxPromptTokens {
+		return "context_max_prompt_tokens", managerBudget, "context manager budget max_prompt_tokens fallback"
+	}
+	return "default_context_fallback_max_prompt_tokens", contextmgr.DefaultFallbackMaxPromptTokens, "contextmgr.DefaultFallbackMaxPromptTokens"
+}
+
 func hasPromptPreflightContextBudgetOverride(agent *Agent) bool {
+	_, ok := promptPreflightContextBudgetOverride(agent)
+	return ok
+}
+
+func promptPreflightContextBudgetOverride(agent *Agent) (int, bool) {
 	if agent == nil || agent.config == nil || len(agent.config.Options) == 0 {
-		return false
+		return 0, false
 	}
-	if _, ok := contextOptionInt(agent.config.Options, "context_max_prompt_tokens"); ok {
-		return true
-	}
-	if profile, ok := agent.config.Options["context_profile"].(string); ok && strings.TrimSpace(profile) != "" {
-		return true
-	}
-	return false
+	return contextOptionInt(agent.config.Options, "context_max_prompt_tokens")
 }
 
 func resolvePromptPreflightProviderModel(runtime *llm.LLMRuntime, agent *Agent) (string, string) {
