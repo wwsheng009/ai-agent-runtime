@@ -12,9 +12,16 @@ import (
 
 const authStoreVersion = 1
 
+const (
+	AuthKeyTypeAPIKey = "api_key"
+	AuthKeyTypeOAuth  = "oauth"
+)
+
 // ProviderAuthRecord stores user-level credentials that must not be written to config.yaml.
 type ProviderAuthRecord struct {
-	AuthMode     string `json:"auth_mode"`
+	KeyType      string `json:"key_type,omitempty"`
+	AuthMode     string `json:"auth_mode,omitempty"`
+	APIKey       string `json:"api_key,omitempty"`
 	Issuer       string `json:"issuer,omitempty"`
 	ClientID     string `json:"client_id,omitempty"`
 	IDToken      string `json:"id_token,omitempty"`
@@ -26,6 +33,116 @@ type ProviderAuthRecord struct {
 type providerAuthStoreDocument struct {
 	Version   int                           `json:"version"`
 	Providers map[string]ProviderAuthRecord `json:"providers"`
+}
+
+func normalizeProviderAuthKeyType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", AuthKeyTypeAPIKey, AuthKeyTypeOAuth:
+		return strings.ToLower(strings.TrimSpace(value))
+	case "apikey", "api-key", "key":
+		return AuthKeyTypeAPIKey
+	case "access_token", "oauth_token", "oauth-access-token":
+		return AuthKeyTypeOAuth
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
+func inferProviderAuthKeyType(record ProviderAuthRecord) string {
+	if keyType := normalizeProviderAuthKeyType(record.KeyType); keyType != "" {
+		return keyType
+	}
+	switch strings.ToLower(strings.TrimSpace(record.AuthMode)) {
+	case AuthKeyTypeAPIKey, "apikey", "api-key", "key":
+		return AuthKeyTypeAPIKey
+	case AuthKeyTypeOAuth, "chatgpt", "device-code", "device_code":
+		return AuthKeyTypeOAuth
+	}
+	if strings.TrimSpace(record.APIKey) != "" {
+		return AuthKeyTypeAPIKey
+	}
+	if strings.TrimSpace(record.AccessToken) != "" || strings.TrimSpace(record.RefreshToken) != "" || strings.TrimSpace(record.IDToken) != "" {
+		return AuthKeyTypeOAuth
+	}
+	return ""
+}
+
+func normalizeProviderAuthRecord(record ProviderAuthRecord) ProviderAuthRecord {
+	record.KeyType = normalizeProviderAuthKeyType(record.KeyType)
+	record.AuthMode = strings.ToLower(strings.TrimSpace(record.AuthMode))
+	if record.KeyType == "" {
+		record.KeyType = inferProviderAuthKeyType(record)
+	}
+	if record.AuthMode == "" {
+		record.AuthMode = record.KeyType
+	}
+	switch record.KeyType {
+	case AuthKeyTypeAPIKey:
+		record.APIKey = strings.TrimSpace(record.APIKey)
+		record.Issuer = ""
+		record.ClientID = ""
+		record.IDToken = ""
+		record.AccessToken = ""
+		record.RefreshToken = ""
+	case AuthKeyTypeOAuth:
+		record.Issuer = strings.TrimSpace(record.Issuer)
+		record.ClientID = strings.TrimSpace(record.ClientID)
+		record.IDToken = strings.TrimSpace(record.IDToken)
+		record.AccessToken = strings.TrimSpace(record.AccessToken)
+		record.RefreshToken = strings.TrimSpace(record.RefreshToken)
+		record.APIKey = ""
+	default:
+		record.APIKey = strings.TrimSpace(record.APIKey)
+		record.Issuer = strings.TrimSpace(record.Issuer)
+		record.ClientID = strings.TrimSpace(record.ClientID)
+		record.IDToken = strings.TrimSpace(record.IDToken)
+		record.AccessToken = strings.TrimSpace(record.AccessToken)
+		record.RefreshToken = strings.TrimSpace(record.RefreshToken)
+	}
+	if strings.TrimSpace(record.UpdatedAt) == "" {
+		record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	} else {
+		record.UpdatedAt = strings.TrimSpace(record.UpdatedAt)
+	}
+	return record
+}
+
+func expandProviderAuthRecordEnvVars(record ProviderAuthRecord) ProviderAuthRecord {
+	record.APIKey = strings.TrimSpace(expandEnvVars(record.APIKey))
+	record.IDToken = strings.TrimSpace(expandEnvVars(record.IDToken))
+	record.AccessToken = strings.TrimSpace(expandEnvVars(record.AccessToken))
+	record.RefreshToken = strings.TrimSpace(expandEnvVars(record.RefreshToken))
+	return record
+}
+
+func providerAuthSecretForKeyType(record ProviderAuthRecord, keyType string) string {
+	switch normalizeProviderAuthKeyType(keyType) {
+	case AuthKeyTypeAPIKey:
+		return strings.TrimSpace(record.APIKey)
+	case AuthKeyTypeOAuth:
+		return strings.TrimSpace(record.AccessToken)
+	default:
+		if secret := strings.TrimSpace(record.APIKey); secret != "" {
+			return secret
+		}
+		return strings.TrimSpace(record.AccessToken)
+	}
+}
+
+func LoadProviderAuthSecret(ref, keyType string) (string, error) {
+	return LoadProviderAuthSecretFromPath(DefaultAuthStorePath(), ref, keyType)
+}
+
+func LoadProviderAuthSecretFromPath(path, ref, keyType string) (string, error) {
+	record, err := LoadProviderAuthFromPath(path, ref)
+	if err != nil {
+		return "", err
+	}
+	secret := providerAuthSecretForKeyType(*record, keyType)
+	if strings.TrimSpace(secret) == "" {
+		return "", fmt.Errorf("auth ref %q has no secret for key type %q", ref, normalizeProviderAuthKeyType(keyType))
+	}
+	return secret, nil
 }
 
 // DefaultAuthStorePath returns the user-level auth store path.
@@ -56,7 +173,8 @@ func LoadProviderAuthFromPath(path, ref string) (*ProviderAuthRecord, error) {
 	if !ok {
 		return nil, fmt.Errorf("auth ref %q not found", ref)
 	}
-	return &record, nil
+	normalized := expandProviderAuthRecordEnvVars(normalizeProviderAuthRecord(record))
+	return &normalized, nil
 }
 
 // SaveProviderAuth stores one auth record in the default user-level auth store.
@@ -81,12 +199,18 @@ func SaveProviderAuthToPath(path, ref string, record ProviderAuthRecord) error {
 	if document.Providers == nil {
 		document.Providers = make(map[string]ProviderAuthRecord)
 	}
-	record.AuthMode = strings.TrimSpace(record.AuthMode)
-	if record.AuthMode == "" {
-		record.AuthMode = "oauth"
-	}
-	if strings.TrimSpace(record.UpdatedAt) == "" {
-		record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	record = normalizeProviderAuthRecord(record)
+	switch record.KeyType {
+	case AuthKeyTypeAPIKey:
+		if strings.TrimSpace(record.APIKey) == "" {
+			return fmt.Errorf("api key is required for auth ref %q", ref)
+		}
+	case AuthKeyTypeOAuth:
+		if strings.TrimSpace(record.AccessToken) == "" {
+			return fmt.Errorf("access token is required for auth ref %q", ref)
+		}
+	default:
+		return fmt.Errorf("key type is required for auth ref %q", ref)
 	}
 	document.Providers[ref] = record
 	return writeProviderAuthStore(path, document)
@@ -118,6 +242,9 @@ func readProviderAuthStore(path string) (*providerAuthStoreDocument, error) {
 	}
 	if document.Providers == nil {
 		document.Providers = make(map[string]ProviderAuthRecord)
+	}
+	for ref, record := range document.Providers {
+		document.Providers[ref] = normalizeProviderAuthRecord(record)
 	}
 	return document, nil
 }

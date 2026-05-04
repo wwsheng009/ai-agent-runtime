@@ -50,6 +50,58 @@ providers:
 	}
 }
 
+func TestJoinBaseURLAndPathDedupesOverlappingPathSegments(t *testing.T) {
+	tests := []struct {
+		name        string
+		baseURL     string
+		requestPath string
+		want        string
+	}{
+		{
+			name:        "openai version prefix",
+			baseURL:     "https://api.example.com/v1",
+			requestPath: "/v1/models",
+			want:        "https://api.example.com/v1/models",
+		},
+		{
+			name:        "nested version prefix",
+			baseURL:     "https://api.example.com/api/v1",
+			requestPath: "/v1/chat/completions",
+			want:        "https://api.example.com/api/v1/chat/completions",
+		},
+		{
+			name:        "chatgpt codex prefix",
+			baseURL:     "https://chatgpt.com/backend-api/codex",
+			requestPath: "/backend-api/codex/models",
+			want:        "https://chatgpt.com/backend-api/codex/models",
+		},
+		{
+			name:        "plain host keeps request path",
+			baseURL:     "https://api.example.com",
+			requestPath: "/v1/models",
+			want:        "https://api.example.com/v1/models",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := JoinBaseURLAndPath(tt.baseURL, tt.requestPath); got != tt.want {
+				t.Fatalf("JoinBaseURLAndPath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildUpstreamURLWithPathDedupesVersionPrefixInBaseURL(t *testing.T) {
+	got := BuildUpstreamURLWithPath(Provider{
+		BaseURL: "https://api.example.com/v1",
+	}, "/v1/responses", "", "gpt-5")
+	want := "https://api.example.com/v1/responses"
+	if got != want {
+		t.Fatalf("BuildUpstreamURLWithPath() = %q, want %q", got, want)
+	}
+}
+
 func TestInitGlobalConfigMimoAnthropicCapabilities(t *testing.T) {
 	_, testFile, _, ok := runtime.Caller(0)
 	if !ok {

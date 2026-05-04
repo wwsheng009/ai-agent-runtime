@@ -531,9 +531,17 @@ func (p *Provider) GetAPIKey() string {
 
 // GetAllAPIKeys returns all configured API keys.
 func (p *Provider) GetAllAPIKeys() []string {
-	if p != nil && strings.EqualFold(strings.TrimSpace(p.AuthMode), "oauth") && strings.TrimSpace(p.AuthRef) != "" {
+	if p == nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(p.AuthMode), AuthKeyTypeOAuth) && strings.TrimSpace(p.AuthRef) != "" {
 		if record, err := LoadProviderAuth(strings.TrimSpace(p.AuthRef)); err == nil && record != nil && strings.TrimSpace(record.AccessToken) != "" {
 			return []string{strings.TrimSpace(record.AccessToken)}
+		}
+	}
+	if strings.TrimSpace(p.APIKeyRef) != "" {
+		if secret, err := LoadProviderAuthSecret(strings.TrimSpace(p.APIKeyRef), AuthKeyTypeAPIKey); err == nil && strings.TrimSpace(secret) != "" {
+			return []string{strings.TrimSpace(secret)}
 		}
 	}
 	if len(p.APIKeys) > 0 {
@@ -579,12 +587,96 @@ func NormalizeProtocol(proto string) string {
 	return strings.ToLower(strings.TrimSpace(proto))
 }
 
+// JoinBaseURLAndPath appends requestPath to baseURL while collapsing duplicated
+// path segments at the boundary, for example https://host/v1 + /v1/models.
+func JoinBaseURLAndPath(baseURL, requestPath string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	requestPath = strings.TrimSpace(requestPath)
+	if requestPath == "" {
+		return baseURL
+	}
+	if parsed, err := url.Parse(requestPath); err == nil && parsed.IsAbs() {
+		return requestPath
+	}
+	if baseURL == "" {
+		if strings.HasPrefix(requestPath, "/") {
+			return requestPath
+		}
+		return "/" + requestPath
+	}
+	if strings.HasPrefix(requestPath, "?") || strings.HasPrefix(requestPath, "#") {
+		return baseURL + requestPath
+	}
+
+	pathPart, suffix := splitURLPathSuffix(requestPath)
+	if strings.TrimSpace(pathPart) == "" {
+		return baseURL + suffix
+	}
+
+	parsedBase, err := url.Parse(baseURL)
+	if err != nil || parsedBase.Scheme == "" || parsedBase.Host == "" {
+		return baseURL + "/" + strings.TrimLeft(requestPath, "/")
+	}
+
+	baseSegments := splitURLPathSegments(parsedBase.Path)
+	requestSegments := splitURLPathSegments(pathPart)
+	overlap := longestPathSegmentOverlap(baseSegments, requestSegments)
+	finalSegments := append(append([]string(nil), baseSegments...), requestSegments[overlap:]...)
+	if len(finalSegments) == 0 {
+		parsedBase.Path = ""
+	} else {
+		parsedBase.Path = "/" + strings.Join(finalSegments, "/")
+	}
+	return parsedBase.String() + suffix
+}
+
+func splitURLPathSuffix(path string) (string, string) {
+	for i, r := range path {
+		if r == '?' || r == '#' {
+			return path[:i], path[i:]
+		}
+	}
+	return path, ""
+}
+
+func splitURLPathSegments(path string) []string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	segments := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			segments = append(segments, part)
+		}
+	}
+	return segments
+}
+
+func longestPathSegmentOverlap(left, right []string) int {
+	maxOverlap := len(left)
+	if len(right) < maxOverlap {
+		maxOverlap = len(right)
+	}
+	for overlap := maxOverlap; overlap > 0; overlap-- {
+		matched := true
+		for i := 0; i < overlap; i++ {
+			if left[len(left)-overlap+i] != right[i] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return overlap
+		}
+	}
+	return 0
+}
+
 // BuildUpstreamURLWithPath builds an upstream URL from the provider config and request path.
 func BuildUpstreamURLWithPath(provider Provider, transformedPath, queryString, model string) string {
 	if provider.ForwardURL != "" {
+		apiKey := provider.GetAPIKey()
 		u := provider.ForwardURL
 		u = strings.Replace(u, "{model}", model, -1)
-		u = strings.Replace(u, "{api_key}", provider.APIKey, -1)
+		u = strings.Replace(u, "{api_key}", apiKey, -1)
 		u = strings.Replace(u, "{path}", transformedPath, -1)
 		// relative forward_url: prepend base_url
 		if strings.HasPrefix(u, "/") {
@@ -607,7 +699,7 @@ func BuildUpstreamURLWithPath(provider Provider, transformedPath, queryString, m
 	} else {
 		finalPath = transformedPath
 	}
-	u := baseURL + finalPath
+	u := JoinBaseURLAndPath(baseURL, finalPath)
 	if queryString != "" {
 		u += queryString
 	}

@@ -12,9 +12,9 @@ aicli:
   timeout:
     request_timeout: ${AICLI_REQUEST_TIMEOUT:-0s}
   chat:
-    default_provider: CODEX_04
-    default_model: gpt-5.4-mini
-    reasoning_effort: xhigh
+    default_provider: modelscope
+    default_model: deepseek-ai/DeepSeek-V4-Pro
+    reasoning_effort: max
     stream: true
 auth:
   access_auth:
@@ -884,6 +884,14 @@ providers:
       max_tokens_limit: 10000
       # model_mappings:
       #     '*': z-ai/glm-5.1
+      model_capabilities:
+        '*':
+          reasoning_model: true
+          reasoning_efforts:
+            - minimal
+            - low
+            - medium
+            - high
       protocol: openai
       support_types:
         - openai

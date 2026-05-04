@@ -36,7 +36,7 @@ make install-aicli
 
 📖 **完整安装与配置说明**：[docs/aicli/install.md](./docs/aicli/install.md)
 
-涵盖：一键脚本 / `make install-aicli` / `go install` 三种安装方式、配置文件查找顺序、最小配置示例、环境变量、常用命令、卸载等。
+涵盖：一键脚本 / `make install-aicli` / `go install` 三种安装方式、配置文件查找顺序、`aicli init --global`、最小配置示例、环境变量、常用命令、卸载等。
 
 ### 验证
 

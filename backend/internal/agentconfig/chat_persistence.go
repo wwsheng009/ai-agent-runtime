@@ -31,7 +31,17 @@ func UpdateAICLIChatPreferences(configPath string, update AICLIChatPreferenceUpd
 
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("read config file %s: %w", configPath, err)
+		if os.IsNotExist(err) {
+			if _, _, starterErr := EnsureStarterConfigAtPath(configPath); starterErr != nil {
+				return nil, starterErr
+			}
+			raw, err = os.ReadFile(configPath)
+			if err != nil {
+				return nil, fmt.Errorf("read starter config file %s: %w", configPath, err)
+			}
+		} else {
+			return nil, fmt.Errorf("read config file %s: %w", configPath, err)
+		}
 	}
 
 	document, err := parseYAMLDocument(raw)

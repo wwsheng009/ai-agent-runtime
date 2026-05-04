@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -14,38 +13,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
-// 默认配置文件搜索路径（首个存在即采用），可被 -c/--config 显式覆盖。
-// 顺序：
-//  1. $HOME/.aicli/config.yaml      —— 用户级全局配置
-//  2. <cwd>/.aicli/config.yaml      —— 项目级 .aicli 目录
-//  3. <cwd>/aicli.yaml              —— 项目级单文件
-//  4. <cwd>/configs/config.yaml     —— 旧版默认路径（向后兼容）
-func defaultConfigSearchPaths() []string {
-	paths := make([]string, 0, 4)
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		paths = append(paths, filepath.Join(home, ".aicli", "config.yaml"))
-	}
-	paths = append(paths,
-		filepath.Join(".aicli", "config.yaml"),
-		"aicli.yaml",
-		filepath.Join("configs", "config.yaml"),
-	)
-	return paths
-}
-
-// resolveConfigPath 在搜索路径中返回首个存在的文件；都不存在时返回空串（由 InitGlobalConfig 容忍）。
-func resolveConfigPath(paths []string) string {
-	for _, p := range paths {
-		if p == "" {
-			continue
-		}
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			return p
-		}
-	}
-	return ""
-}
-
 var (
 	version     = "dev"
 	buildTime   = "unknown"
@@ -54,20 +21,12 @@ var (
 )
 
 func main() {
-	// 加载 .env 文件（支持多个位置）
-	// 优先级：项目根目录 > configs 目录
-	envPaths := []string{".env", "./configs/.env"}
-	envLoaded := false
-
-	for _, path := range envPaths {
-		if err := godotenv.Load(path); err == nil {
-			envLoaded = true
-			break
-		}
-	}
-
-	if !envLoaded {
-		// .env 文件不存在时不是致命错误，继续运行
+	// 加载 .env 文件（按 config.yaml 同样的查找顺序）
+	envPaths := config.DefaultDotEnvSearchPaths()
+	envPath := config.ResolveDotEnvPath(envPaths)
+	if envPath != "" {
+		_ = godotenv.Load(envPath)
+	} else {
 		fmt.Fprintf(os.Stderr, "Warning: .env file not found in %v\n", envPaths)
 	}
 
@@ -106,31 +65,27 @@ func main() {
 			cmd.Help()
 		},
 	}
-
-	// 全局 flags
-	// 默认空串：未显式 -c 时按 defaultConfigSearchPaths() 顺序查找
-	var configPath string
-	rootCmd.PersistentFlags().StringP("config", "c", "", "配置文件路径（未指定时按 $HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml 顺序查找）")
-	rootCmd.PersistentFlags().StringVarP(&logFilePath, "logfile", "l", "", "日志文件路径（默认使用 aicli.log.file_path 或 log.file_path）")
-	rootCmd.PersistentFlags().String("theme", "", "输出主题（classic|focus|contrast|mono，留空使用配置或默认）")
-	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
-
-	// 解析配置后初始化
-	cobra.OnInitialize(func() {
-		// 读取配置文件路径
-		cfgFlag, _ := rootCmd.Flags().GetString("config")
-		if cfgFlag != "" {
-			// 用户显式 -c：使用指定路径，不再回退
-			configPath = cfgFlag
-		} else {
-			// 未显式指定：按搜索顺序找首个存在的配置文件
-			configPath = resolveConfigPath(defaultConfigSearchPaths())
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if !shouldBootstrapConfigForCommand(cmd, args) {
+			return nil
 		}
-		// 加载配置（configPath 为空时 InitGlobalConfig 会返回空配置而不报错）
+
+		cfgFlag, _ := rootCmd.Flags().GetString("config")
+		configPath := strings.TrimSpace(cfgFlag)
+		if configPath == "" {
+			configPath = config.ResolveConfigPath(config.DefaultConfigSearchPaths())
+		}
+		if starterPath, created, starterErr := config.EnsureStarterConfigFile(configPath); starterErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to prepare starter config: %v\n", starterErr)
+		} else {
+			configPath = starterPath
+			if created {
+				fmt.Fprintf(os.Stderr, "Info: no config found, created starter config at %s\n", configPath)
+			}
+		}
 		loadedConfig, err := config.InitGlobalConfig(configPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to load config: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to load config: %w", err)
 		}
 		cfg = loadedConfig
 
@@ -153,8 +108,7 @@ func main() {
 		}
 		if themeName != "" {
 			if err := ui.SetThemePreset(themeName); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				return err
 			}
 		}
 
@@ -162,7 +116,14 @@ func main() {
 		if err := logger.InitLogger(&cfg.Log); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to initialize logger: %v\\n", err)
 		}
-	})
+		return nil
+	}
+
+	// 全局 flags
+	rootCmd.PersistentFlags().StringP("config", "c", "", "配置文件路径（未指定时按 $HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml 顺序查找）")
+	rootCmd.PersistentFlags().StringVarP(&logFilePath, "logfile", "l", "", "日志文件路径（默认使用 aicli.log.file_path 或 log.file_path）")
+	rootCmd.PersistentFlags().String("theme", "", "输出主题（classic|focus|contrast|mono，留空使用配置或默认）")
+	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
 
 	// config 子命令
 	configCmd := &cobra.Command{
@@ -184,6 +145,9 @@ func main() {
 	configCmd.Flags().String("output", "", "输出格式（text|json）")
 	configCmd.Flags().BoolP("json", "j", false, "以 JSON 格式输出")
 	rootCmd.AddCommand(configCmd)
+
+	// init 子命令
+	rootCmd.AddCommand(commands.NewInitCommand())
 
 	// test 子命令
 	testCmd := &cobra.Command{
@@ -382,4 +346,22 @@ func main() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func shouldBootstrapConfigForCommand(cmd *cobra.Command, args []string) bool {
+	if cmd == nil {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(cmd.Name()))
+	switch name {
+	case "", "aicli", "help", "init", "version":
+		return false
+	}
+	if len(args) == 0 && cmd.Parent() == nil {
+		return false
+	}
+	if value, err := cmd.Flags().GetBool("help"); err == nil && value {
+		return false
+	}
+	return true
 }

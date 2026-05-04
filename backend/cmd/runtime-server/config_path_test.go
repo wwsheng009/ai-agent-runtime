@@ -8,6 +8,7 @@ import (
 
 func TestResolveRuntimeServerConfigPathUsesConfigsConfigFromCurrentDir(t *testing.T) {
 	root := t.TempDir()
+	isolateRuntimeServerHome(t, root)
 	configPath := filepath.Join(root, "configs", "config.yaml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
@@ -41,6 +42,7 @@ func TestResolveRuntimeServerConfigPathUsesConfigsConfigFromCurrentDir(t *testin
 
 func TestResolveRuntimeServerConfigPathPrefersProjectConfigYAMLOverConfigsDir(t *testing.T) {
 	root := t.TempDir()
+	isolateRuntimeServerHome(t, root)
 	configPath := filepath.Join(root, "config.yaml")
 	if err := os.WriteFile(configPath, []byte("server:\n  port: 8101\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -78,6 +80,7 @@ func TestResolveRuntimeServerConfigPathPrefersProjectConfigYAMLOverConfigsDir(t 
 
 func TestResolveRuntimeServerConfigPathDoesNotRemapExplicitConfigPath(t *testing.T) {
 	root := t.TempDir()
+	isolateRuntimeServerHome(t, root)
 	backendConfigPath := filepath.Join(root, "backend", "configs", "config.yaml")
 	if err := os.MkdirAll(filepath.Dir(backendConfigPath), 0o755); err != nil {
 		t.Fatalf("mkdir backend config dir: %v", err)
@@ -107,4 +110,34 @@ func TestResolveRuntimeServerConfigPathDoesNotRemapExplicitConfigPath(t *testing
 	if resolved != expected {
 		t.Fatalf("expected %q, got %q", expected, resolved)
 	}
+}
+
+func TestDefaultRuntimeServerDotEnvSearchPathsFollowConfigDirectories(t *testing.T) {
+	root := t.TempDir()
+	isolateRuntimeServerHome(t, root)
+
+	paths := defaultRuntimeServerDotEnvSearchPaths()
+	expected := []string{
+		filepath.Join(root, "home", ".aicli", ".env"),
+		filepath.Join(".aicli", ".env"),
+		".env",
+		filepath.Join("configs", ".env"),
+	}
+	if len(paths) != len(expected) {
+		t.Fatalf("unexpected .env path count: got %d %v, want %d %v", len(paths), paths, len(expected), expected)
+	}
+	for i := range expected {
+		if paths[i] != expected[i] {
+			t.Fatalf("unexpected .env path at %d: got %q, want %q\nall paths: %v", i, paths[i], expected[i], paths)
+		}
+	}
+}
+
+func isolateRuntimeServerHome(t *testing.T, root string) {
+	t.Helper()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
 }

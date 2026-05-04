@@ -28,6 +28,7 @@ custom_section:
 		Protocol:           stringPtr("openai"),
 		BaseURL:            stringPtr("https://api.example.com"),
 		APIKey:             stringPtr("sk-test"),
+		APIKeyRef:          stringPtr("alpha-key"),
 		SupportedModels:    &models,
 		DefaultModel:       stringPtr("gpt-4.1-mini"),
 		AuthMode:           stringPtr("api_key"),
@@ -53,6 +54,7 @@ custom_section:
 		"alpha:",
 		"protocol: openai",
 		"api_key: sk-test",
+		"api_key_ref: alpha-key",
 		"supported_models:",
 		"- gpt-4.1-mini",
 		"- gpt-5",
@@ -134,6 +136,7 @@ providers:
 	updated, err := UpdateProviderConfig(path, ProviderConfigUpdate{
 		Name:     "codex",
 		APIKey:   stringPtr(""),
+		APIKeyRef: stringPtr(""),
 		AuthMode: stringPtr("oauth"),
 		AuthRef:  stringPtr("codex_default"),
 	})

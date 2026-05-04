@@ -914,11 +914,15 @@ func (a *runtimeServerApp) close() {
 }
 
 func loadEnv() {
-	for _, path := range []string{".env", "./configs/.env"} {
-		if err := godotenv.Load(path); err == nil {
-			return
-		}
+	path := config.ResolveDotEnvPath(defaultRuntimeServerDotEnvSearchPaths())
+	if path == "" {
+		return
 	}
+	_ = godotenv.Load(path)
+}
+
+func defaultRuntimeServerDotEnvSearchPaths() []string {
+	return config.DotEnvSearchPathsForConfigPaths(defaultRuntimeServerConfigSearchPaths())
 }
 
 func normalizeSkillsRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfig {

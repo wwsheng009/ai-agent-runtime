@@ -18,6 +18,7 @@ type ProviderConfigUpdate struct {
 	Protocol           *string
 	BaseURL            *string
 	APIKey             *string
+	APIKeyRef          *string
 	AuthMode           *string
 	AuthRef            *string
 	ModelsPath         *string
@@ -40,6 +41,15 @@ func UpdateProviderConfig(configPath string, update ProviderConfigUpdate) (*Prov
 	raw, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read config file %s: %w", configPath, err)
+	}
+	if os.IsNotExist(err) {
+		if _, _, starterErr := EnsureStarterConfigAtPath(configPath); starterErr != nil {
+			return nil, starterErr
+		}
+		raw, err = os.ReadFile(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("read starter config file %s: %w", configPath, err)
+		}
 	}
 
 	document, err := parseYAMLDocument(raw)
@@ -96,6 +106,7 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 	upsertRequiredStringYAMLValue(node, "base_url", update.BaseURL)
 	upsertRequiredStringYAMLValue(node, "default_model", update.DefaultModel)
 	upsertOptionalStringYAMLValue(node, "api_key", update.APIKey)
+	upsertOptionalStringYAMLValue(node, "api_key_ref", update.APIKeyRef)
 	upsertOptionalStringYAMLValue(node, "auth_mode", update.AuthMode)
 	upsertOptionalStringYAMLValue(node, "auth_ref", update.AuthRef)
 	upsertOptionalStringYAMLValue(node, "models_path", update.ModelsPath)

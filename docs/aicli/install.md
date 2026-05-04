@@ -108,7 +108,31 @@ aicli version
 
 四个候选位置都不存在时，`aicli` 会以空配置启动而不报错（仅部分子命令可用）。
 
+### 初始化 starter 配置
+
+如果你还没有配置文件，可以先让 `aicli` 自动生成一个最小 starter 配置：
+
+```bash
+# 在当前工作目录生成 `./.aicli/config.yaml`
+aicli init
+
+# 在用户目录生成 ~/.aicli/config.yaml
+aicli init --global
+
+# 也可以显式指定目标路径
+aicli init --config ~/.aicli/config.yaml
+```
+
+说明：
+
+- `aicli init` 默认生成的是项目级 `./.aicli/config.yaml`
+- `aicli init --global` 等价于 `aicli init --config ~/.aicli/config.yaml`
+- 如果你希望优先使用仓库内配置，建议保持默认本地初始化
+- 如果你希望保存个人默认值到用户目录，可以使用 `--global`
+
 ### 最小配置示例
+
+你也可以直接用 `aicli init --global` 生成一个最小骨架，然后把下面这些字段补进去。
 
 把以下内容存为 `~/.aicli/config.yaml`：
 
@@ -147,8 +171,12 @@ export GEMINI_API_KEY=xxxxx
 
 支持自动加载 `.env` 文件，搜索顺序：
 
-1. `./env`
-2. `./configs/.env`
+1. `$HOME/.aicli/.env`
+2. `./.aicli/.env`
+3. `./.env`
+4. `./configs/.env`
+
+`.env` 的候选位置由 `config.yaml` 候选位置的所在目录派生，仍然是首个存在文件生效。
 
 ---
 
