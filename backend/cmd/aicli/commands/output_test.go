@@ -8,8 +8,8 @@ import (
 	"os"
 	"testing"
 
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/spf13/cobra"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
 func TestNormalizeOutputFormat(t *testing.T) {
@@ -81,6 +81,16 @@ func TestExtractSimpleResponseText(t *testing.T) {
 	nullError := []byte(`{"error":null,"output":[{"content":[{"text":"hello from codex"}]}]}`)
 	if text := extractSimpleResponseText(nullError); text != "hello from codex" {
 		t.Fatalf("unexpected null-error response text: %q", text)
+	}
+
+	sse := []byte("event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n" +
+		"event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n" +
+		"event: response.output_text.done\n" +
+		"data: {\"type\":\"response.output_text.done\",\"text\":\"OK\"}\n")
+	if text := extractSimpleResponseText(sse); text != "OK" {
+		t.Fatalf("unexpected sse response text: %q", text)
 	}
 }
 

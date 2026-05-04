@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -11,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/spf13/cobra"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 )
 
 type testCommandOptions struct {
@@ -231,6 +232,11 @@ func renderTestCommandResult(result *testCommandResult, outputOptions structured
 func displaySimpleResponse(responseBody []byte) {
 	var result map[string]interface{}
 	if err := json.Unmarshal(responseBody, &result); err != nil {
+		if text := extractCodexStreamText(responseBody); text != "" {
+			fmt.Println("Response:")
+			fmt.Println(text)
+			return
+		}
 		// JSON 解析失败，直接显示原始内容
 		fmt.Println("Response:")
 		fmt.Println(string(responseBody))
@@ -286,6 +292,9 @@ func displaySimpleResponse(responseBody []byte) {
 func extractSimpleResponseText(responseBody []byte) string {
 	var result map[string]interface{}
 	if err := json.Unmarshal(responseBody, &result); err != nil {
+		if text := extractCodexStreamText(responseBody); text != "" {
+			return text
+		}
 		return strings.TrimSpace(string(responseBody))
 	}
 
@@ -339,6 +348,107 @@ func extractSimpleResponseText(responseBody []byte) string {
 	}
 
 	return ""
+}
+
+func extractCodexStreamText(responseBody []byte) string {
+	trimmed := strings.TrimSpace(string(responseBody))
+	if trimmed == "" || !looksLikeCodexStreamResponse([]byte(trimmed)) {
+		return ""
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader([]byte(trimmed)))
+	scanner.Buffer(make([]byte, 0, 1024*1024), 20*1024*1024)
+
+	var currentEvent string
+	var content strings.Builder
+	var reasoning strings.Builder
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "event: "):
+			currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
+		case strings.HasPrefix(line, "data: "):
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+			if data == "" {
+				continue
+			}
+			var event map[string]interface{}
+			if err := json.Unmarshal([]byte(data), &event); err != nil {
+				continue
+			}
+			eventType := strings.TrimSpace(currentEvent)
+			if eventType == "" {
+				if value, ok := event["type"].(string); ok {
+					eventType = strings.TrimSpace(value)
+				}
+			}
+			switch eventType {
+			case "response.output_text.delta":
+				if delta, ok := event["delta"].(string); ok {
+					content.WriteString(delta)
+				}
+			case "response.output_text.done":
+				if text, ok := event["text"].(string); ok && strings.TrimSpace(text) != "" {
+					content.Reset()
+					content.WriteString(text)
+				}
+			case "response.output_item.done":
+				if text := extractCodexOutputItemText(event); text != "" {
+					content.Reset()
+					content.WriteString(text)
+				}
+			case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+				if delta, ok := event["delta"].(string); ok {
+					reasoning.WriteString(delta)
+				}
+			case "response.reasoning_summary_text.done":
+				if text, ok := event["text"].(string); ok && strings.TrimSpace(text) != "" {
+					reasoning.Reset()
+					reasoning.WriteString(text)
+				}
+			}
+		}
+	}
+
+	if text := strings.TrimSpace(content.String()); text != "" {
+		return text
+	}
+	return strings.TrimSpace(reasoning.String())
+}
+
+func extractCodexOutputItemText(event map[string]interface{}) string {
+	item, ok := event["item"].(map[string]interface{})
+	if !ok || len(item) == 0 {
+		return ""
+	}
+	content, ok := item["content"].([]interface{})
+	if !ok || len(content) == 0 {
+		return ""
+	}
+
+	var parts []string
+	for _, rawPart := range content {
+		part, ok := rawPart.(map[string]interface{})
+		if !ok || len(part) == 0 {
+			continue
+		}
+		if typ, _ := part["type"].(string); typ != "output_text" {
+			continue
+		}
+		if text, _ := part["text"].(string); strings.TrimSpace(text) != "" {
+			parts = append(parts, strings.TrimSpace(text))
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func looksLikeCodexStreamResponse(body []byte) bool {
+	trimmed := strings.TrimSpace(string(body))
+	return strings.HasPrefix(trimmed, "event: ") || strings.HasPrefix(trimmed, "data: ")
 }
 
 // saveTestData 保存测试数据到文件（保存原始数据）

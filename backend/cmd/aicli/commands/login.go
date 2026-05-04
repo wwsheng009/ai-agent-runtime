@@ -101,6 +101,9 @@ func renderLoginCommandResult(result *providerLoginResult, outputOptions structu
 	if result.AuthRef != "" {
 		fmt.Printf("  Auth ref:        %s\n", result.AuthRef)
 	}
+	if result.APIKeyRef != "" {
+		fmt.Printf("  API key ref:     %s\n", result.APIKeyRef)
+	}
 	if result.APIKeyMasked != "" && result.AuthMode != providerAuthModeOAuth {
 		fmt.Printf("  API key:         %s\n", result.APIKeyMasked)
 	}

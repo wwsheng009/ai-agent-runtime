@@ -402,12 +402,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	}
 
 	// 构建请求 URL
-	baseURL := selected.Provider.BaseURL
-	if baseURL == "" {
-		baseURL = "https://api.openai.com"
-	}
-	apiPath := resolveProviderAPIPath(selected.Provider, adpt.GetAPIPath())
-	url := baseURL + "/" + apiPath
+	url := buildGatewayProviderURL(selected.Provider, adpt.GetAPIPath())
 	reportHTTPDebug(ctx, HTTPDebugEvent{
 		Source:           "gateway_client",
 		Phase:            "request",
@@ -639,12 +634,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	baseURL := selected.Provider.BaseURL
-	if baseURL == "" {
-		baseURL = "https://api.openai.com"
-	}
-	apiPath := resolveProviderAPIPath(selected.Provider, adpt.GetAPIPath())
-	url := baseURL + "/" + apiPath
+	url := buildGatewayProviderURL(selected.Provider, adpt.GetAPIPath())
 	reportHTTPDebug(ctx, HTTPDebugEvent{
 		Source:           "gateway_client",
 		Phase:            "request",
@@ -909,12 +899,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 	}
 
 	// 构建请求 URL
-	baseURL := selected.Provider.BaseURL
-	if baseURL == "" {
-		baseURL = "https://api.openai.com"
-	}
-	apiPath := resolveProviderAPIPath(selected.Provider, adpt.GetAPIPath())
-	url := baseURL + "/" + apiPath
+	url := buildGatewayProviderURL(selected.Provider, adpt.GetAPIPath())
 	reportHTTPDebug(ctx, HTTPDebugEvent{
 		Source:           "gateway_client",
 		Phase:            "request",
@@ -1286,6 +1271,21 @@ func resolveProviderAPIPath(provider *ProviderResource, defaultPath string) stri
 		}
 	}
 	return strings.TrimPrefix(defaultPath, "/")
+}
+
+func buildGatewayProviderURL(provider *ProviderResource, defaultPath string) string {
+	baseURL := ""
+	if provider != nil {
+		baseURL = provider.BaseURL
+	}
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = "https://api.openai.com"
+	}
+	apiPath := resolveProviderAPIPath(provider, defaultPath)
+	if strings.TrimSpace(apiPath) == "" {
+		return strings.TrimRight(baseURL, "/") + "/"
+	}
+	return agentconfig.JoinBaseURLAndPath(baseURL, apiPath)
 }
 
 func resolveGatewaySelectedModel(selected *SelectedResource, requestedModel string) string {

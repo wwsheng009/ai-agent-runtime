@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -132,9 +133,18 @@ func displayProvider(cfg *config.Config, providerName string, showModels bool) {
 
 	fmt.Printf("Enabled:         %v\n", provider.Enabled)
 	fmt.Printf("Type:            %s\n", provider.GetProtocol())
+	if strings.TrimSpace(provider.AuthMode) != "" {
+		fmt.Printf("Auth mode:       %s\n", provider.AuthMode)
+	}
 	fmt.Printf("Base URL:        %s\n", provider.BaseURL)
 	fmt.Printf("API Path:        %s\n", provider.APIPath)
 	fmt.Printf("Forward URL:     %s\n", provider.ForwardURL)
+	if strings.TrimSpace(provider.APIKeyRef) != "" {
+		fmt.Printf("API key ref:     %s\n", provider.APIKeyRef)
+	}
+	if strings.TrimSpace(provider.AuthRef) != "" {
+		fmt.Printf("Auth ref:        %s\n", provider.AuthRef)
+	}
 
 	// API Key 显示（支持多个 keys）
 	allKeys := provider.GetAllAPIKeys()

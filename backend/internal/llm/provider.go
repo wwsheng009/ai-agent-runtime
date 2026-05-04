@@ -1588,7 +1588,10 @@ func (p *ProviderWrapper) buildURL(apiPath string) string {
 	if configured := strings.TrimSpace(p.config.APIPath); configured != "" {
 		apiPath = configured
 	}
-	return baseURL + "/" + strings.TrimPrefix(apiPath, "/")
+	if strings.TrimSpace(apiPath) == "" {
+		return strings.TrimRight(baseURL, "/") + "/"
+	}
+	return agentconfig.JoinBaseURLAndPath(baseURL, apiPath)
 }
 
 // convertToolCalls 转换 tool_calls 格式

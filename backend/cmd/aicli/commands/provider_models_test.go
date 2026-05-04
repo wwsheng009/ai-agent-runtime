@@ -72,6 +72,36 @@ func TestValidateProviderModels_SendsExpectedHeadersAndParsesModels(t *testing.T
 	}
 }
 
+func TestValidateProviderModels_BaseURLWithV1DoesNotDuplicateModelsPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5-codex"}]}`))
+	}))
+	defer server.Close()
+
+	result, err := validateProviderModels(providerModelsValidationRequest{
+		Provider: config.Provider{
+			Protocol: "codex",
+			BaseURL:  server.URL + "/v1",
+			APIKey:   "sk-test",
+		},
+		LoginProtocol: "codex-apikey",
+	})
+	if err != nil {
+		t.Fatalf("validateProviderModels: %v", err)
+	}
+	wantEndpoint := server.URL + "/v1/models"
+	if result.Endpoint != wantEndpoint {
+		t.Fatalf("endpoint = %q, want %q", result.Endpoint, wantEndpoint)
+	}
+	if len(result.Models) != 1 || result.Models[0].ID != "gpt-5-codex" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
 func TestValidateProviderModels_FailsOnEmptyModels(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[]}`))

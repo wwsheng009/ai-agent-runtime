@@ -51,6 +51,7 @@ type providerLoginResult struct {
 	LoginProtocol    string              `json:"login_protocol"`
 	AuthMode         string              `json:"auth_mode"`
 	AuthRef          string              `json:"auth_ref,omitempty"`
+	APIKeyRef        string              `json:"api_key_ref,omitempty"`
 	BaseURL          string              `json:"base_url"`
 	ModelsPath       string              `json:"models_path"`
 	ModelsEndpoint   string              `json:"models_endpoint"`
@@ -106,7 +107,8 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		candidate.BaseURL = baseURL
 	}
 
-	updatedAPIKey := ""
+	resolvedAPIKey := ""
+	apiKeyRef := ""
 	var oauthRecord *config.ProviderAuthRecord
 	if authMode == providerAuthModeOAuth {
 		record, authRef, err := runCodexOAuthDeviceLogin(ctx, req, providerName)
@@ -117,17 +119,18 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		candidate.APIKey = record.AccessToken
 		candidate.AuthMode = providerAuthModeOAuth
 		candidate.AuthRef = authRef
+		candidate.APIKeyRef = ""
 	} else {
-		apiKey, changed, err := resolveLoginAPIKey(req, existing, exists)
+		apiKey, err := resolveLoginAPIKey(req, existing, exists)
 		if err != nil {
 			return nil, err
 		}
+		resolvedAPIKey = apiKey
 		candidate.APIKey = apiKey
 		candidate.AuthMode = providerAuthModeAPIKey
 		candidate.AuthRef = ""
-		if changed {
-			updatedAPIKey = apiKey
-		}
+		apiKeyRef = resolveLoginAPIKeyRef(existing, exists, providerName)
+		candidate.APIKeyRef = apiKeyRef
 	}
 
 	modelsPath := resolveProviderModelsPath(loginProtocol, candidate, req.ModelsPath)
@@ -154,8 +157,31 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 	candidate.ModelsVerifiedAt = modelsResult.VerifiedAt
 
 	if !req.DryRun {
-		if strings.TrimSpace(configPath) == "" {
-			return nil, fmt.Errorf("无法保存配置: 当前未加载 config.yaml，请使用 --config 指定配置文件")
+		resolvedConfigPath, err := ensureWritableAICLIConfigPath(cfg, configPath)
+		if err != nil {
+			return nil, fmt.Errorf("无法保存配置: %w", err)
+		}
+		configPath = resolvedConfigPath
+		if authMode == providerAuthModeAPIKey {
+			if strings.TrimSpace(resolvedAPIKey) == "" {
+				return nil, fmt.Errorf("api key is missing for auth store write")
+			}
+			if strings.TrimSpace(apiKeyRef) == "" {
+				apiKeyRef = resolveLoginAPIKeyRef(existing, exists, providerName)
+			}
+			record := config.ProviderAuthRecord{
+				KeyType:  config.AuthKeyTypeAPIKey,
+				APIKey:   resolvedAPIKey,
+				AuthMode: providerAuthModeAPIKey,
+			}
+			authStorePath := authStorePathForResult(req, authMode)
+			if err := config.SaveProviderAuthToPath(authStorePath, apiKeyRef, record); err != nil {
+				return nil, err
+			}
+			candidate.APIKey = ""
+			if strings.TrimSpace(candidate.APIKeyRef) == "" {
+				candidate.APIKeyRef = apiKeyRef
+			}
 		}
 		if authMode == providerAuthModeOAuth {
 			if oauthRecord == nil {
@@ -166,7 +192,7 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 				return nil, err
 			}
 		}
-		update := buildProviderPersistenceUpdate(providerName, candidate, loginProtocol, authMode, updatedAPIKey, supportedModels, req.SetDefault, modelsResult.VerifiedAt)
+		update := buildProviderPersistenceUpdate(providerName, candidate, loginProtocol, authMode, supportedModels, req.SetDefault, modelsResult.VerifiedAt)
 		persisted, err := config.UpdateProviderConfig(configPath, update)
 		if err != nil {
 			return nil, err
@@ -183,6 +209,7 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		LoginProtocol:    loginProtocol,
 		AuthMode:         authMode,
 		AuthRef:          candidate.AuthRef,
+		APIKeyRef:        candidate.APIKeyRef,
 		BaseURL:          candidate.BaseURL,
 		ModelsPath:       modelsPath,
 		ModelsEndpoint:   modelsResult.Endpoint,
@@ -195,7 +222,7 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		DryRun:           req.DryRun,
 		ConfigPath:       configPath,
 		AuthStorePath:    authStorePathForResult(req, authMode),
-		APIKeyMasked:     maskSecretForDisplay(candidate.APIKey),
+		APIKeyMasked:     maskSecretForDisplay(resolvedAPIKey),
 		SetDefault:       req.SetDefault,
 	}, nil
 }
@@ -328,28 +355,33 @@ func resolveLoginBaseURL(req providerLoginRequest, existing config.Provider, exi
 	return baseURL, nil
 }
 
-func resolveLoginAPIKey(req providerLoginRequest, existing config.Provider, exists bool) (string, bool, error) {
+func resolveLoginAPIKey(req providerLoginRequest, existing config.Provider, exists bool) (string, error) {
 	if strings.TrimSpace(req.APIKey) != "" {
-		return strings.TrimSpace(req.APIKey), true, nil
+		return strings.TrimSpace(req.APIKey), nil
 	}
 	current := ""
 	if exists {
 		current = strings.TrimSpace(existing.APIKey)
+		if current == "" && strings.TrimSpace(existing.APIKeyRef) != "" {
+			if secret, err := config.LoadProviderAuthSecret(strings.TrimSpace(existing.APIKeyRef), config.AuthKeyTypeAPIKey); err == nil && strings.TrimSpace(secret) != "" {
+				current = strings.TrimSpace(secret)
+			}
+		}
 	}
 	if req.Interactive && req.Prompter != nil {
 		required := current == ""
 		value, err := req.Prompter.PromptSecret("API key", maskSecretForDisplay(current), required)
 		if err != nil {
-			return "", false, err
+			return "", err
 		}
 		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value), true, nil
+			return strings.TrimSpace(value), nil
 		}
 	}
 	if current == "" {
-		return "", false, fmt.Errorf("api-key is required")
+		return "", fmt.Errorf("api-key is required")
 	}
-	return current, false, nil
+	return current, nil
 }
 
 func resolveLoginDefaultModel(req providerLoginRequest, provider config.Provider, supported []string) (string, error) {
@@ -369,13 +401,14 @@ func resolveLoginDefaultModel(req providerLoginRequest, provider config.Provider
 	return supported[0], nil
 }
 
-func buildProviderPersistenceUpdate(providerName string, candidate config.Provider, loginProtocol, authMode, updatedAPIKey string, supportedModels []string, setDefault bool, verifiedAt string) config.ProviderConfigUpdate {
+func buildProviderPersistenceUpdate(providerName string, candidate config.Provider, loginProtocol, authMode string, supportedModels []string, setDefault bool, verifiedAt string) config.ProviderConfigUpdate {
 	update := config.ProviderConfigUpdate{
 		Name:               providerName,
 		SetDefaultProvider: setDefault,
 		Enabled:            providerLoginBoolValuePtr(candidate.Enabled),
 		Protocol:           providerLoginStringValuePtr(candidate.Protocol),
 		BaseURL:            providerLoginStringValuePtr(candidate.BaseURL),
+		APIKeyRef:          providerLoginStringValuePtr(candidate.APIKeyRef),
 		AuthMode:           providerLoginStringValuePtr(authMode),
 		ModelsPath:         providerLoginStringValuePtr(candidate.ModelsPath),
 		ModelsVerifiedAt:   providerLoginStringValuePtr(verifiedAt),
@@ -385,8 +418,8 @@ func buildProviderPersistenceUpdate(providerName string, candidate config.Provid
 	if authMode == providerAuthModeOAuth {
 		update.APIKey = providerLoginStringValuePtr("")
 		update.AuthRef = providerLoginStringValuePtr(candidate.AuthRef)
-	} else if strings.TrimSpace(updatedAPIKey) != "" {
-		update.APIKey = providerLoginStringValuePtr(updatedAPIKey)
+	} else {
+		update.APIKey = providerLoginStringValuePtr("")
 		update.AuthRef = providerLoginStringValuePtr("")
 	}
 	_ = loginProtocol
@@ -487,13 +520,23 @@ func promptLoginProtocol(prompter providerLoginPrompter) (string, error) {
 }
 
 func authStorePathForResult(req providerLoginRequest, authMode string) string {
-	if authMode != providerAuthModeOAuth {
+	if authMode != providerAuthModeOAuth && authMode != providerAuthModeAPIKey {
 		return ""
 	}
 	if strings.TrimSpace(req.AuthStorePath) != "" {
 		return strings.TrimSpace(req.AuthStorePath)
 	}
 	return config.DefaultAuthStorePath()
+}
+
+func resolveLoginAPIKeyRef(existing config.Provider, exists bool, providerName string) string {
+	if exists && strings.TrimSpace(existing.APIKeyRef) != "" {
+		return strings.TrimSpace(existing.APIKeyRef)
+	}
+	if strings.TrimSpace(providerName) != "" {
+		return strings.TrimSpace(providerName)
+	}
+	return ""
 }
 
 func stringInListFold(value string, list []string) bool {

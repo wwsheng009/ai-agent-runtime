@@ -45,6 +45,14 @@ func (m *gatewayTestResourceManager) RecordResult(selected *SelectedResource, su
 	m.results = append(m.results, record)
 }
 
+func TestBuildGatewayProviderURLDedupesVersionPrefixInBaseURL(t *testing.T) {
+	got := buildGatewayProviderURL(&ProviderResource{
+		BaseURL: "https://api.example.com/v1",
+	}, "/v1/chat/completions")
+
+	assert.Equal(t, "https://api.example.com/v1/chat/completions", got)
+}
+
 func TestGatewayClient_ConvertTools_CodexIncludesRuntimeTools(t *testing.T) {
 	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
 	tools := []types.ToolDefinition{

@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +13,28 @@ import (
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
+
+func setTestUserProfileDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("HOME", dir)
+}
+
+func testAuthStorePath(dir string) string {
+	return filepath.Join(dir, ".aicli", "auth.json")
+}
+
+func seedTestAPIKeyAuth(t *testing.T, dir, ref, apiKey string) {
+	t.Helper()
+	setTestUserProfileDir(t, dir)
+	if err := config.SaveProviderAuth(ref, config.ProviderAuthRecord{
+		KeyType:  config.AuthKeyTypeAPIKey,
+		AuthMode: config.AuthKeyTypeAPIKey,
+		APIKey:   apiKey,
+	}); err != nil {
+		t.Fatalf("SaveProviderAuth: %v", err)
+	}
+}
 
 func TestRunProviderLogin_CreatesProviderAfterModelsValidation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -25,6 +49,7 @@ func TestRunProviderLogin_CreatesProviderAfterModelsValidation(t *testing.T) {
 	defer server.Close()
 
 	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -49,8 +74,16 @@ func TestRunProviderLogin_CreatesProviderAfterModelsValidation(t *testing.T) {
 		t.Fatalf("expected default provider alpha, got %q", cfg.Providers.DefaultProvider)
 	}
 	provider := cfg.Providers.Items["alpha"]
-	if provider.Protocol != "openai" || provider.APIKey != "sk-test" || len(provider.SupportedModels) != 2 {
+	if provider.Protocol != "openai" || provider.APIKey != "" || provider.APIKeyRef != "alpha" || len(provider.SupportedModels) != 2 {
 		t.Fatalf("unexpected cfg provider: %+v", provider)
+	}
+	authStorePath := testAuthStorePath(dir)
+	loadedAuth, err := config.LoadProviderAuthFromPath(authStorePath, "alpha")
+	if err != nil {
+		t.Fatalf("LoadProviderAuthFromPath: %v", err)
+	}
+	if loadedAuth.KeyType != config.AuthKeyTypeAPIKey || loadedAuth.AuthMode != config.AuthKeyTypeAPIKey || loadedAuth.APIKey != "sk-test" {
+		t.Fatalf("unexpected auth record: %+v", loadedAuth)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -61,13 +94,16 @@ func TestRunProviderLogin_CreatesProviderAfterModelsValidation(t *testing.T) {
 		"default_provider: alpha",
 		"protocol: openai",
 		"base_url: " + server.URL,
-		"api_key: sk-test",
+		"api_key_ref: alpha",
 		"supported_models:",
 		"default_model: gpt-4.1-mini",
 	} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("expected %q in config:\n%s", expected, text)
 		}
+	}
+	if strings.Contains(text, "api_key:") {
+		t.Fatalf("config should not persist inline api_key:\n%s", text)
 	}
 }
 
@@ -78,6 +114,7 @@ func TestRunProviderLogin_DoesNotWriteOnModelsFailure(t *testing.T) {
 	defer server.Close()
 
 	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
 	path := filepath.Join(dir, "config.yaml")
 	initial := "providers:\n  items: {}\n"
 	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
@@ -117,6 +154,7 @@ func TestRunProviderLogin_PartialEditPreservesExistingAPIKey(t *testing.T) {
 	defer server.Close()
 
 	dir := t.TempDir()
+	seedTestAPIKeyAuth(t, dir, "alpha", "old-key")
 	path := filepath.Join(dir, "config.yaml")
 	raw := strings.TrimSpace(`
 providers:
@@ -125,7 +163,7 @@ providers:
       enabled: true
       protocol: openai
       base_url: https://old.example.com
-      api_key: old-key
+      api_key_ref: alpha
       extra_field: keep
       supported_models:
         - old-model
@@ -141,7 +179,8 @@ providers:
 				Enabled:         true,
 				Protocol:        "openai",
 				BaseURL:         "https://old.example.com",
-				APIKey:          "old-key",
+				APIKey:          "",
+				APIKeyRef:       "alpha",
 				SupportedModels: []string{"old-model"},
 				DefaultModel:    "old-model",
 			},
@@ -166,7 +205,7 @@ providers:
 	}
 	text := string(content)
 	for _, expected := range []string{
-		"api_key: old-key",
+		"api_key_ref: alpha",
 		"extra_field: keep",
 		"base_url: " + server.URL,
 		"- new-model",
@@ -187,6 +226,7 @@ func TestRunProviderLogin_InteractiveEditPromptsBaseURLAndKeepsBlankAPIKey(t *te
 	defer server.Close()
 
 	dir := t.TempDir()
+	seedTestAPIKeyAuth(t, dir, "alpha", "old-key")
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(strings.TrimSpace(`
 providers:
@@ -195,7 +235,7 @@ providers:
       enabled: true
       protocol: openai
       base_url: https://old.example.com
-      api_key: old-key
+      api_key_ref: alpha
       default_model: old-model
       supported_models:
         - old-model
@@ -209,7 +249,7 @@ providers:
 				Enabled:         true,
 				Protocol:        "openai",
 				BaseURL:         "https://old.example.com",
-				APIKey:          "old-key",
+				APIKeyRef:       "alpha",
 				DefaultModel:    "old-model",
 				SupportedModels: []string{"old-model"},
 			},
@@ -230,8 +270,13 @@ providers:
 	if result.BaseURL != server.URL || result.DefaultModel != "new-model" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	if cfg.Providers.Items["alpha"].APIKey != "old-key" {
-		t.Fatalf("expected API key to be preserved, got %+v", cfg.Providers.Items["alpha"])
+	authStorePath := testAuthStorePath(dir)
+	loadedAuth, err := config.LoadProviderAuthFromPath(authStorePath, "alpha")
+	if err != nil {
+		t.Fatalf("LoadProviderAuthFromPath: %v", err)
+	}
+	if loadedAuth.KeyType != config.AuthKeyTypeAPIKey || loadedAuth.APIKey != "old-key" {
+		t.Fatalf("expected API key to be resolved from auth store, got %+v", loadedAuth)
 	}
 }
 
@@ -288,6 +333,7 @@ func TestRunProviderLogin_CodexAPIKeyWritesCodexProtocol(t *testing.T) {
 	defer server.Close()
 
 	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -311,10 +357,17 @@ func TestRunProviderLogin_CodexAPIKeyWritesCodexProtocol(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 	text := string(content)
-	for _, expected := range []string{"protocol: codex", "auth_mode: api_key", "api_key: sk-codex", "- gpt-5-codex"} {
+	for _, expected := range []string{"protocol: codex", "auth_mode: api_key", "api_key_ref: codex_key", "- gpt-5-codex"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("expected %q in config:\n%s", expected, text)
 		}
+	}
+	loadedAuth, err := config.LoadProviderAuthFromPath(testAuthStorePath(dir), "codex_key")
+	if err != nil {
+		t.Fatalf("LoadProviderAuthFromPath: %v", err)
+	}
+	if loadedAuth.KeyType != config.AuthKeyTypeAPIKey || loadedAuth.APIKey != "sk-codex" {
+		t.Fatalf("unexpected auth record: %+v", loadedAuth)
 	}
 }
 
@@ -440,6 +493,93 @@ func TestRunProviderLogin_CodexOAuthDoesNotPersistAuthOnModelsFailure(t *testing
 	}
 	if string(content) != initial {
 		t.Fatalf("config changed on failure:\n%s", string(content))
+	}
+}
+
+func TestRenderLoginCommandResultShowsAPIKeyRef(t *testing.T) {
+	stdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+
+	renderLoginCommandResult(&providerLoginResult{
+		ProviderName:    "alpha",
+		Protocol:        "openai",
+		LoginProtocol:   "openai",
+		AuthMode:        providerAuthModeAPIKey,
+		APIKeyRef:       "alpha",
+		BaseURL:         "https://api.example.com",
+		ModelsEndpoint:  "/v1/models",
+		DefaultModel:    "gpt-5",
+		SupportedModels: []string{"gpt-5"},
+		AuthStorePath:   "/home/test/.aicli/auth.json",
+		APIKeyMasked:    "sk-t...test",
+	}, structuredOutputOptions{Format: "text"})
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	os.Stdout = stdout
+	data, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	text := string(bytes.TrimSpace(data))
+	for _, expected := range []string{
+		"API key ref:     alpha",
+		"Auth store:      /home/test/.aicli/auth.json",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in output:\n%s", expected, text)
+		}
+	}
+}
+
+func TestDisplayProviderShowsAuthReferences(t *testing.T) {
+	stdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+
+	displayProvider(&config.Config{
+		Providers: config.ProvidersConfig{
+			Items: map[string]config.Provider{
+				"alpha": {
+					Enabled:      true,
+					Protocol:     "openai",
+					BaseURL:      "https://api.example.com",
+					APIPath:      "/v1",
+					APIKeyRef:    "alpha",
+					AuthMode:     "api_key",
+					AuthRef:      "oauth_ref",
+					DefaultModel: "gpt-5",
+				},
+			},
+		},
+	}, "alpha", false)
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	os.Stdout = stdout
+	data, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	text := string(bytes.TrimSpace(data))
+	for _, expected := range []string{
+		"API key ref:     alpha",
+		"Auth ref:        oauth_ref",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in output:\n%s", expected, text)
+		}
 	}
 }
 

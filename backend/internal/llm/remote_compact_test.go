@@ -15,6 +15,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+func TestResolveCompactURLDedupesVersionPrefixInBaseURL(t *testing.T) {
+	got := resolveCompactURL("https://api.example.com/v1", "", "/v1/responses/compact")
+
+	assert.Equal(t, "https://api.example.com/v1/responses/compact", got)
+}
+
 func TestProviderWrapperRemoteCompactCodexUsesCompactEndpointAndBuildsReplayableHistory(t *testing.T) {
 	var capturedPath string
 	var capturedBody map[string]interface{}

@@ -18,6 +18,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+func TestProviderWrapperBuildURLDedupesVersionPrefixInBaseURL(t *testing.T) {
+	provider := &ProviderWrapper{config: &ProviderConfig{BaseURL: "https://api.example.com/v1"}}
+
+	assert.Equal(t, "https://api.example.com/v1/responses", provider.buildURL("/v1/responses"))
+}
+
 func TestNewProvider_WorksWithUnifiedRuntimeInterface(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)

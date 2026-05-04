@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -229,7 +230,7 @@ func resolveCompactURL(baseURL, configuredPath, defaultPath string) string {
 		baseURL = "https://api.openai.com"
 	}
 	apiPath := resolveCompactAPIPath(configuredPath, defaultPath)
-	return baseURL + "/" + strings.TrimPrefix(apiPath, "/")
+	return agentconfig.JoinBaseURLAndPath(baseURL, apiPath)
 }
 
 func sendRemoteCompactRequest(

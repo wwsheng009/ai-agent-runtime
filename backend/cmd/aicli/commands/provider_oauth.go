@@ -78,6 +78,7 @@ func runCodexOAuthDeviceLogin(ctx context.Context, req providerLoginRequest, pro
 	}
 
 	record := config.ProviderAuthRecord{
+		KeyType:      config.AuthKeyTypeOAuth,
 		AuthMode:     providerAuthModeOAuth,
 		Issuer:       issuer,
 		ClientID:     clientID,

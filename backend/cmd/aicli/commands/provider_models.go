@@ -158,7 +158,7 @@ func buildProviderModelsURL(provider config.Provider, modelsPath string) (string
 	if !strings.HasPrefix(modelsPath, "/") {
 		modelsPath = "/" + modelsPath
 	}
-	return baseURL + modelsPath, nil
+	return config.JoinBaseURLAndPath(baseURL, modelsPath), nil
 }
 
 func parseProviderModelsResponse(raw []byte, loginProtocol string) ([]providerModelInfo, error) {
