@@ -16,7 +16,7 @@
 
 - `docs/skill_runtime/skill_invocation_mechanism.md`
 
-如果你需要更偏“CLI 使用面”的说明，例如安装、配置加载顺序、`aicli` 默认 chat / `aicli chat` 常用命令、`/call`、`/tool`、`/skill` 这类 chat 斜杠命令，请同时阅读：
+如果你需要更偏“CLI 使用面”的说明，例如安装、配置加载顺序、`aicli` 默认 chat / `aicli chat` 常用命令、`/call`、`/tool`、`/skill`、`/skills` 这类 chat 斜杠命令，请同时阅读：
 
 - `docs/aicli/README.md`
 - `docs/aicli/install.md`
@@ -63,6 +63,8 @@
 /functions Run shell command echo PREVIEW_OK --json
 /function skill__run_shell_command
 /function skill__run_shell_command --json
+/skills
+/skills image
 ```
 
 其中：
@@ -73,6 +75,9 @@
 - `/functions <prompt> --json` 会输出机器可读的 exposure report
 - `/function <name>` 会显示单个 function 的 kind、capability、category、triggers 与 metadata
 - `/function <name> --json` 会输出机器可读的 descriptor 视图
+- `/skills` 会列出当前已加载的 skill functions，并提示输入编号或 skill 名称，随后再输入 prompt 直接执行
+- `/skills <query>` 会先按关键字过滤 skill，再进入选择
+- `/skill <name> <prompt>` 仍然保留用于直接执行已知 skill
 
 ## 暴露控制
 

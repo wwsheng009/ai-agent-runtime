@@ -20,7 +20,7 @@ import (
 func handleCommand(session *ChatSession, command string, noInteractive bool) bool {
 	// 首先检查 /shell 和 /cmd 命令（带参数）
 	cmdLower := strings.ToLower(strings.TrimSpace(command))
-	if strings.HasPrefix(cmdLower, "/shell") || strings.HasPrefix(cmdLower, "/cmd") {
+	if commandMatches(cmdLower, "/shell") || commandMatches(cmdLower, "/cmd") {
 		argument := extractCommandArgument(command)
 		if strings.TrimSpace(argument) == "" {
 			fmt.Println("错误: 需要指定 shell 命令")
@@ -45,7 +45,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		}
 		return false
 	}
-	if strings.HasPrefix(cmdLower, "/function ") || strings.HasPrefix(cmdLower, "/describe ") {
+	if commandMatches(cmdLower, "/function") || commandMatches(cmdLower, "/describe") {
 		name, jsonOutput := extractCommandArgumentOptions(command)
 		if name == "" {
 			fmt.Println("错误: 需要指定 function 名称")
@@ -55,7 +55,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println(formatFunctionDescriptor(session, name, jsonOutput))
 		return false
 	}
-	if strings.HasPrefix(cmdLower, "/functions ") || strings.HasPrefix(cmdLower, "/catalog ") {
+	if commandMatches(cmdLower, "/functions") || commandMatches(cmdLower, "/catalog") {
 		prompt, jsonOutput := extractCommandArgumentOptions(command)
 		if prompt == "" && jsonOutput {
 			fmt.Println(formatFunctionCatalogSummary(session, true))
@@ -69,13 +69,16 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println(formatFunctionExposurePreview(session, prompt, jsonOutput))
 		return false
 	}
-	if strings.HasPrefix(cmdLower, "/call ") || strings.HasPrefix(cmdLower, "/tool ") {
+	if commandMatches(cmdLower, "/call") || commandMatches(cmdLower, "/tool") {
 		return handleDirectFunctionCommand(session, command)
 	}
-	if strings.HasPrefix(cmdLower, "/skill ") {
+	if commandMatches(cmdLower, "/skills") {
+		return handleSkillsMenuCommand(session, command)
+	}
+	if commandMatches(cmdLower, "/skill") {
 		return handleDirectSkillCommand(session, command)
 	}
-	if strings.HasPrefix(cmdLower, "/sessions ") {
+	if commandMatches(cmdLower, "/sessions") {
 		filter := session.SessionFilter
 		filter.Query = strings.TrimSpace(extractCommandArgument(command))
 		if err := printChatSessionSummaries(session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session), filter); err != nil {
@@ -83,7 +86,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		}
 		return false
 	}
-	if strings.HasPrefix(cmdLower, "/load ") {
+	if commandMatches(cmdLower, "/load") {
 		sessionID := extractCommandArgument(command)
 		if strings.TrimSpace(sessionID) == "" {
 			fmt.Println("错误: 需要指定会话 ID")
@@ -102,7 +105,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		}
 		return false
 	}
-	if strings.HasPrefix(cmdLower, "/title ") {
+	if commandMatches(cmdLower, "/title") {
 		title := extractCommandArgument(command)
 		if strings.TrimSpace(title) == "" {
 			fmt.Println("错误: 需要指定会话标题")
@@ -121,13 +124,13 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("会话标题已更新")
 		return false
 	}
-	if strings.HasPrefix(cmdLower, "/image") {
+	if commandMatches(cmdLower, "/image") {
 		return handleImageCommand(session, command)
 	}
-	if strings.HasPrefix(cmdLower, "/queue") {
+	if commandMatches(cmdLower, "/queue") {
 		return handleQueueCommand(session, command)
 	}
-	if strings.HasPrefix(cmdLower, "/compact") {
+	if commandMatches(cmdLower, "/compact") {
 		return handleCompactCommand(session, command)
 	}
 	if commandMatches(cmdLower, "/model") {
@@ -145,7 +148,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/permission-mode") || commandMatches(cmdLower, "/mode") {
 		return handlePermissionModeCommand(session, command)
 	}
-	if strings.HasPrefix(cmdLower, "/approval-reuse") {
+	if commandMatches(cmdLower, "/approval-reuse") {
 		return handleApprovalReuseCommand(session, command)
 	}
 

@@ -1323,6 +1323,66 @@ func TestHandleCommand_DirectSkillCall_UsesPromptShortcut(t *testing.T) {
 	}
 }
 
+func TestHandleCommand_SkillsMenu_SelectsAndExecutes(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	executor := &fakeSkillExecutor{
+		result: &runtimeskill.ExecuteResult{
+			SkillName: "imagegen",
+			Success:   true,
+			Output:    "Generated image saved to file:///tmp/skill-image.png",
+		},
+	}
+	catalog.RegisterSkillFunction(&SkillFunction{
+		functionName: "skill__imagegen",
+		skill: &runtimeskill.Skill{
+			Name:        "imagegen",
+			Description: "Generate image",
+		},
+		executor: executor,
+	})
+
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+		InputReader:      bufio.NewReader(strings.NewReader("1\n帮我生成一张风景图\n")),
+	}
+
+	stdout, stderr := captureStdoutStderr(t, func() {
+		if quit := handleCommand(session, "/skills", false); quit {
+			t.Fatal("expected skills menu command not to exit")
+		}
+	})
+
+	if !strings.Contains(stderr, "选择 Skill") {
+		t.Fatalf("expected selection menu to be shown, got stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "Skill Catalog: total=1") {
+		t.Fatalf("expected skill catalog listing, got stderr:\n%s", stderr)
+	}
+	if executor.lastReq == nil || executor.lastReq.Prompt != "帮我生成一张风景图" {
+		t.Fatalf("expected prompt to reach selected skill executor, got %#v", executor.lastReq)
+	}
+	if !strings.Contains(stdout, "Generated image saved to") {
+		t.Fatalf("unexpected stdout: %s", stdout)
+	}
+}
+
+func TestHandleCommand_DirectSkillCall_WithoutArgsShowsUsage(t *testing.T) {
+	output := captureStdout(t, func() {
+		if quit := handleCommand(&ChatSession{}, "/skill", false); quit {
+			t.Fatal("expected bare skill command not to exit")
+		}
+	})
+
+	if strings.Contains(output, "未知命令") {
+		t.Fatalf("expected bare /skill to be routed to the skill handler, got: %s", output)
+	}
+	if !strings.Contains(output, "需要指定 skill 名称") {
+		t.Fatalf("expected usage hint for bare /skill, got: %s", output)
+	}
+}
+
 func TestExecuteShellCommandDetailed_DangerousCommandCancelsOnEOF(t *testing.T) {
 	session := &ChatSession{
 		cancelCtx:  context.Background(),

@@ -98,7 +98,7 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		})
 	case "/function", "/describe", "/call", "/tool":
 		return completeCatalogFunctionArgs(session, argsText, cursor, command)
-	case "/skill":
+	case "/skill", "/skills":
 		return completeSkillArgs(session, argsText, cursor)
 	case "/resume":
 		return p.completeResumeArgs(session, argsText, cursor)

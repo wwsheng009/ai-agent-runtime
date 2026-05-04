@@ -227,6 +227,7 @@ func main() {
   - /call <function> [args-json]
   - /tool <function> [args-json]
   - /skill <skill> <prompt>
+  - /skills [query]
 
 更完整说明见：
   - docs/aicli/install.md
@@ -246,7 +247,8 @@ func main() {
   # chat 内斜杠命令
   /functions 帮我生成一张图片
   /call openai_image_generate {"prompt":"帮我生成一张海边日落照片"}
-  /skill imagegen 帮我生成一张海边日落照片`,
+  /skill imagegen 帮我生成一张海边日落照片
+  /skills`,
 		Run: func(cmd *cobra.Command, args []string) {
 			commands.HandleChat(cmd, cfg)
 		},

@@ -287,6 +287,13 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			RequiresArgs: true,
 		},
 		{
+			Name:        "/skills",
+			Usage:       "/skills [query]",
+			Summary:     "列出并选择执行 skill",
+			Group:       string(chatSlashCommandGroupFunctions),
+			AcceptsArgs: true,
+		},
+		{
 			Name:         "/shell",
 			Aliases:      []string{"/cmd"},
 			Usage:        "/shell [--output-bytes-cap <bytes> | --disable-output-cap] <command>",
