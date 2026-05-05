@@ -342,6 +342,37 @@ func TestNormalizeStreamChunkAndReader_OpenAIReasoningAlias(t *testing.T) {
 	}
 }
 
+func TestNormalizeStreamChunk_OpenAIKeepsEmptyToolArgumentDelta(t *testing.T) {
+	chunk := map[string]interface{}{
+		"choices": []interface{}{
+			map[string]interface{}{
+				"delta": map[string]interface{}{
+					"tool_calls": []interface{}{
+						map[string]interface{}{
+							"index": 0,
+							"id":    "call_1",
+							"type":  "function",
+							"function": map[string]interface{}{
+								"name":      "bash",
+								"arguments": "",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	normalized := NormalizeStreamChunk(Context{Protocol: "openai"}, chunk)
+	choice := normalized["choices"].([]interface{})[0].(map[string]interface{})
+	delta := choice["delta"].(map[string]interface{})
+	toolCall := delta["tool_calls"].([]interface{})[0].(map[string]interface{})
+	fn := toolCall["function"].(map[string]interface{})
+	if got := fn["arguments"]; got != "" {
+		t.Fatalf("expected empty stream argument delta to stay empty, got %#v", got)
+	}
+}
+
 func TestReplayableOpenAIReasoningContent(t *testing.T) {
 	reasoning := &types.ReasoningBlock{
 		Provider:       "deepseek",

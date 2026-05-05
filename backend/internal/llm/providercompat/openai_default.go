@@ -177,7 +177,7 @@ func normalizeOpenAICompatibleDelta(delta map[string]interface{}) (map[string]in
 			ensureMutable()["reasoning_content"] = reasoning
 		}
 	}
-	if toolCalls, ok := normalizeOpenAICompatibleToolCalls(delta["tool_calls"]); ok {
+	if toolCalls, ok := normalizeOpenAICompatibleStreamToolCalls(delta["tool_calls"]); ok {
 		ensureMutable()["tool_calls"] = toolCalls
 	}
 	return normalized, changed
@@ -206,6 +206,39 @@ func normalizeOpenAICompatibleToolCalls(raw interface{}) (interface{}, bool) {
 				continue
 			}
 			next, ok := normalizeOpenAICompatibleToolCall(callMap)
+			normalized[i] = next
+			changed = changed || ok
+		}
+		if changed {
+			return normalized, true
+		}
+	}
+	return raw, false
+}
+
+func normalizeOpenAICompatibleStreamToolCalls(raw interface{}) (interface{}, bool) {
+	switch calls := raw.(type) {
+	case []map[string]interface{}:
+		normalized := make([]map[string]interface{}, len(calls))
+		changed := false
+		for i, call := range calls {
+			next, ok := normalizeOpenAICompatibleStreamToolCall(call)
+			normalized[i] = next
+			changed = changed || ok
+		}
+		if changed {
+			return normalized, true
+		}
+	case []interface{}:
+		normalized := make([]interface{}, len(calls))
+		changed := false
+		for i, call := range calls {
+			callMap, ok := call.(map[string]interface{})
+			if !ok {
+				normalized[i] = call
+				continue
+			}
+			next, ok := normalizeOpenAICompatibleStreamToolCall(callMap)
 			normalized[i] = next
 			changed = changed || ok
 		}
@@ -264,6 +297,53 @@ func normalizeOpenAICompatibleToolCall(call map[string]interface{}) (map[string]
 	return normalized, changed
 }
 
+func normalizeOpenAICompatibleStreamToolCall(call map[string]interface{}) (map[string]interface{}, bool) {
+	if len(call) == 0 {
+		return call, false
+	}
+
+	normalized := call
+	changed := false
+	ensureMutable := func() map[string]interface{} {
+		if !changed {
+			normalized = cloneMapStringAny(call)
+			changed = true
+		}
+		return normalized
+	}
+
+	function, hasFunction := call["function"].(map[string]interface{})
+	if !hasFunction {
+		name, hasName := call["name"].(string)
+		if !hasName || strings.TrimSpace(name) == "" {
+			return call, false
+		}
+		function = map[string]interface{}{
+			"name": strings.TrimSpace(name),
+		}
+		if arguments, ok := normalizeOpenAICompatibleStreamToolArguments(call["arguments"]); ok {
+			function["arguments"] = arguments
+		}
+		mutable := ensureMutable()
+		mutable["function"] = function
+		if _, hasType := mutable["type"]; !hasType {
+			mutable["type"] = "function"
+		}
+		return normalized, true
+	}
+
+	normalizedFunction := function
+	if arguments, ok := normalizeOpenAICompatibleStreamToolArguments(function["arguments"]); ok {
+		normalizedFunction = cloneMapStringAny(function)
+		normalizedFunction["arguments"] = arguments
+		ensureMutable()["function"] = normalizedFunction
+	}
+	if _, hasType := call["type"]; !hasType {
+		ensureMutable()["type"] = "function"
+	}
+	return normalized, changed
+}
+
 func normalizeOpenAICompatibleToolArguments(raw interface{}) (string, bool) {
 	switch value := raw.(type) {
 	case nil:
@@ -275,6 +355,21 @@ func normalizeOpenAICompatibleToolArguments(raw interface{}) (string, bool) {
 		payload, err := json.Marshal(value)
 		if err != nil || len(payload) == 0 || string(payload) == "null" {
 			return "{}", true
+		}
+		return string(payload), true
+	}
+}
+
+func normalizeOpenAICompatibleStreamToolArguments(raw interface{}) (string, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return "", false
+	case string:
+		return value, false
+	default:
+		payload, err := json.Marshal(value)
+		if err != nil || len(payload) == 0 || string(payload) == "null" {
+			return "", false
 		}
 		return string(payload), true
 	}
