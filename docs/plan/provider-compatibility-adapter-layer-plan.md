@@ -16,6 +16,7 @@
 - 已将 aicli login 的 DeepSeek 默认 effort 特例改为 providercompat 模型 hint，默认 effort 列表继续由 provider adapter 统一给出。
 - 已新增 response-side `NormalizeAssistantMessage` 扩展点，并接入 `ProviderWrapper`、`GatewayClient`、aicli chat/pipe 响应链路；OpenAI-compatible 默认 adapter 会归一化 `reasoning`/`reasoning_content` 和工具调用 `arguments` 形态。
 - 已从 `adapter/openai.go` 移除对 `providercompat` 的依赖；DeepSeek 模型名兜底改由 runtime/aicli capability fallback 处理，协议 adapter 只保留 OpenAI 命名规则。
+- 已新增 `providercompat.DefaultCapabilities` / `MergeCapabilities` capability catalog API；runtime 请求组装和 provider capability fallback 均改用同一套 providercompat 合并逻辑。
 
 ## 背景
 

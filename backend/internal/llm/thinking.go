@@ -50,32 +50,10 @@ func supportedProviderReasoningEffort(raw string, capability agentconfig.ModelCa
 	return ""
 }
 
-func fallbackProviderModelCapability(providerName, protocol, baseURL string) (agentconfig.ModelCapabilitySpec, bool) {
-	if !strings.EqualFold(strings.TrimSpace(protocol), "openai") {
-		return agentconfig.ModelCapabilitySpec{}, false
-	}
-	capability, ok := providercompat.DefaultRuntimeCapability(providercompat.Context{
+func providerModelCapabilitiesWithFallback(capabilities map[string]agentconfig.ModelCapabilitySpec, providerName, protocol, baseURL string) map[string]agentconfig.ModelCapabilitySpec {
+	return providercompat.MergeCapabilities(providercompat.Context{
 		ProviderName: providerName,
 		Protocol:     protocol,
 		BaseURL:      baseURL,
-	})
-	return capability, ok
-}
-
-func providerModelCapabilitiesWithFallback(capabilities map[string]agentconfig.ModelCapabilitySpec, providerName, protocol, baseURL string) map[string]agentconfig.ModelCapabilitySpec {
-	capability, ok := fallbackProviderModelCapability(providerName, protocol, baseURL)
-	if !ok {
-		return capabilities
-	}
-	if len(capabilities) == 0 {
-		return map[string]agentconfig.ModelCapabilitySpec{
-			"*": capability,
-		}
-	}
-	if _, exists := capabilities["*"]; exists {
-		return capabilities
-	}
-	merged := CloneModelCapabilityMap(capabilities)
-	merged["*"] = capability
-	return merged
+	}, capabilities)
 }

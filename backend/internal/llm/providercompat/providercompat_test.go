@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -40,6 +41,49 @@ func TestDefaultRuntimeCapability_SensenovaNVIDIAAndDeepSeek(t *testing.T) {
 	}
 	if !spec.ReasoningModel || !reflect.DeepEqual(spec.ReasoningEfforts, []string{"high", "max"}) {
 		t.Fatalf("unexpected deepseek capability: %#v", spec)
+	}
+}
+
+func TestMergeCapabilitiesAddsProviderWildcardFallback(t *testing.T) {
+	configured := map[string]agentconfig.ModelCapabilitySpec{
+		"custom-model": {
+			MaxTokens: 1024,
+		},
+	}
+	merged := MergeCapabilities(Context{
+		Protocol:     "openai",
+		ProviderName: "sensenova",
+		BaseURL:      "https://token.sensenova.cn/v1",
+	}, configured)
+
+	if _, exists := configured["*"]; exists {
+		t.Fatal("expected configured capabilities not to be mutated")
+	}
+	if merged["custom-model"].MaxTokens != 1024 {
+		t.Fatalf("expected configured model capability to be preserved, got %#v", merged["custom-model"])
+	}
+	wildcard, ok := merged["*"]
+	if !ok {
+		t.Fatalf("expected wildcard fallback capability, got %#v", merged)
+	}
+	if !wildcard.ReasoningModel || !reflect.DeepEqual(wildcard.ReasoningEfforts, []string{"low", "medium", "high", "none"}) {
+		t.Fatalf("unexpected wildcard fallback: %#v", wildcard)
+	}
+}
+
+func TestMergeCapabilitiesKeepsConfiguredWildcard(t *testing.T) {
+	configured := map[string]agentconfig.ModelCapabilitySpec{
+		"*": {
+			ReasoningModel:   true,
+			ReasoningEfforts: []string{"custom"},
+		},
+	}
+	merged := MergeCapabilities(Context{
+		Protocol: "openai",
+		BaseURL:  "https://integrate.api.nvidia.com",
+	}, configured)
+	if !reflect.DeepEqual(merged["*"].ReasoningEfforts, []string{"custom"}) {
+		t.Fatalf("expected configured wildcard to win, got %#v", merged["*"])
 	}
 }
 

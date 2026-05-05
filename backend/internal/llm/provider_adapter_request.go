@@ -43,7 +43,7 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 		SupportsMaxOutputTokens: input.SupportsMaxOutputTokens,
 		ConfiguredCapabilities:  input.ModelCapabilities,
 	}
-	modelCapabilities := modelCapabilitiesWithProviderCompatFallback(input.ModelCapabilities, compatCtx)
+	modelCapabilities := providercompat.MergeCapabilities(compatCtx, input.ModelCapabilities)
 	capability, hasCapability := ResolveModelCapabilitySpec(input.Model, modelCapabilities)
 	compat := providercompat.NewChain(compatCtx)
 
@@ -115,24 +115,6 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 		Timeout:                input.Timeout,
 		Metadata:               metadata,
 	}
-}
-
-func modelCapabilitiesWithProviderCompatFallback(capabilities map[string]agentconfig.ModelCapabilitySpec, ctx providercompat.Context) map[string]agentconfig.ModelCapabilitySpec {
-	capability, ok := providercompat.DefaultRuntimeCapability(ctx)
-	if !ok {
-		return capabilities
-	}
-	if len(capabilities) == 0 {
-		return map[string]agentconfig.ModelCapabilitySpec{
-			"*": capability,
-		}
-	}
-	if _, exists := capabilities["*"]; exists {
-		return capabilities
-	}
-	merged := CloneModelCapabilityMap(capabilities)
-	merged["*"] = capability
-	return merged
 }
 
 func providerAdapterStopSequences(metadata map[string]interface{}) []string {

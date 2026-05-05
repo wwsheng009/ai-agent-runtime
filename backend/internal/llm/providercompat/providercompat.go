@@ -69,6 +69,23 @@ func cloneStringSlice(values []string) []string {
 	return append([]string(nil), values...)
 }
 
+func cloneCapabilityMap(input map[string]agentconfig.ModelCapabilitySpec) map[string]agentconfig.ModelCapabilitySpec {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]agentconfig.ModelCapabilitySpec, len(input))
+	for key, value := range input {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		output[strings.TrimSpace(key)] = cloneCapabilitySpec(value)
+	}
+	if len(output) == 0 {
+		return nil
+	}
+	return output
+}
+
 // DefaultRuntimeCapability returns a provider-specific fallback capability used
 // by runtime request filtering.
 func (c Chain) DefaultRuntimeCapability() (agentconfig.ModelCapabilitySpec, bool) {
@@ -78,6 +95,47 @@ func (c Chain) DefaultRuntimeCapability() (agentconfig.ModelCapabilitySpec, bool
 		}
 	}
 	return agentconfig.ModelCapabilitySpec{}, false
+}
+
+// DefaultCapabilities returns the provider fallback capability catalog used by
+// runtime request filtering.
+func (c Chain) DefaultCapabilities() map[string]agentconfig.ModelCapabilitySpec {
+	capability, ok := c.DefaultRuntimeCapability()
+	if !ok {
+		return nil
+	}
+	return map[string]agentconfig.ModelCapabilitySpec{
+		"*": cloneCapabilitySpec(capability),
+	}
+}
+
+// MergeCapabilities merges configured model capabilities with provider fallback
+// capabilities. Configured wildcard capabilities always win.
+func (c Chain) MergeCapabilities(capabilities map[string]agentconfig.ModelCapabilitySpec) map[string]agentconfig.ModelCapabilitySpec {
+	if len(capabilities) == 0 && len(c.ctx.ConfiguredCapabilities) > 0 {
+		capabilities = c.ctx.ConfiguredCapabilities
+	}
+	defaults := c.DefaultCapabilities()
+	if len(defaults) == 0 {
+		return capabilities
+	}
+	if len(capabilities) == 0 {
+		return defaults
+	}
+	if _, exists := capabilities["*"]; exists {
+		return capabilities
+	}
+	merged := cloneCapabilityMap(capabilities)
+	if merged == nil {
+		merged = make(map[string]agentconfig.ModelCapabilitySpec, len(defaults))
+	}
+	for model, capability := range defaults {
+		if _, exists := merged[model]; exists {
+			continue
+		}
+		merged[model] = cloneCapabilitySpec(capability)
+	}
+	return merged
 }
 
 // DefaultLoginReasoningEfforts returns the default reasoning effort list used
@@ -254,6 +312,17 @@ func mergeOpenAICompatibleStringContent(dst, src map[string]interface{}) {
 // need to retain a Chain instance.
 func DefaultRuntimeCapability(ctx Context) (agentconfig.ModelCapabilitySpec, bool) {
 	return NewChain(ctx).DefaultRuntimeCapability()
+}
+
+// DefaultCapabilities returns provider fallback model capabilities.
+func DefaultCapabilities(ctx Context) map[string]agentconfig.ModelCapabilitySpec {
+	return NewChain(ctx).DefaultCapabilities()
+}
+
+// MergeCapabilities merges configured capabilities with provider fallback
+// capabilities using the selected provider context.
+func MergeCapabilities(ctx Context, configured map[string]agentconfig.ModelCapabilitySpec) map[string]agentconfig.ModelCapabilitySpec {
+	return NewChain(ctx).MergeCapabilities(configured)
 }
 
 // DefaultLoginReasoningEfforts is a convenience helper for login flows.
