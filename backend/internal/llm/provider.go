@@ -1555,93 +1555,37 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 		}
 	}
 	resolvedModel := p.resolveModel(request.Model)
-	capability, hasCapability := ResolveModelCapabilitySpec(resolvedModel, p.modelCapabilities())
 
-	// 转换 Messages
 	messages := make([]map[string]interface{}, len(request.Messages))
 	providerHint := strings.TrimSpace(resolvedModel)
 	for i, msg := range request.Messages {
 		messages[i] = providerMessageToAdapterMessage(msg, p.config.Type, providerHint)
 	}
-	switch strings.ToLower(strings.TrimSpace(p.config.Type)) {
-	case "codex":
-		before := len(messages)
-		messages = sanitizeCodexProtocolMessages(messages)
-		if dropped := before - len(messages); dropped > 0 {
-			metadata["tool_replay_sanitized"] = true
-			metadata["tool_replay_dropped_messages"] = dropped
-		}
-		if !providerSupportsCodexMaxOutputTokens(p.config.BaseURL, p.config.SupportsMaxOutputTokens) {
-			metadata[codexSupportsMaxOutputTokensMetadataKey] = false
-		}
-	case "openai":
-		before := len(messages)
-		messages = sanitizeOpenAICompatibleProtocolMessages(messages)
-		if dropped := before - len(messages); dropped > 0 {
-			metadata["tool_replay_sanitized"] = true
-			metadata["tool_replay_dropped_messages"] = dropped
-		}
-		compat := providercompat.NewChain(providercompat.Context{
-			Protocol: p.config.Type,
-			BaseURL:  p.config.BaseURL,
-			Model:    resolvedModel,
-		})
-		before = len(messages)
-		messages = compat.NormalizeOpenAICompatibleMessages(messages)
-		if merged := before - len(messages); merged > 0 {
-			metadata["provider_compat_system_messages_merged"] = merged
-		}
-	case "anthropic":
-		before := len(messages)
-		messages = sanitizeAnthropicProtocolMessages(messages)
-		if dropped := before - len(messages); dropped > 0 {
-			metadata["tool_replay_sanitized"] = true
-			metadata["tool_replay_dropped_messages"] = dropped
-		}
-	}
 
-	// 转换 Tools（从 OpenAI 嵌套格式转换为协议特定格式）
-	var tools interface{}
-	if !metadataDisablesTools(metadata) {
-		tools = p.convertTools(request.Tools, p.config.Type, resolvedModel, !metadataDisablesMetaTools(metadata))
-	}
-
-	reasoningConfig := resolveRequestReasoningConfig(request.ReasoningEffort, request.Thinking, request.Metadata)
-	requestReasoningEffort := supportedProviderReasoningEffort(reasoningConfig.ReasoningEffort, capability, hasCapability)
-	reasoningModel := ReasoningModelEnabled(capability, request.ReasoningModel)
-	reasoningEffortBudgets := request.ReasoningEffortBudgets
-	if len(reasoningEffortBudgets) == 0 && hasCapability {
-		reasoningEffortBudgets = capability.ReasoningEffortBudgets
-	}
-
-	return adapter.RequestConfig{
-		Model:                  resolvedModel,
-		Messages:               messages,
-		Stream:                 request.Stream,
-		MaxTokens:              request.MaxTokens,
-		ReasoningEffort:        requestReasoningEffort,
-		ReasoningEffortBudgets: reasoningEffortBudgets,
-		ReasoningModel:         reasoningModel,
-		Thinking:               reasoningConfig.Thinking,
-		Temperature:            request.Temperature,
-		Functions:              tools,
-		Timeout:                p.config.Timeout,
-		Metadata:               metadata,
-	}
+	return buildProviderAdapterRequest(providerAdapterRequestInput{
+		Protocol:                p.config.Type,
+		BaseURL:                 p.config.BaseURL,
+		Model:                   resolvedModel,
+		SupportsMaxOutputTokens: p.config.SupportsMaxOutputTokens,
+		ModelCapabilities:       p.modelCapabilities(),
+		Messages:                messages,
+		Tools:                   chatToolsToToolDefinitions(request.Tools),
+		Metadata:                metadata,
+		ReasoningEffort:         request.ReasoningEffort,
+		ReasoningEffortBudgets:  request.ReasoningEffortBudgets,
+		ReasoningModel:          request.ReasoningModel,
+		Thinking:                request.Thinking,
+		Stream:                  request.Stream,
+		MaxTokens:               request.MaxTokens,
+		Temperature:             request.Temperature,
+		Timeout:                 p.config.Timeout,
+	})
 }
 
 // convertTools 转换工具定义（从 OpenAI 嵌套格式转换为协议特定格式）
 func (p *ProviderWrapper) convertTools(tools []Tool, protocol string, model string, includeMeta bool) interface{} {
-	normalized := make([]types.ToolDefinition, 0, len(tools))
-	for _, tool := range tools {
-		normalized = append(normalized, types.ToolDefinition{
-			Name:        tool.Function.Name,
-			Description: tool.Function.Description,
-			Parameters:  cloneDeepMapStringAny(tool.Function.Parameters),
-		})
-	}
 	return BuildToolDefinitionsForRequest(
-		normalized,
+		chatToolsToToolDefinitions(tools),
 		protocol,
 		model,
 		p.config.ModelCapabilities,

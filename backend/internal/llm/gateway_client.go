@@ -13,7 +13,6 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -1108,10 +1107,7 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 	resolvedModel := resolveGatewaySelectedModel(selected, model)
 	metadata := cloneMapStringAny(req.Metadata)
 	modelCapabilities := selectedProviderModelCapabilities(selected)
-	capability, hasCapability := ResolveModelCapabilitySpec(resolvedModel, modelCapabilities)
-	reasoningModel := ReasoningModelEnabled(capability, req.ReasoningModel)
 
-	// 转换 Messages
 	messages := make([]map[string]interface{}, len(req.Messages))
 	providerHint := strings.TrimSpace(req.Provider)
 	if providerHint == "" {
@@ -1121,89 +1117,29 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 		messages[i] = runtimeMessageToAdapterMessage(msg, protocol, providerHint)
 	}
 
-	// 转换 Tools（根据协议生成正确格式）
-	var tools interface{}
-	if !metadataDisablesTools(metadata) {
-		tools = c.convertTools(
-			req.Tools,
-			protocol,
-			resolvedModel,
-			selectedProviderModelCapabilities(selected),
-			!metadataDisablesMetaTools(metadata),
-		)
-	}
-	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case "codex":
-		before := len(messages)
-		messages = sanitizeCodexProtocolMessages(messages)
-		if dropped := before - len(messages); dropped > 0 {
-			metadata["tool_replay_sanitized"] = true
-			metadata["tool_replay_dropped_messages"] = dropped
-		}
-		if !selectedProviderSupportsCodexMaxOutputTokens(selected) {
-			metadata[codexSupportsMaxOutputTokensMetadataKey] = false
-		}
-	case "openai":
-		before := len(messages)
-		messages = sanitizeOpenAICompatibleProtocolMessages(messages)
-		if dropped := before - len(messages); dropped > 0 {
-			metadata["tool_replay_sanitized"] = true
-			metadata["tool_replay_dropped_messages"] = dropped
-		}
-		compat := providercompat.NewChain(providercompat.Context{
-			ProviderName: providerNameFromSelected(selected),
-			Protocol:     protocol,
-			BaseURL:      baseURLFromSelected(selected),
-			Model:        resolvedModel,
-		})
-		before = len(messages)
-		messages = compat.NormalizeOpenAICompatibleMessages(messages)
-		if merged := before - len(messages); merged > 0 {
-			metadata["provider_compat_system_messages_merged"] = merged
-		}
-	case "anthropic":
-		before := len(messages)
-		messages = sanitizeAnthropicProtocolMessages(messages)
-		if dropped := before - len(messages); dropped > 0 {
-			metadata["tool_replay_sanitized"] = true
-			metadata["tool_replay_dropped_messages"] = dropped
-		}
+	var supportsMaxOutputTokens *bool
+	if selected != nil && selected.Provider != nil {
+		supportsMaxOutputTokens = selected.Provider.SupportsMaxOutputTokens
 	}
 
-	reasoningConfig := resolveRequestReasoningConfig(req.ReasoningEffort, req.Thinking, req.Metadata)
-	requestReasoningEffort := supportedProviderReasoningEffort(reasoningConfig.ReasoningEffort, capability, hasCapability)
-
-	// Extract stop_sequences and tool_choice from metadata if present
-	var stopSequences []string
-	if ss, ok := metadata["stop_sequences"]; ok {
-		if ssSlice, ok := ss.([]interface{}); ok {
-			for _, s := range ssSlice {
-				if str, ok := s.(string); ok {
-					stopSequences = append(stopSequences, str)
-				}
-			}
-		} else if ssStrings, ok := ss.([]string); ok {
-			stopSequences = ssStrings
-		}
-	}
-	var toolChoice interface{} = metadata["tool_choice"]
-
-	return adapter.RequestConfig{
-		Model:                  resolvedModel,
-		Messages:               messages,
-		Stream:                 req.Stream,
-		MaxTokens:              req.MaxTokens,
-		ReasoningEffort:        requestReasoningEffort,
-		ReasoningEffortBudgets: capability.ReasoningEffortBudgets,
-		ReasoningModel:         reasoningModel,
-		Thinking:               reasoningConfig.Thinking,
-		Temperature:            req.Temperature,
-		Functions:              tools,
-		ToolChoice:             toolChoice,
-		StopSequences:          stopSequences,
-		Timeout:                c.defaultTimeout,
-		Metadata:               metadata,
-	}
+	return buildProviderAdapterRequest(providerAdapterRequestInput{
+		ProviderName:            providerNameFromSelected(selected),
+		Protocol:                protocol,
+		BaseURL:                 baseURLFromSelected(selected),
+		Model:                   resolvedModel,
+		SupportsMaxOutputTokens: supportsMaxOutputTokens,
+		ModelCapabilities:       modelCapabilities,
+		Messages:                messages,
+		Tools:                   req.Tools,
+		Metadata:                metadata,
+		ReasoningEffort:         req.ReasoningEffort,
+		ReasoningModel:          req.ReasoningModel,
+		Thinking:                req.Thinking,
+		Stream:                  req.Stream,
+		MaxTokens:               req.MaxTokens,
+		Temperature:             req.Temperature,
+		Timeout:                 c.defaultTimeout,
+	})
 }
 
 // convertTools 转换工具定义（根据协议类型生成正确格式）
