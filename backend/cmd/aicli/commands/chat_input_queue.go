@@ -732,11 +732,17 @@ func chatInteractiveReadPrioritySecretWithPrompt(session *ChatSession, ctx conte
 		beginDirectInteractiveOutput(session)
 		ui.PrintWarning("%s", notice)
 	}
+	readPrompt := prompt
+	renderedOnSurface := showRuntimeComposerPrompt(session, prompt)
+	if renderedOnSurface {
+		readPrompt = ""
+		defer clearRuntimeComposerPrompt(session)
+	}
 	if session != nil && session.InputBox != nil {
 		if session.Interaction != nil {
 			session.Interaction.SetPromptInput("")
 		}
-		line, err := session.InputBox.ReadTransientSecretPrompt(prompt)
+		line, err := session.InputBox.ReadTransientSecretPrompt(readPrompt)
 		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
 			session.Interrupt()
 			if session.Interaction != nil {
@@ -757,7 +763,7 @@ func chatInteractiveReadPrioritySecretWithPrompt(session *ChatSession, ctx conte
 		return line, err
 	}
 	if chatIsInteractiveTerminal() {
-		return ui.NewInputBox(nil).ReadTransientSecretPrompt(prompt)
+		return ui.NewInputBox(nil).ReadTransientSecretPrompt(readPrompt)
 	}
 	return chatInteractiveReadTransientLine(session, ctx)
 }

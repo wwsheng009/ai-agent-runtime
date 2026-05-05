@@ -258,9 +258,13 @@ func (p chatLoginPrompter) PromptText(label, current string, required bool) (str
 		if strings.TrimSpace(current) != "" {
 			prompt = fmt.Sprintf("%s [%s]: ", label, current)
 		}
-		beginDirectInteractiveOutput(p.session)
-		fmt.Print(prompt)
+		renderedOnSurface := showRuntimeComposerPrompt(p.session, prompt)
+		if !renderedOnSurface {
+			beginDirectInteractiveOutput(p.session)
+			fmt.Print(prompt)
+		}
 		text, err := chatInteractiveReadPriorityLineWithPrompt(p.session, context.Background(), prompt)
+		finishChatLoginTextPrompt(p.session, renderedOnSurface)
 		if err != nil {
 			return "", err
 		}
@@ -272,6 +276,16 @@ func (p chatLoginPrompter) PromptText(label, current string, required bool) (str
 			return value, nil
 		}
 		fmt.Println("该字段不能为空")
+	}
+}
+
+func finishChatLoginTextPrompt(session *ChatSession, renderedOnSurface bool) {
+	if renderedOnSurface {
+		clearRuntimeComposerPrompt(session)
+		return
+	}
+	if shouldUseInteractiveLineEditor(session) {
+		fmt.Println()
 	}
 }
 

@@ -17,6 +17,31 @@ func beginDirectInteractiveOutput(session *ChatSession) {
 	}
 }
 
+func showRuntimeComposerPrompt(session *ChatSession, prompt string) bool {
+	if session == nil || session.Surface == nil || !session.Surface.Enabled() {
+		return false
+	}
+	beginDirectInteractiveOutput(session)
+	session.Surface.SetComposerPreview(prompt)
+	if session.Interaction != nil {
+		session.Interaction.ResetPromptState()
+	}
+	return true
+}
+
+func clearRuntimeComposerPrompt(session *ChatSession) {
+	if session == nil || session.Surface == nil {
+		if session != nil && session.Interaction != nil {
+			session.Interaction.ResetPromptState()
+		}
+		return
+	}
+	session.Surface.ClearComposerPreview()
+	if session.Interaction != nil {
+		session.Interaction.ResetPromptState()
+	}
+}
+
 func writeChatLogBufferedMarker(session *ChatSession) {
 	if shouldRenderInteractiveOutput(session) && session.Surface != nil && session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
