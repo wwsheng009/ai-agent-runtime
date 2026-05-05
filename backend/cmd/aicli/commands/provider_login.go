@@ -155,6 +155,10 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 	candidate.SupportedModels = supportedModels
 	candidate.DefaultModel = defaultModel
 	candidate.ModelsVerifiedAt = modelsResult.VerifiedAt
+	discoveredCapabilities := buildProviderLoginModelCapabilities(providerName, loginProtocol, candidate, modelsResult.Models)
+	if len(discoveredCapabilities) > 0 {
+		candidate.ModelCapabilities = mergeProviderLoginModelCapabilities(candidate.ModelCapabilities, discoveredCapabilities)
+	}
 
 	if !req.DryRun {
 		resolvedConfigPath, err := ensureWritableAICLIConfigPath(cfg, configPath)
@@ -415,6 +419,10 @@ func buildProviderPersistenceUpdate(providerName string, candidate config.Provid
 		SupportedModels:    &supportedModels,
 		DefaultModel:       providerLoginStringValuePtr(candidate.DefaultModel),
 	}
+	if len(candidate.ModelCapabilities) > 0 {
+		capabilities := cloneProviderLoginModelCapabilities(candidate.ModelCapabilities)
+		update.ModelCapabilities = &capabilities
+	}
 	if authMode == providerAuthModeOAuth {
 		update.APIKey = providerLoginStringValuePtr("")
 		update.AuthRef = providerLoginStringValuePtr(candidate.AuthRef)
@@ -424,6 +432,222 @@ func buildProviderPersistenceUpdate(providerName string, candidate config.Provid
 	}
 	_ = loginProtocol
 	return update
+}
+
+func buildProviderLoginModelCapabilities(providerName, loginProtocol string, provider config.Provider, models []providerModelInfo) map[string]config.ModelCapabilitySpec {
+	defaultEfforts := defaultProviderLoginReasoningEfforts(providerName, loginProtocol, provider, models)
+	capabilities := make(map[string]config.ModelCapabilitySpec)
+
+	for _, model := range models {
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		spec := providerLoginModelCapabilitySpec(model)
+		if len(spec.ReasoningEfforts) == 0 && providerLoginModelUsesDefaultReasoningEfforts(modelID, providerName, loginProtocol, provider) {
+			spec.ReasoningEfforts = append([]string(nil), defaultEfforts...)
+			spec.ReasoningModel = len(spec.ReasoningEfforts) > 0
+		}
+		if !providerLoginModelCapabilityIsEmpty(spec) {
+			capabilities[modelID] = spec
+		}
+	}
+
+	if providerLoginUsesWildcardReasoningEfforts(loginProtocol, provider) && len(defaultEfforts) > 0 {
+		spec := capabilities["*"]
+		if len(spec.ReasoningEfforts) == 0 {
+			spec.ReasoningEfforts = append([]string(nil), defaultEfforts...)
+			spec.ReasoningModel = true
+			capabilities["*"] = spec
+		}
+	}
+	if len(capabilities) == 0 {
+		return nil
+	}
+	return capabilities
+}
+
+func providerLoginModelCapabilitySpec(model providerModelInfo) config.ModelCapabilitySpec {
+	spec := config.ModelCapabilitySpec{}
+	if len(model.InputModalities) > 0 {
+		spec.InputModalities = dedupeProviderStringOptions(model.InputModalities)
+	}
+	if len(model.ReasoningEfforts) > 0 {
+		spec.ReasoningEfforts = dedupeProviderStringOptions(model.ReasoningEfforts)
+		spec.ReasoningModel = true
+	}
+	if model.MaxContextTokens > 0 {
+		spec.MaxContextTokens = model.MaxContextTokens
+	}
+	if model.SupportsRemoteCodex {
+		spec.SupportsRemoteCompact = true
+	}
+	return spec
+}
+
+func defaultProviderLoginReasoningEfforts(providerName, loginProtocol string, provider config.Provider, models []providerModelInfo) []string {
+	switch {
+	case providerLoginIsNVIDIA(providerName, provider):
+		return []string{"minimal", "low", "medium", "high"}
+	case providerLoginIsDeepSeek(providerName, provider, models):
+		return []string{"high", "max"}
+	case strings.EqualFold(runtimeProtocolForLoginProtocol(loginProtocol), "codex"):
+		return []string{"low", "medium", "high", "xhigh", "none"}
+	case strings.EqualFold(runtimeProtocolForLoginProtocol(loginProtocol), "openai"):
+		return []string{"low", "medium", "high", "xhigh", "none"}
+	default:
+		return nil
+	}
+}
+
+func providerLoginModelUsesDefaultReasoningEfforts(modelID, providerName, loginProtocol string, provider config.Provider) bool {
+	if providerLoginUsesWildcardReasoningEfforts(loginProtocol, provider) {
+		return true
+	}
+	if providerLoginIsNVIDIA(providerName, provider) {
+		return true
+	}
+	if providerLoginIsDeepSeekModel(modelID) {
+		return true
+	}
+	if strings.EqualFold(runtimeProtocolForLoginProtocol(loginProtocol), "openai") {
+		return providerLoginLooksLikeOpenAIReasoningModel(modelID)
+	}
+	return false
+}
+
+func providerLoginUsesWildcardReasoningEfforts(loginProtocol string, provider config.Provider) bool {
+	if strings.EqualFold(runtimeProtocolForLoginProtocol(loginProtocol), "codex") {
+		return true
+	}
+	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
+	return strings.Contains(baseURL, "/codex")
+}
+
+func providerLoginIsNVIDIA(providerName string, provider config.Provider) bool {
+	name := strings.ToLower(strings.TrimSpace(providerName))
+	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
+	return name == "nvidia" || strings.Contains(baseURL, "integrate.api.nvidia.com")
+}
+
+func providerLoginIsDeepSeek(providerName string, provider config.Provider, models []providerModelInfo) bool {
+	name := strings.ToLower(strings.TrimSpace(providerName))
+	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
+	if strings.Contains(name, "deepseek") || strings.Contains(baseURL, "deepseek") {
+		return true
+	}
+	for _, model := range models {
+		if providerLoginIsDeepSeekModel(model.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+func providerLoginIsDeepSeekModel(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	return strings.Contains(modelID, "deepseek")
+}
+
+func providerLoginLooksLikeOpenAIReasoningModel(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	modelID = strings.TrimPrefix(modelID, "models/")
+	if strings.Contains(modelID, "codex") {
+		return true
+	}
+	for _, prefix := range []string{"gpt-5", "o1", "o3", "o4", "o5"} {
+		if strings.HasPrefix(modelID, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeProviderLoginModelCapabilities(existing, discovered map[string]config.ModelCapabilitySpec) map[string]config.ModelCapabilitySpec {
+	if len(discovered) == 0 {
+		return cloneProviderLoginModelCapabilities(existing)
+	}
+	merged := cloneProviderLoginModelCapabilities(existing)
+	if merged == nil {
+		merged = make(map[string]config.ModelCapabilitySpec, len(discovered))
+	}
+	for model, spec := range discovered {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		merged[model] = mergeProviderLoginModelCapabilitySpec(merged[model], spec)
+	}
+	return merged
+}
+
+func mergeProviderLoginModelCapabilitySpec(base, update config.ModelCapabilitySpec) config.ModelCapabilitySpec {
+	if len(update.InputModalities) > 0 {
+		base.InputModalities = append([]string(nil), update.InputModalities...)
+	}
+	if update.NativeTools.ImageGeneration {
+		base.NativeTools.ImageGeneration = true
+	}
+	if update.NativeTools.ImagesGenerationsAPI {
+		base.NativeTools.ImagesGenerationsAPI = true
+	}
+	if update.ReasoningModel {
+		base.ReasoningModel = true
+	}
+	if len(update.ReasoningEfforts) > 0 {
+		base.ReasoningEfforts = append([]string(nil), update.ReasoningEfforts...)
+	}
+	if update.MaxContextTokens > 0 {
+		base.MaxContextTokens = update.MaxContextTokens
+	}
+	if update.SupportsRemoteCompact {
+		base.SupportsRemoteCompact = true
+	}
+	return base
+}
+
+func cloneProviderLoginModelCapabilities(input map[string]config.ModelCapabilitySpec) map[string]config.ModelCapabilitySpec {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]config.ModelCapabilitySpec, len(input))
+	for key, value := range input {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		if len(value.InputModalities) > 0 {
+			value.InputModalities = append([]string(nil), value.InputModalities...)
+		}
+		if len(value.ReasoningEfforts) > 0 {
+			value.ReasoningEfforts = append([]string(nil), value.ReasoningEfforts...)
+		}
+		if len(value.ReasoningEffortBudgets) > 0 {
+			budgets := make(map[string]int, len(value.ReasoningEffortBudgets))
+			for budgetKey, budgetValue := range value.ReasoningEffortBudgets {
+				budgets[budgetKey] = budgetValue
+			}
+			value.ReasoningEffortBudgets = budgets
+		}
+		output[strings.TrimSpace(key)] = value
+	}
+	return output
+}
+
+func providerLoginModelCapabilityIsEmpty(spec config.ModelCapabilitySpec) bool {
+	return len(spec.InputModalities) == 0 &&
+		!spec.NativeTools.ImageGeneration &&
+		!spec.NativeTools.ImagesGenerationsAPI &&
+		!spec.ReasoningModel &&
+		len(spec.ReasoningEfforts) == 0 &&
+		len(spec.ReasoningEffortBudgets) == 0 &&
+		strings.TrimSpace(spec.DefaultReasoningEffort) == "" &&
+		spec.MaxContextTokens == 0 &&
+		spec.MaxTokens == 0 &&
+		spec.AutoCompactRatio == 0 &&
+		spec.AutoCompactTokenLimit == 0 &&
+		strings.TrimSpace(spec.AutoCompactMode) == "" &&
+		!spec.SupportsRemoteCompact &&
+		strings.TrimSpace(spec.CompactReasoningEffort) == ""
 }
 
 func applyProviderLoginConfigUpdate(cfg *config.Config, providerName string, provider config.Provider, setDefault bool) {

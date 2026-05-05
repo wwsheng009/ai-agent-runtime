@@ -43,6 +43,19 @@ func TestParseProviderModelsResponse_CodexSlugAndCapabilities(t *testing.T) {
 	}
 }
 
+func TestParseProviderModelsResponse_UsesThinkingEffortsAlias(t *testing.T) {
+	models, err := parseProviderModelsResponse([]byte(`{"models":[{"slug":"gpt-5.4","thinkingEfforts":["low","medium"],"supported_thinking_efforts":["HIGH"]}]}`), "codex-apikey")
+	if err != nil {
+		t.Fatalf("parseProviderModelsResponse: %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "gpt-5.4" {
+		t.Fatalf("unexpected models: %+v", models)
+	}
+	if got := models[0].ReasoningEfforts; len(got) != 3 || got[0] != "low" || got[1] != "medium" || got[2] != "HIGH" {
+		t.Fatalf("unexpected efforts: %+v", got)
+	}
+}
+
 func TestValidateProviderModels_SendsExpectedHeadersAndParsesModels(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {

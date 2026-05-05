@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -25,6 +27,7 @@ type ProviderConfigUpdate struct {
 	ModelsVerifiedAt   *string
 	SupportedModels    *[]string
 	DefaultModel       *string
+	ModelCapabilities  *map[string]ModelCapabilitySpec
 }
 
 // UpdateProviderConfig updates one provider node without rewriting unrelated config sections.
@@ -114,6 +117,13 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 	if update.SupportedModels != nil {
 		upsertYAMLMappingValue(node, "supported_models", stringSliceYAMLNode(*update.SupportedModels))
 	}
+	if update.ModelCapabilities != nil {
+		if len(*update.ModelCapabilities) == 0 {
+			removeYAMLMappingValue(node, "model_capabilities")
+		} else {
+			upsertYAMLMappingValue(node, "model_capabilities", modelCapabilitiesYAMLNode(*update.ModelCapabilities))
+		}
+	}
 }
 
 func ensureChildMapping(parent *yaml.Node, key string) *yaml.Node {
@@ -184,4 +194,122 @@ func stringSliceYAMLNode(values []string) *yaml.Node {
 		node.Content = append(node.Content, stringYAMLNode(value))
 	}
 	return node
+}
+
+func intYAMLNode(value int) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(value)}
+}
+
+func floatYAMLNode(value float64) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!float", Value: strconv.FormatFloat(value, 'f', -1, 64)}
+}
+
+func intMapYAMLNode(values map[string]int) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	keys := make([]string, 0, len(values))
+	normalized := make(map[string]int, len(values))
+	for key, value := range values {
+		trimmed := strings.TrimSpace(key)
+		if trimmed != "" && value > 0 {
+			if _, exists := normalized[trimmed]; !exists {
+				keys = append(keys, trimmed)
+			}
+			normalized[trimmed] = value
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		node.Content = append(node.Content, stringYAMLNode(key), intYAMLNode(normalized[key]))
+	}
+	return node
+}
+
+func modelCapabilitiesYAMLNode(capabilities map[string]ModelCapabilitySpec) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	keys := make([]string, 0, len(capabilities))
+	normalized := make(map[string]ModelCapabilitySpec, len(capabilities))
+	for key, spec := range capabilities {
+		trimmed := strings.TrimSpace(key)
+		if trimmed != "" && !modelCapabilitySpecIsEmpty(spec) {
+			if _, exists := normalized[trimmed]; !exists {
+				keys = append(keys, trimmed)
+			}
+			normalized[trimmed] = spec
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		node.Content = append(node.Content, stringYAMLNode(key), modelCapabilitySpecYAMLNode(normalized[key]))
+	}
+	return node
+}
+
+func modelCapabilitySpecYAMLNode(spec ModelCapabilitySpec) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	if len(spec.InputModalities) > 0 {
+		upsertYAMLMappingValue(node, "input_modalities", stringSliceYAMLNode(spec.InputModalities))
+	}
+	if spec.NativeTools.ImageGeneration || spec.NativeTools.ImagesGenerationsAPI {
+		tools := &yaml.Node{Kind: yaml.MappingNode}
+		if spec.NativeTools.ImageGeneration {
+			upsertYAMLMappingValue(tools, "image_generation", boolYAMLNode(true))
+		}
+		if spec.NativeTools.ImagesGenerationsAPI {
+			upsertYAMLMappingValue(tools, "images_generations_api", boolYAMLNode(true))
+		}
+		upsertYAMLMappingValue(node, "native_tools", tools)
+	}
+	if spec.ReasoningModel {
+		upsertYAMLMappingValue(node, "reasoning_model", boolYAMLNode(true))
+	}
+	if len(spec.ReasoningEfforts) > 0 {
+		upsertYAMLMappingValue(node, "reasoning_efforts", stringSliceYAMLNode(spec.ReasoningEfforts))
+	}
+	if len(spec.ReasoningEffortBudgets) > 0 {
+		upsertYAMLMappingValue(node, "reasoning_effort_budgets", intMapYAMLNode(spec.ReasoningEffortBudgets))
+	}
+	upsertNonZeroStringYAMLValue(node, "default_reasoning_effort", spec.DefaultReasoningEffort)
+	upsertNonZeroIntYAMLValue(node, "max_context_tokens", spec.MaxContextTokens)
+	upsertNonZeroIntYAMLValue(node, "max_tokens", spec.MaxTokens)
+	if spec.AutoCompactRatio > 0 {
+		upsertYAMLMappingValue(node, "auto_compact_ratio", floatYAMLNode(spec.AutoCompactRatio))
+	}
+	upsertNonZeroIntYAMLValue(node, "auto_compact_token_limit", spec.AutoCompactTokenLimit)
+	upsertNonZeroStringYAMLValue(node, "auto_compact_mode", spec.AutoCompactMode)
+	if spec.SupportsRemoteCompact {
+		upsertYAMLMappingValue(node, "supports_remote_compact", boolYAMLNode(true))
+	}
+	upsertNonZeroStringYAMLValue(node, "compact_reasoning_effort", spec.CompactReasoningEffort)
+	return node
+}
+
+func modelCapabilitySpecIsEmpty(spec ModelCapabilitySpec) bool {
+	return len(spec.InputModalities) == 0 &&
+		!spec.NativeTools.ImageGeneration &&
+		!spec.NativeTools.ImagesGenerationsAPI &&
+		!spec.ReasoningModel &&
+		len(spec.ReasoningEfforts) == 0 &&
+		len(spec.ReasoningEffortBudgets) == 0 &&
+		strings.TrimSpace(spec.DefaultReasoningEffort) == "" &&
+		spec.MaxContextTokens == 0 &&
+		spec.MaxTokens == 0 &&
+		spec.AutoCompactRatio == 0 &&
+		spec.AutoCompactTokenLimit == 0 &&
+		strings.TrimSpace(spec.AutoCompactMode) == "" &&
+		!spec.SupportsRemoteCompact &&
+		strings.TrimSpace(spec.CompactReasoningEffort) == ""
+}
+
+func upsertNonZeroStringYAMLValue(node *yaml.Node, key, value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	upsertYAMLMappingValue(node, key, stringYAMLNode(strings.TrimSpace(value)))
+}
+
+func upsertNonZeroIntYAMLValue(node *yaml.Node, key string, value int) {
+	if value <= 0 {
+		return
+	}
+	upsertYAMLMappingValue(node, key, intYAMLNode(value))
 }

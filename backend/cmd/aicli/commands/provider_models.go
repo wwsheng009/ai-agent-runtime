@@ -222,11 +222,18 @@ func providerModelInfoFromMap(item map[string]interface{}, loginProtocol string)
 		ID:                  id,
 		DisplayName:         displayName,
 		InputModalities:     firstStringSliceField(item, "input_modalities", "inputModalities", "modalities"),
-		ReasoningEfforts:    firstStringSliceField(item, "reasoning_efforts", "reasoningEfforts", "supported_reasoning_efforts"),
+		ReasoningEfforts:    providerModelReasoningEfforts(item),
 		MaxContextTokens:    firstIntField(item, "max_context_tokens", "maxContextTokens", "context_window", "contextWindow", "context_length"),
 		SupportsRemoteCodex: firstBoolField(item, "supports_remote_codex", "supportsRemoteCodex"),
 		Raw:                 item,
 	}
+}
+
+func providerModelReasoningEfforts(item map[string]interface{}) []string {
+	values := make([]string, 0, 8)
+	values = append(values, allStringSliceFields(item, "reasoning_efforts", "reasoningEfforts", "supported_reasoning_efforts")...)
+	values = append(values, allStringSliceFields(item, "thinking_efforts", "thinkingEfforts", "supported_thinking_efforts")...)
+	return dedupeProviderStringOptions(values)
 }
 
 func normalizeProviderModelID(id, loginProtocol string) string {
@@ -287,24 +294,61 @@ func firstStringField(item map[string]interface{}, keys ...string) string {
 
 func firstStringSliceField(item map[string]interface{}, keys ...string) []string {
 	for _, key := range keys {
-		values, ok := item[key]
-		if !ok {
-			continue
-		}
-		switch typed := values.(type) {
-		case []string:
-			return append([]string(nil), typed...)
-		case []interface{}:
-			out := make([]string, 0, len(typed))
-			for _, value := range typed {
-				if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
-					out = append(out, strings.TrimSpace(text))
-				}
-			}
-			return out
+		if values := stringSliceField(item, key); len(values) > 0 {
+			return values
 		}
 	}
 	return nil
+}
+
+func allStringSliceFields(item map[string]interface{}, keys ...string) []string {
+	values := make([]string, 0)
+	for _, key := range keys {
+		values = append(values, stringSliceField(item, key)...)
+	}
+	return values
+}
+
+func stringSliceField(item map[string]interface{}, key string) []string {
+	values, ok := item[key]
+	if !ok {
+		return nil
+	}
+	switch typed := values.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, value := range typed {
+			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, strings.TrimSpace(text))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func dedupeProviderStringOptions(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func firstIntField(item map[string]interface{}, keys ...string) int {

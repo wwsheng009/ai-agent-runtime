@@ -65,6 +65,60 @@ custom_section:
 	}
 }
 
+func TestUpdateProviderConfig_WritesModelCapabilities(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := "providers:\n  items: {}\n"
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	capabilities := map[string]ModelCapabilitySpec{
+		"*": {
+			InputModalities: []string{"text"},
+			ReasoningModel:  true,
+			ReasoningEfforts: []string{
+				"low",
+				"medium",
+				"high",
+				"xhigh",
+				"none",
+			},
+		},
+		"gpt-5.4": {
+			MaxContextTokens: 270000,
+		},
+	}
+	updated, err := UpdateProviderConfig(path, ProviderConfigUpdate{
+		Name:              "codex",
+		ModelCapabilities: &capabilities,
+	})
+	if err != nil {
+		t.Fatalf("UpdateProviderConfig: %v", err)
+	}
+	if len(updated.ModelCapabilities) != 2 || !updated.ModelCapabilities["*"].ReasoningModel {
+		t.Fatalf("unexpected model capabilities: %+v", updated.ModelCapabilities)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"model_capabilities:",
+		"reasoning_model: true",
+		"reasoning_efforts:",
+		"- xhigh",
+		"- none",
+		"max_context_tokens: 270000",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in updated file:\n%s", expected, text)
+		}
+	}
+}
+
 func TestUpdateProviderConfig_EditsOnlyProvidedFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -134,11 +188,11 @@ providers:
 	}
 
 	updated, err := UpdateProviderConfig(path, ProviderConfigUpdate{
-		Name:     "codex",
-		APIKey:   stringPtr(""),
+		Name:      "codex",
+		APIKey:    stringPtr(""),
 		APIKeyRef: stringPtr(""),
-		AuthMode: stringPtr("oauth"),
-		AuthRef:  stringPtr("codex_default"),
+		AuthMode:  stringPtr("oauth"),
+		AuthRef:   stringPtr("codex_default"),
 	})
 	if err != nil {
 		t.Fatalf("UpdateProviderConfig: %v", err)

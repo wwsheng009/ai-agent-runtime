@@ -107,6 +107,64 @@ func TestRunProviderLogin_CreatesProviderAfterModelsValidation(t *testing.T) {
 	}
 }
 
+func TestRunProviderLogin_AddsDefaultCodexReasoningEfforts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4-mini"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "codex",
+		LoginProtocol: "codex-apikey",
+		BaseURL:       server.URL + "/v1",
+		APIKey:        "sk-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.DefaultModel != "gpt-5.4-mini" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+
+	provider := cfg.Providers.Items["codex"]
+	capability, ok := provider.ModelCapabilities["gpt-5.4-mini"]
+	if !ok {
+		t.Fatalf("expected model capability, got %+v", provider.ModelCapabilities)
+	}
+	if !capability.ReasoningModel || strings.Join(capability.ReasoningEfforts, ",") != "low,medium,high,xhigh,none" {
+		t.Fatalf("unexpected capability: %+v", capability)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"model_capabilities:",
+		"gpt-5.4-mini:",
+		"reasoning_model: true",
+		"- xhigh",
+		"- none",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in config:\n%s", expected, text)
+		}
+	}
+}
+
 func TestRunProviderLogin_DoesNotWriteOnModelsFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
