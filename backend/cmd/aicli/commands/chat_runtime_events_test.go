@@ -193,7 +193,7 @@ func TestChatRuntimeEventBridge_LLMRequestFinishedAddsAnthropicCachedInput(t *te
 		},
 	})
 
-	if session.ContextTokenCount != 18160 {
+	if session.ContextTokenCount != 18400 {
 		t.Fatalf("expected anthropic cached input to count toward active context snapshot, got %d", session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 1000000 {

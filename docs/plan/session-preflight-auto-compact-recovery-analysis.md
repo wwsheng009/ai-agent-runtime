@@ -452,7 +452,7 @@ LLM compact 失败时，不应直接让 preflight 卡死。建议增加 determin
 - provider wrapper 测试覆盖 compact 请求不再发送 `tools`/`tool_choice`，以及空 choices 被识别为错误。
 - active-turn 测试覆盖 latest replay tool result 降载且不破坏 tool call 配对。
 - compactruntime 测试覆盖 provider 空 summary/错误时 deterministic fallback summary 生效。
-- aicli 状态栏测试覆盖 request-start 本地估算不提前显示为 `ctx used`、普通 provider usage 不降低已显示快照、Anthropic/Mimo cache-read/cache-creation input 计入 prompt context、compact/reset 路径允许降低为 compact 后的 `token_after`。
+- aicli 状态栏测试覆盖 request-start 本地估算不提前显示为 `ctx used`、普通 provider usage 不降低已显示快照、provider `total_tokens` 作为 active context 快照、Anthropic/Mimo cache-read/cache-creation input 在 total 缺失或偏低时补入 active context、compact/reset 路径允许降低为 compact 后的 `token_after`。
 
 验证结果：
 

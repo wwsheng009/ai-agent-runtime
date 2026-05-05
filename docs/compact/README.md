@@ -12,7 +12,7 @@
 - 压缩结果不是临时 prompt 注入，而是直接替换并持久化 session history。
 - 压缩阈值按 `provider -> model_capabilities -> model` 解析，不再使用全局固定 token limit。
 - 普通 prompt 组装不再默认执行 recent-window / ledger / summary 重组；只有显式 compact、达到阈值的 session compact 或发送前 preflight 压缩才允许缩短要发送的 prompt。
-- `aicli` 状态栏里的 `ctx used` 表示已经发送给 LLM API 的 prompt context 大小，由 provider usage 确认；普通请求只允许递增，只有 compact / reset / new / clear 允许降低。
+- `aicli` 状态栏里的 `ctx used` 表示最近一次 LLM API 响应确认的 active context 大小，由 provider usage 的 `total_tokens` / input+output 口径确认；普通请求只允许递增，只有 compact / reset / new / clear 允许降低。
 
 ## Codex 自动压缩机制分析
 
@@ -439,6 +439,6 @@ go test ./internal/llm ./internal/compactruntime ./internal/chat ./internal/api/
 - `context` 只负责保留窗口等上下文治理参数；普通 prompt Build 不会默认 recent-window 裁剪历史。
 - 当前已支持本地 `pre-turn` 压缩，以及 Codex 远端 `pre-turn` 压缩，并直接替换持久化 session history。
 - prompt-only preflight 压缩只修改当次发送给模型的 prompt view；只有 session-level compact 成功后才替换并持久化 session history。
-- `aicli` `ctx used` 是发送给 LLM API 的 prompt context 观察值，由 provider usage 确认。普通请求路径不提前显示本地预估，也不会因 provider 返回较小值而回落；本地预估只在请求失败或 usage 无法解析时作为兜底。
+- `aicli` `ctx used` 是最近一次 LLM API 响应确认的 active context 观察值，由 provider usage 的 `total_tokens` / input+output 口径确认。普通请求路径不提前显示本地预估，也不会因 provider 返回较小值而回落；本地预估只在请求失败或 usage 无法解析时作为兜底。
 
 这条链路已经为后续远程压缩预留好适配层，不需要再重做 session 语义。

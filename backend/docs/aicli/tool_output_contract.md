@@ -366,7 +366,7 @@ toolkit / MCP / broker tool
 11. **success / error 两条路径都保留 metadata。**
 12. **内置 toolkit 工具显式声明 `OutputKind`，减少误判。**
 13. **外部 MCP 工具当前优先保留完整输出。**
-14. **`aicli` 状态栏的 `ctx used` 表示已发送给 LLM API 的 prompt context 大小，由 provider usage 确认；request-start 本地预估不会提前显示，普通请求只允许单调递增，compact / reset / new / clear 才允许降低。**
+14. **`aicli` 状态栏的 `ctx used` 表示最近一次 LLM API 响应确认的 active context 大小，由 provider usage 的 `total_tokens` / input+output 口径确认；request-start 本地预估不会提前显示，普通请求只允许单调递增，compact / reset / new / clear 才允许降低。**
 
 ## 11. 后续建议
 

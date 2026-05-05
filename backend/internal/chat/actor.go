@@ -24,7 +24,7 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-const aicliRuntimeContextTokenCountKey = "aicli_token_count"
+const aicliRuntimeContextTokenCountKey = "aicli_context_token_count"
 
 // SessionActorConfig configures a SessionActor instance.
 type SessionActorConfig struct {
@@ -1117,14 +1117,19 @@ func countRuntimeChatContextTokens(llmRuntime *llm.LLMRuntime, messages []runtim
 }
 
 func runtimeSessionObservedTokenUsage(session *Session) int {
+	value, _ := runtimeSessionObservedContextTokenUsage(session)
+	return value
+}
+
+func runtimeSessionObservedContextTokenUsage(session *Session) (int, bool) {
 	if session == nil {
-		return 0
+		return 0, false
 	}
 	value, ok := session.GetContext(aicliRuntimeContextTokenCountKey)
 	if !ok {
-		return 0
+		return 0, false
 	}
-	return runtimeContextIntValue(value)
+	return runtimeContextIntValue(value), true
 }
 
 func setRuntimeSessionObservedTokenUsage(session *Session, value int) {
@@ -1139,6 +1144,40 @@ func setRuntimeSessionObservedTokenUsage(session *Session, value int) {
 		return
 	}
 	delete(session.Metadata.Context, aicliRuntimeContextTokenCountKey)
+}
+
+func runtimeSessionActiveContextTokens(runtime *llm.LLMRuntime, session *Session, history []runtimetypes.Message) (int, bool) {
+	historyTokens := countRuntimeChatContextTokens(runtime, history)
+	observed, ok := runtimeSessionObservedContextTokenUsage(session)
+	if !ok || observed <= 0 {
+		return historyTokens, false
+	}
+	observed += countRuntimeChatPendingTokensAfterLastModelGenerated(runtime, history)
+	if historyTokens > observed {
+		observed = historyTokens
+	}
+	return observed, true
+}
+
+func countRuntimeChatPendingTokensAfterLastModelGenerated(runtime *llm.LLMRuntime, history []runtimetypes.Message) int {
+	lastAssistant := -1
+	for index := len(history) - 1; index >= 0; index-- {
+		if history[index].Role == "assistant" {
+			lastAssistant = index
+			break
+		}
+	}
+	if lastAssistant < 0 || lastAssistant >= len(history)-1 {
+		return 0
+	}
+	pending := make([]runtimetypes.Message, 0, len(history)-lastAssistant-1)
+	for _, message := range history[lastAssistant+1:] {
+		if strings.EqualFold(message.Metadata.GetString("context_stage", ""), "compaction") {
+			continue
+		}
+		pending = append(pending, message)
+	}
+	return countRuntimeChatContextTokens(runtime, pending)
 }
 
 func runtimeContextIntValue(value interface{}) int {
@@ -1234,6 +1273,7 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		taskID = strings.TrimSpace(runMeta.Team.CurrentTaskID)
 	}
 
+	observedTokens, hasObservedTokens := runtimeSessionActiveContextTokens(a.llmRuntime, session, history)
 	runtime := compactruntime.New(a.llmRuntime, manager)
 	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
 		SessionID:          a.id,
@@ -1244,8 +1284,8 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		KeepRecentMessages: keepRecent,
 		Phase:              compactruntime.PhasePreTurn,
 		CountTokens:        a.llmRuntime.CountMessagesTokens,
-		ObservedTokens:     countRuntimeChatContextTokens(a.llmRuntime, history),
-		HasObservedTokens:  true,
+		ObservedTokens:     observedTokens,
+		HasObservedTokens:  hasObservedTokens,
 	})
 	payload["reason"] = status.Reason
 	payload["mode"] = status.Mode

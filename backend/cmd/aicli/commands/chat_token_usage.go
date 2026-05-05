@@ -98,18 +98,22 @@ func chatContextTokensFromProviderUsage(session *ChatSession, usage *runtimetype
 	if usage == nil {
 		return 0
 	}
-	if usage.PromptTokens > 0 {
-		contextTokens := usage.PromptTokens
+	if usage.TotalTokens > 0 {
+		contextTokens := usage.TotalTokens
 		if chatProviderUsageReportsCacheOutsidePrompt(session, usage) {
-			contextTokens += usage.CachedTokens
+			expanded := usage.PromptTokens + usage.CompletionTokens + usage.CachedTokens
+			if expanded > contextTokens {
+				contextTokens = expanded
+			}
 		}
 		return contextTokens
 	}
-	if usage.TotalTokens > 0 {
-		if usage.CompletionTokens > 0 && usage.TotalTokens > usage.CompletionTokens {
-			return usage.TotalTokens - usage.CompletionTokens
-		}
-		return usage.TotalTokens
+	contextTokens := usage.PromptTokens + usage.CompletionTokens
+	if chatProviderUsageReportsCacheOutsidePrompt(session, usage) {
+		contextTokens += usage.CachedTokens
+	}
+	if contextTokens > 0 {
+		return contextTokens
 	}
 	return 0
 }
@@ -121,10 +125,10 @@ func chatProviderUsageReportsCacheOutsidePrompt(session *ChatSession, usage *run
 	if !strings.EqualFold(strings.TrimSpace(session.Provider.GetProtocol()), "anthropic") {
 		return false
 	}
-	if usage.TotalTokens <= 0 {
-		return true
-	}
-	return usage.TotalTokens >= usage.PromptTokens+usage.CompletionTokens+usage.CachedTokens
+	// Anthropic-style usage reports cache read/creation input separately from
+	// input_tokens, so active context must include it even when total_tokens is
+	// missing or provider-normalized too low.
+	return true
 }
 
 func applyChatContextTokensFromMessages(session *ChatSession, messages []runtimetypes.Message, windowTokens int, forceRefresh bool) int {

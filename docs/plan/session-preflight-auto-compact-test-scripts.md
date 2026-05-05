@@ -11,7 +11,7 @@
 - latest replay block 中超大的 tool result 应被内容级降载，同时保留 assistant tool-call 与 tool-result 的邻接结构。
 - compact provider 返回空 summary 或失败时，应启用 deterministic fallback summary，使恢复链路继续推进。
 - 普通 `contextmgr.Manager.Build()` 默认保留完整原始 history，不应被 `MaxMessages`、`KeepRecentMessages`、默认 12k 或 recent-window 裁剪；recent-window / ledger / summary prompt compaction 只能由显式 `BuildInput.EnablePromptCompaction=true` 触发。
-- `aicli` 状态栏 `ctx used` 只展示 provider usage 确认后的 sent-context 快照；request-start 本地估算不提前显示，普通请求不允许从大变小，compact/reset/new/clear 边界才允许降低。
+- `aicli` 状态栏 `ctx used` 只展示 provider usage 确认后的 active-context 快照；request-start 本地估算不提前显示，普通请求不允许从大变小，compact/reset/new/clear 边界才允许降低。
 
 ## 前置条件
 
@@ -208,7 +208,7 @@ go test ./internal/chatcore -run "TestExecuteToolLoop_UsesWholeHistoryCompactorT
 
 ### aicli ctx used 状态栏
 
-验证 `ctx used` 只展示 provider usage 确认后的 sent-context 快照，避免 request-start 预估值先大后小造成抖动。
+验证 `ctx used` 只展示 provider usage 确认后的 active-context 快照，避免 request-start 预估值先大后小造成抖动。
 
 ```powershell
 $ErrorActionPreference = "Stop"
@@ -222,7 +222,7 @@ go test ./cmd/aicli/commands -run "TestApplyChatTurnContextTokens_DoesNotDisplay
 - `llm.request.started` 的 `context_prompt_tokens` 只更新 `TurnContextTokenCount`，不能提前写入 `ContextTokenCount`。
 - 普通 `llm.request.finished` 的 provider usage 即使小于当前显示值，也不能降低 `ctx used`。
 - `session_compact_completed` / reset 路径使用 `applyChatContextTokensReset`，允许把 `ctx used` 降到 compact 后的 `token_after`。
-- Anthropic/Mimo-style provider 把 cache read / cache creation input 作为 prompt 之外字段返回时，`ctx used` 应按 `PromptTokens + CachedTokens` 计算。
+- `ctx used` 应优先按 provider `TotalTokens` 计算；缺失 total 时按 `PromptTokens + CompletionTokens`，Anthropic/Mimo-style cache read / cache creation input 作为 prompt 之外字段返回时还要补入 `CachedTokens`。
 
 ## HTTP artifact 检查脚本
 
@@ -295,7 +295,7 @@ Get-ChildItem -Path $ArtifactDir -Filter "*request_provider_wrapper.json" |
 - compact 请求不应携带 `tools` 或 `tool_choice=auto`。
 - provider 空 choices 不应静默变成空 summary。
 - 自动恢复成功后，应继续当前任务或给出明确的 compact recovery 失败原因。
-- compact 之前的普通请求中，`ctx used` 应随 provider 确认的 sent context 单调递增。
+- compact 之前的普通请求中，`ctx used` 应随 provider 确认的 active context 单调递增。
 - prompt-only preflight compaction 不应默认持久化 replacement history；只有 session-level compact 成功后才替换并保存 session history。
 
 ## 日志和事件检查建议

@@ -277,7 +277,7 @@ func TestApplyChatTurnContextTokens_DoesNotDisplayEstimatedContextSnapshot(t *te
 	}
 }
 
-func TestApplyChatContextTokensFromUsage_UsesProviderPromptContextSnapshot(t *testing.T) {
+func TestApplyChatContextTokensFromUsage_UsesProviderTotalContextSnapshot(t *testing.T) {
 	session := &ChatSession{Provider: config.Provider{Protocol: "openai"}}
 
 	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
@@ -288,15 +288,15 @@ func TestApplyChatContextTokensFromUsage_UsesProviderPromptContextSnapshot(t *te
 		ReasoningTokens:  20,
 	}, 1000, false)
 
-	if got != 100 || session.ContextTokenCount != 100 {
-		t.Fatalf("expected provider prompt context to become active snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	if got != 130 || session.ContextTokenCount != 130 {
+		t.Fatalf("expected provider total tokens to become active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 1000 {
 		t.Fatalf("expected context window token count to be 1000, got %d", session.ContextWindowTokenCount)
 	}
 }
 
-func TestApplyChatContextTokensFromUsage_UsesPromptTokensWithoutTotal(t *testing.T) {
+func TestApplyChatContextTokensFromUsage_UsesPromptAndCompletionWhenTotalMissing(t *testing.T) {
 	session := &ChatSession{}
 
 	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
@@ -304,8 +304,8 @@ func TestApplyChatContextTokensFromUsage_UsesPromptTokensWithoutTotal(t *testing
 		CompletionTokens: 25,
 	}, 0, false)
 
-	if got != 100 || session.ContextTokenCount != 100 {
-		t.Fatalf("expected prompt tokens to become active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	if got != 125 || session.ContextTokenCount != 125 {
+		t.Fatalf("expected prompt plus completion tokens to become active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
 	}
 }
 
@@ -318,7 +318,7 @@ func TestApplyChatContextTokensFromUsage_DoesNotLowerDisplayedSnapshot(t *testin
 		TotalTokens:      40,
 	}, 256000, false)
 
-	if got != 12 || session.ContextTokenCount != 1320 {
+	if got != 40 || session.ContextTokenCount != 1320 {
 		t.Fatalf("expected lower provider usage not to reduce active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 256000 {
@@ -349,11 +349,25 @@ func TestApplyChatContextTokensFromUsage_AddsAnthropicCacheReadToPromptContext(t
 		CachedTokens:     16384,
 	}, 1000000, false)
 
-	if got != 18086 || session.ContextTokenCount != 18086 {
-		t.Fatalf("expected cached input to count toward prompt context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	if got != 18167 || session.ContextTokenCount != 18167 {
+		t.Fatalf("expected cached input to count toward active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 1000000 {
 		t.Fatalf("expected window tokens to still update, got %d", session.ContextWindowTokenCount)
+	}
+}
+
+func TestApplyChatContextTokensFromUsage_ComposesAnthropicContextWhenTotalMissing(t *testing.T) {
+	session := &ChatSession{Provider: config.Provider{Protocol: "anthropic"}}
+
+	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
+		PromptTokens:     1702,
+		CompletionTokens: 81,
+		CachedTokens:     16384,
+	}, 1000000, false)
+
+	if got != 18167 || session.ContextTokenCount != 18167 {
+		t.Fatalf("expected prompt, completion, and cached input to compose active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
 	}
 }
 
