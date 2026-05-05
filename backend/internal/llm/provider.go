@@ -13,7 +13,6 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -426,6 +425,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 
 	// 构建请求体
 	requestBody := p.adapter.BuildRequest(adapterRequest)
+	requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -665,6 +665,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 
 	// 构建请求体
 	requestBody := p.adapter.BuildRequest(adapterRequest)
+	requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request body: %w", err)
@@ -782,7 +783,8 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	}
 
 	var responseBuffer bytes.Buffer
-	assistantMsg, err := p.adapter.HandleResponse(true, io.TeeReader(resp.Body, &responseBuffer), callbacks)
+	streamReader := p.normalizeStreamReader(adapterRequest.Model, io.TeeReader(resp.Body, &responseBuffer))
+	assistantMsg, err := p.adapter.HandleResponse(true, streamReader, callbacks)
 	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
 	reportHTTPDebug(ctx, HTTPDebugEvent{
 		Source:              "provider_wrapper",
@@ -1037,6 +1039,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	adapterRequest.Stream = true
 
 	requestBody := p.adapter.BuildRequest(adapterRequest)
+	requestBody = p.prepareRequestBody(adapterRequest.Model, requestBody)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -1188,7 +1191,8 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		}
 
 		var responseBuffer bytes.Buffer
-		assistantMsg, handleErr := p.adapter.HandleResponse(true, io.TeeReader(resp.Body, &responseBuffer), callbacks)
+		streamReader := p.normalizeStreamReader(adapterRequest.Model, io.TeeReader(resp.Body, &responseBuffer))
+		assistantMsg, handleErr := p.adapter.HandleResponse(true, streamReader, callbacks)
 		resp.Body.Close()
 		responseBody := append([]byte(nil), responseBuffer.Bytes()...)
 
@@ -1409,7 +1413,7 @@ func (p *ProviderWrapper) toChatRequest(req *LLMRequest) ChatRequest {
 			argsJSON := "{}"
 			if len(call.Args) > 0 {
 				if argsBytes, err := json.Marshal(call.Args); err == nil && len(argsBytes) > 0 && string(argsBytes) != "null" {
-					argsJSON = providercompat.NormalizeToolCallArguments(string(argsBytes))
+					argsJSON = normalizeToolCallArgumentsJSON(string(argsBytes))
 				}
 			}
 			toolCalls = append(toolCalls, ToolCall{
@@ -1598,13 +1602,16 @@ func (p *ProviderWrapper) convertTools(tools []Tool, protocol string, model stri
 
 // HandleResponse 处理 HTTP 响应
 func (p *ProviderWrapper) HandleResponse(isStream bool, respBody io.Reader, callbacks adapter.StreamCallbacks) (map[string]interface{}, error) {
-	assistantMsg, err := p.adapter.HandleResponse(isStream, respBody, callbacks)
-	if err != nil {
-		return assistantMsg, err
-	}
 	model := ""
 	if p != nil && p.config != nil {
 		model = p.config.DefaultModel
+	}
+	if isStream {
+		respBody = p.normalizeStreamReader(model, respBody)
+	}
+	assistantMsg, err := p.adapter.HandleResponse(isStream, respBody, callbacks)
+	if err != nil {
+		return assistantMsg, err
 	}
 	return p.normalizeAssistantMessage(model, assistantMsg), nil
 }

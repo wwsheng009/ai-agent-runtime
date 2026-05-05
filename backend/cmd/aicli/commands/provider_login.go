@@ -491,7 +491,7 @@ func defaultProviderLoginReasoningEfforts(providerName, loginProtocol string, pr
 		ProviderName: providerName,
 		Protocol:     runtimeProtocolForLoginProtocol(loginProtocol),
 		BaseURL:      provider.BaseURL,
-		Model:        providerLoginCompatModelHint(models),
+		Model:        providerLoginCompatModelHint(providerName, loginProtocol, provider, models),
 	})
 }
 
@@ -511,22 +511,18 @@ func providerLoginUsesWildcardReasoningEfforts(loginProtocol string, provider co
 	})
 }
 
-func firstProviderLoginModelID(models []providerModelInfo) string {
+func providerLoginCompatModelHint(providerName, loginProtocol string, provider config.Provider, models []providerModelInfo) string {
+	modelIDs := make([]string, 0, len(models))
 	for _, model := range models {
-		if trimmed := strings.TrimSpace(model.ID); trimmed != "" {
-			return trimmed
+		if modelID := strings.TrimSpace(model.ID); modelID != "" {
+			modelIDs = append(modelIDs, modelID)
 		}
 	}
-	return ""
-}
-
-func providerLoginCompatModelHint(models []providerModelInfo) string {
-	for _, model := range models {
-		if providercompat.IsDeepSeekModel(model.ID) {
-			return strings.TrimSpace(model.ID)
-		}
-	}
-	return firstProviderLoginModelID(models)
+	return providercompat.LoginModelHint(providercompat.Context{
+		ProviderName: providerName,
+		Protocol:     runtimeProtocolForLoginProtocol(loginProtocol),
+		BaseURL:      provider.BaseURL,
+	}, modelIDs)
 }
 
 func mergeProviderLoginModelCapabilities(existing, discovered map[string]config.ModelCapabilitySpec) map[string]config.ModelCapabilitySpec {

@@ -396,6 +396,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	// 构建请求体
 	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
 	requestBody := adpt.BuildRequest(adapterRequest)
+	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -630,6 +631,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
 	adapterRequest.Stream = true
 	requestBody := adpt.BuildRequest(adapterRequest)
+	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -760,7 +762,8 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		},
 	}
 	var responseBuffer bytes.Buffer
-	assistantMsg, err := adpt.HandleResponse(true, io.TeeReader(httpResp.Body, &responseBuffer), callbacks)
+	streamReader := normalizeGatewayStreamReader(selected, protocol, adapterRequest.Model, io.TeeReader(httpResp.Body, &responseBuffer))
+	assistantMsg, err := adpt.HandleResponse(true, streamReader, callbacks)
 	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
 	if err == nil {
 		assistantMsg = normalizeGatewayAssistantMessage(selected, protocol, adapterRequest.Model, assistantMsg)
@@ -895,6 +898,7 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 	adapterRequest := c.buildAdapterRequest(model, req, selected, protocol)
 	adapterRequest.Stream = true
 	requestBody := adpt.BuildRequest(adapterRequest)
+	requestBody = prepareGatewayRequestBody(selected, protocol, adapterRequest.Model, requestBody)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
@@ -1033,7 +1037,8 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 		}
 
 		// 使用 adapter 处理流式响应
-		_, err := adpt.HandleResponse(true, io.TeeReader(httpResp.Body, &responseBuffer), callbacks)
+		streamReader := normalizeGatewayStreamReader(selected, protocol, adapterRequest.Model, io.TeeReader(httpResp.Body, &responseBuffer))
+		_, err := adpt.HandleResponse(true, streamReader, callbacks)
 		responseBody := append([]byte(nil), responseBuffer.Bytes()...)
 		reportHTTPDebug(ctx, HTTPDebugEvent{
 			Source:              "gateway_client",

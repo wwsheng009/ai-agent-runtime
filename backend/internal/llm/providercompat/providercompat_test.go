@@ -1,10 +1,13 @@
 package providercompat
 
 import (
+	"io"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -99,6 +102,16 @@ func TestDefaultLoginReasoningEfforts(t *testing.T) {
 	}
 }
 
+func TestLoginModelHintPrefersProviderSpecificModel(t *testing.T) {
+	got := LoginModelHint(Context{}, []string{"plain-model", "deepseek-v4-pro"})
+	if got != "deepseek-v4-pro" {
+		t.Fatalf("expected provider-specific login model hint, got %q", got)
+	}
+	if got := LoginModelHint(Context{}, []string{"plain-model"}); got != "plain-model" {
+		t.Fatalf("expected first model fallback, got %q", got)
+	}
+}
+
 func TestAdapterRegistryPrecedenceAndCodexWildcard(t *testing.T) {
 	chain := NewChain(Context{
 		Protocol:     "openai",
@@ -152,6 +165,52 @@ func TestNormalizeOpenAICompatibleMessages(t *testing.T) {
 	}
 	if got[1]["role"] != "user" {
 		t.Fatalf("unexpected user message: %#v", got[1])
+	}
+}
+
+func TestPrepareRequestBody_OpenAIToolCallArguments(t *testing.T) {
+	body := map[string]interface{}{
+		"model": "test-model",
+		"messages": []map[string]interface{}{
+			{
+				"role": "assistant",
+				"tool_calls": []map[string]interface{}{
+					{
+						"id": "call_1",
+						"function": map[string]interface{}{
+							"name":      "list_files",
+							"arguments": nil,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	normalized := PrepareRequestBody(Context{Protocol: "openai"}, body)
+	messages := normalized["messages"].([]map[string]interface{})
+	toolCalls := messages[0]["tool_calls"].([]map[string]interface{})
+	fn := toolCalls[0]["function"].(map[string]interface{})
+	if fn["arguments"] != "{}" {
+		t.Fatalf("expected request body tool arguments to normalize, got %#v", fn["arguments"])
+	}
+}
+
+func TestPrepareRequestBody_ChatGPTCodexDropsMaxOutputTokens(t *testing.T) {
+	body := map[string]interface{}{
+		"model":             "gpt-5-codex",
+		"input":             "hi",
+		"max_output_tokens": 100,
+	}
+	normalized := PrepareRequestBody(Context{
+		Protocol: "codex",
+		BaseURL:  "https://chatgpt.com/backend-api/codex/responses",
+	}, body)
+	if _, exists := normalized["max_output_tokens"]; exists {
+		t.Fatalf("expected max_output_tokens to be dropped, got %#v", normalized)
+	}
+	if _, exists := body["max_output_tokens"]; !exists {
+		t.Fatal("expected original body not to be mutated")
 	}
 }
 
@@ -214,6 +273,72 @@ func TestNormalizeAssistantMessage_OpenAIToolCallsAndReasoning(t *testing.T) {
 	}
 	if toolCalls[1]["type"] != "function" {
 		t.Fatalf("expected legacy tool call type=function, got %#v", toolCalls[1]["type"])
+	}
+}
+
+func TestNormalizeProcessResult_OpenAIToolCallsAndReasoningBlock(t *testing.T) {
+	result := &llmadapter.ProcessResult{
+		Reasoning:        "think",
+		ReasoningPresent: true,
+		HasToolCalls:     true,
+		ToolCalls: []map[string]interface{}{
+			{
+				"id": "call_1",
+				"function": map[string]interface{}{
+					"name":      "list_files",
+					"arguments": map[string]interface{}{"path": "."},
+				},
+			},
+		},
+	}
+
+	NormalizeProcessResult(Context{Protocol: "openai"}, result)
+	fn, _ := result.ToolCalls[0]["function"].(map[string]interface{})
+	if fn["arguments"] != `{"path":"."}` {
+		t.Fatalf("expected tool arguments to be encoded, got %#v", fn["arguments"])
+	}
+	if result.ReasoningBlock == nil || result.ReasoningBlock.DisplayText() != "think" {
+		t.Fatalf("expected reasoning block to be populated, got %#v", result.ReasoningBlock)
+	}
+}
+
+func TestNormalizeStreamChunkAndReader_OpenAIReasoningAlias(t *testing.T) {
+	chunk := map[string]interface{}{
+		"choices": []interface{}{
+			map[string]interface{}{
+				"delta": map[string]interface{}{
+					"reasoning": "think",
+					"tool_calls": []interface{}{
+						map[string]interface{}{
+							"function": map[string]interface{}{
+								"name":      "list_files",
+								"arguments": map[string]interface{}{"path": "."},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	normalized := NormalizeStreamChunk(Context{Protocol: "openai"}, chunk)
+	choice := normalized["choices"].([]interface{})[0].(map[string]interface{})
+	delta := choice["delta"].(map[string]interface{})
+	if delta["reasoning_content"] != "think" {
+		t.Fatalf("expected reasoning_content to be populated, got %#v", delta)
+	}
+	toolCall := delta["tool_calls"].([]interface{})[0].(map[string]interface{})
+	fn := toolCall["function"].(map[string]interface{})
+	if fn["arguments"] != `{"path":"."}` {
+		t.Fatalf("expected stream tool arguments to be encoded, got %#v", fn["arguments"])
+	}
+
+	reader := NormalizeStreamReader(Context{Protocol: "openai"}, strings.NewReader("data: {\"choices\":[{\"delta\":{\"reasoning\":\"think\"}}]}\n\n"))
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read normalized stream: %v", err)
+	}
+	if !strings.Contains(string(payload), `"reasoning_content":"think"`) {
+		t.Fatalf("expected normalized stream payload, got %s", payload)
 	}
 }
 

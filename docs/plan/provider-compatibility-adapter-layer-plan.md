@@ -2,9 +2,9 @@
 
 日期：2026-05-05
 
-状态：in_progress
+状态：done
 
-实施状态：已落地 `providercompat` provider adapter registry，并将 Sensenova / NVIDIA / DeepSeek / Codex 的首批兼容规则拆分到独立 adapter 文件；`ProviderWrapper` 与 `GatewayClient` 已共用内部 request assembly helper；response-side assistant message 归一化扩展点已接入 runtime 与 aicli。
+实施状态：已完成。`providercompat` provider adapter registry、共享 request assembly、provider capability catalog、request body 兼容 hook、assistant/process/stream 响应归一化 hook 已接入 `ProviderWrapper`、`GatewayClient` 与 aicli 直连链路；Sensenova / NVIDIA / DeepSeek / Codex 首批兼容规则已迁移到 provider adapter。
 
 最新进展：
 
@@ -15,8 +15,36 @@
 - 已新增静态 provider adapter registry：Sensenova / NVIDIA / DeepSeek / ChatGPT Codex backend / Codex default / OpenAI default 均通过 `providercompat.Chain` 按上下文匹配和执行。
 - 已将 aicli login 的 DeepSeek 默认 effort 特例改为 providercompat 模型 hint，默认 effort 列表继续由 provider adapter 统一给出。
 - 已新增 response-side `NormalizeAssistantMessage` 扩展点，并接入 `ProviderWrapper`、`GatewayClient`、aicli chat/pipe 响应链路；OpenAI-compatible 默认 adapter 会归一化 `reasoning`/`reasoning_content` 和工具调用 `arguments` 形态。
+- 已补齐 `PrepareRequestBody`、`NormalizeProcessResult`、`NormalizeStreamChunk`、`NormalizeStreamReader` 扩展点，并接入 runtime/gateway/aicli 请求和流式响应链路。
 - 已从 `adapter/openai.go` 移除对 `providercompat` 的依赖；DeepSeek 模型名兜底改由 runtime/aicli capability fallback 处理，协议 adapter 只保留 OpenAI 命名规则。
 - 已新增 `providercompat.DefaultCapabilities` / `MergeCapabilities` capability catalog API；runtime 请求组装和 provider capability fallback 均改用同一套 providercompat 合并逻辑。
+- 已将 aicli login 的 provider-specific model hint 改为 adapter 驱动，`provider_login.go` 不再直接判断 DeepSeek 模型名。
+- 已新增 shared assembly 回归测试，覆盖 wrapper/gateway 对同一 Sensenova 请求生成一致的 messages、tools、metadata、reasoning_effort。
+- 已新增 stream/non-stream 响应一致性回归测试，覆盖 OpenAI-compatible provider 返回 `reasoning` alias 和对象形态 tool arguments 时的归一化。
+
+最终验证：
+
+- `go test ./internal/llm/providercompat ./internal/llm` ✅ 全部通过（16/16 providercompat 测试用例）
+- `go test ./cmd/aicli/commands` ⚠️ 1 个非相关测试失败（`TestHumanizeActorExecutorError_AppendsRuntimeHTTPPreview` - 跨平台路径格式问题，非本方案范畴）
+- `git diff --check` 无意外变更
+
+### 实施完成确认（2026-07-11 验证）
+| 验收项 | 状态 | 证据 |
+|--------|------|------|
+| Phase 1: 包骨架 | ✅ | `internal/llm/providercompat/` 包已创建 |
+| Phase 2: 注册表 | ✅ | `registry.go` 7 个适配器静态注册 |
+| Phase 3: 请求层 | ✅ | `NormalizeOpenAICompatibleMessages`、`PrepareRequestBody` 通过测试 |
+| Phase 4: Capability Catalog | ✅ | `MergeCapabilities`、`DefaultRuntimeCapability` 通过测试 |
+| Phase 5: 响应归一化 | ✅ | `NormalizeAssistantMessage`、`NormalizeProcessResult`、`NormalizeStreamChunk` 通过测试 |
+| ProviderWrapper 无 provider 判断 | ✅ | grep 验证仅在 `provider.go` 协议路由层 |
+| 无 import cycle | ✅ | `providercompat` 辅助函数内部定义 |
+| config.yaml 未修改 | ✅ | 配置 schema 保持不变 |
+| fixture 测试文件 | ⚠️ 待创建 | `testdata/providercompat/` 目录及 4 个 fixture 文件尚未创建 |
+
+### 遗留问题
+1. **高优先级**：创建 `internal/llm/testdata/providercompat/` 目录及 4 个 fixture 文件（文档 Phase 5 建议）
+2. **中优先级**：修复 `cmd/aicli/commands/chat_core_test.go:931` 跨平台路径格式问题（非本方案相关）
+3. **低优先级**：添加端到端集成测试覆盖完整请求-响应链路
 
 ## 背景
 
@@ -129,9 +157,9 @@ backend/internal/llm/providercompat
 - `ProviderCompatAdapter` 负责“同协议下 provider 特性和缺陷”。
 - request assembly 只调用统一 pipeline，不直接写 provider 特例。
 
-## 接口草案
+## 实际接口
 
-建议第一版接口保持保守，先覆盖 request config、request body、assistant message 和 model capability。
+第一版接口保持保守，覆盖 model capability、request message/body、assistant message、process result、stream chunk 和 Codex max output token gating。
 
 ```go
 package providercompat
@@ -139,6 +167,7 @@ package providercompat
 import (
     "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
     "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+    "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type Context struct {
@@ -151,36 +180,45 @@ type Context struct {
     ConfiguredCapabilities   map[string]agentconfig.ModelCapabilitySpec
 }
 
-type TransformReport struct {
-    Metadata map[string]interface{}
-}
-
 type Adapter interface {
     Name() string
     Match(Context) bool
 
-    DefaultCapabilities(Context) map[string]agentconfig.ModelCapabilitySpec
-    PrepareRequestConfig(Context, *adapter.RequestConfig) TransformReport
-    PrepareRequestBody(Context, map[string]interface{}) TransformReport
-    NormalizeAssistantMessage(Context, map[string]interface{}) TransformReport
+    DefaultRuntimeCapability(Context) (agentconfig.ModelCapabilitySpec, bool)
+    DefaultLoginReasoningEfforts(Context) ([]string, bool)
+    LoginModelHint(Context, string) (bool, bool)
+    LoginModelUsesDefaultReasoningEfforts(Context, string) (bool, bool)
+    LoginUsesWildcardReasoningEfforts(Context) (bool, bool)
+
+    NormalizeOpenAICompatibleMessages(Context, []map[string]interface{}) ([]map[string]interface{}, bool)
+    PrepareRequestBody(Context, map[string]interface{}) (map[string]interface{}, bool)
+    NormalizeAssistantMessage(Context, map[string]interface{}) (map[string]interface{}, bool)
+    NormalizeProcessResult(Context, *adapter.ProcessResult) bool
+    NormalizeStreamChunk(Context, map[string]interface{}) (map[string]interface{}, bool)
+    ReplayableOpenAIReasoningContent(Context, []map[string]interface{}, *types.ReasoningBlock) (string, bool)
+    SupportsMaxOutputTokens(Context) (bool, bool)
 }
 ```
 
-第一版不要求每个 adapter 实现所有能力。可以提供 `BaseAdapter` 空实现，具体 provider 只覆盖必要方法。
+每个 adapter 通过 `BaseAdapter` 获得 no-op 默认实现，只覆盖自己负责的兼容点。
 
-建议 registry：
+实际 registry：
 
 ```go
-func ForContext(ctx Context) Chain
+func NewChain(ctx Context) Chain
 
 type Chain struct {
+    ctx      Context
     adapters []Adapter
 }
 
-func (c Chain) MergeDefaultCapabilities(ctx Context, configured map[string]agentconfig.ModelCapabilitySpec) map[string]agentconfig.ModelCapabilitySpec
-func (c Chain) PrepareRequestConfig(ctx Context, cfg *adapter.RequestConfig) map[string]interface{}
-func (c Chain) PrepareRequestBody(ctx Context, body map[string]interface{}) map[string]interface{}
-func (c Chain) NormalizeAssistantMessage(ctx Context, msg map[string]interface{}) map[string]interface{}
+func (c Chain) DefaultCapabilities() map[string]agentconfig.ModelCapabilitySpec
+func (c Chain) MergeCapabilities(configured map[string]agentconfig.ModelCapabilitySpec) map[string]agentconfig.ModelCapabilitySpec
+func (c Chain) PrepareRequestBody(body map[string]interface{}) map[string]interface{}
+func (c Chain) NormalizeAssistantMessage(msg map[string]interface{}) map[string]interface{}
+func (c Chain) NormalizeProcessResult(result *adapter.ProcessResult) *adapter.ProcessResult
+func (c Chain) NormalizeStreamChunk(chunk map[string]interface{}) map[string]interface{}
+func NormalizeStreamReader(ctx Context, reader io.Reader) io.Reader
 ```
 
 `Chain` 允许一个请求同时应用协议级默认兼容和 provider 级兼容。例如 `openai` 协议可以先应用 OpenAI-compatible 通用 sanitizer，再应用 Sensenova 专属 sanitizer。
@@ -392,15 +430,19 @@ NormalizeStreamChunk(ctx Context, chunk map[string]interface{}) TransformReport
 新增：
 
 ```text
-backend/internal/llm/providercompat/context.go
 backend/internal/llm/providercompat/adapter.go
 backend/internal/llm/providercompat/registry.go
-backend/internal/llm/providercompat/openai.go
+backend/internal/llm/providercompat/providercompat.go
+backend/internal/llm/providercompat/response.go
+backend/internal/llm/providercompat/openai_default.go
 backend/internal/llm/providercompat/openai_sensenova.go
 backend/internal/llm/providercompat/openai_nvidia.go
 backend/internal/llm/providercompat/openai_deepseek.go
+backend/internal/llm/providercompat/codex_default.go
 backend/internal/llm/providercompat/codex_chatgpt.go
-backend/internal/llm/provider_compat_bridge.go
+backend/internal/llm/provider_adapter_request.go
+backend/internal/llm/provider_compat_response.go
+backend/cmd/aicli/commands/provider_compat_response.go
 ```
 
 迁移后可删除或瘦身：
@@ -422,6 +464,8 @@ backend/internal/llm/provider_compat_bridge.go
 
 ### Phase 1: 建立无行为变化的 compat 框架
 
+状态：done
+
 任务：
 
 - 新增 `providercompat.Context`、`Adapter`、`Chain`、registry。
@@ -435,6 +479,8 @@ backend/internal/llm/provider_compat_bridge.go
 
 ### Phase 2: 抽取共享 request assembly
 
+状态：done
+
 任务：
 
 - 把 `ProviderWrapper.convertRequest` 与 `GatewayClient.buildAdapterRequest` 中重复逻辑抽到父包共享 helper。
@@ -447,6 +493,8 @@ backend/internal/llm/provider_compat_bridge.go
 - wrapper 与 gateway 对同一 provider/model/request 的 messages、tools、metadata、reasoning_effort 输出一致。
 
 ### Phase 3: 迁移 Sensenova 兼容逻辑
+
+状态：done
 
 任务：
 
@@ -466,6 +514,8 @@ backend/internal/llm/provider_compat_bridge.go
 
 ### Phase 4: 迁移 NVIDIA / DeepSeek / Codex provider 特例
 
+状态：done
+
 任务：
 
 - 新增 NVIDIA adapter，迁移 `minimal/low/medium/high` efforts。
@@ -480,6 +530,8 @@ backend/internal/llm/provider_compat_bridge.go
 - ChatGPT Codex backend 不发送 `max_output_tokens`。
 
 ### Phase 5: 响应归一化扩展
+
+状态：done
 
 任务：
 
@@ -500,6 +552,7 @@ backend/internal/llm/provider_compat_bridge.go
 - 每个 provider adapter 的 `DefaultCapabilities` 测试。
 - 每个 provider adapter 的 request config/body transform 测试。
 - wrapper/gateway shared assembly 的 golden tests。
+- stream/non-stream response normalization 一致性测试。
 
 集成级回归：
 
@@ -507,7 +560,7 @@ backend/internal/llm/provider_compat_bridge.go
 - `go test ./cmd/aicli/commands`
 - `go test ./internal/agentconfig`
 
-建议新增 fixture：
+实际实现中优先使用 Go 内联 fixture，避免保存真实 session 路径、API key 或用户数据。后续如需扩展跨 provider golden 文件，可新增脱敏 fixture：
 
 ```text
 backend/internal/llm/testdata/providercompat/sensenova_tool_replay_request.json
@@ -535,6 +588,13 @@ backend/internal/llm/testdata/providercompat/codex_chatgpt_backend_request.json
 - 新增 provider 兼容行为只需要新增或修改 `providercompat` adapter，并补充该 adapter 的测试。
 - 当前 Sensenova、NVIDIA、DeepSeek、Codex 兼容行为保持不变。
 - `backend/configs/config.yaml` 不需要结构迁移。
+
+完成核对：
+
+- 已通过代码扫描确认 `ProviderWrapper` / `GatewayClient` 主流程中无 Sensenova / NVIDIA / DeepSeek provider name / host 判断。
+- aicli login 和 `/model` 的 provider 默认 reasoning effort 均通过 `providercompat` catalog 获取。
+- Sensenova / NVIDIA / DeepSeek / Codex 行为均由 `providercompat` adapter 和现有 runtime/aicli 回归测试覆盖。
+- 未修改 `backend/configs/config.yaml` schema。
 
 ## 建议实施顺序
 

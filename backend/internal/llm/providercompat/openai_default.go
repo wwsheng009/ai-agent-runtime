@@ -3,6 +3,9 @@ package providercompat
 import (
 	"encoding/json"
 	"strings"
+
+	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type openAIDefaultAdapter struct {
@@ -27,6 +30,38 @@ func (openAIDefaultAdapter) LoginModelUsesDefaultReasoningEfforts(_ Context, mod
 
 func (openAIDefaultAdapter) NormalizeAssistantMessage(_ Context, message map[string]interface{}) (map[string]interface{}, bool) {
 	return normalizeOpenAICompatibleAssistantMessage(message)
+}
+
+func (openAIDefaultAdapter) PrepareRequestBody(_ Context, body map[string]interface{}) (map[string]interface{}, bool) {
+	return normalizeOpenAICompatibleRequestBody(body)
+}
+
+func (openAIDefaultAdapter) NormalizeProcessResult(_ Context, result *llmadapter.ProcessResult) bool {
+	if result == nil {
+		return false
+	}
+	changed := false
+	if normalized, ok := normalizeOpenAICompatibleToolCalls(result.ToolCalls); ok {
+		if toolCalls, ok := normalized.([]map[string]interface{}); ok {
+			result.ToolCalls = toolCalls
+			result.HasToolCalls = len(toolCalls) > 0
+			changed = true
+		}
+	}
+	if strings.TrimSpace(result.Reasoning) != "" && result.ReasoningBlock == nil {
+		result.ReasoningBlock = &runtimetypes.ReasoningBlock{
+			Format:     "openai_compatible",
+			Summary:    strings.TrimSpace(result.Reasoning),
+			Streamable: true,
+			Visibility: runtimetypes.ReasoningVisibilitySummary,
+		}
+		changed = true
+	}
+	return changed
+}
+
+func (openAIDefaultAdapter) NormalizeStreamChunk(_ Context, chunk map[string]interface{}) (map[string]interface{}, bool) {
+	return normalizeOpenAICompatibleStreamChunk(chunk)
 }
 
 func normalizeOpenAICompatibleAssistantMessage(message map[string]interface{}) (map[string]interface{}, bool) {
@@ -54,6 +89,97 @@ func normalizeOpenAICompatibleAssistantMessage(message map[string]interface{}) (
 		ensureMutable()["tool_calls"] = toolCalls
 	}
 
+	return normalized, changed
+}
+
+func normalizeOpenAICompatibleRequestBody(body map[string]interface{}) (map[string]interface{}, bool) {
+	if len(body) == 0 {
+		return body, false
+	}
+	messages := decodeSliceOfMaps(body["messages"])
+	if len(messages) == 0 {
+		return body, false
+	}
+
+	normalizedMessages := make([]map[string]interface{}, len(messages))
+	changed := false
+	for i, message := range messages {
+		normalized, ok := normalizeOpenAICompatibleAssistantMessage(message)
+		normalizedMessages[i] = normalized
+		changed = changed || ok
+	}
+	if !changed {
+		return body, false
+	}
+	normalizedBody := cloneMapStringAny(body)
+	normalizedBody["messages"] = normalizedMessages
+	return normalizedBody, true
+}
+
+func normalizeOpenAICompatibleStreamChunk(chunk map[string]interface{}) (map[string]interface{}, bool) {
+	if len(chunk) == 0 {
+		return chunk, false
+	}
+	choices, ok := chunk["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return chunk, false
+	}
+
+	normalizedChunk := chunk
+	changed := false
+	normalizedChoices := make([]interface{}, len(choices))
+	copy(normalizedChoices, choices)
+
+	for i, choice := range choices {
+		choiceMap, ok := choice.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		delta, ok := choiceMap["delta"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		normalizedDelta, deltaChanged := normalizeOpenAICompatibleDelta(delta)
+		if !deltaChanged {
+			continue
+		}
+		nextChoice := cloneMapStringAny(choiceMap)
+		nextChoice["delta"] = normalizedDelta
+		normalizedChoices[i] = nextChoice
+		if !changed {
+			normalizedChunk = cloneMapStringAny(chunk)
+			changed = true
+		}
+	}
+
+	if changed {
+		normalizedChunk["choices"] = normalizedChoices
+	}
+	return normalizedChunk, changed
+}
+
+func normalizeOpenAICompatibleDelta(delta map[string]interface{}) (map[string]interface{}, bool) {
+	if len(delta) == 0 {
+		return delta, false
+	}
+	normalized := delta
+	changed := false
+	ensureMutable := func() map[string]interface{} {
+		if !changed {
+			normalized = cloneMapStringAny(delta)
+			changed = true
+		}
+		return normalized
+	}
+
+	if reasoning, ok := delta["reasoning"].(string); ok {
+		if _, exists := delta["reasoning_content"]; !exists {
+			ensureMutable()["reasoning_content"] = reasoning
+		}
+	}
+	if toolCalls, ok := normalizeOpenAICompatibleToolCalls(delta["tool_calls"]); ok {
+		ensureMutable()["tool_calls"] = toolCalls
+	}
 	return normalized, changed
 }
 

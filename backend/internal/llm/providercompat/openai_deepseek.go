@@ -30,6 +30,13 @@ func (deepSeekOpenAIAdapter) DefaultLoginReasoningEfforts(Context) ([]string, bo
 	return []string{"high", "max"}, true
 }
 
+func (deepSeekOpenAIAdapter) LoginModelHint(_ Context, modelID string) (bool, bool) {
+	if IsDeepSeekModel(modelID) {
+		return true, true
+	}
+	return false, false
+}
+
 func (deepSeekOpenAIAdapter) LoginModelUsesDefaultReasoningEfforts(_ Context, modelID string) (bool, bool) {
 	if IsDeepSeekModel(modelID) {
 		return true, true

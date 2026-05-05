@@ -45,6 +45,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	protocolMessages := runtimellm.RuntimeMessagesToProtocolMessages(req.Messages, session.Provider.GetProtocol(), session.ProviderName, session.Model)
 	config := adapterRequestConfig(session, protocolMessages, req)
 	requestBody := session.Adapter.BuildRequest(config)
+	requestBody = prepareChatSessionRequestBody(session, requestBody)
 	requestContextTokens := countChatContextTokensForMessages(session, req.Messages)
 
 	bodyBytes, err := json.Marshal(requestBody)
@@ -197,7 +198,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	var respReader io.Reader
 	var streamCapture bytes.Buffer
 	if needStreamBody {
-		respReader = io.TeeReader(resp.Body, &streamCapture)
+		respReader = normalizeChatSessionStreamReader(session, io.TeeReader(resp.Body, &streamCapture))
 	} else {
 		respReader = bytes.NewReader(responseBody)
 	}

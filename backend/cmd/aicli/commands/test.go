@@ -93,6 +93,7 @@ func runTestCommand(cfg *config.Config, providerFlag, modelFlag string, opts tes
 	}
 
 	requestBody := ctx.Adapter.BuildRequest(requestConfig)
+	requestBody = prepareProviderRequestBody(ctx.ProviderName, ctx.Provider, ctx.Model, requestBody)
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, details, fmt.Errorf("failed to marshal request body: %w", err)

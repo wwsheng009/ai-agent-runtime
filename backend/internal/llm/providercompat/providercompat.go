@@ -149,6 +149,31 @@ func (c Chain) DefaultLoginReasoningEfforts() []string {
 	return nil
 }
 
+// LoginModelHint returns the model id that should be used as capability context
+// while building login defaults. Provider adapters can prefer a model-specific
+// hint without leaking provider-name checks into CLI login code.
+func (c Chain) LoginModelHint(modelIDs []string) string {
+	first := ""
+	for _, modelID := range modelIDs {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			continue
+		}
+		if first == "" {
+			first = modelID
+		}
+		modelCtx := c.ctx
+		modelCtx.Model = modelID
+		modelCtx = normalizeContext(modelCtx)
+		for _, adapter := range adaptersForContext(modelCtx) {
+			if preferred, ok := adapter.LoginModelHint(modelCtx, modelID); ok && preferred {
+				return modelID
+			}
+		}
+	}
+	return first
+}
+
 // LoginModelUsesDefaultReasoningEfforts reports whether a discovered model
 // should inherit the provider's default effort list.
 func (c Chain) LoginModelUsesDefaultReasoningEfforts(modelID string) bool {
@@ -195,6 +220,17 @@ func (c Chain) NormalizeToolCallArguments(raw string) string {
 	return raw
 }
 
+// PrepareRequestBody applies provider-specific fixes after the protocol adapter
+// has built the final HTTP JSON body.
+func (c Chain) PrepareRequestBody(body map[string]interface{}) map[string]interface{} {
+	for _, adapter := range c.adapters {
+		if normalized, ok := adapter.PrepareRequestBody(c.ctx, body); ok {
+			body = normalized
+		}
+	}
+	return body
+}
+
 // NormalizeAssistantMessage applies provider-specific response fixes after the
 // protocol adapter has parsed the provider response.
 func (c Chain) NormalizeAssistantMessage(message map[string]interface{}) map[string]interface{} {
@@ -202,6 +238,10 @@ func (c Chain) NormalizeAssistantMessage(message map[string]interface{}) map[str
 		if normalized, ok := adapter.NormalizeAssistantMessage(c.ctx, message); ok {
 			message = normalized
 		}
+	}
+	if result, ok := processResultFromAssistantMessage(message); ok {
+		c.NormalizeProcessResult(result)
+		message = assistantMessageFromProcessResult(message, result)
 	}
 	return message
 }
@@ -330,6 +370,12 @@ func DefaultLoginReasoningEfforts(ctx Context) []string {
 	return NewChain(ctx).DefaultLoginReasoningEfforts()
 }
 
+// LoginModelHint returns the preferred model id for login default capability
+// context.
+func LoginModelHint(ctx Context, modelIDs []string) string {
+	return NewChain(ctx).LoginModelHint(modelIDs)
+}
+
 // LoginModelUsesDefaultReasoningEfforts reports whether a model should inherit
 // the provider defaults during login.
 func LoginModelUsesDefaultReasoningEfforts(ctx Context, modelID string) bool {
@@ -351,6 +397,12 @@ func NormalizeOpenAICompatibleMessages(ctx Context, messages []map[string]interf
 // NormalizeToolCallArguments normalizes OpenAI-compatible tool call arguments.
 func NormalizeToolCallArguments(raw string) string {
 	return NewChain(Context{}).NormalizeToolCallArguments(raw)
+}
+
+// PrepareRequestBody applies provider-specific request body compatibility
+// fixes after protocol request construction.
+func PrepareRequestBody(ctx Context, body map[string]interface{}) map[string]interface{} {
+	return NewChain(ctx).PrepareRequestBody(body)
 }
 
 // NormalizeAssistantMessage applies provider-specific response compatibility

@@ -254,6 +254,7 @@ func sendPipeRequest(session *PipeSession, message string, stream bool) (*pipeCo
 		Temperature: 0.7,
 	}
 	requestBody := session.Adapter.BuildRequest(config)
+	requestBody = preparePipeSessionRequestBody(session, requestBody)
 
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
@@ -300,12 +301,14 @@ func sendPipeRequest(session *PipeSession, message string, stream bool) (*pipeCo
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
 			line := scanner.Text()
-			if data, ok := strings.CutPrefix(line, "data: "); ok {
+			if data, ok := strings.CutPrefix(line, "data:"); ok {
+				data = strings.TrimSpace(data)
 				if data == "[DONE]" {
 					continue
 				}
 				var chunkData map[string]any
 				if err := json.Unmarshal([]byte(data), &chunkData); err == nil {
+					chunkData = normalizePipeSessionStreamChunk(session, chunkData)
 					// 优先提取推理内容
 					if reasoning := session.Adapter.ExtractStreamReasoning(chunkData); reasoning != "" {
 						result.Response += reasoning
