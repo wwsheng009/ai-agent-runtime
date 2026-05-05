@@ -1149,6 +1149,13 @@ func (c *GatewayClient) buildAdapterRequest(model string, req *LLMRequest, selec
 			metadata["tool_replay_sanitized"] = true
 			metadata["tool_replay_dropped_messages"] = dropped
 		}
+		if selectedProviderIsSensenova(selected) {
+			before = len(messages)
+			messages = sanitizeSensenovaOpenAICompatibleProtocolMessages(messages)
+			if merged := before - len(messages); merged > 0 {
+				metadata["sensenova_system_messages_merged"] = merged
+			}
+		}
 	case "anthropic":
 		before := len(messages)
 		messages = sanitizeAnthropicProtocolMessages(messages)
@@ -1341,6 +1348,22 @@ func selectedProviderModelCapabilities(selected *SelectedResource) map[string]ag
 		}
 	}
 	return providerModelCapabilitiesWithFallback(modelCapabilities, providerName, protocol, baseURL)
+}
+
+func selectedProviderIsSensenova(selected *SelectedResource) bool {
+	if selected == nil || selected.Provider == nil {
+		return false
+	}
+	baseURL := strings.TrimSpace(selected.Provider.BaseURL)
+	if baseURL == "" {
+		switch cfg := selected.Provider.Config.(type) {
+		case *agentconfig.Provider:
+			baseURL = cfg.BaseURL
+		case agentconfig.Provider:
+			baseURL = cfg.BaseURL
+		}
+	}
+	return isSensenovaProvider(selected.Provider.Name, baseURL)
 }
 
 func newGatewayHTTPError(statusCode int, body string, header http.Header, rules []RetryRule) error {

@@ -489,6 +489,8 @@ func defaultProviderLoginReasoningEfforts(providerName, loginProtocol string, pr
 	switch {
 	case providerLoginIsNVIDIA(providerName, provider):
 		return []string{"minimal", "low", "medium", "high"}
+	case providerLoginIsSensenova(providerName, provider):
+		return []string{"low", "medium", "high", "none"}
 	case providerLoginIsDeepSeek(providerName, provider, models):
 		return []string{"high", "max"}
 	case strings.EqualFold(runtimeProtocolForLoginProtocol(loginProtocol), "codex"):
@@ -507,6 +509,9 @@ func providerLoginModelUsesDefaultReasoningEfforts(modelID, providerName, loginP
 	if providerLoginIsNVIDIA(providerName, provider) {
 		return true
 	}
+	if providerLoginIsSensenova(providerName, provider) {
+		return true
+	}
 	if providerLoginIsDeepSeekModel(modelID) {
 		return true
 	}
@@ -520,6 +525,9 @@ func providerLoginUsesWildcardReasoningEfforts(loginProtocol string, provider co
 	if strings.EqualFold(runtimeProtocolForLoginProtocol(loginProtocol), "codex") {
 		return true
 	}
+	if providerLoginIsSensenova("", provider) {
+		return true
+	}
 	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
 	return strings.Contains(baseURL, "/codex")
 }
@@ -528,6 +536,12 @@ func providerLoginIsNVIDIA(providerName string, provider config.Provider) bool {
 	name := strings.ToLower(strings.TrimSpace(providerName))
 	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
 	return name == "nvidia" || strings.Contains(baseURL, "integrate.api.nvidia.com")
+}
+
+func providerLoginIsSensenova(providerName string, provider config.Provider) bool {
+	name := strings.ToLower(strings.TrimSpace(providerName))
+	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
+	return strings.Contains(name, "sensenova") || strings.Contains(baseURL, "sensenova.cn")
 }
 
 func providerLoginIsDeepSeek(providerName string, provider config.Provider, models []providerModelInfo) bool {

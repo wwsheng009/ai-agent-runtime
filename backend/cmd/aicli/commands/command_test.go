@@ -620,6 +620,40 @@ func TestResolveChatReasoningEffort_UsesNVIDIAFallbackCapability(t *testing.T) {
 	}
 }
 
+func TestResolveChatReasoningEffort_UsesSensenovaFallbackCapability(t *testing.T) {
+	provider := config.Provider{
+		Protocol: "openai",
+		BaseURL:  "https://token.sensenova.cn/v1",
+	}
+
+	effort, warning, err := resolveChatReasoningEffort(provider, "sensenova-6.7-flash-lite", "max", false)
+	if err != nil {
+		t.Fatalf("expected nil error for stored unsupported effort, got %v", err)
+	}
+	if effort != "" {
+		t.Fatalf("expected unsupported sensenova effort to be cleared, got %q", effort)
+	}
+	if !strings.Contains(warning, "已清空") {
+		t.Fatalf("expected clear warning, got %q", warning)
+	}
+
+	effort, warning, err = resolveChatReasoningEffort(provider, "sensenova-6.7-flash-lite", "high", true)
+	if err != nil {
+		t.Fatalf("expected nil error for sensenova high, got %v", err)
+	}
+	if warning != "" || effort != "high" {
+		t.Fatalf("expected high without warning, got effort=%q warning=%q", effort, warning)
+	}
+
+	effort, warning, err = resolveChatReasoningEffort(provider, "sensenova-6.7-flash-lite", "xhigh", true)
+	if err == nil {
+		t.Fatal("expected explicit unsupported sensenova effort to fail")
+	}
+	if effort != "" || warning != "" {
+		t.Fatalf("expected empty effort/warning on explicit error, got effort=%q warning=%q", effort, warning)
+	}
+}
+
 func TestResolveChatReasoningEffort_WithoutCapabilityDoesNotInjectDefault(t *testing.T) {
 	effort, warning, err := resolveChatReasoningEffort(config.Provider{}, "gpt-5.4", "", false)
 	if err != nil {

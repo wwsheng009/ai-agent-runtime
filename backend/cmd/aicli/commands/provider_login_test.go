@@ -165,6 +165,24 @@ func TestRunProviderLogin_AddsDefaultCodexReasoningEfforts(t *testing.T) {
 	}
 }
 
+func TestBuildProviderLoginModelCapabilities_AddsSensenovaReasoningEfforts(t *testing.T) {
+	capabilities := buildProviderLoginModelCapabilities("sensenova", "openai", config.Provider{
+		Protocol: "openai",
+		BaseURL:  "https://token.sensenova.cn/v1",
+	}, []providerModelInfo{{ID: "sensenova-6.7-flash-lite"}})
+
+	capability, ok := capabilities["sensenova-6.7-flash-lite"]
+	if !ok {
+		t.Fatalf("expected sensenova model capability, got %+v", capabilities)
+	}
+	if !capability.ReasoningModel || strings.Join(capability.ReasoningEfforts, ",") != "low,medium,high,none" {
+		t.Fatalf("unexpected capability: %+v", capability)
+	}
+	if wildcard := capabilities["*"]; !wildcard.ReasoningModel || strings.Join(wildcard.ReasoningEfforts, ",") != "low,medium,high,none" {
+		t.Fatalf("unexpected wildcard capability: %+v", wildcard)
+	}
+}
+
 func TestRunProviderLogin_DoesNotWriteOnModelsFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)

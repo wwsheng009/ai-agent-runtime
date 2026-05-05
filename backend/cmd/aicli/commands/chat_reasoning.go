@@ -90,6 +90,12 @@ func fallbackReasoningEffortCapabilityForProvider(providerName string, provider 
 	}
 	name := strings.ToLower(strings.TrimSpace(providerName))
 	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
+	if strings.Contains(name, "sensenova") || strings.Contains(baseURL, "sensenova.cn") {
+		return config.ModelCapabilitySpec{
+			ReasoningModel:   true,
+			ReasoningEfforts: []string{"low", "medium", "high", "none"},
+		}, true
+	}
 	if name != "nvidia" && !strings.Contains(baseURL, "integrate.api.nvidia.com") {
 		return config.ModelCapabilitySpec{}, false
 	}

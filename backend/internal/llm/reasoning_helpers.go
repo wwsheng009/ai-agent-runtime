@@ -562,6 +562,55 @@ func sanitizeOpenAICompatibleProtocolMessages(messages []map[string]interface{})
 	return filtered
 }
 
+func sanitizeSensenovaOpenAICompatibleProtocolMessages(messages []map[string]interface{}) []map[string]interface{} {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	filtered := make([]map[string]interface{}, 0, len(messages))
+	var pendingSystem map[string]interface{}
+	flushSystem := func() {
+		if pendingSystem == nil {
+			return
+		}
+		filtered = append(filtered, pendingSystem)
+		pendingSystem = nil
+	}
+
+	for _, msg := range messages {
+		role, _ := msg["role"].(string)
+		if strings.EqualFold(strings.TrimSpace(role), "system") {
+			if pendingSystem == nil {
+				pendingSystem = cloneMapStringAny(msg)
+				continue
+			}
+			mergeOpenAICompatibleStringContent(pendingSystem, msg)
+			continue
+		}
+		flushSystem()
+		filtered = append(filtered, msg)
+	}
+	flushSystem()
+
+	return filtered
+}
+
+func mergeOpenAICompatibleStringContent(dst, src map[string]interface{}) {
+	if dst == nil || src == nil {
+		return
+	}
+	existing, _ := dst["content"].(string)
+	additional, _ := src["content"].(string)
+	if strings.TrimSpace(additional) == "" {
+		return
+	}
+	if strings.TrimSpace(existing) == "" {
+		dst["content"] = additional
+		return
+	}
+	dst["content"] = strings.TrimRight(existing, "\n") + "\n\n" + strings.TrimLeft(additional, "\n")
+}
+
 func sanitizeCodexProtocolMessages(messages []map[string]interface{}) []map[string]interface{} {
 	if len(messages) == 0 {
 		return nil
@@ -1448,11 +1497,19 @@ func encodeProviderToolCalls(calls []ToolCall) []map[string]interface{} {
 			"type": call.Type,
 			"function": map[string]interface{}{
 				"name":      call.Function.Name,
-				"arguments": call.Function.Arguments,
+				"arguments": normalizeToolCallArgumentsJSON(call.Function.Arguments),
 			},
 		})
 	}
 	return result
+}
+
+func normalizeToolCallArgumentsJSON(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.EqualFold(trimmed, "null") {
+		return "{}"
+	}
+	return raw
 }
 
 func decodeSliceOfMaps(value interface{}) []map[string]interface{} {

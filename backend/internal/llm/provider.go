@@ -1402,13 +1402,18 @@ func (p *ProviderWrapper) toChatRequest(req *LLMRequest) ChatRequest {
 	for _, msg := range req.Messages {
 		toolCalls := make([]ToolCall, 0, len(msg.ToolCalls))
 		for _, call := range msg.ToolCalls {
-			argsBytes, _ := json.Marshal(call.Args)
+			argsJSON := "{}"
+			if len(call.Args) > 0 {
+				if argsBytes, err := json.Marshal(call.Args); err == nil && len(argsBytes) > 0 && string(argsBytes) != "null" {
+					argsJSON = string(argsBytes)
+				}
+			}
 			toolCalls = append(toolCalls, ToolCall{
 				ID:   call.ID,
 				Type: "function",
 				Function: ToolCallFunc{
 					Name:      call.Name,
-					Arguments: string(argsBytes),
+					Arguments: argsJSON,
 				},
 			})
 		}
@@ -1574,6 +1579,13 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 		if dropped := before - len(messages); dropped > 0 {
 			metadata["tool_replay_sanitized"] = true
 			metadata["tool_replay_dropped_messages"] = dropped
+		}
+		if isSensenovaProvider("", p.config.BaseURL) {
+			before = len(messages)
+			messages = sanitizeSensenovaOpenAICompatibleProtocolMessages(messages)
+			if merged := before - len(messages); merged > 0 {
+				metadata["sensenova_system_messages_merged"] = merged
+			}
 		}
 	case "anthropic":
 		before := len(messages)

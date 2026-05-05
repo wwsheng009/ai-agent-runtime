@@ -55,6 +55,12 @@ func fallbackProviderModelCapability(providerName, protocol, baseURL string) (ag
 	}
 	name := strings.ToLower(strings.TrimSpace(providerName))
 	normalizedBaseURL := strings.ToLower(strings.TrimSpace(baseURL))
+	if isSensenovaProvider(name, normalizedBaseURL) {
+		return agentconfig.ModelCapabilitySpec{
+			ReasoningModel:   true,
+			ReasoningEfforts: []string{"low", "medium", "high", "none"},
+		}, true
+	}
 	if name != "nvidia" && !strings.Contains(normalizedBaseURL, "integrate.api.nvidia.com") {
 		return agentconfig.ModelCapabilitySpec{}, false
 	}
@@ -62,6 +68,12 @@ func fallbackProviderModelCapability(providerName, protocol, baseURL string) (ag
 		ReasoningModel:   true,
 		ReasoningEfforts: []string{"minimal", "low", "medium", "high"},
 	}, true
+}
+
+func isSensenovaProvider(providerName, baseURL string) bool {
+	name := strings.ToLower(strings.TrimSpace(providerName))
+	normalizedBaseURL := strings.ToLower(strings.TrimSpace(baseURL))
+	return strings.Contains(name, "sensenova") || strings.Contains(normalizedBaseURL, "sensenova.cn")
 }
 
 func providerModelCapabilitiesWithFallback(capabilities map[string]agentconfig.ModelCapabilitySpec, providerName, protocol, baseURL string) map[string]agentconfig.ModelCapabilitySpec {

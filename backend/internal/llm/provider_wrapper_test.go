@@ -230,6 +230,114 @@ func TestProviderWrapper_ConvertRequestUsesNVIDIAFallbackCapability(t *testing.T
 	assert.NotContains(t, body, "reasoning_effort")
 }
 
+func TestProviderWrapper_ConvertRequestUsesSensenovaFallbackCapability(t *testing.T) {
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: "https://token.sensenova.cn/v1",
+	})
+	require.NoError(t, err)
+	wrapper := provider.(*ProviderWrapper)
+
+	cfg := wrapper.convertRequest(ChatRequest{
+		Model:           "sensenova-6.7-flash-lite",
+		ReasoningEffort: "max",
+		Messages: []Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	if cfg.ReasoningEffort != "" {
+		t.Fatalf("expected unsupported sensenova reasoning_effort to be omitted, got %q", cfg.ReasoningEffort)
+	}
+
+	body := wrapper.adapter.BuildRequest(cfg)
+	assert.NotContains(t, body, "reasoning_effort")
+
+	cfg = wrapper.convertRequest(ChatRequest{
+		Model:           "sensenova-6.7-flash-lite",
+		ReasoningEffort: "xhigh",
+		Messages: []Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	if cfg.ReasoningEffort != "" {
+		t.Fatalf("expected unsupported sensenova reasoning_effort xhigh to be omitted, got %q", cfg.ReasoningEffort)
+	}
+
+	cfg = wrapper.convertRequest(ChatRequest{
+		Model:           "sensenova-6.7-flash-lite",
+		ReasoningEffort: "high",
+		Messages: []Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	if cfg.ReasoningEffort != "high" {
+		t.Fatalf("expected supported sensenova reasoning_effort high, got %q", cfg.ReasoningEffort)
+	}
+}
+
+func TestProviderWrapper_ConvertRequestSanitizesSensenovaMessageCompatibility(t *testing.T) {
+	provider, err := NewProvider(&ProviderConfig{
+		Type:    "openai",
+		BaseURL: "https://token.sensenova.cn/v1",
+	})
+	require.NoError(t, err)
+	wrapper := provider.(*ProviderWrapper)
+
+	cfg := wrapper.convertRequest(ChatRequest{
+		Model: "sensenova-6.7-flash-lite",
+		Messages: []Message{
+			{Role: "system", Content: "first"},
+			{Role: "system", Content: "second"},
+			{Role: "user", Content: "ls"},
+			{
+				Role:    "assistant",
+				Content: "\n\n",
+				ToolCalls: []ToolCall{{
+					ID:   "call_1",
+					Type: "function",
+					Function: ToolCallFunc{
+						Name:      "ls",
+						Arguments: "null",
+					},
+				}},
+			},
+			{Role: "tool", Content: "ok", ToolCallID: "call_1"},
+		},
+	})
+
+	require.Len(t, cfg.Messages, 4)
+	assert.Equal(t, "system", cfg.Messages[0]["role"])
+	assert.Equal(t, "first\n\nsecond", cfg.Messages[0]["content"])
+
+	toolCalls, ok := cfg.Messages[2]["tool_calls"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, toolCalls, 1)
+	function, ok := toolCalls[0]["function"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "{}", function["arguments"])
+}
+
+func TestProviderWrapper_ToChatRequestDefaultsNilToolArgumentsToObject(t *testing.T) {
+	wrapper := &ProviderWrapper{config: &ProviderConfig{Type: "openai"}}
+
+	req := wrapper.toChatRequest(&LLMRequest{
+		Messages: []types.Message{{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{{
+				ID:   "call_1",
+				Name: "ls",
+			}},
+		}},
+	})
+
+	require.Len(t, req.Messages, 1)
+	require.Len(t, req.Messages[0].ToolCalls, 1)
+	assert.Equal(t, "{}", req.Messages[0].ToolCalls[0].Function.Arguments)
+}
+
 func TestProviderWrapper_CallRejectsEmptyChoices(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
