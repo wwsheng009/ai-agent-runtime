@@ -193,7 +193,7 @@ func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
 		if reasoningEffort == "" {
 			reasoningEffort = "-"
 		}
-		parts = append(parts, "thinking_effort "+compactStatusValueOrDash(reasoningEffort, 12))
+		parts = append(parts, "reasoning_effort "+compactStatusValueOrDash(reasoningEffort, 12))
 
 		if budget := resolveSharedChatPromptBudget(session); budget.ActiveTurnMaxTokens > 0 || budget.ModelCapabilityMaxContextTokens > 0 || budget.ProviderContextLimit > 0 || session.ContextWindowTokenCount > 0 || session.ContextTokenCount > 0 || len(session.Messages) > 0 {
 			if ctxSummary := formatChatContextWindowSummary(session, budget); ctxSummary != "" {

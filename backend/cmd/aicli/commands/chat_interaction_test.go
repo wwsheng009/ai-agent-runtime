@@ -1005,7 +1005,7 @@ func TestChatInteractionCoordinator_ClearPromptAdvancesLineForBufferedWriters(t 
 	}
 }
 
-func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirectory(t *testing.T) {
+func TestBuildChatSurfaceStatusLine_IncludesReasoningEffortContextAndCurrentDirectory(t *testing.T) {
 	previousWD, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("os.Getwd: %v", err)
@@ -1044,7 +1044,7 @@ func TestBuildChatSurfaceStatusLine_IncludesThinkingEffortContextAndCurrentDirec
 	for _, want := range []string{
 		"Thinking",
 		"model gpt-5.4-code",
-		"thinking_effort " + runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort),
+		"reasoning_effort " + runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort),
 		"ctx 128000 used 28640 22%",
 		"openai",
 		"msgs 17",

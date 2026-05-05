@@ -173,7 +173,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		{
 			Name:        "/model",
 			Usage:       "/model [name|status|clear-reasoning|--provider ...]",
-			Summary:     "查看或切换 provider/model/thinking_effort",
+			Summary:     "查看或切换 provider/model/reasoning_effort",
 			Group:       string(chatSlashCommandGroupModel),
 			AcceptsArgs: true,
 		},
