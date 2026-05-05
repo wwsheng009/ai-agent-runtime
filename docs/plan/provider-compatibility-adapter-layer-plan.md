@@ -4,7 +4,14 @@
 
 状态：in_progress
 
-实施状态：已落地 `providercompat` 兼容层骨架，并将 Sensenova / NVIDIA / DeepSeek / Codex 的首批兼容规则接入 runtime 与 CLI；response-side 归一化和更完整的 registry 仍保留在后续 phase。
+实施状态：已落地 `providercompat` 兼容层骨架，并将 Sensenova / NVIDIA / DeepSeek / Codex 的首批兼容规则接入 runtime 与 CLI；`ProviderWrapper` 与 `GatewayClient` 已共用内部 request assembly helper；response-side 归一化和更完整的 provider adapter registry 仍保留在后续 phase。
+
+最新进展：
+
+- 已新增 `backend/internal/llm/provider_adapter_request.go`，集中处理协议 sanitizer、provider compat message transform、tools 构建、`reasoning_effort` 过滤、Codex `max_output_tokens` gating。
+- 已将 `ProviderWrapper.convertRequest` 和 `GatewayClient.buildAdapterRequest` 改为薄 wrapper，二者共用同一套 request assembly。
+- 已补齐 DeepSeek runtime fallback capability：`reasoning_efforts = [high, max]`。
+- 已保留 DeepSeek legacy reasoning model fallback，避免旧配置在没有显式 `model_capabilities` 时重新发送 `temperature`。
 
 ## 背景
 
