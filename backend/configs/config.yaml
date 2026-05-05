@@ -12,9 +12,9 @@ aicli:
   timeout:
     request_timeout: ${AICLI_REQUEST_TIMEOUT:-0s}
   chat:
-    default_provider: mimo_anthropic
-    default_model: mimo-v2.5-pro
-    reasoning_effort: max
+    default_provider: sensenova
+    default_model: sensenova-6.7-flash-lite
+    reasoning_effort: medium
     stream: true
 auth:
   access_auth:
@@ -903,6 +903,19 @@ providers:
         - z-ai/glm-5.1
       timeout: 300s
       truncation_adapter: openai_local
+    sensenova:
+      enabled: true
+      protocol: openai
+      base_url: https://token.sensenova.cn/v1
+      default_model: sensenova-6.7-flash-lite
+      api_key_ref: sensenova
+      auth_mode: api_key
+      models_path: /v1/models
+      models_verified_at: "2026-05-05T01:08:44Z"
+      supported_models:
+        - sensenova-6.7-flash-lite
+        - deepseek-v4-flash
+        - sensenova-u1-fast
   proxy:
     enabled: ${PROXY_ENABLED:-false}
     http: ${HTTP_PROXY:-http://127.0.0.1:10810}
