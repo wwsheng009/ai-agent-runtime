@@ -130,6 +130,49 @@ func TestNormalizeToolCallArgumentsAndCodexSupport(t *testing.T) {
 	}
 }
 
+func TestNormalizeAssistantMessage_OpenAIToolCallsAndReasoning(t *testing.T) {
+	message := map[string]interface{}{
+		"role":      "assistant",
+		"content":   "",
+		"reasoning": "think",
+		"tool_calls": []map[string]interface{}{
+			{
+				"id": "call_1",
+				"function": map[string]interface{}{
+					"name": "first",
+					"arguments": map[string]interface{}{
+						"path": ".",
+					},
+				},
+			},
+			{
+				"name":      "legacy",
+				"arguments": nil,
+			},
+		},
+	}
+
+	normalized := NormalizeAssistantMessage(Context{Protocol: "openai"}, message)
+	if normalized["reasoning_content"] != "think" {
+		t.Fatalf("expected reasoning_content to be populated, got %#v", normalized)
+	}
+	toolCalls, ok := normalized["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 2 {
+		t.Fatalf("expected normalized tool_calls, got %#v", normalized["tool_calls"])
+	}
+	firstFn, _ := toolCalls[0]["function"].(map[string]interface{})
+	if got := firstFn["arguments"]; got != `{"path":"."}` {
+		t.Fatalf("expected object arguments to be encoded, got %#v", got)
+	}
+	secondFn, _ := toolCalls[1]["function"].(map[string]interface{})
+	if secondFn["name"] != "legacy" || secondFn["arguments"] != "{}" {
+		t.Fatalf("expected legacy function_call shape to normalize, got %#v", secondFn)
+	}
+	if toolCalls[1]["type"] != "function" {
+		t.Fatalf("expected legacy tool call type=function, got %#v", toolCalls[1]["type"])
+	}
+}
+
 func TestReplayableOpenAIReasoningContent(t *testing.T) {
 	reasoning := &types.ReasoningBlock{
 		Provider:       "deepseek",

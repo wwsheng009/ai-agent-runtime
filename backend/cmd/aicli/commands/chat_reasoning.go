@@ -52,7 +52,7 @@ func reasoningEffortCatalogForModel(provider config.Provider, modelName string) 
 			}
 		}
 	}
-	if capability, ok := fallbackReasoningEffortCapabilityForProvider("", provider); ok {
+	if capability, ok := fallbackReasoningEffortCapabilityForProvider("", provider, modelName); ok {
 		options := normalizeReasoningEffortOptions(capability.ReasoningEfforts)
 		if len(options) > 0 {
 			return reasoningEffortCatalog{
@@ -79,13 +79,13 @@ func reasoningEffortCapabilityForRequest(session *ChatSession) (config.ModelCapa
 	if capability, ok := reasoningEffortCapabilityForModel(session.Provider, session.Model); ok {
 		return capability, true
 	}
-	if capability, ok := fallbackReasoningEffortCapabilityForProvider(session.ProviderName, session.Provider); ok {
+	if capability, ok := fallbackReasoningEffortCapabilityForProvider(session.ProviderName, session.Provider, session.Model); ok {
 		return capability, true
 	}
 	return config.ModelCapabilitySpec{}, false
 }
 
-func fallbackReasoningEffortCapabilityForProvider(providerName string, provider config.Provider) (config.ModelCapabilitySpec, bool) {
+func fallbackReasoningEffortCapabilityForProvider(providerName string, provider config.Provider, modelName string) (config.ModelCapabilitySpec, bool) {
 	if !strings.EqualFold(strings.TrimSpace(provider.GetProtocol()), "openai") {
 		return config.ModelCapabilitySpec{}, false
 	}
@@ -93,6 +93,7 @@ func fallbackReasoningEffortCapabilityForProvider(providerName string, provider 
 		ProviderName: providerName,
 		Protocol:     provider.GetProtocol(),
 		BaseURL:      provider.BaseURL,
+		Model:        modelName,
 	})
 	if !ok {
 		return config.ModelCapabilitySpec{}, false

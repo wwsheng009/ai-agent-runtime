@@ -4,7 +4,7 @@
 
 状态：in_progress
 
-实施状态：已落地 `providercompat` provider adapter registry，并将 Sensenova / NVIDIA / DeepSeek / Codex 的首批兼容规则拆分到独立 adapter 文件；`ProviderWrapper` 与 `GatewayClient` 已共用内部 request assembly helper；response-side 归一化仍保留在后续 phase。
+实施状态：已落地 `providercompat` provider adapter registry，并将 Sensenova / NVIDIA / DeepSeek / Codex 的首批兼容规则拆分到独立 adapter 文件；`ProviderWrapper` 与 `GatewayClient` 已共用内部 request assembly helper；response-side assistant message 归一化扩展点已接入 runtime 与 aicli。
 
 最新进展：
 
@@ -14,6 +14,8 @@
 - 已保留 DeepSeek legacy reasoning model fallback，避免旧配置在没有显式 `model_capabilities` 时重新发送 `temperature`。
 - 已新增静态 provider adapter registry：Sensenova / NVIDIA / DeepSeek / ChatGPT Codex backend / Codex default / OpenAI default 均通过 `providercompat.Chain` 按上下文匹配和执行。
 - 已将 aicli login 的 DeepSeek 默认 effort 特例改为 providercompat 模型 hint，默认 effort 列表继续由 provider adapter 统一给出。
+- 已新增 response-side `NormalizeAssistantMessage` 扩展点，并接入 `ProviderWrapper`、`GatewayClient`、aicli chat/pipe 响应链路；OpenAI-compatible 默认 adapter 会归一化 `reasoning`/`reasoning_content` 和工具调用 `arguments` 形态。
+- 已从 `adapter/openai.go` 移除对 `providercompat` 的依赖；DeepSeek 模型名兜底改由 runtime/aicli capability fallback 处理，协议 adapter 只保留 OpenAI 命名规则。
 
 ## 背景
 

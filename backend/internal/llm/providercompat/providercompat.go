@@ -137,6 +137,17 @@ func (c Chain) NormalizeToolCallArguments(raw string) string {
 	return raw
 }
 
+// NormalizeAssistantMessage applies provider-specific response fixes after the
+// protocol adapter has parsed the provider response.
+func (c Chain) NormalizeAssistantMessage(message map[string]interface{}) map[string]interface{} {
+	for _, adapter := range c.adapters {
+		if normalized, ok := adapter.NormalizeAssistantMessage(c.ctx, message); ok {
+			message = normalized
+		}
+	}
+	return message
+}
+
 // ReplayableOpenAIReasoningContent returns the reasoning content that should
 // be replayed into an OpenAI-compatible request transcript.
 func (c Chain) ReplayableOpenAIReasoningContent(toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock) (string, bool) {
@@ -271,6 +282,12 @@ func NormalizeOpenAICompatibleMessages(ctx Context, messages []map[string]interf
 // NormalizeToolCallArguments normalizes OpenAI-compatible tool call arguments.
 func NormalizeToolCallArguments(raw string) string {
 	return NewChain(Context{}).NormalizeToolCallArguments(raw)
+}
+
+// NormalizeAssistantMessage applies provider-specific response compatibility
+// fixes after protocol parsing.
+func NormalizeAssistantMessage(ctx Context, message map[string]interface{}) map[string]interface{} {
+	return NewChain(ctx).NormalizeAssistantMessage(message)
 }
 
 // ReplayableOpenAIReasoningContent returns the reasoning content that should

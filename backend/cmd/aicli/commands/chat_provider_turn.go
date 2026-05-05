@@ -221,6 +221,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		}
 		return nil, fmt.Errorf("响应处理失败: %w", err)
 	}
+	assistantMsg = normalizeChatSessionAssistantMessage(session, assistantMsg)
 
 	if needStreamBody {
 		responseBody = streamCapture.Bytes()

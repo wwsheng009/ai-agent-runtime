@@ -14,6 +14,7 @@ type Adapter interface {
 	LoginModelUsesDefaultReasoningEfforts(Context, string) (bool, bool)
 	LoginUsesWildcardReasoningEfforts(Context) (bool, bool)
 	NormalizeOpenAICompatibleMessages(Context, []map[string]interface{}) ([]map[string]interface{}, bool)
+	NormalizeAssistantMessage(Context, map[string]interface{}) (map[string]interface{}, bool)
 	ReplayableOpenAIReasoningContent(Context, []map[string]interface{}, *types.ReasoningBlock) (string, bool)
 	SupportsMaxOutputTokens(Context) (bool, bool)
 }
@@ -40,6 +41,10 @@ func (BaseAdapter) LoginUsesWildcardReasoningEfforts(Context) (bool, bool) {
 
 func (BaseAdapter) NormalizeOpenAICompatibleMessages(_ Context, messages []map[string]interface{}) ([]map[string]interface{}, bool) {
 	return messages, false
+}
+
+func (BaseAdapter) NormalizeAssistantMessage(_ Context, message map[string]interface{}) (map[string]interface{}, bool) {
+	return message, false
 }
 
 func (BaseAdapter) ReplayableOpenAIReasoningContent(Context, []map[string]interface{}, *types.ReasoningBlock) (string, bool) {

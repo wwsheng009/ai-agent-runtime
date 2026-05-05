@@ -7,7 +7,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -774,9 +773,21 @@ func (a *OpenAIAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]inter
 // IsReasoningModel is retained for legacy callers only. Request assembly and
 // session display now prefer explicit capability flags from configuration.
 func (a *OpenAIAdapter) IsReasoningModel(model string) bool {
-	return providercompat.IsDeepSeekModel(model) ||
-		providercompat.LooksLikeOpenAIReasoningModel(model) ||
-		isReasoningModelPrefix(model)
+	return looksLikeOpenAIReasoningModel(model) || isReasoningModelPrefix(model)
+}
+
+func looksLikeOpenAIReasoningModel(modelID string) bool {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	modelID = strings.TrimPrefix(modelID, "models/")
+	if strings.Contains(modelID, "codex") {
+		return true
+	}
+	for _, prefix := range []string{"gpt-5", "o1", "o3", "o4", "o5"} {
+		if strings.HasPrefix(modelID, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetAPIPath returns default API path

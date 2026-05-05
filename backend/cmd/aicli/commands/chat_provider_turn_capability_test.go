@@ -140,6 +140,33 @@ func TestAdapterRequestConfig_TreatsDeepSeekModelAsReasoningWithoutConfiguredCap
 	}
 }
 
+func TestAdapterRequestConfig_TreatsDeepSeekModelHintAsProviderCompatFallback(t *testing.T) {
+	session := &ChatSession{
+		ProviderName: "",
+		Provider: config.Provider{
+			Enabled:  true,
+			Protocol: "openai",
+			BaseURL:  "https://example.com/v1",
+		},
+		Adapter:         adapter.GetAdapterOrDefault("openai"),
+		Model:           "deepseek-ai/DeepSeek-V4-Pro",
+		ReasoningEffort: "max",
+	}
+
+	cfg := adapterRequestConfig(session, []map[string]interface{}{{"role": "user", "content": "hi"}}, runtimechatcore.ProviderTurnRequest{Stream: false})
+	if !cfg.ReasoningModel {
+		t.Fatal("expected deepseek model hint to be treated as reasoning model")
+	}
+	if cfg.ReasoningEffort != "max" {
+		t.Fatalf("expected deepseek reasoning_effort=max, got %q", cfg.ReasoningEffort)
+	}
+
+	body := session.Adapter.BuildRequest(cfg)
+	if _, exists := body["temperature"]; exists {
+		t.Fatalf("expected OpenAI request to omit temperature for deepseek model hint, got %#v", body["temperature"])
+	}
+}
+
 // TestAdapterRequestConfig_AnthropicBuildRequestDerivesThinking 验证 Anthropic
 // adapter 在请求层使用 ReasoningEffort + ReasoningEffortBudgets 生成 thinking 配置，
 // 而不是依赖会话层直接传入协议特定字段。

@@ -552,6 +552,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	if err != nil {
 		return nil, newGatewayResponseError("failed to handle response", err, c.retryRules)
 	}
+	assistantMsg = normalizeGatewayAssistantMessage(selected, protocol, adapterRequest.Model, assistantMsg)
 	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
 		if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
 			if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
@@ -762,6 +763,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	assistantMsg, err := adpt.HandleResponse(true, io.TeeReader(httpResp.Body, &responseBuffer), callbacks)
 	responseBody := append([]byte(nil), responseBuffer.Bytes()...)
 	if err == nil {
+		assistantMsg = normalizeGatewayAssistantMessage(selected, protocol, adapterRequest.Model, assistantMsg)
 		err = validateStreamingAggregateResponse(protocol, responseBody, assistantMsg)
 	}
 	reportHTTPDebug(ctx, HTTPDebugEvent{

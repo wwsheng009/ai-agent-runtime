@@ -571,6 +571,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	if err != nil {
 		return nil, fmt.Errorf("failed to handle response: %w", err)
 	}
+	assistantMsg = p.normalizeAssistantMessage(adapterRequest.Model, assistantMsg)
 	if assistantMessageHasTruncatedToolCall(assistantMsg) {
 		return nil, fmt.Errorf("truncated_tool_call: model output was truncated before completing a tool call; split long file writes into smaller chunks and retry")
 	}
@@ -799,6 +800,7 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 	if err != nil {
 		return fmt.Errorf("failed to handle stream response: %w", err)
 	}
+	assistantMsg = p.normalizeAssistantMessage(adapterRequest.Model, assistantMsg)
 	if assistantMessageHasTruncatedToolCall(assistantMsg) {
 		return fmt.Errorf("truncated_tool_call: model output was truncated before completing a tool call; split long file writes into smaller chunks and retry")
 	}
@@ -1191,6 +1193,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 		responseBody := append([]byte(nil), responseBuffer.Bytes()...)
 
 		if handleErr == nil {
+			assistantMsg = p.normalizeAssistantMessage(adapterRequest.Model, assistantMsg)
 			handleErr = validateStreamingAggregateResponse(p.config.Type, responseBody, assistantMsg)
 		}
 		reportHTTPDebug(attemptCtx, HTTPDebugEvent{
@@ -1595,7 +1598,15 @@ func (p *ProviderWrapper) convertTools(tools []Tool, protocol string, model stri
 
 // HandleResponse 处理 HTTP 响应
 func (p *ProviderWrapper) HandleResponse(isStream bool, respBody io.Reader, callbacks adapter.StreamCallbacks) (map[string]interface{}, error) {
-	return p.adapter.HandleResponse(isStream, respBody, callbacks)
+	assistantMsg, err := p.adapter.HandleResponse(isStream, respBody, callbacks)
+	if err != nil {
+		return assistantMsg, err
+	}
+	model := ""
+	if p != nil && p.config != nil {
+		model = p.config.DefaultModel
+	}
+	return p.normalizeAssistantMessage(model, assistantMsg), nil
 }
 
 // buildURL 构建完整请求 URL

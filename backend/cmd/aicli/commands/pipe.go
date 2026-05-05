@@ -329,6 +329,7 @@ func sendPipeRequest(session *PipeSession, message string, stream bool) (*pipeCo
 		}
 		assistantMsg, handleErr := session.Adapter.HandleResponse(false, bytes.NewReader(body), adapter.StreamCallbacks{})
 		if handleErr == nil {
+			assistantMsg = normalizePipeSessionAssistantMessage(session, assistantMsg)
 			if content, ok := assistantMsg["content"].(string); ok && strings.TrimSpace(content) != "" {
 				result.Response = content
 			}
