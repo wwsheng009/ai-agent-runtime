@@ -54,6 +54,11 @@ func (c Chain) DefaultRuntimeCapability() (agentconfig.ModelCapabilitySpec, bool
 			ReasoningModel:   true,
 			ReasoningEfforts: []string{"minimal", "low", "medium", "high"},
 		}, true
+	case c.IsDeepSeek():
+		return agentconfig.ModelCapabilitySpec{
+			ReasoningModel:   true,
+			ReasoningEfforts: []string{"high", "max"},
+		}, true
 	default:
 		return agentconfig.ModelCapabilitySpec{}, false
 	}

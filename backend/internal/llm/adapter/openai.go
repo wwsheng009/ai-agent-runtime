@@ -774,7 +774,9 @@ func (a *OpenAIAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]inter
 // IsReasoningModel is retained for legacy callers only. Request assembly and
 // session display now prefer explicit capability flags from configuration.
 func (a *OpenAIAdapter) IsReasoningModel(model string) bool {
-	return providercompat.LooksLikeOpenAIReasoningModel(model) || isReasoningModelPrefix(model)
+	return providercompat.IsDeepSeekModel(model) ||
+		providercompat.LooksLikeOpenAIReasoningModel(model) ||
+		isReasoningModelPrefix(model)
 }
 
 // GetAPIPath returns default API path

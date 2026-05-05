@@ -7,7 +7,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-func TestDefaultRuntimeCapability_SensenovaAndNVIDIA(t *testing.T) {
+func TestDefaultRuntimeCapability_SensenovaNVIDIAAndDeepSeek(t *testing.T) {
 	spec, ok := DefaultRuntimeCapability(Context{
 		Protocol: "openai",
 		BaseURL:  "https://token.sensenova.cn/v1",
@@ -28,6 +28,18 @@ func TestDefaultRuntimeCapability_SensenovaAndNVIDIA(t *testing.T) {
 	}
 	if !spec.ReasoningModel || !reflect.DeepEqual(spec.ReasoningEfforts, []string{"minimal", "low", "medium", "high"}) {
 		t.Fatalf("unexpected nvidia capability: %#v", spec)
+	}
+
+	spec, ok = DefaultRuntimeCapability(Context{
+		Protocol:     "openai",
+		ProviderName: "deepseek",
+		BaseURL:      "https://api.deepseek.com",
+	})
+	if !ok {
+		t.Fatal("expected deepseek runtime capability")
+	}
+	if !spec.ReasoningModel || !reflect.DeepEqual(spec.ReasoningEfforts, []string{"high", "max"}) {
+		t.Fatalf("unexpected deepseek capability: %#v", spec)
 	}
 }
 
