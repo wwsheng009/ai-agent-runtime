@@ -487,14 +487,11 @@ func providerLoginModelCapabilitySpec(model providerModelInfo) config.ModelCapab
 }
 
 func defaultProviderLoginReasoningEfforts(providerName, loginProtocol string, provider config.Provider, models []providerModelInfo) []string {
-	if providerLoginIsDeepSeek(providerName, provider, models) {
-		return []string{"high", "max"}
-	}
 	return providercompat.DefaultLoginReasoningEfforts(providercompat.Context{
 		ProviderName: providerName,
 		Protocol:     runtimeProtocolForLoginProtocol(loginProtocol),
 		BaseURL:      provider.BaseURL,
-		Model:        firstProviderLoginModelID(models),
+		Model:        providerLoginCompatModelHint(models),
 	})
 }
 
@@ -514,34 +511,6 @@ func providerLoginUsesWildcardReasoningEfforts(loginProtocol string, provider co
 	})
 }
 
-func providerLoginIsNVIDIA(providerName string, provider config.Provider) bool {
-	return providercompat.IsNVIDIA(providerName, provider.BaseURL)
-}
-
-func providerLoginIsSensenova(providerName string, provider config.Provider) bool {
-	return providercompat.IsSensenova(providerName, provider.BaseURL)
-}
-
-func providerLoginIsDeepSeek(providerName string, provider config.Provider, models []providerModelInfo) bool {
-	if providercompat.IsDeepSeek(providerName, provider.BaseURL, firstProviderLoginModelID(models)) {
-		return true
-	}
-	for _, model := range models {
-		if providerLoginIsDeepSeekModel(model.ID) {
-			return true
-		}
-	}
-	return false
-}
-
-func providerLoginIsDeepSeekModel(modelID string) bool {
-	return providercompat.IsDeepSeekModel(modelID)
-}
-
-func providerLoginLooksLikeOpenAIReasoningModel(modelID string) bool {
-	return providercompat.LooksLikeOpenAIReasoningModel(modelID)
-}
-
 func firstProviderLoginModelID(models []providerModelInfo) string {
 	for _, model := range models {
 		if trimmed := strings.TrimSpace(model.ID); trimmed != "" {
@@ -549,6 +518,15 @@ func firstProviderLoginModelID(models []providerModelInfo) string {
 		}
 	}
 	return ""
+}
+
+func providerLoginCompatModelHint(models []providerModelInfo) string {
+	for _, model := range models {
+		if providercompat.IsDeepSeekModel(model.ID) {
+			return strings.TrimSpace(model.ID)
+		}
+	}
+	return firstProviderLoginModelID(models)
 }
 
 func mergeProviderLoginModelCapabilities(existing, discovered map[string]config.ModelCapabilitySpec) map[string]config.ModelCapabilitySpec {

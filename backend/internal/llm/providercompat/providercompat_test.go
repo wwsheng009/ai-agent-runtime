@@ -55,6 +55,31 @@ func TestDefaultLoginReasoningEfforts(t *testing.T) {
 	}
 }
 
+func TestAdapterRegistryPrecedenceAndCodexWildcard(t *testing.T) {
+	chain := NewChain(Context{
+		Protocol:     "openai",
+		ProviderName: "sensenova",
+		BaseURL:      "https://token.sensenova.cn/v1",
+	})
+	if len(chain.adapters) < 2 {
+		t.Fatalf("expected sensenova and openai adapters, got %d", len(chain.adapters))
+	}
+	if got := chain.adapters[0].Name(); got != "openai-sensenova" {
+		t.Fatalf("expected sensenova adapter before generic openai adapter, got %q", got)
+	}
+	if got := chain.DefaultLoginReasoningEfforts(); !reflect.DeepEqual(got, []string{"low", "medium", "high", "none"}) {
+		t.Fatalf("expected provider-specific defaults to win, got %#v", got)
+	}
+
+	codexPath := Context{Protocol: "openai", BaseURL: "https://example.com/backend-api/codex/responses"}
+	if !LoginUsesWildcardReasoningEfforts(codexPath) {
+		t.Fatal("expected codex path wildcard reasoning efforts to be preserved")
+	}
+	if !LoginModelUsesDefaultReasoningEfforts(codexPath, "plain-model") {
+		t.Fatal("expected codex path wildcard to apply defaults to discovered models")
+	}
+}
+
 func TestLoginModelUsesDefaultReasoningEfforts(t *testing.T) {
 	ctx := Context{Protocol: "openai", ProviderName: "sensenova", BaseURL: "https://token.sensenova.cn/v1"}
 	if !LoginModelUsesDefaultReasoningEfforts(ctx, "sensenova-6.7-flash-lite") {

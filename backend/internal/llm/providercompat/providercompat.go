@@ -23,12 +23,17 @@ type Context struct {
 // The first implementation keeps the surface small while still centralizing the
 // provider-specific decisions that used to be duplicated across call sites.
 type Chain struct {
-	ctx Context
+	ctx      Context
+	adapters []Adapter
 }
 
 // NewChain constructs a compatibility chain for the given provider context.
 func NewChain(ctx Context) Chain {
-	return Chain{ctx: normalizeContext(ctx)}
+	normalized := normalizeContext(ctx)
+	return Chain{
+		ctx:      normalized,
+		adapters: adaptersForContext(normalized),
+	}
 }
 
 func normalizeContext(ctx Context) Context {
@@ -40,47 +45,50 @@ func normalizeContext(ctx Context) Context {
 	return ctx
 }
 
+func cloneCapabilitySpec(spec agentconfig.ModelCapabilitySpec) agentconfig.ModelCapabilitySpec {
+	if len(spec.InputModalities) > 0 {
+		spec.InputModalities = append([]string(nil), spec.InputModalities...)
+	}
+	if len(spec.ReasoningEfforts) > 0 {
+		spec.ReasoningEfforts = append([]string(nil), spec.ReasoningEfforts...)
+	}
+	if len(spec.ReasoningEffortBudgets) > 0 {
+		budgets := make(map[string]int, len(spec.ReasoningEffortBudgets))
+		for key, value := range spec.ReasoningEffortBudgets {
+			budgets[key] = value
+		}
+		spec.ReasoningEffortBudgets = budgets
+	}
+	return spec
+}
+
+func cloneStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
+}
+
 // DefaultRuntimeCapability returns a provider-specific fallback capability used
 // by runtime request filtering.
 func (c Chain) DefaultRuntimeCapability() (agentconfig.ModelCapabilitySpec, bool) {
-	switch {
-	case c.IsSensenova():
-		return agentconfig.ModelCapabilitySpec{
-			ReasoningModel:   true,
-			ReasoningEfforts: []string{"low", "medium", "high", "none"},
-		}, true
-	case c.IsNVIDIA():
-		return agentconfig.ModelCapabilitySpec{
-			ReasoningModel:   true,
-			ReasoningEfforts: []string{"minimal", "low", "medium", "high"},
-		}, true
-	case c.IsDeepSeek():
-		return agentconfig.ModelCapabilitySpec{
-			ReasoningModel:   true,
-			ReasoningEfforts: []string{"high", "max"},
-		}, true
-	default:
-		return agentconfig.ModelCapabilitySpec{}, false
+	for _, adapter := range c.adapters {
+		if capability, ok := adapter.DefaultRuntimeCapability(c.ctx); ok {
+			return cloneCapabilitySpec(capability), true
+		}
 	}
+	return agentconfig.ModelCapabilitySpec{}, false
 }
 
 // DefaultLoginReasoningEfforts returns the default reasoning effort list used
 // by login/model discovery when a provider does not advertise one explicitly.
 func (c Chain) DefaultLoginReasoningEfforts() []string {
-	switch {
-	case c.IsNVIDIA():
-		return []string{"minimal", "low", "medium", "high"}
-	case c.IsSensenova():
-		return []string{"low", "medium", "high", "none"}
-	case c.IsDeepSeek():
-		return []string{"high", "max"}
-	case c.ctx.Protocol == "codex":
-		return []string{"low", "medium", "high", "xhigh", "none"}
-	case c.ctx.Protocol == "openai":
-		return []string{"low", "medium", "high", "xhigh", "none"}
-	default:
-		return nil
+	for _, adapter := range c.adapters {
+		if efforts, ok := adapter.DefaultLoginReasoningEfforts(c.ctx); ok {
+			return cloneStringSlice(efforts)
+		}
 	}
+	return nil
 }
 
 // LoginModelUsesDefaultReasoningEfforts reports whether a discovered model
@@ -89,14 +97,10 @@ func (c Chain) LoginModelUsesDefaultReasoningEfforts(modelID string) bool {
 	if c.LoginUsesWildcardReasoningEfforts() {
 		return true
 	}
-	if c.IsNVIDIA() || c.IsSensenova() {
-		return true
-	}
-	if IsDeepSeekModel(modelID) {
-		return true
-	}
-	if c.ctx.Protocol == "openai" {
-		return LooksLikeOpenAIReasoningModel(modelID)
+	for _, adapter := range c.adapters {
+		if uses, ok := adapter.LoginModelUsesDefaultReasoningEfforts(c.ctx, modelID); ok {
+			return uses
+		}
 	}
 	return false
 }
@@ -104,48 +108,23 @@ func (c Chain) LoginModelUsesDefaultReasoningEfforts(modelID string) bool {
 // LoginUsesWildcardReasoningEfforts reports whether a wildcard capability
 // should receive the provider default list.
 func (c Chain) LoginUsesWildcardReasoningEfforts() bool {
-	if c.ctx.Protocol == "codex" {
-		return true
+	for _, adapter := range c.adapters {
+		if uses, ok := adapter.LoginUsesWildcardReasoningEfforts(c.ctx); ok {
+			return uses
+		}
 	}
-	if c.IsSensenova() {
-		return true
-	}
-	return strings.Contains(strings.ToLower(c.ctx.BaseURL), "/codex")
+	return false
 }
 
 // NormalizeOpenAICompatibleMessages applies provider-specific OpenAI-compatible
 // message fixes on top of the generic request sanitizer.
 func (c Chain) NormalizeOpenAICompatibleMessages(messages []map[string]interface{}) []map[string]interface{} {
-	if len(messages) == 0 || !c.IsSensenova() {
-		return messages
-	}
-
-	filtered := make([]map[string]interface{}, 0, len(messages))
-	var pendingSystem map[string]interface{}
-	flushSystem := func() {
-		if pendingSystem == nil {
-			return
+	for _, adapter := range c.adapters {
+		if normalized, ok := adapter.NormalizeOpenAICompatibleMessages(c.ctx, messages); ok {
+			messages = normalized
 		}
-		filtered = append(filtered, pendingSystem)
-		pendingSystem = nil
 	}
-
-	for _, msg := range messages {
-		role, _ := msg["role"].(string)
-		if strings.EqualFold(strings.TrimSpace(role), "system") {
-			if pendingSystem == nil {
-				pendingSystem = cloneMapStringAny(msg)
-				continue
-			}
-			mergeOpenAICompatibleStringContent(pendingSystem, msg)
-			continue
-		}
-		flushSystem()
-		filtered = append(filtered, msg)
-	}
-	flushSystem()
-
-	return filtered
+	return messages
 }
 
 // NormalizeToolCallArguments converts empty or null tool arguments to a JSON
@@ -161,26 +140,35 @@ func (c Chain) NormalizeToolCallArguments(raw string) string {
 // ReplayableOpenAIReasoningContent returns the reasoning content that should
 // be replayed into an OpenAI-compatible request transcript.
 func (c Chain) ReplayableOpenAIReasoningContent(toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock) (string, bool) {
-	provider := c.ctx.ProviderName
+	for _, adapter := range c.adapters {
+		if content, ok := adapter.ReplayableOpenAIReasoningContent(c.ctx, toolCalls, reasoning); ok {
+			return content, true
+		}
+	}
 	if reasoning != nil {
-		if normalized := strings.ToLower(strings.TrimSpace(reasoning.Provider)); normalized != "" {
-			provider = normalized
+		if normalizedProvider := strings.TrimSpace(reasoning.Provider); normalizedProvider != "" {
+			providerCtx := c.ctx
+			providerCtx.ProviderName = normalizedProvider
+			providerCtx = normalizeContext(providerCtx)
+			for _, adapter := range adaptersForContext(providerCtx) {
+				if adapterAlreadySelected(c.adapters, adapter.Name()) {
+					continue
+				}
+				if content, ok := adapter.ReplayableOpenAIReasoningContent(providerCtx, toolCalls, reasoning); ok {
+					return content, true
+				}
+			}
 		}
-		if c.IsDeepSeek() || IsDeepSeek(provider, "", reasoning.Provider) {
-			return reasoning.RawDisplayText(), true
-		}
-		if len(toolCalls) == 0 && !reasoning.ReplayRequired {
-			return "", false
-		}
-		if text := strings.TrimSpace(reasoning.DisplayText()); text != "" {
-			return text, true
-		}
+	}
+
+	if reasoning == nil {
 		return "", false
 	}
-	if c.IsDeepSeek() || IsDeepSeek(provider, "", "") {
-		if len(toolCalls) > 0 {
-			return "", true
-		}
+	if len(toolCalls) == 0 && !reasoning.ReplayRequired {
+		return "", false
+	}
+	if text := strings.TrimSpace(reasoning.DisplayText()); text != "" {
+		return text, true
 	}
 	return "", false
 }
@@ -191,7 +179,12 @@ func (c Chain) SupportsMaxOutputTokens() bool {
 	if c.ctx.SupportsMaxOutputTokens != nil {
 		return *c.ctx.SupportsMaxOutputTokens
 	}
-	return !c.IsChatGPTCodexBackend()
+	for _, adapter := range c.adapters {
+		if supported, ok := adapter.SupportsMaxOutputTokens(c.ctx); ok {
+			return supported
+		}
+	}
+	return true
 }
 
 // IsSensenova reports whether the current context targets Sensenova.
@@ -224,6 +217,10 @@ func cloneMapStringAny(input map[string]interface{}) map[string]interface{} {
 		output[key] = value
 	}
 	return output
+}
+
+func isSystemRole(role string) bool {
+	return strings.EqualFold(strings.TrimSpace(role), "system")
 }
 
 func mergeOpenAICompatibleStringContent(dst, src map[string]interface{}) {
