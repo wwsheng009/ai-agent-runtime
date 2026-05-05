@@ -1,14 +1,11 @@
 package llm
 
-import "strings"
+import "github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 
 const codexSupportsMaxOutputTokensMetadataKey = "supports_max_output_tokens"
 
 func providerSupportsCodexMaxOutputTokens(baseURL string, explicit *bool) bool {
-	if explicit != nil {
-		return *explicit
-	}
-	return !isChatGPTCodexBackendBaseURL(baseURL)
+	return providercompat.SupportsMaxOutputTokens(baseURL, explicit)
 }
 
 func selectedProviderSupportsCodexMaxOutputTokens(selected *SelectedResource) bool {
@@ -22,9 +19,5 @@ func selectedProviderSupportsCodexMaxOutputTokens(selected *SelectedResource) bo
 }
 
 func isChatGPTCodexBackendBaseURL(baseURL string) bool {
-	lower := strings.ToLower(strings.TrimSpace(baseURL))
-	if lower == "" {
-		return false
-	}
-	return strings.Contains(lower, "chatgpt.com/backend-api/codex/responses")
+	return providercompat.IsChatGPTCodexBackend(baseURL)
 }

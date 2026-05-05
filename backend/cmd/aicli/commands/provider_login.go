@@ -7,6 +7,7 @@ import (
 	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 )
 
 const (
@@ -486,68 +487,43 @@ func providerLoginModelCapabilitySpec(model providerModelInfo) config.ModelCapab
 }
 
 func defaultProviderLoginReasoningEfforts(providerName, loginProtocol string, provider config.Provider, models []providerModelInfo) []string {
-	switch {
-	case providerLoginIsNVIDIA(providerName, provider):
-		return []string{"minimal", "low", "medium", "high"}
-	case providerLoginIsSensenova(providerName, provider):
-		return []string{"low", "medium", "high", "none"}
-	case providerLoginIsDeepSeek(providerName, provider, models):
+	if providerLoginIsDeepSeek(providerName, provider, models) {
 		return []string{"high", "max"}
-	case strings.EqualFold(runtimeProtocolForLoginProtocol(loginProtocol), "codex"):
-		return []string{"low", "medium", "high", "xhigh", "none"}
-	case strings.EqualFold(runtimeProtocolForLoginProtocol(loginProtocol), "openai"):
-		return []string{"low", "medium", "high", "xhigh", "none"}
-	default:
-		return nil
 	}
+	return providercompat.DefaultLoginReasoningEfforts(providercompat.Context{
+		ProviderName: providerName,
+		Protocol:     runtimeProtocolForLoginProtocol(loginProtocol),
+		BaseURL:      provider.BaseURL,
+		Model:        firstProviderLoginModelID(models),
+	})
 }
 
 func providerLoginModelUsesDefaultReasoningEfforts(modelID, providerName, loginProtocol string, provider config.Provider) bool {
-	if providerLoginUsesWildcardReasoningEfforts(loginProtocol, provider) {
-		return true
-	}
-	if providerLoginIsNVIDIA(providerName, provider) {
-		return true
-	}
-	if providerLoginIsSensenova(providerName, provider) {
-		return true
-	}
-	if providerLoginIsDeepSeekModel(modelID) {
-		return true
-	}
-	if strings.EqualFold(runtimeProtocolForLoginProtocol(loginProtocol), "openai") {
-		return providerLoginLooksLikeOpenAIReasoningModel(modelID)
-	}
-	return false
+	return providercompat.LoginModelUsesDefaultReasoningEfforts(providercompat.Context{
+		ProviderName: providerName,
+		Protocol:     runtimeProtocolForLoginProtocol(loginProtocol),
+		BaseURL:      provider.BaseURL,
+		Model:        modelID,
+	}, modelID)
 }
 
 func providerLoginUsesWildcardReasoningEfforts(loginProtocol string, provider config.Provider) bool {
-	if strings.EqualFold(runtimeProtocolForLoginProtocol(loginProtocol), "codex") {
-		return true
-	}
-	if providerLoginIsSensenova("", provider) {
-		return true
-	}
-	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
-	return strings.Contains(baseURL, "/codex")
+	return providercompat.LoginUsesWildcardReasoningEfforts(providercompat.Context{
+		Protocol: runtimeProtocolForLoginProtocol(loginProtocol),
+		BaseURL:  provider.BaseURL,
+	})
 }
 
 func providerLoginIsNVIDIA(providerName string, provider config.Provider) bool {
-	name := strings.ToLower(strings.TrimSpace(providerName))
-	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
-	return name == "nvidia" || strings.Contains(baseURL, "integrate.api.nvidia.com")
+	return providercompat.IsNVIDIA(providerName, provider.BaseURL)
 }
 
 func providerLoginIsSensenova(providerName string, provider config.Provider) bool {
-	name := strings.ToLower(strings.TrimSpace(providerName))
-	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
-	return strings.Contains(name, "sensenova") || strings.Contains(baseURL, "sensenova.cn")
+	return providercompat.IsSensenova(providerName, provider.BaseURL)
 }
 
 func providerLoginIsDeepSeek(providerName string, provider config.Provider, models []providerModelInfo) bool {
-	name := strings.ToLower(strings.TrimSpace(providerName))
-	baseURL := strings.ToLower(strings.TrimSpace(provider.BaseURL))
-	if strings.Contains(name, "deepseek") || strings.Contains(baseURL, "deepseek") {
+	if providercompat.IsDeepSeek(providerName, provider.BaseURL, firstProviderLoginModelID(models)) {
 		return true
 	}
 	for _, model := range models {
@@ -559,22 +535,20 @@ func providerLoginIsDeepSeek(providerName string, provider config.Provider, mode
 }
 
 func providerLoginIsDeepSeekModel(modelID string) bool {
-	modelID = strings.ToLower(strings.TrimSpace(modelID))
-	return strings.Contains(modelID, "deepseek")
+	return providercompat.IsDeepSeekModel(modelID)
 }
 
 func providerLoginLooksLikeOpenAIReasoningModel(modelID string) bool {
-	modelID = strings.ToLower(strings.TrimSpace(modelID))
-	modelID = strings.TrimPrefix(modelID, "models/")
-	if strings.Contains(modelID, "codex") {
-		return true
-	}
-	for _, prefix := range []string{"gpt-5", "o1", "o3", "o4", "o5"} {
-		if strings.HasPrefix(modelID, prefix) {
-			return true
+	return providercompat.LooksLikeOpenAIReasoningModel(modelID)
+}
+
+func firstProviderLoginModelID(models []providerModelInfo) string {
+	for _, model := range models {
+		if trimmed := strings.TrimSpace(model.ID); trimmed != "" {
+			return trimmed
 		}
 	}
-	return false
+	return ""
 }
 
 func mergeProviderLoginModelCapabilities(existing, discovered map[string]config.ModelCapabilitySpec) map[string]config.ModelCapabilitySpec {

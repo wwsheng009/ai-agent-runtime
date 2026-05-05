@@ -13,6 +13,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -1405,7 +1406,7 @@ func (p *ProviderWrapper) toChatRequest(req *LLMRequest) ChatRequest {
 			argsJSON := "{}"
 			if len(call.Args) > 0 {
 				if argsBytes, err := json.Marshal(call.Args); err == nil && len(argsBytes) > 0 && string(argsBytes) != "null" {
-					argsJSON = string(argsBytes)
+					argsJSON = providercompat.NormalizeToolCallArguments(string(argsBytes))
 				}
 			}
 			toolCalls = append(toolCalls, ToolCall{
@@ -1580,12 +1581,15 @@ func (p *ProviderWrapper) convertRequest(request ChatRequest) adapter.RequestCon
 			metadata["tool_replay_sanitized"] = true
 			metadata["tool_replay_dropped_messages"] = dropped
 		}
-		if isSensenovaProvider("", p.config.BaseURL) {
-			before = len(messages)
-			messages = sanitizeSensenovaOpenAICompatibleProtocolMessages(messages)
-			if merged := before - len(messages); merged > 0 {
-				metadata["sensenova_system_messages_merged"] = merged
-			}
+		compat := providercompat.NewChain(providercompat.Context{
+			Protocol: p.config.Type,
+			BaseURL:  p.config.BaseURL,
+			Model:    resolvedModel,
+		})
+		before = len(messages)
+		messages = compat.NormalizeOpenAICompatibleMessages(messages)
+		if merged := before - len(messages); merged > 0 {
+			metadata["provider_compat_system_messages_merged"] = merged
 		}
 	case "anthropic":
 		before := len(messages)

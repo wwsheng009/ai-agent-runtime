@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -560,55 +561,6 @@ func sanitizeOpenAICompatibleProtocolMessages(messages []map[string]interface{})
 	// If the transcript ended with an incomplete assistant tool replay block,
 	// drop it rather than sending an invalid OpenAI-compatible message chain.
 	return filtered
-}
-
-func sanitizeSensenovaOpenAICompatibleProtocolMessages(messages []map[string]interface{}) []map[string]interface{} {
-	if len(messages) == 0 {
-		return nil
-	}
-
-	filtered := make([]map[string]interface{}, 0, len(messages))
-	var pendingSystem map[string]interface{}
-	flushSystem := func() {
-		if pendingSystem == nil {
-			return
-		}
-		filtered = append(filtered, pendingSystem)
-		pendingSystem = nil
-	}
-
-	for _, msg := range messages {
-		role, _ := msg["role"].(string)
-		if strings.EqualFold(strings.TrimSpace(role), "system") {
-			if pendingSystem == nil {
-				pendingSystem = cloneMapStringAny(msg)
-				continue
-			}
-			mergeOpenAICompatibleStringContent(pendingSystem, msg)
-			continue
-		}
-		flushSystem()
-		filtered = append(filtered, msg)
-	}
-	flushSystem()
-
-	return filtered
-}
-
-func mergeOpenAICompatibleStringContent(dst, src map[string]interface{}) {
-	if dst == nil || src == nil {
-		return
-	}
-	existing, _ := dst["content"].(string)
-	additional, _ := src["content"].(string)
-	if strings.TrimSpace(additional) == "" {
-		return
-	}
-	if strings.TrimSpace(existing) == "" {
-		dst["content"] = additional
-		return
-	}
-	dst["content"] = strings.TrimRight(existing, "\n") + "\n\n" + strings.TrimLeft(additional, "\n")
 }
 
 func sanitizeCodexProtocolMessages(messages []map[string]interface{}) []map[string]interface{} {
@@ -1440,26 +1392,9 @@ func boolMetadataValue(metadata map[string]interface{}, key string) (bool, bool)
 }
 
 func replayableOpenAIReasoningContent(toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock, providerHint string) (string, bool) {
-	provider := strings.ToLower(strings.TrimSpace(providerHint))
-	if reasoning != nil {
-		if normalized := strings.ToLower(strings.TrimSpace(reasoning.Provider)); normalized != "" {
-			provider = normalized
-		}
-		if strings.HasPrefix(provider, "deepseek") {
-			return reasoning.RawDisplayText(), true
-		}
-		if len(toolCalls) == 0 && !reasoning.ReplayRequired {
-			return "", false
-		}
-		if text := strings.TrimSpace(reasoning.DisplayText()); text != "" {
-			return text, true
-		}
-		return "", false
-	}
-	if strings.HasPrefix(provider, "deepseek") && len(toolCalls) > 0 {
-		return "", true
-	}
-	return "", false
+	return providercompat.ReplayableOpenAIReasoningContent(providercompat.Context{
+		ProviderName: providerHint,
+	}, toolCalls, reasoning)
 }
 
 func encodeRuntimeToolCalls(calls []types.ToolCall) []map[string]interface{} {
@@ -1505,11 +1440,7 @@ func encodeProviderToolCalls(calls []ToolCall) []map[string]interface{} {
 }
 
 func normalizeToolCallArgumentsJSON(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" || strings.EqualFold(trimmed, "null") {
-		return "{}"
-	}
-	return raw
+	return providercompat.NormalizeToolCallArguments(raw)
 }
 
 func decodeSliceOfMaps(value interface{}) []map[string]interface{} {

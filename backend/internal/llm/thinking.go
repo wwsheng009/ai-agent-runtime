@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -53,27 +54,12 @@ func fallbackProviderModelCapability(providerName, protocol, baseURL string) (ag
 	if !strings.EqualFold(strings.TrimSpace(protocol), "openai") {
 		return agentconfig.ModelCapabilitySpec{}, false
 	}
-	name := strings.ToLower(strings.TrimSpace(providerName))
-	normalizedBaseURL := strings.ToLower(strings.TrimSpace(baseURL))
-	if isSensenovaProvider(name, normalizedBaseURL) {
-		return agentconfig.ModelCapabilitySpec{
-			ReasoningModel:   true,
-			ReasoningEfforts: []string{"low", "medium", "high", "none"},
-		}, true
-	}
-	if name != "nvidia" && !strings.Contains(normalizedBaseURL, "integrate.api.nvidia.com") {
-		return agentconfig.ModelCapabilitySpec{}, false
-	}
-	return agentconfig.ModelCapabilitySpec{
-		ReasoningModel:   true,
-		ReasoningEfforts: []string{"minimal", "low", "medium", "high"},
-	}, true
-}
-
-func isSensenovaProvider(providerName, baseURL string) bool {
-	name := strings.ToLower(strings.TrimSpace(providerName))
-	normalizedBaseURL := strings.ToLower(strings.TrimSpace(baseURL))
-	return strings.Contains(name, "sensenova") || strings.Contains(normalizedBaseURL, "sensenova.cn")
+	capability, ok := providercompat.DefaultRuntimeCapability(providercompat.Context{
+		ProviderName: providerName,
+		Protocol:     protocol,
+		BaseURL:      baseURL,
+	})
+	return capability, ok
 }
 
 func providerModelCapabilitiesWithFallback(capabilities map[string]agentconfig.ModelCapabilitySpec, providerName, protocol, baseURL string) map[string]agentconfig.ModelCapabilitySpec {
