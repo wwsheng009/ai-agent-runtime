@@ -59,6 +59,24 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	var (
+		mailWake <-chan MailMessage
+		unwatch  func()
+		lastSeq  int64
+	)
+	if watcher, ok := o.Store.(MailWatcherStore); ok {
+		mailWake, unwatch = watcher.WatchMail(ctx, teamID)
+		defer unwatch()
+	}
+	initialSeq, err := o.lastMailboxSeq(ctx, teamID)
+	if err != nil {
+		if !IsSQLiteLockError(err) {
+			return err
+		}
+	} else {
+		lastSeq = initialSeq
+	}
+
 	for {
 		locked := false
 		team, err := o.Store.GetTeam(ctx, teamID)
@@ -89,8 +107,41 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 			return ctx.Err()
 		case <-ticker.C:
 		case <-wake:
+		case <-mailWake:
+			nextSeq, err := o.lastMailboxSeq(ctx, teamID)
+			if err != nil {
+				if !IsSQLiteLockError(err) {
+					return err
+				}
+				continue
+			}
+			if nextSeq <= lastSeq {
+				continue
+			}
+			lastSeq = nextSeq
 		}
 	}
+}
+
+func (o *Orchestrator) lastMailboxSeq(ctx context.Context, teamID string) (int64, error) {
+	if o == nil || o.Store == nil {
+		return 0, nil
+	}
+	if store, ok := o.Store.(MailSequenceStore); ok {
+		return store.LastMailSeq(ctx, teamID)
+	}
+	messages, err := o.Store.ListMail(ctx, MailFilter{
+		TeamID:   teamID,
+		AfterSeq: 0,
+		Limit:    1,
+	})
+	if err != nil {
+		return 0, err
+	}
+	if len(messages) == 0 {
+		return 0, nil
+	}
+	return messages[0].Seq, nil
 }
 
 // ClaimReadyTasks assigns and claims ready tasks, returning accepted assignments.

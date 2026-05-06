@@ -43,6 +43,20 @@ func (s *notifyingClaimStore) ClaimTask(ctx context.Context, id string, assignee
 	return claimed, err
 }
 
+func (s *notifyingClaimStore) WatchMail(ctx context.Context, teamID string) (<-chan MailMessage, func()) {
+	if watcher, ok := s.Store.(MailWatcherStore); ok {
+		return watcher.WatchMail(ctx, teamID)
+	}
+	return make(chan MailMessage), func() {}
+}
+
+func (s *notifyingClaimStore) LastMailSeq(ctx context.Context, teamID string) (int64, error) {
+	if sequencer, ok := s.Store.(MailSequenceStore); ok {
+		return sequencer.LastMailSeq(ctx, teamID)
+	}
+	return 0, nil
+}
+
 func TestOrchestratorClaimReadyTasksHonorsMaxWriters(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -261,6 +275,69 @@ func TestOrchestratorRunWithWakeProcessesReadyTaskBeforeFallbackTick(t *testing.
 		t.Fatalf("orchestrator exited before wake task was claimed: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("orchestrator did not claim wake task before fallback tick")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("orchestrator did not stop after context cancellation")
+	}
+}
+
+func TestOrchestratorRunWakesFromMailboxSequenceBeforeFallbackTick(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
+	require.NoError(t, err)
+	assignee := "mate-b"
+	_, err = store.CreateTask(ctx, Task{
+		TeamID:   teamID,
+		Title:    "already running task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
+	})
+	require.NoError(t, err)
+
+	claimStore := newNotifyingClaimStore(store)
+	orchestrator := NewOrchestrator(claimStore, nil, nil)
+	orchestrator.TickInterval = time.Hour
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- orchestrator.Run(runCtx, teamID)
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	_, err = store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "mailbox wake task",
+		Status: TaskStatusReady,
+	})
+	require.NoError(t, err)
+	_, err = store.InsertMail(ctx, MailMessage{
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "orchestrator",
+		Kind:      "wake",
+		Body:      "ready task added",
+	})
+	require.NoError(t, err)
+
+	select {
+	case <-claimStore.claimed:
+	case err := <-errCh:
+		t.Fatalf("orchestrator exited before mailbox wake task was claimed: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("orchestrator did not claim mailbox wake task before fallback tick")
 	}
 
 	cancel()
