@@ -97,6 +97,7 @@ type ChatSession struct {
 	PermissionMode                  runtimepolicy.Mode                 // actor/team run permission mode
 	ApprovalReuseMode               chatApprovalReuseMode              // local actor/team approval reuse policy
 	ActiveTeam                      *chatTeamBinding                   // ambient team binding across turns
+	SelectedAgentTarget             string                             // explicit /agents target used by /agents send/followup
 	RuntimeEventBridge              *chatRuntimeEventBridge            // actor runtime event bridge
 	ActorFirstReady                 bool                               // actor-first executor established for this session
 	ChatExecutor                    aicliChatExecutor                  // shared chatcore-backed chat executor

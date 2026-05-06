@@ -893,39 +893,7 @@ func (a *SessionActor) handleDeliverMailboxMessage(cmd DeliverMailboxMessage) {
 	if cmd.Reply == nil {
 		return
 	}
-	message := cmd.Message
-	payload := map[string]interface{}{
-		"team_id":    strings.TrimSpace(message.TeamID),
-		"message_id": strings.TrimSpace(message.ID),
-		"from_agent": strings.TrimSpace(message.FromAgent),
-		"to_agent":   strings.TrimSpace(message.ToAgent),
-		"kind":       strings.TrimSpace(message.Kind),
-		"body":       strings.TrimSpace(message.Body),
-	}
-	if payload["to_agent"] == "" {
-		payload["to_agent"] = "*"
-	}
-	if payload["kind"] == "" {
-		payload["kind"] = "info"
-	}
-	if message.TaskID != nil && strings.TrimSpace(*message.TaskID) != "" {
-		payload["task_id"] = strings.TrimSpace(*message.TaskID)
-	}
-	if !message.CreatedAt.IsZero() {
-		payload["created_at"] = message.CreatedAt.UTC()
-	}
-	if len(message.Metadata) > 0 {
-		metadata := make(map[string]interface{}, len(message.Metadata))
-		for key, value := range message.Metadata {
-			metadata[key] = value
-		}
-		payload["metadata"] = metadata
-	}
-	a.publish(runtimeevents.Event{
-		Type:      EventMailboxReceived,
-		SessionID: a.id,
-		Payload:   payload,
-	})
+	a.publish(NewMailboxReceivedEvent(a.id, cmd.Message))
 	cmd.Reply <- nil
 }
 

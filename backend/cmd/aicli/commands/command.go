@@ -151,6 +151,18 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/approval-reuse") {
 		return handleApprovalReuseCommand(session, command)
 	}
+	if commandMatches(cmdLower, "/agents") {
+		handleChatAgentsCommand(session, command)
+		return false
+	}
+	if commandMatches(cmdLower, "/timeline") {
+		printChatTimeline(session, command)
+		return false
+	}
+	if commandMatches(cmdLower, "/collab") {
+		printChatCollab(session, command)
+		return false
+	}
 
 	// 处理其他命令
 	cmd := cmdLower
@@ -212,6 +224,15 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 
 	case "/debug":
 		printChatDebugInfo(session)
+
+	case "/agents":
+		handleChatAgentsCommand(session, command)
+
+	case "/timeline":
+		printChatTimeline(session, command)
+
+	case "/collab":
+		printChatCollab(session, command)
 
 	case "/compact":
 		return handleCompactCommand(session, command)

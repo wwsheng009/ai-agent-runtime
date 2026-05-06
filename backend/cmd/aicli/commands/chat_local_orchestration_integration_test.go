@@ -1282,6 +1282,7 @@ func newLocalOrchestrationTestHost(t *testing.T, manager *runtimechat.SessionMan
 		}
 		if host.Orchestrator != nil {
 			broker.TeamPlanner = host.Orchestrator.LeadPlanner
+			broker.TeamEvents = host.Orchestrator.Events
 		}
 		a.SetToolBroker(broker)
 		if ctxMgr := a.GetContextManager(); ctxMgr != nil {

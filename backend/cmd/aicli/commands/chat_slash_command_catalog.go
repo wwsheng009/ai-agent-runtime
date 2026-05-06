@@ -90,6 +90,39 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			AcceptsArgs: false,
 		},
 		{
+			Name:        "/agents",
+			Usage:       "/agents [pick|target <target>|send [target] <message>|followup [target] <message>]",
+			Summary:     "显示、选择或发送 agent 协作消息",
+			Group:       string(chatSlashCommandGroupSession),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "pick", Summary: "弹出 agent picker"},
+				{Token: "target", Summary: "设置默认 agent 消息目标"},
+				{Token: "send", Summary: "向目标 agent 投递 mailbox 消息"},
+				{Token: "followup", Summary: "向目标 agent 投递或触发 follow-up task"},
+			},
+		},
+		{
+			Name:        "/timeline",
+			Usage:       "/timeline [limit]",
+			Summary:     "显示当前 active team 协作事件",
+			Group:       string(chatSlashCommandGroupSession),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "<limit>", Summary: "最多显示事件数"},
+			},
+		},
+		{
+			Name:        "/collab",
+			Usage:       "/collab [limit]",
+			Summary:     "显示 parent mailbox 协作事件",
+			Group:       string(chatSlashCommandGroupSession),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "<limit>", Summary: "最多显示事件数"},
+			},
+		},
+		{
 			Name:        "/sessions",
 			Usage:       "/sessions [query]",
 			Summary:     "列出或筛选可恢复会话",

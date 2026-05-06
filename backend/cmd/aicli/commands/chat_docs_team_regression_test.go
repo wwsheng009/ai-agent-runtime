@@ -905,6 +905,7 @@ func newWorkspaceLocalOrchestrationTestHost(t *testing.T, session *ChatSession, 
 		}
 		if host.Orchestrator != nil {
 			broker.TeamPlanner = host.Orchestrator.LeadPlanner
+			broker.TeamEvents = host.Orchestrator.Events
 		}
 		a.SetToolBroker(broker)
 		if policy := buildLocalChatToolPolicy(session, host.ToolSurface, broker); policy != nil {
