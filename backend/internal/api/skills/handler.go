@@ -567,6 +567,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/commands", h.SubmitSessionRuntimeCommand).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents", h.SpawnSessionAgent).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/wait", h.WaitSessionAgents).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}", h.GetSessionAgentStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/input", h.SendSessionAgentInput).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
@@ -3401,6 +3402,9 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 			if lifecycle := h.teamLifecycleService(); lifecycle != nil {
 				lifecycle.SyncLoops()
 			}
+		}
+		if orchestrator := h.getTeamOrchestrator(); orchestrator != nil {
+			broker.TeamEvents = orchestrator.Events
 		}
 		if hub := h.getSessionHub(); hub != nil {
 			broker.TeamPlanner = &team.LeadPlanner{
