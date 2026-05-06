@@ -12,6 +12,17 @@ type MailboxService struct {
 	Store Store
 }
 
+// MailWatcherStore exposes low-latency mailbox notifications from stores that
+// can wake waiters after durable inserts.
+type MailWatcherStore interface {
+	WatchMail(ctx context.Context, teamID string) (<-chan MailMessage, func())
+}
+
+// MailSequenceStore exposes the durable high-water mark for a team mailbox.
+type MailSequenceStore interface {
+	LastMailSeq(ctx context.Context, teamID string) (int64, error)
+}
+
 // MailboxDispatcher pushes a persisted mailbox message to active sessions.
 type MailboxDispatcher interface {
 	DispatchTeamMailboxMessage(ctx context.Context, message MailMessage) error
@@ -23,6 +34,18 @@ type MailboxDigest struct {
 	MessageIDs   []string
 	MessageCount int
 	MarkedRead   bool
+}
+
+// MailWatchRequest describes a durable mailbox watch. AfterSeq is the last
+// sequence the caller has already processed.
+type MailWatchRequest struct {
+	TeamID           string
+	ToAgent          string
+	AfterSeq         int64
+	Limit            int
+	UnreadOnly       bool
+	IncludeBroadcast bool
+	Timeout          time.Duration
 }
 
 // NewMailboxService creates a mailbox helper bound to a store.
@@ -74,6 +97,73 @@ func (m *MailboxService) ListUnread(ctx context.Context, teamID, agentID string,
 		IncludeBroadcast: true,
 		Limit:            limit,
 	})
+}
+
+// Wait waits until mailbox messages newer than AfterSeq are visible in the
+// durable store or until the timeout/context fires.
+func (m *MailboxService) Wait(ctx context.Context, request MailWatchRequest) ([]MailMessage, error) {
+	if m == nil || m.Store == nil {
+		return nil, fmt.Errorf("mailbox store is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	filter := MailFilter{
+		TeamID:           strings.TrimSpace(request.TeamID),
+		ToAgent:          strings.TrimSpace(request.ToAgent),
+		AfterSeq:         request.AfterSeq,
+		UnreadOnly:       request.UnreadOnly,
+		IncludeBroadcast: request.IncludeBroadcast,
+		Limit:            request.Limit,
+	}
+	if filter.TeamID == "" {
+		return nil, fmt.Errorf("team id is required")
+	}
+	read := func() ([]MailMessage, error) {
+		return m.Store.ListMail(ctx, filter)
+	}
+	if request.Timeout == 0 {
+		return read()
+	}
+
+	waitCtx := ctx
+	cancel := func() {}
+	if request.Timeout > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, request.Timeout)
+	}
+	defer cancel()
+
+	var watch <-chan MailMessage
+	unwatch := func() {}
+	if watcher, ok := m.Store.(MailWatcherStore); ok {
+		watch, unwatch = watcher.WatchMail(waitCtx, filter.TeamID)
+	}
+	defer unwatch()
+
+	messages, err := read()
+	if err != nil || len(messages) > 0 {
+		return messages, err
+	}
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-waitCtx.Done():
+			if messages, err := read(); err != nil || len(messages) > 0 {
+				return messages, err
+			}
+			return nil, nil
+		case <-watch:
+			if messages, err := read(); err != nil || len(messages) > 0 {
+				return messages, err
+			}
+		case <-ticker.C:
+			if messages, err := read(); err != nil || len(messages) > 0 {
+				return messages, err
+			}
+		}
+	}
 }
 
 // Ack marks messages as read.

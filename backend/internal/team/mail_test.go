@@ -67,6 +67,110 @@ func TestSQLiteStoreListMailFilters(t *testing.T) {
 	require.Len(t, messages, 0)
 }
 
+func TestSQLiteStoreListMailAfterSeqReturnsLaterMessages(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	firstID, err := store.InsertMail(ctx, MailMessage{
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "mate-a",
+		Kind:      "info",
+		Body:      "first",
+	})
+	require.NoError(t, err)
+	secondID, err := store.InsertMail(ctx, MailMessage{
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "mate-a",
+		Kind:      "info",
+		Body:      "second",
+	})
+	require.NoError(t, err)
+
+	all, err := store.ListMail(ctx, MailFilter{TeamID: teamID})
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	require.Equal(t, secondID, all[0].ID)
+	require.Equal(t, firstID, all[1].ID)
+	require.Greater(t, all[0].Seq, all[1].Seq)
+
+	later, err := store.ListMail(ctx, MailFilter{
+		TeamID:   teamID,
+		AfterSeq: all[1].Seq,
+	})
+	require.NoError(t, err)
+	require.Len(t, later, 1)
+	assert.Equal(t, secondID, later[0].ID)
+	assert.Equal(t, all[0].Seq, later[0].Seq)
+}
+
+func TestMailboxServiceWaitUsesDurableSequenceAndWake(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	firstID, err := store.InsertMail(ctx, MailMessage{
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "mate-a",
+		Kind:      "info",
+		Body:      "first",
+	})
+	require.NoError(t, err)
+	firstBatch, err := store.ListMail(ctx, MailFilter{TeamID: teamID, AfterSeq: 0})
+	require.NoError(t, err)
+	require.Len(t, firstBatch, 1)
+	require.Equal(t, firstID, firstBatch[0].ID)
+	firstSeq := firstBatch[0].Seq
+
+	mailbox := NewMailboxService(store)
+	waitDone := make(chan []MailMessage, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		messages, err := mailbox.Wait(ctx, MailWatchRequest{
+			TeamID:           teamID,
+			ToAgent:          "mate-a",
+			AfterSeq:         firstSeq,
+			Limit:            4,
+			UnreadOnly:       true,
+			IncludeBroadcast: true,
+			Timeout:          2 * time.Second,
+		})
+		if err != nil {
+			waitErr <- err
+			return
+		}
+		waitDone <- messages
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	secondID, err := store.InsertMail(ctx, MailMessage{
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "mate-a",
+		Kind:      "info",
+		Body:      "second",
+	})
+	require.NoError(t, err)
+
+	select {
+	case err := <-waitErr:
+		require.NoError(t, err)
+	case messages := <-waitDone:
+		require.Len(t, messages, 1)
+		assert.Equal(t, secondID, messages[0].ID)
+		assert.Greater(t, messages[0].Seq, firstSeq)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("mailbox wait did not wake from inserted message")
+	}
+}
+
 func TestMailboxReceiptsArePerAgentAndIncludeBroadcast(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
