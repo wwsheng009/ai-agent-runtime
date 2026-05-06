@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -430,6 +431,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		ResolvedSkillDirs:          []string{skillsDir},
 		PermissionMode:             "default",
 		ApprovalReuseMode:          chatApprovalReuseTeamReadOnlyShell,
+		SelectedAgentTarget:        "/root/debug-child",
 		SessionDir:                 sessionDir,
 		InputQueue:                 queue,
 		RuntimeSession:             &runtimechat.Session{ID: "session-1", State: runtimechat.StateActive},
@@ -478,6 +480,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		fmt.Sprintf("%-18s %s", "Approval Reuse:", "team_readonly_shell"),
 		fmt.Sprintf("%-18s %s", "Queued Input:", "0 pending"),
 		fmt.Sprintf("%-18s %s", "Interaction:", "prompt_visible=true prompt_paste_active=true thinking_active=true streaming_active=true reasoning_active=true complete_block_output=true shutdown=false"),
+		fmt.Sprintf("%-18s %s", "Agent Target:", "/root/debug-child"),
 		fmt.Sprintf("%-18s %s", "Surface:", "<none>"),
 	}
 	for _, expected := range expectedFragments {
@@ -509,9 +512,10 @@ func TestChatDebugAgentGraphLinesListsLocalAgents(t *testing.T) {
 	}
 	host.ActorRegistry = newLocalActorRegistry(host)
 	session := &ChatSession{
-		RuntimeSession:   rootSession,
-		SessionUserID:    userID,
-		LocalRuntimeHost: host,
+		RuntimeSession:      rootSession,
+		SessionUserID:       userID,
+		LocalRuntimeHost:    host,
+		SelectedAgentTarget: "/root/debug-worker",
 	}
 
 	worker := runtimechat.NewSession(userID)
@@ -529,6 +533,7 @@ func TestChatDebugAgentGraphLinesListsLocalAgents(t *testing.T) {
 	output := strings.Join(lines, "\n")
 	for _, expected := range []string{
 		"count=1",
+		"selected=/root/debug-worker",
 		"/root/debug-worker",
 		"status=idle",
 		"session=debug-worker",
@@ -590,6 +595,284 @@ func TestChatDebugMailboxLinesListsPendingTeamMessages(t *testing.T) {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected mailbox debug to contain %q, got:\n%s", expected, output)
 		}
+	}
+}
+
+func TestChatAgentPickerResolvesByNumberPathAndSession(t *testing.T) {
+	agents := []toolbroker.AgentStatusResult{
+		{ID: "agent-1", SessionID: "session-1", Path: "/root/agent-1", Status: "idle"},
+		{ID: "agent-2", SessionID: "session-2", Path: "/root/agent-2", Status: "running"},
+	}
+	if got := resolveChatAgentPickerChoice("2", agents); got == nil || got.SessionID != "session-2" {
+		t.Fatalf("expected numeric choice to resolve second agent, got %#v", got)
+	}
+	if got := resolveChatAgentPickerChoice("/root/agent-1", agents); got == nil || got.SessionID != "session-1" {
+		t.Fatalf("expected path choice to resolve first agent, got %#v", got)
+	}
+	if got := resolveChatAgentPickerChoice("session-2", agents); got == nil || got.Path != "/root/agent-2" {
+		t.Fatalf("expected session choice to resolve second agent, got %#v", got)
+	}
+	if got := resolveChatAgentPickerChoice("missing", agents); got != nil {
+		t.Fatalf("expected missing choice to return nil, got %#v", got)
+	}
+}
+
+func TestChatAgentPickerPopupLinesIncludeAgentDetails(t *testing.T) {
+	lines := chatAgentPickerPopupLines([]toolbroker.AgentStatusResult{
+		{ID: "agent-1", SessionID: "session-1", Path: "/root/agent-1", Status: "idle", AgentType: "worker"},
+	}, "")
+	output := strings.Join(lines, "\n")
+	for _, expected := range []string{
+		"Agent Picker:",
+		"[1] /root/agent-1",
+		"status=idle",
+		"session=session-1",
+		"type=worker",
+		"输入编号",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected picker lines to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestParseChatAgentMessageCommandPreservesMessageSpaces(t *testing.T) {
+	target, message := parseChatAgentMessageCommand("send /root/agent-1 review docs and report")
+	if target != "/root/agent-1" || message != "review docs and report" {
+		t.Fatalf("unexpected parsed command: target=%q message=%q", target, message)
+	}
+	target, message = parseChatAgentMessageCommand("followup session-2 continue the task")
+	if target != "session-2" || message != "continue the task" {
+		t.Fatalf("unexpected parsed followup command: target=%q message=%q", target, message)
+	}
+}
+
+func TestChatTimelineLinesListsActiveTeamEvents(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	const teamID = "timeline-team"
+	if _, err := store.CreateTeam(context.Background(), team.Team{
+		ID:            teamID,
+		LeadSessionID: "timeline-root",
+		Status:        team.TeamStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	_, _ = store.AppendTeamEvent(context.Background(), team.TeamEvent{
+		Type:   "task.completed",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"task_id":  "task-1",
+			"assignee": "worker",
+			"summary":  "finished docs review",
+		},
+	})
+	_, _ = store.AppendTeamEvent(context.Background(), team.TeamEvent{
+		Type:   "team.completed",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"status": "done",
+		},
+	})
+
+	session := &ChatSession{
+		ActiveTeam:       &chatTeamBinding{TeamID: teamID, AgentID: "lead"},
+		LocalRuntimeHost: &localChatRuntimeHost{TeamStore: store},
+	}
+	lines := chatTimelineLines(session, 10)
+	output := strings.Join(lines, "\n")
+	for _, expected := range []string{
+		"team=" + teamID,
+		"events=2",
+		"#1 task.completed",
+		"task=task-1",
+		"assignee=worker",
+		"summary=finished docs review",
+		"#2 team.completed",
+		"status=done",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected timeline to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestChatTimelineLinesShowsRecentEventsInSequenceOrder(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	const teamID = "timeline-recent-team"
+	if _, err := store.CreateTeam(context.Background(), team.Team{
+		ID:            teamID,
+		LeadSessionID: "timeline-root",
+		Status:        team.TeamStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	for _, name := range []string{"first", "second", "third"} {
+		_, _ = store.AppendTeamEvent(context.Background(), team.TeamEvent{
+			Type:   "task.completed",
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"task_id": name,
+			},
+		})
+	}
+
+	session := &ChatSession{
+		ActiveTeam:       &chatTeamBinding{TeamID: teamID, AgentID: "lead"},
+		LocalRuntimeHost: &localChatRuntimeHost{TeamStore: store},
+	}
+	lines := chatTimelineLines(session, 2)
+	output := strings.Join(lines, "\n")
+	if strings.Contains(output, "task=first") {
+		t.Fatalf("expected recent timeline to hide oldest event, got:\n%s", output)
+	}
+	second := strings.Index(output, "#2 task.completed task=second")
+	third := strings.Index(output, "#3 task.completed task=third")
+	if second < 0 || third < 0 || second > third {
+		t.Fatalf("expected recent timeline in ascending seq order, got:\n%s", output)
+	}
+	if !strings.Contains(output, "events=3 shown=2") {
+		t.Fatalf("expected total/shown counts, got:\n%s", output)
+	}
+}
+
+func TestChatTimelineLinesIncludesTaskDispatchDetails(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	const teamID = "timeline-dispatch-team"
+	if _, err := store.CreateTeam(context.Background(), team.Team{
+		ID:            teamID,
+		LeadSessionID: "timeline-root",
+		Status:        team.TeamStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	request := team.TaskTriggerRequest{
+		SessionID: "team-1__member-1",
+		TeamID:    teamID,
+		AgentID:   "member-1",
+		TaskID:    "task-1",
+		Prompt:    "review docs",
+	}
+	if _, err := team.AppendTaskDispatchRequested(context.Background(), store, request); err != nil {
+		t.Fatalf("AppendTaskDispatchRequested: %v", err)
+	}
+	if _, err := team.AppendTaskDispatchCompleted(context.Background(), store, request, &team.SessionResult{
+		Success: true,
+		TraceID: "trace-1",
+		Steps:   2,
+		Output:  "done",
+	}, nil); err != nil {
+		t.Fatalf("AppendTaskDispatchCompleted: %v", err)
+	}
+
+	session := &ChatSession{
+		ActiveTeam:       &chatTeamBinding{TeamID: teamID, AgentID: "lead"},
+		LocalRuntimeHost: &localChatRuntimeHost{TeamStore: store},
+	}
+	output := strings.Join(chatTimelineLines(session, 10), "\n")
+	for _, expected := range []string{
+		"#1 " + team.TaskDispatchRequestedEvent,
+		"task=task-1",
+		"session=team-1__member-1",
+		"assignee=member-1",
+		"via=agent_control.trigger_task",
+		"#2 " + team.TaskDispatchCompletedEvent,
+		"success=true",
+		"trace=trace-1",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected dispatch timeline to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestChatCollabLinesListsParentMailboxEvents(t *testing.T) {
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "collab-root", State: runtimechat.StateActive},
+		LocalRuntimeHost: &localChatRuntimeHost{
+			EventStore: runtimeStore,
+		},
+	}
+	_, err := runtimeStore.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "collab-root",
+		Payload:   map[string]interface{}{"content": "not collab"},
+	})
+	if err != nil {
+		t.Fatalf("append non-collab event: %v", err)
+	}
+	for _, body := range []string{"first", "second", "third"} {
+		if _, _, err := runtimeStore.AppendMailbox(context.Background(), "collab-root", team.MailMessage{
+			FromAgent: "child-1",
+			ToAgent:   "parent",
+			Kind:      "agent_message",
+			Body:      body,
+		}); err != nil {
+			t.Fatalf("append mailbox: %v", err)
+		}
+	}
+
+	output := strings.Join(chatCollabLines(session, 2), "\n")
+	if strings.Contains(output, "not collab") || strings.Contains(output, "body=first") {
+		t.Fatalf("expected collab lines to filter non-collab and old events, got:\n%s", output)
+	}
+	for _, expected := range []string{
+		"session=collab-root events=3 shown=2 source=mailbox",
+		"mailbox_received",
+		"from=child-1",
+		"to=parent",
+		"kind=agent_message",
+		"body=second",
+		"body=third",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected collab output to contain %q, got:\n%s", expected, output)
+		}
+	}
+	if strings.Count(output, "mailbox_received") != 2 {
+		t.Fatalf("expected collab output to list mailbox substrate rows without session-event mirror duplicates, got:\n%s", output)
+	}
+}
+
+func TestHandleCommand_CollabPrintsParentMailboxTimeline(t *testing.T) {
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "collab-command-root", State: runtimechat.StateActive},
+		LocalRuntimeHost: &localChatRuntimeHost{
+			EventStore: runtimeStore,
+		},
+	}
+	if _, _, err := runtimeStore.AppendMailbox(context.Background(), "collab-command-root", team.MailMessage{
+		FromAgent: "child-1",
+		ToAgent:   "parent",
+		Kind:      "agent_message",
+		Body:      "command collab hello",
+	}); err != nil {
+		t.Fatalf("append mailbox: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/collab 5", false); quit {
+			t.Fatal("collab command should not quit")
+		}
+	})
+	if !strings.Contains(output, "Parent Mailbox Timeline:") || !strings.Contains(output, "command collab hello") {
+		t.Fatalf("expected collab command output, got:\n%s", output)
 	}
 }
 
