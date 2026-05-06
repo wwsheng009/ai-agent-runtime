@@ -242,6 +242,65 @@ func TestRun_SessionAgentEvents(t *testing.T) {
 	assert.Contains(t, output, `payload={"status":"ok"}`)
 }
 
+func TestRun_SessionAgentMailboxEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Equal(t, "/api/runtime/sessions/parent-1/agents/events", r.URL.Path)
+		assert.Equal(t, "after_seq=8&limit=3&wait_ms=900", r.URL.RawQuery)
+		_, _ = io.WriteString(w, `{"result":{"session_id":"parent-1","count":1,"latest_seq":9,"events":[{"seq":9,"type":"mailbox_received","session_id":"parent-1","timestamp":"2026-03-18T00:00:00Z","payload":{"body":"hello parent"}}]}}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"-mode", "session-agent",
+		"-agent-action", "events",
+		"-url", server.URL,
+		"-parent-session-id", "parent-1",
+		"-after-seq", "8",
+		"-limit", "3",
+		"-wait-ms", "900",
+	}, &stdout, &stderr)
+	require.NoError(t, err)
+
+	output := stdout.String()
+	assert.Contains(t, output, "parent_session=parent-1")
+	assert.Contains(t, output, "agent_session=parent-1 count=1 latest_seq=9 timed_out=false")
+	assert.Contains(t, output, "event seq=9 type=mailbox_received session=parent-1")
+	assert.Contains(t, output, "hello parent")
+}
+
+func TestRun_SessionAgentWaitParentMailbox(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/runtime/sessions/parent-1/agents/wait", r.URL.Path)
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), `"timeout_ms":900`)
+		_, _ = io.WriteString(w, `{"result":{"ready_count":1,"latest_seq":9,"event":{"seq":9,"type":"mailbox_received","session_id":"parent-1","timestamp":"2026-03-18T00:00:00Z","payload":{"body":"hello parent"}},"events":[{"seq":9,"type":"mailbox_received","session_id":"parent-1","timestamp":"2026-03-18T00:00:00Z","payload":{"body":"hello parent"}}]}}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"-mode", "session-agent",
+		"-agent-action", "wait",
+		"-url", server.URL,
+		"-parent-session-id", "parent-1",
+		"-agent-timeout-ms", "900",
+	}, &stdout, &stderr)
+	require.NoError(t, err)
+
+	output := stdout.String()
+	assert.Contains(t, output, "parent_session=parent-1")
+	assert.Contains(t, output, "ready=1 pending=0 latest_seq=9 timed_out=false")
+	assert.Contains(t, output, "mailbox_event seq=9 type=mailbox_received session=parent-1")
+	assert.Contains(t, output, "hello parent")
+}
+
 func joinLines(lines []string) string {
 	var buf bytes.Buffer
 	for i, line := range lines {

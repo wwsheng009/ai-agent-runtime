@@ -1965,11 +1965,13 @@ type SendSessionAgentInputRequest struct {
 }
 
 type WaitSessionAgentsRequest struct {
-	ID         string   `json:"id,omitempty"`
-	SessionID  string   `json:"session_id,omitempty"`
-	IDs        []string `json:"ids,omitempty"`
-	SessionIDs []string `json:"session_ids,omitempty"`
-	TimeoutMs  int      `json:"timeout_ms,omitempty"`
+	ID          string   `json:"id,omitempty"`
+	SessionID   string   `json:"session_id,omitempty"`
+	IDs         []string `json:"ids,omitempty"`
+	SessionIDs  []string `json:"session_ids,omitempty"`
+	AfterSeq    int64    `json:"after_seq,omitempty"`
+	TimeoutMs   int      `json:"timeout_ms,omitempty"`
+	MailboxOnly bool     `json:"mailbox_only,omitempty"`
 }
 
 type ListSessionAgentEventsParams struct {
@@ -1979,26 +1981,30 @@ type ListSessionAgentEventsParams struct {
 }
 
 type SessionAgent struct {
-	ID                 string `json:"id"`
-	SessionID          string `json:"session_id"`
-	ParentSessionID    string `json:"parent_session_id,omitempty"`
-	AgentType          string `json:"agent_type,omitempty"`
-	Status             string `json:"status"`
-	Exists             bool   `json:"exists"`
-	Created            bool   `json:"created,omitempty"`
-	Queued             bool   `json:"queued,omitempty"`
-	TimedOut           bool   `json:"timed_out,omitempty"`
-	PendingApproval    bool   `json:"pending_approval,omitempty"`
-	PendingQuestion    bool   `json:"pending_question,omitempty"`
-	MessageCount       int    `json:"message_count,omitempty"`
-	Output             string `json:"output,omitempty"`
-	Error              string `json:"error,omitempty"`
-	SessionState       string `json:"session_state,omitempty"`
-	CurrentTurnID      string `json:"current_turn_id,omitempty"`
-	PendingToolName    string `json:"pending_tool_name,omitempty"`
-	PendingToolCallID  string `json:"pending_tool_call_id,omitempty"`
-	LastMessageRole    string `json:"last_message_role,omitempty"`
-	LastMessagePreview string `json:"last_message_preview,omitempty"`
+	ID                 string   `json:"id"`
+	SessionID          string   `json:"session_id"`
+	ParentSessionID    string   `json:"parent_session_id,omitempty"`
+	Path               string   `json:"path,omitempty"`
+	Depth              int      `json:"depth,omitempty"`
+	AgentType          string   `json:"agent_type,omitempty"`
+	Status             string   `json:"status"`
+	Exists             bool     `json:"exists"`
+	Created            bool     `json:"created,omitempty"`
+	Queued             bool     `json:"queued,omitempty"`
+	TimedOut           bool     `json:"timed_out,omitempty"`
+	PendingApproval    bool     `json:"pending_approval,omitempty"`
+	PendingQuestion    bool     `json:"pending_question,omitempty"`
+	MessageCount       int      `json:"message_count,omitempty"`
+	Output             string   `json:"output,omitempty"`
+	Error              string   `json:"error,omitempty"`
+	SessionState       string   `json:"session_state,omitempty"`
+	CurrentTurnID      string   `json:"current_turn_id,omitempty"`
+	PendingToolName    string   `json:"pending_tool_name,omitempty"`
+	PendingToolCallID  string   `json:"pending_tool_call_id,omitempty"`
+	LastMessageRole    string   `json:"last_message_role,omitempty"`
+	LastMessagePreview string   `json:"last_message_preview,omitempty"`
+	ClosedCount        int      `json:"closed_count,omitempty"`
+	ClosedSessionIDs   []string `json:"closed_session_ids,omitempty"`
 }
 
 type SessionAgentStatusResponse struct {
@@ -2006,13 +2012,16 @@ type SessionAgentStatusResponse struct {
 }
 
 type SessionAgentWaitResult struct {
-	Agent            *SessionAgent  `json:"agent,omitempty"`
-	Agents           []SessionAgent `json:"agents,omitempty"`
-	MatchedID        string         `json:"matched_id,omitempty"`
-	MatchedSessionID string         `json:"matched_session_id,omitempty"`
-	TimedOut         bool           `json:"timed_out,omitempty"`
-	ReadyCount       int            `json:"ready_count,omitempty"`
-	PendingCount     int            `json:"pending_count,omitempty"`
+	Agent            *SessionAgent       `json:"agent,omitempty"`
+	Agents           []SessionAgent      `json:"agents,omitempty"`
+	Event            *SessionAgentEvent  `json:"event,omitempty"`
+	Events           []SessionAgentEvent `json:"events,omitempty"`
+	MatchedID        string              `json:"matched_id,omitempty"`
+	MatchedSessionID string              `json:"matched_session_id,omitempty"`
+	LatestSeq        int64               `json:"latest_seq,omitempty"`
+	TimedOut         bool                `json:"timed_out,omitempty"`
+	ReadyCount       int                 `json:"ready_count,omitempty"`
+	PendingCount     int                 `json:"pending_count,omitempty"`
 }
 
 type WaitSessionAgentsResponse struct {
@@ -4205,6 +4214,25 @@ func (c *Client) ListSessionAgentEvents(ctx context.Context, parentSessionID, ag
 
 	var response ListSessionAgentEventsResponse
 	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(parentSessionID)+"/agents/"+url.PathEscape(agentID)+"/events", query, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) ListSessionAgentMailboxEvents(ctx context.Context, parentSessionID string, params ListSessionAgentEventsParams) (*ListSessionAgentEventsResponse, error) {
+	query := url.Values{}
+	if params.AfterSeq > 0 {
+		query.Set("after_seq", strconv.FormatInt(params.AfterSeq, 10))
+	}
+	if params.Limit > 0 {
+		query.Set("limit", strconv.Itoa(params.Limit))
+	}
+	if params.WaitMs > 0 {
+		query.Set("wait_ms", strconv.Itoa(params.WaitMs))
+	}
+
+	var response ListSessionAgentEventsResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(parentSessionID)+"/agents/events", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

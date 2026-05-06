@@ -2229,7 +2229,9 @@ func TestClient_SessionAgentEndpointsEncodePathsAndQuery(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/agents/wait"):
-			_, _ = w.Write([]byte(`{"result":{"matched_id":"child-1","matched_session_id":"child-1","ready_count":1}}`))
+			_, _ = w.Write([]byte(`{"result":{"matched_id":"child-1","matched_session_id":"child-1","ready_count":1,"latest_seq":13,"event":{"seq":13,"type":"mailbox_received","session_id":"parent/1","payload":{"body":"hello"}},"events":[{"seq":13,"type":"mailbox_received","session_id":"parent/1","payload":{"body":"hello"}}]}}`))
+		case strings.HasSuffix(r.URL.Path, "/agents/events"):
+			_, _ = w.Write([]byte(`{"result":{"session_id":"parent/1","count":1,"latest_seq":14,"events":[{"seq":14,"type":"mailbox_received","session_id":"parent/1","payload":{"body":"parent hello"}}]}}`))
 		case strings.HasSuffix(r.URL.Path, "/events"):
 			_, _ = w.Write([]byte(`{"result":{"session_id":"child-1","count":0}}`))
 		default:
@@ -2241,14 +2243,26 @@ func TestClient_SessionAgentEndpointsEncodePathsAndQuery(t *testing.T) {
 	client := NewClient(server.URL)
 
 	_, err := client.WaitSessionAgents(context.Background(), "parent/1", WaitSessionAgentsRequest{
-		IDs:       []string{"child-1", "child-2"},
-		TimeoutMs: 1500,
+		IDs:         []string{"child-1", "child-2"},
+		AfterSeq:    12,
+		TimeoutMs:   1500,
+		MailboxOnly: true,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodPost, gotMethod)
 	assert.Equal(t, "/api/runtime/sessions/parent%2F1/agents/wait", gotPath)
 	assert.Contains(t, gotBody, `"ids":["child-1","child-2"]`)
+	assert.Contains(t, gotBody, `"after_seq":12`)
 	assert.Contains(t, gotBody, `"timeout_ms":1500`)
+	assert.Contains(t, gotBody, `"mailbox_only":true`)
+
+	waitResp, err := client.WaitSessionAgents(context.Background(), "parent/1", WaitSessionAgentsRequest{})
+	require.NoError(t, err)
+	require.NotNil(t, waitResp.Result.Event)
+	assert.Equal(t, int64(13), waitResp.Result.LatestSeq)
+	assert.Equal(t, int64(13), waitResp.Result.Event.Seq)
+	assert.Equal(t, "mailbox_received", waitResp.Result.Event.Type)
+	assert.Len(t, waitResp.Result.Events, 1)
 
 	_, err = client.ListSessionAgentEvents(context.Background(), "parent/1", "child/1", ListSessionAgentEventsParams{
 		AfterSeq: 12,
@@ -2261,6 +2275,19 @@ func TestClient_SessionAgentEndpointsEncodePathsAndQuery(t *testing.T) {
 	assert.Contains(t, gotQuery, "after_seq=12")
 	assert.Contains(t, gotQuery, "limit=5")
 	assert.Contains(t, gotQuery, "wait_ms=900")
+
+	mailboxEventsResp, err := client.ListSessionAgentMailboxEvents(context.Background(), "parent/1", ListSessionAgentEventsParams{
+		AfterSeq: 13,
+		Limit:    5,
+		WaitMs:   900,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, gotMethod)
+	assert.Equal(t, "/api/runtime/sessions/parent%2F1/agents/events", gotPath)
+	assert.Contains(t, gotQuery, "after_seq=13")
+	assert.Equal(t, "parent/1", mailboxEventsResp.Result.SessionID)
+	assert.Equal(t, 1, mailboxEventsResp.Result.Count)
+	assert.Equal(t, int64(14), mailboxEventsResp.Result.LatestSeq)
 }
 
 func TestClient_ReportTaskOutcomeUsesCanonicalEndpoint(t *testing.T) {

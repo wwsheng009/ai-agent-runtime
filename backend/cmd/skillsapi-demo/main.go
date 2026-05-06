@@ -145,12 +145,16 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 	case "session-agent":
 		switch strings.ToLower(strings.TrimSpace(opts.agentAction)) {
 		case "spawn":
-		case "status", "events", "close", "resume":
+		case "status", "close", "resume":
 			if strings.TrimSpace(opts.parentSessionID) == "" {
 				return demoOptions{}, fmt.Errorf("parent-session-id is required")
 			}
 			if strings.TrimSpace(opts.agentID) == "" {
 				return demoOptions{}, fmt.Errorf("agent-id is required")
+			}
+		case "events":
+			if strings.TrimSpace(opts.parentSessionID) == "" {
+				return demoOptions{}, fmt.Errorf("parent-session-id is required")
 			}
 		case "input":
 			if strings.TrimSpace(opts.parentSessionID) == "" {
@@ -165,9 +169,6 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 		case "wait":
 			if strings.TrimSpace(opts.parentSessionID) == "" {
 				return demoOptions{}, fmt.Errorf("parent-session-id is required")
-			}
-			if strings.TrimSpace(opts.agentID) == "" && len(parseCSVList(opts.agentIDsCSV)) == 0 {
-				return demoOptions{}, fmt.Errorf("agent-id or agent-ids is required")
 			}
 		default:
 			return demoOptions{}, fmt.Errorf("unsupported session-agent action: %s", opts.agentAction)
@@ -216,11 +217,20 @@ func runSessionAgentDemo(ctx context.Context, client *skillsapi.Client, opts dem
 		}
 		return printLines(stdout, summarizeSessionAgentWaitResult(opts.parentSessionID, &resp.Result))
 	case "events":
-		resp, err := client.ListSessionAgentEvents(ctx, opts.parentSessionID, opts.agentID, skillsapi.ListSessionAgentEventsParams{
+		params := skillsapi.ListSessionAgentEventsParams{
 			AfterSeq: opts.afterSeq,
 			Limit:    opts.limit,
 			WaitMs:   opts.waitMs,
-		})
+		}
+		var (
+			resp *skillsapi.ListSessionAgentEventsResponse
+			err  error
+		)
+		if strings.TrimSpace(opts.agentID) == "" {
+			resp, err = client.ListSessionAgentMailboxEvents(ctx, opts.parentSessionID, params)
+		} else {
+			resp, err = client.ListSessionAgentEvents(ctx, opts.parentSessionID, opts.agentID, params)
+		}
 		if err != nil {
 			return err
 		}
@@ -554,7 +564,10 @@ func summarizeSessionAgentWaitResult(parentSessionID string, result *skillsapi.S
 
 	lines := []string{
 		fmt.Sprintf("parent_session=%s", strings.TrimSpace(parentSessionID)),
-		fmt.Sprintf("matched_id=%s matched_session_id=%s ready=%d pending=%d timed_out=%t", result.MatchedID, result.MatchedSessionID, result.ReadyCount, result.PendingCount, result.TimedOut),
+		fmt.Sprintf("matched_id=%s matched_session_id=%s ready=%d pending=%d latest_seq=%d timed_out=%t", result.MatchedID, result.MatchedSessionID, result.ReadyCount, result.PendingCount, result.LatestSeq, result.TimedOut),
+	}
+	if result.Event != nil {
+		lines = append(lines, formatSessionAgentEvent("mailbox_event", *result.Event))
 	}
 	if result.Agent != nil {
 		lines = append(lines, "matched_agent_status="+result.Agent.Status)
@@ -589,25 +602,32 @@ func summarizeSessionAgentEvents(parentSessionID string, result *skillsapi.Sessi
 		fmt.Sprintf("agent_session=%s count=%d latest_seq=%d timed_out=%t", result.SessionID, result.Count, result.LatestSeq, result.TimedOut),
 	}
 	for _, event := range result.Events {
-		parts := []string{
-			fmt.Sprintf("event seq=%d", event.Seq),
-			"type=" + event.Type,
-		}
-		if !event.Timestamp.IsZero() {
-			parts = append(parts, "time="+event.Timestamp.Format(time.RFC3339))
-		}
-		if event.AgentName != "" {
-			parts = append(parts, "agent="+event.AgentName)
-		}
-		if event.ToolName != "" {
-			parts = append(parts, "tool="+event.ToolName)
-		}
-		if payload := compactJSON(event.Payload); payload != "" && payload != "null" {
-			parts = append(parts, "payload="+payload)
-		}
-		lines = append(lines, strings.Join(parts, " "))
+		lines = append(lines, formatSessionAgentEvent("event", event))
 	}
 	return lines
+}
+
+func formatSessionAgentEvent(prefix string, event skillsapi.SessionAgentEvent) string {
+	parts := []string{
+		fmt.Sprintf("%s seq=%d", strings.TrimSpace(prefix), event.Seq),
+		"type=" + event.Type,
+	}
+	if event.SessionID != "" {
+		parts = append(parts, "session="+event.SessionID)
+	}
+	if !event.Timestamp.IsZero() {
+		parts = append(parts, "time="+event.Timestamp.Format(time.RFC3339))
+	}
+	if event.AgentName != "" {
+		parts = append(parts, "agent="+event.AgentName)
+	}
+	if event.ToolName != "" {
+		parts = append(parts, "tool="+event.ToolName)
+	}
+	if payload := compactJSON(event.Payload); payload != "" && payload != "null" {
+		parts = append(parts, "payload="+payload)
+	}
+	return strings.Join(parts, " ")
 }
 
 func parseCSVList(raw string) []string {
