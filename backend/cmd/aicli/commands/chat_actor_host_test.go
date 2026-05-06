@@ -318,6 +318,352 @@ func TestLocalActorRegistry_UsesConfiguredDefaultForkTurns(t *testing.T) {
 	}
 }
 
+func TestLocalActorRegistry_CloseAgentPathClosesSubtree(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.RuntimeConfig.Agents.MaxDepth = 2
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+	registry := host.ActorRegistry
+
+	if _, err := registry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "close-parent"}); err != nil {
+		t.Fatalf("spawn parent: %v", err)
+	}
+	if _, err := registry.Spawn(context.Background(), "close-parent", toolbroker.SpawnAgentArgs{ID: "close-child"}); err != nil {
+		t.Fatalf("spawn child: %v", err)
+	}
+	if _, err := registry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "close-sibling"}); err != nil {
+		t.Fatalf("spawn sibling: %v", err)
+	}
+
+	result, err := registry.Close(context.Background(), "/root/close-parent")
+	if err != nil {
+		t.Fatalf("close path: %v", err)
+	}
+	if result.ClosedCount != 2 {
+		t.Fatalf("expected close subtree to close parent and child, got %#v", result)
+	}
+	if !reflect.DeepEqual(result.ClosedSessionIDs, []string{"close-parent", "close-child"}) {
+		t.Fatalf("unexpected closed sessions: %#v", result.ClosedSessionIDs)
+	}
+
+	parent, err := manager.Get(context.Background(), "close-parent")
+	if err != nil {
+		t.Fatalf("load close-parent: %v", err)
+	}
+	child, err := manager.Get(context.Background(), "close-child")
+	if err != nil {
+		t.Fatalf("load close-child: %v", err)
+	}
+	sibling, err := manager.Get(context.Background(), "close-sibling")
+	if err != nil {
+		t.Fatalf("load close-sibling: %v", err)
+	}
+	if parent.State != runtimechat.StateClosed || child.State != runtimechat.StateClosed {
+		t.Fatalf("expected parent and child closed, got parent=%s child=%s", parent.State, child.State)
+	}
+	if sibling.State == runtimechat.StateClosed {
+		t.Fatalf("expected sibling to stay open, got %s", sibling.State)
+	}
+
+	list, err := registry.List(context.Background(), rootSession.ID, toolbroker.ListAgentsArgs{IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	if list.Count != 3 {
+		t.Fatalf("expected closed subtree plus open sibling in list, got %#v", list)
+	}
+}
+
+func TestLocalActorRegistry_AgentPathTargetsResolveToSession(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	provider := runtimellm.NewMockProvider("mock", 0)
+	provider.SetResponse("read status", "status ok")
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+		DefaultProvider: "mock",
+		DefaultModel:    "mock-model",
+	})
+	if err := llmRuntime.RegisterProvider("mock", provider); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+	if err := llmRuntime.RegisterProviderAlias("mock-model", "mock"); err != nil {
+		t.Fatalf("RegisterProviderAlias: %v", err)
+	}
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+	registry := host.ActorRegistry
+
+	if _, err := registry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "path-target"}); err != nil {
+		t.Fatalf("spawn path target: %v", err)
+	}
+	messageResult, err := registry.SendMessage(context.Background(), rootSession.ID, toolbroker.AgentMessageArgs{
+		Target:  "/root/path-target",
+		Message: "hello by path",
+	})
+	if err != nil {
+		t.Fatalf("send message by path: %v", err)
+	}
+	if messageResult.TargetSessionID != "path-target" {
+		t.Fatalf("expected path to resolve to session id, got %#v", messageResult)
+	}
+
+	waitResult, err := registry.Wait(context.Background(), toolbroker.WaitAgentArgs{ID: "/root/path-target", TimeoutMs: 100})
+	if err != nil {
+		t.Fatalf("wait by path: %v", err)
+	}
+	if waitResult.MatchedSessionID != "path-target" {
+		t.Fatalf("expected wait path to resolve, got %#v", waitResult)
+	}
+
+	if _, err := registry.Resume(context.Background(), "/root/path-target"); err != nil {
+		t.Fatalf("resume by path: %v", err)
+	}
+}
+
+func TestLocalActorRegistry_WaitUsesRuntimeEventWakeup(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+	registry := host.ActorRegistry
+
+	if _, err := registry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "event-wait-child"}); err != nil {
+		t.Fatalf("spawn event wait child: %v", err)
+	}
+	if err := host.RuntimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{
+		SessionID: "event-wait-child",
+		Status:    runtimechat.SessionRunning,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("save running state: %v", err)
+	}
+
+	resultCh := make(chan *toolbroker.AgentWaitResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, waitErr := registry.Wait(context.Background(), toolbroker.WaitAgentArgs{ID: "event-wait-child", TimeoutMs: 2000})
+		if waitErr != nil {
+			errCh <- waitErr
+			return
+		}
+		resultCh <- result
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := host.RuntimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{
+		SessionID: "event-wait-child",
+		Status:    runtimechat.SessionIdle,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("save idle state: %v", err)
+	}
+	host.EventBus.Publish(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "event-wait-child",
+		Payload:   map[string]interface{}{"success": true},
+	})
+
+	select {
+	case waitErr := <-errCh:
+		t.Fatalf("wait failed: %v", waitErr)
+	case result := <-resultCh:
+		if result == nil || result.MatchedSessionID != "event-wait-child" || result.ReadyCount != 1 {
+			t.Fatalf("unexpected wait result: %#v", result)
+		}
+	case <-time.After(450 * time.Millisecond):
+		t.Fatal("wait did not wake from runtime event")
+	}
+}
+
+func TestLocalActorRegistry_ReadEventsUsesRuntimeEventWakeup(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+	registry := host.ActorRegistry
+
+	if _, err := registry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "event-read-child"}); err != nil {
+		t.Fatalf("spawn event read child: %v", err)
+	}
+
+	resultCh := make(chan *toolbroker.AgentEventsResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, readErr := registry.ReadEvents(context.Background(), toolbroker.ReadAgentEventsArgs{
+			ID:       "/root/event-read-child",
+			AfterSeq: 0,
+			Limit:    20,
+			WaitMs:   2000,
+		})
+		if readErr != nil {
+			errCh <- readErr
+			return
+		}
+		resultCh <- result
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	event := runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "event-read-child",
+		Payload:   map[string]interface{}{"content": "event read done"},
+	}
+	if _, err := host.EventStore.AppendEvent(context.Background(), event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	host.EventBus.Publish(event)
+
+	select {
+	case readErr := <-errCh:
+		t.Fatalf("read events failed: %v", readErr)
+	case result := <-resultCh:
+		if result == nil || result.SessionID != "event-read-child" || result.Count != 1 {
+			t.Fatalf("unexpected read result: %#v", result)
+		}
+		if len(result.Events) != 1 || result.Events[0].Type != runtimechat.EventAssistantMessage {
+			t.Fatalf("unexpected events: %#v", result.Events)
+		}
+	case <-time.After(450 * time.Millisecond):
+		t.Fatal("read_agent_events did not wake from runtime event")
+	}
+}
+
+func TestLocalActorRegistry_MirrorsChildCompletionToParentEvents(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+	registry := host.ActorRegistry
+
+	_, err = registry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:        "completion-child",
+		AgentType: "worker",
+	})
+	if err != nil {
+		t.Fatalf("spawn completion child: %v", err)
+	}
+	childEnd := runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "completion-child",
+		TraceID:   "trace-child-complete",
+		Payload: map[string]interface{}{
+			"success": true,
+			"steps":   3,
+		},
+	}
+	host.EventBus.Publish(childEnd)
+
+	events, err := host.EventStore.ListEvents(context.Background(), rootSession.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected one parent completion event, got %#v", events)
+	}
+	event := events[0]
+	if event.Type != "subagent.completed" || event.SessionID != rootSession.ID {
+		t.Fatalf("unexpected mirrored event: %#v", event)
+	}
+	if event.Payload["session_id"] != "completion-child" || event.Payload["path"] != "/root/completion-child" || event.Payload["agent_type"] != "worker" {
+		t.Fatalf("unexpected mirrored payload: %#v", event.Payload)
+	}
+	if event.Payload["status"] != string(runtimechat.SessionIdle) || event.Payload["success"] != true {
+		t.Fatalf("unexpected completion status payload: %#v", event.Payload)
+	}
+}
+
 func TestBuildLocalChatAgent_DisablesWorkspaceContextByDefaultForActorChat(t *testing.T) {
 	session := &ChatSession{}
 	host := &localChatRuntimeHost{

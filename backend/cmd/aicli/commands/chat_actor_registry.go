@@ -182,6 +182,7 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	if err := r.Host.SessionStore.Save(ctx, childSession); err != nil {
 		return nil, err
 	}
+	r.subscribeLocalAgentCompletion(parentSessionID, childSession)
 
 	actor, err := r.Host.SessionHub.GetOrCreate(sessionID)
 	if err != nil {
@@ -201,6 +202,74 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	result.Created = true
 	result.Queued = queued
 	return result, nil
+}
+
+func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID string, childSession *runtimechat.Session) {
+	if r == nil || r.Host == nil || r.Host.EventBus == nil || r.Host.EventStore == nil || childSession == nil {
+		return
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	childSessionID := strings.TrimSpace(childSession.ID)
+	if parentSessionID == "" || childSessionID == "" {
+		return
+	}
+	childPath := localAgentSessionPath(childSession)
+	childDepth := localAgentSessionDepth(childSession)
+	childType := ""
+	if value, ok := childSession.GetContext(toolbroker.AgentSessionContextAgentType); ok {
+		if text, ok := value.(string); ok {
+			childType = strings.TrimSpace(text)
+		}
+	}
+
+	var unsubscribe func()
+	handler := func(event runtimeevents.Event) {
+		if !strings.EqualFold(strings.TrimSpace(event.SessionID), childSessionID) {
+			return
+		}
+		eventType := strings.TrimSpace(event.Type)
+		if eventType != runtimechat.EventSessionEnd && eventType != runtimechat.EventSessionInterrupted {
+			return
+		}
+		if unsubscribe != nil {
+			unsubscribe()
+		}
+		payload := map[string]interface{}{
+			"agent_id":          childSessionID,
+			"session_id":        childSessionID,
+			"parent_session_id": parentSessionID,
+			"path":              childPath,
+			"source_event_type": eventType,
+			"status":            localAgentCompletionStatus(event),
+		}
+		if childDepth > 0 {
+			payload["depth"] = childDepth
+		}
+		if childType != "" {
+			payload["agent_type"] = childType
+			payload["role"] = childType
+		}
+		copyLocalAgentCompletionPayload(payload, event.Payload)
+		mirrored := runtimeevents.Event{
+			Type:      "subagent.completed",
+			TraceID:   strings.TrimSpace(event.TraceID),
+			AgentName: "agent-controller",
+			SessionID: parentSessionID,
+			Payload:   payload,
+			Timestamp: event.Timestamp,
+		}
+		if mirrored.Timestamp.IsZero() {
+			mirrored.Timestamp = time.Now().UTC()
+		}
+		if seq, err := r.Host.EventStore.AppendEvent(context.Background(), mirrored); err == nil {
+			if mirrored.Payload == nil {
+				mirrored.Payload = map[string]interface{}{}
+			}
+			mirrored.Payload["seq"] = seq
+		}
+		r.Host.EventBus.Publish(mirrored)
+	}
+	unsubscribe = r.Host.EventBus.SubscribeCancelable("", handler)
 }
 
 func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, args toolbroker.ListAgentsArgs) (*toolbroker.AgentListResult, error) {
@@ -286,6 +355,11 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 	if sessionID == "" {
 		return nil, fmt.Errorf("target is required")
 	}
+	resolvedSessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sessionID = resolvedSessionID
 	message := strings.TrimSpace(args.Message)
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
@@ -348,6 +422,11 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 	if sessionID == "" {
 		return nil, fmt.Errorf("id is required")
 	}
+	resolvedSessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sessionID = resolvedSessionID
 	message := strings.TrimSpace(args.Message)
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
@@ -387,6 +466,13 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 	if len(sessionIDs) == 0 {
 		return nil, fmt.Errorf("id is required")
 	}
+	for index, sessionID := range sessionIDs {
+		resolvedSessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		sessionIDs[index] = resolvedSessionID
+	}
 	timeout := time.Duration(args.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		defaultWaitMs := r.localAgentsConfig().DefaultWaitTimeoutMs
@@ -397,6 +483,8 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	wakeCh, unsubscribe := r.subscribeLocalAgentWaitEvents(sessionIDs)
+	defer unsubscribe()
 	for {
 		snapshots := make([]toolbroker.AgentStatusResult, 0, len(sessionIDs))
 		var matched *toolbroker.AgentStatusResult
@@ -433,9 +521,40 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 		case <-waitCtx.Done():
 			waitResult.TimedOut = true
 			return waitResult, nil
-		case <-time.After(50 * time.Millisecond):
+		case <-wakeCh:
+		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+func (r *localActorRegistry) subscribeLocalAgentWaitEvents(sessionIDs []string) (<-chan struct{}, func()) {
+	if r == nil || r.Host == nil || r.Host.EventBus == nil || len(sessionIDs) == 0 {
+		return nil, func() {}
+	}
+	targets := make(map[string]struct{}, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+			targets[sessionID] = struct{}{}
+		}
+	}
+	if len(targets) == 0 {
+		return nil, func() {}
+	}
+	wakeCh := make(chan struct{}, 1)
+	handler := func(event runtimeevents.Event) {
+		if _, ok := targets[strings.TrimSpace(event.SessionID)]; !ok {
+			return
+		}
+		if !isLocalAgentWaitWakeEvent(event.Type) {
+			return
+		}
+		select {
+		case wakeCh <- struct{}{}:
+		default:
+		}
+	}
+	unsubscribeAll := r.Host.EventBus.SubscribeCancelable("", handler)
+	return wakeCh, unsubscribeAll
 }
 
 func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.ReadAgentEventsArgs) (*toolbroker.AgentEventsResult, error) {
@@ -446,6 +565,11 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 	if sessionID == "" {
 		return nil, fmt.Errorf("id is required")
 	}
+	resolvedSessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sessionID = resolvedSessionID
 	limit := args.Limit
 	if limit <= 0 {
 		limit = 20
@@ -460,6 +584,8 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 		readCtx, cancel = context.WithTimeout(ctx, time.Duration(waitMs)*time.Millisecond)
 	}
 	defer cancel()
+	wakeCh, unsubscribe := r.subscribeLocalAgentReadEvents(sessionID)
+	defer unsubscribe()
 	for {
 		events, err := r.Host.EventStore.ListEvents(readCtx, sessionID, args.AfterSeq, limit)
 		if err != nil {
@@ -473,31 +599,194 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 			result := buildLocalAgentEventsResult(sessionID, nil)
 			result.TimedOut = true
 			return result, nil
-		case <-time.After(50 * time.Millisecond):
+		case <-wakeCh:
+		case <-time.After(500 * time.Millisecond):
 		}
 	}
 }
 
-func (r *localActorRegistry) Close(ctx context.Context, sessionID string) (*toolbroker.AgentStatusResult, error) {
+func (r *localActorRegistry) subscribeLocalAgentReadEvents(sessionID string) (<-chan struct{}, func()) {
+	if r == nil || r.Host == nil || r.Host.EventBus == nil {
+		return nil, func() {}
+	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return nil, fmt.Errorf("id is required")
+		return nil, func() {}
 	}
-	if r != nil && r.Host != nil && r.Host.SessionHub != nil {
-		r.Host.SessionHub.Stop(sessionID)
-	}
-	if r != nil && r.Host != nil && r.Host.SessionStore != nil {
-		if session, err := r.Host.SessionStore.Load(ctx, sessionID); err == nil && session != nil {
-			session.UpdateState(runtimechat.StateClosed)
-			_ = r.Host.SessionStore.Update(ctx, session)
+	wakeCh := make(chan struct{}, 1)
+	handler := func(event runtimeevents.Event) {
+		if !strings.EqualFold(strings.TrimSpace(event.SessionID), sessionID) {
+			return
+		}
+		select {
+		case wakeCh <- struct{}{}:
+		default:
 		}
 	}
-	result, err := r.agentSnapshot(ctx, sessionID)
+	unsubscribeAll := r.Host.EventBus.SubscribeCancelable("", handler)
+	return wakeCh, unsubscribeAll
+}
+
+func (r *localActorRegistry) Close(ctx context.Context, sessionID string) (*toolbroker.AgentStatusResult, error) {
+	target := strings.TrimSpace(sessionID)
+	if target == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	targetSessionID, closeIDs, err := r.resolveLocalAgentCloseTargets(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	if len(closeIDs) == 0 {
+		closeIDs = []string{target}
+		targetSessionID = target
+	}
+	closedIDs := make([]string, 0, len(closeIDs))
+	for _, closeID := range closeIDs {
+		closeID = strings.TrimSpace(closeID)
+		if closeID == "" {
+			continue
+		}
+		if r != nil && r.Host != nil && r.Host.SessionHub != nil {
+			r.Host.SessionHub.Stop(closeID)
+		}
+		if r != nil && r.Host != nil && r.Host.SessionStore != nil {
+			if session, loadErr := r.Host.SessionStore.Load(ctx, closeID); loadErr == nil && session != nil {
+				session.UpdateState(runtimechat.StateClosed)
+				_ = r.Host.SessionStore.Update(ctx, session)
+			}
+		}
+		closedIDs = append(closedIDs, closeID)
+	}
+	result, err := r.agentSnapshot(ctx, targetSessionID)
 	if err != nil {
 		return nil, err
 	}
 	result.Status = string(runtimechat.SessionStopped)
+	result.ClosedCount = len(closedIDs)
+	result.ClosedSessionIDs = closedIDs
 	return result, nil
+}
+
+func (r *localActorRegistry) resolveLocalAgentCloseTargets(ctx context.Context, target string) (string, []string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", nil, fmt.Errorf("id is required")
+	}
+	sessions, err := r.listLocalAgentSessions(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, session := range sessions {
+		changed, applyErr := r.applyTeamTeammateAgentContext(ctx, session)
+		if applyErr != nil {
+			return "", nil, applyErr
+		}
+		if changed {
+			if err := r.Host.SessionStore.Update(ctx, session); err != nil {
+				return "", nil, err
+			}
+		}
+	}
+	byID := make(map[string]*runtimechat.Session, len(sessions))
+	for _, session := range sessions {
+		if session != nil && strings.TrimSpace(session.ID) != "" {
+			byID[strings.TrimSpace(session.ID)] = session
+		}
+	}
+	targetSessionID := target
+	targetPath := ""
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		sessionID := strings.TrimSpace(session.ID)
+		path := localAgentSessionPath(session)
+		if strings.EqualFold(target, path) {
+			targetSessionID = sessionID
+			targetPath = path
+			break
+		}
+	}
+	targetSession := byID[targetSessionID]
+	if targetPath == "" && targetSession != nil {
+		targetPath = localAgentSessionPath(targetSession)
+	}
+	if targetSession == nil && !strings.HasPrefix(target, "/") {
+		return target, []string{target}, nil
+	}
+	closeIDs := make([]string, 0, len(sessions))
+	seen := make(map[string]struct{}, len(sessions))
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, exists := seen[value]; exists {
+			return
+		}
+		seen[value] = struct{}{}
+		closeIDs = append(closeIDs, value)
+	}
+	add(targetSessionID)
+	for _, session := range sessions {
+		if session == nil || !isLocalAgentSession(session) {
+			continue
+		}
+		sessionID := strings.TrimSpace(session.ID)
+		if sessionID == "" || strings.EqualFold(sessionID, targetSessionID) {
+			continue
+		}
+		if targetPath != "" && strings.HasPrefix(localAgentSessionPath(session), strings.TrimRight(targetPath, "/")+"/") {
+			add(sessionID)
+			continue
+		}
+		if targetSessionID != "" && localAgentHasAncestor(session, targetSessionID, byID) {
+			add(sessionID)
+		}
+	}
+	sort.SliceStable(closeIDs, func(i, j int) bool {
+		if strings.EqualFold(closeIDs[i], targetSessionID) {
+			return true
+		}
+		if strings.EqualFold(closeIDs[j], targetSessionID) {
+			return false
+		}
+		return closeIDs[i] < closeIDs[j]
+	})
+	return targetSessionID, closeIDs, nil
+}
+
+func (r *localActorRegistry) resolveLocalAgentTargetSessionID(ctx context.Context, target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" || !strings.HasPrefix(target, "/") {
+		return target, nil
+	}
+	sessions, err := r.listLocalAgentSessions(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, session := range sessions {
+		changed, applyErr := r.applyTeamTeammateAgentContext(ctx, session)
+		if applyErr != nil {
+			return "", applyErr
+		}
+		if changed {
+			if err := r.Host.SessionStore.Update(ctx, session); err != nil {
+				return "", err
+			}
+		}
+	}
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		if strings.EqualFold(target, localAgentSessionPath(session)) {
+			if sessionID := strings.TrimSpace(session.ID); sessionID != "" {
+				return sessionID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("unknown agent path: %s", target)
 }
 
 func (r *localActorRegistry) Resume(ctx context.Context, sessionID string) (*toolbroker.AgentStatusResult, error) {
@@ -505,6 +794,11 @@ func (r *localActorRegistry) Resume(ctx context.Context, sessionID string) (*too
 	if sessionID == "" {
 		return nil, fmt.Errorf("id is required")
 	}
+	resolvedSessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sessionID = resolvedSessionID
 	if err := r.ensureSession(ctx, sessionID); err != nil {
 		return nil, err
 	}
@@ -919,6 +1213,46 @@ func isLocalAgentWaitReady(status string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func isLocalAgentWaitWakeEvent(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case runtimechat.EventSessionEnd,
+		runtimechat.EventSessionInterrupted,
+		runtimechat.EventAssistantMessage,
+		runtimechat.EventApprovalRequested,
+		runtimechat.EventQuestionAsked,
+		runtimechat.EventMailboxReceived:
+		return true
+	default:
+		return false
+	}
+}
+
+func localAgentCompletionStatus(event runtimeevents.Event) string {
+	if strings.TrimSpace(event.Type) == runtimechat.EventSessionInterrupted {
+		return string(runtimechat.SessionStopped)
+	}
+	if event.Payload != nil {
+		if success, ok := event.Payload["success"].(bool); ok && !success {
+			return "failed"
+		}
+		if text, ok := event.Payload["status"].(string); ok && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	return string(runtimechat.SessionIdle)
+}
+
+func copyLocalAgentCompletionPayload(target map[string]interface{}, payload map[string]interface{}) {
+	if len(target) == 0 || len(payload) == 0 {
+		return
+	}
+	for _, key := range []string{"success", "error", "duration", "steps", "trace_id", "turn_id"} {
+		if value, ok := payload[key]; ok {
+			target[key] = value
+		}
 	}
 }
 
