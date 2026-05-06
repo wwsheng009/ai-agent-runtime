@@ -27,6 +27,7 @@ import (
 
 type localChatRuntimeHost struct {
 	Bootstrap     *runtimebootstrap.Manager
+	RuntimeConfig *runtimecfg.RuntimeConfig
 	SessionHub    *runtimechat.SessionHub
 	RuntimeStore  runtimechat.RuntimeStateStore
 	EventStore    runtimechat.EventStore
@@ -96,16 +97,17 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	receiptStore, _ := runtimeStore.(runtimechat.ToolReceiptStore)
 	eventBus := runtimeevents.NewBusWithRetention(2048)
 	host := &localChatRuntimeHost{
-		Bootstrap:    bootstrapManager,
-		RuntimeStore: runtimeStore,
-		EventStore:   eventStore,
-		ReceiptStore: receiptStore,
-		TeamStore:    bootstrapManager.TeamStore(),
-		ToolSurface:  runtimeMCP,
-		EventBus:     eventBus,
-		SessionStore: sessionStore,
-		SessionUser:  session.SessionUserID,
-		BaseSession:  session,
+		Bootstrap:     bootstrapManager,
+		RuntimeConfig: runtimeConfig,
+		RuntimeStore:  runtimeStore,
+		EventStore:    eventStore,
+		ReceiptStore:  receiptStore,
+		TeamStore:     bootstrapManager.TeamStore(),
+		ToolSurface:   runtimeMCP,
+		EventBus:      eventBus,
+		SessionStore:  sessionStore,
+		SessionUser:   session.SessionUserID,
+		BaseSession:   session,
 	}
 	host.TeamLifecycle = newLocalTeamLifecycleService(host)
 
@@ -351,6 +353,7 @@ func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) st
 			"When calling team tools, leave teammate session_id unset unless you truly need a fixed explicit session. Never use session_id=\"current\" for teammates.",
 			"When calling spawn_team from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
 			"When you call spawn_team with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",
+			"Do not use wait_agent or read_agent_events for spawn_team teammate ids such as member-1. Those tools are only for spawn_agent child sessions; team progress arrives through team lifecycle events and the final team.summary.",
 		)
 	}
 	return strings.Join(lines, "\n\n")
@@ -769,10 +772,8 @@ func (h *localChatRuntimeHost) dispatchTeamLifecycleEvent(event team.TeamEvent, 
 	if strings.TrimSpace(event.TeamID) != "" {
 		payload["team_id"] = strings.TrimSpace(event.TeamID)
 	}
-	sessionID := ""
-	if h.BaseSession != nil && h.BaseSession.RuntimeSession != nil {
-		sessionID = strings.TrimSpace(h.BaseSession.RuntimeSession.ID)
-	}
+	baseSessionID := h.baseRuntimeSessionID()
+	sessionID := h.teamLifecycleEventSessionID(context.Background(), strings.TrimSpace(event.TeamID), baseSessionID)
 	runtimeEvent := runtimeevents.Event{
 		Type:      strings.TrimSpace(event.Type),
 		AgentName: "team-orchestrator",
@@ -788,15 +789,42 @@ func (h *localChatRuntimeHost) dispatchTeamLifecycleEvent(event team.TeamEvent, 
 			runtimeEvent.Payload["seq"] = seq
 		}
 	}
-	if lifecycle := h.teamLifecycleService(); lifecycle != nil {
-		lifecycle.Apply(runtimeEvent)
+	if h.isLifecycleEventForBaseSession(sessionID) {
+		if lifecycle := h.teamLifecycleService(); lifecycle != nil {
+			lifecycle.Apply(runtimeEvent)
+		}
+		if h.EventBus != nil {
+			h.EventBus.Publish(runtimeEvent)
+		}
 	}
-	if h.EventBus != nil {
-		h.EventBus.Publish(runtimeEvent)
-	}
-	if h.BaseSession != nil {
+	if h.BaseSession != nil && h.isLifecycleEventForBaseSession(sessionID) {
 		warnIfChatSessionSyncFails(h.BaseSession, "team lifecycle sync", syncAmbientTeamLifecycleState(h.BaseSession))
 	}
+}
+
+func (h *localChatRuntimeHost) baseRuntimeSessionID() string {
+	if h == nil || h.BaseSession == nil || h.BaseSession.RuntimeSession == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.BaseSession.RuntimeSession.ID)
+}
+
+func (h *localChatRuntimeHost) teamLifecycleEventSessionID(ctx context.Context, teamID string, fallback string) string {
+	teamID = strings.TrimSpace(teamID)
+	if h != nil && h.TeamStore != nil && teamID != "" {
+		if record, err := h.TeamStore.GetTeam(ctx, teamID); err == nil && record != nil {
+			if leadSessionID := strings.TrimSpace(record.LeadSessionID); leadSessionID != "" {
+				return leadSessionID
+			}
+		}
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func (h *localChatRuntimeHost) isLifecycleEventForBaseSession(sessionID string) bool {
+	baseSessionID := h.baseRuntimeSessionID()
+	sessionID = strings.TrimSpace(sessionID)
+	return baseSessionID == "" || sessionID == "" || strings.EqualFold(sessionID, baseSessionID)
 }
 
 func (h *localChatRuntimeHost) teamLifecycleService() teamLifecycleService {
