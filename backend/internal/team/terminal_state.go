@@ -10,10 +10,11 @@ import (
 
 // TerminalTeamServices groups collaborators used to reconcile team terminal state.
 type TerminalTeamServices struct {
-	Store   Store
-	Planner *LeadPlanner
-	Mailbox *MailboxService
-	Events  *TeamEventBus
+	Store               Store
+	Planner             *LeadPlanner
+	Mailbox             *MailboxService
+	Events              *TeamEventBus
+	IgnoreBusyTeammates bool
 }
 
 // TerminalTeamResult captures the outcome of a terminal-state reconciliation.
@@ -64,6 +65,13 @@ func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServic
 	}
 	if len(active) > 0 {
 		return &TerminalTeamResult{Terminal: false}, nil
+	}
+	if !services.IgnoreBusyTeammates {
+		if busy, err := hasBusyTeammates(ctx, services.Store, teamID); err != nil {
+			return nil, err
+		} else if busy {
+			return &TerminalTeamResult{Terminal: false}, nil
+		}
 	}
 
 	failed, err := services.Store.ListTasks(ctx, TaskFilter{
@@ -174,6 +182,16 @@ func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, s
 				result.Terminal = false
 				return nil
 			}
+			if !services.IgnoreBusyTeammates {
+				busyCount, err := countTeammatesByStateTx(ctx, tx, teamID, TeammateStateBusy)
+				if err != nil {
+					return err
+				}
+				if busyCount > 0 {
+					result.Terminal = false
+					return nil
+				}
+			}
 
 			failedCount, err := countTasksByStatusTx(ctx, tx, teamID, TaskStatusFailed)
 			if err != nil {
@@ -268,6 +286,19 @@ func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, s
 	return result, nil
 }
 
+func hasBusyTeammates(ctx context.Context, store Store, teamID string) (bool, error) {
+	teammates, err := store.ListTeammates(ctx, teamID)
+	if err != nil {
+		return false, err
+	}
+	for _, teammate := range teammates {
+		if teammate.State == TeammateStateBusy {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func countTasksByStatusTx(ctx context.Context, tx *sql.Tx, teamID string, statuses ...TaskStatus) (int, error) {
 	if len(statuses) == 0 {
 		return 0, nil
@@ -287,6 +318,29 @@ func countTasksByStatusTx(ctx context.Context, tx *sql.Tx, teamID string, status
 	var count int
 	if err := row.Scan(&count); err != nil {
 		return 0, fmt.Errorf("count team tasks: %w", err)
+	}
+	return count, nil
+}
+
+func countTeammatesByStateTx(ctx context.Context, tx *sql.Tx, teamID string, states ...TeammateState) (int, error) {
+	if len(states) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, 0, len(states))
+	args := make([]interface{}, 0, len(states)+1)
+	args = append(args, teamID)
+	for _, state := range states {
+		placeholders = append(placeholders, "?")
+		args = append(args, string(state))
+	}
+	row := tx.QueryRowContext(ctx, `
+		SELECT COUNT(1)
+		FROM teammates
+		WHERE team_id = ? AND state IN (`+strings.Join(placeholders, ",")+`)
+	`, args...)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("count teammates: %w", err)
 	}
 	return count, nil
 }

@@ -117,6 +117,46 @@ func TestReconcileTerminalTeamStateDoesNotDowngradeTerminalDoneTeam(t *testing.T
 	assert.Empty(t, events)
 }
 
+func TestReconcileTerminalTeamStateWaitsForBusyTeammate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{
+		Status: TeamStatusActive,
+	})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:     "mate-busy",
+		TeamID: teamID,
+		State:  TeammateStateBusy,
+	})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, Task{
+		ID:      "task-1",
+		TeamID:  teamID,
+		Title:   "done task",
+		Status:  TaskStatusDone,
+		Summary: "finished",
+	})
+	require.NoError(t, err)
+
+	result, err := ReconcileTerminalTeamState(ctx, TerminalTeamServices{
+		Store: store,
+	}, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Terminal)
+
+	record, err := store.GetTeam(ctx, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.Equal(t, TeamStatusActive, record.Status)
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	assert.Empty(t, events)
+}
+
 func TestReconcileTerminalTeamStatePublishesFallbackSummaryFailureMetadata(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
