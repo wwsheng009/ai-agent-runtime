@@ -732,9 +732,12 @@ P4: TUI 和观测。
 - P2 `wait_agent` 事件唤醒: `wait_agent` 会订阅 runtime event bus，在目标 session 出现 `session_end`、`session_interrupted`、`assistant_message`、`approval_requested`、`question_asked`、`mailbox_received` 时立即重新快照状态；固定 fallback 从 50ms 高频轮询降为 500ms。
 - P2 `read_agent_events` 事件唤醒: `read_agent_events` 带 `wait_ms` 时会订阅 runtime event bus，在目标 session 出现新 event 后立即重新读取 event store；固定 fallback 从 50ms 高频轮询降为 500ms。
 - P2 child completion 持久父级事件: `spawn_agent` child session 的 `session_end/session_interrupted` 会向 parent session event store 镜像一条轻量 `subagent.completed` 事件，payload 包含 child session、path、agent type、status、success/error/trace 等摘要字段；CLI 与 runtime API controller 均已覆盖。
+- P2 team mailbox durable sequence/watch 基础: `team.MailMessage` 增加 per-team `seq`，`MailFilter.AfterSeq` 支持按 durable sequence 增量读取；SQLite migration v7 会为既有 `team_mailbox_messages` 回填 sequence 并建立 `(team_id, seq)` 索引；`SQLiteStore.WatchMail/LastMailSeq` 与 `MailboxService.Wait` 提供“内存通知 + durable catch-up”的 watch 语义，通知丢失时仍可通过 `AfterSeq` 恢复。
+- P2 runtime API mailbox 增量读取: `GET /api/runtime/teams/{id}/mailbox` 支持 `after_seq` / `after` 参数，并在响应 filters 中回显 `after_seq`；返回的 `MailMessage.seq` 可作为下一次增量读取 cursor。
 - P2 工具面分层: 新增 `send_message` 与 `followup_task`。前者只投递消息，后者在 idle child 上触发新 turn，busy child 上只投递消息不打断。
 - P3 轻量桥接: team teammate session 会被投影为 `/root/teams/<team>/<member>`，因此可在 `list_agents` 中看到；完整 team substrate 迁移尚未完成。
 - P3 team orchestrator wake: `Orchestrator.RunWithWake` 支持事件唤醒 + fallback tick，启动后会先做一次 immediate tick；本地 CLI 与 runtime API 的 team lifecycle loop 会在 `SyncLoops` 命中已有 active team 时发送非阻塞 wake signal，减少 ready task 等待下一个 tick 的延迟。
+- P3 team orchestrator mailbox sequence wake: `Orchestrator.RunWithWake` 现在会订阅 team mailbox watcher，并用 `LastMailSeq` 作为 durable high-water mark；当 mailbox 插入新 sequence 时可在 fallback tick 前唤醒编排 loop，外部 lifecycle wake 仍作为兼容入口保留。
 - P3 terminal reconcile 保护: team 终态 reconcile 现在会把 busy teammate 视为未 settle，避免运行中的 teammate 尚未发布 `task.completed` 时提前发出 `team.completed/team.summary`。
 - P3 team SQLite memory store 稳定性: `SQLiteStore` 对 `:memory:` / `mode=memory` DSN 限制单连接，避免 HTTP/API 测试或轻量运行时跨连接访问时出现 schema 丢失。
 - P4 `/debug` agent graph: `/debug` 已增加当前 root 下 agent tree 摘要，包含 path、status、session、session state、parent、depth、type、pending approval/question/tool 等排障字段。
@@ -746,6 +749,8 @@ P4: TUI 和观测。
 - `go test ./cmd/aicli/commands -run "TestLocalActorRegistry_(WaitUsesRuntimeEventWakeup|ReadEventsUsesRuntimeEventWakeup|AgentPathTargetsResolveToSession|CloseAgentPathClosesSubtree)"`
 - `go test ./cmd/aicli/commands -run TestLocalActorRegistry_MirrorsChildCompletionToParentEvents -count=1 -v`
 - `go test ./internal/api/skills -run TestSessionAgentController_MirrorsChildCompletionToParentEvents -count=1 -v`
+- `go test ./internal/team -run "Test(SQLiteStoreListMailAfterSeqReturnsLaterMessages|MailboxServiceWaitUsesDurableSequenceAndWake|OrchestratorRun(WakesFromMailboxSequenceBeforeFallbackTick|WithWakeProcessesReadyTaskBeforeFallbackTick|TicksImmediately)|MailboxReceiptsArePerAgentAndIncludeBroadcast|SQLiteStoreListMailFilters)" -count=1 -v`
+- `go test ./internal/api/skills -run "TestListMailboxHandler(MarksMessagesReadForAgent|SupportsAfterSeq)" -count=1 -v`
 - `go test ./internal/team -run "Test(OrchestratorRun(TicksImmediately|WithWakeProcessesReadyTaskBeforeFallbackTick|StopsWhenTeamNotActive)|ReconcileTerminalTeamStateWaitsForBusyTeammate|ReconcileTerminalTeamStateDoesNotDuplicateSummarySideEffects)"`
 - `go test ./internal/api/skills -run "TestSyncTeamLifecycleLoops(EnrichesInjectedOrchestratorBeforeStartingLoops|SignalsExistingLoop|CompletesTeamWhenTeammateReportsOutcomeViaBroker)" -count=1 -v`
 - `go test ./cmd/aicli/commands -run "TestAICLIChatActorExecutor_(InteractiveAutoStartRendersTeamTimeline|AutoStartQueuedTasksStaySerializedPerTeammate)"`
@@ -758,8 +763,8 @@ P4: TUI 和观测。
 
 仍保留:
 
-- `wait_agent/read_agent_events` 已不再依赖高频 50ms 状态轮询，但还不是 Codex 式 durable mailbox watch/sequence；`read_agent_events` 仍读取 event store，而不是父 agent mailbox。
+- team mailbox 已具备 durable sequence/watch 基础，但 `wait_agent/read_agent_events` 还不是 Codex 式父 agent mailbox watch；`read_agent_events` 仍读取 event store，而不是父 agent mailbox。
 - child completion notification 已有 parent session 持久事件镜像，但还没有完全改成 durable mailbox 通信模型。
 - `spawn_team` 的 task assignment 尚未完全改为统一 AgentControl/substrate 派发。
-- team orchestrator 已支持事件唤醒 + fallback tick，但 wake 源仍是本地 lifecycle signal，不是 durable mailbox watch/sequence。
+- team orchestrator 已支持 mailbox sequence wake + lifecycle wake + fallback tick，但 task creation、outcome reported、claim released 等来源还没有全部统一为 durable mailbox/substrate watch。
 - TUI agent picker/collab timeline 仍是后续 P4 工作。
