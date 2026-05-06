@@ -96,6 +96,49 @@ func TestLocalChatRuntimeHost_MirrorsTeamSummaryIntoBaseSession(t *testing.T) {
 	}
 }
 
+func TestLocalChatRuntimeHost_TeamLifecyclePersistsParentMailbox(t *testing.T) {
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
+	host := &localChatRuntimeHost{
+		EventStore: runtimeStore,
+		EventBus:   runtimeevents.NewBusWithRetention(16),
+		BaseSession: &ChatSession{
+			RuntimeSession: &runtimechat.Session{ID: "root-session"},
+		},
+	}
+
+	host.dispatchTeamLifecycleEvent(team.TeamEvent{
+		Type:   "team.completed",
+		TeamID: "team-1",
+		Payload: map[string]interface{}{
+			"status": "done",
+		},
+	}, true)
+
+	events, err := runtimeStore.ListEvents(context.Background(), "root-session", 0, 10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected team completed event and mailbox mirror, got %#v", events)
+	}
+	if events[0].Type != "team.completed" || events[0].Payload["status"] != "done" {
+		t.Fatalf("unexpected lifecycle event: %#v", events[0])
+	}
+	if events[1].Type != runtimechat.EventMailboxReceived || events[1].Payload["kind"] != team.TeamLifecycleMailboxKind {
+		t.Fatalf("unexpected lifecycle mailbox event: %#v", events[1])
+	}
+	messages, err := runtimeStore.ListMailbox(context.Background(), "root-session", 0, 10)
+	if err != nil {
+		t.Fatalf("ListMailbox: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Kind != team.TeamLifecycleMailboxKind || messages[0].Metadata["event_type"] != "team.completed" {
+		t.Fatalf("unexpected lifecycle mailbox substrate rows: %#v", messages)
+	}
+	if messages[0].Metadata["message_type"] != team.TeamLifecycleControlMessageType || messages[0].Metadata["status"] != "done" {
+		t.Fatalf("unexpected lifecycle mailbox metadata: %#v", messages[0].Metadata)
+	}
+}
+
 func TestBuildLocalChatAgent_PropagatesReasoningEffortToAgentOptions(t *testing.T) {
 	session := &ChatSession{
 		ReasoningEffort: "medium",
@@ -458,7 +501,7 @@ func TestLocalActorRegistry_AgentPathTargetsResolveToSession(t *testing.T) {
 	}
 }
 
-func TestLocalActorRegistry_WaitUsesRuntimeEventWakeup(t *testing.T) {
+func TestLocalActorRegistry_WaitUsesEventStoreWakeup(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
 		t.Fatalf("newChatSessionManager: %v", err)
@@ -513,11 +556,13 @@ func TestLocalActorRegistry_WaitUsesRuntimeEventWakeup(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save idle state: %v", err)
 	}
-	host.EventBus.Publish(runtimeevents.Event{
+	if _, err := host.EventStore.AppendEvent(context.Background(), runtimeevents.Event{
 		Type:      runtimechat.EventSessionEnd,
 		SessionID: "event-wait-child",
 		Payload:   map[string]interface{}{"success": true},
-	})
+	}); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
 
 	select {
 	case waitErr := <-errCh:
@@ -527,11 +572,11 @@ func TestLocalActorRegistry_WaitUsesRuntimeEventWakeup(t *testing.T) {
 			t.Fatalf("unexpected wait result: %#v", result)
 		}
 	case <-time.After(450 * time.Millisecond):
-		t.Fatal("wait did not wake from runtime event")
+		t.Fatal("wait did not wake from event store append")
 	}
 }
 
-func TestLocalActorRegistry_ReadEventsUsesRuntimeEventWakeup(t *testing.T) {
+func TestLocalActorRegistry_ReadEventsUsesEventStoreWakeup(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
 		t.Fatalf("newChatSessionManager: %v", err)
@@ -585,7 +630,6 @@ func TestLocalActorRegistry_ReadEventsUsesRuntimeEventWakeup(t *testing.T) {
 	if _, err := host.EventStore.AppendEvent(context.Background(), event); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
 	}
-	host.EventBus.Publish(event)
 
 	select {
 	case readErr := <-errCh:
@@ -598,7 +642,392 @@ func TestLocalActorRegistry_ReadEventsUsesRuntimeEventWakeup(t *testing.T) {
 			t.Fatalf("unexpected events: %#v", result.Events)
 		}
 	case <-time.After(450 * time.Millisecond):
-		t.Fatal("read_agent_events did not wake from runtime event")
+		t.Fatal("read_agent_events did not wake from event store append")
+	}
+}
+
+func TestLocalActorRegistry_WaitWithoutTargetUsesParentMailbox(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.BaseSession = &ChatSession{RuntimeSession: rootSession, SessionUserID: userID}
+	registry := host.ActorRegistry
+
+	resultCh := make(chan *toolbroker.AgentWaitResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, waitErr := registry.Wait(context.Background(), toolbroker.WaitAgentArgs{
+			SessionID:   rootSession.ID,
+			MailboxOnly: true,
+			TimeoutMs:   2000,
+		})
+		if waitErr != nil {
+			errCh <- waitErr
+			return
+		}
+		resultCh <- result
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := registry.deliverAgentMailboxEvent(context.Background(), rootSession.ID, team.MailMessage{
+		FromAgent: "child-1",
+		ToAgent:   "parent",
+		Kind:      "agent_message",
+		Body:      "parent mailbox hello",
+	}); err != nil {
+		t.Fatalf("deliverAgentMailboxEvent: %v", err)
+	}
+
+	select {
+	case waitErr := <-errCh:
+		t.Fatalf("wait failed: %v", waitErr)
+	case result := <-resultCh:
+		if result == nil || result.Event == nil || result.Event.Type != runtimechat.EventMailboxReceived {
+			t.Fatalf("unexpected mailbox wait result: %#v", result)
+		}
+		if result.LatestSeq != 1 || result.Event.Seq != 1 || result.Event.Payload["mailbox_seq"] != int64(1) {
+			t.Fatalf("expected mailbox substrate sequence 1, got result=%#v payload=%#v", result, result.Event.Payload)
+		}
+		if result.Event.Payload["body"] != "parent mailbox hello" {
+			t.Fatalf("unexpected mailbox event payload: %#v", result.Event.Payload)
+		}
+	case <-time.After(450 * time.Millisecond):
+		t.Fatal("wait_agent did not wake from parent mailbox event")
+	}
+}
+
+func TestLocalActorRegistry_ReadEventsWithoutTargetUsesParentMailbox(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.BaseSession = &ChatSession{RuntimeSession: rootSession, SessionUserID: userID}
+	registry := host.ActorRegistry
+
+	resultCh := make(chan *toolbroker.AgentEventsResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, readErr := registry.ReadEvents(context.Background(), toolbroker.ReadAgentEventsArgs{
+			SessionID:   rootSession.ID,
+			MailboxOnly: true,
+			AfterSeq:    0,
+			Limit:       20,
+			WaitMs:      2000,
+		})
+		if readErr != nil {
+			errCh <- readErr
+			return
+		}
+		resultCh <- result
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if _, err := host.EventStore.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: rootSession.ID,
+		Payload:   map[string]interface{}{"content": "not mailbox"},
+	}); err != nil {
+		t.Fatalf("AppendEvent non-mailbox: %v", err)
+	}
+	if err := registry.deliverAgentMailboxEvent(context.Background(), rootSession.ID, team.MailMessage{
+		FromAgent: "child-1",
+		ToAgent:   "parent",
+		Kind:      "agent_message",
+		Body:      "parent mailbox event read hello",
+	}); err != nil {
+		t.Fatalf("deliverAgentMailboxEvent: %v", err)
+	}
+
+	select {
+	case readErr := <-errCh:
+		t.Fatalf("read failed: %v", readErr)
+	case result := <-resultCh:
+		if result == nil || result.SessionID != rootSession.ID || result.Count != 1 {
+			t.Fatalf("unexpected mailbox read result: %#v", result)
+		}
+		if len(result.Events) != 1 || result.Events[0].Type != runtimechat.EventMailboxReceived {
+			t.Fatalf("unexpected mailbox events: %#v", result.Events)
+		}
+		if result.LatestSeq != 1 || result.Events[0].Seq != 1 || result.Events[0].Payload["mailbox_seq"] != int64(1) {
+			t.Fatalf("expected mailbox substrate sequence 1, got result=%#v payload=%#v", result, result.Events[0].Payload)
+		}
+		if result.Events[0].Payload["body"] != "parent mailbox event read hello" {
+			t.Fatalf("unexpected mailbox payload: %#v", result.Events[0].Payload)
+		}
+	case <-time.After(450 * time.Millisecond):
+		t.Fatal("read_agent_events did not wake from parent mailbox event")
+	}
+}
+
+func TestLocalActorRegistry_SendMessagePersistsMailboxWithoutTargetActor(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.BaseSession = &ChatSession{RuntimeSession: rootSession, SessionUserID: userID}
+	registry := host.ActorRegistry
+	if _, err := registry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "mailbox-child"}); err != nil {
+		t.Fatalf("spawn mailbox child: %v", err)
+	}
+	host.SessionHub.Stop("mailbox-child")
+
+	result, err := registry.SendMessage(context.Background(), rootSession.ID, toolbroker.AgentMessageArgs{
+		Target:  "/root/mailbox-child",
+		Message: "durable hello",
+	})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if result == nil || result.TargetSessionID != "mailbox-child" || !result.Delivered || result.Triggered {
+		t.Fatalf("unexpected send result: %#v", result)
+	}
+	if _, ok := host.SessionHub.Get("mailbox-child"); ok {
+		t.Fatal("send_message should persist mailbox event without starting target actor")
+	}
+
+	events, err := host.EventStore.ListEvents(context.Background(), "mailbox-child", 0, 10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected durable mailbox event, got %#v", events)
+	}
+	event := events[0]
+	if event.Type != runtimechat.EventMailboxReceived || event.Payload["kind"] != "agent_message" || event.Payload["body"] != "durable hello" {
+		t.Fatalf("unexpected mailbox event: %#v", event)
+	}
+	metadata, ok := event.Payload["metadata"].(map[string]interface{})
+	if !ok || metadata["target_session_id"] != "mailbox-child" || metadata["trigger_turn"] != false {
+		t.Fatalf("unexpected mailbox metadata: %#v", event.Payload)
+	}
+	if metadata["message_type"] != toolbroker.AgentMailboxMessageType ||
+		metadata["control_action"] != toolbroker.AgentMailboxMessageAction ||
+		metadata["workflow"] != toolbroker.AgentMailboxWorkflow ||
+		metadata["mailbox_kind"] != toolbroker.AgentMailboxMessageKind {
+		t.Fatalf("expected agent-control mailbox metadata, got %#v", metadata)
+	}
+}
+
+func TestHandleCommand_AgentsSendPersistsMailboxMessage(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	session := &ChatSession{
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+	host.BaseSession = session
+	if _, err := host.ActorRegistry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "send-child"}); err != nil {
+		t.Fatalf("spawn send child: %v", err)
+	}
+	host.SessionHub.Stop("send-child")
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents send /root/send-child please inspect docs", false); quit {
+			t.Fatal("agents send command should not quit")
+		}
+	})
+	if !strings.Contains(output, "Agent Message: sent target=send-child mode=delivered") {
+		t.Fatalf("unexpected agents send output:\n%s", output)
+	}
+	messages, err := host.EventStore.(runtimechat.MailboxReaderStore).ListMailbox(context.Background(), "send-child", 0, 10)
+	if err != nil {
+		t.Fatalf("ListMailbox: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Kind != "agent_message" || messages[0].Body != "please inspect docs" {
+		t.Fatalf("unexpected child mailbox messages: %#v", messages)
+	}
+	if _, ok := host.SessionHub.Get("send-child"); ok {
+		t.Fatal("agents send should persist mailbox without starting stopped target actor")
+	}
+}
+
+func TestHandleCommand_AgentsTargetProvidesDefaultSendTarget(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	session := &ChatSession{
+		RuntimeSession:   rootSession,
+		SessionManager:   manager,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+	host.BaseSession = session
+	if _, err := host.ActorRegistry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "target-child"}); err != nil {
+		t.Fatalf("spawn target child: %v", err)
+	}
+	host.SessionHub.Stop("target-child")
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents target /root/target-child", false); quit {
+			t.Fatal("agents target command should not quit")
+		}
+	})
+	if !strings.Contains(output, "Selected Agent Target: /root/target-child") {
+		t.Fatalf("unexpected agents target output:\n%s", output)
+	}
+	if session.SelectedAgentTarget != "/root/target-child" {
+		t.Fatalf("expected selected target to be set, got %q", session.SelectedAgentTarget)
+	}
+	stored, err := manager.Get(context.Background(), rootSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if got := runtimeSessionContextString(stored, chatRuntimeContextSelectedAgent); got != "/root/target-child" {
+		t.Fatalf("expected selected target context, got %q", got)
+	}
+
+	output = captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents send inspect selected target", false); quit {
+			t.Fatal("agents send command should not quit")
+		}
+	})
+	if !strings.Contains(output, "Agent Message: sent target=target-child mode=delivered") {
+		t.Fatalf("unexpected agents send output:\n%s", output)
+	}
+	messages, err := host.EventStore.(runtimechat.MailboxReaderStore).ListMailbox(context.Background(), "target-child", 0, 10)
+	if err != nil {
+		t.Fatalf("ListMailbox: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Body != "inspect selected target" {
+		t.Fatalf("unexpected mailbox messages: %#v", messages)
+	}
+}
+
+func TestLocalActorRegistry_FollowupTaskPersistsMailboxWhenTargetBusy(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.BaseSession = &ChatSession{RuntimeSession: rootSession, SessionUserID: userID}
+	registry := host.ActorRegistry
+	if _, err := registry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "busy-followup-child"}); err != nil {
+		t.Fatalf("spawn busy followup child: %v", err)
+	}
+	if _, err := host.SessionHub.GetOrCreate("busy-followup-child"); err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if err := host.RuntimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{
+		SessionID: "busy-followup-child",
+		Status:    runtimechat.SessionRunning,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	result, err := registry.FollowupTask(context.Background(), rootSession.ID, toolbroker.AgentMessageArgs{
+		Target:  "/root/busy-followup-child",
+		Message: "queue while busy",
+	})
+	if err != nil {
+		t.Fatalf("FollowupTask: %v", err)
+	}
+	if result == nil || result.TargetSessionID != "busy-followup-child" || !result.Delivered || result.Triggered {
+		t.Fatalf("unexpected followup result: %#v", result)
+	}
+
+	events, err := host.EventStore.ListEvents(context.Background(), "busy-followup-child", 0, 10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected durable busy followup mailbox event, got %#v", events)
+	}
+	event := events[0]
+	if event.Type != runtimechat.EventMailboxReceived || event.Payload["kind"] != "followup_task" || event.Payload["body"] != "queue while busy" {
+		t.Fatalf("unexpected followup mailbox event: %#v", event)
+	}
+	metadata, ok := event.Payload["metadata"].(map[string]interface{})
+	if !ok || metadata["target_session_id"] != "busy-followup-child" || metadata["trigger_turn"] != true {
+		t.Fatalf("unexpected followup metadata: %#v", event.Payload)
+	}
+	if metadata["message_type"] != toolbroker.AgentMailboxFollowupMessageType ||
+		metadata["control_action"] != toolbroker.AgentMailboxFollowupAction ||
+		metadata["workflow"] != toolbroker.AgentMailboxWorkflow ||
+		metadata["mailbox_kind"] != toolbroker.AgentMailboxFollowupKind {
+		t.Fatalf("expected agent-control followup metadata, got %#v", metadata)
 	}
 }
 
@@ -649,8 +1078,8 @@ func TestLocalActorRegistry_MirrorsChildCompletionToParentEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
-	if len(events) != 1 {
-		t.Fatalf("expected one parent completion event, got %#v", events)
+	if len(events) != 2 {
+		t.Fatalf("expected parent completion event and mailbox event, got %#v", events)
 	}
 	event := events[0]
 	if event.Type != "subagent.completed" || event.SessionID != rootSession.ID {
@@ -661,6 +1090,54 @@ func TestLocalActorRegistry_MirrorsChildCompletionToParentEvents(t *testing.T) {
 	}
 	if event.Payload["status"] != string(runtimechat.SessionIdle) || event.Payload["success"] != true {
 		t.Fatalf("unexpected completion status payload: %#v", event.Payload)
+	}
+	mailboxEvent := events[1]
+	if mailboxEvent.Type != runtimechat.EventMailboxReceived || mailboxEvent.SessionID != rootSession.ID {
+		t.Fatalf("unexpected completion mailbox event: %#v", mailboxEvent)
+	}
+	if mailboxEvent.Payload["kind"] != "subagent.completed" || mailboxEvent.Payload["from_agent"] != "completion-child" || mailboxEvent.Payload["to_agent"] != "parent" {
+		t.Fatalf("unexpected completion mailbox payload: %#v", mailboxEvent.Payload)
+	}
+	metadata, ok := mailboxEvent.Payload["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected completion mailbox metadata, got %#v", mailboxEvent.Payload)
+	}
+	if metadata["session_id"] != "completion-child" || metadata["path"] != "/root/completion-child" || metadata["agent_type"] != "worker" {
+		t.Fatalf("unexpected completion mailbox metadata: %#v", metadata)
+	}
+}
+
+func TestLocalActorRegistry_PersistsCompletionMailboxWithoutParentActor(t *testing.T) {
+	eventStore := runtimechat.NewInMemoryRuntimeStore(16)
+	host := &localChatRuntimeHost{
+		EventStore: eventStore,
+		EventBus:   runtimeevents.NewBusWithRetention(16),
+	}
+	registry := newLocalActorRegistry(host)
+
+	registry.deliverSubagentCompletionMailbox(context.Background(), "parent-session", "child-session", "/root/child-session", "worker", runtimechat.EventSessionEnd, map[string]interface{}{
+		"status":  string(runtimechat.SessionIdle),
+		"success": true,
+		"seq":     int64(7),
+	})
+
+	events, err := eventStore.ListEvents(context.Background(), "parent-session", 0, 10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected durable mailbox event without parent actor, got %#v", events)
+	}
+	event := events[0]
+	if event.Type != runtimechat.EventMailboxReceived || event.Payload["kind"] != "subagent.completed" {
+		t.Fatalf("unexpected mailbox event: %#v", event)
+	}
+	metadata, ok := event.Payload["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mailbox metadata, got %#v", event.Payload)
+	}
+	if metadata["session_id"] != "child-session" || metadata["event_seq"] != int64(7) {
+		t.Fatalf("unexpected mailbox metadata: %#v", metadata)
 	}
 }
 

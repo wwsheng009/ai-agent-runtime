@@ -121,9 +121,10 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		host.Orchestrator.Mailbox = mailbox
 		host.Orchestrator.Dispatcher = host.ActorRegistry
 		host.Orchestrator.Runner = &team.TeammateRunner{
-			Sessions: host.ActorRegistry,
-			Mailbox:  mailbox,
-			Context:  team.NewContextBuilder(host.TeamStore),
+			Sessions:     host.ActorRegistry,
+			AgentControl: host.ActorRegistry,
+			Mailbox:      mailbox,
+			Context:      team.NewContextBuilder(host.TeamStore),
 		}
 		host.Orchestrator.LeadPlanner = &team.LeadPlanner{
 			Sessions:    host.ActorRegistry,
@@ -296,6 +297,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		broker.TeamLifecycleChanged = host.syncTeamLifecycleLoops
 		if host.Orchestrator != nil {
 			broker.TeamPlanner = host.Orchestrator.LeadPlanner
+			broker.TeamEvents = host.Orchestrator.Events
 		}
 	}
 	if apiAgent.GetToolBroker() == nil && host.ActorRegistry != nil {
@@ -789,6 +791,9 @@ func (h *localChatRuntimeHost) dispatchTeamLifecycleEvent(event team.TeamEvent, 
 			runtimeEvent.Payload["seq"] = seq
 		}
 	}
+	if persist {
+		h.deliverTeamLifecycleMailbox(context.Background(), sessionID, event)
+	}
 	if h.isLifecycleEventForBaseSession(sessionID) {
 		if lifecycle := h.teamLifecycleService(); lifecycle != nil {
 			lifecycle.Apply(runtimeEvent)
@@ -800,6 +805,22 @@ func (h *localChatRuntimeHost) dispatchTeamLifecycleEvent(event team.TeamEvent, 
 	if h.BaseSession != nil && h.isLifecycleEventForBaseSession(sessionID) {
 		warnIfChatSessionSyncFails(h.BaseSession, "team lifecycle sync", syncAmbientTeamLifecycleState(h.BaseSession))
 	}
+}
+
+func (h *localChatRuntimeHost) deliverTeamLifecycleMailbox(ctx context.Context, sessionID string, event team.TeamEvent) {
+	if h == nil || h.EventStore == nil {
+		return
+	}
+	switch strings.TrimSpace(event.Type) {
+	case "team.completed", "team.summary":
+	default:
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	_ = runtimechat.DeliverMailboxEventFirst(ctx, h.EventStore, nil, nil, sessionID, team.BuildTeamLifecycleMailboxMessage(event))
 }
 
 func (h *localChatRuntimeHost) baseRuntimeSessionID() string {

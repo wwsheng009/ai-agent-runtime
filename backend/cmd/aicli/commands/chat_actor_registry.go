@@ -53,8 +53,20 @@ func (r *localActorRegistry) SubmitPrompt(ctx context.Context, sessionID, prompt
 	}, nil
 }
 
+func (r *localActorRegistry) TriggerTask(ctx context.Context, request team.TaskTriggerRequest) (*team.SessionResult, error) {
+	store := team.Store(nil)
+	if r != nil && r.Host != nil {
+		store = r.Host.TeamStore
+	}
+	_, _ = team.AppendTaskDispatchRequested(ctx, store, request)
+	_ = r.deliverAgentMailboxEvent(ctx, request.SessionID, team.BuildTaskAssignmentMailboxMessage(request))
+	result, err := r.SubmitPrompt(ctx, request.SessionID, request.Prompt, request.RunMeta)
+	_, _ = team.AppendTaskDispatchCompleted(ctx, store, request, result, err)
+	return result, err
+}
+
 func (r *localActorRegistry) DispatchTeamMailboxMessage(ctx context.Context, message team.MailMessage) error {
-	if r == nil || r.Host == nil || r.Host.TeamStore == nil || r.Host.SessionHub == nil {
+	if r == nil || r.Host == nil || r.Host.TeamStore == nil {
 		return nil
 	}
 	targets, err := r.resolveMailboxSessionTargets(ctx, message)
@@ -65,11 +77,7 @@ func (r *localActorRegistry) DispatchTeamMailboxMessage(ctx context.Context, mes
 		if err := r.ensureSession(ctx, sessionID); err != nil {
 			return err
 		}
-		actor, actorErr := r.Host.SessionHub.GetOrCreate(sessionID)
-		if actorErr != nil {
-			return actorErr
-		}
-		if err := actor.DeliverMailboxMessage(ctx, message); err != nil {
+		if err := r.deliverAgentMailboxEvent(ctx, sessionID, message); err != nil {
 			return err
 		}
 	}
@@ -267,9 +275,58 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 			}
 			mirrored.Payload["seq"] = seq
 		}
+		r.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, mirrored.Payload)
 		r.Host.EventBus.Publish(mirrored)
 	}
 	unsubscribe = r.Host.EventBus.SubscribeCancelable("", handler)
+}
+
+func (r *localActorRegistry) deliverSubagentCompletionMailbox(ctx context.Context, parentSessionID, childSessionID, childPath, childType, sourceEventType string, payload map[string]interface{}) {
+	if r == nil || r.Host == nil {
+		return
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	childSessionID = strings.TrimSpace(childSessionID)
+	if parentSessionID == "" || childSessionID == "" {
+		return
+	}
+	metadata := map[string]interface{}{
+		"session_id":        childSessionID,
+		"parent_session_id": parentSessionID,
+		"path":              strings.TrimSpace(childPath),
+		"source_event_type": strings.TrimSpace(sourceEventType),
+	}
+	if childType = strings.TrimSpace(childType); childType != "" {
+		metadata["agent_type"] = childType
+	}
+	if payload != nil {
+		if status, ok := payload["status"]; ok {
+			metadata["status"] = status
+		}
+		if success, ok := payload["success"]; ok {
+			metadata["success"] = success
+		}
+		if errText, ok := payload["error"]; ok {
+			metadata["error"] = errText
+		}
+		if seq, ok := payload["seq"]; ok {
+			metadata["event_seq"] = seq
+		}
+	}
+	status := "completed"
+	if value, ok := metadata["status"].(string); ok && strings.TrimSpace(value) != "" {
+		status = strings.TrimSpace(value)
+	}
+	message := team.MailMessage{
+		ID:        "subagent_completed_" + sanitizeLocalAgentPathSegment(childSessionID),
+		TeamID:    "",
+		FromAgent: childSessionID,
+		ToAgent:   "parent",
+		Kind:      "subagent.completed",
+		Body:      fmt.Sprintf("Subagent %s completed with status %s.", childSessionID, status),
+		Metadata:  metadata,
+	}
+	_ = runtimechat.DeliverMailboxEventFirst(ctx, r.Host.EventStore, r.Host.EventBus, r.deliverMailboxToActor, parentSessionID, message)
 }
 
 func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, args toolbroker.ListAgentsArgs) (*toolbroker.AgentListResult, error) {
@@ -348,8 +405,8 @@ func (r *localActorRegistry) FollowupTask(ctx context.Context, fromSessionID str
 }
 
 func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessionID string, args toolbroker.AgentMessageArgs, trigger bool) (*toolbroker.AgentMessageResult, error) {
-	if r == nil || r.Host == nil || r.Host.SessionHub == nil {
-		return nil, fmt.Errorf("session hub not configured")
+	if r == nil || r.Host == nil {
+		return nil, fmt.Errorf("runtime host not configured")
 	}
 	sessionID := firstNonEmptyChatValue(strings.TrimSpace(args.Target), strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
 	if sessionID == "" {
@@ -367,34 +424,19 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 	if err := r.ensureSession(ctx, sessionID); err != nil {
 		return nil, err
 	}
-	actor, err := r.Host.SessionHub.GetOrCreate(sessionID)
-	if err != nil {
-		return nil, err
-	}
 	delivered := false
 	triggered := false
-	if trigger && !localAgentActorBusy(actor.State()) {
-		if err := actor.SubmitPromptAsync(ctx, message, nil); err != nil {
-			return nil, err
+	if trigger && !r.localAgentSessionBusy(ctx, sessionID) {
+		if actor := r.localAgentActor(ctx, sessionID); actor != nil && !localAgentActorBusy(actor.State()) {
+			if err := actor.SubmitPromptAsync(ctx, message, nil); err != nil {
+				return nil, err
+			}
+			triggered = true
 		}
-		triggered = true
-	} else {
-		mail := team.MailMessage{
-			FromAgent: strings.TrimSpace(fromSessionID),
-			ToAgent:   sessionID,
-			Kind:      "agent_message",
-			Body:      message,
-			CreatedAt: time.Now().UTC(),
-			Metadata: map[string]interface{}{
-				"from_session_id":   strings.TrimSpace(fromSessionID),
-				"target_session_id": sessionID,
-				"trigger_turn":      trigger,
-			},
-		}
-		if trigger {
-			mail.Kind = "followup_task"
-		}
-		if err := actor.DeliverMailboxMessage(ctx, mail); err != nil {
+	}
+	if !triggered {
+		mail := toolbroker.BuildAgentMailboxMessage(fromSessionID, sessionID, message, trigger)
+		if err := r.deliverAgentMailboxEvent(ctx, sessionID, mail); err != nil {
 			return nil, err
 		}
 		delivered = true
@@ -412,6 +454,57 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 		Triggered:       triggered,
 		Status:          status,
 	}, nil
+}
+
+func (r *localActorRegistry) localAgentSessionBusy(ctx context.Context, sessionID string) bool {
+	if r == nil || r.Host == nil {
+		return false
+	}
+	if r.Host.SessionHub != nil {
+		if actor, ok := r.Host.SessionHub.Get(strings.TrimSpace(sessionID)); ok && actor != nil && localAgentActorBusy(actor.State()) {
+			return true
+		}
+	}
+	if r.Host.RuntimeStore != nil {
+		state, err := r.Host.RuntimeStore.LoadState(ctx, strings.TrimSpace(sessionID))
+		if err == nil && localAgentActorBusy(state) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *localActorRegistry) localAgentActor(ctx context.Context, sessionID string) *runtimechat.SessionActor {
+	if r == nil || r.Host == nil || r.Host.SessionHub == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	if actor, ok := r.Host.SessionHub.Get(sessionID); ok && actor != nil {
+		return actor
+	}
+	actor, err := r.Host.SessionHub.GetOrCreate(sessionID)
+	if err != nil {
+		return nil
+	}
+	return actor
+}
+
+func (r *localActorRegistry) deliverAgentMailboxEvent(ctx context.Context, sessionID string, mail team.MailMessage) error {
+	if r == nil || r.Host == nil {
+		return fmt.Errorf("runtime host not configured")
+	}
+	return runtimechat.DeliverMailboxEventFirst(ctx, r.Host.EventStore, r.Host.EventBus, r.deliverMailboxToActor, sessionID, mail)
+}
+
+func (r *localActorRegistry) deliverMailboxToActor(ctx context.Context, sessionID string, mail team.MailMessage) error {
+	actor := r.localAgentActor(ctx, sessionID)
+	if actor == nil {
+		return fmt.Errorf("session hub not configured")
+	}
+	return actor.DeliverMailboxMessage(ctx, mail)
 }
 
 func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.SendAgentInputArgs) (*toolbroker.AgentStatusResult, error) {
@@ -462,6 +555,9 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 }
 
 func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
+	if args.MailboxOnly {
+		return r.waitForLocalAgentMailbox(ctx, args)
+	}
 	sessionIDs := normalizeLocalAgentWaitIDs(args)
 	if len(sessionIDs) == 0 {
 		return nil, fmt.Errorf("id is required")
@@ -483,7 +579,7 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	wakeCh, unsubscribe := r.subscribeLocalAgentWaitEvents(sessionIDs)
+	wakeCh, unsubscribe := r.subscribeLocalAgentWaitEvents(waitCtx, sessionIDs)
 	defer unsubscribe()
 	for {
 		snapshots := make([]toolbroker.AgentStatusResult, 0, len(sessionIDs))
@@ -527,8 +623,61 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 	}
 }
 
-func (r *localActorRegistry) subscribeLocalAgentWaitEvents(sessionIDs []string) (<-chan struct{}, func()) {
-	if r == nil || r.Host == nil || r.Host.EventBus == nil || len(sessionIDs) == 0 {
+func (r *localActorRegistry) waitForLocalAgentMailbox(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
+	if r == nil || r.Host == nil || r.Host.EventStore == nil {
+		return nil, fmt.Errorf("event store not configured")
+	}
+	sessionID := firstNonEmptyChatValue(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID), r.Host.baseRuntimeSessionID())
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	timeout := time.Duration(args.TimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		defaultWaitMs := r.localAgentsConfig().DefaultWaitTimeoutMs
+		if defaultWaitMs <= 0 {
+			defaultWaitMs = int((30 * time.Second).Milliseconds())
+		}
+		timeout = time.Duration(defaultWaitMs) * time.Millisecond
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	wakeCh, unsubscribe := r.subscribeLocalAgentMailboxEvents(waitCtx, sessionID)
+	defer unsubscribe()
+	for {
+		if events, ok, hasMailboxRows, err := r.listLocalAgentMailboxEvents(waitCtx, sessionID, args.AfterSeq, 64); err != nil {
+			return nil, err
+		} else if ok {
+			if result := buildLocalAgentMailboxWaitResult(sessionID, events); result != nil {
+				return result, nil
+			}
+			if hasMailboxRows {
+				select {
+				case <-waitCtx.Done():
+					return &toolbroker.AgentWaitResult{TimedOut: true}, nil
+				case <-wakeCh:
+				case <-time.After(500 * time.Millisecond):
+				}
+				continue
+			}
+		}
+		events, err := r.Host.EventStore.ListEvents(waitCtx, sessionID, args.AfterSeq, 64)
+		if err != nil {
+			return nil, err
+		}
+		if result := buildLocalAgentMailboxWaitResult(sessionID, events); result != nil {
+			return result, nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return &toolbroker.AgentWaitResult{TimedOut: true}, nil
+		case <-wakeCh:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func (r *localActorRegistry) subscribeLocalAgentWaitEvents(ctx context.Context, sessionIDs []string) (<-chan struct{}, func()) {
+	if r == nil || r.Host == nil || len(sessionIDs) == 0 {
 		return nil, func() {}
 	}
 	targets := make(map[string]struct{}, len(sessionIDs))
@@ -541,6 +690,44 @@ func (r *localActorRegistry) subscribeLocalAgentWaitEvents(sessionIDs []string) 
 		return nil, func() {}
 	}
 	wakeCh := make(chan struct{}, 1)
+	wake := func() {
+		select {
+		case wakeCh <- struct{}{}:
+		default:
+		}
+	}
+	var unsubscribeStores []func()
+	if watcher, ok := r.Host.EventStore.(runtimechat.EventWatcherStore); ok && watcher != nil {
+		for sessionID := range targets {
+			eventCh, unwatch := watcher.WatchEvents(ctx, sessionID)
+			unsubscribeStores = append(unsubscribeStores, unwatch)
+			go func(target string, ch <-chan runtimeevents.Event) {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case event := <-ch:
+						if !strings.EqualFold(strings.TrimSpace(event.SessionID), target) {
+							continue
+						}
+						if !isLocalAgentWaitWakeEvent(event.Type) {
+							continue
+						}
+						wake()
+					}
+				}
+			}(sessionID, eventCh)
+		}
+	}
+	if r.Host.EventBus == nil {
+		return wakeCh, func() {
+			for _, unwatch := range unsubscribeStores {
+				if unwatch != nil {
+					unwatch()
+				}
+			}
+		}
+	}
 	handler := func(event runtimeevents.Event) {
 		if _, ok := targets[strings.TrimSpace(event.SessionID)]; !ok {
 			return
@@ -548,13 +735,19 @@ func (r *localActorRegistry) subscribeLocalAgentWaitEvents(sessionIDs []string) 
 		if !isLocalAgentWaitWakeEvent(event.Type) {
 			return
 		}
-		select {
-		case wakeCh <- struct{}{}:
-		default:
+		wake()
+	}
+	unsubscribeBus := r.Host.EventBus.SubscribeCancelable("", handler)
+	return wakeCh, func() {
+		for _, unwatch := range unsubscribeStores {
+			if unwatch != nil {
+				unwatch()
+			}
+		}
+		if unsubscribeBus != nil {
+			unsubscribeBus()
 		}
 	}
-	unsubscribeAll := r.Host.EventBus.SubscribeCancelable("", handler)
-	return wakeCh, unsubscribeAll
 }
 
 func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.ReadAgentEventsArgs) (*toolbroker.AgentEventsResult, error) {
@@ -563,13 +756,18 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 	}
 	sessionID := firstNonEmptyChatValue(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
 	if sessionID == "" {
+		sessionID = r.Host.baseRuntimeSessionID()
+	}
+	if sessionID == "" {
 		return nil, fmt.Errorf("id is required")
 	}
-	resolvedSessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionID)
-	if err != nil {
-		return nil, err
+	if !args.MailboxOnly {
+		resolvedSessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		sessionID = resolvedSessionID
 	}
-	sessionID = resolvedSessionID
 	limit := args.Limit
 	if limit <= 0 {
 		limit = 20
@@ -584,12 +782,39 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 		readCtx, cancel = context.WithTimeout(ctx, time.Duration(waitMs)*time.Millisecond)
 	}
 	defer cancel()
-	wakeCh, unsubscribe := r.subscribeLocalAgentReadEvents(sessionID)
+	wakeCh, unsubscribe := r.subscribeLocalAgentReadEvents(readCtx, sessionID)
+	if args.MailboxOnly {
+		unsubscribe()
+		wakeCh, unsubscribe = r.subscribeLocalAgentMailboxEvents(readCtx, sessionID)
+	}
 	defer unsubscribe()
 	for {
+		if args.MailboxOnly {
+			if events, ok, hasMailboxRows, err := r.listLocalAgentMailboxEvents(readCtx, sessionID, args.AfterSeq, limit); err != nil {
+				return nil, err
+			} else if ok {
+				if len(events) > 0 || (hasMailboxRows && waitMs == 0) {
+					return buildLocalAgentEventsResult(sessionID, events), nil
+				}
+				if hasMailboxRows {
+					select {
+					case <-readCtx.Done():
+						result := buildLocalAgentEventsResult(sessionID, nil)
+						result.TimedOut = true
+						return result, nil
+					case <-wakeCh:
+					case <-time.After(500 * time.Millisecond):
+					}
+					continue
+				}
+			}
+		}
 		events, err := r.Host.EventStore.ListEvents(readCtx, sessionID, args.AfterSeq, limit)
 		if err != nil {
 			return nil, err
+		}
+		if args.MailboxOnly {
+			events = filterLocalAgentMailboxWaitEvents(events)
 		}
 		if len(events) > 0 || waitMs == 0 {
 			return buildLocalAgentEventsResult(sessionID, events), nil
@@ -605,8 +830,58 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 	}
 }
 
-func (r *localActorRegistry) subscribeLocalAgentReadEvents(sessionID string) (<-chan struct{}, func()) {
-	if r == nil || r.Host == nil || r.Host.EventBus == nil {
+func filterLocalAgentMailboxWaitEvents(events []runtimeevents.Event) []runtimeevents.Event {
+	filtered := make([]runtimeevents.Event, 0, len(events))
+	for _, event := range events {
+		if !isLocalAgentMailboxWaitEvent(event) {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered
+}
+
+func (r *localActorRegistry) listLocalAgentMailboxEvents(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]runtimeevents.Event, bool, bool, error) {
+	if r == nil || r.Host == nil || r.Host.EventStore == nil {
+		return nil, false, false, nil
+	}
+	reader, ok := r.Host.EventStore.(runtimechat.MailboxReaderStore)
+	if !ok || reader == nil {
+		return nil, false, false, nil
+	}
+	messages, err := reader.ListMailbox(ctx, sessionID, afterSeq, limit)
+	if err != nil {
+		return nil, true, false, err
+	}
+	hasMailboxRows := len(messages) > 0
+	if !hasMailboxRows {
+		if sequencer, ok := r.Host.EventStore.(runtimechat.MailboxSequenceStore); ok && sequencer != nil {
+			seq, err := sequencer.LastMailboxSeq(ctx, sessionID)
+			if err != nil {
+				return nil, true, false, err
+			}
+			hasMailboxRows = seq > 0
+		}
+	}
+	return localAgentMailboxMessagesToEvents(sessionID, messages), true, hasMailboxRows, nil
+}
+
+func localAgentMailboxMessagesToEvents(sessionID string, messages []team.MailMessage) []runtimeevents.Event {
+	events := make([]runtimeevents.Event, 0, len(messages))
+	for _, message := range messages {
+		event := runtimechat.NewMailboxReceivedEvent(sessionID, message)
+		if event.Payload == nil {
+			event.Payload = map[string]interface{}{}
+		}
+		event.Payload["seq"] = message.Seq
+		event.Payload["mailbox_seq"] = message.Seq
+		events = append(events, event)
+	}
+	return events
+}
+
+func (r *localActorRegistry) subscribeLocalAgentMailboxEvents(ctx context.Context, sessionID string) (<-chan struct{}, func()) {
+	if r == nil || r.Host == nil {
 		return nil, func() {}
 	}
 	sessionID = strings.TrimSpace(sessionID)
@@ -614,17 +889,111 @@ func (r *localActorRegistry) subscribeLocalAgentReadEvents(sessionID string) (<-
 		return nil, func() {}
 	}
 	wakeCh := make(chan struct{}, 1)
-	handler := func(event runtimeevents.Event) {
-		if !strings.EqualFold(strings.TrimSpace(event.SessionID), sessionID) {
-			return
-		}
+	wake := func() {
 		select {
 		case wakeCh <- struct{}{}:
 		default:
 		}
 	}
-	unsubscribeAll := r.Host.EventBus.SubscribeCancelable("", handler)
-	return wakeCh, unsubscribeAll
+	unsubscribes := make([]func(), 0, 2)
+	if watcher, ok := r.Host.EventStore.(runtimechat.MailboxWatcherStore); ok && watcher != nil {
+		mailCh, unwatch := watcher.WatchMailbox(ctx, sessionID)
+		unsubscribes = append(unsubscribes, unwatch)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case message := <-mailCh:
+					if strings.TrimSpace(message.ToAgent) != "" || message.Seq > 0 {
+						wake()
+					}
+				}
+			}
+		}()
+	}
+	if watcher, ok := r.Host.EventStore.(runtimechat.EventWatcherStore); ok && watcher != nil {
+		eventCh, unwatch := watcher.WatchEvents(ctx, sessionID)
+		unsubscribes = append(unsubscribes, unwatch)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case event := <-eventCh:
+					if strings.EqualFold(strings.TrimSpace(event.SessionID), sessionID) && isLocalAgentMailboxWaitEvent(event) {
+						wake()
+					}
+				}
+			}
+		}()
+	}
+	if len(unsubscribes) > 0 {
+		return wakeCh, func() {
+			for _, unsubscribe := range unsubscribes {
+				if unsubscribe != nil {
+					unsubscribe()
+				}
+			}
+		}
+	}
+	return r.subscribeLocalAgentReadEvents(ctx, sessionID)
+}
+
+func (r *localActorRegistry) subscribeLocalAgentReadEvents(ctx context.Context, sessionID string) (<-chan struct{}, func()) {
+	if r == nil || r.Host == nil {
+		return nil, func() {}
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, func() {}
+	}
+	wakeCh := make(chan struct{}, 1)
+	wake := func() {
+		select {
+		case wakeCh <- struct{}{}:
+		default:
+		}
+	}
+	var unsubscribeStore func()
+	if watcher, ok := r.Host.EventStore.(runtimechat.EventWatcherStore); ok && watcher != nil {
+		eventCh, unwatch := watcher.WatchEvents(ctx, sessionID)
+		unsubscribeStore = unwatch
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case event := <-eventCh:
+					if strings.EqualFold(strings.TrimSpace(event.SessionID), sessionID) {
+						wake()
+					}
+				}
+			}
+		}()
+	}
+	if r.Host.EventBus == nil {
+		return wakeCh, func() {
+			if unsubscribeStore != nil {
+				unsubscribeStore()
+			}
+		}
+	}
+	handler := func(event runtimeevents.Event) {
+		if !strings.EqualFold(strings.TrimSpace(event.SessionID), sessionID) {
+			return
+		}
+		wake()
+	}
+	unsubscribeBus := r.Host.EventBus.SubscribeCancelable("", handler)
+	return wakeCh, func() {
+		if unsubscribeStore != nil {
+			unsubscribeStore()
+		}
+		if unsubscribeBus != nil {
+			unsubscribeBus()
+		}
+	}
 }
 
 func (r *localActorRegistry) Close(ctx context.Context, sessionID string) (*toolbroker.AgentStatusResult, error) {
@@ -1307,6 +1676,37 @@ func buildLocalAgentEventsResult(sessionID string, events []runtimeevents.Event)
 	result.Events = items
 	result.LatestSeq = latestSeq
 	return result
+}
+
+func buildLocalAgentMailboxWaitResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentWaitResult {
+	filtered := filterLocalAgentMailboxWaitEvents(events)
+	if len(filtered) == 0 {
+		return nil
+	}
+	agentEvents := buildLocalAgentEventsResult(sessionID, filtered)
+	result := &toolbroker.AgentWaitResult{
+		Events:    agentEvents.Events,
+		LatestSeq: agentEvents.LatestSeq,
+	}
+	if len(agentEvents.Events) > 0 {
+		event := agentEvents.Events[0]
+		result.Event = &event
+		result.MatchedSessionID = event.SessionID
+		result.ReadyCount = 1
+	}
+	return result
+}
+
+func isLocalAgentMailboxWaitEvent(event runtimeevents.Event) bool {
+	switch strings.TrimSpace(event.Type) {
+	case runtimechat.EventMailboxReceived,
+		"subagent.completed",
+		"team.completed",
+		"team.summary":
+		return true
+	default:
+		return false
+	}
 }
 
 func localAgentEventSeq(event runtimeevents.Event) int64 {
