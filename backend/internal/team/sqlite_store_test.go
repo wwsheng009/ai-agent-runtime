@@ -62,3 +62,84 @@ func TestSQLiteStoreWithImmediateTxRollsBackOnError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, teamRecord)
 }
+
+func TestSQLiteStoreTaskSignalsPersistSequenceAndWake(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	watch, unwatch := store.WatchTaskSignals(ctx, teamID)
+	defer unwatch()
+
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "ready task",
+		Status: TaskStatusReady,
+	})
+	require.NoError(t, err)
+
+	select {
+	case signal := <-watch:
+		assert.Equal(t, int64(1), signal.Seq)
+		assert.Equal(t, teamID, signal.TeamID)
+		assert.Equal(t, taskID, signal.TaskID)
+		assert.Equal(t, TaskSignalTaskCreated, signal.Kind)
+		assert.Equal(t, TaskStatusReady, signal.Status)
+	case <-time.After(time.Second):
+		t.Fatal("expected task signal watcher wake")
+	}
+
+	seq, err := store.LastTaskSignalSeq(ctx, teamID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), seq)
+
+	messages, err := store.ListMail(ctx, MailFilter{TeamID: teamID})
+	require.NoError(t, err)
+	assert.Empty(t, messages)
+}
+
+func TestSQLiteStoreMarkReadyTasksEmitsTaskSignal(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "pending task",
+		Status: TaskStatusPending,
+	})
+	require.NoError(t, err)
+	startSeq, err := store.LastTaskSignalSeq(ctx, teamID)
+	require.NoError(t, err)
+
+	changed, err := store.MarkReadyTasks(ctx, teamID)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, changed)
+
+	seq, err := store.LastTaskSignalSeq(ctx, teamID)
+	require.NoError(t, err)
+	assert.Equal(t, startSeq+1, seq)
+}
+
+func TestSQLiteStorePendingTaskCreationDoesNotEmitTaskSignal(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "pending task",
+		Status: TaskStatusPending,
+	})
+	require.NoError(t, err)
+
+	seq, err := store.LastTaskSignalSeq(ctx, teamID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), seq)
+}

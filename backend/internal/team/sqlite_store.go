@@ -24,6 +24,10 @@ type SQLiteStore struct {
 	mailboxWatchMu     sync.Mutex
 	nextMailboxWatchID int64
 	mailboxWatchers    map[int64]mailboxWatcher
+
+	taskSignalWatchMu     sync.Mutex
+	nextTaskSignalWatchID int64
+	taskSignalWatchers    map[int64]taskSignalWatcher
 }
 
 const globalMailReceiptAgent = "*"
@@ -31,6 +35,11 @@ const globalMailReceiptAgent = "*"
 type mailboxWatcher struct {
 	teamID string
 	ch     chan MailMessage
+}
+
+type taskSignalWatcher struct {
+	teamID string
+	ch     chan TaskSignal
 }
 
 // NewSQLiteStore opens a SQLite-backed team store.
@@ -469,6 +478,14 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, task Task) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("insert task: %w", err)
 	}
+	if task.Status != TaskStatusPending {
+		_ = s.appendTaskSignal(ctx, TaskSignal{
+			TeamID: task.TeamID,
+			TaskID: task.ID,
+			Kind:   TaskSignalTaskCreated,
+			Status: task.Status,
+		})
+	}
 	return task.ID, nil
 }
 
@@ -662,6 +679,12 @@ func (s *SQLiteStore) UpdateTask(ctx context.Context, task Task) error {
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}
+	_ = s.appendTaskSignal(ctx, TaskSignal{
+		TeamID: task.TeamID,
+		TaskID: task.ID,
+		Kind:   TaskSignalTaskUpdated,
+		Status: task.Status,
+	})
 	return nil
 }
 
@@ -676,6 +699,7 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, id string, status Ta
 	if err != nil {
 		return fmt.Errorf("update task status: %w", err)
 	}
+	_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskStatus, status)
 	return nil
 }
 
@@ -690,6 +714,7 @@ func (s *SQLiteStore) IncrementTaskRetry(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("increment task retry: %w", err)
 	}
+	_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskRetry, "")
 	return nil
 }
 
@@ -712,6 +737,13 @@ func (s *SQLiteStore) MarkReadyTasks(ctx context.Context, teamID string) (int64,
 		return 0, fmt.Errorf("mark ready tasks: %w", err)
 	}
 	rows, _ := result.RowsAffected()
+	if rows > 0 {
+		_ = s.appendTaskSignal(ctx, TaskSignal{
+			TeamID: strings.TrimSpace(teamID),
+			Kind:   TaskSignalTasksMarkedReady,
+			Status: TaskStatusReady,
+		})
+	}
 	return rows, nil
 }
 
@@ -738,6 +770,9 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, id string, assignee string,
 		return false, fmt.Errorf("claim task: %w", err)
 	}
 	affected, _ := result.RowsAffected()
+	if affected > 0 {
+		_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskClaimed, TaskStatusRunning)
+	}
 	return affected > 0, nil
 }
 
@@ -824,6 +859,14 @@ func (s *SQLiteStore) ClaimTaskWithPathClaims(ctx context.Context, task Task, as
 	if err != nil {
 		return false, err
 	}
+	if claimed {
+		_ = s.appendTaskSignal(ctx, TaskSignal{
+			TeamID: teamID,
+			TaskID: taskID,
+			Kind:   TaskSignalTaskClaimed,
+			Status: TaskStatusRunning,
+		})
+	}
 	return claimed, nil
 }
 
@@ -838,6 +881,7 @@ func (s *SQLiteStore) RenewTaskLease(ctx context.Context, id string, leaseUntil 
 	if err != nil {
 		return fmt.Errorf("renew task lease: %w", err)
 	}
+	_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskLeaseRenewed, TaskStatusRunning)
 	return nil
 }
 
@@ -852,6 +896,7 @@ func (s *SQLiteStore) ReleaseTask(ctx context.Context, id string, status TaskSta
 	if err != nil {
 		return fmt.Errorf("release task: %w", err)
 	}
+	_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskReleased, status)
 	return nil
 }
 
@@ -871,6 +916,7 @@ func (s *SQLiteStore) BlockTask(ctx context.Context, id string, summary string) 
 	if err != nil {
 		return fmt.Errorf("block task: %w", err)
 	}
+	_ = s.appendTaskSignalForTask(ctx, id, TaskSignalTaskBlocked, TaskStatusBlocked)
 	return nil
 }
 
@@ -1148,6 +1194,64 @@ func (s *SQLiteStore) LastMailSeq(ctx context.Context, teamID string) (int64, er
 	return seq, nil
 }
 
+// WatchTaskSignals registers an in-process notification channel for task
+// lifecycle signal inserts. Callers must use LastTaskSignalSeq for durable
+// catch-up; this channel is only a low-latency wake source.
+func (s *SQLiteStore) WatchTaskSignals(ctx context.Context, teamID string) (<-chan TaskSignal, func()) {
+	ch := make(chan TaskSignal, 1)
+	if s == nil {
+		return ch, func() {}
+	}
+	teamID = strings.TrimSpace(teamID)
+	s.taskSignalWatchMu.Lock()
+	if s.taskSignalWatchers == nil {
+		s.taskSignalWatchers = make(map[int64]taskSignalWatcher)
+	}
+	s.nextTaskSignalWatchID++
+	watchID := s.nextTaskSignalWatchID
+	s.taskSignalWatchers[watchID] = taskSignalWatcher{
+		teamID: teamID,
+		ch:     ch,
+	}
+	s.taskSignalWatchMu.Unlock()
+
+	cancel := func() {
+		s.taskSignalWatchMu.Lock()
+		if s.taskSignalWatchers != nil {
+			delete(s.taskSignalWatchers, watchID)
+		}
+		s.taskSignalWatchMu.Unlock()
+	}
+	if ctx != nil {
+		done := ctx.Done()
+		if done == nil {
+			return ch, cancel
+		}
+		go func() {
+			<-done
+			cancel()
+		}()
+	}
+	return ch, cancel
+}
+
+// LastTaskSignalSeq returns the current durable task signal high-water mark for a team.
+func (s *SQLiteStore) LastTaskSignalSeq(ctx context.Context, teamID string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("team store is not initialized")
+	}
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0)
+		FROM team_task_signals
+		WHERE team_id = ?
+	`, strings.TrimSpace(teamID)).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("last task signal sequence: %w", err)
+	}
+	return seq, nil
+}
+
 func nextMailboxSeqTx(ctx context.Context, tx *sql.Tx, teamID string) (int64, error) {
 	var seq int64
 	err := tx.QueryRowContext(ctx, `
@@ -1157,6 +1261,77 @@ func nextMailboxSeqTx(ctx context.Context, tx *sql.Tx, teamID string) (int64, er
 	`, strings.TrimSpace(teamID)).Scan(&seq)
 	if err != nil {
 		return 0, fmt.Errorf("next mail sequence: %w", err)
+	}
+	return seq, nil
+}
+
+func (s *SQLiteStore) appendTaskSignalForTask(ctx context.Context, taskID string, kind string, status TaskStatus) error {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil
+	}
+	task, err := s.GetTask(ctx, taskID)
+	if err != nil || task == nil {
+		return err
+	}
+	if status == "" {
+		status = task.Status
+	}
+	return s.appendTaskSignal(ctx, TaskSignal{
+		TeamID: task.TeamID,
+		TaskID: task.ID,
+		Kind:   kind,
+		Status: status,
+	})
+}
+
+func (s *SQLiteStore) appendTaskSignal(ctx context.Context, signal TaskSignal) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("team store is not initialized")
+	}
+	signal.TeamID = strings.TrimSpace(signal.TeamID)
+	if signal.TeamID == "" {
+		return nil
+	}
+	signal.TaskID = strings.TrimSpace(signal.TaskID)
+	signal.Kind = strings.TrimSpace(signal.Kind)
+	if signal.Kind == "" {
+		signal.Kind = TaskSignalTaskUpdated
+	}
+	if signal.CreatedAt.IsZero() {
+		signal.CreatedAt = time.Now().UTC()
+	}
+	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		seq, err := nextTaskSignalSeqTx(ctx, tx, signal.TeamID)
+		if err != nil {
+			return err
+		}
+		signal.Seq = seq
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO team_task_signals (
+				seq, team_id, task_id, kind, status, created_at
+			) VALUES (?, ?, ?, ?, ?, ?)
+		`, signal.Seq, signal.TeamID, nullablePlainString(signal.TaskID), signal.Kind, string(signal.Status), formatTime(signal.CreatedAt))
+		if err != nil {
+			return fmt.Errorf("insert task signal: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	s.notifyTaskSignalWatchers(signal)
+	return nil
+}
+
+func nextTaskSignalSeqTx(ctx context.Context, tx *sql.Tx, teamID string) (int64, error) {
+	var seq int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) + 1
+		FROM team_task_signals
+		WHERE team_id = ?
+	`, strings.TrimSpace(teamID)).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("next task signal sequence: %w", err)
 	}
 	return seq, nil
 }
@@ -1181,6 +1356,31 @@ func (s *SQLiteStore) notifyMailboxWatchers(message MailMessage) {
 	for _, watcher := range watchers {
 		select {
 		case watcher.ch <- message:
+		default:
+		}
+	}
+}
+
+func (s *SQLiteStore) notifyTaskSignalWatchers(signal TaskSignal) {
+	if s == nil {
+		return
+	}
+	teamID := strings.TrimSpace(signal.TeamID)
+	s.taskSignalWatchMu.Lock()
+	watchers := make([]taskSignalWatcher, 0, len(s.taskSignalWatchers))
+	for _, watcher := range s.taskSignalWatchers {
+		if watcher.ch == nil {
+			continue
+		}
+		if watcher.teamID != "" && !strings.EqualFold(watcher.teamID, teamID) {
+			continue
+		}
+		watchers = append(watchers, watcher)
+	}
+	s.taskSignalWatchMu.Unlock()
+	for _, watcher := range watchers {
+		select {
+		case watcher.ch <- signal:
 		default:
 		}
 	}
@@ -1658,6 +1858,26 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 				ON team_mailbox_messages(team_id, seq);
 			`,
 		},
+		{
+			Version: 8,
+			Name:    "team_task_signals",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS team_task_signals (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					team_id TEXT NOT NULL,
+					seq INTEGER NOT NULL,
+					task_id TEXT,
+					kind TEXT NOT NULL,
+					status TEXT,
+					created_at TEXT NOT NULL,
+					UNIQUE(team_id, seq)
+				);
+				CREATE INDEX IF NOT EXISTS idx_team_task_signals_team_seq
+				ON team_task_signals(team_id, seq);
+				CREATE INDEX IF NOT EXISTS idx_team_task_signals_team_created
+				ON team_task_signals(team_id, created_at);
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }
@@ -1888,6 +2108,13 @@ func nullableString(value *string) interface{} {
 		return nil
 	}
 	return *value
+}
+
+func nullablePlainString(value string) interface{} {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }
 
 func nullableTime(value *time.Time) interface{} {

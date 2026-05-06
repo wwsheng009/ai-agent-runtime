@@ -60,27 +60,51 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 	defer ticker.Stop()
 
 	var (
-		mailWake <-chan MailMessage
-		unwatch  func()
-		lastSeq  int64
+		mailWake          <-chan MailMessage
+		unwatchMail       func()
+		lastMailSeq       int64
+		taskSignalWake    <-chan TaskSignal
+		unwatchTask       func()
+		lastTaskSignalSeq int64
 	)
 	if watcher, ok := o.Store.(MailWatcherStore); ok {
-		mailWake, unwatch = watcher.WatchMail(ctx, teamID)
-		defer unwatch()
+		mailWake, unwatchMail = watcher.WatchMail(ctx, teamID)
+		defer unwatchMail()
+	}
+	if watcher, ok := o.Store.(TaskWatcherStore); ok {
+		taskSignalWake, unwatchTask = watcher.WatchTaskSignals(ctx, teamID)
+		defer unwatchTask()
 	}
 	initialSeq, err := o.lastMailboxSeq(ctx, teamID)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if !IsSQLiteLockError(err) {
 			return err
 		}
 	} else {
-		lastSeq = initialSeq
+		lastMailSeq = initialSeq
+	}
+	initialTaskSeq, err := o.lastTaskSignalSeq(ctx, teamID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !IsSQLiteLockError(err) {
+			return err
+		}
+	} else {
+		lastTaskSignalSeq = initialTaskSeq
 	}
 
 	for {
 		locked := false
 		team, err := o.Store.GetTeam(ctx, teamID)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if !IsSQLiteLockError(err) {
 				return err
 			}
@@ -88,6 +112,9 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 		} else if team == nil || team.Status != TeamStatusActive {
 			return nil
 		} else if err := o.tick(ctx, teamID); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if !IsSQLiteLockError(err) {
 				return err
 			}
@@ -110,15 +137,33 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 		case <-mailWake:
 			nextSeq, err := o.lastMailboxSeq(ctx, teamID)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				if !IsSQLiteLockError(err) {
 					return err
 				}
 				continue
 			}
-			if nextSeq <= lastSeq {
+			if nextSeq <= lastMailSeq {
 				continue
 			}
-			lastSeq = nextSeq
+			lastMailSeq = nextSeq
+		case <-taskSignalWake:
+			nextSeq, err := o.lastTaskSignalSeq(ctx, teamID)
+			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if !IsSQLiteLockError(err) {
+					return err
+				}
+				continue
+			}
+			if nextSeq <= lastTaskSignalSeq {
+				continue
+			}
+			lastTaskSignalSeq = nextSeq
 		}
 	}
 }
@@ -142,6 +187,16 @@ func (o *Orchestrator) lastMailboxSeq(ctx context.Context, teamID string) (int64
 		return 0, nil
 	}
 	return messages[0].Seq, nil
+}
+
+func (o *Orchestrator) lastTaskSignalSeq(ctx context.Context, teamID string) (int64, error) {
+	if o == nil || o.Store == nil {
+		return 0, nil
+	}
+	if store, ok := o.Store.(TaskSequenceStore); ok {
+		return store.LastTaskSignalSeq(ctx, teamID)
+	}
+	return 0, nil
 }
 
 // ClaimReadyTasks assigns and claims ready tasks, returning accepted assignments.
@@ -407,14 +462,6 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 		case TaskOutcomeFailed:
 			o.setTeammateState(ctx, assignment.Teammate.ID, TeammateStateIdle)
 			o.sendLeadProgress(ctx, teamID, assignment, "failed", summary)
-			payload := map[string]interface{}{
-				"task_id":  assignment.Task.ID,
-				"assignee": assignment.Teammate.ID,
-				"summary":  summary,
-				"trace_id": resultTraceID(result),
-			}
-			appendStructuredTaskRunErrorPayload(payload, result)
-			o.publish("task.failed", teamID, payload)
 			if termErr := o.checkTerminalState(context.Background(), teamID); termErr != nil {
 				logger.Debug("team orchestrator: terminal check failed",
 					logger.String("team_id", teamID),
@@ -426,12 +473,6 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 		default:
 			o.setTeammateState(ctx, assignment.Teammate.ID, TeammateStateIdle)
 			o.sendLeadProgress(ctx, teamID, assignment, "done", summary)
-			o.publish("task.completed", teamID, map[string]interface{}{
-				"task_id":  assignment.Task.ID,
-				"assignee": assignment.Teammate.ID,
-				"summary":  summary,
-				"trace_id": resultTraceID(result),
-			})
 			if termErr := o.checkTerminalState(context.Background(), teamID); termErr != nil {
 				logger.Debug("team orchestrator: terminal check failed",
 					logger.String("team_id", teamID),
@@ -444,16 +485,8 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 	}
 	if err != nil || result == nil || !result.Success {
 		summary := summarizeRunFailure(result, err)
-		_ = o.FailTask(ctx, assignment, summary)
+		_ = o.failTaskWithRunResult(ctx, assignment, summary, result, err)
 		o.sendLeadProgress(ctx, teamID, assignment, "failed", summary)
-		payload := map[string]interface{}{
-			"task_id":  assignment.Task.ID,
-			"assignee": assignment.Teammate.ID,
-			"summary":  summary,
-			"trace_id": resultTraceID(result),
-		}
-		appendStructuredTaskRunErrorPayload(payload, result)
-		o.publish("task.failed", teamID, payload)
 		if termErr := o.checkTerminalState(context.Background(), teamID); termErr != nil {
 			logger.Debug("team orchestrator: terminal check failed",
 				logger.String("team_id", teamID),
@@ -480,14 +513,8 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 		return
 	}
 	summary := summarizeRunSuccess(result)
-	_ = o.CompleteTask(ctx, assignment, summary)
+	_ = o.completeTaskWithRunResult(ctx, assignment, summary, result)
 	o.sendLeadProgress(ctx, teamID, assignment, "done", summary)
-	o.publish("task.completed", teamID, map[string]interface{}{
-		"task_id":  assignment.Task.ID,
-		"assignee": assignment.Teammate.ID,
-		"summary":  summary,
-		"trace_id": resultTraceID(result),
-	})
 	if termErr := o.checkTerminalState(context.Background(), teamID); termErr != nil {
 		logger.Debug("team orchestrator: terminal check failed",
 			logger.String("team_id", teamID),
@@ -603,12 +630,17 @@ func (o *Orchestrator) ReclaimExpiredTasks(ctx context.Context, teamID string, a
 
 // CompleteTask marks the task as done and releases related claims.
 func (o *Orchestrator) CompleteTask(ctx context.Context, assignment Assignment, summary string) error {
+	return o.completeTaskWithRunResult(ctx, assignment, summary, nil)
+}
+
+func (o *Orchestrator) completeTaskWithRunResult(ctx context.Context, assignment Assignment, summary string, result *TaskRunResult) error {
 	if o == nil || o.Store == nil {
 		return fmt.Errorf("orchestrator store is not configured")
 	}
 	_, err := ApplyTerminalTaskOutcome(ctx, TaskOutcomeApplyServices{
 		Store:  o.Store,
 		Claims: o.Claims,
+		Events: o.Events,
 	}, TerminalTaskOutcomeRequest{
 		Task:          assignment.Task,
 		TeammateID:    assignment.Teammate.ID,
@@ -616,18 +648,31 @@ func (o *Orchestrator) CompleteTask(ctx context.Context, assignment Assignment, 
 		Outcome: TaskOutcomeContract{
 			Summary: strings.TrimSpace(summary),
 		},
+		TraceID: resultTraceID(result),
 	})
 	return err
 }
 
 // FailTask marks the task as failed and releases related claims.
 func (o *Orchestrator) FailTask(ctx context.Context, assignment Assignment, summary string) error {
+	return o.failTaskWithRunResult(ctx, assignment, summary, nil, nil)
+}
+
+func (o *Orchestrator) failTaskWithRunResult(ctx context.Context, assignment Assignment, summary string, result *TaskRunResult, runErr error) error {
 	if o == nil || o.Store == nil {
 		return fmt.Errorf("orchestrator store is not configured")
+	}
+	errorText := ""
+	if result != nil {
+		errorText = strings.TrimSpace(result.Error)
+	}
+	if errorText == "" && runErr != nil {
+		errorText = strings.TrimSpace(runErr.Error())
 	}
 	_, err := ApplyTerminalTaskOutcome(ctx, TaskOutcomeApplyServices{
 		Store:  o.Store,
 		Claims: o.Claims,
+		Events: o.Events,
 	}, TerminalTaskOutcomeRequest{
 		Task:          assignment.Task,
 		TeammateID:    assignment.Teammate.ID,
@@ -635,6 +680,10 @@ func (o *Orchestrator) FailTask(ctx context.Context, assignment Assignment, summ
 		Outcome: TaskOutcomeContract{
 			Summary: strings.TrimSpace(summary),
 		},
+		TraceID:       resultTraceID(result),
+		Error:         errorText,
+		ErrorType:     taskRunErrorType(result),
+		ErrorMetadata: taskRunErrorMetadata(result),
 	})
 	return err
 }
@@ -710,25 +759,26 @@ func resultTraceID(result *TaskRunResult) string {
 	return strings.TrimSpace(result.TraceID)
 }
 
-func appendStructuredTaskRunErrorPayload(payload map[string]interface{}, result *TaskRunResult) {
-	if len(payload) == 0 || result == nil {
-		return
+func taskRunErrorType(result *TaskRunResult) string {
+	if result == nil {
+		return ""
 	}
-	if errorType := strings.TrimSpace(result.ErrorType); errorType != "" {
-		payload["error_type"] = errorType
+	return strings.TrimSpace(result.ErrorType)
+}
+
+func taskRunErrorMetadata(result *TaskRunResult) map[string]interface{} {
+	if result == nil || len(result.ErrorMetadata) == 0 {
+		return nil
 	}
-	if strings.TrimSpace(result.Error) != "" {
-		payload["error"] = strings.TrimSpace(result.Error)
-	}
+	cloned := make(map[string]interface{}, len(result.ErrorMetadata))
 	for key, value := range result.ErrorMetadata {
+		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
-		if _, exists := payload[key]; exists {
-			continue
-		}
-		payload[key] = value
+		cloned[key] = value
 	}
+	return cloned
 }
 
 func errorString(err error) string {
