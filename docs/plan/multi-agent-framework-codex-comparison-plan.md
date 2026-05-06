@@ -715,3 +715,51 @@ P4: TUI 和观测。
 真正需要改进的是底层协作控制面: 当前轻量 child session 和 persistent team 是并列体系，导致 id、等待、通信、中断、输出隔离和观测都需要额外桥接。Codex 的价值不在于更多工具，而在于统一的 `AgentControl`、`AgentRegistry`、mailbox wait、agent path、spawn limit 和结构化 collab event。
 
 因此建议不要废弃 `spawn_team`，而是将它降为 durable workflow layer；底层新建统一 agent substrate，让 `spawn_agent` 和 team teammate 都成为同一棵 agent tree 上的节点。这样可以同时获得 Codex 式低噪声协作体验，以及当前项目已经具备的持久化团队任务编排能力。
+
+## 13. 已落地修复状态（2026-05-06）
+
+本节记录按本报告继续推进后的当前实现状态，避免后续重复分析同一批问题。
+
+已完成:
+
+- P0 输出隔离与 reasoning 隔离相关回归: child/non-primary reasoning 不再默认污染 root 控制台；非交互输出中的 reasoning-only 内容会被抑制。
+- P0 Ctrl+C 清理: `chat_interrupt.go` 已能中断 foreground run，并清理当前 root 关联的 child/team runtime 状态。
+- P0 team teammate id 误用保护: `wait_agent/read_agent_events` 会拒绝直接作用于 `spawn_team` teammate id，并提示等待 team lifecycle/team.summary。
+- P0 spawn 限制: 新增 `agents.maxThreads`、`agents.maxDepth`、`agents.defaultWaitTimeoutMs`、`agents.defaultForkTurns`，默认 `maxThreads=6`、`maxDepth=1`、`defaultForkTurns=none`。
+- P1 agent path/list: `spawn_agent` session 写入 parent/root/path/depth，`list_agents` 可展示 root 下 child session，并支持 `path_prefix` 与 `include_closed`。
+- P1 path target 与 subtree: `send_message`、`send_input`、`wait_agent`、`read_agent_events`、`resume_agent`、`close_agent` 支持 `/root/...` agent path 目标；`close_agent` 关闭父 path 会同步关闭该节点及其 descendant child sessions，并返回 `closed_count/closed_session_ids`。
+- P1 API controller path 修正: `/root/...` 目标解析不再默认只列 `agent` 用户 session，而是通过 all-session index 查找 path，避免非默认用户会话下 path target 找不到。
+- P2 `wait_agent` 事件唤醒: `wait_agent` 会订阅 runtime event bus，在目标 session 出现 `session_end`、`session_interrupted`、`assistant_message`、`approval_requested`、`question_asked`、`mailbox_received` 时立即重新快照状态；固定 fallback 从 50ms 高频轮询降为 500ms。
+- P2 `read_agent_events` 事件唤醒: `read_agent_events` 带 `wait_ms` 时会订阅 runtime event bus，在目标 session 出现新 event 后立即重新读取 event store；固定 fallback 从 50ms 高频轮询降为 500ms。
+- P2 child completion 持久父级事件: `spawn_agent` child session 的 `session_end/session_interrupted` 会向 parent session event store 镜像一条轻量 `subagent.completed` 事件，payload 包含 child session、path、agent type、status、success/error/trace 等摘要字段；CLI 与 runtime API controller 均已覆盖。
+- P2 工具面分层: 新增 `send_message` 与 `followup_task`。前者只投递消息，后者在 idle child 上触发新 turn，busy child 上只投递消息不打断。
+- P3 轻量桥接: team teammate session 会被投影为 `/root/teams/<team>/<member>`，因此可在 `list_agents` 中看到；完整 team substrate 迁移尚未完成。
+- P3 team orchestrator wake: `Orchestrator.RunWithWake` 支持事件唤醒 + fallback tick，启动后会先做一次 immediate tick；本地 CLI 与 runtime API 的 team lifecycle loop 会在 `SyncLoops` 命中已有 active team 时发送非阻塞 wake signal，减少 ready task 等待下一个 tick 的延迟。
+- P3 terminal reconcile 保护: team 终态 reconcile 现在会把 busy teammate 视为未 settle，避免运行中的 teammate 尚未发布 `task.completed` 时提前发出 `team.completed/team.summary`。
+- P3 team SQLite memory store 稳定性: `SQLiteStore` 对 `:memory:` / `mode=memory` DSN 限制单连接，避免 HTTP/API 测试或轻量运行时跨连接访问时出现 schema 丢失。
+- P4 `/debug` agent graph: `/debug` 已增加当前 root 下 agent tree 摘要，包含 path、status、session、session state、parent、depth、type、pending approval/question/tool 等排障字段。
+- P4 `/debug` mailbox pending: `/debug` 已增加当前 active team 的 unread mailbox 摘要，展示 team、agent、unread count、message id、kind、from/to、task、body preview，且不会 mark read。
+
+已验证:
+
+- `go test ./internal/api/skills -run "TestSessionAgentController_(PathTargetsAndCloseSubtree|WaitUsesRuntimeEventWakeup|ReadEventsUsesRuntimeEventWakeup)"`
+- `go test ./cmd/aicli/commands -run "TestLocalActorRegistry_(WaitUsesRuntimeEventWakeup|ReadEventsUsesRuntimeEventWakeup|AgentPathTargetsResolveToSession|CloseAgentPathClosesSubtree)"`
+- `go test ./cmd/aicli/commands -run TestLocalActorRegistry_MirrorsChildCompletionToParentEvents -count=1 -v`
+- `go test ./internal/api/skills -run TestSessionAgentController_MirrorsChildCompletionToParentEvents -count=1 -v`
+- `go test ./internal/team -run "Test(OrchestratorRun(TicksImmediately|WithWakeProcessesReadyTaskBeforeFallbackTick|StopsWhenTeamNotActive)|ReconcileTerminalTeamStateWaitsForBusyTeammate|ReconcileTerminalTeamStateDoesNotDuplicateSummarySideEffects)"`
+- `go test ./internal/api/skills -run "TestSyncTeamLifecycleLoops(EnrichesInjectedOrchestratorBeforeStartingLoops|SignalsExistingLoop|CompletesTeamWhenTeammateReportsOutcomeViaBroker)" -count=1 -v`
+- `go test ./cmd/aicli/commands -run "TestAICLIChatActorExecutor_(InteractiveAutoStartRendersTeamTimeline|AutoStartQueuedTasksStaySerializedPerTeammate)"`
+- `go test ./cmd/aicli/commands -run "Test(ChatDebugAgentGraphLinesListsLocalAgents|HandleCommand_DebugPrintsSessionArtifactsAndRuntimeState)"`
+- `go test ./cmd/aicli/commands -run "Test(ChatDebugAgentGraphLinesListsLocalAgents|ChatDebugMailboxLinesListsPendingTeamMessages|HandleCommand_DebugPrintsSessionArtifactsAndRuntimeState)"`
+- `go test ./pkg/skillsapi -run TestClient_CreateAndListTeams -count=1 -v`
+- `go test ./internal/events ./internal/toolbroker ./internal/api/skills ./cmd/aicli/commands`
+- `go test ./...`
+- 使用 `mimo_anthropic / mimo-v2.5-pro` 真实非交互调用验证两个 `spawn_agent` 并行、`list_agents`、`wait_agent` 全链路可用。
+
+仍保留:
+
+- `wait_agent/read_agent_events` 已不再依赖高频 50ms 状态轮询，但还不是 Codex 式 durable mailbox watch/sequence；`read_agent_events` 仍读取 event store，而不是父 agent mailbox。
+- child completion notification 已有 parent session 持久事件镜像，但还没有完全改成 durable mailbox 通信模型。
+- `spawn_team` 的 task assignment 尚未完全改为统一 AgentControl/substrate 派发。
+- team orchestrator 已支持事件唤醒 + fallback tick，但 wake 源仍是本地 lifecycle signal，不是 durable mailbox watch/sequence。
+- TUI agent picker/collab timeline 仍是后续 P4 工作。
