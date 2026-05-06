@@ -19,6 +19,27 @@ func TestBus_SubscribeAndPublish(t *testing.T) {
 	}
 }
 
+func TestBus_SubscribeCancelable(t *testing.T) {
+	bus := NewBus()
+	called := 0
+
+	unsubscribe := bus.SubscribeCancelable("session_end", func(event Event) {
+		called++
+	})
+	bus.Publish(Event{Type: "session_end"})
+	unsubscribe()
+	bus.Publish(Event{Type: "session_end"})
+
+	if called != 1 {
+		t.Fatalf("expected handler to be called only before unsubscribe, got %d", called)
+	}
+	unsubscribe()
+	bus.Publish(Event{Type: "session_end"})
+	if called != 1 {
+		t.Fatalf("expected unsubscribe to be idempotent, got %d", called)
+	}
+}
+
 func TestBus_QueryByTraceID(t *testing.T) {
 	bus := NewBusWithRetention(8)
 

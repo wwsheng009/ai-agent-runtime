@@ -21,6 +21,9 @@ type Event struct {
 // Handler 处理一条 runtime event。
 type Handler func(Event)
 
+// Unsubscribe removes a previously registered runtime event handler.
+type Unsubscribe func()
+
 // Publisher 是 runtime event 的最小发布接口。
 type Publisher interface {
 	Publish(event Event)
@@ -189,10 +192,16 @@ type GovernanceStats struct {
 // Bus 是最小的 runtime 事件总线。
 type Bus struct {
 	mu          sync.RWMutex
-	subscribers map[string][]Handler
-	all         []Handler
+	subscribers map[string][]subscription
+	all         []subscription
+	nextID      int64
 	retention   int
 	events      []Event
+}
+
+type subscription struct {
+	id      int64
+	handler Handler
 }
 
 // NewBus 创建一个新的 runtime event bus。
@@ -206,8 +215,8 @@ func NewBusWithRetention(retention int) *Bus {
 		retention = 0
 	}
 	return &Bus{
-		subscribers: make(map[string][]Handler),
-		all:         make([]Handler, 0),
+		subscribers: make(map[string][]subscription),
+		all:         make([]subscription, 0),
 		retention:   retention,
 		events:      make([]Event, 0, retention),
 	}
@@ -215,17 +224,42 @@ func NewBusWithRetention(retention int) *Bus {
 
 // Subscribe 订阅指定 event type；eventType 为空时订阅全部事件。
 func (b *Bus) Subscribe(eventType string, handler Handler) {
+	_ = b.SubscribeCancelable(eventType, handler)
+}
+
+// SubscribeCancelable subscribes to runtime events and returns an unsubscribe function.
+func (b *Bus) SubscribeCancelable(eventType string, handler Handler) Unsubscribe {
 	if b == nil || handler == nil {
-		return
+		return func() {}
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
+	b.nextID++
+	id := b.nextID
+	item := subscription{id: id, handler: handler}
 	if eventType == "" {
-		b.all = append(b.all, handler)
-		return
+		b.all = append(b.all, item)
+	} else {
+		b.subscribers[eventType] = append(b.subscribers[eventType], item)
 	}
-	b.subscribers[eventType] = append(b.subscribers[eventType], handler)
+	b.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			if eventType == "" {
+				b.all = removeSubscriptionByID(b.all, id)
+				return
+			}
+			items := removeSubscriptionByID(b.subscribers[eventType], id)
+			if len(items) == 0 {
+				delete(b.subscribers, eventType)
+				return
+			}
+			b.subscribers[eventType] = items
+		})
+	}
 }
 
 // Publish 同步发布事件。
@@ -246,8 +280,8 @@ func (b *Bus) Publish(event Event) {
 			b.events = append(b.events, cloneEvent(event))
 		}
 	}
-	typed := append([]Handler(nil), b.subscribers[event.Type]...)
-	all := append([]Handler(nil), b.all...)
+	typed := cloneSubscriptionHandlers(b.subscribers[event.Type])
+	all := cloneSubscriptionHandlers(b.all)
 	b.mu.Unlock()
 
 	for _, handler := range all {
@@ -256,6 +290,35 @@ func (b *Bus) Publish(event Event) {
 	for _, handler := range typed {
 		handler(event)
 	}
+}
+
+func removeSubscriptionByID(items []subscription, id int64) []subscription {
+	if len(items) == 0 {
+		return nil
+	}
+	filtered := items[:0]
+	for _, item := range items {
+		if item.id != id {
+			filtered = append(filtered, item)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+func cloneSubscriptionHandlers(items []subscription) []Handler {
+	if len(items) == 0 {
+		return nil
+	}
+	handlers := make([]Handler, 0, len(items))
+	for _, item := range items {
+		if item.handler != nil {
+			handlers = append(handlers, item.handler)
+		}
+	}
+	return handlers
 }
 
 // Recent 返回最近留存的事件。
