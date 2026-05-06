@@ -80,6 +80,43 @@ func TestReconcileTerminalTeamStateDoesNotDuplicateSummarySideEffects(t *testing
 	assert.Equal(t, "final team summary", messages[0].Body)
 }
 
+func TestReconcileTerminalTeamStateDoesNotDowngradeTerminalDoneTeam(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{
+		Status:        TeamStatusDone,
+		LeadSessionID: "lead-session",
+	})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, Task{
+		ID:      "task-1",
+		TeamID:  teamID,
+		Title:   "late failed task",
+		Status:  TaskStatusFailed,
+		Summary: "context canceled",
+	})
+	require.NoError(t, err)
+
+	result, err := ReconcileTerminalTeamState(ctx, TerminalTeamServices{
+		Store: store,
+	}, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Terminal)
+	assert.False(t, result.Transition)
+	assert.Equal(t, TeamStatusDone, result.Status)
+
+	record, err := store.GetTeam(ctx, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.Equal(t, TeamStatusDone, record.Status)
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	assert.Empty(t, events)
+}
+
 func TestReconcileTerminalTeamStatePublishesFallbackSummaryFailureMetadata(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

@@ -401,6 +401,79 @@ func TestTeammateRunnerRecoversStructuredOutcomeFromStore(t *testing.T) {
 	assert.Empty(t, result.ProtocolError)
 }
 
+func TestTeammateRunnerRecoversStructuredOutcomeFromStoreAfterSessionCancel(t *testing.T) {
+	store, err := NewSQLiteStore(&StoreConfig{
+		DSN: "file:teammate-runner-recover-cancel-outcome-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:      "task-1",
+		TeamID:  teamID,
+		Title:   "task-1",
+		Status:  TaskStatusRunning,
+		Summary: "",
+	})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-1",
+		TeamID:    teamID,
+		SessionID: "session-1",
+		State:     TeammateStateBusy,
+	})
+	require.NoError(t, err)
+
+	client := &updatingSessionClient{
+		onSubmit: func(ctx context.Context, sessionID, prompt string, runMeta *RunMeta) {
+			_, applyErr := ApplyTerminalTaskOutcome(ctx, TaskOutcomeApplyServices{
+				Store: store,
+			}, TerminalTaskOutcomeRequest{
+				Task: Task{
+					ID:       taskID,
+					TeamID:   teamID,
+					Title:    "task-1",
+					Status:   TaskStatusRunning,
+					Assignee: stringPtr("mate-1"),
+				},
+				TeammateID:    "mate-1",
+				DefaultStatus: TaskOutcomeDone,
+				Outcome: TaskOutcomeContract{
+					Status:  TaskOutcomeDone,
+					Summary: "completed before cancellation",
+				},
+			})
+			require.NoError(t, applyErr)
+		},
+		err: context.Canceled,
+	}
+
+	runner := &TeammateRunner{
+		Sessions: client,
+		Context:  NewContextBuilder(store),
+	}
+
+	result, err := runner.StartTask(ctx, Team{ID: teamID}, Teammate{
+		ID:        "mate-1",
+		SessionID: "session-1",
+	}, Task{
+		ID:     taskID,
+		TeamID: teamID,
+		Title:  "task-1",
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+	assert.True(t, result.Structured)
+	assert.True(t, result.OutcomeApplied)
+	assert.Equal(t, TaskOutcomeDone, result.Outcome)
+	assert.Equal(t, "completed before cancellation", result.Summary)
+	assert.Empty(t, result.ProtocolError)
+}
+
 func TestTeammateRunnerUsesObservedReportTaskOutcomeAsCanonicalResult(t *testing.T) {
 	runner := &TeammateRunner{
 		Sessions: &staticSessionClient{

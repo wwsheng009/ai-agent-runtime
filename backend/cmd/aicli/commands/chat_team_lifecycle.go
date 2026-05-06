@@ -27,6 +27,8 @@ type localTeamLifecycleService struct {
 	loopCancels map[string]context.CancelFunc
 }
 
+const terminalTeammateCleanupWaitTimeout = 10 * time.Second
+
 func newLocalTeamLifecycleService(host *localChatRuntimeHost) *localTeamLifecycleService {
 	if host == nil {
 		return nil
@@ -123,10 +125,15 @@ func (c *localTeamLifecycleService) SyncLoops() {
 	if err != nil {
 		return
 	}
+	leadSessionID := c.hostLeadSessionID()
+	activeTeamID := c.hostActiveTeamID()
 	desired := make(map[string]struct{}, len(teams))
 	for _, item := range teams {
 		teamID := strings.TrimSpace(item.ID)
 		if teamID == "" {
+			continue
+		}
+		if !teamBelongsToHostLead(item, leadSessionID, activeTeamID) {
 			continue
 		}
 		desired[teamID] = struct{}{}
@@ -172,6 +179,23 @@ func (c *localTeamLifecycleService) StopLoops() {
 	}
 	c.loopMu.Unlock()
 	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (c *localTeamLifecycleService) StopLoop(teamID string) {
+	teamID = strings.TrimSpace(teamID)
+	if c == nil || c.Host == nil || teamID == "" {
+		return
+	}
+	var cancel context.CancelFunc
+	c.loopMu.Lock()
+	if c.loopCancels != nil {
+		cancel = c.loopCancels[teamID]
+		delete(c.loopCancels, teamID)
+	}
+	c.loopMu.Unlock()
+	if cancel != nil {
 		cancel()
 	}
 }
@@ -226,8 +250,31 @@ func (c *localTeamLifecycleService) closeTerminalTeammatesAsync(teamID string) {
 		return
 	}
 	go func() {
+		waitCtx, cancel := context.WithTimeout(context.Background(), terminalTeammateCleanupWaitTimeout)
+		_ = c.waitForTerminalCleanupReady(waitCtx, teamID)
+		cancel()
 		_ = c.closeTerminalTeammates(context.Background(), teamID)
 	}()
+}
+
+func (c *localTeamLifecycleService) waitForTerminalCleanupReady(ctx context.Context, teamID string) error {
+	teamID = strings.TrimSpace(teamID)
+	if c == nil || c.Host == nil || teamID == "" {
+		return nil
+	}
+	ticker := time.NewTicker(noInteractiveTeamDrainPollInterval)
+	defer ticker.Stop()
+	for {
+		settled, err := c.RunSettled(ctx, teamID)
+		if err == nil && settled {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (c *localTeamLifecycleService) closeTerminalTeammates(ctx context.Context, teamID string) error {
@@ -317,6 +364,37 @@ func (c *localTeamLifecycleService) teamSessionIDs(ctx context.Context, teamID s
 		resolved = append(resolved, sessionID)
 	}
 	return resolved, nil
+}
+
+func (c *localTeamLifecycleService) hostLeadSessionID() string {
+	if c == nil || c.Host == nil || c.Host.BaseSession == nil || c.Host.BaseSession.RuntimeSession == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.Host.BaseSession.RuntimeSession.ID)
+}
+
+func (c *localTeamLifecycleService) hostActiveTeamID() string {
+	if c == nil || c.Host == nil || c.Host.BaseSession == nil || c.Host.BaseSession.ActiveTeam == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.Host.BaseSession.ActiveTeam.TeamID)
+}
+
+func teamBelongsToHostLead(record team.Team, leadSessionID, activeTeamID string) bool {
+	teamID := strings.TrimSpace(record.ID)
+	leadSessionID = strings.TrimSpace(leadSessionID)
+	activeTeamID = strings.TrimSpace(activeTeamID)
+	recordLeadSessionID := strings.TrimSpace(record.LeadSessionID)
+	if leadSessionID == "" {
+		if activeTeamID == "" {
+			return true
+		}
+		return strings.EqualFold(teamID, activeTeamID)
+	}
+	if strings.EqualFold(recordLeadSessionID, leadSessionID) {
+		return true
+	}
+	return recordLeadSessionID == "" && activeTeamID != "" && strings.EqualFold(teamID, activeTeamID)
 }
 
 func (c *localTeamLifecycleService) hasTeamLoop(teamID string) bool {

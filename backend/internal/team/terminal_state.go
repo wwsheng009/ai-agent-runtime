@@ -43,6 +43,18 @@ func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServic
 		return reconcileTerminalTeamStateSQLite(ctx, sqliteStore, services, teamID)
 	}
 
+	current, err := services.Store.GetTeam(ctx, teamID)
+	if err != nil {
+		return nil, err
+	}
+	if isTerminalTeamStatus(currentTeamStatus(current)) {
+		return &TerminalTeamResult{
+			Terminal:   true,
+			Transition: false,
+			Status:     current.Status,
+		}, nil
+	}
+
 	active, err := services.Store.ListTasks(ctx, TaskFilter{
 		TeamID: teamID,
 		Status: []TaskStatus{TaskStatusPending, TaskStatusReady, TaskStatusRunning, TaskStatusBlocked},
@@ -67,10 +79,6 @@ func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServic
 		status = TeamStatusFailed
 	}
 
-	current, err := services.Store.GetTeam(ctx, teamID)
-	if err != nil {
-		return nil, err
-	}
 	if current != nil && current.Status == status {
 		return &TerminalTeamResult{
 			Terminal:   true,
@@ -147,6 +155,17 @@ func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, s
 	for attempt := 0; attempt < 8; attempt++ {
 		result = &TerminalTeamResult{}
 		err = store.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+			currentStatus, err := loadTeamStatusTx(ctx, tx, teamID)
+			if err != nil {
+				return err
+			}
+			if isTerminalTeamStatus(currentStatus) {
+				result.Terminal = true
+				result.Transition = false
+				result.Status = currentStatus
+				return nil
+			}
+
 			activeCount, err := countTasksByStatusTx(ctx, tx, teamID, TaskStatusPending, TaskStatusReady, TaskStatusRunning, TaskStatusBlocked)
 			if err != nil {
 				return err
@@ -166,10 +185,6 @@ func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, s
 				status = TeamStatusFailed
 			}
 
-			currentStatus, err := loadTeamStatusTx(ctx, tx, teamID)
-			if err != nil {
-				return err
-			}
 			if currentStatus == status {
 				result.Terminal = true
 				result.Transition = false
@@ -290,6 +305,17 @@ func loadTeamStatusTx(ctx context.Context, tx *sql.Tx, teamID string) (TeamStatu
 		return "", fmt.Errorf("load team status: %w", err)
 	}
 	return TeamStatus(status), nil
+}
+
+func currentTeamStatus(record *Team) TeamStatus {
+	if record == nil {
+		return ""
+	}
+	return record.Status
+}
+
+func isTerminalTeamStatus(status TeamStatus) bool {
+	return status == TeamStatusDone || status == TeamStatusFailed
 }
 
 func emitTerminalTeamEvent(store Store, events *TeamEventBus, event TeamEvent) {

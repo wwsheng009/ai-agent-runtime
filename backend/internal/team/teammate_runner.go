@@ -134,6 +134,7 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 		if strings.TrimSpace(run.Summary) == "" {
 			run.Summary = truncateLine(firstNonEmptyString(run.Error, err.Error()), 240)
 		}
+		r.recoverStructuredTaskOutcome(ctx, strings.TrimSpace(task.ID), run)
 		return run, err
 	}
 	if result == nil {
