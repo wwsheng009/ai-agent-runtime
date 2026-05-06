@@ -2885,6 +2885,16 @@ func (h *Handler) ListMailbox(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	rawAfter := strings.TrimSpace(firstNonEmptyString(r.URL.Query().Get("after_seq"), r.URL.Query().Get("after")))
+	afterSeq := int64(0)
+	if rawAfter != "" {
+		value, err := strconv.ParseInt(rawAfter, 10, 64)
+		if err != nil || value < 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid after_seq value"))
+			return
+		}
+		afterSeq = value
+	}
 	includeBroadcast := parseOptionalBool(r.URL.Query().Get("include_broadcast"))
 	taskIDFilter := strings.TrimSpace(r.URL.Query().Get("task_id"))
 	parentTaskParam := strings.TrimSpace(r.URL.Query().Get("parent_task_id"))
@@ -2907,6 +2917,7 @@ func (h *Handler) ListMailbox(w http.ResponseWriter, r *http.Request) {
 		Kind:             r.URL.Query().Get("kind"),
 		UnreadOnly:       unreadOnly,
 		IncludeBroadcast: includeBroadcast,
+		AfterSeq:         afterSeq,
 		Since:            since,
 		Limit:            limit,
 	}
@@ -3003,6 +3014,7 @@ func (h *Handler) ListMailbox(w http.ResponseWriter, r *http.Request) {
 			"unread_only":       unreadOnly,
 			"mark_read":         markRead,
 			"include_broadcast": includeBroadcast,
+			"after_seq":         afterSeq,
 			"since":             since,
 		},
 	})

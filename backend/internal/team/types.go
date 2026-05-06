@@ -96,6 +96,7 @@ type Task struct {
 // MailMessage represents a message exchanged inside the team mailbox.
 type MailMessage struct {
 	ID        string                 `json:"id"`
+	Seq       int64                  `json:"seq,omitempty"`
 	TeamID    string                 `json:"team_id"`
 	FromAgent string                 `json:"from_agent"`
 	ToAgent   string                 `json:"to_agent"`
@@ -152,6 +153,7 @@ type TaskFilter struct {
 // MailFilter allows filtering mailbox messages.
 type MailFilter struct {
 	TeamID           string
+	AfterSeq         int64
 	FromAgent        string
 	ToAgent          string
 	TaskID           string
