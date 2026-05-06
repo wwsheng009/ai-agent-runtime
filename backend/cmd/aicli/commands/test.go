@@ -189,7 +189,7 @@ func renderTestResponse(formatFlag string, jsonEnvelope bool, providerName, prot
 	case "text":
 		if content := extractSimpleResponseText(responseBody); content != "" {
 			fmt.Println(content)
-		} else {
+		} else if !json.Valid(responseBody) {
 			fmt.Println(string(responseBody))
 		}
 	default: // pretty
@@ -233,9 +233,11 @@ func renderTestCommandResult(result *testCommandResult, outputOptions structured
 func displaySimpleResponse(responseBody []byte) {
 	var result map[string]interface{}
 	if err := json.Unmarshal(responseBody, &result); err != nil {
-		if text := extractCodexStreamText(responseBody); text != "" {
+		if looksLikeCodexStreamResponse(responseBody) {
 			fmt.Println("Response:")
-			fmt.Println(text)
+			if text := extractCodexStreamText(responseBody); text != "" {
+				fmt.Println(text)
+			}
 			return
 		}
 		// JSON 解析失败，直接显示原始内容
@@ -259,8 +261,6 @@ func displaySimpleResponse(responseBody []byte) {
 			if msg, ok := choice["message"].(map[string]interface{}); ok {
 				if content, ok := msg["content"].(string); ok && content != "" {
 					fmt.Println(content)
-				} else if reasoning, ok := msg["reasoning_content"].(string); ok {
-					fmt.Printf("--- Thinking ---\n%s\n--- End Thinking ---\n", reasoning)
 				}
 			}
 		}
@@ -293,8 +293,8 @@ func displaySimpleResponse(responseBody []byte) {
 func extractSimpleResponseText(responseBody []byte) string {
 	var result map[string]interface{}
 	if err := json.Unmarshal(responseBody, &result); err != nil {
-		if text := extractCodexStreamText(responseBody); text != "" {
-			return text
+		if looksLikeCodexStreamResponse(responseBody) {
+			return extractCodexStreamText(responseBody)
 		}
 		return strings.TrimSpace(string(responseBody))
 	}
@@ -308,9 +308,6 @@ func extractSimpleResponseText(responseBody []byte) string {
 			if msg, ok := choice["message"].(map[string]interface{}); ok {
 				if content, ok := msg["content"].(string); ok && content != "" {
 					return strings.TrimSpace(content)
-				}
-				if reasoning, ok := msg["reasoning_content"].(string); ok && reasoning != "" {
-					return strings.TrimSpace(reasoning)
 				}
 			}
 		}
@@ -362,7 +359,6 @@ func extractCodexStreamText(responseBody []byte) string {
 
 	var currentEvent string
 	var content strings.Builder
-	var reasoning strings.Builder
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -402,15 +398,6 @@ func extractCodexStreamText(responseBody []byte) string {
 					content.Reset()
 					content.WriteString(text)
 				}
-			case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
-				if delta, ok := event["delta"].(string); ok {
-					reasoning.WriteString(delta)
-				}
-			case "response.reasoning_summary_text.done":
-				if text, ok := event["text"].(string); ok && strings.TrimSpace(text) != "" {
-					reasoning.Reset()
-					reasoning.WriteString(text)
-				}
 			}
 		}
 	}
@@ -418,7 +405,7 @@ func extractCodexStreamText(responseBody []byte) string {
 	if text := strings.TrimSpace(content.String()); text != "" {
 		return text
 	}
-	return strings.TrimSpace(reasoning.String())
+	return ""
 }
 
 func extractCodexOutputItemText(event map[string]interface{}) string {

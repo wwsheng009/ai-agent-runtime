@@ -137,6 +137,7 @@ func (s *ChatSession) Interrupt() {
 	if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
+	s.interruptLocalRuntimeWorkAsync()
 	// 中断语义是“取消当前输入/当前轮次”，因此需要同时清掉尚未提交的输入草稿
 	// 和已渲染但尚未重绘的 prompt 状态，避免下一轮仍被旧状态挡住。
 	_ = discardPendingInteractiveInput(s)

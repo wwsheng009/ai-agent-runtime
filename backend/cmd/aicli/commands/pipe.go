@@ -309,17 +309,11 @@ func sendPipeRequest(session *PipeSession, message string, stream bool) (*pipeCo
 				var chunkData map[string]any
 				if err := json.Unmarshal([]byte(data), &chunkData); err == nil {
 					chunkData = normalizePipeSessionStreamChunk(session, chunkData)
-					// 优先提取推理内容
-					if reasoning := session.Adapter.ExtractStreamReasoning(chunkData); reasoning != "" {
-						result.Response += reasoning
-						fmt.Fprint(os.Stderr, reasoning) // 流式输出到 stderr
-					} else {
-						// 提取普通内容
-						chunk := session.Adapter.ExtractStreamContent(chunkData)
-						if chunk != "" {
-							result.Response += chunk
-							fmt.Fprint(os.Stdout, chunk) // 流式输出到 stdout
-						}
+					// Reasoning deltas are replay metadata, not pipe response text.
+					chunk := session.Adapter.ExtractStreamContent(chunkData)
+					if chunk != "" {
+						result.Response += chunk
+						fmt.Fprint(os.Stdout, chunk) // 流式输出到 stdout
 					}
 				}
 			}

@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 )
 
 func TestNormalizeOutputFormat(t *testing.T) {
@@ -91,6 +95,58 @@ func TestExtractSimpleResponseText(t *testing.T) {
 		"data: {\"type\":\"response.output_text.done\",\"text\":\"OK\"}\n")
 	if text := extractSimpleResponseText(sse); text != "OK" {
 		t.Fatalf("unexpected sse response text: %q", text)
+	}
+
+	reasoningOnly := []byte(`{"choices":[{"message":{"reasoning_content":"internal reasoning"}}]}`)
+	if text := extractSimpleResponseText(reasoningOnly); text != "" {
+		t.Fatalf("expected reasoning-only response to be suppressed, got %q", text)
+	}
+
+	reasoningSSE := []byte("event: response.reasoning_text.delta\n" +
+		"data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"internal reasoning\"}\n")
+	if text := extractSimpleResponseText(reasoningSSE); text != "" {
+		t.Fatalf("expected reasoning-only stream to be suppressed, got %q", text)
+	}
+}
+
+func TestSendPipeRequestStreamSuppressesReasoning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"internal reasoning\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	openAIAdapter, err := adapter.NewAdapter("openai")
+	if err != nil {
+		t.Fatalf("adapter: %v", err)
+	}
+	session := &PipeSession{
+		ProviderName: "test",
+		Provider:     config.Provider{Protocol: "openai", APIKey: "test"},
+		Adapter:      openAIAdapter,
+		Model:        "test-model",
+		BaseURL:      server.URL,
+		HTTPClient:   server.Client(),
+	}
+
+	var result *pipeCommandResult
+	stdout, stderr := captureStdoutStderr(t, func() {
+		result, err = sendPipeRequest(session, "hello", true)
+	})
+
+	if err != nil {
+		t.Fatalf("send pipe request: %v", err)
+	}
+	if result == nil || result.Response != "answer" {
+		t.Fatalf("expected only assistant content in result, got %#v", result)
+	}
+	if stdout != "answer" {
+		t.Fatalf("expected only assistant content on stdout, got %q", stdout)
+	}
+	if strings.Contains(stderr, "internal reasoning") {
+		t.Fatalf("expected reasoning to be suppressed from stderr, got %q", stderr)
 	}
 }
 
