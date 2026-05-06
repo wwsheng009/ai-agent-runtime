@@ -1,0 +1,147 @@
+package commands
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+	"time"
+
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+)
+
+func TestInterruptActiveRunsPausesTeamAndStopsRuntimeStates(t *testing.T) {
+	ctx := context.Background()
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(32)
+	host := &localChatRuntimeHost{
+		TeamStore:    store,
+		RuntimeStore: runtimeStore,
+	}
+
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:            "team-interrupt",
+		LeadSessionID: "parent-session",
+		Status:        team.TeamStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if _, err := store.UpsertTeammate(ctx, team.Teammate{
+		ID:        "mate-1",
+		TeamID:    teamID,
+		SessionID: "child-session",
+		State:     team.TeammateStateBusy,
+	}); err != nil {
+		t.Fatalf("UpsertTeammate: %v", err)
+	}
+	assignee := "mate-1"
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	if _, err := store.CreateTask(ctx, team.Task{
+		ID:         "task-1",
+		TeamID:     teamID,
+		Title:      "running task",
+		Goal:       "keep running",
+		Status:     team.TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	for _, sessionID := range []string{"parent-session", "child-session"} {
+		if err := runtimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+			SessionID:     sessionID,
+			Status:        runtimechat.SessionRunning,
+			CurrentTurnID: "turn-1",
+			CurrentRunMeta: &team.RunMeta{Team: &team.TeamRunMeta{
+				TeamID: teamID,
+			}},
+			UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("SaveState(%s): %v", sessionID, err)
+		}
+	}
+
+	host.interruptActiveRuns(ctx, "parent-session", "", "")
+
+	record, err := store.GetTeam(ctx, teamID)
+	if err != nil {
+		t.Fatalf("GetTeam: %v", err)
+	}
+	if record.Status != team.TeamStatusPaused {
+		t.Fatalf("expected team paused, got %s", record.Status)
+	}
+	taskRecord, err := store.GetTask(ctx, "task-1")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if taskRecord.Status != team.TaskStatusCancelled {
+		t.Fatalf("expected task cancelled, got %s", taskRecord.Status)
+	}
+	if taskRecord.Assignee != nil || taskRecord.LeaseUntil != nil {
+		t.Fatalf("expected task lease released, got assignee=%v lease=%v", taskRecord.Assignee, taskRecord.LeaseUntil)
+	}
+	mate, err := store.GetTeammate(ctx, "mate-1")
+	if err != nil {
+		t.Fatalf("GetTeammate: %v", err)
+	}
+	if mate.State != team.TeammateStateIdle {
+		t.Fatalf("expected teammate idle, got %s", mate.State)
+	}
+	for _, sessionID := range []string{"parent-session", "child-session"} {
+		state, err := runtimeStore.LoadState(ctx, sessionID)
+		if err != nil {
+			t.Fatalf("LoadState(%s): %v", sessionID, err)
+		}
+		if state == nil || state.Status != runtimechat.SessionStopped || state.CurrentTurnID != "" || state.CurrentRunMeta != nil {
+			t.Fatalf("expected stopped clean state for %s, got %+v", sessionID, state)
+		}
+	}
+}
+
+func TestInterruptActiveRunsStopsDirectChildAgentState(t *testing.T) {
+	ctx := context.Background()
+	userID := "user-1"
+	storage := runtimechat.NewInMemoryStorage()
+	parent := runtimechat.NewSession(userID)
+	parent.ID = "parent-session"
+	if err := storage.Save(ctx, parent); err != nil {
+		t.Fatalf("Save parent: %v", err)
+	}
+	child := runtimechat.NewSession(userID)
+	child.ID = "child-agent-session"
+	child.SetContext(toolbroker.AgentSessionContextParentSessionID, parent.ID)
+	if err := storage.Save(ctx, child); err != nil {
+		t.Fatalf("Save child: %v", err)
+	}
+
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(32)
+	if err := runtimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID:     child.ID,
+		Status:        runtimechat.SessionRunning,
+		CurrentTurnID: "turn-child",
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveState child: %v", err)
+	}
+	host := &localChatRuntimeHost{
+		SessionStore: storage,
+		RuntimeStore: runtimeStore,
+	}
+
+	host.interruptActiveRuns(ctx, parent.ID, userID, "")
+
+	state, err := runtimeStore.LoadState(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("LoadState child: %v", err)
+	}
+	if state == nil || state.Status != runtimechat.SessionStopped || state.CurrentTurnID != "" {
+		t.Fatalf("expected stopped child state, got %+v", state)
+	}
+}
