@@ -75,6 +75,33 @@ func TestValidateAgentConfig_ParallelToolDefaults(t *testing.T) {
 	require.Error(t, ValidateRuntimeConfig(cfg))
 }
 
+func TestValidateAgentsConfig_DefaultsAndValidation(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	require.Equal(t, 6, cfg.Agents.MaxThreads)
+	require.Equal(t, 1, cfg.Agents.MaxDepth)
+	require.Equal(t, int((30 * time.Second).Milliseconds()), cfg.Agents.DefaultWaitTimeoutMs)
+	require.Equal(t, "none", cfg.Agents.DefaultForkTurns)
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.Agents.MaxThreads = -1
+	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Agents.MaxDepth = -1
+	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Agents.DefaultWaitTimeoutMs = -1
+	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Agents.DefaultForkTurns = "2"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.Agents.DefaultForkTurns = "invalid"
+	require.Error(t, ValidateRuntimeConfig(cfg))
+}
+
 func TestValidateSandboxConfig(t *testing.T) {
 	cfg := DefaultRuntimeConfig()
 	cfg.Sandbox = runtimeexecutor.SandboxConfig{

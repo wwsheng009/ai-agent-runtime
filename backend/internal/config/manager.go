@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ type RuntimeConfig struct {
 
 	// Skills 引擎配置
 	Agent          AgentConfig               `yaml:"agent" json:"agent"`
+	Agents         AgentsConfig              `yaml:"agents" json:"agents"`
 	Router         RouterConfig              `yaml:"router" json:"router"`
 	Embedding      EmbeddingConfig           `yaml:"embedding" json:"embedding"`
 	Workspace      WorkspaceConfig           `yaml:"workspace" json:"workspace"`
@@ -64,6 +66,14 @@ type AgentConfig struct {
 	MaxParallelToolCalls int           `yaml:"maxParallelToolCalls" json:"maxParallelToolCalls"`
 	Timeout              time.Duration `yaml:"timeout" json:"timeout"`
 	DefaultPlanningMode  string        `yaml:"defaultPlanningMode,omitempty" json:"defaultPlanningMode,omitempty"`
+}
+
+// AgentsConfig controls lightweight multi-agent collaboration limits.
+type AgentsConfig struct {
+	MaxThreads           int    `yaml:"maxThreads" json:"maxThreads"`
+	MaxDepth             int    `yaml:"maxDepth" json:"maxDepth"`
+	DefaultWaitTimeoutMs int    `yaml:"defaultWaitTimeoutMs,omitempty" json:"defaultWaitTimeoutMs,omitempty"`
+	DefaultForkTurns     string `yaml:"defaultForkTurns,omitempty" json:"defaultForkTurns,omitempty"`
 }
 
 // RouterConfig 路由器配置
@@ -244,6 +254,12 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			MaxParallelToolCalls: 1,
 			Timeout:              5 * time.Minute,
 			DefaultPlanningMode:  "",
+		},
+		Agents: AgentsConfig{
+			MaxThreads:           6,
+			MaxDepth:             1,
+			DefaultWaitTimeoutMs: int((30 * time.Second).Milliseconds()),
+			DefaultForkTurns:     "none",
 		},
 		Router: RouterConfig{
 			MinScore:        0.0,
@@ -563,6 +579,9 @@ func ValidateRuntimeConfig(config *RuntimeConfig) error {
 	if err := ValidateAgentConfig(&config.Agent); err != nil {
 		return err
 	}
+	if err := ValidateAgentsConfig(&config.Agents); err != nil {
+		return err
+	}
 	if err := ValidateRouterConfig(&config.Router); err != nil {
 		return err
 	}
@@ -806,6 +825,30 @@ func ValidateAgentConfig(config *AgentConfig) error {
 	}
 	if config.MaxParallelToolCalls < 0 {
 		return errors.New(errors.ErrValidationFailed, "maxParallelToolCalls cannot be negative")
+	}
+	return nil
+}
+
+// ValidateAgentsConfig validates lightweight multi-agent limits.
+func ValidateAgentsConfig(config *AgentsConfig) error {
+	if config == nil {
+		return nil
+	}
+	if config.MaxThreads < 0 {
+		return errors.New(errors.ErrValidationFailed, "agents.maxThreads cannot be negative")
+	}
+	if config.MaxDepth < 0 {
+		return errors.New(errors.ErrValidationFailed, "agents.maxDepth cannot be negative")
+	}
+	if config.DefaultWaitTimeoutMs < 0 {
+		return errors.New(errors.ErrValidationFailed, "agents.defaultWaitTimeoutMs cannot be negative")
+	}
+	forkTurns := strings.ToLower(strings.TrimSpace(config.DefaultForkTurns))
+	if forkTurns == "" || forkTurns == "none" || forkTurns == "all" {
+		return nil
+	}
+	if value, err := strconv.Atoi(forkTurns); err != nil || value <= 0 {
+		return errors.New(errors.ErrValidationFailed, "agents.defaultForkTurns must be none, all, or a positive integer")
 	}
 	return nil
 }

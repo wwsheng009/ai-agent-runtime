@@ -39,7 +39,7 @@ func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 		return []Capability{CapBackgroundTask}
 	case "task_output":
 		return []Capability{CapReadOnly}
-	case "spawn_agent", "send_input", "wait_agent", "read_agent_events", "close_agent", "resume_agent",
+	case "spawn_agent", "list_agents", "send_message", "followup_task", "send_input", "wait_agent", "read_agent_events", "close_agent", "resume_agent",
 		"send_team_message", "read_mailbox_digest", "read_task_spec", "read_task_context", "report_task_outcome", "block_current_task":
 		return []Capability{CapReadOnly}
 	}
@@ -90,6 +90,12 @@ func normalizeToolName(name string) string {
 		return "task_output"
 	case "spawnagent":
 		return "spawn_agent"
+	case "listagents":
+		return "list_agents"
+	case "sendmessage":
+		return "send_message"
+	case "followuptask":
+		return "followup_task"
 	case "sendinput":
 		return "send_input"
 	case "waitagent":
