@@ -33,3 +33,17 @@ func TestReasoningBlock_RoundTripPreservesStreamingWhitespace(t *testing.T) {
 		t.Fatalf("expected raw display text after round trip, got %q", got)
 	}
 }
+
+func TestReasoningBlock_OpaqueVisibilitySuppressesDisplayText(t *testing.T) {
+	block := &ReasoningBlock{
+		Summary:    "internal reasoning",
+		Visibility: ReasoningVisibilityOpaque,
+	}
+
+	if got := block.RawDisplayText(); got != "" {
+		t.Fatalf("expected opaque raw display text to be suppressed, got %q", got)
+	}
+	if got := block.DisplayText(); got != "" {
+		t.Fatalf("expected opaque display text to be suppressed, got %q", got)
+	}
+}

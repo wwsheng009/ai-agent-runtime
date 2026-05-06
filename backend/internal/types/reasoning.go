@@ -55,6 +55,10 @@ func (r *ReasoningBlock) RawDisplayText() string {
 	if r == nil {
 		return ""
 	}
+	switch r.Visibility {
+	case ReasoningVisibilityNone, ReasoningVisibilityOpaque:
+		return ""
+	}
 	if r.Summary != "" {
 		return r.Summary
 	}
