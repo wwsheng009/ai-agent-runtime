@@ -45,6 +45,19 @@ func (c *updatingSessionClient) SubmitPrompt(ctx context.Context, sessionID, pro
 	return c.result, c.err
 }
 
+type capturingTaskTriggerClient struct {
+	result  *SessionResult
+	err     error
+	request TaskTriggerRequest
+	called  bool
+}
+
+func (c *capturingTaskTriggerClient) TriggerTask(ctx context.Context, request TaskTriggerRequest) (*SessionResult, error) {
+	c.called = true
+	c.request = request
+	return c.result, c.err
+}
+
 func TestTeammateRunnerMarksMissingStructuredOutcomeAsProtocolError(t *testing.T) {
 	runner := &TeammateRunner{
 		Sessions: &staticSessionClient{
@@ -72,6 +85,52 @@ func TestTeammateRunnerMarksMissingStructuredOutcomeAsProtocolError(t *testing.T
 	assert.Contains(t, result.ProtocolError, "missing structured task outcome")
 	assert.Equal(t, result.ProtocolError, result.Summary)
 	assert.False(t, result.Structured)
+}
+
+func TestTeammateRunnerPrefersAgentControlTriggerTask(t *testing.T) {
+	fallback := &staticSessionClient{
+		result: &SessionResult{
+			Success: true,
+			Output:  "```json\n{\"task_status\":\"done\",\"summary\":\"fallback\"}\n```",
+		},
+	}
+	control := &capturingTaskTriggerClient{
+		result: &SessionResult{
+			Success: true,
+			Output:  "```json\n{\"task_status\":\"done\",\"summary\":\"triggered\"}\n```",
+		},
+	}
+	runner := &TeammateRunner{
+		Sessions:     fallback,
+		AgentControl: control,
+	}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-1",
+		Name:      "Mate",
+		SessionID: "session-1",
+	}, Task{
+		ID:     "task-1",
+		TeamID: "team-1",
+		Title:  "Implement change",
+		Goal:   "Implement change",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, control.called)
+	assert.Equal(t, "session-1", control.request.SessionID)
+	assert.Equal(t, "team-1", control.request.TeamID)
+	assert.Equal(t, "mate-1", control.request.AgentID)
+	assert.Equal(t, "task-1", control.request.TaskID)
+	assert.Contains(t, control.request.Prompt, "Implement change")
+	require.NotNil(t, control.request.RunMeta)
+	require.NotNil(t, control.request.RunMeta.Team)
+	assert.Equal(t, "team-1", control.request.RunMeta.Team.TeamID)
+	assert.Equal(t, "mate-1", control.request.RunMeta.Team.AgentID)
+	assert.Equal(t, "task-1", control.request.RunMeta.Team.CurrentTaskID)
+	assert.Equal(t, "bypass_permissions", control.request.RunMeta.PermissionMode)
+	assert.Equal(t, "", fallback.prompt)
+	assert.Equal(t, "triggered", result.Summary)
 }
 
 func TestTeammateRunnerParsesStructuredJSONOutcome(t *testing.T) {

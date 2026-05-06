@@ -14,6 +14,7 @@ type TaskOutcomeApplyServices struct {
 	Claims  *PathClaimManager
 	Mailbox *MailboxService
 	Planner *LeadPlanner
+	Events  *TeamEventBus
 }
 
 // BlockedTaskOutcomeRequest describes a blocked or handoff task outcome application.
@@ -58,6 +59,10 @@ type TerminalTaskOutcomeRequest struct {
 	ResultRef       *string
 	DefaultStatus   TaskOutcomeStatus
 	SkipStateUpdate bool
+	TraceID         string
+	Error           string
+	ErrorType       string
+	ErrorMetadata   map[string]interface{}
 }
 
 // TerminalTaskOutcomeResult captures side effects produced by a done or failed outcome.
@@ -142,6 +147,7 @@ func ApplyTerminalTaskOutcome(ctx context.Context, services TaskOutcomeApplyServ
 		updatedTask.LeaseUntil = nil
 		result.Task = updatedTask
 	}
+	emitTerminalTaskOutcomeEvent(ctx, services, result, teammateID, req)
 	return result, nil
 }
 
@@ -196,6 +202,12 @@ func applyTerminalTaskOutcomeSQLite(
 	if services.Claims != nil {
 		_ = services.Claims.Release(ctx, taskID)
 	}
+	_ = store.appendTaskSignal(ctx, TaskSignal{
+		TeamID: req.Task.TeamID,
+		TaskID: taskID,
+		Kind:   TaskSignalTaskReleased,
+		Status: status,
+	})
 
 	result := &TerminalTaskOutcomeResult{
 		Outcome:   normalized,
@@ -214,7 +226,118 @@ func applyTerminalTaskOutcomeSQLite(
 		updatedTask.LeaseUntil = nil
 		result.Task = updatedTask
 	}
+	emitTerminalTaskOutcomeEvent(ctx, services, result, teammateID, req)
 	return result, nil
+}
+
+func emitTerminalTaskOutcomeEvent(ctx context.Context, services TaskOutcomeApplyServices, result *TerminalTaskOutcomeResult, teammateID string, req TerminalTaskOutcomeRequest) {
+	if result == nil || services.Store == nil {
+		return
+	}
+	teamID := strings.TrimSpace(result.Task.TeamID)
+	if teamID == "" {
+		teamID = strings.TrimSpace(req.Task.TeamID)
+	}
+	taskID := strings.TrimSpace(result.Task.ID)
+	if taskID == "" {
+		taskID = strings.TrimSpace(req.Task.ID)
+	}
+	if teamID == "" || taskID == "" {
+		return
+	}
+	eventType := "task.completed"
+	if result.Status == TaskStatusFailed {
+		eventType = "task.failed"
+	}
+	payload := map[string]interface{}{
+		"task_id": taskID,
+	}
+	if assignee := strings.TrimSpace(teammateID); assignee != "" {
+		payload["assignee"] = assignee
+	}
+	if summary := strings.TrimSpace(result.Summary); summary != "" {
+		payload["summary"] = summary
+	}
+	if result.ResultRef != nil && strings.TrimSpace(*result.ResultRef) != "" {
+		payload["result_ref"] = strings.TrimSpace(*result.ResultRef)
+	}
+	if traceID := strings.TrimSpace(req.TraceID); traceID != "" {
+		payload["trace_id"] = traceID
+	}
+	if errorText := strings.TrimSpace(req.Error); errorText != "" {
+		payload["error"] = truncateLine(errorText, 240)
+	}
+	if errorType := strings.TrimSpace(req.ErrorType); errorType != "" {
+		payload["error_type"] = errorType
+	}
+	for key, value := range req.ErrorMetadata {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, exists := payload[key]; exists {
+			continue
+		}
+		payload[key] = value
+	}
+	event := TeamEvent{
+		Type:      eventType,
+		TeamID:    teamID,
+		Payload:   payload,
+		Timestamp: time.Now().UTC(),
+	}
+	emitDedupedTerminalTaskEvent(ctx, services.Store, services.Events, event)
+}
+
+func emitDedupedTerminalTaskEvent(ctx context.Context, store Store, events *TeamEventBus, event TeamEvent) {
+	if store == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	event.Type = strings.TrimSpace(event.Type)
+	event.TeamID = strings.TrimSpace(event.TeamID)
+	if event.Type == "" || event.TeamID == "" {
+		return
+	}
+	taskID := teamEventPayloadString(event.Payload["task_id"])
+	if taskID == "" {
+		return
+	}
+	if existing, err := store.ListTeamEvents(ctx, TeamEventFilter{
+		TeamID:    event.TeamID,
+		EventType: event.Type,
+	}); err == nil {
+		for _, record := range existing {
+			if teamEventPayloadString(record.Payload["task_id"]) == taskID {
+				return
+			}
+		}
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	if _, err := store.AppendTeamEvent(ctx, event); err != nil {
+		return
+	}
+	if events != nil {
+		events.Publish(event)
+	}
+}
+
+func teamEventPayloadString(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
 }
 
 // ApplyBlockedTaskOutcome applies blocked or handoff teammate outcomes using shared side effects.

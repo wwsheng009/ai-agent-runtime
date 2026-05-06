@@ -239,6 +239,8 @@ func TestApplyTerminalTaskOutcomeReleasesTaskAndSetsResultRef(t *testing.T) {
 	task, err := store.GetTask(ctx, taskID)
 	require.NoError(t, err)
 	require.NotNil(t, task)
+	startSeq, err := store.LastTaskSignalSeq(ctx, teamID)
+	require.NoError(t, err)
 
 	resultRef := "artifact://build-1"
 	result, err := ApplyTerminalTaskOutcome(ctx, TaskOutcomeApplyServices{
@@ -265,4 +267,87 @@ func TestApplyTerminalTaskOutcomeReleasesTaskAndSetsResultRef(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, mate)
 	assert.Equal(t, TeammateStateIdle, mate.State)
+
+	seq, err := store.LastTaskSignalSeq(ctx, teamID)
+	require.NoError(t, err)
+	assert.Equal(t, startSeq+1, seq)
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "task.completed", events[0].Type)
+	assert.Equal(t, taskID, events[0].Payload["task_id"])
+	assert.Equal(t, "mate-1", events[0].Payload["assignee"])
+	assert.Equal(t, "artifact published", events[0].Payload["summary"])
+	assert.Equal(t, "artifact://build-1", events[0].Payload["result_ref"])
+}
+
+func TestApplyTerminalTaskOutcomePublishesTerminalTaskEventOnce(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	events := NewTeamEventBus()
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "terminal task",
+		Status: TaskStatusRunning,
+	})
+	require.NoError(t, err)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+
+	var published []TeamEvent
+	events.Subscribe("", func(event TeamEvent) {
+		published = append(published, event)
+	})
+
+	_, err = ApplyTerminalTaskOutcome(ctx, TaskOutcomeApplyServices{
+		Store:  store,
+		Events: events,
+	}, TerminalTaskOutcomeRequest{
+		Task:          *task,
+		TeammateID:    "mate-1",
+		DefaultStatus: TaskOutcomeFailed,
+		Outcome: TaskOutcomeContract{
+			Summary: "preflight failed",
+		},
+		TraceID:   "trace-1",
+		Error:     "prompt preflight budget exceeded",
+		ErrorType: "prompt_preflight",
+		ErrorMetadata: map[string]interface{}{
+			"failure_reason_code": "prompt_still_exceeds_budget_after_compaction",
+		},
+	})
+	require.NoError(t, err)
+
+	updated, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	_, err = ApplyTerminalTaskOutcome(ctx, TaskOutcomeApplyServices{
+		Store:  store,
+		Events: events,
+	}, TerminalTaskOutcomeRequest{
+		Task:          *updated,
+		TeammateID:    "mate-1",
+		DefaultStatus: TaskOutcomeFailed,
+		Outcome: TaskOutcomeContract{
+			Summary: "duplicate failed",
+		},
+	})
+	require.NoError(t, err)
+
+	persisted, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	require.Len(t, persisted, 1)
+	assert.Equal(t, "task.failed", persisted[0].Type)
+	assert.Equal(t, taskID, persisted[0].Payload["task_id"])
+	assert.Equal(t, "mate-1", persisted[0].Payload["assignee"])
+	assert.Equal(t, "trace-1", persisted[0].Payload["trace_id"])
+	assert.Equal(t, "prompt_preflight", persisted[0].Payload["error_type"])
+	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", persisted[0].Payload["failure_reason_code"])
+	require.Len(t, published, 1)
+	assert.Equal(t, "task.failed", published[0].Type)
 }

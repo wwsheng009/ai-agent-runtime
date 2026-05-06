@@ -15,6 +15,21 @@ type SessionClient interface {
 	SubmitPrompt(ctx context.Context, sessionID, prompt string, runMeta *RunMeta) (*SessionResult, error)
 }
 
+// TaskTriggerClient dispatches a team task through the agent control surface.
+type TaskTriggerClient interface {
+	TriggerTask(ctx context.Context, request TaskTriggerRequest) (*SessionResult, error)
+}
+
+// TaskTriggerRequest describes a teammate task dispatch.
+type TaskTriggerRequest struct {
+	SessionID string
+	TeamID    string
+	AgentID   string
+	TaskID    string
+	Prompt    string
+	RunMeta   *RunMeta
+}
+
 // SessionResult captures the outcome of a session prompt.
 type SessionResult struct {
 	Success       bool
@@ -48,6 +63,7 @@ type TaskRunResult struct {
 // TeammateRunner drives task execution through existing sessions.
 type TeammateRunner struct {
 	Sessions          SessionClient
+	AgentControl      TaskTriggerClient
 	Mailbox           *MailboxService
 	Context           *ContextBuilder
 	ContextBudget     int
@@ -59,8 +75,8 @@ const teammateAuxiliaryReadTimeout = 1500 * time.Millisecond
 
 // StartTask submits a task prompt to the teammate's session and returns the result.
 func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate, task Task) (*TaskRunResult, error) {
-	if r == nil || r.Sessions == nil {
-		return nil, fmt.Errorf("teammate runner sessions are not configured")
+	if r == nil || (r.Sessions == nil && r.AgentControl == nil) {
+		return nil, fmt.Errorf("teammate runner agent control is not configured")
 	}
 	teamID := strings.TrimSpace(team.ID)
 	if teamID == "" {
@@ -114,13 +130,21 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 		cancel()
 	}
 	prompt := buildTaskPrompt(teamID, mate.Name, task, digest, teamContext)
-	result, err := r.Sessions.SubmitPrompt(ctx, mate.SessionID, prompt, &RunMeta{
+	runMeta := &RunMeta{
 		PermissionMode: "bypass_permissions",
 		Team: &TeamRunMeta{
 			TeamID:        teamID,
 			AgentID:       strings.TrimSpace(mate.ID),
 			CurrentTaskID: strings.TrimSpace(task.ID),
 		},
+	}
+	result, err := r.triggerTask(ctx, TaskTriggerRequest{
+		SessionID: strings.TrimSpace(mate.SessionID),
+		TeamID:    teamID,
+		AgentID:   strings.TrimSpace(mate.ID),
+		TaskID:    strings.TrimSpace(task.ID),
+		Prompt:    prompt,
+		RunMeta:   runMeta,
 	})
 	if err != nil {
 		run := buildTaskRunResult(result)
@@ -151,6 +175,16 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 	}
 	r.recoverStructuredTaskOutcome(ctx, strings.TrimSpace(task.ID), run)
 	return run, nil
+}
+
+func (r *TeammateRunner) triggerTask(ctx context.Context, request TaskTriggerRequest) (*SessionResult, error) {
+	if r != nil && r.AgentControl != nil {
+		return r.AgentControl.TriggerTask(ctx, request)
+	}
+	if r == nil || r.Sessions == nil {
+		return nil, fmt.Errorf("teammate runner agent control is not configured")
+	}
+	return r.Sessions.SubmitPrompt(ctx, request.SessionID, request.Prompt, request.RunMeta)
 }
 
 func (r *TeammateRunner) startHeartbeatLoop(ctx context.Context, teammateID string) func() {
