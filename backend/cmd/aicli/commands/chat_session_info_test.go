@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,8 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 func TestBuildChatSessionInfo_IncludesEndpointHostAndOperationalMetadata(t *testing.T) {
@@ -480,6 +483,112 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 	for _, expected := range expectedFragments {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestChatDebugAgentGraphLinesListsLocalAgents(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+
+	host := &localChatRuntimeHost{
+		SessionStore: manager.GetStorage(),
+		SessionUser:  userID,
+		BaseSession: &ChatSession{
+			RuntimeSession: rootSession,
+			SessionUserID:  userID,
+		},
+	}
+	host.ActorRegistry = newLocalActorRegistry(host)
+	session := &ChatSession{
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+
+	worker := runtimechat.NewSession(userID)
+	worker.ID = "debug-worker"
+	worker.SetContext(toolbroker.AgentSessionContextParentSessionID, rootSession.ID)
+	worker.SetContext(toolbroker.AgentSessionContextRootSessionID, rootSession.ID)
+	worker.SetContext(toolbroker.AgentSessionContextPath, "/root/debug-worker")
+	worker.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	worker.SetContext(toolbroker.AgentSessionContextAgentType, "worker")
+	if err := manager.GetStorage().Save(context.Background(), worker); err != nil {
+		t.Fatalf("save worker: %v", err)
+	}
+
+	lines := chatDebugAgentGraphLines(session)
+	output := strings.Join(lines, "\n")
+	for _, expected := range []string{
+		"count=1",
+		"/root/debug-worker",
+		"status=idle",
+		"session=debug-worker",
+		"parent=" + rootSession.ID,
+		"depth=1",
+		"type=worker",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected agent graph to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestChatDebugMailboxLinesListsPendingTeamMessages(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	const teamID = "debug-mailbox-team"
+	if _, err := store.CreateTeam(context.Background(), team.Team{
+		ID:            teamID,
+		LeadSessionID: "debug-root",
+		Status:        team.TeamStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	taskID := "task-1"
+	messageID, err := store.InsertMail(context.Background(), team.MailMessage{
+		TeamID:    teamID,
+		FromAgent: "worker",
+		ToAgent:   "lead",
+		TaskID:    &taskID,
+		Kind:      "progress",
+		Body:      "Started task and waiting for review.",
+	})
+	if err != nil {
+		t.Fatalf("InsertMail: %v", err)
+	}
+
+	session := &ChatSession{
+		ActiveTeam:       &chatTeamBinding{TeamID: teamID, AgentID: "lead"},
+		LocalRuntimeHost: &localChatRuntimeHost{TeamStore: store},
+	}
+	lines := chatDebugMailboxLines(session)
+	output := strings.Join(lines, "\n")
+	for _, expected := range []string{
+		"team=" + teamID,
+		"agent=lead",
+		"unread=1",
+		messageID,
+		"kind=progress",
+		"from=worker",
+		"to=lead",
+		"task=task-1",
+		"body=Started task and waiting for review.",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected mailbox debug to contain %q, got:\n%s", expected, output)
 		}
 	}
 }

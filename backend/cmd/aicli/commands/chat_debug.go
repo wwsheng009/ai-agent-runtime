@@ -1,8 +1,12 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 func printChatDebugInfo(session *ChatSession) {
@@ -69,6 +73,115 @@ func printChatDebugInfo(session *ChatSession) {
 	} else {
 		printChatSessionMetaRow("Surface:", "<none>")
 	}
+	printChatDebugAgentGraph(session)
+	printChatDebugMailbox(session)
+}
+
+func printChatDebugAgentGraph(session *ChatSession) {
+	fmt.Println("Agent Graph:")
+	for _, line := range chatDebugAgentGraphLines(session) {
+		fmt.Println(line)
+	}
+}
+
+func chatDebugAgentGraphLines(session *ChatSession) []string {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.ActorRegistry == nil {
+		return []string{"  <none>"}
+	}
+	parentSessionID := ""
+	if session.RuntimeSession != nil {
+		parentSessionID = strings.TrimSpace(session.RuntimeSession.ID)
+	}
+	list, err := session.LocalRuntimeHost.ActorRegistry.List(context.Background(), parentSessionID, toolbroker.ListAgentsArgs{IncludeClosed: true})
+	if err != nil {
+		return []string{"  <error: " + err.Error() + ">"}
+	}
+	if list == nil || len(list.Agents) == 0 {
+		return []string{"  <none>"}
+	}
+	lines := make([]string, 0, len(list.Agents)+1)
+	lines = append(lines, fmt.Sprintf("  count=%d", list.Count))
+	for _, agent := range list.Agents {
+		path := firstNonEmptyChatValue(agent.Path, agent.SessionID, agent.ID)
+		status := firstNonEmptyChatValue(agent.Status, "unknown")
+		sessionID := firstNonEmptyChatValue(agent.SessionID, agent.ID)
+		parts := []string{fmt.Sprintf("  %s status=%s session=%s", path, status, sessionID)}
+		if agent.SessionState != "" {
+			parts = append(parts, "state="+agent.SessionState)
+		}
+		if agent.ParentSessionID != "" {
+			parts = append(parts, "parent="+agent.ParentSessionID)
+		}
+		if agent.Depth > 0 {
+			parts = append(parts, fmt.Sprintf("depth=%d", agent.Depth))
+		}
+		if agent.AgentType != "" {
+			parts = append(parts, "type="+agent.AgentType)
+		}
+		if agent.PendingApproval {
+			parts = append(parts, "approval=pending")
+		}
+		if agent.PendingQuestion {
+			parts = append(parts, "question=pending")
+		}
+		if agent.PendingToolName != "" {
+			parts = append(parts, "tool="+agent.PendingToolName)
+		}
+		lines = append(lines, strings.Join(parts, " "))
+	}
+	return lines
+}
+
+func printChatDebugMailbox(session *ChatSession) {
+	fmt.Println("Mailbox Pending:")
+	for _, line := range chatDebugMailboxLines(session) {
+		fmt.Println(line)
+	}
+}
+
+func chatDebugMailboxLines(session *ChatSession) []string {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil || session.ActiveTeam == nil {
+		return []string{"  <none>"}
+	}
+	teamID := strings.TrimSpace(session.ActiveTeam.TeamID)
+	if teamID == "" {
+		return []string{"  <none>"}
+	}
+	agentID := firstNonEmptyChatValue(session.ActiveTeam.AgentID, "lead")
+	messages, err := session.LocalRuntimeHost.TeamStore.ListMail(context.Background(), team.MailFilter{
+		TeamID:           teamID,
+		ToAgent:          agentID,
+		UnreadOnly:       true,
+		IncludeBroadcast: true,
+		Limit:            5,
+	})
+	if err != nil {
+		return []string{"  <error: " + err.Error() + ">"}
+	}
+	if len(messages) == 0 {
+		return []string{fmt.Sprintf("  team=%s agent=%s unread=0", teamID, agentID)}
+	}
+	lines := []string{fmt.Sprintf("  team=%s agent=%s unread=%d shown=%d", teamID, agentID, len(messages), len(messages))}
+	for _, message := range messages {
+		parts := []string{fmt.Sprintf("  - %s", firstNonEmptyChatValue(message.ID, "<no-id>"))}
+		if message.Kind != "" {
+			parts = append(parts, "kind="+strings.TrimSpace(message.Kind))
+		}
+		if message.FromAgent != "" {
+			parts = append(parts, "from="+strings.TrimSpace(message.FromAgent))
+		}
+		if message.ToAgent != "" {
+			parts = append(parts, "to="+strings.TrimSpace(message.ToAgent))
+		}
+		if message.TaskID != nil && strings.TrimSpace(*message.TaskID) != "" {
+			parts = append(parts, "task="+strings.TrimSpace(*message.TaskID))
+		}
+		if body := truncateChatRuntimeText(message.Body, 120); body != "" {
+			parts = append(parts, "body="+body)
+		}
+		lines = append(lines, strings.Join(parts, " "))
+	}
+	return lines
 }
 
 func chatDebugSessionLabel(session *ChatSession) string {
