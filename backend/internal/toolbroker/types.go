@@ -245,13 +245,16 @@ type SendAgentInputArgs struct {
 	Interrupt *bool  `json:"interrupt,omitempty"`
 }
 
-// WaitAgentArgs waits for a child agent to reach an idle or blocked state.
+// WaitAgentArgs waits for child agent status, or for parent mailbox events
+// when MailboxOnly is true.
 type WaitAgentArgs struct {
-	ID         string   `json:"id,omitempty"`
-	SessionID  string   `json:"session_id,omitempty"`
-	IDs        []string `json:"ids,omitempty"`
-	SessionIDs []string `json:"session_ids,omitempty"`
-	TimeoutMs  int      `json:"timeout_ms,omitempty"`
+	ID          string   `json:"id,omitempty"`
+	SessionID   string   `json:"session_id,omitempty"`
+	IDs         []string `json:"ids,omitempty"`
+	SessionIDs  []string `json:"session_ids,omitempty"`
+	AfterSeq    int64    `json:"after_seq,omitempty"`
+	TimeoutMs   int      `json:"timeout_ms,omitempty"`
+	MailboxOnly bool     `json:"mailbox_only,omitempty"`
 }
 
 // ListAgentsArgs lists lightweight child-agent sessions under a parent/root.
@@ -297,12 +300,15 @@ type AgentStatusResult struct {
 	ClosedSessionIDs   []string `json:"closed_session_ids,omitempty"`
 }
 
-// AgentWaitResult reports the outcome of waiting on one or more child agent sessions.
+// AgentWaitResult reports the outcome of child-status or mailbox-event wait.
 type AgentWaitResult struct {
 	Agent            *AgentStatusResult  `json:"agent,omitempty"`
 	Agents           []AgentStatusResult `json:"agents,omitempty"`
+	Event            *AgentEventItem     `json:"event,omitempty"`
+	Events           []AgentEventItem    `json:"events,omitempty"`
 	MatchedID        string              `json:"matched_id,omitempty"`
 	MatchedSessionID string              `json:"matched_session_id,omitempty"`
+	LatestSeq        int64               `json:"latest_seq,omitempty"`
 	TimedOut         bool                `json:"timed_out,omitempty"`
 	ReadyCount       int                 `json:"ready_count,omitempty"`
 	PendingCount     int                 `json:"pending_count,omitempty"`
@@ -322,13 +328,15 @@ type AgentMessageResult struct {
 	Status          *AgentStatusResult `json:"status,omitempty"`
 }
 
-// ReadAgentEventsArgs reads child-agent runtime events from the session event store.
+// ReadAgentEventsArgs reads child-agent runtime events, or parent mailbox/collab
+// events when MailboxOnly is true.
 type ReadAgentEventsArgs struct {
-	ID        string `json:"id,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	AfterSeq  int64  `json:"after_seq,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
-	WaitMs    int    `json:"wait_ms,omitempty"`
+	ID          string `json:"id,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	AfterSeq    int64  `json:"after_seq,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+	WaitMs      int    `json:"wait_ms,omitempty"`
+	MailboxOnly bool   `json:"mailbox_only,omitempty"`
 }
 
 // AgentEventItem is a lightweight runtime event view for child-agent sessions.
@@ -343,7 +351,7 @@ type AgentEventItem struct {
 	Payload   map[string]interface{} `json:"payload,omitempty"`
 }
 
-// AgentEventsResult returns recent runtime events for a child agent session.
+// AgentEventsResult returns recent child runtime or parent mailbox/collab events.
 type AgentEventsResult struct {
 	SessionID string           `json:"session_id"`
 	Events    []AgentEventItem `json:"events,omitempty"`

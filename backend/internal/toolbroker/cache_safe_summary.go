@@ -190,6 +190,21 @@ func agentWaitCacheSafeSummary(result *AgentWaitResult) string {
 	if result.TimedOut {
 		lines = append(lines, "Wait timed out before a ready agent was found.")
 	}
+	if result.Event != nil {
+		lines[0] = fmt.Sprintf("Waited on parent mailbox. Events: %d.", len(result.Events))
+		lines = append(lines, fmt.Sprintf("Event: %s", result.Event.Type))
+		if result.LatestSeq > 0 {
+			lines = append(lines, fmt.Sprintf("Latest seq: %d.", result.LatestSeq))
+		}
+		if result.Event.SessionID != "" {
+			lines = append(lines, "Session: "+result.Event.SessionID)
+		}
+		if body, ok := result.Event.Payload["body"].(string); ok {
+			if preview := truncateCacheSafeSummary(body, 180); preview != "" {
+				lines = append(lines, "Message: "+preview)
+			}
+		}
+	}
 	if result.Agent != nil {
 		lines = append(lines, agentStatusCacheSafeSummary(result.Agent))
 	}
@@ -239,8 +254,15 @@ func agentEventsCacheSafeSummary(result *AgentEventsResult) string {
 	if result == nil {
 		return ""
 	}
+	subject := "child agent"
+	for _, event := range result.Events {
+		if isCollaborationEventType(event.Type) {
+			subject = "parent mailbox"
+			break
+		}
+	}
 	lines := []string{
-		fmt.Sprintf("Read %d events from child agent %s.", result.Count, firstNonEmptyString(strings.TrimSpace(result.SessionID), "child_agent")),
+		fmt.Sprintf("Read %d events from %s %s.", result.Count, subject, firstNonEmptyString(strings.TrimSpace(result.SessionID), "session")),
 	}
 	if result.TimedOut {
 		lines = append(lines, "Read timed out while waiting for new events.")
@@ -267,6 +289,15 @@ func agentEventsCacheSafeSummary(result *AgentEventsResult) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func isCollaborationEventType(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case "mailbox_received", "subagent.completed", "team.completed", "team.summary":
+		return true
+	default:
+		return false
+	}
 }
 
 func truncateCacheSafeSummary(text string, maxLen int) string {

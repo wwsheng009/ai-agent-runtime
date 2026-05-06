@@ -32,6 +32,13 @@ func valueOrZeroWaitReadyCount(result *AgentWaitResult) int {
 	return result.ReadyCount
 }
 
+func valueOrZeroWaitSeq(result *AgentWaitResult) int64 {
+	if result == nil {
+		return 0
+	}
+	return result.LatestSeq
+}
+
 func valueOrZeroAgentListCount(result *AgentListResult) int {
 	if result == nil {
 		return 0

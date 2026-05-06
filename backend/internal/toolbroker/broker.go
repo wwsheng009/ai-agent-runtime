@@ -49,6 +49,7 @@ type Broker struct {
 	TeamClaims           *team.PathClaimManager
 	TeamPlanner          *team.LeadPlanner
 	TeamDispatcher       TeamMailboxDispatcher
+	TeamEvents           *team.TeamEventBus
 	TeamLifecycleChanged func()
 }
 
@@ -233,7 +234,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for a spawn_agent child session to become idle or blocked. Runtime events wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
+				Description: "Wait for collaboration progress. With id/ids, waits for spawn_agent child sessions to become idle or blocked. Without id, waits for the current parent session mailbox/collab event. Session event-store watchers wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -241,17 +242,18 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"session_id":  map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional list of child agent session ids or paths. Returns when the first one becomes ready."},
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
+						"after_seq":   map[string]interface{}{"type": "integer", "description": "When no id is provided, wait only for parent mailbox/collab events after this session event sequence."},
 						"timeout_ms":  map[string]interface{}{"type": "integer", "description": "Optional wait timeout in milliseconds."},
 					},
 				},
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read recent runtime events for a spawn_agent child session and optionally wait for new events. Do not use this for spawn_team teammate ids such as member-1.",
+				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker. Omit to read parent mailbox/collab events."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
 						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
@@ -371,11 +373,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read recent runtime events for a spawn_agent child session and optionally wait for new events. Do not use this for spawn_team teammate ids such as member-1.",
+				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker. Omit to read parent mailbox/collab events."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
 						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
@@ -1107,8 +1109,19 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		} else if value, ok := args["timeout_ms"].(int); ok {
 			request.TimeoutMs = value
 		}
+		if value, ok := args["after_seq"].(float64); ok {
+			request.AfterSeq = int64(value)
+		} else if value, ok := args["after_seq"].(int64); ok {
+			request.AfterSeq = value
+		} else if value, ok := args["after_seq"].(int); ok {
+			request.AfterSeq = int64(value)
+		}
 		request.IDs = coerceStringSlice(args["ids"])
 		request.SessionIDs = coerceStringSlice(args["session_ids"])
+		if strings.TrimSpace(request.ID) == "" && strings.TrimSpace(request.SessionID) == "" && len(request.IDs) == 0 && len(request.SessionIDs) == 0 {
+			request.SessionID = strings.TrimSpace(sessionID)
+			request.MailboxOnly = true
+		}
 		if handleAliases != nil {
 			if request.ID, _, err = handleAliases.Sessions.resolve(request.ID, agentSessionAliasPrefix, "agent session"); err != nil {
 				return nil, nil, err
@@ -1148,6 +1161,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":        waitResultStatus(result),
 			"timed_out":     result != nil && result.TimedOut,
 			"ready_count":   valueOrZeroWaitReadyCount(result),
+			"latest_seq":    valueOrZeroWaitSeq(result),
 		}, agentWaitCacheSafeSummary(aliasedResult)), nil
 
 	case ToolReadAgentEvents:
@@ -1178,6 +1192,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		} else if value, ok := args["wait_ms"].(int); ok {
 			request.WaitMs = value
 		}
+		noTarget := strings.TrimSpace(request.ID) == "" && strings.TrimSpace(request.SessionID) == ""
+		if noTarget {
+			request.SessionID = strings.TrimSpace(sessionID)
+			request.MailboxOnly = true
+		}
 		sessionRef := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID))
 		actualSessionID := sessionRef
 		if handleAliases != nil {
@@ -1186,13 +1205,18 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				return nil, nil, err
 			}
 		}
-		if err := b.rejectTeamTeammateAgentRefs(ctx, ToolReadAgentEvents, actualSessionID); err != nil {
-			return nil, nil, err
+		if !request.MailboxOnly {
+			if err := b.rejectTeamTeammateAgentRefs(ctx, ToolReadAgentEvents, actualSessionID); err != nil {
+				return nil, nil, err
+			}
 		}
 		if strings.TrimSpace(request.ID) != "" {
 			request.ID = actualSessionID
 		} else {
 			request.SessionID = actualSessionID
+		}
+		if strings.TrimSpace(actualSessionID) == "" {
+			return nil, nil, fmt.Errorf("id is required")
 		}
 		result, err := b.AgentSessions.ReadEvents(ctx, request)
 		if err != nil {
@@ -2321,6 +2345,7 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 		result, err := team.ApplyTerminalTaskOutcome(ctx, team.TaskOutcomeApplyServices{
 			Store:  b.TeamStore,
 			Claims: b.TeamClaims,
+			Events: b.TeamEvents,
 		}, team.TerminalTaskOutcomeRequest{
 			Task:            *task,
 			TeammateID:      agentID,
@@ -2338,6 +2363,7 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 			Store:               b.TeamStore,
 			Planner:             b.TeamPlanner,
 			Mailbox:             team.NewMailboxService(b.TeamStore),
+			Events:              b.TeamEvents,
 			IgnoreBusyTeammates: true,
 		}, teamID); err != nil {
 			if !team.IsSQLiteLockError(err) {

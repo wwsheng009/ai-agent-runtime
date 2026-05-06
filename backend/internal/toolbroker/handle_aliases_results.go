@@ -32,6 +32,18 @@ func aliasAgentWaitResult(result *AgentWaitResult, aliases *handleAliasRegistry)
 			}
 		}
 	}
+	if result.Event != nil {
+		event := *result.Event
+		event.SessionID = aliasSessionValue(event.SessionID, aliases)
+		cloned.Event = &event
+	}
+	if len(result.Events) > 0 {
+		cloned.Events = make([]AgentEventItem, len(result.Events))
+		copy(cloned.Events, result.Events)
+		for index := range cloned.Events {
+			cloned.Events[index].SessionID = aliasSessionValue(cloned.Events[index].SessionID, aliases)
+		}
+	}
 	cloned.MatchedID = aliasSessionValue(cloned.MatchedID, aliases)
 	cloned.MatchedSessionID = aliasSessionValue(cloned.MatchedSessionID, aliases)
 	return &cloned

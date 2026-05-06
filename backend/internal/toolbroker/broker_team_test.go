@@ -894,6 +894,62 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 	assert.Len(t, tasks, 2)
 }
 
+func TestBrokerReportTaskOutcomePersistsTaskEventBeforeTeamCompleted(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:     "team-order",
+		Status: team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+	assignee := "mate-1"
+	_, err = store.UpsertTeammate(ctx, team.Teammate{
+		ID:        assignee,
+		TeamID:    teamID,
+		SessionID: "mate-session",
+		State:     team.TeammateStateBusy,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		ID:       "task-order",
+		TeamID:   teamID,
+		Title:    "finish",
+		Status:   team.TaskStatusRunning,
+		Assignee: &assignee,
+	})
+	require.NoError(t, err)
+
+	broker := &Broker{
+		TeamStore:  store,
+		TeamEvents: team.NewTeamEventBus(),
+	}
+	runCtx := team.WithRunMeta(ctx, &team.RunMeta{
+		Team: &team.TeamRunMeta{
+			TeamID:        teamID,
+			AgentID:       assignee,
+			CurrentTaskID: taskID,
+		},
+	})
+
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolReportTaskOutcome, map[string]interface{}{
+		"task_status": "done",
+		"summary":     "finished",
+	})
+	require.NoError(t, err)
+	result, ok := raw.(ReportTaskOutcomeResult)
+	require.True(t, ok)
+	assert.Equal(t, string(team.TaskStatusDone), result.Status)
+
+	events, err := store.ListTeamEvents(ctx, team.TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, "task.completed", events[0].Type)
+	assert.Equal(t, "task-order", events[0].Payload["task_id"])
+	assert.Equal(t, "mate-1", events[0].Payload["assignee"])
+	assert.Equal(t, "team.completed", events[1].Type)
+	assert.Equal(t, "done", events[1].Payload["status"])
+}
+
 func TestBrokerExecuteSpawnTeamRehomesTerminalTeamAndTaskIDConflicts(t *testing.T) {
 	store := newTeamStore(t)
 	ctx := context.Background()

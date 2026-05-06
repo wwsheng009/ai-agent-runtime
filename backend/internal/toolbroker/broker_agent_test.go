@@ -136,6 +136,32 @@ func TestBroker_Definitions_ExposeAgentToolsWhenControllerConfigured(t *testing.
 	}
 }
 
+func TestBuildAgentMailboxMessageUsesAgentControlEnvelope(t *testing.T) {
+	message := BuildAgentMailboxMessage("parent-1", "child-1", " inspect docs ", false)
+	if message.Kind != AgentMailboxMessageKind || message.Body != "inspect docs" || message.FromAgent != "parent-1" || message.ToAgent != "child-1" {
+		t.Fatalf("unexpected agent mailbox message: %#v", message)
+	}
+	if message.Metadata["message_type"] != AgentMailboxMessageType ||
+		message.Metadata["control_action"] != AgentMailboxMessageAction ||
+		message.Metadata["workflow"] != AgentMailboxWorkflow ||
+		message.Metadata["mailbox_delivery"] != AgentMailboxDeliverySessionStore ||
+		message.Metadata["mailbox_kind"] != AgentMailboxMessageKind ||
+		message.Metadata["trigger_turn"] != false {
+		t.Fatalf("unexpected agent message envelope metadata: %#v", message.Metadata)
+	}
+
+	followup := BuildAgentMailboxMessage("parent-1", "child-1", " continue ", true)
+	if followup.Kind != AgentMailboxFollowupKind || followup.Body != "continue" {
+		t.Fatalf("unexpected followup mailbox message: %#v", followup)
+	}
+	if followup.Metadata["message_type"] != AgentMailboxFollowupMessageType ||
+		followup.Metadata["control_action"] != AgentMailboxFollowupAction ||
+		followup.Metadata["mailbox_kind"] != AgentMailboxFollowupKind ||
+		followup.Metadata["trigger_turn"] != true {
+		t.Fatalf("unexpected followup envelope metadata: %#v", followup.Metadata)
+	}
+}
+
 func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
@@ -282,6 +308,29 @@ func TestBroker_Execute_WaitAgentAcceptsBatchIDs(t *testing.T) {
 	}
 }
 
+func TestBroker_Execute_WaitAgentWithoutTargetWaitsParentMailbox(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	rawResult, meta, err := broker.Execute(context.Background(), "parent-session", ToolWaitAgent, map[string]interface{}{
+		"timeout_ms": 1000,
+		"after_seq":  12,
+	})
+	if err != nil {
+		t.Fatalf("wait_agent failed: %v", err)
+	}
+	if controller.lastWait.SessionID != "parent-session" || !controller.lastWait.MailboxOnly || controller.lastWait.AfterSeq != 12 {
+		t.Fatalf("unexpected mailbox wait args: %#v", controller.lastWait)
+	}
+	result, ok := rawResult.(*AgentWaitResult)
+	if !ok || result == nil {
+		t.Fatalf("expected AgentWaitResult, got %#v", rawResult)
+	}
+	if result.ReadyCount != 1 || meta["ready_count"] != 1 {
+		t.Fatalf("unexpected wait result/meta: %#v %#v", result, meta)
+	}
+}
+
 func TestBroker_Execute_FollowupTaskRejectsCurrentSession(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
@@ -320,6 +369,23 @@ func TestBroker_Execute_ReadAgentEventsDelegatesToController(t *testing.T) {
 	}
 	if meta["latest_seq"] != int64(7) && meta["latest_seq"] != 7 {
 		t.Fatalf("unexpected read_agent_events meta: %#v", meta)
+	}
+}
+
+func TestBroker_Execute_ReadAgentEventsWithoutTargetReadsParentMailbox(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolReadAgentEvents, map[string]interface{}{
+		"after_seq": float64(5),
+		"limit":     float64(10),
+		"wait_ms":   float64(250),
+	})
+	if err != nil {
+		t.Fatalf("read_agent_events failed: %v", err)
+	}
+	if controller.lastRead.SessionID != "parent-session" || !controller.lastRead.MailboxOnly || controller.lastRead.AfterSeq != 5 || controller.lastRead.Limit != 10 || controller.lastRead.WaitMs != 250 {
+		t.Fatalf("unexpected parent mailbox read args: %#v", controller.lastRead)
 	}
 }
 
