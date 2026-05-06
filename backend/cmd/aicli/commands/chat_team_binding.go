@@ -19,6 +19,7 @@ const (
 	chatRuntimeContextActiveTeamID   = "aicli_active_team_id"
 	chatRuntimeContextActiveAgentID  = "aicli_active_team_agent_id"
 	chatRuntimeContextActiveTaskID   = "aicli_active_task_id"
+	chatRuntimeContextSelectedAgent  = "aicli_selected_agent_target"
 )
 
 type chatTeamBinding struct {
@@ -46,6 +47,7 @@ func restoreChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat
 	if mode, err := parseChatPermissionMode(runtimeSessionContextString(runtimeSession, chatRuntimeContextPermissionMode), false); err == nil {
 		session.PermissionMode = mode
 	}
+	session.SelectedAgentTarget = runtimeSessionContextString(runtimeSession, chatRuntimeContextSelectedAgent)
 	teamID := runtimeSessionContextString(runtimeSession, chatRuntimeContextActiveTeamID)
 	if teamID == "" {
 		session.ActiveTeam = nil
@@ -169,6 +171,12 @@ func syncChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Se
 		runtimeSession.Metadata.Context = make(map[string]interface{})
 	}
 	runtimeSession.Metadata.Context[chatRuntimeContextPermissionMode] = string(session.PermissionMode)
+	selectedAgentTarget := strings.TrimSpace(session.SelectedAgentTarget)
+	if selectedAgentTarget != "" {
+		runtimeSession.Metadata.Context[chatRuntimeContextSelectedAgent] = selectedAgentTarget
+	} else {
+		delete(runtimeSession.Metadata.Context, chatRuntimeContextSelectedAgent)
+	}
 	requestedModel := strings.TrimSpace(session.Model)
 	if requestedModel != "" {
 		runtimeSession.Metadata.Context[toolbroker.AgentSessionContextRequestedModel] = requestedModel

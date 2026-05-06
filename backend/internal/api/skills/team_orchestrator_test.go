@@ -50,6 +50,111 @@ func TestGetTeamOrchestratorEnrichesInjectedOrchestrator(t *testing.T) {
 	require.NotNil(t, orchestrator.LeadPlanner)
 }
 
+func TestSessionActorClientTriggerTaskPersistsDispatchEvents(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{
+		DSN: "file:skills-trigger-task-dispatch-events?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, err = store.CreateTeam(context.Background(), team.Team{ID: "team-1"})
+	require.NoError(t, err)
+
+	eventStore := chat.NewInMemoryRuntimeStore(16)
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetSessionManager(chat.NewSessionManager(chat.NewInMemoryStorage(), nil))
+	handler.sessionEventStore = eventStore
+	client := &sessionActorClient{
+		store:      store,
+		eventStore: eventStore,
+		eventBus:   handler.getRuntimeEventBus(),
+	}
+	result, err := client.TriggerTask(context.Background(), team.TaskTriggerRequest{
+		SessionID: "session-1",
+		TeamID:    "team-1",
+		AgentID:   "mate-1",
+		TaskID:    "task-1",
+		Prompt:    "inspect",
+		RunMeta: &team.RunMeta{
+			PermissionMode: "bypass_permissions",
+			Team: &team.TeamRunMeta{
+				TeamID:        "team-1",
+				AgentID:       "mate-1",
+				CurrentTaskID: "task-1",
+			},
+		},
+	})
+	require.Error(t, err)
+	require.Nil(t, result)
+
+	events, err := store.ListTeamEvents(context.Background(), team.TeamEventFilter{TeamID: "team-1"})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, team.TaskDispatchRequestedEvent, events[0].Type)
+	assert.Equal(t, team.TaskDispatchCompletedEvent, events[1].Type)
+	assert.Equal(t, "mate-1", events[1].Payload["assignee"])
+	assert.Equal(t, "session-1", events[1].Payload["session_id"])
+	assert.Equal(t, false, events[1].Payload["success"])
+	assert.Contains(t, events[1].Payload["error"], "session hub not configured")
+	agentEvents, err := eventStore.ListEvents(context.Background(), "session-1", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, agentEvents, 1)
+	assert.Equal(t, chat.EventMailboxReceived, agentEvents[0].Type)
+	assert.Equal(t, team.TaskAssignmentMailboxKind, agentEvents[0].Payload["kind"])
+	metadata, ok := agentEvents[0].Payload["metadata"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "task-1", metadata["task_id"])
+	assert.Equal(t, "team-1", metadata["team_id"])
+	assert.Equal(t, "session-1", metadata["target_session_id"])
+	assert.Equal(t, team.TaskAssignmentControlMessageType, metadata["message_type"])
+	assert.Equal(t, team.TaskAssignmentControlAction, metadata["control_action"])
+	assert.Equal(t, team.TaskAssignmentWorkflow, metadata["workflow"])
+	mailboxMessages, err := eventStore.ListMailbox(context.Background(), "session-1", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, mailboxMessages, 1)
+	assert.Equal(t, team.TaskAssignmentMailboxKind, mailboxMessages[0].Kind)
+	assert.Equal(t, int64(1), mailboxMessages[0].Seq)
+	assert.Equal(t, team.TaskAssignmentControlMessageType, mailboxMessages[0].Metadata["message_type"])
+}
+
+func TestHandlerDeliverTeamLifecycleMailboxPersistsToLeadSession(t *testing.T) {
+	ctx := context.Background()
+	store, err := team.NewSQLiteStore(&team.StoreConfig{
+		DSN: "file:skills-team-lifecycle-mailbox?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, err = store.CreateTeam(ctx, team.Team{
+		ID:            "team-1",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusDone,
+	})
+	require.NoError(t, err)
+
+	eventStore := chat.NewInMemoryRuntimeStore(16)
+	handler := &Handler{
+		teamStore:         store,
+		sessionEventStore: eventStore,
+		runtimeEventBus:   runtimeevents.NewBusWithRetention(16),
+	}
+	handler.deliverTeamLifecycleMailbox(ctx, team.TeamEvent{
+		Type:   "team.summary",
+		TeamID: "team-1",
+		Payload: map[string]interface{}{
+			"summary": "lead summary",
+			"status":  "done",
+		},
+	})
+
+	messages, err := eventStore.ListMailbox(ctx, "lead-session", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, team.TeamLifecycleMailboxKind, messages[0].Kind)
+	assert.Equal(t, "lead summary", messages[0].Body)
+	assert.Equal(t, "team.summary", messages[0].Metadata["event_type"])
+	assert.Equal(t, team.TeamLifecycleControlMessageType, messages[0].Metadata["message_type"])
+	assert.Equal(t, "done", messages[0].Metadata["status"])
+}
+
 func TestHandlerDispatchTeamMailboxMessageHandlesEmptyTargets(t *testing.T) {
 	store, err := team.NewSQLiteStore(&team.StoreConfig{
 		DSN: "file:skills-team-mail-dispatch-test?mode=memory&cache=shared",
@@ -72,6 +177,91 @@ func TestHandlerDispatchTeamMailboxMessageHandlesEmptyTargets(t *testing.T) {
 		Body:      "no session targets",
 	})
 	require.NoError(t, err)
+}
+
+func TestHandlerDispatchTeamMailboxMessagePersistsWithoutActor(t *testing.T) {
+	ctx := context.Background()
+	store, err := team.NewSQLiteStore(&team.StoreConfig{
+		DSN: "file:skills-team-mail-durable-dispatch-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:            "team-1",
+		LeadSessionID: "session-1",
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+	t.Cleanup(func() { handler.getSessionHub().StopAll() })
+	handler.SetSessionManager(sessionManager)
+	handler.teamStore = store
+	handler.sessionEventStore = chat.NewInMemoryRuntimeStore(16)
+	session := chat.NewSession("user-team-mail-durable")
+	session.ID = "session-1"
+	require.NoError(t, sessionManager.GetStorage().Save(ctx, session))
+	handler.getSessionHub().Stop("session-1")
+
+	err = handler.DispatchTeamMailboxMessage(ctx, team.MailMessage{
+		ID:        "mail-1",
+		TeamID:    teamID,
+		FromAgent: "planner",
+		ToAgent:   "lead",
+		Kind:      "progress",
+		Body:      "durable api team hello",
+	})
+	require.NoError(t, err)
+	if _, ok := handler.getSessionHub().Get("session-1"); ok {
+		t.Fatal("team mailbox dispatch should persist event without starting target actor")
+	}
+	events, err := handler.getSessionEventStore().ListEvents(ctx, "session-1", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, chat.EventMailboxReceived, events[0].Type)
+	assert.Equal(t, "progress", events[0].Payload["kind"])
+	assert.Equal(t, "durable api team hello", events[0].Payload["body"])
+}
+
+func TestHandlerDispatchTeamMailboxMessagePersistsWithoutSessionManager(t *testing.T) {
+	ctx := context.Background()
+	store, err := team.NewSQLiteStore(&team.StoreConfig{
+		DSN: "file:skills-team-mail-no-session-manager-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:            "team-1",
+		LeadSessionID: "session-1",
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+
+	eventStore := chat.NewInMemoryRuntimeStore(16)
+	handler := &Handler{
+		teamStore:         store,
+		sessionEventStore: eventStore,
+		runtimeEventBus:   runtimeevents.NewBusWithRetention(16),
+	}
+
+	err = handler.DispatchTeamMailboxMessage(ctx, team.MailMessage{
+		ID:        "mail-1",
+		TeamID:    teamID,
+		FromAgent: "planner",
+		ToAgent:   "lead",
+		Kind:      "progress",
+		Body:      "durable no hub",
+	})
+	require.NoError(t, err)
+	events, err := eventStore.ListEvents(ctx, "session-1", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, chat.EventMailboxReceived, events[0].Type)
+	assert.Equal(t, "durable no hub", events[0].Payload["body"])
 }
 
 func TestSyncTeamLifecycleLoopsEnrichesInjectedOrchestratorBeforeStartingLoops(t *testing.T) {

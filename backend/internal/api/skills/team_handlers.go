@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -133,6 +134,7 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 			if raw, ok := payload["trace_id"].(string); ok {
 				traceID = strings.TrimSpace(raw)
 			}
+			h.deliverTeamLifecycleMailbox(context.Background(), event)
 			h.getRuntimeEventBus().Publish(runtimeevents.Event{
 				Type:      normalizeTeamEventType(event.Type),
 				TraceID:   traceID,
@@ -153,11 +155,17 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 	}
 
 	if hub != nil {
-		sessionClient := &sessionActorClient{hub: hub}
+		sessionClient := &sessionActorClient{
+			hub:        hub,
+			store:      store,
+			eventStore: h.getSessionEventStore(),
+			eventBus:   h.getRuntimeEventBus(),
+		}
 		if orchestrator.Runner == nil {
 			orchestrator.Runner = &team.TeammateRunner{}
 		}
 		orchestrator.Runner.Sessions = sessionClient
+		orchestrator.Runner.AgentControl = sessionClient
 		if orchestrator.Runner.Mailbox == nil {
 			orchestrator.Runner.Mailbox = mailbox
 		}
@@ -174,6 +182,14 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 		}
 	}
 	return cloneTeamOrchestrator(orchestrator)
+}
+
+func (h *Handler) getTeamEvents() *team.TeamEventBus {
+	orchestrator := h.getTeamOrchestrator()
+	if orchestrator == nil {
+		return nil
+	}
+	return orchestrator.Events
 }
 
 func cloneTeamOrchestrator(orchestrator *team.Orchestrator) *team.Orchestrator {
@@ -196,7 +212,7 @@ func cloneTeamOrchestrator(orchestrator *team.Orchestrator) *team.Orchestrator {
 	return &cloned
 }
 
-// DispatchTeamMailboxMessage delivers mailbox notifications to active session actors.
+// DispatchTeamMailboxMessage delivers mailbox notifications to target sessions.
 func (h *Handler) DispatchTeamMailboxMessage(ctx context.Context, message team.MailMessage) error {
 	if h == nil {
 		return nil
@@ -205,8 +221,7 @@ func (h *Handler) DispatchTeamMailboxMessage(ctx context.Context, message team.M
 		return nil
 	}
 	store := h.getTeamStore()
-	hub := h.getSessionHub()
-	if store == nil || hub == nil {
+	if store == nil {
 		return nil
 	}
 	targets, err := h.resolveTeamMailboxSessionTargets(ctx, store, message)
@@ -217,13 +232,22 @@ func (h *Handler) DispatchTeamMailboxMessage(ctx context.Context, message team.M
 		return nil
 	}
 	var failures []string
+	eventStore := h.getSessionEventStore()
+	eventBus := h.getRuntimeEventBus()
+	var controller *sessionAgentController
+	if eventStore == nil {
+		controller = h.getAgentSessionController()
+	}
 	for _, sessionID := range targets {
-		actor, actorErr := hub.GetOrCreate(sessionID)
-		if actorErr != nil {
-			failures = append(failures, actorErr.Error())
-			continue
+		var fallback chat.MailboxActorFallback
+		if eventStore == nil {
+			if controller == nil {
+				failures = append(failures, "session controller not configured")
+				continue
+			}
+			fallback = controller.deliverMailboxToActor
 		}
-		if err := actor.DeliverMailboxMessage(ctx, message); err != nil {
+		if err := chat.DeliverMailboxEventFirst(ctx, eventStore, eventBus, fallback, sessionID, message); err != nil {
 			failures = append(failures, err.Error())
 		}
 	}
@@ -231,6 +255,38 @@ func (h *Handler) DispatchTeamMailboxMessage(ctx context.Context, message team.M
 		return nil
 	}
 	return fmt.Errorf("deliver mailbox message: %s", strings.Join(failures, "; "))
+}
+
+func (h *Handler) deliverTeamLifecycleMailbox(ctx context.Context, event team.TeamEvent) {
+	if h == nil {
+		return
+	}
+	switch strings.TrimSpace(event.Type) {
+	case "team.completed", "team.summary":
+	default:
+		return
+	}
+	sessionID := h.teamLifecycleMailboxSessionID(ctx, strings.TrimSpace(event.TeamID))
+	if sessionID == "" {
+		return
+	}
+	_ = chat.DeliverMailboxEventFirst(ctx, h.getSessionEventStore(), nil, nil, sessionID, team.BuildTeamLifecycleMailboxMessage(event))
+}
+
+func (h *Handler) teamLifecycleMailboxSessionID(ctx context.Context, teamID string) string {
+	teamID = strings.TrimSpace(teamID)
+	if h == nil || teamID == "" {
+		return ""
+	}
+	store := h.getTeamStore()
+	if store == nil {
+		return ""
+	}
+	record, err := store.GetTeam(ctx, teamID)
+	if err != nil || record == nil {
+		return ""
+	}
+	return strings.TrimSpace(record.LeadSessionID)
 }
 
 func (h *Handler) resolveTeamMailboxSessionTargets(ctx context.Context, store team.Store, message team.MailMessage) ([]string, error) {
@@ -2383,6 +2439,7 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 		result, err := team.ApplyTerminalTaskOutcome(r.Context(), team.TaskOutcomeApplyServices{
 			Store:  store,
 			Claims: h.getTeamClaimsManager(),
+			Events: h.getTeamEvents(),
 		}, team.TerminalTaskOutcomeRequest{
 			Task:          *current,
 			TeammateID:    req.TeammateID,
@@ -2406,6 +2463,7 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 			Store:   store,
 			Planner: planner,
 			Mailbox: team.NewMailboxService(store),
+			Events:  h.getTeamEvents(),
 		}, teamID); err != nil {
 			if team.IsSQLiteLockError(err) {
 				if lifecycle := h.teamLifecycleService(); lifecycle != nil {

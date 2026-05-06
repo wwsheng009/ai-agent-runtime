@@ -155,7 +155,7 @@ func (s *handlerTeamLifecycleService) ReplayStoredTerminalEvents(teamID string) 
 		return
 	}
 	for _, event := range events {
-		if event.Type != "team.completed" && event.Type != "team.summary" {
+		if !isReplayableTeamLifecycleEvent(event.Type) {
 			continue
 		}
 		payload := map[string]interface{}{}
@@ -171,6 +171,15 @@ func (s *handlerTeamLifecycleService) ReplayStoredTerminalEvents(teamID string) 
 			Payload:   payload,
 			Timestamp: event.Timestamp,
 		})
+	}
+}
+
+func isReplayableTeamLifecycleEvent(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case "task.completed", "task.failed", "team.completed", "team.summary":
+		return true
+	default:
+		return false
 	}
 }
 

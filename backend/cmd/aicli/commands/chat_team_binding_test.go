@@ -4,13 +4,13 @@ import (
 	"context"
 	"testing"
 
+	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/spf13/cobra"
 )
 
 func TestParseChatCommandOptions_YoloImpliesBypassPermissions(t *testing.T) {
@@ -72,6 +72,31 @@ func TestSyncRuntimeSessionFromChat_PersistsAmbientTeamBinding(t *testing.T) {
 	}
 	if got := runtimeSessionContextString(stored, chatRuntimeContextPermissionMode); got != string(runtimepolicy.ModeBypassPermissions) {
 		t.Fatalf("unexpected permission mode: %q", got)
+	}
+}
+
+func TestChatRuntimeContext_RoundTripsSelectedAgentTarget(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	session := &ChatSession{
+		PermissionMode:      runtimepolicy.ModeAcceptEdits,
+		SelectedAgentTarget: " /root/agent-1 ",
+	}
+
+	syncChatRuntimeContext(session, runtimeSession)
+	if got := runtimeSessionContextString(runtimeSession, chatRuntimeContextSelectedAgent); got != "/root/agent-1" {
+		t.Fatalf("unexpected selected agent target context: %q", got)
+	}
+
+	restored := &ChatSession{}
+	restoreChatRuntimeContext(restored, runtimeSession)
+	if restored.SelectedAgentTarget != "/root/agent-1" {
+		t.Fatalf("expected selected target to restore, got %q", restored.SelectedAgentTarget)
+	}
+
+	session.SelectedAgentTarget = ""
+	syncChatRuntimeContext(session, runtimeSession)
+	if got := runtimeSessionContextString(runtimeSession, chatRuntimeContextSelectedAgent); got != "" {
+		t.Fatalf("expected selected agent target context to be cleared, got %q", got)
 	}
 }
 

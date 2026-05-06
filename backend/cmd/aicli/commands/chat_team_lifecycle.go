@@ -70,10 +70,19 @@ func (c *localTeamLifecycleService) PublishStoredTerminalEvents(teamID string) {
 		return
 	}
 	for _, event := range events {
-		if event.Type != "team.completed" && event.Type != "team.summary" {
+		if !isReplayableTeamLifecycleEvent(event.Type) {
 			continue
 		}
 		c.Host.dispatchTeamLifecycleEvent(event.TeamEvent, false)
+	}
+}
+
+func isReplayableTeamLifecycleEvent(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case "task.completed", "task.failed", "team.completed", "team.summary":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -91,6 +100,7 @@ func (c *localTeamLifecycleService) WaitForTerminal(ctx context.Context, teamID 
 	for {
 		settled, err := c.RunSettled(ctx, teamID)
 		if err == nil && settled {
+			c.PublishStoredTerminalEvents(teamID)
 			return nil
 		}
 
