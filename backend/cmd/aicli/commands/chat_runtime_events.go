@@ -765,7 +765,13 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b.shouldSuppressLatePrimaryRunEvent(event) {
 		return
 	}
+	if isTeamLifecycleRuntimeEvent(event.Type) && strings.TrimSpace(event.SessionID) != "" && !b.isPrimarySessionEvent(event) {
+		return
+	}
 	if b.handleAssistantReasoning(event) {
+		return
+	}
+	if event.Type == runtimechat.EventAssistantReasoning || event.Type == "assistant.reasoning" {
 		return
 	}
 	if b.handleAssistantDelta(event) {
@@ -1521,6 +1527,11 @@ func (b *chatRuntimeEventBridge) isPrimarySessionEvent(event runtimeevents.Event
 	return strings.TrimSpace(event.SessionID) == strings.TrimSpace(b.session.RuntimeSession.ID)
 }
 
+func isTeamLifecycleRuntimeEvent(eventType string) bool {
+	eventType = strings.TrimSpace(eventType)
+	return strings.HasPrefix(eventType, "team.") || strings.HasPrefix(eventType, "task.")
+}
+
 func (b *chatRuntimeEventBridge) isTerminalTeam(teamID string) bool {
 	if b == nil || b.session == nil || b.session.LocalRuntimeHost == nil || b.session.LocalRuntimeHost.TeamStore == nil {
 		return false
@@ -1761,6 +1772,12 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		return chatRuntimeTimelineEvent{
 			Line:     fmt.Sprintf("[team] completed %s status=%s", firstNonEmptyChatValue(teamID, "?"), status),
 			DedupKey: fmt.Sprintf("team.completed:%s:%s", teamID, status),
+		}
+	case "team.interrupted":
+		status := firstNonEmptyChatValue(payloadStringValue(event.Payload["status"]), "paused")
+		return chatRuntimeTimelineEvent{
+			Line:     fmt.Sprintf("[team] interrupted %s status=%s", firstNonEmptyChatValue(teamID, "?"), status),
+			DedupKey: fmt.Sprintf("team.interrupted:%s:%s", teamID, status),
 		}
 	case "team.plan.failed", "team.plan.replan_failed", "team.summary.failed":
 		action := strings.TrimSpace(event.Type)

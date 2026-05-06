@@ -1087,6 +1087,42 @@ func TestChatRuntimeEvents_RendersAssistantMessageReasoningBeforeContent(t *test
 	}
 }
 
+func TestChatRuntimeEvents_IgnoresNonPrimaryReasoningEvents(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction.liveStreamFn = func() bool { return true }
+
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+	bridge.writeReasoningDelta = func(block *runtimetypes.ReasoningBlock) {
+		rendered = append(rendered, "delta:"+block.DisplayText())
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantReasoning,
+		SessionID: "child-session",
+		TraceID:   "trace-child",
+		Payload: map[string]interface{}{
+			"reasoning": map[string]interface{}{
+				"provider":   "nvidia",
+				"format":     "stream_delta",
+				"summary":    "child reasoning",
+				"streamable": true,
+			},
+		},
+	})
+
+	require.Empty(t, rendered)
+	require.False(t, bridge.hasRenderedReasoningDelta())
+	require.False(t, bridge.hasRenderedReasoningFinal())
+}
+
 func TestChatRuntimeEvents_CompletesFinalStreamableReasoningInsteadOfRestartingIt(t *testing.T) {
 	session := &ChatSession{
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},

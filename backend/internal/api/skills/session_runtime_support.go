@@ -4,6 +4,8 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,6 +94,42 @@ type sessionAgentController struct {
 	handler *Handler
 }
 
+type apiAgentForkMode int
+
+const (
+	apiAgentForkNone apiAgentForkMode = iota
+	apiAgentForkAll
+	apiAgentForkLastN
+)
+
+func apiAgentForkModeForText(forkTurns string) (apiAgentForkMode, int, error) {
+	forkTurns = strings.ToLower(strings.TrimSpace(forkTurns))
+	switch forkTurns {
+	case "":
+		return apiAgentForkNone, 0, nil
+	case "none":
+		return apiAgentForkNone, 0, nil
+	case "all":
+		return apiAgentForkAll, 0, nil
+	default:
+		n, err := strconv.Atoi(forkTurns)
+		if err != nil || n <= 0 {
+			return apiAgentForkNone, 0, fmt.Errorf("fork_turns must be none, all, or a positive integer")
+		}
+		return apiAgentForkLastN, n, nil
+	}
+}
+
+func resolveAPIAgentForkMode(args toolbroker.SpawnAgentArgs) (apiAgentForkMode, int, error) {
+	if strings.TrimSpace(args.ForkTurns) != "" {
+		return apiAgentForkModeForText(args.ForkTurns)
+	}
+	if args.ForkContext != nil && *args.ForkContext {
+		return apiAgentForkAll, 0, nil
+	}
+	return apiAgentForkNone, 0, nil
+}
+
 func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID string, args toolbroker.SpawnAgentArgs) (*toolbroker.AgentStatusResult, error) {
 	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
 		return nil, fmt.Errorf("session manager not configured")
@@ -109,6 +147,17 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 		} else if !stderrors.Is(err, chat.ErrSessionNotFound) && !strings.Contains(strings.ToLower(err.Error()), "not found") {
 			return nil, err
 		}
+	}
+	childDepth := apiAgentChildDepth(parentSession)
+	if err := c.enforceSpawnLimits(ctx, parentSession, parentSessionID, childDepth); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(args.ForkTurns) == "" && args.ForkContext == nil {
+		args.ForkTurns = strings.TrimSpace(c.agentsConfig().DefaultForkTurns)
+	}
+	forkMode, forkTurns, err := resolveAPIAgentForkMode(args)
+	if err != nil {
+		return nil, err
 	}
 	userID := "agent"
 	if parentSession != nil && strings.TrimSpace(parentSession.UserID) != "" {
@@ -135,14 +184,19 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 		childSession.ID = sessionID
 	}
 
-	forkContext := args.ForkContext != nil && *args.ForkContext
-	if forkContext && parentSession != nil {
+	if forkMode != apiAgentForkNone && parentSession != nil {
 		childSession = parentSession.Clone()
+		if forkMode == apiAgentForkLastN {
+			childSession.ReplaceHistory(parentSession.GetRecentMessages(forkTurns))
+		}
 		childSession.ID = sessionID
 		childSession.UserID = userID
 		childSession.UpdateState(chat.StateActive)
 	}
 	childSession.SetContext(toolbroker.AgentSessionContextParentSessionID, strings.TrimSpace(parentSessionID))
+	childSession.SetContext(toolbroker.AgentSessionContextRootSessionID, apiAgentRootSessionID(parentSession, parentSessionID))
+	childSession.SetContext(toolbroker.AgentSessionContextPath, apiAgentChildPath(parentSession, sessionID))
+	childSession.SetContext(toolbroker.AgentSessionContextDepth, childDepth)
 	if agentType := strings.TrimSpace(args.AgentType); agentType != "" {
 		childSession.SetContext(toolbroker.AgentSessionContextAgentType, agentType)
 	}
@@ -171,6 +225,124 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	result.Created = true
 	result.Queued = queued
 	return result, nil
+}
+
+func (c *sessionAgentController) List(ctx context.Context, parentSessionID string, args toolbroker.ListAgentsArgs) (*toolbroker.AgentListResult, error) {
+	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
+		return nil, fmt.Errorf("session manager not configured")
+	}
+	parentSessionID = firstNonEmptyString(strings.TrimSpace(args.ParentSessionID), strings.TrimSpace(parentSessionID))
+	sessions, err := c.listSessions(ctx, parentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]*chat.Session, len(sessions))
+	for _, session := range sessions {
+		if session != nil && strings.TrimSpace(session.ID) != "" {
+			byID[strings.TrimSpace(session.ID)] = session
+		}
+	}
+	rootSessionID := parentSessionID
+	if parent := byID[parentSessionID]; parent != nil {
+		rootSessionID = apiAgentRootSessionID(parent, parentSessionID)
+	}
+	pathPrefix := strings.TrimSpace(args.PathPrefix)
+	agents := make([]toolbroker.AgentStatusResult, 0)
+	for _, session := range sessions {
+		if session == nil || !isAPIAgentSession(session) {
+			continue
+		}
+		if !args.IncludeClosed && isClosedAPIAgentSession(session) {
+			continue
+		}
+		if rootSessionID != "" && apiAgentRootSessionID(session, "") != rootSessionID && !apiAgentHasAncestor(session, parentSessionID, byID) {
+			continue
+		}
+		path := apiAgentSessionPath(session)
+		if pathPrefix != "" && !strings.HasPrefix(path, pathPrefix) {
+			continue
+		}
+		snapshot, err := c.snapshot(ctx, strings.TrimSpace(session.ID))
+		if err != nil {
+			return nil, err
+		}
+		if snapshot != nil {
+			agents = append(agents, *snapshot)
+		}
+	}
+	sort.SliceStable(agents, func(i, j int) bool {
+		left := firstNonEmptyString(agents[i].Path, agents[i].SessionID, agents[i].ID)
+		right := firstNonEmptyString(agents[j].Path, agents[j].SessionID, agents[j].ID)
+		return left < right
+	})
+	return &toolbroker.AgentListResult{Agents: agents, Count: len(agents)}, nil
+}
+
+func (c *sessionAgentController) SendMessage(ctx context.Context, fromSessionID string, args toolbroker.AgentMessageArgs) (*toolbroker.AgentMessageResult, error) {
+	return c.deliverAgentMessage(ctx, fromSessionID, args, false)
+}
+
+func (c *sessionAgentController) FollowupTask(ctx context.Context, fromSessionID string, args toolbroker.AgentMessageArgs) (*toolbroker.AgentMessageResult, error) {
+	return c.deliverAgentMessage(ctx, fromSessionID, args, true)
+}
+
+func (c *sessionAgentController) deliverAgentMessage(ctx context.Context, fromSessionID string, args toolbroker.AgentMessageArgs, trigger bool) (*toolbroker.AgentMessageResult, error) {
+	if c == nil || c.handler == nil {
+		return nil, fmt.Errorf("handler not configured")
+	}
+	sessionID := firstNonEmptyString(strings.TrimSpace(args.Target), strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
+	if sessionID == "" {
+		return nil, fmt.Errorf("target is required")
+	}
+	message := strings.TrimSpace(args.Message)
+	if message == "" {
+		return nil, fmt.Errorf("message is required")
+	}
+	actor, err := c.handler.getSessionHub().GetOrCreate(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	delivered := false
+	triggered := false
+	if trigger && !apiAgentActorBusy(actor.State()) {
+		if err := actor.SubmitPromptAsync(ctx, message, nil); err != nil {
+			return nil, err
+		}
+		triggered = true
+	} else {
+		mail := team.MailMessage{
+			FromAgent: strings.TrimSpace(fromSessionID),
+			ToAgent:   sessionID,
+			Kind:      "agent_message",
+			Body:      message,
+			CreatedAt: time.Now().UTC(),
+			Metadata: map[string]interface{}{
+				"from_session_id":   strings.TrimSpace(fromSessionID),
+				"target_session_id": sessionID,
+				"trigger_turn":      trigger,
+			},
+		}
+		if trigger {
+			mail.Kind = "followup_task"
+		}
+		if err := actor.DeliverMailboxMessage(ctx, mail); err != nil {
+			return nil, err
+		}
+		delivered = true
+	}
+	status, err := c.snapshot(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if status != nil && triggered {
+		status.Queued = true
+	}
+	return &toolbroker.AgentMessageResult{
+		TargetSessionID: sessionID,
+		Delivered:       delivered || triggered,
+		Triggered:       triggered,
+		Status:          status,
+	}, nil
 }
 
 func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.SendAgentInputArgs) (*toolbroker.AgentStatusResult, error) {
@@ -226,7 +398,11 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 	}
 	timeout := time.Duration(args.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		defaultWaitMs := c.agentsConfig().DefaultWaitTimeoutMs
+		if defaultWaitMs <= 0 {
+			defaultWaitMs = int((30 * time.Second).Milliseconds())
+		}
+		timeout = time.Duration(defaultWaitMs) * time.Millisecond
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -369,6 +545,8 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 				result.ParentSessionID = strings.TrimSpace(text)
 			}
 		}
+		result.Path = apiAgentSessionPath(session)
+		result.Depth = apiAgentSessionDepth(session)
 		if value, ok := session.GetContext(toolbroker.AgentSessionContextAgentType); ok {
 			if text, ok := value.(string); ok {
 				result.AgentType = strings.TrimSpace(text)
@@ -430,9 +608,238 @@ func normalizeAgentWaitIDs(args toolbroker.WaitAgentArgs) []string {
 	return ordered
 }
 
+func (c *sessionAgentController) enforceSpawnLimits(ctx context.Context, parentSession *chat.Session, parentSessionID string, childDepth int) error {
+	limits := c.agentsConfig()
+	if limits.MaxDepth > 0 && childDepth > limits.MaxDepth {
+		return fmt.Errorf("agent spawn depth limit reached: max_depth=%d requested_depth=%d", limits.MaxDepth, childDepth)
+	}
+	if limits.MaxThreads <= 0 {
+		return nil
+	}
+	rootSessionID := apiAgentRootSessionID(parentSession, parentSessionID)
+	count, err := c.countAgentTree(ctx, rootSessionID)
+	if err != nil {
+		return err
+	}
+	if count >= limits.MaxThreads {
+		return fmt.Errorf("agent spawn thread limit reached: max_threads=%d active_children=%d", limits.MaxThreads, count)
+	}
+	return nil
+}
+
+func (c *sessionAgentController) agentsConfig() runtimecfg.AgentsConfig {
+	defaults := runtimecfg.DefaultRuntimeConfig().Agents
+	if c == nil || c.handler == nil || c.handler.runtimeConfig == nil {
+		return defaults
+	}
+	cfg := c.handler.runtimeConfig.Agents
+	if cfg.MaxThreads == 0 && cfg.MaxDepth == 0 && cfg.DefaultWaitTimeoutMs == 0 && strings.TrimSpace(cfg.DefaultForkTurns) == "" {
+		return defaults
+	}
+	return cfg
+}
+
+func (c *sessionAgentController) countAgentTree(ctx context.Context, rootSessionID string) (int, error) {
+	sessions, err := c.listSessions(ctx, rootSessionID)
+	if err != nil {
+		return 0, err
+	}
+	byID := make(map[string]*chat.Session, len(sessions))
+	for _, session := range sessions {
+		if session != nil && strings.TrimSpace(session.ID) != "" {
+			byID[strings.TrimSpace(session.ID)] = session
+		}
+	}
+	count := 0
+	for _, session := range sessions {
+		if session == nil || !isAPIAgentSession(session) || isClosedAPIAgentSession(session) {
+			continue
+		}
+		if rootSessionID == "" || apiAgentRootSessionID(session, "") == rootSessionID || apiAgentHasAncestor(session, rootSessionID, byID) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (c *sessionAgentController) listSessions(ctx context.Context, preferredSessionID string) ([]*chat.Session, error) {
+	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
+		return nil, nil
+	}
+	userID := "agent"
+	if strings.TrimSpace(preferredSessionID) != "" {
+		if session, err := c.handler.sessionManager.Get(ctx, strings.TrimSpace(preferredSessionID)); err == nil && session != nil && strings.TrimSpace(session.UserID) != "" {
+			userID = strings.TrimSpace(session.UserID)
+		}
+	}
+	return c.handler.sessionManager.List(ctx, userID)
+}
+
+func apiAgentChildDepth(parent *chat.Session) int {
+	if parent == nil {
+		return 1
+	}
+	return apiAgentSessionDepth(parent) + 1
+}
+
+func apiAgentSessionDepth(session *chat.Session) int {
+	if session == nil {
+		return 0
+	}
+	value, ok := session.GetContext(toolbroker.AgentSessionContextDepth)
+	if !ok {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case string:
+		depth, _ := strconv.Atoi(strings.TrimSpace(typed))
+		return depth
+	default:
+		return 0
+	}
+}
+
+func apiAgentRootSessionID(session *chat.Session, fallback string) string {
+	if session != nil {
+		if value, ok := session.GetContext(toolbroker.AgentSessionContextRootSessionID); ok {
+			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+				return strings.TrimSpace(text)
+			}
+		}
+	}
+	if fallback = strings.TrimSpace(fallback); fallback != "" {
+		return fallback
+	}
+	if session != nil {
+		return strings.TrimSpace(session.ID)
+	}
+	return ""
+}
+
+func apiAgentChildPath(parent *chat.Session, sessionID string) string {
+	parentPath := apiAgentSessionPath(parent)
+	if parentPath == "" {
+		parentPath = "/root"
+	}
+	return strings.TrimRight(parentPath, "/") + "/" + sanitizeAPIAgentPathSegment(sessionID)
+}
+
+func apiAgentSessionPath(session *chat.Session) string {
+	if session == nil {
+		return ""
+	}
+	if value, ok := session.GetContext(toolbroker.AgentSessionContextPath); ok {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	if isAPIAgentSession(session) {
+		return "/root/" + sanitizeAPIAgentPathSegment(session.ID)
+	}
+	return "/root"
+}
+
+func sanitizeAPIAgentPathSegment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "agent"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	text := strings.Trim(b.String(), "-")
+	if text == "" {
+		return "agent"
+	}
+	return text
+}
+
+func isAPIAgentSession(session *chat.Session) bool {
+	if session == nil {
+		return false
+	}
+	if value, ok := session.GetContext(toolbroker.AgentSessionContextParentSessionID); ok {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			return true
+		}
+	}
+	if value, ok := session.GetContext(toolbroker.AgentSessionContextPath); ok {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func isClosedAPIAgentSession(session *chat.Session) bool {
+	if session == nil {
+		return false
+	}
+	return session.State == chat.StateClosed || session.State == chat.StateArchived
+}
+
+func apiAgentHasAncestor(session *chat.Session, ancestorID string, byID map[string]*chat.Session) bool {
+	ancestorID = strings.TrimSpace(ancestorID)
+	if session == nil || ancestorID == "" {
+		return false
+	}
+	seen := map[string]struct{}{}
+	current := session
+	for current != nil {
+		parentID := ""
+		if value, ok := current.GetContext(toolbroker.AgentSessionContextParentSessionID); ok {
+			if text, ok := value.(string); ok {
+				parentID = strings.TrimSpace(text)
+			}
+		}
+		if parentID == "" {
+			return false
+		}
+		if strings.EqualFold(parentID, ancestorID) {
+			return true
+		}
+		if _, ok := seen[parentID]; ok {
+			return false
+		}
+		seen[parentID] = struct{}{}
+		current = byID[parentID]
+	}
+	return false
+}
+
 func isAgentWaitReady(status string) bool {
 	switch strings.TrimSpace(status) {
 	case string(chat.SessionIdle), string(chat.SessionWaitingApproval), string(chat.SessionWaitingInput), string(chat.SessionStopped), "missing":
+		return true
+	default:
+		return false
+	}
+}
+
+func apiAgentActorBusy(state *chat.RuntimeState) bool {
+	if state == nil {
+		return false
+	}
+	switch state.Status {
+	case chat.SessionRunning, chat.SessionRewinding, chat.SessionWaitingApproval, chat.SessionWaitingInput:
 		return true
 	default:
 		return false
