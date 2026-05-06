@@ -5,15 +5,16 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/google/uuid"
 )
 
 type handlerTeamLifecycleService struct {
 	handler     *Handler
 	loopMu      sync.Mutex
 	loopCancels map[string]context.CancelFunc
+	loopSignals map[string]chan struct{}
 }
 
 func newHandlerTeamLifecycleService(handler *Handler) *handlerTeamLifecycleService {
@@ -23,6 +24,7 @@ func newHandlerTeamLifecycleService(handler *Handler) *handlerTeamLifecycleServi
 	return &handlerTeamLifecycleService{
 		handler:     handler,
 		loopCancels: make(map[string]context.CancelFunc),
+		loopSignals: make(map[string]chan struct{}),
 	}
 }
 
@@ -73,19 +75,26 @@ func (s *handlerTeamLifecycleService) SyncLoops() {
 	if s.loopCancels == nil {
 		s.loopCancels = make(map[string]context.CancelFunc)
 	}
+	if s.loopSignals == nil {
+		s.loopSignals = make(map[string]chan struct{})
+	}
 	for teamID, cancel := range s.loopCancels {
 		if _, ok := desired[teamID]; !ok {
 			toStop = append(toStop, cancel)
 			delete(s.loopCancels, teamID)
+			delete(s.loopSignals, teamID)
 		}
 	}
 	for teamID := range desired {
 		if _, ok := s.loopCancels[teamID]; ok {
+			s.signalLoopLocked(teamID)
 			continue
 		}
 		runCtx, cancel := context.WithCancel(context.Background())
+		wake := make(chan struct{}, 1)
 		s.loopCancels[teamID] = cancel
-		go s.runLoop(runCtx, orchestrator, teamID)
+		s.loopSignals[teamID] = wake
+		go s.runLoop(runCtx, orchestrator, teamID, wake)
 	}
 	s.loopMu.Unlock()
 
@@ -94,14 +103,31 @@ func (s *handlerTeamLifecycleService) SyncLoops() {
 	}
 }
 
-func (s *handlerTeamLifecycleService) runLoop(ctx context.Context, orchestrator *team.Orchestrator, teamID string) {
-	err := orchestrator.Run(ctx, teamID)
+func (s *handlerTeamLifecycleService) signalLoopLocked(teamID string) {
+	if s == nil || s.loopSignals == nil {
+		return
+	}
+	wake := s.loopSignals[strings.TrimSpace(teamID)]
+	if wake == nil {
+		return
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *handlerTeamLifecycleService) runLoop(ctx context.Context, orchestrator *team.Orchestrator, teamID string, wake <-chan struct{}) {
+	err := orchestrator.RunWithWake(ctx, teamID, wake)
 	if err == nil && ctx.Err() == nil {
 		s.ReplayStoredTerminalEvents(teamID)
 	}
 	s.loopMu.Lock()
 	if s.loopCancels != nil {
 		delete(s.loopCancels, teamID)
+	}
+	if s.loopSignals != nil {
+		delete(s.loopSignals, teamID)
 	}
 	s.loopMu.Unlock()
 	if err == nil || ctx.Err() != nil || s.handler == nil {
@@ -159,6 +185,9 @@ func (s *handlerTeamLifecycleService) StopLoop(teamID string) {
 		cancel = s.loopCancels[teamID]
 		delete(s.loopCancels, teamID)
 	}
+	if s.loopSignals != nil {
+		delete(s.loopSignals, teamID)
+	}
 	s.loopMu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -176,6 +205,7 @@ func (s *handlerTeamLifecycleService) StopAllLoops() {
 			cancels = append(cancels, cancel)
 		}
 		delete(s.loopCancels, teamID)
+		delete(s.loopSignals, teamID)
 	}
 	s.loopMu.Unlock()
 	for _, cancel := range cancels {
@@ -202,4 +232,3 @@ func (s *handlerTeamLifecycleService) LoopCount() int {
 	defer s.loopMu.Unlock()
 	return len(s.loopCancels)
 }
-

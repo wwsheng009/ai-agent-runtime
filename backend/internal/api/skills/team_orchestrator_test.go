@@ -102,6 +102,77 @@ func TestSyncTeamLifecycleLoopsEnrichesInjectedOrchestratorBeforeStartingLoops(t
 	require.True(t, running, "expected team loop to be started for active team")
 }
 
+func TestSyncTeamLifecycleLoopsSignalsExistingLoop(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{
+		DSN: "file:skills-team-sync-loop-wake-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		Status: team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, team.Teammate{
+		ID:     "mate-a",
+		TeamID: teamID,
+		State:  team.TeammateStateIdle,
+	})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, team.Teammate{
+		ID:     "mate-b",
+		TeamID: teamID,
+		State:  team.TeammateStateBusy,
+	})
+	require.NoError(t, err)
+	assignee := "mate-b"
+	leaseUntil := time.Now().UTC().Add(time.Hour)
+	_, err = store.CreateTask(ctx, team.Task{
+		TeamID:     teamID,
+		Title:      "already running task",
+		Status:     team.TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+
+	handler := &Handler{
+		teamStore:        store,
+		teamOrchestrator: team.NewOrchestrator(store, nil, nil),
+	}
+	orchestrator := handler.getTeamOrchestrator()
+	require.NotNil(t, orchestrator)
+	orchestrator.TickInterval = time.Hour
+
+	handler.teamLifecycleService().SyncLoops()
+	t.Cleanup(func() { handler.teamLifecycleService().StopAllLoops() })
+	require.True(t, handler.teamLifecycleService().HasLoop(teamID))
+
+	wakeTaskID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "wake task",
+		Status: team.TaskStatusReady,
+	})
+	require.NoError(t, err)
+	handler.teamLifecycleService().SyncLoops()
+
+	if !assert.Eventually(t, func() bool {
+		task, loadErr := store.GetTask(ctx, wakeTaskID)
+		return loadErr == nil && task != nil && task.Status != team.TaskStatusReady
+	}, 2*time.Second, 20*time.Millisecond) {
+		task, _ := store.GetTask(ctx, wakeTaskID)
+		teamRecord, _ := store.GetTeam(ctx, teamID)
+		teammates, _ := store.ListTeammates(ctx, teamID)
+		t.Fatalf("wake task was not processed; loop=%v team=%+v task=%+v teammates=%+v",
+			handler.teamLifecycleService().HasLoop(teamID),
+			teamRecord,
+			task,
+			teammates,
+		)
+	}
+}
+
 func TestTerminalTeamSummaryFallbackPublishesStructuredRuntimeEvents(t *testing.T) {
 	store, err := team.NewSQLiteStore(&team.StoreConfig{
 		DSN: "file:skills-team-terminal-summary-runtime?mode=memory&cache=shared",

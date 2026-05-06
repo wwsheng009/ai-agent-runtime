@@ -25,6 +25,7 @@ type localTeamLifecycleService struct {
 	Host        *localChatRuntimeHost
 	loopMu      sync.Mutex
 	loopCancels map[string]context.CancelFunc
+	loopSignals map[string]chan struct{}
 }
 
 const terminalTeammateCleanupWaitTimeout = 10 * time.Second
@@ -36,6 +37,7 @@ func newLocalTeamLifecycleService(host *localChatRuntimeHost) *localTeamLifecycl
 	return &localTeamLifecycleService{
 		Host:        host,
 		loopCancels: make(map[string]context.CancelFunc),
+		loopSignals: make(map[string]chan struct{}),
 	}
 }
 
@@ -144,19 +146,26 @@ func (c *localTeamLifecycleService) SyncLoops() {
 	if c.loopCancels == nil {
 		c.loopCancels = make(map[string]context.CancelFunc)
 	}
+	if c.loopSignals == nil {
+		c.loopSignals = make(map[string]chan struct{})
+	}
 	for teamID, cancel := range c.loopCancels {
 		if _, ok := desired[teamID]; !ok {
 			toStop = append(toStop, cancel)
 			delete(c.loopCancels, teamID)
+			delete(c.loopSignals, teamID)
 		}
 	}
 	for teamID := range desired {
 		if _, ok := c.loopCancels[teamID]; ok {
+			c.signalTeamLoopLocked(teamID)
 			continue
 		}
 		runCtx, cancel := context.WithCancel(context.Background())
+		wake := make(chan struct{}, 1)
 		c.loopCancels[teamID] = cancel
-		go c.runTeamLoop(runCtx, teamID)
+		c.loopSignals[teamID] = wake
+		go c.runTeamLoop(runCtx, teamID, wake)
 	}
 	c.loopMu.Unlock()
 
@@ -176,6 +185,7 @@ func (c *localTeamLifecycleService) StopLoops() {
 			cancels = append(cancels, cancel)
 		}
 		delete(c.loopCancels, teamID)
+		delete(c.loopSignals, teamID)
 	}
 	c.loopMu.Unlock()
 	for _, cancel := range cancels {
@@ -193,6 +203,9 @@ func (c *localTeamLifecycleService) StopLoop(teamID string) {
 	if c.loopCancels != nil {
 		cancel = c.loopCancels[teamID]
 		delete(c.loopCancels, teamID)
+	}
+	if c.loopSignals != nil {
+		delete(c.loopSignals, teamID)
 	}
 	c.loopMu.Unlock()
 	if cancel != nil {
@@ -411,14 +424,31 @@ func (c *localTeamLifecycleService) hasTeamLoop(teamID string) bool {
 	return ok
 }
 
-func (c *localTeamLifecycleService) runTeamLoop(ctx context.Context, teamID string) {
+func (c *localTeamLifecycleService) signalTeamLoopLocked(teamID string) {
+	if c == nil || c.loopSignals == nil {
+		return
+	}
+	wake := c.loopSignals[strings.TrimSpace(teamID)]
+	if wake == nil {
+		return
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *localTeamLifecycleService) runTeamLoop(ctx context.Context, teamID string, wake <-chan struct{}) {
 	if c == nil || c.Host == nil || c.Host.Orchestrator == nil {
 		return
 	}
-	_ = c.Host.Orchestrator.Run(ctx, teamID)
+	_ = c.Host.Orchestrator.RunWithWake(ctx, teamID, wake)
 	c.loopMu.Lock()
 	if c.loopCancels != nil {
 		delete(c.loopCancels, teamID)
+	}
+	if c.loopSignals != nil {
+		delete(c.loopSignals, teamID)
 	}
 	c.loopMu.Unlock()
 }
