@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,9 +20,18 @@ import (
 // SQLiteStore persists team data in SQLite.
 type SQLiteStore struct {
 	db *sql.DB
+
+	mailboxWatchMu     sync.Mutex
+	nextMailboxWatchID int64
+	mailboxWatchers    map[int64]mailboxWatcher
 }
 
 const globalMailReceiptAgent = "*"
+
+type mailboxWatcher struct {
+	teamID string
+	ch     chan MailMessage
+}
 
 // NewSQLiteStore opens a SQLite-backed team store.
 func NewSQLiteStore(cfg *StoreConfig) (*SQLiteStore, error) {
@@ -935,6 +945,10 @@ func (s *SQLiteStore) InsertMail(ctx context.Context, message MailMessage) (stri
 	if s == nil || s.db == nil {
 		return "", fmt.Errorf("team store is not initialized")
 	}
+	message.TeamID = strings.TrimSpace(message.TeamID)
+	if message.TeamID == "" {
+		return "", fmt.Errorf("team id is required")
+	}
 	if message.ID == "" {
 		message.ID = "mail_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	}
@@ -945,14 +959,25 @@ func (s *SQLiteStore) InsertMail(ctx context.Context, message MailMessage) (stri
 	if err != nil {
 		return "", err
 	}
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO team_mailbox_messages (
-			id, team_id, from_agent, to_agent, task_id, kind, body, metadata_json, created_at, acked_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, message.ID, message.TeamID, message.FromAgent, message.ToAgent, nullableString(message.TaskID), message.Kind, message.Body, metadataJSON, formatTime(message.CreatedAt), nullableTime(message.AckedAt))
-	if err != nil {
-		return "", fmt.Errorf("insert mail: %w", err)
+	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		seq, err := nextMailboxSeqTx(ctx, tx, message.TeamID)
+		if err != nil {
+			return err
+		}
+		message.Seq = seq
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO team_mailbox_messages (
+				id, seq, team_id, from_agent, to_agent, task_id, kind, body, metadata_json, created_at, acked_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, message.ID, message.Seq, message.TeamID, message.FromAgent, message.ToAgent, nullableString(message.TaskID), message.Kind, message.Body, metadataJSON, formatTime(message.CreatedAt), nullableTime(message.AckedAt))
+		if err != nil {
+			return fmt.Errorf("insert mail: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return "", err
 	}
+	s.notifyMailboxWatchers(message)
 	return message.ID, nil
 }
 
@@ -963,7 +988,7 @@ func (s *SQLiteStore) ListMail(ctx context.Context, filter MailFilter) ([]MailMe
 	}
 	query := strings.Builder{}
 	query.WriteString(`
-		SELECT id, team_id, from_agent, to_agent, task_id, kind, body, metadata_json, created_at, acked_at
+		SELECT id, seq, team_id, from_agent, to_agent, task_id, kind, body, metadata_json, created_at, acked_at
 		FROM team_mailbox_messages
 	`)
 	clauses := make([]string, 0)
@@ -994,6 +1019,10 @@ func (s *SQLiteStore) ListMail(ctx context.Context, filter MailFilter) ([]MailMe
 		clauses = append(clauses, "kind = ?")
 		args = append(args, strings.TrimSpace(filter.Kind))
 	}
+	if filter.AfterSeq > 0 {
+		clauses = append(clauses, "seq > ?")
+		args = append(args, filter.AfterSeq)
+	}
 	if filter.UnreadOnly {
 		if toAgent := strings.TrimSpace(filter.ToAgent); toAgent != "" {
 			clauses = append(clauses, `
@@ -1018,7 +1047,11 @@ func (s *SQLiteStore) ListMail(ctx context.Context, filter MailFilter) ([]MailMe
 		query.WriteString(" WHERE ")
 		query.WriteString(strings.Join(clauses, " AND "))
 	}
-	query.WriteString(" ORDER BY created_at DESC")
+	if filter.AfterSeq > 0 {
+		query.WriteString(" ORDER BY seq ASC")
+	} else {
+		query.WriteString(" ORDER BY created_at DESC, seq DESC")
+	}
 	if filter.Limit > 0 {
 		query.WriteString(" LIMIT ?")
 		args = append(args, filter.Limit)
@@ -1038,7 +1071,7 @@ func (s *SQLiteStore) ListMail(ctx context.Context, filter MailFilter) ([]MailMe
 			ackedRaw    sql.NullString
 			taskIDRaw   sql.NullString
 		)
-		if err := rows.Scan(&msg.ID, &msg.TeamID, &msg.FromAgent, &msg.ToAgent, &taskIDRaw, &msg.Kind, &msg.Body, &metadataRaw, &createdRaw, &ackedRaw); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.Seq, &msg.TeamID, &msg.FromAgent, &msg.ToAgent, &taskIDRaw, &msg.Kind, &msg.Body, &metadataRaw, &createdRaw, &ackedRaw); err != nil {
 			return nil, fmt.Errorf("scan mail: %w", err)
 		}
 		if taskIDRaw.Valid {
@@ -1054,6 +1087,103 @@ func (s *SQLiteStore) ListMail(ctx context.Context, filter MailFilter) ([]MailMe
 		messages = append(messages, msg)
 	}
 	return messages, rows.Err()
+}
+
+// WatchMail registers an in-process notification channel for mailbox inserts.
+// Callers must still use ListMail with AfterSeq for durable catch-up; this
+// channel is only a low-latency wake source and intentionally drops duplicate
+// wake signals when the receiver is already behind.
+func (s *SQLiteStore) WatchMail(ctx context.Context, teamID string) (<-chan MailMessage, func()) {
+	ch := make(chan MailMessage, 1)
+	if s == nil {
+		return ch, func() {}
+	}
+	teamID = strings.TrimSpace(teamID)
+	s.mailboxWatchMu.Lock()
+	if s.mailboxWatchers == nil {
+		s.mailboxWatchers = make(map[int64]mailboxWatcher)
+	}
+	s.nextMailboxWatchID++
+	watchID := s.nextMailboxWatchID
+	s.mailboxWatchers[watchID] = mailboxWatcher{
+		teamID: teamID,
+		ch:     ch,
+	}
+	s.mailboxWatchMu.Unlock()
+
+	cancel := func() {
+		s.mailboxWatchMu.Lock()
+		if s.mailboxWatchers != nil {
+			delete(s.mailboxWatchers, watchID)
+		}
+		s.mailboxWatchMu.Unlock()
+	}
+	if ctx != nil {
+		done := ctx.Done()
+		if done == nil {
+			return ch, cancel
+		}
+		go func() {
+			<-done
+			cancel()
+		}()
+	}
+	return ch, cancel
+}
+
+// LastMailSeq returns the current durable mailbox high-water mark for a team.
+func (s *SQLiteStore) LastMailSeq(ctx context.Context, teamID string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("team store is not initialized")
+	}
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0)
+		FROM team_mailbox_messages
+		WHERE team_id = ?
+	`, strings.TrimSpace(teamID)).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("last mail sequence: %w", err)
+	}
+	return seq, nil
+}
+
+func nextMailboxSeqTx(ctx context.Context, tx *sql.Tx, teamID string) (int64, error) {
+	var seq int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) + 1
+		FROM team_mailbox_messages
+		WHERE team_id = ?
+	`, strings.TrimSpace(teamID)).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("next mail sequence: %w", err)
+	}
+	return seq, nil
+}
+
+func (s *SQLiteStore) notifyMailboxWatchers(message MailMessage) {
+	if s == nil {
+		return
+	}
+	teamID := strings.TrimSpace(message.TeamID)
+	s.mailboxWatchMu.Lock()
+	watchers := make([]mailboxWatcher, 0, len(s.mailboxWatchers))
+	for _, watcher := range s.mailboxWatchers {
+		if watcher.ch == nil {
+			continue
+		}
+		if watcher.teamID != "" && !strings.EqualFold(watcher.teamID, teamID) {
+			continue
+		}
+		watchers = append(watchers, watcher)
+	}
+	s.mailboxWatchMu.Unlock()
+	for _, watcher := range watchers {
+		select {
+		case watcher.ch <- message:
+		default:
+		}
+	}
 }
 
 // AckMail marks a mailbox message as acknowledged.
@@ -1506,6 +1636,26 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 				);
 				CREATE INDEX IF NOT EXISTS idx_mailbox_receipts_message
 				ON team_mailbox_receipts(team_id, message_id, acked_at);
+			`,
+		},
+		{
+			Version: 7,
+			Name:    "team_mailbox_sequence",
+			UpSQL: `
+				ALTER TABLE team_mailbox_messages ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+				WITH ordered AS (
+					SELECT id, ROW_NUMBER() OVER (PARTITION BY team_id ORDER BY created_at ASC, id ASC) AS rn
+					FROM team_mailbox_messages
+				)
+				UPDATE team_mailbox_messages
+				SET seq = (
+					SELECT rn FROM ordered WHERE ordered.id = team_mailbox_messages.id
+				)
+				WHERE seq = 0;
+				CREATE UNIQUE INDEX IF NOT EXISTS idx_mailbox_team_seq
+				ON team_mailbox_messages(team_id, seq);
+				CREATE INDEX IF NOT EXISTS idx_mailbox_team_after_seq
+				ON team_mailbox_messages(team_id, seq);
 			`,
 		},
 	}
