@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -130,6 +130,140 @@ func TestSQLiteRuntimeStoreAppendEventIsSerialized(t *testing.T) {
 		require.NotNil(t, event.Payload)
 		assert.Equal(t, int64(idx+1), event.Payload["seq"])
 	}
+}
+
+func TestInMemoryRuntimeStoreWatchEventsAndLastSeq(t *testing.T) {
+	store := NewInMemoryRuntimeStore(16)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watch, unwatch := store.WatchEvents(ctx, "session-watch")
+	defer unwatch()
+	seq, err := store.AppendEvent(ctx, runtimeevents.Event{
+		Type:      EventMailboxReceived,
+		SessionID: "session-watch",
+		Payload:   map[string]interface{}{"kind": "agent_message"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), seq)
+
+	select {
+	case event := <-watch:
+		assert.Equal(t, EventMailboxReceived, event.Type)
+		assert.Equal(t, "session-watch", event.SessionID)
+		assert.Equal(t, int64(1), event.Payload["seq"])
+	case <-time.After(time.Second):
+		t.Fatal("event watcher did not wake")
+	}
+	lastSeq, err := store.LastEventSeq(ctx, "session-watch")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), lastSeq)
+}
+
+func TestInMemoryRuntimeStoreAppendMailbox(t *testing.T) {
+	store := NewInMemoryRuntimeStore(16)
+	_, err := store.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      "assistant_message",
+		SessionID: "session-mailbox",
+		Payload:   map[string]interface{}{"content": "before mailbox"},
+	})
+	require.NoError(t, err)
+	event, seq, err := store.AppendMailbox(context.Background(), "session-mailbox", team.MailMessage{
+		FromAgent: "parent",
+		ToAgent:   "child",
+		Kind:      "agent_message",
+		Body:      "hello mailbox",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), seq)
+	assert.Equal(t, EventMailboxReceived, event.Type)
+	assert.Equal(t, int64(2), event.Payload["seq"])
+	assert.Equal(t, int64(1), event.Payload["mailbox_seq"])
+
+	events, err := store.ListEvents(context.Background(), "session-mailbox", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, EventMailboxReceived, events[1].Type)
+	assert.Equal(t, "hello mailbox", events[1].Payload["body"])
+	assert.Equal(t, int64(1), events[1].Payload["mailbox_seq"])
+}
+
+func TestSQLiteRuntimeStoreWatchEventsAndLastSeq(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-watch-events-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watch, unwatch := store.WatchEvents(ctx, "session-watch")
+	defer unwatch()
+	seq, err := store.AppendEvent(ctx, runtimeevents.Event{
+		Type:      EventMailboxReceived,
+		SessionID: "session-watch",
+		Payload:   map[string]interface{}{"kind": "agent_message"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), seq)
+
+	select {
+	case event := <-watch:
+		assert.Equal(t, EventMailboxReceived, event.Type)
+		assert.Equal(t, "session-watch", event.SessionID)
+		assert.Equal(t, int64(1), event.Payload["seq"])
+	case <-time.After(time.Second):
+		t.Fatal("event watcher did not wake")
+	}
+	lastSeq, err := store.LastEventSeq(ctx, "session-watch")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), lastSeq)
+}
+
+func TestSQLiteRuntimeStoreAppendMailbox(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-append-mailbox-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, err = store.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      "assistant_message",
+		SessionID: "session-mailbox",
+		Payload:   map[string]interface{}{"content": "before mailbox"},
+	})
+	require.NoError(t, err)
+	event, seq, err := store.AppendMailbox(context.Background(), "session-mailbox", team.MailMessage{
+		FromAgent: "parent",
+		ToAgent:   "child",
+		Kind:      "agent_message",
+		Body:      "hello sqlite mailbox",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), seq)
+	assert.Equal(t, EventMailboxReceived, event.Type)
+	assert.Equal(t, int64(2), event.Payload["seq"])
+	assert.Equal(t, int64(1), event.Payload["mailbox_seq"])
+
+	events, err := store.ListEvents(context.Background(), "session-mailbox", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, EventMailboxReceived, events[1].Type)
+	assert.Equal(t, "hello sqlite mailbox", events[1].Payload["body"])
+	assert.EqualValues(t, 1, events[1].Payload["mailbox_seq"])
+
+	var count int
+	var storedSeq int64
+	var storedBody string
+	err = store.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*), COALESCE(MAX(seq), 0), COALESCE(MAX(body), '')
+		FROM session_mailbox_messages
+		WHERE session_id = ?
+	`, "session-mailbox").Scan(&count, &storedSeq, &storedBody)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.Equal(t, int64(1), storedSeq)
+	assert.Equal(t, "hello sqlite mailbox", storedBody)
 }
 
 func TestSQLiteRuntimeStoreMigratesCurrentRunMetaColumn(t *testing.T) {
@@ -607,4 +741,91 @@ func TestSQLiteRuntimeStoreMigratesFrozenTurnToolsColumn(t *testing.T) {
 	assert.True(t, loaded.FrozenTurnToolsSet)
 	require.Len(t, loaded.FrozenTurnTools, 1)
 	assert.Equal(t, "spawn_team", loaded.FrozenTurnTools[0].Name)
+}
+
+func TestSQLiteRuntimeStoreMigratesSessionMailboxTable(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "runtime.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		);
+		INSERT INTO schema_migrations (version, name, applied_at) VALUES
+			(1, 'session_runtime_state', '2026-03-15T00:00:00Z'),
+			(2, 'session_events', '2026-03-15T00:00:00Z'),
+			(3, 'session_runtime_state_current_run_meta', '2026-03-15T00:00:00Z'),
+			(4, 'session_runtime_state_pending_tool', '2026-03-15T00:00:00Z'),
+			(5, 'session_tool_receipts', '2026-03-15T00:00:00Z'),
+			(6, 'session_tool_receipts_created_at_unix_nano', '2026-03-15T00:00:00Z'),
+			(7, 'session_runtime_state_ambient_run_meta', '2026-03-15T00:00:00Z'),
+			(8, 'session_runtime_state_frozen_turn_tools', '2026-03-15T00:00:00Z');
+
+		CREATE TABLE session_runtime_state (
+			session_id TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			current_turn_id TEXT,
+			current_checkpoint_id TEXT,
+			pending_approval_json BLOB,
+			pending_question_json BLOB,
+			head_offset INTEGER NOT NULL DEFAULT 0,
+			active_job_ids_json BLOB NOT NULL DEFAULT '[]',
+			updated_at TEXT NOT NULL,
+			current_run_meta_json BLOB,
+			pending_tool_json BLOB,
+			ambient_run_meta_json BLOB,
+			frozen_turn_tools_json BLOB
+		);
+
+		CREATE TABLE session_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			type TEXT NOT NULL,
+			trace_id TEXT,
+			agent_name TEXT,
+			tool_name TEXT,
+			payload_json BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			UNIQUE(session_id, seq)
+		);
+
+		CREATE TABLE session_tool_receipts (
+			session_id TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			tool_name TEXT,
+			message_json BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			created_at_unix_nano INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (session_id, tool_call_id)
+		);
+	`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: dbPath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	event, mailboxSeq, err := store.AppendMailbox(context.Background(), "session-mailbox-migration", team.MailMessage{
+		FromAgent: "parent",
+		ToAgent:   "child",
+		Kind:      "agent_message",
+		Body:      "after migration",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), mailboxSeq)
+	assert.Equal(t, int64(1), event.Payload["mailbox_seq"])
+
+	var count int
+	err = store.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*) FROM session_mailbox_messages WHERE session_id = ?
+	`, "session-mailbox-migration").Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
 }

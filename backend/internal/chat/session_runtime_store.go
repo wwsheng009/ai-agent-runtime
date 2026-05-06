@@ -42,6 +42,17 @@ type EventStore interface {
 	ListEvents(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]runtimeevents.Event, error)
 }
 
+// EventWatcherStore exposes in-process wake notifications for session events.
+// Callers must still use ListEvents with AfterSeq for durable catch-up.
+type EventWatcherStore interface {
+	WatchEvents(ctx context.Context, sessionID string) (<-chan runtimeevents.Event, func())
+}
+
+// EventSequenceStore exposes the durable high-water mark for session events.
+type EventSequenceStore interface {
+	LastEventSeq(ctx context.Context, sessionID string) (int64, error)
+}
+
 // RuntimeStoreConfig configures the sqlite-backed runtime store.
 type RuntimeStoreConfig struct {
 	Path string
@@ -50,17 +61,33 @@ type RuntimeStoreConfig struct {
 
 // InMemoryRuntimeStore stores state and events in memory.
 type InMemoryRuntimeStore struct {
-	mu        sync.RWMutex
-	states    map[string]*RuntimeState
-	events    map[string][]storedEvent
-	receipts  map[string]map[string]ToolExecutionReceipt
-	seq       map[string]int64
-	retention int
+	mu            sync.RWMutex
+	states        map[string]*RuntimeState
+	events        map[string][]storedEvent
+	mailbox       map[string][]team.MailMessage
+	receipts      map[string]map[string]ToolExecutionReceipt
+	seq           map[string]int64
+	mailboxSeq    map[string]int64
+	retention     int
+	watchMu       sync.Mutex
+	nextWatchID   int64
+	eventWatchers map[int64]eventWatcher
+	mailWatchers  map[int64]mailboxWatcher
 }
 
 type storedEvent struct {
 	Seq   int64
 	Event runtimeevents.Event
+}
+
+type eventWatcher struct {
+	sessionID string
+	ch        chan runtimeevents.Event
+}
+
+type mailboxWatcher struct {
+	sessionID string
+	ch        chan team.MailMessage
 }
 
 // NewInMemoryRuntimeStore creates a memory-backed runtime store.
@@ -69,11 +96,13 @@ func NewInMemoryRuntimeStore(retention int) *InMemoryRuntimeStore {
 		retention = 0
 	}
 	return &InMemoryRuntimeStore{
-		states:    make(map[string]*RuntimeState),
-		events:    make(map[string][]storedEvent),
-		receipts:  make(map[string]map[string]ToolExecutionReceipt),
-		seq:       make(map[string]int64),
-		retention: retention,
+		states:     make(map[string]*RuntimeState),
+		events:     make(map[string][]storedEvent),
+		mailbox:    make(map[string][]team.MailMessage),
+		receipts:   make(map[string]map[string]ToolExecutionReceipt),
+		seq:        make(map[string]int64),
+		mailboxSeq: make(map[string]int64),
+		retention:  retention,
 	}
 }
 
@@ -118,8 +147,10 @@ func (s *InMemoryRuntimeStore) DeleteState(ctx context.Context, sessionID string
 	defer s.mu.Unlock()
 	delete(s.states, sessionID)
 	delete(s.events, sessionID)
+	delete(s.mailbox, sessionID)
 	delete(s.receipts, sessionID)
 	delete(s.seq, sessionID)
+	delete(s.mailboxSeq, sessionID)
 	return nil
 }
 
@@ -232,7 +263,6 @@ func (s *InMemoryRuntimeStore) AppendEvent(ctx context.Context, event runtimeeve
 		event.Timestamp = time.Now().UTC()
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.seq[event.SessionID]++
 	seq := s.seq[event.SessionID]
 	entry := storedEvent{Seq: seq, Event: cloneRuntimeEvent(event)}
@@ -241,7 +271,46 @@ func (s *InMemoryRuntimeStore) AppendEvent(ctx context.Context, event runtimeeve
 		list = list[len(list)-s.retention:]
 	}
 	s.events[event.SessionID] = list
+	s.mu.Unlock()
+	s.notifyEventWatchers(seq, event)
 	return seq, nil
+}
+
+// AppendMailbox stores an agent mailbox message through the runtime store's
+// mailbox substrate.
+func (s *InMemoryRuntimeStore) AppendMailbox(ctx context.Context, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeevents.Event{}, 0, err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return runtimeevents.Event{}, 0, fmt.Errorf("session id is required")
+	}
+	if message.CreatedAt.IsZero() {
+		message.CreatedAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	s.mailboxSeq[sessionID]++
+	mailboxSeq := s.mailboxSeq[sessionID]
+	message.Seq = mailboxSeq
+	if strings.TrimSpace(message.ID) == "" {
+		message.ID = fmt.Sprintf("mailbox_%d", mailboxSeq)
+	}
+	s.mailbox[sessionID] = append(s.mailbox[sessionID], cloneTeamMailMessage(message))
+	s.mu.Unlock()
+	s.notifyMailboxWatchers(sessionID, message)
+
+	event := NewMailboxReceivedEvent(sessionID, message)
+	seq, err := s.AppendEvent(ctx, event)
+	if err != nil {
+		return event, mailboxSeq, err
+	}
+	if event.Payload == nil {
+		event.Payload = map[string]interface{}{}
+	}
+	event.Payload["seq"] = seq
+	event.Payload["mailbox_seq"] = mailboxSeq
+	return event, mailboxSeq, nil
 }
 
 // ListEvents returns events after a given sequence.
@@ -273,10 +342,220 @@ func (s *InMemoryRuntimeStore) ListEvents(ctx context.Context, sessionID string,
 	return result, nil
 }
 
+// ListMailbox returns mailbox messages after a given mailbox sequence.
+func (s *InMemoryRuntimeStore) ListMailbox(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]team.MailMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s == nil {
+		return nil, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := s.mailbox[sessionID]
+	if len(list) == 0 {
+		return nil, nil
+	}
+	result := make([]team.MailMessage, 0, len(list))
+	for _, message := range list {
+		if message.Seq <= afterSeq {
+			continue
+		}
+		result = append(result, cloneTeamMailMessage(message))
+		if limit > 0 && len(result) >= limit {
+			break
+		}
+	}
+	return result, nil
+}
+
+// WatchEvents registers an in-process notification channel for session events.
+func (s *InMemoryRuntimeStore) WatchEvents(ctx context.Context, sessionID string) (<-chan runtimeevents.Event, func()) {
+	ch := make(chan runtimeevents.Event, 1)
+	if s == nil {
+		return ch, func() {}
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	s.watchMu.Lock()
+	if s.eventWatchers == nil {
+		s.eventWatchers = make(map[int64]eventWatcher)
+	}
+	s.nextWatchID++
+	watchID := s.nextWatchID
+	s.eventWatchers[watchID] = eventWatcher{sessionID: sessionID, ch: ch}
+	s.watchMu.Unlock()
+
+	cancel := func() {
+		s.watchMu.Lock()
+		if s.eventWatchers != nil {
+			delete(s.eventWatchers, watchID)
+		}
+		s.watchMu.Unlock()
+	}
+	if ctx != nil {
+		done := ctx.Done()
+		if done != nil {
+			go func() {
+				<-done
+				cancel()
+			}()
+		}
+	}
+	return ch, cancel
+}
+
+// WatchMailbox registers an in-process notification channel for session mailbox rows.
+func (s *InMemoryRuntimeStore) WatchMailbox(ctx context.Context, sessionID string) (<-chan team.MailMessage, func()) {
+	ch := make(chan team.MailMessage, 1)
+	if s == nil {
+		return ch, func() {}
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	s.watchMu.Lock()
+	if s.mailWatchers == nil {
+		s.mailWatchers = make(map[int64]mailboxWatcher)
+	}
+	s.nextWatchID++
+	watchID := s.nextWatchID
+	s.mailWatchers[watchID] = mailboxWatcher{sessionID: sessionID, ch: ch}
+	s.watchMu.Unlock()
+
+	cancel := func() {
+		s.watchMu.Lock()
+		if s.mailWatchers != nil {
+			delete(s.mailWatchers, watchID)
+		}
+		s.watchMu.Unlock()
+	}
+	if ctx != nil {
+		done := ctx.Done()
+		if done != nil {
+			go func() {
+				<-done
+				cancel()
+			}()
+		}
+	}
+	return ch, cancel
+}
+
+// LastEventSeq returns the current durable event high-water mark for a session.
+func (s *InMemoryRuntimeStore) LastEventSeq(ctx context.Context, sessionID string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if s == nil {
+		return 0, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.seq[strings.TrimSpace(sessionID)], nil
+}
+
+// LastMailboxSeq returns the current durable mailbox high-water mark for a session.
+func (s *InMemoryRuntimeStore) LastMailboxSeq(ctx context.Context, sessionID string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if s == nil {
+		return 0, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.mailboxSeq[strings.TrimSpace(sessionID)], nil
+}
+
+func (s *InMemoryRuntimeStore) notifyEventWatchers(seq int64, event runtimeevents.Event) {
+	if s == nil {
+		return
+	}
+	sessionID := strings.TrimSpace(event.SessionID)
+	if sessionID == "" {
+		return
+	}
+	event = cloneRuntimeEvent(event)
+	if event.Payload == nil {
+		event.Payload = map[string]interface{}{}
+	}
+	event.Payload["seq"] = seq
+	s.watchMu.Lock()
+	watchers := make([]eventWatcher, 0, len(s.eventWatchers))
+	for _, watcher := range s.eventWatchers {
+		if watcher.ch == nil {
+			continue
+		}
+		if watcher.sessionID != "" && !strings.EqualFold(watcher.sessionID, sessionID) {
+			continue
+		}
+		watchers = append(watchers, watcher)
+	}
+	s.watchMu.Unlock()
+	for _, watcher := range watchers {
+		select {
+		case watcher.ch <- event:
+		default:
+		}
+	}
+}
+
+func (s *InMemoryRuntimeStore) notifyMailboxWatchers(sessionID string, message team.MailMessage) {
+	if s == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	message = cloneTeamMailMessage(message)
+	s.watchMu.Lock()
+	watchers := make([]mailboxWatcher, 0, len(s.mailWatchers))
+	for _, watcher := range s.mailWatchers {
+		if watcher.ch == nil {
+			continue
+		}
+		if watcher.sessionID != "" && !strings.EqualFold(watcher.sessionID, sessionID) {
+			continue
+		}
+		watchers = append(watchers, watcher)
+	}
+	s.watchMu.Unlock()
+	for _, watcher := range watchers {
+		select {
+		case watcher.ch <- message:
+		default:
+		}
+	}
+}
+
+func cloneTeamMailMessage(message team.MailMessage) team.MailMessage {
+	cloned := message
+	if message.TaskID != nil {
+		taskID := *message.TaskID
+		cloned.TaskID = &taskID
+	}
+	if len(message.Metadata) > 0 {
+		cloned.Metadata = make(map[string]interface{}, len(message.Metadata))
+		for key, value := range message.Metadata {
+			cloned.Metadata[key] = value
+		}
+	}
+	if message.AckedAt != nil {
+		ackedAt := *message.AckedAt
+		cloned.AckedAt = &ackedAt
+	}
+	return cloned
+}
+
 // SQLiteRuntimeStore persists runtime data in sqlite.
 type SQLiteRuntimeStore struct {
 	mu sync.Mutex
 	db *sql.DB
+
+	watchMu       sync.Mutex
+	nextWatchID   int64
+	eventWatchers map[int64]eventWatcher
+	mailWatchers  map[int64]mailboxWatcher
 }
 
 // NewSQLiteRuntimeStore opens a sqlite-backed runtime store.
@@ -653,9 +932,9 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 		return 0, fmt.Errorf("marshal event payload: %w", err)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		s.mu.Unlock()
 		return 0, fmt.Errorf("begin event tx: %w", err)
 	}
 	var seq int64
@@ -663,6 +942,7 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 		SELECT COALESCE(MAX(seq), 0) + 1 FROM session_events WHERE session_id = ?
 	`, event.SessionID).Scan(&seq); err != nil {
 		_ = tx.Rollback()
+		s.mu.Unlock()
 		return 0, fmt.Errorf("next event seq: %w", err)
 	}
 	_, err = tx.ExecContext(ctx, `
@@ -673,12 +953,112 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 		nullIfEmpty(event.ToolName), string(payloadJSON), event.Timestamp.Format(time.RFC3339Nano))
 	if err != nil {
 		_ = tx.Rollback()
+		s.mu.Unlock()
 		return 0, fmt.Errorf("insert session event: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
+		s.mu.Unlock()
 		return 0, fmt.Errorf("commit session event: %w", err)
 	}
+	s.mu.Unlock()
+	s.notifyEventWatchers(seq, event)
 	return seq, nil
+}
+
+// AppendMailbox stores an agent mailbox message through the runtime store's
+// mailbox substrate.
+func (s *SQLiteRuntimeStore) AppendMailbox(ctx context.Context, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, error) {
+	if s == nil || s.db == nil {
+		return runtimeevents.Event{}, 0, fmt.Errorf("runtime store is not initialized")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return runtimeevents.Event{}, 0, fmt.Errorf("session id is required")
+	}
+	if message.CreatedAt.IsZero() {
+		message.CreatedAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.mu.Unlock()
+		return runtimeevents.Event{}, 0, fmt.Errorf("begin mailbox tx: %w", err)
+	}
+	storedEvent, mailboxSeq, eventSeq, err := s.appendMailboxTx(ctx, tx, sessionID, message)
+	if err != nil {
+		_ = tx.Rollback()
+		s.mu.Unlock()
+		return storedEvent, mailboxSeq, err
+	}
+	if err := tx.Commit(); err != nil {
+		s.mu.Unlock()
+		return storedEvent, mailboxSeq, fmt.Errorf("commit mailbox tx: %w", err)
+	}
+	s.mu.Unlock()
+	message.Seq = mailboxSeq
+	if strings.TrimSpace(message.ID) == "" {
+		message.ID = fmt.Sprintf("mailbox_%d", mailboxSeq)
+	}
+	s.notifyMailboxWatchers(sessionID, message)
+	s.notifyEventWatchers(eventSeq, storedEvent)
+	return storedEvent, mailboxSeq, nil
+}
+
+func (s *SQLiteRuntimeStore) appendMailboxTx(ctx context.Context, tx *sql.Tx, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, int64, error) {
+	var mailboxSeq int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) + 1 FROM session_mailbox_messages WHERE session_id = ?
+	`, sessionID).Scan(&mailboxSeq); err != nil {
+		return runtimeevents.Event{}, 0, 0, fmt.Errorf("next mailbox seq: %w", err)
+	}
+	message.Seq = mailboxSeq
+	if strings.TrimSpace(message.ID) == "" {
+		message.ID = fmt.Sprintf("mailbox_%d", mailboxSeq)
+	}
+	metadataJSON, err := json.Marshal(message.Metadata)
+	if err != nil {
+		return runtimeevents.Event{}, mailboxSeq, 0, fmt.Errorf("marshal mailbox metadata: %w", err)
+	}
+	taskID := interface{}(nil)
+	if message.TaskID != nil && strings.TrimSpace(*message.TaskID) != "" {
+		taskID = strings.TrimSpace(*message.TaskID)
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO session_mailbox_messages (
+			session_id, seq, message_id, team_id, from_agent, to_agent, task_id, kind, body, metadata_json, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, sessionID, mailboxSeq, strings.TrimSpace(message.ID), nullIfEmpty(message.TeamID),
+		nullIfEmpty(message.FromAgent), nullIfEmpty(message.ToAgent), taskID, nullIfEmpty(message.Kind),
+		strings.TrimSpace(message.Body), string(metadataJSON), message.CreatedAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return runtimeevents.Event{}, mailboxSeq, 0, fmt.Errorf("insert session mailbox: %w", err)
+	}
+	event := NewMailboxReceivedEvent(sessionID, message)
+	payloadJSON, err := json.Marshal(event.Payload)
+	if err != nil {
+		return event, mailboxSeq, 0, fmt.Errorf("marshal mailbox event payload: %w", err)
+	}
+	var eventSeq int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) + 1 FROM session_events WHERE session_id = ?
+	`, sessionID).Scan(&eventSeq); err != nil {
+		return event, mailboxSeq, 0, fmt.Errorf("next mailbox event seq: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO session_events (
+			session_id, seq, type, trace_id, agent_name, tool_name, payload_json, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, sessionID, eventSeq, event.Type, nullIfEmpty(event.TraceID), nullIfEmpty(event.AgentName),
+		nullIfEmpty(event.ToolName), string(payloadJSON), event.Timestamp.Format(time.RFC3339Nano))
+	if err != nil {
+		return event, mailboxSeq, eventSeq, fmt.Errorf("insert mailbox session event: %w", err)
+	}
+	if event.Payload == nil {
+		event.Payload = map[string]interface{}{}
+	}
+	event.Payload["seq"] = eventSeq
+	event.Payload["mailbox_seq"] = mailboxSeq
+	return event, mailboxSeq, eventSeq, nil
 }
 
 // ListEvents returns session events after a given sequence.
@@ -747,6 +1127,234 @@ func (s *SQLiteRuntimeStore) ListEvents(ctx context.Context, sessionID string, a
 		return nil, err
 	}
 	return events, nil
+}
+
+// ListMailbox returns mailbox messages after a given mailbox sequence.
+func (s *SQLiteRuntimeStore) ListMailbox(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]team.MailMessage, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	query := `
+		SELECT seq, message_id, team_id, from_agent, to_agent, task_id, kind, body, metadata_json, created_at
+		FROM session_mailbox_messages
+		WHERE session_id = ? AND seq > ?
+		ORDER BY seq ASC
+	`
+	args := []interface{}{strings.TrimSpace(sessionID), afterSeq}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list session mailbox: %w", err)
+	}
+	defer rows.Close()
+
+	messages := make([]team.MailMessage, 0)
+	for rows.Next() {
+		var (
+			message    team.MailMessage
+			teamID     sql.NullString
+			fromAgent  sql.NullString
+			toAgent    sql.NullString
+			taskID     sql.NullString
+			kind       sql.NullString
+			metadata   string
+			createdRaw string
+		)
+		if err := rows.Scan(&message.Seq, &message.ID, &teamID, &fromAgent, &toAgent, &taskID, &kind, &message.Body, &metadata, &createdRaw); err != nil {
+			return nil, fmt.Errorf("scan session mailbox: %w", err)
+		}
+		message.TeamID = teamID.String
+		message.FromAgent = fromAgent.String
+		message.ToAgent = toAgent.String
+		if taskID.Valid {
+			task := taskID.String
+			message.TaskID = &task
+		}
+		message.Kind = kind.String
+		if metadata != "" {
+			_ = json.Unmarshal([]byte(metadata), &message.Metadata)
+		}
+		if message.Metadata == nil {
+			message.Metadata = map[string]interface{}{}
+		}
+		if createdRaw != "" {
+			message.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+// WatchEvents registers an in-process notification channel for session events.
+func (s *SQLiteRuntimeStore) WatchEvents(ctx context.Context, sessionID string) (<-chan runtimeevents.Event, func()) {
+	ch := make(chan runtimeevents.Event, 1)
+	if s == nil {
+		return ch, func() {}
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	s.watchMu.Lock()
+	if s.eventWatchers == nil {
+		s.eventWatchers = make(map[int64]eventWatcher)
+	}
+	s.nextWatchID++
+	watchID := s.nextWatchID
+	s.eventWatchers[watchID] = eventWatcher{sessionID: sessionID, ch: ch}
+	s.watchMu.Unlock()
+
+	cancel := func() {
+		s.watchMu.Lock()
+		if s.eventWatchers != nil {
+			delete(s.eventWatchers, watchID)
+		}
+		s.watchMu.Unlock()
+	}
+	if ctx != nil {
+		done := ctx.Done()
+		if done != nil {
+			go func() {
+				<-done
+				cancel()
+			}()
+		}
+	}
+	return ch, cancel
+}
+
+// WatchMailbox registers an in-process notification channel for session mailbox rows.
+func (s *SQLiteRuntimeStore) WatchMailbox(ctx context.Context, sessionID string) (<-chan team.MailMessage, func()) {
+	ch := make(chan team.MailMessage, 1)
+	if s == nil {
+		return ch, func() {}
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	s.watchMu.Lock()
+	if s.mailWatchers == nil {
+		s.mailWatchers = make(map[int64]mailboxWatcher)
+	}
+	s.nextWatchID++
+	watchID := s.nextWatchID
+	s.mailWatchers[watchID] = mailboxWatcher{sessionID: sessionID, ch: ch}
+	s.watchMu.Unlock()
+
+	cancel := func() {
+		s.watchMu.Lock()
+		if s.mailWatchers != nil {
+			delete(s.mailWatchers, watchID)
+		}
+		s.watchMu.Unlock()
+	}
+	if ctx != nil {
+		done := ctx.Done()
+		if done != nil {
+			go func() {
+				<-done
+				cancel()
+			}()
+		}
+	}
+	return ch, cancel
+}
+
+// LastEventSeq returns the current durable event high-water mark for a session.
+func (s *SQLiteRuntimeStore) LastEventSeq(ctx context.Context, sessionID string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("runtime store is not initialized")
+	}
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0)
+		FROM session_events
+		WHERE session_id = ?
+	`, strings.TrimSpace(sessionID)).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("last session event sequence: %w", err)
+	}
+	return seq, nil
+}
+
+// LastMailboxSeq returns the current durable mailbox high-water mark for a session.
+func (s *SQLiteRuntimeStore) LastMailboxSeq(ctx context.Context, sessionID string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("runtime store is not initialized")
+	}
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0)
+		FROM session_mailbox_messages
+		WHERE session_id = ?
+	`, strings.TrimSpace(sessionID)).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("last session mailbox sequence: %w", err)
+	}
+	return seq, nil
+}
+
+func (s *SQLiteRuntimeStore) notifyEventWatchers(seq int64, event runtimeevents.Event) {
+	if s == nil {
+		return
+	}
+	sessionID := strings.TrimSpace(event.SessionID)
+	if sessionID == "" {
+		return
+	}
+	event = cloneRuntimeEvent(event)
+	if event.Payload == nil {
+		event.Payload = map[string]interface{}{}
+	}
+	event.Payload["seq"] = seq
+	s.watchMu.Lock()
+	watchers := make([]eventWatcher, 0, len(s.eventWatchers))
+	for _, watcher := range s.eventWatchers {
+		if watcher.ch == nil {
+			continue
+		}
+		if watcher.sessionID != "" && !strings.EqualFold(watcher.sessionID, sessionID) {
+			continue
+		}
+		watchers = append(watchers, watcher)
+	}
+	s.watchMu.Unlock()
+	for _, watcher := range watchers {
+		select {
+		case watcher.ch <- event:
+		default:
+		}
+	}
+}
+
+func (s *SQLiteRuntimeStore) notifyMailboxWatchers(sessionID string, message team.MailMessage) {
+	if s == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	message = cloneTeamMailMessage(message)
+	s.watchMu.Lock()
+	watchers := make([]mailboxWatcher, 0, len(s.mailWatchers))
+	for _, watcher := range s.mailWatchers {
+		if watcher.ch == nil {
+			continue
+		}
+		if watcher.sessionID != "" && !strings.EqualFold(watcher.sessionID, sessionID) {
+			continue
+		}
+		watchers = append(watchers, watcher)
+	}
+	s.watchMu.Unlock()
+	for _, watcher := range watchers {
+		select {
+		case watcher.ch <- message:
+		default:
+		}
+	}
 }
 
 func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
@@ -843,6 +1451,31 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 			Name:    "session_runtime_state_frozen_turn_tools",
 			UpSQL: `
 				ALTER TABLE session_runtime_state ADD COLUMN frozen_turn_tools_json BLOB;
+			`,
+		},
+		{
+			Version: 9,
+			Name:    "session_mailbox_messages",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS session_mailbox_messages (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					session_id TEXT NOT NULL,
+					seq INTEGER NOT NULL,
+					message_id TEXT NOT NULL,
+					team_id TEXT,
+					from_agent TEXT,
+					to_agent TEXT,
+					task_id TEXT,
+					kind TEXT,
+					body TEXT NOT NULL,
+					metadata_json BLOB NOT NULL DEFAULT '{}',
+					created_at TEXT NOT NULL,
+					UNIQUE(session_id, seq)
+				);
+				CREATE INDEX IF NOT EXISTS idx_session_mailbox_session_seq
+				ON session_mailbox_messages(session_id, seq);
+				CREATE INDEX IF NOT EXISTS idx_session_mailbox_session_message
+				ON session_mailbox_messages(session_id, message_id);
 			`,
 		},
 	}
