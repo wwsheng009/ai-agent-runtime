@@ -217,6 +217,34 @@ func TestShouldShowChatSessionStartupPreamble_ShowsInLegacyInteractiveMode(t *te
 	}
 }
 
+func TestShouldClearChatStartupScreen_OnlyInteractiveTextChat(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	chatIsInteractiveTerminal = func() bool { return true }
+	if !shouldClearChatStartupScreen(&chatCommandOptions{OutputFormat: "interactive"}) {
+		t.Fatal("expected interactive chat to clear startup screen")
+	}
+
+	for name, opts := range map[string]*chatCommandOptions{
+		"nil":            nil,
+		"nonInteractive": {NoInteractive: true, OutputFormat: "text"},
+		"json":           {NoInteractive: true, OutputFormat: "json"},
+		"listSessions":   {OutputFormat: "interactive", ListSessionsFlag: true},
+	} {
+		if shouldClearChatStartupScreen(opts) {
+			t.Fatalf("expected %s not to clear startup screen", name)
+		}
+	}
+
+	chatIsInteractiveTerminal = func() bool { return false }
+	if shouldClearChatStartupScreen(&chatCommandOptions{OutputFormat: "interactive"}) {
+		t.Fatal("expected non-TTY chat not to clear startup screen")
+	}
+}
+
 func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	runtimeSession.AddMessage(*runtimetypes.NewUserMessage("hello"))

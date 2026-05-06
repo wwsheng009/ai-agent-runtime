@@ -214,6 +214,8 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 		return
 	}
 
+	clearChatStartupScreen(opts)
+
 	if shouldShowChatStartupBanner(opts) {
 		printWelcome()
 	}

@@ -83,6 +83,15 @@ func (t *Terminal) Clear() {
 	t.MoveTo(1, 1)
 }
 
+// ClearIfSupported 在当前终端支持 ANSI 控制序列时清屏。
+func (t *Terminal) ClearIfSupported() bool {
+	if !t.SupportsANSI() {
+		return false
+	}
+	t.Clear()
+	return true
+}
+
 // ClearFromCursor 从光标到行尾清除
 func (t *Terminal) ClearFromCursor() {
 	fmt.Print("\033[K")

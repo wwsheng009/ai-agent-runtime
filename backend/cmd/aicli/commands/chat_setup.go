@@ -173,6 +173,20 @@ func shouldShowChatSessionStartupPreamble(opts *chatCommandOptions) bool {
 	return shouldShowChatStartupBanner(opts)
 }
 
+func clearChatStartupScreen(opts *chatCommandOptions) {
+	if !shouldClearChatStartupScreen(opts) {
+		return
+	}
+	ui.NewTerminal().ClearIfSupported()
+}
+
+func shouldClearChatStartupScreen(opts *chatCommandOptions) bool {
+	if opts == nil || opts.NoInteractive || opts.OutputFormat == "json" || opts.ListSessionsFlag {
+		return false
+	}
+	return chatIsInteractiveTerminal()
+}
+
 func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPersistenceState, opts *chatCommandOptions) error {
 	if session == nil || opts == nil || persistenceState == nil {
 		return nil
