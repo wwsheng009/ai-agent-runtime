@@ -234,6 +234,7 @@ type SpawnAgentArgs struct {
 	AgentType   string `json:"agent_type,omitempty"`
 	Model       string `json:"model,omitempty"`
 	ForkContext *bool  `json:"fork_context,omitempty"`
+	ForkTurns   string `json:"fork_turns,omitempty"`
 }
 
 // SendAgentInputArgs describes a follow-up input for an existing child agent.
@@ -253,11 +254,28 @@ type WaitAgentArgs struct {
 	TimeoutMs  int      `json:"timeout_ms,omitempty"`
 }
 
+// ListAgentsArgs lists lightweight child-agent sessions under a parent/root.
+type ListAgentsArgs struct {
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	PathPrefix      string `json:"path_prefix,omitempty"`
+	IncludeClosed   bool   `json:"include_closed,omitempty"`
+}
+
+// AgentMessageArgs describes an inter-agent message target and body.
+type AgentMessageArgs struct {
+	Target    string `json:"target,omitempty"`
+	ID        string `json:"id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
 // AgentStatusResult returns the current state of a lightweight child agent session.
 type AgentStatusResult struct {
 	ID                 string `json:"id"`
 	SessionID          string `json:"session_id"`
 	ParentSessionID    string `json:"parent_session_id,omitempty"`
+	Path               string `json:"path,omitempty"`
+	Depth              int    `json:"depth,omitempty"`
 	AgentType          string `json:"agent_type,omitempty"`
 	Status             string `json:"status"`
 	Exists             bool   `json:"exists"`
@@ -286,6 +304,20 @@ type AgentWaitResult struct {
 	TimedOut         bool                `json:"timed_out,omitempty"`
 	ReadyCount       int                 `json:"ready_count,omitempty"`
 	PendingCount     int                 `json:"pending_count,omitempty"`
+}
+
+// AgentListResult reports known child-agent sessions.
+type AgentListResult struct {
+	Agents []AgentStatusResult `json:"agents,omitempty"`
+	Count  int                 `json:"count"`
+}
+
+// AgentMessageResult reports queued inter-agent communication.
+type AgentMessageResult struct {
+	TargetSessionID string             `json:"target_session_id"`
+	Delivered       bool               `json:"delivered"`
+	Triggered       bool               `json:"triggered,omitempty"`
+	Status          *AgentStatusResult `json:"status,omitempty"`
 }
 
 // ReadAgentEventsArgs reads child-agent runtime events from the session event store.
@@ -321,6 +353,9 @@ type AgentEventsResult struct {
 // AgentSessionController provides lightweight child-agent lifecycle operations.
 type AgentSessionController interface {
 	Spawn(ctx context.Context, parentSessionID string, args SpawnAgentArgs) (*AgentStatusResult, error)
+	List(ctx context.Context, parentSessionID string, args ListAgentsArgs) (*AgentListResult, error)
+	SendMessage(ctx context.Context, fromSessionID string, args AgentMessageArgs) (*AgentMessageResult, error)
+	FollowupTask(ctx context.Context, fromSessionID string, args AgentMessageArgs) (*AgentMessageResult, error)
 	SendInput(ctx context.Context, args SendAgentInputArgs) (*AgentStatusResult, error)
 	Wait(ctx context.Context, args WaitAgentArgs) (*AgentWaitResult, error)
 	ReadEvents(ctx context.Context, args ReadAgentEventsArgs) (*AgentEventsResult, error)
@@ -330,6 +365,9 @@ type AgentSessionController interface {
 
 const (
 	AgentSessionContextParentSessionID = "agent_parent_session_id"
+	AgentSessionContextRootSessionID   = "agent_root_session_id"
 	AgentSessionContextAgentType       = "agent_type"
 	AgentSessionContextRequestedModel  = "agent_requested_model"
+	AgentSessionContextPath            = "agent_path"
+	AgentSessionContextDepth           = "agent_depth"
 )

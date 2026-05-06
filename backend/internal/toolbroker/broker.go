@@ -22,6 +22,9 @@ const (
 	ToolBackgroundTask    = "background_task"
 	ToolTaskOutput        = "task_output"
 	ToolSpawnAgent        = "spawn_agent"
+	ToolListAgents        = "list_agents"
+	ToolSendMessage       = "send_message"
+	ToolFollowupTask      = "followup_task"
 	ToolSendInput         = "send_input"
 	ToolWaitAgent         = "wait_agent"
 	ToolReadAgentEvents   = "read_agent_events"
@@ -68,7 +71,7 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolSendInput, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolSpawnTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask:
+	case ToolAskUserQuestion, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolSpawnTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask:
 		return true
 	default:
 		return false
@@ -160,7 +163,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		return withBrokerSourceDefinitions(append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSpawnAgent,
-				Description: "Create a lightweight child agent session and optionally send its first prompt.",
+				Description: "Create a lightweight child agent session and optionally send its first prompt. This is separate from spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -170,12 +173,53 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"agent_type":   map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
 						"model":        map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"fork_context": map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
+						"fork_turns":   map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
 					},
 				},
 			},
 			types.ToolDefinition{
+				Name:        ToolListAgents,
+				Description: "List lightweight spawn_agent child sessions for the current root session. This is separate from spawn_team task progress.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"parent_session_id": map[string]interface{}{"type": "string", "description": "Optional parent/root session id. Defaults to the current session."},
+						"path_prefix":       map[string]interface{}{"type": "string", "description": "Optional agent path prefix filter, for example /root."},
+						"include_closed":    map[string]interface{}{"type": "boolean", "description": "Whether to include closed/archived child sessions."},
+					},
+				},
+			},
+			types.ToolDefinition{
+				Name:        ToolSendMessage,
+				Description: "Queue a plain message for a spawn_agent child session without interrupting or starting a new turn.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or alias."},
+						"id":         map[string]interface{}{"type": "string", "description": "Alias for target."},
+						"session_id": map[string]interface{}{"type": "string", "description": "Alias for target."},
+						"message":    map[string]interface{}{"type": "string", "description": "Message to deliver."},
+					},
+					"required": []string{"message"},
+				},
+			},
+			types.ToolDefinition{
+				Name:        ToolFollowupTask,
+				Description: "Send a follow-up task to a spawn_agent child session. If the child is busy, the message is delivered without interrupting the active run.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or alias."},
+						"id":         map[string]interface{}{"type": "string", "description": "Alias for target."},
+						"session_id": map[string]interface{}{"type": "string", "description": "Alias for target."},
+						"message":    map[string]interface{}{"type": "string", "description": "Follow-up task prompt."},
+					},
+					"required": []string{"message"},
+				},
+			},
+			types.ToolDefinition{
 				Name:        ToolSendInput,
-				Description: "Send a follow-up prompt to an existing child agent session.",
+				Description: "Send a follow-up prompt to an existing spawn_agent child session. This does not address spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -189,7 +233,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for a child agent session to become idle or blocked.",
+				Description: "Wait for a spawn_agent child session to become idle or blocked. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -203,21 +247,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read recent runtime events for a child agent session and optionally wait for new events.",
-				Parameters: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id."},
-						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
-						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
-						"wait_ms":    map[string]interface{}{"type": "integer", "description": "Optional wait timeout for polling until new events arrive."},
-					},
-				},
-			},
-			types.ToolDefinition{
-				Name:        ToolReadAgentEvents,
-				Description: "Read recent runtime events for a child agent session and optionally wait for new events.",
+				Description: "Read recent runtime events for a spawn_agent child session and optionally wait for new events. Do not use this for spawn_team teammate ids such as member-1.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -257,7 +287,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		definitions = append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSpawnAgent,
-				Description: "Create a lightweight child agent session and optionally send its first prompt.",
+				Description: "Create a lightweight child agent session and optionally send its first prompt. This is separate from spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -267,12 +297,53 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"agent_type":   map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
 						"model":        map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"fork_context": map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
+						"fork_turns":   map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
 					},
 				},
 			},
 			types.ToolDefinition{
+				Name:        ToolListAgents,
+				Description: "List lightweight spawn_agent child sessions for the current root session. This is separate from spawn_team task progress.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"parent_session_id": map[string]interface{}{"type": "string", "description": "Optional parent/root session id. Defaults to the current session."},
+						"path_prefix":       map[string]interface{}{"type": "string", "description": "Optional agent path prefix filter, for example /root."},
+						"include_closed":    map[string]interface{}{"type": "boolean", "description": "Whether to include closed/archived child sessions."},
+					},
+				},
+			},
+			types.ToolDefinition{
+				Name:        ToolSendMessage,
+				Description: "Queue a plain message for a spawn_agent child session without interrupting or starting a new turn.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or alias."},
+						"id":         map[string]interface{}{"type": "string", "description": "Alias for target."},
+						"session_id": map[string]interface{}{"type": "string", "description": "Alias for target."},
+						"message":    map[string]interface{}{"type": "string", "description": "Message to deliver."},
+					},
+					"required": []string{"message"},
+				},
+			},
+			types.ToolDefinition{
+				Name:        ToolFollowupTask,
+				Description: "Send a follow-up task to a spawn_agent child session. If the child is busy, the message is delivered without interrupting the active run.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or alias."},
+						"id":         map[string]interface{}{"type": "string", "description": "Alias for target."},
+						"session_id": map[string]interface{}{"type": "string", "description": "Alias for target."},
+						"message":    map[string]interface{}{"type": "string", "description": "Follow-up task prompt."},
+					},
+					"required": []string{"message"},
+				},
+			},
+			types.ToolDefinition{
 				Name:        ToolSendInput,
-				Description: "Send a follow-up prompt to an existing child agent session.",
+				Description: "Send a follow-up prompt to an existing spawn_agent child session. This does not address spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -286,7 +357,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for a child agent session to become idle or blocked.",
+				Description: "Wait for a spawn_agent child session to become idle or blocked. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -300,21 +371,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read recent runtime events for a child agent session and optionally wait for new events.",
-				Parameters: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id."},
-						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
-						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
-						"wait_ms":    map[string]interface{}{"type": "integer", "description": "Optional wait timeout for polling until new events arrive."},
-					},
-				},
-			},
-			types.ToolDefinition{
-				Name:        ToolReadAgentEvents,
-				Description: "Read recent runtime events for a child agent session and optionally wait for new events.",
+				Description: "Read recent runtime events for a spawn_agent child session and optionally wait for new events. Do not use this for spawn_team teammate ids such as member-1.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -882,6 +939,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["fork_context"].(bool); ok {
 			request.ForkContext = &value
 		}
+		if value, ok := args["fork_turns"].(string); ok {
+			request.ForkTurns = strings.TrimSpace(value)
+		}
 		explicitSessionID := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID)) != ""
 		result, err := b.AgentSessions.Spawn(ctx, strings.TrimSpace(sessionID), request)
 		if err != nil {
@@ -909,6 +969,81 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"created":       result != nil && result.Created,
 			"queued":        result != nil && result.Queued,
 		}, agentStatusCacheSafeSummary(aliasedResult)), nil
+
+	case ToolListAgents:
+		if b.AgentSessions == nil {
+			return nil, nil, fmt.Errorf("agent session controller is not configured")
+		}
+		request := ListAgentsArgs{}
+		if value, ok := args["parent_session_id"].(string); ok {
+			request.ParentSessionID = strings.TrimSpace(value)
+		}
+		if value, ok := args["path_prefix"].(string); ok {
+			request.PathPrefix = strings.TrimSpace(value)
+		}
+		if value, ok := args["include_closed"].(bool); ok {
+			request.IncludeClosed = value
+		}
+		parentSessionID := firstNonEmptyToolValue(request.ParentSessionID, strings.TrimSpace(sessionID))
+		result, err := b.AgentSessions.List(ctx, parentSessionID, request)
+		if err != nil {
+			return nil, nil, err
+		}
+		aliasedResult := aliasAgentListResult(result, handleAliases)
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"count": valueOrZeroAgentListCount(result),
+		}, agentListCacheSafeSummary(aliasedResult)), nil
+
+	case ToolSendMessage, ToolFollowupTask:
+		if b.AgentSessions == nil {
+			return nil, nil, fmt.Errorf("agent session controller is not configured")
+		}
+		request := AgentMessageArgs{}
+		if value, ok := args["target"].(string); ok {
+			request.Target = strings.TrimSpace(value)
+		}
+		if value, ok := args["id"].(string); ok {
+			request.ID = strings.TrimSpace(value)
+		}
+		if value, ok := args["session_id"].(string); ok {
+			request.SessionID = strings.TrimSpace(value)
+		}
+		if value, ok := args["message"].(string); ok {
+			request.Message = strings.TrimSpace(value)
+		}
+		sessionRef := strings.TrimSpace(firstNonEmptyToolValue(request.Target, request.ID, request.SessionID))
+		actualSessionID := sessionRef
+		if handleAliases != nil {
+			actualSessionID, _, err = handleAliases.Sessions.resolve(sessionRef, agentSessionAliasPrefix, "agent session")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		request.Target = actualSessionID
+		request.ID = ""
+		request.SessionID = actualSessionID
+		if err := b.rejectTeamTeammateAgentRefs(ctx, toolName, actualSessionID); err != nil {
+			return nil, nil, err
+		}
+		var result *AgentMessageResult
+		if toolName == ToolFollowupTask {
+			if strings.TrimSpace(actualSessionID) == strings.TrimSpace(sessionID) {
+				return nil, nil, fmt.Errorf("followup_task target cannot be the current/root session")
+			}
+			result, err = b.AgentSessions.FollowupTask(ctx, strings.TrimSpace(sessionID), request)
+		} else {
+			result, err = b.AgentSessions.SendMessage(ctx, strings.TrimSpace(sessionID), request)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		aliasedResult := aliasAgentMessageResult(result, handleAliases)
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"session_id":    strings.TrimSpace(actualSessionID),
+			"session_alias": aliasSessionValue(actualSessionID, handleAliases),
+			"delivered":     result != nil && result.Delivered,
+			"triggered":     result != nil && result.Triggered,
+		}, agentMessageCacheSafeSummary(aliasedResult)), nil
 
 	case ToolSendInput:
 		if b.AgentSessions == nil {
@@ -992,6 +1127,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				}
 			}
 		}
+		if err := b.rejectTeamTeammateAgentRefs(ctx, ToolWaitAgent, request.ID, request.SessionID); err != nil {
+			return nil, nil, err
+		}
+		if err := b.rejectTeamTeammateAgentRefs(ctx, ToolWaitAgent, append(request.IDs, request.SessionIDs...)...); err != nil {
+			return nil, nil, err
+		}
 		result, err := b.AgentSessions.Wait(ctx, request)
 		if err != nil {
 			return nil, nil, err
@@ -1044,6 +1185,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			if err != nil {
 				return nil, nil, err
 			}
+		}
+		if err := b.rejectTeamTeammateAgentRefs(ctx, ToolReadAgentEvents, actualSessionID); err != nil {
+			return nil, nil, err
 		}
 		if strings.TrimSpace(request.ID) != "" {
 			request.ID = actualSessionID
@@ -1936,6 +2080,12 @@ func normalizeToolName(name string) string {
 		return ToolTaskOutput
 	case "spawnagent":
 		return ToolSpawnAgent
+	case "listagents":
+		return ToolListAgents
+	case "sendmessage":
+		return ToolSendMessage
+	case "followuptask":
+		return ToolFollowupTask
 	case "sendinput":
 		return ToolSendInput
 	case "waitagent":
@@ -2311,6 +2461,32 @@ func (b *Broker) notifyTeamLifecycleChanged() {
 		return
 	}
 	b.TeamLifecycleChanged()
+}
+
+func (b *Broker) rejectTeamTeammateAgentRefs(ctx context.Context, toolName string, refs ...string) error {
+	if b == nil || b.TeamStore == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		teammate, err := b.TeamStore.GetTeammate(ctx, ref)
+		if err != nil {
+			return err
+		}
+		if teammate == nil {
+			continue
+		}
+		return fmt.Errorf("%s is a spawn_agent child-session tool, but %q is a spawn_team teammate id in team %q; do not use wait_agent/read_agent_events for team teammates, wait for team.completed/team.summary instead", toolName, ref, strings.TrimSpace(teammate.TeamID))
+	}
+	return nil
 }
 
 func payloadString(payload map[string]interface{}, key string) string {

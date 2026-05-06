@@ -37,6 +37,35 @@ func aliasAgentWaitResult(result *AgentWaitResult, aliases *handleAliasRegistry)
 	return &cloned
 }
 
+func aliasAgentListResult(result *AgentListResult, aliases *handleAliasRegistry) *AgentListResult {
+	if result == nil {
+		return nil
+	}
+	cloned := *result
+	if len(result.Agents) > 0 {
+		cloned.Agents = make([]AgentStatusResult, 0, len(result.Agents))
+		for _, agent := range result.Agents {
+			aliased := aliasAgentStatusResult(&agent, aliases)
+			if aliased != nil {
+				cloned.Agents = append(cloned.Agents, *aliased)
+			}
+		}
+	}
+	return &cloned
+}
+
+func aliasAgentMessageResult(result *AgentMessageResult, aliases *handleAliasRegistry) *AgentMessageResult {
+	if result == nil {
+		return nil
+	}
+	cloned := *result
+	cloned.TargetSessionID = aliasSessionValue(cloned.TargetSessionID, aliases)
+	if result.Status != nil {
+		cloned.Status = aliasAgentStatusResult(result.Status, aliases)
+	}
+	return &cloned
+}
+
 func aliasAgentEventsResult(result *AgentEventsResult, aliases *handleAliasRegistry) *AgentEventsResult {
 	if result == nil {
 		return nil

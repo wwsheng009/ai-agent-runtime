@@ -32,6 +32,13 @@ func valueOrZeroWaitReadyCount(result *AgentWaitResult) int {
 	return result.ReadyCount
 }
 
+func valueOrZeroAgentListCount(result *AgentListResult) int {
+	if result == nil {
+		return 0
+	}
+	return result.Count
+}
+
 func valueOrEmptyEventsSession(result *AgentEventsResult) string {
 	if result == nil {
 		return ""

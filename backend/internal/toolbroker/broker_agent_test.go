@@ -2,13 +2,19 @@ package toolbroker
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 type fakeAgentSessionController struct {
 	lastParent string
 	lastSpawn  SpawnAgentArgs
+	lastList   ListAgentsArgs
+	lastMsg    AgentMessageArgs
+	lastFollow AgentMessageArgs
 	lastInput  SendAgentInputArgs
 	lastWait   WaitAgentArgs
 	lastRead   ReadAgentEventsArgs
@@ -30,6 +36,37 @@ func (f *fakeAgentSessionController) Spawn(ctx context.Context, parentSessionID 
 		CurrentTurnID:     "turn-dynamic-123",
 		PendingToolCallID: "toolcall-dynamic-456",
 	}, nil
+}
+
+func (f *fakeAgentSessionController) List(ctx context.Context, parentSessionID string, args ListAgentsArgs) (*AgentListResult, error) {
+	f.lastParent = parentSessionID
+	f.lastList = args
+	return &AgentListResult{
+		Count: 1,
+		Agents: []AgentStatusResult{{
+			ID:              "child-1",
+			SessionID:       "child-1",
+			ParentSessionID: parentSessionID,
+			Path:            "/root/child-1",
+			Depth:           1,
+			Status:          "idle",
+			Exists:          true,
+		}},
+	}, nil
+}
+
+func (f *fakeAgentSessionController) SendMessage(ctx context.Context, fromSessionID string, args AgentMessageArgs) (*AgentMessageResult, error) {
+	f.lastParent = fromSessionID
+	f.lastMsg = args
+	status := &AgentStatusResult{ID: args.SessionID, SessionID: args.SessionID, Status: "idle", Exists: true}
+	return &AgentMessageResult{TargetSessionID: args.SessionID, Delivered: true, Status: status}, nil
+}
+
+func (f *fakeAgentSessionController) FollowupTask(ctx context.Context, fromSessionID string, args AgentMessageArgs) (*AgentMessageResult, error) {
+	f.lastParent = fromSessionID
+	f.lastFollow = args
+	status := &AgentStatusResult{ID: args.SessionID, SessionID: args.SessionID, Status: "running", Exists: true, Queued: true}
+	return &AgentMessageResult{TargetSessionID: args.SessionID, Delivered: true, Triggered: true, Status: status}, nil
 }
 
 func (f *fakeAgentSessionController) SendInput(ctx context.Context, args SendAgentInputArgs) (*AgentStatusResult, error) {
@@ -92,7 +129,7 @@ func TestBroker_Definitions_ExposeAgentToolsWhenControllerConfigured(t *testing.
 		seen[def.Name] = true
 	}
 
-	for _, name := range []string{ToolSpawnAgent, ToolSendInput, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent} {
+	for _, name := range []string{ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent} {
 		if !seen[name] {
 			t.Fatalf("expected %s in broker definitions", name)
 		}
@@ -106,6 +143,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 	result, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
 		"message":      "inspect repo",
 		"agent_type":   "explorer",
+		"fork_turns":   "1",
 		"fork_context": true,
 	})
 	if err != nil {
@@ -114,11 +152,56 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 	if controller.lastParent != "parent-session" {
 		t.Fatalf("unexpected parent session: %s", controller.lastParent)
 	}
-	if controller.lastSpawn.Message != "inspect repo" || controller.lastSpawn.AgentType != "explorer" {
+	if controller.lastSpawn.Message != "inspect repo" || controller.lastSpawn.AgentType != "explorer" || controller.lastSpawn.ForkTurns != "1" {
 		t.Fatalf("unexpected spawn args: %#v", controller.lastSpawn)
 	}
 	if result == nil || meta["status"] != "running" {
 		t.Fatalf("unexpected spawn result/meta: %#v %#v", result, meta)
+	}
+
+	rawList, meta, err := broker.Execute(context.Background(), "parent-session", ToolListAgents, map[string]interface{}{
+		"path_prefix":    "/root",
+		"include_closed": true,
+	})
+	if err != nil {
+		t.Fatalf("list_agents failed: %v", err)
+	}
+	if controller.lastParent != "parent-session" || controller.lastList.PathPrefix != "/root" || !controller.lastList.IncludeClosed {
+		t.Fatalf("unexpected list_agents args: parent=%q args=%#v", controller.lastParent, controller.lastList)
+	}
+	listResult, ok := rawList.(*AgentListResult)
+	if !ok || listResult.Count != 1 {
+		t.Fatalf("unexpected list_agents result/meta: %#v %#v", rawList, meta)
+	}
+
+	rawMsg, meta, err := broker.Execute(context.Background(), "parent-session", ToolSendMessage, map[string]interface{}{
+		"target":  "child-1",
+		"message": "note only",
+	})
+	if err != nil {
+		t.Fatalf("send_message failed: %v", err)
+	}
+	if controller.lastParent != "parent-session" || controller.lastMsg.SessionID != "child-1" || controller.lastMsg.Message != "note only" {
+		t.Fatalf("unexpected send_message args: parent=%q args=%#v", controller.lastParent, controller.lastMsg)
+	}
+	msgResult, ok := rawMsg.(*AgentMessageResult)
+	if !ok || !msgResult.Delivered || msgResult.Triggered || meta["delivered"] != true {
+		t.Fatalf("unexpected send_message result/meta: %#v %#v", rawMsg, meta)
+	}
+
+	rawFollow, meta, err := broker.Execute(context.Background(), "parent-session", ToolFollowupTask, map[string]interface{}{
+		"target":  "child-1",
+		"message": "new task",
+	})
+	if err != nil {
+		t.Fatalf("followup_task failed: %v", err)
+	}
+	if controller.lastParent != "parent-session" || controller.lastFollow.SessionID != "child-1" || controller.lastFollow.Message != "new task" {
+		t.Fatalf("unexpected followup_task args: parent=%q args=%#v", controller.lastParent, controller.lastFollow)
+	}
+	followResult, ok := rawFollow.(*AgentMessageResult)
+	if !ok || !followResult.Delivered || !followResult.Triggered || meta["triggered"] != true {
+		t.Fatalf("unexpected followup_task result/meta: %#v %#v", rawFollow, meta)
 	}
 
 	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSendInput, map[string]interface{}{
@@ -191,6 +274,22 @@ func TestBroker_Execute_WaitAgentAcceptsBatchIDs(t *testing.T) {
 	}
 }
 
+func TestBroker_Execute_FollowupTaskRejectsCurrentSession(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolFollowupTask, map[string]interface{}{
+		"target":  "parent-session",
+		"message": "do this",
+	})
+	if err == nil || !strings.Contains(err.Error(), "current/root session") {
+		t.Fatalf("expected current/root rejection, got %v", err)
+	}
+	if controller.lastFollow.Message != "" {
+		t.Fatalf("expected controller not to receive followup_task, got %#v", controller.lastFollow)
+	}
+}
+
 func TestBroker_Execute_ReadAgentEventsDelegatesToController(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
@@ -213,5 +312,45 @@ func TestBroker_Execute_ReadAgentEventsDelegatesToController(t *testing.T) {
 	}
 	if meta["latest_seq"] != int64(7) && meta["latest_seq"] != 7 {
 		t.Fatalf("unexpected read_agent_events meta: %#v", meta)
+	}
+}
+
+func TestBroker_Execute_AgentToolsRejectTeamTeammateIDs(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{Status: team.TeamStatusActive})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if _, err := store.UpsertTeammate(ctx, team.Teammate{
+		ID:        "member-1",
+		TeamID:    teamID,
+		SessionID: "team-session-member-1",
+		State:     team.TeammateStateIdle,
+	}); err != nil {
+		t.Fatalf("UpsertTeammate: %v", err)
+	}
+
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller, TeamStore: store}
+
+	_, _, err = broker.Execute(ctx, "parent-session", ToolWaitAgent, map[string]interface{}{
+		"id": "member-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "spawn_team teammate id") {
+		t.Fatalf("expected wait_agent teammate id error, got %v", err)
+	}
+	if controller.lastWait.ID != "" {
+		t.Fatalf("expected wait_agent not to reach controller, got %#v", controller.lastWait)
+	}
+
+	_, _, err = broker.Execute(ctx, "parent-session", ToolReadAgentEvents, map[string]interface{}{
+		"id": "member-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "spawn_team teammate id") {
+		t.Fatalf("expected read_agent_events teammate id error, got %v", err)
+	}
+	if controller.lastRead.ID != "" {
+		t.Fatalf("expected read_agent_events not to reach controller, got %#v", controller.lastRead)
 	}
 }

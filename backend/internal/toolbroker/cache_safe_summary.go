@@ -196,6 +196,45 @@ func agentWaitCacheSafeSummary(result *AgentWaitResult) string {
 	return strings.Join(lines, "\n")
 }
 
+func agentListCacheSafeSummary(result *AgentListResult) string {
+	if result == nil {
+		return ""
+	}
+	lines := []string{
+		fmt.Sprintf("Listed %d child agent(s).", result.Count),
+	}
+	for _, agent := range result.Agents {
+		if len(lines) >= 7 {
+			lines = append(lines, "Additional agents omitted from summary.")
+			break
+		}
+		sessionRef := firstNonEmptyString(strings.TrimSpace(agent.SessionID), strings.TrimSpace(agent.ID), "child_agent")
+		status := firstNonEmptyString(strings.TrimSpace(agent.Status), "unknown")
+		if path := strings.TrimSpace(agent.Path); path != "" {
+			lines = append(lines, fmt.Sprintf("- %s %s status=%s", path, sessionRef, status))
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- %s status=%s", sessionRef, status))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func agentMessageCacheSafeSummary(result *AgentMessageResult) string {
+	if result == nil {
+		return ""
+	}
+	sessionRef := firstNonEmptyString(strings.TrimSpace(result.TargetSessionID), "child_agent")
+	action := "Delivered message"
+	if result.Triggered {
+		action = "Triggered follow-up task"
+	}
+	lines := []string{fmt.Sprintf("%s for %s.", action, sessionRef)}
+	if result.Status != nil {
+		lines = append(lines, agentStatusCacheSafeSummary(result.Status))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func agentEventsCacheSafeSummary(result *AgentEventsResult) string {
 	if result == nil {
 		return ""
