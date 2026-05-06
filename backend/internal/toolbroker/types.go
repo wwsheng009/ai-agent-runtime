@@ -271,28 +271,30 @@ type AgentMessageArgs struct {
 
 // AgentStatusResult returns the current state of a lightweight child agent session.
 type AgentStatusResult struct {
-	ID                 string `json:"id"`
-	SessionID          string `json:"session_id"`
-	ParentSessionID    string `json:"parent_session_id,omitempty"`
-	Path               string `json:"path,omitempty"`
-	Depth              int    `json:"depth,omitempty"`
-	AgentType          string `json:"agent_type,omitempty"`
-	Status             string `json:"status"`
-	Exists             bool   `json:"exists"`
-	Created            bool   `json:"created,omitempty"`
-	Queued             bool   `json:"queued,omitempty"`
-	TimedOut           bool   `json:"timed_out,omitempty"`
-	PendingApproval    bool   `json:"pending_approval,omitempty"`
-	PendingQuestion    bool   `json:"pending_question,omitempty"`
-	MessageCount       int    `json:"message_count,omitempty"`
-	Output             string `json:"output,omitempty"`
-	Error              string `json:"error,omitempty"`
-	SessionState       string `json:"session_state,omitempty"`
-	CurrentTurnID      string `json:"current_turn_id,omitempty"`
-	PendingToolName    string `json:"pending_tool_name,omitempty"`
-	PendingToolCallID  string `json:"pending_tool_call_id,omitempty"`
-	LastMessageRole    string `json:"last_message_role,omitempty"`
-	LastMessagePreview string `json:"last_message_preview,omitempty"`
+	ID                 string   `json:"id"`
+	SessionID          string   `json:"session_id"`
+	ParentSessionID    string   `json:"parent_session_id,omitempty"`
+	Path               string   `json:"path,omitempty"`
+	Depth              int      `json:"depth,omitempty"`
+	AgentType          string   `json:"agent_type,omitempty"`
+	Status             string   `json:"status"`
+	Exists             bool     `json:"exists"`
+	Created            bool     `json:"created,omitempty"`
+	Queued             bool     `json:"queued,omitempty"`
+	TimedOut           bool     `json:"timed_out,omitempty"`
+	PendingApproval    bool     `json:"pending_approval,omitempty"`
+	PendingQuestion    bool     `json:"pending_question,omitempty"`
+	MessageCount       int      `json:"message_count,omitempty"`
+	Output             string   `json:"output,omitempty"`
+	Error              string   `json:"error,omitempty"`
+	SessionState       string   `json:"session_state,omitempty"`
+	CurrentTurnID      string   `json:"current_turn_id,omitempty"`
+	PendingToolName    string   `json:"pending_tool_name,omitempty"`
+	PendingToolCallID  string   `json:"pending_tool_call_id,omitempty"`
+	LastMessageRole    string   `json:"last_message_role,omitempty"`
+	LastMessagePreview string   `json:"last_message_preview,omitempty"`
+	ClosedCount        int      `json:"closed_count,omitempty"`
+	ClosedSessionIDs   []string `json:"closed_session_ids,omitempty"`
 }
 
 // AgentWaitResult reports the outcome of waiting on one or more child agent sessions.

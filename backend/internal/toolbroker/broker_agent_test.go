@@ -235,6 +235,14 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected close id: %s", controller.lastClose)
 	}
 
+	_, _, err = broker.Execute(context.Background(), "parent-session", ToolCloseAgent, map[string]interface{}{"id": "/root/child-1"})
+	if err != nil {
+		t.Fatalf("close_agent path failed: %v", err)
+	}
+	if controller.lastClose != "/root/child-1" {
+		t.Fatalf("unexpected close path: %s", controller.lastClose)
+	}
+
 	_, _, err = broker.Execute(context.Background(), "parent-session", ToolResumeAgent, map[string]interface{}{"id": "child-1"})
 	if err != nil {
 		t.Fatalf("resume_agent failed: %v", err)

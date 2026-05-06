@@ -195,7 +195,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or alias."},
+						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or path such as /root/worker."},
 						"id":         map[string]interface{}{"type": "string", "description": "Alias for target."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for target."},
 						"message":    map[string]interface{}{"type": "string", "description": "Message to deliver."},
@@ -209,7 +209,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or alias."},
+						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or path such as /root/worker."},
 						"id":         map[string]interface{}{"type": "string", "description": "Alias for target."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for target."},
 						"message":    map[string]interface{}{"type": "string", "description": "Follow-up task prompt."},
@@ -223,7 +223,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"message":    map[string]interface{}{"type": "string", "description": "Prompt to send to the child agent."},
 						"interrupt":  map[string]interface{}{"type": "boolean", "description": "Whether to interrupt an active child run before submitting the new prompt."},
@@ -233,13 +233,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for a spawn_agent child session to become idle or blocked. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
+				Description: "Wait for a spawn_agent child session to become idle or blocked. Runtime events wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":          map[string]interface{}{"type": "string", "description": "Child agent session id."},
+						"id":          map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id":  map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional list of child agent ids. Returns when the first one becomes ready."},
+						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional list of child agent session ids or paths. Returns when the first one becomes ready."},
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
 						"timeout_ms":  map[string]interface{}{"type": "integer", "description": "Optional wait timeout in milliseconds."},
 					},
@@ -251,21 +251,21 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
 						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
-						"wait_ms":    map[string]interface{}{"type": "integer", "description": "Optional wait timeout for polling until new events arrive."},
+						"wait_ms":    map[string]interface{}{"type": "integer", "description": "Optional wait timeout while waiting for new events to arrive."},
 					},
 				},
 			},
 			types.ToolDefinition{
 				Name:        ToolCloseAgent,
-				Description: "Stop and close a child agent session.",
+				Description: "Stop and close a child agent session or agent path. Closing a parent path also closes its descendant child sessions.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 					},
 				},
@@ -276,7 +276,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 					},
 				},
@@ -319,7 +319,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or alias."},
+						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or path such as /root/worker."},
 						"id":         map[string]interface{}{"type": "string", "description": "Alias for target."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for target."},
 						"message":    map[string]interface{}{"type": "string", "description": "Message to deliver."},
@@ -333,7 +333,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or alias."},
+						"target":     map[string]interface{}{"type": "string", "description": "Target child agent session id or path such as /root/worker."},
 						"id":         map[string]interface{}{"type": "string", "description": "Alias for target."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for target."},
 						"message":    map[string]interface{}{"type": "string", "description": "Follow-up task prompt."},
@@ -347,7 +347,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"message":    map[string]interface{}{"type": "string", "description": "Prompt to send to the child agent."},
 						"interrupt":  map[string]interface{}{"type": "boolean", "description": "Whether to interrupt an active child run before submitting the new prompt."},
@@ -357,13 +357,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for a spawn_agent child session to become idle or blocked. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
+				Description: "Wait for a spawn_agent child session to become idle or blocked. Runtime events wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":          map[string]interface{}{"type": "string", "description": "Child agent session id."},
+						"id":          map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id":  map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional list of child agent ids. Returns when the first one becomes ready."},
+						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional list of child agent session ids or paths. Returns when the first one becomes ready."},
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
 						"timeout_ms":  map[string]interface{}{"type": "integer", "description": "Optional wait timeout in milliseconds."},
 					},
@@ -375,21 +375,21 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
 						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
-						"wait_ms":    map[string]interface{}{"type": "integer", "description": "Optional wait timeout for polling until new events arrive."},
+						"wait_ms":    map[string]interface{}{"type": "integer", "description": "Optional wait timeout while waiting for new events to arrive."},
 					},
 				},
 			},
 			types.ToolDefinition{
 				Name:        ToolCloseAgent,
-				Description: "Stop and close a child agent session.",
+				Description: "Stop and close a child agent session or agent path. Closing a parent path also closes its descendant child sessions.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 					},
 				},
@@ -400,7 +400,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 					},
 				},
@@ -2335,9 +2335,10 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 		if b.TeamLifecycleChanged != nil {
 			b.notifyTeamLifecycleChanged()
 		} else if _, err := team.ReconcileTerminalTeamState(ctx, team.TerminalTeamServices{
-			Store:   b.TeamStore,
-			Planner: b.TeamPlanner,
-			Mailbox: team.NewMailboxService(b.TeamStore),
+			Store:               b.TeamStore,
+			Planner:             b.TeamPlanner,
+			Mailbox:             team.NewMailboxService(b.TeamStore),
+			IgnoreBusyTeammates: true,
 		}, teamID); err != nil {
 			if !team.IsSQLiteLockError(err) {
 				return ReportTaskOutcomeResult{}, nil, err
