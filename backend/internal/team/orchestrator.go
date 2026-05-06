@@ -39,6 +39,12 @@ func NewOrchestrator(store Store, claims *PathClaimManager, scheduler Scheduler)
 
 // Run starts the orchestrator loop for a team.
 func (o *Orchestrator) Run(ctx context.Context, teamID string) error {
+	return o.RunWithWake(ctx, teamID, nil)
+}
+
+// RunWithWake starts the orchestrator loop for a team and accepts an optional
+// wake channel for event-driven checks between fallback ticks.
+func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-chan struct{}) error {
 	if o == nil || o.Store == nil {
 		return fmt.Errorf("orchestrator store is not configured")
 	}
@@ -54,26 +60,35 @@ func (o *Orchestrator) Run(ctx context.Context, teamID string) error {
 	defer ticker.Stop()
 
 	for {
+		locked := false
+		team, err := o.Store.GetTeam(ctx, teamID)
+		if err != nil {
+			if !IsSQLiteLockError(err) {
+				return err
+			}
+			locked = true
+		} else if team == nil || team.Status != TeamStatusActive {
+			return nil
+		} else if err := o.tick(ctx, teamID); err != nil {
+			if !IsSQLiteLockError(err) {
+				return err
+			}
+			locked = true
+		}
+		if locked {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(25 * time.Millisecond):
+				continue
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			team, err := o.Store.GetTeam(ctx, teamID)
-			if err != nil {
-				if IsSQLiteLockError(err) {
-					continue
-				}
-				return err
-			}
-			if team == nil || team.Status != TeamStatusActive {
-				return nil
-			}
-			if err := o.tick(ctx, teamID); err != nil {
-				if IsSQLiteLockError(err) {
-					continue
-				}
-				return err
-			}
+		case <-wake:
 		}
 	}
 }
@@ -303,10 +318,13 @@ func (o *Orchestrator) tick(ctx context.Context, teamID string) error {
 	if err != nil {
 		return err
 	}
-	if len(assignments) > 0 && o.Runner != nil {
-		for _, assignment := range assignments {
-			go o.executeAssignment(ctx, teamID, assignment)
+	if len(assignments) > 0 {
+		if o.Runner != nil {
+			for _, assignment := range assignments {
+				go o.executeAssignment(ctx, teamID, assignment)
+			}
 		}
+		return nil
 	}
 	return o.checkTerminalState(ctx, teamID)
 }

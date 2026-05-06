@@ -36,6 +36,10 @@ func NewSQLiteStore(cfg *StoreConfig) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open team db: %w", err)
 	}
+	if isSQLiteMemoryDSN(dsn) {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	}
 	store := &SQLiteStore{db: db}
 	if err := store.init(context.Background()); err != nil {
 		_ = db.Close()
@@ -1559,6 +1563,14 @@ func ensureSQLiteDSNOption(dsn, key, value string) string {
 		separator = "&"
 	}
 	return dsn + separator + key + "=" + value
+}
+
+func isSQLiteMemoryDSN(dsn string) bool {
+	lower := strings.ToLower(strings.TrimSpace(dsn))
+	if lower == ":memory:" {
+		return true
+	}
+	return strings.Contains(lower, "mode=memory")
 }
 
 func listPathClaimsTx(ctx context.Context, tx *sql.Tx, teamID string) ([]PathClaim, error) {

@@ -3,6 +3,7 @@ package team
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,29 @@ func newTestStore(t *testing.T) *SQLiteStore {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	return store
+}
+
+type notifyingClaimStore struct {
+	Store
+	claimed chan struct{}
+	once    sync.Once
+}
+
+func newNotifyingClaimStore(store Store) *notifyingClaimStore {
+	return &notifyingClaimStore{
+		Store:   store,
+		claimed: make(chan struct{}),
+	}
+}
+
+func (s *notifyingClaimStore) ClaimTask(ctx context.Context, id string, assignee string, leaseUntil time.Time, expectedVersion int64) (bool, error) {
+	claimed, err := s.Store.ClaimTask(ctx, id, assignee, leaseUntil, expectedVersion)
+	if claimed {
+		s.once.Do(func() {
+			close(s.claimed)
+		})
+	}
+	return claimed, err
 }
 
 func TestOrchestratorClaimReadyTasksHonorsMaxWriters(t *testing.T) {
@@ -146,6 +170,106 @@ func TestOrchestratorRunStopsWhenTeamNotActive(t *testing.T) {
 	orchestrator := NewOrchestrator(store, nil, nil)
 	orchestrator.TickInterval = 10 * time.Millisecond
 	require.NoError(t, orchestrator.Run(ctx, teamID))
+}
+
+func TestOrchestratorRunTicksImmediately(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "ready task",
+		Status: TaskStatusReady,
+	})
+	require.NoError(t, err)
+
+	claimStore := newNotifyingClaimStore(store)
+	orchestrator := NewOrchestrator(claimStore, nil, nil)
+	orchestrator.TickInterval = time.Hour
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- orchestrator.Run(runCtx, teamID)
+	}()
+
+	select {
+	case <-claimStore.claimed:
+	case err := <-errCh:
+		t.Fatalf("orchestrator exited before claiming a ready task: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("orchestrator did not claim a ready task immediately")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("orchestrator did not stop after context cancellation")
+	}
+}
+
+func TestOrchestratorRunWithWakeProcessesReadyTaskBeforeFallbackTick(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
+	require.NoError(t, err)
+	assignee := "mate-b"
+	_, err = store.CreateTask(ctx, Task{
+		TeamID:   teamID,
+		Title:    "already running task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
+	})
+	require.NoError(t, err)
+
+	claimStore := newNotifyingClaimStore(store)
+	orchestrator := NewOrchestrator(claimStore, nil, nil)
+	orchestrator.TickInterval = time.Hour
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	wake := make(chan struct{}, 1)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- orchestrator.RunWithWake(runCtx, teamID, wake)
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	_, err = store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "wake task",
+		Status: TaskStatusReady,
+	})
+	require.NoError(t, err)
+	wake <- struct{}{}
+
+	select {
+	case <-claimStore.claimed:
+	case err := <-errCh:
+		t.Fatalf("orchestrator exited before wake task was claimed: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("orchestrator did not claim wake task before fallback tick")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("orchestrator did not stop after context cancellation")
+	}
 }
 
 func TestOrchestratorExecuteAssignmentBlocksTaskAndReplans(t *testing.T) {
