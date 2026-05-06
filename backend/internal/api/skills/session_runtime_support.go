@@ -18,7 +18,10 @@ import (
 )
 
 type sessionActorClient struct {
-	hub *chat.SessionHub
+	hub        *chat.SessionHub
+	store      team.Store
+	eventStore chat.EventStore
+	eventBus   *runtimeevents.Bus
 }
 
 func (h *Handler) getAgentSessionController() *sessionAgentController {
@@ -52,6 +55,36 @@ func (c *sessionActorClient) SubmitPrompt(ctx context.Context, sessionID, prompt
 		return nil, fmt.Errorf("session result is nil")
 	}
 	return sessionResult, nil
+}
+
+func (c *sessionActorClient) TriggerTask(ctx context.Context, request team.TaskTriggerRequest) (*team.SessionResult, error) {
+	store := team.Store(nil)
+	if c != nil {
+		store = c.store
+	}
+	_, _ = team.AppendTaskDispatchRequested(ctx, store, request)
+	_ = c.deliverTaskAssignmentMailbox(ctx, request.SessionID, team.BuildTaskAssignmentMailboxMessage(request))
+	result, err := c.SubmitPrompt(ctx, request.SessionID, request.Prompt, request.RunMeta)
+	_, _ = team.AppendTaskDispatchCompleted(ctx, store, request, result, err)
+	return result, err
+}
+
+func (c *sessionActorClient) deliverTaskAssignmentMailbox(ctx context.Context, sessionID string, mail team.MailMessage) error {
+	if c == nil {
+		return nil
+	}
+	return chat.DeliverMailboxEventFirst(ctx, c.eventStore, c.eventBus, c.deliverMailboxToActor, sessionID, mail)
+}
+
+func (c *sessionActorClient) deliverMailboxToActor(ctx context.Context, sessionID string, mail team.MailMessage) error {
+	if c == nil || c.hub == nil {
+		return fmt.Errorf("session hub not configured")
+	}
+	actor, err := c.hub.GetOrCreate(strings.TrimSpace(sessionID))
+	if err != nil {
+		return err
+	}
+	return actor.DeliverMailboxMessage(ctx, mail)
 }
 
 func sessionResultFromActorRun(result *agent.Result, err error) *team.SessionResult {
@@ -298,9 +331,57 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 			}
 			mirrored.Payload["seq"] = seq
 		}
+		c.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, mirrored.Payload)
 		bus.Publish(mirrored)
 	}
 	unsubscribe = bus.SubscribeCancelable("", handler)
+}
+
+func (c *sessionAgentController) deliverSubagentCompletionMailbox(ctx context.Context, parentSessionID, childSessionID, childPath, childType, sourceEventType string, payload map[string]interface{}) {
+	if c == nil || c.handler == nil {
+		return
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	childSessionID = strings.TrimSpace(childSessionID)
+	if parentSessionID == "" || childSessionID == "" {
+		return
+	}
+	metadata := map[string]interface{}{
+		"session_id":        childSessionID,
+		"parent_session_id": parentSessionID,
+		"path":              strings.TrimSpace(childPath),
+		"source_event_type": strings.TrimSpace(sourceEventType),
+	}
+	if childType = strings.TrimSpace(childType); childType != "" {
+		metadata["agent_type"] = childType
+	}
+	if payload != nil {
+		if status, ok := payload["status"]; ok {
+			metadata["status"] = status
+		}
+		if success, ok := payload["success"]; ok {
+			metadata["success"] = success
+		}
+		if errText, ok := payload["error"]; ok {
+			metadata["error"] = errText
+		}
+		if seq, ok := payload["seq"]; ok {
+			metadata["event_seq"] = seq
+		}
+	}
+	status := "completed"
+	if value, ok := metadata["status"].(string); ok && strings.TrimSpace(value) != "" {
+		status = strings.TrimSpace(value)
+	}
+	message := team.MailMessage{
+		ID:        "subagent_completed_" + sanitizeAPIAgentPathSegment(childSessionID),
+		FromAgent: childSessionID,
+		ToAgent:   "parent",
+		Kind:      "subagent.completed",
+		Body:      fmt.Sprintf("Subagent %s completed with status %s.", childSessionID, status),
+		Metadata:  metadata,
+	}
+	_ = chat.DeliverMailboxEventFirst(ctx, c.handler.getSessionEventStore(), c.handler.getRuntimeEventBus(), c.deliverMailboxToActor, parentSessionID, message)
 }
 
 func (c *sessionAgentController) List(ctx context.Context, parentSessionID string, args toolbroker.ListAgentsArgs) (*toolbroker.AgentListResult, error) {
@@ -379,34 +460,19 @@ func (c *sessionAgentController) deliverAgentMessage(ctx context.Context, fromSe
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
 	}
-	actor, err := c.handler.getSessionHub().GetOrCreate(sessionID)
-	if err != nil {
-		return nil, err
-	}
 	delivered := false
 	triggered := false
-	if trigger && !apiAgentActorBusy(actor.State()) {
-		if err := actor.SubmitPromptAsync(ctx, message, nil); err != nil {
-			return nil, err
+	if trigger && !c.apiAgentSessionBusy(ctx, sessionID) {
+		if actor := c.apiAgentActor(ctx, sessionID); actor != nil && !apiAgentActorBusy(actor.State()) {
+			if err := actor.SubmitPromptAsync(ctx, message, nil); err != nil {
+				return nil, err
+			}
+			triggered = true
 		}
-		triggered = true
-	} else {
-		mail := team.MailMessage{
-			FromAgent: strings.TrimSpace(fromSessionID),
-			ToAgent:   sessionID,
-			Kind:      "agent_message",
-			Body:      message,
-			CreatedAt: time.Now().UTC(),
-			Metadata: map[string]interface{}{
-				"from_session_id":   strings.TrimSpace(fromSessionID),
-				"target_session_id": sessionID,
-				"trigger_turn":      trigger,
-			},
-		}
-		if trigger {
-			mail.Kind = "followup_task"
-		}
-		if err := actor.DeliverMailboxMessage(ctx, mail); err != nil {
+	}
+	if !triggered {
+		mail := toolbroker.BuildAgentMailboxMessage(fromSessionID, sessionID, message, trigger)
+		if err := c.deliverAgentMailboxEvent(ctx, sessionID, mail); err != nil {
 			return nil, err
 		}
 		delivered = true
@@ -424,6 +490,61 @@ func (c *sessionAgentController) deliverAgentMessage(ctx context.Context, fromSe
 		Triggered:       triggered,
 		Status:          status,
 	}, nil
+}
+
+func (c *sessionAgentController) apiAgentSessionBusy(ctx context.Context, sessionID string) bool {
+	if c == nil || c.handler == nil {
+		return false
+	}
+	if hub := c.handler.getSessionHub(); hub != nil {
+		if actor, ok := hub.Get(strings.TrimSpace(sessionID)); ok && actor != nil && apiAgentActorBusy(actor.State()) {
+			return true
+		}
+	}
+	if store := c.handler.getSessionRuntimeStore(); store != nil {
+		state, err := store.LoadState(ctx, strings.TrimSpace(sessionID))
+		if err == nil && apiAgentActorBusy(state) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *sessionAgentController) apiAgentActor(ctx context.Context, sessionID string) *chat.SessionActor {
+	if c == nil || c.handler == nil {
+		return nil
+	}
+	hub := c.handler.getSessionHub()
+	if hub == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	if actor, ok := hub.Get(sessionID); ok && actor != nil {
+		return actor
+	}
+	actor, err := hub.GetOrCreate(sessionID)
+	if err != nil {
+		return nil
+	}
+	return actor
+}
+
+func (c *sessionAgentController) deliverAgentMailboxEvent(ctx context.Context, sessionID string, mail team.MailMessage) error {
+	if c == nil || c.handler == nil {
+		return fmt.Errorf("handler not configured")
+	}
+	return chat.DeliverMailboxEventFirst(ctx, c.handler.getSessionEventStore(), c.handler.getRuntimeEventBus(), c.deliverMailboxToActor, sessionID, mail)
+}
+
+func (c *sessionAgentController) deliverMailboxToActor(ctx context.Context, sessionID string, mail team.MailMessage) error {
+	actor := c.apiAgentActor(ctx, sessionID)
+	if actor == nil {
+		return fmt.Errorf("session hub not configured")
+	}
+	return actor.DeliverMailboxMessage(ctx, mail)
 }
 
 func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.SendAgentInputArgs) (*toolbroker.AgentStatusResult, error) {
@@ -478,6 +599,9 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 }
 
 func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
+	if args.MailboxOnly {
+		return c.waitForMailboxEvent(ctx, args)
+	}
 	sessionIDs := normalizeAgentWaitIDs(args)
 	if len(sessionIDs) == 0 {
 		return nil, fmt.Errorf("id is required")
@@ -499,7 +623,7 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	wakeCh, unsubscribe := c.subscribeWaitEvents(sessionIDs)
+	wakeCh, unsubscribe := c.subscribeWaitEvents(waitCtx, sessionIDs)
 	defer unsubscribe()
 	for {
 		snapshots := make([]toolbroker.AgentStatusResult, 0, len(sessionIDs))
@@ -543,12 +667,65 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 	}
 }
 
-func (c *sessionAgentController) subscribeWaitEvents(sessionIDs []string) (<-chan struct{}, func()) {
-	if c == nil || c.handler == nil || len(sessionIDs) == 0 {
-		return nil, func() {}
+func (c *sessionAgentController) waitForMailboxEvent(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
+	if c == nil || c.handler == nil {
+		return nil, fmt.Errorf("handler not configured")
 	}
-	bus := c.handler.getRuntimeEventBus()
-	if bus == nil {
+	sessionID := firstNonEmptyString(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	store := c.handler.getSessionEventStore()
+	if store == nil {
+		return nil, fmt.Errorf("session event store not configured")
+	}
+	timeout := time.Duration(args.TimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		defaultWaitMs := c.agentsConfig().DefaultWaitTimeoutMs
+		if defaultWaitMs <= 0 {
+			defaultWaitMs = int((30 * time.Second).Milliseconds())
+		}
+		timeout = time.Duration(defaultWaitMs) * time.Millisecond
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	wakeCh, unsubscribe := c.subscribeMailboxEvents(waitCtx, store, sessionID)
+	defer unsubscribe()
+	for {
+		if events, ok, hasMailboxRows, err := listAPIMailboxEvents(waitCtx, store, sessionID, args.AfterSeq, 64); err != nil {
+			return nil, err
+		} else if ok {
+			if result := buildMailboxWaitResult(sessionID, events); result != nil {
+				return result, nil
+			}
+			if hasMailboxRows {
+				select {
+				case <-waitCtx.Done():
+					return &toolbroker.AgentWaitResult{TimedOut: true}, nil
+				case <-wakeCh:
+				case <-time.After(500 * time.Millisecond):
+				}
+				continue
+			}
+		}
+		events, err := store.ListEvents(waitCtx, sessionID, args.AfterSeq, 64)
+		if err != nil {
+			return nil, err
+		}
+		if result := buildMailboxWaitResult(sessionID, events); result != nil {
+			return result, nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return &toolbroker.AgentWaitResult{TimedOut: true}, nil
+		case <-wakeCh:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func (c *sessionAgentController) subscribeWaitEvents(ctx context.Context, sessionIDs []string) (<-chan struct{}, func()) {
+	if c == nil || c.handler == nil || len(sessionIDs) == 0 {
 		return nil, func() {}
 	}
 	targets := make(map[string]struct{}, len(sessionIDs))
@@ -561,6 +738,47 @@ func (c *sessionAgentController) subscribeWaitEvents(sessionIDs []string) (<-cha
 		return nil, func() {}
 	}
 	wakeCh := make(chan struct{}, 1)
+	wake := func() {
+		select {
+		case wakeCh <- struct{}{}:
+		default:
+		}
+	}
+	var unsubscribeStores []func()
+	if store := c.handler.getSessionEventStore(); store != nil {
+		if watcher, ok := store.(chat.EventWatcherStore); ok && watcher != nil {
+			for sessionID := range targets {
+				eventCh, unwatch := watcher.WatchEvents(ctx, sessionID)
+				unsubscribeStores = append(unsubscribeStores, unwatch)
+				go func(target string, ch <-chan runtimeevents.Event) {
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case event := <-ch:
+							if !strings.EqualFold(strings.TrimSpace(event.SessionID), target) {
+								continue
+							}
+							if !isAgentWaitWakeEvent(event.Type) {
+								continue
+							}
+							wake()
+						}
+					}
+				}(sessionID, eventCh)
+			}
+		}
+	}
+	bus := c.handler.getRuntimeEventBus()
+	if bus == nil {
+		return wakeCh, func() {
+			for _, unwatch := range unsubscribeStores {
+				if unwatch != nil {
+					unwatch()
+				}
+			}
+		}
+	}
 	handler := func(event runtimeevents.Event) {
 		if _, ok := targets[strings.TrimSpace(event.SessionID)]; !ok {
 			return
@@ -568,13 +786,19 @@ func (c *sessionAgentController) subscribeWaitEvents(sessionIDs []string) (<-cha
 		if !isAgentWaitWakeEvent(event.Type) {
 			return
 		}
-		select {
-		case wakeCh <- struct{}{}:
-		default:
+		wake()
+	}
+	unsubscribeBus := bus.SubscribeCancelable("", handler)
+	return wakeCh, func() {
+		for _, unwatch := range unsubscribeStores {
+			if unwatch != nil {
+				unwatch()
+			}
+		}
+		if unsubscribeBus != nil {
+			unsubscribeBus()
 		}
 	}
-	unsubscribe := bus.SubscribeCancelable("", handler)
-	return wakeCh, unsubscribe
 }
 
 func (c *sessionAgentController) ReadEvents(ctx context.Context, args toolbroker.ReadAgentEventsArgs) (*toolbroker.AgentEventsResult, error) {
@@ -582,11 +806,13 @@ func (c *sessionAgentController) ReadEvents(ctx context.Context, args toolbroker
 	if sessionID == "" {
 		return nil, fmt.Errorf("id is required")
 	}
-	resolvedSessionID, err := c.resolveTargetSessionID(ctx, sessionID)
-	if err != nil {
-		return nil, err
+	if !args.MailboxOnly {
+		resolvedSessionID, err := c.resolveTargetSessionID(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		sessionID = resolvedSessionID
 	}
-	sessionID = resolvedSessionID
 	store := c.handler.getSessionEventStore()
 	if store == nil {
 		return nil, fmt.Errorf("session event store not configured")
@@ -605,12 +831,39 @@ func (c *sessionAgentController) ReadEvents(ctx context.Context, args toolbroker
 		readCtx, cancel = context.WithTimeout(ctx, time.Duration(waitMs)*time.Millisecond)
 	}
 	defer cancel()
-	wakeCh, unsubscribe := c.subscribeReadEvents(sessionID)
+	wakeCh, unsubscribe := c.subscribeReadEvents(readCtx, store, sessionID)
+	if args.MailboxOnly {
+		unsubscribe()
+		wakeCh, unsubscribe = c.subscribeMailboxEvents(readCtx, store, sessionID)
+	}
 	defer unsubscribe()
 	for {
+		if args.MailboxOnly {
+			if events, ok, hasMailboxRows, err := listAPIMailboxEvents(readCtx, store, sessionID, args.AfterSeq, limit); err != nil {
+				return nil, err
+			} else if ok {
+				if len(events) > 0 || (hasMailboxRows && waitMs == 0) {
+					return buildAgentEventsResult(sessionID, events), nil
+				}
+				if hasMailboxRows {
+					select {
+					case <-readCtx.Done():
+						result := buildAgentEventsResult(sessionID, nil)
+						result.TimedOut = true
+						return result, nil
+					case <-wakeCh:
+					case <-time.After(500 * time.Millisecond):
+					}
+					continue
+				}
+			}
+		}
 		events, err := store.ListEvents(readCtx, sessionID, args.AfterSeq, limit)
 		if err != nil {
 			return nil, err
+		}
+		if args.MailboxOnly {
+			events = filterAPIMailboxWaitEvents(events)
 		}
 		if len(events) > 0 || waitMs == 0 {
 			return buildAgentEventsResult(sessionID, events), nil
@@ -626,7 +879,54 @@ func (c *sessionAgentController) ReadEvents(ctx context.Context, args toolbroker
 	}
 }
 
-func (c *sessionAgentController) subscribeReadEvents(sessionID string) (<-chan struct{}, func()) {
+func filterAPIMailboxWaitEvents(events []runtimeevents.Event) []runtimeevents.Event {
+	filtered := make([]runtimeevents.Event, 0, len(events))
+	for _, event := range events {
+		if !isAPIMailboxWaitEvent(event) {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered
+}
+
+func listAPIMailboxEvents(ctx context.Context, store chat.EventStore, sessionID string, afterSeq int64, limit int) ([]runtimeevents.Event, bool, bool, error) {
+	reader, ok := store.(chat.MailboxReaderStore)
+	if !ok || reader == nil {
+		return nil, false, false, nil
+	}
+	messages, err := reader.ListMailbox(ctx, sessionID, afterSeq, limit)
+	if err != nil {
+		return nil, true, false, err
+	}
+	hasMailboxRows := len(messages) > 0
+	if !hasMailboxRows {
+		if sequencer, ok := store.(chat.MailboxSequenceStore); ok && sequencer != nil {
+			seq, err := sequencer.LastMailboxSeq(ctx, sessionID)
+			if err != nil {
+				return nil, true, false, err
+			}
+			hasMailboxRows = seq > 0
+		}
+	}
+	return apiMailboxMessagesToEvents(sessionID, messages), true, hasMailboxRows, nil
+}
+
+func apiMailboxMessagesToEvents(sessionID string, messages []team.MailMessage) []runtimeevents.Event {
+	events := make([]runtimeevents.Event, 0, len(messages))
+	for _, message := range messages {
+		event := chat.NewMailboxReceivedEvent(sessionID, message)
+		if event.Payload == nil {
+			event.Payload = map[string]interface{}{}
+		}
+		event.Payload["seq"] = message.Seq
+		event.Payload["mailbox_seq"] = message.Seq
+		events = append(events, event)
+	}
+	return events
+}
+
+func (c *sessionAgentController) subscribeMailboxEvents(ctx context.Context, store chat.EventStore, sessionID string) (<-chan struct{}, func()) {
 	if c == nil || c.handler == nil {
 		return nil, func() {}
 	}
@@ -634,22 +934,113 @@ func (c *sessionAgentController) subscribeReadEvents(sessionID string) (<-chan s
 	if sessionID == "" {
 		return nil, func() {}
 	}
-	bus := c.handler.getRuntimeEventBus()
-	if bus == nil {
-		return nil, func() {}
-	}
 	wakeCh := make(chan struct{}, 1)
-	handler := func(event runtimeevents.Event) {
-		if !strings.EqualFold(strings.TrimSpace(event.SessionID), sessionID) {
-			return
-		}
+	wake := func() {
 		select {
 		case wakeCh <- struct{}{}:
 		default:
 		}
 	}
-	unsubscribe := bus.SubscribeCancelable("", handler)
-	return wakeCh, unsubscribe
+	unsubscribes := make([]func(), 0, 2)
+	if watcher, ok := store.(chat.MailboxWatcherStore); ok && watcher != nil {
+		mailCh, unwatch := watcher.WatchMailbox(ctx, sessionID)
+		unsubscribes = append(unsubscribes, unwatch)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case message := <-mailCh:
+					if strings.TrimSpace(message.ToAgent) != "" || message.Seq > 0 {
+						wake()
+					}
+				}
+			}
+		}()
+	}
+	if watcher, ok := store.(chat.EventWatcherStore); ok && watcher != nil {
+		eventCh, unwatch := watcher.WatchEvents(ctx, sessionID)
+		unsubscribes = append(unsubscribes, unwatch)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case event := <-eventCh:
+					if strings.EqualFold(strings.TrimSpace(event.SessionID), sessionID) && isAPIMailboxWaitEvent(event) {
+						wake()
+					}
+				}
+			}
+		}()
+	}
+	if len(unsubscribes) > 0 {
+		return wakeCh, func() {
+			for _, unsubscribe := range unsubscribes {
+				if unsubscribe != nil {
+					unsubscribe()
+				}
+			}
+		}
+	}
+	return c.subscribeReadEvents(ctx, store, sessionID)
+}
+
+func (c *sessionAgentController) subscribeReadEvents(ctx context.Context, store chat.EventStore, sessionID string) (<-chan struct{}, func()) {
+	if c == nil || c.handler == nil {
+		return nil, func() {}
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, func() {}
+	}
+	wakeCh := make(chan struct{}, 1)
+	wake := func() {
+		select {
+		case wakeCh <- struct{}{}:
+		default:
+		}
+	}
+	var unsubscribeStore func()
+	if watcher, ok := store.(chat.EventWatcherStore); ok && watcher != nil {
+		eventCh, unwatch := watcher.WatchEvents(ctx, sessionID)
+		unsubscribeStore = unwatch
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case event := <-eventCh:
+					if strings.EqualFold(strings.TrimSpace(event.SessionID), sessionID) {
+						wake()
+					}
+				}
+			}
+		}()
+	}
+	bus := c.handler.getRuntimeEventBus()
+	if bus == nil {
+		return wakeCh, func() {
+			if unsubscribeStore != nil {
+				unsubscribeStore()
+			}
+		}
+	}
+	handler := func(event runtimeevents.Event) {
+		if !strings.EqualFold(strings.TrimSpace(event.SessionID), sessionID) {
+			return
+		}
+		wake()
+	}
+	unsubscribeBus := bus.SubscribeCancelable("", handler)
+	return wakeCh, func() {
+		if unsubscribeStore != nil {
+			unsubscribeStore()
+		}
+		if unsubscribeBus != nil {
+			unsubscribeBus()
+		}
+	}
 }
 
 func (c *sessionAgentController) Close(ctx context.Context, sessionID string) (*toolbroker.AgentStatusResult, error) {
@@ -1228,6 +1619,37 @@ func buildAgentEventsResult(sessionID string, events []runtimeevents.Event) *too
 	result.Events = items
 	result.LatestSeq = latestSeq
 	return result
+}
+
+func buildMailboxWaitResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentWaitResult {
+	filtered := filterAPIMailboxWaitEvents(events)
+	if len(filtered) == 0 {
+		return nil
+	}
+	agentEvents := buildAgentEventsResult(sessionID, filtered)
+	result := &toolbroker.AgentWaitResult{
+		Events:    agentEvents.Events,
+		LatestSeq: agentEvents.LatestSeq,
+	}
+	if len(agentEvents.Events) > 0 {
+		event := agentEvents.Events[0]
+		result.Event = &event
+		result.MatchedSessionID = event.SessionID
+		result.ReadyCount = 1
+	}
+	return result
+}
+
+func isAPIMailboxWaitEvent(event runtimeevents.Event) bool {
+	switch strings.TrimSpace(event.Type) {
+	case chat.EventMailboxReceived,
+		"subagent.completed",
+		"team.completed",
+		"team.summary":
+		return true
+	default:
+		return false
+	}
 }
 
 func agentEventSeq(event runtimeevents.Event) int64 {

@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 const (
@@ -123,10 +123,19 @@ func (h *Handler) WaitSessionAgents(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "agent session controller not configured"))
 		return
 	}
+	parentSessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	if parentSessionID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
+		return
+	}
 	var req toolbroker.WaitAgentArgs
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
 		return
+	}
+	if sessionAgentWaitHasNoTarget(req) {
+		req.SessionID = parentSessionID
+		req.MailboxOnly = true
 	}
 	result, err := controller.Wait(r.Context(), req)
 	if err != nil {
@@ -138,17 +147,25 @@ func (h *Handler) WaitSessionAgents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func sessionAgentWaitHasNoTarget(req toolbroker.WaitAgentArgs) bool {
+	return strings.TrimSpace(req.ID) == "" &&
+		strings.TrimSpace(req.SessionID) == "" &&
+		len(req.IDs) == 0 &&
+		len(req.SessionIDs) == 0
+}
+
 func (h *Handler) ListSessionAgentEvents(w http.ResponseWriter, r *http.Request) {
 	controller := h.getAgentSessionController()
 	if controller == nil {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "agent session controller not configured"))
 		return
 	}
-	agentID := strings.TrimSpace(mux.Vars(r)["agent_id"])
-	if agentID == "" {
-		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "agent id is required"))
+	parentSessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	if parentSessionID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
 	}
+	agentID := strings.TrimSpace(mux.Vars(r)["agent_id"])
 	after := int64(0)
 	if raw := strings.TrimSpace(r.URL.Query().Get("after_seq")); raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
@@ -173,10 +190,12 @@ func (h *Handler) ListSessionAgentEvents(w http.ResponseWriter, r *http.Request)
 		waitMs = parsed
 	}
 	result, err := controller.ReadEvents(r.Context(), toolbroker.ReadAgentEventsArgs{
-		ID:       agentID,
-		AfterSeq: after,
-		Limit:    limit,
-		WaitMs:   waitMs,
+		ID:          agentID,
+		SessionID:   parentSessionID,
+		AfterSeq:    after,
+		Limit:       limit,
+		WaitMs:      waitMs,
+		MailboxOnly: agentID == "",
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -516,4 +535,3 @@ func submitSessionPrompt(actor *chat.SessionActor, requestCtx context.Context, p
 		}
 	}
 }
-

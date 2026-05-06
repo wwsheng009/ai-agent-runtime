@@ -594,6 +594,108 @@ func TestSessionAgentHTTP_SendWaitAndEvents(t *testing.T) {
 	assert.GreaterOrEqual(t, int(eventsResult["latest_seq"].(float64)), 1)
 }
 
+func TestWaitSessionAgentsWithoutTargetUsesParentMailbox(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = runtimeStore
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+	handler.SetSessionManager(sessionManager)
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+
+	parentSession, err := sessionManager.Create(ctx, "user-agent-http-parent-mailbox")
+	require.NoError(t, err)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	waitReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+parentSession.ID+"/agents/wait", strings.NewReader(`{
+		"timeout_ms":2000
+	}`))
+	waitRec := newSynchronizedResponseRecorder()
+	waitDone := make(chan struct{})
+	go func() {
+		router.ServeHTTP(waitRec, waitReq)
+		close(waitDone)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	_, err = runtimeStore.AppendEvent(ctx, chat.NewMailboxReceivedEvent(parentSession.ID, team.MailMessage{
+		FromAgent: "child-1",
+		ToAgent:   "parent",
+		Kind:      "agent_message",
+		Body:      "http parent mailbox hello",
+	}))
+	require.NoError(t, err)
+
+	select {
+	case <-waitDone:
+	case <-time.After(450 * time.Millisecond):
+		t.Fatal("wait endpoint did not wake from parent mailbox event")
+	}
+
+	require.Equal(t, http.StatusOK, waitRec.Code)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(waitRec.Body.Bytes(), &payload))
+	result := payload["result"].(map[string]interface{})
+	event := result["event"].(map[string]interface{})
+	assert.Equal(t, chat.EventMailboxReceived, event["type"])
+	assert.Equal(t, parentSession.ID, event["session_id"])
+	assert.Equal(t, float64(1), result["ready_count"])
+	assert.GreaterOrEqual(t, int(result["latest_seq"].(float64)), 1)
+	eventPayload := event["payload"].(map[string]interface{})
+	assert.Equal(t, "http parent mailbox hello", eventPayload["body"])
+}
+
+func TestListSessionAgentEventsWithoutAgentReadsParentMailbox(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = runtimeStore
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+	handler.SetSessionManager(sessionManager)
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+
+	parentSession, err := sessionManager.Create(context.Background(), "user-agent-http-parent-events")
+	require.NoError(t, err)
+	_, err = runtimeStore.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      chat.EventAssistantMessage,
+		SessionID: parentSession.ID,
+		Payload:   map[string]interface{}{"content": "not mailbox"},
+	})
+	require.NoError(t, err)
+	_, err = runtimeStore.AppendEvent(context.Background(), chat.NewMailboxReceivedEvent(parentSession.ID, team.MailMessage{
+		FromAgent: "child-1",
+		ToAgent:   "parent",
+		Kind:      "agent_message",
+		Body:      "http parent mailbox events read hello",
+	}))
+	require.NoError(t, err)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+parentSession.ID+"/agents/events?after_seq=0&limit=20&wait_ms=0", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	result := payload["result"].(map[string]interface{})
+	assert.Equal(t, parentSession.ID, result["session_id"])
+	assert.Equal(t, float64(1), result["count"])
+	events := result["events"].([]interface{})
+	require.Len(t, events, 1)
+	event := events[0].(map[string]interface{})
+	assert.Equal(t, chat.EventMailboxReceived, event["type"])
+	eventPayload := event["payload"].(map[string]interface{})
+	assert.Equal(t, "http parent mailbox events read hello", eventPayload["body"])
+}
+
 func TestListSessionToolReceiptsReturnsPersistedReceipts(t *testing.T) {
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
 	runtimeStore := chat.NewInMemoryRuntimeStore(64)
