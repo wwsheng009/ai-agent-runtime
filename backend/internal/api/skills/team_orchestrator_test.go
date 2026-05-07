@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -114,6 +115,11 @@ func TestSessionActorClientTriggerTaskPersistsDispatchEvents(t *testing.T) {
 	assert.Equal(t, team.TaskAssignmentMailboxKind, mailboxMessages[0].Kind)
 	assert.Equal(t, int64(1), mailboxMessages[0].Seq)
 	assert.Equal(t, team.TaskAssignmentControlMessageType, mailboxMessages[0].Metadata["message_type"])
+	controlMessages, err := eventStore.ListAgentControlMailbox(context.Background(), "session-1", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, controlMessages, 1)
+	assert.Equal(t, team.TaskAssignmentMailboxKind, controlMessages[0].Kind)
+	assert.Equal(t, team.TaskAssignmentControlMessageType, controlMessages[0].Metadata["message_type"])
 }
 
 func TestHandlerDeliverTeamLifecycleMailboxPersistsToLeadSession(t *testing.T) {
@@ -152,7 +158,67 @@ func TestHandlerDeliverTeamLifecycleMailboxPersistsToLeadSession(t *testing.T) {
 	assert.Equal(t, "lead summary", messages[0].Body)
 	assert.Equal(t, "team.summary", messages[0].Metadata["event_type"])
 	assert.Equal(t, team.TeamLifecycleControlMessageType, messages[0].Metadata["message_type"])
+	assert.Equal(t, agentcontrol.ActionTeamLifecycle, messages[0].Metadata["control_action"])
 	assert.Equal(t, "done", messages[0].Metadata["status"])
+	controlMessages, err := eventStore.ListAgentControlMailbox(ctx, "lead-session", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, controlMessages, 1)
+	assert.Equal(t, team.TeamLifecycleMailboxKind, controlMessages[0].Kind)
+	assert.Equal(t, team.TeamLifecycleControlMessageType, controlMessages[0].Metadata["message_type"])
+}
+
+func TestHandlerDeliverTeamTaskLifecycleMailboxPersistsToTeammateSession(t *testing.T) {
+	ctx := context.Background()
+	store, err := team.NewSQLiteStore(&team.StoreConfig{
+		DSN: "file:skills-team-task-lifecycle-mailbox?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	_, err = store.CreateTeam(ctx, team.Team{
+		ID:            "team-1",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, team.Teammate{
+		ID:        "mate-1",
+		TeamID:    "team-1",
+		SessionID: "mate-session",
+		State:     team.TeammateStateBusy,
+	})
+	require.NoError(t, err)
+
+	eventStore := chat.NewInMemoryRuntimeStore(16)
+	handler := &Handler{
+		teamStore:         store,
+		sessionEventStore: eventStore,
+		runtimeEventBus:   runtimeevents.NewBusWithRetention(16),
+	}
+	handler.deliverTeamTaskLifecycleMailbox(ctx, team.TeamEvent{
+		Type:   "task.failed",
+		TeamID: "team-1",
+		Payload: map[string]interface{}{
+			"task_id":    "task-1",
+			"assignee":   "mate-1",
+			"summary":    "failed",
+			"error_type": "test",
+		},
+	})
+
+	messages, err := eventStore.ListMailbox(ctx, "mate-session", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, team.TaskLifecycleMailboxKind, messages[0].Kind)
+	assert.Equal(t, "failed", messages[0].Body)
+	assert.Equal(t, "task.failed", messages[0].Metadata["event_type"])
+	assert.Equal(t, team.TaskLifecycleControlMessageType, messages[0].Metadata["message_type"])
+	assert.Equal(t, team.TaskLifecycleControlAction, messages[0].Metadata["control_action"])
+	assert.Equal(t, "test", messages[0].Metadata["error_type"])
+	controlMessages, err := eventStore.ListAgentControlMailbox(ctx, "mate-session", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, controlMessages, 1)
+	assert.Equal(t, team.TaskLifecycleMailboxKind, controlMessages[0].Kind)
+	assert.Equal(t, team.TaskLifecycleControlMessageType, controlMessages[0].Metadata["message_type"])
 }
 
 func TestHandlerDispatchTeamMailboxMessageHandlesEmptyTargets(t *testing.T) {

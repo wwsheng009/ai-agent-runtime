@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -346,41 +347,8 @@ func (c *sessionAgentController) deliverSubagentCompletionMailbox(ctx context.Co
 	if parentSessionID == "" || childSessionID == "" {
 		return
 	}
-	metadata := map[string]interface{}{
-		"session_id":        childSessionID,
-		"parent_session_id": parentSessionID,
-		"path":              strings.TrimSpace(childPath),
-		"source_event_type": strings.TrimSpace(sourceEventType),
-	}
-	if childType = strings.TrimSpace(childType); childType != "" {
-		metadata["agent_type"] = childType
-	}
-	if payload != nil {
-		if status, ok := payload["status"]; ok {
-			metadata["status"] = status
-		}
-		if success, ok := payload["success"]; ok {
-			metadata["success"] = success
-		}
-		if errText, ok := payload["error"]; ok {
-			metadata["error"] = errText
-		}
-		if seq, ok := payload["seq"]; ok {
-			metadata["event_seq"] = seq
-		}
-	}
-	status := "completed"
-	if value, ok := metadata["status"].(string); ok && strings.TrimSpace(value) != "" {
-		status = strings.TrimSpace(value)
-	}
-	message := team.MailMessage{
-		ID:        "subagent_completed_" + sanitizeAPIAgentPathSegment(childSessionID),
-		FromAgent: childSessionID,
-		ToAgent:   "parent",
-		Kind:      "subagent.completed",
-		Body:      fmt.Sprintf("Subagent %s completed with status %s.", childSessionID, status),
-		Metadata:  metadata,
-	}
+	message := toolbroker.BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, childPath, childType, sourceEventType, payload)
+	message.ID = "subagent_completed_" + sanitizeAPIAgentPathSegment(childSessionID)
 	_ = chat.DeliverMailboxEventFirst(ctx, c.handler.getSessionEventStore(), c.handler.getRuntimeEventBus(), c.deliverMailboxToActor, parentSessionID, message)
 }
 
@@ -891,23 +859,12 @@ func filterAPIMailboxWaitEvents(events []runtimeevents.Event) []runtimeevents.Ev
 }
 
 func listAPIMailboxEvents(ctx context.Context, store chat.EventStore, sessionID string, afterSeq int64, limit int) ([]runtimeevents.Event, bool, bool, error) {
-	reader, ok := store.(chat.MailboxReaderStore)
-	if !ok || reader == nil {
-		return nil, false, false, nil
-	}
-	messages, err := reader.ListMailbox(ctx, sessionID, afterSeq, limit)
+	messages, ok, hasMailboxRows, err := chat.ListMailboxAgentControlFirst(ctx, store, sessionID, afterSeq, limit)
 	if err != nil {
-		return nil, true, false, err
+		return nil, ok, false, err
 	}
-	hasMailboxRows := len(messages) > 0
-	if !hasMailboxRows {
-		if sequencer, ok := store.(chat.MailboxSequenceStore); ok && sequencer != nil {
-			seq, err := sequencer.LastMailboxSeq(ctx, sessionID)
-			if err != nil {
-				return nil, true, false, err
-			}
-			hasMailboxRows = seq > 0
-		}
+	if !ok {
+		return nil, false, false, nil
 	}
 	return apiMailboxMessagesToEvents(sessionID, messages), true, hasMailboxRows, nil
 }
@@ -942,15 +899,17 @@ func (c *sessionAgentController) subscribeMailboxEvents(ctx context.Context, sto
 		}
 	}
 	unsubscribes := make([]func(), 0, 2)
-	if watcher, ok := store.(chat.MailboxWatcherStore); ok && watcher != nil {
-		mailCh, unwatch := watcher.WatchMailbox(ctx, sessionID)
+	if mailCh, unwatch, ok := chat.WatchMailboxAgentControlFirst(ctx, store, sessionID); ok {
 		unsubscribes = append(unsubscribes, unwatch)
 		go func() {
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case message := <-mailCh:
+				case message, open := <-mailCh:
+					if !open {
+						return
+					}
 					if strings.TrimSpace(message.ToAgent) != "" || message.Seq > 0 {
 						wake()
 					}
@@ -1230,6 +1189,9 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 				result.AgentType = strings.TrimSpace(text)
 			}
 		}
+		if err := c.enrichAgentTeamProjection(ctx, session, result); err != nil {
+			return nil, err
+		}
 		messages := session.GetMessages()
 		for index := len(messages) - 1; index >= 0; index-- {
 			if result.LastMessageRole == "" {
@@ -1259,6 +1221,46 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 		}
 	}
 	return result, nil
+}
+
+func (c *sessionAgentController) enrichAgentTeamProjection(ctx context.Context, session *chat.Session, result *toolbroker.AgentStatusResult) error {
+	if session == nil || result == nil {
+		return nil
+	}
+	if value, ok := session.GetContext(toolbroker.AgentSessionContextTeamID); ok {
+		if text, ok := value.(string); ok {
+			result.TeamID = strings.TrimSpace(text)
+		}
+	}
+	if value, ok := session.GetContext(toolbroker.AgentSessionContextTeammateID); ok {
+		if text, ok := value.(string); ok {
+			result.TeammateID = strings.TrimSpace(text)
+		}
+	}
+	if c == nil || c.handler == nil || c.handler.teamStore == nil {
+		return nil
+	}
+	if result.TeamID == "" || result.TeammateID == "" {
+		record, teammate, err := team.FindTeammateBySession(ctx, c.handler.teamStore, session.ID)
+		if err != nil {
+			return err
+		}
+		if record != nil {
+			result.TeamID = strings.TrimSpace(record.ID)
+		}
+		if teammate != nil {
+			result.TeammateID = strings.TrimSpace(teammate.ID)
+		}
+	}
+	task, err := team.ActiveAgentControlTaskRecordForAssignee(ctx, c.handler.teamStore, result.TeamID, result.TeammateID)
+	if err != nil {
+		return err
+	}
+	if task != nil {
+		result.CurrentTaskID = strings.TrimSpace(task.ID)
+		result.CurrentTaskStatus = strings.TrimSpace(task.Status)
+	}
+	return nil
 }
 
 func normalizeAgentWaitIDs(args toolbroker.WaitAgentArgs) []string {
@@ -1346,7 +1348,11 @@ func (c *sessionAgentController) listSessions(ctx context.Context, preferredSess
 	}
 	preferredSessionID = strings.TrimSpace(preferredSessionID)
 	if strings.HasPrefix(preferredSessionID, "/") {
-		return c.listAllSessions(ctx)
+		sessions, err := c.listAllSessions(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return c.applyTeamTeammateAgentContexts(ctx, sessions, "")
 	}
 	userID := "agent"
 	if preferredSessionID != "" {
@@ -1354,7 +1360,74 @@ func (c *sessionAgentController) listSessions(ctx context.Context, preferredSess
 			userID = strings.TrimSpace(session.UserID)
 		}
 	}
-	return c.handler.sessionManager.List(ctx, userID)
+	sessions, err := c.handler.sessionManager.List(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return c.applyTeamTeammateAgentContexts(ctx, sessions, preferredSessionID)
+}
+
+func (c *sessionAgentController) applyTeamTeammateAgentContexts(ctx context.Context, sessions []*chat.Session, fallbackLeadSessionID string) ([]*chat.Session, error) {
+	if c == nil || c.handler == nil || c.handler.teamStore == nil || c.handler.sessionManager == nil {
+		return sessions, nil
+	}
+	for _, session := range sessions {
+		changed, err := c.applyTeamTeammateAgentContext(ctx, session, fallbackLeadSessionID)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			if err := c.handler.sessionManager.Update(ctx, session); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return sessions, nil
+}
+
+func (c *sessionAgentController) applyTeamTeammateAgentContext(ctx context.Context, session *chat.Session, fallbackLeadSessionID string) (bool, error) {
+	if c == nil || c.handler == nil || c.handler.teamStore == nil || session == nil {
+		return false, nil
+	}
+	sessionID := strings.TrimSpace(session.ID)
+	if sessionID == "" {
+		return false, nil
+	}
+	teams, err := c.handler.teamStore.ListTeams(ctx, team.TeamFilter{})
+	if err != nil {
+		return false, err
+	}
+	for _, record := range teams {
+		teamID := strings.TrimSpace(record.ID)
+		if teamID == "" {
+			continue
+		}
+		teammates, err := c.handler.teamStore.ListTeammates(ctx, teamID)
+		if err != nil {
+			return false, err
+		}
+		for _, mate := range teammates {
+			if !strings.EqualFold(strings.TrimSpace(mate.SessionID), sessionID) {
+				continue
+			}
+			leadSessionID := firstNonEmptyString(strings.TrimSpace(record.LeadSessionID), strings.TrimSpace(fallbackLeadSessionID))
+			changed := false
+			if leadSessionID != "" {
+				changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextParentSessionID, leadSessionID) || changed
+				changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextRootSessionID, leadSessionID) || changed
+			}
+			changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextTeamID, teamID) || changed
+			changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextTeammateID, mate.ID) || changed
+			path := agentcontrol.TeamTeammatePath(teamID, mate.ID, mate.Name, sessionID)
+			changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextPath, path) || changed
+			changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextDepth, 1) || changed
+			if profile := strings.TrimSpace(mate.Profile); profile != "" {
+				changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextAgentType, profile) || changed
+			}
+			return changed, nil
+		}
+	}
+	return false, nil
 }
 
 func (c *sessionAgentController) listAllSessions(ctx context.Context) ([]*chat.Session, error) {
@@ -1370,100 +1443,39 @@ func (c *sessionAgentController) listAllSessions(ctx context.Context) ([]*chat.S
 }
 
 func apiAgentChildDepth(parent *chat.Session) int {
-	if parent == nil {
-		return 1
-	}
-	return apiAgentSessionDepth(parent) + 1
+	return agentcontrol.ChildDepth(parent)
 }
 
 func apiAgentSessionDepth(session *chat.Session) int {
-	if session == nil {
-		return 0
-	}
-	value, ok := session.GetContext(toolbroker.AgentSessionContextDepth)
-	if !ok {
-		return 0
-	}
-	switch typed := value.(type) {
-	case int:
-		return typed
-	case int64:
-		return int(typed)
-	case float64:
-		return int(typed)
-	case string:
-		depth, _ := strconv.Atoi(strings.TrimSpace(typed))
-		return depth
-	default:
-		return 0
-	}
+	return agentcontrol.SessionDepth(session)
 }
 
 func apiAgentRootSessionID(session *chat.Session, fallback string) string {
+	sessionID := ""
 	if session != nil {
-		if value, ok := session.GetContext(toolbroker.AgentSessionContextRootSessionID); ok {
-			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
-				return strings.TrimSpace(text)
-			}
-		}
+		sessionID = session.ID
 	}
-	if fallback = strings.TrimSpace(fallback); fallback != "" {
-		return fallback
-	}
-	if session != nil {
-		return strings.TrimSpace(session.ID)
-	}
-	return ""
+	return agentcontrol.RootSessionID(session, sessionID, fallback)
 }
 
 func apiAgentChildPath(parent *chat.Session, sessionID string) string {
-	parentPath := apiAgentSessionPath(parent)
-	if parentPath == "" {
-		parentPath = "/root"
+	parentID := ""
+	if parent != nil {
+		parentID = parent.ID
 	}
-	return strings.TrimRight(parentPath, "/") + "/" + sanitizeAPIAgentPathSegment(sessionID)
+	return agentcontrol.ChildPath(parent, parentID, sessionID, parent != nil && isAPIAgentSession(parent))
 }
 
 func apiAgentSessionPath(session *chat.Session) string {
-	if session == nil {
-		return ""
+	sessionID := ""
+	if session != nil {
+		sessionID = session.ID
 	}
-	if value, ok := session.GetContext(toolbroker.AgentSessionContextPath); ok {
-		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
-			return strings.TrimSpace(text)
-		}
-	}
-	if isAPIAgentSession(session) {
-		return "/root/" + sanitizeAPIAgentPathSegment(session.ID)
-	}
-	return "/root"
+	return agentcontrol.SessionPath(session, sessionID, isAPIAgentSession(session))
 }
 
 func sanitizeAPIAgentPathSegment(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "agent"
-	}
-	var b strings.Builder
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '_' || r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('-')
-		}
-	}
-	text := strings.Trim(b.String(), "-")
-	if text == "" {
-		return "agent"
-	}
-	return text
+	return agentcontrol.SanitizePathSegment(value)
 }
 
 func isAPIAgentSession(session *chat.Session) bool {

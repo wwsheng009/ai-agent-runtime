@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -135,6 +136,7 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 				traceID = strings.TrimSpace(raw)
 			}
 			h.deliverTeamLifecycleMailbox(context.Background(), event)
+			h.deliverTeamTaskLifecycleMailbox(context.Background(), event)
 			h.getRuntimeEventBus().Publish(runtimeevents.Event{
 				Type:      normalizeTeamEventType(event.Type),
 				TraceID:   traceID,
@@ -271,6 +273,44 @@ func (h *Handler) deliverTeamLifecycleMailbox(ctx context.Context, event team.Te
 		return
 	}
 	_ = chat.DeliverMailboxEventFirst(ctx, h.getSessionEventStore(), nil, nil, sessionID, team.BuildTeamLifecycleMailboxMessage(event))
+}
+
+func (h *Handler) deliverTeamTaskLifecycleMailbox(ctx context.Context, event team.TeamEvent) {
+	if h == nil {
+		return
+	}
+	switch strings.TrimSpace(event.Type) {
+	case "task.completed", "task.failed":
+	default:
+		return
+	}
+	assignee := teamEventPayloadString(event.Payload["assignee"])
+	if assignee == "" {
+		return
+	}
+	store := h.getTeamStore()
+	if store == nil {
+		return
+	}
+	mate, err := store.GetTeammate(ctx, assignee)
+	if err != nil || mate == nil || strings.TrimSpace(mate.SessionID) == "" {
+		return
+	}
+	_ = chat.DeliverMailboxEventFirst(ctx, h.getSessionEventStore(), nil, nil, strings.TrimSpace(mate.SessionID), team.BuildTaskLifecycleMailboxMessage(event))
+}
+
+func teamEventPayloadString(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
 }
 
 func (h *Handler) teamLifecycleMailboxSessionID(ctx context.Context, teamID string) string {
@@ -1321,6 +1361,371 @@ func (h *Handler) UpdateTeammateHeartbeat(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// ListAgentControlTasks lists tasks through the shared AgentControl task
+// registry read model instead of the team-native task shape.
+func (h *Handler) ListAgentControlTasks(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	limit, err := parseOptionalLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	filter := agentcontrol.TaskFilter{
+		Workflow:   strings.TrimSpace(r.URL.Query().Get("workflow")),
+		TeamID:     strings.TrimSpace(r.URL.Query().Get("team_id")),
+		Assignee:   strings.TrimSpace(r.URL.Query().Get("assignee")),
+		Status:     parseAgentControlTaskStatusList(r.URL.Query().Get("status")),
+		PathPrefix: strings.TrimSpace(r.URL.Query().Get("path_prefix")),
+		Limit:      limit,
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	records, err := registry.ListAgentControlTasks(r.Context(), filter)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"tasks": records,
+		"count": len(records),
+		"filters": map[string]interface{}{
+			"workflow":    filter.Workflow,
+			"team_id":     filter.TeamID,
+			"assignee":    filter.Assignee,
+			"status":      filter.Status,
+			"path_prefix": filter.PathPrefix,
+			"limit":       filter.Limit,
+		},
+	})
+}
+
+// CreateAgentControlTask creates a task through the shared AgentControl task
+// registry write seam.
+func (h *Handler) CreateAgentControlTask(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	var req struct {
+		ID           string   `json:"id,omitempty"`
+		Workflow     string   `json:"workflow,omitempty"`
+		TeamID       string   `json:"team_id,omitempty"`
+		ParentTaskID string   `json:"parent_task_id,omitempty"`
+		Title        string   `json:"title,omitempty"`
+		Goal         string   `json:"goal,omitempty"`
+		Status       string   `json:"status,omitempty"`
+		Priority     int      `json:"priority,omitempty"`
+		Assignee     string   `json:"assignee,omitempty"`
+		Inputs       []string `json:"inputs,omitempty"`
+		ReadPaths    []string `json:"read_paths,omitempty"`
+		WritePaths   []string `json:"write_paths,omitempty"`
+		Deliverables []string `json:"deliverables,omitempty"`
+		Summary      string   `json:"summary,omitempty"`
+		ResultRef    string   `json:"result_ref,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	status, err := parseTaskStatus(req.Status)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	record, err := registry.CreateAgentControlTask(r.Context(), agentcontrol.TaskCreateRequest{
+		ID:           req.ID,
+		Workflow:     firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		TeamID:       req.TeamID,
+		ParentTaskID: req.ParentTaskID,
+		Title:        req.Title,
+		Goal:         req.Goal,
+		Status:       string(status),
+		Priority:     req.Priority,
+		Assignee:     req.Assignee,
+		Inputs:       req.Inputs,
+		ReadPaths:    req.ReadPaths,
+		WritePaths:   req.WritePaths,
+		Deliverables: req.Deliverables,
+		Summary:      req.Summary,
+		ResultRef:    req.ResultRef,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"task": record,
+	})
+}
+
+// UpdateAgentControlTaskStatus updates a task status through the shared
+// AgentControl task registry write seam.
+func (h *Handler) UpdateAgentControlTaskStatus(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	taskID := mux.Vars(r)["task_id"]
+	var req struct {
+		Workflow string `json:"workflow,omitempty"`
+		Status   string `json:"status,omitempty"`
+		Summary  string `json:"summary,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	status, err := parseTaskStatus(req.Status)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	record, err := registry.UpdateAgentControlTaskStatus(r.Context(), agentcontrol.TaskStatusUpdateRequest{
+		ID:       taskID,
+		Workflow: firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		Status:   string(status),
+		Summary:  req.Summary,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
+}
+
+// ClaimAgentControlTask claims a task through the shared AgentControl task
+// registry write seam.
+func (h *Handler) ClaimAgentControlTask(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	taskID := mux.Vars(r)["task_id"]
+	var req struct {
+		Workflow        string   `json:"workflow,omitempty"`
+		TeamID          string   `json:"team_id,omitempty"`
+		Assignee        string   `json:"assignee,omitempty"`
+		LeaseUntil      string   `json:"lease_until,omitempty"`
+		DurationSec     int      `json:"duration_sec,omitempty"`
+		ExpectedVersion int64    `json:"expected_version,omitempty"`
+		ReadPaths       []string `json:"read_paths,omitempty"`
+		WritePaths      []string `json:"write_paths,omitempty"`
+		UsePathClaims   bool     `json:"use_path_claims,omitempty"`
+		WorkspaceRoot   string   `json:"workspace_root,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	leaseUntil, err := resolveLeaseUntil(req.LeaseUntil, req.DurationSec, h.defaultLeaseDuration())
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.UsePathClaims && strings.TrimSpace(req.WorkspaceRoot) == "" {
+		if claims := h.getTeamClaimsManager(); claims != nil {
+			req.WorkspaceRoot = claims.Root()
+		}
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	record, claimed, err := registry.ClaimAgentControlTask(r.Context(), agentcontrol.TaskClaimRequest{
+		ID:              taskID,
+		Workflow:        firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		TeamID:          req.TeamID,
+		Assignee:        req.Assignee,
+		LeaseUntil:      leaseUntil,
+		ExpectedVersion: req.ExpectedVersion,
+		ReadPaths:       req.ReadPaths,
+		WritePaths:      req.WritePaths,
+		UsePathClaims:   req.UsePathClaims,
+		WorkspaceRoot:   req.WorkspaceRoot,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"task":    record,
+		"claimed": claimed,
+	})
+}
+
+// RenewAgentControlTaskLease renews a task lease through the shared
+// AgentControl task registry write seam.
+func (h *Handler) RenewAgentControlTaskLease(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	taskID := mux.Vars(r)["task_id"]
+	var req struct {
+		Workflow    string `json:"workflow,omitempty"`
+		LeaseUntil  string `json:"lease_until,omitempty"`
+		DurationSec int    `json:"duration_sec,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	leaseUntil, err := resolveLeaseUntil(req.LeaseUntil, req.DurationSec, h.defaultLeaseDuration())
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	record, err := registry.RenewAgentControlTaskLease(r.Context(), agentcontrol.TaskLeaseRenewRequest{
+		ID:         taskID,
+		Workflow:   firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		LeaseUntil: leaseUntil,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if claims := h.getTeamClaimsManager(); claims != nil {
+		_ = claims.Renew(r.Context(), taskID, leaseUntil)
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
+}
+
+// ReleaseAgentControlTask releases a task lease through the shared
+// AgentControl task registry write seam.
+func (h *Handler) ReleaseAgentControlTask(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	taskID := mux.Vars(r)["task_id"]
+	var req struct {
+		Workflow   string `json:"workflow,omitempty"`
+		Status     string `json:"status,omitempty"`
+		Summary    string `json:"summary,omitempty"`
+		TeammateID string `json:"teammate_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	status, err := parseTaskStatus(req.Status)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if status == "" {
+		status = team.TaskStatusPending
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	record, err := registry.ReleaseAgentControlTask(r.Context(), agentcontrol.TaskReleaseRequest{
+		ID:       taskID,
+		Workflow: firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		Status:   string(status),
+		Summary:  req.Summary,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if claims := h.getTeamClaimsManager(); claims != nil {
+		_ = claims.Release(r.Context(), taskID)
+	}
+	if teammateID := strings.TrimSpace(req.TeammateID); teammateID != "" {
+		_ = store.UpdateTeammateState(r.Context(), teammateID, team.TeammateStateIdle)
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
+}
+
+// UpdateAgentControlTaskTerminal applies a done/failed terminal task
+// transition through the shared AgentControl task registry write seam.
+func (h *Handler) UpdateAgentControlTaskTerminal(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	taskID := mux.Vars(r)["task_id"]
+	var req struct {
+		Workflow        string  `json:"workflow,omitempty"`
+		TeamID          string  `json:"team_id,omitempty"`
+		Status          string  `json:"status,omitempty"`
+		Summary         string  `json:"summary,omitempty"`
+		ResultRef       *string `json:"result_ref,omitempty"`
+		TeammateID      string  `json:"teammate_id,omitempty"`
+		SkipStateUpdate bool    `json:"skip_state_update,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	status, err := parseTaskStatus(req.Status)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	record, err := registry.UpdateAgentControlTaskTerminal(r.Context(), agentcontrol.TaskTerminalUpdateRequest{
+		ID:              taskID,
+		Workflow:        firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		TeamID:          req.TeamID,
+		Status:          string(status),
+		Summary:         req.Summary,
+		ResultRef:       normalizeOptionalString(req.ResultRef),
+		TeammateID:      req.TeammateID,
+		SkipStateUpdate: req.SkipStateUpdate,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if claims := h.getTeamClaimsManager(); claims != nil {
+		_ = claims.Release(r.Context(), taskID)
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
+}
+
+// BlockAgentControlTask blocks a task through the shared AgentControl task
+// registry write seam.
+func (h *Handler) BlockAgentControlTask(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	taskID := mux.Vars(r)["task_id"]
+	var req struct {
+		Workflow        string `json:"workflow,omitempty"`
+		Summary         string `json:"summary,omitempty"`
+		TeammateID      string `json:"teammate_id,omitempty"`
+		SkipStateUpdate bool   `json:"skip_state_update,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	record, err := registry.BlockAgentControlTask(r.Context(), agentcontrol.TaskBlockRequest{
+		ID:              taskID,
+		Workflow:        firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		Summary:         req.Summary,
+		TeammateID:      req.TeammateID,
+		SkipStateUpdate: req.SkipStateUpdate,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
+}
+
 // ListTasks lists tasks for a team.
 func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
 	store := h.getTeamStore()
@@ -1703,46 +2108,42 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	var parentID *string
-	if strings.TrimSpace(req.ParentTaskID) != "" {
-		value := strings.TrimSpace(req.ParentTaskID)
-		parentID = &value
-	}
-	var assignee *string
-	if strings.TrimSpace(req.Assignee) != "" {
-		value := strings.TrimSpace(req.Assignee)
-		assignee = &value
-	}
-	var resultRef *string
-	if strings.TrimSpace(req.ResultRef) != "" {
-		value := strings.TrimSpace(req.ResultRef)
-		resultRef = &value
-	}
-	task := team.Task{
-		ID:           strings.TrimSpace(req.ID),
+	taskRegistry := team.NewAgentControlTaskRegistry(store)
+	record, err := taskRegistry.CreateAgentControlTask(r.Context(), agentcontrol.TaskCreateRequest{
+		ID:           req.ID,
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
 		TeamID:       teamID,
-		ParentTaskID: parentID,
-		Title:        strings.TrimSpace(req.Title),
-		Goal:         strings.TrimSpace(req.Goal),
-		Status:       status,
+		ParentTaskID: req.ParentTaskID,
+		Title:        req.Title,
+		Goal:         req.Goal,
+		Status:       string(status),
 		Priority:     req.Priority,
-		Assignee:     assignee,
+		Assignee:     req.Assignee,
 		Inputs:       req.Inputs,
 		ReadPaths:    req.ReadPaths,
 		WritePaths:   req.WritePaths,
 		Deliverables: req.Deliverables,
-		Summary:      strings.TrimSpace(req.Summary),
-		ResultRef:    resultRef,
-	}
-	id, err := store.CreateTask(r.Context(), task)
+		Summary:      req.Summary,
+		ResultRef:    req.ResultRef,
+	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	created, _ := store.GetTask(r.Context(), id)
-	if created == nil {
-		task.ID = id
-		created = &task
+	if record == nil {
+		h.writeError(w, http.StatusInternalServerError, errors.New(errors.ErrAPIServerError, "task creation did not return a record"))
+		return
+	}
+	created, _ := store.GetTask(r.Context(), record.ID)
+	if created == nil && record != nil {
+		created = &team.Task{
+			ID:       record.ID,
+			TeamID:   record.TeamID,
+			Title:    record.Title,
+			Status:   team.TaskStatus(record.Status),
+			Priority: record.Priority,
+			Summary:  record.Summary,
+		}
 	}
 	{
 		traceID, requestID := runtimeTraceIDForRequest(r)
@@ -2671,7 +3072,12 @@ func (h *Handler) RenewTaskLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := store.RenewTaskLease(r.Context(), taskID, leaseUntil); err != nil {
+	taskRegistry := team.NewAgentControlTaskRegistry(store)
+	if _, err := taskRegistry.RenewAgentControlTaskLease(r.Context(), agentcontrol.TaskLeaseRenewRequest{
+		ID:         taskID,
+		Workflow:   agentcontrol.WorkflowSpawnTeam,
+		LeaseUntil: leaseUntil,
+	}); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -2737,12 +3143,16 @@ func (h *Handler) ReleaseTaskLease(w http.ResponseWriter, r *http.Request) {
 	if status == "" {
 		status = team.TaskStatusPending
 	}
-	if err := store.ReleaseTask(r.Context(), taskID, status); err != nil {
+	taskRegistry := team.NewAgentControlTaskRegistry(store)
+	released, err := taskRegistry.ReleaseAgentControlTask(r.Context(), agentcontrol.TaskReleaseRequest{
+		ID:       taskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   string(status),
+		Summary:  strings.TrimSpace(req.Summary),
+	})
+	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	if summary := strings.TrimSpace(req.Summary); summary != "" {
-		_ = store.UpdateTaskStatus(r.Context(), taskID, status, summary)
 	}
 	if claims := h.getTeamClaimsManager(); claims != nil {
 		_ = claims.Release(r.Context(), taskID)
@@ -2754,6 +3164,9 @@ func (h *Handler) ReleaseTaskLease(w http.ResponseWriter, r *http.Request) {
 	if updated == nil {
 		updated = current
 		updated.Status = status
+		if released != nil {
+			updated.Summary = released.Summary
+		}
 	}
 	{
 		traceID, requestID := runtimeTraceIDForRequest(r)
@@ -3762,6 +4175,22 @@ func parseTaskStatuses(raw string) ([]team.TaskStatus, error) {
 		}
 	}
 	return out, nil
+}
+
+func parseAgentControlTaskStatusList(raw string) []string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		status := strings.TrimSpace(part)
+		if status != "" {
+			out = append(out, status)
+		}
+	}
+	return out
 }
 
 func (h *Handler) defaultLeaseDuration() time.Duration {

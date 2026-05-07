@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -694,6 +695,69 @@ func TestListSessionAgentEventsWithoutAgentReadsParentMailbox(t *testing.T) {
 	assert.Equal(t, chat.EventMailboxReceived, event["type"])
 	eventPayload := event["payload"].(map[string]interface{})
 	assert.Equal(t, "http parent mailbox events read hello", eventPayload["body"])
+}
+
+func TestListSessionAgentControlMailboxReadsOnlyControlRows(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = runtimeStore
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+	handler.SetSessionManager(sessionManager)
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+
+	parentSession, err := sessionManager.Create(ctx, "user-agent-control-mailbox")
+	require.NoError(t, err)
+	_, _, err = runtimeStore.AppendMailbox(ctx, parentSession.ID, team.MailMessage{
+		FromAgent: "legacy-child",
+		ToAgent:   "parent",
+		Kind:      "agent_message",
+		Body:      "legacy mailbox row",
+	})
+	require.NoError(t, err)
+	metadata := agentcontrol.ApplyEnvelope(map[string]interface{}{"target_session_id": parentSession.ID}, agentcontrol.Envelope{
+		MessageType:     agentcontrol.MessageTypeAgentMessage,
+		ControlAction:   agentcontrol.ActionAgentMessage,
+		Workflow:        agentcontrol.WorkflowSpawnAgent,
+		MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+		MailboxKind:     agentcontrol.MailboxKindAgentMessage,
+	})
+	_, _, err = runtimeStore.AppendAgentControlMailbox(ctx, parentSession.ID, team.MailMessage{
+		FromAgent: "control-child",
+		ToAgent:   "parent",
+		Kind:      "agent_message",
+		Body:      "control mailbox row",
+		Metadata:  metadata,
+	})
+	require.NoError(t, err)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+parentSession.ID+"/agent-control/mailbox?after_seq=0&limit=20&wait_ms=0", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	result := payload["result"].(map[string]interface{})
+	assert.Equal(t, parentSession.ID, result["session_id"])
+	assert.Equal(t, "agent_control_mailbox", result["source"])
+	assert.Equal(t, true, result["control_only"])
+	assert.Equal(t, float64(1), result["count"])
+	assert.Equal(t, float64(2), result["latest_seq"])
+	messages := result["messages"].([]interface{})
+	require.Len(t, messages, 1)
+	message := messages[0].(map[string]interface{})
+	assert.Equal(t, "control-child", message["from_agent"])
+	assert.Equal(t, "control mailbox row", message["body"])
+	assert.Equal(t, float64(2), message["seq"])
+	msgMetadata := message["metadata"].(map[string]interface{})
+	assert.Equal(t, agentcontrol.MessageTypeAgentMessage, msgMetadata["message_type"])
+	assert.Equal(t, agentcontrol.ActionAgentMessage, msgMetadata["control_action"])
 }
 
 func TestListSessionToolReceiptsReturnsPersistedReceipts(t *testing.T) {

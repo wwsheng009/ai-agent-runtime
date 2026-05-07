@@ -565,6 +565,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tool-receipts", h.ListSessionToolReceipts).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/stream", h.StreamSessionRuntimeEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/commands", h.SubmitSessionRuntimeCommand).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agent-control/mailbox", h.ListSessionAgentControlMailbox).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents", h.SpawnSessionAgent).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/wait", h.WaitSessionAgents).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
@@ -581,6 +582,14 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/history", h.ClearSessionHistory).Methods(http.MethodDelete)
 
 	// Teams
+	runtimeRouter.HandleFunc("/agent-control/tasks", h.ListAgentControlTasks).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/agent-control/tasks", h.CreateAgentControlTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/status", h.UpdateAgentControlTaskStatus).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/claim", h.ClaimAgentControlTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/lease", h.RenewAgentControlTaskLease).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/release", h.ReleaseAgentControlTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/terminal", h.UpdateAgentControlTaskTerminal).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/block", h.BlockAgentControlTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/teams", h.ListTeams).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/teams", h.CreateTeam).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/teams/summary", h.ListTeamSummaries).Methods(http.MethodGet)

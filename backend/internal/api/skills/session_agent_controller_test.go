@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -74,6 +75,75 @@ func TestSessionAgentController_PathTargetsAndCloseSubtree(t *testing.T) {
 	listResult, err := controller.List(ctx, rootSession.ID, toolbroker.ListAgentsArgs{IncludeClosed: true})
 	require.NoError(t, err)
 	assert.Equal(t, 3, listResult.Count)
+}
+
+func TestSessionAgentController_ProjectsTeamTeammatesIntoAgentList(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
+	require.NoError(t, err)
+	defer teamStore.Close()
+	handler.teamStore = teamStore
+
+	rootSession, err := sessionManager.Create(ctx, "user-team-agent-projection")
+	require.NoError(t, err)
+	teamID, err := teamStore.CreateTeam(ctx, team.Team{
+		ID:            "team-alpha",
+		LeadSessionID: rootSession.ID,
+	})
+	require.NoError(t, err)
+	_, err = teamStore.UpsertTeammate(ctx, team.Teammate{
+		ID:        "member-1",
+		TeamID:    teamID,
+		Name:      "Documentation Reviewer",
+		Profile:   "documentation-reviewer",
+		SessionID: "api-mate-session",
+		State:     team.TeammateStateIdle,
+	})
+	require.NoError(t, err)
+	assignee := "member-1"
+	_, err = teamStore.CreateTask(ctx, team.Task{
+		ID:       "api-task-docs",
+		TeamID:   teamID,
+		Title:    "Review docs",
+		Status:   team.TaskStatusReady,
+		Assignee: &assignee,
+	})
+	require.NoError(t, err)
+
+	mateSession := chat.NewSession(rootSession.UserID)
+	mateSession.ID = "api-mate-session"
+	require.NoError(t, sessionManager.GetStorage().Save(ctx, mateSession))
+
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	listResult, err := controller.List(ctx, rootSession.ID, toolbroker.ListAgentsArgs{PathPrefix: "/root/teams/team-alpha"})
+	require.NoError(t, err)
+	require.Equal(t, 1, listResult.Count)
+	agent := listResult.Agents[0]
+	assert.Equal(t, "api-mate-session", agent.SessionID)
+	assert.Equal(t, rootSession.ID, agent.ParentSessionID)
+	assert.Equal(t, "/root/teams/team-alpha/member-1", agent.Path)
+	assert.Equal(t, 1, agent.Depth)
+	assert.Equal(t, "documentation-reviewer", agent.AgentType)
+	assert.Equal(t, teamID, agent.TeamID)
+	assert.Equal(t, "member-1", agent.TeammateID)
+	assert.Equal(t, "api-task-docs", agent.CurrentTaskID)
+	assert.Equal(t, string(team.TaskStatusReady), agent.CurrentTaskStatus)
+
+	reloaded, err := sessionManager.Get(ctx, "api-mate-session")
+	require.NoError(t, err)
+	parent, ok := reloaded.GetContext(toolbroker.AgentSessionContextParentSessionID)
+	require.True(t, ok)
+	assert.Equal(t, rootSession.ID, parent)
+	path, ok := reloaded.GetContext(toolbroker.AgentSessionContextPath)
+	require.True(t, ok)
+	assert.Equal(t, "/root/teams/team-alpha/member-1", path)
 }
 
 func TestSessionAgentController_SendMessagePersistsMailboxWithoutTargetActor(t *testing.T) {
@@ -482,6 +552,48 @@ func TestSessionAgentController_ReadEventsWithoutTargetUsesParentMailbox(t *test
 	}
 }
 
+func TestSessionAgentController_ReadEventsWithoutTargetMergesAgentControlMailbox(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+
+	rootSession, err := sessionManager.Create(ctx, "user-session-agent-controller-parent-merged-events")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+
+	err = controller.deliverAgentMailboxEvent(ctx, rootSession.ID, team.MailMessage{
+		FromAgent: "child-1",
+		ToAgent:   "parent",
+		Kind:      "info",
+		Body:      "api legacy mailbox",
+	})
+	require.NoError(t, err)
+	err = controller.deliverAgentMailboxEvent(ctx, rootSession.ID, toolbroker.BuildAgentMailboxMessage("child-2", "parent", "api control mailbox", false))
+	require.NoError(t, err)
+
+	result, err := controller.ReadEvents(ctx, toolbroker.ReadAgentEventsArgs{
+		SessionID:   rootSession.ID,
+		MailboxOnly: true,
+		AfterSeq:    0,
+		Limit:       20,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, rootSession.ID, result.SessionID)
+	assert.Equal(t, 2, result.Count)
+	assert.Equal(t, int64(2), result.LatestSeq)
+	if assert.Len(t, result.Events, 2) {
+		assert.Equal(t, "api legacy mailbox", result.Events[0].Payload["body"])
+		assert.Equal(t, "api control mailbox", result.Events[1].Payload["body"])
+		assert.NotNil(t, result.Events[1].Payload["metadata"])
+	}
+}
+
 func TestSessionAgentController_MirrorsChildCompletionToParentEvents(t *testing.T) {
 	ctx := context.Background()
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
@@ -538,6 +650,11 @@ func TestSessionAgentController_MirrorsChildCompletionToParentEvents(t *testing.
 	assert.Equal(t, "api-completion-child", metadata["session_id"])
 	assert.Equal(t, "/root/api-completion-child", metadata["path"])
 	assert.Equal(t, "worker", metadata["agent_type"])
+	assert.Equal(t, agentcontrol.MessageTypeSubagentCompleted, metadata["message_type"])
+	assert.Equal(t, agentcontrol.ActionAgentCompleted, metadata["control_action"])
+	assert.Equal(t, agentcontrol.WorkflowSpawnAgent, metadata["workflow"])
+	assert.Equal(t, agentcontrol.DeliverySessionMailbox, metadata["mailbox_delivery"])
+	assert.Equal(t, agentcontrol.MailboxKindSubagentCompleted, metadata["mailbox_kind"])
 }
 
 func TestSessionAgentController_PersistsCompletionMailboxWithoutParentActor(t *testing.T) {
@@ -566,6 +683,9 @@ func TestSessionAgentController_PersistsCompletionMailboxWithoutParentActor(t *t
 	require.True(t, ok)
 	assert.Equal(t, "api-child-session", metadata["session_id"])
 	assert.Equal(t, int64(11), metadata["event_seq"])
+	assert.Equal(t, agentcontrol.MessageTypeSubagentCompleted, metadata["message_type"])
+	assert.Equal(t, agentcontrol.ActionAgentCompleted, metadata["control_action"])
+	assert.Equal(t, agentcontrol.MailboxKindSubagentCompleted, metadata["mailbox_kind"])
 }
 
 type sessionAgentBlockingProvider struct {

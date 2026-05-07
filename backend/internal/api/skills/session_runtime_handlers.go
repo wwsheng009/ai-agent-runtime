@@ -206,6 +206,117 @@ func (h *Handler) ListSessionAgentEvents(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// ListSessionAgentControlMailbox lists durable AgentControl mailbox rows for a
+// session without converting them through legacy runtime event shape.
+func (h *Handler) ListSessionAgentControlMailbox(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	if sessionID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
+		return
+	}
+	store := h.getSessionEventStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session event store not configured"))
+		return
+	}
+	reader, ok := store.(chat.AgentControlMailboxReaderStore)
+	if !ok || reader == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "agent control mailbox reader not configured"))
+		return
+	}
+	after := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("after_seq")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid after_seq value"))
+			return
+		}
+		after = parsed
+	}
+	limit, err := parseOptionalLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	waitMs := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("wait_ms")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid wait_ms value"))
+			return
+		}
+		waitMs = parsed
+	}
+
+	ctx := r.Context()
+	cancel := func() {}
+	if waitMs > 0 {
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(waitMs)*time.Millisecond)
+	}
+	defer cancel()
+
+	var mailboxWake <-chan team.MailMessage
+	unwatch := func() {}
+	if watcher, ok := store.(chat.AgentControlMailboxWatcherStore); ok && watcher != nil {
+		mailboxWake, unwatch = watcher.WatchAgentControlMailbox(ctx, sessionID)
+	}
+	defer unwatch()
+
+	for {
+		messages, err := reader.ListAgentControlMailbox(ctx, sessionID, after, limit)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		latestSeq := int64(0)
+		if sequencer, ok := store.(chat.AgentControlMailboxSequenceStore); ok && sequencer != nil {
+			seq, err := sequencer.LastAgentControlMailboxSeq(ctx, sessionID)
+			if err != nil {
+				h.writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			latestSeq = seq
+		} else if len(messages) > 0 {
+			latestSeq = messages[len(messages)-1].Seq
+		}
+		if len(messages) > 0 || waitMs == 0 {
+			h.writeJSON(w, http.StatusOK, map[string]interface{}{
+				"result": map[string]interface{}{
+					"session_id":   sessionID,
+					"messages":     messages,
+					"count":        len(messages),
+					"latest_seq":   latestSeq,
+					"source":       "agent_control_mailbox",
+					"after_seq":    after,
+					"control_only": true,
+				},
+			})
+			return
+		}
+		select {
+		case <-ctx.Done():
+			h.writeJSON(w, http.StatusOK, map[string]interface{}{
+				"result": map[string]interface{}{
+					"session_id":   sessionID,
+					"messages":     []team.MailMessage{},
+					"count":        0,
+					"latest_seq":   latestSeq,
+					"source":       "agent_control_mailbox",
+					"after_seq":    after,
+					"control_only": true,
+					"timed_out":    true,
+				},
+			})
+			return
+		case <-mailboxWake:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
 func (h *Handler) CloseSessionAgent(w http.ResponseWriter, r *http.Request) {
 	controller := h.getAgentSessionController()
 	if controller == nil {
