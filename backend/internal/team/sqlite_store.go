@@ -986,6 +986,77 @@ func (s *SQLiteStore) ListTaskDependents(ctx context.Context, taskID string) ([]
 	return dependents, rows.Err()
 }
 
+// ListTaskDependencyRecords returns full dependency edge records.
+func (s *SQLiteStore) ListTaskDependencyRecords(ctx context.Context, filter TaskDependencyFilter) ([]TaskDependency, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("team store is not initialized")
+	}
+	taskID := strings.TrimSpace(filter.TaskID)
+	dependsOnID := strings.TrimSpace(filter.DependsOnID)
+	if taskID == "" && dependsOnID == "" {
+		return nil, fmt.Errorf("task_id or depends_on_id is required")
+	}
+	clauses := make([]string, 0, 2)
+	args := make([]interface{}, 0, 2)
+	if taskID != "" {
+		clauses = append(clauses, "task_id = ?")
+		args = append(args, taskID)
+	}
+	if dependsOnID != "" {
+		clauses = append(clauses, "depends_on_id = ?")
+		args = append(args, dependsOnID)
+	}
+	query := `
+		SELECT id, task_id, depends_on_id, created_at
+		FROM team_task_dependencies
+		WHERE ` + strings.Join(clauses, " AND ") + `
+		ORDER BY created_at ASC, task_id ASC, depends_on_id ASC
+	`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list dependency records: %w", err)
+	}
+	defer rows.Close()
+	records := make([]TaskDependency, 0)
+	for rows.Next() {
+		var record TaskDependency
+		var createdAt string
+		if err := rows.Scan(&record.ID, &record.TaskID, &record.DependsOnID, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan dependency record: %w", err)
+		}
+		record.CreatedAt = parseTime(createdAt)
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if filter.IncludeDependents && taskID != "" {
+		dependentRecords, err := s.ListTaskDependencyRecords(ctx, TaskDependencyFilter{DependsOnID: taskID})
+		if err != nil {
+			return nil, err
+		}
+		records = appendUniqueTaskDependencies(records, dependentRecords...)
+	}
+	return records, nil
+}
+
+func appendUniqueTaskDependencies(records []TaskDependency, extra ...TaskDependency) []TaskDependency {
+	seen := make(map[string]struct{}, len(records)+len(extra))
+	for _, record := range records {
+		key := strings.ToLower(strings.TrimSpace(record.TaskID)) + "\x00" + strings.ToLower(strings.TrimSpace(record.DependsOnID))
+		seen[key] = struct{}{}
+	}
+	for _, record := range extra {
+		key := strings.ToLower(strings.TrimSpace(record.TaskID)) + "\x00" + strings.ToLower(strings.TrimSpace(record.DependsOnID))
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		records = append(records, record)
+	}
+	return records
+}
+
 // InsertMail inserts a mailbox message.
 func (s *SQLiteStore) InsertMail(ctx context.Context, message MailMessage) (string, error) {
 	if s == nil || s.db == nil {

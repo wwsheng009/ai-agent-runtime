@@ -1726,6 +1726,95 @@ func (h *Handler) BlockAgentControlTask(w http.ResponseWriter, r *http.Request) 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
 }
 
+// CreateAgentControlTaskDependency creates a dependency edge through the
+// shared AgentControl task graph writer seam.
+func (h *Handler) CreateAgentControlTaskDependency(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	taskID := mux.Vars(r)["task_id"]
+	var req struct {
+		Workflow    string `json:"workflow,omitempty"`
+		TeamID      string `json:"team_id,omitempty"`
+		DependsOnID string `json:"depends_on_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	dependsOnID := strings.TrimSpace(req.DependsOnID)
+	if dependsOnID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "depends_on_id is required"))
+		return
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	if err := registry.CreateAgentControlTaskDependency(r.Context(), agentcontrol.TaskDependencyCreateRequest{
+		Workflow:    firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		TeamID:      req.TeamID,
+		TaskID:      taskID,
+		DependsOnID: dependsOnID,
+	}); err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"task_id":       strings.TrimSpace(taskID),
+		"depends_on_id": dependsOnID,
+	})
+}
+
+// ListAgentControlTaskDependencies lists task graph edges through the shared
+// AgentControl dependency read seam.
+func (h *Handler) ListAgentControlTaskDependencies(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	taskID := strings.TrimSpace(mux.Vars(r)["task_id"])
+	if taskID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "task_id is required"))
+		return
+	}
+	includeDependents := parseOptionalBool(r.URL.Query().Get("include_dependents"))
+	filter := agentcontrol.TaskDependencyFilter{
+		Workflow:          firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("workflow")), agentcontrol.WorkflowSpawnTeam),
+		TeamID:            strings.TrimSpace(r.URL.Query().Get("team_id")),
+		TaskID:            taskID,
+		DependsOnID:       strings.TrimSpace(r.URL.Query().Get("depends_on_id")),
+		IncludeDependents: includeDependents,
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	records, err := registry.ListAgentControlTaskDependencies(r.Context(), filter)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	dependencies := make([]string, 0, len(records))
+	dependents := make([]string, 0, len(records))
+	for _, record := range records {
+		if strings.EqualFold(record.TaskID, taskID) && strings.TrimSpace(record.DependsOnID) != "" {
+			dependencies = append(dependencies, strings.TrimSpace(record.DependsOnID))
+		}
+		if strings.EqualFold(record.DependsOnID, taskID) && strings.TrimSpace(record.TaskID) != "" {
+			dependents = append(dependents, strings.TrimSpace(record.TaskID))
+		}
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"task_id":       taskID,
+		"dependencies":  dependencies,
+		"dependents":    dependents,
+		"edges":         records,
+		"count":         len(records),
+		"edge_count":    len(records),
+		"workflow":      filter.Workflow,
+		"team_id":       filter.TeamID,
+		"depends_on_id": filter.DependsOnID,
+	})
+}
+
 // ListTasks lists tasks for a team.
 func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
 	store := h.getTeamStore()
@@ -2355,7 +2444,14 @@ func (h *Handler) AddTaskDependency(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "depends_on_id is required"))
 		return
 	}
-	if err := store.AddTaskDependency(r.Context(), taskID, strings.TrimSpace(req.DependsOnID)); err != nil {
+	registry := team.NewAgentControlTaskRegistry(store)
+	dependsOnID := strings.TrimSpace(req.DependsOnID)
+	if err := registry.CreateAgentControlTaskDependency(r.Context(), agentcontrol.TaskDependencyCreateRequest{
+		Workflow:    agentcontrol.WorkflowSpawnTeam,
+		TeamID:      teamID,
+		TaskID:      taskID,
+		DependsOnID: dependsOnID,
+	}); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -2364,7 +2460,7 @@ func (h *Handler) AddTaskDependency(w http.ResponseWriter, r *http.Request) {
 		payload := map[string]interface{}{
 			"team_id":       teamID,
 			"task_id":       taskID,
-			"depends_on_id": strings.TrimSpace(req.DependsOnID),
+			"depends_on_id": dependsOnID,
 		}
 		if requestID != "" {
 			payload["request_id"] = requestID
@@ -2373,7 +2469,7 @@ func (h *Handler) AddTaskDependency(w http.ResponseWriter, r *http.Request) {
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"task_id":       taskID,
-		"depends_on_id": strings.TrimSpace(req.DependsOnID),
+		"depends_on_id": dependsOnID,
 	})
 }
 

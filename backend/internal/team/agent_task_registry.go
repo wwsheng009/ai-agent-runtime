@@ -19,6 +19,8 @@ type AgentControlTaskRegistry struct {
 
 var _ agentcontrol.TaskRegistryReader = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryCreateWriter = AgentControlTaskRegistry{}
+var _ agentcontrol.TaskDependencyReader = AgentControlTaskRegistry{}
+var _ agentcontrol.TaskDependencyCreateWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryStatusWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryReleaseWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryLeaseRenewWriter = AgentControlTaskRegistry{}
@@ -228,6 +230,232 @@ func (r AgentControlTaskRegistry) CreateAgentControlTask(ctx context.Context, re
 	}
 	record := AgentControlTaskRecord(*created, mate)
 	return &record, nil
+}
+
+// CreateAgentControlTaskDependency maps the shared AgentControl task graph
+// writer seam onto the current team task dependency store.
+func (r AgentControlTaskRegistry) CreateAgentControlTaskDependency(ctx context.Context, request agentcontrol.TaskDependencyCreateRequest) error {
+	if r.Store == nil {
+		return fmt.Errorf("team store is not configured")
+	}
+	request = request.Normalize()
+	if request.Workflow != "" && request.Workflow != agentcontrol.WorkflowSpawnTeam {
+		return fmt.Errorf("unsupported task workflow: %s", request.Workflow)
+	}
+	if request.TaskID == "" || request.DependsOnID == "" {
+		return fmt.Errorf("task dependency ids are required")
+	}
+	if request.TeamID != "" {
+		task, err := r.Store.GetTask(ctx, request.TaskID)
+		if err != nil {
+			return err
+		}
+		if task == nil {
+			return fmt.Errorf("task not found: %s", request.TaskID)
+		}
+		if !strings.EqualFold(strings.TrimSpace(task.TeamID), request.TeamID) {
+			return fmt.Errorf("task does not belong to team: %s", request.TaskID)
+		}
+		dependsOn, err := r.Store.GetTask(ctx, request.DependsOnID)
+		if err != nil {
+			return err
+		}
+		if dependsOn == nil {
+			return fmt.Errorf("dependency task not found: %s", request.DependsOnID)
+		}
+		if !strings.EqualFold(strings.TrimSpace(dependsOn.TeamID), request.TeamID) {
+			return fmt.Errorf("dependency task does not belong to team: %s", request.DependsOnID)
+		}
+	}
+	return r.Store.AddTaskDependency(ctx, request.TaskID, request.DependsOnID)
+}
+
+// ListAgentControlTaskDependencies maps the shared AgentControl task graph
+// reader seam onto the current team task dependency store.
+func (r AgentControlTaskRegistry) ListAgentControlTaskDependencies(ctx context.Context, filter agentcontrol.TaskDependencyFilter) ([]agentcontrol.TaskDependencyRecord, error) {
+	if r.Store == nil {
+		return nil, nil
+	}
+	filter = filter.Normalize()
+	if filter.Workflow != "" && filter.Workflow != agentcontrol.WorkflowSpawnTeam {
+		return nil, nil
+	}
+	if filter.TaskID == "" && filter.DependsOnID == "" {
+		return nil, fmt.Errorf("task_id or depends_on_id is required")
+	}
+	if reader, ok := r.Store.(TaskDependencyReaderStore); ok {
+		return r.listAgentControlTaskDependencyRecords(ctx, filter, reader)
+	}
+
+	records := make([]agentcontrol.TaskDependencyRecord, 0)
+	seen := make(map[string]struct{})
+	appendRecord := func(record agentcontrol.TaskDependencyRecord) {
+		record = record.Normalize()
+		key := strings.ToLower(record.TaskID) + "\x00" + strings.ToLower(record.DependsOnID)
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		records = append(records, record)
+	}
+	if filter.TaskID != "" {
+		task, err := r.Store.GetTask(ctx, filter.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		if task == nil {
+			return nil, fmt.Errorf("task not found: %s", filter.TaskID)
+		}
+		if filter.TeamID != "" && !strings.EqualFold(strings.TrimSpace(task.TeamID), filter.TeamID) {
+			return nil, fmt.Errorf("task does not belong to team: %s", filter.TaskID)
+		}
+		deps, err := r.Store.ListTaskDependencies(ctx, filter.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		for _, dependsOnID := range deps {
+			dependsOnID = strings.TrimSpace(dependsOnID)
+			if dependsOnID == "" {
+				continue
+			}
+			if filter.DependsOnID != "" && !strings.EqualFold(dependsOnID, filter.DependsOnID) {
+				continue
+			}
+			appendRecord(agentcontrol.TaskDependencyRecord{
+				Workflow:    agentcontrol.WorkflowSpawnTeam,
+				TeamID:      strings.TrimSpace(task.TeamID),
+				TaskID:      strings.TrimSpace(task.ID),
+				DependsOnID: dependsOnID,
+			})
+		}
+	}
+
+	if filter.IncludeDependents {
+		dependentTargetID := firstNonEmptyString(filter.TaskID, filter.DependsOnID)
+		if dependentTargetID == "" {
+			return records, nil
+		}
+		dependencyTask, err := r.Store.GetTask(ctx, dependentTargetID)
+		if err != nil {
+			return nil, err
+		}
+		if dependencyTask == nil {
+			return nil, fmt.Errorf("dependency task not found: %s", dependentTargetID)
+		}
+		if filter.TeamID != "" && !strings.EqualFold(strings.TrimSpace(dependencyTask.TeamID), filter.TeamID) {
+			return nil, fmt.Errorf("dependency task does not belong to team: %s", dependentTargetID)
+		}
+		dependents, err := r.Store.ListTaskDependents(ctx, dependentTargetID)
+		if err != nil {
+			return nil, err
+		}
+		for _, taskID := range dependents {
+			taskID = strings.TrimSpace(taskID)
+			if taskID == "" {
+				continue
+			}
+			appendRecord(agentcontrol.TaskDependencyRecord{
+				Workflow:    agentcontrol.WorkflowSpawnTeam,
+				TeamID:      strings.TrimSpace(dependencyTask.TeamID),
+				TaskID:      taskID,
+				DependsOnID: strings.TrimSpace(dependencyTask.ID),
+			})
+		}
+	}
+	return records, nil
+}
+
+func (r AgentControlTaskRegistry) listAgentControlTaskDependencyRecords(ctx context.Context, filter agentcontrol.TaskDependencyFilter, reader TaskDependencyReaderStore) ([]agentcontrol.TaskDependencyRecord, error) {
+	if filter.TaskID != "" {
+		task, err := r.Store.GetTask(ctx, filter.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		if task == nil {
+			return nil, fmt.Errorf("task not found: %s", filter.TaskID)
+		}
+		if filter.TeamID != "" && !strings.EqualFold(strings.TrimSpace(task.TeamID), filter.TeamID) {
+			return nil, fmt.Errorf("task does not belong to team: %s", filter.TaskID)
+		}
+	}
+	if filter.DependsOnID != "" {
+		dependencyTask, err := r.Store.GetTask(ctx, filter.DependsOnID)
+		if err != nil {
+			return nil, err
+		}
+		if dependencyTask == nil {
+			return nil, fmt.Errorf("dependency task not found: %s", filter.DependsOnID)
+		}
+		if filter.TeamID != "" && !strings.EqualFold(strings.TrimSpace(dependencyTask.TeamID), filter.TeamID) {
+			return nil, fmt.Errorf("dependency task does not belong to team: %s", filter.DependsOnID)
+		}
+	}
+	edges, err := reader.ListTaskDependencyRecords(ctx, TaskDependencyFilter{
+		TaskID:            filter.TaskID,
+		DependsOnID:       filter.DependsOnID,
+		IncludeDependents: filter.IncludeDependents,
+	})
+	if err != nil {
+		return nil, err
+	}
+	records := make([]agentcontrol.TaskDependencyRecord, 0, len(edges))
+	seen := make(map[string]struct{}, len(edges))
+	for _, edge := range edges {
+		record, err := r.agentControlDependencyRecordFromTeamEdge(ctx, edge, filter.TeamID)
+		if err != nil {
+			return nil, err
+		}
+		if record == nil {
+			continue
+		}
+		key := strings.ToLower(record.TaskID) + "\x00" + strings.ToLower(record.DependsOnID)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		records = append(records, record.Normalize())
+	}
+	return records, nil
+}
+
+func (r AgentControlTaskRegistry) agentControlDependencyRecordFromTeamEdge(ctx context.Context, edge TaskDependency, filterTeamID string) (*agentcontrol.TaskDependencyRecord, error) {
+	taskID := strings.TrimSpace(edge.TaskID)
+	dependsOnID := strings.TrimSpace(edge.DependsOnID)
+	if taskID == "" || dependsOnID == "" {
+		return nil, nil
+	}
+	task, err := r.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task not found: %s", taskID)
+	}
+	teamID := strings.TrimSpace(task.TeamID)
+	if filterTeamID != "" && !strings.EqualFold(teamID, filterTeamID) {
+		return nil, nil
+	}
+	dependencyTask, err := r.Store.GetTask(ctx, dependsOnID)
+	if err != nil {
+		return nil, err
+	}
+	if dependencyTask == nil {
+		return nil, fmt.Errorf("dependency task not found: %s", dependsOnID)
+	}
+	if filterTeamID != "" && !strings.EqualFold(strings.TrimSpace(dependencyTask.TeamID), filterTeamID) {
+		return nil, nil
+	}
+	if teamID != "" && strings.TrimSpace(dependencyTask.TeamID) != "" && !strings.EqualFold(teamID, strings.TrimSpace(dependencyTask.TeamID)) {
+		return nil, fmt.Errorf("dependency task does not belong to task team: %s", dependsOnID)
+	}
+	return &agentcontrol.TaskDependencyRecord{
+		ID:          strings.TrimSpace(edge.ID),
+		Workflow:    agentcontrol.WorkflowSpawnTeam,
+		TeamID:      teamID,
+		TaskID:      taskID,
+		DependsOnID: dependsOnID,
+		CreatedAt:   edge.CreatedAt,
+	}, nil
 }
 
 func taskSignalToAgentControlWake(signal TaskSignal) agentcontrol.TaskWakeEvent {

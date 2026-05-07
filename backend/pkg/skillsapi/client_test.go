@@ -2699,6 +2699,10 @@ func TestClient_AgentControlTaskWriteEndpoints(t *testing.T) {
 			_, _ = w.Write([]byte(`{"task":{"id":"task/1","workflow":"spawn_team","status":"running"},"claimed":true}`))
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/dependencies") {
+			_, _ = w.Write([]byte(`{"task_id":"task/1","depends_on_id":"task/0"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"task":{"id":"task/1","workflow":"spawn_team","status":"ready"}}`))
 	}))
 	t.Cleanup(server.Close)
@@ -2725,8 +2729,11 @@ func TestClient_AgentControlTaskWriteEndpoints(t *testing.T) {
 	require.NoError(t, err)
 	_, err = client.BlockAgentControlTask(context.Background(), "task/1", BlockAgentControlTaskRequest{Workflow: "spawn_team", Summary: "blocked"})
 	require.NoError(t, err)
+	depResp, err := client.CreateAgentControlTaskDependency(context.Background(), "task/1", CreateAgentControlTaskDependencyRequest{Workflow: "spawn_team", TeamID: "team-1", DependsOnID: "task/0"})
+	require.NoError(t, err)
+	require.Equal(t, "task/0", depResp.DependsOnID)
 
-	require.Len(t, requests, 7)
+	require.Len(t, requests, 8)
 	assert.Equal(t, http.MethodPost, requests[0].Method)
 	assert.Equal(t, "/api/runtime/agent-control/tasks", requests[0].Path)
 	assert.Equal(t, "task/1", requests[0].Body["id"])
@@ -2741,6 +2748,50 @@ func TestClient_AgentControlTaskWriteEndpoints(t *testing.T) {
 	assert.Equal(t, resultRef, requests[5].Body["result_ref"])
 	assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/block", requests[6].Path)
 	assert.Equal(t, "blocked", requests[6].Body["summary"])
+	assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/dependencies", requests[7].Path)
+	assert.Equal(t, "task/0", requests[7].Body["depends_on_id"])
+}
+
+func TestClient_ListAgentControlTaskDependencies(t *testing.T) {
+	var (
+		gotMethod string
+		gotPath   string
+		gotQuery  string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.EscapedPath()
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task_id":"task/1","dependencies":["task/0"],"dependents":["task/2"],"edges":[{"id":"dep-1","workflow":"spawn_team","team_id":"team-1","task_id":"task/1","depends_on_id":"task/0","created_at":"2026-05-07T00:00:00Z"}],"count":1,"edge_count":1,"workflow":"spawn_team","team_id":"team-1","depends_on_id":"task/0"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClient(server.URL)
+	resp, err := client.ListAgentControlTaskDependencies(context.Background(), "task/1", ListAgentControlTaskDependenciesParams{
+		Workflow:          "spawn_team",
+		TeamID:            "team-1",
+		DependsOnID:       "task/0",
+		IncludeDependents: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, http.MethodGet, gotMethod)
+	assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/dependencies", gotPath)
+	assert.Contains(t, gotQuery, "workflow=spawn_team")
+	assert.Contains(t, gotQuery, "team_id=team-1")
+	assert.Contains(t, gotQuery, "depends_on_id=task%2F0")
+	assert.Contains(t, gotQuery, "include_dependents=true")
+	assert.Equal(t, "task/1", resp.TaskID)
+	assert.Equal(t, []string{"task/0"}, resp.Dependencies)
+	assert.Equal(t, []string{"task/2"}, resp.Dependents)
+	require.Len(t, resp.Edges, 1)
+	assert.Equal(t, "dep-1", resp.Edges[0].ID)
+	assert.Equal(t, "task/0", resp.Edges[0].DependsOnID)
+	require.NotNil(t, resp.Edges[0].CreatedAt)
+	assert.Equal(t, time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC), *resp.Edges[0].CreatedAt)
+	assert.Equal(t, 1, resp.Count)
+	assert.Equal(t, 1, resp.EdgeCount)
 }
 
 func TestClient_PlanTeamTasksUsesEndpoint(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -892,6 +893,14 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Len(t, tasks, 2)
+
+	records, err := team.NewAgentControlTaskRegistry(store).ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   "team-auto",
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	assert.Equal(t, agentcontrol.WorkflowSpawnTeam, records[0].Workflow)
 }
 
 func TestBrokerExecuteSpawnTeamAutoStartSynthesizesTeammatesForTasks(t *testing.T) {

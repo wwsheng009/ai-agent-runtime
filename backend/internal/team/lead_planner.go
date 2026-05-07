@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 // LeadPlanner coordinates task decomposition and summary generation.
@@ -263,11 +265,34 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 
 	idMap := make(map[string]string)
 	if p.Store != nil && p.AutoPersist {
+		taskWriter := NewAgentControlTaskRegistry(p.Store)
 		for i := range tasks {
-			id, err := p.Store.CreateTask(ctx, tasks[i])
+			assignee := ""
+			if tasks[i].Assignee != nil {
+				assignee = strings.TrimSpace(*tasks[i].Assignee)
+			}
+			created, err := taskWriter.CreateAgentControlTask(ctx, agentcontrol.TaskCreateRequest{
+				ID:           tasks[i].ID,
+				Workflow:     agentcontrol.WorkflowSpawnTeam,
+				TeamID:       tasks[i].TeamID,
+				Title:        tasks[i].Title,
+				Goal:         tasks[i].Goal,
+				Status:       string(tasks[i].Status),
+				Priority:     tasks[i].Priority,
+				Assignee:     assignee,
+				Inputs:       tasks[i].Inputs,
+				ReadPaths:    tasks[i].ReadPaths,
+				WritePaths:   tasks[i].WritePaths,
+				Deliverables: tasks[i].Deliverables,
+				Summary:      tasks[i].Summary,
+			})
 			if err != nil {
 				return nil, err
 			}
+			if created == nil {
+				return nil, fmt.Errorf("agent control task create returned nil record")
+			}
+			id := created.ID
 			planID := planKeyAtIndex(planIDMap, i)
 			if planID != "" {
 				idMap[planID] = id
@@ -277,6 +302,10 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 	}
 
 	dependencies := make([]TaskDependency, 0, len(payload.Dependencies))
+	var dependencyWriter AgentControlTaskRegistry
+	if p.Store != nil && p.AutoPersist {
+		dependencyWriter = NewAgentControlTaskRegistry(p.Store)
+	}
 	for _, dep := range payload.Dependencies {
 		taskKey := strings.TrimSpace(dep.Task)
 		depKey := strings.TrimSpace(dep.DependsOn)
@@ -293,7 +322,12 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 			DependsOnID: depID,
 		})
 		if p.Store != nil && p.AutoPersist {
-			_ = p.Store.AddTaskDependency(ctx, taskID, depID)
+			_ = dependencyWriter.CreateAgentControlTaskDependency(ctx, agentcontrol.TaskDependencyCreateRequest{
+				Workflow:    agentcontrol.WorkflowSpawnTeam,
+				TeamID:      teamID,
+				TaskID:      taskID,
+				DependsOnID: depID,
+			})
 		}
 	}
 	return &PlanResult{

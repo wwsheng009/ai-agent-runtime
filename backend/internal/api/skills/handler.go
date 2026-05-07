@@ -590,6 +590,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/release", h.ReleaseAgentControlTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/terminal", h.UpdateAgentControlTaskTerminal).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/block", h.BlockAgentControlTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/dependencies", h.ListAgentControlTaskDependencies).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/dependencies", h.CreateAgentControlTaskDependency).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/teams", h.ListTeams).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/teams", h.CreateTeam).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/teams/summary", h.ListTeamSummaries).Methods(http.MethodGet)

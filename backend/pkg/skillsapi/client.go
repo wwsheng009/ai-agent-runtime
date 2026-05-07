@@ -1873,6 +1873,45 @@ type BlockAgentControlTaskRequest struct {
 	SkipStateUpdate bool   `json:"skip_state_update,omitempty"`
 }
 
+type CreateAgentControlTaskDependencyRequest struct {
+	Workflow    string `json:"workflow,omitempty"`
+	TeamID      string `json:"team_id,omitempty"`
+	DependsOnID string `json:"depends_on_id,omitempty"`
+}
+
+type CreateAgentControlTaskDependencyResponse struct {
+	TaskID      string `json:"task_id"`
+	DependsOnID string `json:"depends_on_id"`
+}
+
+type AgentControlTaskDependency struct {
+	ID          string     `json:"id,omitempty"`
+	Workflow    string     `json:"workflow,omitempty"`
+	TeamID      string     `json:"team_id,omitempty"`
+	TaskID      string     `json:"task_id,omitempty"`
+	DependsOnID string     `json:"depends_on_id,omitempty"`
+	CreatedAt   *time.Time `json:"created_at,omitempty"`
+}
+
+type ListAgentControlTaskDependenciesParams struct {
+	Workflow          string
+	TeamID            string
+	DependsOnID       string
+	IncludeDependents bool
+}
+
+type ListAgentControlTaskDependenciesResponse struct {
+	TaskID       string                       `json:"task_id"`
+	Dependencies []string                     `json:"dependencies"`
+	Dependents   []string                     `json:"dependents,omitempty"`
+	Edges        []AgentControlTaskDependency `json:"edges"`
+	Count        int                          `json:"count"`
+	EdgeCount    int                          `json:"edge_count,omitempty"`
+	Workflow     string                       `json:"workflow,omitempty"`
+	TeamID       string                       `json:"team_id,omitempty"`
+	DependsOnID  string                       `json:"depends_on_id,omitempty"`
+}
+
 type TeamTaskDependenciesResponse struct {
 	TaskID       string   `json:"task_id"`
 	Dependencies []string `json:"dependencies"`
@@ -4025,6 +4064,46 @@ func (c *Client) UpdateAgentControlTaskTerminal(ctx context.Context, taskID stri
 
 func (c *Client) BlockAgentControlTask(ctx context.Context, taskID string, req BlockAgentControlTaskRequest) (*AgentControlTaskResponse, error) {
 	return c.agentControlTaskAction(ctx, taskID, "block", req)
+}
+
+func (c *Client) CreateAgentControlTaskDependency(ctx context.Context, taskID string, req CreateAgentControlTaskDependencyRequest) (*CreateAgentControlTaskDependencyResponse, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, fmt.Errorf("taskID is required")
+	}
+	var response CreateAgentControlTaskDependencyResponse
+	endpoint := "/api/runtime/agent-control/tasks/" + url.PathEscape(taskID) + "/dependencies"
+	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) ListAgentControlTaskDependencies(ctx context.Context, taskID string, params ListAgentControlTaskDependenciesParams) (*ListAgentControlTaskDependenciesResponse, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, fmt.Errorf("taskID is required")
+	}
+	query := url.Values{}
+	if strings.TrimSpace(params.Workflow) != "" {
+		query.Set("workflow", strings.TrimSpace(params.Workflow))
+	}
+	if strings.TrimSpace(params.TeamID) != "" {
+		query.Set("team_id", strings.TrimSpace(params.TeamID))
+	}
+	if strings.TrimSpace(params.DependsOnID) != "" {
+		query.Set("depends_on_id", strings.TrimSpace(params.DependsOnID))
+	}
+	if params.IncludeDependents {
+		query.Set("include_dependents", "true")
+	}
+
+	var response ListAgentControlTaskDependenciesResponse
+	endpoint := "/api/runtime/agent-control/tasks/" + url.PathEscape(taskID) + "/dependencies"
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, query, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
 }
 
 func (c *Client) agentControlTaskAction(ctx context.Context, taskID string, action string, req interface{}) (*AgentControlTaskResponse, error) {

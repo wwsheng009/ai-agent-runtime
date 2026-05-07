@@ -95,17 +95,19 @@ type Task struct {
 
 // MailMessage represents a message exchanged inside the team mailbox.
 type MailMessage struct {
-	ID        string                 `json:"id"`
-	Seq       int64                  `json:"seq,omitempty"`
-	TeamID    string                 `json:"team_id"`
-	FromAgent string                 `json:"from_agent"`
-	ToAgent   string                 `json:"to_agent"`
-	TaskID    *string                `json:"task_id,omitempty"`
-	Kind      string                 `json:"kind"`
-	Body      string                 `json:"body"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
-	CreatedAt time.Time              `json:"created_at"`
-	AckedAt   *time.Time             `json:"acked_at,omitempty"`
+	ID                string                 `json:"id"`
+	Seq               int64                  `json:"seq,omitempty"`
+	ControlSeq        int64                  `json:"control_seq,omitempty"`
+	SessionMailboxSeq int64                  `json:"session_mailbox_seq,omitempty"`
+	TeamID            string                 `json:"team_id"`
+	FromAgent         string                 `json:"from_agent"`
+	ToAgent           string                 `json:"to_agent"`
+	TaskID            *string                `json:"task_id,omitempty"`
+	Kind              string                 `json:"kind"`
+	Body              string                 `json:"body"`
+	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt         time.Time              `json:"created_at"`
+	AckedAt           *time.Time             `json:"acked_at,omitempty"`
 }
 
 // MailReceipt records that an agent has acknowledged a mailbox message.
@@ -129,9 +131,17 @@ type PathClaim struct {
 
 // TaskDependency describes an edge in the task DAG.
 type TaskDependency struct {
+	ID          string    `json:"id,omitempty"`
 	TaskID      string    `json:"task_id"`
 	DependsOnID string    `json:"depends_on_id"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// TaskDependencyFilter allows filtering task dependency graph edges.
+type TaskDependencyFilter struct {
+	TaskID            string
+	DependsOnID       string
+	IncludeDependents bool
 }
 
 // TeamFilter allows filtering teams in the store.

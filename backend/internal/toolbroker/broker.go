@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -1563,34 +1564,40 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			}
 			resolvedTaskIDs[specID] = strings.TrimSpace(resolvedTaskSpecs[index].ID)
 		}
+		taskRegistry := team.NewAgentControlTaskRegistry(b.TeamStore)
 		for _, spec := range resolvedTaskSpecs {
-			task := team.Task{
-				ID:           strings.TrimSpace(spec.ID),
+			taskID := strings.TrimSpace(spec.ID)
+			if taskID != "" {
+				if existingTask, err := b.TeamStore.GetTask(ctx, taskID); err == nil && existingTask != nil && strings.TrimSpace(existingTask.TeamID) == strings.TrimSpace(teamID) {
+					taskIDs = append(taskIDs, existingTask.ID)
+					if strings.TrimSpace(spec.ID) != "" {
+						taskIndex[strings.TrimSpace(spec.ID)] = existingTask.ID
+					}
+					continue
+				} else if err != nil {
+					return nil, nil, err
+				}
+			}
+			created, err := taskRegistry.CreateAgentControlTask(ctx, agentcontrol.TaskCreateRequest{
+				ID:           taskID,
+				Workflow:     agentcontrol.WorkflowSpawnTeam,
 				TeamID:       teamID,
 				Title:        strings.TrimSpace(spec.Title),
 				Goal:         strings.TrimSpace(spec.Goal),
+				Priority:     spec.Priority,
+				Assignee:     strings.TrimSpace(spec.Assignee),
 				Inputs:       append([]string(nil), spec.Inputs...),
 				ReadPaths:    append([]string(nil), spec.ReadPaths...),
 				WritePaths:   append([]string(nil), spec.WritePaths...),
 				Deliverables: append([]string(nil), spec.Deliverables...),
-				Priority:     spec.Priority,
-			}
-			if assignee := strings.TrimSpace(spec.Assignee); assignee != "" {
-				task.Assignee = &assignee
-			}
-			if existingTask, err := b.TeamStore.GetTask(ctx, task.ID); err == nil && existingTask != nil && strings.TrimSpace(existingTask.TeamID) == strings.TrimSpace(teamID) {
-				taskIDs = append(taskIDs, existingTask.ID)
-				if strings.TrimSpace(spec.ID) != "" {
-					taskIndex[strings.TrimSpace(spec.ID)] = existingTask.ID
-				}
-				continue
-			} else if err != nil {
-				return nil, nil, err
-			}
-			createdID, err := b.TeamStore.CreateTask(ctx, task)
+			})
 			if err != nil {
 				return nil, nil, err
 			}
+			if created == nil || strings.TrimSpace(created.ID) == "" {
+				return nil, nil, fmt.Errorf("task creation did not return a task id")
+			}
+			createdID := strings.TrimSpace(created.ID)
 			taskIDs = append(taskIDs, createdID)
 			if strings.TrimSpace(spec.ID) != "" {
 				taskIndex[strings.TrimSpace(spec.ID)] = createdID
@@ -1604,6 +1611,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			if strings.TrimSpace(spec.ID) == "" {
 				return nil, nil, fmt.Errorf("task depends_on requires explicit task id")
 			}
+			dependencyWriter := team.NewAgentControlTaskRegistry(b.TeamStore)
 			taskID := taskIndex[strings.TrimSpace(spec.ID)]
 			if taskID == "" {
 				return nil, nil, fmt.Errorf("task id %s was not created", strings.TrimSpace(spec.ID))
@@ -1620,7 +1628,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				if depID == "" {
 					return nil, nil, fmt.Errorf("dependency %s not found", dep)
 				}
-				if err := b.TeamStore.AddTaskDependency(ctx, taskID, depID); err != nil {
+				if err := dependencyWriter.CreateAgentControlTaskDependency(ctx, agentcontrol.TaskDependencyCreateRequest{
+					Workflow:    agentcontrol.WorkflowSpawnTeam,
+					TeamID:      teamID,
+					TaskID:      taskID,
+					DependsOnID: depID,
+				}); err != nil {
 					return nil, nil, err
 				}
 			}

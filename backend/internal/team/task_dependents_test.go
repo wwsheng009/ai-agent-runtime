@@ -37,6 +37,44 @@ func TestSQLiteStoreListTaskDependents(t *testing.T) {
 	require.Equal(t, childID, dependents[0])
 }
 
+func TestSQLiteStoreListTaskDependencyRecords(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	parentID := "task-parent"
+	childID := "task-child"
+	followupID := "task-followup"
+	for _, id := range []string{parentID, childID, followupID} {
+		_, err = store.CreateTask(ctx, Task{
+			ID:     id,
+			TeamID: teamID,
+			Status: TaskStatusReady,
+		})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, store.AddTaskDependency(ctx, childID, parentID))
+	require.NoError(t, store.AddTaskDependency(ctx, followupID, childID))
+
+	records, err := store.ListTaskDependencyRecords(ctx, TaskDependencyFilter{
+		TaskID:            childID,
+		IncludeDependents: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	require.NotEmpty(t, records[0].ID)
+	require.Equal(t, childID, records[0].TaskID)
+	require.Equal(t, parentID, records[0].DependsOnID)
+	require.False(t, records[0].CreatedAt.IsZero())
+	require.NotEmpty(t, records[1].ID)
+	require.Equal(t, followupID, records[1].TaskID)
+	require.Equal(t, childID, records[1].DependsOnID)
+	require.False(t, records[1].CreatedAt.IsZero())
+}
+
 func TestSQLiteStoreListTeamIDs(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

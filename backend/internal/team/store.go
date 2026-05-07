@@ -11,6 +11,12 @@ type StoreConfig struct {
 	DSN  string
 }
 
+// TaskDependencyReaderStore exposes full dependency edge records for stores
+// that can return graph metadata beyond the legacy id-only dependency APIs.
+type TaskDependencyReaderStore interface {
+	ListTaskDependencyRecords(ctx context.Context, filter TaskDependencyFilter) ([]TaskDependency, error)
+}
+
 // Store defines persistence operations required by the team subsystem.
 type Store interface {
 	Close() error

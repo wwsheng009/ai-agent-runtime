@@ -231,6 +231,129 @@ func TestAgentControlTaskRegistryCreatesTask(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestAgentControlTaskRegistryCreatesTaskDependency(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	dependencyID, err := store.CreateTask(ctx, Task{
+		ID:     "task-dependency",
+		TeamID: teamID,
+		Title:  "Dependency",
+		Status: TaskStatusDone,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:     "task-dependent",
+		TeamID: teamID,
+		Title:  "Dependent",
+		Status: TaskStatusPending,
+	})
+	require.NoError(t, err)
+
+	registry := NewAgentControlTaskRegistry(store)
+	err = registry.CreateAgentControlTaskDependency(ctx, agentcontrol.TaskDependencyCreateRequest{
+		Workflow:    agentcontrol.WorkflowSpawnTeam,
+		TeamID:      teamID,
+		TaskID:      taskID,
+		DependsOnID: dependencyID,
+	})
+	require.NoError(t, err)
+	deps, err := store.ListTaskDependencies(ctx, taskID)
+	require.NoError(t, err)
+	require.Equal(t, []string{dependencyID}, deps)
+
+	err = registry.CreateAgentControlTaskDependency(ctx, agentcontrol.TaskDependencyCreateRequest{
+		Workflow:    agentcontrol.WorkflowSpawnAgent,
+		TeamID:      teamID,
+		TaskID:      taskID,
+		DependsOnID: dependencyID,
+	})
+	require.Error(t, err)
+
+	otherTeamID, err := store.CreateTeam(ctx, Team{ID: "team-2"})
+	require.NoError(t, err)
+	otherTaskID, err := store.CreateTask(ctx, Task{
+		ID:     "task-other-team",
+		TeamID: otherTeamID,
+		Title:  "Other team task",
+		Status: TaskStatusPending,
+	})
+	require.NoError(t, err)
+	err = registry.CreateAgentControlTaskDependency(ctx, agentcontrol.TaskDependencyCreateRequest{
+		Workflow:    agentcontrol.WorkflowSpawnTeam,
+		TeamID:      teamID,
+		TaskID:      otherTaskID,
+		DependsOnID: dependencyID,
+	})
+	require.Error(t, err)
+}
+
+func TestAgentControlTaskRegistryListsTaskDependencies(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	dependencyID, err := store.CreateTask(ctx, Task{
+		ID:     "task-dependency",
+		TeamID: teamID,
+		Title:  "Dependency",
+		Status: TaskStatusDone,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:     "task-dependent",
+		TeamID: teamID,
+		Title:  "Dependent",
+		Status: TaskStatusPending,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.AddTaskDependency(ctx, taskID, dependencyID))
+
+	registry := NewAgentControlTaskRegistry(store)
+	records, err := registry.ListAgentControlTaskDependencies(ctx, agentcontrol.TaskDependencyFilter{
+		Workflow:          agentcontrol.WorkflowSpawnTeam,
+		TeamID:            teamID,
+		TaskID:            taskID,
+		DependsOnID:       dependencyID,
+		IncludeDependents: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.NotEmpty(t, records[0].ID)
+	require.Equal(t, agentcontrol.WorkflowSpawnTeam, records[0].Workflow)
+	require.Equal(t, teamID, records[0].TeamID)
+	require.Equal(t, taskID, records[0].TaskID)
+	require.Equal(t, dependencyID, records[0].DependsOnID)
+	require.False(t, records[0].CreatedAt.IsZero())
+
+	dependents, err := registry.ListAgentControlTaskDependencies(ctx, agentcontrol.TaskDependencyFilter{
+		Workflow:          agentcontrol.WorkflowSpawnTeam,
+		TeamID:            teamID,
+		DependsOnID:       dependencyID,
+		IncludeDependents: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, dependents, 1)
+	require.NotEmpty(t, dependents[0].ID)
+	require.Equal(t, taskID, dependents[0].TaskID)
+	require.False(t, dependents[0].CreatedAt.IsZero())
+
+	unsupported, err := registry.ListAgentControlTaskDependencies(ctx, agentcontrol.TaskDependencyFilter{
+		Workflow:    agentcontrol.WorkflowSpawnAgent,
+		TaskID:      taskID,
+		DependsOnID: dependencyID,
+	})
+	require.NoError(t, err)
+	require.Empty(t, unsupported)
+}
+
 func TestAgentControlTaskRegistryUpdatesTaskStatus(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})

@@ -538,6 +538,52 @@ func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	require.NotNil(t, task)
 	require.Equal(t, int64(1), task.Version)
 
+	depReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-dependency","workflow":"spawn_team","team_id":"team-1","title":"Dependency","status":"done"}`))
+	depReq.Header.Set("Content-Type", "application/json")
+	depRec := httptest.NewRecorder()
+	router.ServeHTTP(depRec, depReq)
+	require.Equal(t, http.StatusCreated, depRec.Code)
+
+	dependencyReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/task-control/dependencies", strings.NewReader(`{"workflow":"spawn_team","team_id":"team-1","depends_on_id":"task-dependency"}`))
+	dependencyReq.Header.Set("Content-Type", "application/json")
+	dependencyRec := httptest.NewRecorder()
+	router.ServeHTTP(dependencyRec, dependencyReq)
+	require.Equal(t, http.StatusOK, dependencyRec.Code)
+	deps, err := store.ListTaskDependencies(ctx, "task-control")
+	require.NoError(t, err)
+	require.Equal(t, []string{"task-dependency"}, deps)
+
+	listDependencyReq := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/tasks/task-control/dependencies?workflow=spawn_team&team_id=team-1&include_dependents=true", nil)
+	listDependencyRec := httptest.NewRecorder()
+	router.ServeHTTP(listDependencyRec, listDependencyReq)
+	require.Equal(t, http.StatusOK, listDependencyRec.Code)
+	var listDependencyPayload struct {
+		TaskID       string `json:"task_id"`
+		Dependencies []string
+		Dependents   []string `json:"dependents"`
+		Edges        []struct {
+			ID          string    `json:"id"`
+			Workflow    string    `json:"workflow"`
+			TeamID      string    `json:"team_id"`
+			TaskID      string    `json:"task_id"`
+			DependsOnID string    `json:"depends_on_id"`
+			CreatedAt   time.Time `json:"created_at"`
+		} `json:"edges"`
+		Count int `json:"count"`
+	}
+	require.NoError(t, decodeJSONResponse(listDependencyRec, &listDependencyPayload))
+	require.Equal(t, "task-control", listDependencyPayload.TaskID)
+	require.Equal(t, []string{"task-dependency"}, listDependencyPayload.Dependencies)
+	require.Empty(t, listDependencyPayload.Dependents)
+	require.Len(t, listDependencyPayload.Edges, 1)
+	require.NotEmpty(t, listDependencyPayload.Edges[0].ID)
+	require.Equal(t, "spawn_team", listDependencyPayload.Edges[0].Workflow)
+	require.Equal(t, teamID, listDependencyPayload.Edges[0].TeamID)
+	require.Equal(t, "task-control", listDependencyPayload.Edges[0].TaskID)
+	require.Equal(t, "task-dependency", listDependencyPayload.Edges[0].DependsOnID)
+	require.False(t, listDependencyPayload.Edges[0].CreatedAt.IsZero())
+	require.Equal(t, 1, listDependencyPayload.Count)
+
 	claimBody := `{"workflow":"spawn_team","team_id":"team-1","assignee":"mate-1","expected_version":1,"duration_sec":600,"use_path_claims":true,"write_paths":["docs/plan.md"],"workspace_root":"workspace"}`
 	claimReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/task-control/claim", strings.NewReader(claimBody))
 	claimReq.Header.Set("Content-Type", "application/json")

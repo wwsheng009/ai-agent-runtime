@@ -56,11 +56,37 @@ type TaskWakeEvent struct {
 	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
+// TaskDependencyRecord is the storage-neutral AgentControl read model for a
+// task graph dependency edge.
+type TaskDependencyRecord struct {
+	ID          string    `json:"id,omitempty"`
+	Workflow    string    `json:"workflow,omitempty"`
+	TeamID      string    `json:"team_id,omitempty"`
+	TaskID      string    `json:"task_id,omitempty"`
+	DependsOnID string    `json:"depends_on_id,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+}
+
+// TaskDependencyFilter describes which task graph edges to read through the
+// AgentControl dependency seam.
+type TaskDependencyFilter struct {
+	Workflow          string
+	TeamID            string
+	TaskID            string
+	DependsOnID       string
+	IncludeDependents bool
+}
+
 // TaskRegistryReader is the read side of the AgentControl task registry seam.
 // Workflow-specific implementations can project their native task model into
 // TaskRecord while AgentControl consumers depend only on this interface.
 type TaskRegistryReader interface {
 	ListAgentControlTasks(ctx context.Context, filter TaskFilter) ([]TaskRecord, error)
+}
+
+// TaskDependencyReader is the read side of the AgentControl task graph seam.
+type TaskDependencyReader interface {
+	ListAgentControlTaskDependencies(ctx context.Context, filter TaskDependencyFilter) ([]TaskDependencyRecord, error)
 }
 
 // TaskWakeWatcher exposes task lifecycle wake notifications through the
@@ -110,6 +136,16 @@ type TaskCreateRequest struct {
 	Deliverables []string
 	Summary      string
 	ResultRef    string
+}
+
+// TaskDependencyCreateRequest describes creating a dependency edge through the
+// AgentControl task graph seam without depending on a workflow-specific graph
+// table.
+type TaskDependencyCreateRequest struct {
+	Workflow    string
+	TeamID      string
+	TaskID      string
+	DependsOnID string
 }
 
 // TaskReleaseRequest describes a lease release/status reset through the
@@ -180,6 +216,12 @@ type TaskRegistryCreateWriter interface {
 	CreateAgentControlTask(ctx context.Context, request TaskCreateRequest) (*TaskRecord, error)
 }
 
+// TaskDependencyCreateWriter exposes dependency edge creation through the
+// AgentControl task graph seam.
+type TaskDependencyCreateWriter interface {
+	CreateAgentControlTaskDependency(ctx context.Context, request TaskDependencyCreateRequest) error
+}
+
 // TaskRegistryReleaseWriter exposes task release through the AgentControl task
 // registry seam while workflow stores remain responsible for native lease
 // bookkeeping.
@@ -243,6 +285,25 @@ func (e TaskWakeEvent) Normalize() TaskWakeEvent {
 	return e
 }
 
+// Normalize trims task dependency record fields.
+func (r TaskDependencyRecord) Normalize() TaskDependencyRecord {
+	r.ID = strings.TrimSpace(r.ID)
+	r.Workflow = strings.TrimSpace(r.Workflow)
+	r.TeamID = strings.TrimSpace(r.TeamID)
+	r.TaskID = strings.TrimSpace(r.TaskID)
+	r.DependsOnID = strings.TrimSpace(r.DependsOnID)
+	return r
+}
+
+// Normalize trims task dependency filter fields.
+func (f TaskDependencyFilter) Normalize() TaskDependencyFilter {
+	f.Workflow = strings.TrimSpace(f.Workflow)
+	f.TeamID = strings.TrimSpace(f.TeamID)
+	f.TaskID = strings.TrimSpace(f.TaskID)
+	f.DependsOnID = strings.TrimSpace(f.DependsOnID)
+	return f
+}
+
 // Normalize trims string fields in a task status update request.
 func (r TaskStatusUpdateRequest) Normalize() TaskStatusUpdateRequest {
 	r.ID = strings.TrimSpace(r.ID)
@@ -264,6 +325,15 @@ func (r TaskCreateRequest) Normalize() TaskCreateRequest {
 	r.Assignee = strings.TrimSpace(r.Assignee)
 	r.Summary = strings.TrimSpace(r.Summary)
 	r.ResultRef = strings.TrimSpace(r.ResultRef)
+	return r
+}
+
+// Normalize trims string fields in a dependency creation request.
+func (r TaskDependencyCreateRequest) Normalize() TaskDependencyCreateRequest {
+	r.Workflow = strings.TrimSpace(r.Workflow)
+	r.TeamID = strings.TrimSpace(r.TeamID)
+	r.TaskID = strings.TrimSpace(r.TaskID)
+	r.DependsOnID = strings.TrimSpace(r.DependsOnID)
 	return r
 }
 
