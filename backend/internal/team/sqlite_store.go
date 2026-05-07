@@ -929,7 +929,7 @@ func (s *SQLiteStore) AddTaskDependency(ctx context.Context, taskID, dependsOnID
 		return fmt.Errorf("task dependency ids are required")
 	}
 	id := "dep_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO team_task_dependencies (id, task_id, depends_on_id, created_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(task_id, depends_on_id) DO NOTHING
@@ -937,7 +937,36 @@ func (s *SQLiteStore) AddTaskDependency(ctx context.Context, taskID, dependsOnID
 	if err != nil {
 		return fmt.Errorf("insert dependency: %w", err)
 	}
+	if affected, _ := result.RowsAffected(); affected > 0 {
+		_ = s.appendTaskDependencyCreatedEvent(ctx, id, taskID, dependsOnID)
+	}
 	return nil
+}
+
+func (s *SQLiteStore) appendTaskDependencyCreatedEvent(ctx context.Context, dependencyID, taskID, dependsOnID string) error {
+	task, err := s.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task == nil || strings.TrimSpace(task.TeamID) == "" {
+		return nil
+	}
+	payload := map[string]interface{}{
+		"dependency_id": dependencyID,
+		"task_id":       strings.TrimSpace(taskID),
+		"depends_on_id": strings.TrimSpace(dependsOnID),
+		"team_id":       strings.TrimSpace(task.TeamID),
+	}
+	if dependsOn, err := s.GetTask(ctx, dependsOnID); err == nil && dependsOn != nil {
+		payload["depends_on_team_id"] = strings.TrimSpace(dependsOn.TeamID)
+	}
+	_, err = s.AppendTeamEvent(ctx, TeamEvent{
+		Type:      TaskDependencyCreatedEvent,
+		TeamID:    strings.TrimSpace(task.TeamID),
+		Payload:   payload,
+		Timestamp: time.Now().UTC(),
+	})
+	return err
 }
 
 // ListTaskDependencies returns dependency ids for a task.

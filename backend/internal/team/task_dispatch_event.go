@@ -16,6 +16,7 @@ const (
 	TaskDispatchRequestedEvent = "task.dispatch.requested"
 	// TaskDispatchCompletedEvent records the submit result for a teammate task.
 	TaskDispatchCompletedEvent             = "task.dispatch.completed"
+	TaskDependencyCreatedEvent             = "task.dependency.created"
 	TaskAssignmentMailboxKind              = agentcontrol.MailboxKindTeamTaskAssignment
 	TaskAssignmentControlMessageType       = agentcontrol.MessageTypeTeamTaskAssignment
 	TaskAssignmentControlAction            = agentcontrol.ActionTaskAssign

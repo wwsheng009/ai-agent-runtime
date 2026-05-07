@@ -73,6 +73,20 @@ func TestSQLiteStoreListTaskDependencyRecords(t *testing.T) {
 	require.Equal(t, followupID, records[1].TaskID)
 	require.Equal(t, childID, records[1].DependsOnID)
 	require.False(t, records[1].CreatedAt.IsZero())
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID, EventType: TaskDependencyCreatedEvent})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	require.Equal(t, int64(1), events[0].Seq)
+	require.Equal(t, TaskDependencyCreatedEvent, events[0].Type)
+	require.Equal(t, childID, events[0].Payload["task_id"])
+	require.Equal(t, parentID, events[0].Payload["depends_on_id"])
+	require.NotEmpty(t, events[0].Payload["dependency_id"])
+
+	require.NoError(t, store.AddTaskDependency(ctx, childID, parentID))
+	eventsAfterDuplicate, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID, EventType: TaskDependencyCreatedEvent})
+	require.NoError(t, err)
+	require.Len(t, eventsAfterDuplicate, 2)
 }
 
 func TestSQLiteStoreListTeamIDs(t *testing.T) {
