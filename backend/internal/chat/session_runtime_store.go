@@ -62,18 +62,20 @@ type RuntimeStoreConfig struct {
 
 // InMemoryRuntimeStore stores state and events in memory.
 type InMemoryRuntimeStore struct {
-	mu            sync.RWMutex
-	states        map[string]*RuntimeState
-	events        map[string][]storedEvent
-	mailbox       map[string][]team.MailMessage
-	receipts      map[string]map[string]ToolExecutionReceipt
-	seq           map[string]int64
-	mailboxSeq    map[string]int64
-	retention     int
-	watchMu       sync.Mutex
-	nextWatchID   int64
-	eventWatchers map[int64]eventWatcher
-	mailWatchers  map[int64]mailboxWatcher
+	mu             sync.RWMutex
+	states         map[string]*RuntimeState
+	events         map[string][]storedEvent
+	mailbox        map[string][]team.MailMessage
+	controlMailbox map[string][]team.MailMessage
+	receipts       map[string]map[string]ToolExecutionReceipt
+	seq            map[string]int64
+	mailboxSeq     map[string]int64
+	controlSeq     map[string]int64
+	retention      int
+	watchMu        sync.Mutex
+	nextWatchID    int64
+	eventWatchers  map[int64]eventWatcher
+	mailWatchers   map[int64]mailboxWatcher
 }
 
 type storedEvent struct {
@@ -97,13 +99,15 @@ func NewInMemoryRuntimeStore(retention int) *InMemoryRuntimeStore {
 		retention = 0
 	}
 	return &InMemoryRuntimeStore{
-		states:     make(map[string]*RuntimeState),
-		events:     make(map[string][]storedEvent),
-		mailbox:    make(map[string][]team.MailMessage),
-		receipts:   make(map[string]map[string]ToolExecutionReceipt),
-		seq:        make(map[string]int64),
-		mailboxSeq: make(map[string]int64),
-		retention:  retention,
+		states:         make(map[string]*RuntimeState),
+		events:         make(map[string][]storedEvent),
+		mailbox:        make(map[string][]team.MailMessage),
+		controlMailbox: make(map[string][]team.MailMessage),
+		receipts:       make(map[string]map[string]ToolExecutionReceipt),
+		seq:            make(map[string]int64),
+		mailboxSeq:     make(map[string]int64),
+		controlSeq:     make(map[string]int64),
+		retention:      retention,
 	}
 }
 
@@ -149,9 +153,11 @@ func (s *InMemoryRuntimeStore) DeleteState(ctx context.Context, sessionID string
 	delete(s.states, sessionID)
 	delete(s.events, sessionID)
 	delete(s.mailbox, sessionID)
+	delete(s.controlMailbox, sessionID)
 	delete(s.receipts, sessionID)
 	delete(s.seq, sessionID)
 	delete(s.mailboxSeq, sessionID)
+	delete(s.controlSeq, sessionID)
 	return nil
 }
 
@@ -294,8 +300,16 @@ func (s *InMemoryRuntimeStore) AppendMailbox(ctx context.Context, sessionID stri
 	s.mailboxSeq[sessionID]++
 	mailboxSeq := s.mailboxSeq[sessionID]
 	message.Seq = mailboxSeq
+	message.SessionMailboxSeq = mailboxSeq
 	if strings.TrimSpace(message.ID) == "" {
 		message.ID = fmt.Sprintf("mailbox_%d", mailboxSeq)
+	}
+	if IsAgentControlMailboxMessage(message) {
+		s.controlSeq[sessionID]++
+		controlSeq := s.controlSeq[sessionID]
+		controlMessage := cloneTeamMailMessage(message)
+		controlMessage.ControlSeq = controlSeq
+		s.controlMailbox[sessionID] = append(s.controlMailbox[sessionID], controlMessage)
 	}
 	s.mailbox[sessionID] = append(s.mailbox[sessionID], cloneTeamMailMessage(message))
 	s.mu.Unlock()
@@ -382,16 +396,27 @@ func (s *InMemoryRuntimeStore) ListMailbox(ctx context.Context, sessionID string
 
 // ListAgentControlMailbox returns mailbox messages with AgentControl envelope metadata.
 func (s *InMemoryRuntimeStore) ListAgentControlMailbox(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]team.MailMessage, error) {
-	messages, err := s.ListMailbox(ctx, sessionID, afterSeq, 0)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	result := make([]team.MailMessage, 0, len(messages))
-	for _, message := range messages {
-		if !IsAgentControlMailboxMessage(message) {
+	if s == nil {
+		return nil, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := s.controlMailbox[sessionID]
+	if len(list) == 0 {
+		return nil, nil
+	}
+	result := make([]team.MailMessage, 0, len(list))
+	for _, message := range list {
+		if message.ControlSeq <= afterSeq {
 			continue
 		}
-		result = append(result, message)
+		cloned := cloneTeamMailMessage(message)
+		cloned.Seq = cloned.ControlSeq
+		result = append(result, cloned)
 		if limit > 0 && len(result) >= limit {
 			break
 		}
@@ -477,17 +502,29 @@ func (s *InMemoryRuntimeStore) WatchAgentControlMailbox(ctx context.Context, ses
 	watchCtx, cancel := context.WithCancel(ctx)
 	source, unwatch := s.WatchMailbox(watchCtx, sessionID)
 	ch := make(chan team.MailMessage, 1)
+	lastSeq, _ := s.LastAgentControlMailboxSeq(watchCtx, sessionID)
 	go func() {
 		defer close(ch)
 		for {
 			select {
-			case message := <-source:
-				if !IsAgentControlMailboxMessage(message) {
+			case _, ok := <-source:
+				if !ok {
+					return
+				}
+				messages, err := s.ListAgentControlMailbox(watchCtx, sessionID, lastSeq, 0)
+				if err != nil {
 					continue
 				}
-				select {
-				case ch <- cloneTeamMailMessage(message):
-				default:
+				for _, message := range messages {
+					if message.ControlSeq > lastSeq {
+						lastSeq = message.ControlSeq
+					} else if message.Seq > lastSeq {
+						lastSeq = message.Seq
+					}
+					select {
+					case ch <- cloneTeamMailMessage(message):
+					default:
+					}
 				}
 			case <-watchCtx.Done():
 				return
@@ -528,17 +565,15 @@ func (s *InMemoryRuntimeStore) LastMailboxSeq(ctx context.Context, sessionID str
 
 // LastAgentControlMailboxSeq returns the high-water mark for AgentControl mailbox rows.
 func (s *InMemoryRuntimeStore) LastAgentControlMailboxSeq(ctx context.Context, sessionID string) (int64, error) {
-	messages, err := s.ListAgentControlMailbox(ctx, sessionID, 0, 0)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	var seq int64
-	for _, message := range messages {
-		if message.Seq > seq {
-			seq = message.Seq
-		}
+	if s == nil {
+		return 0, nil
 	}
-	return seq, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.controlSeq[strings.TrimSpace(sessionID)], nil
 }
 
 func (s *InMemoryRuntimeStore) notifyEventWatchers(seq int64, event runtimeevents.Event) {
@@ -645,6 +680,9 @@ func NewSQLiteRuntimeStore(cfg *RuntimeStoreConfig) (*SQLiteRuntimeStore, error)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open runtime db: %w", err)
+	}
+	if strings.Contains(dsn, "mode=memory") {
+		db.SetMaxOpenConns(1)
 	}
 	store := &SQLiteRuntimeStore{db: db}
 	if err := store.init(context.Background()); err != nil {
@@ -1152,17 +1190,23 @@ func appendAgentControlMailboxTx(ctx context.Context, tx *sql.Tx, sessionID stri
 	if tx == nil || !agentcontrol.HasEnvelopeMetadata(message.Metadata) {
 		return nil
 	}
+	var controlSeq int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_control_mailbox_messages WHERE session_id = ?
+	`, sessionID).Scan(&controlSeq); err != nil {
+		return fmt.Errorf("next agent control mailbox seq: %w", err)
+	}
 	taskID := interface{}(nil)
 	if message.TaskID != nil && strings.TrimSpace(*message.TaskID) != "" {
 		taskID = strings.TrimSpace(*message.TaskID)
 	}
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO agent_control_mailbox_messages (
-			session_id, session_mailbox_seq, message_id, team_id, from_agent, to_agent, task_id,
+			session_id, seq, session_mailbox_seq, message_id, team_id, from_agent, to_agent, task_id,
 			kind, message_type, control_action, workflow, mailbox_delivery, mailbox_kind,
 			body, metadata_json, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, sessionID, mailboxSeq, strings.TrimSpace(message.ID), nullIfEmpty(message.TeamID),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, sessionID, controlSeq, mailboxSeq, strings.TrimSpace(message.ID), nullIfEmpty(message.TeamID),
 		nullIfEmpty(message.FromAgent), nullIfEmpty(message.ToAgent), taskID, nullIfEmpty(message.Kind),
 		nullIfEmpty(agentcontrol.MetadataString(message.Metadata, agentcontrol.MetadataKeyMessageType)),
 		nullIfEmpty(agentcontrol.MetadataString(message.Metadata, agentcontrol.MetadataKeyControlAction)),
@@ -1281,6 +1325,7 @@ func (s *SQLiteRuntimeStore) ListMailbox(ctx context.Context, sessionID string, 
 		if err := rows.Scan(&message.Seq, &message.ID, &teamID, &fromAgent, &toAgent, &taskID, &kind, &message.Body, &metadata, &createdRaw); err != nil {
 			return nil, fmt.Errorf("scan session mailbox: %w", err)
 		}
+		message.SessionMailboxSeq = message.Seq
 		message.TeamID = teamID.String
 		message.FromAgent = fromAgent.String
 		message.ToAgent = toAgent.String
@@ -1312,10 +1357,10 @@ func (s *SQLiteRuntimeStore) ListAgentControlMailbox(ctx context.Context, sessio
 		return nil, fmt.Errorf("runtime store is not initialized")
 	}
 	query := `
-		SELECT session_mailbox_seq, message_id, team_id, from_agent, to_agent, task_id, kind, body, metadata_json, created_at
+		SELECT seq, session_mailbox_seq, message_id, team_id, from_agent, to_agent, task_id, kind, body, metadata_json, created_at
 		FROM agent_control_mailbox_messages
-		WHERE session_id = ? AND session_mailbox_seq > ?
-		ORDER BY session_mailbox_seq ASC
+		WHERE session_id = ? AND seq > ?
+		ORDER BY seq ASC
 	`
 	args := []interface{}{strings.TrimSpace(sessionID), afterSeq}
 	if limit > 0 {
@@ -1331,18 +1376,21 @@ func (s *SQLiteRuntimeStore) ListAgentControlMailbox(ctx context.Context, sessio
 	messages := make([]team.MailMessage, 0)
 	for rows.Next() {
 		var (
-			message    team.MailMessage
-			teamID     sql.NullString
-			fromAgent  sql.NullString
-			toAgent    sql.NullString
-			taskID     sql.NullString
-			kind       sql.NullString
-			metadata   string
-			createdRaw string
+			message           team.MailMessage
+			sessionMailboxSeq int64
+			teamID            sql.NullString
+			fromAgent         sql.NullString
+			toAgent           sql.NullString
+			taskID            sql.NullString
+			kind              sql.NullString
+			metadata          string
+			createdRaw        string
 		)
-		if err := rows.Scan(&message.Seq, &message.ID, &teamID, &fromAgent, &toAgent, &taskID, &kind, &message.Body, &metadata, &createdRaw); err != nil {
+		if err := rows.Scan(&message.ControlSeq, &sessionMailboxSeq, &message.ID, &teamID, &fromAgent, &toAgent, &taskID, &kind, &message.Body, &metadata, &createdRaw); err != nil {
 			return nil, fmt.Errorf("scan agent control mailbox: %w", err)
 		}
+		message.Seq = message.ControlSeq
+		message.SessionMailboxSeq = sessionMailboxSeq
 		message.TeamID = teamID.String
 		message.FromAgent = fromAgent.String
 		message.ToAgent = toAgent.String
@@ -1446,17 +1494,29 @@ func (s *SQLiteRuntimeStore) WatchAgentControlMailbox(ctx context.Context, sessi
 	watchCtx, cancel := context.WithCancel(ctx)
 	source, unwatch := s.WatchMailbox(watchCtx, sessionID)
 	ch := make(chan team.MailMessage, 1)
+	lastSeq, _ := s.LastAgentControlMailboxSeq(watchCtx, sessionID)
 	go func() {
 		defer close(ch)
 		for {
 			select {
-			case message := <-source:
-				if !IsAgentControlMailboxMessage(message) {
+			case _, ok := <-source:
+				if !ok {
+					return
+				}
+				messages, err := s.ListAgentControlMailbox(watchCtx, sessionID, lastSeq, 0)
+				if err != nil {
 					continue
 				}
-				select {
-				case ch <- cloneTeamMailMessage(message):
-				default:
+				for _, message := range messages {
+					if message.ControlSeq > lastSeq {
+						lastSeq = message.ControlSeq
+					} else if message.Seq > lastSeq {
+						lastSeq = message.Seq
+					}
+					select {
+					case ch <- cloneTeamMailMessage(message):
+					default:
+					}
 				}
 			case <-watchCtx.Done():
 				return
@@ -1510,7 +1570,7 @@ func (s *SQLiteRuntimeStore) LastAgentControlMailboxSeq(ctx context.Context, ses
 	}
 	var seq int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(session_mailbox_seq), 0)
+		SELECT COALESCE(MAX(seq), 0)
 		FROM agent_control_mailbox_messages
 		WHERE session_id = ?
 	`, strings.TrimSpace(sessionID)).Scan(&seq)
@@ -1733,6 +1793,25 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 				ON agent_control_mailbox_messages(message_id);
 				CREATE INDEX IF NOT EXISTS idx_agent_control_mailbox_workflow_action
 				ON agent_control_mailbox_messages(workflow, control_action);
+			`,
+		},
+		{
+			Version: 11,
+			Name:    "agent_control_mailbox_sequence",
+			UpSQL: `
+				ALTER TABLE agent_control_mailbox_messages ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+				UPDATE agent_control_mailbox_messages
+				SET seq = (
+					SELECT COUNT(*)
+					FROM agent_control_mailbox_messages AS prior
+					WHERE prior.session_id = agent_control_mailbox_messages.session_id
+						AND prior.session_mailbox_seq <= agent_control_mailbox_messages.session_mailbox_seq
+				)
+				WHERE seq = 0;
+				CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_control_mailbox_session_control_seq_unique
+				ON agent_control_mailbox_messages(session_id, seq);
+				CREATE INDEX IF NOT EXISTS idx_agent_control_mailbox_session_mailbox_seq
+				ON agent_control_mailbox_messages(session_id, session_mailbox_seq);
 			`,
 		},
 	}

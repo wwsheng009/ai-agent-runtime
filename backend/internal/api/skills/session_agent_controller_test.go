@@ -621,6 +621,7 @@ func TestSessionAgentController_MirrorsChildCompletionToParentEvents(t *testing.
 		Payload: map[string]interface{}{
 			"success": true,
 			"steps":   5,
+			"seq":     int64(55),
 		},
 	}
 	handler.getRuntimeEventBus().Publish(childEnd)
@@ -630,16 +631,7 @@ func TestSessionAgentController_MirrorsChildCompletionToParentEvents(t *testing.
 	events, err := store.ListEvents(ctx, rootSession.ID, 0, 20)
 	require.NoError(t, err)
 	require.Len(t, events, 2)
-	event := events[0]
-	assert.Equal(t, "subagent.completed", event.Type)
-	assert.Equal(t, rootSession.ID, event.SessionID)
-	assert.Equal(t, "api-completion-child", event.Payload["session_id"])
-	assert.Equal(t, "/root/api-completion-child", event.Payload["path"])
-	assert.Equal(t, "worker", event.Payload["agent_type"])
-	assert.Equal(t, string(chat.SessionIdle), event.Payload["status"])
-	assert.Equal(t, true, event.Payload["success"])
-	assert.Equal(t, 5, event.Payload["steps"])
-	mailboxEvent := events[1]
+	mailboxEvent := events[0]
 	assert.Equal(t, chat.EventMailboxReceived, mailboxEvent.Type)
 	assert.Equal(t, rootSession.ID, mailboxEvent.SessionID)
 	assert.Equal(t, "subagent.completed", mailboxEvent.Payload["kind"])
@@ -650,11 +642,27 @@ func TestSessionAgentController_MirrorsChildCompletionToParentEvents(t *testing.
 	assert.Equal(t, "api-completion-child", metadata["session_id"])
 	assert.Equal(t, "/root/api-completion-child", metadata["path"])
 	assert.Equal(t, "worker", metadata["agent_type"])
+	assert.Equal(t, int64(55), metadata["event_seq"])
 	assert.Equal(t, agentcontrol.MessageTypeSubagentCompleted, metadata["message_type"])
 	assert.Equal(t, agentcontrol.ActionAgentCompleted, metadata["control_action"])
 	assert.Equal(t, agentcontrol.WorkflowSpawnAgent, metadata["workflow"])
 	assert.Equal(t, agentcontrol.DeliverySessionMailbox, metadata["mailbox_delivery"])
 	assert.Equal(t, agentcontrol.MailboxKindSubagentCompleted, metadata["mailbox_kind"])
+	event := events[1]
+	assert.Equal(t, "subagent.completed", event.Type)
+	assert.Equal(t, rootSession.ID, event.SessionID)
+	assert.Equal(t, "api-completion-child", event.Payload["session_id"])
+	assert.Equal(t, "/root/api-completion-child", event.Payload["path"])
+	assert.Equal(t, "worker", event.Payload["agent_type"])
+	assert.Equal(t, string(chat.SessionIdle), event.Payload["status"])
+	assert.Equal(t, true, event.Payload["success"])
+	assert.Equal(t, 5, event.Payload["steps"])
+	assert.Equal(t, int64(55), event.Payload["source_event_seq"])
+	assert.Equal(t, true, event.Payload["display_mirror"])
+	assert.Equal(t, toolbroker.SubagentCompletionMirrorSource, event.Payload["mirror_source"])
+	assert.Equal(t, "delivered", event.Payload["mailbox_delivery_status"])
+	assert.Equal(t, agentcontrol.MessageTypeSubagentCompleted, event.Payload["message_type"])
+	assert.Equal(t, agentcontrol.ActionAgentCompleted, event.Payload["control_action"])
 }
 
 func TestSessionAgentController_PersistsCompletionMailboxWithoutParentActor(t *testing.T) {

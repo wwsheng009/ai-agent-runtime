@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 func TestApplyBlockedTaskOutcomeBlocksAndReplans(t *testing.T) {
@@ -42,7 +43,7 @@ func TestApplyBlockedTaskOutcomeBlocksAndReplans(t *testing.T) {
 			Sessions: &staticSessionClient{
 				result: &SessionResult{
 					Success: true,
-					Output:  `{"tasks":[{"id":"task-followup","title":"follow up","goal":"collect missing info"}]}`,
+					Output:  `{"tasks":[{"id":"task-followup","title":"follow up","goal":"collect missing info"},{"id":"task-verify","title":"verify follow up","goal":"verify missing info"}],"dependencies":[{"task":"task-verify","depends_on":"task-followup"}]}`,
 				},
 			},
 			Store: store,
@@ -65,10 +66,36 @@ func TestApplyBlockedTaskOutcomeBlocksAndReplans(t *testing.T) {
 	assert.True(t, result.AutoReplan)
 	assert.True(t, result.Replanned())
 	require.NotNil(t, result.PlanResult)
-	require.Len(t, result.PlanResult.Tasks, 1)
+	require.Len(t, result.PlanResult.Tasks, 2)
+	require.Len(t, result.PlanResult.Dependencies, 1)
+	assert.Equal(t, "follow up", result.PlanResult.Tasks[0].Title)
 	require.NotNil(t, result.Message)
 	assert.Equal(t, "lead", result.Message.ToAgent)
 	assert.Equal(t, "warning", result.Message.Kind)
+	assert.Equal(t, TaskLifecycleControlMessageType, result.Message.Metadata["message_type"])
+	assert.Equal(t, TaskLifecycleControlAction, result.Message.Metadata["control_action"])
+	assert.Equal(t, TaskAssignmentWorkflow, result.Message.Metadata["workflow"])
+	assert.Equal(t, TaskLifecycleMailboxKind, result.Message.Metadata["mailbox_kind"])
+	assert.Equal(t, "task.blocked", result.Message.Metadata["event_type"])
+	assert.Equal(t, taskID, result.Message.Metadata["task_id"])
+	assert.Equal(t, "mate-1", result.Message.Metadata["blocked_by"])
+
+	records, err := NewAgentControlTaskRegistry(store).ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+		Status:   []string{string(TaskStatusPending)},
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	recordTitles := []string{records[0].Title, records[1].Title}
+	assert.Contains(t, recordTitles, "follow up")
+	assert.Contains(t, recordTitles, "verify follow up")
+	for _, record := range records {
+		assert.Equal(t, agentcontrol.WorkflowSpawnTeam, record.Workflow)
+	}
+	deps, err := store.ListTaskDependencies(ctx, result.PlanResult.Dependencies[0].TaskID)
+	require.NoError(t, err)
+	require.Equal(t, []string{result.PlanResult.Dependencies[0].DependsOnID}, deps)
 
 	mate, err := store.GetTeammate(ctx, "mate-1")
 	require.NoError(t, err)
@@ -146,6 +173,13 @@ func TestApplyBlockedTaskOutcomeHandoffSkipsReplan(t *testing.T) {
 	require.NotNil(t, result.Message)
 	assert.Equal(t, "mate-2", result.Message.ToAgent)
 	assert.Equal(t, "handoff", result.Message.Kind)
+	assert.Equal(t, TaskLifecycleControlMessageType, result.Message.Metadata["message_type"])
+	assert.Equal(t, TaskLifecycleControlAction, result.Message.Metadata["control_action"])
+	assert.Equal(t, TaskAssignmentWorkflow, result.Message.Metadata["workflow"])
+	assert.Equal(t, TaskLifecycleMailboxKind, result.Message.Metadata["mailbox_kind"])
+	assert.Equal(t, "task.handoff", result.Message.Metadata["event_type"])
+	assert.Equal(t, "mate-2", result.Message.Metadata["handoff_to"])
+	assert.Equal(t, taskID, result.Message.Metadata["task_id"])
 }
 
 func TestApplyBlockedTaskOutcomeCapturesStructuredReplanFailure(t *testing.T) {

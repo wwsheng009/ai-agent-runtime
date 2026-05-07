@@ -330,18 +330,7 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 	}
 	if notifyRecipient && services.Mailbox != nil {
 		recipient := firstNonEmptyString(handoffTo, "lead")
-		kind := "warning"
-		if recipient != "" && !strings.EqualFold(recipient, "lead") {
-			kind = "handoff"
-		}
-		message := MailMessage{
-			TeamID:    teamRecord.ID,
-			FromAgent: firstNonEmptyString(teammateID, "teammate"),
-			ToAgent:   recipient,
-			TaskID:    &taskID,
-			Kind:      kind,
-			Body:      summary,
-		}
+		message := BuildBlockedTaskOutcomeMailboxMessage(teamRecord.ID, taskID, teammateID, recipient, summary, normalized)
 		messageID, err := services.Mailbox.Send(ctx, message)
 		if err != nil {
 			return nil, err
@@ -392,6 +381,63 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 		result.Task = fallback
 	}
 	return result, nil
+}
+
+// BuildBlockedTaskOutcomeMailboxMessage creates a mailbox notification for
+// blocked/handoff task outcomes while carrying the AgentControl task lifecycle
+// envelope needed by session mailbox mirrors and future control substrates.
+func BuildBlockedTaskOutcomeMailboxMessage(teamID, taskID, teammateID, recipient, summary string, outcome TaskOutcomeContract) MailMessage {
+	teamID = strings.TrimSpace(teamID)
+	taskID = strings.TrimSpace(taskID)
+	teammateID = strings.TrimSpace(teammateID)
+	recipient = firstNonEmptyString(strings.TrimSpace(recipient), "lead")
+	summary = strings.TrimSpace(summary)
+	handoffTo := strings.TrimSpace(outcome.HandoffTo)
+	kind := "warning"
+	eventType := "task.blocked"
+	if handoffTo != "" && !strings.EqualFold(recipient, "lead") {
+		kind = "handoff"
+		eventType = "task.handoff"
+	}
+	metadata := agentcontrol.ApplyEnvelope(map[string]interface{}{
+		"event_type":  eventType,
+		"team_id":     teamID,
+		"task_id":     taskID,
+		"assignee":    teammateID,
+		"blocked_by":  teammateID,
+		"task_status": string(TaskStatusBlocked),
+		"outcome":     string(outcome.Status),
+	}, agentcontrol.Envelope{
+		MessageType:     TaskLifecycleControlMessageType,
+		ControlAction:   TaskLifecycleControlAction,
+		Workflow:        TaskAssignmentWorkflow,
+		MailboxDelivery: taskDispatchMailboxDeliveryAgentSubstr,
+		MailboxKind:     TaskLifecycleMailboxKind,
+	})
+	if handoffTo != "" {
+		metadata["handoff_to"] = handoffTo
+	}
+	if blocker := strings.TrimSpace(outcome.Blocker); blocker != "" {
+		metadata["blocker"] = blocker
+	}
+	if outcomeSummary := strings.TrimSpace(outcome.Summary); outcomeSummary != "" {
+		metadata["summary"] = outcomeSummary
+	}
+	var taskIDPtr *string
+	if taskID != "" {
+		taskIDValue := taskID
+		taskIDPtr = &taskIDValue
+	}
+	return MailMessage{
+		TeamID:    teamID,
+		FromAgent: firstNonEmptyString(teammateID, "teammate"),
+		ToAgent:   recipient,
+		TaskID:    taskIDPtr,
+		Kind:      kind,
+		Body:      summary,
+		Metadata:  metadata,
+		CreatedAt: time.Now().UTC(),
+	}
 }
 
 func normalizeOptionalTaskResultRef(value *string) *string {

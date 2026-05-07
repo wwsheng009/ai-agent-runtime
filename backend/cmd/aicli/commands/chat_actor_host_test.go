@@ -1263,6 +1263,7 @@ func TestLocalActorRegistry_MirrorsChildCompletionToParentEvents(t *testing.T) {
 		Payload: map[string]interface{}{
 			"success": true,
 			"steps":   3,
+			"seq":     int64(44),
 		},
 	}
 	host.EventBus.Publish(childEnd)
@@ -1274,17 +1275,7 @@ func TestLocalActorRegistry_MirrorsChildCompletionToParentEvents(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("expected parent completion event and mailbox event, got %#v", events)
 	}
-	event := events[0]
-	if event.Type != "subagent.completed" || event.SessionID != rootSession.ID {
-		t.Fatalf("unexpected mirrored event: %#v", event)
-	}
-	if event.Payload["session_id"] != "completion-child" || event.Payload["path"] != "/root/completion-child" || event.Payload["agent_type"] != "worker" {
-		t.Fatalf("unexpected mirrored payload: %#v", event.Payload)
-	}
-	if event.Payload["status"] != string(runtimechat.SessionIdle) || event.Payload["success"] != true {
-		t.Fatalf("unexpected completion status payload: %#v", event.Payload)
-	}
-	mailboxEvent := events[1]
+	mailboxEvent := events[0]
 	if mailboxEvent.Type != runtimechat.EventMailboxReceived || mailboxEvent.SessionID != rootSession.ID {
 		t.Fatalf("unexpected completion mailbox event: %#v", mailboxEvent)
 	}
@@ -1298,12 +1289,33 @@ func TestLocalActorRegistry_MirrorsChildCompletionToParentEvents(t *testing.T) {
 	if metadata["session_id"] != "completion-child" ||
 		metadata["path"] != "/root/completion-child" ||
 		metadata["agent_type"] != "worker" ||
+		metadata["event_seq"] != int64(44) ||
 		metadata["message_type"] != agentcontrol.MessageTypeSubagentCompleted ||
 		metadata["control_action"] != agentcontrol.ActionAgentCompleted ||
 		metadata["workflow"] != agentcontrol.WorkflowSpawnAgent ||
 		metadata["mailbox_delivery"] != agentcontrol.DeliverySessionMailbox ||
 		metadata["mailbox_kind"] != agentcontrol.MailboxKindSubagentCompleted {
 		t.Fatalf("unexpected completion mailbox metadata: %#v", metadata)
+	}
+	event := events[1]
+	if event.Type != "subagent.completed" || event.SessionID != rootSession.ID {
+		t.Fatalf("unexpected mirrored event: %#v", event)
+	}
+	if event.Payload["session_id"] != "completion-child" || event.Payload["path"] != "/root/completion-child" || event.Payload["agent_type"] != "worker" {
+		t.Fatalf("unexpected mirrored payload: %#v", event.Payload)
+	}
+	if event.Payload["status"] != string(runtimechat.SessionIdle) || event.Payload["success"] != true {
+		t.Fatalf("unexpected completion status payload: %#v", event.Payload)
+	}
+	if event.Payload["source_event_seq"] != int64(44) {
+		t.Fatalf("expected source event seq on display mirror, got %#v", event.Payload)
+	}
+	if event.Payload["display_mirror"] != true ||
+		event.Payload["mirror_source"] != toolbroker.SubagentCompletionMirrorSource ||
+		event.Payload["mailbox_delivery_status"] != "delivered" ||
+		event.Payload["message_type"] != agentcontrol.MessageTypeSubagentCompleted ||
+		event.Payload["control_action"] != agentcontrol.ActionAgentCompleted {
+		t.Fatalf("expected display mirror metadata, got %#v", event.Payload)
 	}
 }
 

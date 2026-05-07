@@ -230,16 +230,20 @@ func TestInMemoryRuntimeStoreAgentControlMailboxFiltersEnvelope(t *testing.T) {
 	messages, err := store.ListAgentControlMailbox(context.Background(), "session-mailbox", 0, 10)
 	require.NoError(t, err)
 	require.Len(t, messages, 1)
-	assert.Equal(t, int64(2), messages[0].Seq)
+	assert.Equal(t, int64(1), messages[0].Seq)
+	assert.Equal(t, int64(1), messages[0].ControlSeq)
+	assert.Equal(t, int64(2), messages[0].SessionMailboxSeq)
 	assert.Equal(t, "control mailbox", messages[0].Body)
 
 	lastSeq, err := store.LastAgentControlMailboxSeq(context.Background(), "session-mailbox")
 	require.NoError(t, err)
-	assert.Equal(t, int64(2), lastSeq)
+	assert.Equal(t, int64(1), lastSeq)
 
 	select {
 	case message := <-watch:
-		assert.Equal(t, int64(2), message.Seq)
+		assert.Equal(t, int64(1), message.Seq)
+		assert.Equal(t, int64(1), message.ControlSeq)
+		assert.Equal(t, int64(2), message.SessionMailboxSeq)
 		assert.Equal(t, "control mailbox", message.Body)
 	case <-time.After(time.Second):
 		t.Fatal("agent control mailbox watcher did not wake")
@@ -380,16 +384,20 @@ func TestSQLiteRuntimeStoreAppendMailboxMirrorsAgentControlEnvelope(t *testing.T
 	controlMessages, err := store.ListAgentControlMailbox(context.Background(), "teammate-session", 0, 10)
 	require.NoError(t, err)
 	require.Len(t, controlMessages, 1)
-	assert.Equal(t, int64(2), controlMessages[0].Seq)
+	assert.Equal(t, int64(1), controlMessages[0].Seq)
+	assert.Equal(t, int64(1), controlMessages[0].ControlSeq)
+	assert.Equal(t, int64(2), controlMessages[0].SessionMailboxSeq)
 	assert.Equal(t, agentcontrol.MessageTypeTeamTaskAssignment, agentcontrol.MetadataString(controlMessages[0].Metadata, agentcontrol.MetadataKeyMessageType))
 
 	lastSeq, err := store.LastAgentControlMailboxSeq(context.Background(), "teammate-session")
 	require.NoError(t, err)
-	assert.Equal(t, int64(2), lastSeq)
+	assert.Equal(t, int64(1), lastSeq)
 
 	select {
 	case message := <-watch:
-		assert.Equal(t, int64(2), message.Seq)
+		assert.Equal(t, int64(1), message.Seq)
+		assert.Equal(t, int64(1), message.ControlSeq)
+		assert.Equal(t, int64(2), message.SessionMailboxSeq)
 		assert.Equal(t, agentcontrol.MailboxKindTeamTaskAssignment, message.Kind)
 	case <-time.After(time.Second):
 		t.Fatal("agent control mailbox watcher did not wake")
@@ -397,15 +405,16 @@ func TestSQLiteRuntimeStoreAppendMailboxMirrorsAgentControlEnvelope(t *testing.T
 
 	var count int
 	var messageType, action, workflow, mailboxKind string
-	var mailboxSeq int64
+	var controlSeq, mailboxSeq int64
 	err = store.db.QueryRowContext(context.Background(), `
-		SELECT COUNT(*), COALESCE(MAX(session_mailbox_seq), 0), COALESCE(MAX(message_type), ''),
+		SELECT COUNT(*), COALESCE(MAX(seq), 0), COALESCE(MAX(session_mailbox_seq), 0), COALESCE(MAX(message_type), ''),
 			COALESCE(MAX(control_action), ''), COALESCE(MAX(workflow), ''), COALESCE(MAX(mailbox_kind), '')
 		FROM agent_control_mailbox_messages
 		WHERE session_id = ?
-	`, "teammate-session").Scan(&count, &mailboxSeq, &messageType, &action, &workflow, &mailboxKind)
+	`, "teammate-session").Scan(&count, &controlSeq, &mailboxSeq, &messageType, &action, &workflow, &mailboxKind)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
+	assert.Equal(t, int64(1), controlSeq)
 	assert.Equal(t, int64(2), mailboxSeq)
 	assert.Equal(t, agentcontrol.MessageTypeTeamTaskAssignment, messageType)
 	assert.Equal(t, agentcontrol.ActionTaskAssign, action)
@@ -988,4 +997,161 @@ func TestSQLiteRuntimeStoreMigratesSessionMailboxTable(t *testing.T) {
 	`, "session-mailbox-migration").Scan(&count)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
+}
+
+func TestSQLiteRuntimeStoreMigratesAgentControlMailboxSequence(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "runtime.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		);
+		INSERT INTO schema_migrations (version, name, applied_at) VALUES
+			(1, 'session_runtime_state', '2026-03-15T00:00:00Z'),
+			(2, 'session_events', '2026-03-15T00:00:00Z'),
+			(3, 'session_runtime_state_current_run_meta', '2026-03-15T00:00:00Z'),
+			(4, 'session_runtime_state_pending_tool', '2026-03-15T00:00:00Z'),
+			(5, 'session_tool_receipts', '2026-03-15T00:00:00Z'),
+			(6, 'session_tool_receipts_created_at_unix_nano', '2026-03-15T00:00:00Z'),
+			(7, 'session_runtime_state_ambient_run_meta', '2026-03-15T00:00:00Z'),
+			(8, 'session_runtime_state_frozen_turn_tools', '2026-03-15T00:00:00Z'),
+			(9, 'session_mailbox_messages', '2026-03-15T00:00:00Z'),
+			(10, 'agent_control_mailbox_messages', '2026-03-15T00:00:00Z');
+
+		CREATE TABLE session_runtime_state (
+			session_id TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			current_turn_id TEXT,
+			current_checkpoint_id TEXT,
+			pending_approval_json BLOB,
+			pending_question_json BLOB,
+			head_offset INTEGER NOT NULL DEFAULT 0,
+			active_job_ids_json BLOB NOT NULL DEFAULT '[]',
+			updated_at TEXT NOT NULL,
+			current_run_meta_json BLOB,
+			pending_tool_json BLOB,
+			ambient_run_meta_json BLOB,
+			frozen_turn_tools_json BLOB
+		);
+
+		CREATE TABLE session_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			type TEXT NOT NULL,
+			trace_id TEXT,
+			agent_name TEXT,
+			tool_name TEXT,
+			payload_json BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			UNIQUE(session_id, seq)
+		);
+
+		CREATE TABLE session_tool_receipts (
+			session_id TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			tool_name TEXT,
+			message_json BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			created_at_unix_nano INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (session_id, tool_call_id)
+		);
+
+		CREATE TABLE session_mailbox_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			message_id TEXT NOT NULL,
+			team_id TEXT,
+			from_agent TEXT,
+			to_agent TEXT,
+			task_id TEXT,
+			kind TEXT,
+			body TEXT NOT NULL,
+			metadata_json BLOB NOT NULL DEFAULT '{}',
+			created_at TEXT NOT NULL,
+			UNIQUE(session_id, seq)
+		);
+
+		CREATE TABLE agent_control_mailbox_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			session_mailbox_seq INTEGER NOT NULL,
+			message_id TEXT NOT NULL,
+			team_id TEXT,
+			from_agent TEXT,
+			to_agent TEXT,
+			task_id TEXT,
+			kind TEXT,
+			message_type TEXT,
+			control_action TEXT,
+			workflow TEXT,
+			mailbox_delivery TEXT,
+			mailbox_kind TEXT,
+			body TEXT NOT NULL,
+			metadata_json BLOB NOT NULL DEFAULT '{}',
+			created_at TEXT NOT NULL,
+			UNIQUE(session_id, session_mailbox_seq)
+		);
+
+		INSERT INTO session_mailbox_messages (
+			session_id, seq, message_id, from_agent, to_agent, kind, body, metadata_json, created_at
+		) VALUES
+			('session-control-migration', 2, 'control-old-2', 'child-2', 'parent', 'agent_message', 'old control 2', '{"message_type":"agent_control.agent_message"}', '2026-03-15T00:00:00Z'),
+			('session-control-migration', 4, 'control-old-4', 'child-4', 'parent', 'agent_message', 'old control 4', '{"message_type":"agent_control.agent_message"}', '2026-03-15T00:00:01Z');
+
+		INSERT INTO agent_control_mailbox_messages (
+			session_id, session_mailbox_seq, message_id, from_agent, to_agent, kind,
+			message_type, control_action, workflow, mailbox_delivery, mailbox_kind,
+			body, metadata_json, created_at
+		) VALUES
+			('session-control-migration', 2, 'control-old-2', 'child-2', 'parent', 'agent_message',
+			 'agent_control.agent_message', 'agent.message', 'spawn_agent', 'session_mailbox', 'agent_message',
+			 'old control 2', '{"message_type":"agent_control.agent_message"}', '2026-03-15T00:00:00Z'),
+			('session-control-migration', 4, 'control-old-4', 'child-4', 'parent', 'agent_message',
+			 'agent_control.agent_message', 'agent.message', 'spawn_agent', 'session_mailbox', 'agent_message',
+			 'old control 4', '{"message_type":"agent_control.agent_message"}', '2026-03-15T00:00:01Z');
+	`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: dbPath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	messages, err := store.ListAgentControlMailbox(context.Background(), "session-control-migration", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, messages, 2)
+	assert.Equal(t, int64(1), messages[0].Seq)
+	assert.Equal(t, int64(2), messages[0].SessionMailboxSeq)
+	assert.Equal(t, int64(2), messages[1].Seq)
+	assert.Equal(t, int64(4), messages[1].SessionMailboxSeq)
+
+	_, seq, err := store.AppendAgentControlMailbox(context.Background(), "session-control-migration", team.MailMessage{
+		FromAgent: "child-5",
+		ToAgent:   "parent",
+		Kind:      agentcontrol.MailboxKindAgentMessage,
+		Body:      "new control 5",
+		Metadata: agentcontrol.Envelope{
+			MessageType:     agentcontrol.MessageTypeAgentMessage,
+			ControlAction:   agentcontrol.ActionAgentMessage,
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindAgentMessage,
+		}.Metadata(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), seq)
+
+	messages, err = store.ListAgentControlMailbox(context.Background(), "session-control-migration", 2, 10)
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, int64(3), messages[0].Seq)
+	assert.Equal(t, int64(5), messages[0].SessionMailboxSeq)
 }

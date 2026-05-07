@@ -21,6 +21,7 @@ const (
 	SubagentCompletionMailboxKind    = agentcontrol.MailboxKindSubagentCompleted
 	SubagentCompletionMessageType    = agentcontrol.MessageTypeSubagentCompleted
 	SubagentCompletionAction         = agentcontrol.ActionAgentCompleted
+	SubagentCompletionMirrorSource   = "agent_control_mailbox"
 )
 
 // BuildAgentMailboxMessage creates the mailbox envelope used by send_message
@@ -89,7 +90,9 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 		if errText, ok := payload["error"]; ok {
 			metadata["error"] = errText
 		}
-		if seq, ok := payload["seq"]; ok {
+		if seq, ok := payload["source_event_seq"]; ok {
+			metadata["event_seq"] = seq
+		} else if seq, ok := payload["seq"]; ok {
 			metadata["event_seq"] = seq
 		}
 	}
@@ -105,4 +108,42 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 		Metadata:  metadata,
 		CreatedAt: time.Now().UTC(),
 	}
+}
+
+// AnnotateSubagentCompletionDisplayMirror marks the legacy subagent.completed
+// session event as a display-only mirror of the durable AgentControl mailbox
+// message. The mailbox message remains the primary control-plane record.
+func AnnotateSubagentCompletionDisplayMirror(payload map[string]interface{}, message team.MailMessage, deliveryErr error) map[string]interface{} {
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	payload["display_mirror"] = true
+	payload["mirror_source"] = SubagentCompletionMirrorSource
+	payload["mailbox_delivery_status"] = "delivered"
+	if deliveryErr != nil {
+		payload["mailbox_delivery_status"] = "failed"
+		payload["mailbox_delivery_error"] = deliveryErr.Error()
+	}
+	if id := strings.TrimSpace(message.ID); id != "" {
+		payload["mailbox_message_id"] = id
+	}
+	if kind := strings.TrimSpace(message.Kind); kind != "" {
+		payload["mailbox_kind"] = kind
+	}
+	if value := agentcontrol.MetadataString(message.Metadata, "message_type"); value != "" {
+		payload["message_type"] = value
+	}
+	if value := agentcontrol.MetadataString(message.Metadata, "control_action"); value != "" {
+		payload["control_action"] = value
+	}
+	if value := agentcontrol.MetadataString(message.Metadata, "workflow"); value != "" {
+		payload["workflow"] = value
+	}
+	if value := agentcontrol.MetadataString(message.Metadata, "mailbox_delivery"); value != "" {
+		payload["mailbox_delivery"] = value
+	}
+	if value := agentcontrol.MetadataString(message.Metadata, "mailbox_kind"); value != "" {
+		payload["mailbox_kind"] = value
+	}
+	return payload
 }

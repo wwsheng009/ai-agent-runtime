@@ -259,6 +259,8 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 			payload["role"] = childType
 		}
 		copyLocalAgentCompletionPayload(payload, event.Payload)
+		completionMessage, mailboxErr := r.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, payload)
+		payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
 		mirrored := runtimeevents.Event{
 			Type:      "subagent.completed",
 			TraceID:   strings.TrimSpace(event.TraceID),
@@ -276,24 +278,24 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 			}
 			mirrored.Payload["seq"] = seq
 		}
-		r.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, mirrored.Payload)
 		r.Host.EventBus.Publish(mirrored)
 	}
 	unsubscribe = r.Host.EventBus.SubscribeCancelable("", handler)
 }
 
-func (r *localActorRegistry) deliverSubagentCompletionMailbox(ctx context.Context, parentSessionID, childSessionID, childPath, childType, sourceEventType string, payload map[string]interface{}) {
+func (r *localActorRegistry) deliverSubagentCompletionMailbox(ctx context.Context, parentSessionID, childSessionID, childPath, childType, sourceEventType string, payload map[string]interface{}) (team.MailMessage, error) {
 	if r == nil || r.Host == nil {
-		return
+		return team.MailMessage{}, nil
 	}
 	parentSessionID = strings.TrimSpace(parentSessionID)
 	childSessionID = strings.TrimSpace(childSessionID)
 	if parentSessionID == "" || childSessionID == "" {
-		return
+		return team.MailMessage{}, nil
 	}
 	message := toolbroker.BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, childPath, childType, sourceEventType, payload)
 	message.ID = "subagent_completed_" + sanitizeLocalAgentPathSegment(childSessionID)
-	_ = runtimechat.DeliverMailboxEventFirst(ctx, r.Host.EventStore, r.Host.EventBus, r.deliverMailboxToActor, parentSessionID, message)
+	err := runtimechat.DeliverMailboxEventFirst(ctx, r.Host.EventStore, r.Host.EventBus, r.deliverMailboxToActor, parentSessionID, message)
+	return message, err
 }
 
 func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, args toolbroker.ListAgentsArgs) (*toolbroker.AgentListResult, error) {
@@ -829,8 +831,20 @@ func localAgentMailboxMessagesToEvents(sessionID string, messages []team.MailMes
 		if event.Payload == nil {
 			event.Payload = map[string]interface{}{}
 		}
-		event.Payload["seq"] = message.Seq
-		event.Payload["mailbox_seq"] = message.Seq
+		presentationSeq := message.Seq
+		if message.SessionMailboxSeq > 0 {
+			presentationSeq = message.SessionMailboxSeq
+		}
+		event.Payload["seq"] = presentationSeq
+		if message.ControlSeq > 0 {
+			event.Payload["control_seq"] = message.ControlSeq
+		}
+		if message.SessionMailboxSeq > 0 {
+			event.Payload["session_mailbox_seq"] = message.SessionMailboxSeq
+			event.Payload["mailbox_seq"] = message.SessionMailboxSeq
+		} else {
+			event.Payload["mailbox_seq"] = message.Seq
+		}
 		events = append(events, event)
 	}
 	return events
@@ -1528,6 +1542,9 @@ func copyLocalAgentCompletionPayload(target map[string]interface{}, payload map[
 		if value, ok := payload[key]; ok {
 			target[key] = value
 		}
+	}
+	if value, ok := payload["seq"]; ok {
+		target["source_event_seq"] = value
 	}
 }
 

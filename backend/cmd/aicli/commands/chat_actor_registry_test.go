@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -255,6 +256,75 @@ func TestLocalActorRegistry_DispatchTeamMailboxMessagePersistsWithoutActor(t *te
 	}
 	if events[0].Type != runtimechat.EventMailboxReceived || events[0].Payload["kind"] != "progress" || events[0].Payload["body"] != "durable team hello" {
 		t.Fatalf("unexpected mailbox event: %#v", events[0])
+	}
+}
+
+func TestLocalActorRegistry_DispatchBlockedHandoffMailboxPersistsAgentControlRow(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(context.Background(), team.Team{
+		ID:            "team-1",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	_, err = store.UpsertTeammate(context.Background(), team.Teammate{
+		ID:        "mate-2",
+		TeamID:    teamID,
+		SessionID: "mate-session-2",
+		State:     team.TeammateStateIdle,
+	})
+	if err != nil {
+		t.Fatalf("UpsertTeammate: %v", err)
+	}
+
+	host := &localChatRuntimeHost{
+		SessionHub: buildTestSessionHub(t),
+		EventStore: runtimechat.NewInMemoryRuntimeStore(16),
+		EventBus:   runtimeevents.NewBusWithRetention(16),
+		TeamStore:  store,
+	}
+	registry := newLocalActorRegistry(host)
+	host.SessionHub.Stop("mate-session-2")
+
+	message := team.BuildBlockedTaskOutcomeMailboxMessage(teamID, "task-1", "mate-1", "mate-2", "pass to reviewer", team.TaskOutcomeContract{
+		Status:    team.TaskOutcomeHandoff,
+		Summary:   "pass to reviewer",
+		Blocker:   "need review",
+		HandoffTo: "mate-2",
+	})
+	message.ID = "handoff-mail-1"
+	if err := registry.DispatchTeamMailboxMessage(context.Background(), message); err != nil {
+		t.Fatalf("DispatchTeamMailboxMessage failed: %v", err)
+	}
+	if _, ok := host.SessionHub.Get("mate-session-2"); ok {
+		t.Fatal("handoff mailbox dispatch should persist event without starting target actor")
+	}
+
+	controlReader, ok := host.EventStore.(runtimechat.AgentControlMailboxReaderStore)
+	if !ok {
+		t.Fatal("expected runtime store to expose agent-control mailbox reader")
+	}
+	controlMessages, err := controlReader.ListAgentControlMailbox(context.Background(), "mate-session-2", 0, 10)
+	if err != nil {
+		t.Fatalf("ListAgentControlMailbox: %v", err)
+	}
+	if len(controlMessages) != 1 {
+		t.Fatalf("expected one control mailbox message, got %#v", controlMessages)
+	}
+	if controlMessages[0].Kind != "handoff" ||
+		controlMessages[0].Metadata["message_type"] != team.TaskLifecycleControlMessageType ||
+		controlMessages[0].Metadata["control_action"] != team.TaskLifecycleControlAction ||
+		controlMessages[0].Metadata["workflow"] != agentcontrol.WorkflowSpawnTeam ||
+		controlMessages[0].Metadata["event_type"] != "task.handoff" ||
+		controlMessages[0].Metadata["handoff_to"] != "mate-2" {
+		t.Fatalf("unexpected handoff control mailbox row: %#v", controlMessages[0])
 	}
 }
 

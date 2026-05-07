@@ -73,8 +73,9 @@ func IsAgentControlMailboxMessage(message team.MailMessage) bool {
 }
 
 // MergeMailboxMessagesBySeq combines mailbox rows while preferring primary
-// rows on duplicate durable sequence values. Results are sorted by seq and then
-// id so callers can safely merge AgentControl rows with legacy mailbox rows.
+// rows on duplicate durable session mailbox sequence values. AgentControl rows
+// may have an independent control seq, so merged presentation order uses the
+// session mailbox seq when it is available.
 func MergeMailboxMessagesBySeq(primary, secondary []team.MailMessage, limit int) []team.MailMessage {
 	byKey := make(map[string]team.MailMessage, len(primary)+len(secondary))
 	appendMessage := func(message team.MailMessage, overwrite bool) {
@@ -98,8 +99,10 @@ func MergeMailboxMessagesBySeq(primary, secondary []team.MailMessage, limit int)
 		merged = append(merged, message)
 	}
 	sort.SliceStable(merged, func(i, j int) bool {
-		if merged[i].Seq != merged[j].Seq {
-			return merged[i].Seq < merged[j].Seq
+		leftSeq := mailboxPresentationSeq(merged[i])
+		rightSeq := mailboxPresentationSeq(merged[j])
+		if leftSeq != rightSeq {
+			return leftSeq < rightSeq
 		}
 		return strings.TrimSpace(merged[i].ID) < strings.TrimSpace(merged[j].ID)
 	})
@@ -227,6 +230,9 @@ func WatchMailboxAgentControlFirst(ctx context.Context, store interface{}, sessi
 }
 
 func mailboxMergeKey(message team.MailMessage) string {
+	if message.SessionMailboxSeq > 0 {
+		return fmt.Sprintf("session_seq:%d", message.SessionMailboxSeq)
+	}
 	if message.Seq > 0 {
 		return fmt.Sprintf("seq:%d", message.Seq)
 	}
@@ -234,6 +240,13 @@ func mailboxMergeKey(message team.MailMessage) string {
 		return "id:" + id
 	}
 	return ""
+}
+
+func mailboxPresentationSeq(message team.MailMessage) int64 {
+	if message.SessionMailboxSeq > 0 {
+		return message.SessionMailboxSeq
+	}
+	return message.Seq
 }
 
 // SessionEventMailboxStore adapts the existing session runtime event store into
