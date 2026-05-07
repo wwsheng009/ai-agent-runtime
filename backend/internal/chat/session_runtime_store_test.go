@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -188,6 +189,63 @@ func TestInMemoryRuntimeStoreAppendMailbox(t *testing.T) {
 	assert.Equal(t, int64(1), events[1].Payload["mailbox_seq"])
 }
 
+func TestInMemoryRuntimeStoreAgentControlMailboxFiltersEnvelope(t *testing.T) {
+	store := NewInMemoryRuntimeStore(16)
+	_, _, err := store.AppendMailbox(context.Background(), "session-mailbox", team.MailMessage{
+		FromAgent: "parent",
+		ToAgent:   "child",
+		Kind:      "info",
+		Body:      "non control mailbox",
+	})
+	require.NoError(t, err)
+	_, _, err = store.AppendAgentControlMailbox(context.Background(), "session-mailbox", team.MailMessage{
+		FromAgent: "parent",
+		ToAgent:   "child",
+		Kind:      "info",
+		Body:      "missing envelope",
+	})
+	require.Error(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watch, unwatch := store.WatchAgentControlMailbox(ctx, "session-mailbox")
+	defer unwatch()
+
+	_, seq, err := store.AppendAgentControlMailbox(context.Background(), "session-mailbox", team.MailMessage{
+		FromAgent: "parent",
+		ToAgent:   "child",
+		Kind:      agentcontrol.MailboxKindAgentMessage,
+		Body:      "control mailbox",
+		Metadata: agentcontrol.Envelope{
+			MessageType:     agentcontrol.MessageTypeAgentMessage,
+			ControlAction:   agentcontrol.ActionAgentMessage,
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindAgentMessage,
+		}.Metadata(),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), seq)
+
+	messages, err := store.ListAgentControlMailbox(context.Background(), "session-mailbox", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, int64(2), messages[0].Seq)
+	assert.Equal(t, "control mailbox", messages[0].Body)
+
+	lastSeq, err := store.LastAgentControlMailboxSeq(context.Background(), "session-mailbox")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), lastSeq)
+
+	select {
+	case message := <-watch:
+		assert.Equal(t, int64(2), message.Seq)
+		assert.Equal(t, "control mailbox", message.Body)
+	case <-time.After(time.Second):
+		t.Fatal("agent control mailbox watcher did not wake")
+	}
+}
+
 func TestSQLiteRuntimeStoreWatchEventsAndLastSeq(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
 		DSN: "file:runtime-store-watch-events-test?mode=memory&cache=shared",
@@ -264,6 +322,95 @@ func TestSQLiteRuntimeStoreAppendMailbox(t *testing.T) {
 	assert.Equal(t, 1, count)
 	assert.Equal(t, int64(1), storedSeq)
 	assert.Equal(t, "hello sqlite mailbox", storedBody)
+}
+
+func TestSQLiteRuntimeStoreAppendMailboxMirrorsAgentControlEnvelope(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-agent-control-mailbox-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	_, _, err = store.AppendMailbox(context.Background(), "teammate-session", team.MailMessage{
+		FromAgent: "parent",
+		ToAgent:   "member-1",
+		Kind:      "info",
+		Body:      "non control mailbox",
+	})
+	require.NoError(t, err)
+	_, _, err = store.AppendAgentControlMailbox(context.Background(), "teammate-session", team.MailMessage{
+		FromAgent: "parent",
+		ToAgent:   "member-1",
+		Kind:      "info",
+		Body:      "missing envelope",
+	})
+	require.Error(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watch, unwatch := store.WatchAgentControlMailbox(ctx, "teammate-session")
+	defer unwatch()
+
+	metadata := agentcontrol.ApplyEnvelope(map[string]interface{}{
+		"team_id": "team-1",
+	}, agentcontrol.Envelope{
+		MessageType:     agentcontrol.MessageTypeTeamTaskAssignment,
+		ControlAction:   agentcontrol.ActionTaskAssign,
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+		MailboxKind:     agentcontrol.MailboxKindTeamTaskAssignment,
+	})
+	taskID := "task-1"
+	_, seq, err := store.AppendAgentControlMailbox(context.Background(), "teammate-session", team.MailMessage{
+		TeamID:    "team-1",
+		FromAgent: "team-orchestrator",
+		ToAgent:   "member-1",
+		TaskID:    &taskID,
+		Kind:      agentcontrol.MailboxKindTeamTaskAssignment,
+		Body:      "Team task task-1 assigned.",
+		Metadata:  metadata,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), seq)
+
+	allMessages, err := store.ListMailbox(context.Background(), "teammate-session", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, allMessages, 2)
+
+	controlMessages, err := store.ListAgentControlMailbox(context.Background(), "teammate-session", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, controlMessages, 1)
+	assert.Equal(t, int64(2), controlMessages[0].Seq)
+	assert.Equal(t, agentcontrol.MessageTypeTeamTaskAssignment, agentcontrol.MetadataString(controlMessages[0].Metadata, agentcontrol.MetadataKeyMessageType))
+
+	lastSeq, err := store.LastAgentControlMailboxSeq(context.Background(), "teammate-session")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), lastSeq)
+
+	select {
+	case message := <-watch:
+		assert.Equal(t, int64(2), message.Seq)
+		assert.Equal(t, agentcontrol.MailboxKindTeamTaskAssignment, message.Kind)
+	case <-time.After(time.Second):
+		t.Fatal("agent control mailbox watcher did not wake")
+	}
+
+	var count int
+	var messageType, action, workflow, mailboxKind string
+	var mailboxSeq int64
+	err = store.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*), COALESCE(MAX(session_mailbox_seq), 0), COALESCE(MAX(message_type), ''),
+			COALESCE(MAX(control_action), ''), COALESCE(MAX(workflow), ''), COALESCE(MAX(mailbox_kind), '')
+		FROM agent_control_mailbox_messages
+		WHERE session_id = ?
+	`, "teammate-session").Scan(&count, &mailboxSeq, &messageType, &action, &workflow, &mailboxKind)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+	assert.Equal(t, int64(2), mailboxSeq)
+	assert.Equal(t, agentcontrol.MessageTypeTeamTaskAssignment, messageType)
+	assert.Equal(t, agentcontrol.ActionTaskAssign, action)
+	assert.Equal(t, agentcontrol.WorkflowSpawnTeam, workflow)
+	assert.Equal(t, agentcontrol.MailboxKindTeamTaskAssignment, mailboxKind)
 }
 
 func TestSQLiteRuntimeStoreMigratesCurrentRunMetaColumn(t *testing.T) {
@@ -817,6 +964,13 @@ func TestSQLiteRuntimeStoreMigratesSessionMailboxTable(t *testing.T) {
 		ToAgent:   "child",
 		Kind:      "agent_message",
 		Body:      "after migration",
+		Metadata: agentcontrol.Envelope{
+			MessageType:     agentcontrol.MessageTypeAgentMessage,
+			ControlAction:   agentcontrol.ActionAgentMessage,
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindAgentMessage,
+		}.Metadata(),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), mailboxSeq)
@@ -825,6 +979,12 @@ func TestSQLiteRuntimeStoreMigratesSessionMailboxTable(t *testing.T) {
 	var count int
 	err = store.db.QueryRowContext(context.Background(), `
 		SELECT COUNT(*) FROM session_mailbox_messages WHERE session_id = ?
+	`, "session-mailbox-migration").Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	err = store.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*) FROM agent_control_mailbox_messages WHERE session_id = ?
 	`, "session-mailbox-migration").Scan(&count)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
