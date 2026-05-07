@@ -2230,6 +2230,8 @@ func TestClient_SessionAgentEndpointsEncodePathsAndQuery(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/agents/wait"):
 			_, _ = w.Write([]byte(`{"result":{"matched_id":"child-1","matched_session_id":"child-1","ready_count":1,"latest_seq":13,"event":{"seq":13,"type":"mailbox_received","session_id":"parent/1","payload":{"body":"hello"}},"events":[{"seq":13,"type":"mailbox_received","session_id":"parent/1","payload":{"body":"hello"}}]}}`))
+		case strings.HasSuffix(r.URL.Path, "/agent-control/mailbox"):
+			_, _ = w.Write([]byte(`{"result":{"session_id":"parent/1","count":1,"latest_seq":15,"source":"agent_control_mailbox","control_only":true,"messages":[{"seq":15,"id":"mailbox_15","from_agent":"child-1","to_agent":"parent","kind":"agent_message","body":"control hello","metadata":{"message_type":"agent_control.agent_message"}}]}}`))
 		case strings.HasSuffix(r.URL.Path, "/agents/events"):
 			_, _ = w.Write([]byte(`{"result":{"session_id":"parent/1","count":1,"latest_seq":14,"events":[{"seq":14,"type":"mailbox_received","session_id":"parent/1","payload":{"body":"parent hello"}}]}}`))
 		case strings.HasSuffix(r.URL.Path, "/events"):
@@ -2288,6 +2290,24 @@ func TestClient_SessionAgentEndpointsEncodePathsAndQuery(t *testing.T) {
 	assert.Equal(t, "parent/1", mailboxEventsResp.Result.SessionID)
 	assert.Equal(t, 1, mailboxEventsResp.Result.Count)
 	assert.Equal(t, int64(14), mailboxEventsResp.Result.LatestSeq)
+
+	controlMailboxResp, err := client.ListSessionAgentControlMailbox(context.Background(), "parent/1", ListSessionAgentEventsParams{
+		AfterSeq: 14,
+		Limit:    3,
+		WaitMs:   250,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, gotMethod)
+	assert.Equal(t, "/api/runtime/sessions/parent%2F1/agent-control/mailbox", gotPath)
+	assert.Contains(t, gotQuery, "after_seq=14")
+	assert.Contains(t, gotQuery, "limit=3")
+	assert.Contains(t, gotQuery, "wait_ms=250")
+	assert.Equal(t, "parent/1", controlMailboxResp.Result.SessionID)
+	assert.Equal(t, "agent_control_mailbox", controlMailboxResp.Result.Source)
+	assert.True(t, controlMailboxResp.Result.ControlOnly)
+	assert.Equal(t, int64(15), controlMailboxResp.Result.LatestSeq)
+	require.Len(t, controlMailboxResp.Result.Messages, 1)
+	assert.Equal(t, "control hello", controlMailboxResp.Result.Messages[0].Body)
 }
 
 func TestClient_ReportTaskOutcomeUsesCanonicalEndpoint(t *testing.T) {
@@ -2616,6 +2636,111 @@ func TestClient_ListTeammates(t *testing.T) {
 	assert.Equal(t, "mate-1", resp.Teammates[0].ID)
 	require.NotNil(t, resp.State)
 	assert.Equal(t, "idle", *resp.State)
+}
+
+func TestClient_ListAgentControlTasks(t *testing.T) {
+	var (
+		gotPath  string
+		gotQuery string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		require.Equal(t, http.MethodGet, r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tasks":[{"id":"task-1","workflow":"spawn_team","team_id":"team-1","assignee":"mate-1","session_id":"session-1","path":"/root/teams/team-1/mate-1","title":"Projected","status":"running"}],"count":1,"filters":{"workflow":"spawn_team","team_id":"team-1","status":["running"],"limit":5}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClient(server.URL)
+	resp, err := client.ListAgentControlTasks(context.Background(), ListAgentControlTasksParams{
+		Workflow:   "spawn_team",
+		TeamID:     "team-1",
+		Assignee:   "mate-1",
+		Status:     []string{"running"},
+		PathPrefix: "/root/teams/team-1",
+		Limit:      5,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "/api/runtime/agent-control/tasks", gotPath)
+	assert.Contains(t, gotQuery, "workflow=spawn_team")
+	assert.Contains(t, gotQuery, "team_id=team-1")
+	assert.Contains(t, gotQuery, "assignee=mate-1")
+	assert.Contains(t, gotQuery, "status=running")
+	assert.Contains(t, gotQuery, "path_prefix=%2Froot%2Fteams%2Fteam-1")
+	assert.Contains(t, gotQuery, "limit=5")
+	require.Len(t, resp.Tasks, 1)
+	assert.Equal(t, "task-1", resp.Tasks[0].ID)
+	assert.Equal(t, "spawn_team", resp.Tasks[0].Workflow)
+	assert.Equal(t, "/root/teams/team-1/mate-1", resp.Tasks[0].Path)
+	assert.Equal(t, 1, resp.Count)
+}
+
+func TestClient_AgentControlTaskWriteEndpoints(t *testing.T) {
+	type requestRecord struct {
+		Method string
+		Path   string
+		Body   map[string]interface{}
+	}
+	var requests []requestRecord
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]interface{}{}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
+		requests = append(requests, requestRecord{
+			Method: r.Method,
+			Path:   r.URL.EscapedPath(),
+			Body:   body,
+		})
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/claim") {
+			_, _ = w.Write([]byte(`{"task":{"id":"task/1","workflow":"spawn_team","status":"running"},"claimed":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"task":{"id":"task/1","workflow":"spawn_team","status":"ready"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClient(server.URL)
+	_, err := client.CreateAgentControlTask(context.Background(), CreateAgentControlTaskRequest{
+		ID:       "task/1",
+		Workflow: "spawn_team",
+		TeamID:   "team-1",
+		Status:   "ready",
+	})
+	require.NoError(t, err)
+	_, err = client.UpdateAgentControlTaskStatus(context.Background(), "task/1", UpdateAgentControlTaskStatusRequest{Workflow: "spawn_team", Status: "blocked"})
+	require.NoError(t, err)
+	claimResp, err := client.ClaimAgentControlTask(context.Background(), "task/1", ClaimAgentControlTaskRequest{Workflow: "spawn_team", Assignee: "mate-1", DurationSec: 60})
+	require.NoError(t, err)
+	require.True(t, claimResp.Claimed)
+	_, err = client.RenewAgentControlTaskLease(context.Background(), "task/1", RenewAgentControlTaskLeaseRequest{Workflow: "spawn_team", DurationSec: 120})
+	require.NoError(t, err)
+	_, err = client.ReleaseAgentControlTask(context.Background(), "task/1", ReleaseAgentControlTaskRequest{Workflow: "spawn_team", Status: "ready"})
+	require.NoError(t, err)
+	resultRef := "artifact://done"
+	_, err = client.UpdateAgentControlTaskTerminal(context.Background(), "task/1", UpdateAgentControlTaskTerminalRequest{Workflow: "spawn_team", Status: "done", ResultRef: &resultRef})
+	require.NoError(t, err)
+	_, err = client.BlockAgentControlTask(context.Background(), "task/1", BlockAgentControlTaskRequest{Workflow: "spawn_team", Summary: "blocked"})
+	require.NoError(t, err)
+
+	require.Len(t, requests, 7)
+	assert.Equal(t, http.MethodPost, requests[0].Method)
+	assert.Equal(t, "/api/runtime/agent-control/tasks", requests[0].Path)
+	assert.Equal(t, "task/1", requests[0].Body["id"])
+	assert.Equal(t, "team-1", requests[0].Body["team_id"])
+	assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/status", requests[1].Path)
+	assert.Equal(t, "blocked", requests[1].Body["status"])
+	assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/claim", requests[2].Path)
+	assert.Equal(t, "mate-1", requests[2].Body["assignee"])
+	assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/lease", requests[3].Path)
+	assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/release", requests[4].Path)
+	assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/terminal", requests[5].Path)
+	assert.Equal(t, resultRef, requests[5].Body["result_ref"])
+	assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/block", requests[6].Path)
+	assert.Equal(t, "blocked", requests[6].Body["summary"])
 }
 
 func TestClient_PlanTeamTasksUsesEndpoint(t *testing.T) {

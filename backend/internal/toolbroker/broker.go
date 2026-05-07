@@ -1511,6 +1511,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			createdTeam = true
 		}
 
+		request.Teammates, err = b.ensureAutoStartTeammates(ctx, teamID, request, autoStart)
+		if err != nil {
+			return nil, nil, err
+		}
 		teammateIDs := make([]string, 0, len(request.Teammates))
 		if allocator, ok := b.TeamDispatcher.(interface {
 			EnsureTeammateSessionIDs(teamID string, specs []SpawnTeammateSpec) []SpawnTeammateSpec
@@ -2001,6 +2005,63 @@ func (b *Broker) workspaceRoot() string {
 		return ""
 	}
 	return b.TeamClaims.Root()
+}
+
+func (b *Broker) ensureAutoStartTeammates(ctx context.Context, teamID string, request SpawnTeamArgs, autoStart bool) ([]SpawnTeammateSpec, error) {
+	specs := append([]SpawnTeammateSpec(nil), request.Teammates...)
+	if !autoStart || len(request.Tasks) == 0 || len(specs) > 0 {
+		return specs, nil
+	}
+	if b == nil || b.TeamStore == nil {
+		return specs, nil
+	}
+	existing, err := b.TeamStore.ListTeammates(ctx, strings.TrimSpace(teamID))
+	if err != nil {
+		return nil, err
+	}
+	if len(existing) > 0 {
+		return specs, nil
+	}
+	return synthesizeAutoStartTeammates(request.Tasks, request.MaxTeammates), nil
+}
+
+func synthesizeAutoStartTeammates(tasks []SpawnTaskSpec, maxTeammates int) []SpawnTeammateSpec {
+	seen := make(map[string]struct{}, len(tasks))
+	specs := make([]SpawnTeammateSpec, 0, len(tasks))
+	for _, task := range tasks {
+		assignee := strings.TrimSpace(task.Assignee)
+		if assignee == "" {
+			continue
+		}
+		key := strings.ToLower(assignee)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		specs = append(specs, SpawnTeammateSpec{
+			ID:   assignee,
+			Name: assignee,
+		})
+	}
+	if len(specs) > 0 {
+		return specs
+	}
+
+	count := len(tasks)
+	if maxTeammates > 0 && count > maxTeammates {
+		count = maxTeammates
+	}
+	if count <= 0 {
+		return nil
+	}
+	specs = make([]SpawnTeammateSpec, 0, count)
+	for index := 0; index < count; index++ {
+		specs = append(specs, SpawnTeammateSpec{
+			ID:   fmt.Sprintf("mate-%d", index+1),
+			Name: fmt.Sprintf("Teammate %d", index+1),
+		})
+	}
+	return specs
 }
 
 func (b *Broker) prepareSpawnTaskSpecs(specs []SpawnTaskSpec) ([]SpawnTaskSpec, error) {

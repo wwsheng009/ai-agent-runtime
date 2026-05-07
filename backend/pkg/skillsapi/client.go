@@ -1593,6 +1593,22 @@ type TeamTask struct {
 	UpdatedAt    *time.Time `json:"updated_at,omitempty"`
 }
 
+type AgentControlTaskRecord struct {
+	ID           string     `json:"id"`
+	Workflow     string     `json:"workflow,omitempty"`
+	TeamID       string     `json:"team_id,omitempty"`
+	ParentTaskID string     `json:"parent_task_id,omitempty"`
+	Assignee     string     `json:"assignee,omitempty"`
+	SessionID    string     `json:"session_id,omitempty"`
+	Path         string     `json:"path,omitempty"`
+	Title        string     `json:"title,omitempty"`
+	Summary      string     `json:"summary,omitempty"`
+	Status       string     `json:"status,omitempty"`
+	Priority     int        `json:"priority,omitempty"`
+	CreatedAt    *time.Time `json:"created_at,omitempty"`
+	UpdatedAt    *time.Time `json:"updated_at,omitempty"`
+}
+
 type TeamTaskDependency struct {
 	TaskID      string `json:"task_id"`
 	DependsOnID string `json:"depends_on_id"`
@@ -1768,6 +1784,93 @@ type ListTeamTasksResponse struct {
 	TaskIDs      []string            `json:"task_ids,omitempty"`
 	Dependencies map[string][]string `json:"dependencies,omitempty"`
 	Dependents   map[string][]string `json:"dependents,omitempty"`
+}
+
+type ListAgentControlTasksParams struct {
+	Workflow   string
+	TeamID     string
+	Assignee   string
+	Status     []string
+	PathPrefix string
+	Limit      int
+}
+
+type ListAgentControlTasksResponse struct {
+	Tasks   []AgentControlTaskRecord `json:"tasks"`
+	Count   int                      `json:"count"`
+	Filters map[string]interface{}   `json:"filters,omitempty"`
+}
+
+type AgentControlTaskResponse struct {
+	Task    *AgentControlTaskRecord `json:"task,omitempty"`
+	Claimed bool                    `json:"claimed,omitempty"`
+}
+
+type CreateAgentControlTaskRequest struct {
+	ID           string   `json:"id,omitempty"`
+	Workflow     string   `json:"workflow,omitempty"`
+	TeamID       string   `json:"team_id,omitempty"`
+	ParentTaskID string   `json:"parent_task_id,omitempty"`
+	Title        string   `json:"title,omitempty"`
+	Goal         string   `json:"goal,omitempty"`
+	Status       string   `json:"status,omitempty"`
+	Priority     int      `json:"priority,omitempty"`
+	Assignee     string   `json:"assignee,omitempty"`
+	Inputs       []string `json:"inputs,omitempty"`
+	ReadPaths    []string `json:"read_paths,omitempty"`
+	WritePaths   []string `json:"write_paths,omitempty"`
+	Deliverables []string `json:"deliverables,omitempty"`
+	Summary      string   `json:"summary,omitempty"`
+	ResultRef    string   `json:"result_ref,omitempty"`
+}
+
+type UpdateAgentControlTaskStatusRequest struct {
+	Workflow string `json:"workflow,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Summary  string `json:"summary,omitempty"`
+}
+
+type ClaimAgentControlTaskRequest struct {
+	Workflow        string   `json:"workflow,omitempty"`
+	TeamID          string   `json:"team_id,omitempty"`
+	Assignee        string   `json:"assignee,omitempty"`
+	LeaseUntil      string   `json:"lease_until,omitempty"`
+	DurationSec     int      `json:"duration_sec,omitempty"`
+	ExpectedVersion int64    `json:"expected_version,omitempty"`
+	ReadPaths       []string `json:"read_paths,omitempty"`
+	WritePaths      []string `json:"write_paths,omitempty"`
+	UsePathClaims   bool     `json:"use_path_claims,omitempty"`
+	WorkspaceRoot   string   `json:"workspace_root,omitempty"`
+}
+
+type RenewAgentControlTaskLeaseRequest struct {
+	Workflow    string `json:"workflow,omitempty"`
+	LeaseUntil  string `json:"lease_until,omitempty"`
+	DurationSec int    `json:"duration_sec,omitempty"`
+}
+
+type ReleaseAgentControlTaskRequest struct {
+	Workflow   string `json:"workflow,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Summary    string `json:"summary,omitempty"`
+	TeammateID string `json:"teammate_id,omitempty"`
+}
+
+type UpdateAgentControlTaskTerminalRequest struct {
+	Workflow        string  `json:"workflow,omitempty"`
+	TeamID          string  `json:"team_id,omitempty"`
+	Status          string  `json:"status,omitempty"`
+	Summary         string  `json:"summary,omitempty"`
+	ResultRef       *string `json:"result_ref,omitempty"`
+	TeammateID      string  `json:"teammate_id,omitempty"`
+	SkipStateUpdate bool    `json:"skip_state_update,omitempty"`
+}
+
+type BlockAgentControlTaskRequest struct {
+	Workflow        string `json:"workflow,omitempty"`
+	Summary         string `json:"summary,omitempty"`
+	TeammateID      string `json:"teammate_id,omitempty"`
+	SkipStateUpdate bool   `json:"skip_state_update,omitempty"`
 }
 
 type TeamTaskDependenciesResponse struct {
@@ -2049,6 +2152,35 @@ type SessionAgentEventsResult struct {
 
 type ListSessionAgentEventsResponse struct {
 	Result SessionAgentEventsResult `json:"result"`
+}
+
+type SessionAgentControlMailboxMessage struct {
+	ID        string                 `json:"id"`
+	Seq       int64                  `json:"seq,omitempty"`
+	TeamID    string                 `json:"team_id,omitempty"`
+	FromAgent string                 `json:"from_agent,omitempty"`
+	ToAgent   string                 `json:"to_agent,omitempty"`
+	TaskID    *string                `json:"task_id,omitempty"`
+	Kind      string                 `json:"kind,omitempty"`
+	Body      string                 `json:"body,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt time.Time              `json:"created_at"`
+	AckedAt   *time.Time             `json:"acked_at,omitempty"`
+}
+
+type SessionAgentControlMailboxResult struct {
+	SessionID   string                              `json:"session_id"`
+	Messages    []SessionAgentControlMailboxMessage `json:"messages,omitempty"`
+	Count       int                                 `json:"count"`
+	LatestSeq   int64                               `json:"latest_seq,omitempty"`
+	Source      string                              `json:"source,omitempty"`
+	AfterSeq    int64                               `json:"after_seq,omitempty"`
+	ControlOnly bool                                `json:"control_only,omitempty"`
+	TimedOut    bool                                `json:"timed_out,omitempty"`
+}
+
+type ListSessionAgentControlMailboxResponse struct {
+	Result SessionAgentControlMailboxResult `json:"result"`
 }
 
 type BackgroundJob struct {
@@ -3826,6 +3958,93 @@ func (c *Client) ListTeamTasks(ctx context.Context, teamID string, params ListTe
 	return &response, nil
 }
 
+func (c *Client) ListAgentControlTasks(ctx context.Context, params ListAgentControlTasksParams) (*ListAgentControlTasksResponse, error) {
+	query := url.Values{}
+	if strings.TrimSpace(params.Workflow) != "" {
+		query.Set("workflow", strings.TrimSpace(params.Workflow))
+	}
+	if strings.TrimSpace(params.TeamID) != "" {
+		query.Set("team_id", strings.TrimSpace(params.TeamID))
+	}
+	if strings.TrimSpace(params.Assignee) != "" {
+		query.Set("assignee", strings.TrimSpace(params.Assignee))
+	}
+	if len(params.Status) > 0 {
+		statuses := make([]string, 0, len(params.Status))
+		for _, status := range params.Status {
+			status = strings.TrimSpace(status)
+			if status != "" {
+				statuses = append(statuses, status)
+			}
+		}
+		if len(statuses) > 0 {
+			query.Set("status", strings.Join(statuses, ","))
+		}
+	}
+	if strings.TrimSpace(params.PathPrefix) != "" {
+		query.Set("path_prefix", strings.TrimSpace(params.PathPrefix))
+	}
+	if params.Limit > 0 {
+		query.Set("limit", strconv.Itoa(params.Limit))
+	}
+
+	var response ListAgentControlTasksResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/agent-control/tasks", query, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) CreateAgentControlTask(ctx context.Context, req CreateAgentControlTaskRequest) (*AgentControlTaskResponse, error) {
+	var response AgentControlTaskResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/agent-control/tasks", nil, req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) UpdateAgentControlTaskStatus(ctx context.Context, taskID string, req UpdateAgentControlTaskStatusRequest) (*AgentControlTaskResponse, error) {
+	return c.agentControlTaskAction(ctx, taskID, "status", req)
+}
+
+func (c *Client) ClaimAgentControlTask(ctx context.Context, taskID string, req ClaimAgentControlTaskRequest) (*AgentControlTaskResponse, error) {
+	return c.agentControlTaskAction(ctx, taskID, "claim", req)
+}
+
+func (c *Client) RenewAgentControlTaskLease(ctx context.Context, taskID string, req RenewAgentControlTaskLeaseRequest) (*AgentControlTaskResponse, error) {
+	return c.agentControlTaskAction(ctx, taskID, "lease", req)
+}
+
+func (c *Client) ReleaseAgentControlTask(ctx context.Context, taskID string, req ReleaseAgentControlTaskRequest) (*AgentControlTaskResponse, error) {
+	return c.agentControlTaskAction(ctx, taskID, "release", req)
+}
+
+func (c *Client) UpdateAgentControlTaskTerminal(ctx context.Context, taskID string, req UpdateAgentControlTaskTerminalRequest) (*AgentControlTaskResponse, error) {
+	return c.agentControlTaskAction(ctx, taskID, "terminal", req)
+}
+
+func (c *Client) BlockAgentControlTask(ctx context.Context, taskID string, req BlockAgentControlTaskRequest) (*AgentControlTaskResponse, error) {
+	return c.agentControlTaskAction(ctx, taskID, "block", req)
+}
+
+func (c *Client) agentControlTaskAction(ctx context.Context, taskID string, action string, req interface{}) (*AgentControlTaskResponse, error) {
+	taskID = strings.TrimSpace(taskID)
+	action = strings.TrimSpace(action)
+	if taskID == "" {
+		return nil, fmt.Errorf("taskID is required")
+	}
+	if action == "" {
+		return nil, fmt.Errorf("action is required")
+	}
+
+	var response AgentControlTaskResponse
+	endpoint := "/api/runtime/agent-control/tasks/" + url.PathEscape(taskID) + "/" + url.PathEscape(action)
+	if err := c.doJSON(ctx, http.MethodPost, endpoint, nil, req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
 func (c *Client) ListTaskDependencies(ctx context.Context, teamID, taskID string) (*TeamTaskDependenciesResponse, error) {
 	teamID = strings.TrimSpace(teamID)
 	taskID = strings.TrimSpace(taskID)
@@ -4233,6 +4452,25 @@ func (c *Client) ListSessionAgentMailboxEvents(ctx context.Context, parentSessio
 
 	var response ListSessionAgentEventsResponse
 	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(parentSessionID)+"/agents/events", query, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) ListSessionAgentControlMailbox(ctx context.Context, sessionID string, params ListSessionAgentEventsParams) (*ListSessionAgentControlMailboxResponse, error) {
+	query := url.Values{}
+	if params.AfterSeq > 0 {
+		query.Set("after_seq", strconv.FormatInt(params.AfterSeq, 10))
+	}
+	if params.Limit > 0 {
+		query.Set("limit", strconv.Itoa(params.Limit))
+	}
+	if params.WaitMs > 0 {
+		query.Set("wait_ms", strconv.Itoa(params.WaitMs))
+	}
+
+	var response ListSessionAgentControlMailboxResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/sessions/"+url.PathEscape(sessionID)+"/agent-control/mailbox", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

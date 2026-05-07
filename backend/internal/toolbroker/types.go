@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
@@ -280,6 +281,10 @@ type AgentStatusResult struct {
 	Path               string   `json:"path,omitempty"`
 	Depth              int      `json:"depth,omitempty"`
 	AgentType          string   `json:"agent_type,omitempty"`
+	TeamID             string   `json:"team_id,omitempty"`
+	TeammateID         string   `json:"teammate_id,omitempty"`
+	CurrentTaskID      string   `json:"current_task_id,omitempty"`
+	CurrentTaskStatus  string   `json:"current_task_status,omitempty"`
 	Status             string   `json:"status"`
 	Exists             bool     `json:"exists"`
 	Created            bool     `json:"created,omitempty"`
@@ -374,10 +379,12 @@ type AgentSessionController interface {
 }
 
 const (
-	AgentSessionContextParentSessionID = "agent_parent_session_id"
-	AgentSessionContextRootSessionID   = "agent_root_session_id"
-	AgentSessionContextAgentType       = "agent_type"
-	AgentSessionContextRequestedModel  = "agent_requested_model"
-	AgentSessionContextPath            = "agent_path"
-	AgentSessionContextDepth           = "agent_depth"
+	AgentSessionContextParentSessionID = agentcontrol.SessionContextParentSessionID
+	AgentSessionContextRootSessionID   = agentcontrol.SessionContextRootSessionID
+	AgentSessionContextAgentType       = agentcontrol.SessionContextAgentType
+	AgentSessionContextRequestedModel  = agentcontrol.SessionContextRequestedModel
+	AgentSessionContextPath            = agentcontrol.SessionContextPath
+	AgentSessionContextDepth           = agentcontrol.SessionContextDepth
+	AgentSessionContextTeamID          = agentcontrol.SessionContextTeamID
+	AgentSessionContextTeammateID      = agentcontrol.SessionContextTeammateID
 )

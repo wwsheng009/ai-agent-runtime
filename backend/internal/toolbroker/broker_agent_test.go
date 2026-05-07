@@ -162,6 +162,35 @@ func TestBuildAgentMailboxMessageUsesAgentControlEnvelope(t *testing.T) {
 	}
 }
 
+func TestBuildSubagentCompletionMailboxMessageUsesAgentControlEnvelope(t *testing.T) {
+	message := BuildSubagentCompletionMailboxMessage(" parent-1 ", " child-1 ", " /root/child-1 ", " worker ", "session.end", map[string]interface{}{
+		"status":  "idle",
+		"success": true,
+		"seq":     int64(9),
+	})
+	if message.Kind != SubagentCompletionMailboxKind ||
+		message.FromAgent != "child-1" ||
+		message.ToAgent != "parent" ||
+		message.Body != "Subagent child-1 completed with status idle." ||
+		message.CreatedAt.IsZero() {
+		t.Fatalf("unexpected completion mailbox message: %#v", message)
+	}
+	if message.Metadata["message_type"] != SubagentCompletionMessageType ||
+		message.Metadata["control_action"] != SubagentCompletionAction ||
+		message.Metadata["workflow"] != AgentMailboxWorkflow ||
+		message.Metadata["mailbox_delivery"] != AgentMailboxDeliverySessionStore ||
+		message.Metadata["mailbox_kind"] != SubagentCompletionMailboxKind ||
+		message.Metadata["session_id"] != "child-1" ||
+		message.Metadata["parent_session_id"] != "parent-1" ||
+		message.Metadata["path"] != "/root/child-1" ||
+		message.Metadata["agent_type"] != "worker" ||
+		message.Metadata["source_event_type"] != "session.end" ||
+		message.Metadata["event_seq"] != int64(9) ||
+		message.Metadata["success"] != true {
+		t.Fatalf("unexpected completion envelope metadata: %#v", message.Metadata)
+	}
+}
+
 func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}

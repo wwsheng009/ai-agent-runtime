@@ -894,6 +894,53 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 	assert.Len(t, tasks, 2)
 }
 
+func TestBrokerExecuteSpawnTeamAutoStartSynthesizesTeammatesForTasks(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	broker := &Broker{
+		TeamStore:      store,
+		TeamDispatcher: teammateSessionAllocatorStub{},
+	}
+	loopCalls := 0
+	broker.TeamLifecycleChanged = func() { loopCalls++ }
+
+	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+		"team_id":    "team-docs",
+		"auto_start": true,
+		"tasks": []interface{}{
+			map[string]interface{}{
+				"id":         "task-a",
+				"title":      "read doc a",
+				"goal":       "summarize doc a",
+				"read_paths": []interface{}{"docs/a.md"},
+			},
+			map[string]interface{}{
+				"id":         "task-b",
+				"title":      "read doc b",
+				"goal":       "summarize doc b",
+				"read_paths": []interface{}{"docs/b.md"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	result, ok := raw.(SpawnTeamResult)
+	require.True(t, ok)
+	assert.Equal(t, "team-docs", result.TeamID)
+	assert.True(t, result.AutoStarted)
+	assert.Equal(t, 2, result.TeammateCount)
+	assert.Equal(t, 2, result.TaskCount)
+	assert.Equal(t, 1, loopCalls)
+
+	teammates, err := store.ListTeammates(ctx, "team-docs")
+	require.NoError(t, err)
+	require.Len(t, teammates, 2)
+	assert.Equal(t, "mate-1", teammates[0].ID)
+	assert.Equal(t, "team-docs__mate_1", teammates[0].SessionID)
+	assert.Equal(t, "mate-2", teammates[1].ID)
+	assert.Equal(t, "team-docs__mate_2", teammates[1].SessionID)
+}
+
 func TestBrokerReportTaskOutcomePersistsTaskEventBeforeTeamCompleted(t *testing.T) {
 	store := newTeamStore(t)
 	ctx := context.Background()
