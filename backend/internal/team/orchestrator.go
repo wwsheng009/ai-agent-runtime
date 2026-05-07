@@ -21,6 +21,7 @@ type Orchestrator struct {
 	LeadPlanner   *LeadPlanner
 	Mailbox       *MailboxService
 	Events        *TeamEventBus
+	MailboxWake   agentcontrol.MailboxWakeSource
 	TaskWake      agentcontrol.TaskWakeSource
 	LeaseDuration time.Duration
 	TickInterval  time.Duration
@@ -62,24 +63,26 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 	defer ticker.Stop()
 
 	var (
-		mailWake        <-chan MailMessage
-		unwatchMail     func()
-		lastMailSeq     int64
+		mailboxWake     <-chan agentcontrol.MailboxWakeEvent
+		unwatchMailbox  func()
+		lastMailboxSeq  int64
 		taskWake        <-chan agentcontrol.TaskWakeEvent
 		unwatchTaskWake func()
 		lastTaskWakeSeq int64
 	)
-	if watcher, ok := o.Store.(MailWatcherStore); ok {
-		mailWake, unwatchMail = watcher.WatchMail(ctx, teamID)
-		defer unwatchMail()
-	}
+	mailboxWakeSource := o.agentControlMailboxWakeSource()
+	mailboxWake, unwatchMailbox = mailboxWakeSource.WatchAgentControlMailboxWake(ctx, agentcontrol.MailboxWakeFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	defer unwatchMailbox()
 	taskWakeRegistry := o.agentControlTaskWakeSource()
 	taskWake, unwatchTaskWake = taskWakeRegistry.WatchAgentControlTaskWake(ctx, agentcontrol.TaskWakeFilter{
 		Workflow: agentcontrol.WorkflowSpawnTeam,
 		TeamID:   teamID,
 	})
 	defer unwatchTaskWake()
-	initialSeq, err := o.lastMailboxSeq(ctx, teamID)
+	initialSeq, err := o.lastAgentControlMailboxWakeSeq(ctx, teamID)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -88,7 +91,7 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 			return err
 		}
 	} else {
-		lastMailSeq = initialSeq
+		lastMailboxSeq = initialSeq
 	}
 	initialTaskSeq, err := o.lastAgentControlTaskWakeSeq(ctx, teamID)
 	if err != nil {
@@ -138,8 +141,8 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 			return ctx.Err()
 		case <-ticker.C:
 		case <-wake:
-		case <-mailWake:
-			nextSeq, err := o.lastMailboxSeq(ctx, teamID)
+		case <-mailboxWake:
+			nextSeq, err := o.lastAgentControlMailboxWakeSeq(ctx, teamID)
 			if err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
@@ -149,10 +152,10 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 				}
 				continue
 			}
-			if nextSeq <= lastMailSeq {
+			if nextSeq <= lastMailboxSeq {
 				continue
 			}
-			lastMailSeq = nextSeq
+			lastMailboxSeq = nextSeq
 		case <-taskWake:
 			nextSeq, err := o.lastAgentControlTaskWakeSeq(ctx, teamID)
 			if err != nil {
@@ -193,6 +196,16 @@ func (o *Orchestrator) lastMailboxSeq(ctx context.Context, teamID string) (int64
 	return messages[0].Seq, nil
 }
 
+func (o *Orchestrator) lastAgentControlMailboxWakeSeq(ctx context.Context, teamID string) (int64, error) {
+	if o == nil || o.Store == nil {
+		return 0, nil
+	}
+	return o.agentControlMailboxWakeSource().LastAgentControlMailboxWakeSeq(ctx, agentcontrol.MailboxWakeFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+}
+
 func (o *Orchestrator) lastAgentControlTaskWakeSeq(ctx context.Context, teamID string) (int64, error) {
 	if o == nil || o.Store == nil {
 		return 0, nil
@@ -211,6 +224,16 @@ func (o *Orchestrator) agentControlTaskWakeSource() agentcontrol.TaskWakeSource 
 		return NewAgentControlTaskRegistry(nil)
 	}
 	return NewAgentControlTaskRegistry(o.Store)
+}
+
+func (o *Orchestrator) agentControlMailboxWakeSource() agentcontrol.MailboxWakeSource {
+	if o != nil && o.MailboxWake != nil {
+		return o.MailboxWake
+	}
+	if o == nil {
+		return NewAgentControlMailboxWake(nil)
+	}
+	return NewAgentControlMailboxWake(o.Store)
 }
 
 // ClaimReadyTasks assigns and claims ready tasks, returning accepted assignments.
