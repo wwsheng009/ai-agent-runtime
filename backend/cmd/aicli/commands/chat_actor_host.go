@@ -793,6 +793,7 @@ func (h *localChatRuntimeHost) dispatchTeamLifecycleEvent(event team.TeamEvent, 
 	}
 	if persist {
 		h.deliverTeamLifecycleMailbox(context.Background(), sessionID, event)
+		h.deliverTeamTaskLifecycleMailbox(context.Background(), event)
 	}
 	if h.isLifecycleEventForBaseSession(sessionID) {
 		if lifecycle := h.teamLifecycleService(); lifecycle != nil {
@@ -821,6 +822,26 @@ func (h *localChatRuntimeHost) deliverTeamLifecycleMailbox(ctx context.Context, 
 		return
 	}
 	_ = runtimechat.DeliverMailboxEventFirst(ctx, h.EventStore, nil, nil, sessionID, team.BuildTeamLifecycleMailboxMessage(event))
+}
+
+func (h *localChatRuntimeHost) deliverTeamTaskLifecycleMailbox(ctx context.Context, event team.TeamEvent) {
+	if h == nil || h.EventStore == nil || h.TeamStore == nil {
+		return
+	}
+	switch strings.TrimSpace(event.Type) {
+	case "task.completed", "task.failed":
+	default:
+		return
+	}
+	assignee := payloadStringValue(event.Payload["assignee"])
+	if assignee == "" {
+		return
+	}
+	mate, err := h.TeamStore.GetTeammate(ctx, assignee)
+	if err != nil || mate == nil || strings.TrimSpace(mate.SessionID) == "" {
+		return
+	}
+	_ = runtimechat.DeliverMailboxEventFirst(ctx, h.EventStore, nil, nil, strings.TrimSpace(mate.SessionID), team.BuildTaskLifecycleMailboxMessage(event))
 }
 
 func (h *localChatRuntimeHost) baseRuntimeSessionID() string {

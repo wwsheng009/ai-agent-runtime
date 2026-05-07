@@ -355,6 +355,7 @@ func chatAgentPickerOptionLine(agent toolbroker.AgentStatusResult) string {
 	if agent.AgentType != "" {
 		parts = append(parts, "type="+agent.AgentType)
 	}
+	parts = appendAgentTeamTaskParts(parts, agent)
 	return strings.Join(parts, " ")
 }
 
@@ -397,6 +398,19 @@ func chatAgentPickerSelectionLines(agent toolbroker.AgentStatusResult) []string 
 	}
 	if agent.AgentType != "" {
 		lines = append(lines, "  type="+agent.AgentType)
+	}
+	if agent.TeamID != "" {
+		lines = append(lines, "  team="+agent.TeamID)
+	}
+	if agent.TeammateID != "" {
+		lines = append(lines, "  teammate="+agent.TeammateID)
+	}
+	if agent.CurrentTaskID != "" {
+		taskLine := "  task=" + agent.CurrentTaskID
+		if agent.CurrentTaskStatus != "" {
+			taskLine += " status=" + agent.CurrentTaskStatus
+		}
+		lines = append(lines, taskLine)
 	}
 	return lines
 }
@@ -449,6 +463,7 @@ func chatAgentGraphLines(session *ChatSession) []string {
 		if agent.AgentType != "" {
 			parts = append(parts, "type="+agent.AgentType)
 		}
+		parts = appendAgentTeamTaskParts(parts, agent)
 		if agent.PendingApproval {
 			parts = append(parts, "approval=pending")
 		}
@@ -463,13 +478,29 @@ func chatAgentGraphLines(session *ChatSession) []string {
 	return lines
 }
 
+func appendAgentTeamTaskParts(parts []string, agent toolbroker.AgentStatusResult) []string {
+	if agent.TeamID != "" {
+		parts = append(parts, "team="+agent.TeamID)
+	}
+	if agent.TeammateID != "" {
+		parts = append(parts, "teammate="+agent.TeammateID)
+	}
+	if agent.CurrentTaskID != "" {
+		parts = append(parts, "task="+agent.CurrentTaskID)
+	}
+	if agent.CurrentTaskStatus != "" {
+		parts = append(parts, "task_status="+agent.CurrentTaskStatus)
+	}
+	return parts
+}
+
 func printChatTimeline(session *ChatSession, command string) {
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return
 	}
 	fmt.Println("Collab Timeline:")
-	for _, line := range chatTimelineLines(session, parseChatTimelineLimit(command, 20)) {
+	for _, line := range chatTimelineCommandLines(session, command) {
 		fmt.Println(line)
 	}
 }
@@ -479,25 +510,42 @@ func printChatCollab(session *ChatSession, command string) {
 		fmt.Println("错误: 当前没有活动会话")
 		return
 	}
-	fmt.Println("Parent Mailbox Timeline:")
-	for _, line := range chatCollabLines(session, parseChatTimelineLimit(command, 20)) {
+	target, _ := parseChatCollabTargetAndLimit(command, 20)
+	if strings.TrimSpace(target) == "" {
+		fmt.Println("Parent Mailbox Timeline:")
+	} else {
+		fmt.Println("Agent Mailbox Timeline:")
+	}
+	for _, line := range chatCollabCommandLines(session, command) {
 		fmt.Println(line)
 	}
 }
 
 func parseChatTimelineLimit(command string, fallback int) int {
+	_, limit := parseChatTimelineTargetAndLimit(command, fallback)
+	return limit
+}
+
+func parseChatTimelineTargetAndLimit(command string, fallback int) (string, int) {
+	limit := fallback
+	target := ""
 	arg := strings.TrimSpace(extractCommandArgument(command))
 	if arg == "" {
-		return fallback
+		return target, limit
 	}
-	limit, err := strconv.Atoi(arg)
-	if err != nil || limit <= 0 {
-		return fallback
+	for _, field := range strings.Fields(arg) {
+		if value, err := strconv.Atoi(field); err == nil && value > 0 {
+			if value > 100 {
+				value = 100
+			}
+			limit = value
+			continue
+		}
+		if target == "" {
+			target = strings.TrimSpace(field)
+		}
 	}
-	if limit > 100 {
-		return 100
-	}
-	return limit
+	return target, limit
 }
 
 func chatTimelineLines(session *ChatSession, limit int) []string {
@@ -505,6 +553,25 @@ func chatTimelineLines(session *ChatSession, limit int) []string {
 		return []string{"  <none>"}
 	}
 	teamID := strings.TrimSpace(session.ActiveTeam.TeamID)
+	return chatTimelineLinesForTeam(session, teamID, limit)
+}
+
+func chatTimelineCommandLines(session *ChatSession, command string) []string {
+	target, limit := parseChatTimelineTargetAndLimit(command, 20)
+	teamID := strings.TrimSpace(target)
+	if teamID == "" || strings.EqualFold(teamID, "active") || strings.EqualFold(teamID, "current") {
+		if session != nil && session.ActiveTeam != nil {
+			teamID = strings.TrimSpace(session.ActiveTeam.TeamID)
+		}
+	}
+	return chatTimelineLinesForTeam(session, teamID, limit)
+}
+
+func chatTimelineLinesForTeam(session *ChatSession, teamID string, limit int) []string {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil {
+		return []string{"  <none>"}
+	}
+	teamID = strings.TrimSpace(teamID)
 	if teamID == "" {
 		return []string{"  <none>"}
 	}
@@ -577,18 +644,89 @@ func chatTimelineEventLine(event team.TeamEventRecord) string {
 }
 
 func chatCollabLines(session *ChatSession, limit int) []string {
+	if session == nil || session.RuntimeSession == nil {
+		return []string{"  <none>"}
+	}
+	return chatCollabLinesForSession(session, strings.TrimSpace(session.RuntimeSession.ID), limit)
+}
+
+func chatCollabCommandLines(session *ChatSession, command string) []string {
+	target, limit := parseChatCollabTargetAndLimit(command, 20)
+	if strings.TrimSpace(target) == "" {
+		return chatCollabLines(session, limit)
+	}
+	sessionID, err := resolveChatCollabTargetSession(session, target)
+	if err != nil {
+		return []string{"  <error: " + err.Error() + ">"}
+	}
+	return chatCollabLinesForSession(session, sessionID, limit)
+}
+
+func parseChatCollabTargetAndLimit(command string, fallback int) (string, int) {
+	limit := fallback
+	target := ""
+	arg := strings.TrimSpace(extractCommandArgument(command))
+	if arg == "" {
+		return target, limit
+	}
+	for _, field := range strings.Fields(arg) {
+		if value, err := strconv.Atoi(field); err == nil && value > 0 {
+			if value > 100 {
+				value = 100
+			}
+			limit = value
+			continue
+		}
+		if target == "" {
+			target = strings.TrimSpace(field)
+		}
+	}
+	return target, limit
+}
+
+func resolveChatCollabTargetSession(session *ChatSession, target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if session == nil || session.RuntimeSession == nil {
+		return "", fmt.Errorf("当前没有活动会话")
+	}
+	if target == "" || strings.EqualFold(target, "parent") || strings.EqualFold(target, "current") {
+		return strings.TrimSpace(session.RuntimeSession.ID), nil
+	}
+	if strings.EqualFold(target, "selected") || strings.EqualFold(target, "target") {
+		target = strings.TrimSpace(session.SelectedAgentTarget)
+		if target == "" {
+			return "", fmt.Errorf("no selected agent target")
+		}
+	}
+	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.ActorRegistry != nil {
+		if resolved, err := resolveChatAgentTarget(session, target); err == nil && resolved != nil {
+			if sessionID := strings.TrimSpace(resolved.SessionID); sessionID != "" {
+				return sessionID, nil
+			}
+		}
+	}
+	if strings.HasPrefix(target, "/") {
+		return "", fmt.Errorf("unknown agent target: %s", target)
+	}
+	return target, nil
+}
+
+func chatCollabLinesForSession(session *ChatSession, sessionID string, limit int) []string {
 	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.EventStore == nil || session.RuntimeSession == nil {
 		return []string{"  <none>"}
 	}
-	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return []string{"  <none>"}
 	}
 	if limit <= 0 {
 		limit = 20
 	}
+	if reader, ok := session.LocalRuntimeHost.EventStore.(runtimechat.AgentControlMailboxReaderStore); ok {
+		return chatCollabAgentControlMailboxLines(context.Background(), reader, session.LocalRuntimeHost.EventStore, sessionID, limit)
+	}
 	if reader, ok := session.LocalRuntimeHost.EventStore.(runtimechat.MailboxReaderStore); ok {
-		return chatCollabMailboxSubstrateLines(context.Background(), reader, session.LocalRuntimeHost.EventStore, sessionID, limit)
+		return chatCollabMailboxSubstrateLines(context.Background(), reader, session.LocalRuntimeHost.EventStore, sessionID, limit, "mailbox", 0)
 	}
 	events, err := session.LocalRuntimeHost.EventStore.ListEvents(context.Background(), sessionID, 0, 0)
 	if err != nil {
@@ -618,12 +756,36 @@ func chatCollabLines(session *ChatSession, limit int) []string {
 	return lines
 }
 
-func chatCollabMailboxSubstrateLines(ctx context.Context, reader runtimechat.MailboxReaderStore, eventStore interface {
+func chatCollabAgentControlMailboxLines(ctx context.Context, reader runtimechat.AgentControlMailboxReaderStore, store interface {
 	ListEvents(context.Context, string, int64, int) ([]runtimeevents.Event, error)
 }, sessionID string, limit int) []string {
-	messages, err := reader.ListMailbox(ctx, sessionID, 0, 0)
+	controlMessages, err := reader.ListAgentControlMailbox(ctx, sessionID, 0, 0)
 	if err != nil {
 		return []string{"  <error: " + err.Error() + ">"}
+	}
+	messages := controlMessages
+	if mailboxReader, ok := store.(runtimechat.MailboxReaderStore); ok && mailboxReader != nil {
+		allMessages, err := mailboxReader.ListMailbox(ctx, sessionID, 0, 0)
+		if err != nil {
+			return []string{"  <error: " + err.Error() + ">"}
+		}
+		messages = allMessages
+	}
+	return chatCollabMailboxSubstrateLines(ctx, nil, store, sessionID, limit, "agent_control+mailbox", len(controlMessages), messages...)
+}
+
+func chatCollabMailboxSubstrateLines(ctx context.Context, reader runtimechat.MailboxReaderStore, eventStore interface {
+	ListEvents(context.Context, string, int64, int) ([]runtimeevents.Event, error)
+}, sessionID string, limit int, source string, controlCount int, preloadedMessages ...team.MailMessage) []string {
+	var messages []team.MailMessage
+	if len(preloadedMessages) > 0 {
+		messages = preloadedMessages
+	} else if reader != nil {
+		var err error
+		messages, err = reader.ListMailbox(ctx, sessionID, 0, 0)
+		if err != nil {
+			return []string{"  <error: " + err.Error() + ">"}
+		}
 	}
 	extras, err := listChatCollabNonMailboxEvents(ctx, eventStore, sessionID)
 	if err != nil {
@@ -633,7 +795,15 @@ func chatCollabMailboxSubstrateLines(ctx context.Context, reader runtimechat.Mai
 	if total == 0 {
 		return []string{fmt.Sprintf("  session=%s events=0", sessionID)}
 	}
-	lines := []string{fmt.Sprintf("  session=%s events=%d shown=%d source=mailbox", sessionID, total, minChatTimelineLimit(total, limit))}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "mailbox"
+	}
+	header := fmt.Sprintf("  session=%s events=%d shown=%d source=%s", sessionID, total, minChatTimelineLimit(total, limit), source)
+	if controlCount > 0 {
+		header += fmt.Sprintf(" control_events=%d", controlCount)
+	}
+	lines := []string{header}
 	for _, entry := range recentChatCollabMailboxEntries(messages, extras, limit) {
 		line := strings.TrimSpace(entry)
 		if line != "" {
@@ -697,10 +867,31 @@ func chatCollabMailboxLine(message team.MailMessage) string {
 	if body := truncateChatRuntimeText(strings.TrimSpace(message.Body), 140); body != "" {
 		parts = append(parts, "body="+body)
 	}
+	parts = appendAgentControlMetadataParts(parts, message.Metadata)
 	if status := payloadStringValue(message.Metadata["status"]); status != "" {
 		parts = append(parts, "status="+status)
 	}
 	return strings.Join(parts, " ")
+}
+
+func appendAgentControlMetadataParts(parts []string, metadata map[string]interface{}) []string {
+	for _, field := range []struct {
+		Key   string
+		Label string
+	}{
+		{Key: "message_type", Label: "msg"},
+		{Key: "control_action", Label: "action"},
+		{Key: "workflow", Label: "workflow"},
+		{Key: "mailbox_delivery", Label: "delivery"},
+		{Key: "mailbox_kind", Label: "mailbox"},
+		{Key: "event_type", Label: "event"},
+		{Key: "target_session_id", Label: "target"},
+	} {
+		if value := payloadStringValue(metadata[field.Key]); value != "" {
+			parts = append(parts, field.Label+"="+value)
+		}
+	}
+	return parts
 }
 
 func minChatTimelineLimit(total, limit int) int {
@@ -738,6 +929,7 @@ func chatCollabEventLine(event runtimeevents.Event) string {
 		parts = append(parts, "body="+body)
 	}
 	if metadata, ok := payload["metadata"].(map[string]interface{}); ok {
+		parts = appendAgentControlMetadataParts(parts, metadata)
 		if childSession := payloadStringValue(metadata["session_id"]); childSession != "" {
 			parts = append(parts, "child="+childSession)
 		}

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -148,6 +149,7 @@ func (c *localTeamLifecycleService) SyncLoops() {
 		if !teamBelongsToHostLead(item, leadSessionID, activeTeamID) {
 			continue
 		}
+		c.ensureRunnableTeam(context.Background(), item)
 		desired[teamID] = struct{}{}
 	}
 
@@ -244,6 +246,15 @@ func (c *localTeamLifecycleService) RunSettled(ctx context.Context, teamID strin
 	if c.hasTeamLoop(teamID) {
 		return false, nil
 	}
+	if record.Status == team.TeamStatusDone {
+		summaryReady, err := c.terminalSummaryReady(ctx, teamID)
+		if err != nil {
+			return false, err
+		}
+		if !summaryReady {
+			return false, nil
+		}
+	}
 	if c.Host.RuntimeStore == nil {
 		return true, nil
 	}
@@ -266,6 +277,24 @@ func (c *localTeamLifecycleService) RunSettled(ctx context.Context, teamID strin
 		}
 	}
 	return true, nil
+}
+
+func (c *localTeamLifecycleService) terminalSummaryReady(ctx context.Context, teamID string) (bool, error) {
+	if c == nil || c.Host == nil || c.Host.TeamStore == nil {
+		return true, nil
+	}
+	if c.Host.Orchestrator == nil || c.Host.Orchestrator.LeadPlanner == nil {
+		return true, nil
+	}
+	events, err := c.Host.TeamStore.ListTeamEvents(ctx, team.TeamEventFilter{
+		TeamID:    strings.TrimSpace(teamID),
+		EventType: "team.summary*",
+		Limit:     1,
+	})
+	if err != nil {
+		return false, err
+	}
+	return len(events) > 0, nil
 }
 
 func (c *localTeamLifecycleService) closeTerminalTeammatesAsync(teamID string) {
@@ -418,6 +447,77 @@ func teamBelongsToHostLead(record team.Team, leadSessionID, activeTeamID string)
 		return true
 	}
 	return recordLeadSessionID == "" && activeTeamID != "" && strings.EqualFold(teamID, activeTeamID)
+}
+
+func (c *localTeamLifecycleService) ensureRunnableTeam(ctx context.Context, record team.Team) {
+	if c == nil || c.Host == nil || c.Host.TeamStore == nil {
+		return
+	}
+	teamID := strings.TrimSpace(record.ID)
+	if teamID == "" {
+		return
+	}
+	teammates, err := c.Host.TeamStore.ListTeammates(ctx, teamID)
+	if err != nil || len(teammates) > 0 {
+		return
+	}
+	tasks, err := c.Host.TeamStore.ListTasks(ctx, team.TaskFilter{
+		TeamID: teamID,
+		Status: []team.TaskStatus{team.TaskStatusPending, team.TaskStatusReady, team.TaskStatusRunning},
+	})
+	if err != nil || len(tasks) == 0 {
+		return
+	}
+	for _, teammate := range synthesizeLocalRunnableTeammates(teamID, tasks, record.MaxTeammates) {
+		_, _ = c.Host.TeamStore.UpsertTeammate(ctx, teammate)
+	}
+}
+
+func synthesizeLocalRunnableTeammates(teamID string, tasks []team.Task, maxTeammates int) []team.Teammate {
+	seen := make(map[string]struct{}, len(tasks))
+	teammates := make([]team.Teammate, 0, len(tasks))
+	for _, task := range tasks {
+		if task.Assignee == nil {
+			continue
+		}
+		assignee := strings.TrimSpace(*task.Assignee)
+		if assignee == "" {
+			continue
+		}
+		key := strings.ToLower(assignee)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		teammates = append(teammates, buildSyntheticLocalTeammate(teamID, assignee, assignee))
+	}
+	if len(teammates) > 0 {
+		return teammates
+	}
+
+	count := len(tasks)
+	if maxTeammates > 0 && count > maxTeammates {
+		count = maxTeammates
+	}
+	for index := 0; index < count; index++ {
+		id := fmt.Sprintf("mate-%d", index+1)
+		teammates = append(teammates, buildSyntheticLocalTeammate(teamID, id, fmt.Sprintf("Teammate %d", index+1)))
+	}
+	return teammates
+}
+
+func buildSyntheticLocalTeammate(teamID, id, name string) team.Teammate {
+	segment := normalizeLocalSessionSegment(firstNonEmptyChatValue(id, name))
+	if segment == "" {
+		segment = "mate"
+	}
+	return team.Teammate{
+		ID:        strings.TrimSpace(id),
+		TeamID:    strings.TrimSpace(teamID),
+		Name:      strings.TrimSpace(name),
+		SessionID: strings.TrimSpace(teamID) + "__" + segment,
+		State:     team.TeammateStateIdle,
+	}
 }
 
 func (c *localTeamLifecycleService) hasTeamLoop(teamID string) bool {

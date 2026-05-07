@@ -129,6 +129,20 @@ func TestLocalActorRegistry_TriggerTaskUsesSessionHub(t *testing.T) {
 	if mailboxMessages[0].Kind != team.TaskAssignmentMailboxKind || mailboxMessages[0].Seq != 1 || mailboxMetadata["message_type"] != team.TaskAssignmentControlMessageType {
 		t.Fatalf("unexpected assignment mailbox row: %#v", mailboxMessages[0])
 	}
+	controlReader, ok := registry.Host.EventStore.(runtimechat.AgentControlMailboxReaderStore)
+	if !ok {
+		t.Fatal("expected runtime store to expose agent-control mailbox reader substrate")
+	}
+	controlMessages, err := controlReader.ListAgentControlMailbox(context.Background(), "session-1", 0, 10)
+	if err != nil {
+		t.Fatalf("ListAgentControlMailbox session-1: %v", err)
+	}
+	if len(controlMessages) != 1 {
+		t.Fatalf("expected assignment agent-control mailbox row, got %#v", controlMessages)
+	}
+	if controlMessages[0].Kind != team.TaskAssignmentMailboxKind || controlMessages[0].Metadata["message_type"] != team.TaskAssignmentControlMessageType {
+		t.Fatalf("unexpected assignment agent-control row: %#v", controlMessages[0])
+	}
 }
 
 func TestLocalActorRegistry_DispatchTeamMailboxMessageRoutesToActor(t *testing.T) {

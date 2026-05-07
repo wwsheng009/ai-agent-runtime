@@ -11,6 +11,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -96,6 +97,57 @@ func TestLocalChatRuntimeHost_MirrorsTeamSummaryIntoBaseSession(t *testing.T) {
 	}
 }
 
+func TestLocalTeamLifecycleService_RunSettledWaitsForDoneSummaryEvent(t *testing.T) {
+	ctx := context.Background()
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	teamID, err := teamStore.CreateTeam(ctx, team.Team{ID: "summary-wait-team"})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if err := teamStore.UpdateTeamStatus(ctx, teamID, team.TeamStatusDone); err != nil {
+		t.Fatalf("UpdateTeamStatus: %v", err)
+	}
+
+	host := &localChatRuntimeHost{
+		TeamStore: teamStore,
+		Orchestrator: &team.Orchestrator{
+			LeadPlanner: &team.LeadPlanner{},
+		},
+	}
+	lifecycle := newLocalTeamLifecycleService(host)
+
+	settled, err := lifecycle.RunSettled(ctx, teamID)
+	if err != nil {
+		t.Fatalf("RunSettled without summary: %v", err)
+	}
+	if settled {
+		t.Fatal("expected done team with configured lead planner to wait for team.summary event")
+	}
+
+	if _, err := teamStore.AppendTeamEvent(ctx, team.TeamEvent{
+		Type:   "team.summary",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"summary": "done",
+		},
+	}); err != nil {
+		t.Fatalf("AppendTeamEvent: %v", err)
+	}
+
+	settled, err = lifecycle.RunSettled(ctx, teamID)
+	if err != nil {
+		t.Fatalf("RunSettled with summary: %v", err)
+	}
+	if !settled {
+		t.Fatal("expected done team to settle after team.summary event is persisted")
+	}
+}
+
 func TestLocalChatRuntimeHost_TeamLifecyclePersistsParentMailbox(t *testing.T) {
 	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
 	host := &localChatRuntimeHost{
@@ -136,6 +188,80 @@ func TestLocalChatRuntimeHost_TeamLifecyclePersistsParentMailbox(t *testing.T) {
 	}
 	if messages[0].Metadata["message_type"] != team.TeamLifecycleControlMessageType || messages[0].Metadata["status"] != "done" {
 		t.Fatalf("unexpected lifecycle mailbox metadata: %#v", messages[0].Metadata)
+	}
+	controlMessages, err := runtimeStore.ListAgentControlMailbox(context.Background(), "root-session", 0, 10)
+	if err != nil {
+		t.Fatalf("ListAgentControlMailbox: %v", err)
+	}
+	if len(controlMessages) != 1 || controlMessages[0].Kind != team.TeamLifecycleMailboxKind || controlMessages[0].Metadata["message_type"] != team.TeamLifecycleControlMessageType {
+		t.Fatalf("unexpected lifecycle agent-control rows: %#v", controlMessages)
+	}
+}
+
+func TestLocalChatRuntimeHost_TaskLifecyclePersistsTeammateMailbox(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.CreateTeam(context.Background(), team.Team{
+		ID:            "team-1",
+		LeadSessionID: "root-session",
+		Status:        team.TeamStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if _, err := store.UpsertTeammate(context.Background(), team.Teammate{
+		ID:        "mate-1",
+		TeamID:    "team-1",
+		SessionID: "mate-session",
+		State:     team.TeammateStateBusy,
+	}); err != nil {
+		t.Fatalf("UpsertTeammate: %v", err)
+	}
+
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
+	host := &localChatRuntimeHost{
+		EventStore: runtimeStore,
+		TeamStore:  store,
+		BaseSession: &ChatSession{
+			RuntimeSession: &runtimechat.Session{ID: "root-session"},
+		},
+	}
+
+	host.dispatchTeamLifecycleEvent(team.TeamEvent{
+		Type:   "task.completed",
+		TeamID: "team-1",
+		Payload: map[string]interface{}{
+			"task_id":  "task-1",
+			"assignee": "mate-1",
+			"summary":  "done",
+		},
+	}, true)
+
+	parentMessages, err := runtimeStore.ListMailbox(context.Background(), "root-session", 0, 10)
+	if err != nil {
+		t.Fatalf("ListMailbox parent: %v", err)
+	}
+	if len(parentMessages) != 0 {
+		t.Fatalf("expected task lifecycle not to mirror into parent mailbox, got %#v", parentMessages)
+	}
+	messages, err := runtimeStore.ListMailbox(context.Background(), "mate-session", 0, 10)
+	if err != nil {
+		t.Fatalf("ListMailbox teammate: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Kind != team.TaskLifecycleMailboxKind || messages[0].Metadata["event_type"] != "task.completed" {
+		t.Fatalf("unexpected task lifecycle mailbox row: %#v", messages)
+	}
+	if messages[0].Metadata["message_type"] != team.TaskLifecycleControlMessageType || messages[0].Metadata["control_action"] != team.TaskLifecycleControlAction {
+		t.Fatalf("unexpected task lifecycle metadata: %#v", messages[0].Metadata)
+	}
+	controlMessages, err := runtimeStore.ListAgentControlMailbox(context.Background(), "mate-session", 0, 10)
+	if err != nil {
+		t.Fatalf("ListAgentControlMailbox teammate: %v", err)
+	}
+	if len(controlMessages) != 1 || controlMessages[0].Kind != team.TaskLifecycleMailboxKind || controlMessages[0].Metadata["message_type"] != team.TaskLifecycleControlMessageType {
+		t.Fatalf("unexpected task lifecycle agent-control rows: %#v", controlMessages)
 	}
 }
 
@@ -257,6 +383,16 @@ func TestLocalActorRegistry_ListIncludesTeamTeammateSessions(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertTeammate: %v", err)
 	}
+	assignee := "member-1"
+	if _, err := teamStore.CreateTask(context.Background(), team.Task{
+		ID:       "task-docs",
+		TeamID:   teamID,
+		Title:    "Review docs",
+		Status:   team.TaskStatusRunning,
+		Assignee: &assignee,
+	}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
 
 	mateSession := runtimechat.NewSession(userID)
 	mateSession.ID = "mate-session"
@@ -285,6 +421,9 @@ func TestLocalActorRegistry_ListIncludesTeamTeammateSessions(t *testing.T) {
 	}
 	if agent.Path != "/root/teams/team-alpha/member-1" || agent.Depth != 1 || agent.AgentType != "documentation-reviewer" {
 		t.Fatalf("unexpected teammate metadata: %#v", agent)
+	}
+	if agent.TeamID != teamID || agent.TeammateID != "member-1" || agent.CurrentTaskID != "task-docs" || agent.CurrentTaskStatus != string(team.TaskStatusRunning) {
+		t.Fatalf("unexpected teammate task projection: %#v", agent)
 	}
 
 	filtered, err := registry.List(context.Background(), rootSession.ID, toolbroker.ListAgentsArgs{PathPrefix: "/root/teams/team-alpha"})
@@ -786,6 +925,60 @@ func TestLocalActorRegistry_ReadEventsWithoutTargetUsesParentMailbox(t *testing.
 	}
 }
 
+func TestLocalActorRegistry_ReadEventsWithoutTargetMergesAgentControlMailbox(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.BaseSession = &ChatSession{RuntimeSession: rootSession, SessionUserID: userID}
+	registry := host.ActorRegistry
+
+	if err := registry.deliverAgentMailboxEvent(context.Background(), rootSession.ID, team.MailMessage{
+		FromAgent: "child-1",
+		ToAgent:   "parent",
+		Kind:      "info",
+		Body:      "legacy mailbox",
+	}); err != nil {
+		t.Fatalf("deliver legacy mailbox: %v", err)
+	}
+	controlMessage := toolbroker.BuildAgentMailboxMessage("child-2", "parent", "control mailbox", false)
+	if err := registry.deliverAgentMailboxEvent(context.Background(), rootSession.ID, controlMessage); err != nil {
+		t.Fatalf("deliver control mailbox: %v", err)
+	}
+
+	result, err := registry.ReadEvents(context.Background(), toolbroker.ReadAgentEventsArgs{
+		SessionID:   rootSession.ID,
+		MailboxOnly: true,
+		AfterSeq:    0,
+		Limit:       20,
+	})
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	if result == nil || result.Count != 2 || result.LatestSeq != 2 {
+		t.Fatalf("unexpected merged mailbox result: %#v", result)
+	}
+	if result.Events[0].Payload["body"] != "legacy mailbox" || result.Events[1].Payload["body"] != "control mailbox" {
+		t.Fatalf("unexpected merged event order: %#v", result.Events)
+	}
+	if result.Events[1].Payload["metadata"] == nil {
+		t.Fatalf("expected control mailbox metadata, got %#v", result.Events[1].Payload)
+	}
+}
+
 func TestLocalActorRegistry_SendMessagePersistsMailboxWithoutTargetActor(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -1102,7 +1295,14 @@ func TestLocalActorRegistry_MirrorsChildCompletionToParentEvents(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected completion mailbox metadata, got %#v", mailboxEvent.Payload)
 	}
-	if metadata["session_id"] != "completion-child" || metadata["path"] != "/root/completion-child" || metadata["agent_type"] != "worker" {
+	if metadata["session_id"] != "completion-child" ||
+		metadata["path"] != "/root/completion-child" ||
+		metadata["agent_type"] != "worker" ||
+		metadata["message_type"] != agentcontrol.MessageTypeSubagentCompleted ||
+		metadata["control_action"] != agentcontrol.ActionAgentCompleted ||
+		metadata["workflow"] != agentcontrol.WorkflowSpawnAgent ||
+		metadata["mailbox_delivery"] != agentcontrol.DeliverySessionMailbox ||
+		metadata["mailbox_kind"] != agentcontrol.MailboxKindSubagentCompleted {
 		t.Fatalf("unexpected completion mailbox metadata: %#v", metadata)
 	}
 }
@@ -1136,7 +1336,11 @@ func TestLocalActorRegistry_PersistsCompletionMailboxWithoutParentActor(t *testi
 	if !ok {
 		t.Fatalf("expected mailbox metadata, got %#v", event.Payload)
 	}
-	if metadata["session_id"] != "child-session" || metadata["event_seq"] != int64(7) {
+	if metadata["session_id"] != "child-session" ||
+		metadata["event_seq"] != int64(7) ||
+		metadata["message_type"] != agentcontrol.MessageTypeSubagentCompleted ||
+		metadata["control_action"] != agentcontrol.ActionAgentCompleted ||
+		metadata["mailbox_kind"] != agentcontrol.MailboxKindSubagentCompleted {
 		t.Fatalf("unexpected mailbox metadata: %#v", metadata)
 	}
 }
@@ -1353,6 +1557,64 @@ func TestLocalTeamLifecycleService_SyncLoopsFiltersToBaseLeadSession(t *testing.
 	}
 	if lifecycle.hasTeamLoop("team-old") {
 		t.Fatal("expected old lead team loop to stay stopped")
+	}
+}
+
+func TestLocalTeamLifecycleService_SyncLoopsRepairsActiveTeamWithoutTeammates(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(context.Background(), team.Team{
+		ID:            "team-repair",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusActive,
+		MaxTeammates:  2,
+	})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	for _, id := range []string{"task-a", "task-b", "task-c"} {
+		if _, err := store.CreateTask(context.Background(), team.Task{
+			ID:     id,
+			TeamID: teamID,
+			Title:  id,
+			Status: team.TaskStatusPending,
+		}); err != nil {
+			t.Fatalf("CreateTask %s: %v", id, err)
+		}
+	}
+
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.ID = "lead-session"
+	host := &localChatRuntimeHost{
+		TeamStore: store,
+		BaseSession: &ChatSession{
+			RuntimeSession: runtimeSession,
+		},
+		Orchestrator: team.NewOrchestrator(store, nil, nil),
+	}
+	host.Orchestrator.TickInterval = time.Hour
+	lifecycle := newLocalTeamLifecycleService(host)
+	host.TeamLifecycle = lifecycle
+	defer lifecycle.StopLoops()
+
+	lifecycle.SyncLoops()
+
+	teammates, err := store.ListTeammates(context.Background(), teamID)
+	if err != nil {
+		t.Fatalf("ListTeammates: %v", err)
+	}
+	if len(teammates) != 2 {
+		t.Fatalf("expected repaired teammate records capped by max_teammates, got %+v", teammates)
+	}
+	if teammates[0].ID != "mate-1" || teammates[0].SessionID != "team-repair__mate_1" {
+		t.Fatalf("unexpected first repaired teammate: %+v", teammates[0])
+	}
+	if teammates[1].ID != "mate-2" || teammates[1].SessionID != "team-repair__mate_2" {
+		t.Fatalf("unexpected second repaired teammate: %+v", teammates[1])
 	}
 }
 

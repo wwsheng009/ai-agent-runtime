@@ -619,7 +619,7 @@ func TestChatAgentPickerResolvesByNumberPathAndSession(t *testing.T) {
 
 func TestChatAgentPickerPopupLinesIncludeAgentDetails(t *testing.T) {
 	lines := chatAgentPickerPopupLines([]toolbroker.AgentStatusResult{
-		{ID: "agent-1", SessionID: "session-1", Path: "/root/agent-1", Status: "idle", AgentType: "worker"},
+		{ID: "agent-1", SessionID: "session-1", Path: "/root/agent-1", Status: "idle", AgentType: "worker", TeamID: "team-1", TeammateID: "member-1", CurrentTaskID: "task-1", CurrentTaskStatus: "running"},
 	}, "")
 	output := strings.Join(lines, "\n")
 	for _, expected := range []string{
@@ -628,6 +628,10 @@ func TestChatAgentPickerPopupLinesIncludeAgentDetails(t *testing.T) {
 		"status=idle",
 		"session=session-1",
 		"type=worker",
+		"team=team-1",
+		"teammate=member-1",
+		"task=task-1",
+		"task_status=running",
 		"输入编号",
 	} {
 		if !strings.Contains(output, expected) {
@@ -697,6 +701,47 @@ func TestChatTimelineLinesListsActiveTeamEvents(t *testing.T) {
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected timeline to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestChatTimelineCommandLinesListsExplicitTeamEvents(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	const teamID = "timeline-explicit-team"
+	if _, err := store.CreateTeam(context.Background(), team.Team{
+		ID:            teamID,
+		LeadSessionID: "timeline-root",
+		Status:        team.TeamStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	_, _ = store.AppendTeamEvent(context.Background(), team.TeamEvent{
+		Type:   "task.completed",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"task_id": "explicit-task",
+			"summary": "explicit team finished",
+		},
+	})
+
+	session := &ChatSession{
+		LocalRuntimeHost: &localChatRuntimeHost{TeamStore: store},
+	}
+	output := strings.Join(chatTimelineCommandLines(session, "/timeline "+teamID+" 5"), "\n")
+	for _, expected := range []string{
+		"team=" + teamID,
+		"events=1",
+		"#1 task.completed",
+		"task=explicit-task",
+		"summary=explicit team finished",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected explicit timeline to contain %q, got:\n%s", expected, output)
 		}
 	}
 }
@@ -817,12 +862,8 @@ func TestChatCollabLinesListsParentMailboxEvents(t *testing.T) {
 		t.Fatalf("append non-collab event: %v", err)
 	}
 	for _, body := range []string{"first", "second", "third"} {
-		if _, _, err := runtimeStore.AppendMailbox(context.Background(), "collab-root", team.MailMessage{
-			FromAgent: "child-1",
-			ToAgent:   "parent",
-			Kind:      "agent_message",
-			Body:      body,
-		}); err != nil {
+		message := toolbroker.BuildAgentMailboxMessage("child-1", "parent", body, false)
+		if _, _, err := runtimeStore.AppendMailbox(context.Background(), "collab-root", message); err != nil {
 			t.Fatalf("append mailbox: %v", err)
 		}
 	}
@@ -832,11 +873,17 @@ func TestChatCollabLinesListsParentMailboxEvents(t *testing.T) {
 		t.Fatalf("expected collab lines to filter non-collab and old events, got:\n%s", output)
 	}
 	for _, expected := range []string{
-		"session=collab-root events=3 shown=2 source=mailbox",
+		"session=collab-root events=3 shown=2 source=agent_control+mailbox control_events=3",
 		"mailbox_received",
 		"from=child-1",
 		"to=parent",
 		"kind=agent_message",
+		"msg=agent_control.agent_message",
+		"action=agent.message",
+		"workflow=spawn_agent",
+		"delivery=session_mailbox",
+		"mailbox=agent_message",
+		"target=parent",
 		"body=second",
 		"body=third",
 	} {
@@ -873,6 +920,38 @@ func TestHandleCommand_CollabPrintsParentMailboxTimeline(t *testing.T) {
 	})
 	if !strings.Contains(output, "Parent Mailbox Timeline:") || !strings.Contains(output, "command collab hello") {
 		t.Fatalf("expected collab command output, got:\n%s", output)
+	}
+}
+
+func TestHandleCommand_CollabPrintsSelectedAgentMailboxTimeline(t *testing.T) {
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
+	session := &ChatSession{
+		RuntimeSession:      &runtimechat.Session{ID: "collab-selected-root", State: runtimechat.StateActive},
+		SelectedAgentTarget: "collab-selected-child",
+		LocalRuntimeHost:    &localChatRuntimeHost{EventStore: runtimeStore},
+	}
+	if _, _, err := runtimeStore.AppendMailbox(context.Background(), "collab-selected-child", toolbroker.BuildAgentMailboxMessage(
+		"parent",
+		"collab-selected-child",
+		"selected collab hello",
+		false,
+	)); err != nil {
+		t.Fatalf("append selected mailbox: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/collab selected 5", false); quit {
+			t.Fatal("collab command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Agent Mailbox Timeline:",
+		"session=collab-selected-child",
+		"selected collab hello",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected selected collab output to contain %q, got:\n%s", expected, output)
+		}
 	}
 }
 

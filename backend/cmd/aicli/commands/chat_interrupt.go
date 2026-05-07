@@ -70,6 +70,12 @@ func (h *localChatRuntimeHost) interruptChildAgentRuns(ctx context.Context, base
 	if err != nil {
 		return
 	}
+	byID := make(map[string]*runtimechat.Session, len(sessions))
+	for _, item := range sessions {
+		if item != nil && strings.TrimSpace(item.ID) != "" {
+			byID[strings.TrimSpace(item.ID)] = item
+		}
+	}
 	for _, item := range sessions {
 		if item == nil {
 			continue
@@ -84,7 +90,9 @@ func (h *localChatRuntimeHost) interruptChildAgentRuns(ctx context.Context, base
 		parent, _ := item.GetContext(toolbroker.AgentSessionContextParentSessionID)
 		parentSessionID, _ := parent.(string)
 		if !strings.EqualFold(strings.TrimSpace(parentSessionID), strings.TrimSpace(baseSessionID)) {
-			continue
+			if !localAgentHasAncestor(item, baseSessionID, byID) {
+				continue
+			}
 		}
 		h.interruptActorRun(ctx, sessionID)
 		h.markRuntimeSessionStopped(ctx, sessionID)

@@ -367,6 +367,7 @@ func restoreLocalRuntimeHostTeamState(session *ChatSession) {
 		session.LocalRuntimeHost.replayStoredTerminalTeamLifecycleEvents(session.ActiveTeam.TeamID)
 	}
 	warnIfChatSessionSyncFails(session, "sync ambient team lifecycle state", syncAmbientTeamLifecycleState(session))
+	session.LocalRuntimeHost.syncTeamLifecycleLoops()
 }
 
 func presentChatSession(session *ChatSession) {

@@ -145,3 +145,79 @@ func TestInterruptActiveRunsStopsDirectChildAgentState(t *testing.T) {
 		t.Fatalf("expected stopped child state, got %+v", state)
 	}
 }
+
+func TestInterruptActiveRunsStopsNestedChildAgentState(t *testing.T) {
+	ctx := context.Background()
+	userID := "user-1"
+	storage := runtimechat.NewInMemoryStorage()
+
+	parent := runtimechat.NewSession(userID)
+	parent.ID = "parent-session"
+	if err := storage.Save(ctx, parent); err != nil {
+		t.Fatalf("Save parent: %v", err)
+	}
+
+	child := runtimechat.NewSession(userID)
+	child.ID = "child-agent-session"
+	child.SetContext(toolbroker.AgentSessionContextParentSessionID, parent.ID)
+	if err := storage.Save(ctx, child); err != nil {
+		t.Fatalf("Save child: %v", err)
+	}
+
+	grandchild := runtimechat.NewSession(userID)
+	grandchild.ID = "grandchild-agent-session"
+	grandchild.SetContext(toolbroker.AgentSessionContextParentSessionID, child.ID)
+	if err := storage.Save(ctx, grandchild); err != nil {
+		t.Fatalf("Save grandchild: %v", err)
+	}
+
+	siblingParent := runtimechat.NewSession(userID)
+	siblingParent.ID = "other-parent-session"
+	if err := storage.Save(ctx, siblingParent); err != nil {
+		t.Fatalf("Save sibling parent: %v", err)
+	}
+
+	sibling := runtimechat.NewSession(userID)
+	sibling.ID = "sibling-child-session"
+	sibling.SetContext(toolbroker.AgentSessionContextParentSessionID, siblingParent.ID)
+	if err := storage.Save(ctx, sibling); err != nil {
+		t.Fatalf("Save sibling: %v", err)
+	}
+
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(32)
+	for _, sessionID := range []string{child.ID, grandchild.ID, sibling.ID} {
+		if err := runtimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+			SessionID:     sessionID,
+			Status:        runtimechat.SessionRunning,
+			CurrentTurnID: "turn-" + sessionID,
+			UpdatedAt:     time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("SaveState(%s): %v", sessionID, err)
+		}
+	}
+
+	host := &localChatRuntimeHost{
+		SessionStore: storage,
+		RuntimeStore: runtimeStore,
+	}
+
+	host.interruptActiveRuns(ctx, parent.ID, userID, "")
+
+	for _, sessionID := range []string{child.ID, grandchild.ID} {
+		state, err := runtimeStore.LoadState(ctx, sessionID)
+		if err != nil {
+			t.Fatalf("LoadState(%s): %v", sessionID, err)
+		}
+		if state == nil || state.Status != runtimechat.SessionStopped || state.CurrentTurnID != "" {
+			t.Fatalf("expected stopped descendant state for %s, got %+v", sessionID, state)
+		}
+	}
+
+	state, err := runtimeStore.LoadState(ctx, sibling.ID)
+	if err != nil {
+		t.Fatalf("LoadState sibling: %v", err)
+	}
+	if state == nil || state.Status != runtimechat.SessionRunning || state.CurrentTurnID == "" {
+		t.Fatalf("expected unrelated sibling to keep running, got %+v", state)
+	}
+}
