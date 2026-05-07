@@ -22,8 +22,12 @@ type demoOptions struct {
 	agentID                    string
 	agentIDsCSV                string
 	agentAction                string
+	controlAction              string
 	agentType                  string
 	agentModel                 string
+	teamID                     string
+	taskID                     string
+	dependsOnID                string
 	userID                     string
 	tenantID                   string
 	projectID                  string
@@ -37,6 +41,7 @@ type demoOptions struct {
 	afterSeq                   int64
 	limit                      int
 	waitMs                     int
+	includeDependents          bool
 	stream                     bool
 	forkContext                bool
 	interrupt                  bool
@@ -73,6 +78,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if strings.EqualFold(strings.TrimSpace(opts.mode), "session-agent") {
 		return runSessionAgentDemo(ctx, client, opts, stdout)
 	}
+	if strings.EqualFold(strings.TrimSpace(opts.mode), "agent-control") {
+		return runAgentControlDemo(ctx, client, opts, stdout)
+	}
 
 	req := skillsapi.AgentChatRequest{
 		Messages: []skillsapi.Message{{
@@ -103,7 +111,7 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 	fs := flag.NewFlagSet("skillsapi-demo", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	fs.StringVar(&opts.mode, "mode", "chat", "demo mode: chat or session-agent")
+	fs.StringVar(&opts.mode, "mode", "chat", "demo mode: chat, session-agent, or agent-control")
 	fs.StringVar(&opts.baseURL, "url", "http://127.0.0.1:8101", "skills api base url")
 	fs.StringVar(&opts.message, "message", "", "user message to send")
 	fs.StringVar(&opts.sessionID, "session-id", "", "existing session id")
@@ -111,8 +119,12 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 	fs.StringVar(&opts.agentID, "agent-id", "", "child agent/session id for session-agent mode")
 	fs.StringVar(&opts.agentIDsCSV, "agent-ids", "", "comma-separated child agent/session ids for batch wait")
 	fs.StringVar(&opts.agentAction, "agent-action", "spawn", "session-agent action: spawn, status, input, wait, events, control-mailbox, close, resume")
+	fs.StringVar(&opts.controlAction, "control-action", "tasks", "agent-control action: tasks, dependencies, add-dependency")
 	fs.StringVar(&opts.agentType, "agent-type", "", "child agent type for session-agent spawn")
 	fs.StringVar(&opts.agentModel, "agent-model", "", "child agent model for session-agent spawn")
+	fs.StringVar(&opts.teamID, "team-id", "", "team id for agent-control mode")
+	fs.StringVar(&opts.taskID, "task-id", "", "task id for agent-control mode")
+	fs.StringVar(&opts.dependsOnID, "depends-on-id", "", "dependency task id for agent-control mode")
 	fs.StringVar(&opts.userID, "user-id", "skillsapi-demo", "user id")
 	fs.StringVar(&opts.tenantID, "tenant-id", "", "tenant id")
 	fs.StringVar(&opts.projectID, "project-id", "", "project id")
@@ -126,6 +138,7 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 	fs.Int64Var(&opts.afterSeq, "after-seq", 0, "starting event sequence for session-agent events")
 	fs.IntVar(&opts.limit, "limit", 20, "result limit for session-agent events")
 	fs.IntVar(&opts.waitMs, "wait-ms", 0, "long-poll wait milliseconds for session-agent events")
+	fs.BoolVar(&opts.includeDependents, "include-dependents", false, "include dependent task edges in agent-control dependency reads")
 	fs.BoolVar(&opts.stream, "stream", false, "use streaming mode")
 	fs.BoolVar(&opts.forkContext, "fork-context", false, "copy parent session history when spawning a child agent")
 	fs.BoolVar(&opts.interrupt, "interrupt", false, "interrupt a busy child agent before sending new input")
@@ -172,6 +185,23 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 			}
 		default:
 			return demoOptions{}, fmt.Errorf("unsupported session-agent action: %s", opts.agentAction)
+		}
+	case "agent-control":
+		switch strings.ToLower(strings.TrimSpace(opts.controlAction)) {
+		case "tasks":
+		case "dependencies":
+			if strings.TrimSpace(opts.taskID) == "" {
+				return demoOptions{}, fmt.Errorf("task-id is required for agent-control dependencies")
+			}
+		case "add-dependency":
+			if strings.TrimSpace(opts.taskID) == "" {
+				return demoOptions{}, fmt.Errorf("task-id is required for agent-control add-dependency")
+			}
+			if strings.TrimSpace(opts.dependsOnID) == "" {
+				return demoOptions{}, fmt.Errorf("depends-on-id is required for agent-control add-dependency")
+			}
+		default:
+			return demoOptions{}, fmt.Errorf("unsupported agent-control action: %s", opts.controlAction)
 		}
 	default:
 		return demoOptions{}, fmt.Errorf("unsupported mode: %s", opts.mode)
@@ -260,6 +290,47 @@ func runSessionAgentDemo(ctx context.Context, client *skillsapi.Client, opts dem
 		return printLines(stdout, summarizeSessionAgentStatus(opts.parentSessionID, &resp.Agent))
 	default:
 		return fmt.Errorf("unsupported session-agent action: %s", opts.agentAction)
+	}
+}
+
+func runAgentControlDemo(ctx context.Context, client *skillsapi.Client, opts demoOptions, stdout io.Writer) error {
+	switch strings.ToLower(strings.TrimSpace(opts.controlAction)) {
+	case "tasks":
+		resp, err := client.ListAgentControlTasks(ctx, skillsapi.ListAgentControlTasksParams{
+			Workflow: "spawn_team",
+			TeamID:   opts.teamID,
+			Limit:    opts.limit,
+		})
+		if err != nil {
+			return err
+		}
+		return printLines(stdout, summarizeAgentControlTasks(resp))
+	case "dependencies":
+		resp, err := client.ListAgentControlTaskDependencies(ctx, opts.taskID, skillsapi.ListAgentControlTaskDependenciesParams{
+			Workflow:          "spawn_team",
+			TeamID:            opts.teamID,
+			DependsOnID:       opts.dependsOnID,
+			IncludeDependents: opts.includeDependents,
+		})
+		if err != nil {
+			return err
+		}
+		return printLines(stdout, summarizeAgentControlTaskDependencies(resp))
+	case "add-dependency":
+		resp, err := client.CreateAgentControlTaskDependency(ctx, opts.taskID, skillsapi.CreateAgentControlTaskDependencyRequest{
+			Workflow:    "spawn_team",
+			TeamID:      opts.teamID,
+			DependsOnID: opts.dependsOnID,
+		})
+		if err != nil {
+			return err
+		}
+		return printLines(stdout, []string{
+			"agent_control_dependency_created=true",
+			fmt.Sprintf("task_id=%s depends_on_id=%s", resp.TaskID, resp.DependsOnID),
+		})
+	default:
+		return fmt.Errorf("unsupported agent-control action: %s", opts.controlAction)
 	}
 }
 
@@ -645,6 +716,69 @@ func summarizeSessionAgentControlMailbox(parentSessionID string, result *skillsa
 		}
 		if metadata := compactJSON(message.Metadata); metadata != "" && metadata != "null" {
 			parts = append(parts, "metadata="+metadata)
+		}
+		lines = append(lines, strings.Join(parts, " "))
+	}
+	return lines
+}
+
+func summarizeAgentControlTasks(result *skillsapi.ListAgentControlTasksResponse) []string {
+	if result == nil {
+		return []string{"agent_control_tasks=<nil>"}
+	}
+	lines := []string{
+		fmt.Sprintf("agent_control_tasks count=%d", result.Count),
+	}
+	for _, task := range result.Tasks {
+		parts := []string{
+			"task_id=" + task.ID,
+		}
+		if task.Workflow != "" {
+			parts = append(parts, "workflow="+task.Workflow)
+		}
+		if task.TeamID != "" {
+			parts = append(parts, "team_id="+task.TeamID)
+		}
+		if task.Assignee != "" {
+			parts = append(parts, "assignee="+task.Assignee)
+		}
+		if task.Status != "" {
+			parts = append(parts, "status="+task.Status)
+		}
+		if task.Title != "" {
+			parts = append(parts, "title="+task.Title)
+		}
+		lines = append(lines, strings.Join(parts, " "))
+	}
+	return lines
+}
+
+func summarizeAgentControlTaskDependencies(result *skillsapi.ListAgentControlTaskDependenciesResponse) []string {
+	if result == nil {
+		return []string{"agent_control_dependencies=<nil>"}
+	}
+	lines := []string{
+		fmt.Sprintf("agent_control_dependencies task_id=%s count=%d edge_count=%d", result.TaskID, result.Count, result.EdgeCount),
+	}
+	if len(result.Dependencies) > 0 {
+		lines = append(lines, "dependencies="+strings.Join(result.Dependencies, ","))
+	}
+	if len(result.Dependents) > 0 {
+		lines = append(lines, "dependents="+strings.Join(result.Dependents, ","))
+	}
+	for _, edge := range result.Edges {
+		parts := []string{
+			"edge",
+		}
+		if edge.ID != "" {
+			parts = append(parts, "id="+edge.ID)
+		}
+		parts = append(parts, "task_id="+edge.TaskID, "depends_on_id="+edge.DependsOnID)
+		if edge.Workflow != "" {
+			parts = append(parts, "workflow="+edge.Workflow)
+		}
+		if edge.TeamID != "" {
+			parts = append(parts, "team_id="+edge.TeamID)
 		}
 		lines = append(lines, strings.Join(parts, " "))
 	}

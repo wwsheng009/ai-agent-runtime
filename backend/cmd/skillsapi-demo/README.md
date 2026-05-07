@@ -16,6 +16,11 @@
     - `ListSessionAgentControlMailbox`
     - `CloseSessionAgent`
     - `ResumeSessionAgent`
+- `agent-control`
+  - 调用统一控制面 task graph 入口：
+    - `ListAgentControlTasks`
+    - `ListAgentControlTaskDependencies`
+    - `CreateAgentControlTaskDependency`
 
 ## 构建
 
@@ -182,12 +187,50 @@ go run ./cmd/skillsapi-demo \
   -agent-id <child>
 ```
 
+## Agent-Control 模式
+
+列出统一 task read-model：
+
+```bash
+go run ./cmd/skillsapi-demo \
+  -mode agent-control \
+  -control-action tasks \
+  -url http://127.0.0.1:8101 \
+  -team-id <team> \
+  -limit 20
+```
+
+读取 task dependency graph：
+
+```bash
+go run ./cmd/skillsapi-demo \
+  -mode agent-control \
+  -control-action dependencies \
+  -url http://127.0.0.1:8101 \
+  -team-id <team> \
+  -task-id <task> \
+  -include-dependents
+```
+
+通过 AgentControl task graph seam 写入依赖边：
+
+```bash
+go run ./cmd/skillsapi-demo \
+  -mode agent-control \
+  -control-action add-dependency \
+  -url http://127.0.0.1:8101 \
+  -team-id <team> \
+  -task-id <task> \
+  -depends-on-id <dependency-task>
+```
+
 ## 输出风格
 
 `skillsapi-demo` 默认输出面向终端阅读的摘要，而不是原始 JSON：
 
 - chat 模式输出 `kind/source/output/usage/planning` 等摘要
 - session-agent 模式输出 `parent_session/agent_session/status/output/events` 等摘要
+- agent-control 模式输出 `agent_control_tasks`、`agent_control_dependencies` 或依赖写入摘要
 
 如果你需要 HTTP 字段级契约，请看：
 

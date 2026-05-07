@@ -174,6 +174,16 @@ func TestParseDemoOptions_SessionAgentInputRequiresMessage(t *testing.T) {
 	assert.Contains(t, err.Error(), "message is required for session-agent input")
 }
 
+func TestParseDemoOptions_AgentControlAddDependencyRequiresDependencyID(t *testing.T) {
+	_, err := parseDemoOptions([]string{
+		"-mode", "agent-control",
+		"-control-action", "add-dependency",
+		"-task-id", "task-1",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "depends-on-id is required")
+}
+
 func TestRun_SessionAgentSpawnAutoCreatesParent(t *testing.T) {
 	var requestPaths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -328,6 +338,91 @@ func TestRun_SessionAgentWaitParentMailbox(t *testing.T) {
 	assert.Contains(t, output, "ready=1 pending=0 latest_seq=9 timed_out=false")
 	assert.Contains(t, output, "mailbox_event seq=9 type=mailbox_received session=parent-1")
 	assert.Contains(t, output, "hello parent")
+}
+
+func TestRun_AgentControlTasks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/runtime/agent-control/tasks", r.URL.Path)
+		assert.Equal(t, "limit=5&team_id=team-1&workflow=spawn_team", r.URL.RawQuery)
+		_, _ = io.WriteString(w, `{"tasks":[{"id":"task-1","workflow":"spawn_team","team_id":"team-1","assignee":"member-1","title":"Review docs","status":"running"}],"count":1}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"-mode", "agent-control",
+		"-control-action", "tasks",
+		"-url", server.URL,
+		"-team-id", "team-1",
+		"-limit", "5",
+	}, &stdout, &stderr)
+	require.NoError(t, err)
+
+	output := stdout.String()
+	assert.Contains(t, output, "agent_control_tasks count=1")
+	assert.Contains(t, output, "task_id=task-1 workflow=spawn_team team_id=team-1 assignee=member-1 status=running title=Review docs")
+}
+
+func TestRun_AgentControlDependencies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/dependencies", r.URL.EscapedPath())
+		assert.Equal(t, "depends_on_id=task%2F0&include_dependents=true&team_id=team-1&workflow=spawn_team", r.URL.RawQuery)
+		_, _ = io.WriteString(w, `{"task_id":"task/1","dependencies":["task/0"],"dependents":["task/2"],"edges":[{"id":"dep-1","workflow":"spawn_team","team_id":"team-1","task_id":"task/1","depends_on_id":"task/0"}],"count":1,"edge_count":1}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"-mode", "agent-control",
+		"-control-action", "dependencies",
+		"-url", server.URL,
+		"-team-id", "team-1",
+		"-task-id", "task/1",
+		"-depends-on-id", "task/0",
+		"-include-dependents",
+	}, &stdout, &stderr)
+	require.NoError(t, err)
+
+	output := stdout.String()
+	assert.Contains(t, output, "agent_control_dependencies task_id=task/1 count=1 edge_count=1")
+	assert.Contains(t, output, "dependencies=task/0")
+	assert.Contains(t, output, "dependents=task/2")
+	assert.Contains(t, output, "edge id=dep-1 task_id=task/1 depends_on_id=task/0 workflow=spawn_team team_id=team-1")
+}
+
+func TestRun_AgentControlAddDependency(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1/dependencies", r.URL.EscapedPath())
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), `"depends_on_id":"task/0"`)
+		_, _ = io.WriteString(w, `{"task_id":"task/1","depends_on_id":"task/0"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"-mode", "agent-control",
+		"-control-action", "add-dependency",
+		"-url", server.URL,
+		"-team-id", "team-1",
+		"-task-id", "task/1",
+		"-depends-on-id", "task/0",
+	}, &stdout, &stderr)
+	require.NoError(t, err)
+
+	output := stdout.String()
+	assert.Contains(t, output, "agent_control_dependency_created=true")
+	assert.Contains(t, output, "task_id=task/1 depends_on_id=task/0")
 }
 
 func joinLines(lines []string) string {
