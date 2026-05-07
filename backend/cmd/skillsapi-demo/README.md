@@ -13,6 +13,7 @@
     - `SendSessionAgentInput`
     - `WaitSessionAgents`
     - `ListSessionAgentEvents`
+    - `ListSessionAgentControlMailbox`
     - `CloseSessionAgent`
     - `ResumeSessionAgent`
 
@@ -145,6 +146,19 @@ go run ./cmd/skillsapi-demo \
   -url http://127.0.0.1:8101 \
   -parent-session-id <parent> \
   -agent-id <child> \
+  -after-seq 0 \
+  -limit 20 \
+  -wait-ms 5000
+```
+
+父 session 的 AgentControl mailbox control rows 可通过独立入口读取，不会转换成 `mailbox_received` runtime event:
+
+```bash
+go run ./cmd/skillsapi-demo \
+  -mode session-agent \
+  -agent-action control-mailbox \
+  -url http://127.0.0.1:8101 \
+  -parent-session-id <parent> \
   -after-seq 0 \
   -limit 20 \
   -wait-ms 5000

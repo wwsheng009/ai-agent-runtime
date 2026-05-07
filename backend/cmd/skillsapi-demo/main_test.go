@@ -271,6 +271,35 @@ func TestRun_SessionAgentMailboxEvents(t *testing.T) {
 	assert.Contains(t, output, "hello parent")
 }
 
+func TestRun_SessionAgentControlMailbox(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Equal(t, "/api/runtime/sessions/parent-1/agent-control/mailbox", r.URL.Path)
+		assert.Equal(t, "after_seq=8&limit=3&wait_ms=900", r.URL.RawQuery)
+		_, _ = io.WriteString(w, `{"result":{"session_id":"parent-1","count":1,"latest_seq":9,"source":"agent_control_mailbox","control_only":true,"messages":[{"seq":9,"kind":"agent_message","from_agent":"child-1","to_agent":"parent","body":"control hello","metadata":{"message_type":"agent_control.agent_message"}}]}}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"-mode", "session-agent",
+		"-agent-action", "control-mailbox",
+		"-url", server.URL,
+		"-parent-session-id", "parent-1",
+		"-after-seq", "8",
+		"-limit", "3",
+		"-wait-ms", "900",
+	}, &stdout, &stderr)
+	require.NoError(t, err)
+
+	output := stdout.String()
+	assert.Contains(t, output, "parent_session=parent-1")
+	assert.Contains(t, output, "agent_control_mailbox session=parent-1 count=1 latest_seq=9 timed_out=false source=agent_control_mailbox")
+	assert.Contains(t, output, "control_message seq=9 kind=agent_message from=child-1 to=parent body=control hello")
+	assert.Contains(t, output, "agent_control.agent_message")
+}
+
 func TestRun_SessionAgentWaitParentMailbox(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

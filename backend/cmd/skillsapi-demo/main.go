@@ -110,7 +110,7 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 	fs.StringVar(&opts.parentSessionID, "parent-session-id", "", "parent session id for session-agent mode")
 	fs.StringVar(&opts.agentID, "agent-id", "", "child agent/session id for session-agent mode")
 	fs.StringVar(&opts.agentIDsCSV, "agent-ids", "", "comma-separated child agent/session ids for batch wait")
-	fs.StringVar(&opts.agentAction, "agent-action", "spawn", "session-agent action: spawn, status, input, wait, events, close, resume")
+	fs.StringVar(&opts.agentAction, "agent-action", "spawn", "session-agent action: spawn, status, input, wait, events, control-mailbox, close, resume")
 	fs.StringVar(&opts.agentType, "agent-type", "", "child agent type for session-agent spawn")
 	fs.StringVar(&opts.agentModel, "agent-model", "", "child agent model for session-agent spawn")
 	fs.StringVar(&opts.userID, "user-id", "skillsapi-demo", "user id")
@@ -152,7 +152,7 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 			if strings.TrimSpace(opts.agentID) == "" {
 				return demoOptions{}, fmt.Errorf("agent-id is required")
 			}
-		case "events":
+		case "events", "control-mailbox":
 			if strings.TrimSpace(opts.parentSessionID) == "" {
 				return demoOptions{}, fmt.Errorf("parent-session-id is required")
 			}
@@ -235,6 +235,17 @@ func runSessionAgentDemo(ctx context.Context, client *skillsapi.Client, opts dem
 			return err
 		}
 		return printLines(stdout, summarizeSessionAgentEvents(opts.parentSessionID, &resp.Result))
+	case "control-mailbox":
+		params := skillsapi.ListSessionAgentEventsParams{
+			AfterSeq: opts.afterSeq,
+			Limit:    opts.limit,
+			WaitMs:   opts.waitMs,
+		}
+		resp, err := client.ListSessionAgentControlMailbox(ctx, opts.parentSessionID, params)
+		if err != nil {
+			return err
+		}
+		return printLines(stdout, summarizeSessionAgentControlMailbox(opts.parentSessionID, &resp.Result))
 	case "close":
 		resp, err := client.CloseSessionAgent(ctx, opts.parentSessionID, opts.agentID)
 		if err != nil {
@@ -603,6 +614,39 @@ func summarizeSessionAgentEvents(parentSessionID string, result *skillsapi.Sessi
 	}
 	for _, event := range result.Events {
 		lines = append(lines, formatSessionAgentEvent("event", event))
+	}
+	return lines
+}
+
+func summarizeSessionAgentControlMailbox(parentSessionID string, result *skillsapi.SessionAgentControlMailboxResult) []string {
+	if result == nil {
+		return []string{"control_mailbox_result=<nil>"}
+	}
+
+	lines := []string{
+		fmt.Sprintf("parent_session=%s", strings.TrimSpace(parentSessionID)),
+		fmt.Sprintf("agent_control_mailbox session=%s count=%d latest_seq=%d timed_out=%t source=%s", result.SessionID, result.Count, result.LatestSeq, result.TimedOut, result.Source),
+	}
+	for _, message := range result.Messages {
+		parts := []string{
+			fmt.Sprintf("control_message seq=%d", message.Seq),
+		}
+		if message.Kind != "" {
+			parts = append(parts, "kind="+message.Kind)
+		}
+		if message.FromAgent != "" {
+			parts = append(parts, "from="+message.FromAgent)
+		}
+		if message.ToAgent != "" {
+			parts = append(parts, "to="+message.ToAgent)
+		}
+		if message.Body != "" {
+			parts = append(parts, "body="+message.Body)
+		}
+		if metadata := compactJSON(message.Metadata); metadata != "" && metadata != "null" {
+			parts = append(parts, "metadata="+metadata)
+		}
+		lines = append(lines, strings.Join(parts, " "))
 	}
 	return lines
 }
