@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 func newTestStore(t *testing.T) *SQLiteStore {
@@ -69,6 +70,44 @@ func (s *notifyingClaimStore) LastTaskSignalSeq(ctx context.Context, teamID stri
 		return sequencer.LastTaskSignalSeq(ctx, teamID)
 	}
 	return 0, nil
+}
+
+type testAgentControlTaskWakeSource struct {
+	events chan agentcontrol.TaskWakeEvent
+	mu     sync.Mutex
+	seq    int64
+}
+
+func newTestAgentControlTaskWakeSource() *testAgentControlTaskWakeSource {
+	return &testAgentControlTaskWakeSource{
+		events: make(chan agentcontrol.TaskWakeEvent, 1),
+	}
+}
+
+func (s *testAgentControlTaskWakeSource) WatchAgentControlTaskWake(ctx context.Context, filter agentcontrol.TaskWakeFilter) (<-chan agentcontrol.TaskWakeEvent, func()) {
+	return s.events, func() {}
+}
+
+func (s *testAgentControlTaskWakeSource) LastAgentControlTaskWakeSeq(ctx context.Context, filter agentcontrol.TaskWakeFilter) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seq, nil
+}
+
+func (s *testAgentControlTaskWakeSource) Wake(teamID, taskID string) {
+	s.mu.Lock()
+	s.seq++
+	seq := s.seq
+	s.mu.Unlock()
+	s.events <- agentcontrol.TaskWakeEvent{
+		Seq:       seq,
+		Workflow:  agentcontrol.WorkflowSpawnTeam,
+		TeamID:    teamID,
+		TaskID:    taskID,
+		Kind:      "test.wake",
+		Status:    string(TaskStatusReady),
+		CreatedAt: time.Now().UTC(),
+	}
 }
 
 func TestOrchestratorClaimReadyTasksHonorsMaxWriters(t *testing.T) {
@@ -407,6 +446,64 @@ func TestOrchestratorRunWakesFromTaskSignalBeforeFallbackTick(t *testing.T) {
 		t.Fatalf("orchestrator exited before task signal wake task was claimed: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("orchestrator did not claim task signal wake task before fallback tick")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("orchestrator did not stop after context cancellation")
+	}
+}
+
+func TestOrchestratorRunUsesAgentControlTaskWakeSourceBeforeFallbackTick(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
+	require.NoError(t, err)
+	assignee := "mate-b"
+	_, err = store.CreateTask(ctx, Task{
+		TeamID:   teamID,
+		Title:    "already running task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
+	})
+	require.NoError(t, err)
+
+	claimStore := newNotifyingClaimStore(store)
+	wakeSource := newTestAgentControlTaskWakeSource()
+	orchestrator := NewOrchestrator(claimStore, nil, nil)
+	orchestrator.TaskWake = wakeSource
+	orchestrator.TickInterval = time.Hour
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- orchestrator.Run(runCtx, teamID)
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "agent-control wake task",
+		Status: TaskStatusReady,
+	})
+	require.NoError(t, err)
+	wakeSource.Wake(teamID, taskID)
+
+	select {
+	case <-claimStore.claimed:
+	case err := <-errCh:
+		t.Fatalf("orchestrator exited before AgentControl wake task was claimed: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("orchestrator did not claim AgentControl wake task before fallback tick")
 	}
 
 	cancel()

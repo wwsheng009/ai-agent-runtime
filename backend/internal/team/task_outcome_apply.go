@@ -2,10 +2,11 @@ package team
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 // TaskOutcomeApplyServices groups shared collaborators used to apply task outcomes.
@@ -109,25 +110,21 @@ func ApplyTerminalTaskOutcome(ctx context.Context, services TaskOutcomeApplyServ
 		teammateID = strings.TrimSpace(*req.Task.Assignee)
 	}
 
-	if sqliteStore, ok := services.Store.(*SQLiteStore); ok {
-		return applyTerminalTaskOutcomeSQLite(ctx, sqliteStore, services, req, normalized, status, summary, resultRef, teammateID)
-	}
-
-	updatedTask := req.Task
-	updatedTask.Status = status
-	updatedTask.Summary = summary
-	updatedTask.ResultRef = resultRef
-	if err := services.Store.UpdateTask(ctx, updatedTask); err != nil {
-		return nil, err
-	}
-	if err := services.Store.ReleaseTask(ctx, taskID, status); err != nil {
+	taskWriter := NewAgentControlTaskRegistry(services.Store)
+	if _, err := taskWriter.UpdateAgentControlTaskTerminal(ctx, agentcontrol.TaskTerminalUpdateRequest{
+		ID:              taskID,
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		TeamID:          req.Task.TeamID,
+		Status:          string(status),
+		Summary:         summary,
+		ResultRef:       resultRef,
+		TeammateID:      teammateID,
+		SkipStateUpdate: req.SkipStateUpdate,
+	}); err != nil {
 		return nil, err
 	}
 	if services.Claims != nil {
 		_ = services.Claims.Release(ctx, taskID)
-	}
-	if teammateID != "" && !req.SkipStateUpdate {
-		_ = services.Store.UpdateTeammateState(ctx, teammateID, TeammateStateIdle)
 	}
 
 	result := &TerminalTaskOutcomeResult{
@@ -143,85 +140,10 @@ func ApplyTerminalTaskOutcome(ctx context.Context, services TaskOutcomeApplyServ
 	if current != nil {
 		result.Task = *current
 	} else {
-		updatedTask.Assignee = nil
-		updatedTask.LeaseUntil = nil
-		result.Task = updatedTask
-	}
-	emitTerminalTaskOutcomeEvent(ctx, services, result, teammateID, req)
-	return result, nil
-}
-
-func applyTerminalTaskOutcomeSQLite(
-	ctx context.Context,
-	store *SQLiteStore,
-	services TaskOutcomeApplyServices,
-	req TerminalTaskOutcomeRequest,
-	normalized TaskOutcomeContract,
-	status TaskStatus,
-	summary string,
-	resultRef *string,
-	teammateID string,
-) (*TerminalTaskOutcomeResult, error) {
-	taskID := strings.TrimSpace(req.Task.ID)
-	updatedTask := req.Task
-	updatedTask.Status = status
-	updatedTask.Summary = summary
-	updatedTask.ResultRef = resultRef
-
-	var err error
-	for attempt := 0; attempt < 8; attempt++ {
-		err = store.WithImmediateTx(ctx, func(tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE team_tasks
-				SET status = ?, summary = ?, result_ref = ?, assignee = NULL, lease_until = NULL, updated_at = ?
-				WHERE id = ?
-			`, string(status), summary, nullableString(resultRef), formatTime(time.Now().UTC()), taskID); err != nil {
-				return fmt.Errorf("update task: %w", err)
-			}
-			if teammateID != "" && !req.SkipStateUpdate {
-				if _, err := tx.ExecContext(ctx, `
-					UPDATE teammates SET state = ?, updated_at = ? WHERE id = ?
-				`, string(TeammateStateIdle), formatTime(time.Now().UTC()), teammateID); err != nil {
-					return fmt.Errorf("update teammate state: %w", err)
-				}
-			}
-			return nil
-		})
-		if err == nil || !IsSQLiteLockError(err) {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * 10 * time.Millisecond):
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-	if services.Claims != nil {
-		_ = services.Claims.Release(ctx, taskID)
-	}
-	_ = store.appendTaskSignal(ctx, TaskSignal{
-		TeamID: req.Task.TeamID,
-		TaskID: taskID,
-		Kind:   TaskSignalTaskReleased,
-		Status: status,
-	})
-
-	result := &TerminalTaskOutcomeResult{
-		Outcome:   normalized,
-		Status:    status,
-		Summary:   summary,
-		ResultRef: resultRef,
-	}
-	current, err := services.Store.GetTask(ctx, taskID)
-	if err != nil {
-		return nil, err
-	}
-	if current != nil {
-		result.Task = *current
-	} else {
+		updatedTask := req.Task
+		updatedTask.Status = status
+		updatedTask.Summary = summary
+		updatedTask.ResultRef = resultRef
 		updatedTask.Assignee = nil
 		updatedTask.LeaseUntil = nil
 		result.Task = updatedTask
@@ -382,14 +304,18 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 	}
 	handoffTo := strings.TrimSpace(normalized.HandoffTo)
 
-	if err := services.Store.BlockTask(ctx, taskID, summary); err != nil {
+	taskWriter := NewAgentControlTaskRegistry(services.Store)
+	if _, err := taskWriter.BlockAgentControlTask(ctx, agentcontrol.TaskBlockRequest{
+		ID:              taskID,
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		Summary:         summary,
+		TeammateID:      teammateID,
+		SkipStateUpdate: req.SkipStateUpdate,
+	}); err != nil {
 		return nil, err
 	}
 	if services.Claims != nil {
 		_ = services.Claims.Release(ctx, taskID)
-	}
-	if teammateID != "" && !req.SkipStateUpdate {
-		_ = services.Store.UpdateTeammateState(ctx, teammateID, TeammateStateBlocked)
 	}
 
 	result := &BlockedTaskOutcomeResult{

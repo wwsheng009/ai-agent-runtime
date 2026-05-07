@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
@@ -20,6 +21,7 @@ type Orchestrator struct {
 	LeadPlanner   *LeadPlanner
 	Mailbox       *MailboxService
 	Events        *TeamEventBus
+	TaskWake      agentcontrol.TaskWakeSource
 	LeaseDuration time.Duration
 	TickInterval  time.Duration
 	Clock         func() time.Time
@@ -60,21 +62,23 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 	defer ticker.Stop()
 
 	var (
-		mailWake          <-chan MailMessage
-		unwatchMail       func()
-		lastMailSeq       int64
-		taskSignalWake    <-chan TaskSignal
-		unwatchTask       func()
-		lastTaskSignalSeq int64
+		mailWake        <-chan MailMessage
+		unwatchMail     func()
+		lastMailSeq     int64
+		taskWake        <-chan agentcontrol.TaskWakeEvent
+		unwatchTaskWake func()
+		lastTaskWakeSeq int64
 	)
 	if watcher, ok := o.Store.(MailWatcherStore); ok {
 		mailWake, unwatchMail = watcher.WatchMail(ctx, teamID)
 		defer unwatchMail()
 	}
-	if watcher, ok := o.Store.(TaskWatcherStore); ok {
-		taskSignalWake, unwatchTask = watcher.WatchTaskSignals(ctx, teamID)
-		defer unwatchTask()
-	}
+	taskWakeRegistry := o.agentControlTaskWakeSource()
+	taskWake, unwatchTaskWake = taskWakeRegistry.WatchAgentControlTaskWake(ctx, agentcontrol.TaskWakeFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	defer unwatchTaskWake()
 	initialSeq, err := o.lastMailboxSeq(ctx, teamID)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -86,7 +90,7 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 	} else {
 		lastMailSeq = initialSeq
 	}
-	initialTaskSeq, err := o.lastTaskSignalSeq(ctx, teamID)
+	initialTaskSeq, err := o.lastAgentControlTaskWakeSeq(ctx, teamID)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -95,7 +99,7 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 			return err
 		}
 	} else {
-		lastTaskSignalSeq = initialTaskSeq
+		lastTaskWakeSeq = initialTaskSeq
 	}
 
 	for {
@@ -149,8 +153,8 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 				continue
 			}
 			lastMailSeq = nextSeq
-		case <-taskSignalWake:
-			nextSeq, err := o.lastTaskSignalSeq(ctx, teamID)
+		case <-taskWake:
+			nextSeq, err := o.lastAgentControlTaskWakeSeq(ctx, teamID)
 			if err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
@@ -160,10 +164,10 @@ func (o *Orchestrator) RunWithWake(ctx context.Context, teamID string, wake <-ch
 				}
 				continue
 			}
-			if nextSeq <= lastTaskSignalSeq {
+			if nextSeq <= lastTaskWakeSeq {
 				continue
 			}
-			lastTaskSignalSeq = nextSeq
+			lastTaskWakeSeq = nextSeq
 		}
 	}
 }
@@ -189,14 +193,24 @@ func (o *Orchestrator) lastMailboxSeq(ctx context.Context, teamID string) (int64
 	return messages[0].Seq, nil
 }
 
-func (o *Orchestrator) lastTaskSignalSeq(ctx context.Context, teamID string) (int64, error) {
+func (o *Orchestrator) lastAgentControlTaskWakeSeq(ctx context.Context, teamID string) (int64, error) {
 	if o == nil || o.Store == nil {
 		return 0, nil
 	}
-	if store, ok := o.Store.(TaskSequenceStore); ok {
-		return store.LastTaskSignalSeq(ctx, teamID)
+	return o.agentControlTaskWakeSource().LastAgentControlTaskWakeSeq(ctx, agentcontrol.TaskWakeFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+}
+
+func (o *Orchestrator) agentControlTaskWakeSource() agentcontrol.TaskWakeSource {
+	if o != nil && o.TaskWake != nil {
+		return o.TaskWake
 	}
-	return 0, nil
+	if o == nil {
+		return NewAgentControlTaskRegistry(nil)
+	}
+	return NewAgentControlTaskRegistry(o.Store)
 }
 
 // ClaimReadyTasks assigns and claims ready tasks, returning accepted assignments.
@@ -303,6 +317,7 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 
 	assignments := make([]Assignment, 0, len(readyTasks))
 	assignedTeammates := make(map[string]bool)
+	taskClaimWriter := NewAgentControlTaskRegistry(o.Store)
 
 	pinned := make([]Task, 0)
 	unassigned := make([]Task, 0)
@@ -326,20 +341,25 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 
 	claimAssignment := func(task Task, mate Teammate) bool {
 		leaseUntil := time.Now().UTC().Add(leaseDuration)
-		usedAtomicClaim := false
-		if o.Claims != nil {
-			claimed, err := o.Store.ClaimTaskWithPathClaims(ctx, task, mate.ID, leaseUntil, o.Claims.root)
-			if err != nil || !claimed {
-				return false
-			}
-			usedAtomicClaim = true
-		} else {
-			claimed, err := o.Store.ClaimTask(ctx, task.ID, mate.ID, leaseUntil, task.Version)
-			if err != nil || !claimed {
-				return false
-			}
+		claimRequest := agentcontrol.TaskClaimRequest{
+			ID:              task.ID,
+			Workflow:        agentcontrol.WorkflowSpawnTeam,
+			TeamID:          task.TeamID,
+			Assignee:        mate.ID,
+			LeaseUntil:      leaseUntil,
+			ExpectedVersion: task.Version,
 		}
-		if !usedAtomicClaim {
+		if o.Claims != nil {
+			claimRequest.UsePathClaims = true
+			claimRequest.WorkspaceRoot = o.Claims.root
+			claimRequest.ReadPaths = task.ReadPaths
+			claimRequest.WritePaths = task.WritePaths
+		}
+		_, claimed, err := taskClaimWriter.ClaimAgentControlTask(ctx, claimRequest)
+		if err != nil || !claimed {
+			return false
+		}
+		if !claimRequest.UsePathClaims {
 			_ = o.Store.UpdateTeammateState(ctx, mate.ID, TeammateStateBusy)
 		}
 		assignments = append(assignments, Assignment{Task: task, Teammate: mate})

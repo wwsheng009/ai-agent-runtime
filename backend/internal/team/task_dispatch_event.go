@@ -2,9 +2,12 @@ package team
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 const (
@@ -13,14 +16,17 @@ const (
 	TaskDispatchRequestedEvent = "task.dispatch.requested"
 	// TaskDispatchCompletedEvent records the submit result for a teammate task.
 	TaskDispatchCompletedEvent             = "task.dispatch.completed"
-	TaskAssignmentMailboxKind              = "team.task_assignment"
-	TaskAssignmentControlMessageType       = "agent_control.task_assignment"
-	TaskAssignmentControlAction            = "task.assign"
-	TaskAssignmentWorkflow                 = "spawn_team"
-	TeamLifecycleMailboxKind               = "team.lifecycle"
-	TeamLifecycleControlMessageType        = "agent_control.team_lifecycle"
-	taskDispatchViaAgentControl            = "agent_control.trigger_task"
-	taskDispatchMailboxDeliveryAgentSubstr = "session_mailbox"
+	TaskAssignmentMailboxKind              = agentcontrol.MailboxKindTeamTaskAssignment
+	TaskAssignmentControlMessageType       = agentcontrol.MessageTypeTeamTaskAssignment
+	TaskAssignmentControlAction            = agentcontrol.ActionTaskAssign
+	TaskAssignmentWorkflow                 = agentcontrol.WorkflowSpawnTeam
+	TaskLifecycleMailboxKind               = agentcontrol.MailboxKindTeamTaskLifecycle
+	TaskLifecycleControlMessageType        = agentcontrol.MessageTypeTeamTaskLifecycle
+	TaskLifecycleControlAction             = agentcontrol.ActionTaskLifecycle
+	TeamLifecycleMailboxKind               = agentcontrol.MailboxKindTeamLifecycle
+	TeamLifecycleControlMessageType        = agentcontrol.MessageTypeTeamLifecycle
+	taskDispatchViaAgentControl            = agentcontrol.ViaTriggerTask
+	taskDispatchMailboxDeliveryAgentSubstr = agentcontrol.DeliverySessionMailbox
 )
 
 // AppendTaskDispatchRequested persists an audit event for a teammate task
@@ -48,12 +54,13 @@ func BuildTaskAssignmentMailboxMessage(request TaskTriggerRequest) MailMessage {
 	if taskID != "" {
 		body = "Team task " + taskID + " assigned."
 	}
-	metadata := taskDispatchPayload(request)
-	metadata["message_type"] = TaskAssignmentControlMessageType
-	metadata["control_action"] = TaskAssignmentControlAction
-	metadata["workflow"] = TaskAssignmentWorkflow
-	metadata["mailbox_delivery"] = taskDispatchMailboxDeliveryAgentSubstr
-	metadata["mailbox_kind"] = TaskAssignmentMailboxKind
+	metadata := agentcontrol.ApplyEnvelope(taskDispatchPayload(request), agentcontrol.Envelope{
+		MessageType:     TaskAssignmentControlMessageType,
+		ControlAction:   TaskAssignmentControlAction,
+		Workflow:        TaskAssignmentWorkflow,
+		MailboxDelivery: taskDispatchMailboxDeliveryAgentSubstr,
+		MailboxKind:     TaskAssignmentMailboxKind,
+	})
 	metadata["target_session_id"] = strings.TrimSpace(request.SessionID)
 	if prompt := truncateLine(request.Prompt, 240); prompt != "" {
 		metadata["prompt_preview"] = prompt
@@ -75,18 +82,80 @@ func BuildTaskAssignmentMailboxMessage(request TaskTriggerRequest) MailMessage {
 	}
 }
 
+// BuildTaskLifecycleMailboxMessage creates a durable mailbox envelope for the
+// teammate session that owns a task lifecycle transition.
+func BuildTaskLifecycleMailboxMessage(event TeamEvent) MailMessage {
+	eventType := strings.TrimSpace(event.Type)
+	teamID := strings.TrimSpace(event.TeamID)
+	taskID := teamEventPayloadString(event.Payload["task_id"])
+	assignee := teamEventPayloadString(event.Payload["assignee"])
+	metadata := agentcontrol.Envelope{
+		MessageType:     TaskLifecycleControlMessageType,
+		ControlAction:   TaskLifecycleControlAction,
+		Workflow:        TaskAssignmentWorkflow,
+		MailboxDelivery: taskDispatchMailboxDeliveryAgentSubstr,
+		MailboxKind:     TaskLifecycleMailboxKind,
+	}.Metadata()
+	for key, value := range map[string]interface{}{
+		"event_type": eventType,
+		"team_id":    teamID,
+		"task_id":    taskID,
+		"assignee":   assignee,
+	} {
+		if strings.TrimSpace(fmt.Sprint(value)) != "" {
+			metadata[key] = value
+		}
+	}
+	for key, value := range event.Payload {
+		if _, exists := metadata[key]; !exists {
+			metadata[key] = value
+		}
+	}
+	body := "Team task lifecycle event."
+	if taskID != "" {
+		body = "Team task " + taskID + " " + taskLifecycleEventVerb(eventType) + "."
+	}
+	if summary := teamEventPayloadString(event.Payload["summary"]); summary != "" {
+		body = truncateLine(summary, 240)
+	}
+	var taskIDPtr *string
+	if taskID != "" {
+		taskIDValue := taskID
+		taskIDPtr = &taskIDValue
+	}
+	createdAt := event.Timestamp
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	return MailMessage{
+		TeamID:    teamID,
+		FromAgent: "team-orchestrator",
+		ToAgent:   firstNonEmptyString(assignee, "teammate"),
+		TaskID:    taskIDPtr,
+		Kind:      TaskLifecycleMailboxKind,
+		Body:      body,
+		Metadata:  metadata,
+		CreatedAt: createdAt,
+	}
+}
+
 // BuildTeamLifecycleMailboxMessage creates a durable mailbox envelope for a
 // terminal team lifecycle event delivered to a parent/lead session.
 func BuildTeamLifecycleMailboxMessage(event TeamEvent) MailMessage {
 	eventType := strings.TrimSpace(event.Type)
 	teamID := strings.TrimSpace(event.TeamID)
-	metadata := map[string]interface{}{
-		"message_type":     TeamLifecycleControlMessageType,
-		"workflow":         TaskAssignmentWorkflow,
-		"mailbox_delivery": taskDispatchMailboxDeliveryAgentSubstr,
-		"mailbox_kind":     TeamLifecycleMailboxKind,
-		"event_type":       eventType,
-		"team_id":          teamID,
+	metadata := agentcontrol.Envelope{
+		MessageType:     TeamLifecycleControlMessageType,
+		ControlAction:   agentcontrol.ActionTeamLifecycle,
+		Workflow:        TaskAssignmentWorkflow,
+		MailboxDelivery: taskDispatchMailboxDeliveryAgentSubstr,
+		MailboxKind:     TeamLifecycleMailboxKind,
+	}.Metadata()
+	for key, value := range map[string]interface{}{
+		"event_type": eventType,
+		"team_id":    teamID,
+	} {
+		metadata[key] = value
 	}
 	for key, value := range event.Payload {
 		if _, exists := metadata[key]; !exists {
@@ -118,6 +187,17 @@ func BuildTeamLifecycleMailboxMessage(event TeamEvent) MailMessage {
 		Body:      body,
 		Metadata:  metadata,
 		CreatedAt: createdAt,
+	}
+}
+
+func taskLifecycleEventVerb(eventType string) string {
+	switch strings.TrimSpace(eventType) {
+	case "task.completed":
+		return "completed"
+	case "task.failed":
+		return "failed"
+	default:
+		return "updated"
 	}
 }
 
