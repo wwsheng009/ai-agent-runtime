@@ -9,8 +9,8 @@ import (
 // MailboxWakeFilter identifies the workflow-scoped mailbox wake stream a
 // scheduler or orchestrator wants to consume.
 type MailboxWakeFilter struct {
-	Workflow string
-	TeamID   string
+	Workflow  string
+	TeamID    string
 	SessionID string
 }
 

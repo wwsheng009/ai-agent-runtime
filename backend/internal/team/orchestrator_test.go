@@ -110,6 +110,43 @@ func (s *testAgentControlTaskWakeSource) Wake(teamID, taskID string) {
 	}
 }
 
+type testAgentControlMailboxWakeSource struct {
+	events chan agentcontrol.MailboxWakeEvent
+	mu     sync.Mutex
+	seq    int64
+}
+
+func newTestAgentControlMailboxWakeSource() *testAgentControlMailboxWakeSource {
+	return &testAgentControlMailboxWakeSource{
+		events: make(chan agentcontrol.MailboxWakeEvent, 1),
+	}
+}
+
+func (s *testAgentControlMailboxWakeSource) WatchAgentControlMailboxWake(ctx context.Context, filter agentcontrol.MailboxWakeFilter) (<-chan agentcontrol.MailboxWakeEvent, func()) {
+	return s.events, func() {}
+}
+
+func (s *testAgentControlMailboxWakeSource) LastAgentControlMailboxWakeSeq(ctx context.Context, filter agentcontrol.MailboxWakeFilter) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seq, nil
+}
+
+func (s *testAgentControlMailboxWakeSource) Wake(teamID string) {
+	s.mu.Lock()
+	s.seq++
+	seq := s.seq
+	s.mu.Unlock()
+	s.events <- agentcontrol.MailboxWakeEvent{
+		Seq:       seq,
+		Workflow:  agentcontrol.WorkflowSpawnTeam,
+		TeamID:    teamID,
+		MessageID: "test-mailbox-wake",
+		Kind:      "test.wake",
+		CreatedAt: time.Now().UTC(),
+	}
+}
+
 func TestOrchestratorClaimReadyTasksHonorsMaxWriters(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -391,6 +428,64 @@ func TestOrchestratorRunWakesFromMailboxSequenceBeforeFallbackTick(t *testing.T)
 		t.Fatalf("orchestrator exited before mailbox wake task was claimed: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("orchestrator did not claim mailbox wake task before fallback tick")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("orchestrator did not stop after context cancellation")
+	}
+}
+
+func TestOrchestratorRunUsesAgentControlMailboxWakeSourceBeforeFallbackTick(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
+	require.NoError(t, err)
+	assignee := "mate-b"
+	_, err = store.CreateTask(ctx, Task{
+		TeamID:   teamID,
+		Title:    "already running task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
+	})
+	require.NoError(t, err)
+
+	claimStore := newNotifyingClaimStore(store)
+	wakeSource := newTestAgentControlMailboxWakeSource()
+	orchestrator := NewOrchestrator(claimStore, nil, nil)
+	orchestrator.MailboxWake = wakeSource
+	orchestrator.TickInterval = time.Hour
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- orchestrator.Run(runCtx, teamID)
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	_, err = store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "agent-control mailbox wake task",
+		Status: TaskStatusReady,
+	})
+	require.NoError(t, err)
+	wakeSource.Wake(teamID)
+
+	select {
+	case <-claimStore.claimed:
+	case err := <-errCh:
+		t.Fatalf("orchestrator exited before AgentControl mailbox wake task was claimed: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("orchestrator did not claim AgentControl mailbox wake task before fallback tick")
 	}
 
 	cancel()
