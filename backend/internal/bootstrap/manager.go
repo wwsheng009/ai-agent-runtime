@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -162,8 +163,8 @@ func (m *Manager) buildLLMRuntime(gatewayProviderName string) (*llm.LLMRuntime, 
 		DefaultProvider: m.config.Agent.DefaultProvider,
 		DefaultModel:    defaultModel,
 		DefaultTimeout:  m.config.Agent.Timeout,
-		MaxRetries:      3,
 	}
+	llmConfig.MaxRetries, llmConfig.RetryTuning, llmConfig.RetryRules = runtimeRetryConfigFromProviderConfigs(m.providerConfigs)
 
 	if m.resourceManager != nil && len(m.providerConfigs) == 0 {
 		if strings.TrimSpace(llmConfig.DefaultProvider) == "" {
@@ -324,7 +325,34 @@ func (m *Manager) ReloadProviderConfigs(providerConfigs map[string]*llm.Provider
 	}
 
 	m.providerConfigs = nextConfigs
+	maxRetries, retryTuning, retryRules := runtimeRetryConfigFromProviderConfigs(nextConfigs)
+	m.llmRuntime.UpdateRetryConfig(maxRetries, retryTuning, retryRules)
 	return nil
+}
+
+func runtimeRetryConfigFromProviderConfigs(providerConfigs map[string]*llm.ProviderConfig) (int, llm.RetryTuning, []llm.RetryRule) {
+	if len(providerConfigs) == 0 {
+		return 3, llm.RetryTuning{}, nil
+	}
+
+	names := make([]string, 0, len(providerConfigs))
+	for name := range providerConfigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		providerConfig := providerConfigs[name]
+		if providerConfig == nil {
+			continue
+		}
+		maxRetries := providerConfig.MaxRetries
+		if maxRetries <= 0 {
+			maxRetries = 3
+		}
+		return maxRetries, providerConfig.RetryTuning, cloneRetryRules(providerConfig.RetryRules)
+	}
+	return 3, llm.RetryTuning{}, nil
 }
 
 func collectProviderAliases(providerConfig *llm.ProviderConfig, provider llm.ModelCatalogProvider) []string {
@@ -389,10 +417,29 @@ func cloneProviderConfig(input *llm.ProviderConfig) *llm.ProviderConfig {
 	if len(input.HeaderMappingRules) > 0 {
 		cloned.HeaderMappingRules = cloneHeaderMappingRules(input.HeaderMappingRules)
 	}
+	if len(input.RetryRules) > 0 {
+		cloned.RetryRules = cloneRetryRules(input.RetryRules)
+	}
 	if input.Proxy != nil {
 		cloned.Proxy = input.Proxy.Clone()
 	}
 	return &cloned
+}
+
+func cloneRetryRules(input []llm.RetryRule) []llm.RetryRule {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make([]llm.RetryRule, len(input))
+	for i, rule := range input {
+		cloned := rule
+		cloned.Keyword.Values = append([]string(nil), rule.Keyword.Values...)
+		cloned.Keyword.Patterns = append([]string(nil), rule.Keyword.Patterns...)
+		cloned.ErrorCode.Codes = append([]string(nil), rule.ErrorCode.Codes...)
+		cloned.StatusCode.Codes = append([]int(nil), rule.StatusCode.Codes...)
+		output[i] = cloned
+	}
+	return output
 }
 
 func cloneStringMap(input map[string]string) map[string]string {

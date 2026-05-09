@@ -124,6 +124,46 @@ func (p *debugFlakyProvider) GetCapabilities() *ModelCapabilities {
 
 func (p *debugFlakyProvider) CheckHealth(ctx context.Context) error { return nil }
 
+type streamSequenceProvider struct {
+	name       string
+	streams    [][]StreamChunk
+	streamErrs []error
+	calls      int
+}
+
+func (p *streamSequenceProvider) Name() string { return p.name }
+
+func (p *streamSequenceProvider) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
+	return &LLMResponse{Content: "provider:" + p.name, Model: req.Model}, nil
+}
+
+func (p *streamSequenceProvider) Stream(ctx context.Context, req *LLMRequest) (<-chan StreamChunk, error) {
+	p.calls++
+	index := p.calls - 1
+	if index < len(p.streamErrs) && p.streamErrs[index] != nil {
+		return nil, p.streamErrs[index]
+	}
+
+	var chunks []StreamChunk
+	if index < len(p.streams) {
+		chunks = p.streams[index]
+	}
+	ch := make(chan StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		ch <- chunk
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (p *streamSequenceProvider) CountTokens(text string) int { return len(text) }
+
+func (p *streamSequenceProvider) GetCapabilities() *ModelCapabilities {
+	return &ModelCapabilities{SupportsStreaming: true}
+}
+
+func (p *streamSequenceProvider) CheckHealth(ctx context.Context) error { return nil }
+
 func TestLLMRuntime_Call_UsesExplicitProviderAndPreservesModel(t *testing.T) {
 	runtime := NewLLMRuntime(&RuntimeConfig{
 		DefaultProvider: "provider-a",
@@ -358,6 +398,176 @@ func TestLLMRuntime_RegisterGatewayClient(t *testing.T) {
 	assert.Equal(t, "http_5xx_retry", gatewayProvider.retryRules[0].Name)
 	assert.Equal(t, 4, gatewayProvider.retryRules[0].MaxRetries)
 	assert.Contains(t, runtime.ListProviders(), "gateway-default")
+}
+
+func TestLLMRuntime_Stream_RetriesErrorChunkBeforeText(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      2,
+		RetryTuning: RetryTuning{
+			BaseDelay: time.Millisecond,
+		},
+	})
+	provider := &streamSequenceProvider{
+		name: "provider-a",
+		streams: [][]StreamChunk{
+			{
+				{Type: EventTypeError, Error: "HTTP 503: temporary upstream failure", Done: true},
+			},
+			{
+				{Type: EventTypeText, Content: "hello"},
+				{Type: EventTypeDone, Done: true},
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	stream, err := runtime.Stream(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+
+	var chunks []StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+
+	require.Len(t, chunks, 2)
+	assert.Equal(t, EventTypeText, chunks[0].Type)
+	assert.Equal(t, "hello", chunks[0].Content)
+	assert.Equal(t, EventTypeDone, chunks[1].Type)
+	assert.Equal(t, 2, provider.calls)
+}
+
+func TestLLMRuntime_Stream_DoesNotRetryAfterText(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      2,
+		RetryTuning: RetryTuning{
+			BaseDelay: time.Millisecond,
+		},
+	})
+	provider := &streamSequenceProvider{
+		name: "provider-a",
+		streams: [][]StreamChunk{
+			{
+				{Type: EventTypeText, Content: "partial"},
+				{Type: EventTypeError, Error: "HTTP 503: temporary upstream failure", Done: true},
+			},
+			{
+				{Type: EventTypeText, Content: "should-not-run"},
+				{Type: EventTypeDone, Done: true},
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	stream, err := runtime.Stream(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+
+	var chunks []StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+
+	require.Len(t, chunks, 2)
+	assert.Equal(t, EventTypeText, chunks[0].Type)
+	assert.Equal(t, "partial", chunks[0].Content)
+	assert.Equal(t, EventTypeError, chunks[1].Type)
+	assert.Equal(t, 1, provider.calls)
+}
+
+func TestLLMRuntime_Stream_UsesConfiguredRetryRules(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      1,
+		RetryTuning: RetryTuning{
+			BaseDelay: time.Millisecond,
+		},
+		RetryRules: []RetryRule{
+			{
+				Name:       "configured_stream_retry",
+				Enabled:    true,
+				MaxRetries: 2,
+				Keyword: RetryKeywordMatcher{
+					Values: []string{"retry_me"},
+				},
+			},
+		},
+	})
+	provider := &streamSequenceProvider{
+		name: "provider-a",
+		streams: [][]StreamChunk{
+			{
+				{Type: EventTypeError, Error: "retry_me: transient stream failure", Done: true},
+			},
+			{
+				{Type: EventTypeText, Content: "recovered"},
+				{Type: EventTypeDone, Done: true},
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	stream, err := runtime.Stream(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+
+	var content string
+	for chunk := range stream {
+		if chunk.Type == EventTypeText {
+			content += chunk.Content
+		}
+	}
+
+	assert.Equal(t, "recovered", content)
+	assert.Equal(t, 2, provider.calls)
+}
+
+func TestLLMRuntime_Stream_RetriesImmediateProviderError(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5.4-mini",
+		MaxRetries:      2,
+		RetryTuning: RetryTuning{
+			BaseDelay: time.Millisecond,
+		},
+	})
+	provider := &streamSequenceProvider{
+		name: "provider-a",
+		streamErrs: []error{
+			fmt.Errorf("HTTP 503: temporary upstream failure"),
+		},
+		streams: [][]StreamChunk{
+			nil,
+			{
+				{Type: EventTypeText, Content: "after-immediate-error"},
+				{Type: EventTypeDone, Done: true},
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	stream, err := runtime.Stream(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+
+	var content string
+	for chunk := range stream {
+		if chunk.Type == EventTypeText {
+			content += chunk.Content
+		}
+	}
+
+	assert.Equal(t, "after-immediate-error", content)
+	assert.Equal(t, 2, provider.calls)
 }
 
 func TestLLMRuntime_ReplaceProviderRegistrationResetsAliases(t *testing.T) {

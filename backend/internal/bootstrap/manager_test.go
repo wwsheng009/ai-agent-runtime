@@ -183,6 +183,50 @@ func TestManager_NewManager_WiresDefaultProvider(t *testing.T) {
 	assert.Equal(t, "real-model", manager.LLMRuntime().DefaultModel())
 }
 
+func TestManager_NewManager_WiresRuntimeRetryConfigFromProviderConfig(t *testing.T) {
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Agent.DefaultProvider = "openai-test"
+	cfg.Agent.DefaultModel = "real-model"
+	cfg.HotReload.Enabled = false
+
+	manager, err := NewManager(&Options{
+		Config: cfg,
+		ProviderConfigs: map[string]*llm.ProviderConfig{
+			"openai-test": {
+				Type:         "openai",
+				BaseURL:      "http://127.0.0.1",
+				DefaultModel: "real-model",
+				MaxRetries:   6,
+				RetryTuning: llm.RetryTuning{
+					BaseDelay:  150 * time.Millisecond,
+					MaxDelay:   2 * time.Second,
+					Multiplier: 1.7,
+				},
+				RetryRules: []llm.RetryRule{
+					{
+						Name:       "http_5xx_retry",
+						Enabled:    true,
+						MaxRetries: 4,
+						StatusCode: llm.RetryStatusCodeMatcher{Range: "500-504"},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	maxRetries, tuning, rules := manager.LLMRuntime().RetryConfigSnapshot()
+	assert.Equal(t, 6, maxRetries)
+	assert.Equal(t, 150*time.Millisecond, tuning.BaseDelay)
+	assert.Equal(t, 2*time.Second, tuning.MaxDelay)
+	assert.Equal(t, 1.7, tuning.Multiplier)
+	require.Len(t, rules, 1)
+	assert.Equal(t, "http_5xx_retry", rules[0].Name)
+	assert.Equal(t, 4, rules[0].MaxRetries)
+	assert.Equal(t, "500-504", rules[0].StatusCode.Range)
+}
+
 func TestManager_ReloadProviderConfigsReplacesRuntimeProviders(t *testing.T) {
 	firstUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -237,6 +281,57 @@ func TestManager_ReloadProviderConfigsReplacesRuntimeProviders(t *testing.T) {
 
 	_, err = manager.LLMRuntime().GetProvider("model-v1")
 	require.Error(t, err)
+}
+
+func TestManager_ReloadProviderConfigsUpdatesRuntimeRetryConfig(t *testing.T) {
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Agent.DefaultProvider = "openai-test"
+	cfg.Agent.DefaultModel = "model-v1"
+	cfg.HotReload.Enabled = false
+
+	manager, err := NewManager(&Options{
+		Config: cfg,
+		ProviderConfigs: map[string]*llm.ProviderConfig{
+			"openai-test": {
+				Type:         "openai",
+				BaseURL:      "http://127.0.0.1",
+				DefaultModel: "model-v1",
+				MaxRetries:   1,
+			},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	require.NoError(t, manager.ReloadProviderConfigs(map[string]*llm.ProviderConfig{
+		"openai-test": {
+			Type:         "openai",
+			BaseURL:      "http://127.0.0.1",
+			DefaultModel: "model-v2",
+			MaxRetries:   5,
+			RetryTuning: llm.RetryTuning{
+				BaseDelay: 250 * time.Millisecond,
+			},
+			RetryRules: []llm.RetryRule{
+				{
+					Name:       "rate_limit_retry",
+					Enabled:    true,
+					MaxRetries: 8,
+					Keyword: llm.RetryKeywordMatcher{
+						Values: []string{"rate limit"},
+					},
+				},
+			},
+		},
+	}))
+
+	maxRetries, tuning, rules := manager.LLMRuntime().RetryConfigSnapshot()
+	assert.Equal(t, 5, maxRetries)
+	assert.Equal(t, 250*time.Millisecond, tuning.BaseDelay)
+	require.Len(t, rules, 1)
+	assert.Equal(t, "rate_limit_retry", rules[0].Name)
+	assert.Equal(t, 8, rules[0].MaxRetries)
+	assert.Equal(t, []string{"rate limit"}, rules[0].Keyword.Values)
 }
 
 func TestManager_NewManager_BuildsLocalEmbeddingRouter(t *testing.T) {

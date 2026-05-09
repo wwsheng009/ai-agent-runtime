@@ -377,6 +377,34 @@ func (r *LLMRuntime) DefaultProvider() string {
 	return r.config.DefaultProvider
 }
 
+// RetryConfigSnapshot returns a copy of the runtime retry settings.
+func (r *LLMRuntime) RetryConfigSnapshot() (int, RetryTuning, []RetryRule) {
+	if r == nil {
+		return 0, RetryTuning{}, nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.config == nil {
+		return 0, RetryTuning{}, nil
+	}
+	return r.config.MaxRetries, r.config.RetryTuning, cloneRetryRules(r.config.RetryRules)
+}
+
+// UpdateRetryConfig updates runtime-level retry settings used by Call and Stream.
+func (r *LLMRuntime) UpdateRetryConfig(maxRetries int, tuning RetryTuning, rules []RetryRule) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.config == nil {
+		r.config = &RuntimeConfig{}
+	}
+	r.config.MaxRetries = maxRetries
+	r.config.RetryTuning = tuning
+	r.config.RetryRules = cloneRetryRules(rules)
+}
+
 // Call 调用 LLM（统一接口）
 func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
 	if req == nil {
@@ -417,7 +445,8 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 		return nil, err
 	}
 
-	policy := newRuntimeRetryPolicy(r.config.MaxRetries, r.config.RetryTuning, r.config.RetryRules)
+	maxRetries, retryTuning, retryRules := r.RetryConfigSnapshot()
+	policy := newRuntimeRetryPolicy(maxRetries, retryTuning, retryRules)
 	var lastError error
 	startedAt := time.Now()
 
@@ -489,7 +518,129 @@ func (r *LLMRuntime) Stream(ctx context.Context, req *LLMRequest) (<-chan Stream
 		return nil, err
 	}
 
-	return provider.Stream(ctx, req)
+	maxRetries, retryTuning, retryRules := r.RetryConfigSnapshot()
+	policy := newRuntimeRetryPolicy(maxRetries, retryTuning, retryRules)
+	startedAt := time.Now()
+	meta := retryExecutionMeta{
+		Source:   "llm_runtime",
+		Provider: providerName,
+		Model:    req.Model,
+	}
+
+	stream, attempt, err := openStreamWithRetry(ctx, provider, policy, startedAt, 1, req, meta)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(chan StreamChunk, 32)
+	go forwardStreamWithRetry(ctx, out, provider, policy, startedAt, attempt, stream, req, meta)
+	return out, nil
+}
+
+func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPolicy, startedAt time.Time, startAttempt int, req *LLMRequest, meta retryExecutionMeta) (<-chan StreamChunk, int, error) {
+	if provider == nil {
+		return nil, startAttempt, errors.New(errors.ErrValidationFailed, "provider cannot be nil")
+	}
+	if startAttempt < 1 {
+		startAttempt = 1
+	}
+
+	var lastErr error
+	lastAttempt := startAttempt
+	for attempt := startAttempt; attempt <= policy.MaxAttempts; attempt++ {
+		lastAttempt = attempt
+		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
+		stream, err := provider.Stream(attemptCtx, req)
+		if err == nil && stream != nil {
+			return stream, attempt, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("empty_stream_response: provider returned nil stream")
+		}
+		lastErr = err
+
+		retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, err, meta)
+		if retryErr != nil {
+			return nil, attempt, retryErr
+		}
+		if !retryResult.Decision.Retryable {
+			return nil, attempt, err
+		}
+		if retryResult.Retry {
+			continue
+		}
+		break
+	}
+
+	return nil, lastAttempt, markRetryExhausted("LLM stream failed after retries", policy.MaxAttempts, lastErr)
+}
+
+func forwardStreamWithRetry(ctx context.Context, out chan<- StreamChunk, provider Provider, policy retryPolicy, startedAt time.Time, attempt int, stream <-chan StreamChunk, req *LLMRequest, meta retryExecutionMeta) {
+	defer close(out)
+
+	for stream != nil {
+		emissionState := &streamEmissionState{}
+		retrying := false
+
+		for chunk := range stream {
+			markRuntimeStreamEmission(emissionState, chunk)
+			if chunk.Type == EventTypeError && strings.TrimSpace(chunk.Error) != "" && !emissionState.emittedAnything() {
+				err := fmt.Errorf("%s", chunk.Error)
+				retryResult, retryErr := prepareRetry(ctx, policy, startedAt, attempt, err, meta)
+				if retryErr != nil {
+					sendStreamChunk(ctx, out, StreamChunk{Type: EventTypeError, Error: retryErr.Error(), Done: true})
+					return
+				}
+				if retryResult.Retry {
+					nextStream, nextAttempt, openErr := openStreamWithRetry(ctx, provider, policy, startedAt, attempt+1, req, meta)
+					if openErr != nil {
+						sendStreamChunk(ctx, out, StreamChunk{Type: EventTypeError, Error: openErr.Error(), Done: true})
+						return
+					}
+					stream = nextStream
+					attempt = nextAttempt
+					retrying = true
+					break
+				}
+			}
+
+			if !sendStreamChunk(ctx, out, chunk) {
+				return
+			}
+			if chunk.Done {
+				return
+			}
+		}
+
+		if !retrying {
+			return
+		}
+	}
+}
+
+func markRuntimeStreamEmission(state *streamEmissionState, chunk StreamChunk) {
+	if state == nil {
+		return
+	}
+	switch chunk.Type {
+	case EventTypeText:
+		state.markText(chunk.Content)
+	case EventTypeImage:
+		state.markImage(chunk.Metadata)
+	case EventTypeToolCall, EventTypeToolStart, EventTypeToolEnd:
+		if chunk.Content != "" || chunk.ToolCall != nil || chunk.Delta != nil {
+			state.markText("tool")
+		}
+	}
+}
+
+func sendStreamChunk(ctx context.Context, out chan<- StreamChunk, chunk StreamChunk) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case out <- chunk:
+		return true
+	}
 }
 
 // CountTokens 统计 Token 数
