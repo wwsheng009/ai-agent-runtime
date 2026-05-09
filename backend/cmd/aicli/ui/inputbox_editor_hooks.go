@@ -2,10 +2,10 @@ package ui
 
 // LineEditorSnapshot captures the current editable line state for hooks.
 type LineEditorSnapshot struct {
-	Text       string
-	Cursor     int
-	Prompt     string
-	HistoryPos int
+	Text        string
+	Cursor      int
+	Prompt      string
+	HistoryPos  int
 	PasteActive bool
 }
 
@@ -20,6 +20,8 @@ type LineEditorHooks struct {
 	OnChange      func(LineEditorSnapshot)
 	OnComplete    func(LineEditorSnapshot) (LineEditorReplacement, bool)
 	OnNavigate    func(LineEditorSnapshot, int) bool
+	OnMove        func(LineEditorSnapshot, int) bool
 	OnSubmit      func(LineEditorSnapshot) (LineEditorReplacement, bool)
 	OnCancelPopup func(LineEditorSnapshot) bool
+	OnCancel      func(LineEditorSnapshot) bool
 }

@@ -26,8 +26,9 @@ func spawnTeamCacheSafeSummary(result SpawnTeamResult) string {
 	if !result.CreatedTeam {
 		action = "Reused"
 	}
+	teamID := firstNonEmptyString(strings.TrimSpace(result.TeamID), "team")
 	parts := []string{
-		fmt.Sprintf("%s team run with %d teammates and %d tasks.", action, result.TeammateCount, result.TaskCount),
+		fmt.Sprintf("%s team run %s with %d teammates and %d tasks.", action, teamID, result.TeammateCount, result.TaskCount),
 	}
 	if result.AutoStarted {
 		parts = append(parts, "Background orchestration auto-started.")
@@ -35,6 +36,29 @@ func spawnTeamCacheSafeSummary(result SpawnTeamResult) string {
 		parts = append(parts, "Background orchestration not auto-started.")
 	}
 	return strings.Join(parts, " ")
+}
+
+func waitTeamCacheSafeSummary(result WaitTeamResult) string {
+	lines := []string{
+		fmt.Sprintf("Team %s status=%s.", firstNonEmptyString(strings.TrimSpace(result.TeamID), "team"), firstNonEmptyString(strings.TrimSpace(result.Status), "unknown")),
+	}
+	if result.Terminal {
+		lines = append(lines, "Team is terminal.")
+	} else if result.TimedOut {
+		lines = append(lines, "Wait timed out before terminal state.")
+	} else {
+		lines = append(lines, "Team is still running.")
+	}
+	if result.SummaryReady {
+		lines = append(lines, "Summary is ready.")
+	}
+	if summary := truncateCacheSafeSummary(result.Summary, 420); summary != "" {
+		lines = append(lines, "Summary: "+summary)
+	}
+	if result.EventCount > 0 {
+		lines = append(lines, fmt.Sprintf("Returned %d lifecycle events. Latest seq=%d.", result.EventCount, result.LatestSeq))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func sendTeamMessageCacheSafeSummary(result SendTeamMessageResult) string {

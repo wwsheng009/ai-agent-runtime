@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,10 @@ func NewSQLiteGlobalMailboxRegistryStore(cfg *GlobalMailboxStoreConfig) (*SQLite
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
 	}
+	if err := configureAgentControlSQLiteDB(context.Background(), db, dsn); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	store := &SQLiteGlobalMailboxRegistryStore{db: db, dsn: dsn, ownsDB: true}
 	if err := store.init(context.Background()); err != nil {
 		_ = db.Close()
@@ -80,10 +85,30 @@ func (s *SQLiteGlobalMailboxRegistryStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	s.closeMailboxWakeWatchers()
 	if !s.ownsDB {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *SQLiteGlobalMailboxRegistryStore) closeMailboxWakeWatchers() {
+	if s == nil {
+		return
+	}
+	s.mailboxWakeMu.Lock()
+	watchers := s.mailboxWakeWatchers
+	s.mailboxWakeWatchers = nil
+	s.mailboxWakeMu.Unlock()
+	for _, watcher := range watchers {
+		if watcher.unwatch != nil {
+			watcher.unwatch()
+		}
+		if watcher.ch == nil {
+			continue
+		}
+		close(watcher.ch)
+	}
 }
 
 // AppendGlobalMailboxRecord writes or refreshes one source-local mailbox row in
@@ -293,7 +318,7 @@ func appendPrimaryGlobalMailboxRecordSQL(ctx context.Context, runner globalMailb
 			created_at, acked_at, updated_at, primary_key
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(primary_key) DO NOTHING
-	`, MailboxSourceGlobal, record.Scope, sourceID, 0, nullMailboxString(record.Workflow), record.Scope,
+	`, MailboxSourceGlobal, record.Scope, sourceID, temporaryGlobalPrimarySourceSeq(primaryKey), nullMailboxString(record.Workflow), record.Scope,
 		nullMailboxString(record.SessionID), record.SessionMailboxSeq, nullMailboxString(record.TeamID), record.TeamSeq,
 		record.MessageID, nullMailboxString(record.FromAgent), nullMailboxString(record.ToAgent), nullMailboxString(record.TaskID),
 		nullMailboxString(record.Kind), record.Body, metadataJSON, formatMailboxTime(record.CreatedAt),
@@ -540,20 +565,14 @@ func (s *SQLiteGlobalMailboxRegistryStore) WatchAgentControlMailboxWake(ctx cont
 		return out, func() {}
 	}
 	filter = filter.Normalize()
+	done := make(chan struct{})
+	var once sync.Once
 	s.mailboxWakeMu.Lock()
 	if s.mailboxWakeWatchers == nil {
 		s.mailboxWakeWatchers = make(map[int64]globalMailboxWakeWatcher)
 	}
 	s.nextMailboxWakeWatchID++
 	watchID := s.nextMailboxWakeWatchID
-	s.mailboxWakeWatchers[watchID] = globalMailboxWakeWatcher{
-		filter: filter,
-		ch:     out,
-	}
-	s.mailboxWakeMu.Unlock()
-
-	done := make(chan struct{})
-	var once sync.Once
 	unwatch := func() {
 		once.Do(func() {
 			s.mailboxWakeMu.Lock()
@@ -562,6 +581,12 @@ func (s *SQLiteGlobalMailboxRegistryStore) WatchAgentControlMailboxWake(ctx cont
 			close(done)
 		})
 	}
+	s.mailboxWakeWatchers[watchID] = globalMailboxWakeWatcher{
+		filter:  filter,
+		ch:      out,
+		unwatch: unwatch,
+	}
+	s.mailboxWakeMu.Unlock()
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -676,8 +701,9 @@ type globalMailboxScanner interface {
 }
 
 type globalMailboxWakeWatcher struct {
-	filter MailboxWakeFilter
-	ch     chan MailboxWakeEvent
+	filter  MailboxWakeFilter
+	ch      chan MailboxWakeEvent
+	unwatch func()
 }
 
 func scanGlobalMailboxRecord(scanner globalMailboxScanner) (MailboxRecord, error) {
@@ -768,6 +794,16 @@ func globalMailboxPrimaryKey(record MailboxRecord, sourceID string) string {
 		strings.TrimSpace(sourceID),
 		strings.TrimSpace(record.MessageID),
 	}, "\x1f")
+}
+
+func temporaryGlobalPrimarySourceSeq(primaryKey string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(strings.TrimSpace(primaryKey)))
+	value := int64(h.Sum64() & ((uint64(1) << 63) - 1))
+	if value == 0 {
+		value = 1
+	}
+	return -value
 }
 
 func qualifiedGlobalMailboxTable(schema string) (string, error) {

@@ -32,6 +32,7 @@ const (
 	ToolCloseAgent        = "close_agent"
 	ToolResumeAgent       = "resume_agent"
 	ToolSpawnTeam         = "spawn_team"
+	ToolWaitTeam          = "wait_team"
 	ToolSendTeamMessage   = "send_team_message"
 	ToolReadMailboxDigest = "read_mailbox_digest"
 	ToolReadTaskSpec      = "read_task_spec"
@@ -73,7 +74,7 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolSpawnTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask:
+	case ToolAskUserQuestion, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask:
 		return true
 	default:
 		return false
@@ -360,7 +361,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for a spawn_agent child session to become idle or blocked. Runtime events wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
+				Description: "Wait for a spawn_agent child session to become idle or blocked. Runtime events wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team progress and final team.summary.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -374,7 +375,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1.",
+				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team lifecycle events.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -540,6 +541,35 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 								},
 							},
 						},
+					},
+				},
+			},
+		},
+		types.ToolDefinition{
+			Name:        ToolWaitTeam,
+			Description: "Wait for a spawn_team run to reach durable team.completed/team.summary state and return recent persisted team lifecycle events. Use this after spawn_team auto_start=true instead of wait_agent/read_agent_events; those are only for spawn_agent child sessions.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"team_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Team id returned by spawn_team. If omitted, defaults to the current active team run when one is bound in context.",
+					},
+					"after_seq": map[string]interface{}{
+						"type":        "integer",
+						"description": "Only include persisted team events after this team event sequence.",
+					},
+					"timeout_ms": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional wait timeout in milliseconds. Defaults to 30000.",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum recent team events to return. Defaults to 24.",
+					},
+					"require_summary": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Whether a done team should wait for team.summary. Defaults to true when a lead planner is configured, otherwise false.",
 					},
 				},
 			},
@@ -1025,7 +1055,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		request.Target = actualSessionID
 		request.ID = ""
 		request.SessionID = actualSessionID
-		if err := b.rejectTeamTeammateAgentRefs(ctx, toolName, actualSessionID); err != nil {
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, toolName, actualSessionID); err != nil {
 			return nil, nil, err
 		}
 		var result *AgentMessageResult
@@ -1141,10 +1171,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				}
 			}
 		}
-		if err := b.rejectTeamTeammateAgentRefs(ctx, ToolWaitAgent, request.ID, request.SessionID); err != nil {
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolWaitAgent, request.ID, request.SessionID); err != nil {
 			return nil, nil, err
 		}
-		if err := b.rejectTeamTeammateAgentRefs(ctx, ToolWaitAgent, append(request.IDs, request.SessionIDs...)...); err != nil {
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolWaitAgent, append(request.IDs, request.SessionIDs...)...); err != nil {
 			return nil, nil, err
 		}
 		result, err := b.AgentSessions.Wait(ctx, request)
@@ -1207,7 +1237,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			}
 		}
 		if !request.MailboxOnly {
-			if err := b.rejectTeamTeammateAgentRefs(ctx, ToolReadAgentEvents, actualSessionID); err != nil {
+			if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolReadAgentEvents, actualSessionID); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -1354,68 +1384,66 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			request.AutoStart = &value
 		}
 		if raw, ok := args["teammates"]; ok {
-			switch items := raw.(type) {
-			case []interface{}:
-				for _, item := range items {
-					if entry, ok := item.(map[string]interface{}); ok {
-						spec := SpawnTeammateSpec{}
-						if value, ok := entry["id"].(string); ok {
-							spec.ID = strings.TrimSpace(value)
-						}
-						if value, ok := entry["name"].(string); ok {
-							spec.Name = strings.TrimSpace(value)
-						}
-						if value, ok := entry["profile"].(string); ok {
-							spec.Profile = strings.TrimSpace(value)
-						}
-						if value, ok := entry["session_id"].(string); ok {
-							spec.SessionID = strings.TrimSpace(value)
-							if isCurrentPlaceholder(spec.SessionID) {
-								spec.SessionID = ""
-							}
-						}
-						if value, ok := entry["state"].(string); ok {
-							spec.State = strings.TrimSpace(value)
-						}
-						if caps := coerceStringSlice(entry["capabilities"]); len(caps) > 0 {
-							spec.Capabilities = caps
-						}
-						request.Teammates = append(request.Teammates, spec)
+			entries, err := coerceObjectArray(raw, "teammates")
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, entry := range entries {
+				spec := SpawnTeammateSpec{}
+				if value, ok := entry["id"].(string); ok {
+					spec.ID = strings.TrimSpace(value)
+				}
+				if value, ok := entry["name"].(string); ok {
+					spec.Name = strings.TrimSpace(value)
+				}
+				if value, ok := entry["profile"].(string); ok {
+					spec.Profile = strings.TrimSpace(value)
+				}
+				if value, ok := entry["session_id"].(string); ok {
+					spec.SessionID = strings.TrimSpace(value)
+					if isCurrentPlaceholder(spec.SessionID) {
+						spec.SessionID = ""
 					}
 				}
+				if value, ok := entry["state"].(string); ok {
+					spec.State = strings.TrimSpace(value)
+				}
+				if caps := coerceStringSlice(entry["capabilities"]); len(caps) > 0 {
+					spec.Capabilities = caps
+				}
+				request.Teammates = append(request.Teammates, spec)
 			}
 		}
 		if raw, ok := args["tasks"]; ok {
-			switch items := raw.(type) {
-			case []interface{}:
-				for _, item := range items {
-					if entry, ok := item.(map[string]interface{}); ok {
-						spec := SpawnTaskSpec{}
-						if value, ok := entry["id"].(string); ok {
-							spec.ID = strings.TrimSpace(value)
-						}
-						if value, ok := entry["title"].(string); ok {
-							spec.Title = strings.TrimSpace(value)
-						}
-						if value, ok := entry["goal"].(string); ok {
-							spec.Goal = strings.TrimSpace(value)
-						}
-						spec.Inputs = coerceStringSlice(entry["inputs"])
-						spec.ReadPaths = coerceStringSlice(entry["read_paths"])
-						spec.WritePaths = coerceStringSlice(entry["write_paths"])
-						spec.Deliverables = coerceStringSlice(entry["deliverables"])
-						if value, ok := entry["priority"].(float64); ok {
-							spec.Priority = int(value)
-						} else if value, ok := entry["priority"].(int); ok {
-							spec.Priority = value
-						}
-						if value, ok := entry["assignee"].(string); ok {
-							spec.Assignee = strings.TrimSpace(value)
-						}
-						spec.DependsOn = coerceStringSlice(entry["depends_on"])
-						request.Tasks = append(request.Tasks, spec)
-					}
+			entries, err := coerceObjectArray(raw, "tasks")
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, entry := range entries {
+				spec := SpawnTaskSpec{}
+				if value, ok := entry["id"].(string); ok {
+					spec.ID = strings.TrimSpace(value)
 				}
+				if value, ok := entry["title"].(string); ok {
+					spec.Title = strings.TrimSpace(value)
+				}
+				if value, ok := entry["goal"].(string); ok {
+					spec.Goal = strings.TrimSpace(value)
+				}
+				spec.Inputs = coerceStringSlice(entry["inputs"])
+				spec.ReadPaths = coerceStringSlice(entry["read_paths"])
+				spec.WritePaths = coerceStringSlice(entry["write_paths"])
+				spec.Deliverables = coerceStringSlice(entry["deliverables"])
+				if value, ok := entry["priority"].(float64); ok {
+					spec.Priority = int(value)
+				} else if value, ok := entry["priority"].(int); ok {
+					spec.Priority = value
+				}
+				if value, ok := entry["assignee"].(string); ok {
+					spec.Assignee = strings.TrimSpace(value)
+				}
+				spec.DependsOn = coerceStringSlice(entry["depends_on"])
+				request.Tasks = append(request.Tasks, spec)
 			}
 		}
 		preparedTaskSpecs, err := b.prepareSpawnTaskSpecs(request.Tasks)
@@ -1686,6 +1714,44 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			TaskCount:     len(taskIDs),
 		}
 		return result, attachCacheSafeSummary(rawMeta, spawnTeamCacheSafeSummary(result)), nil
+
+	case ToolWaitTeam:
+		request := WaitTeamArgs{}
+		if value, ok := args["team_id"].(string); ok {
+			request.TeamID = strings.TrimSpace(value)
+		}
+		if value, ok := args["after_seq"].(float64); ok {
+			request.AfterSeq = int64(value)
+		} else if value, ok := args["after_seq"].(int64); ok {
+			request.AfterSeq = value
+		} else if value, ok := args["after_seq"].(int); ok {
+			request.AfterSeq = int64(value)
+		}
+		if value, ok := args["timeout_ms"].(float64); ok {
+			request.TimeoutMs = int(value)
+		} else if value, ok := args["timeout_ms"].(int); ok {
+			request.TimeoutMs = value
+		}
+		if value, ok := args["limit"].(float64); ok {
+			request.Limit = int(value)
+		} else if value, ok := args["limit"].(int); ok {
+			request.Limit = value
+		}
+		if value, ok := args["require_summary"].(bool); ok {
+			request.RequireSummary = &value
+		}
+		result, err := b.executeWaitTeam(ctx, sessionID, request)
+		if err != nil {
+			return nil, nil, err
+		}
+		return result, attachCacheSafeSummary(map[string]interface{}{
+			"team_id":       result.TeamID,
+			"status":        result.Status,
+			"terminal":      result.Terminal,
+			"summary_ready": result.SummaryReady,
+			"timed_out":     result.TimedOut,
+			"latest_seq":    result.LatestSeq,
+		}, waitTeamCacheSafeSummary(result)), nil
 
 	case ToolSendTeamMessage:
 		if b.TeamStore == nil {
@@ -2220,6 +2286,8 @@ func normalizeToolName(name string) string {
 		return ToolResumeAgent
 	case "spawnteam":
 		return ToolSpawnTeam
+	case "waitteam":
+		return ToolWaitTeam
 	case "sendteammessage":
 		return ToolSendTeamMessage
 	case "readmailboxdigest":
@@ -2312,6 +2380,48 @@ func coerceStringSlice(value interface{}) []string {
 	return nil
 }
 
+func coerceObjectArray(value interface{}, field string) ([]map[string]interface{}, error) {
+	switch typed := value.(type) {
+	case []map[string]interface{}:
+		clone := make([]map[string]interface{}, 0, len(typed))
+		for _, item := range typed {
+			if item != nil {
+				clone = append(clone, item)
+			}
+		}
+		return clone, nil
+	case []interface{}:
+		clone := make([]map[string]interface{}, 0, len(typed))
+		for _, item := range typed {
+			entry, ok := item.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("%s must be an array of objects", field)
+			}
+			clone = append(clone, entry)
+		}
+		return clone, nil
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return nil, nil
+		}
+		var items []map[string]interface{}
+		if err := json.Unmarshal([]byte(text), &items); err == nil {
+			return coerceObjectArray(items, field)
+		}
+		var generic []interface{}
+		if err := json.Unmarshal([]byte(text), &generic); err != nil {
+			return nil, fmt.Errorf("%s must be an array of objects or a JSON array string: %w", field, err)
+		}
+		return coerceObjectArray(generic, field)
+	default:
+		if value == nil {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s must be an array of objects", field)
+	}
+}
+
 func (b *Broker) resolveTeamScope(ctx context.Context, sessionID, explicitTeamID string) (teamID string, agentID string, taskID string, err error) {
 	runMeta, ok := team.GetRunMeta(ctx)
 	if !ok || runMeta == nil || runMeta.Team == nil || strings.TrimSpace(runMeta.Team.TeamID) == "" {
@@ -2343,6 +2453,178 @@ func (b *Broker) resolveTeamScope(ctx context.Context, sessionID, explicitTeamID
 		agentID = "lead"
 	}
 	return teamID, agentID, taskID, nil
+}
+
+func (b *Broker) resolveWaitTeamID(ctx context.Context, sessionID, explicitTeamID string) (string, error) {
+	if b == nil || b.TeamStore == nil {
+		return "", fmt.Errorf("team store is not configured")
+	}
+	teamID := strings.TrimSpace(explicitTeamID)
+	if teamID != "" {
+		return teamID, nil
+	}
+	if runMeta, ok := team.GetRunMeta(ctx); ok && runMeta != nil && runMeta.Team != nil {
+		if scoped := strings.TrimSpace(runMeta.Team.TeamID); scoped != "" {
+			return scoped, nil
+		}
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", fmt.Errorf("team_id is required")
+	}
+	teams, err := b.TeamStore.ListTeams(ctx, team.TeamFilter{Limit: 64})
+	if err != nil {
+		return "", err
+	}
+	var matches []team.Team
+	for _, item := range teams {
+		if strings.EqualFold(strings.TrimSpace(item.LeadSessionID), sessionID) {
+			matches = append(matches, item)
+		}
+	}
+	if len(matches) == 1 {
+		return strings.TrimSpace(matches[0].ID), nil
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("team_id is required because multiple teams belong to this lead session")
+	}
+	return "", fmt.Errorf("team_id is required")
+}
+
+func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request WaitTeamArgs) (WaitTeamResult, error) {
+	if b == nil || b.TeamStore == nil {
+		return WaitTeamResult{}, fmt.Errorf("team store is not configured")
+	}
+	teamID, err := b.resolveWaitTeamID(ctx, sessionID, request.TeamID)
+	if err != nil {
+		return WaitTeamResult{}, err
+	}
+	b.notifyTeamLifecycleChanged()
+	if request.Limit <= 0 {
+		request.Limit = 24
+	}
+	if request.Limit > 100 {
+		request.Limit = 100
+	}
+	if request.TimeoutMs <= 0 {
+		request.TimeoutMs = 30000
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, time.Duration(request.TimeoutMs)*time.Millisecond)
+	defer cancel()
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return WaitTeamResult{}, ctx.Err()
+			}
+			return WaitTeamResult{
+				TeamID:   teamID,
+				TimedOut: true,
+			}, nil
+		default:
+		}
+		result, err := b.readWaitTeamSnapshot(ctx, teamID, request)
+		if err != nil {
+			return WaitTeamResult{}, err
+		}
+		if result.Terminal && (!b.waitTeamRequiresSummary(request) || result.Status != string(team.TeamStatusDone) || result.SummaryReady) {
+			return result, nil
+		}
+		select {
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return WaitTeamResult{}, ctx.Err()
+			}
+			result.TimedOut = true
+			return result, nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func (b *Broker) waitTeamRequiresSummary(request WaitTeamArgs) bool {
+	if request.RequireSummary != nil {
+		return *request.RequireSummary
+	}
+	return b != nil && b.TeamPlanner != nil
+}
+
+func (b *Broker) readWaitTeamSnapshot(ctx context.Context, teamID string, request WaitTeamArgs) (WaitTeamResult, error) {
+	record, err := b.TeamStore.GetTeam(ctx, teamID)
+	if err != nil {
+		return WaitTeamResult{}, err
+	}
+	if record == nil {
+		return WaitTeamResult{}, fmt.Errorf("team not found: %s", teamID)
+	}
+	events, err := b.TeamStore.ListTeamEvents(ctx, team.TeamEventFilter{
+		TeamID:   teamID,
+		AfterSeq: request.AfterSeq,
+		Limit:    request.Limit,
+	})
+	if err != nil {
+		return WaitTeamResult{}, err
+	}
+	result := WaitTeamResult{
+		TeamID:   strings.TrimSpace(record.ID),
+		Status:   string(record.Status),
+		Terminal: record.Status == team.TeamStatusDone || record.Status == team.TeamStatusFailed,
+		Events:   make([]WaitTeamEventResult, 0, len(events)),
+	}
+	for _, event := range events {
+		item := WaitTeamEventResult{
+			Seq:       event.Seq,
+			Type:      strings.TrimSpace(event.Type),
+			TeamID:    strings.TrimSpace(event.TeamID),
+			Payload:   cloneAliasPayloadMap(event.Payload),
+			CreatedAt: event.Timestamp,
+		}
+		result.Events = append(result.Events, item)
+		if item.Seq > result.LatestSeq {
+			result.LatestSeq = item.Seq
+		}
+		if item.Type == "team.summary" {
+			result.SummaryReady = true
+			result.SummaryEventSeq = item.Seq
+			result.Summary = firstNonEmptyString(payloadString(item.Payload, "summary"), result.Summary)
+			result.SummarySource = firstNonEmptyString(payloadString(item.Payload, "summary_source"), result.SummarySource)
+		}
+	}
+	result.EventCount = len(result.Events)
+	if !result.SummaryReady {
+		if summaryEvent, summaryErr := b.latestTeamSummaryEvent(ctx, teamID); summaryErr != nil {
+			return WaitTeamResult{}, summaryErr
+		} else if summaryEvent != nil {
+			result.SummaryReady = true
+			result.SummaryEventSeq = summaryEvent.Seq
+			result.Summary = payloadString(summaryEvent.Payload, "summary")
+			result.SummarySource = payloadString(summaryEvent.Payload, "summary_source")
+			if summaryEvent.Seq > result.LatestSeq {
+				result.LatestSeq = summaryEvent.Seq
+			}
+		}
+	}
+	return result, nil
+}
+
+func (b *Broker) latestTeamSummaryEvent(ctx context.Context, teamID string) (*team.TeamEventRecord, error) {
+	events, err := b.TeamStore.ListTeamEvents(ctx, team.TeamEventFilter{
+		TeamID:    strings.TrimSpace(teamID),
+		EventType: "team.summary",
+		Limit:     100,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(events) == 0 {
+		return nil, nil
+	}
+	latest := events[len(events)-1]
+	return &latest, nil
 }
 
 func firstNonEmptyString(values ...string) string {
@@ -2588,10 +2870,11 @@ func (b *Broker) notifyTeamLifecycleChanged() {
 	b.TeamLifecycleChanged()
 }
 
-func (b *Broker) rejectTeamTeammateAgentRefs(ctx context.Context, toolName string, refs ...string) error {
+func (b *Broker) rejectTeamTeammateAgentRefs(ctx context.Context, parentSessionID, toolName string, refs ...string) error {
 	if b == nil || b.TeamStore == nil {
 		return nil
 	}
+	spawnAgentRefs := b.currentSpawnAgentRefs(ctx, parentSessionID)
 	seen := map[string]struct{}{}
 	for _, ref := range refs {
 		ref = strings.TrimSpace(ref)
@@ -2602,6 +2885,9 @@ func (b *Broker) rejectTeamTeammateAgentRefs(ctx context.Context, toolName strin
 			continue
 		}
 		seen[ref] = struct{}{}
+		if _, ok := spawnAgentRefs[normalizeToolRefKey(ref)]; ok {
+			continue
+		}
 		teammate, err := b.TeamStore.GetTeammate(ctx, ref)
 		if err != nil {
 			return err
@@ -2609,9 +2895,52 @@ func (b *Broker) rejectTeamTeammateAgentRefs(ctx context.Context, toolName strin
 		if teammate == nil {
 			continue
 		}
-		return fmt.Errorf("%s is a spawn_agent child-session tool, but %q is a spawn_team teammate id in team %q; do not use wait_agent/read_agent_events for team teammates, wait for team.completed/team.summary instead", toolName, ref, strings.TrimSpace(teammate.TeamID))
+		return fmt.Errorf("%s is a spawn_agent child-session tool, but %q is a spawn_team teammate id in team %q; do not use wait_agent/read_agent_events for team teammates, call wait_team with team_id %q instead", toolName, ref, strings.TrimSpace(teammate.TeamID), strings.TrimSpace(teammate.TeamID))
 	}
 	return nil
+}
+
+func (b *Broker) currentSpawnAgentRefs(ctx context.Context, parentSessionID string) map[string]struct{} {
+	if b == nil || b.AgentSessions == nil || strings.TrimSpace(parentSessionID) == "" {
+		return nil
+	}
+	result, err := b.AgentSessions.List(ctx, strings.TrimSpace(parentSessionID), ListAgentsArgs{IncludeClosed: true})
+	if err != nil || result == nil || len(result.Agents) == 0 {
+		return nil
+	}
+	refs := make(map[string]struct{}, len(result.Agents)*3)
+	for _, agent := range result.Agents {
+		if !agentStatusLooksLikeSpawnAgentChild(agent) {
+			continue
+		}
+		addToolRefKey(refs, agent.ID)
+		addToolRefKey(refs, agent.SessionID)
+		addToolRefKey(refs, agent.Path)
+	}
+	return refs
+}
+
+func agentStatusLooksLikeSpawnAgentChild(agent AgentStatusResult) bool {
+	if strings.EqualFold(strings.TrimSpace(agent.AgentType), agentcontrol.AgentTypeChild) {
+		return true
+	}
+	if strings.TrimSpace(agent.AgentType) == "" && strings.TrimSpace(agent.TeamID) == "" && strings.TrimSpace(agent.TeammateID) == "" {
+		return true
+	}
+	return false
+}
+
+func addToolRefKey(refs map[string]struct{}, ref string) {
+	if refs == nil {
+		return
+	}
+	if key := normalizeToolRefKey(ref); key != "" {
+		refs[key] = struct{}{}
+	}
+}
+
+func normalizeToolRefKey(ref string) string {
+	return strings.ToLower(strings.TrimSpace(ref))
 }
 
 func payloadString(payload map[string]interface{}, key string) string {

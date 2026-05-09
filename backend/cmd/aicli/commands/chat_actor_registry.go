@@ -438,6 +438,12 @@ func (r *localActorRegistry) reserveOrRegisterLocalAgentSpawn(ctx context.Contex
 	}
 	rootRecord := localRootAgentRecord(parentSession, parentSessionID)
 	childRecord := localChildAgentRecord(parentSession, parentSessionID, childSession, args, childDepth)
+	if err := r.closeStaleLocalAgentSessionBinding(ctx, store, rootRecord); err != nil {
+		return err
+	}
+	if err := r.closeStaleLocalAgentSessionBinding(ctx, store, childRecord); err != nil {
+		return err
+	}
 	if reserver, ok := store.(agentcontrol.AgentSpawnReservationStore); ok && reserver != nil {
 		_, err := reserver.ReserveAgentControlAgentSpawn(ctx, rootRecord, childRecord, r.localAgentsConfig().MaxThreads)
 		return err
@@ -643,11 +649,57 @@ func (r *localActorRegistry) materializeLocalAgentRegistry(ctx context.Context) 
 		if exists && existing.Closed() && !record.Closed() {
 			continue
 		}
+		if err := r.closeStaleLocalAgentSessionBinding(ctx, store, record); err != nil {
+			return err
+		}
 		if _, err := store.UpsertAgentControlAgent(ctx, record); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (r *localActorRegistry) closeStaleLocalAgentSessionBinding(ctx context.Context, store agentcontrol.AgentRegistryStore, record agentcontrol.AgentRecord) error {
+	if store == nil {
+		return nil
+	}
+	record = record.Normalize()
+	if record.SessionID == "" {
+		return nil
+	}
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		SessionID: record.SessionID,
+	})
+	if err != nil {
+		return err
+	}
+	for _, existing := range records {
+		existing = existing.Normalize()
+		if sameLocalAgentBinding(existing, record) {
+			continue
+		}
+		if existing.RootSessionID == "" || existing.AgentPath == "" {
+			continue
+		}
+		if _, err := store.CloseAgentControlAgentSubtree(ctx, existing.RootSessionID, existing.AgentPath, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sameLocalAgentBinding(left, right agentcontrol.AgentRecord) bool {
+	left = left.Normalize()
+	right = right.Normalize()
+	if left.AgentID != "" && right.AgentID != "" && strings.EqualFold(left.AgentID, right.AgentID) {
+		return true
+	}
+	return left.RootSessionID != "" &&
+		right.RootSessionID != "" &&
+		left.AgentPath != "" &&
+		right.AgentPath != "" &&
+		strings.EqualFold(left.RootSessionID, right.RootSessionID) &&
+		strings.EqualFold(left.AgentPath, right.AgentPath)
 }
 
 func (r *localActorRegistry) existingLocalAgentRecord(ctx context.Context, store agentcontrol.AgentRegistryStore, record agentcontrol.AgentRecord) (agentcontrol.AgentRecord, bool, error) {

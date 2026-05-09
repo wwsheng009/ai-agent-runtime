@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -606,6 +607,136 @@ func TestLocalActorRegistry_WritesAndClosesAgentRegistryStore(t *testing.T) {
 	}
 	if len(closed) != 1 || !closed[0].Closed() {
 		t.Fatalf("expected durable child row to be closed, got %#v", closed)
+	}
+}
+
+func TestLocalActorRegistry_ConcurrentSpawnAgentReservationsUseUniqueSessions(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	agentStore, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent_control_agents.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalAgentRegistryStore: %v", err)
+	}
+	defer agentStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.AgentRegistryStore = agentStore
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.RuntimeConfig.Agents.MaxThreads = 4
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, childID := range []string{"agent-A", "agent-B"} {
+		childID := childID
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, spawnErr := host.ActorRegistry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: childID})
+			errs <- spawnErr
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent spawn failed: %v", err)
+		}
+	}
+	records, err := agentStore.ListAgentControlAgents(context.Background(), agentcontrol.AgentFilter{
+		RootSessionID: rootSession.ID,
+	})
+	if err != nil {
+		t.Fatalf("ListAgentControlAgents: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("expected root and two child agent records, got %#v", records)
+	}
+}
+
+func TestLocalActorRegistry_SpawnClosesStaleSessionBinding(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	agentStore, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent_control_agents.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalAgentRegistryStore: %v", err)
+	}
+	defer agentStore.Close()
+	if _, err := agentStore.UpsertAgentControlAgent(context.Background(), agentcontrol.AgentRecord{
+		AgentID:       "root:stale-child",
+		RootSessionID: "stale-child",
+		SessionID:     "stale-child",
+		AgentPath:     "/root",
+		AgentType:     agentcontrol.AgentTypeRoot,
+		Status:        agentcontrol.AgentStatusActive,
+	}); err != nil {
+		t.Fatalf("upsert stale root binding: %v", err)
+	}
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.AgentRegistryStore = agentStore
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.RuntimeConfig.Agents.MaxThreads = 4
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+
+	if _, err := host.ActorRegistry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "stale-child"}); err != nil {
+		t.Fatalf("spawn with stale session binding failed: %v", err)
+	}
+	stale, err := agentStore.ListAgentControlAgents(context.Background(), agentcontrol.AgentFilter{
+		AgentID:       "root:stale-child",
+		IncludeClosed: true,
+	})
+	if err != nil {
+		t.Fatalf("ListAgentControlAgents stale: %v", err)
+	}
+	if len(stale) != 1 || !stale[0].Closed() {
+		t.Fatalf("expected stale root binding to be closed, got %#v", stale)
+	}
+	child, err := agentStore.ListAgentControlAgents(context.Background(), agentcontrol.AgentFilter{
+		SessionID:     "stale-child",
+		IncludeClosed: false,
+	})
+	if err != nil {
+		t.Fatalf("ListAgentControlAgents child: %v", err)
+	}
+	if len(child) != 1 || child[0].AgentPath != "/root/stale-child" || child[0].RootSessionID != rootSession.ID {
+		t.Fatalf("expected active child binding under current root, got %#v", child)
 	}
 }
 
@@ -1410,6 +1541,71 @@ func TestLocalActorRegistry_ReadEventsWithoutTargetMergesAgentControlMailbox(t *
 	}
 	if result.Events[1].Payload["metadata"] == nil {
 		t.Fatalf("expected control mailbox metadata, got %#v", result.Events[1].Payload)
+	}
+}
+
+func TestLocalActorRegistry_ReadEventsWithoutTargetUsesCompletionMailboxWithoutDisplayMirror(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.BaseSession = &ChatSession{RuntimeSession: rootSession, SessionUserID: userID}
+	registry := host.ActorRegistry
+	completion := toolbroker.BuildSubagentCompletionMailboxMessage(rootSession.ID, "completion-child", "/root/completion-child", "worker", runtimechat.EventSessionEnd, map[string]interface{}{
+		"status": "done",
+	})
+	controlStore, ok := host.EventStore.(runtimechat.AgentControlMailboxStore)
+	if !ok {
+		t.Fatalf("expected AgentControl mailbox store, got %T", host.EventStore)
+	}
+	if _, _, err := controlStore.AppendAgentControlMailbox(context.Background(), rootSession.ID, completion); err != nil {
+		t.Fatalf("AppendAgentControlMailbox: %v", err)
+	}
+	storedEvents, err := host.EventStore.ListEvents(context.Background(), rootSession.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for _, event := range storedEvents {
+		if event.Type == "subagent.completed" {
+			t.Fatalf("test setup should not write display mirror event, got %#v", event)
+		}
+	}
+
+	result, err := registry.ReadEvents(context.Background(), toolbroker.ReadAgentEventsArgs{
+		SessionID:   rootSession.ID,
+		MailboxOnly: true,
+		AfterSeq:    0,
+		Limit:       20,
+	})
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	if result == nil || result.Count != 1 || result.LatestSeq != 1 {
+		t.Fatalf("unexpected completion mailbox result: %#v", result)
+	}
+	event := result.Events[0]
+	if event.Type != runtimechat.EventMailboxReceived || event.Payload["kind"] != toolbroker.SubagentCompletionMailboxKind {
+		t.Fatalf("expected completion mailbox event, got %#v", event)
+	}
+	metadata, ok := event.Payload["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected completion metadata, got %#v", event.Payload)
+	}
+	if metadata["control_action"] != toolbroker.SubagentCompletionAction || metadata["message_type"] != toolbroker.SubagentCompletionMessageType {
+		t.Fatalf("unexpected completion metadata: %#v", metadata)
 	}
 }
 

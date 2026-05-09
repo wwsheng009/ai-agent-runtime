@@ -789,6 +789,12 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 		case editorKeyCancelPopup:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
+			if hooks != nil && hooks.OnCancel != nil && hooks.OnCancel(snapshot()) {
+				if onChange != nil {
+					onChange("")
+				}
+				return "", nil
+			}
 			if hooks != nil && hooks.OnCancelPopup != nil && hooks.OnCancelPopup(snapshot()) {
 				continue
 			}
@@ -866,6 +872,9 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 		case editorKeyLeft:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
+			if hooks != nil && hooks.OnMove != nil && hooks.OnMove(snapshot(), -1) {
+				continue
+			}
 			if cursor > 0 {
 				cursor--
 				emitChange()
@@ -874,6 +883,9 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 		case editorKeyRight:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
+			if hooks != nil && hooks.OnMove != nil && hooks.OnMove(snapshot(), 1) {
+				continue
+			}
 			if cursor < len(line) {
 				cursor++
 				emitChange()

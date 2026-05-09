@@ -381,7 +381,7 @@ func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) st
 			"When calling team tools, leave teammate session_id unset unless you truly need a fixed explicit session. Never use session_id=\"current\" for teammates.",
 			"When calling spawn_team from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
 			"When you call spawn_team with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",
-			"Do not use wait_agent or read_agent_events for spawn_team teammate ids such as member-1. Those tools are only for spawn_agent child sessions; team progress arrives through team lifecycle events and the final team.summary.",
+			"After spawn_team auto_start=true, call wait_team with the returned team_id to wait for durable team.completed/team.summary. Do not use wait_agent or read_agent_events for spawn_team teammate ids such as member-1; those tools are only for spawn_agent child sessions.",
 		)
 	}
 	return strings.Join(lines, "\n\n")

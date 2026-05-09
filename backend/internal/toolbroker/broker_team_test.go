@@ -181,6 +181,7 @@ func TestBrokerDefinitionsForContext_HidesTeamOnlyToolsWithoutActiveRun(t *testi
 
 	names := toolDefinitionNames(broker.DefinitionsForContext(context.Background()))
 	assert.Contains(t, names, ToolSpawnTeam)
+	assert.Contains(t, names, ToolWaitTeam)
 	for _, hidden := range []string{
 		ToolSendTeamMessage,
 		ToolReadMailboxDigest,
@@ -207,6 +208,7 @@ func TestBrokerDefinitionsForContext_IncludesTeamOnlyToolsWithActiveRun(t *testi
 	names := toolDefinitionNames(broker.DefinitionsForContext(runCtx))
 	for _, required := range []string{
 		ToolSpawnTeam,
+		ToolWaitTeam,
 		ToolSendTeamMessage,
 		ToolReadMailboxDigest,
 		ToolReadTaskSpec,
@@ -216,6 +218,132 @@ func TestBrokerDefinitionsForContext_IncludesTeamOnlyToolsWithActiveRun(t *testi
 	} {
 		assert.Contains(t, names, required)
 	}
+}
+
+func TestBrokerExecuteWaitTeamReturnsDurableSummary(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:     "team-wait-summary",
+		Status: team.TeamStatusDone,
+	})
+	require.NoError(t, err)
+	_, err = store.AppendTeamEvent(ctx, team.TeamEvent{
+		Type:   "team.completed",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"status": string(team.TeamStatusDone),
+		},
+	})
+	require.NoError(t, err)
+	summarySeq, err := store.AppendTeamEvent(ctx, team.TeamEvent{
+		Type:   "team.summary",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"summary":        "all docs reviewed",
+			"summary_source": "lead",
+		},
+	})
+	require.NoError(t, err)
+
+	broker := &Broker{TeamStore: store}
+	raw, meta, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+		"team_id":    teamID,
+		"timeout_ms": 1,
+	})
+	require.NoError(t, err)
+	result, ok := raw.(WaitTeamResult)
+	require.True(t, ok)
+	assert.Equal(t, teamID, result.TeamID)
+	assert.Equal(t, string(team.TeamStatusDone), result.Status)
+	assert.True(t, result.Terminal)
+	assert.False(t, result.TimedOut)
+	assert.True(t, result.SummaryReady)
+	assert.Equal(t, "all docs reviewed", result.Summary)
+	assert.Equal(t, "lead", result.SummarySource)
+	assert.Equal(t, summarySeq, result.SummaryEventSeq)
+	assert.Equal(t, summarySeq, result.LatestSeq)
+	require.NotNil(t, meta)
+	assert.Contains(t, meta[cacheSafeSummaryMetadataKey], "Summary is ready")
+}
+
+func TestBrokerExecuteWaitTeamWaitsForSummaryWhenPlannerConfigured(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:            "team-wait-async",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+
+	broker := &Broker{
+		TeamStore:   store,
+		TeamPlanner: &team.LeadPlanner{},
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(50 * time.Millisecond)
+		_ = store.UpdateTeamStatus(ctx, teamID, team.TeamStatusDone)
+		_, _ = store.AppendTeamEvent(ctx, team.TeamEvent{
+			Type:   "team.completed",
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"status": string(team.TeamStatusDone),
+			},
+		})
+		time.Sleep(50 * time.Millisecond)
+		_, _ = store.AppendTeamEvent(ctx, team.TeamEvent{
+			Type:   "team.summary",
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"summary": "async final summary",
+			},
+		})
+	}()
+
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+		"team_id":    teamID,
+		"timeout_ms": 2000,
+	})
+	require.NoError(t, err)
+	<-done
+	result, ok := raw.(WaitTeamResult)
+	require.True(t, ok)
+	assert.True(t, result.Terminal)
+	assert.False(t, result.TimedOut)
+	assert.True(t, result.SummaryReady)
+	assert.Equal(t, "async final summary", result.Summary)
+}
+
+func TestBrokerExecuteWaitTeamInfersSingleLeadTeam(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:            "team-lead-default",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusDone,
+	})
+	require.NoError(t, err)
+	_, err = store.AppendTeamEvent(ctx, team.TeamEvent{
+		Type:   "team.completed",
+		TeamID: teamID,
+		Payload: map[string]interface{}{
+			"status": string(team.TeamStatusDone),
+		},
+	})
+	require.NoError(t, err)
+
+	broker := &Broker{TeamStore: store}
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+		"timeout_ms": 1,
+	})
+	require.NoError(t, err)
+	result, ok := raw.(WaitTeamResult)
+	require.True(t, ok)
+	assert.Equal(t, teamID, result.TeamID)
+	assert.True(t, result.Terminal)
 }
 
 func TestBrokerExecuteTeamToolRequiresRunMeta(t *testing.T) {
@@ -901,6 +1029,42 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, records, 2)
 	assert.Equal(t, agentcontrol.WorkflowSpawnTeam, records[0].Workflow)
+}
+
+func TestBrokerExecuteSpawnTeamAcceptsJSONStringTeammatesAndTasks(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	broker := &Broker{TeamStore: store}
+
+	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+		"team_id":    "team-json-args",
+		"auto_start": false,
+		"teammates":  `[{"id":"mate-a","name":"planner"},{"id":"mate-b","name":"reviewer"}]`,
+		"tasks":      `[{"id":"task-1","title":"draft plan","goal":"create task plan","assignee":"mate-a"},{"id":"task-2","title":"review plan","goal":"review task plan","assignee":"mate-b","depends_on":["task-1"]}]`,
+	})
+	require.NoError(t, err)
+
+	result, ok := raw.(SpawnTeamResult)
+	require.True(t, ok)
+	assert.Equal(t, "team-json-args", result.TeamID)
+	assert.Equal(t, 2, result.TeammateCount)
+	assert.Equal(t, 2, result.TaskCount)
+
+	teammates, err := store.ListTeammates(ctx, "team-json-args")
+	require.NoError(t, err)
+	assert.Len(t, teammates, 2)
+
+	tasks, err := store.ListTasks(ctx, team.TaskFilter{TeamID: "team-json-args"})
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	task1, err := store.GetTask(ctx, "task-1")
+	require.NoError(t, err)
+	require.NotNil(t, task1)
+	assert.Equal(t, "create task plan", task1.Goal)
+
+	deps, err := store.ListTaskDependencies(ctx, "task-2")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"task-1"}, deps)
 }
 
 func TestBrokerExecuteSpawnTeamProjectsTeammatesImmediately(t *testing.T) {

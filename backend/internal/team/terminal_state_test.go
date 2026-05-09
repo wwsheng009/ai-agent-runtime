@@ -117,6 +117,69 @@ func TestReconcileTerminalTeamStateDoesNotDowngradeTerminalDoneTeam(t *testing.T
 	assert.Empty(t, events)
 }
 
+func TestReconcileTerminalTeamStateDoesNotCompletePausedCancelledTeam(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{
+		Status: TeamStatusPaused,
+	})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, Task{
+		ID:      "task-cancelled",
+		TeamID:  teamID,
+		Title:   "cancelled task",
+		Status:  TaskStatusCancelled,
+		Summary: "cancelled by user interrupt",
+	})
+	require.NoError(t, err)
+
+	result, err := ReconcileTerminalTeamState(ctx, TerminalTeamServices{
+		Store: store,
+	}, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Terminal)
+	assert.False(t, result.Transition)
+	assert.Equal(t, TeamStatusPaused, result.Status)
+
+	record, err := store.GetTeam(ctx, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.Equal(t, TeamStatusPaused, record.Status)
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	assert.Empty(t, events)
+}
+
+func TestReconcileTerminalTeamStateDoesNotCompleteEmptyActiveTeam(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{
+		Status: TeamStatusActive,
+	})
+	require.NoError(t, err)
+
+	result, err := ReconcileTerminalTeamState(ctx, TerminalTeamServices{
+		Store: store,
+	}, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Terminal)
+	assert.False(t, result.Transition)
+
+	record, err := store.GetTeam(ctx, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.Equal(t, TeamStatusActive, record.Status)
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	assert.Empty(t, events)
+}
+
 func TestReconcileTerminalTeamStateWaitsForBusyTeammate(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

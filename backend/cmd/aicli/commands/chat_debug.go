@@ -2,13 +2,17 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -80,6 +84,7 @@ func printChatDebugInfo(session *ChatSession) {
 	} else {
 		printChatSessionMetaRow("Surface:", "<none>")
 	}
+	printChatDebugAgentControl(session)
 	printChatDebugAgentGraph(session)
 	printChatDebugMailbox(session)
 }
@@ -460,6 +465,11 @@ func printChatDebugAgentGraph(session *ChatSession) {
 	}
 }
 
+func printChatDebugAgentControl(session *ChatSession) {
+	fmt.Println("AgentControl Registry:")
+	fmt.Println(chatAgentPanelRegistryLine(session))
+}
+
 func chatDebugAgentGraphLines(session *ChatSession) []string {
 	return chatAgentGraphLines(session)
 }
@@ -517,7 +527,26 @@ func chatAgentGraphLines(session *ChatSession) []string {
 }
 
 func printChatAgentPanel(session *ChatSession, argument string) {
-	lines := chatAgentPanelLines(session, parseChatAgentPanelLimit(argument, 8))
+	opts := parseChatAgentPanelOptions(argument, 8)
+	if changed, err := applyChatAgentPanelNavigation(session, opts); err != nil {
+		fmt.Printf("错误: %v\n", err)
+		return
+	} else if changed {
+		warnIfChatSessionSyncFails(session, "set panel selected agent target", syncRuntimeSessionFromChat(session))
+	}
+	if opts.Follow && shouldUseChatAgentPanelModal(session) {
+		if err := runChatAgentPanelModal(session, opts); err != nil {
+			if err == io.EOF {
+				return
+			}
+			fmt.Printf("错误: %v\n", err)
+		}
+		return
+	}
+	lines := chatAgentPanelLines(session, opts.Limit)
+	if opts.Follow {
+		lines = append(lines, chatAgentPanelFollowLines(session, opts)...)
+	}
 	if useRuntimeSelectionPopup(session) {
 		session.Surface.ShowPopup(lines)
 		fmt.Println("Agent Control Panel: shown")
@@ -528,14 +557,54 @@ func printChatAgentPanel(session *ChatSession, argument string) {
 	}
 }
 
+func shouldUseChatAgentPanelModal(session *ChatSession) bool {
+	return useRuntimeSelectionPopup(session) && shouldUseInteractiveLineEditor(session)
+}
+
 func parseChatAgentPanelLimit(argument string, fallback int) int {
+	return parseChatAgentPanelOptions(argument, fallback).Limit
+}
+
+type chatAgentPanelOptions struct {
+	Limit   int
+	Follow  bool
+	Timeout time.Duration
+	Nav     string
+	Target  string
+}
+
+func parseChatAgentPanelOptions(argument string, fallback int) chatAgentPanelOptions {
 	limit := fallback
+	follow := false
+	timeout := 10 * time.Second
 	for _, field := range strings.Fields(strings.TrimSpace(argument)) {
 		if strings.EqualFold(field, "panel") || strings.EqualFold(field, "pane") || strings.EqualFold(field, "dashboard") {
 			continue
 		}
+		if strings.EqualFold(field, "next") || strings.EqualFold(field, "prev") || strings.EqualFold(field, "previous") {
+			if strings.EqualFold(field, "previous") {
+				field = "prev"
+			}
+			return chatAgentPanelOptions{Limit: limit, Follow: follow, Timeout: timeout, Nav: strings.ToLower(field)}
+		}
+		if strings.EqualFold(field, "target") {
+			continue
+		}
+		if strings.EqualFold(field, "follow") || strings.EqualFold(field, "watch") {
+			follow = true
+			continue
+		}
+		if duration, ok := chatCollabTimeoutToken(field); ok {
+			if duration > 0 {
+				timeout = duration
+			}
+			continue
+		}
 		value, err := strconv.Atoi(field)
 		if err != nil || value <= 0 {
+			if !strings.HasPrefix(field, "timeout=") && !strings.HasPrefix(field, "wait=") {
+				return chatAgentPanelOptions{Limit: limit, Follow: follow, Timeout: timeout, Nav: "target", Target: strings.TrimSpace(field)}
+			}
 			continue
 		}
 		if value > 50 {
@@ -543,7 +612,479 @@ func parseChatAgentPanelLimit(argument string, fallback int) int {
 		}
 		limit = value
 	}
-	return limit
+	return chatAgentPanelOptions{Limit: limit, Follow: follow, Timeout: timeout}
+}
+
+func applyChatAgentPanelNavigation(session *ChatSession, opts chatAgentPanelOptions) (bool, error) {
+	if strings.TrimSpace(opts.Nav) == "" {
+		return false, nil
+	}
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.ActorRegistry == nil {
+		return false, fmt.Errorf("agent registry not configured")
+	}
+	switch strings.ToLower(strings.TrimSpace(opts.Nav)) {
+	case "target":
+		if strings.TrimSpace(opts.Target) == "" {
+			return false, nil
+		}
+		resolved, err := resolveChatAgentTarget(session, opts.Target)
+		if err != nil {
+			return false, err
+		}
+		session.SelectedAgentTarget = firstNonEmptyChatValue(resolved.Path, resolved.SessionID, resolved.ID)
+		return true, nil
+	case "next", "prev":
+		target, err := nextChatAgentPanelTarget(session, strings.EqualFold(opts.Nav, "prev"))
+		if err != nil {
+			return false, err
+		}
+		if target == "" {
+			return false, nil
+		}
+		session.SelectedAgentTarget = target
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func nextChatAgentPanelTarget(session *ChatSession, previous bool) (string, error) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.ActorRegistry == nil {
+		return "", fmt.Errorf("agent registry not configured")
+	}
+	parentSessionID := ""
+	if session.RuntimeSession != nil {
+		parentSessionID = strings.TrimSpace(session.RuntimeSession.ID)
+	}
+	list, err := session.LocalRuntimeHost.ActorRegistry.List(context.Background(), parentSessionID, toolbroker.ListAgentsArgs{})
+	if err != nil {
+		return "", err
+	}
+	if list == nil || len(list.Agents) == 0 {
+		return "", nil
+	}
+	targets := make([]string, 0, len(list.Agents))
+	for _, agent := range list.Agents {
+		target := firstNonEmptyChatValue(agent.Path, agent.SessionID, agent.ID)
+		if strings.TrimSpace(target) != "" {
+			targets = append(targets, strings.TrimSpace(target))
+		}
+	}
+	if len(targets) == 0 {
+		return "", nil
+	}
+	current := strings.TrimSpace(session.SelectedAgentTarget)
+	index := -1
+	for i, target := range targets {
+		if strings.EqualFold(target, current) {
+			index = i
+			break
+		}
+	}
+	if previous {
+		if index <= 0 {
+			return targets[len(targets)-1], nil
+		}
+		return targets[index-1], nil
+	}
+	if index < 0 || index+1 >= len(targets) {
+		return targets[0], nil
+	}
+	return targets[index+1], nil
+}
+
+type chatAgentPanelPane int
+
+const (
+	chatAgentPanelPaneAgents chatAgentPanelPane = iota
+	chatAgentPanelPaneMailbox
+	chatAgentPanelPaneTimeline
+)
+
+func (p chatAgentPanelPane) String() string {
+	switch p {
+	case chatAgentPanelPaneMailbox:
+		return "mailbox"
+	case chatAgentPanelPaneTimeline:
+		return "timeline"
+	default:
+		return "agents"
+	}
+}
+
+type chatAgentPanelModalState struct {
+	Limit  int
+	Pane   chatAgentPanelPane
+	Cursor int
+}
+
+func newChatAgentPanelModalState(limit int) chatAgentPanelModalState {
+	if limit <= 0 {
+		limit = 8
+	}
+	return chatAgentPanelModalState{Limit: limit}
+}
+
+func (s *chatAgentPanelModalState) MoveCursor(delta int, total int) {
+	if s == nil || delta == 0 || total <= 0 {
+		return
+	}
+	s.Cursor += delta
+	if s.Cursor < 0 {
+		s.Cursor = total - 1
+	}
+	if s.Cursor >= total {
+		s.Cursor = 0
+	}
+}
+
+func (s *chatAgentPanelModalState) MovePane(delta int) {
+	if s == nil || delta == 0 {
+		return
+	}
+	next := int(s.Pane) + delta
+	for next < 0 {
+		next += 3
+	}
+	s.Pane = chatAgentPanelPane(next % 3)
+}
+
+func runChatAgentPanelModal(session *ChatSession, opts chatAgentPanelOptions) error {
+	if session == nil || session.InputBox == nil {
+		return io.EOF
+	}
+	state := newChatAgentPanelModalState(opts.Limit)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer clearRuntimeSelectionPopup(session)
+	beginDirectInteractiveOutput(session)
+	controller := newChatAgentPanelModalController(session, &state, "Agent Panel> ")
+	controller.Start(ctx)
+	defer controller.Stop()
+	controller.Render()
+	_, err := session.InputBox.ReadTransientPromptWithHooks("Agent Panel> ", ui.LineEditorHooks{
+		OnNavigate: func(snapshot ui.LineEditorSnapshot, delta int) bool {
+			controller.Navigate(delta)
+			return true
+		},
+		OnMove: func(snapshot ui.LineEditorSnapshot, delta int) bool {
+			controller.MovePane(delta)
+			return true
+		},
+		OnSubmit: func(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
+			controller.Select()
+			return ui.LineEditorReplacement{}, true
+		},
+		OnCancel: func(snapshot ui.LineEditorSnapshot) bool {
+			return true
+		},
+	})
+	if handledErr := handleChatAgentPanelModalInputError(session, err); handledErr != err {
+		return handledErr
+	}
+	return err
+}
+
+func handleChatAgentPanelModalInputError(session *ChatSession, err error) error {
+	if errors.Is(err, ui.ErrInteractiveInputInterrupted) || errors.Is(err, ui.ErrInteractiveInputExitRequested) {
+		if session == nil {
+			return io.EOF
+		}
+		session.Interrupt()
+		if session.Interaction != nil {
+			session.Interaction.ResetPromptState()
+		}
+		return io.EOF
+	}
+	return err
+}
+
+type chatAgentPanelModalController struct {
+	session *ChatSession
+	state   *chatAgentPanelModalState
+	prompt  string
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+}
+
+func newChatAgentPanelModalController(session *ChatSession, state *chatAgentPanelModalState, prompt string) *chatAgentPanelModalController {
+	return &chatAgentPanelModalController{session: session, state: state, prompt: prompt}
+}
+
+func (c *chatAgentPanelModalController) Start(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	watchCtx, cancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	c.cancel = cancel
+	c.mu.Unlock()
+	updates := watchChatAgentPanelModalUpdates(watchCtx, c.session)
+	go func() {
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case _, ok := <-updates:
+				if !ok {
+					return
+				}
+				c.Render()
+			}
+		}
+	}()
+}
+
+func (c *chatAgentPanelModalController) Stop() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	cancel := c.cancel
+	c.cancel = nil
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (c *chatAgentPanelModalController) Navigate(delta int) {
+	if c == nil || c.state == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	agents, _ := chatAgentPickerItems(c.session)
+	c.state.MoveCursor(delta, len(agents))
+	c.renderLocked()
+}
+
+func (c *chatAgentPanelModalController) MovePane(delta int) {
+	if c == nil || c.state == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.state.MovePane(delta)
+	c.renderLocked()
+}
+
+func (c *chatAgentPanelModalController) Select() {
+	if c == nil || c.state == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	agents, err := chatAgentPickerItems(c.session)
+	if err != nil || len(agents) == 0 {
+		c.renderLocked()
+		return
+	}
+	if c.state.Cursor < 0 {
+		c.state.Cursor = 0
+	}
+	if c.state.Cursor >= len(agents) {
+		c.state.Cursor = len(agents) - 1
+	}
+	selected := agents[c.state.Cursor]
+	c.session.SelectedAgentTarget = firstNonEmptyChatValue(selected.Path, selected.SessionID, selected.ID)
+	warnIfChatSessionSyncFails(c.session, "set panel selected agent target", syncRuntimeSessionFromChat(c.session))
+	c.renderLocked()
+}
+
+func (c *chatAgentPanelModalController) Render() {
+	if c == nil || c.session == nil || c.session.Surface == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.renderLocked()
+}
+
+func (c *chatAgentPanelModalController) renderLocked() {
+	if c == nil || c.session == nil || c.session.Surface == nil {
+		return
+	}
+	c.session.Surface.ShowPopupInput(chatAgentPanelModalLines(c.session, c.state), c.prompt)
+}
+
+func chatAgentPanelModalLines(session *ChatSession, state *chatAgentPanelModalState) []string {
+	if state == nil {
+		s := newChatAgentPanelModalState(8)
+		state = &s
+	}
+	lines := []string{
+		"Agent Control Panel:",
+		fmt.Sprintf("  mode=follow pane=%s cursor=%d", state.Pane.String(), state.Cursor+1),
+	}
+	selected := "<none>"
+	if session != nil && strings.TrimSpace(session.SelectedAgentTarget) != "" {
+		selected = strings.TrimSpace(session.SelectedAgentTarget)
+	}
+	lines = append(lines, "  selected="+selected)
+	if session != nil && session.RuntimeSession != nil {
+		lines = append(lines, "  parent_session="+strings.TrimSpace(session.RuntimeSession.ID)+" state="+strings.TrimSpace(string(session.RuntimeSession.State)))
+	}
+	if session != nil && session.ActiveTeam != nil {
+		lines = append(lines, "  active_team="+strings.TrimSpace(session.ActiveTeam.TeamID)+" agent="+strings.TrimSpace(session.ActiveTeam.AgentID))
+	}
+	lines = append(lines, chatAgentPanelRegistryLine(session))
+	lines = append(lines, chatAgentPanelModalAgentLines(session, state)...)
+	lines = append(lines, chatAgentPanelModalMailboxLines(session, state)...)
+	lines = append(lines, chatAgentPanelModalTimelineLines(session, state)...)
+	lines = append(lines, "  提示: ↑↓ 选择 agent，←→ 切换 pane，Enter 设为 target，Esc 关闭")
+	return compactChatAgentPanelLines(lines, 80)
+}
+
+func chatAgentPanelModalAgentLines(session *ChatSession, state *chatAgentPanelModalState) []string {
+	lines := []string{"Agents:"}
+	agents, err := chatAgentPickerItems(session)
+	if err != nil {
+		return append(lines, "  <error: "+err.Error()+">")
+	}
+	if len(agents) == 0 {
+		return append(lines, "  <none>")
+	}
+	cursor := state.Cursor
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(agents) {
+		cursor = len(agents) - 1
+	}
+	for index, agent := range agents {
+		marker := " "
+		if index == cursor {
+			marker = ">"
+		}
+		selected := " "
+		if session != nil && chatAgentTargetMatchesSelected(session.SelectedAgentTarget, agent) {
+			selected = "*"
+		}
+		lines = append(lines, fmt.Sprintf("  %s%s [%d] %s", marker, selected, index+1, chatAgentPickerOptionLine(agent)))
+	}
+	return lines
+}
+
+func chatAgentPanelModalMailboxLines(session *ChatSession, state *chatAgentPanelModalState) []string {
+	header := "Mailbox:"
+	if state.Pane == chatAgentPanelPaneMailbox {
+		header += " <focused>"
+	}
+	lines := []string{header}
+	target := ""
+	if session != nil && strings.TrimSpace(session.SelectedAgentTarget) != "" {
+		target = "selected"
+	}
+	return append(lines, chatCollabSnapshotLines(session, target, state.Limit, "")...)
+}
+
+func chatAgentPanelModalTimelineLines(session *ChatSession, state *chatAgentPanelModalState) []string {
+	header := "Timeline:"
+	if state.Pane == chatAgentPanelPaneTimeline {
+		header += " <focused>"
+	}
+	lines := []string{header}
+	if session != nil && session.ActiveTeam != nil {
+		return append(lines, chatTimelineLines(session, state.Limit)...)
+	}
+	return append(lines, "  <none>")
+}
+
+func watchChatAgentPanelModalUpdates(ctx context.Context, session *ChatSession) <-chan struct{} {
+	out := make(chan struct{}, 1)
+	if session == nil || session.LocalRuntimeHost == nil {
+		return out
+	}
+	watchChatAgentPanelMailboxUpdates(ctx, session, out)
+	watchChatAgentPanelAgentUpdates(ctx, session, out)
+	watchChatAgentPanelTaskUpdates(ctx, session, out)
+	return out
+}
+
+func watchChatAgentPanelMailboxUpdates(ctx context.Context, session *ChatSession, out chan<- struct{}) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.EventStore == nil {
+		return
+	}
+	sessionIDs, err := chatCollabFollowSessionIDs(session, "all")
+	if err != nil || len(sessionIDs) == 0 {
+		return
+	}
+	for _, sessionID := range sessionIDs {
+		watch, unwatch, ok := runtimechat.WatchMailboxAgentControlFirst(ctx, session.LocalRuntimeHost.EventStore, sessionID)
+		if ok {
+			go forwardChatAgentPanelModalUpdates(ctx, watch, unwatch, out)
+		}
+	}
+}
+
+func watchChatAgentPanelAgentUpdates(ctx context.Context, session *ChatSession, out chan<- struct{}) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.AgentRegistryStore == nil {
+		return
+	}
+	source, ok := session.LocalRuntimeHost.AgentRegistryStore.(agentcontrol.AgentWakeSource)
+	if !ok || source == nil {
+		return
+	}
+	filter := agentcontrol.AgentWakeFilter{}
+	if session.RuntimeSession != nil {
+		filter.RootSessionID = strings.TrimSpace(session.RuntimeSession.ID)
+	}
+	watch, unwatch := source.WatchAgentControlAgentWake(ctx, filter)
+	go forwardChatAgentPanelModalUpdates(ctx, watch, unwatch, out)
+}
+
+func watchChatAgentPanelTaskUpdates(ctx context.Context, session *ChatSession, out chan<- struct{}) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil || session.ActiveTeam == nil {
+		return
+	}
+	watchSource := team.NewAgentControlTaskRegistry(session.LocalRuntimeHost.TeamStore)
+	watch, unwatch := watchSource.WatchAgentControlTaskWake(ctx, agentcontrol.TaskWakeFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   strings.TrimSpace(session.ActiveTeam.TeamID),
+	})
+	go forwardChatAgentPanelModalUpdates(ctx, watch, unwatch, out)
+}
+
+func forwardChatAgentPanelModalUpdates[T any](ctx context.Context, watch <-chan T, unwatch func(), out chan<- struct{}) {
+	defer func() {
+		if unwatch != nil {
+			unwatch()
+		}
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-watch:
+			if !ok {
+				return
+			}
+			select {
+			case out <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+func chatAgentPanelFollowLines(session *ChatSession, opts chatAgentPanelOptions) []string {
+	target := ""
+	if session != nil {
+		target = strings.TrimSpace(session.SelectedAgentTarget)
+	}
+	followOpts := chatCollabCommandConfig{
+		Target:  target,
+		Limit:   opts.Limit,
+		Follow:  true,
+		Timeout: opts.Timeout,
+	}
+	if followOpts.Target == "" {
+		followOpts.Target = "parent"
+	}
+	lines := []string{"Panel Follow:"}
+	lines = append(lines, chatCollabFollowUpdateLines(session, followOpts)...)
+	return lines
 }
 
 func chatAgentPanelLines(session *ChatSession, limit int) []string {
@@ -570,6 +1111,9 @@ func chatAgentPanelLines(session *ChatSession, limit int) []string {
 	lines = append(lines, chatAgentGraphLines(session)...)
 	lines = append(lines, "Mailbox:")
 	if strings.TrimSpace(selected) != "" && selected != "<none>" {
+		lines = append(lines, "  target=parent")
+		lines = append(lines, chatCollabSnapshotLines(session, "", limit, "")...)
+		lines = append(lines, "  target=selected")
 		lines = append(lines, chatCollabSnapshotLines(session, "selected", limit, "")...)
 	} else {
 		lines = append(lines, chatCollabSnapshotLines(session, "", limit, "")...)
@@ -590,6 +1134,15 @@ func chatAgentPanelRegistryLine(session *ChatSession) string {
 	}
 	if session.LocalRuntimeHost.AgentControl != nil {
 		parts = append(parts, "service=on")
+		health, err := session.LocalRuntimeHost.AgentControl.Health(context.Background())
+		if err != nil {
+			parts = append(parts, "service_health=error")
+			parts = append(parts, "mode="+session.LocalRuntimeHost.AgentControl.Mode())
+		} else {
+			parts = append(parts, "service_health=ok")
+			parts = append(parts, "mode="+health.Mode)
+			parts = append(parts, "shared_db="+strconv.FormatBool(health.SharedDB))
+		}
 	}
 	if session.LocalRuntimeHost.AgentRegistryStore != nil {
 		parts = append(parts, "agents=durable")
@@ -600,7 +1153,29 @@ func chatAgentPanelRegistryLine(session *ChatSession) string {
 	if session.LocalRuntimeHost.TeamStore != nil {
 		parts = append(parts, "tasks=durable")
 	}
+	if projection := chatMailboxProjectionStatusPart("runtime_projection", session.LocalRuntimeHost.EventStore); projection != "" {
+		parts = append(parts, projection)
+	}
+	if projection := chatMailboxProjectionStatusPart("team_projection", session.LocalRuntimeHost.TeamStore); projection != "" {
+		parts = append(parts, projection)
+	}
 	return strings.Join(parts, " ")
+}
+
+func chatMailboxProjectionStatusPart(label string, store interface{}) string {
+	reporter, ok := store.(agentcontrol.MailboxProjectionReporter)
+	if !ok || reporter == nil {
+		return ""
+	}
+	status := reporter.AgentControlMailboxProjectionStatus().Normalize()
+	value := status.Mode
+	if status.Reason != "" {
+		value += ":" + status.Reason
+	}
+	if status.Store != "" {
+		value += "@" + status.Store
+	}
+	return label + "=" + value
 }
 
 func compactChatAgentPanelLines(lines []string, maxLines int) []string {

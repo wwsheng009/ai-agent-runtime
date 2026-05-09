@@ -96,6 +96,39 @@ type SpawnTeamResult struct {
 	TaskCount     int      `json:"task_count"`
 }
 
+// WaitTeamArgs describes a durable wait/read request for a spawned team run.
+type WaitTeamArgs struct {
+	TeamID         string `json:"team_id,omitempty"`
+	AfterSeq       int64  `json:"after_seq,omitempty"`
+	TimeoutMs      int    `json:"timeout_ms,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+	RequireSummary *bool  `json:"require_summary,omitempty"`
+}
+
+// WaitTeamEventResult returns one persisted team lifecycle event.
+type WaitTeamEventResult struct {
+	Seq       int64                  `json:"seq"`
+	Type      string                 `json:"type"`
+	TeamID    string                 `json:"team_id"`
+	Payload   map[string]interface{} `json:"payload,omitempty"`
+	CreatedAt time.Time              `json:"created_at,omitempty"`
+}
+
+// WaitTeamResult returns terminal state plus recent durable lifecycle events.
+type WaitTeamResult struct {
+	TeamID          string                `json:"team_id"`
+	Status          string                `json:"status"`
+	Terminal        bool                  `json:"terminal"`
+	TimedOut        bool                  `json:"timed_out"`
+	SummaryReady    bool                  `json:"summary_ready"`
+	Summary         string                `json:"summary,omitempty"`
+	SummarySource   string                `json:"summary_source,omitempty"`
+	SummaryEventSeq int64                 `json:"summary_event_seq,omitempty"`
+	Events          []WaitTeamEventResult `json:"events,omitempty"`
+	EventCount      int                   `json:"event_count"`
+	LatestSeq       int64                 `json:"latest_seq,omitempty"`
+}
+
 // TeamMailboxDispatcher delivers mailbox events to active team sessions.
 type TeamMailboxDispatcher interface {
 	DispatchTeamMailboxMessage(ctx context.Context, message team.MailMessage) error

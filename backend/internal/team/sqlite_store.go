@@ -57,6 +57,35 @@ func (s *SQLiteStore) SetGlobalMailboxWriter(writer agentcontrol.GlobalMailboxWr
 	s.globalMailboxWriterMu.Unlock()
 }
 
+// AgentControlMailboxProjectionStatus reports the team store's local to global
+// AgentControl mailbox projection semantics.
+func (s *SQLiteStore) AgentControlMailboxProjectionStatus() agentcontrol.MailboxProjectionStatus {
+	status := agentcontrol.MailboxProjectionStatus{Store: "team_sqlite"}
+	if s == nil || s.db == nil {
+		status.Mode = agentcontrol.MailboxProjectionModeLocalOnly
+		status.Reason = "store_not_configured"
+		return status.Normalize()
+	}
+	s.globalMailboxWriterMu.RLock()
+	writer := s.globalMailboxWriter
+	s.globalMailboxWriterMu.RUnlock()
+	if writer == nil {
+		status.Mode = agentcontrol.MailboxProjectionModeLocalOnly
+		status.Reason = "global_writer_not_configured"
+		return status.Normalize()
+	}
+	if txWriter, ok := writer.(agentcontrol.GlobalMailboxSQLiteTxWriter); ok && txWriter != nil {
+		if _, ok := txWriter.GlobalMailboxAttachDSN(); ok {
+			status.Mode = agentcontrol.MailboxProjectionModeTransactional
+			status.Reason = "global_registry_attachable"
+			return status.Normalize()
+		}
+	}
+	status.Mode = agentcontrol.MailboxProjectionModeWriteThrough
+	status.Reason = "global_registry_not_attachable"
+	return status.Normalize()
+}
+
 const globalMailReceiptAgent = "*"
 
 type mailboxWatcher struct {

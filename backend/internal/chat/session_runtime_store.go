@@ -93,6 +93,28 @@ func (s *InMemoryRuntimeStore) SetGlobalMailboxWriter(writer agentcontrol.Global
 	s.mu.Unlock()
 }
 
+// AgentControlMailboxProjectionStatus reports the runtime store's local to
+// global AgentControl mailbox projection semantics.
+func (s *InMemoryRuntimeStore) AgentControlMailboxProjectionStatus() agentcontrol.MailboxProjectionStatus {
+	status := agentcontrol.MailboxProjectionStatus{Store: "runtime_in_memory"}
+	if s == nil {
+		status.Mode = agentcontrol.MailboxProjectionModeLocalOnly
+		status.Reason = "store_not_configured"
+		return status.Normalize()
+	}
+	s.mu.RLock()
+	writer := s.globalMailboxWriter
+	s.mu.RUnlock()
+	if writer == nil {
+		status.Mode = agentcontrol.MailboxProjectionModeLocalOnly
+		status.Reason = "global_writer_not_configured"
+		return status.Normalize()
+	}
+	status.Mode = agentcontrol.MailboxProjectionModeWriteThrough
+	status.Reason = "in_memory_store_cannot_share_sqlite_transaction"
+	return status.Normalize()
+}
+
 type storedEvent struct {
 	Seq   int64
 	Event runtimeevents.Event
@@ -979,6 +1001,35 @@ func (s *SQLiteRuntimeStore) SetGlobalMailboxWriter(writer agentcontrol.GlobalMa
 	s.mu.Lock()
 	s.globalMailboxWriter = writer
 	s.mu.Unlock()
+}
+
+// AgentControlMailboxProjectionStatus reports the runtime store's local to
+// global AgentControl mailbox projection semantics.
+func (s *SQLiteRuntimeStore) AgentControlMailboxProjectionStatus() agentcontrol.MailboxProjectionStatus {
+	status := agentcontrol.MailboxProjectionStatus{Store: "runtime_sqlite"}
+	if s == nil || s.db == nil {
+		status.Mode = agentcontrol.MailboxProjectionModeLocalOnly
+		status.Reason = "store_not_configured"
+		return status.Normalize()
+	}
+	s.mu.Lock()
+	writer := s.globalMailboxWriter
+	s.mu.Unlock()
+	if writer == nil {
+		status.Mode = agentcontrol.MailboxProjectionModeLocalOnly
+		status.Reason = "global_writer_not_configured"
+		return status.Normalize()
+	}
+	if txWriter, ok := writer.(agentcontrol.GlobalMailboxSQLiteTxWriter); ok && txWriter != nil {
+		if _, ok := txWriter.GlobalMailboxAttachDSN(); ok {
+			status.Mode = agentcontrol.MailboxProjectionModeTransactional
+			status.Reason = "global_registry_attachable"
+			return status.Normalize()
+		}
+	}
+	status.Mode = agentcontrol.MailboxProjectionModeWriteThrough
+	status.Reason = "global_registry_not_attachable"
+	return status.Normalize()
 }
 
 // NewSQLiteRuntimeStore opens a sqlite-backed runtime store.

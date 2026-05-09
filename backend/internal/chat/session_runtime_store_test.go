@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,6 +18,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+type failingGlobalMailboxWriter struct{}
+
+func (failingGlobalMailboxWriter) AppendGlobalMailboxRecord(context.Context, string, agentcontrol.MailboxRecord) (int64, error) {
+	return 0, fmt.Errorf("global mailbox writer unavailable")
+}
 
 func assertSQLiteTableMissing(t *testing.T, db *sql.DB, table string) {
 	t.Helper()
@@ -155,6 +162,60 @@ func TestSQLiteRuntimeStoreRepairsMailboxGlobalProjection(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, records, 1)
 	require.Equal(t, globalRecords[0].Seq, records[0].GlobalSeq)
+}
+
+func TestSQLiteRuntimeStoreWriteThroughFailureKeepsLocalProjectionRepairable(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-mailbox-write-through-failure-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	store.SetGlobalMailboxWriter(failingGlobalMailboxWriter{})
+
+	sessionID := "session-write-through-failure"
+	_, _, err = store.AppendAgentControlMailbox(ctx, sessionID, team.MailMessage{
+		ID:        "mailbox-write-through-failure-runtime",
+		FromAgent: "lead",
+		ToAgent:   "worker",
+		Kind:      agentcontrol.MailboxKindAgentMessage,
+		Body:      "repairable runtime local row",
+		Metadata: agentcontrol.Envelope{
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MessageType:     agentcontrol.MessageTypeAgentMessage,
+			ControlAction:   agentcontrol.ActionAgentMessage,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindAgentMessage,
+		}.Metadata(),
+	})
+	require.NoError(t, err)
+	records, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:     agentcontrol.MailboxScopeSession,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, int64(0), records[0].GlobalSeq)
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global-mailbox.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+	store.SetGlobalMailboxWriter(globalStore)
+	repaired, err := store.RepairAgentControlMailboxProjection(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:     agentcontrol.MailboxScopeSession,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), repaired)
+	globalRecords, err := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:     agentcontrol.MailboxScopeSession,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Len(t, globalRecords, 1)
+	require.Equal(t, "mailbox-write-through-failure-runtime", globalRecords[0].MessageID)
 }
 
 func TestSQLiteRuntimeStoreRepairsMailboxLocalProjectionFromGlobal(t *testing.T) {
@@ -346,6 +407,43 @@ func TestInMemoryRuntimeStoreWatchEventsAndLastSeq(t *testing.T) {
 	lastSeq, err := store.LastEventSeq(ctx, "session-watch")
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), lastSeq)
+}
+
+func TestSQLiteRuntimeStoreMailboxProjectionStatus(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: filepath.Join(t.TempDir(), "runtime.sqlite")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	status := store.AgentControlMailboxProjectionStatus()
+	require.Equal(t, agentcontrol.MailboxProjectionModeLocalOnly, status.Mode)
+	require.Equal(t, "global_writer_not_configured", status.Reason)
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global.sqlite"),
+	})
+	require.NoError(t, err)
+	defer globalStore.Close()
+	store.SetGlobalMailboxWriter(globalStore)
+	status = store.AgentControlMailboxProjectionStatus()
+	require.Equal(t, agentcontrol.MailboxProjectionModeTransactional, status.Mode)
+	require.True(t, status.Transactional)
+	require.Equal(t, "global_registry_attachable", status.Reason)
+}
+
+func TestInMemoryRuntimeStoreMailboxProjectionStatus(t *testing.T) {
+	store := NewInMemoryRuntimeStore(16)
+	status := store.AgentControlMailboxProjectionStatus()
+	require.Equal(t, agentcontrol.MailboxProjectionModeLocalOnly, status.Mode)
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global.sqlite"),
+	})
+	require.NoError(t, err)
+	defer globalStore.Close()
+	store.SetGlobalMailboxWriter(globalStore)
+	status = store.AgentControlMailboxProjectionStatus()
+	require.Equal(t, agentcontrol.MailboxProjectionModeWriteThrough, status.Mode)
+	require.Equal(t, "in_memory_store_cannot_share_sqlite_transaction", status.Reason)
 }
 
 func TestInMemoryRuntimeStoreAppendMailbox(t *testing.T) {

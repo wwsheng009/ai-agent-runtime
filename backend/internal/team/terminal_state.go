@@ -57,6 +57,13 @@ func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServic
 			Status:     current.Status,
 		}, nil
 	}
+	if currentTeamStatus(current) == TeamStatusPaused {
+		return &TerminalTeamResult{
+			Terminal:   false,
+			Transition: false,
+			Status:     TeamStatusPaused,
+		}, nil
+	}
 
 	active, err := services.Store.ListTasks(ctx, TaskFilter{
 		TeamID: teamID,
@@ -74,6 +81,14 @@ func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServic
 		} else if busy {
 			return &TerminalTeamResult{Terminal: false}, nil
 		}
+	}
+
+	allTasks, err := services.Store.ListTasks(ctx, TaskFilter{TeamID: teamID})
+	if err != nil {
+		return nil, err
+	}
+	if len(allTasks) == 0 {
+		return &TerminalTeamResult{Terminal: false}, nil
 	}
 
 	failed, err := services.Store.ListTasks(ctx, TaskFilter{
@@ -175,6 +190,12 @@ func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, s
 				result.Status = currentStatus
 				return nil
 			}
+			if currentStatus == TeamStatusPaused {
+				result.Terminal = false
+				result.Transition = false
+				result.Status = currentStatus
+				return nil
+			}
 
 			activeCount, err := countTasksByStatusTx(ctx, tx, teamID, TaskStatusPending, TaskStatusReady, TaskStatusRunning, TaskStatusBlocked)
 			if err != nil {
@@ -193,6 +214,15 @@ func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, s
 					result.Terminal = false
 					return nil
 				}
+			}
+
+			taskCount, err := countTeamTasksTx(ctx, tx, teamID)
+			if err != nil {
+				return err
+			}
+			if taskCount == 0 {
+				result.Terminal = false
+				return nil
 			}
 
 			failedCount, err := countTasksByStatusTx(ctx, tx, teamID, TaskStatusFailed)
@@ -317,6 +347,19 @@ func countTasksByStatusTx(ctx context.Context, tx *sql.Tx, teamID string, status
 		FROM agent_control_task_records
 		WHERE workflow = ? AND team_id = ? AND status IN (`+strings.Join(placeholders, ",")+`)
 	`, args...)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("count team tasks: %w", err)
+	}
+	return count, nil
+}
+
+func countTeamTasksTx(ctx context.Context, tx *sql.Tx, teamID string) (int, error) {
+	row := tx.QueryRowContext(ctx, `
+		SELECT COUNT(1)
+		FROM agent_control_task_records
+		WHERE workflow = ? AND team_id = ?
+	`, agentcontrol.WorkflowSpawnTeam, teamID)
 	var count int
 	if err := row.Scan(&count); err != nil {
 		return 0, fmt.Errorf("count team tasks: %w", err)

@@ -38,8 +38,9 @@ var _ AgentSpawnReservationStore = (*SQLiteGlobalAgentRegistryStore)(nil)
 var _ AgentWakeSource = (*SQLiteGlobalAgentRegistryStore)(nil)
 
 type globalAgentWakeWatcher struct {
-	filter AgentWakeFilter
-	ch     chan<- AgentWakeEvent
+	filter  AgentWakeFilter
+	ch      chan<- AgentWakeEvent
+	unwatch func()
 }
 
 // NewSQLiteGlobalAgentRegistryStore opens a SQLite-backed AgentControl identity
@@ -59,6 +60,10 @@ func NewSQLiteGlobalAgentRegistryStore(cfg *GlobalAgentStoreConfig) (*SQLiteGlob
 	if isGlobalMailboxMemoryDSN(dsn) {
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
+	}
+	if err := configureAgentControlSQLiteDB(context.Background(), db, dsn); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	store := &SQLiteGlobalAgentRegistryStore{db: db, dsn: dsn, ownsDB: true}
 	if err := store.init(context.Background()); err != nil {
@@ -84,10 +89,30 @@ func (s *SQLiteGlobalAgentRegistryStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	s.closeAgentWakeWatchers()
 	if !s.ownsDB {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *SQLiteGlobalAgentRegistryStore) closeAgentWakeWatchers() {
+	if s == nil {
+		return
+	}
+	s.agentWakeMu.Lock()
+	watchers := s.agentWakeWatchers
+	s.agentWakeWatchers = nil
+	s.agentWakeMu.Unlock()
+	for _, watcher := range watchers {
+		if watcher.unwatch != nil {
+			watcher.unwatch()
+		}
+		if watcher.ch == nil {
+			continue
+		}
+		close(watcher.ch)
+	}
 }
 
 // UpsertAgentControlAgent inserts or refreshes one durable AgentControl
@@ -481,20 +506,14 @@ func (s *SQLiteGlobalAgentRegistryStore) WatchAgentControlAgentWake(ctx context.
 		return out, func() {}
 	}
 	filter = filter.Normalize()
+	done := make(chan struct{})
+	var once sync.Once
 	s.agentWakeMu.Lock()
 	if s.agentWakeWatchers == nil {
 		s.agentWakeWatchers = make(map[int64]globalAgentWakeWatcher)
 	}
 	s.nextAgentWakeWatchID++
 	watchID := s.nextAgentWakeWatchID
-	s.agentWakeWatchers[watchID] = globalAgentWakeWatcher{
-		filter: filter,
-		ch:     out,
-	}
-	s.agentWakeMu.Unlock()
-
-	done := make(chan struct{})
-	var once sync.Once
 	unwatch := func() {
 		once.Do(func() {
 			s.agentWakeMu.Lock()
@@ -503,6 +522,12 @@ func (s *SQLiteGlobalAgentRegistryStore) WatchAgentControlAgentWake(ctx context.
 			close(done)
 		})
 	}
+	s.agentWakeWatchers[watchID] = globalAgentWakeWatcher{
+		filter:  filter,
+		ch:      out,
+		unwatch: unwatch,
+	}
+	s.agentWakeMu.Unlock()
 	go func() {
 		select {
 		case <-ctx.Done():

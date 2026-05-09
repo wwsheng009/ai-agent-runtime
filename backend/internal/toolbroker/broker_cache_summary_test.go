@@ -11,7 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
-func TestBrokerSpawnTeamCacheSafeSummaryOmitsDynamicIDsInEnvelope(t *testing.T) {
+func TestBrokerSpawnTeamCacheSafeSummaryIncludesTeamIDAndOmitsTaskIDsInEnvelope(t *testing.T) {
 	store := newTeamStore(t)
 	broker := &Broker{TeamStore: store}
 
@@ -32,7 +32,7 @@ func TestBrokerSpawnTeamCacheSafeSummaryOmitsDynamicIDsInEnvelope(t *testing.T) 
 	summary, ok := meta[cacheSafeSummaryMetadataKey].(string)
 	require.True(t, ok)
 	assert.Contains(t, summary, "Created team run")
-	assert.NotContains(t, summary, result.TeamID)
+	assert.Contains(t, summary, result.TeamID)
 	for _, taskID := range result.TaskIDs {
 		assert.NotContains(t, summary, taskID)
 	}
@@ -49,7 +49,7 @@ func TestBrokerSpawnTeamCacheSafeSummaryOmitsDynamicIDsInEnvelope(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, envelope)
 	assert.Contains(t, envelope.Render(), "Created team run")
-	assert.NotContains(t, envelope.Render(), result.TeamID)
+	assert.Contains(t, envelope.Render(), result.TeamID)
 	for _, taskID := range result.TaskIDs {
 		assert.NotContains(t, envelope.Render(), taskID)
 	}

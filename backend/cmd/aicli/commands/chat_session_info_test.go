@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
@@ -1239,6 +1240,416 @@ func TestHandleCommand_AgentsPanelShowsUnifiedMultiAgentView(t *testing.T) {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected agents panel output to contain %q, got:\n%s", expected, output)
 		}
+	}
+}
+
+func TestHandleCommand_AgentsPanelShowsRegistryServiceMode(t *testing.T) {
+	ctx := context.Background()
+	registry, err := agentcontrol.NewRegistryService(ctx, agentcontrol.RegistryServiceConfig{
+		StorePath: filepath.Join(t.TempDir(), "agent-control.sqlite"),
+	})
+	require.NoError(t, err)
+	defer registry.Close()
+
+	root := runtimechat.NewSession("panel-user")
+	root.ID = "panel-root"
+	host := &localChatRuntimeHost{
+		EventStore:         runtimechat.NewInMemoryRuntimeStore(32),
+		SessionUser:        "panel-user",
+		AgentControl:       registry,
+		AgentRegistryStore: registry.AgentStore,
+	}
+	session := &ChatSession{
+		RuntimeSession:   root,
+		SessionUserID:    "panel-user",
+		LocalRuntimeHost: host,
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents panel 5", false); quit {
+			t.Fatal("agents panel command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"service=on",
+		"service_health=ok",
+		"mode=single_sqlite",
+		"shared_db=true",
+		"agents=durable",
+		"runtime_projection=local_only:global_writer_not_configured@runtime_in_memory",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected agents panel output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_DebugShowsAgentControlRegistryServiceMode(t *testing.T) {
+	ctx := context.Background()
+	registry, err := agentcontrol.NewRegistryService(ctx, agentcontrol.RegistryServiceConfig{
+		StorePath: filepath.Join(t.TempDir(), "agent-control.sqlite"),
+	})
+	require.NoError(t, err)
+	defer registry.Close()
+
+	root := runtimechat.NewSession("debug-user")
+	root.ID = "debug-agent-control-root"
+	host := &localChatRuntimeHost{
+		EventStore:         runtimechat.NewInMemoryRuntimeStore(32),
+		SessionUser:        "debug-user",
+		AgentControl:       registry,
+		AgentRegistryStore: registry.AgentStore,
+	}
+	session := &ChatSession{
+		RuntimeSession:   root,
+		SessionUserID:    "debug-user",
+		LocalRuntimeHost: host,
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/debug", false); quit {
+			t.Fatal("debug command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"AgentControl Registry:",
+		"service=on",
+		"service_health=ok",
+		"mode=single_sqlite",
+		"shared_db=true",
+		"agents=durable",
+		"runtime_projection=local_only:global_writer_not_configured@runtime_in_memory",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected debug output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_CollabAndPanelUseCompletionMailboxWithoutDisplayMirror(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
+	sessionStore := runtimechat.NewInMemoryStorage()
+	root := runtimechat.NewSession("collab-user")
+	root.ID = "completion-root"
+	require.NoError(t, sessionStore.Save(ctx, root))
+	child := runtimechat.NewSession("collab-user")
+	child.ID = "completion-child"
+	child.SetContext(toolbroker.AgentSessionContextParentSessionID, root.ID)
+	child.SetContext(toolbroker.AgentSessionContextRootSessionID, root.ID)
+	child.SetContext(toolbroker.AgentSessionContextPath, "/root/completion-child")
+	child.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	require.NoError(t, sessionStore.Save(ctx, child))
+	host := &localChatRuntimeHost{
+		EventStore:   runtimeStore,
+		SessionStore: sessionStore,
+		SessionUser:  "collab-user",
+	}
+	host.ActorRegistry = newLocalActorRegistry(host)
+	session := &ChatSession{
+		RuntimeSession:      root,
+		SessionUserID:       "collab-user",
+		SelectedAgentTarget: "/root/completion-child",
+		LocalRuntimeHost:    host,
+	}
+
+	completion := toolbroker.BuildSubagentCompletionMailboxMessage(root.ID, child.ID, "/root/completion-child", "worker", runtimechat.EventSessionEnd, map[string]interface{}{
+		"status": "done",
+	})
+	_, _, err := runtimeStore.AppendAgentControlMailbox(ctx, root.ID, completion)
+	require.NoError(t, err)
+	events, err := runtimeStore.ListEvents(ctx, root.ID, 0, 20)
+	require.NoError(t, err)
+	for _, event := range events {
+		if event.Type == "subagent.completed" {
+			t.Fatalf("test setup should not write display mirror event, got %#v", event)
+		}
+	}
+
+	collabOutput := captureStdout(t, func() {
+		if quit := handleCommand(session, "/collab 5", false); quit {
+			t.Fatal("collab command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Parent Mailbox Timeline:",
+		"source=agent_control+mailbox",
+		"kind=subagent.completed",
+		"action=agent.completed",
+		"completion-child",
+	} {
+		if !strings.Contains(collabOutput, expected) {
+			t.Fatalf("expected collab output to contain %q without display mirror, got:\n%s", expected, collabOutput)
+		}
+	}
+
+	panelOutput := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents panel 5", false); quit {
+			t.Fatal("agents panel command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Agent Control Panel:",
+		"Mailbox:",
+		"kind=subagent.completed",
+		"action=agent.completed",
+		"completion-child",
+	} {
+		if !strings.Contains(panelOutput, expected) {
+			t.Fatalf("expected panel output to contain %q without display mirror, got:\n%s", expected, panelOutput)
+		}
+	}
+
+	result, err := host.ActorRegistry.ReadEvents(ctx, toolbroker.ReadAgentEventsArgs{
+		SessionID:   root.ID,
+		MailboxOnly: true,
+		Limit:       5,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	if len(result.Events) != 1 {
+		t.Fatalf("expected one mailbox event, got %#v", result.Events)
+	}
+	if result.Events[0].Type != runtimechat.EventMailboxReceived || result.Events[0].Payload["kind"] != toolbroker.SubagentCompletionMailboxKind {
+		t.Fatalf("expected mailbox completion event, got %#v", result.Events[0])
+	}
+}
+
+func TestHandleCommand_AgentsPanelFollowWaitsForMailboxUpdate(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
+	sessionStore := runtimechat.NewInMemoryStorage()
+	sessionManager := runtimechat.NewSessionManager(sessionStore, nil)
+	root := runtimechat.NewSession("panel-user")
+	root.ID = "panel-follow-root"
+	require.NoError(t, sessionStore.Save(ctx, root))
+	host := &localChatRuntimeHost{
+		EventStore:   runtimeStore,
+		SessionStore: sessionStore,
+		SessionUser:  "panel-user",
+	}
+	host.ActorRegistry = newLocalActorRegistry(host)
+	session := &ChatSession{
+		RuntimeSession:   root,
+		SessionManager:   sessionManager,
+		SessionUserID:    "panel-user",
+		LocalRuntimeHost: host,
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, _, _ = runtimeStore.AppendMailbox(ctx, root.ID, toolbroker.BuildAgentMailboxMessage(
+			"child",
+			"parent",
+			"panel follow mailbox update",
+			false,
+		))
+	}()
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents panel follow timeout=500ms 5", false); quit {
+			t.Fatal("agents panel follow command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Agent Control Panel:",
+		"Panel Follow:",
+		"follow=waiting",
+		"follow=update session=panel-follow-root",
+		"panel follow mailbox update",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected agents panel follow output to contain %q, got:\n%s", expected, output)
+		}
+	}
+	if session.SelectedAgentTarget != "" {
+		t.Fatalf("panel follow should not change selected target, got %q", session.SelectedAgentTarget)
+	}
+}
+
+func TestHandleCommand_AgentsPanelCanSwitchTarget(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
+	sessionStore := runtimechat.NewInMemoryStorage()
+	sessionManager := runtimechat.NewSessionManager(sessionStore, nil)
+	root := runtimechat.NewSession("panel-user")
+	root.ID = "panel-nav-root"
+	require.NoError(t, sessionStore.Save(ctx, root))
+	first := runtimechat.NewSession("panel-user")
+	first.ID = "panel-nav-first"
+	first.SetContext(toolbroker.AgentSessionContextParentSessionID, root.ID)
+	first.SetContext(toolbroker.AgentSessionContextRootSessionID, root.ID)
+	first.SetContext(toolbroker.AgentSessionContextPath, "/root/panel-nav-first")
+	first.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	require.NoError(t, sessionStore.Save(ctx, first))
+	second := runtimechat.NewSession("panel-user")
+	second.ID = "panel-nav-second"
+	second.SetContext(toolbroker.AgentSessionContextParentSessionID, root.ID)
+	second.SetContext(toolbroker.AgentSessionContextRootSessionID, root.ID)
+	second.SetContext(toolbroker.AgentSessionContextPath, "/root/panel-nav-second")
+	second.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	require.NoError(t, sessionStore.Save(ctx, second))
+	host := &localChatRuntimeHost{
+		EventStore:   runtimeStore,
+		SessionStore: sessionStore,
+		SessionUser:  "panel-user",
+	}
+	host.ActorRegistry = newLocalActorRegistry(host)
+	session := &ChatSession{
+		RuntimeSession:   root,
+		SessionManager:   sessionManager,
+		SessionUserID:    "panel-user",
+		LocalRuntimeHost: host,
+	}
+	host.BaseSession = session
+
+	targetOutput := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents panel target /root/panel-nav-second 5", false); quit {
+			t.Fatal("agents panel target command should not quit")
+		}
+	})
+	if session.SelectedAgentTarget != "/root/panel-nav-second" {
+		t.Fatalf("expected selected target to switch, got %q", session.SelectedAgentTarget)
+	}
+	if !strings.Contains(targetOutput, "selected=/root/panel-nav-second") {
+		t.Fatalf("expected panel target output to show selected target, got:\n%s", targetOutput)
+	}
+	stored, err := sessionManager.Get(ctx, root.ID)
+	require.NoError(t, err)
+	if got := runtimeSessionContextString(stored, chatRuntimeContextSelectedAgent); got != "/root/panel-nav-second" {
+		t.Fatalf("expected selected target to persist, got %q", got)
+	}
+
+	nextOutput := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents panel next 5", false); quit {
+			t.Fatal("agents panel next command should not quit")
+		}
+	})
+	if session.SelectedAgentTarget != "/root/panel-nav-first" {
+		t.Fatalf("expected selected target to wrap to first, got %q\n%s", session.SelectedAgentTarget, nextOutput)
+	}
+	prevOutput := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents panel prev 5", false); quit {
+			t.Fatal("agents panel prev command should not quit")
+		}
+	})
+	if session.SelectedAgentTarget != "/root/panel-nav-second" {
+		t.Fatalf("expected selected target to move back to second, got %q\n%s", session.SelectedAgentTarget, prevOutput)
+	}
+}
+
+func TestChatAgentPanelModalControllerNavigatesAndSelectsTarget(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
+	sessionStore := runtimechat.NewInMemoryStorage()
+	sessionManager := runtimechat.NewSessionManager(sessionStore, nil)
+	root := runtimechat.NewSession("panel-user")
+	root.ID = "panel-modal-root"
+	require.NoError(t, sessionStore.Save(ctx, root))
+	first := runtimechat.NewSession("panel-user")
+	first.ID = "panel-modal-first"
+	first.SetContext(toolbroker.AgentSessionContextParentSessionID, root.ID)
+	first.SetContext(toolbroker.AgentSessionContextRootSessionID, root.ID)
+	first.SetContext(toolbroker.AgentSessionContextPath, "/root/panel-modal-first")
+	first.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	require.NoError(t, sessionStore.Save(ctx, first))
+	second := runtimechat.NewSession("panel-user")
+	second.ID = "panel-modal-second"
+	second.SetContext(toolbroker.AgentSessionContextParentSessionID, root.ID)
+	second.SetContext(toolbroker.AgentSessionContextRootSessionID, root.ID)
+	second.SetContext(toolbroker.AgentSessionContextPath, "/root/panel-modal-second")
+	second.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	require.NoError(t, sessionStore.Save(ctx, second))
+	host := &localChatRuntimeHost{
+		EventStore:   runtimeStore,
+		SessionStore: sessionStore,
+		SessionUser:  "panel-user",
+	}
+	host.ActorRegistry = newLocalActorRegistry(host)
+	session := &ChatSession{
+		RuntimeSession:   root,
+		SessionManager:   sessionManager,
+		SessionUserID:    "panel-user",
+		LocalRuntimeHost: host,
+	}
+	host.BaseSession = session
+	state := newChatAgentPanelModalState(5)
+	controller := newChatAgentPanelModalController(session, &state, "Agent Panel> ")
+
+	controller.Navigate(1)
+	if state.Cursor != 1 {
+		t.Fatalf("expected down navigation to select second row, got cursor=%d", state.Cursor)
+	}
+	controller.MovePane(1)
+	if state.Pane != chatAgentPanelPaneMailbox {
+		t.Fatalf("expected right navigation to focus mailbox pane, got %s", state.Pane.String())
+	}
+	controller.MovePane(1)
+	if state.Pane != chatAgentPanelPaneTimeline {
+		t.Fatalf("expected right navigation to focus timeline pane, got %s", state.Pane.String())
+	}
+	controller.Select()
+	if session.SelectedAgentTarget != "/root/panel-modal-second" {
+		t.Fatalf("expected modal enter to select second target, got %q", session.SelectedAgentTarget)
+	}
+	stored, err := sessionManager.Get(ctx, root.ID)
+	require.NoError(t, err)
+	if got := runtimeSessionContextString(stored, chatRuntimeContextSelectedAgent); got != "/root/panel-modal-second" {
+		t.Fatalf("expected modal selection to persist, got %q", got)
+	}
+	lines := chatAgentPanelModalLines(session, &state)
+	joined := strings.Join(lines, "\n")
+	for _, expected := range []string{
+		"mode=follow pane=timeline cursor=2",
+		"selected=/root/panel-modal-second",
+		">* [2] /root/panel-modal-second",
+		"Timeline: <focused>",
+		"Enter 设为 target",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected modal lines to contain %q, got:\n%s", expected, joined)
+		}
+	}
+}
+
+func TestRunChatAgentPanelModalInterruptMarksSessionInterrupted(t *testing.T) {
+	session := &ChatSession{}
+	err := handleChatAgentPanelModalInputError(session, ui.ErrInteractiveInputInterrupted)
+	if err != io.EOF {
+		t.Fatalf("expected interrupt to return io.EOF, got %v", err)
+	}
+	if !session.IsInterrupted() {
+		t.Fatal("expected panel modal interrupt to mark session interrupted")
+	}
+}
+
+func TestChatAgentPanelModalWatchesTaskWake(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer teamStore.Close()
+
+	session := &ChatSession{
+		ActiveTeam: &chatTeamBinding{TeamID: "panel-task-wake-team"},
+		LocalRuntimeHost: &localChatRuntimeHost{
+			TeamStore: teamStore,
+		},
+	}
+	updates := watchChatAgentPanelModalUpdates(ctx, session)
+	taskID, err := teamStore.CreateTask(ctx, team.Task{
+		ID:     "panel-task-wake-task",
+		TeamID: "panel-task-wake-team",
+		Title:  "wake panel",
+		Goal:   "wake panel",
+		Status: team.TaskStatusPending,
+	})
+	require.NoError(t, err)
+	require.NoError(t, teamStore.UpdateTaskStatus(ctx, taskID, team.TaskStatusRunning, "wake panel"))
+
+	select {
+	case <-updates:
+	case <-time.After(time.Second):
+		t.Fatal("expected panel modal update from task wake")
 	}
 }
 

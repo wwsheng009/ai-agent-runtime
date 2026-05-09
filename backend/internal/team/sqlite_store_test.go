@@ -3,6 +3,7 @@ package team
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,6 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
+
+type failingGlobalMailboxWriter struct{}
+
+func (failingGlobalMailboxWriter) AppendGlobalMailboxRecord(context.Context, string, agentcontrol.MailboxRecord) (int64, error) {
+	return 0, fmt.Errorf("global mailbox writer unavailable")
+}
 
 func TestSQLiteStoreBlockTask(t *testing.T) {
 	ctx := context.Background()
@@ -206,6 +213,52 @@ func TestSQLiteStoreRepairsMailboxGlobalProjection(t *testing.T) {
 	require.Equal(t, globalRecords[0].Seq, records[0].GlobalSeq)
 }
 
+func TestSQLiteStoreWriteThroughFailureKeepsLocalProjectionRepairable(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	store.SetGlobalMailboxWriter(failingGlobalMailboxWriter{})
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	messageID, err := store.InsertMail(ctx, MailMessage{
+		ID:        "mailbox-write-through-failure-team",
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "mate",
+		Kind:      "info",
+		Body:      "repairable team local row",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "mailbox-write-through-failure-team", messageID)
+	records, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:  agentcontrol.MailboxScopeTeam,
+		TeamID: teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, int64(0), records[0].GlobalSeq)
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global-mailbox.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+	store.SetGlobalMailboxWriter(globalStore)
+	repaired, err := store.RepairAgentControlMailboxProjection(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:  agentcontrol.MailboxScopeTeam,
+		TeamID: teamID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), repaired)
+	globalRecords, err := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:  agentcontrol.MailboxScopeTeam,
+		TeamID: teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, globalRecords, 1)
+	require.Equal(t, "mailbox-write-through-failure-team", globalRecords[0].MessageID)
+}
+
 func TestSQLiteStoreRepairsMailboxLocalProjectionFromGlobal(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -308,6 +361,27 @@ func TestSQLiteStoreInsertMailCanCommitGlobalAndLocalInOneTx(t *testing.T) {
 	require.Len(t, globalRecords, 1)
 	require.Equal(t, globalRecords[0].Seq, localRecords[0].GlobalSeq)
 	require.Equal(t, "atomic-team-mailbox", globalRecords[0].MessageID)
+}
+
+func TestSQLiteStoreMailboxProjectionStatus(t *testing.T) {
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.sqlite")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	status := store.AgentControlMailboxProjectionStatus()
+	require.Equal(t, agentcontrol.MailboxProjectionModeLocalOnly, status.Mode)
+	require.Equal(t, "global_writer_not_configured", status.Reason)
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global.sqlite"),
+	})
+	require.NoError(t, err)
+	defer globalStore.Close()
+	store.SetGlobalMailboxWriter(globalStore)
+	status = store.AgentControlMailboxProjectionStatus()
+	require.Equal(t, agentcontrol.MailboxProjectionModeTransactional, status.Mode)
+	require.True(t, status.Transactional)
+	require.Equal(t, "global_registry_attachable", status.Reason)
 }
 
 func TestSQLiteStoreTaskSignalsPersistSequenceAndWake(t *testing.T) {

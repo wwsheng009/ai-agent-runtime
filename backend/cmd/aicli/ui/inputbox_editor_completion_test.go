@@ -172,6 +172,39 @@ func TestReadInteractiveLineWithHooks_OnNavigateConsumesHistoryNavigation(t *tes
 	}
 }
 
+func TestReadInteractiveLineWithHooks_OnMoveConsumesCursorMovement(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	var moves []int
+	hooks := LineEditorHooks{
+		OnMove: func(snapshot LineEditorSnapshot, delta int) bool {
+			moves = append(moves, delta)
+			return true
+		},
+	}
+
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("/m\x1b[D\x1b[C\r\n"),
+		&output,
+		"",
+		nil,
+		nil,
+		&hooks,
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "/m" {
+		t.Fatalf("expected hook to consume left/right arrows and preserve line, got %q", line)
+	}
+	if len(moves) != 2 || moves[0] != -1 || moves[1] != 1 {
+		t.Fatalf("expected left/right movement callbacks, got %#v", moves)
+	}
+}
+
 func TestReadInteractiveLineWithHooks_EscCancelsPopupHook(t *testing.T) {
 	t.Parallel()
 
@@ -205,5 +238,41 @@ func TestReadInteractiveLineWithHooks_EscCancelsPopupHook(t *testing.T) {
 	}
 	if canceled != 1 {
 		t.Fatalf("expected one cancel callback, got %d", canceled)
+	}
+}
+
+func TestReadInteractiveLineWithHooks_OnCancelCanExitModal(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	var canceled int
+	hooks := LineEditorHooks{
+		OnCancel: func(snapshot LineEditorSnapshot) bool {
+			if snapshot.Text != "/m" || snapshot.Cursor != 2 {
+				t.Fatalf("unexpected cancel snapshot: %#v", snapshot)
+			}
+			canceled++
+			return true
+		},
+	}
+
+	line, err := readInteractiveLineWithHooks(
+		&chunkedReader{chunks: [][]byte{[]byte("/m"), []byte("\x1b")}},
+		&output,
+		"",
+		nil,
+		nil,
+		&hooks,
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "" {
+		t.Fatalf("expected modal cancel to return empty line, got %q", line)
+	}
+	if canceled != 1 {
+		t.Fatalf("expected one modal cancel callback, got %d", canceled)
 	}
 }

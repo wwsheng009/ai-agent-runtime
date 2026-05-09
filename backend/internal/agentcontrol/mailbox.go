@@ -24,6 +24,19 @@ const (
 	// SQLite store attaches the durable global mailbox registry for an atomic
 	// projection commit.
 	SQLiteGlobalMailboxAttachSchema = "agent_control_registry"
+
+	// MailboxProjectionModeLocalOnly means no durable global registry writer is
+	// configured for this local mailbox store.
+	MailboxProjectionModeLocalOnly = "local_only"
+	// MailboxProjectionModeTransactional means the local store can commit the
+	// global primary row and local compatibility projection in one SQLite tx.
+	MailboxProjectionModeTransactional = "transactional"
+	// MailboxProjectionModeWriteThrough means local/global writes are separate
+	// and can be repaired by projection reconcile.
+	MailboxProjectionModeWriteThrough = "write_through"
+	// MailboxProjectionModeReconcileOnly means projection is populated only by
+	// explicit materialization/reconcile jobs.
+	MailboxProjectionModeReconcileOnly = "reconcile_only"
 )
 
 // MailboxRecordFilter describes reads from a generic AgentControl mailbox
@@ -62,6 +75,35 @@ type MailboxRecord struct {
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`
 	CreatedAt         time.Time              `json:"created_at,omitempty"`
 	AckedAt           *time.Time             `json:"acked_at,omitempty"`
+}
+
+// MailboxProjectionStatus describes how one local mailbox store projects rows
+// into the durable global AgentControl mailbox registry.
+type MailboxProjectionStatus struct {
+	Mode             string `json:"mode"`
+	Store            string `json:"store,omitempty"`
+	GlobalConfigured bool   `json:"global_configured,omitempty"`
+	Transactional    bool   `json:"transactional,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+}
+
+// Normalize returns a stable projection status.
+func (s MailboxProjectionStatus) Normalize() MailboxProjectionStatus {
+	s.Mode = strings.TrimSpace(s.Mode)
+	s.Store = strings.TrimSpace(s.Store)
+	s.Reason = strings.TrimSpace(s.Reason)
+	if s.Mode == "" {
+		s.Mode = MailboxProjectionModeLocalOnly
+	}
+	s.Transactional = s.Mode == MailboxProjectionModeTransactional
+	s.GlobalConfigured = s.GlobalConfigured || s.Mode != MailboxProjectionModeLocalOnly
+	return s
+}
+
+// MailboxProjectionReporter exposes a debug/read-only capability snapshot for
+// local mailbox projection semantics.
+type MailboxProjectionReporter interface {
+	AgentControlMailboxProjectionStatus() MailboxProjectionStatus
 }
 
 // MailboxRegistryReader exposes generic AgentControl mailbox registry reads.

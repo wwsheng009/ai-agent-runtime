@@ -20,6 +20,7 @@ type fakeAgentSessionController struct {
 	lastRead   ReadAgentEventsArgs
 	lastClose  string
 	lastResume string
+	agents     []AgentStatusResult
 }
 
 func (f *fakeAgentSessionController) Spawn(ctx context.Context, parentSessionID string, args SpawnAgentArgs) (*AgentStatusResult, error) {
@@ -41,6 +42,13 @@ func (f *fakeAgentSessionController) Spawn(ctx context.Context, parentSessionID 
 func (f *fakeAgentSessionController) List(ctx context.Context, parentSessionID string, args ListAgentsArgs) (*AgentListResult, error) {
 	f.lastParent = parentSessionID
 	f.lastList = args
+	if len(f.agents) > 0 {
+		agents := append([]AgentStatusResult(nil), f.agents...)
+		return &AgentListResult{
+			Count:  len(agents),
+			Agents: agents,
+		}, nil
+	}
 	return &AgentListResult{
 		Count: 1,
 		Agents: []AgentStatusResult{{
@@ -455,5 +463,55 @@ func TestBroker_Execute_AgentToolsRejectTeamTeammateIDs(t *testing.T) {
 	}
 	if controller.lastRead.ID != "" {
 		t.Fatalf("expected read_agent_events not to reach controller, got %#v", controller.lastRead)
+	}
+}
+
+func TestBroker_Execute_AgentToolsPreferCurrentSpawnAgentWhenIDCollidesWithTeammate(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{Status: team.TeamStatusActive})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if _, err := store.UpsertTeammate(ctx, team.Teammate{
+		ID:        "agent-a",
+		TeamID:    teamID,
+		SessionID: "historical-team-session-agent-a",
+		State:     team.TeammateStateIdle,
+	}); err != nil {
+		t.Fatalf("UpsertTeammate: %v", err)
+	}
+
+	controller := &fakeAgentSessionController{
+		agents: []AgentStatusResult{{
+			ID:              "agent-a",
+			SessionID:       "agent-a",
+			ParentSessionID: "parent-session",
+			Path:            "/root/agent-a",
+			AgentType:       "child",
+			Status:          "idle",
+			Exists:          true,
+		}},
+	}
+	broker := &Broker{AgentSessions: controller, TeamStore: store}
+
+	_, _, err = broker.Execute(ctx, "parent-session", ToolWaitAgent, map[string]interface{}{
+		"id": "agent-a",
+	})
+	if err != nil {
+		t.Fatalf("wait_agent should prefer current spawn_agent child over stale teammate id: %v", err)
+	}
+	if controller.lastWait.ID != "agent-a" {
+		t.Fatalf("expected wait_agent to reach controller with child id, got %#v", controller.lastWait)
+	}
+
+	_, _, err = broker.Execute(ctx, "parent-session", ToolReadAgentEvents, map[string]interface{}{
+		"id": "/root/agent-a",
+	})
+	if err != nil {
+		t.Fatalf("read_agent_events should prefer current spawn_agent path over stale teammate id: %v", err)
+	}
+	if controller.lastRead.ID != "/root/agent-a" {
+		t.Fatalf("expected read_agent_events to reach controller with child path, got %#v", controller.lastRead)
 	}
 }
