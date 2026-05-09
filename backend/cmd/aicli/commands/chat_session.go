@@ -197,7 +197,7 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 		return fmt.Errorf("会话管理未启用")
 	}
 
-	runtimeSession, err := loadLatestResumableRuntimeSession(context.Background(), session.SessionManager, session.SessionUserID)
+	runtimeSession, err := loadLatestResumableRuntimeSessionExcluding(context.Background(), session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session))
 	if err != nil {
 		return err
 	}
@@ -215,6 +215,10 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 // conversation content. It skips system-only shell sessions created during startup so
 // /resume latest lands on the last meaningful thread instead of a blank placeholder.
 func loadLatestResumableRuntimeSession(ctx context.Context, manager *runtimechat.SessionManager, userID string) (*runtimechat.Session, error) {
+	return loadLatestResumableRuntimeSessionExcluding(ctx, manager, userID, "")
+}
+
+func loadLatestResumableRuntimeSessionExcluding(ctx context.Context, manager *runtimechat.SessionManager, userID, excludedSessionID string) (*runtimechat.Session, error) {
 	if manager == nil {
 		return nil, nil
 	}
@@ -228,12 +232,19 @@ func loadLatestResumableRuntimeSession(ctx context.Context, manager *runtimechat
 	}
 
 	for _, session := range sessions {
-		if runtimeSessionHasConversation(session) {
-			return session, nil
+		if shouldSkipRuntimeResumeSession(session, excludedSessionID, true) {
+			continue
 		}
+		return session, nil
 	}
 
+	if strings.TrimSpace(excludedSessionID) != "" {
+		return nil, runtimechat.ErrSessionNotFound
+	}
 	for _, session := range sessions {
+		if shouldSkipRuntimeResumeSession(session, excludedSessionID, false) {
+			continue
+		}
 		if session != nil {
 			return session, nil
 		}
@@ -247,6 +258,17 @@ func runtimeSessionHasConversation(session *runtimechat.Session) bool {
 		return false
 	}
 	return chatMessagesHaveConversation(session.GetMessages())
+}
+
+func shouldSkipRuntimeResumeSession(session *runtimechat.Session, excludedSessionID string, requireConversation bool) bool {
+	if session == nil {
+		return true
+	}
+	excludedSessionID = strings.TrimSpace(excludedSessionID)
+	if excludedSessionID != "" && strings.EqualFold(strings.TrimSpace(session.ID), excludedSessionID) {
+		return true
+	}
+	return requireConversation && !runtimeSessionHasConversation(session)
 }
 
 func syncRuntimeSessionFromChat(session *ChatSession) error {
@@ -437,6 +459,28 @@ func listFilteredChatSessions(manager *runtimechat.SessionManager, userID string
 		}
 	}
 	return filtered, nil
+}
+
+func listResumeCandidateChatSessions(manager *runtimechat.SessionManager, userID string, filter ChatSessionListFilter, currentID string) ([]*runtimechat.Session, error) {
+	limit := filter.Limit
+	filter.Limit = 0
+
+	sessions, err := listFilteredChatSessions(manager, userID, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := make([]*runtimechat.Session, 0, len(sessions))
+	for _, session := range sessions {
+		if shouldSkipRuntimeResumeSession(session, currentID, true) {
+			continue
+		}
+		candidates = append(candidates, session)
+		if limit > 0 && len(candidates) >= limit {
+			break
+		}
+	}
+	return candidates, nil
 }
 
 func matchesChatSessionFilter(session *runtimechat.Session, filter ChatSessionListFilter) bool {
@@ -1112,6 +1156,48 @@ func renderRuntimeSessionSummaryLines(session *runtimechat.Session, currentID st
 		lines = append(lines, fmt.Sprintf("    摘要: %s", strings.TrimSpace(preview.Summary)))
 	}
 	return lines
+}
+
+func renderRuntimeResumeSessionLine(session *runtimechat.Session, now time.Time) string {
+	if session == nil {
+		return ""
+	}
+	return fmt.Sprintf("%-10s %s", formatSessionRelativeTime(session.UpdatedAt, now), runtimeResumeSessionTitle(session))
+}
+
+func runtimeResumeSessionTitle(session *runtimechat.Session) string {
+	if session == nil {
+		return "(untitled)"
+	}
+	preview := session.BuildPreview()
+	title := ""
+	if preview != nil {
+		title = strings.TrimSpace(preview.Title)
+		if title == "" {
+			title = strings.TrimSpace(preview.Summary)
+		}
+	}
+	title = sanitizeRuntimeResumeSessionTitle(title)
+	if title == "" {
+		return "(untitled)"
+	}
+	return title
+}
+
+func sanitizeRuntimeResumeSessionTitle(title string) string {
+	title = strings.Join(strings.Fields(strings.TrimSpace(title)), " ")
+	if title == "" {
+		return ""
+	}
+
+	lowerTitle := strings.ToLower(title)
+	for _, marker := range []string{" session:", " session file:", " session store:", " chat log file:", " debug log file:"} {
+		if index := strings.Index(lowerTitle, marker); index >= 0 {
+			title = strings.TrimRight(strings.TrimSpace(title[:index]), ",，;；:：")
+			lowerTitle = strings.ToLower(title)
+		}
+	}
+	return title
 }
 
 func formatSessionLastUsed(updatedAt time.Time, now time.Time) string {

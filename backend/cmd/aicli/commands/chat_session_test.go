@@ -2,6 +2,8 @@ package commands
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -366,6 +368,158 @@ func TestResumeLatestRuntimeConversationSkipsSystemOnlySession(t *testing.T) {
 	}
 	if session.Messages[1].Content != "first" {
 		t.Fatalf("expected restored chat history from first session, got %#v", session.Messages)
+	}
+}
+
+func TestResumeLatestRuntimeConversationSkipsCurrentSession(t *testing.T) {
+	storage, err := runtimechat.NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file storage: %v", err)
+	}
+	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
+		TTL:             24 * time.Hour,
+		MaxHistory:      20,
+		CleanupInterval: 0,
+		AutoArchive:     false,
+	})
+
+	ctx := context.Background()
+	previous, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create previous session: %v", err)
+	}
+	previous.ReplaceHistory([]runtimetypes.Message{{Role: "user", Content: "previous", Metadata: runtimetypes.NewMetadata()}})
+	if err := manager.Update(ctx, previous); err != nil {
+		t.Fatalf("update previous session: %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	current, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create current session: %v", err)
+	}
+	current.ReplaceHistory([]runtimetypes.Message{{Role: "user", Content: "current", Metadata: runtimetypes.NewMetadata()}})
+	if err := manager.Update(ctx, current); err != nil {
+		t.Fatalf("update current session: %v", err)
+	}
+
+	session := &ChatSession{
+		SessionManager: manager,
+		SessionUserID:  "tester",
+		RuntimeSession: current,
+	}
+
+	if err := resumeLatestRuntimeConversation(session); err != nil {
+		t.Fatalf("resumeLatestRuntimeConversation: %v", err)
+	}
+	if session.RuntimeSession == nil || session.RuntimeSession.ID != previous.ID {
+		t.Fatalf("expected previous session %s, got %#v", previous.ID, session.RuntimeSession)
+	}
+}
+
+func TestResumeLatestRuntimeConversationDoesNotFallbackToSystemOnlyAfterSkippingCurrent(t *testing.T) {
+	storage, err := runtimechat.NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file storage: %v", err)
+	}
+	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
+		TTL:             24 * time.Hour,
+		MaxHistory:      20,
+		CleanupInterval: 0,
+		AutoArchive:     false,
+	})
+
+	ctx := context.Background()
+	systemOnly, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create system-only session: %v", err)
+	}
+	systemOnly.ReplaceHistory([]runtimetypes.Message{{Role: "system", Content: "placeholder", Metadata: runtimetypes.NewMetadata()}})
+	if err := manager.Update(ctx, systemOnly); err != nil {
+		t.Fatalf("update system-only session: %v", err)
+	}
+
+	current, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create current session: %v", err)
+	}
+	current.ReplaceHistory([]runtimetypes.Message{{Role: "user", Content: "current", Metadata: runtimetypes.NewMetadata()}})
+	if err := manager.Update(ctx, current); err != nil {
+		t.Fatalf("update current session: %v", err)
+	}
+
+	session := &ChatSession{
+		SessionManager: manager,
+		SessionUserID:  "tester",
+		RuntimeSession: current,
+	}
+
+	err = resumeLatestRuntimeConversation(session)
+	if !errors.Is(err, runtimechat.ErrSessionNotFound) {
+		t.Fatalf("expected no resumable session after current was skipped, got %v", err)
+	}
+}
+
+func TestListResumeCandidateChatSessionsSkipsCurrentAndSystemOnly(t *testing.T) {
+	storage, err := runtimechat.NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file storage: %v", err)
+	}
+	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
+		TTL:             24 * time.Hour,
+		MaxHistory:      20,
+		CleanupInterval: 0,
+		AutoArchive:     false,
+	})
+
+	ctx := context.Background()
+	previous, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create previous session: %v", err)
+	}
+	previous.ReplaceHistory([]runtimetypes.Message{{Role: "user", Content: "previous", Metadata: runtimetypes.NewMetadata()}})
+	if err := manager.Update(ctx, previous); err != nil {
+		t.Fatalf("update previous session: %v", err)
+	}
+
+	systemOnly, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create system-only session: %v", err)
+	}
+	systemOnly.ReplaceHistory([]runtimetypes.Message{{Role: "system", Content: "placeholder", Metadata: runtimetypes.NewMetadata()}})
+	if err := manager.Update(ctx, systemOnly); err != nil {
+		t.Fatalf("update system-only session: %v", err)
+	}
+
+	current, err := manager.Create(ctx, "tester")
+	if err != nil {
+		t.Fatalf("create current session: %v", err)
+	}
+	current.ReplaceHistory([]runtimetypes.Message{{Role: "user", Content: "current", Metadata: runtimetypes.NewMetadata()}})
+	if err := manager.Update(ctx, current); err != nil {
+		t.Fatalf("update current session: %v", err)
+	}
+
+	candidates, err := listResumeCandidateChatSessions(manager, "tester", ChatSessionListFilter{}, current.ID)
+	if err != nil {
+		t.Fatalf("listResumeCandidateChatSessions: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != previous.ID {
+		t.Fatalf("expected only previous session %s, got %#v", previous.ID, candidates)
+	}
+}
+
+func TestRuntimeResumeSessionTitleStripsEmbeddedSessionMetadata(t *testing.T) {
+	session := runtimechat.NewSession("tester")
+	session.Metadata.Title = `检查 multi team执行功能机制， Session: session_20260506094548_QX3iM9PR [active]Session File: C:\Users\vince\.aicli\sessions\session_20260506094548_QX3iM9PR.json`
+
+	title := runtimeResumeSessionTitle(session)
+	if title != "检查 multi team执行功能机制" {
+		t.Fatalf("expected embedded session metadata to be stripped, got %q", title)
+	}
+	if strings.Contains(strings.ToLower(title), "session_") || strings.Contains(strings.ToLower(title), "session file") {
+		t.Fatalf("expected title to hide session metadata, got %q", title)
 	}
 }
 

@@ -37,6 +37,10 @@ func handleResumeCommand(session *ChatSession, command string) bool {
 		return resumeLatestAndPrint(session)
 	}
 
+	if currentID := currentRuntimeSessionID(session); currentID != "" && strings.EqualFold(currentID, arg) {
+		fmt.Println("当前已经在该会话中，无需恢复")
+		return false
+	}
 	if err := loadRuntimeConversation(session, arg); err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
@@ -63,7 +67,7 @@ func resumeInteractiveSelect(session *ChatSession) bool {
 		return resumeLatestAndPrint(session)
 	}
 
-	sessions, err := listFilteredChatSessions(session.SessionManager, session.SessionUserID, session.SessionFilter)
+	sessions, err := listResumeCandidateChatSessions(session.SessionManager, session.SessionUserID, session.SessionFilter, currentRuntimeSessionID(session))
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
@@ -169,7 +173,7 @@ func readResumeMenuChoice(session *ChatSession, optionWidth int) (resumeMenuChoi
 }
 
 func readResumeSessionPick(session *ChatSession, sessions []*runtimechat.Session) (*runtimechat.Session, error) {
-	prompt := "编号/ID (回车=1, q取消): "
+	prompt := "编号 (回车=1, q取消): "
 	usePopup := useRuntimeSelectionPopup(session)
 	if usePopup {
 		defer clearRuntimeSelectionPopup(session)
@@ -180,12 +184,12 @@ func readResumeSessionPick(session *ChatSession, sessions []*runtimechat.Session
 		if item == nil {
 			continue
 		}
-		itemLines := clampSessionSummaryLines(renderRuntimeSessionSummaryLines(item, currentRuntimeSessionID(session), now), ui.GetTerminalWidth())
-		if len(itemLines) == 0 {
+		itemLine := renderRuntimeResumeSessionLine(item, now)
+		if strings.TrimSpace(itemLine) == "" {
 			continue
 		}
-		itemLines[0] = fmt.Sprintf("  [%-2d] %s", index+1, strings.TrimSpace(itemLines[0]))
-		lines = append(lines, itemLines...)
+		itemLine = truncateStatusValue(fmt.Sprintf("  [%-2d] %s", index+1, strings.TrimSpace(itemLine)), ui.GetTerminalWidth())
+		lines = append(lines, itemLine)
 	}
 	if !usePopup {
 		for _, line := range lines {

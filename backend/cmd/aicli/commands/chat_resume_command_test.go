@@ -41,7 +41,7 @@ func TestRenderRuntimeSessionSummaryLinesIncludesProtocolCurrentAndRelativeTime(
 	}
 }
 
-func TestReadResumeSessionPickRendersProtocolAndCurrentMarker(t *testing.T) {
+func TestReadResumeSessionPickRendersOnlyUpdatedTimeAndTitle(t *testing.T) {
 	session := &ChatSession{
 		RuntimeSession: runtimechat.NewSession("resume-1"),
 		InputReader:    bufio.NewReader(strings.NewReader("q\n")),
@@ -49,6 +49,7 @@ func TestReadResumeSessionPickRendersProtocolAndCurrentMarker(t *testing.T) {
 	session.RuntimeSession.ID = "resume-1"
 	session.RuntimeSession.State = runtimechat.StateActive
 	session.RuntimeSession.UpdatedAt = time.Now().Add(-3 * time.Minute)
+	session.RuntimeSession.Metadata.Title = "First session"
 	session.RuntimeSession.Metadata.Context = map[string]interface{}{
 		chatRuntimeContextProtocol:     "openai",
 		chatRuntimeContextProviderName: "openai",
@@ -59,13 +60,16 @@ func TestReadResumeSessionPickRendersProtocolAndCurrentMarker(t *testing.T) {
 		_, _ = readResumeSessionPick(session, []*runtimechat.Session{session.RuntimeSession})
 	})
 
-	if !strings.Contains(lines, "协议=openai") {
-		t.Fatalf("expected protocol in resume list, got %q", lines)
+	if !strings.Contains(lines, "First session") {
+		t.Fatalf("expected title in resume list, got %q", lines)
 	}
-	if !strings.Contains(lines, "【当前】") {
-		t.Fatalf("expected current marker in resume list, got %q", lines)
+	if strings.Contains(lines, "resume-1") {
+		t.Fatalf("did not expect session id in resume list, got %q", lines)
 	}
-	if !strings.Contains(lines, "编号/ID (回车=1, q取消):") {
+	if strings.Contains(lines, "协议=") || strings.Contains(lines, "provider=") || strings.Contains(lines, "【当前】") {
+		t.Fatalf("did not expect session metadata in compact resume list, got %q", lines)
+	}
+	if !strings.Contains(lines, "编号 (回车=1, q取消):") {
 		t.Fatalf("expected visible resume pick prompt, got %q", lines)
 	}
 }
