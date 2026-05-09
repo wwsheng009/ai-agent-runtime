@@ -114,6 +114,67 @@ func TestFixedBottomSurface_ShowPopupDoesNotUseCursorSaveRestore(t *testing.T) {
 	}
 }
 
+func TestFixedBottomSurface_ShowPopupPreserveCursorRestoresPromptCursor(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+
+	output := captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursor([]string{
+			"命令补全: /co",
+			"> /collab",
+			"提示: Tab/Enter 接受",
+		})
+	})
+
+	if !strings.Contains(output, cursorSaveSequence) {
+		t.Fatalf("expected preserve popup render to save cursor, got %q", output)
+	}
+	if !strings.HasSuffix(output, cursorRestoreSequence) {
+		t.Fatalf("expected preserve popup render to restore cursor at the end, got %q", output)
+	}
+	if surface.popupRenderedRows != 3 {
+		t.Fatalf("expected popup rows to render, got %d", surface.popupRenderedRows)
+	}
+	if surface.popupRenderedGapRows != 1 {
+		t.Fatalf("expected input gap row to remain reserved, got %d", surface.popupRenderedGapRows)
+	}
+}
+
+func TestFixedBottomSurface_ClearPopupPreserveCursorRestoresPromptCursor(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPopup([]string{
+			"命令补全: /co",
+			"> /collab",
+			"提示: Tab/Enter 接受",
+		})
+	})
+
+	output := captureUIStdout(t, func() {
+		surface.ClearPopupPreserveCursor()
+	})
+
+	if !strings.Contains(output, cursorSaveSequence) {
+		t.Fatalf("expected preserve popup clear to save cursor, got %q", output)
+	}
+	if !strings.HasSuffix(output, cursorRestoreSequence) {
+		t.Fatalf("expected preserve popup clear to restore cursor at the end, got %q", output)
+	}
+	if surface.popupRenderedRows != 0 {
+		t.Fatalf("expected popup rows to clear, got %d", surface.popupRenderedRows)
+	}
+	if surface.popupLines != nil {
+		t.Fatalf("expected popup lines to clear, got %#v", surface.popupLines)
+	}
+}
+
 func TestFixedBottomSurface_ClearPopupKeepsStatusLine(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true

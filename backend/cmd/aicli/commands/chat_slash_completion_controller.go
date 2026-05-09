@@ -348,10 +348,10 @@ func (c *chatSlashCompletionController) renderLocked() {
 		return
 	}
 	if c.renderedSignature != "" {
-		c.session.Surface.ClearPopup()
+		c.session.Surface.ClearPopupPreserveCursor()
 	}
 
-	c.session.Surface.ShowPopup(lines)
+	c.session.Surface.ShowPopupPreserveCursor(lines)
 	c.renderedSignature = signature
 }
 
@@ -359,7 +359,7 @@ func (c *chatSlashCompletionController) clearPopupLocked() {
 	if !c.isSurfaceEnabledLocked() {
 		return
 	}
-	c.session.Surface.ClearPopup()
+	c.session.Surface.ClearPopupPreserveCursor()
 }
 
 func (c *chatSlashCompletionController) isSurfaceEnabledLocked() bool {

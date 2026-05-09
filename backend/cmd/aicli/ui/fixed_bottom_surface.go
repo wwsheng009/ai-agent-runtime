@@ -110,6 +110,24 @@ func (s *FixedBottomSurface) ShowPopup(lines []string) {
 	s.moveToOutputLocked()
 }
 
+func (s *FixedBottomSurface) ShowPopupPreserveCursor(lines []string) {
+	if s == nil || s.terminal == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.popupLines = cloneAndSanitizePopupLines(lines)
+	s.composerLine = ""
+	if !s.enabled {
+		return
+	}
+	s.terminal.SaveCursor()
+	defer s.terminal.RestoreCursor()
+	s.applyLayoutLocked()
+	s.renderPopupLocked()
+	s.renderStatusLocked()
+}
+
 func (s *FixedBottomSurface) ShowPopupInput(lines []string, prompt string) {
 	if s == nil || s.terminal == nil {
 		return
@@ -167,6 +185,31 @@ func (s *FixedBottomSurface) ClearPopup() {
 	s.popupRenderedGapRows = 0
 	s.renderStatusLocked()
 	s.moveToOutputLocked()
+}
+
+func (s *FixedBottomSurface) ClearPopupPreserveCursor() {
+	if s == nil || s.terminal == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.popupLines) == 0 && s.popupRenderedRows == 0 && strings.TrimSpace(s.composerLine) == "" {
+		return
+	}
+	s.popupLines = nil
+	s.composerLine = ""
+	if !s.enabled {
+		s.popupRenderedRows = 0
+		s.popupRenderedGapRows = 0
+		return
+	}
+	s.terminal.SaveCursor()
+	defer s.terminal.RestoreCursor()
+	s.applyLayoutLocked()
+	s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
+	s.popupRenderedRows = 0
+	s.popupRenderedGapRows = 0
+	s.renderStatusLocked()
 }
 
 func (s *FixedBottomSurface) SetStatusLine(line string) {
