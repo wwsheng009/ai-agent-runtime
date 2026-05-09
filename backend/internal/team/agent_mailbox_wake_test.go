@@ -53,6 +53,14 @@ func TestAgentControlMailboxWakeWatchesTeamMailbox(t *testing.T) {
 		t.Fatal("expected AgentControl mailbox wake event")
 	}
 
+	assertSQLiteTableMissing(t, store.db, "agent_control_mailbox_wake_messages")
+
+	var registryRows int
+	require.NoError(t, store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM agent_control_wake_events WHERE team_id = ? AND kind = ?
+	`, teamID, agentcontrol.WakeKindMailbox).Scan(&registryRows))
+	require.Equal(t, 1, registryRows)
+
 	seq, err := source.LastAgentControlMailboxWakeSeq(ctx, agentcontrol.MailboxWakeFilter{
 		Workflow: agentcontrol.WorkflowSpawnTeam,
 		TeamID:   teamID,

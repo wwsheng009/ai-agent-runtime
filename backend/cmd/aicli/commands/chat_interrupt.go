@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -252,17 +253,52 @@ func (h *localChatRuntimeHost) cancelActiveTeamTasks(ctx context.Context, teamID
 	if err != nil {
 		return err
 	}
+	taskRegistry := team.NewAgentControlTaskRegistry(h.TeamStore)
 	for _, item := range tasks {
-		item.Status = team.TaskStatusCancelled
-		item.Summary = "cancelled by user interrupt"
-		item.Assignee = nil
-		item.LeaseUntil = nil
-		if err := h.TeamStore.UpdateTask(ctx, item); err != nil {
+		assignee := taskAssignee(item)
+		summary := "cancelled by user interrupt"
+		if _, err := taskRegistry.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
+			ID:       item.ID,
+			Workflow: agentcontrol.WorkflowSpawnTeam,
+			Status:   string(team.TaskStatusCancelled),
+			Summary:  summary,
+		}); err != nil {
 			return err
 		}
 		_ = h.TeamStore.ReleasePathClaimsByTask(ctx, item.ID)
+		h.dispatchCancelledTaskLifecycleEvent(ctx, item, assignee, summary)
 	}
 	return nil
+}
+
+func taskAssignee(task team.Task) string {
+	if task.Assignee == nil {
+		return ""
+	}
+	return strings.TrimSpace(*task.Assignee)
+}
+
+func (h *localChatRuntimeHost) dispatchCancelledTaskLifecycleEvent(ctx context.Context, task team.Task, assignee string, summary string) {
+	if h == nil || strings.TrimSpace(task.ID) == "" || strings.TrimSpace(task.TeamID) == "" {
+		return
+	}
+	event := team.TeamEvent{
+		Type:   "task.cancelled",
+		TeamID: strings.TrimSpace(task.TeamID),
+		Payload: map[string]interface{}{
+			"team_id":  strings.TrimSpace(task.TeamID),
+			"task_id":  strings.TrimSpace(task.ID),
+			"assignee": strings.TrimSpace(assignee),
+			"status":   string(team.TaskStatusCancelled),
+			"reason":   "user_interrupt",
+			"summary":  strings.TrimSpace(summary),
+		},
+		Timestamp: time.Now().UTC(),
+	}
+	if h.TeamStore != nil {
+		_, _ = h.TeamStore.AppendTeamEvent(ctx, event)
+	}
+	h.dispatchTeamLifecycleEvent(event, true)
 }
 
 func (h *localChatRuntimeHost) idleTeamMates(ctx context.Context, teamID string) error {

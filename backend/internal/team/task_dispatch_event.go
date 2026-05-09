@@ -197,6 +197,8 @@ func taskLifecycleEventVerb(eventType string) string {
 		return "completed"
 	case "task.failed":
 		return "failed"
+	case "task.cancelled":
+		return "cancelled"
 	default:
 		return "updated"
 	}

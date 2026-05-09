@@ -236,6 +236,16 @@ func (o *Orchestrator) agentControlMailboxWakeSource() agentcontrol.MailboxWakeS
 	return NewAgentControlMailboxWake(o.Store)
 }
 
+func (o *Orchestrator) markAgentControlTasksReady(ctx context.Context, teamID string) (int64, error) {
+	if o == nil || o.Store == nil {
+		return 0, fmt.Errorf("orchestrator store is not configured")
+	}
+	return NewAgentControlTaskRegistry(o.Store).MarkAgentControlTasksReady(ctx, agentcontrol.TaskReadyRequest{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+}
+
 // ClaimReadyTasks assigns and claims ready tasks, returning accepted assignments.
 func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit int) ([]Assignment, error) {
 	if o == nil || o.Store == nil {
@@ -248,7 +258,7 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 	if err != nil {
 		return nil, err
 	}
-	_, _ = o.Store.MarkReadyTasks(ctx, teamID)
+	_, _ = o.markAgentControlTasksReady(ctx, teamID)
 
 	readyTasks, err := o.Store.ListTasks(ctx, TaskFilter{
 		TeamID: teamID,
@@ -461,7 +471,7 @@ func (o *Orchestrator) tick(ctx context.Context, teamID string) error {
 			return err
 		}
 	}
-	_, _ = o.Store.MarkReadyTasks(ctx, teamID)
+	_, _ = o.markAgentControlTasksReady(ctx, teamID)
 
 	assignments, err := o.ClaimReadyTasks(ctx, teamID, 0)
 	if err != nil {

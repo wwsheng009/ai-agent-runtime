@@ -608,6 +608,137 @@ func TestAICLIChatActorExecutor_AutoStartQueuedTasksStaySerializedPerTeammate(t 
 	}
 }
 
+func TestAICLIChatActorExecutor_InterruptStopsSlowAutoStartTeam(t *testing.T) {
+	manager, userID, dir, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	provider := newInterruptibleAutoStartLocalOrchestrationProvider()
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+	})
+	if err := llmRuntime.RegisterProvider("test-provider", provider); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+	if err := llmRuntime.RegisterProviderAlias("test-model", "test-provider"); err != nil {
+		t.Fatalf("RegisterProviderAlias: %v", err)
+	}
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	session := &ChatSession{
+		ProviderName:     "test-provider",
+		PermissionMode:   runtimepolicy.ModeDefault,
+		Model:            "test-model",
+		SessionManager:   manager,
+		RuntimeSession:   runtimeSession,
+		SessionUserID:    userID,
+		SessionDir:       dir,
+		LocalRuntimeHost: host,
+		ChatExecutor:     newAICLIActorChatExecutor(),
+	}
+	host.BaseSession = session
+
+	var (
+		linesMu sync.Mutex
+		lines   []string
+	)
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.writeLine = func(line string) {
+		linesMu.Lock()
+		defer linesMu.Unlock()
+		lines = append(lines, line)
+	}
+	session.RuntimeEventBridge = bridge
+
+	response, err := session.ChatExecutor.Execute(context.Background(), session, "Create an interruptible slow auto-start team")
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if !strings.Contains(response, "team-interrupt-slow") {
+		t.Fatalf("expected interruptible spawn response, got %q", response)
+	}
+	if session.ActiveTeam == nil || session.ActiveTeam.TeamID != "team-interrupt-slow" {
+		t.Fatalf("expected active interruptible team binding, got %+v", session.ActiveTeam)
+	}
+
+	provider.waitStarted(t, 2*time.Second)
+	session.Interrupt()
+	provider.waitCanceled(t, 3*time.Second)
+
+	waitForChatTestCondition(t, 3*time.Second, func() bool {
+		record, recordErr := teamStore.GetTeam(context.Background(), "team-interrupt-slow")
+		taskRecord, taskErr := teamStore.GetTask(context.Background(), "task-interrupt-slow")
+		state, stateErr := runtimeStoreFromHost(host).LoadState(context.Background(), runtimeSession.ID)
+		if recordErr != nil || taskErr != nil || stateErr != nil || record == nil || taskRecord == nil || state == nil {
+			return false
+		}
+		return record.Status == team.TeamStatusPaused &&
+			taskRecord.Status == team.TaskStatusCancelled &&
+			state.Status == runtimechat.SessionStopped
+	}, func() string {
+		record, _ := teamStore.GetTeam(context.Background(), "team-interrupt-slow")
+		taskRecord, _ := teamStore.GetTask(context.Background(), "task-interrupt-slow")
+		state, _ := runtimeStoreFromHost(host).LoadState(context.Background(), runtimeSession.ID)
+		return fmt.Sprintf("team=%+v task=%+v state=%+v lines=%v events=%v", record, taskRecord, state, copyInterruptTestLines(&linesMu, lines), host.EventBus.Recent(30))
+	})
+
+	time.Sleep(150 * time.Millisecond)
+	record, err := teamStore.GetTeam(context.Background(), "team-interrupt-slow")
+	if err != nil {
+		t.Fatalf("GetTeam: %v", err)
+	}
+	if record == nil || record.Status != team.TeamStatusPaused {
+		t.Fatalf("expected interrupted team to remain paused, got %+v", record)
+	}
+	taskRecord, err := teamStore.GetTask(context.Background(), "task-interrupt-slow")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if taskRecord == nil || taskRecord.Status != team.TaskStatusCancelled {
+		t.Fatalf("expected interrupted task to remain cancelled, got %+v", taskRecord)
+	}
+
+	events, err := teamStore.ListTeamEvents(context.Background(), team.TeamEventFilter{TeamID: "team-interrupt-slow"})
+	if err != nil {
+		t.Fatalf("ListTeamEvents: %v", err)
+	}
+	for _, event := range events {
+		switch event.Type {
+		case "task.completed", "task.failed", "team.completed", "team.summary":
+			t.Fatalf("expected no terminal team events after interrupt, got %+v", events)
+		}
+	}
+
+	linesMu.Lock()
+	snapshot := append([]string(nil), lines...)
+	linesMu.Unlock()
+	for _, prefix := range []string{
+		"[done] planner -> lead task-interrupt-slow",
+		"[task] completed task-interrupt-slow",
+		"[task] failed task-interrupt-slow",
+		"[team] completed team-interrupt-slow",
+		"[team summary] team-interrupt-slow",
+	} {
+		if containsChatTimelinePrefix(snapshot, prefix) {
+			t.Fatalf("expected no terminal timeline line %q after interrupt, got %v", prefix, snapshot)
+		}
+	}
+}
+
 func TestAICLIChatActorExecutor_PersistsActiveTeamBindingWhenTurnEndsWithEmptyReply(t *testing.T) {
 	manager, userID, dir, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -1111,6 +1242,120 @@ func TestAICLIChatActorExecutor_FailedAutoStartTeamClosesNonLeadTeammateSessionA
 	}
 }
 
+func TestAICLIChatActorExecutor_AutoStartTeamHandlesTeammateProviderStreamError(t *testing.T) {
+	manager, userID, dir, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	provider := &streamErrorAutoStartLocalOrchestrationProvider{teammateDelay: 80 * time.Millisecond}
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+	})
+	if err := llmRuntime.RegisterProvider("test-provider", provider); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+	if err := llmRuntime.RegisterProviderAlias("test-model", "test-provider"); err != nil {
+		t.Fatalf("RegisterProviderAlias: %v", err)
+	}
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	session := &ChatSession{
+		ProviderName:     "test-provider",
+		PermissionMode:   runtimepolicy.ModeDefault,
+		Model:            "test-model",
+		SessionManager:   manager,
+		RuntimeSession:   runtimeSession,
+		SessionUserID:    userID,
+		SessionDir:       dir,
+		LocalRuntimeHost: host,
+		ChatExecutor:     newAICLIActorChatExecutor(),
+	}
+	host.BaseSession = session
+
+	var (
+		linesMu sync.Mutex
+		lines   []string
+	)
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.writeLine = func(line string) {
+		linesMu.Lock()
+		defer linesMu.Unlock()
+		lines = append(lines, line)
+	}
+	session.RuntimeEventBridge = bridge
+
+	response, err := session.ChatExecutor.Execute(context.Background(), session, "Create a stream-error auto-start team and let the planner hit a provider stream error")
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if !strings.Contains(response, "team-stream-error") {
+		t.Fatalf("expected stream-error spawn response, got %q", response)
+	}
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := host.waitForTeamTerminal(waitCtx, "team-stream-error"); err != nil {
+		t.Fatalf("waitForTeamTerminal: %v", err)
+	}
+
+	teamRecord, err := teamStore.GetTeam(context.Background(), "team-stream-error")
+	if err != nil {
+		t.Fatalf("GetTeam: %v", err)
+	}
+	if teamRecord == nil || teamRecord.Status != team.TeamStatusFailed {
+		t.Fatalf("expected stream-error team failed, got %+v", teamRecord)
+	}
+	taskRecord, err := teamStore.GetTask(context.Background(), "task-stream-error")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if taskRecord == nil || taskRecord.Status != team.TaskStatusFailed {
+		t.Fatalf("expected stream-error task failed, got %+v", taskRecord)
+	}
+	if !strings.Contains(strings.ToLower(taskRecord.Summary), "stream error") {
+		t.Fatalf("expected task summary to include stream error, got %+v", taskRecord)
+	}
+
+	events, err := teamStore.ListTeamEvents(context.Background(), team.TeamEventFilter{TeamID: "team-stream-error"})
+	if err != nil {
+		t.Fatalf("ListTeamEvents: %v", err)
+	}
+	if !hasTeamEventType(events, "task.failed") || !hasTeamEventType(events, "team.completed") {
+		t.Fatalf("expected task.failed and team.completed events, got %+v", events)
+	}
+	for _, event := range events {
+		if event.Type == "team.summary" {
+			t.Fatalf("expected no team.summary for stream-error failed team, got %+v", events)
+		}
+	}
+
+	linesMu.Lock()
+	snapshot := append([]string(nil), lines...)
+	linesMu.Unlock()
+	if !containsChatTimelinePrefix(snapshot, "[failed] planner -> lead task-stream-error") ||
+		!containsChatTimelinePrefix(snapshot, "[task] failed task-stream-error @planner") ||
+		!containsChatTimelinePrefix(snapshot, "[team] completed team-stream-error status=failed") {
+		t.Fatalf("expected stream-error failure timeline, got %v", snapshot)
+	}
+	if containsChatTimelinePrefix(snapshot, "[team summary] team-stream-error") {
+		t.Fatalf("expected no team summary timeline for stream-error failure, got %v", snapshot)
+	}
+}
+
 func containsAllChatTimelineLines(lines []string, expected ...string) bool {
 	flattened := flattenChatTimelineLines(lines)
 	for _, want := range expected {
@@ -1499,6 +1744,124 @@ type autoStartLocalOrchestrationProvider struct {
 	teammateDelay time.Duration
 }
 
+type interruptibleAutoStartLocalOrchestrationProvider struct {
+	startedOnce sync.Once
+	cancelOnce  sync.Once
+	started     chan struct{}
+	canceled    chan struct{}
+}
+
+func newInterruptibleAutoStartLocalOrchestrationProvider() *interruptibleAutoStartLocalOrchestrationProvider {
+	return &interruptibleAutoStartLocalOrchestrationProvider{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+}
+
+func (p *interruptibleAutoStartLocalOrchestrationProvider) Name() string { return "test-provider" }
+
+func (p *interruptibleAutoStartLocalOrchestrationProvider) Call(ctx context.Context, req *runtimellm.LLMRequest) (*runtimellm.LLMResponse, error) {
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		message := req.Messages[i]
+		switch message.Role {
+		case "tool":
+			switch strings.TrimSpace(message.ToolCallID) {
+			case "call-spawn-interrupt-slow":
+				return &runtimellm.LLMResponse{Content: "team-interrupt-slow task-interrupt-slow", Model: req.Model}, nil
+			}
+		case "user":
+			lastUser := message.Content
+			switch {
+			case strings.Contains(lastUser, "Create an interruptible slow auto-start team"):
+				return &runtimellm.LLMResponse{
+					Model: req.Model,
+					ToolCalls: []runtimetypes.ToolCall{
+						{
+							ID:   "call-spawn-interrupt-slow",
+							Name: toolbroker.ToolSpawnTeam,
+							Args: map[string]interface{}{
+								"team_id":    "team-interrupt-slow",
+								"auto_start": true,
+								"teammates": []interface{}{
+									map[string]interface{}{
+										"id":      "planner",
+										"name":    "Planner",
+										"profile": "planner",
+									},
+								},
+								"tasks": []interface{}{
+									map[string]interface{}{
+										"id":           "task-interrupt-slow",
+										"title":        "Interruptible slow task",
+										"goal":         "Stay running until the parent interrupt arrives",
+										"assignee":     "planner",
+										"deliverables": []interface{}{"no terminal outcome after interrupt"},
+									},
+								},
+							},
+						},
+					},
+				}, nil
+			case strings.Contains(lastUser, "You are teammate"):
+				p.startedOnce.Do(func() { close(p.started) })
+				<-ctx.Done()
+				p.cancelOnce.Do(func() { close(p.canceled) })
+				return nil, ctx.Err()
+			case strings.Contains(lastUser, "You are the team lead. Provide a concise final summary"):
+				return &runtimellm.LLMResponse{Content: "unexpected interrupt summary", Model: req.Model}, nil
+			default:
+				return &runtimellm.LLMResponse{Content: "no-op", Model: req.Model}, nil
+			}
+		}
+	}
+	return &runtimellm.LLMResponse{Content: "no-op", Model: req.Model}, nil
+}
+
+func (p *interruptibleAutoStartLocalOrchestrationProvider) Stream(ctx context.Context, req *runtimellm.LLMRequest) (<-chan runtimellm.StreamChunk, error) {
+	ch := make(chan runtimellm.StreamChunk, 1)
+	close(ch)
+	return ch, nil
+}
+
+func (p *interruptibleAutoStartLocalOrchestrationProvider) CountTokens(text string) int {
+	return len(text)
+}
+
+func (p *interruptibleAutoStartLocalOrchestrationProvider) GetCapabilities() *runtimellm.ModelCapabilities {
+	return &runtimellm.ModelCapabilities{SupportsTools: true}
+}
+
+func (p *interruptibleAutoStartLocalOrchestrationProvider) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
+func (p *interruptibleAutoStartLocalOrchestrationProvider) waitStarted(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-p.started:
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for interruptible teammate run to start")
+	}
+}
+
+func (p *interruptibleAutoStartLocalOrchestrationProvider) waitCanceled(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-p.canceled:
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for interruptible teammate context cancellation")
+	}
+}
+
+func copyInterruptTestLines(mu *sync.Mutex, lines []string) []string {
+	if mu == nil {
+		return append([]string(nil), lines...)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]string(nil), lines...)
+}
+
 func (p *autoStartLocalOrchestrationProvider) Name() string { return "test-provider" }
 
 func (p *autoStartLocalOrchestrationProvider) Call(ctx context.Context, req *runtimellm.LLMRequest) (*runtimellm.LLMResponse, error) {
@@ -1767,6 +2130,86 @@ func (p *failedAutoStartLocalOrchestrationProvider) GetCapabilities() *runtimell
 }
 
 func (p *failedAutoStartLocalOrchestrationProvider) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
+type streamErrorAutoStartLocalOrchestrationProvider struct {
+	teammateDelay time.Duration
+}
+
+func (p *streamErrorAutoStartLocalOrchestrationProvider) Name() string { return "test-provider" }
+
+func (p *streamErrorAutoStartLocalOrchestrationProvider) Call(ctx context.Context, req *runtimellm.LLMRequest) (*runtimellm.LLMResponse, error) {
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		message := req.Messages[i]
+		switch message.Role {
+		case "tool":
+			if strings.TrimSpace(message.ToolCallID) == "call-spawn-stream-error" {
+				return &runtimellm.LLMResponse{Content: "team-stream-error task-stream-error", Model: req.Model}, nil
+			}
+		case "user":
+			lastUser := message.Content
+			switch {
+			case strings.Contains(lastUser, "Create a stream-error auto-start team"):
+				return &runtimellm.LLMResponse{
+					Model: req.Model,
+					ToolCalls: []runtimetypes.ToolCall{
+						{
+							ID:   "call-spawn-stream-error",
+							Name: toolbroker.ToolSpawnTeam,
+							Args: map[string]interface{}{
+								"team_id":    "team-stream-error",
+								"auto_start": true,
+								"teammates": []interface{}{
+									map[string]interface{}{
+										"id":      "planner",
+										"name":    "Planner",
+										"profile": "planner",
+									},
+								},
+								"tasks": []interface{}{
+									map[string]interface{}{
+										"id":           "task-stream-error",
+										"title":        "Stream error task",
+										"goal":         "Fail with a provider stream error",
+										"assignee":     "planner",
+										"deliverables": []interface{}{"failure summary"},
+									},
+								},
+							},
+						},
+					},
+				}, nil
+			case strings.Contains(lastUser, "You are teammate"):
+				if p.teammateDelay > 0 {
+					time.Sleep(p.teammateDelay)
+				}
+				return nil, fmt.Errorf("failed to handle stream response: stream error: stream ID 23; INTERNAL_ERROR; received from peer")
+			case strings.Contains(lastUser, "You are the team lead. Provide a concise final summary"):
+				return &runtimellm.LLMResponse{Content: "unexpected stream-error summary", Model: req.Model}, nil
+			default:
+				return &runtimellm.LLMResponse{Content: "no-op", Model: req.Model}, nil
+			}
+		}
+	}
+	return &runtimellm.LLMResponse{Content: "no-op", Model: req.Model}, nil
+}
+
+func (p *streamErrorAutoStartLocalOrchestrationProvider) Stream(ctx context.Context, req *runtimellm.LLMRequest) (<-chan runtimellm.StreamChunk, error) {
+	ch := make(chan runtimellm.StreamChunk, 1)
+	close(ch)
+	return ch, nil
+}
+
+func (p *streamErrorAutoStartLocalOrchestrationProvider) CountTokens(text string) int {
+	return len(text)
+}
+
+func (p *streamErrorAutoStartLocalOrchestrationProvider) GetCapabilities() *runtimellm.ModelCapabilities {
+	return &runtimellm.ModelCapabilities{SupportsTools: true}
+}
+
+func (p *streamErrorAutoStartLocalOrchestrationProvider) CheckHealth(ctx context.Context) error {
 	return nil
 }
 

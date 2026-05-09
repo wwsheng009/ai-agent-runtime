@@ -96,8 +96,10 @@ func TestReadInteractiveLine_CtrlLRedrawsCurrentLine(t *testing.T) {
 		t.Fatalf("expected ctrl+l to keep current input unchanged, got %q", line)
 	}
 	rendered := output.String()
-	if count := strings.Count(rendered, cursorRestoreSequence); count < 2 {
-		t.Fatalf("expected ctrl+l to trigger an additional redraw, got %d in %q", count, rendered)
+	// 重绘会输出 `\x1b[K` 清除输入区。初始输入产生一次重绘，Ctrl+L 触发
+	// 另外一次，因此应不少于 2 个 `\x1b[K`。
+	if count := strings.Count(rendered, "\x1b[K"); count < 2 {
+		t.Fatalf("expected ctrl+l to trigger an additional redraw, got %d clears in %q", count, rendered)
 	}
 }
 
@@ -417,8 +419,43 @@ func TestReadInteractiveLine_BuffersBracketedPasteIntoSingleRedraw(t *testing.T)
 	if count := strings.Count(rendered, prompt); count != 1 {
 		t.Fatalf("expected prompt to be rendered once, got %d in %q", count, rendered)
 	}
-	if count := strings.Count(rendered, cursorRestoreSequence); count != 2 {
-		t.Fatalf("expected one bounded redraw after buffered paste, got %d cursor restores in %q", count, rendered)
+	pastedBody := strings.Repeat("a", 96)
+	if count := strings.Count(rendered, pastedBody); count != 1 {
+		t.Fatalf("expected one bounded redraw after buffered paste, got %d content renders in %q", count, rendered)
+	}
+	if strings.Contains(rendered, cursorRestoreSequence) {
+		t.Fatalf("expected redraw to avoid absolute \\x1b[u restore, got %q", rendered)
+	}
+}
+
+func TestReadInteractiveLine_MultiLinePasteRendersBodyOnce(t *testing.T) {
+	var output bytes.Buffer
+	prompt := UserPromptText(0)
+	output.WriteString(prompt)
+
+	body := "line-01\nline-02\nline-03\nline-04\nline-05\nline-06\nline-07\nline-08\nline-09\nline-10\nline-11\nline-12"
+	pastedInput := "\x1b[200~" + body + "\x1b[201~\n"
+	line, err := readInteractiveLine(
+		strings.NewReader(pastedInput),
+		&output,
+		prompt,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != body {
+		t.Fatalf("expected pasted multiline input to stay intact, got %q", line)
+	}
+
+	rendered := output.String()
+	rerenderedBody := strings.ReplaceAll(body, "\n", "\r\n")
+	if count := strings.Count(rendered, rerenderedBody); count != 1 {
+		t.Fatalf("expected multi-line paste body to be rendered once, got %d in %q", count, rendered)
+	}
+	if strings.Contains(rendered, cursorRestoreSequence) {
+		t.Fatalf("expected redraw to use relative cursor motion, got absolute \\x1b[u in %q", rendered)
 	}
 }
 
@@ -479,8 +516,12 @@ func TestReadInteractiveLine_BuffersRapidPlainInputIntoSingleRedraw(t *testing.T
 	if count := strings.Count(rendered, prompt); count != 1 {
 		t.Fatalf("expected prompt to be rendered once, got %d in %q", count, rendered)
 	}
-	if count := strings.Count(rendered, cursorRestoreSequence); count != 2 {
-		t.Fatalf("expected one bounded redraw after buffered plain input, got %d cursor restores in %q", count, rendered)
+	pastedBody := strings.Repeat("a", 96)
+	if count := strings.Count(rendered, pastedBody); count != 1 {
+		t.Fatalf("expected one bounded redraw after buffered plain input, got %d content renders in %q", count, rendered)
+	}
+	if strings.Contains(rendered, cursorRestoreSequence) {
+		t.Fatalf("expected redraw to avoid absolute \\x1b[u restore, got %q", rendered)
 	}
 }
 

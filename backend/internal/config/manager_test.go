@@ -208,3 +208,48 @@ func TestValidateCatalogConfig(t *testing.T) {
 	err = ValidateRuntimeConfig(cfg)
 	require.Error(t, err)
 }
+
+func TestValidateAgentControlConfig(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.AgentControl.StorePath = "agent-control.sqlite"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.AgentControl.StoreDSN = "file:agent-control?mode=memory&cache=shared"
+	err := ValidateRuntimeConfig(cfg)
+	require.Error(t, err)
+
+	cfg = DefaultRuntimeConfig()
+	cfg.AgentControl.StoreDSN = "file:agent-control?mode=memory&cache=shared"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.AgentControl.StorePath = "agent-control.sqlite"
+	cfg.AgentControl.AgentStorePath = "agent-control-agents.sqlite"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.AgentControl.MailboxStorePath = "agent-control-mailbox.sqlite"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.AgentControl.MailboxStoreDSN = "file:agent-control-mailbox?mode=memory&cache=shared"
+	err = ValidateRuntimeConfig(cfg)
+	require.Error(t, err)
+
+	cfg = DefaultRuntimeConfig()
+	cfg.AgentControl.MailboxStoreDSN = "file:agent-control-mailbox?mode=memory&cache=shared"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.AgentControl.AgentStorePath = "agent-control-agents.sqlite"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.AgentControl.AgentStoreDSN = "file:agent-control-agents?mode=memory&cache=shared"
+	err = ValidateRuntimeConfig(cfg)
+	require.Error(t, err)
+
+	cfg = DefaultRuntimeConfig()
+	cfg.AgentControl.AgentStoreDSN = "file:agent-control-agents?mode=memory&cache=shared"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+}

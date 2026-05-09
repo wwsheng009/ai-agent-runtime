@@ -2,11 +2,14 @@ package team
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 func TestSQLiteStoreListMailFilters(t *testing.T) {
@@ -67,6 +70,66 @@ func TestSQLiteStoreListMailFilters(t *testing.T) {
 	require.Len(t, messages, 0)
 }
 
+func TestSQLiteStoreInsertMailWritesGlobalRegistry(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global-mailbox.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+	store.SetGlobalMailboxWriter(globalStore)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	messageID, err := store.InsertMail(ctx, MailMessage{
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "member-1",
+		Kind:      agentcontrol.MailboxKindTeamTaskLifecycle,
+		Body:      "task lifecycle",
+		CreatedAt: time.Unix(11, 0).UTC(),
+	})
+	require.NoError(t, err)
+
+	records, err := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, agentcontrol.MailboxSourceGlobal, records[0].Source)
+	assert.Positive(t, records[0].SourceSeq)
+	assert.Equal(t, messageID, records[0].MessageID)
+	assert.Equal(t, agentcontrol.MailboxScopeTeam, records[0].Scope)
+	assert.Equal(t, int64(1), records[0].TeamSeq)
+
+	localMessages, err := store.ListMail(ctx, MailFilter{TeamID: teamID})
+	require.NoError(t, err)
+	require.Len(t, localMessages, 1)
+	assert.Equal(t, records[0].Seq, localMessages[0].GlobalSeq)
+
+	localRecords, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, localRecords, 1)
+	assert.Equal(t, records[0].Seq, localRecords[0].GlobalSeq)
+
+	count, err := globalStore.MaterializeMailboxRecords(ctx, []agentcontrol.NamedMailboxRegistrySource{
+		{Name: agentcontrol.MailboxSourceTeams, Source: NewAgentControlMailboxRegistry(store)},
+	}, agentcontrol.MailboxRecordFilter{Workflow: agentcontrol.WorkflowSpawnTeam})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+	records, err = globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+}
+
 func TestSQLiteStoreListMailAfterSeqReturnsLaterMessages(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -106,6 +169,124 @@ func TestSQLiteStoreListMailAfterSeqReturnsLaterMessages(t *testing.T) {
 	require.Len(t, later, 1)
 	assert.Equal(t, secondID, later[0].ID)
 	assert.Equal(t, all[0].Seq, later[0].Seq)
+}
+
+func TestSQLiteStoreListMailPrefersAgentControlMessages(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	messageID, err := store.InsertMail(ctx, MailMessage{
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "mate-a",
+		Kind:      "info",
+		Body:      "agent-control body",
+		Metadata: map[string]interface{}{
+			"source": "agent-control",
+		},
+	})
+	require.NoError(t, err)
+
+	assertSQLiteTableMissing(t, store.db, "team_mailbox_messages")
+	assertSQLiteTableMissing(t, store.db, "agent_control_mailbox_messages")
+
+	messages, err := store.ListMail(ctx, MailFilter{TeamID: teamID})
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Equal(t, messageID, messages[0].ID)
+	assert.Equal(t, "agent-control body", messages[0].Body)
+	assert.Equal(t, "info", messages[0].Kind)
+	assert.Equal(t, "agent-control", messages[0].Metadata["source"])
+	assert.Equal(t, int64(1), messages[0].Seq)
+	assert.Equal(t, int64(1), messages[0].ControlSeq)
+
+	var unifiedRows int
+	require.NoError(t, store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM agent_control_mailbox_records
+		WHERE scope = ? AND team_id = ?
+	`, agentcontrol.MailboxScopeTeam, teamID).Scan(&unifiedRows))
+	assert.Equal(t, 1, unifiedRows)
+
+	records, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:    agentcontrol.MailboxScopeTeam,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, messageID, records[0].MessageID)
+	assert.Equal(t, agentcontrol.MailboxScopeTeam, records[0].Scope)
+	assert.Equal(t, agentcontrol.WorkflowSpawnTeam, records[0].Workflow)
+	assert.Equal(t, teamID, records[0].TeamID)
+	assert.Equal(t, int64(1), records[0].Seq)
+	assert.Equal(t, int64(1), records[0].TeamSeq)
+	assert.Equal(t, "agent-control body", records[0].Body)
+
+	recordSeq, err := store.LastAgentControlMailboxRecordSeq(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:    agentcontrol.MailboxScopeTeam,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), recordSeq)
+}
+
+func TestSQLiteStoreRecordMailReceiptDoesNotRequireMirrorRows(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	messageID, err := store.InsertMail(ctx, MailMessage{
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "mate-a",
+		Kind:      "info",
+		Body:      "agent-control body",
+	})
+	require.NoError(t, err)
+
+	assertSQLiteTableMissing(t, store.db, "team_mailbox_messages")
+	assertSQLiteTableMissing(t, store.db, "agent_control_mailbox_messages")
+
+	ackedAt := time.Date(2026, 5, 8, 10, 30, 0, 0, time.UTC)
+	require.NoError(t, store.AckMail(ctx, teamID, messageID, ackedAt))
+
+	records, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:    agentcontrol.MailboxScopeTeam,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.NotNil(t, records[0].AckedAt)
+	assert.Equal(t, formatTime(ackedAt), formatTime(*records[0].AckedAt))
+
+	unread, err := store.ListMail(ctx, MailFilter{
+		TeamID:     teamID,
+		UnreadOnly: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, unread, 0)
+
+	receipts, err := store.ListMailReceipts(ctx, teamID, messageID)
+	require.NoError(t, err)
+	require.Len(t, receipts, 1)
+	assert.Equal(t, globalMailReceiptAgent, receipts[0].AgentID)
+}
+
+func assertSQLiteTableMissing(t *testing.T, db *sql.DB, table string) {
+	t.Helper()
+	var count int
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'table' AND name = ?
+	`, table).Scan(&count))
+	assert.Equal(t, 0, count)
 }
 
 func TestMailboxServiceWaitUsesDurableSequenceAndWake(t *testing.T) {

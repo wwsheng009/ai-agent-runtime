@@ -22,6 +22,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -136,6 +137,16 @@ type Handler struct {
 	teamOrchestrator   *team.Orchestrator
 	teamClaimsManager  *team.PathClaimManager
 	teamLifecycle      *handlerTeamLifecycleService
+
+	agentControlMu               sync.RWMutex
+	agentControlRegistryService  *agentcontrol.RegistryService
+	agentControlRegistryStoreKey string
+	agentControlMailboxStore     agentcontrol.GlobalMailboxRegistryStore
+	agentControlMailboxStoreKey  string
+	agentControlMailboxStoreAuto bool
+	agentControlAgentStore       agentcontrol.AgentRegistryStore
+	agentControlAgentStoreKey    string
+	agentControlAgentStoreAuto   bool
 
 	sessionRuntimeMu       sync.RWMutex
 	sessionHub             *chat.SessionHub
@@ -400,6 +411,7 @@ func (h *Handler) SetRuntimeConfig(config *runtimecfg.RuntimeConfig, configFile 
 	h.runtimeConfigFile = strings.TrimSpace(configFile)
 	_, _ = h.refreshTeamStore(config, h.runtimeConfigFile, "", "")
 	_, _ = h.refreshSessionRuntimeStore(config, h.runtimeConfigFile)
+	_, _ = h.refreshAgentControlRegistryService(config, h.runtimeConfigFile)
 }
 
 // SetRuntimeConfigResolver 设置 runtime config 选择器（用于 rollout）
@@ -582,8 +594,12 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/history", h.ClearSessionHistory).Methods(http.MethodDelete)
 
 	// Teams
+	runtimeRouter.HandleFunc("/agent-control/agents", h.ListAgentControlAgents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/agent-control/mailbox", h.ListAgentControlMailbox).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/agent-control/tasks", h.ListAgentControlTasks).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/agent-control/tasks", h.CreateAgentControlTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/events", h.ListAgentControlTaskGraphEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}", h.UpdateAgentControlTask).Methods(http.MethodPatch)
 	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/status", h.UpdateAgentControlTaskStatus).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/claim", h.ClaimAgentControlTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/lease", h.RenewAgentControlTaskLease).Methods(http.MethodPost)
@@ -3000,6 +3016,18 @@ func resolveRuntimeTeamStorePath(configFile, path string) string {
 	return filepath.Join(baseDir, path)
 }
 
+func resolveRuntimeAgentControlMailboxStorePath(configFile, path string) string {
+	return resolveRuntimeTeamStorePath(configFile, path)
+}
+
+func resolveRuntimeAgentControlAgentStorePath(configFile, path string) string {
+	return resolveRuntimeTeamStorePath(configFile, path)
+}
+
+func resolveRuntimeAgentControlStorePath(configFile, path string) string {
+	return resolveRuntimeTeamStorePath(configFile, path)
+}
+
 func resolveRuntimeBackgroundStorePath(configFile, path string) string {
 	return resolveRuntimeTeamStorePath(configFile, path)
 }
@@ -3146,6 +3174,7 @@ func (h *Handler) refreshTeamStore(config *runtimecfg.RuntimeConfig, configFile,
 	if oldStore != nil {
 		_ = oldStore.Close()
 	}
+	h.configureMailboxWriteThrough(h.getAgentControlMailboxStore())
 	payload := map[string]interface{}{
 		"store_path": storePath,
 		"uses_dsn":   storeDSN != "",
@@ -3154,6 +3183,228 @@ func (h *Handler) refreshTeamStore(config *runtimecfg.RuntimeConfig, configFile,
 		payload["request_id"] = strings.TrimSpace(requestID)
 	}
 	h.publishRuntimeEvent("team.store.reloaded", traceID, payload)
+	return true, nil
+}
+
+func (h *Handler) refreshAgentControlMailboxStore(config *runtimecfg.RuntimeConfig, configFile string) (bool, error) {
+	if h == nil || config == nil {
+		return false, nil
+	}
+	storePath := resolveRuntimeAgentControlMailboxStorePath(configFile, firstNonEmptyString(config.AgentControl.MailboxStorePath, config.AgentControl.StorePath))
+	storeDSN := strings.TrimSpace(firstNonEmptyString(config.AgentControl.MailboxStoreDSN, config.AgentControl.StoreDSN))
+	configKey := storePath + "|" + storeDSN
+
+	h.agentControlMu.RLock()
+	currentKey := h.agentControlMailboxStoreKey
+	currentStore := h.agentControlMailboxStore
+	autoManaged := h.agentControlMailboxStoreAuto
+	h.agentControlMu.RUnlock()
+
+	if configKey == "|" {
+		if currentStore != nil && autoManaged {
+			h.agentControlMu.Lock()
+			if h.agentControlMailboxStore == currentStore && h.agentControlMailboxStoreAuto {
+				h.agentControlMailboxStore = nil
+				h.agentControlMailboxStoreKey = ""
+				h.agentControlMailboxStoreAuto = false
+			}
+			h.agentControlMu.Unlock()
+			_ = currentStore.Close()
+			h.configureMailboxWriteThrough(nil)
+			return true, nil
+		}
+		return false, nil
+	}
+	if currentStore != nil && !autoManaged {
+		return false, nil
+	}
+	if configKey == currentKey && currentStore != nil {
+		return false, nil
+	}
+
+	store, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: strings.TrimSpace(storePath),
+		DSN:  storeDSN,
+	})
+	if err != nil {
+		h.publishRuntimeEvent("agent_control.mailbox.store.reload_failed", "", map[string]interface{}{
+			"store_path": storePath,
+			"uses_dsn":   storeDSN != "",
+			"error":      err.Error(),
+		})
+		return false, err
+	}
+
+	h.agentControlMu.Lock()
+	oldStore := h.agentControlMailboxStore
+	oldAutoManaged := h.agentControlMailboxStoreAuto
+	h.agentControlMailboxStore = store
+	h.agentControlMailboxStoreKey = configKey
+	h.agentControlMailboxStoreAuto = true
+	h.agentControlMu.Unlock()
+	h.configureMailboxWriteThrough(store)
+
+	if oldStore != nil && oldAutoManaged {
+		_ = oldStore.Close()
+	}
+	h.publishRuntimeEvent("agent_control.mailbox.store.reloaded", "", map[string]interface{}{
+		"store_path": storePath,
+		"uses_dsn":   storeDSN != "",
+	})
+	return true, nil
+}
+
+func (h *Handler) refreshAgentControlRegistryService(config *runtimecfg.RuntimeConfig, configFile string) (bool, error) {
+	if h == nil || config == nil {
+		return false, nil
+	}
+	cfg := agentcontrol.RegistryServiceConfig{
+		StorePath:        resolveRuntimeAgentControlStorePath(configFile, config.AgentControl.StorePath),
+		StoreDSN:         strings.TrimSpace(config.AgentControl.StoreDSN),
+		MailboxStorePath: resolveRuntimeAgentControlMailboxStorePath(configFile, config.AgentControl.MailboxStorePath),
+		MailboxStoreDSN:  strings.TrimSpace(config.AgentControl.MailboxStoreDSN),
+		AgentStorePath:   resolveRuntimeAgentControlAgentStorePath(configFile, config.AgentControl.AgentStorePath),
+		AgentStoreDSN:    strings.TrimSpace(config.AgentControl.AgentStoreDSN),
+	}
+	configKey := cfg.Key()
+
+	h.agentControlMu.RLock()
+	currentKey := h.agentControlRegistryStoreKey
+	currentService := h.agentControlRegistryService
+	currentMailboxStore := h.agentControlMailboxStore
+	currentAgentStore := h.agentControlAgentStore
+	mailboxAuto := h.agentControlMailboxStoreAuto
+	agentAuto := h.agentControlAgentStoreAuto
+	h.agentControlMu.RUnlock()
+
+	if cfg.Empty() {
+		if currentService != nil && mailboxAuto && agentAuto {
+			h.agentControlMu.Lock()
+			if h.agentControlRegistryService == currentService {
+				h.agentControlRegistryService = nil
+				h.agentControlRegistryStoreKey = ""
+				h.agentControlMailboxStore = nil
+				h.agentControlMailboxStoreKey = ""
+				h.agentControlMailboxStoreAuto = false
+				h.agentControlAgentStore = nil
+				h.agentControlAgentStoreKey = ""
+				h.agentControlAgentStoreAuto = false
+			}
+			h.agentControlMu.Unlock()
+			h.configureMailboxWriteThrough(nil)
+			_ = currentService.Close()
+			return true, nil
+		}
+		return false, nil
+	}
+	if (currentMailboxStore != nil && !mailboxAuto) || (currentAgentStore != nil && !agentAuto) {
+		return false, nil
+	}
+	if currentService != nil && currentKey == configKey {
+		return false, nil
+	}
+
+	service, err := agentcontrol.NewRegistryService(context.Background(), cfg)
+	if err != nil {
+		h.publishRuntimeEvent("agent_control.registry.store.reload_failed", "", map[string]interface{}{
+			"store_path":         cfg.Normalize().StorePath,
+			"mailbox_store_path": cfg.Normalize().MailboxStorePath,
+			"agent_store_path":   cfg.Normalize().AgentStorePath,
+			"uses_dsn":           cfg.Normalize().StoreDSN != "" || cfg.Normalize().MailboxStoreDSN != "" || cfg.Normalize().AgentStoreDSN != "",
+			"error":              err.Error(),
+		})
+		return false, err
+	}
+
+	h.agentControlMu.Lock()
+	oldService := h.agentControlRegistryService
+	h.agentControlRegistryService = service
+	h.agentControlRegistryStoreKey = configKey
+	h.agentControlMailboxStore = service.MailboxStore
+	h.agentControlMailboxStoreKey = "registry|" + configKey
+	h.agentControlMailboxStoreAuto = true
+	h.agentControlAgentStore = service.AgentStore
+	h.agentControlAgentStoreKey = "registry|" + configKey
+	h.agentControlAgentStoreAuto = true
+	h.agentControlMu.Unlock()
+	h.configureMailboxWriteThrough(service.MailboxStore)
+
+	if oldService != nil {
+		_ = oldService.Close()
+	}
+	normalized := cfg.Normalize()
+	h.publishRuntimeEvent("agent_control.registry.store.reloaded", "", map[string]interface{}{
+		"store_path":         normalized.StorePath,
+		"mailbox_store_path": normalized.MailboxStorePath,
+		"agent_store_path":   normalized.AgentStorePath,
+		"uses_dsn":           normalized.StoreDSN != "" || normalized.MailboxStoreDSN != "" || normalized.AgentStoreDSN != "",
+	})
+	return true, nil
+}
+
+func (h *Handler) refreshAgentControlAgentStore(config *runtimecfg.RuntimeConfig, configFile string) (bool, error) {
+	if h == nil || config == nil {
+		return false, nil
+	}
+	storePath := resolveRuntimeAgentControlAgentStorePath(configFile, firstNonEmptyString(config.AgentControl.AgentStorePath, config.AgentControl.StorePath))
+	storeDSN := strings.TrimSpace(firstNonEmptyString(config.AgentControl.AgentStoreDSN, config.AgentControl.StoreDSN))
+	configKey := storePath + "|" + storeDSN
+
+	h.agentControlMu.RLock()
+	currentKey := h.agentControlAgentStoreKey
+	currentStore := h.agentControlAgentStore
+	autoManaged := h.agentControlAgentStoreAuto
+	h.agentControlMu.RUnlock()
+
+	if configKey == "|" {
+		if currentStore != nil && autoManaged {
+			h.agentControlMu.Lock()
+			if h.agentControlAgentStore == currentStore && h.agentControlAgentStoreAuto {
+				h.agentControlAgentStore = nil
+				h.agentControlAgentStoreKey = ""
+				h.agentControlAgentStoreAuto = false
+			}
+			h.agentControlMu.Unlock()
+			_ = currentStore.Close()
+			return true, nil
+		}
+		return false, nil
+	}
+	if currentStore != nil && !autoManaged {
+		return false, nil
+	}
+	if configKey == currentKey && currentStore != nil {
+		return false, nil
+	}
+
+	store, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: strings.TrimSpace(storePath),
+		DSN:  storeDSN,
+	})
+	if err != nil {
+		h.publishRuntimeEvent("agent_control.agent.store.reload_failed", "", map[string]interface{}{
+			"store_path": storePath,
+			"uses_dsn":   storeDSN != "",
+			"error":      err.Error(),
+		})
+		return false, err
+	}
+
+	h.agentControlMu.Lock()
+	oldStore := h.agentControlAgentStore
+	oldAutoManaged := h.agentControlAgentStoreAuto
+	h.agentControlAgentStore = store
+	h.agentControlAgentStoreKey = configKey
+	h.agentControlAgentStoreAuto = true
+	h.agentControlMu.Unlock()
+
+	if oldStore != nil && oldAutoManaged {
+		_ = oldStore.Close()
+	}
+	h.publishRuntimeEvent("agent_control.agent.store.reloaded", "", map[string]interface{}{
+		"store_path": storePath,
+		"uses_dsn":   storeDSN != "",
+	})
 	return true, nil
 }
 
@@ -3222,6 +3473,7 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 		oldHub.StopAll()
 	}
 	closeRuntimeStore(oldStore, oldEventStore)
+	h.configureMailboxWriteThrough(h.getAgentControlMailboxStore())
 
 	h.publishRuntimeEvent("session.runtime.store.reloaded", "", map[string]interface{}{
 		"store_path": storePath,

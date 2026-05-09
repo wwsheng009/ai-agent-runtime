@@ -431,6 +431,26 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 	}
 }
 
+func TestChatSlashCommandCatalogTimelineIncludesFilterArg(t *testing.T) {
+	spec, ok := chatSlashCommandCatalogMap()["/timeline"]
+	if !ok {
+		t.Fatal("catalog missing /timeline")
+	}
+	if !strings.Contains(spec.Usage, "filter=<text>") {
+		t.Fatalf("expected /timeline usage to mention filter, got %q", spec.Usage)
+	}
+	found := false
+	for _, arg := range spec.Args {
+		if arg.Token == "filter=<text>" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected /timeline args to include filter token, got %#v", spec.Args)
+	}
+}
+
 func TestShouldEnableSlashCompletion(t *testing.T) {
 	t.Parallel()
 

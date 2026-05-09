@@ -2,7 +2,10 @@ package commands
 
 import (
 	"context"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,6 +13,133 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
+
+func TestSignalHandlerFirstInterruptCancelsActiveTeamRuns(t *testing.T) {
+	ctx := context.Background()
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(32)
+	host := &localChatRuntimeHost{
+		TeamStore:    store,
+		RuntimeStore: runtimeStore,
+		EventStore:   runtimeStore,
+	}
+
+	teamID, err := store.CreateTeam(ctx, team.Team{
+		ID:            "team-signal-interrupt",
+		LeadSessionID: "parent-session",
+		Status:        team.TeamStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	assignee := "mate-1"
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	if _, err := store.UpsertTeammate(ctx, team.Teammate{
+		ID:        assignee,
+		TeamID:    teamID,
+		SessionID: "child-session",
+		State:     team.TeammateStateBusy,
+	}); err != nil {
+		t.Fatalf("UpsertTeammate: %v", err)
+	}
+	if _, err := store.CreateTask(ctx, team.Task{
+		ID:         "task-signal-interrupt",
+		TeamID:     teamID,
+		Title:      "running task",
+		Status:     team.TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	for _, sessionID := range []string{"parent-session", "child-session"} {
+		if err := runtimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+			SessionID:     sessionID,
+			Status:        runtimechat.SessionRunning,
+			CurrentTurnID: "turn-1",
+			CurrentRunMeta: &team.RunMeta{Team: &team.TeamRunMeta{
+				TeamID: teamID,
+			}},
+			UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("SaveState(%s): %v", sessionID, err)
+		}
+	}
+
+	runtimeSession := runtimechat.NewSession("user-1")
+	runtimeSession.ID = "parent-session"
+	session := &ChatSession{
+		RuntimeSession:   runtimeSession,
+		SessionUserID:    "user-1",
+		LocalRuntimeHost: host,
+		ActiveTeam:       &chatTeamBinding{TeamID: teamID, AgentID: "lead"},
+	}
+
+	sigChan := make(chan os.Signal, 1)
+	sigCountChan := make(chan int, 1)
+	var shouldExit atomic.Bool
+	setupSignalHandler(session, sigChan, sigCountChan, &shouldExit)
+	defer signal.Stop(sigChan)
+
+	sigChan <- os.Interrupt
+	waitForSignalInterruptTaskCancelled(t, store, runtimeStore, teamID, "task-signal-interrupt")
+	if shouldExit.Load() {
+		t.Fatal("first interrupt should cancel active work without requesting chat loop exit")
+	}
+
+	sigChan <- os.Interrupt
+	deadline := time.Now().Add(2 * time.Second)
+	for !shouldExit.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("expected second interrupt to request chat loop exit")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForSignalInterruptTaskCancelled(t *testing.T, store team.Store, runtimeStore *runtimechat.InMemoryRuntimeStore, teamID, taskID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		taskRecord, err := store.GetTask(context.Background(), taskID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		teamRecord, err := store.GetTeam(context.Background(), teamID)
+		if err != nil {
+			t.Fatalf("GetTeam: %v", err)
+		}
+		parentState, err := runtimeStore.LoadState(context.Background(), "parent-session")
+		if err != nil {
+			t.Fatalf("LoadState parent: %v", err)
+		}
+		childState, err := runtimeStore.LoadState(context.Background(), "child-session")
+		if err != nil {
+			t.Fatalf("LoadState child: %v", err)
+		}
+		if taskRecord != nil &&
+			taskRecord.Status == team.TaskStatusCancelled &&
+			taskRecord.Assignee == nil &&
+			taskRecord.LeaseUntil == nil &&
+			teamRecord != nil &&
+			teamRecord.Status == team.TeamStatusPaused &&
+			parentState != nil &&
+			parentState.Status == runtimechat.SessionStopped &&
+			childState != nil &&
+			childState.Status == runtimechat.SessionStopped {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected signal interrupt cleanup, got task=%+v team=%+v parent=%+v child=%+v", taskRecord, teamRecord, parentState, childState)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 func TestInterruptActiveRunsPausesTeamAndStopsRuntimeStates(t *testing.T) {
 	ctx := context.Background()
@@ -23,6 +153,7 @@ func TestInterruptActiveRunsPausesTeamAndStopsRuntimeStates(t *testing.T) {
 	host := &localChatRuntimeHost{
 		TeamStore:    store,
 		RuntimeStore: runtimeStore,
+		EventStore:   runtimeStore,
 	}
 
 	teamID, err := store.CreateTeam(ctx, team.Team{
@@ -102,6 +233,40 @@ func TestInterruptActiveRunsPausesTeamAndStopsRuntimeStates(t *testing.T) {
 		if state == nil || state.Status != runtimechat.SessionStopped || state.CurrentTurnID != "" || state.CurrentRunMeta != nil {
 			t.Fatalf("expected stopped clean state for %s, got %+v", sessionID, state)
 		}
+	}
+	events, err := store.ListTeamEvents(ctx, team.TeamEventFilter{TeamID: teamID})
+	if err != nil {
+		t.Fatalf("ListTeamEvents: %v", err)
+	}
+	foundCancelledEvent := false
+	for _, event := range events {
+		if event.Type == "task.cancelled" &&
+			payloadStringValue(event.Payload["task_id"]) == "task-1" &&
+			payloadStringValue(event.Payload["assignee"]) == "mate-1" &&
+			payloadStringValue(event.Payload["status"]) == string(team.TaskStatusCancelled) {
+			foundCancelledEvent = true
+			break
+		}
+	}
+	if !foundCancelledEvent {
+		t.Fatalf("expected task.cancelled team event, got %+v", events)
+	}
+	messages, err := runtimeStore.ListAgentControlMailbox(ctx, "child-session", 0, 0)
+	if err != nil {
+		t.Fatalf("ListAgentControlMailbox child: %v", err)
+	}
+	foundCancelledMailbox := false
+	for _, message := range messages {
+		if message.Kind == team.TaskLifecycleMailboxKind &&
+			payloadStringValue(message.Metadata["event_type"]) == "task.cancelled" &&
+			payloadStringValue(message.Metadata["task_id"]) == "task-1" &&
+			payloadStringValue(message.Metadata["assignee"]) == "mate-1" {
+			foundCancelledMailbox = true
+			break
+		}
+	}
+	if !foundCancelledMailbox {
+		t.Fatalf("expected task.cancelled agent-control mailbox, got %+v", messages)
 	}
 }
 

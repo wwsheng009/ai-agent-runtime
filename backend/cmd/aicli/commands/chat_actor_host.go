@@ -6,9 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -26,23 +28,25 @@ import (
 )
 
 type localChatRuntimeHost struct {
-	Bootstrap     *runtimebootstrap.Manager
-	RuntimeConfig *runtimecfg.RuntimeConfig
-	SessionHub    *runtimechat.SessionHub
-	RuntimeStore  runtimechat.RuntimeStateStore
-	EventStore    runtimechat.EventStore
-	ReceiptStore  runtimechat.ToolReceiptStore
-	TeamStore     team.Store
-	TeamClaims    *team.PathClaimManager
-	Orchestrator  *team.Orchestrator
-	ToolSurface   runtimeskill.MCPManager
-	EventBus      *runtimeevents.Bus
-	SessionStore  runtimechat.SessionStorage
-	SessionUser   string
-	BaseSession   *ChatSession
-	TeamLifecycle teamLifecycleService
-	ActorRegistry *localActorRegistry
-	cleanupFns    []func()
+	Bootstrap          *runtimebootstrap.Manager
+	RuntimeConfig      *runtimecfg.RuntimeConfig
+	SessionHub         *runtimechat.SessionHub
+	RuntimeStore       runtimechat.RuntimeStateStore
+	EventStore         runtimechat.EventStore
+	ReceiptStore       runtimechat.ToolReceiptStore
+	TeamStore          team.Store
+	AgentControl       *agentcontrol.RegistryService
+	AgentRegistryStore agentcontrol.AgentRegistryStore
+	TeamClaims         *team.PathClaimManager
+	Orchestrator       *team.Orchestrator
+	ToolSurface        runtimeskill.MCPManager
+	EventBus           *runtimeevents.Bus
+	SessionStore       runtimechat.SessionStorage
+	SessionUser        string
+	BaseSession        *ChatSession
+	TeamLifecycle      teamLifecycleService
+	ActorRegistry      *localActorRegistry
+	cleanupFns         []func()
 }
 
 func (h *localChatRuntimeHost) Close() {
@@ -95,19 +99,29 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 
 	runtimeStore, eventStore := buildLocalChatRuntimeStores(session)
 	receiptStore, _ := runtimeStore.(runtimechat.ToolReceiptStore)
+	agentControlRegistry := buildLocalChatAgentControlRegistryService(runtimeConfig)
+	var globalMailboxStore agentcontrol.GlobalMailboxRegistryStore
+	var globalAgentStore agentcontrol.AgentRegistryStore
+	if agentControlRegistry != nil {
+		globalMailboxStore = agentControlRegistry.MailboxStore
+		globalAgentStore = agentControlRegistry.AgentStore
+	}
+	configureLocalChatMailboxWriteThrough(globalMailboxStore, runtimeStore, bootstrapManager.TeamStore())
 	eventBus := runtimeevents.NewBusWithRetention(2048)
 	host := &localChatRuntimeHost{
-		Bootstrap:     bootstrapManager,
-		RuntimeConfig: runtimeConfig,
-		RuntimeStore:  runtimeStore,
-		EventStore:    eventStore,
-		ReceiptStore:  receiptStore,
-		TeamStore:     bootstrapManager.TeamStore(),
-		ToolSurface:   runtimeMCP,
-		EventBus:      eventBus,
-		SessionStore:  sessionStore,
-		SessionUser:   session.SessionUserID,
-		BaseSession:   session,
+		Bootstrap:          bootstrapManager,
+		RuntimeConfig:      runtimeConfig,
+		RuntimeStore:       runtimeStore,
+		EventStore:         eventStore,
+		ReceiptStore:       receiptStore,
+		TeamStore:          bootstrapManager.TeamStore(),
+		AgentControl:       agentControlRegistry,
+		AgentRegistryStore: globalAgentStore,
+		ToolSurface:        runtimeMCP,
+		EventBus:           eventBus,
+		SessionStore:       sessionStore,
+		SessionUser:        session.SessionUserID,
+		BaseSession:        session,
 	}
 	host.TeamLifecycle = newLocalTeamLifecycleService(host)
 
@@ -115,6 +129,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	claims := team.NewPathClaimManager(host.TeamStore, workspaceRoot)
 	host.TeamClaims = claims
 	host.Orchestrator = team.NewOrchestrator(host.TeamStore, claims, nil)
+	if globalMailboxStore != nil {
+		host.Orchestrator.MailboxWake = globalMailboxStore
+	}
 	host.ActorRegistry = newLocalActorRegistry(host)
 	if host.Orchestrator != nil {
 		mailbox := team.NewMailboxService(host.TeamStore)
@@ -150,6 +167,15 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		},
 		func() {
 			closeLocalRuntimeStores(runtimeStore, eventStore)
+		},
+		func() {
+			if host.Orchestrator != nil && globalMailboxStore != nil {
+				host.Orchestrator.MailboxWake = nil
+			}
+			configureLocalChatMailboxWriteThrough(nil, runtimeStore, bootstrapManager.TeamStore())
+			if agentControlRegistry != nil {
+				_ = agentControlRegistry.Close()
+			}
 		},
 		func() {
 			_ = bootstrapManager.Stop()
@@ -541,6 +567,32 @@ func applyLocalChatRuntimePersistenceDefaults(config *runtimecfg.RuntimeConfig, 
 			config.Team.StorePath = teamStorePath
 		}
 	}
+	if strings.TrimSpace(config.AgentControl.StorePath) == "" &&
+		strings.TrimSpace(config.AgentControl.StoreDSN) == "" &&
+		strings.TrimSpace(config.AgentControl.MailboxStorePath) == "" &&
+		strings.TrimSpace(config.AgentControl.MailboxStoreDSN) == "" &&
+		strings.TrimSpace(config.AgentControl.AgentStorePath) == "" &&
+		strings.TrimSpace(config.AgentControl.AgentStoreDSN) == "" {
+		if registryStorePath := resolveLocalChatAgentControlStorePath(session); registryStorePath != "" {
+			config.AgentControl.StorePath = registryStorePath
+		}
+	}
+	if strings.TrimSpace(config.AgentControl.StorePath) == "" &&
+		strings.TrimSpace(config.AgentControl.StoreDSN) == "" &&
+		strings.TrimSpace(config.AgentControl.MailboxStorePath) == "" &&
+		strings.TrimSpace(config.AgentControl.MailboxStoreDSN) == "" {
+		if mailboxStorePath := resolveLocalChatGlobalMailboxStorePath(session); mailboxStorePath != "" {
+			config.AgentControl.MailboxStorePath = mailboxStorePath
+		}
+	}
+	if strings.TrimSpace(config.AgentControl.StorePath) == "" &&
+		strings.TrimSpace(config.AgentControl.StoreDSN) == "" &&
+		strings.TrimSpace(config.AgentControl.AgentStorePath) == "" &&
+		strings.TrimSpace(config.AgentControl.AgentStoreDSN) == "" {
+		if agentStorePath := resolveLocalChatGlobalAgentStorePath(session); agentStorePath != "" {
+			config.AgentControl.AgentStorePath = agentStorePath
+		}
+	}
 }
 
 func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSession) error {
@@ -600,6 +652,86 @@ func buildLocalChatRuntimeStores(session *ChatSession) (runtimechat.RuntimeState
 	return memoryStore, memoryStore
 }
 
+func buildLocalChatAgentControlRegistryService(runtimeConfig *runtimecfg.RuntimeConfig) *agentcontrol.RegistryService {
+	if runtimeConfig == nil {
+		return nil
+	}
+	cfg := agentcontrol.RegistryServiceConfig{
+		StorePath:        strings.TrimSpace(runtimeConfig.AgentControl.StorePath),
+		StoreDSN:         strings.TrimSpace(runtimeConfig.AgentControl.StoreDSN),
+		MailboxStorePath: strings.TrimSpace(runtimeConfig.AgentControl.MailboxStorePath),
+		MailboxStoreDSN:  strings.TrimSpace(runtimeConfig.AgentControl.MailboxStoreDSN),
+		AgentStorePath:   strings.TrimSpace(runtimeConfig.AgentControl.AgentStorePath),
+		AgentStoreDSN:    strings.TrimSpace(runtimeConfig.AgentControl.AgentStoreDSN),
+	}
+	if cfg.Empty() {
+		return nil
+	}
+	service, err := agentcontrol.NewRegistryService(context.Background(), cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: 初始化 AgentControl registry service 失败，已跳过 global registry write-through: %v\n", err)
+		return nil
+	}
+	return service
+}
+
+func buildLocalChatGlobalMailboxStore(runtimeConfig *runtimecfg.RuntimeConfig) agentcontrol.GlobalMailboxRegistryStore {
+	if runtimeConfig == nil {
+		return nil
+	}
+	path := firstNonEmptyChatValue(runtimeConfig.AgentControl.MailboxStorePath, runtimeConfig.AgentControl.StorePath)
+	dsn := firstNonEmptyChatValue(runtimeConfig.AgentControl.MailboxStoreDSN, runtimeConfig.AgentControl.StoreDSN)
+	if path == "" && dsn == "" {
+		return nil
+	}
+	store, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: path,
+		DSN:  dsn,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: 初始化 AgentControl global mailbox store 失败，已跳过 global write-through: %v\n", err)
+		return nil
+	}
+	return store
+}
+
+func buildLocalChatGlobalAgentStore(runtimeConfig *runtimecfg.RuntimeConfig) agentcontrol.AgentRegistryStore {
+	if runtimeConfig == nil {
+		return nil
+	}
+	path := firstNonEmptyChatValue(runtimeConfig.AgentControl.AgentStorePath, runtimeConfig.AgentControl.StorePath)
+	dsn := firstNonEmptyChatValue(runtimeConfig.AgentControl.AgentStoreDSN, runtimeConfig.AgentControl.StoreDSN)
+	if path == "" && dsn == "" {
+		return nil
+	}
+	store, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: path,
+		DSN:  dsn,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: 初始化 AgentControl global agent registry store 失败，已跳过 agent registry write-through: %v\n", err)
+		return nil
+	}
+	return store
+}
+
+func configureLocalChatMailboxWriteThrough(writer agentcontrol.GlobalMailboxWriter, stores ...interface{}) {
+	for _, store := range stores {
+		if setter, ok := store.(interface {
+			SetGlobalMailboxWriter(agentcontrol.GlobalMailboxWriter)
+		}); ok && setter != nil {
+			setter.SetGlobalMailboxWriter(writer)
+		}
+	}
+	if writer != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, _ = agentcontrol.ReconcileMailboxProjections(ctx, agentcontrol.MailboxRecordFilter{}, stores...)
+		}()
+	}
+}
+
 func closeLocalRuntimeStores(store runtimechat.RuntimeStateStore, eventStore runtimechat.EventStore) {
 	seen := map[interface{}]struct{}{}
 	closeStore := func(value interface{}) {
@@ -630,6 +762,27 @@ func resolveLocalChatTeamStorePath(session *ChatSession) string {
 		return ""
 	}
 	return filepath.Join(session.SessionDir, "runtime", "team_store.sqlite")
+}
+
+func resolveLocalChatAgentControlStorePath(session *ChatSession) string {
+	if session == nil || strings.TrimSpace(session.SessionDir) == "" {
+		return ""
+	}
+	return filepath.Join(session.SessionDir, "runtime", "agent_control.sqlite")
+}
+
+func resolveLocalChatGlobalMailboxStorePath(session *ChatSession) string {
+	if session == nil || strings.TrimSpace(session.SessionDir) == "" {
+		return ""
+	}
+	return filepath.Join(session.SessionDir, "runtime", "agent_control_mailbox.sqlite")
+}
+
+func resolveLocalChatGlobalAgentStorePath(session *ChatSession) string {
+	if session == nil || strings.TrimSpace(session.SessionDir) == "" {
+		return ""
+	}
+	return filepath.Join(session.SessionDir, "runtime", "agent_control_agents.sqlite")
 }
 
 func resolveLocalWorkspacePath(runtimeConfig *runtimecfg.RuntimeConfig, session *ChatSession) string {
@@ -829,7 +982,7 @@ func (h *localChatRuntimeHost) deliverTeamTaskLifecycleMailbox(ctx context.Conte
 		return
 	}
 	switch strings.TrimSpace(event.Type) {
-	case "task.completed", "task.failed":
+	case "task.completed", "task.failed", "task.cancelled":
 	default:
 		return
 	}

@@ -1104,19 +1104,21 @@ func TestChatRuntimeEvents_IgnoresNonPrimaryReasoningEvents(t *testing.T) {
 	}
 
 	bridge.BeginRun()
-	bridge.handleEvent(runtimeevents.Event{
-		Type:      runtimechat.EventAssistantReasoning,
-		SessionID: "child-session",
-		TraceID:   "trace-child",
-		Payload: map[string]interface{}{
-			"reasoning": map[string]interface{}{
-				"provider":   "nvidia",
-				"format":     "stream_delta",
-				"summary":    "child reasoning",
-				"streamable": true,
+	for _, eventType := range []string{runtimechat.EventAssistantReasoning, "assistant.reasoning"} {
+		bridge.handleEvent(runtimeevents.Event{
+			Type:      eventType,
+			SessionID: "child-session",
+			TraceID:   "trace-child",
+			Payload: map[string]interface{}{
+				"reasoning": map[string]interface{}{
+					"provider":   "nvidia",
+					"format":     "stream_delta",
+					"summary":    "child reasoning",
+					"streamable": true,
+				},
 			},
-		},
-	})
+		})
+	}
 
 	require.Empty(t, rendered)
 	require.False(t, bridge.hasRenderedReasoningDelta())

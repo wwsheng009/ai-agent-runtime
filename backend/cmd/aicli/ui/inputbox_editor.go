@@ -167,8 +167,9 @@ func (ib *InputBox) readPrompt(prompt string, onChange func(string), keepHistory
 	// 这样我们就能把块内换行当作文本而不是 Enter。
 	fmt.Fprint(os.Stdout, bracketedPasteEnableSequence)
 	// 提示符已经由调用方渲染到屏幕上了。
-	// 这里保存当前光标位置，后续重绘只刷新输入区，避免折行后重复残留。
-	fmt.Fprint(os.Stdout, cursorSaveSequence)
+	// 重绘时使用相对光标移动定位输入区，避免依赖会被滚动失效的
+	// `\x1b[s` / `\x1b[u` 绝对锚点（多行粘贴触发滚动后会把同一段输入
+	// 反复打印到错误行）。
 
 	line, readErr := readInteractiveLineWithOptions(os.Stdin, os.Stdout, prompt, ib.history, onChange, echoSubmit, holdFirstRune)
 	if readErr == nil && keepHistory && strings.TrimSpace(line) != "" {
@@ -214,7 +215,6 @@ func (ib *InputBox) readPromptWithHooks(prompt string, hooks LineEditorHooks, ke
 		_ = term.Restore(fd, state)
 	}()
 	fmt.Fprint(os.Stdout, bracketedPasteEnableSequence)
-	fmt.Fprint(os.Stdout, cursorSaveSequence)
 
 	line, readErr := readInteractiveLineWithHooks(os.Stdin, os.Stdout, prompt, ib.history, nil, &hooks, echoSubmit, holdFirstRune)
 	if readErr == nil && keepHistory && strings.TrimSpace(line) != "" {
@@ -276,6 +276,19 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 	pasteActive := false
 	stdinFile, _ := reader.(*os.File)
 	lastRenderedRows := 1
+	// lastCursorRow / lastCursorCol 记录上一次重绘结束时光标的相对坐标
+	// （行偏移基于“输入锚点行”，列基于终端视口的列号，与 interactiveInputVisualPosition 一致）。
+	// 通过相对运动（\x1b[<n>A/B + \r + \x1b[<n>C）回到目标位置，
+	// 避免依赖会因终端滚动而失效的绝对保存点。
+	lastCursorRow := 0
+	lastCursorCol := terminalVisibleWidth(prompt)
+	// lastRenderedLine 是上一次完整重绘时使用的内容快照。
+	// 当后续 redraw 发现 line 与快照按 rune 完全相同、终端宽度也未变时，
+	// 只发一次光标增量，不再清屏 + 重写整段内容（极大降低长输入下的闪烁）。
+	var lastRenderedLine []rune
+	lastRenderedHasContent := false
+	lastRenderedTermWidth := 0
+	lastRenderedPromptWidth := 0
 	var redraw func()
 	snapshot := func() LineEditorSnapshot {
 		return LineEditorSnapshot{
@@ -315,27 +328,78 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 		hooks.OnChange(snapshot())
 	}
 
-	// 调用方会在提示符渲染完成后保存输入锚点。
-	// 这里每次都回到锚点，只重绘可编辑输入区，避免折行残留。
+	// 重绘策略：用相对运动定位回输入锚点，再清空已渲染区域并写入当前内容。
+	// 这样即便多行粘贴触发终端滚动，锚点也跟随内容一起上移，不会出现
+	// 把同一段输入反复打印到错位行的现象（绝对 `\x1b[s`/`\x1b[u` 在滚动后
+	// 会把光标恢复到一个早已被滚走的视口坐标）。
 	redraw = func() {
 		termWidth := GetTerminalWidth()
 		if termWidth <= 0 {
 			termWidth = 80
 		}
 		promptWidth := terminalVisibleWidth(prompt)
+		cursorPos := interactiveInputVisualPosition(line, cursor, promptWidth, termWidth)
+
+		// Fast path: 内容、终端宽度、提示符宽度都未变化时，只发光标增量。
+		// 这能让方向键 / Home / End / 历史导航等"光标-only"操作跳过整段
+		// `\x1b[K` + 重写流程，长粘贴下也不会再有逐行闪烁。
+		if lastRenderedHasContent &&
+			termWidth == lastRenderedTermWidth &&
+			promptWidth == lastRenderedPromptWidth &&
+			runesEqual(line, lastRenderedLine) {
+			if cursorPos.row == lastCursorRow && cursorPos.col == lastCursorCol {
+				return
+			}
+			var builder strings.Builder
+			builder.Grow(24)
+			if dr := cursorPos.row - lastCursorRow; dr > 0 {
+				fmt.Fprintf(&builder, "\x1b[%dB", dr)
+			} else if dr < 0 {
+				fmt.Fprintf(&builder, "\x1b[%dA", -dr)
+			}
+			builder.WriteByte('\r')
+			if cursorPos.col > 0 {
+				fmt.Fprintf(&builder, "\x1b[%dC", cursorPos.col)
+			}
+			fmt.Fprint(writer, builder.String())
+			lastCursorRow = cursorPos.row
+			lastCursorCol = cursorPos.col
+			return
+		}
+
 		renderedRows := interactiveInputDisplayRows(line, promptWidth, termWidth)
 		clearRows := renderedRows
 		if lastRenderedRows > clearRows {
 			clearRows = lastRenderedRows
 		}
 		var builder strings.Builder
-		builder.Grow(len(line)*4 + 24)
-		builder.WriteString(cursorRestoreSequence)
-		appendClearInteractiveInputRows(&builder, clearRows)
+		builder.Grow(len(line)*4 + 64)
+		// 1) 从“上次光标位置”相对地回到输入锚点行（提示符所在行）。
+		if lastCursorRow > 0 {
+			fmt.Fprintf(&builder, "\x1b[%dA", lastCursorRow)
+		}
+		// 2) 移到提示符之后的第一个输入列。`\r` 回到列 0 不会动到提示符内容；
+		//    随后用 `\x1b[<n>C` 前进到 promptWidth，光标位置即输入区起点。
+		builder.WriteByte('\r')
+		if promptWidth > 0 {
+			fmt.Fprintf(&builder, "\x1b[%dC", promptWidth)
+		}
+		// 3) 清掉锚点行从输入起点开始的旧内容；并按需向下逐行清理。
+		builder.WriteString("\x1b[K")
+		for i := 1; i < clearRows; i++ {
+			builder.WriteString("\x1b[1B\r\x1b[K")
+		}
+		// 4) 回到锚点行 + 输入起点，再写入新内容。
+		if clearRows > 1 {
+			fmt.Fprintf(&builder, "\x1b[%dA", clearRows-1)
+		}
+		builder.WriteByte('\r')
+		if promptWidth > 0 {
+			fmt.Fprintf(&builder, "\x1b[%dC", promptWidth)
+		}
 		builder.WriteString(renderInteractiveInputForTerminal(line))
+		endPos := interactiveInputVisualPosition(line, len(line), promptWidth, termWidth)
 		if cursor < len(line) {
-			endPos := interactiveInputVisualPosition(line, len(line), promptWidth, termWidth)
-			cursorPos := interactiveInputVisualPosition(line, cursor, promptWidth, termWidth)
 			if rowsUp := endPos.row - cursorPos.row; rowsUp > 0 {
 				fmt.Fprintf(&builder, "\x1b[%dA", rowsUp)
 			}
@@ -343,8 +407,17 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 			if cursorPos.col > 0 {
 				fmt.Fprintf(&builder, "\x1b[%dC", cursorPos.col)
 			}
+			lastCursorRow = cursorPos.row
+			lastCursorCol = cursorPos.col
+		} else {
+			lastCursorRow = endPos.row
+			lastCursorCol = endPos.col
 		}
 		lastRenderedRows = renderedRows
+		lastRenderedHasContent = true
+		lastRenderedTermWidth = termWidth
+		lastRenderedPromptWidth = promptWidth
+		lastRenderedLine = append(lastRenderedLine[:0], line...)
 		fmt.Fprint(writer, builder.String())
 	}
 
@@ -905,6 +978,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 			deleteForwardWord()
 		case editorKeyRedraw:
 			flushPasteBurstBeforeModifiedInput()
+			lastRenderedHasContent = false
 			redraw()
 		case editorKeyYank:
 			flushPasteBurstBeforeModifiedInput()
@@ -964,6 +1038,18 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 type interactiveInputPosition struct {
 	row int
 	col int
+}
+
+func runesEqual(a, b []rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, r := range a {
+		if r != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func renderInteractiveInputForTerminal(line []rune) string {

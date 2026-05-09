@@ -18,8 +18,8 @@ import (
 type MailboxActorFallback func(ctx context.Context, sessionID string, message team.MailMessage) error
 
 // MailboxStore is the durable mailbox substrate used by agent collaboration.
-// The current implementation can be backed by the session runtime event store;
-// a future AgentControl mailbox table can implement this interface directly.
+// Legacy session mailbox rows implement this interface; AgentControl envelope
+// traffic should use AgentControlMailboxStore when available.
 type MailboxStore interface {
 	AppendMailbox(ctx context.Context, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, error)
 }

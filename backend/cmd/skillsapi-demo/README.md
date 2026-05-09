@@ -20,6 +20,7 @@
   - 调用统一控制面 task graph 入口：
     - `ListAgentControlTasks`
     - `ListAgentControlTaskDependencies`
+    - `ListAgentControlTaskGraphEvents`
     - `CreateAgentControlTaskDependency`
 
 ## 构建
@@ -200,6 +201,18 @@ go run ./cmd/skillsapi-demo \
   -limit 20
 ```
 
+通过 AgentControl task update seam 更新 task summary：
+
+```bash
+go run ./cmd/skillsapi-demo \
+  -mode agent-control \
+  -control-action update \
+  -url http://127.0.0.1:8101 \
+  -team-id <team> \
+  -task-id <task> \
+  -message "updated summary"
+```
+
 读取 task dependency graph：
 
 ```bash
@@ -210,6 +223,18 @@ go run ./cmd/skillsapi-demo \
   -team-id <team> \
   -task-id <task> \
   -include-dependents
+```
+
+读取 AgentControl task graph event cursor：
+
+```bash
+go run ./cmd/skillsapi-demo \
+  -mode agent-control \
+  -control-action events \
+  -url http://127.0.0.1:8101 \
+  -team-id <team> \
+  -after-seq 0 \
+  -limit 20
 ```
 
 通过 AgentControl task graph seam 写入依赖边：
@@ -224,13 +249,26 @@ go run ./cmd/skillsapi-demo \
   -depends-on-id <dependency-task>
 ```
 
+读取 runtime/session 与 team 组合后的 AgentControl mailbox registry：
+
+```bash
+go run ./cmd/skillsapi-demo \
+  -mode agent-control \
+  -control-action mailbox \
+  -url http://127.0.0.1:8101 \
+  -team-id <team> \
+  -session-id <session> \
+  -after-seq 0 \
+  -limit 20
+```
+
 ## 输出风格
 
 `skillsapi-demo` 默认输出面向终端阅读的摘要，而不是原始 JSON：
 
 - chat 模式输出 `kind/source/output/usage/planning` 等摘要
 - session-agent 模式输出 `parent_session/agent_session/status/output/events` 等摘要
-- agent-control 模式输出 `agent_control_tasks`、`agent_control_dependencies` 或依赖写入摘要
+- agent-control 模式输出 `agent_control_tasks`、`agent_control_task_updated`、`agent_control_dependencies`、`agent_control_mailbox` 或依赖写入摘要
 
 如果你需要 HTTP 字段级契约，请看：
 

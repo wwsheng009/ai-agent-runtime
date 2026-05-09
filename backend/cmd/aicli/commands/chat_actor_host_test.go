@@ -198,6 +198,197 @@ func TestLocalChatRuntimeHost_TeamLifecyclePersistsParentMailbox(t *testing.T) {
 	}
 }
 
+func TestConfigureLocalChatMailboxWriteThroughWritesRuntimeAndTeamRows(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent_control_mailbox.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalMailboxRegistryStore: %v", err)
+	}
+	defer globalStore.Close()
+	configureLocalChatMailboxWriteThrough(globalStore, runtimeStore, teamStore)
+
+	if _, _, err := runtimeStore.AppendAgentControlMailbox(ctx, "root-session", team.MailMessage{
+		ID:        "runtime-control",
+		FromAgent: "child",
+		ToAgent:   "root",
+		Kind:      agentcontrol.MailboxKindSubagentCompleted,
+		Body:      "done",
+		Metadata: agentcontrol.Envelope{
+			MessageType:     agentcontrol.MessageTypeSubagentCompleted,
+			ControlAction:   agentcontrol.ActionAgentCompleted,
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindSubagentCompleted,
+		}.Metadata(),
+	}); err != nil {
+		t.Fatalf("AppendAgentControlMailbox: %v", err)
+	}
+	teamID, err := teamStore.CreateTeam(ctx, team.Team{ID: "team-1"})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if _, err := teamStore.InsertMail(ctx, team.MailMessage{
+		ID:        "team-control",
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "mate",
+		Kind:      agentcontrol.MailboxKindTeamTaskLifecycle,
+		Body:      "team body",
+	}); err != nil {
+		t.Fatalf("InsertMail: %v", err)
+	}
+
+	runtimeRows, err := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: "root-session",
+	})
+	if err != nil {
+		t.Fatalf("List runtime global mailbox: %v", err)
+	}
+	if len(runtimeRows) != 1 || runtimeRows[0].Source != agentcontrol.MailboxSourceGlobal || runtimeRows[0].MessageID != "runtime-control" {
+		t.Fatalf("unexpected runtime global mailbox rows: %#v", runtimeRows)
+	}
+	teamRows, err := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	if err != nil {
+		t.Fatalf("List team global mailbox: %v", err)
+	}
+	if len(teamRows) != 1 || teamRows[0].Source != agentcontrol.MailboxSourceGlobal || teamRows[0].MessageID != "team-control" {
+		t.Fatalf("unexpected team global mailbox rows: %#v", teamRows)
+	}
+}
+
+func TestConfigureLocalChatMailboxWriteThroughReconcilesExistingProjections(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore, err := runtimechat.NewSQLiteRuntimeStore(&runtimechat.RuntimeStoreConfig{
+		Path: filepath.Join(t.TempDir(), "runtime.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteRuntimeStore: %v", err)
+	}
+	defer runtimeStore.Close()
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	if _, _, err := runtimeStore.AppendAgentControlMailbox(ctx, "local-runtime-session", team.MailMessage{
+		ID:        "runtime-before-global",
+		FromAgent: "child",
+		ToAgent:   "root",
+		Kind:      agentcontrol.MailboxKindSubagentCompleted,
+		Body:      "runtime local first",
+		Metadata: agentcontrol.Envelope{
+			MessageType:     agentcontrol.MessageTypeSubagentCompleted,
+			ControlAction:   agentcontrol.ActionAgentCompleted,
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindSubagentCompleted,
+		}.Metadata(),
+	}); err != nil {
+		t.Fatalf("AppendAgentControlMailbox: %v", err)
+	}
+	localTeamID, err := teamStore.CreateTeam(ctx, team.Team{ID: "local-team"})
+	if err != nil {
+		t.Fatalf("Create local team: %v", err)
+	}
+	if _, err := teamStore.InsertMail(ctx, team.MailMessage{
+		ID:        "team-before-global",
+		TeamID:    localTeamID,
+		FromAgent: "lead",
+		ToAgent:   "mate",
+		Kind:      agentcontrol.MailboxKindTeamTaskLifecycle,
+		Body:      "team local first",
+	}); err != nil {
+		t.Fatalf("InsertMail local first: %v", err)
+	}
+	globalTeamID, err := teamStore.CreateTeam(ctx, team.Team{ID: "global-team"})
+	if err != nil {
+		t.Fatalf("Create global team: %v", err)
+	}
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent_control_mailbox.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalMailboxRegistryStore: %v", err)
+	}
+	defer globalStore.Close()
+	runtimeGlobal, err := globalStore.AppendPrimaryGlobalMailboxRecord(ctx, agentcontrol.MailboxRecord{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		Scope:     agentcontrol.MailboxScopeSession,
+		SessionID: "global-runtime-session",
+		MessageID: "runtime-global-only",
+		Kind:      agentcontrol.MailboxKindAgentMessage,
+		Body:      "runtime global first",
+		Metadata: agentcontrol.Envelope{
+			MessageType:     agentcontrol.MessageTypeAgentMessage,
+			ControlAction:   agentcontrol.ActionAgentMessage,
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindAgentMessage,
+		}.Metadata(),
+		CreatedAt: time.Unix(40, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Append primary runtime global: %v", err)
+	}
+	teamGlobal, err := globalStore.AppendPrimaryGlobalMailboxRecord(ctx, agentcontrol.MailboxRecord{
+		Workflow:  agentcontrol.WorkflowSpawnTeam,
+		Scope:     agentcontrol.MailboxScopeTeam,
+		TeamID:    globalTeamID,
+		MessageID: "team-global-only",
+		Kind:      agentcontrol.MailboxKindTeamTaskLifecycle,
+		Body:      "team global first",
+		CreatedAt: time.Unix(41, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Append primary team global: %v", err)
+	}
+
+	configureLocalChatMailboxWriteThrough(globalStore, runtimeStore, teamStore)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		runtimeRows, _ := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+			Workflow:  agentcontrol.WorkflowSpawnAgent,
+			SessionID: "local-runtime-session",
+		})
+		teamRows, _ := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+			Workflow: agentcontrol.WorkflowSpawnTeam,
+			TeamID:   localTeamID,
+		})
+		runtimeLocal, _ := runtimeStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+			Workflow:  agentcontrol.WorkflowSpawnAgent,
+			SessionID: "global-runtime-session",
+		})
+		teamLocal, _ := teamStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+			Workflow: agentcontrol.WorkflowSpawnTeam,
+			TeamID:   globalTeamID,
+		})
+		if len(runtimeRows) == 1 && len(teamRows) == 1 &&
+			len(runtimeLocal) == 1 && runtimeLocal[0].GlobalSeq == runtimeGlobal.Seq &&
+			len(teamLocal) == 1 && teamLocal[0].GlobalSeq == teamGlobal.Seq {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for mailbox projection reconcile: runtimeRows=%#v teamRows=%#v runtimeLocal=%#v teamLocal=%#v", runtimeRows, teamRows, runtimeLocal, teamLocal)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestLocalChatRuntimeHost_TaskLifecyclePersistsTeammateMailbox(t *testing.T) {
 	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
 	if err != nil {
@@ -348,6 +539,190 @@ func TestLocalActorRegistry_EnforcesAgentLimitsAndListsChildren(t *testing.T) {
 	}
 }
 
+func TestLocalActorRegistry_WritesAndClosesAgentRegistryStore(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	agentStore, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent_control_agents.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalAgentRegistryStore: %v", err)
+	}
+	defer agentStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.AgentRegistryStore = agentStore
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+
+	if _, err := host.ActorRegistry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "durable-child"}); err != nil {
+		t.Fatalf("spawn durable child: %v", err)
+	}
+	records, err := agentStore.ListAgentControlAgents(context.Background(), agentcontrol.AgentFilter{
+		RootSessionID: rootSession.ID,
+		IncludeClosed: true,
+	})
+	if err != nil {
+		t.Fatalf("ListAgentControlAgents: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected root and child agent records, got %#v", records)
+	}
+	var foundChild bool
+	for _, record := range records {
+		if record.SessionID == "durable-child" && record.AgentPath == "/root/durable-child" && record.Workflow == agentcontrol.WorkflowSpawnAgent {
+			foundChild = true
+		}
+	}
+	if !foundChild {
+		t.Fatalf("expected durable child registry row, got %#v", records)
+	}
+
+	if _, err := host.ActorRegistry.Close(context.Background(), "/root/durable-child"); err != nil {
+		t.Fatalf("close durable child: %v", err)
+	}
+	closed, err := agentStore.ListAgentControlAgents(context.Background(), agentcontrol.AgentFilter{
+		SessionID:     "durable-child",
+		IncludeClosed: true,
+	})
+	if err != nil {
+		t.Fatalf("ListAgentControlAgents closed: %v", err)
+	}
+	if len(closed) != 1 || !closed[0].Closed() {
+		t.Fatalf("expected durable child row to be closed, got %#v", closed)
+	}
+}
+
+func TestLocalActorRegistry_RegistrySpawnLimitUsesDurableStore(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	agentStore, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent_control_agents.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalAgentRegistryStore: %v", err)
+	}
+	defer agentStore.Close()
+	if _, err := agentStore.UpsertAgentControlAgent(context.Background(), agentcontrol.AgentRecord{
+		AgentID:       "root:" + rootSession.ID,
+		RootSessionID: rootSession.ID,
+		SessionID:     rootSession.ID,
+		AgentPath:     "/root",
+		AgentType:     agentcontrol.AgentTypeRoot,
+		Status:        agentcontrol.AgentStatusActive,
+	}); err != nil {
+		t.Fatalf("upsert root record: %v", err)
+	}
+	if _, err := agentStore.UpsertAgentControlAgent(context.Background(), agentcontrol.AgentRecord{
+		AgentID:         "external-child",
+		RootSessionID:   rootSession.ID,
+		ParentAgentID:   "root:" + rootSession.ID,
+		ParentSessionID: rootSession.ID,
+		SessionID:       "external-child",
+		AgentPath:       "/root/external-child",
+		Depth:           1,
+		AgentType:       agentcontrol.AgentTypeChild,
+		Workflow:        agentcontrol.WorkflowSpawnAgent,
+		Status:          agentcontrol.AgentStatusActive,
+	}); err != nil {
+		t.Fatalf("upsert external child record: %v", err)
+	}
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.AgentRegistryStore = agentStore
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.RuntimeConfig.Agents.MaxThreads = 1
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+
+	if _, err := host.ActorRegistry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "local-child"}); err == nil || !strings.Contains(err.Error(), "thread limit") {
+		t.Fatalf("expected durable registry max thread error, got %v", err)
+	}
+}
+
+func TestLocalActorRegistry_RegistryProjectionDoesNotReopenClosedAgent(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	agentStore, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent_control_agents.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalAgentRegistryStore: %v", err)
+	}
+	defer agentStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.AgentRegistryStore = agentStore
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+	if _, err := host.ActorRegistry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "closed-projection-child"}); err != nil {
+		t.Fatalf("spawn child: %v", err)
+	}
+	if _, err := agentStore.CloseAgentControlAgentSubtree(context.Background(), rootSession.ID, "/root/closed-projection-child", time.Now().UTC()); err != nil {
+		t.Fatalf("CloseAgentControlAgentSubtree: %v", err)
+	}
+	if _, err := host.ActorRegistry.List(context.Background(), rootSession.ID, toolbroker.ListAgentsArgs{}); err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	records, err := agentStore.ListAgentControlAgents(context.Background(), agentcontrol.AgentFilter{
+		SessionID:     "closed-projection-child",
+		IncludeClosed: true,
+	})
+	if err != nil {
+		t.Fatalf("ListAgentControlAgents: %v", err)
+	}
+	if len(records) != 1 || !records[0].Closed() {
+		t.Fatalf("expected list/materialize to preserve closed durable row, got %#v", records)
+	}
+}
+
 func TestLocalActorRegistry_ListIncludesTeamTeammateSessions(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -440,6 +815,65 @@ func TestLocalActorRegistry_ListIncludesTeamTeammateSessions(t *testing.T) {
 	}
 	if parent, ok := reloaded.GetContext(toolbroker.AgentSessionContextParentSessionID); !ok || parent != rootSession.ID {
 		t.Fatalf("expected persisted teammate parent context, got %#v", reloaded.Metadata.Context)
+	}
+}
+
+func TestLocalActorRegistry_SyncTeamTeammateAgentWritesRegistry(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	agentStore, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent_control_agents.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalAgentRegistryStore: %v", err)
+	}
+	defer agentStore.Close()
+	teamID, err := teamStore.CreateTeam(context.Background(), team.Team{
+		ID:            "team-sync",
+		LeadSessionID: rootSession.ID,
+		Status:        team.TeamStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.AgentRegistryStore = agentStore
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootSession,
+		SessionUserID:  userID,
+	}
+	mate := team.Teammate{
+		ID:        "member-1",
+		TeamID:    teamID,
+		Name:      "Reviewer",
+		Profile:   "reviewer",
+		SessionID: "mate-session",
+		State:     team.TeammateStateIdle,
+	}
+	if err := host.ActorRegistry.SyncTeamTeammateAgent(context.Background(), nil, mate); err != nil {
+		t.Fatalf("SyncTeamTeammateAgent: %v", err)
+	}
+	records, err := agentStore.ListAgentControlAgents(context.Background(), agentcontrol.AgentFilter{
+		TeamID:     teamID,
+		TeammateID: "member-1",
+	})
+	if err != nil {
+		t.Fatalf("ListAgentControlAgents: %v", err)
+	}
+	if len(records) != 1 || records[0].AgentID != "team:team-sync:member-1" || records[0].SessionID != "mate-session" {
+		t.Fatalf("expected teammate registry row, got %#v", records)
 	}
 }
 

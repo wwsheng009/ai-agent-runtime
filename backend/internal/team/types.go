@@ -98,6 +98,7 @@ type MailMessage struct {
 	ID                string                 `json:"id"`
 	Seq               int64                  `json:"seq,omitempty"`
 	ControlSeq        int64                  `json:"control_seq,omitempty"`
+	GlobalSeq         int64                  `json:"global_seq,omitempty"`
 	SessionMailboxSeq int64                  `json:"session_mailbox_seq,omitempty"`
 	TeamID            string                 `json:"team_id"`
 	FromAgent         string                 `json:"from_agent"`
@@ -142,6 +143,27 @@ type TaskDependencyFilter struct {
 	TaskID            string
 	DependsOnID       string
 	IncludeDependents bool
+}
+
+// TaskGraphEvent describes a task-related team event with a global graph
+// sequence when the backing store can provide one.
+type TaskGraphEvent struct {
+	Seq       int64                  `json:"seq,omitempty"`
+	TeamSeq   int64                  `json:"team_seq,omitempty"`
+	Workflow  string                 `json:"workflow,omitempty"`
+	TeamID    string                 `json:"team_id"`
+	Type      string                 `json:"type"`
+	Payload   map[string]interface{} `json:"payload,omitempty"`
+	CreatedAt time.Time              `json:"created_at"`
+}
+
+// TaskGraphEventFilter describes a cursor read over task-related graph events.
+type TaskGraphEventFilter struct {
+	Workflow  string
+	TeamID    string
+	EventType string
+	AfterSeq  int64
+	Limit     int
 }
 
 // TeamFilter allows filtering teams in the store.

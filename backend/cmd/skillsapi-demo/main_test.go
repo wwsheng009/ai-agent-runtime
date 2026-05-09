@@ -184,6 +184,16 @@ func TestParseDemoOptions_AgentControlAddDependencyRequiresDependencyID(t *testi
 	assert.Contains(t, err.Error(), "depends-on-id is required")
 }
 
+func TestParseDemoOptions_AgentControlUpdateRequiresTaskID(t *testing.T) {
+	_, err := parseDemoOptions([]string{
+		"-mode", "agent-control",
+		"-control-action", "update",
+		"-message", "patched",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "task-id is required")
+}
+
 func TestRun_SessionAgentSpawnAutoCreatesParent(t *testing.T) {
 	var requestPaths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +320,40 @@ func TestRun_SessionAgentControlMailbox(t *testing.T) {
 	assert.Contains(t, output, "agent_control.agent_message")
 }
 
+func TestRun_AgentControlMailbox(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Equal(t, "/api/runtime/agent-control/mailbox", r.URL.Path)
+		assert.Contains(t, r.URL.RawQuery, "workflow=spawn_team")
+		assert.Contains(t, r.URL.RawQuery, "team_id=team-1")
+		assert.Contains(t, r.URL.RawQuery, "session_id=session-1")
+		assert.Contains(t, r.URL.RawQuery, "after_seq=8")
+		assert.Contains(t, r.URL.RawQuery, "limit=3")
+		_, _ = io.WriteString(w, `{"records":[{"seq":9,"workflow":"spawn_team","scope":"team","team_id":"team-1","message_id":"mail-1","kind":"info","body":"global hello"}],"count":1,"latest_seq":9,"sources":["teams"]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"-mode", "agent-control",
+		"-control-action", "mailbox",
+		"-url", server.URL,
+		"-session-id", "session-1",
+		"-team-id", "team-1",
+		"-after-seq", "8",
+		"-limit", "3",
+	}, &stdout, &stderr)
+	require.NoError(t, err)
+
+	output := stdout.String()
+	assert.Contains(t, output, "agent_control_mailbox count=1 latest_seq=9 sources=teams")
+	assert.Contains(t, output, "record seq=9 scope=team workflow=spawn_team")
+	assert.Contains(t, output, "team=team-1")
+	assert.Contains(t, output, "message=mail-1")
+	assert.Contains(t, output, "body=global hello")
+}
+
 func TestRun_SessionAgentWaitParentMailbox(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -366,6 +410,36 @@ func TestRun_AgentControlTasks(t *testing.T) {
 	assert.Contains(t, output, "task_id=task-1 workflow=spawn_team team_id=team-1 assignee=member-1 status=running title=Review docs")
 }
 
+func TestRun_AgentControlUpdate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Equal(t, http.MethodPatch, r.Method)
+		assert.Equal(t, "/api/runtime/agent-control/tasks/task%2F1", r.URL.EscapedPath())
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), `"summary":"patched summary"`)
+		_, _ = io.WriteString(w, `{"task":{"id":"task/1","workflow":"spawn_team","team_id":"team-1","status":"ready","summary":"patched summary"}}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"-mode", "agent-control",
+		"-control-action", "update",
+		"-url", server.URL,
+		"-team-id", "team-1",
+		"-task-id", "task/1",
+		"-message", "patched summary",
+	}, &stdout, &stderr)
+	require.NoError(t, err)
+
+	output := stdout.String()
+	assert.Contains(t, output, "agent_control_task_updated=true")
+	assert.Contains(t, output, "task_id=task/1")
+	assert.Contains(t, output, "summary=patched summary")
+}
+
 func TestRun_AgentControlDependencies(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -394,6 +468,33 @@ func TestRun_AgentControlDependencies(t *testing.T) {
 	assert.Contains(t, output, "dependencies=task/0")
 	assert.Contains(t, output, "dependents=task/2")
 	assert.Contains(t, output, "edge id=dep-1 task_id=task/1 depends_on_id=task/0 workflow=spawn_team team_id=team-1")
+}
+
+func TestRun_AgentControlEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/runtime/agent-control/tasks/events", r.URL.Path)
+		assert.Equal(t, "after_seq=2&limit=5&team_id=team-1&workflow=spawn_team", r.URL.RawQuery)
+		_, _ = io.WriteString(w, `{"events":[{"seq":3,"team_seq":1,"workflow":"spawn_team","team_id":"team-1","event_type":"task.dependency.created","task_id":"task/1","depends_on_id":"task/0","dependency_id":"dep-1"}],"count":1,"workflow":"spawn_team","team_id":"team-1","after_seq":2,"limit":5}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"-mode", "agent-control",
+		"-control-action", "events",
+		"-url", server.URL,
+		"-team-id", "team-1",
+		"-after-seq", "2",
+		"-limit", "5",
+	}, &stdout, &stderr)
+	require.NoError(t, err)
+
+	output := stdout.String()
+	assert.Contains(t, output, "agent_control_task_graph_events count=1 after_seq=2")
+	assert.Contains(t, output, "event seq=3 team_seq=1 type=task.dependency.created team_id=team-1 task_id=task/1 depends_on_id=task/0 dependency_id=dep-1")
 }
 
 func TestRun_AgentControlAddDependency(t *testing.T) {

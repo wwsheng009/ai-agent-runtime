@@ -1801,6 +1801,42 @@ type ListAgentControlTasksResponse struct {
 	Filters map[string]interface{}   `json:"filters,omitempty"`
 }
 
+type ListAgentControlMailboxParams struct {
+	Workflow  string
+	Scope     string
+	SessionID string
+	TeamID    string
+	AfterSeq  int64
+	Limit     int
+}
+
+type AgentControlMailboxRecord struct {
+	Seq               int64                  `json:"seq,omitempty"`
+	Workflow          string                 `json:"workflow,omitempty"`
+	Scope             string                 `json:"scope,omitempty"`
+	SessionID         string                 `json:"session_id,omitempty"`
+	SessionMailboxSeq int64                  `json:"session_mailbox_seq,omitempty"`
+	TeamID            string                 `json:"team_id,omitempty"`
+	TeamSeq           int64                  `json:"team_seq,omitempty"`
+	MessageID         string                 `json:"message_id,omitempty"`
+	FromAgent         string                 `json:"from_agent,omitempty"`
+	ToAgent           string                 `json:"to_agent,omitempty"`
+	TaskID            string                 `json:"task_id,omitempty"`
+	Kind              string                 `json:"kind,omitempty"`
+	Body              string                 `json:"body,omitempty"`
+	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	CreatedAt         time.Time              `json:"created_at,omitempty"`
+	AckedAt           *time.Time             `json:"acked_at,omitempty"`
+}
+
+type ListAgentControlMailboxResponse struct {
+	Records   []AgentControlMailboxRecord `json:"records"`
+	Count     int                         `json:"count"`
+	LatestSeq int64                       `json:"latest_seq,omitempty"`
+	Sources   []string                    `json:"sources,omitempty"`
+	Filters   map[string]interface{}      `json:"filters,omitempty"`
+}
+
 type AgentControlTaskResponse struct {
 	Task    *AgentControlTaskRecord `json:"task,omitempty"`
 	Claimed bool                    `json:"claimed,omitempty"`
@@ -1822,6 +1858,23 @@ type CreateAgentControlTaskRequest struct {
 	Deliverables []string `json:"deliverables,omitempty"`
 	Summary      string   `json:"summary,omitempty"`
 	ResultRef    string   `json:"result_ref,omitempty"`
+}
+
+type UpdateAgentControlTaskRequest struct {
+	Workflow     string   `json:"workflow,omitempty"`
+	TeamID       string   `json:"team_id,omitempty"`
+	ParentTaskID *string  `json:"parent_task_id,omitempty"`
+	Title        *string  `json:"title,omitempty"`
+	Goal         *string  `json:"goal,omitempty"`
+	Status       *string  `json:"status,omitempty"`
+	Priority     *int     `json:"priority,omitempty"`
+	Assignee     *string  `json:"assignee,omitempty"`
+	Inputs       []string `json:"inputs,omitempty"`
+	ReadPaths    []string `json:"read_paths,omitempty"`
+	WritePaths   []string `json:"write_paths,omitempty"`
+	Deliverables []string `json:"deliverables,omitempty"`
+	Summary      *string  `json:"summary,omitempty"`
+	ResultRef    *string  `json:"result_ref,omitempty"`
 }
 
 type UpdateAgentControlTaskStatusRequest struct {
@@ -1910,6 +1963,37 @@ type ListAgentControlTaskDependenciesResponse struct {
 	Workflow     string                       `json:"workflow,omitempty"`
 	TeamID       string                       `json:"team_id,omitempty"`
 	DependsOnID  string                       `json:"depends_on_id,omitempty"`
+}
+
+type AgentControlTaskGraphEvent struct {
+	Seq          int64                  `json:"seq,omitempty"`
+	TeamSeq      int64                  `json:"team_seq,omitempty"`
+	Workflow     string                 `json:"workflow,omitempty"`
+	TeamID       string                 `json:"team_id,omitempty"`
+	EventType    string                 `json:"event_type,omitempty"`
+	TaskID       string                 `json:"task_id,omitempty"`
+	DependsOnID  string                 `json:"depends_on_id,omitempty"`
+	DependencyID string                 `json:"dependency_id,omitempty"`
+	Payload      map[string]interface{} `json:"payload,omitempty"`
+	CreatedAt    *time.Time             `json:"created_at,omitempty"`
+}
+
+type ListAgentControlTaskGraphEventsParams struct {
+	Workflow  string
+	TeamID    string
+	EventType string
+	AfterSeq  int64
+	Limit     int
+}
+
+type ListAgentControlTaskGraphEventsResponse struct {
+	Events    []AgentControlTaskGraphEvent `json:"events"`
+	Count     int                          `json:"count"`
+	Workflow  string                       `json:"workflow,omitempty"`
+	TeamID    string                       `json:"team_id,omitempty"`
+	EventType string                       `json:"event_type,omitempty"`
+	AfterSeq  int64                        `json:"after_seq,omitempty"`
+	Limit     int                          `json:"limit,omitempty"`
 }
 
 type TeamTaskDependenciesResponse struct {
@@ -4034,9 +4118,49 @@ func (c *Client) ListAgentControlTasks(ctx context.Context, params ListAgentCont
 	return &response, nil
 }
 
+func (c *Client) ListAgentControlMailbox(ctx context.Context, params ListAgentControlMailboxParams) (*ListAgentControlMailboxResponse, error) {
+	query := url.Values{}
+	if strings.TrimSpace(params.Workflow) != "" {
+		query.Set("workflow", strings.TrimSpace(params.Workflow))
+	}
+	if strings.TrimSpace(params.Scope) != "" {
+		query.Set("scope", strings.TrimSpace(params.Scope))
+	}
+	if strings.TrimSpace(params.SessionID) != "" {
+		query.Set("session_id", strings.TrimSpace(params.SessionID))
+	}
+	if strings.TrimSpace(params.TeamID) != "" {
+		query.Set("team_id", strings.TrimSpace(params.TeamID))
+	}
+	if params.AfterSeq > 0 {
+		query.Set("after_seq", strconv.FormatInt(params.AfterSeq, 10))
+	}
+	if params.Limit > 0 {
+		query.Set("limit", strconv.Itoa(params.Limit))
+	}
+	var response ListAgentControlMailboxResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/agent-control/mailbox", query, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
 func (c *Client) CreateAgentControlTask(ctx context.Context, req CreateAgentControlTaskRequest) (*AgentControlTaskResponse, error) {
 	var response AgentControlTaskResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/agent-control/tasks", nil, req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) UpdateAgentControlTask(ctx context.Context, taskID string, req UpdateAgentControlTaskRequest) (*AgentControlTaskResponse, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, fmt.Errorf("taskID is required")
+	}
+	var response AgentControlTaskResponse
+	endpoint := "/api/runtime/agent-control/tasks/" + url.PathEscape(taskID)
+	if err := c.doJSON(ctx, http.MethodPatch, endpoint, nil, req, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil
@@ -4101,6 +4225,31 @@ func (c *Client) ListAgentControlTaskDependencies(ctx context.Context, taskID st
 	var response ListAgentControlTaskDependenciesResponse
 	endpoint := "/api/runtime/agent-control/tasks/" + url.PathEscape(taskID) + "/dependencies"
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, query, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *Client) ListAgentControlTaskGraphEvents(ctx context.Context, params ListAgentControlTaskGraphEventsParams) (*ListAgentControlTaskGraphEventsResponse, error) {
+	query := url.Values{}
+	if strings.TrimSpace(params.Workflow) != "" {
+		query.Set("workflow", strings.TrimSpace(params.Workflow))
+	}
+	if strings.TrimSpace(params.TeamID) != "" {
+		query.Set("team_id", strings.TrimSpace(params.TeamID))
+	}
+	if strings.TrimSpace(params.EventType) != "" {
+		query.Set("event_type", strings.TrimSpace(params.EventType))
+	}
+	if params.AfterSeq > 0 {
+		query.Set("after_seq", strconv.FormatInt(params.AfterSeq, 10))
+	}
+	if params.Limit > 0 {
+		query.Set("limit", strconv.Itoa(params.Limit))
+	}
+
+	var response ListAgentControlTaskGraphEventsResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/agent-control/tasks/events", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

@@ -77,6 +77,32 @@ type TaskDependencyFilter struct {
 	IncludeDependents bool
 }
 
+// TaskGraphEvent is the storage-neutral AgentControl read model for task graph
+// timeline changes. Workflow adapters can project native event streams into
+// this shape before a single AgentControl task graph table exists.
+type TaskGraphEvent struct {
+	Seq          int64                  `json:"seq,omitempty"`
+	TeamSeq      int64                  `json:"team_seq,omitempty"`
+	Workflow     string                 `json:"workflow,omitempty"`
+	TeamID       string                 `json:"team_id,omitempty"`
+	EventType    string                 `json:"event_type,omitempty"`
+	TaskID       string                 `json:"task_id,omitempty"`
+	DependsOnID  string                 `json:"depends_on_id,omitempty"`
+	DependencyID string                 `json:"dependency_id,omitempty"`
+	Payload      map[string]interface{} `json:"payload,omitempty"`
+	CreatedAt    time.Time              `json:"created_at,omitempty"`
+}
+
+// TaskGraphEventFilter describes a cursor read over AgentControl task graph
+// events.
+type TaskGraphEventFilter struct {
+	Workflow  string
+	TeamID    string
+	EventType string
+	AfterSeq  int64
+	Limit     int
+}
+
 // TaskRegistryReader is the read side of the AgentControl task registry seam.
 // Workflow-specific implementations can project their native task model into
 // TaskRecord while AgentControl consumers depend only on this interface.
@@ -87,6 +113,12 @@ type TaskRegistryReader interface {
 // TaskDependencyReader is the read side of the AgentControl task graph seam.
 type TaskDependencyReader interface {
 	ListAgentControlTaskDependencies(ctx context.Context, filter TaskDependencyFilter) ([]TaskDependencyRecord, error)
+}
+
+// TaskGraphEventReader reads task graph timeline events through the
+// AgentControl task graph seam.
+type TaskGraphEventReader interface {
+	ListAgentControlTaskGraphEvents(ctx context.Context, filter TaskGraphEventFilter) ([]TaskGraphEvent, error)
 }
 
 // TaskWakeWatcher exposes task lifecycle wake notifications through the
@@ -138,6 +170,27 @@ type TaskCreateRequest struct {
 	ResultRef    string
 }
 
+// TaskUpdateRequest describes a full task patch through the AgentControl task
+// registry write seam. Nil fields are left unchanged; non-nil string pointers
+// can be empty when the backing workflow supports clearing that field.
+type TaskUpdateRequest struct {
+	ID           string
+	Workflow     string
+	TeamID       string
+	ParentTaskID *string
+	Title        *string
+	Goal         *string
+	Status       *string
+	Priority     *int
+	Assignee     *string
+	Inputs       *[]string
+	ReadPaths    *[]string
+	WritePaths   *[]string
+	Deliverables *[]string
+	Summary      *string
+	ResultRef    *string
+}
+
 // TaskDependencyCreateRequest describes creating a dependency edge through the
 // AgentControl task graph seam without depending on a workflow-specific graph
 // table.
@@ -146,6 +199,13 @@ type TaskDependencyCreateRequest struct {
 	TeamID      string
 	TaskID      string
 	DependsOnID string
+}
+
+// TaskReadyRequest describes workflow task readiness promotion through the
+// AgentControl task registry seam.
+type TaskReadyRequest struct {
+	Workflow string
+	TeamID   string
 }
 
 // TaskReleaseRequest describes a lease release/status reset through the
@@ -163,6 +223,16 @@ type TaskLeaseRenewRequest struct {
 	ID         string
 	Workflow   string
 	LeaseUntil time.Time
+}
+
+// TaskRetryRequest describes a retry/reclaim transition through the
+// AgentControl task registry seam. The backing workflow decides how retry
+// counters, leases, and assignee cleanup map to native storage.
+type TaskRetryRequest struct {
+	ID       string
+	Workflow string
+	Status   string
+	Summary  string
 }
 
 // TaskClaimRequest describes a task claim attempt through the AgentControl
@@ -216,10 +286,22 @@ type TaskRegistryCreateWriter interface {
 	CreateAgentControlTask(ctx context.Context, request TaskCreateRequest) (*TaskRecord, error)
 }
 
+// TaskRegistryUpdateWriter exposes full task patching through the
+// AgentControl task registry seam.
+type TaskRegistryUpdateWriter interface {
+	UpdateAgentControlTask(ctx context.Context, request TaskUpdateRequest) (*TaskRecord, error)
+}
+
 // TaskDependencyCreateWriter exposes dependency edge creation through the
 // AgentControl task graph seam.
 type TaskDependencyCreateWriter interface {
 	CreateAgentControlTaskDependency(ctx context.Context, request TaskDependencyCreateRequest) error
+}
+
+// TaskRegistryReadyWriter exposes readiness promotion through the AgentControl
+// task registry seam instead of a workflow-specific task store call.
+type TaskRegistryReadyWriter interface {
+	MarkAgentControlTasksReady(ctx context.Context, request TaskReadyRequest) (int64, error)
 }
 
 // TaskRegistryReleaseWriter exposes task release through the AgentControl task
@@ -233,6 +315,12 @@ type TaskRegistryReleaseWriter interface {
 // AgentControl task registry seam.
 type TaskRegistryLeaseRenewWriter interface {
 	RenewAgentControlTaskLease(ctx context.Context, request TaskLeaseRenewRequest) (*TaskRecord, error)
+}
+
+// TaskRegistryRetryWriter exposes retry/reclaim transitions through the
+// AgentControl task registry seam.
+type TaskRegistryRetryWriter interface {
+	RetryAgentControlTask(ctx context.Context, request TaskRetryRequest) (*TaskRecord, error)
 }
 
 // TaskRegistryClaimWriter exposes task claim attempts through the AgentControl
@@ -304,6 +392,25 @@ func (f TaskDependencyFilter) Normalize() TaskDependencyFilter {
 	return f
 }
 
+// Normalize trims task graph event fields.
+func (e TaskGraphEvent) Normalize() TaskGraphEvent {
+	e.Workflow = strings.TrimSpace(e.Workflow)
+	e.TeamID = strings.TrimSpace(e.TeamID)
+	e.EventType = strings.TrimSpace(e.EventType)
+	e.TaskID = strings.TrimSpace(e.TaskID)
+	e.DependsOnID = strings.TrimSpace(e.DependsOnID)
+	e.DependencyID = strings.TrimSpace(e.DependencyID)
+	return e
+}
+
+// Normalize trims task graph event filter fields.
+func (f TaskGraphEventFilter) Normalize() TaskGraphEventFilter {
+	f.Workflow = strings.TrimSpace(f.Workflow)
+	f.TeamID = strings.TrimSpace(f.TeamID)
+	f.EventType = strings.TrimSpace(f.EventType)
+	return f
+}
+
 // Normalize trims string fields in a task status update request.
 func (r TaskStatusUpdateRequest) Normalize() TaskStatusUpdateRequest {
 	r.ID = strings.TrimSpace(r.ID)
@@ -328,12 +435,45 @@ func (r TaskCreateRequest) Normalize() TaskCreateRequest {
 	return r
 }
 
+// Normalize trims string fields in a task update request.
+func (r TaskUpdateRequest) Normalize() TaskUpdateRequest {
+	r.ID = strings.TrimSpace(r.ID)
+	r.Workflow = strings.TrimSpace(r.Workflow)
+	r.TeamID = strings.TrimSpace(r.TeamID)
+	trimStringPtr := func(value **string) {
+		if value == nil || *value == nil {
+			return
+		}
+		trimmed := strings.TrimSpace(**value)
+		*value = &trimmed
+	}
+	trimStringPtr(&r.ParentTaskID)
+	trimStringPtr(&r.Title)
+	trimStringPtr(&r.Goal)
+	trimStringPtr(&r.Status)
+	trimStringPtr(&r.Assignee)
+	trimStringPtr(&r.Summary)
+	trimStringPtr(&r.ResultRef)
+	r.Inputs = trimStringSlicePtr(r.Inputs)
+	r.ReadPaths = trimStringSlicePtr(r.ReadPaths)
+	r.WritePaths = trimStringSlicePtr(r.WritePaths)
+	r.Deliverables = trimStringSlicePtr(r.Deliverables)
+	return r
+}
+
 // Normalize trims string fields in a dependency creation request.
 func (r TaskDependencyCreateRequest) Normalize() TaskDependencyCreateRequest {
 	r.Workflow = strings.TrimSpace(r.Workflow)
 	r.TeamID = strings.TrimSpace(r.TeamID)
 	r.TaskID = strings.TrimSpace(r.TaskID)
 	r.DependsOnID = strings.TrimSpace(r.DependsOnID)
+	return r
+}
+
+// Normalize trims string fields in a readiness promotion request.
+func (r TaskReadyRequest) Normalize() TaskReadyRequest {
+	r.Workflow = strings.TrimSpace(r.Workflow)
+	r.TeamID = strings.TrimSpace(r.TeamID)
 	return r
 }
 
@@ -350,6 +490,15 @@ func (r TaskReleaseRequest) Normalize() TaskReleaseRequest {
 func (r TaskLeaseRenewRequest) Normalize() TaskLeaseRenewRequest {
 	r.ID = strings.TrimSpace(r.ID)
 	r.Workflow = strings.TrimSpace(r.Workflow)
+	return r
+}
+
+// Normalize trims string fields in a task retry request.
+func (r TaskRetryRequest) Normalize() TaskRetryRequest {
+	r.ID = strings.TrimSpace(r.ID)
+	r.Workflow = strings.TrimSpace(r.Workflow)
+	r.Status = strings.TrimSpace(r.Status)
+	r.Summary = strings.TrimSpace(r.Summary)
 	return r
 }
 
@@ -381,4 +530,15 @@ func (r TaskBlockRequest) Normalize() TaskBlockRequest {
 	r.Summary = strings.TrimSpace(r.Summary)
 	r.TeammateID = strings.TrimSpace(r.TeammateID)
 	return r
+}
+
+func trimStringSlicePtr(values *[]string) *[]string {
+	if values == nil {
+		return nil
+	}
+	trimmed := make([]string, 0, len(*values))
+	for _, value := range *values {
+		trimmed = append(trimmed, strings.TrimSpace(value))
+	}
+	return &trimmed
 }

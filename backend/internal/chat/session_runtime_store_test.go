@@ -18,6 +18,17 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+func assertSQLiteTableMissing(t *testing.T, db *sql.DB, table string) {
+	t.Helper()
+	var count int
+	require.NoError(t, db.QueryRow(`
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'table' AND name = ?
+	`, table).Scan(&count))
+	assert.Equal(t, 0, count)
+}
+
 func TestSQLiteRuntimeStorePersistsCurrentRunMeta(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
 		DSN: "file:runtime-store-current-run-meta-test?mode=memory&cache=shared",
@@ -80,6 +91,182 @@ func TestSQLiteRuntimeStorePersistsAmbientRunMeta(t *testing.T) {
 	assert.Equal(t, "team-ambient", loaded.AmbientRunMeta.Team.TeamID)
 	assert.Equal(t, "lead", loaded.AmbientRunMeta.Team.AgentID)
 	assert.Equal(t, SessionIdle, loaded.Status)
+}
+
+func TestSQLiteRuntimeStoreRepairsMailboxGlobalProjection(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-mailbox-repair-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	sessionID := "session-mailbox-repair"
+	_, _, err = store.AppendAgentControlMailbox(ctx, sessionID, team.MailMessage{
+		ID:        "mailbox-repair-runtime",
+		FromAgent: "lead",
+		ToAgent:   "worker",
+		Kind:      agentcontrol.MailboxKindAgentMessage,
+		Body:      "repair runtime backlink",
+		Metadata: agentcontrol.Envelope{
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MessageType:     agentcontrol.MessageTypeAgentMessage,
+			ControlAction:   agentcontrol.ActionAgentMessage,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindAgentMessage,
+		}.Metadata(),
+	})
+	require.NoError(t, err)
+
+	records, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:     agentcontrol.MailboxScopeSession,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, int64(0), records[0].GlobalSeq)
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global-mailbox.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+	store.SetGlobalMailboxWriter(globalStore)
+
+	repaired, err := store.RepairAgentControlMailboxProjection(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:     agentcontrol.MailboxScopeSession,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), repaired)
+
+	globalRecords, err := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:     agentcontrol.MailboxScopeSession,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Len(t, globalRecords, 1)
+	require.Equal(t, "mailbox-repair-runtime", globalRecords[0].MessageID)
+
+	records, err = store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Scope:     agentcontrol.MailboxScopeSession,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, globalRecords[0].Seq, records[0].GlobalSeq)
+}
+
+func TestSQLiteRuntimeStoreRepairsMailboxLocalProjectionFromGlobal(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-mailbox-local-repair-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global-mailbox.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+	store.SetGlobalMailboxWriter(globalStore)
+
+	sessionID := "session-local-repair"
+	globalRecord, err := globalStore.AppendPrimaryGlobalMailboxRecord(ctx, agentcontrol.MailboxRecord{
+		Workflow:          agentcontrol.WorkflowSpawnAgent,
+		Scope:             agentcontrol.MailboxScopeSession,
+		SessionID:         sessionID,
+		SessionMailboxSeq: 4,
+		MessageID:         "global-only-runtime",
+		FromAgent:         "child",
+		ToAgent:           "parent",
+		Kind:              agentcontrol.MailboxKindAgentMessage,
+		Body:              "global only",
+		Metadata: agentcontrol.Envelope{
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MessageType:     agentcontrol.MessageTypeAgentMessage,
+			ControlAction:   agentcontrol.ActionAgentMessage,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindAgentMessage,
+		}.Metadata(),
+		CreatedAt: time.Unix(30, 0).UTC(),
+	})
+	require.NoError(t, err)
+
+	localRecords, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Empty(t, localRecords)
+
+	repaired, err := store.RepairAgentControlMailboxLocalProjection(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), repaired)
+
+	localRecords, err = store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Len(t, localRecords, 1)
+	require.Equal(t, globalRecord.Seq, localRecords[0].GlobalSeq)
+	require.Equal(t, int64(4), localRecords[0].SessionMailboxSeq)
+
+	repaired, err = store.RepairAgentControlMailboxLocalProjection(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: sessionID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(0), repaired)
+}
+
+func TestSQLiteRuntimeStoreAppendAgentControlMailboxCanCommitGlobalAndLocalInOneTx(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: filepath.Join(dir, "runtime.db")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(dir, "agent-control.sqlite"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+	store.SetGlobalMailboxWriter(globalStore)
+
+	_, _, err = store.AppendAgentControlMailbox(ctx, "session-atomic", team.MailMessage{
+		ID:        "atomic-runtime-mailbox",
+		FromAgent: "child",
+		ToAgent:   "parent",
+		Kind:      agentcontrol.MailboxKindAgentMessage,
+		Body:      "atomic runtime mailbox",
+		Metadata: agentcontrol.Envelope{
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MessageType:     agentcontrol.MessageTypeAgentMessage,
+			ControlAction:   agentcontrol.ActionAgentMessage,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindAgentMessage,
+		}.Metadata(),
+	})
+	require.NoError(t, err)
+
+	localRecords, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		SessionID: "session-atomic",
+	})
+	require.NoError(t, err)
+	require.Len(t, localRecords, 1)
+	require.Greater(t, localRecords[0].GlobalSeq, int64(0))
+	globalRecords, err := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		SessionID: "session-atomic",
+	})
+	require.NoError(t, err)
+	require.Len(t, globalRecords, 1)
+	require.Equal(t, globalRecords[0].Seq, localRecords[0].GlobalSeq)
+	require.Equal(t, "atomic-runtime-mailbox", globalRecords[0].MessageID)
 }
 
 func TestSQLiteRuntimeStoreAppendEventIsSerialized(t *testing.T) {
@@ -250,6 +437,50 @@ func TestInMemoryRuntimeStoreAgentControlMailboxFiltersEnvelope(t *testing.T) {
 	}
 }
 
+func TestInMemoryRuntimeStoreAppendAgentControlMailboxWritesGlobalRegistry(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryRuntimeStore(16)
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global-mailbox.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+	store.SetGlobalMailboxWriter(globalStore)
+
+	_, _, err = store.AppendAgentControlMailbox(ctx, "parent-session", team.MailMessage{
+		ID:        "child-completed-memory",
+		FromAgent: "child",
+		ToAgent:   "parent",
+		Kind:      agentcontrol.MailboxKindSubagentCompleted,
+		Body:      "done",
+		Metadata: agentcontrol.Envelope{
+			MessageType:     agentcontrol.MessageTypeSubagentCompleted,
+			ControlAction:   agentcontrol.ActionAgentCompleted,
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+			MailboxKind:     agentcontrol.MailboxKindSubagentCompleted,
+		}.Metadata(),
+	})
+	require.NoError(t, err)
+
+	records, err := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: "parent-session",
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, agentcontrol.MailboxSourceGlobal, records[0].Source)
+	assert.Equal(t, "child-completed-memory", records[0].MessageID)
+
+	localRecords, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: "parent-session",
+	})
+	require.NoError(t, err)
+	require.Len(t, localRecords, 1)
+	assert.Equal(t, records[0].Seq, localRecords[0].GlobalSeq)
+}
+
 func TestSQLiteRuntimeStoreWatchEventsAndLastSeq(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
 		DSN: "file:runtime-store-watch-events-test?mode=memory&cache=shared",
@@ -314,14 +545,16 @@ func TestSQLiteRuntimeStoreAppendMailbox(t *testing.T) {
 	assert.Equal(t, "hello sqlite mailbox", events[1].Payload["body"])
 	assert.EqualValues(t, 1, events[1].Payload["mailbox_seq"])
 
+	assertSQLiteTableMissing(t, store.db, "session_mailbox_messages")
+
 	var count int
 	var storedSeq int64
 	var storedBody string
 	err = store.db.QueryRowContext(context.Background(), `
-		SELECT COUNT(*), COALESCE(MAX(seq), 0), COALESCE(MAX(body), '')
-		FROM session_mailbox_messages
-		WHERE session_id = ?
-	`, "session-mailbox").Scan(&count, &storedSeq, &storedBody)
+		SELECT COUNT(*), COALESCE(MAX(session_mailbox_seq), 0), COALESCE(MAX(body), '')
+		FROM agent_control_mailbox_records
+		WHERE scope = ? AND session_id = ?
+	`, agentcontrol.MailboxScopeSession, "session-mailbox").Scan(&count, &storedSeq, &storedBody)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
 	assert.Equal(t, int64(1), storedSeq)
@@ -384,42 +617,262 @@ func TestSQLiteRuntimeStoreAppendMailboxMirrorsAgentControlEnvelope(t *testing.T
 	controlMessages, err := store.ListAgentControlMailbox(context.Background(), "teammate-session", 0, 10)
 	require.NoError(t, err)
 	require.Len(t, controlMessages, 1)
-	assert.Equal(t, int64(1), controlMessages[0].Seq)
-	assert.Equal(t, int64(1), controlMessages[0].ControlSeq)
+	assert.Equal(t, int64(2), controlMessages[0].Seq)
+	assert.Equal(t, int64(2), controlMessages[0].ControlSeq)
 	assert.Equal(t, int64(2), controlMessages[0].SessionMailboxSeq)
 	assert.Equal(t, agentcontrol.MessageTypeTeamTaskAssignment, agentcontrol.MetadataString(controlMessages[0].Metadata, agentcontrol.MetadataKeyMessageType))
 
 	lastSeq, err := store.LastAgentControlMailboxSeq(context.Background(), "teammate-session")
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), lastSeq)
+	assert.Equal(t, int64(2), lastSeq)
 
 	select {
 	case message := <-watch:
-		assert.Equal(t, int64(1), message.Seq)
-		assert.Equal(t, int64(1), message.ControlSeq)
+		assert.Equal(t, int64(2), message.Seq)
+		assert.Equal(t, int64(2), message.ControlSeq)
 		assert.Equal(t, int64(2), message.SessionMailboxSeq)
 		assert.Equal(t, agentcontrol.MailboxKindTeamTaskAssignment, message.Kind)
 	case <-time.After(time.Second):
 		t.Fatal("agent control mailbox watcher did not wake")
 	}
 
+	assertSQLiteTableMissing(t, store.db, "agent_control_mailbox_messages")
+
 	var count int
-	var messageType, action, workflow, mailboxKind string
 	var controlSeq, mailboxSeq int64
 	err = store.db.QueryRowContext(context.Background(), `
-		SELECT COUNT(*), COALESCE(MAX(seq), 0), COALESCE(MAX(session_mailbox_seq), 0), COALESCE(MAX(message_type), ''),
-			COALESCE(MAX(control_action), ''), COALESCE(MAX(workflow), ''), COALESCE(MAX(mailbox_kind), '')
-		FROM agent_control_mailbox_messages
-		WHERE session_id = ?
-	`, "teammate-session").Scan(&count, &controlSeq, &mailboxSeq, &messageType, &action, &workflow, &mailboxKind)
+		SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(MAX(session_mailbox_seq), 0)
+		FROM agent_control_mailbox_records
+		WHERE scope = ? AND session_id = ? AND COALESCE(workflow, '') <> ''
+	`, agentcontrol.MailboxScopeSession, "teammate-session").Scan(&count, &controlSeq, &mailboxSeq)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
-	assert.Equal(t, int64(1), controlSeq)
+	assert.Equal(t, int64(2), controlSeq)
 	assert.Equal(t, int64(2), mailboxSeq)
-	assert.Equal(t, agentcontrol.MessageTypeTeamTaskAssignment, messageType)
-	assert.Equal(t, agentcontrol.ActionTaskAssign, action)
-	assert.Equal(t, agentcontrol.WorkflowSpawnTeam, workflow)
-	assert.Equal(t, agentcontrol.MailboxKindTeamTaskAssignment, mailboxKind)
+}
+
+func TestSQLiteRuntimeStoreAppendAgentControlMailboxWritesGlobalRegistry(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-global-mailbox-write-through-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global-mailbox.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+	store.SetGlobalMailboxWriter(globalStore)
+
+	metadata := agentcontrol.ApplyEnvelope(map[string]interface{}{}, agentcontrol.Envelope{
+		MessageType:     agentcontrol.MessageTypeSubagentCompleted,
+		ControlAction:   agentcontrol.ActionAgentCompleted,
+		Workflow:        agentcontrol.WorkflowSpawnAgent,
+		MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+		MailboxKind:     agentcontrol.MailboxKindSubagentCompleted,
+	})
+	_, _, err = store.AppendAgentControlMailbox(ctx, "parent-session", team.MailMessage{
+		ID:        "child-completed",
+		FromAgent: "child",
+		ToAgent:   "parent",
+		Kind:      agentcontrol.MailboxKindSubagentCompleted,
+		Body:      "done",
+		Metadata:  metadata,
+		CreatedAt: time.Unix(10, 0).UTC(),
+	})
+	require.NoError(t, err)
+
+	records, err := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: "parent-session",
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, agentcontrol.MailboxSourceGlobal, records[0].Source)
+	assert.Positive(t, records[0].SourceSeq)
+	assert.Equal(t, "child-completed", records[0].MessageID)
+	assert.Equal(t, agentcontrol.MailboxScopeSession, records[0].Scope)
+	assert.Equal(t, int64(1), records[0].SessionMailboxSeq)
+
+	localMessages, err := store.ListAgentControlMailbox(ctx, "parent-session", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, localMessages, 1)
+	assert.Equal(t, records[0].Seq, localMessages[0].GlobalSeq)
+
+	localRecords, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: "parent-session",
+	})
+	require.NoError(t, err)
+	require.Len(t, localRecords, 1)
+	assert.Equal(t, records[0].Seq, localRecords[0].GlobalSeq)
+
+	count, err := globalStore.MaterializeMailboxRecords(ctx, []agentcontrol.NamedMailboxRegistrySource{
+		{Name: agentcontrol.MailboxSourceRuntimeSessions, Source: NewAgentControlMailboxRegistry(store)},
+	}, agentcontrol.MailboxRecordFilter{Workflow: agentcontrol.WorkflowSpawnAgent, SessionID: "parent-session"})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+	records, err = globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: "parent-session",
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+}
+
+func TestSQLiteRuntimeStoreAppendMailboxControlEnvelopeUsesGlobalPrimary(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-append-mailbox-global-primary-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "global-mailbox.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+	store.SetGlobalMailboxWriter(globalStore)
+
+	_, _, err = store.AppendMailbox(ctx, "session-append", team.MailMessage{
+		ID:        "ordinary-mail",
+		FromAgent: "child",
+		ToAgent:   "parent",
+		Kind:      "info",
+		Body:      "ordinary",
+		CreatedAt: time.Unix(20, 0).UTC(),
+	})
+	require.NoError(t, err)
+
+	metadata := agentcontrol.ApplyEnvelope(map[string]interface{}{}, agentcontrol.Envelope{
+		MessageType:     agentcontrol.MessageTypeSubagentCompleted,
+		ControlAction:   agentcontrol.ActionAgentCompleted,
+		Workflow:        agentcontrol.WorkflowSpawnAgent,
+		MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+		MailboxKind:     agentcontrol.MailboxKindSubagentCompleted,
+	})
+	_, _, err = store.AppendMailbox(ctx, "session-append", team.MailMessage{
+		ID:        "control-via-append",
+		FromAgent: "child",
+		ToAgent:   "parent",
+		Kind:      agentcontrol.MailboxKindSubagentCompleted,
+		Body:      "control",
+		Metadata:  metadata,
+		CreatedAt: time.Unix(21, 0).UTC(),
+	})
+	require.NoError(t, err)
+
+	records, err := globalStore.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: "session-append",
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, agentcontrol.MailboxSourceGlobal, records[0].Source)
+	assert.Equal(t, "control-via-append", records[0].MessageID)
+	assert.Equal(t, int64(2), records[0].SessionMailboxSeq)
+
+	localRecords, err := store.ListAgentControlMailboxRecords(ctx, agentcontrol.MailboxRecordFilter{
+		Workflow:  agentcontrol.WorkflowSpawnAgent,
+		SessionID: "session-append",
+	})
+	require.NoError(t, err)
+	require.Len(t, localRecords, 1)
+	assert.Equal(t, records[0].Seq, localRecords[0].GlobalSeq)
+}
+
+func TestSQLiteRuntimeStoreAppendAgentControlMailboxPrefersControlRows(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-agent-control-mailbox-primary-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	metadata := agentcontrol.ApplyEnvelope(map[string]interface{}{
+		"team_id":    "team-1",
+		"event_type": "task.done",
+	}, agentcontrol.Envelope{
+		MessageType:     agentcontrol.MessageTypeTeamTaskLifecycle,
+		ControlAction:   agentcontrol.ActionTaskLifecycle,
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+		MailboxKind:     agentcontrol.MailboxKindTeamTaskLifecycle,
+	})
+	taskID := "task-primary"
+	event, seq, err := store.AppendAgentControlMailbox(context.Background(), "primary-session", team.MailMessage{
+		TeamID:    "team-1",
+		FromAgent: "team-orchestrator",
+		ToAgent:   "member-1",
+		TaskID:    &taskID,
+		Kind:      agentcontrol.MailboxKindTeamTaskLifecycle,
+		Body:      "control primary body",
+		Metadata:  metadata,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), seq)
+	assert.Equal(t, EventMailboxReceived, event.Type)
+	assert.EqualValues(t, 1, event.Payload["mailbox_seq"])
+
+	assertSQLiteTableMissing(t, store.db, "session_mailbox_messages")
+
+	legacyMessages, err := store.ListMailbox(context.Background(), "primary-session", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, legacyMessages, 1)
+	assert.Equal(t, "control primary body", legacyMessages[0].Body)
+
+	controlMessages, err := store.ListAgentControlMailbox(context.Background(), "primary-session", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, controlMessages, 1)
+	assert.Equal(t, "control primary body", controlMessages[0].Body)
+	assert.Equal(t, int64(1), controlMessages[0].Seq)
+	assert.Equal(t, int64(1), controlMessages[0].ControlSeq)
+	assert.Equal(t, int64(1), controlMessages[0].SessionMailboxSeq)
+	assert.Equal(t, agentcontrol.MessageTypeTeamTaskLifecycle, agentcontrol.MetadataString(controlMessages[0].Metadata, agentcontrol.MetadataKeyMessageType))
+
+	lastControlSeq, err := store.LastAgentControlMailboxSeq(context.Background(), "primary-session")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), lastControlSeq)
+
+	var unifiedRows int
+	require.NoError(t, store.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*)
+		FROM agent_control_mailbox_records
+		WHERE scope = ? AND session_id = ?
+	`, agentcontrol.MailboxScopeSession, "primary-session").Scan(&unifiedRows))
+	assert.Equal(t, 1, unifiedRows)
+
+	assertSQLiteTableMissing(t, store.db, "agent_control_mailbox_messages")
+
+	controlMessages, err = store.ListAgentControlMailbox(context.Background(), "primary-session", 0, 10)
+	require.NoError(t, err)
+	require.Len(t, controlMessages, 1)
+	assert.Equal(t, "control primary body", controlMessages[0].Body)
+
+	registryRecords, err := store.ListAgentControlMailboxRecords(context.Background(), agentcontrol.MailboxRecordFilter{
+		Scope:     agentcontrol.MailboxScopeSession,
+		SessionID: "primary-session",
+		Workflow:  agentcontrol.WorkflowSpawnTeam,
+	})
+	require.NoError(t, err)
+	require.Len(t, registryRecords, 1)
+	assert.Equal(t, int64(1), registryRecords[0].Seq)
+	assert.Equal(t, agentcontrol.MailboxScopeSession, registryRecords[0].Scope)
+	assert.Equal(t, "primary-session", registryRecords[0].SessionID)
+	assert.Equal(t, int64(1), registryRecords[0].SessionMailboxSeq)
+	assert.Equal(t, "team-1", registryRecords[0].TeamID)
+	assert.Equal(t, "control primary body", registryRecords[0].Body)
+	assert.Equal(t, agentcontrol.MessageTypeTeamTaskLifecycle, agentcontrol.MetadataString(registryRecords[0].Metadata, agentcontrol.MetadataKeyMessageType))
+
+	registrySeq, err := store.LastAgentControlMailboxRecordSeq(context.Background(), agentcontrol.MailboxRecordFilter{
+		Scope:     agentcontrol.MailboxScopeSession,
+		SessionID: "primary-session",
+		Workflow:  agentcontrol.WorkflowSpawnTeam,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), registrySeq)
 }
 
 func TestSQLiteRuntimeStoreMigratesCurrentRunMetaColumn(t *testing.T) {
@@ -986,15 +1439,15 @@ func TestSQLiteRuntimeStoreMigratesSessionMailboxTable(t *testing.T) {
 	assert.Equal(t, int64(1), event.Payload["mailbox_seq"])
 
 	var count int
-	err = store.db.QueryRowContext(context.Background(), `
-		SELECT COUNT(*) FROM session_mailbox_messages WHERE session_id = ?
-	`, "session-mailbox-migration").Scan(&count)
-	require.NoError(t, err)
-	assert.Equal(t, 1, count)
+	assertSQLiteTableMissing(t, store.db, "session_mailbox_messages")
+
+	assertSQLiteTableMissing(t, store.db, "agent_control_mailbox_messages")
 
 	err = store.db.QueryRowContext(context.Background(), `
-		SELECT COUNT(*) FROM agent_control_mailbox_messages WHERE session_id = ?
-	`, "session-mailbox-migration").Scan(&count)
+		SELECT COUNT(*)
+		FROM agent_control_mailbox_records
+		WHERE scope = ? AND session_id = ?
+	`, agentcontrol.MailboxScopeSession, "session-mailbox-migration").Scan(&count)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
 }
@@ -1124,6 +1577,8 @@ func TestSQLiteRuntimeStoreMigratesAgentControlMailboxSequence(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: dbPath})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
+	assertSQLiteTableMissing(t, store.db, "session_mailbox_messages")
+	assertSQLiteTableMissing(t, store.db, "agent_control_mailbox_messages")
 
 	messages, err := store.ListAgentControlMailbox(context.Background(), "session-control-migration", 0, 10)
 	require.NoError(t, err)

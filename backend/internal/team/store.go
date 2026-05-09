@@ -17,6 +17,24 @@ type TaskDependencyReaderStore interface {
 	ListTaskDependencyRecords(ctx context.Context, filter TaskDependencyFilter) ([]TaskDependency, error)
 }
 
+// TaskGraphEventReaderStore exposes a global task graph event cursor for
+// stores that can read task-related team events across teams.
+type TaskGraphEventReaderStore interface {
+	ListTaskGraphEvents(ctx context.Context, filter TaskGraphEventFilter) ([]TaskGraphEvent, error)
+}
+
+// AgentControlMailboxWatcherStore exposes mailbox wake notifications through
+// the AgentControl wake projection rather than the team-native mailbox table.
+type AgentControlMailboxWatcherStore interface {
+	WatchAgentControlMailboxSignals(ctx context.Context, workflow, teamID string) (<-chan MailMessage, func())
+}
+
+// AgentControlMailboxSequenceStore exposes the AgentControl mailbox wake
+// high-water mark.
+type AgentControlMailboxSequenceStore interface {
+	LastAgentControlMailboxSignalSeq(ctx context.Context, workflow, teamID string) (int64, error)
+}
+
 // Store defines persistence operations required by the team subsystem.
 type Store interface {
 	Close() error

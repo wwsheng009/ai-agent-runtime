@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 // TerminalTeamServices groups collaborators used to reconcile team terminal state.
@@ -304,16 +306,16 @@ func countTasksByStatusTx(ctx context.Context, tx *sql.Tx, teamID string, status
 		return 0, nil
 	}
 	placeholders := make([]string, 0, len(statuses))
-	args := make([]interface{}, 0, len(statuses)+1)
-	args = append(args, teamID)
+	args := make([]interface{}, 0, len(statuses)+2)
+	args = append(args, agentcontrol.WorkflowSpawnTeam, teamID)
 	for _, status := range statuses {
 		placeholders = append(placeholders, "?")
 		args = append(args, string(status))
 	}
 	row := tx.QueryRowContext(ctx, `
 		SELECT COUNT(1)
-		FROM team_tasks
-		WHERE team_id = ? AND status IN (`+strings.Join(placeholders, ",")+`)
+		FROM agent_control_task_records
+		WHERE workflow = ? AND team_id = ? AND status IN (`+strings.Join(placeholders, ",")+`)
 	`, args...)
 	var count int
 	if err := row.Scan(&count); err != nil {

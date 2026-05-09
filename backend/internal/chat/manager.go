@@ -73,6 +73,9 @@ func (m *SessionManager) Create(ctx context.Context, userID string) (*Session, e
 	}
 
 	session := NewSession(userID)
+	if m.config != nil && m.config.TTL > 0 {
+		session.SetTTL(m.config.TTL)
+	}
 
 	if err := m.storage.Save(ctx, session); err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)

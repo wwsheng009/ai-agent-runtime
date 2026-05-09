@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
 // LeaseManager handles task lease renewal and reclamation.
@@ -73,8 +75,11 @@ func (m *LeaseManager) ReclaimExpiredTasks(ctx context.Context, teamID string, a
 		if dryRun {
 			continue
 		}
-		_ = m.Store.ReleaseTask(ctx, task.ID, TaskStatusReady)
-		_ = m.Store.IncrementTaskRetry(ctx, task.ID)
+		_, _ = NewAgentControlTaskRegistry(m.Store).RetryAgentControlTask(ctx, agentcontrol.TaskRetryRequest{
+			ID:       task.ID,
+			Workflow: agentcontrol.WorkflowSpawnTeam,
+			Status:   string(TaskStatusReady),
+		})
 		if m.Claims != nil {
 			_ = m.Claims.Release(ctx, task.ID)
 		}
@@ -110,7 +115,11 @@ func (m *LeaseManager) RenewTask(ctx context.Context, taskID string, leaseUntil 
 	if leaseUntil.IsZero() {
 		leaseUntil = time.Now().UTC().Add(5 * time.Minute)
 	}
-	if err := m.Store.RenewTaskLease(ctx, taskID, leaseUntil); err != nil {
+	if _, err := NewAgentControlTaskRegistry(m.Store).RenewAgentControlTaskLease(ctx, agentcontrol.TaskLeaseRenewRequest{
+		ID:         taskID,
+		Workflow:   agentcontrol.WorkflowSpawnTeam,
+		LeaseUntil: leaseUntil,
+	}); err != nil {
 		return err
 	}
 	if m.Claims != nil {

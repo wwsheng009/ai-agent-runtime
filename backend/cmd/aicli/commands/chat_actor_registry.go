@@ -89,6 +89,124 @@ func (r *localActorRegistry) EnsureTeammateSessionIDs(teamID string, specs []too
 	return ensureTeammateSessionIDs(teamID, specs)
 }
 
+func (r *localActorRegistry) SyncTeamTeammateAgent(ctx context.Context, previous *team.Teammate, mate team.Teammate) error {
+	if r == nil || r.Host == nil || r.Host.TeamStore == nil {
+		return nil
+	}
+	if err := r.closeStaleTeamTeammateAgentRecord(ctx, previous, mate); err != nil {
+		return err
+	}
+	teamID := strings.TrimSpace(mate.TeamID)
+	sessionID := strings.TrimSpace(mate.SessionID)
+	if teamID == "" || sessionID == "" {
+		return nil
+	}
+	record, err := r.Host.TeamStore.GetTeam(ctx, teamID)
+	if err != nil || record == nil {
+		return err
+	}
+	return r.upsertTeamTeammateAgentRecordByProjection(ctx, mate)
+}
+
+func (r *localActorRegistry) closeStaleTeamTeammateAgentRecord(ctx context.Context, previous *team.Teammate, mate team.Teammate) error {
+	store := r.localAgentRegistryStore()
+	if store == nil || r == nil || r.Host == nil || r.Host.TeamStore == nil || previous == nil {
+		return nil
+	}
+	previousRecord, ok, err := r.teamTeammateAgentRecordProjection(ctx, *previous)
+	if err != nil || !ok {
+		return err
+	}
+	currentRecord, currentOK, err := r.teamTeammateAgentRecordProjection(ctx, mate)
+	if err != nil {
+		return err
+	}
+	if currentOK && strings.EqualFold(previousRecord.RootSessionID, currentRecord.RootSessionID) && strings.EqualFold(previousRecord.AgentPath, currentRecord.AgentPath) {
+		return nil
+	}
+	_, err = store.CloseAgentControlAgentSubtree(ctx, previousRecord.RootSessionID, previousRecord.AgentPath, time.Now().UTC())
+	return err
+}
+
+func (r *localActorRegistry) upsertTeamTeammateAgentRecordByProjection(ctx context.Context, mate team.Teammate) error {
+	store := r.localAgentRegistryStore()
+	if store == nil {
+		return nil
+	}
+	teammate, ok, err := r.teamTeammateAgentRecordProjection(ctx, mate)
+	if err != nil || !ok {
+		return err
+	}
+	root := agentcontrol.AgentRecord{
+		AgentID:       localRootAgentID(teammate.RootSessionID),
+		RootSessionID: teammate.RootSessionID,
+		SessionID:     localRootSessionBinding(teammate),
+		AgentPath:     "/root",
+		AgentType:     agentcontrol.AgentTypeRoot,
+		Status:        agentcontrol.AgentStatusActive,
+	}
+	if _, err := store.UpsertAgentControlAgent(ctx, root); err != nil {
+		return err
+	}
+	if existing, exists, err := r.existingLocalAgentRecord(ctx, store, teammate); err != nil {
+		return err
+	} else if exists && existing.Closed() {
+		return nil
+	}
+	_, err = store.UpsertAgentControlAgent(ctx, teammate)
+	return err
+}
+
+func (r *localActorRegistry) teamTeammateAgentRecordProjection(ctx context.Context, mate team.Teammate) (agentcontrol.AgentRecord, bool, error) {
+	if r == nil || r.Host == nil || r.Host.TeamStore == nil {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	teamID := strings.TrimSpace(mate.TeamID)
+	sessionID := strings.TrimSpace(mate.SessionID)
+	if teamID == "" || sessionID == "" {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	record, err := r.Host.TeamStore.GetTeam(ctx, teamID)
+	if err != nil {
+		return agentcontrol.AgentRecord{}, false, err
+	}
+	if record == nil {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	rootSessionID := firstNonEmptyChatValue(strings.TrimSpace(record.LeadSessionID), strings.TrimSpace(r.Host.baseRuntimeSessionID()))
+	if rootSessionID == "" {
+		rootSessionID = "team:" + teamID
+	}
+	if rootSessionID == "" {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	return agentcontrol.AgentRecord{
+		AgentID:         "team:" + teamID + ":" + firstNonEmptyChatValue(strings.TrimSpace(mate.ID), sessionID),
+		RootSessionID:   rootSessionID,
+		ParentAgentID:   localRootAgentID(rootSessionID),
+		ParentSessionID: rootSessionID,
+		SessionID:       sessionID,
+		AgentPath:       agentcontrol.TeamTeammatePath(teamID, mate.ID, mate.Name, sessionID),
+		Depth:           1,
+		AgentType:       firstNonEmptyChatValue(strings.TrimSpace(mate.Profile), agentcontrol.AgentTypeTeamTeammate),
+		Nickname:        strings.TrimSpace(mate.Name),
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		TeamID:          teamID,
+		TeammateID:      strings.TrimSpace(mate.ID),
+		Status:          agentcontrol.AgentStatusActive,
+		CreatedAt:       mate.CreatedAt,
+		UpdatedAt:       mate.UpdatedAt,
+	}, true, nil
+}
+
+func localRootSessionBinding(record agentcontrol.AgentRecord) string {
+	rootSessionID := strings.TrimSpace(record.RootSessionID)
+	if rootSessionID == "" || strings.EqualFold(rootSessionID, "team:"+strings.TrimSpace(record.TeamID)) {
+		return ""
+	}
+	return rootSessionID
+}
+
 type localAgentForkMode int
 
 const (
@@ -124,7 +242,7 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 		return nil, fmt.Errorf("session runtime host is not configured")
 	}
 	sessionID := firstNonEmptyChatValue(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
-	parentSessionID = strings.TrimSpace(parentSessionID)
+	parentSessionID = firstNonEmptyChatValue(strings.TrimSpace(parentSessionID), r.Host.baseRuntimeSessionID())
 
 	var parentSession *runtimechat.Session
 	if parentSessionID != "" {
@@ -189,6 +307,10 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 		childSession.SetContext(toolbroker.AgentSessionContextRequestedModel, model)
 	}
 	if err := r.Host.SessionStore.Save(ctx, childSession); err != nil {
+		return nil, err
+	}
+	if err := r.reserveOrRegisterLocalAgentSpawn(ctx, parentSession, parentSessionID, childSession, args, childDepth); err != nil {
+		_ = r.Host.SessionStore.Delete(ctx, childSession.ID)
 		return nil, err
 	}
 	r.subscribeLocalAgentCompletion(parentSessionID, childSession)
@@ -298,12 +420,487 @@ func (r *localActorRegistry) deliverSubagentCompletionMailbox(ctx context.Contex
 	return message, err
 }
 
+func (r *localActorRegistry) localAgentRegistryStore() agentcontrol.AgentRegistryStore {
+	if r == nil || r.Host == nil {
+		return nil
+	}
+	return r.Host.AgentRegistryStore
+}
+
+func (r *localActorRegistry) reserveOrRegisterLocalAgentSpawn(ctx context.Context, parentSession *runtimechat.Session, parentSessionID string, childSession *runtimechat.Session, args toolbroker.SpawnAgentArgs, childDepth int) error {
+	store := r.localAgentRegistryStore()
+	if store == nil || childSession == nil {
+		return nil
+	}
+	childSessionID := strings.TrimSpace(childSession.ID)
+	if childSessionID == "" {
+		return fmt.Errorf("child session id is required")
+	}
+	rootRecord := localRootAgentRecord(parentSession, parentSessionID)
+	childRecord := localChildAgentRecord(parentSession, parentSessionID, childSession, args, childDepth)
+	if reserver, ok := store.(agentcontrol.AgentSpawnReservationStore); ok && reserver != nil {
+		_, err := reserver.ReserveAgentControlAgentSpawn(ctx, rootRecord, childRecord, r.localAgentsConfig().MaxThreads)
+		return err
+	}
+	if _, err := store.UpsertAgentControlAgent(ctx, rootRecord); err != nil {
+		return err
+	}
+	_, err := store.UpsertAgentControlAgent(ctx, childRecord)
+	return err
+}
+
+func localRootAgentRecord(parentSession *runtimechat.Session, parentSessionID string) agentcontrol.AgentRecord {
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	rootSessionID := localAgentRootSessionID(parentSession, parentSessionID)
+	if rootSessionID == "" {
+		rootSessionID = parentSessionID
+	}
+	return agentcontrol.AgentRecord{
+		AgentID:       localRootAgentID(rootSessionID),
+		RootSessionID: rootSessionID,
+		SessionID:     rootSessionID,
+		AgentPath:     "/root",
+		AgentType:     agentcontrol.AgentTypeRoot,
+		Status:        agentcontrol.AgentStatusActive,
+	}
+}
+
+func localChildAgentRecord(parentSession *runtimechat.Session, parentSessionID string, childSession *runtimechat.Session, args toolbroker.SpawnAgentArgs, childDepth int) agentcontrol.AgentRecord {
+	childSessionID := ""
+	if childSession != nil {
+		childSessionID = strings.TrimSpace(childSession.ID)
+	}
+	rootSessionID := localAgentRootSessionID(parentSession, strings.TrimSpace(parentSessionID))
+	agentType := firstNonEmptyChatValue(strings.TrimSpace(args.AgentType), agentcontrol.AgentTypeChild)
+	return agentcontrol.AgentRecord{
+		AgentID:         childSessionID,
+		RootSessionID:   rootSessionID,
+		ParentAgentID:   localAgentIDForSession(parentSession, strings.TrimSpace(parentSessionID)),
+		ParentSessionID: strings.TrimSpace(parentSessionID),
+		SessionID:       childSessionID,
+		AgentPath:       localAgentChildPath(parentSession, childSessionID),
+		Depth:           childDepth,
+		AgentType:       agentType,
+		Workflow:        agentcontrol.WorkflowSpawnAgent,
+		Status:          agentcontrol.AgentStatusActive,
+	}
+}
+
+func localAgentIDForSession(session *runtimechat.Session, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if session == nil || !isLocalAgentSession(session) {
+		return localRootAgentID(localAgentRootSessionID(session, sessionID))
+	}
+	return sessionID
+}
+
+func localRootAgentID(rootSessionID string) string {
+	rootSessionID = strings.TrimSpace(rootSessionID)
+	if rootSessionID == "" {
+		return "root"
+	}
+	return "root:" + rootSessionID
+}
+
+func firstNonZeroChatInt(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func (r *localActorRegistry) listLocalAgentsFromRegistry(ctx context.Context, parentSessionID string, args toolbroker.ListAgentsArgs, store agentcontrol.AgentRegistryStore) (*toolbroker.AgentListResult, error) {
+	if store == nil {
+		return nil, nil
+	}
+	rootSessionID, parentPath, err := r.localAgentRegistryRootAndPath(ctx, parentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if rootSessionID == "" {
+		return nil, nil
+	}
+	pathPrefix := strings.TrimSpace(args.PathPrefix)
+	if pathPrefix == "" && parentPath != "" && parentPath != "/root" {
+		pathPrefix = parentPath
+	}
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		RootSessionID: rootSessionID,
+		PathPrefix:    pathPrefix,
+		IncludeClosed: args.IncludeClosed,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	agents := make([]toolbroker.AgentStatusResult, 0, len(records))
+	for _, record := range records {
+		record = record.Normalize()
+		if record.AgentPath == "/root" || strings.EqualFold(record.AgentType, agentcontrol.AgentTypeRoot) {
+			continue
+		}
+		status, err := r.localAgentStatusFromRecord(ctx, record)
+		if err != nil {
+			return nil, err
+		}
+		agents = append(agents, status)
+	}
+	sort.SliceStable(agents, func(i, j int) bool {
+		left := firstNonEmptyChatValue(agents[i].Path, agents[i].SessionID, agents[i].ID)
+		right := firstNonEmptyChatValue(agents[j].Path, agents[j].SessionID, agents[j].ID)
+		return left < right
+	})
+	return &toolbroker.AgentListResult{Agents: agents, Count: len(agents)}, nil
+}
+
+func (r *localActorRegistry) localAgentRegistryRootAndPath(ctx context.Context, parentSessionID string) (string, string, error) {
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" {
+		return "", "", nil
+	}
+	if strings.HasPrefix(parentSessionID, "/") {
+		if store := r.localAgentRegistryStore(); store != nil {
+			records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+				AgentPath:     parentSessionID,
+				IncludeClosed: true,
+				Limit:         1,
+			})
+			if err != nil {
+				return "", "", err
+			}
+			if len(records) > 0 {
+				return records[0].RootSessionID, records[0].AgentPath, nil
+			}
+		}
+		return "", parentSessionID, nil
+	}
+	parent, err := r.Host.SessionStore.Load(ctx, parentSessionID)
+	if err != nil {
+		if err == runtimechat.ErrSessionNotFound {
+			return parentSessionID, "", nil
+		}
+		return "", "", err
+	}
+	return localAgentRootSessionID(parent, parentSessionID), localAgentSessionPath(parent), nil
+}
+
+func (r *localActorRegistry) localAgentStatusFromRecord(ctx context.Context, record agentcontrol.AgentRecord) (toolbroker.AgentStatusResult, error) {
+	sessionID := strings.TrimSpace(record.SessionID)
+	var result *toolbroker.AgentStatusResult
+	if sessionID != "" {
+		snapshot, err := r.agentSnapshot(ctx, sessionID)
+		if err != nil {
+			return toolbroker.AgentStatusResult{}, err
+		}
+		result = snapshot
+	}
+	if result == nil {
+		result = &toolbroker.AgentStatusResult{
+			ID:        firstNonEmptyChatValue(record.AgentID, record.SessionID),
+			SessionID: sessionID,
+			Status:    "missing",
+		}
+	}
+	result.ID = firstNonEmptyChatValue(strings.TrimSpace(result.ID), record.AgentID, sessionID)
+	result.SessionID = firstNonEmptyChatValue(strings.TrimSpace(result.SessionID), sessionID)
+	result.ParentSessionID = firstNonEmptyChatValue(strings.TrimSpace(result.ParentSessionID), record.ParentSessionID)
+	result.Path = firstNonEmptyChatValue(strings.TrimSpace(result.Path), record.AgentPath)
+	result.Depth = firstNonZeroChatInt(result.Depth, record.Depth)
+	result.AgentType = firstNonEmptyChatValue(strings.TrimSpace(result.AgentType), record.AgentType)
+	result.TeamID = firstNonEmptyChatValue(strings.TrimSpace(result.TeamID), record.TeamID)
+	result.TeammateID = firstNonEmptyChatValue(strings.TrimSpace(result.TeammateID), record.TeammateID)
+	if record.Closed() {
+		result.Status = string(runtimechat.SessionStopped)
+		if result.SessionState == "" {
+			result.SessionState = string(runtimechat.StateClosed)
+		}
+	}
+	return *result, nil
+}
+
+func (r *localActorRegistry) materializeLocalAgentRegistry(ctx context.Context) error {
+	store := r.localAgentRegistryStore()
+	if store == nil {
+		return nil
+	}
+	records, err := r.projectLocalAgentRecords(ctx)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		record = record.Normalize()
+		if record.AgentID == "" || record.RootSessionID == "" || record.AgentPath == "" {
+			continue
+		}
+		existing, exists, err := r.existingLocalAgentRecord(ctx, store, record)
+		if err != nil {
+			return err
+		}
+		if exists && existing.Closed() && !record.Closed() {
+			continue
+		}
+		if _, err := store.UpsertAgentControlAgent(ctx, record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *localActorRegistry) existingLocalAgentRecord(ctx context.Context, store agentcontrol.AgentRegistryStore, record agentcontrol.AgentRecord) (agentcontrol.AgentRecord, bool, error) {
+	if store == nil {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	if agentID := strings.TrimSpace(record.AgentID); agentID != "" {
+		records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+			AgentID:       agentID,
+			IncludeClosed: true,
+			Limit:         1,
+		})
+		if err != nil {
+			return agentcontrol.AgentRecord{}, false, err
+		}
+		if len(records) > 0 {
+			return records[0].Normalize(), true, nil
+		}
+	}
+	if rootSessionID, agentPath := strings.TrimSpace(record.RootSessionID), strings.TrimSpace(record.AgentPath); rootSessionID != "" && agentPath != "" {
+		records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+			RootSessionID: rootSessionID,
+			AgentPath:     agentPath,
+			IncludeClosed: true,
+			Limit:         1,
+		})
+		if err != nil {
+			return agentcontrol.AgentRecord{}, false, err
+		}
+		if len(records) > 0 {
+			return records[0].Normalize(), true, nil
+		}
+	}
+	return agentcontrol.AgentRecord{}, false, nil
+}
+
+func (r *localActorRegistry) projectLocalAgentRecords(ctx context.Context) ([]agentcontrol.AgentRecord, error) {
+	records := make([]agentcontrol.AgentRecord, 0)
+	sessionRecords, err := r.projectLocalSessionAgentRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+	records = append(records, sessionRecords...)
+	teamRecords, err := r.projectLocalTeamAgentRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+	records = append(records, teamRecords...)
+	return dedupeLocalAgentRecords(records), nil
+}
+
+func (r *localActorRegistry) projectLocalSessionAgentRecords(ctx context.Context) ([]agentcontrol.AgentRecord, error) {
+	sessions, err := r.listLocalAgentSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	records := make([]agentcontrol.AgentRecord, 0, len(sessions)+1)
+	roots := map[string]agentcontrol.AgentRecord{}
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		if changed, applyErr := r.applyTeamTeammateAgentContext(ctx, session); applyErr != nil {
+			return nil, applyErr
+		} else if changed && r.Host != nil && r.Host.SessionStore != nil {
+			if err := r.Host.SessionStore.Update(ctx, session); err != nil {
+				return nil, err
+			}
+		}
+		sessionID := strings.TrimSpace(session.ID)
+		if sessionID == "" {
+			continue
+		}
+		rootID := localAgentRootSessionID(session, sessionID)
+		if rootID == "" {
+			continue
+		}
+		if _, exists := roots[rootID]; !exists {
+			roots[rootID] = agentcontrol.AgentRecord{
+				AgentID:       localRootAgentID(rootID),
+				RootSessionID: rootID,
+				SessionID:     rootID,
+				AgentPath:     "/root",
+				AgentType:     agentcontrol.AgentTypeRoot,
+				Status:        agentcontrol.AgentStatusActive,
+			}
+		}
+		if !isLocalAgentSession(session) {
+			continue
+		}
+		parentSessionID := ""
+		if value, ok := session.GetContext(toolbroker.AgentSessionContextParentSessionID); ok {
+			if text, ok := value.(string); ok {
+				parentSessionID = strings.TrimSpace(text)
+			}
+		}
+		agentID := sessionID
+		record := agentcontrol.AgentRecord{
+			AgentID:         agentID,
+			RootSessionID:   rootID,
+			ParentAgentID:   localRootAgentID(rootID),
+			ParentSessionID: parentSessionID,
+			SessionID:       sessionID,
+			AgentPath:       localAgentSessionPath(session),
+			Depth:           localAgentSessionDepth(session),
+			AgentType:       agentcontrol.AgentTypeChild,
+			Workflow:        agentcontrol.WorkflowSpawnAgent,
+			Status:          agentcontrol.AgentStatusActive,
+		}
+		if parentSessionID != "" && !strings.EqualFold(parentSessionID, rootID) {
+			record.ParentAgentID = parentSessionID
+		}
+		if agentType := agentcontrol.ContextString(session, toolbroker.AgentSessionContextAgentType); agentType != "" {
+			record.AgentType = agentType
+		}
+		if teamID := agentcontrol.ContextString(session, toolbroker.AgentSessionContextTeamID); teamID != "" {
+			record.TeamID = teamID
+			record.Workflow = agentcontrol.WorkflowSpawnTeam
+		}
+		if teammateID := agentcontrol.ContextString(session, toolbroker.AgentSessionContextTeammateID); teammateID != "" {
+			record.TeammateID = teammateID
+			record.Workflow = agentcontrol.WorkflowSpawnTeam
+		}
+		if record.TeamID != "" {
+			record.AgentID = "team:" + record.TeamID + ":" + firstNonEmptyChatValue(record.TeammateID, sessionID)
+			record.ParentAgentID = localRootAgentID(rootID)
+		}
+		if isClosedLocalAgentSession(session) {
+			record.Status = agentcontrol.AgentStatusClosed
+			closedAt := time.Now().UTC()
+			record.ClosedAt = &closedAt
+		}
+		records = append(records, record)
+	}
+	for _, root := range roots {
+		records = append(records, root)
+	}
+	return records, nil
+}
+
+func (r *localActorRegistry) projectLocalTeamAgentRecords(ctx context.Context) ([]agentcontrol.AgentRecord, error) {
+	if r == nil || r.Host == nil || r.Host.TeamStore == nil {
+		return nil, nil
+	}
+	teams, err := r.Host.TeamStore.ListTeams(ctx, team.TeamFilter{})
+	if err != nil {
+		return nil, err
+	}
+	records := make([]agentcontrol.AgentRecord, 0)
+	for _, teamRecord := range teams {
+		teamID := strings.TrimSpace(teamRecord.ID)
+		if teamID == "" {
+			continue
+		}
+		rootSessionID := firstNonEmptyChatValue(strings.TrimSpace(teamRecord.LeadSessionID), strings.TrimSpace(r.Host.baseRuntimeSessionID()))
+		rootSessionIDIsSynthetic := false
+		if rootSessionID == "" {
+			rootSessionID = "team:" + teamID
+			rootSessionIDIsSynthetic = true
+		}
+		rootSessionBinding := rootSessionID
+		if rootSessionIDIsSynthetic {
+			rootSessionBinding = ""
+		}
+		records = append(records, agentcontrol.AgentRecord{
+			AgentID:       localRootAgentID(rootSessionID),
+			RootSessionID: rootSessionID,
+			SessionID:     rootSessionBinding,
+			AgentPath:     "/root",
+			AgentType:     agentcontrol.AgentTypeRoot,
+			Status:        agentcontrol.AgentStatusActive,
+		})
+		teammates, err := r.Host.TeamStore.ListTeammates(ctx, teamID)
+		if err != nil {
+			return nil, err
+		}
+		for _, mate := range teammates {
+			sessionID := strings.TrimSpace(mate.SessionID)
+			if sessionID == "" {
+				continue
+			}
+			path := agentcontrol.TeamTeammatePath(teamID, mate.ID, mate.Name, sessionID)
+			agentID := "team:" + teamID + ":" + firstNonEmptyChatValue(strings.TrimSpace(mate.ID), sessionID)
+			records = append(records, agentcontrol.AgentRecord{
+				AgentID:         agentID,
+				RootSessionID:   rootSessionID,
+				ParentAgentID:   localRootAgentID(rootSessionID),
+				ParentSessionID: rootSessionID,
+				SessionID:       sessionID,
+				AgentPath:       path,
+				Depth:           1,
+				AgentType:       firstNonEmptyChatValue(strings.TrimSpace(mate.Profile), agentcontrol.AgentTypeTeamTeammate),
+				Nickname:        strings.TrimSpace(mate.Name),
+				Workflow:        agentcontrol.WorkflowSpawnTeam,
+				TeamID:          teamID,
+				TeammateID:      strings.TrimSpace(mate.ID),
+				Status:          agentcontrol.AgentStatusActive,
+			})
+		}
+	}
+	return records, nil
+}
+
+func dedupeLocalAgentRecords(records []agentcontrol.AgentRecord) []agentcontrol.AgentRecord {
+	if len(records) == 0 {
+		return nil
+	}
+	byID := make(map[string]agentcontrol.AgentRecord, len(records))
+	ordered := make([]string, 0, len(records))
+	for _, record := range records {
+		record = record.Normalize()
+		if record.AgentID == "" {
+			continue
+		}
+		key := record.AgentID
+		if _, exists := byID[key]; !exists {
+			ordered = append(ordered, key)
+		}
+		if existing, exists := byID[key]; exists {
+			if existing.Workflow == agentcontrol.WorkflowSpawnTeam && record.Workflow != agentcontrol.WorkflowSpawnTeam {
+				continue
+			}
+			if existing.Closed() && !record.Closed() {
+				continue
+			}
+		}
+		byID[key] = record
+	}
+	out := make([]agentcontrol.AgentRecord, 0, len(ordered))
+	for _, key := range ordered {
+		out = append(out, byID[key])
+	}
+	return out
+}
+
 func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, args toolbroker.ListAgentsArgs) (*toolbroker.AgentListResult, error) {
 	baseSessionID := ""
 	if r != nil && r.Host != nil {
 		baseSessionID = r.Host.baseRuntimeSessionID()
 	}
 	parentSessionID = firstNonEmptyChatValue(strings.TrimSpace(args.ParentSessionID), strings.TrimSpace(parentSessionID), baseSessionID)
+	if store := r.localAgentRegistryStore(); store != nil {
+		if err := r.materializeLocalAgentRegistry(ctx); err != nil {
+			return nil, err
+		}
+		result, err := r.listLocalAgentsFromRegistry(ctx, parentSessionID, args, store)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil {
+			return result, nil
+		}
+	}
 	sessions, err := r.listLocalAgentSessions(ctx)
 	if err != nil {
 		return nil, err
@@ -1005,6 +1602,17 @@ func (r *localActorRegistry) Close(ctx context.Context, sessionID string) (*tool
 	result.Status = string(runtimechat.SessionStopped)
 	result.ClosedCount = len(closedIDs)
 	result.ClosedSessionIDs = closedIDs
+	if store := r.localAgentRegistryStore(); store != nil {
+		rootSessionID, targetPath, err := r.closeTargetLocalRegistryRootAndPath(ctx, target, targetSessionID)
+		if err != nil {
+			return nil, err
+		}
+		if rootSessionID != "" && targetPath != "" {
+			if _, err := store.CloseAgentControlAgentSubtree(ctx, rootSessionID, targetPath, time.Now().UTC()); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return result, nil
 }
 
@@ -1012,6 +1620,9 @@ func (r *localActorRegistry) resolveLocalAgentCloseTargets(ctx context.Context, 
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return "", nil, fmt.Errorf("id is required")
+	}
+	if targetSessionID, closeIDs, ok, err := r.resolveLocalAgentCloseTargetsFromRegistry(ctx, target); err != nil || ok {
+		return targetSessionID, closeIDs, err
 	}
 	sessions, err := r.listLocalAgentSessions(ctx)
 	if err != nil {
@@ -1097,9 +1708,129 @@ func (r *localActorRegistry) resolveLocalAgentCloseTargets(ctx context.Context, 
 	return targetSessionID, closeIDs, nil
 }
 
+func (r *localActorRegistry) resolveLocalAgentCloseTargetsFromRegistry(ctx context.Context, target string) (string, []string, bool, error) {
+	if r == nil || r.Host == nil {
+		return "", nil, false, nil
+	}
+	if err := r.materializeLocalAgentRegistry(ctx); err != nil {
+		return "", nil, false, err
+	}
+	record, ok, err := r.resolveLocalAgentRecord(ctx, target, true)
+	if err != nil || !ok {
+		return "", nil, ok, err
+	}
+	store := r.localAgentRegistryStore()
+	if store == nil {
+		return "", nil, false, nil
+	}
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		RootSessionID: record.RootSessionID,
+		PathPrefix:    record.AgentPath,
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return "", nil, true, err
+	}
+	if len(records) == 0 {
+		records = []agentcontrol.AgentRecord{record}
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if strings.EqualFold(records[i].AgentPath, record.AgentPath) {
+			return true
+		}
+		if strings.EqualFold(records[j].AgentPath, record.AgentPath) {
+			return false
+		}
+		return records[i].AgentPath < records[j].AgentPath
+	})
+	closeIDs := make([]string, 0, len(records))
+	seen := map[string]struct{}{}
+	targetPath := strings.TrimRight(strings.TrimSpace(record.AgentPath), "/")
+	for _, item := range records {
+		itemPath := strings.TrimSpace(item.AgentPath)
+		if targetPath != "" && itemPath != targetPath && !strings.HasPrefix(itemPath, targetPath+"/") {
+			continue
+		}
+		sessionID := strings.TrimSpace(item.SessionID)
+		if sessionID == "" {
+			continue
+		}
+		key := strings.ToLower(sessionID)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		closeIDs = append(closeIDs, sessionID)
+	}
+	targetSessionID := firstNonEmptyChatValue(record.SessionID, record.AgentID, target)
+	if len(closeIDs) == 0 && targetSessionID != "" {
+		closeIDs = append(closeIDs, targetSessionID)
+	}
+	return targetSessionID, closeIDs, true, nil
+}
+
+func (r *localActorRegistry) closeTargetLocalRegistryRootAndPath(ctx context.Context, target, targetSessionID string) (string, string, error) {
+	record, ok, err := r.resolveLocalAgentRecord(ctx, firstNonEmptyChatValue(target, targetSessionID), true)
+	if err != nil || !ok {
+		return "", "", err
+	}
+	return record.RootSessionID, record.AgentPath, nil
+}
+
+func (r *localActorRegistry) resolveLocalAgentRecord(ctx context.Context, target string, includeClosed bool) (agentcontrol.AgentRecord, bool, error) {
+	store := r.localAgentRegistryStore()
+	if store == nil {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	filter := agentcontrol.AgentFilter{IncludeClosed: includeClosed, Limit: 1}
+	if strings.HasPrefix(target, "/") {
+		filter.AgentPath = target
+	} else {
+		filter.SessionID = target
+	}
+	records, err := store.ListAgentControlAgents(ctx, filter)
+	if err != nil {
+		return agentcontrol.AgentRecord{}, false, err
+	}
+	if len(records) == 0 && !strings.HasPrefix(target, "/") {
+		records, err = store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+			AgentID:       target,
+			IncludeClosed: includeClosed,
+			Limit:         1,
+		})
+		if err != nil {
+			return agentcontrol.AgentRecord{}, false, err
+		}
+	}
+	if len(records) == 0 {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	return records[0].Normalize(), true, nil
+}
+
 func (r *localActorRegistry) resolveLocalAgentTargetSessionID(ctx context.Context, target string) (string, error) {
 	target = strings.TrimSpace(target)
-	if target == "" || !strings.HasPrefix(target, "/") {
+	if target == "" {
+		return target, nil
+	}
+	if r.localAgentRegistryStore() != nil {
+		if err := r.materializeLocalAgentRegistry(ctx); err != nil {
+			return "", err
+		}
+		if record, ok, err := r.resolveLocalAgentRecord(ctx, target, false); err != nil || ok {
+			if err != nil {
+				return "", err
+			}
+			if sessionID := strings.TrimSpace(record.SessionID); sessionID != "" {
+				return sessionID, nil
+			}
+		}
+	}
+	if !strings.HasPrefix(target, "/") {
 		return target, nil
 	}
 	sessions, err := r.listLocalAgentSessions(ctx)
@@ -1289,6 +2020,28 @@ func (r *localActorRegistry) enforceLocalAgentSpawnLimits(ctx context.Context, p
 		return nil
 	}
 	rootSessionID := localAgentRootSessionID(parentSession, parentSessionID)
+	if store := r.localAgentRegistryStore(); store != nil {
+		if err := r.materializeLocalAgentRegistry(ctx); err != nil {
+			return err
+		}
+		records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+			RootSessionID: rootSessionID,
+		})
+		if err != nil {
+			return err
+		}
+		count := 0
+		for _, record := range records {
+			if record.AgentPath == "/root" || strings.EqualFold(record.AgentType, agentcontrol.AgentTypeRoot) {
+				continue
+			}
+			count++
+		}
+		if count >= limits.MaxThreads {
+			return fmt.Errorf("agent spawn thread limit reached: max_threads=%d active_children=%d", limits.MaxThreads, count)
+		}
+		return nil
+	}
 	count, err := r.countLocalAgentTree(ctx, rootSessionID)
 	if err != nil {
 		return err
@@ -1429,10 +2182,62 @@ func (r *localActorRegistry) applyTeamTeammateAgentContext(ctx context.Context, 
 			if profile := strings.TrimSpace(mate.Profile); profile != "" {
 				changed = setLocalAgentSessionContextIfChanged(session, toolbroker.AgentSessionContextAgentType, profile) || changed
 			}
+			if err := r.upsertTeamTeammateAgentRecord(ctx, record, mate, session, leadSessionID, path); err != nil {
+				return false, err
+			}
 			return changed, nil
 		}
 	}
 	return false, nil
+}
+
+func (r *localActorRegistry) upsertTeamTeammateAgentRecord(ctx context.Context, record team.Team, mate team.Teammate, session *runtimechat.Session, leadSessionID, path string) error {
+	store := r.localAgentRegistryStore()
+	if store == nil || session == nil {
+		return nil
+	}
+	sessionID := strings.TrimSpace(session.ID)
+	teamID := strings.TrimSpace(record.ID)
+	rootSessionID := firstNonEmptyChatValue(strings.TrimSpace(leadSessionID), strings.TrimSpace(record.LeadSessionID))
+	rootSessionIDIsSynthetic := false
+	if rootSessionID == "" {
+		rootSessionID = "team:" + teamID
+		rootSessionIDIsSynthetic = true
+	}
+	if rootSessionID == "" {
+		return nil
+	}
+	rootSessionBinding := rootSessionID
+	if rootSessionIDIsSynthetic {
+		rootSessionBinding = ""
+	}
+	if _, err := store.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:       localRootAgentID(rootSessionID),
+		RootSessionID: rootSessionID,
+		SessionID:     rootSessionBinding,
+		AgentPath:     "/root",
+		AgentType:     agentcontrol.AgentTypeRoot,
+		Status:        agentcontrol.AgentStatusActive,
+	}); err != nil {
+		return err
+	}
+	agentID := "team:" + teamID + ":" + firstNonEmptyChatValue(strings.TrimSpace(mate.ID), sessionID)
+	_, err := store.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:         agentID,
+		RootSessionID:   rootSessionID,
+		ParentAgentID:   localRootAgentID(rootSessionID),
+		ParentSessionID: rootSessionID,
+		SessionID:       sessionID,
+		AgentPath:       path,
+		Depth:           1,
+		AgentType:       firstNonEmptyChatValue(strings.TrimSpace(mate.Profile), agentcontrol.AgentTypeTeamTeammate),
+		Nickname:        strings.TrimSpace(mate.Name),
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		TeamID:          teamID,
+		TeammateID:      strings.TrimSpace(mate.ID),
+		Status:          agentcontrol.AgentStatusActive,
+	})
+	return err
 }
 
 func setLocalAgentSessionContextIfChanged(session *runtimechat.Session, key string, value interface{}) bool {

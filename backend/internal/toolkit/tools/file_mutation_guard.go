@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	maxInlineFileMutationFieldBytes   = 12 * 1024
-	maxInlineFileMutationPayloadBytes = 16 * 1024
+	maxInlineFileMutationFieldBytes   = 64 * 1024
+	maxInlineFileMutationPayloadBytes = 128 * 1024
 )
 
 type inlineMutationSegment struct {

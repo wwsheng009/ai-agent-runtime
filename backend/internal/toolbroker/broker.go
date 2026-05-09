@@ -1522,6 +1522,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}); ok {
 			request.Teammates = allocator.EnsureTeammateSessionIDs(teamID, request.Teammates)
 		}
+		var teammateProjector TeamTeammateAgentProjector
+		if projector, ok := b.TeamDispatcher.(TeamTeammateAgentProjector); ok {
+			teammateProjector = projector
+		}
 		for _, spec := range request.Teammates {
 			state, err := parseTeammateState(spec.State)
 			if err != nil {
@@ -1536,9 +1540,29 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				State:        state,
 				Capabilities: append([]string(nil), spec.Capabilities...),
 			}
+			var previous *team.Teammate
+			if teammateProjector != nil && strings.TrimSpace(teammate.ID) != "" {
+				previous, err = b.TeamStore.GetTeammate(ctx, teammate.ID)
+				if err != nil {
+					return nil, nil, err
+				}
+			}
 			id, err := b.TeamStore.UpsertTeammate(ctx, teammate)
 			if err != nil {
 				return nil, nil, err
+			}
+			if teammateProjector != nil {
+				updated, err := b.TeamStore.GetTeammate(ctx, id)
+				if err != nil {
+					return nil, nil, err
+				}
+				if updated == nil {
+					teammate.ID = id
+					updated = &teammate
+				}
+				if err := teammateProjector.SyncTeamTeammateAgent(ctx, previous, *updated); err != nil {
+					return nil, nil, err
+				}
 			}
 			teammateIDs = append(teammateIDs, id)
 		}

@@ -33,6 +33,7 @@ type RuntimeConfig struct {
 	Catalog        CatalogConfig             `yaml:"catalog" json:"catalog"`
 	Sessions       SessionsConfig            `yaml:"sessions" json:"sessions"`
 	Team           TeamConfig                `yaml:"team" json:"team"`
+	AgentControl   AgentControlConfig        `yaml:"agentControl" json:"agentControl"`
 	Trace          TraceConfig               `yaml:"trace" json:"trace"`
 	Hooks          []runtimehooks.HookConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 	SessionRuntime SessionRuntimeConfig      `yaml:"sessionRuntime" json:"sessionRuntime"`
@@ -146,6 +147,16 @@ type TraceConfig struct {
 type TeamConfig struct {
 	StorePath string `yaml:"storePath" json:"storePath"`
 	StoreDSN  string `yaml:"storeDSN" json:"storeDSN"`
+}
+
+// AgentControlConfig configures cross-workflow AgentControl persistence.
+type AgentControlConfig struct {
+	StorePath        string `yaml:"storePath" json:"storePath"`
+	StoreDSN         string `yaml:"storeDSN" json:"storeDSN"`
+	MailboxStorePath string `yaml:"mailboxStorePath" json:"mailboxStorePath"`
+	MailboxStoreDSN  string `yaml:"mailboxStoreDSN" json:"mailboxStoreDSN"`
+	AgentStorePath   string `yaml:"agentStorePath" json:"agentStorePath"`
+	AgentStoreDSN    string `yaml:"agentStoreDSN" json:"agentStoreDSN"`
 }
 
 // SessionRuntimeConfig configures persistence for session runtime state/events.
@@ -299,6 +310,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			TeamIDLimit: 0,
 		},
 		Team:           TeamConfig{},
+		AgentControl:   AgentControlConfig{},
 		SessionRuntime: SessionRuntimeConfig{},
 		Checkpoint: CheckpointConfig{
 			Enabled:      true,
@@ -606,6 +618,9 @@ func ValidateRuntimeConfig(config *RuntimeConfig) error {
 	if err := ValidateTeamConfig(&config.Team); err != nil {
 		return err
 	}
+	if err := ValidateAgentControlConfig(&config.AgentControl); err != nil {
+		return err
+	}
 	if err := ValidateSessionRuntimeConfig(&config.SessionRuntime); err != nil {
 		return err
 	}
@@ -661,6 +676,24 @@ func ValidateTeamConfig(config *TeamConfig) error {
 	}
 	if strings.TrimSpace(config.StorePath) != "" && strings.TrimSpace(config.StoreDSN) != "" {
 		return errors.New(errors.ErrValidationFailed, "team storePath and storeDSN cannot both be set")
+	}
+	return nil
+}
+
+// ValidateAgentControlConfig validates global AgentControl persistence
+// configuration.
+func ValidateAgentControlConfig(config *AgentControlConfig) error {
+	if config == nil {
+		return nil
+	}
+	if strings.TrimSpace(config.StorePath) != "" && strings.TrimSpace(config.StoreDSN) != "" {
+		return errors.New(errors.ErrValidationFailed, "agentControl storePath and storeDSN cannot both be set")
+	}
+	if strings.TrimSpace(config.MailboxStorePath) != "" && strings.TrimSpace(config.MailboxStoreDSN) != "" {
+		return errors.New(errors.ErrValidationFailed, "agentControl mailboxStorePath and mailboxStoreDSN cannot both be set")
+	}
+	if strings.TrimSpace(config.AgentStorePath) != "" && strings.TrimSpace(config.AgentStoreDSN) != "" {
+		return errors.New(errors.ErrValidationFailed, "agentControl agentStorePath and agentStoreDSN cannot both be set")
 	}
 	return nil
 }

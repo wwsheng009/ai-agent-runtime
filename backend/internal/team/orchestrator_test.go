@@ -3,6 +3,7 @@ package team
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -486,6 +487,77 @@ func TestOrchestratorRunUsesAgentControlMailboxWakeSourceBeforeFallbackTick(t *t
 		t.Fatalf("orchestrator exited before AgentControl mailbox wake task was claimed: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("orchestrator did not claim AgentControl mailbox wake task before fallback tick")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("orchestrator did not stop after context cancellation")
+	}
+}
+
+func TestOrchestratorRunUsesGlobalMailboxWakeBeforeFallbackTick(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent-control-mailbox.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+	store.SetGlobalMailboxWriter(globalStore)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateBusy})
+	require.NoError(t, err)
+	assignee := "mate-b"
+	_, err = store.CreateTask(ctx, Task{
+		TeamID:   teamID,
+		Title:    "already running task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
+	})
+	require.NoError(t, err)
+
+	claimStore := newNotifyingClaimStore(store)
+	orchestrator := NewOrchestrator(claimStore, nil, nil)
+	orchestrator.MailboxWake = globalStore
+	orchestrator.TickInterval = time.Hour
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- orchestrator.Run(runCtx, teamID)
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	_, err = store.CreateTask(ctx, Task{
+		TeamID: teamID,
+		Title:  "global mailbox wake task",
+		Status: TaskStatusReady,
+	})
+	require.NoError(t, err)
+	_, err = store.InsertMail(ctx, MailMessage{
+		TeamID:    teamID,
+		FromAgent: "lead",
+		ToAgent:   "orchestrator",
+		Kind:      "wake",
+		Body:      "ready task added",
+	})
+	require.NoError(t, err)
+
+	select {
+	case <-claimStore.claimed:
+	case err := <-errCh:
+		t.Fatalf("orchestrator exited before global mailbox wake task was claimed: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("orchestrator did not claim global mailbox wake task before fallback tick")
 	}
 
 	cancel()

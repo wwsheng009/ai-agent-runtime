@@ -242,6 +242,10 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	if err := storage.Save(ctx, childSession); err != nil {
 		return nil, err
 	}
+	if err := c.reserveOrRegisterAgentSpawn(ctx, parentSession, parentSessionID, childSession, args, childDepth); err != nil {
+		_ = storage.Delete(ctx, childSession.ID)
+		return nil, err
+	}
 	c.subscribeAgentCompletion(parentSessionID, childSession)
 
 	actor, err := c.handler.getSessionHub().GetOrCreate(sessionID)
@@ -354,11 +358,222 @@ func (c *sessionAgentController) deliverSubagentCompletionMailbox(ctx context.Co
 	return message, err
 }
 
+func (c *sessionAgentController) reserveOrRegisterAgentSpawn(ctx context.Context, parentSession *chat.Session, parentSessionID string, childSession *chat.Session, args toolbroker.SpawnAgentArgs, childDepth int) error {
+	if c == nil || c.handler == nil || childSession == nil {
+		return nil
+	}
+	store := c.handler.getAgentControlAgentStore()
+	if store == nil {
+		return nil
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	childSessionID := strings.TrimSpace(childSession.ID)
+	if childSessionID == "" {
+		return fmt.Errorf("child session id is required")
+	}
+	rootRecord := apiRootAgentRecord(parentSession, parentSessionID)
+	childRecord := apiChildAgentRecord(parentSession, parentSessionID, childSession, args, childDepth)
+	if reserver, ok := store.(agentcontrol.AgentSpawnReservationStore); ok && reserver != nil {
+		_, err := reserver.ReserveAgentControlAgentSpawn(ctx, rootRecord, childRecord, c.agentsConfig().MaxThreads)
+		return err
+	}
+	if _, err := store.UpsertAgentControlAgent(ctx, rootRecord); err != nil {
+		return err
+	}
+	if _, err := store.UpsertAgentControlAgent(ctx, childRecord); err != nil {
+		return err
+	}
+	return nil
+}
+
+func apiRootAgentRecord(parentSession *chat.Session, parentSessionID string) agentcontrol.AgentRecord {
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	rootSessionID := apiAgentRootSessionID(parentSession, parentSessionID)
+	if rootSessionID == "" {
+		rootSessionID = parentSessionID
+	}
+	return agentcontrol.AgentRecord{
+		AgentID:       apiRootAgentID(rootSessionID),
+		RootSessionID: rootSessionID,
+		SessionID:     rootSessionID,
+		AgentPath:     "/root",
+		AgentType:     agentcontrol.AgentTypeRoot,
+		Status:        agentcontrol.AgentStatusActive,
+	}
+}
+
+func apiChildAgentRecord(parentSession *chat.Session, parentSessionID string, childSession *chat.Session, args toolbroker.SpawnAgentArgs, childDepth int) agentcontrol.AgentRecord {
+	childSessionID := ""
+	if childSession != nil {
+		childSessionID = strings.TrimSpace(childSession.ID)
+	}
+	rootSessionID := apiAgentRootSessionID(parentSession, strings.TrimSpace(parentSessionID))
+	agentType := firstNonEmptyString(strings.TrimSpace(args.AgentType), agentcontrol.AgentTypeChild)
+	return agentcontrol.AgentRecord{
+		AgentID:         childSessionID,
+		RootSessionID:   rootSessionID,
+		ParentAgentID:   apiAgentIDForSession(parentSession, strings.TrimSpace(parentSessionID)),
+		ParentSessionID: strings.TrimSpace(parentSessionID),
+		SessionID:       childSessionID,
+		AgentPath:       apiAgentChildPath(parentSession, childSessionID),
+		Depth:           childDepth,
+		AgentType:       agentType,
+		Workflow:        agentcontrol.WorkflowSpawnAgent,
+		Status:          agentcontrol.AgentStatusActive,
+	}
+}
+
+func apiAgentIDForSession(session *chat.Session, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if session == nil || !isAPIAgentSession(session) {
+		rootSessionID := apiAgentRootSessionID(session, sessionID)
+		return apiRootAgentID(rootSessionID)
+	}
+	return sessionID
+}
+
+func apiRootAgentID(rootSessionID string) string {
+	rootSessionID = strings.TrimSpace(rootSessionID)
+	if rootSessionID == "" {
+		return "root"
+	}
+	return "root:" + rootSessionID
+}
+
+func firstNonZeroInt(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func (c *sessionAgentController) listAgentsFromRegistry(ctx context.Context, parentSessionID string, args toolbroker.ListAgentsArgs, store agentcontrol.AgentRegistryStore) (*toolbroker.AgentListResult, error) {
+	if store == nil {
+		return nil, nil
+	}
+	rootSessionID, parentPath, err := c.agentRegistryRootAndPath(ctx, parentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if rootSessionID == "" {
+		return nil, nil
+	}
+	pathPrefix := strings.TrimSpace(args.PathPrefix)
+	if pathPrefix == "" && parentPath != "" && parentPath != "/root" {
+		pathPrefix = parentPath
+	}
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		RootSessionID: rootSessionID,
+		PathPrefix:    pathPrefix,
+		IncludeClosed: args.IncludeClosed,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	agents := make([]toolbroker.AgentStatusResult, 0, len(records))
+	for _, record := range records {
+		record = record.Normalize()
+		if strings.EqualFold(record.AgentType, agentcontrol.AgentTypeRoot) || record.AgentPath == "/root" {
+			continue
+		}
+		status, err := c.agentStatusFromRecord(ctx, record)
+		if err != nil {
+			return nil, err
+		}
+		agents = append(agents, status)
+	}
+	sort.SliceStable(agents, func(i, j int) bool {
+		left := firstNonEmptyString(agents[i].Path, agents[i].SessionID, agents[i].ID)
+		right := firstNonEmptyString(agents[j].Path, agents[j].SessionID, agents[j].ID)
+		return left < right
+	})
+	return &toolbroker.AgentListResult{Agents: agents, Count: len(agents)}, nil
+}
+
+func (c *sessionAgentController) agentRegistryRootAndPath(ctx context.Context, parentSessionID string) (string, string, error) {
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" {
+		return "", "", nil
+	}
+	if strings.HasPrefix(parentSessionID, "/") {
+		if store := c.handler.getAgentControlAgentStore(); store != nil {
+			records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+				AgentPath:     parentSessionID,
+				IncludeClosed: true,
+				Limit:         1,
+			})
+			if err != nil {
+				return "", "", err
+			}
+			if len(records) > 0 {
+				return records[0].RootSessionID, records[0].AgentPath, nil
+			}
+		}
+		return "", parentSessionID, nil
+	}
+	parent, err := c.handler.sessionManager.Get(ctx, parentSessionID)
+	if err != nil {
+		if stderrors.Is(err, chat.ErrSessionNotFound) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return parentSessionID, "", nil
+		}
+		return "", "", err
+	}
+	return apiAgentRootSessionID(parent, parentSessionID), apiAgentSessionPath(parent), nil
+}
+
+func (c *sessionAgentController) agentStatusFromRecord(ctx context.Context, record agentcontrol.AgentRecord) (toolbroker.AgentStatusResult, error) {
+	sessionID := strings.TrimSpace(record.SessionID)
+	var result *toolbroker.AgentStatusResult
+	if sessionID != "" {
+		snapshot, err := c.snapshot(ctx, sessionID)
+		if err != nil {
+			return toolbroker.AgentStatusResult{}, err
+		}
+		result = snapshot
+	}
+	if result == nil {
+		result = &toolbroker.AgentStatusResult{
+			ID:        firstNonEmptyString(record.AgentID, record.SessionID),
+			SessionID: sessionID,
+			Status:    "missing",
+		}
+	}
+	result.ID = firstNonEmptyString(strings.TrimSpace(result.ID), record.AgentID, sessionID)
+	result.SessionID = firstNonEmptyString(strings.TrimSpace(result.SessionID), sessionID)
+	result.ParentSessionID = firstNonEmptyString(strings.TrimSpace(result.ParentSessionID), record.ParentSessionID)
+	result.Path = firstNonEmptyString(strings.TrimSpace(result.Path), record.AgentPath)
+	result.Depth = firstNonZeroInt(result.Depth, record.Depth)
+	result.AgentType = firstNonEmptyString(strings.TrimSpace(result.AgentType), record.AgentType)
+	result.TeamID = firstNonEmptyString(strings.TrimSpace(result.TeamID), record.TeamID)
+	result.TeammateID = firstNonEmptyString(strings.TrimSpace(result.TeammateID), record.TeammateID)
+	if record.Closed() {
+		result.Status = string(chat.SessionStopped)
+		if result.SessionState == "" {
+			result.SessionState = string(chat.StateClosed)
+		}
+	}
+	return *result, nil
+}
+
 func (c *sessionAgentController) List(ctx context.Context, parentSessionID string, args toolbroker.ListAgentsArgs) (*toolbroker.AgentListResult, error) {
 	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
 		return nil, fmt.Errorf("session manager not configured")
 	}
 	parentSessionID = firstNonEmptyString(strings.TrimSpace(args.ParentSessionID), strings.TrimSpace(parentSessionID))
+	if store := c.handler.getAgentControlAgentStore(); store != nil {
+		result, err := c.listAgentsFromRegistry(ctx, parentSessionID, args, store)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil {
+			return result, nil
+		}
+	}
 	sessions, err := c.listSessions(ctx, parentSessionID)
 	if err != nil {
 		return nil, err
@@ -1052,6 +1267,18 @@ func (c *sessionAgentController) Close(ctx context.Context, sessionID string) (*
 		result.ClosedCount = len(closedIDs)
 		result.ClosedSessionIDs = closedIDs
 	}
+	if store := c.handler.getAgentControlAgentStore(); store != nil {
+		rootSessionID, targetPath, err := c.closeTargetRegistryRootAndPath(ctx, target, targetSessionID)
+		if err != nil {
+			return nil, err
+		}
+		if rootSessionID != "" && targetPath != "" {
+			_, err = store.CloseAgentControlAgentSubtree(ctx, rootSessionID, targetPath, time.Now().UTC())
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	return result, nil
 }
 
@@ -1059,6 +1286,9 @@ func (c *sessionAgentController) resolveCloseTargets(ctx context.Context, target
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return "", nil, fmt.Errorf("id is required")
+	}
+	if targetSessionID, closeIDs, ok, err := c.resolveCloseTargetsFromRegistry(ctx, target); err != nil || ok {
+		return targetSessionID, closeIDs, err
 	}
 	sessions, err := c.listSessions(ctx, target)
 	if err != nil {
@@ -1133,9 +1363,85 @@ func (c *sessionAgentController) resolveCloseTargets(ctx context.Context, target
 	return targetSessionID, closeIDs, nil
 }
 
+func (c *sessionAgentController) resolveCloseTargetsFromRegistry(ctx context.Context, target string) (string, []string, bool, error) {
+	if c == nil || c.handler == nil {
+		return "", nil, false, nil
+	}
+	store := c.handler.getAgentControlAgentStore()
+	if store == nil {
+		return "", nil, false, nil
+	}
+	record, ok, err := c.resolveAgentRecord(ctx, target, true)
+	if err != nil || !ok {
+		return "", nil, ok, err
+	}
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		RootSessionID: record.RootSessionID,
+		PathPrefix:    record.AgentPath,
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return "", nil, true, err
+	}
+	if len(records) == 0 {
+		records = []agentcontrol.AgentRecord{record}
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if strings.EqualFold(records[i].AgentPath, record.AgentPath) {
+			return true
+		}
+		if strings.EqualFold(records[j].AgentPath, record.AgentPath) {
+			return false
+		}
+		return records[i].AgentPath < records[j].AgentPath
+	})
+	closeIDs := make([]string, 0, len(records))
+	seen := map[string]struct{}{}
+	for _, item := range records {
+		itemPath := strings.TrimSpace(item.AgentPath)
+		targetPath := strings.TrimRight(strings.TrimSpace(record.AgentPath), "/")
+		if targetPath != "" && itemPath != targetPath && !strings.HasPrefix(itemPath, targetPath+"/") {
+			continue
+		}
+		sessionID := strings.TrimSpace(item.SessionID)
+		if sessionID == "" {
+			continue
+		}
+		if _, exists := seen[strings.ToLower(sessionID)]; exists {
+			continue
+		}
+		seen[strings.ToLower(sessionID)] = struct{}{}
+		closeIDs = append(closeIDs, sessionID)
+	}
+	targetSessionID := firstNonEmptyString(record.SessionID, record.AgentID, target)
+	if len(closeIDs) == 0 && targetSessionID != "" {
+		closeIDs = append(closeIDs, targetSessionID)
+	}
+	return targetSessionID, closeIDs, true, nil
+}
+
+func (c *sessionAgentController) closeTargetRegistryRootAndPath(ctx context.Context, target, targetSessionID string) (string, string, error) {
+	record, ok, err := c.resolveAgentRecord(ctx, firstNonEmptyString(target, targetSessionID), true)
+	if err != nil || !ok {
+		return "", "", err
+	}
+	return record.RootSessionID, record.AgentPath, nil
+}
+
 func (c *sessionAgentController) resolveTargetSessionID(ctx context.Context, target string) (string, error) {
 	target = strings.TrimSpace(target)
-	if target == "" || !strings.HasPrefix(target, "/") {
+	if target == "" {
+		return target, nil
+	}
+	if record, ok, err := c.resolveAgentRecord(ctx, target, false); err != nil || ok {
+		if err != nil {
+			return "", err
+		}
+		if sessionID := strings.TrimSpace(record.SessionID); sessionID != "" {
+			return sessionID, nil
+		}
+	}
+	if !strings.HasPrefix(target, "/") {
 		return target, nil
 	}
 	sessions, err := c.listSessions(ctx, target)
@@ -1153,6 +1459,44 @@ func (c *sessionAgentController) resolveTargetSessionID(ctx context.Context, tar
 		}
 	}
 	return "", fmt.Errorf("unknown agent path: %s", target)
+}
+
+func (c *sessionAgentController) resolveAgentRecord(ctx context.Context, target string, includeClosed bool) (agentcontrol.AgentRecord, bool, error) {
+	if c == nil || c.handler == nil {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	store := c.handler.getAgentControlAgentStore()
+	if store == nil {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	filter := agentcontrol.AgentFilter{IncludeClosed: includeClosed, Limit: 1}
+	if strings.HasPrefix(target, "/") {
+		filter.AgentPath = target
+	} else {
+		filter.SessionID = target
+	}
+	records, err := store.ListAgentControlAgents(ctx, filter)
+	if err != nil {
+		return agentcontrol.AgentRecord{}, false, err
+	}
+	if len(records) == 0 && !strings.HasPrefix(target, "/") {
+		records, err = store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+			AgentID:       target,
+			IncludeClosed: includeClosed,
+			Limit:         1,
+		})
+		if err != nil {
+			return agentcontrol.AgentRecord{}, false, err
+		}
+	}
+	if len(records) == 0 {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	return records[0].Normalize(), true, nil
 }
 
 func (c *sessionAgentController) Resume(ctx context.Context, sessionID string) (*toolbroker.AgentStatusResult, error) {
@@ -1310,6 +1654,26 @@ func (c *sessionAgentController) enforceSpawnLimits(ctx context.Context, parentS
 	if limits.MaxThreads <= 0 {
 		return nil
 	}
+	if store := c.handler.getAgentControlAgentStore(); store != nil {
+		rootSessionID := apiAgentRootSessionID(parentSession, parentSessionID)
+		records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+			RootSessionID: rootSessionID,
+		})
+		if err != nil {
+			return err
+		}
+		count := 0
+		for _, record := range records {
+			if record.AgentPath == "/root" || strings.EqualFold(record.AgentType, agentcontrol.AgentTypeRoot) {
+				continue
+			}
+			count++
+		}
+		if count >= limits.MaxThreads {
+			return fmt.Errorf("agent spawn thread limit reached: max_threads=%d active_children=%d", limits.MaxThreads, count)
+		}
+		return nil
+	}
 	rootSessionID := apiAgentRootSessionID(parentSession, parentSessionID)
 	count, err := c.countAgentTree(ctx, rootSessionID)
 	if err != nil {
@@ -1438,10 +1802,65 @@ func (c *sessionAgentController) applyTeamTeammateAgentContext(ctx context.Conte
 			if profile := strings.TrimSpace(mate.Profile); profile != "" {
 				changed = agentcontrol.SetContextIfChanged(session, toolbroker.AgentSessionContextAgentType, profile) || changed
 			}
+			if err := c.upsertTeamTeammateAgentRecord(ctx, record, mate, session, leadSessionID, path); err != nil {
+				return false, err
+			}
 			return changed, nil
 		}
 	}
 	return false, nil
+}
+
+func (c *sessionAgentController) upsertTeamTeammateAgentRecord(ctx context.Context, record team.Team, mate team.Teammate, session *chat.Session, leadSessionID, path string) error {
+	if c == nil || c.handler == nil || session == nil {
+		return nil
+	}
+	store := c.handler.getAgentControlAgentStore()
+	if store == nil {
+		return nil
+	}
+	sessionID := strings.TrimSpace(session.ID)
+	teamID := strings.TrimSpace(record.ID)
+	rootSessionID := firstNonEmptyString(strings.TrimSpace(leadSessionID), strings.TrimSpace(record.LeadSessionID))
+	rootSessionIDIsSynthetic := false
+	if rootSessionID == "" {
+		rootSessionID = "team:" + teamID
+		rootSessionIDIsSynthetic = true
+	}
+	if rootSessionID == "" {
+		return nil
+	}
+	rootSessionBinding := rootSessionID
+	if rootSessionIDIsSynthetic {
+		rootSessionBinding = ""
+	}
+	if _, err := store.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:       apiRootAgentID(rootSessionID),
+		RootSessionID: rootSessionID,
+		SessionID:     rootSessionBinding,
+		AgentPath:     "/root",
+		AgentType:     agentcontrol.AgentTypeRoot,
+		Status:        agentcontrol.AgentStatusActive,
+	}); err != nil {
+		return err
+	}
+	agentID := "team:" + teamID + ":" + firstNonEmptyString(strings.TrimSpace(mate.ID), sessionID)
+	_, err := store.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:         agentID,
+		RootSessionID:   rootSessionID,
+		ParentAgentID:   apiRootAgentID(rootSessionID),
+		ParentSessionID: rootSessionID,
+		SessionID:       sessionID,
+		AgentPath:       path,
+		Depth:           1,
+		AgentType:       firstNonEmptyString(strings.TrimSpace(mate.Profile), agentcontrol.AgentTypeTeamTeammate),
+		Nickname:        strings.TrimSpace(mate.Name),
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		TeamID:          teamID,
+		TeammateID:      strings.TrimSpace(mate.ID),
+		Status:          agentcontrol.AgentStatusActive,
+	})
+	return err
 }
 
 func (c *sessionAgentController) listAllSessions(ctx context.Context) ([]*chat.Session, error) {

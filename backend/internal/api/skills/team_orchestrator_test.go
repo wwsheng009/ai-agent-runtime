@@ -2,6 +2,7 @@ package skills
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,31 @@ func TestGetTeamOrchestratorEnrichesInjectedOrchestrator(t *testing.T) {
 	require.NotNil(t, orchestrator.LeaseManager)
 	require.NotNil(t, orchestrator.Runner)
 	require.NotNil(t, orchestrator.LeadPlanner)
+}
+
+func TestGetTeamOrchestratorUsesGlobalMailboxWakeStore(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "team.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	globalStore, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent-control-mailbox.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = globalStore.Close() })
+
+	handler := &Handler{
+		teamStore:        store,
+		teamOrchestrator: team.NewOrchestrator(store, nil, nil),
+	}
+	handler.SetAgentControlMailboxStore(globalStore)
+	orchestrator := handler.getTeamOrchestrator()
+	require.NotNil(t, orchestrator)
+	wakeStore, ok := orchestrator.MailboxWake.(*agentcontrol.SQLiteGlobalMailboxRegistryStore)
+	require.True(t, ok)
+	require.Same(t, globalStore, wakeStore)
 }
 
 func TestSessionActorClientTriggerTaskPersistsDispatchEvents(t *testing.T) {

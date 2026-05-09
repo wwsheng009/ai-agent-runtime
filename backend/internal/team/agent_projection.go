@@ -77,8 +77,8 @@ func ActiveTaskForAssignee(ctx context.Context, store Store, teamID, assignee st
 }
 
 // AgentControlTaskRecords projects team tasks into the shared AgentControl
-// task read model. The team store remains the write authority; this helper is a
-// compatibility bridge for registry/debug/control-plane views.
+// task read model for legacy/non-SQLite stores. SQLite stores should read the
+// persisted AgentControl task graph directly.
 func AgentControlTaskRecords(ctx context.Context, store Store, teamID string) ([]agentcontrol.TaskRecord, error) {
 	if store == nil {
 		return nil, nil

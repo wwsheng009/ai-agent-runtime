@@ -840,6 +840,16 @@ func TestLoadLocalChatRuntimeConfig_DefaultsTeamStorePathToSessionRuntimeDir(t *
 	if cfg.Team.StorePath != expected {
 		t.Fatalf("expected team store path %q, got %q", expected, cfg.Team.StorePath)
 	}
+	expectedAgentControl := filepath.Join(session.SessionDir, "runtime", "agent_control.sqlite")
+	if cfg.AgentControl.StorePath != expectedAgentControl {
+		t.Fatalf("expected agent control store path %q, got %q", expectedAgentControl, cfg.AgentControl.StorePath)
+	}
+	if cfg.AgentControl.MailboxStorePath != "" {
+		t.Fatalf("expected agent control mailbox override to be empty, got %q", cfg.AgentControl.MailboxStorePath)
+	}
+	if cfg.AgentControl.AgentStorePath != "" {
+		t.Fatalf("expected agent control agent override to be empty, got %q", cfg.AgentControl.AgentStorePath)
+	}
 }
 
 func TestRestoreAmbientTeamBindingFromRuntimeStore(t *testing.T) {

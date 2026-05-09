@@ -903,6 +903,35 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 	assert.Equal(t, agentcontrol.WorkflowSpawnTeam, records[0].Workflow)
 }
 
+func TestBrokerExecuteSpawnTeamProjectsTeammatesImmediately(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	dispatcher := &teammateProjectorStub{}
+	broker := &Broker{TeamStore: store, TeamDispatcher: dispatcher}
+
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolSpawnTeam, map[string]interface{}{
+		"team_id": "team-registry",
+		"teammates": []interface{}{
+			map[string]interface{}{
+				"id":         "mate-a",
+				"name":       "planner",
+				"profile":    "planner",
+				"session_id": "mate-session",
+			},
+		},
+	})
+	require.NoError(t, err)
+	result, ok := raw.(SpawnTeamResult)
+	require.True(t, ok)
+	require.Equal(t, "team-registry", result.TeamID)
+	require.Equal(t, 1, result.TeammateCount)
+	require.Len(t, dispatcher.calls, 1)
+	require.Nil(t, dispatcher.calls[0].previous)
+	require.Equal(t, "mate-a", dispatcher.calls[0].teammate.ID)
+	require.Equal(t, "team-registry", dispatcher.calls[0].teammate.TeamID)
+	require.Equal(t, "mate-session", dispatcher.calls[0].teammate.SessionID)
+}
+
 func TestBrokerExecuteSpawnTeamAutoStartSynthesizesTeammatesForTasks(t *testing.T) {
 	store := newTeamStore(t)
 	ctx := context.Background()
@@ -1264,4 +1293,25 @@ func (teammateSessionAllocatorStub) EnsureTeammateSessionIDs(teamID string, spec
 		}
 	}
 	return resolved
+}
+
+type teammateProjectorStub struct {
+	calls []teammateProjectorCall
+}
+
+type teammateProjectorCall struct {
+	previous *team.Teammate
+	teammate team.Teammate
+}
+
+func (d *teammateProjectorStub) DispatchTeamMailboxMessage(ctx context.Context, message team.MailMessage) error {
+	return nil
+}
+
+func (d *teammateProjectorStub) SyncTeamTeammateAgent(ctx context.Context, previous *team.Teammate, teammate team.Teammate) error {
+	d.calls = append(d.calls, teammateProjectorCall{
+		previous: previous,
+		teammate: teammate,
+	})
+	return nil
 }

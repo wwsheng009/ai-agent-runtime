@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -11,19 +12,44 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 )
 
-// AgentControlTaskRegistry adapts the team task store to the shared
-// AgentControl task registry read seam. Team remains the write authority.
+// AgentControlTaskRegistry adapts team task operations to the shared
+// AgentControl task graph. SQLite stores use the AgentControl task graph as
+// the primary task substrate.
 type AgentControlTaskRegistry struct {
 	Store Store
 }
 
+type agentControlTaskRecordReaderStore interface {
+	ListAgentControlTaskRecords(ctx context.Context, filter agentcontrol.TaskFilter) ([]agentcontrol.TaskRecord, error)
+}
+
+type agentControlTaskRecordCreateStore interface {
+	CreateAgentControlTaskRecord(ctx context.Context, task Task) (string, error)
+}
+
+type agentControlTaskRecordUpdateStore interface {
+	UpdateAgentControlTaskRecord(ctx context.Context, task Task) error
+}
+
+type agentControlTaskDependencyCreateStore interface {
+	CreateAgentControlTaskDependencyRecord(ctx context.Context, teamID, taskID, dependsOnID string) error
+}
+
+type agentControlTaskReadyStore interface {
+	MarkAgentControlTaskRecordsReady(ctx context.Context, teamID string) (int64, error)
+}
+
 var _ agentcontrol.TaskRegistryReader = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryCreateWriter = AgentControlTaskRegistry{}
+var _ agentcontrol.TaskRegistryUpdateWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskDependencyReader = AgentControlTaskRegistry{}
+var _ agentcontrol.TaskGraphEventReader = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskDependencyCreateWriter = AgentControlTaskRegistry{}
+var _ agentcontrol.TaskRegistryReadyWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryStatusWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryReleaseWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryLeaseRenewWriter = AgentControlTaskRegistry{}
+var _ agentcontrol.TaskRegistryRetryWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryClaimWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryTerminalWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryBlockWriter = AgentControlTaskRegistry{}
@@ -43,6 +69,9 @@ func (r AgentControlTaskRegistry) ListAgentControlTasks(ctx context.Context, fil
 	}
 	if workflow := strings.TrimSpace(filter.Workflow); workflow != "" && workflow != agentcontrol.WorkflowSpawnTeam {
 		return nil, nil
+	}
+	if reader, ok := r.Store.(agentControlTaskRecordReaderStore); ok {
+		return reader.ListAgentControlTaskRecords(ctx, filter)
 	}
 	teamIDs, err := r.registryTeamIDs(ctx, filter.TeamID)
 	if err != nil {
@@ -94,8 +123,9 @@ func (r AgentControlTaskRegistry) ActiveTaskForAssignee(ctx context.Context, tea
 	return selected, nil
 }
 
-// WatchAgentControlTaskWake adapts the team task-signal watcher to the shared
-// AgentControl task wake seam.
+// WatchAgentControlTaskWake adapts task wake notifications to the shared
+// AgentControl task wake seam. Stores with an AgentControl task wake mirror are
+// preferred; team-native task signals remain as a compatibility fallback.
 func (r AgentControlTaskRegistry) WatchAgentControlTaskWake(ctx context.Context, filter agentcontrol.TaskWakeFilter) (<-chan agentcontrol.TaskWakeEvent, func()) {
 	out := make(chan agentcontrol.TaskWakeEvent, 1)
 	if ctx == nil {
@@ -108,11 +138,63 @@ func (r AgentControlTaskRegistry) WatchAgentControlTaskWake(ctx context.Context,
 	if filter.Workflow != "" && filter.Workflow != agentcontrol.WorkflowSpawnTeam {
 		return out, func() {}
 	}
+	if watcher, ok := r.Store.(agentControlWakeRegistryStore); ok {
+		input, unwatch := watcher.WatchAgentControlWake(ctx, agentcontrol.WakeFilter{
+			Workflow: agentcontrol.WorkflowSpawnTeam,
+			Kind:     agentcontrol.WakeKindTask,
+			TeamID:   filter.TeamID,
+		})
+		return r.watchGenericAgentControlTaskWake(ctx, filter, input, unwatch, out)
+	}
+	if watcher, ok := r.Store.(AgentControlTaskWatcherStore); ok {
+		input, unwatch := watcher.WatchAgentControlTaskSignals(ctx, agentcontrol.WorkflowSpawnTeam, filter.TeamID)
+		return r.watchAgentControlTaskWake(ctx, filter, input, unwatch, out)
+	}
 	watcher, ok := r.Store.(TaskWatcherStore)
 	if !ok {
 		return out, func() {}
 	}
 	input, unwatch := watcher.WatchTaskSignals(ctx, filter.TeamID)
+	return r.watchAgentControlTaskWake(ctx, filter, input, unwatch, out)
+}
+
+func (r AgentControlTaskRegistry) watchGenericAgentControlTaskWake(ctx context.Context, filter agentcontrol.TaskWakeFilter, input <-chan agentcontrol.WakeEvent, unwatch func(), out chan agentcontrol.TaskWakeEvent) (<-chan agentcontrol.TaskWakeEvent, func()) {
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case event, ok := <-input:
+				if !ok {
+					return
+				}
+				if event.Kind != agentcontrol.WakeKindTask {
+					continue
+				}
+				wake := taskWakeFromGenericWake(event)
+				if wake.TeamID == "" || (filter.TeamID != "" && !strings.EqualFold(wake.TeamID, filter.TeamID)) {
+					continue
+				}
+				select {
+				case out <- wake:
+				default:
+				}
+			}
+		}
+	}()
+	return out, func() {
+		once.Do(func() {
+			close(done)
+			unwatch()
+		})
+	}
+}
+
+func (r AgentControlTaskRegistry) watchAgentControlTaskWake(ctx context.Context, filter agentcontrol.TaskWakeFilter, input <-chan TaskSignal, unwatch func(), out chan agentcontrol.TaskWakeEvent) (<-chan agentcontrol.TaskWakeEvent, func()) {
 	done := make(chan struct{})
 	var once sync.Once
 	go func() {
@@ -145,8 +227,8 @@ func (r AgentControlTaskRegistry) WatchAgentControlTaskWake(ctx context.Context,
 	}
 }
 
-// LastAgentControlTaskWakeSeq adapts the team task-signal sequence to the
-// shared AgentControl task wake seam.
+// LastAgentControlTaskWakeSeq returns the AgentControl task wake high-water
+// mark, preferring the AgentControl task wake mirror when available.
 func (r AgentControlTaskRegistry) LastAgentControlTaskWakeSeq(ctx context.Context, filter agentcontrol.TaskWakeFilter) (int64, error) {
 	if r.Store == nil {
 		return 0, nil
@@ -154,6 +236,16 @@ func (r AgentControlTaskRegistry) LastAgentControlTaskWakeSeq(ctx context.Contex
 	filter = filter.Normalize()
 	if filter.Workflow != "" && filter.Workflow != agentcontrol.WorkflowSpawnTeam {
 		return 0, nil
+	}
+	if sequencer, ok := r.Store.(agentControlWakeRegistryStore); ok {
+		return sequencer.LastAgentControlWakeSeq(ctx, agentcontrol.WakeFilter{
+			Workflow: agentcontrol.WorkflowSpawnTeam,
+			Kind:     agentcontrol.WakeKindTask,
+			TeamID:   filter.TeamID,
+		})
+	}
+	if sequencer, ok := r.Store.(AgentControlTaskSequenceStore); ok {
+		return sequencer.LastAgentControlTaskSignalSeq(ctx, agentcontrol.WorkflowSpawnTeam, filter.TeamID)
 	}
 	sequencer, ok := r.Store.(TaskSequenceStore)
 	if !ok {
@@ -210,7 +302,15 @@ func (r AgentControlTaskRegistry) CreateAgentControlTask(ctx context.Context, re
 		Summary:      request.Summary,
 		ResultRef:    resultRef,
 	}
-	taskID, err := r.Store.CreateTask(ctx, task)
+	var (
+		taskID string
+		err    error
+	)
+	if writer, ok := r.Store.(agentControlTaskRecordCreateStore); ok {
+		taskID, err = writer.CreateAgentControlTaskRecord(ctx, task)
+	} else {
+		taskID, err = r.Store.CreateTask(ctx, task)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -229,6 +329,115 @@ func (r AgentControlTaskRegistry) CreateAgentControlTask(ctx context.Context, re
 		}
 	}
 	record := AgentControlTaskRecord(*created, mate)
+	return &record, nil
+}
+
+// UpdateAgentControlTask maps the shared AgentControl full task patch writer
+// seam onto the current team task store.
+func (r AgentControlTaskRegistry) UpdateAgentControlTask(ctx context.Context, request agentcontrol.TaskUpdateRequest) (*agentcontrol.TaskRecord, error) {
+	if r.Store == nil {
+		return nil, fmt.Errorf("team store is not configured")
+	}
+	request = request.Normalize()
+	if request.ID == "" {
+		return nil, fmt.Errorf("task id is required")
+	}
+	if request.Workflow != "" && request.Workflow != agentcontrol.WorkflowSpawnTeam {
+		return nil, fmt.Errorf("unsupported task workflow: %s", request.Workflow)
+	}
+	task, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task not found: %s", request.ID)
+	}
+	if request.TeamID != "" && !strings.EqualFold(strings.TrimSpace(task.TeamID), request.TeamID) {
+		return nil, fmt.Errorf("task does not belong to team: %s", request.ID)
+	}
+	if request.ParentTaskID != nil {
+		if *request.ParentTaskID == "" {
+			task.ParentTaskID = nil
+		} else {
+			value := *request.ParentTaskID
+			task.ParentTaskID = &value
+		}
+	}
+	if request.Title != nil {
+		task.Title = *request.Title
+	}
+	if request.Goal != nil {
+		task.Goal = *request.Goal
+	}
+	closedStatusUpdate := false
+	if request.Status != nil && *request.Status != "" {
+		status := TaskStatus(*request.Status)
+		if !isAgentControlWritableTaskStatus(status) {
+			return nil, fmt.Errorf("unsupported task status: %s", *request.Status)
+		}
+		task.Status = status
+		closedStatusUpdate = isAgentControlClosedTaskStatus(status)
+	}
+	if request.Priority != nil {
+		task.Priority = *request.Priority
+	}
+	if request.Assignee != nil {
+		if *request.Assignee == "" {
+			task.Assignee = nil
+		} else {
+			value := *request.Assignee
+			task.Assignee = &value
+		}
+	}
+	if request.Inputs != nil {
+		task.Inputs = *request.Inputs
+	}
+	if request.ReadPaths != nil {
+		task.ReadPaths = *request.ReadPaths
+	}
+	if request.WritePaths != nil {
+		task.WritePaths = *request.WritePaths
+	}
+	if request.Deliverables != nil {
+		task.Deliverables = *request.Deliverables
+	}
+	if request.Summary != nil {
+		task.Summary = *request.Summary
+	}
+	if request.ResultRef != nil {
+		if *request.ResultRef == "" {
+			task.ResultRef = nil
+		} else {
+			value := *request.ResultRef
+			task.ResultRef = &value
+		}
+	}
+	if closedStatusUpdate {
+		task.Assignee = nil
+		task.LeaseUntil = nil
+	}
+	if writer, ok := r.Store.(agentControlTaskRecordUpdateStore); ok {
+		err = writer.UpdateAgentControlTaskRecord(ctx, *task)
+	} else {
+		err = r.Store.UpdateTask(ctx, *task)
+	}
+	if err != nil {
+		return nil, err
+	}
+	updated, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		updated = task
+	}
+	var mate *Teammate
+	if assignee := taskAssigneeID(*updated); assignee != "" {
+		if record, err := r.Store.GetTeammate(ctx, assignee); err == nil && record != nil {
+			mate = record
+		}
+	}
+	record := AgentControlTaskRecord(*updated, mate)
 	return &record, nil
 }
 
@@ -267,7 +476,29 @@ func (r AgentControlTaskRegistry) CreateAgentControlTaskDependency(ctx context.C
 			return fmt.Errorf("dependency task does not belong to team: %s", request.DependsOnID)
 		}
 	}
+	if writer, ok := r.Store.(agentControlTaskDependencyCreateStore); ok {
+		return writer.CreateAgentControlTaskDependencyRecord(ctx, request.TeamID, request.TaskID, request.DependsOnID)
+	}
 	return r.Store.AddTaskDependency(ctx, request.TaskID, request.DependsOnID)
+}
+
+// MarkAgentControlTasksReady promotes dependency-satisfied tasks through the
+// shared AgentControl task registry seam.
+func (r AgentControlTaskRegistry) MarkAgentControlTasksReady(ctx context.Context, request agentcontrol.TaskReadyRequest) (int64, error) {
+	if r.Store == nil {
+		return 0, fmt.Errorf("team store is not configured")
+	}
+	request = request.Normalize()
+	if request.Workflow != "" && request.Workflow != agentcontrol.WorkflowSpawnTeam {
+		return 0, fmt.Errorf("unsupported task workflow: %s", request.Workflow)
+	}
+	if request.TeamID == "" {
+		return 0, fmt.Errorf("team id is required")
+	}
+	if writer, ok := r.Store.(agentControlTaskReadyStore); ok {
+		return writer.MarkAgentControlTaskRecordsReady(ctx, request.TeamID)
+	}
+	return r.Store.MarkReadyTasks(ctx, request.TeamID)
 }
 
 // ListAgentControlTaskDependencies maps the shared AgentControl task graph
@@ -458,10 +689,178 @@ func (r AgentControlTaskRegistry) agentControlDependencyRecordFromTeamEdge(ctx c
 	}, nil
 }
 
+// ListAgentControlTaskGraphEvents maps team task timeline events into the
+// shared AgentControl task graph event read model.
+func (r AgentControlTaskRegistry) ListAgentControlTaskGraphEvents(ctx context.Context, filter agentcontrol.TaskGraphEventFilter) ([]agentcontrol.TaskGraphEvent, error) {
+	if r.Store == nil {
+		return nil, nil
+	}
+	filter = filter.Normalize()
+	if filter.Workflow != "" && filter.Workflow != agentcontrol.WorkflowSpawnTeam {
+		return nil, nil
+	}
+	if reader, ok := r.Store.(TaskGraphEventReaderStore); ok {
+		return r.listAgentControlTaskGraphEvents(ctx, filter, reader)
+	}
+	teamIDs, err := r.registryTeamIDs(ctx, filter.TeamID)
+	if err != nil {
+		return nil, err
+	}
+	useCombinedCursor := strings.TrimSpace(filter.TeamID) == ""
+	events := make([]agentcontrol.TaskGraphEvent, 0)
+	for _, teamID := range teamIDs {
+		afterSeq := filter.AfterSeq
+		if useCombinedCursor {
+			afterSeq = 0
+		}
+		records, err := r.Store.ListTeamEvents(ctx, TeamEventFilter{
+			TeamID:    teamID,
+			AfterSeq:  afterSeq,
+			EventType: filter.EventType,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range records {
+			event, ok := agentControlTaskGraphEventFromTeamEvent(record)
+			if !ok {
+				continue
+			}
+			if useCombinedCursor {
+				event.Seq = agentControlTeamProjectionSeq(teamID, event.TeamSeq, event.CreatedAt)
+			}
+			if event.Seq <= filter.AfterSeq {
+				continue
+			}
+			events = append(events, event)
+		}
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].Seq != events[j].Seq {
+			return events[i].Seq < events[j].Seq
+		}
+		if events[i].CreatedAt.Equal(events[j].CreatedAt) {
+			if strings.EqualFold(events[i].TeamID, events[j].TeamID) {
+				return events[i].TeamSeq < events[j].TeamSeq
+			}
+			return events[i].TeamID < events[j].TeamID
+		}
+		return events[i].CreatedAt.Before(events[j].CreatedAt)
+	})
+	if filter.Limit > 0 && len(events) > filter.Limit {
+		events = events[:filter.Limit]
+	}
+	return events, nil
+}
+
+func (r AgentControlTaskRegistry) listAgentControlTaskGraphEvents(ctx context.Context, filter agentcontrol.TaskGraphEventFilter, reader TaskGraphEventReaderStore) ([]agentcontrol.TaskGraphEvent, error) {
+	records, err := reader.ListTaskGraphEvents(ctx, TaskGraphEventFilter{
+		Workflow:  agentcontrol.WorkflowSpawnTeam,
+		TeamID:    filter.TeamID,
+		EventType: filter.EventType,
+		AfterSeq:  filter.AfterSeq,
+		Limit:     filter.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	events := make([]agentcontrol.TaskGraphEvent, 0, len(records))
+	for _, record := range records {
+		event, ok := agentControlTaskGraphEventFromTaskGraphEvent(record)
+		if !ok {
+			continue
+		}
+		events = append(events, event)
+	}
+	if filter.Limit > 0 && len(events) > filter.Limit {
+		events = events[:filter.Limit]
+	}
+	return events, nil
+}
+
+func agentControlTaskGraphEventFromTaskGraphEvent(record TaskGraphEvent) (agentcontrol.TaskGraphEvent, bool) {
+	eventType := strings.TrimSpace(record.Type)
+	if !strings.HasPrefix(eventType, "task.") {
+		return agentcontrol.TaskGraphEvent{}, false
+	}
+	workflow := strings.TrimSpace(record.Workflow)
+	if workflow == "" {
+		workflow = agentcontrol.WorkflowSpawnTeam
+	}
+	payload := cloneStringInterfaceMap(record.Payload)
+	event := agentcontrol.TaskGraphEvent{
+		Seq:          record.Seq,
+		TeamSeq:      record.TeamSeq,
+		Workflow:     workflow,
+		TeamID:       strings.TrimSpace(record.TeamID),
+		EventType:    eventType,
+		TaskID:       metadataString(payload, "task_id"),
+		DependsOnID:  metadataString(payload, "depends_on_id"),
+		DependencyID: metadataString(payload, "dependency_id"),
+		Payload:      payload,
+		CreatedAt:    record.CreatedAt,
+	}.Normalize()
+	return event, true
+}
+
+func agentControlTaskGraphEventFromTeamEvent(record TeamEventRecord) (agentcontrol.TaskGraphEvent, bool) {
+	eventType := strings.TrimSpace(record.Type)
+	if !strings.HasPrefix(eventType, "task.") {
+		return agentcontrol.TaskGraphEvent{}, false
+	}
+	payload := cloneStringInterfaceMap(record.Payload)
+	event := agentcontrol.TaskGraphEvent{
+		Seq:          record.Seq,
+		TeamSeq:      record.Seq,
+		Workflow:     agentcontrol.WorkflowSpawnTeam,
+		TeamID:       strings.TrimSpace(record.TeamID),
+		EventType:    eventType,
+		TaskID:       metadataString(payload, "task_id"),
+		DependsOnID:  metadataString(payload, "depends_on_id"),
+		DependencyID: metadataString(payload, "dependency_id"),
+		Payload:      payload,
+		CreatedAt:    record.Timestamp,
+	}.Normalize()
+	return event, true
+}
+
+func cloneStringInterfaceMap(input map[string]interface{}) map[string]interface{} {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func metadataString(metadata map[string]interface{}, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
 func taskSignalToAgentControlWake(signal TaskSignal) agentcontrol.TaskWakeEvent {
+	workflow := strings.TrimSpace(signal.Workflow)
+	if workflow == "" {
+		workflow = agentcontrol.WorkflowSpawnTeam
+	}
 	return agentcontrol.TaskWakeEvent{
 		Seq:       signal.Seq,
-		Workflow:  agentcontrol.WorkflowSpawnTeam,
+		Workflow:  workflow,
 		TeamID:    strings.TrimSpace(signal.TeamID),
 		TaskID:    strings.TrimSpace(signal.TaskID),
 		Kind:      strings.TrimSpace(signal.Kind),
@@ -620,19 +1019,27 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTaskTerminal(ctx context.Con
 
 func (r AgentControlTaskRegistry) updateSQLiteTerminalTask(ctx context.Context, store *SQLiteStore, request agentcontrol.TaskTerminalUpdateRequest, status TaskStatus, resultRef *string) error {
 	var err error
+	changed := false
 	for attempt := 0; attempt < 8; attempt++ {
 		err = store.WithImmediateTx(ctx, func(tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE team_tasks
-				SET status = ?, summary = ?, result_ref = ?, assignee = NULL, lease_until = NULL, updated_at = ?
-				WHERE id = ?
-			`, string(status), request.Summary, nullableString(resultRef), formatTime(time.Now().UTC()), request.ID); err != nil {
-				return fmt.Errorf("update task: %w", err)
+			now := time.Now().UTC()
+			result, err := tx.ExecContext(ctx, `
+				UPDATE agent_control_task_records
+				SET status = ?, summary = ?, result_ref = ?, assignee = NULL, session_id = NULL, agent_path = NULL, lease_until = NULL, updated_at = ?
+				WHERE workflow = ? AND task_id = ?
+			`, string(status), request.Summary, nullableString(resultRef), formatTime(now), agentcontrol.WorkflowSpawnTeam, request.ID)
+			if err != nil {
+				return fmt.Errorf("update agent control task: %w", err)
 			}
+			affected, _ := result.RowsAffected()
+			if affected == 0 {
+				return nil
+			}
+			changed = true
 			if request.TeammateID != "" && !request.SkipStateUpdate {
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE teammates SET state = ?, updated_at = ? WHERE id = ?
-				`, string(TeammateStateIdle), formatTime(time.Now().UTC()), request.TeammateID); err != nil {
+				`, string(TeammateStateIdle), formatTime(now), request.TeammateID); err != nil {
 					return fmt.Errorf("update teammate state: %w", err)
 				}
 			}
@@ -650,7 +1057,10 @@ func (r AgentControlTaskRegistry) updateSQLiteTerminalTask(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	return store.appendTaskSignalForTask(ctx, request.ID, TaskSignalTaskReleased, status)
+	if changed {
+		return store.appendTaskSignalForTask(ctx, request.ID, TaskSignalTaskReleased, status)
+	}
+	return nil
 }
 
 // BlockAgentControlTask maps a shared AgentControl blocked task transition
@@ -693,9 +1103,7 @@ func (r AgentControlTaskRegistry) BlockAgentControlTask(ctx context.Context, req
 }
 
 // UpdateAgentControlTaskStatus maps the shared AgentControl task status writer
-// seam onto the current team task store. This is a migration bridge; team
-// remains the backing store while callers can depend on an AgentControl-shaped
-// write surface.
+// seam onto the current team task graph substrate.
 func (r AgentControlTaskRegistry) UpdateAgentControlTaskStatus(ctx context.Context, request agentcontrol.TaskStatusUpdateRequest) (*agentcontrol.TaskRecord, error) {
 	if r.Store == nil {
 		return nil, fmt.Errorf("team store is not configured")
@@ -714,8 +1122,19 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTaskStatus(ctx context.Conte
 	if !isAgentControlWritableTaskStatus(status) {
 		return nil, fmt.Errorf("unsupported task status: %s", request.Status)
 	}
-	if err := r.Store.UpdateTaskStatus(ctx, request.ID, status, request.Summary); err != nil {
-		return nil, err
+	if isAgentControlClosedTaskStatus(status) {
+		if err := r.Store.ReleaseTask(ctx, request.ID, status); err != nil {
+			return nil, err
+		}
+		if request.Summary != "" {
+			if err := r.Store.UpdateTaskStatus(ctx, request.ID, status, request.Summary); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		if err := r.Store.UpdateTaskStatus(ctx, request.ID, status, request.Summary); err != nil {
+			return nil, err
+		}
 	}
 	task, err := r.Store.GetTask(ctx, request.ID)
 	if err != nil {
@@ -815,6 +1234,54 @@ func (r AgentControlTaskRegistry) RenewAgentControlTaskLease(ctx context.Context
 	return &record, nil
 }
 
+// RetryAgentControlTask maps a retry/reclaim transition onto the current team
+// task store while preserving retry count, lease reset, and optional summary.
+func (r AgentControlTaskRegistry) RetryAgentControlTask(ctx context.Context, request agentcontrol.TaskRetryRequest) (*agentcontrol.TaskRecord, error) {
+	if r.Store == nil {
+		return nil, fmt.Errorf("team store is not configured")
+	}
+	request = request.Normalize()
+	if request.ID == "" {
+		return nil, fmt.Errorf("task id is required")
+	}
+	if request.Workflow != "" && request.Workflow != agentcontrol.WorkflowSpawnTeam {
+		return nil, fmt.Errorf("unsupported task workflow: %s", request.Workflow)
+	}
+	if request.Status == "" {
+		return nil, fmt.Errorf("task status is required")
+	}
+	status := TaskStatus(request.Status)
+	if !isAgentControlWritableTaskStatus(status) {
+		return nil, fmt.Errorf("unsupported task status: %s", request.Status)
+	}
+	if err := r.Store.IncrementTaskRetry(ctx, request.ID); err != nil {
+		return nil, err
+	}
+	if err := r.Store.ReleaseTask(ctx, request.ID, status); err != nil {
+		return nil, err
+	}
+	if request.Summary != "" {
+		if err := r.Store.UpdateTaskStatus(ctx, request.ID, status, request.Summary); err != nil {
+			return nil, err
+		}
+	}
+	task, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task not found after retry: %s", request.ID)
+	}
+	var mate *Teammate
+	if assignee := taskAssigneeID(*task); assignee != "" {
+		if record, err := r.Store.GetTeammate(ctx, assignee); err == nil && record != nil {
+			mate = record
+		}
+	}
+	record := AgentControlTaskRecord(*task, mate)
+	return &record, nil
+}
+
 func (r AgentControlTaskRegistry) registryTeamIDs(ctx context.Context, teamID string) ([]string, error) {
 	teamID = strings.TrimSpace(teamID)
 	if teamID != "" {
@@ -873,6 +1340,15 @@ func isAgentControlWritableTaskStatus(status TaskStatus) bool {
 func isAgentControlTerminalTaskStatus(status TaskStatus) bool {
 	switch status {
 	case TaskStatusDone, TaskStatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func isAgentControlClosedTaskStatus(status TaskStatus) bool {
+	switch status {
+	case TaskStatusDone, TaskStatusFailed, TaskStatusCancelled:
 		return true
 	default:
 		return false

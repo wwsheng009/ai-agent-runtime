@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -361,6 +362,191 @@ func TestCreateTaskUsesAgentControlTaskCreateWriter(t *testing.T) {
 	require.Equal(t, []string{"summary"}, created.Deliverables)
 }
 
+func TestUpdateTaskUsesAgentControlTaskUpdateWriter(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-update-agentcontrol-writer?mode=memory&cache=shared")
+
+	teamID, err := store.CreateTeam(ctx, team.Team{})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		TeamID:   teamID,
+		Title:    "old title",
+		Status:   team.TaskStatusPending,
+		Priority: 1,
+	})
+	require.NoError(t, err)
+
+	body := `{"title":"patched through api","status":"ready","priority":9,"assignee":"mate-1","read_paths":["docs"],"summary":"updated through agentcontrol"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/teams/"+teamID+"/tasks/"+taskID, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Task team.Task `json:"task"`
+	}
+	require.NoError(t, decodeJSONResponse(rec, &resp))
+	require.Equal(t, "patched through api", resp.Task.Title)
+	require.Equal(t, team.TaskStatusReady, resp.Task.Status)
+	require.Equal(t, 9, resp.Task.Priority)
+	require.NotNil(t, resp.Task.Assignee)
+	require.Equal(t, "mate-1", *resp.Task.Assignee)
+	require.Equal(t, []string{"docs"}, resp.Task.ReadPaths)
+	require.Equal(t, "updated through agentcontrol", resp.Task.Summary)
+
+	records, err := team.NewAgentControlTaskRegistry(store).ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+		Status:   []string{string(team.TaskStatusReady)},
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, taskID, records[0].ID)
+	require.Equal(t, "patched through api", records[0].Title)
+	require.Equal(t, "updated through agentcontrol", records[0].Summary)
+}
+
+func TestUpdateAgentControlTaskEndpointUsesTaskUpdateWriter(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:agentcontrol-update-endpoint?mode=memory&cache=shared")
+
+	teamID, err := store.CreateTeam(ctx, team.Team{})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "old control title",
+		Status: team.TaskStatusPending,
+	})
+	require.NoError(t, err)
+
+	body := `{"workflow":"spawn_team","team_id":"` + teamID + `","title":"patched control title","status":"ready","summary":"patched through control endpoint"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+taskID, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Task agentcontrol.TaskRecord `json:"task"`
+	}
+	require.NoError(t, decodeJSONResponse(rec, &resp))
+	require.Equal(t, taskID, resp.Task.ID)
+	require.Equal(t, "ready", resp.Task.Status)
+	require.Equal(t, "patched control title", resp.Task.Title)
+	require.Equal(t, "patched through control endpoint", resp.Task.Summary)
+
+	updated, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.Equal(t, team.TaskStatusReady, updated.Status)
+	require.Equal(t, "patched control title", updated.Title)
+	require.Equal(t, "patched through control endpoint", updated.Summary)
+}
+
+func TestUpdateTaskTerminalStatusesReleaseLease(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:task-terminal-update-release?mode=memory&cache=shared")
+
+	teamID, err := store.CreateTeam(ctx, team.Team{})
+	require.NoError(t, err)
+	assignee := "mate-1"
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	legacyTaskID, err := store.CreateTask(ctx, team.Task{
+		TeamID:     teamID,
+		Title:      "legacy terminal update",
+		Status:     team.TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+	controlTaskID, err := store.CreateTask(ctx, team.Task{
+		TeamID:     teamID,
+		Title:      "control terminal update",
+		Status:     team.TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/teams/"+teamID+"/tasks/"+legacyTaskID, strings.NewReader(`{"status":"done","assignee":"mate-2","summary":"legacy done"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	legacyTask, err := store.GetTask(ctx, legacyTaskID)
+	require.NoError(t, err)
+	require.NotNil(t, legacyTask)
+	require.Equal(t, team.TaskStatusDone, legacyTask.Status)
+	require.Equal(t, "legacy done", legacyTask.Summary)
+	require.Nil(t, legacyTask.Assignee)
+	require.Nil(t, legacyTask.LeaseUntil)
+
+	req = httptest.NewRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+controlTaskID, strings.NewReader(`{"workflow":"spawn_team","team_id":"`+teamID+`","status":"failed","assignee":"mate-2","summary":"control failed"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Task agentcontrol.TaskRecord `json:"task"`
+	}
+	require.NoError(t, decodeJSONResponse(rec, &resp))
+	require.Equal(t, controlTaskID, resp.Task.ID)
+	require.Equal(t, "failed", resp.Task.Status)
+	require.Empty(t, resp.Task.Assignee)
+
+	controlTask, err := store.GetTask(ctx, controlTaskID)
+	require.NoError(t, err)
+	require.NotNil(t, controlTask)
+	require.Equal(t, team.TaskStatusFailed, controlTask.Status)
+	require.Equal(t, "control failed", controlTask.Summary)
+	require.Nil(t, controlTask.Assignee)
+	require.Nil(t, controlTask.LeaseUntil)
+}
+
+func TestMarkReadyTasksUsesAgentControlReadyWriter(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-mark-ready-agentcontrol-writer?mode=memory&cache=shared")
+
+	teamID, err := store.CreateTeam(ctx, team.Team{})
+	require.NoError(t, err)
+	dependencyID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "done dependency",
+		Status: team.TaskStatusDone,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "pending dependent",
+		Status: team.TaskStatusPending,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.AddTaskDependency(ctx, taskID, dependencyID))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/ready", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		TeamID string `json:"team_id"`
+		Count  int64  `json:"count"`
+	}
+	require.NoError(t, decodeJSONResponse(rec, &resp))
+	require.Equal(t, teamID, resp.TeamID)
+	require.EqualValues(t, 1, resp.Count)
+
+	records, err := team.NewAgentControlTaskRegistry(store).ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+		Status:   []string{string(team.TaskStatusReady)},
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, taskID, records[0].ID)
+}
+
 func TestReleaseTaskLeaseUsesAgentControlTaskReleaseWriter(t *testing.T) {
 	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-release-agentcontrol-writer?mode=memory&cache=shared")
 
@@ -402,6 +588,121 @@ func TestReleaseTaskLeaseUsesAgentControlTaskReleaseWriter(t *testing.T) {
 	require.Nil(t, updated.LeaseUntil)
 }
 
+func TestReleaseTaskCancelledPersistsAgentControlLifecycleMailbox(t *testing.T) {
+	ctx := context.Background()
+	store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:team-release-cancel-lifecycle?mode=memory&cache=shared"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	eventStore := chat.NewInMemoryRuntimeStore(64)
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetTeamStore(store)
+	handler.sessionEventStore = eventStore
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	teamID, err := store.CreateTeam(ctx, team.Team{ID: "team-release-cancel"})
+	require.NoError(t, err)
+	for _, mate := range []team.Teammate{
+		{ID: "mate-legacy", TeamID: teamID, SessionID: "legacy-session", State: team.TeammateStateBusy},
+		{ID: "mate-control", TeamID: teamID, SessionID: "control-session", State: team.TeammateStateBusy},
+		{ID: "mate-status", TeamID: teamID, SessionID: "status-session", State: team.TeammateStateBusy},
+		{ID: "mate-update", TeamID: teamID, SessionID: "update-session", State: team.TeammateStateBusy},
+		{ID: "mate-control-update", TeamID: teamID, SessionID: "control-update-session", State: team.TeammateStateBusy},
+	} {
+		_, err = store.UpsertTeammate(ctx, mate)
+		require.NoError(t, err)
+	}
+	legacyAssignee := "mate-legacy"
+	controlAssignee := "mate-control"
+	statusAssignee := "mate-status"
+	updateAssignee := "mate-update"
+	controlUpdateAssignee := "mate-control-update"
+	legacyTaskID, err := store.CreateTask(ctx, team.Task{
+		ID:       "task-legacy-cancel",
+		TeamID:   teamID,
+		Title:    "legacy cancel",
+		Status:   team.TaskStatusRunning,
+		Assignee: &legacyAssignee,
+	})
+	require.NoError(t, err)
+	controlTaskID, err := store.CreateTask(ctx, team.Task{
+		ID:       "task-control-cancel",
+		TeamID:   teamID,
+		Title:    "control cancel",
+		Status:   team.TaskStatusRunning,
+		Assignee: &controlAssignee,
+	})
+	require.NoError(t, err)
+	statusTaskID, err := store.CreateTask(ctx, team.Task{
+		ID:       "task-status-cancel",
+		TeamID:   teamID,
+		Title:    "status cancel",
+		Status:   team.TaskStatusRunning,
+		Assignee: &statusAssignee,
+	})
+	require.NoError(t, err)
+	updateTaskID, err := store.CreateTask(ctx, team.Task{
+		ID:       "task-update-cancel",
+		TeamID:   teamID,
+		Title:    "update cancel",
+		Status:   team.TaskStatusRunning,
+		Assignee: &updateAssignee,
+	})
+	require.NoError(t, err)
+	controlUpdateTaskID, err := store.CreateTask(ctx, team.Task{
+		ID:       "task-control-update-cancel",
+		TeamID:   teamID,
+		Title:    "control update cancel",
+		Status:   team.TaskStatusRunning,
+		Assignee: &controlUpdateAssignee,
+	})
+	require.NoError(t, err)
+
+	legacyReq := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+legacyTaskID+"/release", strings.NewReader(`{"status":"cancelled","summary":"legacy cancelled","teammate_id":"mate-legacy"}`))
+	legacyReq.Header.Set("Content-Type", "application/json")
+	legacyRec := httptest.NewRecorder()
+	router.ServeHTTP(legacyRec, legacyReq)
+	require.Equal(t, http.StatusOK, legacyRec.Code)
+
+	controlReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/"+controlTaskID+"/release", strings.NewReader(`{"workflow":"spawn_team","status":"cancelled","summary":"control cancelled","teammate_id":"mate-control"}`))
+	controlReq.Header.Set("Content-Type", "application/json")
+	controlRec := httptest.NewRecorder()
+	router.ServeHTTP(controlRec, controlReq)
+	require.Equal(t, http.StatusOK, controlRec.Code)
+
+	statusReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/"+statusTaskID+"/status", strings.NewReader(`{"workflow":"spawn_team","status":"cancelled","summary":"status cancelled"}`))
+	statusReq.Header.Set("Content-Type", "application/json")
+	statusRec := httptest.NewRecorder()
+	router.ServeHTTP(statusRec, statusReq)
+	require.Equal(t, http.StatusOK, statusRec.Code)
+
+	updateReq := httptest.NewRequest(http.MethodPatch, "/api/runtime/teams/"+teamID+"/tasks/"+updateTaskID, strings.NewReader(`{"status":"cancelled","summary":"update cancelled"}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRec := httptest.NewRecorder()
+	router.ServeHTTP(updateRec, updateReq)
+	require.Equal(t, http.StatusOK, updateRec.Code)
+
+	controlUpdateReq := httptest.NewRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+controlUpdateTaskID, strings.NewReader(`{"workflow":"spawn_team","team_id":"team-release-cancel","status":"cancelled","summary":"control update cancelled"}`))
+	controlUpdateReq.Header.Set("Content-Type", "application/json")
+	controlUpdateRec := httptest.NewRecorder()
+	router.ServeHTTP(controlUpdateRec, controlUpdateReq)
+	require.Equal(t, http.StatusOK, controlUpdateRec.Code)
+
+	events, err := store.ListTeamEvents(ctx, team.TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	require.True(t, hasCancelledTaskEvent(events, legacyTaskID, "mate-legacy"))
+	require.True(t, hasCancelledTaskEvent(events, controlTaskID, "mate-control"))
+	require.True(t, hasCancelledTaskEvent(events, statusTaskID, "mate-status"))
+	require.True(t, hasCancelledTaskEvent(events, updateTaskID, "mate-update"))
+	require.True(t, hasCancelledTaskEvent(events, controlUpdateTaskID, "mate-control-update"))
+	require.True(t, hasCancelledMailbox(t, eventStore, "legacy-session", legacyTaskID, "mate-legacy"))
+	require.True(t, hasCancelledMailbox(t, eventStore, "control-session", controlTaskID, "mate-control"))
+	require.True(t, hasCancelledMailbox(t, eventStore, "status-session", statusTaskID, "mate-status"))
+	require.True(t, hasCancelledMailbox(t, eventStore, "update-session", updateTaskID, "mate-update"))
+	require.True(t, hasCancelledMailbox(t, eventStore, "control-update-session", controlUpdateTaskID, "mate-control-update"))
+}
+
 func TestRenewTaskLeaseUsesAgentControlTaskLeaseRenewWriter(t *testing.T) {
 	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-renew-agentcontrol-writer?mode=memory&cache=shared")
 
@@ -441,6 +742,50 @@ func TestRenewTaskLeaseUsesAgentControlTaskLeaseRenewWriter(t *testing.T) {
 	require.NotNil(t, updated)
 	require.NotNil(t, updated.LeaseUntil)
 	require.WithinDuration(t, renewedLease, *updated.LeaseUntil, time.Second)
+}
+
+func TestRetryTaskUsesAgentControlTaskRetryWriter(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-retry-agentcontrol-writer?mode=memory&cache=shared")
+
+	teamID, err := store.CreateTeam(ctx, team.Team{})
+	require.NoError(t, err)
+	assignee := "mate-1"
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		TeamID:     teamID,
+		Title:      "retry through api",
+		Status:     team.TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks/"+taskID+"/retry", strings.NewReader(`{"status":"ready","summary":"retry through agentcontrol","teammate_id":"mate-1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Task team.Task `json:"task"`
+	}
+	require.NoError(t, decodeJSONResponse(rec, &resp))
+	require.Equal(t, team.TaskStatusReady, resp.Task.Status)
+	require.Equal(t, "retry through agentcontrol", resp.Task.Summary)
+	require.Nil(t, resp.Task.Assignee)
+	require.Nil(t, resp.Task.LeaseUntil)
+	require.Equal(t, 1, resp.Task.RetryCount)
+
+	records, err := team.NewAgentControlTaskRegistry(store).ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+		Status:   []string{string(team.TaskStatusReady)},
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, taskID, records[0].ID)
+	require.Equal(t, "retry through agentcontrol", records[0].Summary)
 }
 
 func TestListAgentControlTasksHandlerProjectsTeamTasks(t *testing.T) {
@@ -584,6 +929,37 @@ func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	require.False(t, listDependencyPayload.Edges[0].CreatedAt.IsZero())
 	require.Equal(t, 1, listDependencyPayload.Count)
 
+	graphEventsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/tasks/events?workflow=spawn_team&team_id=team-1&event_type=task.dependency.created&after_seq=0&limit=5", nil)
+	graphEventsRec := httptest.NewRecorder()
+	router.ServeHTTP(graphEventsRec, graphEventsReq)
+	require.Equal(t, http.StatusOK, graphEventsRec.Code)
+	var graphEventsPayload struct {
+		Events []struct {
+			Seq          int64     `json:"seq"`
+			TeamSeq      int64     `json:"team_seq"`
+			Workflow     string    `json:"workflow"`
+			TeamID       string    `json:"team_id"`
+			EventType    string    `json:"event_type"`
+			TaskID       string    `json:"task_id"`
+			DependsOnID  string    `json:"depends_on_id"`
+			DependencyID string    `json:"dependency_id"`
+			CreatedAt    time.Time `json:"created_at"`
+		} `json:"events"`
+		Count int `json:"count"`
+	}
+	require.NoError(t, decodeJSONResponse(graphEventsRec, &graphEventsPayload))
+	require.Equal(t, 1, graphEventsPayload.Count)
+	require.Len(t, graphEventsPayload.Events, 1)
+	require.Equal(t, int64(1), graphEventsPayload.Events[0].Seq)
+	require.Equal(t, int64(1), graphEventsPayload.Events[0].TeamSeq)
+	require.Equal(t, "spawn_team", graphEventsPayload.Events[0].Workflow)
+	require.Equal(t, teamID, graphEventsPayload.Events[0].TeamID)
+	require.Equal(t, team.TaskDependencyCreatedEvent, graphEventsPayload.Events[0].EventType)
+	require.Equal(t, "task-control", graphEventsPayload.Events[0].TaskID)
+	require.Equal(t, "task-dependency", graphEventsPayload.Events[0].DependsOnID)
+	require.NotEmpty(t, graphEventsPayload.Events[0].DependencyID)
+	require.False(t, graphEventsPayload.Events[0].CreatedAt.IsZero())
+
 	claimBody := `{"workflow":"spawn_team","team_id":"team-1","assignee":"mate-1","expected_version":1,"duration_sec":600,"use_path_claims":true,"write_paths":["docs/plan.md"],"workspace_root":"workspace"}`
 	claimReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks/task-control/claim", strings.NewReader(claimBody))
 	claimReq.Header.Set("Content-Type", "application/json")
@@ -704,6 +1080,33 @@ func newTeamTaskOutcomeTestRouter(t *testing.T, dsn string) (context.Context, te
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 	return context.Background(), store, router
+}
+
+func hasCancelledTaskEvent(events []team.TeamEventRecord, taskID string, assignee string) bool {
+	for _, event := range events {
+		if event.Type == "task.cancelled" &&
+			teamEventPayloadString(event.Payload["task_id"]) == taskID &&
+			teamEventPayloadString(event.Payload["assignee"]) == assignee &&
+			teamEventPayloadString(event.Payload["status"]) == string(team.TaskStatusCancelled) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCancelledMailbox(t *testing.T, eventStore *chat.InMemoryRuntimeStore, sessionID string, taskID string, assignee string) bool {
+	t.Helper()
+	messages, err := eventStore.ListAgentControlMailbox(context.Background(), sessionID, 0, 0)
+	require.NoError(t, err)
+	for _, message := range messages {
+		if message.Kind == team.TaskLifecycleMailboxKind &&
+			teamEventPayloadString(message.Metadata["event_type"]) == "task.cancelled" &&
+			teamEventPayloadString(message.Metadata["task_id"]) == taskID &&
+			teamEventPayloadString(message.Metadata["assignee"]) == assignee {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeJSONResponse(rec *httptest.ResponseRecorder, target interface{}) error {

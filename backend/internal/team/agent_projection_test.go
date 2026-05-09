@@ -162,6 +162,14 @@ func TestAgentControlTaskRegistryWatchesTaskWake(t *testing.T) {
 		t.Fatal("expected AgentControl task wake event")
 	}
 
+	var registryRows int
+	require.NoError(t, store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM agent_control_wake_events WHERE team_id = ? AND kind = ?
+	`, teamID, agentcontrol.WakeKindTask).Scan(&registryRows))
+	require.Equal(t, 1, registryRows)
+
+	assertSQLiteTableMissing(t, store.db, "agent_control_task_wake_signals")
+
 	seq, err := registry.LastAgentControlTaskWakeSeq(ctx, agentcontrol.TaskWakeFilter{
 		Workflow: agentcontrol.WorkflowSpawnTeam,
 		TeamID:   teamID,
@@ -223,12 +231,85 @@ func TestAgentControlTaskRegistryCreatesTask(t *testing.T) {
 	require.NotNil(t, created.Assignee)
 	require.Equal(t, assignee, *created.Assignee)
 
+	var (
+		goalRaw         string
+		inputsRaw       string
+		readPathsRaw    string
+		writePathsRaw   string
+		deliverablesRaw string
+		versionRaw      int64
+	)
+	require.NoError(t, store.db.QueryRowContext(ctx, `
+		SELECT goal, inputs_json, read_paths_json, write_paths_json, deliverables_json, version
+		FROM agent_control_task_records
+		WHERE workflow = ? AND task_id = ?
+	`, agentcontrol.WorkflowSpawnTeam, "task-create").Scan(&goalRaw, &inputsRaw, &readPathsRaw, &writePathsRaw, &deliverablesRaw, &versionRaw))
+	require.Equal(t, "Review docs", goalRaw)
+	require.Equal(t, "[]", inputsRaw)
+	require.Equal(t, `["docs"]`, readPathsRaw)
+	require.Equal(t, `["docs/plan"]`, writePathsRaw)
+	require.Equal(t, `["summary"]`, deliverablesRaw)
+	require.EqualValues(t, 1, versionRaw)
+
 	_, err = registry.CreateAgentControlTask(ctx, agentcontrol.TaskCreateRequest{
 		Workflow: agentcontrol.WorkflowSpawnAgent,
 		TeamID:   teamID,
 		Title:    "bad workflow",
 	})
 	require.Error(t, err)
+}
+
+func TestAgentControlTaskRegistryUpdatesTask(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	assignee := "member-1"
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:       "task-update",
+		TeamID:   teamID,
+		Title:    "Old title",
+		Status:   TaskStatusPending,
+		Priority: 1,
+	})
+	require.NoError(t, err)
+
+	title := "New title"
+	status := string(TaskStatusReady)
+	priority := 7
+	summary := "patched through agentcontrol"
+	readPaths := []string{"docs", "backend"}
+	registry := NewAgentControlTaskRegistry(store)
+	record, err := registry.UpdateAgentControlTask(ctx, agentcontrol.TaskUpdateRequest{
+		ID:        taskID,
+		Workflow:  agentcontrol.WorkflowSpawnTeam,
+		TeamID:    teamID,
+		Title:     &title,
+		Status:    &status,
+		Priority:  &priority,
+		Assignee:  &assignee,
+		ReadPaths: &readPaths,
+		Summary:   &summary,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, taskID, record.ID)
+	require.Equal(t, "ready", record.Status)
+	require.Equal(t, assignee, record.Assignee)
+	require.Equal(t, "New title", record.Title)
+	require.Equal(t, "patched through agentcontrol", record.Summary)
+
+	updated, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.Equal(t, TaskStatusReady, updated.Status)
+	require.Equal(t, 7, updated.Priority)
+	require.NotNil(t, updated.Assignee)
+	require.Equal(t, assignee, *updated.Assignee)
+	require.Equal(t, []string{"docs", "backend"}, updated.ReadPaths)
 }
 
 func TestAgentControlTaskRegistryCreatesTaskDependency(t *testing.T) {
@@ -292,6 +373,54 @@ func TestAgentControlTaskRegistryCreatesTaskDependency(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestAgentControlTaskRegistryMarksReadyTasks(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	dependencyID, err := store.CreateTask(ctx, Task{
+		ID:     "task-ready-dependency",
+		TeamID: teamID,
+		Title:  "Dependency",
+		Status: TaskStatusDone,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:     "task-ready-dependent",
+		TeamID: teamID,
+		Title:  "Dependent",
+		Status: TaskStatusPending,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.AddTaskDependency(ctx, taskID, dependencyID))
+
+	registry := NewAgentControlTaskRegistry(store)
+	changed, err := registry.MarkAgentControlTasksReady(ctx, agentcontrol.TaskReadyRequest{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, changed)
+
+	records, err := registry.ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+		Status:   []string{string(TaskStatusReady)},
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, taskID, records[0].ID)
+
+	_, err = registry.MarkAgentControlTasksReady(ctx, agentcontrol.TaskReadyRequest{
+		Workflow: agentcontrol.WorkflowSpawnAgent,
+		TeamID:   teamID,
+	})
+	require.Error(t, err)
+}
+
 func TestAgentControlTaskRegistryListsTaskDependencies(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
@@ -345,6 +474,23 @@ func TestAgentControlTaskRegistryListsTaskDependencies(t *testing.T) {
 	require.Equal(t, taskID, dependents[0].TaskID)
 	require.False(t, dependents[0].CreatedAt.IsZero())
 
+	graphEvents, err := registry.ListAgentControlTaskGraphEvents(ctx, agentcontrol.TaskGraphEventFilter{
+		Workflow:  agentcontrol.WorkflowSpawnTeam,
+		TeamID:    teamID,
+		EventType: TaskDependencyCreatedEvent,
+	})
+	require.NoError(t, err)
+	require.Len(t, graphEvents, 1)
+	require.Equal(t, int64(1), graphEvents[0].Seq)
+	require.Equal(t, int64(1), graphEvents[0].TeamSeq)
+	require.Equal(t, agentcontrol.WorkflowSpawnTeam, graphEvents[0].Workflow)
+	require.Equal(t, teamID, graphEvents[0].TeamID)
+	require.Equal(t, TaskDependencyCreatedEvent, graphEvents[0].EventType)
+	require.Equal(t, taskID, graphEvents[0].TaskID)
+	require.Equal(t, dependencyID, graphEvents[0].DependsOnID)
+	require.NotEmpty(t, graphEvents[0].DependencyID)
+	require.False(t, graphEvents[0].CreatedAt.IsZero())
+
 	unsupported, err := registry.ListAgentControlTaskDependencies(ctx, agentcontrol.TaskDependencyFilter{
 		Workflow:    agentcontrol.WorkflowSpawnAgent,
 		TaskID:      taskID,
@@ -352,6 +498,60 @@ func TestAgentControlTaskRegistryListsTaskDependencies(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Empty(t, unsupported)
+}
+
+func TestAgentControlTaskRegistryListTaskGraphEventsUsesGlobalCursor(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID1, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	teamID2, err := store.CreateTeam(ctx, Team{ID: "team-2"})
+	require.NoError(t, err)
+
+	createDependency := func(teamID, parentID, childID string) {
+		t.Helper()
+		_, err := store.CreateTask(ctx, Task{
+			ID:     parentID,
+			TeamID: teamID,
+			Status: TaskStatusReady,
+		})
+		require.NoError(t, err)
+		_, err = store.CreateTask(ctx, Task{
+			ID:     childID,
+			TeamID: teamID,
+			Status: TaskStatusReady,
+		})
+		require.NoError(t, err)
+		require.NoError(t, store.AddTaskDependency(ctx, childID, parentID))
+	}
+
+	createDependency(teamID1, "task-parent-1", "task-child-1")
+	createDependency(teamID2, "task-parent-2", "task-child-2")
+
+	registry := NewAgentControlTaskRegistry(store)
+	events, err := registry.ListAgentControlTaskGraphEvents(ctx, agentcontrol.TaskGraphEventFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+	})
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	require.Equal(t, teamID1, events[0].TeamID)
+	require.Equal(t, teamID2, events[1].TeamID)
+	require.Equal(t, int64(1), events[0].TeamSeq)
+	require.Equal(t, int64(1), events[1].TeamSeq)
+	require.Greater(t, events[1].Seq, events[0].Seq)
+	require.Equal(t, TaskDependencyCreatedEvent, events[0].EventType)
+
+	afterFirst, err := registry.ListAgentControlTaskGraphEvents(ctx, agentcontrol.TaskGraphEventFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		AfterSeq: events[0].Seq,
+	})
+	require.NoError(t, err)
+	require.Len(t, afterFirst, 1)
+	require.Equal(t, events[1].Seq, afterFirst[0].Seq)
+	require.Equal(t, teamID2, afterFirst[0].TeamID)
 }
 
 func TestAgentControlTaskRegistryUpdatesTaskStatus(t *testing.T) {
@@ -405,6 +605,146 @@ func TestAgentControlTaskRegistryUpdatesTaskStatus(t *testing.T) {
 		Status:   string(TaskStatusReady),
 	})
 	require.Error(t, err)
+}
+
+func TestAgentControlTaskRegistryCancelledUpdatesReleaseLease(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	assignee := "member-1"
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	statusTaskID, err := store.CreateTask(ctx, Task{
+		ID:         "task-status-cancel",
+		TeamID:     teamID,
+		Title:      "Cancel through status",
+		Status:     TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+	updateTaskID, err := store.CreateTask(ctx, Task{
+		ID:         "task-update-cancel",
+		TeamID:     teamID,
+		Title:      "Cancel through update",
+		Status:     TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+
+	registry := NewAgentControlTaskRegistry(store)
+	record, err := registry.UpdateAgentControlTaskStatus(ctx, agentcontrol.TaskStatusUpdateRequest{
+		ID:       statusTaskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   string(TaskStatusCancelled),
+		Summary:  "status cancelled",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, "cancelled", record.Status)
+	require.Empty(t, record.Assignee)
+	require.Equal(t, "status cancelled", record.Summary)
+
+	statusTask, err := store.GetTask(ctx, statusTaskID)
+	require.NoError(t, err)
+	require.NotNil(t, statusTask)
+	require.Equal(t, TaskStatusCancelled, statusTask.Status)
+	require.Nil(t, statusTask.Assignee)
+	require.Nil(t, statusTask.LeaseUntil)
+
+	cancelled := string(TaskStatusCancelled)
+	reassigned := "member-2"
+	record, err = registry.UpdateAgentControlTask(ctx, agentcontrol.TaskUpdateRequest{
+		ID:       updateTaskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   &cancelled,
+		Assignee: &reassigned,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, "cancelled", record.Status)
+	require.Empty(t, record.Assignee)
+
+	updateTask, err := store.GetTask(ctx, updateTaskID)
+	require.NoError(t, err)
+	require.NotNil(t, updateTask)
+	require.Equal(t, TaskStatusCancelled, updateTask.Status)
+	require.Nil(t, updateTask.Assignee)
+	require.Nil(t, updateTask.LeaseUntil)
+}
+
+func TestAgentControlTaskRegistryTerminalStatusUpdatesReleaseLease(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	assignee := "member-1"
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	statusTaskID, err := store.CreateTask(ctx, Task{
+		ID:         "task-status-done",
+		TeamID:     teamID,
+		Title:      "Done through status",
+		Status:     TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+	updateTaskID, err := store.CreateTask(ctx, Task{
+		ID:         "task-update-failed",
+		TeamID:     teamID,
+		Title:      "Failed through update",
+		Status:     TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+
+	registry := NewAgentControlTaskRegistry(store)
+	record, err := registry.UpdateAgentControlTaskStatus(ctx, agentcontrol.TaskStatusUpdateRequest{
+		ID:       statusTaskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   string(TaskStatusDone),
+		Summary:  "status done",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, "done", record.Status)
+	require.Empty(t, record.Assignee)
+	require.Equal(t, "status done", record.Summary)
+
+	statusTask, err := store.GetTask(ctx, statusTaskID)
+	require.NoError(t, err)
+	require.NotNil(t, statusTask)
+	require.Equal(t, TaskStatusDone, statusTask.Status)
+	require.Nil(t, statusTask.Assignee)
+	require.Nil(t, statusTask.LeaseUntil)
+
+	failed := string(TaskStatusFailed)
+	reassigned := "member-2"
+	record, err = registry.UpdateAgentControlTask(ctx, agentcontrol.TaskUpdateRequest{
+		ID:       updateTaskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   &failed,
+		Assignee: &reassigned,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, "failed", record.Status)
+	require.Empty(t, record.Assignee)
+
+	updateTask, err := store.GetTask(ctx, updateTaskID)
+	require.NoError(t, err)
+	require.NotNil(t, updateTask)
+	require.Equal(t, TaskStatusFailed, updateTask.Status)
+	require.Nil(t, updateTask.Assignee)
+	require.Nil(t, updateTask.LeaseUntil)
 }
 
 func TestAgentControlTaskRegistryClaimsTask(t *testing.T) {
@@ -699,6 +1039,49 @@ func TestAgentControlTaskRegistryReleasesTask(t *testing.T) {
 	require.Nil(t, updated.Assignee)
 	require.Nil(t, updated.LeaseUntil)
 	require.Equal(t, "released for retry", updated.Summary)
+}
+
+func TestAgentControlTaskRegistryRetriesTask(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	assignee := "member-1"
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:         "task-retry",
+		TeamID:     teamID,
+		Title:      "Retry task",
+		Status:     TaskStatusRunning,
+		Assignee:   &assignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+
+	registry := NewAgentControlTaskRegistry(store)
+	record, err := registry.RetryAgentControlTask(ctx, agentcontrol.TaskRetryRequest{
+		ID:       taskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   string(TaskStatusReady),
+		Summary:  "retry through agentcontrol",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, taskID, record.ID)
+	require.Equal(t, "ready", record.Status)
+	require.Equal(t, "retry through agentcontrol", record.Summary)
+
+	updated, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.Equal(t, TaskStatusReady, updated.Status)
+	require.Nil(t, updated.Assignee)
+	require.Nil(t, updated.LeaseUntil)
+	require.Equal(t, 1, updated.RetryCount)
+	require.Equal(t, "retry through agentcontrol", updated.Summary)
 }
 
 func TestAgentControlTaskRegistryRenewsTaskLease(t *testing.T) {

@@ -119,7 +119,7 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 	fs.StringVar(&opts.agentID, "agent-id", "", "child agent/session id for session-agent mode")
 	fs.StringVar(&opts.agentIDsCSV, "agent-ids", "", "comma-separated child agent/session ids for batch wait")
 	fs.StringVar(&opts.agentAction, "agent-action", "spawn", "session-agent action: spawn, status, input, wait, events, control-mailbox, close, resume")
-	fs.StringVar(&opts.controlAction, "control-action", "tasks", "agent-control action: tasks, dependencies, add-dependency")
+	fs.StringVar(&opts.controlAction, "control-action", "tasks", "agent-control action: mailbox, tasks, update, events, dependencies, add-dependency")
 	fs.StringVar(&opts.agentType, "agent-type", "", "child agent type for session-agent spawn")
 	fs.StringVar(&opts.agentModel, "agent-model", "", "child agent model for session-agent spawn")
 	fs.StringVar(&opts.teamID, "team-id", "", "team id for agent-control mode")
@@ -188,7 +188,14 @@ func parseDemoOptions(args []string) (demoOptions, error) {
 		}
 	case "agent-control":
 		switch strings.ToLower(strings.TrimSpace(opts.controlAction)) {
-		case "tasks":
+		case "mailbox", "tasks", "events":
+		case "update":
+			if strings.TrimSpace(opts.taskID) == "" {
+				return demoOptions{}, fmt.Errorf("task-id is required for agent-control update")
+			}
+			if strings.TrimSpace(opts.message) == "" {
+				return demoOptions{}, fmt.Errorf("message is required for agent-control update")
+			}
 		case "dependencies":
 			if strings.TrimSpace(opts.taskID) == "" {
 				return demoOptions{}, fmt.Errorf("task-id is required for agent-control dependencies")
@@ -295,6 +302,18 @@ func runSessionAgentDemo(ctx context.Context, client *skillsapi.Client, opts dem
 
 func runAgentControlDemo(ctx context.Context, client *skillsapi.Client, opts demoOptions, stdout io.Writer) error {
 	switch strings.ToLower(strings.TrimSpace(opts.controlAction)) {
+	case "mailbox":
+		resp, err := client.ListAgentControlMailbox(ctx, skillsapi.ListAgentControlMailboxParams{
+			Workflow:  "spawn_team",
+			SessionID: opts.sessionID,
+			TeamID:    opts.teamID,
+			AfterSeq:  opts.afterSeq,
+			Limit:     opts.limit,
+		})
+		if err != nil {
+			return err
+		}
+		return printLines(stdout, summarizeAgentControlMailbox(resp))
 	case "tasks":
 		resp, err := client.ListAgentControlTasks(ctx, skillsapi.ListAgentControlTasksParams{
 			Workflow: "spawn_team",
@@ -316,6 +335,28 @@ func runAgentControlDemo(ctx context.Context, client *skillsapi.Client, opts dem
 			return err
 		}
 		return printLines(stdout, summarizeAgentControlTaskDependencies(resp))
+	case "events":
+		resp, err := client.ListAgentControlTaskGraphEvents(ctx, skillsapi.ListAgentControlTaskGraphEventsParams{
+			Workflow: "spawn_team",
+			TeamID:   opts.teamID,
+			AfterSeq: opts.afterSeq,
+			Limit:    opts.limit,
+		})
+		if err != nil {
+			return err
+		}
+		return printLines(stdout, summarizeAgentControlTaskGraphEvents(resp))
+	case "update":
+		summary := strings.TrimSpace(opts.message)
+		resp, err := client.UpdateAgentControlTask(ctx, opts.taskID, skillsapi.UpdateAgentControlTaskRequest{
+			Workflow: "spawn_team",
+			TeamID:   opts.teamID,
+			Summary:  &summary,
+		})
+		if err != nil {
+			return err
+		}
+		return printLines(stdout, summarizeAgentControlTaskUpdate(resp))
 	case "add-dependency":
 		resp, err := client.CreateAgentControlTaskDependency(ctx, opts.taskID, skillsapi.CreateAgentControlTaskDependencyRequest{
 			Workflow:    "spawn_team",
@@ -722,6 +763,43 @@ func summarizeSessionAgentControlMailbox(parentSessionID string, result *skillsa
 	return lines
 }
 
+func summarizeAgentControlMailbox(result *skillsapi.ListAgentControlMailboxResponse) []string {
+	if result == nil {
+		return []string{"agent_control_mailbox=<nil>"}
+	}
+	lines := []string{
+		fmt.Sprintf("agent_control_mailbox count=%d latest_seq=%d sources=%s", result.Count, result.LatestSeq, strings.Join(result.Sources, ",")),
+	}
+	for _, record := range result.Records {
+		parts := []string{
+			fmt.Sprintf("record seq=%d", record.Seq),
+		}
+		if record.Scope != "" {
+			parts = append(parts, "scope="+record.Scope)
+		}
+		if record.Workflow != "" {
+			parts = append(parts, "workflow="+record.Workflow)
+		}
+		if record.SessionID != "" {
+			parts = append(parts, "session="+record.SessionID)
+		}
+		if record.TeamID != "" {
+			parts = append(parts, "team="+record.TeamID)
+		}
+		if record.MessageID != "" {
+			parts = append(parts, "message="+record.MessageID)
+		}
+		if record.Kind != "" {
+			parts = append(parts, "kind="+record.Kind)
+		}
+		if record.Body != "" {
+			parts = append(parts, "body="+record.Body)
+		}
+		lines = append(lines, strings.Join(parts, " "))
+	}
+	return lines
+}
+
 func summarizeAgentControlTasks(result *skillsapi.ListAgentControlTasksResponse) []string {
 	if result == nil {
 		return []string{"agent_control_tasks=<nil>"}
@@ -753,6 +831,30 @@ func summarizeAgentControlTasks(result *skillsapi.ListAgentControlTasksResponse)
 	return lines
 }
 
+func summarizeAgentControlTaskUpdate(result *skillsapi.AgentControlTaskResponse) []string {
+	if result == nil || result.Task == nil {
+		return []string{"agent_control_task_update=<nil>"}
+	}
+	task := result.Task
+	lines := []string{
+		"agent_control_task_updated=true",
+		"task_id=" + task.ID,
+	}
+	if task.Workflow != "" {
+		lines = append(lines, "workflow="+task.Workflow)
+	}
+	if task.TeamID != "" {
+		lines = append(lines, "team_id="+task.TeamID)
+	}
+	if task.Status != "" {
+		lines = append(lines, "status="+task.Status)
+	}
+	if task.Summary != "" {
+		lines = append(lines, "summary="+task.Summary)
+	}
+	return lines
+}
+
 func summarizeAgentControlTaskDependencies(result *skillsapi.ListAgentControlTaskDependenciesResponse) []string {
 	if result == nil {
 		return []string{"agent_control_dependencies=<nil>"}
@@ -779,6 +881,40 @@ func summarizeAgentControlTaskDependencies(result *skillsapi.ListAgentControlTas
 		}
 		if edge.TeamID != "" {
 			parts = append(parts, "team_id="+edge.TeamID)
+		}
+		lines = append(lines, strings.Join(parts, " "))
+	}
+	return lines
+}
+
+func summarizeAgentControlTaskGraphEvents(result *skillsapi.ListAgentControlTaskGraphEventsResponse) []string {
+	if result == nil {
+		return []string{"agent_control_task_graph_events=<nil>"}
+	}
+	lines := []string{
+		fmt.Sprintf("agent_control_task_graph_events count=%d after_seq=%d", result.Count, result.AfterSeq),
+	}
+	for _, event := range result.Events {
+		parts := []string{
+			fmt.Sprintf("event seq=%d", event.Seq),
+		}
+		if event.TeamSeq > 0 {
+			parts = append(parts, fmt.Sprintf("team_seq=%d", event.TeamSeq))
+		}
+		if event.EventType != "" {
+			parts = append(parts, "type="+event.EventType)
+		}
+		if event.TeamID != "" {
+			parts = append(parts, "team_id="+event.TeamID)
+		}
+		if event.TaskID != "" {
+			parts = append(parts, "task_id="+event.TaskID)
+		}
+		if event.DependsOnID != "" {
+			parts = append(parts, "depends_on_id="+event.DependsOnID)
+		}
+		if event.DependencyID != "" {
+			parts = append(parts, "dependency_id="+event.DependencyID)
 		}
 		lines = append(lines, strings.Join(parts, " "))
 	}

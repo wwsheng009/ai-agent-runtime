@@ -77,6 +77,131 @@ func TestSessionAgentController_PathTargetsAndCloseSubtree(t *testing.T) {
 	assert.Equal(t, 3, listResult.Count)
 }
 
+func TestSessionAgentController_WritesAndReadsAgentRegistry(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Agents.MaxDepth = 2
+	handler.SetRuntimeConfig(cfg, "")
+	store, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: t.TempDir() + "/agents.db",
+	})
+	require.NoError(t, err)
+	defer store.Close()
+	handler.SetAgentControlAgentStore(store)
+
+	rootSession, err := sessionManager.Create(ctx, "user-session-agent-registry")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-registry-child", AgentType: "worker"})
+	require.NoError(t, err)
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		RootSessionID: rootSession.ID,
+		IncludeClosed: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	assert.Equal(t, agentcontrol.AgentTypeRoot, records[0].AgentType)
+	assert.Equal(t, "api-registry-child", records[1].SessionID)
+	assert.Equal(t, "/root/api-registry-child", records[1].AgentPath)
+	assert.Equal(t, agentcontrol.WorkflowSpawnAgent, records[1].Workflow)
+
+	require.NoError(t, sessionManager.GetStorage().Delete(ctx, "api-registry-child"))
+	listResult, err := controller.List(ctx, rootSession.ID, toolbroker.ListAgentsArgs{})
+	require.NoError(t, err)
+	require.Equal(t, 1, listResult.Count)
+	agent := listResult.Agents[0]
+	assert.Equal(t, "api-registry-child", agent.SessionID)
+	assert.Equal(t, "/root/api-registry-child", agent.Path)
+	assert.Equal(t, "worker", agent.AgentType)
+	assert.False(t, agent.Exists)
+	assert.Equal(t, "missing", agent.Status)
+}
+
+func TestSessionAgentController_RegistryCloseUsesSegmentSafePath(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Agents.MaxDepth = 2
+	handler.SetRuntimeConfig(cfg, "")
+	store, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: t.TempDir() + "/agents.db",
+	})
+	require.NoError(t, err)
+	defer store.Close()
+	handler.SetAgentControlAgentStore(store)
+
+	rootSession, err := sessionManager.Create(ctx, "user-session-agent-registry-close")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-close-a"})
+	require.NoError(t, err)
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-close-a2"})
+	require.NoError(t, err)
+	_, err = controller.Spawn(ctx, "api-close-a", toolbroker.SpawnAgentArgs{ID: "api-close-child"})
+	require.NoError(t, err)
+
+	result, err := controller.Close(ctx, "/root/api-close-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"api-close-a", "api-close-child"}, result.ClosedSessionIDs)
+
+	sibling, err := sessionManager.Get(ctx, "api-close-a2")
+	require.NoError(t, err)
+	assert.NotEqual(t, chat.StateClosed, sibling.State)
+	active, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{RootSessionID: rootSession.ID})
+	require.NoError(t, err)
+	var activeSessions []string
+	for _, record := range active {
+		if record.SessionID != "" {
+			activeSessions = append(activeSessions, record.SessionID)
+		}
+	}
+	assert.Contains(t, activeSessions, "api-close-a2")
+	assert.NotContains(t, activeSessions, "api-close-a")
+	assert.NotContains(t, activeSessions, "api-close-child")
+}
+
+func TestSessionAgentController_RegistrySpawnLimitUsesDurableStore(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Agents.MaxThreads = 1
+	handler.SetRuntimeConfig(cfg, "")
+	store, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: t.TempDir() + "/agents.db",
+	})
+	require.NoError(t, err)
+	defer store.Close()
+	handler.SetAgentControlAgentStore(store)
+
+	rootSession, err := sessionManager.Create(ctx, "user-session-agent-registry-limit")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-limit-child-1"})
+	require.NoError(t, err)
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-limit-child-2"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "agent spawn thread limit reached")
+	_, err = sessionManager.Get(ctx, "api-limit-child-2")
+	require.Error(t, err)
+}
+
 func TestSessionAgentController_ProjectsTeamTeammatesIntoAgentList(t *testing.T) {
 	ctx := context.Background()
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
@@ -144,6 +269,65 @@ func TestSessionAgentController_ProjectsTeamTeammatesIntoAgentList(t *testing.T)
 	path, ok := reloaded.GetContext(toolbroker.AgentSessionContextPath)
 	require.True(t, ok)
 	assert.Equal(t, "/root/teams/team-alpha/member-1", path)
+}
+
+func TestSessionAgentController_ProjectsTeamTeammatesIntoAgentRegistry(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+	store, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: t.TempDir() + "/agents.db",
+	})
+	require.NoError(t, err)
+	defer store.Close()
+	handler.SetAgentControlAgentStore(store)
+
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
+	require.NoError(t, err)
+	defer teamStore.Close()
+	handler.teamStore = teamStore
+
+	rootSession, err := sessionManager.Create(ctx, "user-team-agent-registry")
+	require.NoError(t, err)
+	teamID, err := teamStore.CreateTeam(ctx, team.Team{
+		ID:            "team-registry",
+		LeadSessionID: rootSession.ID,
+	})
+	require.NoError(t, err)
+	_, err = teamStore.UpsertTeammate(ctx, team.Teammate{
+		ID:        "member-registry",
+		TeamID:    teamID,
+		Name:      "Registry Reviewer",
+		Profile:   "documentation-reviewer",
+		SessionID: "api-mate-registry-session",
+		State:     team.TeammateStateIdle,
+	})
+	require.NoError(t, err)
+	mateSession := chat.NewSession(rootSession.UserID)
+	mateSession.ID = "api-mate-registry-session"
+	require.NoError(t, sessionManager.GetStorage().Save(ctx, mateSession))
+
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	listResult, err := controller.List(ctx, rootSession.ID, toolbroker.ListAgentsArgs{PathPrefix: "/root/teams/team-registry"})
+	require.NoError(t, err)
+	require.Equal(t, 1, listResult.Count)
+
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		RootSessionID: rootSession.ID,
+		PathPrefix:    "/root/teams/team-registry",
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	record := records[0]
+	assert.Equal(t, "api-mate-registry-session", record.SessionID)
+	assert.Equal(t, agentcontrol.WorkflowSpawnTeam, record.Workflow)
+	assert.Equal(t, "team-registry", record.TeamID)
+	assert.Equal(t, "member-registry", record.TeammateID)
+	assert.Equal(t, "/root/teams/team-registry/member-registry", record.AgentPath)
 }
 
 func TestSessionAgentController_SendMessagePersistsMailboxWithoutTargetActor(t *testing.T) {

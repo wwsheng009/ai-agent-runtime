@@ -22,6 +22,8 @@ const (
 // pollute user-visible team mailbox counts, digests, or unread state.
 type TaskSignal struct {
 	Seq       int64      `json:"seq,omitempty"`
+	TeamSeq   int64      `json:"team_seq,omitempty"`
+	Workflow  string     `json:"workflow,omitempty"`
 	TeamID    string     `json:"team_id"`
 	TaskID    string     `json:"task_id,omitempty"`
 	Kind      string     `json:"kind"`
@@ -39,4 +41,16 @@ type TaskWatcherStore interface {
 // signals in a team.
 type TaskSequenceStore interface {
 	LastTaskSignalSeq(ctx context.Context, teamID string) (int64, error)
+}
+
+// AgentControlTaskWatcherStore exposes task wake notifications through the
+// AgentControl wake projection rather than the team-native signal table.
+type AgentControlTaskWatcherStore interface {
+	WatchAgentControlTaskSignals(ctx context.Context, workflow, teamID string) (<-chan TaskSignal, func())
+}
+
+// AgentControlTaskSequenceStore exposes the durable AgentControl task wake
+// high-water mark.
+type AgentControlTaskSequenceStore interface {
+	LastAgentControlTaskSignalSeq(ctx context.Context, workflow, teamID string) (int64, error)
 }

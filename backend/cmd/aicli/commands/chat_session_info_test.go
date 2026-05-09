@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -547,6 +548,69 @@ func TestChatDebugAgentGraphLinesListsLocalAgents(t *testing.T) {
 	}
 }
 
+func TestChatAgentTargetLinesListsAvailableTargets(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+
+	host := &localChatRuntimeHost{
+		SessionStore: manager.GetStorage(),
+		SessionUser:  userID,
+		BaseSession: &ChatSession{
+			RuntimeSession: rootSession,
+			SessionUserID:  userID,
+		},
+	}
+	host.ActorRegistry = newLocalActorRegistry(host)
+	session := &ChatSession{
+		RuntimeSession:      rootSession,
+		SessionUserID:       userID,
+		LocalRuntimeHost:    host,
+		SelectedAgentTarget: "/root/target-worker",
+	}
+
+	worker := runtimechat.NewSession(userID)
+	worker.ID = "target-worker"
+	worker.SetContext(toolbroker.AgentSessionContextParentSessionID, rootSession.ID)
+	worker.SetContext(toolbroker.AgentSessionContextRootSessionID, rootSession.ID)
+	worker.SetContext(toolbroker.AgentSessionContextPath, "/root/target-worker")
+	worker.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	worker.SetContext(toolbroker.AgentSessionContextAgentType, "worker")
+	if err := manager.GetStorage().Save(context.Background(), worker); err != nil {
+		t.Fatalf("save worker: %v", err)
+	}
+
+	output := strings.Join(chatAgentTargetLines(session), "\n")
+	for _, expected := range []string{
+		"Selected Agent Target: /root/target-worker",
+		"Agent Targets:",
+		"[1] * /root/target-worker",
+		"status=idle",
+		"session=target-worker",
+		"type=worker",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected target lines to contain %q, got:\n%s", expected, output)
+		}
+	}
+
+	commandOutput := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents target", false); quit {
+			t.Fatal("agents target command should not quit")
+		}
+	})
+	if !strings.Contains(commandOutput, "Agent Targets:") || !strings.Contains(commandOutput, "[1] * /root/target-worker") {
+		t.Fatalf("expected agents target command to list available targets, got:\n%s", commandOutput)
+	}
+}
+
 func TestChatDebugMailboxLinesListsPendingTeamMessages(t *testing.T) {
 	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
 	if err != nil {
@@ -845,6 +909,70 @@ func TestChatTimelineLinesIncludesTaskDispatchDetails(t *testing.T) {
 	}
 }
 
+func TestChatTimelineCommandLinesFiltersEventRows(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	const teamID = "timeline-filter-team"
+	if _, err := store.CreateTeam(context.Background(), team.Team{
+		ID:            teamID,
+		LeadSessionID: "timeline-root",
+		Status:        team.TeamStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	for _, event := range []team.TeamEvent{
+		{
+			Type:   "task.completed",
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"task_id":  "keep-task",
+				"assignee": "member-a",
+				"summary":  "kept event",
+			},
+		},
+		{
+			Type:   "task.completed",
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"task_id":  "skip-task",
+				"assignee": "member-b",
+				"summary":  "hidden event",
+			},
+		},
+		{
+			Type:   "team.completed",
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"status": "done",
+			},
+		},
+	} {
+		if _, err := store.AppendTeamEvent(context.Background(), event); err != nil {
+			t.Fatalf("AppendTeamEvent: %v", err)
+		}
+	}
+
+	session := &ChatSession{
+		LocalRuntimeHost: &localChatRuntimeHost{TeamStore: store},
+	}
+	output := strings.Join(chatTimelineCommandLines(session, "/timeline "+teamID+" filter=task=keep-task 10"), "\n")
+	if !strings.Contains(output, "team="+teamID+" events=3 shown=3") {
+		t.Fatalf("expected filtered timeline to keep header context, got:\n%s", output)
+	}
+	if !strings.Contains(output, "task=keep-task") || !strings.Contains(output, "summary=kept event") {
+		t.Fatalf("expected filtered timeline to keep matching event, got:\n%s", output)
+	}
+	for _, hidden := range []string{"task=skip-task", "hidden event", "team.completed"} {
+		if strings.Contains(output, hidden) {
+			t.Fatalf("expected filtered timeline to hide %q, got:\n%s", hidden, output)
+		}
+	}
+}
+
 func TestChatCollabLinesListsParentMailboxEvents(t *testing.T) {
 	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
 	session := &ChatSession{
@@ -951,6 +1079,165 @@ func TestHandleCommand_CollabPrintsSelectedAgentMailboxTimeline(t *testing.T) {
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected selected collab output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_CollabAllAggregatesParentAndAgentMailboxes(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
+	sessionStore := runtimechat.NewInMemoryStorage()
+	root := runtimechat.NewSession("collab-user")
+	root.ID = "collab-all-root"
+	root.State = runtimechat.StateActive
+	if err := sessionStore.Save(ctx, root); err != nil {
+		t.Fatalf("save root session: %v", err)
+	}
+	child := runtimechat.NewSession("collab-user")
+	child.ID = "collab-all-child"
+	child.SetContext(toolbroker.AgentSessionContextParentSessionID, root.ID)
+	child.SetContext(toolbroker.AgentSessionContextRootSessionID, root.ID)
+	child.SetContext(toolbroker.AgentSessionContextPath, "/root/collab-all-child")
+	child.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	if err := sessionStore.Save(ctx, child); err != nil {
+		t.Fatalf("save child session: %v", err)
+	}
+	host := &localChatRuntimeHost{
+		EventStore:   runtimeStore,
+		SessionStore: sessionStore,
+		SessionUser:  "collab-user",
+	}
+	host.ActorRegistry = newLocalActorRegistry(host)
+	session := &ChatSession{
+		RuntimeSession:   root,
+		SessionUserID:    "collab-user",
+		LocalRuntimeHost: host,
+	}
+	if _, _, err := runtimeStore.AppendMailbox(ctx, root.ID, toolbroker.BuildAgentMailboxMessage(
+		child.ID,
+		"parent",
+		"parent aggregate hello",
+		false,
+	)); err != nil {
+		t.Fatalf("append parent mailbox: %v", err)
+	}
+	if _, _, err := runtimeStore.AppendMailbox(ctx, child.ID, toolbroker.BuildAgentMailboxMessage(
+		"parent",
+		child.ID,
+		"child aggregate hello",
+		false,
+	)); err != nil {
+		t.Fatalf("append child mailbox: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/collab all 5", false); quit {
+			t.Fatal("collab command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"All Mailbox Timelines:",
+		"targets=2",
+		"target=parent session=collab-all-root",
+		"target=/root/collab-all-child session=collab-all-child",
+		"parent aggregate hello",
+		"child aggregate hello",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected collab all output to contain %q, got:\n%s", expected, output)
+		}
+	}
+
+	filtered := captureStdout(t, func() {
+		if quit := handleCommand(session, "/collab all filter=body=child 5", false); quit {
+			t.Fatal("collab command should not quit")
+		}
+	})
+	if strings.Contains(filtered, "parent aggregate hello") {
+		t.Fatalf("expected filtered collab output to hide parent mailbox event, got:\n%s", filtered)
+	}
+	if !strings.Contains(filtered, "child aggregate hello") {
+		t.Fatalf("expected filtered collab output to keep child mailbox event, got:\n%s", filtered)
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, _, _ = runtimeStore.AppendMailbox(ctx, child.ID, toolbroker.BuildAgentMailboxMessage(
+			"parent",
+			child.ID,
+			"follow child update",
+			false,
+		))
+	}()
+	followed := captureStdout(t, func() {
+		if quit := handleCommand(session, "/collab follow all filter=body=follow timeout=500ms 5", false); quit {
+			t.Fatal("collab command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"follow=waiting",
+		"follow=update session=collab-all-child",
+		"Follow Update:",
+		"follow child update",
+	} {
+		if !strings.Contains(followed, expected) {
+			t.Fatalf("expected followed collab output to contain %q, got:\n%s", expected, followed)
+		}
+	}
+}
+
+func TestHandleCommand_AgentsPanelShowsUnifiedMultiAgentView(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
+	sessionStore := runtimechat.NewInMemoryStorage()
+	root := runtimechat.NewSession("panel-user")
+	root.ID = "panel-root"
+	root.State = runtimechat.StateActive
+	require.NoError(t, sessionStore.Save(ctx, root))
+	child := runtimechat.NewSession("panel-user")
+	child.ID = "panel-child"
+	child.SetContext(toolbroker.AgentSessionContextParentSessionID, root.ID)
+	child.SetContext(toolbroker.AgentSessionContextRootSessionID, root.ID)
+	child.SetContext(toolbroker.AgentSessionContextPath, "/root/panel-child")
+	child.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	require.NoError(t, sessionStore.Save(ctx, child))
+	host := &localChatRuntimeHost{
+		EventStore:   runtimeStore,
+		SessionStore: sessionStore,
+		SessionUser:  "panel-user",
+	}
+	host.ActorRegistry = newLocalActorRegistry(host)
+	session := &ChatSession{
+		RuntimeSession:      root,
+		SessionUserID:       "panel-user",
+		SelectedAgentTarget: "/root/panel-child",
+		LocalRuntimeHost:    host,
+	}
+	_, _, err := runtimeStore.AppendMailbox(ctx, child.ID, toolbroker.BuildAgentMailboxMessage(
+		"parent",
+		child.ID,
+		"panel mailbox hello",
+		false,
+	))
+	require.NoError(t, err)
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents panel 5", false); quit {
+			t.Fatal("agents panel command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Agent Control Panel:",
+		"selected=/root/panel-child",
+		"parent_session=panel-root",
+		"Agents:",
+		"/root/panel-child",
+		"Mailbox:",
+		"panel mailbox hello",
+		"Timeline:",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected agents panel output to contain %q, got:\n%s", expected, output)
 		}
 	}
 }

@@ -108,6 +108,17 @@ func TestTaskDependencyCreateRequestNormalizeTrimsFields(t *testing.T) {
 	}
 }
 
+func TestTaskReadyRequestNormalizeTrimsFields(t *testing.T) {
+	request := TaskReadyRequest{
+		Workflow: " spawn_team ",
+		TeamID:   " team-1 ",
+	}.Normalize()
+
+	if request.Workflow != WorkflowSpawnTeam || request.TeamID != "team-1" {
+		t.Fatalf("unexpected normalized task ready request: %#v", request)
+	}
+}
+
 func TestTaskDependencyRecordAndFilterNormalizeTrimFields(t *testing.T) {
 	record := TaskDependencyRecord{
 		ID:          " dep-1 ",
@@ -135,6 +146,36 @@ func TestTaskDependencyRecordAndFilterNormalizeTrimFields(t *testing.T) {
 		filter.TaskID != "task-2" ||
 		filter.DependsOnID != "task-1" {
 		t.Fatalf("unexpected normalized task dependency filter: %#v", filter)
+	}
+}
+
+func TestTaskGraphEventAndFilterNormalizeTrimFields(t *testing.T) {
+	event := TaskGraphEvent{
+		Workflow:     " spawn_team ",
+		TeamID:       " team-1 ",
+		EventType:    " task.dependency.created ",
+		TaskID:       " task-2 ",
+		DependsOnID:  " task-1 ",
+		DependencyID: " dep-1 ",
+	}.Normalize()
+	if event.Workflow != WorkflowSpawnTeam ||
+		event.TeamID != "team-1" ||
+		event.EventType != "task.dependency.created" ||
+		event.TaskID != "task-2" ||
+		event.DependsOnID != "task-1" ||
+		event.DependencyID != "dep-1" {
+		t.Fatalf("unexpected normalized task graph event: %#v", event)
+	}
+
+	filter := TaskGraphEventFilter{
+		Workflow:  " spawn_team ",
+		TeamID:    " team-1 ",
+		EventType: " task.dependency.created ",
+	}.Normalize()
+	if filter.Workflow != WorkflowSpawnTeam ||
+		filter.TeamID != "team-1" ||
+		filter.EventType != "task.dependency.created" {
+		t.Fatalf("unexpected normalized task graph event filter: %#v", filter)
 	}
 }
 

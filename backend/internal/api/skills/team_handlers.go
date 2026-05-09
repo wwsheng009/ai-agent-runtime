@@ -28,6 +28,7 @@ func (h *Handler) SetTeamStore(store team.Store) {
 	h.teamStoreMu.Lock()
 	h.teamStore = store
 	h.teamStoreMu.Unlock()
+	h.configureMailboxWriteThrough(h.getAgentControlMailboxStore())
 }
 
 // SetTeamOrchestrator sets the Team orchestrator used by the handler.
@@ -35,6 +36,7 @@ func (h *Handler) SetTeamOrchestrator(orchestrator *team.Orchestrator) {
 	if h == nil {
 		return
 	}
+	applyTeamOrchestratorMailboxWake(orchestrator, h.getAgentControlMailboxStore())
 	h.teamStoreMu.Lock()
 	h.teamOrchestrator = orchestrator
 	h.teamStoreMu.Unlock()
@@ -106,6 +108,7 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 
 	claims := h.getTeamClaimsManager()
 	hub := h.getSessionHub()
+	mailboxWakeStore := h.getAgentControlMailboxStore()
 	h.teamStoreMu.Lock()
 	defer h.teamStoreMu.Unlock()
 	if h.teamOrchestrator == nil {
@@ -114,6 +117,7 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 	orchestrator := h.teamOrchestrator
 	orchestrator.Store = store
 	orchestrator.Claims = claims
+	applyTeamOrchestratorMailboxWake(orchestrator, mailboxWakeStore)
 
 	mailbox := orchestrator.Mailbox
 	if mailbox == nil {
@@ -214,6 +218,21 @@ func cloneTeamOrchestrator(orchestrator *team.Orchestrator) *team.Orchestrator {
 	return &cloned
 }
 
+func applyTeamOrchestratorMailboxWake(orchestrator *team.Orchestrator, writer agentcontrol.GlobalMailboxWriter) {
+	if orchestrator == nil {
+		return
+	}
+	if source, ok := writer.(agentcontrol.MailboxWakeSource); ok && source != nil {
+		orchestrator.MailboxWake = source
+		return
+	}
+	if writer == nil {
+		if _, ok := orchestrator.MailboxWake.(agentcontrol.GlobalMailboxRegistryStore); ok {
+			orchestrator.MailboxWake = nil
+		}
+	}
+}
+
 // DispatchTeamMailboxMessage delivers mailbox notifications to target sessions.
 func (h *Handler) DispatchTeamMailboxMessage(ctx context.Context, message team.MailMessage) error {
 	if h == nil {
@@ -280,7 +299,7 @@ func (h *Handler) deliverTeamTaskLifecycleMailbox(ctx context.Context, event tea
 		return
 	}
 	switch strings.TrimSpace(event.Type) {
-	case "task.completed", "task.failed":
+	case "task.completed", "task.failed", "task.cancelled":
 	default:
 		return
 	}
@@ -297,6 +316,36 @@ func (h *Handler) deliverTeamTaskLifecycleMailbox(ctx context.Context, event tea
 		return
 	}
 	_ = chat.DeliverMailboxEventFirst(ctx, h.getSessionEventStore(), nil, nil, strings.TrimSpace(mate.SessionID), team.BuildTaskLifecycleMailboxMessage(event))
+}
+
+func (h *Handler) dispatchCancelledTaskLifecycleEvent(ctx context.Context, store team.Store, task *team.Task, assignee string, summary string) {
+	if h == nil || store == nil || task == nil || strings.TrimSpace(task.ID) == "" || strings.TrimSpace(task.TeamID) == "" {
+		return
+	}
+	assignee = firstNonEmptyString(strings.TrimSpace(assignee), teamTaskAssigneeID(task))
+	summary = firstNonEmptyString(strings.TrimSpace(summary), "cancelled")
+	event := team.TeamEvent{
+		Type:   "task.cancelled",
+		TeamID: strings.TrimSpace(task.TeamID),
+		Payload: map[string]interface{}{
+			"team_id":  strings.TrimSpace(task.TeamID),
+			"task_id":  strings.TrimSpace(task.ID),
+			"assignee": assignee,
+			"status":   string(team.TaskStatusCancelled),
+			"reason":   "api_release",
+			"summary":  summary,
+		},
+		Timestamp: time.Now().UTC(),
+	}
+	_, _ = store.AppendTeamEvent(ctx, event)
+	h.deliverTeamTaskLifecycleMailbox(ctx, event)
+}
+
+func teamTaskAssigneeID(task *team.Task) string {
+	if task == nil || task.Assignee == nil {
+		return ""
+	}
+	return strings.TrimSpace(*task.Assignee)
 }
 
 func teamEventPayloadString(value interface{}) string {
@@ -1182,6 +1231,14 @@ func (h *Handler) UpsertTeammate(w http.ResponseWriter, r *http.Request) {
 		Capabilities:  req.Capabilities,
 		LastHeartbeat: heartbeat,
 	}
+	var previous *team.Teammate
+	if teammate.ID != "" {
+		previous, err = store.GetTeammate(r.Context(), teammate.ID)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
 	id, err := store.UpsertTeammate(r.Context(), teammate)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -1191,6 +1248,10 @@ func (h *Handler) UpsertTeammate(w http.ResponseWriter, r *http.Request) {
 	if updated == nil {
 		teammate.ID = id
 		updated = &teammate
+	}
+	if err := h.syncTeammateAgentRegistryRecord(r.Context(), store, previous, *updated); err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 	{
 		traceID, requestID := runtimeTraceIDForRequest(r)
@@ -1229,6 +1290,7 @@ func (h *Handler) UpdateTeammate(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "teammate not found"))
 		return
 	}
+	previous := *current
 	var req struct {
 		Name          *string  `json:"name,omitempty"`
 		Profile       *string  `json:"profile,omitempty"`
@@ -1278,6 +1340,10 @@ func (h *Handler) UpdateTeammate(w http.ResponseWriter, r *http.Request) {
 	if updated == nil {
 		updated = current
 	}
+	if err := h.syncTeammateAgentRegistryRecord(r.Context(), store, &previous, *updated); err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	{
 		traceID, requestID := runtimeTraceIDForRequest(r)
 		payload := map[string]interface{}{
@@ -1294,6 +1360,125 @@ func (h *Handler) UpdateTeammate(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"teammate": updated,
 	})
+}
+
+func (h *Handler) syncTeammateAgentRegistryRecord(ctx context.Context, teamStore team.Store, previous *team.Teammate, mate team.Teammate) error {
+	if err := h.closeStaleTeammateAgentRegistryRecord(ctx, teamStore, previous, mate); err != nil {
+		return err
+	}
+	return h.upsertTeammateAgentRegistryRecord(ctx, teamStore, mate)
+}
+
+// SyncTeamTeammateAgent lets toolbroker spawn_team project teammate identity
+// rows immediately after team store writes.
+func (h *Handler) SyncTeamTeammateAgent(ctx context.Context, previous *team.Teammate, mate team.Teammate) error {
+	return h.syncTeammateAgentRegistryRecord(ctx, h.getTeamStore(), previous, mate)
+}
+
+func (h *Handler) closeStaleTeammateAgentRegistryRecord(ctx context.Context, teamStore team.Store, previous *team.Teammate, mate team.Teammate) error {
+	registry := h.getAgentControlAgentStore()
+	if registry == nil || teamStore == nil || previous == nil {
+		return nil
+	}
+	previousProjection, ok, err := h.teammateAgentRegistryProjection(ctx, teamStore, *previous)
+	if err != nil || !ok {
+		return err
+	}
+	currentProjection, currentOK, err := h.teammateAgentRegistryProjection(ctx, teamStore, mate)
+	if err != nil {
+		return err
+	}
+	if currentOK &&
+		strings.EqualFold(previousProjection.RootSessionID, currentProjection.RootSessionID) &&
+		strings.EqualFold(previousProjection.AgentPath, currentProjection.AgentPath) {
+		return nil
+	}
+	_, err = registry.CloseAgentControlAgentSubtree(ctx, previousProjection.RootSessionID, previousProjection.AgentPath, time.Now().UTC())
+	return err
+}
+
+func (h *Handler) upsertTeammateAgentRegistryRecord(ctx context.Context, teamStore team.Store, mate team.Teammate) error {
+	registry := h.getAgentControlAgentStore()
+	if registry == nil || teamStore == nil {
+		return nil
+	}
+	teammate, ok, err := h.teammateAgentRegistryProjection(ctx, teamStore, mate)
+	if err != nil || !ok {
+		return err
+	}
+	root := agentcontrol.AgentRecord{
+		AgentID:       apiRootAgentID(teammate.RootSessionID),
+		RootSessionID: teammate.RootSessionID,
+		SessionID:     rootAgentSessionBinding(teammate),
+		AgentPath:     "/root",
+		AgentType:     agentcontrol.AgentTypeRoot,
+		Status:        agentcontrol.AgentStatusActive,
+	}
+	if existing, exists, err := existingAgentControlAgentRecord(ctx, registry, root); err != nil {
+		return err
+	} else if !(exists && existing.Closed()) {
+		if _, err := registry.UpsertAgentControlAgent(ctx, root); err != nil {
+			return err
+		}
+	}
+	if existing, exists, err := existingAgentControlAgentRecord(ctx, registry, teammate); err != nil {
+		return err
+	} else if exists && existing.Closed() {
+		return nil
+	}
+	_, err = registry.UpsertAgentControlAgent(ctx, teammate)
+	return err
+}
+
+func (h *Handler) teammateAgentRegistryProjection(ctx context.Context, teamStore team.Store, mate team.Teammate) (agentcontrol.AgentRecord, bool, error) {
+	if teamStore == nil {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	teamID := strings.TrimSpace(mate.TeamID)
+	sessionID := strings.TrimSpace(mate.SessionID)
+	if teamID == "" || sessionID == "" {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	record, err := teamStore.GetTeam(ctx, teamID)
+	if err != nil {
+		return agentcontrol.AgentRecord{}, false, err
+	}
+	if record == nil {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	rootSessionID := strings.TrimSpace(record.LeadSessionID)
+	if rootSessionID == "" {
+		rootSessionID = "team:" + teamID
+	}
+	if rootSessionID == "" {
+		return agentcontrol.AgentRecord{}, false, nil
+	}
+	path := agentcontrol.TeamTeammatePath(teamID, mate.ID, mate.Name, sessionID)
+	return agentcontrol.AgentRecord{
+		AgentID:         "team:" + teamID + ":" + firstNonEmptyString(strings.TrimSpace(mate.ID), sessionID),
+		RootSessionID:   rootSessionID,
+		ParentAgentID:   apiRootAgentID(rootSessionID),
+		ParentSessionID: rootSessionID,
+		SessionID:       sessionID,
+		AgentPath:       path,
+		Depth:           1,
+		AgentType:       firstNonEmptyString(strings.TrimSpace(mate.Profile), agentcontrol.AgentTypeTeamTeammate),
+		Nickname:        strings.TrimSpace(mate.Name),
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		TeamID:          teamID,
+		TeammateID:      strings.TrimSpace(mate.ID),
+		Status:          agentcontrol.AgentStatusActive,
+		CreatedAt:       mate.CreatedAt,
+		UpdatedAt:       mate.UpdatedAt,
+	}, true, nil
+}
+
+func rootAgentSessionBinding(record agentcontrol.AgentRecord) string {
+	rootSessionID := strings.TrimSpace(record.RootSessionID)
+	if rootSessionID == "" || strings.EqualFold(rootSessionID, "team:"+strings.TrimSpace(record.TeamID)) {
+		return ""
+	}
+	return rootSessionID
 }
 
 // UpdateTeammateHeartbeat updates a teammate heartbeat timestamp.
@@ -1402,6 +1587,53 @@ func (h *Handler) ListAgentControlTasks(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// ListAgentControlTaskGraphEvents lists task graph timeline events through the
+// shared AgentControl task graph event read seam.
+func (h *Handler) ListAgentControlTaskGraphEvents(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	rawAfter := firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("after_seq")), strings.TrimSpace(r.URL.Query().Get("after")))
+	afterSeq := int64(0)
+	if rawAfter != "" {
+		value, err := strconv.ParseInt(rawAfter, 10, 64)
+		if err != nil || value < 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid after value"))
+			return
+		}
+		afterSeq = value
+	}
+	limit, err := parseOptionalLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	filter := agentcontrol.TaskGraphEventFilter{
+		Workflow:  firstNonEmptyString(strings.TrimSpace(r.URL.Query().Get("workflow")), agentcontrol.WorkflowSpawnTeam),
+		TeamID:    strings.TrimSpace(r.URL.Query().Get("team_id")),
+		EventType: strings.TrimSpace(r.URL.Query().Get("event_type")),
+		AfterSeq:  afterSeq,
+		Limit:     limit,
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	events, err := registry.ListAgentControlTaskGraphEvents(r.Context(), filter)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"events":     events,
+		"count":      len(events),
+		"workflow":   filter.Workflow,
+		"team_id":    filter.TeamID,
+		"event_type": filter.EventType,
+		"after_seq":  filter.AfterSeq,
+		"limit":      filter.Limit,
+	})
+}
+
 // CreateAgentControlTask creates a task through the shared AgentControl task
 // registry write seam.
 func (h *Handler) CreateAgentControlTask(w http.ResponseWriter, r *http.Request) {
@@ -1463,6 +1695,86 @@ func (h *Handler) CreateAgentControlTask(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// UpdateAgentControlTask patches a task through the shared AgentControl task
+// registry write seam.
+func (h *Handler) UpdateAgentControlTask(w http.ResponseWriter, r *http.Request) {
+	store := h.getTeamStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "team store not configured"))
+		return
+	}
+	taskID := mux.Vars(r)["task_id"]
+	var req struct {
+		Workflow     string   `json:"workflow,omitempty"`
+		TeamID       string   `json:"team_id,omitempty"`
+		ParentTaskID *string  `json:"parent_task_id,omitempty"`
+		Title        *string  `json:"title,omitempty"`
+		Goal         *string  `json:"goal,omitempty"`
+		Status       *string  `json:"status,omitempty"`
+		Priority     *int     `json:"priority,omitempty"`
+		Assignee     *string  `json:"assignee,omitempty"`
+		Inputs       []string `json:"inputs,omitempty"`
+		ReadPaths    []string `json:"read_paths,omitempty"`
+		WritePaths   []string `json:"write_paths,omitempty"`
+		Deliverables []string `json:"deliverables,omitempty"`
+		Summary      *string  `json:"summary,omitempty"`
+		ResultRef    *string  `json:"result_ref,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	var current *team.Task
+	cancelledUpdate := false
+	updateReq := agentcontrol.TaskUpdateRequest{
+		ID:           taskID,
+		Workflow:     firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		TeamID:       strings.TrimSpace(req.TeamID),
+		ParentTaskID: req.ParentTaskID,
+		Title:        req.Title,
+		Goal:         req.Goal,
+		Priority:     req.Priority,
+		Assignee:     req.Assignee,
+		Inputs:       optionalStringSlicePtr(req.Inputs),
+		ReadPaths:    optionalStringSlicePtr(req.ReadPaths),
+		WritePaths:   optionalStringSlicePtr(req.WritePaths),
+		Deliverables: optionalStringSlicePtr(req.Deliverables),
+		Summary:      req.Summary,
+		ResultRef:    req.ResultRef,
+	}
+	if req.Status != nil {
+		status, err := parseTaskStatus(*req.Status)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		value := string(status)
+		updateReq.Status = &value
+		cancelledUpdate = status == team.TaskStatusCancelled
+		if cancelledUpdate {
+			current, err = store.GetTask(r.Context(), taskID)
+			if err != nil {
+				h.writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+	}
+	registry := team.NewAgentControlTaskRegistry(store)
+	record, err := registry.UpdateAgentControlTask(r.Context(), updateReq)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if cancelledUpdate {
+		summary := "cancelled"
+		if req.Summary != nil {
+			summary = strings.TrimSpace(*req.Summary)
+		}
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, teamTaskAssigneeID(current), summary)
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
+}
+
 // UpdateAgentControlTaskStatus updates a task status through the shared
 // AgentControl task registry write seam.
 func (h *Handler) UpdateAgentControlTaskStatus(w http.ResponseWriter, r *http.Request) {
@@ -1486,6 +1798,14 @@ func (h *Handler) UpdateAgentControlTaskStatus(w http.ResponseWriter, r *http.Re
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	var current *team.Task
+	if status == team.TaskStatusCancelled {
+		current, err = store.GetTask(r.Context(), taskID)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
 	registry := team.NewAgentControlTaskRegistry(store)
 	record, err := registry.UpdateAgentControlTaskStatus(r.Context(), agentcontrol.TaskStatusUpdateRequest{
 		ID:       taskID,
@@ -1496,6 +1816,9 @@ func (h *Handler) UpdateAgentControlTaskStatus(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if status == team.TaskStatusCancelled {
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, teamTaskAssigneeID(current), strings.TrimSpace(req.Summary))
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
 }
@@ -1624,6 +1947,12 @@ func (h *Handler) ReleaseAgentControlTask(w http.ResponseWriter, r *http.Request
 	if status == "" {
 		status = team.TaskStatusPending
 	}
+	current, err := store.GetTask(r.Context(), taskID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	assignee := teamTaskAssigneeID(current)
 	registry := team.NewAgentControlTaskRegistry(store)
 	record, err := registry.ReleaseAgentControlTask(r.Context(), agentcontrol.TaskReleaseRequest{
 		ID:       taskID,
@@ -1640,6 +1969,10 @@ func (h *Handler) ReleaseAgentControlTask(w http.ResponseWriter, r *http.Request
 	}
 	if teammateID := strings.TrimSpace(req.TeammateID); teammateID != "" {
 		_ = store.UpdateTeammateState(r.Context(), teammateID, team.TeammateStateIdle)
+		assignee = firstNonEmptyString(assignee, teammateID)
+	}
+	if status == team.TaskStatusCancelled {
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, assignee, strings.TrimSpace(req.Summary))
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
 }
@@ -2333,19 +2666,23 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
 		return
 	}
+	updateReq := agentcontrol.TaskUpdateRequest{
+		ID:       taskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	}
+	cancelledUpdate := false
 	if req.ParentTaskID != nil {
 		value := strings.TrimSpace(*req.ParentTaskID)
-		if value == "" {
-			current.ParentTaskID = nil
-		} else {
-			current.ParentTaskID = &value
-		}
+		updateReq.ParentTaskID = &value
 	}
 	if req.Title != nil {
-		current.Title = strings.TrimSpace(*req.Title)
+		value := strings.TrimSpace(*req.Title)
+		updateReq.Title = &value
 	}
 	if req.Goal != nil {
-		current.Goal = strings.TrimSpace(*req.Goal)
+		value := strings.TrimSpace(*req.Goal)
+		updateReq.Goal = &value
 	}
 	if req.Status != nil {
 		status, err := parseTaskStatus(*req.Status)
@@ -2353,56 +2690,72 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 			h.writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		current.Status = status
+		value := string(status)
+		updateReq.Status = &value
+		cancelledUpdate = status == team.TaskStatusCancelled
 	}
 	if req.Priority != nil {
-		current.Priority = *req.Priority
+		value := *req.Priority
+		updateReq.Priority = &value
 	}
 	if req.Assignee != nil {
 		value := strings.TrimSpace(*req.Assignee)
-		if value == "" {
-			current.Assignee = nil
-		} else {
-			current.Assignee = &value
-		}
+		updateReq.Assignee = &value
 	}
 	if req.Inputs != nil {
-		current.Inputs = req.Inputs
+		values := append([]string(nil), req.Inputs...)
+		updateReq.Inputs = &values
 	}
 	if req.ReadPaths != nil {
-		current.ReadPaths = req.ReadPaths
+		values := append([]string(nil), req.ReadPaths...)
+		updateReq.ReadPaths = &values
 	}
 	if req.WritePaths != nil {
-		current.WritePaths = req.WritePaths
+		values := append([]string(nil), req.WritePaths...)
+		updateReq.WritePaths = &values
 	}
 	if req.Deliverables != nil {
-		current.Deliverables = req.Deliverables
+		values := append([]string(nil), req.Deliverables...)
+		updateReq.Deliverables = &values
 	}
 	if req.Summary != nil {
-		current.Summary = strings.TrimSpace(*req.Summary)
+		value := strings.TrimSpace(*req.Summary)
+		updateReq.Summary = &value
 	}
 	if req.ResultRef != nil {
 		value := strings.TrimSpace(*req.ResultRef)
-		if value == "" {
-			current.ResultRef = nil
-		} else {
-			current.ResultRef = &value
-		}
+		updateReq.ResultRef = &value
 	}
-	if err := store.UpdateTask(r.Context(), *current); err != nil {
+	taskRegistry := team.NewAgentControlTaskRegistry(store)
+	if _, err := taskRegistry.UpdateAgentControlTask(r.Context(), updateReq); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if cancelledUpdate {
+		summary := "cancelled"
+		if req.Summary != nil {
+			summary = strings.TrimSpace(*req.Summary)
+		}
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, teamTaskAssigneeID(current), summary)
+	}
+	updated, err := store.GetTask(r.Context(), taskID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if updated == nil {
+		updated = current
 	}
 	{
 		traceID, requestID := runtimeTraceIDForRequest(r)
 		payload := map[string]interface{}{
 			"team_id":     teamID,
-			"task_id":     current.ID,
-			"status":      current.Status,
-			"priority":    current.Priority,
-			"assignee":    current.Assignee,
-			"read_count":  len(current.ReadPaths),
-			"write_count": len(current.WritePaths),
+			"task_id":     updated.ID,
+			"status":      updated.Status,
+			"priority":    updated.Priority,
+			"assignee":    updated.Assignee,
+			"read_count":  len(updated.ReadPaths),
+			"write_count": len(updated.WritePaths),
 		}
 		if requestID != "" {
 			payload["request_id"] = requestID
@@ -2410,7 +2763,7 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		h.publishRuntimeEvent("team.task.updated", traceID, payload)
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"task": current,
+		"task": updated,
 	})
 }
 
@@ -3112,7 +3465,11 @@ func (h *Handler) MarkReadyTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	teamID := mux.Vars(r)["id"]
-	count, err := store.MarkReadyTasks(r.Context(), teamID)
+	registry := team.NewAgentControlTaskRegistry(store)
+	count, err := registry.MarkAgentControlTasksReady(r.Context(), agentcontrol.TaskReadyRequest{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
@@ -3256,6 +3613,9 @@ func (h *Handler) ReleaseTaskLease(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.TeammateID) != "" {
 		_ = store.UpdateTeammateState(r.Context(), strings.TrimSpace(req.TeammateID), team.TeammateStateIdle)
 	}
+	if status == team.TaskStatusCancelled {
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, firstNonEmptyString(teamTaskAssigneeID(current), strings.TrimSpace(req.TeammateID)), strings.TrimSpace(req.Summary))
+	}
 	updated, _ := store.GetTask(r.Context(), taskID)
 	if updated == nil {
 		updated = current
@@ -3319,16 +3679,15 @@ func (h *Handler) RetryTask(w http.ResponseWriter, r *http.Request) {
 	if status == "" {
 		status = team.TaskStatusPending
 	}
-	if err := store.IncrementTaskRetry(r.Context(), taskID); err != nil {
+	taskRegistry := team.NewAgentControlTaskRegistry(store)
+	if _, err := taskRegistry.RetryAgentControlTask(r.Context(), agentcontrol.TaskRetryRequest{
+		ID:       taskID,
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		Status:   string(status),
+		Summary:  strings.TrimSpace(req.Summary),
+	}); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	if err := store.ReleaseTask(r.Context(), taskID, status); err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if summary := strings.TrimSpace(req.Summary); summary != "" {
-		_ = store.UpdateTaskStatus(r.Context(), taskID, status, summary)
 	}
 	if claims := h.getTeamClaimsManager(); claims != nil {
 		_ = claims.Release(r.Context(), taskID)
@@ -3977,6 +4336,7 @@ func (h *Handler) SweepTeammates(w http.ResponseWriter, r *http.Request) {
 	}
 	updated := make([]map[string]interface{}, 0)
 	reclaimedTasks := make([]map[string]interface{}, 0)
+	taskRegistry := team.NewAgentControlTaskRegistry(store)
 	for _, mate := range teammates {
 		if mate.State == team.TeammateStateOffline {
 			continue
@@ -4014,11 +4374,11 @@ func (h *Handler) SweepTeammates(w http.ResponseWriter, r *http.Request) {
 		})
 		if reclaimTasks {
 			for _, task := range tasksByAssignee[mate.ID] {
-				if err := store.IncrementTaskRetry(r.Context(), task.ID); err != nil {
-					h.writeError(w, http.StatusInternalServerError, err)
-					return
-				}
-				if err := store.ReleaseTask(r.Context(), task.ID, parsedReclaimStatus); err != nil {
+				if _, err := taskRegistry.RetryAgentControlTask(r.Context(), agentcontrol.TaskRetryRequest{
+					ID:       task.ID,
+					Workflow: agentcontrol.WorkflowSpawnTeam,
+					Status:   string(parsedReclaimStatus),
+				}); err != nil {
 					h.writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -4287,6 +4647,14 @@ func parseAgentControlTaskStatusList(raw string) []string {
 		}
 	}
 	return out
+}
+
+func optionalStringSlicePtr(values []string) *[]string {
+	if values == nil {
+		return nil
+	}
+	copied := append([]string(nil), values...)
+	return &copied
 }
 
 func (h *Handler) defaultLeaseDuration() time.Duration {

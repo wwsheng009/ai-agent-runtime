@@ -101,6 +101,12 @@ type TeamMailboxDispatcher interface {
 	DispatchTeamMailboxMessage(ctx context.Context, message team.MailMessage) error
 }
 
+// TeamTeammateAgentProjector optionally projects spawn_team teammates into the
+// AgentControl identity graph immediately after team store writes.
+type TeamTeammateAgentProjector interface {
+	SyncTeamTeammateAgent(ctx context.Context, previous *team.Teammate, teammate team.Teammate) error
+}
+
 // SendTeamMessageArgs describes mailbox writes for a team run.
 type SendTeamMessageArgs struct {
 	TeamID   string                 `json:"team_id,omitempty"`
