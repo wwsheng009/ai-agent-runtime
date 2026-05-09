@@ -3,6 +3,9 @@
 > 更新时间：2026-03-14  
 > 目标：把 `docs/multi-agents/plan` 中已识别缺口拆成可执行任务，并持续回写状态。
 
+> 当前同步（2026-05-09）：
+> 本文是早期 TODO 快照。当前 standalone runtime 的 live routes 是 `POST /api/agent/chat` 与 `/api/runtime/*`；旧 `/api/skills/agent/chat`、`/api/skills/{name}/execute` compatibility alias 说法不再代表当前源码 route table。判断当前多 agent 状态请优先看 `docs/multi-agents/agents/design/current.md` 与 `docs/skill_runtime/runtime_operations_api.md`。
+
 ## 状态标记
 
 - `[x]` 已完成（代码与测试已落地）

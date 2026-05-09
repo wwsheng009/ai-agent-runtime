@@ -7,10 +7,12 @@ Scope: API `/api/agent/chat` + Team orchestration APIs + `aicli chat` actor-firs
 
 API (multi-agent capable):
 - `/api/agent/chat` (canonical)
-- `/api/skills/agent/chat` (compat alias)
+- Historical notes may mention `/api/skills/agent/chat`; current `runtime-server` route source registers `POST /api/agent/chat`
 
 API (team orchestration):
-- `/api/skills/teams/*` (create team, plan tasks, orchestrate teammates, mailbox, leases, path claims)
+- `/api/runtime/teams/*` (create team, plan tasks, orchestrate teammates, mailbox, leases, path claims)
+- `/api/runtime/agent-control/*` (cross-team task, mailbox, dependency, and task-graph control surface)
+- `/api/runtime/sessions/{id}/agents*` (session-scoped child-agent control plane)
 
 CLI:
 - `aicli chat` (default local actor-first orchestration host)
@@ -42,14 +44,17 @@ CLI:
 
 ## 3. Processing Chain: Team Orchestration APIs
 
-1. Create team: `POST /api/skills/teams`.
-2. Upsert teammates: `POST /api/skills/teams/{id}/teammates`.
-3. Plan tasks: `POST /api/skills/teams/{id}/plan` or create tasks directly.
-4. Orchestrator loop starts for active teams and runs continuously.
-5. Orchestrator claims ready tasks, dispatches to teammate runners.
-6. Teammate runner uses session actor to execute, writes outcomes.
-7. Mailbox and path claims provide coordination + locking.
-8. Outcome APIs finalize tasks, trigger replanning if blocked.
+1. Create team: `POST /api/runtime/teams`.
+2. Upsert teammates: `POST /api/runtime/teams/{id}/teammates`.
+3. Plan tasks: `POST /api/runtime/teams/{id}/plan` or create tasks directly with `POST /api/runtime/teams/{id}/tasks`.
+4. `spawn_team` can create the same structure from a chat/tool call; chat-originated calls bind the lead to the current session.
+5. `spawn_team` accepts teammates/tasks as structured arrays or JSON array strings; when `auto_start=true` and tasks exist without teammates, the broker can synthesize an executable teammate.
+6. Task and dependency creation now goes through the AgentControl task registry substrate where available.
+7. Orchestrator loop starts for active teams and runs continuously.
+8. Orchestrator claims ready tasks, dispatches to teammate runners.
+9. Teammate runner uses session actor to execute, writes outcomes.
+10. Mailbox and path claims provide coordination + locking.
+11. Outcome APIs finalize tasks, trigger replanning if blocked.
 
 Note: Team orchestration can now be triggered either from the API or from local `aicli chat`.
 The difference is where the orchestration host lives: service-side for `/api/agent/chat`,
@@ -199,7 +204,12 @@ Expected:
 Use `--skills-debug` to show routing candidates and which skills are exposed for a prompt.
 This is the most reliable way to confirm keyword-trigger routing in CLI.
 
-### 7.4 Important Limitation
+### 7.4 Current CLI Orchestration Notes
 
-`aicli chat` does not run subagents or team orchestration.  
-To validate multi-agent orchestration, use `/api/agent/chat` and check `planning/subagent` outputs.
+`aicli chat` now hosts local actor-first orchestration and can run the broker tools used by multi-agent/team workflows:
+
+- child agents: `spawn_agent` / `list_agents` / `send_input` / `send_message` / `followup_task` / `wait_agent` / `read_agent_events` / `close_agent` / `resume_agent`
+- teams: `spawn_team` / `wait_team` / `send_team_message` / `read_mailbox_digest` / `read_task_spec` / `read_task_context` / `report_task_outcome`
+- visibility commands: `/agents`, `/timeline`, and `/collab`
+
+Operationally, `spawn_team auto_start=true` should be followed by `wait_team` with the returned `team_id`; `wait_agent` remains for `spawn_agent` child sessions and will reject team teammate ids unless a same-root child session target exists.

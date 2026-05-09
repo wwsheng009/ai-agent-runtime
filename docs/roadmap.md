@@ -1,6 +1,6 @@
 # 前端迁移进度与路线图
 
-更新时间：2026-03-31
+更新时间：2026-05-09
 
 本文用于记录 `ai-agent-runtime` 当前前端相对 `E:\projects\ai\deer-flow\frontend` 的迁移现状、能力边界、工程风险和后续路线。本文的目标不是推动“原样照搬 Deer Flow 前端”，而是明确：
 
@@ -8,6 +8,13 @@
 - 哪些内容是围绕本项目 runtime API 新长出来的
 - 哪些内容仍应延后
 - 当前最值得投入的工程收口点是什么
+
+2026-05-09 同步补充：
+
+- 当前前端已经不再只有 `/` 和 `/workspace` 两个入口；`App.tsx` 已注册 `/logs`、`/runtime/config`、`/workspace/chats/:threadId`、`/workspace/sessions/:sessionId`、`/workspace/restore/:sessionId` 等路由。
+- `src/api/runtime/*` 已覆盖 agent chat、SSE、sessions/checkpoints、teams、logs、models、runtime config/service control。
+- `RuntimeTeams` 已拆出 `frontend/src/components/workspace/runtime-teams/*` 子模块，最大热点从单一 `runtime-teams.tsx` 转移到 settings/config editor 与 team dispatch/detail 子域。
+- 前端测试已经落地，不再是“没有测试文件”的状态；当前 `frontend/src` 下有 52 个 `*.test.ts(x)` 文件。
 
 ## 1. 结论摘要
 
@@ -41,13 +48,15 @@
 
 | 指标 | Deer Flow 来源前端 | 当前前端 | 说明 |
 | --- | --- | --- | --- |
-| `src` 源码文件数 | 232 | 30 | 当前前端体量明显更小，但已不再是纯样板 |
-| `src` 代码总行数 | 22201 | 6199 | 当前规模约为来源前端的 28%，其中 runtime 控制面占比不低 |
-| 非生成文件总数 | 312 | 41 | 已排除 `node_modules`、`dist`、`.next`、`coverage` 等生成目录 |
+| `src` 源码文件数 | 232 | 215 | 当前前端体量已经接近来源项目，但结构和协议仍以本项目 runtime 为准 |
+| `src` TS/TSX 文件数 | - | 213 | 当前 `frontend/src` 主要由 TypeScript / React 文件组成 |
+| `src` TS/TSX 代码总行数 | 22201 | 41727 | 当前规模已超过来源前端统计值，主要增长来自 runtime config/settings、team orchestration、tests 和 i18n |
+| 前端测试文件数 | - | 52 | 当前已经具备多处单元/组件测试，不再是无测试状态 |
+| 非生成文件总数 | 312 | 215+ | 已排除 `node_modules`、`dist`、`.next`、`coverage` 等生成目录；当前统计按 `frontend/src` 口径 |
 | 相同相对路径文件数 | 13 | 13 | 说明直接路径复用非常有限 |
 | 相同相对路径代码文件数 | 10 | 10 | 存在部分同名文件，但多数已经重写或改造成 Vite 结构 |
-| 运行时依赖数 | 70 | 7 | 当前前端显著裁剪，没有引入 Deer Flow 大量运行时依赖 |
-| 开发依赖数 | 15 | 14 | 开发工具链接近，但目标平台不同 |
+| 运行时依赖数 | 70 | 13 | 当前前端显著裁剪，没有引入 Deer Flow 大量运行时依赖；新增依赖主要服务 i18n、routing、markdown、icons 和样式合并 |
+| 开发依赖数 | 15 | 17 | 开发工具链接近，但目标平台不同 |
 
 这组数据说明两个关键事实：
 
@@ -70,10 +79,15 @@
 
 ### 4.2 页面入口和 Deer Flow 风格外壳已经落地
 
-当前前端保留了两个本地路由入口：
+当前前端已从早期两个入口扩展为多条本地路由：
 
 - `/`
-- `/workspace`
+- `/logs`
+- `/runtime/config`
+- `/workspace/chats/new`
+- `/workspace/chats/:threadId`
+- `/workspace/sessions/:sessionId`
+- `/workspace/restore/:sessionId`
 
 并已经完成以下高复用部分的迁移或重写：
 
@@ -103,6 +117,9 @@
 早期的大型 `runtime-api.ts` 已经被拆分为按领域划分的 API 层：
 
 - `src/api/runtime/agent-chat.ts`
+- `src/api/runtime/config.ts`
+- `src/api/runtime/logs.ts`
+- `src/api/runtime/models.ts`
 - `src/api/runtime/sessions.ts`
 - `src/api/runtime/teams.ts`
 - `src/api/runtime/sse.ts`
@@ -154,7 +171,7 @@
 
 ### 5.1 Deer Flow 的页面体系仍未迁入
 
-当前项目仍然只实现了两个 Vite 页面入口，而 Deer Flow 前端中仍有大量页面没有进入当前仓库，例如：
+当前项目已经实现 landing、workspace、logs、runtime config 等 Vite 页面入口，但 Deer Flow 前端中仍有大量页面没有进入当前仓库，例如：
 
 - 聊天线程页面
 - agent 页面和新建 agent 页面
@@ -165,25 +182,22 @@
 
 ### 5.2 来源项目的大量 `core` 能力仍未迁入
 
-Deer Flow 前端中的以下领域层能力当前仍未迁入：
+Deer Flow 前端中的以下领域层能力没有按来源项目原样迁入：
 
 - `threads`
-- `models`
 - `memory`
-- `settings`
 - `uploads`
-- `i18n`
 - 来源项目自己的 `core` 状态模型
 - `Next.js` 认证与服务端路由
 
-这部分差距是客观存在的，但其中相当一部分本来也不应直接迁入。
+同时，本项目已经有围绕 runtime API 的 `models`、settings/runtime config editor 和 i18n 框架；这些不是 Deer Flow `core` 的直接迁移。当前差距主要在 Deer Flow 式 thread/core 状态模型、uploads、memory、认证和服务端路由。
 
 ### 5.3 当前工作台仍缺若干关键能力
 
 虽然 runtime 控制面已经很深，但当前前端仍有明显缺口：
 
-- 线程级路由与更明确的 session 恢复流程
-- 真实 artifact 文件拉取、预览和错误处理
+- 已有 `/workspace/chats/*`、`/workspace/sessions/*`、`/workspace/restore/*` 基础 deep link，但恢复索引、切换语义和错误状态还需要继续收敛
+- checkpoint preview / file diff 已有，Deer Flow 式线程文件系统 artifact、通用文件拉取和错误处理仍未完整实现
 - 更成熟的消息分组、inline tool steps、workflow 卡片
 - 多 team 结果聚合、outcome 汇总和 final summary 对比
 - 更系统的空状态、错误状态和回放能力
@@ -199,12 +213,12 @@ Deer Flow 前端中的以下领域层能力当前仍未迁入：
 - `src/data`
 - `src/lib`
 - `src/pages`
+- `src/hooks`
 - `src/styles`
 - `src/types`
 
 这比早期“所有逻辑集中在少数页面和 `lib`”的状态前进了一步，但仍然缺少：
 
-- `src/hooks`
 - `src/store`
 - 更清晰的页面状态边界
 
@@ -244,23 +258,33 @@ Deer Flow 前端中的以下领域层能力当前仍未迁入：
 
 ### 7.2 自动化测试情况
 
-当前前端未发现测试文件。这意味着：
+当前前端已经补上测试基线，`frontend/src` 下已有 52 个 `*.test.ts(x)` 文件，覆盖范围包括：
 
-- 构建和 lint 虽然通过，但回归保护仍然偏弱
-- SSE 消费、消息状态合并、team dispatch monitor、mailbox/path claims 交互没有自动化验证
-- 后续继续扩展 team orchestration 时，回归风险会快速上升
+- runtime API shared / SSE helper
+- workspace shell/sidebar shared 逻辑
+- logs page shared/detail panel
+- settings domain editor 工具函数
+- landing page 与部分 workspace 富内容组件
+
+仍需继续补强的高风险区域：
+
+- 多 team dispatch monitor 的长轮询/状态收敛
+- runtime config editor 的端到端保存/预览/写回流程
+- workspace 多 session 恢复与 artifact preview 的组合流程
 
 ### 7.3 大文件与模块边界风险
 
-当前最大的几个文件仍然明显偏大：
+当前最大的几个文件仍然明显偏大，但热点已经从单一 workspace 文件转移到 settings/config 与 team 子域：
 
-- `src/components/workspace/runtime-teams.tsx`：2181 行
-- `src/pages/workspace-page.tsx`：1059 行
-- `src/types/runtime.ts`：439 行
-- `src/data/mock.ts`：406 行
-- `src/api/runtime/teams.ts`：328 行
+- `src/components/workspace/settings/backend-config-settings-page.tsx`：约 3559 行
+- `src/components/workspace/settings/runtime-provider-groups-domain-editor.tsx`：约 1138 行
+- `src/components/workspace/runtime-teams/runtime-team-dispatch-panel.tsx`：约 816 行
+- `src/components/workspace/runtime-teams/runtime-team-details-panel.tsx`：约 784 行
+- `src/components/workspace/runtime-teams/use-runtime-team-dispatch.ts`：约 686 行
+- `src/components/workspace/runtime-teams.tsx`：约 649 行
+- `src/types/runtime.ts`：约 651 行
 
-相比旧状态，`runtime-api.ts` 已经完成拆分，不再是主要热点；但 `RuntimeTeams` 和 `workspace-page` 仍然承担了过多状态机、格式化和 UI 组装逻辑，后续继续在这两个文件上堆功能会显著降低可维护性。
+相比旧状态，`runtime-api.ts` 和 `runtime-teams.tsx` 已经完成拆分，不再是唯一热点；但 config editor 与 team dispatch/detail 子域仍然承担了较多状态机、格式化和 UI 组装逻辑，后续应继续按 domain editor / hook / presentational component 拆分。
 
 ## 8. 已知偏差与文档不一致点
 
@@ -300,8 +324,8 @@ Deer Flow 前端中的以下领域层能力当前仍未迁入：
 
 建议动作：
 
-1. 拆分 `runtime-teams.tsx`，至少按“概览 / 详情 / mailbox / path claims / dispatch / monitor”拆为子组件或 hooks。
-2. 拆分 `workspace-page.tsx`，把 history 同步、runtime stream、chat SSE 状态机和 artifact 生成逻辑下沉。
+1. 继续拆分 `runtime-teams.tsx` 及 `runtime-teams/*` 子域，重点收敛 dispatch/detail/monitor 的状态边界。
+2. 继续保持 `workspace-page.tsx` 的装配层定位；当前页面约 138 行，后续应把剩余 chat submit 和 artifact 聚合逻辑下沉到 hooks/domain helpers。
 3. 继续收紧 `src/types/runtime.ts`，把 API 返回类型、UI 展示类型和本地工作台模型边界拆清。
 4. 为 SSE 解析、消息合并、多 team dispatch monitor 补最小测试。
 
@@ -313,7 +337,7 @@ Deer Flow 前端中的以下领域层能力当前仍未迁入：
 
 ### Phase 3：补齐工作台 MVP 缺口
 
-当前状态：待开始
+当前状态：部分已开始
 
 目标：
 
@@ -321,15 +345,15 @@ Deer Flow 前端中的以下领域层能力当前仍未迁入：
 
 建议动作：
 
-1. 增加线程级路由和更明确的 session 创建、恢复、切换流程。
-2. 为 artifact 面板补真实文件拉取、预览和错误处理。
+1. 收敛现有 `/workspace/chats/*`、`/workspace/sessions/*`、`/workspace/restore/*` 的 session 创建、恢复、切换流程。
+2. 在已有 checkpoint preview / file diff 基础上，为 artifact 面板补 Deer Flow 式线程文件系统 artifact、通用文件拉取和错误处理。
 3. 为多 team fan-out 增加结果聚合、outcome 汇总和 summary 对比视图。
 4. 提升消息区的 workflow 表达，补 inline tool steps、消息分组和更明确的运行轨迹展示。
 
 验收标准：
 
 - 多 session、多 team 工作流可以稳定复用
-- artifact 不再只依赖前端拼装字符串
+- checkpoint preview / file diff 可用，线程文件系统 artifact 不再只依赖前端拼装字符串
 - 多 team 执行结果可以在前端完成收敛和比对
 
 ### Phase 4：选择性吸收 Deer Flow 的高级前端能力
@@ -359,7 +383,7 @@ Deer Flow 前端中的以下领域层能力当前仍未迁入：
 
 1. 直接把 Deer Flow 的 `src/app`、`src/core`、`src/server` 整体复制进当前仓库。
 2. 为了复用来源前端，强行让本项目后端去模拟 Deer Flow 的前端协议。
-3. 在 `runtime-teams.tsx` 和 `workspace-page.tsx` 这两个热点文件上继续串行堆功能，而不先拆结构。
+3. 在 settings/config editor、runtime-teams dispatch/detail 等当前热点文件上继续串行堆功能，而不先拆结构。
 4. 在缺少最小测试的情况下继续快速扩展 team orchestration 交互。
 
 这些做法都会让迁移从“有边界的裁剪重构”退化为“高耦合搬运”。
@@ -368,9 +392,9 @@ Deer Flow 前端中的以下领域层能力当前仍未迁入：
 
 建议按下面顺序推进：
 
-1. 先拆 `runtime-teams.tsx` 和 `workspace-page.tsx`，同时补最小测试。
+1. 先继续拆 settings/config editor 与 runtime-teams dispatch/detail 子域，同时保持 `workspace-page.tsx` 的装配层定位。
 2. 再补多 team 结果聚合、outcome 汇总和真实 artifact 拉取。
-3. 然后增加线程级路由和更完整的 session 恢复流程。
+3. 然后继续收敛现有 workspace deep link 与更完整的 session 恢复流程。
 4. 最后再选择性吸收 Deer Flow 中成熟但低耦合的高级组件。
 
 如果必须在“继续扩功能”和“先收工程质量”之间二选一，当前阶段应优先收工程质量和结果聚合，因为现有控制面已经足够深，再继续堆功能而不拆边界，后续维护成本会明显上升。
@@ -399,9 +423,9 @@ Deer Flow 前端中的以下领域层能力当前仍未迁入：
 | --- | --- | --- | --- |
 | WS-A 基础质量收口 | 已完成首轮 | 保持 `lint/build` 持续通过，避免基础组件回退 | `src/components/ui/*`、`src/components/landing/*`、局部 workspace 组件 |
 | WS-B Runtime API 模块化 | 已完成首轮 | 继续收紧类型边界和兼容出口 | `src/api/runtime/*`、`src/lib/runtime-api.ts`、`src/types/*` |
-| WS-C Workspace 页状态拆分 | 进行中 | 拆 `workspace-page.tsx` 的 history/runtime/chat/artifact 逻辑 | `src/pages/workspace-page.tsx`、后续 `src/hooks/workspace/*` |
+| WS-C Workspace 页状态拆分 | 进行中 | 保持 `workspace-page.tsx` 装配层定位，继续下沉 chat/artifact 逻辑 | `src/pages/workspace-page.tsx`、`src/hooks/workspace/*` |
 | WS-D Runtime Teams 拆分 | 进行中 | 拆 `runtime-teams.tsx` 的概览、邮箱、路径占用、派发、监控等子域 | `src/components/workspace/runtime-teams.tsx`、后续 `src/components/workspace/runtime-teams/*` |
-| WS-E 最小测试补齐 | 待开始 | 为 SSE、消息合并、dispatch monitor 补最小自动化测试 | `src/**/*.test.*` |
+| WS-E 最小测试补齐 | 已有基线 | 继续为 SSE、消息合并、dispatch monitor 补高风险自动化测试 | `src/**/*.test.*` |
 | WS-F 结果聚合与 artifact 补齐 | 待开始 | 收敛多 team 执行结果，并补真实 artifact 拉取/预览 | `src/components/workspace/*`、`src/pages/*`、`src/api/runtime/*` |
 
 建议的边界约束：
@@ -422,7 +446,7 @@ Deer Flow 前端中的以下领域层能力当前仍未迁入：
 | WS-B Runtime API 模块化 | 已完成 | 已落地 `src/api/runtime/*` 和 `src/types/runtime.ts`，旧入口保留兼容 |
 | WS-C Workspace 页状态拆分 | 第一轮完成 | 已拆出 runtime teams 加载、session history 同步、runtime stream 订阅 3 个 hooks，聊天提交流和 artifact 逻辑仍待继续下沉 |
 | WS-D Runtime Teams 拆分 | 第一轮完成 | 已抽出共享类型、排序、格式化和 dispatch 模板逻辑到 `runtime-teams/shared.ts`，UI 细粒度组件拆分仍待继续 |
-| WS-E 最小测试补齐 | 未开始 | 当前仍缺前端自动化测试 |
+| WS-E 最小测试补齐 | 已有基线 | 当前已有 52 个 `*.test.ts(x)`，仍需补高风险流程测试 |
 | WS-F 结果聚合与 artifact 补齐 | 未开始 | 当前仍缺多 team 执行结果聚合和真实 artifact 拉取 |
 
 本轮统一验证结果：
@@ -535,29 +559,32 @@ artifact 详情区也具备独立的 header、view mode、code/preview 切换和
 
 ### 14.4 当前项目的页面与 workspace 结构
 
-当前 `ai-agent-runtime` 前端页面入口非常扁平：
+当前 `ai-agent-runtime` 前端页面入口仍比 Deer Flow 扁平，但已从单页 workspace 扩展出基础路由：
 
 - [frontend/src/App.tsx](E:/projects/ai/ai-agent-runtime/frontend/src/App.tsx)
   - `/`
-  - `/workspace`
+  - `/logs`
+  - `/runtime/config`
+  - `/workspace/chats/new`
+  - `/workspace/chats/:threadId`
+  - `/workspace/sessions/:sessionId`
+  - `/workspace/restore/:sessionId`
 
 landing 页面当前是简化版：
 
 - [frontend/src/pages/landing-page.tsx](E:/projects/ai/ai-agent-runtime/frontend/src/pages/landing-page.tsx)
   - `LandingHeader`
   - `Hero`
-  - `FeatureGrid`
-  - `LandingFooter`
+  - lazy `LandingDeferredSections`
+
+`LandingDeferredSections` 中再延迟加载 case study、skills、what's new、community、footer 等后续 section。
 
 workspace 当前则是单页控制台：
 
 - [frontend/src/pages/workspace-page.tsx](E:/projects/ai/ai-agent-runtime/frontend/src/pages/workspace-page.tsx)
-  - 线程本地状态
-  - session history 同步
-  - session runtime stream
-  - agent chat SSE
-  - runtime teams 数据加载
-  - 把以上状态统一传给 `WorkspaceShell`
+  - 约 138 行，主要负责 hooks 装配
+  - 线程选择、session history、runtime stream、runtime teams 数据加载已下沉到 `src/hooks/workspace/*`
+  - 页面层把状态统一传给 `WorkspaceShell`
 
 `WorkspaceShell` 的布局是显式三栏：
 
@@ -567,11 +594,11 @@ workspace 当前则是单页控制台：
   - 中栏 `MessageList + MessageComposer`
   - 右栏 `ArtifactPanel`
 
-左栏内部除了线程列表，还直接嵌了 `RuntimeTeams`：
+左栏内部除了线程列表，还展示 runtime teams summary，并通过 lazy `RuntimeTeamsDialog` 打开完整 team 控制面：
 
 - [frontend/src/components/workspace/workspace-sidebar.tsx](E:/projects/ai/ai-agent-runtime/frontend/src/components/workspace/workspace-sidebar.tsx)
 
-这意味着当前项目把“全局导航层”和“运行时控制面”合并到了同一个左侧栏中。
+这意味着当前项目已经避免把完整 `RuntimeTeams` 控制面直接塞进 sidebar；左栏仍承担一部分 runtime summary / launch surface，但完整控制面在 dialog 中呈现。
 
 ### 14.5 已复用的结构与视觉模式
 
@@ -593,10 +620,10 @@ workspace 当前则是单页控制台：
 
 当前前端也已经明显偏离 Deer Flow 原实现，并开始围绕 `ai-agent-runtime` 自己建模：
 
-- 页面入口从多子路由收缩成单个 `/workspace`
-- `WorkspaceSidebar` 直接承载 `RuntimeTeams` 控制面，而不是只做导航
+- 页面入口仍比 Deer Flow 少，但已围绕 logs、runtime config、workspace chats/sessions/restore 建立本项目自己的路由集合
+- `WorkspaceSidebar` 承载 runtime teams summary 和 dialog launch surface，而不是只做导航
 - `WorkspacePage` 直接处理 `/api/agent/chat`、session history、runtime event stream
-- artifact 目前偏向“前端组装出来的运行时回执/JSON 产物”，而不是 Deer Flow 那种线程文件系统视角
+- artifact 已有 checkpoint preview / file diff 等 runtime-backed 能力，但还不是 Deer Flow 那种完整线程文件系统视角
 - 线程模型当前是本地 UI 线程 + runtime session 的混合模型，而不是 Deer Flow 的 `core/threads` 体系
 
 所以当前前端的本质不是“简化版 Deer Flow”，而是“借了 Deer Flow 的浏览器壳，但已经在 runtime 协议上自成一套”。
@@ -609,7 +636,7 @@ workspace 当前则是单页控制台：
 2. 当前把“线程导航”和“team orchestration 控制面”揉在了同一个 sidebar 里，左栏职责过重。
 3. 当前 artifact panel 是固定第三列，而不是内容区内部可开合的附属面板，灵活性不如来源实现。
 4. 当前 message 区仍是简化模型，离来源项目的富消息分组、subtask、artifact 伴随展示还有明显差距。
-5. 当前缺少线程级路由和 session 恢复流程，导致 workspace 还像“控制台页面”，不像“真正的工作区”。
+5. 当前已有基础线程/session/restore deep link，但恢复索引、切换语义和布局层级还需要继续收敛，workspace 仍更像本项目 runtime 控制台，而不是 Deer Flow 那种完整工作区。
 
 可以把这个缺口总结为一句话：
 
@@ -625,7 +652,7 @@ workspace 当前则是单页控制台：
 | Chat Surface Owner | message list、composer、streaming、thread 切换 | 把聊天主面板从页面状态机里继续拆出，并向更丰富的消息呈现靠拢 |
 | Artifact Surface Owner | artifact 列表、详情、预览、开合逻辑 | 把右侧固定列逐步演进成更接近 Deer Flow 的可控 artifact surface |
 | Team Console Owner | runtime teams、mailbox、path claims、dispatch、monitor | 保持 team 控制面围绕 runtime 能力演进，但避免继续侵入主 sidebar 边界 |
-| Route and Session Owner | 线程级路由、session 恢复、页面入口组织 | 把当前单页 `/workspace` 演进成真正的 workspace 路由体系 |
+| Route and Session Owner | 线程级路由、session 恢复、页面入口组织 | 继续收敛 `/workspace/chats/*`、`/workspace/sessions/*`、`/workspace/restore/*` 的恢复与切换语义 |
 
 推荐的执行顺序：
 

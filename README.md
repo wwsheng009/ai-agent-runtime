@@ -2,7 +2,7 @@
 
 通用 Multi-Agent 执行运行时，提供：
 
-- **`aicli`** —— 命令行工具，对接 AI Gateway，支持配置查看、端点测试、上下文测试、MCP、管道模式等
+- **`aicli`** —— 命令行工具，默认进入 chat，支持 provider login、session/resume、slash commands、tools/skills、shell/background、MCP、管道模式、配置查看、端点测试和上下文测试
 - **`runtime-server`** —— Skills / Agent HTTP 服务（`/api/agent`、`/api/runtime`、`/healthz`）
 - **`frontend/`** —— React + TypeScript 控制台
 
@@ -36,7 +36,7 @@ make install-aicli
 
 📖 **完整安装与配置说明**：[docs/aicli/install.md](./docs/aicli/install.md)
 
-涵盖：一键脚本 / `make install-aicli` / `go install` 三种安装方式、配置文件查找顺序、`aicli init --global`、最小配置示例、环境变量、常用命令、卸载等。
+涵盖：一键脚本 / `make install-aicli` / 本地模块内 `go install`、配置文件查找顺序、starter 配置、`aicli init`、`aicli login`、`aicli.chat` 偏好、session/resume、MCP、slash commands、shell/background、常用命令和卸载等。
 
 ### 验证
 
@@ -54,7 +54,7 @@ aicli config
 ```bash
 # 后端 HTTP 服务
 cd backend
-go run ./cmd/runtime-server --listen 127.0.0.1:8101
+go run ./cmd/runtime-server serve --listen 127.0.0.1:8101
 # 提供 POST /api/agent/chat、/api/runtime/*、GET /healthz
 ```
 

@@ -99,13 +99,42 @@
 - `SendSessionAgentInput`
 - `WaitSessionAgents`
 - `ListSessionAgentEvents`
+- `ListSessionAgentMailboxEvents`
+- `ListSessionAgentControlMailbox`
 - `CloseSessionAgent`
 - `ResumeSessionAgent`
+- `GetSessionRuntimeState`
+- `ListSessionRuntimeEvents`
+- `StreamSessionRuntimeEvents`
+- `SubmitSessionRuntimeCommand`
+- `ListAgentControlTasks`
+- `ListAgentControlMailbox`
+- `CreateAgentControlTask`
+- `UpdateAgentControlTask`
+- `UpdateAgentControlTaskStatus`
+- `ClaimAgentControlTask`
+- `RenewAgentControlTaskLease`
+- `ReleaseAgentControlTask`
+- `UpdateAgentControlTaskTerminal`
+- `BlockAgentControlTask`
+- `CreateAgentControlTaskDependency`
+- `ListAgentControlTaskDependencies`
+- `ListAgentControlTaskGraphEvents`
+- `ListBackgroundJobs`
+- `GetBackgroundJob`
+- `ListBackgroundJobEvents`
+- `GetBackgroundJobOutput`
+- `ListSessionCheckpoints`
+- `GetCheckpointFiles`
+- `PreviewSessionCheckpoint`
+- `RestoreSessionCheckpoint`
 
 说明：
 
 - 轻量 child-agent 控制面已经提供独立 HTTP API：`/api/runtime/sessions/{id}/agents*`
 - 现在 `pkg/skillsapi` 也已提供 typed helper；HTTP 语义与 `curl` 示例见 `docs/skill_runtime/session_agent_api.md`
+- 当前 client 尚未覆盖全部 runtime operations HTTP surface。`/api/runtime/service`、`/api/runtime/logs*`、`/api/runtime/config/document*`、`/api/runtime/models`、`/api/runtime/fs/*`、`/api/runtime/sessions/{id}/generated-images/{name}` 仍需直接使用 HTTP client 或后续补 typed helper。
+- Background jobs typed helper 已覆盖 list/get/events/output，但当前尚未提供 `CancelBackgroundJob` typed helper。
 
 ## 初始化
 
@@ -157,7 +186,7 @@ authPolicy, err := client.GetAuthPolicy(ctx)
 推荐先在 `E:\projects\ai\ai-agent-runtime\backend` 启动独立服务：
 
 ```bash
-go run ./cmd/runtime-server --listen 127.0.0.1:8081
+go run ./cmd/runtime-server serve --listen 127.0.0.1:8081
 ```
 
 然后在同一仓库目录执行 demo：
@@ -220,6 +249,8 @@ mutationPolicy, err := client.GetMutationPolicy(ctx)
 - `SendSessionAgentInput`
 - `WaitSessionAgents`
 - `ListSessionAgentEvents`
+- `ListSessionAgentMailboxEvents`
+- `ListSessionAgentControlMailbox`
 - `CloseSessionAgent`
 - `ResumeSessionAgent`
 
@@ -301,8 +332,8 @@ resp, err := client.ReportTaskOutcome(ctx, "team-1", "task-1", skillsapi.ReportT
 Compatibility notes:
 
 - `ReportTaskOutcome` uses the canonical `/outcome` endpoint.
-- `CompleteTask`, `FailTask`, and `BlockTask` are compatibility wrappers around the legacy HTTP aliases.
-- Legacy HTTP aliases still return compatibility headers on the server side.
+- `CompleteTask`, `FailTask`, and `BlockTask` are typed convenience wrappers that set `task_status` and then call the canonical `/outcome` endpoint.
+- `/complete`, `/fail`, and `/block` are historical HTTP alias notes, not current live routes in `backend/internal/api/skills/handler.go`.
 
 Task and mailbox helpers:
 

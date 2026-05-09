@@ -1,8 +1,15 @@
 # aicli chat TUI slash 命令自动补全分析与实施方案
 
-状态: **planned**
+状态: **implemented baseline**
 
 调研日期: **2026-05-02**
+
+当前状态（2026-05-09）：
+
+- slash command catalog 已集中在 `backend/cmd/aicli/commands/chat_slash_command_catalog.go`。
+- TUI completion controller 已实现，支持 Tab 补全、候选循环、Up/Down 导航、Enter 接受、Esc 关闭。
+- 参数补全已覆盖 session/function/skill/model/login 等动态候选。
+- 本文后续 Phase 2/3 的“未来计划”表述保留为设计记录；当前代码已具备 baseline 能力，后续重点是视觉细节和更多参数源补齐。
 
 ## 结论
 

@@ -310,4 +310,4 @@ If `--profile` is not specified:
 
 - Should MCP configs be merged (by server name) or replaced?
 - Should agent-specific skills be loaded into a dedicated registry (per agent) or shared?
-- Do we need a new API to expose profile metadata to clients?
+- Profile metadata API exposure is no longer an open baseline question: runtime status / health / trace / validate surfaces now include `profile.reference` and `profile.resolved`. See `docs/multi-agents/profile/implementation-status.md` for current implementation evidence.

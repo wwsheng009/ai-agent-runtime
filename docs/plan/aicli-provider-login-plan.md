@@ -522,9 +522,9 @@ OAuth：
 
 - `--config` 指定时写该文件。
 - 未指定时写 `cfg.ConfigFilePath`。
-- 如果 `cfg.ConfigFilePath` 为空，交互模式下应提示无法保存；非交互模式直接失败。
+- 当前实现已调整：如果没有现有配置路径，会通过可写配置路径策略创建本地 starter `./.aicli/config.yaml` 后写入，而不是直接失败。
 
-不建议在没有完整配置加载能力前自动创建 `$HOME/.aicli/config.yaml`，因为当前配置搜索是“首个存在文件生效”，创建局部配置可能遮蔽项目内完整 provider 配置。
+仍不建议在没有用户显式要求时自动创建 `$HOME/.aicli/config.yaml`，因为当前配置搜索是“首个存在文件生效”，创建全局配置可能遮蔽项目内完整 provider 配置；当前默认落点是项目本地 starter。
 
 ## 文件级调整建议
 

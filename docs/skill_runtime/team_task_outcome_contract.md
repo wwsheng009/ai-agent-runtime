@@ -2,17 +2,17 @@
 
 ## Scope
 
-This document describes the canonical Team task outcome API and its compatibility aliases.
+This document describes the canonical Team task outcome API and the broker/tool compatibility surface.
 
 Canonical HTTP entrypoint:
 
 - `POST /api/runtime/teams/{id}/tasks/{task_id}/outcome`
 
-Compatibility aliases:
+Current HTTP surface:
 
-- `POST /api/runtime/teams/{id}/tasks/{task_id}/complete`
-- `POST /api/runtime/teams/{id}/tasks/{task_id}/fail`
-- `POST /api/runtime/teams/{id}/tasks/{task_id}/block`
+- The current `runtime-server` route table registers `/outcome` as the HTTP entrypoint.
+- Older docs and tests may mention `/complete`, `/fail`, and `/block`; those are not current live HTTP routes in `backend/internal/api/skills/handler.go`.
+- The Go client methods `CompleteTask`, `FailTask`, and `BlockTask` are convenience wrappers that set `task_status` and still call the canonical `/outcome` endpoint.
 
 Canonical broker tool:
 
@@ -103,17 +103,17 @@ Blocked responses may also include:
 - `planned_dependencies`
 - `planned_summary`
 
-## Compatibility HTTP Aliases
+## Compatibility Notes
 
-`/complete`, `/fail`, and `/block` remain available for compatibility.
+`/complete`, `/fail`, and `/block` are historical HTTP aliases from earlier design notes.
 
 Current behavior:
 
-- they reuse the same internal outcome handling path as `/outcome`
-- they return `Warning` compatibility headers
-- they return `X-AI-Gateway-Canonical-Entrypoint` pointing to `/outcome`
-- `/complete` / `/fail` still accept legacy summary-only request bodies
-- `/block` still accepts the older blocked-style request body
+- server-side live route: `POST /api/runtime/teams/{id}/tasks/{task_id}/outcome`
+- typed client convenience wrappers: `CompleteTask`, `FailTask`, `BlockTask`
+- broker compatibility alias: `block_current_task`
+
+If HTTP alias compatibility is needed again, the route table must be updated first; documentation alone should not assume those paths exist.
 
 ## Broker Tool Contract
 

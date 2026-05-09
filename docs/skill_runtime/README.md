@@ -27,21 +27,24 @@ The current implementation status is:
 - `skills API` is available in `ai-agent-runtime`
 - `aicli chat` can expose skills as AI-callable functions
 - governance, usage/quota, search monitoring, and source layering are documented
+- LLM retry policy now applies to both non-stream `Call()` and streaming `Stream()` before the first emitted content, using provider retry config and runtime config reloads
 
 执行入口说明：
 
 - 独立 runtime 业务侧统一入口：`POST /api/agent/chat`
-- `POST /api/agent/chat` 为 compatibility alias
+- 当前 `runtime-server` 注册的 agent chat HTTP 入口就是 `POST /api/agent/chat`；旧文档中的 `/api/skills/agent/chat` 视为历史兼容说明，不再作为当前路由来源
 - `POST /api/runtime/skills/{name}/execute` 为 admin/debug（非主入口）
 - Team task outcome 统一入口：`POST /api/runtime/teams/{id}/tasks/{task_id}/outcome`
-- `POST /api/runtime/teams/{id}/tasks/{task_id}/complete|fail|block` 为 compatibility alias
+- `POST /api/runtime/teams/{id}/tasks/{task_id}/complete|fail|block` 是历史 HTTP alias 说明；当前源码 live route 只注册 `/outcome`
 
 推荐启动方式：
 
 ```bash
 cd E:\projects\ai\ai-agent-runtime\backend
-go run ./cmd/runtime-server --listen 127.0.0.1:8081
+go run ./cmd/runtime-server serve --listen 127.0.0.1:8081
 ```
+
+不带子命令时仍兼容旧写法，等价于 `serve`。
 
 For the latest implementation status, start with:
 
@@ -64,10 +67,11 @@ For the latest implementation status, start with:
 1. [Skills API Result Contract](./skills_api_result_contract.md)
 2. [Skills API Stream Contract](./skills_api_stream_contract.md)
 3. [Session Agent HTTP API](./session_agent_api.md)
-4. [Skills API Client](./skills_api_client.md)
-5. [Team Task Outcome Contract](./team_task_outcome_contract.md)
-6. [Skill Invocation Mechanism](./skill_invocation_mechanism.md)
-7. [AICLI Skills Usage](./aicli_skills_usage.md)
+4. [Runtime Operations API](./runtime_operations_api.md)
+5. [Skills API Client](./skills_api_client.md)
+6. [Team Task Outcome Contract](./team_task_outcome_contract.md)
+7. [Skill Invocation Mechanism](./skill_invocation_mechanism.md)
+8. [AICLI Skills Usage](./aicli_skills_usage.md)
 
 ### If you want to operate or govern it
 
@@ -108,7 +112,9 @@ For the latest implementation status, start with:
 - [Skills API Client](./skills_api_client.md)
   - Go client usage for `skills API`.
 - [Team Task Outcome Contract](./team_task_outcome_contract.md)
-  - Canonical `/outcome` API, compatibility aliases, and broker outcome reporting rules.
+  - Canonical `/outcome` API, typed client convenience wrappers, and broker outcome reporting rules.
+- [Runtime Operations API](./runtime_operations_api.md)
+  - Current `runtime-server` process commands and `/api/runtime/*` operations surface for service, logs, config, models, file transfer, background jobs, sessions, checkpoints, generated images, teams, and AgentControl.
 - [Skill Invocation Mechanism](./skill_invocation_mechanism.md)
   - How AI becomes aware of skills, how skills are routed or exposed, and how `prompt` is consumed across the invocation path.
 - [AICLI Skills Usage](./aicli_skills_usage.md)
@@ -129,15 +135,16 @@ For the latest implementation status, start with:
 
 ### Skill Packs
 
-- [System Skills](./skills/README.md)
+- [System Skills](../../.agents/skills/README.md)
   - Rules for what should and should not live in the built-in system skill directory.
 
 Current built-in system skills:
 
-- [skill_runtime_smoke](./skills/skill_runtime_smoke/skill.yaml)
-- [run_shell_command](./skills/run_shell_command/skill.yaml)
-- [fetch_url_content](./skills/fetch_url_content/skill.yaml)
-- [view_file_content](./skills/view_file_content/skill.yaml)
+- [skill_runtime_smoke](../../.agents/skills/skill_runtime_smoke/skill.yaml)
+- [run_shell_command](../../.agents/skills/run_shell_command/skill.yaml)
+- [fetch_url_content](../../.agents/skills/fetch_url_content/skill.yaml)
+- [view_file_content](../../.agents/skills/view_file_content/skill.yaml)
+- [imagegen](../../.agents/skills/imagegen/skill.yaml)
 
 ### Design History
 

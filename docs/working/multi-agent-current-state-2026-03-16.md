@@ -8,6 +8,7 @@ Scope: `runtime.yaml` provider/model resolution, `/api/agent/chat`, `spawn_team`
 > - The live `/api/agent/chat` and `/api/skills` service has since moved to `E:\projects\ai\ai-agent-runtime\backend`.
 > - In the standalone runtime repo, many old paths under `internal/runtime/<subpkg>` were flattened to `internal/<subpkg>`.
 > - When re-running anything below today, use `cmd/runtime-server` instead of a gateway-hosted runtime.
+> - Current standalone route groups are `/api/agent/chat` and `/api/runtime/*`. Any `/api/skills/teams/*` or `/api/skills/runtime/*` verification lines below are historical gateway-era observations; re-run them as `/api/runtime/teams/*` or `/api/runtime/traces*`.
 > - When this document mentions `configs/runtime.yaml` or `configs/config.yaml`, read them as `backend/configs/runtime.yaml` and `backend/configs/config.yaml`.
 > - All `go test ./...` commands below should be run from `E:\projects\ai\ai-agent-runtime\backend`.
 

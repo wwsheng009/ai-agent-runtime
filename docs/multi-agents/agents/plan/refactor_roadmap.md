@@ -4,6 +4,9 @@
 > Scope: `/api/agent/chat` (canonical) + `/api/skills/agent/chat` (compat) unification with multi‑agent target architecture  
 > Reference: `docs/multi-agents/plan/architecture.md` (Target Architecture)
 
+> Current sync (2026-05-09):
+> This is an early refactor roadmap. The current `runtime-server` route table registers `POST /api/agent/chat` and `/api/runtime/*`; `/api/skills/agent/chat` is historical documentation context, not a live compatibility route in `backend/internal/api/skills/handler.go`. Current admin/debug skill execution is `POST /api/runtime/skills/{name}/execute`.
+
 ## 1. Why Refactor
 
 The target architecture positions **agent orchestration above skills**, with:

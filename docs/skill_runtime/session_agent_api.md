@@ -11,11 +11,13 @@ This document describes the lightweight child-agent control plane exposed under 
 
 - `POST /api/runtime/sessions/{id}/agents`
 - `POST /api/runtime/sessions/{id}/agents/wait`
+- `GET /api/runtime/sessions/{id}/agents/events`
 - `GET /api/runtime/sessions/{id}/agents/{agent_id}`
 - `POST /api/runtime/sessions/{id}/agents/{agent_id}/input`
 - `GET /api/runtime/sessions/{id}/agents/{agent_id}/events`
 - `POST /api/runtime/sessions/{id}/agents/{agent_id}/close`
 - `POST /api/runtime/sessions/{id}/agents/{agent_id}/resume`
+- `GET /api/runtime/sessions/{id}/agent-control/mailbox`
 
 实现入口位于：
 
@@ -61,6 +63,8 @@ Request body:
   - 可选，记录期望模型。
 - `fork_context`
   - 可选，`true` 时复制父 session history 到 child session。
+- `fork_turns`
+  - 可选，精细控制复制多少轮父 session history。当前实现支持 `none`、`all` 或数字字符串/数值；未传时由 runtime config 的 `defaultForkTurns` 决定。
 
 Response:
 
@@ -161,6 +165,7 @@ Response:
 
 - 批量模式下，任一 child ready 就会返回。
 - 超时不会报错；而是返回当前快照并带 `timed_out=true`。
+- 当请求体没有 `id` / `session_id` / `ids` / `session_ids` 时，HTTP handler 会把目标设为父 session，并启用 `mailbox_only` 模式；这用于等待 parent mailbox / collab event，而不是等待某个 child session。
 
 ### `GET /api/runtime/sessions/{id}/agents/{agent_id}`
 
@@ -192,6 +197,10 @@ Response:
 ### `GET /api/runtime/sessions/{id}/agents/{agent_id}/events`
 
 读取 child session 的 runtime events。
+
+### `GET /api/runtime/sessions/{id}/agents/events`
+
+读取父 session mailbox / collab event。该路由复用 `ListSessionAgentEvents`，因为没有路径级 `agent_id`，会启用 `mailbox_only` 模式。
 
 Query params:
 
@@ -226,6 +235,35 @@ Response:
 - `agent_name`
 - `timestamp`
 - `payload`
+
+### `GET /api/runtime/sessions/{id}/agent-control/mailbox`
+
+读取 durable AgentControl mailbox rows，而不是把 mailbox 转换成 legacy runtime event 形态。
+
+Query params:
+
+- `after_seq`
+- `limit`
+- `wait_ms`
+
+Response:
+
+```json
+{
+  "result": {
+    "session_id": "session_parent",
+    "messages": [],
+    "count": 0,
+    "latest_seq": 0,
+    "source": "agent_control_mailbox",
+    "after_seq": 0,
+    "control_only": true,
+    "timed_out": true
+  }
+}
+```
+
+该入口适合需要读取 AgentControl 原生 mailbox seq / control seq 的调用方；只需要 child-agent 事件形态时继续使用 `/agents/events` 或 `/agents/{agent_id}/events`。
 
 ### `POST /api/runtime/sessions/{id}/agents/{agent_id}/close`
 
@@ -315,7 +353,7 @@ Response:
 下面示例假定：
 
 - 已在 `E:\projects\ai\ai-agent-runtime\backend` 启动：
-  `go run ./cmd/runtime-server --listen 127.0.0.1:8081`
+  `go run ./cmd/runtime-server serve --listen 127.0.0.1:8081`
 - 本地安装了 `jq`
 
 ```bash

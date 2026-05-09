@@ -195,9 +195,9 @@ ai-agent-runtime/
 | `internal/gateway/loadbalancer` | 网关核心能力，runtime 侧只保留抽象接口 |
 | `internal/config` 全量 | 网关全局配置过大，已裁剪出 `agentconfig` 子集 |
 | `internal/runtime/e2e` | 依赖完整网关环境 |
-| `internal/model` | 持久层 ORM 模型，属于网关数据库边界 |
+| `internal/model` | 网关持久层 ORM 模型未原样迁入；当前 runtime 仅保留轻量 `backend/internal/model/entity` 等运行期所需结构 |
 | `internal/repository` | 数据访问层，属于网关持久层 |
-| `internal/session` | 会话管理，强依赖网关数据库与上下文 |
+| `internal/session` | 网关 DB-backed session 未原样迁入；当前 runtime 使用自己的 `backend/internal/chat` session/runtime 存储 |
 | `internal/taskqueue` | 依赖网关基础设施 |
 
 ### 3.3 当前仍成立的解耦原则
@@ -349,7 +349,7 @@ ai-agent-runtime/
 
 - `backend/` 下 `go build ./...` 无错误
 - `backend/internal/` 已摆脱对原网关若干核心路径的直接依赖
-- `cmd/aicli/` 已迁入独立仓库
+- `backend/cmd/aicli/` 已迁入独立仓库
 
 需要注意：
 

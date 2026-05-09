@@ -1,10 +1,13 @@
 # aicli chat 运行时切换模型与 reasoning_effort 可行性分析
 
 - 调研日期：2026-04-29
-- 结论先行：可以实现，但应作为终端内运行时“选择菜单/弹出面板”来做，不是 GUI 弹窗。
-- 关键前提：当前代码里 `/model` 还会被 `/mode` 前缀误伤，必须先修复命令路由，否则新增模型切换命令会被错误分发。
+- 当前状态（2026-05-09）：本文前半部分是实现前分析；`/model` 路由误伤和运行时切换能力已经修复并落地。
+- 当前主实现：`backend/cmd/aicli/commands/chat_model_command.go`。
+- 当前能力：支持 `status`、`clear-reasoning`、`--provider/-p`、`--model/-m`、`--reasoning-effort/-r`，并在切换后刷新 provider、adapter、BaseURL、HTTP client、function builder、logger、local runtime、session metadata 和偏好持久化。
 
 ## 1. 现状结论
+
+> 历史说明：本节记录 2026-04-29 实现前状态，不能作为当前代码事实使用。
 
 - `backend/cmd/aicli/commands/command.go` 里已经有完整的 slash 命令分发，但没有真正的 `/model` 分支。
 - 同一个文件里，`strings.HasPrefix(cmdLower, "/mode")` 会把 `/model` 误判成 `permission-mode` 命令，因为 `/model` 也是 `/mode` 的前缀。
@@ -67,7 +70,7 @@
 ## 8. 实施状态
 
 - 已按上述方案落地运行时 `/model` 切换。
-- 运行时菜单实现位于 `backend/cmd/aicli/commands/chat_model_switch.go`。
+- 运行时菜单与命令实现位于 `backend/cmd/aicli/commands/chat_model_command.go`。
 - 命令路由已改为精确 token 匹配，避免 `/model` 被 `/mode` 前缀误伤。
-- 切换流程会先应用 model mapping，再更新 `BaseURL`、`ReasoningEffort`，并同步持久化会话。
+- 切换流程会先应用 model mapping 和 provider capability 校验，再更新 provider、adapter、`BaseURL`、HTTP client、function builder、logger、local runtime、`ReasoningEffort`，并同步持久化会话与 `aicli.chat` 偏好。
 - 相关测试已补充，覆盖路由、映射、BaseURL 更新、reasoning_effort 清空与优先级输入读取。

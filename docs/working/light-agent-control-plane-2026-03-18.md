@@ -9,6 +9,14 @@ Scope: 当前仓库新增的轻量 child-agent 控制工具
 > - `internal/api/skills/*` 与 `cmd/aicli/*` 的 runtime 侧实现也应以 `ai-agent-runtime` 仓库为准
 > - 如需按当前仓库定位代码，请优先映射到 `backend/internal/*` 与 `backend/cmd/aicli/*`
 
+> 当前同步（2026-05-09）：
+> - 轻量控制面已经扩展到 `list_agents`、`send_message`、`followup_task`、`resume_agent`，并与 `spawn_team` / `wait_team` 的 team 控制面共存。
+> - `fork_turns=none|all|N` 已落地；runtime config 字段使用 `agents.maxThreads`、`agents.maxDepth`、`agents.defaultForkTurns`。
+> - `wait_agent` / `read_agent_events` 已接入 event watcher / mailbox watcher，固定轮询只是 500ms fallback；无 target 时进入 parent mailbox / collab event 模式。
+> - AgentControl identity graph、path、spawn reservation、subtree close、maxThreads/maxDepth 已落地。
+> - `send_message` 只投递 mailbox；`followup_task` 在目标 idle 时触发新 turn，否则持久投递 mailbox；`send_input` 仍是直接 submit 兼容面，busy 时需要 `interrupt=true`。
+> - `spawn_team` 创建的 teammate id 不能当成 `spawn_agent` child id 传给 `wait_agent` / `read_agent_events`；等待 team 请使用 `wait_team`。
+
 ## 已实现
 
 当前系统已在 `toolbroker` 增加第一批轻量 agent 控制工具：
@@ -19,11 +27,15 @@ Scope: 当前仓库新增的轻量 child-agent 控制工具
 - `read_agent_events`
 - `close_agent`
 - `resume_agent`
+- `list_agents`
+- `send_message`
+- `followup_task`
 
 这些工具不是替代现有：
 
 - `spawn_subagents`
 - `spawn_team`
+- `wait_team`
 
 而是补出一层更接近 Codex 风格的轻量控制面。
 
@@ -173,7 +185,7 @@ Scope: 当前仓库新增的轻量 child-agent 控制工具
 ### 未完全支持
 
 - `items` 多模态输入
-- 真正的 queued mailbox 模型（当前更像直接再次 submit）
+- `send_input` 仍是直接再次 submit 的兼容面；queued mailbox 语义已经由 `send_message` / `followup_task` 承担
 - provider/model/profile 的完整 role layering
 - rich final status（仅返回轻量 session 快照，不是完整 thread transcript）
 - parent/child session 之间的强一致 push 订阅（当前是 event store 轮询）

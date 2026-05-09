@@ -8,6 +8,15 @@
 - 对比项目: `E:\projects\ai\codex`
 - 重点问题: 多 agent 并行执行、子 agent 输出隔离、等待/中断语义、控制台噪声、reasoning 输出、team 与 child session 的控制面边界。
 
+当前源码同步（2026-05-09）：
+
+- 本文前半部分保留了 2026-05-06 的差距分析；其中“缺 `fork_turns` / AgentRegistry / `list_agents` / mailbox wait / subtree close / spawn limits”等描述已经被后续实现追上。
+- 当前 toolbroker 已具备 `spawn_agent`、`list_agents`、`send_input`、`send_message`、`followup_task`、`wait_agent`、`read_agent_events`、`close_agent`、`resume_agent`、`spawn_team`、`wait_team`。
+- 当前 fork 语义支持 `fork_turns=none|all|N`，配置字段为 `agents.maxThreads`、`agents.maxDepth`、`agents.defaultForkTurns`。
+- 当前 AgentControl identity graph、path、spawn reservation、subtree close、maxThreads/maxDepth、task registry、mailbox projection 已落地；team task/dependency/outcome 写路径正在收敛到 AgentControl substrate。
+- 当前 `wait_agent` / `read_agent_events` 已接入 event watcher / mailbox watcher；无 target 时读取 parent mailbox / collab event。固定轮询描述只适合历史版本。
+- 当前仍需明确的边界是：`spawn_team` teammate id 不能直接等同于 `spawn_agent` child id；team 等待应使用 `wait_team`。
+
 ## 1. 结论摘要
 
 当前项目已经具备两套多 agent 能力:
@@ -30,6 +39,8 @@ Codex 的多 agent 机制更接近一个统一的 agent/thread tree:
 ## 2. 当前项目机制梳理
 
 ### 2.1 轻量 child session 控制面
+
+> 历史基线说明：本节先描述 2026-05-06 观察到的机制。到 2026-05-09，`fork_turns`、`list_agents`、event/mailbox watcher、parent mailbox wait/read、AgentControl registry/path/subtree close 等能力已经落地；当前事实以本文开头“当前源码同步”小节为准。
 
 主要代码:
 
@@ -285,6 +296,8 @@ Codex TUI 有专门的 multi-agent transcript、collab agent event、agent picke
 - `wait_agent/list_agents/send_message/followup_task` 接受 path，而不是让模型猜 id 类型。
 
 ### 5.2 wait/read 轮询导致延迟与资源浪费
+
+> 当前同步：固定 50ms 轮询是历史问题描述。当前实现已接入 event watcher / mailbox watcher，固定等待主要是 fallback；本节保留为问题来源记录。
 
 当前轻量 control plane:
 

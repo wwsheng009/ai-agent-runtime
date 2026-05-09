@@ -12,7 +12,7 @@
 > - 当前阻塞已从“核心能力缺失”转为“测试不全绿、API 编译链未收口、模块尚未完全接入主路径”。
 > - 自 2026-03-09 起，路线图按“通用 `skill / agent` 平台”重新基线；coding-specific 高阶能力不再作为平台阻塞项。
 > - 文中旧 `internal/runtime/*`、`internal/api/skills/*` 路径，如需映射到当前仓库，请按 `E:\projects\ai\ai-agent-runtime\backend\internal\...` 理解。
-> - 文中 `/monitor/*` 与 `/metrics` 多为 gateway-era 历史观测面；runtime 当前主观测入口请改看 `/api/skills/runtime/*`、`/api/skills/search/stats`、`/api/skills/usage/*`。
+> - 文中 `/monitor/*`、`/metrics`、`/api/skills/runtime/*` 多为 gateway-era 或旧 runtime 观测面；当前主观测入口请改看 `/api/runtime/status`、`/api/runtime/health`、`/api/runtime/traces*`、`/api/runtime/skills/search/stats`、`/api/runtime/usage/*`。
 > - 文中所有 `go test ./...` / `go run ./cmd/...` 命令，如需今天执行，请在 `E:\projects\ai\ai-agent-runtime\backend` 目录运行。
 
 ---
@@ -130,7 +130,7 @@
 - [x] 统一 provider / MCP 生命周期治理，包括连接状态、失败恢复、配置健康检查（当前已补 runtime status / runtime health / runtime validate 可见性，并支持 MCP runtime reload）
   - [x] provider health recheck + degraded/unhealthy 状态标记
   - [x] runtime config health validation（config file / embedding / workspace / hot-reload）
-  - [x] 历史：曾由 gateway 暴露 `/monitor/runtime-health` 统一摘要输出；当前 runtime 侧请改看 `/api/skills/runtime/status` 与 `/api/skills/runtime/health`
+  - [x] 历史：曾由 gateway 暴露 `/monitor/runtime-health` 统一摘要输出；当前 runtime 侧请改看 `/api/runtime/status` 与 `/api/runtime/health`
   - [x] MCP 健康检查定时器 + 失败后自动重连
   - [x] MCP 更细粒度 probe / failure recovery 策略（按工具或按资源）
 - [x] 为 `skills API` 增加更完整的端到端回归矩阵，覆盖 provider / MCP / session / search 组合路径

@@ -15,7 +15,7 @@ The implementation lives in `E:\projects\ai\ai-agent-runtime\backend\internal\ap
 
 ## Request Additions
 
-`POST /api/agent/chat`（兼容：`POST /api/agent/chat`）的流式请求目前额外支持：
+`POST /api/agent/chat` 的流式请求目前额外支持：
 
 - `workspace_path`
 - `planning_mode`
@@ -26,12 +26,21 @@ The implementation lives in `E:\projects\ai\ai-agent-runtime\backend\internal\ap
 
 - `planner_preferred`
 
+当前 `runtime-server` 的源码路由只注册 `POST /api/agent/chat`。旧文档中的 `/api/skills/agent/chat` 属于历史兼容入口说明；除非外层代理自行映射，否则不要把它当作当前仓库的 live route。
+
 流式执行分两种路径：
 
 - `llm_stream`：LLM token 流式输出，触发 `chunk` / `reasoning` / `tool_*` 等事件。
 - `static_sse`：用于 agent 路由/编排结果（含 planned subagents）。返回的是静态 SSE 事件序列，不提供增量 token 与 tool delta。
 
 当 `execute_planned_subagents=true` 时，流式请求 **支持执行 planned subagents**，并通过 `static_sse` 返回 `planning / orchestration / subagent / result / done` 等事件。
+
+LLM streaming retry behavior:
+
+- `LLMRuntime.Stream()` 使用与非流式 `Call()` 相同的 runtime retry policy。
+- provider 直接打开 stream 失败时可以按 retry rule 重试。
+- 如果 stream 在发出任何 text/image/tool 内容前先返回 error chunk，也可以按 retry rule 重试。
+- 一旦已经向客户端发出有效内容，后续 error chunk 不会自动重试，避免同一个响应前缀被重复发送。
 
 ## Transport
 

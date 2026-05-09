@@ -2,6 +2,13 @@
 
 日期：2026-05-01
 
+当前状态（2026-05-09）：
+
+- `aicli.chat` 偏好 schema 已实现，包含 `default_provider`、`default_model`、`reasoning_effort`、`stream`。
+- 启动优先级已落地：flag > loaded session > `aicli.chat` > interactive > provider default。
+- `/model` 已迁到 `backend/cmd/aicli/commands/chat_model_command.go`，支持跨 provider/model/reasoning 切换、能力校验、运行态刷新和偏好持久化。
+- 本文中“没有 chat 默认模型偏好”“`/model` 无法跨 provider/持久化”“扩展 `chat_model_switch.go`”等表述是实现前背景，不再代表当前代码事实。
+
 ## 目标
 
 优化 `aicli chat` 的启动交互，避免每次新开 CLI 都重复选择 provider、model 和 thinking/reasoning effort。
@@ -14,24 +21,26 @@
 - `/model` 不再只做当前 provider 下的 model 切换，应支持查看和修改 provider、model、thinking/reasoning effort，并把修改后的偏好保存回配置文件。
 - 会话历史和会话管理必须保持协议无关。OpenAI、Anthropic、Gemini、Codex 等协议差异只允许出现在请求构造、响应解析、工具调用格式转换等 adapter/provider 边界。
 
-## 当前代码结论
+## 实现前代码结论
+
+以下内容记录实现前入口与缺口，当前状态以本文开头“当前状态（2026-05-09）”为准。
 
 相关入口：
 
 - `backend/cmd/aicli/main.go` 负责解析 `--config`，按 `$HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml` 搜索配置。
-- `backend/internal/agentconfig/config.go` 定义当前配置结构。`AICLIConfig` 目前只有 `mcp/log/retry/timeout/theme`，没有 chat 默认模型偏好。
+- 历史状态下 `backend/internal/agentconfig/config.go` 的 `AICLIConfig` 只有 `mcp/log/retry/timeout/theme`，没有 chat 默认模型偏好；当前已经新增 `chat`。
 - `backend/cmd/aicli/commands/chat_options.go` 负责解析 chat flags，并提供 `resolveChatProviderName`、`resolveChatModelName`、`resolveChatStreamMode`。
 - `backend/cmd/aicli/commands/chat_bootstrap.go` 的 `prepareChatRuntimeState` 组合 provider、model、reasoning effort、adapter、baseURL。
-- `backend/cmd/aicli/commands/chat_model_switch.go` 已有 `/model` 实现，但只支持当前 provider 下切换 model，并在支持时调整 `ReasoningEffort`。
+- 历史状态下 `/model` 实现只支持当前 provider 下切换 model；当前主实现已迁到 `backend/cmd/aicli/commands/chat_model_command.go` 并支持跨 provider/model/reasoning 切换。
 - `backend/cmd/aicli/commands/command.go` 已经用 `commandMatches(cmdLower, "/model")` 做精确匹配，避免 `/model` 被 `/mode` 误伤。
 - `backend/cmd/aicli/commands/chat_provider_turn.go` 在每轮请求时把统一 `types.Message` 转成协议消息，并通过 `session.Adapter.BuildRequest` / `HandleResponse` 做协议适配。
 - `backend/internal/chatcore` 和 `backend/internal/types.Message` 已经提供较好的统一会话抽象基础，但 `ChatSession.Messages []map[string]interface{}` 与 `aicli_raw_message_json` 仍然把协议形态带回了 CLI 会话层。
 
-当前缺口：
+实现前缺口：
 
-- 新会话没有读取“用户上次选择”的独立配置，只能从历史会话恢复，或者重新交互选择。
-- `config.yaml` 没有模型偏好 schema，也没有局部 YAML 写回能力。
-- `ChatSession` 没有保存完整 `cfg` 或配置文件路径，`/model` 无法跨 provider 解析和持久化。
+- 历史状态下新会话没有读取“用户上次选择”的独立配置，只能从历史会话恢复，或者重新交互选择。
+- 历史状态下 `config.yaml` 没有模型偏好 schema，也没有局部 YAML 写回能力。
+- 历史状态下 `ChatSession` 没有保存完整 `cfg` 或配置文件路径，`/model` 无法跨 provider 解析和持久化。
 - `/model` 跨 provider 切换不只是改字段，还要刷新 adapter、baseURL、HTTP client、function schema builder、capability/reasoning 校验。
 - adapter 请求配置没有完整传入 `ReasoningEffortBudgets`、`ReasoningModel`、`Thinking` 等协议相关能力，Anthropic/Gemini 等 thinking 配置需要在请求层补齐，而不是让会话层感知协议细节。
 
@@ -149,7 +158,7 @@ type AICLIChatConfig struct {
 - `backend/cmd/aicli/main.go`：在 `InitGlobalConfig(configPath)` 后保留最终解析路径，确保 commands 层可写回同一个 `config.yaml`。
 - `backend/cmd/aicli/commands/chat_options.go`：扩展 provider/model/reasoning 解析逻辑，加入用户偏好来源和“是否需要交互/是否需要保存”的状态。
 - `backend/cmd/aicli/commands/chat_bootstrap.go`：在 `prepareChatRuntimeState` 完成校验和交互后，按需保存偏好。`ChatSession` 构建时保存 `cfg` 或可用于 `/model` 的 provider catalog。
-- `backend/cmd/aicli/commands/chat_model_switch.go`：把当前 `applyRuntimeModelSwitch` 扩展为统一的 provider/model/reasoning 切换函数；保留 model-only 快捷路径；成功后保存配置。
+- `backend/cmd/aicli/commands/chat_model_command.go`：当前统一 provider/model/reasoning 切换入口；保留 model-only 快捷路径；成功后保存配置。
 - `backend/cmd/aicli/commands/command.go`：更新 `/help` 文案，明确 `/model` 可修改 provider/model/thinking effort。
 - `backend/cmd/aicli/commands/chat_provider_turn.go`：补齐 adapter request config 的 model capability 信息，保证不同协议只在请求/响应层分化。
 - `backend/internal/llm/reasoning_helpers.go`：继续作为统一消息到协议消息的转换边界；后续减少对 raw protocol JSON 的依赖。

@@ -5,7 +5,7 @@ This directory contains `aicli`-specific runtime documentation.
 Recommended entry points:
 
 - [install.md](./install.md)
-  - Installation, configuration loading order, `aicli init --global`, default `aicli` / `aicli chat` startup, common commands, and chat slash commands.
+  - Installation, configuration loading order, starter config bootstrap, `aicli init`, `aicli login`, default `aicli` / `aicli chat` startup, session/resume flags, MCP overview, shell/background notes, and current chat slash commands.
 
 Related runtime docs:
 

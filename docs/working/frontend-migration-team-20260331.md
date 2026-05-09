@@ -2,6 +2,9 @@
 
 创建时间：2026-03-31
 
+> 历史快照说明（2026-05-09）：
+> 本文记录 2026-03-31 的一次 team run，不代表当前前端状态。当前 `workspace-page.tsx` 已缩到约 138 行并主要做 hooks 装配，`frontend/src/hooks/workspace/*` 已存在，runtime teams 已拆到 `frontend/src/components/workspace/runtime-teams/*`，前端已有 52 个 `*.test.ts(x)`。
+
 本次已在本地 runtime 中创建一组前端迁移执行成员，用于承接 `landing / workspace shell / artifact detail / workspace state` 四条迁移线。
 
 ## Team
@@ -32,7 +35,7 @@
   - 目标文件：`frontend/src/components/workspace/artifact-panel.tsx` 及其子组件
 - `workspace-state-member`
   - 负责 `workspace-page.tsx` 状态下沉和后续结果聚合边界准备
-  - 目标文件：`frontend/src/pages/workspace-page.tsx`、`frontend/src/hooks/workspace/*`、`frontend/src/types/workspace/*`
+  - 目标文件：`frontend/src/pages/workspace-page.tsx`、`frontend/src/hooks/workspace/*`、`frontend/src/types/runtime.ts`
 
 ## Verification
 

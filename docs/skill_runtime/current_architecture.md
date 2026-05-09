@@ -114,11 +114,15 @@
 - `backend/internal/agent/agent.go`
 - `backend/internal/agent/loop.go`
 - `backend/internal/agent/planner.go`
+- `backend/internal/llm/retry_policy.go`
 
 职责：
 
 - 统一 provider 调用与流式接口
 - 支持 provider alias、gateway provider、default model
+- 从 provider config 接入 runtime retry tuning / retry rules；`Call()` 与 `Stream()` 共用 retry policy
+- 流式路径只在 provider 直接打开失败或首个有效输出前收到 error chunk 时重试；一旦已经发出 text/image/tool 内容，就把后续错误原样传给调用方，避免重复输出
+- `bootstrap.Manager.ReloadProviderConfigs()` 会同步更新现有 `LLMRuntime` 的 retry 配置，不需要重建整个 runtime
 - 提供 route-first agent chat、LLM fallback、基础 ReAct / planner 能力
 
 ### 4. Session / API / Delivery Surface
@@ -153,7 +157,7 @@
 
 - 默认本地 embedding 生成与语义搜索
 - search telemetry / audit / reindex ops
-- 由 runtime 自身的 `/api/skills/runtime/*`、trace / governance / usage 视图对外暴露
+- 由 runtime 自身的 `/api/runtime/*`、trace / governance / usage 视图对外暴露
 
 ## 组件关系总览
 
@@ -248,9 +252,9 @@ Registry + LLM/MCP + Session + Policies
 | `SemanticEmbeddingRouter` | bootstrap | vector index、`Registry` | embedding index | router、search、hot reload sync |
 | `Executor` | handler / agent / `aicli` | `Registry`、`LLMRuntime`、MCP | 无长期状态，按请求执行 | skill execute、agent、CLI function |
 | `SessionManager` | bootstrap | session storage | session / history / lifecycle | handler、agent chat |
-| `skills.Handler` | `runtime-server` | runtime 全组件 + policies | API 级状态、usage tracker、search telemetry、policy snapshot | HTTP `/api/skills/*` + `/api/agent/chat`（主入口：`/api/agent/chat`） |
+| `skills.Handler` | `runtime-server` | runtime 全组件 + policies | API 级状态、usage tracker、search telemetry、policy snapshot | HTTP `/api/runtime/*` + `/api/agent/chat`（主入口：`/api/agent/chat`） |
 | `SkillFunction` | `aicli` | `Executor`、session history、metadata | 无长期状态，按轮暴露 skill function | `aicli chat` |
-| runtime observability API | `skills.Handler` + runtime event bus | runtime metrics、trace/event store、governance snapshot | status/health/traces/governance 视图 | `/api/skills/runtime/*` |
+| runtime observability API | `skills.Handler` + runtime event bus | runtime metrics、trace/event store、governance snapshot | status/health/traces/governance 视图 | `/api/runtime/*` |
 
 从这张表可以看到：
 
@@ -261,18 +265,38 @@ Registry + LLM/MCP + Session + Policies
 
 ## 宿主适配层
 
-### 网关宿主：`GinEngine`
+### HTTP 宿主：`runtime-server`
 
-`GinEngine` 是 HTTP 入口的宿主，负责：
+当前独立 HTTP 宿主是 `backend/cmd/runtime-server/main.go`。它负责：
 
-- 读取 `SkillsRuntimeConfig`
-- 加载 `RuntimeManager`
-- 建立 MCP runtime
+- 解析 `serve/start/stop/status` 子命令、配置路径、监听地址与 PID 文件
+- 按 `$HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./config.yaml -> ./configs/config.yaml` 搜索配置
+- 创建 `RuntimeManager`
 - 创建 `bootstrap.Manager`
+- 建立 MCP runtime、session hub、background manager、service control、config document service、file transfer service
 - 创建并接线 `skills.Handler`
-- 将策略、配额、认证与数据库 ledger 注入 handler
+- 将 handler 注册到 mux route table
 
-因此它扮演的是“平台装配器 + HTTP adapter”，而不是 skill runtime 内核本身。
+当前启动链路可以概括为：
+
+`cmd/runtime-server/main.go -> RuntimeManager -> bootstrap.Manager -> skills.Handler -> mux routes`
+
+当前 route source of truth 是 `backend/internal/api/skills/handler.go`，主 route group 包括：
+
+- `POST /api/agent/chat`
+- `/api/runtime/skills/*`
+- `/api/runtime/sessions/*`
+- `/api/runtime/teams/*`
+- `/api/runtime/agent-control/*`
+- `/api/runtime/status`、`/api/runtime/health`、`/api/runtime/traces*`、`/api/runtime/usage/*`
+- `/api/runtime/service`、`/api/runtime/service/restart`
+- `/api/runtime/logs`、`/api/runtime/logs/stream`
+- `/api/runtime/config/document*`、`/api/runtime/skills/config/write`
+- `/api/runtime/models`
+- `/api/runtime/fs/*`
+- `/api/runtime/background/jobs*`
+
+历史上的 `internal/gateway/router/GinEngine` 属于 gateway-hosted runtime 阶段的宿主适配器说明；当前 standalone runtime 不再以它作为 live HTTP 入口。
 
 ### CLI 宿主：`aicli chat`
 
@@ -335,11 +359,11 @@ Registry + LLM/MCP + Session + Policies
 runtime 本身直接产出 metrics、telemetry、trace 和治理统计；
 `skills.Handler` 会把这些状态整理成 self-hosted API：
 
-- `/api/skills/runtime/status`
-- `/api/skills/runtime/health`
-- `/api/skills/runtime/traces*`
-- `/api/skills/search/stats`
-- `/api/skills/usage/*`
+- `/api/runtime/status`
+- `/api/runtime/health`
+- `/api/runtime/traces*`
+- `/api/runtime/skills/search/stats`
+- `/api/runtime/usage/*`
 
 如果需要 Prometheus 或外部指标抓取，再由独立 collector/exporter 读取 runtime 暴露的数据，而不是反向侵入执行主路径。
 
@@ -357,7 +381,7 @@ runtime 本身直接产出 metrics、telemetry、trace 和治理统计；
 
 ### 单 Skill 执行流
 
-`POST /api/skills/{name}/execute (admin/debug) -> skills.Handler -> types.Request -> skill.Executor -> handler/workflow/llm/mcp -> session persistence -> response`
+`POST /api/runtime/skills/{name}/execute (admin/debug) -> skills.Handler -> types.Request -> skill.Executor -> handler/workflow/llm/mcp -> session persistence -> response`
 
 关键落点：
 
@@ -376,7 +400,7 @@ runtime 本身直接产出 metrics、telemetry、trace 和治理统计；
 
 ### 搜索流
 
-`GET /api/skills/search -> lexical / semantic / hybrid selection -> local embedding index -> search telemetry -> response`
+`GET /api/runtime/skills/search -> lexical / semantic / hybrid selection -> local embedding index -> search telemetry -> response`
 
 关键落点：
 

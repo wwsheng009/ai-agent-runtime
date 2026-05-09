@@ -10,19 +10,18 @@ This document describes the JSON response contract for:
 
 - `POST /api/runtime/skills/{name}/execute` (admin/debug; not the primary entry)
 - `POST /api/agent/chat` (non-stream mode; canonical)
-- `POST /api/agent/chat` (non-stream mode; compatibility alias)
 
 The implementation lives in `E:\projects\ai\ai-agent-runtime\backend\internal\api\skills\handler.go`.
 
 **入口说明**
 
 - `POST /api/agent/chat` 是主入口，面向业务调用。
-- `POST /api/agent/chat` 是兼容别名，响应会带 compatibility warning header。
+- 当前 `runtime-server` 的源码路由只注册 `POST /api/agent/chat`。旧文档中的 `/api/skills/agent/chat` 属于历史兼容入口说明；除非外层代理自行映射，否则不要把它当作当前仓库的 live route。
 - `POST /api/runtime/skills/{name}/execute` 仅用于 admin/debug（未来会进一步收口）。
 
 ## Request Additions
 
-`POST /api/agent/chat`（兼容：`POST /api/agent/chat`）目前额外支持：
+`POST /api/agent/chat` 目前额外支持：
 
 - `workspace_path`: 可选，本地 workspace 路径；若提供，会在入口构建 workspace context
 - `planning_mode`: 可选，当前支持 `planner_preferred`
@@ -96,8 +95,6 @@ For workflow-backed skill execution, each `observations[*].metrics` entry may al
 - `execution_mode`
 
 ## `POST /api/agent/chat` (non-stream)
-
-> 兼容别名：`POST /api/agent/chat`
 
 ### Top-level response
 

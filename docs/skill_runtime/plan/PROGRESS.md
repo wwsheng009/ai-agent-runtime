@@ -8,7 +8,7 @@
 > - 本文是历史进度日志，不是当前操作手册。
 > - 文中旧 `internal/runtime/*`、`internal/api/skills/*` 路径，如需映射到当前仓库，请按 `E:\projects\ai\ai-agent-runtime\backend\internal\...` 理解。
 > - 文中 `configs/config.yaml`、`configs/runtime.yaml` 与所有 `go test ./...` / `go run ./cmd/...` 命令，如需今天重跑，请在 `E:\projects\ai\ai-agent-runtime\backend` 目录执行。
-> - 文中出现的 `/monitor/*`、`/metrics` 多为 gateway-era 历史观测面；runtime 当前对外主入口请改看 `/api/skills/runtime/*`、`/api/skills/search/stats`、`/api/skills/usage/*`。
+> - 文中出现的 `/monitor/*`、`/metrics`、`/api/skills/runtime/*` 多为 gateway-era 或旧 runtime 观测面；runtime 当前对外主入口请改看 `/api/runtime/status`、`/api/runtime/health`、`/api/runtime/traces*`、`/api/runtime/skills/search/stats`、`/api/runtime/usage/*`。
 
 ---
 
@@ -63,7 +63,7 @@
      - `ProviderWrapper` 已实现统一 runtime interface，并支持 `default_model` 与 `model_mappings`
 - 13. 配置驱动的 live provider smoke 已通过：
      - 历史上新增了 `internal/gateway/router/gin_live_provider_test.go`，默认跳过，设置 `LIVE_PROVIDER_TEST=1` 后执行
-     - 2026-03-08 已基于 `backend/configs/config.yaml` + `configs/.env` 实测跑通 agent chat 主链路（现主入口：`POST /api/agent/chat`，兼容：`POST /api/skills/agent/chat`）
+     - 2026-03-08 已基于 `backend/configs/config.yaml` + `configs/.env` 实测跑通 agent chat 主链路；当前源码路由主入口为 `POST /api/agent/chat`
      - 本次实测命中 `nvidia`（OpenAI 兼容）provider，模型为 `z-ai/glm4.7`
 - 14. 本地 toolkit MCP smoke 已通过：
      - 新增 `internal/gateway/router/gin_live_mcp_test.go`，默认跳过，设置 `LIVE_MCP_TEST=1` 后执行
@@ -121,17 +121,17 @@
      - `skills.Handler` / `AgentChat` / `HotReload` 已接上同一套 embedding 索引与增量更新
      - 已补充 `bootstrap`、`skills API`、`gin` 入口回归测试，验证语义路由可开箱使用
 - 29. `SearchSkills` 与 `GetStats` 已接入 embedding 能力：
-     - `GET /api/skills/search` 现在支持 `mode=auto|lexical|semantic|hybrid`
+     - 当前 standalone runtime 路径为 `GET /api/runtime/skills/search`，支持 `mode=auto|lexical|semantic|hybrid`
      - 自动模式会在词法无命中时回退到本地语义搜索，并返回 `requested_mode/resolved_mode/used_embedding/matches`
-     - `GET /api/skills/stats` 现在会返回 embedding router 是否启用及当前索引统计
+     - 当前 standalone runtime 路径为 `GET /api/runtime/skills/stats`，返回 embedding router 是否启用及当前索引统计
 - 30. 已补充搜索观测与索引运维接口：
-     - 新增 `GET /api/skills/search/stats`，返回搜索请求总量、模式分布、embedding 命中次数、最近一次查询与重建状态
-     - 新增 `POST /api/skills/search/reindex`，支持手动重建本地 embedding 索引
-     - `GET /api/skills/stats` 同时聚合返回 `search` telemetry，便于平台统一观测
+     - 当前 standalone runtime 路径为 `GET /api/runtime/skills/search/stats`，返回搜索请求总量、模式分布、embedding 命中次数、最近一次查询与重建状态
+     - 当前 standalone runtime 路径为 `POST /api/runtime/skills/search/reindex`，支持手动重建本地 embedding 索引
+     - `GET /api/runtime/skills/stats` 同时聚合返回 `search` telemetry，便于平台统一观测
 - 31. 已为搜索运维接口补充轻量安全控制：
-     - `GET /api/skills/search/stats` 与 `POST /api/skills/search/reindex` 默认仅允许 loopback 访问
+     - `GET /api/runtime/skills/search/stats` 与 `POST /api/runtime/skills/search/reindex` 默认仅允许 loopback 访问
      - 可通过 `skills_runtime.admin_token` 放开远程运维访问，支持 `Authorization: Bearer <token>` 或 `X-Skills-Admin-Token`
-     - `POST /api/skills/search/reindex` 增加冷却时间控制，默认 `30s`，超限返回 `429` 与 `Retry-After`
+     - `POST /api/runtime/skills/search/reindex` 增加冷却时间控制，默认 `30s`，超限返回 `429` 与 `Retry-After`
 - 32. 已补充搜索运维审计日志：
      - `search/stats` 与 `search/reindex` 现在会记录结构化审计日志
      - 审计字段包含 `action/outcome/access_mode/remote_ip/request_id/search_summary`
@@ -154,7 +154,7 @@
      - 便于 dashboard 或运维脚本直接消费，无需自行解析原始 metric 列表
 - 37. 已补充搜索监控与运维指南：
      - 新增 `docs/skill_runtime/search_monitoring_guide.md`
-     - 历史上覆盖 gateway `/monitor/search-admin`、`/monitor/search?prefix=search_`、`/metrics`，当前 runtime 侧请改看 `/api/skills/search/*` 与 `/api/skills/runtime/*`
+     - 历史上覆盖 gateway `/monitor/search-admin`、`/monitor/search?prefix=search_`、`/metrics`，当前 runtime 侧请改看 `/api/runtime/skills/search/*` 与 `/api/runtime/*`
      - 包含 access control、cooldown、PromQL 示例、运维检查项与建议 dashboard blocks
 - 38. 已补充搜索故障排查 playbook：
      - 新增 `docs/skill_runtime/search_monitoring_playbook.md`
@@ -714,7 +714,7 @@ func (e *ParallelExecutor) ExecuteParallel(ctx context.Context, steps []PlanStep
 ## 已知限制
 1. ⚠️ 当前仍以 Mock Provider 为主要测试场景，但 adapter-based 真实 Provider 已可通过 bootstrap / gateway 主链路接入
 3. ⚠️ Skill Executor 仅完成基础 LLM 调用，Prompt 模板、Token Budget、工具结果格式化尚未闭环
-4. ✅ `GatewayClient` 与 `HotReload` 已具备统一 bootstrap 组装能力，并已接入 `internal/gateway/router/GinEngine` 真实应用入口；`ParallelExecutor` 已接入 workflow 主执行路径
+4. ✅ 历史阶段中 `GatewayClient` 与 `HotReload` 曾接入 `internal/gateway/router/GinEngine`；当前 standalone runtime 的真实入口请看 `backend/cmd/runtime-server/main.go` 与 `backend/internal/api/skills/handler.go`。`ParallelExecutor` 已接入 workflow 主执行路径
 5. ⚠️ Observability 目前是自研实现，尚未看到 Prometheus / OpenTelemetry 的正式接入
 6. ⚠️ `internal/api/skills` 已具备基础执行、Session/History 与 SSE 能力，但批量会话管理与更完整的 Agent 编排仍未收口
 
@@ -824,17 +824,17 @@ for _, obs := range result.Observations {
 - ✅ 已新增可选 `planner_preferred` 编排模式：`AgentChat` 非流式请求可通过 `planning_mode=planner_preferred` 触发计划构建，并在结果中返回 `planning` 摘要
 - ✅ `planner_preferred` 已扩展到 streaming 路径：SSE 现在会输出 `planning` 事件，并在 `meta / result / done` 中携带 planning 摘要
 - ✅ `backend/pkg/skillsapi` 请求模型已支持 `workspace_path / planning_mode`，并已补 client 文档说明 planning 响应与 `planning` SSE 事件
-- ✅ 已补统一 runtime status 可见性：`GetStats` 现在聚合返回 `runtime`，且新增 `GET /api/skills/runtime/status` 与 `backend/pkg/skillsapi.GetRuntimeStatus()`
-- ✅ 已补 `GET /api/skills/runtime/health` 与 `backend/pkg/skillsapi.GetRuntimeHealth()`，提供 provider / MCP 的健康摘要、问题列表与连接计数
-- ✅ 已补 `POST /api/skills/runtime/mcps/reload` 与 `backend/pkg/skillsapi.ReloadRuntimeMCPs()`，支持按当前配置重新加载并重连 MCP runtime
-- ✅ 已补 `GET /api/skills/runtime/validate` 与 `backend/pkg/skillsapi.ValidateRuntime()`，提供 runtime 配置健康校验与 warnings/issues 摘要
+- ✅ 已补统一 runtime status 可见性：`GetStats` 现在聚合返回 `runtime`，且当前入口为 `GET /api/runtime/status` 与 `backend/pkg/skillsapi.GetRuntimeStatus()`
+- ✅ 已补 `GET /api/runtime/health` 与 `backend/pkg/skillsapi.GetRuntimeHealth()`，提供 provider / MCP 的健康摘要、问题列表与连接计数
+- ✅ 已补 `POST /api/runtime/mcps/reload` 与 `backend/pkg/skillsapi.ReloadRuntimeMCPs()`，支持按当前配置重新加载并重连 MCP runtime
+- ✅ 已补 `GET /api/runtime/validate` 与 `backend/pkg/skillsapi.ValidateRuntime()`，提供 runtime 配置健康校验与 warnings/issues 摘要
 - ✅ runtime health 现支持 `recheck` 触发复查，并标注 provider `degraded / unhealthy` 状态与最近检查时间
 - ✅ runtime validate 已补充 config file / embedding / hot-reload / workspace 维度的健康检查
-- ✅ 历史：曾新增 gateway 监控摘要 `GET /monitor/runtime-health`，统一输出 runtime health + validation 状态；当前 runtime 侧请改看 `GET /api/skills/runtime/status` 与 `GET /api/skills/runtime/health`
+- ✅ 历史：曾新增 gateway 监控摘要 `GET /monitor/runtime-health`，统一输出 runtime health + validation 状态；当前 runtime 侧请改看 `GET /api/runtime/status` 与 `GET /api/runtime/health`
 - ✅ MCP manager 已支持健康检查定时器与自动重连：health check 失败会尝试重建连接并刷新 tools
 - ✅ MCP health probe 支持按 tool/resource 维度检查，失败的工具会被自动标记为不可用
 - ✅ runtime config 已引入版本号与 rollout 配置，并在 update/load 时记录版本历史
-- ✅ capability abstraction 已接入 skills API：新增 `GET /api/skills/capabilities`，并在 orchestration 中输出 `capability_candidates`
+- ✅ capability abstraction 已接入 runtime API：当前入口为 `GET /api/runtime/capabilities`，并在 orchestration 中输出 `capability_candidates`
 - ✅ AgentChat 已支持统一 context pack（workspace + session），并可通过默认 planning mode 配置控制 planner-first
 - ✅ runtime rollout 已支持 canary/progressive 策略，并按 scopeKey 选择 candidate config
 - ✅ 新增 skills API E2E matrix 回归，覆盖 provider / session / search / agent 路径

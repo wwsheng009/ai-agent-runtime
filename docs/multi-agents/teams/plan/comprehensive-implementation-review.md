@@ -4,6 +4,9 @@
 **审查范围**: Team1-Team9 设计文档与实施状态
 **审查方法**: 设计文档对比、代码实施验证、实施分析报告交叉验证
 
+> 历史快照说明（2026-05-09）：
+> 本文是 2026-03-15 的阶段性审查。当前 Team 系统已继续向 AgentControl task registry、mailbox projection、`spawn_team -> wait_team`、CLI/TUI 可视化和真实终端验证 gate 演进；因此文中的 “100% 完成” 只代表当日 Team1-Team9 设计范围，不代表当前生产就绪结论。
+
 ---
 
 ## 执行摘要

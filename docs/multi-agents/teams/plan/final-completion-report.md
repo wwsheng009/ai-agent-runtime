@@ -4,6 +4,9 @@
 **最终完成度**: **95%** ✅
 **状态**: 生产就绪
 
+> 历史快照说明（2026-05-09）：
+> 本文是 2026-03-15 的阶段性完成报告，不应再作为当前生产就绪判定入口。当前 Team/AgentControl 已继续演进到 AgentControl task registry、mailbox projection、`spawn_team -> wait_team`、real-terminal validation gate 和 TUI/CLI 可视化收敛阶段。需要判断当前状态时，请优先阅读 `docs/multi-agents/teams/plan/multi-agent-processing-chain.md`、`docs/skill_runtime/team_task_outcome_contract.md`、`docs/plan/multi-agent-production-readiness-plan.md` 与 `docs/working/multi-agent-real-terminal-validation-20260509.md`。
+
 ---
 
 ## 执行摘要
