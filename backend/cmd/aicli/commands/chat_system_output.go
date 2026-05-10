@@ -68,7 +68,7 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 			}
 			w.lastBlank = true
 			w.beginOutput()
-			if _, err := io.WriteString(w.writer, "\n"); err != nil {
+			if _, err := ui.WriteTerminalText(w.writer, "\n"); err != nil {
 				return 0, err
 			}
 			renderedAny = true
@@ -76,7 +76,7 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 		}
 		w.lastBlank = false
 		w.beginOutput()
-		if _, err := io.WriteString(w.writer, rendered+"\n"); err != nil {
+		if _, err := ui.WriteTerminalLine(w.writer, rendered); err != nil {
 			return 0, err
 		}
 		renderedAny = true
@@ -111,7 +111,7 @@ func (w *chatSystemOutputWriter) flushPartialLocked() error {
 	}
 	w.lastBlank = false
 	w.beginOutput()
-	if _, err := io.WriteString(w.writer, ui.FormatAssistantSupplementBlock(line)+"\n"); err != nil {
+	if _, err := ui.WriteTerminalLine(w.writer, ui.FormatAssistantSupplementBlock(line)); err != nil {
 		return err
 	}
 	return flushChatOutputWriter(w.writer)

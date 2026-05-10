@@ -125,7 +125,7 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 		return
 	}
-	fmt.Fprint(c.writer, formatSessionUserPrompt(c.session))
+	c.writeTextLocked(formatSessionUserPrompt(c.session))
 	c.promptVisible = true
 }
 
@@ -150,6 +150,27 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
 		return
 	}
 	c.surface.SetStatusLine(buildChatSurfaceStatusLine(c.session, state))
+}
+
+func (c *chatInteractionCoordinator) writeTextLocked(text string) {
+	if c == nil || c.writer == nil || text == "" {
+		return
+	}
+	_, _ = ui.WriteTerminalText(c.writer, text)
+}
+
+func (c *chatInteractionCoordinator) writeLineLocked(text string) {
+	if c == nil || c.writer == nil {
+		return
+	}
+	_, _ = ui.WriteTerminalLine(c.writer, text)
+}
+
+func (c *chatInteractionCoordinator) writeFormatLocked(format string, args ...interface{}) {
+	if c == nil || c.writer == nil || format == "" {
+		return
+	}
+	_, _ = ui.WriteTerminalFormat(c.writer, format, args...)
 }
 
 func (c *chatInteractionCoordinator) RefreshStatus(state string) {
@@ -436,10 +457,10 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 		c.reasoningRendered = false
 		c.reasoningTrailingLF = false
 		c.reasoningBuffer.Reset()
-		fmt.Fprintln(c.writer, ui.FormatAssistantSupplementBlock(chatToolDivider("reasoning")))
+		c.writeLineLocked(ui.FormatAssistantSupplementBlock(chatToolDivider("reasoning")))
 		if meta := chatReasoningMetaLine(block); meta != "" {
 			c.reasoningMeta = meta
-			fmt.Fprintln(c.writer, ui.FormatAssistantSupplementBlock(meta))
+			c.writeLineLocked(ui.FormatAssistantSupplementBlock(meta))
 		} else {
 			c.reasoningMeta = ""
 		}
@@ -609,7 +630,7 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 			c.streamBuffer.WriteString(suffix)
 		}
 		if c.streamRendered && !c.streamTrailingLF {
-			fmt.Fprintln(c.writer)
+			c.writeLineLocked("")
 		}
 		c.resetStreamLocked()
 		return true
@@ -682,7 +703,7 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 			return
 		}
 		if c.streamRendered && !c.streamTrailingLF {
-			fmt.Fprintln(c.writer)
+			c.writeLineLocked("")
 		}
 		if c.streamRendered {
 			c.completeBlockOutput = true
@@ -905,7 +926,7 @@ func (c *chatInteractionCoordinator) flushStreamLocked() {
 			content := c.streamBuffer.String()
 			if strings.TrimSpace(content) == "" {
 				if !c.streamTrailingLF {
-					fmt.Fprintln(c.writer)
+					c.writeLineLocked("")
 				}
 				return
 			}
@@ -915,14 +936,14 @@ func (c *chatInteractionCoordinator) flushStreamLocked() {
 		}
 		c.renderBufferedAssistantStreamLocked()
 		if c.streamRendered && !c.streamTrailingLF {
-			fmt.Fprintln(c.writer)
+			c.writeLineLocked("")
 		}
 		return
 	}
 	content := c.streamBuffer.String()
 	if strings.TrimSpace(content) == "" {
 		if !c.streamTrailingLF {
-			fmt.Fprintln(c.writer)
+			c.writeLineLocked("")
 		}
 		return
 	}
@@ -931,7 +952,7 @@ func (c *chatInteractionCoordinator) flushStreamLocked() {
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(content)
 	}
-	fmt.Fprintln(c.writer, ui.FormatAssistantMessage(formatted))
+	c.writeLineLocked(ui.FormatAssistantMessage(formatted))
 }
 
 func (c *chatInteractionCoordinator) flushReasoningLocked() {
@@ -949,7 +970,7 @@ func (c *chatInteractionCoordinator) flushReasoningLocked() {
 	}
 	lines := chatReasoningLines(renderBlock)
 	if len(lines) > 0 {
-		fmt.Fprintln(c.writer, ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")))
+		c.writeLineLocked(ui.FormatAssistantSupplementBlock(strings.Join(lines, "\n")))
 	}
 }
 
@@ -960,7 +981,7 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	promptText := promptDisplayText(c.session)
 	promptLine := promptText + c.promptInput
 	if c.shouldAdvanceAfterPromptLocked() {
-		fmt.Fprint(c.writer, "\r\n")
+		c.writeTextLocked("\r\n")
 		c.promptInput = ""
 		return
 	}
@@ -968,12 +989,15 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	if termWidth <= 0 {
 		termWidth = 80
 	}
+	rows := interactivePromptDisplayRows(promptLine, termWidth)
 	// 当 prompt+输入已经折行时，先把光标上移到输入起始行，
 	// 再逐行清理 prompt/input 曾占用的区域，避免清掉固定底部状态栏。
-	if rows := interactivePromptDisplayRows(promptLine, termWidth); rows > 1 {
-		fmt.Fprintf(c.writer, "\x1b[%dA", rows-1)
+	var builder strings.Builder
+	if rows > 1 {
+		fmt.Fprintf(&builder, "\x1b[%dA", rows-1)
 	}
-	clearPromptDisplayRows(c.writer, interactivePromptDisplayRows(promptLine, termWidth))
+	builder.WriteString(clearPromptDisplayRowsSequence(rows))
+	c.writeTextLocked(builder.String())
 	c.promptInput = ""
 }
 
@@ -981,19 +1005,25 @@ func clearPromptDisplayRows(writer io.Writer, rows int) {
 	if writer == nil {
 		return
 	}
+	_, _ = ui.WriteTerminalText(writer, clearPromptDisplayRowsSequence(rows))
+}
+
+func clearPromptDisplayRowsSequence(rows int) string {
 	if rows < 1 {
 		rows = 1
 	}
-	fmt.Fprint(writer, "\r")
+	var builder strings.Builder
+	builder.WriteString("\r")
 	for i := 0; i < rows; i++ {
-		fmt.Fprint(writer, "\x1b[K")
+		builder.WriteString("\x1b[K")
 		if i < rows-1 {
-			fmt.Fprint(writer, "\x1b[1B\r")
+			builder.WriteString("\x1b[1B\r")
 		}
 	}
 	if rows > 1 {
-		fmt.Fprintf(writer, "\x1b[%dA\r", rows-1)
+		fmt.Fprintf(&builder, "\x1b[%dA\r", rows-1)
 	}
+	return builder.String()
 }
 
 func interactivePromptDisplayRows(text string, termWidth int) int {
@@ -1026,9 +1056,9 @@ func (c *chatInteractionCoordinator) finalizeReasoningLocked() {
 		return
 	}
 	if c.reasoningRendered && !c.reasoningTrailingLF {
-		fmt.Fprintln(c.writer)
+		c.writeLineLocked("")
 	}
-	fmt.Fprintln(c.writer, ui.FormatAssistantSupplementBlock(chatToolDivider("end reasoning")))
+	c.writeLineLocked(ui.FormatAssistantSupplementBlock(chatToolDivider("end reasoning")))
 	c.completeBlockOutput = true
 	c.resetReasoningLocked()
 	c.renderBufferedAssistantStreamLocked()
@@ -1057,7 +1087,7 @@ func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(conten
 		suffix := c.unrenderedAssistantStreamSuffixLocked(content)
 		if strings.TrimSpace(suffix) == "" {
 			if !c.streamTrailingLF {
-				fmt.Fprintln(c.writer)
+				c.writeLineLocked("")
 			}
 			c.completeBlockOutput = true
 			return
@@ -1070,20 +1100,20 @@ func (c *chatInteractionCoordinator) renderFormattedAssistantStreamLocked(conten
 		formatted = strings.TrimLeft(formatted, "\n")
 		if strings.TrimSpace(formatted) == "" {
 			if !c.streamTrailingLF {
-				fmt.Fprintln(c.writer)
+				c.writeLineLocked("")
 			}
 			c.completeBlockOutput = true
 			return
 		}
 		if inlineContinuation {
-			fmt.Fprintln(c.writer, formatted)
+			c.writeLineLocked(formatted)
 			c.completeBlockOutput = true
 			return
 		}
 		if !c.streamTrailingLF {
-			fmt.Fprintln(c.writer)
+			c.writeLineLocked("")
 		}
-		fmt.Fprintln(c.writer, ui.IndentAssistantContent(formatted))
+		c.writeLineLocked(ui.IndentAssistantContent(formatted))
 		c.completeBlockOutput = true
 		return
 	}
@@ -1143,9 +1173,9 @@ func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, s
 		return
 	}
 	if !suppressSeparator && c.completeBlockOutput {
-		fmt.Fprintln(c.writer)
+		c.writeLineLocked("")
 	}
-	fmt.Fprintln(c.writer, rendered)
+	c.writeLineLocked(rendered)
 	c.completeBlockOutput = true
 }
 
@@ -1179,7 +1209,7 @@ func (c *chatInteractionCoordinator) writeIndentedStreamingDeltaLocked(delta, in
 	atLineStart := !*rendered || *trailingLF
 	for _, r := range []rune(delta) {
 		if atLineStart && r != '\n' {
-			fmt.Fprint(c.writer, indent)
+			c.writeTextLocked(indent)
 			atLineStart = false
 			*rendered = true
 		}
@@ -1199,12 +1229,12 @@ func (c *chatInteractionCoordinator) writeStreamingDeltaLocked(delta string) {
 		return
 	}
 	if c.writer != os.Stdout || c.streamRuneDelay <= 0 {
-		fmt.Fprint(c.writer, delta)
+		c.writeTextLocked(delta)
 		return
 	}
 	runes := []rune(delta)
 	if len(runes) <= 1 {
-		fmt.Fprint(c.writer, delta)
+		c.writeTextLocked(delta)
 		return
 	}
 	delay := c.streamRuneDelay
@@ -1215,11 +1245,11 @@ func (c *chatInteractionCoordinator) writeStreamingDeltaLocked(delta string) {
 		}
 	}
 	if delay <= 0 {
-		fmt.Fprint(c.writer, delta)
+		c.writeTextLocked(delta)
 		return
 	}
 	for _, r := range runes {
-		fmt.Fprint(c.writer, string(r))
+		c.writeTextLocked(string(r))
 		time.Sleep(delay)
 	}
 }
@@ -1359,7 +1389,7 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 		if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 			return
 		}
-		fmt.Fprint(c.writer, formatSessionUserPrompt(c.session))
+		c.writeTextLocked(formatSessionUserPrompt(c.session))
 		c.promptVisible = true
 	})
 }

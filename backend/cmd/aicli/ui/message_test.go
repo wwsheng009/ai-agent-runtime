@@ -56,10 +56,10 @@ func TestMessageFormat_MultilineAlignsContinuationWithIconPrefixAcrossTypes(t *t
 	}()
 
 	tests := []struct {
-		name         string
-		messageType  MessageType
-		firstPrefix  string
-		plainPrefix  string
+		name        string
+		messageType MessageType
+		firstPrefix string
+		plainPrefix string
 	}{
 		{"user", MessageUser, "👤  ", "👤 "},
 		{"system", MessageSystem, "ℹ️  ", "ℹ️ "},
@@ -122,5 +122,28 @@ func TestDisplayWidth_IgnoresDirectionalIsolates(t *testing.T) {
 
 	if DisplayWidth(sanitized) != DisplayWidth(plain) {
 		t.Fatalf("expected directional isolates to have zero width, plain=%d sanitized=%d", DisplayWidth(plain), DisplayWidth(sanitized))
+	}
+}
+
+func TestSanitizeTerminalText_RemovesANSIEscapeSequences(t *testing.T) {
+	input := "safe\x1b[2J\x1b[Hstill safe\x1b]0;owned\a!"
+
+	sanitized := SanitizeTerminalText(input)
+
+	if sanitized != "safestill safe!" {
+		t.Fatalf("unexpected sanitized text: %q", sanitized)
+	}
+	if strings.ContainsRune(sanitized, '\x1b') || strings.ContainsRune(sanitized, '\a') {
+		t.Fatalf("expected terminal controls to be removed, got %q", sanitized)
+	}
+}
+
+func TestSanitizeTerminalText_NormalizesCRLFAndDropsControls(t *testing.T) {
+	input := "a\r\nb\bc\t"
+
+	sanitized := SanitizeTerminalText(input)
+
+	if sanitized != "a\nbc    " {
+		t.Fatalf("unexpected sanitized text: %q", sanitized)
 	}
 }

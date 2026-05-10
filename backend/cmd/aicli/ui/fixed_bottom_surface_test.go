@@ -175,6 +175,123 @@ func TestFixedBottomSurface_ClearPopupPreserveCursorRestoresPromptCursor(t *test
 	}
 }
 
+func TestFixedBottomSurface_ClearPopupForOwnerPreserveCursorKeepsOtherPopup(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPopup([]string{
+			"Agent Control Panel:",
+			"  selected=<none>",
+		})
+	})
+	renderedRows := surface.popupRenderedRows
+
+	output := captureUIStdout(t, func() {
+		surface.ClearPopupForOwnerPreserveCursor("slash_completion")
+	})
+
+	if output != "" {
+		t.Fatalf("expected owner-mismatched clear to be a no-op, got %q", output)
+	}
+	if surface.popupLines == nil || surface.popupRenderedRows != renderedRows {
+		t.Fatalf("expected non-owned popup to remain rendered, rows=%d lines=%#v", surface.popupRenderedRows, surface.popupLines)
+	}
+
+	captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwner([]string{
+			"命令补全: /ag",
+			"> /agents",
+		}, "slash_completion")
+	})
+	output = captureUIStdout(t, func() {
+		surface.ClearPopupForOwnerPreserveCursor("slash_completion")
+	})
+
+	if !strings.Contains(output, cursorSaveSequence) {
+		t.Fatalf("expected matching owner clear to preserve cursor, got %q", output)
+	}
+	if !strings.HasSuffix(output, cursorRestoreSequence) {
+		t.Fatalf("expected matching owner clear to restore cursor at the end, got %q", output)
+	}
+	if surface.popupLines != nil || surface.popupRenderedRows != 0 {
+		t.Fatalf("expected owned popup to clear, rows=%d lines=%#v", surface.popupRenderedRows, surface.popupLines)
+	}
+}
+
+func TestFixedBottomSurface_OwnerPopupRestoresPreviousPanel(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwner([]string{
+			"Agent Control Panel:",
+			"  selected=/root/worker",
+		}, "agent_panel")
+		surface.ShowPopupPreserveCursorForOwner([]string{
+			"命令补全: /ag",
+			"> /agents",
+		}, "slash_completion")
+	})
+
+	if surface.popupOwner != "slash_completion" {
+		t.Fatalf("expected slash popup to be active, got owner=%q", surface.popupOwner)
+	}
+
+	output := captureUIStdout(t, func() {
+		surface.ClearPopupForOwnerPreserveCursor("slash_completion")
+	})
+
+	if surface.popupOwner != "agent_panel" {
+		t.Fatalf("expected agent panel to be restored, got owner=%q lines=%#v", surface.popupOwner, surface.popupLines)
+	}
+	if !strings.Contains(strings.Join(surface.popupLines, "\n"), "Agent Control Panel:") {
+		t.Fatalf("expected restored panel lines, got %#v", surface.popupLines)
+	}
+	if !strings.Contains(output, "Agent Control Panel:") {
+		t.Fatalf("expected restored panel to render, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_LowerPriorityOwnerUpdateDoesNotStealActivePopup(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwner([]string{
+			"命令补全: /ag",
+			"> /agents",
+		}, "slash_completion")
+	})
+
+	output := captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwner([]string{
+			"Agent Control Panel:",
+			"  selected=/root/updated",
+		}, "agent_panel")
+	})
+
+	if output != "" {
+		t.Fatalf("expected lower priority panel update not to render over slash popup, got %q", output)
+	}
+	if surface.popupOwner != "slash_completion" {
+		t.Fatalf("expected slash popup to remain active, got owner=%q", surface.popupOwner)
+	}
+
+	captureUIStdout(t, func() {
+		surface.ClearPopupForOwnerPreserveCursor("slash_completion")
+	})
+	if surface.popupOwner != "agent_panel" || !strings.Contains(strings.Join(surface.popupLines, "\n"), "/root/updated") {
+		t.Fatalf("expected updated panel to restore, owner=%q lines=%#v", surface.popupOwner, surface.popupLines)
+	}
+}
+
 func TestFixedBottomSurface_ClearPopupKeepsStatusLine(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true
@@ -211,6 +328,25 @@ func TestFixedBottomSurface_ClearPopupKeepsStatusLine(t *testing.T) {
 	}
 }
 
+func TestFixedBottomSurface_SetStatusLinePreservesCursor(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+
+	output := captureUIStdout(t, func() {
+		surface.SetStatusLine("Ready | Agent Panel")
+	})
+
+	if !strings.Contains(output, cursorSaveSequence) {
+		t.Fatalf("expected status render to save cursor, got %q", output)
+	}
+	if !strings.HasSuffix(output, cursorRestoreSequence) {
+		t.Fatalf("expected status render to restore cursor at the end, got %q", output)
+	}
+}
+
 func TestFixedBottomSurface_ShowPopupInputFocusesPromptRow(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true
@@ -239,6 +375,44 @@ func TestFixedBottomSurface_ShowPopupInputFocusesPromptRow(t *testing.T) {
 	}
 	if !strings.HasSuffix(output, "\x1b[23;8H") {
 		t.Fatalf("expected final cursor position after popup prompt, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ShowPopupInputPreserveCursorKeepsPromptRow(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPopupInput([]string{
+			"Agent Panel:",
+			"  [1] /root/one",
+		}, "Agent Panel> ")
+	})
+
+	output := captureUIStdout(t, func() {
+		surface.ShowPopupInputPreserveCursor([]string{
+			"Agent Panel:",
+			"  [1] /root/one",
+			"  [2] /root/two",
+		}, "Agent Panel> ")
+	})
+
+	if surface.composerLine != "Agent Panel> " {
+		t.Fatalf("expected preserve render to keep composer prompt, got %q", surface.composerLine)
+	}
+	if surface.popupRenderedRows != 4 {
+		t.Fatalf("expected popup plus prompt row to render, got %d", surface.popupRenderedRows)
+	}
+	if !strings.Contains(output, cursorSaveSequence) {
+		t.Fatalf("expected preserve input render to save cursor, got %q", output)
+	}
+	if !strings.HasSuffix(output, cursorRestoreSequence) {
+		t.Fatalf("expected preserve input render to restore cursor at the end, got %q", output)
+	}
+	if !strings.Contains(output, "Agent Panel>") {
+		t.Fatalf("expected prompt row to remain rendered, got %q", output)
 	}
 }
 
@@ -300,6 +474,12 @@ func TestFixedBottomSurface_ShowPendingPastePreviewRendersPreview(t *testing.T) 
 	}
 	if surface.popupRenderedRows == 0 {
 		t.Fatal("expected pending paste preview to render popup rows")
+	}
+	if !strings.Contains(output, cursorSaveSequence) {
+		t.Fatalf("expected pending paste preview to preserve cursor, got %q", output)
+	}
+	if !strings.HasSuffix(output, cursorRestoreSequence) {
+		t.Fatalf("expected pending paste preview to restore cursor at the end, got %q", output)
 	}
 }
 

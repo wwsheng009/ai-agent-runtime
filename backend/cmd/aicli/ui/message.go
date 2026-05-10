@@ -148,7 +148,7 @@ func (m *Message) Format() string {
 	}
 
 	// 如果内容很长，添加前缀换行
-	if strings.Contains(m.content, "\n") {
+	if strings.Contains(safeContent, "\n") {
 		lines := strings.Split(result, "\n")
 		if len(lines) > 0 {
 			lines[0] = prefix + contentPadding + lines[0]
@@ -246,10 +246,14 @@ func DisplayWidth(text string) int {
 	return messageDisplayWidth(text)
 }
 
-// SanitizeTerminalText removes unsafe bidi formatting controls and isolates
-// strong RTL runs so mixed-direction content does not reorder adjacent CJK/LTR
-// text in terminal renderers.
+// SanitizeTerminalText removes terminal control sequences and unsafe bidi
+// formatting controls, then isolates strong RTL runs so mixed-direction content
+// does not reorder adjacent CJK/LTR text in terminal renderers.
 func SanitizeTerminalText(text string) string {
+	if text == "" {
+		return ""
+	}
+	text = stripUnsafeTerminalControls(text)
 	if text == "" {
 		return ""
 	}
@@ -285,6 +289,48 @@ func SanitizeTerminalText(text string) string {
 	}
 	if inRTLRun {
 		builder.WriteRune(popDirectionalIsolate)
+	}
+	return builder.String()
+}
+
+func stripUnsafeTerminalControls(text string) string {
+	if text == "" {
+		return ""
+	}
+	var builder strings.Builder
+	builder.Grow(len(text))
+	for i := 0; i < len(text); {
+		if text[i] == '\x1b' {
+			consumed := consumeTerminalEscapeSequence(text[i:])
+			if consumed <= 0 {
+				consumed = 1
+			}
+			i += consumed
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(text[i:])
+		if r == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		switch {
+		case r == '\r':
+			builder.WriteRune('\n')
+			if i+size < len(text) && text[i+size] == '\n' {
+				size++
+			}
+		case r == '\n':
+			builder.WriteRune('\n')
+		case r == '\t':
+			builder.WriteString("    ")
+		case r < 32 || r == 127:
+			// Drop C0 controls such as BEL, backspace, form feed and raw ESC.
+		case r >= 0x80 && r <= 0x9f:
+			// Drop C1 controls, including 8-bit CSI/OSC variants.
+		default:
+			builder.WriteRune(r)
+		}
+		i += size
 	}
 	return builder.String()
 }

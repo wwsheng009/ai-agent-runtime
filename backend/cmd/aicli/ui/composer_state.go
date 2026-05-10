@@ -101,7 +101,7 @@ func (c *ComposerState) SubmitText() string {
 		if pending.Placeholder == "" {
 			continue
 		}
-		text = strings.ReplaceAll(text, pending.Placeholder, pending.Text)
+		text = strings.Replace(text, pending.Placeholder, pending.Text, 1)
 	}
 	return text
 }

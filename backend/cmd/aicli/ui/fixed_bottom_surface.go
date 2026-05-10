@@ -14,12 +14,20 @@ type FixedBottomSurface struct {
 	enabled              bool
 	statusLine           string
 	popupLines           []string
+	popupOwner           string
+	popupStack           []fixedBottomPopupState
 	composerLine         string
 	popupRenderedRows    int
 	popupRenderedGapRows int
 	lastWidth            int
 	lastHeight           int
 	lastBottomRows       int
+}
+
+type fixedBottomPopupState struct {
+	lines        []string
+	owner        string
+	composerLine string
 }
 
 func NewFixedBottomSurface(term *Terminal) *FixedBottomSurface {
@@ -42,10 +50,12 @@ func (s *FixedBottomSurface) Enable() bool {
 		return false
 	}
 	s.enabled = true
-	s.applyLayoutLocked()
-	s.renderPopupLocked()
-	s.renderStatusLocked()
-	s.moveToOutputLocked()
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.moveToOutputLocked()
+	})
 	return true
 }
 
@@ -58,15 +68,19 @@ func (s *FixedBottomSurface) Disable() {
 	if !s.enabled {
 		return
 	}
-	s.terminal.SaveCursor()
-	s.terminal.ResetScrollRegion()
-	s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-	s.terminal.MoveTo(s.statusRowLocked(), 1)
-	s.terminal.ClearLine()
-	s.terminal.RestoreCursor()
+	WithTerminalWriteLock(func() {
+		s.terminal.SaveCursor()
+		s.terminal.ResetScrollRegion()
+		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
+		s.terminal.MoveTo(s.statusRowLocked(), 1)
+		s.terminal.ClearLine()
+		s.terminal.RestoreCursor()
+	})
 	s.popupRenderedRows = 0
 	s.popupRenderedGapRows = 0
 	s.popupLines = nil
+	s.popupOwner = ""
+	s.popupStack = nil
 	s.composerLine = ""
 	s.enabled = false
 }
@@ -89,8 +103,10 @@ func (s *FixedBottomSurface) BeginOutput() {
 	if !s.enabled {
 		return
 	}
-	s.applyLayoutLocked()
-	s.moveToOutputLocked()
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.moveToOutputLocked()
+	})
 }
 
 func (s *FixedBottomSurface) ShowPopup(lines []string) {
@@ -99,33 +115,41 @@ func (s *FixedBottomSurface) ShowPopup(lines []string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.popupLines = cloneAndSanitizePopupLines(lines)
-	s.composerLine = ""
+	s.setActivePopupStateLocked(cloneAndSanitizePopupLines(lines), "", "")
 	if !s.enabled {
 		return
 	}
-	s.applyLayoutLocked()
-	s.renderPopupLocked()
-	s.renderStatusLocked()
-	s.moveToOutputLocked()
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.moveToOutputLocked()
+	})
 }
 
 func (s *FixedBottomSurface) ShowPopupPreserveCursor(lines []string) {
+	s.ShowPopupPreserveCursorForOwner(lines, "")
+}
+
+func (s *FixedBottomSurface) ShowPopupPreserveCursorForOwner(lines []string, owner string) {
 	if s == nil || s.terminal == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.popupLines = cloneAndSanitizePopupLines(lines)
-	s.composerLine = ""
+	if !s.setActivePopupStateLocked(cloneAndSanitizePopupLines(lines), strings.TrimSpace(owner), "") {
+		return
+	}
 	if !s.enabled {
 		return
 	}
-	s.terminal.SaveCursor()
-	defer s.terminal.RestoreCursor()
-	s.applyLayoutLocked()
-	s.renderPopupLocked()
-	s.renderStatusLocked()
+	WithTerminalWriteLock(func() {
+		s.terminal.SaveCursor()
+		defer s.terminal.RestoreCursor()
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+	})
 }
 
 func (s *FixedBottomSurface) ShowPopupInput(lines []string, prompt string) {
@@ -135,15 +159,38 @@ func (s *FixedBottomSurface) ShowPopupInput(lines []string, prompt string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
-	s.popupLines = cloneAndSanitizePopupLines(lines)
-	s.composerLine = prompt
+	s.setActivePopupStateLocked(cloneAndSanitizePopupLines(lines), "", prompt)
 	if !s.enabled {
 		return
 	}
-	s.applyLayoutLocked()
-	s.renderPopupLocked()
-	s.renderStatusLocked()
-	s.moveToPopupInputLocked()
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.moveToPopupInputLocked()
+	})
+}
+
+func (s *FixedBottomSurface) ShowPopupInputPreserveCursor(lines []string, prompt string) {
+	if s == nil || s.terminal == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
+	if !s.setActivePopupStateLocked(cloneAndSanitizePopupLines(lines), "", prompt) {
+		return
+	}
+	if !s.enabled {
+		return
+	}
+	WithTerminalWriteLock(func() {
+		s.terminal.SaveCursor()
+		defer s.terminal.RestoreCursor()
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+	})
 }
 
 func (s *FixedBottomSurface) ShowPendingPastePreview(lines int, text string) {
@@ -153,14 +200,14 @@ func (s *FixedBottomSurface) ShowPendingPastePreview(lines int, text string) {
 	text = NormalizePastedText(text)
 	lines = maxInt(0, lines)
 	preview := buildPendingPastePreviewLines(lines, text)
-	s.ShowPopup(preview)
+	s.ShowPopupPreserveCursorForOwner(preview, "pending_paste")
 }
 
 func (s *FixedBottomSurface) ClearPendingPastePreview() {
 	if s == nil || s.terminal == nil {
 		return
 	}
-	s.ClearPopup()
+	s.ClearPopupForOwnerPreserveCursor("pending_paste")
 }
 
 func (s *FixedBottomSurface) ClearPopup() {
@@ -173,18 +220,22 @@ func (s *FixedBottomSurface) ClearPopup() {
 		return
 	}
 	s.popupLines = nil
+	s.popupOwner = ""
+	s.popupStack = nil
 	s.composerLine = ""
 	if !s.enabled {
 		s.popupRenderedRows = 0
 		s.popupRenderedGapRows = 0
 		return
 	}
-	s.applyLayoutLocked()
-	s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-	s.popupRenderedRows = 0
-	s.popupRenderedGapRows = 0
-	s.renderStatusLocked()
-	s.moveToOutputLocked()
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
+		s.popupRenderedRows = 0
+		s.popupRenderedGapRows = 0
+		s.renderStatusLocked()
+		s.moveToOutputLocked()
+	})
 }
 
 func (s *FixedBottomSurface) ClearPopupPreserveCursor() {
@@ -197,19 +248,58 @@ func (s *FixedBottomSurface) ClearPopupPreserveCursor() {
 		return
 	}
 	s.popupLines = nil
+	s.popupOwner = ""
+	s.popupStack = nil
 	s.composerLine = ""
 	if !s.enabled {
 		s.popupRenderedRows = 0
 		s.popupRenderedGapRows = 0
 		return
 	}
-	s.terminal.SaveCursor()
-	defer s.terminal.RestoreCursor()
-	s.applyLayoutLocked()
-	s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-	s.popupRenderedRows = 0
-	s.popupRenderedGapRows = 0
-	s.renderStatusLocked()
+	WithTerminalWriteLock(func() {
+		s.terminal.SaveCursor()
+		defer s.terminal.RestoreCursor()
+		s.applyLayoutLocked()
+		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
+		s.popupRenderedRows = 0
+		s.popupRenderedGapRows = 0
+		s.renderStatusLocked()
+	})
+}
+
+func (s *FixedBottomSurface) ClearPopupForOwnerPreserveCursor(owner string) {
+	if s == nil || s.terminal == nil {
+		return
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.popupOwner != owner {
+		s.removePopupStateFromStackLocked(owner)
+		return
+	}
+	if len(s.popupLines) == 0 && s.popupRenderedRows == 0 && strings.TrimSpace(s.composerLine) == "" {
+		return
+	}
+	previousRows := s.popupRenderedRows
+	previousGapRows := s.popupRenderedGapRows
+	s.restorePopupStateFromStackLocked()
+	if !s.enabled {
+		return
+	}
+	WithTerminalWriteLock(func() {
+		s.terminal.SaveCursor()
+		defer s.terminal.RestoreCursor()
+		s.applyLayoutLocked()
+		s.clearPopupAreaLocked(previousRows, previousGapRows)
+		s.popupRenderedRows = 0
+		s.popupRenderedGapRows = 0
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+	})
 }
 
 func (s *FixedBottomSurface) SetStatusLine(line string) {
@@ -226,10 +316,13 @@ func (s *FixedBottomSurface) SetStatusLine(line string) {
 	if !s.enabled {
 		return
 	}
-	s.applyLayoutLocked()
-	s.renderPopupLocked()
-	s.renderStatusLocked()
-	s.moveToOutputLocked()
+	WithTerminalWriteLock(func() {
+		s.terminal.SaveCursor()
+		defer s.terminal.RestoreCursor()
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+	})
 }
 
 // SetComposerPreview 在底部固定区额外保留一行 composer 预览。
@@ -245,10 +338,12 @@ func (s *FixedBottomSurface) SetComposerPreview(line string) {
 	if !s.enabled {
 		return
 	}
-	s.applyLayoutLocked()
-	s.renderPopupLocked()
-	s.renderStatusLocked()
-	s.moveToPopupInputLocked()
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.moveToPopupInputLocked()
+	})
 }
 
 // ClearComposerPreview 清理底部 composer 预览。
@@ -267,13 +362,111 @@ func (s *FixedBottomSurface) ClearComposerPreview() {
 		s.popupRenderedGapRows = 0
 		return
 	}
-	s.applyLayoutLocked()
-	s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-	s.popupRenderedRows = 0
-	s.popupRenderedGapRows = 0
-	s.renderPopupLocked()
-	s.renderStatusLocked()
-	s.moveToOutputLocked()
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
+		s.popupRenderedRows = 0
+		s.popupRenderedGapRows = 0
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.moveToOutputLocked()
+	})
+}
+
+func (s *FixedBottomSurface) setActivePopupStateLocked(lines []string, owner string, composerLine string) bool {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		s.popupStack = nil
+		s.popupLines = lines
+		s.popupOwner = ""
+		s.composerLine = composerLine
+		return true
+	}
+	if s.popupOwner == owner {
+		s.popupLines = lines
+		s.composerLine = composerLine
+		return true
+	}
+	if s.popupOwner != "" && popupOwnerPriority(owner) < popupOwnerPriority(s.popupOwner) {
+		s.upsertPopupStateInStackLocked(fixedBottomPopupState{
+			lines:        lines,
+			owner:        owner,
+			composerLine: composerLine,
+		})
+		return false
+	}
+	if s.popupOwner != "" || len(s.popupLines) > 0 || strings.TrimSpace(s.composerLine) != "" {
+		s.upsertPopupStateInStackLocked(fixedBottomPopupState{
+			lines:        append([]string(nil), s.popupLines...),
+			owner:        s.popupOwner,
+			composerLine: s.composerLine,
+		})
+	}
+	s.removePopupStateFromStackLocked(owner)
+	s.popupLines = lines
+	s.popupOwner = owner
+	s.composerLine = composerLine
+	return true
+}
+
+func (s *FixedBottomSurface) upsertPopupStateInStackLocked(state fixedBottomPopupState) {
+	state.owner = strings.TrimSpace(state.owner)
+	if state.owner == "" {
+		return
+	}
+	state.lines = append([]string(nil), state.lines...)
+	for i := range s.popupStack {
+		if s.popupStack[i].owner == state.owner {
+			s.popupStack[i] = state
+			return
+		}
+	}
+	s.popupStack = append(s.popupStack, state)
+}
+
+func (s *FixedBottomSurface) removePopupStateFromStackLocked(owner string) {
+	owner = strings.TrimSpace(owner)
+	if owner == "" || len(s.popupStack) == 0 {
+		return
+	}
+	filtered := s.popupStack[:0]
+	for _, state := range s.popupStack {
+		if state.owner == owner {
+			continue
+		}
+		filtered = append(filtered, state)
+	}
+	s.popupStack = filtered
+}
+
+func (s *FixedBottomSurface) restorePopupStateFromStackLocked() {
+	for len(s.popupStack) > 0 {
+		last := s.popupStack[len(s.popupStack)-1]
+		s.popupStack = s.popupStack[:len(s.popupStack)-1]
+		if last.owner == "" && len(last.lines) == 0 && strings.TrimSpace(last.composerLine) == "" {
+			continue
+		}
+		s.popupLines = append([]string(nil), last.lines...)
+		s.popupOwner = last.owner
+		s.composerLine = last.composerLine
+		return
+	}
+	s.popupLines = nil
+	s.popupOwner = ""
+	s.composerLine = ""
+}
+
+func popupOwnerPriority(owner string) int {
+	switch strings.TrimSpace(owner) {
+	case "slash_completion":
+		return 100
+	case "pending_paste":
+		return 90
+	case "":
+		return 0
+	default:
+		return 10
+	}
 }
 
 func (s *FixedBottomSurface) canEnableLocked() bool {

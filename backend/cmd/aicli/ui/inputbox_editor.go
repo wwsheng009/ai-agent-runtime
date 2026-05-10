@@ -100,13 +100,13 @@ func (ib *InputBox) ReadTransientSecretPrompt(prompt string) (string, error) {
 	}
 	ib.historyPos = len(ib.history)
 	if prompt != "" {
-		fmt.Fprint(os.Stdout, prompt)
+		_, _ = WriteTerminalText(os.Stdout, prompt)
 	}
 	if !IsInteractiveTerminal() {
 		return readBufferedLine(os.Stdin)
 	}
 	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stdout)
+	_, _ = WriteTerminalLine(os.Stdout, "")
 	if err != nil {
 		return "", err
 	}
@@ -160,12 +160,12 @@ func (ib *InputBox) readPrompt(prompt string, onChange func(string), keepHistory
 		return line, readErr
 	}
 	defer func() {
-		fmt.Fprint(os.Stdout, bracketedPasteDisableSequence)
+		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence)
 		_ = term.Restore(fd, state)
 	}()
 	// 启用 bracketed paste 后，终端会给粘贴块加上明确边界，
 	// 这样我们就能把块内换行当作文本而不是 Enter。
-	fmt.Fprint(os.Stdout, bracketedPasteEnableSequence)
+	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence)
 	// 提示符已经由调用方渲染到屏幕上了。
 	// 重绘时使用相对光标移动定位输入区，避免依赖会被滚动失效的
 	// `\x1b[s` / `\x1b[u` 绝对锚点（多行粘贴触发滚动后会把同一段输入
@@ -211,10 +211,10 @@ func (ib *InputBox) readPromptWithHooks(prompt string, hooks LineEditorHooks, ke
 		return line, readErr
 	}
 	defer func() {
-		fmt.Fprint(os.Stdout, bracketedPasteDisableSequence)
+		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence)
 		_ = term.Restore(fd, state)
 	}()
-	fmt.Fprint(os.Stdout, bracketedPasteEnableSequence)
+	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence)
 
 	line, readErr := readInteractiveLineWithHooks(os.Stdin, os.Stdout, prompt, ib.history, nil, &hooks, echoSubmit, holdFirstRune)
 	if readErr == nil && keepHistory && strings.TrimSpace(line) != "" {
@@ -361,7 +361,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 			if cursorPos.col > 0 {
 				fmt.Fprintf(&builder, "\x1b[%dC", cursorPos.col)
 			}
-			fmt.Fprint(writer, builder.String())
+			_, _ = WriteTerminalText(writer, builder.String())
 			lastCursorRow = cursorPos.row
 			lastCursorCol = cursorPos.col
 			return
@@ -418,7 +418,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 		lastRenderedTermWidth = termWidth
 		lastRenderedPromptWidth = promptWidth
 		lastRenderedLine = append(lastRenderedLine[:0], line...)
-		fmt.Fprint(writer, builder.String())
+		_, _ = WriteTerminalText(writer, builder.String())
 	}
 
 	setLine := func(next []rune) {
@@ -705,7 +705,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 			case editorKeyEnter:
 				pasteBuffer = append(pasteBuffer, '\n')
 			case editorKeyInterrupt:
-				fmt.Fprint(writer, "\r\n")
+				_, _ = WriteTerminalText(writer, "\r\n")
 				if onChange != nil {
 					onChange("")
 				}
@@ -842,7 +842,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 				}
 			}
 			if echoSubmit {
-				fmt.Fprint(writer, "\r\n")
+				_, _ = WriteTerminalText(writer, "\r\n")
 			}
 			if onChange != nil {
 				onChange("")
@@ -1019,7 +1019,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 			hadTypedContent := len(line) > 0 || pasteBurst.IsActive()
 			pasteBurst.ClearAfterExplicitPaste()
 			if echoSubmit {
-				fmt.Fprint(writer, "\r\n")
+				_, _ = WriteTerminalText(writer, "\r\n")
 			}
 			if onChange != nil {
 				onChange("")

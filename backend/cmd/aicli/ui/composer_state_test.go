@@ -62,6 +62,20 @@ func TestComposerStateLargePastePlaceholdersAreUnique(t *testing.T) {
 	}
 }
 
+func TestComposerStateLargePasteExpandsOnlyOnePlaceholderOccurrence(t *testing.T) {
+	composer := NewComposerState()
+	large := strings.Repeat("a", LargePasteCharThreshold+1)
+	composer.HandlePasteAt(0, large)
+	placeholder := composer.Text()
+	composer.SetText(placeholder + " " + placeholder)
+
+	got := composer.SubmitText()
+	want := large + " " + placeholder
+	if got != want {
+		t.Fatalf("expected only one placeholder occurrence to expand, got len=%d", len(got))
+	}
+}
+
 func TestComposerStateSetTextPrunesDeletedPendingPaste(t *testing.T) {
 	composer := NewComposerState()
 	large := strings.Repeat("a", LargePasteCharThreshold+1)

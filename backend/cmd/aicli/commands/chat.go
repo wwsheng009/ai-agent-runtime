@@ -845,7 +845,11 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 
 			input, err = chatInteractiveReadLine(session, session.cancelCtx)
 			if session.Interaction != nil {
-				session.Interaction.ClearPrompt()
+				if err == nil {
+					session.Interaction.ResetPromptState()
+				} else {
+					session.Interaction.ClearPrompt()
+				}
 			}
 			if err != nil {
 				if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
