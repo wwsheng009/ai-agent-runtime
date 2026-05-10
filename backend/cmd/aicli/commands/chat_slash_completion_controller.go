@@ -11,6 +11,7 @@ import (
 const (
 	slashCompletionHintLine      = "提示: ↑↓ 选择，Tab/Enter 接受，Esc 关闭"
 	slashCompletionShellHintLine = "Shell 快捷: !git status"
+	slashCompletionPopupOwner    = "slash_completion"
 )
 
 type chatSlashCompletionController struct {
@@ -348,10 +349,10 @@ func (c *chatSlashCompletionController) renderLocked() {
 		return
 	}
 	if c.renderedSignature != "" {
-		c.session.Surface.ClearPopupPreserveCursor()
+		c.session.Surface.ClearPopupForOwnerPreserveCursor(slashCompletionPopupOwner)
 	}
 
-	c.session.Surface.ShowPopupPreserveCursor(lines)
+	c.session.Surface.ShowPopupPreserveCursorForOwner(lines, slashCompletionPopupOwner)
 	c.renderedSignature = signature
 }
 
@@ -359,7 +360,7 @@ func (c *chatSlashCompletionController) clearPopupLocked() {
 	if !c.isSurfaceEnabledLocked() {
 		return
 	}
-	c.session.Surface.ClearPopupPreserveCursor()
+	c.session.Surface.ClearPopupForOwnerPreserveCursor(slashCompletionPopupOwner)
 }
 
 func (c *chatSlashCompletionController) isSurfaceEnabledLocked() bool {

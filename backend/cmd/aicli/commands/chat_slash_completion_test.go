@@ -330,13 +330,14 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/new", forms: []string{"/new"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/session", forms: []string{"/session"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/status", forms: []string{"/status"}, acceptsArgs: false, requiresArgs: false},
-		{canonical: "/debug", forms: []string{"/debug"}, acceptsArgs: false, requiresArgs: false},
+		{canonical: "/debug", forms: []string{"/debug"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/agents", forms: []string{"/agents"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/timeline", forms: []string{"/timeline"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/collab", forms: []string{"/collab"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/sessions", forms: []string{"/sessions"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/load", forms: []string{"/load"}, acceptsArgs: true, requiresArgs: true},
 		{canonical: "/resume", forms: []string{"/resume"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/export", forms: []string{"/export"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/title", forms: []string{"/title"}, acceptsArgs: true, requiresArgs: true},
 		{canonical: "/history", forms: []string{"/history", "/h"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/stream", forms: []string{"/stream"}, acceptsArgs: true, requiresArgs: false},
@@ -599,6 +600,50 @@ func TestChatSlashArgumentCompletionModelAndResume(t *testing.T) {
 	resumeController.UpdateAt("/resume ", len([]rune("/resume ")))
 	if got := atomic.LoadInt32(&resumeStorage.listCalls); got != 1 {
 		t.Fatalf("expected cached resume candidates to avoid repeated list calls, got %d", got)
+	}
+}
+
+func TestChatSlashArgumentCompletionAgents(t *testing.T) {
+	t.Parallel()
+
+	controller := newChatSlashCompletionController(&ChatSession{})
+	controller.UpdateAt("/agents ", len([]rune("/agents ")))
+	if !controller.state.Active || !controller.state.Context.InArguments {
+		t.Fatalf("expected agents args popup to be active, got %#v", controller.state)
+	}
+	for _, command := range []string{"panel", "dashboard", "pick", "target", "send", "followup"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /agents candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/agents pa", len([]rune("/agents pa")))
+	if !containsSlashCandidate(controller.state.Candidates, "panel") {
+		t.Fatalf("expected /agents pa to complete panel, got %#v", controller.state.Candidates)
+	}
+	nextText, nextCursor, ok := controller.ApplyCompletion("/agents pa", len([]rune("/agents pa")))
+	if !ok {
+		t.Fatal("expected /agents pa completion to be accepted")
+	}
+	if nextText != "/agents panel" {
+		t.Fatalf("expected panel completion without forced trailing space, got %q", nextText)
+	}
+	if nextCursor != len([]rune("/agents panel")) {
+		t.Fatalf("expected cursor after panel, got %d", nextCursor)
+	}
+
+	controller.UpdateAt("/agents panel ", len([]rune("/agents panel ")))
+	for _, command := range []string{"follow", "target", "next", "prev"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /agents panel candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/agents target ", len([]rune("/agents target ")))
+	for _, command := range []string{"clear", "none"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /agents target candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
 	}
 }
 

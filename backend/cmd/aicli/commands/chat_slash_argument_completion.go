@@ -96,10 +96,21 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "status", Summary: "查看当前状态", Group: string(chatSlashCommandGroupContext)},
 			{Command: "clear", Summary: "清空排队输入", Group: string(chatSlashCommandGroupContext)},
 		})
+	case "/debug":
+		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "export", Summary: "打包调试文件", Group: string(chatSlashCommandGroupSession)},
+			{Command: "zip", Summary: "打包调试文件", Group: string(chatSlashCommandGroupSession)},
+			{Command: "--output", Summary: "指定 zip 输出文件", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--dir", Summary: "指定 zip 输出目录", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		})
+	case "/agents":
+		return completeAgentsSlashArgs(session, argsText, cursor)
 	case "/function", "/describe", "/call", "/tool":
 		return completeCatalogFunctionArgs(session, argsText, cursor, command)
 	case "/skill", "/skills":
 		return completeSkillArgs(session, argsText, cursor)
+	case "/export":
+		return p.completeExportArgs(session, argsText, cursor)
 	case "/resume":
 		return p.completeResumeArgs(session, argsText, cursor)
 	case "/load":
@@ -112,6 +123,134 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 func completeStaticSlashArgs(argsText string, cursor int, candidates []chatSlashCompletionCandidate) []chatSlashCompletionCandidate {
 	ctx := parseSlashArgumentContext(argsText, cursor)
 	return matchSlashArgumentCandidates(candidates, activeSlashArgumentQuery(ctx))
+}
+
+func completeAgentsSlashArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {
+	ctx := parseSlashArgumentContext(argsText, cursor)
+	query := activeSlashArgumentQuery(ctx)
+	first := slashArgumentTokenText(ctx, 0)
+
+	if first == "" || slashArgumentCursorInToken(ctx, 0) {
+		return matchSlashArgumentCandidates(agentTopLevelArgumentCandidates(), query)
+	}
+
+	switch strings.ToLower(first) {
+	case "panel", "pane", "dashboard":
+		return completeAgentsPanelSlashArgs(session, ctx, query)
+	case "pick", "select":
+		return nil
+	case "target":
+		return matchSlashArgumentCandidates(agentTargetArgumentCandidates(session, false, true), query)
+	case "send":
+		return completeAgentsMessageTargetSlashArgs(session, ctx, query)
+	case "followup", "task":
+		return completeAgentsMessageTargetSlashArgs(session, ctx, query)
+	default:
+		return matchSlashArgumentCandidates(agentTopLevelArgumentCandidates(), query)
+	}
+}
+
+func completeAgentsPanelSlashArgs(session *ChatSession, ctx slashArgumentContext, query string) []chatSlashCompletionCandidate {
+	second := slashArgumentTokenText(ctx, 1)
+	if second == "" || slashArgumentCursorInToken(ctx, 1) {
+		return matchSlashArgumentCandidates(agentPanelArgumentCandidates(), query)
+	}
+	if strings.EqualFold(second, "target") {
+		return matchSlashArgumentCandidates(agentTargetArgumentCandidates(session, false, false), query)
+	}
+	return nil
+}
+
+func completeAgentsMessageTargetSlashArgs(session *ChatSession, ctx slashArgumentContext, query string) []chatSlashCompletionCandidate {
+	if slashArgumentTokenText(ctx, 1) == "" || slashArgumentCursorInToken(ctx, 1) {
+		candidates := agentTargetArgumentCandidates(session, true, false)
+		matches := matchSlashArgumentCandidates(candidates, query)
+		if len(matches) == 0 && strings.TrimSpace(sessionSelectedAgentTarget(session)) != "" {
+			return nil
+		}
+		return matches
+	}
+	return nil
+}
+
+func agentTopLevelArgumentCandidates() []chatSlashCompletionCandidate {
+	return []chatSlashCompletionCandidate{
+		{Command: "panel", Summary: "显示多 agent 富交互面板", Group: string(chatSlashCommandGroupSession)},
+		{Command: "dashboard", Summary: "panel 的别名", Group: string(chatSlashCommandGroupSession)},
+		{Command: "pick", Summary: "弹出 agent picker", Group: string(chatSlashCommandGroupSession)},
+		{Command: "target", Summary: "设置或列出默认 agent 消息目标", Group: string(chatSlashCommandGroupSession)},
+		{Command: "send", Summary: "向目标 agent 投递 mailbox 消息", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "followup", Summary: "向目标 agent 投递或触发 follow-up task", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "select", Summary: "pick 的别名", Group: string(chatSlashCommandGroupSession)},
+		{Command: "task", Summary: "followup 的别名", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+	}
+}
+
+func agentPanelArgumentCandidates() []chatSlashCompletionCandidate {
+	return []chatSlashCompletionCandidate{
+		{Command: "follow", Summary: "进入面板跟随模式或等待 mailbox 更新", Group: string(chatSlashCommandGroupSession)},
+		{Command: "target", Summary: "切换 panel 到指定 agent target", Group: string(chatSlashCommandGroupSession)},
+		{Command: "next", Summary: "切换 panel 到下一个 agent target", Group: string(chatSlashCommandGroupSession)},
+		{Command: "prev", Summary: "切换 panel 到上一个 agent target", Group: string(chatSlashCommandGroupSession)},
+		{Command: "watch", Summary: "follow 的别名", Group: string(chatSlashCommandGroupSession)},
+		{Command: "previous", Summary: "prev 的别名", Group: string(chatSlashCommandGroupSession)},
+	}
+}
+
+func agentTargetArgumentCandidates(session *ChatSession, acceptsArgs bool, includeClear bool) []chatSlashCompletionCandidate {
+	candidates := make([]chatSlashCompletionCandidate, 0, 8)
+	if includeClear {
+		candidates = append(candidates,
+			chatSlashCompletionCandidate{Command: "clear", Summary: "清空默认 agent target", Group: string(chatSlashCommandGroupSession)},
+			chatSlashCompletionCandidate{Command: "none", Summary: "清空默认 agent target", Group: string(chatSlashCommandGroupSession)},
+		)
+	}
+	agents, err := chatAgentPickerItems(session)
+	if err != nil {
+		return candidates
+	}
+	for _, agent := range agents {
+		target := firstNonEmptyChatValue(agent.Path, agent.SessionID, agent.ID)
+		if strings.TrimSpace(target) == "" {
+			continue
+		}
+		summary := "agent target"
+		if status := strings.TrimSpace(agent.Status); status != "" {
+			summary = "status=" + status
+		}
+		if sessionID := firstNonEmptyChatValue(agent.SessionID, agent.ID); strings.TrimSpace(sessionID) != "" {
+			summary += " session=" + sessionID
+		}
+		candidates = append(candidates, chatSlashCompletionCandidate{
+			Command:     target,
+			Summary:     summary,
+			Group:       string(chatSlashCommandGroupSession),
+			AcceptsArgs: acceptsArgs,
+		})
+	}
+	return candidates
+}
+
+func slashArgumentTokenText(ctx slashArgumentContext, index int) string {
+	if index < 0 || index >= len(ctx.Tokens) {
+		return ""
+	}
+	return strings.TrimSpace(ctx.Tokens[index].Text)
+}
+
+func slashArgumentCursorInToken(ctx slashArgumentContext, index int) bool {
+	if !ctx.CurrentOK || index < 0 || index >= len(ctx.Tokens) {
+		return false
+	}
+	token := ctx.Tokens[index]
+	return ctx.Current.Start == token.Start && ctx.Current.End == token.End
+}
+
+func sessionSelectedAgentTarget(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	return strings.TrimSpace(session.SelectedAgentTarget)
 }
 
 func completeModelSlashArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {
@@ -202,6 +341,19 @@ func (p *chatSlashArgumentCompletionProvider) completeLoadArgs(session *ChatSess
 	ctx := parseSlashArgumentContext(argsText, cursor)
 	candidates := p.loadArgumentCandidates(session)
 	return matchSlashArgumentCandidates(candidates, activeSlashArgumentQuery(ctx))
+}
+
+func (p *chatSlashArgumentCompletionProvider) completeExportArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {
+	ctx := parseSlashArgumentContext(argsText, cursor)
+	candidates := []chatSlashCompletionCandidate{
+		{Command: "current", Summary: "导出当前会话", Group: string(chatSlashCommandGroupSession)},
+		{Command: "--full", Summary: "完整 JSON", Group: string(chatSlashCommandGroupSession)},
+		{Command: "--body", Summary: "正文 Markdown", Group: string(chatSlashCommandGroupSession)},
+		{Command: "--output", Summary: "指定输出文件", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "--dir", Summary: "指定输出目录", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+	}
+	candidates = append(candidates, p.resumeArgumentCandidates(session)...)
+	return matchSlashArgumentCandidates(dedupeSlashArgumentCandidates(candidates), activeSlashArgumentQuery(ctx))
 }
 
 func activeSlashArgumentQuery(ctx slashArgumentContext) string {
