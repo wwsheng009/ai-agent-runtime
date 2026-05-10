@@ -1,6 +1,7 @@
 aicli:
     log:
-        file_path: ${AICLI_LOG_FILE_PATH:-./logs/aicli.log}
+        enabled: ${AICLI_LOG_ENABLED:-true}
+        file_path: ${AICLI_LOG_FILE_PATH:-~/.aicli/logs/aicli.log}
     mcp:
         auto_connect: ${MCP_AUTO_CONNECT:-false}
         config_file: ${MCP_CONFIG_FILE:-configs/mcp.yaml}
@@ -66,8 +67,9 @@ database:
         wal_auto_checkpoint_pages: ${SQLITE_WAL_AUTO_CHECKPOINT_PAGES:-1000}
 log:
     compress: true
+    enabled: ${LOG_ENABLED:-true}
     enable_console: ${LOG_ENABLE_CONSOLE:-false}
-    file_path: ${LOG_FILE_PATH:-./logs/gateway.log}
+    file_path: ${LOG_FILE_PATH:-~/.aicli/logs/gateway.log}
     format: ${LOG_FORMAT:-json}
     level: ${LOG_LEVEL:-debug}
     max_age: ${LOG_MAX_AGE:-7}

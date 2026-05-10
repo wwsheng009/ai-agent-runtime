@@ -95,10 +95,17 @@ func main() {
 		}
 		cfg = loadedConfig
 
-		// AICLI 日志路径覆盖（优先级：命令行 > aicli.log.file_path > log.file_path）
+		// AICLI 日志配置覆盖（优先级：命令行 > aicli.log > log）
 		if cfg != nil {
-			if cfg.AICLI != nil && cfg.AICLI.Log != nil && cfg.AICLI.Log.FilePath != "" {
-				cfg.Log.FilePath = cfg.AICLI.Log.FilePath
+			if cfg.AICLI != nil && cfg.AICLI.Log != nil {
+				// aicli.log.enabled → 覆盖 → log.enabled
+				if cfg.AICLI.Log.Enabled != nil {
+					cfg.Log.Enabled = cfg.AICLI.Log.Enabled
+				}
+				// aicli.log.file_path → 覆盖 → log.file_path
+				if cfg.AICLI.Log.FilePath != "" {
+					cfg.Log.FilePath = cfg.AICLI.Log.FilePath
+				}
 			}
 			if logFilePath != "" {
 				cfg.Log.FilePath = logFilePath

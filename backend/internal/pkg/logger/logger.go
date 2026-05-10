@@ -21,8 +21,34 @@ var (
 	loggerMu      sync.RWMutex
 )
 
+// IsEnabled returns true if logging is enabled (defaults to true when not set).
+func IsEnabled(cfg *LogConfig) bool {
+	if cfg == nil || cfg.Enabled == nil {
+		return true
+	}
+	return *cfg.Enabled
+}
+
 // InitLogger initializes the global logger
 func InitLogger(cfg *LogConfig) error {
+	if !IsEnabled(cfg) {
+		// Logging is disabled: reset to a basic stderr logger so callers never
+		// see nil pointers, but do not create any log files or directories.
+		basic, _ := zap.NewProduction()
+		loggerMu.Lock()
+		oldLogger := globalLogger
+		oldClosers := globalClosers
+		globalLogger = basic
+		globalSugar = basic.Sugar()
+		globalClosers = nil
+		loggerMu.Unlock()
+		if oldLogger != nil {
+			_ = oldLogger.Sync()
+		}
+		closeLoggerClosers(oldClosers)
+		return nil
+	}
+
 	logger, sugar, closers, err := buildLogger(cfg)
 	if err != nil {
 		return err

@@ -17,6 +17,11 @@ func suppressChatConsoleLogger(cfg *config.Config, opts *chatCommandOptions) fun
 		return nil
 	}
 
+	// Logging is disabled – nothing to suppress.
+	if !logpkg.IsEnabled(&cfg.Log) {
+		return nil
+	}
+
 	original := cfg.Log
 	if strings.EqualFold(strings.TrimSpace(original.Output), "file") && !original.EnableConsole && strings.TrimSpace(original.FilePath) != "" {
 		return nil

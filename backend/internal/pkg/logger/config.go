@@ -6,6 +6,7 @@ type LogConfig struct {
 	Level         string                     `yaml:"level" mapstructure:"level"`
 	Format        string                     `yaml:"format" mapstructure:"format"`
 	Output        string                     `yaml:"output" mapstructure:"output"`
+	Enabled       *bool                      `yaml:"enabled" mapstructure:"enabled"`
 	FilePath      string                     `yaml:"file_path" mapstructure:"file_path"`
 	MaxSize       int                        `yaml:"max_size" mapstructure:"max_size"`
 	MaxBackups    int                        `yaml:"max_backups" mapstructure:"max_backups"`

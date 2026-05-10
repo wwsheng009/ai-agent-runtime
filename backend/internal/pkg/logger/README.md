@@ -26,7 +26,7 @@ cfg := &config.LogConfig{
     Level:      "info",
     Format:     "json",
     Output:     "both",
-    FilePath:   "./logs/gateway.log",
+    FilePath:   "~/.aicli/logs/gateway.log",
     MaxSize:    100,
     MaxBackups: 3,
     MaxAge:     7,
@@ -135,10 +135,11 @@ logger.Panic("Panic, calls panic()")
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| Enabled | *bool | true | Enable/disable log file creation (nil defaults to true) |
 | Level | string | info | Log level: debug, info, warn, error |
 | Format | string | json | Log format: json, text |
 | Output | string | stdout | Output target: stdout, file, both (console logs are emitted to stderr) |
-| FilePath | string | ./logs/gateway.log | Log file path (when output=file or both) |
+| FilePath | string | ~/.aicli/logs/gateway.log | Log file path (when output=file or both) |
 | MaxSize | int | 100 | Max log file size in MB |
 | MaxBackups | int | 3 | Max number of old log files |
 | MaxAge | int | 7 | Max age of old log files in days |

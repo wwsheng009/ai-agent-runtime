@@ -355,6 +355,7 @@ type AICLIMCPConfig struct {
 
 // AICLILogConfig holds aicli log configuration.
 type AICLILogConfig struct {
+	Enabled  *bool  `yaml:"enabled" mapstructure:"enabled" env:"AICLI_LOG_ENABLED"`
 	FilePath string `yaml:"file_path" mapstructure:"file_path" env:"AICLI_LOG_FILE_PATH"`
 }
 
