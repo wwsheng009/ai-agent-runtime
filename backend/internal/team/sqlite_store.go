@@ -3470,6 +3470,23 @@ func (s *SQLiteStore) ListTeamEvents(ctx context.Context, filter TeamEventFilter
 	return events, nil
 }
 
+// LastTeamEventSeq returns the current durable team event high-water mark.
+func (s *SQLiteStore) LastTeamEventSeq(ctx context.Context, teamID string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("team store is not initialized")
+	}
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0)
+		FROM team_events
+		WHERE team_id = ?
+	`, strings.TrimSpace(teamID)).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("last team event sequence: %w", err)
+	}
+	return seq, nil
+}
+
 func (s *SQLiteStore) init(ctx context.Context) error {
 	migrations := []migrate.Migration{
 		{

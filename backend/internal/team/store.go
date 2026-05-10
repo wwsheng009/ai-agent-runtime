@@ -23,6 +23,11 @@ type TaskGraphEventReaderStore interface {
 	ListTaskGraphEvents(ctx context.Context, filter TaskGraphEventFilter) ([]TaskGraphEvent, error)
 }
 
+// TeamEventSequenceStore exposes the durable high-water mark for team events.
+type TeamEventSequenceStore interface {
+	LastTeamEventSeq(ctx context.Context, teamID string) (int64, error)
+}
+
 // AgentControlMailboxWatcherStore exposes mailbox wake notifications through
 // the AgentControl wake projection rather than the team-native mailbox table.
 type AgentControlMailboxWatcherStore interface {
