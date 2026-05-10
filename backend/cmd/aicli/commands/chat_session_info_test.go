@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -609,6 +610,77 @@ func TestChatAgentTargetLinesListsAvailableTargets(t *testing.T) {
 	})
 	if !strings.Contains(commandOutput, "Agent Targets:") || !strings.Contains(commandOutput, "[1] * /root/target-worker") {
 		t.Fatalf("expected agents target command to list available targets, got:\n%s", commandOutput)
+	}
+}
+
+func TestChatAgentPickerItemsUsesDurableRegistryWithoutSessionList(t *testing.T) {
+	ctx := context.Background()
+	registry, err := agentcontrol.NewRegistryService(ctx, agentcontrol.RegistryServiceConfig{
+		StorePath: filepath.Join(t.TempDir(), "agent-control.sqlite"),
+	})
+	require.NoError(t, err)
+	defer registry.Close()
+
+	sessionStore := &countingSessionStorage{InMemoryStorage: runtimechat.NewInMemoryStorage()}
+	root := runtimechat.NewSession("picker-user")
+	root.ID = "picker-root"
+	require.NoError(t, sessionStore.Save(ctx, root))
+	_, err = registry.AgentStore.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:         "picker-worker",
+		RootSessionID:   root.ID,
+		ParentAgentID:   localRootAgentID(root.ID),
+		ParentSessionID: root.ID,
+		SessionID:       "picker-worker-session",
+		AgentPath:       "/root/picker-worker",
+		Depth:           1,
+		AgentType:       "worker",
+		Status:          agentcontrol.AgentStatusActive,
+	})
+	require.NoError(t, err)
+	_, err = registry.AgentStore.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:         "picker-closed-worker",
+		RootSessionID:   root.ID,
+		ParentAgentID:   localRootAgentID(root.ID),
+		ParentSessionID: root.ID,
+		SessionID:       "picker-closed-session",
+		AgentPath:       "/root/picker-closed-worker",
+		Depth:           1,
+		AgentType:       "worker",
+		Status:          agentcontrol.AgentStatusClosed,
+	})
+	require.NoError(t, err)
+
+	host := &localChatRuntimeHost{
+		SessionStore:       sessionStore,
+		SessionUser:        "picker-user",
+		AgentRegistryStore: registry.AgentStore,
+	}
+	host.ActorRegistry = newLocalActorRegistry(host)
+	session := &ChatSession{
+		RuntimeSession:   root,
+		SessionUserID:    "picker-user",
+		LocalRuntimeHost: host,
+	}
+
+	agents, err := chatAgentPickerItems(session)
+	require.NoError(t, err)
+	if len(agents) != 1 {
+		t.Fatalf("expected one picker agent from durable registry, got %#v", agents)
+	}
+	if agents[0].Path != "/root/picker-worker" || agents[0].SessionID != "picker-worker-session" || agents[0].AgentType != "worker" {
+		t.Fatalf("unexpected picker agent: %#v", agents[0])
+	}
+	if got := atomic.LoadInt32(&sessionStore.listCalls); got != 0 {
+		t.Fatalf("expected picker fast path not to list all sessions, got list calls=%d", got)
+	}
+
+	graphAgents, err := chatAgentGraphItems(session)
+	require.NoError(t, err)
+	if len(graphAgents) != 2 {
+		t.Fatalf("expected graph to include active and closed durable agents, got %#v", graphAgents)
+	}
+	if got := atomic.LoadInt32(&sessionStore.listCalls); got != 0 {
+		t.Fatalf("expected graph fast path not to list all sessions, got list calls=%d", got)
 	}
 }
 
@@ -1243,6 +1315,70 @@ func TestHandleCommand_AgentsPanelShowsUnifiedMultiAgentView(t *testing.T) {
 	}
 }
 
+func TestChatAgentPanelUsesBoundedRecentWindowAndHandlesNoAgents(t *testing.T) {
+	store := &recordingPanelRuntimeStore{
+		eventSeq:   1000,
+		mailboxSeq: 1000,
+		controlSeq: 1000,
+	}
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "panel-bounded-root", State: runtimechat.StateActive},
+		LocalRuntimeHost: &localChatRuntimeHost{
+			EventStore: store,
+		},
+	}
+
+	output := strings.Join(chatAgentPanelLines(session, 8), "\n")
+	for _, expected := range []string{
+		"Agent Control Panel:",
+		"selected=<none>",
+		"Agents:",
+		"  <none>",
+		"Mailbox:",
+		"panel bounded mailbox",
+		"Timeline:",
+		"  <none>",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected bounded panel output to contain %q, got:\n%s", expected, output)
+		}
+	}
+	if store.controlAfterSeq != 936 || store.controlLimit != 64 {
+		t.Fatalf("expected bounded control mailbox read window, got after=%d limit=%d", store.controlAfterSeq, store.controlLimit)
+	}
+	if store.mailboxAfterSeq != 936 || store.mailboxLimit != 64 {
+		t.Fatalf("expected bounded mailbox read window, got after=%d limit=%d", store.mailboxAfterSeq, store.mailboxLimit)
+	}
+	if store.eventAfterSeq != 936 || store.eventLimit != 64 {
+		t.Fatalf("expected bounded event read window, got after=%d limit=%d", store.eventAfterSeq, store.eventLimit)
+	}
+}
+
+func TestChatAgentPanelTimelineUsesBoundedRecentWindow(t *testing.T) {
+	store := &recordingPanelTeamStore{lastSeq: 1000}
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "panel-timeline-root", State: runtimechat.StateActive},
+		ActiveTeam:     &chatTeamBinding{TeamID: "panel-team"},
+		LocalRuntimeHost: &localChatRuntimeHost{
+			TeamStore: store,
+		},
+	}
+
+	output := strings.Join(chatAgentPanelLines(session, 8), "\n")
+	for _, expected := range []string{
+		"Timeline:",
+		"team=panel-team",
+		"recent panel team event",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected bounded panel timeline output to contain %q, got:\n%s", expected, output)
+		}
+	}
+	if store.afterSeq != 936 || store.limit != 64 {
+		t.Fatalf("expected bounded team event read window, got after=%d limit=%d", store.afterSeq, store.limit)
+	}
+}
+
 func TestHandleCommand_AgentsPanelShowsRegistryServiceMode(t *testing.T) {
 	ctx := context.Background()
 	registry, err := agentcontrol.NewRegistryService(ctx, agentcontrol.RegistryServiceConfig{
@@ -1677,4 +1813,82 @@ func captureStdout(t *testing.T, fn func()) string {
 	_ = reader.Close()
 
 	return string(data)
+}
+
+type recordingPanelRuntimeStore struct {
+	eventSeq   int64
+	mailboxSeq int64
+	controlSeq int64
+
+	eventAfterSeq   int64
+	eventLimit      int
+	mailboxAfterSeq int64
+	mailboxLimit    int
+	controlAfterSeq int64
+	controlLimit    int
+}
+
+func (s *recordingPanelRuntimeStore) AppendEvent(context.Context, runtimeevents.Event) (int64, error) {
+	return 0, nil
+}
+
+func (s *recordingPanelRuntimeStore) ListEvents(_ context.Context, sessionID string, afterSeq int64, limit int) ([]runtimeevents.Event, error) {
+	s.eventAfterSeq = afterSeq
+	s.eventLimit = limit
+	return []runtimeevents.Event{{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: sessionID,
+		Payload:   map[string]interface{}{"summary": "recent panel event"},
+	}}, nil
+}
+
+func (s *recordingPanelRuntimeStore) ListMailbox(_ context.Context, sessionID string, afterSeq int64, limit int) ([]team.MailMessage, error) {
+	s.mailboxAfterSeq = afterSeq
+	s.mailboxLimit = limit
+	return []team.MailMessage{toolbroker.BuildAgentMailboxMessage("child-1", "parent", "panel bounded mailbox", false)}, nil
+}
+
+func (s *recordingPanelRuntimeStore) ListAgentControlMailbox(_ context.Context, sessionID string, afterSeq int64, limit int) ([]team.MailMessage, error) {
+	s.controlAfterSeq = afterSeq
+	s.controlLimit = limit
+	return []team.MailMessage{toolbroker.BuildAgentMailboxMessage("child-1", "parent", "panel bounded control mailbox", false)}, nil
+}
+
+func (s *recordingPanelRuntimeStore) LastEventSeq(context.Context, string) (int64, error) {
+	return s.eventSeq, nil
+}
+
+func (s *recordingPanelRuntimeStore) LastMailboxSeq(context.Context, string) (int64, error) {
+	return s.mailboxSeq, nil
+}
+
+func (s *recordingPanelRuntimeStore) LastAgentControlMailboxSeq(context.Context, string) (int64, error) {
+	return s.controlSeq, nil
+}
+
+type recordingPanelTeamStore struct {
+	team.Store
+	lastSeq  int64
+	afterSeq int64
+	limit    int
+}
+
+func (s *recordingPanelTeamStore) ListTeamEvents(_ context.Context, filter team.TeamEventFilter) ([]team.TeamEventRecord, error) {
+	s.afterSeq = filter.AfterSeq
+	s.limit = filter.Limit
+	return []team.TeamEventRecord{{
+		Seq: filter.AfterSeq + 1,
+		TeamEvent: team.TeamEvent{
+			Type:   "task.completed",
+			TeamID: filter.TeamID,
+			Payload: map[string]interface{}{
+				"task_id": "recent-task",
+				"summary": "recent panel team event",
+			},
+		},
+	}}, nil
+}
+
+func (s *recordingPanelTeamStore) LastTeamEventSeq(context.Context, string) (int64, error) {
+	return s.lastSeq, nil
 }
