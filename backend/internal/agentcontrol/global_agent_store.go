@@ -334,8 +334,9 @@ func agentFilterClauses(filter AgentFilter) ([]string, []interface{}) {
 		args = append(args, filter.AgentPath)
 	}
 	if filter.PathPrefix != "" {
-		clauses = append(clauses, "agent_path LIKE ?")
-		args = append(args, strings.TrimRight(filter.PathPrefix, "/")+"%")
+		pathPrefix := strings.TrimRight(filter.PathPrefix, "/")
+		clauses = append(clauses, "(agent_path = ? OR agent_path LIKE ?)")
+		args = append(args, pathPrefix, pathPrefix+"/%")
 	}
 	if filter.Workflow != "" {
 		clauses = append(clauses, "workflow = ?")
@@ -641,7 +642,7 @@ func agentWakeMatchesFilter(event AgentWakeEvent, filter AgentWakeFilter) bool {
 	if filter.AgentPath != "" && !strings.EqualFold(event.AgentPath, filter.AgentPath) {
 		return false
 	}
-	if filter.PathPrefix != "" && !strings.HasPrefix(event.AgentPath, strings.TrimRight(filter.PathPrefix, "/")) {
+	if filter.PathPrefix != "" && !agentPathMatchesPrefix(event.AgentPath, filter.PathPrefix) {
 		return false
 	}
 	if filter.Workflow != "" && !strings.EqualFold(event.Workflow, filter.Workflow) {
@@ -677,8 +678,9 @@ func agentWakeFilterClauses(filter AgentWakeFilter) ([]string, []interface{}) {
 		args = append(args, filter.AgentPath)
 	}
 	if filter.PathPrefix != "" {
-		clauses = append(clauses, "agent_path LIKE ?")
-		args = append(args, strings.TrimRight(filter.PathPrefix, "/")+"%")
+		pathPrefix := strings.TrimRight(filter.PathPrefix, "/")
+		clauses = append(clauses, "(agent_path = ? OR agent_path LIKE ?)")
+		args = append(args, pathPrefix, pathPrefix+"/%")
 	}
 	if filter.Workflow != "" {
 		clauses = append(clauses, "workflow = ?")
@@ -693,6 +695,10 @@ func agentWakeFilterClauses(filter AgentWakeFilter) ([]string, []interface{}) {
 		args = append(args, filter.TeammateID)
 	}
 	return clauses, args
+}
+
+func agentPathMatchesPrefix(path string, prefix string) bool {
+	return AgentPathMatchesPrefix(path, prefix)
 }
 
 func (s *SQLiteGlobalAgentRegistryStore) init(ctx context.Context) error {

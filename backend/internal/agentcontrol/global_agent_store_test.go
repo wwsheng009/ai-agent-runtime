@@ -60,6 +60,28 @@ func TestSQLiteGlobalAgentRegistryStoreUpsertAndList(t *testing.T) {
 	require.Equal(t, "child-session", records[0].SessionID)
 }
 
+func TestSQLiteGlobalAgentRegistryStorePathPrefixMatchesOnlySubtree(t *testing.T) {
+	ctx := context.Background()
+	store := newTestGlobalAgentRegistryStore(t)
+
+	for _, record := range []AgentRecord{
+		{AgentID: "child-1", RootSessionID: "root-session", SessionID: "session-1", AgentPath: "/root/child"},
+		{AgentID: "nested", RootSessionID: "root-session", SessionID: "session-nested", AgentPath: "/root/child/nested"},
+		{AgentID: "child-10", RootSessionID: "root-session", SessionID: "session-10", AgentPath: "/root/child-10"},
+	} {
+		_, err := store.UpsertAgentControlAgent(ctx, record)
+		require.NoError(t, err)
+	}
+
+	records, err := store.ListAgentControlAgents(ctx, AgentFilter{
+		RootSessionID: "root-session",
+		PathPrefix:    "/root/child",
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	require.Equal(t, []string{"child-1", "nested"}, []string{records[0].AgentID, records[1].AgentID})
+}
+
 func TestSQLiteGlobalAgentRegistryStoreCanonicalizesDuplicateRootPath(t *testing.T) {
 	ctx := context.Background()
 	store := newTestGlobalAgentRegistryStore(t)
@@ -222,6 +244,23 @@ func TestSQLiteGlobalAgentRegistryStoreWatchesAgentWake(t *testing.T) {
 	select {
 	case event := <-wake:
 		t.Fatalf("root row should not match child prefix wake filter: %#v", event)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	_, err = store.UpsertAgentControlAgent(ctx, AgentRecord{
+		AgentID:         "child-10",
+		RootSessionID:   "root-session",
+		ParentAgentID:   "root",
+		ParentSessionID: "root-session",
+		SessionID:       "child-10-session",
+		AgentPath:       "/root/child-10",
+		Depth:           1,
+		AgentType:       AgentTypeChild,
+	})
+	require.NoError(t, err)
+	select {
+	case event := <-wake:
+		t.Fatalf("sibling prefix row should not match child subtree wake filter: %#v", event)
 	case <-time.After(50 * time.Millisecond):
 	}
 

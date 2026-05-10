@@ -227,3 +227,15 @@ func normalizeAgentPath(path string) string {
 	}
 	return path
 }
+
+// AgentPathMatchesPrefix reports whether path is exactly prefix or is inside
+// prefix as a path subtree. It intentionally does not treat sibling names such
+// as /root/child-10 as descendants of /root/child.
+func AgentPathMatchesPrefix(path string, prefix string) bool {
+	path = normalizeAgentPath(path)
+	prefix = strings.TrimRight(normalizeAgentPath(prefix), "/")
+	if path == "" || prefix == "" {
+		return false
+	}
+	return strings.EqualFold(path, prefix) || strings.HasPrefix(strings.ToLower(path), strings.ToLower(prefix)+"/")
+}

@@ -409,9 +409,7 @@ func agentRecordMatchesFilter(record agentcontrol.AgentRecord, filter agentcontr
 		return false
 	}
 	if filter.PathPrefix != "" {
-		prefix := strings.TrimRight(filter.PathPrefix, "/")
-		path := strings.TrimSpace(record.AgentPath)
-		if !strings.HasPrefix(path, prefix) {
+		if !agentcontrol.AgentPathMatchesPrefix(record.AgentPath, filter.PathPrefix) {
 			return false
 		}
 	}

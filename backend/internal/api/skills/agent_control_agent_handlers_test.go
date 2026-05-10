@@ -72,7 +72,7 @@ func TestListAgentControlAgentsUsesDurableRegistryStore(t *testing.T) {
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
-	req := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/agents?root_session_id=root-session&path_prefix=/root/child&limit=5", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/agents?root_session_id=root-session&path_prefix=/root/child-agent&limit=5", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -90,7 +90,7 @@ func TestListAgentControlAgentsUsesDurableRegistryStore(t *testing.T) {
 	require.Equal(t, "child-agent", payload.Agents[0].AgentID)
 	require.Equal(t, "/root/child-agent", payload.Agents[0].AgentPath)
 	require.Equal(t, "root-session", payload.Filters["root_session_id"])
-	require.Equal(t, "/root/child", payload.Filters["path_prefix"])
+	require.Equal(t, "/root/child-agent", payload.Filters["path_prefix"])
 }
 
 func TestListAgentControlAgentsProjectsSessionAgentsWithoutDurableStore(t *testing.T) {
@@ -113,7 +113,7 @@ func TestListAgentControlAgentsProjectsSessionAgentsWithoutDurableStore(t *testi
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
-	req := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/agents?root_session_id="+root.ID+"&path_prefix=/root/projected", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/agents?root_session_id="+root.ID+"&path_prefix=/root/projected-child", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -156,7 +156,7 @@ func TestListAgentControlAgentsMaterializesProjectionIntoDurableStore(t *testing
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
-	req := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/agents?root_session_id="+root.ID+"&path_prefix=/root/materialized", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/agents?root_session_id="+root.ID+"&path_prefix=/root/materialized-child", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -171,7 +171,7 @@ func TestListAgentControlAgentsMaterializesProjectionIntoDurableStore(t *testing
 
 	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
 		RootSessionID: root.ID,
-		PathPrefix:    "/root/materialized",
+		PathPrefix:    "/root/materialized-child",
 	})
 	require.NoError(t, err)
 	require.Len(t, records, 1)

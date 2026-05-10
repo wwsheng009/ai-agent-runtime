@@ -601,7 +601,7 @@ func (c *sessionAgentController) List(ctx context.Context, parentSessionID strin
 			continue
 		}
 		path := apiAgentSessionPath(session)
-		if pathPrefix != "" && !strings.HasPrefix(path, pathPrefix) {
+		if pathPrefix != "" && !agentcontrol.AgentPathMatchesPrefix(path, pathPrefix) {
 			continue
 		}
 		snapshot, err := c.snapshot(ctx, strings.TrimSpace(session.ID))
