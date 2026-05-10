@@ -321,7 +321,7 @@ aicli --help
 | `/new` | 创建新会话 |
 | `/session` | 显示当前会话信息 |
 | `/status` | 显示当前会话状态 |
-| `/debug` | 显示当前会话调试信息 |
+| `/debug [export|zip]` | 显示当前会话调试信息，或将会话日志与 artifacts 打包为 zip |
 | `/title <title>` | 更新当前会话标题 |
 | `/history`、`/h` | 显示当前会话历史 |
 | `/stream [on|off|toggle|status]` | 查看或切换流式输出 |
@@ -344,6 +344,7 @@ aicli --help
 | `/sessions` | 列出或筛选可恢复会话 |
 | `/load <session-id>` | 加载指定会话 |
 | `/resume [latest|<session-id>]` | 恢复最近会话或指定会话；无参数时显示可恢复会话选择器 |
+| `/export [current|latest|<session-id>] [--full|--body]` | 导出当前或历史会话；完整 JSON 保留 tool_calls、tool 结果和 metadata，正文模式输出 Markdown |
 | `/agents [panel|pick|target|send|followup]` | 查看 agent tree、选择默认 agent target、向 child agent 投递消息或 follow-up |
 | `/timeline [team|active] [limit] [filter=<text>]` | 查看 active team 或指定 team 的持久事件时间线 |
 | `/collab [follow] [target|selected|parent|all] [limit] [filter=<text>] [timeout=10s]` | 查看 parent/child/team teammate 的 mailbox/collab 时间线 |
@@ -358,6 +359,8 @@ aicli --help
 - `/login` 与 `aicli login` 共用 provider 登录逻辑，支持 API key、Codex OAuth、`--models-path`、`--default-model`、`--set-default`、`--dry-run` 和 JSON 输出。
 - `/stream`、`/s`、`/normal` 会更新当前会话，并在可写配置存在时写回 `aicli.chat.stream`。
 - `/resume latest` 会跳过当前正在使用的 runtime session 和只有 system prompt 的启动占位 session；交互式选择器只显示相对更新时间与清理后的标题，不再把 session id、provider 和 session file 路径塞进候选行。
+- `/export` 无参数时会弹出选择器；`--full` 生成完整 JSON，`--body` 只导出用户/助手正文；可用 `--output <path>` 或 `--dir <dir>` 指定输出位置。
+- `/debug export` / `/debug zip` 会把 `/debug` 中“会话文件与目录”部分的 session file、chat/debug log、runtime-http/local-shell/generated-images artifacts 打包为 zip，并附带 `manifest.json`。
 - `spawn_team auto_start=true` 之后应使用 `wait_team` 等待持久 `team.completed` / `team.summary`；`wait_agent` / `read_agent_events` 面向 `spawn_agent` child session，不应拿 team member id 当 child session id。
 - `/shell` / `/cmd` 支持 `--output-bytes-cap <bytes>` 与 `--disable-output-cap`；默认使用检测到的用户 shell。危险命令仍会进入确认/权限流程。
 - builtin `execute_shell_command` function 支持 `command`、`workdir`、`output_bytes_cap`、`disable_output_cap`；Windows PowerShell/pwsh 下不要把 POSIX-only 命令如 `head` 当默认可用命令。

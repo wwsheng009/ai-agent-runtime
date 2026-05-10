@@ -142,6 +142,12 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/stream") {
 		return applyStreamCommand(session, command)
 	}
+	if commandMatches(cmdLower, "/debug") {
+		return handleDebugCommand(session, command)
+	}
+	if commandMatches(cmdLower, "/export") {
+		return handleExportCommand(session, command)
+	}
 	if commandMatches(cmdLower, "/resume") {
 		return handleResumeCommand(session, command)
 	}
@@ -223,7 +229,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		return handleStatusCommand(session, command)
 
 	case "/debug":
-		printChatDebugInfo(session)
+		return handleDebugCommand(session, command)
+
+	case "/export":
+		return handleExportCommand(session, command)
 
 	case "/agents":
 		handleChatAgentsCommand(session, command)
