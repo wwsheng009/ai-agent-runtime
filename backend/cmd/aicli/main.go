@@ -41,6 +41,7 @@ func main() {
 功能包括：
   - 列出当前配置信息（providers, provider_groups）
   - 对不同端点进行测试
+  - 直接调用图片生成工具
   - 测试模型的最大上下文窗口和最大生成长度
 
 直接运行 ` + "`aicli`" + ` 会默认进入交互式 chat 模式。
@@ -62,6 +63,10 @@ func main() {
   aicli test --model gpt-4 --message "Hello"
   aicli test --provider nvidia --message "测试"
   aicli test --stream
+
+  # 直接生成图片
+  aicli image "一只在月光下奔跑的猫"
+  aicli image --provider SENSENOVA_IMAGE "海边日落照片"
 
   # 测试上下文窗口
   aicli context --model glm-4.7
@@ -196,6 +201,11 @@ func main() {
 		return cfg
 	}))
 
+	// image 子命令
+	rootCmd.AddCommand(commands.NewImageCommand(func() *config.Config {
+		return cfg
+	}))
+
 	// context 子命令
 	contextCmd := &cobra.Command{
 		Use:   "context",
@@ -253,6 +263,7 @@ func main() {
 
   # chat 内斜杠命令
   /functions 帮我生成一张图片
+  /call openai_image_generate 帮我生成一张海边日落照片
   /call openai_image_generate {"prompt":"帮我生成一张海边日落照片"}
   /skill imagegen 帮我生成一张海边日落照片
   /skills`,

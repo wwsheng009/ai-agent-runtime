@@ -256,8 +256,14 @@ aicli chat --image ./screenshot.png --message "describe this screenshot"
 # chat 中查看当前请求会暴露哪些 functions / skills
 /functions 帮我生成一张图片
 
+# 独立图片生成子命令（直接复用 openai_image_generate）
+aicli image "帮我生成一张海边日落照片"
+aicli image --provider SENSENOVA_IMAGE --model sensenova-u1-fast "生成一张海报"
+
 # 直接调用内置 tool（适合图片生成这类不依赖模型 tool-choice 的场景）
+/call openai_image_generate 帮我生成一张海边日落照片
 /call openai_image_generate {"prompt":"帮我生成一张海边日落照片"}
+/tool openai_image_generate 帮我生成一张海边日落照片
 /tool openai_image_generate {"prompt":"帮我生成一张海边日落照片"}
 
 # 直接调用 skill（会路由到 skill__imagegen）
@@ -337,8 +343,8 @@ aicli --help
 | `/yolo` | 切换到 `bypass_permissions` |
 | `/functions <prompt>` | 预览当前 prompt 会暴露哪些 builtin tools / skill functions |
 | `/function <name>` | 查看单个 function 描述 |
-| `/call <name> [args-json]` | 直接执行指定 function |
-| `/tool <name> [args-json]` | `/call` 别名，便于直接执行 tool |
+| `/call <name> [args-json]` | 直接执行指定 function；`openai_image_generate` 可直接把后续文本作为 `prompt` |
+| `/tool <name> [args-json]` | `/call` 别名；`openai_image_generate` 可直接把后续文本作为 `prompt` |
 | `/skill <name> <prompt>` | 直接执行指定 skill，并把后面的文本作为 `prompt` |
 | `/skills [query]` | 列出并选择执行 skill |
 | `/sessions` | 列出或筛选可恢复会话 |
@@ -353,7 +359,7 @@ aicli --help
 
 说明：
 
-- `/call` / `/tool` 适合直接执行 `openai_image_generate` 这类内置工具。
+- `/call` / `/tool` 适合直接执行 `openai_image_generate` 这类内置工具；例如 `/call openai_image_generate 生成图片` 会自动转换为 `{"prompt":"生成图片"}`。
 - `/skill imagegen ...` 会直接调用 `skill__imagegen`，由 skill 工作流转发到 `/v1/images/generations` provider。
 - `/model` 支持 `status`、`clear-reasoning`、`--provider/-p`、`--model/-m`、`--reasoning-effort/-r`；切换后会刷新 provider、adapter、BaseURL、HTTP client、function builder、logger 和 runtime session metadata。
 - `/login` 与 `aicli login` 共用 provider 登录逻辑，支持 API key、Codex OAuth、`--models-path`、`--default-model`、`--set-default`、`--dry-run` 和 JSON 输出。

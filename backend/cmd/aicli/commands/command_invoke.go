@@ -37,7 +37,7 @@ func handleDirectFunctionCommand(session *ChatSession, command string) bool {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
 	}
-	args, err := parseDirectFunctionArgs(rawArgs, isSkill)
+	args, err := parseDirectFunctionArgs(rawArgs, isSkill, resolvedName)
 	if err != nil {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
@@ -71,7 +71,7 @@ func handleDirectSkillCommand(session *ChatSession, command string) bool {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
 	}
-	args, err := parseDirectFunctionArgs(rawPrompt, true)
+	args, err := parseDirectFunctionArgs(rawPrompt, true, resolvedName)
 	if err != nil {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
@@ -268,7 +268,7 @@ func hasPathSuffix(path, suffix string) bool {
 	return strings.HasSuffix(path, "/"+suffix)
 }
 
-func parseDirectFunctionArgs(raw string, isSkill bool) (map[string]interface{}, error) {
+func parseDirectFunctionArgs(raw string, isSkill bool, functionName string) (map[string]interface{}, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		if isSkill {
@@ -287,6 +287,9 @@ func parseDirectFunctionArgs(raw string, isSkill bool) (map[string]interface{}, 
 		return args, nil
 	}
 	if isSkill {
+		return map[string]interface{}{"prompt": raw}, nil
+	}
+	if toolnames.IsOpenAIImageGenerateToolName(functionName) {
 		return map[string]interface{}{"prompt": raw}, nil
 	}
 	return nil, fmt.Errorf("非 skill function 需要 JSON object 参数，例如 {\"prompt\":\"...\"}")

@@ -25,6 +25,7 @@ type directMetadataFunction struct {
 	name     string
 	output   string
 	metadata map[string]interface{}
+	lastArgs map[string]interface{}
 }
 
 func (f *directMetadataFunction) Name() string { return f.name }
@@ -38,10 +39,12 @@ func (f *directMetadataFunction) Parameters() map[string]interface{} {
 }
 
 func (f *directMetadataFunction) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	f.lastArgs = args
 	return f.output, nil
 }
 
 func (f *directMetadataFunction) ExecuteWithMeta(ctx context.Context, args map[string]interface{}) (string, map[string]interface{}, error) {
+	f.lastArgs = args
 	return f.output, f.metadata, nil
 }
 
@@ -1342,6 +1345,48 @@ func TestHandleCommand_DirectFunctionCall_JSON(t *testing.T) {
 	}
 	if payload.Metadata["provider"] != "OPENAI_IMAGE" {
 		t.Fatalf("unexpected metadata: %+v", payload.Metadata)
+	}
+}
+
+func TestHandleCommand_DirectFunctionCall_OpenAIImageGeneratePromptShortcut(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	fn := &directMetadataFunction{
+		name:   "openai_image_generate",
+		output: "Generated image saved to file:///tmp/demo.png",
+	}
+	catalog.RegisterFunction(fn)
+
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, `/call openai_image_generate 生成图片 --json`, false); quit {
+			t.Fatal("expected call command not to exit")
+		}
+	})
+
+	var payload directFunctionInvokeReport
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &payload); err != nil {
+		t.Fatalf("expected JSON output, got error: %v\n%s", err, output)
+	}
+	if got := fn.lastArgs["prompt"]; got != "生成图片" {
+		t.Fatalf("expected prompt shortcut args, got %#v", fn.lastArgs)
+	}
+	if payload.FunctionName != "openai_image_generate" {
+		t.Fatalf("unexpected function name: %+v", payload)
+	}
+}
+
+func TestParseDirectFunctionArgs_RejectsTextForNonImageFunction(t *testing.T) {
+	_, err := parseDirectFunctionArgs("plain text", false, "execute_shell_command")
+	if err == nil {
+		t.Fatal("expected non-image function text args to be rejected")
+	}
+	if !strings.Contains(err.Error(), "非 skill function 需要 JSON object 参数") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
