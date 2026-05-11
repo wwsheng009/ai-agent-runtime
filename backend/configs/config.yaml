@@ -424,8 +424,8 @@ providers:
       supported_models:
         - gpt-5.2-codex
         - gpt-5.4
+        - gpt-5.5
         - gpt-5.4-mini
-        - '*'
       timeout: 300s
     OPENAI_IMAGE:
       api_key: ${CODEX_04_API_KEYS:-}
@@ -917,7 +917,34 @@ providers:
       supported_models:
         - sensenova-6.7-flash-lite
         - deepseek-v4-flash
+    SENSENOVA_IMAGE:
+      api_key: ${SENSENOVA_API_KEY:-}
+      api_path: /v1/images/generations
+      base_url: https://token.sensenova.cn
+      default_model: sensenova-u1-fast
+      enabled: true
+      forward_url: /v1/images/generations
+      header_mappings:
+        X-Gateway-Provider: sensenova_image
+      model_capabilities:
+        '*':
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+            images_generations_api: false
+        sensenova-u1-fast:
+          input_modalities:
+            - text
+          native_tools:
+            image_generation: false
+            images_generations_api: true
+      protocol: openai
+      support_types:
+        - openai
+      supported_models:
         - sensenova-u1-fast
+      timeout: 300s
   proxy:
     enabled: ${PROXY_ENABLED:-false}
     http: ${HTTP_PROXY:-http://127.0.0.1:10810}

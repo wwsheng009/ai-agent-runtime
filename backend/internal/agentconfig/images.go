@@ -46,6 +46,19 @@ func ResolveModelCapabilitySpec(model string, modelCapabilities map[string]Model
 // SelectImagesGenerationsProvider resolves the first provider/model pair that
 // advertises native support for the images generations API.
 func SelectImagesGenerationsProvider(cfg *Config, hint ImagesGenerationsHint) (*ImagesGenerationsSelection, error) {
+	all, err := SelectAllImagesGenerationsProviders(cfg, hint)
+	if err != nil {
+		return nil, err
+	}
+	return all[0], nil
+}
+
+// SelectAllImagesGenerationsProviders resolves all provider/model pairs that
+// advertise native support for the images generations API, ordered by
+// preference (exact model/provider match first, then alphabetical).
+// The first element is the primary choice; subsequent elements are failover
+// candidates.
+func SelectAllImagesGenerationsProviders(cfg *Config, hint ImagesGenerationsHint) ([]*ImagesGenerationsSelection, error) {
 	if cfg == nil || len(cfg.Providers.Items) == 0 {
 		return nil, ErrNoImagesGenerationsProvider
 	}
@@ -63,6 +76,7 @@ func SelectImagesGenerationsProvider(cfg *Config, hint ImagesGenerationsHint) (*
 		sort.Strings(providerNames)
 	}
 
+	var results []*ImagesGenerationsSelection
 	for _, providerName := range providerNames {
 		provider, ok := cfg.Providers.Items[providerName]
 		if !ok || !provider.Enabled {
@@ -78,15 +92,18 @@ func SelectImagesGenerationsProvider(cfg *Config, hint ImagesGenerationsHint) (*
 			if selectedModel == "" {
 				continue
 			}
-			return &ImagesGenerationsSelection{
+			results = append(results, &ImagesGenerationsSelection{
 				ProviderName: providerName,
 				Provider:     provider,
 				Model:        selectedModel,
-			}, nil
+			})
 		}
 	}
 
-	return nil, ErrNoImagesGenerationsProvider
+	if len(results) == 0 {
+		return nil, ErrNoImagesGenerationsProvider
+	}
+	return results, nil
 }
 
 func imagesGenerationCandidateModels(provider Provider, requestedModel string) []string {

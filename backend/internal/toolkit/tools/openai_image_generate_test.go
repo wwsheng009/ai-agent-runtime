@@ -1,8 +1,11 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -306,4 +309,258 @@ func TestOpenAIImageGenerateTool_ExecuteIgnoresNullModelString(t *testing.T) {
 	require.Len(t, generated, 1)
 	require.Equal(t, "image_1", generated[0]["id"])
 	require.Contains(t, result.Content, "Generated image saved to")
+}
+
+func TestOpenAIImageGenerateTool_FailoverToSecondProvider(t *testing.T) {
+	outputDir := t.TempDir()
+	runtimeConfig := &runtimecfg.RuntimeConfig{
+		Images: runtimecfg.ImagesConfig{
+			Generations: runtimecfg.ImagesGenerationsConfig{
+				DefaultModel:        "gpt-image-2",
+				DefaultSize:         "1024x1024",
+				DefaultQuality:      "medium",
+				DefaultOutputFormat: "png",
+				RequestTimeout:      time.Second,
+				MaxN:                4,
+			},
+		},
+	}
+
+	// First provider fails, second succeeds.
+	failMock := &mockImageGenerator{
+		err: fmt.Errorf("provider unavailable"),
+	}
+	successMock := &mockImageGenerator{
+		response: &imagegen.GenerateResponse{
+			Created: 456,
+			Data: []imagegen.GenerateResponseItem{
+				{B64JSON: base64.StdEncoding.EncodeToString([]byte("failover-image")), RevisedPrompt: "failover"},
+			},
+		},
+	}
+
+	var callCount int32
+	tool := NewOpenAIImageGenerateTool(runtimeConfig)
+	tool.providerConfigResolver = func() *agentconfig.Config {
+		return &agentconfig.Config{
+			Providers: agentconfig.ProvidersConfig{
+				Items: map[string]agentconfig.Provider{
+					"OPENAI_IMAGE": {
+						Enabled:      true,
+						Type:         "openai",
+						BaseURL:      "https://api.openai.com",
+						APIKey:       "openai-key",
+						DefaultModel: "gpt-image-2",
+						SupportedModels: []string{
+							"gpt-image-2",
+						},
+						ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+							"gpt-image-2": {
+								NativeTools: agentconfig.NativeToolCapabilities{ImagesGenerationsAPI: true},
+							},
+						},
+					},
+					"SENSENOVA_IMAGE": {
+						Enabled:      true,
+						Type:         "openai",
+						BaseURL:      "https://token.sensenova.cn",
+						APIKey:       "sensenova-key",
+						DefaultModel: "sensenova-u1-fast",
+						SupportedModels: []string{
+							"sensenova-u1-fast",
+						},
+						ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+							"sensenova-u1-fast": {
+								NativeTools: agentconfig.NativeToolCapabilities{ImagesGenerationsAPI: true},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	tool.clientFactory = func(provider agentconfig.Provider, timeout time.Duration, proxy *agentconfig.ProxyConfig) imagegen.Generator {
+		idx := atomic.AddInt32(&callCount, 1)
+		if idx == 1 {
+			return failMock
+		}
+		return successMock
+	}
+
+	ctx := toolctx.WithGeneratedImageOutputDir(context.Background(), outputDir)
+	result, err := tool.Execute(ctx, map[string]interface{}{
+		"prompt": "draw a sunset",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	// The second provider's model should be used.
+	require.Equal(t, "sensenova-u1-fast", successMock.lastReq.Model)
+	require.Empty(t, successMock.lastReq.Size)
+	require.Empty(t, successMock.lastReq.Quality)
+	require.Empty(t, successMock.lastReq.OutputFormat)
+	require.Equal(t, "sensenova-u1-fast", result.Metadata["model"])
+	require.Equal(t, "SENSENOVA_IMAGE", result.Metadata["provider"])
+	// Failover metadata should be present.
+	require.Equal(t, 2, result.Metadata["failover_attempt"])
+	require.Equal(t, 2, result.Metadata["failover_total"])
+	require.Contains(t, result.Content, "Generated image saved to")
+}
+
+func TestOpenAIImageGenerateTool_ExplicitProviderSelection(t *testing.T) {
+	outputDir := t.TempDir()
+	runtimeConfig := &runtimecfg.RuntimeConfig{
+		Images: runtimecfg.ImagesConfig{
+			Generations: runtimecfg.ImagesGenerationsConfig{
+				DefaultModel:        "gpt-image-2",
+				DefaultSize:         "1024x1024",
+				DefaultQuality:      "medium",
+				DefaultOutputFormat: "png",
+				RequestTimeout:      time.Second,
+				MaxN:                4,
+			},
+		},
+	}
+
+	mock := &mockImageGenerator{
+		response: &imagegen.GenerateResponse{
+			Created: 789,
+			Data: []imagegen.GenerateResponseItem{
+				{B64JSON: base64.StdEncoding.EncodeToString([]byte("sensenova-image")), RevisedPrompt: "sensenova"},
+			},
+		},
+	}
+
+	var capturedProvider agentconfig.Provider
+	tool := NewOpenAIImageGenerateTool(runtimeConfig)
+	tool.providerConfigResolver = func() *agentconfig.Config {
+		return &agentconfig.Config{
+			Providers: agentconfig.ProvidersConfig{
+				Items: map[string]agentconfig.Provider{
+					"OPENAI_IMAGE": {
+						Enabled:         true,
+						BaseURL:         "https://api.openai.com",
+						APIKey:          "openai-key",
+						DefaultModel:    "gpt-image-2",
+						SupportedModels: []string{"gpt-image-2"},
+						ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+							"gpt-image-2": {
+								NativeTools: agentconfig.NativeToolCapabilities{ImagesGenerationsAPI: true},
+							},
+						},
+					},
+					"SENSENOVA_IMAGE": {
+						Enabled:         true,
+						BaseURL:         "https://token.sensenova.cn",
+						APIKey:          "sensenova-key",
+						DefaultModel:    "sensenova-u1-fast",
+						SupportedModels: []string{"sensenova-u1-fast"},
+						ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+							"sensenova-u1-fast": {
+								NativeTools: agentconfig.NativeToolCapabilities{ImagesGenerationsAPI: true},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	tool.clientFactory = func(provider agentconfig.Provider, timeout time.Duration, proxy *agentconfig.ProxyConfig) imagegen.Generator {
+		capturedProvider = provider
+		return mock
+	}
+
+	ctx := toolctx.WithGeneratedImageOutputDir(context.Background(), outputDir)
+	result, err := tool.Execute(ctx, map[string]interface{}{
+		"prompt":   "draw a robot",
+		"provider": "SENSENOVA_IMAGE",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, "sensenova-u1-fast", mock.lastReq.Model)
+	require.Empty(t, mock.lastReq.Size)
+	require.Empty(t, mock.lastReq.Quality)
+	require.Empty(t, mock.lastReq.OutputFormat)
+	require.Equal(t, "sensenova-u1-fast", result.Metadata["model"])
+	require.Equal(t, "SENSENOVA_IMAGE", result.Metadata["provider"])
+	require.Equal(t, "https://token.sensenova.cn", capturedProvider.BaseURL)
+}
+
+func TestOpenAIImageGenerateTool_DebugOutputIncludesSelectionAPICallAndSave(t *testing.T) {
+	outputDir := t.TempDir()
+	runtimeConfig := &runtimecfg.RuntimeConfig{
+		Images: runtimecfg.ImagesConfig{
+			Generations: runtimecfg.ImagesGenerationsConfig{
+				DefaultModel:        "gpt-image-2",
+				DefaultSize:         "1024x1024",
+				DefaultQuality:      "medium",
+				DefaultOutputFormat: "png",
+				RequestTimeout:      time.Second,
+				MaxN:                4,
+			},
+		},
+	}
+	mock := &mockImageGenerator{
+		response: &imagegen.GenerateResponse{
+			Created: 123,
+			Data: []imagegen.GenerateResponseItem{
+				{B64JSON: base64.StdEncoding.EncodeToString([]byte("image-bytes")), RevisedPrompt: "revised"},
+			},
+		},
+	}
+
+	tool := NewOpenAIImageGenerateTool(runtimeConfig)
+	tool.providerConfigResolver = func() *agentconfig.Config {
+		return &agentconfig.Config{
+			Providers: agentconfig.ProvidersConfig{
+				Items: map[string]agentconfig.Provider{
+					"OPENAI_IMAGE": {
+						Enabled:         true,
+						BaseURL:         "https://api.openai.example",
+						APIKey:          "test-key",
+						ForwardURL:      "/v1/images/generations",
+						DefaultModel:    "gpt-image-2",
+						SupportedModels: []string{"gpt-image-2"},
+						ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+							"gpt-image-2": {
+								NativeTools: agentconfig.NativeToolCapabilities{ImagesGenerationsAPI: true},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	tool.clientFactory = func(provider agentconfig.Provider, timeout time.Duration, proxy *agentconfig.ProxyConfig) imagegen.Generator {
+		return mock
+	}
+
+	var debug bytes.Buffer
+	ctx := toolctx.WithGeneratedImageOutputDir(context.Background(), outputDir)
+	result, err := tool.Execute(ctx, map[string]interface{}{
+		"prompt":        "raw prompt should not be logged",
+		"debug":         true,
+		"_debug_writer": &debug,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+
+	output := debug.String()
+	for _, expected := range []string{
+		"[image-debug/tool] request",
+		"select requested_provider=",
+		"candidates count=1 list=OPENAI_IMAGE/gpt-image-2",
+		"attempt=1/1 provider=\"OPENAI_IMAGE\" model=\"gpt-image-2\" api_url=\"https://api.openai.example/v1/images/generations\"",
+		"attempt=1 api_call provider=\"OPENAI_IMAGE\" model=\"gpt-image-2\"",
+		"attempt=1 api_response created=123 items=1",
+		"attempt=1 save index=1 source=b64_json",
+		"attempt=1 saved index=1 path=",
+		"success provider=\"OPENAI_IMAGE\" model=\"gpt-image-2\" generated_count=1",
+	} {
+		require.Contains(t, output, expected)
+	}
+	require.NotContains(t, output, "raw prompt should not be logged")
+	require.False(t, strings.Contains(strings.ToLower(output), "test-key"), "debug output leaked API key:\n%s", output)
 }

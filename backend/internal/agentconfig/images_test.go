@@ -96,3 +96,146 @@ func TestSelectImagesGenerationsProvider_ReturnsErrorWhenUnavailable(t *testing.
 		t.Fatal("expected error when no images_generations_api capability is configured")
 	}
 }
+
+func TestSelectAllImagesGenerationsProviders_ReturnsMultipleProviders(t *testing.T) {
+	cfg := &Config{
+		Providers: ProvidersConfig{
+			Items: map[string]Provider{
+				"SENSENOVA_IMAGE": {
+					Enabled:      true,
+					Type:         "openai",
+					BaseURL:      "https://token.sensenova.cn",
+					APIKey:       "sensenova-key",
+					DefaultModel: "sensenova-u1-fast",
+					SupportedModels: []string{
+						"sensenova-u1-fast",
+					},
+					ModelCapabilities: map[string]ModelCapabilitySpec{
+						"sensenova-u1-fast": {
+							NativeTools: NativeToolCapabilities{ImagesGenerationsAPI: true},
+						},
+					},
+				},
+				"OPENAI_IMAGE": {
+					Enabled:      true,
+					Type:         "openai",
+					BaseURL:      "https://api.openai.com",
+					APIKey:       "openai-key",
+					DefaultModel: "gpt-image-2",
+					SupportedModels: []string{
+						"gpt-image-2",
+					},
+					ModelCapabilities: map[string]ModelCapabilitySpec{
+						"gpt-image-2": {
+							NativeTools: NativeToolCapabilities{ImagesGenerationsAPI: true},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	results, err := SelectAllImagesGenerationsProviders(cfg, ImagesGenerationsHint{})
+	if err != nil {
+		t.Fatalf("SelectAllImagesGenerationsProviders failed: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(results))
+	}
+
+	// Providers should be sorted alphabetically: OPENAI_IMAGE before SENSENOVA_IMAGE
+	if results[0].ProviderName != "OPENAI_IMAGE" {
+		t.Fatalf("expected first provider OPENAI_IMAGE, got %s", results[0].ProviderName)
+	}
+	if results[1].ProviderName != "SENSENOVA_IMAGE" {
+		t.Fatalf("expected second provider SENSENOVA_IMAGE, got %s", results[1].ProviderName)
+	}
+}
+
+func TestSelectAllImagesGenerationsProvider_HintByProvider(t *testing.T) {
+	cfg := &Config{
+		Providers: ProvidersConfig{
+			Items: map[string]Provider{
+				"SENSENOVA_IMAGE": {
+					Enabled:      true,
+					BaseURL:      "https://token.sensenova.cn",
+					APIKey:       "sensenova-key",
+					DefaultModel: "sensenova-u1-fast",
+					SupportedModels: []string{"sensenova-u1-fast"},
+					ModelCapabilities: map[string]ModelCapabilitySpec{
+						"sensenova-u1-fast": {
+							NativeTools: NativeToolCapabilities{ImagesGenerationsAPI: true},
+						},
+					},
+				},
+				"OPENAI_IMAGE": {
+					Enabled:      true,
+					BaseURL:      "https://api.openai.com",
+					APIKey:       "openai-key",
+					DefaultModel: "gpt-image-2",
+					SupportedModels: []string{"gpt-image-2"},
+					ModelCapabilities: map[string]ModelCapabilitySpec{
+						"gpt-image-2": {
+							NativeTools: NativeToolCapabilities{ImagesGenerationsAPI: true},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	results, err := SelectAllImagesGenerationsProviders(cfg, ImagesGenerationsHint{ProviderName: "SENSENOVA_IMAGE"})
+	if err != nil {
+		t.Fatalf("SelectAllImagesGenerationsProviders with provider hint failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result for provider hint, got %d", len(results))
+	}
+	if results[0].ProviderName != "SENSENOVA_IMAGE" {
+		t.Fatalf("expected SENSENOVA_IMAGE, got %s", results[0].ProviderName)
+	}
+}
+
+func TestSelectAllImagesGenerationsProvider_HintByModel(t *testing.T) {
+	cfg := &Config{
+		Providers: ProvidersConfig{
+			Items: map[string]Provider{
+				"SENSENOVA_IMAGE": {
+					Enabled:      true,
+					BaseURL:      "https://token.sensenova.cn",
+					APIKey:       "sensenova-key",
+					DefaultModel: "sensenova-u1-fast",
+					SupportedModels: []string{"sensenova-u1-fast"},
+					ModelCapabilities: map[string]ModelCapabilitySpec{
+						"sensenova-u1-fast": {
+							NativeTools: NativeToolCapabilities{ImagesGenerationsAPI: true},
+						},
+					},
+				},
+				"OPENAI_IMAGE": {
+					Enabled:      true,
+					BaseURL:      "https://api.openai.com",
+					APIKey:       "openai-key",
+					DefaultModel: "gpt-image-2",
+					SupportedModels: []string{"gpt-image-2"},
+					ModelCapabilities: map[string]ModelCapabilitySpec{
+						"gpt-image-2": {
+							NativeTools: NativeToolCapabilities{ImagesGenerationsAPI: true},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	results, err := SelectAllImagesGenerationsProviders(cfg, ImagesGenerationsHint{Model: "sensenova-u1-fast"})
+	if err != nil {
+		t.Fatalf("SelectAllImagesGenerationsProviders with model hint failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result for model hint, got %d", len(results))
+	}
+	if results[0].Model != "sensenova-u1-fast" {
+		t.Fatalf("expected sensenova-u1-fast, got %s", results[0].Model)
+	}
+}

@@ -1,10 +1,13 @@
 package imagegen
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,8 +75,122 @@ func SaveBase64Image(outputDir, idHint, b64, format string) (SavedImage, error) 
 		MimeType:  mimeType,
 		SavedPath: path,
 		SHA256:    hex.EncodeToString(sum[:]),
-		ByteCount:  len(decoded),
+		ByteCount: len(decoded),
 	}, nil
+}
+
+// SaveURLImage downloads the image from the given URL and writes it into
+// outputDir using a sanitized id hint. The file format is inferred from
+// the URL path or Content-Type header, falling back to the requested format.
+func SaveURLImage(ctx context.Context, outputDir, idHint, imageURL, format string, httpClient *http.Client) (SavedImage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	outputDir = strings.TrimSpace(outputDir)
+	if outputDir == "" {
+		return SavedImage{}, fmt.Errorf("generated image output dir is empty")
+	}
+	imageURL = strings.TrimSpace(imageURL)
+	if imageURL == "" {
+		return SavedImage{}, fmt.Errorf("image URL is empty")
+	}
+
+	rawID := strings.TrimSpace(idHint)
+	if rawID == "" {
+		rawID = "generated_image"
+	}
+	fileID := sanitizeImageID(rawID)
+
+	outputFormat, err := normalizeOutputFormatForPersist(format)
+	if err != nil {
+		// Fall back to inferring from URL or using png.
+		outputFormat = "png"
+	}
+
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return SavedImage{}, fmt.Errorf("create generated image directory: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
+	if err != nil {
+		return SavedImage{}, fmt.Errorf("create download request for %s: %w", rawID, err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return SavedImage{}, fmt.Errorf("download image %s from %s: %w", rawID, imageURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return SavedImage{}, fmt.Errorf("download image %s: HTTP %d", rawID, resp.StatusCode)
+	}
+
+	// Infer format from Content-Type if the requested format was empty/default.
+	if format == "" {
+		if inferred := formatFromContentType(resp.Header.Get("Content-Type")); inferred != "" {
+			outputFormat = inferred
+		}
+	}
+
+	mimeType := mimeTypeForFormat(outputFormat)
+	path, err := chooseGeneratedImagePath(outputDir, fileID, outputFormat)
+	if err != nil {
+		return SavedImage{}, err
+	}
+
+	// Download to temp file first, then rename atomically.
+	tmpFile, err := os.CreateTemp(outputDir, fileID+"_*.tmp")
+	if err != nil {
+		return SavedImage{}, fmt.Errorf("create temp file for %s: %w", rawID, err)
+	}
+	tmpPath := tmpFile.Name()
+
+	hasher := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(tmpFile, hasher), resp.Body)
+	closeErr := tmpFile.Close()
+	if copyErr != nil {
+		os.Remove(tmpPath)
+		return SavedImage{}, fmt.Errorf("download image %s: %w", rawID, copyErr)
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return SavedImage{}, fmt.Errorf("close temp file for %s: %w", rawID, closeErr)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return SavedImage{}, fmt.Errorf("rename temp file for %s: %w", rawID, err)
+	}
+
+	return SavedImage{
+		ID:        rawID,
+		MimeType:  mimeType,
+		SavedPath: path,
+		SHA256:    hex.EncodeToString(hasher.Sum(nil)),
+		ByteCount: int(written),
+	}, nil
+}
+
+func formatFromContentType(contentType string) string {
+	contentType = strings.TrimSpace(contentType)
+	// Strip parameters (e.g. "image/png; charset=utf-8")
+	if idx := strings.Index(contentType, ";"); idx >= 0 {
+		contentType = strings.TrimSpace(contentType[:idx])
+	}
+	switch strings.ToLower(contentType) {
+	case "image/jpeg", "image/jpg":
+		return "jpeg"
+	case "image/webp":
+		return "webp"
+	case "image/png":
+		return "png"
+	default:
+		return ""
+	}
 }
 
 func chooseGeneratedImagePath(outputDir, idHint, format string) (string, error) {

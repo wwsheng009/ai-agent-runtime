@@ -20,11 +20,11 @@ const (
 )
 
 var (
-	AllowedLegacySizes    = map[string]struct{}{"1024x1024": {}, "1536x1024": {}, "1024x1536": {}, "auto": {}}
-	AllowedQualities      = map[string]struct{}{"low": {}, "medium": {}, "high": {}, "auto": {}}
-	AllowedBackgrounds    = map[string]struct{}{"transparent": {}, "opaque": {}, "auto": {}, "": {}}
-	AllowedOutputFormats  = map[string]struct{}{"png": {}, "jpeg": {}, "webp": {}, "jpg": {}}
-	sizePattern           = regexp.MustCompile(`^([1-9][0-9]*)x([1-9][0-9]*)$`)
+	AllowedLegacySizes   = map[string]struct{}{"1024x1024": {}, "1536x1024": {}, "1024x1536": {}, "auto": {}}
+	AllowedQualities     = map[string]struct{}{"low": {}, "medium": {}, "high": {}, "auto": {}}
+	AllowedBackgrounds   = map[string]struct{}{"transparent": {}, "opaque": {}, "auto": {}, "": {}}
+	AllowedOutputFormats = map[string]struct{}{"png": {}, "jpeg": {}, "webp": {}, "jpg": {}}
+	sizePattern          = regexp.MustCompile(`^([1-9][0-9]*)x([1-9][0-9]*)$`)
 )
 
 // GenerateRequest describes an image generations request for the OpenAI
@@ -39,6 +39,9 @@ type GenerateRequest struct {
 	OutputFormat      string `json:"output_format,omitempty"`
 	OutputCompression *int   `json:"output_compression,omitempty"`
 	Moderation        string `json:"moderation,omitempty"`
+	// Provider is a client-side hint indicating which provider to use.
+	// It is NOT serialized in the API request (json:"-").
+	Provider string `json:"-"`
 }
 
 // GenerateResponse mirrors the endpoint response payload.
@@ -50,7 +53,24 @@ type GenerateResponse struct {
 // GenerateResponseItem describes one returned image artifact.
 type GenerateResponseItem struct {
 	B64JSON       string `json:"b64_json"`
+	URL           string `json:"url"`
 	RevisedPrompt string `json:"revised_prompt,omitempty"`
+}
+
+// HasB64JSON reports whether the item contains a base64-encoded image.
+func (item *GenerateResponseItem) HasB64JSON() bool {
+	return strings.TrimSpace(item.B64JSON) != ""
+}
+
+// HasURL reports whether the item contains a downloadable image URL.
+func (item *GenerateResponseItem) HasURL() bool {
+	return strings.TrimSpace(item.URL) != ""
+}
+
+// IsGPTImageModel reports whether the model name refers to a GPT Image model
+// (e.g. gpt-image-1, gpt-image-2).
+func IsGPTImageModel(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), GPTImageModelPrefix)
 }
 
 // NormalizeGenerateRequest applies endpoint-friendly defaults and canonical
@@ -73,14 +93,19 @@ func NormalizeGenerateRequest(req *GenerateRequest) {
 	if req.N == 0 {
 		req.N = 1
 	}
-	if req.Size == "" {
-		req.Size = DefaultSize
-	}
-	if req.Quality == "" {
-		req.Quality = DefaultQuality
-	}
-	if req.OutputFormat == "" {
-		req.OutputFormat = DefaultOutputFormat
+	// Size, quality, and output_format defaults are GPT-Image-specific.
+	// For non-GPT-Image models, leave them empty so the upstream API
+	// applies its own defaults rather than receiving an incompatible value.
+	if IsGPTImageModel(req.Model) {
+		if req.Size == "" {
+			req.Size = DefaultSize
+		}
+		if req.Quality == "" {
+			req.Quality = DefaultQuality
+		}
+		if req.OutputFormat == "" {
+			req.OutputFormat = DefaultOutputFormat
+		}
 	}
 }
 
@@ -94,31 +119,52 @@ func Validate(req *GenerateRequest) error {
 	if req.Prompt == "" {
 		return fmt.Errorf("prompt cannot be empty")
 	}
-	if !strings.HasPrefix(strings.ToLower(req.Model), GPTImageModelPrefix) {
-		return fmt.Errorf("model must be a GPT Image model (for example gpt-image-2)")
+	if req.Model == "" {
+		return fmt.Errorf("model cannot be empty")
 	}
 	if req.N < 1 || req.N > 10 {
 		return fmt.Errorf("n must be between 1 and 10")
 	}
-	if _, ok := AllowedQualities[req.Quality]; !ok {
-		return fmt.Errorf("quality must be one of low, medium, high, or auto")
+	if req.Quality != "" {
+		if _, ok := AllowedQualities[req.Quality]; !ok {
+			return fmt.Errorf("quality must be one of low, medium, high, or auto")
+		}
 	}
 	if _, ok := AllowedBackgrounds[req.Background]; !ok {
 		return fmt.Errorf("background must be one of transparent, opaque, or auto")
 	}
-	if _, ok := AllowedOutputFormats[req.OutputFormat]; !ok {
-		return fmt.Errorf("output_format must be png, jpeg, or webp")
+	if req.OutputFormat != "" {
+		if _, ok := AllowedOutputFormats[req.OutputFormat]; !ok {
+			return fmt.Errorf("output_format must be png, jpeg, or webp")
+		}
+		if req.OutputFormat == "jpg" {
+			req.OutputFormat = "jpeg"
+		}
 	}
-	if req.OutputFormat == "jpg" {
-		req.OutputFormat = "jpeg"
-	}
-	if req.Background == "transparent" && req.OutputFormat != "png" && req.OutputFormat != "webp" {
+	if req.Background == "transparent" && req.OutputFormat != "" && req.OutputFormat != "png" && req.OutputFormat != "webp" {
 		return fmt.Errorf("transparent background requires output-format png or webp")
 	}
 	if req.OutputCompression != nil {
 		if *req.OutputCompression < 0 || *req.OutputCompression > 100 {
 			return fmt.Errorf("output_compression must be between 0 and 100")
 		}
+	}
+	// GPT Image specific validation only applies to gpt-image-* models.
+	if strings.HasPrefix(strings.ToLower(req.Model), GPTImageModelPrefix) {
+		if err := validateGPTImageModel(req); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateGPTImageModel applies GPT Image model-specific constraints.
+func validateGPTImageModel(req *GenerateRequest) error {
+	if req.Quality == "" {
+		return fmt.Errorf("quality must be one of low, medium, high, or auto")
+	}
+	if req.OutputFormat == "" {
+		return fmt.Errorf("output_format must be png, jpeg, or webp")
 	}
 	switch strings.ToLower(strings.TrimSpace(req.Model)) {
 	case GPTImage2Model:

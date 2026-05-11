@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +14,7 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/imagegen"
+	runtimehttpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
@@ -26,6 +29,11 @@ type OpenAIImageGenerateTool struct {
 	runtimeConfig          *runtimecfg.RuntimeConfig
 	providerConfigResolver func() *agentconfig.Config
 	clientFactory          func(provider agentconfig.Provider, timeout time.Duration, proxy *agentconfig.ProxyConfig) imagegen.Generator
+}
+
+type openAIImageGenerateDebug struct {
+	enabled bool
+	writer  io.Writer
 }
 
 // NewOpenAIImageGenerateTool creates a new tool instance using the provided runtime
@@ -79,6 +87,10 @@ func (t *OpenAIImageGenerateTool) parameters() map[string]interface{} {
 			"description": "图像模型名称；默认值来自 runtime.images.generations.default_model。",
 			"default":     generationCfg.DefaultModel,
 		},
+		"provider": map[string]interface{}{
+			"type":        "string",
+			"description": "指定使用的图像生成 provider 名称（如 OPENAI_IMAGE、SENSENOVA_IMAGE）。不指定时自动选择。",
+		},
 		"n": map[string]interface{}{
 			"type":        "integer",
 			"description": "单次请求生成的图片数量。",
@@ -126,65 +138,165 @@ func (t *OpenAIImageGenerateTool) parameters() map[string]interface{} {
 
 // Execute performs the image generation request, persists all returned images,
 // and returns a structured result compatible with existing artifact flows.
+// When multiple providers are available and the primary one fails, Execute
+// automatically falls through to the next candidate (failover).
 func (t *OpenAIImageGenerateTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	req, explicitModel := t.buildRequest(params)
+	debug := newOpenAIImageGenerateDebug(params)
+	req, explicitModel, explicitProvider := t.buildRequest(params)
 	if req == nil {
+		debug.printf("request_build_failed")
 		return failureToolResult(fmt.Errorf("image generation request could not be constructed")), nil
 	}
+	debug.printf(
+		"request prompt_chars=%d explicit_provider=%t provider=%q explicit_model=%t model=%q",
+		len([]rune(strings.TrimSpace(req.Prompt))),
+		explicitProvider,
+		strings.TrimSpace(req.Provider),
+		explicitModel,
+		strings.TrimSpace(req.Model),
+	)
 
 	providerCfg := t.resolveProviderConfig()
 	if providerCfg == nil {
+		debug.printf("provider_config unavailable")
 		return failureToolResult(fmt.Errorf("image generations provider configuration is unavailable")), nil
 	}
+	debug.printf("provider_config providers=%d", len(providerCfg.Providers.Items))
 
-	selection, err := t.selectProvider(providerCfg, req.Model, explicitModel)
+	debug.printf(
+		"select requested_provider=%q requested_model=%q default_model=%q explicit_provider=%t explicit_model=%t",
+		strings.TrimSpace(req.Provider),
+		strings.TrimSpace(req.Model),
+		t.resolveDefaultModel(),
+		explicitProvider,
+		explicitModel,
+	)
+	candidates, err := t.selectProviders(providerCfg, req.Model, explicitModel, req.Provider, explicitProvider)
 	if err != nil {
+		debug.printf("select_failed error=%q", err.Error())
 		return failureToolResult(err), nil
 	}
-	req.Model = selection.Model
-	t.applyRuntimeDefaults(req)
-
-	if maxN := t.resolveMaxN(); maxN > 0 && req.N > maxN {
-		req.N = maxN
-	}
-
-	imagegen.NormalizeGenerateRequest(req)
-	if err := imagegen.Validate(req); err != nil {
-		return failureToolResult(err), nil
-	}
+	debug.printf("candidates count=%d list=%s", len(candidates), formatImageGenerateCandidates(candidates))
 
 	timeout := t.resolveRequestTimeout()
-	client := t.newClient(selection.Provider, timeout)
-	resp, err := client.Generate(ctx, req)
-	if err != nil {
-		return failureToolResult(err), nil
-	}
-
 	outputDir := toolctx.GeneratedImageOutputDir(ctx)
 	if strings.TrimSpace(outputDir) == "" {
+		debug.printf("output_dir unavailable")
 		return failureToolResult(fmt.Errorf("generated image output dir is unavailable")), nil
 	}
+	debug.printf("output_dir=%q request_timeout=%s max_n=%d", outputDir, timeout, t.resolveMaxN())
 
-	images := make([]imagegen.SavedImage, 0, len(resp.Data))
-	for index, item := range resp.Data {
-		saved, saveErr := imagegen.SaveBase64Image(outputDir, fmt.Sprintf("image_%d", index+1), item.B64JSON, req.OutputFormat)
-		if saveErr != nil {
-			return failureToolResult(saveErr), nil
+	// Failover: try each candidate in order. Return on the first success.
+	// If all candidates fail, return the last error.
+	var lastErr error
+	for i, selection := range candidates {
+		attemptReq := *req
+		attemptReq.Model = selection.Model
+		t.applyRuntimeDefaults(&attemptReq)
+		if maxN := t.resolveMaxN(); maxN > 0 && attemptReq.N > maxN {
+			debug.printf("attempt=%d clamp_n requested=%d max=%d", i+1, attemptReq.N, maxN)
+			attemptReq.N = maxN
 		}
-		saved.Status = "completed"
-		saved.RevisedPrompt = strings.TrimSpace(item.RevisedPrompt)
-		images = append(images, saved)
+
+		imagegen.NormalizeGenerateRequest(&attemptReq)
+		debug.printf(
+			"attempt=%d/%d provider=%q model=%q api_url=%q timeout=%s proxy=%t",
+			i+1,
+			len(candidates),
+			selection.ProviderName,
+			attemptReq.Model,
+			imageGenerateAPIURL(selection.Provider),
+			timeout,
+			selection.Provider.Proxy != nil,
+		)
+		debug.printf(
+			"attempt=%d request n=%d size=%q quality=%q background=%q output_format=%q output_compression=%s",
+			i+1,
+			attemptReq.N,
+			attemptReq.Size,
+			attemptReq.Quality,
+			attemptReq.Background,
+			attemptReq.OutputFormat,
+			formatOptionalInt(attemptReq.OutputCompression),
+		)
+		if vErr := imagegen.Validate(&attemptReq); vErr != nil {
+			lastErr = vErr
+			debug.printf("attempt=%d validation_failed error=%q", i+1, vErr.Error())
+			continue
+		}
+
+		client := t.newClient(selection.Provider, timeout)
+		debug.printf("attempt=%d api_call provider=%q model=%q", i+1, selection.ProviderName, attemptReq.Model)
+		resp, genErr := client.Generate(ctx, &attemptReq)
+		if genErr != nil {
+			lastErr = fmt.Errorf("provider %s (model %s): %w", selection.ProviderName, selection.Model, genErr)
+			debug.printf("attempt=%d api_error error=%q", i+1, lastErr.Error())
+			// Skip failover if context is cancelled or deadline exceeded.
+			if ctx.Err() != nil {
+				debug.printf("attempt=%d context_done error=%q", i+1, ctx.Err().Error())
+				return failureToolResult(lastErr), nil
+			}
+			continue
+		}
+		debug.printf("attempt=%d api_response created=%d items=%d", i+1, resp.Created, len(resp.Data))
+
+		images := make([]imagegen.SavedImage, 0, len(resp.Data))
+		for index, item := range resp.Data {
+			var saved imagegen.SavedImage
+			var saveErr error
+			if item.HasB64JSON() {
+				debug.printf("attempt=%d save index=%d source=b64_json output_format=%q", i+1, index+1, attemptReq.OutputFormat)
+				saved, saveErr = imagegen.SaveBase64Image(outputDir, fmt.Sprintf("image_%d", index+1), item.B64JSON, attemptReq.OutputFormat)
+			} else if item.HasURL() {
+				debug.printf("attempt=%d save index=%d source=url output_format=%q", i+1, index+1, attemptReq.OutputFormat)
+				downloadClient := runtimehttpclient.NewProviderHTTPClient(timeout, selection.Provider.Proxy, false)
+				saved, saveErr = imagegen.SaveURLImage(ctx, outputDir, fmt.Sprintf("image_%d", index+1), item.URL, attemptReq.OutputFormat, downloadClient)
+			} else {
+				debug.printf("attempt=%d save_failed index=%d error=%q", i+1, index+1, "image response item has neither b64_json nor url")
+				return failureToolResult(fmt.Errorf("image response item %d has neither b64_json nor url", index)), nil
+			}
+			if saveErr != nil {
+				debug.printf("attempt=%d save_failed index=%d error=%q", i+1, index+1, saveErr.Error())
+				return failureToolResult(saveErr), nil
+			}
+			saved.Status = "completed"
+			saved.RevisedPrompt = strings.TrimSpace(item.RevisedPrompt)
+			images = append(images, saved)
+			debug.printf(
+				"attempt=%d saved index=%d path=%q bytes=%d mime=%q sha256=%s",
+				i+1,
+				index+1,
+				saved.SavedPath,
+				saved.ByteCount,
+				saved.MimeType,
+				saved.SHA256,
+			)
+		}
+
+		metadata := t.buildMetadata(selection, &attemptReq, outputDir, images)
+		if len(candidates) > 1 {
+			metadata["failover_attempt"] = i + 1
+			metadata["failover_total"] = len(candidates)
+		}
+		debug.printf("success provider=%q model=%q generated_count=%d output_dir=%q", selection.ProviderName, attemptReq.Model, len(images), outputDir)
+
+		return &toolkit.ToolResult{
+			Success:    true,
+			OutputKind: toolresult.KindStructured,
+			Content:    llm.GeneratedImageSummary(images),
+			Metadata:   metadata,
+		}, nil
 	}
 
-	return &toolkit.ToolResult{
-		Success:    true,
-		OutputKind: toolresult.KindStructured,
-		Content:    llm.GeneratedImageSummary(images),
-		Metadata:   t.buildMetadata(selection, req, outputDir, images),
-	}, nil
+	if lastErr != nil {
+		debug.printf("failed last_error=%q", lastErr.Error())
+	} else {
+		debug.printf("failed")
+	}
+	return failureToolResult(lastErr), nil
 }
 
 func (t *OpenAIImageGenerateTool) CanDirectCall() bool { return true }
@@ -198,19 +310,24 @@ func (t *OpenAIImageGenerateTool) DefinitionMetadata() map[string]interface{} {
 	}
 }
 
-func (t *OpenAIImageGenerateTool) buildRequest(params map[string]interface{}) (*imagegen.GenerateRequest, bool) {
+func (t *OpenAIImageGenerateTool) buildRequest(params map[string]interface{}) (*imagegen.GenerateRequest, bool, bool) {
 	req := &imagegen.GenerateRequest{}
 	if params == nil {
-		return req, false
+		return req, false, false
 	}
 
 	var explicitModel bool
+	var explicitProvider bool
 	if value, ok := stringParam(params, "prompt"); ok {
 		req.Prompt = value
 	}
 	if value, ok := stringParam(params, "model"); ok {
 		req.Model = value
 		explicitModel = true
+	}
+	if value, ok := stringParam(params, "provider"); ok {
+		req.Provider = value
+		explicitProvider = true
 	}
 	if value, ok := intParam(params, "n"); ok {
 		req.N = value
@@ -234,7 +351,7 @@ func (t *OpenAIImageGenerateTool) buildRequest(params map[string]interface{}) (*
 	if value, ok := stringParam(params, "moderation"); ok {
 		req.Moderation = value
 	}
-	return req, explicitModel
+	return req, explicitModel, explicitProvider
 }
 
 func (t *OpenAIImageGenerateTool) resolveProviderConfig() *agentconfig.Config {
@@ -246,19 +363,49 @@ func (t *OpenAIImageGenerateTool) resolveProviderConfig() *agentconfig.Config {
 	return agentconfig.GetGlobalConfig()
 }
 
-func (t *OpenAIImageGenerateTool) selectProvider(cfg *agentconfig.Config, requestedModel string, explicitModel bool) (*agentconfig.ImagesGenerationsSelection, error) {
-	requestedModel = strings.TrimSpace(requestedModel)
-	if explicitModel {
-		return agentconfig.SelectImagesGenerationsProvider(cfg, agentconfig.ImagesGenerationsHint{Model: requestedModel})
+func (t *OpenAIImageGenerateTool) selectProviders(cfg *agentconfig.Config, requestedModel string, explicitModel bool, providerName string, explicitProvider bool) ([]*agentconfig.ImagesGenerationsSelection, error) {
+	// Build ordered hint list for fallback selection.
+	var hints []agentconfig.ImagesGenerationsHint
+
+	if explicitProvider {
+		// User explicitly specified a provider → constrain to that provider.
+		hints = append(hints, agentconfig.ImagesGenerationsHint{
+			ProviderName: strings.TrimSpace(providerName),
+			Model:        strings.TrimSpace(requestedModel),
+		})
+	} else if explicitModel {
+		// User explicitly specified a model → find all providers for it.
+		hints = append(hints, agentconfig.ImagesGenerationsHint{Model: strings.TrimSpace(requestedModel)})
+	} else {
+		// No explicit selection → try default model first, then any available.
+		defaultModel := strings.TrimSpace(t.resolveDefaultModel())
+		if defaultModel != "" {
+			hints = append(hints, agentconfig.ImagesGenerationsHint{Model: defaultModel})
+		}
+		hints = append(hints, agentconfig.ImagesGenerationsHint{})
 	}
 
-	defaultModel := strings.TrimSpace(t.resolveDefaultModel())
-	if defaultModel != "" {
-		if selection, err := agentconfig.SelectImagesGenerationsProvider(cfg, agentconfig.ImagesGenerationsHint{Model: defaultModel}); err == nil {
-			return selection, nil
+	// Try each hint, collect deduplicated results for failover.
+	seen := make(map[string]bool)
+	var results []*agentconfig.ImagesGenerationsSelection
+	for _, h := range hints {
+		candidates, err := agentconfig.SelectAllImagesGenerationsProviders(cfg, h)
+		if err != nil {
+			continue
+		}
+		for _, c := range candidates {
+			key := c.ProviderName + "/" + c.Model
+			if !seen[key] {
+				seen[key] = true
+				results = append(results, c)
+			}
 		}
 	}
-	return agentconfig.SelectImagesGenerationsProvider(cfg, agentconfig.ImagesGenerationsHint{})
+
+	if len(results) == 0 {
+		return nil, agentconfig.ErrNoImagesGenerationsProvider
+	}
+	return results, nil
 }
 
 func (t *OpenAIImageGenerateTool) resolveDefaultModel() string {
@@ -316,14 +463,19 @@ func (t *OpenAIImageGenerateTool) applyRuntimeDefaults(req *imagegen.GenerateReq
 	if strings.TrimSpace(req.Model) == "" {
 		req.Model = t.resolveDefaultModel()
 	}
-	if strings.TrimSpace(req.Size) == "" {
-		req.Size = t.resolveDefaultSize()
-	}
-	if strings.TrimSpace(req.Quality) == "" {
-		req.Quality = t.resolveDefaultQuality()
-	}
-	if strings.TrimSpace(req.OutputFormat) == "" {
-		req.OutputFormat = t.resolveDefaultOutputFormat()
+	// Size, quality, and output_format defaults are GPT-Image-specific.
+	// For non-GPT-Image models, leave them empty so the upstream API
+	// applies its own defaults rather than receiving an incompatible value.
+	if imagegen.IsGPTImageModel(req.Model) {
+		if strings.TrimSpace(req.Size) == "" {
+			req.Size = t.resolveDefaultSize()
+		}
+		if strings.TrimSpace(req.Quality) == "" {
+			req.Quality = t.resolveDefaultQuality()
+		}
+		if strings.TrimSpace(req.OutputFormat) == "" {
+			req.OutputFormat = t.resolveDefaultOutputFormat()
+		}
 	}
 	if req.N <= 0 {
 		req.N = 1
@@ -476,4 +628,92 @@ func intParam(params map[string]interface{}, key string) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func newOpenAIImageGenerateDebug(params map[string]interface{}) openAIImageGenerateDebug {
+	if !boolParam(params, "debug") {
+		return openAIImageGenerateDebug{}
+	}
+	writer := io.Writer(os.Stderr)
+	if raw, ok := params["_debug_writer"]; ok {
+		if typed, ok := raw.(io.Writer); ok && typed != nil {
+			writer = typed
+		}
+	}
+	return openAIImageGenerateDebug{enabled: true, writer: writer}
+}
+
+func (d openAIImageGenerateDebug) printf(format string, args ...interface{}) {
+	if !d.enabled {
+		return
+	}
+	writer := d.writer
+	if writer == nil {
+		writer = os.Stderr
+	}
+	fmt.Fprintf(writer, "[image-debug/tool] "+format+"\n", args...)
+}
+
+func boolParam(params map[string]interface{}, key string) bool {
+	if params == nil {
+		return false
+	}
+	value, ok := params[key]
+	if !ok || value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return parseDebugBool(typed)
+	case fmt.Stringer:
+		return parseDebugBool(typed.String())
+	default:
+		return parseDebugBool(fmt.Sprint(value))
+	}
+}
+
+func parseDebugBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatImageGenerateCandidates(candidates []*agentconfig.ImagesGenerationsSelection) string {
+	if len(candidates) == 0 {
+		return "<none>"
+	}
+	parts := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s/%s", strings.TrimSpace(candidate.ProviderName), strings.TrimSpace(candidate.Model)))
+	}
+	if len(parts) == 0 {
+		return "<none>"
+	}
+	return strings.Join(parts, ",")
+}
+
+func imageGenerateAPIURL(provider agentconfig.Provider) string {
+	apiPath := strings.TrimSpace(provider.ForwardURL)
+	if apiPath == "" {
+		apiPath = strings.TrimSpace(provider.APIPath)
+	}
+	if apiPath == "" {
+		apiPath = "/v1/images/generations"
+	}
+	return agentconfig.JoinBaseURLAndPath(strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/"), apiPath)
+}
+
+func formatOptionalInt(value *int) string {
+	if value == nil {
+		return "<nil>"
+	}
+	return strconv.Itoa(*value)
 }

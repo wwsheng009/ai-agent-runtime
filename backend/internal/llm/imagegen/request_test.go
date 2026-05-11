@@ -71,6 +71,39 @@ func TestValidateGenerateRequest_RejectsLegacySizeForOlderModel(t *testing.T) {
 	}
 }
 
+func TestValidateGenerateRequest_AcceptsNonGPTModelWithoutGPTDefaults(t *testing.T) {
+	req := &GenerateRequest{
+		Model:  "sensenova-u1-fast",
+		Prompt: "draw a robot",
+	}
+
+	if err := Validate(req); err != nil {
+		t.Fatalf("Validate failed for non-GPT model without optional defaults: %v", err)
+	}
+	if req.Size != "" {
+		t.Fatalf("expected non-GPT size to stay empty, got %q", req.Size)
+	}
+	if req.Quality != "" {
+		t.Fatalf("expected non-GPT quality to stay empty, got %q", req.Quality)
+	}
+	if req.OutputFormat != "" {
+		t.Fatalf("expected non-GPT output format to stay empty, got %q", req.OutputFormat)
+	}
+}
+
+func TestValidateGenerateRequest_RejectsInvalidExplicitNonGPTOptions(t *testing.T) {
+	req := &GenerateRequest{
+		Model:        "sensenova-u1-fast",
+		Prompt:       "draw a robot",
+		Quality:      "ultra",
+		OutputFormat: "png",
+	}
+
+	if err := Validate(req); err == nil {
+		t.Fatal("expected invalid explicit quality to be rejected")
+	}
+}
+
 func TestNormalizeGenerateRequest_DefaultsAndAliases(t *testing.T) {
 	req := &GenerateRequest{
 		Model:        "",

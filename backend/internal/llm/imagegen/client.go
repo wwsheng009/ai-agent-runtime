@@ -26,6 +26,7 @@ type Generator interface {
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+	apiPath    string
 	apiKey     string
 	headers    map[string]string
 }
@@ -43,9 +44,21 @@ func NewClient(provider agentconfig.Provider, timeout time.Duration, proxy *agen
 		}
 		headers[key] = value
 	}
+
+	// Determine the request path from provider config, falling back to the
+	// standard OpenAI images generations path.
+	apiPath := strings.TrimSpace(provider.ForwardURL)
+	if apiPath == "" {
+		apiPath = strings.TrimSpace(provider.APIPath)
+	}
+	if apiPath == "" {
+		apiPath = "/v1/images/generations"
+	}
+
 	return &Client{
 		httpClient: runtimehttpclient.NewProviderHTTPClient(timeout, proxy, false),
 		baseURL:    strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/"),
+		apiPath:    apiPath,
 		apiKey:     strings.TrimSpace(provider.GetAPIKey()),
 		headers:    headers,
 	}
@@ -106,7 +119,12 @@ func (c *Client) doGenerate(ctx context.Context, req *GenerateRequest) (*Generat
 		return nil, fmt.Errorf("marshal image generation request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/images/generations", bytes.NewReader(body))
+	// Use JoinBaseURLAndPath which automatically deduplicates overlapping path
+	// segments (e.g. baseURL ending with /v1 + apiPath /v1/images/generations
+	// produces /v1/images/generations, not /v1/v1/images/generations).
+	requestURL := agentconfig.JoinBaseURLAndPath(c.baseURL, c.apiPath)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create image generation request: %w", err)
 	}
@@ -142,8 +160,8 @@ func (c *Client) doGenerate(ctx context.Context, req *GenerateRequest) (*Generat
 		return nil, fmt.Errorf("image generation response contained no data")
 	}
 	for i, item := range out.Data {
-		if strings.TrimSpace(item.B64JSON) == "" {
-			return nil, fmt.Errorf("image generation response item %d contained empty b64_json", i)
+		if !item.HasB64JSON() && !item.HasURL() {
+			return nil, fmt.Errorf("image generation response item %d contained neither b64_json nor url", i)
 		}
 	}
 	return &out, nil

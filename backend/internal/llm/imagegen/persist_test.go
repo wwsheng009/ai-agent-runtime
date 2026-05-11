@@ -1,7 +1,10 @@
 package imagegen
 
 import (
+	"context"
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,5 +60,47 @@ func TestSaveBase64Image_RejectsInvalidPayloads(t *testing.T) {
 	}
 	if _, err := SaveBase64Image(dir, "img", "data:image/png;base64,aW1hZ2U=", "png"); err == nil {
 		t.Fatal("expected data URL payload to fail")
+	}
+}
+
+func TestSaveURLImage_UsesContextAndInfersFormat(t *testing.T) {
+	dir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/webp")
+		_, _ = w.Write([]byte("image-bytes"))
+	}))
+	defer server.Close()
+
+	saved, err := SaveURLImage(context.Background(), dir, "img", server.URL+"/image", "", server.Client())
+	if err != nil {
+		t.Fatalf("SaveURLImage failed: %v", err)
+	}
+	if saved.MimeType != "image/webp" {
+		t.Fatalf("unexpected mime type: %+v", saved)
+	}
+	if saved.ByteCount != len("image-bytes") {
+		t.Fatalf("unexpected byte count: %+v", saved)
+	}
+	if !strings.HasSuffix(saved.SavedPath, filepath.Join("", "img.webp")) {
+		t.Fatalf("unexpected saved path: %s", saved.SavedPath)
+	}
+}
+
+func TestSaveURLImage_HonorsCanceledContext(t *testing.T) {
+	dir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("image-bytes"))
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := SaveURLImage(ctx, dir, "img", server.URL+"/image", "", server.Client())
+	if err == nil {
+		t.Fatal("expected canceled context to fail URL image save")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "context canceled") {
+		t.Fatalf("expected context canceled error, got %v", err)
 	}
 }
