@@ -111,6 +111,11 @@ func TestMatchSlashCommandCandidates(t *testing.T) {
 			want:      []string{"/q", "/queue", "/quit"},
 			wantAlias: map[string]string{"/q": "/exit", "/quit": "/exit"},
 		},
+		{
+			name:  "image prefix shows generation command",
+			query: "/im",
+			want:  []string{"/image"},
+		},
 	}
 
 	for _, tc := range cases {
@@ -346,6 +351,7 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/model", forms: []string{"/model"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/login", forms: []string{"/login"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/compact", forms: []string{"/compact"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/attach", forms: []string{"/attach"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/image", forms: []string{"/image"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/queue", forms: []string{"/queue"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/permission-mode", forms: []string{"/permission-mode", "/mode"}, acceptsArgs: true, requiresArgs: false},
@@ -603,6 +609,44 @@ func TestChatSlashArgumentCompletionModelAndResume(t *testing.T) {
 	}
 }
 
+func TestChatSlashArgumentCompletionAttach(t *testing.T) {
+	t.Parallel()
+
+	for _, command := range []string{"/attach "} {
+		command := command
+		t.Run(strings.TrimSpace(command), func(t *testing.T) {
+			t.Parallel()
+
+			controller := newChatSlashCompletionController(&ChatSession{})
+			controller.UpdateAt(command, len([]rune(command)))
+			if !controller.state.Active || !controller.state.Context.InArguments {
+				t.Fatalf("expected %s args popup to be active, got %#v", command, controller.state)
+			}
+			if !containsSlashCandidate(controller.state.Candidates, "clear") {
+				t.Fatalf("expected %s candidates to include clear, got %#v", command, controller.state.Candidates)
+			}
+		})
+	}
+}
+
+func TestChatSlashArgumentCompletionImageGeneration(t *testing.T) {
+	t.Parallel()
+
+	controller := newChatSlashCompletionController(&ChatSession{})
+	controller.UpdateAt("/image --", len([]rune("/image --")))
+	if !controller.state.Active || !controller.state.Context.InArguments {
+		t.Fatalf("expected /image args popup to be active, got %#v", controller.state)
+	}
+	for _, command := range []string{"--prompt", "--provider", "--model", "--path", "--output-dir", "--json"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /image candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+	if containsSlashCandidate(controller.state.Candidates, "clear") {
+		t.Fatalf("did not expect /image generation candidates to include attachment clear, got %#v", controller.state.Candidates)
+	}
+}
+
 func TestChatSlashArgumentCompletionAgents(t *testing.T) {
 	t.Parallel()
 
@@ -693,7 +737,13 @@ func TestBuildChatSlashHelpLinesUsesCatalog(t *testing.T) {
 	if !strings.Contains(joined, "!git status --short") {
 		t.Fatalf("expected help text to include shell usage example, got %#v", lines)
 	}
+	if strings.Contains(joined, "/image [path|clear]") {
+		t.Fatalf("expected /image help to describe generation instead of attachments, got %#v", lines)
+	}
 	for _, spec := range chatSlashCommandCatalog() {
+		if spec.Hidden {
+			continue
+		}
 		label := spec.Usage
 		if label == "" {
 			label = spec.Name

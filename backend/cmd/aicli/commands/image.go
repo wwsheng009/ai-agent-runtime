@@ -21,6 +21,7 @@ const defaultImageCommandOutputDir = "generated-images"
 
 type imageGenerateCommandRequest struct {
 	Config            *config.Config
+	Session           *ChatSession
 	Prompt            string
 	Provider          string
 	Model             string
@@ -161,7 +162,7 @@ func runImageGenerateCommand(req imageGenerateCommandRequest) (*imageGenerateCom
 
 	params := imageGenerateCommandParams(req, prompt)
 	imageDebugf(req, "params %s", imageDebugParams(params))
-	tool := tools.NewOpenAIImageGenerateTool(loadRuntimeToolConfig(req.Config, nil))
+	tool := tools.NewOpenAIImageGenerateTool(loadRuntimeToolConfig(req.Config, req.Session))
 	imageDebugf(req, "calling tool=%s debug=%t", tool.Name(), req.Debug)
 	toolResult, execErr := tool.Execute(ctx, params)
 	if execErr != nil {

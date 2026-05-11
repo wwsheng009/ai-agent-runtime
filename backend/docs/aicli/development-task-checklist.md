@@ -39,7 +39,8 @@
   - `internal/llm/reasoning_helpers.go`：`buildGeminiProtocolMessage` 在 user message 中构造 `inline_data` parts
   - 需要将 `messageMetadata` 参数传入该函数
 - [x] 为交互式会话增加"当前待发送附件"提示与管理命令
-  - `cmd/aicli/commands/command.go`：`/image [path]` 添加、`/image` 查看、`/image clear` 清空
+  - `cmd/aicli/commands/command.go`：`/attach [path]` 添加、`/attach` 查看、`/attach clear` 清空
+  - `cmd/aicli/commands/command.go`：`/image [prompt] ...` 调用 `openai_image_generate`，与 `aicli image` 使用同一条图片生成路径
   - `cmd/aicli/commands/chat.go`：ImagePaths 在消息发送后清空（而非下一轮迭代开始时）
   - `cmd/aicli/ui/input.go`：`FormatUserPromptWithAttachments()` 提示符显示待发送附件数量
   - `cmd/aicli/commands/chat_interaction.go`：使用带附件数的提示符
@@ -72,8 +73,8 @@
   - 当前 `buildOpenAIProtocolMessage` / `buildAnthropicProtocolMessage` / `buildGeminiProtocolMessage` 仍通过 `ExtractLocalInputImages(messageMetadata)` 读取
   - 可改为优先从 `ContentParts` 读取图片，仅当 `ContentParts` 为空时 fallback 到 metadata
 - [ ] 为交互式会话增加更丰富的附件管理
-  - `/image remove <n>` 按序号移除
-  - `/image info` 显示图片详细信息（大小、分辨率等）
+  - `/attach remove <n>` 按序号移除
+  - `/attach info` 显示图片详细信息（大小、分辨率等）
 - [ ] Session 加载时校验已持久化图片完整性
   - 检查 artifact 目录中的图片文件是否存在
   - 若缺失则尝试从原始路径回退
@@ -91,7 +92,7 @@
 
 本次在上一阶段基础上完成了四项关键推进：
 
-1. **交互式附件管理**：`/image` 命令支持在交互模式下动态添加/查看/清空图片附件，提示符显示待发送附件数量
+1. **交互式附件管理**：`/attach` 命令支持在交互模式下动态添加/查看/清空图片附件，提示符显示待发送附件数量；`/image` 保留给图片生成快捷入口
 2. **Actor 路径图片支持**：`SubmitPromptOption` 结构体统一传递图片路径和 artifact 目录，`handleSubmitPrompt` 使用 `NewUserPromptMessageWithImages`
 3. **Session 图片持久化**：`PersistLocalInputImages()` 将原始图片复制到会话 artifact 目录，session replay 不再依赖原始绝对路径
 4. **结构化消息模型**：`ContentPart` / `ContentParts` 类型使图片成为消息的一等公民，为后续协议构建器直通路径重构奠定基础

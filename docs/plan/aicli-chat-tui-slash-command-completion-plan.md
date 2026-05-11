@@ -57,7 +57,7 @@
 
 - 会话控制：`/exit`、`/quit`、`/q`、`/clear`、`/cls`、`/new`、`/session`、`/sessions`、`/load`、`/resume`、`/title`、`/history`、`/h`
 - 输出与模型：`/stream`、`/s`、`/normal`、`/n`、`/model`
-- 上下文与附件：`/compact`、`/image`、`/queue`
+- 上下文、附件与图片：`/compact`、`/attach`、`/image`、`/queue`
 - 权限与审批：`/permission-mode`、`/mode`、`/approval-reuse`、`/yolo`
 - function/skill：`/functions`、`/catalog`、`/function`、`/describe`、`/call`、`/tool`、`/skill`
 - shell：`/shell`、`/cmd`，以及非 slash 的 `!<command>`
@@ -187,7 +187,8 @@ catalog 初始建议：
 | `/title` | | 更新当前会话标题 |
 | `/model` | | 查看或切换 provider/model/thinking_effort |
 | `/compact` | | 手动触发会话压缩 |
-| `/image` | | 查看、添加或清空图片附件 |
+| `/attach` | | 查看、添加或清空待发送图片附件 |
+| `/image` | | 调用 `openai_image_generate` 生成图片 |
 | `/queue` | | 查看或清空排队输入 |
 | `/permission-mode` | `/mode` | 查看或切换权限模式 |
 | `/approval-reuse` | | 查看或切换审批复用策略 |
@@ -202,9 +203,9 @@ catalog 初始建议：
 
 **catalog ↔ handleCommand 双向同步**：`@backend/cmd/aicli/commands/command.go` 里命令分三类分发：
 
-- 精确 `switch cmd` 分支：`/exit`、`/quit`、`/q`、`/clear`、`/cls`、`/new`、`/s`、`/normal`、`/n`、`/history`、`/h`、`/functions`、`/catalog`、`/session`、`/compact`、`/sessions`、`/yolo`、`/image`、`/help`、`/?`。
+- 精确 `switch cmd` 分支：`/exit`、`/quit`、`/q`、`/clear`、`/cls`、`/new`、`/s`、`/normal`、`/n`、`/history`、`/h`、`/functions`、`/catalog`、`/session`、`/compact`、`/sessions`、`/yolo`、`/attach`、`/image`、`/help`、`/?`。
 - `HasPrefix` + 空格分支（必须带参数）：`/shell `、`/cmd `、`/function `、`/describe `、`/functions `、`/catalog `、`/call `、`/tool `、`/skill `、`/sessions `、`/load `、`/title `。
-- `HasPrefix` 无空格分支（可带可不带参数）：`/image`、`/queue`、`/compact`、`/approval-reuse`、`/model`、`/stream`、`/resume`、`/permission-mode`、`/mode`。
+- `HasPrefix` 无空格分支（可带可不带参数）：`/attach`、`/image`、`/queue`、`/compact`、`/approval-reuse`、`/model`、`/stream`、`/resume`、`/permission-mode`、`/mode`。
 
 catalog 必须同时覆盖这三类，`RequiresArgs` 用来区分第二类；测试要求见「测试计划 → catalog 与路由同步测试」。
 
@@ -533,15 +534,17 @@ func (ib *InputBox) ReadWithHistoryPromptWithHooks(prompt string, hooks LineEdit
    - `default`、`accept_edits`、`plan`、`bypass_permissions`
 5. `/approval-reuse`
    - `off`、`session_readonly_shell`、`team_readonly_shell`
-6. `/image`
+6. `/attach`
    - `clear`，后续可接文件路径补全
-7. `/queue`
+7. `/image`
+   - `--prompt`、`--provider`、`--model`、`--path`、`--n`、`--size`、`--quality`、`--background`、`--output-format`、`--output-dir`、`--json`、`--debug`
+8. `/queue`
    - `clear`、`status`
-8. `/function` / `/describe` / `/call` / `/tool`
+9. `/function` / `/describe` / `/call` / `/tool`
    - 动态读取 `session.FunctionCatalog`
-9. `/skill`
+10. `/skill`
    - 动态读取已加载 skill function 或 resolved skill dirs
-10. `/resume` / `/load`
+11. `/resume` / `/load`
    - 动态读取 session id；注意不要在每次按键同步扫描大量会话文件
 
 实现方式：

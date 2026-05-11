@@ -336,7 +336,8 @@ aicli --help
 | `/model [name|status|clear-reasoning|--provider ...]` | 查看或切换 provider/model/reasoning_effort |
 | `/login [provider|--provider ...]` | 在 chat 内新增或更新 provider 登录凭证，并可刷新/切换当前模型 |
 | `/compact [auto|local|remote]` | 手动触发会话压缩 |
-| `/image [path|clear]` | 查看、添加或清空图片附件 |
+| `/attach [path|clear]` | 查看、添加或清空待发送图片附件 |
+| `/image [prompt] [--provider <name>] [--model <name>] [--path auto\|api\|codex_native]` | 调用 `openai_image_generate` 生成图片，行为与 `aicli image` 对齐 |
 | `/queue [status|clear]` | 查看或清空排队输入 |
 | `/permission-mode [default|accept_edits|plan|bypass_permissions]`、`/mode` | 查看或切换权限模式 |
 | `/approval-reuse [off|session_readonly_shell|team_readonly_shell]` | 查看或切换审批复用策略 |

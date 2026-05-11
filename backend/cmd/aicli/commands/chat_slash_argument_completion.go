@@ -87,9 +87,24 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "session_readonly_shell", Summary: "会话只读 shell", Group: string(chatSlashCommandGroupPermission)},
 			{Command: "team_readonly_shell", Summary: "团队只读 shell", Group: string(chatSlashCommandGroupPermission)},
 		})
-	case "/image":
+	case "/attach":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "clear", Summary: "清空待发送图片附件", Group: string(chatSlashCommandGroupContext)},
+		})
+	case "/image":
+		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "--prompt", Summary: "图片提示词", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "--provider", Summary: "指定图片生成 provider", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "--model", Summary: "指定图像模型", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "--path", Summary: "图片生成路径：auto|api|codex_native", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "--n", Summary: "生成图片数量", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "--size", Summary: "图片尺寸", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "--quality", Summary: "图片质量", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "--background", Summary: "背景模式", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "--output-format", Summary: "图片输出格式", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "--output-dir", Summary: "生成图片保存目录", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
+			{Command: "--json", Summary: "输出 JSON", Group: string(chatSlashCommandGroupContext)},
+			{Command: "--debug", Summary: "输出调试信息", Group: string(chatSlashCommandGroupContext)},
 		})
 	case "/queue":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{

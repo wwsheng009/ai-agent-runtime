@@ -125,7 +125,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		return false
 	}
 	if commandMatches(cmdLower, "/image") {
-		return handleImageCommand(session, command)
+		return handleImageGenerationCommand(session, command)
+	}
+	if commandMatches(cmdLower, "/attach") {
+		return handleImageAttachmentCommand(session, command)
 	}
 	if commandMatches(cmdLower, "/queue") {
 		return handleQueueCommand(session, command)
@@ -264,7 +267,10 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		fmt.Println("提示: 已切换到 permission-mode=bypass_permissions（等价于 --yolo）")
 
 	case "/image":
-		handleImageCommand(session, "/image")
+		handleImageGenerationCommand(session, cmd)
+
+	case "/attach":
+		handleImageAttachmentCommand(session, cmd)
 
 	case "/help", "/?":
 		printChatSlashHelp()
@@ -301,14 +307,14 @@ func handlePermissionModeCommand(session *ChatSession, command string) bool {
 	return false
 }
 
-func handleImageCommand(session *ChatSession, command string) bool {
+func handleImageAttachmentCommand(session *ChatSession, command string) bool {
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
 	}
 	arg := strings.TrimSpace(extractCommandArgument(command))
 	if arg == "" {
-		// /image with no argument: list current attachments
+		// /attach with no argument: list current attachments
 		if len(session.ImagePaths) == 0 {
 			fmt.Println("当前无待发送图片附件")
 		} else {
@@ -325,7 +331,7 @@ func handleImageCommand(session *ChatSession, command string) bool {
 		fmt.Printf("已清空 %d 个待发送图片附件\n", count)
 		return false
 	}
-	// /image <path>: add image path
+	// /attach <path>: add image path
 	path := arg
 	session.ImagePaths = append(session.ImagePaths, path)
 	fmt.Printf("已添加图片附件: %s (当前共 %d 个)\n", path, len(session.ImagePaths))

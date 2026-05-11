@@ -152,6 +152,58 @@ func TestRunImageGenerateCommandPassesOptionalArgs(t *testing.T) {
 	assertJSONValue(t, captured, "output_compression", float64(42))
 }
 
+func TestHandleCommandImageGenerationUsesImageCommandPath(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		body map[string]interface{}
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/generations" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		var decoded map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		mu.Lock()
+		body = decoded
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": []map[string]interface{}{
+				{"b64_json": base64.StdEncoding.EncodeToString([]byte("image-bytes"))},
+			},
+		})
+	}))
+	defer server.Close()
+
+	restoreGlobalConfig(t)
+	outputDir := t.TempDir()
+	session := &ChatSession{Config: imageCommandTestConfig(server.URL)}
+	stdout, stderr := captureStdoutStderr(t, func() {
+		if quit := handleCommand(session, `/image --provider OPENAI_IMAGE --model gpt-image-2 --size 1024x1024 --output-dir "`+outputDir+`" draw a robot`, false); quit {
+			t.Fatal("expected /image command not to exit")
+		}
+	})
+
+	if stderr != "" {
+		t.Fatalf("expected no stderr, got %q", stderr)
+	}
+	if !strings.Contains(stdout, "Generated image saved to") {
+		t.Fatalf("expected image generation output, got %q", stdout)
+	}
+	if !strings.Contains(stdout, "Output dir: "+outputDir) {
+		t.Fatalf("expected output dir in stdout, got %q", stdout)
+	}
+
+	mu.Lock()
+	captured := body
+	mu.Unlock()
+	assertJSONValue(t, captured, "prompt", "draw a robot")
+	assertJSONValue(t, captured, "model", "gpt-image-2")
+	assertJSONValue(t, captured, "size", "1024x1024")
+}
+
 func TestRunImageGenerateCommandWritesDebugToWriter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
