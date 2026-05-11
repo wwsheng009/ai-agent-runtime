@@ -296,6 +296,10 @@ func main() {
 	chatCmd.Flags().StringSliceP("image", "i", nil, "附加本地图片文件路径（可重复指定，支持 PNG/JPEG/GIF/WebP）")
 	rootCmd.AddCommand(chatCmd)
 
+	rootCmd.AddCommand(commands.NewExecCommand(func() *config.Config {
+		return cfg
+	}))
+
 	// pipe 子命令 - 管道输入处理
 	pipeCmd := &cobra.Command{
 		Use:   "pipe",

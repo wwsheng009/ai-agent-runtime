@@ -99,6 +99,7 @@ type ChatSession struct {
 	ActiveTeam                      *chatTeamBinding                   // ambient team binding across turns
 	SelectedAgentTarget             string                             // explicit /agents target used by /agents send/followup
 	RuntimeEventBridge              *chatRuntimeEventBridge            // actor runtime event bridge
+	ExecEventBridge                 *execEventBridge                   // optional headless exec event bridge
 	ActorFirstReady                 bool                               // actor-first executor established for this session
 	ChatExecutor                    aicliChatExecutor                  // shared chatcore-backed chat executor
 	LocalRuntimeHost                *localChatRuntimeHost              // actor-first local runtime host

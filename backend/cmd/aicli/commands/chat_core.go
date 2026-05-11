@@ -633,6 +633,9 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 	if r == nil || r.session == nil {
 		return
 	}
+	if r.session.ExecEventBridge != nil {
+		r.session.ExecEventBridge.HandleChatCoreEvent(event)
+	}
 	switch event.Type {
 	case runtimechatcore.EventPlanning:
 		if !r.session.Stream || !shouldRenderInteractiveOutput(r.session) {

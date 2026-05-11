@@ -759,6 +759,9 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b == nil || b.session == nil {
 		return
 	}
+	if b.session.ExecEventBridge != nil {
+		b.session.ExecEventBridge.HandleRuntimeEvent(event)
+	}
 	b.handleStructuredLogEvent(event)
 	b.applyLLMRequestStatus(event)
 	b.applySessionCompactStatus(event)
