@@ -57,6 +57,25 @@ func TestBuildRuntimeServerStartFailureMessageIncludesLogTail(t *testing.T) {
 	}
 }
 
+func TestResolveRuntimeServerLogPathExpandsTilde(t *testing.T) {
+	root := t.TempDir()
+	isolateRuntimeServerHome(t, root)
+
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("log:\n  file_path: ~/.aicli/logs/gateway.log\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := resolveRuntimeServerLogPath(configPath, filepath.Join(root, "work"))
+	if err != nil {
+		t.Fatalf("resolve log path: %v", err)
+	}
+	expected := filepath.Join(root, "home", ".aicli", "logs", "gateway.log")
+	if got != expected {
+		t.Fatalf("expected %q, got %q", expected, got)
+	}
+}
+
 func TestTailTextLinesReturnsLastLinesOnly(t *testing.T) {
 	got := tailTextLines("a\nb\nc\nd\n", 2)
 	if got != "c\nd" {

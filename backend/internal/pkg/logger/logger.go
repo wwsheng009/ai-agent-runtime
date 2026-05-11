@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -137,6 +138,7 @@ func buildLogger(cfg *LogConfig) (*zap.Logger, *zap.SugaredLogger, []io.Closer, 
 		if strings.TrimSpace(effectiveCfg.FilePath) == "" {
 			return nil, nil, nil, fmt.Errorf("file_writer: file_path is required")
 		}
+		effectiveCfg.FilePath = aiclipaths.ExpandUserPath(effectiveCfg.FilePath)
 
 		dir := dirPath(effectiveCfg.FilePath)
 		if err := os.MkdirAll(dir, 0755); err != nil {

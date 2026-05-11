@@ -3,6 +3,7 @@ package logger
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -142,6 +143,60 @@ func TestInitLogger_FileNoPath(t *testing.T) {
 	err := InitLogger(cfg)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "file_path is required")
+}
+
+func TestBuildLoggerExpandsTildeFilePath(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+
+	cwd := filepath.Join(root, "work")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("create cwd: %v", err)
+	}
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWD); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+
+	zapLogger, _, closers, err := buildLogger(&LogConfig{
+		Level:      "info",
+		Format:     "json",
+		Output:     "file",
+		FilePath:   "~/.aicli/logs/aicli-test.log",
+		MaxSize:    1,
+		MaxBackups: 1,
+		MaxAge:     1,
+	})
+	if err != nil {
+		t.Fatalf("build logger: %v", err)
+	}
+	zapLogger.Info("tilde expansion test")
+	_ = zapLogger.Sync()
+	closeLoggerClosers(closers)
+
+	expectedPath := filepath.Join(home, ".aicli", "logs", "aicli-test.log")
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Fatalf("expected log at expanded home path %q: %v", expectedPath, err)
+	}
+
+	unexpectedPath := filepath.Join(cwd, "~", ".aicli", "logs", "aicli-test.log")
+	if _, err := os.Stat(unexpectedPath); err == nil {
+		t.Fatalf("log path was not expanded; unexpected relative file exists at %q", unexpectedPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat unexpected path: %v", err)
+	}
 }
 
 func TestInitLogger_InvalidOutput(t *testing.T) {

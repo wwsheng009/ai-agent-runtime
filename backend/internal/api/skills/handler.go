@@ -23,6 +23,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -421,7 +422,7 @@ func (h *Handler) SetRuntimeConfigResolver(resolver func(UsageScope) *runtimecfg
 
 // SetRuntimeLogFilePath 设置 runtime 服务日志文件路径。
 func (h *Handler) SetRuntimeLogFilePath(path string) {
-	path = strings.TrimSpace(path)
+	path = aiclipaths.ExpandUserPath(path)
 	if path != "" {
 		if absolutePath, err := filepath.Abs(path); err == nil {
 			path = absolutePath

@@ -529,6 +529,7 @@ func resolveRuntimeServerLogPath(configPath, cwd string) (string, error) {
 	if logPath == "" {
 		return "", nil
 	}
+	logPath = aiclipaths.ExpandUserPath(logPath)
 	if filepath.IsAbs(logPath) {
 		return filepath.Clean(logPath), nil
 	}
