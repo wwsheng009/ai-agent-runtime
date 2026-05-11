@@ -132,7 +132,11 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 		tools := mergeCodexTools(config.Functions, BuildMCPMetaTools())
 		if len(tools) > 0 {
 			request["tools"] = tools
-			request["tool_choice"] = "auto"
+			if config.ToolChoice != nil {
+				request["tool_choice"] = config.ToolChoice
+			} else {
+				request["tool_choice"] = "auto"
+			}
 			if codexToolsContainType(tools, codexImageGenerationToolType) {
 				request["parallel_tool_calls"] = false
 			}

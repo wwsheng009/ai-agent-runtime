@@ -2,16 +2,39 @@
 
 ## 概述
 
-`openai_image_generate` 是 ai-agent-runtime 内置的图片生成工具，通过 OpenAI 兼容的 `/v1/images/generations` 端点生成图片。chat 内调用时会保存到当前会话的 `generated-images` 目录；`aicli image` 子命令默认保存到当前目录下的 `generated-images`，也可用 `--output-dir` 覆盖。
+`openai_image_generate` 是 ai-agent-runtime 内置的图片生成门面工具，支持两类图片生成后端：
+
+1. OpenAI 兼容的 `/v1/images/generations` 端点（Path A）。
+2. Codex Responses API 的原生 `image_generation` native tool（Path B）。
+
+chat 内调用时会保存到当前会话的 `generated-images` 目录；`aicli image` 子命令默认保存到当前目录下的 `generated-images`，也可用 `--output-dir` 覆盖。
 
 系统中存在 **两条独立的图片生成路径**：
 
 | 路径 | 入口 | 适用场景 |
 |------|------|----------|
-| **Path A：工具调用** | `openai_image_generate` 工具 | 所有兼容 `/v1/images/generations` 端点的 provider |
-| **Path B：Codex 原生** | Codex `image_generation` native tool | 仅 Codex 协议且模型支持 `image_generation` 能力时 |
+| **Path A：工具调用** | `openai_image_generate` → `/v1/images/generations` | 所有兼容 `/v1/images/generations` 端点的 provider |
+| **Path B：Codex 原生** | `openai_image_generate` → Codex `image_generation` native tool，或 chat 自动注入 native tool | 仅 Codex 协议且模型支持 `image_generation` 能力时 |
 
-两条路径互斥：当 Codex 原生图片生成启用时，`openai_image_generate` 工具会自动从工具列表中移除，避免重复。
+默认策略：
+
+- `path=auto`：优先 Path A；如果找不到 `images_generations_api: true` 的 provider/model，会回退 Path B。
+- `path=images_generations_api` / `path=api`：强制 Path A。
+- `path=codex_native` / `path=native`：强制 Path B。
+
+也就是说，不指定 `--path` 时并不是固定走 `/v1/images/generations`，而是根据配置自动推断：
+
+| 调用方式 | 配置命中 | 实际路径 |
+|----------|----------|----------|
+| `aicli image "prompt"` | 找到任意 `images_generations_api: true` 的 provider/model | Path A |
+| `aicli image "prompt"` | 找不到 Path A，但找到 Codex `image_generation: true` 且输入模态含 `text`、`image` 的 provider/model | Path B |
+| `aicli image --provider CODEX_04 --model gpt-5.4 "prompt"` | 该 provider/model 不支持 Path A，但支持 Path B | Path B |
+| `aicli image --provider OPENAI_IMAGE "prompt"` | 该 provider/model 支持 Path A | Path A |
+| Path A 和 Path B 都可用，且未指定 `--path` | 默认优先 Path A | Path A |
+
+自动推断完全依赖 provider 配置，不根据 provider 名称或 model 名称做猜测。要让 `--provider CODEX_04 --model gpt-5.4` 自动走 Path B，配置里必须正确声明 `protocol: codex`、`native_tools.image_generation: true`，并且 `input_modalities` 同时包含 `text` 和 `image`。
+
+chat 自动工具曝光仍保持互斥：当 Codex 原生图片生成启用时，普通对话的工具列表会移除 `openai_image_generate`，避免模型同时看到 Path A function tool 和 Path B native tool。显式 `/call openai_image_generate ...` 或 `aicli image --path native ...` 属于直接调用，不受普通曝光互斥影响。
 
 ---
 
@@ -27,9 +50,11 @@ aicli image --provider SENSENOVA_IMAGE "海边日落照片"
 aicli image --provider SENSENOVA_IMAGE --output-dir ./generated-images "生成一张产品海报"
 aicli image --provider SENSENOVA_IMAGE --json "生成一张壁纸"
 aicli image --provider SENSENOVA_IMAGE --debug --json "生成一张壁纸"
+aicli image --provider CODEX_04 --model gpt-5.4 "生成一张未来城市海报"
+aicli image --provider CODEX_04 --model gpt-5.4 --path codex_native "生成一张未来城市海报"
 ```
 
-命令会直接复用 `openai_image_generate` 的 provider 选择、failover、请求重试、图片保存和 metadata 结构。默认输出目录是当前工作目录下的 `generated-images`。
+命令会直接复用 `openai_image_generate` 的 provider 选择、failover、请求重试、图片保存和 metadata 结构。默认输出目录是当前工作目录下的 `generated-images`。如果不指定 `--path`，命令使用 `auto` 推断：优先尝试 Path A；当当前 provider/model 或全局候选不满足 `images_generations_api: true` 时，再尝试 Path B。Path B 会调用 Codex Responses API `/v1/responses`，请求中注入 `{"type":"image_generation"}` native tool，并把响应中的 `image_generation_call.result` 保存到本地。
 
 ### Chat 内直接调用工具
 
@@ -69,6 +94,7 @@ aicli image --provider SENSENOVA_IMAGE --size 2752x1536 "测试"
 | `prompt` | string | 是 | — | 图片提示词 |
 | `model` | string | 否 | `gpt-image-2` | 图像模型名称 |
 | `provider` | string | 否 | 自动选择 | Provider 名称（如 `OPENAI_IMAGE`、`SENSENOVA_IMAGE`） |
+| `path` | string | 否 | `auto` | 生成路径：`auto`、`images_generations_api`/`api`、`codex_native`/`native` |
 | `n` | integer | 否 | `1` | 单次生成图片数量（1~max_n） |
 | `size` | string | 否 | GPT Image: `1024x1024`；其他: 空 | 图片尺寸 |
 | `quality` | string | 否 | GPT Image: `medium`；其他: 空 | 图片质量 (`low`/`medium`/`high`/`auto`) |
@@ -85,6 +111,7 @@ aicli image --provider SENSENOVA_IMAGE --size 2752x1536 "测试"
 | `[prompt]` / `--prompt/-p` | `prompt` | `--prompt` 优先；未指定时拼接位置参数 |
 | `--provider` | `provider` | 限定图片生成 provider |
 | `--model/-m` | `model` | 指定图像模型 |
+| `--path` | `path` | 选择生成路径：`auto`、`images_generations_api`/`api`、`codex_native`/`native` |
 | `--n` | `n` | `0` 表示不显式传入，由工具使用默认值 |
 | `--size` | `size` | 图片尺寸 |
 | `--quality` | `quality` | 图片质量 |
@@ -138,16 +165,29 @@ aicli image --provider SENSENOVA_IMAGE --size 2752x1536 "测试"
 ### 整体流程
 
 ```
-用户调用 → buildRequest() → selectProviders() → applyRuntimeDefaults()
-                                                     ↓
-                                          对每个 candidate（failover）:
-                                          NormalizeGenerateRequest()
-                                          Validate()
-                                          Client.Generate()
-                                                     ↓
-                                          保存图片 (b64_json 或 url)
-                                                     ↓
-                                          返回 ToolResult
+用户调用 → buildRequest() → resolve path
+                        ↓
+              path=api / Path A 可用:
+              selectProviders(images_generations_api)
+                        ↓
+              applyRuntimeDefaults()
+              NormalizeGenerateRequest()
+              Validate()
+              Client.Generate(/v1/images/generations)
+                        ↓
+              保存图片 (b64_json 或 url)
+                        ↓
+              返回 ToolResult
+
+              path=native / Path A 不可用:
+              selectCodexNativeProviders(image_generation)
+                        ↓
+              BuildToolDefinitionsForRequestWithImageOptions()
+              Provider.Call(/v1/responses, tool_choice=image_generation)
+                        ↓
+              ProcessCodexAssistantImageGenerationWithOptions()
+                        ↓
+              返回同构 ToolResult
 ```
 
 ### Provider 选择逻辑
@@ -159,6 +199,8 @@ aicli image --provider SENSENOVA_IMAGE --size 2752x1536 "测试"
 3. **均未指定**：先尝试默认 model，再尝试空 hint（匹配所有可用 provider）
 
 选择结果是一个有序列表，第一个是首选，后续为 failover 候选。
+
+Path B 使用独立的 provider 选择逻辑：provider 必须启用、协议必须是 `codex`，并且目标 model 的能力必须满足 `image_generation: true` 且 `input_modalities` 同时包含 `text` 和 `image`。`path=auto` 会先运行 Path A 的选择逻辑；只有 Path A 没有候选时，才运行 Path B 的选择逻辑。因此，显式指定 Codex provider/model 时，只要该组合没有 `images_generations_api: true`，但有 `image_generation: true`，就会自动推断为 Path B，不需要额外加 `--path codex_native`。
 
 ### Provider 匹配条件
 
@@ -186,7 +228,7 @@ model_capabilities:
 | 字段 | 作用 | 路径 |
 |------|------|------|
 | `images_generations_api: true` | 标识该 model 支持 `/v1/images/generations` 端点 | Path A |
-| `image_generation: true` | 标识该 model 支持 Codex 原生 `image_generation` tool | Path B |
+| `image_generation: true` | 标识该 model 支持 Codex 原生 `image_generation` tool；还需要 `input_modalities: [text, image]` | Path B |
 
 ### Failover 机制
 
@@ -441,6 +483,9 @@ go build -o aicli.exe ./cmd/aicli
 - `openai_image_generate` 工具会自动从工具列表中移除
 - 图片由 Codex Response API 直接返回，格式为 `b64_json`
 - 判断条件：`protocol == "codex"` && `image_generation == true` && 输入模态包含 `text` 和 `image`
+- 直接调用入口：`aicli image --path codex_native --provider <codex-provider> --model <model> "prompt"`，或 `/call openai_image_generate {"prompt":"...","path":"codex_native","provider":"...","model":"..."}`
+- 请求约束：直接 Path B 会向 Codex 请求设置 `tool_choice={"type":"image_generation"}`，避免模型只返回文本。
+- 参数映射：`size`、`quality`、`background`、`output_format`、`output_compression` 会写入 native tool 定义；`n>1` 会写入用户提示词约束模型生成多张图，因为 Codex native tool 本身不是 `/v1/images/generations` 的 `n` 参数。
 
 ```yaml
 # Codex 原生图片生成的模型配置示例

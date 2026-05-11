@@ -157,10 +157,10 @@ func TestSelectAllImagesGenerationsProvider_HintByProvider(t *testing.T) {
 		Providers: ProvidersConfig{
 			Items: map[string]Provider{
 				"SENSENOVA_IMAGE": {
-					Enabled:      true,
-					BaseURL:      "https://token.sensenova.cn",
-					APIKey:       "sensenova-key",
-					DefaultModel: "sensenova-u1-fast",
+					Enabled:         true,
+					BaseURL:         "https://token.sensenova.cn",
+					APIKey:          "sensenova-key",
+					DefaultModel:    "sensenova-u1-fast",
 					SupportedModels: []string{"sensenova-u1-fast"},
 					ModelCapabilities: map[string]ModelCapabilitySpec{
 						"sensenova-u1-fast": {
@@ -169,10 +169,10 @@ func TestSelectAllImagesGenerationsProvider_HintByProvider(t *testing.T) {
 					},
 				},
 				"OPENAI_IMAGE": {
-					Enabled:      true,
-					BaseURL:      "https://api.openai.com",
-					APIKey:       "openai-key",
-					DefaultModel: "gpt-image-2",
+					Enabled:         true,
+					BaseURL:         "https://api.openai.com",
+					APIKey:          "openai-key",
+					DefaultModel:    "gpt-image-2",
 					SupportedModels: []string{"gpt-image-2"},
 					ModelCapabilities: map[string]ModelCapabilitySpec{
 						"gpt-image-2": {
@@ -201,10 +201,10 @@ func TestSelectAllImagesGenerationsProvider_HintByModel(t *testing.T) {
 		Providers: ProvidersConfig{
 			Items: map[string]Provider{
 				"SENSENOVA_IMAGE": {
-					Enabled:      true,
-					BaseURL:      "https://token.sensenova.cn",
-					APIKey:       "sensenova-key",
-					DefaultModel: "sensenova-u1-fast",
+					Enabled:         true,
+					BaseURL:         "https://token.sensenova.cn",
+					APIKey:          "sensenova-key",
+					DefaultModel:    "sensenova-u1-fast",
 					SupportedModels: []string{"sensenova-u1-fast"},
 					ModelCapabilities: map[string]ModelCapabilitySpec{
 						"sensenova-u1-fast": {
@@ -213,10 +213,10 @@ func TestSelectAllImagesGenerationsProvider_HintByModel(t *testing.T) {
 					},
 				},
 				"OPENAI_IMAGE": {
-					Enabled:      true,
-					BaseURL:      "https://api.openai.com",
-					APIKey:       "openai-key",
-					DefaultModel: "gpt-image-2",
+					Enabled:         true,
+					BaseURL:         "https://api.openai.com",
+					APIKey:          "openai-key",
+					DefaultModel:    "gpt-image-2",
 					SupportedModels: []string{"gpt-image-2"},
 					ModelCapabilities: map[string]ModelCapabilitySpec{
 						"gpt-image-2": {
@@ -237,5 +237,75 @@ func TestSelectAllImagesGenerationsProvider_HintByModel(t *testing.T) {
 	}
 	if results[0].Model != "sensenova-u1-fast" {
 		t.Fatalf("expected sensenova-u1-fast, got %s", results[0].Model)
+	}
+}
+
+func TestSelectAllCodexNativeImageGenerationProviders_SelectsTextImageCodexModel(t *testing.T) {
+	cfg := &Config{
+		Providers: ProvidersConfig{
+			Items: map[string]Provider{
+				"CODEX_NATIVE": {
+					Enabled:         true,
+					Protocol:        "codex",
+					DefaultModel:    "gpt-5.4",
+					SupportedModels: []string{"gpt-5.4"},
+					ModelCapabilities: map[string]ModelCapabilitySpec{
+						"gpt-5.4": {
+							InputModalities: []string{"text", "image"},
+							NativeTools: NativeToolCapabilities{
+								ImageGeneration: true,
+							},
+						},
+					},
+				},
+				"OPENAI_IMAGE": {
+					Enabled:      true,
+					Protocol:     "openai",
+					DefaultModel: "gpt-image-2",
+					ModelCapabilities: map[string]ModelCapabilitySpec{
+						"gpt-image-2": {
+							NativeTools: NativeToolCapabilities{ImagesGenerationsAPI: true},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	results, err := SelectAllCodexNativeImageGenerationProviders(cfg, CodexNativeImageGenerationHint{})
+	if err != nil {
+		t.Fatalf("SelectAllCodexNativeImageGenerationProviders failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 native result, got %d", len(results))
+	}
+	if results[0].ProviderName != "CODEX_NATIVE" || results[0].Model != "gpt-5.4" {
+		t.Fatalf("unexpected native selection: %+v", results[0])
+	}
+}
+
+func TestSelectAllCodexNativeImageGenerationProviders_RejectsTextOnlyModel(t *testing.T) {
+	cfg := &Config{
+		Providers: ProvidersConfig{
+			Items: map[string]Provider{
+				"CODEX_TEXT": {
+					Enabled:      true,
+					Protocol:     "codex",
+					DefaultModel: "gpt-5.4",
+					ModelCapabilities: map[string]ModelCapabilitySpec{
+						"gpt-5.4": {
+							InputModalities: []string{"text"},
+							NativeTools: NativeToolCapabilities{
+								ImageGeneration: true,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if _, err := SelectAllCodexNativeImageGenerationProviders(cfg, CodexNativeImageGenerationHint{}); err == nil {
+		t.Fatal("expected error for text-only native image model")
 	}
 }

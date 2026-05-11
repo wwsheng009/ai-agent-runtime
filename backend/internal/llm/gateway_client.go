@@ -556,7 +556,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 	assistantMsg = normalizeGatewayAssistantMessage(selected, protocol, adapterRequest.Model, assistantMsg)
 	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
 		if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
-			if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
+			if _, imageErr := ProcessCodexAssistantImageGenerationWithOptions(assistantMsg, outputDir, CodexImageGenerationOptionsFromMetadata(req.Metadata)); imageErr != nil {
 				metadata := decodeMapAny(assistantMsg["metadata"])
 				if metadata == nil {
 					metadata = map[string]interface{}{}
@@ -798,7 +798,7 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 	}
 	if strings.EqualFold(strings.TrimSpace(protocol), "codex") {
 		if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
-			if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
+			if _, imageErr := ProcessCodexAssistantImageGenerationWithOptions(assistantMsg, outputDir, CodexImageGenerationOptionsFromMetadata(req.Metadata)); imageErr != nil {
 				metadata := decodeMapAny(assistantMsg["metadata"])
 				if metadata == nil {
 					metadata = map[string]interface{}{}

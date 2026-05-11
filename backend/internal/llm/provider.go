@@ -577,7 +577,7 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	}
 	if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
 		if outputDir := strings.TrimSpace(stringValue(request.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
-			if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
+			if _, imageErr := ProcessCodexAssistantImageGenerationWithOptions(assistantMsg, outputDir, CodexImageGenerationOptionsFromMetadata(request.Metadata)); imageErr != nil {
 				metadata := decodeMapAny(assistantMsg["metadata"])
 				if metadata == nil {
 					metadata = map[string]interface{}{}
@@ -1235,7 +1235,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 
 		if strings.EqualFold(strings.TrimSpace(p.config.Type), "codex") {
 			if outputDir := strings.TrimSpace(stringValue(req.Metadata[MetadataKeyGeneratedImageOutputDir])); outputDir != "" {
-				if _, imageErr := ProcessCodexAssistantImageGeneration(assistantMsg, outputDir); imageErr != nil {
+				if _, imageErr := ProcessCodexAssistantImageGenerationWithOptions(assistantMsg, outputDir, CodexImageGenerationOptionsFromMetadata(req.Metadata)); imageErr != nil {
 					metadata := decodeMapAny(assistantMsg["metadata"])
 					if metadata == nil {
 						metadata = map[string]interface{}{}

@@ -275,6 +275,23 @@ func TestImageCommandCompressionFlagChanged(t *testing.T) {
 	}
 }
 
+func TestImageGenerateCommandParamsIncludesNonDefaultPath(t *testing.T) {
+	params := imageGenerateCommandParams(imageGenerateCommandRequest{
+		Path: "codex_native",
+	}, "draw a robot")
+
+	if got := params["path"]; got != "codex_native" {
+		t.Fatalf("expected path param, got %#v", got)
+	}
+
+	defaultParams := imageGenerateCommandParams(imageGenerateCommandRequest{
+		Path: "auto",
+	}, "draw a robot")
+	if _, ok := defaultParams["path"]; ok {
+		t.Fatalf("did not expect default auto path to be passed, got %#v", defaultParams["path"])
+	}
+}
+
 func imageCommandTestConfig(baseURL string) *config.Config {
 	return &config.Config{
 		Providers: config.ProvidersConfig{

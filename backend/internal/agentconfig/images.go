@@ -11,6 +11,10 @@ import (
 // satisfy the image generations API requirement.
 var ErrNoImagesGenerationsProvider = errors.New("no image generations provider configured")
 
+// ErrNoCodexNativeImageGenerationProvider is returned when no provider/model
+// pair can expose Codex native image_generation.
+var ErrNoCodexNativeImageGenerationProvider = errors.New("no codex native image generation provider configured")
+
 // ImagesGenerationsHint narrows provider selection for image generation calls.
 type ImagesGenerationsHint struct {
 	ProviderName string
@@ -20,6 +24,21 @@ type ImagesGenerationsHint struct {
 // ImagesGenerationsSelection identifies the provider/model chosen for an image
 // generation request.
 type ImagesGenerationsSelection struct {
+	ProviderName string
+	Provider     Provider
+	Model        string
+}
+
+// CodexNativeImageGenerationHint narrows provider selection for Codex native
+// image_generation calls.
+type CodexNativeImageGenerationHint struct {
+	ProviderName string
+	Model        string
+}
+
+// CodexNativeImageGenerationSelection identifies the provider/model chosen for
+// a Codex native image_generation request.
+type CodexNativeImageGenerationSelection struct {
 	ProviderName string
 	Provider     Provider
 	Model        string
@@ -106,6 +125,58 @@ func SelectAllImagesGenerationsProviders(cfg *Config, hint ImagesGenerationsHint
 	return results, nil
 }
 
+// SelectAllCodexNativeImageGenerationProviders resolves all provider/model
+// pairs that can expose the Codex Responses image_generation native tool.
+func SelectAllCodexNativeImageGenerationProviders(cfg *Config, hint CodexNativeImageGenerationHint) ([]*CodexNativeImageGenerationSelection, error) {
+	if cfg == nil || len(cfg.Providers.Items) == 0 {
+		return nil, ErrNoCodexNativeImageGenerationProvider
+	}
+
+	hint.ProviderName = strings.TrimSpace(hint.ProviderName)
+	hint.Model = strings.TrimSpace(hint.Model)
+
+	providerNames := make([]string, 0, len(cfg.Providers.Items))
+	if hint.ProviderName != "" {
+		providerNames = append(providerNames, hint.ProviderName)
+	} else {
+		for name := range cfg.Providers.Items {
+			providerNames = append(providerNames, name)
+		}
+		sort.Strings(providerNames)
+	}
+
+	var results []*CodexNativeImageGenerationSelection
+	for _, providerName := range providerNames {
+		provider, ok := cfg.Providers.Items[providerName]
+		if !ok || !provider.Enabled || !strings.EqualFold(provider.GetProtocol(), "codex") {
+			continue
+		}
+		models := imagesGenerationCandidateModels(provider, hint.Model)
+		for _, model := range models {
+			if strings.TrimSpace(model) == "*" {
+				continue
+			}
+			if !ProviderHasCodexNativeImageGeneration(provider, model) {
+				continue
+			}
+			selectedModel := strings.TrimSpace(model)
+			if selectedModel == "" {
+				continue
+			}
+			results = append(results, &CodexNativeImageGenerationSelection{
+				ProviderName: providerName,
+				Provider:     provider,
+				Model:        selectedModel,
+			})
+		}
+	}
+
+	if len(results) == 0 {
+		return nil, ErrNoCodexNativeImageGenerationProvider
+	}
+	return results, nil
+}
+
 func imagesGenerationCandidateModels(provider Provider, requestedModel string) []string {
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel != "" {
@@ -152,6 +223,37 @@ func imagesGenerationCandidateModels(provider Provider, requestedModel string) [
 func ProviderHasImagesGenerationsAPI(provider Provider, model string) bool {
 	spec, ok := ResolveModelCapabilitySpec(model, provider.ModelCapabilities)
 	return ok && spec.NativeTools.ImagesGenerationsAPI
+}
+
+// ProviderHasCodexNativeImageGeneration reports whether the provider/model pair
+// can expose Codex native image_generation.
+func ProviderHasCodexNativeImageGeneration(provider Provider, model string) bool {
+	if !strings.EqualFold(provider.GetProtocol(), "codex") {
+		return false
+	}
+	spec, ok := ResolveModelCapabilitySpec(model, provider.ModelCapabilities)
+	if !ok && strings.TrimSpace(model) != "*" {
+		spec, ok = provider.ModelCapabilities["*"]
+	}
+	return ok && ModelCapabilityHasTextImageNativeGeneration(spec)
+}
+
+// ModelCapabilityHasTextImageNativeGeneration reports whether a capability
+// enables native image_generation and accepts both text and image modalities.
+func ModelCapabilityHasTextImageNativeGeneration(spec ModelCapabilitySpec) bool {
+	if !spec.NativeTools.ImageGeneration {
+		return false
+	}
+	modalities := make(map[string]struct{}, len(spec.InputModalities))
+	for _, modality := range spec.InputModalities {
+		trimmed := strings.ToLower(strings.TrimSpace(modality))
+		if trimmed != "" {
+			modalities[trimmed] = struct{}{}
+		}
+	}
+	_, hasText := modalities["text"]
+	_, hasImage := modalities["image"]
+	return hasText && hasImage
 }
 
 // ImagesGenerationsProviderSummary returns a short human-readable summary of a

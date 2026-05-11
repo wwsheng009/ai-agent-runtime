@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -49,6 +52,106 @@ func (m *mockImageGenerator) Generate(ctx context.Context, req *imagegen.Generat
 			{B64JSON: base64.StdEncoding.EncodeToString([]byte("image-bytes-1")), RevisedPrompt: "revised one"},
 		},
 	}, nil
+}
+
+func TestOpenAIImageGenerateTool_CodexNativePathSavesImageAndForcesToolChoice(t *testing.T) {
+	var capturedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/v1/responses", r.URL.Path)
+		require.Equal(t, "Bearer codex-key", r.Header.Get("Authorization"))
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.Header().Set("Content-Type", "text/event-stream")
+		result := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg=="
+		fmt.Fprintf(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_image\",\"model\":\"gpt-5.4\"}}\n\n")
+		fmt.Fprintf(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"image_generation_call\",\"id\":\"img:1\",\"status\":\"in_progress\",\"revised_prompt\":\"tiny robot\"}}\n\n")
+		fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"image_generation_call\",\"id\":\"img:1\",\"status\":\"completed\",\"revised_prompt\":\"tiny robot\",\"output_format\":\"png\",\"result\":%q}}\n\n", result)
+		fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_image\",\"status\":\"completed\",\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n\n")
+	}))
+	defer server.Close()
+
+	outputDir := t.TempDir()
+	tool := NewOpenAIImageGenerateTool(&runtimecfg.RuntimeConfig{
+		Images: runtimecfg.ImagesConfig{
+			Generations: runtimecfg.ImagesGenerationsConfig{
+				DefaultModel:        "gpt-image-2",
+				DefaultOutputFormat: "png",
+				RequestTimeout:      time.Second,
+				MaxN:                4,
+			},
+		},
+	})
+	tool.providerConfigResolver = func() *agentconfig.Config {
+		return &agentconfig.Config{
+			Providers: agentconfig.ProvidersConfig{
+				Items: map[string]agentconfig.Provider{
+					"CODEX_NATIVE": {
+						Enabled:         true,
+						Protocol:        "codex",
+						BaseURL:         server.URL,
+						APIKey:          "codex-key",
+						DefaultModel:    "gpt-5.4",
+						SupportedModels: []string{"gpt-5.4"},
+						ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+							"gpt-5.4": {
+								InputModalities: []string{"text", "image"},
+								NativeTools: agentconfig.NativeToolCapabilities{
+									ImageGeneration: true,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	tool.clientFactory = func(provider agentconfig.Provider, timeout time.Duration, proxy *agentconfig.ProxyConfig) imagegen.Generator {
+		t.Fatalf("Path B should not use /v1/images/generations client")
+		return nil
+	}
+
+	ctx := toolctx.WithGeneratedImageOutputDir(context.Background(), outputDir)
+	result, err := tool.Execute(ctx, map[string]interface{}{
+		"prompt":        "draw a tiny robot",
+		"provider":      "CODEX_NATIVE",
+		"model":         "gpt-5.4",
+		"path":          "codex_native",
+		"size":          "1024x1024",
+		"quality":       "high",
+		"output_format": "png",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, string(imageGeneratePathCodexNative), result.Metadata["image_generation_path"])
+	require.Equal(t, "CODEX_NATIVE", result.Metadata["provider"])
+	require.Equal(t, "gpt-5.4", result.Metadata["model"])
+	require.Equal(t, 1, result.Metadata["generated_count"])
+	require.Contains(t, result.Content, "Generated image saved to")
+
+	generated := generatedImagesMetadata(result.Metadata[llm.MetadataKeyGeneratedImages])
+	require.Len(t, generated, 1)
+	require.FileExists(t, generated[0]["saved_path"].(string))
+
+	require.Equal(t, true, capturedBody["stream"])
+	choice, ok := capturedBody["tool_choice"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, "image_generation", choice["type"])
+	require.Equal(t, false, capturedBody["parallel_tool_calls"])
+	tools, ok := capturedBody["tools"].([]interface{})
+	require.True(t, ok)
+	var sawNative bool
+	for _, raw := range tools {
+		toolMap, ok := raw.(map[string]interface{})
+		require.True(t, ok)
+		if toolMap["type"] == "image_generation" {
+			sawNative = true
+			require.Equal(t, "png", toolMap["output_format"])
+			require.Equal(t, "1024x1024", toolMap["size"])
+			require.Equal(t, "high", toolMap["quality"])
+		}
+	}
+	require.True(t, sawNative)
 }
 
 func TestOpenAIImageGenerateTool_ExecuteUsesRuntimeDefaultsAndPersistsImages(t *testing.T) {

@@ -14,15 +14,26 @@ import (
 )
 
 const (
-	MetadataKeyGeneratedImageOutputDir = "generated_image_output_dir"
-	MetadataKeyGeneratedImages         = "generated_images"
-	codexImageGenerationToolType       = toolnames.CodexNativeImageGenerationToolType
-	codexImageGenerationCallType       = toolnames.CodexNativeImageGenerationCallType
-	defaultGeneratedImageFormat        = "png"
+	MetadataKeyGeneratedImageOutputDir     = "generated_image_output_dir"
+	MetadataKeyGeneratedImages             = "generated_images"
+	MetadataKeyCodexImageGenerationOptions = "codex_image_generation_options"
+	codexImageGenerationToolType           = toolnames.CodexNativeImageGenerationToolType
+	codexImageGenerationCallType           = toolnames.CodexNativeImageGenerationCallType
+	defaultGeneratedImageFormat            = "png"
 )
 
 // GeneratedImage stores local metadata for one saved image_generation result.
 type GeneratedImage = imagegen.SavedImage
+
+// CodexImageGenerationOptions carries request-side options for the Codex
+// Responses image_generation native tool.
+type CodexImageGenerationOptions struct {
+	Size              string
+	Quality           string
+	Background        string
+	OutputFormat      string
+	OutputCompression *int
+}
 
 // BuildToolDefinitionsForRequest converts local tool definitions into protocol
 // request payloads and appends Codex native tools when the selected model
@@ -33,6 +44,19 @@ func BuildToolDefinitionsForRequest(
 	model string,
 	modelCapabilities map[string]agentconfig.ModelCapabilitySpec,
 	includeMeta bool,
+) interface{} {
+	return BuildToolDefinitionsForRequestWithImageOptions(tools, protocol, model, modelCapabilities, includeMeta, nil)
+}
+
+// BuildToolDefinitionsForRequestWithImageOptions is BuildToolDefinitionsForRequest
+// plus optional request-side fields for Codex native image_generation.
+func BuildToolDefinitionsForRequestWithImageOptions(
+	tools []types.ToolDefinition,
+	protocol string,
+	model string,
+	modelCapabilities map[string]agentconfig.ModelCapabilitySpec,
+	includeMeta bool,
+	imageOptions *CodexImageGenerationOptions,
 ) interface{} {
 	nativeImageGenerationEnabled := CodexImageGenerationEnabled(protocol, model, modelCapabilities)
 	tools = filterOpenAIImageGenerateToolForCodexNative(tools, nativeImageGenerationEnabled)
@@ -53,13 +77,39 @@ func BuildToolDefinitionsForRequest(
 		normalized = append(normalized, definition)
 	}
 	if nativeImageGenerationEnabled {
-		normalized = append(normalized, map[string]interface{}{
-			"type":          codexImageGenerationToolType,
-			"output_format": defaultGeneratedImageFormat,
-		})
+		normalized = append(normalized, buildCodexNativeImageGenerationTool(imageOptions))
 	}
 
 	return buildToolDefinitionsForProtocol(normalized, protocol, includeMeta)
+}
+
+func buildCodexNativeImageGenerationTool(options *CodexImageGenerationOptions) map[string]interface{} {
+	tool := map[string]interface{}{
+		"type": codexImageGenerationToolType,
+	}
+	outputFormat := defaultGeneratedImageFormat
+	if options != nil && strings.TrimSpace(options.OutputFormat) != "" {
+		outputFormat = strings.TrimSpace(options.OutputFormat)
+	}
+	if outputFormat != "" {
+		tool["output_format"] = outputFormat
+	}
+	if options == nil {
+		return tool
+	}
+	if value := strings.TrimSpace(options.Size); value != "" {
+		tool["size"] = value
+	}
+	if value := strings.TrimSpace(options.Quality); value != "" {
+		tool["quality"] = value
+	}
+	if value := strings.TrimSpace(options.Background); value != "" {
+		tool["background"] = value
+	}
+	if options.OutputCompression != nil {
+		tool["output_compression"] = *options.OutputCompression
+	}
+	return tool
 }
 
 func filterOpenAIImageGenerateToolForCodexNative(tools []types.ToolDefinition, nativeImageGenerationEnabled bool) []types.ToolDefinition {
@@ -87,25 +137,19 @@ func CodexImageGenerationEnabled(
 		return false
 	}
 	capability, ok := ResolveModelCapabilitySpec(model, modelCapabilities)
-	if !ok || !capability.NativeTools.ImageGeneration {
-		return false
-	}
-	modalities := make(map[string]struct{}, len(capability.InputModalities))
-	for _, modality := range capability.InputModalities {
-		trimmed := strings.ToLower(strings.TrimSpace(modality))
-		if trimmed != "" {
-			modalities[trimmed] = struct{}{}
-		}
-	}
-	_, hasText := modalities["text"]
-	_, hasImage := modalities["image"]
-	return hasText && hasImage
+	return ok && agentconfig.ModelCapabilityHasTextImageNativeGeneration(capability)
 }
 
 // ProcessCodexAssistantImageGeneration saves image_generation results to disk,
 // strips the raw base64 payload from replay metadata, and annotates the
 // assistant message with generated image metadata.
 func ProcessCodexAssistantImageGeneration(msg map[string]interface{}, outputDir string) ([]GeneratedImage, error) {
+	return ProcessCodexAssistantImageGenerationWithOptions(msg, outputDir, nil)
+}
+
+// ProcessCodexAssistantImageGenerationWithOptions is ProcessCodexAssistantImageGeneration
+// with a caller-provided output format hint for native image_generation.
+func ProcessCodexAssistantImageGenerationWithOptions(msg map[string]interface{}, outputDir string, options *CodexImageGenerationOptions) ([]GeneratedImage, error) {
 	items := extractCodexOutputItems(msg)
 	if len(items) == 0 || strings.TrimSpace(outputDir) == "" {
 		return nil, nil
@@ -132,7 +176,7 @@ func ProcessCodexAssistantImageGeneration(msg map[string]interface{}, outputDir 
 			continue
 		}
 
-		image, err := saveGeneratedImage(outputDir, cloned)
+		image, err := saveGeneratedImage(outputDir, cloned, options)
 		if err != nil {
 			errs = append(errs, err.Error())
 			if canonical := canonicalizeCodexOutputItem(cloned); canonical != nil {
@@ -258,7 +302,7 @@ func attachGeneratedImagesMetadata(msg map[string]interface{}, images []Generate
 	msg["metadata"] = metadata
 }
 
-func saveGeneratedImage(outputDir string, item map[string]interface{}) (GeneratedImage, error) {
+func saveGeneratedImage(outputDir string, item map[string]interface{}, options *CodexImageGenerationOptions) (GeneratedImage, error) {
 	id := strings.TrimSpace(stringValue(item["id"]))
 	if id == "" {
 		id = "generated_image"
@@ -267,13 +311,83 @@ func saveGeneratedImage(outputDir string, item map[string]interface{}) (Generate
 	if payload == "" {
 		return GeneratedImage{}, fmt.Errorf("image_generation %s returned empty payload", id)
 	}
-	saved, err := imagegen.SaveBase64Image(outputDir, id, payload, defaultGeneratedImageFormat)
+	format := codexImageGenerationOutputFormat(item, options)
+	saved, err := imagegen.SaveBase64Image(outputDir, id, payload, format)
 	if err != nil {
 		return GeneratedImage{}, fmt.Errorf("image_generation %s: %w", id, err)
 	}
 	saved.Status = strings.TrimSpace(stringValue(item["status"]))
 	saved.RevisedPrompt = strings.TrimSpace(stringValue(item["revised_prompt"]))
 	return saved, nil
+}
+
+func codexImageGenerationOutputFormat(item map[string]interface{}, options *CodexImageGenerationOptions) string {
+	if options != nil {
+		if value := strings.TrimSpace(options.OutputFormat); value != "" {
+			return value
+		}
+	}
+	if value := strings.TrimSpace(stringValue(item["output_format"])); value != "" {
+		return value
+	}
+	return defaultGeneratedImageFormat
+}
+
+// CodexImageGenerationOptionsFromMetadata extracts native image_generation
+// options from an LLM request metadata map.
+func CodexImageGenerationOptionsFromMetadata(metadata map[string]interface{}) *CodexImageGenerationOptions {
+	if len(metadata) == 0 {
+		return nil
+	}
+	raw, ok := metadata[MetadataKeyCodexImageGenerationOptions]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch typed := raw.(type) {
+	case CodexImageGenerationOptions:
+		return cloneCodexImageGenerationOptions(&typed)
+	case *CodexImageGenerationOptions:
+		return cloneCodexImageGenerationOptions(typed)
+	case map[string]interface{}:
+		return codexImageGenerationOptionsFromMap(typed)
+	default:
+		if decoded := decodeMapAny(raw); decoded != nil {
+			return codexImageGenerationOptionsFromMap(decoded)
+		}
+	}
+	return nil
+}
+
+func codexImageGenerationOptionsFromMap(values map[string]interface{}) *CodexImageGenerationOptions {
+	if len(values) == 0 {
+		return nil
+	}
+	options := &CodexImageGenerationOptions{
+		Size:         strings.TrimSpace(stringValue(values["size"])),
+		Quality:      strings.TrimSpace(stringValue(values["quality"])),
+		Background:   strings.TrimSpace(stringValue(values["background"])),
+		OutputFormat: strings.TrimSpace(stringValue(values["output_format"])),
+	}
+	if raw, ok := values["output_compression"]; ok && raw != nil {
+		value := intValue(raw)
+		options.OutputCompression = &value
+	}
+	if options.Size == "" && options.Quality == "" && options.Background == "" && options.OutputFormat == "" && options.OutputCompression == nil {
+		return nil
+	}
+	return options
+}
+
+func cloneCodexImageGenerationOptions(options *CodexImageGenerationOptions) *CodexImageGenerationOptions {
+	if options == nil {
+		return nil
+	}
+	cloned := *options
+	if options.OutputCompression != nil {
+		value := *options.OutputCompression
+		cloned.OutputCompression = &value
+	}
+	return &cloned
 }
 
 func cloneDeepMapStringAny(input map[string]interface{}) map[string]interface{} {

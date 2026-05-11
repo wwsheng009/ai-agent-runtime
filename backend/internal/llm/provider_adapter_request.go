@@ -82,12 +82,13 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 
 	var tools interface{}
 	if !metadataDisablesTools(metadata) {
-		tools = BuildToolDefinitionsForRequest(
+		tools = BuildToolDefinitionsForRequestWithImageOptions(
 			input.Tools,
 			input.Protocol,
 			input.Model,
 			modelCapabilities,
 			!metadataDisablesMetaTools(metadata),
+			CodexImageGenerationOptionsFromMetadata(metadata),
 		)
 	}
 

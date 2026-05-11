@@ -36,6 +36,14 @@ type openAIImageGenerateDebug struct {
 	writer  io.Writer
 }
 
+type imageGeneratePath string
+
+const (
+	imageGeneratePathAuto        imageGeneratePath = "auto"
+	imageGeneratePathAPI         imageGeneratePath = "images_generations_api"
+	imageGeneratePathCodexNative imageGeneratePath = "codex_native"
+)
+
 // NewOpenAIImageGenerateTool creates a new tool instance using the provided runtime
 // configuration for default values.
 func NewOpenAIImageGenerateTool(runtimeConfig *runtimecfg.RuntimeConfig) *OpenAIImageGenerateTool {
@@ -90,6 +98,12 @@ func (t *OpenAIImageGenerateTool) parameters() map[string]interface{} {
 		"provider": map[string]interface{}{
 			"type":        "string",
 			"description": "指定使用的图像生成 provider 名称（如 OPENAI_IMAGE、SENSENOVA_IMAGE）。不指定时自动选择。",
+		},
+		"path": map[string]interface{}{
+			"type":        "string",
+			"description": "图片生成路径：auto 优先使用 /v1/images/generations，必要时回退 Codex 原生；images_generations_api 强制 Path A；codex_native 强制 Path B。",
+			"enum":        []string{"auto", "images_generations_api", "api", "codex_native", "native"},
+			"default":     "auto",
 		},
 		"n": map[string]interface{}{
 			"type":        "integer",
@@ -166,6 +180,22 @@ func (t *OpenAIImageGenerateTool) Execute(ctx context.Context, params map[string
 	}
 	debug.printf("provider_config providers=%d", len(providerCfg.Providers.Items))
 
+	path, pathErr := imageGeneratePathParam(params)
+	if pathErr != nil {
+		debug.printf("path_invalid error=%q", pathErr.Error())
+		return failureToolResult(pathErr), nil
+	}
+	timeout := t.resolveRequestTimeout()
+	outputDir := toolctx.GeneratedImageOutputDir(ctx)
+	if strings.TrimSpace(outputDir) == "" {
+		debug.printf("output_dir unavailable")
+		return failureToolResult(fmt.Errorf("generated image output dir is unavailable")), nil
+	}
+	debug.printf("path=%q output_dir=%q request_timeout=%s max_n=%d", path, outputDir, timeout, t.resolveMaxN())
+	if path == imageGeneratePathCodexNative {
+		return t.executeCodexNative(ctx, providerCfg, req, explicitModel, explicitProvider, outputDir, timeout, debug), nil
+	}
+
 	debug.printf(
 		"select requested_provider=%q requested_model=%q default_model=%q explicit_provider=%t explicit_model=%t",
 		strings.TrimSpace(req.Provider),
@@ -176,18 +206,14 @@ func (t *OpenAIImageGenerateTool) Execute(ctx context.Context, params map[string
 	)
 	candidates, err := t.selectProviders(providerCfg, req.Model, explicitModel, req.Provider, explicitProvider)
 	if err != nil {
+		if path == imageGeneratePathAuto {
+			debug.printf("select_failed error=%q fallback_path=%q", err.Error(), imageGeneratePathCodexNative)
+			return t.executeCodexNative(ctx, providerCfg, req, explicitModel, explicitProvider, outputDir, timeout, debug), nil
+		}
 		debug.printf("select_failed error=%q", err.Error())
 		return failureToolResult(err), nil
 	}
 	debug.printf("candidates count=%d list=%s", len(candidates), formatImageGenerateCandidates(candidates))
-
-	timeout := t.resolveRequestTimeout()
-	outputDir := toolctx.GeneratedImageOutputDir(ctx)
-	if strings.TrimSpace(outputDir) == "" {
-		debug.printf("output_dir unavailable")
-		return failureToolResult(fmt.Errorf("generated image output dir is unavailable")), nil
-	}
-	debug.printf("output_dir=%q request_timeout=%s max_n=%d", outputDir, timeout, t.resolveMaxN())
 
 	// Failover: try each candidate in order. Return on the first success.
 	// If all candidates fail, return the last error.
@@ -299,6 +325,105 @@ func (t *OpenAIImageGenerateTool) Execute(ctx context.Context, params map[string
 	return failureToolResult(lastErr), nil
 }
 
+func (t *OpenAIImageGenerateTool) executeCodexNative(
+	ctx context.Context,
+	providerCfg *agentconfig.Config,
+	req *imagegen.GenerateRequest,
+	explicitModel bool,
+	explicitProvider bool,
+	outputDir string,
+	timeout time.Duration,
+	debug openAIImageGenerateDebug,
+) *toolkit.ToolResult {
+	candidates, err := t.selectCodexNativeProviders(providerCfg, req.Model, explicitModel, req.Provider, explicitProvider)
+	if err != nil {
+		debug.printf("native_select_failed error=%q", err.Error())
+		return failureToolResult(err)
+	}
+	debug.printf("native_candidates count=%d list=%s", len(candidates), formatCodexNativeImageCandidates(candidates))
+
+	var lastErr error
+	for i, selection := range candidates {
+		attemptReq := *req
+		attemptReq.Model = selection.Model
+		imagegen.NormalizeGenerateRequest(&attemptReq)
+		if maxN := t.resolveMaxN(); maxN > 0 && attemptReq.N > maxN {
+			debug.printf("native_attempt=%d clamp_n requested=%d max=%d", i+1, attemptReq.N, maxN)
+			attemptReq.N = maxN
+		}
+		if err := validateCodexNativeImageRequest(&attemptReq); err != nil {
+			lastErr = err
+			debug.printf("native_attempt=%d validation_failed error=%q", i+1, err.Error())
+			continue
+		}
+
+		provider, err := t.newCodexNativeProvider(selection.Provider, timeout)
+		if err != nil {
+			lastErr = fmt.Errorf("provider %s (model %s): %w", selection.ProviderName, selection.Model, err)
+			debug.printf("native_attempt=%d provider_build_error error=%q", i+1, lastErr.Error())
+			continue
+		}
+
+		debug.printf(
+			"native_attempt=%d/%d provider=%q model=%q timeout=%s",
+			i+1,
+			len(candidates),
+			selection.ProviderName,
+			attemptReq.Model,
+			timeout,
+		)
+		resp, callErr := provider.Call(ctx, &llm.LLMRequest{
+			Model:    attemptReq.Model,
+			Messages: []runtimetypes.Message{{Role: "user", Content: codexNativeImagePrompt(&attemptReq)}},
+			Stream:   true,
+			Metadata: codexNativeImageMetadata(outputDir, &attemptReq),
+		})
+		if callErr != nil {
+			lastErr = fmt.Errorf("provider %s (model %s): %w", selection.ProviderName, selection.Model, callErr)
+			debug.printf("native_attempt=%d api_error error=%q", i+1, lastErr.Error())
+			if ctx.Err() != nil {
+				debug.printf("native_attempt=%d context_done error=%q", i+1, ctx.Err().Error())
+				return failureToolResult(lastErr)
+			}
+			continue
+		}
+
+		metadata := t.buildCodexNativeMetadata(selection, &attemptReq, outputDir, resp)
+		generatedCount := metadataInt(metadata, "generated_count")
+		debug.printf("native_success provider=%q model=%q generated_count=%d output_dir=%q", selection.ProviderName, attemptReq.Model, generatedCount, outputDir)
+		if generatedCount < 1 {
+			lastErr = fmt.Errorf("codex native image_generation did not return generated images")
+			debug.printf("native_attempt=%d no_images error=%q", i+1, lastErr.Error())
+			continue
+		}
+		if len(candidates) > 1 {
+			metadata["failover_attempt"] = i + 1
+			metadata["failover_total"] = len(candidates)
+		}
+
+		content := ""
+		if resp != nil {
+			content = strings.TrimSpace(resp.Content)
+		}
+		if content == "" {
+			content = firstGeneratedImageSummaryFromMetadata(metadata)
+		}
+		return &toolkit.ToolResult{
+			Success:    true,
+			OutputKind: toolresult.KindStructured,
+			Content:    content,
+			Metadata:   metadata,
+		}
+	}
+
+	if lastErr != nil {
+		debug.printf("native_failed last_error=%q", lastErr.Error())
+	} else {
+		debug.printf("native_failed")
+	}
+	return failureToolResult(lastErr)
+}
+
 func (t *OpenAIImageGenerateTool) CanDirectCall() bool { return true }
 
 func (t *OpenAIImageGenerateTool) DefinitionMetadata() map[string]interface{} {
@@ -306,6 +431,10 @@ func (t *OpenAIImageGenerateTool) DefinitionMetadata() map[string]interface{} {
 		"tool_class":     "image_generation",
 		"upstream_path":  "/v1/images/generations",
 		"provider_scope": "images_generations_api",
+		"supported_paths": []string{
+			string(imageGeneratePathAPI),
+			string(imageGeneratePathCodexNative),
+		},
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 	}
 }
@@ -408,6 +537,45 @@ func (t *OpenAIImageGenerateTool) selectProviders(cfg *agentconfig.Config, reque
 	return results, nil
 }
 
+func (t *OpenAIImageGenerateTool) selectCodexNativeProviders(cfg *agentconfig.Config, requestedModel string, explicitModel bool, providerName string, explicitProvider bool) ([]*agentconfig.CodexNativeImageGenerationSelection, error) {
+	var hints []agentconfig.CodexNativeImageGenerationHint
+
+	if explicitProvider {
+		hints = append(hints, agentconfig.CodexNativeImageGenerationHint{
+			ProviderName: strings.TrimSpace(providerName),
+			Model:        strings.TrimSpace(requestedModel),
+		})
+	} else if explicitModel {
+		hints = append(hints, agentconfig.CodexNativeImageGenerationHint{Model: strings.TrimSpace(requestedModel)})
+	} else {
+		defaultModel := strings.TrimSpace(t.resolveDefaultModel())
+		if defaultModel != "" {
+			hints = append(hints, agentconfig.CodexNativeImageGenerationHint{Model: defaultModel})
+		}
+		hints = append(hints, agentconfig.CodexNativeImageGenerationHint{})
+	}
+
+	seen := make(map[string]bool)
+	var results []*agentconfig.CodexNativeImageGenerationSelection
+	for _, h := range hints {
+		candidates, err := agentconfig.SelectAllCodexNativeImageGenerationProviders(cfg, h)
+		if err != nil {
+			continue
+		}
+		for _, c := range candidates {
+			key := c.ProviderName + "/" + c.Model
+			if !seen[key] {
+				seen[key] = true
+				results = append(results, c)
+			}
+		}
+	}
+	if len(results) == 0 {
+		return nil, agentconfig.ErrNoCodexNativeImageGenerationProvider
+	}
+	return results, nil
+}
+
 func (t *OpenAIImageGenerateTool) resolveDefaultModel() string {
 	if t == nil || t.runtimeConfig == nil {
 		return runtimecfg.DefaultRuntimeConfig().Images.Generations.DefaultModel
@@ -489,8 +657,34 @@ func (t *OpenAIImageGenerateTool) newClient(provider agentconfig.Provider, timeo
 	return imagegen.NewClient(provider, timeout, provider.Proxy)
 }
 
+func (t *OpenAIImageGenerateTool) newCodexNativeProvider(provider agentconfig.Provider, timeout time.Duration) (llm.Provider, error) {
+	providerTimeout := provider.Timeout
+	if timeout > 0 {
+		providerTimeout = timeout
+	}
+	return llm.NewProvider(&llm.ProviderConfig{
+		Type:                    provider.GetProtocol(),
+		APIKey:                  provider.GetAPIKey(),
+		BaseURL:                 provider.BaseURL,
+		APIPath:                 provider.APIPath,
+		Timeout:                 providerTimeout,
+		MaxRetries:              3,
+		DefaultModel:            strings.TrimSpace(provider.DefaultModel),
+		SupportedModels:         append([]string(nil), provider.SupportedModels...),
+		ModelMappings:           cloneStringStringMap(provider.ModelMappings),
+		ModelCapabilities:       cloneModelCapabilityMap(provider.ModelCapabilities),
+		Headers:                 cloneStringStringMap(provider.Headers),
+		HeaderMappings:          cloneStringStringMap(provider.HeaderMappings),
+		HeaderMappingRules:      cloneLLMHeaderMappingRules(provider.HeaderMappingRules),
+		SupportsMaxOutputTokens: provider.SupportsMaxOutputTokens,
+		Proxy:                   provider.Proxy.Clone(),
+		RequestsPerMinute:       provider.RequestsPerMinute,
+	})
+}
+
 func (t *OpenAIImageGenerateTool) buildMetadata(selection *agentconfig.ImagesGenerationsSelection, req *imagegen.GenerateRequest, outputDir string, images []imagegen.SavedImage) map[string]interface{} {
 	metadata := map[string]interface{}{
+		"image_generation_path":        string(imageGeneratePathAPI),
 		"model":                        strings.TrimSpace(req.Model),
 		"output_dir":                   strings.TrimSpace(outputDir),
 		"requested_n":                  req.N,
@@ -521,6 +715,46 @@ func (t *OpenAIImageGenerateTool) buildMetadata(selection *agentconfig.ImagesGen
 	return metadata
 }
 
+func (t *OpenAIImageGenerateTool) buildCodexNativeMetadata(selection *agentconfig.CodexNativeImageGenerationSelection, req *imagegen.GenerateRequest, outputDir string, resp *llm.LLMResponse) map[string]interface{} {
+	metadata := map[string]interface{}{
+		"image_generation_path":        string(imageGeneratePathCodexNative),
+		"native_tool":                  toolnames.CodexNativeImageGenerationToolType,
+		"model":                        strings.TrimSpace(req.Model),
+		"output_dir":                   strings.TrimSpace(outputDir),
+		"requested_n":                  req.N,
+		llm.MetadataKeyGeneratedImages: []map[string]interface{}{},
+	}
+	if selection != nil {
+		metadata["provider"] = strings.TrimSpace(selection.ProviderName)
+	}
+	if req.OutputFormat != "" {
+		metadata["output_format"] = req.OutputFormat
+	}
+	if req.Size != "" {
+		metadata["size"] = req.Size
+	}
+	if req.Quality != "" {
+		metadata["quality"] = req.Quality
+	}
+	if req.Background != "" {
+		metadata["background"] = req.Background
+	}
+	if resp != nil && len(resp.Metadata) > 0 {
+		for key, value := range resp.Metadata {
+			metadata[key] = value
+		}
+	}
+	generated := generatedImagesMetadata(metadata[llm.MetadataKeyGeneratedImages])
+	metadata[llm.MetadataKeyGeneratedImages] = generated
+	metadata["generated_count"] = len(generated)
+	if len(generated) > 0 {
+		if savedPath := strings.TrimSpace(fmt.Sprint(generated[0]["saved_path"])); savedPath != "" && savedPath != "<nil>" {
+			metadata["saved_path"] = savedPath
+		}
+	}
+	return metadata
+}
+
 func toGeneratedImageMetadata(images []imagegen.SavedImage) []map[string]interface{} {
 	if len(images) == 0 {
 		return []map[string]interface{}{}
@@ -538,6 +772,99 @@ func toGeneratedImageMetadata(images []imagegen.SavedImage) []map[string]interfa
 		})
 	}
 	return out
+}
+
+func generatedImagesMetadata(raw interface{}) []map[string]interface{} {
+	switch typed := raw.(type) {
+	case []map[string]interface{}:
+		return typed
+	case []interface{}:
+		out := make([]map[string]interface{}, 0, len(typed))
+		for _, item := range typed {
+			if entry, ok := item.(map[string]interface{}); ok {
+				out = append(out, entry)
+			}
+		}
+		return out
+	default:
+		return []map[string]interface{}{}
+	}
+}
+
+func metadataInt(metadata map[string]interface{}, key string) int {
+	if len(metadata) == 0 {
+		return 0
+	}
+	return intFromAny(metadata[key])
+}
+
+func firstGeneratedImageSummaryFromMetadata(metadata map[string]interface{}) string {
+	images := generatedImagesMetadata(metadata[llm.MetadataKeyGeneratedImages])
+	if len(images) == 0 {
+		return ""
+	}
+	savedPath := strings.TrimSpace(fmt.Sprint(images[0]["saved_path"]))
+	if savedPath == "" || savedPath == "<nil>" {
+		return ""
+	}
+	if len(images) == 1 {
+		return fmt.Sprintf("Generated image saved to %s", savedPath)
+	}
+	return fmt.Sprintf("Generated %d images. First saved to %s", len(images), savedPath)
+}
+
+func cloneStringStringMap(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]string, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func cloneModelCapabilityMap(input map[string]agentconfig.ModelCapabilitySpec) map[string]agentconfig.ModelCapabilitySpec {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make(map[string]agentconfig.ModelCapabilitySpec, len(input))
+	for key, value := range input {
+		cloned := value
+		if len(value.InputModalities) > 0 {
+			cloned.InputModalities = append([]string(nil), value.InputModalities...)
+		}
+		if len(value.ReasoningEfforts) > 0 {
+			cloned.ReasoningEfforts = append([]string(nil), value.ReasoningEfforts...)
+		}
+		if len(value.ReasoningEffortBudgets) > 0 {
+			cloned.ReasoningEffortBudgets = make(map[string]int, len(value.ReasoningEffortBudgets))
+			for effort, budget := range value.ReasoningEffortBudgets {
+				cloned.ReasoningEffortBudgets[effort] = budget
+			}
+		}
+		output[key] = cloned
+	}
+	return output
+}
+
+func cloneLLMHeaderMappingRules(input []agentconfig.HeaderMappingRule) []llm.HeaderMappingRule {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make([]llm.HeaderMappingRule, len(input))
+	for i, rule := range input {
+		output[i] = llm.HeaderMappingRule{
+			Name:         rule.Name,
+			Enabled:      rule.Enabled,
+			Header:       rule.Header,
+			TargetHeader: rule.TargetHeader,
+			MatchType:    rule.MatchType,
+			Match:        rule.Match,
+			Value:        rule.Value,
+		}
+	}
+	return output
 }
 
 func failureToolResult(err error) *toolkit.ToolResult {
@@ -630,6 +957,41 @@ func intParam(params map[string]interface{}, key string) (int, bool) {
 	}
 }
 
+func intFromAny(value interface{}) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int8:
+		return int(typed)
+	case int16:
+		return int(typed)
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		number, err := typed.Int64()
+		if err == nil {
+			return int(number)
+		}
+		f, err := typed.Float64()
+		if err != nil {
+			return 0
+		}
+		return int(f)
+	case string:
+		number, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err == nil {
+			return number
+		}
+	}
+	return 0
+}
+
 func newOpenAIImageGenerateDebug(params map[string]interface{}) openAIImageGenerateDebug {
 	if !boolParam(params, "debug") {
 		return openAIImageGenerateDebug{}
@@ -641,6 +1003,108 @@ func newOpenAIImageGenerateDebug(params map[string]interface{}) openAIImageGener
 		}
 	}
 	return openAIImageGenerateDebug{enabled: true, writer: writer}
+}
+
+func imageGeneratePathParam(params map[string]interface{}) (imageGeneratePath, error) {
+	value, ok := stringParam(params, "path")
+	if !ok {
+		return imageGeneratePathAuto, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		return imageGeneratePathAuto, nil
+	case "api", "images_generations_api", "images-generations-api", "path_a":
+		return imageGeneratePathAPI, nil
+	case "native", "codex_native", "codex-native", "path_b":
+		return imageGeneratePathCodexNative, nil
+	default:
+		return imageGeneratePathAuto, fmt.Errorf("path must be one of auto, images_generations_api/api, or codex_native/native")
+	}
+}
+
+func validateCodexNativeImageRequest(req *imagegen.GenerateRequest) error {
+	if req == nil {
+		return fmt.Errorf("generate request is nil")
+	}
+	req.Prompt = strings.TrimSpace(req.Prompt)
+	req.Model = strings.TrimSpace(req.Model)
+	req.Size = strings.TrimSpace(req.Size)
+	req.Quality = strings.ToLower(strings.TrimSpace(req.Quality))
+	req.Background = strings.ToLower(strings.TrimSpace(req.Background))
+	req.OutputFormat = strings.ToLower(strings.TrimSpace(req.OutputFormat))
+	if req.OutputFormat == "jpg" {
+		req.OutputFormat = "jpeg"
+	}
+	if req.Prompt == "" {
+		return fmt.Errorf("prompt cannot be empty")
+	}
+	if req.Model == "" {
+		return fmt.Errorf("model cannot be empty")
+	}
+	if req.N < 1 || req.N > 10 {
+		return fmt.Errorf("n must be between 1 and 10")
+	}
+	if req.Quality != "" {
+		if _, ok := imagegen.AllowedQualities[req.Quality]; !ok {
+			return fmt.Errorf("quality must be one of low, medium, high, or auto")
+		}
+	}
+	if _, ok := imagegen.AllowedBackgrounds[req.Background]; !ok {
+		return fmt.Errorf("background must be one of transparent, opaque, or auto")
+	}
+	if req.OutputFormat != "" {
+		if _, ok := imagegen.AllowedOutputFormats[req.OutputFormat]; !ok {
+			return fmt.Errorf("output_format must be png, jpeg, or webp")
+		}
+	}
+	if req.OutputCompression != nil && (*req.OutputCompression < 0 || *req.OutputCompression > 100) {
+		return fmt.Errorf("output_compression must be between 0 and 100")
+	}
+	return nil
+}
+
+func codexNativeImagePrompt(req *imagegen.GenerateRequest) string {
+	if req == nil {
+		return ""
+	}
+	prompt := strings.TrimSpace(req.Prompt)
+	if req.N <= 1 {
+		return prompt
+	}
+	return fmt.Sprintf("Generate exactly %d images for this request.\n\n%s", req.N, prompt)
+}
+
+func codexNativeImageMetadata(outputDir string, req *imagegen.GenerateRequest) map[string]interface{} {
+	metadata := map[string]interface{}{
+		llm.MetadataKeyGeneratedImageOutputDir: outputDir,
+		"tool_choice": map[string]interface{}{
+			"type": toolnames.CodexNativeImageGenerationToolType,
+		},
+	}
+	if options := codexNativeImageOptions(req); options != nil {
+		metadata[llm.MetadataKeyCodexImageGenerationOptions] = options
+	}
+	return metadata
+}
+
+func codexNativeImageOptions(req *imagegen.GenerateRequest) *llm.CodexImageGenerationOptions {
+	if req == nil {
+		return nil
+	}
+	options := &llm.CodexImageGenerationOptions{
+		Size:         strings.TrimSpace(req.Size),
+		Quality:      strings.TrimSpace(req.Quality),
+		Background:   strings.TrimSpace(req.Background),
+		OutputFormat: strings.TrimSpace(req.OutputFormat),
+	}
+	if req.OutputCompression != nil {
+		value := *req.OutputCompression
+		options.OutputCompression = &value
+	}
+	if options.Size == "" && options.Quality == "" && options.Background == "" && options.OutputFormat == "" && options.OutputCompression == nil {
+		return nil
+	}
+	return options
 }
 
 func (d openAIImageGenerateDebug) printf(format string, args ...interface{}) {
@@ -684,6 +1148,23 @@ func parseDebugBool(value string) bool {
 }
 
 func formatImageGenerateCandidates(candidates []*agentconfig.ImagesGenerationsSelection) string {
+	if len(candidates) == 0 {
+		return "<none>"
+	}
+	parts := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s/%s", strings.TrimSpace(candidate.ProviderName), strings.TrimSpace(candidate.Model)))
+	}
+	if len(parts) == 0 {
+		return "<none>"
+	}
+	return strings.Join(parts, ",")
+}
+
+func formatCodexNativeImageCandidates(candidates []*agentconfig.CodexNativeImageGenerationSelection) string {
 	if len(candidates) == 0 {
 		return "<none>"
 	}

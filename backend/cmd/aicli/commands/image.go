@@ -24,6 +24,7 @@ type imageGenerateCommandRequest struct {
 	Prompt            string
 	Provider          string
 	Model             string
+	Path              string
 	N                 int
 	Size              string
 	Quality           string
@@ -50,7 +51,7 @@ func NewImageCommand(configProvider func() *config.Config) *cobra.Command {
 		Use:     "image [prompt]",
 		Aliases: []string{"img"},
 		Short:   "直接调用图片生成工具",
-		Long:    "直接调用 openai_image_generate，通过 OpenAI 兼容 /v1/images/generations 端点生成图片并保存到本地目录。",
+		Long:    "直接调用 openai_image_generate，通过 OpenAI 兼容 /v1/images/generations 或 Codex 原生 image_generation 生成图片并保存到本地目录。",
 		Example: `  aicli image "一只在月光下奔跑的猫"
 	aicli image --provider SENSENOVA_IMAGE --model sensenova-u1-fast "海边日落照片"
 	aicli image --prompt "产品海报，白底" --size 1024x1024 --output-dir ./out/images
@@ -64,6 +65,7 @@ func NewImageCommand(configProvider func() *config.Config) *cobra.Command {
 	cmd.Flags().StringP("prompt", "p", "", "图片提示词；未指定时使用位置参数拼接")
 	cmd.Flags().String("provider", "", "指定图片生成 provider 名称（如 OPENAI_IMAGE、SENSENOVA_IMAGE）")
 	cmd.Flags().StringP("model", "m", "", "指定图像模型名称")
+	cmd.Flags().String("path", "auto", "图片生成路径（auto|images_generations_api|api|codex_native|native）")
 	cmd.Flags().Int("n", 0, "生成图片数量；0 表示使用工具默认值")
 	cmd.Flags().String("size", "", "图片尺寸（如 1024x1024、1536x1024、auto）")
 	cmd.Flags().String("quality", "", "图片质量（low|medium|high|auto）")
@@ -97,6 +99,7 @@ func HandleImageGenerate(cmd *cobra.Command, args []string, configProvider func(
 		Prompt:       imagePromptFromFlags(cmd, args),
 		Provider:     stringFlag(cmd, "provider"),
 		Model:        stringFlag(cmd, "model"),
+		Path:         stringFlag(cmd, "path"),
 		N:            intFlag(cmd, "n"),
 		Size:         stringFlag(cmd, "size"),
 		Quality:      stringFlag(cmd, "quality"),
@@ -208,6 +211,9 @@ func imageGenerateCommandParams(req imageGenerateCommandRequest, prompt string) 
 	if strings.TrimSpace(req.Model) != "" {
 		params["model"] = strings.TrimSpace(req.Model)
 	}
+	if path := strings.TrimSpace(req.Path); path != "" && !strings.EqualFold(path, "auto") {
+		params["path"] = path
+	}
 	if req.N > 0 {
 		params["n"] = req.N
 	}
@@ -318,7 +324,7 @@ func imageDebugParams(params map[string]interface{}) string {
 	if len(params) == 0 {
 		return ""
 	}
-	orderedKeys := []string{"provider", "model", "n", "size", "quality", "background", "output_format", "output_compression", "debug"}
+	orderedKeys := []string{"provider", "model", "path", "n", "size", "quality", "background", "output_format", "output_compression", "debug"}
 	parts := make([]string, 0, len(orderedKeys)+1)
 	if prompt, ok := params["prompt"].(string); ok {
 		parts = append(parts, fmt.Sprintf("prompt_chars=%d", len([]rune(prompt))))
