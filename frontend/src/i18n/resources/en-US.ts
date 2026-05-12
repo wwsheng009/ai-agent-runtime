@@ -325,6 +325,12 @@ export const enUS = {
         sessions: "Sessions",
         runtime: "Runtime overview",
       },
+      sessionUserSelect: "Session user",
+      sessionUserOption: "{{user}} · {{count}} sessions",
+      sessionUserOptionDefault: "{{user}} · {{count}} sessions · default",
+      sessionUserDefault: "default",
+      sessionUsersLoading: "loading users",
+      sessionDirectoryUnscoped: "Unscoped sessions",
       threadStatuses: {
         review: "Waiting for review",
         draft: "Draft thread",

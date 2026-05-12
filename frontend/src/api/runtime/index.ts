@@ -19,6 +19,7 @@ export {
   getRuntimeSession,
   getSessionHistory,
   getSessionCheckpointFiles,
+  listRuntimeSessionUsers,
   listRuntimeSessions,
   listSessionCheckpoints,
   previewSessionCheckpoint,

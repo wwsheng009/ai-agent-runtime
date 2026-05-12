@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildStoredRuntimeSessionsKey,
+  chooseRuntimeSessionUserId,
   mergePinnedRuntimeSession,
+  normalizeRuntimeSessionUsers,
   normalizeRuntimeSessions,
+  readStoredRuntimeSessionUserId,
   readStoredRuntimeSessions,
   resolveRuntimeSessionsRetryDelay,
   sortRuntimeSessions,
   summarizeRuntimeSessions,
+  writeStoredRuntimeSessionUserId,
   writeStoredRuntimeSessions,
 } from "@/hooks/workspace/use-runtime-sessions-data";
 
@@ -49,6 +53,46 @@ describe("use-runtime-sessions-data helpers", () => {
   it("normalizes null or missing session payloads to an empty array", () => {
     expect(normalizeRuntimeSessions(null)).toEqual([]);
     expect(normalizeRuntimeSessions(undefined)).toEqual([]);
+  });
+
+  it("normalizes session user payloads and drops blank user ids", () => {
+    expect(
+      normalizeRuntimeSessionUsers([
+        { user_id: "cli-user", session_count: 1 },
+        { user_id: " ", session_count: 2 },
+      ]),
+    ).toEqual([{ user_id: "cli-user", session_count: 1 }]);
+    expect(normalizeRuntimeSessionUsers(null)).toEqual([]);
+  });
+
+  it("chooses the best runtime session user from discovered users", () => {
+    const users = [
+      {
+        user_id: "older-user",
+        session_count: 5,
+        latest_updated_at: "2026-03-31T08:30:00Z",
+      },
+      {
+        user_id: "newer-user",
+        session_count: 1,
+        latest_updated_at: "2026-03-31T09:30:00Z",
+      },
+    ];
+
+    expect(
+      chooseRuntimeSessionUserId(users, "anonymous", "missing-user", "web-user"),
+    ).toBe("newer-user");
+    expect(
+      chooseRuntimeSessionUserId(users, "anonymous", "older-user", "web-user"),
+    ).toBe("older-user");
+    expect(
+      chooseRuntimeSessionUserId(
+        [{ user_id: "anonymous", session_count: 2 }],
+        "anonymous",
+        "missing-user",
+        "web-user",
+      ),
+    ).toBe("anonymous");
   });
 
   it("merges a pinned route session when it is missing from the current list", () => {
@@ -158,6 +202,13 @@ describe("use-runtime-sessions-data helpers", () => {
     expect(readStoredRuntimeSessions(storage, "user-2").map((session) => session.id)).toEqual([
       "session-other-user",
     ]);
+  });
+
+  it("persists and restores the selected runtime session user", () => {
+    const storage = new MemoryStorage();
+    writeStoredRuntimeSessionUserId(storage, "thinkbook14\\wangweisheng");
+
+    expect(readStoredRuntimeSessionUserId(storage)).toBe("thinkbook14\\wangweisheng");
   });
 
   it("falls back to an empty cache when stored runtime sessions are invalid", () => {

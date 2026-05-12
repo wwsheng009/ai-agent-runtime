@@ -23,6 +23,8 @@ import { type Artifact, type Thread } from "@/data/mock";
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
 import { type RuntimeClientIdentity } from "@/lib/runtime-client";
 import {
+  type RuntimeSessionRecord,
+  type RuntimeSessionUserSummary,
   type RuntimeTeamRecord,
   type RuntimeTeamSummaryEntry,
 } from "@/lib/runtime-api";
@@ -53,10 +55,16 @@ type WorkspaceShellProps = {
   runtimeTeamsRefreshing?: boolean;
   runtimeTeamSummaries: RuntimeTeamSummaryEntry[];
   runtimeSessionsError: string | null;
+  runtimeSessions: RuntimeSessionRecord[];
   runtimeSessionsLoading: boolean;
   runtimeSessionsRefreshing?: boolean;
   runtimeSessionsSummary: RuntimeSessionsSummary;
+  runtimeSessionDefaultUserId?: string;
+  runtimeSessionUsers: RuntimeSessionUserSummary[];
+  runtimeSessionUsersError: string | null;
+  runtimeSessionUsersLoading: boolean;
   runtimeClient: RuntimeClientIdentity;
+  selectedRuntimeSessionUserId: string;
   selectedThread: Thread;
   selectedArtifact: Artifact | null;
   selectedArtifactId: string | null;
@@ -69,6 +77,7 @@ type WorkspaceShellProps = {
   onSelectArtifact: (artifactId: string) => void;
   onSelectThread: (threadId: string) => void;
   onRefreshRuntimeTeams?: () => void;
+  onSelectRuntimeSessionUser: (userId: string) => void;
   onResetRuntimeClientIdentity: () => void;
   onStopResponding: () => void;
   onSubmit: () => void;
@@ -87,10 +96,16 @@ export function WorkspaceShell({
   runtimeTeamsRefreshing,
   runtimeTeamSummaries,
   runtimeSessionsError,
+  runtimeSessions,
   runtimeSessionsLoading,
   runtimeSessionsRefreshing,
   runtimeSessionsSummary,
+  runtimeSessionDefaultUserId,
+  runtimeSessionUsers,
+  runtimeSessionUsersError,
+  runtimeSessionUsersLoading,
   runtimeClient,
+  selectedRuntimeSessionUserId,
   selectedThread,
   selectedArtifact,
   selectedArtifactId,
@@ -103,6 +118,7 @@ export function WorkspaceShell({
   onSelectArtifact,
   onSelectThread,
   onRefreshRuntimeTeams,
+  onSelectRuntimeSessionUser,
   onResetRuntimeClientIdentity,
   onStopResponding,
   onSubmit,
@@ -232,9 +248,16 @@ export function WorkspaceShell({
           runtimeTeamsRefreshing={runtimeTeamsRefreshing}
           runtimeTeamSummaries={runtimeTeamSummaries}
           runtimeSessionsError={runtimeSessionsError}
+          runtimeSessions={runtimeSessions}
           runtimeSessionsLoading={runtimeSessionsLoading}
           runtimeSessionsRefreshing={runtimeSessionsRefreshing}
           runtimeSessionsSummary={runtimeSessionsSummary}
+          runtimeSessionDefaultUserId={runtimeSessionDefaultUserId}
+          runtimeSessionUsers={runtimeSessionUsers}
+          runtimeSessionUsersError={runtimeSessionUsersError}
+          runtimeSessionUsersLoading={runtimeSessionUsersLoading}
+          selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
+          onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
           onRefreshRuntimeTeams={onRefreshRuntimeTeams}
           threads={threads}
           selectedThreadId={selectedThread.id}
@@ -271,7 +294,7 @@ export function WorkspaceShell({
             <div
               className={cn(
                 "relative flex h-full min-h-0 w-full flex-col",
-                isNewThread ? "max-w-[48rem]" : "max-w-[72rem]",
+                isNewThread ? "max-w-[48rem]" : null,
               )}
             >
               {!isNewThread ? (

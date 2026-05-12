@@ -3,6 +3,7 @@ import {
   ChevronDownIcon,
   Clock3Icon,
   CompassIcon,
+  FolderIcon,
   HistoryIcon,
   LoaderCircleIcon,
   MessageSquarePlusIcon,
@@ -11,6 +12,7 @@ import {
   Settings2Icon,
   SparklesIcon,
   TriangleAlertIcon,
+  UserIcon,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -26,6 +28,7 @@ import { Link } from "react-router-dom";
 
 import {
   describeThreadSession,
+  groupRuntimeSessionsByDirectory,
   summarizeSidebarSessions,
   type ThreadSessionDescriptor,
 } from "@/components/workspace/workspace-sidebar-shared";
@@ -36,6 +39,8 @@ import { type Thread } from "@/data/mock";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
 import {
+  type RuntimeSessionRecord,
+  type RuntimeSessionUserSummary,
   type RuntimeTeamRecord,
   type RuntimeTeamSummaryEntry,
 } from "@/lib/runtime-api";
@@ -57,10 +62,17 @@ type WorkspaceSidebarProps = {
   runtimeTeamsRefreshing?: boolean;
   runtimeTeamSummaries: RuntimeTeamSummaryEntry[];
   runtimeSessionsError: string | null;
+  runtimeSessions: RuntimeSessionRecord[];
   runtimeSessionsLoading: boolean;
   runtimeSessionsRefreshing?: boolean;
   runtimeSessionsSummary: RuntimeSessionsSummary;
+  runtimeSessionDefaultUserId?: string;
+  runtimeSessionUsers: RuntimeSessionUserSummary[];
+  runtimeSessionUsersError: string | null;
+  runtimeSessionUsersLoading: boolean;
+  selectedRuntimeSessionUserId: string;
   onRefreshRuntimeTeams?: () => void;
+  onSelectRuntimeSessionUser: (userId: string) => void;
   threads: Thread[];
   selectedThreadId: string;
   onSelectThread: (threadId: string) => void;
@@ -234,10 +246,17 @@ export function WorkspaceSidebar({
   runtimeTeamsRefreshing,
   runtimeTeamSummaries,
   runtimeSessionsError,
+  runtimeSessions,
   runtimeSessionsLoading,
   runtimeSessionsRefreshing,
   runtimeSessionsSummary,
+  runtimeSessionDefaultUserId,
+  runtimeSessionUsers,
+  runtimeSessionUsersError,
+  runtimeSessionUsersLoading,
+  selectedRuntimeSessionUserId,
   onRefreshRuntimeTeams,
+  onSelectRuntimeSessionUser,
   threads,
   selectedThreadId,
   onSelectThread,
@@ -251,6 +270,9 @@ export function WorkspaceSidebar({
     sessions: true,
     runtime: true,
   });
+  const [openSessionDirectories, setOpenSessionDirectories] = useState<
+    Record<string, boolean>
+  >({});
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const filteredThreads = deferredQuery
     ? threads.filter((thread) => {
@@ -281,12 +303,71 @@ export function WorkspaceSidebar({
         ),
     [filteredThreads],
   );
+  const sessionUserMenuItems = useMemo(() => {
+    const seen = new Set<string>();
+    const items = runtimeSessionUsers
+      .map((user) => {
+        const userId = user.user_id.trim();
+        if (!userId || seen.has(userId)) {
+          return null;
+        }
+        seen.add(userId);
+        const displayName = user.display_name?.trim() || userId;
+        const sessionCount = user.session_count ?? 0;
+        const isDefaultUser = runtimeSessionDefaultUserId?.trim() === userId;
+        return {
+          userId,
+          displayName,
+          isDefaultUser,
+          sessionCount,
+        };
+      })
+      .filter(Boolean) as Array<{
+        displayName: string;
+        isDefaultUser: boolean;
+        sessionCount: number;
+        userId: string;
+      }>;
+
+    const selectedUserId = selectedRuntimeSessionUserId.trim();
+    if (selectedUserId && !seen.has(selectedUserId)) {
+      items.unshift({
+        userId: selectedUserId,
+        displayName: selectedUserId,
+        isDefaultUser: runtimeSessionDefaultUserId?.trim() === selectedUserId,
+        sessionCount: runtimeSessionsSummary.totalCount,
+      });
+    }
+    return items;
+  }, [
+    runtimeSessionDefaultUserId,
+    runtimeSessionUsers,
+    runtimeSessionsSummary.totalCount,
+    selectedRuntimeSessionUserId,
+  ]);
+  const sessionDirectoryGroups = useMemo(
+    () => groupRuntimeSessionsByDirectory(runtimeSessions),
+    [runtimeSessions],
+  );
+  const sessionThreadById = useMemo(() => {
+    const byId = new Map<string, Thread>();
+    for (const thread of sessionThreads) {
+      if (thread.sessionId) {
+        byId.set(thread.sessionId, thread);
+      }
+      byId.set(thread.id, thread);
+    }
+    return byId;
+  }, [sessionThreads]);
   const sessionRailSummary = useMemo(() => summarizeSidebarSessions(threads), [threads]);
   const showSessionsSection =
     sessionThreads.length > 0 ||
     runtimeSessionsLoading ||
     runtimeSessionsRefreshing ||
     Boolean(runtimeSessionsError) ||
+    runtimeSessionUsersLoading ||
+    Boolean(runtimeSessionUsersError) ||
+    sessionUserMenuItems.length > 0 ||
     Boolean(deferredQuery);
   const liveTeamCount = runtimeTeams.filter(
     (team) => (team.status || "").trim().toLowerCase() === "active",
@@ -330,10 +411,47 @@ export function WorkspaceSidebar({
     };
   }, [deferredQuery]);
 
+  useEffect(() => {
+    setOpenSessionDirectories((current) => {
+      const knownKeys = new Set(sessionDirectoryGroups.map((group) => group.key));
+      const next: Record<string, boolean> = {};
+      let changed = false;
+
+      for (const [key, value] of Object.entries(current)) {
+        if (knownKeys.has(key)) {
+          next[key] = value;
+        } else {
+          changed = true;
+        }
+      }
+
+      sessionDirectoryGroups.forEach((group, index) => {
+        if (typeof next[group.key] === "boolean") {
+          return;
+        }
+        const containsSelectedThread = group.sessions.some((session) => {
+          const thread = sessionThreadById.get(session.id);
+          return thread?.id === selectedThreadId || thread?.sessionId === selectedThreadId;
+        });
+        next[group.key] = containsSelectedThread || index === 0;
+        changed = true;
+      });
+
+      return changed ? next : current;
+    });
+  }, [selectedThreadId, sessionDirectoryGroups, sessionThreadById]);
+
   function toggleSection(section: SidebarSectionId) {
     setOpenSections((current) => ({
       ...current,
       [section]: !current[section],
+    }));
+  }
+
+  function toggleSessionDirectory(directoryKey: string) {
+    setOpenSessionDirectories((current) => ({
+      ...current,
+      [directoryKey]: !current[directoryKey],
     }));
   }
 
@@ -494,46 +612,177 @@ export function WorkspaceSidebar({
               isOpen={openSections.sessions}
               onToggle={toggleSection}
             >
-              <div className="space-y-1">
-                {sessionThreads.length > 0 ? (
-                  sessionThreads.map((thread) => {
-                    const isActive = thread.id === selectedThreadId;
-                    const sessionDescriptor = describeThreadSession(
-                      thread,
-                      threadSessionDetails,
-                    );
-                    const sessionStatusIcon = getSessionStatusIcon(
-                      sessionDescriptor.label,
-                      sidebarLabels,
-                    );
-
-                    return (
-                      <button
-                        key={`recoverable-${thread.id}`}
-                        type="button"
-                        title={`${thread.title} · ${sessionStatusIcon.label}`}
-                        onClick={() => onSelectThread(thread.id)}
-                        className={cn(
-                          "flex w-full items-center gap-2.5 rounded-[0.8rem] border px-2.5 py-2 text-left transition",
-                          isActive
-                            ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)]"
-                            : "border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
-                        )}
-                      >
-                        <div className="min-w-0 flex-1 truncate text-base font-semibold text-[var(--foreground)]">
-                          {thread.title}
-                        </div>
-                        <SidebarStateIcon spec={sessionStatusIcon} />
-                      </button>
-                    );
-                  })
-                ) : (
-                  <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
-                    {deferredQuery
-                      ? t("sidebar.emptySessions.search")
-                      : t("sidebar.emptySessions.default")}
+              <div className="space-y-2">
+                {runtimeSessionUsersLoading && sessionUserMenuItems.length === 0 ? (
+                  <div className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-1 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    <LoaderCircleIcon size={12} className="animate-spin" />
+                    {t("sidebar.sessionUsersLoading")}
                   </div>
-                )}
+                ) : null}
+                {runtimeSessionUsersError ? (
+                  <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-[var(--muted-foreground)]">
+                    {runtimeSessionUsersError}
+                  </div>
+                ) : null}
+                <div className="space-y-1.5">
+                  {sessionUserMenuItems.length > 0 ? (
+                    sessionUserMenuItems.map((user) => {
+                      const isSelectedUser =
+                        user.userId === selectedRuntimeSessionUserId.trim();
+
+                      return (
+                        <div key={user.userId} className="space-y-1">
+                          <button
+                            type="button"
+                            title={user.userId}
+                            onClick={() => onSelectRuntimeSessionUser(user.userId)}
+                            className={cn(
+                              "flex w-full items-center gap-2 rounded-[0.8rem] border px-2.5 py-2 text-left transition",
+                              isSelectedUser
+                                ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)]"
+                                : "border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+                            )}
+                          >
+                            <UserIcon
+                              size={14}
+                              className="shrink-0 text-[var(--accent-secondary)]"
+                            />
+                            <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--foreground)]">
+                              {user.displayName}
+                            </span>
+                            {user.isDefaultUser ? (
+                              <span className="shrink-0 rounded-[0.55rem] border border-[var(--border)] bg-[var(--surface-soft)] px-1.5 py-0.5 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                                {t("sidebar.sessionUserDefault")}
+                              </span>
+                            ) : null}
+                            <Badge>{user.sessionCount}</Badge>
+                            <ChevronDownIcon
+                              size={14}
+                              className={cn(
+                                "shrink-0 text-[var(--muted-foreground)] transition-transform duration-200",
+                                isSelectedUser ? "rotate-0" : "-rotate-90",
+                              )}
+                            />
+                          </button>
+
+                          {isSelectedUser ? (
+                            <div className="ml-3 space-y-1 border-l border-[var(--border)] pl-2">
+                              {sessionDirectoryGroups.length > 0 ? (
+                                sessionDirectoryGroups.map((group) => {
+                                  const isDirectoryOpen =
+                                    openSessionDirectories[group.key] ?? false;
+
+                                  return (
+                                    <div key={group.key} className="space-y-1">
+                                      <button
+                                        type="button"
+                                        title={group.fullPath || group.label}
+                                        onClick={() => toggleSessionDirectory(group.key)}
+                                        className="flex w-full items-center gap-2 rounded-[0.72rem] px-2 py-1.5 text-left text-[var(--muted-foreground)] transition hover:bg-[var(--surface-softer)] hover:text-[var(--foreground)]"
+                                      >
+                                        <FolderIcon
+                                          size={13}
+                                          className="shrink-0 text-[var(--accent-primary)]"
+                                        />
+                                        <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                                          {group.fullPath
+                                            ? group.label
+                                            : t("sidebar.sessionDirectoryUnscoped")}
+                                        </span>
+                                        <span className="shrink-0 app-text-10 text-[var(--muted-foreground)]">
+                                          {group.sessions.length}
+                                        </span>
+                                        <ChevronDownIcon
+                                          size={13}
+                                          className={cn(
+                                            "shrink-0 transition-transform duration-200",
+                                            isDirectoryOpen
+                                              ? "rotate-0"
+                                              : "-rotate-90",
+                                          )}
+                                        />
+                                      </button>
+
+                                      {isDirectoryOpen ? (
+                                        <div className="ml-4 space-y-1">
+                                          {group.sessions.map((session) => {
+                                            const thread =
+                                              sessionThreadById.get(session.id);
+                                            const title =
+                                              thread?.title ||
+                                              session.metadata?.title?.trim() ||
+                                              session.id;
+                                            const isActive =
+                                              thread?.id === selectedThreadId ||
+                                              thread?.sessionId === selectedThreadId;
+                                            const sessionStatusIcon = getSessionStatusIcon(
+                                              describeThreadSession(
+                                                thread ?? {
+                                                  id: session.id,
+                                                  title,
+                                                  summary:
+                                                    session.metadata?.summary ?? "",
+                                                  updatedAt:
+                                                    session.updatedAt ||
+                                                    session.createdAt ||
+                                                    "",
+                                                  status: "active",
+                                                  sessionId: session.id,
+                                                  tags: ["runtime-session"],
+                                                  prompts: [],
+                                                  messages: [],
+                                                  artifacts: [],
+                                                },
+                                                threadSessionDetails,
+                                              ).label,
+                                              sidebarLabels,
+                                            );
+
+                                            return (
+                                              <button
+                                                key={`recoverable-${session.id}`}
+                                                type="button"
+                                                title={`${title} · ${sessionStatusIcon.label}`}
+                                                onClick={() => onSelectThread(thread?.id ?? session.id)}
+                                                className={cn(
+                                                  "flex w-full items-center gap-2 rounded-[0.72rem] border px-2 py-1.5 text-left transition",
+                                                  isActive
+                                                    ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)]"
+                                                    : "border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+                                                )}
+                                              >
+                                                <div className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--foreground)]">
+                                                  {title}
+                                                </div>
+                                                <SidebarStateIcon spec={sessionStatusIcon} />
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  );
+                                })
+                              ) : (
+                                <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+                                  {deferredQuery
+                                    ? t("sidebar.emptySessions.search")
+                                    : t("sidebar.emptySessions.default")}
+                                </div>
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })
+                  ) : !runtimeSessionUsersLoading ? (
+                    <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+                      {deferredQuery
+                        ? t("sidebar.emptySessions.search")
+                        : t("sidebar.emptySessions.default")}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </SidebarSection>
           ) : null}

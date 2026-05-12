@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { Thread } from "@/data/mock";
 import {
   describeThreadSession,
+  groupRuntimeSessionsByDirectory,
+  resolveRuntimeSessionDirectory,
   summarizeSidebarSessions,
 } from "@/components/workspace/workspace-sidebar-shared";
 
@@ -96,5 +98,56 @@ describe("workspace sidebar session helpers", () => {
       "thread-live",
       "thread-error",
     ]);
+  });
+
+  it("groups runtime sessions by workspace directory", () => {
+    const groups = groupRuntimeSessionsByDirectory([
+      {
+        id: "session-workspace-new",
+        metadata: {
+          context: {
+            workspace_path: "E:\\projects\\ai\\runtime",
+          },
+        },
+        updatedAt: "2026-03-31T11:00:00Z",
+      },
+      {
+        id: "session-other",
+        metadata: {
+          context: {
+            workspacePath: "E:/projects/ai/other",
+          },
+        },
+        updatedAt: "2026-03-31T10:00:00Z",
+      },
+      {
+        id: "session-workspace-old",
+        metadata: {
+          context: {
+            workspace_path: "E:/projects/ai/runtime/",
+          },
+        },
+        updatedAt: "2026-03-31T09:00:00Z",
+      },
+    ]);
+
+    expect(groups.map((group) => group.label)).toEqual(["runtime", "other"]);
+    expect(groups[0]?.fullPath).toBe("E:/projects/ai/runtime");
+    expect(groups[0]?.sessions.map((session) => session.id)).toEqual([
+      "session-workspace-new",
+      "session-workspace-old",
+    ]);
+  });
+
+  it("uses an unscoped directory bucket when session metadata has no path", () => {
+    expect(
+      resolveRuntimeSessionDirectory({
+        id: "session-unscoped",
+        metadata: {},
+      }),
+    ).toMatchObject({
+      label: "Unscoped sessions",
+      fullPath: "",
+    });
   });
 });

@@ -314,6 +314,12 @@ export const zhCN = {
         sessions: "会话",
         runtime: "运行时概览",
       },
+      sessionUserSelect: "会话用户",
+      sessionUserOption: "{{user}} · {{count}} 个会话",
+      sessionUserOptionDefault: "{{user}} · {{count}} 个会话 · 默认",
+      sessionUserDefault: "默认",
+      sessionUsersLoading: "加载用户",
+      sessionDirectoryUnscoped: "未绑定目录",
       threadStatuses: {
         review: "等待复核",
         draft: "草稿线程",

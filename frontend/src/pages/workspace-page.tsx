@@ -48,6 +48,12 @@ export function WorkspacePage() {
     runtimeSessionsLoading,
     runtimeSessionsRefreshing,
     runtimeSessionsSummary,
+    runtimeSessionDefaultUserId,
+    runtimeSessionUsers,
+    runtimeSessionUsersError,
+    runtimeSessionUsersLoading,
+    selectedRuntimeSessionUserId,
+    selectRuntimeSessionUserId,
   } = useRuntimeSessionsData({
     pinnedSessionId: routeSessionId,
     userId: runtimeClient.userId,
@@ -84,7 +90,7 @@ export function WorkspacePage() {
     selectedThread,
     setSelectedArtifactId,
     setThreads,
-    userId: runtimeClient.userId,
+    userId: selectedRuntimeSessionUserId || runtimeClient.userId,
     workspacePath: runtimeClient.workspacePath,
   });
 
@@ -116,10 +122,16 @@ export function WorkspacePage() {
       runtimeTeamsRefreshing={runtimeTeamsRefreshing}
       runtimeTeamSummaries={runtimeTeamSummaries}
       runtimeSessionsError={runtimeSessionsError}
+      runtimeSessions={runtimeSessions}
       runtimeSessionsLoading={runtimeSessionsLoading}
       runtimeSessionsRefreshing={runtimeSessionsRefreshing}
       runtimeSessionsSummary={runtimeSessionsSummary}
+      runtimeSessionDefaultUserId={runtimeSessionDefaultUserId}
+      runtimeSessionUsers={runtimeSessionUsers}
+      runtimeSessionUsersError={runtimeSessionUsersError}
+      runtimeSessionUsersLoading={runtimeSessionUsersLoading}
       runtimeClient={runtimeClient}
+      selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
       selectedThread={selectedThread}
       selectedArtifact={selectedArtifact}
       selectedArtifactId={selectedArtifactId}
@@ -132,6 +144,7 @@ export function WorkspacePage() {
       onSelectArtifact={handleSelectArtifact}
       onSelectThread={handleSelectThread}
       onRefreshRuntimeTeams={handleRefreshRuntimeTeams}
+      onSelectRuntimeSessionUser={selectRuntimeSessionUserId}
       onResetRuntimeClientIdentity={handleResetRuntimeClientIdentity}
       onStopResponding={stopResponding}
       onSubmit={submitPrompt}

@@ -127,6 +127,7 @@ export type RuntimeSessionRecord = {
   state?: string;
   metadata?: {
     title?: string;
+    titleSource?: string;
     summary?: string;
     totalTurns?: number;
     lastAgent?: string;
@@ -234,6 +235,27 @@ export type RuntimeSessionsResponse = {
 
 export type RuntimeSessionsQuery = {
   userId?: string;
+};
+
+export type RuntimeSessionUserSummary = {
+  user_id: string;
+  display_name?: string;
+  source?: string;
+  session_count: number;
+  active_count?: number;
+  idle_count?: number;
+  closed_count?: number;
+  archived_count?: number;
+  recoverable_count?: number;
+  latest_updated_at?: string;
+};
+
+export type RuntimeSessionUsersResponse = {
+  users: RuntimeSessionUserSummary[];
+  count: number;
+  total_count?: number;
+  default_user_id?: string;
+  limit?: number;
 };
 
 export type RuntimeSessionCheckpointsQuery = {

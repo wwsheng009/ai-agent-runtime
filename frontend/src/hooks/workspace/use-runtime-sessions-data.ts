@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   getRuntimeSession,
+  listRuntimeSessionUsers,
   listRuntimeSessions,
   type RuntimeSessionRecord,
+  type RuntimeSessionUserSummary,
 } from "@/lib/runtime-api";
 import { getRuntimeClientIdentity } from "@/lib/runtime-client";
 
@@ -28,6 +30,8 @@ type StoredRuntimeSessionsPayload = {
 };
 
 const runtimeSessionsStorageKeyPrefix = "workspace.runtime.sessions";
+const runtimeSessionsSelectedUserStorageKey =
+  "workspace.runtime.sessions.selectedUser";
 const runtimeSessionsRetryDelaysMs = [1200, 2500, 5000, 8000];
 
 function getBrowserStorage() {
@@ -45,6 +49,32 @@ export function buildStoredRuntimeSessionsKey(userId: string) {
   }
 
   return `${runtimeSessionsStorageKeyPrefix}:${encodeURIComponent(resolvedUserId)}`;
+}
+
+export function readStoredRuntimeSessionUserId(
+  storage: Storage | null | undefined,
+) {
+  if (!storage) {
+    return "";
+  }
+
+  try {
+    return storage.getItem(runtimeSessionsSelectedUserStorageKey)?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function writeStoredRuntimeSessionUserId(
+  storage: Storage | null | undefined,
+  userId: string,
+) {
+  const resolvedUserId = userId.trim();
+  if (!storage || !resolvedUserId) {
+    return;
+  }
+
+  storage.setItem(runtimeSessionsSelectedUserStorageKey, resolvedUserId);
 }
 
 export function readStoredRuntimeSessions(
@@ -142,6 +172,65 @@ export function normalizeRuntimeSessions(
   return Array.isArray(sessions) ? sessions : [];
 }
 
+export function normalizeRuntimeSessionUsers(
+  users: RuntimeSessionUserSummary[] | null | undefined,
+) {
+  return Array.isArray(users)
+    ? users.filter((user) => user.user_id?.trim())
+    : [];
+}
+
+export function chooseRuntimeSessionUserId(
+  users: RuntimeSessionUserSummary[],
+  defaultUserId: string | null | undefined,
+  currentUserId: string | null | undefined,
+  fallbackUserId: string,
+) {
+  const normalizedUsers = normalizeRuntimeSessionUsers(users);
+  const userIds = new Set(normalizedUsers.map((user) => user.user_id.trim()));
+  const current = currentUserId?.trim() ?? "";
+  if (current && userIds.has(current)) {
+    return current;
+  }
+
+  const defaultUser = defaultUserId?.trim() ?? "";
+  if (
+    defaultUser &&
+    normalizedUsers.some(
+      (user) => user.user_id.trim() === defaultUser && (user.session_count ?? 0) > 0,
+    )
+  ) {
+    return defaultUser;
+  }
+
+  const withSessions = normalizedUsers.filter((user) => (user.session_count ?? 0) > 0);
+  if (withSessions.length > 0) {
+    return [...withSessions].sort((left, right) => {
+      const leftTime = Date.parse(left.latest_updated_at ?? "");
+      const rightTime = Date.parse(right.latest_updated_at ?? "");
+      if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+        return rightTime - leftTime;
+      }
+      if (Number.isFinite(leftTime) && !Number.isFinite(rightTime)) {
+        return -1;
+      }
+      if (!Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
+        return 1;
+      }
+      if ((left.session_count ?? 0) !== (right.session_count ?? 0)) {
+        return (right.session_count ?? 0) - (left.session_count ?? 0);
+      }
+      return left.user_id.localeCompare(right.user_id);
+    })[0]?.user_id.trim() ?? fallbackUserId;
+  }
+
+  if (defaultUser) {
+    return defaultUser;
+  }
+
+  return fallbackUserId.trim();
+}
+
 export function mergePinnedRuntimeSession(
   sessions: RuntimeSessionRecord[],
   pinnedSession: RuntimeSessionRecord | null | undefined,
@@ -186,17 +275,29 @@ export function useRuntimeSessionsData({
   pinnedSessionId,
   userId,
 }: RuntimeSessionsDataOptions = {}) {
-  const resolvedUserId = userId?.trim() || getRuntimeClientIdentity().userId;
+  const fallbackUserId = userId?.trim() || getRuntimeClientIdentity().userId;
+  const initialSelectedUserId =
+    readStoredRuntimeSessionUserId(getBrowserStorage()) || fallbackUserId;
   const resolvedPinnedSessionId = pinnedSessionId?.trim();
   const initialStoredSessions = readStoredRuntimeSessions(
     getBrowserStorage(),
-    resolvedUserId,
+    initialSelectedUserId,
   );
   const [reloadToken, setReloadToken] = useState(0);
   const retryTimeoutRef = useRef<number | null>(null);
   const retryAttemptRef = useRef(0);
   const runtimeSessionsRef = useRef<RuntimeSessionRecord[]>(initialStoredSessions);
   const runtimeSessionsRefreshingRef = useRef(false);
+  const sessionUsersRef = useRef<RuntimeSessionUserSummary[]>([]);
+  const [runtimeSessionUsers, setRuntimeSessionUsers] = useState<
+    RuntimeSessionUserSummary[]
+  >([]);
+  const [runtimeSessionUsersError, setRuntimeSessionUsersError] =
+    useState<string | null>(null);
+  const [runtimeSessionUsersLoading, setRuntimeSessionUsersLoading] = useState(true);
+  const [runtimeSessionDefaultUserId, setRuntimeSessionDefaultUserId] = useState("");
+  const [selectedRuntimeSessionUserId, setSelectedRuntimeSessionUserIdState] =
+    useState(initialSelectedUserId);
   const [runtimeSessions, setRuntimeSessions] = useState<RuntimeSessionRecord[]>(
     initialStoredSessions,
   );
@@ -223,9 +324,65 @@ export function useRuntimeSessionsData({
   }, [runtimeSessionsRefreshing]);
 
   useEffect(() => {
+    sessionUsersRef.current = runtimeSessionUsers;
+  }, [runtimeSessionUsers]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRuntimeSessionUsersLoading(sessionUsersRef.current.length === 0);
+
+    void (async () => {
+      try {
+        const response = await listRuntimeSessionUsers();
+        if (cancelled) {
+          return;
+        }
+        const users = normalizeRuntimeSessionUsers(response.users);
+        const defaultUserId = response.default_user_id?.trim() ?? "";
+        setRuntimeSessionUsers(users);
+        setRuntimeSessionDefaultUserId(defaultUserId);
+        setRuntimeSessionUsersError(null);
+        setSelectedRuntimeSessionUserIdState((currentUserId) => {
+          const nextUserId = chooseRuntimeSessionUserId(
+            users,
+            defaultUserId,
+            currentUserId,
+            fallbackUserId,
+          );
+          if (nextUserId) {
+            writeStoredRuntimeSessionUserId(getBrowserStorage(), nextUserId);
+          }
+          return nextUserId || currentUserId || fallbackUserId;
+        });
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setRuntimeSessionUsersError(
+          error instanceof Error ? error.message : "failed to load runtime session users",
+        );
+        setSelectedRuntimeSessionUserIdState((currentUserId) =>
+          currentUserId.trim() || fallbackUserId,
+        );
+      } finally {
+        if (!cancelled) {
+          setRuntimeSessionUsersLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fallbackUserId, reloadToken]);
+
+  useEffect(() => {
+    if (!selectedRuntimeSessionUserId.trim()) {
+      return;
+    }
     const cachedSessions = readStoredRuntimeSessions(
       getBrowserStorage(),
-      resolvedUserId,
+      selectedRuntimeSessionUserId,
     );
     setRuntimeSessions(cachedSessions);
     setRuntimeSessionsLoading(cachedSessions.length === 0);
@@ -236,10 +393,18 @@ export function useRuntimeSessionsData({
     return () => {
       clearPendingRetry();
     };
-  }, [resolvedUserId]);
+  }, [selectedRuntimeSessionUserId]);
 
   useEffect(() => {
     let cancelled = false;
+    const userIdForRequest = selectedRuntimeSessionUserId.trim();
+    if (!userIdForRequest) {
+      setRuntimeSessions([]);
+      setRuntimeSessionsLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     void (async () => {
       if (!runtimeSessionsRefreshingRef.current) {
@@ -248,14 +413,14 @@ export function useRuntimeSessionsData({
 
       try {
         const sessions = await loadRuntimeSessions(
-          resolvedUserId,
+          userIdForRequest,
           resolvedPinnedSessionId,
         );
         if (cancelled) {
           return;
         }
         setRuntimeSessions(sessions);
-        writeStoredRuntimeSessions(getBrowserStorage(), resolvedUserId, sessions);
+        writeStoredRuntimeSessions(getBrowserStorage(), userIdForRequest, sessions);
         setRuntimeSessionsError(null);
         retryAttemptRef.current = 0;
         clearPendingRetry();
@@ -290,8 +455,21 @@ export function useRuntimeSessionsData({
   }, [
     reloadToken,
     resolvedPinnedSessionId,
-    resolvedUserId,
+    selectedRuntimeSessionUserId,
   ]);
+
+  function selectRuntimeSessionUserId(userId: string) {
+    const nextUserId = userId.trim();
+    if (!nextUserId) {
+      return;
+    }
+    writeStoredRuntimeSessionUserId(getBrowserStorage(), nextUserId);
+    clearPendingRetry();
+    retryAttemptRef.current = 0;
+    setRuntimeSessionsRefreshing(true);
+    setRuntimeSessionsError(null);
+    setSelectedRuntimeSessionUserIdState(nextUserId);
+  }
 
   function refreshRuntimeSessions() {
     clearPendingRetry();
@@ -308,5 +486,11 @@ export function useRuntimeSessionsData({
     runtimeSessionsLoading,
     runtimeSessionsRefreshing,
     runtimeSessionsSummary,
+    runtimeSessionDefaultUserId,
+    runtimeSessionUsers,
+    runtimeSessionUsersError,
+    runtimeSessionUsersLoading,
+    selectedRuntimeSessionUserId,
+    selectRuntimeSessionUserId,
   };
 }

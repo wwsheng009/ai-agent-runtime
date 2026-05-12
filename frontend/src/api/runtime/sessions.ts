@@ -7,6 +7,7 @@ import type {
   RuntimeSessionCheckpointsQuery,
   RuntimeSessionCheckpointsResponse,
   RuntimeSessionRecord,
+  RuntimeSessionUsersResponse,
   RuntimeSessionsQuery,
   RuntimeSessionsResponse,
   SessionHistoryResponse,
@@ -54,6 +55,17 @@ export async function listRuntimeSessions(
     buildRuntimeUrlWithQuery("/api/runtime/sessions", {
       user_id: query.userId,
     }),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
+export async function listRuntimeSessionUsers(): Promise<RuntimeSessionUsersResponse> {
+  return fetchRuntimeJson<RuntimeSessionUsersResponse>(
+    buildRuntimeUrl("/api/runtime/sessions/users"),
     {
       headers: {
         Accept: "application/json",

@@ -1,4 +1,5 @@
 import { type Thread } from "@/data/mock";
+import { type RuntimeSessionRecord } from "@/types/runtime";
 
 export type ThreadSessionDescriptor = {
   detail: string;
@@ -20,6 +21,16 @@ export type SessionRailSummary = {
   recentRecoverableThreads: Thread[];
   restoredCount: number;
 };
+
+export type RuntimeSessionDirectoryGroup = {
+  key: string;
+  label: string;
+  fullPath: string;
+  sessions: RuntimeSessionRecord[];
+  latestUpdatedAt?: string;
+};
+
+const unknownRuntimeSessionDirectory = "__runtime-session-directory-unknown__";
 
 const defaultThreadSessionDetailLabels: ThreadSessionDetailLabels = {
   pending: "No runtime session attached yet.",
@@ -78,4 +89,125 @@ export function summarizeSidebarSessions(threads: Thread[]): SessionRailSummary 
       .slice(0, 3),
     restoredCount: restoredThreads.length,
   };
+}
+
+export function groupRuntimeSessionsByDirectory(
+  sessions: RuntimeSessionRecord[],
+): RuntimeSessionDirectoryGroup[] {
+  const groups = new Map<string, RuntimeSessionDirectoryGroup>();
+
+  for (const session of sessions) {
+    const directory = resolveRuntimeSessionDirectory(session);
+    const group = groups.get(directory.key) ?? {
+      key: directory.key,
+      label: directory.label,
+      fullPath: directory.fullPath,
+      sessions: [],
+      latestUpdatedAt: undefined,
+    };
+    group.sessions.push(session);
+    const updatedAt = session.updatedAt || session.createdAt;
+    if (
+      updatedAt &&
+      (!group.latestUpdatedAt ||
+        Date.parse(updatedAt) > Date.parse(group.latestUpdatedAt))
+    ) {
+      group.latestUpdatedAt = updatedAt;
+    }
+    groups.set(directory.key, group);
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      sessions: [...group.sessions].sort(compareRuntimeSessionsByUpdated),
+    }))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.latestUpdatedAt ?? "");
+      const rightTime = Date.parse(right.latestUpdatedAt ?? "");
+      if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+        return rightTime - leftTime;
+      }
+      if (Number.isFinite(leftTime) && !Number.isFinite(rightTime)) {
+        return -1;
+      }
+      if (!Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
+        return 1;
+      }
+      return left.label.localeCompare(right.label);
+    });
+}
+
+export function resolveRuntimeSessionDirectory(session: RuntimeSessionRecord) {
+  const rawPath = readRuntimeSessionDirectoryPath(session);
+  if (!rawPath) {
+    return {
+      key: unknownRuntimeSessionDirectory,
+      label: "Unscoped sessions",
+      fullPath: "",
+    };
+  }
+
+  const normalizedPath = normalizeRuntimeDirectoryPath(rawPath);
+  return {
+    key: normalizedPath.toLowerCase(),
+    label: runtimeDirectoryBaseName(normalizedPath),
+    fullPath: normalizedPath,
+  };
+}
+
+function readRuntimeSessionDirectoryPath(session: RuntimeSessionRecord) {
+  const context = session.metadata?.context;
+  if (!context || typeof context !== "object") {
+    return "";
+  }
+
+  return readFirstContextText(
+    context,
+    "workspace_path",
+    "workspacePath",
+    "cwd",
+    "workdir",
+    "working_dir",
+    "profile_root",
+    "profileRoot",
+    "aicli_profile_root",
+  );
+}
+
+function readFirstContextText(
+  context: Record<string, unknown>,
+  ...keys: string[]
+) {
+  for (const key of keys) {
+    const value = context[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
+function normalizeRuntimeDirectoryPath(value: string) {
+  return value.trim().replace(/\\/g, "/").replace(/\/+$/, "") || value.trim();
+}
+
+function runtimeDirectoryBaseName(value: string) {
+  const normalized = normalizeRuntimeDirectoryPath(value);
+  if (normalized === "/" || /^[A-Za-z]:$/.test(normalized)) {
+    return normalized;
+  }
+  return normalized.split("/").filter(Boolean).pop() || normalized;
+}
+
+function compareRuntimeSessionsByUpdated(
+  left: RuntimeSessionRecord,
+  right: RuntimeSessionRecord,
+) {
+  const leftTime = Date.parse(left.updatedAt || left.createdAt || "");
+  const rightTime = Date.parse(right.updatedAt || right.createdAt || "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  return left.id.localeCompare(right.id);
 }
