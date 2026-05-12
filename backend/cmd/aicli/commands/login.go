@@ -36,6 +36,9 @@ func NewLoginCommand(configProvider func() *config.Config) *cobra.Command {
 	cmd.Flags().Bool("set-default", false, "登录成功后同步更新 providers.default_provider")
 	cmd.Flags().Bool("dry-run", false, "只校验凭证和 models，不写配置")
 	cmd.Flags().BoolP("yes", "y", false, "跳过确认；不会跳过 models 校验")
+	cmd.Flags().String("model-cards", "", "额外模型卡片 catalog 文件路径")
+	cmd.Flags().Bool("no-model-cards", false, "禁用模型卡片元数据补齐")
+	cmd.Flags().Bool("model-cards-strict", false, "模型卡片加载或校验失败时中止登录")
 	cmd.Flags().String("auth-ref", "", "OAuth auth store 引用名")
 	cmd.Flags().String("oauth-issuer", "", "Codex OAuth issuer（默认 https://auth.openai.com）")
 	cmd.Flags().String("oauth-client-id", "", "Codex OAuth client id")
@@ -58,23 +61,26 @@ func HandleLogin(cmd *cobra.Command, configProvider func() *config.Config) {
 	timeoutSec, _ := cmd.Flags().GetInt("timeout")
 	oauthTimeoutSec, _ := cmd.Flags().GetInt("oauth-timeout")
 	req := providerLoginRequest{
-		Config:        cfg,
-		ProviderName:  stringFlag(cmd, "provider"),
-		LoginProtocol: stringFlag(cmd, "protocol"),
-		AuthMode:      stringFlag(cmd, "mode"),
-		BaseURL:       stringFlag(cmd, "base-url"),
-		APIKey:        stringFlag(cmd, "api-key"),
-		ModelsPath:    stringFlag(cmd, "models-path"),
-		DefaultModel:  stringFlag(cmd, "default-model"),
-		SetDefault:    boolFlag(cmd, "set-default"),
-		DryRun:        boolFlag(cmd, "dry-run"),
-		Yes:           boolFlag(cmd, "yes"),
-		Interactive:   !isJSONOutputFormat(outputOptions.Format),
-		Timeout:       time.Duration(timeoutSec) * time.Second,
-		AuthRef:       stringFlag(cmd, "auth-ref"),
-		OAuthIssuer:   stringFlag(cmd, "oauth-issuer"),
-		OAuthClientID: stringFlag(cmd, "oauth-client-id"),
-		OAuthTimeout:  time.Duration(oauthTimeoutSec) * time.Second,
+		Config:               cfg,
+		ProviderName:         stringFlag(cmd, "provider"),
+		LoginProtocol:        stringFlag(cmd, "protocol"),
+		AuthMode:             stringFlag(cmd, "mode"),
+		BaseURL:              stringFlag(cmd, "base-url"),
+		APIKey:               stringFlag(cmd, "api-key"),
+		ModelsPath:           stringFlag(cmd, "models-path"),
+		DefaultModel:         stringFlag(cmd, "default-model"),
+		SetDefault:           boolFlag(cmd, "set-default"),
+		DryRun:               boolFlag(cmd, "dry-run"),
+		Yes:                  boolFlag(cmd, "yes"),
+		Interactive:          !isJSONOutputFormat(outputOptions.Format),
+		Timeout:              time.Duration(timeoutSec) * time.Second,
+		AuthRef:              stringFlag(cmd, "auth-ref"),
+		OAuthIssuer:          stringFlag(cmd, "oauth-issuer"),
+		OAuthClientID:        stringFlag(cmd, "oauth-client-id"),
+		OAuthTimeout:         time.Duration(oauthTimeoutSec) * time.Second,
+		ModelCardCatalogPath: stringFlag(cmd, "model-cards"),
+		DisableModelCards:    boolFlag(cmd, "no-model-cards"),
+		ModelCardsStrict:     boolFlag(cmd, "model-cards-strict"),
 	}
 	if req.Interactive {
 		req.Prompter = newCLILoginPrompter()
@@ -113,6 +119,36 @@ func renderLoginCommandResult(result *providerLoginResult, outputOptions structu
 	fmt.Printf("  Models:          %d\n", len(result.SupportedModels))
 	for _, model := range previewModelList(result.SupportedModels, 20) {
 		fmt.Printf("    - %s\n", model)
+	}
+	if len(result.ModelsSkippedByProtocol) > 0 {
+		fmt.Printf("  Models skipped:  %d by provider template\n", len(result.ModelsSkippedByProtocol))
+		for _, skipped := range previewModelsSkippedByProtocol(result.ModelsSkippedByProtocol, 10) {
+			if skipped.RecommendedProviderTemplate == "" {
+				fmt.Printf("    - %s\n", skipped.Model)
+				continue
+			}
+			fmt.Printf("    - %s -> %s\n", skipped.Model, skipped.RecommendedProviderTemplate)
+		}
+	}
+	if len(result.ModelCardsApplied) > 0 {
+		fmt.Printf("  Model cards:     %d applied\n", len(result.ModelCardsApplied))
+		for _, applied := range previewModelCardsApplied(result.ModelCardsApplied, 10) {
+			if applied.CardID == "" {
+				fmt.Printf("    - %s\n", applied.Model)
+				continue
+			}
+			fmt.Printf("    - %s <- %s\n", applied.Model, applied.CardID)
+		}
+	}
+	if len(result.ModelCardWarnings) > 0 {
+		fmt.Printf("  Model warnings:  %d\n", len(result.ModelCardWarnings))
+		for _, warning := range previewModelCardWarnings(result.ModelCardWarnings, 5) {
+			if warning.Source != "" {
+				fmt.Printf("    - %s: %s\n", warning.Source, warning.Message)
+				continue
+			}
+			fmt.Printf("    - %s\n", warning.Message)
+		}
 	}
 	if result.DryRun {
 		fmt.Println("  Config:          dry-run，未写入")
@@ -202,5 +238,39 @@ func previewModelList(models []string, limit int) []string {
 	}
 	out := append([]string(nil), models[:limit]...)
 	out = append(out, fmt.Sprintf("... (%d more)", len(models)-limit))
+	return out
+}
+
+func previewModelCardsApplied(items []providerLoginModelCardAppliedInfo, limit int) []providerLoginModelCardAppliedInfo {
+	if limit <= 0 || len(items) <= limit {
+		return items
+	}
+	out := append([]providerLoginModelCardAppliedInfo(nil), items[:limit]...)
+	out = append(out, providerLoginModelCardAppliedInfo{
+		Model:  fmt.Sprintf("... (%d more)", len(items)-limit),
+		CardID: "",
+	})
+	return out
+}
+
+func previewModelsSkippedByProtocol(items []providerLoginModelSkippedByProtocolInfo, limit int) []providerLoginModelSkippedByProtocolInfo {
+	if limit <= 0 || len(items) <= limit {
+		return items
+	}
+	out := append([]providerLoginModelSkippedByProtocolInfo(nil), items[:limit]...)
+	out = append(out, providerLoginModelSkippedByProtocolInfo{
+		Model: fmt.Sprintf("... (%d more)", len(items)-limit),
+	})
+	return out
+}
+
+func previewModelCardWarnings(items []providerLoginModelCardWarning, limit int) []providerLoginModelCardWarning {
+	if limit <= 0 || len(items) <= limit {
+		return items
+	}
+	out := append([]providerLoginModelCardWarning(nil), items[:limit]...)
+	out = append(out, providerLoginModelCardWarning{
+		Message: fmt.Sprintf("... (%d more)", len(items)-limit),
+	})
 	return out
 }

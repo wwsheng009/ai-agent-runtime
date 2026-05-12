@@ -11,21 +11,24 @@ import (
 )
 
 type chatLoginCommandRequest struct {
-	Provider      string
-	Protocol      string
-	Mode          string
-	BaseURL       string
-	APIKey        string
-	ModelsPath    string
-	DefaultModel  string
-	AuthRef       string
-	OAuthIssuer   string
-	OAuthClientID string
-	SetDefault    bool
-	DryRun        bool
-	Switch        bool
-	TimeoutSec    int
-	OAuthTimeout  int
+	Provider         string
+	Protocol         string
+	Mode             string
+	BaseURL          string
+	APIKey           string
+	ModelsPath       string
+	DefaultModel     string
+	AuthRef          string
+	OAuthIssuer      string
+	OAuthClientID    string
+	ModelCardsPath   string
+	SetDefault       bool
+	DryRun           bool
+	Switch           bool
+	NoModelCards     bool
+	ModelCardsStrict bool
+	TimeoutSec       int
+	OAuthTimeout     int
 }
 
 func handleLoginCommand(session *ChatSession, command string, noInteractive bool) bool {
@@ -47,23 +50,26 @@ func handleLoginCommand(session *ChatSession, command string, noInteractive bool
 		oauthTimeout = 15 * time.Minute
 	}
 	req := providerLoginRequest{
-		Context:       context.Background(),
-		Config:        session.Config,
-		ProviderName:  parsed.Provider,
-		LoginProtocol: parsed.Protocol,
-		AuthMode:      parsed.Mode,
-		BaseURL:       parsed.BaseURL,
-		APIKey:        parsed.APIKey,
-		ModelsPath:    parsed.ModelsPath,
-		DefaultModel:  parsed.DefaultModel,
-		SetDefault:    parsed.SetDefault,
-		DryRun:        parsed.DryRun,
-		Interactive:   !noInteractive,
-		Timeout:       timeout,
-		AuthRef:       parsed.AuthRef,
-		OAuthIssuer:   parsed.OAuthIssuer,
-		OAuthClientID: parsed.OAuthClientID,
-		OAuthTimeout:  oauthTimeout,
+		Context:              context.Background(),
+		Config:               session.Config,
+		ProviderName:         parsed.Provider,
+		LoginProtocol:        parsed.Protocol,
+		AuthMode:             parsed.Mode,
+		BaseURL:              parsed.BaseURL,
+		APIKey:               parsed.APIKey,
+		ModelsPath:           parsed.ModelsPath,
+		DefaultModel:         parsed.DefaultModel,
+		SetDefault:           parsed.SetDefault,
+		DryRun:               parsed.DryRun,
+		Interactive:          !noInteractive,
+		Timeout:              timeout,
+		AuthRef:              parsed.AuthRef,
+		OAuthIssuer:          parsed.OAuthIssuer,
+		OAuthClientID:        parsed.OAuthClientID,
+		OAuthTimeout:         oauthTimeout,
+		ModelCardCatalogPath: parsed.ModelCardsPath,
+		DisableModelCards:    parsed.NoModelCards,
+		ModelCardsStrict:     parsed.ModelCardsStrict,
 	}
 	if req.Interactive {
 		req.Prompter = chatLoginPrompter{session: session}
@@ -178,6 +184,15 @@ func parseChatLoginCommandRequest(command string) (chatLoginCommandRequest, erro
 			i = next
 		case strings.HasPrefix(token, "--oauth-client-id="):
 			req.OAuthClientID = strings.TrimSpace(strings.TrimPrefix(token, "--oauth-client-id="))
+		case token == "--model-cards":
+			value, next, err := consumeChatLoginValue(tokens, i)
+			if err != nil {
+				return req, err
+			}
+			req.ModelCardsPath = value
+			i = next
+		case strings.HasPrefix(token, "--model-cards="):
+			req.ModelCardsPath = strings.TrimSpace(strings.TrimPrefix(token, "--model-cards="))
 		case token == "--timeout":
 			value, next, err := consumeChatLoginValue(tokens, i)
 			if err != nil {
@@ -218,6 +233,10 @@ func parseChatLoginCommandRequest(command string) (chatLoginCommandRequest, erro
 			req.DryRun = true
 		case token == "--switch":
 			req.Switch = true
+		case token == "--no-model-cards":
+			req.NoModelCards = true
+		case token == "--model-cards-strict":
+			req.ModelCardsStrict = true
 		default:
 			if strings.HasPrefix(token, "-") {
 				return req, fmt.Errorf("未知 /login 参数: %s", token)

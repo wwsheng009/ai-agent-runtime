@@ -12,6 +12,7 @@ import (
 	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/modelcard"
 )
 
 func setTestUserProfileDir(t *testing.T, dir string) {
@@ -125,11 +126,12 @@ func TestRunProviderLogin_AddsDefaultCodexReasoningEfforts(t *testing.T) {
 	cfg := &config.Config{ConfigFilePath: path}
 
 	result, err := runProviderLogin(providerLoginRequest{
-		Config:        cfg,
-		ProviderName:  "codex",
-		LoginProtocol: "codex-apikey",
-		BaseURL:       server.URL + "/v1",
-		APIKey:        "sk-test",
+		Config:            cfg,
+		ProviderName:      "codex",
+		LoginProtocol:     "codex-apikey",
+		BaseURL:           server.URL + "/v1",
+		APIKey:            "sk-test",
+		DisableModelCards: true,
 	})
 	if err != nil {
 		t.Fatalf("runProviderLogin: %v", err)
@@ -162,6 +164,475 @@ func TestRunProviderLogin_AddsDefaultCodexReasoningEfforts(t *testing.T) {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("expected %q in config:\n%s", expected, text)
 		}
+	}
+}
+
+func TestRunProviderLogin_AppliesBuiltinModelCard(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "codex",
+		LoginProtocol: "codex-apikey",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if len(result.ModelCardsApplied) == 0 {
+		t.Fatalf("expected model card applied, got %+v", result)
+	}
+	capability := cfg.Providers.Items["codex"].ModelCapabilities["gpt-5.4"]
+	if capability.MaxContextTokens != 270000 || capability.AutoCompactTokenLimit != 200000 || !capability.NativeTools.ImageGeneration {
+		t.Fatalf("unexpected model-card capability: %+v", capability)
+	}
+	if strings.Join(capability.InputModalities, ",") != "text,image" {
+		t.Fatalf("unexpected modalities: %+v", capability.InputModalities)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"gpt-5.4:",
+		"max_context_tokens: 270000",
+		"auto_compact_token_limit: 200000",
+		"image_generation: true",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in config:\n%s", expected, text)
+		}
+	}
+}
+
+func TestRunProviderLogin_DisableModelCardsKeepsDiscoveryOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:            cfg,
+		ProviderName:      "codex",
+		LoginProtocol:     "codex-apikey",
+		BaseURL:           server.URL,
+		APIKey:            "sk-test",
+		DisableModelCards: true,
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if len(result.ModelCardsApplied) != 0 {
+		t.Fatalf("expected no model cards, got %+v", result.ModelCardsApplied)
+	}
+	capability := cfg.Providers.Items["codex"].ModelCapabilities["gpt-5.4"]
+	if capability.MaxContextTokens != 0 || capability.NativeTools.ImageGeneration {
+		t.Fatalf("expected discovery-only capability, got %+v", capability)
+	}
+	if !capability.ReasoningModel {
+		t.Fatalf("expected codex reasoning fallback, got %+v", capability)
+	}
+}
+
+func TestRunProviderLogin_AppliesAnthropicModelCard(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-sonnet-4-6"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "anthropic",
+		LoginProtocol: "anthropic",
+		BaseURL:       server.URL,
+		APIKey:        "sk-ant-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if len(result.ModelCardsApplied) == 0 || result.ModelCardsApplied[0].CardID != "anthropic.claude-sonnet-4-6" {
+		t.Fatalf("expected anthropic model card, got %+v", result.ModelCardsApplied)
+	}
+	capability := cfg.Providers.Items["anthropic"].ModelCapabilities["claude-sonnet-4-6"]
+	if capability.MaxContextTokens != 1000000 || capability.MaxTokens != 64000 || !capability.ReasoningModel {
+		t.Fatalf("unexpected anthropic capability: %+v", capability)
+	}
+	if strings.Join(capability.InputModalities, ",") != "text,image" {
+		t.Fatalf("unexpected modalities: %+v", capability.InputModalities)
+	}
+	provider := cfg.Providers.Items["anthropic"]
+	if provider.APIPath != "/v1/messages" || provider.ForwardURL != "/v1/messages" || provider.MaxTokensLimit != 131072 {
+		t.Fatalf("unexpected provider template defaults: %+v", provider)
+	}
+	if strings.Join(provider.SupportTypes, ",") != "anthropic" {
+		t.Fatalf("unexpected support types: %+v", provider.SupportTypes)
+	}
+}
+
+func TestRunProviderLogin_FiltersModelsByProviderTemplate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"claude-sonnet-4-6"},{"id":"gpt-image-2"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "mixed",
+		LoginProtocol: "openai",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if strings.Join(result.SupportedModels, ",") != "gpt-4.1" || result.DefaultModel != "gpt-4.1" {
+		t.Fatalf("unexpected supported models: %+v", result)
+	}
+	if len(result.ModelsSkippedByProtocol) != 2 {
+		t.Fatalf("expected two skipped models, got %+v", result.ModelsSkippedByProtocol)
+	}
+	skipped := map[string]string{}
+	for _, item := range result.ModelsSkippedByProtocol {
+		skipped[item.Model] = item.RecommendedProviderTemplate
+	}
+	if skipped["claude-sonnet-4-6"] != "anthropic.messages" || skipped["gpt-image-2"] != "openai.images" {
+		t.Fatalf("unexpected skipped recommendations: %+v", result.ModelsSkippedByProtocol)
+	}
+	if len(result.ModelCardsApplied) != 1 || result.ModelCardsApplied[0].Model != "gpt-4.1" || result.ModelCardsApplied[0].CardID != "fallback.openai.chat" {
+		t.Fatalf("expected openai fallback model card, got %+v", result.ModelCardsApplied)
+	}
+	provider := cfg.Providers.Items["mixed"]
+	if provider.APIPath != "/v1/chat/completions" || provider.ForwardURL != "/v1/chat/completions" {
+		t.Fatalf("unexpected openai provider template defaults: %+v", provider)
+	}
+	if strings.Join(provider.SupportedModels, ",") != "gpt-4.1" {
+		t.Fatalf("unexpected persisted supported models: %+v", provider.SupportedModels)
+	}
+	if _, exists := provider.ModelCapabilities["claude-sonnet-4-6"]; exists {
+		t.Fatalf("skipped model capability should not be persisted: %+v", provider.ModelCapabilities)
+	}
+}
+
+func TestRunProviderLogin_ProtocolChangeReplacesKnownProviderTemplateDefaults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-sonnet-4-6"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	raw := strings.TrimSpace(`
+providers:
+  items:
+    alpha:
+      enabled: true
+      protocol: openai
+      base_url: https://old.example.com
+      api_path: /v1/chat/completions
+      forward_url: /v1/chat/completions
+      support_types:
+        - openai
+      max_tokens_limit: 10000
+      default_model: gpt-4.1
+      supported_models:
+        - gpt-4.1
+`)
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{
+		ConfigFilePath: path,
+		Providers: config.ProvidersConfig{Items: map[string]config.Provider{
+			"alpha": {
+				Enabled:         true,
+				Protocol:        "openai",
+				BaseURL:         "https://old.example.com",
+				APIPath:         "/v1/chat/completions",
+				ForwardURL:      "/v1/chat/completions",
+				SupportTypes:    []string{"openai"},
+				MaxTokensLimit:  10000,
+				DefaultModel:    "gpt-4.1",
+				SupportedModels: []string{"gpt-4.1"},
+			},
+		}},
+	}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "alpha",
+		LoginProtocol: "anthropic",
+		BaseURL:       server.URL,
+		APIKey:        "sk-ant-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if !result.Updated || result.Protocol != "anthropic" || result.DefaultModel != "claude-sonnet-4-6" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	provider := cfg.Providers.Items["alpha"]
+	if provider.Protocol != "anthropic" || provider.APIPath != "/v1/messages" || provider.ForwardURL != "/v1/messages" {
+		t.Fatalf("expected anthropic endpoint defaults, got %+v", provider)
+	}
+	if strings.Join(provider.SupportTypes, ",") != "anthropic" || provider.MaxTokensLimit != 131072 {
+		t.Fatalf("expected anthropic template defaults, got %+v", provider)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"protocol: anthropic",
+		"api_path: /v1/messages",
+		"forward_url: /v1/messages",
+		"- anthropic",
+		"max_tokens_limit: 131072",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in config:\n%s", expected, text)
+		}
+	}
+}
+
+func TestApplyProviderLoginProviderTemplateDefaults_CodexChatGPTUsesResponsesPath(t *testing.T) {
+	provider := config.Provider{
+		Protocol: "codex",
+		BaseURL:  "https://chatgpt.com/backend-api/codex",
+	}
+	applyProviderLoginProviderTemplateDefaults(&provider, modelcard.ProviderTemplate{
+		ID:             "codex.responses",
+		Protocol:       "codex",
+		APIPath:        "/v1/responses",
+		ForwardURL:     "/v1/responses",
+		SupportTypes:   []string{"codex"},
+		MaxTokensLimit: 10000,
+	}, providerLoginTemplateDefaults{}, false)
+	if provider.APIPath != "/responses" || provider.ForwardURL != "/responses" {
+		t.Fatalf("expected ChatGPT Codex /responses path, got %+v", provider)
+	}
+	if provider.MaxTokensLimit != 10000 || strings.Join(provider.SupportTypes, ",") != "codex" {
+		t.Fatalf("unexpected provider defaults: %+v", provider)
+	}
+}
+
+func TestApplyProviderLoginProviderTemplateDefaults_ReplacesOnlyKnownPreviousDefaults(t *testing.T) {
+	provider := config.Provider{
+		Protocol:       "anthropic",
+		BaseURL:        "https://api.example.com",
+		APIPath:        "/custom/messages",
+		ForwardURL:     "/v1/chat/completions",
+		SupportTypes:   []string{"openai"},
+		MaxTokensLimit: 10000,
+	}
+	previous := providerLoginTemplateDefaults{
+		APIPathCandidates:    []string{"/v1/chat/completions"},
+		ForwardURLCandidates: []string{"/v1/chat/completions"},
+		SupportTypes:         []string{"openai"},
+		MaxTokensLimit:       10000,
+	}
+	applyProviderLoginProviderTemplateDefaults(&provider, modelcard.ProviderTemplate{
+		ID:             "anthropic.messages",
+		Protocol:       "anthropic",
+		APIPath:        "/v1/messages",
+		ForwardURL:     "/v1/messages",
+		SupportTypes:   []string{"anthropic"},
+		MaxTokensLimit: 131072,
+	}, previous, true)
+
+	if provider.APIPath != "/custom/messages" {
+		t.Fatalf("custom api_path should be preserved, got %+v", provider)
+	}
+	if provider.ForwardURL != "/v1/messages" || strings.Join(provider.SupportTypes, ",") != "anthropic" || provider.MaxTokensLimit != 131072 {
+		t.Fatalf("known previous defaults should be replaced, got %+v", provider)
+	}
+}
+
+func TestRunProviderLogin_ModelCardsPreserveExistingCapabilityFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4","inputModalities":["text","image"],"reasoningEfforts":["high"],"maxContextTokens":999999}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	raw := strings.TrimSpace(`
+providers:
+  items:
+    codex:
+      enabled: true
+      protocol: codex
+      base_url: https://old.example.com
+      default_model: gpt-5.4
+      supported_models:
+        - gpt-5.4
+      model_capabilities:
+        gpt-5.4:
+          input_modalities:
+            - text
+          reasoning_efforts:
+            - low
+          max_context_tokens: 123
+`)
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{
+		ConfigFilePath: path,
+		Providers: config.ProvidersConfig{Items: map[string]config.Provider{
+			"codex": {
+				Enabled:         true,
+				Protocol:        "codex",
+				BaseURL:         "https://old.example.com",
+				DefaultModel:    "gpt-5.4",
+				SupportedModels: []string{"gpt-5.4"},
+				ModelCapabilities: map[string]config.ModelCapabilitySpec{
+					"gpt-5.4": {
+						InputModalities:  []string{"text"},
+						ReasoningEfforts: []string{"low"},
+						MaxContextTokens: 123,
+					},
+				},
+			},
+		}},
+	}
+
+	_, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "codex",
+		LoginProtocol: "codex-apikey",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	capability := cfg.Providers.Items["codex"].ModelCapabilities["gpt-5.4"]
+	if strings.Join(capability.InputModalities, ",") != "text" {
+		t.Fatalf("input modalities overwritten: %+v", capability)
+	}
+	if strings.Join(capability.ReasoningEfforts, ",") != "low" {
+		t.Fatalf("reasoning efforts overwritten: %+v", capability)
+	}
+	if capability.MaxContextTokens != 123 {
+		t.Fatalf("max context overwritten: %+v", capability)
+	}
+	if capability.AutoCompactTokenLimit != 200000 || !capability.NativeTools.ImageGeneration {
+		t.Fatalf("expected template to fill missing fields: %+v", capability)
+	}
+}
+
+func TestRunProviderLogin_ModelCardWarningsNonStrict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	cardsPath := filepath.Join(dir, "broken-model-cards.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(cardsPath, []byte("version: ["), 0o644); err != nil {
+		t.Fatalf("write cards: %v", err)
+	}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:               &config.Config{ConfigFilePath: path},
+		ProviderName:         "alpha",
+		LoginProtocol:        "openai",
+		BaseURL:              server.URL,
+		APIKey:               "sk-test",
+		ModelCardCatalogPath: cardsPath,
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if len(result.ModelCardWarnings) != 1 || result.ModelCardWarnings[0].Code != "parse_failed" {
+		t.Fatalf("expected parse warning, got %+v", result.ModelCardWarnings)
+	}
+}
+
+func TestRunProviderLogin_ModelCardStrictFailsBeforeWrite(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	cardsPath := filepath.Join(dir, "broken-model-cards.yaml")
+	initial := "providers:\n  items: {}\n"
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(cardsPath, []byte("version: ["), 0o644); err != nil {
+		t.Fatalf("write cards: %v", err)
+	}
+
+	_, err := runProviderLogin(providerLoginRequest{
+		Config:               &config.Config{ConfigFilePath: path},
+		ProviderName:         "alpha",
+		LoginProtocol:        "openai",
+		BaseURL:              server.URL,
+		APIKey:               "sk-test",
+		ModelCardCatalogPath: cardsPath,
+		ModelCardsStrict:     true,
+	})
+	if err == nil {
+		t.Fatal("expected strict model card error")
+	}
+	content, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read config: %v", readErr)
+	}
+	if string(content) != initial {
+		t.Fatalf("config changed on strict model card failure:\n%s", string(content))
 	}
 }
 
@@ -660,11 +1131,11 @@ func TestDisplayProviderShowsAuthReferences(t *testing.T) {
 }
 
 func TestParseChatLoginCommandRequest(t *testing.T) {
-	req, err := parseChatLoginCommandRequest(`/login --provider alpha --protocol openai --base-url http://localhost:4000 --models-path /v1/models --set-default --switch`)
+	req, err := parseChatLoginCommandRequest(`/login --provider alpha --protocol openai --base-url http://localhost:4000 --models-path /v1/models --model-cards ./cards.yaml --no-model-cards --model-cards-strict --set-default --switch`)
 	if err != nil {
 		t.Fatalf("parseChatLoginCommandRequest: %v", err)
 	}
-	if req.Provider != "alpha" || req.Protocol != "openai" || req.BaseURL != "http://localhost:4000" || req.ModelsPath != "/v1/models" || !req.SetDefault || !req.Switch {
+	if req.Provider != "alpha" || req.Protocol != "openai" || req.BaseURL != "http://localhost:4000" || req.ModelsPath != "/v1/models" || req.ModelCardsPath != "./cards.yaml" || !req.NoModelCards || !req.ModelCardsStrict || !req.SetDefault || !req.Switch {
 		t.Fatalf("unexpected req: %+v", req)
 	}
 }

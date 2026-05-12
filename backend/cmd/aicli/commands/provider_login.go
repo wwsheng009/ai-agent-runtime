@@ -3,11 +3,15 @@ package commands
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/modelcard"
 )
 
 const (
@@ -44,29 +48,63 @@ type providerLoginRequest struct {
 	OAuthIssuer   string
 	OAuthClientID string
 	OAuthTimeout  time.Duration
+
+	ModelCardCatalogPath string
+	DisableModelCards    bool
+	ModelCardsStrict     bool
 }
 
 type providerLoginResult struct {
-	ProviderName     string              `json:"provider"`
-	Protocol         string              `json:"protocol"`
-	LoginProtocol    string              `json:"login_protocol"`
-	AuthMode         string              `json:"auth_mode"`
-	AuthRef          string              `json:"auth_ref,omitempty"`
-	APIKeyRef        string              `json:"api_key_ref,omitempty"`
-	BaseURL          string              `json:"base_url"`
-	ModelsPath       string              `json:"models_path"`
-	ModelsEndpoint   string              `json:"models_endpoint"`
-	ModelsVerifiedAt string              `json:"models_verified_at"`
-	SupportedModels  []string            `json:"supported_models"`
-	DefaultModel     string              `json:"default_model"`
-	Models           []providerModelInfo `json:"models,omitempty"`
-	Created          bool                `json:"created"`
-	Updated          bool                `json:"updated"`
-	DryRun           bool                `json:"dry_run"`
-	ConfigPath       string              `json:"config_path,omitempty"`
-	AuthStorePath    string              `json:"auth_store_path,omitempty"`
-	APIKeyMasked     string              `json:"api_key_masked,omitempty"`
-	SetDefault       bool                `json:"set_default"`
+	ProviderName            string                                    `json:"provider"`
+	Protocol                string                                    `json:"protocol"`
+	LoginProtocol           string                                    `json:"login_protocol"`
+	AuthMode                string                                    `json:"auth_mode"`
+	AuthRef                 string                                    `json:"auth_ref,omitempty"`
+	APIKeyRef               string                                    `json:"api_key_ref,omitempty"`
+	BaseURL                 string                                    `json:"base_url"`
+	ModelsPath              string                                    `json:"models_path"`
+	ModelsEndpoint          string                                    `json:"models_endpoint"`
+	ModelsVerifiedAt        string                                    `json:"models_verified_at"`
+	SupportedModels         []string                                  `json:"supported_models"`
+	DefaultModel            string                                    `json:"default_model"`
+	Models                  []providerModelInfo                       `json:"models,omitempty"`
+	ModelsSkippedByProtocol []providerLoginModelSkippedByProtocolInfo `json:"models_skipped_by_protocol,omitempty"`
+	ModelCardsApplied       []providerLoginModelCardAppliedInfo       `json:"model_cards_applied,omitempty"`
+	ModelCardsSkipped       []providerLoginModelCardSkippedInfo       `json:"model_cards_skipped,omitempty"`
+	ModelCardWarnings       []providerLoginModelCardWarning           `json:"model_card_warnings,omitempty"`
+	Created                 bool                                      `json:"created"`
+	Updated                 bool                                      `json:"updated"`
+	DryRun                  bool                                      `json:"dry_run"`
+	ConfigPath              string                                    `json:"config_path,omitempty"`
+	AuthStorePath           string                                    `json:"auth_store_path,omitempty"`
+	APIKeyMasked            string                                    `json:"api_key_masked,omitempty"`
+	SetDefault              bool                                      `json:"set_default"`
+}
+
+type providerLoginModelCardAppliedInfo struct {
+	Model  string   `json:"model"`
+	CardID string   `json:"card_id"`
+	Fields []string `json:"fields,omitempty"`
+}
+
+type providerLoginModelCardSkippedInfo struct {
+	Model  string `json:"model"`
+	Reason string `json:"reason"`
+}
+
+type providerLoginModelSkippedByProtocolInfo struct {
+	Model                       string `json:"model"`
+	CurrentProtocol             string `json:"current_protocol,omitempty"`
+	CurrentProviderTemplate     string `json:"current_provider_template,omitempty"`
+	RecommendedProtocol         string `json:"recommended_protocol,omitempty"`
+	RecommendedProviderTemplate string `json:"recommended_provider_template,omitempty"`
+	Reason                      string `json:"reason"`
+}
+
+type providerLoginModelCardWarning struct {
+	Source  string `json:"source,omitempty"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
@@ -148,7 +186,24 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		return nil, err
 	}
 
-	supportedModels := providerModelIDs(modelsResult.Models)
+	modelCardCatalog, modelCardWarnings, err := loadProviderLoginModelCardCatalog(req, cfg)
+	if err != nil {
+		return nil, err
+	}
+	modelsForLogin, currentProviderTemplate, hasCurrentProviderTemplate, modelsSkippedByProtocol := filterProviderLoginModelsByProviderTemplate(providerName, loginProtocol, candidate, modelsResult.Models, modelCardCatalog)
+	if hasCurrentProviderTemplate {
+		previousProviderTemplate, hasPreviousProviderTemplate := resolveProviderLoginPreviousProviderTemplate(modelCardCatalog, existing, exists)
+		previousDefaults := providerLoginTemplateDefaults{}
+		if hasPreviousProviderTemplate {
+			previousDefaults = providerLoginProviderTemplateDefaults(existing, previousProviderTemplate)
+		}
+		applyProviderLoginProviderTemplateDefaults(&candidate, currentProviderTemplate, previousDefaults, hasPreviousProviderTemplate)
+	}
+	if len(modelsForLogin) == 0 {
+		return nil, providerLoginAllModelsFilteredError(modelsSkippedByProtocol)
+	}
+
+	supportedModels := providerModelIDs(modelsForLogin)
 	defaultModel, err := resolveLoginDefaultModel(req, candidate, supportedModels)
 	if err != nil {
 		return nil, err
@@ -156,9 +211,9 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 	candidate.SupportedModels = supportedModels
 	candidate.DefaultModel = defaultModel
 	candidate.ModelsVerifiedAt = modelsResult.VerifiedAt
-	discoveredCapabilities := buildProviderLoginModelCapabilities(providerName, loginProtocol, candidate, modelsResult.Models)
+	discoveredCapabilities, modelCardsApplied, modelCardsSkipped := buildProviderLoginModelCapabilitiesForLogin(providerName, loginProtocol, candidate, modelsForLogin, modelCardCatalog)
 	if len(discoveredCapabilities) > 0 {
-		candidate.ModelCapabilities = mergeProviderLoginModelCapabilities(candidate.ModelCapabilities, discoveredCapabilities)
+		candidate.ModelCapabilities = discoveredCapabilities
 	}
 
 	if !req.DryRun {
@@ -209,26 +264,30 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 	}
 
 	return &providerLoginResult{
-		ProviderName:     providerName,
-		Protocol:         runtimeProtocol,
-		LoginProtocol:    loginProtocol,
-		AuthMode:         authMode,
-		AuthRef:          candidate.AuthRef,
-		APIKeyRef:        candidate.APIKeyRef,
-		BaseURL:          candidate.BaseURL,
-		ModelsPath:       modelsPath,
-		ModelsEndpoint:   modelsResult.Endpoint,
-		ModelsVerifiedAt: modelsResult.VerifiedAt,
-		SupportedModels:  supportedModels,
-		DefaultModel:     defaultModel,
-		Models:           modelsResult.Models,
-		Created:          !exists,
-		Updated:          exists,
-		DryRun:           req.DryRun,
-		ConfigPath:       configPath,
-		AuthStorePath:    authStorePathForResult(req, authMode),
-		APIKeyMasked:     maskSecretForDisplay(resolvedAPIKey),
-		SetDefault:       req.SetDefault,
+		ProviderName:            providerName,
+		Protocol:                runtimeProtocol,
+		LoginProtocol:           loginProtocol,
+		AuthMode:                authMode,
+		AuthRef:                 candidate.AuthRef,
+		APIKeyRef:               candidate.APIKeyRef,
+		BaseURL:                 candidate.BaseURL,
+		ModelsPath:              modelsPath,
+		ModelsEndpoint:          modelsResult.Endpoint,
+		ModelsVerifiedAt:        modelsResult.VerifiedAt,
+		SupportedModels:         supportedModels,
+		DefaultModel:            defaultModel,
+		Models:                  modelsForLogin,
+		ModelsSkippedByProtocol: modelsSkippedByProtocol,
+		ModelCardsApplied:       modelCardsApplied,
+		ModelCardsSkipped:       modelCardsSkipped,
+		ModelCardWarnings:       modelCardWarnings,
+		Created:                 !exists,
+		Updated:                 exists,
+		DryRun:                  req.DryRun,
+		ConfigPath:              configPath,
+		AuthStorePath:           authStorePathForResult(req, authMode),
+		APIKeyMasked:            maskSecretForDisplay(resolvedAPIKey),
+		SetDefault:              req.SetDefault,
 	}, nil
 }
 
@@ -406,6 +465,410 @@ func resolveLoginDefaultModel(req providerLoginRequest, provider config.Provider
 	return supported[0], nil
 }
 
+func loadProviderLoginModelCardCatalog(req providerLoginRequest, cfg *config.Config) (*modelcard.Catalog, []providerLoginModelCardWarning, error) {
+	if req.DisableModelCards {
+		return nil, nil, nil
+	}
+	modelCardsConfig := (*config.AICLIModelCardsConfig)(nil)
+	if cfg != nil && cfg.AICLI != nil {
+		modelCardsConfig = cfg.AICLI.ModelCards
+	}
+	if modelCardsConfig != nil && modelCardsConfig.Enabled != nil && !*modelCardsConfig.Enabled && strings.TrimSpace(req.ModelCardCatalogPath) == "" {
+		return nil, nil, nil
+	}
+
+	strict := req.ModelCardsStrict
+	if modelCardsConfig != nil && modelCardsConfig.Strict {
+		strict = true
+	}
+	sources := []modelcard.Source{modelcard.BuiltinSource()}
+	if modelCardsConfig != nil && strings.TrimSpace(modelCardsConfig.BuiltinPath) != "" {
+		sources = append(sources, readProviderLoginModelCardFile(modelCardsConfig.BuiltinPath))
+	}
+	userPath := "~/.aicli/model_cards.yaml"
+	if modelCardsConfig != nil && strings.TrimSpace(modelCardsConfig.UserPath) != "" {
+		userPath = modelCardsConfig.UserPath
+	}
+	if source, ok := readExistingProviderLoginModelCardFile(userPath); ok {
+		sources = append(sources, source)
+	}
+	if strings.TrimSpace(req.ModelCardCatalogPath) != "" {
+		sources = append(sources, readProviderLoginModelCardFile(req.ModelCardCatalogPath))
+	}
+
+	catalog, warnings, err := modelcard.LoadSources(sources, strict)
+	if err != nil {
+		return nil, providerLoginModelCardWarnings(warnings), err
+	}
+	return catalog, providerLoginModelCardWarnings(warnings), nil
+}
+
+func readProviderLoginModelCardFile(path string) modelcard.Source {
+	resolved := resolveProviderLoginModelCardPath(path)
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return modelcard.Source{Name: resolved, Err: err}
+	}
+	return modelcard.Source{Name: resolved, Data: data}
+}
+
+func readExistingProviderLoginModelCardFile(path string) (modelcard.Source, bool) {
+	resolved := resolveProviderLoginModelCardPath(path)
+	if info, err := os.Stat(resolved); err != nil || info.IsDir() {
+		return modelcard.Source{}, false
+	}
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return modelcard.Source{Name: resolved, Err: err}, true
+	}
+	return modelcard.Source{Name: resolved, Data: data}, true
+}
+
+func resolveProviderLoginModelCardPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			return home
+		}
+		return path
+	}
+	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~\\") {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			return filepath.Join(home, strings.TrimLeft(path[2:], "/\\"))
+		}
+	}
+	return filepath.Clean(path)
+}
+
+func providerLoginModelCardWarnings(input []modelcard.Warning) []providerLoginModelCardWarning {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make([]providerLoginModelCardWarning, 0, len(input))
+	for _, warning := range input {
+		output = append(output, providerLoginModelCardWarning{
+			Source:  warning.Source,
+			Code:    warning.Code,
+			Message: warning.Message,
+		})
+	}
+	return output
+}
+
+func filterProviderLoginModelsByProviderTemplate(
+	providerName, loginProtocol string,
+	provider config.Provider,
+	models []providerModelInfo,
+	catalog *modelcard.Catalog,
+) ([]providerModelInfo, modelcard.ProviderTemplate, bool, []providerLoginModelSkippedByProtocolInfo) {
+	if catalog == nil || len(models) == 0 {
+		return models, modelcard.ProviderTemplate{}, false, nil
+	}
+	runtimeProtocol := runtimeProtocolForLoginProtocol(loginProtocol)
+	currentTemplate, ok := resolveProviderLoginProviderTemplate(catalog, runtimeProtocol, provider)
+	if !ok {
+		return models, modelcard.ProviderTemplate{}, false, nil
+	}
+	ctx := modelcard.Context{
+		ProviderName:     providerName,
+		LoginProtocol:    loginProtocol,
+		RuntimeProtocol:  runtimeProtocol,
+		ProviderTemplate: strings.TrimSpace(currentTemplate.ID),
+		BaseURL:          provider.BaseURL,
+	}
+	filtered := make([]providerModelInfo, 0, len(models))
+	skipped := make([]providerLoginModelSkippedByProtocolInfo, 0)
+	for _, model := range models {
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		recommended, _, ok := catalog.RecommendedProviderTemplate(ctx, modelID)
+		if !ok || sameProviderLoginTemplateID(currentTemplate, recommended) {
+			filtered = append(filtered, model)
+			continue
+		}
+		skipped = append(skipped, providerLoginModelSkippedByProtocolInfo{
+			Model:                       modelID,
+			CurrentProtocol:             strings.TrimSpace(currentTemplate.Protocol),
+			CurrentProviderTemplate:     strings.TrimSpace(currentTemplate.ID),
+			RecommendedProtocol:         strings.TrimSpace(recommended.Protocol),
+			RecommendedProviderTemplate: strings.TrimSpace(recommended.ID),
+			Reason:                      "recommended_provider_template_mismatch",
+		})
+	}
+	return filtered, currentTemplate, true, skipped
+}
+
+func resolveProviderLoginProviderTemplate(catalog *modelcard.Catalog, runtimeProtocol string, provider config.Provider) (modelcard.ProviderTemplate, bool) {
+	if catalog == nil {
+		return modelcard.ProviderTemplate{}, false
+	}
+	runtimeProtocol = strings.TrimSpace(runtimeProtocol)
+	for _, template := range catalog.ProviderTemplateList() {
+		if !strings.EqualFold(strings.TrimSpace(template.Protocol), runtimeProtocol) {
+			continue
+		}
+		if providerLoginConfiguredProviderMatchesTemplate(provider, template) {
+			return template, true
+		}
+	}
+	return catalog.ProviderTemplateForProtocol(runtimeProtocol)
+}
+
+func resolveProviderLoginPreviousProviderTemplate(catalog *modelcard.Catalog, provider config.Provider, exists bool) (modelcard.ProviderTemplate, bool) {
+	if !exists || catalog == nil {
+		return modelcard.ProviderTemplate{}, false
+	}
+	if template, ok := resolveProviderLoginConfiguredProviderTemplate(catalog, "", provider); ok {
+		return template, true
+	}
+	if protocol := provider.GetProtocol(); strings.TrimSpace(protocol) != "" {
+		return catalog.ProviderTemplateForProtocol(protocol)
+	}
+	return modelcard.ProviderTemplate{}, false
+}
+
+func resolveProviderLoginConfiguredProviderTemplate(catalog *modelcard.Catalog, runtimeProtocol string, provider config.Provider) (modelcard.ProviderTemplate, bool) {
+	if catalog == nil {
+		return modelcard.ProviderTemplate{}, false
+	}
+	templates := catalog.ProviderTemplateList()
+	for _, template := range templates {
+		if !providerLoginProviderTemplateProtocolMatches(template, runtimeProtocol) {
+			continue
+		}
+		if providerLoginConfiguredPathMatchesAny(provider.APIPath, providerLoginProviderTemplateAPIPathCandidates(provider, template)) {
+			return template, true
+		}
+	}
+	for _, template := range templates {
+		if !providerLoginProviderTemplateProtocolMatches(template, runtimeProtocol) {
+			continue
+		}
+		if providerLoginConfiguredPathMatchesAny(provider.ForwardURL, providerLoginProviderTemplateForwardURLCandidates(provider, template)) {
+			return template, true
+		}
+	}
+	return modelcard.ProviderTemplate{}, false
+}
+
+func providerLoginProviderTemplateProtocolMatches(template modelcard.ProviderTemplate, runtimeProtocol string) bool {
+	runtimeProtocol = strings.TrimSpace(runtimeProtocol)
+	return runtimeProtocol == "" || strings.EqualFold(strings.TrimSpace(template.Protocol), runtimeProtocol)
+}
+
+func providerLoginConfiguredProviderMatchesTemplate(provider config.Provider, template modelcard.ProviderTemplate) bool {
+	return providerLoginConfiguredPathMatchesAny(provider.APIPath, providerLoginProviderTemplateAPIPathCandidates(provider, template)) ||
+		providerLoginConfiguredPathMatchesAny(provider.ForwardURL, providerLoginProviderTemplateForwardURLCandidates(provider, template))
+}
+
+func providerLoginConfiguredPathMatchesAny(configured string, templates []string) bool {
+	configured = normalizeProviderLoginTemplatePath(configured)
+	if configured == "" {
+		return false
+	}
+	for _, template := range templates {
+		if configured == normalizeProviderLoginTemplatePath(template) && configured != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeProviderLoginTemplatePath(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.IsAbs() {
+		value = parsed.Path
+		if parsed.RawQuery != "" {
+			value += "?" + parsed.RawQuery
+		}
+	}
+	return strings.TrimRight(value, "/")
+}
+
+func sameProviderLoginTemplateID(left, right modelcard.ProviderTemplate) bool {
+	return strings.EqualFold(strings.TrimSpace(left.ID), strings.TrimSpace(right.ID))
+}
+
+type providerLoginTemplateDefaults struct {
+	APIPath              string
+	APIPathCandidates    []string
+	ForwardURL           string
+	ForwardURLCandidates []string
+	SupportTypes         []string
+	MaxTokensLimit       int
+}
+
+func providerLoginProviderTemplateDefaults(provider config.Provider, template modelcard.ProviderTemplate) providerLoginTemplateDefaults {
+	defaults := providerLoginTemplateDefaults{
+		APIPath:        strings.TrimSpace(template.APIPath),
+		ForwardURL:     strings.TrimSpace(template.ForwardURL),
+		SupportTypes:   append([]string(nil), template.SupportTypes...),
+		MaxTokensLimit: template.MaxTokensLimit,
+	}
+	if strings.EqualFold(strings.TrimSpace(template.ID), "codex.responses") {
+		if codexPath, ok := providerLoginCodexResponsesPathForBaseURL(provider.BaseURL); ok {
+			defaults.APIPath = codexPath
+			defaults.ForwardURL = codexPath
+		}
+	}
+	defaults.APIPathCandidates = providerLoginProviderTemplatePathCandidates(template, defaults.APIPath, template.APIPath)
+	defaults.ForwardURLCandidates = providerLoginProviderTemplatePathCandidates(template, defaults.ForwardURL, template.ForwardURL)
+	return defaults
+}
+
+func providerLoginProviderTemplateAPIPathCandidates(provider config.Provider, template modelcard.ProviderTemplate) []string {
+	return providerLoginProviderTemplateDefaults(provider, template).APIPathCandidates
+}
+
+func providerLoginProviderTemplateForwardURLCandidates(provider config.Provider, template modelcard.ProviderTemplate) []string {
+	return providerLoginProviderTemplateDefaults(provider, template).ForwardURLCandidates
+}
+
+func providerLoginProviderTemplatePathCandidates(template modelcard.ProviderTemplate, values ...string) []string {
+	out := make([]string, 0, len(values)+3)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		normalized := normalizeProviderLoginTemplatePath(value)
+		for _, existing := range out {
+			if normalizeProviderLoginTemplatePath(existing) == normalized {
+				return
+			}
+		}
+		out = append(out, value)
+	}
+	for _, value := range values {
+		add(value)
+	}
+	if strings.EqualFold(strings.TrimSpace(template.ID), "codex.responses") {
+		add("/v1/responses")
+		add("/responses")
+		add("/backend-api/codex/responses")
+	}
+	return out
+}
+
+func applyProviderLoginProviderTemplateDefaults(provider *config.Provider, template modelcard.ProviderTemplate, previous providerLoginTemplateDefaults, hasPrevious bool) {
+	if provider == nil || strings.TrimSpace(template.ID) == "" {
+		return
+	}
+	current := providerLoginProviderTemplateDefaults(*provider, template)
+	provider.APIPath = providerLoginMergedTemplatePath(provider.APIPath, current.APIPath, previous.APIPathCandidates, hasPrevious)
+	provider.ForwardURL = providerLoginMergedTemplatePath(provider.ForwardURL, current.ForwardURL, previous.ForwardURLCandidates, hasPrevious)
+	provider.SupportTypes = providerLoginMergedTemplateSupportTypes(provider.SupportTypes, current.SupportTypes, previous.SupportTypes, hasPrevious)
+	provider.MaxTokensLimit = providerLoginMergedTemplateMaxTokensLimit(provider.MaxTokensLimit, current.MaxTokensLimit, previous.MaxTokensLimit, hasPrevious)
+}
+
+func providerLoginMergedTemplatePath(configured, currentDefault string, previousDefaults []string, hasPrevious bool) string {
+	if strings.TrimSpace(configured) == "" {
+		return strings.TrimSpace(currentDefault)
+	}
+	if hasPrevious && providerLoginConfiguredPathMatchesAny(configured, previousDefaults) {
+		return strings.TrimSpace(currentDefault)
+	}
+	return configured
+}
+
+func providerLoginMergedTemplateSupportTypes(configured, currentDefault, previousDefault []string, hasPrevious bool) []string {
+	if len(configured) == 0 {
+		return append([]string(nil), currentDefault...)
+	}
+	if hasPrevious && providerLoginStringSlicesEqualFold(configured, previousDefault) {
+		return append([]string(nil), currentDefault...)
+	}
+	return configured
+}
+
+func providerLoginMergedTemplateMaxTokensLimit(configured, currentDefault, previousDefault int, hasPrevious bool) int {
+	if configured <= 0 {
+		return currentDefault
+	}
+	if hasPrevious && previousDefault > 0 && configured == previousDefault {
+		return currentDefault
+	}
+	return configured
+}
+
+func providerLoginStringSlicesEqualFold(left, right []string) bool {
+	left = providerLoginNormalizedStringSlice(left)
+	right = providerLoginNormalizedStringSlice(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func providerLoginNormalizedStringSlice(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func providerLoginCodexResponsesPathForBaseURL(baseURL string) (string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(baseURL))
+	if !strings.Contains(lower, "chatgpt.com") {
+		return "", false
+	}
+	if strings.Contains(lower, "/backend-api/codex") {
+		return "/responses", true
+	}
+	return "/backend-api/codex/responses", true
+}
+
+func providerLoginAllModelsFilteredError(skipped []providerLoginModelSkippedByProtocolInfo) error {
+	if len(skipped) == 0 {
+		return fmt.Errorf("models endpoint returned no supported models after provider-template filtering")
+	}
+	return fmt.Errorf("models endpoint returned only models for other provider templates; first skipped models: %s", providerLoginSkippedByProtocolSummary(skipped, 5))
+}
+
+func providerLoginSkippedByProtocolSummary(skipped []providerLoginModelSkippedByProtocolInfo, limit int) string {
+	if len(skipped) == 0 {
+		return ""
+	}
+	if limit <= 0 || limit > len(skipped) {
+		limit = len(skipped)
+	}
+	parts := make([]string, 0, limit+1)
+	for _, item := range skipped[:limit] {
+		model := strings.TrimSpace(item.Model)
+		recommended := strings.TrimSpace(item.RecommendedProviderTemplate)
+		if recommended == "" {
+			recommended = strings.TrimSpace(item.RecommendedProtocol)
+		}
+		if recommended == "" {
+			parts = append(parts, model)
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s -> %s", model, recommended))
+	}
+	if len(skipped) > limit {
+		parts = append(parts, fmt.Sprintf("... (%d more)", len(skipped)-limit))
+	}
+	return strings.Join(parts, ", ")
+}
+
 func buildProviderPersistenceUpdate(providerName string, candidate config.Provider, loginProtocol, authMode string, supportedModels []string, setDefault bool, verifiedAt string) config.ProviderConfigUpdate {
 	update := config.ProviderConfigUpdate{
 		Name:               providerName,
@@ -420,6 +883,12 @@ func buildProviderPersistenceUpdate(providerName string, candidate config.Provid
 		SupportedModels:    &supportedModels,
 		DefaultModel:       providerLoginStringValuePtr(candidate.DefaultModel),
 	}
+	update.APIPath = providerLoginStringValuePtr(candidate.APIPath)
+	update.ForwardURL = providerLoginStringValuePtr(candidate.ForwardURL)
+	supportTypes := append([]string(nil), candidate.SupportTypes...)
+	update.SupportTypes = &supportTypes
+	maxTokensLimit := candidate.MaxTokensLimit
+	update.MaxTokensLimit = &maxTokensLimit
 	if len(candidate.ModelCapabilities) > 0 {
 		capabilities := cloneProviderLoginModelCapabilities(candidate.ModelCapabilities)
 		update.ModelCapabilities = &capabilities
@@ -523,6 +992,89 @@ func providerLoginCompatModelHint(providerName, loginProtocol string, provider c
 		Protocol:     runtimeProtocolForLoginProtocol(loginProtocol),
 		BaseURL:      provider.BaseURL,
 	}, modelIDs)
+}
+
+func buildProviderLoginModelCapabilitiesForLogin(
+	providerName, loginProtocol string,
+	provider config.Provider,
+	models []providerModelInfo,
+	catalog *modelcard.Catalog,
+) (map[string]config.ModelCapabilitySpec, []providerLoginModelCardAppliedInfo, []providerLoginModelCardSkippedInfo) {
+	merged := cloneProviderLoginModelCapabilities(provider.ModelCapabilities)
+	if merged == nil {
+		merged = make(map[string]config.ModelCapabilitySpec)
+	}
+	defaultEfforts := defaultProviderLoginReasoningEfforts(providerName, loginProtocol, provider, models)
+	ctx := modelcard.Context{
+		ProviderName:    providerName,
+		LoginProtocol:   loginProtocol,
+		RuntimeProtocol: runtimeProtocolForLoginProtocol(loginProtocol),
+		BaseURL:         provider.BaseURL,
+	}
+	if catalog != nil {
+		if template, ok := resolveProviderLoginProviderTemplate(catalog, runtimeProtocolForLoginProtocol(loginProtocol), provider); ok {
+			ctx.ProviderTemplate = strings.TrimSpace(template.ID)
+		}
+	}
+	applied := make([]providerLoginModelCardAppliedInfo, 0)
+	skipped := make([]providerLoginModelCardSkippedInfo, 0)
+
+	for _, model := range models {
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		existing := merged[modelID]
+		remote := providerLoginModelCapabilitySpec(model)
+		compat := providerLoginCompatModelCapabilitySpec(modelID, providerName, loginProtocol, provider, defaultEfforts)
+		cardCapability := config.ModelCapabilitySpec{}
+		cardApplied := []modelcard.AppliedCard(nil)
+		if catalog != nil {
+			cardCapability, cardApplied = catalog.Resolve(ctx, modelID)
+			if len(cardApplied) == 0 {
+				skipped = append(skipped, providerLoginModelCardSkippedInfo{Model: modelID, Reason: "no_matching_card"})
+			}
+			for _, item := range cardApplied {
+				applied = append(applied, providerLoginModelCardAppliedInfo{
+					Model:  modelID,
+					CardID: item.CardID,
+					Fields: append([]string(nil), item.Fields...),
+				})
+			}
+		}
+		spec := modelcard.MergeCapability(existing, remote, cardCapability, compat)
+		if !providerLoginModelCapabilityIsEmpty(spec) {
+			merged[modelID] = spec
+		}
+	}
+
+	if providerLoginUsesWildcardReasoningEfforts(loginProtocol, provider) && len(defaultEfforts) > 0 {
+		compat := config.ModelCapabilitySpec{
+			ReasoningModel:   true,
+			ReasoningEfforts: append([]string(nil), defaultEfforts...),
+		}
+		spec := modelcard.MergeCapability(merged["*"], config.ModelCapabilitySpec{}, config.ModelCapabilitySpec{}, compat)
+		if !providerLoginModelCapabilityIsEmpty(spec) {
+			merged["*"] = spec
+		}
+	}
+	if len(merged) == 0 {
+		return nil, applied, skipped
+	}
+	return merged, applied, skipped
+}
+
+func providerLoginCompatModelCapabilitySpec(modelID, providerName, loginProtocol string, provider config.Provider, defaultEfforts []string) config.ModelCapabilitySpec {
+	if len(defaultEfforts) == 0 {
+		return config.ModelCapabilitySpec{}
+	}
+	if !providerLoginModelUsesDefaultReasoningEfforts(modelID, providerName, loginProtocol, provider) {
+		return config.ModelCapabilitySpec{}
+	}
+	return config.ModelCapabilitySpec{
+		ReasoningModel:   true,
+		ReasoningEfforts: append([]string(nil), defaultEfforts...),
+	}
 }
 
 func mergeProviderLoginModelCapabilities(existing, discovered map[string]config.ModelCapabilitySpec) map[string]config.ModelCapabilitySpec {
