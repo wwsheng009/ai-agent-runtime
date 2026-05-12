@@ -339,13 +339,14 @@ func maskProxyURL(proxyURL string) string {
 
 // AICLIConfig holds aicli configuration.
 type AICLIConfig struct {
-	MCP     *AICLIMCPConfig     `yaml:"mcp" mapstructure:"mcp"`
-	Log     *AICLILogConfig     `yaml:"log" mapstructure:"log"`
-	Retry   *AICLIRetryConfig   `yaml:"retry" mapstructure:"retry"`
-	Timeout *AICLITimeoutConfig `yaml:"timeout" mapstructure:"timeout"`
-	Theme   *AICLIThemeConfig   `yaml:"theme" mapstructure:"theme"`
-	Chat    *AICLIChatConfig    `yaml:"chat" mapstructure:"chat"`
-	Runtime *AICLIRuntimeConfig `yaml:"runtime" mapstructure:"runtime"`
+	MCP        *AICLIMCPConfig        `yaml:"mcp" mapstructure:"mcp"`
+	Log        *AICLILogConfig        `yaml:"log" mapstructure:"log"`
+	Retry      *AICLIRetryConfig      `yaml:"retry" mapstructure:"retry"`
+	Timeout    *AICLITimeoutConfig    `yaml:"timeout" mapstructure:"timeout"`
+	Theme      *AICLIThemeConfig      `yaml:"theme" mapstructure:"theme"`
+	Chat       *AICLIChatConfig       `yaml:"chat" mapstructure:"chat"`
+	Runtime    *AICLIRuntimeConfig    `yaml:"runtime" mapstructure:"runtime"`
+	ModelCards *AICLIModelCardsConfig `yaml:"model_cards" mapstructure:"model_cards"`
 }
 
 // AICLIMCPConfig holds aicli MCP configuration.
@@ -391,6 +392,14 @@ type AICLIChatConfig struct {
 type AICLIRuntimeConfig struct {
 	Mode      string `yaml:"mode,omitempty" mapstructure:"mode" env:"AICLI_RUNTIME_MODE"`
 	ServerURL string `yaml:"server_url,omitempty" mapstructure:"server_url" env:"AICLI_RUNTIME_SERVER_URL"`
+}
+
+// AICLIModelCardsConfig controls model card catalog loading for provider login.
+type AICLIModelCardsConfig struct {
+	Enabled     *bool  `yaml:"enabled" mapstructure:"enabled"`
+	BuiltinPath string `yaml:"builtin_path" mapstructure:"builtin_path"`
+	UserPath    string `yaml:"user_path" mapstructure:"user_path"`
+	Strict      bool   `yaml:"strict" mapstructure:"strict"`
 }
 
 // ProfilesConfig holds profile topology configuration.
@@ -688,7 +697,7 @@ func BuildUpstreamURLWithPath(provider Provider, transformedPath, queryString, m
 		u = strings.Replace(u, "{path}", transformedPath, -1)
 		// relative forward_url: prepend base_url
 		if strings.HasPrefix(u, "/") {
-			u = strings.TrimSuffix(provider.BaseURL, "/") + u
+			u = JoinBaseURLAndPath(provider.BaseURL, u)
 		}
 		if queryString != "" {
 			if strings.Contains(u, "?") {

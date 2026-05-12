@@ -27,6 +27,8 @@ custom_section:
 		Enabled:            boolPtr(true),
 		Protocol:           stringPtr("openai"),
 		BaseURL:            stringPtr("https://api.example.com"),
+		APIPath:            stringPtr("/v1/chat/completions"),
+		ForwardURL:         stringPtr("/v1/chat/completions"),
 		APIKey:             stringPtr("sk-test"),
 		APIKeyRef:          stringPtr("alpha-key"),
 		SupportedModels:    &models,
@@ -34,11 +36,13 @@ custom_section:
 		AuthMode:           stringPtr("api_key"),
 		ModelsPath:         stringPtr("/v1/models"),
 		ModelsVerifiedAt:   stringPtr("2026-05-02T00:00:00Z"),
+		SupportTypes:       &[]string{"openai", "openai"},
+		MaxTokensLimit:     intPtr(10000),
 	})
 	if err != nil {
 		t.Fatalf("UpdateProviderConfig: %v", err)
 	}
-	if updated == nil || updated.Protocol != "openai" || updated.DefaultModel != "gpt-4.1-mini" {
+	if updated == nil || updated.Protocol != "openai" || updated.DefaultModel != "gpt-4.1-mini" || updated.APIPath != "/v1/chat/completions" || updated.ForwardURL != "/v1/chat/completions" || updated.MaxTokensLimit != 10000 {
 		t.Fatalf("unexpected provider: %+v", updated)
 	}
 
@@ -53,9 +57,13 @@ custom_section:
 		"default_provider: alpha",
 		"alpha:",
 		"protocol: openai",
+		"api_path: /v1/chat/completions",
+		"forward_url: /v1/chat/completions",
 		"api_key: sk-test",
 		"api_key_ref: alpha-key",
 		"supported_models:",
+		"support_types:",
+		"max_tokens_limit: 10000",
 		"- gpt-4.1-mini",
 		"- gpt-5",
 	} {
@@ -84,6 +92,10 @@ func TestUpdateProviderConfig_WritesModelCapabilities(t *testing.T) {
 				"xhigh",
 				"none",
 			},
+			ReasoningEffortBudgets: map[string]int{
+				"none": 0,
+				"low":  0,
+			},
 		},
 		"gpt-5.4": {
 			MaxContextTokens: 270000,
@@ -109,6 +121,8 @@ func TestUpdateProviderConfig_WritesModelCapabilities(t *testing.T) {
 		"model_capabilities:",
 		"reasoning_model: true",
 		"reasoning_efforts:",
+		"reasoning_effort_budgets:",
+		"none: 0",
 		"- xhigh",
 		"- none",
 		"max_context_tokens: 270000",
@@ -210,5 +224,9 @@ providers:
 }
 
 func boolPtr(v bool) *bool {
+	return &v
+}
+
+func intPtr(v int) *int {
 	return &v
 }

@@ -102,6 +102,17 @@ func TestBuildUpstreamURLWithPathDedupesVersionPrefixInBaseURL(t *testing.T) {
 	}
 }
 
+func TestBuildUpstreamURLWithRelativeForwardURLDedupesBasePath(t *testing.T) {
+	got := BuildUpstreamURLWithPath(Provider{
+		BaseURL:    "https://chatgpt.com/backend-api/codex/responses",
+		ForwardURL: "/responses",
+	}, "/responses", "", "gpt-5")
+	want := "https://chatgpt.com/backend-api/codex/responses"
+	if got != want {
+		t.Fatalf("BuildUpstreamURLWithPath() = %q, want %q", got, want)
+	}
+}
+
 func TestInitGlobalConfigMimoAnthropicCapabilities(t *testing.T) {
 	_, testFile, _, ok := runtime.Caller(0)
 	if !ok {

@@ -19,6 +19,8 @@ type ProviderConfigUpdate struct {
 	Enabled            *bool
 	Protocol           *string
 	BaseURL            *string
+	APIPath            *string
+	ForwardURL         *string
 	APIKey             *string
 	APIKeyRef          *string
 	AuthMode           *string
@@ -27,6 +29,8 @@ type ProviderConfigUpdate struct {
 	ModelsVerifiedAt   *string
 	SupportedModels    *[]string
 	DefaultModel       *string
+	SupportTypes       *[]string
+	MaxTokensLimit     *int
 	ModelCapabilities  *map[string]ModelCapabilitySpec
 }
 
@@ -107,6 +111,8 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 	}
 	upsertRequiredStringYAMLValue(node, "protocol", update.Protocol)
 	upsertRequiredStringYAMLValue(node, "base_url", update.BaseURL)
+	upsertOptionalStringYAMLValue(node, "api_path", update.APIPath)
+	upsertOptionalStringYAMLValue(node, "forward_url", update.ForwardURL)
 	upsertRequiredStringYAMLValue(node, "default_model", update.DefaultModel)
 	upsertOptionalStringYAMLValue(node, "api_key", update.APIKey)
 	upsertOptionalStringYAMLValue(node, "api_key_ref", update.APIKeyRef)
@@ -116,6 +122,20 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 	upsertOptionalStringYAMLValue(node, "models_verified_at", update.ModelsVerifiedAt)
 	if update.SupportedModels != nil {
 		upsertYAMLMappingValue(node, "supported_models", stringSliceYAMLNode(*update.SupportedModels))
+	}
+	if update.SupportTypes != nil {
+		if len(*update.SupportTypes) == 0 {
+			removeYAMLMappingValue(node, "support_types")
+		} else {
+			upsertYAMLMappingValue(node, "support_types", stringSliceYAMLNode(*update.SupportTypes))
+		}
+	}
+	if update.MaxTokensLimit != nil {
+		if *update.MaxTokensLimit <= 0 {
+			removeYAMLMappingValue(node, "max_tokens_limit")
+		} else {
+			upsertYAMLMappingValue(node, "max_tokens_limit", intYAMLNode(*update.MaxTokensLimit))
+		}
 	}
 	if update.ModelCapabilities != nil {
 		if len(*update.ModelCapabilities) == 0 {
@@ -210,7 +230,7 @@ func intMapYAMLNode(values map[string]int) *yaml.Node {
 	normalized := make(map[string]int, len(values))
 	for key, value := range values {
 		trimmed := strings.TrimSpace(key)
-		if trimmed != "" && value > 0 {
+		if trimmed != "" && value >= 0 {
 			if _, exists := normalized[trimmed]; !exists {
 				keys = append(keys, trimmed)
 			}
