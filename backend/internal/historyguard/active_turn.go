@@ -275,8 +275,8 @@ func buildActiveTurnReplaySummary(messages []types.Message) *types.Message {
 		return nil
 	}
 
-	assistantItems := make([]string, 0, 4)
-	toolItems := make([]string, 0, 6)
+	assistantItems := make([]string, 0)
+	toolItems := make([]string, 0)
 	toolCalls := 0
 
 	for _, message := range messages {
@@ -292,29 +292,41 @@ func buildActiveTurnReplaySummary(messages []types.Message) *types.Message {
 					}
 				}
 				if len(names) > 0 {
-					assistantItems = appendLimited(assistantItems, "assistant requested tools: "+strings.Join(names, ", "), 4)
+					assistantItems = append(assistantItems, "assistant requested tools: "+strings.Join(names, ", "))
 				}
 			} else if content != "" {
-				assistantItems = appendLimited(assistantItems, summarizeLine(content, 180), 4)
+				assistantItems = append(assistantItems, summarizeLine(content, 180))
 			}
 		case "tool":
 			if content != "" {
-				toolItems = appendLimited(toolItems, summarizeLine(content, 200), 6)
+				toolItems = append(toolItems, summarizeLine(content, 200))
 			}
 		}
 	}
 
 	lines := []string{"Compacted earlier tool replay in current turn:"}
-	if len(assistantItems) > 0 {
+	if head, recent := splitSummaryItems(assistantItems, 4, 3); len(head) > 0 {
 		lines = append(lines, "Assistant actions:")
-		for _, item := range assistantItems {
+		for _, item := range head {
 			lines = append(lines, "- "+item)
 		}
+		if len(recent) > 0 {
+			lines = append(lines, "Recent assistant actions:")
+			for _, item := range recent {
+				lines = append(lines, "- "+item)
+			}
+		}
 	}
-	if len(toolItems) > 0 {
+	if head, recent := splitSummaryItems(toolItems, 6, 4); len(head) > 0 {
 		lines = append(lines, "Tool outcomes:")
-		for _, item := range toolItems {
+		for _, item := range head {
 			lines = append(lines, "- "+item)
+		}
+		if len(recent) > 0 {
+			lines = append(lines, "Recent tool outcomes:")
+			for _, item := range recent {
+				lines = append(lines, "- "+item)
+			}
 		}
 	}
 
@@ -331,6 +343,9 @@ func latestReplayBlockStart(messages []types.Message, userIndex int) int {
 	}
 
 	index := len(messages) - 1
+	for index > userIndex && isTrailingContextMessage(messages[index]) {
+		index--
+	}
 	for index > userIndex && messages[index].Role == "tool" {
 		index--
 	}
@@ -341,6 +356,16 @@ func latestReplayBlockStart(messages []types.Message, userIndex int) int {
 		return index
 	}
 	return index
+}
+
+func isTrailingContextMessage(message types.Message) bool {
+	if strings.TrimSpace(message.Metadata.GetString("context_stage", "")) != "" {
+		return true
+	}
+	content := strings.TrimSpace(message.Content)
+	return strings.HasPrefix(content, "Relevant recalled artifacts:") ||
+		strings.HasPrefix(content, "Recent observations:") ||
+		strings.HasPrefix(content, "Workspace recall:")
 }
 
 func activeUserTurnStart(messages []types.Message) int {
@@ -388,6 +413,27 @@ func appendLimited(items []string, item string, limit int) []string {
 		return items
 	}
 	return append(items, item)
+}
+
+func splitSummaryItems(items []string, headLimit, recentLimit int) ([]string, []string) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	if headLimit <= 0 || len(items) <= headLimit {
+		return append([]string(nil), items...), nil
+	}
+	head := append([]string(nil), items[:headLimit]...)
+	if recentLimit <= 0 {
+		return head, nil
+	}
+	recentStart := len(items) - recentLimit
+	if recentStart < headLimit {
+		recentStart = headLimit
+	}
+	if recentStart >= len(items) {
+		return head, nil
+	}
+	return head, append([]string(nil), items[recentStart:]...)
 }
 
 func joinCompactionReasons(overBytes, overTokens, overTotalTokens bool) string {

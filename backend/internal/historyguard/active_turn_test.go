@@ -75,6 +75,49 @@ func TestCompactActiveTurnReplay_CompactsEarlierReplayAndKeepsLatestBlock(t *tes
 	}
 }
 
+func TestCompactActiveTurnReplay_KeepsLatestBlockBeforeTrailingContext(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 80)
+	recall := types.NewAssistantMessage("Relevant recalled artifacts:\n- artifact=art_1 tool=view previous plan")
+	recall.Metadata["context_stage"] = "recall"
+	messages := []types.Message{
+		*types.NewUserMessage("continue analysis"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_1", Name: "view", Args: map[string]interface{}{"file_path": "README.md"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_1", "README "+large),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_2", Name: "ls", Args: map[string]interface{}{"path": "docs/plan"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_2", "docs/plan latest listing"),
+		*recall,
+	}
+
+	got, compacted := CompactActiveTurnReplay(messages, 2048)
+	if !compacted {
+		t.Fatalf("expected compaction, got %#v", got)
+	}
+	if len(got) != 5 {
+		t.Fatalf("expected user + summary + latest assistant + latest tool + recall, got %#v", got)
+	}
+	if got[2].Role != "assistant" || len(got[2].ToolCalls) != 1 || got[2].ToolCalls[0].ID != "call_2" {
+		t.Fatalf("expected latest assistant tool call before recall to be preserved, got %#v", got[2])
+	}
+	if got[3].Role != "tool" || got[3].ToolCallID != "call_2" {
+		t.Fatalf("expected latest tool result before recall to be preserved, got %#v", got[3])
+	}
+	if got[4].Metadata.GetString("context_stage", "") != "recall" {
+		t.Fatalf("expected trailing recall context to remain after latest replay, got %#v", got[4])
+	}
+}
+
 func TestCompactActiveTurnReplay_ReducesLatestReplayToolResultWithoutBreakingToolPair(t *testing.T) {
 	large := strings.Repeat("line with artifact_refs: runtime-http/request.json\n", 200)
 	messages := []types.Message{
