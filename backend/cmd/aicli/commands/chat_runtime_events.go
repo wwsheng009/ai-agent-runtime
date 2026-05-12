@@ -22,6 +22,7 @@ import (
 type chatRuntimeEventBridge struct {
 	session                *ChatSession
 	startOnce              sync.Once
+	processorOnce          sync.Once
 	eventQueue             chan runtimeevents.Event
 	runMu                  sync.Mutex
 	logMu                  sync.Mutex
@@ -50,6 +51,8 @@ type chatRuntimeEventBridge struct {
 	processedEvents        uint64
 	askApproval            func(*runtimechat.ApprovalRequest) (bool, error)
 	askQuestion            func(prompt string, suggestions []string, required bool) (string, error)
+	approveTool            func(ctx context.Context, sessionID, requestID string, allow bool) error
+	answerQuestion         func(ctx context.Context, sessionID, questionID, answer string) error
 	writeLine              func(string)
 	writeDelta             func(string)
 	finalizeDelta          func()
@@ -230,7 +233,16 @@ func (b *chatRuntimeEventBridge) start() {
 		return
 	}
 	b.startOnce.Do(func() {
+		b.startProcessor()
 		b.session.LocalRuntimeHost.EventBus.Subscribe("", b.Handle)
+	})
+}
+
+func (b *chatRuntimeEventBridge) startProcessor() {
+	if b == nil {
+		return
+	}
+	b.processorOnce.Do(func() {
 		go b.run()
 	})
 }
@@ -819,11 +831,6 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if event.Type != runtimechat.EventApprovalRequested && event.Type != runtimechat.EventQuestionAsked {
 		return
 	}
-	actor, err := b.lookupActor(event.SessionID)
-	if err != nil {
-		b.setRunError(err)
-		return
-	}
 	switch event.Type {
 	case runtimechat.EventApprovalRequested:
 		requestID, _ := event.Payload["request_id"].(string)
@@ -831,7 +838,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		b.maybeRenderPermissionModeHint(reason)
 		approval := b.approvalRequestForEvent(event)
 		if grantKey := b.autoApprovalGrantKey(event.SessionID, approval); grantKey != "" && b.hasApprovalGrant(grantKey) {
-			if err := actor.ApproveTool(context.Background(), requestID, true); err != nil {
+			if err := b.resolveApproval(context.Background(), event.SessionID, requestID, true); err != nil {
 				b.setRunError(err)
 			}
 			return
@@ -841,19 +848,19 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		}
 		if b.session.NoInteractive {
 			b.setRunError(fmt.Errorf("interactive approval required in --no-interactive mode"))
-			_ = actor.ApproveTool(context.Background(), requestID, false)
+			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
 			return
 		}
 		allowed, askErr := b.askApproval(approval)
 		if askErr != nil {
 			b.setRunError(askErr)
-			_ = actor.ApproveTool(context.Background(), requestID, false)
+			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
 			return
 		}
 		if allowed {
 			b.rememberApprovalGrant(b.autoApprovalGrantKey(event.SessionID, approval))
 		}
-		if err := actor.ApproveTool(context.Background(), requestID, allowed); err != nil {
+		if err := b.resolveApproval(context.Background(), event.SessionID, requestID, allowed); err != nil {
 			b.setRunError(err)
 		}
 	case runtimechat.EventQuestionAsked:
@@ -863,16 +870,16 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		suggestions := interfaceSliceToStrings(event.Payload["suggestions"])
 		if b.session.NoInteractive {
 			b.setRunError(fmt.Errorf("interactive question required in --no-interactive mode"))
-			_ = actor.AnswerQuestion(context.Background(), questionID, "")
+			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
 			return
 		}
 		answer, askErr := b.askQuestion(prompt, suggestions, required)
 		if askErr != nil {
 			b.setRunError(askErr)
-			_ = actor.AnswerQuestion(context.Background(), questionID, "")
+			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
 			return
 		}
-		if err := actor.AnswerQuestion(context.Background(), questionID, answer); err != nil {
+		if err := b.resolveQuestion(context.Background(), event.SessionID, questionID, answer); err != nil {
 			b.setRunError(err)
 		}
 	}
@@ -1611,6 +1618,34 @@ func (b *chatRuntimeEventBridge) lookupActor(sessionID string) (*runtimechat.Ses
 		return nil, fmt.Errorf("session hub not configured")
 	}
 	return b.session.LocalRuntimeHost.SessionHub.GetOrCreate(strings.TrimSpace(sessionID))
+}
+
+func (b *chatRuntimeEventBridge) resolveApproval(ctx context.Context, sessionID, requestID string, allow bool) error {
+	if b == nil {
+		return nil
+	}
+	if b.approveTool != nil {
+		return b.approveTool(ctx, sessionID, requestID, allow)
+	}
+	actor, err := b.lookupActor(sessionID)
+	if err != nil {
+		return err
+	}
+	return actor.ApproveTool(ctx, requestID, allow)
+}
+
+func (b *chatRuntimeEventBridge) resolveQuestion(ctx context.Context, sessionID, questionID, answer string) error {
+	if b == nil {
+		return nil
+	}
+	if b.answerQuestion != nil {
+		return b.answerQuestion(ctx, sessionID, questionID, answer)
+	}
+	actor, err := b.lookupActor(sessionID)
+	if err != nil {
+		return err
+	}
+	return actor.AnswerQuestion(ctx, questionID, answer)
 }
 
 func (b *chatRuntimeEventBridge) setRunError(err error) {

@@ -13,6 +13,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -2543,9 +2544,12 @@ func (r *localActorRegistry) ensureSession(ctx context.Context, sessionID string
 		if prompt := strings.TrimSpace(r.Host.BaseSession.SystemPromptText); prompt != "" {
 			runtimeSession.AddMessage(*runtimetypes.NewSystemMessage(prompt))
 		}
-		runtimeSession.SetContext(chatRuntimeContextProviderName, strings.TrimSpace(r.Host.BaseSession.ProviderName))
-		runtimeSession.SetContext(chatRuntimeContextProtocol, strings.TrimSpace(r.Host.BaseSession.Provider.GetProtocol()))
-		runtimeSession.SetContext(chatRuntimeContextModel, strings.TrimSpace(r.Host.BaseSession.Model))
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProviderName, strings.TrimSpace(r.Host.BaseSession.ProviderName), chatRuntimeContextProviderName)
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProviderProtocol, strings.TrimSpace(r.Host.BaseSession.Provider.GetProtocol()), chatRuntimeContextProtocol)
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Model, strings.TrimSpace(r.Host.BaseSession.Model), chatRuntimeContextModel)
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ReasoningEffort, strings.TrimSpace(r.Host.BaseSession.ReasoningEffort), chatRuntimeContextReasoningEffort)
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Stream, r.Host.BaseSession.Stream, chatRuntimeContextStream)
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DisableTools, r.Host.BaseSession.DisableTools, chatRuntimeContextDisableTools)
 	}
 	if _, err := r.applyTeamTeammateAgentContext(ctx, runtimeSession); err != nil {
 		return err

@@ -141,6 +141,7 @@ func syncChatLoggerModelState(session *ChatSession) {
 	session.Logger.sessionLog.Protocol = session.Provider.GetProtocol()
 	session.Logger.sessionLog.Model = strings.TrimSpace(session.Model)
 	session.Logger.sessionLog.BaseURL = strings.TrimSpace(session.BaseURL)
+	session.Logger.sessionLog.Stream = session.Stream
 }
 
 func promptRuntimeModelSelection(session *ChatSession) (string, bool, error) {

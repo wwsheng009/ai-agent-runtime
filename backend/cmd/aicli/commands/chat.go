@@ -85,6 +85,7 @@ type ChatSession struct {
 	OutputFormat                    string                             // 输出格式（interactive|text|json）
 	InputReader                     *bufio.Reader                      // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
 	InputQueue                      *chatInputQueue                    // interactive line queue fed by stdin pump
+	ProfileReference                string                             // 用户指定或配置解析出的 profile 引用
 	ProfileName                     string                             // 当前 profile 名称
 	ProfileAgent                    string                             // 当前 profile agent
 	ProfileRoot                     string                             // 当前 profile 根目录
@@ -202,7 +203,7 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	}
 	applyProfileDefaultsToChatOptions(opts, profileState)
 
-	persistenceState, err := prepareChatPersistence(opts)
+	persistenceState, err := prepareChatPersistence(cfg, opts, profileState)
 	if err != nil {
 		exitCommandError("chat", opts.OutputFormat, err, nil)
 	}
@@ -625,7 +626,10 @@ func shouldDisplayActorStreamFallback(session *ChatSession) bool {
 	if session == nil || !session.Stream {
 		return false
 	}
-	_, ok := session.ChatExecutor.(*aicliActorChatExecutor)
+	if _, ok := session.ChatExecutor.(*aicliActorChatExecutor); ok {
+		return true
+	}
+	_, ok := session.ChatExecutor.(*aicliRuntimeServerChatExecutor)
 	return ok
 }
 
@@ -633,15 +637,14 @@ func wasInteractiveActorResponseAlreadyRendered(session *ChatSession) bool {
 	if session == nil || session.NoInteractive || session.JSONOutput || session.RuntimeEventBridge == nil {
 		return false
 	}
-	_, ok := session.ChatExecutor.(*aicliActorChatExecutor)
-	return ok && session.RuntimeEventBridge.HasRenderedAssistantFinal()
+	return chatExecutorUsesRuntimeEvents(session.ChatExecutor) && session.RuntimeEventBridge.HasRenderedAssistantFinal()
 }
 
 func finalizeInteractiveActorStreamIfNeeded(session *ChatSession, response string) bool {
 	if session == nil || session.NoInteractive || session.JSONOutput || !session.Stream || session.RuntimeEventBridge == nil {
 		return false
 	}
-	if _, ok := session.ChatExecutor.(*aicliActorChatExecutor); !ok {
+	if !chatExecutorUsesRuntimeEvents(session.ChatExecutor) {
 		return false
 	}
 	if !session.RuntimeEventBridge.HasRenderedAssistantDelta() {
@@ -657,6 +660,15 @@ func finalizeInteractiveActorStreamIfNeeded(session *ChatSession, response strin
 		session.RuntimeEventBridge.MarkAssistantFinalRendered()
 	}
 	return completed
+}
+
+func chatExecutorUsesRuntimeEvents(executor aicliChatExecutor) bool {
+	switch executor.(type) {
+	case *aicliActorChatExecutor, *aicliRuntimeServerChatExecutor:
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldPrintChatSessionPreamble(session *ChatSession) bool {

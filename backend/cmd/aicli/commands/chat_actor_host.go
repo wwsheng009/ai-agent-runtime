@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -19,6 +21,7 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -26,6 +29,8 @@ import (
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+const localChatSessionActorLeaseOwnerKind = "aicli-actor"
 
 type localChatRuntimeHost struct {
 	Bootstrap          *runtimebootstrap.Manager
@@ -37,6 +42,7 @@ type localChatRuntimeHost struct {
 	TeamStore          team.Store
 	AgentControl       *agentcontrol.RegistryService
 	AgentRegistryStore agentcontrol.AgentRegistryStore
+	Background         *background.Manager
 	TeamClaims         *team.PathClaimManager
 	Orchestrator       *team.Orchestrator
 	ToolSurface        runtimeskill.MCPManager
@@ -53,11 +59,26 @@ func (h *localChatRuntimeHost) Close() {
 	if h == nil {
 		return
 	}
+	h.waitForWarmup()
 	for i := len(h.cleanupFns) - 1; i >= 0; i-- {
 		if h.cleanupFns[i] != nil {
 			h.cleanupFns[i]()
 		}
 	}
+}
+
+func (h *localChatRuntimeHost) waitForWarmup() {
+	if h == nil || h.BaseSession == nil || h.BaseSession.RuntimeSession == nil {
+		return
+	}
+	warmup := currentChatActorWarmup(h.BaseSession, h.BaseSession.RuntimeSession.ID)
+	if warmup == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, _ = warmup.wait(ctx)
+	cancel()
+	setChatActorWarmup(h.BaseSession, nil)
 }
 
 func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, toolManager *runtimetools.Manager) (*localChatRuntimeHost, error) {
@@ -97,9 +118,10 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		return nil, err
 	}
 
-	runtimeStore, eventStore := buildLocalChatRuntimeStores(session)
+	runtimeStore, eventStore := buildLocalChatRuntimeStores(session, runtimeConfig)
 	receiptStore, _ := runtimeStore.(runtimechat.ToolReceiptStore)
 	agentControlRegistry := buildLocalChatAgentControlRegistryService(runtimeConfig)
+	backgroundManager := buildLocalChatBackgroundManager(runtimeConfig)
 	var globalMailboxStore agentcontrol.GlobalMailboxRegistryStore
 	var globalAgentStore agentcontrol.AgentRegistryStore
 	if agentControlRegistry != nil {
@@ -117,6 +139,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		TeamStore:          bootstrapManager.TeamStore(),
 		AgentControl:       agentControlRegistry,
 		AgentRegistryStore: globalAgentStore,
+		Background:         backgroundManager,
 		ToolSurface:        runtimeMCP,
 		EventBus:           eventBus,
 		SessionStore:       sessionStore,
@@ -158,15 +181,12 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	})
 	host.cleanupFns = []func(){
 		func() {
-			host.stopTeamLifecycleLoops()
+			_ = bootstrapManager.Stop()
 		},
 		func() {
-			if host.SessionHub != nil {
-				host.SessionHub.StopAll()
+			if backgroundManager != nil {
+				backgroundManager.Close()
 			}
-		},
-		func() {
-			closeLocalRuntimeStores(runtimeStore, eventStore)
 		},
 		func() {
 			if host.Orchestrator != nil && globalMailboxStore != nil {
@@ -178,7 +198,15 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 			}
 		},
 		func() {
-			_ = bootstrapManager.Stop()
+			closeLocalRuntimeStores(runtimeStore, eventStore)
+		},
+		func() {
+			if host.SessionHub != nil {
+				host.SessionHub.StopAll()
+			}
+		},
+		func() {
+			host.stopTeamLifecycleLoops()
 		},
 	}
 
@@ -230,6 +258,10 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		}
 	}
 	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, childAgentType, requestedModel)
+	leaseHandle, leaseErr := acquireLocalChatSessionLease(context.Background(), h.RuntimeStore, sessionID)
+	if leaseErr != nil {
+		return nil, leaseErr
+	}
 	actor, err := runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
 		Agent:        apiAgent,
 		LLMRuntime:   h.Bootstrap.LLMRuntime(),
@@ -238,11 +270,70 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		EventStore:   h.EventStore,
 		EventBus:     h.EventBus,
 		LoopConfig:   buildLocalChatLoopConfig(runtimeConfig, session),
+		OnStop: func() {
+			if leaseHandle != nil {
+				_ = leaseHandle.Release(context.Background())
+			}
+		},
 	})
 	if err != nil {
+		if leaseHandle != nil {
+			_ = leaseHandle.Release(context.Background())
+		}
 		return nil, err
 	}
 	return actor, nil
+}
+
+func acquireLocalChatSessionLease(ctx context.Context, store runtimechat.RuntimeStateStore, sessionID string) (*runtimechat.SessionLeaseHandle, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil
+	}
+	leaseStore, ok := store.(runtimechat.SessionLeaseStore)
+	if !ok || leaseStore == nil {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return runtimechat.AcquireSessionLease(ctx, leaseStore, runtimechat.LeaseRequest{
+		SessionID: sessionID,
+		OwnerID:   localChatSessionLeaseOwnerID(localChatSessionActorLeaseOwnerKind, sessionID),
+		OwnerKind: localChatSessionActorLeaseOwnerKind,
+		PID:       os.Getpid(),
+		Hostname:  localChatHostname(),
+	})
+}
+
+func localChatSessionLeaseOwnerID(ownerKind, scope string) string {
+	parts := []string{sanitizeLocalChatLeaseOwnerPart(ownerKind)}
+	if hostname := localChatHostname(); hostname != "" {
+		parts = append(parts, sanitizeLocalChatLeaseOwnerPart(hostname))
+	}
+	parts = append(parts, strconv.Itoa(os.Getpid()))
+	if scope = strings.TrimSpace(scope); scope != "" {
+		parts = append(parts, sanitizeLocalChatLeaseOwnerPart(scope))
+	}
+	return strings.Join(parts, ":")
+}
+
+func localChatHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(hostname)
+}
+
+func sanitizeLocalChatLeaseOwnerPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	value = strings.ReplaceAll(value, ":", "_")
+	value = strings.ReplaceAll(value, " ", "_")
+	return value
 }
 
 func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string, childAgentType string, requestedModel string) *agent.Agent {
@@ -336,6 +427,17 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 	if broker := apiAgent.GetToolBroker(); broker != nil && broker.SessionContextStore == nil {
 		broker.SessionContextStore = toolbrokersessionctx.New(host.SessionStore)
+	}
+	if host.Background != nil {
+		broker := apiAgent.GetToolBroker()
+		if broker == nil {
+			broker = &toolbroker.Broker{}
+			apiAgent.SetToolBroker(broker)
+		}
+		if broker.SessionContextStore == nil && host.SessionStore != nil {
+			broker.SessionContextStore = toolbrokersessionctx.New(host.SessionStore)
+		}
+		broker.Background = host.Background
 	}
 	if toolPolicy := buildLocalChatToolPolicy(session, host.ToolSurface, apiAgent.GetToolBroker()); toolPolicy != nil {
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
@@ -534,65 +636,46 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 	if len(wsCfg.Exclude) > 0 {
 		agentConfig.Options["workspace_exclude"] = append([]string(nil), wsCfg.Exclude...)
 	}
+	if path := strings.TrimSpace(runtimeConfig.Artifact.StorePath); path != "" {
+		agentConfig.Options["artifact_store_path"] = path
+	}
+	if dsn := strings.TrimSpace(runtimeConfig.Artifact.StoreDSN); dsn != "" {
+		agentConfig.Options["artifact_store_dsn"] = dsn
+	}
 }
 
 func loadLocalChatRuntimeConfig(cfg *config.Config, session *ChatSession) (*runtimecfg.RuntimeConfig, error) {
 	configPath := resolveChatRuntimeConfigPath(cfg, session)
 	if strings.TrimSpace(configPath) == "" {
 		config := runtimecfg.DefaultRuntimeConfig()
-		applyLocalChatRuntimePersistenceDefaults(config, session)
+		applyLocalChatRuntimePersistenceDefaults(config, session, "")
 		return config, nil
 	}
 	manager := runtimecfg.NewRuntimeManager(configPath)
 	if err := manager.Load(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: 加载 actor runtime 配置失败，已退回默认配置: %v\n", err)
 		config := runtimecfg.DefaultRuntimeConfig()
-		applyLocalChatRuntimePersistenceDefaults(config, session)
+		applyLocalChatRuntimePersistenceDefaults(config, session, configPath)
 		return config, nil
 	}
 	config := manager.Get()
 	if session != nil && session.Model != "" {
 		config.Agent.DefaultModel = session.Model
 	}
-	applyLocalChatRuntimePersistenceDefaults(config, session)
+	applyLocalChatRuntimePersistenceDefaults(config, session, configPath)
 	return config, nil
 }
 
-func applyLocalChatRuntimePersistenceDefaults(config *runtimecfg.RuntimeConfig, session *ChatSession) {
+func applyLocalChatRuntimePersistenceDefaults(config *runtimecfg.RuntimeConfig, session *ChatSession, configPath string) {
 	if config == nil || session == nil {
 		return
 	}
-	if strings.TrimSpace(config.Team.StorePath) == "" && strings.TrimSpace(config.Team.StoreDSN) == "" {
-		if teamStorePath := resolveLocalChatTeamStorePath(session); teamStorePath != "" {
-			config.Team.StorePath = teamStorePath
-		}
-	}
-	if strings.TrimSpace(config.AgentControl.StorePath) == "" &&
-		strings.TrimSpace(config.AgentControl.StoreDSN) == "" &&
-		strings.TrimSpace(config.AgentControl.MailboxStorePath) == "" &&
-		strings.TrimSpace(config.AgentControl.MailboxStoreDSN) == "" &&
-		strings.TrimSpace(config.AgentControl.AgentStorePath) == "" &&
-		strings.TrimSpace(config.AgentControl.AgentStoreDSN) == "" {
-		if registryStorePath := resolveLocalChatAgentControlStorePath(session); registryStorePath != "" {
-			config.AgentControl.StorePath = registryStorePath
-		}
-	}
-	if strings.TrimSpace(config.AgentControl.StorePath) == "" &&
-		strings.TrimSpace(config.AgentControl.StoreDSN) == "" &&
-		strings.TrimSpace(config.AgentControl.MailboxStorePath) == "" &&
-		strings.TrimSpace(config.AgentControl.MailboxStoreDSN) == "" {
-		if mailboxStorePath := resolveLocalChatGlobalMailboxStorePath(session); mailboxStorePath != "" {
-			config.AgentControl.MailboxStorePath = mailboxStorePath
-		}
-	}
-	if strings.TrimSpace(config.AgentControl.StorePath) == "" &&
-		strings.TrimSpace(config.AgentControl.StoreDSN) == "" &&
-		strings.TrimSpace(config.AgentControl.AgentStorePath) == "" &&
-		strings.TrimSpace(config.AgentControl.AgentStoreDSN) == "" {
-		if agentStorePath := resolveLocalChatGlobalAgentStorePath(session); agentStorePath != "" {
-			config.AgentControl.AgentStorePath = agentStorePath
-		}
-	}
+	sessionruntime.ApplyDefaults(config, sessionruntime.ResolveOptions{
+		Config:     config,
+		ConfigFile: configPath,
+		SessionDir: session.SessionDir,
+		Mode:       sessionruntime.ModeCLILocal,
+	})
 }
 
 func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSession) error {
@@ -639,8 +722,8 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 	return nil
 }
 
-func buildLocalChatRuntimeStores(session *ChatSession) (runtimechat.RuntimeStateStore, runtimechat.EventStore) {
-	storePath := resolveLocalChatRuntimeStorePath(session)
+func buildLocalChatRuntimeStores(session *ChatSession, runtimeConfig *runtimecfg.RuntimeConfig) (runtimechat.RuntimeStateStore, runtimechat.EventStore) {
+	storePath := resolveLocalChatRuntimeStorePath(session, runtimeConfig)
 	if storePath != "" {
 		store, err := runtimechat.NewSQLiteRuntimeStore(&runtimechat.RuntimeStoreConfig{Path: storePath})
 		if err == nil {
@@ -650,6 +733,24 @@ func buildLocalChatRuntimeStores(session *ChatSession) (runtimechat.RuntimeState
 	}
 	memoryStore := runtimechat.NewInMemoryRuntimeStore(2048)
 	return memoryStore, memoryStore
+}
+
+func buildLocalChatBackgroundManager(runtimeConfig *runtimecfg.RuntimeConfig) *background.Manager {
+	if runtimeConfig == nil {
+		return nil
+	}
+	cfg := runtimeConfig.Background
+	if strings.TrimSpace(cfg.StorePath) == "" && strings.TrimSpace(cfg.StoreDSN) == "" && strings.TrimSpace(cfg.LogDir) == "" {
+		return nil
+	}
+	return background.NewManager(background.Config{
+		MaxOutputBytes:    cfg.MaxOutputBytes,
+		DefaultTimeout:    cfg.DefaultTimeout,
+		StorePath:         strings.TrimSpace(cfg.StorePath),
+		StoreDSN:          strings.TrimSpace(cfg.StoreDSN),
+		LogDir:            strings.TrimSpace(cfg.LogDir),
+		MaxConcurrentJobs: cfg.MaxConcurrentJobs,
+	})
 }
 
 func buildLocalChatAgentControlRegistryService(runtimeConfig *runtimecfg.RuntimeConfig) *agentcontrol.RegistryService {
@@ -750,11 +851,19 @@ func closeLocalRuntimeStores(store runtimechat.RuntimeStateStore, eventStore run
 	closeStore(eventStore)
 }
 
-func resolveLocalChatRuntimeStorePath(session *ChatSession) string {
+func resolveLocalChatRuntimeStorePath(session *ChatSession, runtimeConfig *runtimecfg.RuntimeConfig) string {
+	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath) != "" {
+		return strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath)
+	}
 	if session == nil || strings.TrimSpace(session.SessionDir) == "" {
 		return ""
 	}
-	return filepath.Join(session.SessionDir, "runtime", "chat_runtime.sqlite")
+	paths := sessionruntime.ResolvePaths(sessionruntime.ResolveOptions{
+		Config:     runtimeConfig,
+		SessionDir: session.SessionDir,
+		Mode:       sessionruntime.ModeCLILocal,
+	})
+	return paths.SessionRuntimeStorePath
 }
 
 func resolveLocalChatTeamStorePath(session *ChatSession) string {

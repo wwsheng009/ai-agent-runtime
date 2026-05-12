@@ -733,6 +733,9 @@ func TestShouldDisplayFinalResponse(t *testing.T) {
 	if !shouldDisplayFinalResponse(&ChatSession{Stream: true, ChatExecutor: &aicliActorChatExecutor{}}, "hello") {
 		t.Fatal("expected actor-first stream session to display final response fallback")
 	}
+	if !shouldDisplayFinalResponse(&ChatSession{Stream: true, ChatExecutor: &aicliRuntimeServerChatExecutor{}}, "hello") {
+		t.Fatal("expected runtime-server stream session to display final response fallback")
+	}
 	if shouldDisplayFinalResponse(&ChatSession{Stream: false}, "   ") {
 		t.Fatal("expected blank response to skip final response display")
 	}

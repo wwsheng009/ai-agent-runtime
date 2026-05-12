@@ -114,6 +114,8 @@ func parseExecOptionsInternal(cmd *cobra.Command, args []string, readPrompt bool
 	opts.StreamFlag, _ = cmd.Flags().GetBool("stream")
 	opts.StreamChanged = cmd.Flags().Changed("stream")
 	opts.ReasoningEffortFlag, _ = cmd.Flags().GetString("reasoning-effort")
+	opts.RuntimeModeFlag, _ = cmd.Flags().GetString("runtime-mode")
+	opts.RuntimeServerFlag, _ = cmd.Flags().GetString("runtime-server")
 
 	opts.JSONMode, _ = cmd.Flags().GetBool("json")
 	outputFlag, _ := cmd.Flags().GetString("output")
@@ -131,6 +133,7 @@ func parseExecOptionsInternal(cmd *cobra.Command, args []string, readPrompt bool
 
 	opts.Ephemeral, _ = cmd.Flags().GetBool("ephemeral")
 	opts.SessionDir, _ = cmd.Flags().GetString("session-dir")
+	opts.SessionUser, _ = cmd.Flags().GetString("user")
 	opts.SessionTitle, _ = cmd.Flags().GetString("title")
 	opts.ImagePaths, _ = cmd.Flags().GetStringSlice("image")
 	opts.RequestTimeout, _ = cmd.Flags().GetString("request-timeout")
@@ -199,6 +202,12 @@ func readExecStdinIfPiped() (string, error) {
 }
 
 func buildExecSession(cfg *config.Config, opts *ExecOptions, processor ExecEventProcessor) (*ExecSession, func(), error) {
+	runtimeMode, runtimeServerURL, err := resolveAICLIRuntimeExecution(cfg, opts.RuntimeServerFlag, opts.RuntimeModeFlag, strings.TrimSpace(opts.RuntimeServerFlag) != "", strings.TrimSpace(opts.RuntimeModeFlag) != "")
+	if err != nil {
+		return nil, nil, newExecExitError(execExitUsage, "INVALID_RUNTIME_MODE", err)
+	}
+	opts.RuntimeMode = runtimeMode
+	opts.RuntimeServerURL = runtimeServerURL
 	chatOpts := buildExecChatOptions(opts)
 	profileState, err := resolveChatProfileState(cfg, chatOpts)
 	if err != nil {
@@ -209,7 +218,7 @@ func buildExecSession(cfg *config.Config, opts *ExecOptions, processor ExecEvent
 		strings.TrimSpace(opts.SessionTitle) != "" ||
 		(profileState != nil && profileState.Active())
 
-	persistenceState, err := prepareExecPersistence(chatOpts, opts)
+	persistenceState, err := prepareExecPersistence(cfg, chatOpts, opts, profileState)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -256,6 +265,10 @@ func buildExecChatOptions(opts *ExecOptions) *chatCommandOptions {
 		RequestTimeoutFlag:     opts.RequestTimeout,
 		ReasoningEffortFlag:    opts.ReasoningEffortFlag,
 		ReasoningEffortChanged: strings.TrimSpace(opts.ReasoningEffortFlag) != "",
+		RuntimeServerFlag:      opts.RuntimeServerFlag,
+		RuntimeModeFlag:        opts.RuntimeModeFlag,
+		RuntimeMode:            opts.RuntimeMode,
+		RuntimeServerURL:       opts.RuntimeServerURL,
 		DisableTools:           opts.DisableTools,
 		HTTPDebug:              opts.HTTPDebug,
 		FailFast:               opts.FailFast,
@@ -269,6 +282,7 @@ func buildExecChatOptions(opts *ExecOptions) *chatCommandOptions {
 		OutputFlag:             opts.OutputFormat,
 		JSONEnvelope:           opts.JSONEnvelope,
 		SessionDirFlag:         opts.SessionDir,
+		SessionUserFlag:        opts.SessionUser,
 		SessionTitleFlag:       opts.SessionTitle,
 		ProviderChanged:        strings.TrimSpace(opts.ProviderFlag) != "",
 		ModelChanged:           strings.TrimSpace(opts.ModelFlag) != "",
@@ -277,14 +291,14 @@ func buildExecChatOptions(opts *ExecOptions) *chatCommandOptions {
 	}
 }
 
-func prepareExecPersistence(chatOpts *chatCommandOptions, opts *ExecOptions) (*chatPersistenceState, error) {
+func prepareExecPersistence(cfg *config.Config, chatOpts *chatCommandOptions, opts *ExecOptions, profileState *chatProfileState) (*chatPersistenceState, error) {
 	if opts != nil && opts.Ephemeral {
 		if strings.TrimSpace(opts.SessionDir) != "" || strings.TrimSpace(opts.SessionTitle) != "" {
 			return nil, newExecExitError(execExitUsage, "EPHEMERAL_SESSION_CONFLICT", fmt.Errorf("--ephemeral 不能与 --session-dir 或 --title 同时使用"))
 		}
 		return &chatPersistenceState{}, nil
 	}
-	return prepareChatPersistence(chatOpts)
+	return prepareChatPersistence(cfg, chatOpts, profileState)
 }
 
 func executeExecWithSignals(session *ExecSession) error {

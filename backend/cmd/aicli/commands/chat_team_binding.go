@@ -9,17 +9,18 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const (
-	chatRuntimeContextPermissionMode = "aicli_permission_mode"
-	chatRuntimeContextActiveTeamID   = "aicli_active_team_id"
-	chatRuntimeContextActiveAgentID  = "aicli_active_team_agent_id"
-	chatRuntimeContextActiveTaskID   = "aicli_active_task_id"
-	chatRuntimeContextSelectedAgent  = "aicli_selected_agent_target"
+	chatRuntimeContextPermissionMode = sessionmeta.LegacyAICLIPermissionMode
+	chatRuntimeContextActiveTeamID   = sessionmeta.LegacyAICLIActiveTeamID
+	chatRuntimeContextActiveAgentID  = sessionmeta.LegacyAICLIActiveTeamAgentID
+	chatRuntimeContextActiveTaskID   = sessionmeta.LegacyAICLIActiveTeamTaskID
+	chatRuntimeContextSelectedAgent  = sessionmeta.LegacyAICLISelectedAgent
 )
 
 type chatTeamBinding struct {
@@ -170,12 +171,22 @@ func syncChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Se
 	if runtimeSession.Metadata.Context == nil {
 		runtimeSession.Metadata.Context = make(map[string]interface{})
 	}
-	runtimeSession.Metadata.Context[chatRuntimeContextPermissionMode] = string(session.PermissionMode)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Client, "aicli")
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Entrypoint, "aicli")
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.PermissionMode, string(session.PermissionMode), chatRuntimeContextPermissionMode)
+	if profileRef := strings.TrimSpace(session.ProfileReference); profileRef != "" {
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProfileRef, profileRef, sessionmeta.LegacyAPIProfileReference)
+	} else {
+		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ProfileRef, sessionmeta.LegacyAPIProfileReference)
+	}
+	if workspacePath := strings.TrimSpace(resolveLocalWorkspacePath(loadRuntimeToolConfig(session.Config, session), session)); workspacePath != "" {
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.WorkspacePath, workspacePath)
+	}
 	selectedAgentTarget := strings.TrimSpace(session.SelectedAgentTarget)
 	if selectedAgentTarget != "" {
-		runtimeSession.Metadata.Context[chatRuntimeContextSelectedAgent] = selectedAgentTarget
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.SelectedAgent, selectedAgentTarget, chatRuntimeContextSelectedAgent)
 	} else {
-		delete(runtimeSession.Metadata.Context, chatRuntimeContextSelectedAgent)
+		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.SelectedAgent, chatRuntimeContextSelectedAgent)
 	}
 	requestedModel := strings.TrimSpace(session.Model)
 	if requestedModel != "" {
@@ -183,16 +194,16 @@ func syncChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Se
 	} else {
 		delete(runtimeSession.Metadata.Context, toolbroker.AgentSessionContextRequestedModel)
 	}
-	delete(runtimeSession.Metadata.Context, chatRuntimeContextActiveTeamID)
-	delete(runtimeSession.Metadata.Context, chatRuntimeContextActiveAgentID)
-	delete(runtimeSession.Metadata.Context, chatRuntimeContextActiveTaskID)
+	sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamID, chatRuntimeContextActiveTeamID)
+	sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamAgentID, chatRuntimeContextActiveAgentID)
+	sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamTaskID, chatRuntimeContextActiveTaskID)
 	if session.ActiveTeam == nil || strings.TrimSpace(session.ActiveTeam.TeamID) == "" {
 		return
 	}
-	runtimeSession.Metadata.Context[chatRuntimeContextActiveTeamID] = strings.TrimSpace(session.ActiveTeam.TeamID)
-	runtimeSession.Metadata.Context[chatRuntimeContextActiveAgentID] = firstNonEmptyChatValue(session.ActiveTeam.AgentID, "lead")
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamID, strings.TrimSpace(session.ActiveTeam.TeamID), chatRuntimeContextActiveTeamID)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamAgentID, firstNonEmptyChatValue(session.ActiveTeam.AgentID, "lead"), chatRuntimeContextActiveAgentID)
 	if strings.TrimSpace(session.ActiveTeam.TaskID) != "" {
-		runtimeSession.Metadata.Context[chatRuntimeContextActiveTaskID] = strings.TrimSpace(session.ActiveTeam.TaskID)
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ActiveTeamTaskID, strings.TrimSpace(session.ActiveTeam.TaskID), chatRuntimeContextActiveTaskID)
 	}
 }
 

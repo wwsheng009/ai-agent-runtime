@@ -116,6 +116,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	session.Interaction = newChatInteractionCoordinator(session)
 	session.Interaction.SetSurface(surface)
 	if profileState != nil && profileState.Active() {
+		session.ProfileReference = profileState.Reference
 		session.ProfileName = profileState.Resolved.ProfileName
 		session.ProfileAgent = profileState.Resolved.AgentID
 		session.ProfileRoot = profileState.Resolved.ProfileRoot
@@ -225,6 +226,11 @@ func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPer
 
 func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, session *ChatSession) (*skillsRuntimeBinding, func(), error) {
 	if session == nil || opts == nil {
+		return nil, nil, nil
+	}
+	if configured, err := configureRuntimeServerChatExecutor(context.Background(), opts, session); err != nil {
+		return nil, nil, err
+	} else if configured {
 		return nil, nil, nil
 	}
 

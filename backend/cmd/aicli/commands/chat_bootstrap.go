@@ -9,7 +9,9 @@ import (
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 )
 
 type chatPersistenceState struct {
@@ -36,13 +38,30 @@ type chatRuntimeState struct {
 	requestTimeout   time.Duration
 }
 
-func prepareChatPersistence(opts *chatCommandOptions) (*chatPersistenceState, error) {
+func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profileState *chatProfileState) (*chatPersistenceState, error) {
 	state := &chatPersistenceState{}
 	if opts == nil {
 		return state, nil
 	}
 
-	manager, userID, sessionDir, err := newChatSessionManager(opts.SessionDirFlag)
+	runtimeConfig, runtimeConfigPath := loadChatPersistenceRuntimeConfig(cfg, profileState)
+	if manager, userID, sessionDir, configured, err := prepareRuntimeServerChatPersistence(runtimeConfig, opts); err != nil {
+		return nil, err
+	} else if configured {
+		state.runtimeSessionManager = manager
+		state.sessionUserID = userID
+		state.resolvedSessionDir = sessionDir
+		if manager != nil {
+			loadedRuntimeSession, loadErr := loadRequestedRuntimeSession(context.Background(), manager, userID, opts.SessionIDFlag, opts.ResumeFlag)
+			if loadErr != nil {
+				return nil, fmt.Errorf("加载会话失败: %w", loadErr)
+			}
+			state.loadedRuntimeSession = loadedRuntimeSession
+		}
+		return state, nil
+	}
+
+	manager, userID, sessionDir, err := newChatSessionManagerWithRuntimeConfig(opts.SessionDirFlag, runtimeConfig, runtimeConfigPath, opts.SessionUserFlag)
 	if err != nil {
 		if opts.SessionFeaturesRequested {
 			return nil, fmt.Errorf("初始化会话管理失败: %w", err)
@@ -64,6 +83,32 @@ func prepareChatPersistence(opts *chatCommandOptions) (*chatPersistenceState, er
 	}
 
 	return state, nil
+}
+
+func loadChatPersistenceRuntimeConfig(cfg *config.Config, profileState *chatProfileState) (*runtimecfg.RuntimeConfig, string) {
+	runtimePath := ""
+	if profileState != nil && profileState.Active() {
+		runtimePath = strings.TrimSpace(profileState.RuntimeConfigPath())
+	}
+	if runtimePath == "" && cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
+		runtimePath = resolveGlobalRuntimeConfigPath(cfg)
+	}
+	if runtimePath == "" {
+		return nil, ""
+	}
+	manager := runtimecfg.NewRuntimeManager(runtimePath)
+	if err := manager.Load(); err != nil {
+		return nil, runtimePath
+	}
+	runtimeConfig := manager.Get()
+	runtimeConfigPath := manager.GetFilePath()
+	sessionruntime.ApplyDefaults(runtimeConfig, sessionruntime.ResolveOptions{
+		Config:     runtimeConfig,
+		ConfigFile: runtimeConfigPath,
+		SessionDir: strings.TrimSpace(runtimeConfig.Sessions.Dir),
+		Mode:       sessionruntime.ModeCLILocal,
+	})
+	return runtimeConfig, runtimeConfigPath
 }
 
 func maybeSelectStartupSession(opts *chatCommandOptions, state *chatPersistenceState) error {

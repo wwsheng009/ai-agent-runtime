@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -415,6 +417,84 @@ func TestResumeLatestRuntimeConversationSkipsCurrentSession(t *testing.T) {
 	}
 	if session.RuntimeSession == nil || session.RuntimeSession.ID != previous.ID {
 		t.Fatalf("expected previous session %s, got %#v", previous.ID, session.RuntimeSession)
+	}
+}
+
+func TestLoadRuntimeConversationRestoresProviderModelAndReasoning(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	openAIProvider := config.Provider{
+		Enabled:      true,
+		Protocol:     "openai",
+		BaseURL:      "https://openai.example.com",
+		DefaultModel: "gpt-4.1",
+		ModelCapabilities: map[string]config.ModelCapabilitySpec{
+			"gpt-4.1": {ReasoningEfforts: []string{"low", "medium", "high"}},
+		},
+	}
+	anthropicProvider := config.Provider{
+		Enabled:      true,
+		Protocol:     "anthropic",
+		BaseURL:      "https://anthropic.example.com",
+		DefaultModel: "claude-3-5-sonnet",
+	}
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "anthropic",
+			Items: map[string]config.Provider{
+				"openai":    openAIProvider,
+				"anthropic": anthropicProvider,
+			},
+		},
+	}
+
+	target, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create target: %v", err)
+	}
+	target.ReplaceHistory([]runtimetypes.Message{{Role: "user", Content: "restore me", Metadata: runtimetypes.NewMetadata()}})
+	target.Metadata.Context[chatRuntimeContextProviderName] = "openai"
+	target.Metadata.Context[chatRuntimeContextProtocol] = "openai"
+	target.Metadata.Context[chatRuntimeContextModel] = "gpt-4.1"
+	target.Metadata.Context[chatRuntimeContextReasoningEffort] = "high"
+	target.Metadata.Context[chatRuntimeContextStream] = true
+	if err := manager.Update(context.Background(), target); err != nil {
+		t.Fatalf("manager.Update target: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:    "anthropic",
+		Provider:        anthropicProvider,
+		Adapter:         adapter.GetAdapterOrDefault("anthropic"),
+		Model:           "claude-3-5-sonnet",
+		ReasoningEffort: "medium",
+		BaseURL:         buildProviderURL(anthropicProvider, adapter.GetAdapterOrDefault("anthropic").GetAPIPath(), "claude-3-5-sonnet"),
+		Config:          cfg,
+		SessionManager:  manager,
+		SessionUserID:   userID,
+	}
+
+	if err := loadRuntimeConversation(session, target.ID); err != nil {
+		t.Fatalf("loadRuntimeConversation: %v", err)
+	}
+	if session.ProviderName != "openai" || session.Provider.GetProtocol() != "openai" {
+		t.Fatalf("expected provider to be restored to openai, got name=%q protocol=%q", session.ProviderName, session.Provider.GetProtocol())
+	}
+	if session.Model != "gpt-4.1" {
+		t.Fatalf("expected model gpt-4.1, got %q", session.Model)
+	}
+	if session.ReasoningEffort != "high" {
+		t.Fatalf("expected reasoning effort high, got %q", session.ReasoningEffort)
+	}
+	if !session.Stream {
+		t.Fatal("expected stream mode to be restored")
+	}
+	if len(session.Messages) < 2 || session.Messages[1].Content != "restore me" {
+		t.Fatalf("expected target history to be restored, got %#v", session.Messages)
 	}
 }
 

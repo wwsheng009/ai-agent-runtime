@@ -25,10 +25,10 @@ import (
 
 func TestPrepareChatPersistence_UsesProvidedSessionDir(t *testing.T) {
 	dir := t.TempDir()
-	state, err := prepareChatPersistence(&chatCommandOptions{
+	state, err := prepareChatPersistence(nil, &chatCommandOptions{
 		SessionDirFlag:           dir,
 		SessionFeaturesRequested: true,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("prepareChatPersistence: %v", err)
 	}
@@ -836,6 +836,10 @@ func TestLoadLocalChatRuntimeConfig_DefaultsTeamStorePathToSessionRuntimeDir(t *
 		t.Fatalf("loadLocalChatRuntimeConfig: %v", err)
 	}
 
+	expectedRuntime := filepath.Join(session.SessionDir, "runtime", "session_runtime.sqlite")
+	if cfg.SessionRuntime.StorePath != expectedRuntime {
+		t.Fatalf("expected session runtime store path %q, got %q", expectedRuntime, cfg.SessionRuntime.StorePath)
+	}
 	expected := filepath.Join(session.SessionDir, "runtime", "team_store.sqlite")
 	if cfg.Team.StorePath != expected {
 		t.Fatalf("expected team store path %q, got %q", expected, cfg.Team.StorePath)
@@ -849,6 +853,18 @@ func TestLoadLocalChatRuntimeConfig_DefaultsTeamStorePathToSessionRuntimeDir(t *
 	}
 	if cfg.AgentControl.AgentStorePath != "" {
 		t.Fatalf("expected agent control agent override to be empty, got %q", cfg.AgentControl.AgentStorePath)
+	}
+	expectedArtifacts := filepath.Join(session.SessionDir, "runtime", "artifacts.sqlite")
+	if cfg.Artifact.StorePath != expectedArtifacts {
+		t.Fatalf("expected artifact store path %q, got %q", expectedArtifacts, cfg.Artifact.StorePath)
+	}
+	expectedBackgroundStore := filepath.Join(session.SessionDir, "runtime", "background.sqlite")
+	if cfg.Background.StorePath != expectedBackgroundStore {
+		t.Fatalf("expected background store path %q, got %q", expectedBackgroundStore, cfg.Background.StorePath)
+	}
+	expectedBackgroundLogDir := filepath.Join(session.SessionDir, "runtime", "background_logs")
+	if cfg.Background.LogDir != expectedBackgroundLogDir {
+		t.Fatalf("expected background log dir %q, got %q", expectedBackgroundLogDir, cfg.Background.LogDir)
 	}
 }
 

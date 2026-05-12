@@ -20,6 +20,7 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 	chat.Flags().StringP("message", "M", "", "")
 	chat.Flags().BoolP("stream", "s", false, "")
 	chat.Flags().Bool("no-interactive", false, "")
+	chat.Flags().String("runtime-server", "", "")
 	root.AddCommand(chat)
 
 	tests := []struct {
@@ -51,6 +52,11 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 			name: "boolean flag with explicit value default to chat",
 			args: []string{"-s", "true", "-M", "hello"},
 			want: []string{"chat", "-s", "true", "-M", "hello"},
+		},
+		{
+			name: "runtime server flag default to chat",
+			args: []string{"--runtime-server", "server", "-M", "hello"},
+			want: []string{"chat", "--runtime-server", "server", "-M", "hello"},
 		},
 		{
 			name: "help flag preserves root help",

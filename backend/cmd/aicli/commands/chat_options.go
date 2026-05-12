@@ -42,12 +42,17 @@ type chatCommandOptions struct {
 	ResumeFlag               bool
 	ListSessionsFlag         bool
 	SessionDirFlag           string
+	SessionUserFlag          string
 	SessionTitleFlag         string
 	SessionStateFlag         string
 	SessionProviderFilter    string
 	SessionModelFilter       string
 	SessionQueryFlag         string
 	SessionLimitFlag         int
+	RuntimeServerFlag        string
+	RuntimeModeFlag          string
+	RuntimeMode              string
+	RuntimeServerURL         string
 	ProviderChanged          bool
 	ModelChanged             bool
 	OutputFormat             string
@@ -88,14 +93,21 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	resumeFlag, _ := cmd.Flags().GetBool("resume")
 	listSessionsFlag, _ := cmd.Flags().GetBool("list-sessions")
 	sessionDirFlag, _ := cmd.Flags().GetString("session-dir")
+	sessionUserFlag, _ := cmd.Flags().GetString("user")
 	sessionTitleFlag, _ := cmd.Flags().GetString("title")
 	sessionStateFlag, _ := cmd.Flags().GetString("session-state")
 	sessionProviderFilterFlag, _ := cmd.Flags().GetString("session-provider")
 	sessionModelFilterFlag, _ := cmd.Flags().GetString("session-model")
 	sessionQueryFlag, _ := cmd.Flags().GetString("session-query")
 	sessionLimitFlag, _ := cmd.Flags().GetInt("session-limit")
+	runtimeServerFlag, _ := cmd.Flags().GetString("runtime-server")
+	runtimeModeFlag, _ := cmd.Flags().GetString("runtime-mode")
 
 	outputFormat, err := resolveChatOutputFormat(noInteractive, outputFlag, jsonOutput)
+	if err != nil {
+		return nil, err
+	}
+	runtimeMode, runtimeServerURL, err := resolveAICLIRuntimeExecution(cfg, runtimeServerFlag, runtimeModeFlag, cmd.Flags().Changed("runtime-server"), cmd.Flags().Changed("runtime-mode"))
 	if err != nil {
 		return nil, err
 	}
@@ -151,18 +163,23 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		ResumeFlag:             resumeFlag,
 		ListSessionsFlag:       listSessionsFlag,
 		SessionDirFlag:         sessionDirFlag,
+		SessionUserFlag:        sessionUserFlag,
 		SessionTitleFlag:       sessionTitleFlag,
 		SessionStateFlag:       sessionStateFlag,
 		SessionProviderFilter:  sessionProviderFilterFlag,
 		SessionModelFilter:     sessionModelFilterFlag,
 		SessionQueryFlag:       sessionQueryFlag,
 		SessionLimitFlag:       sessionLimitFlag,
+		RuntimeServerFlag:      runtimeServerFlag,
+		RuntimeModeFlag:        runtimeModeFlag,
+		RuntimeMode:            runtimeMode,
+		RuntimeServerURL:       runtimeServerURL,
 		ProviderChanged:        cmd.Flags().Changed("provider"),
 		ModelChanged:           cmd.Flags().Changed("model"),
 		OutputFormat:           outputFormat,
 		InputReader:            bufio.NewReader(os.Stdin),
 		SessionFilter:          sessionFilter,
-		SessionFeaturesRequested: listSessionsFlag || resumeFlag || strings.TrimSpace(sessionIDFlag) != "" || strings.TrimSpace(sessionDirFlag) != "" ||
+		SessionFeaturesRequested: listSessionsFlag || resumeFlag || strings.TrimSpace(sessionIDFlag) != "" || strings.TrimSpace(sessionDirFlag) != "" || strings.TrimSpace(sessionUserFlag) != "" ||
 			sessionFilter.State != "" || sessionFilter.Provider != "" || sessionFilter.Model != "" || sessionFilter.Query != "",
 	}, nil
 }

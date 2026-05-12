@@ -97,7 +97,7 @@ func buildExecSessionWithResume(cfg *config.Config, opts *ExecOptions, processor
 		return nil, nil, newExecExitError(execExitUsage, "PROFILE_FAILED", err)
 	}
 	applyProfileDefaultsToChatOptions(chatOpts, profileState)
-	persistenceState, err := prepareChatPersistence(chatOpts)
+	persistenceState, err := prepareChatPersistence(cfg, chatOpts, profileState)
 	if err != nil {
 		return nil, nil, newExecExitError(execExitUsage, "RESUME_LOAD_FAILED", err)
 	}

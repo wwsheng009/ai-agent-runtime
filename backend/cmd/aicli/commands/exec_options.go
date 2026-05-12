@@ -17,6 +17,10 @@ type ExecOptions struct {
 	StreamFlag          bool
 	StreamChanged       bool
 	ReasoningEffortFlag string
+	RuntimeModeFlag     string
+	RuntimeServerFlag   string
+	RuntimeMode         string
+	RuntimeServerURL    string
 
 	JSONMode      bool
 	OutputFormat  string
@@ -26,6 +30,7 @@ type ExecOptions struct {
 
 	Ephemeral      bool
 	SessionDir     string
+	SessionUser    string
 	SessionTitle   string
 	ImagePaths     []string
 	RequestTimeout string

@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
@@ -80,4 +81,61 @@ func listEnabledProviderNames(cfg *config.Config) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func resolveEnabledProviderNameByProtocol(cfg *config.Config, protocol string, preferred ...string) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" {
+		return "", false
+	}
+
+	for _, candidate := range preferred {
+		if name, ok := canonicalEnabledProviderName(cfg, candidate); ok {
+			provider := cfg.Providers.Items[name]
+			if strings.EqualFold(provider.GetProtocol(), protocol) {
+				return name, true
+			}
+		}
+	}
+
+	if name, ok := canonicalEnabledProviderName(cfg, cfg.Providers.DefaultProvider); ok {
+		provider := cfg.Providers.Items[name]
+		if strings.EqualFold(provider.GetProtocol(), protocol) {
+			return name, true
+		}
+	}
+
+	matches := make([]string, 0, len(cfg.Providers.Items))
+	for name, provider := range cfg.Providers.Items {
+		if provider.Enabled && strings.EqualFold(provider.GetProtocol(), protocol) {
+			matches = append(matches, name)
+		}
+	}
+	sort.Strings(matches)
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	return "", false
+}
+
+func canonicalEnabledProviderName(cfg *config.Config, providerName string) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		return "", false
+	}
+	if provider, ok := cfg.Providers.Items[providerName]; ok && provider.Enabled {
+		return providerName, true
+	}
+	for name, provider := range cfg.Providers.Items {
+		if provider.Enabled && strings.EqualFold(name, providerName) {
+			return name, true
+		}
+	}
+	return "", false
 }

@@ -93,7 +93,7 @@ func TestAICLIChatActorExecutor_LiveAutoStartShowsTeamProgressTimeline(t *testin
 		OutputFormat:           "text",
 	}
 
-	persistenceState, err := prepareChatPersistence(opts)
+	persistenceState, err := prepareChatPersistence(cfg, opts, nil)
 	if err != nil {
 		t.Fatalf("prepareChatPersistence: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestAICLIChatActorExecutor_LiveDocsPromptCreatesTeamAndUsesLocalReadFlow(t 
 		OutputFormat:           "text",
 	}
 
-	persistenceState, err := prepareChatPersistence(opts)
+	persistenceState, err := prepareChatPersistence(cfg, opts, nil)
 	if err != nil {
 		t.Fatalf("prepareChatPersistence: %v", err)
 	}
@@ -538,7 +538,7 @@ func TestAICLIChatActorExecutor_LiveDocsPromptClearsPromptBeforeAsyncTimeline(t 
 		OutputFormat:           "text",
 	}
 
-	persistenceState, err := prepareChatPersistence(opts)
+	persistenceState, err := prepareChatPersistence(cfg, opts, nil)
 	if err != nil {
 		t.Fatalf("prepareChatPersistence: %v", err)
 	}
@@ -730,7 +730,7 @@ func TestAICLIChatActorExecutor_LiveDocsTranscriptUsesObservedListingForTeamTask
 		OutputFormat:           "text",
 	}
 
-	persistenceState, err := prepareChatPersistence(opts)
+	persistenceState, err := prepareChatPersistence(cfg, opts, nil)
 	if err != nil {
 		t.Fatalf("prepareChatPersistence: %v", err)
 	}

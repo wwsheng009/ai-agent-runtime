@@ -345,6 +345,7 @@ type AICLIConfig struct {
 	Timeout *AICLITimeoutConfig `yaml:"timeout" mapstructure:"timeout"`
 	Theme   *AICLIThemeConfig   `yaml:"theme" mapstructure:"theme"`
 	Chat    *AICLIChatConfig    `yaml:"chat" mapstructure:"chat"`
+	Runtime *AICLIRuntimeConfig `yaml:"runtime" mapstructure:"runtime"`
 }
 
 // AICLIMCPConfig holds aicli MCP configuration.
@@ -384,6 +385,12 @@ type AICLIChatConfig struct {
 	ReasoningEffort string `yaml:"reasoning_effort,omitempty" mapstructure:"reasoning_effort"`
 	// Stream 记录用户偏好的输出模式（流式/普通）。使用指针以便区分“未配置”与“显式 false”。
 	Stream *bool `yaml:"stream,omitempty" mapstructure:"stream"`
+}
+
+// AICLIRuntimeConfig controls whether aicli executes turns locally or via runtime-server.
+type AICLIRuntimeConfig struct {
+	Mode      string `yaml:"mode,omitempty" mapstructure:"mode" env:"AICLI_RUNTIME_MODE"`
+	ServerURL string `yaml:"server_url,omitempty" mapstructure:"server_url" env:"AICLI_RUNTIME_SERVER_URL"`
 }
 
 // ProfilesConfig holds profile topology configuration.

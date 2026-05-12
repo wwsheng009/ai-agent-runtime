@@ -1,18 +1,17 @@
 package commands
 
 import (
-	"encoding/json"
-	"strconv"
 	"strings"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-const chatRuntimeContextTokenCount = "aicli_token_count"
-const chatRuntimeContextContextTokenCount = "aicli_context_token_count"
-const chatRuntimeContextContextWindowTokenCount = "aicli_context_window_token_count"
-const chatRuntimeContextTurnContextTokenCount = "aicli_turn_context_token_count"
+const chatRuntimeContextTokenCount = sessionmeta.LegacyAICLITokenCount
+const chatRuntimeContextContextTokenCount = sessionmeta.LegacyAICLIContextTokenCount
+const chatRuntimeContextContextWindowTokenCount = sessionmeta.LegacyAICLIContextWindowCount
+const chatRuntimeContextTurnContextTokenCount = sessionmeta.LegacyAICLITurnContextCount
 
 func applyChatTokenUsage(session *ChatSession, usage *runtimetypes.TokenUsage) {
 	if session == nil || usage == nil || usage.TotalTokens <= 0 {
@@ -267,47 +266,8 @@ func restoreChatContextTokenUsage(session *ChatSession, runtimeSession *runtimec
 }
 
 func runtimeSessionContextInt(session *runtimechat.Session, key string) (int, bool) {
-	if session == nil {
+	if session == nil || session.Metadata.Context == nil {
 		return 0, false
 	}
-	value, ok := session.GetContext(key)
-	if !ok || value == nil {
-		return 0, false
-	}
-
-	switch typed := value.(type) {
-	case int:
-		return typed, true
-	case int8:
-		return int(typed), true
-	case int16:
-		return int(typed), true
-	case int32:
-		return int(typed), true
-	case int64:
-		return int(typed), true
-	case uint:
-		return int(typed), true
-	case uint8:
-		return int(typed), true
-	case uint16:
-		return int(typed), true
-	case uint32:
-		return int(typed), true
-	case uint64:
-		return int(typed), true
-	case float32:
-		return int(typed), true
-	case float64:
-		return int(typed), true
-	case json.Number:
-		if parsed, err := typed.Int64(); err == nil {
-			return int(parsed), true
-		}
-	case string:
-		if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
-			return parsed, true
-		}
-	}
-	return 0, false
+	return sessionmeta.Int(session.Metadata.Context, key)
 }

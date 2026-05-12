@@ -257,6 +257,24 @@ func applyModelCommandSelection(session *ChatSession, providerCtx *providerExecu
 		return fmt.Errorf("当前没有活动会话")
 	}
 
+	if err := applyChatExecutionContext(session, providerCtx, reasoning); err != nil {
+		return err
+	}
+	warnIfChatSessionSyncFails(session, "toggle model", syncRuntimeSessionFromChat(session))
+	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+		warnIfChatSessionSyncFails(session, "refresh local runtime after model switch", err)
+	}
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
+	return persistModelCommandPreferences(session)
+}
+
+func applyChatExecutionContext(session *ChatSession, providerCtx *providerExecutionContext, reasoning string) error {
+	if session == nil || providerCtx == nil {
+		return fmt.Errorf("当前没有活动会话")
+	}
+
 	session.ProviderName = providerCtx.ProviderName
 	session.Provider = providerCtx.Provider
 	session.Adapter = providerCtx.Adapter
@@ -278,14 +296,7 @@ func applyModelCommandSelection(session *ChatSession, providerCtx *providerExecu
 		session.FunctionBuilder = functions.GetFunctionCallBuilder(session.Provider.GetProtocol())
 	}
 	syncChatLoggerModelState(session)
-	warnIfChatSessionSyncFails(session, "toggle model", syncRuntimeSessionFromChat(session))
-	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
-		warnIfChatSessionSyncFails(session, "refresh local runtime after model switch", err)
-	}
-	if session.Interaction != nil {
-		session.Interaction.RefreshStatus("")
-	}
-	return persistModelCommandPreferences(session)
+	return nil
 }
 
 func persistModelCommandPreferences(session *ChatSession) error {

@@ -26,7 +26,23 @@ func resolveChatProviderChoice(cfg *config.Config, opts *chatCommandOptions, loa
 	}
 	if loadedRuntimeSession != nil {
 		if storedProvider := runtimeSessionContextString(loadedRuntimeSession, chatRuntimeContextProviderName); storedProvider != "" {
+			if cfg == nil {
+				return storedProvider, chatPreferenceSourceSession
+			}
+			if canonicalProvider, ok := canonicalEnabledProviderName(cfg, storedProvider); ok {
+				return canonicalProvider, chatPreferenceSourceSession
+			}
+			if storedProtocol := runtimeSessionContextString(loadedRuntimeSession, chatRuntimeContextProtocol); storedProtocol != "" {
+				if providerName, ok := resolveEnabledProviderNameByProtocol(cfg, storedProtocol); ok {
+					return providerName, chatPreferenceSourceSession
+				}
+			}
 			return storedProvider, chatPreferenceSourceSession
+		}
+		if storedProtocol := runtimeSessionContextString(loadedRuntimeSession, chatRuntimeContextProtocol); storedProtocol != "" {
+			if providerName, ok := resolveEnabledProviderNameByProtocol(cfg, storedProtocol); ok {
+				return providerName, chatPreferenceSourceSession
+			}
 		}
 	}
 

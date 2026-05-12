@@ -22,6 +22,8 @@ func registerExecSharedFlags(cmd *cobra.Command, exclude map[string]bool) {
 	}
 	flags.Bool("stream", false, "使用流式模型输出")
 	flags.String("reasoning-effort", "", "当前模型支持的 reasoning_effort 值")
+	flags.String("runtime-mode", "", "执行宿主模式（local|server|auto）")
+	flags.String("runtime-server", "", "runtime-server 地址或模式别名（server|auto|local|http://127.0.0.1:8101）")
 
 	flags.Bool("json", false, "以 JSONL 事件流格式输出")
 	flags.String("output", "", "输出格式（text|json）")
@@ -31,6 +33,7 @@ func registerExecSharedFlags(cmd *cobra.Command, exclude map[string]bool) {
 
 	flags.Bool("ephemeral", false, "不持久化会话文件")
 	flags.String("session-dir", "", "chat 会话持久化目录")
+	flags.String("user", "", "chat 会话用户 ID")
 	if !has("title") {
 		flags.String("title", "", "设置当前 exec 会话标题")
 	}

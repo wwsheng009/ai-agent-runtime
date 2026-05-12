@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	osuser "os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,23 +14,26 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const (
-	chatRuntimeContextProviderName    = "aicli_provider_name"
-	chatRuntimeContextProtocol        = "aicli_protocol"
-	chatRuntimeContextModel           = "aicli_model"
-	chatRuntimeContextReasoningEffort = "aicli_reasoning_effort"
-	chatRuntimeContextApprovalReuse   = "aicli_approval_reuse"
-	chatRuntimeContextStream          = "aicli_stream"
-	chatRuntimeContextDisableTools    = "aicli_disable_tools"
-	chatRuntimeContextMessageCount    = "aicli_message_count"
-	chatRuntimeContextProfileName     = "aicli_profile_name"
-	chatRuntimeContextProfileAgent    = "aicli_profile_agent"
-	chatRuntimeContextProfileRoot     = "aicli_profile_root"
+	chatRuntimeContextProviderName    = sessionmeta.LegacyAICLIProviderName
+	chatRuntimeContextProtocol        = sessionmeta.LegacyAICLIProviderProtocol
+	chatRuntimeContextModel           = sessionmeta.LegacyAICLIModel
+	chatRuntimeContextReasoningEffort = sessionmeta.LegacyAICLIReasoningEffort
+	chatRuntimeContextApprovalReuse   = sessionmeta.LegacyAICLIApprovalReuse
+	chatRuntimeContextStream          = sessionmeta.LegacyAICLIStream
+	chatRuntimeContextDisableTools    = sessionmeta.LegacyAICLIDisableTools
+	chatRuntimeContextMessageCount    = sessionmeta.LegacyAICLIMessageCount
+	chatRuntimeContextProfileName     = sessionmeta.LegacyAICLIProfileName
+	chatRuntimeContextProfileAgent    = sessionmeta.LegacyAICLIProfileAgent
+	chatRuntimeContextProfileRoot     = sessionmeta.LegacyAICLIProfileRoot
 )
 
 type ChatSessionListFilter struct {
@@ -44,9 +46,23 @@ type ChatSessionListFilter struct {
 }
 
 func newChatSessionManager(dir string) (*runtimechat.SessionManager, string, string, error) {
+	return newChatSessionManagerWithRuntimeConfig(dir, nil, "", "")
+}
+
+func newChatSessionManagerWithRuntimeConfig(dir string, runtimeConfig *runtimecfg.RuntimeConfig, runtimeConfigFile, explicitUserID string) (*runtimechat.SessionManager, string, string, error) {
 	resolvedDir := strings.TrimSpace(dir)
 	if resolvedDir == "" {
-		resolvedDir = resolveDefaultChatSessionDir()
+		if runtimeConfig != nil {
+			resolved := sessionruntime.ResolvePaths(sessionruntime.ResolveOptions{
+				Config:     runtimeConfig,
+				ConfigFile: runtimeConfigFile,
+				Mode:       sessionruntime.ModeCLILocal,
+			})
+			resolvedDir = strings.TrimSpace(resolved.SessionDir)
+		}
+		if resolvedDir == "" {
+			resolvedDir = resolveDefaultChatSessionDir()
+		}
 	}
 
 	storage, err := runtimechat.NewFileStorage(resolvedDir)
@@ -59,7 +75,12 @@ func newChatSessionManager(dir string) (*runtimechat.SessionManager, string, str
 	cfg.CleanupInterval = 6 * time.Hour
 	cfg.IdleTimeout = 72 * time.Hour
 
-	return runtimechat.NewSessionManager(storage, cfg), resolveChatSessionUserID(), resolvedDir, nil
+	userID := sessionruntime.ResolveSessionUserID(sessionruntime.IdentitySource{
+		CLIUserID: strings.TrimSpace(explicitUserID),
+		Config:    runtimeConfig,
+		CLILocal:  true,
+	})
+	return runtimechat.NewSessionManager(storage, cfg), userID, resolvedDir, nil
 }
 
 func resolveDefaultChatSessionDir() string {
@@ -77,17 +98,7 @@ func ResolveDefaultChatLogDir() string {
 }
 
 func resolveChatSessionUserID() string {
-	if current, err := osuser.Current(); err == nil {
-		if username := strings.TrimSpace(current.Username); username != "" {
-			return username
-		}
-	}
-	for _, key := range []string{"AICLI_SESSION_USER", "USERNAME", "USER"} {
-		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-			return value
-		}
-	}
-	return "default"
+	return sessionruntime.ResolveSessionUserID(sessionruntime.IdentitySource{CLILocal: true})
 }
 
 func loadRequestedRuntimeSession(ctx context.Context, manager *runtimechat.SessionManager, userID, sessionID string, resume bool) (*runtimechat.Session, error) {
@@ -182,6 +193,9 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 	if runtimeSession.UserID != session.SessionUserID {
 		return fmt.Errorf("会话 %s 不属于当前用户", sessionID)
 	}
+	if err := applyRuntimeSessionExecutionContext(session, runtimeSession); err != nil {
+		return err
+	}
 	if err := ensureRuntimeSessionCompatible(session, runtimeSession); err != nil {
 		return err
 	}
@@ -199,6 +213,9 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 
 	runtimeSession, err := loadLatestResumableRuntimeSessionExcluding(context.Background(), session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session))
 	if err != nil {
+		return err
+	}
+	if err := applyRuntimeSessionExecutionContext(session, runtimeSession); err != nil {
 		return err
 	}
 	if err := ensureRuntimeSessionCompatible(session, runtimeSession); err != nil {
@@ -288,43 +305,43 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	if runtimeSession.Metadata.Context == nil {
 		runtimeSession.Metadata.Context = make(map[string]interface{})
 	}
-	runtimeSession.Metadata.Context[chatRuntimeContextProviderName] = session.ProviderName
-	runtimeSession.Metadata.Context[chatRuntimeContextProtocol] = session.Provider.GetProtocol()
-	runtimeSession.Metadata.Context[chatRuntimeContextModel] = session.Model
-	runtimeSession.Metadata.Context[chatRuntimeContextReasoningEffort] = runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
-	runtimeSession.Metadata.Context[chatRuntimeContextApprovalReuse] = string(session.ApprovalReuseMode)
-	runtimeSession.Metadata.Context[chatRuntimeContextStream] = session.Stream
-	runtimeSession.Metadata.Context[chatRuntimeContextDisableTools] = session.DisableTools
-	runtimeSession.Metadata.Context[chatRuntimeContextMessageCount] = len(session.Messages)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProviderName, session.ProviderName, chatRuntimeContextProviderName)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProviderProtocol, session.Provider.GetProtocol(), chatRuntimeContextProtocol)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Model, session.Model, chatRuntimeContextModel)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ReasoningEffort, runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort), chatRuntimeContextReasoningEffort)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ApprovalReuse, string(session.ApprovalReuseMode), chatRuntimeContextApprovalReuse)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Stream, session.Stream, chatRuntimeContextStream)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DisableTools, session.DisableTools, chatRuntimeContextDisableTools)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.MessageCount, len(session.Messages), chatRuntimeContextMessageCount)
 	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 	if session.TokenCount > 0 {
-		runtimeSession.Metadata.Context[chatRuntimeContextTokenCount] = session.TokenCount
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.TokenCount, session.TokenCount, chatRuntimeContextTokenCount)
 	} else {
-		delete(runtimeSession.Metadata.Context, chatRuntimeContextTokenCount)
+		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.TokenCount, chatRuntimeContextTokenCount)
 	}
 	if session.ContextTokenCount > 0 {
-		runtimeSession.Metadata.Context[chatRuntimeContextContextTokenCount] = session.ContextTokenCount
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ContextTokenCount, session.ContextTokenCount, chatRuntimeContextContextTokenCount)
 	} else {
-		delete(runtimeSession.Metadata.Context, chatRuntimeContextContextTokenCount)
+		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ContextTokenCount, chatRuntimeContextContextTokenCount)
 	}
 	if session.ContextWindowTokenCount > 0 {
-		runtimeSession.Metadata.Context[chatRuntimeContextContextWindowTokenCount] = session.ContextWindowTokenCount
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ContextWindowCount, session.ContextWindowTokenCount, chatRuntimeContextContextWindowTokenCount)
 	} else {
-		delete(runtimeSession.Metadata.Context, chatRuntimeContextContextWindowTokenCount)
+		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ContextWindowCount, chatRuntimeContextContextWindowTokenCount)
 	}
 	if session.TurnContextTokenCount > 0 {
-		runtimeSession.Metadata.Context[chatRuntimeContextTurnContextTokenCount] = session.TurnContextTokenCount
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.TurnContextCount, session.TurnContextTokenCount, chatRuntimeContextTurnContextTokenCount)
 	} else {
-		delete(runtimeSession.Metadata.Context, chatRuntimeContextTurnContextTokenCount)
+		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.TurnContextCount, chatRuntimeContextTurnContextTokenCount)
 	}
 	if strings.TrimSpace(session.ProfileName) != "" {
-		runtimeSession.Metadata.Context[chatRuntimeContextProfileName] = session.ProfileName
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProfileName, session.ProfileName, chatRuntimeContextProfileName)
 	}
 	if strings.TrimSpace(session.ProfileAgent) != "" {
-		runtimeSession.Metadata.Context[chatRuntimeContextProfileAgent] = session.ProfileAgent
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProfileAgent, session.ProfileAgent, chatRuntimeContextProfileAgent)
 	}
 	if strings.TrimSpace(session.ProfileRoot) != "" {
-		runtimeSession.Metadata.Context[chatRuntimeContextProfileRoot] = session.ProfileRoot
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProfileRoot, session.ProfileRoot, chatRuntimeContextProfileRoot)
 	}
 	syncChatRuntimeContext(session, runtimeSession)
 
@@ -737,30 +754,106 @@ func ensureRuntimeSessionCompatible(session *ChatSession, runtimeSession *runtim
 	return nil
 }
 
-func runtimeSessionContextString(session *runtimechat.Session, key string) string {
+func applyRuntimeSessionExecutionContext(session *ChatSession, runtimeSession *runtimechat.Session) error {
+	if session == nil || runtimeSession == nil {
+		return nil
+	}
+
+	storedProtocol := runtimeSessionContextString(runtimeSession, chatRuntimeContextProtocol)
+	providerName := runtimeSessionContextString(runtimeSession, chatRuntimeContextProviderName)
+	modelName := runtimeSessionContextString(runtimeSession, chatRuntimeContextModel)
+	reasoningEffort := runtimetypes.NormalizeReasoningEffort(runtimeSessionContextString(runtimeSession, chatRuntimeContextReasoningEffort))
+	if strings.TrimSpace(storedProtocol) == "" &&
+		strings.TrimSpace(providerName) == "" &&
+		strings.TrimSpace(modelName) == "" &&
+		strings.TrimSpace(reasoningEffort) == "" {
+		return nil
+	}
+
+	if strings.TrimSpace(providerName) == "" && strings.TrimSpace(storedProtocol) != "" {
+		if resolved, ok := resolveChatSessionProviderNameByProtocol(session, storedProtocol); ok {
+			providerName = resolved
+		}
+	} else if session.Config != nil && strings.TrimSpace(providerName) != "" {
+		if canonicalProvider, ok := canonicalEnabledProviderName(session.Config, providerName); ok {
+			providerName = canonicalProvider
+		} else if strings.TrimSpace(storedProtocol) != "" {
+			if resolved, ok := resolveChatSessionProviderNameByProtocol(session, storedProtocol); ok {
+				providerName = resolved
+			}
+		}
+	}
+	if strings.TrimSpace(providerName) == "" {
+		providerName = currentModelCommandProvider(session)
+	}
+	if strings.TrimSpace(providerName) == "" {
+		if strings.TrimSpace(storedProtocol) != "" {
+			return fmt.Errorf("会话协议为 %s，但当前配置中找不到可恢复的 provider", storedProtocol)
+		}
+		return nil
+	}
+
+	providerCtx, _, err := resolveModelCommandExecutionContext(session, providerName, modelName)
+	if err != nil {
+		if strings.TrimSpace(storedProtocol) == "" {
+			return err
+		}
+		return fmt.Errorf("会话协议为 %s，但无法恢复对应 provider/model: %w", storedProtocol, err)
+	}
+	if strings.TrimSpace(storedProtocol) != "" && !strings.EqualFold(providerCtx.Provider.GetProtocol(), storedProtocol) {
+		return fmt.Errorf("会话协议为 %s，解析出的 provider %s 协议为 %s，无法恢复",
+			storedProtocol, providerCtx.ProviderName, providerCtx.Provider.GetProtocol())
+	}
+
+	resolvedReasoning, warning, err := resolveChatReasoningEffort(providerCtx.Provider, providerCtx.Model, reasoningEffort, false)
+	if err != nil {
+		return err
+	}
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
+	if storedStream, ok := runtimeSessionContextBool(runtimeSession, chatRuntimeContextStream); ok {
+		session.Stream = storedStream
+	}
+	if err := applyChatExecutionContext(session, providerCtx, resolvedReasoning); err != nil {
+		return err
+	}
+	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+		warnIfChatSessionSyncFails(session, "refresh local runtime after resume", err)
+	}
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
+	return nil
+}
+
+func resolveChatSessionProviderNameByProtocol(session *ChatSession, protocol string) (string, bool) {
 	if session == nil {
+		return "", false
+	}
+	protocol = strings.TrimSpace(protocol)
+	if protocol == "" {
+		return "", false
+	}
+	currentProvider := currentModelCommandProvider(session)
+	if strings.EqualFold(session.Provider.GetProtocol(), protocol) && strings.TrimSpace(currentProvider) != "" {
+		return currentProvider, true
+	}
+	return resolveEnabledProviderNameByProtocol(session.Config, protocol, currentProvider)
+}
+
+func runtimeSessionContextString(session *runtimechat.Session, key string) string {
+	if session == nil || session.Metadata.Context == nil {
 		return ""
 	}
-	value, ok := session.GetContext(key)
-	if !ok || value == nil {
-		return ""
-	}
-	if text, ok := value.(string); ok {
-		return strings.TrimSpace(text)
-	}
-	return strings.TrimSpace(fmt.Sprintf("%v", value))
+	return sessionmeta.String(session.Metadata.Context, key)
 }
 
 func runtimeSessionContextBool(session *runtimechat.Session, key string) (bool, bool) {
-	if session == nil {
+	if session == nil || session.Metadata.Context == nil {
 		return false, false
 	}
-	value, ok := session.GetContext(key)
-	if !ok || value == nil {
-		return false, false
-	}
-	boolean, ok := value.(bool)
-	return boolean, ok
+	return sessionmeta.Bool(session.Metadata.Context, key)
 }
 
 func ensureChatSystemPromptMessage(session *ChatSession) {
