@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -29,6 +31,7 @@ import (
 )
 
 const emptyTerminalAssistantResponseError = "upstream model returned an empty reply: no text and no tool calls"
+const repeatedPromptToolLoopError = "repeated identical prompt view while model is still requesting tools"
 const defaultPromptPreflightAutoCompactRatio = 0.9
 
 // LoopReActConfig ReAct 循环配置
@@ -225,6 +228,8 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	remainingBudget := options.BudgetTokens
 	currentCtx := ensureTurnToolSurfaceSnapshot(ctx)
 	sessionCompactionRecoveryStep := 0
+	lastToolPromptFingerprint := ""
+	repeatedToolPromptFingerprint := 0
 
 	// ReAct 循环：Think - Act - Observe
 	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
@@ -326,6 +331,35 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 
 			return result, nil
+		}
+		if fingerprint := actionPromptFingerprint(action); fingerprint != "" {
+			if fingerprint == lastToolPromptFingerprint {
+				repeatedToolPromptFingerprint++
+			} else {
+				lastToolPromptFingerprint = fingerprint
+				repeatedToolPromptFingerprint = 1
+			}
+			if repeatedToolPromptFingerprint >= 2 {
+				err := fmt.Errorf("%s: fingerprint=%s step=%d", repeatedPromptToolLoopError, fingerprint, step)
+				loop.agent.AddError(err.Error())
+				result.Success = false
+				result.Error = err.Error()
+				result.Steps = step
+				result.Observations = observations
+				result.Duration = *startTime
+				result.Usage = totalUsage.Clone()
+				result.State = loop.agent.GetState()
+				loop.agent.emitRuntimeEvent("tool_loop.repeated_prompt_stopped", sessionID, "", map[string]interface{}{
+					"trace_id":           traceID,
+					"step":               step,
+					"prompt_fingerprint": fingerprint,
+					"tool_call_count":    len(action.ToolCalls),
+				})
+				return result, err
+			}
+		} else {
+			lastToolPromptFingerprint = ""
+			repeatedToolPromptFingerprint = 0
 		}
 
 		// 2. Act: 执行工具调用
@@ -663,6 +697,14 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if availability := summarizeToolAvailability(req.Tools); len(availability) > 0 {
 		req.Metadata["tool_availability"] = cloneInterfaceMap(availability)
 		requestPayload["tool_availability"] = availability
+	}
+	if fingerprint := promptMessageFingerprint(req.Messages); fingerprint != "" {
+		req.Metadata["prompt_fingerprint"] = fingerprint
+		requestPayload["prompt_fingerprint"] = fingerprint
+		if action.Metadata == nil {
+			action.Metadata = map[string]interface{}{}
+		}
+		action.Metadata["prompt_fingerprint"] = fingerprint
 	}
 	loop.agent.emitRuntimeEvent("llm.request.started", sessionID, "", requestPayload)
 	response, err := loop.llmRuntime.Call(callCtx, req)
@@ -2081,6 +2123,57 @@ func cloneMessages(input []types.Message) []types.Message {
 	return cloned
 }
 
+func actionPromptFingerprint(action *AgentAction) string {
+	if action == nil || len(action.Metadata) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(stringValue(action.Metadata["prompt_fingerprint"]))
+}
+
+func promptMessageFingerprint(messages []types.Message) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	type fingerprintToolCall struct {
+		ID   string                 `json:"id,omitempty"`
+		Name string                 `json:"name,omitempty"`
+		Args map[string]interface{} `json:"arguments,omitempty"`
+	}
+	type fingerprintMessage struct {
+		Role         string                `json:"role,omitempty"`
+		Content      string                `json:"content,omitempty"`
+		ContentParts []types.ContentPart   `json:"content_parts,omitempty"`
+		ToolCalls    []fingerprintToolCall `json:"tool_calls,omitempty"`
+		ToolCallID   string                `json:"tool_call_id,omitempty"`
+	}
+	payload := make([]fingerprintMessage, 0, len(messages))
+	for _, message := range messages {
+		item := fingerprintMessage{
+			Role:         message.Role,
+			Content:      message.Content,
+			ContentParts: append([]types.ContentPart(nil), message.ContentParts...),
+			ToolCallID:   message.ToolCallID,
+		}
+		if len(message.ToolCalls) > 0 {
+			item.ToolCalls = make([]fingerprintToolCall, 0, len(message.ToolCalls))
+			for _, call := range message.ToolCalls {
+				item.ToolCalls = append(item.ToolCalls, fingerprintToolCall{
+					ID:   call.ID,
+					Name: call.Name,
+					Args: call.Args,
+				})
+			}
+		}
+		payload = append(payload, item)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:])
+}
+
 func cloneToolDefinitions(input []types.ToolDefinition) []types.ToolDefinition {
 	if len(input) == 0 {
 		return nil
@@ -2559,6 +2652,7 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remaini
 
 	if runtime != nil {
 		resolvedCapabilityProvider, resolvedCapabilityModel, capability, ok := llm.ResolveRuntimeModelCapability(runtime, resolvedProvider, resolvedModel)
+		capabilityAddedPromptLimit := false
 		if ok {
 			if resolvedCapabilityProvider != "" {
 				budget.ResolvedProvider = resolvedCapabilityProvider
@@ -2579,6 +2673,7 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remaini
 					"provider/model capability auto_compact_token_limit",
 				)
 				hasResolvedPromptLimit = true
+				capabilityAddedPromptLimit = true
 			} else if capability.MaxContextTokens > 0 {
 				ratio := capability.AutoCompactRatio
 				if ratio <= 0 || ratio >= 1 {
@@ -2595,8 +2690,10 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remaini
 					fmt.Sprintf("floor(model capability max_context_tokens * %.2f)", ratio),
 				)
 				hasResolvedPromptLimit = true
+				capabilityAddedPromptLimit = true
 			}
-		} else if budget.ProviderContextLimit > 0 {
+		}
+		if (!ok || !capabilityAddedPromptLimit) && budget.ProviderContextLimit > 0 {
 			value := int(math.Floor(float64(budget.ProviderContextLimit) * defaultPromptPreflightAutoCompactRatio))
 			if value <= 0 || value > budget.ProviderContextLimit {
 				value = budget.ProviderContextLimit

@@ -100,7 +100,33 @@ func (s *SequenceLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*l
 }
 
 func (s *SequenceLLMProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
-	return nil, nil
+	s.requests = append(s.requests, cloneLLMRequest(req))
+	if s.callCount >= len(s.responses) {
+		ch := make(chan llm.StreamChunk, 1)
+		ch <- llm.StreamChunk{Type: llm.EventTypeDone, Done: true}
+		close(ch)
+		return ch, nil
+	}
+
+	response := s.responses[s.callCount]
+	s.callCount++
+
+	ch := make(chan llm.StreamChunk, 3)
+	go func() {
+		defer close(ch)
+		if response == nil {
+			ch <- llm.StreamChunk{Type: llm.EventTypeDone, Done: true}
+			return
+		}
+		if response.Reasoning != "" {
+			ch <- llm.StreamChunk{Type: llm.EventTypeReasoning, Content: response.Reasoning}
+		}
+		if response.Content != "" {
+			ch <- llm.StreamChunk{Type: llm.EventTypeText, Content: response.Content}
+		}
+		ch <- llm.StreamChunk{Type: llm.EventTypeDone, Done: true}
+	}()
+	return ch, nil
 }
 
 func (s *SequenceLLMProvider) CountTokens(text string) int {
@@ -1804,6 +1830,49 @@ func TestResolvePromptPreflightBudget_FallsBackToProviderContextLimitWhenCapabil
 	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
 	require.Equal(t, 8000, budget.ProviderContextLimit)
 	require.Equal(t, 2048, budget.ProviderOutputLimit)
+}
+
+func TestResolvePromptPreflightBudget_UsesProviderContextLimitWhenWildcardCapabilityHasNoLimit(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "gpt-5.5",
+	})
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		providerCaps: &llm.ModelCapabilities{
+			MaxContextTokens: 128000,
+			MaxOutputTokens:  4096,
+		},
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"*": {
+				ReasoningModel: true,
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	require.NoError(t, llmRuntime.RegisterProviderAlias("gpt-5.5", "test-provider"))
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "test-agent",
+			Provider: "test-provider",
+			Model:    "gpt-5.5",
+			Options: map[string]interface{}{
+				"context_fallback_max_prompt_tokens": 32000,
+			},
+		},
+		contextMgr: &contextmgr.Manager{
+			Budget: contextmgr.DefaultBudget(),
+		},
+	}
+
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	require.Equal(t, 115200, budget.PromptBudget)
+	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
+	require.Equal(t, 128000, budget.ProviderContextLimit)
+	require.Equal(t, 4096, budget.ProviderOutputLimit)
+	require.Equal(t, 0, budget.ModelCapabilityMaxContextTokens)
+	require.Contains(t, budget.BudgetCandidates, "provider_context_limit_default_ratio")
 }
 
 func TestReActLoop_Run_EmptyTerminalAssistantResponseFails(t *testing.T) {
