@@ -44,6 +44,100 @@ func TestSessionAddMessage(t *testing.T) {
 	}
 }
 
+func TestSessionDerivedTitleSkipsInstructionMessages(t *testing.T) {
+	session := NewSession("test-user")
+	session.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("Shell guidance:\n- Detected operating system: windows."),
+		*types.NewDeveloperMessage("Always answer tersely."),
+		*types.NewUserMessage("检查登录流程为什么失败"),
+		*types.NewAssistantMessage("我会检查登录链路。"),
+	})
+
+	if got := session.Metadata.Title; got != "检查登录流程为什么失败" {
+		t.Fatalf("expected title from first user message, got %q", got)
+	}
+	if got := session.Metadata.TitleSource; got != sessionTitleSourceDerived {
+		t.Fatalf("expected derived title source, got %q", got)
+	}
+}
+
+func TestSessionSystemOnlyDoesNotDeriveInstructionTitle(t *testing.T) {
+	session := NewSession("test-user")
+	session.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("Shell guidance:\n- Detected operating system: windows."),
+	})
+
+	if got := session.Metadata.Title; got != "" {
+		t.Fatalf("expected empty title for system-only session, got %q", got)
+	}
+	preview := session.BuildPreview()
+	if preview == nil {
+		t.Fatal("expected preview")
+	}
+	if got := preview.Title; got != "" {
+		t.Fatalf("expected empty preview title for system-only session, got %q", got)
+	}
+
+	legacy := NewSession("test-user")
+	legacy.Metadata.Title = "Shell guidance: - Detected operating system: ..."
+	legacy.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("Shell guidance:\n- Detected operating system: windows."),
+	})
+	if got := legacy.Metadata.Title; got != "" {
+		t.Fatalf("expected legacy instruction-only title to be cleared, got %q", got)
+	}
+}
+
+func TestSessionRepairsLegacyInstructionDerivedTitle(t *testing.T) {
+	session := NewSession("test-user")
+	session.Metadata.Title = "Shell guidance: - Detected operating system: ..."
+	session.ReplaceHistory([]types.Message{
+		*types.NewUserMessage("写一个提交说明"),
+		*types.NewAssistantMessage("提交说明如下。"),
+	})
+
+	if got := session.Metadata.Title; got != "写一个提交说明" {
+		t.Fatalf("expected repaired title from user message, got %q", got)
+	}
+	if got := session.Metadata.TitleSource; got != sessionTitleSourceDerived {
+		t.Fatalf("expected repaired title to be marked derived, got %q", got)
+	}
+}
+
+func TestSessionManualTitleIsNotOverwrittenByDerivedTitle(t *testing.T) {
+	session := NewSession("test-user")
+	session.UpdateTitle("保留的手动标题")
+	session.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("Shell guidance:\n- Detected operating system: windows."),
+		*types.NewUserMessage("这条用户消息不应覆盖标题"),
+	})
+
+	if got := session.Metadata.Title; got != "保留的手动标题" {
+		t.Fatalf("expected manual title to be preserved, got %q", got)
+	}
+	if got := session.Metadata.TitleSource; got != sessionTitleSourceManual {
+		t.Fatalf("expected manual title source, got %q", got)
+	}
+}
+
+func TestSessionManualTitleClearIsPreserved(t *testing.T) {
+	session := NewSession("test-user")
+	session.UpdateTitle("")
+	session.ReplaceHistory([]types.Message{
+		*types.NewUserMessage("这条消息不应重新生成标题"),
+	})
+
+	if got := session.Metadata.Title; got != "" {
+		t.Fatalf("expected cleared manual title to remain empty, got %q", got)
+	}
+	if got := session.Metadata.TitleSource; got != sessionTitleSourceManual {
+		t.Fatalf("expected cleared title to remain manual, got %q", got)
+	}
+	if got := session.BuildPreview().Title; got != "" {
+		t.Fatalf("expected preview title to remain empty, got %q", got)
+	}
+}
+
 func TestSessionSetGetContext(t *testing.T) {
 	session := NewSession("test-user")
 
@@ -339,4 +433,3 @@ func TestSessionManagerArchive(t *testing.T) {
 		t.Error("Expected state to be archived")
 	}
 }
-

@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
-	"github.com/gorilla/mux"
 )
 
 type checkpointSummary struct {
@@ -53,6 +53,9 @@ func (h *Handler) ListSessionCheckpoints(w http.ResponseWriter, r *http.Request)
 
 	actor, err := hub.GetOrCreate(sessionID)
 	if err != nil {
+		if h.writeSessionLeaseConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -157,6 +160,9 @@ func (h *Handler) PreviewSessionCheckpoint(w http.ResponseWriter, r *http.Reques
 
 	actor, err := hub.GetOrCreate(sessionID)
 	if err != nil {
+		if h.writeSessionLeaseConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -218,6 +224,9 @@ func (h *Handler) RestoreSessionCheckpoint(w http.ResponseWriter, r *http.Reques
 
 	actor, err := hub.GetOrCreate(sessionID)
 	if err != nil {
+		if h.writeSessionLeaseConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -255,6 +264,9 @@ func (h *Handler) GetCheckpointFiles(w http.ResponseWriter, r *http.Request) {
 
 	actor, err := hub.GetOrCreate(sessionID)
 	if err != nil {
+		if h.writeSessionLeaseConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -268,4 +280,3 @@ func (h *Handler) GetCheckpointFiles(w http.ResponseWriter, r *http.Request) {
 		"count": len(files),
 	})
 }
-

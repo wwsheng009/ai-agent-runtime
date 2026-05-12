@@ -1425,15 +1425,16 @@ type ResetUsageStatsResponse struct {
 }
 
 type SessionMetadata struct {
-	Tags       []string               `json:"tags,omitempty"`
-	Title      string                 `json:"title,omitempty"`
-	Summary    string                 `json:"summary,omitempty"`
-	TotalTurns int                    `json:"totalTurns,omitempty"`
-	LastAgent  string                 `json:"lastAgent,omitempty"`
-	LastSkill  string                 `json:"lastSkill,omitempty"`
-	LastModel  string                 `json:"lastModel,omitempty"`
-	CreatedBy  string                 `json:"createdBy,omitempty"`
-	Context    map[string]interface{} `json:"context,omitempty"`
+	Tags        []string               `json:"tags,omitempty"`
+	Title       string                 `json:"title,omitempty"`
+	TitleSource string                 `json:"titleSource,omitempty"`
+	Summary     string                 `json:"summary,omitempty"`
+	TotalTurns  int                    `json:"totalTurns,omitempty"`
+	LastAgent   string                 `json:"lastAgent,omitempty"`
+	LastSkill   string                 `json:"lastSkill,omitempty"`
+	LastModel   string                 `json:"lastModel,omitempty"`
+	CreatedBy   string                 `json:"createdBy,omitempty"`
+	Context     map[string]interface{} `json:"context,omitempty"`
 }
 
 type Session struct {

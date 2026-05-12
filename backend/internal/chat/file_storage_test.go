@@ -28,6 +28,31 @@ func TestSessionBuildPreviewDerivesTitleAndSummary(t *testing.T) {
 	}
 }
 
+func TestFileStorageLoadRepairsLegacyInstructionDerivedTitle(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	storage, err := NewFileStorage(dir)
+	if err != nil {
+		t.Fatalf("new file storage: %v", err)
+	}
+
+	session := NewSession("preview-user")
+	session.Metadata.Title = "Shell guidance: - Detected operating system: ..."
+	session.History = []types.Message{*types.NewUserMessage("恢复旧会话标题")}
+	if err := storage.Save(ctx, session); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	loaded, err := storage.Load(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if got := loaded.Metadata.Title; got != "恢复旧会话标题" {
+		t.Fatalf("expected repaired loaded title, got %q", got)
+	}
+}
+
 func TestFileStorageRoundTripAndLatest(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

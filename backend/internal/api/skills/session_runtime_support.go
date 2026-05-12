@@ -14,8 +14,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type sessionActorClient struct {
@@ -2155,28 +2157,36 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 
 	var profileState *profileRuntimeState
 	childAgentType := ""
+	requestedProvider := ""
 	requestedChildModel := ""
+	requestedReasoningEffort := ""
+	streamRequested := false
+	disableTools := false
 	if session, err := h.sessionManager.Get(context.Background(), sessionID); err == nil && session != nil {
 		getContextString := func(key string) string {
-			value, ok := session.GetContext(key)
-			if !ok {
-				return ""
-			}
-			text, ok := value.(string)
-			if !ok {
-				return ""
-			}
-			return strings.TrimSpace(text)
+			return sessionmeta.String(session.Metadata.Context, key)
 		}
 		profileRef := getContextString(apiProfileContextReference)
 		agentID := getContextString(apiProfileContextAgent)
+		workspacePath = getContextString(sessionmeta.WorkspacePath)
 		if profileRef != "" {
 			if resolved, err := h.resolveProfileSessionState(profileRef, agentID, workspacePath); err == nil {
 				profileState = resolved
 			}
 		}
 		childAgentType = getContextString(toolbroker.AgentSessionContextAgentType)
+		requestedProvider = getContextString(sessionmeta.ProviderName)
 		requestedChildModel = getContextString(toolbroker.AgentSessionContextRequestedModel)
+		if requestedChildModel == "" {
+			requestedChildModel = getContextString(sessionmeta.Model)
+		}
+		requestedReasoningEffort = getContextString(sessionmeta.ReasoningEffort)
+		if value, ok := sessionmeta.Bool(session.Metadata.Context, sessionmeta.Stream); ok {
+			streamRequested = value
+		}
+		if value, ok := sessionmeta.Bool(session.Metadata.Context, sessionmeta.DisableTools); ok {
+			disableTools = value
+		}
 	}
 
 	selectedConfig := runtimeConfig
@@ -2185,6 +2195,9 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	}
 
 	agentProvider := resolveAgentProvider(profileState, selectedConfig, h.llmRuntime)
+	if strings.TrimSpace(requestedProvider) != "" {
+		agentProvider = strings.TrimSpace(requestedProvider)
+	}
 	agentModel := resolveAgentModel(profileState, selectedConfig, h.llmRuntime)
 	if strings.TrimSpace(requestedChildModel) != "" {
 		agentModel = strings.TrimSpace(requestedChildModel)
@@ -2212,6 +2225,17 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	if selectedConfig != nil {
 		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig)
 	}
+	if streamRequested || strings.TrimSpace(requestedReasoningEffort) != "" {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
+		}
+		if streamRequested {
+			agentConfig.Options["stream"] = true
+		}
+		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(requestedReasoningEffort); reasoningEffort != "" {
+			agentConfig.Options["reasoning_effort"] = reasoningEffort
+		}
+	}
 	if workspacePath != "" {
 		if agentConfig.Options == nil {
 			agentConfig.Options = make(map[string]interface{})
@@ -2237,26 +2261,44 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		mcpManager:      h.mcpManager,
 		llmRuntime:      h.llmRuntime,
 	})
-	h.applyAgentExecutionPolicy(apiAgent, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
+	if disableTools {
+		apiAgent.SetToolExecutionPolicy(agent.NewToolExecutionPolicy([]string{}, false))
+	} else {
+		h.applyAgentExecutionPolicy(apiAgent, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
+	}
 	h.applyAgentHooks(apiAgent, selectedConfig)
 	h.applyAgentRuntimeServices(apiAgent, selectedConfig)
 
+	stateStore := h.getSessionRuntimeStore()
+	eventStore := h.getSessionEventStore()
+	leaseHandle, leaseErr := h.acquireSessionLease(context.Background(), sessionID, sessionActorLeaseOwnerKind, sessionID)
+	if leaseErr != nil {
+		return nil, leaseErr
+	}
 	actor, err := chat.NewSessionActor(sessionID, chat.SessionActorConfig{
 		Agent:        apiAgent,
 		LLMRuntime:   h.llmRuntime,
 		SessionStore: sessionStore,
-		StateStore:   h.getSessionRuntimeStore(),
-		EventStore:   h.getSessionEventStore(),
+		StateStore:   stateStore,
+		EventStore:   eventStore,
 		EventBus:     h.getRuntimeEventBus(),
-		LoopConfig:   buildSessionLoopConfig(selectedConfig),
+		LoopConfig:   buildSessionLoopConfig(selectedConfig, requestedReasoningEffort),
+		OnStop: func() {
+			if leaseHandle != nil {
+				_ = leaseHandle.Release(context.Background())
+			}
+		},
 	})
 	if err != nil {
+		if leaseHandle != nil {
+			_ = leaseHandle.Release(context.Background())
+		}
 		return nil, err
 	}
 	return actor, nil
 }
 
-func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig) *agent.LoopReActConfig {
+func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig, requestedReasoningEffort ...string) *agent.LoopReActConfig {
 	config := &agent.LoopReActConfig{
 		MaxSteps:             0,
 		EnableThought:        true,
@@ -2270,6 +2312,11 @@ func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig) *agent.Loo
 		config.EnableParallelTools = selectedConfig.Agent.EnableParallelTools
 		if selectedConfig.Agent.MaxParallelToolCalls > 0 {
 			config.MaxParallelToolCalls = selectedConfig.Agent.MaxParallelToolCalls
+		}
+	}
+	if len(requestedReasoningEffort) > 0 {
+		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(requestedReasoningEffort[0]); reasoningEffort != "" {
+			config.ReasoningEffort = reasoningEffort
 		}
 	}
 	return config

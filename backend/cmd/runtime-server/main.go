@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"go.uber.org/zap/zapcore"
@@ -766,6 +767,11 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	}
 	runtimeConfig := runtimeManager.Get()
 	runtimeConfig.Sessions.Dir = resolveRuntimeServerSessionDir(runtimeManager.GetFilePath(), runtimeConfig.Sessions.Dir)
+	sessionruntime.ApplyDefaults(runtimeConfig, sessionruntime.ResolveOptions{
+		Config:     runtimeConfig,
+		ConfigFile: runtimeManager.GetFilePath(),
+		Mode:       sessionruntime.ModeServer,
+	})
 
 	mcpAdapter, manager, err := buildSkillsMCPManager(ctx, cfg, runtimeConfig)
 	if err != nil {
@@ -798,15 +804,26 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	handler := skillsapi.NewHandler(bootstrapManager.Registry(), bootstrapManager.Loader(), mcpAdapter)
 	bootstrapManager.ApplyToSkillsHandler(handler)
 	handler.SetFileTransferService(filetransport.NewLocalService())
-	handler.SetRuntimeConfig(runtimeManager.Get(), runtimeManager.GetFilePath())
+	handler.SetRuntimeConfig(runtimeConfig, runtimeManager.GetFilePath())
 	handler.SetRuntimeLogFilePath(strings.TrimSpace(cfg.Log.FilePath))
 	handler.SetRuntimeConfigResolver(func(scope skillsapi.UsageScope) *runtimecfg.RuntimeConfig {
-		return runtimeManager.SelectConfigForScope(scope.ScopeKey)
+		selectedConfig, selectedPath := runtimeManager.SelectConfigForScopeWithPath(scope.ScopeKey)
+		if selectedConfig == nil {
+			return nil
+		}
+		configCopy := *selectedConfig
+		configCopy.Sessions.Dir = resolveRuntimeServerSessionDir(selectedPath, configCopy.Sessions.Dir)
+		sessionruntime.ApplyDefaults(&configCopy, sessionruntime.ResolveOptions{
+			Config:     &configCopy,
+			ConfigFile: selectedPath,
+			Mode:       sessionruntime.ModeServer,
+		})
+		return &configCopy
 	})
 	handler.SetProfileSupport(skillsapi.ProfileSupportConfig{
 		Registry:          profilesys.NewRegistryFromProfilesConfig(cfg.Profiles),
 		DefaultProfile:    defaultProfile(cfg),
-		GlobalRuntimePath: strings.TrimSpace(skillsCfg.ConfigFile),
+		GlobalRuntimePath: strings.TrimSpace(runtimeManager.GetFilePath()),
 		GlobalMCPPath:     configuredMCPConfigPath(cfg),
 		GlobalSkillDirs:   allConfiguredSkillDirs(skillsCfg),
 		MCPAutoConnect:    configuredMCPAutoConnect(cfg),

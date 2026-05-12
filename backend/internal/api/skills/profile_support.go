@@ -14,6 +14,7 @@ import (
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
@@ -347,7 +348,14 @@ func (h *Handler) resolveProfileRuntimeConfig(scope UsageScope, resolved *profil
 	if err := manager.Load(); err != nil {
 		return nil, "", err
 	}
-	return manager.Get(), manager.GetFilePath(), nil
+	cfg := manager.Get()
+	configFile := manager.GetFilePath()
+	sessionruntime.ApplyDefaults(cfg, sessionruntime.ResolveOptions{
+		Config:     cfg,
+		ConfigFile: configFile,
+		Mode:       sessionruntime.ModeServer,
+	})
+	return cfg, configFile, nil
 }
 
 func samePath(left, right string) bool {

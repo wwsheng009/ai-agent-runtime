@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -51,6 +52,12 @@ func TestValidateRolloutConfig_RequiresCandidateAndVersion(t *testing.T) {
 	cfg.Rollout.CandidateFile = "candidate.yaml"
 	err = ValidateRuntimeConfig(cfg)
 	require.NoError(t, err)
+}
+
+func TestResolveRuntimeConfigReference_RelativeToActiveConfigFile(t *testing.T) {
+	baseFile := filepath.Join(t.TempDir(), "configs", "runtime.yaml")
+	got := resolveRuntimeConfigReference(baseFile, "candidate.yaml")
+	require.Equal(t, filepath.Join(filepath.Dir(baseFile), "candidate.yaml"), got)
 }
 
 func TestValidateAgentConfig_AllowsNonPositiveMaxStepsAsUnlimited(t *testing.T) {

@@ -19,17 +19,25 @@ const (
 	StateArchived SessionState = "archived"
 )
 
+const (
+	sessionTitleLimit         = 48
+	sessionSummaryLimit       = 120
+	sessionTitleSourceDerived = "derived"
+	sessionTitleSourceManual  = "manual"
+)
+
 // SessionMetadata 会话元数据
 type SessionMetadata struct {
-	Tags       []string               `json:"tags" yaml:"tags"`
-	Title      string                 `json:"title" yaml:"title"`
-	Summary    string                 `json:"summary" yaml:"summary"`
-	TotalTurns int                    `json:"totalTurns" yaml:"totalTurns"`
-	LastAgent  string                 `json:"lastAgent" yaml:"lastAgent"`
-	LastSkill  string                 `json:"lastSkill" yaml:"lastSkill"`
-	LastModel  string                 `json:"lastModel" yaml:"lastModel"`
-	CreatedBy  string                 `json:"createdBy" yaml:"createdBy"`
-	Context    map[string]interface{} `json:"context" yaml:"context"`
+	Tags        []string               `json:"tags" yaml:"tags"`
+	Title       string                 `json:"title" yaml:"title"`
+	TitleSource string                 `json:"titleSource,omitempty" yaml:"titleSource,omitempty"`
+	Summary     string                 `json:"summary" yaml:"summary"`
+	TotalTurns  int                    `json:"totalTurns" yaml:"totalTurns"`
+	LastAgent   string                 `json:"lastAgent" yaml:"lastAgent"`
+	LastSkill   string                 `json:"lastSkill" yaml:"lastSkill"`
+	LastModel   string                 `json:"lastModel" yaml:"lastModel"`
+	CreatedBy   string                 `json:"createdBy" yaml:"createdBy"`
+	Context     map[string]interface{} `json:"context" yaml:"context"`
 }
 
 // Session 用户会话
@@ -238,6 +246,7 @@ func (s *Session) IsActive() bool {
 // UpdateTitle 更新会话标题
 func (s *Session) UpdateTitle(title string) {
 	s.Metadata.Title = strings.TrimSpace(title)
+	s.Metadata.TitleSource = sessionTitleSourceManual
 	s.UpdatedAt = time.Now()
 }
 
@@ -269,14 +278,11 @@ func (s *Session) BuildPreview() *SessionPreview {
 		return nil
 	}
 
-	title := strings.TrimSpace(s.Metadata.Title)
-	if title == "" {
-		title = summarizeSessionText(s.firstContent(), 48)
-	}
+	title := s.effectiveTitle()
 
 	summary := strings.TrimSpace(s.Metadata.Summary)
 	if summary == "" {
-		summary = summarizeSessionText(s.lastContent(), 120)
+		summary = summarizeSessionText(s.lastContent(), sessionSummaryLimit)
 	}
 
 	preview := &SessionPreview{
@@ -338,6 +344,7 @@ func (s *Session) Clone() *Session {
 		clone.Metadata.Context = context
 	}
 
+	clone.refreshDerivedMetadata()
 	return clone
 }
 
@@ -350,19 +357,119 @@ func (s *Session) updateMetadata(msg types.Message) {
 
 func (s *Session) refreshDerivedMetadata() {
 	s.Metadata.TotalTurns = len(s.visibleHistory())
-	if strings.TrimSpace(s.Metadata.Title) == "" {
-		s.Metadata.Title = summarizeSessionText(s.firstContent(), 48)
-	}
-	s.Metadata.Summary = summarizeSessionText(s.lastContent(), 120)
+	s.refreshDerivedTitle()
+	s.Metadata.Summary = summarizeSessionText(s.lastContent(), sessionSummaryLimit)
 }
 
-func (s *Session) firstContent() string {
-	for _, msg := range s.visibleHistory() {
+func (s *Session) refreshDerivedTitle() {
+	derivedTitle := s.derivedTitle()
+	currentTitle := strings.TrimSpace(s.Metadata.Title)
+	titleSource := strings.TrimSpace(s.Metadata.TitleSource)
+	if titleSource == sessionTitleSourceManual {
+		return
+	}
+	if strings.TrimSpace(derivedTitle) == "" {
+		if currentTitle != "" && shouldRepairLegacyDerivedTitle(currentTitle) {
+			s.Metadata.Title = ""
+			s.Metadata.TitleSource = ""
+		}
+		return
+	}
+
+	if currentTitle != "" && titleSource != sessionTitleSourceDerived && !shouldRepairLegacyDerivedTitle(currentTitle) {
+		return
+	}
+
+	s.Metadata.Title = derivedTitle
+	s.Metadata.TitleSource = sessionTitleSourceDerived
+}
+
+func (s *Session) effectiveTitle() string {
+	currentTitle := strings.TrimSpace(s.Metadata.Title)
+	derivedTitle := s.derivedTitle()
+	titleSource := strings.TrimSpace(s.Metadata.TitleSource)
+	if currentTitle == "" {
+		if titleSource == sessionTitleSourceManual {
+			return ""
+		}
+		return derivedTitle
+	}
+
+	if titleSource == sessionTitleSourceManual {
+		return currentTitle
+	}
+	if titleSource == sessionTitleSourceDerived || shouldRepairLegacyDerivedTitle(currentTitle) {
+		if strings.TrimSpace(derivedTitle) != "" {
+			return derivedTitle
+		}
+		if shouldRepairLegacyDerivedTitle(currentTitle) && titleSource != sessionTitleSourceManual {
+			return ""
+		}
+	}
+
+	return currentTitle
+}
+
+func (s *Session) derivedTitle() string {
+	return summarizeSessionText(s.titleSourceContent(), sessionTitleLimit)
+}
+
+func (s *Session) titleSourceContent() string {
+	if s == nil {
+		return ""
+	}
+
+	history := s.visibleHistory()
+	for _, role := range []string{"user", "assistant"} {
+		for _, msg := range history {
+			if !strings.EqualFold(strings.TrimSpace(msg.Role), role) {
+				continue
+			}
+			if content := strings.TrimSpace(msg.Content); content != "" {
+				return content
+			}
+		}
+	}
+
+	for _, msg := range history {
+		if isInstructionMessageRole(msg.Role) || strings.EqualFold(strings.TrimSpace(msg.Role), "tool") {
+			continue
+		}
 		if content := strings.TrimSpace(msg.Content); content != "" {
 			return content
 		}
 	}
+
 	return ""
+}
+
+func isInstructionMessageRole(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "system", "developer":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldRepairLegacyDerivedTitle(title string) bool {
+	if strings.TrimSpace(title) == "" {
+		return false
+	}
+
+	normalized := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(title)), " "))
+	switch {
+	case strings.HasPrefix(normalized, "shell guidance:"):
+		return true
+	case strings.HasPrefix(normalized, "file editing guidance:"):
+		return true
+	case strings.HasPrefix(normalized, "parallel tool guidance:"):
+		return true
+	case strings.HasPrefix(normalized, "detected operating system:"):
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Session) lastContent() string {

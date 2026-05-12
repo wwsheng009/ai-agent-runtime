@@ -46,6 +46,8 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -81,10 +83,13 @@ const (
 	skillHotReloadActionRemoved       = "skill_hot_reload_removed"
 	skillsChangedEventType            = "skills.changed"
 
-	apiProfileContextReference = "profile_reference"
-	apiProfileContextName      = "profile_name"
-	apiProfileContextAgent     = "profile_agent"
-	apiProfileContextRoot      = "profile_root"
+	apiProfileContextReference = sessionmeta.LegacyAPIProfileReference
+	apiProfileContextName      = sessionmeta.ProfileName
+	apiProfileContextAgent     = sessionmeta.ProfileAgent
+	apiProfileContextRoot      = sessionmeta.ProfileRoot
+
+	sessionActorLeaseOwnerKind = "runtime-server-actor"
+	agentChatLeaseOwnerKind    = "runtime-server-agent-chat"
 )
 
 // Handler Skills API 处理器
@@ -408,6 +413,13 @@ func (h *Handler) SetScopeResolverConfig(config ScopeResolverConfig) {
 
 // SetRuntimeConfig 设置 skills runtime 配置快照与路径
 func (h *Handler) SetRuntimeConfig(config *runtimecfg.RuntimeConfig, configFile string) {
+	if config != nil {
+		sessionruntime.ApplyDefaults(config, sessionruntime.ResolveOptions{
+			Config:     config,
+			ConfigFile: configFile,
+			Mode:       sessionruntime.ModeServer,
+		})
+	}
 	h.runtimeConfig = config
 	h.runtimeConfigFile = strings.TrimSpace(configFile)
 	_, _ = h.refreshTeamStore(config, h.runtimeConfigFile, "", "")
@@ -566,6 +578,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/batch/delete", h.BatchDeleteSessions).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/batch/archive", h.BatchArchiveSessions).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/stats", h.GetSessionStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/users", h.ListSessionUsers).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}", h.GetSession).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}", h.UpdateSession).Methods(http.MethodPatch)
 	runtimeRouter.HandleFunc("/sessions/{id}", h.DeleteSession).Methods(http.MethodDelete)
@@ -1241,6 +1254,25 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if session != nil {
+		leaseScope := requestID
+		if leaseScope == "" {
+			leaseScope = uuid.NewString()
+		}
+		leaseHandle, leaseErr := h.acquireSessionLease(ctx, session.ID, agentChatLeaseOwnerKind, leaseScope)
+		if leaseErr != nil {
+			if h.writeSessionLeaseConflict(w, leaseErr) {
+				return
+			}
+			h.writeError(w, http.StatusInternalServerError, leaseErr)
+			return
+		}
+		if leaseHandle != nil {
+			defer func() {
+				_ = leaseHandle.Release(context.Background())
+			}()
+		}
+	}
 
 	selectedConfig := h.resolveRuntimeConfig(usageScope)
 	if profileState != nil && profileState.RuntimeConfig != nil {
@@ -1385,6 +1417,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		mcpManager:      runtimeMCP,
 		llmRuntime:      runtimeLLM,
 	})
+	defer func() {
+		_ = a.Close()
+	}()
 	h.applyAgentExecutionPolicy(a, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
 	h.applyAgentHooks(a, selectedConfig)
 	h.applyAgentRuntimeServices(a, selectedConfig)
@@ -1875,9 +1910,7 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	if req.UserID == "" {
 		req.UserID = r.URL.Query().Get("user_id")
 	}
-	if req.UserID == "" {
-		req.UserID = "anonymous"
-	}
+	req.UserID = h.resolveServerSessionUserID(req.UserID)
 
 	session, err := h.sessionManager.CreateSession(r.Context(), req.UserID)
 	if err != nil {
@@ -1885,7 +1918,7 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Title != "" {
-		session.Metadata.Title = req.Title
+		session.UpdateTitle(req.Title)
 		_ = h.sessionManager.Update(r.Context(), session)
 	}
 
@@ -1902,10 +1935,7 @@ func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := r.URL.Query().Get("user_id")
-	if userID == "" {
-		userID = "anonymous"
-	}
+	userID := h.resolveServerSessionUserID(r.URL.Query().Get("user_id"))
 
 	sessions, err := h.sessionManager.List(r.Context(), userID)
 	if err != nil {
@@ -1992,10 +2022,7 @@ func (h *Handler) GetSessionStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := r.URL.Query().Get("user_id")
-	if userID == "" {
-		userID = "anonymous"
-	}
+	userID := h.resolveServerSessionUserID(r.URL.Query().Get("user_id"))
 
 	stats, err := h.sessionManager.GetStatistics(r.Context(), userID)
 	if err != nil {
@@ -2518,10 +2545,89 @@ func (h *Handler) getOrCreateSession(ctx context.Context, userID, requestedSessi
 	if h.sessionManager == nil {
 		return nil, nil
 	}
-	if userID == "" {
-		userID = "anonymous"
-	}
+	userID = h.resolveServerSessionUserID(userID)
 	return h.sessionManager.GetOrCreate(ctx, userID, requestedSessionID)
+}
+
+func (h *Handler) resolveServerSessionUserID(userID string) string {
+	var config *runtimecfg.RuntimeConfig
+	if h != nil {
+		config = h.runtimeConfig
+	}
+	return sessionruntime.ResolveSessionUserID(sessionruntime.IdentitySource{
+		ExplicitUserID: userID,
+		Config:         config,
+		ServerFallback: true,
+	})
+}
+
+func (h *Handler) acquireSessionLease(ctx context.Context, sessionID, ownerKind, ownerScope string) (*chat.SessionLeaseHandle, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if h == nil || sessionID == "" {
+		return nil, nil
+	}
+	store := h.getSessionRuntimeStore()
+	leaseStore, ok := store.(chat.SessionLeaseStore)
+	if !ok || leaseStore == nil {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ownerKind = strings.TrimSpace(ownerKind)
+	if ownerKind == "" {
+		ownerKind = sessionruntime.DefaultSessionRuntimeOwner()
+	}
+	return chat.AcquireSessionLease(ctx, leaseStore, chat.LeaseRequest{
+		SessionID: sessionID,
+		OwnerID:   sessionLeaseOwnerID(ownerKind, ownerScope),
+		OwnerKind: ownerKind,
+		PID:       os.Getpid(),
+		Hostname:  currentHostname(),
+	})
+}
+
+func (h *Handler) writeSessionLeaseConflict(w http.ResponseWriter, err error) bool {
+	var conflict *chat.LeaseConflictError
+	if !stderrors.As(err, &conflict) {
+		return false
+	}
+	runtimeErr := errors.New(errors.ErrValidationFailed, "session runtime lease conflict")
+	if conflict != nil && conflict.Lease != nil {
+		runtimeErr = runtimeErr.WithContext("lease", conflict.Lease)
+	}
+	h.writeError(w, http.StatusConflict, runtimeErr)
+	return true
+}
+
+func sessionLeaseOwnerID(ownerKind, scope string) string {
+	parts := []string{sanitizeLeaseOwnerPart(ownerKind)}
+	if hostname := currentHostname(); hostname != "" {
+		parts = append(parts, sanitizeLeaseOwnerPart(hostname))
+	}
+	parts = append(parts, strconv.Itoa(os.Getpid()))
+	if scope = strings.TrimSpace(scope); scope != "" {
+		parts = append(parts, sanitizeLeaseOwnerPart(scope))
+	}
+	return strings.Join(parts, ":")
+}
+
+func currentHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(hostname)
+}
+
+func sanitizeLeaseOwnerPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	value = strings.ReplaceAll(value, ":", "_")
+	value = strings.ReplaceAll(value, " ", "_")
+	return value
 }
 
 func (h *Handler) persistChatTurn(ctx context.Context, session *chat.Session, userPrompt, assistantReply string, assistantMetadata types.Metadata) error {
@@ -2629,12 +2735,24 @@ func (h *Handler) applyProfileSessionContext(session *chat.Session, state *profi
 		if value == "" {
 			return
 		}
-		if existing, ok := session.GetContext(key); ok {
-			if text, ok := existing.(string); ok && strings.TrimSpace(text) == value {
-				return
-			}
+		if existing := sessionmeta.String(session.Metadata.Context, key); existing == value {
+			return
 		}
-		session.SetContext(key, value)
+		if session.Metadata.Context == nil {
+			session.Metadata.Context = make(map[string]interface{})
+		}
+		switch key {
+		case apiProfileContextReference:
+			sessionmeta.Set(session.Metadata.Context, sessionmeta.ProfileRef, value, apiProfileContextReference)
+		case apiProfileContextName:
+			sessionmeta.Set(session.Metadata.Context, sessionmeta.ProfileName, value)
+		case apiProfileContextAgent:
+			sessionmeta.Set(session.Metadata.Context, sessionmeta.ProfileAgent, value)
+		case apiProfileContextRoot:
+			sessionmeta.Set(session.Metadata.Context, sessionmeta.ProfileRoot, value)
+		default:
+			session.SetContext(key, value)
+		}
 		changed = true
 	}
 
@@ -3484,16 +3602,21 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 }
 
 func closeRuntimeStore(store chat.RuntimeStateStore, eventStore chat.EventStore) {
-	if store != nil {
-		if closer, ok := store.(interface{ Close() error }); ok {
+	seen := map[interface{}]struct{}{}
+	closeStore := func(value interface{}) {
+		if value == nil {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		if closer, ok := value.(interface{ Close() error }); ok {
 			_ = closer.Close()
 		}
 	}
-	if eventStore != nil {
-		if closer, ok := eventStore.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
-	}
+	closeStore(store)
+	closeStore(eventStore)
 }
 
 func (h *Handler) publishRuntimeEvent(eventType, traceID string, payload map[string]interface{}) {
@@ -5307,10 +5430,11 @@ func (h *Handler) resolveUsageScope(r *http.Request, tenantID, projectID, userID
 	config := h.getScopeResolverConfig()
 	jwtScope := h.resolveScopeFromJWTClaims(r)
 	apiKeyScope := h.resolveScopeFromAPIKey(r)
+	resolvedUserID := h.resolveUsageScopeValue(userID, r, "user_id", config.UserHeaders, jwtScope.UserID, apiKeyScope.UserID)
 	return normalizeUsageScope(UsageScope{
 		TenantID:  h.resolveUsageScopeValue(tenantID, r, "tenant_id", config.TenantHeaders, jwtScope.TenantID, apiKeyScope.TenantID),
 		ProjectID: h.resolveUsageScopeValue(projectID, r, "project_id", config.ProjectHeaders, jwtScope.ProjectID, apiKeyScope.ProjectID),
-		UserID:    h.resolveUsageScopeValue(userID, r, "user_id", config.UserHeaders, jwtScope.UserID, apiKeyScope.UserID),
+		UserID:    h.resolveServerSessionUserID(resolvedUserID),
 	})
 }
 
@@ -7829,17 +7953,61 @@ func (h *Handler) runtimeStatusSnapshot(ctx context.Context, mode llm.HealthChec
 	}
 
 	return map[string]interface{}{
-		"default_provider": defaultAgentProvider(h.llmRuntime),
-		"default_model":    defaultAgentModel(h.llmRuntime),
-		"providers":        providers,
-		"provider_count":   len(providers),
-		"mcps":             mcps,
-		"mcp_count":        len(mcps),
-		"context":          contextSnapshot,
-		"tool_catalog":     toolCatalog,
-		"patch_governance": patchGovernance,
-		"provenance":       provenance,
+		"default_provider":    defaultAgentProvider(h.llmRuntime),
+		"default_model":       defaultAgentModel(h.llmRuntime),
+		"providers":           providers,
+		"provider_count":      len(providers),
+		"mcps":                mcps,
+		"mcp_count":           len(mcps),
+		"context":             contextSnapshot,
+		"session_persistence": h.sessionPersistenceSnapshot(),
+		"tool_catalog":        toolCatalog,
+		"patch_governance":    patchGovernance,
+		"provenance":          provenance,
 	}
+}
+
+func (h *Handler) sessionPersistenceSnapshot() map[string]interface{} {
+	if h == nil {
+		return map[string]interface{}{}
+	}
+	paths := sessionruntime.ResolvePaths(sessionruntime.ResolveOptions{
+		Config:     h.runtimeConfig,
+		ConfigFile: h.runtimeConfigFile,
+		Mode:       sessionruntime.ModeServer,
+	})
+	result := map[string]interface{}{
+		"config_file":                  h.runtimeConfigFile,
+		"session_dir":                  paths.SessionDir,
+		"runtime_dir":                  paths.RuntimeDir,
+		"session_runtime_store_path":   paths.SessionRuntimeStorePath,
+		"legacy_runtime_store_path":    paths.LegacySessionRuntimeStorePath,
+		"team_store_path":              paths.TeamStorePath,
+		"agent_control_store_path":     paths.AgentControlStorePath,
+		"artifact_store_path":          paths.ArtifactStorePath,
+		"background_store_path":        paths.BackgroundStorePath,
+		"background_log_dir":           paths.BackgroundLogDir,
+		"default_persistence":          paths.DefaultPersistence,
+		"file_defaults_enabled":        paths.FileDefaultsEnabled,
+		"session_runtime_store_active": h.sessionRuntimeStoreKey,
+		"team_store_active":            h.teamStoreConfigKey,
+		"background_active":            h.backgroundConfigKey,
+	}
+	if paths.AgentControlMailboxStorePath != "" {
+		result["agent_control_mailbox_store_path"] = paths.AgentControlMailboxStorePath
+	}
+	if paths.AgentControlAgentStorePath != "" {
+		result["agent_control_agent_store_path"] = paths.AgentControlAgentStorePath
+	}
+	if h.sessionManager != nil && h.sessionManager.GetStorage() != nil {
+		if dirReader, ok := h.sessionManager.GetStorage().(interface{ Dir() string }); ok {
+			result["session_store_dir"] = dirReader.Dir()
+		}
+	}
+	if h.runtimeConfig != nil {
+		result["checkpoint_enabled"] = h.runtimeConfig.Checkpoint.Enabled
+	}
+	return result
 }
 
 // RuntimeStatusSnapshot 导出 runtime 状态快照
@@ -9589,6 +9757,12 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[strin
 	}
 	if len(wsCfg.Exclude) > 0 {
 		options["workspace_exclude"] = append([]string(nil), wsCfg.Exclude...)
+	}
+	if path := strings.TrimSpace(config.Artifact.StorePath); path != "" {
+		options["artifact_store_path"] = path
+	}
+	if dsn := strings.TrimSpace(config.Artifact.StoreDSN); dsn != "" {
+		options["artifact_store_dsn"] = dsn
 	}
 	if len(options) == 0 {
 		return nil

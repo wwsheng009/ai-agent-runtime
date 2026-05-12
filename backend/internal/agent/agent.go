@@ -362,6 +362,24 @@ func (a *Agent) SetToolBroker(broker *ToolBroker) {
 	a.toolBroker = broker
 }
 
+// Close releases resources owned directly by the agent instance.
+func (a *Agent) Close() error {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	store := a.artifacts
+	a.artifacts = nil
+	a.outputGate = nil
+	a.contextMgr = nil
+	a.checkpointMgr = nil
+	a.mu.Unlock()
+	if store != nil {
+		return store.Close()
+	}
+	return nil
+}
+
 // GetHookManager returns the hook manager.
 func (a *Agent) GetHookManager() *HookManager {
 	a.mu.RLock()

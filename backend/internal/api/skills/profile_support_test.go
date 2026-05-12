@@ -2,6 +2,7 @@ package skills
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -48,5 +49,35 @@ func TestResolveProfileMCPAdapter_KeepsLocalToolkitWhenProfileAutoConnectDisable
 	}
 	if _, err := adapter.FindTool("grep"); err != nil {
 		t.Fatalf("expected grep to be available: %v", err)
+	}
+}
+
+func TestResolveProfileRuntimeConfig_AppliesSharedSessionDefaults(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "runtime.yaml")
+	data := []byte("sessionRuntime:\n  defaultPersistence: file\nsessions:\n  dir: sessions\n")
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		t.Fatalf("write runtime config: %v", err)
+	}
+
+	handler := &Handler{}
+	cfg, resolvedPath, err := handler.resolveProfileRuntimeConfig(UsageScope{}, &profilesys.ResolvedAgent{
+		RuntimeConfig: configPath,
+	})
+	if err != nil {
+		t.Fatalf("resolveProfileRuntimeConfig failed: %v", err)
+	}
+	if resolvedPath != configPath {
+		t.Fatalf("unexpected runtime path: %q", resolvedPath)
+	}
+	sessionDir := filepath.Join(root, "sessions")
+	if cfg.Sessions.Dir != sessionDir {
+		t.Fatalf("expected session dir %q, got %q", sessionDir, cfg.Sessions.Dir)
+	}
+	if cfg.SessionRuntime.StorePath != filepath.Join(sessionDir, "runtime", "session_runtime.sqlite") {
+		t.Fatalf("unexpected session runtime store path: %q", cfg.SessionRuntime.StorePath)
+	}
+	if cfg.Background.StorePath != filepath.Join(sessionDir, "runtime", "background.sqlite") {
+		t.Fatalf("unexpected background store path: %q", cfg.Background.StorePath)
 	}
 }

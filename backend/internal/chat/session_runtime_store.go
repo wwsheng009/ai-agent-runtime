@@ -43,6 +43,147 @@ type EventStore interface {
 	ListEvents(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]runtimeevents.Event, error)
 }
 
+// SessionLeaseStore coordinates cross-process ownership for mutating session execution.
+type SessionLeaseStore interface {
+	AcquireLease(ctx context.Context, req LeaseRequest) (*SessionLease, error)
+	RenewLease(ctx context.Context, sessionID, ownerID string, ttl time.Duration) error
+	ReleaseLease(ctx context.Context, sessionID, ownerID string) error
+	GetLease(ctx context.Context, sessionID string) (*SessionLease, error)
+}
+
+// LeaseRequest describes a requested session execution lease.
+type LeaseRequest struct {
+	SessionID string
+	OwnerID   string
+	OwnerKind string
+	PID       int
+	Hostname  string
+	TTL       time.Duration
+	Now       time.Time
+}
+
+// SessionLease describes the current owner of a session execution lease.
+type SessionLease struct {
+	SessionID   string    `json:"session_id"`
+	OwnerID     string    `json:"owner_id"`
+	OwnerKind   string    `json:"owner_kind"`
+	PID         int       `json:"pid,omitempty"`
+	Hostname    string    `json:"hostname,omitempty"`
+	AcquiredAt  time.Time `json:"acquired_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	HeartbeatAt time.Time `json:"heartbeat_at"`
+}
+
+// LeaseConflictError is returned when another live owner holds a lease.
+type LeaseConflictError struct {
+	Lease *SessionLease
+}
+
+func (e *LeaseConflictError) Error() string {
+	if e == nil || e.Lease == nil {
+		return "session lease conflict"
+	}
+	return fmt.Sprintf("session %s is already owned by %s until %s", e.Lease.SessionID, e.Lease.OwnerID, e.Lease.ExpiresAt.Format(time.RFC3339Nano))
+}
+
+const defaultSessionLeaseTTL = 2 * time.Minute
+
+// SessionLeaseHandle owns a live session lease and renews it until released.
+type SessionLeaseHandle struct {
+	store SessionLeaseStore
+	lease *SessionLease
+	ttl   time.Duration
+
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+}
+
+// AcquireSessionLease acquires a lease and starts periodic renewal for it.
+func AcquireSessionLease(ctx context.Context, store SessionLeaseStore, req LeaseRequest) (*SessionLeaseHandle, error) {
+	if store == nil {
+		return nil, fmt.Errorf("session lease store is not configured")
+	}
+	req.TTL = normalizeSessionLeaseTTL(req.TTL)
+	lease, err := store.AcquireLease(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	handle := &SessionLeaseHandle{
+		store: store,
+		lease: cloneSessionLease(lease),
+		ttl:   req.TTL,
+		stop:  make(chan struct{}),
+		done:  make(chan struct{}),
+	}
+	go handle.renewLoop()
+	return handle, nil
+}
+
+// Lease returns a copy of the currently held lease.
+func (h *SessionLeaseHandle) Lease() *SessionLease {
+	if h == nil {
+		return nil
+	}
+	return cloneSessionLease(h.lease)
+}
+
+// Release stops renewal and releases the lease. It is safe to call more than once.
+func (h *SessionLeaseHandle) Release(ctx context.Context) error {
+	if h == nil || h.store == nil || h.lease == nil {
+		return nil
+	}
+	h.stopOnce.Do(func() {
+		close(h.stop)
+		<-h.done
+	})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return h.store.ReleaseLease(ctx, h.lease.SessionID, h.lease.OwnerID)
+}
+
+func (h *SessionLeaseHandle) renewLoop() {
+	defer close(h.done)
+	if h == nil || h.store == nil || h.lease == nil {
+		return
+	}
+	interval := sessionLeaseHeartbeatInterval(h.ttl)
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-h.stop:
+			return
+		case <-timer.C:
+			err := h.store.RenewLease(context.Background(), h.lease.SessionID, h.lease.OwnerID, h.ttl)
+			if err != nil {
+				return
+			}
+			timer.Reset(interval)
+		}
+	}
+}
+
+func normalizeSessionLeaseTTL(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return defaultSessionLeaseTTL
+	}
+	return ttl
+}
+
+func sessionLeaseHeartbeatInterval(ttl time.Duration) time.Duration {
+	ttl = normalizeSessionLeaseTTL(ttl)
+	interval := ttl / 3
+	if interval <= 0 {
+		return time.Second
+	}
+	if interval < time.Second && ttl >= time.Second {
+		return time.Second
+	}
+	return interval
+}
+
 // EventWatcherStore exposes in-process wake notifications for session events.
 // Callers must still use ListEvents with AfterSeq for durable catch-up.
 type EventWatcherStore interface {
@@ -72,6 +213,7 @@ type InMemoryRuntimeStore struct {
 	mailboxSeq     map[string]int64
 	controlSeq     map[string]int64
 	retention      int
+	leases         map[string]*SessionLease
 
 	globalMailboxWriter agentcontrol.GlobalMailboxWriter
 
@@ -144,6 +286,7 @@ func NewInMemoryRuntimeStore(retention int) *InMemoryRuntimeStore {
 		seq:            make(map[string]int64),
 		mailboxSeq:     make(map[string]int64),
 		controlSeq:     make(map[string]int64),
+		leases:         make(map[string]*SessionLease),
 		retention:      retention,
 	}
 }
@@ -195,7 +338,82 @@ func (s *InMemoryRuntimeStore) DeleteState(ctx context.Context, sessionID string
 	delete(s.seq, sessionID)
 	delete(s.mailboxSeq, sessionID)
 	delete(s.controlSeq, sessionID)
+	delete(s.leases, sessionID)
 	return nil
+}
+
+func (s *InMemoryRuntimeStore) AcquireLease(ctx context.Context, req LeaseRequest) (*SessionLease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	lease, err := buildLeaseFromRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.leases[lease.SessionID]; existing != nil && !leaseExpired(existing, lease.HeartbeatAt) && existing.OwnerID != lease.OwnerID {
+		return nil, &LeaseConflictError{Lease: cloneSessionLease(existing)}
+	}
+	s.leases[lease.SessionID] = cloneSessionLease(lease)
+	return cloneSessionLease(lease), nil
+}
+
+func (s *InMemoryRuntimeStore) RenewLease(ctx context.Context, sessionID, ownerID string, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	ownerID = strings.TrimSpace(ownerID)
+	if sessionID == "" || ownerID == "" {
+		return fmt.Errorf("session id and owner id are required")
+	}
+	if ttl <= 0 {
+		ttl = defaultSessionLeaseTTL
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing := s.leases[sessionID]
+	if existing == nil {
+		return fmt.Errorf("session lease not found")
+	}
+	if existing.OwnerID != ownerID {
+		return &LeaseConflictError{Lease: cloneSessionLease(existing)}
+	}
+	existing.HeartbeatAt = now
+	existing.ExpiresAt = now.Add(ttl)
+	return nil
+}
+
+func (s *InMemoryRuntimeStore) ReleaseLease(ctx context.Context, sessionID, ownerID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	ownerID = strings.TrimSpace(ownerID)
+	if sessionID == "" || ownerID == "" {
+		return fmt.Errorf("session id and owner id are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.leases[sessionID]; existing != nil && existing.OwnerID == ownerID {
+		delete(s.leases, sessionID)
+	}
+	return nil
+}
+
+func (s *InMemoryRuntimeStore) GetLease(ctx context.Context, sessionID string) (*SessionLease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneSessionLease(s.leases[sessionID]), nil
 }
 
 // SaveToolReceipt persists a replayable tool result.
@@ -1062,6 +1280,131 @@ func (s *SQLiteRuntimeStore) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *SQLiteRuntimeStore) AcquireLease(ctx context.Context, req LeaseRequest) (*SessionLease, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	lease, err := buildLeaseFromRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin lease transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	existing, err := getSessionLeaseTx(ctx, tx, lease.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil && !leaseExpired(existing, lease.HeartbeatAt) && existing.OwnerID != lease.OwnerID {
+		return nil, &LeaseConflictError{Lease: existing}
+	}
+	if existing != nil && existing.OwnerID == lease.OwnerID && !existing.AcquiredAt.IsZero() {
+		lease.AcquiredAt = existing.AcquiredAt
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO session_actor_leases (
+			session_id, owner_id, owner_kind, pid, hostname, acquired_at, expires_at, heartbeat_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			owner_id = excluded.owner_id,
+			owner_kind = excluded.owner_kind,
+			pid = excluded.pid,
+			hostname = excluded.hostname,
+			acquired_at = excluded.acquired_at,
+			expires_at = excluded.expires_at,
+			heartbeat_at = excluded.heartbeat_at
+	`, lease.SessionID, lease.OwnerID, lease.OwnerKind, lease.PID, lease.Hostname, lease.AcquiredAt.Format(time.RFC3339Nano), lease.ExpiresAt.Format(time.RFC3339Nano), lease.HeartbeatAt.Format(time.RFC3339Nano)); err != nil {
+		return nil, fmt.Errorf("save session lease: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit session lease: %w", err)
+	}
+	return cloneSessionLease(lease), nil
+}
+
+func (s *SQLiteRuntimeStore) RenewLease(ctx context.Context, sessionID, ownerID string, ttl time.Duration) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("runtime store is not initialized")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	ownerID = strings.TrimSpace(ownerID)
+	if sessionID == "" || ownerID == "" {
+		return fmt.Errorf("session id and owner id are required")
+	}
+	if ttl <= 0 {
+		ttl = defaultSessionLeaseTTL
+	}
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin lease transaction: %w", err)
+	}
+	defer tx.Rollback()
+	existing, err := getSessionLeaseTx(ctx, tx, sessionID)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return fmt.Errorf("session lease not found")
+	}
+	if existing.OwnerID != ownerID {
+		return &LeaseConflictError{Lease: existing}
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE session_actor_leases
+		SET heartbeat_at = ?, expires_at = ?
+		WHERE session_id = ? AND owner_id = ?
+	`, now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), sessionID, ownerID)
+	if err != nil {
+		return fmt.Errorf("renew session lease: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+		return fmt.Errorf("session lease not found")
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteRuntimeStore) ReleaseLease(ctx context.Context, sessionID, ownerID string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("runtime store is not initialized")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	ownerID = strings.TrimSpace(ownerID)
+	if sessionID == "" || ownerID == "" {
+		return fmt.Errorf("session id and owner id are required")
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM session_actor_leases WHERE session_id = ? AND owner_id = ?`, sessionID, ownerID)
+	if err != nil {
+		return fmt.Errorf("release session lease: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteRuntimeStore) GetLease(ctx context.Context, sessionID string) (*SessionLease, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	lease, err := scanSessionLease(s.db.QueryRowContext(ctx, `
+		SELECT session_id, owner_id, owner_kind, pid, hostname, acquired_at, expires_at, heartbeat_at
+		FROM session_actor_leases
+		WHERE session_id = ?
+	`, sessionID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get session lease: %w", err)
+	}
+	return lease, nil
 }
 
 // LoadState loads runtime state for a session.
@@ -3034,6 +3377,24 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 				ON agent_control_mailbox_records(global_seq);
 			`,
 		},
+		{
+			Version: 16,
+			Name:    "session_actor_leases",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS session_actor_leases (
+					session_id TEXT PRIMARY KEY,
+					owner_id TEXT NOT NULL,
+					owner_kind TEXT NOT NULL,
+					pid INTEGER,
+					hostname TEXT,
+					acquired_at TEXT NOT NULL,
+					expires_at TEXT NOT NULL,
+					heartbeat_at TEXT NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS idx_session_actor_leases_expires_at
+				ON session_actor_leases(expires_at);
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }
@@ -3052,6 +3413,108 @@ func resolveRuntimeDSN(cfg *RuntimeStoreConfig) (string, error) {
 		return cfg.DSN, nil
 	}
 	return fmt.Sprintf("file:runtime-store-%s?mode=memory&cache=shared", uuid.NewString()), nil
+}
+
+func getSessionLeaseTx(ctx context.Context, tx *sql.Tx, sessionID string) (*SessionLease, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("transaction is nil")
+	}
+	lease, err := scanSessionLease(tx.QueryRowContext(ctx, `
+		SELECT session_id, owner_id, owner_kind, pid, hostname, acquired_at, expires_at, heartbeat_at
+		FROM session_actor_leases
+		WHERE session_id = ?
+	`, strings.TrimSpace(sessionID)))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get session lease: %w", err)
+	}
+	return lease, nil
+}
+
+func buildLeaseFromRequest(req LeaseRequest) (*SessionLease, error) {
+	sessionID := strings.TrimSpace(req.SessionID)
+	ownerID := strings.TrimSpace(req.OwnerID)
+	if sessionID == "" || ownerID == "" {
+		return nil, fmt.Errorf("session id and owner id are required")
+	}
+	ownerKind := strings.TrimSpace(req.OwnerKind)
+	if ownerKind == "" {
+		ownerKind = "unknown"
+	}
+	ttl := req.TTL
+	if ttl <= 0 {
+		ttl = defaultSessionLeaseTTL
+	}
+	now := req.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	return &SessionLease{
+		SessionID:   sessionID,
+		OwnerID:     ownerID,
+		OwnerKind:   ownerKind,
+		PID:         req.PID,
+		Hostname:    strings.TrimSpace(req.Hostname),
+		AcquiredAt:  now,
+		HeartbeatAt: now,
+		ExpiresAt:   now.Add(ttl),
+	}, nil
+}
+
+func leaseExpired(lease *SessionLease, now time.Time) bool {
+	if lease == nil {
+		return true
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return !lease.ExpiresAt.After(now.UTC())
+}
+
+func cloneSessionLease(lease *SessionLease) *SessionLease {
+	if lease == nil {
+		return nil
+	}
+	cloned := *lease
+	return &cloned
+}
+
+func scanSessionLease(scanner interface {
+	Scan(dest ...interface{}) error
+}) (*SessionLease, error) {
+	var lease SessionLease
+	var acquiredAt, expiresAt, heartbeatAt string
+	var pid sql.NullInt64
+	var hostname sql.NullString
+	if err := scanner.Scan(&lease.SessionID, &lease.OwnerID, &lease.OwnerKind, &pid, &hostname, &acquiredAt, &expiresAt, &heartbeatAt); err != nil {
+		return nil, err
+	}
+	if pid.Valid {
+		lease.PID = int(pid.Int64)
+	}
+	if hostname.Valid {
+		lease.Hostname = hostname.String
+	}
+	lease.AcquiredAt = parseRFC3339Time(acquiredAt)
+	lease.ExpiresAt = parseRFC3339Time(expiresAt)
+	lease.HeartbeatAt = parseRFC3339Time(heartbeatAt)
+	return &lease, nil
+}
+
+func parseRFC3339Time(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
 }
 
 func nullIfEmpty(value string) interface{} {

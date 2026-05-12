@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -421,17 +422,75 @@ func (h *Handler) ListSessionRuntimeEvents(w http.ResponseWriter, r *http.Reques
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-
-	events, err := store.ListEvents(r.Context(), sessionID, after, limit)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
-		return
+	waitMs := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("wait_ms")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid wait_ms value"))
+			return
+		}
+		waitMs = parsed
 	}
 
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"events": buildSessionRuntimeEventViews(events),
-		"count":  len(events),
-	})
+	ctx := r.Context()
+	cancel := func() {}
+	if waitMs > 0 {
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(waitMs)*time.Millisecond)
+	}
+	defer cancel()
+
+	var eventWake <-chan runtimeevents.Event
+	unwatch := func() {}
+	if watcher, ok := store.(chat.EventWatcherStore); ok && watcher != nil {
+		eventWake, unwatch = watcher.WatchEvents(ctx, sessionID)
+	}
+	defer unwatch()
+
+	for {
+		events, err := store.ListEvents(ctx, sessionID, after, limit)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		latestSeq := int64(0)
+		if sequenceStore, ok := store.(chat.EventSequenceStore); ok {
+			seq, err := sequenceStore.LastEventSeq(ctx, sessionID)
+			if err != nil {
+				h.writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			latestSeq = seq
+		}
+		for _, event := range events {
+			if seq := agentEventSeq(event); seq > latestSeq {
+				latestSeq = seq
+			}
+		}
+
+		if len(events) > 0 || waitMs == 0 {
+			h.writeJSON(w, http.StatusOK, map[string]interface{}{
+				"events":     buildSessionRuntimeEventViews(events),
+				"count":      len(events),
+				"latest_seq": latestSeq,
+				"after_seq":  after,
+			})
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			h.writeJSON(w, http.StatusOK, map[string]interface{}{
+				"events":     []map[string]interface{}{},
+				"count":      0,
+				"latest_seq": latestSeq,
+				"after_seq":  after,
+				"timed_out":  true,
+			})
+			return
+		case <-eventWake:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // ListSessionToolReceipts returns persisted tool receipts for a session.
@@ -510,6 +569,9 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 	}
 	actor, err := hub.GetOrCreate(sessionID)
 	if err != nil {
+		if h.writeSessionLeaseConflict(w, err) {
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -558,10 +620,6 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		questionID := strings.TrimSpace(req.QuestionID)
 		if questionID == "" {
 			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "question_id is required"))
-			return
-		}
-		if strings.TrimSpace(req.Answer) == "" {
-			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "answer is required"))
 			return
 		}
 		if err := actor.AnswerQuestion(r.Context(), questionID, req.Answer); err != nil {

@@ -35,6 +35,7 @@ type SessionActorConfig struct {
 	EventStore   EventStore
 	EventBus     *runtimeevents.Bus
 	LoopConfig   *agent.LoopReActConfig
+	OnStop       func()
 }
 
 // SessionActor serializes session commands and manages execution state.
@@ -52,8 +53,10 @@ type SessionActor struct {
 	stop  chan struct{}
 	done  chan struct{}
 
-	startOnce sync.Once
-	stopOnce  sync.Once
+	startOnce  sync.Once
+	stopOnce   sync.Once
+	onStop     func()
+	onStopOnce sync.Once
 
 	mu           sync.RWMutex
 	state        *RuntimeState
@@ -103,6 +106,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		stateStore:      cfg.StateStore,
 		eventStore:      cfg.EventStore,
 		eventBus:        bus,
+		onStop:          cfg.OnStop,
 		cmdCh:           make(chan Command, 32),
 		stop:            make(chan struct{}),
 		done:            make(chan struct{}),
@@ -131,12 +135,27 @@ func (a *SessionActor) Stop() {
 	if a == nil {
 		return
 	}
+	defer a.runStopHook()
 	a.Start()
 	a.stopOnce.Do(func() {
 		close(a.stop)
 		a.cancelActive()
 	})
 	<-a.done
+}
+
+func (a *SessionActor) runStopHook() {
+	if a == nil {
+		return
+	}
+	a.onStopOnce.Do(func() {
+		if a.agent != nil {
+			_ = a.agent.Close()
+		}
+		if a.onStop != nil {
+			a.onStop()
+		}
+	})
 }
 
 // SubmitPromptOption configures a SubmitPrompt call.

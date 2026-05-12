@@ -25,6 +25,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -399,6 +400,81 @@ func TestSubmitSessionRuntimeCommand_SubmitPromptReturnsAcceptedWhenApprovalIsPe
 	require.Equal(t, http.StatusAccepted, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"pending":true`)
 	assert.Contains(t, rec.Body.String(), `"status":"waiting_approval"`)
+}
+
+func TestSubmitSessionRuntimeCommand_AnswerQuestionAllowsEmptyAnswer(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionStorage := chat.NewInMemoryStorage()
+	sessionManager := chat.NewSessionManager(sessionStorage, nil)
+	handler.SetSessionManager(sessionManager)
+
+	session, err := sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+
+	apiAgent := agent.NewAgent(&agent.Config{
+		Name:  "runtime-command-empty-answer-test",
+		Model: "test-model",
+	}, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	actor, err := chat.NewSessionActor(session.ID, chat.SessionActorConfig{
+		Agent:        apiAgent,
+		SessionStore: sessionStorage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	handler.sessionHub = chat.NewSessionHub(func(sessionID string) (*chat.SessionActor, error) {
+		require.Equal(t, session.ID, sessionID)
+		return actor, nil
+	})
+
+	answerCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		answer, askErr := actor.AskUserQuestion(context.Background(), toolbroker.UserQuestionRequest{
+			ID:         "question_empty",
+			Prompt:     "Optional answer?",
+			ToolCallID: "tool_question_empty",
+		})
+		if askErr != nil {
+			errCh <- askErr
+			return
+		}
+		answerCh <- answer
+	}()
+
+	require.Eventually(t, func() bool {
+		state := actor.State()
+		return state != nil &&
+			state.Status == chat.SessionWaitingInput &&
+			state.PendingQuestion != nil &&
+			state.PendingQuestion.ID == "question_empty"
+	}, 2*time.Second, 20*time.Millisecond)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
+		"type":"answer_question",
+		"question_id":"question_empty",
+		"answer":""
+	}`))
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := httptest.NewRecorder()
+
+	handler.SubmitSessionRuntimeCommand(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	select {
+	case answer := <-answerCh:
+		assert.Equal(t, "", answer)
+	case askErr := <-errCh:
+		t.Fatalf("ask user question failed: %v", askErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("question waiter did not receive empty answer")
+	}
+	state := actor.State()
+	require.NotNil(t, state)
+	assert.Nil(t, state.PendingQuestion)
+	assert.Nil(t, state.PendingTool)
 }
 
 func TestSubmitSessionRuntimeCommand_SubmitPromptCompletesWithBootstrapWiring(t *testing.T) {
@@ -852,6 +928,9 @@ func TestListSessionRuntimeEventsIncludesToolReceiptLedgerEvents(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	assert.Equal(t, float64(1), payload["latest_seq"])
 	assert.Contains(t, rec.Body.String(), `"type":"tool_receipt_recorded"`)
 	assert.Contains(t, rec.Body.String(), `"tool_call_id":"tool_receipt_1"`)
 	assert.Contains(t, rec.Body.String(), `"source":"receipt_store"`)
@@ -984,6 +1063,83 @@ func TestListSessionRuntimeEventsReturnsEmptyArrayWhenNoEvents(t *testing.T) {
 	assert.Len(t, events, 0)
 }
 
+func TestListSessionRuntimeEventsWaitsForNewEvent(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = runtimeStore
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-events-wait/runtime/events?after_seq=0&wait_ms=1500", nil).WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"id": "session-runtime-events-wait"})
+	rec := newSynchronizedResponseRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		handler.ListSessionRuntimeEvents(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	_, err := runtimeStore.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      chat.EventAssistantMessage,
+		SessionID: "session-runtime-events-wait",
+		Payload:   map[string]interface{}{"content": "long poll response"},
+	})
+	require.NoError(t, err)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("long-poll runtime events request did not wake after event append")
+	}
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(rec.BodyString()), &payload))
+	assert.Equal(t, float64(1), payload["count"])
+	assert.Equal(t, float64(1), payload["latest_seq"])
+	assert.Equal(t, float64(0), payload["after_seq"])
+	assert.Nil(t, payload["timed_out"])
+	events := payload["events"].([]interface{})
+	require.Len(t, events, 1)
+	event := events[0].(map[string]interface{})
+	assert.Equal(t, chat.EventAssistantMessage, event["type"])
+	eventPayload := event["payload"].(map[string]interface{})
+	assert.Equal(t, "long poll response", eventPayload["content"])
+}
+
+func TestListSessionRuntimeEventsWaitTimeoutReturnsLatestSeq(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = runtimeStore
+
+	_, err := runtimeStore.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      chat.EventAssistantMessage,
+		SessionID: "session-runtime-events-wait-timeout",
+		Payload:   map[string]interface{}{"content": "existing"},
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-events-wait-timeout/runtime/events?after_seq=1&wait_ms=25", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "session-runtime-events-wait-timeout"})
+	rec := httptest.NewRecorder()
+
+	handler.ListSessionRuntimeEvents(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	assert.Equal(t, float64(0), payload["count"])
+	assert.Equal(t, float64(1), payload["latest_seq"])
+	assert.Equal(t, float64(1), payload["after_seq"])
+	assert.Equal(t, true, payload["timed_out"])
+	events := payload["events"].([]interface{})
+	assert.Len(t, events, 0)
+}
+
 func TestStreamSessionRuntimeEventsIncludesToolReceiptLedgerEvents(t *testing.T) {
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
 	runtimeStore := chat.NewInMemoryRuntimeStore(64)
@@ -1039,6 +1195,49 @@ func TestStreamSessionRuntimeEventsIncludesToolReceiptLedgerEvents(t *testing.T)
 	assert.Contains(t, rec.BodyString(), `"tool_call_id":"tool_receipt_2"`)
 	assert.Contains(t, rec.BodyString(), `"source":"runtime_state"`)
 	assert.NotContains(t, rec.BodyString(), `"data":{"type":"tool_receipt_replayed"`)
+}
+
+func TestStreamSessionRuntimeEventsWakesFromEventWatcher(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = runtimeStore
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-stream-watch/runtime/stream?poll_ms=5000", nil).WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"id": "session-runtime-stream-watch"})
+	rec := newSynchronizedResponseRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		handler.StreamSessionRuntimeEvents(rec, req)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	_, err := runtimeStore.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      chat.EventAssistantMessage,
+		SessionID: "session-runtime-stream-watch",
+		Payload:   map[string]interface{}{"content": "watcher stream response"},
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(rec.BodyString(), "watcher stream response")
+	}, 2*time.Second, 20*time.Millisecond)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream handler did not exit after context cancellation")
+	}
+
+	assert.Contains(t, rec.BodyString(), "event: runtime_event")
+	assert.Contains(t, rec.BodyString(), `"type":"assistant_message"`)
+	assert.Contains(t, rec.BodyString(), `"content":"watcher stream response"`)
 }
 
 func TestStreamSessionRuntimeEventsIncludesCompactProvenanceSummary(t *testing.T) {

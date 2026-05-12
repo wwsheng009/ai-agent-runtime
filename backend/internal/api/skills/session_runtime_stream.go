@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
-	"github.com/gorilla/mux"
 )
 
 // StreamSessionRuntimeEvents streams runtime events for a session via SSE.
@@ -47,7 +48,18 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 	emitter := newSSEEmitter(w)
 
 	ctx := r.Context()
-	ticker := time.NewTicker(pollInterval)
+	var eventWake <-chan runtimeevents.Event
+	unwatch := func() {}
+	if watcher, ok := store.(chat.EventWatcherStore); ok && watcher != nil {
+		eventWake, unwatch = watcher.WatchEvents(ctx, sessionID)
+	}
+	defer unwatch()
+
+	fallbackInterval := pollInterval
+	if eventWake != nil {
+		fallbackInterval = 5 * time.Second
+	}
+	ticker := time.NewTicker(fallbackInterval)
 	defer ticker.Stop()
 
 	sendEvents := func(events []runtimeevents.Event) error {
@@ -73,6 +85,15 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 		select {
 		case <-ctx.Done():
 			return
+		case <-eventWake:
+			events, err := store.ListEvents(ctx, sessionID, afterSeq, 0)
+			if err != nil {
+				emitter.Emit("error", map[string]interface{}{"error": err.Error()})
+				return
+			}
+			if len(events) > 0 {
+				_ = sendEvents(events)
+			}
 		case <-ticker.C:
 			events, err := store.ListEvents(ctx, sessionID, afterSeq, 0)
 			if err != nil {
@@ -108,4 +129,3 @@ func asInt64(raw interface{}) (int64, bool) {
 	}
 	return 0, false
 }
-

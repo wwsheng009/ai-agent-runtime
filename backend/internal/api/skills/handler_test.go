@@ -34,6 +34,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -362,6 +363,7 @@ func cloneLLMRequest(req *llm.LLMRequest) *llm.LLMRequest {
 		return nil
 	}
 	cloned := &llm.LLMRequest{
+		Provider:        req.Provider,
 		Model:           req.Model,
 		MaxTokens:       req.MaxTokens,
 		Temperature:     req.Temperature,
@@ -2544,6 +2546,51 @@ agents:
 	}
 	assert.True(t, found, "expected profile system prompt in session actor request")
 	assert.True(t, profileContextFound, "expected explicit profile context layer in session actor request")
+}
+
+func TestBuildSessionActor_UsesSharedSessionMetadataContext(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workspaceRoot, "AGENTS.md"), []byte("Shared workspace instruction."), 0o644))
+
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetSessionManager(chat.NewSessionManager(chat.NewInMemoryStorage(), nil))
+
+	provider := &testLLMProvider{name: "server-provider", content: "ok"}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "default-provider",
+		DefaultModel:    "default-model",
+		MaxRetries:      0,
+	})
+	require.NoError(t, runtime.RegisterProvider("server-provider", provider))
+	handler.SetLLMRuntime(runtime)
+
+	session, err := handler.sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+	session.SetContext(sessionmeta.ProviderName, "server-provider")
+	session.SetContext(sessionmeta.Model, "server-model")
+	session.SetContext(sessionmeta.ReasoningEffort, "high")
+	session.SetContext(sessionmeta.Stream, true)
+	session.SetContext(sessionmeta.DisableTools, true)
+	session.SetContext(sessionmeta.WorkspacePath, workspaceRoot)
+	require.NoError(t, handler.sessionManager.Update(context.Background(), session))
+
+	actor, err := handler.buildSessionActor(session.ID)
+	require.NoError(t, err)
+	defer actor.Stop()
+
+	_, err = actor.SubmitPrompt(context.Background(), "hi", nil)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, provider.requests)
+	request := provider.requests[0]
+	assert.Equal(t, "server-provider", request.Provider)
+	assert.Equal(t, "server-model", request.Model)
+	assert.Equal(t, "high", request.ReasoningEffort)
+	assert.True(t, request.Stream)
+	assert.Empty(t, request.Tools, "disable_tools metadata should remove the tool surface")
+	assert.True(t, messageListContainsText(request.Messages, "Shared workspace instruction."))
 }
 
 func TestBuildSessionLoopConfig_PropagatesParallelToolConfig(t *testing.T) {

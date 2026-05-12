@@ -25,6 +25,55 @@ func (failingGlobalMailboxWriter) AppendGlobalMailboxRecord(context.Context, str
 	return 0, fmt.Errorf("global mailbox writer unavailable")
 }
 
+type failingRenewLeaseStore struct {
+	mu        sync.Mutex
+	renewals  int
+	releases  int
+	renewErr  error
+	sessionID string
+	ownerID   string
+}
+
+func (s *failingRenewLeaseStore) AcquireLease(_ context.Context, req LeaseRequest) (*SessionLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionID = req.SessionID
+	s.ownerID = req.OwnerID
+	now := time.Now().UTC()
+	return &SessionLease{
+		SessionID:   req.SessionID,
+		OwnerID:     req.OwnerID,
+		OwnerKind:   req.OwnerKind,
+		AcquiredAt:  now,
+		ExpiresAt:   now.Add(req.TTL),
+		HeartbeatAt: now,
+	}, nil
+}
+
+func (s *failingRenewLeaseStore) RenewLease(context.Context, string, string, time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.renewals++
+	return s.renewErr
+}
+
+func (s *failingRenewLeaseStore) ReleaseLease(context.Context, string, string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.releases++
+	return nil
+}
+
+func (s *failingRenewLeaseStore) GetLease(context.Context, string) (*SessionLease, error) {
+	return nil, nil
+}
+
+func (s *failingRenewLeaseStore) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.renewals, s.releases
+}
+
 func assertSQLiteTableMissing(t *testing.T, db *sql.DB, table string) {
 	t.Helper()
 	var count int
@@ -34,6 +83,139 @@ func assertSQLiteTableMissing(t *testing.T, db *sql.DB, table string) {
 		WHERE type = 'table' AND name = ?
 	`, table).Scan(&count))
 	assert.Equal(t, 0, count)
+}
+
+func TestInMemoryRuntimeStoreSessionLeaseLifecycle(t *testing.T) {
+	store := NewInMemoryRuntimeStore(16)
+	ctx := context.Background()
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+
+	lease, err := store.AcquireLease(ctx, LeaseRequest{
+		SessionID: "session-lease",
+		OwnerID:   "owner-1",
+		OwnerKind: "test",
+		Now:       now,
+		TTL:       time.Minute,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "owner-1", lease.OwnerID)
+
+	_, err = store.AcquireLease(ctx, LeaseRequest{
+		SessionID: "session-lease",
+		OwnerID:   "owner-2",
+		OwnerKind: "test",
+		Now:       now.Add(time.Second),
+		TTL:       time.Minute,
+	})
+	var conflict *LeaseConflictError
+	require.ErrorAs(t, err, &conflict)
+	require.Equal(t, "owner-1", conflict.Lease.OwnerID)
+
+	lease, err = store.AcquireLease(ctx, LeaseRequest{
+		SessionID: "session-lease",
+		OwnerID:   "owner-2",
+		OwnerKind: "test",
+		Now:       now.Add(2 * time.Minute),
+		TTL:       time.Minute,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "owner-2", lease.OwnerID)
+
+	err = store.RenewLease(ctx, "session-lease", "owner-1", time.Minute)
+	conflict = nil
+	require.ErrorAs(t, err, &conflict)
+	require.Equal(t, "owner-2", conflict.Lease.OwnerID)
+
+	require.NoError(t, store.ReleaseLease(ctx, "session-lease", "owner-2"))
+	lease, err = store.GetLease(ctx, "session-lease")
+	require.NoError(t, err)
+	require.Nil(t, lease)
+}
+
+func TestSQLiteRuntimeStoreSessionLeaseLifecycle(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		Path: filepath.Join(t.TempDir(), "runtime.sqlite"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	lease, err := store.AcquireLease(ctx, LeaseRequest{
+		SessionID: "session-lease",
+		OwnerID:   "owner-1",
+		OwnerKind: "test",
+		PID:       123,
+		Hostname:  "host-a",
+		Now:       now,
+		TTL:       time.Minute,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "owner-1", lease.OwnerID)
+	require.Equal(t, now, lease.AcquiredAt)
+
+	reentrant, err := store.AcquireLease(ctx, LeaseRequest{
+		SessionID: "session-lease",
+		OwnerID:   "owner-1",
+		OwnerKind: "test",
+		Now:       now.Add(time.Second),
+		TTL:       time.Minute,
+	})
+	require.NoError(t, err)
+	require.Equal(t, lease.AcquiredAt, reentrant.AcquiredAt)
+
+	_, err = store.AcquireLease(ctx, LeaseRequest{
+		SessionID: "session-lease",
+		OwnerID:   "owner-2",
+		OwnerKind: "test",
+		Now:       now.Add(2 * time.Second),
+		TTL:       time.Minute,
+	})
+	var conflict *LeaseConflictError
+	require.ErrorAs(t, err, &conflict)
+	require.Equal(t, "owner-1", conflict.Lease.OwnerID)
+
+	taken, err := store.AcquireLease(ctx, LeaseRequest{
+		SessionID: "session-lease",
+		OwnerID:   "owner-2",
+		OwnerKind: "test",
+		Now:       now.Add(2 * time.Minute),
+		TTL:       time.Minute,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "owner-2", taken.OwnerID)
+
+	err = store.RenewLease(ctx, "session-lease", "owner-1", time.Minute)
+	conflict = nil
+	require.ErrorAs(t, err, &conflict)
+	require.Equal(t, "owner-2", conflict.Lease.OwnerID)
+
+	loaded, err := store.GetLease(ctx, "session-lease")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Equal(t, "owner-2", loaded.OwnerID)
+
+	require.NoError(t, store.ReleaseLease(ctx, "session-lease", "owner-2"))
+	loaded, err = store.GetLease(ctx, "session-lease")
+	require.NoError(t, err)
+	require.Nil(t, loaded)
+}
+
+func TestSessionLeaseHandleStopsRenewingAfterRenewError(t *testing.T) {
+	store := &failingRenewLeaseStore{renewErr: fmt.Errorf("database closed")}
+	handle, err := AcquireSessionLease(context.Background(), store, LeaseRequest{
+		SessionID: "session-renew-error",
+		OwnerID:   "owner-renew-error",
+		OwnerKind: "test",
+		TTL:       30 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	time.Sleep(80 * time.Millisecond)
+	require.NoError(t, handle.Release(context.Background()))
+
+	renewals, releases := store.counts()
+	require.Equal(t, 1, renewals)
+	require.Equal(t, 1, releases)
 }
 
 func TestSQLiteRuntimeStorePersistsCurrentRunMeta(t *testing.T) {

@@ -37,6 +37,7 @@ type RuntimeConfig struct {
 	Trace          TraceConfig               `yaml:"trace" json:"trace"`
 	Hooks          []runtimehooks.HookConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 	SessionRuntime SessionRuntimeConfig      `yaml:"sessionRuntime" json:"sessionRuntime"`
+	Artifact       ArtifactConfig            `yaml:"artifact" json:"artifact"`
 	Checkpoint     CheckpointConfig          `yaml:"checkpoint" json:"checkpoint"`
 	Background     BackgroundConfig          `yaml:"background" json:"background"`
 	Images         ImagesConfig              `yaml:"images" json:"images"`
@@ -135,7 +136,13 @@ type CatalogConfig struct {
 
 // SessionsConfig configures session history persistence.
 type SessionsConfig struct {
-	Dir string `yaml:"dir" json:"dir"`
+	Dir             string        `yaml:"dir" json:"dir"`
+	DefaultUserID   string        `yaml:"defaultUserId" json:"defaultUserId"`
+	MaxHistory      int           `yaml:"maxHistory" json:"maxHistory"`
+	TTL             time.Duration `yaml:"ttl" json:"ttl"`
+	CleanupInterval time.Duration `yaml:"cleanupInterval" json:"cleanupInterval"`
+	IdleTimeout     time.Duration `yaml:"idleTimeout" json:"idleTimeout"`
+	AutoArchive     bool          `yaml:"autoArchive" json:"autoArchive"`
 }
 
 // TraceConfig configures runtime trace exports.
@@ -161,6 +168,13 @@ type AgentControlConfig struct {
 
 // SessionRuntimeConfig configures persistence for session runtime state/events.
 type SessionRuntimeConfig struct {
+	StorePath          string `yaml:"storePath" json:"storePath"`
+	StoreDSN           string `yaml:"storeDSN" json:"storeDSN"`
+	DefaultPersistence string `yaml:"defaultPersistence" json:"defaultPersistence"`
+}
+
+// ArtifactConfig configures persistence for artifacts, context ledger, and checkpoints.
+type ArtifactConfig struct {
 	StorePath string `yaml:"storePath" json:"storePath"`
 	StoreDSN  string `yaml:"storeDSN" json:"storeDSN"`
 }
@@ -227,12 +241,13 @@ type RolloutConfig struct {
 
 // RuntimeManager Runtime 配置管理器
 type RuntimeManager struct {
-	mu        sync.RWMutex
-	config    *RuntimeConfig
-	filePath  string
-	watchers  []RuntimeWatcher
-	history   []RuntimeConfigSnapshot
-	candidate *RuntimeConfig
+	mu                sync.RWMutex
+	config            *RuntimeConfig
+	filePath          string
+	watchers          []RuntimeWatcher
+	history           []RuntimeConfigSnapshot
+	candidate         *RuntimeConfig
+	candidateFilePath string
 }
 
 // RuntimeWatcher Runtime 配置变更监听器
@@ -312,6 +327,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		Team:           TeamConfig{},
 		AgentControl:   AgentControlConfig{},
 		SessionRuntime: SessionRuntimeConfig{},
+		Artifact:       ArtifactConfig{},
 		Checkpoint: CheckpointConfig{
 			Enabled:      true,
 			MaxFileBytes: 1 * 1024 * 1024,
@@ -513,20 +529,33 @@ func (rm *RuntimeManager) ListHistory() []RuntimeConfigSnapshot {
 
 // SelectConfigForScope 根据 scopeKey 选择配置（支持 rollout）
 func (rm *RuntimeManager) SelectConfigForScope(scopeKey string) *RuntimeConfig {
+	config, _ := rm.SelectConfigForScopeWithPath(scopeKey)
+	return config
+}
+
+// SelectConfigForScopeWithPath 根据 scopeKey 选择配置，并返回该配置对应的文件路径。
+func (rm *RuntimeManager) SelectConfigForScopeWithPath(scopeKey string) (*RuntimeConfig, string) {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
 
 	active := rm.config
 	if active == nil {
-		return nil
+		return nil, ""
 	}
 	if !active.Rollout.Enabled || rm.candidate == nil {
-		return active
+		configCopy := *active
+		return &configCopy, rm.filePath
 	}
 	if !shouldUseCandidate(scopeKey, active.Rollout) {
-		return active
+		configCopy := *active
+		return &configCopy, rm.filePath
 	}
-	return rm.candidate
+	configCopy := *rm.candidate
+	configFile := rm.candidateFilePath
+	if strings.TrimSpace(configFile) == "" {
+		configFile = rm.filePath
+	}
+	return &configCopy, configFile
 }
 
 // GetVersion 获取指定版本的配置快照
@@ -624,6 +653,9 @@ func ValidateRuntimeConfig(config *RuntimeConfig) error {
 	if err := ValidateSessionRuntimeConfig(&config.SessionRuntime); err != nil {
 		return err
 	}
+	if err := ValidateArtifactConfig(&config.Artifact); err != nil {
+		return err
+	}
 	if err := ValidateTraceConfig(&config.Trace); err != nil {
 		return err
 	}
@@ -705,6 +737,22 @@ func ValidateSessionRuntimeConfig(config *SessionRuntimeConfig) error {
 	}
 	if strings.TrimSpace(config.StorePath) != "" && strings.TrimSpace(config.StoreDSN) != "" {
 		return errors.New(errors.ErrValidationFailed, "sessionRuntime storePath and storeDSN cannot both be set")
+	}
+	switch strings.ToLower(strings.TrimSpace(config.DefaultPersistence)) {
+	case "", "memory", "file":
+	default:
+		return errors.New(errors.ErrValidationFailed, "sessionRuntime.defaultPersistence must be one of memory or file")
+	}
+	return nil
+}
+
+// ValidateArtifactConfig validates artifact persistence configuration.
+func ValidateArtifactConfig(config *ArtifactConfig) error {
+	if config == nil {
+		return nil
+	}
+	if strings.TrimSpace(config.StorePath) != "" && strings.TrimSpace(config.StoreDSN) != "" {
+		return errors.New(errors.ErrValidationFailed, "artifact storePath and storeDSN cannot both be set")
 	}
 	return nil
 }
@@ -1085,6 +1133,7 @@ func cloneRuntimeConfig(config *RuntimeConfig) (*RuntimeConfig, error) {
 
 func (rm *RuntimeManager) loadCandidateLocked() error {
 	rm.candidate = nil
+	rm.candidateFilePath = ""
 	if rm.config == nil || !rm.config.Rollout.Enabled {
 		return nil
 	}
@@ -1092,9 +1141,10 @@ func (rm *RuntimeManager) loadCandidateLocked() error {
 	if candidateFile == "" {
 		return nil
 	}
-	candidate, err := loadRuntimeConfigFromFile(candidateFile)
+	candidatePath := resolveRuntimeConfigReference(rm.filePath, candidateFile)
+	candidate, err := loadRuntimeConfigFromFile(candidatePath)
 	if err != nil {
-		return errors.Wrap(errors.ErrConfigInvalid, fmt.Sprintf("failed to load candidate config: %s", candidateFile), err)
+		return errors.Wrap(errors.ErrConfigInvalid, fmt.Sprintf("failed to load candidate config: %s", candidatePath), err)
 	}
 	if candidate == nil {
 		return nil
@@ -1104,7 +1154,23 @@ func (rm *RuntimeManager) loadCandidateLocked() error {
 		return errors.New(errors.ErrValidationFailed, fmt.Sprintf("candidate version mismatch: expected %s, got %s", rm.config.Rollout.CandidateVersion, candidate.Version))
 	}
 	rm.candidate = candidate
+	rm.candidateFilePath = candidatePath
 	return nil
+}
+
+func resolveRuntimeConfigReference(baseFile, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) || strings.TrimSpace(baseFile) == "" {
+		return path
+	}
+	baseDir := filepath.Dir(strings.TrimSpace(baseFile))
+	if baseDir == "" || baseDir == "." {
+		return path
+	}
+	return filepath.Join(baseDir, path)
 }
 
 func loadRuntimeConfigFromFile(path string) (*RuntimeConfig, error) {
