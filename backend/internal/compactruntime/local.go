@@ -92,22 +92,7 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, sys
 
 	maxTokens, reasoningEffort := resolveCompactSummaryRequestSettings(a.llmRuntime, req.Provider, req.Model)
 
-	response, err := a.llmRuntime.Call(ctx, &llm.LLMRequest{
-		Provider:        strings.TrimSpace(req.Provider),
-		Model:           strings.TrimSpace(req.Model),
-		Messages:        buildLocalCompactionRequest(systemMessages, history),
-		MaxTokens:       maxTokens,
-		Temperature:     0,
-		ReasoningEffort: reasoningEffort,
-		Metadata: map[string]interface{}{
-			llm.MetadataKeyInternalOperation: "compact",
-			llm.MetadataKeyDisableTools:      true,
-			llm.MetadataKeyDisableMetaTools:  true,
-			"compact_mode":                   ModeLocal,
-			"compact_phase":                  normalizedPhase(req.Phase),
-			"session_id":                     strings.TrimSpace(req.SessionID),
-		},
-	})
+	response, err := a.streamSummaryResponse(ctx, buildLocalCompactionLLMRequest(req, systemMessages, history, maxTokens, reasoningEffort))
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, nil, "", ctxErr
@@ -137,6 +122,55 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, sys
 		return message, nil, usage, usageSource, nil
 	}
 	return message, []string{checkpointID}, usage, usageSource, nil
+}
+
+func (a *LocalAdapter) streamSummaryResponse(ctx context.Context, request *llm.LLMRequest) (*llm.LLMResponse, error) {
+	if a == nil || a.llmRuntime == nil {
+		return nil, fmt.Errorf("llm runtime is not configured")
+	}
+	if request == nil {
+		return nil, fmt.Errorf("compact summary request is nil")
+	}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	stream, err := a.llmRuntime.Stream(streamCtx, request)
+	if err != nil {
+		return nil, err
+	}
+
+	var text strings.Builder
+	var reasoning strings.Builder
+	metadata := map[string]interface{}{}
+	for chunk := range stream {
+		mergeCompactStreamMetadata(metadata, chunk.Metadata)
+
+		switch chunk.Type {
+		case llm.EventTypeText:
+			text.WriteString(chunk.Content)
+		case llm.EventTypeReasoning:
+			reasoning.WriteString(chunk.Content)
+		case llm.EventTypeToolCall, llm.EventTypeToolStart, llm.EventTypeToolEnd:
+			return nil, fmt.Errorf("compact summary stream returned unexpected tool event: %s", chunk.Type)
+		case llm.EventTypeError:
+			if trimmed := strings.TrimSpace(chunk.Error); trimmed != "" {
+				return nil, fmt.Errorf("%s", trimmed)
+			}
+		}
+
+		if chunk.Done {
+			if err := validateCompactStreamDone(chunk.Metadata); err != nil {
+				return nil, err
+			}
+			return compactStreamResponse(request, text.String(), reasoning.String(), metadata), nil
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return compactStreamResponse(request, text.String(), reasoning.String(), metadata), nil
 }
 
 func (a *LocalAdapter) buildDeterministicSummaryMessage(ctx context.Context, req Request, history []types.Message, reason string) (*types.Message, []string, *types.TokenUsage, string, error) {
@@ -235,6 +269,60 @@ func extractCompactSummaryText(response *llm.LLMResponse) string {
 		}
 	}
 	return ensureSummaryHeading(summaryText)
+}
+
+func buildLocalCompactionLLMRequest(req Request, systemMessages, history []types.Message, maxTokens int, reasoningEffort string) *llm.LLMRequest {
+	return &llm.LLMRequest{
+		Provider:        strings.TrimSpace(req.Provider),
+		Model:           strings.TrimSpace(req.Model),
+		Messages:        buildLocalCompactionRequest(systemMessages, history),
+		MaxTokens:       maxTokens,
+		Temperature:     0,
+		ReasoningEffort: strings.TrimSpace(reasoningEffort),
+		Metadata: map[string]interface{}{
+			llm.MetadataKeyInternalOperation: "compact",
+			llm.MetadataKeyDisableTools:      true,
+			llm.MetadataKeyDisableMetaTools:  true,
+			"compact_mode":                   ModeLocal,
+			"compact_phase":                  normalizedPhase(req.Phase),
+			"session_id":                     strings.TrimSpace(req.SessionID),
+		},
+	}
+}
+
+func compactStreamResponse(request *llm.LLMRequest, content, reasoning string, metadata map[string]interface{}) *llm.LLMResponse {
+	response := &llm.LLMResponse{
+		Content:   content,
+		Reasoning: reasoning,
+	}
+	if request != nil {
+		response.Model = strings.TrimSpace(request.Model)
+	}
+	if len(metadata) > 0 {
+		response.Metadata = metadata
+	}
+	return response
+}
+
+func mergeCompactStreamMetadata(target, source map[string]interface{}) {
+	if target == nil || len(source) == 0 {
+		return
+	}
+	for key, value := range source {
+		target[key] = value
+	}
+}
+
+func validateCompactStreamDone(metadata map[string]interface{}) error {
+	finishReason := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", metadata["finish_reason"])))
+	switch finishReason {
+	case "", "stop", "end_turn":
+		return nil
+	case "tool_calls", "tool_call", "function_call":
+		return fmt.Errorf("compact summary stream finished with unexpected tool request: %s", finishReason)
+	default:
+		return nil
+	}
 }
 
 func buildLocalCompactionRequest(systemMessages, history []types.Message) []types.Message {

@@ -19,11 +19,14 @@ import (
 type compactTestProvider struct {
 	name              string
 	callCount         int
+	streamCount       int
 	capabilities      map[string]agentconfig.ModelCapabilitySpec
 	lastRequest       *llm.LLMRequest
 	responseContent   string
 	responseReasoning string
 	responseErr       error
+	streamErr         error
+	streamChunks      []llm.StreamChunk
 	allowEmpty        bool
 }
 
@@ -53,10 +56,40 @@ func (p *compactTestProvider) Call(ctx context.Context, req *llm.LLMRequest) (*l
 }
 
 func (p *compactTestProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
-	ch := make(chan llm.StreamChunk, 1)
-	ch <- llm.StreamChunk{Type: llm.EventTypeDone, Done: true}
+	p.streamCount++
+	p.lastRequest = cloneLLMRequest(req)
+	if p.streamErr != nil {
+		return nil, p.streamErr
+	}
+	if p.responseErr != nil {
+		return nil, p.responseErr
+	}
+	chunks := p.streamChunks
+	if chunks == nil {
+		chunks = p.defaultStreamChunks()
+	}
+	ch := make(chan llm.StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		ch <- chunk
+	}
 	close(ch)
 	return ch, nil
+}
+
+func (p *compactTestProvider) defaultStreamChunks() []llm.StreamChunk {
+	content := p.responseContent
+	if content == "" && strings.TrimSpace(p.responseReasoning) == "" && !p.allowEmpty {
+		content = "User goal preserved. Key tool results preserved. Continue from the latest turns."
+	}
+	chunks := make([]llm.StreamChunk, 0, 3)
+	if content != "" {
+		chunks = append(chunks, llm.StreamChunk{Type: llm.EventTypeText, Content: content})
+	}
+	if p.responseReasoning != "" {
+		chunks = append(chunks, llm.StreamChunk{Type: llm.EventTypeReasoning, Content: p.responseReasoning})
+	}
+	chunks = append(chunks, llm.StreamChunk{Type: llm.EventTypeDone, Done: true})
+	return chunks
 }
 
 func (p *compactTestProvider) CountTokens(text string) int { return len(text) }
@@ -121,7 +154,8 @@ func TestMaybeCompactUsesModelSpecificLimit(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, 200, result.TriggerTokenLimit)
 	require.Equal(t, "provider-a", status.ResolvedProvider)
-	require.Equal(t, 1, provider.callCount)
+	require.Equal(t, 0, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
 	require.Len(t, result.ReplacementHistory, 4)
 	require.Equal(t, "system", result.ReplacementHistory[0].Role)
 	require.Equal(t, "user", result.ReplacementHistory[1].Role)
@@ -166,6 +200,7 @@ func TestMaybeCompactUsesModelSpecificCompactSettings(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Equal(t, 1, provider.streamCount)
 	require.NotNil(t, provider.lastRequest)
 	assert.Equal(t, 4096, provider.lastRequest.MaxTokens)
 	assert.Equal(t, "none", provider.lastRequest.ReasoningEffort)
@@ -203,7 +238,10 @@ func TestMaybeCompactDefaultCompactRequestDisablesToolsAndOmitsReasoningEffort(t
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Equal(t, 0, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
 	require.NotNil(t, provider.lastRequest)
+	assert.True(t, provider.lastRequest.Stream)
 	assert.Empty(t, provider.lastRequest.ReasoningEffort)
 	assert.Equal(t, "compact", provider.lastRequest.Metadata[llm.MetadataKeyInternalOperation])
 	assert.Equal(t, true, provider.lastRequest.Metadata[llm.MetadataKeyDisableTools])
@@ -243,6 +281,7 @@ func TestMaybeCompactFallsBackToDeterministicSummaryWhenProviderSummaryEmpty(t *
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Equal(t, 1, provider.streamCount)
 	require.NotEmpty(t, result.ReplacementHistory)
 	require.Equal(t, "", status.Reason)
 	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
@@ -285,9 +324,59 @@ func TestMaybeCompactFallsBackToDeterministicSummaryWhenProviderErrors(t *testin
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Equal(t, 1, provider.streamCount)
 	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
 	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
 	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "upstream compact failed")
+}
+
+func TestMaybeCompactFallsBackToDeterministicSummaryWhenStreamRequestsToolCall(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		streamChunks: []llm.StreamChunk{
+			{
+				Type: llm.EventTypeDone,
+				Done: true,
+				Metadata: map[string]interface{}{
+					"finish_reason": "tool_calls",
+				},
+			},
+		},
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {
+				MaxContextTokens:      272000,
+				AutoCompactTokenLimit: 200,
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, _, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:          "session-compact-fallback-tool-call",
+		Provider:           "provider-a",
+		Model:              "gpt-5",
+		History:            compactTestHistory(),
+		KeepRecentMessages: 2,
+		Phase:              PhasePreTurn,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 60
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 0, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
+
+	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
+	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
+	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "tool_calls")
 }
 
 func TestMaybeCompactFallsBackToWildcardAndSkipsBelowLimit(t *testing.T) {
@@ -354,7 +443,7 @@ func TestMaybeCompactUsesObservedTokensForTrigger(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, 95, status.TokenBefore)
 	require.Equal(t, 95, result.TokenBefore)
-	require.Equal(t, 1, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
 }
 
 func TestMaybeCompactSkipsWhenObservedTokensBelowLimitEvenIfHistoryEstimateIsHigh(t *testing.T) {
@@ -462,13 +551,13 @@ func TestMaybeCompactReusesSummaryCheckpointWithoutSecondLLMCall(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, first)
 	require.Len(t, first.CheckpointIDs, 1)
-	require.Equal(t, 1, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
 
 	second, _, err := compactor.MaybeCompact(context.Background(), request)
 	require.NoError(t, err)
 	require.NotNil(t, second)
 	require.Len(t, second.CheckpointIDs, 1)
-	require.Equal(t, 1, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
 }
 
 func TestMaybeCompactUsesRemoteAdapterWhenCapabilitySupportsIt(t *testing.T) {
@@ -589,7 +678,7 @@ func TestMaybeCompactForceBypassesBelowLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, "provider-a", status.ResolvedProvider)
-	require.Equal(t, 1, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
 }
 
 func TestMaybeCompactMissingCapabilityUsesDefaultWindowAndReportsResolvedProviderAndModel(t *testing.T) {
@@ -623,7 +712,7 @@ func TestMaybeCompactMissingCapabilityUsesDefaultWindowAndReportsResolvedProvide
 	require.Equal(t, defaultAutoCompactContextWindow, status.TokenBefore)
 	require.Equal(t, defaultAutoCompactContextWindow, status.MaxContextTokens)
 	require.Equal(t, int(math.Floor(float64(defaultAutoCompactContextWindow)*defaultAutoCompactRatio)), status.TriggerTokenLimit)
-	require.Equal(t, 1, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
 }
 
 func TestMaybeCompactMissingCapabilitySkipsBelowDefaultWindow(t *testing.T) {
@@ -702,7 +791,7 @@ func TestMaybeCompactCapabilityWithoutContextLimitFallsBackToDefaultWindow(t *te
 	require.Equal(t, defaultAutoCompactContextWindow, status.TokenBefore)
 	require.Equal(t, defaultAutoCompactContextWindow, status.MaxContextTokens)
 	require.Equal(t, int(math.Floor(float64(defaultAutoCompactContextWindow)*defaultAutoCompactRatio)), status.TriggerTokenLimit)
-	require.Equal(t, 1, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
 }
 
 func TestMaybeCompactForceLocalDoesNotRequireModelCapability(t *testing.T) {
@@ -736,7 +825,7 @@ func TestMaybeCompactForceLocalDoesNotRequireModelCapability(t *testing.T) {
 	require.Equal(t, ModeLocal, status.Mode)
 	require.Equal(t, "provider-a", status.ResolvedProvider)
 	require.Equal(t, "gpt-5.5", status.ResolvedModel)
-	require.Equal(t, 1, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
 }
 
 func TestMaybeCompactLocalRequestUsesOriginalMessagesAndCompactPrompt(t *testing.T) {
@@ -821,7 +910,7 @@ func TestMaybeCompactUsesReasoningFallbackWhenContentIsEmpty(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, 1, provider.callCount)
+	require.Equal(t, 1, provider.streamCount)
 	require.NotEmpty(t, result.ReplacementHistory)
 
 	summaryMessage := result.ReplacementHistory[len(result.ReplacementHistory)-1]
