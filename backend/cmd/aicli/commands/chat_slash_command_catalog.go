@@ -260,7 +260,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/login",
-			Usage:       "/login [provider|--provider ... --base-url ... --api-key ...]",
+			Usage:       "/login [provider|--provider ... --base-url ... --api-key ... --model-cards ...]",
 			Summary:     "新增或更新 provider 登录凭证并刷新 models",
 			Group:       string(chatSlashCommandGroupModel),
 			AcceptsArgs: true,
@@ -269,6 +269,9 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "--protocol", Summary: "openai|anthropic|gemini|codex-apikey|codex-oauth"},
 				{Token: "--base-url", Summary: "provider base URL"},
 				{Token: "--api-key", Summary: "API key"},
+				{Token: "--model-cards", Summary: "额外模型卡片 catalog 文件"},
+				{Token: "--no-model-cards", Summary: "禁用模型卡片补齐"},
+				{Token: "--model-cards-strict", Summary: "模型卡片错误时中止登录"},
 				{Token: "--switch", Summary: "登录成功后切换当前会话"},
 			},
 		},

@@ -309,9 +309,12 @@ func completeLoginSlashArgs(session *ChatSession, argsText string, cursor int) [
 		{Command: "--api-key", Summary: "API key", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
 		{Command: "--models-path", Summary: "models endpoint", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
 		{Command: "--default-model", Summary: "默认模型", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
+		{Command: "--model-cards", Summary: "额外模型卡片 catalog 文件", Group: string(chatSlashCommandGroupModel), AcceptsArgs: true},
 		{Command: "--set-default", Summary: "设为默认 provider", Group: string(chatSlashCommandGroupModel)},
 		{Command: "--dry-run", Summary: "只校验不写配置", Group: string(chatSlashCommandGroupModel)},
 		{Command: "--switch", Summary: "登录后切换当前会话", Group: string(chatSlashCommandGroupModel)},
+		{Command: "--no-model-cards", Summary: "禁用模型卡片补齐", Group: string(chatSlashCommandGroupModel)},
+		{Command: "--model-cards-strict", Summary: "模型卡片错误时中止登录", Group: string(chatSlashCommandGroupModel)},
 	}
 	switch slashLoginArgumentFocus(ctx) {
 	case "provider":

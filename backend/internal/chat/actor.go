@@ -550,12 +550,14 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 			})
 		}
 	}
+	appendedPrompt := false
 	if shouldAppendUserPromptMessage(session.LastMessage(), preparedPrompt) {
 		session.AddMessage(*preparedPrompt)
 		if err := a.persistSession(ctx, session); err != nil {
 			reply <- SubmitResult{Err: err}
 			return
 		}
+		appendedPrompt = true
 	}
 
 	turnID := "turn_" + uuid.NewString()
@@ -567,7 +569,7 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	})
-	a.startSessionRun(ctx, session, prompt, false, turnID, cmd.RunMeta, reply)
+	a.startSessionRun(ctx, session, prompt, false, turnID, cmd.RunMeta, reply, appendedPrompt)
 }
 
 func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
@@ -1076,6 +1078,32 @@ func shouldAppendUserPromptMessage(last *runtimetypes.Message, prepared *runtime
 	return llm.MessageHasLocalInputImages(prepared) && !llm.MessageHasLocalInputImages(last)
 }
 
+func shouldRollbackFailedPrompt(execErr error, result *agent.Result, resume bool, appendedPrompt []bool) bool {
+	if execErr == nil || resume || len(appendedPrompt) == 0 || !appendedPrompt[0] {
+		return false
+	}
+	if result == nil {
+		return true
+	}
+	return strings.TrimSpace(result.Output) == "" && result.Steps == 0 && len(result.Observations) == 0
+}
+
+func (a *SessionActor) rollbackLastUserPrompt(ctx context.Context, session *Session, prompt string) error {
+	if a == nil || session == nil {
+		return nil
+	}
+	history := session.GetMessages()
+	if len(history) == 0 {
+		return nil
+	}
+	last := history[len(history)-1]
+	if last.Role != "user" || last.Content != prompt {
+		return nil
+	}
+	session.ReplaceHistory(history[:len(history)-1])
+	return a.persistSession(ctx, session)
+}
+
 func countRuntimeChatContextTokens(llmRuntime *llm.LLMRuntime, messages []runtimetypes.Message) int {
 	if len(messages) == 0 {
 		return 0
@@ -1490,7 +1518,7 @@ func cloneEventPayload(input map[string]interface{}) map[string]interface{} {
 	return cloned
 }
 
-func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, reply chan SubmitResult) {
+func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, reply chan SubmitResult, appendedPrompt ...bool) {
 	if a == nil || session == nil {
 		if reply != nil {
 			reply <- SubmitResult{Err: fmt.Errorf("session is nil")}
@@ -1555,6 +1583,11 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		}
 		cancel()
 		a.clearActiveCancel()
+		if shouldRollbackFailedPrompt(execErr, result, resume, appendedPrompt) {
+			if rollbackErr := a.rollbackLastUserPrompt(context.Background(), session, prompt); rollbackErr != nil && execErr == nil {
+				execErr = rollbackErr
+			}
+		}
 
 		status := SessionIdle
 		if ctx.Err() != nil || a.consumeInterrupted() {

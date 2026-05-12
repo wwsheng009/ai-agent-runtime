@@ -70,7 +70,20 @@ func (p *capturingSequenceProvider) Call(ctx context.Context, req *llm.LLMReques
 }
 
 func (p *capturingSequenceProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
-	return nil, nil
+	response, err := p.Call(ctx, req)
+	ch := make(chan llm.StreamChunk, 2)
+	go func() {
+		defer close(ch)
+		if err != nil {
+			ch <- llm.StreamChunk{Type: llm.EventTypeError, Error: err.Error(), Done: true}
+			return
+		}
+		if response != nil && strings.TrimSpace(response.Content) != "" {
+			ch <- llm.StreamChunk{Type: llm.EventTypeText, Content: response.Content}
+		}
+		ch <- llm.StreamChunk{Type: llm.EventTypeDone, Done: true}
+	}()
+	return ch, nil
 }
 
 func (p *capturingSequenceProvider) CountTokens(text string) int {
@@ -128,6 +141,45 @@ func (m *simpleEchoMCPManager) CallTool(ctx interface{}, mcpName, toolName strin
 func (m *simpleEchoMCPManager) ListTools() []skill.ToolInfo {
 	info, _ := m.FindTool("team_echo")
 	return []skill.ToolInfo{info}
+}
+
+type failingLLMProvider struct {
+	name     string
+	err      error
+	requests []*llm.LLMRequest
+}
+
+func (p *failingLLMProvider) Name() string {
+	return p.name
+}
+
+func (p *failingLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	if req != nil {
+		p.requests = append(p.requests, &llm.LLMRequest{
+			Provider: req.Provider,
+			Model:    req.Model,
+		})
+	}
+	return nil, p.err
+}
+
+func (p *failingLLMProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
+	return nil, p.err
+}
+
+func (p *failingLLMProvider) CountTokens(text string) int {
+	return len(text) / 4
+}
+
+func (p *failingLLMProvider) GetCapabilities() *llm.ModelCapabilities {
+	return &llm.ModelCapabilities{
+		MaxContextTokens: 128000,
+		SupportsTools:    true,
+	}
+}
+
+func (p *failingLLMProvider) CheckHealth(ctx context.Context) error {
+	return nil
 }
 
 func TestNewPendingToolInvocationGeneratesDeterministicStandaloneID(t *testing.T) {
@@ -221,6 +273,58 @@ func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
 	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
+}
+
+func TestSessionActorSubmitPromptRollsBackPromptWhenInitialLLMRequestFails(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	session.AddMessage(*types.NewUserMessage("previous"))
+	session.AddMessage(*types.NewAssistantMessage("ack"))
+	require.NoError(t, storage.Update(ctx, session))
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "failing-provider",
+		DefaultModel:    "gpt-5.5",
+		MaxRetries:      0,
+	})
+	provider := &failingLLMProvider{
+		name: "failing-provider",
+		err:  fmt.Errorf("HTTP 503: model_not_found"),
+	}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5.5", provider.Name()))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-failure-test",
+		Provider: provider.Name(),
+		Model:    "gpt-5.5",
+		MaxSteps: 3,
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	result, err := actor.SubmitPrompt(ctx, "ls", nil)
+	require.Error(t, err)
+	require.NotNil(t, result)
+
+	updated, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.Len(t, updated.History, 2)
+	require.Equal(t, "previous", updated.History[0].Content)
+	require.Equal(t, "ack", updated.History[1].Content)
+	require.Len(t, provider.requests, 1)
 }
 
 func TestNewSessionActor_DefaultLoopConfigDisablesParallelTools(t *testing.T) {

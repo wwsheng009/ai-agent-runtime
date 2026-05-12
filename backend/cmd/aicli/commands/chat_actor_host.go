@@ -243,6 +243,11 @@ func refreshLocalRuntimeAfterModelSelection(session *ChatSession) error {
 func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *ChatSession, sessionStore runtimechat.SessionStorage, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string) (*runtimechat.SessionActor, error) {
 	childAgentType := ""
 	requestedModel := ""
+	baseSessionID := ""
+	if session != nil && session.RuntimeSession != nil {
+		baseSessionID = strings.TrimSpace(session.RuntimeSession.ID)
+	}
+	isBaseSession := baseSessionID != "" && strings.EqualFold(strings.TrimSpace(sessionID), baseSessionID)
 	if sessionStore != nil {
 		if runtimeSession, err := sessionStore.Load(context.Background(), sessionID); err == nil && runtimeSession != nil {
 			if value, ok := runtimeSession.GetContext(toolbroker.AgentSessionContextAgentType); ok {
@@ -250,9 +255,11 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 					childAgentType = strings.TrimSpace(text)
 				}
 			}
-			if value, ok := runtimeSession.GetContext(toolbroker.AgentSessionContextRequestedModel); ok {
-				if text, ok := value.(string); ok {
-					requestedModel = strings.TrimSpace(text)
+			if !isBaseSession {
+				if value, ok := runtimeSession.GetContext(toolbroker.AgentSessionContextRequestedModel); ok {
+					if text, ok := value.(string); ok {
+						requestedModel = strings.TrimSpace(text)
+					}
 				}
 			}
 		}

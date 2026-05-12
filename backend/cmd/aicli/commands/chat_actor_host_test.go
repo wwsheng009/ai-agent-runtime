@@ -25,6 +25,51 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+type capturingLocalChatProvider struct {
+	name      string
+	responses []*runtimellm.LLMResponse
+	requests  []*runtimellm.LLMRequest
+	callCount int
+}
+
+func (p *capturingLocalChatProvider) Name() string {
+	return p.name
+}
+
+func (p *capturingLocalChatProvider) Call(ctx context.Context, req *runtimellm.LLMRequest) (*runtimellm.LLMResponse, error) {
+	if req != nil {
+		p.requests = append(p.requests, &runtimellm.LLMRequest{
+			Provider: req.Provider,
+			Model:    req.Model,
+		})
+	}
+	if p.callCount >= len(p.responses) {
+		return &runtimellm.LLMResponse{Content: "ok", Model: p.name}, nil
+	}
+	response := p.responses[p.callCount]
+	p.callCount++
+	return response, nil
+}
+
+func (p *capturingLocalChatProvider) Stream(ctx context.Context, req *runtimellm.LLMRequest) (<-chan runtimellm.StreamChunk, error) {
+	return nil, nil
+}
+
+func (p *capturingLocalChatProvider) CountTokens(text string) int {
+	return len(text) / 4
+}
+
+func (p *capturingLocalChatProvider) GetCapabilities() *runtimellm.ModelCapabilities {
+	return &runtimellm.ModelCapabilities{
+		MaxContextTokens: 128000,
+		SupportsTools:    true,
+	}
+}
+
+func (p *capturingLocalChatProvider) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
 func TestLocalChatRuntimeHost_MirrorsTeamSummaryIntoBaseSession(t *testing.T) {
 	manager, userID, dir, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -477,6 +522,93 @@ func TestBuildLocalChatAgent_PropagatesReasoningEffortToAgentOptions(t *testing.
 	}
 	if got := cfg.Options["reasoning_effort"]; got != "medium" {
 		t.Fatalf("expected reasoning_effort=medium, got %#v", got)
+	}
+}
+
+func TestLocalChatRuntimeHostBuildSessionActorIgnoresStaleRequestedModelForBaseSession(t *testing.T) {
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	runtimeSession.SetContext(toolbroker.AgentSessionContextRequestedModel, "gpt-5.5")
+	if err := manager.Update(ctx, runtimeSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+		DefaultProvider: "mimo_anthropic",
+		DefaultModel:    "mimo-v2.5-pro",
+		MaxRetries:      0,
+	})
+	provider := &capturingLocalChatProvider{
+		name: "mimo_anthropic",
+		responses: []*runtimellm.LLMResponse{
+			{Content: "ok", Model: "mimo-v2.5-pro"},
+		},
+	}
+	if err := llmRuntime.RegisterProvider("mimo_anthropic", provider); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+	if err := llmRuntime.RegisterProviderAlias("mimo-v2.5-pro", "mimo_anthropic"); err != nil {
+		t.Fatalf("RegisterProviderAlias: %v", err)
+	}
+	if err := llmRuntime.RegisterProviderAlias("gpt-5.5", "mimo_anthropic"); err != nil {
+		t.Fatalf("RegisterProviderAlias stale: %v", err)
+	}
+	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
+		Config: runtimecfg.DefaultRuntimeConfig(),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer bootstrapManager.Stop()
+	if err := bootstrapManager.LLMRuntime().RegisterProvider("mimo_anthropic", provider); err != nil {
+		t.Fatalf("bootstrap RegisterProvider: %v", err)
+	}
+	if err := bootstrapManager.LLMRuntime().RegisterProviderAlias("mimo-v2.5-pro", "mimo_anthropic"); err != nil {
+		t.Fatalf("bootstrap RegisterProviderAlias: %v", err)
+	}
+	if err := bootstrapManager.LLMRuntime().RegisterProviderAlias("gpt-5.5", "mimo_anthropic"); err != nil {
+		t.Fatalf("bootstrap RegisterProviderAlias stale: %v", err)
+	}
+	host := &localChatRuntimeHost{
+		Bootstrap:    bootstrapManager,
+		RuntimeStore: runtimechat.NewInMemoryRuntimeStore(64),
+	}
+	session := &ChatSession{
+		ProviderName:     "mimo_anthropic",
+		Model:            "mimo-v2.5-pro",
+		RuntimeSession:   runtimeSession,
+		SessionManager:   manager,
+		LocalRuntimeHost: host,
+	}
+
+	actor, err := host.buildSessionActor(runtimeSession.ID, session, manager.GetStorage(), nil, "")
+	if err != nil {
+		t.Fatalf("buildSessionActor: %v", err)
+	}
+	if actor == nil {
+		t.Fatal("expected actor")
+	}
+	result, err := actor.SubmitPrompt(ctx, "hello", nil)
+	if err != nil {
+		t.Fatalf("SubmitPrompt: %v", err)
+	}
+	if result == nil || strings.TrimSpace(result.Output) != "ok" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(provider.requests))
+	}
+	if provider.requests[0].Model != "mimo-v2.5-pro" {
+		t.Fatalf("expected base session model to follow ChatSession, got %q", provider.requests[0].Model)
 	}
 }
 
