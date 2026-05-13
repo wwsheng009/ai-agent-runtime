@@ -143,7 +143,7 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	// 读取文件
-	content, err := v.readFile(resolvedPath, p.Offset, p.Limit)
+	content, readMeta, err := v.readFile(resolvedPath, p.Offset, p.Limit)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &toolkit.ToolResult{
@@ -168,44 +168,67 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 
-	return &toolkit.ToolResult{
+	result := &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    content,
 		Metadata: map[string]interface{}{
 			"file_path":    resolvedPath,
 			"file_size":    fileInfo.Size(),
-			"lines_read":   v.countLines(content),
-			"is_truncated": p.Offset > 0 || p.Limit > 0,
+			"lines_read":   readMeta.LinesRead,
+			"offset":       p.Offset,
+			"limit":        p.Limit,
+			"eof":          readMeta.EOF,
+			"is_truncated": readMeta.HasMore,
 		},
-	}, nil
+	}
+	if readMeta.TotalLinesKnown {
+		result.Metadata["total_lines"] = readMeta.TotalLines
+	}
+	return result, nil
+}
+
+type viewReadResult struct {
+	TotalLines      int
+	TotalLinesKnown bool
+	LinesRead       int
+	HasMore         bool
+	EOF             bool
 }
 
 // readFile 读取文件内容
-func (v *ViewTool) readFile(filePath string, offset, limit int) (string, error) {
+func (v *ViewTool) readFile(filePath string, offset, limit int) (string, viewReadResult, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return "", err
+		return "", viewReadResult{}, err
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	var lines []string
+	meta := viewReadResult{}
 
 	// 跳过 offset 行
 	skipped := 0
 	for skipped < offset && scanner.Scan() {
 		skipped++
+		meta.TotalLines++
 	}
 
 	if err := scanner.Err(); err != nil {
-		return "", err
+		return "", meta, err
+	}
+	if skipped < offset {
+		meta.EOF = true
+		meta.TotalLinesKnown = true
+		return fmt.Sprintf("Reached end of file: offset %d is beyond total lines %d.", offset, meta.TotalLines), meta, nil
 	}
 
 	// 读取 limit 行
-	var lines []string
 	readCount := 0
 	for readCount < limit && scanner.Scan() {
 		line := scanner.Text()
+		meta.TotalLines++
 
 		// 跳过过长的行
 		if utf8.RuneCountInString(line) > 2000 {
@@ -215,17 +238,34 @@ func (v *ViewTool) readFile(filePath string, offset, limit int) (string, error) 
 		lines = append(lines, line)
 		readCount++
 	}
+	meta.LinesRead = readCount
 
 	if err := scanner.Err(); err != nil {
-		return "", err
+		return "", meta, err
 	}
 
-	// 如果还有更多内容，添加提示
-	if readCount == limit && scanner.Scan() {
-		// 还有更多行
+	if scanner.Scan() {
+		meta.TotalLines++
+		meta.HasMore = true
+	}
+	if err := scanner.Err(); err != nil {
+		return "", meta, err
+	}
+	if !meta.HasMore {
+		meta.TotalLinesKnown = true
+		meta.EOF = true
 	}
 
-	return v.formatContent(lines), nil
+	if readCount == 0 {
+		meta.EOF = true
+		meta.TotalLinesKnown = true
+		if offset == meta.TotalLines {
+			return fmt.Sprintf("Reached end of file: offset %d equals total lines %d.", offset, meta.TotalLines), meta, nil
+		}
+		return fmt.Sprintf("Reached end of file: offset %d is beyond total lines %d.", offset, meta.TotalLines), meta, nil
+	}
+
+	return v.formatContent(lines), meta, nil
 }
 
 // formatContent 格式化内容
@@ -257,19 +297,4 @@ func (v *ViewTool) isBinaryFile(content string) bool {
 
 	// 如果超过一定比例是 null 字节，认为是二进制文件
 	return nullCount > checkLen/20
-}
-
-// countLines 统计行数
-func (v *ViewTool) countLines(content string) int {
-	if content == "" {
-		return 0
-	}
-
-	count := 0
-	for _, c := range content {
-		if c == '\n' {
-			count++
-		}
-	}
-	return count + 1
 }
