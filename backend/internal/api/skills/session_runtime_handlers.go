@@ -418,6 +418,11 @@ func (h *Handler) sessionRuntimeToolDefinitions(ctx context.Context, sessionID s
 	if h == nil {
 		return []runtimetypes.ToolDefinition{}
 	}
+	if store := h.getSessionRuntimeStore(); store != nil {
+		if state, err := store.LoadState(ctx, strings.TrimSpace(sessionID)); err == nil && state != nil && state.StableToolSurfaceSet {
+			return cloneSessionRuntimeToolDefinitions(state.StableToolSurface)
+		}
+	}
 	surface := h.runtimeServerToolSurfaceForSession(ctx, sessionID, h.mcpManager, true)
 	if surface == nil {
 		return []runtimetypes.ToolDefinition{}
@@ -442,6 +447,29 @@ func (h *Handler) sessionRuntimeToolDefinitions(ctx context.Context, sessionID s
 		return strings.TrimSpace(tools[i].Name) < strings.TrimSpace(tools[j].Name)
 	})
 	return tools
+}
+
+func cloneSessionRuntimeToolDefinitions(input []runtimetypes.ToolDefinition) []runtimetypes.ToolDefinition {
+	if len(input) == 0 {
+		return []runtimetypes.ToolDefinition{}
+	}
+	output := make([]runtimetypes.ToolDefinition, 0, len(input))
+	for _, tool := range input {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		output = append(output, runtimetypes.ToolDefinition{
+			Name:        name,
+			Description: tool.Description,
+			Parameters:  cloneAnyMap(tool.Parameters),
+			Metadata:    cloneAnyMap(tool.Metadata),
+		})
+	}
+	sort.SliceStable(output, func(i, j int) bool {
+		return strings.TrimSpace(output[i].Name) < strings.TrimSpace(output[j].Name)
+	})
+	return output
 }
 
 func (h *Handler) sessionRuntimeToolsDisabled(ctx context.Context, sessionID string) bool {

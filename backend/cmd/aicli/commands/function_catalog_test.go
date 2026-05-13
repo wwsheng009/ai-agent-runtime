@@ -135,6 +135,116 @@ func TestAICLIFunctionCatalog_SelectRequestFunctions_UnifiesBuiltinAndSkillSelec
 	}
 }
 
+func TestAICLIFunctionCatalog_SelectRequestFunctions_KeepsGoalToolsInvariantWithSkillPrefer(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	registerGoalFunctions(&ChatSession{FunctionCatalog: catalog, FunctionRegistry: registry})
+
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: "builtin__diagnose"}, runtimetools.ToolDescriptor{
+		Name:        "builtin__diagnose",
+		Description: "builtin diagnose",
+		Parameters: map[string]interface{}{
+			"type": "object",
+		},
+	})
+	skillFn := &SkillFunction{
+		functionName: "skill__alpha",
+		skill:        &runtimeskill.Skill{Name: "alpha"},
+		schema: map[string]interface{}{
+			"name":        "skill__alpha",
+			"description": "alpha skill",
+			"parameters": map[string]interface{}{
+				"type": "object",
+			},
+		},
+	}
+	catalog.RegisterSkillFunction(skillFn)
+
+	binding := &skillsRuntimeBinding{
+		exposureMode: skillExposurePrefer,
+		catalog:      catalog,
+		skillFunctions: map[string]*SkillFunction{
+			"skill__alpha": skillFn,
+		},
+	}
+	catalog.SetSkillsBinding(binding)
+
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+		SkillsBinding:    binding,
+		SkillsMode:       skillExposurePrefer,
+	}
+
+	selection, _ := catalog.SelectRequestFunctions(session, "please use skill__alpha to handle this request")
+	if selection == nil {
+		t.Fatal("expected function selection")
+	}
+	if !selectionContainsFunction(selection, getGoalFunctionName) || !selectionContainsFunction(selection, updateGoalFunctionName) {
+		t.Fatalf("expected goal tools to remain in prefer-mode request tools, got %v", selection.FinalFunctionNames)
+	}
+	if selectionContainsFunction(selection, "builtin__diagnose") {
+		t.Fatalf("expected non-invariant builtin to remain suppressed, got %v", selection.FinalFunctionNames)
+	}
+}
+
+func TestAICLIFunctionCatalog_SelectStableSessionFunctions_UsesFixedSuperset(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+		SkillsMode:       skillExposurePrefer,
+	}
+	registerGoalFunctions(session)
+
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: "builtin__diagnose"}, runtimetools.ToolDescriptor{
+		Name:        "builtin__diagnose",
+		Description: "builtin diagnose",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: toolnames.OpenAIImageGenerateToolName}, runtimetools.ToolDescriptor{
+		Name:        toolnames.OpenAIImageGenerateToolName,
+		Description: "generate image via /v1/images/generations",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+	skillFn := &SkillFunction{
+		functionName: "skill__alpha",
+		skill:        &runtimeskill.Skill{Name: "alpha"},
+		schema: map[string]interface{}{
+			"name":        "skill__alpha",
+			"description": "alpha skill",
+			"parameters":  map[string]interface{}{"type": "object"},
+		},
+	}
+	catalog.RegisterSkillFunction(skillFn)
+	binding := &skillsRuntimeBinding{
+		exposureMode: skillExposurePrefer,
+		catalog:      catalog,
+		skillFunctions: map[string]*SkillFunction{
+			"skill__alpha": skillFn,
+		},
+	}
+	catalog.SetSkillsBinding(binding)
+	session.SkillsBinding = binding
+
+	selection := catalog.SelectStableSessionFunctions(session)
+	if selection == nil {
+		t.Fatal("expected stable function selection")
+	}
+	for _, name := range []string{
+		"builtin__diagnose",
+		"skill__alpha",
+		toolnames.OpenAIImageGenerateToolName,
+		getGoalFunctionName,
+		updateGoalFunctionName,
+	} {
+		if !selectionContainsFunction(selection, name) {
+			t.Fatalf("expected stable selection to include %s, got %v", name, selection.FinalFunctionNames)
+		}
+	}
+}
+
 func TestFormatSkillExposureDebug_IncludesCatalogAndFinalExposure(t *testing.T) {
 	registry := functions.NewFunctionRegistry()
 	catalog := newAICLIFunctionCatalog("openai", registry)

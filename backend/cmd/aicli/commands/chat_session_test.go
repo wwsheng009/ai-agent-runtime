@@ -590,6 +590,51 @@ func TestListResumeCandidateChatSessionsSkipsCurrentAndSystemOnly(t *testing.T) 
 	}
 }
 
+func TestRestoreChatStateFromRuntimeSession_PreservesStableToolSurfaceWithinSameSession(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	session := &ChatSession{
+		SessionManager:            manager,
+		SessionUserID:             userID,
+		RuntimeSession:            runtimeSession.Clone(),
+		stableSharedToolSessionID: runtimeSession.ID,
+		stableSharedToolSelection: &aicliFunctionSelection{
+			FinalFunctionNames: []string{"get_goal", "update_goal"},
+		},
+	}
+
+	updated := runtimeSession.Clone()
+	updated.ReplaceHistory([]runtimetypes.Message{{Role: "user", Content: "goal update", Metadata: runtimetypes.NewMetadata()}})
+	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
+		t.Fatalf("restoreChatStateFromRuntimeSession: %v", err)
+	}
+	if session.stableSharedToolSelection == nil {
+		t.Fatal("expected stable tool selection to be preserved for same session")
+	}
+	if got := session.stableSharedToolSelection.FinalFunctionNames; len(got) != 2 || got[0] != "get_goal" || got[1] != "update_goal" {
+		t.Fatalf("unexpected stable tool selection: %#v", got)
+	}
+
+	otherSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create other: %v", err)
+	}
+	if err := restoreChatStateFromRuntimeSession(session, otherSession); err != nil {
+		t.Fatalf("restoreChatStateFromRuntimeSession other: %v", err)
+	}
+	if session.stableSharedToolSelection != nil {
+		t.Fatal("expected stable tool selection to be cleared when switching sessions")
+	}
+}
+
 func TestRuntimeResumeSessionTitleStripsEmbeddedSessionMetadata(t *testing.T) {
 	session := runtimechat.NewSession("tester")
 	session.Metadata.Title = `检查 multi team执行功能机制， Session: session_20260506094548_QX3iM9PR [active]Session File: C:\Users\vince\.aicli\sessions\session_20260506094548_QX3iM9PR.json`

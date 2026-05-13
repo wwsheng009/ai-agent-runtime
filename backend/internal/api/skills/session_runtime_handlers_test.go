@@ -112,6 +112,25 @@ func (p *runtimeCommandSequenceProvider) CheckHealth(ctx context.Context) error 
 	return nil
 }
 
+func TestSessionRuntimeToolDefinitionsUsesStableSurface(t *testing.T) {
+	store := chat.NewInMemoryRuntimeStore(64)
+	require.NoError(t, store.SaveState(context.Background(), &chat.RuntimeState{
+		SessionID: "session-stable-tools",
+		Status:    chat.SessionIdle,
+		StableToolSurface: []types.ToolDefinition{
+			{Name: "get_goal", Description: "Read goal"},
+			{Name: "update_goal", Description: "Complete goal"},
+		},
+		StableToolSurfaceSet: true,
+	}))
+
+	handler := &Handler{sessionRuntimeStore: store}
+	tools := handler.sessionRuntimeToolDefinitions(context.Background(), "session-stable-tools")
+	require.Len(t, tools, 2)
+	assert.Equal(t, "get_goal", tools[0].Name)
+	assert.Equal(t, "update_goal", tools[1].Name)
+}
+
 type runtimeCommandCapturingProvider struct {
 	runtimeCommandSequenceProvider
 	requests []*llm.LLMRequest

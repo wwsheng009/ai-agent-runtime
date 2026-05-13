@@ -293,10 +293,113 @@ func (c *aicliFunctionCatalog) SelectRequestFunctions(session *ChatSession, prom
 		ExposedSkills: exposedSkills,
 	})
 	if selection == nil {
-		return &aicliFunctionSelection{Mode: exposureMode}, exposureDetails
+		selection = &aicliFunctionSelection{Mode: exposureMode}
+	} else {
+		selection = filterImageGenerationToolExposure(session, prompt, selection, exposureDetails)
 	}
-	selection = filterImageGenerationToolExposure(session, prompt, selection, exposureDetails)
-	return selection, exposureDetails
+	return c.ensureInvariantGoalFunctionsSelected(selection), exposureDetails
+}
+
+func (c *aicliFunctionCatalog) SelectStableSessionFunctions(session *ChatSession) *aicliFunctionSelection {
+	if session == nil || c == nil || c.registry == nil {
+		return nil
+	}
+	c.syncFromRegistry()
+
+	exposureMode := skillExposureAuto
+	if binding := c.SkillsBinding(); binding != nil {
+		if mode := normalizeSkillExposureMode(binding.exposureMode); mode != "" {
+			exposureMode = mode
+		}
+	} else if mode := normalizeSkillExposureMode(session.SkillsMode); mode != "" {
+		exposureMode = mode
+	}
+
+	shared := c.sharedCapabilityCatalog()
+	selection := &aicliFunctionSelection{
+		Mode:           exposureMode,
+		IncludeBuiltin: exposureMode != skillExposureOnly,
+	}
+	if selection.IncludeBuiltin {
+		for _, name := range shared.BuiltinFunctionNames() {
+			if c.toolPolicy != nil && !c.toolPolicy.AllowsDefinition(name) {
+				continue
+			}
+			entry := c.entries[name]
+			if entry == nil || len(entry.schema) == 0 {
+				continue
+			}
+			selection.BuiltinFunctions = append(selection.BuiltinFunctions, name)
+			selection.FinalFunctionNames = append(selection.FinalFunctionNames, name)
+			selection.Schemas = append(selection.Schemas, cloneFunctionSchema(entry.schema))
+		}
+	}
+	for _, name := range shared.SkillFunctionNames() {
+		entry := c.entries[name]
+		if entry == nil || len(entry.schema) == 0 {
+			continue
+		}
+		selection.SkillFunctions = append(selection.SkillFunctions, name)
+		selection.FinalFunctionNames = append(selection.FinalFunctionNames, name)
+		selection.Schemas = append(selection.Schemas, cloneFunctionSchema(entry.schema))
+	}
+	selection = filterStableImageGenerationToolExposure(session, selection)
+	return c.normalizeFunctionSelection(c.ensureInvariantGoalFunctionsSelected(selection))
+}
+
+func (c *aicliFunctionCatalog) ensureInvariantGoalFunctionsSelected(selection *aicliFunctionSelection) *aicliFunctionSelection {
+	if c == nil {
+		return selection
+	}
+	if selection == nil {
+		selection = &aicliFunctionSelection{}
+	}
+	for _, name := range []string{getGoalFunctionName, updateGoalFunctionName} {
+		entry := c.entries[name]
+		if entry == nil || entry.isSkill || len(entry.schema) == 0 {
+			continue
+		}
+		if c.toolPolicy != nil && !c.toolPolicy.AllowsDefinition(name) {
+			continue
+		}
+		if selectionContainsFunction(selection, name) {
+			continue
+		}
+		selection.BuiltinFunctions = append(selection.BuiltinFunctions, name)
+		selection.FinalFunctionNames = append(selection.FinalFunctionNames, name)
+		selection.Schemas = append(selection.Schemas, cloneFunctionSchema(entry.schema))
+	}
+	if len(selection.BuiltinFunctions) > 0 {
+		selection.IncludeBuiltin = true
+		sort.Strings(selection.BuiltinFunctions)
+	}
+	if len(selection.FinalFunctionNames) > 0 {
+		sort.Strings(selection.FinalFunctionNames)
+	}
+	sort.SliceStable(selection.Schemas, func(i, j int) bool {
+		left, _ := selection.Schemas[i]["name"].(string)
+		right, _ := selection.Schemas[j]["name"].(string)
+		return strings.TrimSpace(left) < strings.TrimSpace(right)
+	})
+	return selection
+}
+
+func (c *aicliFunctionCatalog) normalizeFunctionSelection(selection *aicliFunctionSelection) *aicliFunctionSelection {
+	if selection == nil {
+		return nil
+	}
+	selection.BuiltinFunctions = uniqueStrings(selection.BuiltinFunctions)
+	selection.SkillFunctions = uniqueStrings(selection.SkillFunctions)
+	selection.FinalFunctionNames = uniqueStrings(selection.FinalFunctionNames)
+	sort.Strings(selection.BuiltinFunctions)
+	sort.Strings(selection.SkillFunctions)
+	sort.Strings(selection.FinalFunctionNames)
+	sort.SliceStable(selection.Schemas, func(i, j int) bool {
+		left, _ := selection.Schemas[i]["name"].(string)
+		right, _ := selection.Schemas[j]["name"].(string)
+		return strings.TrimSpace(left) < strings.TrimSpace(right)
+	})
+	return selection
 }
 
 func (c *aicliFunctionCatalog) sharedCapabilityCatalog() *runtimechatcore.Catalog {

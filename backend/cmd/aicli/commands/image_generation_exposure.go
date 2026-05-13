@@ -43,6 +43,24 @@ func filterImageGenerationToolExposure(
 	return removeFunctionsFromSelection(selection, toolnames.OpenAIImageGenerateToolName, toolnames.LegacyImageGenerateToolName)
 }
 
+func filterStableImageGenerationToolExposure(
+	session *ChatSession,
+	selection *aicliFunctionSelection,
+) *aicliFunctionSelection {
+	if selection == nil {
+		return selection
+	}
+	if sessionHasCodexNativeImageGeneration(session) {
+		return removeFunctionsFromSelection(
+			selection,
+			toolnames.OpenAIImageGenerateToolName,
+			toolnames.LegacyImageGenerateToolName,
+			imagegenSkillFunctionName,
+		)
+	}
+	return selection
+}
+
 func shouldExposeOpenAIImageGenerateTool(
 	session *ChatSession,
 	prompt string,

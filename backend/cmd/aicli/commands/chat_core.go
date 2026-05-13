@@ -117,7 +117,7 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 	var exposureReport *aicliFunctionExposureReport
 	if !session.DisableTools {
 		if catalog := ensureFunctionCatalog(session); catalog != nil && catalog.Registry() != nil {
-			selection, exposureDetails = catalog.SelectRequestFunctions(session, prompt)
+			selection, exposureDetails = stableSharedFunctionSelectionForRequest(session, prompt)
 			exposureReport = buildFunctionExposureReport(catalog, prompt, selection, exposureDetails)
 			if session.SkillsDebug {
 				beginDirectInteractiveOutput(session)

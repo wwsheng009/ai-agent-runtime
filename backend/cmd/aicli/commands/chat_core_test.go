@@ -215,6 +215,90 @@ func TestAICLISharedChatExecutor_SyncsRuntimeSessionFromSharedCoreHistory(t *tes
 	}
 }
 
+func TestAICLISharedChatExecutor_UsesStableToolSurfaceAcrossPrompts(t *testing.T) {
+	originalExecute := executeToolLoop
+	defer func() {
+		executeToolLoop = originalExecute
+	}()
+
+	var captured [][]types.ToolDefinition
+	executeToolLoop = func(ctx context.Context, req runtimechatcore.ToolLoopRequest) (*runtimechatcore.ToolLoopResult, error) {
+		captured = append(captured, append([]types.ToolDefinition(nil), req.Tools...))
+		history := cloneRuntimeMessages(req.History)
+		if strings.TrimSpace(req.Prompt) != "" {
+			history = append(history, *types.NewUserMessage(req.Prompt))
+		}
+		history = append(history, *types.NewAssistantMessage("ok"))
+		return &runtimechatcore.ToolLoopResult{
+			History: history,
+			Response: &runtimechatcore.ChatResult{
+				Output: "ok",
+			},
+		}, nil
+	}
+
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: "builtin__diagnose"}, runtimetools.ToolDescriptor{
+		Name:        "builtin__diagnose",
+		Description: "builtin diagnose",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: toolnames.OpenAIImageGenerateToolName}, runtimetools.ToolDescriptor{
+		Name:        toolnames.OpenAIImageGenerateToolName,
+		Description: "generate image",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+	skillFn := &SkillFunction{
+		functionName: "skill__alpha",
+		schema: map[string]interface{}{
+			"name":        "skill__alpha",
+			"description": "alpha skill",
+			"parameters":  map[string]interface{}{"type": "object"},
+		},
+	}
+	catalog.RegisterSkillFunction(skillFn)
+	binding := &skillsRuntimeBinding{
+		exposureMode: skillExposurePrefer,
+		catalog:      catalog,
+		skillFunctions: map[string]*SkillFunction{
+			"skill__alpha": skillFn,
+		},
+	}
+	catalog.SetSkillsBinding(binding)
+
+	session := &ChatSession{
+		Provider:         config.Provider{Enabled: true, Protocol: "openai"},
+		cancelCtx:        context.Background(),
+		NoInteractive:    true,
+		FunctionRegistry: registry,
+		FunctionCatalog:  catalog,
+		SkillsBinding:    binding,
+		SkillsMode:       skillExposurePrefer,
+		ChatExecutor:     newAICLISharedChatExecutor(),
+	}
+
+	if _, err := session.ChatExecutor.Execute(context.Background(), session, "inspect config and explain startup"); err != nil {
+		t.Fatalf("first Execute failed: %v", err)
+	}
+	if _, err := session.ChatExecutor.Execute(context.Background(), session, "please use skill__alpha and generate an image"); err != nil {
+		t.Fatalf("second Execute failed: %v", err)
+	}
+	if len(captured) != 2 {
+		t.Fatalf("expected two captured requests, got %d", len(captured))
+	}
+	firstNames := toolDefinitionNamesForTest(captured[0])
+	secondNames := toolDefinitionNamesForTest(captured[1])
+	if strings.Join(firstNames, ",") != strings.Join(secondNames, ",") {
+		t.Fatalf("expected stable shared tool surface, first=%v second=%v", firstNames, secondNames)
+	}
+	for _, name := range []string{"builtin__diagnose", "skill__alpha", toolnames.OpenAIImageGenerateToolName} {
+		if !toolDefinitionsContain(captured[0], name) {
+			t.Fatalf("expected stable shared tools to include %s, got %v", name, firstNames)
+		}
+	}
+}
+
 func TestAICLIProviderTurnExecutor_UsesSanitizedProtocolMessagesForSharedReplay(t *testing.T) {
 	var capturedBody map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

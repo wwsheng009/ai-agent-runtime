@@ -1380,6 +1380,35 @@ func TestSQLiteRuntimeStorePersistsFrozenTurnTools(t *testing.T) {
 	assert.Equal(t, "ask_user_question", loaded.FrozenTurnTools[1].Name)
 }
 
+func TestSQLiteRuntimeStorePersistsStableToolSurface(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-stable-tool-surface-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	state := &RuntimeState{
+		SessionID: "session-stable-tool-surface",
+		Status:    SessionIdle,
+		StableToolSurface: []types.ToolDefinition{
+			{Name: "get_goal", Description: "Read goal"},
+			{Name: "update_goal", Description: "Complete goal"},
+		},
+		StableToolSurfaceSet: true,
+		UpdatedAt:            time.Now().UTC(),
+	}
+	require.NoError(t, store.SaveState(ctx, state))
+
+	loaded, err := store.LoadState(ctx, "session-stable-tool-surface")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.True(t, loaded.StableToolSurfaceSet)
+	require.Len(t, loaded.StableToolSurface, 2)
+	assert.Equal(t, "get_goal", loaded.StableToolSurface[0].Name)
+	assert.Equal(t, "update_goal", loaded.StableToolSurface[1].Name)
+}
+
 func TestSQLiteRuntimeStorePersistsToolReceipt(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
 		DSN: "file:runtime-store-tool-receipt-test?mode=memory&cache=shared",

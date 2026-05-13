@@ -51,6 +51,8 @@ type ChatSession struct {
 	FunctionRegistry                *functions.FunctionRegistry        // Function 注册表
 	FunctionBuilder                 functions.FunctionCallBuilder      // 协议对应的 function/tool builder
 	BuiltinSchemas                  []map[string]interface{}           // 预构建的非 skill function schemas
+	stableSharedToolSessionID       string                             // shared executor 会话级稳定工具面所属 runtime session
+	stableSharedToolSelection       *aicliFunctionSelection            // shared executor 会话级稳定工具面快照，避免跨请求动态 tools
 	Logger                          *ChatLogger                        // 聊天日志记录器
 	Formatter                       *formatter.MarkdownFormatter       // Markdown 格式化器
 	Layout                          *ui.Layout                         // 屏幕布局

@@ -33,7 +33,13 @@ func (s *runtimeTurnToolSurfaceSnapshot) LoadTurnToolSurface(ctx context.Context
 		return nil, false, nil
 	}
 	state := s.actor.State()
-	if state == nil || strings.TrimSpace(state.CurrentTurnID) != s.turnID || !state.FrozenTurnToolsSet {
+	if state == nil {
+		return nil, false, nil
+	}
+	if state.StableToolSurfaceSet {
+		return cloneRuntimeToolDefinitions(state.StableToolSurface), true, nil
+	}
+	if strings.TrimSpace(state.CurrentTurnID) != s.turnID || !state.FrozenTurnToolsSet {
 		return nil, false, nil
 	}
 	return cloneRuntimeToolDefinitions(state.FrozenTurnTools), true, nil
@@ -53,6 +59,8 @@ func (s *runtimeTurnToolSurfaceSnapshot) SaveTurnToolSurface(ctx context.Context
 		if strings.TrimSpace(state.CurrentTurnID) != s.turnID {
 			return nil
 		}
+		state.StableToolSurface = cloneRuntimeToolDefinitions(tools)
+		state.StableToolSurfaceSet = true
 		state.FrozenTurnTools = cloneRuntimeToolDefinitions(tools)
 		state.FrozenTurnToolsSet = true
 		state.UpdatedAt = time.Now().UTC()
