@@ -35,6 +35,8 @@ type SessionActorConfig struct {
 	EventStore   EventStore
 	EventBus     *runtimeevents.Bus
 	LoopConfig   *agent.LoopReActConfig
+	PrepareRun   func(ctx context.Context, session *Session, resume bool) error
+	PersistHook  func(ctx context.Context, session *Session) (*Session, error)
 	OnStop       func()
 }
 
@@ -48,6 +50,8 @@ type SessionActor struct {
 	stateStore   RuntimeStateStore
 	eventStore   EventStore
 	eventBus     *runtimeevents.Bus
+	prepareRun   func(context.Context, *Session, bool) error
+	persistHook  func(context.Context, *Session) (*Session, error)
 
 	cmdCh chan Command
 	stop  chan struct{}
@@ -58,10 +62,11 @@ type SessionActor struct {
 	onStop     func()
 	onStopOnce sync.Once
 
-	mu           sync.RWMutex
-	state        *RuntimeState
-	activeCancel context.CancelFunc
-	interrupted  bool
+	mu                      sync.RWMutex
+	state                   *RuntimeState
+	activeCancel            context.CancelFunc
+	interrupted             bool
+	activeStripMetadataKeys []string
 
 	waiterMu        sync.Mutex
 	approvalWaiters map[string]chan runtimepolicy.ApprovalResponse
@@ -106,6 +111,8 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		stateStore:      cfg.StateStore,
 		eventStore:      cfg.EventStore,
 		eventBus:        bus,
+		prepareRun:      cfg.PrepareRun,
+		persistHook:     cfg.PersistHook,
 		onStop:          cfg.OnStop,
 		cmdCh:           make(chan Command, 32),
 		stop:            make(chan struct{}),
@@ -182,6 +189,36 @@ func (a *SessionActor) SubmitPrompt(ctx context.Context, prompt string, runMeta 
 		ImageArtifactDir: opt.ImageArtifactDir,
 		RunMeta:          runMeta.Clone(),
 		Reply:            reply,
+	}
+	if err := a.send(ctx, cmd); err != nil {
+		return nil, err
+	}
+	select {
+	case res := <-reply:
+		return res.Result, res.Err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// Continue resumes execution without appending a new visible user prompt.
+func (a *SessionActor) Continue(ctx context.Context, runMeta *team.RunMeta, opts ...ContinueOption) (*agent.Result, error) {
+	if a == nil {
+		return nil, fmt.Errorf("session actor is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	continuation := mergeContinueOptions(opts)
+	a.Start()
+	reply := make(chan SubmitResult, 1)
+	cmd := ContinueSession{
+		Ctx:                  ctx,
+		ContinuationPrompt:   continuation.ContinuationPrompt,
+		ContinuationMetadata: cloneRuntimeInterfaceMap(continuation.ContinuationMetadata),
+		StripMetadataKeys:    append([]string(nil), continuation.StripMetadataKeys...),
+		RunMeta:              runMeta.Clone(),
+		Reply:                reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
 		return nil, err
@@ -492,6 +529,8 @@ func (a *SessionActor) handle(cmd Command) {
 	switch payload := cmd.(type) {
 	case SubmitPrompt:
 		a.handleSubmitPrompt(payload)
+	case ContinueSession:
+		a.handleContinueSession(payload)
 	case ApproveTool:
 		a.handleApproveTool(payload)
 	case AnswerQuestion:
@@ -570,6 +609,37 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		return nil
 	})
 	a.startSessionRun(ctx, session, prompt, false, turnID, cmd.RunMeta, reply, appendedPrompt)
+}
+
+func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
+	reply := cmd.Reply
+	if reply == nil {
+		return
+	}
+	ctx := cmd.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := a.ensureReady(); err != nil {
+		reply <- SubmitResult{Err: err}
+		return
+	}
+	session, err := a.loadSession(ctx)
+	if err != nil {
+		reply <- SubmitResult{Err: err}
+		return
+	}
+	appendTransientContinuationPrompt(session, cmd.ContinuationPrompt, cmd.ContinuationMetadata)
+	turnID := "turn_" + uuid.NewString()
+	_ = a.updateState(ctx, func(state *RuntimeState) error {
+		state.Status = SessionRunning
+		state.CurrentTurnID = turnID
+		state.CurrentRunMeta = cmd.RunMeta.Clone()
+		resetFrozenTurnTools(state)
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	a.startSessionRun(ctx, session, "", true, turnID, cmd.RunMeta, reply, false, cmd.StripMetadataKeys...)
 }
 
 func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
@@ -1078,8 +1148,8 @@ func shouldAppendUserPromptMessage(last *runtimetypes.Message, prepared *runtime
 	return llm.MessageHasLocalInputImages(prepared) && !llm.MessageHasLocalInputImages(last)
 }
 
-func shouldRollbackFailedPrompt(execErr error, result *agent.Result, resume bool, appendedPrompt []bool) bool {
-	if execErr == nil || resume || len(appendedPrompt) == 0 || !appendedPrompt[0] {
+func shouldRollbackFailedPrompt(execErr error, result *agent.Result, resume bool, appendedPrompt bool) bool {
+	if execErr == nil || resume || !appendedPrompt {
 		return false
 	}
 	if result == nil {
@@ -1518,7 +1588,98 @@ func cloneEventPayload(input map[string]interface{}) map[string]interface{} {
 	return cloned
 }
 
-func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, reply chan SubmitResult, appendedPrompt ...bool) {
+func mergeContinueOptions(opts []ContinueOption) ContinueOption {
+	var merged ContinueOption
+	for _, opt := range opts {
+		if strings.TrimSpace(opt.ContinuationPrompt) != "" {
+			merged.ContinuationPrompt = opt.ContinuationPrompt
+		}
+		if len(opt.ContinuationMetadata) > 0 {
+			if merged.ContinuationMetadata == nil {
+				merged.ContinuationMetadata = make(map[string]interface{})
+			}
+			for key, value := range opt.ContinuationMetadata {
+				if strings.TrimSpace(key) != "" {
+					merged.ContinuationMetadata[key] = value
+				}
+			}
+		}
+		for _, key := range opt.StripMetadataKeys {
+			if strings.TrimSpace(key) != "" {
+				merged.StripMetadataKeys = append(merged.StripMetadataKeys, strings.TrimSpace(key))
+			}
+		}
+	}
+	return merged
+}
+
+func appendTransientContinuationPrompt(session *Session, prompt string, metadata map[string]interface{}) {
+	if session == nil || strings.TrimSpace(prompt) == "" {
+		return
+	}
+	message := runtimetypes.NewUserMessage(prompt)
+	for key, value := range metadata {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			message.Metadata.Set(key, value)
+		}
+	}
+	session.AddMessage(*message)
+}
+
+func stripMessagesWithMetadataKeys(session *Session, keys []string) {
+	if session == nil || len(keys) == 0 {
+		return
+	}
+	history := session.GetMessages()
+	if len(history) == 0 {
+		return
+	}
+	stripped := make([]runtimetypes.Message, 0, len(history))
+	changed := false
+	for _, message := range history {
+		if messageHasAnyMetadataKey(message, keys) {
+			changed = true
+			continue
+		}
+		stripped = append(stripped, message)
+	}
+	if changed {
+		session.ReplaceHistory(stripped)
+	}
+}
+
+func messageHasAnyMetadataKey(message runtimetypes.Message, keys []string) bool {
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, ok := message.Metadata.Get(key); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedMetadataKeys(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(keys))
+	normalized := make([]string, 0, len(keys))
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		normalized = append(normalized, key)
+	}
+	return normalized
+}
+
+func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, reply chan SubmitResult, appendedPrompt bool, stripMetadataKeys ...string) {
 	if a == nil || session == nil {
 		if reply != nil {
 			reply <- SubmitResult{Err: fmt.Errorf("session is nil")}
@@ -1530,6 +1691,14 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	}
 	if strings.TrimSpace(turnID) == "" {
 		turnID = "turn_" + uuid.NewString()
+	}
+	if a.prepareRun != nil {
+		if err := a.prepareRun(ctx, session, resume); err != nil {
+			if reply != nil {
+				reply <- SubmitResult{Err: err}
+			}
+			return
+		}
 	}
 
 	if hookMgr := a.agent.GetHookManager(); hookMgr != nil {
@@ -1564,9 +1733,11 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	runCtx = team.WithRunMeta(runCtx, runMeta)
 	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
 	a.setActiveCancel(cancel)
+	a.setActiveStripMetadataKeys(stripMetadataKeys)
 	a.activeRunWG.Add(1)
 	go func() {
 		defer a.activeRunWG.Done()
+		defer a.clearActiveStripMetadataKeys()
 		var (
 			result  *agent.Result
 			execErr error
@@ -1587,6 +1758,9 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			if rollbackErr := a.rollbackLastUserPrompt(context.Background(), session, prompt); rollbackErr != nil && execErr == nil {
 				execErr = rollbackErr
 			}
+		}
+		if len(stripMetadataKeys) > 0 {
+			stripMessagesWithMetadataKeys(session, stripMetadataKeys)
 		}
 
 		status := SessionIdle
@@ -1692,6 +1866,18 @@ func (a *SessionActor) loadSession(ctx context.Context) (*Session, error) {
 func (a *SessionActor) persistSession(ctx context.Context, session *Session) error {
 	if session == nil || a.sessionStore == nil {
 		return nil
+	}
+	if keys := a.currentStripMetadataKeys(); len(keys) > 0 {
+		stripMessagesWithMetadataKeys(session, keys)
+	}
+	if a.persistHook != nil {
+		prepared, err := a.persistHook(ctx, session)
+		if err != nil {
+			return err
+		}
+		if prepared != nil {
+			session = prepared
+		}
 	}
 	return a.sessionStore.Update(ctx, session)
 }
@@ -2048,7 +2234,7 @@ func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session
 		}
 		cancel()
 		a.clearActiveCancel()
-		a.startSessionRun(context.Background(), session, "", true, turnID, runMeta, nil)
+		a.startSessionRun(context.Background(), session, "", true, turnID, runMeta, nil, false)
 	}()
 }
 
@@ -2134,6 +2320,24 @@ func (a *SessionActor) clearActiveCancel() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.activeCancel = nil
+}
+
+func (a *SessionActor) setActiveStripMetadataKeys(keys []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.activeStripMetadataKeys = normalizedMetadataKeys(keys)
+}
+
+func (a *SessionActor) clearActiveStripMetadataKeys() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.activeStripMetadataKeys = nil
+}
+
+func (a *SessionActor) currentStripMetadataKeys() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return append([]string(nil), a.activeStripMetadataKeys...)
 }
 
 func (a *SessionActor) cancelActive() {

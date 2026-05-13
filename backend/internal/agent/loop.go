@@ -691,6 +691,8 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		requestPayload["prompt_sources"] = promptLayoutSources
 	}
 	if surface := summarizeToolSurface(req.Tools); len(surface) > 0 {
+		req.Metadata["executor_path"] = "actor"
+		requestPayload["executor_path"] = "actor"
 		req.Metadata["tool_surface"] = surface
 		requestPayload["tool_surface"] = surface
 	}

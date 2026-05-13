@@ -143,6 +143,15 @@ func (m *simpleEchoMCPManager) ListTools() []skill.ToolInfo {
 	return []skill.ToolInfo{info}
 }
 
+func requestMessagesContain(messages []types.Message, role, content string) bool {
+	for _, message := range messages {
+		if message.Role == role && strings.Contains(message.Content, content) {
+			return true
+		}
+	}
+	return false
+}
+
 type failingLLMProvider struct {
 	name     string
 	err      error
@@ -273,6 +282,59 @@ func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
 	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, events)
+}
+
+func TestSessionActorContinueUsesTransientPromptAndStripsIt(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	session.AddMessage(*types.NewAssistantMessage("previous result"))
+	require.NoError(t, storage.Update(ctx, session))
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "test-continue-model",
+		MaxRetries:   0,
+	})
+	provider := &capturingSequenceProvider{
+		name: "test-continue-model",
+		responses: []*llm.LLMResponse{{
+			Content: "audit complete",
+			Model:   "test-continue-model",
+		}},
+	}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:  "actor-continue-test-agent",
+		Model: "test-continue-model",
+	}, nil, runtime)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   NewInMemoryRuntimeStore(64),
+	})
+	require.NoError(t, err)
+
+	result, err := actor.Continue(ctx, nil, ContinueOption{
+		ContinuationPrompt: "hidden completion audit",
+		ContinuationMetadata: map[string]interface{}{
+			"hidden_goal_audit": true,
+		},
+		StripMetadataKeys: []string{"hidden_goal_audit"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotEmpty(t, provider.requests)
+	require.True(t, requestMessagesContain(provider.requests[0].Messages, "user", "hidden completion audit"))
+
+	loaded, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.False(t, requestMessagesContain(loaded.History, "user", "hidden completion audit"))
+	require.True(t, requestMessagesContain(loaded.History, "assistant", "audit complete"))
 }
 
 func TestSessionActorSubmitPromptRollsBackPromptWhenInitialLLMRequestFails(t *testing.T) {

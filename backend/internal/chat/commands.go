@@ -32,6 +32,24 @@ type SubmitResult struct {
 	Err    error
 }
 
+// ContinueSession resumes execution without appending a new user prompt.
+type ContinueSession struct {
+	Ctx                  context.Context
+	ContinuationPrompt   string
+	ContinuationMetadata map[string]interface{}
+	StripMetadataKeys    []string
+	RunMeta              *team.RunMeta
+	Reply                chan SubmitResult
+}
+
+// ContinueOption customizes ContinueSession without changing the visible
+// conversation history contract.
+type ContinueOption struct {
+	ContinuationPrompt   string
+	ContinuationMetadata map[string]interface{}
+	StripMetadataKeys    []string
+}
+
 // ApproveTool responds to a pending approval request.
 type ApproveTool struct {
 	Ctx         context.Context
@@ -99,6 +117,7 @@ type SubscribeEvents struct {
 }
 
 func (SubmitPrompt) isCommand()          {}
+func (ContinueSession) isCommand()       {}
 func (ApproveTool) isCommand()           {}
 func (AnswerQuestion) isCommand()        {}
 func (Interrupt) isCommand()             {}
