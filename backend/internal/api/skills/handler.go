@@ -588,6 +588,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/history", h.GetSessionHistory).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime", h.GetSessionRuntimeState).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/events", h.ListSessionRuntimeEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tools", h.ListSessionRuntimeTools).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tool-receipts", h.ListSessionToolReceipts).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/stream", h.StreamSessionRuntimeEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/commands", h.SubmitSessionRuntimeCommand).Methods(http.MethodPost)

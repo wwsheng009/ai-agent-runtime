@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,8 +14,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const (
@@ -28,16 +31,18 @@ type sessionRuntimeSubmitOutcome struct {
 }
 
 type sessionRuntimeCommandRequest struct {
-	Type         string          `json:"type"`
-	Prompt       string          `json:"prompt,omitempty"`
-	RunMeta      *team.RunMeta   `json:"run_meta,omitempty"`
-	RequestID    string          `json:"request_id,omitempty"`
-	Allow        *bool           `json:"allow,omitempty"`
-	PatchedArgs  json.RawMessage `json:"patched_args,omitempty"`
-	QuestionID   string          `json:"question_id,omitempty"`
-	Answer       string          `json:"answer,omitempty"`
-	CheckpointID string          `json:"checkpoint_id,omitempty"`
-	Mode         string          `json:"mode,omitempty"`
+	Type                 string                 `json:"type"`
+	Prompt               string                 `json:"prompt,omitempty"`
+	ContinuationMetadata map[string]interface{} `json:"continuation_metadata,omitempty"`
+	StripMetadataKeys    []string               `json:"strip_metadata_keys,omitempty"`
+	RunMeta              *team.RunMeta          `json:"run_meta,omitempty"`
+	RequestID            string                 `json:"request_id,omitempty"`
+	Allow                *bool                  `json:"allow,omitempty"`
+	PatchedArgs          json.RawMessage        `json:"patched_args,omitempty"`
+	QuestionID           string                 `json:"question_id,omitempty"`
+	Answer               string                 `json:"answer,omitempty"`
+	CheckpointID         string                 `json:"checkpoint_id,omitempty"`
+	Mode                 string                 `json:"mode,omitempty"`
 }
 
 func (h *Handler) SpawnSessionAgent(w http.ResponseWriter, r *http.Request) {
@@ -389,6 +394,68 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// ListSessionRuntimeTools returns the current runtime-server tool surface for a session.
+func (h *Handler) ListSessionRuntimeTools(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(mux.Vars(r)["id"])
+	if sessionID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
+		return
+	}
+
+	tools := []runtimetypes.ToolDefinition{}
+	if !h.sessionRuntimeToolsDisabled(r.Context(), sessionID) {
+		tools = h.sessionRuntimeToolDefinitions(r.Context(), sessionID)
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": sessionID,
+		"tools":      tools,
+		"count":      len(tools),
+		"source":     "runtime_server",
+	})
+}
+
+func (h *Handler) sessionRuntimeToolDefinitions(ctx context.Context, sessionID string) []runtimetypes.ToolDefinition {
+	if h == nil {
+		return []runtimetypes.ToolDefinition{}
+	}
+	surface := h.runtimeServerToolSurfaceForSession(ctx, sessionID, h.mcpManager, true)
+	if surface == nil {
+		return []runtimetypes.ToolDefinition{}
+	}
+	infos := surface.ListTools()
+	tools := make([]runtimetypes.ToolDefinition, 0, len(infos))
+	seen := make(map[string]bool, len(infos))
+	for _, info := range infos {
+		name := strings.TrimSpace(info.Name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		tools = append(tools, runtimetypes.ToolDefinition{
+			Name:        name,
+			Description: info.Description,
+			Parameters:  cloneAnyMap(info.InputSchema),
+			Metadata:    cloneAnyMap(info.Metadata),
+		})
+	}
+	sort.SliceStable(tools, func(i, j int) bool {
+		return strings.TrimSpace(tools[i].Name) < strings.TrimSpace(tools[j].Name)
+	})
+	return tools
+}
+
+func (h *Handler) sessionRuntimeToolsDisabled(ctx context.Context, sessionID string) bool {
+	if h == nil || h.sessionManager == nil {
+		return false
+	}
+	session, err := h.sessionManager.Get(ctx, strings.TrimSpace(sessionID))
+	if err != nil || session == nil {
+		return false
+	}
+	disabled, ok := sessionmeta.Bool(session.Metadata.Context, sessionmeta.DisableTools)
+	return ok && disabled
+}
+
 // ListSessionRuntimeEvents returns session runtime events.
 func (h *Handler) ListSessionRuntimeEvents(w http.ResponseWriter, r *http.Request) {
 	store := h.getSessionEventStore()
@@ -601,6 +668,29 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		})
 		return
 
+	case "continue", "continue_session":
+		result, state, err, completed := submitSessionContinue(actor, r.Context(), req.RunMeta, chat.ContinueOption{
+			ContinuationPrompt:   req.Prompt,
+			ContinuationMetadata: cloneAnyMap(req.ContinuationMetadata),
+			StripMetadataKeys:    append([]string(nil), req.StripMetadataKeys...),
+		})
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if !completed {
+			h.writeJSON(w, http.StatusAccepted, map[string]interface{}{
+				"ok":      true,
+				"pending": true,
+				"state":   state,
+			})
+			return
+		}
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"result": result,
+		})
+		return
+
 	case "approve_tool", "approve":
 		requestID := strings.TrimSpace(req.RequestID)
 		if requestID == "" {
@@ -669,6 +759,51 @@ func submitSessionPrompt(actor *chat.SessionActor, requestCtx context.Context, p
 	resultCh := make(chan sessionRuntimeSubmitOutcome, 1)
 	go func() {
 		result, err := actor.SubmitPrompt(runCtx, prompt, runMeta)
+		resultCh <- sessionRuntimeSubmitOutcome{result: result, err: err}
+	}()
+
+	timer := time.NewTimer(sessionRuntimeSubmitSyncWaitBudget)
+	defer timer.Stop()
+	ticker := time.NewTicker(sessionRuntimeSubmitPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case outcome := <-resultCh:
+			return outcome.result, nil, outcome.err, true
+		case <-ticker.C:
+			state := actor.State()
+			if state == nil {
+				continue
+			}
+			switch state.Status {
+			case chat.SessionWaitingApproval, chat.SessionWaitingInput:
+				return nil, state, nil, false
+			}
+		case <-timer.C:
+			state := actor.State()
+			if state == nil {
+				state = &chat.RuntimeState{
+					Status: chat.SessionRunning,
+				}
+			} else if state.Status == chat.SessionIdle {
+				state = state.Clone()
+				state.Status = chat.SessionRunning
+			}
+			return nil, state, nil, false
+		}
+	}
+}
+
+func submitSessionContinue(actor *chat.SessionActor, requestCtx context.Context, runMeta *team.RunMeta, opts chat.ContinueOption) (*agent.Result, *chat.RuntimeState, error, bool) {
+	if actor == nil {
+		return nil, nil, errors.New(errors.ErrConfigInvalid, "session actor not configured"), false
+	}
+
+	runCtx := context.WithoutCancel(requestCtx)
+	resultCh := make(chan sessionRuntimeSubmitOutcome, 1)
+	go func() {
+		result, err := actor.Continue(runCtx, runMeta, opts)
 		resultCh <- sessionRuntimeSubmitOutcome{result: result, err: err}
 	}()
 

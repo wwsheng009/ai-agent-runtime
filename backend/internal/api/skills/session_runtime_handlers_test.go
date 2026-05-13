@@ -22,7 +22,9 @@ import (
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -108,6 +110,16 @@ func (p *runtimeCommandSequenceProvider) GetCapabilities() *llm.ModelCapabilitie
 
 func (p *runtimeCommandSequenceProvider) CheckHealth(ctx context.Context) error {
 	return nil
+}
+
+type runtimeCommandCapturingProvider struct {
+	runtimeCommandSequenceProvider
+	requests []*llm.LLMRequest
+}
+
+func (p *runtimeCommandCapturingProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	p.requests = append(p.requests, req)
+	return p.runtimeCommandSequenceProvider.Call(ctx, req)
 }
 
 type runtimeCommandCapturingMCPManager struct {
@@ -225,6 +237,157 @@ func (m *runtimeCommandShellMCPManager) ListTools() []skill.ToolInfo {
 	return []skill.ToolInfo{info}
 }
 
+type runtimeToolSurfaceMCPManager struct{}
+
+func (m *runtimeToolSurfaceMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
+	for _, info := range m.ListTools() {
+		if info.Name == toolName {
+			return info, nil
+		}
+	}
+	return skill.ToolInfo{}, fmt.Errorf("tool not found: %s", toolName)
+}
+
+func (m *runtimeToolSurfaceMCPManager) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
+	return "ok", nil
+}
+
+func (m *runtimeToolSurfaceMCPManager) ListTools() []skill.ToolInfo {
+	return []skill.ToolInfo{
+		{
+			Name:        "remote_echo",
+			Description: "Echo tool exposed by runtime-server",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"message": map[string]interface{}{"type": "string"},
+				},
+			},
+			Metadata: map[string]interface{}{
+				"source": "test",
+			},
+			MCPName: "test-mcp",
+			Enabled: true,
+		},
+	}
+}
+
+func TestListSessionRuntimeTools_ReturnsMCPToolSurface(t *testing.T) {
+	mcpManager := &runtimeToolSurfaceMCPManager{}
+	handler := NewHandler(skill.NewRegistry(mcpManager), nil, mcpManager)
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-tools/runtime/tools", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var decoded struct {
+		SessionID string                 `json:"session_id"`
+		Tools     []types.ToolDefinition `json:"tools"`
+		Count     int                    `json:"count"`
+		Source    string                 `json:"source"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&decoded))
+	require.Equal(t, "session-tools", decoded.SessionID)
+	require.Equal(t, "runtime_server", decoded.Source)
+	require.Equal(t, 1, decoded.Count)
+	require.Len(t, decoded.Tools, 1)
+	require.Equal(t, "remote_echo", decoded.Tools[0].Name)
+	require.Equal(t, "Echo tool exposed by runtime-server", decoded.Tools[0].Description)
+	require.Equal(t, "object", decoded.Tools[0].Parameters["type"])
+	require.Equal(t, "test", decoded.Tools[0].Metadata["source"])
+	require.NotEqual(t, "update_goal", decoded.Tools[0].Name)
+}
+
+func TestListSessionRuntimeTools_NoMCPManagerReturnsEmptySurface(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-tools/runtime/tools", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "session-tools"})
+	rec := httptest.NewRecorder()
+
+	handler.ListSessionRuntimeTools(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var decoded struct {
+		Tools []types.ToolDefinition `json:"tools"`
+		Count int                    `json:"count"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&decoded))
+	require.Equal(t, 0, decoded.Count)
+	require.Empty(t, decoded.Tools)
+}
+
+func TestListSessionRuntimeTools_IncludesGoalToolsForManagedSession(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+	session, err := sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/runtime/tools", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := httptest.NewRecorder()
+
+	handler.ListSessionRuntimeTools(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var decoded struct {
+		Tools []types.ToolDefinition `json:"tools"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&decoded))
+	require.True(t, runtimeToolDefinitionsContain(decoded.Tools, runtimegoal.GetToolName))
+	require.True(t, runtimeToolDefinitionsContain(decoded.Tools, runtimegoal.UpdateToolName))
+}
+
+func TestListSessionRuntimeTools_DisabledToolsReturnsEmptySurface(t *testing.T) {
+	mcpManager := &runtimeToolSurfaceMCPManager{}
+	handler := NewHandler(skill.NewRegistry(mcpManager), nil, mcpManager)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+	session, err := sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+	if session.Metadata.Context == nil {
+		session.Metadata.Context = make(map[string]interface{})
+	}
+	session.Metadata.Context[sessionmeta.DisableTools] = true
+	require.NoError(t, sessionManager.Update(context.Background(), session))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/runtime/tools", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := httptest.NewRecorder()
+
+	handler.ListSessionRuntimeTools(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var decoded struct {
+		Tools []types.ToolDefinition `json:"tools"`
+		Count int                    `json:"count"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&decoded))
+	require.Equal(t, 0, decoded.Count)
+	require.Empty(t, decoded.Tools)
+}
+
+func runtimeToolDefinitionsContain(tools []types.ToolDefinition, name string) bool {
+	for _, tool := range tools {
+		if tool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func runtimeMessagesContain(messages []types.Message, role, content string) bool {
+	for _, message := range messages {
+		if message.Role == role && strings.Contains(message.Content, content) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSubmitSessionRuntimeCommand_SubmitPromptPropagatesRunMeta(t *testing.T) {
 	mcpManager := &runtimeCommandCapturingMCPManager{}
 	handler := NewHandler(skill.NewRegistry(mcpManager), nil, mcpManager)
@@ -284,6 +447,115 @@ func TestSubmitSessionRuntimeCommand_SubmitPromptPropagatesRunMeta(t *testing.T)
 	assert.Equal(t, "team-1", mcpManager.lastMeta.Team.TeamID)
 	assert.Equal(t, "mate-1", mcpManager.lastMeta.Team.AgentID)
 	assert.Equal(t, "task-1", mcpManager.lastMeta.Team.CurrentTaskID)
+}
+
+func TestSubmitSessionRuntimeCommand_GoalCapabilityCompletesGoal(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "test-runtime-goal-model",
+		MaxRetries:   0,
+	})
+	provider := &runtimeCommandCapturingProvider{
+		runtimeCommandSequenceProvider: runtimeCommandSequenceProvider{
+			name: "test-runtime-goal-model",
+			responses: []*llm.LLMResponse{
+				{
+					Content: "The goal is complete.",
+					Model:   "test-runtime-goal-model",
+					ToolCalls: []types.ToolCall{{
+						ID:   "tool_goal_1",
+						Name: runtimegoal.UpdateToolName,
+						Args: map[string]interface{}{
+							"status":  string(runtimegoal.StatusComplete),
+							"summary": "runtime-server goal test completed",
+						},
+					}},
+				},
+				{
+					Content: "Done.",
+					Model:   "test-runtime-goal-model",
+				},
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+	handler.SetLLMRuntime(runtime)
+
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+	session, err := sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+	goal, err := runtimegoal.NewSessionGoal(session.ID, "Complete the runtime-server goal test", time.Now())
+	require.NoError(t, err)
+	_, err = runtimegoal.NewMetadataStore().PutPersistent(context.Background(), sessionManager.GetStorage(), session.ID, goal, runtimegoal.MutationUser)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
+		"type":"submit_prompt",
+		"prompt":"Audit and complete the goal."
+	}`))
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := newSynchronizedResponseRecorder()
+
+	handler.SubmitSessionRuntimeCommand(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotEmpty(t, provider.requests)
+	require.True(t, runtimeToolDefinitionsContain(provider.requests[0].Tools, runtimegoal.UpdateToolName))
+
+	loaded, err := sessionManager.Get(context.Background(), session.ID)
+	require.NoError(t, err)
+	completed, ok, err := runtimegoal.NewMetadataStore().Get(loaded)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, runtimegoal.StatusComplete, completed.Status)
+	require.Equal(t, "model", completed.CompletedBy)
+	require.Equal(t, "runtime-server goal test completed", completed.CompletionSummary)
+}
+
+func TestSubmitSessionRuntimeCommand_ContinueUsesTransientPromptAndStripsIt(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "test-runtime-continue-model",
+		MaxRetries:   0,
+	})
+	provider := &runtimeCommandCapturingProvider{
+		runtimeCommandSequenceProvider: runtimeCommandSequenceProvider{
+			name: "test-runtime-continue-model",
+			responses: []*llm.LLMResponse{{
+				Content: "runtime audit complete",
+				Model:   "test-runtime-continue-model",
+			}},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+	handler.SetLLMRuntime(runtime)
+
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+	session, err := sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+	session.AddMessage(*types.NewAssistantMessage("previous result"))
+	require.NoError(t, sessionManager.Update(context.Background(), session))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/runtime/commands", strings.NewReader(`{
+		"type":"continue",
+		"prompt":"hidden runtime completion audit",
+		"continuation_metadata":{"hidden_goal_audit":true},
+		"strip_metadata_keys":["hidden_goal_audit"]
+	}`))
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := newSynchronizedResponseRecorder()
+
+	handler.SubmitSessionRuntimeCommand(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotEmpty(t, provider.requests)
+	require.True(t, runtimeMessagesContain(provider.requests[0].Messages, "user", "hidden runtime completion audit"))
+	loaded, err := sessionManager.Get(context.Background(), session.ID)
+	require.NoError(t, err)
+	require.False(t, runtimeMessagesContain(loaded.History, "user", "hidden runtime completion audit"))
+	require.True(t, runtimeMessagesContain(loaded.History, "assistant", "runtime audit complete"))
 }
 
 func TestSubmitSessionRuntimeCommand_RewindReturnsRestoreResult(t *testing.T) {

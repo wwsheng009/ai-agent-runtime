@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -407,7 +408,9 @@ func cloneStringInterfaceMap(input map[string]interface{}) map[string]interface{
 }
 
 type aicliRuntimeServerChatExecutor struct {
-	serverURL string
+	serverURL            string
+	toolSurfaceMu        sync.Mutex
+	toolSurfaceBySession map[string]map[string]bool
 }
 
 type runtimeServerAgentChatResponse struct {
@@ -430,6 +433,13 @@ type runtimeServerRuntimeEventsResponse struct {
 	Events    []runtimeServerRuntimeEventView `json:"events"`
 	Count     int                             `json:"count"`
 	LatestSeq int64                           `json:"latest_seq"`
+}
+
+type runtimeServerRuntimeToolsResponse struct {
+	SessionID string                        `json:"session_id"`
+	Tools     []runtimetypes.ToolDefinition `json:"tools"`
+	Count     int                           `json:"count"`
+	Source    string                        `json:"source"`
 }
 
 type runtimeServerRuntimeEventView struct {
@@ -499,6 +509,24 @@ func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *C
 		return e.executeAgentChat(ctx, session, prompt)
 	}
 	return "", err
+}
+
+func (e *aicliRuntimeServerChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (string, error) {
+	if session == nil {
+		return "", fmt.Errorf("chat session is nil")
+	}
+	if strings.TrimSpace(e.serverURL) == "" {
+		return "", fmt.Errorf("runtime-server 地址未配置")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	output, result, err := e.executeRuntimeContinuation(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	applyRuntimeServerUsage(session, result)
+	return output, nil
 }
 
 func (e *aicliRuntimeServerChatExecutor) executeAgentChat(ctx context.Context, session *ChatSession, prompt string) (string, error) {
@@ -618,6 +646,64 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Conte
 	return output, commandResp.Result, nil
 }
 
+func (e *aicliRuntimeServerChatExecutor) executeRuntimeContinuation(ctx context.Context, session *ChatSession) (string, map[string]interface{}, error) {
+	sessionID, err := ensureRuntimeServerSessionID(session)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		return "", nil, fmt.Errorf("同步 runtime-server 会话上下文失败: %w", err)
+	}
+	afterSeq, err := e.currentRuntimeServerEventSeq(ctx, session, sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+
+	bridge := ensureChatRuntimeEventBridge(session)
+	if bridge != nil {
+		bridge.startProcessor()
+		previousApprove := bridge.approveTool
+		previousAnswer := bridge.answerQuestion
+		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool) error {
+			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow)
+		}
+		bridge.answerQuestion = func(ctx context.Context, eventSessionID, questionID, answer string) error {
+			return e.answerRuntimeServerQuestion(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), questionID, answer)
+		}
+		defer func() {
+			bridge.approveTool = previousApprove
+			bridge.answerQuestion = previousAnswer
+		}()
+		bridge.PrepareRunPrompt("")
+		bridge.BeginRun()
+		defer bridge.EndRun()
+	}
+
+	commandResp, statusCode, err := e.submitRuntimeServerContinue(ctx, session, sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+	if commandResp == nil {
+		commandResp = &runtimeServerRuntimeCommandResponse{}
+	}
+	waitForCompletion := statusCode == http.StatusAccepted || commandResp.Pending
+	pollResult, pollErr := e.waitRuntimeServerEvents(ctx, session, sessionID, afterSeq, bridge, waitForCompletion)
+	if pollErr != nil {
+		refreshChatSessionFromRuntimeServer(session, sessionID, "", pollResult.Output)
+		return "", commandResp.Result, humanizeActorExecutorError(session, pollErr)
+	}
+
+	output := runtimeServerResultOutput(commandResp.Result)
+	if strings.TrimSpace(output) == "" {
+		output = pollResult.Output
+	}
+	refreshChatSessionFromRuntimeServer(session, sessionID, "", output)
+	if strings.TrimSpace(output) == "" {
+		output = latestAssistantResponseText(session)
+	}
+	return output, commandResp.Result, nil
+}
+
 func ensureRuntimeServerSessionID(session *ChatSession) (string, error) {
 	sessionID := currentRuntimeSessionID(session)
 	if sessionID != "" {
@@ -636,10 +722,127 @@ func ensureRuntimeServerSessionID(session *ChatSession) (string, error) {
 	return sessionID, nil
 }
 
+func (e *aicliRuntimeServerChatExecutor) toolAvailable(ctx context.Context, session *ChatSession, toolName string) bool {
+	toolName = strings.TrimSpace(toolName)
+	sessionID := currentRuntimeSessionID(session)
+	if e == nil || toolName == "" || sessionID == "" {
+		return false
+	}
+	names, err := e.runtimeServerToolNames(ctx, session, sessionID)
+	if err != nil {
+		return false
+	}
+	return names[toolName]
+}
+
+func (e *aicliRuntimeServerChatExecutor) runtimeServerToolNames(ctx context.Context, session *ChatSession, sessionID string) (map[string]bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if e == nil || sessionID == "" {
+		return map[string]bool{}, nil
+	}
+
+	e.toolSurfaceMu.Lock()
+	if e.toolSurfaceBySession != nil {
+		if names, ok := e.toolSurfaceBySession[sessionID]; ok {
+			e.toolSurfaceMu.Unlock()
+			return cloneRuntimeServerToolNameSet(names), nil
+		}
+	}
+	e.toolSurfaceMu.Unlock()
+
+	tools, err := e.listRuntimeServerTools(ctx, session, sessionID)
+	if err != nil {
+		if isRuntimeServerToolSurfaceUnavailable(err) {
+			names := map[string]bool{}
+			e.storeRuntimeServerToolNames(sessionID, names)
+			return names, nil
+		}
+		return nil, err
+	}
+
+	names := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name != "" {
+			names[name] = true
+		}
+	}
+	e.storeRuntimeServerToolNames(sessionID, names)
+	return cloneRuntimeServerToolNameSet(names), nil
+}
+
+func (e *aicliRuntimeServerChatExecutor) storeRuntimeServerToolNames(sessionID string, names map[string]bool) {
+	if e == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	e.toolSurfaceMu.Lock()
+	defer e.toolSurfaceMu.Unlock()
+	if e.toolSurfaceBySession == nil {
+		e.toolSurfaceBySession = make(map[string]map[string]bool)
+	}
+	e.toolSurfaceBySession[sessionID] = cloneRuntimeServerToolNameSet(names)
+}
+
+func (e *aicliRuntimeServerChatExecutor) listRuntimeServerTools(ctx context.Context, session *ChatSession, sessionID string) ([]runtimetypes.ToolDefinition, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if e == nil {
+		return nil, fmt.Errorf("runtime-server executor is nil")
+	}
+	if sessionID == "" {
+		return nil, fmt.Errorf("runtime-server session id is required")
+	}
+	var decoded runtimeServerRuntimeToolsResponse
+	_, err := e.doRuntimeServerJSON(ctx, session, http.MethodGet, runtimeServerToolsPath(sessionID), "", nil, &decoded)
+	if err != nil {
+		return nil, err
+	}
+	if decoded.Tools == nil {
+		return []runtimetypes.ToolDefinition{}, nil
+	}
+	return decoded.Tools, nil
+}
+
+func runtimeServerToolsPath(sessionID string) string {
+	return "/api/runtime/sessions/" + url.PathEscape(strings.TrimSpace(sessionID)) + "/runtime/tools"
+}
+
+func cloneRuntimeServerToolNameSet(input map[string]bool) map[string]bool {
+	if len(input) == 0 {
+		return map[string]bool{}
+	}
+	cloned := make(map[string]bool, len(input))
+	for name, ok := range input {
+		cloned[name] = ok
+	}
+	return cloned
+}
+
 func (e *aicliRuntimeServerChatExecutor) submitRuntimeServerPrompt(ctx context.Context, session *ChatSession, sessionID, prompt string) (*runtimeServerRuntimeCommandResponse, int, error) {
 	payload := map[string]interface{}{
 		"type":   "submit_prompt",
 		"prompt": prompt,
+	}
+	if runMeta := currentRunMetaForSession(session); runMeta != nil {
+		payload["run_meta"] = runMeta
+	}
+	var decoded runtimeServerRuntimeCommandResponse
+	statusCode, err := e.doRuntimeServerJSON(ctx, session, http.MethodPost, runtimeServerCommandPath(sessionID), "", payload, &decoded)
+	if err != nil {
+		return nil, statusCode, err
+	}
+	return &decoded, statusCode, nil
+}
+
+func (e *aicliRuntimeServerChatExecutor) submitRuntimeServerContinue(ctx context.Context, session *ChatSession, sessionID string) (*runtimeServerRuntimeCommandResponse, int, error) {
+	payload := map[string]interface{}{
+		"type":                  "continue",
+		"prompt":                goalAutoContinuationPrompt,
+		"continuation_metadata": map[string]interface{}{goalContinuationMetadataKey: true},
+		"strip_metadata_keys":   []string{goalContinuationMetadataKey},
 	}
 	if runMeta := currentRunMetaForSession(session); runMeta != nil {
 		payload["run_meta"] = runMeta
@@ -1133,6 +1336,23 @@ func isRuntimeServerStateUnavailable(err error) bool {
 		return false
 	}
 	return httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusServiceUnavailable
+}
+
+func isRuntimeServerToolSurfaceUnavailable(err error) bool {
+	var httpErr *runtimeServerHTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	switch httpErr.StatusCode {
+	case http.StatusNotFound,
+		http.StatusMethodNotAllowed,
+		http.StatusNotAcceptable,
+		http.StatusNotImplemented,
+		http.StatusServiceUnavailable:
+		return true
+	default:
+		return false
+	}
 }
 
 func runtimeServerResultOutput(result map[string]interface{}) string {

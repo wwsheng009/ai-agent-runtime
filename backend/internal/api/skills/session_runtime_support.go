@@ -2255,10 +2255,11 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		mergeProfileContextInto(agentConfig.Options, profileState.ContextValues)
 	}
 
+	sessionMCPManager := h.runtimeServerToolSurfaceForSession(context.Background(), sessionID, h.mcpManager, !disableTools)
 	apiAgent := h.newAPIAgentWithRuntime(agentConfig, &agentRuntimeComponents{
 		registry:        h.skillRegistry,
 		embeddingRouter: h.embeddingRouter,
-		mcpManager:      h.mcpManager,
+		mcpManager:      sessionMCPManager,
 		llmRuntime:      h.llmRuntime,
 	})
 	if disableTools {
@@ -2283,6 +2284,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		EventStore:   eventStore,
 		EventBus:     h.getRuntimeEventBus(),
 		LoopConfig:   buildSessionLoopConfig(selectedConfig, requestedReasoningEffort),
+		PersistHook:  h.runtimeServerGoalPersistHook,
 		OnStop: func() {
 			if leaseHandle != nil {
 				_ = leaseHandle.Release(context.Background())

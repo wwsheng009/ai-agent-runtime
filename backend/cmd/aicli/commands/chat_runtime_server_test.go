@@ -3,9 +3,11 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -148,6 +150,101 @@ func TestAICLIRuntimeServerListEventsUsesWaitMS(t *testing.T) {
 	}
 }
 
+func TestAICLIRuntimeServerToolAvailabilityUsesRemoteSurface(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/runtime/sessions/session-1/runtime/tools" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		requestCount++
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"session_id": "session-1",
+			"tools": []runtimetypes.ToolDefinition{{
+				Name:        "remote_echo",
+				Description: "remote echo",
+				Parameters:  map[string]interface{}{"type": "object"},
+			}},
+			"count":  1,
+			"source": "runtime_server",
+		})
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		ChatExecutor:   &aicliRuntimeServerChatExecutor{serverURL: server.URL},
+		RuntimeSession: &runtimechat.Session{ID: "session-1"},
+		HTTPClient:     server.Client(),
+	}
+	if !chatToolAvailable(session, "remote_echo") {
+		t.Fatal("expected remote_echo to be available from runtime-server tool surface")
+	}
+	if chatToolAvailable(session, updateGoalFunctionName) {
+		t.Fatal("did not expect update_goal to be available when remote surface omits it")
+	}
+	if requestCount != 1 {
+		t.Fatalf("expected runtime tool surface to be cached, got %d requests", requestCount)
+	}
+}
+
+func TestAICLIRuntimeServerToolAvailabilityUnsupportedSurfaceReturnsFalse(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/runtime/sessions/session-1/runtime/tools" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		requestCount++
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		ChatExecutor:   &aicliRuntimeServerChatExecutor{serverURL: server.URL},
+		RuntimeSession: &runtimechat.Session{ID: "session-1"},
+		HTTPClient:     server.Client(),
+	}
+	if chatToolAvailable(session, "remote_echo") {
+		t.Fatal("did not expect tools to be available when runtime-server tool surface is unsupported")
+	}
+	if chatToolAvailable(session, updateGoalFunctionName) {
+		t.Fatal("did not expect update_goal to be available when runtime-server tool surface is unsupported")
+	}
+	if requestCount != 1 {
+		t.Fatalf("expected unsupported runtime tool surface to be cached, got %d requests", requestCount)
+	}
+}
+
+func TestAICLIRuntimeServerGoalGuidanceUsesRemoteGoalToolSurface(t *testing.T) {
+	session, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+	captureStdout(t, func() {
+		handleGoalCommand(session, "/goal finish runtime-server goal guidance")
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/runtime/sessions/"+session.RuntimeSession.ID+"/runtime/tools" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"session_id": session.RuntimeSession.ID,
+			"tools": []runtimetypes.ToolDefinition{{
+				Name:        updateGoalFunctionName,
+				Description: "complete the current goal",
+				Parameters:  map[string]interface{}{"type": "object"},
+			}},
+			"count":  1,
+			"source": "runtime_server",
+		})
+	}))
+	defer server.Close()
+
+	session.ChatExecutor = &aicliRuntimeServerChatExecutor{serverURL: server.URL}
+	session.HTTPClient = server.Client()
+	prompt := renderActiveGoalGuidance(session)
+	if !strings.Contains(prompt, "call update_goal") {
+		t.Fatalf("expected runtime-server guidance to allow update_goal when remote surface exposes it, got %q", prompt)
+	}
+}
+
 func TestAICLIRuntimeServerChatExecutorUsesRuntimeCommandsAndRefreshesHistory(t *testing.T) {
 	storage, err := runtimechat.NewFileStorage(filepath.Join(t.TempDir(), "sessions"))
 	if err != nil {
@@ -238,6 +335,84 @@ func TestAICLIRuntimeServerChatExecutorUsesRuntimeCommandsAndRefreshesHistory(t 
 		t.Fatalf("session metadata did not include shared runtime context: %#v", loaded.Metadata.Context)
 	}
 	if len(session.Messages) != 2 || session.Messages[1].Content != "server output" {
+		t.Fatalf("session history was not refreshed from server write: %#v", session.Messages)
+	}
+}
+
+func TestAICLIRuntimeServerChatExecutorContinueGoalUsesHiddenAuditCommand(t *testing.T) {
+	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), runtimechat.DefaultSessionManagerConfig())
+	defer manager.Stop()
+	runtimeSession, err := manager.Create(context.Background(), "cli-user")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var got map[string]interface{}
+	submitted := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/stream":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/events":
+			events := []map[string]interface{}{}
+			if submitted {
+				events = []map[string]interface{}{
+					runtimeServerTestEvent(runtimeSession.ID, "assistant_message", 1, map[string]interface{}{"content": "audit output"}),
+					runtimeServerTestEvent(runtimeSession.ID, "session_end", 2, map[string]interface{}{"success": true}),
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "count": len(events)})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/commands":
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			submitted = true
+			loaded, err := manager.Get(r.Context(), runtimeSession.ID)
+			if err != nil {
+				t.Fatalf("load session: %v", err)
+			}
+			loaded.AddMessage(*runtimetypes.NewAssistantMessage("audit output"))
+			if err := manager.Update(r.Context(), loaded); err != nil {
+				t.Fatalf("update session: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "pending": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID:
+			loaded, err := manager.Get(r.Context(), runtimeSession.ID)
+			if err != nil {
+				t.Fatalf("load session: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"session": loaded})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		SessionManager: manager,
+		RuntimeSession: runtimeSession,
+		SessionUserID:  "cli-user",
+		HTTPClient:     server.Client(),
+	}
+	output, err := newAICLIRuntimeServerChatExecutor(server.URL).(aicliGoalContinuationExecutor).ContinueGoal(context.Background(), session)
+	if err != nil {
+		t.Fatalf("ContinueGoal failed: %v", err)
+	}
+	if output != "audit output" {
+		t.Fatalf("unexpected output: %q", output)
+	}
+	if got["type"] != "continue" || !strings.Contains(fmt.Sprint(got["prompt"]), "Continue working toward") {
+		t.Fatalf("request did not submit hidden continuation command: %#v", got)
+	}
+	metadata, ok := got["continuation_metadata"].(map[string]interface{})
+	if !ok || metadata[goalContinuationMetadataKey] != true {
+		t.Fatalf("expected continuation metadata, got %#v", got["continuation_metadata"])
+	}
+	if !strings.Contains(fmt.Sprint(got["strip_metadata_keys"]), goalContinuationMetadataKey) {
+		t.Fatalf("expected strip metadata key, got %#v", got["strip_metadata_keys"])
+	}
+	if len(session.Messages) != 1 || session.Messages[0].Content != "audit output" {
 		t.Fatalf("session history was not refreshed from server write: %#v", session.Messages)
 	}
 }
