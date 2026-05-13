@@ -344,6 +344,7 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/resume", forms: []string{"/resume"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/export", forms: []string{"/export"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/title", forms: []string{"/title"}, acceptsArgs: true, requiresArgs: true},
+		{canonical: "/goal", forms: []string{"/goal"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/history", forms: []string{"/history", "/h"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/stream", forms: []string{"/stream"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/s", forms: []string{"/s"}, acceptsArgs: false, requiresArgs: false, shortcutOf: "/stream"},
@@ -626,6 +627,37 @@ func TestChatSlashArgumentCompletionAttach(t *testing.T) {
 				t.Fatalf("expected %s candidates to include clear, got %#v", command, controller.state.Candidates)
 			}
 		})
+	}
+}
+
+func TestChatSlashArgumentCompletionGoal(t *testing.T) {
+	t.Parallel()
+
+	controller := newChatSlashCompletionController(&ChatSession{})
+	controller.UpdateAt("/goal ", len([]rune("/goal ")))
+	if !controller.state.Active || !controller.state.Context.InArguments {
+		t.Fatalf("expected /goal args popup to be active, got %#v", controller.state)
+	}
+	for _, command := range []string{"status", "clear", "pause", "resume", "complete", "--json", "<objective>"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /goal candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/goal re", len([]rune("/goal re")))
+	if !containsSlashCandidate(controller.state.Candidates, "resume") {
+		t.Fatalf("expected /goal re to complete resume, got %#v", controller.state.Candidates)
+	}
+	if !containsSlashCandidate(controller.state.Candidates, "<objective>") {
+		t.Fatalf("expected /goal re to keep showing <objective>, got %#v", controller.state.Candidates)
+	}
+
+	nextText, nextCursor, ok := controller.ApplySubmission("/goal finish-goal-audit", len([]rune("/goal finish-goal-audit")))
+	if ok {
+		t.Fatalf("expected free-form /goal submission to bypass placeholder completion, got %q/%d", nextText, nextCursor)
+	}
+	if nextText != "/goal finish-goal-audit" || nextCursor != len([]rune("/goal finish-goal-audit")) {
+		t.Fatalf("expected free-form /goal submission to remain unchanged, got %q/%d", nextText, nextCursor)
 	}
 }
 

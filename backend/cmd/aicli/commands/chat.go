@@ -158,8 +158,14 @@ func (s *ChatSession) ResetInterrupt() {
 // IsInterrupted 检查是否被中断
 // 优先检查原子标志（由信号处理器设置），再检查 cancelCtx 状态作为回退
 func (s *ChatSession) IsInterrupted() bool {
+	if s == nil {
+		return false
+	}
 	if s.interrupted.Load() {
 		return true
+	}
+	if s.cancelCtx == nil {
+		return false
 	}
 	select {
 	case <-s.cancelCtx.Done():
@@ -933,26 +939,13 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				}
 				continue
 			}
-			handledByStreamFinalize := finalizeInteractiveActorStreamIfNeeded(session, response)
-			if shouldDisplayFinalResponse(session, response) && !handledByStreamFinalize && !wasInteractiveActorResponseAlreadyRendered(session) {
-				renderChatResponse(session, response)
-			}
-			// 消息发送成功后清空已使用的图片附件
-			session.ImagePaths = nil
-			// 实时保存会话日志
-			if session.Logger.logDir != "" {
-				if err := session.Logger.FlushSession(); err != nil {
-					writeChatLogSaveError(session, err)
-				}
-			} else {
-				writeChatLogBufferedMarker(session)
-			}
+			finishSuccessfulChatSend(session, response, noInteractive)
 			continue
 		}
 
 		// 处理命令
 		if strings.HasPrefix(input, "/") {
-			if handleCommand(session, input, noInteractive) {
+			if dispatchChatCommand(session, input, noInteractive) {
 				break
 			}
 			if noInteractive {
@@ -990,28 +983,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			continue
 		}
 
-		// 非流式模式：显示完整响应
-		// 流式模式：内容已在 sendMessage 中实时打印
-		handledByStreamFinalize := finalizeInteractiveActorStreamIfNeeded(session, response)
-		if shouldDisplayFinalResponse(session, response) && !handledByStreamFinalize && !wasInteractiveActorResponseAlreadyRendered(session) {
-			renderChatResponse(session, response)
-		} else if session.Stream && !noInteractive && !handledByStreamFinalize {
-			// 流式模式下添加换行
-			beginDirectInteractiveOutput(session)
-			fmt.Println()
-		}
-
-		// 消息发送成功后清空已使用的图片附件
-		session.ImagePaths = nil
-
-		// 实时保存会话日志
-		if session.Logger.logDir != "" {
-			if err := session.Logger.FlushSession(); err != nil {
-				writeChatLogSaveError(session, err)
-			}
-		} else {
-			writeChatLogBufferedMarker(session)
-		}
+		finishSuccessfulChatSend(session, response, noInteractive)
 
 		// 非交互模式下，发送一条消息后退出
 		if noInteractive {

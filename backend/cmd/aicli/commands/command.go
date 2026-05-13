@@ -16,6 +16,13 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
+func dispatchChatCommand(session *ChatSession, command string, noInteractive bool) bool {
+	if !noInteractive {
+		beginDirectInteractiveOutput(session)
+	}
+	return handleCommand(session, command, noInteractive)
+}
+
 // handleCommand 处理命令
 func handleCommand(session *ChatSession, command string, noInteractive bool) bool {
 	// 首先检查 /shell 和 /cmd 命令（带参数）
@@ -104,6 +111,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			printVisibleChatHistory(session, "已加载历史会话")
 		}
 		return false
+	}
+	if commandMatches(cmdLower, "/goal") {
+		return handleGoalCommand(session, command)
 	}
 	if commandMatches(cmdLower, "/title") {
 		title := extractCommandArgument(command)

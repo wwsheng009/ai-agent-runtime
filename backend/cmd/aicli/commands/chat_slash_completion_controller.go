@@ -156,6 +156,10 @@ func (c *chatSlashCompletionController) ApplyCompletion(text string, cursor int)
 		selected = 0
 	}
 	selectedCandidate := c.state.Candidates[selected]
+	if selectedCandidate.Informational {
+		c.renderLocked()
+		return text, cursor, false
+	}
 	if candidateIsExactMatch(selectedCandidate, c.state.Query) && !c.shouldAcceptExactMatchLocked(selectedCandidate) {
 		c.renderLocked()
 		return text, cursor, false
@@ -199,6 +203,10 @@ func (c *chatSlashCompletionController) ApplySubmission(text string, cursor int)
 		selected = 0
 	}
 	selectedCandidate := c.state.Candidates[selected]
+	if selectedCandidate.Informational {
+		c.renderLocked()
+		return text, cursor, false
+	}
 	if candidateIsExactMatch(selectedCandidate, c.state.Query) && !c.shouldAcceptExactMatchLocked(selectedCandidate) {
 		c.clearPopupLocked()
 		c.state = chatSlashCompletionState{Selected: -1}

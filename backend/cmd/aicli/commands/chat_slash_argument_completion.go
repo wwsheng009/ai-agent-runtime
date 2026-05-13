@@ -111,6 +111,8 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "status", Summary: "查看当前状态", Group: string(chatSlashCommandGroupContext)},
 			{Command: "clear", Summary: "清空排队输入", Group: string(chatSlashCommandGroupContext)},
 		})
+	case "/goal":
+		return completeGoalSlashArgs(argsText, cursor)
 	case "/debug":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "export", Summary: "打包调试文件", Group: string(chatSlashCommandGroupSession)},
@@ -138,6 +140,25 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 func completeStaticSlashArgs(argsText string, cursor int, candidates []chatSlashCompletionCandidate) []chatSlashCompletionCandidate {
 	ctx := parseSlashArgumentContext(argsText, cursor)
 	return matchSlashArgumentCandidates(candidates, activeSlashArgumentQuery(ctx))
+}
+
+func completeGoalSlashArgs(argsText string, cursor int) []chatSlashCompletionCandidate {
+	ctx := parseSlashArgumentContext(argsText, cursor)
+	query := activeSlashArgumentQuery(ctx)
+	candidates := matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+		{Command: "status", Summary: "显示当前 goal", Group: string(chatSlashCommandGroupSession)},
+		{Command: "clear", Summary: "清除当前 goal", Group: string(chatSlashCommandGroupSession)},
+		{Command: "pause", Summary: "暂停当前 goal", Group: string(chatSlashCommandGroupSession)},
+		{Command: "resume", Summary: "恢复当前 goal", Group: string(chatSlashCommandGroupSession)},
+		{Command: "complete", Summary: "标记当前 goal 完成", Group: string(chatSlashCommandGroupSession)},
+		{Command: "--json", Summary: "以 JSON 输出当前 goal", Group: string(chatSlashCommandGroupSession)},
+	}, query)
+	return append(candidates, chatSlashCompletionCandidate{
+		Command:       "<objective>",
+		Summary:       "直接输入目标文本以设置或替换当前 goal",
+		Group:         string(chatSlashCommandGroupSession),
+		Informational: true,
+	})
 }
 
 func completeAgentsSlashArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {

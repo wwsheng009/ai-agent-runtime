@@ -34,15 +34,16 @@ const (
 )
 
 type chatSlashCompletionCandidate struct {
-	Command     string
-	AliasOf     string
-	ShortcutOf  string
-	Usage       string
-	Summary     string
-	Group       string
-	Score       int
-	AcceptsArgs bool
-	MatchKind   chatSlashCompletionMatchKind
+	Command       string
+	AliasOf       string
+	ShortcutOf    string
+	Usage         string
+	Summary       string
+	Group         string
+	Score         int
+	AcceptsArgs   bool
+	Informational bool
+	MatchKind     chatSlashCompletionMatchKind
 }
 
 type chatSlashCompletionState struct {
