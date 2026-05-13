@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -1223,6 +1224,34 @@ func TestHandleCommand_ClearResetsConversationTokenUsage(t *testing.T) {
 	}
 	if got, ok := runtimeSessionContextInt(session.RuntimeSession, chatRuntimeContextTokenCount); ok {
 		t.Fatalf("expected token count metadata to be removed, got %d", got)
+	}
+}
+
+func TestDispatchChatCommand_ClearsInteractivePromptBeforePrinting(t *testing.T) {
+	session, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+
+	coord := newChatInteractionCoordinator(session)
+	var renderedPrompt bytes.Buffer
+	coord.SetWriter(&renderedPrompt)
+	session.Interaction = coord
+
+	coord.PrintPrompt()
+	if !coord.promptVisible {
+		t.Fatal("expected prompt to be visible before dispatch")
+	}
+
+	output := captureStdout(t, func() {
+		if quit := dispatchChatCommand(session, "/goal verify interactive command output", false); quit {
+			t.Fatal("expected /goal dispatch not to exit")
+		}
+	})
+
+	if coord.promptVisible {
+		t.Fatal("expected dispatch to clear prompt before command output")
+	}
+	if !strings.Contains(output, "Goal 已设置") {
+		t.Fatalf("expected goal command output after dispatch, got %q", output)
 	}
 }
 

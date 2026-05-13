@@ -41,7 +41,15 @@ type aicliChatExecutor interface {
 	Execute(ctx context.Context, session *ChatSession, prompt string) (string, error)
 }
 
+type aicliGoalContinuationExecutor interface {
+	ContinueGoal(ctx context.Context, session *ChatSession) (string, error)
+}
+
 type aicliSharedChatExecutor struct{}
+
+type sharedChatExecuteOptions struct {
+	ContinuationPrompt string
+}
 
 type sharedChatAutoCompactReport struct {
 	Result *compactruntime.Result
@@ -79,6 +87,14 @@ func ensureChatExecutor(session *ChatSession) aicliChatExecutor {
 }
 
 func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSession, prompt string) (string, error) {
+	return e.execute(ctx, session, prompt, sharedChatExecuteOptions{})
+}
+
+func (e *aicliSharedChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (string, error) {
+	return e.execute(ctx, session, "", sharedChatExecuteOptions{ContinuationPrompt: goalAutoContinuationPrompt})
+}
+
+func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSession, prompt string, opts sharedChatExecuteOptions) (string, error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
@@ -90,6 +106,10 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	history := cloneRuntimeMessages(session.Messages)
 	if len(history) == 0 && session.RuntimeSession != nil && len(session.RuntimeSession.History) > 0 {
 		history = cloneRuntimeMessages(session.RuntimeSession.History)
+	}
+	isGoalContinuation := strings.TrimSpace(opts.ContinuationPrompt) != ""
+	if isGoalContinuation {
+		history = append(history, goalContinuationInstructionMessage(opts.ContinuationPrompt))
 	}
 
 	var selection *aicliFunctionSelection
@@ -124,17 +144,23 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 			return currentScope
 		},
 	}
-	if compactedHistory, compactReport, compactErr := autoCompactSharedChatHistory(ctx, session, history); compactErr != nil {
-		emitSharedChatAutoCompactEvent(renderer, compactReport, compactErr)
-		writeSessionDebugInfo(session, formatSharedChatAutoCompactDebug(compactReport, compactErr), true)
-	} else {
-		history = compactedHistory
-		if compactReport != nil && compactReport.Result != nil {
-			emitSharedChatAutoCompactEvent(renderer, compactReport, nil)
-			writeSessionDebugInfo(session, formatSharedChatAutoCompactDebug(compactReport, nil), true)
+	if !isGoalContinuation {
+		if compactedHistory, compactReport, compactErr := autoCompactSharedChatHistory(ctx, session, history); compactErr != nil {
+			emitSharedChatAutoCompactEvent(renderer, compactReport, compactErr)
+			writeSessionDebugInfo(session, formatSharedChatAutoCompactDebug(compactReport, compactErr), true)
+		} else {
+			history = compactedHistory
+			if compactReport != nil && compactReport.Result != nil {
+				emitSharedChatAutoCompactEvent(renderer, compactReport, nil)
+				writeSessionDebugInfo(session, formatSharedChatAutoCompactDebug(compactReport, nil), true)
+			}
 		}
 	}
 	promptBudget := resolveSharedChatPromptBudget(session)
+	historyCompactor := buildSharedChatPromptPreflightCompactor(session, renderer)
+	if isGoalContinuation {
+		historyCompactor = nil
+	}
 
 	loopResult, err := executeToolLoop(ctx, runtimechatcore.ToolLoopRequest{
 		Prompt:                               prompt,
@@ -150,7 +176,7 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 		ModelCapabilityMaxContextTokens:      promptBudget.ModelCapabilityMaxContextTokens,
 		ModelCapabilityAutoCompactRatio:      promptBudget.ModelCapabilityAutoCompactRatio,
 		ModelCapabilityAutoCompactTokenLimit: promptBudget.ModelCapabilityAutoCompactTokenLimit,
-		HistoryCompactor:                     buildSharedChatPromptPreflightCompactor(session, renderer),
+		HistoryCompactor:                     historyCompactor,
 		Metadata:                             buildToolLoopRequestMetadataFromExposureReport(exposureReport),
 		Stream:                               session.Stream,
 		Tools:                                toolDefinitionsFromSelection(selection),
@@ -161,6 +187,7 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	if err != nil {
 		if preflightErr, ok := agent.AsPromptPreflightError(err); ok {
 			if replacement := preflightErr.CloneReplacementHistory(); len(replacement) > 0 {
+				replacement = stripGoalContinuationInstructionMessages(replacement)
 				if replaceErr := replaceRuntimeMessages(session, replacement); replaceErr != nil {
 					err = fmt.Errorf("%w: 应用 prompt preflight 恢复历史失败: %v", err, replaceErr)
 				} else {
@@ -176,13 +203,15 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 		return "", fmt.Errorf("共享 chatcore 未返回结果")
 	}
 
-	if err := replaceRuntimeMessages(session, loopResult.History); err != nil {
+	resultHistory := stripGoalContinuationInstructionMessages(loopResult.History)
+	if err := replaceRuntimeMessages(session, resultHistory); err != nil {
 		return "", fmt.Errorf("共享 chat history 更新失败: %w", err)
 	}
 	if applied := applyChatContextTokensFromUsage(session, loopResult.Response.Usage, promptBudget.ModelCapabilityMaxContextTokens, true); applied <= 0 {
-		applyChatContextTokensFromMessages(session, loopResult.History, promptBudget.ModelCapabilityMaxContextTokens, true)
+		applyChatContextTokensFromMessages(session, resultHistory, promptBudget.ModelCapabilityMaxContextTokens, true)
 	}
 	warnIfChatSessionSyncFails(session, "shared chatcore sync", syncRuntimeSessionFromChat(session))
+	warnIfChatSessionSyncFails(session, "shared chatcore post-turn reconcile", runPostTurnReconcilersAndSync(session))
 
 	if session.Logger != nil && len(loopResult.Response.ToolExecutions) > 0 {
 		callSummaries := make([]aicliToolExecutionCallSummary, 0, len(loopResult.Response.ToolExecutions))
@@ -215,8 +244,8 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 	}
 
 	var finalMessage *runtimetypes.Message
-	if count := len(loopResult.History); count > 0 {
-		finalMessage = &loopResult.History[count-1]
+	if count := len(resultHistory); count > 0 {
+		finalMessage = &resultHistory[count-1]
 	}
 	renderer.Finalize(loopResult.Response, finalMessage)
 

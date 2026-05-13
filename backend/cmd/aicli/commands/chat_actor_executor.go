@@ -89,6 +89,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
 		return "", err
 	}
+	warnIfChatSessionSyncFails(session, "actor post-turn reconcile", runPostTurnReconcilersAndSync(session))
 	if result != nil {
 		applyChatTokenUsage(session, result.Usage)
 	}
@@ -103,6 +104,88 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		if fallbackResponse, ok := attemptDirectImageGenerationFallback(ctx, session, prompt, result.Error); ok {
 			return fallbackResponse, nil
 		}
+		response = fallbackActorExecutorResponse(result, session)
+	}
+	return response, nil
+}
+
+func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (string, error) {
+	if session == nil {
+		return "", fmt.Errorf("chat session is nil")
+	}
+	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
+		return "", fmt.Errorf("local runtime host is not configured")
+	}
+	if session.RuntimeSession == nil {
+		return "", fmt.Errorf("runtime session is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = generatedImageToolContext(ctx, session)
+	if shouldRenderInteractiveOutput(session) {
+		ctx = runtimeexecutor.WithOutputMirror(ctx, newChatSystemOutputWriterWithSurface(os.Stdout, session.Surface))
+	}
+
+	actor, err := chatActorForSession(ctx, session)
+	if err != nil {
+		return "", err
+	}
+	previousAssistant := latestAssistantResponseText(session)
+	previousTeamID := activeTeamID(session)
+	if bridge := ensureChatRuntimeEventBridge(session); bridge != nil {
+		bridge.PrepareRunPrompt("")
+		bridge.BeginRun()
+		defer bridge.EndRun()
+	}
+	if session.runtimeHTTPCapture != nil {
+		session.runtimeHTTPCapture.Reset()
+	}
+	if reporter := newRuntimeHTTPDebugReporter(session); reporter != nil {
+		ctx = runtimellm.WithHTTPDebugReporter(ctx, reporter)
+	}
+	result, err := actor.Continue(ctx, currentRunMetaForSession(session), runtimechat.ContinueOption{
+		ContinuationPrompt: goalAutoContinuationPrompt,
+		ContinuationMetadata: map[string]interface{}{
+			goalContinuationMetadataKey: true,
+		},
+		StripMetadataKeys: []string{goalContinuationMetadataKey},
+	})
+	if err != nil {
+		warnIfChatSessionSyncFails(session, "actor goal continuation error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
+		warnIfChatSessionSyncFails(session, "actor goal continuation team lifecycle sync", syncAmbientTeamLifecycleState(session))
+		return "", humanizeActorExecutorError(session, err)
+	}
+	if bridge := session.RuntimeEventBridge; bridge != nil {
+		waitTimeout := 8 * time.Second
+		if session.Interaction != nil && result != nil {
+			waitTimeout = session.Interaction.EstimateStreamFlushTimeout(result.Output)
+			if waitTimeout < 8*time.Second {
+				waitTimeout = 8 * time.Second
+			}
+		}
+		bridge.WaitForCurrentEvents(waitTimeout)
+		if runErr := bridge.RunError(); runErr != nil {
+			warnIfChatSessionSyncFails(session, "actor goal continuation runtime error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
+			warnIfChatSessionSyncFails(session, "actor goal continuation team lifecycle sync", syncAmbientTeamLifecycleState(session))
+			return "", humanizeActorExecutorError(session, runErr)
+		}
+	}
+	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
+		return "", err
+	}
+	warnIfChatSessionSyncFails(session, "actor goal continuation post-turn reconcile", runPostTurnReconcilersAndSync(session))
+	if result != nil {
+		applyChatTokenUsage(session, result.Usage)
+	}
+	warnIfChatSessionSyncFails(session, "actor goal continuation usage sync", syncRuntimeSessionFromChat(session))
+	warnIfChatSessionSyncFails(session, "actor goal continuation team lifecycle sync", syncAmbientTeamLifecycleState(session))
+	if result == nil {
+		return "", nil
+	}
+	renderAsyncTeamLaunchNotice(session, previousTeamID)
+	response := resolveActorExecutorResponse(result.Output, session, previousAssistant)
+	if response == "" {
 		response = fallbackActorExecutorResponse(result, session)
 	}
 	return response, nil

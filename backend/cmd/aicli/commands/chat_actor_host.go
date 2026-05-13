@@ -102,6 +102,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	if toolManager != nil {
 		runtimeMCP = runtimetools.NewAgentAdapter(toolManager)
 	}
+	runtimeMCP = wrapGoalToolSurface(session, runtimeMCP)
 
 	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
 		Config:          runtimeConfig,
@@ -277,6 +278,8 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		EventStore:   h.EventStore,
 		EventBus:     h.EventBus,
 		LoopConfig:   buildLocalChatLoopConfig(runtimeConfig, session),
+		PrepareRun:   localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
+		PersistHook:  localGoalPersistHook(sessionStore),
 		OnStop: func() {
 			if leaseHandle != nil {
 				_ = leaseHandle.Release(context.Background())
@@ -454,6 +457,19 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 
 	return apiAgent
+}
+
+func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, workspaceRoot string, isBaseSession bool) func(context.Context, *runtimechat.Session, bool) error {
+	if apiAgent == nil || session == nil || !isBaseSession {
+		return nil
+	}
+	return func(ctx context.Context, runtimeSession *runtimechat.Session, resume bool) error {
+		ensureChatSystemPromptMessage(session)
+		if cfg := apiAgent.GetConfig(); cfg != nil {
+			cfg.SystemPrompt = composeLocalChatSystemPrompt(session, workspaceRoot)
+		}
+		return nil
+	}
 }
 
 func resolveLocalChatWorkspaceMode(runtimeConfig *runtimecfg.RuntimeConfig) string {

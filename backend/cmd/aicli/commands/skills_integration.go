@@ -1170,7 +1170,18 @@ func buildToolLoopRequestMetadataFromExposureReport(report *aicliFunctionExposur
 	if report == nil {
 		return nil
 	}
-	return runtimeskill.BuildSkillExposureMetadata(buildSkillExposureProjectionFromReport(report))
+	metadata := runtimeskill.BuildSkillExposureMetadata(buildSkillExposureProjectionFromReport(report))
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	metadata["executor_path"] = "shared"
+	if len(report.FinalFunctionNames) > 0 {
+		metadata["tool_surface"] = map[string]interface{}{
+			"count": len(report.FinalFunctionNames),
+			"names": append([]string(nil), report.FinalFunctionNames...),
+		}
+	}
+	return metadata
 }
 
 func buildSkillExposureProjectionFromReport(report *aicliFunctionExposureReport) runtimeskill.ExposureProjection {

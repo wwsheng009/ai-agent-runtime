@@ -228,6 +228,9 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 	if session == nil || opts == nil {
 		return nil, nil, nil
 	}
+	if !session.DisableTools {
+		registerGoalFunctions(session)
+	}
 	if configured, err := configureRuntimeServerChatExecutor(context.Background(), opts, session); err != nil {
 		return nil, nil, err
 	} else if configured {

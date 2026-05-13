@@ -206,6 +206,10 @@ func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
 	parts = append(parts, state)
 
 	if session != nil {
+		if goalStatus := resolveChatStatusGoal(session); goalStatus != "" {
+			parts = append(parts, goalStatus)
+		}
+
 		if model := compactStatusValue(strings.TrimSpace(session.Model), 28); model != "" {
 			parts = append(parts, "model "+model)
 		}
@@ -239,6 +243,18 @@ func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
 	}
 
 	return strings.Join(parts, " | ")
+}
+
+func resolveChatStatusGoal(session *ChatSession) string {
+	goal, ok, err := currentSessionGoal(session)
+	if err != nil || !ok || goal == nil {
+		return ""
+	}
+	status := compactStatusValue(string(goal.Status), 12)
+	if status == "" {
+		return ""
+	}
+	return "goal " + status
 }
 
 func resolveChatStatusCurrentDirectory(session *ChatSession) string {

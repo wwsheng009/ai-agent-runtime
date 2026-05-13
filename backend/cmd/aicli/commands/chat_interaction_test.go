@@ -22,6 +22,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -1094,6 +1095,31 @@ func TestBuildChatSurfaceStatusLine_UsesLiveStatusMessageCount(t *testing.T) {
 	}
 	if strings.Contains(status, "msgs 2") {
 		t.Fatalf("expected status line not to fall back to turn count when live count exists, got %q", status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_IncludesGoalStatusWhenSet(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("test-user")
+	goal, err := runtimegoal.NewSessionGoal(runtimeSession.ID, "ship goal status", time.Now())
+	if err != nil {
+		t.Fatalf("NewSessionGoal: %v", err)
+	}
+	goal.Status = runtimegoal.StatusPaused
+	if err := runtimegoal.NewMetadataStore().Put(runtimeSession, goal); err != nil {
+		t.Fatalf("goal store Put: %v", err)
+	}
+
+	session := &ChatSession{RuntimeSession: runtimeSession}
+	status := buildChatSurfaceStatusLine(session, "Ready")
+	if !strings.Contains(status, "goal paused") {
+		t.Fatalf("expected status line to include goal status, got %q", status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_OmitsGoalStatusWhenUnset(t *testing.T) {
+	status := buildChatSurfaceStatusLine(&ChatSession{RuntimeSession: runtimechat.NewSession("test-user")}, "Ready")
+	if strings.Contains(status, "goal ") {
+		t.Fatalf("expected status line to omit missing goal, got %q", status)
 	}
 }
 

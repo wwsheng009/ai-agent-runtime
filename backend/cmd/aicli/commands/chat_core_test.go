@@ -30,11 +30,16 @@ import (
 )
 
 type fakeChatExecutor struct {
-	called  bool
-	prompt  string
-	session *ChatSession
-	output  string
-	err     error
+	called        bool
+	prompt        string
+	prompts       []string
+	continued     bool
+	continuations int
+	session       *ChatSession
+	output        string
+	err           error
+	onCall        func(ctx context.Context, session *ChatSession, prompt string) (string, error)
+	onContinue    func(ctx context.Context, session *ChatSession) (string, error)
 }
 
 type recordingProtocolAdapter struct {
@@ -46,7 +51,21 @@ type recordingProtocolAdapter struct {
 func (f *fakeChatExecutor) Execute(ctx context.Context, session *ChatSession, prompt string) (string, error) {
 	f.called = true
 	f.prompt = prompt
+	f.prompts = append(f.prompts, prompt)
 	f.session = session
+	if f.onCall != nil {
+		return f.onCall(ctx, session, prompt)
+	}
+	return f.output, f.err
+}
+
+func (f *fakeChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (string, error) {
+	f.continued = true
+	f.continuations++
+	f.session = session
+	if f.onContinue != nil {
+		return f.onContinue(ctx, session)
+	}
 	return f.output, f.err
 }
 
@@ -1270,6 +1289,23 @@ func TestBuildToolLoopRequestMetadataFromExposureReport_IncludesTelemetryCounts(
 	})
 	if metadata == nil {
 		t.Fatal("expected metadata to be built")
+	}
+	if got := metadata["executor_path"]; got != "shared" {
+		t.Fatalf("expected shared executor_path metadata, got %#v", got)
+	}
+	surface, ok := metadata["tool_surface"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected tool_surface metadata map, got %#v", metadata["tool_surface"])
+	}
+	names, ok := surface["names"].([]string)
+	if !ok {
+		t.Fatalf("expected tool_surface.names []string, got %#v", surface["names"])
+	}
+	if !stringSliceContains(names, "builtin__search") || !stringSliceContains(names, "skill__alpha") {
+		t.Fatalf("expected tool_surface.names to use final function names, got %#v", names)
+	}
+	if got := surface["count"]; got != 2 {
+		t.Fatalf("expected tool_surface.count=2, got %#v", got)
 	}
 	exposure, ok := metadata["skill_exposure"].(map[string]interface{})
 	if !ok {

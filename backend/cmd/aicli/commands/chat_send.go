@@ -43,7 +43,46 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	} else if err != nil && !session.NoInteractive {
 		fmt.Print("\r   \r")
 	}
-	return response, err
+	if err != nil {
+		if shouldAutoContinueAfterGoalTurnError(session, err) {
+			writeSessionDebugInfo(session, fmt.Sprintf("[goal] initial turn ended with error; starting auto continuation error=%q", err.Error()), false)
+			continueCtx, continueCancel := goalAutoContinuationAttemptContext(ctx, session)
+			continueErr := maybeAutoContinueActiveGoal(continueCtx, session, executor)
+			continueCancel()
+			if continueErr != nil {
+				reportGoalAutoContinuationWarning(session, continueErr)
+				return response, err
+			}
+			return response, nil
+		}
+		return response, err
+	}
+	if continueErr := maybeAutoContinueActiveGoal(ctx, session, executor); continueErr != nil {
+		reportGoalAutoContinuationWarning(session, continueErr)
+	}
+	return response, nil
+}
+
+func finishSuccessfulChatSend(session *ChatSession, response string, noInteractive bool) {
+	if session == nil {
+		return
+	}
+	handledByStreamFinalize := finalizeInteractiveActorStreamIfNeeded(session, response)
+	if shouldDisplayFinalResponse(session, response) && !handledByStreamFinalize && !wasInteractiveActorResponseAlreadyRendered(session) {
+		renderChatResponse(session, response)
+	} else if session.Stream && !noInteractive && !handledByStreamFinalize {
+		beginDirectInteractiveOutput(session)
+		fmt.Println()
+	}
+
+	session.ImagePaths = nil
+	if session.Logger != nil && session.Logger.logDir != "" {
+		if err := session.Logger.FlushSession(); err != nil {
+			writeChatLogSaveError(session, err)
+		}
+	} else {
+		writeChatLogBufferedMarker(session)
+	}
 }
 
 func shouldShowInitialThinkingIndicator(session *ChatSession, executor aicliChatExecutor) bool {
