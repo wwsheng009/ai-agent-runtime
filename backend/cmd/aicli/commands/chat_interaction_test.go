@@ -88,6 +88,41 @@ func TestChatInteractionCoordinator_RenderAsyncLineClearsVisiblePromptInInteract
 	}
 }
 
+func TestChatInteractionCoordinator_RenderSubmittedUserInputWritesUserBlock(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderSubmittedUserInput("第一个问题")
+
+	rendered := output.String()
+	if !strings.Contains(rendered, ui.FormatUserMessage("第一个问题")) {
+		t.Fatalf("expected submitted user input to render as user message, got %q", rendered)
+	}
+}
+
+func TestRenderSubmittedUserInputEchoSkipsLegacyPromptPath(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	session.Interaction = coord
+
+	renderSubmittedUserInputEcho(session, "第一个问题")
+
+	if output.String() != "" {
+		t.Fatalf("expected submitted input echo to be gated to fixed-bottom surface, got %q", output.String())
+	}
+}
+
 func TestChatInteractionCoordinator_ClearPromptClearsWrappedInput(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true

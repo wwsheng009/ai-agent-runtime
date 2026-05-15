@@ -813,6 +813,18 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 	c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(line), promptWasVisible)
 }
 
+func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || strings.TrimSpace(input) == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.beginMessageLocked() {
+		return
+	}
+	c.writeCompleteBlockLocked(ui.FormatUserMessage(input), false)
+}
+
 func (c *chatInteractionCoordinator) RenderError(err error) {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || err == nil {
 		return

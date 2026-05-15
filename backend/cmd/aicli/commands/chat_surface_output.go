@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 func beginDirectInteractiveOutput(session *ChatSession) {
@@ -40,6 +41,16 @@ func clearRuntimeComposerPrompt(session *ChatSession) {
 	if session.Interaction != nil {
 		session.Interaction.ResetPromptState()
 	}
+}
+
+func renderSubmittedUserInputEcho(session *ChatSession, input string) {
+	if session == nil || session.NoInteractive || session.JSONOutput || strings.TrimSpace(input) == "" {
+		return
+	}
+	if session.Surface == nil || !session.Surface.Enabled() || session.Interaction == nil {
+		return
+	}
+	session.Interaction.RenderSubmittedUserInput(input)
 }
 
 func writeChatLogBufferedMarker(session *ChatSession) {
