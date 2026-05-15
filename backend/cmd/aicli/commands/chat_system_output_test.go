@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,21 @@ type fakeChatOutputSurface struct {
 
 func (s *fakeChatOutputSurface) BeginOutput() {
 	s.count.Add(1)
+}
+
+type fakeAtomicChatOutputSurface struct {
+	beginCount atomic.Int32
+	writeCount atomic.Int32
+}
+
+func (s *fakeAtomicChatOutputSurface) BeginOutput() {
+	s.beginCount.Add(1)
+}
+
+func (s *fakeAtomicChatOutputSurface) WriteOutput(writer io.Writer, text string) (int, error, bool) {
+	s.writeCount.Add(1)
+	n, err := io.WriteString(writer, text)
+	return n, err, true
 }
 
 func TestChatSystemOutputWriter_IndentsEachCompletedLine(t *testing.T) {
@@ -99,6 +115,26 @@ func TestChatSystemOutputWriter_BeginsSurfaceOutputOnceForVisibleBlankLines(t *t
 
 	if got := surface.count.Load(); got != 1 {
 		t.Fatalf("expected collapsed visible lines in one write to share surface output begin, got %d", got)
+	}
+}
+
+func TestChatSystemOutputWriter_UsesAtomicSurfaceOutputWhenAvailable(t *testing.T) {
+	var output bytes.Buffer
+	surface := &fakeAtomicChatOutputSurface{}
+	writer := newChatSystemOutputWriterWithSurface(&output, surface)
+
+	if _, err := writer.Write([]byte("[Manager] ready\n[Manager] done\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if got := surface.beginCount.Load(); got != 0 {
+		t.Fatalf("expected atomic surface path not to use separate BeginOutput, got %d", got)
+	}
+	if got := surface.writeCount.Load(); got != 2 {
+		t.Fatalf("expected one atomic surface write per rendered line, got %d", got)
+	}
+	if !strings.Contains(output.String(), ui.FormatAssistantSupplementBlock("[Manager] done")) {
+		t.Fatalf("expected rendered output to be written, got %q", output.String())
 	}
 }
 

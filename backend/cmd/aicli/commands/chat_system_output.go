@@ -43,6 +43,10 @@ type chatOutputSurface interface {
 	BeginOutput()
 }
 
+type chatAtomicOutputSurface interface {
+	WriteOutput(io.Writer, string) (int, error, bool)
+}
+
 func newChatSystemOutputWriter(writer io.Writer) io.Writer {
 	return newChatSystemOutputWriterWithSurface(writer, nil)
 }
@@ -92,6 +96,16 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 		w.beginOutput()
 		outputBegun = true
 	}
+	writeOutput := func(text string) error {
+		if atomicSurface, ok := w.surface.(chatAtomicOutputSurface); ok {
+			if _, err, handled := atomicSurface.WriteOutput(w.writer, text); handled {
+				return err
+			}
+		}
+		beginOutput()
+		_, err := ui.WriteTerminalText(w.writer, text)
+		return err
+	}
 	for {
 		content := w.buffer.String()
 		index := strings.IndexByte(content, '\n')
@@ -108,16 +122,14 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 				continue
 			}
 			w.lastBlank = true
-			beginOutput()
-			if _, err := ui.WriteTerminalText(w.writer, "\n"); err != nil {
+			if err := writeOutput("\n"); err != nil {
 				return 0, err
 			}
 			renderedAny = true
 			continue
 		}
 		w.lastBlank = false
-		beginOutput()
-		if _, err := ui.WriteTerminalLine(w.writer, rendered); err != nil {
+		if err := writeOutput(rendered + "\n"); err != nil {
 			return 0, err
 		}
 		renderedAny = true
@@ -235,11 +247,24 @@ func (w *chatSystemOutputWriter) flushPartialLocked() error {
 		return nil
 	}
 	w.lastBlank = false
-	w.beginOutput()
-	if _, err := ui.WriteTerminalLine(w.writer, ui.FormatAssistantSupplementBlock(line)); err != nil {
+	if err := w.writeOutputTextLocked(ui.FormatAssistantSupplementBlock(line) + "\n"); err != nil {
 		return err
 	}
 	return flushChatOutputWriter(w.writer)
+}
+
+func (w *chatSystemOutputWriter) writeOutputTextLocked(text string) error {
+	if text == "" {
+		return nil
+	}
+	if atomicSurface, ok := w.surface.(chatAtomicOutputSurface); ok {
+		if _, err, handled := atomicSurface.WriteOutput(w.writer, text); handled {
+			return err
+		}
+	}
+	w.beginOutput()
+	_, err := ui.WriteTerminalText(w.writer, text)
+	return err
 }
 
 func (w *chatSystemOutputWriter) schedulePartialFlushLocked() {

@@ -23,6 +23,7 @@ type chatInteractionCoordinator struct {
 	promptVisible           bool
 	promptInput             string
 	promptCursor            int
+	promptRenderedOnSurface bool
 	promptPasteActive       bool
 	thinkingActive          bool
 	streamingActive         bool
@@ -108,6 +109,10 @@ func (c *chatInteractionCoordinator) supportsLiveStreamLocked() bool {
 	return stdoutInfo.Mode()&os.ModeCharDevice != 0
 }
 
+func (c *chatInteractionCoordinator) shouldLiveStreamOutputLocked() bool {
+	return c.supportsLiveStreamLocked() && !c.surfaceOutputActiveLocked()
+}
+
 func (c *chatInteractionCoordinator) PrintPrompt() {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
 		return
@@ -127,6 +132,12 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 		return
 	}
+	if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(formatSessionUserPrompt(c.session)) {
+		c.promptVisible = true
+		c.promptRenderedOnSurface = true
+		return
+	}
+	c.promptRenderedOnSurface = false
 	c.writeTextLocked(formatSessionUserPrompt(c.session))
 	c.promptVisible = true
 }
@@ -158,6 +169,9 @@ func (c *chatInteractionCoordinator) writeTextLocked(text string) {
 	if c == nil || c.writer == nil || text == "" {
 		return
 	}
+	if c.writeSurfaceOutputTextLocked(text) {
+		return
+	}
 	_, _ = ui.WriteTerminalText(c.writer, text)
 }
 
@@ -165,14 +179,26 @@ func (c *chatInteractionCoordinator) writeLineLocked(text string) {
 	if c == nil || c.writer == nil {
 		return
 	}
-	_, _ = ui.WriteTerminalLine(c.writer, text)
+	c.writeTextLocked(text + "\n")
 }
 
 func (c *chatInteractionCoordinator) writeFormatLocked(format string, args ...interface{}) {
 	if c == nil || c.writer == nil || format == "" {
 		return
 	}
+	if c.writer == os.Stdout && c.surface != nil {
+		c.writeTextLocked(fmt.Sprintf(format, args...))
+		return
+	}
 	_, _ = ui.WriteTerminalFormat(c.writer, format, args...)
+}
+
+func (c *chatInteractionCoordinator) writeSurfaceOutputTextLocked(text string) bool {
+	if c == nil || c.writer != os.Stdout || c.surface == nil || text == "" || !c.surfaceOutputActiveLocked() {
+		return false
+	}
+	_, _, handled := c.surface.WriteOutput(c.writer, text)
+	return handled
 }
 
 func (c *chatInteractionCoordinator) RefreshStatus(state string) {
@@ -478,12 +504,16 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 		c.reasoningRendered = false
 		c.reasoningTrailingLF = false
 		c.reasoningBuffer.Reset()
-		c.writeLineLocked(ui.FormatAssistantSupplementBlock(chatToolDivider("reasoning")))
 		if meta := chatReasoningMetaLine(block); meta != "" {
 			c.reasoningMeta = meta
-			c.writeLineLocked(ui.FormatAssistantSupplementBlock(meta))
 		} else {
 			c.reasoningMeta = ""
+		}
+		if c.shouldLiveStreamOutputLocked() {
+			c.writeLineLocked(ui.FormatAssistantSupplementBlock(chatToolDivider("reasoning")))
+			if c.reasoningMeta != "" {
+				c.writeLineLocked(ui.FormatAssistantSupplementBlock(c.reasoningMeta))
+			}
 		}
 		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	}
@@ -491,7 +521,7 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 	if delta == "" {
 		return
 	}
-	if c.supportsLiveStreamLocked() {
+	if c.shouldLiveStreamOutputLocked() {
 		c.writeIndentedStreamingDeltaLocked(delta, ui.AssistantContentIndent()+"  ", &c.reasoningRendered, &c.reasoningTrailingLF)
 	}
 	c.reasoningBuffer.WriteString(delta)
@@ -539,7 +569,7 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		}
 	}
 
-	if c.supportsLiveStreamLocked() && !c.reasoningActive {
+	if c.shouldLiveStreamOutputLocked() && !c.reasoningActive {
 		if c.streamMode == assistantStreamModeMarkdown {
 			return
 		}
@@ -644,7 +674,7 @@ func (c *chatInteractionCoordinator) CompleteAssistantResponse(response string) 
 		c.resetStreamLocked()
 		return true
 	}
-	if c.supportsLiveStreamLocked() {
+	if c.shouldLiveStreamOutputLocked() {
 		suffix := resolveStreamCompletionSuffix(c.streamBuffer.String(), finalContent)
 		if suffix != "" {
 			c.writeIndentedStreamingDeltaLocked(suffix, ui.AssistantContentIndent(), &c.streamRendered, &c.streamTrailingLF)
@@ -680,7 +710,7 @@ func (c *chatInteractionCoordinator) CompleteReasoningResponse(block *runtimetyp
 			finalText = display
 		}
 	}
-	if c.supportsLiveStreamLocked() {
+	if c.shouldLiveStreamOutputLocked() {
 		suffix := resolveStreamCompletionSuffix(c.reasoningBuffer.String(), finalText)
 		if suffix != "" {
 			c.writeIndentedStreamingDeltaLocked(suffix, ui.AssistantContentIndent()+"  ", &c.reasoningRendered, &c.reasoningTrailingLF)
@@ -716,7 +746,7 @@ func (c *chatInteractionCoordinator) FinalizeAssistantDelta() {
 		return
 	}
 	content := c.streamBuffer.String()
-	if c.supportsLiveStreamLocked() {
+	if c.shouldLiveStreamOutputLocked() {
 		if c.streamMode == assistantStreamModeMarkdown {
 			content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
 			c.renderFormattedAssistantStreamLocked(content)
@@ -754,7 +784,7 @@ func (c *chatInteractionCoordinator) FinalizeReasoningDelta() {
 	if !c.reasoningActive {
 		return
 	}
-	if c.supportsLiveStreamLocked() {
+	if c.shouldLiveStreamOutputLocked() {
 		c.finalizeReasoningLocked()
 		return
 	}
@@ -812,6 +842,7 @@ func (c *chatInteractionCoordinator) ClearPrompt() {
 	c.promptVisible = false
 	c.promptInput = ""
 	c.promptCursor = 0
+	c.promptRenderedOnSurface = false
 	c.promptPasteActive = false
 }
 
@@ -825,9 +856,21 @@ func (c *chatInteractionCoordinator) ResetPromptState() {
 		return
 	}
 	c.promptSeq++
+	if c.promptSurfaceActiveLocked() {
+		rows := c.currentPromptDisplayRowsLocked()
+		if c.surface.ResetPrompt(formatSessionUserPrompt(c.session), rows) {
+			c.promptVisible = true
+			c.promptInput = ""
+			c.promptCursor = 0
+			c.promptRenderedOnSurface = true
+			c.promptPasteActive = false
+			return
+		}
+	}
 	c.promptVisible = false
 	c.promptInput = ""
 	c.promptCursor = 0
+	c.promptRenderedOnSurface = false
 	c.promptPasteActive = false
 }
 
@@ -846,6 +889,10 @@ func (c *chatInteractionCoordinator) SetPromptInputSnapshot(snapshot ui.LineEdit
 	c.promptInput = input
 	c.promptCursor = clampPromptCursor(snapshot.Cursor, input)
 	c.promptPasteActive = snapshot.PasteActive
+	if c.promptVisible && c.promptRenderedOnSurface && c.writer == os.Stdout && c.surface != nil {
+		c.surface.SetPromptRows(c.currentPromptDisplayRowsLocked())
+		c.setCurrentPromptCursorLocked()
+	}
 }
 
 func (c *chatInteractionCoordinator) IsPromptPasteActive() bool {
@@ -855,6 +902,31 @@ func (c *chatInteractionCoordinator) IsPromptPasteActive() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.promptPasteActive
+}
+
+func (c *chatInteractionCoordinator) RestorePromptCursor(rowOffset, col int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.restorePromptCursorLocked(rowOffset, col)
+}
+
+func (c *chatInteractionCoordinator) PromptCursorPrefix(rowOffset, col int) string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.promptSurfaceActiveLocked() {
+		return ""
+	}
+	prefix, ok := c.surface.PromptCursorPrefix(rowOffset, col)
+	if !ok {
+		return ""
+	}
+	return prefix
 }
 
 func (c *chatInteractionCoordinator) DebugSummary() string {
@@ -903,6 +975,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.promptVisible = false
 	c.promptInput = ""
 	c.promptCursor = 0
+	c.promptRenderedOnSurface = false
 	c.promptPasteActive = false
 	c.thinkingActive = false
 	c.streamingActive = false
@@ -928,6 +1001,9 @@ func (c *chatInteractionCoordinator) beginMessageLocked() bool {
 		c.flushStreamLocked()
 		c.resetStreamLocked()
 	}
+	if c.promptSurfaceActiveLocked() {
+		return true
+	}
 	if c.promptVisible {
 		c.clearVisiblePromptLocked()
 		c.promptVisible = false
@@ -938,6 +1014,45 @@ func (c *chatInteractionCoordinator) beginMessageLocked() bool {
 	return true
 }
 
+func (c *chatInteractionCoordinator) promptSurfaceActiveLocked() bool {
+	return c != nil && c.promptVisible && c.promptRenderedOnSurface && c.surface != nil && c.surface.Enabled()
+}
+
+func (c *chatInteractionCoordinator) surfaceOutputActiveLocked() bool {
+	return c != nil && c.surface != nil && c.surface.Enabled()
+}
+
+func (c *chatInteractionCoordinator) restorePromptCursorLocked(rowOffset, col int) {
+	if !c.promptSurfaceActiveLocked() {
+		return
+	}
+	c.surface.MoveToPromptCursor(rowOffset, col)
+}
+
+func (c *chatInteractionCoordinator) restoreCurrentPromptCursorLocked() {
+	if !c.promptSurfaceActiveLocked() {
+		return
+	}
+	row, col := c.currentPromptCursorPositionLocked()
+	c.surface.MoveToPromptCursor(row, col)
+}
+
+func (c *chatInteractionCoordinator) setCurrentPromptCursorLocked() {
+	if !c.promptSurfaceActiveLocked() {
+		return
+	}
+	row, col := c.currentPromptCursorPositionLocked()
+	c.surface.SetPromptCursor(row, col)
+}
+
+func (c *chatInteractionCoordinator) currentPromptCursorPositionLocked() (int, int) {
+	termWidth := ui.GetTerminalWidth()
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+	return interactivePromptCursorPosition(promptDisplayText(c.session), c.promptInput, c.promptCursor, termWidth)
+}
+
 func (c *chatInteractionCoordinator) clearThinkingLocked() {
 }
 
@@ -946,7 +1061,7 @@ func (c *chatInteractionCoordinator) clearThinkingLocked() {
 // This prevents text from being silently swallowed when a ReAct loop's
 // intermediate assistant deltas are never finalized via FinalizeAssistantDelta.
 func (c *chatInteractionCoordinator) flushStreamLocked() {
-	if c.supportsLiveStreamLocked() {
+	if c.shouldLiveStreamOutputLocked() {
 		if c.streamMode == assistantStreamModeMarkdown {
 			content := c.streamBuffer.String()
 			if strings.TrimSpace(content) == "" {
@@ -984,7 +1099,7 @@ func (c *chatInteractionCoordinator) flushReasoningLocked() {
 	if !c.reasoningActive {
 		return
 	}
-	if c.supportsLiveStreamLocked() {
+	if c.shouldLiveStreamOutputLocked() {
 		c.finalizeReasoningLocked()
 		return
 	}
@@ -1009,6 +1124,7 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 		c.writeTextLocked("\r\n")
 		c.promptInput = ""
 		c.promptCursor = 0
+		c.promptRenderedOnSurface = false
 		return
 	}
 	termWidth := ui.GetTerminalWidth()
@@ -1019,6 +1135,7 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	if c.writer == os.Stdout && c.surface != nil && c.surface.ClearPromptRows(rows) {
 		c.promptInput = ""
 		c.promptCursor = 0
+		c.promptRenderedOnSurface = false
 		return
 	}
 	// 先从当前编辑光标所在行回到输入起始行，再逐行清理
@@ -1031,6 +1148,18 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	c.writeTextLocked(builder.String())
 	c.promptInput = ""
 	c.promptCursor = 0
+	c.promptRenderedOnSurface = false
+}
+
+func (c *chatInteractionCoordinator) currentPromptDisplayRowsLocked() int {
+	if c == nil {
+		return 1
+	}
+	termWidth := ui.GetTerminalWidth()
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+	return interactivePromptDisplayRows(promptDisplayText(c.session)+c.promptInput, termWidth)
 }
 
 func clearPromptDisplayRows(writer io.Writer, rows int) {
@@ -1084,6 +1213,11 @@ func interactivePromptDisplayRows(text string, termWidth int) int {
 }
 
 func interactivePromptCursorRow(promptText, input string, cursor int, termWidth int) int {
+	row, _ := interactivePromptCursorPosition(promptText, input, cursor, termWidth)
+	return row
+}
+
+func interactivePromptCursorPosition(promptText, input string, cursor int, termWidth int) (int, int) {
 	if cursor < 0 {
 		cursor = 0
 	}
@@ -1091,7 +1225,25 @@ func interactivePromptCursorRow(promptText, input string, cursor int, termWidth 
 	if cursor > len(runes) {
 		cursor = len(runes)
 	}
-	return interactivePromptDisplayRows(promptText+string(runes[:cursor]), termWidth) - 1
+	row, col := 0, 0
+	for _, r := range promptText + string(runes[:cursor]) {
+		switch r {
+		case '\r', '\n':
+			row++
+			col = 0
+			continue
+		}
+		width := ui.DisplayWidth(string(r))
+		if width <= 0 {
+			continue
+		}
+		col += width
+		if col >= termWidth {
+			row += col / termWidth
+			col %= termWidth
+		}
+	}
+	return row, col
 }
 
 func clampPromptCursor(cursor int, input string) int {
@@ -1119,7 +1271,7 @@ func (c *chatInteractionCoordinator) finalizeReasoningLocked() {
 }
 
 func (c *chatInteractionCoordinator) renderBufferedAssistantStreamLocked() {
-	if !c.supportsLiveStreamLocked() || !c.streamingActive || c.streamRendered {
+	if !c.shouldLiveStreamOutputLocked() || !c.streamingActive || c.streamRendered {
 		return
 	}
 	content := c.streamBuffer.String()
@@ -1261,13 +1413,15 @@ func (c *chatInteractionCoordinator) writeIndentedStreamingDeltaLocked(delta, in
 	c.completeBlockOutput = false
 	delta = ui.SanitizeTerminalText(delta)
 	atLineStart := !*rendered || *trailingLF
+	var builder strings.Builder
+	builder.Grow(len(delta) + len(indent)*2)
 	for _, r := range []rune(delta) {
 		if atLineStart && r != '\n' {
-			c.writeTextLocked(indent)
+			builder.WriteString(indent)
 			atLineStart = false
 			*rendered = true
 		}
-		c.writeStreamingDeltaLocked(string(r))
+		builder.WriteRune(r)
 		if r == '\n' {
 			atLineStart = true
 		}
@@ -1276,10 +1430,14 @@ func (c *chatInteractionCoordinator) writeIndentedStreamingDeltaLocked(delta, in
 	if !*rendered && delta != "" {
 		*rendered = true
 	}
+	c.writeStreamingDeltaLocked(builder.String())
 }
 
 func (c *chatInteractionCoordinator) writeStreamingDeltaLocked(delta string) {
 	if delta == "" {
+		return
+	}
+	if c.writeSurfaceOutputTextLocked(delta) {
 		return
 	}
 	if c.writer != os.Stdout || c.streamRuneDelay <= 0 {
@@ -1441,6 +1599,11 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 			return
 		}
 		if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
+			return
+		}
+		if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(formatSessionUserPrompt(c.session)) {
+			c.promptVisible = true
+			c.promptRenderedOnSurface = true
 			return
 		}
 		c.writeTextLocked(formatSessionUserPrompt(c.session))

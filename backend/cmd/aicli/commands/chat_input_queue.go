@@ -553,6 +553,12 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 					}
 					completion.UpdateSnapshot(snapshot)
 				},
+				OnBeforeTerminalWrite: func(snapshot ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
+					if session.Interaction != nil {
+						return session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
+					}
+					return ""
+				},
 				OnComplete: func(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
 					nextText, nextCursor, ok := completion.ApplyCompletion(snapshot.Text, snapshot.Cursor)
 					if !ok {
@@ -593,10 +599,18 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 			}
 			return line, err
 		}
-		line, err := session.InputBox.ReadWithHistoryPrompt(prompt, func(text string) {
-			if session.Interaction != nil {
-				session.Interaction.SetPromptInput(text)
-			}
+		line, err := session.InputBox.ReadWithHistoryPromptWithHooks(prompt, ui.LineEditorHooks{
+			OnChange: func(snapshot ui.LineEditorSnapshot) {
+				if session.Interaction != nil {
+					session.Interaction.SetPromptInputSnapshot(snapshot)
+				}
+			},
+			OnBeforeTerminalWrite: func(snapshot ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
+				if session.Interaction != nil {
+					return session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
+				}
+				return ""
+			},
 		})
 		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
 			session.Interrupt()
