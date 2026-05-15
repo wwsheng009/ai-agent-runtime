@@ -32,7 +32,7 @@ func NewEditTool() *EditTool {
 			},
 			"old_string": map[string]interface{}{
 				"type":        "string",
-				"description": "要替换的文本（必须精确匹配，包括空格和换行）。若需要替换很长的片段或多个位置，请拆分为更小的定位块，避免单次参数过长导致工具调用被截断。",
+				"description": "要替换的文本（必须精确匹配，包括空格和换行）。edit 不做模糊匹配；仅适合刚通过 view/grep 确认存在的小片段。代码编辑、多行替换或上下文可能漂移时优先使用 apply_patch。若需要替换很长的片段或多个位置，请拆分为更小的定位块，避免单次参数过长导致工具调用被截断。",
 			},
 			"new_string": map[string]interface{}{
 				"type":        "string",
@@ -49,7 +49,7 @@ func NewEditTool() *EditTool {
 	return &EditTool{
 		BaseTool: toolkit.NewBaseTool(
 			"edit",
-			"编辑单个文件：使用 new_string 替换文件中的 old_string；适合小范围精确替换。若要改写多个文件或大段内容，请拆分为多个更小的 edit/write 调用，每次只聚焦一个文件和一个替换目标，按章节或按块逐步处理，避免单次参数过大导致截断。",
+			"编辑单个文件：使用 new_string 替换文件中的 old_string；只适合刚确认存在的小范围精确替换，不做模糊匹配。代码编辑、多行替换或上下文可能变化时优先使用 apply_patch。若要改写多个文件或大段内容，请拆分为多个更小的 edit/write 调用，每次只聚焦一个文件和一个替换目标，按章节或按块逐步处理，避免单次参数过大导致截断。",
 			"1.0.0",
 			parameters,
 			true,
@@ -190,7 +190,7 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("old_string 未在文件中找到，请确保完全匹配（包括空格和换行）"),
+			Error:      buildEditOldStringNotFoundError(contentStr, p.OldString),
 		}, nil
 	}
 
@@ -286,4 +286,30 @@ func (e *EditTool) createBackup(filePath string, content []byte) (string, error)
 	}
 
 	return backupPath, nil
+}
+
+func buildEditOldStringNotFoundError(content string, oldString string) error {
+	parts := []string{
+		"old_string 未在文件中找到；edit 只执行精确匹配（包括空格、缩进和换行），不会自动模糊定位。",
+	}
+
+	normalizedContent := normalizeEditLineEndings(content)
+	normalizedOld := normalizeEditLineEndings(oldString)
+	if normalizedContent != content || normalizedOld != oldString {
+		if strings.Contains(normalizedContent, normalizedOld) {
+			parts = append(parts, "检测到 old_string 在统一为 LF 换行后可以匹配，失败很可能来自 CRLF/LF 换行差异。")
+		}
+	}
+
+	parts = append(parts,
+		"请先用 view/grep 获取文件中的最新片段后重试；代码编辑、多行替换或上下文可能变化时优先使用 apply_patch，并在 @@ 中提供靠近目标的函数/类上下文。",
+		fmt.Sprintf("old_string 预览: %q", truncateDiagnosticText(oldString, 200)),
+	)
+	return fmt.Errorf("%s", strings.Join(parts, " "))
+}
+
+func normalizeEditLineEndings(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return text
 }
