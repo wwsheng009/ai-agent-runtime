@@ -667,7 +667,7 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 	}
 	switch event.Type {
 	case runtimechatcore.EventPlanning:
-		if !r.session.Stream || !shouldRenderInteractiveOutput(r.session) {
+		if !r.session.Stream || !shouldRenderChatReasoning(r.session) {
 			return
 		}
 		if event.Content == "" {
@@ -760,7 +760,7 @@ func (r *aicliEventRenderer) Finalize(response *runtimechatcore.ChatResult, fina
 	}
 
 	reasoningBlock := finalReasoningBlock(finalMessage)
-	if reasoningBlock != nil && shouldRenderInteractiveOutput(r.session) && !r.session.Stream {
+	if reasoningBlock != nil && shouldRenderChatReasoning(r.session) && !r.session.Stream {
 		r.clearSpinner()
 		lines := chatReasoningLines(reasoningBlock)
 		if len(lines) > 0 {

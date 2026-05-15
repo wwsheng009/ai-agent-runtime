@@ -1737,6 +1737,34 @@ func TestAICLIEventRenderer_StreamsReasoningBeforeResult(t *testing.T) {
 	}
 }
 
+func TestAICLIEventRenderer_SuppressesReasoningWhenReasoningOff(t *testing.T) {
+	session := &ChatSession{Stream: true, SuppressReasoningOutput: true}
+	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction.liveStreamFn = func() bool { return true }
+	session.Interaction.streamRuneDelay = 0
+	var output bytes.Buffer
+	session.Interaction.SetWriter(&output)
+	renderer := newAICLIEventRenderer(session)
+
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:    runtimechatcore.EventPlanning,
+		Content: "先看目录。",
+	})
+	renderer.Handle(runtimechatcore.ChatEvent{
+		Type:    runtimechatcore.EventResult,
+		Content: "我来查看。",
+	})
+	renderer.Finalize(&runtimechatcore.ChatResult{Output: "我来查看。"}, nil)
+
+	rendered := output.String()
+	if strings.Contains(rendered, "先看目录。") || strings.Contains(rendered, chatToolDivider("reasoning")) {
+		t.Fatalf("expected reasoning content to be suppressed, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "我来查看。") {
+		t.Fatalf("expected assistant content to remain visible, got %q", rendered)
+	}
+}
+
 func TestAICLIEventRenderer_Finalize_NonStreamRendersReasoningBeforeContentWithInteraction(t *testing.T) {
 	session := &ChatSession{Stream: false}
 	session.Interaction = newChatInteractionCoordinator(session)

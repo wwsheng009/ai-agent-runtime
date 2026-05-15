@@ -68,6 +68,14 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "toggle", Summary: "切换流式状态", Group: string(chatSlashCommandGroupModel)},
 			{Command: "status", Summary: "查看当前状态", Group: string(chatSlashCommandGroupModel)},
 		})
+	case "/reasoning":
+		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "on", Summary: "输出 reasoning 内容", Group: string(chatSlashCommandGroupModel)},
+			{Command: "off", Summary: "只显示 thinking 状态", Group: string(chatSlashCommandGroupModel)},
+			{Command: "status", Summary: "查看当前状态", Group: string(chatSlashCommandGroupModel)},
+		})
+	case "/reasoning_effort":
+		return completeReasoningEffortSlashArgs(session, argsText, cursor)
 	case "/compact":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "auto", Summary: "自动模式", Group: string(chatSlashCommandGroupModel)},
@@ -317,6 +325,18 @@ func completeModelSlashArgs(session *ChatSession, argsText string, cursor int) [
 		candidates = append(candidates, reasoningEffortArgumentCandidates(session)...)
 		return matchSlashArgumentCandidates(dedupeSlashArgumentCandidates(candidates), query)
 	}
+}
+
+func completeReasoningEffortSlashArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {
+	staticCandidates := []chatSlashCompletionCandidate{
+		{Command: "status", Summary: "查看当前 reasoning_effort", Group: string(chatSlashCommandGroupModel)},
+		{Command: "select", Summary: "交互选择 reasoning_effort", Group: string(chatSlashCommandGroupModel)},
+		{Command: "clear", Summary: "清空 reasoning_effort", Group: string(chatSlashCommandGroupModel)},
+	}
+	candidates := make([]chatSlashCompletionCandidate, 0, len(staticCandidates)+8)
+	candidates = append(candidates, staticCandidates...)
+	candidates = append(candidates, reasoningEffortArgumentCandidates(session)...)
+	return completeStaticSlashArgs(argsText, cursor, dedupeSlashArgumentCandidates(candidates))
 }
 
 func completeLoginSlashArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {
@@ -605,7 +625,7 @@ func providerNameArgumentCandidates(session *ChatSession) []chatSlashCompletionC
 }
 
 func loginProtocolArgumentCandidates() []chatSlashCompletionCandidate {
-	values := []string{"openai", "codex-apikey", "anthropic", "gemini", "codex-oauth"}
+	values := loginProtocolOptions()
 	candidates := make([]chatSlashCompletionCandidate, 0, len(values))
 	for _, value := range values {
 		candidates = append(candidates, chatSlashCompletionCandidate{

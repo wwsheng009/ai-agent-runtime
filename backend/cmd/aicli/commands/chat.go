@@ -38,6 +38,7 @@ type ChatSession struct {
 	Adapter                         adapter.ProtocolAdapter
 	Model                           string
 	ReasoningEffort                 string
+	SuppressReasoningOutput         bool
 	DisableTools                    bool
 	HTTPDebug                       bool
 	Stream                          bool
@@ -514,6 +515,9 @@ func printSessionInfo(session *ChatSession) {
 	}
 	if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
 		printChatSessionMetaRow("Reasoning Effort:", reasoningEffort)
+	}
+	if !chatReasoningOutputEnabled(session) {
+		printChatSessionMetaRow("Reasoning Output:", "off")
 	}
 	if session.LocalRuntimeHost != nil {
 		printChatSessionMetaRow("Permission Mode:", string(session.PermissionMode))

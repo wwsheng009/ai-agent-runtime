@@ -1,5 +1,7 @@
 package commands
 
+import "strings"
+
 type chatSlashCommandGroup string
 
 const (
@@ -251,6 +253,32 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			},
 		},
 		{
+			Name:        "/reasoning",
+			Usage:       "/reasoning [on|off|status]",
+			Summary:     "查看或切换 console reasoning 输出",
+			Group:       string(chatSlashCommandGroupModel),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "on", Summary: "输出 reasoning 内容"},
+				{Token: "off", Summary: "只保留 thinking 状态，不输出 reasoning 内容"},
+				{Token: "status", Summary: "查看当前状态"},
+			},
+		},
+		{
+			Name:        "/reasoning_effort",
+			Aliases:     []string{"/reasoning-effort"},
+			Usage:       "/reasoning_effort [status|select|clear|<value>]",
+			Summary:     "查看或切换 reasoning_effort",
+			Group:       string(chatSlashCommandGroupModel),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "status", Summary: "查看当前 reasoning_effort"},
+				{Token: "select", Summary: "交互选择当前模型支持的 reasoning_effort"},
+				{Token: "clear", Summary: "清空 reasoning_effort"},
+				{Token: "<value>", Summary: "直接设置 reasoning_effort"},
+			},
+		},
+		{
 			Name:        "/s",
 			Usage:       "/s",
 			Summary:     "流式开启快捷（等价 /stream on）",
@@ -282,7 +310,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{
 				{Token: "--provider", Summary: "provider 名称"},
-				{Token: "--protocol", Summary: "openai|anthropic|gemini|codex-apikey|codex-oauth"},
+				{Token: "--protocol", Summary: strings.Join(loginProtocolOptions(), "|")},
 				{Token: "--base-url", Summary: "provider base URL"},
 				{Token: "--api-key", Summary: "API key"},
 				{Token: "--model-cards", Summary: "额外模型卡片 catalog 文件"},

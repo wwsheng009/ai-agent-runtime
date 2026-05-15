@@ -1068,6 +1068,9 @@ func (b *chatRuntimeEventBridge) handleAssistantReasoning(event runtimeevents.Ev
 	if !shouldRenderInteractiveOutput(b.session) || !b.isPrimarySessionEvent(event) {
 		return false
 	}
+	if !chatReasoningOutputEnabled(b.session) {
+		return true
+	}
 	block := runtimetypes.ReasoningBlockFromMap(event.Payload["reasoning"])
 	if block == nil {
 		return false
@@ -1211,6 +1214,9 @@ func (b *chatRuntimeEventBridge) handleAsyncTeamAssistantMessage(event runtimeev
 
 func (b *chatRuntimeEventBridge) renderReasoningFromAssistantMessage(event runtimeevents.Event, block *runtimetypes.ReasoningBlock) {
 	if b == nil || block == nil || b.hasRenderedReasoningFinal() {
+		return
+	}
+	if !chatReasoningOutputEnabled(b.session) {
 		return
 	}
 	if b.hasRenderedReasoningDelta() && !b.hasRenderedReasoningFinal() && b.completeReasoning != nil {

@@ -155,6 +155,12 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/stream") {
 		return applyStreamCommand(session, command)
 	}
+	if commandMatches(cmdLower, "/reasoning") {
+		return applyReasoningCommand(session, command)
+	}
+	if commandMatches(cmdLower, "/reasoning_effort") || commandMatches(cmdLower, "/reasoning-effort") {
+		return handleReasoningEffortCommand(session, command, noInteractive)
+	}
 	if commandMatches(cmdLower, "/debug") {
 		return handleDebugCommand(session, command)
 	}

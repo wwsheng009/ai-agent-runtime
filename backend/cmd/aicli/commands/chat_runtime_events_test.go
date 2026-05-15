@@ -1087,6 +1087,38 @@ func TestChatRuntimeEvents_RendersAssistantMessageReasoningBeforeContent(t *test
 	}
 }
 
+func TestChatRuntimeEvents_SuppressesAssistantMessageReasoningWhenReasoningOff(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession:          &runtimechat.Session{ID: "lead-session"},
+		SuppressReasoningOutput: true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+	bridge.renderResponse = func(response string) {
+		rendered = append(rendered, response)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		TraceID:   "trace-1",
+		Payload: map[string]interface{}{
+			"content": "Hello!",
+			"reasoning": map[string]interface{}{
+				"provider": "nvidia",
+				"format":   "openai_compatible",
+				"summary":  "先输出 reasoning，再输出正文。",
+			},
+		},
+	})
+
+	require.Equal(t, []string{"Hello!"}, rendered)
+}
+
 func TestChatRuntimeEvents_IgnoresNonPrimaryReasoningEvents(t *testing.T) {
 	session := &ChatSession{
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
