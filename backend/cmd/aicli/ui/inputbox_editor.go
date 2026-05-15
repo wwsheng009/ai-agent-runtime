@@ -299,6 +299,34 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 			PasteActive: pasteActive,
 		}
 	}
+	renderSnapshot := func() LineEditorRenderSnapshot {
+		return LineEditorRenderSnapshot{
+			LastCursorRow: lastCursorRow,
+			LastCursorCol: lastCursorCol,
+		}
+	}
+	terminalWritePrefix := func(render LineEditorRenderSnapshot) string {
+		if hooks == nil {
+			return ""
+		}
+		if hooks.OnBeforeTerminalWrite != nil {
+			return hooks.OnBeforeTerminalWrite(snapshot(), render)
+		}
+		if hooks.OnBeforeRedraw != nil {
+			hooks.OnBeforeRedraw(snapshot(), render)
+		}
+		return ""
+	}
+	writeEditorText := func(text string, render LineEditorRenderSnapshot) {
+		if text == "" {
+			return
+		}
+		if prefix := terminalWritePrefix(render); prefix != "" {
+			_, _ = WriteTerminalText(writer, prefix+text)
+			return
+		}
+		_, _ = WriteTerminalText(writer, text)
+	}
 	emitChange := func() {
 		if onChange != nil {
 			onChange(string(line))
@@ -333,6 +361,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 	// 把同一段输入反复打印到错位行的现象（绝对 `\x1b[s`/`\x1b[u` 在滚动后
 	// 会把光标恢复到一个早已被滚走的视口坐标）。
 	redraw = func() {
+		renderBefore := renderSnapshot()
 		termWidth := GetTerminalWidth()
 		if termWidth <= 0 {
 			termWidth = 80
@@ -361,9 +390,9 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 			if cursorPos.col > 0 {
 				fmt.Fprintf(&builder, "\x1b[%dC", cursorPos.col)
 			}
-			_, _ = WriteTerminalText(writer, builder.String())
 			lastCursorRow = cursorPos.row
 			lastCursorCol = cursorPos.col
+			writeEditorText(builder.String(), renderBefore)
 			return
 		}
 
@@ -418,7 +447,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 		lastRenderedTermWidth = termWidth
 		lastRenderedPromptWidth = promptWidth
 		lastRenderedLine = append(lastRenderedLine[:0], line...)
-		_, _ = WriteTerminalText(writer, builder.String())
+		writeEditorText(builder.String(), renderBefore)
 	}
 
 	setLine := func(next []rune) {
@@ -705,7 +734,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 			case editorKeyEnter:
 				pasteBuffer = append(pasteBuffer, '\n')
 			case editorKeyInterrupt:
-				_, _ = WriteTerminalText(writer, "\r\n")
+				writeEditorText("\r\n", renderSnapshot())
 				if onChange != nil {
 					onChange("")
 				}
@@ -842,7 +871,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 				}
 			}
 			if echoSubmit {
-				_, _ = WriteTerminalText(writer, "\r\n")
+				writeEditorText("\r\n", renderSnapshot())
 			}
 			if onChange != nil {
 				onChange("")
@@ -1019,7 +1048,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 			hadTypedContent := len(line) > 0 || pasteBurst.IsActive()
 			pasteBurst.ClearAfterExplicitPaste()
 			if echoSubmit {
-				_, _ = WriteTerminalText(writer, "\r\n")
+				writeEditorText("\r\n", renderSnapshot())
 			}
 			if onChange != nil {
 				onChange("")

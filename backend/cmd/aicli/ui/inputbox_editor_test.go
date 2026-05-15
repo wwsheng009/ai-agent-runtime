@@ -725,6 +725,34 @@ func TestReadInteractiveLine_CtrlCWithTypedContentCancelsInput(t *testing.T) {
 	}
 }
 
+func TestReadInteractiveLine_RestoresCursorBeforeSubmitEcho(t *testing.T) {
+	var output bytes.Buffer
+	restoreCalls := 0
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("x\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		&LineEditorHooks{
+			OnBeforeRedraw: func(LineEditorSnapshot, LineEditorRenderSnapshot) {
+				restoreCalls++
+			},
+		},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "x" {
+		t.Fatalf("expected submitted line x, got %q", line)
+	}
+	if restoreCalls < 2 {
+		t.Fatalf("expected cursor restore before redraw and submit echo, got %d", restoreCalls)
+	}
+}
+
 func TestReadInteractiveLine_CtrlDOnEmptyLineRequestsExit(t *testing.T) {
 	var output bytes.Buffer
 	_, err := readInteractiveLine(
