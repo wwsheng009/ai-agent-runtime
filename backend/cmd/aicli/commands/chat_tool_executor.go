@@ -77,7 +77,7 @@ func withLiveChatToolOutput(ctx context.Context, session *ChatSession, toolName 
 		return ctx
 	}
 	beginDirectInteractiveOutput(session)
-	return runtimeexecutor.WithOutputMirror(ctx, newChatSystemOutputWriterWithSurface(os.Stdout, session.Surface))
+	return runtimeexecutor.WithOutputMirror(ctx, newLimitedChatSystemOutputWriterWithSurface(os.Stdout, session.Surface, maxToolResultPreviewLines, maxToolResultPreviewBytes))
 }
 
 func toolArgsTruncatedError(args map[string]interface{}) string {

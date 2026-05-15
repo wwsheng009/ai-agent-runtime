@@ -9,7 +9,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
-const chatSystemOutputPartialFlushDelay = 150 * time.Millisecond
+const (
+	chatSystemOutputPartialFlushDelay = 150 * time.Millisecond
+	chatLiveToolOutputLimitNotice     = "... (实时命令输出已达到显示上限，后续输出已折叠；命令仍会继续执行并由 capture limit 处理结果)"
+)
 
 type chatSystemOutputWriter struct {
 	writer            io.Writer
@@ -19,6 +22,21 @@ type chatSystemOutputWriter struct {
 	lastBlank         bool
 	partialFlushDelay time.Duration
 	partialTimer      *time.Timer
+}
+
+// chatLimitedSystemOutputWriter only caps the live terminal mirror. The
+// command capture/result path remains governed by executor capture limits.
+type chatLimitedSystemOutputWriter struct {
+	writer io.Writer
+
+	mu                        sync.Mutex
+	maxLines                  int
+	maxBytes                  int
+	renderedLines             int
+	renderedBytes             int
+	suppressed                bool
+	noticeWritten             bool
+	lastForwardedEndedNewline bool
 }
 
 type chatOutputSurface interface {
@@ -40,6 +58,22 @@ func newChatSystemOutputWriterWithSurface(writer io.Writer, surface chatOutputSu
 	}
 }
 
+func newLimitedChatSystemOutputWriterWithSurface(writer io.Writer, surface chatOutputSurface, maxLines, maxBytes int) io.Writer {
+	base := newChatSystemOutputWriterWithSurface(writer, surface)
+	if base == nil {
+		return nil
+	}
+	if maxLines <= 0 && maxBytes <= 0 {
+		return base
+	}
+	return &chatLimitedSystemOutputWriter{
+		writer:                    base,
+		maxLines:                  maxLines,
+		maxBytes:                  maxBytes,
+		lastForwardedEndedNewline: true,
+	}
+}
+
 func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 	if w == nil || w.writer == nil {
 		return len(p), nil
@@ -47,10 +81,17 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	chunk := strings.ReplaceAll(string(p), "\r\n", "\n")
-	chunk = strings.ReplaceAll(chunk, "\r", "\n")
+	chunk := normalizeChatSystemOutputChunk(p)
 	w.buffer.WriteString(chunk)
 	renderedAny := false
+	outputBegun := false
+	beginOutput := func() {
+		if outputBegun {
+			return
+		}
+		w.beginOutput()
+		outputBegun = true
+	}
 	for {
 		content := w.buffer.String()
 		index := strings.IndexByte(content, '\n')
@@ -67,7 +108,7 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 				continue
 			}
 			w.lastBlank = true
-			w.beginOutput()
+			beginOutput()
 			if _, err := ui.WriteTerminalText(w.writer, "\n"); err != nil {
 				return 0, err
 			}
@@ -75,7 +116,7 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 			continue
 		}
 		w.lastBlank = false
-		w.beginOutput()
+		beginOutput()
 		if _, err := ui.WriteTerminalLine(w.writer, rendered); err != nil {
 			return 0, err
 		}
@@ -90,6 +131,90 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 		w.stopPartialFlushLocked()
 	}
 	return len(p), nil
+}
+
+func (w *chatLimitedSystemOutputWriter) Write(p []byte) (int, error) {
+	if w == nil || w.writer == nil {
+		return len(p), nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if w.suppressed {
+		return len(p), nil
+	}
+
+	allowed, exceeded := w.takeAllowedLocked(normalizeChatSystemOutputChunk(p))
+	if allowed != "" {
+		if _, err := w.writer.Write([]byte(allowed)); err != nil {
+			return 0, err
+		}
+		w.lastForwardedEndedNewline = strings.HasSuffix(allowed, "\n")
+	}
+	if exceeded {
+		w.suppressed = true
+		if err := w.writeLimitNoticeLocked(); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
+func (w *chatLimitedSystemOutputWriter) Flush() error {
+	if w == nil || w.writer == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return flushChatOutputWriter(w.writer)
+}
+
+func (w *chatLimitedSystemOutputWriter) takeAllowedLocked(chunk string) (string, bool) {
+	if chunk == "" {
+		return "", false
+	}
+
+	var allowed strings.Builder
+	exceeded := false
+	for _, r := range chunk {
+		next := string(r)
+		if w.maxBytes > 0 && w.renderedBytes+len(next) > w.maxBytes {
+			exceeded = true
+			break
+		}
+		if w.maxLines > 0 && w.renderedLines >= w.maxLines {
+			exceeded = true
+			break
+		}
+		allowed.WriteString(next)
+		w.renderedBytes += len(next)
+		if r == '\n' {
+			w.renderedLines++
+		}
+	}
+	if allowed.Len() < len(chunk) {
+		exceeded = true
+	}
+	return allowed.String(), exceeded
+}
+
+func (w *chatLimitedSystemOutputWriter) writeLimitNoticeLocked() error {
+	if w.noticeWritten {
+		return nil
+	}
+	w.noticeWritten = true
+	if !w.lastForwardedEndedNewline {
+		if _, err := w.writer.Write([]byte("\n")); err != nil {
+			return err
+		}
+	}
+	if _, err := w.writer.Write([]byte(chatLiveToolOutputLimitNotice + "\n")); err != nil {
+		return err
+	}
+	return flushChatOutputWriter(w.writer)
 }
 
 func (w *chatSystemOutputWriter) Flush() error {
@@ -142,6 +267,11 @@ func flushChatOutputWriter(writer io.Writer) error {
 		return flusher.Flush()
 	}
 	return nil
+}
+
+func normalizeChatSystemOutputChunk(p []byte) string {
+	chunk := strings.ReplaceAll(string(p), "\r\n", "\n")
+	return strings.ReplaceAll(chunk, "\r", "\n")
 }
 
 func (w *chatSystemOutputWriter) beginOutput() {

@@ -39,7 +39,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	}
 	ctx = generatedImageToolContext(ctx, session)
 	if shouldRenderInteractiveOutput(session) {
-		ctx = runtimeexecutor.WithOutputMirror(ctx, newChatSystemOutputWriterWithSurface(os.Stdout, session.Surface))
+		ctx = runtimeexecutor.WithOutputMirror(ctx, newLimitedChatSystemOutputWriterWithSurface(os.Stdout, session.Surface, maxToolResultPreviewLines, maxToolResultPreviewBytes))
 	}
 
 	actor, err := chatActorForSession(ctx, session)
@@ -124,7 +124,7 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	}
 	ctx = generatedImageToolContext(ctx, session)
 	if shouldRenderInteractiveOutput(session) {
-		ctx = runtimeexecutor.WithOutputMirror(ctx, newChatSystemOutputWriterWithSurface(os.Stdout, session.Surface))
+		ctx = runtimeexecutor.WithOutputMirror(ctx, newLimitedChatSystemOutputWriterWithSurface(os.Stdout, session.Surface, maxToolResultPreviewLines, maxToolResultPreviewBytes))
 	}
 
 	actor, err := chatActorForSession(ctx, session)

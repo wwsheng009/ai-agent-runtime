@@ -22,6 +22,7 @@ type chatInteractionCoordinator struct {
 	mu                      sync.Mutex
 	promptVisible           bool
 	promptInput             string
+	promptCursor            int
 	promptPasteActive       bool
 	thinkingActive          bool
 	streamingActive         bool
@@ -121,6 +122,7 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	}
 	c.promptSeq++
 	c.promptInput = ""
+	c.promptCursor = 0
 	c.promptPasteActive = false
 	if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 		return
@@ -219,6 +221,9 @@ func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
 			reasoningEffort = "-"
 		}
 		parts = append(parts, "reasoning_effort "+compactStatusValueOrDash(reasoningEffort, 12))
+		if !chatReasoningOutputEnabled(session) {
+			parts = append(parts, "reasoning off")
+		}
 
 		if budget := resolveSharedChatPromptBudget(session); budget.ActiveTurnMaxTokens > 0 || budget.ModelCapabilityMaxContextTokens > 0 || budget.ProviderContextLimit > 0 || session.ContextWindowTokenCount > 0 || session.ContextTokenCount > 0 || len(session.Messages) > 0 {
 			if ctxSummary := formatChatContextWindowSummary(session, budget); ctxSummary != "" {
@@ -806,6 +811,7 @@ func (c *chatInteractionCoordinator) ClearPrompt() {
 	c.promptSeq++
 	c.promptVisible = false
 	c.promptInput = ""
+	c.promptCursor = 0
 	c.promptPasteActive = false
 }
 
@@ -821,11 +827,12 @@ func (c *chatInteractionCoordinator) ResetPromptState() {
 	c.promptSeq++
 	c.promptVisible = false
 	c.promptInput = ""
+	c.promptCursor = 0
 	c.promptPasteActive = false
 }
 
 func (c *chatInteractionCoordinator) SetPromptInput(input string) {
-	c.SetPromptInputSnapshot(ui.LineEditorSnapshot{Text: input})
+	c.SetPromptInputSnapshot(ui.LineEditorSnapshot{Text: input, Cursor: len([]rune(input))})
 }
 
 func (c *chatInteractionCoordinator) SetPromptInputSnapshot(snapshot ui.LineEditorSnapshot) {
@@ -837,6 +844,7 @@ func (c *chatInteractionCoordinator) SetPromptInputSnapshot(snapshot ui.LineEdit
 	input := strings.ReplaceAll(snapshot.Text, "\r\n", "\n")
 	input = strings.ReplaceAll(input, "\r", "\n")
 	c.promptInput = input
+	c.promptCursor = clampPromptCursor(snapshot.Cursor, input)
 	c.promptPasteActive = snapshot.PasteActive
 }
 
@@ -894,6 +902,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.promptSeq++
 	c.promptVisible = false
 	c.promptInput = ""
+	c.promptCursor = 0
 	c.promptPasteActive = false
 	c.thinkingActive = false
 	c.streamingActive = false
@@ -999,6 +1008,7 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	if c.shouldAdvanceAfterPromptLocked() {
 		c.writeTextLocked("\r\n")
 		c.promptInput = ""
+		c.promptCursor = 0
 		return
 	}
 	termWidth := ui.GetTerminalWidth()
@@ -1006,15 +1016,21 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 		termWidth = 80
 	}
 	rows := interactivePromptDisplayRows(promptLine, termWidth)
-	// 当 prompt+输入已经折行时，先把光标上移到输入起始行，
-	// 再逐行清理 prompt/input 曾占用的区域，避免清掉固定底部状态栏。
+	if c.writer == os.Stdout && c.surface != nil && c.surface.ClearPromptRows(rows) {
+		c.promptInput = ""
+		c.promptCursor = 0
+		return
+	}
+	// 先从当前编辑光标所在行回到输入起始行，再逐行清理
+	// prompt/input 曾占用的区域。
 	var builder strings.Builder
-	if rows > 1 {
-		fmt.Fprintf(&builder, "\x1b[%dA", rows-1)
+	if cursorRow := interactivePromptCursorRow(promptText, c.promptInput, c.promptCursor, termWidth); cursorRow > 0 {
+		fmt.Fprintf(&builder, "\x1b[%dA", cursorRow)
 	}
 	builder.WriteString(clearPromptDisplayRowsSequence(rows))
 	c.writeTextLocked(builder.String())
 	c.promptInput = ""
+	c.promptCursor = 0
 }
 
 func clearPromptDisplayRows(writer io.Writer, rows int) {
@@ -1065,6 +1081,28 @@ func interactivePromptDisplayRows(text string, termWidth int) int {
 		}
 	}
 	return row + 1
+}
+
+func interactivePromptCursorRow(promptText, input string, cursor int, termWidth int) int {
+	if cursor < 0 {
+		cursor = 0
+	}
+	runes := []rune(input)
+	if cursor > len(runes) {
+		cursor = len(runes)
+	}
+	return interactivePromptDisplayRows(promptText+string(runes[:cursor]), termWidth) - 1
+}
+
+func clampPromptCursor(cursor int, input string) int {
+	if cursor < 0 {
+		return 0
+	}
+	runeCount := len([]rune(input))
+	if cursor > runeCount {
+		return runeCount
+	}
+	return cursor
 }
 
 func (c *chatInteractionCoordinator) finalizeReasoningLocked() {

@@ -483,6 +483,58 @@ func TestFixedBottomSurface_ShowPendingPastePreviewRendersPreview(t *testing.T) 
 	}
 }
 
+func TestFixedBottomSurface_ClearPromptRowsUsesAbsoluteRows(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+
+	output := captureUIStdout(t, func() {
+		if !surface.ClearPromptRows(3) {
+			t.Fatal("expected enabled surface to clear prompt rows")
+		}
+	})
+
+	for _, expected := range []string{
+		"\x1b[21;1H\x1b[K",
+		"\x1b[22;1H\x1b[K",
+		"\x1b[23;1H\x1b[K",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected absolute prompt-row clear %q, got %q", expected, output)
+		}
+	}
+	if strings.Contains(output, "\x1b[2A") || strings.Contains(output, "\x1b[1B") {
+		t.Fatalf("expected prompt clear not to use relative vertical movement, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[23;1H") {
+		t.Fatalf("expected cursor to end at output bottom row, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ClearPromptRowsClearsOnlyPopupInputGap(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPopup([]string{
+			"命令补全: /",
+			"> /help",
+		})
+	})
+
+	output := captureUIStdout(t, func() {
+		if !surface.ClearPromptRows(3) {
+			t.Fatal("expected enabled surface to clear prompt rows")
+		}
+	})
+
+	if !strings.Contains(output, "\x1b[23;1H\x1b[K") {
+		t.Fatalf("expected prompt gap row to be cleared, got %q", output)
+	}
+	if strings.Contains(output, "\x1b[21;1H\x1b[K") || strings.Contains(output, "\x1b[22;1H\x1b[K") {
+		t.Fatalf("expected popup rows to remain owned by popup renderer, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[20;1H") {
+		t.Fatalf("expected cursor to return to popup-adjusted output bottom row, got %q", output)
+	}
+}
+
 func newTestFixedBottomSurface() *FixedBottomSurface {
 	term := &Terminal{
 		width:  80,

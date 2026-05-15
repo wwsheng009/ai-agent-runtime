@@ -15,6 +15,9 @@ func TestWithLiveChatToolOutput_AttachesMirrorForShellLikeInteractiveTool(t *tes
 	if runtimeexecutor.OutputMirrorFromContext(ctx) == nil {
 		t.Fatalf("expected shell-like interactive tool to attach live output mirror")
 	}
+	if _, ok := runtimeexecutor.OutputMirrorFromContext(ctx).(*chatLimitedSystemOutputWriter); !ok {
+		t.Fatalf("expected shell-like interactive tool to attach limited live output mirror")
+	}
 }
 
 func TestWithLiveChatToolOutput_SkipsMirrorForNonShellTool(t *testing.T) {

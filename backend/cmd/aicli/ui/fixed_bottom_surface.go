@@ -109,6 +109,28 @@ func (s *FixedBottomSurface) BeginOutput() {
 	})
 }
 
+// ClearPromptRows clears the currently visible interactive prompt rows without
+// relying on cursor-relative movement inside the active scroll region.
+func (s *FixedBottomSurface) ClearPromptRows(rows int) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return false
+	}
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.clearPromptRowsLocked(rows)
+		s.moveToOutputLocked()
+	})
+	return true
+}
+
 func (s *FixedBottomSurface) ShowPopup(lines []string) {
 	if s == nil || s.terminal == nil {
 		return
@@ -614,6 +636,18 @@ func (s *FixedBottomSurface) outputBottomRowLocked() int {
 	return bottom
 }
 
+func (s *FixedBottomSurface) promptBottomRowLocked() int {
+	state := s.bottomPaneStateLocked()
+	if state.popupInputGapRowCount() > 0 {
+		row := s.statusRowLocked() - 1
+		if row < 1 {
+			return 1
+		}
+		return row
+	}
+	return s.outputBottomRowLocked()
+}
+
 func (s *FixedBottomSurface) statusRowLocked() int {
 	row := s.terminal.Height()
 	if row < 1 {
@@ -655,6 +689,27 @@ func (s *FixedBottomSurface) maxPopupRowsLocked() int {
 func (s *FixedBottomSurface) popupVisibleLinesLocked() []string {
 	state := s.bottomPaneStateLocked()
 	return state.VisiblePopupLines(s.terminal.Height())
+}
+
+func (s *FixedBottomSurface) clearPromptRowsLocked(rows int) {
+	if rows < 1 {
+		rows = 1
+	}
+	bottom := s.promptBottomRowLocked()
+	if bottom < 1 {
+		return
+	}
+	if s.bottomPaneStateLocked().popupInputGapRowCount() > 0 && rows > 1 {
+		rows = 1
+	}
+	startRow := bottom - rows + 1
+	if startRow < 1 {
+		startRow = 1
+	}
+	for row := startRow; row <= bottom; row++ {
+		s.terminal.MoveTo(row, 1)
+		s.terminal.ClearLine()
+	}
 }
 
 func (s *FixedBottomSurface) clearPopupAreaLocked(rows int, gapRows int) {

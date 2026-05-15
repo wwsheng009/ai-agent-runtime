@@ -140,6 +140,19 @@ func TestChatInteractionCoordinator_ClearPromptClearsMultilineInput(t *testing.T
 	}
 }
 
+func TestInteractivePromptCursorRowUsesSnapshotCursor(t *testing.T) {
+	prompt := "> "
+	input := strings.Repeat("x", 25)
+	termWidth := 10
+
+	if got := interactivePromptCursorRow(prompt, input, 0, termWidth); got != 0 {
+		t.Fatalf("expected cursor at input start to remain on first row, got %d", got)
+	}
+	if got := interactivePromptCursorRow(prompt, input, len([]rune(input)), termWidth); got != 2 {
+		t.Fatalf("expected cursor at wrapped input end to be on third row, got %d", got)
+	}
+}
+
 func TestNotifyChatInputDraftState_IsSilent(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true

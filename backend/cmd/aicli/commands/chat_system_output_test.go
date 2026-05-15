@@ -57,7 +57,7 @@ func TestChatSystemOutputWriter_CollapsesConsecutiveBlankLines(t *testing.T) {
 	}
 }
 
-func TestChatSystemOutputWriter_BeginsSurfaceOutputForRenderedLines(t *testing.T) {
+func TestChatSystemOutputWriter_BeginsSurfaceOutputOncePerWrite(t *testing.T) {
 	var output bytes.Buffer
 	surface := &fakeChatOutputSurface{}
 	writer := newChatSystemOutputWriterWithSurface(&output, surface)
@@ -66,12 +66,29 @@ func TestChatSystemOutputWriter_BeginsSurfaceOutputForRenderedLines(t *testing.T
 		t.Fatalf("write: %v", err)
 	}
 
-	if got := surface.count.Load(); got != 2 {
-		t.Fatalf("expected surface BeginOutput per rendered line, got %d", got)
+	if got := surface.count.Load(); got != 1 {
+		t.Fatalf("expected surface BeginOutput once per write, got %d", got)
 	}
 }
 
-func TestChatSystemOutputWriter_BeginsSurfaceOutputForVisibleBlankLine(t *testing.T) {
+func TestChatSystemOutputWriter_BeginsSurfaceOutputForSeparateWrites(t *testing.T) {
+	var output bytes.Buffer
+	surface := &fakeChatOutputSurface{}
+	writer := newChatSystemOutputWriterWithSurface(&output, surface)
+
+	if _, err := writer.Write([]byte("[Manager] ready\n")); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	if _, err := writer.Write([]byte("[Manager] done\n")); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+
+	if got := surface.count.Load(); got != 2 {
+		t.Fatalf("expected separate writes to begin surface output separately, got %d", got)
+	}
+}
+
+func TestChatSystemOutputWriter_BeginsSurfaceOutputOnceForVisibleBlankLines(t *testing.T) {
 	var output bytes.Buffer
 	surface := &fakeChatOutputSurface{}
 	writer := newChatSystemOutputWriterWithSurface(&output, surface)
@@ -80,8 +97,8 @@ func TestChatSystemOutputWriter_BeginsSurfaceOutputForVisibleBlankLine(t *testin
 		t.Fatalf("write: %v", err)
 	}
 
-	if got := surface.count.Load(); got != 3 {
-		t.Fatalf("expected collapsed visible lines to begin surface output, got %d", got)
+	if got := surface.count.Load(); got != 1 {
+		t.Fatalf("expected collapsed visible lines in one write to share surface output begin, got %d", got)
 	}
 }
 
@@ -122,5 +139,44 @@ func TestChatSystemOutputWriter_TreatsCarriageReturnAsProgressLine(t *testing.T)
 		if !strings.Contains(rendered, ui.FormatAssistantSupplementBlock(expected)) {
 			t.Fatalf("expected rendered output to contain %q, got %q", expected, rendered)
 		}
+	}
+}
+
+func TestChatLimitedSystemOutputWriter_TruncatesByLineLimit(t *testing.T) {
+	var output bytes.Buffer
+	writer := newLimitedChatSystemOutputWriterWithSurface(&output, nil, 3, 1024)
+
+	if _, err := writer.Write([]byte("line-1\nline-2\nline-3\nline-4\nline-5\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	rendered := output.String()
+	for _, expected := range []string{"line-1", "line-2", "line-3", chatLiveToolOutputLimitNotice} {
+		if !strings.Contains(rendered, ui.FormatAssistantSupplementBlock(expected)) {
+			t.Fatalf("expected rendered output to contain %q, got %q", expected, rendered)
+		}
+	}
+	if strings.Contains(rendered, ui.FormatAssistantSupplementBlock("line-4")) {
+		t.Fatalf("expected line after limit to be suppressed, got %q", rendered)
+	}
+}
+
+func TestChatLimitedSystemOutputWriter_TruncatesSingleLongLineByByteLimit(t *testing.T) {
+	var output bytes.Buffer
+	writer := newLimitedChatSystemOutputWriterWithSurface(&output, nil, 10, 12)
+
+	if _, err := writer.Write([]byte("abcdefghijklmnopqrstuvwxyz")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	rendered := output.String()
+	if !strings.Contains(rendered, ui.FormatAssistantSupplementBlock("abcdefghijkl")) {
+		t.Fatalf("expected byte-limited prefix to be rendered, got %q", rendered)
+	}
+	if strings.Contains(rendered, "mnopqrstuvwxyz") {
+		t.Fatalf("expected suffix after byte limit to be suppressed, got %q", rendered)
+	}
+	if !strings.Contains(rendered, ui.FormatAssistantSupplementBlock(chatLiveToolOutputLimitNotice)) {
+		t.Fatalf("expected truncation notice, got %q", rendered)
 	}
 }
