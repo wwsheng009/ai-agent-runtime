@@ -6,6 +6,7 @@ import "testing"
 
 func TestKeyHandlerStart_DoesNotPrintStartupHint(t *testing.T) {
 	kh := NewKeyHandler()
+	defer kh.Stop()
 	output := captureUIStdout(t, func() {
 		if ch := kh.Start(); ch == nil {
 			t.Fatal("expected start to return a notification channel")

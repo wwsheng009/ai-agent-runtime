@@ -169,6 +169,26 @@ func TestShouldInitializeChatInteractiveUI_DisabledForJSONAndLegacyMode(t *testi
 	}
 }
 
+func TestShouldInitializeChatKeyHandler_IndependentFromLegacyTUI(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	chatIsInteractiveTerminal = func() bool { return true }
+	t.Setenv("AICLI_TUI", "legacy")
+
+	if !shouldInitializeChatKeyHandler(&chatCommandOptions{OutputFormat: "interactive"}) {
+		t.Fatal("expected interactive TTY chat to initialize ESC key handler even when TUI is disabled")
+	}
+	if shouldInitializeChatKeyHandler(&chatCommandOptions{OutputFormat: "json"}) {
+		t.Fatal("expected JSON output to disable ESC key handler")
+	}
+	if shouldInitializeChatKeyHandler(&chatCommandOptions{NoInteractive: true, OutputFormat: "text"}) {
+		t.Fatal("expected non-interactive chat to disable ESC key handler")
+	}
+}
+
 func TestShouldShowChatStartupBanner_SkipsInTUI(t *testing.T) {
 	oldInteractive := chatIsInteractiveTerminal
 	defer func() {

@@ -46,12 +46,14 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		keyHandler *ui.KeyHandler
 		surface    *ui.FixedBottomSurface
 	)
+	if shouldInitializeChatKeyHandler(opts) {
+		keyHandler = ui.NewKeyHandler()
+		keyHandler.Start()
+	}
 	if shouldInitializeChatInteractiveUI(opts) {
 		layout = ui.NewLayout(ui.LayoutAdvanced)
 		layout.Enable()
 		inputBox = ui.NewInputBox(layout)
-		keyHandler = ui.NewKeyHandler()
-		keyHandler.Start()
 		surface = ui.NewFixedBottomSurface(layout.Terminal())
 		if !surface.Enable() {
 			surface = nil
@@ -148,6 +150,13 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	}
 
 	return session, cleanup, nil
+}
+
+func shouldInitializeChatKeyHandler(opts *chatCommandOptions) bool {
+	if opts == nil || opts.NoInteractive || opts.OutputFormat == "json" {
+		return false
+	}
+	return chatIsInteractiveTerminal()
 }
 
 func shouldInitializeChatInteractiveUI(opts *chatCommandOptions) bool {

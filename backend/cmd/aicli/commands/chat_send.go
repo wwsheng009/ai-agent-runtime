@@ -37,6 +37,8 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 		defer cancel()
 	}
 
+	stopEscWatcher := startChatEscapeInterruptWatcher(session)
+	defer stopEscWatcher()
 	response, err := executor.Execute(ctx, session, userMessage)
 	if session.Interaction != nil {
 		session.Interaction.ClearThinking()
