@@ -87,9 +87,10 @@ func RenderShellExecutionGuidance() string {
 func RenderFileEditingGuidance() string {
 	lines := []string{
 		"Prefer the dedicated file tools for workspace mutations.",
-		"Use `write` for small full-file writes, `append_write` for long text chunking, `edit` for small replacements, and `apply_patch` for structured multi-hunk edits.",
+		"Use `apply_patch` for code edits, multi-line replacements, and structured multi-hunk edits; use `edit` only for a small exact string that was just confirmed with view/grep.",
+		"Use `write` for small full-file writes and `append_write` for long text chunking.",
 		"Do not use shell redirection, here-strings, or inline `Set-Content`/`Out-File`/`Add-Content` commands for large file writes.",
-		"For long content, prefer skeleton -> append_write chunk(s) -> apply_patch/edit cleanup, instead of one huge full-file write or one huge shell command.",
+		"For long content, prefer skeleton -> append_write chunk(s) -> apply_patch cleanup, instead of one huge full-file write or one huge shell command.",
 		"If a client or runtime-side transport write API is available, prefer that over pushing oversized inline content through model-generated shell text.",
 	}
 

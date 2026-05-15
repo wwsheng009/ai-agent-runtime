@@ -313,9 +313,10 @@ Rules:
 3. Steps with no dependencies can be executed in parallel
 4. Set appropriate priority (higher = more important)
 5. When the task involves creating or editing a long file, DO NOT plan a single huge full-file write
-6. Prefer this order for long file generation: skeleton -> append_write chunk(s) -> apply_patch/edit cleanup
-7. Prefer append_write for long text chunks, write for small full-file writes, edit for targeted replacements, and apply_patch for structured multi-hunk edits
-8. If content could exceed one tool-call payload, explicitly split it into multiple chunked append_write steps
+6. Prefer this order for long file generation: skeleton -> append_write chunk(s) -> apply_patch cleanup
+7. Prefer apply_patch for code edits, multi-line replacements, and structured multi-hunk edits; use edit only for small exact strings that were just confirmed with view/grep
+8. Prefer append_write for long text chunks and write for small full-file writes
+9. If content could exceed one tool-call payload, explicitly split it into multiple chunked append_write steps
 `, goal, strings.Join(toolDescriptions, "\n"))
 }
 

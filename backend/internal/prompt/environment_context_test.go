@@ -24,3 +24,20 @@ func TestRenderParallelToolGuidance_EncouragesBatchedReadOnlyInspections(t *test
 		t.Fatalf("expected serial dependency guidance, got:\n%s", got)
 	}
 }
+
+func TestRenderFileEditingGuidance_PrefersApplyPatchForCodeEdits(t *testing.T) {
+	got := RenderFileEditingGuidance()
+
+	if !strings.Contains(got, "File editing guidance:") {
+		t.Fatalf("expected guidance heading, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Use `apply_patch` for code edits") {
+		t.Fatalf("expected apply_patch-first guidance, got:\n%s", got)
+	}
+	if !strings.Contains(got, "use `edit` only for a small exact string") {
+		t.Fatalf("expected constrained edit guidance, got:\n%s", got)
+	}
+	if !strings.Contains(got, "view/grep") {
+		t.Fatalf("expected verification guidance, got:\n%s", got)
+	}
+}

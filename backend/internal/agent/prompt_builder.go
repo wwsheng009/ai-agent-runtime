@@ -31,7 +31,8 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask) s
 	lines = append(lines, "The parent receives only your compressed report, not your full transcript.")
 	lines = append(lines, "Do not change the overall plan unless the subtask requires it.")
 	lines = append(lines, "When writing or editing files, prefer small patches and chunked file-tool calls over one huge inline payload.")
-	lines = append(lines, "For long file generation, prefer skeleton first, then append_write chunks, then apply_patch/edit cleanup.")
+	lines = append(lines, "For code edits and multi-line replacements, prefer apply_patch; use edit only for small exact strings that were just confirmed.")
+	lines = append(lines, "For long file generation, prefer skeleton first, then append_write chunks, then apply_patch cleanup.")
 	if guidance := strings.TrimSpace(runtimeprompt.RenderParallelToolGuidance()); guidance != "" {
 		lines = append(lines, guidance)
 	}
