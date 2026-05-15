@@ -326,16 +326,9 @@ func (s *FixedBottomSurface) SetPromptInputState(line string, input string, rows
 	s.promptReservedRows = rows
 	s.promptCursorRow = cursorRow
 	s.promptCursorCol = cursorCol
-	restorePromptCursor := s.bottomPaneStateLocked().popupExpandsBelowPrompt()
 	WithTerminalWriteLock(func() {
-		if restorePromptCursor {
-			s.terminal.HideCursor()
-			defer s.terminal.ShowCursor()
-		}
-		if !restorePromptCursor {
-			s.terminal.SaveCursor()
-			defer s.terminal.RestoreCursor()
-		}
+		s.terminal.HideCursor()
+		defer s.terminal.ShowCursor()
 		if s.popupRenderedRows > 0 && !s.bottomPaneStateLocked().popupExpandsBelowPrompt() {
 			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
 			s.popupRenderedRows = 0
@@ -346,9 +339,7 @@ func (s *FixedBottomSurface) SetPromptInputState(line string, input string, rows
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
-		if restorePromptCursor {
-			s.restoreStoredPromptCursorLocked()
-		}
+		s.restoreStoredPromptCursorLocked()
 	})
 	return true
 }

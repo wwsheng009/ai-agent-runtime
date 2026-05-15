@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -163,9 +164,22 @@ func (ib *InputBox) ReadTransientPromptWithHooks(prompt string, hooks LineEditor
 	return ib.readPromptWithHooks(prompt, hooks, false, false, true, false)
 }
 
+// ReadTransientPromptWithHooksContext reads a transient prompt and returns when
+// ctx is cancelled.
+func (ib *InputBox) ReadTransientPromptWithHooksContext(ctx context.Context, prompt string, hooks LineEditorHooks) (string, error) {
+	return ib.readPromptWithHooksContext(ctx, prompt, hooks, false, false, true, false)
+}
+
 // ReadTransientLineWithHooks reads a transient line without a visible prompt.
 func (ib *InputBox) ReadTransientLineWithHooks(hooks LineEditorHooks) (string, error) {
 	return ib.readPromptWithHooks("", hooks, false, false, false, false)
+}
+
+// ReadTransientLineWithHooksContext reads a transient line and returns when
+// ctx is cancelled. It is used while chat is busy so the prompt can keep
+// accepting queued input without racing the normal Ready-state editor.
+func (ib *InputBox) ReadTransientLineWithHooksContext(ctx context.Context, hooks LineEditorHooks) (string, error) {
+	return ib.readPromptWithHooksContext(ctx, "", hooks, false, false, false, false)
 }
 
 // AddToHistory 添加到历史记录

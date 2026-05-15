@@ -243,7 +243,10 @@ func (c *ProxyConfig) IsEmpty() bool {
 
 // String returns a string representation of the proxy config (passwords masked).
 func (c *ProxyConfig) String() string {
-	if c.IsEmpty() {
+	if c == nil || !c.Enabled {
+		return "disabled"
+	}
+	if c.HTTP == "" && c.HTTPS == "" {
 		return "disabled"
 	}
 	var parts []string

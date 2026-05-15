@@ -224,13 +224,22 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 	if c.shutdown {
 		return
 	}
-	if c.promptVisible {
+	c.promptInput = ""
+	c.promptCursor = 0
+	c.promptPasteActive = false
+	if c.writer == os.Stdout && c.surface != nil {
+		if c.promptVisible && c.promptRenderedOnSurface {
+			if c.surface.ResetPrompt(formatSessionUserPrompt(c.session), 1) {
+				c.promptRenderedOnSurface = true
+			}
+		} else if c.surface.ShowPrompt(formatSessionUserPrompt(c.session)) {
+			c.promptVisible = true
+			c.promptRenderedOnSurface = true
+		}
+	} else if c.promptVisible {
 		c.clearVisiblePromptLocked()
 		c.promptVisible = false
-		c.promptInput = ""
-		c.promptCursor = 0
 		c.promptRenderedOnSurface = false
-		c.promptPasteActive = false
 	}
 	c.waitingActive = true
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
@@ -939,6 +948,27 @@ func (c *chatInteractionCoordinator) ResetPromptState() {
 
 func (c *chatInteractionCoordinator) SetPromptInput(input string) {
 	c.SetPromptInputSnapshot(ui.LineEditorSnapshot{Text: input, Cursor: len([]rune(input))})
+}
+
+func (c *chatInteractionCoordinator) RenderPromptInputSnapshot(snapshot ui.LineEditorSnapshot) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
+	input := strings.ReplaceAll(snapshot.Text, "\r\n", "\n")
+	input = strings.ReplaceAll(input, "\r", "\n")
+	c.promptInput = input
+	c.promptCursor = clampPromptCursor(snapshot.Cursor, input)
+	c.promptPasteActive = snapshot.PasteActive
+	if c.promptVisible && c.promptRenderedOnSurface && c.writer == os.Stdout && c.surface != nil {
+		rows := c.currentPromptDisplayRowsLocked()
+		cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
+		c.surface.SetPromptInputState(formatSessionUserPrompt(c.session), input, rows, cursorRow, cursorCol)
+	}
 }
 
 func (c *chatInteractionCoordinator) SetPromptInputSnapshot(snapshot ui.LineEditorSnapshot) {

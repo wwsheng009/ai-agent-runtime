@@ -40,6 +40,9 @@ func RenderFullToolResultContent(content interface{}, toolErr string) string {
 // history. Structured outputs keep the reduced envelope summary so specialized
 // reducers can preserve stable facts without dumping large JSON.
 func RenderToolResultContentForModel(content interface{}, toolErr string, envelope *Envelope) string {
+	if isEditingToolResult(envelope) {
+		return RenderFullToolResultContent(content, toolErr)
+	}
 	if isExternalMCPToolResult(envelope) {
 		return RenderFullToolResultContent(content, toolErr)
 	}
@@ -75,6 +78,18 @@ func isTaskOutputToolResult(envelope *Envelope) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(envelope.ToolName), "task_output")
+}
+
+func isEditingToolResult(envelope *Envelope) bool {
+	if envelope == nil {
+		return false
+	}
+	switch strings.TrimSpace(envelope.ToolName) {
+	case "edit", "apply_patch":
+		return true
+	default:
+		return false
+	}
 }
 
 func toolResultKindForModel(content interface{}, envelope *Envelope) string {

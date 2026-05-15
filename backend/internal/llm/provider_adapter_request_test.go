@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -117,5 +118,71 @@ func assertRequestConfigEqual(t *testing.T, field string, want, got interface{})
 	t.Helper()
 	if !reflect.DeepEqual(want, got) {
 		t.Fatalf("request config %s mismatch:\nwant: %#v\ngot:  %#v", field, want, got)
+	}
+}
+
+func TestBuildProviderAdapterRequest_CapsMaxTokensByCapability(t *testing.T) {
+	input := providerAdapterRequestInput{
+		Protocol: "anthropic",
+		Model:    "claude-opus-4-7",
+		MaxTokens: 131072,
+		ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"claude-opus-4-7": {
+				MaxTokens:         128000,
+				MaxContextTokens:  1000000,
+				ReasoningModel:    true,
+				ReasoningEfforts:  []string{"low", "medium", "high", "xhigh", "max"},
+				InputModalities:   []string{"text", "image"},
+			},
+		},
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "hello"},
+		},
+	}
+
+	result := buildProviderAdapterRequest(input)
+
+	if result.MaxTokens != 128000 {
+		t.Fatalf("expected MaxTokens to be capped at 128000 (capability), got %d", result.MaxTokens)
+	}
+}
+
+func TestBuildProviderAdapterRequest_NoCapWhenNoCapability(t *testing.T) {
+	input := providerAdapterRequestInput{
+		Protocol: "anthropic",
+		Model:    "unknown-model",
+		MaxTokens: 131072,
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "hello"},
+		},
+	}
+
+	result := buildProviderAdapterRequest(input)
+
+	if result.MaxTokens != 131072 {
+		t.Fatalf("expected MaxTokens to remain 131072 (no capability), got %d", result.MaxTokens)
+	}
+}
+
+func TestBuildProviderAdapterRequest_NoCapWhenWithinLimit(t *testing.T) {
+	input := providerAdapterRequestInput{
+		Protocol: "anthropic",
+		Model:    "claude-opus-4-7",
+		MaxTokens: 8192,
+		ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"claude-opus-4-7": {
+				MaxTokens:        128000,
+				MaxContextTokens: 1000000,
+			},
+		},
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "hello"},
+		},
+	}
+
+	result := buildProviderAdapterRequest(input)
+
+	if result.MaxTokens != 8192 {
+		t.Fatalf("expected MaxTokens to remain 8192 (within limit), got %d", result.MaxTokens)
 	}
 }

@@ -1725,7 +1725,7 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 	case "tool.requested":
 		return chatRuntimeTimelineEvent{Line: appendCompactToolDirectory(renderCompactToolRequestedWithSource(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]), payloadStringValue(event.Payload[toolresult.SourceKey])), event.Payload)}
 	case "tool.completed":
-		line := renderCompactToolCompletedWithSource(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]), payloadStringValue(event.Payload[toolresult.SourceKey]), chatToolSummaryLines(event.Payload))
+		line := renderCompactToolCompletedWithPayload(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]), payloadStringValue(event.Payload[toolresult.SourceKey]), chatToolSummaryLines(event.Payload), event.Payload)
 		line = appendCompactToolDirectory(line, event.Payload)
 		rendered := []string{line}
 		if waitingLine := chatToolPostCommandHint(event.Payload); waitingLine != "" {

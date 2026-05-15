@@ -158,6 +158,32 @@ func TestRenderToolResultContentForModel_TruncatesLargeToolkitTextForHistory(t *
 	}
 }
 
+func TestRenderToolResultContentForModel_DoesNotTruncateEditingToolOutput(t *testing.T) {
+	envelope := &Envelope{
+		ToolName: "edit",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindText,
+			"mcp_name":             "toolkit",
+		},
+	}
+	var builder strings.Builder
+	builder.WriteString("成功替换了 1 处匹配项\n\n文件差异:\n```diff\n")
+	for i := 0; i < 700; i++ {
+		builder.WriteString(fmt.Sprintf("@@ hunk-%03d @@\n-old-%03d\n+new-%03d\n", i, i, i))
+	}
+	builder.WriteString("```")
+	content := builder.String()
+
+	got := RenderToolResultContentForModel(content, "", envelope)
+
+	if got != content {
+		t.Fatal("expected editing tool output to bypass model-history truncation")
+	}
+	if !strings.Contains(got, "@@ hunk-699 @@") || !strings.Contains(got, "+new-699") {
+		t.Fatalf("expected tail diff lines to be preserved, got %q", got)
+	}
+}
+
 func TestRenderToolResultContentForModel_PreservesArtifactNoticeWhenToolkitTextIsTruncated(t *testing.T) {
 	envelope := &Envelope{
 		Metadata: map[string]interface{}{

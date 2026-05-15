@@ -100,11 +100,20 @@ func buildProviderAdapterRequest(input providerAdapterRequestInput) adapter.Requ
 		reasoningEffortBudgets = capability.ReasoningEffortBudgets
 	}
 
+	// Cap MaxTokens by model capability limit when available.
+	// This prevents provider-level max_tokens_limit (e.g. 131072 for
+	// the anthropic.messages template) from exceeding a specific model's
+	// actual output-token ceiling (e.g. 128000 for claude-opus-4-7).
+	maxTokens := input.MaxTokens
+	if hasCapability && capability.MaxTokens > 0 && maxTokens > capability.MaxTokens {
+		maxTokens = capability.MaxTokens
+	}
+
 	return adapter.RequestConfig{
 		Model:                  input.Model,
 		Messages:               messages,
 		Stream:                 input.Stream,
-		MaxTokens:              input.MaxTokens,
+		MaxTokens:              maxTokens,
 		ReasoningEffort:        requestReasoningEffort,
 		ReasoningEffortBudgets: reasoningEffortBudgets,
 		ReasoningModel:         reasoningModel,

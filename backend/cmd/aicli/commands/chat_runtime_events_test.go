@@ -290,6 +290,38 @@ func TestRenderSharedChatToolEvent_AppendsShellContext(t *testing.T) {
 	}
 }
 
+func TestRenderEditedDiffOutput_HandlesCreatedAndDeletedFiles(t *testing.T) {
+	output := strings.Join([]string{
+		"文件差异:",
+		"```diff",
+		"--- /dev/null",
+		"+++ b/internal/new_file.go",
+		"@@ -0,0 +1,2 @@",
+		"+package internal",
+		"+",
+		"--- a/internal/old_file.go",
+		"+++ /dev/null",
+		"@@ -1,2 +0,0 @@",
+		"-package internal",
+		"-",
+		"```",
+	}, "\n")
+
+	got := renderEditedDiffOutput(output)
+	want := strings.Join([]string{
+		`• Edited internal\new_file.go (+2 -0)`,
+		`        1 + package internal`,
+		`        2 + `,
+		`  `,
+		`• Edited internal\old_file.go (+0 -2)`,
+		`        1 - package internal`,
+		`        2 - `,
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected created/deleted diff render:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
 func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestStarted, TraceID: "trace-1", Payload: map[string]interface{}{"model": "gpt-5.4"}}); got != "" {
 		t.Fatalf("unexpected llm started render: %q", got)
@@ -494,6 +526,28 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 		"  统计: 0 个文件, 2 个目录",
 	}, "\n") {
 		t.Fatalf("unexpected tool completed render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "edit",
+		Payload: map[string]interface{}{
+			"arg_preview":               "file_path=sample.txt",
+			"render_output_format":      "markdown",
+			"render_output_untruncated": true,
+			"render_output":             "成功替换了 1 处匹配项\n\n文件差异:\n```diff\n--- a/internal/service/shop/endpoint/security.go\n+++ b/internal/service/shop/endpoint/security.go\n@@ -258,4 +258,3 @@\n updateEndpoint := map[string]interface{}{\n-    \"status\":        nextEndpointStatus,\n-    \"last_audit_id\": audit.ID.String(),\n-    \"updated_at\":    now,\n+    \"status\":     nextEndpointStatus,\n+    \"updated_at\": now,\n }\n```",
+			"summary_lines":             []interface{}{"成功替换了 1 处匹配项", "文件差异:", "```diff"},
+		},
+	}); got != strings.Join([]string{
+		`• Edited internal\service\shop\endpoint\security.go (+2 -3)`,
+		`      258   updateEndpoint := map[string]interface{}{`,
+		`      259 -     "status":        nextEndpointStatus,`,
+		`      260 -     "last_audit_id": audit.ID.String(),`,
+		`      261 -     "updated_at":    now,`,
+		`      259 +     "status":     nextEndpointStatus,`,
+		`      260 +     "updated_at": now,`,
+		`      261   }`,
+	}, "\n") {
+		t.Fatalf("unexpected edit diff render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:     "tool.completed",

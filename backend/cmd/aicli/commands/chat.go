@@ -117,6 +117,7 @@ type ChatSession struct {
 	localShellArtifactCounter       int
 	lastLocalShellArtifactPath      string
 	queuedInputDrain                bool     // suppress repeated queued-input notices while draining
+	queuedInputEchoed               bool     // queued input was already echoed in the fixed prompt while busy
 	ImagePaths                      []string // explicit local image attachments for current turn
 }
 

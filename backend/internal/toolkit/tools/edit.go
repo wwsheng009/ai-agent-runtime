@@ -237,10 +237,11 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		removals = oldLen - newLen
 	}
 
+	patch := buildUnifiedPatch(absPath, contentStr, newContent)
 	result := toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
-		Content:    fmt.Sprintf("成功替换了 %d 处匹配项", count),
+		Content:    formatEditSuccessContent(fmt.Sprintf("成功替换了 %d 处匹配项", count), patch),
 		Metadata: map[string]interface{}{
 			"file_path":     absPath,
 			"replacements":  count,
@@ -248,7 +249,7 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 			"removals":      removals,
 			"old_size":      oldLen,
 			"new_size":      newLen,
-			"patch":         buildUnifiedPatch(absPath, contentStr, newContent),
+			"patch":         patch,
 			"mutated_paths": []string{absPath},
 		},
 	}
@@ -258,6 +259,15 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	return &result, nil
+}
+
+func formatEditSuccessContent(message string, patch string) string {
+	message = strings.TrimSpace(message)
+	patch = strings.TrimRight(patch, "\n")
+	if strings.TrimSpace(patch) == "" {
+		return message + "\n\n文件差异:\n无内容变化"
+	}
+	return message + "\n\n文件差异:\n```diff\n" + patch + "\n```"
 }
 
 // createBackup 创建文件备份

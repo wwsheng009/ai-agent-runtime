@@ -837,6 +837,46 @@ func TestPrepareInteractiveRead_PrefersSessionQueueWithoutPrompt(t *testing.T) {
 	}
 }
 
+func TestPrepareInteractiveRead_SuppressesNoticeForEchoedQueuedInput(t *testing.T) {
+	session := &ChatSession{
+		InputQueue: &chatInputQueue{
+			lines: make(chan chatQueuedInput, 4),
+			errs:  make(chan error, 1),
+		},
+		queuedInputEchoed: true,
+	}
+	session.InputQueue.lines <- chatQueuedInput{Text: "queued line\n", Source: "stdin"}
+
+	showPrompt, notice, err := prepareInteractiveRead(session)
+	if err != nil {
+		t.Fatalf("prepareInteractiveRead: %v", err)
+	}
+	if showPrompt {
+		t.Fatal("expected echoed queued input to suppress prompt")
+	}
+	if notice != "" {
+		t.Fatalf("expected no notice for already echoed queued input, got %q", notice)
+	}
+
+	_, err = chatInteractiveReadLine(session, context.Background())
+	if err != nil {
+		t.Fatalf("chatInteractiveReadLine: %v", err)
+	}
+	showPrompt, notice, err = prepareInteractiveRead(session)
+	if err != nil {
+		t.Fatalf("prepareInteractiveRead after drain: %v", err)
+	}
+	if !showPrompt {
+		t.Fatal("expected prompt to resume after echoed queue drains")
+	}
+	if session.queuedInputEchoed {
+		t.Fatal("expected echoed queue marker to reset after drain")
+	}
+	if notice != "" {
+		t.Fatalf("expected no notice after drain, got %q", notice)
+	}
+}
+
 func TestPrepareInteractiveRead_EmitsQueuedNoticeOnlyOncePerDrain(t *testing.T) {
 	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
 	session := &ChatSession{

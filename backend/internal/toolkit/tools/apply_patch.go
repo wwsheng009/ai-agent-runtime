@@ -157,11 +157,15 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 
 	mutatedPaths, combinedPatch := applier.diff()
 	summary.Files = len(mutatedPaths)
+	message := summary.message()
+	if strings.TrimSpace(combinedPatch) != "" {
+		message = formatEditSuccessContent(message, combinedPatch)
+	}
 
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
-		Content:    summary.message(),
+		Content:    message,
 		Metadata: map[string]interface{}{
 			"patch":         combinedPatch,
 			"files":         summary.Files,

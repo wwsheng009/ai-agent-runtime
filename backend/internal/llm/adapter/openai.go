@@ -272,10 +272,40 @@ func (tc *StreamToolCall) ToToolCall() *ToolCall {
 
 // repairJSON 修复不完整的 JSON（如缺少闭合括号）
 func repairJSON(s string) string {
-	open := strings.Count(s, "{")
-	close := strings.Count(s, "}")
-	if open > close {
-		s += strings.Repeat("}", open-close)
+	if json.Valid([]byte(s)) {
+		return s
+	}
+
+	openObjects := 0
+	inString := false
+	escaped := false
+	for _, r := range s {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inString && r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch r {
+		case '{':
+			openObjects++
+		case '}':
+			if openObjects > 0 {
+				openObjects--
+			}
+		}
+	}
+	if openObjects > 0 {
+		s += strings.Repeat("}", openObjects)
 	}
 	return s
 }

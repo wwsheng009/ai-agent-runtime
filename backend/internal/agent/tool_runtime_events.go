@@ -66,6 +66,11 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 		payload["summary"] = strings.Join(summaryLines, "\n")
 		payload["summary_lines"] = append([]string(nil), summaryLines...)
 	}
+	if output := editingToolRenderOutput(result.Call.Name, result.Output); output != "" {
+		payload["render_output"] = output
+		payload["render_output_format"] = "markdown"
+		payload["render_output_untruncated"] = true
+	}
 	if result.Envelope != nil {
 		if source := toolresult.SourceFromMetadata(result.Envelope.Metadata); source != "" {
 			payload[toolresult.SourceKey] = source
@@ -77,6 +82,15 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 	}
 	mergeToolEventPayload(payload, extra)
 	return payload
+}
+
+func editingToolRenderOutput(toolName string, output interface{}) string {
+	switch strings.TrimSpace(toolName) {
+	case "edit", "apply_patch":
+	default:
+		return ""
+	}
+	return strings.TrimSpace(extractToolTextOutput(output))
 }
 
 func copyToolExecutionDirectory(payload map[string]interface{}, args map[string]interface{}) {

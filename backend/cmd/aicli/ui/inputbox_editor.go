@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -184,8 +185,15 @@ func (ib *InputBox) readPrompt(prompt string, onChange func(string), keepHistory
 }
 
 func (ib *InputBox) readPromptWithHooks(prompt string, hooks LineEditorHooks, keepHistory bool, echoSubmit bool, useDefaultPrompt bool, holdFirstRune bool) (string, error) {
+	return ib.readPromptWithHooksContext(context.Background(), prompt, hooks, keepHistory, echoSubmit, useDefaultPrompt, holdFirstRune)
+}
+
+func (ib *InputBox) readPromptWithHooksContext(ctx context.Context, prompt string, hooks LineEditorHooks, keepHistory bool, echoSubmit bool, useDefaultPrompt bool, holdFirstRune bool) (string, error) {
 	if ib == nil {
 		return "", io.EOF
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	if prompt == "" && useDefaultPrompt {
@@ -218,7 +226,7 @@ func (ib *InputBox) readPromptWithHooks(prompt string, hooks LineEditorHooks, ke
 	}()
 	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence)
 
-	line, readErr := readInteractiveLineWithHooks(os.Stdin, os.Stdout, prompt, ib.history, nil, &hooks, echoSubmit, holdFirstRune)
+	line, readErr := readInteractiveLineWithHooksContext(ctx, os.Stdin, os.Stdout, prompt, ib.history, nil, &hooks, echoSubmit, holdFirstRune)
 	if readErr == nil && keepHistory && strings.TrimSpace(line) != "" {
 		ib.AddToHistory(line)
 	}
@@ -249,8 +257,15 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 }
 
 func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string), hooks *LineEditorHooks, echoSubmit bool, holdFirstRune bool) (string, error) {
+	return readInteractiveLineWithHooksContext(context.Background(), reader, writer, prompt, history, onChange, hooks, echoSubmit, holdFirstRune)
+}
+
+func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string), hooks *LineEditorHooks, echoSubmit bool, holdFirstRune bool) (string, error) {
 	if reader == nil {
 		return "", io.EOF
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if writer == nil {
 		writer = io.Discard
@@ -696,10 +711,14 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 	}
 
 	for {
+		if err := ctx.Err(); err != nil {
+			flushPasteBurstBeforeModifiedInput()
+			return "", err
+		}
 		if err := waitForPasteBurstWindow(); err != nil {
 			return "", err
 		}
-		key, ok, readErr := nextInteractiveKey(reader, &pending, stdinFile)
+		key, ok, readErr := nextInteractiveKey(ctx, reader, &pending, stdinFile)
 		if readErr != nil {
 			flushPasteBurstBeforeModifiedInput()
 			return "", readErr
@@ -1227,8 +1246,14 @@ func consumeTerminalEscapeSequence(text string) int {
 	return len(text)
 }
 
-func nextInteractiveKey(reader io.Reader, pending *[]byte, stdinFile *os.File) (editorKey, bool, error) {
+func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, stdinFile *os.File) (editorKey, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return editorKey{}, false, err
+		}
 		if decoded, ok := decodeInteractiveKey(*pending); ok {
 			*pending = (*pending)[decoded.consumed:]
 			return decoded.key, true, nil
@@ -1245,6 +1270,16 @@ func nextInteractiveKey(reader io.Reader, pending *[]byte, stdinFile *os.File) (
 			if !ready {
 				*pending = (*pending)[:0]
 				return editorKey{kind: editorKeyCancelPopup}, true, nil
+			}
+		}
+
+		if stdinFile != nil {
+			ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), 50*time.Millisecond)
+			if err != nil {
+				return editorKey{}, false, err
+			}
+			if !ready {
+				continue
 			}
 		}
 

@@ -258,6 +258,35 @@ func TestFixedBottomSurface_TrackPromptInputStateDoesNotRedraw(t *testing.T) {
 	}
 }
 
+func TestFixedBottomSurface_SetPromptInputStateRestoresPromptCursorWithoutPopup(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		if !surface.SetPromptInputState("> ", "", 1, 0, 2) {
+			t.Fatal("expected enabled surface to update prompt input")
+		}
+	})
+
+	if strings.Contains(output, cursorSaveSequence) || strings.Contains(output, cursorRestoreSequence) {
+		t.Fatalf("expected prompt input update to restore prompt cursor directly, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[23;1H> ") {
+		t.Fatalf("expected prompt marker to remain rendered, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[23;3H"+cursorShowSequence) {
+		t.Fatalf("expected cursor to return after prompt marker, got %q", output)
+	}
+}
+
 func TestFixedBottomSurface_ShowPopupDoesNotUseCursorSaveRestore(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true

@@ -3,7 +3,9 @@ package commands
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
@@ -39,7 +41,7 @@ func renderSharedChatToolEvent(event runtimechatcore.ChatEvent) string {
 	case "tool_requested":
 		return appendCompactToolDirectory(renderCompactToolRequestedWithSource(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource), payload)
 	case "tool_result":
-		return appendCompactToolDirectory(renderCompactToolCompletedWithSource(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource, chatToolSummaryLines(payload)), payload)
+		return appendCompactToolDirectory(renderCompactToolCompletedWithPayload(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource, chatToolSummaryLines(payload), payload), payload)
 	case "batch_end":
 		return ""
 	default:
@@ -63,6 +65,11 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 	if lines := summarizeSharedChatToolResultLines(event); len(lines) > 0 {
 		payload["summary_lines"] = lines
 		payload["summary"] = strings.Join(lines, "\n")
+	}
+	if output := editingSharedToolRenderOutput(event.ToolName, event.Output); output != "" {
+		payload["render_output"] = output
+		payload["render_output_format"] = "markdown"
+		payload["render_output_untruncated"] = true
 	}
 	if errText := strings.TrimSpace(event.Error); errText != "" {
 		payload["error"] = errText
@@ -223,11 +230,18 @@ func renderCompactToolCompleted(toolName, commandArg, commandText, argPreview st
 }
 
 func renderCompactToolCompletedWithSource(toolName, commandArg, commandText, argPreview, toolSource string, summaryLines []string) string {
+	return renderCompactToolCompletedWithPayload(toolName, commandArg, commandText, argPreview, toolSource, summaryLines, nil)
+}
+
+func renderCompactToolCompletedWithPayload(toolName, commandArg, commandText, argPreview, toolSource string, summaryLines []string, payload map[string]interface{}) string {
 	display := compactToolDisplayTextWithSource(toolName, commandArg, commandText, argPreview, toolSource)
 	if display == "" {
 		return ""
 	}
 	lines := []string{"• Ran " + display}
+	if rendered := renderMarkdownToolOutput(payload); rendered != "" {
+		return rendered
+	}
 	outputLines := compactToolOutputLines(summaryLines)
 	if len(outputLines) == 0 {
 		outputLines = []string{"(no output)"}
@@ -236,6 +250,171 @@ func renderCompactToolCompletedWithSource(toolName, commandArg, commandText, arg
 		lines = append(lines, "  "+line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func renderMarkdownToolOutput(payload map[string]interface{}) string {
+	if payload == nil || !payloadBoolValue(payload, "render_output_untruncated") {
+		return ""
+	}
+	if format := strings.TrimSpace(payloadStringValue(payload["render_output_format"])); format != "" && format != "markdown" {
+		return ""
+	}
+	output := strings.TrimRight(strings.ReplaceAll(payloadStringValue(payload["render_output"]), "\r\n", "\n"), "\n")
+	if strings.TrimSpace(output) == "" {
+		return ""
+	}
+	if rendered := renderEditedDiffOutput(output); rendered != "" {
+		return rendered
+	}
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		lines[i] = "  " + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+var unifiedDiffHunkHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+
+func renderEditedDiffOutput(output string) string {
+	diff := extractFencedDiff(output)
+	if strings.TrimSpace(diff) == "" {
+		return ""
+	}
+	files := parseUnifiedDiffFiles(diff)
+	if len(files) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, 32)
+	for fileIndex, file := range files {
+		if fileIndex > 0 {
+			lines = append(lines, "  ")
+		}
+		lines = append(lines, fmt.Sprintf("• Edited %s (+%d -%d)", file.path, file.additions, file.deletions))
+		for _, line := range file.lines {
+			lines = append(lines, "    "+line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func extractFencedDiff(output string) string {
+	normalized := strings.ReplaceAll(output, "\r\n", "\n")
+	start := strings.Index(normalized, "```diff")
+	if start < 0 {
+		return ""
+	}
+	rest := normalized[start+len("```diff"):]
+	rest = strings.TrimPrefix(rest, "\n")
+	end := strings.Index(rest, "```")
+	if end >= 0 {
+		rest = rest[:end]
+	}
+	return strings.Trim(rest, "\n")
+}
+
+type renderedDiffFile struct {
+	path      string
+	additions int
+	deletions int
+	lines     []string
+}
+
+func parseUnifiedDiffFiles(diff string) []renderedDiffFile {
+	rawLines := strings.Split(strings.ReplaceAll(diff, "\r\n", "\n"), "\n")
+	files := make([]renderedDiffFile, 0, 1)
+	var current *renderedDiffFile
+	oldLine := 0
+	newLine := 0
+	for _, raw := range rawLines {
+		line := strings.TrimRight(raw, "\r")
+		switch {
+		case strings.HasPrefix(line, "--- "):
+			if current != nil && (current.path != "" || len(current.lines) > 0) {
+				files = append(files, *current)
+			}
+			current = &renderedDiffFile{path: normalizeRenderedDiffPath(strings.TrimSpace(strings.TrimPrefix(line, "--- ")))}
+			oldLine = 0
+			newLine = 0
+		case strings.HasPrefix(line, "+++ "):
+			if current == nil {
+				current = &renderedDiffFile{}
+			}
+			rawPath := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
+			if !isRenderedDiffDevNull(rawPath) {
+				path := normalizeRenderedDiffPath(rawPath)
+				if path == "" {
+					continue
+				}
+				current.path = path
+			}
+		case strings.HasPrefix(line, "@@"):
+			if current == nil {
+				current = &renderedDiffFile{}
+			}
+			oldLine, newLine = parseUnifiedDiffHunkStart(line)
+		case current != nil && line != "":
+			switch line[0] {
+			case ' ':
+				current.lines = append(current.lines, formatRenderedDiffLine(oldLine, ' ', newLine, strings.TrimPrefix(line, " ")))
+				oldLine++
+				newLine++
+			case '-':
+				current.deletions++
+				current.lines = append(current.lines, formatRenderedDiffLine(oldLine, '-', 0, strings.TrimPrefix(line, "-")))
+				oldLine++
+			case '+':
+				current.additions++
+				current.lines = append(current.lines, formatRenderedDiffLine(0, '+', newLine, strings.TrimPrefix(line, "+")))
+				newLine++
+			}
+		}
+	}
+	if current != nil && (current.path != "" || len(current.lines) > 0) {
+		files = append(files, *current)
+	}
+	return files
+}
+
+func parseUnifiedDiffHunkStart(line string) (int, int) {
+	match := unifiedDiffHunkHeaderPattern.FindStringSubmatch(line)
+	if len(match) != 3 {
+		return 0, 0
+	}
+	oldStart, _ := strconv.Atoi(match[1])
+	newStart, _ := strconv.Atoi(match[2])
+	return oldStart, newStart
+}
+
+func normalizeRenderedDiffPath(path string) string {
+	path = strings.TrimSpace(path)
+	path = strings.TrimPrefix(path, "a/")
+	path = strings.TrimPrefix(path, "b/")
+	path = strings.ReplaceAll(path, "/", `\`)
+	return path
+}
+
+func isRenderedDiffDevNull(path string) bool {
+	return strings.TrimSpace(path) == "/dev/null"
+}
+
+func formatRenderedDiffLine(oldLine int, marker rune, newLine int, text string) string {
+	lineNumber := oldLine
+	if marker == '+' || (marker == ' ' && newLine > 0) {
+		lineNumber = newLine
+	}
+	if marker == ' ' {
+		return fmt.Sprintf("%5d   %s", lineNumber, text)
+	}
+	return fmt.Sprintf("%5d %c %s", lineNumber, marker, text)
+}
+
+func editingSharedToolRenderOutput(toolName string, output string) string {
+	switch strings.TrimSpace(toolName) {
+	case "edit", "apply_patch":
+	default:
+		return ""
+	}
+	return strings.TrimSpace(output)
 }
 
 func compactToolDisplayTextWithSource(toolName, commandArg, commandText, argPreview, toolSource string) string {

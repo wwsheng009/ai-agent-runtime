@@ -18,6 +18,8 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 		session.Interaction.StartWaiting()
 		defer session.Interaction.ClearWaiting()
 	}
+	stopBusyInputCapture := startBusyQueuedInputCapture(session)
+	defer stopBusyInputCapture()
 	ensureChatSystemPromptMessage(session)
 	beginChatUserTurn(session, userMessage)
 	executor := ensureChatExecutor(session)

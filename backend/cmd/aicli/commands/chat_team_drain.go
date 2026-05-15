@@ -54,6 +54,10 @@ func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
 		return false, "", nil
 	}
 	if pending := pendingInteractiveInputCount(session); pending > 0 {
+		if session.queuedInputEchoed {
+			session.queuedInputDrain = true
+			return false, "", nil
+		}
 		notice := ""
 		if !session.queuedInputDrain {
 			session.queuedInputDrain = true
@@ -71,6 +75,7 @@ func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
 		})
 	}
 	session.queuedInputDrain = false
+	session.queuedInputEchoed = false
 	return true, "", nil
 }
 

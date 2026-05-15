@@ -98,6 +98,86 @@ func TestEditTool_EmitsPatchMetadata(t *testing.T) {
 	}
 }
 
+func TestEditTool_ContentIncludesUnifiedDiff(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "edit-tool-diff-content-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := tmpFile.Name()
+	if _, err := tmpFile.WriteString("line1\nline2\nline3\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = tmpFile.Close()
+	defer os.Remove(path)
+
+	tool := NewEditTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path":  path,
+		"old_string": "line2",
+		"new_string": "LINE2",
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	for _, want := range []string{
+		"文件差异:",
+		"```diff",
+		"--- a/",
+		"+++ b/",
+		"-line2",
+		"+LINE2",
+	} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("expected edit content to include %q, got:\n%s", want, result.Content)
+		}
+	}
+}
+
+func TestApplyPatchTool_ContentIncludesUnifiedDiff(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"patch": strings.Join([]string{
+			"*** Begin Patch",
+			"*** Update File: sample.txt",
+			"@@",
+			" alpha",
+			"-beta",
+			"+BETA",
+			"*** End Patch",
+			"",
+		}, "\n"),
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	for _, want := range []string{
+		"补丁已应用",
+		"文件差异:",
+		"```diff",
+		"--- a/",
+		"+++ b/",
+		"-beta",
+		"+BETA",
+	} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("expected apply_patch content to include %q, got:\n%s", want, result.Content)
+		}
+	}
+}
+
 func TestWriteTool_EmitsMutatedPaths(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "write-tool-mutation-*.txt")
 	if err != nil {
