@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 )
@@ -17,6 +18,9 @@ type FixedBottomSurface struct {
 	popupOwner           string
 	popupStack           []fixedBottomPopupState
 	composerLine         string
+	promptReservedRows   int
+	promptCursorRow      int
+	promptCursorCol      int
 	popupRenderedRows    int
 	popupRenderedGapRows int
 	lastWidth            int
@@ -82,6 +86,9 @@ func (s *FixedBottomSurface) Disable() {
 	s.popupOwner = ""
 	s.popupStack = nil
 	s.composerLine = ""
+	s.promptReservedRows = 0
+	s.promptCursorRow = 0
+	s.promptCursorCol = 0
 	s.enabled = false
 }
 
@@ -109,6 +116,185 @@ func (s *FixedBottomSurface) BeginOutput() {
 	})
 }
 
+func (s *FixedBottomSurface) PromptCursorPrefix(rowOffset, col int) (string, bool) {
+	if s == nil || s.terminal == nil {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return "", false
+	}
+	row, column, ok := s.promptCursorPositionLocked(rowOffset, col)
+	if !ok {
+		return "", false
+	}
+	s.promptCursorRow = rowOffset
+	s.promptCursorCol = col
+	var builder strings.Builder
+	s.appendApplyLayoutSequenceLocked(&builder)
+	builder.WriteString(terminalMoveToSequence(row, column))
+	return builder.String(), true
+}
+
+// WriteOutput moves the real terminal cursor into the scrollable output region
+// and writes text while holding the terminal write lock. This keeps output
+// writers from racing with the line editor's prompt cursor restoration.
+func (s *FixedBottomSurface) WriteOutput(writer io.Writer, text string) (int, error, bool) {
+	if s == nil || s.terminal == nil || writer == nil || text == "" {
+		return 0, nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return 0, nil, false
+	}
+	var n int
+	var err error
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.moveToOutputLocked()
+		n, err = io.WriteString(writer, text)
+		s.restoreStoredPromptCursorLocked()
+	})
+	return n, err, true
+}
+
+func (s *FixedBottomSurface) ShowPrompt(line string) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	line = strings.TrimRight(SanitizeTerminalText(line), "\r\n")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return false
+	}
+	s.promptReservedRows = 1
+	s.setPromptCursorToLineEndLocked(line)
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.moveToPromptLocked()
+		if line != "" {
+			fmt.Print(line)
+		}
+	})
+	return true
+}
+
+func (s *FixedBottomSurface) ResetPrompt(line string, rows int) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	line = strings.TrimRight(SanitizeTerminalText(line), "\r\n")
+	if rows < 1 {
+		rows = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return false
+	}
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.clearPromptRowsLocked(rows)
+		s.promptReservedRows = 1
+		s.setPromptCursorToLineEndLocked(line)
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.moveToPromptLocked()
+		if line != "" {
+			fmt.Print(line)
+		}
+	})
+	return true
+}
+
+func (s *FixedBottomSurface) SetPromptRows(rows int) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return false
+	}
+	if s.promptReservedRows == rows {
+		return true
+	}
+	WithTerminalWriteLock(func() {
+		s.terminal.SaveCursor()
+		defer s.terminal.RestoreCursor()
+		if s.popupRenderedRows > 0 {
+			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
+			s.popupRenderedRows = 0
+			s.popupRenderedGapRows = 0
+		}
+		s.promptReservedRows = rows
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+	})
+	return true
+}
+
+func (s *FixedBottomSurface) SetPromptCursor(rowOffset, col int) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	if rowOffset < 0 {
+		rowOffset = 0
+	}
+	if col < 0 {
+		col = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return false
+	}
+	if _, _, ok := s.promptCursorPositionLocked(rowOffset, col); !ok {
+		return false
+	}
+	s.promptCursorRow = rowOffset
+	s.promptCursorCol = col
+	return true
+}
+
+func (s *FixedBottomSurface) MoveToPromptCursor(rowOffset, col int) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	if rowOffset < 0 {
+		rowOffset = 0
+	}
+	if col < 0 {
+		col = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return false
+	}
+	row, column, ok := s.promptCursorPositionLocked(rowOffset, col)
+	if !ok {
+		return false
+	}
+	s.promptCursorRow = rowOffset
+	s.promptCursorCol = col
+	WithTerminalWriteLock(func() {
+		s.applyLayoutLocked()
+		s.terminal.MoveTo(row, column)
+	})
+	return true
+}
+
 // ClearPromptRows clears the currently visible interactive prompt rows without
 // relying on cursor-relative movement inside the active scroll region.
 func (s *FixedBottomSurface) ClearPromptRows(rows int) bool {
@@ -126,6 +312,10 @@ func (s *FixedBottomSurface) ClearPromptRows(rows int) bool {
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.clearPromptRowsLocked(rows)
+		s.promptReservedRows = 0
+		s.promptCursorRow = 0
+		s.promptCursorCol = 0
+		s.applyLayoutLocked()
 		s.moveToOutputLocked()
 	})
 	return true
@@ -357,6 +547,7 @@ func (s *FixedBottomSurface) SetComposerPreview(line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.composerLine = line
+	s.promptReservedRows = 0
 	if !s.enabled {
 		return
 	}
@@ -379,6 +570,7 @@ func (s *FixedBottomSurface) ClearComposerPreview() {
 		return
 	}
 	s.composerLine = ""
+	s.promptReservedRows = 0
 	if !s.enabled {
 		s.popupRenderedRows = 0
 		s.popupRenderedGapRows = 0
@@ -506,21 +698,32 @@ func (s *FixedBottomSurface) canEnableLocked() bool {
 }
 
 func (s *FixedBottomSurface) applyLayoutLocked() {
+	var builder strings.Builder
+	s.appendApplyLayoutSequenceLocked(&builder)
+	if builder.Len() > 0 {
+		fmt.Print(builder.String())
+	}
+}
+
+func (s *FixedBottomSurface) appendApplyLayoutSequenceLocked(builder *strings.Builder) {
+	if builder == nil {
+		return
+	}
 	width, height := s.terminal.RefreshSize()
 	if width <= 0 {
 		width = 80
 	}
-	bottomRows := s.bottomRowsLocked()
-	if height <= bottomRows {
+	if height <= 1 {
 		return
 	}
+	bottomRows := s.effectiveBottomRowsLocked(height)
 	if width == s.lastWidth && height == s.lastHeight && bottomRows == s.lastBottomRows {
 		return
 	}
 	s.lastWidth = width
 	s.lastHeight = height
 	s.lastBottomRows = bottomRows
-	s.terminal.SetScrollRegion(1, s.outputBottomRowLocked())
+	builder.WriteString(terminalScrollRegionSequence(1, s.outputBottomRowLocked()))
 }
 
 func (s *FixedBottomSurface) renderStatusLocked() {
@@ -544,7 +747,7 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 	state := s.bottomPaneStateLocked()
 	visibleLines := state.VisiblePopupLines(s.terminal.Height())
 	composerRows := state.composerVisibleRowCount()
-	gapRows := state.popupInputGapRowCount()
+	gapRows := state.popupBottomGapRowCount()
 	rows := len(visibleLines) + composerRows
 	if rows == 0 {
 		if s.popupRenderedRows > 0 {
@@ -592,6 +795,75 @@ func (s *FixedBottomSurface) moveToOutputLocked() {
 	s.terminal.MoveTo(s.outputBottomRowLocked(), 1)
 }
 
+func (s *FixedBottomSurface) moveToPromptLocked() {
+	s.terminal.MoveTo(s.promptBottomRowLocked(), 1)
+}
+
+func (s *FixedBottomSurface) restoreStoredPromptCursorLocked() {
+	if s.bottomPaneStateLocked().promptVisibleRowCount() < 1 {
+		return
+	}
+	row, column, ok := s.promptCursorPositionLocked(s.promptCursorRow, s.promptCursorCol)
+	if !ok {
+		return
+	}
+	s.terminal.MoveTo(row, column)
+}
+
+func (s *FixedBottomSurface) setPromptCursorToLineEndLocked(line string) {
+	width := s.terminal.Width()
+	if width <= 0 {
+		width = 80
+	}
+	row, col := fixedPromptLineEndPosition(line, width)
+	s.promptCursorRow = row
+	s.promptCursorCol = col
+}
+
+func (s *FixedBottomSurface) promptCursorPositionLocked(rowOffset, col int) (int, int, bool) {
+	if rowOffset < 0 {
+		rowOffset = 0
+	}
+	if col < 0 {
+		col = 0
+	}
+	state := s.bottomPaneStateLocked()
+	rows := state.promptVisibleRowCount()
+	if rows < 1 {
+		return 0, 0, false
+	}
+	if maxRows := s.promptMaxVisibleRowsLocked(); maxRows > 0 && rows > maxRows {
+		rows = maxRows
+	}
+	if rowOffset >= rows {
+		rowOffset = rows - 1
+	}
+	bottom := s.promptBottomRowLocked()
+	start := bottom - rows + 1
+	if start < 1 {
+		start = 1
+	}
+	row := start + rowOffset
+	if row > bottom {
+		row = bottom
+	}
+	width := s.terminal.Width()
+	if width > 0 && col >= width {
+		col = width - 1
+	}
+	return row, col + 1, true
+}
+
+func (s *FixedBottomSurface) promptMaxVisibleRowsLocked() int {
+	bottom := s.promptBottomRowLocked()
+	outputBottom := s.outputBottomRowLocked()
+	rows := bottom - outputBottom
+	if rows < 1 {
+		return 1
+	}
+	return rows
+}
+
 func (s *FixedBottomSurface) moveToPopupInputLocked() {
 	state := s.bottomPaneStateLocked()
 	visibleLines := state.VisiblePopupLines(s.terminal.Height())
@@ -629,7 +901,7 @@ func (s *FixedBottomSurface) moveToPopupInputLocked() {
 
 func (s *FixedBottomSurface) outputBottomRowLocked() int {
 	height := s.terminal.Height()
-	bottom := height - s.bottomRowsLocked()
+	bottom := height - s.effectiveBottomRowsLocked(height)
 	if bottom < 1 {
 		return 1
 	}
@@ -638,7 +910,18 @@ func (s *FixedBottomSurface) outputBottomRowLocked() int {
 
 func (s *FixedBottomSurface) promptBottomRowLocked() int {
 	state := s.bottomPaneStateLocked()
-	if state.popupInputGapRowCount() > 0 {
+	if state.composerVisibleRowCount() > 0 {
+		visibleLines := state.VisiblePopupLines(s.terminal.Height())
+		row := s.popupStartRowLocked(len(visibleLines)+state.composerVisibleRowCount(), state.popupInputGapRowCount()) + len(visibleLines)
+		if row < 1 {
+			return 1
+		}
+		if row >= s.statusRowLocked() {
+			return s.statusRowLocked() - 1
+		}
+		return row
+	}
+	if state.popupInputGapRowCount() > 0 || state.promptReservedRowCount() > 0 {
 		row := s.statusRowLocked() - 1
 		if row < 1 {
 			return 1
@@ -666,9 +949,24 @@ func (s *FixedBottomSurface) popupStartRowLocked(rows int, gapRows int) int {
 
 func (s *FixedBottomSurface) bottomRowsLocked() int {
 	state := s.bottomPaneStateLocked()
-	rows := 1 + state.popupVisibleRowCount(s.terminal.Height()) + state.composerVisibleRowCount() + state.popupInputGapRowCount()
+	rows := 1 + state.popupVisibleRowCount(s.terminal.Height()) + state.composerVisibleRowCount() + state.popupBottomGapRowCount()
 	if rows < 1 {
 		rows = 1
+	}
+	return rows
+}
+
+func (s *FixedBottomSurface) effectiveBottomRowsLocked(height int) int {
+	rows := s.bottomRowsLocked()
+	if height <= 1 {
+		return 1
+	}
+	maxRows := height - 1
+	if rows > maxRows {
+		return maxRows
+	}
+	if rows < 1 {
+		return 1
 	}
 	return rows
 }
@@ -683,7 +981,7 @@ func (s *FixedBottomSurface) popupVisibleRowCountLocked() int {
 
 func (s *FixedBottomSurface) maxPopupRowsLocked() int {
 	state := s.bottomPaneStateLocked()
-	return maxBottomPanePopupRows(s.terminal.Height(), state.composerVisibleRowCount(), state.popupInputGapRowCount())
+	return maxBottomPanePopupRows(s.terminal.Height(), state.composerVisibleRowCount(), state.popupBottomGapRowCount())
 }
 
 func (s *FixedBottomSurface) popupVisibleLinesLocked() []string {
@@ -699,8 +997,18 @@ func (s *FixedBottomSurface) clearPromptRowsLocked(rows int) {
 	if bottom < 1 {
 		return
 	}
-	if s.bottomPaneStateLocked().popupInputGapRowCount() > 0 && rows > 1 {
+	state := s.bottomPaneStateLocked()
+	capToVisiblePrompt := false
+	if reservedRows := state.promptVisibleRowCount(); reservedRows > 0 {
+		rows = reservedRows
+		capToVisiblePrompt = true
+	} else if state.popupInputGapRowCount() > 0 && rows > 1 {
 		rows = 1
+	}
+	if capToVisiblePrompt {
+		if maxRows := s.promptMaxVisibleRowsLocked(); maxRows > 0 && rows > maxRows {
+			rows = maxRows
+		}
 	}
 	startRow := bottom - rows + 1
 	if startRow < 1 {
@@ -731,9 +1039,10 @@ func (s *FixedBottomSurface) clearPopupAreaLocked(rows int, gapRows int) {
 }
 
 type BottomPaneState struct {
-	StatusLine   string
-	PopupLines   []string
-	ComposerLine string
+	StatusLine         string
+	PopupLines         []string
+	ComposerLine       string
+	PromptReservedRows int
 }
 
 func (s BottomPaneState) composerLineText() string {
@@ -754,8 +1063,42 @@ func (s BottomPaneState) popupInputGapRowCount() int {
 	return 1
 }
 
+func (s BottomPaneState) promptReservedRowCount() int {
+	if s.PromptReservedRows < 0 {
+		return 0
+	}
+	return s.PromptReservedRows
+}
+
+func (s BottomPaneState) promptVisibleRowCount() int {
+	if s.composerVisibleRowCount() > 0 {
+		return s.composerVisibleRowCount()
+	}
+	rows := s.promptReservedRowCount()
+	if gapRows := s.popupInputGapRowCount(); gapRows > rows {
+		rows = gapRows
+	}
+	return rows
+}
+
+func (s BottomPaneState) extraPromptReservedRowCount() int {
+	if s.composerVisibleRowCount() > 0 {
+		return 0
+	}
+	rows := s.promptReservedRowCount()
+	gapRows := s.popupInputGapRowCount()
+	if rows <= gapRows {
+		return 0
+	}
+	return rows - gapRows
+}
+
+func (s BottomPaneState) popupBottomGapRowCount() int {
+	return s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
+}
+
 func (s BottomPaneState) popupVisibleRowCount(height int) int {
-	maxRows := maxBottomPanePopupRows(height, s.composerVisibleRowCount(), s.popupInputGapRowCount())
+	maxRows := maxBottomPanePopupRows(height, s.composerVisibleRowCount(), s.popupBottomGapRowCount())
 	if maxRows <= 0 || len(s.PopupLines) == 0 {
 		return 0
 	}
@@ -804,8 +1147,9 @@ func maxBottomPanePopupRows(height int, composerRows int, gapRows int) int {
 
 func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 	state := BottomPaneState{
-		StatusLine: s.statusLine,
-		PopupLines: append([]string(nil), s.popupLines...),
+		StatusLine:         s.statusLine,
+		PopupLines:         append([]string(nil), s.popupLines...),
+		PromptReservedRows: s.promptReservedRows,
 	}
 	if strings.TrimSpace(s.composerLine) != "" {
 		state.ComposerLine = s.composerLine
@@ -919,6 +1263,51 @@ func buildPendingPastePreviewLines(lines int, text string) []string {
 		out = append(out, "  "+line)
 	}
 	return out
+}
+
+func terminalMoveToSequence(row, col int) string {
+	if row < 1 {
+		row = 1
+	}
+	if col < 1 {
+		col = 1
+	}
+	return fmt.Sprintf("\x1b[%d;%dH", row, col)
+}
+
+func terminalScrollRegionSequence(top, bottom int) string {
+	if top < 1 {
+		top = 1
+	}
+	if bottom < top {
+		bottom = top
+	}
+	return fmt.Sprintf("\x1b[%d;%dr", top, bottom) + terminalMoveToSequence(top, 1)
+}
+
+func fixedPromptLineEndPosition(line string, termWidth int) (int, int) {
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+	row, col := 0, 0
+	for _, r := range stripTerminalEscapeSequences(line) {
+		switch r {
+		case '\r', '\n':
+			row++
+			col = 0
+			continue
+		}
+		width := DisplayWidth(string(r))
+		if width <= 0 {
+			continue
+		}
+		col += width
+		if col >= termWidth {
+			row += col / termWidth
+			col %= termWidth
+		}
+	}
+	return row, col
 }
 
 func maxInt(a, b int) int {

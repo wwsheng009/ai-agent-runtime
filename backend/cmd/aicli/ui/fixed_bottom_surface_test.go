@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -506,6 +507,178 @@ func TestFixedBottomSurface_ClearPromptRowsUsesAbsoluteRows(t *testing.T) {
 	}
 	if !strings.HasSuffix(output, "\x1b[23;1H") {
 		t.Fatalf("expected cursor to end at output bottom row, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ShowPromptReservesRowAboveStatus(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+
+	output := captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+		surface.BeginOutput()
+	})
+
+	if !strings.Contains(output, "\x1b[1;22r") {
+		t.Fatalf("expected prompt reserve to move scroll bottom above prompt row, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[23;1H> ") {
+		t.Fatalf("expected prompt to render on row above status, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[22;1H") {
+		t.Fatalf("expected BeginOutput to target row above prompt, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ClearPromptRowsReleasesPromptReserve(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		if !surface.ClearPromptRows(1) {
+			t.Fatal("expected enabled surface to clear prompt")
+		}
+	})
+
+	if surface.promptReservedRows != 0 {
+		t.Fatal("expected prompt reserve to be released")
+	}
+	if !strings.Contains(output, "\x1b[23;1H\x1b[K") {
+		t.Fatalf("expected prompt row to be cleared, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[1;23r") {
+		t.Fatalf("expected scroll region to return to status-only layout, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ResetPromptClearsInputAndKeepsPromptVisible(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+		if !surface.SetPromptRows(3) {
+			t.Fatal("expected enabled surface to reserve wrapped prompt rows")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		if !surface.ResetPrompt("> ", 3) {
+			t.Fatal("expected enabled surface to reset prompt")
+		}
+	})
+
+	if surface.promptReservedRows != 1 {
+		t.Fatalf("expected prompt reserve to collapse back to one row, got %d", surface.promptReservedRows)
+	}
+	for _, expected := range []string{
+		"\x1b[21;1H\x1b[K",
+		"\x1b[22;1H\x1b[K",
+		"\x1b[23;1H\x1b[K",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected reset to clear old prompt row %q, got %q", expected, output)
+		}
+	}
+	if !strings.Contains(output, "\x1b[23;1H> ") {
+		t.Fatalf("expected reset to redraw visible prompt, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[1;22r") {
+		t.Fatalf("expected reset to keep one prompt row reserved, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_SetPromptRowsReservesWrappedInput(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		if !surface.SetPromptRows(3) {
+			t.Fatal("expected enabled surface to update prompt rows")
+		}
+		surface.BeginOutput()
+	})
+
+	if !strings.Contains(output, "\x1b[1;20r") {
+		t.Fatalf("expected three prompt rows to move scroll bottom above input block, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[20;1H") {
+		t.Fatalf("expected output cursor above reserved prompt rows, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_WriteOutputUsesOutputRegionWithPromptReserved(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+
+	output := captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "reasoning\n"); !ok || err != nil {
+			t.Fatalf("expected surface output write to be handled, ok=%t err=%v", ok, err)
+		}
+	})
+
+	if !strings.Contains(output, "\x1b[22;1Hreasoning\n") {
+		t.Fatalf("expected output to be written above prompt row, got %q", output)
+	}
+	if strings.Contains(output, "\x1b[23;1Hreasoning") {
+		t.Fatalf("expected output not to be written on prompt row, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[23;3H") {
+		t.Fatalf("expected cursor to return after visible prompt, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_WriteOutputRestoresTrackedPromptCursor(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+
+	output := captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+		if !surface.SetPromptCursor(0, 7) {
+			t.Fatal("expected prompt cursor to be tracked")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "tool output\n"); !ok || err != nil {
+			t.Fatalf("expected surface output write to be handled, ok=%t err=%v", ok, err)
+		}
+	})
+
+	if !strings.HasSuffix(output, "\x1b[23;8H") {
+		t.Fatalf("expected cursor to return to tracked prompt cursor, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ClampsOversizedBottomReserveToKeepOutputRow(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		if !surface.SetPromptRows(80) {
+			t.Fatal("expected enabled surface to update prompt rows")
+		}
+		surface.BeginOutput()
+	})
+
+	if !strings.Contains(output, "\x1b[1;1r") {
+		t.Fatalf("expected scroll region to clamp to first row when bottom reserve is oversized, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[1;1H") {
+		t.Fatalf("expected output cursor to stay on the preserved output row, got %q", output)
 	}
 }
 
