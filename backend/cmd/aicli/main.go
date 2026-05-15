@@ -40,6 +40,7 @@ func main() {
 
 功能包括：
   - 列出当前配置信息（providers, provider_groups）
+  - 管理 provider（list/show/remove/enable/disable/set-default）
   - 对不同端点进行测试
   - 直接调用图片生成工具
   - 测试模型的最大上下文窗口和最大生成长度
@@ -54,6 +55,9 @@ func main() {
   aicli config
   aicli config --provider nvidia
   aicli config --groups
+  aicli provider list
+  aicli provider show openai --models
+  aicli provider remove old-provider -y
 
   # 直接进入交互式聊天（默认）
   aicli
@@ -198,6 +202,11 @@ func main() {
 
 	// login 子命令
 	rootCmd.AddCommand(commands.NewLoginCommand(func() *config.Config {
+		return cfg
+	}))
+
+	// provider 管理子命令
+	rootCmd.AddCommand(commands.NewProviderCommand(func() *config.Config {
 		return cfg
 	}))
 

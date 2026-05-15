@@ -134,3 +134,43 @@ func TestProviderAuthStore_ExpandsEnvVarsOnLoad(t *testing.T) {
 		t.Fatalf("auth store should keep original env reference:\n%s", string(content))
 	}
 }
+
+func TestProviderAuthStore_DeleteRefs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := SaveProviderAuthToPath(path, "alpha", ProviderAuthRecord{
+		KeyType:  AuthKeyTypeAPIKey,
+		AuthMode: AuthKeyTypeAPIKey,
+		APIKey:   "sk-alpha",
+	}); err != nil {
+		t.Fatalf("SaveProviderAuthToPath alpha: %v", err)
+	}
+	if err := SaveProviderAuthToPath(path, "beta", ProviderAuthRecord{
+		KeyType:  AuthKeyTypeAPIKey,
+		AuthMode: AuthKeyTypeAPIKey,
+		APIKey:   "sk-beta",
+	}); err != nil {
+		t.Fatalf("SaveProviderAuthToPath beta: %v", err)
+	}
+
+	deleted, err := DeleteProviderAuthRefsFromPath(path, []string{"alpha", "missing"})
+	if err != nil {
+		t.Fatalf("DeleteProviderAuthRefsFromPath: %v", err)
+	}
+	if strings.Join(deleted, ",") != "alpha" {
+		t.Fatalf("unexpected deleted refs: %+v", deleted)
+	}
+	if _, err := LoadProviderAuthFromPath(path, "alpha"); err == nil {
+		t.Fatal("expected alpha auth ref to be deleted")
+	}
+	if loaded, err := LoadProviderAuthFromPath(path, "beta"); err != nil || loaded.APIKey != "sk-beta" {
+		t.Fatalf("expected beta auth ref to remain, loaded=%+v err=%v", loaded, err)
+	}
+
+	deleted, err = DeleteProviderAuthRefsFromPath(path, []string{"missing"})
+	if err != nil {
+		t.Fatalf("DeleteProviderAuthRefsFromPath missing: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("unexpected missing deleted refs: %+v", deleted)
+	}
+}

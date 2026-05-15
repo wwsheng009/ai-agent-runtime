@@ -216,6 +216,58 @@ func SaveProviderAuthToPath(path, ref string, record ProviderAuthRecord) error {
 	return writeProviderAuthStore(path, document)
 }
 
+// DeleteProviderAuth deletes one auth record from the default user-level auth store.
+func DeleteProviderAuth(ref string) (bool, error) {
+	return DeleteProviderAuthFromPath(DefaultAuthStorePath(), ref)
+}
+
+// DeleteProviderAuthFromPath deletes one auth record by reference.
+func DeleteProviderAuthFromPath(path, ref string) (bool, error) {
+	deleted, err := DeleteProviderAuthRefsFromPath(path, []string{ref})
+	if err != nil {
+		return false, err
+	}
+	return len(deleted) > 0, nil
+}
+
+// DeleteProviderAuthRefsFromPath deletes auth records by reference and returns
+// the refs that existed and were removed.
+func DeleteProviderAuthRefsFromPath(path string, refs []string) ([]string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("auth store path is required")
+	}
+	document, err := readProviderAuthStore(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(document.Providers) == 0 {
+		return nil, nil
+	}
+	deleted := make([]string, 0, len(refs))
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		key := strings.ToLower(ref)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if _, ok := document.Providers[ref]; !ok {
+			continue
+		}
+		delete(document.Providers, ref)
+		deleted = append(deleted, ref)
+	}
+	if len(deleted) == 0 {
+		return nil, nil
+	}
+	return deleted, writeProviderAuthStore(path, document)
+}
+
 func readProviderAuthStore(path string) (*providerAuthStoreDocument, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
