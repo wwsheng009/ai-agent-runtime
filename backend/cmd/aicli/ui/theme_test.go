@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/fatih/color"
@@ -47,6 +48,11 @@ func TestFormatAssistantSupplementBlock_PreservesPlainLayoutWithoutColor(t *test
 	if got := FormatAssistantSupplementBlock(raw); got != raw {
 		t.Fatalf("expected plain layout to be preserved, got %q", got)
 	}
+
+	diff := "• Edited internal\\service\\shop\\endpoint\\security.go (+1 -1)\n      259 -     oldValue,\n      259 +     newValue,"
+	if got := FormatAssistantSupplementBlock(diff); got != diff {
+		t.Fatalf("expected plain diff layout to be preserved, got %q", got)
+	}
 }
 
 func TestFormatAssistantSupplementBlock_CollapsesRedundantBlankLines(t *testing.T) {
@@ -65,5 +71,32 @@ func TestFormatAssistantSupplementBlock_CollapsesRedundantBlankLines(t *testing.
 	want := "[prompt] layers=unknown/system\n\n(instruction 471 / total 2490 tokens)"
 	if got := FormatAssistantSupplementBlock(raw); got != want {
 		t.Fatalf("expected redundant blank lines to collapse, got %q", got)
+	}
+}
+
+func TestStyleAssistantSupplementLine_ColorsEditedDiffLinesByTheme(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = false
+	defer func() {
+		color.NoColor = oldNoColor
+		_ = SetThemePreset(ThemePresetFocus)
+	}()
+
+	theme := createTheme(ThemeDark)
+	addBody := "259 +     \"updated_at\": now,"
+	delBody := "260 -     \"last_audit_id\": audit.ID.String(),"
+	addLine := theme.StyleAssistantSupplementLine("      " + addBody)
+	delLine := theme.StyleAssistantSupplementLine("      " + delBody)
+	if addLine == "      "+addBody || delLine == "      "+delBody {
+		t.Fatal("expected edited diff lines to be colorized")
+	}
+	if !strings.Contains(addLine, "\x1b[") || !strings.Contains(delLine, "\x1b[") {
+		t.Fatalf("expected ANSI color sequences in diff lines, got add=%q del=%q", addLine, delLine)
+	}
+	if want := "      " + theme.SuccessColor.Sprint(addBody); addLine != want {
+		t.Fatalf("expected added line to use theme success color, got %q want %q", addLine, want)
+	}
+	if want := "      " + theme.ErrorColor.Sprint(delBody); delLine != want {
+		t.Fatalf("expected deleted line to use theme error color, got %q want %q", delLine, want)
 	}
 }

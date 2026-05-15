@@ -92,6 +92,9 @@ func (t *Theme) StyleAssistantSupplementLine(line string) string {
 		tagColor, bodyColor := t.assistantSupplementColors(tag)
 		return leading + tagColor.Sprint(bullet) + tagColor.Sprint(tag) + bodyColor.Sprint(rest)
 	}
+	if styled, ok := t.styleEditedDiffSupplementLine(leading, body); ok {
+		return styled
+	}
 	if tag, rest, ok := splitBracketTag(body); ok {
 		tagColor, bodyColor := t.assistantSupplementColors(tag)
 		return leading + tagColor.Sprint(tag) + bodyColor.Sprint(rest)
@@ -107,6 +110,51 @@ func (t *Theme) StyleAssistantSupplementLine(line string) string {
 		return leading + t.ColorizeSecondary(body)
 	}
 	return leading + t.ColorizeMuted(body)
+}
+
+func (t *Theme) styleEditedDiffSupplementLine(leading, body string) (string, bool) {
+	if t == nil {
+		return "", false
+	}
+	if strings.HasPrefix(body, "• Edited ") {
+		return leading + t.ToolColor.Sprint(body), true
+	}
+	marker, ok := editedDiffSupplementMarker(body)
+	if !ok {
+		return "", false
+	}
+	switch marker {
+	case '+':
+		return leading + t.SuccessColor.Sprint(body), true
+	case '-':
+		return leading + t.ErrorColor.Sprint(body), true
+	default:
+		return "", false
+	}
+}
+
+func editedDiffSupplementMarker(body string) (rune, bool) {
+	i := 0
+	for i < len(body) && body[i] >= '0' && body[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, false
+	}
+	spaceCount := 0
+	for i < len(body) && body[i] == ' ' {
+		i++
+		spaceCount++
+	}
+	if spaceCount == 0 || i >= len(body) {
+		return 0, false
+	}
+	switch body[i] {
+	case '+', '-':
+		return rune(body[i]), true
+	default:
+		return 0, false
+	}
 }
 
 func (t *Theme) assistantSupplementColors(tag string) (*ThemeColor, *ThemeColor) {
