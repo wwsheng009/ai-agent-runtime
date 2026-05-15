@@ -86,6 +86,86 @@ func TestApplyPatchTool_RejectsMalformedPatch(t *testing.T) {
 	}
 }
 
+func TestApplyPatchTool_AcceptsHeredocWrapper(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "wrapped.txt")
+	requireWriteFile(t, path, "hello\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"<<'EOF'",
+		"*** Begin Patch",
+		"*** Update File: wrapped.txt",
+		"@@",
+		"-hello",
+		"+HELLO",
+		"*** End Patch",
+		"EOF",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "HELLO\n")
+}
+
+func TestApplyPatchTool_AcceptsFirstUpdateChunkWithoutContextMarker(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "no-context.txt")
+	requireWriteFile(t, path, "alpha\nbeta\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: no-context.txt",
+		"-alpha",
+		"+ALPHA",
+		" beta",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "ALPHA\nbeta\n")
+}
+
+func TestApplyPatchTool_AcceptsWhitespaceAroundOperationHeader(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "header.txt")
+	requireWriteFile(t, path, "old\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"  *** Update File: header.txt  ",
+		"@@",
+		"-old",
+		"+new",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "new\n")
+}
+
 func TestApplyPatchTool_DescriptionGuidesPatchSplitting(t *testing.T) {
 	tool := NewApplyPatchTool()
 
@@ -207,6 +287,250 @@ func TestApplyPatchTool_DirectoryPathIncludesKindMismatchHint(t *testing.T) {
 	}
 	if !strings.Contains(hint, candidate) {
 		t.Fatalf("expected candidate path %q in hint, got %q", candidate, hint)
+	}
+}
+
+func TestApplyPatchTool_UpdateIgnoresTrailingWhitespace(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "space.txt")
+	requireWriteFile(t, path, "foo   \nbar\t\nbaz\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: space.txt",
+		"@@",
+		"-foo",
+		"-bar",
+		"+FOO",
+		"+BAR",
+		" baz",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "FOO\nBAR\nbaz\n")
+}
+
+func TestApplyPatchTool_UpdatePureAdditionAppendsAtEnd(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "append.txt")
+	requireWriteFile(t, path, "alpha\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: append.txt",
+		"@@",
+		"+omega",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "alpha\nomega\n")
+}
+
+func TestApplyPatchTool_UpdateAcceptsBlankContextLine(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "blank.txt")
+	requireWriteFile(t, path, "func main() {\n\n\tprintln(\"x\")\n}\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: blank.txt",
+		"@@",
+		" func main() {",
+		"",
+		"-\tprintln(\"x\")",
+		"+\tprintln(\"y\")",
+		" }",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "func main() {\n\n\tprintln(\"y\")\n}\n")
+}
+
+func TestApplyPatchTool_UpdateNormalizesUnicodePunctuation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "unicode.py")
+	requireWriteFile(t, path, "import asyncio  # local import \u2013 avoids top\u2011level dep\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: unicode.py",
+		"@@",
+		"-import asyncio  # local import - avoids top-level dep",
+		"+import asyncio  # HELLO",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "import asyncio  # HELLO\n")
+}
+
+func TestApplyPatchTool_UpdateUsesContextMarker(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "context.go")
+	requireWriteFile(t, path, strings.Join([]string{
+		"func first() {",
+		"\tvalue := 1",
+		"}",
+		"",
+		"func second() {",
+		"\tvalue := 1",
+		"}",
+		"",
+	}, "\n"))
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: context.go",
+		"@@ func second() {",
+		"-\tvalue := 1",
+		"+\tvalue := 2",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, strings.Join([]string{
+		"func first() {",
+		"\tvalue := 1",
+		"}",
+		"",
+		"func second() {",
+		"\tvalue := 2",
+		"}",
+		"",
+	}, "\n"))
+}
+
+func TestApplyPatchTool_UpdateEndOfFilePrefersTail(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tail.txt")
+	requireWriteFile(t, path, "target\nmiddle\ntarget\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: tail.txt",
+		"@@",
+		"-target",
+		"+TAIL",
+		"*** End of File",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	assertFileContent(t, path, "target\nmiddle\nTAIL\n")
+}
+
+func TestApplyPatchTool_UpdateEndOfFileRequiresTailMatch(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tail-required.txt")
+	requireWriteFile(t, path, "target\nmiddle\nother\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: tail-required.txt",
+		"@@",
+		"-target",
+		"+TAIL",
+		"*** End of File",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected EOF-anchored patch to fail, got success with content %q", result.Content)
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "期望内容") {
+		t.Fatalf("expected missing hunk diagnostic, got %v", result.Error)
+	}
+	assertFileContent(t, path, "target\nmiddle\nother\n")
+}
+
+func TestApplyPatchTool_MissingContextIncludesExpectedLines(t *testing.T) {
+	root := t.TempDir()
+	requireWriteFile(t, filepath.Join(root, "missing.txt"), "actual\n")
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: missing.txt",
+		"@@",
+		"-expected",
+		"+updated",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure, got success with content %q", result.Content)
+	}
+	if result.Error == nil {
+		t.Fatal("expected hunk error, got nil")
+	}
+	message := result.Error.Error()
+	if !strings.Contains(message, "期望内容") || !strings.Contains(message, "expected") {
+		t.Fatalf("expected missing-context diagnostic, got %q", message)
+	}
+	if !strings.Contains(message, "view/grep") || !strings.Contains(message, "@@") {
+		t.Fatalf("expected actionable guidance, got %q", message)
 	}
 }
 

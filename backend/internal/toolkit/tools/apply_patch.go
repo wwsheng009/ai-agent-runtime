@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -59,7 +60,7 @@ func NewApplyPatchTool() *ApplyPatchTool {
 		"properties": map[string]interface{}{
 			"patch": map[string]interface{}{
 				"type":        "string",
-				"description": "要应用的补丁文本。必须使用 Codex apply_patch 格式，例如 *** Begin Patch / *** Update File / *** Add File / *** Delete File / *** End Patch。若补丁很大或包含多个独立变更，请拆分为多个更小的补丁块，每次只聚焦一个文件或一个变更区域，避免单次参数过长导致截断。",
+				"description": "要应用的补丁文本。普通函数调用模式下放入 patch 参数；Codex/freeform 模式下直接发送补丁文本，不要包 JSON。必须使用 Codex apply_patch 格式，例如 *** Begin Patch / *** Update File / *** Add File / *** Delete File / *** End Patch。若补丁很大或包含多个独立变更，请拆分为多个更小的补丁块，每次只聚焦一个文件或一个变更区域，避免单次参数过长导致截断。",
 			},
 		},
 		"required": []string{"patch"},
@@ -68,7 +69,7 @@ func NewApplyPatchTool() *ApplyPatchTool {
 	return &ApplyPatchTool{
 		BaseTool: toolkit.NewBaseTool(
 			"apply_patch",
-			"应用 Codex 风格补丁到工作区文件，支持新增、更新、删除和重命名文件。若需要处理很大的变更或多个独立目标，请拆分为多个更小的 apply_patch 调用，每次只聚焦一个文件或一个变更区域，避免单次参数过大导致截断。",
+			"应用 Codex 风格补丁到工作区文件，支持新增、更新、删除和重命名文件。Codex/custom-tool 模式下这是 FREEFORM 工具，应直接发送补丁文本，不要包 JSON；普通函数调用模式使用 patch 参数。若需要处理很大的变更或多个独立目标，请拆分为多个更小的 apply_patch 调用，每次只聚焦一个文件或一个变更区域，避免单次参数过大导致截断。",
 			"1.0.0",
 			parameters,
 			true,
@@ -230,7 +231,8 @@ type patchHunkLine struct {
 }
 
 func parseApplyPatch(input string) ([]patchOperation, error) {
-	lines := strings.Split(strings.ReplaceAll(input, "\r\n", "\n"), "\n")
+	normalizedInput := unwrapApplyPatchHeredoc(strings.TrimSpace(strings.ReplaceAll(input, "\r\n", "\n")))
+	lines := strings.Split(normalizedInput, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != applyPatchBeginMarker {
 		return nil, fmt.Errorf("补丁必须以 %q 开始", applyPatchBeginMarker)
 	}
@@ -238,32 +240,32 @@ func parseApplyPatch(input string) ([]patchOperation, error) {
 	operations := make([]patchOperation, 0, 4)
 	for index := 1; index < len(lines); {
 		line := strings.TrimRight(lines[index], "\r")
-		trimmed := strings.TrimSpace(line)
+		headerLine := strings.TrimSpace(line)
 		switch {
-		case trimmed == "":
+		case headerLine == "":
 			index++
-		case trimmed == applyPatchEndMarker:
+		case headerLine == applyPatchEndMarker:
 			for _, tail := range lines[index+1:] {
 				if strings.TrimSpace(tail) != "" {
 					return nil, fmt.Errorf("第 %d 行后存在无效补丁内容", index+2)
 				}
 			}
 			return operations, nil
-		case strings.HasPrefix(line, applyPatchAddPrefix):
+		case strings.HasPrefix(headerLine, applyPatchAddPrefix):
 			operation, next, err := parseAddFileOperation(lines, index)
 			if err != nil {
 				return nil, err
 			}
 			operations = append(operations, operation)
 			index = next
-		case strings.HasPrefix(line, applyPatchDeletePrefix):
+		case strings.HasPrefix(headerLine, applyPatchDeletePrefix):
 			operation, next, err := parseDeleteFileOperation(lines, index)
 			if err != nil {
 				return nil, err
 			}
 			operations = append(operations, operation)
 			index = next
-		case strings.HasPrefix(line, applyPatchUpdatePrefix):
+		case strings.HasPrefix(headerLine, applyPatchUpdatePrefix):
 			operation, next, err := parseUpdateFileOperation(lines, index)
 			if err != nil {
 				return nil, err
@@ -278,8 +280,24 @@ func parseApplyPatch(input string) ([]patchOperation, error) {
 	return nil, fmt.Errorf("补丁缺少 %q 结束标记", applyPatchEndMarker)
 }
 
+func unwrapApplyPatchHeredoc(input string) string {
+	lines := strings.Split(input, "\n")
+	if len(lines) < 4 {
+		return input
+	}
+	first := strings.TrimSpace(lines[0])
+	last := strings.TrimSpace(lines[len(lines)-1])
+	switch first {
+	case "<<EOF", "<<'EOF'", `<<"EOF"`:
+		if strings.HasSuffix(last, "EOF") {
+			return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
+		}
+	}
+	return input
+}
+
 func parseAddFileOperation(lines []string, start int) (patchOperation, int, error) {
-	path := strings.TrimSpace(strings.TrimPrefix(lines[start], applyPatchAddPrefix))
+	path := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[start]), applyPatchAddPrefix))
 	if path == "" {
 		return patchOperation{}, 0, fmt.Errorf("第 %d 行缺少新增文件路径", start+1)
 	}
@@ -312,7 +330,7 @@ func parseAddFileOperation(lines []string, start int) (patchOperation, int, erro
 }
 
 func parseDeleteFileOperation(lines []string, start int) (patchOperation, int, error) {
-	path := strings.TrimSpace(strings.TrimPrefix(lines[start], applyPatchDeletePrefix))
+	path := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[start]), applyPatchDeletePrefix))
 	if path == "" {
 		return patchOperation{}, 0, fmt.Errorf("第 %d 行缺少删除文件路径", start+1)
 	}
@@ -323,7 +341,7 @@ func parseDeleteFileOperation(lines []string, start int) (patchOperation, int, e
 }
 
 func parseUpdateFileOperation(lines []string, start int) (patchOperation, int, error) {
-	path := strings.TrimSpace(strings.TrimPrefix(lines[start], applyPatchUpdatePrefix))
+	path := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[start]), applyPatchUpdatePrefix))
 	if path == "" {
 		return patchOperation{}, 0, fmt.Errorf("第 %d 行缺少更新文件路径", start+1)
 	}
@@ -358,6 +376,13 @@ func parseUpdateFileOperation(lines []string, start int) (patchOperation, int, e
 			}
 			operation.Hunks = append(operation.Hunks, hunk)
 			index = next
+		case len(operation.Hunks) == 0 && isPatchChangeLine(line):
+			hunk, next, err := parsePatchHunkWithoutHeader(lines, index)
+			if err != nil {
+				return patchOperation{}, 0, err
+			}
+			operation.Hunks = append(operation.Hunks, hunk)
+			index = next
 		default:
 			return patchOperation{}, 0, fmt.Errorf("第 %d 行不是合法的 hunk 头: %s", index+1, line)
 		}
@@ -370,8 +395,15 @@ func parseUpdateFileOperation(lines []string, start int) (patchOperation, int, e
 }
 
 func parsePatchHunk(lines []string, start int) (patchHunk, int, error) {
-	hunk := patchHunk{Header: strings.TrimRight(lines[start], "\r")}
-	index := start + 1
+	return parsePatchHunkBody(lines, start+1, strings.TrimRight(lines[start], "\r"), start)
+}
+
+func parsePatchHunkWithoutHeader(lines []string, start int) (patchHunk, int, error) {
+	return parsePatchHunkBody(lines, start, "@@", start)
+}
+
+func parsePatchHunkBody(lines []string, index int, header string, headerLine int) (patchHunk, int, error) {
+	hunk := patchHunk{Header: header}
 	for index < len(lines) {
 		line := strings.TrimRight(lines[index], "\r")
 		switch {
@@ -381,11 +413,15 @@ func parsePatchHunk(lines []string, start int) (patchHunk, int, error) {
 			return hunk, index, nil
 		case isPatchSectionHeader(line) || strings.TrimSpace(line) == applyPatchEndMarker || strings.HasPrefix(line, "@@"):
 			if len(hunk.Lines) == 0 {
-				return patchHunk{}, 0, fmt.Errorf("第 %d 行的 hunk 没有内容", start+1)
+				return patchHunk{}, 0, fmt.Errorf("第 %d 行的 hunk 没有内容", headerLine+1)
 			}
 			return hunk, index, nil
 		case len(line) == 0:
-			return patchHunk{}, 0, fmt.Errorf("第 %d 行缺少 hunk 行前缀", index+1)
+			hunk.Lines = append(hunk.Lines, patchHunkLine{
+				Kind: ' ',
+				Text: "",
+			})
+			index++
 		default:
 			prefix := line[0]
 			if prefix != ' ' && prefix != '+' && prefix != '-' {
@@ -400,12 +436,21 @@ func parsePatchHunk(lines []string, start int) (patchHunk, int, error) {
 	}
 
 	if len(hunk.Lines) == 0 {
-		return patchHunk{}, 0, fmt.Errorf("第 %d 行的 hunk 没有内容", start+1)
+		return patchHunk{}, 0, fmt.Errorf("第 %d 行的 hunk 没有内容", headerLine+1)
 	}
 	return hunk, index, nil
 }
 
+func isPatchChangeLine(line string) bool {
+	if line == "" {
+		return true
+	}
+	prefix := line[0]
+	return prefix == ' ' || prefix == '+' || prefix == '-'
+}
+
 func isPatchSectionHeader(line string) bool {
+	line = strings.TrimSpace(line)
 	return strings.HasPrefix(line, applyPatchUpdatePrefix) ||
 		strings.HasPrefix(line, applyPatchAddPrefix) ||
 		strings.HasPrefix(line, applyPatchDeletePrefix)
@@ -690,22 +735,46 @@ func applyPatchHunks(content string, hunks []patchHunk) (string, error) {
 			}
 		}
 
-		start := locateHunk(lines, oldLines, cursor)
-		if start < 0 {
-			return "", fmt.Errorf("无法定位 hunk: %s", hunk.Header)
+		searchCursor := cursor
+		if contextLine := hunkChangeContextLine(hunk.Header); contextLine != "" {
+			contextStart := locateHunk(lines, []string{contextLine}, searchCursor, false)
+			if contextStart < 0 {
+				return "", buildPatchHunkNotFoundError(hunk, []string{contextLine}, "未找到 @@ 上下文行")
+			}
+			searchCursor = contextStart + 1
 		}
-		touchesEOF := start+len(oldLines) == len(lines)
 
-		updated := make([]string, 0, len(lines)-len(oldLines)+len(newLines))
+		matchOldLines := oldLines
+		matchNewLines := newLines
+		start := len(lines)
+		if len(matchOldLines) > 0 {
+			start = locateHunk(lines, matchOldLines, searchCursor, hunk.EndOfFile)
+			if start < 0 && matchOldLines[len(matchOldLines)-1] == "" {
+				trimmedOldLines := matchOldLines[:len(matchOldLines)-1]
+				trimmedNewLines := matchNewLines
+				if len(trimmedNewLines) > 0 && trimmedNewLines[len(trimmedNewLines)-1] == "" {
+					trimmedNewLines = trimmedNewLines[:len(trimmedNewLines)-1]
+				}
+				if retryStart := locateHunk(lines, trimmedOldLines, searchCursor, hunk.EndOfFile); retryStart >= 0 {
+					matchOldLines = trimmedOldLines
+					matchNewLines = trimmedNewLines
+					start = retryStart
+				}
+			}
+		}
+		if start < 0 {
+			return "", buildPatchHunkNotFoundError(hunk, oldLines, "未找到期望旧内容")
+		}
+		touchesEOF := start+len(matchOldLines) == len(lines)
+
+		updated := make([]string, 0, len(lines)-len(matchOldLines)+len(matchNewLines))
 		updated = append(updated, lines[:start]...)
-		updated = append(updated, newLines...)
-		updated = append(updated, lines[start+len(oldLines):]...)
+		updated = append(updated, matchNewLines...)
+		updated = append(updated, lines[start+len(matchOldLines):]...)
 		lines = updated
-		cursor = start + len(newLines)
+		cursor = start + len(matchNewLines)
 
-		if hunk.EndOfFile {
-			trailingNewline = false
-		} else if touchesEOF {
+		if touchesEOF {
 			trailingNewline = true
 		}
 	}
@@ -717,43 +786,173 @@ func applyPatchHunks(content string, hunks []patchHunk) (string, error) {
 	return result, nil
 }
 
-func locateHunk(lines []string, expected []string, cursor int) int {
+func locateHunk(lines []string, expected []string, cursor int, eof bool) int {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(lines) {
+		cursor = len(lines)
+	}
 	if len(expected) == 0 {
-		if cursor < 0 {
-			return 0
-		}
-		if cursor > len(lines) {
+		if eof {
 			return len(lines)
 		}
 		return cursor
 	}
-	if cursor < 0 {
-		cursor = 0
+	if len(expected) > len(lines) {
+		return -1
 	}
 
-	for _, start := range []int{cursor, 0} {
-		for index := start; index+len(expected) <= len(lines); index++ {
-			if patchSliceEqual(lines[index:index+len(expected)], expected) {
-				return index
+	maxStart := len(lines) - len(expected)
+	if eof {
+		tailStart := maxStart
+		for _, matcher := range patchLineMatchers() {
+			if patchSliceMatches(lines[tailStart:tailStart+len(expected)], expected, matcher) {
+				return tailStart
 			}
 		}
-		if start == 0 {
-			break
+		return -1
+	}
+
+	for _, matcher := range patchLineMatchers() {
+		for _, searchRange := range hunkSearchRanges(cursor, maxStart) {
+			for index := searchRange.start; index <= searchRange.end; index++ {
+				if patchSliceMatches(lines[index:index+len(expected)], expected, matcher) {
+					return index
+				}
+			}
 		}
 	}
 	return -1
 }
 
-func patchSliceEqual(left, right []string) bool {
+type hunkSearchRange struct {
+	start int
+	end   int
+}
+
+func hunkSearchRanges(cursor int, maxStart int) []hunkSearchRange {
+	if maxStart < 0 {
+		return nil
+	}
+	if cursor > maxStart {
+		cursor = maxStart + 1
+	}
+	ranges := make([]hunkSearchRange, 0, 2)
+	if cursor <= maxStart {
+		ranges = append(ranges, hunkSearchRange{start: cursor, end: maxStart})
+	}
+	if cursor > 0 {
+		ranges = append(ranges, hunkSearchRange{start: 0, end: cursor - 1})
+	}
+	return ranges
+}
+
+type patchLineMatcher func(actual string, expected string) bool
+
+func patchLineMatchers() []patchLineMatcher {
+	return []patchLineMatcher{
+		func(actual string, expected string) bool {
+			return actual == expected
+		},
+		func(actual string, expected string) bool {
+			return strings.TrimRightFunc(actual, unicode.IsSpace) == strings.TrimRightFunc(expected, unicode.IsSpace)
+		},
+		func(actual string, expected string) bool {
+			return strings.TrimSpace(actual) == strings.TrimSpace(expected)
+		},
+		func(actual string, expected string) bool {
+			return normalizePatchComparableLine(actual) == normalizePatchComparableLine(expected)
+		},
+	}
+}
+
+func patchSliceMatches(left, right []string, matcher patchLineMatcher) bool {
 	if len(left) != len(right) {
 		return false
 	}
 	for index := range left {
-		if left[index] != right[index] {
+		if !matcher(left[index], right[index]) {
 			return false
 		}
 	}
 	return true
+}
+
+func normalizePatchComparableLine(line string) string {
+	line = strings.TrimSpace(line)
+	var builder strings.Builder
+	builder.Grow(len(line))
+	for _, char := range line {
+		switch char {
+		case '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212':
+			builder.WriteRune('-')
+		case '\u2018', '\u2019', '\u201a', '\u201b':
+			builder.WriteRune('\'')
+		case '\u201c', '\u201d', '\u201e', '\u201f':
+			builder.WriteRune('"')
+		case '\u00a0', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006',
+			'\u2007', '\u2008', '\u2009', '\u200a', '\u202f', '\u205f', '\u3000':
+			builder.WriteRune(' ')
+		default:
+			builder.WriteRune(char)
+		}
+	}
+	return builder.String()
+}
+
+func hunkChangeContextLine(header string) string {
+	header = strings.TrimRight(header, "\r")
+	if header == "@@" {
+		return ""
+	}
+	if strings.HasPrefix(header, "@@ ") {
+		return strings.TrimPrefix(header, "@@ ")
+	}
+	return ""
+}
+
+func buildPatchHunkNotFoundError(hunk patchHunk, expected []string, reason string) error {
+	header := strings.TrimSpace(hunk.Header)
+	if header == "" {
+		header = "@@"
+	}
+	return fmt.Errorf(
+		"无法定位 hunk: %s；%s。请先用 view/grep 确认文件中的最新上下文，或使用更靠近目标位置的 @@ 函数/类上下文。\n期望内容:\n%s",
+		header,
+		reason,
+		formatPatchExpectedLines(expected),
+	)
+}
+
+func formatPatchExpectedLines(lines []string) string {
+	if len(lines) == 0 {
+		return "(空旧内容)"
+	}
+	const maxLines = 12
+	limit := len(lines)
+	if limit > maxLines {
+		limit = maxLines
+	}
+	preview := make([]string, 0, limit+1)
+	for _, line := range lines[:limit] {
+		preview = append(preview, truncateDiagnosticText(line, 200))
+	}
+	if len(lines) > limit {
+		preview = append(preview, fmt.Sprintf("... 省略 %d 行", len(lines)-limit))
+	}
+	return strings.Join(preview, "\n")
+}
+
+func truncateDiagnosticText(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "..."
 }
 
 func detectLineEnding(content string) string {
