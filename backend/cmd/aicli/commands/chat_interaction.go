@@ -40,6 +40,7 @@ type chatInteractionCoordinator struct {
 	promptSeq               uint64
 	promptAdvanceFn         func() bool
 	liveStreamFn            func() bool
+	waitingActive           bool
 
 	reasoningActive     bool
 	reasoningRendered   bool
@@ -214,12 +215,62 @@ func (c *chatInteractionCoordinator) RefreshStatus(state string) {
 	c.updateSurfaceStatusLocked(state)
 }
 
+func (c *chatInteractionCoordinator) StartWaiting() {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
+	if c.promptVisible {
+		c.clearVisiblePromptLocked()
+		c.promptVisible = false
+		c.promptInput = ""
+		c.promptCursor = 0
+		c.promptRenderedOnSurface = false
+		c.promptPasteActive = false
+	}
+	c.waitingActive = true
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+}
+
+func (c *chatInteractionCoordinator) ClearWaiting() {
+	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown || !c.waitingActive {
+		return
+	}
+	c.waitingActive = false
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+}
+
+func (c *chatInteractionCoordinator) IsReady() bool {
+	if c == nil {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.isReadyLocked()
+}
+
+func (c *chatInteractionCoordinator) isReadyLocked() bool {
+	return c != nil && !c.shutdown && !c.waitingActive && !c.thinkingActive && !c.streamingActive && !c.reasoningActive
+}
+
 func (c *chatInteractionCoordinator) currentSurfaceStateLocked() string {
 	if c.streamingActive {
 		return "Streaming"
 	}
 	if c.thinkingActive || c.reasoningActive {
 		return "Thinking"
+	}
+	if c.waitingActive {
+		return "Waiting"
 	}
 	return "Ready"
 }
@@ -902,8 +953,9 @@ func (c *chatInteractionCoordinator) SetPromptInputSnapshot(snapshot ui.LineEdit
 	c.promptCursor = clampPromptCursor(snapshot.Cursor, input)
 	c.promptPasteActive = snapshot.PasteActive
 	if c.promptVisible && c.promptRenderedOnSurface && c.writer == os.Stdout && c.surface != nil {
-		c.surface.SetPromptRows(c.currentPromptDisplayRowsLocked())
-		c.setCurrentPromptCursorLocked()
+		rows := c.currentPromptDisplayRowsLocked()
+		cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
+		c.surface.TrackPromptInputState(formatSessionUserPrompt(c.session), input, rows, cursorRow, cursorCol)
 	}
 }
 
@@ -989,6 +1041,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.promptCursor = 0
 	c.promptRenderedOnSurface = false
 	c.promptPasteActive = false
+	c.waitingActive = false
 	c.thinkingActive = false
 	c.streamingActive = false
 	c.reasoningActive = false
@@ -1371,7 +1424,7 @@ func (c *chatInteractionCoordinator) resetStreamLocked() {
 	c.streamDisplayLines = 0
 	c.streamBuffer.Reset()
 	if !c.thinkingActive && !c.reasoningActive {
-		c.updateSurfaceStatusLocked("Ready")
+		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	}
 }
 
@@ -1382,7 +1435,7 @@ func (c *chatInteractionCoordinator) resetReasoningLocked() {
 	c.reasoningMeta = ""
 	c.reasoningBuffer.Reset()
 	if !c.thinkingActive && !c.streamingActive {
-		c.updateSurfaceStatusLocked("Ready")
+		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 	}
 }
 

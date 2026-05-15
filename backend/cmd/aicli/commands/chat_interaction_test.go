@@ -109,6 +109,41 @@ func TestChatInteractionCoordinator_RenderSubmittedUserInputWritesUserBlock(t *t
 	}
 }
 
+func TestChatInteractionCoordinator_WaitingStateBlocksCommandInput(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+
+	if !chatInputCommandAllowed(session, "/help") {
+		t.Fatal("expected slash commands to be accepted while ready")
+	}
+
+	coord.StartWaiting()
+	if got := coord.currentSurfaceStateForTest(); got != "Waiting" {
+		t.Fatalf("expected waiting state after prompt submission, got %q", got)
+	}
+	if chatInputCommandAllowed(session, "/help") {
+		t.Fatal("expected slash commands to be blocked while waiting")
+	}
+	if !chatInputCommandAllowed(session, "normal prompt") {
+		t.Fatal("expected normal prompts not to be treated as slash commands")
+	}
+
+	coord.ClearWaiting()
+	if got := coord.currentSurfaceStateForTest(); got != "Ready" {
+		t.Fatalf("expected ready state after waiting clears, got %q", got)
+	}
+	if !chatInputCommandAllowed(session, "/help") {
+		t.Fatal("expected slash commands to be accepted after ready")
+	}
+}
+
+func (c *chatInteractionCoordinator) currentSurfaceStateForTest() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.currentSurfaceStateLocked()
+}
+
 func TestRenderSubmittedUserInputEchoSkipsLegacyPromptPath(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)

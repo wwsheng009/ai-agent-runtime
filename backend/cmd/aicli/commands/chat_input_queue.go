@@ -40,6 +40,8 @@ type chatInputQueue struct {
 	draftLines  int
 	draftActive bool
 	readyText   string
+
+	commandGate func(string) bool
 }
 
 func newChatInputQueue(reader *bufio.Reader) *chatInputQueue {
@@ -64,6 +66,9 @@ func ensureChatInputQueue(session *ChatSession) *chatInputQueue {
 	}
 	session.InputQueue.setDraftNotifier(func(active bool, lines int, text string) {
 		notifyChatInputDraftState(session, active, lines, text)
+	})
+	session.InputQueue.setCommandGate(func(text string) bool {
+		return chatInputCommandAllowed(session, text)
 	})
 	session.InputQueue.startPump()
 	return session.InputQueue
@@ -227,6 +232,9 @@ func (q *chatInputQueue) stdinReadLoop(events chan<- stdinLineEvent) {
 }
 
 func (q *chatInputQueue) routeInputText(text string) {
+	if q.rejectCommandInput(text) {
+		return
+	}
 	q.routeLine(chatQueuedInput{
 		Text:       text,
 		Source:     "stdin",
@@ -297,6 +305,9 @@ func (q *chatInputQueue) consumeDraft() (string, bool) {
 func (q *chatInputQueue) confirmDraft() bool {
 	text, ok := q.consumeDraft()
 	if !ok {
+		return false
+	}
+	if q.rejectCommandInput(text) {
 		return false
 	}
 	q.draftMu.Lock()
@@ -379,6 +390,25 @@ func (q *chatInputQueue) setDraftNotifier(fn func(active bool, lines int, text s
 	q.draftMu.Lock()
 	q.draftNotify = fn
 	q.draftMu.Unlock()
+}
+
+func (q *chatInputQueue) setCommandGate(fn func(string) bool) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	q.commandGate = fn
+	q.mu.Unlock()
+}
+
+func (q *chatInputQueue) rejectCommandInput(text string) bool {
+	if q == nil || !isSlashCommandInput(text) {
+		return false
+	}
+	q.mu.RLock()
+	gate := q.commandGate
+	q.mu.RUnlock()
+	return gate != nil && !gate(text)
 }
 
 func (q *chatInputQueue) shouldStageBufferedInput(text string, bufferedInput bool) bool {
@@ -548,10 +578,7 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 			defer completion.Clear()
 			line, err := session.InputBox.ReadWithHistoryPromptWithHooks(prompt, ui.LineEditorHooks{
 				OnChange: func(snapshot ui.LineEditorSnapshot) {
-					if session.Interaction != nil {
-						session.Interaction.SetPromptInputSnapshot(snapshot)
-					}
-					completion.UpdateSnapshot(snapshot)
+					handleChatLineEditorChange(session, completion, snapshot)
 				},
 				OnBeforeTerminalWrite: func(snapshot ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
 					if session.Interaction != nil {
@@ -601,9 +628,7 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 		}
 		line, err := session.InputBox.ReadWithHistoryPromptWithHooks(prompt, ui.LineEditorHooks{
 			OnChange: func(snapshot ui.LineEditorSnapshot) {
-				if session.Interaction != nil {
-					session.Interaction.SetPromptInputSnapshot(snapshot)
-				}
+				handleChatLineEditorChange(session, nil, snapshot)
 			},
 			OnBeforeTerminalWrite: func(snapshot ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
 				if session.Interaction != nil {
@@ -646,6 +671,19 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 	return "", err
 }
 
+func handleChatLineEditorChange(session *ChatSession, completion *chatSlashCompletionController, snapshot ui.LineEditorSnapshot) {
+	// Slash popup rendering must preserve the cursor from the last completed
+	// editor redraw. The new snapshot is tracked after popup rendering so the
+	// following editor redraw remains the only writer that lands on the new
+	// cursor position.
+	if completion != nil {
+		completion.UpdateSnapshot(snapshot)
+	}
+	if session != nil && session.Interaction != nil {
+		session.Interaction.SetPromptInputSnapshot(snapshot)
+	}
+}
+
 func shouldUseInteractiveLineEditor(session *ChatSession) bool {
 	if session == nil || session.InputBox == nil {
 		return false
@@ -657,7 +695,21 @@ func shouldEnableSlashCompletion(session *ChatSession) bool {
 	if session == nil || session.Surface == nil {
 		return false
 	}
-	return session.Surface.Enabled()
+	return session.Surface.Enabled() && chatInputCommandAllowed(session, "/")
+}
+
+func isSlashCommandInput(text string) bool {
+	return strings.HasPrefix(strings.TrimSpace(text), "/")
+}
+
+func chatInputCommandAllowed(session *ChatSession, text string) bool {
+	if !isSlashCommandInput(text) {
+		return true
+	}
+	if session == nil || session.Interaction == nil {
+		return true
+	}
+	return session.Interaction.IsReady()
 }
 
 func chatInteractiveReadPriorityLine(session *ChatSession, ctx context.Context) (string, error) {

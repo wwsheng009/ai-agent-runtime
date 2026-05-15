@@ -14,6 +14,10 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	if session.IsInterrupted() {
 		return "", fmt.Errorf("用户中断")
 	}
+	if session.Interaction != nil {
+		session.Interaction.StartWaiting()
+		defer session.Interaction.ClearWaiting()
+	}
 	ensureChatSystemPromptMessage(session)
 	beginChatUserTurn(session, userMessage)
 	executor := ensureChatExecutor(session)

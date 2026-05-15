@@ -9,7 +9,6 @@ import (
 )
 
 const (
-	slashCompletionHintLine      = "提示: ↑↓ 选择，Tab/Enter 接受，Esc 关闭"
 	slashCompletionShellHintLine = "Shell 快捷: !git status"
 	slashCompletionPopupOwner    = "slash_completion"
 )
@@ -356,11 +355,8 @@ func (c *chatSlashCompletionController) renderLocked() {
 	if signature == c.renderedSignature {
 		return
 	}
-	if c.renderedSignature != "" {
-		c.session.Surface.ClearPopupForOwnerPreserveCursor(slashCompletionPopupOwner)
-	}
 
-	c.session.Surface.ShowPopupPreserveCursorForOwner(lines, slashCompletionPopupOwner)
+	c.session.Surface.ShowPopupPreserveCursorForOwnerBelowPrompt(lines, slashCompletionPopupOwner)
 	c.renderedSignature = signature
 }
 
@@ -405,26 +401,18 @@ func renderSlashCommandCompletionPopup(state chatSlashCompletionState, width int
 		width = 80
 	}
 
-	title := "命令补全"
 	noMatchLabel := "未找到匹配命令"
 	if state.Context.InArguments {
-		title = "参数补全"
 		noMatchLabel = "未找到匹配参数"
-		if command := strings.TrimSpace(state.Context.Command); command != "" {
-			title = fmt.Sprintf("%s: %s", title, command)
-		}
-	} else if query := strings.TrimSpace(state.Query); query != "" {
-		title = fmt.Sprintf("命令补全: %s", query)
 	}
 
 	if len(state.Candidates) == 0 {
-		lines := []string{title}
+		lines := make([]string, 0, 1)
 		if warning := strings.TrimSpace(state.Warning); warning != "" {
 			lines = append(lines, warning)
 		} else {
 			lines = append(lines, fmt.Sprintf("%s: %s", noMatchLabel, state.Query))
 		}
-		lines = append(lines, slashCompletionHintLine)
 		return clampSlashCompletionPopupLines(lines, width)
 	}
 
@@ -458,7 +446,6 @@ func renderSlashCommandCompletionPopup(state chatSlashCompletionState, width int
 	}
 
 	lines := make([]string, 0, 2+len(visible))
-	lines = append(lines, title)
 	if warning := strings.TrimSpace(state.Warning); warning != "" {
 		lines = append(lines, warning)
 	}
@@ -468,10 +455,9 @@ func renderSlashCommandCompletionPopup(state chatSlashCompletionState, width int
 	if extraLine != "" {
 		lines = append(lines, extraLine)
 	}
-	if !state.Context.InArguments && strings.TrimSpace(state.Query) == "/" && len(lines)+2 <= slashCompletionMaxPopupRows {
+	if !state.Context.InArguments && strings.TrimSpace(state.Query) == "/" && len(lines)+1 <= slashCompletionMaxPopupRows {
 		lines = append(lines, slashCompletionShellHintLine)
 	}
-	lines = append(lines, slashCompletionHintLine)
 	return clampSlashCompletionPopupLines(lines, width)
 }
 

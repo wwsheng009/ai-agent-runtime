@@ -54,6 +54,30 @@ func TestChatInputQueue_SingleLineStillSubmitsImmediately(t *testing.T) {
 	}
 }
 
+func TestChatInputQueue_DropsSlashCommandWhenCommandGateRejects(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setCommandGate(func(text string) bool {
+		return false
+	})
+
+	queue.routeInputText("/help\n")
+	select {
+	case item := <-queue.lines:
+		t.Fatalf("expected rejected slash command not to be queued, got %q", item.Text)
+	default:
+	}
+
+	queue.routeInputText("normal prompt\n")
+	select {
+	case item := <-queue.lines:
+		if strings.TrimSpace(item.Text) != "normal prompt" {
+			t.Fatalf("unexpected queued prompt: %q", item.Text)
+		}
+	default:
+		t.Fatal("expected normal prompt to remain queueable")
+	}
+}
+
 func TestChatInputQueue_MultilinePasteStaysDraftUntilEnter(t *testing.T) {
 	oldDelay := inputPasteSettleDelay
 	inputPasteSettleDelay = func() time.Duration {

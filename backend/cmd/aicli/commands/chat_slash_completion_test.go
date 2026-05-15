@@ -282,17 +282,17 @@ func TestRenderSlashCommandCompletionPopup(t *testing.T) {
 
 	state := buildSlashCompletionState("/s", len([]rune("/s")), -1)
 	lines := renderSlashCommandCompletionPopup(state, 36)
-	if len(lines) != 8 {
-		t.Fatalf("expected 8 rendered lines, got %d: %#v", len(lines), lines)
+	if len(lines) != 6 {
+		t.Fatalf("expected 6 rendered lines, got %d: %#v", len(lines), lines)
 	}
-	if !strings.HasPrefix(lines[0], "命令补全") {
-		t.Fatalf("expected title line, got %q", lines[0])
+	if strings.HasPrefix(lines[0], "命令补全") {
+		t.Fatalf("expected command completion title line to be omitted, got %q", lines[0])
 	}
-	if !strings.HasPrefix(lines[1], "> /s") {
-		t.Fatalf("expected selected exact command on the second line, got %q", lines[1])
+	if !strings.HasPrefix(lines[0], "> /s") {
+		t.Fatalf("expected selected exact command on the first line, got %q", lines[0])
 	}
-	if !strings.Contains(lines[len(lines)-1], "提示") {
-		t.Fatalf("expected hint line at the end, got %q", lines[len(lines)-1])
+	if strings.Contains(strings.Join(lines, "\n"), "提示: ↑↓") {
+		t.Fatalf("expected slash usage hint line to be omitted, got %#v", lines)
 	}
 	for i, line := range lines {
 		if ui.DisplayWidth(line) > 36 {
@@ -305,10 +305,10 @@ func TestRenderSlashCommandCompletionPopup(t *testing.T) {
 		Query:   "/zzz",
 		Warning: "未找到匹配命令: /zzz",
 	}, 40)
-	if len(empty) != 3 {
-		t.Fatalf("expected no-match popup to render title, warning, and hint, got %#v", empty)
+	if len(empty) != 1 {
+		t.Fatalf("expected no-match popup to render warning only, got %#v", empty)
 	}
-	if !strings.Contains(empty[1], "未找到匹配命令") {
+	if !strings.Contains(empty[0], "未找到匹配命令") {
 		t.Fatalf("expected warning line, got %#v", empty)
 	}
 

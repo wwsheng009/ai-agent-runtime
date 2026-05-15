@@ -67,27 +67,194 @@ func TestFixedBottomSurface_ShowPopupReservesInputRowBelowPopup(t *testing.T) {
 		surface.ShowPopup([]string{
 			"命令补全: /",
 			"> /help",
-			"提示: ↑↓ 选择，Tab/Enter 接受，Esc 关闭",
 		})
 	})
 
-	if surface.popupRenderedRows != 3 {
-		t.Fatalf("expected three popup rows, got %d", surface.popupRenderedRows)
+	if surface.popupRenderedRows != 2 {
+		t.Fatalf("expected two popup rows, got %d", surface.popupRenderedRows)
 	}
 	if surface.popupRenderedGapRows != 1 {
 		t.Fatalf("expected one reserved input gap row, got %d", surface.popupRenderedGapRows)
 	}
-	if surface.bottomRowsLocked() != 5 {
+	if surface.bottomRowsLocked() != 4 {
 		t.Fatalf("expected popup rows + input gap + status, got %d", surface.bottomRowsLocked())
 	}
-	if got := surface.popupStartRowLocked(surface.popupRenderedRows, surface.popupRenderedGapRows); got != 20 {
-		t.Fatalf("expected popup to start at row 20 so row 23 remains for input, got %d", got)
+	if got := surface.popupStartRowLocked(surface.popupRenderedRows, surface.popupRenderedGapRows); got != 21 {
+		t.Fatalf("expected popup to start at row 21 so row 23 remains for input, got %d", got)
 	}
-	if strings.Contains(output, "\x1b[23;1H提示") {
-		t.Fatalf("expected hint line not to render on input row 23, got %q", output)
+	if strings.Contains(output, "提示: ↑↓") {
+		t.Fatalf("expected slash usage hint line to be omitted, got %q", output)
 	}
-	if !strings.Contains(output, "\x1b[22;1H") {
-		t.Fatalf("expected last popup line to render on row 22, got %q", output)
+	if !strings.Contains(output, "\x1b[21;1H") {
+		t.Fatalf("expected last popup line to render on row 21, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ShowPopupBelowPromptExpandsDownward(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+		if !surface.SetPromptInputState("> ", "/he", 1, 0, 5) {
+			t.Fatal("expected enabled surface to track prompt input")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{
+			"命令补全: /",
+			"> /help",
+		}, "slash_completion")
+	})
+
+	if surface.bottomRowsLocked() != 4 {
+		t.Fatalf("expected prompt + popup rows + status, got %d", surface.bottomRowsLocked())
+	}
+	if got := surface.outputBottomRowLocked(); got != 20 {
+		t.Fatalf("expected output region to shift above prompt and popup, got row %d", got)
+	}
+	if got := surface.promptBottomRowLocked(); got != 21 {
+		t.Fatalf("expected prompt row above downward popup, got row %d", got)
+	}
+	if surface.popupRenderedStartRow != 22 {
+		t.Fatalf("expected popup to start below prompt at row 22, got %d", surface.popupRenderedStartRow)
+	}
+	if !strings.Contains(output, "\x1b[1;22r\x1b[1;1H\x1b[22;1H\n\n\x1b[1;20r") {
+		t.Fatalf("expected output region to scroll up before reserving slash popup rows, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[1;20r") {
+		t.Fatalf("expected scroll region to shift above prompt and popup, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[21;1H\x1b[K") || !strings.Contains(output, "\x1b[21;1H> /he") {
+		t.Fatalf("expected prompt input row to move above slash popup, got %q", output)
+	}
+	if count := strings.Count(output, "\x1b[21;1H> /he"); count != 1 {
+		t.Fatalf("expected slash popup expansion to render prompt input once, got %d in %q", count, output)
+	}
+	if !strings.Contains(output, "\x1b[22;1H\x1b[K命令补全") {
+		t.Fatalf("expected slash popup to render below prompt, got %q", output)
+	}
+	if strings.Contains(output, "\x1b[21;1H\x1b[K命令补全") {
+		t.Fatalf("expected slash popup not to render on prompt row, got %q", output)
+	}
+	if strings.Contains(output, cursorSaveSequence) || strings.Contains(output, cursorRestoreSequence) {
+		t.Fatalf("expected downward popup render to move to prompt cursor instead of saved cursor restore, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[21;6H"+cursorShowSequence) {
+		t.Fatalf("expected downward popup render to leave cursor on lifted prompt row, got %q", output)
+	}
+
+	updateOutput := captureUIStdout(t, func() {
+		if !surface.SetPromptInputState("> ", "/help", 1, 0, 7) {
+			t.Fatal("expected enabled surface to update lifted prompt input")
+		}
+	})
+	if !strings.Contains(updateOutput, "\x1b[21;1H> /help") {
+		t.Fatalf("expected prompt updates to keep rendering above downward popup, got %q", updateOutput)
+	}
+	if strings.Contains(updateOutput, cursorSaveSequence) || strings.Contains(updateOutput, cursorRestoreSequence) {
+		t.Fatalf("expected prompt updates during downward popup to restore tracked prompt cursor directly, got %q", updateOutput)
+	}
+	if !strings.HasSuffix(updateOutput, "\x1b[21;8H"+cursorShowSequence) {
+		t.Fatalf("expected prompt update to leave cursor on lifted prompt row, got %q", updateOutput)
+	}
+
+	secondOutput := captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{
+			"命令补全: /h",
+			"> /help     显示命令帮助",
+		}, "slash_completion")
+	})
+	if strings.Contains(secondOutput, "\n\n") || strings.Contains(secondOutput, "\x1b[1;22r\x1b[1;1H\x1b[22;1H") {
+		t.Fatalf("expected same slash popup update not to scroll output again, got %q", secondOutput)
+	}
+	if !strings.Contains(secondOutput, "\x1b[21;1H> /help") {
+		t.Fatalf("expected same slash popup update to keep prompt row fixed, got %q", secondOutput)
+	}
+	if !strings.HasSuffix(secondOutput, "\x1b[21;8H"+cursorShowSequence) {
+		t.Fatalf("expected same slash popup update to leave cursor on lifted prompt row, got %q", secondOutput)
+	}
+
+	prefix, ok := surface.PromptCursorPrefix(0, 7)
+	if !ok || !strings.HasSuffix(prefix, "\x1b[21;8H") {
+		t.Fatalf("expected prompt cursor prefix to target row above popup, ok=%t prefix=%q", ok, prefix)
+	}
+
+	clearOutput := captureUIStdout(t, func() {
+		surface.ClearPopupForOwnerPreserveCursor("slash_completion")
+	})
+	if !strings.Contains(clearOutput, "\x1b[22;1H\x1b[K") || !strings.Contains(clearOutput, "\x1b[23;1H\x1b[K") {
+		t.Fatalf("expected downward popup rows to clear, got %q", clearOutput)
+	}
+	if !strings.Contains(clearOutput, "\x1b[21;1H\x1b[K") {
+		t.Fatalf("expected old lifted prompt row to clear when popup closes, got %q", clearOutput)
+	}
+	if !strings.Contains(clearOutput, "\x1b[23;1H\x1b[K") || !strings.Contains(clearOutput, "\x1b[23;1H> /help") {
+		t.Fatalf("expected prompt input row to return below after popup clears, got %q", clearOutput)
+	}
+	if strings.Contains(clearOutput, cursorSaveSequence) || strings.Contains(clearOutput, cursorRestoreSequence) {
+		t.Fatalf("expected downward popup clear to move to relocated prompt cursor instead of saved cursor restore, got %q", clearOutput)
+	}
+	if !strings.HasSuffix(clearOutput, "\x1b[23;8H"+cursorShowSequence) {
+		t.Fatalf("expected downward popup clear to leave cursor on restored prompt row, got %q", clearOutput)
+	}
+
+	reopenOutput := captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{
+			"命令补全: /",
+			"> /help",
+		}, "slash_completion")
+	})
+	if strings.Contains(reopenOutput, "\n\n") || strings.Contains(reopenOutput, "\x1b[1;22r\x1b[1;1H\x1b[22;1H") {
+		t.Fatalf("expected reopening slash popup without new output not to scroll output again, got %q", reopenOutput)
+	}
+	if !strings.Contains(reopenOutput, "\x1b[21;1H> /help") {
+		t.Fatalf("expected reopened slash popup to reuse lifted prompt row, got %q", reopenOutput)
+	}
+}
+
+func TestFixedBottomSurface_TrackPromptInputStateDoesNotRedraw(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		if !surface.TrackPromptInputState("> ", "/help", 1, 0, 7) {
+			t.Fatal("expected enabled surface to track prompt input")
+		}
+	})
+	if output != "" {
+		t.Fatalf("expected tracking active input to avoid terminal redraw, got %q", output)
+	}
+
+	prefix, ok := surface.PromptCursorPrefix(0, 3)
+	if !ok || !strings.HasSuffix(prefix, "\x1b[23;4H") {
+		t.Fatalf("expected prefix to target requested redraw start cursor, ok=%t prefix=%q", ok, prefix)
+	}
+
+	popupOutput := captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{
+			"命令补全: /h",
+			"> /help     显示命令帮助",
+		}, "slash_completion")
+	})
+	if !strings.Contains(popupOutput, "\x1b[21;1H> /help") {
+		t.Fatalf("expected later popup render to use tracked prompt input, got %q", popupOutput)
+	}
+	if !strings.HasSuffix(popupOutput, "\x1b[21;8H"+cursorShowSequence) {
+		t.Fatalf("expected later popup render to restore tracked cursor, got %q", popupOutput)
 	}
 }
 

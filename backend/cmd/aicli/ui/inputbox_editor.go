@@ -23,6 +23,8 @@ const (
 	bracketedPasteDisableSequence = "\x1b[?2004l"
 	cursorSaveSequence            = "\x1b[s"
 	cursorRestoreSequence         = "\x1b[u"
+	cursorHideSequence            = "\x1b[?25l"
+	cursorShowSequence            = "\x1b[?25h"
 	clearToEndSequence            = "\x1b[J"
 	escapeSequenceWait            = 30 * time.Millisecond
 )
@@ -322,7 +324,7 @@ func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt str
 			return
 		}
 		if prefix := terminalWritePrefix(render); prefix != "" {
-			_, _ = WriteTerminalText(writer, prefix+text)
+			_, _ = WriteTerminalText(writer, cursorHideSequence+prefix+text+cursorShowSequence)
 			return
 		}
 		_, _ = WriteTerminalText(writer, text)

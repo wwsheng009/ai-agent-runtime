@@ -952,6 +952,12 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 
 		// 处理命令
 		if strings.HasPrefix(input, "/") {
+			if !chatInputCommandAllowed(session, input) {
+				if session != nil && session.Interaction != nil {
+					session.Interaction.RenderAsyncLine("[input] 当前状态不是 Ready，暂不接受 slash 命令；请等待 Ready 后重试。")
+				}
+				continue
+			}
 			if dispatchChatCommand(session, input, noInteractive) {
 				break
 			}
@@ -970,6 +976,9 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			continue
 		}
 
+		if session.Interaction != nil {
+			session.Interaction.StartWaiting()
+		}
 		renderSubmittedUserInputEcho(session, input)
 
 		// 发送消息
