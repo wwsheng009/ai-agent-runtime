@@ -127,6 +127,8 @@ func resolveProviderModelsPath(loginProtocol string, provider config.Provider, o
 
 func defaultModelsPath(loginProtocol, baseURL string) string {
 	switch normalizeLoginProtocol(loginProtocol, "") {
+	case providerLoginProtocolOpenAIImage:
+		return "/v1/models"
 	case "gemini":
 		return "/v1beta/models"
 	case "codex-apikey", "codex-oauth":

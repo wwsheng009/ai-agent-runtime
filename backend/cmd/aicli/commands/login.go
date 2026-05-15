@@ -19,6 +19,7 @@ func NewLoginCommand(configProvider func() *config.Config) *cobra.Command {
 		Short: "新增或更新 provider 登录凭证",
 		Long:  "新增 provider 或修改现有 provider 的 base_url/API key/OAuth 凭证，校验 models endpoint 后写回 config.yaml。",
 		Example: `  aicli login --provider openai --protocol openai --base-url https://api.openai.com --api-key sk-...
+  aicli login --provider openai_image --protocol openai_image --base-url https://api.openai.com --api-key sk-...
   aicli login --provider local --protocol openai --base-url http://127.0.0.1:4000 --models-path /v1/models
   aicli login --provider codex --protocol codex-apikey --base-url https://api.openai.com --api-key sk-...
   aicli login --provider openai --base-url https://new.example.com --output json`,
@@ -27,7 +28,7 @@ func NewLoginCommand(configProvider func() *config.Config) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringP("provider", "p", "", "provider 名称；不存在时新建，存在时更新")
-	cmd.Flags().String("protocol", "", "登录协议（openai|anthropic|gemini|codex-apikey|codex-oauth）")
+	cmd.Flags().String("protocol", "", "登录协议（"+strings.Join(loginProtocolOptions(), "|")+"）")
 	cmd.Flags().String("mode", "", "认证模式（apikey|oauth，可由 protocol 推断）")
 	cmd.Flags().String("base-url", "", "provider base URL")
 	cmd.Flags().String("api-key", "", "API key；交互模式下建议留空后隐藏输入")
@@ -119,6 +120,16 @@ func renderLoginCommandResult(result *providerLoginResult, outputOptions structu
 	fmt.Printf("  Models:          %d\n", len(result.SupportedModels))
 	for _, model := range previewModelList(result.SupportedModels, 20) {
 		fmt.Printf("    - %s\n", model)
+	}
+	if len(result.ProviderConfigs) > 0 {
+		fmt.Printf("  Provider configs: %d\n", len(result.ProviderConfigs))
+		for _, item := range result.ProviderConfigs {
+			template := item.ProviderTemplate
+			if template == "" {
+				template = item.Protocol
+			}
+			fmt.Printf("    - %s (%s): %d models, default %s\n", item.ProviderName, template, len(item.SupportedModels), item.DefaultModel)
+		}
 	}
 	if len(result.ModelsSkippedByProtocol) > 0 {
 		fmt.Printf("  Models skipped:  %d by provider template\n", len(result.ModelsSkippedByProtocol))

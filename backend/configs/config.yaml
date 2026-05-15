@@ -461,9 +461,9 @@ providers:
           native_tools:
             image_generation: false
             images_generations_api: true
-      protocol: openai
+      protocol: openai_image
       support_types:
-        - openai
+        - openai_image
       supported_models:
         - gpt-image-1
         - gpt-image-1.5
@@ -939,9 +939,9 @@ providers:
           native_tools:
             image_generation: false
             images_generations_api: true
-      protocol: openai
+      protocol: openai_image
       support_types:
-        - openai
+        - openai_image
       supported_models:
         - sensenova-u1-fast
       timeout: 300s

@@ -170,7 +170,7 @@ func modelIDVariants(value string) []string {
 	if idx := strings.LastIndex(normalized, "/"); idx >= 0 && idx+1 < len(normalized) {
 		add(normalized[idx+1:])
 	}
-	if idx := strings.LastIndex(normalized, "."); idx >= 0 && idx+1 < len(normalized) {
+	if idx := strings.LastIndex(normalized, "."); idx >= 0 && idx+1 < len(normalized) && modelIDDotPrefixLooksNamespace(normalized[:idx]) {
 		add(normalized[idx+1:])
 	}
 	for _, variant := range append([]string(nil), out...) {
@@ -180,6 +180,23 @@ func modelIDVariants(value string) []string {
 		add(strings.TrimSuffix(variant, "-v1"))
 	}
 	return out
+}
+
+func modelIDDotPrefixLooksNamespace(prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return false
+	}
+	for _, r := range prefix {
+		if r >= '0' && r <= '9' {
+			return false
+		}
+		if (r >= 'a' && r <= 'z') || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func normalizeModelID(value string) string {

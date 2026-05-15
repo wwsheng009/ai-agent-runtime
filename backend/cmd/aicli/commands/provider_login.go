@@ -17,6 +17,9 @@ import (
 const (
 	providerAuthModeAPIKey = "api_key"
 	providerAuthModeOAuth  = "oauth"
+
+	providerLoginProtocolAuto        = "auto"
+	providerLoginProtocolOpenAIImage = "openai_image"
 )
 
 type providerLoginPrompter interface {
@@ -68,6 +71,7 @@ type providerLoginResult struct {
 	SupportedModels         []string                                  `json:"supported_models"`
 	DefaultModel            string                                    `json:"default_model"`
 	Models                  []providerModelInfo                       `json:"models,omitempty"`
+	ProviderConfigs         []providerLoginGeneratedProviderInfo      `json:"provider_configs,omitempty"`
 	ModelsSkippedByProtocol []providerLoginModelSkippedByProtocolInfo `json:"models_skipped_by_protocol,omitempty"`
 	ModelCardsApplied       []providerLoginModelCardAppliedInfo       `json:"model_cards_applied,omitempty"`
 	ModelCardsSkipped       []providerLoginModelCardSkippedInfo       `json:"model_cards_skipped,omitempty"`
@@ -85,6 +89,17 @@ type providerLoginModelCardAppliedInfo struct {
 	Model  string   `json:"model"`
 	CardID string   `json:"card_id"`
 	Fields []string `json:"fields,omitempty"`
+}
+
+type providerLoginGeneratedProviderInfo struct {
+	ProviderName     string   `json:"provider"`
+	Protocol         string   `json:"protocol"`
+	LoginProtocol    string   `json:"login_protocol"`
+	ProviderTemplate string   `json:"provider_template,omitempty"`
+	DefaultModel     string   `json:"default_model"`
+	SupportedModels  []string `json:"supported_models"`
+	Created          bool     `json:"created"`
+	Updated          bool     `json:"updated"`
 }
 
 type providerLoginModelCardSkippedInfo struct {
@@ -172,35 +187,41 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		candidate.APIKeyRef = apiKeyRef
 	}
 
-	modelsPath := resolveProviderModelsPath(loginProtocol, candidate, req.ModelsPath)
-	candidate.ModelsPath = modelsPath
-	modelsResult, err := validateProviderModels(providerModelsValidationRequest{
-		Config:        cfg,
-		ProviderName:  providerName,
-		Provider:      candidate,
-		LoginProtocol: loginProtocol,
-		ModelsPath:    modelsPath,
-		Timeout:       req.Timeout,
-	})
+	modelsResult, modelsPath, validationLoginProtocol, err := validateProviderLoginModels(cfg, providerName, candidate, loginProtocol, req.ModelsPath, req.Timeout)
 	if err != nil {
 		return nil, err
 	}
+	candidate.ModelsPath = modelsPath
 
 	modelCardCatalog, modelCardWarnings, err := loadProviderLoginModelCardCatalog(req, cfg)
 	if err != nil {
 		return nil, err
 	}
-	modelsForLogin, currentProviderTemplate, hasCurrentProviderTemplate, modelsSkippedByProtocol := filterProviderLoginModelsByProviderTemplate(providerName, loginProtocol, candidate, modelsResult.Models, modelCardCatalog)
-	if hasCurrentProviderTemplate {
+	modelsResult.Models = normalizeProviderLoginModelsForProtocol(modelsResult.Models, validationLoginProtocol)
+	groupingProtocol := loginProtocol
+	if isAutoLoginProtocol(groupingProtocol) {
+		groupingProtocol = validationLoginProtocol
+	}
+	modelGroups := groupProviderLoginModelsByProviderTemplate(providerName, groupingProtocol, loginProtocol, candidate, modelsResult.Models, modelCardCatalog, authMode)
+	primaryGroupIndex := selectPrimaryProviderLoginModelGroup(modelGroups, loginProtocol, candidate, modelCardCatalog)
+	if primaryGroupIndex < 0 {
+		return nil, fmt.Errorf("models endpoint returned no supported models")
+	}
+	primaryGroup := modelGroups[primaryGroupIndex]
+	loginProtocol = primaryGroup.LoginProtocol
+	runtimeProtocol = primaryGroup.RuntimeProtocol
+	candidate.Protocol = runtimeProtocol
+	modelsForLogin := primaryGroup.Models
+	if primaryGroup.HasTemplate {
 		previousProviderTemplate, hasPreviousProviderTemplate := resolveProviderLoginPreviousProviderTemplate(modelCardCatalog, existing, exists)
 		previousDefaults := providerLoginTemplateDefaults{}
 		if hasPreviousProviderTemplate {
 			previousDefaults = providerLoginProviderTemplateDefaults(existing, previousProviderTemplate)
 		}
-		applyProviderLoginProviderTemplateDefaults(&candidate, currentProviderTemplate, previousDefaults, hasPreviousProviderTemplate)
+		applyProviderLoginProviderTemplateDefaults(&candidate, primaryGroup.ProviderTemplate, previousDefaults, hasPreviousProviderTemplate)
 	}
 	if len(modelsForLogin) == 0 {
-		return nil, providerLoginAllModelsFilteredError(modelsSkippedByProtocol)
+		return nil, fmt.Errorf("models endpoint returned no supported models for protocol %q", loginProtocol)
 	}
 
 	supportedModels := providerModelIDs(modelsForLogin)
@@ -215,6 +236,23 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 	if len(discoveredCapabilities) > 0 {
 		candidate.ModelCapabilities = discoveredCapabilities
 	}
+	additionalProviders, additionalModelCardsApplied, additionalModelCardsSkipped, err := buildProviderLoginAdditionalGroupedProviders(
+		req,
+		cfg,
+		providerName,
+		candidate,
+		modelGroups,
+		primaryGroupIndex,
+		modelCardCatalog,
+		modelsResult.VerifiedAt,
+		authMode,
+	)
+	if err != nil {
+		return nil, err
+	}
+	modelCardsApplied = append(modelCardsApplied, additionalModelCardsApplied...)
+	modelCardsSkipped = append(modelCardsSkipped, additionalModelCardsSkipped...)
+	providerConfigs := providerLoginGeneratedProviderInfos(providerName, candidate, primaryGroup, exists, additionalProviders)
 
 	if !req.DryRun {
 		resolvedConfigPath, err := ensureWritableAICLIConfigPath(cfg, configPath)
@@ -242,6 +280,10 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 			if strings.TrimSpace(candidate.APIKeyRef) == "" {
 				candidate.APIKeyRef = apiKeyRef
 			}
+			for i := range additionalProviders {
+				additionalProviders[i].Provider.APIKey = ""
+				additionalProviders[i].Provider.APIKeyRef = candidate.APIKeyRef
+			}
 		}
 		if authMode == providerAuthModeOAuth {
 			if oauthRecord == nil {
@@ -261,6 +303,20 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 			candidate = *persisted
 		}
 		applyProviderLoginConfigUpdate(cfg, providerName, candidate, req.SetDefault)
+		for i := range additionalProviders {
+			grouped := additionalProviders[i]
+			update := buildProviderPersistenceUpdate(grouped.Name, grouped.Provider, grouped.LoginProtocol, grouped.Provider.AuthMode, grouped.SupportedModels, false, modelsResult.VerifiedAt)
+			persisted, err := config.UpdateProviderConfig(configPath, update)
+			if err != nil {
+				return nil, err
+			}
+			if persisted != nil {
+				grouped.Provider = *persisted
+			}
+			additionalProviders[i] = grouped
+			applyProviderLoginConfigUpdate(cfg, grouped.Name, grouped.Provider, false)
+		}
+		providerConfigs = providerLoginGeneratedProviderInfos(providerName, candidate, primaryGroup, exists, additionalProviders)
 	}
 
 	return &providerLoginResult{
@@ -277,7 +333,8 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		SupportedModels:         supportedModels,
 		DefaultModel:            defaultModel,
 		Models:                  modelsForLogin,
-		ModelsSkippedByProtocol: modelsSkippedByProtocol,
+		ProviderConfigs:         providerConfigs,
+		ModelsSkippedByProtocol: nil,
 		ModelCardsApplied:       modelCardsApplied,
 		ModelCardsSkipped:       modelCardsSkipped,
 		ModelCardWarnings:       modelCardWarnings,
@@ -556,6 +613,475 @@ func providerLoginModelCardWarnings(input []modelcard.Warning) []providerLoginMo
 		})
 	}
 	return output
+}
+
+func validateProviderLoginModels(
+	cfg *config.Config,
+	providerName string,
+	provider config.Provider,
+	loginProtocol string,
+	modelsPath string,
+	timeout time.Duration,
+) (*providerModelsValidationResult, string, string, error) {
+	if !isAutoLoginProtocol(loginProtocol) {
+		resolvedPath := resolveProviderModelsPath(loginProtocol, provider, modelsPath)
+		result, err := validateProviderModels(providerModelsValidationRequest{
+			Config:        cfg,
+			ProviderName:  providerName,
+			Provider:      provider,
+			LoginProtocol: loginProtocol,
+			ModelsPath:    resolvedPath,
+			Timeout:       timeout,
+		})
+		return result, resolvedPath, loginProtocol, err
+	}
+
+	attempts := providerLoginAutoValidationProtocols(provider)
+	errors := make([]string, 0, len(attempts))
+	for _, attempt := range attempts {
+		candidate := provider
+		candidate.Protocol = runtimeProtocolForLoginProtocol(attempt)
+		resolvedPath := resolveProviderModelsPath(attempt, candidate, modelsPath)
+		result, err := validateProviderModels(providerModelsValidationRequest{
+			Config:        cfg,
+			ProviderName:  providerName,
+			Provider:      candidate,
+			LoginProtocol: attempt,
+			ModelsPath:    resolvedPath,
+			Timeout:       timeout,
+		})
+		if err == nil {
+			return result, resolvedPath, attempt, nil
+		}
+		errors = append(errors, fmt.Sprintf("%s: %v", attempt, err))
+	}
+	return nil, "", "", fmt.Errorf("auto protocol models validation failed; attempts: %s", strings.Join(errors, " | "))
+}
+
+func providerLoginAutoValidationProtocols(provider config.Provider) []string {
+	if strings.EqualFold(provider.AuthMode, providerAuthModeOAuth) {
+		return []string{"codex-oauth"}
+	}
+	if strings.Contains(strings.ToLower(strings.TrimSpace(provider.BaseURL)), "chatgpt.com") {
+		return []string{"codex-apikey", "openai", "anthropic", "gemini"}
+	}
+	return []string{"openai", "anthropic", "gemini", "codex-apikey"}
+}
+
+func isAutoLoginProtocol(protocol string) bool {
+	return strings.EqualFold(strings.TrimSpace(protocol), providerLoginProtocolAuto)
+}
+
+func normalizeProviderLoginModelsForProtocol(models []providerModelInfo, loginProtocol string) []providerModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]providerModelInfo, 0, len(models))
+	for _, model := range models {
+		model.ID = normalizeProviderModelID(model.ID, loginProtocol)
+		if strings.TrimSpace(model.DisplayName) == "" {
+			model.DisplayName = model.ID
+		}
+		if strings.TrimSpace(model.ID) != "" {
+			out = append(out, model)
+		}
+	}
+	return dedupeProviderModels(out)
+}
+
+type providerLoginModelGroup struct {
+	Key              string
+	LoginProtocol    string
+	RuntimeProtocol  string
+	ProviderTemplate modelcard.ProviderTemplate
+	HasTemplate      bool
+	Models           []providerModelInfo
+}
+
+type providerLoginGroupedProvider struct {
+	Name             string
+	LoginProtocol    string
+	RuntimeProtocol  string
+	ProviderTemplate string
+	Provider         config.Provider
+	SupportedModels  []string
+	DefaultModel     string
+	Created          bool
+	Updated          bool
+}
+
+func groupProviderLoginModelsByProviderTemplate(
+	providerName, loginProtocol, requestedLoginProtocol string,
+	provider config.Provider,
+	models []providerModelInfo,
+	catalog *modelcard.Catalog,
+	authMode string,
+) []providerLoginModelGroup {
+	if len(models) == 0 {
+		return nil
+	}
+	runtimeProtocol := runtimeProtocolForLoginProtocol(loginProtocol)
+	currentTemplate, hasCurrentTemplate := resolveProviderLoginProviderTemplate(catalog, runtimeProtocol, provider)
+	ctx := modelcard.Context{
+		ProviderName:     providerName,
+		LoginProtocol:    loginProtocol,
+		RuntimeProtocol:  runtimeProtocol,
+		BaseURL:          provider.BaseURL,
+		ProviderTemplate: strings.TrimSpace(currentTemplate.ID),
+	}
+	groups := make([]providerLoginModelGroup, 0)
+	indexByKey := make(map[string]int)
+	for _, model := range models {
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		template, applied, hasTemplate := catalog.RecommendedProviderTemplate(ctx, modelID)
+		if imageTemplate, ok := providerLoginAutoImageModelTemplate(catalog, requestedLoginProtocol, modelID, applied, hasTemplate); ok {
+			template = imageTemplate
+			hasTemplate = true
+		}
+		if !hasTemplate && hasCurrentTemplate {
+			template = currentTemplate
+			hasTemplate = true
+		}
+		groupLoginProtocol := loginProtocolForProviderTemplate(template, hasTemplate, loginProtocol, authMode)
+		groupRuntimeProtocol := runtimeProtocolForLoginProtocol(groupLoginProtocol)
+		groupKey := providerLoginModelGroupKey(groupRuntimeProtocol, template, hasTemplate)
+		groupModel := model
+		groupModel.ID = normalizeProviderModelID(groupModel.ID, groupLoginProtocol)
+		if strings.TrimSpace(groupModel.ID) == "" {
+			continue
+		}
+		index, ok := indexByKey[groupKey]
+		if !ok {
+			index = len(groups)
+			indexByKey[groupKey] = index
+			groups = append(groups, providerLoginModelGroup{
+				Key:              groupKey,
+				LoginProtocol:    groupLoginProtocol,
+				RuntimeProtocol:  groupRuntimeProtocol,
+				ProviderTemplate: template,
+				HasTemplate:      hasTemplate,
+			})
+		}
+		groups[index].Models = append(groups[index].Models, groupModel)
+	}
+	for i := range groups {
+		groups[i].Models = dedupeProviderModels(groups[i].Models)
+	}
+	return groups
+}
+
+func providerLoginAutoImageModelTemplate(catalog *modelcard.Catalog, requestedLoginProtocol, modelID string, applied []modelcard.AppliedCard, hasTemplate bool) (modelcard.ProviderTemplate, bool) {
+	if !isAutoLoginProtocol(requestedLoginProtocol) || !providerLoginModelIDContainsImageKeyword(modelID) {
+		return modelcard.ProviderTemplate{}, false
+	}
+	if hasTemplate && !providerLoginRecommendationIsFallback(applied) {
+		return modelcard.ProviderTemplate{}, false
+	}
+	return catalog.ProviderTemplateForProtocol(providerLoginProtocolOpenAIImage)
+}
+
+func providerLoginModelIDContainsImageKeyword(modelID string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(modelID)), "image")
+}
+
+func providerLoginRecommendationIsFallback(applied []modelcard.AppliedCard) bool {
+	if len(applied) == 0 {
+		return false
+	}
+	for _, item := range applied {
+		if !item.Fallback {
+			return false
+		}
+	}
+	return true
+}
+
+func loginProtocolForProviderTemplate(template modelcard.ProviderTemplate, hasTemplate bool, fallbackLoginProtocol, authMode string) string {
+	if hasTemplate {
+		protocol := strings.ToLower(strings.TrimSpace(template.Protocol))
+		if protocol == "codex" {
+			if normalizeProviderAuthMode(authMode) == providerAuthModeOAuth && strings.EqualFold(fallbackLoginProtocol, "codex-oauth") {
+				return "codex-oauth"
+			}
+			return "codex-apikey"
+		}
+		if protocol != "" {
+			return protocol
+		}
+	}
+	if isAutoLoginProtocol(fallbackLoginProtocol) {
+		return "openai"
+	}
+	return normalizeLoginProtocol(fallbackLoginProtocol, authMode)
+}
+
+func providerLoginModelGroupKey(runtimeProtocol string, template modelcard.ProviderTemplate, hasTemplate bool) string {
+	if hasTemplate && strings.TrimSpace(template.ID) != "" {
+		return strings.ToLower(strings.TrimSpace(template.ID))
+	}
+	runtimeProtocol = strings.ToLower(strings.TrimSpace(runtimeProtocol))
+	if runtimeProtocol == "" {
+		return "openai"
+	}
+	return runtimeProtocol
+}
+
+func selectPrimaryProviderLoginModelGroup(groups []providerLoginModelGroup, requestedLoginProtocol string, provider config.Provider, catalog *modelcard.Catalog) int {
+	if len(groups) == 0 {
+		return -1
+	}
+	if !isAutoLoginProtocol(requestedLoginProtocol) {
+		runtimeProtocol := runtimeProtocolForLoginProtocol(requestedLoginProtocol)
+		if template, ok := resolveProviderLoginProviderTemplate(catalog, runtimeProtocol, provider); ok {
+			for i, group := range groups {
+				if group.HasTemplate && sameProviderLoginTemplateID(group.ProviderTemplate, template) {
+					return i
+				}
+			}
+		}
+		for i, group := range groups {
+			if strings.EqualFold(group.RuntimeProtocol, runtimeProtocol) {
+				return i
+			}
+		}
+	}
+	best := 0
+	for i := 1; i < len(groups); i++ {
+		if len(groups[i].Models) > len(groups[best].Models) {
+			best = i
+			continue
+		}
+		if len(groups[i].Models) == len(groups[best].Models) && providerLoginProtocolRank(groups[i].RuntimeProtocol) < providerLoginProtocolRank(groups[best].RuntimeProtocol) {
+			best = i
+		}
+	}
+	return best
+}
+
+func providerLoginProtocolRank(protocol string) int {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "openai":
+		return 0
+	case providerLoginProtocolOpenAIImage:
+		return 1
+	case "codex":
+		return 2
+	case "anthropic":
+		return 3
+	case "gemini":
+		return 4
+	default:
+		return 10
+	}
+}
+
+func buildProviderLoginAdditionalGroupedProviders(
+	req providerLoginRequest,
+	cfg *config.Config,
+	baseProviderName string,
+	baseProvider config.Provider,
+	groups []providerLoginModelGroup,
+	primaryGroupIndex int,
+	catalog *modelcard.Catalog,
+	verifiedAt string,
+	authMode string,
+) ([]providerLoginGroupedProvider, []providerLoginModelCardAppliedInfo, []providerLoginModelCardSkippedInfo, error) {
+	if normalizeProviderAuthMode(authMode) == providerAuthModeOAuth || len(groups) <= 1 {
+		return nil, nil, nil, nil
+	}
+	additional := make([]providerLoginGroupedProvider, 0, len(groups)-1)
+	applied := make([]providerLoginModelCardAppliedInfo, 0)
+	skipped := make([]providerLoginModelCardSkippedInfo, 0)
+	usedNames := map[string]struct{}{strings.ToLower(strings.TrimSpace(baseProviderName)): {}}
+	for i, group := range groups {
+		if i == primaryGroupIndex {
+			continue
+		}
+		name := providerLoginGroupedProviderName(baseProviderName, group, usedNames)
+		existing, exists := config.Provider{}, false
+		if cfg != nil && cfg.Providers.Items != nil {
+			existing, exists = cfg.Providers.Items[name]
+		}
+		provider := buildProviderLoginProviderForGroup(baseProvider, existing, exists, group, catalog)
+		provider.ModelsVerifiedAt = verifiedAt
+		supportedModels := providerModelIDs(group.Models)
+		defaultModel := resolveProviderLoginGroupedDefaultModel(req.DefaultModel, provider, supportedModels)
+		provider.SupportedModels = supportedModels
+		provider.DefaultModel = defaultModel
+		capabilities, groupApplied, groupSkipped := buildProviderLoginModelCapabilitiesForLogin(name, group.LoginProtocol, provider, group.Models, catalog)
+		if len(capabilities) > 0 {
+			provider.ModelCapabilities = capabilities
+		}
+		applied = append(applied, groupApplied...)
+		skipped = append(skipped, groupSkipped...)
+		additional = append(additional, providerLoginGroupedProvider{
+			Name:             name,
+			LoginProtocol:    group.LoginProtocol,
+			RuntimeProtocol:  group.RuntimeProtocol,
+			ProviderTemplate: providerLoginGroupTemplateID(group),
+			Provider:         provider,
+			SupportedModels:  supportedModels,
+			DefaultModel:     defaultModel,
+			Created:          !exists,
+			Updated:          exists,
+		})
+	}
+	return additional, applied, skipped, nil
+}
+
+func buildProviderLoginProviderForGroup(baseProvider, existing config.Provider, exists bool, group providerLoginModelGroup, catalog *modelcard.Catalog) config.Provider {
+	provider := existing
+	if !exists {
+		provider = config.Provider{}
+	}
+	provider.Enabled = true
+	provider.Protocol = group.RuntimeProtocol
+	provider.BaseURL = baseProvider.BaseURL
+	provider.APIKey = baseProvider.APIKey
+	provider.APIKeyRef = baseProvider.APIKeyRef
+	provider.AuthMode = providerAuthModeAPIKey
+	provider.AuthRef = ""
+	provider.ModelsPath = baseProvider.ModelsPath
+	if group.HasTemplate {
+		previousTemplate, hasPreviousTemplate := resolveProviderLoginPreviousProviderTemplate(catalog, existing, exists)
+		previousDefaults := providerLoginTemplateDefaults{}
+		if hasPreviousTemplate {
+			previousDefaults = providerLoginProviderTemplateDefaults(existing, previousTemplate)
+		}
+		applyProviderLoginProviderTemplateDefaults(&provider, group.ProviderTemplate, previousDefaults, hasPreviousTemplate)
+	}
+	return provider
+}
+
+func resolveProviderLoginGroupedDefaultModel(requested string, provider config.Provider, supported []string) string {
+	requested = strings.TrimSpace(requested)
+	if requested != "" && stringInListFold(requested, supported) {
+		return canonicalStringFromList(requested, supported)
+	}
+	if strings.TrimSpace(provider.DefaultModel) != "" && stringInListFold(provider.DefaultModel, supported) {
+		return canonicalStringFromList(provider.DefaultModel, supported)
+	}
+	if len(supported) == 0 {
+		return ""
+	}
+	return supported[0]
+}
+
+func providerLoginGroupedProviderName(baseProviderName string, group providerLoginModelGroup, used map[string]struct{}) string {
+	baseProviderName = strings.TrimSpace(baseProviderName)
+	if baseProviderName == "" {
+		baseProviderName = "provider"
+	}
+	suffix := strings.ToLower(strings.TrimSpace(group.RuntimeProtocol))
+	if suffix == "" {
+		suffix = "openai"
+	}
+	candidate := providerLoginSanitizeProviderName(baseProviderName + "_" + suffix)
+	if _, ok := used[strings.ToLower(candidate)]; !ok {
+		used[strings.ToLower(candidate)] = struct{}{}
+		return candidate
+	}
+	if group.HasTemplate {
+		templateSuffix := providerLoginProviderTemplateNameSuffix(group.ProviderTemplate)
+		if templateSuffix != "" && templateSuffix != suffix {
+			candidate = providerLoginSanitizeProviderName(baseProviderName + "_" + templateSuffix)
+			if _, ok := used[strings.ToLower(candidate)]; !ok {
+				used[strings.ToLower(candidate)] = struct{}{}
+				return candidate
+			}
+		}
+	}
+	for n := 2; ; n++ {
+		next := fmt.Sprintf("%s_%d", candidate, n)
+		if _, ok := used[strings.ToLower(next)]; !ok {
+			used[strings.ToLower(next)] = struct{}{}
+			return next
+		}
+	}
+}
+
+func providerLoginProviderTemplateNameSuffix(template modelcard.ProviderTemplate) string {
+	id := strings.ToLower(strings.TrimSpace(template.ID))
+	if id == "" {
+		return ""
+	}
+	parts := strings.Split(id, ".")
+	if len(parts) == 1 {
+		return providerLoginSanitizeProviderName(parts[0])
+	}
+	if parts[0] == strings.ToLower(strings.TrimSpace(template.Protocol)) && len(parts) > 1 {
+		return providerLoginSanitizeProviderName(strings.Join(parts, "_"))
+	}
+	return providerLoginSanitizeProviderName(strings.Join(parts, "_"))
+}
+
+func providerLoginSanitizeProviderName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "provider"
+	}
+	return out
+}
+
+func providerLoginGroupTemplateID(group providerLoginModelGroup) string {
+	if !group.HasTemplate {
+		return ""
+	}
+	return strings.TrimSpace(group.ProviderTemplate.ID)
+}
+
+func providerLoginGeneratedProviderInfos(
+	primaryName string,
+	primaryProvider config.Provider,
+	primaryGroup providerLoginModelGroup,
+	primaryExists bool,
+	additional []providerLoginGroupedProvider,
+) []providerLoginGeneratedProviderInfo {
+	if len(additional) == 0 {
+		return nil
+	}
+	infos := make([]providerLoginGeneratedProviderInfo, 0, len(additional)+1)
+	infos = append(infos, providerLoginGeneratedProviderInfo{
+		ProviderName:     primaryName,
+		Protocol:         primaryProvider.Protocol,
+		LoginProtocol:    primaryGroup.LoginProtocol,
+		ProviderTemplate: providerLoginGroupTemplateID(primaryGroup),
+		DefaultModel:     primaryProvider.DefaultModel,
+		SupportedModels:  append([]string(nil), primaryProvider.SupportedModels...),
+		Created:          !primaryExists,
+		Updated:          primaryExists,
+	})
+	for _, item := range additional {
+		infos = append(infos, providerLoginGeneratedProviderInfo{
+			ProviderName:     item.Name,
+			Protocol:         item.RuntimeProtocol,
+			LoginProtocol:    item.LoginProtocol,
+			ProviderTemplate: item.ProviderTemplate,
+			DefaultModel:     item.DefaultModel,
+			SupportedModels:  append([]string(nil), item.SupportedModels...),
+			Created:          item.Created,
+			Updated:          item.Updated,
+		})
+	}
+	return infos
 }
 
 func filterProviderLoginModelsByProviderTemplate(
@@ -1191,6 +1717,12 @@ func loginProtocolFromProvider(provider config.Provider, mode string) string {
 func normalizeLoginProtocol(protocol, mode string) string {
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
 	mode = normalizeProviderAuthMode(mode)
+	if protocol == providerLoginProtocolAuto {
+		return providerLoginProtocolAuto
+	}
+	if protocol == "openai-image" {
+		return providerLoginProtocolOpenAIImage
+	}
 	if protocol == "codex" {
 		if mode == providerAuthModeOAuth {
 			return "codex-oauth"
@@ -1219,6 +1751,8 @@ func runtimeProtocolForLoginProtocol(protocol string) string {
 	switch normalizeLoginProtocol(protocol, "") {
 	case "codex-apikey", "codex-oauth":
 		return "codex"
+	case providerLoginProtocolAuto:
+		return "openai"
 	default:
 		return normalizeLoginProtocol(protocol, "")
 	}
@@ -1226,27 +1760,31 @@ func runtimeProtocolForLoginProtocol(protocol string) string {
 
 func isSupportedLoginProtocol(protocol string) bool {
 	switch normalizeLoginProtocol(protocol, "") {
-	case "openai", "anthropic", "gemini", "codex-apikey", "codex-oauth":
+	case providerLoginProtocolAuto, "openai", providerLoginProtocolOpenAIImage, "anthropic", "gemini", "codex-apikey", "codex-oauth":
 		return true
 	default:
 		return false
 	}
 }
 
+func loginProtocolOptions() []string {
+	return []string{providerLoginProtocolAuto, "openai", providerLoginProtocolOpenAIImage, "codex-apikey", "anthropic", "gemini", "codex-oauth"}
+}
+
 func promptLoginProtocol(prompter providerLoginPrompter) (string, error) {
-	options := []string{"openai", "codex-apikey", "anthropic", "gemini", "codex-oauth"}
+	options := loginProtocolOptions()
 	prompter.PrintLine("请选择登录协议:")
 	for i, option := range options {
 		prompter.PrintLine(fmt.Sprintf("  [%d] %s", i+1, option))
 	}
 	for {
-		value, err := prompter.PromptText("协议编号或名称", "openai", true)
+		value, err := prompter.PromptText("协议编号或名称", "auto", true)
 		if err != nil {
 			return "", err
 		}
 		value = strings.TrimSpace(value)
 		if value == "" {
-			return "openai", nil
+			return providerLoginProtocolAuto, nil
 		}
 		for i, option := range options {
 			if value == fmt.Sprintf("%d", i+1) || strings.EqualFold(value, option) {

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -218,6 +219,78 @@ func TestRunProviderLogin_AppliesBuiltinModelCard(t *testing.T) {
 	}
 }
 
+func TestRunProviderLogin_OpenAICompatibleCodexModelsUseCodexTemplate(t *testing.T) {
+	codexModels := []string{
+		"codex-auto-review",
+		"gpt-5.2",
+		"gpt-5.2-openai-compact",
+		"gpt-5.3-codex",
+		"gpt-5.3-codex-openai-compact",
+		"gpt-5.4-nano",
+		"gpt-5.4-openai-compact",
+		"gpt-5.5",
+		"gpt-5.5-openai-compact",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		parts := make([]string, 0, len(codexModels))
+		for _, model := range codexModels {
+			parts = append(parts, fmt.Sprintf(`{"id":%q}`, model))
+		}
+		_, _ = w.Write([]byte(`{"data":[` + strings.Join(parts, ",") + `]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "superapi",
+		LoginProtocol: "openai",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.Protocol != "codex" || result.LoginProtocol != "codex-apikey" {
+		t.Fatalf("expected codex provider selected from model metadata, got %+v", result)
+	}
+	if strings.Join(result.SupportedModels, ",") != strings.Join(codexModels, ",") {
+		t.Fatalf("unexpected supported models: %+v", result.SupportedModels)
+	}
+	if len(result.ModelCardsApplied) != len(codexModels) {
+		t.Fatalf("expected one codex model card per model, got %+v", result.ModelCardsApplied)
+	}
+	for _, applied := range result.ModelCardsApplied {
+		if applied.CardID == "fallback.openai.chat" {
+			t.Fatalf("codex-compatible model still used openai chat fallback: %+v", result.ModelCardsApplied)
+		}
+	}
+
+	provider := cfg.Providers.Items["superapi"]
+	if provider.Protocol != "codex" || provider.APIPath != "/v1/responses" || provider.ForwardURL != "/v1/responses" {
+		t.Fatalf("expected codex.responses provider defaults, got %+v", provider)
+	}
+	for _, model := range codexModels {
+		capability, ok := provider.ModelCapabilities[model]
+		if !ok {
+			t.Fatalf("missing capability for %s: %+v", model, provider.ModelCapabilities)
+		}
+		if capability.MaxContextTokens != 270000 || capability.AutoCompactTokenLimit != 200000 || !capability.ReasoningModel {
+			t.Fatalf("unexpected capability for %s: %+v", model, capability)
+		}
+	}
+}
+
 func TestRunProviderLogin_DisableModelCardsKeepsDiscoveryOnly(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.4"}]}`))
@@ -298,7 +371,7 @@ func TestRunProviderLogin_AppliesAnthropicModelCard(t *testing.T) {
 	}
 }
 
-func TestRunProviderLogin_FiltersModelsByProviderTemplate(t *testing.T) {
+func TestRunProviderLogin_GroupsModelsByProviderTemplate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"claude-sonnet-4-6"},{"id":"gpt-image-2"}]}`))
 	}))
@@ -325,18 +398,27 @@ func TestRunProviderLogin_FiltersModelsByProviderTemplate(t *testing.T) {
 	if strings.Join(result.SupportedModels, ",") != "gpt-4.1" || result.DefaultModel != "gpt-4.1" {
 		t.Fatalf("unexpected supported models: %+v", result)
 	}
-	if len(result.ModelsSkippedByProtocol) != 2 {
-		t.Fatalf("expected two skipped models, got %+v", result.ModelsSkippedByProtocol)
+	if len(result.ModelsSkippedByProtocol) != 0 {
+		t.Fatalf("expected no skipped models after grouping, got %+v", result.ModelsSkippedByProtocol)
 	}
-	skipped := map[string]string{}
-	for _, item := range result.ModelsSkippedByProtocol {
-		skipped[item.Model] = item.RecommendedProviderTemplate
+	if len(result.ProviderConfigs) != 3 {
+		t.Fatalf("expected three provider configs, got %+v", result.ProviderConfigs)
 	}
-	if skipped["claude-sonnet-4-6"] != "anthropic.messages" || skipped["gpt-image-2"] != "openai.images" {
-		t.Fatalf("unexpected skipped recommendations: %+v", result.ModelsSkippedByProtocol)
+	configs := map[string]providerLoginGeneratedProviderInfo{}
+	for _, item := range result.ProviderConfigs {
+		configs[item.ProviderName] = item
 	}
-	if len(result.ModelCardsApplied) != 1 || result.ModelCardsApplied[0].Model != "gpt-4.1" || result.ModelCardsApplied[0].CardID != "fallback.openai.chat" {
-		t.Fatalf("expected openai fallback model card, got %+v", result.ModelCardsApplied)
+	if strings.Join(configs["mixed"].SupportedModels, ",") != "gpt-4.1" ||
+		strings.Join(configs["mixed_anthropic"].SupportedModels, ",") != "claude-sonnet-4-6" ||
+		strings.Join(configs["mixed_openai_image"].SupportedModels, ",") != "gpt-image-2" {
+		t.Fatalf("unexpected provider configs: %+v", result.ProviderConfigs)
+	}
+	appliedModels := map[string]bool{}
+	for _, item := range result.ModelCardsApplied {
+		appliedModels[item.Model] = true
+	}
+	if !appliedModels["gpt-4.1"] || !appliedModels["claude-sonnet-4-6"] || !appliedModels["gpt-image-2"] {
+		t.Fatalf("expected model cards for all groups, got %+v", result.ModelCardsApplied)
 	}
 	provider := cfg.Providers.Items["mixed"]
 	if provider.APIPath != "/v1/chat/completions" || provider.ForwardURL != "/v1/chat/completions" {
@@ -346,7 +428,263 @@ func TestRunProviderLogin_FiltersModelsByProviderTemplate(t *testing.T) {
 		t.Fatalf("unexpected persisted supported models: %+v", provider.SupportedModels)
 	}
 	if _, exists := provider.ModelCapabilities["claude-sonnet-4-6"]; exists {
-		t.Fatalf("skipped model capability should not be persisted: %+v", provider.ModelCapabilities)
+		t.Fatalf("grouped model capability should not be persisted in primary provider: %+v", provider.ModelCapabilities)
+	}
+	anthropic := cfg.Providers.Items["mixed_anthropic"]
+	if anthropic.Protocol != "anthropic" || anthropic.APIPath != "/v1/messages" || strings.Join(anthropic.SupportedModels, ",") != "claude-sonnet-4-6" {
+		t.Fatalf("unexpected anthropic grouped provider: %+v", anthropic)
+	}
+	image := cfg.Providers.Items["mixed_openai_image"]
+	if image.Protocol != "openai_image" || image.APIPath != "/v1/images/generations" || strings.Join(image.SupportedModels, ",") != "gpt-image-2" {
+		t.Fatalf("unexpected image grouped provider: %+v", image)
+	}
+}
+
+func TestRunProviderLogin_OpenAIImageProtocolUsesImageTemplate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-image" {
+			t.Fatalf("unexpected Authorization header: %q", got)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-image-2"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "image_api",
+		LoginProtocol: "openai_image",
+		BaseURL:       server.URL,
+		APIKey:        "sk-image",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.Protocol != "openai_image" || result.LoginProtocol != "openai_image" || result.DefaultModel != "gpt-image-2" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	provider := cfg.Providers.Items["image_api"]
+	if provider.Protocol != "openai_image" || provider.APIPath != "/v1/images/generations" || provider.ForwardURL != "/v1/images/generations" {
+		t.Fatalf("expected image provider template defaults, got %+v", provider)
+	}
+	if strings.Join(provider.SupportTypes, ",") != "openai_image" {
+		t.Fatalf("unexpected support types: %+v", provider.SupportTypes)
+	}
+	capability := provider.ModelCapabilities["gpt-image-2"]
+	if !capability.NativeTools.ImagesGenerationsAPI || strings.Join(capability.InputModalities, ",") != "text" {
+		t.Fatalf("unexpected image capability: %+v", capability)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"protocol: openai_image",
+		"api_path: /v1/images/generations",
+		"forward_url: /v1/images/generations",
+		"- openai_image",
+		"images_generations_api: true",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in config:\n%s", expected, text)
+		}
+	}
+}
+
+func TestRunProviderLogin_AutoGroupsModelsByMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"claude-sonnet-4-6"},{"id":"gemini-2.5-pro"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "auto_mix",
+		LoginProtocol: "auto",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.LoginProtocol != "openai" || result.Protocol != "openai" {
+		t.Fatalf("auto should resolve to primary openai provider, got %+v", result)
+	}
+	if len(result.ProviderConfigs) != 3 {
+		t.Fatalf("expected three provider configs, got %+v", result.ProviderConfigs)
+	}
+	providers := cfg.Providers.Items
+	if strings.Join(providers["auto_mix"].SupportedModels, ",") != "gpt-4.1" {
+		t.Fatalf("unexpected primary provider: %+v", providers["auto_mix"])
+	}
+	if providers["auto_mix_anthropic"].Protocol != "anthropic" || strings.Join(providers["auto_mix_anthropic"].SupportedModels, ",") != "claude-sonnet-4-6" {
+		t.Fatalf("unexpected anthropic provider: %+v", providers["auto_mix_anthropic"])
+	}
+	if providers["auto_mix_gemini"].Protocol != "gemini" || strings.Join(providers["auto_mix_gemini"].SupportedModels, ",") != "gemini-2.5-pro" {
+		t.Fatalf("unexpected gemini provider: %+v", providers["auto_mix_gemini"])
+	}
+}
+
+func TestRunProviderLogin_AutoGroupsImageKeywordModelsToOpenAIImage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"custom-image-model"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "auto_image_mix",
+		LoginProtocol: "auto",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.LoginProtocol != "openai" || result.Protocol != "openai" {
+		t.Fatalf("auto should resolve to primary openai provider, got %+v", result)
+	}
+	if strings.Join(result.SupportedModels, ",") != "gpt-4.1" {
+		t.Fatalf("unexpected primary supported models: %+v", result.SupportedModels)
+	}
+	if len(result.ProviderConfigs) != 2 {
+		t.Fatalf("expected two provider configs, got %+v", result.ProviderConfigs)
+	}
+
+	providers := cfg.Providers.Items
+	primary := providers["auto_image_mix"]
+	if primary.Protocol != "openai" || primary.APIPath != "/v1/chat/completions" || strings.Join(primary.SupportedModels, ",") != "gpt-4.1" {
+		t.Fatalf("unexpected primary provider: %+v", primary)
+	}
+	image, ok := providers["auto_image_mix_openai_image"]
+	if !ok {
+		t.Fatalf("expected openai_image grouped provider, got %+v", providers)
+	}
+	if image.Protocol != "openai_image" || image.APIPath != "/v1/images/generations" || image.ForwardURL != "/v1/images/generations" {
+		t.Fatalf("unexpected image provider template defaults: %+v", image)
+	}
+	if strings.Join(image.SupportedModels, ",") != "custom-image-model" {
+		t.Fatalf("unexpected image supported models: %+v", image.SupportedModels)
+	}
+	capability := image.ModelCapabilities["custom-image-model"]
+	if !capability.NativeTools.ImagesGenerationsAPI {
+		t.Fatalf("expected images generations capability, got %+v", capability)
+	}
+}
+
+func TestRunProviderLogin_AutoImageKeywordDoesNotOverrideExplicitModelCard(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"claude-image-4-6"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "auto_card_image",
+		LoginProtocol: "auto",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.LoginProtocol != "openai" || strings.Join(result.SupportedModels, ",") != "gpt-4.1" {
+		t.Fatalf("unexpected primary result: %+v", result)
+	}
+
+	providers := cfg.Providers.Items
+	if _, exists := providers["auto_card_image_openai_image"]; exists {
+		t.Fatalf("explicit model card should not be overridden by image keyword: %+v", providers["auto_card_image_openai_image"])
+	}
+	anthropic := providers["auto_card_image_anthropic"]
+	if anthropic.Protocol != "anthropic" || anthropic.APIPath != "/v1/messages" || strings.Join(anthropic.SupportedModels, ",") != "claude-image-4-6" {
+		t.Fatalf("unexpected anthropic grouped provider: %+v", anthropic)
+	}
+}
+
+func TestRunProviderLogin_OpenAIProtocolDoesNotUseAutoImageKeywordHeuristic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"custom-image-model"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "openai_image_name",
+		LoginProtocol: "openai",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.LoginProtocol != "openai" || result.Protocol != "openai" {
+		t.Fatalf("unexpected result protocol: %+v", result)
+	}
+	if strings.Join(result.SupportedModels, ",") != "gpt-4.1,custom-image-model" {
+		t.Fatalf("unexpected supported models: %+v", result.SupportedModels)
+	}
+	provider := cfg.Providers.Items["openai_image_name"]
+	if provider.Protocol != "openai" || provider.APIPath != "/v1/chat/completions" || strings.Join(provider.SupportedModels, ",") != "gpt-4.1,custom-image-model" {
+		t.Fatalf("unexpected openai provider: %+v", provider)
+	}
+	if _, exists := cfg.Providers.Items["openai_image_name_openai_image"]; exists {
+		t.Fatalf("explicit openai login should not create auto image group")
 	}
 }
 

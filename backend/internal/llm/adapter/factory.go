@@ -8,7 +8,7 @@ import (
 // NewAdapter 创建对应类型的协议适配器
 func NewAdapter(providerType string) (ProtocolAdapter, error) {
 	switch providerType {
-	case "openai":
+	case "openai", "openai_image":
 		return &OpenAIAdapter{}, nil
 	case "gemini":
 		return &GeminiAdapter{}, nil

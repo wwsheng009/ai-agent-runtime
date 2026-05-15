@@ -146,6 +146,47 @@ func TestBuiltinSourceLoads(t *testing.T) {
 	if !ok || template.ID != "codex.responses" || template.APIPath != "/v1/responses" {
 		t.Fatalf("unexpected builtin provider template: %+v ok=%v", template, ok)
 	}
+	template, ok = catalog.ProviderTemplateForProtocol("openai_image")
+	if !ok || template.ID != "openai.images" || template.APIPath != "/v1/images/generations" {
+		t.Fatalf("unexpected builtin image provider template: %+v ok=%v", template, ok)
+	}
+}
+
+func TestBuiltinSourceRecommendsCodexTemplateForCodexCompatibleAliases(t *testing.T) {
+	catalog, warnings, err := LoadSources([]Source{BuiltinSource()}, true)
+	if err != nil {
+		t.Fatalf("LoadSources builtin: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %+v", warnings)
+	}
+
+	cases := map[string]string{
+		"codex-auto-review":            "openai.codex-auto-review.codex",
+		"gpt-5.2":                      "openai.gpt-5.2-codex",
+		"gpt-5.2-openai-compact":       "openai.gpt-5.2-codex",
+		"gpt-5.3-codex":                "openai.gpt-5.3-codex",
+		"gpt-5.3-codex-openai-compact": "openai.gpt-5.3-codex",
+		"gpt-5.4-nano":                 "openai.gpt-5.4-nano.codex",
+		"gpt-5.4-openai-compact":       "openai.gpt-5.4.codex",
+		"gpt-5.5":                      "openai.gpt-5.5.codex",
+		"gpt-5.5-openai-compact":       "openai.gpt-5.5.codex",
+	}
+	for modelID, expectedCardID := range cases {
+		template, applied, ok := catalog.RecommendedProviderTemplate(Context{
+			RuntimeProtocol:  "openai",
+			LoginProtocol:    "openai",
+			ProviderTemplate: "openai.chat",
+		}, modelID)
+		if !ok || template.ID != "codex.responses" || len(applied) == 0 || applied[0].CardID != expectedCardID {
+			t.Fatalf("expected %q to recommend codex.responses via %s, got template=%+v applied=%+v ok=%v", modelID, expectedCardID, template, applied, ok)
+		}
+
+		spec, resolved := catalog.Resolve(Context{RuntimeProtocol: "codex"}, modelID)
+		if len(resolved) == 0 || resolved[0].CardID != expectedCardID || spec.MaxContextTokens != 270000 || spec.AutoCompactTokenLimit != 200000 {
+			t.Fatalf("expected codex capability for %q via %s, got spec=%+v applied=%+v", modelID, expectedCardID, spec, resolved)
+		}
+	}
 }
 
 func TestResolveUsesProtocolFallbackWhenNoModelCardMatches(t *testing.T) {
@@ -164,14 +205,14 @@ func TestResolveUsesProtocolFallbackWhenNoModelCardMatches(t *testing.T) {
 		t.Fatalf("unexpected fallback capability: %+v", spec)
 	}
 	template, _, ok := catalog.RecommendedProviderTemplate(Context{
-		RuntimeProtocol:  "openai",
+		RuntimeProtocol:  "openai_image",
 		ProviderTemplate: "openai.images",
 	}, "unknown-image-model")
 	if !ok || template.ID != "openai.images" {
 		t.Fatalf("expected image fallback template, got %+v ok=%v", template, ok)
 	}
 	imageSpec, imageApplied := catalog.Resolve(Context{
-		RuntimeProtocol:  "openai",
+		RuntimeProtocol:  "openai_image",
 		ProviderTemplate: "openai.images",
 	}, "unknown-image-model")
 	if len(imageApplied) != 1 || imageApplied[0].CardID != "fallback.openai.images" || !imageSpec.NativeTools.ImagesGenerationsAPI {
@@ -248,6 +289,29 @@ cards:
 		if spec.MaxContextTokens != 1000000 {
 			t.Fatalf("unexpected capability for %q: %+v", modelID, spec)
 		}
+	}
+}
+
+func TestModelIDsDoNotFuzzyMatchVersionDots(t *testing.T) {
+	catalog, _, err := LoadSources([]Source{{
+		Name: "test.yaml",
+		Data: []byte(`
+version: 1
+cards:
+  - id: mimo.test
+    match:
+      model_ids:
+        - mimo-v2.5-pro
+    capability:
+      max_context_tokens: 1000000
+`),
+	}}, true)
+	if err != nil {
+		t.Fatalf("LoadSources: %v", err)
+	}
+	spec, applied := catalog.Resolve(Context{}, "gemini-2.5-pro")
+	if len(applied) != 0 || !capabilityIsEmpty(spec) {
+		t.Fatalf("version-like dot suffix should not fuzzy match, got spec=%+v applied=%+v", spec, applied)
 	}
 }
 

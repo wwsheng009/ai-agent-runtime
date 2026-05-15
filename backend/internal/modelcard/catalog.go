@@ -71,6 +71,7 @@ type AppliedCard struct {
 	ProviderTemplate string   `json:"provider_template,omitempty"`
 	Fields           []string `json:"fields,omitempty"`
 	Score            int      `json:"-"`
+	Fallback         bool     `json:"-"`
 }
 
 func BuiltinSource() Source {
@@ -250,6 +251,7 @@ func (c *Catalog) Resolve(ctx Context, modelID string) (agentconfig.ModelCapabil
 			ProviderTemplate: strings.TrimSpace(match.Card.ProviderTemplate),
 			Fields:           CapabilityFieldNames(match.Card.Capability),
 			Score:            match.Score,
+			Fallback:         match.Card.Fallback,
 		})
 	}
 	return capability, applied
@@ -321,6 +323,7 @@ func (c *Catalog) RecommendedProviderTemplate(ctx Context, modelID string) (Prov
 			ProviderTemplate: strings.TrimSpace(match.Card.ProviderTemplate),
 			Fields:           CapabilityFieldNames(match.Card.Capability),
 			Score:            match.Score,
+			Fallback:         match.Card.Fallback,
 		}}
 		return template, applied, true
 	}
@@ -337,6 +340,7 @@ func (c *Catalog) RecommendedProviderTemplate(ctx Context, modelID string) (Prov
 			ProviderTemplate: strings.TrimSpace(match.Card.ProviderTemplate),
 			Fields:           CapabilityFieldNames(match.Card.Capability),
 			Score:            match.Score,
+			Fallback:         match.Card.Fallback,
 		}}
 		return template, applied, true
 	}

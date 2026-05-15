@@ -53,6 +53,7 @@ const KNOWN_PROVIDER_KEYS = new Set([
 
 const providerProtocolOptions = [
   { value: "openai", label: "openai" },
+  { value: "openai_image", label: "openai_image" },
   { value: "anthropic", label: "anthropic" },
   { value: "gemini", label: "gemini" },
   { value: "codex", label: "codex" },

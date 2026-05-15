@@ -105,11 +105,13 @@ export function createDefaultProviderConfig(
     forward_url:
       sanitizedProtocol === "anthropic"
         ? "/v1/messages"
-        : sanitizedProtocol === "gemini"
-          ? "/v1beta/models/{model}:streamGenerateContent?alt=sse"
-          : sanitizedProtocol === "codex"
-            ? "/v1/responses"
-            : "/v1/chat/completions",
+        : sanitizedProtocol === "openai_image"
+          ? "/v1/images/generations"
+          : sanitizedProtocol === "gemini"
+            ? "/v1beta/models/{model}:streamGenerateContent?alt=sse"
+            : sanitizedProtocol === "codex"
+              ? "/v1/responses"
+              : "/v1/chat/completions",
     api_key: "",
     default_model: "",
     supported_models: [],
