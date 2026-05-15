@@ -15,6 +15,7 @@ const (
 	ApprovalReuse      = "approval_reuse"
 	Stream             = "stream"
 	DisableTools       = "disable_tools"
+	DebugMode          = "debug_mode"
 	ProfileRef         = "profile_ref"
 	ProfileName        = "profile_name"
 	ProfileAgent       = "profile_agent"
@@ -40,6 +41,7 @@ const (
 	LegacyAICLIApprovalReuse      = "aicli_approval_reuse"
 	LegacyAICLIStream             = "aicli_stream"
 	LegacyAICLIDisableTools       = "aicli_disable_tools"
+	LegacyAICLIDebugMode          = "aicli_debug_mode"
 	LegacyAICLIMessageCount       = "aicli_message_count"
 	LegacyAICLIProfileName        = "aicli_profile_name"
 	LegacyAICLIProfileAgent       = "aicli_profile_agent"
@@ -65,6 +67,7 @@ var legacyToCanonical = map[string]string{
 	LegacyAICLIApprovalReuse:      ApprovalReuse,
 	LegacyAICLIStream:             Stream,
 	LegacyAICLIDisableTools:       DisableTools,
+	LegacyAICLIDebugMode:          DebugMode,
 	LegacyAICLIMessageCount:       MessageCount,
 	LegacyAICLIProfileName:        ProfileName,
 	LegacyAICLIProfileAgent:       ProfileAgent,
@@ -89,6 +92,7 @@ var canonicalToLegacy = map[string][]string{
 	ApprovalReuse:      {LegacyAICLIApprovalReuse},
 	Stream:             {LegacyAICLIStream},
 	DisableTools:       {LegacyAICLIDisableTools},
+	DebugMode:          {LegacyAICLIDebugMode},
 	MessageCount:       {LegacyAICLIMessageCount},
 	ProfileRef:         {LegacyAPIProfileReference},
 	ProfileName:        {LegacyAICLIProfileName},

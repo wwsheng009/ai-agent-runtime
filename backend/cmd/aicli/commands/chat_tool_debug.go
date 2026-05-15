@@ -40,7 +40,11 @@ type aicliToolExecutionSummary struct {
 }
 
 func isSessionDebugEnabled(session *ChatSession) bool {
-	return session != nil && (session.HTTPDebug || session.SkillsDebug)
+	return session != nil && (session.DebugMode || session.HTTPDebug || session.SkillsDebug)
+}
+
+func isSessionDebugModeEnabled(session *ChatSession) bool {
+	return session != nil && session.DebugMode
 }
 
 func writeSessionDebugInfo(session *ChatSession, debugInfo string, printToConsole bool) {

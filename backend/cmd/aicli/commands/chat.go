@@ -40,6 +40,7 @@ type ChatSession struct {
 	ReasoningEffort                 string
 	SuppressReasoningOutput         bool
 	DisableTools                    bool
+	DebugMode                       bool
 	HTTPDebug                       bool
 	Stream                          bool
 	BaseURL                         string
@@ -968,6 +969,8 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		if session.IsInterrupted() {
 			continue
 		}
+
+		renderSubmittedUserInputEcho(session, input)
 
 		// 发送消息
 		response, err := sendMessage(session, input)

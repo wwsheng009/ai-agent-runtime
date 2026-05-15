@@ -100,6 +100,17 @@ func TestChatRuntimeContext_RoundTripsSelectedAgentTarget(t *testing.T) {
 	}
 }
 
+func TestRestoreChatRuntimeContext_ClearsDebugModeWhenMetadataMissing(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	session := &ChatSession{DebugMode: true}
+
+	restoreChatRuntimeContext(session, runtimeSession)
+
+	if session.DebugMode {
+		t.Fatal("expected debug mode to reset when restored session has no debug metadata")
+	}
+}
+
 func TestRestoreAmbientTeamBinding_ClearsMissingTeamAndStaleTask(t *testing.T) {
 	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
 	if err != nil {

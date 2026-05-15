@@ -452,7 +452,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 	}
 
 	output := captureStdout(t, func() {
-		if quit := handleCommand(session, "/debug", false); quit {
+		if quit := handleCommand(session, "/debug display", false); quit {
 			t.Fatal("expected debug command not to exit")
 		}
 	})
@@ -478,6 +478,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		fmt.Sprintf("%-18s %s", "JSON Output:", "on"),
 		fmt.Sprintf("%-18s %s", "JSON Envelope:", "on"),
 		fmt.Sprintf("%-18s %s", "MCP Enabled:", "on"),
+		fmt.Sprintf("%-18s %s", "Debug Mode:", "off"),
 		fmt.Sprintf("%-18s %s", "Skills Debug:", "on"),
 		fmt.Sprintf("%-18s %s", "Permission Mode:", "default"),
 		fmt.Sprintf("%-18s %s", "Approval Reuse:", "team_readonly_shell"),
@@ -490,6 +491,58 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
 		}
+	}
+}
+
+func TestHandleCommand_DebugModeTogglesStatusAndPersists(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("create runtime session: %v", err)
+	}
+	session := &ChatSession{
+		SessionManager: manager,
+		RuntimeSession: runtimeSession,
+		SessionUserID:  userID,
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/debug", false); quit {
+			t.Fatal("debug status command should not quit")
+		}
+	})
+	if !strings.Contains(output, fmt.Sprintf("%-18s %s", "Debug Mode:", "off")) || !strings.Contains(output, "/debug display") {
+		t.Fatalf("expected /debug to show status and usage, got:\n%s", output)
+	}
+
+	output = captureStdout(t, func() {
+		if quit := handleCommand(session, "/debug on", false); quit {
+			t.Fatal("debug on command should not quit")
+		}
+	})
+	if !session.DebugMode || !strings.Contains(output, fmt.Sprintf("%-18s %s", "Debug Mode:", "on")) {
+		t.Fatalf("expected debug mode on, session=%+v output=%q", session, output)
+	}
+	stored, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("reload session: %v", err)
+	}
+	if got, ok := runtimeSessionContextBool(stored, chatRuntimeContextDebugMode); !ok || !got {
+		t.Fatalf("expected persisted debug mode=true, got value=%t ok=%t context=%#v", got, ok, stored.Metadata.Context)
+	}
+
+	output = captureStdout(t, func() {
+		if quit := handleCommand(session, "/debug off", false); quit {
+			t.Fatal("debug off command should not quit")
+		}
+	})
+	if session.DebugMode || !strings.Contains(output, fmt.Sprintf("%-18s %s", "Debug Mode:", "off")) {
+		t.Fatalf("expected debug mode off, session=%+v output=%q", session, output)
 	}
 }
 
@@ -1443,7 +1496,7 @@ func TestHandleCommand_DebugShowsAgentControlRegistryServiceMode(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if quit := handleCommand(session, "/debug", false); quit {
+		if quit := handleCommand(session, "/debug display", false); quit {
 			t.Fatal("debug command should not quit")
 		}
 	})

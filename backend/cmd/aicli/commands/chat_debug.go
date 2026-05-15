@@ -68,6 +68,7 @@ func printChatDebugInfo(session *ChatSession) {
 	printChatSessionMetaRow("JSON Output:", chatDebugBool(session.JSONOutput))
 	printChatSessionMetaRow("JSON Envelope:", chatDebugBool(session.JSONEnvelope))
 	printChatSessionMetaRow("MCP Enabled:", chatDebugBool(session.MCPEnabled))
+	printChatSessionMetaRow("Debug Mode:", chatDebugBool(session.DebugMode))
 	printChatSessionMetaRow("Skills Debug:", chatDebugBool(session.SkillsDebug))
 	if session.LocalRuntimeHost == nil && (strings.TrimSpace(string(session.PermissionMode)) != "" || strings.TrimSpace(string(session.ApprovalReuseMode)) != "") {
 		printChatSessionMetaRow("Permission Mode:", chatDebugValueOrNone(string(session.PermissionMode)))

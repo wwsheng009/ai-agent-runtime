@@ -48,6 +48,11 @@ func restoreChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat
 	if mode, err := parseChatPermissionMode(runtimeSessionContextString(runtimeSession, chatRuntimeContextPermissionMode), false); err == nil {
 		session.PermissionMode = mode
 	}
+	if debugMode, ok := runtimeSessionContextBool(runtimeSession, chatRuntimeContextDebugMode); ok {
+		session.DebugMode = debugMode
+	} else {
+		session.DebugMode = false
+	}
 	session.SelectedAgentTarget = runtimeSessionContextString(runtimeSession, chatRuntimeContextSelectedAgent)
 	teamID := runtimeSessionContextString(runtimeSession, chatRuntimeContextActiveTeamID)
 	if teamID == "" {

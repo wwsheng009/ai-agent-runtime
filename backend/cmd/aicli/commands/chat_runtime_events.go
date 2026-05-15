@@ -816,6 +816,9 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			rendered = b.renderAsyncTeamSummaryFallback(event)
 		}
 	}
+	if rendered.DebugOnly && !isSessionDebugModeEnabled(b.session) {
+		rendered = chatRuntimeTimelineEvent{}
+	}
 	if rendered.Line != "" && shouldRenderInteractiveOutput(b.session) && b.shouldRenderTimelineEvent(rendered) {
 		b.writeLine(rendered.Line)
 		renderedSomething = true
@@ -1666,8 +1669,9 @@ func (b *chatRuntimeEventBridge) setRunError(err error) {
 }
 
 type chatRuntimeTimelineEvent struct {
-	Line     string
-	DedupKey string
+	Line      string
+	DedupKey  string
+	DebugOnly bool
 }
 
 func renderChatRuntimeEvent(event runtimeevents.Event) string {
@@ -1986,8 +1990,9 @@ func renderLLMRequestFinishedTimelineEvent(event runtimeevents.Event) chatRuntim
 		return chatRuntimeTimelineEvent{}
 	}
 	return chatRuntimeTimelineEvent{
-		Line:     strings.Join(lines, "\n"),
-		DedupKey: llmRequestDedupKey(event, "llm.request.finished"),
+		Line:      strings.Join(lines, "\n"),
+		DedupKey:  llmRequestDedupKey(event, "llm.request.finished"),
+		DebugOnly: true,
 	}
 }
 
@@ -2333,8 +2338,9 @@ func renderSessionCompactTimelineEvent(event runtimeevents.Event) chatRuntimeTim
 		}
 	case runtimechat.EventSessionCompactSkipped:
 		return chatRuntimeTimelineEvent{
-			Line:     fmt.Sprintf("[context] session compact skipped mode=%s phase=%s reason=%s", mode, phase, sessionCompactReasonSummary(payload)),
-			DedupKey: dedupKeyBase + ":reason=" + sessionCompactReasonSummary(payload),
+			Line:      fmt.Sprintf("[context] session compact skipped mode=%s phase=%s reason=%s", mode, phase, sessionCompactReasonSummary(payload)),
+			DedupKey:  dedupKeyBase + ":reason=" + sessionCompactReasonSummary(payload),
+			DebugOnly: true,
 		}
 	case runtimechat.EventSessionCompactFailed:
 		line := fmt.Sprintf("[context] session compact failed mode=%s phase=%s reason=%s", mode, phase, sessionCompactReasonSummary(payload))

@@ -31,6 +31,7 @@ const (
 	chatRuntimeContextApprovalReuse   = sessionmeta.LegacyAICLIApprovalReuse
 	chatRuntimeContextStream          = sessionmeta.LegacyAICLIStream
 	chatRuntimeContextDisableTools    = sessionmeta.LegacyAICLIDisableTools
+	chatRuntimeContextDebugMode       = sessionmeta.LegacyAICLIDebugMode
 	chatRuntimeContextMessageCount    = sessionmeta.LegacyAICLIMessageCount
 	chatRuntimeContextProfileName     = sessionmeta.LegacyAICLIProfileName
 	chatRuntimeContextProfileAgent    = sessionmeta.LegacyAICLIProfileAgent
@@ -321,6 +322,7 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ApprovalReuse, string(session.ApprovalReuseMode), chatRuntimeContextApprovalReuse)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Stream, session.Stream, chatRuntimeContextStream)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DisableTools, session.DisableTools, chatRuntimeContextDisableTools)
+	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DebugMode, session.DebugMode, chatRuntimeContextDebugMode)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.MessageCount, len(session.Messages), chatRuntimeContextMessageCount)
 	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 	if session.TokenCount > 0 {

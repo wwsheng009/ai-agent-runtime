@@ -123,6 +123,10 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		return completeGoalSlashArgs(argsText, cursor)
 	case "/debug":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "on", Summary: "开启会话 debug 模式", Group: string(chatSlashCommandGroupSession)},
+			{Command: "off", Summary: "关闭会话 debug 模式", Group: string(chatSlashCommandGroupSession)},
+			{Command: "status", Summary: "查看会话 debug 模式状态", Group: string(chatSlashCommandGroupSession)},
+			{Command: "display", Summary: "显示当前会话调试信息", Group: string(chatSlashCommandGroupSession)},
 			{Command: "export", Summary: "打包调试文件", Group: string(chatSlashCommandGroupSession)},
 			{Command: "zip", Summary: "打包调试文件", Group: string(chatSlashCommandGroupSession)},
 			{Command: "--output", Summary: "指定 zip 输出文件", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},

@@ -42,16 +42,24 @@ type chatDebugArchiveManifest struct {
 func handleDebugCommand(session *ChatSession, command string) bool {
 	arg := strings.TrimSpace(extractCommandArgument(command))
 	if arg == "" {
-		printChatDebugInfo(session)
+		printChatDebugModeStatus(session)
 		return false
 	}
-	action, opts, err := parseChatDebugArchiveCommand(arg)
+	action, opts, err := parseChatDebugCommand(arg)
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)
-		fmt.Println("用法: /debug 或 /debug export [--output <zip>|--dir <dir>]")
+		printChatDebugUsage()
 		return false
 	}
 	switch action {
+	case "on":
+		setChatDebugMode(session, true)
+	case "off":
+		setChatDebugMode(session, false)
+	case "status":
+		printChatDebugModeStatus(session)
+	case "display":
+		printChatDebugInfo(session)
 	case "export":
 		result, err := exportChatDebugArchive(session, opts)
 		if err != nil {
@@ -60,12 +68,12 @@ func handleDebugCommand(session *ChatSession, command string) bool {
 		}
 		printChatDebugArchiveResult(result)
 	default:
-		printChatDebugInfo(session)
+		printChatDebugModeStatus(session)
 	}
 	return false
 }
 
-func parseChatDebugArchiveCommand(argument string) (string, chatDebugArchiveOptions, error) {
+func parseChatDebugCommand(argument string) (string, chatDebugArchiveOptions, error) {
 	opts := chatDebugArchiveOptions{}
 	fields := splitChatCommandFields(argument)
 	action := ""
@@ -76,8 +84,36 @@ func parseChatDebugArchiveCommand(argument string) (string, chatDebugArchiveOpti
 		}
 		lower := strings.ToLower(token)
 		switch {
+		case lower == "on" || lower == "enable" || lower == "enabled":
+			next, err := chooseChatDebugAction(action, "on", token)
+			if err != nil {
+				return action, opts, err
+			}
+			action = next
+		case lower == "off" || lower == "disable" || lower == "disabled":
+			next, err := chooseChatDebugAction(action, "off", token)
+			if err != nil {
+				return action, opts, err
+			}
+			action = next
+		case lower == "status" || lower == "state":
+			next, err := chooseChatDebugAction(action, "status", token)
+			if err != nil {
+				return action, opts, err
+			}
+			action = next
+		case lower == "display" || lower == "show" || lower == "info":
+			next, err := chooseChatDebugAction(action, "display", token)
+			if err != nil {
+				return action, opts, err
+			}
+			action = next
 		case lower == "export" || lower == "zip" || lower == "pack" || lower == "archive" || lower == "--zip" || lower == "--export":
-			action = "export"
+			next, err := chooseChatDebugAction(action, "export", token)
+			if err != nil {
+				return action, opts, err
+			}
+			action = next
 		case lower == "--output" || lower == "-o":
 			if i+1 >= len(fields) {
 				return action, opts, fmt.Errorf("%s 需要指定 zip 文件路径", token)
@@ -99,9 +135,46 @@ func parseChatDebugArchiveCommand(argument string) (string, chatDebugArchiveOpti
 		}
 	}
 	if action == "" {
-		action = "show"
+		action = "status"
+	}
+	if action != "export" && (strings.TrimSpace(opts.OutputPath) != "" || strings.TrimSpace(opts.OutputDir) != "") {
+		return action, opts, fmt.Errorf("--output/--dir 只能与 /debug export 一起使用")
 	}
 	return action, opts, nil
+}
+
+func chooseChatDebugAction(current, next, token string) (string, error) {
+	current = strings.TrimSpace(current)
+	next = strings.TrimSpace(next)
+	if current == "" || current == next {
+		return next, nil
+	}
+	return current, fmt.Errorf("参数 %s 不能与 /debug %s 同时使用", token, current)
+}
+
+func setChatDebugMode(session *ChatSession, enabled bool) {
+	if session == nil {
+		fmt.Println("错误: 当前没有活动会话")
+		return
+	}
+	session.DebugMode = enabled
+	warnIfChatSessionSyncFails(session, "toggle debug mode", syncRuntimeSessionFromChat(session))
+	printChatSessionMetaRow("Debug Mode:", chatDebugBool(enabled))
+}
+
+func printChatDebugModeStatus(session *ChatSession) {
+	if session == nil {
+		fmt.Println("错误: 当前没有活动会话")
+		return
+	}
+	printChatSessionMetaRow("Debug Mode:", chatDebugBool(session.DebugMode))
+	printChatSessionMetaRow("HTTP Debug:", chatDebugBool(session.HTTPDebug))
+	printChatSessionMetaRow("Skills Debug:", chatDebugBool(session.SkillsDebug))
+	printChatDebugUsage()
+}
+
+func printChatDebugUsage() {
+	fmt.Println("用法: /debug on | /debug off | /debug status | /debug display | /debug export [--output <zip>|--dir <dir>]")
 }
 
 func exportChatDebugArchive(session *ChatSession, opts chatDebugArchiveOptions) (*chatDebugArchiveResult, error) {

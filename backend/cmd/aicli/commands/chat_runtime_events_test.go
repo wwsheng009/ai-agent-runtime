@@ -918,6 +918,34 @@ func TestChatRuntimeEvents_RenderSessionCompactTimeline(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeEvents_DebugOnlyTimelineRequiresDebugMode(t *testing.T) {
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+
+	event := runtimeevents.Event{
+		Type:    runtimechat.EventSessionCompactSkipped,
+		TraceID: "trace-compact",
+		Payload: map[string]interface{}{
+			"phase":  "pre_turn",
+			"mode":   "local",
+			"reason": "below_limit",
+		},
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(event)
+	require.Empty(t, rendered)
+
+	session.DebugMode = true
+	bridge.BeginRun()
+	bridge.handleEvent(event)
+	require.Equal(t, []string{"[context] session compact skipped mode=local phase=pre_turn reason=below_limit"}, rendered)
+}
+
 func TestChatRuntimeEvents_RenderBudgetPanelWrapsLongLines(t *testing.T) {
 	got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:    "llm.request.finished",
