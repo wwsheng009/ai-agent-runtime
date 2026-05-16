@@ -1025,6 +1025,63 @@ func TestChatInteractiveReadPriorityLine_UsesSessionQueue(t *testing.T) {
 	}
 }
 
+func TestChatInputQueue_PriorityReadUsesExternalCaptureWithoutStartingPump(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("normal\n")))
+	queue.setExternalInputCaptureActive(true)
+
+	result := make(chan string, 1)
+	errs := make(chan error, 1)
+	go func() {
+		line, err := queue.readPriorityLine(context.Background())
+		if err != nil {
+			errs <- err
+			return
+		}
+		result <- line
+	}()
+
+	require.Eventually(t, queue.isPriorityMode, time.Second, 10*time.Millisecond)
+	queue.routeLine(chatQueuedInput{Text: "priority\n", Source: "test"})
+
+	select {
+	case err := <-errs:
+		t.Fatalf("readPriorityLine returned error: %v", err)
+	case line := <-result:
+		if normalizeQueuedInputLine(line) != "priority" {
+			t.Fatalf("expected priority line, got %q", line)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for priority line")
+	}
+
+	if line, ok := queue.readAvailableLine(); ok {
+		t.Fatalf("did not expect stdin pump to consume normal reader line, got %q", line)
+	}
+}
+
+func TestChatInputQueue_PriorityReadReceivesExternalCaptureError(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setExternalInputCaptureActive(true)
+
+	errs := make(chan error, 1)
+	go func() {
+		_, err := queue.readPriorityLine(context.Background())
+		errs <- err
+	}()
+
+	require.Eventually(t, queue.isPriorityMode, time.Second, 10*time.Millisecond)
+	queue.signalReadError(ui.ErrInteractiveInputInterrupted)
+
+	select {
+	case err := <-errs:
+		if !errors.Is(err, ui.ErrInteractiveInputInterrupted) {
+			t.Fatalf("expected interrupted error, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for priority read error")
+	}
+}
+
 func TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt(t *testing.T) {
 	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
 	if err != nil {

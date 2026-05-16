@@ -21,11 +21,15 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 	if queue == nil {
 		return func() {}
 	}
+	queue.setExternalInputCaptureActive(true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer func() {
+			queue.setExternalInputCaptureActive(false)
+			close(done)
+		}()
 		for ctx.Err() == nil {
 			prompt := formatSessionUserPrompt(session)
 			line, err := session.InputBox.ReadTransientPromptWithHooksContext(ctx, prompt, ui.LineEditorHooks{
@@ -46,7 +50,13 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 					return
 				}
 				if errors.Is(err, ui.ErrInteractiveInputExitRequested) || errors.Is(err, ui.ErrInteractiveInputInterrupted) || errors.Is(err, io.EOF) {
+					if queue.isPriorityMode() {
+						queue.signalReadError(err)
+					}
 					return
+				}
+				if queue.isPriorityMode() {
+					queue.signalReadError(err)
 				}
 				return
 			}

@@ -32,6 +32,7 @@ type chatInputQueue struct {
 	start         sync.Once
 	mu            sync.RWMutex
 	priorityMode  bool
+	externalCaptureActive bool
 	terminalMu    sync.RWMutex
 	terminalErr   error
 
@@ -590,7 +591,9 @@ func (q *chatInputQueue) readPriorityLine(ctx context.Context) (string, error) {
 	}
 	q.setPriorityMode(true)
 	defer q.setPriorityMode(false)
-	q.startPump()
+	if !q.hasExternalInputCaptureActive() {
+		q.startPump()
+	}
 	for {
 		if text, ok := q.takeReadySubmission(); ok {
 			return text, nil
@@ -1070,6 +1073,33 @@ func (q *chatInputQueue) setPriorityMode(active bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.priorityMode = active
+}
+
+func (q *chatInputQueue) isPriorityMode() bool {
+	if q == nil {
+		return false
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.priorityMode
+}
+
+func (q *chatInputQueue) setExternalInputCaptureActive(active bool) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.externalCaptureActive = active
+}
+
+func (q *chatInputQueue) hasExternalInputCaptureActive() bool {
+	if q == nil {
+		return false
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.externalCaptureActive
 }
 
 func (q *chatInputQueue) routeLine(item chatQueuedInput) {
