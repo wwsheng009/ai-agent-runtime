@@ -322,6 +322,61 @@ func TestRenderEditedDiffOutput_HandlesCreatedAndDeletedFiles(t *testing.T) {
 	}
 }
 
+func TestRenderEditedDiffOutput_HandlesRawUnifiedDiffAndMultipleHunks(t *testing.T) {
+	output := strings.Join([]string{
+		"--- a/internal/service.go",
+		"+++ b/internal/service.go",
+		"@@ -10,2 +10,2 @@",
+		" unchanged",
+		"-old",
+		"+new",
+		"@@ -30,1 +30,2 @@",
+		"-gone",
+		"+first",
+		"+second",
+	}, "\n")
+
+	got := renderEditedDiffOutput(output)
+	want := strings.Join([]string{
+		`• Edited internal\service.go (+3 -2)`,
+		`       10   unchanged`,
+		`       11 - old`,
+		`       11 + new`,
+		`          ...`,
+		`       30 - gone`,
+		`       30 + first`,
+		`       31 + second`,
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected raw multi-hunk diff render:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
+func TestRenderSharedChatToolEvent_RendersApplyRawDiff(t *testing.T) {
+	diff := strings.Join([]string{
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -1,1 +1,1 @@",
+		"-old",
+		"+new",
+	}, "\n")
+
+	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Stage:    "tool_result",
+		ToolName: "apply",
+		Output:   diff,
+		Success:  true,
+	})
+	want := strings.Join([]string{
+		`• Edited app.go (+1 -1)`,
+		`        1 - old`,
+		`        1 + new`,
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected apply diff render:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
 func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestStarted, TraceID: "trace-1", Payload: map[string]interface{}{"model": "gpt-5.4"}}); got != "" {
 		t.Fatalf("unexpected llm started render: %q", got)

@@ -276,7 +276,7 @@ func renderMarkdownToolOutput(payload map[string]interface{}) string {
 var unifiedDiffHunkHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 
 func renderEditedDiffOutput(output string) string {
-	diff := extractFencedDiff(output)
+	diff := extractUnifiedDiffOutput(output)
 	if strings.TrimSpace(diff) == "" {
 		return ""
 	}
@@ -312,6 +312,28 @@ func extractFencedDiff(output string) string {
 	return strings.Trim(rest, "\n")
 }
 
+func extractUnifiedDiffOutput(output string) string {
+	if diff := extractFencedDiff(output); strings.TrimSpace(diff) != "" {
+		return diff
+	}
+	normalized := strings.ReplaceAll(output, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	lines := strings.Split(normalized, "\n")
+	start := -1
+	for i := 0; i+2 < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "--- ") &&
+			strings.HasPrefix(strings.TrimSpace(lines[i+1]), "+++ ") &&
+			strings.HasPrefix(strings.TrimSpace(lines[i+2]), "@@") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	return strings.Trim(strings.Join(lines[start:], "\n"), "\n")
+}
+
 type renderedDiffFile struct {
 	path      string
 	additions int
@@ -325,6 +347,7 @@ func parseUnifiedDiffFiles(diff string) []renderedDiffFile {
 	var current *renderedDiffFile
 	oldLine := 0
 	newLine := 0
+	hunks := 0
 	for _, raw := range rawLines {
 		line := strings.TrimRight(raw, "\r")
 		switch {
@@ -335,6 +358,7 @@ func parseUnifiedDiffFiles(diff string) []renderedDiffFile {
 			current = &renderedDiffFile{path: normalizeRenderedDiffPath(strings.TrimSpace(strings.TrimPrefix(line, "--- ")))}
 			oldLine = 0
 			newLine = 0
+			hunks = 0
 		case strings.HasPrefix(line, "+++ "):
 			if current == nil {
 				current = &renderedDiffFile{}
@@ -351,6 +375,10 @@ func parseUnifiedDiffFiles(diff string) []renderedDiffFile {
 			if current == nil {
 				current = &renderedDiffFile{}
 			}
+			if hunks > 0 {
+				current.lines = append(current.lines, "      ...")
+			}
+			hunks++
 			oldLine, newLine = parseUnifiedDiffHunkStart(line)
 		case current != nil && line != "":
 			switch line[0] {
@@ -410,7 +438,7 @@ func formatRenderedDiffLine(oldLine int, marker rune, newLine int, text string) 
 
 func editingSharedToolRenderOutput(toolName string, output string) string {
 	switch strings.TrimSpace(toolName) {
-	case "edit", "apply_patch":
+	case "edit", "apply", "apply_patch", "patch":
 	default:
 		return ""
 	}

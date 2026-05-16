@@ -171,6 +171,9 @@ func TestConfigTUI_EditProviderCommonFields(t *testing.T) {
 	if provider.DefaultModel != "gpt-5.4" || provider.APIKeyRef != "codex-ref" || provider.GetMaxTokensLimit() != 256000 || provider.Enabled {
 		t.Fatalf("unexpected provider edited fields: %+v", provider)
 	}
+	if provider.AuthMode != "api_key" {
+		t.Fatalf("expected protocol selection to sync auth_mode=api_key, got %q", provider.AuthMode)
+	}
 }
 
 func TestConfigTUI_LoginProviderUsesProviderLoginTemplates(t *testing.T) {
@@ -198,6 +201,7 @@ func TestConfigTUI_LoginProviderUsesProviderLoginTemplates(t *testing.T) {
 	input := strings.NewReader(strings.Join([]string{
 		"2",        // providers
 		"a",        // login/new provider
+		"true",     // set default
 		"gamma",    // provider name
 		"2",        // protocol openai
 		server.URL, // base url
@@ -221,6 +225,9 @@ func TestConfigTUI_LoginProviderUsesProviderLoginTemplates(t *testing.T) {
 	}
 	if provider.DefaultModel != "gpt-4.1-mini" || len(provider.SupportedModels) != 2 {
 		t.Fatalf("expected models from login validation, got %+v", provider)
+	}
+	if loaded.Providers.DefaultProvider != "gamma" {
+		t.Fatalf("expected TUI login to set default provider, got %q", loaded.Providers.DefaultProvider)
 	}
 	if _, err := config.LoadProviderAuthSecretFromPath(testAuthStorePath(dir), "gamma", config.AuthKeyTypeAPIKey); err != nil {
 		t.Fatalf("expected auth store secret: %v", err)
@@ -256,6 +263,35 @@ func TestConfigTUI_AdvancedEditProviderUpdatesOneField(t *testing.T) {
 	}
 	if provider.APIPath != "/v1/chat/completions" || provider.DefaultModel != "gpt-alpha" {
 		t.Fatalf("unexpected unrelated field change: %+v", provider)
+	}
+}
+
+func TestConfigTUI_AdvancedEditProviderProtocolSyncsAuthMode(t *testing.T) {
+	cfg, path := writeConfigTUITestConfig(t)
+	input := strings.NewReader(strings.Join([]string{
+		"2", // providers
+		"1", // alpha detail
+		"a", // advanced edit
+		"1", // protocol
+		"7", // codex-oauth
+		"b",
+		"b",
+		"b",
+		"q",
+		"",
+	}, "\n"))
+	var output bytes.Buffer
+
+	if err := runConfigTUI(input, &output, cfg); err != nil {
+		t.Fatalf("runConfigTUI: %v\noutput:\n%s", err, output.String())
+	}
+	loaded, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	provider := loaded.Providers.Items["alpha"]
+	if provider.GetProtocol() != "codex" || provider.AuthMode != "oauth" {
+		t.Fatalf("expected codex-oauth selection to sync protocol/auth_mode, got %+v", provider)
 	}
 }
 

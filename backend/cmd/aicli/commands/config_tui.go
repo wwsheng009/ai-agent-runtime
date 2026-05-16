@@ -189,50 +189,65 @@ func (t *configTUI) editProvider(name string) error {
 	}
 	current := t.cfg.Providers.Items[name]
 	update := config.ProviderConfigUpdate{Name: name}
-	if value, ok, err := t.promptProviderProtocolUpdate(current.GetProtocol(), current.AuthMode); err != nil {
+	changed := false
+	if value, authMode, ok, err := t.promptProviderProtocolUpdate(current.GetProtocol(), current.AuthMode); err != nil {
 		return err
 	} else if ok {
 		update.Protocol = &value
+		update.AuthMode = &authMode
+		changed = true
 	}
 	if value, ok, err := t.promptStringUpdate("Base URL", current.BaseURL); err != nil {
 		return err
 	} else if ok {
 		update.BaseURL = &value
+		changed = true
 	}
 	if value, ok, err := t.promptStringUpdate("API Path", current.APIPath); err != nil {
 		return err
 	} else if ok {
 		update.APIPath = &value
+		changed = true
 	}
 	if value, ok, err := t.promptStringUpdate("Models Path", current.ModelsPath); err != nil {
 		return err
 	} else if ok {
 		update.ModelsPath = &value
+		changed = true
 	}
 	if value, ok, err := t.promptStringUpdate("Default Model", current.DefaultModel); err != nil {
 		return err
 	} else if ok {
 		update.DefaultModel = &value
+		changed = true
 	}
 	if value, ok, err := t.promptStringUpdate("API key ref", current.APIKeyRef); err != nil {
 		return err
 	} else if ok {
 		update.APIKeyRef = &value
+		changed = true
 	}
 	if value, ok, err := t.promptIntUpdate("Max tokens limit", current.GetMaxTokensLimit()); err != nil {
 		return err
 	} else if ok {
 		update.MaxTokensLimit = &value
+		changed = true
 	}
 	if value, ok, err := t.promptBoolUpdate("Enabled", current.Enabled); err != nil {
 		return err
 	} else if ok {
 		update.Enabled = &value
+		changed = true
 	}
 	if value, ok, err := t.promptBoolUpdate("Set as default provider", strings.EqualFold(t.cfg.Providers.DefaultProvider, name)); err != nil {
 		return err
 	} else if ok {
 		update.SetDefaultProvider = value
+		changed = true
+	}
+	if !changed {
+		t.notice("未修改 provider: " + name)
+		return nil
 	}
 	if _, err := config.UpdateProviderConfig(t.cfg.ConfigFilePath, update); err != nil {
 		return err
@@ -242,10 +257,16 @@ func (t *configTUI) editProvider(name string) error {
 }
 
 func (t *configTUI) loginProvider() error {
+	setDefaultDefault := len(t.cfg.Providers.Items) == 0 || strings.TrimSpace(t.cfg.Providers.DefaultProvider) == ""
+	setDefault, err := t.promptBoolDefault("设为默认 provider", setDefaultDefault)
+	if err != nil {
+		return err
+	}
 	result, err := runProviderLogin(providerLoginRequest{
 		Context:     context.Background(),
 		Config:      t.cfg,
 		ConfigPath:  t.cfg.ConfigFilePath,
+		SetDefault:  setDefault,
 		Interactive: true,
 		Prompter:    configTUILoginPrompter{tui: t},
 	})
@@ -332,12 +353,13 @@ func (t *configTUI) advancedEditProvider(name string) error {
 		changed := true
 		switch strings.ToLower(input) {
 		case "1", "protocol":
-			value, ok, err := t.promptProviderProtocolUpdate(provider.GetProtocol(), provider.AuthMode)
+			value, authMode, ok, err := t.promptProviderProtocolUpdate(provider.GetProtocol(), provider.AuthMode)
 			if err != nil {
 				return err
 			}
 			if ok {
 				update.Protocol = &value
+				update.AuthMode = &authMode
 			} else {
 				changed = false
 			}
@@ -670,7 +692,7 @@ func (t *configTUI) promptStringUpdate(label, current string) (string, bool, err
 	return value, true, nil
 }
 
-func (t *configTUI) promptProviderProtocolUpdate(currentProtocol, currentAuthMode string) (string, bool, error) {
+func (t *configTUI) promptProviderProtocolUpdate(currentProtocol, currentAuthMode string) (string, string, bool, error) {
 	options := loginProtocolOptions()
 	currentLoginProtocol := loginProtocolFromProvider(config.Provider{
 		Protocol: currentProtocol,
@@ -687,18 +709,43 @@ func (t *configTUI) promptProviderProtocolUpdate(currentProtocol, currentAuthMod
 	for {
 		value, err := t.prompt(fmt.Sprintf("协议编号或名称 [%s]（回车保留）: ", emptyIfBlank(currentLoginProtocol)))
 		if err != nil {
-			return "", false, err
+			return "", "", false, err
 		}
 		if value == "" {
-			return "", false, nil
+			return "", "", false, nil
 		}
 		for i, option := range options {
 			if value == fmt.Sprintf("%d", i+1) || strings.EqualFold(value, option) {
 				runtimeProtocol := runtimeProtocolForLoginProtocol(option)
-				return runtimeProtocol, true, nil
+				authMode := authModeForLoginProtocol(option)
+				return runtimeProtocol, authMode, true, nil
 			}
 		}
 		fmt.Fprintln(t.writer, "无效协议，请重新输入")
+	}
+}
+
+func authModeForLoginProtocol(protocol string) string {
+	if normalizeLoginProtocol(protocol, "") == "codex-oauth" {
+		return providerAuthModeOAuth
+	}
+	return providerAuthModeAPIKey
+}
+
+func (t *configTUI) promptBoolDefault(label string, current bool) (bool, error) {
+	for {
+		value, err := t.prompt(fmt.Sprintf("%s [%t]: ", label, current))
+		if err != nil {
+			return false, err
+		}
+		if value == "" {
+			return current, nil
+		}
+		parsed, ok := parseConfigTUIBool(value)
+		if ok {
+			return parsed, nil
+		}
+		fmt.Fprintf(t.writer, "%s 必须是 true 或 false\n", label)
 	}
 }
 
