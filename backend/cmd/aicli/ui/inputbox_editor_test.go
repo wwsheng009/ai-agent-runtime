@@ -29,6 +29,52 @@ func TestReadInteractiveLine_HandlesArrowKeysAndEditing(t *testing.T) {
 	}
 }
 
+func TestDecodeInteractiveKeyMarksLoneCarriageReturnEnter(t *testing.T) {
+	decoded, ok := decodeInteractiveKey([]byte{'\r'})
+	if !ok {
+		t.Fatal("expected lone carriage return to decode")
+	}
+	if decoded.key.kind != editorKeyEnter {
+		t.Fatalf("expected enter key, got %#v", decoded.key)
+	}
+	if !decoded.key.fromCarriageReturn {
+		t.Fatal("expected lone carriage return enter to be marked")
+	}
+	if decoded.consumed != 1 {
+		t.Fatalf("expected one byte consumed, got %d", decoded.consumed)
+	}
+
+	decoded, ok = decodeInteractiveKey([]byte{'\r', '\n'})
+	if !ok {
+		t.Fatal("expected CRLF to decode")
+	}
+	if decoded.key.kind != editorKeyEnter {
+		t.Fatalf("expected enter key for CRLF, got %#v", decoded.key)
+	}
+	if decoded.key.fromCarriageReturn {
+		t.Fatal("expected CRLF enter not to request trailing LF drain")
+	}
+	if decoded.consumed != 2 {
+		t.Fatalf("expected CRLF to consume two bytes, got %d", decoded.consumed)
+	}
+}
+
+func TestInteractiveInputCarryoverRoundTripsBytes(t *testing.T) {
+	_ = takeInteractiveInputCarryover()
+	defer takeInteractiveInputCarryover()
+
+	storeInteractiveInputCarryover([]byte("next"))
+	storeInteractiveInputCarryover([]byte("-line"))
+
+	got := takeInteractiveInputCarryover()
+	if string(got) != "next-line" {
+		t.Fatalf("expected carryover bytes to round-trip, got %q", string(got))
+	}
+	if leftover := takeInteractiveInputCarryover(); len(leftover) != 0 {
+		t.Fatalf("expected carryover to be empty after take, got %q", string(leftover))
+	}
+}
+
 func TestReadInteractiveLine_CtrlUClearsCurrentLine(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLine(

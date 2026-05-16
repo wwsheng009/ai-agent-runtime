@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -28,6 +29,7 @@ const (
 	cursorShowSequence            = "\x1b[?25h"
 	clearToEndSequence            = "\x1b[J"
 	escapeSequenceWait            = 30 * time.Millisecond
+	trailingLineFeedDrainWait     = 12 * time.Millisecond
 )
 
 func defaultPasteBurstHoldFirstRune() bool {
@@ -72,8 +74,14 @@ const (
 )
 
 type editorKey struct {
-	kind editorKeyKind
-	r    rune
+	kind               editorKeyKind
+	r                  rune
+	fromCarriageReturn bool
+}
+
+var interactiveInputCarryover struct {
+	sync.Mutex
+	bytes []byte
 }
 
 // ReadWithHistoryPrompt reads a single line using a local line editor.
@@ -163,7 +171,7 @@ func (ib *InputBox) readPrompt(prompt string, onChange func(string), keepHistory
 		return line, readErr
 	}
 	defer func() {
-		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence)
+		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence+cursorShowSequence)
 		_ = term.Restore(fd, state)
 	}()
 	// 启用 bracketed paste 后，终端会给粘贴块加上明确边界，
@@ -221,7 +229,7 @@ func (ib *InputBox) readPromptWithHooksContext(ctx context.Context, prompt strin
 		return line, readErr
 	}
 	defer func() {
-		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence)
+		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence+cursorShowSequence)
 		_ = term.Restore(fd, state)
 	}()
 	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence)
@@ -298,7 +306,10 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 	var reverseSearchOriginal []rune
 	reverseSearchStart := len(history)
 	reverseSearchActive := false
-	pending := make([]byte, 0, 16)
+	pending := takeInteractiveInputCarryover()
+	if pending == nil {
+		pending = make([]byte, 0, 16)
+	}
 	pasteActive := false
 	stdinFile, _ := reader.(*os.File)
 	lastRenderedRows := 1
@@ -906,6 +917,9 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			if onChange != nil {
 				onChange("")
 			}
+			if shouldDrainTrailingLineFeedAfterSubmit(key, echoSubmit, line) {
+				drainTrailingLineFeedAfterCarriageReturn(ctx, reader, &pending, stdinFile)
+			}
 			return submittedText(), nil
 		case editorKeyBackspace:
 			flushPasteBurstBeforeModifiedInput()
@@ -1316,6 +1330,61 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 	}
 }
 
+func shouldDrainTrailingLineFeedAfterSubmit(key editorKey, _ bool, _ []rune) bool {
+	return runtime.GOOS == "windows" && key.fromCarriageReturn
+}
+
+// Windows terminals may deliver Enter as CR followed by LF. If the editor
+// submits on the CR and restores cooked mode first, the LF can echo as a stray
+// newline and leave the next prompt apparently unfocused.
+func drainTrailingLineFeedAfterCarriageReturn(ctx context.Context, reader io.Reader, pending *[]byte, stdinFile *os.File) {
+	if reader == nil || pending == nil || stdinFile == nil {
+		return
+	}
+	if len(*pending) > 0 {
+		return
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+	ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), trailingLineFeedDrainWait)
+	if err != nil || !ready {
+		return
+	}
+	var buf [64]byte
+	n, err := reader.Read(buf[:])
+	if n <= 0 || err != nil && !errors.Is(err, io.EOF) {
+		return
+	}
+	if buf[0] == '\n' {
+		if n > 1 {
+			storeInteractiveInputCarryover(buf[1:n])
+		}
+		return
+	}
+	storeInteractiveInputCarryover(buf[:n])
+}
+
+func takeInteractiveInputCarryover() []byte {
+	interactiveInputCarryover.Lock()
+	defer interactiveInputCarryover.Unlock()
+	if len(interactiveInputCarryover.bytes) == 0 {
+		return nil
+	}
+	out := append([]byte(nil), interactiveInputCarryover.bytes...)
+	interactiveInputCarryover.bytes = interactiveInputCarryover.bytes[:0]
+	return out
+}
+
+func storeInteractiveInputCarryover(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	interactiveInputCarryover.Lock()
+	defer interactiveInputCarryover.Unlock()
+	interactiveInputCarryover.bytes = append(interactiveInputCarryover.bytes, data...)
+}
+
 type decodedInteractiveKey struct {
 	key      editorKey
 	consumed int
@@ -1331,7 +1400,7 @@ func decodeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 		if len(pending) >= 2 && pending[1] == '\n' {
 			return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter}, consumed: 2}, true
 		}
-		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter}, consumed: 1}, true
+		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter, fromCarriageReturn: true}, consumed: 1}, true
 	case '\n':
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter}, consumed: 1}, true
 	case '\t':
