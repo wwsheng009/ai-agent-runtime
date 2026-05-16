@@ -92,15 +92,50 @@ func (s *FixedBottomSurface) Disable() {
 		s.terminal.ClearLine()
 		s.terminal.RestoreCursor()
 	})
-	s.popupRenderedRows = 0
-	s.popupRenderedGapRows = 0
+	s.clearPopupRenderStateLocked()
+	s.clearPopupStateLocked(true)
+	s.clearComposerStateLocked()
+	s.clearPromptStateLocked(true)
+	s.enabled = false
+	s.scrollCompensatedRows = 0
+}
+
+func (s *FixedBottomSurface) clearPopupStateLocked(clearStack bool) {
+	if s == nil {
+		return
+	}
 	s.popupLines = nil
 	s.popupOwner = ""
 	s.popupBelowPrompt = false
 	s.popupReservedRows = 0
-	s.popupStack = nil
+	if clearStack {
+		s.popupStack = nil
+	}
+}
+
+func (s *FixedBottomSurface) clearPopupRenderStateLocked() {
+	if s == nil {
+		return
+	}
+	s.popupRenderedRows = 0
+	s.popupRenderedGapRows = 0
+	s.popupRenderedStartRow = 0
+}
+
+func (s *FixedBottomSurface) clearComposerStateLocked() {
+	if s == nil {
+		return
+	}
 	s.composerLine = ""
-	s.promptNoticeLine = ""
+}
+
+func (s *FixedBottomSurface) clearPromptStateLocked(clearNotice bool) {
+	if s == nil {
+		return
+	}
+	if clearNotice {
+		s.promptNoticeLine = ""
+	}
 	s.promptLine = ""
 	s.promptInput = ""
 	s.promptReservedRows = 0
@@ -108,10 +143,17 @@ func (s *FixedBottomSurface) Disable() {
 	s.promptCursorCol = 0
 	s.promptRenderedStartRow = 0
 	s.promptRenderedRows = 0
-	s.enabled = false
-	s.popupRenderedStartRow = 0
-	s.popupReservedRows = 0
-	s.scrollCompensatedRows = 0
+}
+
+func (s *FixedBottomSurface) setPromptStateLocked(line string, input string, rows int, cursorRow int, cursorCol int) {
+	if s == nil {
+		return
+	}
+	s.promptLine = line
+	s.promptInput = input
+	s.promptReservedRows = rows
+	s.promptCursorRow = cursorRow
+	s.promptCursorCol = cursorCol
 }
 
 func (s *FixedBottomSurface) Enabled() bool {
@@ -262,9 +304,7 @@ func (s *FixedBottomSurface) SetPromptRows(rows int) bool {
 		}
 		if s.popupRenderedRows > 0 {
 			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-			s.popupRenderedRows = 0
-			s.popupRenderedGapRows = 0
-			s.popupRenderedStartRow = 0
+			s.clearPopupRenderStateLocked()
 		}
 		s.promptReservedRows = rows
 		s.applyLayoutLocked()
@@ -339,11 +379,7 @@ func (s *FixedBottomSurface) TrackPromptInputState(line string, input string, ro
 	if !s.enabled {
 		return false
 	}
-	s.promptLine = line
-	s.promptInput = input
-	s.promptReservedRows = rows
-	s.promptCursorRow = cursorRow
-	s.promptCursorCol = cursorCol
+	s.setPromptStateLocked(line, input, rows, cursorRow, cursorCol)
 	return true
 }
 
@@ -357,19 +393,13 @@ func (s *FixedBottomSurface) SetPromptInputState(line string, input string, rows
 	if !s.enabled {
 		return false
 	}
-	s.promptLine = line
-	s.promptInput = input
-	s.promptReservedRows = rows
-	s.promptCursorRow = cursorRow
-	s.promptCursorCol = cursorCol
+	s.setPromptStateLocked(line, input, rows, cursorRow, cursorCol)
 	WithTerminalWriteLock(func() {
 		s.terminal.HideCursor()
 		defer s.terminal.ShowCursor()
 		if s.popupRenderedRows > 0 && !s.bottomPaneStateLocked().popupExpandsBelowPrompt() {
 			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-			s.popupRenderedRows = 0
-			s.popupRenderedGapRows = 0
-			s.popupRenderedStartRow = 0
+			s.clearPopupRenderStateLocked()
 		}
 		s.applyLayoutLocked()
 		s.renderPopupLocked()
@@ -592,25 +622,16 @@ func (s *FixedBottomSurface) ClearPopup() {
 	if len(s.popupLines) == 0 && s.popupRenderedRows == 0 && strings.TrimSpace(s.composerLine) == "" {
 		return
 	}
-	s.popupLines = nil
-	s.popupOwner = ""
-	s.popupBelowPrompt = false
-	s.popupReservedRows = 0
-	s.popupStack = nil
-	s.composerLine = ""
+	s.clearPopupStateLocked(true)
+	s.clearComposerStateLocked()
 	if !s.enabled {
-		s.popupRenderedRows = 0
-		s.popupRenderedGapRows = 0
-		s.popupRenderedStartRow = 0
-		s.popupReservedRows = 0
+		s.clearPopupRenderStateLocked()
 		return
 	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-		s.popupRenderedRows = 0
-		s.popupRenderedGapRows = 0
-		s.popupRenderedStartRow = 0
+		s.clearPopupRenderStateLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
 		s.moveToOutputLocked()
@@ -627,17 +648,10 @@ func (s *FixedBottomSurface) ClearPopupPreserveCursor() {
 		return
 	}
 	restorePromptCursor := s.bottomPaneStateLocked().popupExpandsBelowPrompt()
-	s.popupLines = nil
-	s.popupOwner = ""
-	s.popupBelowPrompt = false
-	s.popupReservedRows = 0
-	s.popupStack = nil
-	s.composerLine = ""
+	s.clearPopupStateLocked(true)
+	s.clearComposerStateLocked()
 	if !s.enabled {
-		s.popupRenderedRows = 0
-		s.popupRenderedGapRows = 0
-		s.popupRenderedStartRow = 0
-		s.popupReservedRows = 0
+		s.clearPopupRenderStateLocked()
 		return
 	}
 	WithTerminalWriteLock(func() {
@@ -651,9 +665,7 @@ func (s *FixedBottomSurface) ClearPopupPreserveCursor() {
 		}
 		s.applyLayoutLocked()
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-		s.popupRenderedRows = 0
-		s.popupRenderedGapRows = 0
-		s.popupRenderedStartRow = 0
+		s.clearPopupRenderStateLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
 		if restorePromptCursor {
@@ -698,9 +710,7 @@ func (s *FixedBottomSurface) ClearPopupForOwnerPreserveCursor(owner string) {
 		}
 		s.applyLayoutLocked()
 		s.clearPopupAreaLocked(previousRows, previousGapRows)
-		s.popupRenderedRows = 0
-		s.popupRenderedGapRows = 0
-		s.popupRenderedStartRow = 0
+		s.clearPopupRenderStateLocked()
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.renderPromptRowsLocked(true)
@@ -756,14 +766,7 @@ func (s *FixedBottomSurface) SetComposerPreview(line string) {
 	s.composerLine = line
 	s.popupBelowPrompt = false
 	s.popupReservedRows = 0
-	s.promptNoticeLine = ""
-	s.promptLine = ""
-	s.promptInput = ""
-	s.promptReservedRows = 0
-	s.promptCursorRow = 0
-	s.promptCursorCol = 0
-	s.promptRenderedStartRow = 0
-	s.promptRenderedRows = 0
+	s.clearPromptStateLocked(true)
 	if !s.enabled {
 		return
 	}
@@ -785,23 +788,18 @@ func (s *FixedBottomSurface) ClearComposerPreview() {
 	if s.composerLine == "" && s.popupRenderedRows == 0 {
 		return
 	}
-	s.composerLine = ""
+	s.clearComposerStateLocked()
 	s.promptReservedRows = 0
 	s.promptCursorRow = 0
 	s.promptCursorCol = 0
 	if !s.enabled {
-		s.popupRenderedRows = 0
-		s.popupRenderedGapRows = 0
-		s.popupRenderedStartRow = 0
-		s.popupReservedRows = 0
+		s.clearPopupRenderStateLocked()
 		return
 	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-		s.popupRenderedRows = 0
-		s.popupRenderedGapRows = 0
-		s.popupRenderedStartRow = 0
+		s.clearPopupRenderStateLocked()
 		s.renderPopupLocked()
 		s.renderStatusLocked()
 		s.moveToOutputLocked()
@@ -913,11 +911,8 @@ func (s *FixedBottomSurface) restorePopupStateFromStackLocked() {
 		s.composerLine = last.composerLine
 		return
 	}
-	s.popupLines = nil
-	s.popupOwner = ""
-	s.popupBelowPrompt = false
-	s.popupReservedRows = 0
-	s.composerLine = ""
+	s.clearPopupStateLocked(false)
+	s.clearComposerStateLocked()
 }
 
 func popupOwnerPriority(owner string) int {
@@ -1024,17 +1019,13 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 	if rows == 0 {
 		if s.popupRenderedRows > 0 {
 			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-			s.popupRenderedRows = 0
-			s.popupRenderedGapRows = 0
-			s.popupRenderedStartRow = 0
+			s.clearPopupRenderStateLocked()
 		}
 		return
 	}
 	if s.popupRenderedRows > 0 && (s.popupRenderedRows != rows || s.popupRenderedGapRows != gapRows) {
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-		s.popupRenderedRows = 0
-		s.popupRenderedGapRows = 0
-		s.popupRenderedStartRow = 0
+		s.clearPopupRenderStateLocked()
 	}
 	startRow := s.popupStartRowLocked(rows, gapRows)
 	if startRow < 1 {
