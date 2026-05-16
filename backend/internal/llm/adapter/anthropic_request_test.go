@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -181,6 +182,82 @@ func TestAnthropicBuildAssistantMessage_NormalizesToolUseBlocks(t *testing.T) {
 	args, _ := fn["arguments"].(string)
 	if !strings.Contains(args, `"file_path":"README.md"`) {
 		t.Fatalf("expected file_path in normalized arguments, got %q", args)
+	}
+}
+
+func TestAnthropicBuildAssistantMessage_UnwrapsRawToolUseInput(t *testing.T) {
+	a := &AnthropicAdapter{}
+	msg := a.BuildAssistantMessage("", []map[string]interface{}{
+		{
+			"type": "tool_use",
+			"id":   "call-raw",
+			"name": "edit",
+			"input": map[string]interface{}{
+				"_raw": `{"file_path":"E:/projects/app/main.go","old_string":"old","new_string":"new"}`,
+			},
+		},
+	}, "")
+
+	toolCalls, ok := msg["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("expected 1 normalized tool call, got %T %#v", msg["tool_calls"], msg["tool_calls"])
+	}
+	fn, _ := toolCalls[0]["function"].(map[string]interface{})
+	argsJSON, _ := fn["arguments"].(string)
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		t.Fatalf("decode arguments: %v", err)
+	}
+	if got, _ := args["file_path"].(string); got != "E:/projects/app/main.go" {
+		t.Fatalf("expected unwrapped file_path, got %q in %s", got, argsJSON)
+	}
+	if _, exists := args["_raw"]; exists {
+		t.Fatalf("did not expect _raw after normalization: %s", argsJSON)
+	}
+}
+
+func TestAnthropicHandleResponse_StreamUnwrapsRawToolArguments(t *testing.T) {
+	a := &AnthropicAdapter{}
+	sse := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"mimo-v2.5-pro","content":[]}}`,
+		"",
+		"event: content_block_start",
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"bash","input":{}}}`,
+		"",
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"_raw\":\"{\\\"command\\\":\\\"git status\\\",\\\"workdir\\\":\\\"E:/projects/app\\\"}\"}"}}`,
+		"",
+		"event: content_block_stop",
+		`data: {"type":"content_block_stop","index":0}`,
+		"",
+		"event: message_delta",
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+	}, "\n")
+
+	msg, err := a.HandleResponse(true, strings.NewReader(sse), StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("HandleResponse failed: %v", err)
+	}
+	toolCalls, ok := msg["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %T %#v", msg["tool_calls"], msg["tool_calls"])
+	}
+	fn, _ := toolCalls[0]["function"].(map[string]interface{})
+	argsJSON, _ := fn["arguments"].(string)
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		t.Fatalf("decode arguments: %v", err)
+	}
+	if got, _ := args["command"].(string); got != "git status" {
+		t.Fatalf("expected unwrapped command, got %q in %s", got, argsJSON)
+	}
+	if got, _ := args["workdir"].(string); got != "E:/projects/app" {
+		t.Fatalf("expected unwrapped workdir, got %q in %s", got, argsJSON)
 	}
 }
 

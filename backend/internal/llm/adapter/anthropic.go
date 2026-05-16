@@ -679,6 +679,7 @@ func (a *AnthropicAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]in
 			if input, ok := tcMap["input"].(map[string]interface{}); ok {
 				args = input
 			}
+			args = toolargs.Normalize(args)
 
 			argsJSON, _ := json.Marshal(args)
 			toolCalls = append(toolCalls, ToolCall{
