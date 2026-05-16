@@ -703,6 +703,74 @@ func TestFixedBottomSurface_SetComposerPreviewRendersStandaloneComposerRow(t *te
 	}
 }
 
+func TestFixedBottomSurface_SetComposerPreviewSuppressesPromptState(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+		if !surface.SetPromptInputState("> ", "/help", 1, 0, 7) {
+			t.Fatal("expected enabled surface to track prompt input")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		surface.SetComposerPreview("Provider 名称: ")
+	})
+
+	if surface.composerLine != "Provider 名称: " {
+		t.Fatalf("expected composer preview to be active, got %q", surface.composerLine)
+	}
+	if surface.promptLine != "" || surface.promptInput != "" || surface.promptReservedRows != 0 {
+		t.Fatalf("expected prompt state to be suppressed while composer is active, line=%q input=%q rows=%d", surface.promptLine, surface.promptInput, surface.promptReservedRows)
+	}
+	if surface.promptCursorRow != 0 || surface.promptCursorCol != 0 {
+		t.Fatalf("expected prompt cursor to reset while composer is active, row=%d col=%d", surface.promptCursorRow, surface.promptCursorCol)
+	}
+	if strings.Contains(output, "\x1b[23;1H> /help") {
+		t.Fatalf("expected previous prompt input not to render under composer preview, got %q", output)
+	}
+	if !strings.Contains(output, "Provider 名称:") {
+		t.Fatalf("expected composer preview to render, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ClearComposerPreviewLeavesPopupStateIntact(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwner([]string{
+			"选择 Provider",
+			"  [1] openai",
+		}, "provider_select")
+		surface.SetComposerPreview("providers> ")
+	})
+
+	output := captureUIStdout(t, func() {
+		surface.ClearComposerPreview()
+	})
+
+	if surface.composerLine != "" {
+		t.Fatalf("expected composer preview to clear, got %q", surface.composerLine)
+	}
+	if surface.popupOwner != "provider_select" || !strings.Contains(strings.Join(surface.popupLines, "\n"), "选择 Provider") {
+		t.Fatalf("expected popup state to remain after composer clear, owner=%q lines=%#v", surface.popupOwner, surface.popupLines)
+	}
+	if surface.promptCursorRow != 0 || surface.promptCursorCol != 0 {
+		t.Fatalf("expected prompt cursor to remain reset after composer clear, row=%d col=%d", surface.promptCursorRow, surface.promptCursorCol)
+	}
+	if !strings.Contains(output, "选择 Provider") {
+		t.Fatalf("expected popup to re-render after composer clear, got %q", output)
+	}
+}
+
 func TestFixedBottomSurface_ShowPendingPastePreviewRendersPreview(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true

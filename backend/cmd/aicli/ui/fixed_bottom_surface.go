@@ -760,6 +760,8 @@ func (s *FixedBottomSurface) SetComposerPreview(line string) {
 	s.promptLine = ""
 	s.promptInput = ""
 	s.promptReservedRows = 0
+	s.promptCursorRow = 0
+	s.promptCursorCol = 0
 	s.promptRenderedStartRow = 0
 	s.promptRenderedRows = 0
 	if !s.enabled {
@@ -785,6 +787,8 @@ func (s *FixedBottomSurface) ClearComposerPreview() {
 	}
 	s.composerLine = ""
 	s.promptReservedRows = 0
+	s.promptCursorRow = 0
+	s.promptCursorCol = 0
 	if !s.enabled {
 		s.popupRenderedRows = 0
 		s.popupRenderedGapRows = 0
