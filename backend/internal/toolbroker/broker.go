@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -786,6 +787,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	args = toolargs.Normalize(args)
 	handleAliases, err := b.loadSessionHandleAliases(ctx, sessionID)
 	if err != nil {
 		return nil, nil, err

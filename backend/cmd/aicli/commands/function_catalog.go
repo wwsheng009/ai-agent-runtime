@@ -11,6 +11,7 @@ import (
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
 
@@ -431,6 +432,7 @@ func (c *aicliFunctionCatalog) ExecuteFunctionWithMeta(ctx context.Context, name
 	if c == nil || c.registry == nil {
 		return "", nil, fmt.Errorf("function catalog is not initialized")
 	}
+	args = toolargs.Normalize(args)
 	c.syncFromRegistry()
 	if entry, ok := c.entries[name]; ok && entry != nil && !entry.isSkill && c.toolPolicy != nil {
 		if err := c.toolPolicy.AllowToolCall(skill.ToolInfo{Name: name}, args); err != nil {

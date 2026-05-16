@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -251,11 +252,11 @@ func (tc *StreamToolCall) ParseArguments() map[string]interface{} {
 	argStr := repairJSON(tc.Args.String())
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(argStr), &result); err != nil {
-		return map[string]interface{}{
+		return toolargs.Normalize(map[string]interface{}{
 			"_raw": tc.Args.String(),
-		}
+		})
 	}
-	return result
+	return toolargs.Normalize(result)
 }
 
 // ToToolCall 将 StreamToolCall 转换为 ToolCall
@@ -782,6 +783,7 @@ func (a *OpenAIAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]inter
 			} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
 				args = argsMap
 			}
+			args = toolargs.Normalize(args)
 
 			id, _ := tcMap["id"].(string)
 			name, _ := fn["name"].(string)

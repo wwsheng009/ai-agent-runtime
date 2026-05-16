@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 )
 
 // Registry 工具注册表
@@ -76,6 +78,7 @@ func (r *Registry) Execute(ctx context.Context, name string, params map[string]i
 	if !exists {
 		return nil, fmt.Errorf("tool '%s' not found", name)
 	}
+	params = toolargs.Normalize(params)
 
 	// 优化：如果工具支持直接调用，直接执行
 	if tool.CanDirectCall() {

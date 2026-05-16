@@ -548,6 +548,36 @@ func TestGatewayClient_CallProvider_PreservesTypedOpenAIToolCalls(t *testing.T) 
 	assert.Equal(t, `E:\projects\ai\ai-agent-runtime`, resp.ToolCalls[0].Args["path"])
 }
 
+func TestGatewayClient_CallProvider_UnwrapsRawToolArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"_raw\":\"{\\\"command\\\":\\\"git status\\\"}\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	}))
+	defer server.Close()
+
+	client := &GatewayClient{tokenizer: NewTokenizer("openai")}
+	selected := &SelectedResource{
+		Provider: &ProviderResource{
+			Name:    "openai_ee",
+			Type:    "openai",
+			BaseURL: server.URL,
+		},
+		KeyValue: "test-key",
+	}
+
+	resp, err := client.callProvider(context.Background(), selected, "gpt-4o-mini", &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.ToolCalls, 1)
+	assert.Equal(t, "bash", resp.ToolCalls[0].Name)
+	assert.Equal(t, "git status", resp.ToolCalls[0].Args["command"])
+}
+
 func TestGatewayClient_CallProvider_WithStreamPreservesTypedOpenAIToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

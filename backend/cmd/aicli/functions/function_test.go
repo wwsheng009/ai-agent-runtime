@@ -16,6 +16,7 @@ import (
 type plainTestFunction struct {
 	name   string
 	output string
+	args   map[string]interface{}
 }
 
 func (f *plainTestFunction) Name() string { return f.name }
@@ -27,6 +28,7 @@ func (f *plainTestFunction) Parameters() map[string]interface{} {
 }
 
 func (f *plainTestFunction) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	f.args = args
 	return f.output, nil
 }
 
@@ -56,6 +58,22 @@ func TestFunctionRegistry_ExecuteFunctionWithMeta_FallsBackForPlainFunction(t *t
 	}
 	if metadata != nil {
 		t.Fatalf("expected nil metadata for plain function, got %#v", metadata)
+	}
+}
+
+func TestFunctionRegistry_ExecuteFunctionWithMeta_UnwrapsRawArgs(t *testing.T) {
+	registry := NewFunctionRegistry()
+	fn := &plainTestFunction{name: "plain", output: "ok"}
+	registry.Register(fn)
+
+	_, _, err := registry.ExecuteFunctionWithMeta(context.Background(), "plain", map[string]interface{}{
+		"_raw": `{"command":"git status"}`,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteFunctionWithMeta failed: %v", err)
+	}
+	if fn.args["command"] != "git status" {
+		t.Fatalf("expected normalized command arg, got %#v", fn.args)
 	}
 }
 

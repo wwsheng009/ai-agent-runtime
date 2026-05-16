@@ -10,6 +10,7 @@ import (
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -30,6 +31,7 @@ func (e *aicliToolExecutor) ExecuteTool(ctx context.Context, call runtimetypes.T
 	if e.scopeProvider != nil {
 		scope = e.scopeProvider()
 	}
+	call.Args = toolargs.Normalize(call.Args)
 
 	if truncatedErr := toolArgsTruncatedError(call.Args); truncatedErr != "" {
 		result.Error = truncatedErr

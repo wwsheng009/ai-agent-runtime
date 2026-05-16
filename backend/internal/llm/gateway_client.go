@@ -13,6 +13,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -1215,9 +1216,9 @@ func parseToolArguments(argsStr string) map[string]interface{} {
 		if strings.TrimSpace(argsStr) == "" {
 			return make(map[string]interface{})
 		}
-		return map[string]interface{}{"_raw": argsStr}
+		return toolargs.Normalize(map[string]interface{}{"_raw": argsStr})
 	}
-	return args
+	return toolargs.Normalize(args)
 }
 
 func resolveProviderAPIPath(provider *ProviderResource, defaultPath string) string {

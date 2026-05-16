@@ -3,6 +3,8 @@ package functions
 import (
 	"context"
 	"fmt"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 )
 
 // Function 定义 Function Call 的接口
@@ -95,6 +97,7 @@ func (r *FunctionRegistry) ExecuteFunctionWithMeta(ctx context.Context, name str
 	if !ok {
 		return "", nil, fmt.Errorf("function '%s' not found", name)
 	}
+	args = toolargs.Normalize(args)
 	if rich, ok := fn.(FunctionWithMetadata); ok {
 		return rich.ExecuteWithMeta(ctx, args)
 	}

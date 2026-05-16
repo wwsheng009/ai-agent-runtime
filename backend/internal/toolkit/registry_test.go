@@ -2,6 +2,7 @@ package toolkit_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -72,6 +73,25 @@ func TestRegistryList_SortsToolsByName(t *testing.T) {
 	}
 	if toolsList[0].Name() != "bash" || toolsList[1].Name() != "view" || toolsList[2].Name() != "write" {
 		t.Fatalf("expected sorted tool list, got %s, %s, %s", toolsList[0].Name(), toolsList[1].Name(), toolsList[2].Name())
+	}
+}
+
+func TestRegistryExecute_UnwrapsRawArgs(t *testing.T) {
+	registry := toolkit.NewRegistry()
+	if err := registry.Register(tools.NewBashTool()); err != nil {
+		t.Fatalf("register bash: %v", err)
+	}
+	result, err := registry.Execute(context.Background(), "bash", map[string]interface{}{
+		"_raw": `{"command":"echo registry-raw-ok"}`,
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %v", result.Error)
+	}
+	if !strings.Contains(result.Content, "registry-raw-ok") {
+		t.Fatalf("expected raw command output, got %q", result.Content)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	anthropictypes "github.com/wwsheng009/ai-agent-runtime/internal/types/anthropic"
 )
@@ -703,6 +704,7 @@ func (a *AnthropicAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]in
 			} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
 				args = argsMap
 			}
+			args = toolargs.Normalize(args)
 
 			id, _ := tcMap["id"].(string)
 			name, _ := fn["name"].(string)
