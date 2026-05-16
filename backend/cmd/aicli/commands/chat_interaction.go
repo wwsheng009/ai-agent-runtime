@@ -1281,8 +1281,6 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	promptLine := promptText + c.promptInput
 	if c.shouldAdvanceAfterPromptLocked() {
 		c.writeTextLocked("\r\n")
-		c.promptInput = ""
-		c.promptCursor = 0
 		c.promptRenderedOnSurface = false
 		return
 	}
@@ -1292,8 +1290,6 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	}
 	rows := interactivePromptDisplayRows(promptLine, termWidth)
 	if c.writer == os.Stdout && c.surface != nil && c.surface.ClearPromptRows(rows) {
-		c.promptInput = ""
-		c.promptCursor = 0
 		c.promptRenderedOnSurface = false
 		return
 	}
@@ -1305,8 +1301,6 @@ func (c *chatInteractionCoordinator) clearVisiblePromptLocked() {
 	}
 	builder.WriteString(clearPromptDisplayRowsSequence(rows))
 	c.writeTextLocked(builder.String())
-	c.promptInput = ""
-	c.promptCursor = 0
 	c.promptRenderedOnSurface = false
 }
 
@@ -1760,12 +1754,21 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 		if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 			return
 		}
-		if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(formatSessionUserPrompt(c.session)) {
+		prompt := formatSessionUserPrompt(c.session)
+		if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(prompt) {
 			c.promptVisible = true
 			c.promptRenderedOnSurface = true
+			if c.promptInput != "" {
+				rows := c.currentPromptDisplayRowsLocked()
+				cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
+				c.surface.SetPromptInputState(prompt, c.promptInput, rows, cursorRow, cursorCol)
+			}
 			return
 		}
-		c.writeTextLocked(formatSessionUserPrompt(c.session))
+		c.writeTextLocked(prompt)
+		if c.promptInput != "" {
+			c.writeTextLocked(c.promptInput)
+		}
 		c.promptVisible = true
 	})
 }

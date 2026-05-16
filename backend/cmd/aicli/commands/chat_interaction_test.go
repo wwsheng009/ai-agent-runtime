@@ -152,6 +152,40 @@ func TestStartWaiting_PreservesPromptDraft(t *testing.T) {
 	}
 }
 
+func TestStartThinking_PreservesVisiblePromptDraft(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.promptAdvanceFn = func() bool { return false }
+	output := &terminalCaptureWriter{}
+	coord.SetWriter(output)
+
+	coord.PrintPrompt()
+	coord.SetPromptInput("draft while thinking")
+	coord.StartThinking()
+
+	snapshot := coord.PromptInputSnapshot()
+	if snapshot.Text != "draft while thinking" {
+		t.Fatalf("expected thinking transition to preserve prompt draft, got %q", snapshot.Text)
+	}
+}
+
+func TestSchedulePromptRedraw_RestoresPromptDraft(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.promptDelay = 10 * time.Millisecond
+	output := &synchronizedBuffer{}
+	coord.SetWriter(output)
+
+	coord.SetPromptInput("draft after ready")
+	coord.SchedulePromptRedraw()
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(output.String(), ui.UserPromptText(0)+"draft after ready")
+	}, 200*time.Millisecond, 10*time.Millisecond)
+}
+
 func TestFinishInteractiveReadPromptState_PreservesDraftForQueuedInput(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
