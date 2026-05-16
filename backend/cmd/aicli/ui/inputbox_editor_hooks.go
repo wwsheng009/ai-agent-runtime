@@ -22,6 +22,8 @@ type LineEditorRenderSnapshot struct {
 
 // LineEditorHooks lets the caller observe and intercept editor actions.
 type LineEditorHooks struct {
+	InitialText           string
+	InitialCursor         int
 	OnChange              func(LineEditorSnapshot)
 	OnBeforeRedraw        func(LineEditorSnapshot, LineEditorRenderSnapshot)
 	OnBeforeTerminalWrite func(LineEditorSnapshot, LineEditorRenderSnapshot) string

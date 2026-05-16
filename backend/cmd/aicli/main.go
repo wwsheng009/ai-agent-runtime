@@ -150,12 +150,14 @@ func main() {
 	// config 子命令
 	configCmd := &cobra.Command{
 		Use:   "config",
-		Short: "列出配置信息",
-		Long:  `列出当前配置的 providers 和 provider_groups 信息。`,
-		Example: `  aicli config                        # 显示所有配置
+		Short: "管理配置",
+		Long:  `交互式管理配置；也可通过 flags 输出 providers、provider_groups、models 等只读信息。`,
+		Example: `  aicli config                        # 默认进入交互式配置管理
+  aicli config --no-tui                # 显示配置摘要
   aicli config --provider nvidia       # 只显示指定 provider
   aicli config --groups                # 只显示 provider groups
   aicli config --models                # 列出所有可用模型
+  aicli config --tui                   # 显式进入交互式配置管理
   aicli config --output json           # 结构化 JSON 输出`,
 		Run: func(cmd *cobra.Command, args []string) {
 			commands.HandleConfig(cmd, cfg)
@@ -164,6 +166,8 @@ func main() {
 	configCmd.Flags().StringP("provider", "p", "", "指定 provider 名称")
 	configCmd.Flags().BoolP("groups", "g", false, "显示 provider groups")
 	configCmd.Flags().BoolP("models", "m", false, "列出所有可用模型")
+	configCmd.Flags().Bool("tui", false, "打开交互式配置管理界面")
+	configCmd.Flags().Bool("no-tui", false, "禁用默认交互界面，使用传统摘要输出")
 	configCmd.Flags().String("output", "", "输出格式（text|json）")
 	configCmd.Flags().BoolP("json", "j", false, "以 JSON 格式输出")
 	rootCmd.AddCommand(configCmd)

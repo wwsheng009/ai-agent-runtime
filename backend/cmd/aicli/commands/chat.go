@@ -118,6 +118,7 @@ type ChatSession struct {
 	lastLocalShellArtifactPath      string
 	queuedInputDrain                bool     // suppress repeated queued-input notices while draining
 	queuedInputEchoed               bool     // queued input was already echoed in the fixed prompt while busy
+	lastInteractiveInputQueued      bool     // last chatInteractiveReadLine result came from InputQueue
 	ImagePaths                      []string // explicit local image attachments for current turn
 }
 
@@ -871,13 +872,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			}
 
 			input, err = chatInteractiveReadLine(session, session.cancelCtx)
-			if session.Interaction != nil {
-				if err == nil {
-					session.Interaction.ResetPromptState()
-				} else {
-					session.Interaction.ClearPrompt()
-				}
-			}
+			finishChatInteractiveReadPromptState(session, err)
 			if err != nil {
 				if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
 					beginDirectInteractiveOutput(session)

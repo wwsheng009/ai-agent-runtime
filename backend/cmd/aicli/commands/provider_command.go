@@ -1,8 +1,12 @@
 package commands
 
 import (
+	"bufio"
 	"fmt"
+	"io"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -79,10 +83,11 @@ func newProviderShowCommand(configProvider func() *config.Config) *cobra.Command
 
 func newProviderRemoveCommand(configProvider func() *config.Config) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "remove <name...>",
+		Use:     "remove [name...]",
 		Aliases: []string{"rm", "delete"},
 		Short:   "删除一个或多个 provider",
-		Args:    cobra.MinimumNArgs(1),
+		Long:    "删除一个或多个 provider。未提供名称时进入交互选择，可输入编号或名称切换选择，并支持 all、clear、invert、done、q。",
+		Args:    cobra.ArbitraryArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			HandleProviderRemove(cmd, configProvider, args)
 		},
@@ -174,10 +179,37 @@ func HandleProviderRemove(cmd *cobra.Command, configProvider func() *config.Conf
 	yes := boolFlag(cmd, "yes")
 	executeCommand("provider remove", outputOptions, func() (*config.ProviderDeleteResult, map[string]interface{}, error) {
 		cfg := providerCommandConfig(configProvider)
-		if !req.DryRun && !yes {
+		if cfg == nil {
+			return nil, nil, fmt.Errorf("config is not loaded")
+		}
+		effectiveReq := req
+		if len(effectiveReq.Names) == 0 {
+			if isJSONOutputFormat(outputOptions.Format) {
+				return nil, nil, fmt.Errorf("provider remove JSON 模式需要显式提供 provider 名称")
+			}
+			selected, err := promptProviderRemoveSelection(os.Stdin, os.Stdout, config.ListProviderSummaries(cfg, config.ProviderListFilter{}))
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(selected) == 0 {
+				return nil, nil, fmt.Errorf("未选择要删除的 provider")
+			}
+			effectiveReq.Names = selected
+			if !effectiveReq.DryRun && !yes {
+				confirmed, err := confirmProviderRemoveSelection(os.Stdin, os.Stdout, selected)
+				if err != nil {
+					return nil, nil, err
+				}
+				if !confirmed {
+					return nil, nil, fmt.Errorf("已取消删除 provider")
+				}
+				yes = true
+			}
+		}
+		if !effectiveReq.DryRun && !yes {
 			return nil, nil, fmt.Errorf("删除 provider 会修改配置；请添加 --yes 确认，或使用 --dry-run 预览")
 		}
-		result, err := runProviderRemoveCommand(cfg, req)
+		result, err := runProviderRemoveCommand(cfg, effectiveReq)
 		if err != nil {
 			return result, providerResultDetails(result), err
 		}
@@ -291,6 +323,165 @@ func runProviderRemoveCommand(cfg *config.Config, req config.ProviderDeleteReque
 		return result, err
 	}
 	return result, nil
+}
+
+func promptProviderRemoveSelection(reader io.Reader, writer io.Writer, providers []config.ProviderSummary) ([]string, error) {
+	if reader == nil {
+		reader = os.Stdin
+	}
+	if writer == nil {
+		writer = os.Stdout
+	}
+	if len(providers) == 0 {
+		return nil, fmt.Errorf("没有可删除的 provider")
+	}
+	selected := make(map[int]bool, len(providers))
+	scanner := bufio.NewScanner(reader)
+	for {
+		renderProviderRemoveSelectionMenu(writer, providers, selected)
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("已取消删除 provider")
+		}
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			continue
+		}
+		action := strings.ToLower(input)
+		switch action {
+		case "q", "quit", "cancel", "exit":
+			return nil, fmt.Errorf("已取消删除 provider")
+		case "d", "done", "ok", "confirm":
+			return selectedProviderNames(providers, selected), nil
+		case "a", "all", "*":
+			for i := range providers {
+				selected[i] = true
+			}
+			continue
+		case "n", "none", "clear":
+			for key := range selected {
+				delete(selected, key)
+			}
+			continue
+		case "i", "invert":
+			for i := range providers {
+				selected[i] = !selected[i]
+			}
+			continue
+		}
+		if err := toggleProviderRemoveSelection(input, providers, selected); err != nil {
+			fmt.Fprintf(writer, "输入无效: %v\n\n", err)
+		}
+	}
+}
+
+func renderProviderRemoveSelectionMenu(writer io.Writer, providers []config.ProviderSummary, selected map[int]bool) {
+	fmt.Fprintln(writer, "选择要删除的 provider:")
+	for i, provider := range providers {
+		mark := " "
+		if selected[i] {
+			mark = "x"
+		}
+		defaultMark := ""
+		if provider.Default {
+			defaultMark = " default"
+		}
+		enabled := "disabled"
+		if provider.Enabled {
+			enabled = "enabled"
+		}
+		fmt.Fprintf(writer, "  [%s] %2d. %-20s %-8s %-12s%s\n", mark, i+1, provider.Name, enabled, emptyIfBlank(provider.Protocol), defaultMark)
+	}
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "输入编号或名称切换选择；支持 1,3、1-3、all 全选、clear 清空、invert 反选、done 继续、q 取消。")
+	fmt.Fprint(writer, "provider remove> ")
+}
+
+func toggleProviderRemoveSelection(input string, providers []config.ProviderSummary, selected map[int]bool) error {
+	tokens := strings.FieldsFunc(input, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	if len(tokens) == 0 {
+		return fmt.Errorf("请输入编号、名称或操作")
+	}
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		indexes, err := providerSelectionTokenIndexes(token, providers)
+		if err != nil {
+			return err
+		}
+		for _, index := range indexes {
+			selected[index] = !selected[index]
+		}
+	}
+	return nil
+}
+
+func providerSelectionTokenIndexes(token string, providers []config.ProviderSummary) ([]int, error) {
+	if strings.Contains(token, "-") {
+		parts := strings.SplitN(token, "-", 2)
+		start, startErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+		end, endErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if startErr == nil && endErr == nil {
+			if start <= 0 || end <= 0 || start > len(providers) || end > len(providers) {
+				return nil, fmt.Errorf("范围超出 provider 列表: %s", token)
+			}
+			if start > end {
+				start, end = end, start
+			}
+			indexes := make([]int, 0, end-start+1)
+			for i := start; i <= end; i++ {
+				indexes = append(indexes, i-1)
+			}
+			return indexes, nil
+		}
+	}
+	if number, err := strconv.Atoi(token); err == nil {
+		if number <= 0 || number > len(providers) {
+			return nil, fmt.Errorf("编号超出 provider 列表: %s", token)
+		}
+		return []int{number - 1}, nil
+	}
+	for i, provider := range providers {
+		if strings.EqualFold(provider.Name, token) {
+			return []int{i}, nil
+		}
+	}
+	return nil, fmt.Errorf("找不到 provider: %s", token)
+}
+
+func selectedProviderNames(providers []config.ProviderSummary, selected map[int]bool) []string {
+	names := make([]string, 0, len(selected))
+	for i, provider := range providers {
+		if selected[i] {
+			names = append(names, provider.Name)
+		}
+	}
+	return names
+}
+
+func confirmProviderRemoveSelection(reader io.Reader, writer io.Writer, names []string) (bool, error) {
+	if reader == nil {
+		reader = os.Stdin
+	}
+	if writer == nil {
+		writer = os.Stdout
+	}
+	fmt.Fprintf(writer, "将删除 provider: %s\n", strings.Join(names, ", "))
+	fmt.Fprint(writer, "输入 yes 确认删除: ")
+	scanner := bufio.NewScanner(reader)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return strings.EqualFold(strings.TrimSpace(scanner.Text()), "yes"), nil
 }
 
 func runProviderEnableCommand(cfg *config.Config, names []string, enabled bool) (*config.ProviderEnableResult, error) {

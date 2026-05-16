@@ -138,6 +138,38 @@ func TestChatInteractionCoordinator_WaitingStateBlocksCommandInput(t *testing.T)
 	}
 }
 
+func TestStartWaiting_PreservesPromptDraft(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+
+	coord.SetPromptInput("draft while busy")
+	coord.StartWaiting()
+
+	snapshot := coord.PromptInputSnapshot()
+	if snapshot.Text != "draft while busy" {
+		t.Fatalf("expected waiting transition to preserve prompt draft, got %q", snapshot.Text)
+	}
+}
+
+func TestFinishInteractiveReadPromptState_PreservesDraftForQueuedInput(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+
+	coord.SetPromptInput("next draft")
+	session.lastInteractiveInputQueued = true
+	finishChatInteractiveReadPromptState(session, nil)
+
+	snapshot := coord.PromptInputSnapshot()
+	if snapshot.Text != "next draft" {
+		t.Fatalf("expected queued input read to preserve prompt draft, got %q", snapshot.Text)
+	}
+	if session.lastInteractiveInputQueued {
+		t.Fatal("expected queued input marker to reset after prompt state handling")
+	}
+}
+
 func (c *chatInteractionCoordinator) currentSurfaceStateForTest() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1218,6 +1250,39 @@ func TestBuildChatSurfaceStatusLine_UsesLiveStatusMessageCount(t *testing.T) {
 	}
 	if strings.Contains(status, "msgs 2") {
 		t.Fatalf("expected status line not to fall back to turn count when live count exists, got %q", status)
+	}
+}
+
+func TestBuildChatPromptNoticeLine_IncludesQueuedInputState(t *testing.T) {
+	queue := newChatInputQueue(nil)
+	queue.routeLine(chatQueuedInput{Text: "queued\n", Source: "stdin"})
+	session := &ChatSession{
+		InputQueue:       queue,
+		queuedInputDrain: true,
+	}
+
+	notice := buildChatPromptNoticeLine(session)
+	if !strings.Contains(notice, "• Message to be submitted after next tool call (press esc to interrupt and send immediately)") {
+		t.Fatalf("expected prompt notice to include queued input state, got %q", notice)
+	}
+	if !strings.Contains(notice, "  - queued") {
+		t.Fatalf("expected prompt notice to include queued message preview, got %q", notice)
+	}
+}
+
+func TestBuildChatPromptNoticeLine_IncludesReadySubmissionPreview(t *testing.T) {
+	queue := newChatInputQueue(nil)
+	queue.readyText = "confirmed draft\n"
+	session := &ChatSession{
+		InputQueue: queue,
+	}
+
+	notice := buildChatPromptNoticeLine(session)
+	if !strings.Contains(notice, "• Message to be submitted after next tool call (press esc to interrupt and send immediately)") {
+		t.Fatalf("expected prompt notice to include ready submission state, got %q", notice)
+	}
+	if !strings.Contains(notice, "  - confirmed draft") {
+		t.Fatalf("expected prompt notice to include ready submission preview, got %q", notice)
 	}
 }
 

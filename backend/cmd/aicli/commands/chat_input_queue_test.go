@@ -78,6 +78,30 @@ func TestChatInputQueue_DropsSlashCommandWhenCommandGateRejects(t *testing.T) {
 	}
 }
 
+func TestChatInputQueue_QueuedPreviewLinesFollowPendingLines(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.routeInputText("first prompt\n")
+	queue.routeInputText("second prompt\n")
+
+	previews := queue.queuedPreviewLines(5)
+	if len(previews) != 2 || previews[0] != "first prompt" || previews[1] != "second prompt" {
+		t.Fatalf("unexpected queued previews before read: %#v", previews)
+	}
+
+	line, ok := queue.readAvailableLine()
+	if !ok {
+		t.Fatal("expected queued line to be readable")
+	}
+	if normalizeQueuedInputLine(line) != "first prompt" {
+		t.Fatalf("expected first queued line, got %q", line)
+	}
+
+	previews = queue.queuedPreviewLines(5)
+	if len(previews) != 1 || previews[0] != "second prompt" {
+		t.Fatalf("expected preview list to drop consumed line, got %#v", previews)
+	}
+}
+
 func TestChatInputQueue_MultilinePasteStaysDraftUntilEnter(t *testing.T) {
 	oldDelay := inputPasteSettleDelay
 	inputPasteSettleDelay = func() time.Duration {
@@ -334,7 +358,7 @@ func TestShouldUseInteractiveLineEditor_EnabledOnUnixTTY(t *testing.T) {
 	}
 }
 
-func TestChatInteractiveReadLine_UsesInteractiveLineEditorOnWindowsTTY(t *testing.T) {
+func TestChatInteractiveReadLine_DrainsQueuedInputBeforeInteractiveLineEditor(t *testing.T) {
 	oldGOOS := chatRuntimeGOOS
 	oldInteractive := chatIsInteractiveTerminal
 	defer func() {
@@ -348,7 +372,7 @@ func TestChatInteractiveReadLine_UsesInteractiveLineEditorOnWindowsTTY(t *testin
 	restore := withTransientStdio(t, "typed\n")
 	defer restore()
 
-	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("ignored\n")))
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
 	queue.lines <- chatQueuedInput{Text: "queued\n", Source: "stdin"}
 
 	session := &ChatSession{
@@ -361,8 +385,8 @@ func TestChatInteractiveReadLine_UsesInteractiveLineEditorOnWindowsTTY(t *testin
 	if err != nil {
 		t.Fatalf("chatInteractiveReadLine: %v", err)
 	}
-	if normalizeQueuedInputLine(line) != "typed" {
-		t.Fatalf("expected Windows interactive read to use transient input box, got %q", line)
+	if normalizeQueuedInputLine(line) != "queued" {
+		t.Fatalf("expected queued input to be drained before transient input box, got %q", line)
 	}
 
 	if nextLine, err := session.InputReader.ReadString('\n'); err != nil {
@@ -371,13 +395,8 @@ func TestChatInteractiveReadLine_UsesInteractiveLineEditorOnWindowsTTY(t *testin
 		t.Fatalf("expected shared reader input to remain untouched, got %q", nextLine)
 	}
 
-	select {
-	case queued := <-queue.lines:
-		if normalizeQueuedInputLine(queued.Text) != "queued" {
-			t.Fatalf("expected queued input to remain untouched, got %q", queued.Text)
-		}
-	default:
-		t.Fatal("expected queued input to remain untouched when line editor is used")
+	if queue.pendingCount() != 0 {
+		t.Fatalf("expected queued input to be consumed, got %d pending", queue.pendingCount())
 	}
 }
 

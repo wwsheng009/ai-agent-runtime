@@ -127,19 +127,26 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 		return
 	}
 	c.promptSeq++
-	c.promptInput = ""
-	c.promptCursor = 0
 	c.promptPasteActive = false
 	if c.promptVisible || c.thinkingActive || c.streamingActive || c.reasoningActive {
 		return
 	}
-	if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(formatSessionUserPrompt(c.session)) {
+	prompt := formatSessionUserPrompt(c.session)
+	if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(prompt) {
 		c.promptVisible = true
 		c.promptRenderedOnSurface = true
+		if c.promptInput != "" {
+			rows := c.currentPromptDisplayRowsLocked()
+			cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
+			c.surface.SetPromptInputState(prompt, c.promptInput, rows, cursorRow, cursorCol)
+		}
 		return
 	}
 	c.promptRenderedOnSurface = false
-	c.writeTextLocked(formatSessionUserPrompt(c.session))
+	c.writeTextLocked(prompt)
+	if c.promptInput != "" {
+		c.writeTextLocked(c.promptInput)
+	}
 	c.promptVisible = true
 }
 
@@ -164,6 +171,46 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
 		return
 	}
 	c.surface.SetStatusLine(buildChatSurfaceStatusLine(c.session, state))
+	c.surface.SetPromptNoticeLine(buildChatPromptNoticeLine(c.session))
+}
+
+func buildChatPromptNoticeLine(session *ChatSession) string {
+	queuedCount, _ := queuedInteractiveInputState(session)
+	if queuedCount <= 0 {
+		return ""
+	}
+	value := "• Message to be submitted after next tool call"
+	lines := []string{value + " (press esc to interrupt and send immediately)"}
+	for _, preview := range queuedInteractiveInputPreviewLines(session, 5) {
+		preview = compactPromptNoticeMessagePreview(preview)
+		if preview == "" {
+			continue
+		}
+		lines = append(lines, "  - "+preview)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func queuedInteractiveInputPreviewLines(session *ChatSession, limit int) []string {
+	if session == nil || session.InputQueue == nil {
+		return nil
+	}
+	return session.InputQueue.queuedPreviewLines(limit)
+}
+
+func compactPromptNoticeMessagePreview(text string) string {
+	text = strings.TrimSpace(normalizeQueuedInputLine(text))
+	if text == "" {
+		return ""
+	}
+	text = strings.ReplaceAll(text, "\n", " / ")
+	text = strings.Join(strings.Fields(text), " ")
+	const maxRunes = 96
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return string(runes[:maxRunes-3]) + "..."
 }
 
 func (c *chatInteractionCoordinator) writeTextLocked(text string) {
@@ -224,8 +271,6 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 	if c.shutdown {
 		return
 	}
-	c.promptInput = ""
-	c.promptCursor = 0
 	c.promptPasteActive = false
 	if c.writer == os.Stdout && c.surface != nil {
 		if c.promptVisible && c.promptRenderedOnSurface {
@@ -240,6 +285,11 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 		c.clearVisiblePromptLocked()
 		c.promptVisible = false
 		c.promptRenderedOnSurface = false
+	}
+	if c.promptVisible && c.promptRenderedOnSurface && c.promptInput != "" && c.writer == os.Stdout && c.surface != nil {
+		rows := c.currentPromptDisplayRowsLocked()
+		cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
+		c.surface.SetPromptInputState(formatSessionUserPrompt(c.session), c.promptInput, rows, cursorRow, cursorCol)
 	}
 	c.waitingActive = true
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
@@ -948,6 +998,20 @@ func (c *chatInteractionCoordinator) ResetPromptState() {
 
 func (c *chatInteractionCoordinator) SetPromptInput(input string) {
 	c.SetPromptInputSnapshot(ui.LineEditorSnapshot{Text: input, Cursor: len([]rune(input))})
+}
+
+func (c *chatInteractionCoordinator) PromptInputSnapshot() ui.LineEditorSnapshot {
+	if c == nil {
+		return ui.LineEditorSnapshot{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return ui.LineEditorSnapshot{
+		Text:        c.promptInput,
+		Cursor:      c.promptCursor,
+		Prompt:      formatSessionUserPrompt(c.session),
+		PasteActive: c.promptPasteActive,
+	}
 }
 
 func (c *chatInteractionCoordinator) RenderPromptInputSnapshot(snapshot ui.LineEditorSnapshot) {

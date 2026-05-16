@@ -112,7 +112,7 @@ aicli version
 | 3 | `./aicli.yaml` | 项目级单文件配置 |
 | 4 | `./configs/config.yaml` | 旧版默认（向后兼容） |
 
-四个默认候选位置都不存在时，当前 `aicli` 会在当前工作目录创建 starter 配置 `./.aicli/config.yaml`，而不是以完全空配置启动。starter 中默认开启 `aicli.chat.stream: true`，并保留空的 `providers.items`，方便后续通过 `aicli login` 或手工编辑补 provider。
+四个默认候选位置都不存在时，当前 `aicli` 会优先创建用户级 starter 配置 `$HOME/.aicli/config.yaml`，从而与默认查找顺序保持一致；如果用户目录不可用，则回退到当前工作目录的 `./.aicli/config.yaml`。starter 中默认开启 `aicli.chat.stream: true`，并保留空的 `providers.items`，方便后续通过 `aicli login` 或手工编辑补 provider。
 
 注意：`./configs/config.yaml` 是相对当前工作目录解析的路径。仓库示例配置实际位于 `backend/configs/config.yaml`，只有从 `backend` 目录运行时才会被默认候选命中；从仓库根运行时请使用 `-c backend/configs/config.yaml` 或创建项目级 `./.aicli/config.yaml`。
 

@@ -23,9 +23,27 @@ func HandleConfig(cmd *cobra.Command, cfg *config.Config) {
 	providerFlag, _ := cmd.Flags().GetString("provider")
 	showGroups, _ := cmd.Flags().GetBool("groups")
 	showModels, _ := cmd.Flags().GetBool("models")
+	tui, _ := cmd.Flags().GetBool("tui")
+	noTUI, _ := cmd.Flags().GetBool("no-tui")
 	outputOptions, err := resolveStructuredOutputOptions(cmd, "text", "text", "json")
 	if err != nil {
 		exitCommandError("config", "json", err, nil)
+	}
+	if shouldRunConfigTUI(configTUIOptions{
+		ExplicitTUI:  tui,
+		NoTUI:        noTUI,
+		ProviderFlag: providerFlag,
+		ShowGroups:   showGroups,
+		ShowModels:   showModels,
+		OutputFormat: outputOptions.Format,
+	}) {
+		if isJSONOutputFormat(outputOptions.Format) {
+			exitCommandError("config", outputOptions.Format, fmt.Errorf("--tui 仅支持文本交互模式，不能与 JSON 输出同时使用"), nil)
+		}
+		if err := runConfigTUI(os.Stdin, os.Stdout, cfg); err != nil {
+			exitCommandError("config", outputOptions.Format, err, nil)
+		}
+		return
 	}
 
 	executeStructuredCommand("config", outputOptions, func() (configCommandResult, map[string]interface{}, error) {
@@ -33,6 +51,28 @@ func HandleConfig(cmd *cobra.Command, cfg *config.Config) {
 	}, func(result configCommandResult) interface{} {
 		return result.JSONPayload
 	}, renderConfigResult)
+}
+
+type configTUIOptions struct {
+	ExplicitTUI  bool
+	NoTUI        bool
+	ProviderFlag string
+	ShowGroups   bool
+	ShowModels   bool
+	OutputFormat string
+}
+
+func shouldRunConfigTUI(options configTUIOptions) bool {
+	if options.NoTUI {
+		return false
+	}
+	if options.ExplicitTUI {
+		return true
+	}
+	if isJSONOutputFormat(options.OutputFormat) {
+		return false
+	}
+	return strings.TrimSpace(options.ProviderFlag) == "" && !options.ShowGroups && !options.ShowModels
 }
 
 func runConfigCommand(cfg *config.Config, providerFlag string, showGroups, showModels bool) (configCommandResult, map[string]interface{}, error) {

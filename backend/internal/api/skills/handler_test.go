@@ -837,8 +837,11 @@ func TestAgentChat_ReActReturnsStructuredFailureWhenMaxStepsIsReached(t *testing
 				},
 			},
 			{
-				Content: "这条响应不应被请求到。",
+				Content: "继续查看第三段日志。",
 				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app-3.log"}},
+				},
 			},
 		},
 	}
@@ -848,8 +851,8 @@ func TestAgentChat_ReActReturnsStructuredFailureWhenMaxStepsIsReached(t *testing
 	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
 	runtimeConfig.Agent.DefaultProvider = "test-provider"
 	runtimeConfig.Agent.DefaultModel = "test-model"
-	runtimeConfig.Agent.MaxMaxSteps = 8
-	runtimeConfig.Context.MaxPromptTokens = 64
+	runtimeConfig.Agent.MaxMaxSteps = 6
+	runtimeConfig.Context.MaxPromptTokens = 900
 	runtimeConfig.Context.MaxMessages = 16
 	runtimeConfig.Context.KeepRecentMessages = 8
 	handler.SetRuntimeConfig(runtimeConfig, "")
@@ -885,7 +888,7 @@ func TestAgentChat_ReActReturnsStructuredFailureWhenMaxStepsIsReached(t *testing
 	assert.NotEmpty(t, result["trace_id"])
 	assert.Equal(t, false, result["success"])
 	assert.Equal(t, "agent_react", result["source"])
-	assert.Contains(t, result["error"], "maxSteps=8")
+	assert.Contains(t, result["error"], "maxSteps=6")
 
 	updated, err := sessionManager.GetSession(context.Background(), session.ID)
 	require.NoError(t, err)

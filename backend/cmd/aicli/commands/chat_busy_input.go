@@ -59,6 +59,9 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 			}
 			queue.routeInputText(line)
 			session.queuedInputEchoed = true
+			if session.Interaction != nil {
+				session.Interaction.RefreshStatus("")
+			}
 			if !isSlashCommandInput(line) && session.InputBox != nil {
 				session.InputBox.AddToHistory(line)
 			}

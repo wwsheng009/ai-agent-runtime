@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,6 +132,77 @@ providers:
 	if strings.Contains(string(mustReadFile(t, path)), "\n    alpha:") {
 		t.Fatal("expected alpha provider to be removed")
 	}
+}
+
+func TestProviderCommand_RemoveAllowsInteractiveNoArgs(t *testing.T) {
+	cmd := newProviderRemoveCommand(func() *config.Config { return nil })
+	if err := cmd.Args(cmd, nil); err != nil {
+		t.Fatalf("expected provider remove without args to enter interactive mode, got %v", err)
+	}
+}
+
+func TestProviderCommand_InteractiveRemoveSelectionSupportsBulkActions(t *testing.T) {
+	providers := []config.ProviderSummary{
+		{Name: "alpha", Enabled: true, Protocol: "openai"},
+		{Name: "beta", Enabled: false, Protocol: "anthropic", Default: true},
+		{Name: "gamma", Enabled: true, Protocol: "gemini"},
+	}
+	input := strings.NewReader("all\n2\ninvert\ndone\n")
+	var output bytes.Buffer
+
+	selected, err := promptProviderRemoveSelection(input, &output, providers)
+	if err != nil {
+		t.Fatalf("promptProviderRemoveSelection: %v\noutput:\n%s", err, output.String())
+	}
+	if strings.Join(selected, ",") != "beta" {
+		t.Fatalf("expected beta to remain selected after all/toggle/invert, got %v\noutput:\n%s", selected, output.String())
+	}
+	for _, want := range []string{"all 全选", "clear 清空", "invert 反选", "done 继续", "beta"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("expected interactive menu to contain %q, got:\n%s", want, output.String())
+		}
+	}
+}
+
+func TestProviderCommand_InteractiveRemoveSelectionSupportsNamesRangesAndClear(t *testing.T) {
+	providers := []config.ProviderSummary{
+		{Name: "alpha"},
+		{Name: "beta"},
+		{Name: "gamma"},
+	}
+	input := strings.NewReader("alpha 3\nclear\n1-2\ndone\n")
+	var output bytes.Buffer
+
+	selected, err := promptProviderRemoveSelection(input, &output, providers)
+	if err != nil {
+		t.Fatalf("promptProviderRemoveSelection: %v\noutput:\n%s", err, output.String())
+	}
+	if strings.Join(selected, ",") != "alpha,beta" {
+		t.Fatalf("expected alpha,beta from name/clear/range flow, got %v\noutput:\n%s", selected, output.String())
+	}
+}
+
+func TestProviderCommand_ConfirmInteractiveRemoveRequiresYes(t *testing.T) {
+	confirmed, err := confirmProviderRemoveSelection(strings.NewReader("no\n"), ioDiscard{}, []string{"alpha"})
+	if err != nil {
+		t.Fatalf("confirmProviderRemoveSelection: %v", err)
+	}
+	if confirmed {
+		t.Fatal("expected non-yes confirmation to cancel")
+	}
+	confirmed, err = confirmProviderRemoveSelection(strings.NewReader("yes\n"), ioDiscard{}, []string{"alpha"})
+	if err != nil {
+		t.Fatalf("confirmProviderRemoveSelection yes: %v", err)
+	}
+	if !confirmed {
+		t.Fatal("expected yes confirmation to proceed")
+	}
+}
+
+type ioDiscard struct{}
+
+func (ioDiscard) Write(p []byte) (int, error) {
+	return len(p), nil
 }
 
 func mustReadFile(t *testing.T, path string) []byte {

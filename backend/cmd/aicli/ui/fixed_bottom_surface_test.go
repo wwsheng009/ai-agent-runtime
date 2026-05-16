@@ -287,6 +287,60 @@ func TestFixedBottomSurface_SetPromptInputStateRestoresPromptCursorWithoutPopup(
 	}
 }
 
+func TestFixedBottomSurface_SetPromptNoticeLineRendersAbovePrompt(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+	})
+
+	notice := "• Message to be submitted after next tool call\n  - queued prompt"
+	output := captureUIStdout(t, func() {
+		if !surface.SetPromptNoticeLine(notice) {
+			t.Fatal("expected enabled surface to render prompt notice")
+		}
+	})
+
+	if surface.bottomRowsLocked() != 4 {
+		t.Fatalf("expected notice + prompt + status rows, got %d", surface.bottomRowsLocked())
+	}
+	if got := surface.outputBottomRowLocked(); got != 20 {
+		t.Fatalf("expected output region to leave room for prompt notice, got row %d", got)
+	}
+	if !strings.Contains(output, "\x1b[21;1H") || !strings.Contains(output, "Message to be submitted") {
+		t.Fatalf("expected prompt notice to render above prompt, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[22;1H") || !strings.Contains(output, "  - queued prompt") {
+		t.Fatalf("expected queued message list to render below notice title, got %q", output)
+	}
+	if !strings.Contains(output, "\x1b[23;1H> ") {
+		t.Fatalf("expected prompt marker to remain below notice, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[23;3H"+cursorShowSequence) {
+		t.Fatalf("expected cursor to return to prompt after notice render, got %q", output)
+	}
+
+	clearOutput := captureUIStdout(t, func() {
+		if !surface.SetPromptNoticeLine("") {
+			t.Fatal("expected enabled surface to clear prompt notice")
+		}
+	})
+	if surface.bottomRowsLocked() != 2 {
+		t.Fatalf("expected notice row to be released, got %d bottom rows", surface.bottomRowsLocked())
+	}
+	if !strings.Contains(clearOutput, "\x1b[21;1H\x1b[K") || !strings.Contains(clearOutput, "\x1b[22;1H\x1b[K") {
+		t.Fatalf("expected previous notice row to clear, got %q", clearOutput)
+	}
+	if !strings.Contains(clearOutput, "\x1b[23;1H> ") {
+		t.Fatalf("expected prompt marker to remain rendered after clearing notice, got %q", clearOutput)
+	}
+}
+
 func TestFixedBottomSurface_ShowPopupDoesNotUseCursorSaveRestore(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true

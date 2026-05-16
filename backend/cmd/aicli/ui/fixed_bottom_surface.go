@@ -19,6 +19,7 @@ type FixedBottomSurface struct {
 	popupBelowPrompt       bool
 	popupStack             []fixedBottomPopupState
 	composerLine           string
+	promptNoticeLine       string
 	promptLine             string
 	promptInput            string
 	promptReservedRows     int
@@ -99,6 +100,7 @@ func (s *FixedBottomSurface) Disable() {
 	s.popupReservedRows = 0
 	s.popupStack = nil
 	s.composerLine = ""
+	s.promptNoticeLine = ""
 	s.promptLine = ""
 	s.promptInput = ""
 	s.promptReservedRows = 0
@@ -276,6 +278,40 @@ func (s *FixedBottomSurface) SetPromptRows(rows int) bool {
 	return true
 }
 
+func (s *FixedBottomSurface) SetPromptNoticeLine(line string) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	line = strings.TrimRight(SanitizeTerminalText(line), "\r\n")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.promptNoticeLine == line {
+		return true
+	}
+	s.promptNoticeLine = line
+	if !s.enabled {
+		return false
+	}
+	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
+	WithTerminalWriteLock(func() {
+		if restorePromptCursor {
+			s.terminal.HideCursor()
+			defer s.terminal.ShowCursor()
+		} else {
+			s.terminal.SaveCursor()
+			defer s.terminal.RestoreCursor()
+		}
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.renderPromptRowsLocked(true)
+		if restorePromptCursor {
+			s.restoreStoredPromptCursorLocked()
+		}
+	})
+	return true
+}
+
 func normalizeFixedPromptInputState(line string, input string, rows int, cursorRow int, cursorCol int) (string, string, int, int, int) {
 	line = strings.TrimRight(SanitizeTerminalText(line), "\r\n")
 	input = strings.ReplaceAll(input, "\r\n", "\n")
@@ -412,6 +448,7 @@ func (s *FixedBottomSurface) ClearPromptRows(rows int) bool {
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.clearPromptRowsLocked(rows)
+		s.promptNoticeLine = ""
 		s.promptLine = ""
 		s.promptInput = ""
 		s.promptReservedRows = 0
@@ -719,6 +756,7 @@ func (s *FixedBottomSurface) SetComposerPreview(line string) {
 	s.composerLine = line
 	s.popupBelowPrompt = false
 	s.popupReservedRows = 0
+	s.promptNoticeLine = ""
 	s.promptLine = ""
 	s.promptInput = ""
 	s.promptReservedRows = 0
@@ -1092,7 +1130,7 @@ func (s *FixedBottomSurface) promptCursorPositionLocked(rowOffset, col int) (int
 func (s *FixedBottomSurface) promptMaxVisibleRowsLocked() int {
 	bottom := s.promptBottomRowLocked()
 	outputBottom := s.outputBottomRowLocked()
-	rows := bottom - outputBottom
+	rows := bottom - outputBottom - s.bottomPaneStateLocked().promptNoticeVisibleRowCount()
 	if rows < 1 {
 		return 1
 	}
@@ -1146,7 +1184,7 @@ func (s *FixedBottomSurface) outputBottomRowLocked() int {
 func (s *FixedBottomSurface) promptBottomRowLocked() int {
 	state := s.bottomPaneStateLocked()
 	if state.popupExpandsBelowPrompt() {
-		rows := state.promptVisibleRowCount()
+		rows := state.promptAreaVisibleRowCount()
 		if rows < 1 {
 			return s.outputBottomRowLocked()
 		}
@@ -1210,7 +1248,7 @@ func (s *FixedBottomSurface) bottomRowsLocked() int {
 	state := s.bottomPaneStateLocked()
 	rows := 1 + state.popupVisibleRowCount(s.terminal.Height())
 	if state.popupExpandsBelowPrompt() {
-		rows += state.promptVisibleRowCount()
+		rows += state.promptAreaVisibleRowCount()
 	} else {
 		rows += state.composerVisibleRowCount() + state.popupBottomGapRowCount()
 	}
@@ -1275,6 +1313,7 @@ func (s *FixedBottomSurface) clearPromptRowsLocked(rows int) {
 			rows = maxRows
 		}
 	}
+	rows += state.promptNoticeVisibleRowCount()
 	startRow := bottom - rows + 1
 	if startRow < 1 {
 		startRow = 1
@@ -1297,6 +1336,7 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 	if rows < 1 {
 		return
 	}
+	noticeRows := state.promptNoticeVisibleRowCount()
 	if maxRows := s.promptMaxVisibleRowsLocked(); maxRows > 0 && rows > maxRows {
 		rows = maxRows
 	}
@@ -1304,17 +1344,29 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 	if bottom < 1 {
 		return
 	}
-	start := bottom - rows + 1
+	promptStart := bottom - rows + 1
+	start := promptStart - noticeRows
 	if start < 1 {
 		start = 1
 	}
-	if s.promptRenderedStartRow > 0 && (s.promptRenderedStartRow != start || s.promptRenderedRows != rows) {
+	areaRows := noticeRows + rows
+	if s.promptRenderedStartRow > 0 && (s.promptRenderedStartRow != start || s.promptRenderedRows != areaRows) {
 		s.clearRowsLocked(s.promptRenderedStartRow, s.promptRenderedRows)
 	}
 	if clear {
-		s.clearRowsLocked(start, rows)
+		s.clearRowsLocked(start, areaRows)
 	}
-	s.terminal.MoveTo(start, 1)
+	if noticeRows > 0 {
+		noticeLines := promptNoticeDisplayLines(state.PromptNoticeLine)
+		for i := 0; i < noticeRows && i < len(noticeLines); i++ {
+			s.terminal.MoveTo(start+i, 1)
+			notice := truncateFixedPopupLine(noticeLines[i], s.terminal.Width())
+			if notice != "" {
+				fmt.Print(GetTheme(ThemeAuto).Dimmed(notice))
+			}
+		}
+	}
+	s.terminal.MoveTo(promptStart, 1)
 	if s.promptLine != "" {
 		fmt.Print(s.promptLine)
 	}
@@ -1322,7 +1374,7 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 		fmt.Print(renderInteractiveInputForTerminal([]rune(s.promptInput)))
 	}
 	s.promptRenderedStartRow = start
-	s.promptRenderedRows = rows
+	s.promptRenderedRows = areaRows
 }
 
 func (s *FixedBottomSurface) clearRowsLocked(startRow int, rows int) {
@@ -1371,6 +1423,7 @@ type BottomPaneState struct {
 	PopupBelowPrompt   bool
 	PopupReservedRows  int
 	ComposerLine       string
+	PromptNoticeLine   string
 	PromptReservedRows int
 }
 
@@ -1385,6 +1438,17 @@ func (s BottomPaneState) composerVisibleRowCount() int {
 	return 1
 }
 
+func (s BottomPaneState) promptNoticeVisibleRowCount() int {
+	if s.composerVisibleRowCount() > 0 || strings.TrimSpace(s.PromptNoticeLine) == "" || s.promptReservedRowCount() < 1 {
+		return 0
+	}
+	return len(promptNoticeDisplayLines(s.PromptNoticeLine))
+}
+
+func (s BottomPaneState) promptAreaVisibleRowCount() int {
+	return s.promptNoticeVisibleRowCount() + s.promptVisibleRowCount()
+}
+
 func (s BottomPaneState) popupExpandsBelowPrompt() bool {
 	return s.PopupBelowPrompt && len(s.PopupLines) > 0 && s.composerVisibleRowCount() == 0
 }
@@ -1393,7 +1457,7 @@ func (s BottomPaneState) popupTopReservedRowCount() int {
 	if !s.popupExpandsBelowPrompt() {
 		return 0
 	}
-	rows := s.promptReservedRowCount()
+	rows := s.promptNoticeVisibleRowCount() + s.promptReservedRowCount()
 	if rows < 0 {
 		return 0
 	}
@@ -1444,7 +1508,7 @@ func (s BottomPaneState) extraPromptReservedRowCount() int {
 }
 
 func (s BottomPaneState) popupBottomGapRowCount() int {
-	return s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
+	return s.promptNoticeVisibleRowCount() + s.popupInputGapRowCount() + s.extraPromptReservedRowCount()
 }
 
 func (s BottomPaneState) popupVisibleRowCount(height int) int {
@@ -1509,12 +1573,23 @@ func maxBottomPanePopupRows(height int, composerRows int, gapRows int) int {
 	return rows
 }
 
+func promptNoticeDisplayLines(line string) []string {
+	line = strings.ReplaceAll(line, "\r\n", "\n")
+	line = strings.ReplaceAll(line, "\r", "\n")
+	line = strings.TrimRight(line, "\n")
+	if strings.TrimSpace(line) == "" {
+		return nil
+	}
+	return strings.Split(line, "\n")
+}
+
 func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 	state := BottomPaneState{
 		StatusLine:         s.statusLine,
 		PopupLines:         append([]string(nil), s.popupLines...),
 		PopupBelowPrompt:   s.popupBelowPrompt,
 		PopupReservedRows:  s.popupReservedRows,
+		PromptNoticeLine:   s.promptNoticeLine,
 		PromptReservedRows: s.promptReservedRows,
 	}
 	if strings.TrimSpace(s.composerLine) != "" {

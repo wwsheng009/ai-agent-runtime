@@ -69,13 +69,16 @@ func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
 		}
 		return false, notice, nil
 	}
-	if session.queuedInputDrain {
+	if session.queuedInputDrain && !session.queuedInputEchoed {
 		publishLocalChatDiagnosticEvent(session, chatEventInputQueueDrained, map[string]interface{}{
 			"queued_input_count": 0,
 		})
 	}
 	session.queuedInputDrain = false
 	session.queuedInputEchoed = false
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
 	return true, "", nil
 }
 

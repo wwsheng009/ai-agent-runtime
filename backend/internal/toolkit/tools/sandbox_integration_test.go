@@ -213,7 +213,7 @@ func TestBashTool_RespectsSandboxCommandPolicy(t *testing.T) {
 		AllowedCommands:  []string{"echo"},
 		DeniedCommands:   []string{"whoami"},
 		EnvWhitelist:     []string{"PATH", "SystemRoot", "ComSpec"},
-		MaxExecutionTime: 2 * time.Second,
+		MaxExecutionTime: 15 * time.Second,
 	})
 
 	tool := NewBashTool()

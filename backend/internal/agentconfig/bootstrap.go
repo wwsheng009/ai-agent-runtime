@@ -129,8 +129,8 @@ func ResolveGlobalConfigPath() (string, error) {
 	return filepath.Join(home, starterConfigRelativePath), nil
 }
 
-// EnsureStarterConfigFile returns an existing config path or creates a local
-// starter config when no config file can be found.
+// EnsureStarterConfigFile returns an existing config path or creates a starter
+// config when no config file can be found.
 //
 // The helper intentionally keeps the generated file minimal:
 // - provider-related sections stay empty so users can fill them in later
@@ -141,6 +141,9 @@ func EnsureStarterConfigFile(configPath string) (string, bool, error) {
 		return configPath, false, nil
 	}
 
+	if globalPath, err := ResolveGlobalConfigPath(); err == nil && strings.TrimSpace(globalPath) != "" {
+		return EnsureStarterConfigAtPath(globalPath)
+	}
 	return EnsureStarterConfigAtPath(filepath.Clean(starterConfigRelativePath))
 }
 

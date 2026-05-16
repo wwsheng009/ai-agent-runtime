@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"runtime"
 	"strings"
@@ -40,6 +41,9 @@ type chatInputQueue struct {
 	draftLines  int
 	draftActive bool
 	readyText   string
+
+	queuedMu      sync.Mutex
+	queuedPreview []chatQueuedInput
 
 	commandGate func(string) bool
 }
@@ -383,6 +387,79 @@ func (q *chatInputQueue) hasReadySubmission() bool {
 	return strings.TrimSpace(q.readyText) != ""
 }
 
+func (q *chatInputQueue) hasReadableInput() bool {
+	if q == nil {
+		return false
+	}
+	return q.pendingCount() > 0 || q.hasReadySubmission()
+}
+
+func (q *chatInputQueue) queuedPreviewLines(limit int) []string {
+	if q == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	out := make([]string, 0, limit+1)
+	q.draftMu.RLock()
+	readyText := q.readyText
+	q.draftMu.RUnlock()
+	if strings.TrimSpace(readyText) != "" {
+		out = append(out, normalizeQueuedInputLine(readyText))
+	}
+	q.queuedMu.Lock()
+	takeLimit := limit - len(out)
+	if takeLimit < 0 {
+		takeLimit = 0
+	}
+	taken := 0
+	for _, item := range q.queuedPreview {
+		if taken >= takeLimit {
+			break
+		}
+		if text := normalizeQueuedInputLine(item.Text); strings.TrimSpace(text) != "" {
+			out = append(out, text)
+			taken++
+		}
+	}
+	remaining := len(q.queuedPreview) - taken
+	q.queuedMu.Unlock()
+	if remaining > 0 {
+		out = append(out, fmt.Sprintf("... %d more", remaining))
+	}
+	return out
+}
+
+func (q *chatInputQueue) readAvailableLine() (string, bool) {
+	if q == nil {
+		return "", false
+	}
+	if text, ok := q.takeReadySubmission(); ok {
+		return text, true
+	}
+	q.ensureChannels()
+	select {
+	case item := <-q.lines:
+		q.noteQueuedLineRead()
+		return item.Text, true
+	default:
+		return "", false
+	}
+}
+
+func (q *chatInputQueue) noteQueuedLineRead() {
+	if q == nil {
+		return
+	}
+	q.queuedMu.Lock()
+	if len(q.queuedPreview) > 0 {
+		copy(q.queuedPreview, q.queuedPreview[1:])
+		q.queuedPreview = q.queuedPreview[:len(q.queuedPreview)-1]
+	}
+	q.queuedMu.Unlock()
+}
+
 func (q *chatInputQueue) setDraftNotifier(fn func(active bool, lines int, text string)) {
 	if q == nil {
 		return
@@ -480,6 +557,7 @@ func (q *chatInputQueue) readLine(ctx context.Context) (string, error) {
 		}
 		select {
 		case item := <-q.lines:
+			q.noteQueuedLineRead()
 			return item.Text, nil
 		default:
 		}
@@ -488,10 +566,12 @@ func (q *chatInputQueue) readLine(ctx context.Context) (string, error) {
 		}
 		select {
 		case item := <-q.lines:
+			q.noteQueuedLineRead()
 			return item.Text, nil
 		case err := <-q.errs:
 			select {
 			case item := <-q.lines:
+				q.noteQueuedLineRead()
 				return item.Text, nil
 			default:
 			}
@@ -551,6 +631,17 @@ func (q *chatInputQueue) pendingCount() int {
 	return len(q.lines)
 }
 
+func (q *chatInputQueue) queuedSubmissionCount() int {
+	if q == nil {
+		return 0
+	}
+	count := q.pendingCount()
+	if q.hasReadySubmission() {
+		count++
+	}
+	return count
+}
+
 func (q *chatInputQueue) discardPending() int {
 	if q == nil {
 		return 0
@@ -560,6 +651,7 @@ func (q *chatInputQueue) discardPending() int {
 	for {
 		select {
 		case <-q.lines:
+			q.noteQueuedLineRead()
 			discarded++
 		default:
 			return discarded + q.discardDraft() + q.discardReadySubmission()
@@ -568,15 +660,30 @@ func (q *chatInputQueue) discardPending() int {
 }
 
 func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string, error) {
+	if session != nil {
+		session.lastInteractiveInputQueued = false
+	}
+	if session != nil && session.InputQueue != nil {
+		if line, ok := session.InputQueue.readAvailableLine(); ok {
+			session.lastInteractiveInputQueued = true
+			return line, nil
+		}
+	}
 	if shouldUseInteractiveLineEditor(session) {
 		prompt := formatSessionUserPrompt(session)
+		initial := ui.LineEditorSnapshot{}
 		if session.Interaction != nil {
-			session.Interaction.SetPromptInput("")
+			initial = session.Interaction.PromptInputSnapshot()
+			if initial.Text == "" {
+				session.Interaction.SetPromptInput("")
+			}
 		}
 		if shouldEnableSlashCompletion(session) {
 			completion := newChatSlashCompletionController(session)
 			defer completion.Clear()
 			line, err := session.InputBox.ReadWithHistoryPromptWithHooks(prompt, ui.LineEditorHooks{
+				InitialText:   initial.Text,
+				InitialCursor: initial.Cursor,
 				OnChange: func(snapshot ui.LineEditorSnapshot) {
 					handleChatLineEditorChange(session, completion, snapshot)
 				},
@@ -627,6 +734,8 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 			return line, err
 		}
 		line, err := session.InputBox.ReadWithHistoryPromptWithHooks(prompt, ui.LineEditorHooks{
+			InitialText:   initial.Text,
+			InitialCursor: initial.Cursor,
 			OnChange: func(snapshot ui.LineEditorSnapshot) {
 				handleChatLineEditorChange(session, nil, snapshot)
 			},
@@ -669,6 +778,23 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 		return line, nil
 	}
 	return "", err
+}
+
+func finishChatInteractiveReadPromptState(session *ChatSession, readErr error) {
+	if session == nil || session.Interaction == nil {
+		return
+	}
+	if readErr != nil {
+		session.lastInteractiveInputQueued = false
+		session.Interaction.ClearPrompt()
+		return
+	}
+	if session.lastInteractiveInputQueued {
+		session.lastInteractiveInputQueued = false
+		session.Interaction.RefreshStatus("")
+		return
+	}
+	session.Interaction.ResetPromptState()
 }
 
 func handleChatLineEditorChange(session *ChatSession, completion *chatSlashCompletionController, snapshot ui.LineEditorSnapshot) {
@@ -845,7 +971,7 @@ func lenQueuedInteractiveInput(session *ChatSession) int {
 	if session == nil || session.InputQueue == nil {
 		return 0
 	}
-	return session.InputQueue.pendingCount()
+	return session.InputQueue.queuedSubmissionCount()
 }
 
 func queuedInteractiveInputState(session *ChatSession) (int, bool) {
@@ -958,5 +1084,8 @@ func (q *chatInputQueue) routeLine(item chatQueuedInput) {
 		q.priorityLines <- item
 		return
 	}
+	q.queuedMu.Lock()
+	q.queuedPreview = append(q.queuedPreview, item)
+	q.queuedMu.Unlock()
 	q.lines <- item
 }

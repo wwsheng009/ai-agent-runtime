@@ -272,9 +272,18 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 	}
 	_ = prompt
 
-	line := make([]rune, 0, 64)
+	initialText := ""
+	initialCursor := 0
+	if hooks != nil {
+		initialText = NormalizePastedText(hooks.InitialText)
+		initialCursor = hooks.InitialCursor
+	}
+	line := []rune(initialText)
 	composer := NewComposerState()
-	cursor := 0
+	cursor := initialCursor
+	if cursor < 0 || cursor > len(line) {
+		cursor = len(line)
+	}
 	historyPos := len(history)
 	var draft []rune
 	var promoteDraft func()

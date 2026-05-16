@@ -13,11 +13,17 @@ func TestEnsureStarterConfigFileCreatesMinimalConfig(t *testing.T) {
 		t.Fatalf("Getwd failed: %v", err)
 	}
 	tempDir := t.TempDir()
+	home := filepath.Join(tempDir, "home")
+	previousHome := userHomeDir
+	userHomeDir = func() (string, error) {
+		return home, nil
+	}
 	if err := os.Chdir(tempDir); err != nil {
 		t.Fatalf("Chdir failed: %v", err)
 	}
 	t.Cleanup(func() {
 		_ = os.Chdir(cwd)
+		userHomeDir = previousHome
 	})
 
 	path, created, err := EnsureStarterConfigFile("")
@@ -27,8 +33,9 @@ func TestEnsureStarterConfigFileCreatesMinimalConfig(t *testing.T) {
 	if !created {
 		t.Fatalf("expected starter config to be created")
 	}
-	if path != filepath.Clean(starterConfigRelativePath) {
-		t.Fatalf("starter config path = %q, want %q", path, filepath.Clean(starterConfigRelativePath))
+	expectedPath := filepath.Join(home, starterConfigRelativePath)
+	if path != expectedPath {
+		t.Fatalf("starter config path = %q, want %q", path, expectedPath)
 	}
 
 	raw, err := os.ReadFile(path)
@@ -59,43 +66,64 @@ func TestEnsureStarterConfigFileCreatesMinimalConfig(t *testing.T) {
 }
 
 func TestEnsureStarterConfigFileDoesNotOverwriteExistingFile(t *testing.T) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd failed: %v", err)
-	}
 	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("Chdir failed: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(cwd)
-	})
+	path := filepath.Join(tempDir, "custom.yaml")
 
-	if err := os.MkdirAll(filepath.Dir(starterConfigRelativePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
 	original := []byte("providers:\n  default_provider: custom\n")
-	if err := os.WriteFile(starterConfigRelativePath, original, 0o644); err != nil {
+	if err := os.WriteFile(path, original, 0o644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	path, created, err := EnsureStarterConfigFile("")
+	gotPath, created, err := EnsureStarterConfigFile(path)
 	if err != nil {
 		t.Fatalf("EnsureStarterConfigFile failed: %v", err)
 	}
 	if created {
 		t.Fatalf("expected existing config to be preserved")
 	}
-	if path != filepath.Clean(starterConfigRelativePath) {
-		t.Fatalf("starter config path = %q, want %q", path, filepath.Clean(starterConfigRelativePath))
+	if gotPath != path {
+		t.Fatalf("starter config path = %q, want %q", gotPath, path)
 	}
 
-	raw, err := os.ReadFile(starterConfigRelativePath)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
 	if string(raw) != string(original) {
 		t.Fatalf("existing config was modified:\n%s", string(raw))
+	}
+}
+
+func TestEnsureStarterConfigFileFallsBackToLocalWhenHomeUnavailable(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd failed: %v", err)
+	}
+	tempDir := t.TempDir()
+	previousHome := userHomeDir
+	userHomeDir = func() (string, error) {
+		return "", os.ErrNotExist
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("Chdir failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+		userHomeDir = previousHome
+	})
+
+	path, created, err := EnsureStarterConfigFile("")
+	if err != nil {
+		t.Fatalf("EnsureStarterConfigFile failed: %v", err)
+	}
+	if !created {
+		t.Fatalf("expected starter config to be created")
+	}
+	if path != filepath.Clean(starterConfigRelativePath) {
+		t.Fatalf("starter config path = %q, want %q", path, filepath.Clean(starterConfigRelativePath))
 	}
 }
 
