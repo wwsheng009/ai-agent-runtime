@@ -16,6 +16,14 @@ import (
 
 var chatRuntimeGOOS = runtime.GOOS
 var chatIsInteractiveTerminal = ui.IsInteractiveTerminal
+var errChatInteractivePromptCancelled = errors.New("interactive prompt cancelled")
+
+func isChatInteractivePromptCancelError(err error) bool {
+	return errors.Is(err, errChatInteractivePromptCancelled) ||
+		errors.Is(err, ui.ErrInteractiveInputInterrupted) ||
+		errors.Is(err, ui.ErrInteractiveInputExitRequested) ||
+		errors.Is(err, io.EOF)
+}
 
 type chatQueuedInput struct {
 	Text       string
@@ -24,17 +32,17 @@ type chatQueuedInput struct {
 }
 
 type chatInputQueue struct {
-	reader        *bufio.Reader
-	lines         chan chatQueuedInput
-	priorityLines chan chatQueuedInput
-	errs          chan error
-	readySignal   chan struct{}
-	start         sync.Once
-	mu            sync.RWMutex
-	priorityMode  bool
+	reader                *bufio.Reader
+	lines                 chan chatQueuedInput
+	priorityLines         chan chatQueuedInput
+	errs                  chan error
+	readySignal           chan struct{}
+	start                 sync.Once
+	mu                    sync.RWMutex
+	priorityMode          bool
 	externalCaptureActive bool
-	terminalMu    sync.RWMutex
-	terminalErr   error
+	terminalMu            sync.RWMutex
+	terminalErr           error
 
 	draftMu     sync.RWMutex
 	draftNotify func(active bool, lines int, text string)
@@ -895,11 +903,27 @@ func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context
 		if trackPromptInput && session.Interaction != nil {
 			session.Interaction.SetPromptInput("")
 		}
-		line, err := session.InputBox.ReadTransientPrompt(prompt, func(text string) {
-			if trackPromptInput && session.Interaction != nil {
-				session.Interaction.SetPromptInput(text)
-			}
+		cancelled := false
+		line, err := session.InputBox.ReadTransientPromptWithHooks(prompt, ui.LineEditorHooks{
+			OnChange: func(snapshot ui.LineEditorSnapshot) {
+				if trackPromptInput && session.Interaction != nil {
+					session.Interaction.SetPromptInput(snapshot.Text)
+				}
+			},
+			OnCancel: func(ui.LineEditorSnapshot) bool {
+				cancelled = true
+				return true
+			},
 		})
+		if trackPromptInput && session.Interaction != nil {
+			session.Interaction.SetPromptInput("")
+		}
+		if cancelled && err == nil {
+			if session.Interaction != nil {
+				session.Interaction.ResetPromptState()
+			}
+			return "", errChatInteractivePromptCancelled
+		}
 		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
 			session.Interrupt()
 			if session.Interaction != nil {

@@ -31,6 +31,9 @@ func handleModelCommand(session *ChatSession, command string, noInteractive bool
 	}
 
 	if err := executeModelCommand(session, request, !noInteractive); err != nil {
+		if isChatInteractivePromptCancelError(err) {
+			return false
+		}
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}

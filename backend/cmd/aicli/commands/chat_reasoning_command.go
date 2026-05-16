@@ -145,6 +145,9 @@ func handleReasoningEffortCommand(session *ChatSession, command string, noIntera
 		}
 		selected, err := selectReasoningEffortForCurrentSession(session)
 		if err != nil {
+			if isChatInteractivePromptCancelError(err) {
+				return false
+			}
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}

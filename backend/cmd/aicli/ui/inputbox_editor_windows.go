@@ -12,7 +12,10 @@ import (
 
 const maxPeekConsoleInputRecords = 1 << 20
 
-var procPeekConsoleInputW = windows.NewLazySystemDLL("kernel32.dll").NewProc("PeekConsoleInputW")
+var (
+	procPeekConsoleInputW = windows.NewLazySystemDLL("kernel32.dll").NewProc("PeekConsoleInputW")
+	procPeekNamedPipe     = windows.NewLazySystemDLL("kernel32.dll").NewProc("PeekNamedPipe")
+)
 
 type consoleInputRecord struct {
 	EventType uint16
@@ -34,7 +37,7 @@ func waitForInteractiveInputReady(fd int, timeout time.Duration) (bool, error) {
 		timeout = 0
 	}
 	if fd <= 0 {
-		return false, nil
+		return false, errInteractiveInputReadinessUnsupported
 	}
 
 	handle := windows.Handle(uintptr(fd))
@@ -46,15 +49,16 @@ func waitForInteractiveInputReady(fd int, timeout time.Duration) (bool, error) {
 	for {
 		ready, err := hasPendingConsoleKeyEvent(handle)
 		if err != nil {
-			// If the handle is not a real console input handle, fall back to a
-			// conservative timeout path instead of breaking the editor loop.
-			if timeout > 0 {
-				remaining := time.Until(deadline)
-				if remaining > 0 {
-					time.Sleep(remaining)
-				}
+			// Some Windows terminals expose stdin as a pipe/PTY instead of a
+			// console input handle. Console event peeking fails there, but
+			// PeekNamedPipe can still provide non-blocking readiness.
+			ready, err = hasPendingPipeInput(handle)
+			if err != nil {
+				// If neither console nor pipe peeking works, callers must
+				// choose between direct blocking reads and timeout-based
+				// fallbacks instead of looping forever as if there were no input.
+				return false, errInteractiveInputReadinessUnsupported
 			}
-			return false, nil
 		}
 		if ready {
 			return true, nil
@@ -111,4 +115,23 @@ func hasPendingConsoleKeyEvent(handle windows.Handle) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func hasPendingPipeInput(handle windows.Handle) (bool, error) {
+	var available uint32
+	ret, _, callErr := procPeekNamedPipe.Call(
+		uintptr(handle),
+		0,
+		0,
+		0,
+		uintptr(unsafe.Pointer(&available)),
+		0,
+	)
+	if ret == 0 {
+		if callErr != syscall.Errno(0) {
+			return false, callErr
+		}
+		return false, windows.GetLastError()
+	}
+	return available > 0, nil
 }

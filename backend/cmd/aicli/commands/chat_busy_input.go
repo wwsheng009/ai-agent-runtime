@@ -32,6 +32,7 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 		}()
 		for ctx.Err() == nil {
 			prompt := formatSessionUserPrompt(session)
+			cancelled := false
 			line, err := session.InputBox.ReadTransientPromptWithHooksContext(ctx, prompt, ui.LineEditorHooks{
 				OnChange: func(snapshot ui.LineEditorSnapshot) {
 					if session.Interaction != nil {
@@ -44,7 +45,21 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 					}
 					return ""
 				},
+				OnCancel: func(ui.LineEditorSnapshot) bool {
+					cancelled = true
+					return true
+				},
 			})
+			if cancelled {
+				if queue.isPriorityMode() {
+					queue.signalReadError(errChatInteractivePromptCancelled)
+					return
+				}
+				if session.Interaction != nil {
+					session.Interaction.RenderPromptInputSnapshot(ui.LineEditorSnapshot{})
+				}
+				continue
+			}
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return

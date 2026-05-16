@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -35,6 +36,33 @@ func TestHandleCommand_ModelDoesNotFallThroughToPermissionMode(t *testing.T) {
 	}
 	if strings.Contains(output, "permission-mode") {
 		t.Fatalf("expected /model to avoid permission-mode handler, got:\n%s", output)
+	}
+}
+
+func TestHandleCommand_ModelPromptCancelIsSilent(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setExternalInputCaptureActive(true)
+	queue.signalReadError(ui.ErrInteractiveInputInterrupted)
+
+	session := &ChatSession{
+		ProviderName: "alpha",
+		Provider: config.Provider{
+			Enabled:      true,
+			Protocol:     "openai",
+			DefaultModel: "gpt-4.1",
+		},
+		Model:      "gpt-4.1",
+		InputQueue: queue,
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/model", false); quit {
+			t.Fatal("expected /model command not to exit")
+		}
+	})
+
+	if strings.Contains(output, "错误:") || strings.Contains(output, "interactive input") {
+		t.Fatalf("expected cancelled model prompt to avoid error output, got:\n%s", output)
 	}
 }
 

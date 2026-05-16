@@ -19,6 +19,7 @@ import (
 
 var ErrInteractiveInputInterrupted = errors.New("interactive input interrupted")
 var ErrInteractiveInputExitRequested = errors.New("interactive input exit requested")
+var errInteractiveInputReadinessUnsupported = errors.New("interactive input readiness unsupported")
 
 const (
 	bracketedPasteEnableSequence  = "\x1b[?2004h"
@@ -681,6 +682,11 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		}
 		ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
 		if err != nil {
+			if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+				time.Sleep(timeout)
+				flushPasteBurst()
+				return nil
+			}
 			return err
 		}
 		if !ready {
@@ -703,7 +709,12 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if timeout <= 0 {
 			return false, nil
 		}
-		return waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
+		ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
+		if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+			time.Sleep(timeout)
+			return false, nil
+		}
+		return ready, err
 	}
 
 	plainPasteEnterShouldInsertNewline := func() (bool, error) {
@@ -720,7 +731,12 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if timeout <= 0 {
 			return false, nil
 		}
-		return waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
+		ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
+		if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+			time.Sleep(timeout)
+			return false, nil
+		}
+		return ready, err
 	}
 
 	promoteDraft = func() {
@@ -1288,6 +1304,11 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 			}
 			ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), escapeSequenceWait)
 			if err != nil {
+				if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+					time.Sleep(escapeSequenceWait)
+					*pending = (*pending)[:0]
+					return editorKey{kind: editorKeyCancelPopup}, true, nil
+				}
 				return editorKey{}, false, err
 			}
 			if !ready {
@@ -1299,7 +1320,11 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 		if stdinFile != nil {
 			ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), 50*time.Millisecond)
 			if err != nil {
-				return editorKey{}, false, err
+				if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+					ready = true
+				} else {
+					return editorKey{}, false, err
+				}
 			}
 			if !ready {
 				continue
