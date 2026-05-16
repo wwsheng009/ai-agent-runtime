@@ -377,6 +377,74 @@ func TestRenderSharedChatToolEvent_RendersApplyRawDiff(t *testing.T) {
 	}
 }
 
+func TestRenderEditedDiffOutput_IgnoresRawDiffTrailingStatusLines(t *testing.T) {
+	output := strings.Join([]string{
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -1,1 +1,1 @@",
+		"-old",
+		"+new",
+		"",
+		"+ applied successfully",
+	}, "\n")
+
+	got := renderEditedDiffOutput(output)
+	want := strings.Join([]string{
+		`• Edited app.go (+1 -1)`,
+		`        1 - old`,
+		`        1 + new`,
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected raw diff render with trailing status:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
+func TestRenderSharedChatToolEvent_RendersNamespacedEditDiff(t *testing.T) {
+	diff := strings.Join([]string{
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -1,1 +1,1 @@",
+		"-old",
+		"+new",
+	}, "\n")
+
+	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Stage:    "tool_result",
+		ToolName: "filesystem.edit_file",
+		Output:   diff,
+		Success:  true,
+	})
+	if !strings.Contains(got, "• Edited app.go (+1 -1)") {
+		t.Fatalf("expected namespaced edit tool to render diff, got:\n%s", got)
+	}
+}
+
+func TestRenderSharedChatToolEvent_DoesNotTreatShellDiffAsEdit(t *testing.T) {
+	diff := strings.Join([]string{
+		"--- a/app.go",
+		"+++ b/app.go",
+		"@@ -1,1 +1,1 @@",
+		"-old",
+		"+new",
+	}, "\n")
+
+	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Stage:    "tool_result",
+		ToolName: "execute_shell_command",
+		Arguments: map[string]interface{}{
+			"command": "git diff",
+		},
+		Output:  diff,
+		Success: true,
+	})
+	if strings.Contains(got, "• Edited app.go") {
+		t.Fatalf("expected shell diff to remain tool output, got:\n%s", got)
+	}
+	if !strings.Contains(got, "• Ran git diff") {
+		t.Fatalf("expected shell command render, got:\n%s", got)
+	}
+}
+
 func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventLLMRequestStarted, TraceID: "trace-1", Payload: map[string]interface{}{"model": "gpt-5.4"}}); got != "" {
 		t.Fatalf("unexpected llm started render: %q", got)

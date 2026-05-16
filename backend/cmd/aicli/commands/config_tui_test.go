@@ -141,7 +141,7 @@ func TestConfigTUI_EditProviderCommonFields(t *testing.T) {
 		"2",                         // providers
 		"1",                         // alpha detail
 		"m",                         // modify
-		"4",                         // protocol codex-apikey
+		"3",                         // protocol codex-apikey
 		"https://codex.example.com", // base url
 		"/responses",                // api path
 		"/models",                   // models path
@@ -149,7 +149,6 @@ func TestConfigTUI_EditProviderCommonFields(t *testing.T) {
 		"codex-ref",                 // api key ref
 		"256000",                    // max tokens
 		"false",                     // enabled
-		"true",                      // set default
 		"b",
 		"b",
 		"q",
@@ -273,7 +272,7 @@ func TestConfigTUI_AdvancedEditProviderProtocolSyncsAuthMode(t *testing.T) {
 		"1", // alpha detail
 		"a", // advanced edit
 		"1", // protocol
-		"7", // codex-oauth
+		"6", // codex-oauth
 		"b",
 		"b",
 		"b",
@@ -292,6 +291,47 @@ func TestConfigTUI_AdvancedEditProviderProtocolSyncsAuthMode(t *testing.T) {
 	provider := loaded.Providers.Items["alpha"]
 	if provider.GetProtocol() != "codex" || provider.AuthMode != "oauth" {
 		t.Fatalf("expected codex-oauth selection to sync protocol/auth_mode, got %+v", provider)
+	}
+	if provider.APIKeyRef != "" {
+		t.Fatalf("expected codex-oauth selection to clear api_key_ref, got %+v", provider)
+	}
+}
+
+func TestConfigTUI_EditProviderSetDefaultFalseDoesNotRewrite(t *testing.T) {
+	cfg, path := writeConfigTUITestConfig(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config before: %v", err)
+	}
+	input := strings.NewReader(strings.Join([]string{
+		"2",     // providers
+		"2",     // beta detail
+		"m",     // modify
+		"",      // protocol
+		"",      // base url
+		"",      // api path
+		"",      // models path
+		"",      // default model
+		"",      // api key ref
+		"",      // max tokens
+		"",      // enabled
+		"false", // set default should be ignored
+		"b",
+		"b",
+		"q",
+		"",
+	}, "\n"))
+	var output bytes.Buffer
+
+	if err := runConfigTUI(input, &output, cfg); err != nil {
+		t.Fatalf("runConfigTUI: %v\noutput:\n%s", err, output.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config after: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("expected no rewrite when set-default=false is the only input\nbefore:\n%s\n\nafter:\n%s", string(before), string(after))
 	}
 }
 

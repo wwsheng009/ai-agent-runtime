@@ -321,9 +321,7 @@ func extractUnifiedDiffOutput(output string) string {
 	lines := strings.Split(normalized, "\n")
 	start := -1
 	for i := 0; i+2 < len(lines); i++ {
-		if strings.HasPrefix(strings.TrimSpace(lines[i]), "--- ") &&
-			strings.HasPrefix(strings.TrimSpace(lines[i+1]), "+++ ") &&
-			strings.HasPrefix(strings.TrimSpace(lines[i+2]), "@@") {
+		if isUnifiedDiffFileStart(lines, i) {
 			start = i
 			break
 		}
@@ -331,7 +329,79 @@ func extractUnifiedDiffOutput(output string) string {
 	if start < 0 {
 		return ""
 	}
-	return strings.Trim(strings.Join(lines[start:], "\n"), "\n")
+	collected := collectUnifiedDiffLines(lines[start:])
+	return strings.Trim(strings.Join(collected, "\n"), "\n")
+}
+
+func isUnifiedDiffFileStart(lines []string, i int) bool {
+	return i+2 < len(lines) &&
+		strings.HasPrefix(strings.TrimSpace(lines[i]), "--- ") &&
+		strings.HasPrefix(strings.TrimSpace(lines[i+1]), "+++ ") &&
+		strings.HasPrefix(strings.TrimSpace(lines[i+2]), "@@")
+}
+
+func collectUnifiedDiffLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	inHunk := false
+	sawDiff := false
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimRight(lines[i], "\r")
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "diff --git ") {
+			continue
+		}
+		if isUnifiedDiffFileStart(lines, i) {
+			out = append(out, line)
+			inHunk = false
+			sawDiff = true
+			continue
+		}
+		if len(out) > 0 && strings.HasPrefix(trimmed, "+++ ") {
+			out = append(out, line)
+			continue
+		}
+		if len(out) > 0 && strings.HasPrefix(trimmed, "@@") {
+			out = append(out, line)
+			inHunk = true
+			sawDiff = true
+			continue
+		}
+		if inHunk {
+			if line == `\ No newline at end of file` {
+				out = append(out, line)
+				continue
+			}
+			if i+2 < len(lines) && isUnifiedDiffFileStart(lines, i) {
+				inHunk = false
+				i--
+				continue
+			}
+			if line == "" {
+				break
+			}
+			if isUnifiedDiffContinuation(line) {
+				out = append(out, line)
+				continue
+			}
+			break
+		}
+		if sawDiff && trimmed != "" {
+			break
+		}
+	}
+	return out
+}
+
+func isUnifiedDiffContinuation(line string) bool {
+	if line == "" {
+		return false
+	}
+	switch line[0] {
+	case ' ', '+', '-':
+		return true
+	default:
+		return false
+	}
 }
 
 type renderedDiffFile struct {
@@ -437,10 +507,14 @@ func formatRenderedDiffLine(oldLine int, marker rune, newLine int, text string) 
 }
 
 func editingSharedToolRenderOutput(toolName string, output string) string {
-	switch strings.TrimSpace(toolName) {
+	normalizedToolName := strings.TrimSpace(toolName)
+	switch normalizedToolName {
 	case "edit", "apply", "apply_patch", "patch":
 	default:
-		return ""
+		lowerToolName := strings.ToLower(normalizedToolName)
+		if !strings.Contains(lowerToolName, "edit") && !strings.Contains(lowerToolName, "apply") && !strings.Contains(lowerToolName, "patch") {
+			return ""
+		}
 	}
 	return strings.TrimSpace(output)
 }

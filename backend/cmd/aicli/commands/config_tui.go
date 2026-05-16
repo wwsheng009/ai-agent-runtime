@@ -190,11 +190,10 @@ func (t *configTUI) editProvider(name string) error {
 	current := t.cfg.Providers.Items[name]
 	update := config.ProviderConfigUpdate{Name: name}
 	changed := false
-	if value, authMode, ok, err := t.promptProviderProtocolUpdate(current.GetProtocol(), current.AuthMode); err != nil {
+	if selection, ok, err := t.promptProviderProtocolUpdate(current); err != nil {
 		return err
 	} else if ok {
-		update.Protocol = &value
-		update.AuthMode = &authMode
+		applyProviderProtocolSelection(&update, selection)
 		changed = true
 	}
 	if value, ok, err := t.promptStringUpdate("Base URL", current.BaseURL); err != nil {
@@ -239,7 +238,7 @@ func (t *configTUI) editProvider(name string) error {
 		update.Enabled = &value
 		changed = true
 	}
-	if value, ok, err := t.promptBoolUpdate("Set as default provider", strings.EqualFold(t.cfg.Providers.DefaultProvider, name)); err != nil {
+	if value, ok, err := t.promptSetDefaultProviderUpdate(name); err != nil {
 		return err
 	} else if ok {
 		update.SetDefaultProvider = value
@@ -353,13 +352,12 @@ func (t *configTUI) advancedEditProvider(name string) error {
 		changed := true
 		switch strings.ToLower(input) {
 		case "1", "protocol":
-			value, authMode, ok, err := t.promptProviderProtocolUpdate(provider.GetProtocol(), provider.AuthMode)
+			selection, ok, err := t.promptProviderProtocolUpdate(provider)
 			if err != nil {
 				return err
 			}
 			if ok {
-				update.Protocol = &value
-				update.AuthMode = &authMode
+				applyProviderProtocolSelection(&update, selection)
 			} else {
 				changed = false
 			}
@@ -424,7 +422,7 @@ func (t *configTUI) advancedEditProvider(name string) error {
 				changed = false
 			}
 		case "8", "auth_mode", "auth-mode":
-			value, ok, err := t.promptAuthModeUpdate(provider.AuthMode)
+			value, ok, err := t.promptAuthModeUpdate(provider)
 			if err != nil {
 				return err
 			}
@@ -692,12 +690,17 @@ func (t *configTUI) promptStringUpdate(label, current string) (string, bool, err
 	return value, true, nil
 }
 
-func (t *configTUI) promptProviderProtocolUpdate(currentProtocol, currentAuthMode string) (string, string, bool, error) {
-	options := loginProtocolOptions()
-	currentLoginProtocol := loginProtocolFromProvider(config.Provider{
-		Protocol: currentProtocol,
-		AuthMode: currentAuthMode,
-	}, currentAuthMode)
+type providerProtocolSelection struct {
+	LoginProtocol   string
+	RuntimeProtocol string
+	AuthMode        string
+	ClearAPIKeyRef  bool
+	ClearAuthRef    bool
+}
+
+func (t *configTUI) promptProviderProtocolUpdate(current config.Provider) (providerProtocolSelection, bool, error) {
+	options := editableProviderProtocolOptions()
+	currentLoginProtocol := loginProtocolFromProvider(current, current.AuthMode)
 	fmt.Fprintln(t.writer, "请选择登录协议:")
 	for i, option := range options {
 		currentMarker := ""
@@ -709,19 +712,61 @@ func (t *configTUI) promptProviderProtocolUpdate(currentProtocol, currentAuthMod
 	for {
 		value, err := t.prompt(fmt.Sprintf("协议编号或名称 [%s]（回车保留）: ", emptyIfBlank(currentLoginProtocol)))
 		if err != nil {
-			return "", "", false, err
+			return providerProtocolSelection{}, false, err
 		}
 		if value == "" {
-			return "", "", false, nil
+			return providerProtocolSelection{}, false, nil
 		}
 		for i, option := range options {
 			if value == fmt.Sprintf("%d", i+1) || strings.EqualFold(value, option) {
-				runtimeProtocol := runtimeProtocolForLoginProtocol(option)
-				authMode := authModeForLoginProtocol(option)
-				return runtimeProtocol, authMode, true, nil
+				selection := providerProtocolSelection{
+					LoginProtocol:   option,
+					RuntimeProtocol: runtimeProtocolForLoginProtocol(option),
+					AuthMode:        authModeForLoginProtocol(option),
+				}
+				if selection.AuthMode == providerAuthModeOAuth {
+					selection.ClearAPIKeyRef = true
+					if strings.TrimSpace(current.AuthRef) == "" {
+						fmt.Fprintln(t.writer, "提示: 已选择 OAuth 协议，但当前 provider 没有 auth_ref；请继续在高级编辑中修复 auth_ref，或重新执行登录。")
+					}
+				} else {
+					selection.ClearAuthRef = true
+					if strings.TrimSpace(current.APIKeyRef) == "" {
+						fmt.Fprintln(t.writer, "提示: 已选择 API key 协议，但当前 provider 没有 api_key_ref；请继续修复 api_key_ref，或重新执行登录。")
+					}
+				}
+				return selection, true, nil
 			}
 		}
 		fmt.Fprintln(t.writer, "无效协议，请重新输入")
+	}
+}
+
+func editableProviderProtocolOptions() []string {
+	out := make([]string, 0, len(loginProtocolOptions()))
+	for _, option := range loginProtocolOptions() {
+		if strings.EqualFold(option, providerLoginProtocolAuto) {
+			continue
+		}
+		out = append(out, option)
+	}
+	return out
+}
+
+func applyProviderProtocolSelection(update *config.ProviderConfigUpdate, selection providerProtocolSelection) {
+	if update == nil {
+		return
+	}
+	update.Protocol = &selection.RuntimeProtocol
+	update.AuthMode = &selection.AuthMode
+	if selection.ClearAPIKeyRef {
+		empty := ""
+		update.APIKey = &empty
+		update.APIKeyRef = &empty
+	}
+	if selection.ClearAuthRef {
+		empty := ""
+		update.AuthRef = &empty
 	}
 }
 
@@ -749,19 +794,19 @@ func (t *configTUI) promptBoolDefault(label string, current bool) (bool, error) 
 	}
 }
 
-func (t *configTUI) promptAuthModeUpdate(current string) (string, bool, error) {
+func (t *configTUI) promptAuthModeUpdate(current config.Provider) (string, bool, error) {
 	options := []string{providerAuthModeAPIKey, providerAuthModeOAuth}
-	current = normalizeProviderAuthMode(current)
+	currentMode := normalizeProviderAuthMode(current.AuthMode)
 	fmt.Fprintln(t.writer, "请选择认证模式:")
 	for i, option := range options {
 		currentMarker := ""
-		if strings.EqualFold(option, current) {
+		if strings.EqualFold(option, currentMode) {
 			currentMarker = " *"
 		}
 		fmt.Fprintf(t.writer, "  [%d] %s%s\n", i+1, option, currentMarker)
 	}
 	for {
-		value, err := t.prompt(fmt.Sprintf("认证模式编号或名称 [%s]（回车保留，clear 清除）: ", emptyIfBlank(current)))
+		value, err := t.prompt(fmt.Sprintf("认证模式编号或名称 [%s]（回车保留，clear 清除）: ", emptyIfBlank(currentMode)))
 		if err != nil {
 			return "", false, err
 		}
@@ -773,11 +818,40 @@ func (t *configTUI) promptAuthModeUpdate(current string) (string, bool, error) {
 		}
 		for i, option := range options {
 			if value == fmt.Sprintf("%d", i+1) || strings.EqualFold(value, option) {
+				if option == providerAuthModeOAuth && strings.TrimSpace(current.AuthRef) == "" {
+					fmt.Fprintln(t.writer, "提示: OAuth 模式需要 auth_ref；请继续修复 auth_ref，或重新执行登录。")
+				}
+				if option == providerAuthModeAPIKey && strings.TrimSpace(current.APIKeyRef) == "" {
+					fmt.Fprintln(t.writer, "提示: API key 模式需要 api_key_ref；请继续修复 api_key_ref，或重新执行登录。")
+				}
 				return option, true, nil
 			}
 		}
 		fmt.Fprintln(t.writer, "无效认证模式，请重新输入")
 	}
+}
+
+func (t *configTUI) promptSetDefaultProviderUpdate(name string) (bool, bool, error) {
+	isDefault := strings.EqualFold(t.cfg.Providers.DefaultProvider, name)
+	if isDefault {
+		fmt.Fprintf(t.writer, "当前 provider 已是默认 provider；如需切换默认值，请在其它 provider 详情中选择设为默认。\n")
+		return false, false, nil
+	}
+	value, err := t.prompt("设为默认 provider [false]（true/false，回车保留）: ")
+	if err != nil {
+		return false, false, err
+	}
+	if value == "" {
+		return false, false, nil
+	}
+	parsed, ok := parseConfigTUIBool(value)
+	if !ok {
+		return false, false, fmt.Errorf("设为默认 provider 必须是 true 或 false")
+	}
+	if !parsed {
+		return false, false, nil
+	}
+	return true, true, nil
 }
 
 func (t *configTUI) promptIntUpdate(label string, current int) (int, bool, error) {
