@@ -104,21 +104,10 @@ func main() {
 		}
 		cfg = loadedConfig
 
-		// AICLI 日志配置覆盖（优先级：命令行 > aicli.log > log）
+		// AICLI 日志配置覆盖（优先级：命令行 > aicli.log > log），并统一为文件日志，
+		// 避免内部 JSON 日志污染交互提示、管道输出或结构化命令结果。
 		if cfg != nil {
-			if cfg.AICLI != nil && cfg.AICLI.Log != nil {
-				// aicli.log.enabled → 覆盖 → log.enabled
-				if cfg.AICLI.Log.Enabled != nil {
-					cfg.Log.Enabled = cfg.AICLI.Log.Enabled
-				}
-				// aicli.log.file_path → 覆盖 → log.file_path
-				if cfg.AICLI.Log.FilePath != "" {
-					cfg.Log.FilePath = cfg.AICLI.Log.FilePath
-				}
-			}
-			if logFilePath != "" {
-				cfg.Log.FilePath = logFilePath
-			}
+			commands.ConfigureAICLILoggerForCLI(cfg, logFilePath)
 		}
 
 		themeName := ""

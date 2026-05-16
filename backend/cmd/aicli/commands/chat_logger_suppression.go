@@ -3,11 +3,42 @@ package commands
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
+
+// ConfigureAICLILoggerForCLI normalizes the aicli process logger to the same
+// terminal-safe mode used by chat: internal logs go to a file, while command
+// output remains the only thing written to stdout/stderr.
+func ConfigureAICLILoggerForCLI(cfg *config.Config, logFileOverride string) {
+	if cfg == nil {
+		return
+	}
+	if cfg.AICLI != nil && cfg.AICLI.Log != nil {
+		if cfg.AICLI.Log.Enabled != nil {
+			cfg.Log.Enabled = cfg.AICLI.Log.Enabled
+		}
+		if strings.TrimSpace(cfg.AICLI.Log.FilePath) != "" {
+			cfg.Log.FilePath = cfg.AICLI.Log.FilePath
+		}
+	}
+	if strings.TrimSpace(logFileOverride) != "" {
+		cfg.Log.FilePath = logFileOverride
+	}
+	if strings.TrimSpace(cfg.Log.FilePath) == "" {
+		cfg.Log.FilePath = defaultAICLILogFilePath()
+	}
+	cfg.Log.Output = "file"
+	cfg.Log.EnableConsole = false
+}
+
+func defaultAICLILogFilePath() string {
+	return filepath.Join(aiclipaths.DefaultLogsDir(), "aicli.log")
+}
 
 // suppressChatConsoleLogger temporarily switches the global logger to file-only.
 // Chat turns emit a lot of transport/debug logs, and they should not interleave

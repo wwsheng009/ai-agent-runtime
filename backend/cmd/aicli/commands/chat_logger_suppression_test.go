@@ -11,6 +11,73 @@ import (
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
+func TestConfigureAICLILoggerForCLIForcesFileOnlyOutput(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Log: logpkg.LogConfig{
+			Level:         "debug",
+			Format:        "json",
+			Output:        "stdout",
+			FilePath:      "gateway.log",
+			EnableConsole: true,
+		},
+		AICLI: &config.AICLIConfig{
+			Log: &config.AICLILogConfig{
+				Enabled:  &enabled,
+				FilePath: "aicli.log",
+			},
+		},
+	}
+
+	ConfigureAICLILoggerForCLI(cfg, "")
+
+	if cfg.Log.Enabled == nil || !*cfg.Log.Enabled {
+		t.Fatal("expected aicli log enabled override to be applied")
+	}
+	if cfg.Log.FilePath != "aicli.log" {
+		t.Fatalf("expected aicli log file path override, got %q", cfg.Log.FilePath)
+	}
+	if cfg.Log.Output != "file" {
+		t.Fatalf("expected file-only output, got %q", cfg.Log.Output)
+	}
+	if cfg.Log.EnableConsole {
+		t.Fatal("expected console logging to be disabled")
+	}
+}
+
+func TestConfigureAICLILoggerForCLICommandLineLogFileWins(t *testing.T) {
+	cfg := &config.Config{
+		Log: logpkg.LogConfig{Output: "stdout", FilePath: "gateway.log"},
+		AICLI: &config.AICLIConfig{
+			Log: &config.AICLILogConfig{FilePath: "aicli.log"},
+		},
+	}
+
+	ConfigureAICLILoggerForCLI(cfg, "override.log")
+
+	if cfg.Log.FilePath != "override.log" {
+		t.Fatalf("expected command line log file override, got %q", cfg.Log.FilePath)
+	}
+	if cfg.Log.Output != "file" || cfg.Log.EnableConsole {
+		t.Fatalf("expected file-only logging, got output=%q enable_console=%v", cfg.Log.Output, cfg.Log.EnableConsole)
+	}
+}
+
+func TestConfigureAICLILoggerForCLIUsesDefaultLogFile(t *testing.T) {
+	cfg := &config.Config{
+		Log: logpkg.LogConfig{Output: "stdout"},
+	}
+
+	ConfigureAICLILoggerForCLI(cfg, "")
+
+	if !strings.HasSuffix(filepath.ToSlash(cfg.Log.FilePath), "/.aicli/logs/aicli.log") {
+		t.Fatalf("expected default aicli log path, got %q", cfg.Log.FilePath)
+	}
+	if cfg.Log.Output != "file" || cfg.Log.EnableConsole {
+		t.Fatalf("expected file-only logging, got output=%q enable_console=%v", cfg.Log.Output, cfg.Log.EnableConsole)
+	}
+}
+
 func TestSuppressChatConsoleLoggerRoutesLogsToFileOnly(t *testing.T) {
 	tempFile, err := os.CreateTemp("", "aicli-chat-suppression-*.log")
 	if err != nil {
