@@ -2936,6 +2936,27 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 	}
 }
 
+func TestShowChatRuntimePriorityPrompt_RendersPromptBlockAndReturnsReadablePrompt(t *testing.T) {
+	var session ChatSession
+	output := captureStdout(t, func() {
+		readPrompt, cleanup := showChatRuntimePriorityPrompt(&session, []string{
+			"[approval] command=git status",
+			"[approval] cwd=C:/work",
+		}, "[approval] allow bash? [y/N]: ")
+		defer cleanup()
+		if readPrompt != "[approval] allow bash? [y/N]: " {
+			t.Fatalf("unexpected read prompt: %q", readPrompt)
+		}
+	})
+
+	if !strings.Contains(output, "[approval] command=git status") {
+		t.Fatalf("expected approval command line in output, got %q", output)
+	}
+	if !strings.Contains(output, "[approval] allow bash? [y/N]: ") {
+		t.Fatalf("expected approval prompt in output, got %q", output)
+	}
+}
+
 func TestChatRuntimeEvents_ApprovalReusePersistsAcrossTurnsForSameTeam(t *testing.T) {
 	bridge := newChatRuntimeEventBridge(&ChatSession{
 		ApprovalReuseMode: chatApprovalReuseTeamReadOnlyShell,
@@ -3852,6 +3873,11 @@ func TestChatRuntimeEvents_NonInteractiveQuestionReturnsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "--no-interactive") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	for _, want := range []string{"--disable-tools", "aicli chat"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected non-interactive question error to contain %q, got %v", want, err)
+		}
+	}
 }
 
 func TestChatRuntimeEvents_NonInteractiveApprovalReturnsError(t *testing.T) {
@@ -3930,6 +3956,11 @@ func TestChatRuntimeEvents_NonInteractiveApprovalReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--no-interactive") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"tool=team_echo", "permission-mode=default", "--disable-tools", "--yolo", "aicli chat"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected non-interactive approval error to contain %q, got %v", want, err)
+		}
 	}
 	if mcpManager.callCount != 0 {
 		t.Fatalf("expected denied approval path to skip tool execution, got %d", mcpManager.callCount)

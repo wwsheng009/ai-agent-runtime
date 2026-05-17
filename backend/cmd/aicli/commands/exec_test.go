@@ -71,6 +71,56 @@ func TestParseExecOptions_MapsCommonFlags(t *testing.T) {
 	}
 }
 
+func TestParseExecOptions_DefaultsDisableToolsForHeadlessSafety(t *testing.T) {
+	cmd := newTestExecCommand()
+	opts, err := parseExecOptions(cmd, []string{"今天的日期"})
+	if err != nil {
+		t.Fatalf("parse options: %v", err)
+	}
+	if !opts.DisableTools {
+		t.Fatalf("expected exec to default disable tools for plain headless prompt")
+	}
+}
+
+func TestParseExecOptions_EnableToolsAndYoloOverrideDefault(t *testing.T) {
+	cmd := newTestExecCommand()
+	if err := cmd.Flags().Set("enable-tools", "true"); err != nil {
+		t.Fatalf("set enable-tools: %v", err)
+	}
+	opts, err := parseExecOptions(cmd, []string{"run tools"})
+	if err != nil {
+		t.Fatalf("parse options: %v", err)
+	}
+	if opts.DisableTools {
+		t.Fatalf("expected --enable-tools to keep tools enabled")
+	}
+
+	cmd = newTestExecCommand()
+	if err := cmd.Flags().Set("yolo", "true"); err != nil {
+		t.Fatalf("set yolo: %v", err)
+	}
+	opts, err = parseExecOptions(cmd, []string{"run tools"})
+	if err != nil {
+		t.Fatalf("parse options: %v", err)
+	}
+	if opts.DisableTools {
+		t.Fatalf("expected --yolo to keep tools enabled")
+	}
+}
+
+func TestParseExecOptions_ToolFlagsConflict(t *testing.T) {
+	cmd := newTestExecCommand()
+	if err := cmd.Flags().Set("disable-tools", "true"); err != nil {
+		t.Fatalf("set disable-tools: %v", err)
+	}
+	if err := cmd.Flags().Set("enable-tools", "true"); err != nil {
+		t.Fatalf("set enable-tools: %v", err)
+	}
+	if _, err := parseExecOptions(cmd, []string{"run tools"}); err == nil {
+		t.Fatal("expected conflicting tool flags to fail")
+	}
+}
+
 func TestApplyConfigOverrides(t *testing.T) {
 	cfg := &config.Config{
 		Providers: config.ProvidersConfig{

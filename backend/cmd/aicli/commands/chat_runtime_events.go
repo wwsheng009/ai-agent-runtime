@@ -180,9 +180,9 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			fmt.Print(ui.FormatUserPromptWithAttachments(len(session.ImagePaths)))
 		},
 		askApproval: func(approval *runtimechat.ApprovalRequest) (bool, error) {
-			beginDirectInteractiveOutput(session)
+			lines := make([]string, 0, 4)
 			if notice := discardPendingInteractiveInputForPriorityPrompt(session, "审批提示"); notice != "" {
-				fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine(notice))
+				lines = append(lines, notice)
 			}
 			toolName := ""
 			reason := ""
@@ -190,15 +190,16 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 				toolName = strings.TrimSpace(approval.ToolName)
 				reason = strings.TrimSpace(approval.Reason)
 				for _, line := range approvalRequestPreviewLines(approval) {
-					fmt.Printf("\n%s", formatInteractiveSupplementPromptLine("[approval] "+line))
+					lines = append(lines, "[approval] "+line)
 				}
 			}
 			promptLine := fmt.Sprintf("[approval] allow %s", strings.TrimSpace(toolName))
 			if strings.TrimSpace(reason) != "" {
 				promptLine += fmt.Sprintf(" (%s)", strings.TrimSpace(reason))
 			}
-			fmt.Printf("\n%s? [y/N]: ", formatInteractiveSupplementPromptLine(promptLine))
-			text, err := chatInteractiveReadTransientLine(session, context.Background())
+			readPrompt, cleanupPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine+"? [y/N]: ")
+			defer cleanupPrompt()
+			text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
 			if err != nil {
 				return false, err
 			}
@@ -206,20 +207,23 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			return text == "y" || text == "yes", nil
 		},
 		askQuestion: func(prompt string, suggestions []string, required bool) (string, error) {
-			beginDirectInteractiveOutput(session)
+			lines := make([]string, 0, 3)
 			if notice := discardPendingInteractiveInputForPriorityPrompt(session, "问题提示"); notice != "" {
-				fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine(notice))
+				lines = append(lines, notice)
 			}
-			fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine("[question] "+strings.TrimSpace(prompt)))
+			lines = append(lines, "[question] "+strings.TrimSpace(prompt))
 			if len(suggestions) > 0 {
-				fmt.Printf("%s\n", formatInteractiveSupplementPromptLine("Suggestions: "+strings.Join(suggestions, ", ")))
+				lines = append(lines, "Suggestions: "+strings.Join(suggestions, ", "))
 			}
+			readPrompt := "> "
 			if required {
-				fmt.Print("> ")
+				readPrompt = "> "
 			} else {
-				fmt.Print("> (optional) ")
+				readPrompt = "> (optional) "
 			}
-			text, err := chatInteractiveReadTransientLine(session, context.Background())
+			readPrompt, cleanupPrompt := showChatRuntimePriorityPrompt(session, lines, readPrompt)
+			defer cleanupPrompt()
+			text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
 			if err != nil {
 				return "", err
 			}
@@ -837,8 +841,6 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	switch event.Type {
 	case runtimechat.EventApprovalRequested:
 		requestID, _ := event.Payload["request_id"].(string)
-		reason, _ := event.Payload["reason"].(string)
-		b.maybeRenderPermissionModeHint(reason)
 		approval := b.approvalRequestForEvent(event)
 		if grantKey := b.autoApprovalGrantKey(event.SessionID, approval); grantKey != "" && b.hasApprovalGrant(grantKey) {
 			if err := b.resolveApproval(context.Background(), event.SessionID, requestID, true); err != nil {
@@ -846,13 +848,15 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			}
 			return
 		}
-		if hint := b.approvalPromptHint(event.SessionID, approval); hint != "" && b.writeLine != nil {
-			b.writeLine(hint)
-		}
 		if b.session.NoInteractive {
-			b.setRunError(fmt.Errorf("interactive approval required in --no-interactive mode"))
+			b.setRunError(b.nonInteractiveApprovalError(approval))
 			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
 			return
+		}
+		reason, _ := event.Payload["reason"].(string)
+		b.maybeRenderPermissionModeHint(reason)
+		if hint := b.approvalPromptHint(event.SessionID, approval); hint != "" && b.writeLine != nil {
+			b.writeLine(hint)
 		}
 		allowed, askErr := b.askApproval(approval)
 		if askErr != nil {
@@ -872,7 +876,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		required, _ := event.Payload["required"].(bool)
 		suggestions := interfaceSliceToStrings(event.Payload["suggestions"])
 		if b.session.NoInteractive {
-			b.setRunError(fmt.Errorf("interactive question required in --no-interactive mode"))
+			b.setRunError(b.nonInteractiveQuestionError(prompt))
 			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
 			return
 		}
@@ -995,6 +999,34 @@ func formatInteractiveSupplementPromptLine(line string) string {
 		return ""
 	}
 	return ui.FormatAssistantSupplementBlock(line)
+}
+
+func showChatRuntimePriorityPrompt(session *ChatSession, lines []string, prompt string) (string, func()) {
+	prompt = strings.TrimRight(strings.ReplaceAll(prompt, "\r\n", "\n"), "\n")
+	if session != nil && session.Surface != nil && session.Surface.Enabled() {
+		beginDirectInteractiveOutput(session)
+		session.Surface.ShowPopupInput(lines, prompt)
+		return prompt, func() {
+			session.Surface.ClearPopup()
+			if session.Interaction != nil {
+				session.Interaction.ResetPromptState()
+			}
+		}
+	}
+
+	beginDirectInteractiveOutput(session)
+	fmt.Println()
+	for _, line := range lines {
+		if rendered := formatInteractiveSupplementPromptLine(line); rendered != "" {
+			fmt.Println(rendered)
+		}
+	}
+	renderedPrompt := formatInteractiveSupplementPromptLine(prompt)
+	if renderedPrompt == "" {
+		renderedPrompt = prompt
+	}
+	fmt.Print(renderedPrompt)
+	return renderedPrompt, func() {}
 }
 
 func (b *chatRuntimeEventBridge) shouldSuppressApprovalTimeline(event runtimeevents.Event) bool {
@@ -1390,6 +1422,50 @@ func (b *chatRuntimeEventBridge) rememberApprovalGrant(key string) {
 	b.approvalGrants[strings.TrimSpace(key)] = time.Now().UTC().Add(chatApprovalGrantTTL)
 }
 
+func (b *chatRuntimeEventBridge) nonInteractiveApprovalError(approval *runtimechat.ApprovalRequest) error {
+	mode := chatRuntimePermissionModeLabel(b.session)
+	toolName := "unknown"
+	reason := ""
+	if approval != nil {
+		if name := strings.TrimSpace(approval.ToolName); name != "" {
+			toolName = name
+		}
+		reason = strings.TrimSpace(approval.Reason)
+	}
+
+	parts := []string{
+		fmt.Sprintf("非交互模式（--no-interactive）无法审批工具调用 tool=%s", toolName),
+		fmt.Sprintf("permission-mode=%s", mode),
+	}
+	if reason != "" {
+		parts = append(parts, fmt.Sprintf("reason=%s", truncateChatRuntimeText(reason, 160)))
+	}
+	parts = append(parts, "建议：纯文本问答使用 `aicli exec --disable-tools \"...\"`；信任当前工作区工具执行时使用 `aicli exec --yolo \"...\"`；需要人工确认时使用 `aicli chat`")
+	return fmt.Errorf("%s", strings.Join(parts, "；"))
+}
+
+func (b *chatRuntimeEventBridge) nonInteractiveQuestionError(prompt string) error {
+	parts := []string{
+		"非交互模式（--no-interactive）无法回答运行时提问",
+	}
+	if prompt = strings.TrimSpace(prompt); prompt != "" {
+		parts = append(parts, fmt.Sprintf("prompt=%s", truncateChatRuntimeText(prompt, 160)))
+	}
+	parts = append(parts, "建议：把必要信息直接写进 exec 输入；纯文本问答使用 `aicli exec --disable-tools \"...\"`；需要交互追问时使用 `aicli chat`")
+	return fmt.Errorf("%s", strings.Join(parts, "；"))
+}
+
+func chatRuntimePermissionModeLabel(session *ChatSession) string {
+	if session == nil {
+		return string(runtimepolicy.ModeDefault)
+	}
+	mode := strings.TrimSpace(string(session.PermissionMode))
+	if mode == "" {
+		return string(runtimepolicy.ModeDefault)
+	}
+	return mode
+}
+
 func (b *chatRuntimeEventBridge) maybeRenderPermissionModeHint(reason string) {
 	if b == nil || b.session == nil || b.writeLine == nil {
 		return
@@ -1405,13 +1481,9 @@ func (b *chatRuntimeEventBridge) maybeRenderPermissionModeHint(reason string) {
 	b.permissionHintShown = true
 	b.renderMu.Unlock()
 
-	mode := string(b.session.PermissionMode)
-	if strings.TrimSpace(mode) == "" {
-		mode = string(runtimepolicy.ModeDefault)
-	}
 	b.writeLine(fmt.Sprintf(
 		"[tip] 当前 permission-mode=%s。若你信任当前会话，可用 --yolo（等价于 --permission-mode bypass_permissions）关闭审批；--approval-reuse=%s 可减少重复只读审批（shell/网络搜索等）。",
-		mode,
+		chatRuntimePermissionModeLabel(b.session),
 		formatChatApprovalReuseMode(b.session.ApprovalReuseMode),
 	))
 }

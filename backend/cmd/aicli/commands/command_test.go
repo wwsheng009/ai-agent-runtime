@@ -1460,6 +1460,107 @@ func TestHandleCommand_DirectSkillCall_UsesPromptShortcut(t *testing.T) {
 	}
 }
 
+func TestHandleCommand_DirectAICLISkillCall_EchoesInvocationBeforeExecution(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	mcp := &recordingAICLIBridgeMCP{}
+	summary := newAICLIExecBridgeSummaryForTest("aicli")
+	skillItem := summary.ToSkillStub()
+	attachDirectToolBridgeSkillHandler(summary, skillItem, mcp)
+	catalog.RegisterSkillFunction(&SkillFunction{
+		functionName: buildSkillFunctionName("aicli"),
+		skill:        skillItem,
+		executor:     runtimeskill.NewExecutor(nil, mcp, nil),
+	})
+
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+	}
+	command := `/skill aicli {"prompt":"查看当前日期","options":{"timeout":"60s","request-timeout":"45s"}}`
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, command, false); quit {
+			t.Fatal("expected skill command not to exit")
+		}
+	})
+
+	echoIndex := strings.Index(output, "• Running "+command)
+	resultIndex := strings.Index(output, "AICLI_EXEC_OK")
+	if echoIndex < 0 {
+		t.Fatalf("expected direct skill invocation echo, got:\n%s", output)
+	}
+	if resultIndex < 0 || echoIndex > resultIndex {
+		t.Fatalf("expected invocation echo before result, got:\n%s", output)
+	}
+	for _, expected := range []string{
+		"aicli exec",
+		"--output text",
+		"--request-timeout 45s",
+		"--disable-tools",
+		"--timeout 60s",
+		"<prompt via stdin>",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestExecuteDirectFunction_LogsAndFlushesDirectSkillError(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	executor := &fakeSkillExecutor{
+		result: &runtimeskill.ExecuteResult{
+			SkillName: "broken",
+			Success:   false,
+			Output:    "partial output",
+			Error:     "bridge failed",
+		},
+	}
+	catalog.RegisterSkillFunction(&SkillFunction{
+		functionName: "skill__broken",
+		skill: &runtimeskill.Skill{
+			Name:        "broken",
+			Description: "Broken skill",
+		},
+		executor: executor,
+	})
+
+	logger := NewChatLogger("provider", "openai", "model", false, "")
+	if err := logger.SetLogDir(t.TempDir()); err != nil {
+		t.Fatalf("SetLogDir failed: %v", err)
+	}
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+		Logger:           logger,
+	}
+
+	_, err := executeDirectFunction(session, "broken", "skill__broken", map[string]interface{}{"prompt": "run"})
+	if err == nil || !strings.Contains(err.Error(), "bridge failed") {
+		t.Fatalf("expected direct skill error to be returned, got %v", err)
+	}
+
+	logData, readErr := os.ReadFile(logger.SessionLogPath())
+	if readErr != nil {
+		t.Fatalf("expected flushed chat log: %v", readErr)
+	}
+	logText := string(logData)
+	for _, expected := range []string{`"message_type": "tool_call"`, `"message_type": "tool_result"`, `"function": "skill__broken"`, `"bridge failed"`} {
+		if !strings.Contains(logText, expected) {
+			t.Fatalf("expected flushed chat log to contain %q, got:\n%s", expected, logText)
+		}
+	}
+
+	debugData, readErr := os.ReadFile(logger.DebugLogPath())
+	if readErr != nil {
+		t.Fatalf("expected debug log: %v", readErr)
+	}
+	if debugText := string(debugData); !strings.Contains(debugText, "[direct-function] finish") || !strings.Contains(debugText, "bridge failed") {
+		t.Fatalf("expected direct function debug line, got:\n%s", debugText)
+	}
+}
+
 func TestHandleCommand_SkillsMenu_SelectsAndExecutes(t *testing.T) {
 	registry := functions.NewFunctionRegistry()
 	catalog := newAICLIFunctionCatalog("openai", registry)

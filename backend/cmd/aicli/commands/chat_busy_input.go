@@ -31,16 +31,37 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 			close(done)
 		}()
 		for ctx.Err() == nil {
-			prompt := formatSessionUserPrompt(session)
+			prompt, priorityPrompt, revision := queue.capturePrompt(formatSessionUserPrompt(session))
+			readCtx, cancelRead := context.WithCancel(ctx)
+			promptChanged := make(chan struct{}, 1)
+			if changes := queue.priorityCaptureChanges(); changes != nil {
+				go func(expected uint64) {
+					for {
+						select {
+						case <-changes:
+							if queue.priorityCaptureRevision() != expected {
+								select {
+								case promptChanged <- struct{}{}:
+								default:
+								}
+								cancelRead()
+								return
+							}
+						case <-readCtx.Done():
+							return
+						}
+					}
+				}(revision)
+			}
 			cancelled := false
-			line, err := session.InputBox.ReadTransientPromptWithHooksContext(ctx, prompt, ui.LineEditorHooks{
+			line, err := session.InputBox.ReadTransientPromptWithHooksContext(readCtx, prompt, ui.LineEditorHooks{
 				OnChange: func(snapshot ui.LineEditorSnapshot) {
-					if session.Interaction != nil {
+					if !priorityPrompt && session.Interaction != nil {
 						session.Interaction.SetPromptInputSnapshot(snapshot)
 					}
 				},
 				OnBeforeTerminalWrite: func(snapshot ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
-					if session.Interaction != nil {
+					if !priorityPrompt && session.Interaction != nil {
 						return session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
 					}
 					return ""
@@ -50,6 +71,15 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 					return true
 				},
 			})
+			cancelRead()
+			select {
+			case <-promptChanged:
+				if session.Interaction != nil && !priorityPrompt {
+					session.Interaction.RenderPromptInputSnapshot(ui.LineEditorSnapshot{})
+				}
+				continue
+			default:
+			}
 			if cancelled {
 				if queue.isPriorityMode() {
 					queue.signalReadError(errChatInteractivePromptCancelled)
@@ -61,6 +91,9 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 				continue
 			}
 			if err != nil {
+				if errors.Is(err, context.Canceled) && ctx.Err() == nil && queue.priorityCaptureRevision() != revision {
+					continue
+				}
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return
 				}

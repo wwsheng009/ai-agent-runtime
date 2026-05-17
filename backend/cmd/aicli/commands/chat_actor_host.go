@@ -489,7 +489,11 @@ func resolveLocalChatWorkspaceMode(runtimeConfig *runtimecfg.RuntimeConfig) stri
 }
 
 func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) string {
-	base := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
+	promptCWD := strings.TrimSpace(workspaceRoot)
+	if promptCWD == "" {
+		promptCWD, _ = os.Getwd()
+	}
+	base := strings.TrimSpace(composeChatSystemPromptWithGuidanceForCWD(session, promptCWD))
 
 	lines := []string{}
 	if base != "" {

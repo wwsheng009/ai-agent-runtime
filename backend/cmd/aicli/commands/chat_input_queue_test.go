@@ -452,6 +452,53 @@ func TestChatInteractiveReadPriorityLineWithPrompt_UsesTransientInputBoxWithoutS
 	}
 }
 
+func TestChatInputQueue_PriorityReadPublishesCapturePrompt(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setExternalInputCaptureActive(true)
+
+	result := make(chan string, 1)
+	errs := make(chan error, 1)
+	go func() {
+		line, err := queue.readPriorityLineWithPrompt(context.Background(), "[approval] allow bash? [y/N]: ")
+		if err != nil {
+			errs <- err
+			return
+		}
+		result <- line
+	}()
+
+	deadline := time.After(time.Second)
+	for {
+		prompt, priority, _ := queue.capturePrompt("default> ")
+		if priority && prompt == "[approval] allow bash? [y/N]: " {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for priority capture prompt, got prompt=%q priority=%v", prompt, priority)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	queue.priorityLines <- chatQueuedInput{Text: "y", Source: "stdin"}
+
+	select {
+	case err := <-errs:
+		t.Fatalf("readPriorityLineWithPrompt returned error: %v", err)
+	case line := <-result:
+		if line != "y" {
+			t.Fatalf("expected priority input y, got %q", line)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for priority line result")
+	}
+
+	prompt, priority, _ := queue.capturePrompt("default> ")
+	if priority || prompt != "default> " {
+		t.Fatalf("expected capture prompt to reset, got prompt=%q priority=%v", prompt, priority)
+	}
+}
+
 func TestChatInteractiveReadPrioritySecretWithPrompt_UsesSecretInputBoxWithoutSharedReader(t *testing.T) {
 	restore := withTransientStdio(t, "secret-value\n")
 	defer restore()

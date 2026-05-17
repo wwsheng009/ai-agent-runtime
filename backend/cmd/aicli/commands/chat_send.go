@@ -63,6 +63,8 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 			}
 			return response, nil
 		}
+		logChatTurnFailureIfUnrecorded(session, userMessage, err)
+		flushChatSessionLog(session)
 		return response, err
 	}
 	if continueErr := maybeAutoContinueActiveGoal(ctx, session, executor); continueErr != nil {
@@ -84,13 +86,53 @@ func finishSuccessfulChatSend(session *ChatSession, response string, noInteracti
 	}
 
 	session.ImagePaths = nil
+	flushChatSessionLog(session)
+}
+
+func flushChatSessionLog(session *ChatSession) {
+	if session == nil {
+		return
+	}
 	if session.Logger != nil && session.Logger.logDir != "" {
 		if err := session.Logger.FlushSession(); err != nil {
 			writeChatLogSaveError(session, err)
 		}
-	} else {
-		writeChatLogBufferedMarker(session)
+		return
 	}
+	writeChatLogBufferedMarker(session)
+}
+
+func logChatTurnFailureIfUnrecorded(session *ChatSession, userMessage string, turnErr error) {
+	logChatFailureIfUnrecorded(session, userMessage, turnErr, "chat_turn")
+}
+
+func logActorExecutorFailureIfUnrecorded(session *ChatSession, prompt string, turnErr error) {
+	logChatFailureIfUnrecorded(session, prompt, turnErr, "actor_executor")
+}
+
+func logChatFailureIfUnrecorded(session *ChatSession, userMessage string, turnErr error, path string) {
+	if session == nil || session.Logger == nil || session.Logger.sessionLog == nil || turnErr == nil {
+		return
+	}
+	if len(session.Logger.sessionLog.Messages) > 0 {
+		return
+	}
+	if strings.TrimSpace(path) == "" {
+		path = "chat_turn"
+	}
+	scope := aicliLogScope{TurnID: "turn-error", RequestID: "turn-error-req-01"}
+	session.Logger.LogRequest(scope, map[string]interface{}{
+		"prompt":   userMessage,
+		"provider": session.ProviderName,
+		"protocol": session.Provider.GetProtocol(),
+		"model":    session.Model,
+		"base_url": session.BaseURL,
+		"path":     path,
+	})
+	session.Logger.LogResponse(scope, map[string]interface{}{
+		"error": turnErr.Error(),
+		"path":  path,
+	}, nil, session.Stream, turnErr, 0)
 }
 
 func shouldShowInitialThinkingIndicator(session *ChatSession, executor aicliChatExecutor) bool {

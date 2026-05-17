@@ -187,6 +187,11 @@ func syncChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Se
 	if workspacePath := strings.TrimSpace(resolveLocalWorkspacePath(loadRuntimeToolConfig(session.Config, session), session)); workspacePath != "" {
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.WorkspacePath, workspacePath)
 	}
+	if session.Config != nil {
+		if configFile := strings.TrimSpace(session.Config.ConfigFilePath); configFile != "" {
+			sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ConfigFile, configFile, sessionmeta.LegacyAICLIConfigFile)
+		}
+	}
 	selectedAgentTarget := strings.TrimSpace(session.SelectedAgentTarget)
 	if selectedAgentTarget != "" {
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.SelectedAgent, selectedAgentTarget, chatRuntimeContextSelectedAgent)

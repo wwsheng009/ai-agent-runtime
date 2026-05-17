@@ -291,16 +291,18 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 		}
 	}
 
-	localRuntimeHost, hostErr := initializeLocalChatRuntimeHost(cfg, session, toolManager)
-	if hostErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: 初始化 actor runtime host 失败，继续使用 legacy chat executor: %v\n", hostErr)
-		logpkg.Warnf("AICLI actor runtime host init failed: %v", hostErr)
-	} else if localRuntimeHost != nil {
-		session.LocalRuntimeHost = localRuntimeHost
-		session.ActorFirstReady = true
-		restoreLocalRuntimeHostTeamState(session)
-		session.ChatExecutor = newAICLIActorChatExecutor()
-		startChatActorWarmup(session)
+	if !session.DisableTools {
+		localRuntimeHost, hostErr := initializeLocalChatRuntimeHost(cfg, session, toolManager)
+		if hostErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: 初始化 actor runtime host 失败，继续使用 legacy chat executor: %v\n", hostErr)
+			logpkg.Warnf("AICLI actor runtime host init failed: %v", hostErr)
+		} else if localRuntimeHost != nil {
+			session.LocalRuntimeHost = localRuntimeHost
+			session.ActorFirstReady = true
+			restoreLocalRuntimeHostTeamState(session)
+			session.ChatExecutor = newAICLIActorChatExecutor()
+			startChatActorWarmup(session)
+		}
 	}
 
 	refreshBuiltinFunctionSchemas(session)

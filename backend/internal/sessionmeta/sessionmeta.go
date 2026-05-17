@@ -21,6 +21,7 @@ const (
 	ProfileAgent       = "profile_agent"
 	ProfileRoot        = "profile_root"
 	WorkspacePath      = "workspace_path"
+	ConfigFile         = "config_file"
 	Client             = "client"
 	Entrypoint         = "entrypoint"
 	MessageCount       = "message_count"
@@ -55,6 +56,7 @@ const (
 	LegacyAICLIActiveTeamAgentID  = "aicli_active_team_agent_id"
 	LegacyAICLIActiveTeamTaskID   = "aicli_active_task_id"
 	LegacyAICLISelectedAgent      = "aicli_selected_agent_target"
+	LegacyAICLIConfigFile         = "aicli_config_file"
 
 	LegacyAPIProfileReference = "profile_reference"
 )
@@ -81,6 +83,7 @@ var legacyToCanonical = map[string]string{
 	LegacyAICLIActiveTeamAgentID:  ActiveTeamAgentID,
 	LegacyAICLIActiveTeamTaskID:   ActiveTeamTaskID,
 	LegacyAICLISelectedAgent:      SelectedAgent,
+	LegacyAICLIConfigFile:         ConfigFile,
 	LegacyAPIProfileReference:     ProfileRef,
 }
 
@@ -107,6 +110,7 @@ var canonicalToLegacy = map[string][]string{
 	ActiveTeamAgentID:  {LegacyAICLIActiveTeamAgentID},
 	ActiveTeamTaskID:   {LegacyAICLIActiveTeamTaskID},
 	SelectedAgent:      {LegacyAICLISelectedAgent},
+	ConfigFile:         {LegacyAICLIConfigFile},
 }
 
 func CanonicalKey(key string) string {

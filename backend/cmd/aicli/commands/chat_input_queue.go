@@ -37,9 +37,12 @@ type chatInputQueue struct {
 	priorityLines         chan chatQueuedInput
 	errs                  chan error
 	readySignal           chan struct{}
+	priorityCaptureSignal chan struct{}
 	start                 sync.Once
 	mu                    sync.RWMutex
 	priorityMode          bool
+	priorityPrompt        string
+	priorityRevision      uint64
 	externalCaptureActive bool
 	terminalMu            sync.RWMutex
 	terminalErr           error
@@ -62,11 +65,12 @@ func newChatInputQueue(reader *bufio.Reader) *chatInputQueue {
 		reader = newChatInputReader()
 	}
 	return &chatInputQueue{
-		reader:        reader,
-		lines:         make(chan chatQueuedInput, 32),
-		priorityLines: make(chan chatQueuedInput, 4),
-		errs:          make(chan error, 1),
-		readySignal:   make(chan struct{}, 1),
+		reader:                reader,
+		lines:                 make(chan chatQueuedInput, 32),
+		priorityLines:         make(chan chatQueuedInput, 4),
+		errs:                  make(chan error, 1),
+		readySignal:           make(chan struct{}, 1),
+		priorityCaptureSignal: make(chan struct{}, 1),
 	}
 }
 
@@ -594,11 +598,15 @@ func (q *chatInputQueue) readLine(ctx context.Context) (string, error) {
 }
 
 func (q *chatInputQueue) readPriorityLine(ctx context.Context) (string, error) {
+	return q.readPriorityLineWithPrompt(ctx, "")
+}
+
+func (q *chatInputQueue) readPriorityLineWithPrompt(ctx context.Context, prompt string) (string, error) {
 	if q == nil {
 		return "", io.EOF
 	}
-	q.setPriorityMode(true)
-	defer q.setPriorityMode(false)
+	q.setPriorityCapture(true, prompt)
+	defer q.setPriorityCapture(false, "")
 	if !q.hasExternalInputCaptureActive() {
 		q.startPump()
 	}
@@ -892,7 +900,7 @@ func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context)
 
 func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context.Context, prompt string) (string, error) {
 	if session != nil && session.InputQueue != nil {
-		line, err := session.InputQueue.readPriorityLine(ctx)
+		line, err := session.InputQueue.readPriorityLineWithPrompt(ctx, prompt)
 		if session.Interaction != nil && err != nil {
 			session.Interaction.ResetPromptState()
 		}
@@ -1056,6 +1064,9 @@ func (q *chatInputQueue) ensureChannels() {
 	if q.readySignal == nil {
 		q.readySignal = make(chan struct{}, 1)
 	}
+	if q.priorityCaptureSignal == nil {
+		q.priorityCaptureSignal = make(chan struct{}, 1)
+	}
 }
 
 func (q *chatInputQueue) signalReadError(err error) {
@@ -1090,13 +1101,28 @@ func (q *chatInputQueue) terminalError() error {
 	return q.terminalErr
 }
 
-func (q *chatInputQueue) setPriorityMode(active bool) {
+func (q *chatInputQueue) setPriorityCapture(active bool, prompt string) {
 	if q == nil {
 		return
 	}
+	q.ensureChannels()
+	prompt = strings.TrimRight(prompt, "\r\n")
+	changed := false
 	q.mu.Lock()
-	defer q.mu.Unlock()
+	if q.priorityMode != active || q.priorityPrompt != prompt {
+		changed = true
+		q.priorityRevision++
+	}
 	q.priorityMode = active
+	if active {
+		q.priorityPrompt = prompt
+	} else {
+		q.priorityPrompt = ""
+	}
+	q.mu.Unlock()
+	if changed {
+		q.signalPriorityCaptureChange()
+	}
 }
 
 func (q *chatInputQueue) isPriorityMode() bool {
@@ -1106,6 +1132,46 @@ func (q *chatInputQueue) isPriorityMode() bool {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	return q.priorityMode
+}
+
+func (q *chatInputQueue) capturePrompt(defaultPrompt string) (string, bool, uint64) {
+	if q == nil {
+		return defaultPrompt, false, 0
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	if q.priorityMode && strings.TrimSpace(q.priorityPrompt) != "" {
+		return q.priorityPrompt, true, q.priorityRevision
+	}
+	return defaultPrompt, false, q.priorityRevision
+}
+
+func (q *chatInputQueue) priorityCaptureRevision() uint64 {
+	if q == nil {
+		return 0
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.priorityRevision
+}
+
+func (q *chatInputQueue) priorityCaptureChanges() <-chan struct{} {
+	if q == nil {
+		return nil
+	}
+	q.ensureChannels()
+	return q.priorityCaptureSignal
+}
+
+func (q *chatInputQueue) signalPriorityCaptureChange() {
+	if q == nil {
+		return
+	}
+	q.ensureChannels()
+	select {
+	case q.priorityCaptureSignal <- struct{}{}:
+	default:
+	}
 }
 
 func (q *chatInputQueue) setExternalInputCaptureActive(active bool) {

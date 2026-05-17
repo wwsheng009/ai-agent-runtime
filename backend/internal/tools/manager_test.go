@@ -212,11 +212,12 @@ func TestNewDefaultManagerWithRuntimeConfig_PreservesParallelDefinitionMetadata(
 	tools := manager.ListTools()
 
 	want := map[string]bool{
-		"view":  true,
-		"ls":    true,
-		"glob":  true,
-		"grep":  true,
-		"write": false,
+		"view":       true,
+		"ls":         true,
+		"glob":       true,
+		"grep":       true,
+		"write":      false,
+		"aicli_exec": false,
 	}
 	found := make(map[string]map[string]interface{})
 	for _, tool := range tools {

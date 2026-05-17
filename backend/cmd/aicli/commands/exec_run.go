@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
 const (
@@ -80,7 +81,7 @@ func runExec(cmd *cobra.Command, cfg *config.Config, args []string) error {
 			return newExecExitError(execExitUsage, "CONFIG_OVERRIDE_FAILED", err)
 		}
 	}
-	if restoreLogger := suppressChatConsoleLogger(cfg, &chatCommandOptions{NoInteractive: true, OutputFormat: opts.OutputFormat}); restoreLogger != nil {
+	if restoreLogger := suppressChatConsoleLogger(cfg, &chatCommandOptions{NoInteractive: true, OutputFormat: opts.OutputFormat, LogDir: opts.LogDir}); restoreLogger != nil {
 		defer restoreLogger()
 	}
 	processor := NewExecEventProcessor(opts.JSONMode, nil, opts.OutputLastMsg)
@@ -132,6 +133,7 @@ func parseExecOptionsInternal(cmd *cobra.Command, args []string, readPrompt bool
 	opts.JSONEnvelope = useJSONEnvelope(cmd)
 
 	opts.Ephemeral, _ = cmd.Flags().GetBool("ephemeral")
+	opts.LogDir, _ = cmd.Flags().GetString("log-dir")
 	opts.SessionDir, _ = cmd.Flags().GetString("session-dir")
 	opts.SessionUser, _ = cmd.Flags().GetString("user")
 	opts.SessionTitle, _ = cmd.Flags().GetString("title")
@@ -141,6 +143,7 @@ func parseExecOptionsInternal(cmd *cobra.Command, args []string, readPrompt bool
 
 	permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
 	opts.YoloMode, _ = cmd.Flags().GetBool("yolo")
+	permissionModeChanged := cmd.Flags().Changed("permission-mode")
 	permissionMode, err := parseChatPermissionMode(permissionModeFlag, opts.YoloMode)
 	if err != nil {
 		return nil, newExecExitError(execExitUsage, "INVALID_PERMISSION_MODE", err)
@@ -154,10 +157,19 @@ func parseExecOptionsInternal(cmd *cobra.Command, args []string, readPrompt bool
 	opts.ApprovalReuse = approvalReuse
 
 	opts.DisableTools, _ = cmd.Flags().GetBool("disable-tools")
+	opts.EnableTools, _ = cmd.Flags().GetBool("enable-tools")
 	opts.CLISkillDirs, _ = cmd.Flags().GetStringSlice("skills-dir")
 	opts.CLISkillsTopK, _ = cmd.Flags().GetInt("skills-top-k")
 	opts.CLISkillsMode, _ = cmd.Flags().GetString("skills-mode")
 	opts.CLISkillsDebug, _ = cmd.Flags().GetBool("skills-debug")
+	if opts.DisableTools && opts.EnableTools {
+		return nil, newExecExitError(execExitUsage, "TOOL_FLAG_CONFLICT", fmt.Errorf("--disable-tools 与 --enable-tools 不能同时为 true"))
+	}
+	if opts.EnableTools {
+		opts.DisableTools = false
+	} else if !cmd.Flags().Changed("disable-tools") {
+		opts.DisableTools = shouldDisableExecToolsByDefault(cmd, opts, permissionModeChanged)
+	}
 	opts.ConfigOverrides, _ = cmd.Flags().GetStringSlice("config-override")
 	opts.HTTPDebug, _ = cmd.Flags().GetBool("debug-http")
 	opts.FailFast, _ = cmd.Flags().GetBool("fail-fast")
@@ -165,6 +177,28 @@ func parseExecOptionsInternal(cmd *cobra.Command, args []string, readPrompt bool
 		opts.Prompt = buildExecPrompt(args, opts.PromptFlag)
 	}
 	return opts, nil
+}
+
+func shouldDisableExecToolsByDefault(cmd *cobra.Command, opts *ExecOptions, permissionModeChanged bool) bool {
+	if opts == nil {
+		return true
+	}
+	if opts.YoloMode || opts.PermissionMode == runtimepolicy.ModeBypassPermissions {
+		return false
+	}
+	if permissionModeChanged && opts.PermissionMode != runtimepolicy.ModeDefault {
+		return false
+	}
+	if strings.TrimSpace(opts.ProfileFlag) != "" || strings.TrimSpace(opts.AgentFlag) != "" {
+		return false
+	}
+	if len(opts.CLISkillDirs) > 0 || opts.CLISkillsTopK > 0 || opts.CLISkillsDebug {
+		return false
+	}
+	if cmd != nil && cmd.Flags().Changed("skills-mode") && !strings.EqualFold(strings.TrimSpace(opts.CLISkillsMode), "auto") {
+		return false
+	}
+	return true
 }
 
 func buildExecPrompt(args []string, promptFlag string) string {
@@ -262,6 +296,7 @@ func buildExecChatOptions(opts *ExecOptions) *chatCommandOptions {
 		NoInteractive:          true,
 		Message:                opts.Prompt,
 		ImagePaths:             opts.ImagePaths,
+		LogDir:                 opts.LogDir,
 		RequestTimeoutFlag:     opts.RequestTimeout,
 		ReasoningEffortFlag:    opts.ReasoningEffortFlag,
 		ReasoningEffortChanged: strings.TrimSpace(opts.ReasoningEffortFlag) != "",

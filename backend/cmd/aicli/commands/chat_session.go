@@ -872,12 +872,20 @@ func ensureChatSystemPromptMessage(session *ChatSession) {
 }
 
 func composeChatSystemPromptWithGuidance(session *ChatSession) string {
+	cwd, _ := os.Getwd()
+	return composeChatSystemPromptWithGuidanceForCWD(session, cwd)
+}
+
+func composeChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd string) string {
 	if session == nil {
 		return ""
 	}
-	lines := make([]string, 0, 3)
+	lines := make([]string, 0, 6)
 	if base := strings.TrimSpace(session.SystemPromptText); base != "" {
 		lines = append(lines, base)
+	}
+	if context := strings.TrimSpace(runtimeprompt.RenderEnvironmentContextBlock(cwd)); context != "" {
+		lines = append(lines, "Environment context:\n"+context)
 	}
 	if guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidance()); guidance != "" {
 		lines = append(lines, guidance)

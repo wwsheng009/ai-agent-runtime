@@ -213,6 +213,12 @@ func TestComposeChatSystemPromptWithGuidance_IncludesParallelToolGuidance(t *tes
 	}
 
 	prompt := composeChatSystemPromptWithGuidance(session)
+	if !strings.Contains(prompt, "Environment context:") {
+		t.Fatalf("expected environment context heading, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "<current_date>") || !strings.Contains(prompt, "<timezone>") {
+		t.Fatalf("expected date and timezone context, got:\n%s", prompt)
+	}
 	if !strings.Contains(prompt, "Parallel tool guidance:") {
 		t.Fatalf("expected parallel tool guidance, got:\n%s", prompt)
 	}

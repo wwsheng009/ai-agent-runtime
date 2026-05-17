@@ -456,6 +456,8 @@ func TestSendHTTPRequest_FailFastCapturesRetryableResponse(t *testing.T) {
 func TestSanitizeHeadersForDebug_RedactsAuthorization(t *testing.T) {
 	header := http.Header{}
 	header.Set("Authorization", "Bearer sk-1234567890abcdef")
+	header.Set("X-Api-Key", "tp-1234567890abcdef")
+	header.Set("Anthropic-Api-Key", "sk-ant-1234567890")
 	header.Set("Content-Type", "application/json")
 
 	sanitized := sanitizeHeadersForDebug(header)
@@ -464,6 +466,12 @@ func TestSanitizeHeadersForDebug_RedactsAuthorization(t *testing.T) {
 	}
 	if !strings.Contains(sanitized["Authorization"][0], "***") {
 		t.Fatalf("expected redaction marker, got %q", sanitized["Authorization"][0])
+	}
+	if sanitized["X-Api-Key"][0] == header.Get("X-Api-Key") || !strings.Contains(sanitized["X-Api-Key"][0], "***") {
+		t.Fatalf("expected x-api-key to be redacted, got %q", sanitized["X-Api-Key"][0])
+	}
+	if sanitized["Anthropic-Api-Key"][0] == header.Get("Anthropic-Api-Key") || !strings.Contains(sanitized["Anthropic-Api-Key"][0], "***") {
+		t.Fatalf("expected anthropic-api-key to be redacted, got %q", sanitized["Anthropic-Api-Key"][0])
 	}
 	if sanitized["Content-Type"][0] != "application/json" {
 		t.Fatalf("unexpected content-type: %q", sanitized["Content-Type"][0])

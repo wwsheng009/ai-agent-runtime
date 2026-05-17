@@ -17,6 +17,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -343,6 +344,7 @@ func TestSyncAndRestoreChatTokenCountRoundTrip(t *testing.T) {
 	session := &ChatSession{
 		ProviderName:            "codex_ee",
 		Provider:                config.Provider{Protocol: "codex"},
+		Config:                  &config.Config{ConfigFilePath: filepath.Join(t.TempDir(), "config.yaml")},
 		Model:                   "gpt-5.2-code",
 		SessionManager:          manager,
 		RuntimeSession:          runtimeSession,
@@ -375,6 +377,12 @@ func TestSyncAndRestoreChatTokenCountRoundTrip(t *testing.T) {
 	}
 	if got, ok := runtimeSessionContextInt(cloned, chatRuntimeContextTurnContextTokenCount); !ok || got != 654 {
 		t.Fatalf("expected persisted turn context token count 654, got ok=%v value=%d", ok, got)
+	}
+	if got := runtimeSessionContextString(cloned, sessionmeta.ConfigFile); got != session.Config.ConfigFilePath {
+		t.Fatalf("expected persisted config file %q, got %q", session.Config.ConfigFilePath, got)
+	}
+	if got := runtimeSessionContextString(cloned, sessionmeta.LegacyAICLIConfigFile); got != session.Config.ConfigFilePath {
+		t.Fatalf("expected persisted legacy config file %q, got %q", session.Config.ConfigFilePath, got)
 	}
 
 	restored := &ChatSession{}
@@ -770,7 +778,7 @@ func TestBootstrapChatSession_UsesActorExecutorByDefault(t *testing.T) {
 	session, cleanup, err := bootstrapChatSession(cfg, &chatCommandOptions{
 		NoInteractive:            true,
 		OutputFormat:             "json",
-		DisableTools:             true,
+		DisableTools:             false,
 		SessionFeaturesRequested: true,
 	}, nil, &chatPersistenceState{
 		runtimeSessionManager: manager,
@@ -815,6 +823,56 @@ func TestBootstrapChatSession_UsesActorExecutorByDefault(t *testing.T) {
 	sessionHub := hostValue.FieldByName("SessionHub")
 	if !sessionHub.IsValid() || sessionHub.IsNil() {
 		t.Fatal("expected local runtime host to include SessionHub")
+	}
+}
+
+func TestBootstrapChatSession_DisableToolsUsesSharedExecutor(t *testing.T) {
+	cfg := &config.Config{}
+	manager, userID, dir, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	session, cleanup, err := bootstrapChatSession(cfg, &chatCommandOptions{
+		NoInteractive:            true,
+		OutputFormat:             "json",
+		DisableTools:             true,
+		SessionFeaturesRequested: true,
+	}, nil, &chatPersistenceState{
+		runtimeSessionManager: manager,
+		sessionUserID:         userID,
+		resolvedSessionDir:    dir,
+	}, &chatRuntimeState{
+		providerName:    "codex_ee",
+		provider:        config.Provider{Enabled: true, Protocol: "codex", BaseURL: "https://example.com"},
+		adapter:         &adapter.CodexAdapter{},
+		modelName:       "gpt-5.2-code",
+		reasoningEffort: "medium",
+		shouldStream:    false,
+		baseURL:         "https://example.com/v1/responses",
+		retryCfg:        defaultRetryConfig(),
+		requestTimeout:  15 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("bootstrapChatSession: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("expected cleanup function")
+	}
+	defer cleanup()
+
+	if session.ChatExecutor == nil {
+		t.Fatal("expected chat executor")
+	}
+	if got := reflect.TypeOf(session.ChatExecutor).String(); got != "*commands.aicliSharedChatExecutor" {
+		t.Fatalf("expected shared executor when tools are disabled, got %s", got)
+	}
+	if session.LocalRuntimeHost != nil {
+		t.Fatal("expected LocalRuntimeHost not to be initialized when tools are disabled")
+	}
+	if session.ActorFirstReady {
+		t.Fatal("expected ActorFirstReady to remain false when tools are disabled")
 	}
 }
 
@@ -1074,6 +1132,11 @@ func TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance(t *testing.T) {
 
 	for _, want := range []string{
 		"Base prompt.",
+		"Environment context:",
+		"<environment_context>",
+		"<cwd>E:\\projects\\ai\\ai-gateway</cwd>",
+		"<current_date>",
+		"<timezone>",
 		"Shell guidance:",
 		"Detected user shell:",
 		"File editing guidance:",

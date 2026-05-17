@@ -1,0 +1,11 @@
+interface:
+  display_name: "AICLI Bridge"
+  short_description: "Delegate bounded tasks to local aicli exec."
+  default_prompt: "Use $aicli to delegate a bounded task to the local aicli agent."
+dependencies:
+  tools:
+    - type: "tool"
+      value: "aicli_exec"
+      description: "Launches local aicli exec with argv/stdin execution."
+policy:
+  allow_implicit_invocation: true

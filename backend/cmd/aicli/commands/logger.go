@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type aicliLogScope struct {
@@ -65,7 +67,7 @@ type ChatLogger struct {
 
 // NewChatLogger 创建新的聊天日志记录器
 func NewChatLogger(provider, protocol, model string, stream bool, baseURL string) *ChatLogger {
-	sessionID := time.Now().Format("20060102_150405")
+	sessionID := newChatLogSessionID()
 	return &ChatLogger{
 		sessionID: sessionID,
 		logDir:    resolveDefaultChatLogDir(),
@@ -81,6 +83,14 @@ func NewChatLogger(provider, protocol, model string, stream bool, baseURL string
 		},
 		currentReqIndex: -1,
 	}
+}
+
+func newChatLogSessionID() string {
+	shortID := strings.ReplaceAll(uuid.NewString(), "-", "")
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	return time.Now().Format("20060102_150405.000") + "_" + shortID
 }
 
 // SetLogDir 设置日志保存目录

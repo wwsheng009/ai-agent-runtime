@@ -146,6 +146,80 @@ func TestSendMessage_DelegatesToSharedChatExecutor(t *testing.T) {
 	}
 }
 
+func TestSendMessage_FlushesChatLogOnExecutorError(t *testing.T) {
+	logger := NewChatLogger("test-provider", "test", "test-model", false, "https://example.com/v1/messages")
+	if err := logger.SetLogDir(t.TempDir()); err != nil {
+		t.Fatalf("SetLogDir: %v", err)
+	}
+
+	executor := &fakeChatExecutor{
+		onCall: func(ctx context.Context, session *ChatSession, prompt string) (string, error) {
+			session.Logger.LogRequest(aicliLogScope{TurnID: "turn-0001", RequestID: "turn-0001-req-01"}, map[string]interface{}{
+				"url": "https://example.com/v1/messages",
+			})
+			session.Logger.LogResponse(aicliLogScope{TurnID: "turn-0001", RequestID: "turn-0001-req-01"}, nil, []byte("404 page not found"), false, fmt.Errorf("HTTP 404"), 12)
+			return "", fmt.Errorf("HTTP 404: 404 page not found")
+		},
+	}
+	session := &ChatSession{
+		Provider:      config.Provider{Protocol: "anthropic"},
+		cancelCtx:     context.Background(),
+		ChatExecutor:  executor,
+		Logger:        logger,
+		NoInteractive: true,
+	}
+
+	_, err := sendMessage(session, "trigger failure")
+	if err == nil {
+		t.Fatal("expected sendMessage error")
+	}
+
+	raw, readErr := os.ReadFile(logger.SessionLogPath())
+	if readErr != nil {
+		t.Fatalf("expected chat log to be flushed on error: %v", readErr)
+	}
+	if !strings.Contains(string(raw), "404 page not found") {
+		t.Fatalf("expected flushed chat log to include response body, got %s", raw)
+	}
+	if !strings.Contains(string(raw), "HTTP 404") {
+		t.Fatalf("expected flushed chat log to include response error, got %s", raw)
+	}
+}
+
+func TestSendMessage_RecordsActorExecutorErrorWhenNoProviderLogExists(t *testing.T) {
+	logger := NewChatLogger("test-provider", "test", "test-model", false, "https://example.com/v1/messages")
+	if err := logger.SetLogDir(t.TempDir()); err != nil {
+		t.Fatalf("SetLogDir: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:  "test-provider",
+		Provider:      config.Provider{Protocol: "anthropic"},
+		Model:         "test-model",
+		BaseURL:       "https://example.com/v1/messages",
+		cancelCtx:     context.Background(),
+		ChatExecutor:  &fakeChatExecutor{err: fmt.Errorf(`HTTP 401: {"code":"INVALID_API_KEY","message":"Invalid API key"}`)},
+		Logger:        logger,
+		NoInteractive: true,
+	}
+
+	_, err := sendMessage(session, "trigger actor failure")
+	if err == nil {
+		t.Fatal("expected sendMessage error")
+	}
+
+	raw, readErr := os.ReadFile(logger.SessionLogPath())
+	if readErr != nil {
+		t.Fatalf("expected chat log to be flushed on actor error: %v", readErr)
+	}
+	if !strings.Contains(string(raw), "INVALID_API_KEY") {
+		t.Fatalf("expected flushed chat log to include actor error, got %s", raw)
+	}
+	if !strings.Contains(string(raw), "trigger actor failure") {
+		t.Fatalf("expected flushed chat log to include prompt, got %s", raw)
+	}
+}
+
 func TestAICLISharedChatExecutor_SyncsRuntimeSessionFromSharedCoreHistory(t *testing.T) {
 	originalExecute := executeToolLoop
 	defer func() {
@@ -931,6 +1005,87 @@ func TestSendMessage_UsesActorFirstExecutorWhenLocalHostAvailable(t *testing.T) 
 	}
 	if got := ensureChatExecutor(session); got == nil {
 		t.Fatal("expected actor executor to be installed")
+	}
+}
+
+func TestSendMessage_ActorFirstPreservesConfiguredMimoModel(t *testing.T) {
+	manager, userID, dir, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+		DefaultProvider: "mimo_anthropic",
+		DefaultModel:    "mimo-v2.5-pro",
+	})
+	provider := &staticProvider{name: "mimo_anthropic", content: "actor output"}
+	if err := llmRuntime.RegisterProvider("mimo_anthropic", provider); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+	if err := llmRuntime.RegisterProviderAlias("mimo-v2.5-pro", "mimo_anthropic"); err != nil {
+		t.Fatalf("RegisterProviderAlias: %v", err)
+	}
+
+	host := &localChatRuntimeHost{
+		EventBus:     runtimeevents.NewBusWithRetention(16),
+		SessionStore: manager.GetStorage(),
+		SessionUser:  userID,
+	}
+	host.SessionHub = runtimechat.NewSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
+		runtimeStore := runtimechat.NewInMemoryRuntimeStore(32)
+		a := agent.NewAgentWithLLM(&agent.Config{
+			Name:     "actor-mimo-model-test",
+			Provider: "mimo_anthropic",
+			Model:    "mimo-v2.5-pro",
+			MaxSteps: 2,
+		}, nil, llmRuntime)
+		a.SetToolExecutionPolicy(runtimepolicy.NewToolExecutionPolicy(nil, false))
+		return runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
+			Agent:        a,
+			LLMRuntime:   llmRuntime,
+			SessionStore: manager.GetStorage(),
+			StateStore:   runtimeStore,
+			EventStore:   runtimeStore,
+			EventBus:     host.EventBus,
+		})
+	})
+
+	session := &ChatSession{
+		ProviderName:     "mimo_anthropic",
+		Provider:         config.Provider{Protocol: "anthropic"},
+		Model:            "mimo-v2.5-pro",
+		cancelCtx:        context.Background(),
+		NoInteractive:    true,
+		SessionManager:   manager,
+		RuntimeSession:   runtimeSession,
+		SessionUserID:    userID,
+		SessionDir:       dir,
+		LocalRuntimeHost: host,
+		ActorFirstReady:  true,
+	}
+	host.BaseSession = session
+
+	response, err := sendMessage(session, "查看当前日期")
+	if err != nil {
+		t.Fatalf("sendMessage failed: %v", err)
+	}
+	if response != "actor output" {
+		t.Fatalf("unexpected response: %q", response)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one provider request, got %d", len(provider.requests))
+	}
+	if provider.requests[0].Provider != "mimo_anthropic" {
+		t.Fatalf("expected provider mimo_anthropic, got %q", provider.requests[0].Provider)
+	}
+	if provider.requests[0].Model != "mimo-v2.5-pro" {
+		t.Fatalf("expected model mimo-v2.5-pro, got %q", provider.requests[0].Model)
 	}
 }
 
@@ -2387,15 +2542,22 @@ func TestCountSharedChatMessagesTokens_IncludesToolCallPayloads(t *testing.T) {
 }
 
 type staticProvider struct {
-	name    string
-	content string
+	name     string
+	content  string
+	requests []runtimellm.LLMRequest
 }
 
 func (p *staticProvider) Name() string { return p.name }
 func (p *staticProvider) Call(ctx context.Context, req *runtimellm.LLMRequest) (*runtimellm.LLMResponse, error) {
+	if req != nil {
+		p.requests = append(p.requests, *req)
+	}
 	return &runtimellm.LLMResponse{Content: p.content, Model: req.Model}, nil
 }
 func (p *staticProvider) Stream(ctx context.Context, req *runtimellm.LLMRequest) (<-chan runtimellm.StreamChunk, error) {
+	if req != nil {
+		p.requests = append(p.requests, *req)
+	}
 	ch := make(chan runtimellm.StreamChunk)
 	close(ch)
 	return ch, nil

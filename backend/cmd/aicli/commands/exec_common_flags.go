@@ -32,6 +32,7 @@ func registerExecSharedFlags(cmd *cobra.Command, exclude map[string]bool) {
 	flags.Bool("envelope", false, "JSON 输出使用 envelope 结构")
 
 	flags.Bool("ephemeral", false, "不持久化会话文件")
+	flags.String("log-dir", ResolveDefaultChatLogDir(), "保存会话日志到指定目录")
 	flags.String("session-dir", "", "chat 会话持久化目录")
 	flags.String("user", "", "chat 会话用户 ID")
 	if !has("title") {
@@ -48,6 +49,7 @@ func registerExecSharedFlags(cmd *cobra.Command, exclude map[string]bool) {
 	flags.Bool("yolo", false, "快捷模式：等价于 --permission-mode bypass_permissions")
 
 	flags.Bool("disable-tools", false, "禁用 tools/skills 暴露")
+	flags.Bool("enable-tools", false, "显式启用 tools/skills 暴露；aicli exec 默认关闭 tools 以避免 headless 审批阻塞，--yolo 会自动启用")
 	flags.StringSlice("skills-dir", nil, "附加外部 skills 目录（可重复指定）")
 	flags.Int("skills-top-k", 0, "暴露给模型的候选 skills 数量（0=使用配置默认值）")
 	flags.String("skills-mode", "auto", "skills 暴露模式（auto|prefer|only）")

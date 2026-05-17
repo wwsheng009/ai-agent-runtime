@@ -29,6 +29,7 @@ type ExecOptions struct {
 	JSONEnvelope  bool
 
 	Ephemeral      bool
+	LogDir         string
 	SessionDir     string
 	SessionUser    string
 	SessionTitle   string
@@ -41,6 +42,7 @@ type ExecOptions struct {
 	YoloMode       bool
 
 	DisableTools   bool
+	EnableTools    bool
 	CLISkillDirs   []string
 	CLISkillsTopK  int
 	CLISkillsMode  string

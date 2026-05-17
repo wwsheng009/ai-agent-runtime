@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -47,6 +48,59 @@ func (f *fakeSkillExecutor) Execute(_ context.Context, skill *runtimeskill.Skill
 	f.lastSkill = skill
 	f.lastReq = req
 	return f.result, nil
+}
+
+type recordingAICLIBridgeMCP struct {
+	callCount int
+	lastMCP   string
+	lastTool  string
+	lastArgs  map[string]interface{}
+}
+
+func (m *recordingAICLIBridgeMCP) FindTool(toolName string) (runtimeskill.ToolInfo, error) {
+	if toolName != aicliExecToolName {
+		return runtimeskill.ToolInfo{}, fmt.Errorf("tool not found: %s", toolName)
+	}
+	return runtimeskill.ToolInfo{
+		Name:        aicliExecToolName,
+		Description: "test aicli exec",
+		MCPName:     "toolkit",
+		Enabled:     true,
+	}, nil
+}
+
+func (m *recordingAICLIBridgeMCP) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
+	m.callCount++
+	m.lastMCP = mcpName
+	m.lastTool = toolName
+	m.lastArgs = cloneFunctionSchema(args)
+	return "AICLI_EXEC_OK", nil
+}
+
+func (m *recordingAICLIBridgeMCP) ListTools() []runtimeskill.ToolInfo {
+	return []runtimeskill.ToolInfo{{
+		Name:        aicliExecToolName,
+		Description: "test aicli exec",
+		MCPName:     "toolkit",
+		Enabled:     true,
+	}}
+}
+
+func newAICLIExecBridgeSummaryForTest(name string) *runtimeskill.SkillSummary {
+	return &runtimeskill.SkillSummary{
+		Name:        name,
+		Description: "AICLI exec bridge",
+		Codex: &runtimeskill.CodexSkillMetadata{
+			Name:        name,
+			Description: "AICLI exec bridge",
+			Dependencies: &runtimeskill.CodexSkillDependencies{
+				Tools: []runtimeskill.CodexSkillToolDependency{{
+					Type:  "tool",
+					Value: aicliExecToolName,
+				}},
+			},
+		},
+	}
 }
 
 func TestBuildSkillFunctionName(t *testing.T) {
@@ -296,6 +350,116 @@ func TestSkillFunctionExecute_UsesLazyResolverWhenPresent(t *testing.T) {
 	}
 	if executor.lastSkill == nil || executor.lastSkill.Name != "abap_search_resolved" {
 		t.Fatalf("expected resolved skill to be passed to executor, got %#v", executor.lastSkill)
+	}
+}
+
+func TestSkillFunctionExecute_DirectToolBridgeUsesDeclaredAICLIExecTool(t *testing.T) {
+	mcp := &recordingAICLIBridgeMCP{}
+	summary := newAICLIExecBridgeSummaryForTest("renamed-agent")
+	skillItem := summary.ToSkillStub()
+	attachDirectToolBridgeSkillHandler(summary, skillItem, mcp)
+	fn := &SkillFunction{
+		functionName: buildSkillFunctionName("renamed-agent"),
+		skill:        skillItem,
+		executor:     runtimeskill.NewExecutor(nil, mcp, nil),
+	}
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"prompt": "查看时间",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output != "AICLI_EXEC_OK" {
+		t.Fatalf("unexpected output: %s", output)
+	}
+	if mcp.callCount != 1 {
+		t.Fatalf("expected aicli_exec to be called once, got %d", mcp.callCount)
+	}
+	if mcp.lastTool != aicliExecToolName {
+		t.Fatalf("expected %s tool, got %s", aicliExecToolName, mcp.lastTool)
+	}
+	if mcp.lastArgs["prompt"] != "查看时间" {
+		t.Fatalf("unexpected prompt arg: %#v", mcp.lastArgs["prompt"])
+	}
+	if mcp.lastArgs["disable_tools"] != true {
+		t.Fatalf("expected disable_tools=true by default, got %#v", mcp.lastArgs["disable_tools"])
+	}
+	if mcp.lastArgs["output"] != "text" {
+		t.Fatalf("expected text output by default, got %#v", mcp.lastArgs["output"])
+	}
+	if mcp.lastArgs["timeout"] != directBridgeTimeout {
+		t.Fatalf("expected default timeout %s, got %#v", directBridgeTimeout, mcp.lastArgs["timeout"])
+	}
+	for _, forbidden := range []string{"config", "provider", "model"} {
+		if _, ok := mcp.lastArgs[forbidden]; ok {
+			t.Fatalf("expected no implicit %s to be injected into aicli_exec args: %#v", forbidden, mcp.lastArgs)
+		}
+	}
+}
+
+func TestSkillFunctionExecute_DirectToolBridgePreservesHandlerAfterLazyResolve(t *testing.T) {
+	mcp := &recordingAICLIBridgeMCP{}
+	summary := newAICLIExecBridgeSummaryForTest("renamed-agent")
+	skillItem := summary.ToSkillStub()
+	attachDirectToolBridgeSkillHandler(summary, skillItem, mcp)
+	fn := &SkillFunction{
+		functionName: buildSkillFunctionName("renamed-agent"),
+		skill:        skillItem,
+		skillResolver: func() (*runtimeskill.Skill, error) {
+			return &runtimeskill.Skill{
+				Name:        "renamed-agent",
+				Description: "AICLI bridge loaded from SKILL.md",
+			}, nil
+		},
+		executor: runtimeskill.NewExecutor(nil, mcp, nil),
+	}
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"prompt": "查看时间",
+		"options": map[string]interface{}{
+			"timeout":         "5s",
+			"request-timeout": "4s",
+			"provider":        "explicit_provider",
+			"model":           "explicit_model",
+			"log-dir":         `E:\logs\aicli-child`,
+			"session-dir":     `E:\sessions\aicli-child`,
+			"user":            "tester",
+			"title":           "direct bridge run",
+			"debug-http":      true,
+			"fail-fast":       true,
+			"ignored":         "not forwarded",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output != "AICLI_EXEC_OK" {
+		t.Fatalf("unexpected output: %s", output)
+	}
+	if mcp.callCount != 1 {
+		t.Fatalf("expected resolver-preserved handler to call aicli_exec once, got %d", mcp.callCount)
+	}
+	if mcp.lastArgs["timeout"] != "5s" {
+		t.Fatalf("expected explicit timeout option, got %#v", mcp.lastArgs["timeout"])
+	}
+	if mcp.lastArgs["request_timeout"] != "4s" {
+		t.Fatalf("expected hyphenated request-timeout option to normalize, got %#v", mcp.lastArgs["request_timeout"])
+	}
+	if mcp.lastArgs["provider"] != "explicit_provider" || mcp.lastArgs["model"] != "explicit_model" {
+		t.Fatalf("expected explicit provider/model options to be forwarded, got %#v", mcp.lastArgs)
+	}
+	if mcp.lastArgs["log_dir"] != `E:\logs\aicli-child` || mcp.lastArgs["session_dir"] != `E:\sessions\aicli-child` {
+		t.Fatalf("expected log/session directory options to be forwarded, got %#v", mcp.lastArgs)
+	}
+	if mcp.lastArgs["user"] != "tester" || mcp.lastArgs["title"] != "direct bridge run" {
+		t.Fatalf("expected user/title options to be forwarded, got %#v", mcp.lastArgs)
+	}
+	if mcp.lastArgs["debug_http"] != true || mcp.lastArgs["fail_fast"] != true {
+		t.Fatalf("expected debug options to be forwarded, got %#v", mcp.lastArgs)
+	}
+	if _, ok := mcp.lastArgs["ignored"]; ok {
+		t.Fatalf("unexpected unsupported option forwarded: %#v", mcp.lastArgs)
 	}
 }
 

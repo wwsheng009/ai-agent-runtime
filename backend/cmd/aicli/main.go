@@ -203,6 +203,14 @@ func main() {
 		return cfg
 	}))
 
+	// doctor 诊断子命令
+	rootCmd.AddCommand(commands.NewDoctorCommand(func() *config.Config {
+		return cfg
+	}))
+
+	// skill 管理子命令
+	rootCmd.AddCommand(commands.NewSkillCommand())
+
 	// image 子命令
 	rootCmd.AddCommand(commands.NewImageCommand(func() *config.Config {
 		return cfg
@@ -391,8 +399,14 @@ func shouldBootstrapConfigForCommand(cmd *cobra.Command, args []string) bool {
 	}
 	name := strings.ToLower(strings.TrimSpace(cmd.Name()))
 	switch name {
-	case "", "aicli", "help", "init", "version":
+	case "", "aicli", "help", "init", "version", "skill", "skills":
 		return false
+	}
+	for current := cmd; current != nil; current = current.Parent() {
+		switch strings.ToLower(strings.TrimSpace(current.Name())) {
+		case "skill", "skills":
+			return false
+		}
 	}
 	if len(args) == 0 && cmd.Parent() == nil {
 		return false

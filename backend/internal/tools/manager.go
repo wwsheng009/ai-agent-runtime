@@ -280,6 +280,7 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	// Ignore duplicates; registry will reject with error.
 	register(tools.NewBashTool())
 	register(tools.NewExecuteShellCommandTool())
+	register(tools.NewAICLIExecTool())
 	register(tools.NewApplyPatchTool())
 	register(tools.NewViewTool())
 	register(tools.NewEditTool())

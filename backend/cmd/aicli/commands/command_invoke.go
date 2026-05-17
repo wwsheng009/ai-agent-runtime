@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
@@ -77,6 +78,7 @@ func handleDirectSkillCommand(session *ChatSession, command string) bool {
 		return false
 	}
 
+	renderDirectSkillInvocationStarted(session, command, requestedName, resolvedName, args, jsonOutput)
 	report, err := executeDirectFunction(session, requestedName, resolvedName, args)
 	if err != nil {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
@@ -314,24 +316,273 @@ func executeDirectFunction(session *ChatSession, requestedName, functionName str
 	}
 	ctx = generatedImageToolContext(ctx, session)
 
+	scope, toolCallID, startedAt, shouldLog := beginDirectFunctionExecutionLog(session, requestedName, functionName, args)
 	output, metadata, err := catalog.Registry().ExecuteFunctionWithMeta(ctx, functionName, args)
 	if err != nil {
+		finishDirectFunctionExecutionLog(session, scope, toolCallID, functionName, output, metadata, err, startedAt, shouldLog)
 		return nil, err
 	}
 	if strings.HasPrefix(functionName, skillFunctionPrefix) {
 		normalizedOutput, normalizedMeta, normalizeErr := normalizeDirectSkillCommandResult(output, metadata)
 		if normalizeErr != nil {
+			finishDirectFunctionExecutionLog(session, scope, toolCallID, functionName, normalizedOutput, normalizedMeta, normalizeErr, startedAt, shouldLog)
 			return nil, normalizeErr
 		}
 		output = normalizedOutput
 		metadata = normalizedMeta
 	}
+	finishDirectFunctionExecutionLog(session, scope, toolCallID, functionName, output, metadata, nil, startedAt, shouldLog)
 	return &directFunctionInvokeReport{
 		RequestedName: requestedName,
 		FunctionName:  functionName,
 		Output:        output,
 		Metadata:      metadata,
 	}, nil
+}
+
+func renderDirectSkillInvocationStarted(session *ChatSession, command, requestedName, functionName string, args map[string]interface{}, jsonOutput bool) {
+	if jsonOutput || session == nil || session.NoInteractive || session.JSONOutput {
+		return
+	}
+	lines := []string{}
+	if preview := compactDirectCommandPreview(command); preview != "" {
+		lines = append(lines, prefixExecutionBullet("Running "+preview))
+	} else {
+		lines = append(lines, prefixExecutionBullet(fmt.Sprintf("Running /skill %s", strings.TrimSpace(requestedName))))
+	}
+	if bridgePreview := directSkillBridgeCommandPreview(session, functionName, args); bridgePreview != "" {
+		lines = append(lines, "  "+bridgePreview)
+	}
+	renderDirectInvocationLine(session, strings.Join(lines, "\n"))
+}
+
+func renderDirectInvocationLine(session *ChatSession, line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	if session != nil && session.Interaction != nil && !session.NoInteractive && !session.JSONOutput {
+		session.Interaction.RenderAsyncLine(line)
+		return
+	}
+	fmt.Println(line)
+}
+
+func compactDirectCommandPreview(command string) string {
+	command = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(command, "\r", " "), "\n", " "))
+	if command == "" {
+		return ""
+	}
+	return truncateChatRuntimeText(command, 240)
+}
+
+func directSkillBridgeCommandPreview(session *ChatSession, functionName string, args map[string]interface{}) string {
+	catalog := ensureFunctionCatalog(session)
+	if catalog == nil {
+		return ""
+	}
+	catalog.syncFromRegistry()
+	entry := catalog.entries[strings.TrimSpace(functionName)]
+	if entry == nil || entry.fn == nil {
+		return ""
+	}
+	skillFn, ok := entry.fn.(*SkillFunction)
+	if !ok || skillFn == nil {
+		return ""
+	}
+	toolName := resolveDirectToolBridgeName(skillFn.summary, skillFn.skill)
+	if !strings.EqualFold(toolName, aicliExecToolName) {
+		return ""
+	}
+	toolArgs := buildDirectToolBridgeArgsFromPromptOptions(toolName, resolveSkillPrompt(args), extractMapArg(args, "options"))
+	return renderAICLIExecCommandPreview(toolArgs)
+}
+
+func renderAICLIExecCommandPreview(args map[string]interface{}) string {
+	if len(args) == 0 {
+		return ""
+	}
+	parts := []string{"aicli"}
+	if value := directPreviewStringArg(args, "config"); value != "" {
+		parts = append(parts, "--config", quoteDirectCommandArg(value))
+	}
+	if directPreviewBoolArg(args, "envelope") {
+		parts = append(parts, "--envelope")
+	}
+	parts = append(parts, "exec")
+	for _, item := range []struct {
+		key  string
+		flag string
+	}{
+		{"provider", "--provider"},
+		{"model", "--model"},
+		{"profile", "--profile"},
+		{"agent", "--agent"},
+		{"log_dir", "--log-dir"},
+		{"session_dir", "--session-dir"},
+		{"user", "--user"},
+		{"title", "--title"},
+		{"output", "--output"},
+		{"permission_mode", "--permission-mode"},
+		{"skills_mode", "--skills-mode"},
+		{"request_timeout", "--request-timeout"},
+	} {
+		if value := directPreviewStringArg(args, item.key); value != "" {
+			parts = append(parts, item.flag, quoteDirectCommandArg(value))
+		}
+	}
+	for _, dir := range directPreviewStringListArg(args, "skills_dir") {
+		parts = append(parts, "--skills-dir", quoteDirectCommandArg(dir))
+	}
+	for _, item := range []struct {
+		key  string
+		flag string
+	}{
+		{"json", "--json"},
+		{"disable_tools", "--disable-tools"},
+		{"yolo", "--yolo"},
+		{"debug_http", "--debug-http"},
+		{"fail_fast", "--fail-fast"},
+	} {
+		if directPreviewBoolArg(args, item.key) {
+			parts = append(parts, item.flag)
+		}
+	}
+	if value := directPreviewStringArg(args, "timeout"); value != "" {
+		parts = append(parts, "--timeout", quoteDirectCommandArg(value))
+	} else if value := directPreviewStringArg(args, "timeout_ms"); value != "" {
+		parts = append(parts, "--timeout", quoteDirectCommandArg(directPreviewTimeoutMS(value)))
+	}
+	return truncateChatRuntimeText(strings.Join(parts, " ")+" <prompt via stdin>", 240)
+}
+
+func directPreviewTimeoutMS(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return value
+		}
+	}
+	return value + "ms"
+}
+
+func directPreviewStringArg(args map[string]interface{}, key string) string {
+	if args == nil {
+		return ""
+	}
+	value, ok := args[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	default:
+		return ""
+	}
+}
+
+func directPreviewBoolArg(args map[string]interface{}, key string) bool {
+	if args == nil {
+		return false
+	}
+	value, ok := args[key]
+	if !ok || value == nil {
+		return false
+	}
+	typed, ok := value.(bool)
+	return ok && typed
+}
+
+func directPreviewStringListArg(args map[string]interface{}, key string) []string {
+	if args == nil {
+		return nil
+	}
+	value, ok := args[key]
+	if !ok || value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if item = strings.TrimSpace(item); item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				if text = strings.TrimSpace(text); text != "" {
+					out = append(out, text)
+				}
+			}
+		}
+		return out
+	default:
+		if text := directPreviewStringArg(args, key); text != "" {
+			return []string{text}
+		}
+		return nil
+	}
+}
+
+func quoteDirectCommandArg(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return `""`
+	}
+	if !strings.ContainsAny(value, " \t\r\n\"") {
+		return value
+	}
+	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+}
+
+func beginDirectFunctionExecutionLog(session *ChatSession, requestedName, functionName string, args map[string]interface{}) (aicliLogScope, string, time.Time, bool) {
+	startedAt := time.Now()
+	if session == nil || session.Logger == nil {
+		return aicliLogScope{}, "", startedAt, false
+	}
+	requestID := fmt.Sprintf("direct-%d", startedAt.UnixNano())
+	scope := aicliLogScope{
+		TurnID:    "direct",
+		RequestID: requestID,
+	}
+	toolCallID := requestID + "-call-01"
+	session.Logger.LogToolCall(scope, toolCallID, functionName, map[string]interface{}{
+		"requested_name": requestedName,
+		"function_name":  functionName,
+		"args":           cloneFunctionSchema(args),
+		"direct_command": true,
+	})
+	writeSessionDebugInfo(session, fmt.Sprintf("[direct-function] start requested=%q function=%q", requestedName, functionName), false)
+	return scope, toolCallID, startedAt, true
+}
+
+func finishDirectFunctionExecutionLog(session *ChatSession, scope aicliLogScope, toolCallID, functionName, output string, metadata map[string]interface{}, err error, startedAt time.Time, shouldLog bool) {
+	if !shouldLog || session == nil || session.Logger == nil {
+		return
+	}
+	durationMs := time.Since(startedAt).Milliseconds()
+	result := toolExecutionLogPayload(output, metadata)
+	session.Logger.LogToolResult(scope, toolCallID, functionName, result, err)
+	message := fmt.Sprintf("[direct-function] finish function=%q duration_ms=%d output_bytes=%d", functionName, durationMs, len(output))
+	if err != nil {
+		message += fmt.Sprintf(" error=%q", err.Error())
+	}
+	writeSessionDebugInfo(session, message, false)
+	if flushErr := session.Logger.FlushSession(); flushErr != nil {
+		writeSessionDebugInfo(session, fmt.Sprintf("[direct-function] flush failed function=%q error=%q", functionName, flushErr.Error()), false)
+	}
 }
 
 type directSkillCommandEnvelope struct {

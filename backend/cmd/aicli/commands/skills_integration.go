@@ -26,6 +26,8 @@ const (
 	skillExposureAuto     = "auto"
 	skillExposurePrefer   = "prefer"
 	skillExposureOnly     = "only"
+	aicliExecToolName     = "aicli_exec"
+	directBridgeTimeout   = "2m"
 )
 
 type skillExecutor interface {
@@ -370,6 +372,12 @@ func (f *SkillFunction) Execute(ctx context.Context, args map[string]interface{}
 			return "", err
 		}
 		if resolved != nil {
+			if resolved.Handler == nil && skillItem != nil && skillItem.Handler != nil {
+				resolved.Handler = skillItem.Handler
+			}
+			if len(resolved.Tools) == 0 && skillItem != nil && len(skillItem.Tools) > 0 {
+				resolved.Tools = append([]string(nil), skillItem.Tools...)
+			}
 			skillItem = resolved
 		}
 	}
@@ -464,6 +472,224 @@ func (f *SkillFunction) metadata() runtimetypes.Metadata {
 	return metadata.Clone()
 }
 
+func attachDirectToolBridgeSkillHandler(summary *runtimeskill.SkillSummary, skillItem *runtimeskill.Skill, mcpRuntime runtimeskill.MCPManager) {
+	toolName := resolveDirectToolBridgeName(summary, skillItem)
+	if toolName == "" {
+		return
+	}
+	handler := newDirectToolBridgeSkillHandler(toolName, mcpRuntime)
+	if skillItem != nil {
+		skillItem.Handler = handler
+		skillItem.Tools = appendUniqueCaseInsensitive(skillItem.Tools, toolName)
+	}
+	if summary != nil {
+		summary.Handler = handler
+		summary.Tools = appendUniqueCaseInsensitive(summary.Tools, toolName)
+	}
+}
+
+func resolveDirectToolBridgeName(summary *runtimeskill.SkillSummary, skillItem *runtimeskill.Skill) string {
+	if summary != nil {
+		if toolName := directToolBridgeNameFromCodex(summary.Codex); toolName != "" {
+			return toolName
+		}
+	}
+	if skillItem != nil {
+		if toolName := directToolBridgeNameFromCodex(skillItem.Codex); toolName != "" {
+			return toolName
+		}
+	}
+	return ""
+}
+
+func directToolBridgeNameFromCodex(metadata *runtimeskill.CodexSkillMetadata) string {
+	if metadata == nil || metadata.Dependencies == nil {
+		return ""
+	}
+	for _, dependency := range metadata.Dependencies.Tools {
+		if !isDirectToolBridgeDependency(dependency) {
+			continue
+		}
+		if value := strings.TrimSpace(dependency.Value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func isDirectToolBridgeDependency(dependency runtimeskill.CodexSkillToolDependency) bool {
+	kind := strings.ToLower(strings.TrimSpace(dependency.Type))
+	switch kind {
+	case "tool", "local_tool", "runtime_tool":
+		return strings.TrimSpace(dependency.Value) != ""
+	case "mcp":
+		transport := strings.ToLower(strings.TrimSpace(dependency.Transport))
+		return transport == "local_tool" || transport == "runtime_tool"
+	default:
+		return false
+	}
+}
+
+func newDirectToolBridgeSkillHandler(toolName string, mcpRuntime runtimeskill.MCPManager) runtimeskill.SkillHandler {
+	toolName = strings.TrimSpace(toolName)
+	return runtimeskill.SkillHandlerFunc(func(ctx interface{}, req *runtimetypes.Request) (*runtimetypes.Result, error) {
+		if req == nil || strings.TrimSpace(req.Prompt) == "" {
+			return nil, fmt.Errorf("prompt 参数不能为空")
+		}
+		if toolName == "" {
+			return nil, fmt.Errorf("direct tool bridge 未声明工具名称")
+		}
+		if mcpRuntime == nil {
+			return nil, fmt.Errorf("direct tool bridge 需要 %s 工具，但当前工具运行时未初始化", toolName)
+		}
+
+		callCtx := context.Background()
+		if typedCtx, ok := ctx.(context.Context); ok && typedCtx != nil {
+			callCtx = typedCtx
+		}
+		toolInfo, err := mcpRuntime.FindTool(toolName)
+		if err != nil {
+			return nil, fmt.Errorf("direct tool bridge 需要 %s 工具，但当前工具不可用: %w", toolName, err)
+		}
+
+		args := buildDirectToolBridgeArgs(toolName, req)
+		observation := runtimetypes.NewObservation(toolName, toolName).WithInput(args)
+		output, metadata, err := callDirectToolBridgeTool(callCtx, mcpRuntime, toolInfo.MCPName, toolName, args)
+		outputText := stringifySkillToolOutput(output)
+		observation.WithOutput(output)
+		if len(metadata) > 0 {
+			observation.WithMetric("metadata", cloneFunctionSchema(metadata))
+		}
+		if err != nil {
+			observation.MarkFailure(err.Error())
+			return &runtimetypes.Result{
+				Success:      false,
+				Output:       outputText,
+				Error:        err.Error(),
+				Observations: []runtimetypes.Observation{*observation},
+			}, nil
+		}
+		observation.MarkSuccess()
+		return &runtimetypes.Result{
+			Success:      true,
+			Output:       outputText,
+			Observations: []runtimetypes.Observation{*observation},
+		}, nil
+	})
+}
+
+func buildDirectToolBridgeArgs(toolName string, req *runtimetypes.Request) map[string]interface{} {
+	prompt := ""
+	options := map[string]interface{}{}
+	if req != nil {
+		prompt = req.Prompt
+		options = req.Options
+	}
+	return buildDirectToolBridgeArgsFromPromptOptions(toolName, prompt, options)
+}
+
+func buildDirectToolBridgeArgsFromPromptOptions(toolName, prompt string, options map[string]interface{}) map[string]interface{} {
+	args := map[string]interface{}{
+		"prompt": strings.TrimSpace(prompt),
+	}
+	if strings.EqualFold(toolName, aicliExecToolName) {
+		args["disable_tools"] = true
+		args["output"] = "text"
+		args["timeout"] = directBridgeTimeout
+	}
+	for key, value := range options {
+		normalizedKey := normalizeDirectToolBridgeOptionKey(key)
+		if normalizedKey == "" || normalizedKey == "prompt" {
+			continue
+		}
+		if !isAllowedDirectToolBridgeOption(toolName, normalizedKey) {
+			continue
+		}
+		args[normalizedKey] = cloneSkillContextValue(value)
+	}
+	return args
+}
+
+func callDirectToolBridgeTool(ctx context.Context, mcpRuntime runtimeskill.MCPManager, mcpName, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
+	if rich, ok := mcpRuntime.(interface {
+		CallToolWithMeta(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error)
+	}); ok {
+		return rich.CallToolWithMeta(ctx, mcpName, toolName, args)
+	}
+	output, err := mcpRuntime.CallTool(ctx, mcpName, toolName, args)
+	return output, nil, err
+}
+
+func stringifySkillToolOutput(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	if data, err := json.Marshal(value); err == nil {
+		return string(data)
+	}
+	return fmt.Sprint(value)
+}
+
+func normalizeDirectToolBridgeOptionKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.ReplaceAll(key, "-", "_")
+	return key
+}
+
+func isAllowedDirectToolBridgeOption(toolName, key string) bool {
+	if !strings.EqualFold(toolName, aicliExecToolName) {
+		return true
+	}
+	switch key {
+	case "cwd",
+		"config",
+		"provider",
+		"model",
+		"profile",
+		"agent",
+		"log_dir",
+		"session_dir",
+		"user",
+		"title",
+		"output",
+		"json",
+		"envelope",
+		"disable_tools",
+		"permission_mode",
+		"yolo",
+		"skills_dir",
+		"skills_mode",
+		"timeout",
+		"timeout_ms",
+		"request_timeout",
+		"debug_http",
+		"fail_fast",
+		"executable_path",
+		"allow_nested",
+		"output_bytes_cap",
+		"disable_output_cap":
+		return true
+	default:
+		return false
+	}
+}
+
+func appendUniqueCaseInsensitive(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if strings.EqualFold(strings.TrimSpace(existing), value) {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
 func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *runtimetools.Manager, cliSkillDirs []string, cliSkillsTopK int, cliSkillsMode string) (*skillsRuntimeBinding, error) {
 	catalog := ensureFunctionCatalog(session)
 	if cfg == nil || session == nil || catalog == nil || catalog.Registry() == nil {
@@ -550,6 +776,7 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 		}
 		summaryRef := summaryItem
 		skillRef := summaryRef.ToSkillStub()
+		attachDirectToolBridgeSkillHandler(summaryRef, skillRef, mcpRuntime)
 		skillName := summaryRef.Name
 		sourcePath := ""
 		if summaryRef.Source != nil {
@@ -573,6 +800,12 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 					loaded.SetSource(sourcePath, sourceDir, sourceLayer)
 					if promptPath != "" {
 						loaded.SetPromptSource(promptPath)
+					}
+					if loaded.Handler == nil && skillRef != nil && skillRef.Handler != nil {
+						loaded.Handler = skillRef.Handler
+					}
+					if len(loaded.Tools) == 0 && skillRef != nil && len(skillRef.Tools) > 0 {
+						loaded.Tools = append([]string(nil), skillRef.Tools...)
 					}
 				}
 				return loaded, nil

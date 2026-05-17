@@ -355,9 +355,13 @@ func sanitizeHeadersForDebug(header http.Header) map[string][]string {
 	sanitized := make(map[string][]string, len(header))
 	for key, values := range header {
 		copied := append([]string(nil), values...)
-		if strings.EqualFold(key, "Authorization") {
+		if isSensitiveHeaderForDebug(key) {
 			for i, value := range copied {
-				copied[i] = redactAuthorizationValue(value)
+				if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "Proxy-Authorization") {
+					copied[i] = redactAuthorizationValue(value)
+				} else {
+					copied[i] = redactSecretValue(value)
+				}
 			}
 		}
 		sanitized[key] = copied
@@ -386,4 +390,30 @@ func redactAuthorizationValue(value string) string {
 		return parts[0] + " ***"
 	}
 	return parts[0] + " " + token[:4] + "***" + token[len(token)-4:]
+}
+
+func isSensitiveHeaderForDebug(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	if normalized == "" {
+		return false
+	}
+	switch normalized {
+	case "authorization", "proxy-authorization", "x-api-key", "api-key", "apikey", "openai-api-key", "anthropic-api-key", "x-goog-api-key":
+		return true
+	}
+	return strings.Contains(normalized, "api-key") ||
+		strings.Contains(normalized, "apikey") ||
+		strings.Contains(normalized, "access-token") ||
+		strings.Contains(normalized, "secret")
+}
+
+func redactSecretValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) <= 8 {
+		return "***"
+	}
+	return trimmed[:4] + "***" + trimmed[len(trimmed)-4:]
 }

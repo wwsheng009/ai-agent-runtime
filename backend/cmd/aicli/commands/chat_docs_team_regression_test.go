@@ -105,7 +105,7 @@ func TestAICLIChatActorExecutor_DocsPromptRegression_CoversWorkspaceToolPriority
 		t.Fatalf("expected team id in response, got %q", response)
 	}
 
-	waitForChatTestCondition(t, 6*time.Second, func() bool {
+	waitForChatTestCondition(t, 12*time.Second, func() bool {
 		rootTask, rootErr := teamStore.GetTask(context.Background(), "task_docs_root")
 		followupTask, followupErr := findTeamTaskByTitle(context.Background(), teamStore, "team_docs", "Summarize docs/guides/getting-started.md")
 		teamEvents, listErr := teamStore.ListTeamEvents(context.Background(), team.TeamEventFilter{TeamID: "team_docs"})

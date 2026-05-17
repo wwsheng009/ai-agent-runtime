@@ -64,6 +64,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		ImageArtifactDir: chatSessionImageArtifactDir(session),
 	})
 	if err != nil {
+		logActorExecutorFailureIfUnrecorded(session, prompt, err)
 		warnIfChatSessionSyncFails(session, "actor error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
 		warnIfChatSessionSyncFails(session, "actor error team lifecycle sync", syncAmbientTeamLifecycleState(session))
 		if response, ok := attemptDirectImageGenerationFallback(ctx, session, prompt, err.Error()); ok {
@@ -81,6 +82,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		}
 		bridge.WaitForCurrentEvents(waitTimeout)
 		if runErr := bridge.RunError(); runErr != nil {
+			logActorExecutorFailureIfUnrecorded(session, prompt, runErr)
 			warnIfChatSessionSyncFails(session, "actor runtime error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
 			warnIfChatSessionSyncFails(session, "actor runtime error team lifecycle sync", syncAmbientTeamLifecycleState(session))
 			return "", humanizeActorExecutorError(session, runErr)
