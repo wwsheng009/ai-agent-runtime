@@ -2005,6 +2005,27 @@ func TestApprovalRequestPreviewLines_FallbackArgs(t *testing.T) {
 	require.Equal(t, []string{"args={\"message\":\"hello\"}"}, lines)
 }
 
+func TestChatRuntimeEvents_RenderApprovalDecisionKeepsStatusOnly(t *testing.T) {
+	var rendered bytes.Buffer
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.writeLine = func(line string) {
+		rendered.WriteString(line)
+	}
+
+	bridge.renderApprovalDecision(&runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"git commit -m \"feat: add nginx configuration\"","workdir":"E:/projects/ai/ai-agent-runtime"}`),
+	}, true)
+
+	output := rendered.String()
+	if !strings.Contains(output, "[approval] approved: execute_shell_command") {
+		t.Fatalf("expected approval decision line, got %q", output)
+	}
+	if strings.Contains(output, "[approval] command=") || strings.Contains(output, "[approval] workdir=") {
+		t.Fatalf("expected approval decision to avoid duplicating transcript details, got %q", output)
+	}
+}
+
 func TestChatRuntimeEvents_WaitForCurrentEventsWaitsForLateArrivingEvents(t *testing.T) {
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
@@ -2939,13 +2960,16 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 func TestShowChatRuntimePriorityPrompt_RendersPromptBlockAndReturnsReadablePrompt(t *testing.T) {
 	var session ChatSession
 	output := captureStdout(t, func() {
-		readPrompt, cleanup := showChatRuntimePriorityPrompt(&session, []string{
+		readPrompt, cleanup, transient := showChatRuntimePriorityPrompt(&session, []string{
 			"[approval] command=git status",
 			"[approval] cwd=C:/work",
 		}, "[approval] allow bash? [y/N]: ")
 		defer cleanup()
 		if readPrompt != "[approval] allow bash? [y/N]: " {
 			t.Fatalf("unexpected read prompt: %q", readPrompt)
+		}
+		if transient {
+			t.Fatal("expected plain stdout prompt to be persistent")
 		}
 	})
 
@@ -2954,6 +2978,34 @@ func TestShowChatRuntimePriorityPrompt_RendersPromptBlockAndReturnsReadablePromp
 	}
 	if !strings.Contains(output, "[approval] allow bash? [y/N]: ") {
 		t.Fatalf("expected approval prompt in output, got %q", output)
+	}
+}
+
+func TestRenderChatRuntimePriorityPromptTranscript_PersistsApprovalDetails(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	session.Interaction = coord
+
+	renderChatRuntimePriorityPromptTranscript(session, []string{
+		"[approval] command=git commit -m \"feat: add nginx configuration\"",
+		"[approval] workdir=E:\\projects\\ai\\ai-gateway",
+	}, "[approval] allow bash (permission_mode_requires_approval)? [y/N]: ", "y")
+
+	rendered := output.String()
+	for _, want := range []string{
+		"[approval] command=git commit -m \"feat: add nginx configuration\"",
+		"[approval] workdir=E:\\projects\\ai\\ai-gateway",
+		"[approval] allow bash (permission_mode_requires_approval)? [y/N]: y",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected persisted approval transcript to contain %q, got %q", want, rendered)
+		}
 	}
 }
 

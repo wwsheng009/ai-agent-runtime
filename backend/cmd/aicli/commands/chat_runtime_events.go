@@ -197,13 +197,17 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			if strings.TrimSpace(reason) != "" {
 				promptLine += fmt.Sprintf(" (%s)", strings.TrimSpace(reason))
 			}
-			readPrompt, cleanupPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine+"? [y/N]: ")
-			defer cleanupPrompt()
+			readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine+"? [y/N]: ")
 			text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
 			if err != nil {
+				cleanupPrompt()
 				return false, err
 			}
 			text = strings.ToLower(strings.TrimSpace(normalizeQueuedInputLine(text)))
+			cleanupPrompt()
+			if transientPrompt {
+				renderChatRuntimePriorityPromptTranscript(session, lines, promptLine+"? [y/N]: ", text)
+			}
 			return text == "y" || text == "yes", nil
 		},
 		askQuestion: func(prompt string, suggestions []string, required bool) (string, error) {
@@ -221,7 +225,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			} else {
 				readPrompt = "> (optional) "
 			}
-			readPrompt, cleanupPrompt := showChatRuntimePriorityPrompt(session, lines, readPrompt)
+			readPrompt, cleanupPrompt, _ := showChatRuntimePriorityPrompt(session, lines, readPrompt)
 			defer cleanupPrompt()
 			text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
 			if err != nil {
@@ -864,6 +868,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
 			return
 		}
+		b.renderApprovalDecision(approval, allowed)
 		if allowed {
 			b.rememberApprovalGrant(b.autoApprovalGrantKey(event.SessionID, approval))
 		}
@@ -1001,7 +1006,7 @@ func formatInteractiveSupplementPromptLine(line string) string {
 	return ui.FormatAssistantSupplementBlock(line)
 }
 
-func showChatRuntimePriorityPrompt(session *ChatSession, lines []string, prompt string) (string, func()) {
+func showChatRuntimePriorityPrompt(session *ChatSession, lines []string, prompt string) (string, func(), bool) {
 	prompt = strings.TrimRight(strings.ReplaceAll(prompt, "\r\n", "\n"), "\n")
 	if session != nil && session.Surface != nil && session.Surface.Enabled() {
 		beginDirectInteractiveOutput(session)
@@ -1011,7 +1016,7 @@ func showChatRuntimePriorityPrompt(session *ChatSession, lines []string, prompt 
 			if session.Interaction != nil {
 				session.Interaction.ResetPromptState()
 			}
-		}
+		}, true
 	}
 
 	beginDirectInteractiveOutput(session)
@@ -1026,7 +1031,31 @@ func showChatRuntimePriorityPrompt(session *ChatSession, lines []string, prompt 
 		renderedPrompt = prompt
 	}
 	fmt.Print(renderedPrompt)
-	return renderedPrompt, func() {}
+	return renderedPrompt, func() {}, false
+}
+
+func renderChatRuntimePriorityPromptTranscript(session *ChatSession, lines []string, prompt string, answer string) {
+	if session == nil || session.Interaction == nil {
+		return
+	}
+	transcriptLines := make([]string, 0, len(lines)+1)
+	for _, line := range lines {
+		line = strings.TrimSpace(strings.TrimRight(strings.ReplaceAll(line, "\r\n", "\n"), "\n"))
+		if line != "" {
+			transcriptLines = append(transcriptLines, line)
+		}
+	}
+	prompt = strings.TrimRight(strings.ReplaceAll(prompt, "\r\n", "\n"), "\n")
+	if strings.TrimSpace(prompt) != "" {
+		if answer = strings.TrimSpace(answer); answer != "" {
+			prompt += answer
+		}
+		transcriptLines = append(transcriptLines, prompt)
+	}
+	if len(transcriptLines) == 0 {
+		return
+	}
+	session.Interaction.RenderAsyncLine(strings.Join(transcriptLines, "\n"))
 }
 
 func (b *chatRuntimeEventBridge) shouldSuppressApprovalTimeline(event runtimeevents.Event) bool {
@@ -1713,6 +1742,21 @@ func (b *chatRuntimeEventBridge) resolveApproval(ctx context.Context, sessionID,
 		return err
 	}
 	return actor.ApproveTool(ctx, requestID, allow)
+}
+
+func (b *chatRuntimeEventBridge) renderApprovalDecision(approval *runtimechat.ApprovalRequest, allowed bool) {
+	if b == nil || b.writeLine == nil || approval == nil {
+		return
+	}
+	status := "denied"
+	if allowed {
+		status = "approved"
+	}
+	toolName := strings.TrimSpace(approval.ToolName)
+	if toolName == "" {
+		toolName = "tool"
+	}
+	b.writeLine(fmt.Sprintf("[approval] %s: %s", status, toolName))
 }
 
 func (b *chatRuntimeEventBridge) resolveQuestion(ctx context.Context, sessionID, questionID, answer string) error {
