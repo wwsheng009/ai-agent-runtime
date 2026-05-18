@@ -23,14 +23,51 @@ permissions:
   contents: write
 
 env:
-  GO_VERSION: '1.24'
+  GO_VERSION: '1.24.2'
   CMD_PATH: ./cmd/aicli
   BIN_NAME: aicli
   WORKDIR: backend
+  CGO_ENABLED: '0'
+  GOPROXY: https://proxy.golang.org,direct
 
 jobs:
+  validate:
+    name: Validate no-CGO build prerequisites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.WORKDIR }}/go.sum
+
+      - name: Verify Go environment
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go env GOOS GOARCH CGO_ENABLED GOPROXY
+          test "$(go env CGO_ENABLED)" = "0"
+
+      - name: Verify SQLite no-CGO packages
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go test ./internal/sqlitedriver ./internal/chat ./internal/team ./internal/agentcontrol -count=1
+
+      - name: Verify aicli no-CGO build
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go build -trimpath -o /tmp/aicli-cgo0-check ${CMD_PATH}
+          /tmp/aicli-cgo0-check version
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: validate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -81,9 +118,10 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
         run: |
           set -euo pipefail
+          echo "GOOS=${GOOS} GOARCH=${GOARCH} CGO_ENABLED=${CGO_ENABLED}"
+          test "${CGO_ENABLED}" = "0"
           EXT=""
           if [[ "${GOOS}" == "windows" ]]; then EXT=".exe"; fi
           ARTIFACT="${BIN_NAME}-${GOOS}-${GOARCH}${EXT}"
