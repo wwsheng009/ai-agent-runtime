@@ -395,7 +395,7 @@ func clearRuntimeSelectionPopup(session *ChatSession) {
 		}
 		return
 	}
-	session.Surface.ClearPopup()
+	session.Surface.ClearPopupPreserveCursor()
 	if session.Interaction != nil {
 		session.Interaction.ResetPromptState()
 	}

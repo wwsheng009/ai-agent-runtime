@@ -21,6 +21,9 @@ func discardPendingInteractiveInput(session *ChatSession) int {
 	if session.InputQueue != nil {
 		return discardQueuedInteractiveLines(session)
 	}
+	if shouldUseInteractiveLineEditor(session) {
+		return 0
+	}
 	if !shouldDiscardPendingInput() {
 		return 0
 	}

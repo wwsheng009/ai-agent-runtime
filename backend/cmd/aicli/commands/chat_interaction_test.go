@@ -718,6 +718,44 @@ func TestDiscardPendingInteractiveInput_ResetsReaderAndFlushesConsoleBuffer(t *t
 	}
 }
 
+func TestDiscardPendingInteractiveInput_SkipsConsoleFlushForLineEditor(t *testing.T) {
+	session := &ChatSession{
+		InputBox:    ui.NewInputBox(nil),
+		InputReader: bufio.NewReader(strings.NewReader("stale\n")),
+	}
+	oldDiscard := discardPendingConsoleInput
+	oldNewReader := newChatInputReader
+	oldShouldDiscard := shouldDiscardPendingInput
+	oldInteractive := chatIsInteractiveTerminal
+	defer func() {
+		discardPendingConsoleInput = oldDiscard
+		newChatInputReader = oldNewReader
+		shouldDiscardPendingInput = oldShouldDiscard
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	flushed := 0
+	discardPendingConsoleInput = func() (int, error) {
+		flushed++
+		return 3, nil
+	}
+	sentinel := bufio.NewReader(strings.NewReader(""))
+	newChatInputReader = func() *bufio.Reader { return sentinel }
+	shouldDiscardPendingInput = func() bool { return true }
+	chatIsInteractiveTerminal = func() bool { return true }
+
+	discarded := discardPendingInteractiveInput(session)
+	if discarded != 0 {
+		t.Fatalf("expected no discarded input for line editor, got %d", discarded)
+	}
+	if flushed != 0 {
+		t.Fatalf("expected console buffer not to flush for line editor, got %d", flushed)
+	}
+	if session.InputReader == sentinel {
+		t.Fatalf("expected shared reader to remain untouched")
+	}
+}
+
 func TestDiscardPendingInteractiveInputForPriorityPrompt_ReturnsNotice(t *testing.T) {
 	session := &ChatSession{InputReader: bufio.NewReader(strings.NewReader("stale\n"))}
 	oldDiscard := discardPendingConsoleInput

@@ -426,6 +426,37 @@ func TestFixedBottomSurface_ClearPopupPreserveCursorRestoresPromptCursor(t *test
 	}
 }
 
+func TestFixedBottomSurface_ClearPopupInputPreserveCursorRestoresPromptCursor(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPopupInput([]string{
+			"Select model",
+			"  [1] gpt-4.1",
+		}, "choice: ")
+	})
+
+	output := captureUIStdout(t, func() {
+		surface.ClearPopupPreserveCursor()
+	})
+
+	if !strings.Contains(output, cursorSaveSequence) {
+		t.Fatalf("expected preserve popup input clear to save cursor, got %q", output)
+	}
+	if !strings.HasSuffix(output, cursorRestoreSequence) {
+		t.Fatalf("expected preserve popup input clear to restore cursor at the end, got %q", output)
+	}
+	if surface.popupRenderedRows != 0 {
+		t.Fatalf("expected popup rows to clear, got %d", surface.popupRenderedRows)
+	}
+	if surface.composerLine != "" {
+		t.Fatalf("expected popup input composer line to clear, got %q", surface.composerLine)
+	}
+}
+
 func TestFixedBottomSurface_ClearPopupForOwnerPreserveCursorKeepsOtherPopup(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true

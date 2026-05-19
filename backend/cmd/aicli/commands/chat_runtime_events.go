@@ -1012,7 +1012,7 @@ func showChatRuntimePriorityPrompt(session *ChatSession, lines []string, prompt 
 		beginDirectInteractiveOutput(session)
 		session.Surface.ShowPopupInput(lines, prompt)
 		return prompt, func() {
-			session.Surface.ClearPopup()
+			session.Surface.ClearPopupPreserveCursor()
 			if session.Interaction != nil {
 				session.Interaction.ResetPromptState()
 			}
