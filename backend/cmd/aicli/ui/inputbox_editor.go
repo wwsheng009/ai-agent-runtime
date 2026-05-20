@@ -20,6 +20,7 @@ import (
 var ErrInteractiveInputInterrupted = errors.New("interactive input interrupted")
 var ErrInteractiveInputExitRequested = errors.New("interactive input exit requested")
 var errInteractiveInputReadinessUnsupported = errors.New("interactive input readiness unsupported")
+var waitForInteractiveInputReady = platformWaitForInteractiveInputReady
 
 const (
 	bracketedPasteEnableSequence  = "\x1b[?2004h"
@@ -267,6 +268,17 @@ func readInteractiveLineWithOptions(reader io.Reader, writer io.Writer, prompt s
 
 func readInteractiveLineWithHooks(reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string), hooks *LineEditorHooks, echoSubmit bool, holdFirstRune bool) (string, error) {
 	return readInteractiveLineWithHooksContext(context.Background(), reader, writer, prompt, history, onChange, hooks, echoSubmit, holdFirstRune)
+}
+
+// SupportsCancelableInteractiveInputRead reports whether the current stdin can
+// be polled before a raw-mode read. Background readers must require this so a
+// context cancellation cannot leave a stale goroutine blocked inside Read.
+func SupportsCancelableInteractiveInputRead() bool {
+	if os.Stdin == nil {
+		return false
+	}
+	_, err := waitForInteractiveInputReady(int(os.Stdin.Fd()), 0)
+	return err == nil
 }
 
 func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string), hooks *LineEditorHooks, echoSubmit bool, holdFirstRune bool) (string, error) {
@@ -1289,6 +1301,7 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	cancelable := ctx.Done() != nil
 	for {
 		if err := ctx.Err(); err != nil {
 			return editorKey{}, false, err
@@ -1321,6 +1334,10 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 			ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), 50*time.Millisecond)
 			if err != nil {
 				if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+					if cancelable {
+						time.Sleep(50 * time.Millisecond)
+						continue
+					}
 					ready = true
 				} else {
 					return editorKey{}, false, err

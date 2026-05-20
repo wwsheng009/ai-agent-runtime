@@ -1131,6 +1131,76 @@ func TestChatInputQueue_PriorityReadUsesExternalCaptureWithoutStartingPump(t *te
 	}
 }
 
+func TestPriorityPromptBypassesInactiveQueueWhenLineEditorOwnsStdin(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	chatIsInteractiveTerminal = func() bool { return true }
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("queued-from-pump\n")))
+	session := &ChatSession{
+		InputBox:   ui.NewInputBox(nil),
+		InputQueue: queue,
+	}
+
+	if shouldRoutePriorityPromptThroughQueue(session) {
+		t.Fatal("expected inactive queue to be bypassed while line editor owns stdin")
+	}
+
+	select {
+	case item := <-queue.lines:
+		t.Fatalf("priority prompt should not start stdin pump, got queued item %q", item.Text)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestPriorityPromptUsesQueueWhenExternalCaptureOwnsStdin(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	chatIsInteractiveTerminal = func() bool { return true }
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("normal\n")))
+	queue.setExternalInputCaptureActive(true)
+	session := &ChatSession{
+		InputBox:   ui.NewInputBox(nil),
+		InputQueue: queue,
+	}
+
+	if !shouldRoutePriorityPromptThroughQueue(session) {
+		t.Fatal("expected priority prompt to use queue while external capture owns stdin")
+	}
+}
+
+func TestStartBusyQueuedInputCaptureSkipsUnsupportedCancelableStdin(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	chatIsInteractiveTerminal = func() bool { return true }
+	defer func() {
+		chatIsInteractiveTerminal = oldInteractive
+	}()
+
+	oldSupports := supportsCancelableInteractiveInputRead
+	supportsCancelableInteractiveInputRead = func() bool { return false }
+	defer func() {
+		supportsCancelableInteractiveInputRead = oldSupports
+	}()
+
+	session := &ChatSession{
+		InputBox:    ui.NewInputBox(nil),
+		Interaction: newChatInteractionCoordinator(&ChatSession{}),
+	}
+	session.Interaction.session = session
+
+	stop := startBusyQueuedInputCapture(session)
+	defer stop()
+
+	if session.InputQueue != nil && session.InputQueue.hasExternalInputCaptureActive() {
+		t.Fatal("expected busy input capture to stay inactive without cancellable stdin")
+	}
+}
+
 func TestChatInputQueue_PriorityReadReceivesExternalCaptureError(t *testing.T) {
 	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
 	queue.setExternalInputCaptureActive(true)

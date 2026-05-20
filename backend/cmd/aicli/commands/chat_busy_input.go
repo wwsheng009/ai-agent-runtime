@@ -10,11 +10,16 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
+var supportsCancelableInteractiveInputRead = ui.SupportsCancelableInteractiveInputRead
+
 func startBusyQueuedInputCapture(session *ChatSession) func() {
 	if session == nil || session.NoInteractive || session.JSONOutput {
 		return func() {}
 	}
 	if session.InputBox == nil || session.Interaction == nil || !shouldUseInteractiveLineEditor(session) {
+		return func() {}
+	}
+	if !supportsCancelableInteractiveInputRead() {
 		return func() {}
 	}
 	queue := ensureChatBufferedInputQueue(session)

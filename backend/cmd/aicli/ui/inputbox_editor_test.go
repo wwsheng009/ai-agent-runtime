@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -56,6 +57,56 @@ func TestDecodeInteractiveKeyMarksLoneCarriageReturnEnter(t *testing.T) {
 	}
 	if decoded.consumed != 2 {
 		t.Fatalf("expected CRLF to consume two bytes, got %d", decoded.consumed)
+	}
+}
+
+func TestNextInteractiveKeyCancelableReadDoesNotBlockWhenReadinessUnsupported(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+
+	oldWait := waitForInteractiveInputReady
+	waitForInteractiveInputReady = func(int, time.Duration) (bool, error) {
+		return false, errInteractiveInputReadinessUnsupported
+	}
+	defer func() {
+		waitForInteractiveInputReady = oldWait
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	result := make(chan error, 1)
+	pending := make([]byte, 0, 16)
+	go func() {
+		_, _, err := nextInteractiveKey(ctx, reader, &pending, reader)
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected context deadline, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("cancelable read blocked after unsupported readiness")
+	}
+}
+
+func TestSupportsCancelableInteractiveInputReadReflectsReadinessProbe(t *testing.T) {
+	oldWait := waitForInteractiveInputReady
+	waitForInteractiveInputReady = func(int, time.Duration) (bool, error) {
+		return false, errInteractiveInputReadinessUnsupported
+	}
+	defer func() {
+		waitForInteractiveInputReady = oldWait
+	}()
+
+	if SupportsCancelableInteractiveInputRead() {
+		t.Fatal("expected unsupported readiness probe to disable cancelable interactive input")
 	}
 }
 

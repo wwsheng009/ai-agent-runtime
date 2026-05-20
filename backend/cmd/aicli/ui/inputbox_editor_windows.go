@@ -32,7 +32,7 @@ type consoleKeyEventRecord struct {
 	ControlKeyState uint32
 }
 
-func waitForInteractiveInputReady(fd int, timeout time.Duration) (bool, error) {
+func platformWaitForInteractiveInputReady(fd int, timeout time.Duration) (bool, error) {
 	if timeout < 0 {
 		timeout = 0
 	}

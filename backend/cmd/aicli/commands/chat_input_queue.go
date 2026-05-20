@@ -861,8 +861,18 @@ func chatInteractiveReadPriorityLine(session *ChatSession, ctx context.Context) 
 	return chatInteractiveReadTransientLine(session, ctx)
 }
 
+func shouldRoutePriorityPromptThroughQueue(session *ChatSession) bool {
+	if session == nil || session.InputQueue == nil {
+		return false
+	}
+	if shouldUseInteractiveLineEditor(session) && !session.InputQueue.hasExternalInputCaptureActive() {
+		return false
+	}
+	return true
+}
+
 func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context) (string, error) {
-	if session != nil && session.InputQueue != nil {
+	if shouldRoutePriorityPromptThroughQueue(session) {
 		line, err := session.InputQueue.readPriorityLine(ctx)
 		if session.Interaction != nil && err != nil {
 			session.Interaction.ResetPromptState()
@@ -899,7 +909,7 @@ func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context)
 }
 
 func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context.Context, prompt string) (string, error) {
-	if session != nil && session.InputQueue != nil {
+	if shouldRoutePriorityPromptThroughQueue(session) {
 		line, err := session.InputQueue.readPriorityLineWithPrompt(ctx, prompt)
 		if session.Interaction != nil && err != nil {
 			session.Interaction.ResetPromptState()
