@@ -3,7 +3,9 @@
 package ui
 
 import (
+	"os"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -13,7 +15,15 @@ const (
 	windowsEscapePollInterval   = 50 * time.Millisecond
 )
 
-var procGetAsyncKeyState = windows.NewLazySystemDLL("user32.dll").NewProc("GetAsyncKeyState")
+var (
+	procGetAsyncKeyState         = windows.NewLazySystemDLL("user32.dll").NewProc("GetAsyncKeyState")
+	procGetConsoleWindow         = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleWindow")
+	procGetForegroundWindow      = windows.NewLazySystemDLL("user32.dll").NewProc("GetForegroundWindow")
+	procGetWindowThreadProcessID = windows.NewLazySystemDLL("user32.dll").NewProc("GetWindowThreadProcessId")
+
+	windowsEscapeKeyDownFunc     = windowsEscapeKeyDown
+	windowsConsoleForegroundFunc = windowsConsoleForeground
+)
 
 // Start 启动键盘监听（Windows 系统）。
 // Windows 控制台没有 Unix SIGUSR2 这类可复用的 ESC 信号，因此这里用
@@ -33,7 +43,7 @@ func (kh *KeyHandler) Start() <-chan bool {
 		for {
 			select {
 			case <-ticker.C:
-				down := windowsEscapeKeyDown()
+				down := windowsConsoleForegroundFunc() && windowsEscapeKeyDownFunc()
 				if down && !wasDown {
 					kh.Notify()
 				}
@@ -50,4 +60,54 @@ func (kh *KeyHandler) Start() <-chan bool {
 func windowsEscapeKeyDown() bool {
 	state, _, _ := procGetAsyncKeyState.Call(uintptr(windowsEscapeVirtualKeyCode))
 	return state&0x8000 != 0
+}
+
+func windowsConsoleForeground() bool {
+	consoleWindow, _, _ := procGetConsoleWindow.Call()
+	if consoleWindow == 0 {
+		return false
+	}
+	foregroundWindow, _, _ := procGetForegroundWindow.Call()
+	if foregroundWindow == 0 {
+		return false
+	}
+	if foregroundWindow == consoleWindow {
+		return true
+	}
+	foregroundPID := windowsForegroundWindowProcessID(foregroundWindow)
+	return foregroundPID != 0 && windowsProcessIsAncestor(uint32(os.Getpid()), foregroundPID)
+}
+
+func windowsForegroundWindowProcessID(hwnd uintptr) uint32 {
+	var pid uint32
+	procGetWindowThreadProcessID.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+	return pid
+}
+
+func windowsProcessIsAncestor(pid, ancestorPID uint32) bool {
+	if pid == 0 || ancestorPID == 0 || pid == ancestorPID {
+		return pid != 0 && ancestorPID != 0
+	}
+
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(snapshot)
+
+	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	for err = windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
+		if entry.ProcessID != pid {
+			continue
+		}
+		parentPID := entry.ParentProcessID
+		if parentPID == ancestorPID {
+			return true
+		}
+		if parentPID == 0 || parentPID == pid {
+			return false
+		}
+		pid = parentPID
+	}
+	return false
 }
