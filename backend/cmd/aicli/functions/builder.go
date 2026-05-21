@@ -27,6 +27,40 @@ type FunctionCallBuilder interface {
 	BuildToolResponse(toolCallID string, result string) map[string]interface{}
 }
 
+func normalizeFunctionParameters(raw interface{}) map[string]interface{} {
+	params, _ := raw.(map[string]interface{})
+	if len(params) == 0 {
+		return map[string]interface{}{
+			"type":                 "object",
+			"properties":           map[string]interface{}{},
+			"additionalProperties": false,
+		}
+	}
+	normalized := make(map[string]interface{}, len(params)+1)
+	for key, value := range params {
+		normalized[key] = value
+	}
+	if _, ok := normalized["type"]; !ok {
+		normalized["type"] = "object"
+	}
+	normalizeFunctionParameterObjectSchema(normalized)
+	return normalized
+}
+
+func normalizeFunctionParameterObjectSchema(schema map[string]interface{}) {
+	if schema == nil {
+		return
+	}
+	if schemaType, _ := schema["type"].(string); schemaType != "object" {
+		return
+	}
+	if properties, exists := schema["properties"]; exists {
+		if _, ok := properties.(map[string]interface{}); !ok {
+			schema["properties"] = map[string]interface{}{}
+		}
+	}
+}
+
 // ToolCall 工具调用信息
 type ToolCall struct {
 	ID       string                 `json:"id"`
@@ -135,7 +169,7 @@ func (b *OpenAIFunctionCallBuilder) BuildFunctions(schemas []map[string]interfac
 			"function": map[string]interface{}{
 				"description": schema["description"],
 				"name":        schema["name"],
-				"parameters":  schema["parameters"].(map[string]interface{}),
+				"parameters":  normalizeFunctionParameters(schema["parameters"]),
 			},
 		})
 	}
@@ -301,7 +335,7 @@ func (b *AnthropicFunctionCallBuilder) BuildFunctions(schemas []map[string]inter
 		tools = append(tools, map[string]interface{}{
 			"name":         schema["name"],
 			"description":  schema["description"],
-			"input_schema": schema["parameters"].(map[string]interface{}),
+			"input_schema": normalizeFunctionParameters(schema["parameters"]),
 		})
 	}
 	return tools
@@ -410,7 +444,7 @@ func (b *GeminiFunctionCallBuilder) BuildFunctions(schemas []map[string]interfac
 		functionDeclarations = append(functionDeclarations, map[string]interface{}{
 			"name":        schema["name"],
 			"description": schema["description"],
-			"parameters":  schema["parameters"],
+			"parameters":  normalizeFunctionParameters(schema["parameters"]),
 		})
 	}
 	return functionDeclarations
@@ -515,7 +549,7 @@ func (b *CodexFunctionCallBuilder) BuildFunctions(schemas []map[string]interface
 			"type":        "function",
 			"name":        schema["name"],
 			"description": schema["description"],
-			"parameters":  schema["parameters"].(map[string]interface{}),
+			"parameters":  normalizeFunctionParameters(schema["parameters"]),
 		}
 		// 添加 strict 字段（默认 true）
 		tool["strict"] = true

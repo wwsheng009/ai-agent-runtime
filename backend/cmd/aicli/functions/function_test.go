@@ -138,6 +138,77 @@ func TestFunctionRegistry_GetFunctionSchemas_PreservesDefinitionMetadata(t *test
 	}
 }
 
+func TestFunctionCallBuilders_DefaultNilParametersToObjectSchema(t *testing.T) {
+	schemas := []map[string]interface{}{
+		{"name": "get_goal", "description": "read goal"},
+	}
+
+	for _, tc := range []struct {
+		provider string
+		builder  FunctionCallBuilder
+	}{
+		{provider: "openai", builder: &OpenAIFunctionCallBuilder{}},
+		{provider: "anthropic", builder: &AnthropicFunctionCallBuilder{}},
+		{provider: "gemini", builder: &GeminiFunctionCallBuilder{}},
+		{provider: "codex", builder: &CodexFunctionCallBuilder{}},
+	} {
+		built := tc.builder.BuildFunctions(schemas)
+		var params interface{}
+		switch tc.provider {
+		case "openai":
+			tools, ok := built.([]interface{})
+			if !ok || len(tools) != 1 {
+				t.Fatalf("%s: unexpected tools %#v", tc.provider, built)
+			}
+			tool, _ := tools[0].(map[string]interface{})
+			fn, _ := tool["function"].(map[string]interface{})
+			params = fn["parameters"]
+		case "anthropic":
+			tools, ok := built.([]interface{})
+			if !ok || len(tools) != 1 {
+				t.Fatalf("%s: unexpected tools %#v", tc.provider, built)
+			}
+			tool, _ := tools[0].(map[string]interface{})
+			params = tool["input_schema"]
+		case "gemini":
+			tools, ok := built.([]interface{})
+			if !ok || len(tools) != 1 {
+				t.Fatalf("%s: unexpected tools %#v", tc.provider, built)
+			}
+			tool, _ := tools[0].(map[string]interface{})
+			params = tool["parameters"]
+		case "codex":
+			tools, ok := built.([]map[string]interface{})
+			if !ok || len(tools) != 1 {
+				t.Fatalf("%s: unexpected tools %#v", tc.provider, built)
+			}
+			params = tools[0]["parameters"]
+		}
+
+		schema, ok := params.(map[string]interface{})
+		if !ok {
+			t.Fatalf("%s: expected parameters map, got %#v", tc.provider, params)
+		}
+		if schema["type"] != "object" || schema["additionalProperties"] != false {
+			t.Fatalf("%s: unexpected default parameters schema %#v", tc.provider, schema)
+		}
+	}
+}
+
+func TestNormalizeFunctionParameters_RepairsNullProperties(t *testing.T) {
+	params := normalizeFunctionParameters(map[string]interface{}{
+		"type":                 "object",
+		"properties":           nil,
+		"additionalProperties": false,
+	})
+
+	if params["type"] != "object" || params["additionalProperties"] != false {
+		t.Fatalf("unexpected parameters schema %#v", params)
+	}
+	if props, ok := params["properties"].(map[string]interface{}); !ok || props == nil {
+		t.Fatalf("expected null properties to become empty object, got %#v", params["properties"])
+	}
+}
 type inspectShellExecuter struct {
 	output     string
 	err        error

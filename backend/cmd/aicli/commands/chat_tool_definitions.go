@@ -23,7 +23,7 @@ func toolDefinitionsFromSelection(selection *aicliFunctionSelection) []runtimety
 		definitions = append(definitions, runtimetypes.ToolDefinition{
 			Name:        strings.TrimSpace(name),
 			Description: strings.TrimSpace(description),
-			Parameters:  cloneFunctionSchema(parameters),
+			Parameters:  cloneToolParametersSchema(parameters),
 			Metadata:    cloneFunctionSchema(metadata),
 		})
 	}
@@ -43,7 +43,7 @@ func toolDefinitionsToSchemas(defs []runtimetypes.ToolDefinition) []map[string]i
 		schema := map[string]interface{}{
 			"name":        def.Name,
 			"description": def.Description,
-			"parameters":  cloneFunctionSchema(def.Parameters),
+			"parameters":  cloneToolParametersSchema(def.Parameters),
 		}
 		if len(def.Metadata) > 0 {
 			schema["metadata"] = cloneFunctionSchema(def.Metadata)
@@ -64,4 +64,34 @@ func sortToolDefinitions(definitions []runtimetypes.ToolDefinition) {
 		rightDescription := strings.TrimSpace(definitions[j].Description)
 		return leftDescription < rightDescription
 	})
+}
+
+func cloneToolParametersSchema(parameters map[string]interface{}) map[string]interface{} {
+	cloned := cloneFunctionSchema(parameters)
+	if len(cloned) == 0 {
+		return map[string]interface{}{
+			"type":                 "object",
+			"properties":           map[string]interface{}{},
+			"additionalProperties": false,
+		}
+	}
+	if _, ok := cloned["type"]; !ok {
+		cloned["type"] = "object"
+	}
+	normalizeToolParametersObjectSchema(cloned)
+	return cloned
+}
+
+func normalizeToolParametersObjectSchema(schema map[string]interface{}) {
+	if schema == nil {
+		return
+	}
+	if schemaType, _ := schema["type"].(string); schemaType != "object" {
+		return
+	}
+	if properties, exists := schema["properties"]; exists {
+		if _, ok := properties.(map[string]interface{}); !ok {
+			schema["properties"] = map[string]interface{}{}
+		}
+	}
 }

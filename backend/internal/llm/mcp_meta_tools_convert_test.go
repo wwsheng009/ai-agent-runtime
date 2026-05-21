@@ -29,6 +29,66 @@ func TestBuildToolDefinitionsForProtocol_SortsInputToolsByName(t *testing.T) {
 	}
 }
 
+func TestBuildToolDefinitionsForProtocol_DefaultsMissingParametersForAllNamedToolProtocols(t *testing.T) {
+	tools := []map[string]interface{}{
+		{
+			"name":        "get_goal",
+			"description": "read current goal",
+		},
+	}
+
+	for _, protocol := range []string{"openai", "anthropic", "gemini", "codex"} {
+		converted := buildToolDefinitionsForProtocol(tools, protocol, false)
+		list, ok := converted.([]map[string]interface{})
+		if !ok || len(list) != 1 {
+			t.Fatalf("%s: expected 1 tool definition, got %T %#v", protocol, converted, converted)
+		}
+
+		var params interface{}
+		switch protocol {
+		case "openai":
+			fn, _ := list[0]["function"].(map[string]interface{})
+			params = fn["parameters"]
+		case "anthropic":
+			params = list[0]["input_schema"]
+		default:
+			params = list[0]["parameters"]
+		}
+
+		schema, ok := params.(map[string]interface{})
+		if !ok {
+			t.Fatalf("%s: expected parameters object, got %#v", protocol, params)
+		}
+		if schema["type"] != "object" || schema["additionalProperties"] != false {
+			t.Fatalf("%s: unexpected default schema %#v", protocol, schema)
+		}
+	}
+}
+
+func TestBuildToolDefinitionsForProtocol_DefaultsInvalidParametersToObjectSchema(t *testing.T) {
+	tools := []map[string]interface{}{
+		{
+			"name":        "bad_schema",
+			"description": "bad schema",
+			"parameters":  nil,
+		},
+	}
+
+	converted := buildToolDefinitionsForProtocol(tools, "openai", false)
+	list, ok := converted.([]map[string]interface{})
+	if !ok || len(list) != 1 {
+		t.Fatalf("expected 1 tool definition, got %T %#v", converted, converted)
+	}
+	fn, _ := list[0]["function"].(map[string]interface{})
+	schema, ok := fn["parameters"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected parameters object, got %#v", fn["parameters"])
+	}
+	if schema["type"] != "object" || schema["additionalProperties"] != false {
+		t.Fatalf("unexpected default schema %#v", schema)
+	}
+}
+
 func TestBuildToolDefinitionsForProtocol_CodexPromotesFreeformApplyPatch(t *testing.T) {
 	tools := []map[string]interface{}{
 		{

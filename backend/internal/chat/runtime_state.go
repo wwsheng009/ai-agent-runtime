@@ -143,11 +143,52 @@ func cloneRuntimeToolDefinitions(input []types.ToolDefinition) []types.ToolDefin
 		cloned[index] = types.ToolDefinition{
 			Name:        tool.Name,
 			Description: tool.Description,
-			Parameters:  cloneRuntimeInterfaceMap(tool.Parameters),
+			Parameters:  cloneRuntimeToolParameters(tool.Parameters),
 			Metadata:    cloneRuntimeInterfaceMap(tool.Metadata),
 		}
 	}
 	return cloned
+}
+
+func cloneRuntimeToolParameters(input map[string]interface{}) map[string]interface{} {
+	if input == nil {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		cloned[key] = cloneRuntimeToolParameterValue(value)
+	}
+	normalizeRuntimeToolParameterObjectSchema(cloned)
+	return cloned
+}
+
+func normalizeRuntimeToolParameterObjectSchema(schema map[string]interface{}) {
+	if schema == nil {
+		return
+	}
+	if schemaType, _ := schema["type"].(string); schemaType != "object" {
+		return
+	}
+	if properties, exists := schema["properties"]; exists {
+		if _, ok := properties.(map[string]interface{}); !ok {
+			schema["properties"] = map[string]interface{}{}
+		}
+	}
+}
+
+func cloneRuntimeToolParameterValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return cloneRuntimeToolParameters(typed)
+	case []interface{}:
+		cloned := make([]interface{}, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneRuntimeToolParameterValue(item)
+		}
+		return cloned
+	default:
+		return typed
+	}
 }
 
 func cloneRuntimeInterfaceMap(input map[string]interface{}) map[string]interface{} {

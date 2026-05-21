@@ -904,6 +904,47 @@ func TestToolDefinitionsToSchemas_SortsDefinitionsByName(t *testing.T) {
 	}
 }
 
+func TestToolDefinitionsToSchemas_DefaultsNilParameters(t *testing.T) {
+	defs := []types.ToolDefinition{
+		{Name: "get_goal", Description: "read goal"},
+	}
+
+	schemas := toolDefinitionsToSchemas(defs)
+	if len(schemas) != 1 {
+		t.Fatalf("expected 1 schema, got %d", len(schemas))
+	}
+	params, ok := schemas[0]["parameters"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected parameters map, got %#v", schemas[0]["parameters"])
+	}
+	if params["type"] != "object" || params["additionalProperties"] != false {
+		t.Fatalf("unexpected default parameters schema: %#v", params)
+	}
+}
+
+func TestToolDefinitionsToSchemas_RepairsNullParameterProperties(t *testing.T) {
+	defs := []types.ToolDefinition{
+		{
+			Name:        "get_goal",
+			Description: "read goal",
+			Parameters: map[string]interface{}{
+				"type":                 "object",
+				"properties":           nil,
+				"additionalProperties": false,
+			},
+		},
+	}
+
+	schemas := toolDefinitionsToSchemas(defs)
+	params, ok := schemas[0]["parameters"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected parameters map, got %#v", schemas[0]["parameters"])
+	}
+	if props, ok := params["properties"].(map[string]interface{}); !ok || props == nil {
+		t.Fatalf("expected null properties to become empty object, got %#v", params["properties"])
+	}
+}
+
 func TestToolDefinitionsToSchemas_PreservesMetadata(t *testing.T) {
 	defs := []types.ToolDefinition{
 		{

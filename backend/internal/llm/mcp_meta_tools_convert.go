@@ -99,7 +99,13 @@ func prepareToolDefinitionForProtocol(tool map[string]interface{}, protocol stri
 		}
 		cloned[key] = value
 	}
+	cloned["parameters"] = normalizeRawToolParametersForRequest(cloned["parameters"])
 	return cloned
+}
+
+func normalizeRawToolParametersForRequest(raw interface{}) map[string]interface{} {
+	params, _ := raw.(map[string]interface{})
+	return cloneToolParametersForRequest(params)
 }
 
 func buildCodexFreeformToolDefinition(tool map[string]interface{}) map[string]interface{} {

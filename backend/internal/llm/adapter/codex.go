@@ -1504,13 +1504,11 @@ func normalizeCodexTools(raw interface{}) []map[string]interface{} {
 			if desc, ok := fn["description"]; ok {
 				out["description"] = desc
 			}
-			if params, ok := fn["parameters"]; ok {
+			if params, ok := fn["parameters"]; ok && params != nil {
 				out["parameters"] = params
 			}
 			if _, ok := out["parameters"]; !ok {
-				out["parameters"] = map[string]interface{}{
-					"type": "object",
-				}
+				out["parameters"] = emptyCodexObjectParameters()
 			}
 			if strict, ok := tool["strict"]; ok {
 				out["strict"] = strict
@@ -1535,9 +1533,9 @@ func normalizeCodexTools(raw interface{}) []map[string]interface{} {
 			flat["type"] = "function"
 		}
 		if _, ok := flat["parameters"]; !ok {
-			flat["parameters"] = map[string]interface{}{
-				"type": "object",
-			}
+			flat["parameters"] = emptyCodexObjectParameters()
+		} else if flat["parameters"] == nil {
+			flat["parameters"] = emptyCodexObjectParameters()
 		}
 		if _, ok := flat["strict"]; !ok {
 			flat["strict"] = true
@@ -1582,9 +1580,19 @@ func sanitizeCodexTool(tool map[string]interface{}) map[string]interface{} {
 
 	if params := decodeMap(sanitized["parameters"]); params != nil {
 		sanitized["parameters"] = sanitizeCodexSchemaMap(params, false)
+	} else if strings.EqualFold(strings.TrimSpace(asCodexString(sanitized["type"])), "function") || sanitized["type"] == nil {
+		sanitized["parameters"] = emptyCodexObjectParameters()
 	}
 
 	return sanitized
+}
+
+func emptyCodexObjectParameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"properties":           map[string]interface{}{},
+		"additionalProperties": false,
+	}
 }
 
 func sanitizeCodexSchemaMap(schema map[string]interface{}, optional bool) map[string]interface{} {
@@ -1635,6 +1643,11 @@ func sanitizeCodexSchemaMap(schema map[string]interface{}, optional bool) map[st
 	if schemaType, ok := sanitized["type"]; ok {
 		if typeContains(schemaType, "object") {
 			sanitized["additionalProperties"] = false
+			if properties, exists := sanitized["properties"]; exists {
+				if _, ok := properties.(map[string]interface{}); !ok {
+					sanitized["properties"] = map[string]interface{}{}
+				}
+			}
 		}
 	}
 

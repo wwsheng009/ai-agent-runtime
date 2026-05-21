@@ -69,7 +69,7 @@ func BuildToolDefinitionsForRequestWithImageOptions(
 		definition := map[string]interface{}{
 			"name":        tool.Name,
 			"description": tool.Description,
-			"parameters":  cloneDeepMapStringAny(tool.Parameters),
+			"parameters":  cloneToolParametersForRequest(tool.Parameters),
 		}
 		if len(tool.Metadata) > 0 {
 			definition["metadata"] = cloneDeepMapStringAny(tool.Metadata)
@@ -81,6 +81,21 @@ func BuildToolDefinitionsForRequestWithImageOptions(
 	}
 
 	return buildToolDefinitionsForProtocol(normalized, protocol, includeMeta)
+}
+
+func cloneToolParametersForRequest(parameters map[string]interface{}) map[string]interface{} {
+	cloned := cloneDeepMapStringAny(parameters)
+	if len(cloned) == 0 {
+		return map[string]interface{}{
+			"type":                 "object",
+			"properties":           map[string]interface{}{},
+			"additionalProperties": false,
+		}
+	}
+	if _, ok := cloned["type"]; !ok {
+		cloned["type"] = "object"
+	}
+	return cloned
 }
 
 func buildCodexNativeImageGenerationTool(options *CodexImageGenerationOptions) map[string]interface{} {
@@ -398,7 +413,22 @@ func cloneDeepMapStringAny(input map[string]interface{}) map[string]interface{} 
 	for key, value := range input {
 		cloned[key] = cloneDeepInterfaceValue(value)
 	}
+	normalizeToolParameterObjectSchemaForRequest(cloned)
 	return cloned
+}
+
+func normalizeToolParameterObjectSchemaForRequest(schema map[string]interface{}) {
+	if schema == nil {
+		return
+	}
+	if schemaType, _ := schema["type"].(string); schemaType != "object" {
+		return
+	}
+	if properties, exists := schema["properties"]; exists {
+		if _, ok := properties.(map[string]interface{}); !ok {
+			schema["properties"] = map[string]interface{}{}
+		}
+	}
 }
 
 func cloneDeepInterfaceValue(value interface{}) interface{} {

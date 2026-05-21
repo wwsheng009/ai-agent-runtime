@@ -50,6 +50,43 @@ func (f *fakeToolExecutor) ExecuteTool(ctx context.Context, call types.ToolCall)
 	return ToolResult{Error: "missing fake tool result"}
 }
 
+func TestCloneToolDefinitionsPreservesEmptyParameterProperties(t *testing.T) {
+	cloned := cloneToolDefinitions([]types.ToolDefinition{
+		{
+			Name:        "get_goal",
+			Description: "Read goal",
+			Parameters: map[string]interface{}{
+				"type":                 "object",
+				"properties":           map[string]interface{}{},
+				"additionalProperties": false,
+			},
+		},
+		{
+			Name:        "get_goal_from_old_state",
+			Description: "Read goal from old persisted state",
+			Parameters: map[string]interface{}{
+				"type":                 "object",
+				"properties":           nil,
+				"additionalProperties": false,
+			},
+		},
+	})
+
+	if len(cloned) != 2 {
+		t.Fatalf("expected two cloned tools, got %d", len(cloned))
+	}
+	for _, tool := range cloned {
+		params := tool.Parameters
+		props, ok := params["properties"].(map[string]interface{})
+		if !ok || props == nil {
+			t.Fatalf("expected empty properties object to be preserved, got %#v", params["properties"])
+		}
+		if params["type"] != "object" || params["additionalProperties"] != false {
+			t.Fatalf("unexpected parameters schema: %#v", params)
+		}
+	}
+}
+
 func TestExecuteToolLoop_ReplaysToolCallsUntilFinalAssistantMessage(t *testing.T) {
 	provider := &fakeProviderTurnExecutor{
 		responses: []*ProviderTurnResponse{

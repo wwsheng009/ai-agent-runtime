@@ -62,6 +62,53 @@ func TestBuildToolDefinitionsForRequest_DoesNotAddImageGenerationWithoutTextImag
 	require.Nil(t, got)
 }
 
+func TestBuildToolDefinitionsForRequest_DefaultsNilParametersToEmptyObjectSchema(t *testing.T) {
+	defs := []types.ToolDefinition{
+		{
+			Name:        "get_goal",
+			Description: "read current goal",
+		},
+	}
+
+	got := BuildToolDefinitionsForRequest(defs, "codex", "gpt-5.4", nil, false)
+
+	toolList, ok := got.([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, toolList, 1)
+
+	params, ok := toolList[0]["parameters"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, "object", params["type"])
+	require.Equal(t, false, params["additionalProperties"])
+	require.IsType(t, map[string]interface{}{}, params["properties"])
+}
+
+func TestBuildToolDefinitionsForRequest_RepairsNullParameterProperties(t *testing.T) {
+	defs := []types.ToolDefinition{
+		{
+			Name:        "get_goal",
+			Description: "read current goal",
+			Parameters: map[string]interface{}{
+				"type":                 "object",
+				"properties":           nil,
+				"additionalProperties": false,
+			},
+		},
+	}
+
+	got := BuildToolDefinitionsForRequest(defs, "openai", "deepseek-v4-pro", nil, false)
+
+	toolList, ok := got.([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, toolList, 1)
+	fn, ok := toolList[0]["function"].(map[string]interface{})
+	require.True(t, ok)
+	params, ok := fn["parameters"].(map[string]interface{})
+	require.True(t, ok)
+	require.IsType(t, map[string]interface{}{}, params["properties"])
+	require.NotNil(t, params["properties"])
+}
+
 func TestBuildToolDefinitionsForRequest_CodexNativeImageHidesOpenAIImageGenerateTool(t *testing.T) {
 	defs := []types.ToolDefinition{
 		{
