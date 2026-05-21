@@ -140,9 +140,9 @@ func createTheme(themeType ThemeType) *Theme {
 		Type:             actualType,
 		Name:             normalizeThemePresetName(currentThemeName),
 		UserColor:        color.New(color.FgCyan, color.Bold),
-		UserIcon:         "👤",
+		UserIcon:         ">",
 		AssistantColor:   color.New(color.FgGreen),
-		AssistantIcon:    "🤖",
+		AssistantIcon:    "",
 		SystemColor:      color.New(color.FgHiYellow),
 		SystemIcon:       "ℹ️",
 		CommandColor:     color.New(color.FgMagenta),
@@ -234,12 +234,12 @@ func (t *Theme) PrintBorder(width int) {
 
 // FormatUser 格式化用户消息
 func (t *Theme) FormatUser(text string) string {
-	return t.UserColor.Sprintf("%s %s", t.UserIcon, text)
+	return formatThemedPrefix(t.UserColor, t.UserIcon, text)
 }
 
 // FormatAssistant 格式化助手消息
 func (t *Theme) FormatAssistant(text string) string {
-	return t.AssistantColor.Sprintf("%s %s", t.AssistantIcon, text)
+	return formatThemedPrefix(t.AssistantColor, t.AssistantIcon, text)
 }
 
 // FormatSystem 格式化系统消息
@@ -265,6 +265,16 @@ func (t *Theme) FormatSuccess(text string) string {
 // FormatInfo 格式化信息消息
 func (t *Theme) FormatInfo(text string) string {
 	return t.InfoColor.Sprintf("%s %s", t.InfoIcon, text)
+}
+
+func formatThemedPrefix(c *color.Color, icon string, text string) string {
+	if strings.TrimSpace(icon) == "" {
+		return c.Sprint(text)
+	}
+	if text == "" {
+		return c.Sprintf("%s ", icon)
+	}
+	return c.Sprintf("%s %s", icon, text)
 }
 
 // ColorizeUser 用户消息颜色化

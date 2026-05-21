@@ -82,8 +82,8 @@ func (m *Message) Format() string {
 	switch m.mType {
 	case MessageUser:
 		if m.showIcon {
-			plainPrefix = m.theme.UserIcon + " "
-			prefix = m.theme.FormatUser("")
+			plainPrefix = "> "
+			prefix = m.theme.UserColor.Sprint("> ")
 		} else {
 			plainPrefix = "> "
 			prefix = "> "
@@ -91,19 +91,15 @@ func (m *Message) Format() string {
 		coloredContent = m.theme.ColorizeUser(safeContent)
 
 	case MessageAssistant:
-		if m.showIcon {
-			plainPrefix = m.theme.AssistantIcon + " "
-			prefix = m.theme.FormatAssistant("")
-		} else {
-			plainPrefix = "助手> "
-			prefix = "助手> "
-		}
+		plainPrefix = ""
+		prefix = ""
 		coloredContent = m.theme.ColorizeAssistant(safeContent)
 
 	case MessageSystem:
 		if m.showIcon {
 			plainPrefix = m.theme.SystemIcon + " "
 			prefix = m.theme.FormatSystem("")
+			contentPadding = " "
 		} else {
 			plainPrefix = "系统> "
 			prefix = "系统> "
@@ -114,6 +110,7 @@ func (m *Message) Format() string {
 		if m.showIcon {
 			plainPrefix = fmt.Sprintf("%s工具> ", GetIcon(IconTool))
 			prefix = fmt.Sprintf("%s工具> ", GetIcon(IconTool))
+			contentPadding = " "
 		} else {
 			plainPrefix = "工具> "
 			prefix = "工具> "
@@ -124,6 +121,7 @@ func (m *Message) Format() string {
 		if m.showIcon {
 			plainPrefix = m.theme.ErrorIcon + " "
 			prefix = m.theme.FormatError("")
+			contentPadding = " "
 		} else {
 			plainPrefix = "错误> "
 			prefix = "错误> "
@@ -137,9 +135,6 @@ func (m *Message) Format() string {
 	}
 
 	result := coloredContent
-	if m.showIcon {
-		contentPadding = " "
-	}
 
 	// 添加时间戳
 	if m.showTimestamp {
@@ -229,8 +224,7 @@ func FormatErrorMessage(content string) string {
 }
 
 func AssistantContentIndent() string {
-	theme := GetTheme(ThemeAuto)
-	return strings.Repeat(" ", messageDisplayWidth(theme.AssistantIcon+"  "))
+	return ""
 }
 
 func IndentAssistantContent(content string) string {

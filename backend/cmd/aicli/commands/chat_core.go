@@ -795,7 +795,7 @@ func (r *aicliEventRenderer) Finalize(response *runtimechatcore.ChatResult, fina
 		if content != "" && r.session.Formatter != nil && r.session.Formatter.IsMarkdown(content) {
 			fmt.Printf("\033[%dF", r.streamLines+1)
 			fmt.Printf("\033[J")
-			fmt.Printf("助手> %s\n\n", r.session.Formatter.Format(content))
+			fmt.Printf("%s\n\n", r.session.Formatter.Format(content))
 		} else if r.spinnerCleared {
 			fmt.Println()
 		}

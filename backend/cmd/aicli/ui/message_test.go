@@ -7,7 +7,7 @@ import (
 	"github.com/fatih/color"
 )
 
-func TestAssistantMessageFormat_MultilineIncludesPrefixOnFirstLine(t *testing.T) {
+func TestAssistantMessageFormat_MultilineHasNoPrefix(t *testing.T) {
 	msg := NewMessage(MessageAssistant, "line1\nline2").ShowIcon(false)
 
 	formatted := msg.Format()
@@ -15,15 +15,15 @@ func TestAssistantMessageFormat_MultilineIncludesPrefixOnFirstLine(t *testing.T)
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines, got %d: %q", len(lines), formatted)
 	}
-	if !strings.HasPrefix(lines[0], "助手> ") {
-		t.Fatalf("expected first line to include prefix, got %q", lines[0])
+	if lines[0] != "line1" {
+		t.Fatalf("expected first line without prefix, got %q", lines[0])
 	}
-	if !strings.HasPrefix(lines[1], "  ") {
-		t.Fatalf("expected second line to be indented, got %q", lines[1])
+	if lines[1] != "line2" {
+		t.Fatalf("expected second line without indent, got %q", lines[1])
 	}
 }
 
-func TestAssistantMessageFormat_MultilineAlignsContinuationWithIconPrefix(t *testing.T) {
+func TestAssistantMessageFormat_MultilineShowsNoIconPrefix(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true
 	defer func() {
@@ -37,14 +37,11 @@ func TestAssistantMessageFormat_MultilineAlignsContinuationWithIconPrefix(t *tes
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines, got %d: %q", len(lines), formatted)
 	}
-	if !strings.HasPrefix(lines[0], "🤖  ") {
-		t.Fatalf("expected first line to include icon prefix, got %q", lines[0])
+	if lines[0] != "line1" {
+		t.Fatalf("expected first line without icon prefix, got %q", lines[0])
 	}
-	if !strings.HasPrefix(lines[1], "    ") {
-		t.Fatalf("expected second line to align with icon prefix width, got %q", lines[1])
-	}
-	if strings.HasPrefix(lines[1], "   ") && !strings.HasPrefix(lines[1], "    ") {
-		t.Fatalf("expected continuation indent to include content gutter, got %q", lines[1])
+	if lines[1] != "line2" {
+		t.Fatalf("expected second line without icon indent, got %q", lines[1])
 	}
 }
 
@@ -61,7 +58,7 @@ func TestMessageFormat_MultilineAlignsContinuationWithIconPrefixAcrossTypes(t *t
 		firstPrefix string
 		plainPrefix string
 	}{
-		{"user", MessageUser, "👤  ", "👤 "},
+		{"user", MessageUser, "> ", ">"},
 		{"system", MessageSystem, "ℹ️  ", "ℹ️ "},
 		{"tool", MessageTool, "🔧工具>  ", "🔧工具> "},
 		{"error", MessageError, "❌  ", "❌ "},
@@ -98,8 +95,8 @@ func TestIndentAssistantContent_UsesSameGutterAsAssistantMessage(t *testing.T) {
 	if !strings.HasPrefix(indented, AssistantContentIndent()) {
 		t.Fatalf("expected assistant indent prefix, got %q", indented)
 	}
-	if DisplayWidth(AssistantContentIndent()) <= 0 {
-		t.Fatalf("expected assistant indent to have positive visible width")
+	if AssistantContentIndent() != "" {
+		t.Fatalf("expected assistant indent to be empty when assistant has no prefix, got %q", AssistantContentIndent())
 	}
 }
 

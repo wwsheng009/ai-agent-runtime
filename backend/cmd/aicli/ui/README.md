@@ -131,10 +131,11 @@ cmd/aicli/
 - chat 启动后追加的 `MCP / Reasoning Effort / Session / Title / History / Skills / Skills Mode / Skills Top-K` 使用另一组固定 label 宽度，保持纵向对齐
 
 ### 3. 消息区 Gutter
-- `👤`、`>`、`🤖`、`ℹ️`、`🔧工具>`、`❌` 等前缀视为独立 gutter 列
+- 用户消息只使用 `>` 前缀；assistant 正文默认不显示前缀
+- `>`、`ℹ️`、`🔧工具>`、`❌` 等前缀视为独立 gutter 列
 - 首行格式为 `前缀列 + 内容列`
 - 多行消息的续行必须直接对齐到首行内容列，而不是简单补两个空格
-- assistant 内容列宽由 `AssistantContentIndent()` / `IndentAssistantContent()` 统一提供，避免不同调用方各自计算
+- assistant 内容列宽由 `AssistantContentIndent()` / `IndentAssistantContent()` 统一提供；默认无 assistant 前缀时该缩进为空
 
 ### 4. 流式输出
 - assistant 流式内容统一先缓冲，再在 finalize 阶段整体交给 Markdown formatter 处理

@@ -32,8 +32,8 @@ import (
 
 func TestFormatInteractiveSupplementPromptLine_PreservesPromptContentWithoutIndent(t *testing.T) {
 	got := formatInteractiveSupplementPromptLine("[approval] query=北京 天气预报 未来 7 天")
-	if strings.HasPrefix(got, ui.AssistantContentIndent()) {
-		t.Fatalf("expected prompt line without assistant gutter indent, got %q", got)
+	if strings.HasPrefix(got, " ") {
+		t.Fatalf("expected prompt line without leading assistant gutter indent, got %q", got)
 	}
 	if !strings.Contains(got, "[approval] query=北京 天气预报 未来 7 天") {
 		t.Fatalf("expected approval content to stay visible, got %q", got)

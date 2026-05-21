@@ -123,8 +123,7 @@ func PromptUser() string {
 // PromptAssistant 助手输入辅助（用于测试或特殊场景）
 func PromptAssistant(message string) {
 	theme := GetTheme(ThemeAuto)
-	fmt.Printf("%s ", theme.AssistantColor.Sprint(fmt.Sprintf("%s助手>", theme.AssistantIcon)))
-	fmt.Println(message)
+	fmt.Println(theme.ColorizeAssistant(message))
 }
 
 // FormatUserPrompt 格式化用户输入提示
@@ -141,8 +140,7 @@ func FormatUserPromptWithAttachments(attachmentCount int) string {
 
 // FormatAssistantPrompt 格式化助手输出提示
 func FormatAssistantPrompt() string {
-	theme := GetTheme(ThemeAuto)
-	return theme.AssistantColor.Sprintf("%s助手> ", theme.AssistantIcon)
+	return ""
 }
 
 // FormatCommandPrompt 格式化命令提示

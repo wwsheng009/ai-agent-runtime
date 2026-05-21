@@ -4,27 +4,27 @@ import "fmt"
 
 // 图标名称常量
 const (
-	IconUser       = "user"
-	IconAssistant  = "assistant"
-	IconSystem     = "system"
-	IconCommand    = "command"
-	IconError      = "error"
-	IconWarning    = "warning"
-	IconSuccess    = "success"
-	IconInfo       = "info"
-	IconProgress   = "progress"
-	IconSpinner    = "spinner"
-	IconDatabase   = "database"
-	IconFile       = "file"
-	IconFolder     = "folder"
-	IconNetwork    = "network"
-	IconSettings   = "settings"
-	IconTool       = "tool"
-	IconShell      = "shell"
-	IconCopy       = "copy"
-	IconSave       = "save"
-	IconClock      = "clock"
-	IconToken      = "token"
+	IconUser      = "user"
+	IconAssistant = "assistant"
+	IconSystem    = "system"
+	IconCommand   = "command"
+	IconError     = "error"
+	IconWarning   = "warning"
+	IconSuccess   = "success"
+	IconInfo      = "info"
+	IconProgress  = "progress"
+	IconSpinner   = "spinner"
+	IconDatabase  = "database"
+	IconFile      = "file"
+	IconFolder    = "folder"
+	IconNetwork   = "network"
+	IconSettings  = "settings"
+	IconTool      = "tool"
+	IconShell     = "shell"
+	IconCopy      = "copy"
+	IconSave      = "save"
+	IconClock     = "clock"
+	IconToken     = "token"
 )
 
 // IconSet 图标集合
@@ -54,8 +54,8 @@ type IconSet struct {
 var (
 	// 默认图标集合（Unicode 图标）
 	defaultIcons = &IconSet{
-		User:      "👤",
-		Assistant: "🤖",
+		User:      ">",
+		Assistant: "",
 		System:    "ℹ️",
 		Command:   "❯",
 		Error:     "❌",
@@ -78,8 +78,8 @@ var (
 
 	// ASCII 图标集合（用于不支持 Unicode 的终端）
 	asciiIcons = &IconSet{
-		User:      "[U]",
-		Assistant: "[A]",
+		User:      ">",
+		Assistant: "",
 		System:    "[S]",
 		Command:   ">",
 		Error:     "[!]",
@@ -102,8 +102,8 @@ var (
 
 	// Simple 图标集合（最小化版本）
 	simpleIcons = &IconSet{
-		User:      "●",
-		Assistant: "○",
+		User:      ">",
+		Assistant: "",
 		System:    "•",
 		Command:   "»",
 		Error:     "✘",

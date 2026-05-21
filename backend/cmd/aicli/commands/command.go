@@ -48,7 +48,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			return false
 		}
 		if !session.Stream && response != "" {
-			fmt.Printf("助手> %s\n", response)
+			fmt.Println(response)
 		}
 		return false
 	}
