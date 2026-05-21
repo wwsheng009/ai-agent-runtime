@@ -21,6 +21,7 @@ var ErrInteractiveInputInterrupted = errors.New("interactive input interrupted")
 var ErrInteractiveInputExitRequested = errors.New("interactive input exit requested")
 var errInteractiveInputReadinessUnsupported = errors.New("interactive input readiness unsupported")
 var waitForInteractiveInputReady = platformWaitForInteractiveInputReady
+var readInteractiveClipboardText = platformClipboardText
 
 const (
 	bracketedPasteEnableSequence  = "\x1b[?2004h"
@@ -71,6 +72,7 @@ const (
 	editorKeyAbortSearch
 	editorKeyPasteStart
 	editorKeyPasteEnd
+	editorKeyPasteClipboard
 	editorKeyInterrupt
 	editorKeyEOF
 )
@@ -802,6 +804,10 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				pasteBuffer = append(pasteBuffer, '\t')
 			case editorKeyEnter:
 				pasteBuffer = append(pasteBuffer, '\n')
+			case editorKeyPasteClipboard:
+				if pasted, err := readInteractiveClipboardText(); err == nil && pasted != "" {
+					pasteBuffer = append(pasteBuffer, []rune(pasted)...)
+				}
 			case editorKeyInterrupt:
 				writeEditorText("\r\n", renderSnapshot())
 				if onChange != nil {
@@ -826,6 +832,12 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		}
 
 		switch key.kind {
+		case editorKeyPasteClipboard:
+			flushPasteBurstBeforeModifiedInput()
+			clearReverseSearchState()
+			if pasted, err := readInteractiveClipboardText(); err == nil && pasted != "" {
+				insertPastedText(pasted)
+			}
 		case editorKeyRune:
 			clearReverseSearchState()
 			if unicode.IsControl(key.r) && key.r != '\n' {
@@ -1479,6 +1491,8 @@ func decodeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyRedraw}, consumed: 1}, true
 	case 21:
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyClearLine}, consumed: 1}, true
+	case 22:
+		return decodedInteractiveKey{key: editorKey{kind: editorKeyPasteClipboard}, consumed: 1}, true
 	case 7:
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyAbortSearch}, consumed: 1}, true
 	case 27:

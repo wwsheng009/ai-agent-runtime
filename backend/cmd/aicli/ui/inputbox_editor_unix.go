@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"errors"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -30,4 +31,8 @@ func platformWaitForInteractiveInputReady(fd int, timeout time.Duration) (bool, 
 		}
 		return pollFD[0].Revents&unix.POLLIN != 0, nil
 	}
+}
+
+func platformClipboardText() (string, error) {
+	return "", errors.New("platform clipboard paste unsupported")
 }

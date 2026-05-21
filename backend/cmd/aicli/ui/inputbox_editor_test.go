@@ -60,6 +60,18 @@ func TestDecodeInteractiveKeyMarksLoneCarriageReturnEnter(t *testing.T) {
 	}
 }
 
+func TestDecodeInteractiveKey_CtrlVRequestsClipboardPaste(t *testing.T) {
+	decoded, ok := decodeInteractiveKey([]byte{22})
+	if !ok {
+		t.Fatal("expected ctrl+v to decode")
+	}
+	if decoded.key.kind != editorKeyPasteClipboard {
+		t.Fatalf("expected clipboard paste key, got %#v", decoded.key)
+	}
+	if decoded.consumed != 1 {
+		t.Fatalf("expected ctrl+v to consume one byte, got %d", decoded.consumed)
+	}
+}
 func TestNextInteractiveKeyCancelableReadDoesNotBlockWhenReadinessUnsupported(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -439,6 +451,30 @@ func TestReadInteractiveLine_HandlesBracketedPasteAsAtomicMultiLineInput(t *test
 	}
 }
 
+func TestReadInteractiveLine_CtrlVInsertsClipboardText(t *testing.T) {
+	oldClipboard := readInteractiveClipboardText
+	readInteractiveClipboardText = func() (string, error) {
+		return "first\r\nsecond", nil
+	}
+	t.Cleanup(func() {
+		readInteractiveClipboardText = oldClipboard
+	})
+
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("\x16\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != "first\nsecond" {
+		t.Fatalf("expected ctrl+v to insert normalized clipboard text, got %q", line)
+	}
+}
 func TestReadInteractiveLine_RendersMultilinePasteWithCarriageReturns(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLine(

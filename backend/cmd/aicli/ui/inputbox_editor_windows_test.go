@@ -88,3 +88,44 @@ func TestNextInteractiveKeyReadsFromPipeBackedStdin(t *testing.T) {
 		t.Fatal("timed out waiting for pipe-backed input")
 	}
 }
+
+func TestConsoleKeyEventCanProduceInputAcceptsCtrlVClipboardShortcut(t *testing.T) {
+	ctrlV := &consoleKeyEventRecord{
+		KeyDown:         1,
+		VirtualKeyCode:  windowsVKV,
+		UnicodeChar:     0,
+		ControlKeyState: windowsLeftCtrlPressed,
+	}
+	if !consoleKeyEventCanProduceInput(ctrlV) {
+		t.Fatal("expected Ctrl+V key event to mark stdin ready for clipboard paste")
+	}
+}
+
+func TestConsoleKeyEventCanProduceInputAcceptsCharactersAndEditingKeys(t *testing.T) {
+	character := &consoleKeyEventRecord{
+		KeyDown:        1,
+		VirtualKeyCode: 0x41,
+		UnicodeChar:    'a',
+	}
+	if !consoleKeyEventCanProduceInput(character) {
+		t.Fatal("expected key event with Unicode character to mark stdin ready")
+	}
+
+	leftArrow := &consoleKeyEventRecord{
+		KeyDown:        1,
+		VirtualKeyCode: 0x25, // VK_LEFT
+		UnicodeChar:    0,
+	}
+	if !consoleKeyEventCanProduceInput(leftArrow) {
+		t.Fatal("expected navigation key to mark stdin ready")
+	}
+
+	keyUp := &consoleKeyEventRecord{
+		KeyDown:        0,
+		VirtualKeyCode: 0x41,
+		UnicodeChar:    'a',
+	}
+	if consoleKeyEventCanProduceInput(keyUp) {
+		t.Fatal("expected key-up event not to mark stdin ready")
+	}
+}
