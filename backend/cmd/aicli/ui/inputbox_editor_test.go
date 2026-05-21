@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"runtime"
@@ -72,6 +73,7 @@ func TestDecodeInteractiveKey_CtrlVRequestsClipboardPaste(t *testing.T) {
 		t.Fatalf("expected ctrl+v to consume one byte, got %d", decoded.consumed)
 	}
 }
+
 func TestNextInteractiveKeyCancelableReadDoesNotBlockWhenReadinessUnsupported(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -434,6 +436,39 @@ func TestReadInteractiveLine_RestoresDraftAfterHistoryNavigation(t *testing.T) {
 	}
 }
 
+func TestInputBoxAddToHistoryTrimsSkipsAdjacentDuplicatesAndLimitsSize(t *testing.T) {
+	ib := NewInputBox(nil)
+
+	ib.AddToHistory("  first  ")
+	ib.AddToHistory("first")
+	ib.AddToHistory("")
+	ib.AddToHistory("second")
+
+	if got := ib.GetHistorySize(); got != 2 {
+		t.Fatalf("expected adjacent duplicate and empty history entries to be skipped, got size %d history=%#v", got, ib.GetHistory())
+	}
+	if first, ok := ib.GetHistoryAt(0); !ok || first != "first" {
+		t.Fatalf("expected first trimmed history entry, got %q ok=%v", first, ok)
+	}
+	if second, ok := ib.GetHistoryAt(1); !ok || second != "second" {
+		t.Fatalf("expected second history entry, got %q ok=%v", second, ok)
+	}
+
+	for i := 0; i < defaultInputHistoryLimit+5; i++ {
+		ib.AddToHistory(fmt.Sprintf("item-%03d", i))
+	}
+	if got := ib.GetHistorySize(); got != defaultInputHistoryLimit {
+		t.Fatalf("expected history to be capped at %d, got %d", defaultInputHistoryLimit, got)
+	}
+	oldest, ok := ib.GetHistoryAt(0)
+	if !ok || oldest != "item-005" {
+		t.Fatalf("expected oldest retained entry item-005, got %q ok=%v", oldest, ok)
+	}
+	if previous, ok := ib.PreviousHistory(); !ok || previous != "item-204" {
+		t.Fatalf("expected history cursor to point after latest retained entry, got %q ok=%v", previous, ok)
+	}
+}
+
 func TestReadInteractiveLine_HandlesBracketedPasteAsAtomicMultiLineInput(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLine(
@@ -475,6 +510,7 @@ func TestReadInteractiveLine_CtrlVInsertsClipboardText(t *testing.T) {
 		t.Fatalf("expected ctrl+v to insert normalized clipboard text, got %q", line)
 	}
 }
+
 func TestReadInteractiveLine_RendersMultilinePasteWithCarriageReturns(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLine(

@@ -398,6 +398,12 @@ func TestChatInteractiveReadLine_DrainsQueuedInputBeforeInteractiveLineEditor(t 
 	if queue.pendingCount() != 0 {
 		t.Fatalf("expected queued input to be consumed, got %d pending", queue.pendingCount())
 	}
+	if got := session.InputBox.GetHistorySize(); got != 1 {
+		t.Fatalf("expected queued input to be recorded in prompt history, got size %d", got)
+	}
+	if history, ok := session.InputBox.GetHistoryAt(0); !ok || history != "queued" {
+		t.Fatalf("expected queued input history entry, got %q ok=%v", history, ok)
+	}
 }
 
 func TestChatInteractiveReadTransientLine_UsesTransientInputBoxWithoutSharedReader(t *testing.T) {
@@ -449,6 +455,29 @@ func TestChatInteractiveReadPriorityLineWithPrompt_UsesTransientInputBoxWithoutS
 	}
 	if nextLine != "stale\n" {
 		t.Fatalf("expected shared reader input to remain untouched, got %q", nextLine)
+	}
+}
+
+func TestChatInteractiveReadLine_DeduplicatesQueuedPromptHistory(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.lines <- chatQueuedInput{Text: "repeat\n", Source: "stdin"}
+
+	inputBox := ui.NewInputBox(nil)
+	inputBox.AddToHistory("repeat")
+	session := &ChatSession{
+		InputBox:   inputBox,
+		InputQueue: queue,
+	}
+
+	line, err := chatInteractiveReadLine(session, context.Background())
+	if err != nil {
+		t.Fatalf("chatInteractiveReadLine: %v", err)
+	}
+	if normalizeQueuedInputLine(line) != "repeat" {
+		t.Fatalf("expected queued repeat input, got %q", line)
+	}
+	if got := inputBox.GetHistorySize(); got != 1 {
+		t.Fatalf("expected adjacent duplicate queued input not to be recorded twice, got history size %d", got)
 	}
 }
 

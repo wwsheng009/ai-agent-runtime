@@ -62,3 +62,25 @@ func TestStartChatEscapeInterruptWatcherStoppedDoesNotInterruptSession(t *testin
 		t.Fatal("stopped ESC watcher should not interrupt session")
 	}
 }
+
+func TestInterruptChatTurnFromBusyInputCancelCancelsActiveTurn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	session := &ChatSession{
+		NoInteractive: true,
+		cancelCtx:     ctx,
+		cancelFunc:    cancel,
+	}
+
+	interruptChatTurnFromBusyInputCancel(session)
+
+	if !session.IsInterrupted() {
+		t.Fatal("expected busy-input ESC cancel to mark session interrupted")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected busy-input ESC cancel to cancel active context")
+	}
+}

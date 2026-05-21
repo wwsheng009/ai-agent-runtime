@@ -685,6 +685,7 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 	if session != nil && session.InputQueue != nil {
 		if line, ok := session.InputQueue.readAvailableLine(); ok {
 			session.lastInteractiveInputQueued = true
+			recordChatPromptHistory(session, line)
 			return line, nil
 		}
 	}
@@ -786,6 +787,9 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 	}
 	if session != nil && session.InputQueue != nil {
 		line, err := session.InputQueue.readLine(ctx)
+		if err == nil {
+			recordChatPromptHistory(session, line)
+		}
 		if session.Interaction != nil && err != nil {
 			session.Interaction.ResetPromptState()
 		}
@@ -797,6 +801,13 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 		return line, nil
 	}
 	return "", err
+}
+
+func recordChatPromptHistory(session *ChatSession, input string) {
+	if session == nil || session.InputBox == nil {
+		return
+	}
+	session.InputBox.AddToHistory(normalizeQueuedInputLine(input))
 }
 
 func finishChatInteractiveReadPromptState(session *ChatSession, readErr error) {

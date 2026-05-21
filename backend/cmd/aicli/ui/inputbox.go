@@ -19,6 +19,8 @@ type InputBox struct {
 	historyPos int
 }
 
+const defaultInputHistoryLimit = 200
+
 // NewInputBox 创建新的输入框
 func NewInputBox(layout *Layout) *InputBox {
 	return &InputBox{
@@ -84,11 +86,7 @@ func (ib *InputBox) Read() (string, error) {
 
 	input = strings.TrimSpace(input)
 
-	// 添加到历史记录
-	if input != "" {
-		ib.history = append(ib.history, input)
-		ib.historyPos = len(ib.history)
-	}
+	ib.AddToHistory(input)
 
 	return input, nil
 }
@@ -139,11 +137,7 @@ func (ib *InputBox) ReadMultiLine() (string, error) {
 
 	result := builder.String()
 
-	// 添加到历史记录
-	if result != "" {
-		ib.history = append(ib.history, result)
-		ib.historyPos = len(ib.history)
-	}
+	ib.AddToHistory(result)
 
 	return result, nil
 }
@@ -184,10 +178,23 @@ func (ib *InputBox) ReadTransientLineWithHooksContext(ctx context.Context, hooks
 
 // AddToHistory 添加到历史记录
 func (ib *InputBox) AddToHistory(input string) {
-	if input != "" {
-		ib.history = append(ib.history, input)
-		ib.historyPos = len(ib.history)
+	if ib == nil {
+		return
 	}
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return
+	}
+	if len(ib.history) > 0 && ib.history[len(ib.history)-1] == input {
+		ib.historyPos = len(ib.history)
+		return
+	}
+	ib.history = append(ib.history, input)
+	if len(ib.history) > defaultInputHistoryLimit {
+		overflow := len(ib.history) - defaultInputHistoryLimit
+		ib.history = append([]string(nil), ib.history[overflow:]...)
+	}
+	ib.historyPos = len(ib.history)
 }
 
 // ClearHistory 清空历史记录

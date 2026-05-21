@@ -86,6 +86,7 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 			default:
 			}
 			if cancelled {
+				interruptChatTurnFromBusyInputCancel(session)
 				if queue.isPriorityMode() {
 					queue.signalReadError(errChatInteractivePromptCancelled)
 					return
@@ -140,6 +141,17 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 		case <-done:
 		case <-time.After(250 * time.Millisecond):
 		}
+	}
+}
+
+func interruptChatTurnFromBusyInputCancel(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	wasInterrupted := session.IsInterrupted()
+	session.Interrupt()
+	if !wasInterrupted {
+		renderChatEscapeInterruptNotice(session)
 	}
 }
 
