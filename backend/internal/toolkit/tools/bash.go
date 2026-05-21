@@ -38,7 +38,12 @@ var defaultBlacklist = []string{
 	"> /dev/hda",
 }
 
-const modelHistoryArtifactThresholdBytes = 12 * 1024
+const (
+	modelHistoryArtifactThresholdBytes = 12 * 1024
+	defaultShellCommandTimeout         = 30 * time.Second
+	shellCommandTimeoutEnv             = "AICLI_SHELL_COMMAND_TIMEOUT"
+	shellCommandTimeoutMSEnv           = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
+)
 
 // NewBashTool 创建 Bash 工具
 func NewBashTool() *BashTool {
@@ -52,6 +57,18 @@ func NewBashTool() *BashTool {
 			"workdir": map[string]interface{}{
 				"type":        "string",
 				"description": "可选：命令执行的工作目录。绝对路径直接使用，相对路径基于当前工作目录解析。默认为当前工作目录。",
+			},
+			"timeout": map[string]interface{}{
+				"type":        "string",
+				"description": "可选：命令超时，例如 30s、2m、5m。默认 30s，可用 AICLI_SHELL_COMMAND_TIMEOUT 或 AICLI_SHELL_COMMAND_TIMEOUT_MS 调整全局默认；运行测试、构建、类型检查等可能超过默认值的命令时，应由模型显式设置更长超时。",
+			},
+			"timeout_ms": map[string]interface{}{
+				"type":        "integer",
+				"description": "可选：命令超时毫秒数，必须为正整数。优先级高于 timeout 和 timeout_sec。",
+			},
+			"timeout_sec": map[string]interface{}{
+				"type":        "integer",
+				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。",
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",
@@ -81,7 +98,7 @@ func NewBashTool() *BashTool {
 			true, // 支持直接调用
 		),
 		executer:  &DefaultCommandExecuter{},
-		timeout:   30 * time.Second,
+		timeout:   resolveDefaultShellCommandTimeout(),
 		blacklist: defaultBlacklist,
 	}
 }
@@ -105,6 +122,7 @@ type CommandExecutionResult struct {
 	RawOutputArtifactError string
 	ShellType              string
 	ShellPath              string
+	TimeoutMs              int64
 }
 
 type outputCaptureSettings struct {
@@ -142,6 +160,14 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Error:      err,
 		}, nil
 	}
+	timeout, err := parseShellCommandTimeout(params, b.timeout)
+	if err != nil {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      err,
+		}, nil
+	}
 
 	// 检查黑名单
 	if b.isBlacklisted(command) {
@@ -153,7 +179,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	// 使用 executer 执行命令
-	execResult, err := b.executeCommand(ctx, command, workdir, captureSettings)
+	execResult, err := b.executeCommand(ctx, command, workdir, timeout, captureSettings)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -172,7 +198,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}, nil
 }
 
-func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string, captureSettings outputCaptureSettings) (CommandExecutionResult, error) {
+func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string, timeout time.Duration, captureSettings outputCaptureSettings) (CommandExecutionResult, error) {
 	// 解析工作目录
 	resolvedWorkdir, err := resolveWorkdir(workdir)
 	if err != nil {
@@ -187,7 +213,9 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		if captureSettings.disableOutputCap {
 			opts = append(opts, WithDisableOutputCap())
 		}
-		return b.executer.Execute(ctx, command, b.timeout, opts...)
+		result, err := b.executer.Execute(ctx, command, timeout, opts...)
+		result.TimeoutMs = timeout.Milliseconds()
+		return result, err
 	}
 
 	mainCmd := extractPrimaryCommand(command)
@@ -208,9 +236,10 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		})
 	}
 
-	timeout := b.timeout
 	if configured := b.sandbox.Config().MaxExecutionTime; configured > 0 {
-		timeout = configured
+		if timeout <= 0 || timeout > configured {
+			timeout = configured
+		}
 	}
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -248,7 +277,8 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
 			applyCommandExecutionShell(result, shell)
-			return result, fmt.Errorf("命令执行超时（超过 %v）", timeout)
+			result.TimeoutMs = timeout.Milliseconds()
+			return result, shellCommandTimeoutError(timeout)
 		}
 		result := commandExecutionFromCapture(capture)
 		result.RawOutputArtifactPath = artifactPath
@@ -256,6 +286,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 			result.RawOutputArtifactError = artifactErr.Error()
 		}
 		applyCommandExecutionShell(result, shell)
+		result.TimeoutMs = timeout.Milliseconds()
 		return result, err
 	}
 	result := commandExecutionFromCapture(capture)
@@ -264,6 +295,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		result.RawOutputArtifactError = artifactErr.Error()
 	}
 	applyCommandExecutionShell(result, shell)
+	result.TimeoutMs = timeout.Milliseconds()
 	return result, nil
 }
 
@@ -364,7 +396,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
 			applyCommandExecutionShell(result, shell)
-			return result, fmt.Errorf("命令执行超时（超过 %v）", timeout)
+			return result, shellCommandTimeoutError(timeout)
 		}
 
 		// 检查常见错误并给出友好提示
@@ -454,6 +486,9 @@ func buildCommandExecutionMetadata(command string, mutatedPaths []string, result
 	}
 	if strings.TrimSpace(result.RawOutputArtifactError) != "" {
 		metadata["raw_output_artifact_error"] = result.RawOutputArtifactError
+	}
+	if result.TimeoutMs > 0 {
+		metadata["timeout_ms"] = result.TimeoutMs
 	}
 	shell := runtimeexecutor.Shell{
 		Type: runtimeexecutor.ShellType(strings.TrimSpace(result.ShellType)),
@@ -629,6 +664,73 @@ func parseOutputCaptureSettings(params map[string]interface{}) (outputCaptureSet
 	}
 
 	return settings, nil
+}
+
+func parseShellCommandTimeout(params map[string]interface{}, defaultTimeout time.Duration) (time.Duration, error) {
+	if defaultTimeout <= 0 {
+		defaultTimeout = resolveDefaultShellCommandTimeout()
+	}
+	if params == nil {
+		return defaultTimeout, nil
+	}
+
+	if raw, ok := params["timeout_ms"]; ok && raw != nil {
+		value, err := extractPositiveInt(raw)
+		if err != nil {
+			return 0, fmt.Errorf("timeout_ms 参数无效: %w", err)
+		}
+		return time.Duration(value) * time.Millisecond, nil
+	}
+	if raw, ok := params["timeout_sec"]; ok && raw != nil {
+		value, err := extractPositiveInt(raw)
+		if err != nil {
+			return 0, fmt.Errorf("timeout_sec 参数无效: %w", err)
+		}
+		return time.Duration(value) * time.Second, nil
+	}
+	if raw, ok := params["timeout"]; ok && raw != nil {
+		timeoutText, ok := raw.(string)
+		if !ok {
+			return defaultTimeout, nil
+		}
+		timeoutText = strings.TrimSpace(timeoutText)
+		if timeoutText == "" {
+			return defaultTimeout, nil
+		}
+		parsed, err := time.ParseDuration(timeoutText)
+		if err != nil || parsed <= 0 {
+			return 0, fmt.Errorf("timeout 参数无效: %q", timeoutText)
+		}
+		return parsed, nil
+	}
+	return defaultTimeout, nil
+}
+
+func shellCommandTimeoutError(timeout time.Duration) error {
+	return fmt.Errorf("命令执行超时（超过 %v）。如需继续运行长命令，请重试并显式设置 timeout（例如 2m、5m）或 timeout_ms/timeout_sec", timeout)
+}
+
+func resolveDefaultShellCommandTimeout() time.Duration {
+	return resolveShellTimeoutFromEnv(shellCommandTimeoutMSEnv, shellCommandTimeoutEnv, defaultShellCommandTimeout)
+}
+
+func resolveShellTimeoutFromEnv(timeoutMSEnv string, timeoutEnv string, fallback time.Duration) time.Duration {
+	if fallback <= 0 {
+		fallback = defaultShellCommandTimeout
+	}
+	if raw := strings.TrimSpace(os.Getenv(timeoutMSEnv)); raw != "" {
+		value, err := time.ParseDuration(raw + "ms")
+		if err == nil && value > 0 {
+			return value
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv(timeoutEnv)); raw != "" {
+		value, err := time.ParseDuration(raw)
+		if err == nil && value > 0 {
+			return value
+		}
+	}
+	return fallback
 }
 
 // extractString extracts a string value from a map, returning "" if not found.

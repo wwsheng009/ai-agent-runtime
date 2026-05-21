@@ -16,7 +16,12 @@ type ShellFunction struct {
 	executer CommandExecuter
 }
 
-const modelHistoryArtifactThresholdBytes = 12 * 1024
+const (
+	modelHistoryArtifactThresholdBytes = 12 * 1024
+	defaultShellFunctionTimeout        = 30 * time.Second
+	shellFunctionTimeoutEnv            = "AICLI_SHELL_COMMAND_TIMEOUT"
+	shellFunctionTimeoutMSEnv          = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
+)
 
 type ShellExecutionResult struct {
 	Output   string
@@ -115,11 +120,11 @@ func (e *DefaultCommandExecuter) ExecuteDetailed(ctx context.Context, command st
 	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureLimitBytesFromExecConfig(cfg), "function", command, "", outputMirror)
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "function", command)
 	outputStr := capture.Output
-	metadata := buildShellExecutionMetadata(command, outputStr, capture, artifactPath, artifactErr, shell, cfg.workdir)
+	metadata := buildShellExecutionMetadata(command, outputStr, capture, artifactPath, artifactErr, shell, cfg.workdir, timeout)
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return ShellExecutionResult{Output: outputStr, Metadata: metadata}, fmt.Errorf("命令执行超时（超过 %v）", timeout)
+			return ShellExecutionResult{Output: outputStr, Metadata: metadata}, shellFunctionTimeoutError(timeout)
 		}
 
 		// 针对常见错误给出友好提示
@@ -207,7 +212,7 @@ func GetEnvironmentInfo() string {
 	return getShellEnvironmentInfo()
 }
 
-func buildShellExecutionMetadata(command string, output string, capture runtimeexecutor.CombinedOutputCapture, artifactPath string, artifactErr error, shell runtimeexecutor.Shell, workdir string) map[string]interface{} {
+func buildShellExecutionMetadata(command string, output string, capture runtimeexecutor.CombinedOutputCapture, artifactPath string, artifactErr error, shell runtimeexecutor.Shell, workdir string, timeout time.Duration) map[string]interface{} {
 	retainedBytes := capture.RetainedBytes
 	if retainedBytes == 0 && output != "" {
 		retainedBytes = len(output)
@@ -223,6 +228,7 @@ func buildShellExecutionMetadata(command string, output string, capture runtimee
 	metadata := map[string]interface{}{
 		"command":                       command,
 		"command_length_bytes":          len(command),
+		"timeout_ms":                    timeout.Milliseconds(),
 		"output_size":                   len(output),
 		"captured_output_bytes":         retainedBytes,
 		"retained_output_bytes":         retainedBytes,
@@ -325,6 +331,73 @@ func buildOutputCaptureExecOptions(args map[string]interface{}) ([]ExecOption, e
 	return opts, nil
 }
 
+func parseShellFunctionTimeout(args map[string]interface{}, defaultTimeout time.Duration) (time.Duration, error) {
+	if defaultTimeout <= 0 {
+		defaultTimeout = resolveDefaultShellFunctionTimeout()
+	}
+	if args == nil {
+		return defaultTimeout, nil
+	}
+
+	if raw, ok := args["timeout_ms"]; ok && raw != nil {
+		value, err := extractPositiveInt(raw)
+		if err != nil {
+			return 0, fmt.Errorf("timeout_ms 参数无效: %w", err)
+		}
+		return time.Duration(value) * time.Millisecond, nil
+	}
+	if raw, ok := args["timeout_sec"]; ok && raw != nil {
+		value, err := extractPositiveInt(raw)
+		if err != nil {
+			return 0, fmt.Errorf("timeout_sec 参数无效: %w", err)
+		}
+		return time.Duration(value) * time.Second, nil
+	}
+	if raw, ok := args["timeout"]; ok && raw != nil {
+		timeoutText, ok := raw.(string)
+		if !ok {
+			return defaultTimeout, nil
+		}
+		timeoutText = strings.TrimSpace(timeoutText)
+		if timeoutText == "" {
+			return defaultTimeout, nil
+		}
+		parsed, err := time.ParseDuration(timeoutText)
+		if err != nil || parsed <= 0 {
+			return 0, fmt.Errorf("timeout 参数无效: %q", timeoutText)
+		}
+		return parsed, nil
+	}
+	return defaultTimeout, nil
+}
+
+func shellFunctionTimeoutError(timeout time.Duration) error {
+	return fmt.Errorf("命令执行超时（超过 %v）。如需继续运行长命令，请重试并显式设置 timeout（例如 2m、5m）或 timeout_ms/timeout_sec", timeout)
+}
+
+func resolveDefaultShellFunctionTimeout() time.Duration {
+	return resolveShellFunctionTimeoutFromEnv(shellFunctionTimeoutMSEnv, shellFunctionTimeoutEnv, defaultShellFunctionTimeout)
+}
+
+func resolveShellFunctionTimeoutFromEnv(timeoutMSEnv string, timeoutEnv string, fallback time.Duration) time.Duration {
+	if fallback <= 0 {
+		fallback = defaultShellFunctionTimeout
+	}
+	if raw := strings.TrimSpace(os.Getenv(timeoutMSEnv)); raw != "" {
+		value, err := time.ParseDuration(raw + "ms")
+		if err == nil && value > 0 {
+			return value
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv(timeoutEnv)); raw != "" {
+		value, err := time.ParseDuration(raw)
+		if err == nil && value > 0 {
+			return value
+		}
+	}
+	return fallback
+}
+
 func extractPositiveInt(value interface{}) (int, error) {
 	switch typed := value.(type) {
 	case int:
@@ -387,6 +460,18 @@ func (f *ShellFunction) Parameters() map[string]interface{} {
 				"type":        "string",
 				"description": "可选：命令执行的工作目录。绝对路径直接使用，相对路径基于当前工作目录解析。默认为当前工作目录。路径请使用正斜杠（如 E:/projects/foo）以兼容所有平台。",
 			},
+			"timeout": map[string]interface{}{
+				"type":        "string",
+				"description": "可选：命令超时，例如 30s、2m、5m。默认 30s，可用 AICLI_SHELL_COMMAND_TIMEOUT 或 AICLI_SHELL_COMMAND_TIMEOUT_MS 调整全局默认；运行测试、构建、类型检查等可能超过默认值的命令时，应由模型显式设置更长超时。",
+			},
+			"timeout_ms": map[string]interface{}{
+				"type":        "integer",
+				"description": "可选：命令超时毫秒数，必须为正整数。优先级高于 timeout 和 timeout_sec。",
+			},
+			"timeout_sec": map[string]interface{}{
+				"type":        "integer",
+				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。",
+			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",
 				"description": "可选：stdout/stderr 合并输出的保留上限（字节）。用于覆盖默认 256KB capture limit；必须为正整数，不能与 disable_output_cap 同时设置。",
@@ -428,13 +513,16 @@ func (f *ShellFunction) ExecuteWithMeta(ctx context.Context, args map[string]int
 		return "", nil, err
 	}
 	opts = append(opts, captureOpts...)
+	timeout, err := parseShellFunctionTimeout(args, resolveDefaultShellFunctionTimeout())
+	if err != nil {
+		return "", nil, err
+	}
 
-	// 执行命令，30秒超时
 	if rich, ok := f.executer.(DetailedCommandExecuter); ok {
-		result, err := rich.ExecuteDetailed(ctx, command, 30*time.Second, opts...)
+		result, err := rich.ExecuteDetailed(ctx, command, timeout, opts...)
 		return result.Output, result.Metadata, err
 	}
-	output, err := f.executer.Execute(ctx, command, 30*time.Second, opts...)
+	output, err := f.executer.Execute(ctx, command, timeout, opts...)
 	return output, nil, err
 }
 

@@ -23,9 +23,10 @@ func (f fakeExecuter) Execute(ctx context.Context, command string, timeout time.
 }
 
 type inspectExecuter struct {
-	result     CommandExecutionResult
-	err        error
-	lastConfig execConfig
+	result      CommandExecutionResult
+	err         error
+	lastConfig  execConfig
+	lastTimeout time.Duration
 }
 
 func (f *inspectExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (CommandExecutionResult, error) {
@@ -34,6 +35,7 @@ func (f *inspectExecuter) Execute(ctx context.Context, command string, timeout t
 		opt(&cfg)
 	}
 	f.lastConfig = cfg
+	f.lastTimeout = timeout
 	return f.result, f.err
 }
 
@@ -104,6 +106,9 @@ func TestExecuteShellCommandTool_DescribesDetectedWindowsShellAndWorkdir(t *test
 	if !strings.Contains(commandDescription, "workdir") || !strings.Contains(commandDescription, "get-location") || !strings.Contains(commandDescription, "head") || !strings.Contains(commandDescription, "select-object") {
 		t.Fatalf("command description should mention workdir, Get-Location, and head guidance, got %q", commandDescription)
 	}
+	if _, ok := properties["timeout_ms"]; !ok {
+		t.Fatalf("expected timeout_ms parameter in execute_shell_command schema: %#v", properties)
+	}
 }
 
 func TestBashTool_CommandDescriptionMentionsPowerShellHeadCompatibility(t *testing.T) {
@@ -124,6 +129,175 @@ func TestBashTool_CommandDescriptionMentionsPowerShellHeadCompatibility(t *testi
 	commandDescription := strings.ToLower(fmt.Sprint(commandSchema["description"]))
 	if !strings.Contains(commandDescription, "powershell") || !strings.Contains(commandDescription, "head") || !strings.Contains(commandDescription, "select-object") {
 		t.Fatalf("bash command description should mention PowerShell head compatibility, got %q", commandDescription)
+	}
+	if _, ok := properties["timeout_ms"]; !ok {
+		t.Fatalf("expected timeout_ms parameter in bash schema: %#v", properties)
+	}
+}
+
+func TestBashTool_PassesExplicitTimeoutToExecuter(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":    "npx tsc --noEmit",
+		"timeout_ms": 120000,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if inspector.lastTimeout != 120*time.Second {
+		t.Fatalf("expected explicit timeout to reach executer, got %v", inspector.lastTimeout)
+	}
+	if got := result.Metadata["timeout_ms"]; got != int64(120000) {
+		t.Fatalf("expected timeout_ms metadata, got %#v", got)
+	}
+}
+
+func TestBashTool_UsesEnvDefaultTimeout(t *testing.T) {
+	t.Setenv(shellCommandTimeoutEnv, "90s")
+	t.Setenv(shellCommandTimeoutMSEnv, "")
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "npx tsc --noEmit",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if inspector.lastTimeout != 90*time.Second {
+		t.Fatalf("expected env default timeout to reach executer, got %v", inspector.lastTimeout)
+	}
+	if got := result.Metadata["timeout_ms"]; got != int64(90000) {
+		t.Fatalf("expected env timeout_ms metadata, got %#v", got)
+	}
+}
+
+func TestBashTool_NonStringTimeoutFallsBackToDefault(t *testing.T) {
+	t.Setenv(shellCommandTimeoutEnv, "45s")
+	t.Setenv(shellCommandTimeoutMSEnv, "")
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "pwsh --version",
+		"timeout": 30,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success with default timeout, got error: %v", result.Error)
+	}
+	if inspector.lastTimeout != 45*time.Second {
+		t.Fatalf("expected non-string timeout to fall back to default, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestBashTool_ExplicitTimeoutOverridesEnvDefault(t *testing.T) {
+	t.Setenv(shellCommandTimeoutEnv, "90s")
+	t.Setenv(shellCommandTimeoutMSEnv, "")
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":    "npx tsc --noEmit",
+		"timeout_ms": 120000,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if inspector.lastTimeout != 120*time.Second {
+		t.Fatalf("expected explicit timeout to override env default, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestBashTool_RejectsInvalidTimeout(t *testing.T) {
+	tool := NewBashTool()
+	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":    "npx tsc --noEmit",
+		"timeout_ms": 0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success || result.Error == nil || !strings.Contains(result.Error.Error(), "timeout_ms 参数无效") {
+		t.Fatalf("expected timeout validation error, got success=%v error=%v", result.Success, result.Error)
+	}
+}
+
+func TestBashTool_EnvDefaultTimeoutStopsRealWindowsCommand(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-specific real shell timeout verification")
+	}
+	shell := runtimeexecutor.DefaultUserShell()
+	if shell.Type == runtimeexecutor.ShellTypeCmd {
+		t.Skip("test requires PowerShell or pwsh for millisecond sleep")
+	}
+	t.Setenv(shellCommandTimeoutEnv, "")
+	t.Setenv(shellCommandTimeoutMSEnv, "100")
+
+	tool := NewBashTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "Start-Sleep -Milliseconds 500; Write-Output done",
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected real command to time out, got success with output %q", result.Content)
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "命令执行超时") {
+		t.Fatalf("expected timeout error, got %v", result.Error)
+	}
+	if got := result.Metadata["timeout_ms"]; got != int64(100) {
+		t.Fatalf("expected timeout_ms metadata from env default, got %#v", got)
+	}
+}
+
+func TestBashTool_ExplicitTimeoutOverridesEnvDefaultForRealWindowsCommand(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-specific real shell timeout verification")
+	}
+	shell := runtimeexecutor.DefaultUserShell()
+	if shell.Type == runtimeexecutor.ShellTypeCmd {
+		t.Skip("test requires PowerShell or pwsh for millisecond sleep")
+	}
+	t.Setenv(shellCommandTimeoutEnv, "")
+	t.Setenv(shellCommandTimeoutMSEnv, "100")
+
+	tool := NewBashTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":    "Start-Sleep -Milliseconds 500; Write-Output done",
+		"timeout_ms": 5000,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected real command to complete with explicit timeout, got error %v output %q", result.Error, result.Content)
+	}
+	if !strings.Contains(result.Content, "done") {
+		t.Fatalf("expected command output to contain done, got %q", result.Content)
+	}
+	if got := result.Metadata["timeout_ms"]; got != int64(5000) {
+		t.Fatalf("expected explicit timeout_ms metadata, got %#v", got)
 	}
 }
 

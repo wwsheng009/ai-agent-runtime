@@ -209,10 +209,12 @@ func TestNormalizeFunctionParameters_RepairsNullProperties(t *testing.T) {
 		t.Fatalf("expected null properties to become empty object, got %#v", params["properties"])
 	}
 }
+
 type inspectShellExecuter struct {
-	output     string
-	err        error
-	lastConfig execConfig
+	output      string
+	err         error
+	lastConfig  execConfig
+	lastTimeout time.Duration
 }
 
 func (e *inspectShellExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (string, error) {
@@ -221,13 +223,15 @@ func (e *inspectShellExecuter) Execute(ctx context.Context, command string, time
 		opt(&cfg)
 	}
 	e.lastConfig = cfg
+	e.lastTimeout = timeout
 	return e.output, e.err
 }
 
 type inspectDetailedShellExecuter struct {
-	result     ShellExecutionResult
-	err        error
-	lastConfig execConfig
+	result      ShellExecutionResult
+	err         error
+	lastConfig  execConfig
+	lastTimeout time.Duration
 }
 
 func (e *inspectDetailedShellExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (string, error) {
@@ -236,6 +240,7 @@ func (e *inspectDetailedShellExecuter) Execute(ctx context.Context, command stri
 		opt(&cfg)
 	}
 	e.lastConfig = cfg
+	e.lastTimeout = timeout
 	return e.result.Output, e.err
 }
 
@@ -245,6 +250,7 @@ func (e *inspectDetailedShellExecuter) ExecuteDetailed(ctx context.Context, comm
 		opt(&cfg)
 	}
 	e.lastConfig = cfg
+	e.lastTimeout = timeout
 	return e.result, e.err
 }
 
@@ -268,6 +274,104 @@ func TestShellFunction_PassesOutputCaptureOptions(t *testing.T) {
 	}
 	if inspector.lastConfig.disableOutputCap {
 		t.Fatalf("did not expect disableOutputCap, got %+v", inspector.lastConfig)
+	}
+}
+
+func TestShellFunction_PassesExplicitTimeout(t *testing.T) {
+	fn := NewShellFunction()
+	inspector := &inspectShellExecuter{output: "ok"}
+	fn.SetExecuter(inspector)
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command":    "npx tsc --noEmit",
+		"timeout_ms": 120000,
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected output ok, got %q", output)
+	}
+	if inspector.lastTimeout != 120*time.Second {
+		t.Fatalf("expected explicit timeout to reach executer, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestShellFunction_UsesEnvDefaultTimeout(t *testing.T) {
+	t.Setenv(shellFunctionTimeoutEnv, "90s")
+	t.Setenv(shellFunctionTimeoutMSEnv, "")
+	fn := NewShellFunction()
+	inspector := &inspectShellExecuter{output: "ok"}
+	fn.SetExecuter(inspector)
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command": "npx tsc --noEmit",
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected output ok, got %q", output)
+	}
+	if inspector.lastTimeout != 90*time.Second {
+		t.Fatalf("expected env default timeout to reach executer, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestShellFunction_NonStringTimeoutFallsBackToDefault(t *testing.T) {
+	t.Setenv(shellFunctionTimeoutEnv, "45s")
+	t.Setenv(shellFunctionTimeoutMSEnv, "")
+	fn := NewShellFunction()
+	inspector := &inspectShellExecuter{output: "ok"}
+	fn.SetExecuter(inspector)
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command": "pwsh --version",
+		"timeout": 30,
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected output ok, got %q", output)
+	}
+	if inspector.lastTimeout != 45*time.Second {
+		t.Fatalf("expected non-string timeout to fall back to default, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestShellFunction_ExplicitTimeoutOverridesEnvDefault(t *testing.T) {
+	t.Setenv(shellFunctionTimeoutEnv, "90s")
+	t.Setenv(shellFunctionTimeoutMSEnv, "")
+	fn := NewShellFunction()
+	inspector := &inspectShellExecuter{output: "ok"}
+	fn.SetExecuter(inspector)
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command":    "npx tsc --noEmit",
+		"timeout_ms": 120000,
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected output ok, got %q", output)
+	}
+	if inspector.lastTimeout != 120*time.Second {
+		t.Fatalf("expected explicit timeout to override env default, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestShellFunction_RejectsInvalidTimeout(t *testing.T) {
+	fn := NewShellFunction()
+	fn.SetExecuter(&inspectShellExecuter{output: "ok"})
+
+	_, err := fn.Execute(context.Background(), map[string]interface{}{
+		"command":    "npx tsc --noEmit",
+		"timeout_ms": 0,
+	})
+	if err == nil || !strings.Contains(err.Error(), "timeout_ms 参数无效") {
+		t.Fatalf("expected timeout validation error, got %v", err)
 	}
 }
 
@@ -446,6 +550,9 @@ func TestShellFunction_DescriptionAndParameters_MentionPowerShellHeadGuidance(t 
 	if !strings.Contains(commandDescription, "head") || !strings.Contains(commandDescription, "select-object") || !strings.Contains(commandDescription, "get-location") {
 		t.Fatalf("expected shell command schema to mention PowerShell head guidance, got %q", commandDescription)
 	}
+	if _, ok := properties["timeout_ms"]; !ok {
+		t.Fatalf("expected timeout_ms parameter in shell function schema: %#v", properties)
+	}
 }
 
 func TestBuildShellExecutionMetadata_RecordsSelectedShell(t *testing.T) {
@@ -465,6 +572,7 @@ func TestBuildShellExecutionMetadata_RecordsSelectedShell(t *testing.T) {
 			Path: `C:\Program Files\PowerShell\7\pwsh.exe`,
 		},
 		workdir,
+		2*time.Minute,
 	)
 
 	if got := metadata["shell_type"]; got != "pwsh" {
@@ -481,6 +589,9 @@ func TestBuildShellExecutionMetadata_RecordsSelectedShell(t *testing.T) {
 	}
 	if got := metadata["command_length_bytes"]; got != len("git status --short") {
 		t.Fatalf("expected command_length_bytes to be preserved, got %#v", got)
+	}
+	if got := metadata["timeout_ms"]; got != int64(120000) {
+		t.Fatalf("expected timeout_ms to be preserved, got %#v", got)
 	}
 }
 

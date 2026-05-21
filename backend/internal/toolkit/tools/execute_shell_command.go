@@ -27,6 +27,18 @@ func NewExecuteShellCommandTool() *ExecuteShellCommandTool {
 				"type":        "string",
 				"description": "可选：命令执行的工作目录。绝对路径直接使用，相对路径基于当前工作目录解析。默认为当前工作目录。路径请使用正斜杠（如 E:/projects/foo）以兼容所有平台。",
 			},
+			"timeout": map[string]interface{}{
+				"type":        "string",
+				"description": "可选：命令超时，例如 30s、2m、5m。默认 30s，可用 AICLI_SHELL_COMMAND_TIMEOUT 或 AICLI_SHELL_COMMAND_TIMEOUT_MS 调整全局默认；运行测试、构建、类型检查等可能超过默认值的命令时，应由模型显式设置更长超时。",
+			},
+			"timeout_ms": map[string]interface{}{
+				"type":        "integer",
+				"description": "可选：命令超时毫秒数，必须为正整数。优先级高于 timeout 和 timeout_sec。",
+			},
+			"timeout_sec": map[string]interface{}{
+				"type":        "integer",
+				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。",
+			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",
 				"description": "可选：stdout/stderr 合并输出的保留上限（字节）。用于覆盖默认 256KB capture limit；必须为正整数，不能与 disable_output_cap 同时设置。",
