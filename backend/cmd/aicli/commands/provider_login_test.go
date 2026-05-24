@@ -1029,6 +1029,109 @@ func TestRunProviderLogin_DoesNotWriteOnModelsFailure(t *testing.T) {
 	}
 }
 
+func TestRunProviderLogin_InteractiveManualModelsWhenEndpointReturnsHTML(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html>not found</html>`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+	prompter := &testLoginPrompter{text: map[string]string{
+		"模型列表（逗号分隔）": "manual-model, manual-model-2",
+	}}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "manual_html",
+		LoginProtocol: "openai",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+		Interactive:   true,
+		Prompter:      prompter,
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.LoginProtocol != "openai" || result.Protocol != "openai" {
+		t.Fatalf("unexpected protocol result: %+v", result)
+	}
+	if result.ModelsVerifiedAt != "" {
+		t.Fatalf("manual models should not be marked verified, got %q", result.ModelsVerifiedAt)
+	}
+	if strings.Join(result.SupportedModels, ",") != "manual-model,manual-model-2" || result.DefaultModel != "manual-model" {
+		t.Fatalf("unexpected manual models result: %+v", result)
+	}
+	provider := cfg.Providers.Items["manual_html"]
+	if strings.Join(provider.SupportedModels, ",") != "manual-model,manual-model-2" || provider.DefaultModel != "manual-model" {
+		t.Fatalf("unexpected persisted provider: %+v", provider)
+	}
+}
+
+func TestRunProviderLogin_AutoInteractivePromptsExplicitProtocolAndManualModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html>not json</html>`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+	prompter := &testLoginPrompter{text: map[string]string{
+		"协议编号或名称":    "1",
+		"模型列表（逗号分隔）": "manual-auto-model",
+	}}
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "manual_auto",
+		LoginProtocol: "auto",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+		Interactive:   true,
+		Prompter:      prompter,
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.LoginProtocol != "openai" || result.Protocol != "openai" || result.DefaultModel != "manual-auto-model" {
+		t.Fatalf("auto fallback should require explicit protocol and manual model, got %+v", result)
+	}
+}
+
+func TestRunProviderLogin_AutoNonInteractiveReportsUnsupportedWithoutModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html>not json</html>`))
+	}))
+	defer server.Close()
+
+	_, err := runProviderLogin(providerLoginRequest{
+		Config:        &config.Config{},
+		ProviderName:  "bad_auto",
+		LoginProtocol: "auto",
+		BaseURL:       server.URL,
+		APIKey:        "sk-test",
+	})
+	if err == nil {
+		t.Fatal("expected auto unsupported error")
+	}
+	if !strings.Contains(err.Error(), "auto protocol is not supported") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRunProviderLogin_PartialEditPreservesExistingAPIKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer old-key" {

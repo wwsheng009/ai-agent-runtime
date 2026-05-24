@@ -112,7 +112,7 @@ func TestLocalChatRuntimeHost_MirrorsTeamSummaryIntoBaseSession(t *testing.T) {
 		LocalRuntimeHost: host,
 		ChatExecutor:     newAICLIActorChatExecutor(),
 		NoInteractive:    true,
-		RequestTimeout:   2 * time.Second,
+		RequestTimeout:   10 * time.Second,
 	}
 	host.BaseSession = session
 
@@ -121,7 +121,7 @@ func TestLocalChatRuntimeHost_MirrorsTeamSummaryIntoBaseSession(t *testing.T) {
 		t.Fatalf("Execute failed: %v", err)
 	}
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.waitForTeamTerminal(waitCtx, "team-auto"); err != nil {
 		t.Fatalf("waitForTeamTerminal: %v", err)

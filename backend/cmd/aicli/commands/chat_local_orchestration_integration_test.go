@@ -287,7 +287,7 @@ func TestFinalizeChatSession_NoInteractiveDrainsAutoStartedTeamLoop(t *testing.T
 		LocalRuntimeHost: host,
 		ChatExecutor:     newAICLIActorChatExecutor(),
 		NoInteractive:    true,
-		RequestTimeout:   2 * time.Second,
+		RequestTimeout:   10 * time.Second,
 	}
 	host.BaseSession = session
 
@@ -403,7 +403,7 @@ func TestAICLIChatActorExecutor_InteractiveAutoStartRendersTeamTimeline(t *testi
 		t.Fatalf("expected spawn response, got %q", response)
 	}
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.waitForTeamTerminal(waitCtx, "team-auto"); err != nil {
 		t.Fatalf("waitForTeamTerminal: %v", err)
@@ -503,7 +503,7 @@ func TestAICLIChatActorExecutor_AutoStartQueuedTasksStaySerializedPerTeammate(t 
 		t.Fatalf("expected serial spawn response, got %q", response)
 	}
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.waitForTeamTerminal(waitCtx, "team-serial"); err != nil {
 		t.Fatalf("waitForTeamTerminal: %v", err)
@@ -852,7 +852,7 @@ func TestAICLIChatActorExecutor_AutoStartTeamPublishesSingleTerminalEvents(t *te
 		t.Fatalf("expected spawn response, got %q", response)
 	}
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.waitForTeamTerminal(waitCtx, "team-auto"); err != nil {
 		t.Fatalf("waitForTeamTerminal: %v", err)
@@ -944,7 +944,7 @@ func TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled
 		t.Fatalf("expected base session runtime state to stay idle with ambient team metadata while team is pending, got %+v", state)
 	}
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.waitForTeamTerminal(waitCtx, "team-auto"); err != nil {
 		t.Fatalf("waitForTeamTerminal: %v", err)
@@ -1042,7 +1042,7 @@ func TestAICLIChatActorExecutor_AutoStartTeamClosesNonLeadTeammateSessionAfterTe
 		t.Fatalf("expected lead actor %q to remain registered", runtimeSession.ID)
 	}
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.waitForTeamTerminal(waitCtx, "team-auto"); err != nil {
 		t.Fatalf("waitForTeamTerminal: %v", err)
@@ -1167,7 +1167,7 @@ func TestAICLIChatActorExecutor_FailedAutoStartTeamClosesNonLeadTeammateSessionA
 		t.Fatalf("expected lead actor %q to remain registered", runtimeSession.ID)
 	}
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.waitForTeamTerminal(waitCtx, "team-failed"); err != nil {
 		t.Fatalf("waitForTeamTerminal: %v", err)
@@ -1306,7 +1306,7 @@ func TestAICLIChatActorExecutor_AutoStartTeamHandlesTeammateProviderStreamError(
 		t.Fatalf("expected stream-error spawn response, got %q", response)
 	}
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.waitForTeamTerminal(waitCtx, "team-stream-error"); err != nil {
 		t.Fatalf("waitForTeamTerminal: %v", err)

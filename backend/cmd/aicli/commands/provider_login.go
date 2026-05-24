@@ -189,7 +189,13 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 
 	modelsResult, modelsPath, validationLoginProtocol, err := validateProviderLoginModels(cfg, providerName, candidate, loginProtocol, req.ModelsPath, req.Timeout)
 	if err != nil {
-		return nil, err
+		fallbackResult, fallbackPath, fallbackProtocol, fallbackErr := resolveProviderLoginModelsManually(req, candidate, loginProtocol, err)
+		if fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		modelsResult = fallbackResult
+		modelsPath = fallbackPath
+		validationLoginProtocol = fallbackProtocol
 	}
 	candidate.ModelsPath = modelsPath
 
@@ -656,6 +662,116 @@ func validateProviderLoginModels(
 		errors = append(errors, fmt.Sprintf("%s: %v", attempt, err))
 	}
 	return nil, "", "", fmt.Errorf("auto protocol models validation failed; attempts: %s", strings.Join(errors, " | "))
+}
+
+func resolveProviderLoginModelsManually(
+	req providerLoginRequest,
+	provider config.Provider,
+	loginProtocol string,
+	validationErr error,
+) (*providerModelsValidationResult, string, string, error) {
+	if !req.Interactive || req.Prompter == nil {
+		if isAutoLoginProtocol(loginProtocol) {
+			return nil, "", "", fmt.Errorf("auto protocol is not supported when the models endpoint does not return a valid model list; specify --protocol and --default-model manually, or provide a working --models-path: %w", validationErr)
+		}
+		return nil, "", "", validationErr
+	}
+
+	req.Prompter.PrintLine(fmt.Sprintf("模型列表自动校验失败: %v", validationErr))
+	if isAutoLoginProtocol(loginProtocol) {
+		req.Prompter.PrintLine("auto 协议依赖可解析的 models endpoint；当前服务无法自动识别协议，请改用显式协议并手动填写模型。")
+		selected, err := promptExplicitLoginProtocol(req.Prompter)
+		if err != nil {
+			return nil, "", "", err
+		}
+		loginProtocol = selected
+	}
+
+	models, err := promptProviderLoginManualModels(req.Prompter, req.DefaultModel, provider.DefaultModel)
+	if err != nil {
+		return nil, "", "", err
+	}
+	resolvedPath := resolveProviderModelsPath(loginProtocol, provider, req.ModelsPath)
+	endpoint, _ := buildProviderModelsURL(provider, resolvedPath)
+	return &providerModelsValidationResult{
+		Endpoint: endpoint,
+		Models:   models,
+	}, resolvedPath, loginProtocol, nil
+}
+
+func promptExplicitLoginProtocol(prompter providerLoginPrompter) (string, error) {
+	options := make([]string, 0, len(loginProtocolOptions()))
+	for _, option := range loginProtocolOptions() {
+		if !isAutoLoginProtocol(option) {
+			options = append(options, option)
+		}
+	}
+	prompter.PrintLine("请选择显式登录协议:")
+	for i, option := range options {
+		prompter.PrintLine(fmt.Sprintf("  [%d] %s", i+1, option))
+	}
+	for {
+		value, err := prompter.PromptText("协议编号或名称", "openai", true)
+		if err != nil {
+			return "", err
+		}
+		value = strings.TrimSpace(value)
+		for i, option := range options {
+			if value == fmt.Sprintf("%d", i+1) || strings.EqualFold(value, option) {
+				return option, nil
+			}
+		}
+		if value == "" {
+			return "openai", nil
+		}
+		prompter.PrintLine("无效协议，请重新输入")
+	}
+}
+
+func promptProviderLoginManualModels(prompter providerLoginPrompter, requestedDefault, existingDefault string) ([]providerModelInfo, error) {
+	current := strings.TrimSpace(requestedDefault)
+	if current == "" {
+		current = strings.TrimSpace(existingDefault)
+	}
+	value, err := prompter.PromptText("模型列表（逗号分隔）", current, true)
+	if err != nil {
+		return nil, err
+	}
+	ids := splitProviderLoginManualModelIDs(value)
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("manual model list is empty")
+	}
+	models := make([]providerModelInfo, 0, len(ids))
+	for _, id := range ids {
+		models = append(models, providerModelInfo{ID: id, DisplayName: id})
+	}
+	return models, nil
+}
+
+func splitProviderLoginManualModelIDs(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		switch r {
+		case ',', '\n', '\r', '\t', ' ':
+			return true
+		default:
+			return false
+		}
+	})
+	seen := make(map[string]struct{}, len(fields))
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		id := strings.TrimSpace(field)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func providerLoginAutoValidationProtocols(provider config.Provider) []string {
