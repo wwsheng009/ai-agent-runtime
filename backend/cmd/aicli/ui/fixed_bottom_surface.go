@@ -217,7 +217,7 @@ func (s *FixedBottomSurface) WriteOutput(writer io.Writer, text string) (int, er
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		s.moveToOutputLocked()
-		n, err = io.WriteString(writer, text)
+		n, err = io.WriteString(writer, normalizeFixedSurfaceOutputText(text))
 		s.resetScrollCompensationLocked()
 		s.restoreStoredPromptCursorLocked()
 	})
@@ -1002,7 +1002,7 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 	s.terminal.ClearLine()
 	line := truncateFixedStatusLine(state.StatusLine, s.terminal.Width())
 	if line != "" {
-		fmt.Print(GetTheme(ThemeAuto).Dimmed(line))
+		fmt.Print(formatFixedStatusLine(line, GetTheme(ThemeAuto)))
 	}
 	s.terminal.ClearLine()
 }
@@ -1621,6 +1621,42 @@ func truncateFixedStatusLine(line string, width int) string {
 	return builder.String()
 }
 
+func formatFixedStatusLine(line string, theme *Theme) string {
+	if line == "" {
+		return ""
+	}
+	if theme == nil {
+		theme = GetTheme(ThemeAuto)
+	}
+
+	state, rest, hasRest := strings.Cut(line, " | ")
+	formattedState := formatFixedStatusState(state, theme)
+	if !hasRest {
+		return formattedState
+	}
+	return formattedState + theme.Dimmed(" | "+rest)
+}
+
+func formatFixedStatusState(state string, theme *Theme) string {
+	if theme == nil {
+		theme = GetTheme(ThemeAuto)
+	}
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "ready", "idle":
+		return theme.SuccessColor.Sprint(state)
+	case "streaming", "running", "working":
+		return theme.ToolColor.Sprint(state)
+	case "thinking", "reasoning":
+		return theme.ReasoningColor.Sprint(state)
+	case "waiting", "pending", "busy":
+		return theme.WarningColor.Sprint(state)
+	case "error", "failed", "interrupted", "cancelled", "canceled":
+		return theme.ErrorColor.Sprint(state)
+	default:
+		return theme.InfoColor.Sprint(state)
+	}
+}
+
 func truncateFixedPopupLine(line string, width int) string {
 	if width <= 0 {
 		width = 80
@@ -1663,6 +1699,15 @@ func cloneAndSanitizePopupLines(lines []string) []string {
 		out = append(out, line)
 	}
 	return out
+}
+
+func normalizeFixedSurfaceOutputText(text string) string {
+	if text == "" {
+		return ""
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return strings.ReplaceAll(text, "\n", "\r\n")
 }
 
 func buildPendingPastePreviewLines(lines int, text string) []string {

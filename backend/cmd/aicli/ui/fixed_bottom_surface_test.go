@@ -24,6 +24,42 @@ func TestTruncateFixedStatusLineAddsAsciiEllipsis(t *testing.T) {
 	}
 }
 
+func TestFormatFixedStatusLineColorsStateOnly(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = false
+	defer func() { color.NoColor = oldNoColor }()
+
+	theme := createTheme(ThemeDark)
+	got := formatFixedStatusLine("Ready | model mimo", theme)
+	want := theme.SuccessColor.Sprint("Ready") + theme.Dimmed(" | model mimo")
+	if got != want {
+		t.Fatalf("unexpected formatted status line:\nwant %q\n got %q", want, got)
+	}
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("expected ANSI color sequences, got %q", got)
+	}
+}
+
+func TestFormatFixedStatusStateUsesDifferentColors(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = false
+	defer func() { color.NoColor = oldNoColor }()
+
+	theme := createTheme(ThemeDark)
+	cases := map[string]string{
+		"Ready":     theme.SuccessColor.Sprint("Ready"),
+		"Streaming": theme.ToolColor.Sprint("Streaming"),
+		"Thinking":  theme.ReasoningColor.Sprint("Thinking"),
+		"Waiting":   theme.WarningColor.Sprint("Waiting"),
+		"Error":     theme.ErrorColor.Sprint("Error"),
+	}
+	for state, want := range cases {
+		if got := formatFixedStatusState(state, theme); got != want {
+			t.Fatalf("unexpected color for %s:\nwant %q\n got %q", state, want, got)
+		}
+	}
+}
+
 func TestFixedBottomSurface_ShowPopupClampsToViewportHeight(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true
@@ -977,7 +1013,7 @@ func TestFixedBottomSurface_WriteOutputUsesOutputRegionWithPromptReserved(t *tes
 		}
 	})
 
-	if !strings.Contains(output, "\x1b[22;1Hreasoning\n") {
+	if !strings.Contains(output, "\x1b[22;1Hreasoning\r\n") {
 		t.Fatalf("expected output to be written above prompt row, got %q", output)
 	}
 	if strings.Contains(output, "\x1b[23;1Hreasoning") {
@@ -985,6 +1021,26 @@ func TestFixedBottomSurface_WriteOutputUsesOutputRegionWithPromptReserved(t *tes
 	}
 	if !strings.HasSuffix(output, "\x1b[23;3H") {
 		t.Fatalf("expected cursor to return after visible prompt, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_WriteOutputNormalizesNewlinesForRawUnixTerminals(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+
+	output := captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+		if _, err, ok := surface.WriteOutput(os.Stdout, "first\nsecond\r\nthird\rfourth"); !ok || err != nil {
+			t.Fatalf("expected surface output write to be handled, ok=%t err=%v", ok, err)
+		}
+	})
+
+	if !strings.Contains(output, "first\r\nsecond\r\nthird\r\nfourth") {
+		t.Fatalf("expected surface output newlines to be normalized to CRLF, got %q", output)
+	}
+	if strings.Contains(output, "first\nsecond") || strings.Contains(output, "second\r\nthird\rfourth") {
+		t.Fatalf("expected no bare LF/CR in rendered surface output, got %q", output)
 	}
 }
 
