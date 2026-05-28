@@ -22,6 +22,7 @@ var ErrInteractiveInputExitRequested = errors.New("interactive input exit reques
 var errInteractiveInputReadinessUnsupported = errors.New("interactive input readiness unsupported")
 var waitForInteractiveInputReady = platformWaitForInteractiveInputReady
 var readInteractiveClipboardText = platformClipboardText
+var consumeSpecialInteractiveKey = platformConsumeSpecialInteractiveKey
 
 const (
 	bracketedPasteEnableSequence  = "\x1b[?2004h"
@@ -81,6 +82,7 @@ type editorKey struct {
 	kind               editorKeyKind
 	r                  rune
 	fromCarriageReturn bool
+	fromConsoleCtrlV   bool
 }
 
 var interactiveInputCarryover struct {
@@ -303,6 +305,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 	}
 	line := []rune(initialText)
 	composer := NewComposerState()
+	composer.SetText(initialText)
 	cursor := initialCursor
 	if cursor < 0 || cursor > len(line) {
 		cursor = len(line)
@@ -389,7 +392,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 	}
 	applyReplacement := func(repl LineEditorReplacement) {
 		promoteDraft()
-		line = []rune(repl.Text)
+		composer.ReplaceText(repl.Text)
+		line = []rune(composer.Text())
 		cursor = repl.Cursor
 		if cursor < 0 {
 			cursor = len(line)
@@ -503,7 +507,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 	}
 
 	setLine := func(next []rune) {
-		line = append(line[:0], next...)
+		composer.ReplaceText(string(next))
+		line = []rune(composer.Text())
 		cursor = len(line)
 		emitChange()
 		redraw()
@@ -517,8 +522,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		reverseSearchQuery = reverseSearchQuery[:0]
 		reverseSearchStart = len(history)
 		promoteDraft()
-		line = append(line[:cursor], append(chars, line[cursor:]...)...)
-		cursor += len(chars)
+		cursor = composer.InsertTextAt(cursor, string(chars))
+		line = []rune(composer.Text())
 		emitChange()
 		redraw()
 	}
@@ -532,7 +537,6 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		reverseSearchQuery = reverseSearchQuery[:0]
 		reverseSearchStart = len(history)
 		promoteDraft()
-		composer.SetText(string(line))
 		cursor = composer.HandlePasteAt(cursor, text)
 		line = []rune(composer.Text())
 		emitChange()
@@ -547,14 +551,13 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		reverseSearchQuery = reverseSearchQuery[:0]
 		reverseSearchStart = len(history)
 		promoteDraft()
-		line = append(line[:cursor], append([]rune{ch}, line[cursor:]...)...)
-		cursor++
+		cursor = composer.InsertTextAt(cursor, string(ch))
+		line = []rune(composer.Text())
 		emitChange()
 		redraw()
 	}
 
 	submittedText := func() string {
-		composer.SetText(string(line))
 		return strings.TrimRight(composer.SubmitText(), "\r\n")
 	}
 
@@ -582,12 +585,14 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		}
 		if cursor >= len(line) {
 			line[len(line)-2], line[len(line)-1] = line[len(line)-1], line[len(line)-2]
+			composer.SetText(string(line))
 			cursor = len(line)
 			emitChange()
 			redraw()
 			return
 		}
 		line[cursor-1], line[cursor] = line[cursor], line[cursor-1]
+		composer.SetText(string(line))
 		cursor++
 		emitChange()
 		redraw()
@@ -632,7 +637,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		}
 		promoteDraft()
 		storeKill(append([]rune(nil), line[start:end]...))
-		line = append(line[:start], line[end:]...)
+		cursor = composer.DeleteRange(start, end)
+		line = []rune(composer.Text())
 		emitChange()
 		redraw()
 	}
@@ -833,8 +839,12 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 
 		switch key.kind {
 		case editorKeyPasteClipboard:
+			hadBufferedPaste := pasteBurst.HasBufferedText()
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
+			if key.fromConsoleCtrlV && hadBufferedPaste {
+				continue
+			}
 			if pasted, err := readInteractiveClipboardText(); err == nil && pasted != "" {
 				insertPastedText(pasted)
 			}
@@ -870,8 +880,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				before := string(line[:safeCursor])
 				if grab := pasteBurst.DecideBeginBuffer(now, before, decision.RetroChars); grab != nil {
 					if grab.StartByte < safeCursor {
-						line = append(line[:grab.StartByte], line[safeCursor:]...)
-						cursor = grab.StartByte
+						cursor = composer.DeleteRange(grab.StartByte, safeCursor)
+						line = []rune(composer.Text())
 						emitChange()
 						redraw()
 					}
@@ -968,8 +978,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				continue
 			}
 			promoteDraft()
-			line = append(line[:cursor-1], line[cursor:]...)
-			cursor--
+			cursor = composer.DeleteRange(cursor-1, cursor)
+			line = []rune(composer.Text())
 			emitChange()
 			redraw()
 		case editorKeyDelete:
@@ -979,7 +989,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				continue
 			}
 			promoteDraft()
-			line = append(line[:cursor], line[cursor+1:]...)
+			cursor = composer.DeleteRange(cursor, cursor+1)
+			line = []rune(composer.Text())
 			emitChange()
 			redraw()
 		case editorKeyLeft:
@@ -1066,8 +1077,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			}
 			promoteDraft()
 			storeKill(append([]rune(nil), line...))
-			line = line[:0]
-			cursor = 0
+			cursor = composer.DeleteRange(0, len(line))
+			line = []rune(composer.Text())
 			emitChange()
 			redraw()
 		case editorKeyDeleteWord:
@@ -1082,8 +1093,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			}
 			promoteDraft()
 			storeKill(append([]rune(nil), line[start:cursor]...))
-			line = append(line[:start], line[cursor:]...)
-			cursor = start
+			cursor = composer.DeleteRange(start, cursor)
+			line = []rune(composer.Text())
 			emitChange()
 			redraw()
 		case editorKeyKillToEnd:
@@ -1094,7 +1105,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			}
 			promoteDraft()
 			storeKill(append([]rune(nil), line[cursor:]...))
-			line = line[:cursor]
+			cursor = composer.DeleteRange(cursor, len(line))
+			line = []rune(composer.Text())
 			emitChange()
 			redraw()
 		case editorKeyDeleteForwardWord:
@@ -1153,7 +1165,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				continue
 			}
 			promoteDraft()
-			line = append(line[:cursor], line[cursor+1:]...)
+			cursor = composer.DeleteRange(cursor, cursor+1)
+			line = []rune(composer.Text())
 			emitChange()
 			redraw()
 		}
@@ -1339,6 +1352,13 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 			if !ready {
 				*pending = (*pending)[:0]
 				return editorKey{kind: editorKeyCancelPopup}, true, nil
+			}
+		}
+
+		if stdinFile != nil && len(*pending) == 0 {
+			key, ok, _ := consumeSpecialInteractiveKey(int(stdinFile.Fd()))
+			if ok {
+				return key, true, nil
 			}
 		}
 

@@ -99,6 +99,15 @@ func TestConsoleKeyEventCanProduceInputAcceptsCtrlVClipboardShortcut(t *testing.
 	if !consoleKeyEventCanProduceInput(ctrlV) {
 		t.Fatal("expected Ctrl+V key event to mark stdin ready for clipboard paste")
 	}
+	if !consoleKeyEventIsCtrlVDown(ctrlV) {
+		t.Fatal("expected Ctrl+V key event to be consumable as explicit clipboard paste")
+	}
+
+	ctrlVWithUnicode := *ctrlV
+	ctrlVWithUnicode.UnicodeChar = 'v'
+	if consoleKeyEventIsCtrlVDown(&ctrlVWithUnicode) {
+		t.Fatal("expected Ctrl+V recognizer not to consume normal Unicode input")
+	}
 }
 
 func TestConsoleKeyEventCanProduceInputAcceptsCharactersAndEditingKeys(t *testing.T) {

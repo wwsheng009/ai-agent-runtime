@@ -110,6 +110,38 @@ func TestNextInteractiveKeyCancelableReadDoesNotBlockWhenReadinessUnsupported(t 
 	}
 }
 
+func TestNextInteractiveKeyConsumesSpecialKeyBeforeReadiness(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+
+	oldConsume := consumeSpecialInteractiveKey
+	oldWait := waitForInteractiveInputReady
+	consumeSpecialInteractiveKey = func(int) (editorKey, bool, error) {
+		return editorKey{kind: editorKeyPasteClipboard, fromConsoleCtrlV: true}, true, nil
+	}
+	waitForInteractiveInputReady = func(int, time.Duration) (bool, error) {
+		t.Fatal("special key should be consumed before readiness polling")
+		return false, nil
+	}
+	t.Cleanup(func() {
+		consumeSpecialInteractiveKey = oldConsume
+		waitForInteractiveInputReady = oldWait
+	})
+
+	pending := make([]byte, 0, 16)
+	key, ok, err := nextInteractiveKey(context.Background(), reader, &pending, reader)
+	if err != nil {
+		t.Fatalf("nextInteractiveKey returned error: %v", err)
+	}
+	if !ok || key.kind != editorKeyPasteClipboard || !key.fromConsoleCtrlV {
+		t.Fatalf("expected console Ctrl+V paste key, got key=%#v ok=%v", key, ok)
+	}
+}
+
 func TestSupportsCancelableInteractiveInputReadReflectsReadinessProbe(t *testing.T) {
 	oldWait := waitForInteractiveInputReady
 	waitForInteractiveInputReady = func(int, time.Duration) (bool, error) {
@@ -655,6 +687,28 @@ func TestReadInteractiveLine_LargeBracketedPasteUsesPlaceholderButSubmitsFullTex
 	}
 	if strings.Contains(rendered, large) {
 		t.Fatalf("expected rendered input to avoid full large paste")
+	}
+}
+
+func TestReadInteractiveLine_LargePastePlaceholderTracksThroughTypedPrefix(t *testing.T) {
+	var output bytes.Buffer
+	large := strings.Repeat("a", LargePasteCharThreshold+1)
+	placeholder := "[Pasted Content 1001 chars]"
+	input := "\x1b[200~" + large + "\x1b[201~\x01" + placeholder + " \n"
+
+	line, err := readInteractiveLine(
+		strings.NewReader(input),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	want := placeholder + " " + large
+	if line != want {
+		t.Fatalf("expected large paste to expand at tracked placeholder after typed prefix:\nwant len=%d\n got len=%d", len(want), len(line))
 	}
 }
 

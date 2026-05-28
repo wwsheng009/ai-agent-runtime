@@ -13,6 +13,7 @@ import (
 
 const (
 	maxPeekConsoleInputRecords  = 1 << 20
+	maxSpecialConsoleInputScan  = 64
 	windowsClipboardUnicodeText = 13
 	windowsVKV                  = 0x56
 	windowsLeftCtrlPressed      = 0x0008
@@ -23,6 +24,7 @@ const (
 
 var (
 	procPeekConsoleInputW          = windows.NewLazySystemDLL("kernel32.dll").NewProc("PeekConsoleInputW")
+	procReadConsoleInputW          = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReadConsoleInputW")
 	procPeekNamedPipe              = windows.NewLazySystemDLL("kernel32.dll").NewProc("PeekNamedPipe")
 	procOpenClipboard              = windows.NewLazySystemDLL("user32.dll").NewProc("OpenClipboard")
 	procCloseClipboard             = windows.NewLazySystemDLL("user32.dll").NewProc("CloseClipboard")
@@ -161,6 +163,116 @@ func consoleKeyEventCanProduceInput(key *consoleKeyEventRecord) bool {
 	default:
 		return false
 	}
+}
+
+func platformConsumeSpecialInteractiveKey(fd int) (editorKey, bool, error) {
+	if fd <= 0 {
+		return editorKey{}, false, nil
+	}
+	handle := windows.Handle(uintptr(fd))
+	records, err := peekConsoleInputRecords(handle, maxSpecialConsoleInputScan)
+	if err != nil || len(records) == 0 {
+		return editorKey{}, false, err
+	}
+	noiseRecords := 0
+	for i := range records {
+		if records[i].EventType == windows.KEY_EVENT {
+			key := (*consoleKeyEventRecord)(unsafe.Pointer(&records[i].Event[0]))
+			if consoleKeyEventIsCtrlVDown(key) {
+				for consumed := 0; consumed <= i; consumed++ {
+					if err := readConsoleInputRecord(handle); err != nil {
+						return editorKey{}, false, err
+					}
+				}
+				return editorKey{kind: editorKeyPasteClipboard, fromConsoleCtrlV: true}, true, nil
+			}
+		}
+		if consoleInputRecordCanProduceInput(records[i]) {
+			if err := consumeConsoleInputRecords(handle, noiseRecords); err != nil {
+				return editorKey{}, false, err
+			}
+			return editorKey{}, false, nil
+		}
+		noiseRecords++
+	}
+	if err := consumeConsoleInputRecords(handle, noiseRecords); err != nil {
+		return editorKey{}, false, err
+	}
+	return editorKey{}, false, nil
+}
+
+func consoleInputRecordCanProduceInput(record consoleInputRecord) bool {
+	if record.EventType != windows.KEY_EVENT {
+		return false
+	}
+	key := (*consoleKeyEventRecord)(unsafe.Pointer(&record.Event[0]))
+	return consoleKeyEventCanProduceInput(key)
+}
+
+func consoleKeyEventIsCtrlVDown(key *consoleKeyEventRecord) bool {
+	return key != nil &&
+		key.KeyDown != 0 &&
+		key.UnicodeChar == 0 &&
+		key.VirtualKeyCode == windowsVKV &&
+		key.ControlKeyState&(windowsLeftCtrlPressed|windowsRightCtrlPressed) != 0
+}
+
+func readConsoleInputRecord(handle windows.Handle) error {
+	records := []consoleInputRecord{{}}
+	var read uint32
+	ret, _, callErr := procReadConsoleInputW.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(&records[0])),
+		uintptr(1),
+		uintptr(unsafe.Pointer(&read)),
+	)
+	if ret == 0 {
+		if callErr != syscall.Errno(0) {
+			return callErr
+		}
+		return windows.GetLastError()
+	}
+	return nil
+}
+
+func consumeConsoleInputRecords(handle windows.Handle, count int) error {
+	for i := 0; i < count; i++ {
+		if err := readConsoleInputRecord(handle); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func peekConsoleInputRecords(handle windows.Handle, limit uint32) ([]consoleInputRecord, error) {
+	var eventCount uint32
+	if err := windows.GetNumberOfConsoleInputEvents(handle, &eventCount); err != nil {
+		return nil, err
+	}
+	if eventCount == 0 {
+		return nil, nil
+	}
+	if limit > 0 && eventCount > limit {
+		eventCount = limit
+	}
+	if eventCount > maxPeekConsoleInputRecords {
+		eventCount = maxPeekConsoleInputRecords
+	}
+	records := make([]consoleInputRecord, eventCount)
+	var read uint32
+	ret, _, callErr := procPeekConsoleInputW.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(&records[0])),
+		uintptr(eventCount),
+		uintptr(unsafe.Pointer(&read)),
+	)
+	if ret == 0 {
+		if callErr != syscall.Errno(0) {
+			return nil, callErr
+		}
+		return nil, windows.GetLastError()
+	}
+	return records[:read], nil
 }
 
 func hasPendingPipeInput(handle windows.Handle) (bool, error) {

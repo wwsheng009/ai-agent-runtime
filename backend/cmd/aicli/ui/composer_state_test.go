@@ -76,6 +76,52 @@ func TestComposerStateLargePasteExpandsOnlyOnePlaceholderOccurrence(t *testing.T
 	}
 }
 
+func TestComposerStateLargePasteExpandsTrackedPlaceholderWhenDuplicateTextInsertedBeforeIt(t *testing.T) {
+	composer := NewComposerState()
+	large := strings.Repeat("a", LargePasteCharThreshold+1)
+	composer.HandlePasteAt(0, large)
+	placeholder := composer.Text()
+
+	composer.InsertTextAt(0, placeholder+" ")
+
+	got := composer.SubmitText()
+	want := placeholder + " " + large
+	if got != want {
+		t.Fatalf("expected only tracked placeholder to expand after duplicate prefix insertion:\nwant len=%d\n got len=%d", len(want), len(got))
+	}
+}
+
+func TestComposerStateEditingInsideLargePastePlaceholderPrunesPendingPaste(t *testing.T) {
+	composer := NewComposerState()
+	large := strings.Repeat("a", LargePasteCharThreshold+1)
+	composer.HandlePasteAt(0, large)
+
+	composer.InsertTextAt(1, "x")
+
+	if got := composer.SubmitText(); strings.Contains(got, large) {
+		t.Fatalf("expected edited placeholder not to expand, got len=%d", len(got))
+	}
+	if pending := composer.PendingPastes(); len(pending) != 0 {
+		t.Fatalf("expected edited placeholder to prune pending paste, got %#v", pending)
+	}
+}
+
+func TestComposerStateDeletingLargePastePlaceholderPrunesPendingPaste(t *testing.T) {
+	composer := NewComposerState()
+	large := strings.Repeat("a", LargePasteCharThreshold+1)
+	composer.HandlePasteAt(0, large)
+	placeholderLen := len([]rune(composer.Text()))
+
+	composer.DeleteRange(0, placeholderLen)
+
+	if got := composer.SubmitText(); got != "" {
+		t.Fatalf("expected deleted placeholder not to submit paste, got %q", got)
+	}
+	if pending := composer.PendingPastes(); len(pending) != 0 {
+		t.Fatalf("expected deleted placeholder to prune pending paste, got %#v", pending)
+	}
+}
+
 func TestComposerStateSetTextPrunesDeletedPendingPaste(t *testing.T) {
 	composer := NewComposerState()
 	large := strings.Repeat("a", LargePasteCharThreshold+1)

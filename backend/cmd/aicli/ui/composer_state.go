@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -11,6 +12,8 @@ const LargePasteCharThreshold = 1000
 type PendingPaste struct {
 	Placeholder string
 	Text        string
+	start       int
+	end         int
 }
 
 type ComposerState struct {
@@ -37,7 +40,7 @@ func (c *ComposerState) SetText(text string) {
 		return
 	}
 	c.text = append(c.text[:0], []rune(text)...)
-	c.prunePendingPastes(text)
+	c.reconcilePendingPasteRanges()
 }
 
 func (c *ComposerState) Text() string {
@@ -60,15 +63,33 @@ func (c *ComposerState) InsertTextAt(cursor int, text string) int {
 	if c == nil || text == "" {
 		return cursor
 	}
-	if cursor < 0 {
-		cursor = 0
-	}
-	if cursor > len(c.text) {
-		cursor = len(c.text)
-	}
+	cursor = c.clampCursor(cursor)
 	chars := []rune(text)
 	c.text = append(c.text[:cursor], append(chars, c.text[cursor:]...)...)
+	c.shiftPendingPastesForInsert(cursor, len(chars))
 	return cursor + len(chars)
+}
+
+func (c *ComposerState) DeleteRange(start int, end int) int {
+	if c == nil || len(c.text) == 0 {
+		return 0
+	}
+	start, end = c.normalizeRange(start, end)
+	if start == end {
+		return start
+	}
+	c.text = append(c.text[:start], c.text[end:]...)
+	c.shiftPendingPastesForDelete(start, end)
+	return start
+}
+
+func (c *ComposerState) ReplaceText(text string) int {
+	if c == nil {
+		return 0
+	}
+	c.text = append(c.text[:0], []rune(text)...)
+	c.pendingPastes = c.pendingPastes[:0]
+	return len(c.text)
 }
 
 func (c *ComposerState) HandlePasteAt(cursor int, pasted string) int {
@@ -82,9 +103,13 @@ func (c *ComposerState) HandlePasteAt(cursor int, pasted string) int {
 	charCount := utf8.RuneCountInString(pasted)
 	if charCount > LargePasteCharThreshold {
 		placeholder := c.nextLargePastePlaceholder(charCount)
+		cursor = c.clampCursor(cursor)
+		placeholderLen := utf8.RuneCountInString(placeholder)
 		c.pendingPastes = append(c.pendingPastes, PendingPaste{
 			Placeholder: placeholder,
 			Text:        pasted,
+			start:       cursor,
+			end:         cursor + placeholderLen,
 		})
 		return c.InsertTextAt(cursor, placeholder)
 	}
@@ -95,15 +120,25 @@ func (c *ComposerState) SubmitText() string {
 	if c == nil {
 		return ""
 	}
-	text := string(c.text)
-	for i := len(c.pendingPastes) - 1; i >= 0; i-- {
-		pending := c.pendingPastes[i]
-		if pending.Placeholder == "" {
+	if len(c.pendingPastes) == 0 {
+		return string(c.text)
+	}
+	pending := c.validPendingPastesInTextOrder()
+	if len(pending) == 0 {
+		return string(c.text)
+	}
+	var builder strings.Builder
+	last := 0
+	for _, paste := range pending {
+		if paste.start < last || paste.end > len(c.text) {
 			continue
 		}
-		text = strings.Replace(text, pending.Placeholder, pending.Text, 1)
+		builder.WriteString(string(c.text[last:paste.start]))
+		builder.WriteString(paste.Text)
+		last = paste.end
 	}
-	return text
+	builder.WriteString(string(c.text[last:]))
+	return builder.String()
 }
 
 func (c *ComposerState) ClearPendingPastes() {
@@ -112,19 +147,6 @@ func (c *ComposerState) ClearPendingPastes() {
 	}
 	c.pendingPastes = nil
 	c.largePasteCounters = nil
-}
-
-func (c *ComposerState) prunePendingPastes(text string) {
-	if c == nil || len(c.pendingPastes) == 0 {
-		return
-	}
-	filtered := c.pendingPastes[:0]
-	for _, pending := range c.pendingPastes {
-		if pending.Placeholder != "" && strings.Contains(text, pending.Placeholder) {
-			filtered = append(filtered, pending)
-		}
-	}
-	c.pendingPastes = filtered
 }
 
 func (c *ComposerState) nextLargePastePlaceholder(charCount int) string {
@@ -137,4 +159,113 @@ func (c *ComposerState) nextLargePastePlaceholder(charCount int) string {
 		return base
 	}
 	return fmt.Sprintf("%s #%d", base, c.largePasteCounters[charCount])
+}
+
+func (c *ComposerState) clampCursor(cursor int) int {
+	if c == nil {
+		return 0
+	}
+	if cursor < 0 {
+		return 0
+	}
+	if cursor > len(c.text) {
+		return len(c.text)
+	}
+	return cursor
+}
+
+func (c *ComposerState) normalizeRange(start int, end int) (int, int) {
+	if c == nil {
+		return 0, 0
+	}
+	start = c.clampCursor(start)
+	end = c.clampCursor(end)
+	if end < start {
+		start, end = end, start
+	}
+	return start, end
+}
+
+func (c *ComposerState) shiftPendingPastesForInsert(cursor int, count int) {
+	if c == nil || count <= 0 || len(c.pendingPastes) == 0 {
+		return
+	}
+	filtered := c.pendingPastes[:0]
+	for _, pending := range c.pendingPastes {
+		if pending.start < 0 || pending.end <= pending.start {
+			continue
+		}
+		if cursor < pending.start {
+			pending.start += count
+			pending.end += count
+		} else if cursor > pending.start && cursor < pending.end {
+			continue
+		} else if cursor == pending.start {
+			if c.pendingPasteMatchesRange(pending.start+count, pending.end+count, pending.Placeholder) {
+				pending.start += count
+				pending.end += count
+			} else if !c.pendingPasteMatchesRange(pending.start, pending.end, pending.Placeholder) {
+				continue
+			}
+		}
+		filtered = append(filtered, pending)
+	}
+	c.pendingPastes = filtered
+}
+
+func (c *ComposerState) shiftPendingPastesForDelete(start int, end int) {
+	if c == nil || len(c.pendingPastes) == 0 || end <= start {
+		return
+	}
+	removed := end - start
+	filtered := c.pendingPastes[:0]
+	for _, pending := range c.pendingPastes {
+		if pending.end <= start {
+			filtered = append(filtered, pending)
+			continue
+		}
+		if pending.start >= end {
+			pending.start -= removed
+			pending.end -= removed
+			filtered = append(filtered, pending)
+			continue
+		}
+	}
+	c.pendingPastes = filtered
+}
+
+func (c *ComposerState) reconcilePendingPasteRanges() {
+	if c == nil || len(c.pendingPastes) == 0 {
+		return
+	}
+	filtered := c.pendingPastes[:0]
+	for _, pending := range c.pendingPastes {
+		if c.pendingPasteMatchesRange(pending.start, pending.end, pending.Placeholder) {
+			filtered = append(filtered, pending)
+		}
+	}
+	c.pendingPastes = filtered
+}
+
+func (c *ComposerState) validPendingPastesInTextOrder() []PendingPaste {
+	if c == nil || len(c.pendingPastes) == 0 {
+		return nil
+	}
+	valid := make([]PendingPaste, 0, len(c.pendingPastes))
+	for _, pending := range c.pendingPastes {
+		if c.pendingPasteMatchesRange(pending.start, pending.end, pending.Placeholder) {
+			valid = append(valid, pending)
+		}
+	}
+	sort.SliceStable(valid, func(i, j int) bool {
+		return valid[i].start < valid[j].start
+	})
+	return valid
+}
+
+func (c *ComposerState) pendingPasteMatchesRange(start int, end int, placeholder string) bool {
+	if c == nil || placeholder == "" || start < 0 || end > len(c.text) || start >= end {
+		return false
+	}
+	return string(c.text[start:end]) == placeholder
 }

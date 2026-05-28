@@ -36,3 +36,7 @@ func platformWaitForInteractiveInputReady(fd int, timeout time.Duration) (bool, 
 func platformClipboardText() (string, error) {
 	return "", errors.New("platform clipboard paste unsupported")
 }
+
+func platformConsumeSpecialInteractiveKey(int) (editorKey, bool, error) {
+	return editorKey{}, false, nil
+}
