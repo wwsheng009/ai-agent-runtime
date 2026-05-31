@@ -164,6 +164,9 @@ func main() {
 	// init 子命令
 	rootCmd.AddCommand(commands.NewInitCommand())
 
+	// uninstall 子命令
+	rootCmd.AddCommand(commands.NewUninstallCommand())
+
 	// test 子命令
 	testCmd := &cobra.Command{
 		Use:   "test",
@@ -399,7 +402,7 @@ func shouldBootstrapConfigForCommand(cmd *cobra.Command, args []string) bool {
 	}
 	name := strings.ToLower(strings.TrimSpace(cmd.Name()))
 	switch name {
-	case "", "aicli", "help", "init", "version", "skill", "skills":
+	case "", "aicli", "help", "init", "uninstall", "version", "skill", "skills":
 		return false
 	}
 	for current := cmd; current != nil; current = current.Parent() {

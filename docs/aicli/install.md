@@ -378,6 +378,17 @@ aicli --help
 
 ## 四、卸载
 
+如需删除 aicli 在本机写入的配置与运行数据，可先预览，再确认删除：
+
+```bash
+aicli uninstall --dry-run
+aicli uninstall --yes
+```
+
+`aicli uninstall` 默认删除用户目录下的 `~/.aicli`，以及当前工作目录树中的所有 `.aicli` 目录。这些目录中可能包含 `config.yaml`、`.env`、`auth.json`、sessions、chat-logs、logs、skills、MCP 配置等文件。可用 `--user-only` 或 `--local-only` 限定删除范围，也可用 `--output json` 获取结构化结果。
+
+该命令只清理配置与数据目录，不删除 `aicli` 可执行文件本身。删除可执行文件请按安装方式使用下面的方法。
+
 **通过 Makefile 安装的**：
 
 ```bash
