@@ -543,6 +543,58 @@ func TestReadInteractiveLine_CtrlVInsertsClipboardText(t *testing.T) {
 	}
 }
 
+func TestReadInteractiveLine_CtrlVReportsPasteInactiveAfterRender(t *testing.T) {
+	oldClipboard := readInteractiveClipboardText
+	readInteractiveClipboardText = func() (string, error) {
+		return "first\r\nsecond", nil
+	}
+	t.Cleanup(func() {
+		readInteractiveClipboardText = oldClipboard
+	})
+
+	var output bytes.Buffer
+	var snapshots []LineEditorSnapshot
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("\x16\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		&LineEditorHooks{
+			OnChange: func(snapshot LineEditorSnapshot) {
+				snapshots = append(snapshots, snapshot)
+			},
+		},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "first\nsecond" {
+		t.Fatalf("expected ctrl+v to insert normalized clipboard text, got %q", line)
+	}
+
+	sawPasteActive := false
+	sawPasteInactive := false
+	for _, snapshot := range snapshots {
+		if snapshot.Text != "first\nsecond" {
+			continue
+		}
+		if snapshot.PasteActive {
+			sawPasteActive = true
+		} else {
+			sawPasteInactive = true
+		}
+	}
+	if !sawPasteActive {
+		t.Fatalf("expected ctrl+v insertion to publish a paste-active snapshot, got %#v", snapshots)
+	}
+	if !sawPasteInactive {
+		t.Fatalf("expected ctrl+v insertion to publish a paste-inactive snapshot after render, got %#v", snapshots)
+	}
+}
+
 func TestReadInteractiveLine_RendersMultilinePasteWithCarriageReturns(t *testing.T) {
 	var output bytes.Buffer
 	line, err := readInteractiveLine(
@@ -750,10 +802,7 @@ func TestReadInteractiveLine_BuffersRapidPlainInputIntoSingleRedraw(t *testing.T
 
 func TestDefaultPasteBurstHoldFirstRunePlatformPolicy(t *testing.T) {
 	got := defaultPasteBurstHoldFirstRune()
-	if runtime.GOOS == "windows" && !got {
-		t.Fatal("expected Windows to keep hold-first paste burst mode")
-	}
-	if runtime.GOOS != "windows" && got {
+	if got {
 		t.Fatalf("expected %s to echo the first rune without hold-first mode", runtime.GOOS)
 	}
 }
@@ -808,6 +857,149 @@ func TestReadInteractiveLine_ComposerNoHoldEchoesFirstRuneImmediately(t *testing
 	}
 	if line != "x" {
 		t.Fatalf("expected no-hold composer line to submit x, got %q", line)
+	}
+}
+
+func TestReadInteractiveLine_ComposerNoHoldKeepsLongPlainPasteVisible(t *testing.T) {
+	readerR, readerW := io.Pipe()
+	defer func() {
+		_ = readerR.Close()
+		_ = readerW.Close()
+	}()
+
+	pasted := "plain paste text that should stay visible"
+	output := &notifyingBuffer{
+		notify: make(chan struct{}),
+		match:  pasted,
+	}
+
+	done := make(chan struct{})
+	var (
+		line string
+		err  error
+	)
+	go func() {
+		line, err = readInteractiveLineWithOptions(readerR, output, UserPromptText(0), nil, nil, true, false)
+		close(done)
+	}()
+
+	if _, err := readerW.Write([]byte(pasted)); err != nil {
+		t.Fatalf("write plain paste: %v", err)
+	}
+
+	select {
+	case <-output.notify:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("timed out waiting for no-hold composer to render full plain paste; output=%q", output.String())
+	}
+
+	if _, err := readerW.Write([]byte("\n")); err != nil {
+		t.Fatalf("write newline: %v", err)
+	}
+	if err := readerW.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for no-hold composer to finish")
+	}
+
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithOptions: %v", err)
+	}
+	if line != pasted {
+		t.Fatalf("expected no-hold composer line to submit pasted text, got %q", line)
+	}
+}
+
+func TestReadInteractiveLine_ComposerNoHoldReportsPlainPasteWindow(t *testing.T) {
+	readerR, readerW := io.Pipe()
+	defer func() {
+		_ = readerR.Close()
+		_ = readerW.Close()
+	}()
+
+	oldInterval := pasteBurstCharInterval
+	oldIdle := pasteBurstActiveIdleTimeout
+	pasteBurstCharInterval = 50 * time.Millisecond
+	pasteBurstActiveIdleTimeout = 40 * time.Millisecond
+	t.Cleanup(func() {
+		pasteBurstCharInterval = oldInterval
+		pasteBurstActiveIdleTimeout = oldIdle
+	})
+
+	var mu sync.Mutex
+	var snapshots []LineEditorSnapshot
+	done := make(chan struct{})
+	var (
+		line string
+		err  error
+	)
+	go func() {
+		line, err = readInteractiveLineWithHooks(
+			readerR,
+			io.Discard,
+			UserPromptText(0),
+			nil,
+			nil,
+			&LineEditorHooks{
+				OnChange: func(snapshot LineEditorSnapshot) {
+					mu.Lock()
+					snapshots = append(snapshots, snapshot)
+					mu.Unlock()
+				},
+			},
+			true,
+			false,
+		)
+		close(done)
+	}()
+
+	pasted := "/model --provider=openai"
+	if _, err := readerW.Write([]byte(pasted)); err != nil {
+		t.Fatalf("write plain paste: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if _, err := readerW.Write([]byte("\n")); err != nil {
+		t.Fatalf("write newline: %v", err)
+	}
+	if err := readerW.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("timed out waiting for no-hold composer to finish")
+	}
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != pasted {
+		t.Fatalf("expected no-hold composer line to submit pasted text, got %q", line)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	sawActive := false
+	sawInactive := false
+	for _, snapshot := range snapshots {
+		if snapshot.Text != pasted {
+			continue
+		}
+		if snapshot.PasteActive {
+			sawActive = true
+		} else if sawActive {
+			sawInactive = true
+		}
+	}
+	if !sawActive {
+		t.Fatalf("expected rapid plain paste to publish paste-active snapshot, got %#v", snapshots)
+	}
+	if !sawInactive {
+		t.Fatalf("expected rapid plain paste to publish paste-inactive snapshot, got %#v", snapshots)
 	}
 }
 

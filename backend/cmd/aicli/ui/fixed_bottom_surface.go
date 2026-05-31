@@ -379,7 +379,19 @@ func (s *FixedBottomSurface) TrackPromptInputState(line string, input string, ro
 	if !s.enabled {
 		return false
 	}
+	needsRender := s.promptReservedRows != rows
 	s.setPromptStateLocked(line, input, rows, cursorRow, cursorCol)
+	if needsRender {
+		WithTerminalWriteLock(func() {
+			s.terminal.HideCursor()
+			defer s.terminal.ShowCursor()
+			s.applyLayoutLocked()
+			s.renderPopupLocked()
+			s.renderStatusLocked()
+			s.renderPromptRowsLocked(true)
+			s.restoreStoredPromptCursorLocked()
+		})
+	}
 	return true
 }
 

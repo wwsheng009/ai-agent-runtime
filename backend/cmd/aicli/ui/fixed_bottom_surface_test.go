@@ -294,6 +294,32 @@ func TestFixedBottomSurface_TrackPromptInputStateDoesNotRedraw(t *testing.T) {
 	}
 }
 
+func TestFixedBottomSurface_TrackPromptInputStateRedrawsWhenRowsChange(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		if !surface.TrackPromptInputState("> ", "first\nsecond", 2, 1, 6) {
+			t.Fatal("expected enabled surface to track prompt input")
+		}
+	})
+
+	if !strings.Contains(output, "\x1b[22;1H> first\r\nsecond") {
+		t.Fatalf("expected row growth tracking to redraw multiline prompt input, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[23;7H"+cursorShowSequence) {
+		t.Fatalf("expected row growth tracking to restore prompt cursor, got %q", output)
+	}
+}
+
 func TestFixedBottomSurface_SetPromptInputStateRestoresPromptCursorWithoutPopup(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true

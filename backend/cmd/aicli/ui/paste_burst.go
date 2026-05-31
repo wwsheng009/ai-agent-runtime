@@ -64,6 +64,7 @@ const (
 	FlushResultNone FlushResultKind = iota
 	FlushResultPaste
 	FlushResultTyped
+	FlushResultPasteInactive
 )
 
 type FlushResult struct {
@@ -86,6 +87,7 @@ type PasteBurst struct {
 	lastPlainCharTime         time.Time
 	consecutivePlainCharBurst int
 	burstWindowUntil          time.Time
+	noHoldActiveUntil         time.Time
 	buffer                    []rune
 	active                    bool
 	pendingFirstChar          *pastePendingChar
@@ -112,7 +114,7 @@ func recommendedPasteBurstDelay() time.Duration {
 }
 
 func (b *PasteBurst) IsActive() bool {
-	return b != nil && (b.active || len(b.buffer) > 0 || b.pendingFirstChar != nil)
+	return b != nil && (b.active || len(b.buffer) > 0 || b.pendingFirstChar != nil || !b.noHoldActiveUntil.IsZero())
 }
 
 func (b *PasteBurst) HasBufferedText() bool {
@@ -121,6 +123,10 @@ func (b *PasteBurst) HasBufferedText() bool {
 
 func (b *PasteBurst) HasPendingFirstChar() bool {
 	return b != nil && b.pendingFirstChar != nil
+}
+
+func (b *PasteBurst) HasNoHoldActivity() bool {
+	return b != nil && !b.noHoldActiveUntil.IsZero()
 }
 
 func (b *PasteBurst) ContainsNewline() bool {
@@ -154,6 +160,9 @@ func (b *PasteBurst) Deadline() time.Time {
 			return time.Time{}
 		}
 		return b.pendingFirstChar.at.Add(pasteBurstCharInterval)
+	}
+	if !b.noHoldActiveUntil.IsZero() {
+		return b.noHoldActiveUntil
 	}
 	return time.Time{}
 }
@@ -211,19 +220,12 @@ func (b *PasteBurst) OnPlainCharNoHold(now time.Time) CharDecision {
 		return CharDecision{}
 	}
 	b.notePlainChar(now)
-
-	if b.HasBufferedText() {
-		b.burstWindowUntil = now.Add(pasteEnterSuppressWindow)
-		return CharDecision{Kind: CharDecisionBufferAppend}
+	// No-hold mode is used by chat composers where every visible rune must stay
+	// visible immediately. Keep timing state for paste-newline detection, but do
+	// not retroactively move already-rendered text into a hidden paste buffer.
+	if b.consecutivePlainCharBurst >= 2 {
+		b.noHoldActiveUntil = now.Add(pasteBurstActiveIdleTimeout)
 	}
-
-	if b.consecutivePlainCharBurst >= pasteBurstMinChars {
-		return CharDecision{
-			Kind:       CharDecisionBeginBuffer,
-			RetroChars: b.consecutivePlainCharBurst - 1,
-		}
-	}
-
 	return CharDecision{}
 }
 
@@ -259,6 +261,14 @@ func (b *PasteBurst) FlushIfDue(now time.Time) FlushResult {
 			ch := b.pendingFirstChar.ch
 			b.pendingFirstChar = nil
 			return FlushResult{Kind: FlushResultTyped, Ch: ch}
+		}
+	}
+	if !b.noHoldActiveUntil.IsZero() && !now.Before(b.noHoldActiveUntil) {
+		b.noHoldActiveUntil = time.Time{}
+		if !b.HasBufferedText() && b.pendingFirstChar == nil {
+			b.lastPlainCharTime = time.Time{}
+			b.consecutivePlainCharBurst = 0
+			return FlushResult{Kind: FlushResultPasteInactive}
 		}
 	}
 	return FlushResult{}
@@ -349,6 +359,10 @@ func (b *PasteBurst) FlushBeforeModifiedInput() string {
 	if b == nil || !b.IsActive() {
 		return ""
 	}
+	if b.pendingFirstChar == nil && len(b.buffer) == 0 {
+		b.ClearAfterExplicitPaste()
+		return ""
+	}
 	var builder strings.Builder
 	if b.pendingFirstChar != nil {
 		builder.WriteRune(b.pendingFirstChar.ch)
@@ -367,6 +381,7 @@ func (b *PasteBurst) ClearWindowAfterNonChar() {
 	b.consecutivePlainCharBurst = 0
 	b.lastPlainCharTime = time.Time{}
 	b.burstWindowUntil = time.Time{}
+	b.noHoldActiveUntil = time.Time{}
 	b.active = false
 	b.pendingFirstChar = nil
 }
@@ -378,6 +393,7 @@ func (b *PasteBurst) ClearAfterExplicitPaste() {
 	b.lastPlainCharTime = time.Time{}
 	b.consecutivePlainCharBurst = 0
 	b.burstWindowUntil = time.Time{}
+	b.noHoldActiveUntil = time.Time{}
 	b.active = false
 	b.buffer = b.buffer[:0]
 	b.pendingFirstChar = nil

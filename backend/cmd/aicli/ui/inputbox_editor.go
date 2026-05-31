@@ -37,11 +37,11 @@ const (
 )
 
 func defaultPasteBurstHoldFirstRune() bool {
-	// Unix PTY / WSL 下 poll readiness 对 raw stdin 的行为更容易受终端
-	// 与多路复用器影响。首字符不能依赖异步 flush，否则会表现为输入被
-	// 缓存但不回显；Windows console 继续使用 hold-first 以保持现有
-	// paste burst 聚合路径。
-	return runtime.GOOS == "windows"
+	// The editor must echo the first visible rune immediately. Paste burst
+	// detection can still retroactively coalesce rapid input once enough text is
+	// available, but holding the first rune makes Windows Ctrl+V appear stuck
+	// when the idle flush is delayed by console event ordering.
+	return false
 }
 
 type editorKeyKind int
@@ -329,6 +329,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		pending = make([]byte, 0, 16)
 	}
 	pasteActive := false
+	pasteInsertActive := false
 	stdinFile, _ := reader.(*os.File)
 	lastRenderedRows := 1
 	// lastCursorRow / lastCursorCol 记录上一次重绘结束时光标的相对坐标
@@ -351,7 +352,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			Cursor:      cursor,
 			Prompt:      prompt,
 			HistoryPos:  historyPos,
-			PasteActive: pasteActive,
+			PasteActive: pasteActive || pasteInsertActive || pasteBurst.IsActive(),
 		}
 	}
 	renderSnapshot := func() LineEditorRenderSnapshot {
@@ -528,19 +529,25 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		redraw()
 	}
 
-	insertPastedText := func(text string) {
+	insertPastedText := func(text string) bool {
 		text = NormalizePastedText(text)
 		if text == "" {
-			return
+			return false
 		}
 		reverseSearchActive = false
 		reverseSearchQuery = reverseSearchQuery[:0]
 		reverseSearchStart = len(history)
 		promoteDraft()
+		pasteInsertActive = true
 		cursor = composer.HandlePasteAt(cursor, text)
 		line = []rune(composer.Text())
 		emitChange()
 		redraw()
+		pasteInsertActive = false
+		if !pasteActive {
+			emitChange()
+		}
+		return true
 	}
 
 	insertTypedRune := func(ch rune) {
@@ -682,12 +689,19 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			insertPastedText(result.Text)
 		case FlushResultTyped:
 			insertTypedRune(result.Ch)
+		case FlushResultPasteInactive:
+			emitChange()
 		}
 	}
 
 	flushPasteBurstBeforeModifiedInput := func() {
+		clearNoHoldActivity := pasteBurst.HasNoHoldActivity() && !pasteBurst.HasBufferedText() && !pasteBurst.HasPendingFirstChar()
 		if pasted := pasteBurst.FlushBeforeModifiedInput(); pasted != "" {
 			insertPastedText(pasted)
+			return
+		}
+		if clearNoHoldActivity {
+			emitChange()
 		}
 	}
 
@@ -790,11 +804,15 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			continue
 		}
 		if key.kind == editorKeyPasteEnd {
+			insertedPaste := false
 			if pasteActive && len(pasteBuffer) > 0 {
-				insertPastedText(string(pasteBuffer))
+				insertedPaste = insertPastedText(string(pasteBuffer))
 				pasteBuffer = pasteBuffer[:0]
 			}
 			pasteActive = false
+			if insertedPaste {
+				emitChange()
+			}
 			continue
 		}
 		if pasteActive && key.kind == editorKeyEnter {
