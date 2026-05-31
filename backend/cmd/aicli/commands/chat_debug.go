@@ -2,7 +2,6 @@ package commands
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -11,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -1017,41 +1015,7 @@ func runChatAgentPanelModal(session *ChatSession, opts chatAgentPanelOptions) er
 	controller.Start(ctx)
 	defer controller.Stop()
 	controller.Render()
-	_, err := session.InputBox.ReadTransientPromptWithHooks("Agent Panel> ", ui.LineEditorHooks{
-		OnNavigate: func(snapshot ui.LineEditorSnapshot, delta int) bool {
-			controller.Navigate(delta)
-			return true
-		},
-		OnMove: func(snapshot ui.LineEditorSnapshot, delta int) bool {
-			controller.MovePane(delta)
-			return true
-		},
-		OnSubmit: func(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
-			controller.Select()
-			return ui.LineEditorReplacement{}, true
-		},
-		OnCancel: func(snapshot ui.LineEditorSnapshot) bool {
-			return true
-		},
-	})
-	if handledErr := handleChatAgentPanelModalInputError(session, err); handledErr != err {
-		return handledErr
-	}
-	return err
-}
-
-func handleChatAgentPanelModalInputError(session *ChatSession, err error) error {
-	if errors.Is(err, ui.ErrInteractiveInputInterrupted) || errors.Is(err, ui.ErrInteractiveInputExitRequested) {
-		if session == nil {
-			return io.EOF
-		}
-		session.Interrupt()
-		if session.Interaction != nil {
-			session.Interaction.ResetPromptState()
-		}
-		return io.EOF
-	}
-	return err
+	return newChatAgentPanelComposer(session, "Agent Panel> ", controller).ReadLine()
 }
 
 type chatAgentPanelModalController struct {
@@ -1149,7 +1113,7 @@ func (c *chatAgentPanelModalController) Select() {
 }
 
 func (c *chatAgentPanelModalController) Render() {
-	if c == nil || c.session == nil || c.session.Surface == nil {
+	if c == nil || c.session == nil {
 		return
 	}
 	c.mu.Lock()
@@ -1158,16 +1122,14 @@ func (c *chatAgentPanelModalController) Render() {
 }
 
 func (c *chatAgentPanelModalController) renderLocked() {
-	if c == nil || c.session == nil || c.session.Surface == nil {
+	if c == nil || c.session == nil {
 		return
 	}
 	lines := chatAgentPanelModalLines(c.session, c.state)
-	if !c.rendered {
-		c.session.Surface.ShowPopupInput(lines, c.prompt)
+	preserveCursor := c.rendered
+	if newChatPromptOverlay(c.session).renderModalPopupInput(lines, c.prompt, preserveCursor) {
 		c.rendered = true
-		return
 	}
-	c.session.Surface.ShowPopupInputPreserveCursor(lines, c.prompt)
 }
 
 func chatAgentPanelModalLines(session *ChatSession, state *chatAgentPanelModalState) []string {

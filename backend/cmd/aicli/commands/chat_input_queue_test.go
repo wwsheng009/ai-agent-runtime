@@ -3,6 +3,7 @@ package commands
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -478,6 +479,92 @@ func TestChatInteractiveReadLine_DeduplicatesQueuedPromptHistory(t *testing.T) {
 	}
 	if got := inputBox.GetHistorySize(); got != 1 {
 		t.Fatalf("expected adjacent duplicate queued input not to be recorded twice, got history size %d", got)
+	}
+}
+
+func TestChatInputReadLifecycleMarksQueuedReadyLineAndRecordsHistory(t *testing.T) {
+	session := &ChatSession{InputBox: ui.NewInputBox(nil)}
+	lifecycle := newChatInputReadLifecycle(session)
+
+	lifecycle.beginReadyRead()
+	lifecycle.markReadyLineQueued("queued command\n")
+
+	if !session.lastInteractiveInputQueued {
+		t.Fatal("expected queued ready line to mark session as queued")
+	}
+	if got := session.InputBox.GetHistorySize(); got != 1 {
+		t.Fatalf("expected queued ready line to be recorded in history, got %d", got)
+	}
+	if history, ok := session.InputBox.GetHistoryAt(0); !ok || history != "queued command" {
+		t.Fatalf("expected normalized queued history, got %q ok=%v", history, ok)
+	}
+}
+
+func TestChatInputReadLifecycleResetsPromptOnQueuedReadError(t *testing.T) {
+	session := &ChatSession{InputBox: ui.NewInputBox(nil)}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetPromptInput("stale queued draft")
+
+	newChatInputReadLifecycle(session).finishQueuedReadyRead("", errors.New("queue failed"))
+
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "" {
+		t.Fatalf("expected queued read error to reset prompt state, got %#v", snapshot)
+	}
+}
+
+func TestChatInputReadLifecycleFinishMainReadClearsPromptOnError(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetPromptInput("failed read draft")
+
+	newChatInputReadLifecycle(session).finishMainRead(errors.New("read failed"))
+
+	if session.lastInteractiveInputQueued {
+		t.Fatal("expected read error to clear queued marker")
+	}
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "" {
+		t.Fatalf("expected read error to clear prompt state, got %#v", snapshot)
+	}
+}
+
+func TestChatInputReadLifecycleFinishMainReadResetsPromptAfterDirectRead(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetPromptInput("submitted draft")
+
+	newChatInputReadLifecycle(session).finishMainRead(nil)
+
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "" {
+		t.Fatalf("expected direct read completion to reset prompt state, got %#v", snapshot)
+	}
+}
+
+func TestChatInputReadLifecycleKeepsPromptOnPrioritySuccess(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetPromptInput("main draft")
+
+	newChatInputReadLifecycle(session).finishQueuedPriorityRead(nil)
+
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "main draft" {
+		t.Fatalf("expected successful priority queue read not to clear main draft, got %#v", snapshot)
+	}
+}
+
+func TestChatInputReadLifecycleResetsPromptOnPriorityError(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetPromptInput("stale priority draft")
+
+	newChatInputReadLifecycle(session).finishQueuedPriorityRead(errors.New("priority failed"))
+
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "" {
+		t.Fatalf("expected priority queue error to reset prompt state, got %#v", snapshot)
 	}
 }
 

@@ -58,42 +58,22 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 					}
 				}(revision)
 			}
-			cancelled := false
-			line, err := session.InputBox.ReadTransientPromptWithHooksContext(readCtx, prompt, ui.LineEditorHooks{
-				OnChange: func(snapshot ui.LineEditorSnapshot) {
-					if !priorityPrompt && session.Interaction != nil {
-						session.Interaction.SetPromptInputSnapshot(snapshot)
-					}
-				},
-				OnBeforeTerminalWrite: func(snapshot ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
-					if !priorityPrompt && session.Interaction != nil {
-						return session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
-					}
-					return ""
-				},
-				OnCancel: func(ui.LineEditorSnapshot) bool {
-					cancelled = true
-					return true
-				},
-			})
+			capture := newChatBusyComposerCapture(session, prompt, priorityPrompt)
+			line, err := capture.ReadLine(readCtx)
 			cancelRead()
 			select {
 			case <-promptChanged:
-				if session.Interaction != nil && !priorityPrompt {
-					session.Interaction.RenderPromptInputSnapshot(ui.LineEditorSnapshot{})
-				}
+				capture.ClearPrompt()
 				continue
 			default:
 			}
-			if cancelled {
+			if capture.Cancelled() {
 				interruptChatTurnFromBusyInputCancel(session)
 				if queue.isPriorityMode() {
 					queue.signalReadError(errChatInteractivePromptCancelled)
 					return
 				}
-				if session.Interaction != nil {
-					session.Interaction.RenderPromptInputSnapshot(ui.LineEditorSnapshot{})
-				}
+				capture.ClearPrompt()
 				continue
 			}
 			if err != nil {
@@ -116,9 +96,7 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 			}
 			line = strings.TrimSpace(normalizeQueuedInputLine(line))
 			if line == "" {
-				if session.Interaction != nil {
-					session.Interaction.RenderPromptInputSnapshot(ui.LineEditorSnapshot{})
-				}
+				capture.ClearPrompt()
 				continue
 			}
 			queue.routeInputText(line)
@@ -129,9 +107,7 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 			if !isSlashCommandInput(line) && session.InputBox != nil {
 				session.InputBox.AddToHistory(line)
 			}
-			if session.Interaction != nil {
-				session.Interaction.RenderPromptInputSnapshot(ui.LineEditorSnapshot{})
-			}
+			capture.ClearPrompt()
 		}
 	}()
 

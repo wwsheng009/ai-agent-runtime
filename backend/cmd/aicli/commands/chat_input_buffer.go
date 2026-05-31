@@ -2,7 +2,6 @@ package commands
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"strings"
 )
@@ -96,32 +95,4 @@ func discardPendingInteractiveInputForPriorityPrompt(session *ChatSession, promp
 		promptKind = "交互提示"
 	}
 	return "[input] 检测到之前排队的输入内容；为避免误用，已在" + promptKind + "前丢弃这些输入。"
-}
-
-// notifyChatInputDraftState 通过 surface 展示 pending paste preview；
-// 没有 surface 时才回退到旧的状态栏提示。
-func notifyChatInputDraftState(session *ChatSession, active bool, lines int, text string) {
-	if session == nil {
-		return
-	}
-	if active {
-		if lines < 1 {
-			lines = 1
-		}
-		if session.Surface != nil && session.Surface.Enabled() {
-			session.Surface.ShowPendingPastePreview(lines, text)
-			return
-		}
-		if session.Interaction != nil {
-			session.Interaction.RefreshStatus(fmt.Sprintf("Paste draft %d lines", lines))
-		}
-		return
-	}
-	if session.Surface != nil && session.Surface.Enabled() {
-		session.Surface.ClearPendingPastePreview()
-		return
-	}
-	if session.Interaction != nil {
-		session.Interaction.RefreshStatus("")
-	}
 }

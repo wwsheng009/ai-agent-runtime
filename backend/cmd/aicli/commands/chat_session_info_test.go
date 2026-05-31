@@ -1802,7 +1802,7 @@ func TestChatAgentPanelModalControllerNavigatesAndSelectsTarget(t *testing.T) {
 
 func TestRunChatAgentPanelModalInterruptMarksSessionInterrupted(t *testing.T) {
 	session := &ChatSession{}
-	err := handleChatAgentPanelModalInputError(session, ui.ErrInteractiveInputInterrupted)
+	err := normalizeChatAgentPanelComposerReadError(session, ui.ErrInteractiveInputInterrupted)
 	if err != io.EOF {
 		t.Fatalf("expected interrupt to return io.EOF, got %v", err)
 	}

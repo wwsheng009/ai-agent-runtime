@@ -31,6 +31,10 @@ type chatQueuedInput struct {
 	EnqueuedAt time.Time
 }
 
+type chatInputReadLifecycle struct {
+	session *ChatSession
+}
+
 type chatInputQueue struct {
 	reader                *bufio.Reader
 	lines                 chan chatQueuedInput
@@ -678,121 +682,79 @@ func (q *chatInputQueue) discardPending() int {
 	}
 }
 
-func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string, error) {
-	if session != nil {
-		session.lastInteractiveInputQueued = false
+func newChatInputReadLifecycle(session *ChatSession) chatInputReadLifecycle {
+	return chatInputReadLifecycle{session: session}
+}
+
+func (l chatInputReadLifecycle) beginReadyRead() {
+	if l.session != nil {
+		l.session.lastInteractiveInputQueued = false
 	}
+}
+
+func (l chatInputReadLifecycle) finishQueuedReadyRead(line string, err error) {
+	if l.session == nil {
+		return
+	}
+	if err == nil {
+		recordChatPromptHistory(l.session, line)
+		return
+	}
+	l.resetPromptState()
+}
+
+func (l chatInputReadLifecycle) finishQueuedPriorityRead(err error) {
+	if err != nil {
+		l.resetPromptState()
+	}
+}
+
+func (l chatInputReadLifecycle) markReadyLineQueued(line string) {
+	if l.session == nil {
+		return
+	}
+	l.session.lastInteractiveInputQueued = true
+	recordChatPromptHistory(l.session, line)
+}
+
+func (l chatInputReadLifecycle) finishMainRead(readErr error) {
+	if l.session == nil || l.session.Interaction == nil {
+		return
+	}
+	if readErr != nil {
+		l.session.lastInteractiveInputQueued = false
+		l.session.Interaction.ClearPrompt()
+		return
+	}
+	if l.session.lastInteractiveInputQueued {
+		l.session.lastInteractiveInputQueued = false
+		l.session.Interaction.RefreshStatus("")
+		return
+	}
+	l.resetPromptState()
+}
+
+func (l chatInputReadLifecycle) resetPromptState() {
+	if l.session != nil && l.session.Interaction != nil {
+		l.session.Interaction.ResetPromptState()
+	}
+}
+
+func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string, error) {
+	lifecycle := newChatInputReadLifecycle(session)
+	lifecycle.beginReadyRead()
 	if session != nil && session.InputQueue != nil {
 		if line, ok := session.InputQueue.readAvailableLine(); ok {
-			session.lastInteractiveInputQueued = true
-			recordChatPromptHistory(session, line)
+			lifecycle.markReadyLineQueued(line)
 			return line, nil
 		}
 	}
 	if shouldUseInteractiveLineEditor(session) {
-		prompt := formatSessionUserPrompt(session)
-		initial := ui.LineEditorSnapshot{}
-		if session.Interaction != nil {
-			initial = session.Interaction.PromptInputSnapshot()
-			if initial.Text == "" {
-				session.Interaction.SetPromptInput("")
-			}
-		}
-		if shouldEnableSlashCompletion(session) {
-			completion := newChatSlashCompletionController(session)
-			defer completion.Clear()
-			line, err := session.InputBox.ReadWithHistoryPromptWithHooks(prompt, ui.LineEditorHooks{
-				InitialText:   initial.Text,
-				InitialCursor: initial.Cursor,
-				OnChange: func(snapshot ui.LineEditorSnapshot) {
-					handleChatLineEditorChange(session, completion, snapshot)
-				},
-				OnBeforeTerminalWrite: func(snapshot ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
-					if session.Interaction != nil {
-						return session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
-					}
-					return ""
-				},
-				OnComplete: func(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
-					nextText, nextCursor, ok := completion.ApplyCompletion(snapshot.Text, snapshot.Cursor)
-					if !ok {
-						return ui.LineEditorReplacement{}, false
-					}
-					return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
-				},
-				OnNavigate: func(snapshot ui.LineEditorSnapshot, delta int) bool {
-					return completion.Navigate(delta)
-				},
-				OnSubmit: func(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
-					nextText, nextCursor, ok := completion.ApplySubmission(snapshot.Text, snapshot.Cursor)
-					if !ok {
-						return ui.LineEditorReplacement{}, false
-					}
-					return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
-				},
-				OnCancelPopup: func(snapshot ui.LineEditorSnapshot) bool {
-					return completion.Cancel()
-				},
-			})
-			if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
-				session.Interrupt()
-				if session.Interaction != nil {
-					session.Interaction.ResetPromptState()
-				}
-				return "", ui.ErrInteractiveInputExitRequested
-			}
-			if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
-				session.Interrupt()
-				if session.Interaction != nil {
-					session.Interaction.ResetPromptState()
-				}
-				return "", io.EOF
-			}
-			if session.Interaction != nil && err != nil {
-				session.Interaction.ResetPromptState()
-			}
-			return line, err
-		}
-		line, err := session.InputBox.ReadWithHistoryPromptWithHooks(prompt, ui.LineEditorHooks{
-			InitialText:   initial.Text,
-			InitialCursor: initial.Cursor,
-			OnChange: func(snapshot ui.LineEditorSnapshot) {
-				handleChatLineEditorChange(session, nil, snapshot)
-			},
-			OnBeforeTerminalWrite: func(snapshot ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
-				if session.Interaction != nil {
-					return session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
-				}
-				return ""
-			},
-		})
-		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
-			session.Interrupt()
-			if session.Interaction != nil {
-				session.Interaction.ResetPromptState()
-			}
-			return "", ui.ErrInteractiveInputExitRequested
-		}
-		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
-			session.Interrupt()
-			if session.Interaction != nil {
-				session.Interaction.ResetPromptState()
-			}
-			return "", io.EOF
-		}
-		if session.Interaction != nil && err != nil {
-			session.Interaction.ResetPromptState()
-		}
-		return line, err
+		return newChatComposerController(session).ReadLine()
 	}
 	if session != nil && session.InputQueue != nil {
 		line, err := session.InputQueue.readLine(ctx)
-		if err == nil {
-			recordChatPromptHistory(session, line)
-		}
-		if session.Interaction != nil && err != nil {
-			session.Interaction.ResetPromptState()
-		}
+		lifecycle.finishQueuedReadyRead(line, err)
 		return line, err
 	}
 	reader := chatSessionInputReader(session)
@@ -811,33 +773,7 @@ func recordChatPromptHistory(session *ChatSession, input string) {
 }
 
 func finishChatInteractiveReadPromptState(session *ChatSession, readErr error) {
-	if session == nil || session.Interaction == nil {
-		return
-	}
-	if readErr != nil {
-		session.lastInteractiveInputQueued = false
-		session.Interaction.ClearPrompt()
-		return
-	}
-	if session.lastInteractiveInputQueued {
-		session.lastInteractiveInputQueued = false
-		session.Interaction.RefreshStatus("")
-		return
-	}
-	session.Interaction.ResetPromptState()
-}
-
-func handleChatLineEditorChange(session *ChatSession, completion *chatSlashCompletionController, snapshot ui.LineEditorSnapshot) {
-	// Slash popup rendering must preserve the cursor from the last completed
-	// editor redraw. The new snapshot is tracked after popup rendering so the
-	// following editor redraw remains the only writer that lands on the new
-	// cursor position.
-	if completion != nil {
-		completion.UpdateSnapshot(snapshot)
-	}
-	if session != nil && session.Interaction != nil {
-		session.Interaction.SetPromptInputSnapshot(snapshot)
-	}
+	newChatInputReadLifecycle(session).finishMainRead(readErr)
 }
 
 func shouldUseInteractiveLineEditor(session *ChatSession) bool {
@@ -885,31 +821,11 @@ func shouldRoutePriorityPromptThroughQueue(session *ChatSession) bool {
 func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context) (string, error) {
 	if shouldRoutePriorityPromptThroughQueue(session) {
 		line, err := session.InputQueue.readPriorityLine(ctx)
-		if session.Interaction != nil && err != nil {
-			session.Interaction.ResetPromptState()
-		}
+		newChatInputReadLifecycle(session).finishQueuedPriorityRead(err)
 		return line, err
 	}
 	if session != nil && session.InputBox != nil {
-		line, err := session.InputBox.ReadTransientLine(nil)
-		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
-			session.Interrupt()
-			if session.Interaction != nil {
-				session.Interaction.ResetPromptState()
-			}
-			return "", ui.ErrInteractiveInputExitRequested
-		}
-		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
-			session.Interrupt()
-			if session.Interaction != nil {
-				session.Interaction.ResetPromptState()
-			}
-			return "", io.EOF
-		}
-		if session.Interaction != nil && err != nil {
-			session.Interaction.ResetPromptState()
-		}
-		return line, err
+		return newChatTransientLineComposer(session).ReadLine()
 	}
 	reader := chatSessionInputReader(session)
 	line, err := reader.ReadString('\n')
@@ -922,55 +838,11 @@ func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context)
 func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context.Context, prompt string) (string, error) {
 	if shouldRoutePriorityPromptThroughQueue(session) {
 		line, err := session.InputQueue.readPriorityLineWithPrompt(ctx, prompt)
-		if session.Interaction != nil && err != nil {
-			session.Interaction.ResetPromptState()
-		}
+		newChatInputReadLifecycle(session).finishQueuedPriorityRead(err)
 		return line, err
 	}
 	if session != nil && session.InputBox != nil {
-		trackPromptInput := session == nil || session.Surface == nil || !session.Surface.Enabled()
-		if trackPromptInput && session.Interaction != nil {
-			session.Interaction.SetPromptInput("")
-		}
-		cancelled := false
-		line, err := session.InputBox.ReadTransientPromptWithHooks(prompt, ui.LineEditorHooks{
-			OnChange: func(snapshot ui.LineEditorSnapshot) {
-				if trackPromptInput && session.Interaction != nil {
-					session.Interaction.SetPromptInput(snapshot.Text)
-				}
-			},
-			OnCancel: func(ui.LineEditorSnapshot) bool {
-				cancelled = true
-				return true
-			},
-		})
-		if trackPromptInput && session.Interaction != nil {
-			session.Interaction.SetPromptInput("")
-		}
-		if cancelled && err == nil {
-			if session.Interaction != nil {
-				session.Interaction.ResetPromptState()
-			}
-			return "", errChatInteractivePromptCancelled
-		}
-		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
-			session.Interrupt()
-			if session.Interaction != nil {
-				session.Interaction.ResetPromptState()
-			}
-			return "", ui.ErrInteractiveInputExitRequested
-		}
-		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
-			session.Interrupt()
-			if session.Interaction != nil {
-				session.Interaction.ResetPromptState()
-			}
-			return "", io.EOF
-		}
-		if session.Interaction != nil && err != nil {
-			session.Interaction.ResetPromptState()
-		}
-		return line, err
+		return newChatModalComposerPrompt(session, prompt).ReadLine()
 	}
 	return chatInteractiveReadTransientLine(session, ctx)
 }
@@ -987,28 +859,7 @@ func chatInteractiveReadPrioritySecretWithPrompt(session *ChatSession, ctx conte
 		defer clearRuntimeComposerPrompt(session)
 	}
 	if session != nil && session.InputBox != nil {
-		if session.Interaction != nil {
-			session.Interaction.SetPromptInput("")
-		}
-		line, err := session.InputBox.ReadTransientSecretPrompt(readPrompt)
-		if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
-			session.Interrupt()
-			if session.Interaction != nil {
-				session.Interaction.ResetPromptState()
-			}
-			return "", ui.ErrInteractiveInputExitRequested
-		}
-		if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
-			session.Interrupt()
-			if session.Interaction != nil {
-				session.Interaction.ResetPromptState()
-			}
-			return "", io.EOF
-		}
-		if session.Interaction != nil {
-			session.Interaction.ResetPromptState()
-		}
-		return line, err
+		return newChatSecretComposerPrompt(session, readPrompt).ReadLine()
 	}
 	if chatIsInteractiveTerminal() {
 		return ui.NewInputBox(nil).ReadTransientSecretPrompt(readPrompt)

@@ -998,40 +998,8 @@ func (b *chatRuntimeEventBridge) approvalRequestForEvent(event runtimeevents.Eve
 	}
 }
 
-func formatInteractiveSupplementPromptLine(line string) string {
-	line = strings.TrimRight(strings.ReplaceAll(line, "\r\n", "\n"), "\n")
-	if strings.TrimSpace(line) == "" {
-		return ""
-	}
-	return ui.FormatAssistantSupplementBlock(line)
-}
-
 func showChatRuntimePriorityPrompt(session *ChatSession, lines []string, prompt string) (string, func(), bool) {
-	prompt = strings.TrimRight(strings.ReplaceAll(prompt, "\r\n", "\n"), "\n")
-	if session != nil && session.Surface != nil && session.Surface.Enabled() {
-		beginDirectInteractiveOutput(session)
-		session.Surface.ShowPopupInput(lines, prompt)
-		return prompt, func() {
-			session.Surface.ClearPopupPreserveCursor()
-			if session.Interaction != nil {
-				session.Interaction.ResetPromptState()
-			}
-		}, true
-	}
-
-	beginDirectInteractiveOutput(session)
-	fmt.Println()
-	for _, line := range lines {
-		if rendered := formatInteractiveSupplementPromptLine(line); rendered != "" {
-			fmt.Println(rendered)
-		}
-	}
-	renderedPrompt := formatInteractiveSupplementPromptLine(prompt)
-	if renderedPrompt == "" {
-		renderedPrompt = prompt
-	}
-	fmt.Print(renderedPrompt)
-	return renderedPrompt, func() {}, false
+	return newChatPromptOverlay(session).showPriorityPrompt(lines, prompt)
 }
 
 func renderChatRuntimePriorityPromptTranscript(session *ChatSession, lines []string, prompt string, answer string) {

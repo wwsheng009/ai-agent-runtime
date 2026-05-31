@@ -1,0 +1,390 @@
+package commands
+
+import (
+	"context"
+	"errors"
+	"io"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+)
+
+type chatComposerController struct {
+	session    *ChatSession
+	prompt     string
+	initial    ui.LineEditorSnapshot
+	completion *chatSlashCompletionController
+}
+
+type chatBusyComposerCapture struct {
+	session     *ChatSession
+	prompt      string
+	trackPrompt bool
+	cancelled   bool
+}
+
+type chatModalComposerPrompt struct {
+	session     *ChatSession
+	prompt      string
+	trackPrompt bool
+	cancelled   bool
+}
+
+type chatTransientLineComposer struct {
+	session *ChatSession
+}
+
+type chatSecretComposerPrompt struct {
+	session *ChatSession
+	prompt  string
+}
+
+type chatAgentPanelComposer struct {
+	session    *ChatSession
+	prompt     string
+	controller *chatAgentPanelModalController
+}
+
+func newChatComposerController(session *ChatSession) *chatComposerController {
+	controller := &chatComposerController{
+		session: session,
+		prompt:  formatSessionUserPrompt(session),
+	}
+	if session != nil && session.Interaction != nil {
+		controller.initial = session.Interaction.PromptInputSnapshot()
+		if controller.initial.Text == "" {
+			session.Interaction.SetPromptInput("")
+		}
+	}
+	if shouldEnableSlashCompletion(session) {
+		controller.completion = newChatSlashCompletionController(session)
+	}
+	return controller
+}
+
+func (c *chatComposerController) ReadLine() (string, error) {
+	if c == nil || c.session == nil || c.session.InputBox == nil {
+		return "", io.EOF
+	}
+	defer c.Close()
+	line, err := c.session.InputBox.ReadWithHistoryPromptWithHooks(c.prompt, c.hooks())
+	return line, normalizeChatComposerReadError(c.session, err)
+}
+
+func (c *chatComposerController) Close() {
+	if c == nil || c.completion == nil {
+		return
+	}
+	c.completion.Clear()
+}
+
+func (c *chatComposerController) hooks() ui.LineEditorHooks {
+	hooks := ui.LineEditorHooks{
+		InitialText:           c.initial.Text,
+		InitialCursor:         c.initial.Cursor,
+		OnChange:              c.onChange,
+		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
+	}
+	if c.completion != nil {
+		hooks.OnComplete = c.onComplete
+		hooks.OnNavigate = c.onNavigate
+		hooks.OnSubmit = c.onSubmit
+		hooks.OnCancelPopup = c.onCancelPopup
+	}
+	return hooks
+}
+
+func (c *chatComposerController) onChange(snapshot ui.LineEditorSnapshot) {
+	if c == nil || c.session == nil {
+		return
+	}
+	// Slash popup rendering must preserve the cursor from the last completed
+	// editor redraw. Track the prompt snapshot first so popup rendering and
+	// paste-active blocking observe the same composer state that the editor is
+	// about to draw.
+	if c.session.Interaction != nil {
+		c.session.Interaction.SetPromptInputSnapshot(snapshot)
+	}
+	if c.completion != nil {
+		c.completion.UpdateSnapshot(snapshot)
+	}
+}
+
+func (c *chatComposerController) onBeforeTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return ""
+	}
+	return c.session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
+}
+
+func (c *chatComposerController) onComplete(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
+	if c == nil || c.completion == nil {
+		return ui.LineEditorReplacement{}, false
+	}
+	nextText, nextCursor, ok := c.completion.ApplyCompletion(snapshot.Text, snapshot.Cursor)
+	if !ok {
+		return ui.LineEditorReplacement{}, false
+	}
+	return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
+}
+
+func (c *chatComposerController) onNavigate(_ ui.LineEditorSnapshot, delta int) bool {
+	return c != nil && c.completion != nil && c.completion.Navigate(delta)
+}
+
+func (c *chatComposerController) onSubmit(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
+	if c == nil || c.completion == nil {
+		return ui.LineEditorReplacement{}, false
+	}
+	nextText, nextCursor, ok := c.completion.ApplySubmission(snapshot.Text, snapshot.Cursor)
+	if !ok {
+		return ui.LineEditorReplacement{}, false
+	}
+	return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
+}
+
+func (c *chatComposerController) onCancelPopup(ui.LineEditorSnapshot) bool {
+	return c != nil && c.completion != nil && c.completion.Cancel()
+}
+
+func normalizeChatComposerReadError(session *ChatSession, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
+		interruptChatComposerSession(session)
+		resetChatComposerPrompt(session)
+		return ui.ErrInteractiveInputExitRequested
+	}
+	if errors.Is(err, ui.ErrInteractiveInputInterrupted) {
+		interruptChatComposerSession(session)
+		resetChatComposerPrompt(session)
+		return io.EOF
+	}
+	resetChatComposerPrompt(session)
+	return err
+}
+
+func interruptChatComposerSession(session *ChatSession) {
+	if session != nil {
+		session.Interrupt()
+	}
+}
+
+func resetChatComposerPrompt(session *ChatSession) {
+	if session != nil && session.Interaction != nil {
+		session.Interaction.ResetPromptState()
+	}
+}
+
+func newChatBusyComposerCapture(session *ChatSession, prompt string, priorityPrompt bool) *chatBusyComposerCapture {
+	return &chatBusyComposerCapture{
+		session:     session,
+		prompt:      prompt,
+		trackPrompt: !priorityPrompt,
+	}
+}
+
+func (c *chatBusyComposerCapture) ReadLine(ctx context.Context) (string, error) {
+	if c == nil || c.session == nil || c.session.InputBox == nil {
+		return "", io.EOF
+	}
+	return c.session.InputBox.ReadTransientPromptWithHooksContext(ctx, c.prompt, c.hooks())
+}
+
+func (c *chatBusyComposerCapture) hooks() ui.LineEditorHooks {
+	return ui.LineEditorHooks{
+		OnChange:              c.onChange,
+		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
+		OnCancel:              c.onCancel,
+	}
+}
+
+func (c *chatBusyComposerCapture) Cancelled() bool {
+	return c != nil && c.cancelled
+}
+
+func (c *chatBusyComposerCapture) ClearPrompt() {
+	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.session.Interaction.RenderPromptInputSnapshot(ui.LineEditorSnapshot{})
+}
+
+func (c *chatBusyComposerCapture) onChange(snapshot ui.LineEditorSnapshot) {
+	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.session.Interaction.SetPromptInputSnapshot(snapshot)
+}
+
+func (c *chatBusyComposerCapture) onBeforeTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
+	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+		return ""
+	}
+	return c.session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
+}
+
+func (c *chatBusyComposerCapture) onCancel(ui.LineEditorSnapshot) bool {
+	if c != nil {
+		c.cancelled = true
+	}
+	return true
+}
+
+func newChatModalComposerPrompt(session *ChatSession, prompt string) *chatModalComposerPrompt {
+	return &chatModalComposerPrompt{
+		session:     session,
+		prompt:      prompt,
+		trackPrompt: session == nil || session.Surface == nil || !session.Surface.Enabled(),
+	}
+}
+
+func (c *chatModalComposerPrompt) ReadLine() (string, error) {
+	if c == nil || c.session == nil || c.session.InputBox == nil {
+		return "", io.EOF
+	}
+	c.initializePrompt()
+	line, err := c.session.InputBox.ReadTransientPromptWithHooks(c.prompt, c.hooks())
+	c.clearPrompt()
+	return line, c.normalizeReadError(err)
+}
+
+func (c *chatModalComposerPrompt) hooks() ui.LineEditorHooks {
+	return ui.LineEditorHooks{
+		OnChange: c.onChange,
+		OnCancel: c.onCancel,
+	}
+}
+
+func (c *chatModalComposerPrompt) initializePrompt() {
+	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.session.Interaction.SetPromptInput("")
+}
+
+func (c *chatModalComposerPrompt) clearPrompt() {
+	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.session.Interaction.SetPromptInput("")
+}
+
+func (c *chatModalComposerPrompt) onChange(snapshot ui.LineEditorSnapshot) {
+	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.session.Interaction.SetPromptInput(snapshot.Text)
+}
+
+func (c *chatModalComposerPrompt) onCancel(ui.LineEditorSnapshot) bool {
+	if c != nil {
+		c.cancelled = true
+	}
+	return true
+}
+
+func (c *chatModalComposerPrompt) normalizeReadError(err error) error {
+	if c == nil {
+		return err
+	}
+	if c.cancelled && err == nil {
+		resetChatComposerPrompt(c.session)
+		return errChatInteractivePromptCancelled
+	}
+	return normalizeChatComposerReadError(c.session, err)
+}
+
+func newChatTransientLineComposer(session *ChatSession) *chatTransientLineComposer {
+	return &chatTransientLineComposer{session: session}
+}
+
+func (c *chatTransientLineComposer) ReadLine() (string, error) {
+	if c == nil || c.session == nil || c.session.InputBox == nil {
+		return "", io.EOF
+	}
+	line, err := c.session.InputBox.ReadTransientLineWithHooks(ui.LineEditorHooks{})
+	return line, normalizeChatComposerReadError(c.session, err)
+}
+
+func newChatSecretComposerPrompt(session *ChatSession, prompt string) *chatSecretComposerPrompt {
+	return &chatSecretComposerPrompt{session: session, prompt: prompt}
+}
+
+func (c *chatSecretComposerPrompt) ReadLine() (string, error) {
+	if c == nil || c.session == nil || c.session.InputBox == nil {
+		return "", io.EOF
+	}
+	resetChatComposerPromptInput(c.session)
+	line, err := c.session.InputBox.ReadTransientSecretPrompt(c.prompt)
+	if err == nil {
+		resetChatComposerPrompt(c.session)
+		return line, nil
+	}
+	return line, normalizeChatComposerReadError(c.session, err)
+}
+
+func resetChatComposerPromptInput(session *ChatSession) {
+	if session != nil && session.Interaction != nil {
+		session.Interaction.SetPromptInput("")
+	}
+}
+
+func newChatAgentPanelComposer(session *ChatSession, prompt string, controller *chatAgentPanelModalController) *chatAgentPanelComposer {
+	return &chatAgentPanelComposer{
+		session:    session,
+		prompt:     prompt,
+		controller: controller,
+	}
+}
+
+func (c *chatAgentPanelComposer) ReadLine() error {
+	if c == nil || c.session == nil || c.session.InputBox == nil {
+		return io.EOF
+	}
+	_, err := c.session.InputBox.ReadTransientPromptWithHooks(c.prompt, c.hooks())
+	return normalizeChatAgentPanelComposerReadError(c.session, err)
+}
+
+func (c *chatAgentPanelComposer) hooks() ui.LineEditorHooks {
+	return ui.LineEditorHooks{
+		OnNavigate: c.onNavigate,
+		OnMove:     c.onMove,
+		OnSubmit:   c.onSubmit,
+		OnCancel:   c.onCancel,
+	}
+}
+
+func (c *chatAgentPanelComposer) onNavigate(_ ui.LineEditorSnapshot, delta int) bool {
+	if c != nil && c.controller != nil {
+		c.controller.Navigate(delta)
+	}
+	return true
+}
+
+func (c *chatAgentPanelComposer) onMove(_ ui.LineEditorSnapshot, delta int) bool {
+	if c != nil && c.controller != nil {
+		c.controller.MovePane(delta)
+	}
+	return true
+}
+
+func (c *chatAgentPanelComposer) onSubmit(ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
+	if c != nil && c.controller != nil {
+		c.controller.Select()
+	}
+	return ui.LineEditorReplacement{}, true
+}
+
+func (c *chatAgentPanelComposer) onCancel(ui.LineEditorSnapshot) bool {
+	return true
+}
+
+func normalizeChatAgentPanelComposerReadError(session *ChatSession, err error) error {
+	if errors.Is(err, ui.ErrInteractiveInputInterrupted) || errors.Is(err, ui.ErrInteractiveInputExitRequested) {
+		interruptChatComposerSession(session)
+		resetChatComposerPrompt(session)
+		return io.EOF
+	}
+	return err
+}

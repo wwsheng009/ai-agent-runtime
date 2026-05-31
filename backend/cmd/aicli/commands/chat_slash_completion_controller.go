@@ -356,15 +356,12 @@ func (c *chatSlashCompletionController) renderLocked() {
 		return
 	}
 
-	c.session.Surface.ShowPopupPreserveCursorForOwnerBelowPrompt(lines, slashCompletionPopupOwner)
+	newChatPromptOverlay(c.session).showOwnedPopupBelowPrompt(lines, slashCompletionPopupOwner)
 	c.renderedSignature = signature
 }
 
 func (c *chatSlashCompletionController) clearPopupLocked() {
-	if !c.isSurfaceEnabledLocked() {
-		return
-	}
-	c.session.Surface.ClearPopupForOwnerPreserveCursor(slashCompletionPopupOwner)
+	newChatPromptOverlay(c.session).clearOwnedPopup(slashCompletionPopupOwner)
 }
 
 func (c *chatSlashCompletionController) isSurfaceEnabledLocked() bool {

@@ -377,28 +377,15 @@ func selectRuntimeReasoningEffortLegacy(session *ChatSession, current string, op
 }
 
 func useRuntimeSelectionPopup(session *ChatSession) bool {
-	return session != nil && session.Surface != nil && session.Surface.Enabled()
+	return newChatPromptOverlay(session).surfaceEnabled()
 }
 
 func showRuntimeSelectionPopup(session *ChatSession, lines []string, prompt string) {
-	if !useRuntimeSelectionPopup(session) {
-		return
-	}
-	beginDirectInteractiveOutput(session)
-	session.Surface.ShowPopupInput(lines, prompt)
+	newChatPromptOverlay(session).showSelectionPopup(lines, prompt)
 }
 
 func clearRuntimeSelectionPopup(session *ChatSession) {
-	if session == nil || session.Surface == nil {
-		if session != nil && session.Interaction != nil {
-			session.Interaction.ResetPromptState()
-		}
-		return
-	}
-	session.Surface.ClearPopupPreserveCursor()
-	if session.Interaction != nil {
-		session.Interaction.ResetPromptState()
-	}
+	newChatPromptOverlay(session).clearSelectionPopup()
 }
 
 func renderSelectionPopupLines(title, currentLabel, currentValue string, options []string, currentMatch, defaultOption, hint, notice, warning string) []string {
