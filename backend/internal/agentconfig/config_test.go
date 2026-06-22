@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -47,6 +48,189 @@ providers:
 	}
 	if got := both.GetMaxTokensLimit(); got != 12000 {
 		t.Fatalf("both max tokens = %d, want 12000", got)
+	}
+}
+
+func TestInitGlobalConfigLoadsSubagentRouting(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `
+aicli:
+  subagents:
+    routing:
+      enabled: true
+      compatibility_mode: strict
+      default_difficulty: normal
+      unsupported_reasoning_policy: downgrade
+      allow_explicit_model_override: true
+      allow_explicit_reasoning_override: true
+      allowed_provider_overrides:
+        - strong
+      allowed_model_overrides:
+        - strong-model
+      levels:
+        hard:
+          provider: strong
+          model: strong-model
+          reasoning_effort: high
+          max_tokens: 12000
+      roles:
+        verifier:
+          hard:
+            provider: verify
+            model: verify-model
+            thinking_effort: medium
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+
+	cfg, err := InitGlobalConfig(configPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig failed: %v", err)
+	}
+	if cfg.AICLI == nil || cfg.AICLI.Subagents == nil || cfg.AICLI.Subagents.Routing == nil {
+		t.Fatal("expected subagent routing config")
+	}
+	routing := cfg.AICLI.Subagents.Routing
+	if routing.Enabled == nil || !*routing.Enabled {
+		t.Fatalf("expected routing enabled, got %#v", routing.Enabled)
+	}
+	if routing.CompatibilityMode != "strict" {
+		t.Fatalf("unexpected compatibility mode: %q", routing.CompatibilityMode)
+	}
+	if routing.UnsupportedReasoningPolicy != "downgrade" {
+		t.Fatalf("unexpected unsupported reasoning policy: %q", routing.UnsupportedReasoningPolicy)
+	}
+	if routing.Levels["hard"].Provider != "strong" || routing.Levels["hard"].Model != "strong-model" {
+		t.Fatalf("unexpected hard route: %#v", routing.Levels["hard"])
+	}
+	if len(routing.AllowedProviderOverrides) != 1 || routing.AllowedProviderOverrides[0] != "strong" {
+		t.Fatalf("unexpected allowed provider overrides: %#v", routing.AllowedProviderOverrides)
+	}
+	if len(routing.AllowedModelOverrides) != 1 || routing.AllowedModelOverrides[0] != "strong-model" {
+		t.Fatalf("unexpected allowed model overrides: %#v", routing.AllowedModelOverrides)
+	}
+	if !routing.AllowExplicitReasoningOverride {
+		t.Fatal("expected explicit reasoning override to be allowed")
+	}
+	if routing.Roles["verifier"]["hard"].ThinkingEffort != "medium" {
+		t.Fatalf("unexpected verifier route: %#v", routing.Roles["verifier"]["hard"])
+	}
+}
+
+func TestInitGlobalConfigRejectsInvalidEnabledSubagentRoutingCompatibilityMode(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `
+aicli:
+  subagents:
+    routing:
+      enabled: true
+      compatibility_mode: loose
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+
+	_, err := InitGlobalConfig(configPath)
+	if err == nil {
+		t.Fatal("expected invalid routing compatibility mode error")
+	}
+	if !strings.Contains(err.Error(), "compatibility_mode") {
+		t.Fatalf("expected compatibility_mode error, got %v", err)
+	}
+}
+
+func TestInitGlobalConfigRejectsInvalidEnabledSubagentRoutingDefaultDifficulty(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `
+aicli:
+  subagents:
+    routing:
+      enabled: true
+      default_difficulty: impossible
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+
+	_, err := InitGlobalConfig(configPath)
+	if err == nil {
+		t.Fatal("expected invalid routing default difficulty error")
+	}
+	if !strings.Contains(err.Error(), "default_difficulty") {
+		t.Fatalf("expected default_difficulty error, got %v", err)
+	}
+}
+
+func TestInitGlobalConfigRejectsInvalidEnabledSubagentRoutingReasoningPolicy(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `
+aicli:
+  subagents:
+    routing:
+      enabled: true
+      unsupported_reasoning_policy: explode
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+
+	_, err := InitGlobalConfig(configPath)
+	if err == nil {
+		t.Fatal("expected invalid unsupported reasoning policy error")
+	}
+	if !strings.Contains(err.Error(), "unsupported_reasoning_policy") {
+		t.Fatalf("expected unsupported_reasoning_policy error, got %v", err)
+	}
+}
+
+func TestInitGlobalConfigAllowsInvalidDisabledSubagentRoutingDraft(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `
+aicli:
+  subagents:
+    routing:
+      enabled: false
+      default_difficulty: impossible
+      levels:
+        super-hard:
+          max_tokens: -1
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+
+	cfg, err := InitGlobalConfig(configPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig failed: %v", err)
+	}
+	if cfg.AICLI == nil || cfg.AICLI.Subagents == nil || cfg.AICLI.Subagents.Routing == nil {
+		t.Fatal("expected disabled routing draft config to load")
+	}
+}
+
+func TestInitGlobalConfigRejectsIncompleteRouteWhenSubagentRoutingMustNotInherit(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `
+aicli:
+  subagents:
+    routing:
+      enabled: true
+      inherit_parent_when_missing: false
+      levels:
+        hard:
+          provider: strong
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+
+	_, err := InitGlobalConfig(configPath)
+	if err == nil {
+		t.Fatal("expected incomplete subagent route error")
+	}
+	if !strings.Contains(err.Error(), "provider and model") {
+		t.Fatalf("expected provider/model completeness error, got %v", err)
 	}
 }
 

@@ -126,6 +126,21 @@ func RenderParallelToolGuidance() string {
 	return strings.Join(rendered, "\n")
 }
 
+// RenderTaskDifficultyGuidance renders the delegation policy used by runtimes
+// that can map child task difficulty to local provider/model routes.
+func RenderTaskDifficultyGuidance() string {
+	lines := []string{
+		"Task difficulty rating and subagent delegation policy:",
+		"",
+		"Before decomposing or delegating work, rate the overall user request difficulty as one of: easy, normal, hard, expert.",
+		"Use easy for local, low-risk, single-step work. Use normal for regular multi-file or multi-step work. Use hard for complex implementation, broad investigation, or tasks requiring test verification. Use expert for high-risk architecture, security, permission, provider/protocol, migration, or cross-system consistency work.",
+		"Do not spawn subagents for easy work unless explicitly requested or clearly beneficial. Prefer one or more subagents for hard/expert work when subtasks can be isolated.",
+		"When spawning subagents, include difficulty and difficulty_rationale for every child task. Do not invent provider/model names; leave provider/model empty unless the user explicitly asked for a specific override. The runtime maps difficulty to local provider/model configuration.",
+		"For multiple subtasks, use this structure: id, role, goal, difficulty, difficulty_rationale, depends_on, read_only, and tools_whitelist when needed.",
+	}
+	return strings.Join(lines, "\n")
+}
+
 func detectedShellName(shell runtimeexecutor.Shell) string {
 	if text := strings.TrimSpace(string(shell.Type)); text != "" {
 		return text

@@ -3,6 +3,8 @@ package agent
 import (
 	"fmt"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 )
 
 // BuildSubagentTasksFromPlan 将 planner 结果映射为建议的子代理任务图。
@@ -17,13 +19,16 @@ func BuildSubagentTasksFromPlan(plan *Plan) []SubagentTask {
 
 	for _, step := range plan.Steps {
 		role := inferSubagentRole(step)
+		difficulty, difficultyRationale := difficultyMetadataForPlanStep(step)
 		task := SubagentTask{
-			ID:             firstNonEmptyString(step.ID, role),
-			Role:           role,
-			Goal:           subagentGoalForStep(plan.Goal, step),
-			ToolsWhitelist: stepToolWhitelist(step),
-			DependsOn:      append([]string(nil), step.DependsOn...),
-			ReadOnly:       role != "writer",
+			ID:                  firstNonEmptyString(step.ID, role),
+			Role:                role,
+			Goal:                subagentGoalForStep(plan.Goal, step),
+			Difficulty:          difficulty,
+			DifficultyRationale: difficultyRationale,
+			ToolsWhitelist:      stepToolWhitelist(step),
+			DependsOn:           append([]string(nil), step.DependsOn...),
+			ReadOnly:            role != "writer",
 		}
 		tasks = append(tasks, task)
 		if role == "writer" {
@@ -35,16 +40,20 @@ func BuildSubagentTasksFromPlan(plan *Plan) []SubagentTask {
 	}
 
 	if len(writerIDs) > 0 && !verifierDependsOnWriter {
+		verifierDifficulty := verifierDifficultyForWriters(tasks, writerIDs)
 		tasks = append(tasks, SubagentTask{
-			ID:             "verifier_auto",
-			Role:           "verifier",
-			Goal:           fmt.Sprintf("Verify the writer changes for goal: %s", strings.TrimSpace(plan.Goal)),
-			ToolsWhitelist: DefaultToolsForRole("verifier"),
-			DependsOn:      append([]string(nil), writerIDs...),
-			ReadOnly:       true,
+			ID:                  "verifier_auto",
+			Role:                "verifier",
+			Goal:                fmt.Sprintf("Verify the writer changes for goal: %s", strings.TrimSpace(plan.Goal)),
+			Difficulty:          verifierDifficulty,
+			DifficultyRationale: "Verifier difficulty derived from planner writer task difficulty.",
+			ToolsWhitelist:      DefaultToolsForRole("verifier"),
+			DependsOn:           append([]string(nil), writerIDs...),
+			ReadOnly:            true,
 		})
 	}
 
+	upgradeVerifierDifficultyForHighRiskWriters(tasks)
 	return tasks
 }
 
@@ -90,6 +99,75 @@ func stepToolWhitelist(step PlanStep) []string {
 		return nil
 	}
 	return []string{strings.TrimSpace(step.Tool)}
+}
+
+func difficultyMetadataForPlanStep(step PlanStep) (string, string) {
+	difficulty, ok := modelrouting.NormalizeDifficulty(step.Difficulty)
+	if !ok {
+		difficulty = modelrouting.DifficultyNormal
+	}
+	rationale := strings.TrimSpace(step.DifficultyRationale)
+	if rationale == "" {
+		rationale = "Default difficulty assigned for planner-generated subtask."
+	}
+	return difficulty, rationale
+}
+
+func verifierDifficultyForWriters(tasks []SubagentTask, writerIDs []string) string {
+	writerSet := make(map[string]bool, len(writerIDs))
+	for _, writerID := range writerIDs {
+		writerSet[strings.TrimSpace(writerID)] = true
+	}
+	for _, task := range tasks {
+		if !writerSet[strings.TrimSpace(task.ID)] {
+			continue
+		}
+		difficulty, ok := modelrouting.NormalizeDifficulty(task.Difficulty)
+		if !ok {
+			continue
+		}
+		if difficulty == modelrouting.DifficultyHard || difficulty == modelrouting.DifficultyExpert {
+			return modelrouting.DifficultyHard
+		}
+	}
+	return modelrouting.DifficultyNormal
+}
+
+func upgradeVerifierDifficultyForHighRiskWriters(tasks []SubagentTask) {
+	writerDifficulty := make(map[string]string, len(tasks))
+	for _, task := range tasks {
+		if isHighRiskWriterTask(task) {
+			writerDifficulty[strings.TrimSpace(task.ID)] = task.Difficulty
+		}
+	}
+	if len(writerDifficulty) == 0 {
+		return
+	}
+	for index := range tasks {
+		task := tasks[index]
+		if !strings.EqualFold(strings.TrimSpace(task.Role), "verifier") || !task.ReadOnly {
+			continue
+		}
+		if !dependsOnAny(task.DependsOn, mapKeys(writerDifficulty)) {
+			continue
+		}
+		if subagentDifficultyRank(task.Difficulty) >= subagentDifficultyRank(modelrouting.DifficultyHard) {
+			continue
+		}
+		tasks[index].Difficulty = modelrouting.DifficultyHard
+		if strings.TrimSpace(tasks[index].DifficultyRationale) == "" ||
+			strings.Contains(tasks[index].DifficultyRationale, "Default difficulty assigned") {
+			tasks[index].DifficultyRationale = "Verifier difficulty derived from hard or expert writer dependency."
+		}
+	}
+}
+
+func mapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func dependsOnAny(dependsOn []string, targets []string) bool {
@@ -169,8 +247,54 @@ func ValidatePlannedSubagentExecution(tasks []SubagentTask, policy *ToolExecutio
 			return fmt.Errorf("planned writer subagent execution requires a verifier dependency")
 		}
 	}
+	for _, writerID := range writerIDs {
+		writer := taskMap[writerID]
+		if !isHighRiskWriterTask(writer) {
+			continue
+		}
+		verifierFound := false
+		for _, task := range tasks {
+			if task.Role != "verifier" || !task.ReadOnly || !dependsOnAny(task.DependsOn, []string{writerID}) {
+				continue
+			}
+			verifierFound = true
+			if subagentDifficultyRank(task.Difficulty) < subagentDifficultyRank(modelrouting.DifficultyHard) {
+				return fmt.Errorf("hard or expert writer subagent %q requires a hard-or-higher verifier", writerID)
+			}
+		}
+		if !verifierFound {
+			return fmt.Errorf("hard or expert writer subagent %q requires a read-only verifier dependency", writerID)
+		}
+	}
 
 	return nil
+}
+
+func isHighRiskWriterTask(task SubagentTask) bool {
+	if task.ReadOnly || !strings.EqualFold(strings.TrimSpace(task.Role), "writer") {
+		return false
+	}
+	difficulty, ok := modelrouting.NormalizeDifficulty(task.Difficulty)
+	return ok && (difficulty == modelrouting.DifficultyHard || difficulty == modelrouting.DifficultyExpert)
+}
+
+func subagentDifficultyRank(raw string) int {
+	difficulty, ok := modelrouting.NormalizeDifficulty(raw)
+	if !ok {
+		difficulty = modelrouting.DifficultyNormal
+	}
+	switch difficulty {
+	case modelrouting.DifficultyEasy:
+		return 1
+	case modelrouting.DifficultyNormal:
+		return 2
+	case modelrouting.DifficultyHard:
+		return 3
+	case modelrouting.DifficultyExpert:
+		return 4
+	default:
+		return 2
+	}
 }
 
 func hasSubagentDependencyCycle(taskMap map[string]SubagentTask) bool {

@@ -515,6 +515,12 @@ func (s *SQLiteStore) CreateAgentControlTaskRecord(ctx context.Context, task Tas
 	if task.Status == "" {
 		task.Status = TaskStatusPending
 	}
+	difficulty, ok := NormalizeTaskDifficulty(task.Difficulty)
+	if !ok {
+		return "", fmt.Errorf("unsupported task difficulty: %s", task.Difficulty)
+	}
+	task.Difficulty = difficulty
+	task.DifficultyRationale = strings.TrimSpace(task.DifficultyRationale)
 	now := time.Now().UTC()
 	if task.CreatedAt.IsZero() {
 		task.CreatedAt = now
@@ -563,7 +569,7 @@ func (s *SQLiteStore) getAgentControlTask(ctx context.Context, id string) (*Task
 		return nil, fmt.Errorf("team store is not initialized")
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT task_id, team_id, parent_task_id, title, goal, status, priority, assignee, lease_until, retry_count,
+		SELECT task_id, team_id, parent_task_id, title, goal, difficulty, difficulty_rationale, status, priority, assignee, lease_until, retry_count,
 			inputs_json, read_paths_json, write_paths_json, deliverables_json, summary, result_ref, version, created_at, updated_at
 		FROM agent_control_task_records
 		WHERE workflow = ? AND task_id = ?
@@ -597,7 +603,7 @@ func scanTaskRow(row taskRowScanner) (*Task, error) {
 		createdAtRaw    string
 		updatedAtRaw    string
 	)
-	if err := row.Scan(&task.ID, &task.TeamID, &parentID, &task.Title, &task.Goal, &status, &task.Priority, &assigneeRaw, &leaseUntilRaw, &task.RetryCount, &inputsJSON, &readJSON, &writeJSON, &deliverableJSON, &task.Summary, &resultRefRaw, &task.Version, &createdAtRaw, &updatedAtRaw); err != nil {
+	if err := row.Scan(&task.ID, &task.TeamID, &parentID, &task.Title, &task.Goal, &task.Difficulty, &task.DifficultyRationale, &status, &task.Priority, &assigneeRaw, &leaseUntilRaw, &task.RetryCount, &inputsJSON, &readJSON, &writeJSON, &deliverableJSON, &task.Summary, &resultRefRaw, &task.Version, &createdAtRaw, &updatedAtRaw); err != nil {
 		return nil, err
 	}
 	if parentID.Valid {
@@ -640,7 +646,7 @@ func (s *SQLiteStore) listAgentControlTasks(ctx context.Context, filter TaskFilt
 	}
 	query := strings.Builder{}
 	query.WriteString(`
-		SELECT task_id, team_id, parent_task_id, title, goal, status, priority, assignee, lease_until, retry_count,
+		SELECT task_id, team_id, parent_task_id, title, goal, difficulty, difficulty_rationale, status, priority, assignee, lease_until, retry_count,
 			inputs_json, read_paths_json, write_paths_json, deliverables_json, summary, result_ref, version, created_at, updated_at
 		FROM agent_control_task_records
 	`)
@@ -711,6 +717,12 @@ func (s *SQLiteStore) UpdateAgentControlTaskRecord(ctx context.Context, task Tas
 	if task.Status == "" {
 		task.Status = TaskStatusPending
 	}
+	difficulty, ok := NormalizeTaskDifficulty(task.Difficulty)
+	if !ok {
+		return fmt.Errorf("unsupported task difficulty: %s", task.Difficulty)
+	}
+	task.Difficulty = difficulty
+	task.DifficultyRationale = strings.TrimSpace(task.DifficultyRationale)
 	task.UpdatedAt = time.Now().UTC()
 	if task.CreatedAt.IsZero() {
 		task.CreatedAt = task.UpdatedAt
@@ -1243,9 +1255,9 @@ func (s *SQLiteStore) insertAgentControlTaskRecordTx(ctx context.Context, tx *sq
 	query := `
 		INSERT INTO agent_control_task_records (
 			workflow, task_id, team_id, parent_task_id, assignee, session_id, agent_path,
-			title, goal, inputs_json, summary, status, priority, lease_until, retry_count,
+			title, goal, difficulty, difficulty_rationale, inputs_json, summary, status, priority, lease_until, retry_count,
 			read_paths_json, write_paths_json, deliverables_json, result_ref, version, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	if upsert {
 		query += `
@@ -1257,6 +1269,8 @@ func (s *SQLiteStore) insertAgentControlTaskRecordTx(ctx context.Context, tx *sq
 			agent_path = excluded.agent_path,
 			title = excluded.title,
 			goal = excluded.goal,
+			difficulty = excluded.difficulty,
+			difficulty_rationale = excluded.difficulty_rationale,
 			inputs_json = excluded.inputs_json,
 			summary = excluded.summary,
 			status = excluded.status,
@@ -1281,6 +1295,8 @@ func (s *SQLiteStore) insertAgentControlTaskRecordTx(ctx context.Context, tx *sq
 		nullablePlainString(record.Path),
 		task.Title,
 		task.Goal,
+		task.Difficulty,
+		task.DifficultyRationale,
 		inputsJSON,
 		task.Summary,
 		string(task.Status),
@@ -1686,7 +1702,7 @@ func (s *SQLiteStore) ListAgentControlTaskRecords(ctx context.Context, filter ag
 	}
 	query := `
 		SELECT task_id, workflow, team_id, parent_task_id, assignee, session_id, agent_path,
-			title, summary, status, priority, created_at, updated_at
+			title, summary, difficulty, difficulty_rationale, status, priority, created_at, updated_at
 		FROM agent_control_task_records
 		WHERE ` + strings.Join(clauses, " AND ") + `
 		ORDER BY priority DESC, created_at ASC, task_id ASC
@@ -1715,7 +1731,7 @@ func (s *SQLiteStore) ListAgentControlTaskRecords(ctx context.Context, filter ag
 			createdAtRaw string
 			updatedAtRaw string
 		)
-		if err := rows.Scan(&record.ID, &record.Workflow, &record.TeamID, &parentRaw, &assigneeRaw, &sessionRaw, &pathRaw, &titleRaw, &summaryRaw, &statusRaw, &record.Priority, &createdAtRaw, &updatedAtRaw); err != nil {
+		if err := rows.Scan(&record.ID, &record.Workflow, &record.TeamID, &parentRaw, &assigneeRaw, &sessionRaw, &pathRaw, &titleRaw, &summaryRaw, &record.Difficulty, &record.DifficultyRationale, &statusRaw, &record.Priority, &createdAtRaw, &updatedAtRaw); err != nil {
 			return nil, fmt.Errorf("scan agent control task record: %w", err)
 		}
 		if parentRaw.Valid {
@@ -4053,6 +4069,14 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 				ALTER TABLE agent_control_mailbox_records ADD COLUMN global_seq INTEGER NOT NULL DEFAULT 0;
 				CREATE INDEX IF NOT EXISTS idx_agent_control_mailbox_records_global_seq
 				ON agent_control_mailbox_records(global_seq);
+			`,
+		},
+		{
+			Version: 21,
+			Name:    "agent_control_task_difficulty_metadata",
+			UpSQL: `
+				ALTER TABLE agent_control_task_records ADD COLUMN difficulty TEXT NOT NULL DEFAULT '';
+				ALTER TABLE agent_control_task_records ADD COLUMN difficulty_rationale TEXT NOT NULL DEFAULT '';
 			`,
 		},
 	}

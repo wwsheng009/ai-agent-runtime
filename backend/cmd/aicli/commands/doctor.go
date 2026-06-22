@@ -134,6 +134,7 @@ func NewDoctorCommand(getCfg func() *config.Config) *cobra.Command {
 	providerCmd.Flags().Bool("include-yolo", true, "包含 exec --yolo 用例，用于观察工具调用链")
 	providerCmd.Flags().Bool("include-tool-chat", true, "包含 chat 暴露 tools/skills 的用例")
 	cmd.AddCommand(providerCmd)
+	cmd.AddCommand(newDoctorSubagentRouteCommand(getCfg))
 	return cmd
 }
 

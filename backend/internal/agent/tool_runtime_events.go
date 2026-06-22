@@ -227,12 +227,14 @@ func keyWithPrefix(prefix, key string) string {
 }
 
 func summarizeToolExecutionLines(result toolExecutionResult) []string {
-	if lines := summarizeToolTextLines(extractToolTextOutput(result.Output)); len(lines) > 0 {
+	toolName := firstNonEmptyToolRuntimeValue(result.Call.Name)
+	if lines := summarizeToolTextLines(extractToolTextOutput(result.Output), toolName); len(lines) > 0 {
 		return lines
 	}
 	errText := normalizeToolEventText(result.Error)
 	if result.Envelope != nil {
-		if lines := summarizeToolTextLines(result.Envelope.Summary); len(lines) > 0 {
+		envelopeToolName := firstNonEmptyToolRuntimeValue(result.Call.Name, result.Envelope.ToolName)
+		if lines := summarizeToolTextLines(result.Envelope.Summary, envelopeToolName); len(lines) > 0 {
 			if errText == "" || !isGenericToolFailureSummary(result.Envelope.Summary, firstNonEmptyToolRuntimeValue(result.Call.Name, result.Envelope.ToolName)) {
 				return lines
 			}
@@ -381,13 +383,14 @@ func extractToolTextOutput(value interface{}) string {
 	}
 }
 
-func summarizeToolTextLines(text string) []string {
+func summarizeToolTextLines(text string, toolName string) []string {
 	text = strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
 	if text == "" {
 		return nil
 	}
 
 	lines := make([]string, 0, 6)
+	textLimit := toolEventSummaryTextLimit(toolName)
 	for _, rawLine := range strings.Split(text, "\n") {
 		trimmed := strings.TrimSpace(rawLine)
 		if trimmed == "" {
@@ -399,7 +402,7 @@ func summarizeToolTextLines(text string) []string {
 		if strings.HasPrefix(trimmed, "artifact_refs:") {
 			continue
 		}
-		normalized := truncateToolEventText(normalizeToolEventText(trimmed), 120)
+		normalized := truncateToolEventText(normalizeToolEventText(trimmed), textLimit)
 		if normalized == "" {
 			continue
 		}
@@ -415,7 +418,7 @@ func summarizeToolTextLines(text string) []string {
 			lines = split
 		}
 	}
-	return selectToolSummaryLines(lines)
+	return selectToolSummaryLines(lines, toolName)
 }
 
 func splitToolSummaryLine(line string) []string {
@@ -448,9 +451,15 @@ func splitToolSummaryLine(line string) []string {
 	return out
 }
 
-func selectToolSummaryLines(lines []string) []string {
+func selectToolSummaryLines(lines []string, toolName string) []string {
 	if len(lines) == 0 {
 		return nil
+	}
+	if limit := toolEventSummaryLineLimit(toolName); limit > 3 {
+		if len(lines) <= limit {
+			return lines
+		}
+		return lines[:limit]
 	}
 	if looksLikeDirectorySummary(lines) {
 		return buildDirectorySummaryLines(lines)
@@ -462,6 +471,20 @@ func selectToolSummaryLines(lines []string) []string {
 		return []string{lines[0], lines[1], lines[len(lines)-1]}
 	}
 	return lines[:3]
+}
+
+func toolEventSummaryLineLimit(toolName string) int {
+	if strings.EqualFold(strings.TrimSpace(toolName), "todos") {
+		return 32
+	}
+	return 3
+}
+
+func toolEventSummaryTextLimit(toolName string) int {
+	if strings.EqualFold(strings.TrimSpace(toolName), "todos") {
+		return 240
+	}
+	return 120
 }
 
 func looksLikeDirectorySummary(lines []string) bool {

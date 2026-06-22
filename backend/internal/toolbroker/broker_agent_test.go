@@ -10,32 +10,52 @@ import (
 )
 
 type fakeAgentSessionController struct {
-	lastParent string
-	lastSpawn  SpawnAgentArgs
-	lastList   ListAgentsArgs
-	lastMsg    AgentMessageArgs
-	lastFollow AgentMessageArgs
-	lastInput  SendAgentInputArgs
-	lastWait   WaitAgentArgs
-	lastRead   ReadAgentEventsArgs
-	lastClose  string
-	lastResume string
-	agents     []AgentStatusResult
+	lastParent  string
+	lastSpawn   SpawnAgentArgs
+	lastList    ListAgentsArgs
+	lastMsg     AgentMessageArgs
+	lastFollow  AgentMessageArgs
+	lastInput   SendAgentInputArgs
+	lastApprove ResolveAgentApprovalArgs
+	lastWait    WaitAgentArgs
+	lastRead    ReadAgentEventsArgs
+	lastClose   string
+	lastResume  string
+	agents      []AgentStatusResult
+}
+
+type testAgentContext map[string]interface{}
+
+func (c testAgentContext) GetContext(key string) (interface{}, bool) {
+	value, ok := c[key]
+	return value, ok
+}
+
+func (c testAgentContext) SetContext(key string, value interface{}) {
+	c[key] = value
 }
 
 func (f *fakeAgentSessionController) Spawn(ctx context.Context, parentSessionID string, args SpawnAgentArgs) (*AgentStatusResult, error) {
 	f.lastParent = parentSessionID
 	f.lastSpawn = args
 	return &AgentStatusResult{
-		ID:                "child-1",
-		SessionID:         "child-1",
-		ParentSessionID:   parentSessionID,
-		Status:            "running",
-		Exists:            true,
-		Created:           true,
-		Queued:            true,
-		CurrentTurnID:     "turn-dynamic-123",
-		PendingToolCallID: "toolcall-dynamic-456",
+		ID:                  "child-1",
+		SessionID:           "child-1",
+		ParentSessionID:     parentSessionID,
+		Status:              "running",
+		Exists:              true,
+		Created:             true,
+		Queued:              true,
+		Provider:            args.Provider,
+		Model:               args.Model,
+		ReasoningEffort:     args.ReasoningEffort,
+		PermissionMode:      args.PermissionMode,
+		Difficulty:          args.Difficulty,
+		DifficultyRationale: args.DifficultyRationale,
+		RouteSource:         args.RouteSource,
+		RouteWarnings:       append([]string(nil), args.RouteWarnings...),
+		CurrentTurnID:       "turn-dynamic-123",
+		PendingToolCallID:   "toolcall-dynamic-456",
 	}, nil
 }
 
@@ -90,6 +110,23 @@ func (f *fakeAgentSessionController) SendInput(ctx context.Context, args SendAge
 	}, nil
 }
 
+func (f *fakeAgentSessionController) ResolveApproval(ctx context.Context, args ResolveAgentApprovalArgs) (*AgentApprovalResult, error) {
+	f.lastApprove = args
+	status := &AgentStatusResult{
+		ID:        firstNonEmptyString(args.ID, args.SessionID),
+		SessionID: firstNonEmptyString(args.ID, args.SessionID),
+		Status:    "running",
+		Exists:    true,
+	}
+	return &AgentApprovalResult{
+		SessionID: firstNonEmptyString(args.ID, args.SessionID),
+		RequestID: args.RequestID,
+		Allowed:   args.Allow,
+		Resolved:  true,
+		Status:    status,
+	}, nil
+}
+
 func (f *fakeAgentSessionController) Wait(ctx context.Context, args WaitAgentArgs) (*AgentWaitResult, error) {
 	f.lastWait = args
 	agent := AgentStatusResult{ID: "child-1", SessionID: "child-1", Status: "idle", Exists: true, CurrentTurnID: "turn-dynamic-345", PendingToolCallID: "toolcall-dynamic-678"}
@@ -137,10 +174,76 @@ func TestBroker_Definitions_ExposeAgentToolsWhenControllerConfigured(t *testing.
 		seen[def.Name] = true
 	}
 
-	for _, name := range []string{ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent} {
+	for _, name := range []string{ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent} {
 		if !seen[name] {
 			t.Fatalf("expected %s in broker definitions", name)
 		}
+	}
+}
+
+func TestBroker_Definitions_ExposeSpawnAgentRouteSchema(t *testing.T) {
+	broker := &Broker{AgentSessions: &fakeAgentSessionController{}}
+	var spawnDef map[string]interface{}
+	for _, def := range broker.Definitions() {
+		if def.Name == ToolSpawnAgent {
+			spawnDef = def.Parameters
+			break
+		}
+	}
+	if spawnDef == nil {
+		t.Fatal("spawn_agent definition missing")
+	}
+	properties, ok := spawnDef["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("spawn_agent properties missing: %#v", spawnDef)
+	}
+	for _, key := range []string{"difficulty", "difficulty_rationale", "provider", "model", "reasoning_effort", "thinking_effort", "permission_mode"} {
+		if _, ok := properties[key]; !ok {
+			t.Fatalf("expected spawn_agent property %q in %#v", key, properties)
+		}
+	}
+	difficulty, ok := properties["difficulty"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("difficulty property has unexpected shape: %#v", properties["difficulty"])
+	}
+	enum, ok := difficulty["enum"].([]string)
+	if !ok || strings.Join(enum, ",") != "easy,normal,hard,expert" {
+		t.Fatalf("unexpected difficulty enum: %#v", difficulty["enum"])
+	}
+	permissionMode, ok := properties["permission_mode"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("permission_mode property has unexpected shape: %#v", properties["permission_mode"])
+	}
+	permissionEnum, ok := permissionMode["enum"].([]string)
+	if !ok || strings.Join(permissionEnum, ",") != "default,accept_edits,plan,bypass_permissions" {
+		t.Fatalf("unexpected permission_mode enum: %#v", permissionMode["enum"])
+	}
+}
+
+func TestBroker_Definitions_ExposeResolveAgentApprovalSchema(t *testing.T) {
+	broker := &Broker{AgentSessions: &fakeAgentSessionController{}}
+	var approveDef map[string]interface{}
+	for _, def := range broker.Definitions() {
+		if def.Name == ToolResolveAgentApproval {
+			approveDef = def.Parameters
+			break
+		}
+	}
+	if approveDef == nil {
+		t.Fatal("resolve_agent_approval definition missing")
+	}
+	properties, ok := approveDef["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("resolve_agent_approval properties missing: %#v", approveDef)
+	}
+	for _, key := range []string{"id", "session_id", "request_id", "allow", "patched_args"} {
+		if _, ok := properties[key]; !ok {
+			t.Fatalf("expected resolve_agent_approval property %q in %#v", key, properties)
+		}
+	}
+	required, ok := approveDef["required"].([]string)
+	if !ok || strings.Join(required, ",") != "request_id,allow" {
+		t.Fatalf("unexpected resolve_agent_approval required fields: %#v", approveDef["required"])
 	}
 }
 
@@ -172,9 +275,20 @@ func TestBuildAgentMailboxMessageUsesAgentControlEnvelope(t *testing.T) {
 
 func TestBuildSubagentCompletionMailboxMessageUsesAgentControlEnvelope(t *testing.T) {
 	message := BuildSubagentCompletionMailboxMessage(" parent-1 ", " child-1 ", " /root/child-1 ", " worker ", "session.end", map[string]interface{}{
-		"status":  "idle",
-		"success": true,
-		"seq":     int64(9),
+		"status":                 "idle",
+		"success":                true,
+		"seq":                    int64(9),
+		"difficulty":             "hard",
+		"difficulty_source":      "explicit",
+		"difficulty_rationale":   "touches provider policy",
+		"route_provider":         "codex",
+		"route_model":            "gpt-5.4",
+		"route_reasoning_effort": "high",
+		"route_source":           "difficulty_level",
+		"route_warnings":         []string{"provider_fallback_parent"},
+		"fallback_used":          true,
+		"fallback_reason":        "provider_unresolved_parent",
+		"usage_total_tokens":     1200,
 	})
 	if message.Kind != SubagentCompletionMailboxKind ||
 		message.FromAgent != "child-1" ||
@@ -194,8 +308,193 @@ func TestBuildSubagentCompletionMailboxMessageUsesAgentControlEnvelope(t *testin
 		message.Metadata["agent_type"] != "worker" ||
 		message.Metadata["source_event_type"] != "session.end" ||
 		message.Metadata["event_seq"] != int64(9) ||
-		message.Metadata["success"] != true {
+		message.Metadata["success"] != true ||
+		message.Metadata["difficulty"] != "hard" ||
+		message.Metadata["difficulty_source"] != "explicit" ||
+		message.Metadata["difficulty_rationale"] != "touches provider policy" ||
+		message.Metadata["route_provider"] != "codex" ||
+		message.Metadata["route_model"] != "gpt-5.4" ||
+		message.Metadata["route_reasoning_effort"] != "high" ||
+		message.Metadata["route_source"] != "difficulty_level" ||
+		message.Metadata["fallback_used"] != true ||
+		message.Metadata["fallback_reason"] != "provider_unresolved_parent" ||
+		message.Metadata["usage_total_tokens"] != 1200 {
 		t.Fatalf("unexpected completion envelope metadata: %#v", message.Metadata)
+	}
+	warnings, ok := message.Metadata["route_warnings"].([]string)
+	if !ok || strings.Join(warnings, ",") != "provider_fallback_parent" {
+		t.Fatalf("unexpected route warnings metadata: %#v", message.Metadata["route_warnings"])
+	}
+}
+
+func TestBroker_Execute_SpawnAgentParsesRouteHints(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":              "inspect routing",
+		"agent_type":           "worker",
+		"difficulty":           "HARD",
+		"difficulty_rationale": "touches provider policy",
+		"provider":             "codex",
+		"model":                "gpt-5.4",
+		"reasoning_effort":     "high",
+		"permission_mode":      "bypass_permissions",
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.Difficulty != "hard" ||
+		controller.lastSpawn.DifficultyRationale != "touches provider policy" ||
+		controller.lastSpawn.Provider != "codex" ||
+		controller.lastSpawn.Model != "gpt-5.4" ||
+		controller.lastSpawn.ReasoningEffort != "high" ||
+		controller.lastSpawn.PermissionMode != "bypass_permissions" {
+		t.Fatalf("unexpected spawn route args: %#v", controller.lastSpawn)
+	}
+	result, ok := raw.(*AgentStatusResult)
+	if !ok || result.Provider != "codex" || result.Model != "gpt-5.4" || result.Difficulty != "hard" || result.PermissionMode != "bypass_permissions" {
+		t.Fatalf("unexpected route result: %#v", raw)
+	}
+	if meta["provider"] != "codex" || meta["model"] != "gpt-5.4" || meta["difficulty"] != "hard" || meta["permission_mode"] != "bypass_permissions" {
+		t.Fatalf("unexpected route metadata: %#v", meta)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentInheritsPermissionModeFromRunMeta(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{PermissionMode: "bypass_permissions"})
+
+	_, _, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{"message": "inspect"})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.PermissionMode != "bypass_permissions" {
+		t.Fatalf("expected inherited permission_mode, got %#v", controller.lastSpawn)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentRejectsInvalidPermissionMode(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"permission_mode": "unsafe",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid agent permission_mode") {
+		t.Fatalf("expected invalid permission_mode error, got %v", err)
+	}
+	if controller.lastParent != "" {
+		t.Fatalf("controller should not be called, got parent %q", controller.lastParent)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentUsesThinkingEffortAlias(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"thinking_effort": "medium",
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.ReasoningEffort != "medium" || controller.lastSpawn.ThinkingEffort != "medium" {
+		t.Fatalf("expected thinking_effort alias, got %#v", controller.lastSpawn)
+	}
+	if len(controller.lastSpawn.RouteWarnings) != 1 || controller.lastSpawn.RouteWarnings[0] != "thinking_effort_alias_used" {
+		t.Fatalf("expected thinking_effort alias warning, got %#v", controller.lastSpawn.RouteWarnings)
+	}
+}
+
+func TestBroker_Execute_SpawnAgentRejectsInvalidDifficulty(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"difficulty": "extreme",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid agent difficulty") {
+		t.Fatalf("expected invalid difficulty error, got %v", err)
+	}
+	if controller.lastParent != "" {
+		t.Fatalf("controller should not be called, got parent %q", controller.lastParent)
+	}
+}
+
+func TestApplySpawnAgentRouteContextPersistsRouteMetadata(t *testing.T) {
+	ctx := testAgentContext{}
+	ApplySpawnAgentRouteContext(ctx, SpawnAgentArgs{
+		Provider:            " codex ",
+		Model:               " gpt-5.4 ",
+		ReasoningEffort:     " high ",
+		Difficulty:          " hard ",
+		DifficultyRationale: "provider-sensitive",
+		PermissionMode:      "bypass_permissions",
+		RouteSource:         "difficulty_level",
+		RouteWarnings:       []string{" inherited ", " ", "capability_unknown"},
+		FallbackUsed:        true,
+		FallbackReason:      " provider_unresolved_parent ",
+	})
+
+	if ctx[AgentSessionContextProviderName] != "codex" ||
+		ctx[AgentSessionContextRequestedModel] != "gpt-5.4" ||
+		ctx[AgentSessionContextModel] != "gpt-5.4" ||
+		ctx[AgentSessionContextReasoningEffort] != "high" ||
+		ctx[AgentSessionContextPermissionMode] != "bypass_permissions" ||
+		ctx[AgentSessionContextDifficulty] != "hard" ||
+		ctx[AgentSessionContextDifficultyRationale] != "provider-sensitive" ||
+		ctx[AgentSessionContextRouteSource] != "difficulty_level" ||
+		ctx[AgentSessionContextFallbackUsed] != true ||
+		ctx[AgentSessionContextFallbackReason] != "provider_unresolved_parent" {
+		t.Fatalf("unexpected route context: %#v", ctx)
+	}
+	warnings, ok := ctx[AgentSessionContextRouteWarnings].([]string)
+	if !ok || strings.Join(warnings, ",") != "inherited,capability_unknown" {
+		t.Fatalf("unexpected warnings: %#v", ctx[AgentSessionContextRouteWarnings])
+	}
+
+	status := &AgentStatusResult{}
+	ApplySpawnAgentRouteStatusContext(status, ctx)
+	if status.Provider != "codex" ||
+		status.Model != "gpt-5.4" ||
+		status.ReasoningEffort != "high" ||
+		status.PermissionMode != "bypass_permissions" ||
+		status.Difficulty != "hard" ||
+		!status.FallbackUsed ||
+		status.FallbackReason != "provider_unresolved_parent" ||
+		strings.Join(status.RouteWarnings, ",") != "inherited,capability_unknown" {
+		t.Fatalf("unexpected status context: %#v", status)
+	}
+	payload := map[string]interface{}{}
+	AddSpawnAgentRoutePayload(payload, ctx)
+	if payload["route_provider"] != "codex" ||
+		payload["route_model"] != "gpt-5.4" ||
+		payload["route_reasoning_effort"] != "high" ||
+		payload["permission_mode"] != "bypass_permissions" ||
+		payload["difficulty"] != "hard" ||
+		payload["fallback_used"] != true ||
+		payload["fallback_reason"] != "provider_unresolved_parent" {
+		t.Fatalf("unexpected route payload: %#v", payload)
+	}
+}
+
+func TestApplySpawnAgentRouteContextUsesThinkingEffortFallback(t *testing.T) {
+	ctx := testAgentContext{}
+	ApplySpawnAgentRouteContext(ctx, SpawnAgentArgs{ThinkingEffort: " medium "})
+	if ctx[AgentSessionContextReasoningEffort] != "medium" {
+		t.Fatalf("expected thinking_effort fallback, got %#v", ctx)
+	}
+}
+
+func TestSpawnAgentRunMetaUsesPermissionMode(t *testing.T) {
+	if got := SpawnAgentRunMeta(SpawnAgentArgs{}); got != nil {
+		t.Fatalf("expected nil run meta without permission mode, got %#v", got)
+	}
+	got := SpawnAgentRunMeta(SpawnAgentArgs{PermissionMode: " bypass_permissions "})
+	if got == nil || got.PermissionMode != "bypass_permissions" {
+		t.Fatalf("unexpected spawn agent run meta: %#v", got)
 	}
 }
 
@@ -277,6 +576,25 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 	}
 	if controller.lastInput.ID != "child-1" || controller.lastInput.Message != "continue" || controller.lastInput.Interrupt == nil || !*controller.lastInput.Interrupt {
 		t.Fatalf("unexpected send_input args: %#v", controller.lastInput)
+	}
+
+	rawApprove, meta, err := broker.Execute(context.Background(), "parent-session", ToolResolveAgentApproval, map[string]interface{}{
+		"id":         "child-1",
+		"request_id": "approval-1",
+		"allow":      true,
+		"patched_args": map[string]interface{}{
+			"command": "git status --short --branch",
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolve_agent_approval failed: %v", err)
+	}
+	if controller.lastApprove.ID != "child-1" || controller.lastApprove.RequestID != "approval-1" || !controller.lastApprove.Allow || string(controller.lastApprove.PatchedArgs) != `{"command":"git status --short --branch"}` {
+		t.Fatalf("unexpected resolve_agent_approval args: %#v", controller.lastApprove)
+	}
+	approvalResult, ok := rawApprove.(*AgentApprovalResult)
+	if !ok || approvalResult == nil || !approvalResult.Resolved || !approvalResult.Allowed || meta["resolved"] != true {
+		t.Fatalf("unexpected resolve_agent_approval result/meta: %#v %#v", rawApprove, meta)
 	}
 
 	_, _, err = broker.Execute(context.Background(), "parent-session", ToolWaitAgent, map[string]interface{}{
@@ -384,6 +702,30 @@ func TestBroker_Execute_FollowupTaskRejectsCurrentSession(t *testing.T) {
 	}
 }
 
+func TestBroker_Execute_ResolveAgentApprovalValidatesRequiredArgs(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolResolveAgentApproval, map[string]interface{}{
+		"id":         "child-1",
+		"request_id": "approval-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "allow is required") {
+		t.Fatalf("expected allow validation error, got %v", err)
+	}
+
+	_, _, err = broker.Execute(context.Background(), "parent-session", ToolResolveAgentApproval, map[string]interface{}{
+		"id":    "child-1",
+		"allow": true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "request_id is required") {
+		t.Fatalf("expected request_id validation error, got %v", err)
+	}
+	if controller.lastApprove.ID != "" {
+		t.Fatalf("expected controller not to receive invalid approval request, got %#v", controller.lastApprove)
+	}
+}
+
 func TestBroker_Execute_ReadAgentEventsDelegatesToController(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
@@ -464,6 +806,18 @@ func TestBroker_Execute_AgentToolsRejectTeamTeammateIDs(t *testing.T) {
 	if controller.lastRead.ID != "" {
 		t.Fatalf("expected read_agent_events not to reach controller, got %#v", controller.lastRead)
 	}
+
+	_, _, err = broker.Execute(ctx, "parent-session", ToolResolveAgentApproval, map[string]interface{}{
+		"id":         "member-1",
+		"request_id": "approval-1",
+		"allow":      true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "spawn_team teammate id") {
+		t.Fatalf("expected resolve_agent_approval teammate id error, got %v", err)
+	}
+	if controller.lastApprove.ID != "" {
+		t.Fatalf("expected resolve_agent_approval not to reach controller, got %#v", controller.lastApprove)
+	}
 }
 
 func TestBroker_Execute_AgentToolsPreferCurrentSpawnAgentWhenIDCollidesWithTeammate(t *testing.T) {
@@ -513,5 +867,17 @@ func TestBroker_Execute_AgentToolsPreferCurrentSpawnAgentWhenIDCollidesWithTeamm
 	}
 	if controller.lastRead.ID != "/root/agent-a" {
 		t.Fatalf("expected read_agent_events to reach controller with child path, got %#v", controller.lastRead)
+	}
+
+	_, _, err = broker.Execute(ctx, "parent-session", ToolResolveAgentApproval, map[string]interface{}{
+		"id":         "agent-a",
+		"request_id": "approval-1",
+		"allow":      false,
+	})
+	if err != nil {
+		t.Fatalf("resolve_agent_approval should prefer current spawn_agent child over stale teammate id: %v", err)
+	}
+	if controller.lastApprove.ID != "agent-a" {
+		t.Fatalf("expected resolve_agent_approval to reach controller with child id, got %#v", controller.lastApprove)
 	}
 }

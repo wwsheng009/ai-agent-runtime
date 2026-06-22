@@ -78,6 +78,18 @@ func aliasAgentMessageResult(result *AgentMessageResult, aliases *handleAliasReg
 	return &cloned
 }
 
+func aliasAgentApprovalResult(result *AgentApprovalResult, aliases *handleAliasRegistry) *AgentApprovalResult {
+	if result == nil {
+		return nil
+	}
+	cloned := *result
+	cloned.SessionID = aliasSessionValue(cloned.SessionID, aliases)
+	if result.Status != nil {
+		cloned.Status = aliasAgentStatusResult(result.Status, aliases)
+	}
+	return &cloned
+}
+
 func aliasAgentEventsResult(result *AgentEventsResult, aliases *handleAliasRegistry) *AgentEventsResult {
 	if result == nil {
 		return nil

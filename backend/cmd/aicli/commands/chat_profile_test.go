@@ -225,6 +225,12 @@ func TestComposeChatSystemPromptWithGuidance_IncludesParallelToolGuidance(t *tes
 	if !strings.Contains(prompt, "same assistant turn") {
 		t.Fatalf("expected batching guidance, got:\n%s", prompt)
 	}
+	if !strings.Contains(prompt, "Task difficulty rating and subagent delegation policy:") {
+		t.Fatalf("expected task difficulty guidance, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "include difficulty and difficulty_rationale for every child task") {
+		t.Fatalf("expected subagent difficulty schema guidance, got:\n%s", prompt)
+	}
 }
 
 func writeTestFile(t *testing.T, path string, contents string) {

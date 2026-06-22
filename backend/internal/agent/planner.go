@@ -54,12 +54,14 @@ type Plan struct {
 
 // PlanStep 计划步骤
 type PlanStep struct {
-	ID          string                 `json:"id" yaml:"id"`
-	Description string                 `json:"description" yaml:"description"`
-	Tool        string                 `json:"tool" yaml:"tool"`
-	Args        map[string]interface{} `json:"args" yaml:"args"`
-	DependsOn   []string               `json:"dependsOn" yaml:"dependsOn"`
-	Priority    int                    `json:"priority" yaml:"priority"`
+	ID                  string                 `json:"id" yaml:"id"`
+	Description         string                 `json:"description" yaml:"description"`
+	Tool                string                 `json:"tool" yaml:"tool"`
+	Args                map[string]interface{} `json:"args" yaml:"args"`
+	DependsOn           []string               `json:"dependsOn" yaml:"dependsOn"`
+	Priority            int                    `json:"priority" yaml:"priority"`
+	Difficulty          string                 `json:"difficulty,omitempty" yaml:"difficulty,omitempty"`
+	DifficultyRationale string                 `json:"difficulty_rationale,omitempty" yaml:"difficulty_rationale,omitempty"`
 }
 
 // CreatePlanWithLLM 使用 LLM 创建计划
@@ -302,7 +304,9 @@ Respond with a JSON plan:
       "tool": "tool_name",
       "args": {"arg1": "value1"},
       "dependsOn": [],
-      "priority": 1
+      "priority": 1,
+      "difficulty": "easy|normal|hard|expert",
+      "difficulty_rationale": "short reason for this step difficulty"
     }
   ]
 }
@@ -317,6 +321,8 @@ Rules:
 7. Prefer apply_patch for code edits, multi-line replacements, and structured multi-hunk edits; use edit only for small exact strings that were just confirmed with view/grep
 8. Prefer append_write for long text chunks and write for small full-file writes
 9. If content could exceed one tool-call payload, explicitly split it into multiple chunked append_write steps
+10. Assign each step a difficulty of easy, normal, hard, or expert with a short difficulty_rationale
+11. Do not assign provider, model, or reasoning_effort in the plan; runtime routing maps difficulty to local policy
 `, goal, strings.Join(toolDescriptions, "\n"))
 }
 
@@ -343,12 +349,14 @@ func (p *Plan) Clone() *Plan {
 
 	for i, step := range p.Steps {
 		clone.Steps[i] = PlanStep{
-			ID:          step.ID,
-			Description: step.Description,
-			Tool:        step.Tool,
-			Args:        copyMap(step.Args),
-			DependsOn:   append([]string{}, step.DependsOn...),
-			Priority:    step.Priority,
+			ID:                  step.ID,
+			Description:         step.Description,
+			Tool:                step.Tool,
+			Args:                copyMap(step.Args),
+			DependsOn:           append([]string{}, step.DependsOn...),
+			Priority:            step.Priority,
+			Difficulty:          step.Difficulty,
+			DifficultyRationale: step.DifficultyRationale,
 		}
 	}
 

@@ -88,6 +88,14 @@ func NewGatewayClient(resourceManager ResourceManager, defaultModel string) *Gat
 	}
 }
 
+// DefaultModelName returns the gateway-level default model.
+func (c *GatewayClient) DefaultModelName() string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.defaultModel)
+}
+
 // SetTimeout 设置默认超时
 func (c *GatewayClient) SetTimeout(timeout time.Duration) {
 	c.defaultTimeout = timeout

@@ -58,6 +58,28 @@ func (c *capturingTaskTriggerClient) TriggerTask(ctx context.Context, request Ta
 	return c.result, c.err
 }
 
+type staticTaskRouteResolver struct {
+	resolution *TaskRouteResolution
+	err        error
+	request    TaskRouteRequest
+	called     bool
+}
+
+func (r *staticTaskRouteResolver) ResolveTaskRoute(ctx context.Context, request TaskRouteRequest) (*TaskRouteResolution, error) {
+	r.called = true
+	r.request = request
+	return r.resolution, r.err
+}
+
+type capturingTaskRouteAuditSink struct {
+	audits []TaskRouteAudit
+}
+
+func (s *capturingTaskRouteAuditSink) RecordTaskRouteAudit(ctx context.Context, audit TaskRouteAudit) error {
+	s.audits = append(s.audits, audit.Clone())
+	return nil
+}
+
 func TestTeammateRunnerMarksMissingStructuredOutcomeAsProtocolError(t *testing.T) {
 	runner := &TeammateRunner{
 		Sessions: &staticSessionClient{
@@ -110,10 +132,12 @@ func TestTeammateRunnerPrefersAgentControlTriggerTask(t *testing.T) {
 		Name:      "Mate",
 		SessionID: "session-1",
 	}, Task{
-		ID:     "task-1",
-		TeamID: "team-1",
-		Title:  "Implement change",
-		Goal:   "Implement change",
+		ID:                  "task-1",
+		TeamID:              "team-1",
+		Title:               "Implement change",
+		Goal:                "Implement change",
+		Difficulty:          TaskDifficultyExpert,
+		DifficultyRationale: "Needs architecture review.",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -122,7 +146,11 @@ func TestTeammateRunnerPrefersAgentControlTriggerTask(t *testing.T) {
 	assert.Equal(t, "team-1", control.request.TeamID)
 	assert.Equal(t, "mate-1", control.request.AgentID)
 	assert.Equal(t, "task-1", control.request.TaskID)
+	assert.Equal(t, TaskDifficultyExpert, control.request.Difficulty)
+	assert.Equal(t, "Needs architecture review.", control.request.DifficultyRationale)
 	assert.Contains(t, control.request.Prompt, "Implement change")
+	assert.Contains(t, control.request.Prompt, "- Difficulty: expert")
+	assert.Contains(t, control.request.Prompt, "- Difficulty rationale: Needs architecture review.")
 	require.NotNil(t, control.request.RunMeta)
 	require.NotNil(t, control.request.RunMeta.Team)
 	assert.Equal(t, "team-1", control.request.RunMeta.Team.TeamID)
@@ -131,6 +159,165 @@ func TestTeammateRunnerPrefersAgentControlTriggerTask(t *testing.T) {
 	assert.Equal(t, "bypass_permissions", control.request.RunMeta.PermissionMode)
 	assert.Equal(t, "", fallback.prompt)
 	assert.Equal(t, "triggered", result.Summary)
+}
+
+func TestTeammateRunnerPassesResolvedRouteIntoTriggerRunMetaAndPrompt(t *testing.T) {
+	control := &capturingTaskTriggerClient{
+		result: &SessionResult{
+			Success: true,
+			Output:  "```json\n{\"task_status\":\"done\",\"summary\":\"triggered\"}\n```",
+		},
+	}
+	resolver := &staticTaskRouteResolver{
+		resolution: &TaskRouteResolution{
+			Route: &TaskExecutionRoute{
+				Difficulty:          TaskDifficultyHard,
+				DifficultySource:    "task",
+				DifficultyRationale: "Touches shared execution state.",
+				Provider:            "remote-strong",
+				Model:               "strong-model",
+				ReasoningEffort:     "high",
+				Source:              "difficulty_level",
+				Warnings:            []string{"fallback checked"},
+				FallbackUsed:        true,
+				FallbackReason:      "parent model unavailable",
+			},
+		},
+	}
+	audit := &capturingTaskRouteAuditSink{}
+	runner := &TeammateRunner{
+		AgentControl:  control,
+		RouteResolver: resolver,
+		RouteAudit:    audit,
+	}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-1",
+		Name:      "Mate",
+		SessionID: "session-1",
+	}, Task{
+		ID:                  "task-1",
+		TeamID:              "team-1",
+		Title:               "Implement change",
+		Goal:                "Implement change",
+		Difficulty:          TaskDifficultyHard,
+		DifficultyRationale: "Touches shared execution state.",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, control.called)
+	require.True(t, resolver.called)
+	assert.Equal(t, 1, resolver.request.Attempt)
+	require.NotNil(t, control.request.Route)
+	assert.Equal(t, "remote-strong", control.request.Route.Provider)
+	assert.Equal(t, "strong-model", control.request.Route.Model)
+	assert.Equal(t, "high", control.request.Route.ReasoningEffort)
+	assert.Equal(t, "difficulty_level", control.request.Route.Source)
+	assert.Equal(t, []string{"fallback checked"}, control.request.Route.Warnings)
+	require.NotNil(t, control.request.RunMeta)
+	require.NotNil(t, control.request.RunMeta.Team)
+	assert.Equal(t, "bypass_permissions", control.request.RunMeta.PermissionMode)
+	assert.Equal(t, "remote-strong", control.request.RunMeta.Team.RouteProvider)
+	assert.Equal(t, "strong-model", control.request.RunMeta.Team.RouteModel)
+	assert.Equal(t, "high", control.request.RunMeta.Team.RouteReasoningEffort)
+	assert.Equal(t, "difficulty_level", control.request.RunMeta.Team.RouteSource)
+	assert.Equal(t, []string{"fallback checked"}, control.request.RunMeta.Team.RouteWarnings)
+	assert.True(t, control.request.RunMeta.Team.RouteFallbackUsed)
+	assert.Contains(t, control.request.Prompt, "Runtime routing:")
+	assert.Contains(t, control.request.Prompt, "- Provider: remote-strong")
+	assert.Contains(t, control.request.Prompt, "- Model: strong-model")
+	require.NotNil(t, result.Route)
+	assert.Equal(t, "remote-strong", result.Route.Provider)
+	require.Len(t, audit.audits, 1)
+	require.NotNil(t, audit.audits[0].Route)
+	assert.Equal(t, "team-1", audit.audits[0].TeamID)
+	assert.Equal(t, "mate-1", audit.audits[0].AgentID)
+	assert.Equal(t, "task-1", audit.audits[0].TaskID)
+}
+
+func TestTeammateRunnerDisabledRouteKeepsLegacyRequest(t *testing.T) {
+	control := &capturingTaskTriggerClient{
+		result: &SessionResult{
+			Success: true,
+			Output:  "```json\n{\"task_status\":\"done\",\"summary\":\"triggered\"}\n```",
+		},
+	}
+	resolver := &staticTaskRouteResolver{
+		resolution: &TaskRouteResolution{
+			Disabled: true,
+			Route: &TaskExecutionRoute{
+				Provider: "should-not-apply",
+				Model:    "should-not-apply",
+			},
+		},
+	}
+	runner := &TeammateRunner{
+		AgentControl:  control,
+		RouteResolver: resolver,
+	}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-1",
+		SessionID: "session-1",
+	}, Task{
+		ID:     "task-1",
+		TeamID: "team-1",
+		Title:  "Implement change",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, control.called)
+	assert.Nil(t, control.request.Route)
+	assert.Nil(t, result.Route)
+	assert.NotContains(t, control.request.Prompt, "Runtime routing:")
+	require.NotNil(t, control.request.RunMeta)
+	assert.Equal(t, "bypass_permissions", control.request.RunMeta.PermissionMode)
+	assert.Empty(t, control.request.RunMeta.Team.RouteProvider)
+}
+
+func TestTeammateRunnerStrictRouteFailureBlocksWithoutTriggeringSession(t *testing.T) {
+	control := &capturingTaskTriggerClient{
+		result: &SessionResult{
+			Success: true,
+			Output:  "```json\n{\"task_status\":\"done\",\"summary\":\"should not run\"}\n```",
+		},
+	}
+	resolver := &staticTaskRouteResolver{
+		resolution: &TaskRouteResolution{
+			Strict: true,
+			Route: &TaskExecutionRoute{
+				Difficulty: TaskDifficultyExpert,
+				Source:     "difficulty_level",
+			},
+		},
+		err: assert.AnError,
+	}
+	runner := &TeammateRunner{
+		AgentControl:  control,
+		RouteResolver: resolver,
+	}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-1",
+		SessionID: "session-1",
+	}, Task{
+		ID:         "task-1",
+		TeamID:     "team-1",
+		Title:      "Expert change",
+		Difficulty: TaskDifficultyExpert,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, control.called)
+	assert.True(t, result.Success)
+	assert.True(t, result.Blocked)
+	assert.True(t, result.OutcomeApplied)
+	assert.True(t, result.Structured)
+	assert.Equal(t, TaskOutcomeBlocked, result.Outcome)
+	assert.Equal(t, "task_route_resolution", result.ErrorType)
+	assert.Contains(t, result.Blocker, assert.AnError.Error())
+	require.NotNil(t, result.Route)
+	assert.Contains(t, result.Route.Error, assert.AnError.Error())
 }
 
 func TestTeammateRunnerParsesStructuredJSONOutcome(t *testing.T) {
@@ -232,10 +419,12 @@ func TestTeammateRunnerMarksMailboxDigestReadWhenInjected(t *testing.T) {
 		SessionID: "session-1",
 		Name:      "mate-1",
 	}, Task{
-		ID:     "task-1",
-		TeamID: teamID,
-		Title:  "task-1",
-		Goal:   "finish the task",
+		ID:                  "task-1",
+		TeamID:              teamID,
+		Title:               "task-1",
+		Goal:                "finish the task",
+		Difficulty:          TaskDifficultyHard,
+		DifficultyRationale: "Requires shared context review.",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -243,6 +432,8 @@ func TestTeammateRunnerMarksMailboxDigestReadWhenInjected(t *testing.T) {
 	assert.True(t, result.Structured)
 	assert.Contains(t, client.prompt, "Mailbox digest:")
 	assert.Contains(t, client.prompt, "check the latest task context")
+	assert.Contains(t, client.prompt, "- Difficulty: hard")
+	assert.Contains(t, client.prompt, "- Difficulty rationale: Requires shared context review.")
 	assert.Contains(t, client.prompt, "read_task_spec or read_task_context")
 	assert.Contains(t, client.prompt, "protocol error")
 	assert.Contains(t, client.prompt, "prefer direct read-only tools such as ls, glob, grep, and view")

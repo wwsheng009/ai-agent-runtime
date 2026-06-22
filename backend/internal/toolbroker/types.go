@@ -2,6 +2,8 @@ package toolbroker
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
@@ -73,16 +75,18 @@ type SpawnTeammateSpec struct {
 
 // SpawnTaskSpec describes a task to create in the team.
 type SpawnTaskSpec struct {
-	ID           string   `json:"id,omitempty"`
-	Title        string   `json:"title,omitempty"`
-	Goal         string   `json:"goal,omitempty"`
-	Inputs       []string `json:"inputs,omitempty"`
-	ReadPaths    []string `json:"read_paths,omitempty"`
-	WritePaths   []string `json:"write_paths,omitempty"`
-	Deliverables []string `json:"deliverables,omitempty"`
-	Priority     int      `json:"priority,omitempty"`
-	Assignee     string   `json:"assignee,omitempty"`
-	DependsOn    []string `json:"depends_on,omitempty"`
+	ID                  string   `json:"id,omitempty"`
+	Title               string   `json:"title,omitempty"`
+	Goal                string   `json:"goal,omitempty"`
+	Difficulty          string   `json:"difficulty,omitempty"`
+	DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
+	Inputs              []string `json:"inputs,omitempty"`
+	ReadPaths           []string `json:"read_paths,omitempty"`
+	WritePaths          []string `json:"write_paths,omitempty"`
+	Deliverables        []string `json:"deliverables,omitempty"`
+	Priority            int      `json:"priority,omitempty"`
+	Assignee            string   `json:"assignee,omitempty"`
+	DependsOn           []string `json:"depends_on,omitempty"`
 }
 
 // SpawnTeamResult returns created entities for a spawn_team call.
@@ -186,19 +190,21 @@ type ReadTaskSpecArgs struct {
 
 // ReadTaskSpecResult returns a structured task spec.
 type ReadTaskSpecResult struct {
-	TaskID       string   `json:"task_id"`
-	TeamID       string   `json:"team_id"`
-	Title        string   `json:"title,omitempty"`
-	Goal         string   `json:"goal,omitempty"`
-	Inputs       []string `json:"inputs,omitempty"`
-	Status       string   `json:"status,omitempty"`
-	Priority     int      `json:"priority,omitempty"`
-	Assignee     string   `json:"assignee,omitempty"`
-	ReadPaths    []string `json:"read_paths,omitempty"`
-	WritePaths   []string `json:"write_paths,omitempty"`
-	Deliverables []string `json:"deliverables,omitempty"`
-	Summary      string   `json:"summary,omitempty"`
-	ResultRef    string   `json:"result_ref,omitempty"`
+	TaskID              string   `json:"task_id"`
+	TeamID              string   `json:"team_id"`
+	Title               string   `json:"title,omitempty"`
+	Goal                string   `json:"goal,omitempty"`
+	Difficulty          string   `json:"difficulty,omitempty"`
+	DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
+	Inputs              []string `json:"inputs,omitempty"`
+	Status              string   `json:"status,omitempty"`
+	Priority            int      `json:"priority,omitempty"`
+	Assignee            string   `json:"assignee,omitempty"`
+	ReadPaths           []string `json:"read_paths,omitempty"`
+	WritePaths          []string `json:"write_paths,omitempty"`
+	Deliverables        []string `json:"deliverables,omitempty"`
+	Summary             string   `json:"summary,omitempty"`
+	ResultRef           string   `json:"result_ref,omitempty"`
 }
 
 // ReadTaskContextArgs describes a request for richer task execution context.
@@ -268,13 +274,24 @@ type UserInputHandler interface {
 
 // SpawnAgentArgs describes a lightweight child-agent session request.
 type SpawnAgentArgs struct {
-	ID          string `json:"id,omitempty"`
-	SessionID   string `json:"session_id,omitempty"`
-	Message     string `json:"message,omitempty"`
-	AgentType   string `json:"agent_type,omitempty"`
-	Model       string `json:"model,omitempty"`
-	ForkContext *bool  `json:"fork_context,omitempty"`
-	ForkTurns   string `json:"fork_turns,omitempty"`
+	ID                  string   `json:"id,omitempty"`
+	SessionID           string   `json:"session_id,omitempty"`
+	Message             string   `json:"message,omitempty"`
+	AgentType           string   `json:"agent_type,omitempty"`
+	Difficulty          string   `json:"difficulty,omitempty"`
+	DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
+	Provider            string   `json:"provider,omitempty"`
+	Model               string   `json:"model,omitempty"`
+	ReasoningEffort     string   `json:"reasoning_effort,omitempty"`
+	ThinkingEffort      string   `json:"thinking_effort,omitempty"`
+	PermissionMode      string   `json:"permission_mode,omitempty"`
+	ForkContext         *bool    `json:"fork_context,omitempty"`
+	ForkTurns           string   `json:"fork_turns,omitempty"`
+	DifficultySource    string   `json:"-"`
+	RouteSource         string   `json:"-"`
+	RouteWarnings       []string `json:"-"`
+	FallbackUsed        bool     `json:"-"`
+	FallbackReason      string   `json:"-"`
 }
 
 // SendAgentInputArgs describes a follow-up input for an existing child agent.
@@ -283,6 +300,15 @@ type SendAgentInputArgs struct {
 	SessionID string `json:"session_id,omitempty"`
 	Message   string `json:"message,omitempty"`
 	Interrupt *bool  `json:"interrupt,omitempty"`
+}
+
+// ResolveAgentApprovalArgs resolves a pending tool approval in a child agent.
+type ResolveAgentApprovalArgs struct {
+	ID          string          `json:"id,omitempty"`
+	SessionID   string          `json:"session_id,omitempty"`
+	RequestID   string          `json:"request_id"`
+	Allow       bool            `json:"allow"`
+	PatchedArgs json.RawMessage `json:"patched_args,omitempty"`
 }
 
 // WaitAgentArgs waits for child agent status, or for parent mailbox events
@@ -314,34 +340,48 @@ type AgentMessageArgs struct {
 
 // AgentStatusResult returns the current state of a lightweight child agent session.
 type AgentStatusResult struct {
-	ID                 string   `json:"id"`
-	SessionID          string   `json:"session_id"`
-	ParentSessionID    string   `json:"parent_session_id,omitempty"`
-	Path               string   `json:"path,omitempty"`
-	Depth              int      `json:"depth,omitempty"`
-	AgentType          string   `json:"agent_type,omitempty"`
-	TeamID             string   `json:"team_id,omitempty"`
-	TeammateID         string   `json:"teammate_id,omitempty"`
-	CurrentTaskID      string   `json:"current_task_id,omitempty"`
-	CurrentTaskStatus  string   `json:"current_task_status,omitempty"`
-	Status             string   `json:"status"`
-	Exists             bool     `json:"exists"`
-	Created            bool     `json:"created,omitempty"`
-	Queued             bool     `json:"queued,omitempty"`
-	TimedOut           bool     `json:"timed_out,omitempty"`
-	PendingApproval    bool     `json:"pending_approval,omitempty"`
-	PendingQuestion    bool     `json:"pending_question,omitempty"`
-	MessageCount       int      `json:"message_count,omitempty"`
-	Output             string   `json:"output,omitempty"`
-	Error              string   `json:"error,omitempty"`
-	SessionState       string   `json:"session_state,omitempty"`
-	CurrentTurnID      string   `json:"current_turn_id,omitempty"`
-	PendingToolName    string   `json:"pending_tool_name,omitempty"`
-	PendingToolCallID  string   `json:"pending_tool_call_id,omitempty"`
-	LastMessageRole    string   `json:"last_message_role,omitempty"`
-	LastMessagePreview string   `json:"last_message_preview,omitempty"`
-	ClosedCount        int      `json:"closed_count,omitempty"`
-	ClosedSessionIDs   []string `json:"closed_session_ids,omitempty"`
+	ID                       string   `json:"id"`
+	SessionID                string   `json:"session_id"`
+	ParentSessionID          string   `json:"parent_session_id,omitempty"`
+	Path                     string   `json:"path,omitempty"`
+	Depth                    int      `json:"depth,omitempty"`
+	AgentType                string   `json:"agent_type,omitempty"`
+	TeamID                   string   `json:"team_id,omitempty"`
+	TeammateID               string   `json:"teammate_id,omitempty"`
+	CurrentTaskID            string   `json:"current_task_id,omitempty"`
+	CurrentTaskStatus        string   `json:"current_task_status,omitempty"`
+	Provider                 string   `json:"provider,omitempty"`
+	Model                    string   `json:"model,omitempty"`
+	ReasoningEffort          string   `json:"reasoning_effort,omitempty"`
+	PermissionMode           string   `json:"permission_mode,omitempty"`
+	Difficulty               string   `json:"difficulty,omitempty"`
+	DifficultySource         string   `json:"difficulty_source,omitempty"`
+	DifficultyRationale      string   `json:"difficulty_rationale,omitempty"`
+	RouteSource              string   `json:"route_source,omitempty"`
+	RouteWarnings            []string `json:"route_warnings,omitempty"`
+	FallbackUsed             bool     `json:"fallback_used,omitempty"`
+	FallbackReason           string   `json:"fallback_reason,omitempty"`
+	Status                   string   `json:"status"`
+	Exists                   bool     `json:"exists"`
+	Created                  bool     `json:"created,omitempty"`
+	Queued                   bool     `json:"queued,omitempty"`
+	TimedOut                 bool     `json:"timed_out,omitempty"`
+	PendingApproval          bool     `json:"pending_approval,omitempty"`
+	PendingApprovalID        string   `json:"pending_approval_id,omitempty"`
+	PendingApprovalReason    string   `json:"pending_approval_reason,omitempty"`
+	PendingApprovalRiskLevel string   `json:"pending_approval_risk_level,omitempty"`
+	PendingQuestion          bool     `json:"pending_question,omitempty"`
+	MessageCount             int      `json:"message_count,omitempty"`
+	Output                   string   `json:"output,omitempty"`
+	Error                    string   `json:"error,omitempty"`
+	SessionState             string   `json:"session_state,omitempty"`
+	CurrentTurnID            string   `json:"current_turn_id,omitempty"`
+	PendingToolName          string   `json:"pending_tool_name,omitempty"`
+	PendingToolCallID        string   `json:"pending_tool_call_id,omitempty"`
+	LastMessageRole          string   `json:"last_message_role,omitempty"`
+	LastMessagePreview       string   `json:"last_message_preview,omitempty"`
+	ClosedCount              int      `json:"closed_count,omitempty"`
+	ClosedSessionIDs         []string `json:"closed_session_ids,omitempty"`
 }
 
 // AgentWaitResult reports the outcome of child-status or mailbox-event wait.
@@ -370,6 +410,15 @@ type AgentMessageResult struct {
 	Delivered       bool               `json:"delivered"`
 	Triggered       bool               `json:"triggered,omitempty"`
 	Status          *AgentStatusResult `json:"status,omitempty"`
+}
+
+// AgentApprovalResult reports the resolved child-agent tool approval.
+type AgentApprovalResult struct {
+	SessionID string             `json:"session_id"`
+	RequestID string             `json:"request_id"`
+	Allowed   bool               `json:"allowed"`
+	Resolved  bool               `json:"resolved"`
+	Status    *AgentStatusResult `json:"status,omitempty"`
 }
 
 // ReadAgentEventsArgs reads child-agent runtime events, or parent mailbox/collab
@@ -411,6 +460,7 @@ type AgentSessionController interface {
 	SendMessage(ctx context.Context, fromSessionID string, args AgentMessageArgs) (*AgentMessageResult, error)
 	FollowupTask(ctx context.Context, fromSessionID string, args AgentMessageArgs) (*AgentMessageResult, error)
 	SendInput(ctx context.Context, args SendAgentInputArgs) (*AgentStatusResult, error)
+	ResolveApproval(ctx context.Context, args ResolveAgentApprovalArgs) (*AgentApprovalResult, error)
 	Wait(ctx context.Context, args WaitAgentArgs) (*AgentWaitResult, error)
 	ReadEvents(ctx context.Context, args ReadAgentEventsArgs) (*AgentEventsResult, error)
 	Close(ctx context.Context, sessionID string) (*AgentStatusResult, error)
@@ -418,12 +468,309 @@ type AgentSessionController interface {
 }
 
 const (
-	AgentSessionContextParentSessionID = agentcontrol.SessionContextParentSessionID
-	AgentSessionContextRootSessionID   = agentcontrol.SessionContextRootSessionID
-	AgentSessionContextAgentType       = agentcontrol.SessionContextAgentType
-	AgentSessionContextRequestedModel  = agentcontrol.SessionContextRequestedModel
-	AgentSessionContextPath            = agentcontrol.SessionContextPath
-	AgentSessionContextDepth           = agentcontrol.SessionContextDepth
-	AgentSessionContextTeamID          = agentcontrol.SessionContextTeamID
-	AgentSessionContextTeammateID      = agentcontrol.SessionContextTeammateID
+	AgentSessionContextProviderName        = "provider_name"
+	AgentSessionContextModel               = "model"
+	AgentSessionContextReasoningEffort     = "reasoning_effort"
+	AgentSessionContextParentSessionID     = agentcontrol.SessionContextParentSessionID
+	AgentSessionContextRootSessionID       = agentcontrol.SessionContextRootSessionID
+	AgentSessionContextAgentType           = agentcontrol.SessionContextAgentType
+	AgentSessionContextRequestedModel      = agentcontrol.SessionContextRequestedModel
+	AgentSessionContextDifficulty          = agentcontrol.SessionContextDifficulty
+	AgentSessionContextDifficultySource    = agentcontrol.SessionContextDifficultySource
+	AgentSessionContextDifficultyRationale = agentcontrol.SessionContextDifficultyRationale
+	AgentSessionContextRouteSource         = agentcontrol.SessionContextRouteSource
+	AgentSessionContextRouteWarnings       = agentcontrol.SessionContextRouteWarnings
+	AgentSessionContextFallbackUsed        = agentcontrol.SessionContextFallbackUsed
+	AgentSessionContextFallbackReason      = agentcontrol.SessionContextFallbackReason
+	AgentSessionContextPath                = agentcontrol.SessionContextPath
+	AgentSessionContextDepth               = agentcontrol.SessionContextDepth
+	AgentSessionContextTeamID              = agentcontrol.SessionContextTeamID
+	AgentSessionContextTeammateID          = agentcontrol.SessionContextTeammateID
+	AgentSessionContextPermissionMode      = "permission_mode"
 )
+
+// ApplySpawnAgentRouteContext persists spawn_agent route hints on a child
+// session. Provider/model/reasoning use canonical session metadata keys so
+// actor builders can recover the same route after restart/resume.
+func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnAgentArgs) {
+	if session == nil {
+		return
+	}
+	if provider := strings.TrimSpace(args.Provider); provider != "" {
+		session.SetContext(AgentSessionContextProviderName, provider)
+	}
+	if model := strings.TrimSpace(args.Model); model != "" {
+		session.SetContext(AgentSessionContextRequestedModel, model)
+		session.SetContext(AgentSessionContextModel, model)
+	}
+	effort := strings.TrimSpace(args.ReasoningEffort)
+	if effort == "" {
+		effort = strings.TrimSpace(args.ThinkingEffort)
+	}
+	if effort != "" {
+		session.SetContext(AgentSessionContextReasoningEffort, effort)
+	}
+	if difficulty := strings.TrimSpace(args.Difficulty); difficulty != "" {
+		session.SetContext(AgentSessionContextDifficulty, difficulty)
+	}
+	if source := strings.TrimSpace(args.DifficultySource); source != "" {
+		session.SetContext(AgentSessionContextDifficultySource, source)
+	}
+	if rationale := strings.TrimSpace(args.DifficultyRationale); rationale != "" {
+		session.SetContext(AgentSessionContextDifficultyRationale, rationale)
+	}
+	if source := strings.TrimSpace(args.RouteSource); source != "" {
+		session.SetContext(AgentSessionContextRouteSource, source)
+	}
+	if args.FallbackUsed {
+		session.SetContext(AgentSessionContextFallbackUsed, true)
+	}
+	if reason := strings.TrimSpace(args.FallbackReason); reason != "" {
+		session.SetContext(AgentSessionContextFallbackReason, reason)
+	}
+	if len(args.RouteWarnings) > 0 {
+		warnings := make([]string, 0, len(args.RouteWarnings))
+		for _, warning := range args.RouteWarnings {
+			if warning = strings.TrimSpace(warning); warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
+		if len(warnings) > 0 {
+			session.SetContext(AgentSessionContextRouteWarnings, warnings)
+		}
+	}
+	if permissionMode := strings.TrimSpace(args.PermissionMode); permissionMode != "" {
+		session.SetContext(AgentSessionContextPermissionMode, permissionMode)
+	}
+}
+
+// ApplySpawnAgentRouteStatusContext copies persisted spawn_agent route
+// metadata from a session context into an agent status result.
+func ApplySpawnAgentRouteStatusContext(result *AgentStatusResult, session agentcontrol.ContextGetter) {
+	if result == nil || session == nil {
+		return
+	}
+	if provider := agentcontrol.ContextString(session, AgentSessionContextProviderName); provider != "" {
+		result.Provider = provider
+	}
+	model := agentcontrol.ContextString(session, AgentSessionContextRequestedModel)
+	if model == "" {
+		model = agentcontrol.ContextString(session, AgentSessionContextModel)
+	}
+	if model != "" {
+		result.Model = model
+	}
+	if effort := agentcontrol.ContextString(session, AgentSessionContextReasoningEffort); effort != "" {
+		result.ReasoningEffort = effort
+	}
+	if permissionMode := agentcontrol.ContextString(session, AgentSessionContextPermissionMode); permissionMode != "" {
+		result.PermissionMode = permissionMode
+	}
+	if difficulty := agentcontrol.ContextString(session, AgentSessionContextDifficulty); difficulty != "" {
+		result.Difficulty = difficulty
+	}
+	if source := agentcontrol.ContextString(session, AgentSessionContextDifficultySource); source != "" {
+		result.DifficultySource = source
+	}
+	if rationale := agentcontrol.ContextString(session, AgentSessionContextDifficultyRationale); rationale != "" {
+		result.DifficultyRationale = rationale
+	}
+	if source := agentcontrol.ContextString(session, AgentSessionContextRouteSource); source != "" {
+		result.RouteSource = source
+	}
+	if warnings := spawnAgentRouteWarningsFromContext(session); len(warnings) > 0 {
+		result.RouteWarnings = warnings
+	}
+	if spawnAgentFallbackUsedFromContext(session) {
+		result.FallbackUsed = true
+	}
+	if reason := agentcontrol.ContextString(session, AgentSessionContextFallbackReason); reason != "" {
+		result.FallbackReason = reason
+	}
+}
+
+// AddSpawnAgentRoutePayload copies route metadata into completion payloads.
+func AddSpawnAgentRoutePayload(payload map[string]interface{}, session agentcontrol.ContextGetter) {
+	if payload == nil || session == nil {
+		return
+	}
+	status := AgentStatusResult{}
+	ApplySpawnAgentRouteStatusContext(&status, session)
+	if status.Difficulty != "" {
+		payload["difficulty"] = status.Difficulty
+	}
+	if status.DifficultySource != "" {
+		payload["difficulty_source"] = status.DifficultySource
+	}
+	if status.DifficultyRationale != "" {
+		payload["difficulty_rationale"] = status.DifficultyRationale
+	}
+	if status.Provider != "" {
+		payload["route_provider"] = status.Provider
+	}
+	if status.Model != "" {
+		payload["route_model"] = status.Model
+	}
+	if status.ReasoningEffort != "" {
+		payload["route_reasoning_effort"] = status.ReasoningEffort
+	}
+	if status.PermissionMode != "" {
+		payload["permission_mode"] = status.PermissionMode
+	}
+	if status.RouteSource != "" {
+		payload["route_source"] = status.RouteSource
+	}
+	if len(status.RouteWarnings) > 0 {
+		payload["route_warnings"] = append([]string(nil), status.RouteWarnings...)
+	}
+	if status.FallbackUsed {
+		payload["fallback_used"] = true
+	}
+	if status.FallbackReason != "" {
+		payload["fallback_reason"] = status.FallbackReason
+	}
+}
+
+func ApplySpawnAgentRouteRecord(record *agentcontrol.AgentRecord, args SpawnAgentArgs) {
+	if record == nil {
+		return
+	}
+	record.Provider = strings.TrimSpace(args.Provider)
+	record.Model = strings.TrimSpace(args.Model)
+	record.ReasoningEffort = firstNonEmptyRouteString(args.ReasoningEffort, args.ThinkingEffort)
+	record.Difficulty = strings.TrimSpace(args.Difficulty)
+	record.DifficultySource = strings.TrimSpace(args.DifficultySource)
+	record.DifficultyRationale = strings.TrimSpace(args.DifficultyRationale)
+	record.RouteSource = strings.TrimSpace(args.RouteSource)
+	record.RouteWarnings = trimNonEmptyStrings(args.RouteWarnings)
+	record.FallbackUsed = args.FallbackUsed
+	record.FallbackReason = strings.TrimSpace(args.FallbackReason)
+}
+
+func ApplySpawnAgentRouteRecordContext(record *agentcontrol.AgentRecord, session agentcontrol.ContextGetter) {
+	if record == nil || session == nil {
+		return
+	}
+	status := AgentStatusResult{}
+	ApplySpawnAgentRouteStatusContext(&status, session)
+	record.Provider = strings.TrimSpace(status.Provider)
+	record.Model = strings.TrimSpace(status.Model)
+	record.ReasoningEffort = strings.TrimSpace(status.ReasoningEffort)
+	record.Difficulty = strings.TrimSpace(status.Difficulty)
+	record.DifficultySource = strings.TrimSpace(status.DifficultySource)
+	record.DifficultyRationale = strings.TrimSpace(status.DifficultyRationale)
+	record.RouteSource = strings.TrimSpace(status.RouteSource)
+	record.RouteWarnings = trimNonEmptyStrings(status.RouteWarnings)
+	record.FallbackUsed = status.FallbackUsed
+	record.FallbackReason = strings.TrimSpace(status.FallbackReason)
+}
+
+func ApplySpawnAgentRouteStatusRecord(result *AgentStatusResult, record agentcontrol.AgentRecord) {
+	if result == nil {
+		return
+	}
+	if result.Provider == "" {
+		result.Provider = strings.TrimSpace(record.Provider)
+	}
+	if result.Model == "" {
+		result.Model = strings.TrimSpace(record.Model)
+	}
+	if result.ReasoningEffort == "" {
+		result.ReasoningEffort = strings.TrimSpace(record.ReasoningEffort)
+	}
+	if result.Difficulty == "" {
+		result.Difficulty = strings.TrimSpace(record.Difficulty)
+	}
+	if result.DifficultySource == "" {
+		result.DifficultySource = strings.TrimSpace(record.DifficultySource)
+	}
+	if result.DifficultyRationale == "" {
+		result.DifficultyRationale = strings.TrimSpace(record.DifficultyRationale)
+	}
+	if result.RouteSource == "" {
+		result.RouteSource = strings.TrimSpace(record.RouteSource)
+	}
+	if len(result.RouteWarnings) == 0 {
+		result.RouteWarnings = trimNonEmptyStrings(record.RouteWarnings)
+	}
+	if !result.FallbackUsed {
+		result.FallbackUsed = record.FallbackUsed
+	}
+	if result.FallbackReason == "" {
+		result.FallbackReason = strings.TrimSpace(record.FallbackReason)
+	}
+}
+
+func SpawnAgentRunMeta(args SpawnAgentArgs) *team.RunMeta {
+	permissionMode := strings.TrimSpace(args.PermissionMode)
+	if permissionMode == "" {
+		return nil
+	}
+	return &team.RunMeta{PermissionMode: permissionMode}
+}
+
+func firstNonEmptyRouteString(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func spawnAgentRouteWarningsFromContext(session agentcontrol.ContextGetter) []string {
+	if session == nil {
+		return nil
+	}
+	value, ok := session.GetContext(AgentSessionContextRouteWarnings)
+	if !ok {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []string:
+		return trimNonEmptyStrings(typed)
+	case []interface{}:
+		warnings := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				warnings = append(warnings, text)
+			}
+		}
+		return trimNonEmptyStrings(warnings)
+	case string:
+		return trimNonEmptyStrings([]string{typed})
+	default:
+		return nil
+	}
+}
+
+func spawnAgentFallbackUsedFromContext(session agentcontrol.ContextGetter) bool {
+	if session == nil {
+		return false
+	}
+	value, ok := session.GetContext(AgentSessionContextFallbackUsed)
+	if !ok {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
+
+func trimNonEmptyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}

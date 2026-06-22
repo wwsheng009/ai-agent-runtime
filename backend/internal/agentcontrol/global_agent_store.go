@@ -3,6 +3,7 @@ package agentcontrol
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -140,8 +141,10 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_control_agents (
 			agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
-			agent_type, nickname, workflow, team_id, teammate_id, status, created_at, updated_at, closed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
+			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
+			fallback_used, fallback_reason, status, created_at, updated_at, closed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(agent_id) DO UPDATE SET
 			root_session_id = excluded.root_session_id,
 			parent_agent_id = excluded.parent_agent_id,
@@ -154,6 +157,16 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 			workflow = excluded.workflow,
 			team_id = excluded.team_id,
 			teammate_id = excluded.teammate_id,
+			provider = excluded.provider,
+			model = excluded.model,
+			reasoning_effort = excluded.reasoning_effort,
+			difficulty = excluded.difficulty,
+			difficulty_source = excluded.difficulty_source,
+			difficulty_rationale = excluded.difficulty_rationale,
+			route_source = excluded.route_source,
+			route_warnings_json = excluded.route_warnings_json,
+			fallback_used = excluded.fallback_used,
+			fallback_reason = excluded.fallback_reason,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
@@ -168,13 +181,27 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 			workflow = excluded.workflow,
 			team_id = excluded.team_id,
 			teammate_id = excluded.teammate_id,
+			provider = excluded.provider,
+			model = excluded.model,
+			reasoning_effort = excluded.reasoning_effort,
+			difficulty = excluded.difficulty,
+			difficulty_source = excluded.difficulty_source,
+			difficulty_rationale = excluded.difficulty_rationale,
+			route_source = excluded.route_source,
+			route_warnings_json = excluded.route_warnings_json,
+			fallback_used = excluded.fallback_used,
+			fallback_reason = excluded.fallback_reason,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
 	`, record.AgentID, record.RootSessionID, nullAgentString(record.ParentAgentID), nullAgentString(record.ParentSessionID),
 		nullAgentString(record.SessionID), record.AgentPath, record.Depth, nullAgentString(record.AgentType),
 		nullAgentString(record.Nickname), nullAgentString(record.Workflow), nullAgentString(record.TeamID),
-		nullAgentString(record.TeammateID), record.Status, formatAgentTime(record.CreatedAt), formatAgentTime(record.UpdatedAt),
+		nullAgentString(record.TeammateID), nullAgentString(record.Provider), nullAgentString(record.Model),
+		nullAgentString(record.ReasoningEffort), nullAgentString(record.Difficulty), nullAgentString(record.DifficultySource),
+		nullAgentString(record.DifficultyRationale), nullAgentString(record.RouteSource), routeWarningsJSON(record.RouteWarnings),
+		record.FallbackUsed, nullAgentString(record.FallbackReason),
+		record.Status, formatAgentTime(record.CreatedAt), formatAgentTime(record.UpdatedAt),
 		nullableAgentTime(record.ClosedAt))
 	if err != nil {
 		return AgentRecord{}, fmt.Errorf("upsert agent control agent: %w", err)
@@ -274,7 +301,9 @@ func (s *SQLiteGlobalAgentRegistryStore) ListAgentControlAgents(ctx context.Cont
 	clauses, args := agentFilterClauses(filter)
 	query := `
 		SELECT id, agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
-			agent_type, nickname, workflow, team_id, teammate_id, status, created_at, updated_at, closed_at
+			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
+			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
+			fallback_used, fallback_reason, status, created_at, updated_at, closed_at
 		FROM agent_control_agents
 	`
 	if len(clauses) > 0 {
@@ -384,8 +413,10 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO agent_control_agents (
 			agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
-			agent_type, nickname, workflow, team_id, teammate_id, status, created_at, updated_at, closed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
+			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
+			fallback_used, fallback_reason, status, created_at, updated_at, closed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(agent_id) DO UPDATE SET
 			root_session_id = excluded.root_session_id,
 			parent_agent_id = excluded.parent_agent_id,
@@ -398,6 +429,16 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 			workflow = excluded.workflow,
 			team_id = excluded.team_id,
 			teammate_id = excluded.teammate_id,
+			provider = excluded.provider,
+			model = excluded.model,
+			reasoning_effort = excluded.reasoning_effort,
+			difficulty = excluded.difficulty,
+			difficulty_source = excluded.difficulty_source,
+			difficulty_rationale = excluded.difficulty_rationale,
+			route_source = excluded.route_source,
+			route_warnings_json = excluded.route_warnings_json,
+			fallback_used = excluded.fallback_used,
+			fallback_reason = excluded.fallback_reason,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
@@ -412,13 +453,27 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 			workflow = excluded.workflow,
 			team_id = excluded.team_id,
 			teammate_id = excluded.teammate_id,
+			provider = excluded.provider,
+			model = excluded.model,
+			reasoning_effort = excluded.reasoning_effort,
+			difficulty = excluded.difficulty,
+			difficulty_source = excluded.difficulty_source,
+			difficulty_rationale = excluded.difficulty_rationale,
+			route_source = excluded.route_source,
+			route_warnings_json = excluded.route_warnings_json,
+			fallback_used = excluded.fallback_used,
+			fallback_reason = excluded.fallback_reason,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
 	`, record.AgentID, record.RootSessionID, nullAgentString(record.ParentAgentID), nullAgentString(record.ParentSessionID),
 		nullAgentString(record.SessionID), record.AgentPath, record.Depth, nullAgentString(record.AgentType),
 		nullAgentString(record.Nickname), nullAgentString(record.Workflow), nullAgentString(record.TeamID),
-		nullAgentString(record.TeammateID), record.Status, formatAgentTime(record.CreatedAt), formatAgentTime(record.UpdatedAt),
+		nullAgentString(record.TeammateID), nullAgentString(record.Provider), nullAgentString(record.Model),
+		nullAgentString(record.ReasoningEffort), nullAgentString(record.Difficulty), nullAgentString(record.DifficultySource),
+		nullAgentString(record.DifficultyRationale), nullAgentString(record.RouteSource), routeWarningsJSON(record.RouteWarnings),
+		record.FallbackUsed, nullAgentString(record.FallbackReason),
+		record.Status, formatAgentTime(record.CreatedAt), formatAgentTime(record.UpdatedAt),
 		nullableAgentTime(record.ClosedAt))
 	if err != nil {
 		return AgentRecord{}, fmt.Errorf("upsert agent control agent: %w", err)
@@ -484,7 +539,9 @@ func (s *SQLiteGlobalAgentRegistryStore) CloseAgentControlAgentSubtree(ctx conte
 func (s *SQLiteGlobalAgentRegistryStore) getAgentControlAgentByID(ctx context.Context, agentID string) (AgentRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
-			agent_type, nickname, workflow, team_id, teammate_id, status, created_at, updated_at, closed_at
+			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
+			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
+			fallback_used, fallback_reason, status, created_at, updated_at, closed_at
 		FROM agent_control_agents
 		WHERE agent_id = ?
 	`, strings.TrimSpace(agentID))
@@ -720,6 +777,16 @@ func (s *SQLiteGlobalAgentRegistryStore) init(ctx context.Context) error {
 			workflow TEXT,
 			team_id TEXT,
 			teammate_id TEXT,
+			provider TEXT,
+			model TEXT,
+			reasoning_effort TEXT,
+			difficulty TEXT,
+			difficulty_source TEXT,
+			difficulty_rationale TEXT,
+			route_source TEXT,
+			route_warnings_json TEXT NOT NULL DEFAULT '[]',
+			fallback_used INTEGER NOT NULL DEFAULT 0,
+			fallback_reason TEXT,
 			status TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
@@ -762,6 +829,56 @@ func (s *SQLiteGlobalAgentRegistryStore) init(ctx context.Context) error {
 			return fmt.Errorf("initialize agent control agent registry: %w", err)
 		}
 	}
+	if err := s.ensureAgentControlAgentRouteColumns(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteGlobalAgentRegistryStore) ensureAgentControlAgentRouteColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info(agent_control_agents)")
+	if err != nil {
+		return fmt.Errorf("inspect agent control agent columns: %w", err)
+	}
+	defer rows.Close()
+	existing := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue interface{}
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("scan agent control agent column: %w", err)
+		}
+		existing[strings.TrimSpace(name)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	columns := []struct {
+		Name string
+		SQL  string
+	}{
+		{Name: "provider", SQL: "ALTER TABLE agent_control_agents ADD COLUMN provider TEXT"},
+		{Name: "model", SQL: "ALTER TABLE agent_control_agents ADD COLUMN model TEXT"},
+		{Name: "reasoning_effort", SQL: "ALTER TABLE agent_control_agents ADD COLUMN reasoning_effort TEXT"},
+		{Name: "difficulty", SQL: "ALTER TABLE agent_control_agents ADD COLUMN difficulty TEXT"},
+		{Name: "difficulty_source", SQL: "ALTER TABLE agent_control_agents ADD COLUMN difficulty_source TEXT"},
+		{Name: "difficulty_rationale", SQL: "ALTER TABLE agent_control_agents ADD COLUMN difficulty_rationale TEXT"},
+		{Name: "route_source", SQL: "ALTER TABLE agent_control_agents ADD COLUMN route_source TEXT"},
+		{Name: "route_warnings_json", SQL: "ALTER TABLE agent_control_agents ADD COLUMN route_warnings_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "fallback_used", SQL: "ALTER TABLE agent_control_agents ADD COLUMN fallback_used INTEGER NOT NULL DEFAULT 0"},
+		{Name: "fallback_reason", SQL: "ALTER TABLE agent_control_agents ADD COLUMN fallback_reason TEXT"},
+	}
+	for _, column := range columns {
+		if existing[column.Name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, column.SQL); err != nil {
+			return fmt.Errorf("add agent control agent column %s: %w", column.Name, err)
+		}
+	}
 	return nil
 }
 
@@ -771,22 +888,34 @@ type agentRecordScanner interface {
 
 func scanAgentRecord(scanner agentRecordScanner) (AgentRecord, error) {
 	var (
-		record          AgentRecord
-		parentAgentID   sql.NullString
-		parentSessionID sql.NullString
-		sessionID       sql.NullString
-		agentType       sql.NullString
-		nickname        sql.NullString
-		workflow        sql.NullString
-		teamID          sql.NullString
-		teammateID      sql.NullString
-		createdRaw      string
-		updatedRaw      string
-		closedRaw       sql.NullString
+		record              AgentRecord
+		parentAgentID       sql.NullString
+		parentSessionID     sql.NullString
+		sessionID           sql.NullString
+		agentType           sql.NullString
+		nickname            sql.NullString
+		workflow            sql.NullString
+		teamID              sql.NullString
+		teammateID          sql.NullString
+		provider            sql.NullString
+		model               sql.NullString
+		reasoningEffort     sql.NullString
+		difficulty          sql.NullString
+		difficultySource    sql.NullString
+		difficultyRationale sql.NullString
+		routeSource         sql.NullString
+		routeWarningsRaw    string
+		fallbackUsed        int
+		fallbackReason      sql.NullString
+		createdRaw          string
+		updatedRaw          string
+		closedRaw           sql.NullString
 	)
 	if err := scanner.Scan(&record.Seq, &record.AgentID, &record.RootSessionID, &parentAgentID, &parentSessionID,
 		&sessionID, &record.AgentPath, &record.Depth, &agentType, &nickname, &workflow, &teamID,
-		&teammateID, &record.Status, &createdRaw, &updatedRaw, &closedRaw); err != nil {
+		&teammateID, &provider, &model, &reasoningEffort, &difficulty, &difficultySource,
+		&difficultyRationale, &routeSource, &routeWarningsRaw, &fallbackUsed, &fallbackReason,
+		&record.Status, &createdRaw, &updatedRaw, &closedRaw); err != nil {
 		return AgentRecord{}, err
 	}
 	record.ParentAgentID = parentAgentID.String
@@ -797,6 +926,16 @@ func scanAgentRecord(scanner agentRecordScanner) (AgentRecord, error) {
 	record.Workflow = workflow.String
 	record.TeamID = teamID.String
 	record.TeammateID = teammateID.String
+	record.Provider = provider.String
+	record.Model = model.String
+	record.ReasoningEffort = reasoningEffort.String
+	record.Difficulty = difficulty.String
+	record.DifficultySource = difficultySource.String
+	record.DifficultyRationale = difficultyRationale.String
+	record.RouteSource = routeSource.String
+	record.RouteWarnings = parseRouteWarningsJSON(routeWarningsRaw)
+	record.FallbackUsed = fallbackUsed != 0
+	record.FallbackReason = fallbackReason.String
 	if createdRaw != "" {
 		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
 	}
@@ -835,6 +974,30 @@ func nullAgentString(value string) interface{} {
 		return nil
 	}
 	return value
+}
+
+func routeWarningsJSON(values []string) string {
+	values = trimAgentRecordStrings(values)
+	if len(values) == 0 {
+		return "[]"
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
+}
+
+func parseRouteWarningsJSON(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil
+	}
+	return trimAgentRecordStrings(values)
 }
 
 func nullInt64(value int64) interface{} {

@@ -229,6 +229,32 @@ func payloadStringValue(value interface{}) string {
 	}
 }
 
+func stringSliceValueAny(value interface{}) []string {
+	switch typed := value.(type) {
+	case []string:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if item = strings.TrimSpace(item); item != "" {
+				values = append(values, item)
+			}
+		}
+		return values
+	case []interface{}:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := payloadStringValue(item); text != "" {
+				values = append(values, text)
+			}
+		}
+		return values
+	case string:
+		if text := strings.TrimSpace(typed); text != "" {
+			return []string{text}
+		}
+	}
+	return nil
+}
+
 func payloadNestedStringValue(payload map[string]interface{}, key string, nested string) string {
 	if payload == nil {
 		return ""

@@ -723,6 +723,118 @@ func TestChatSlashArgumentCompletionAgents(t *testing.T) {
 			t.Fatalf("expected /agents target candidates to include %q, got %#v", command, controller.state.Candidates)
 		}
 	}
+
+	controller.UpdateAt("/agents routing ", len([]rune("/agents routing ")))
+	for _, command := range []string{"test", "dry-run", "dryrun", "preview", "summary", "status", "config"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /agents routing candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/agents routing dryrun --", len([]rune("/agents routing dryrun --")))
+	for _, command := range []string{"--role", "--difficulty", "--goal", "--provider", "--model", "--reasoning-effort", "--read-only=true", "--read-only=false", "--write"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /agents routing dryrun candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+}
+
+func TestChatSlashArgumentCompletionAgentsRoutingDifficulty(t *testing.T) {
+	t.Parallel()
+
+	controller := newChatSlashCompletionController(&ChatSession{})
+	controller.UpdateAt("/agents routing test --difficulty ", len([]rune("/agents routing test --difficulty ")))
+	if !controller.state.Active || !controller.state.Context.InArguments {
+		t.Fatalf("expected routing difficulty value popup to be active, got %#v", controller.state)
+	}
+	for _, command := range []string{"easy", "normal", "hard", "expert"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /agents routing test --difficulty candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	nextText, nextCursor, ok := controller.ApplyCompletion("/agents routing test --difficulty ", len([]rune("/agents routing test --difficulty ")))
+	if !ok {
+		t.Fatal("expected routing difficulty value completion to be accepted")
+	}
+	if nextText != "/agents routing test --difficulty easy " {
+		t.Fatalf("expected difficulty value completion after flag, got %q", nextText)
+	}
+	if nextCursor != len([]rune(nextText)) {
+		t.Fatalf("expected cursor after completed difficulty value, got %d", nextCursor)
+	}
+
+	eqController := newChatSlashCompletionController(&ChatSession{})
+	eqController.UpdateAt("/agents routing test --difficulty=", len([]rune("/agents routing test --difficulty=")))
+	for _, command := range []string{"easy", "normal", "hard", "expert"} {
+		if !containsSlashCandidate(eqController.state.Candidates, command) {
+			t.Fatalf("expected /agents routing test --difficulty= candidates to include %q, got %#v", command, eqController.state.Candidates)
+		}
+	}
+
+	nextText, nextCursor, ok = eqController.ApplyCompletion("/agents routing test --difficulty=h", len([]rune("/agents routing test --difficulty=h")))
+	if !ok {
+		t.Fatal("expected routing difficulty assignment completion to be accepted")
+	}
+	if nextText != "/agents routing test --difficulty=hard " {
+		t.Fatalf("expected assignment value completion in place, got %q", nextText)
+	}
+	if nextCursor != len([]rune(nextText)) {
+		t.Fatalf("expected cursor after completed assignment value, got %d", nextCursor)
+	}
+}
+
+func TestChatSlashArgumentCompletionAgentsRoutingRouteOverrides(t *testing.T) {
+	t.Parallel()
+
+	session := &ChatSession{
+		ProviderName: "alpha",
+		Model:        "alpha-model",
+		Provider: config.Provider{
+			Enabled:         true,
+			DefaultModel:    "alpha-model",
+			SupportedModels: []string{"alpha-model", "beta-model"},
+			ModelCapabilities: map[string]config.ModelCapabilitySpec{
+				"alpha-model": {
+					ReasoningModel:   true,
+					ReasoningEfforts: []string{"low", "medium", "high"},
+				},
+			},
+		},
+		Config: &config.Config{
+			Providers: config.ProvidersConfig{
+				Items: map[string]config.Provider{
+					"alpha": {
+						Enabled:      true,
+						DefaultModel: "alpha-model",
+					},
+					"beta": {
+						Enabled:      true,
+						DefaultModel: "beta-model",
+					},
+				},
+			},
+		},
+	}
+	controller := newChatSlashCompletionController(session)
+	controller.UpdateAt("/agents routing test --provider ", len([]rune("/agents routing test --provider ")))
+	for _, command := range []string{"alpha", "beta"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected provider candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/agents routing test --model=", len([]rune("/agents routing test --model=")))
+	for _, command := range []string{"alpha-model", "beta-model"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected model candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/agents routing test --reasoning-effort h", len([]rune("/agents routing test --reasoning-effort h")))
+	if !containsSlashCandidate(controller.state.Candidates, "high") {
+		t.Fatalf("expected reasoning candidates to include high, got %#v", controller.state.Candidates)
+	}
 }
 
 func TestChatSlashArgumentCompletionFinalValueSubmissionDoesNotConsume(t *testing.T) {

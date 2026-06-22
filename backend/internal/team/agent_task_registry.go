@@ -271,6 +271,10 @@ func (r AgentControlTaskRegistry) CreateAgentControlTask(ctx context.Context, re
 	if status != "" && !isAgentControlWritableTaskStatus(status) {
 		return nil, fmt.Errorf("unsupported task status: %s", request.Status)
 	}
+	difficulty, ok := NormalizeTaskDifficulty(request.Difficulty)
+	if !ok {
+		return nil, fmt.Errorf("unsupported task difficulty: %s", request.Difficulty)
+	}
 	var parentID *string
 	if request.ParentTaskID != "" {
 		value := request.ParentTaskID
@@ -287,20 +291,22 @@ func (r AgentControlTaskRegistry) CreateAgentControlTask(ctx context.Context, re
 		resultRef = &value
 	}
 	task := Task{
-		ID:           request.ID,
-		TeamID:       request.TeamID,
-		ParentTaskID: parentID,
-		Title:        request.Title,
-		Goal:         request.Goal,
-		Status:       status,
-		Priority:     request.Priority,
-		Assignee:     assignee,
-		Inputs:       request.Inputs,
-		ReadPaths:    request.ReadPaths,
-		WritePaths:   request.WritePaths,
-		Deliverables: request.Deliverables,
-		Summary:      request.Summary,
-		ResultRef:    resultRef,
+		ID:                  request.ID,
+		TeamID:              request.TeamID,
+		ParentTaskID:        parentID,
+		Title:               request.Title,
+		Goal:                request.Goal,
+		Difficulty:          difficulty,
+		DifficultyRationale: request.DifficultyRationale,
+		Status:              status,
+		Priority:            request.Priority,
+		Assignee:            assignee,
+		Inputs:              request.Inputs,
+		ReadPaths:           request.ReadPaths,
+		WritePaths:          request.WritePaths,
+		Deliverables:        request.Deliverables,
+		Summary:             request.Summary,
+		ResultRef:           resultRef,
 	}
 	var (
 		taskID string
@@ -368,6 +374,16 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTask(ctx context.Context, re
 	}
 	if request.Goal != nil {
 		task.Goal = *request.Goal
+	}
+	if request.Difficulty != nil {
+		difficulty, ok := NormalizeTaskDifficulty(*request.Difficulty)
+		if !ok {
+			return nil, fmt.Errorf("unsupported task difficulty: %s", *request.Difficulty)
+		}
+		task.Difficulty = difficulty
+	}
+	if request.DifficultyRationale != nil {
+		task.DifficultyRationale = *request.DifficultyRationale
 	}
 	closedStatusUpdate := false
 	if request.Status != nil && *request.Status != "" {

@@ -243,6 +243,14 @@ func (p *ProviderWrapper) ListModelCapabilities() map[string]agentconfig.ModelCa
 	return CloneModelCapabilityMap(p.config.ModelCapabilities)
 }
 
+// DefaultModelName returns the provider-level default model from its config.
+func (p *ProviderWrapper) DefaultModelName() string {
+	if p == nil || p.config == nil {
+		return ""
+	}
+	return strings.TrimSpace(p.config.DefaultModel)
+}
+
 func (p *ProviderWrapper) modelCapabilities() map[string]agentconfig.ModelCapabilitySpec {
 	if p == nil || p.config == nil {
 		return nil

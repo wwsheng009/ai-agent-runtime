@@ -204,6 +204,27 @@ func agentStatusCacheSafeSummary(result *AgentStatusResult) string {
 	return strings.Join(lines, "\n")
 }
 
+func agentApprovalCacheSafeSummary(result *AgentApprovalResult) string {
+	if result == nil {
+		return ""
+	}
+	sessionRef := firstNonEmptyString(strings.TrimSpace(result.SessionID), "child_agent")
+	decision := "denied"
+	if result.Allowed {
+		decision = "approved"
+	}
+	lines := []string{fmt.Sprintf("Child agent %s approval %s.", sessionRef, decision)}
+	if requestID := strings.TrimSpace(result.RequestID); requestID != "" {
+		lines = append(lines, "Request: "+requestID)
+	}
+	if result.Status != nil {
+		if status := strings.TrimSpace(result.Status.Status); status != "" {
+			lines = append(lines, "Status: "+status)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func agentWaitCacheSafeSummary(result *AgentWaitResult) string {
 	if result == nil {
 		return ""

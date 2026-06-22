@@ -10,10 +10,13 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -168,6 +171,105 @@ func resolveAPIAgentForkMode(args toolbroker.SpawnAgentArgs) (apiAgentForkMode, 
 	return apiAgentForkNone, 0, nil
 }
 
+func (c *sessionAgentController) subagentRoutingConfig() *agentconfig.AICLISubagentRoutingConfig {
+	if c == nil || c.handler == nil {
+		return nil
+	}
+	return c.handler.subagentRoutingConfig()
+}
+
+func (c *sessionAgentController) resolveSpawnAgentRoute(parentSession *chat.Session, sessionID string, args toolbroker.SpawnAgentArgs) (toolbroker.SpawnAgentArgs, error) {
+	parent := c.spawnAgentParentDefaults(parentSession)
+	routingConfig := c.subagentRoutingConfig()
+	task := modelrouting.TaskHint{
+		ID:                  strings.TrimSpace(sessionID),
+		Role:                strings.TrimSpace(args.AgentType),
+		Goal:                strings.TrimSpace(args.Message),
+		Difficulty:          strings.TrimSpace(args.Difficulty),
+		DifficultyRationale: strings.TrimSpace(args.DifficultyRationale),
+		Provider:            strings.TrimSpace(args.Provider),
+		Model:               strings.TrimSpace(args.Model),
+		ReasoningEffort:     firstNonEmptyString(strings.TrimSpace(args.ReasoningEffort), strings.TrimSpace(args.ThinkingEffort)),
+		ReadOnly:            false,
+		Warnings:            append([]string(nil), args.RouteWarnings...),
+	}
+	var catalog modelrouting.ProviderCatalog
+	if c != nil && c.handler != nil && c.handler.llmRuntime != nil {
+		catalog = modelrouting.NewRuntimeCatalog(c.handler.llmRuntime)
+	}
+	decision, err := (modelrouting.Resolver{
+		Config:  routingConfig,
+		Catalog: catalog,
+	}).Resolve(parent, task)
+	if err != nil {
+		return args, err
+	}
+	if !modelrouting.RoutingEnabled(routingConfig) {
+		if strings.TrimSpace(task.Model) != "" {
+			args.Model = strings.TrimSpace(decision.Model)
+		} else {
+			args.Model = ""
+		}
+		args.Provider = ""
+		args.ReasoningEffort = ""
+		args.ThinkingEffort = ""
+		args.Difficulty = strings.TrimSpace(decision.Difficulty)
+		args.DifficultySource = strings.TrimSpace(decision.DifficultySource)
+		args.DifficultyRationale = strings.TrimSpace(decision.DifficultyRationale)
+		args.RouteSource = strings.TrimSpace(decision.Source)
+		args.RouteWarnings = append([]string(nil), decision.Warnings...)
+		args.FallbackUsed = decision.FallbackUsed
+		args.FallbackReason = strings.TrimSpace(decision.FallbackReason)
+		return args, nil
+	}
+	args.Provider = strings.TrimSpace(decision.Provider)
+	args.Model = strings.TrimSpace(decision.Model)
+	args.ReasoningEffort = strings.TrimSpace(decision.ReasoningEffort)
+	args.Difficulty = strings.TrimSpace(decision.Difficulty)
+	args.DifficultySource = strings.TrimSpace(decision.DifficultySource)
+	args.DifficultyRationale = strings.TrimSpace(decision.DifficultyRationale)
+	args.RouteSource = strings.TrimSpace(decision.Source)
+	args.RouteWarnings = append([]string(nil), decision.Warnings...)
+	args.FallbackUsed = decision.FallbackUsed
+	args.FallbackReason = strings.TrimSpace(decision.FallbackReason)
+	return args, nil
+}
+
+func (c *sessionAgentController) spawnAgentParentDefaults(parentSession *chat.Session) modelrouting.ParentDefaults {
+	parent := modelrouting.ParentDefaults{}
+	if c != nil && c.handler != nil {
+		runtimeConfig := c.handler.resolveRuntimeConfig(UsageScope{})
+		if runtimeConfig != nil {
+			parent.Provider = strings.TrimSpace(runtimeConfig.Agent.DefaultProvider)
+			parent.Model = strings.TrimSpace(runtimeConfig.Agent.DefaultModel)
+			parent.Timeout = runtimeConfig.Agent.Timeout
+		}
+		if c.handler.llmRuntime != nil {
+			runtime := c.handler.llmRuntime
+			if strings.TrimSpace(parent.Provider) == "" {
+				parent.Provider = strings.TrimSpace(runtime.DefaultProvider())
+			}
+			if strings.TrimSpace(parent.Model) == "" {
+				parent.Model = strings.TrimSpace(runtime.DefaultModel())
+			}
+		}
+	}
+	if parentSession != nil {
+		if provider := agentcontrol.ContextString(parentSession, sessionmeta.ProviderName); provider != "" {
+			parent.Provider = provider
+		}
+		if model := agentcontrol.ContextString(parentSession, toolbroker.AgentSessionContextRequestedModel); model != "" {
+			parent.Model = model
+		} else if model := agentcontrol.ContextString(parentSession, sessionmeta.Model); model != "" {
+			parent.Model = model
+		}
+		if effort := agentcontrol.ContextString(parentSession, sessionmeta.ReasoningEffort); effort != "" {
+			parent.ReasoningEffort = effort
+		}
+	}
+	return parent
+}
+
 func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID string, args toolbroker.SpawnAgentArgs) (*toolbroker.AgentStatusResult, error) {
 	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
 		return nil, fmt.Errorf("session manager not configured")
@@ -231,6 +333,11 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 		childSession.UserID = userID
 		childSession.UpdateState(chat.StateActive)
 	}
+	args, err = c.resolveSpawnAgentRoute(parentSession, childSession.ID, args)
+	if err != nil {
+		_ = storage.Delete(ctx, childSession.ID)
+		return nil, err
+	}
 	childSession.SetContext(toolbroker.AgentSessionContextParentSessionID, strings.TrimSpace(parentSessionID))
 	childSession.SetContext(toolbroker.AgentSessionContextRootSessionID, apiAgentRootSessionID(parentSession, parentSessionID))
 	childSession.SetContext(toolbroker.AgentSessionContextPath, apiAgentChildPath(parentSession, sessionID))
@@ -238,9 +345,7 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	if agentType := strings.TrimSpace(args.AgentType); agentType != "" {
 		childSession.SetContext(toolbroker.AgentSessionContextAgentType, agentType)
 	}
-	if model := strings.TrimSpace(args.Model); model != "" {
-		childSession.SetContext(toolbroker.AgentSessionContextRequestedModel, model)
-	}
+	toolbroker.ApplySpawnAgentRouteContext(childSession, args)
 	if err := storage.Save(ctx, childSession); err != nil {
 		return nil, err
 	}
@@ -256,7 +361,7 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	}
 	queued := false
 	if message := strings.TrimSpace(args.Message); message != "" {
-		if err := actor.SubmitPromptAsync(ctx, message, nil); err != nil {
+		if err := actor.SubmitPromptAsync(ctx, message, toolbroker.SpawnAgentRunMeta(args)); err != nil {
 			return nil, err
 		}
 		queued = true
@@ -267,6 +372,9 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	}
 	result.Created = true
 	result.Queued = queued
+	c.dispatchAgentHook(runtimehooks.EventSubagentStart, apiSpawnAgentHookPayload(parentSessionID, childSession, map[string]interface{}{
+		"queued": queued,
+	}))
 	return result, nil
 }
 
@@ -320,9 +428,11 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 			payload["agent_type"] = childType
 			payload["role"] = childType
 		}
+		toolbroker.AddSpawnAgentRoutePayload(payload, childSession)
 		copyAgentCompletionPayload(payload, event.Payload)
 		completionMessage, mailboxErr := c.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, payload)
 		payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
+		c.dispatchAgentHook(runtimehooks.EventSubagentStop, cloneProfileContextValues(payload))
 		mirrored := runtimeevents.Event{
 			Type:      "subagent.completed",
 			TraceID:   strings.TrimSpace(event.TraceID),
@@ -343,6 +453,49 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 		bus.Publish(mirrored)
 	}
 	unsubscribe = bus.SubscribeCancelable("", handler)
+}
+
+func (c *sessionAgentController) dispatchAgentHook(event runtimehooks.Event, payload map[string]interface{}) {
+	if c == nil || c.handler == nil || len(payload) == 0 {
+		return
+	}
+	runtimeConfig := c.handler.resolveRuntimeConfig(UsageScope{})
+	if runtimeConfig == nil || len(runtimeConfig.Hooks) == 0 {
+		return
+	}
+	runtimehooks.NewManager(runtimeConfig.Hooks).DispatchAsync(context.Background(), event, payload)
+}
+
+func apiSpawnAgentHookPayload(parentSessionID string, childSession *chat.Session, extra map[string]interface{}) map[string]interface{} {
+	if childSession == nil {
+		return nil
+	}
+	childSessionID := strings.TrimSpace(childSession.ID)
+	if childSessionID == "" {
+		return nil
+	}
+	payload := map[string]interface{}{
+		"agent_id":          childSessionID,
+		"session_id":        childSessionID,
+		"parent_session_id": strings.TrimSpace(parentSessionID),
+		"path":              apiAgentSessionPath(childSession),
+	}
+	if depth := apiAgentSessionDepth(childSession); depth > 0 {
+		payload["depth"] = depth
+	}
+	if value, ok := childSession.GetContext(toolbroker.AgentSessionContextAgentType); ok {
+		if agentType, ok := value.(string); ok && strings.TrimSpace(agentType) != "" {
+			payload["agent_type"] = strings.TrimSpace(agentType)
+			payload["role"] = strings.TrimSpace(agentType)
+		}
+	}
+	toolbroker.AddSpawnAgentRoutePayload(payload, childSession)
+	for key, value := range extra {
+		if strings.TrimSpace(key) != "" {
+			payload[key] = value
+		}
+	}
+	return payload
 }
 
 func (c *sessionAgentController) deliverSubagentCompletionMailbox(ctx context.Context, parentSessionID, childSessionID, childPath, childType, sourceEventType string, payload map[string]interface{}) (team.MailMessage, error) {
@@ -411,7 +564,7 @@ func apiChildAgentRecord(parentSession *chat.Session, parentSessionID string, ch
 	}
 	rootSessionID := apiAgentRootSessionID(parentSession, strings.TrimSpace(parentSessionID))
 	agentType := firstNonEmptyString(strings.TrimSpace(args.AgentType), agentcontrol.AgentTypeChild)
-	return agentcontrol.AgentRecord{
+	record := agentcontrol.AgentRecord{
 		AgentID:         childSessionID,
 		RootSessionID:   rootSessionID,
 		ParentAgentID:   apiAgentIDForSession(parentSession, strings.TrimSpace(parentSessionID)),
@@ -423,6 +576,8 @@ func apiChildAgentRecord(parentSession *chat.Session, parentSessionID string, ch
 		Workflow:        agentcontrol.WorkflowSpawnAgent,
 		Status:          agentcontrol.AgentStatusActive,
 	}
+	toolbroker.ApplySpawnAgentRouteRecord(&record, args)
+	return record
 }
 
 func apiAgentIDForSession(session *chat.Session, sessionID string) string {
@@ -553,6 +708,7 @@ func (c *sessionAgentController) agentStatusFromRecord(ctx context.Context, reco
 	result.AgentType = firstNonEmptyString(strings.TrimSpace(result.AgentType), record.AgentType)
 	result.TeamID = firstNonEmptyString(strings.TrimSpace(result.TeamID), record.TeamID)
 	result.TeammateID = firstNonEmptyString(strings.TrimSpace(result.TeammateID), record.TeammateID)
+	toolbroker.ApplySpawnAgentRouteStatusRecord(result, record)
 	if record.Closed() {
 		result.Status = string(chat.SessionStopped)
 		if result.SessionState == "" {
@@ -651,7 +807,7 @@ func (c *sessionAgentController) deliverAgentMessage(ctx context.Context, fromSe
 	triggered := false
 	if trigger && !c.apiAgentSessionBusy(ctx, sessionID) {
 		if actor := c.apiAgentActor(ctx, sessionID); actor != nil && !apiAgentActorBusy(actor.State()) {
-			if err := actor.SubmitPromptAsync(ctx, message, nil); err != nil {
+			if err := actor.SubmitPromptAsync(ctx, message, c.apiAgentRunMeta(ctx, sessionID)); err != nil {
 				return nil, err
 			}
 			triggered = true
@@ -719,6 +875,19 @@ func (c *sessionAgentController) apiAgentActor(ctx context.Context, sessionID st
 	return actor
 }
 
+func (c *sessionAgentController) apiAgentRunMeta(ctx context.Context, sessionID string) *team.RunMeta {
+	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
+		return nil
+	}
+	session, err := c.handler.sessionManager.Get(ctx, strings.TrimSpace(sessionID))
+	if err != nil || session == nil {
+		return nil
+	}
+	return toolbroker.SpawnAgentRunMeta(toolbroker.SpawnAgentArgs{
+		PermissionMode: agentcontrol.ContextString(session, toolbroker.AgentSessionContextPermissionMode),
+	})
+}
+
 func (c *sessionAgentController) deliverAgentMailboxEvent(ctx context.Context, sessionID string, mail team.MailMessage) error {
 	if c == nil || c.handler == nil {
 		return fmt.Errorf("handler not configured")
@@ -774,7 +943,7 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 			}
 		}
 	}
-	if err := actor.SubmitPromptAsync(ctx, message, nil); err != nil {
+	if err := actor.SubmitPromptAsync(ctx, message, c.apiAgentRunMeta(ctx, sessionID)); err != nil {
 		return nil, err
 	}
 	result, err := c.snapshot(ctx, sessionID)
@@ -783,6 +952,43 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 	}
 	result.Queued = true
 	return result, nil
+}
+
+func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolbroker.ResolveAgentApprovalArgs) (*toolbroker.AgentApprovalResult, error) {
+	if c == nil || c.handler == nil {
+		return nil, fmt.Errorf("handler not configured")
+	}
+	sessionID := firstNonEmptyString(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
+	if sessionID == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	requestID := strings.TrimSpace(args.RequestID)
+	if requestID == "" {
+		return nil, fmt.Errorf("request_id is required")
+	}
+	resolvedSessionID, err := c.resolveTargetSessionID(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	sessionID = resolvedSessionID
+	actor, err := c.handler.getSessionHub().GetOrCreate(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if err := actor.ApproveToolWithArgs(ctx, requestID, args.Allow, args.PatchedArgs); err != nil {
+		return nil, err
+	}
+	status, err := c.snapshot(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return &toolbroker.AgentApprovalResult{
+		SessionID: sessionID,
+		RequestID: requestID,
+		Allowed:   args.Allow,
+		Resolved:  true,
+		Status:    status,
+	}, nil
 }
 
 func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
@@ -1549,6 +1755,7 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 				result.AgentType = strings.TrimSpace(text)
 			}
 		}
+		toolbroker.ApplySpawnAgentRouteStatusContext(result, session)
 		if err := c.enrichAgentTeamProjection(ctx, session, result); err != nil {
 			return nil, err
 		}
@@ -1571,6 +1778,11 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 			if state != nil {
 				result.Status = string(state.Status)
 				result.PendingApproval = state.PendingApproval != nil
+				if state.PendingApproval != nil {
+					result.PendingApprovalID = strings.TrimSpace(state.PendingApproval.ID)
+					result.PendingApprovalReason = strings.TrimSpace(state.PendingApproval.Reason)
+					result.PendingApprovalRiskLevel = strings.TrimSpace(state.PendingApproval.RiskLevel)
+				}
 				result.PendingQuestion = state.PendingQuestion != nil
 				result.CurrentTurnID = strings.TrimSpace(state.CurrentTurnID)
 				if state.PendingTool != nil {
@@ -2020,7 +2232,19 @@ func copyAgentCompletionPayload(target map[string]interface{}, payload map[strin
 	if len(target) == 0 || len(payload) == 0 {
 		return
 	}
-	for _, key := range []string{"success", "error", "duration", "steps", "trace_id", "turn_id"} {
+	for _, key := range []string{
+		"success",
+		"error",
+		"duration",
+		"steps",
+		"trace_id",
+		"turn_id",
+		"usage_prompt_tokens",
+		"usage_completion_tokens",
+		"usage_total_tokens",
+		"usage_cached_tokens",
+		"usage_reasoning_tokens",
+	} {
 		if value, ok := payload[key]; ok {
 			target[key] = value
 		}

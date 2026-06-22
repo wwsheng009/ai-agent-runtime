@@ -59,12 +59,14 @@ func TestSQLiteStoreGetAndListTasksUseAgentControlRecordsWithoutLegacyTaskMirror
 	teamID, err := store.CreateTeam(ctx, Team{})
 	require.NoError(t, err)
 	taskID, err := store.CreateAgentControlTaskRecord(ctx, Task{
-		TeamID:   teamID,
-		Title:    "agent-control-primary",
-		Goal:     "read from AgentControl",
-		Status:   TaskStatusReady,
-		Priority: 4,
-		Summary:  "agent-control summary",
+		TeamID:              teamID,
+		Title:               "agent-control-primary",
+		Goal:                "read from AgentControl",
+		Difficulty:          TaskDifficultyHard,
+		DifficultyRationale: "Requires cross-table persistence.",
+		Status:              TaskStatusReady,
+		Priority:            4,
+		Summary:             "agent-control summary",
 	})
 	require.NoError(t, err)
 
@@ -76,6 +78,8 @@ func TestSQLiteStoreGetAndListTasksUseAgentControlRecordsWithoutLegacyTaskMirror
 	assert.Equal(t, TaskStatusReady, task.Status)
 	assert.Equal(t, "agent-control summary", task.Summary)
 	assert.Equal(t, 4, task.Priority)
+	assert.Equal(t, TaskDifficultyHard, task.Difficulty)
+	assert.Equal(t, "Requires cross-table persistence.", task.DifficultyRationale)
 
 	tasks, err := store.ListTasks(ctx, TaskFilter{
 		TeamID: teamID,
@@ -85,6 +89,135 @@ func TestSQLiteStoreGetAndListTasksUseAgentControlRecordsWithoutLegacyTaskMirror
 	require.Len(t, tasks, 1)
 	assert.Equal(t, taskID, tasks[0].ID)
 	assert.Equal(t, "agent-control-primary", tasks[0].Title)
+	assert.Equal(t, TaskDifficultyHard, tasks[0].Difficulty)
+	assert.Equal(t, "Requires cross-table persistence.", tasks[0].DifficultyRationale)
+
+	records, err := store.ListAgentControlTaskRecords(ctx, agentcontrol.TaskFilter{
+		TeamID: teamID,
+		Status: []string{string(TaskStatusReady)},
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, TaskDifficultyHard, records[0].Difficulty)
+	assert.Equal(t, "Requires cross-table persistence.", records[0].DifficultyRationale)
+}
+
+func TestSQLiteStoreMigratesAgentControlTaskDifficultyMetadata(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "team-v20.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TEXT NOT NULL
+		);
+		CREATE TABLE agent_control_task_records (
+			workflow TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			team_id TEXT NOT NULL,
+			parent_task_id TEXT,
+			assignee TEXT,
+			session_id TEXT,
+			agent_path TEXT,
+			title TEXT,
+			summary TEXT,
+			status TEXT,
+			priority INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			goal TEXT,
+			inputs_json TEXT NOT NULL DEFAULT '[]',
+			read_paths_json TEXT NOT NULL DEFAULT '[]',
+			write_paths_json TEXT NOT NULL DEFAULT '[]',
+			deliverables_json TEXT NOT NULL DEFAULT '[]',
+			lease_until TEXT,
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			result_ref TEXT,
+			version INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY (workflow, task_id)
+		);
+		INSERT INTO agent_control_task_records (
+			workflow, task_id, team_id, parent_task_id, assignee, session_id, agent_path,
+			title, summary, status, priority, created_at, updated_at, goal, inputs_json,
+			read_paths_json, write_paths_json, deliverables_json, lease_until, retry_count,
+			result_ref, version
+		) VALUES (
+			'spawn_team', 'legacy-task', 'team-legacy', NULL, NULL, NULL, NULL,
+			'legacy title', 'legacy summary', 'pending', 4, '2026-06-21T00:00:00Z',
+			'2026-06-21T00:00:00Z', 'legacy goal', '[]', '[]', '[]', '[]', NULL, 0, NULL, 1
+		);
+	`)
+	require.NoError(t, err)
+	for version := 1; version <= 20; version++ {
+		_, err = db.ExecContext(ctx, `
+			INSERT INTO schema_migrations (version, name, applied_at)
+			VALUES (?, ?, ?)
+		`, version, fmt.Sprintf("legacy_%d", version), "2026-06-21T00:00:00Z")
+		require.NoError(t, err)
+	}
+	require.NoError(t, db.Close())
+
+	store, err := NewSQLiteStore(&StoreConfig{Path: dbPath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "difficulty"))
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "difficulty_rationale"))
+
+	legacy, err := store.GetTask(ctx, "legacy-task")
+	require.NoError(t, err)
+	require.NotNil(t, legacy)
+	assert.Equal(t, "legacy title", legacy.Title)
+	assert.Equal(t, "", legacy.Difficulty)
+	assert.Equal(t, "", legacy.DifficultyRationale)
+
+	records, err := store.ListAgentControlTaskRecords(ctx, agentcontrol.TaskFilter{
+		TeamID: "team-legacy",
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, "", records[0].Difficulty)
+	assert.Equal(t, "", records[0].DifficultyRationale)
+
+	_, err = store.CreateAgentControlTaskRecord(ctx, Task{
+		ID:                  "new-task",
+		TeamID:              "team-legacy",
+		Title:               "new task",
+		Difficulty:          TaskDifficultyExpert,
+		DifficultyRationale: "Written after migration.",
+		Status:              TaskStatusPending,
+	})
+	require.NoError(t, err)
+	created, err := store.GetTask(ctx, "new-task")
+	require.NoError(t, err)
+	require.NotNil(t, created)
+	assert.Equal(t, TaskDifficultyExpert, created.Difficulty)
+	assert.Equal(t, "Written after migration.", created.DifficultyRationale)
+}
+
+func sqliteColumnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		require.NoError(t, rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &pk))
+		if name == column {
+			return true
+		}
+	}
+	require.NoError(t, rows.Err())
+	return false
 }
 
 func TestSQLiteStoreClaimTaskDoesNotRequireLegacyTaskMirror(t *testing.T) {

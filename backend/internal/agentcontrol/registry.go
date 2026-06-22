@@ -6,14 +6,21 @@ import (
 )
 
 const (
-	SessionContextParentSessionID = "agent_parent_session_id"
-	SessionContextRootSessionID   = "agent_root_session_id"
-	SessionContextAgentType       = "agent_type"
-	SessionContextRequestedModel  = "agent_requested_model"
-	SessionContextPath            = "agent_path"
-	SessionContextDepth           = "agent_depth"
-	SessionContextTeamID          = "agent_team_id"
-	SessionContextTeammateID      = "agent_teammate_id"
+	SessionContextParentSessionID     = "agent_parent_session_id"
+	SessionContextRootSessionID       = "agent_root_session_id"
+	SessionContextAgentType           = "agent_type"
+	SessionContextRequestedModel      = "agent_requested_model"
+	SessionContextDifficulty          = "agent_difficulty"
+	SessionContextDifficultySource    = "agent_difficulty_source"
+	SessionContextDifficultyRationale = "agent_difficulty_rationale"
+	SessionContextRouteSource         = "agent_route_source"
+	SessionContextRouteWarnings       = "agent_route_warnings"
+	SessionContextFallbackUsed        = "agent_fallback_used"
+	SessionContextFallbackReason      = "agent_fallback_reason"
+	SessionContextPath                = "agent_path"
+	SessionContextDepth               = "agent_depth"
+	SessionContextTeamID              = "agent_team_id"
+	SessionContextTeammateID          = "agent_teammate_id"
 )
 
 // ContextGetter is the small context surface shared by chat sessions and

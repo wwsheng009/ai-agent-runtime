@@ -23,7 +23,26 @@ type SubmitPrompt struct {
 	ImagePaths       []string
 	ImageArtifactDir string
 	RunMeta          *team.RunMeta
+	RouteOverride    *RunRouteOverride
 	Reply            chan SubmitResult
+}
+
+// RunRouteOverride carries per-run model routing values for a chat execution.
+// It is intentionally limited to LLM request routing fields and must not affect
+// permission mode, tool approval, or workspace policy.
+type RunRouteOverride struct {
+	Provider        string
+	Model           string
+	ReasoningEffort string
+}
+
+// Clone returns a defensive copy of the route override.
+func (r *RunRouteOverride) Clone() *RunRouteOverride {
+	if r == nil {
+		return nil
+	}
+	clone := *r
+	return &clone
 }
 
 // SubmitResult carries the outcome of SubmitPrompt.

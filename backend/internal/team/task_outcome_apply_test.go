@@ -43,7 +43,7 @@ func TestApplyBlockedTaskOutcomeBlocksAndReplans(t *testing.T) {
 			Sessions: &staticSessionClient{
 				result: &SessionResult{
 					Success: true,
-					Output:  `{"tasks":[{"id":"task-followup","title":"follow up","goal":"collect missing info"},{"id":"task-verify","title":"verify follow up","goal":"verify missing info"}],"dependencies":[{"task":"task-verify","depends_on":"task-followup"}]}`,
+					Output:  `{"tasks":[{"id":"task-followup","title":"follow up","goal":"collect missing info","difficulty":"hard","difficulty_rationale":"Recovery changes shared plan."},{"id":"task-verify","title":"verify follow up","goal":"verify missing info","difficulty":"normal","difficulty_rationale":"Check replan result."}],"dependencies":[{"task":"task-verify","depends_on":"task-followup"}]}`,
 				},
 			},
 			Store: store,
@@ -69,6 +69,8 @@ func TestApplyBlockedTaskOutcomeBlocksAndReplans(t *testing.T) {
 	require.Len(t, result.PlanResult.Tasks, 2)
 	require.Len(t, result.PlanResult.Dependencies, 1)
 	assert.Equal(t, "follow up", result.PlanResult.Tasks[0].Title)
+	assert.Equal(t, TaskDifficultyHard, result.PlanResult.Tasks[0].Difficulty)
+	assert.Equal(t, "Recovery changes shared plan.", result.PlanResult.Tasks[0].DifficultyRationale)
 	require.NotNil(t, result.Message)
 	assert.Equal(t, "lead", result.Message.ToAgent)
 	assert.Equal(t, "warning", result.Message.Kind)
@@ -90,9 +92,17 @@ func TestApplyBlockedTaskOutcomeBlocksAndReplans(t *testing.T) {
 	recordTitles := []string{records[0].Title, records[1].Title}
 	assert.Contains(t, recordTitles, "follow up")
 	assert.Contains(t, recordTitles, "verify follow up")
+	difficultyByTitle := map[string]string{}
+	rationaleByTitle := map[string]string{}
 	for _, record := range records {
 		assert.Equal(t, agentcontrol.WorkflowSpawnTeam, record.Workflow)
+		difficultyByTitle[record.Title] = record.Difficulty
+		rationaleByTitle[record.Title] = record.DifficultyRationale
 	}
+	assert.Equal(t, TaskDifficultyHard, difficultyByTitle["follow up"])
+	assert.Equal(t, "Recovery changes shared plan.", rationaleByTitle["follow up"])
+	assert.Equal(t, TaskDifficultyNormal, difficultyByTitle["verify follow up"])
+	assert.Equal(t, "Check replan result.", rationaleByTitle["verify follow up"])
 	deps, err := store.ListTaskDependencies(ctx, result.PlanResult.Dependencies[0].TaskID)
 	require.NoError(t, err)
 	require.Equal(t, []string{result.PlanResult.Dependencies[0].DependsOnID}, deps)

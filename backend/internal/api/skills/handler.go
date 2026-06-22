@@ -126,6 +126,7 @@ type Handler struct {
 	runtimeConfig                  *runtimecfg.RuntimeConfig
 	runtimeConfigFile              string
 	runtimeConfigResolver          func(UsageScope) *runtimecfg.RuntimeConfig
+	aicliConfig                    *agentconfig.Config
 	configDocumentService          ConfigDocumentService
 	serviceControlService          RuntimeServiceControlService
 	fileTransferService            FileTransferService
@@ -338,6 +339,19 @@ func NewHandler(
 // SetLLMRuntime 设置 LLM Runtime
 func (h *Handler) SetLLMRuntime(runtime *llm.LLMRuntime) {
 	h.llmRuntime = runtime
+}
+
+// SetAICLIConfig stores the user-facing aicli config for runtime-server
+// behavior that is intentionally outside the skills runtime config.
+func (h *Handler) SetAICLIConfig(config *agentconfig.Config) {
+	h.aicliConfig = config
+}
+
+func (h *Handler) subagentRoutingConfig() *agentconfig.AICLISubagentRoutingConfig {
+	if h == nil || h.aicliConfig == nil || h.aicliConfig.AICLI == nil || h.aicliConfig.AICLI.Subagents == nil {
+		return nil
+	}
+	return h.aicliConfig.AICLI.Subagents.Routing
 }
 
 // SetSessionManager 设置 Session Manager
@@ -2975,6 +2989,9 @@ func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntim
 	} else {
 		apiAgent = agent.NewAgent(cfg, mcpManager)
 	}
+	apiAgent.SetSubagentScheduler(agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
+		Routing: h.subagentRoutingConfig(),
+	}))
 
 	if registry != nil {
 		for _, summary := range registry.ListSummaries() {

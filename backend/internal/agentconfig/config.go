@@ -350,6 +350,7 @@ type AICLIConfig struct {
 	Chat       *AICLIChatConfig       `yaml:"chat" mapstructure:"chat"`
 	Runtime    *AICLIRuntimeConfig    `yaml:"runtime" mapstructure:"runtime"`
 	ModelCards *AICLIModelCardsConfig `yaml:"model_cards" mapstructure:"model_cards"`
+	Subagents  *AICLISubagentsConfig  `yaml:"subagents" mapstructure:"subagents"`
 }
 
 // AICLIMCPConfig holds aicli MCP configuration.
@@ -403,6 +404,41 @@ type AICLIModelCardsConfig struct {
 	BuiltinPath string `yaml:"builtin_path" mapstructure:"builtin_path"`
 	UserPath    string `yaml:"user_path" mapstructure:"user_path"`
 	Strict      bool   `yaml:"strict" mapstructure:"strict"`
+}
+
+// AICLISubagentsConfig holds subagent execution preferences.
+type AICLISubagentsConfig struct {
+	Routing *AICLISubagentRoutingConfig `yaml:"routing" mapstructure:"routing"`
+}
+
+// AICLISubagentRoutingConfig maps subtask difficulty and role to model routes.
+type AICLISubagentRoutingConfig struct {
+	Enabled                        *bool                                           `yaml:"enabled" mapstructure:"enabled"`
+	CompatibilityMode              string                                          `yaml:"compatibility_mode" mapstructure:"compatibility_mode"`
+	DefaultDifficulty              string                                          `yaml:"default_difficulty" mapstructure:"default_difficulty"`
+	AllowExplicitProviderOverride  bool                                            `yaml:"allow_explicit_provider_override" mapstructure:"allow_explicit_provider_override"`
+	AllowExplicitModelOverride     bool                                            `yaml:"allow_explicit_model_override" mapstructure:"allow_explicit_model_override"`
+	AllowExplicitReasoningOverride bool                                            `yaml:"allow_explicit_reasoning_override" mapstructure:"allow_explicit_reasoning_override"`
+	AllowedProviderOverrides       []string                                        `yaml:"allowed_provider_overrides" mapstructure:"allowed_provider_overrides"`
+	AllowedModelOverrides          []string                                        `yaml:"allowed_model_overrides" mapstructure:"allowed_model_overrides"`
+	InheritParentWhenMissing       *bool                                           `yaml:"inherit_parent_when_missing" mapstructure:"inherit_parent_when_missing"`
+	ValidateModelCapabilities      *bool                                           `yaml:"validate_model_capabilities" mapstructure:"validate_model_capabilities"`
+	UnsupportedReasoningPolicy     string                                          `yaml:"unsupported_reasoning_policy" mapstructure:"unsupported_reasoning_policy"`
+	OnReasoningUnsupported         string                                          `yaml:"on_reasoning_unsupported" mapstructure:"on_reasoning_unsupported"`
+	MaxExpertConcurrency           int                                             `yaml:"max_expert_concurrency" mapstructure:"max_expert_concurrency"`
+	Levels                         map[string]AICLISubagentRouteProfile            `yaml:"levels" mapstructure:"levels"`
+	Roles                          map[string]map[string]AICLISubagentRouteProfile `yaml:"roles" mapstructure:"roles"`
+}
+
+// AICLISubagentRouteProfile defines the runtime settings for one route.
+type AICLISubagentRouteProfile struct {
+	Provider        string        `yaml:"provider,omitempty" mapstructure:"provider"`
+	Model           string        `yaml:"model,omitempty" mapstructure:"model"`
+	ReasoningEffort string        `yaml:"reasoning_effort,omitempty" mapstructure:"reasoning_effort"`
+	ThinkingEffort  string        `yaml:"thinking_effort,omitempty" mapstructure:"thinking_effort"`
+	MaxTokens       int           `yaml:"max_tokens,omitempty" mapstructure:"max_tokens"`
+	Timeout         time.Duration `yaml:"timeout,omitempty" mapstructure:"timeout"`
+	Temperature     *float64      `yaml:"temperature,omitempty" mapstructure:"temperature"`
 }
 
 // ProfilesConfig holds profile topology configuration.
@@ -765,6 +801,9 @@ func InitGlobalConfig(configPath string) (*Config, error) {
 			if err := unmarshalYAML(data, cfg); err != nil {
 				return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
 			}
+			if err := validateLoadedConfig(cfg); err != nil {
+				return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
+			}
 		}
 	}
 	cfg.ConfigFilePath = configPath
@@ -802,6 +841,137 @@ func expandEnvVars(content string) string {
 		}
 		return match
 	})
+}
+
+func validateLoadedConfig(cfg *Config) error {
+	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.Subagents == nil || cfg.AICLI.Subagents.Routing == nil {
+		return nil
+	}
+	return validateSubagentRoutingConfig(cfg.AICLI.Subagents.Routing)
+}
+
+func validateSubagentRoutingConfig(cfg *AICLISubagentRoutingConfig) error {
+	if cfg == nil || cfg.Enabled == nil || !*cfg.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.CompatibilityMode) != "" {
+		if _, ok := normalizeSubagentCompatibilityMode(cfg.CompatibilityMode); !ok {
+			return fmt.Errorf("invalid aicli.subagents.routing.compatibility_mode %q", cfg.CompatibilityMode)
+		}
+	}
+	if strings.TrimSpace(cfg.DefaultDifficulty) != "" {
+		if _, ok := normalizeSubagentDifficulty(cfg.DefaultDifficulty); !ok {
+			return fmt.Errorf("invalid aicli.subagents.routing.default_difficulty %q", cfg.DefaultDifficulty)
+		}
+	}
+	if strings.TrimSpace(cfg.UnsupportedReasoningPolicy) != "" {
+		if _, ok := normalizeSubagentUnsupportedReasoningPolicy(cfg.UnsupportedReasoningPolicy); !ok {
+			return fmt.Errorf("invalid aicli.subagents.routing.unsupported_reasoning_policy %q", cfg.UnsupportedReasoningPolicy)
+		}
+	}
+	if strings.TrimSpace(cfg.OnReasoningUnsupported) != "" {
+		if _, ok := normalizeSubagentUnsupportedReasoningPolicy(cfg.OnReasoningUnsupported); !ok {
+			return fmt.Errorf("invalid aicli.subagents.routing.on_reasoning_unsupported %q", cfg.OnReasoningUnsupported)
+		}
+	}
+	for key, profile := range cfg.Levels {
+		difficulty, ok := normalizeSubagentDifficulty(key)
+		if !ok {
+			return fmt.Errorf("invalid aicli.subagents.routing.levels key %q", key)
+		}
+		if err := validateSubagentRouteProfile("levels."+difficulty, profile, cfg); err != nil {
+			return err
+		}
+	}
+	for role, levels := range cfg.Roles {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			return fmt.Errorf("aicli.subagents.routing.roles key cannot be empty")
+		}
+		for key, profile := range levels {
+			difficulty, ok := normalizeSubagentDifficulty(key)
+			if !ok {
+				return fmt.Errorf("invalid aicli.subagents.routing.roles.%s key %q", role, key)
+			}
+			if err := validateSubagentRouteProfile("roles."+role+"."+difficulty, profile, cfg); err != nil {
+				return err
+			}
+		}
+	}
+	if cfg.MaxExpertConcurrency < 0 {
+		return fmt.Errorf("aicli.subagents.routing.max_expert_concurrency cannot be negative")
+	}
+	return nil
+}
+
+func validateSubagentRouteProfile(label string, profile AICLISubagentRouteProfile, cfg *AICLISubagentRoutingConfig) error {
+	if profile.MaxTokens < 0 {
+		return fmt.Errorf("aicli.subagents.routing.%s.max_tokens cannot be negative", label)
+	}
+	if profile.Timeout < 0 {
+		return fmt.Errorf("aicli.subagents.routing.%s.timeout cannot be negative", label)
+	}
+	if !subagentRoutingInheritParentWhenMissing(cfg) && (strings.TrimSpace(profile.Provider) == "" || strings.TrimSpace(profile.Model) == "") {
+		return fmt.Errorf("aicli.subagents.routing.%s must set provider and model when inherit_parent_when_missing=false", label)
+	}
+	return nil
+}
+
+func subagentRoutingInheritParentWhenMissing(cfg *AICLISubagentRoutingConfig) bool {
+	if cfg == nil || cfg.InheritParentWhenMissing == nil {
+		return true
+	}
+	return *cfg.InheritParentWhenMissing
+}
+
+func normalizeSubagentCompatibilityMode(raw string) (string, bool) {
+	key := strings.ToLower(strings.TrimSpace(raw))
+	if key == "" {
+		return "permissive", true
+	}
+	switch key {
+	case "permissive", "strict":
+		return key, true
+	default:
+		return "", false
+	}
+}
+
+func normalizeSubagentUnsupportedReasoningPolicy(raw string) (string, bool) {
+	key := strings.ToLower(strings.TrimSpace(raw))
+	if key == "" {
+		return "ignore", true
+	}
+	switch key {
+	case "ignore", "warn", "clear":
+		return "ignore", true
+	case "downgrade":
+		return "downgrade", true
+	case "fail", "reject":
+		return "fail", true
+	default:
+		return "", false
+	}
+}
+
+func normalizeSubagentDifficulty(raw string) (string, bool) {
+	key := strings.ToLower(strings.TrimSpace(raw))
+	if key == "" {
+		return "", false
+	}
+	key = strings.NewReplacer("-", "_", " ", "_").Replace(key)
+	switch key {
+	case "easy", "simple", "low", "trivial":
+		return "easy", true
+	case "normal", "medium", "standard", "default":
+		return "normal", true
+	case "hard", "complex", "high", "difficult":
+		return "hard", true
+	case "expert", "critical", "very_hard", "architectural":
+		return "expert", true
+	default:
+		return "", false
+	}
 }
 
 func unmarshalYAML(data []byte, v interface{}) error {

@@ -896,6 +896,9 @@ func composeChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd string)
 	if guidance := strings.TrimSpace(runtimeprompt.RenderParallelToolGuidance()); guidance != "" {
 		lines = append(lines, guidance)
 	}
+	if guidance := strings.TrimSpace(runtimeprompt.RenderTaskDifficultyGuidance()); guidance != "" {
+		lines = append(lines, guidance)
+	}
 	if guidance := strings.TrimSpace(renderActiveGoalGuidance(session)); guidance != "" {
 		lines = append(lines, guidance)
 	}

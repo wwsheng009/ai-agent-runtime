@@ -86,7 +86,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/debug",
-			Usage:       "/debug [on|off|status|display|export|zip]",
+			Usage:       "/debug [on|off|status|display|routing|export|zip]",
 			Summary:     "控制 debug 模式、显示当前会话调试信息或打包调试文件",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
@@ -95,6 +95,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "off", Summary: "关闭会话 debug 模式"},
 				{Token: "status", Summary: "查看会话 debug 模式状态"},
 				{Token: "display", Summary: "显示当前会话调试信息"},
+				{Token: "routing", Summary: "显示 subagent routing 配置摘要"},
 				{Token: "export", Summary: "将当前会话日志与 artifact 打包为 zip"},
 				{Token: "--output", Summary: "指定 zip 输出文件"},
 				{Token: "--dir", Summary: "指定 zip 输出目录"},
@@ -102,7 +103,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/agents",
-			Usage:       "/agents [panel [follow|target <target>|next|prev]|pick|target <target>|send [target] <message>|followup [target] <message>]",
+			Usage:       "/agents [panel [follow|target <target>|next|prev]|pick|target <target>|send [target] <message>|followup [target] <message>|routing test --role <role> --difficulty <level>]",
 			Summary:     "显示、选择或发送 agent 协作消息",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
@@ -127,6 +128,8 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "send", Summary: "向目标 agent 投递 mailbox 消息"},
 				{Token: "followup", Summary: "向目标 agent 投递或触发 follow-up task"},
 				{Token: "task", Summary: "followup 的别名"},
+				{Token: "routing", Summary: "预览 subagent difficulty route"},
+				{Token: "test", Summary: "routing test 子命令"},
 			},
 		},
 		{

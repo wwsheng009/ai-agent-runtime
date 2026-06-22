@@ -20,14 +20,43 @@ type TaskTriggerClient interface {
 	TriggerTask(ctx context.Context, request TaskTriggerRequest) (*SessionResult, error)
 }
 
+// TaskRouteResolver optionally resolves a per-task execution route for a teammate run.
+type TaskRouteResolver interface {
+	ResolveTaskRoute(ctx context.Context, request TaskRouteRequest) (*TaskRouteResolution, error)
+}
+
+// TaskRouteAuditSink optionally records route decisions and failures.
+type TaskRouteAuditSink interface {
+	RecordTaskRouteAudit(ctx context.Context, audit TaskRouteAudit) error
+}
+
+// TaskRouteRequest contains the inputs needed to resolve a teammate task route.
+type TaskRouteRequest struct {
+	Team      Team
+	Teammate  Teammate
+	Task      Task
+	Attempt   int
+	SessionID string
+}
+
+// TaskRouteResolution is the result of route resolution.
+type TaskRouteResolution struct {
+	Route    *TaskExecutionRoute
+	Disabled bool
+	Strict   bool
+}
+
 // TaskTriggerRequest describes a teammate task dispatch.
 type TaskTriggerRequest struct {
-	SessionID string
-	TeamID    string
-	AgentID   string
-	TaskID    string
-	Prompt    string
-	RunMeta   *RunMeta
+	SessionID           string
+	TeamID              string
+	AgentID             string
+	TaskID              string
+	Difficulty          string
+	DifficultyRationale string
+	Route               *TaskExecutionRoute
+	Prompt              string
+	RunMeta             *RunMeta
 }
 
 // SessionResult captures the outcome of a session prompt.
@@ -58,6 +87,7 @@ type TaskRunResult struct {
 	HandoffTo      string
 	Structured     bool
 	ProtocolError  string
+	Route          *TaskExecutionRoute
 }
 
 // TeammateRunner drives task execution through existing sessions.
@@ -66,6 +96,8 @@ type TeammateRunner struct {
 	AgentControl      TaskTriggerClient
 	Mailbox           *MailboxService
 	Context           *ContextBuilder
+	RouteResolver     TaskRouteResolver
+	RouteAudit        TaskRouteAuditSink
 	ContextBudget     int
 	DigestLimit       int
 	HeartbeatInterval time.Duration
@@ -90,6 +122,13 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 	}
 	stopHeartbeat := r.startHeartbeatLoop(ctx, mate.ID)
 	defer stopHeartbeat()
+
+	route, strictRouteFailure, routeErr := r.resolveTaskRoute(ctx, team, mate, task)
+	if strictRouteFailure {
+		run := buildStrictRouteFailureResult(route, routeErr)
+		r.recoverStructuredTaskOutcome(ctx, strings.TrimSpace(task.ID), run)
+		return run, nil
+	}
 
 	digest := ""
 	if r.Mailbox != nil {
@@ -129,7 +168,7 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 		}
 		cancel()
 	}
-	prompt := buildTaskPrompt(teamID, mate.Name, task, digest, teamContext)
+	prompt := buildTaskPrompt(teamID, mate.Name, task, digest, teamContext, route)
 	runMeta := &RunMeta{
 		PermissionMode: "bypass_permissions",
 		Team: &TeamRunMeta{
@@ -138,13 +177,17 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 			CurrentTaskID: strings.TrimSpace(task.ID),
 		},
 	}
+	applyRouteToTeamRunMeta(runMeta.Team, route)
 	result, err := r.triggerTask(ctx, TaskTriggerRequest{
-		SessionID: strings.TrimSpace(mate.SessionID),
-		TeamID:    teamID,
-		AgentID:   strings.TrimSpace(mate.ID),
-		TaskID:    strings.TrimSpace(task.ID),
-		Prompt:    prompt,
-		RunMeta:   runMeta,
+		SessionID:           strings.TrimSpace(mate.SessionID),
+		TeamID:              teamID,
+		AgentID:             strings.TrimSpace(mate.ID),
+		TaskID:              strings.TrimSpace(task.ID),
+		Difficulty:          strings.TrimSpace(task.Difficulty),
+		DifficultyRationale: strings.TrimSpace(task.DifficultyRationale),
+		Route:               route.Clone(),
+		Prompt:              prompt,
+		RunMeta:             runMeta,
 	})
 	if err != nil {
 		run := buildTaskRunResult(result)
@@ -158,6 +201,7 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 		if strings.TrimSpace(run.Summary) == "" {
 			run.Summary = truncateLine(firstNonEmptyString(run.Error, err.Error()), 240)
 		}
+		run.Route = route.Clone()
 		r.recoverStructuredTaskOutcome(ctx, strings.TrimSpace(task.ID), run)
 		return run, err
 	}
@@ -169,6 +213,7 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 	}
 
 	run := buildTaskRunResult(result)
+	run.Route = route.Clone()
 	applyObservedTaskOutcome(run, result.Observations)
 	if !run.OutcomeApplied {
 		applyStructuredTaskOutcome(run, run.Output)
@@ -185,6 +230,128 @@ func (r *TeammateRunner) triggerTask(ctx context.Context, request TaskTriggerReq
 		return nil, fmt.Errorf("teammate runner agent control is not configured")
 	}
 	return r.Sessions.SubmitPrompt(ctx, request.SessionID, request.Prompt, request.RunMeta)
+}
+
+func (r *TeammateRunner) resolveTaskRoute(ctx context.Context, team Team, mate Teammate, task Task) (*TaskExecutionRoute, bool, error) {
+	if r == nil || r.RouteResolver == nil {
+		return nil, false, nil
+	}
+	attempt := task.RetryCount + 1
+	if attempt <= 0 {
+		attempt = 1
+	}
+	resolution, err := r.RouteResolver.ResolveTaskRoute(ctx, TaskRouteRequest{
+		Team:      team,
+		Teammate:  mate,
+		Task:      task,
+		Attempt:   attempt,
+		SessionID: strings.TrimSpace(mate.SessionID),
+	})
+	route := (*TaskExecutionRoute)(nil)
+	disabled := false
+	strict := false
+	if resolution != nil {
+		route = normalizeTaskExecutionRoute(resolution.Route, task, attempt)
+		disabled = resolution.Disabled
+		strict = resolution.Strict
+	}
+	if disabled {
+		route = nil
+	}
+	if err != nil && strict {
+		route = normalizeTaskExecutionRoute(route, task, attempt)
+		if route == nil {
+			route = &TaskExecutionRoute{}
+		}
+		route.Error = truncateLine(err.Error(), 240)
+		if route.ResolvedAt.IsZero() {
+			route.ResolvedAt = time.Now().UTC()
+		}
+	}
+	r.recordTaskRouteAudit(ctx, team, mate, task, route, disabled, strict, err)
+	return route, err != nil && strict, err
+}
+
+func normalizeTaskExecutionRoute(route *TaskExecutionRoute, task Task, attempt int) *TaskExecutionRoute {
+	if route == nil {
+		return nil
+	}
+	clone := route.Clone()
+	if strings.TrimSpace(clone.Difficulty) == "" {
+		clone.Difficulty = strings.TrimSpace(task.Difficulty)
+	}
+	if strings.TrimSpace(clone.DifficultyRationale) == "" {
+		clone.DifficultyRationale = strings.TrimSpace(task.DifficultyRationale)
+	}
+	if clone.Attempt <= 0 {
+		clone.Attempt = attempt
+	}
+	if clone.ResolvedAt.IsZero() {
+		clone.ResolvedAt = time.Now().UTC()
+	}
+	return clone
+}
+
+func (r *TeammateRunner) recordTaskRouteAudit(ctx context.Context, team Team, mate Teammate, task Task, route *TaskExecutionRoute, disabled, strict bool, routeErr error) {
+	if r == nil || r.RouteAudit == nil {
+		return
+	}
+	audit := TaskRouteAudit{
+		TeamID:     firstNonEmptyString(strings.TrimSpace(team.ID), strings.TrimSpace(task.TeamID)),
+		AgentID:    strings.TrimSpace(mate.ID),
+		TaskID:     strings.TrimSpace(task.ID),
+		SessionID:  strings.TrimSpace(mate.SessionID),
+		Route:      route.Clone(),
+		Strict:     strict,
+		Disabled:   disabled,
+		RecordedAt: time.Now().UTC(),
+	}
+	if routeErr != nil {
+		audit.Error = truncateLine(routeErr.Error(), 240)
+	}
+	if err := r.RouteAudit.RecordTaskRouteAudit(ctx, audit); err != nil {
+		logger.Debug("teammate runner: route audit skipped",
+			logger.String("task_id", strings.TrimSpace(task.ID)),
+			logger.String("error", err.Error()),
+		)
+	}
+}
+
+func applyRouteToTeamRunMeta(meta *TeamRunMeta, route *TaskExecutionRoute) {
+	if meta == nil || route == nil {
+		return
+	}
+	meta.Difficulty = strings.TrimSpace(route.Difficulty)
+	meta.DifficultySource = strings.TrimSpace(route.DifficultySource)
+	meta.DifficultyRationale = strings.TrimSpace(route.DifficultyRationale)
+	meta.RouteProvider = strings.TrimSpace(route.Provider)
+	meta.RouteModel = strings.TrimSpace(route.Model)
+	meta.RouteReasoningEffort = strings.TrimSpace(route.ReasoningEffort)
+	meta.RouteSource = strings.TrimSpace(route.Source)
+	meta.RouteWarnings = append([]string(nil), route.Warnings...)
+	meta.RouteFallbackUsed = route.FallbackUsed
+	meta.RouteFallbackReason = strings.TrimSpace(route.FallbackReason)
+}
+
+func buildStrictRouteFailureResult(route *TaskExecutionRoute, routeErr error) *TaskRunResult {
+	message := "task route resolution failed"
+	if routeErr != nil && strings.TrimSpace(routeErr.Error()) != "" {
+		message = truncateLine(routeErr.Error(), 240)
+	} else if route != nil && strings.TrimSpace(route.Error) != "" {
+		message = truncateLine(route.Error, 240)
+	}
+	return &TaskRunResult{
+		Success:        true,
+		Summary:        message,
+		Error:          message,
+		ErrorType:      "task_route_resolution",
+		Blocked:        true,
+		Outcome:        TaskOutcomeBlocked,
+		OutcomeApplied: true,
+		Blocker:        message,
+		Structured:     true,
+		Route:          route.Clone(),
+	}
 }
 
 func (r *TeammateRunner) startHeartbeatLoop(ctx context.Context, teammateID string) func() {
@@ -237,7 +404,7 @@ func (r *TeammateRunner) resolveStore() Store {
 	return nil
 }
 
-func buildTaskPrompt(teamID, teammateName string, task Task, mailboxDigest string, teamContext string) string {
+func buildTaskPrompt(teamID, teammateName string, task Task, mailboxDigest string, teamContext string, route *TaskExecutionRoute) string {
 	teammateName = strings.TrimSpace(teammateName)
 	if teammateName == "" {
 		teammateName = "teammate"
@@ -253,6 +420,12 @@ func buildTaskPrompt(teamID, teammateName string, task Task, mailboxDigest strin
 		fmt.Sprintf("- Task ID: %s", strings.TrimSpace(task.ID)),
 		fmt.Sprintf("- Title: %s", firstNonEmptyString(title, task.ID)),
 		fmt.Sprintf("- Goal: %s", strings.TrimSpace(task.Goal)),
+	}
+	if difficulty := strings.TrimSpace(task.Difficulty); difficulty != "" {
+		lines = append(lines, fmt.Sprintf("- Difficulty: %s", difficulty))
+	}
+	if rationale := strings.TrimSpace(task.DifficultyRationale); rationale != "" {
+		lines = append(lines, fmt.Sprintf("- Difficulty rationale: %s", rationale))
 	}
 	if len(task.Inputs) > 0 {
 		lines = append(lines, fmt.Sprintf("- Inputs: %s", strings.Join(task.Inputs, ", ")))
@@ -281,6 +454,30 @@ func buildTaskPrompt(teamID, teammateName string, task Task, mailboxDigest strin
 	lines = append(lines, "- If blocked, send a mailbox message to the lead.")
 	lines = append(lines, "- Prefer report_task_outcome for done/failed/blocked/handoff outcomes; block_current_task is a compatibility alias for blocked or handoff.")
 	lines = append(lines, TaskOutcomePromptLines(TaskOutcomeDone, TaskOutcomeFailed, TaskOutcomeBlocked, TaskOutcomeHandoff)...)
+	if route != nil {
+		lines = append(lines, "", "Runtime routing:")
+		if provider := strings.TrimSpace(route.Provider); provider != "" {
+			lines = append(lines, fmt.Sprintf("- Provider: %s", provider))
+		}
+		if model := strings.TrimSpace(route.Model); model != "" {
+			lines = append(lines, fmt.Sprintf("- Model: %s", model))
+		}
+		if effort := strings.TrimSpace(route.ReasoningEffort); effort != "" {
+			lines = append(lines, fmt.Sprintf("- Reasoning effort: %s", effort))
+		}
+		if source := strings.TrimSpace(route.Source); source != "" {
+			lines = append(lines, fmt.Sprintf("- Route source: %s", source))
+		}
+		if reason := strings.TrimSpace(route.FallbackReason); reason != "" {
+			lines = append(lines, fmt.Sprintf("- Fallback reason: %s", reason))
+		}
+		if len(route.Warnings) > 0 {
+			lines = append(lines, fmt.Sprintf("- Route warnings: %s", strings.Join(route.Warnings, "; ")))
+		}
+		if route.FallbackUsed {
+			lines = append(lines, "- Fallback used: true")
+		}
+	}
 
 	if strings.TrimSpace(mailboxDigest) != "" {
 		lines = append(lines, "", "Mailbox digest:", mailboxDigest)

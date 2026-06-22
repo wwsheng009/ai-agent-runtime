@@ -431,16 +431,18 @@ func TestBrokerExecuteReadTaskSpecUsesCurrentTaskRunMeta(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, team.Team{})
 	require.NoError(t, err)
 	taskID, err := store.CreateTask(ctx, team.Task{
-		TeamID:       teamID,
-		Title:        "fix-team-gap",
-		Goal:         "wire toolbroker",
-		Inputs:       []string{"analysis.md"},
-		ReadPaths:    []string{"internal/runtime/toolbroker"},
-		WritePaths:   []string{"internal/team"},
-		Deliverables: []string{"tests"},
-		Status:       team.TaskStatusRunning,
-		Priority:     3,
-		Summary:      "in progress",
+		TeamID:              teamID,
+		Title:               "fix-team-gap",
+		Goal:                "wire toolbroker",
+		Difficulty:          team.TaskDifficultyExpert,
+		DifficultyRationale: "Touches shared team execution state.",
+		Inputs:              []string{"analysis.md"},
+		ReadPaths:           []string{"internal/runtime/toolbroker"},
+		WritePaths:          []string{"internal/team"},
+		Deliverables:        []string{"tests"},
+		Status:              team.TaskStatusRunning,
+		Priority:            3,
+		Summary:             "in progress",
 	})
 	require.NoError(t, err)
 
@@ -462,6 +464,8 @@ func TestBrokerExecuteReadTaskSpecUsesCurrentTaskRunMeta(t *testing.T) {
 	assert.Equal(t, teamID, result.TeamID)
 	assert.Equal(t, "fix-team-gap", result.Title)
 	assert.Equal(t, "wire toolbroker", result.Goal)
+	assert.Equal(t, team.TaskDifficultyExpert, result.Difficulty)
+	assert.Equal(t, "Touches shared team execution state.", result.DifficultyRationale)
 	assert.Equal(t, []string{"analysis.md"}, result.Inputs)
 	assert.Equal(t, []string{"internal/runtime/toolbroker"}, result.ReadPaths)
 	assert.Equal(t, []string{"internal/team"}, result.WritePaths)
@@ -987,9 +991,11 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 		},
 		"tasks": []interface{}{
 			map[string]interface{}{
-				"id":    "task-1",
-				"title": "draft plan",
-				"goal":  "create task plan",
+				"id":                   "task-1",
+				"title":                "draft plan",
+				"goal":                 "create task plan",
+				"difficulty":           "HARD",
+				"difficulty_rationale": "Touches routing-sensitive planning.",
 			},
 			map[string]interface{}{
 				"title": "execute steps",
@@ -1021,6 +1027,11 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Len(t, tasks, 2)
+	task1, err := store.GetTask(ctx, "task-1")
+	require.NoError(t, err)
+	require.NotNil(t, task1)
+	assert.Equal(t, team.TaskDifficultyHard, task1.Difficulty)
+	assert.Equal(t, "Touches routing-sensitive planning.", task1.DifficultyRationale)
 
 	records, err := team.NewAgentControlTaskRegistry(store).ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
 		Workflow: agentcontrol.WorkflowSpawnTeam,
@@ -1028,7 +1039,31 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, records, 2)
-	assert.Equal(t, agentcontrol.WorkflowSpawnTeam, records[0].Workflow)
+	var taskRecord *agentcontrol.TaskRecord
+	for index := range records {
+		if records[index].ID == "task-1" {
+			taskRecord = &records[index]
+			break
+		}
+	}
+	require.NotNil(t, taskRecord)
+	assert.Equal(t, agentcontrol.WorkflowSpawnTeam, taskRecord.Workflow)
+	assert.Equal(t, team.TaskDifficultyHard, taskRecord.Difficulty)
+	assert.Equal(t, "Touches routing-sensitive planning.", taskRecord.DifficultyRationale)
+
+	runCtx := team.WithRunMeta(ctx, &team.RunMeta{
+		Team: &team.TeamRunMeta{
+			TeamID:        "team-auto",
+			AgentID:       "mate-a",
+			CurrentTaskID: "task-1",
+		},
+	})
+	rawSpec, _, err := broker.Execute(runCtx, "session-1", ToolReadTaskSpec, map[string]interface{}{})
+	require.NoError(t, err)
+	spec, ok := rawSpec.(ReadTaskSpecResult)
+	require.True(t, ok)
+	assert.Equal(t, team.TaskDifficultyHard, spec.Difficulty)
+	assert.Equal(t, "Touches routing-sensitive planning.", spec.DifficultyRationale)
 }
 
 func TestBrokerExecuteSpawnTeamAcceptsJSONStringTeammatesAndTasks(t *testing.T) {
@@ -1040,7 +1075,7 @@ func TestBrokerExecuteSpawnTeamAcceptsJSONStringTeammatesAndTasks(t *testing.T) 
 		"team_id":    "team-json-args",
 		"auto_start": false,
 		"teammates":  `[{"id":"mate-a","name":"planner"},{"id":"mate-b","name":"reviewer"}]`,
-		"tasks":      `[{"id":"task-1","title":"draft plan","goal":"create task plan","assignee":"mate-a"},{"id":"task-2","title":"review plan","goal":"review task plan","assignee":"mate-b","depends_on":["task-1"]}]`,
+		"tasks":      `[{"id":"task-1","title":"draft plan","goal":"create task plan","assignee":"mate-a","difficulty":"hard","difficulty_rationale":"JSON task metadata path."},{"id":"task-2","title":"review plan","goal":"review task plan","assignee":"mate-b","depends_on":["task-1"]}]`,
 	})
 	require.NoError(t, err)
 
@@ -1061,10 +1096,61 @@ func TestBrokerExecuteSpawnTeamAcceptsJSONStringTeammatesAndTasks(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, task1)
 	assert.Equal(t, "create task plan", task1.Goal)
+	assert.Equal(t, team.TaskDifficultyHard, task1.Difficulty)
+	assert.Equal(t, "JSON task metadata path.", task1.DifficultyRationale)
+
+	runCtx := team.WithRunMeta(ctx, &team.RunMeta{
+		Team: &team.TeamRunMeta{
+			TeamID:        "team-json-args",
+			AgentID:       "mate-a",
+			CurrentTaskID: "task-1",
+		},
+	})
+	rawSpec, _, err := broker.Execute(runCtx, "session-1", ToolReadTaskSpec, map[string]interface{}{})
+	require.NoError(t, err)
+	spec, ok := rawSpec.(ReadTaskSpecResult)
+	require.True(t, ok)
+	assert.Equal(t, team.TaskDifficultyHard, spec.Difficulty)
+	assert.Equal(t, "JSON task metadata path.", spec.DifficultyRationale)
 
 	deps, err := store.ListTaskDependencies(ctx, "task-2")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"task-1"}, deps)
+}
+
+func TestBrokerExecuteSpawnTeamRejectsInvalidTaskDifficulty(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	broker := &Broker{TeamStore: store}
+
+	_, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+		"team_id": "team-invalid-difficulty",
+		"tasks": []interface{}{
+			map[string]interface{}{
+				"id":         "task-invalid-difficulty",
+				"title":      "bad difficulty",
+				"difficulty": "extreme",
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid task difficulty")
+}
+
+func TestBrokerExecuteSpawnTeamRejectsDuplicateTaskIDs(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	broker := &Broker{TeamStore: store}
+
+	_, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+		"team_id": "team-duplicate-task",
+		"tasks": []interface{}{
+			map[string]interface{}{"id": "task-1", "title": "first task"},
+			map[string]interface{}{"id": "task-1", "title": "second task"},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `duplicate spawn_team task id "task-1"`)
 }
 
 func TestBrokerExecuteSpawnTeamProjectsTeammatesImmediately(t *testing.T) {

@@ -327,7 +327,7 @@ aicli --help
 | `/new` | 创建新会话 |
 | `/session` | 显示当前会话信息 |
 | `/status` | 显示当前会话状态 |
-| `/debug [on|off|status|display|export|zip]` | 控制会话 debug 模式；`display` 显示当前会话调试信息，`export/zip` 打包会话日志与 artifacts |
+| `/debug [on|off|status|display|routing|export|zip]` | 控制会话 debug 模式；`routing` 显示 subagent difficulty routing 摘要，`display` 显示当前会话调试信息，`export/zip` 打包会话日志与 artifacts |
 | `/title <title>` | 更新当前会话标题 |
 | `/history`、`/h` | 显示当前会话历史 |
 | `/stream [on|off|toggle|status]` | 查看或切换流式输出 |
@@ -352,7 +352,7 @@ aicli --help
 | `/load <session-id>` | 加载指定会话 |
 | `/resume [latest|<session-id>]` | 恢复最近会话或指定会话；无参数时显示可恢复会话选择器 |
 | `/export [current|latest|<session-id>] [--full|--body]` | 导出当前或历史会话；完整 JSON 保留 tool_calls、tool 结果和 metadata，正文模式输出 Markdown |
-| `/agents [panel|pick|target|send|followup]` | 查看 agent tree、选择默认 agent target、向 child agent 投递消息或 follow-up |
+| `/agents [panel|pick|target|send|followup|routing]` | 查看 agent tree、选择默认 agent target、向 child agent 投递消息或 follow-up；`/agents routing test` 可 dry-run 子 agent 路由 |
 | `/timeline [team|active] [limit] [filter=<text>]` | 查看 active team 或指定 team 的持久事件时间线 |
 | `/collab [follow] [target|selected|parent|all] [limit] [filter=<text>] [timeout=10s]` | 查看 parent/child/team teammate 的 mailbox/collab 时间线 |
 | `/shell <command>`、`/cmd <command>` | 执行 shell 命令并把输出分享给 AI |
@@ -373,6 +373,69 @@ aicli --help
 - builtin `execute_shell_command` function 支持 `command`、`workdir`、`output_bytes_cap`、`disable_output_cap`；Windows PowerShell/pwsh 下不要把 POSIX-only 命令如 `head` 当默认可用命令。
 - background toolbroker 能力包括 `background_task` 和 `task_output`；HTTP 观测入口见 `docs/skill_runtime/runtime_operations_api.md` 的 Background Jobs 章节。
 - 当 `aicli.mcp.auto_connect=false` 且 `config_file` 不存在时，chat 会跳过 MCP 初始化，不再为缺失的默认 `configs/mcp.yaml` 打印 warning。
+
+### 子 agent difficulty routing
+
+`aicli` 支持通过 `aicli.subagents.routing` 按子任务难度为子 agent 选择 provider、model 和 `reasoning_effort`。主会话模型仍由 `/model` 与 `aicli.chat` 控制；difficulty routing 只作用于子 agent 执行面。
+
+最小配置示例：
+
+```yaml
+aicli:
+  subagents:
+    routing:
+      enabled: false
+      default_difficulty: normal
+      inherit_parent_when_missing: true
+      validate_model_capabilities: true
+      unsupported_reasoning_policy: ignore
+      max_expert_concurrency: 1
+```
+
+开启后可配置不同难度的 route：
+
+```yaml
+aicli:
+  subagents:
+    routing:
+      enabled: true
+      default_difficulty: normal
+      allow_explicit_provider_override: false
+      allow_explicit_model_override: true
+      allow_explicit_reasoning_override: false
+      unsupported_reasoning_policy: downgrade
+      levels:
+        easy:
+          provider: local_fast
+          model: gpt-5.4-mini
+          reasoning_effort: low
+        hard:
+          provider: strong_remote
+          model: gpt-5.4
+          reasoning_effort: high
+      roles:
+        verifier:
+          hard:
+            provider: audit_model
+            model: gpt-5.4
+            reasoning_effort: medium
+```
+
+可观测入口：
+
+- `aicli doctor subagent-route --role writer --difficulty hard`：不调用模型，只输出最终 route decision。未显式传 `--parent-*` 时，会优先使用 `aicli.chat.default_provider/default_model/reasoning_effort` 作为 parent 默认值，再回退 provider 默认配置。
+- `/debug routing`：在 chat 内查看当前 routing 配置摘要。
+- `/agents routing test --role writer --difficulty hard`：在 chat 内基于当前会话 parent provider/model/reasoning 做 route dry-run。该命令支持 `--provider`、`--model`、`--reasoning-effort` 值补全。
+- `subagent.started` / `subagent.completed` runtime event、`subagent_start` / `subagent_stop` hook payload、AgentControl mailbox/display mirror 会携带 `difficulty`、`difficulty_source`、`difficulty_rationale`、`route_provider`、`route_model`、`route_reasoning_effort`、`route_source`、`route_warnings`、`fallback_used`、`fallback_reason` 和使用量字段。
+- `validate_model_capabilities: true` 时，routing 会校验已声明 capability 的 route model。若 route model 明确不支持，会优先 fallback 到 parent provider/model 并记录 `model_unsupported`、`model_fallback_parent` 和 `fallback_reason`；无法 fallback 时返回错误。未声明能力目录的 provider 不会被强制拒绝。
+- `unsupported_reasoning_policy` 控制模型不支持 route `reasoning_effort` 时的行为：`ignore` 清空并 warning，`downgrade` 降到已支持的较低档位，`fail` / `reject` 直接拒绝该 route。默认是 `ignore`。
+
+tool 参数边界：
+
+- `spawn_subagents` 支持 `difficulty`、`difficulty_rationale`、`provider`、`model`、`reasoning_effort`；`thinking_effort` 是 `reasoning_effort` 的兼容别名。routing enabled 时，provider/model/reasoning 最终仍由本地 routing policy 授权；未授权 override 会被忽略或记录 warning。
+- `spawn_agent` 支持同样的 route hints，并会把最终 route 写入 child session context 和 AgentControl durable graph。routing disabled 时只保留 legacy `model` override，不会因为新增字段切换 provider 或 reasoning。
+- planner 生成的 `PlanStep.difficulty` / `difficulty_rationale` 会复制到建议的 subagent task；hard/expert writer 必须带只读 verifier 依赖，且 verifier 难度至少为 hard。
+- `spawn_team.tasks[].difficulty` 与 `difficulty_rationale` 只用于 task metadata、planner/audit、dispatch/mailbox 展示，不会改变 teammate provider/model routing。
 
 ---
 

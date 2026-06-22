@@ -411,34 +411,52 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		lines: make(chan chatQueuedInput, 4),
 		errs:  make(chan error, 1),
 	}
+	enabled := true
 
 	session := &ChatSession{
-		ProviderName:               "codex_ee",
-		Provider:                   config.Provider{Enabled: true, Protocol: "openai", BaseURL: "https://example.com", APIKeys: []string{"key-1"}},
-		Model:                      "gpt-5.2-code",
-		ReasoningEffort:            "medium",
-		HTTPDebug:                  true,
-		Stream:                     true,
-		NoInteractive:              true,
-		JSONOutput:                 true,
-		JSONEnvelope:               true,
-		MCPEnabled:                 true,
-		MCPStatus:                  &MCPStatus{Enabled: true, ToolCount: 7, MCPCount: 2},
-		SkillsDebug:                true,
-		OutputFormat:               "json",
-		ProfileName:                "debug-profile",
-		ProfileAgent:               "agent-x",
-		ProfileRoot:                profileRoot,
-		RuntimeConfigPath:          runtimeConfigPath,
-		MCPConfigPath:              mcpConfigPath,
-		ResolvedSkillDirs:          []string{skillsDir},
-		PermissionMode:             "default",
-		ApprovalReuseMode:          chatApprovalReuseTeamReadOnlyShell,
-		SelectedAgentTarget:        "/root/debug-child",
-		SessionDir:                 sessionDir,
-		InputQueue:                 queue,
-		RuntimeSession:             &runtimechat.Session{ID: "session-1", State: runtimechat.StateActive},
-		Logger:                     logger,
+		ProviderName:        "codex_ee",
+		Provider:            config.Provider{Enabled: true, Protocol: "openai", BaseURL: "https://example.com", APIKeys: []string{"key-1"}},
+		Model:               "gpt-5.2-code",
+		ReasoningEffort:     "medium",
+		HTTPDebug:           true,
+		Stream:              true,
+		NoInteractive:       true,
+		JSONOutput:          true,
+		JSONEnvelope:        true,
+		MCPEnabled:          true,
+		MCPStatus:           &MCPStatus{Enabled: true, ToolCount: 7, MCPCount: 2},
+		SkillsDebug:         true,
+		OutputFormat:        "json",
+		ProfileName:         "debug-profile",
+		ProfileAgent:        "agent-x",
+		ProfileRoot:         profileRoot,
+		RuntimeConfigPath:   runtimeConfigPath,
+		MCPConfigPath:       mcpConfigPath,
+		ResolvedSkillDirs:   []string{skillsDir},
+		PermissionMode:      "default",
+		ApprovalReuseMode:   chatApprovalReuseTeamReadOnlyShell,
+		SelectedAgentTarget: "/root/debug-child",
+		SessionDir:          sessionDir,
+		InputQueue:          queue,
+		RuntimeSession:      &runtimechat.Session{ID: "session-1", State: runtimechat.StateActive, Metadata: runtimechat.SessionMetadata{Summary: "session debug summary"}},
+		Logger:              logger,
+		Config: &config.Config{
+			AICLI: &config.AICLIConfig{
+				Subagents: &config.AICLISubagentsConfig{
+					Routing: &config.AICLISubagentRoutingConfig{
+						Enabled:           &enabled,
+						DefaultDifficulty: "normal",
+						Levels: map[string]config.AICLISubagentRouteProfile{
+							"hard": {
+								Provider:        "strong",
+								Model:           "strong-model",
+								ReasoningEffort: "high",
+							},
+						},
+					},
+				},
+			},
+		},
 		runtimeHTTPCapture:         runtimeCapture,
 		lastLocalShellArtifactPath: filepath.Join(logger.LocalShellArtifactDir(), "001_git.txt"),
 		Interaction: &chatInteractionCoordinator{
@@ -459,6 +477,7 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 
 	expectedFragments := []string{
 		"Session:           session-1 [active]",
+		fmt.Sprintf("%-18s %s", "Summary:", "session debug summary"),
 		"Session File:      " + filepath.Join(sessionDir, "session-1.json"),
 		"Session Store:     " + sessionDir,
 		"Chat Log File:     " + logger.SessionLogPath(),
@@ -486,6 +505,10 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 		fmt.Sprintf("%-18s %s", "Interaction:", "prompt_visible=true prompt_paste_active=true thinking_active=true streaming_active=true reasoning_active=true complete_block_output=true shutdown=false"),
 		fmt.Sprintf("%-18s %s", "Agent Target:", "/root/debug-child"),
 		fmt.Sprintf("%-18s %s", "Surface:", "<none>"),
+		"Subagent Routing:",
+		fmt.Sprintf("%-18s %s", "Routing Enabled:", "on"),
+		fmt.Sprintf("%-18s %s", "Default Difficulty:", "normal"),
+		"hard: provider=strong model=strong-model reasoning_effort=high",
 	}
 	for _, expected := range expectedFragments {
 		if !strings.Contains(output, expected) {
@@ -543,6 +566,289 @@ func TestHandleCommand_DebugModeTogglesStatusAndPersists(t *testing.T) {
 	})
 	if session.DebugMode || !strings.Contains(output, fmt.Sprintf("%-18s %s", "Debug Mode:", "off")) {
 		t.Fatalf("expected debug mode off, session=%+v output=%q", session, output)
+	}
+}
+
+func TestHandleCommand_DebugRoutingPrintsSubagentRoutingSummary(t *testing.T) {
+	enabled := true
+	session := &ChatSession{
+		Config: &config.Config{
+			AICLI: &config.AICLIConfig{
+				Subagents: &config.AICLISubagentsConfig{
+					Routing: &config.AICLISubagentRoutingConfig{
+						Enabled:                        &enabled,
+						CompatibilityMode:              "strict",
+						DefaultDifficulty:              "normal",
+						AllowExplicitProviderOverride:  true,
+						AllowExplicitModelOverride:     true,
+						AllowExplicitReasoningOverride: true,
+						MaxExpertConcurrency:           2,
+						Levels: map[string]config.AICLISubagentRouteProfile{
+							"hard": {
+								Provider:        "strong",
+								Model:           "strong-model",
+								ReasoningEffort: "high",
+								MaxTokens:       12000,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/debug routing", false); quit {
+			t.Fatal("debug routing command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Subagent Routing:",
+		fmt.Sprintf("%-18s %s", "Routing Enabled:", "on"),
+		fmt.Sprintf("%-18s %s", "Compatibility:", "strict"),
+		fmt.Sprintf("%-18s %s", "Default Difficulty:", "normal"),
+		fmt.Sprintf("%-18s %s", "Reasoning Override:", "on"),
+		fmt.Sprintf("%-18s %s", "Expert Limit:", "2"),
+		"hard: provider=strong model=strong-model reasoning_effort=high max_tokens=12000",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected routing output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_AgentsRoutingTestPrintsDryRunDecision(t *testing.T) {
+	enabled := true
+	session := &ChatSession{
+		ProviderName: "parent",
+		Model:        "parent-model",
+		Config: &config.Config{
+			Providers: config.ProvidersConfig{
+				DefaultProvider: "parent",
+				Items: map[string]config.Provider{
+					"parent": {
+						Enabled:      true,
+						DefaultModel: "parent-model",
+					},
+					"strong": {
+						Enabled:         true,
+						DefaultModel:    "strong-default",
+						SupportedModels: []string{"strong-model"},
+						ModelCapabilities: map[string]config.ModelCapabilitySpec{
+							"strong-model": {
+								ReasoningModel:   true,
+								ReasoningEfforts: []string{"high"},
+							},
+						},
+					},
+				},
+			},
+			AICLI: &config.AICLIConfig{
+				Subagents: &config.AICLISubagentsConfig{
+					Routing: &config.AICLISubagentRoutingConfig{
+						Enabled:           &enabled,
+						DefaultDifficulty: "normal",
+						Levels: map[string]config.AICLISubagentRouteProfile{
+							"hard": {
+								Provider:        "strong",
+								Model:           "strong-model",
+								ReasoningEffort: "high",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents routing test --role writer --difficulty hard --goal migration --read-only=false", false); quit {
+			t.Fatal("agents routing command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Subagent Route Dry Run",
+		"Routing enabled: true",
+		"Role:          writer",
+		"Difficulty:    hard",
+		"Provider:      strong",
+		"Model:         strong-model",
+		"Reasoning:     high",
+		"Source:        difficulty_level",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected routing dry-run output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_AgentsRoutingTestDefaultsToWritableSpawnAgentPreview(t *testing.T) {
+	enabled := true
+	session := &ChatSession{
+		ProviderName: "parent",
+		Model:        "parent-model",
+		Config: &config.Config{
+			Providers: config.ProvidersConfig{
+				DefaultProvider: "parent",
+				Items: map[string]config.Provider{
+					"parent": {Enabled: true, DefaultModel: "parent-model"},
+				},
+			},
+			AICLI: &config.AICLIConfig{
+				Subagents: &config.AICLISubagentsConfig{
+					Routing: &config.AICLISubagentRoutingConfig{
+						Enabled:           &enabled,
+						DefaultDifficulty: "easy",
+						Levels: map[string]config.AICLISubagentRouteProfile{
+							"easy":   {Provider: "parent", Model: "easy-model"},
+							"normal": {Provider: "parent", Model: "normal-model"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents routing test --role writer --goal update", false); quit {
+			t.Fatal("agents routing command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Read only:     false",
+		"Difficulty:    normal (inferred)",
+		"Model:         normal-model",
+		"difficulty_promoted_by_heuristic",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected routing dry-run output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_AgentsRoutingTestPrintsInvalidDifficultyWarning(t *testing.T) {
+	enabled := true
+	session := &ChatSession{
+		ProviderName: "parent",
+		Model:        "parent-model",
+		Config: &config.Config{
+			Providers: config.ProvidersConfig{
+				DefaultProvider: "parent",
+				Items: map[string]config.Provider{
+					"parent": {Enabled: true, DefaultModel: "parent-model"},
+				},
+			},
+			AICLI: &config.AICLIConfig{
+				Subagents: &config.AICLISubagentsConfig{
+					Routing: &config.AICLISubagentRoutingConfig{
+						Enabled:           &enabled,
+						DefaultDifficulty: "normal",
+						Levels: map[string]config.AICLISubagentRouteProfile{
+							"normal": {Provider: "parent", Model: "parent-model"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents routing test --difficulty 复杂 --goal inspect --read-only=true", false); quit {
+			t.Fatal("agents routing command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Difficulty:    normal (default)",
+		"difficulty_invalid_defaulted",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected routing dry-run output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_AgentsRoutingTestPrintsProviderFallbackWarning(t *testing.T) {
+	enabled := true
+	session := &ChatSession{
+		ProviderName: "parent",
+		Model:        "parent-model",
+		Config: &config.Config{
+			Providers: config.ProvidersConfig{
+				DefaultProvider: "parent",
+				Items: map[string]config.Provider{
+					"parent": {Enabled: true, DefaultModel: "parent-model"},
+				},
+			},
+			AICLI: &config.AICLIConfig{
+				Subagents: &config.AICLISubagentsConfig{
+					Routing: &config.AICLISubagentRoutingConfig{
+						Enabled: &enabled,
+						Levels: map[string]config.AICLISubagentRouteProfile{
+							"hard": {Provider: "missing-provider", Model: "missing-model"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents routing test --difficulty hard --goal inspect --read-only=true", false); quit {
+			t.Fatal("agents routing command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Provider:      parent",
+		"Model:         parent-model",
+		"Source:        fallback",
+		"provider_unresolved",
+		"provider_fallback_parent",
+		"model_fallback_parent",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected routing dry-run output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_AgentsRoutingTestDisabledPreservesLegacyModelOverride(t *testing.T) {
+	disabled := false
+	session := &ChatSession{
+		ProviderName: "parent",
+		Model:        "parent-model",
+		Config: &config.Config{
+			Providers: config.ProvidersConfig{
+				DefaultProvider: "parent",
+				Items: map[string]config.Provider{
+					"parent": {Enabled: true, DefaultModel: "parent-model"},
+				},
+			},
+			AICLI: &config.AICLIConfig{
+				Subagents: &config.AICLISubagentsConfig{
+					Routing: &config.AICLISubagentRoutingConfig{
+						Enabled:           &disabled,
+						DefaultDifficulty: "not-a-real-difficulty",
+					},
+				},
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents routing test --provider ignored --model child-model --reasoning-effort high", false); quit {
+			t.Fatal("agents routing command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Routing enabled: false",
+		"Provider:      parent",
+		"Model:         child-model",
+		"Reasoning:     -",
+		"Source:        disabled",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected routing dry-run output to contain %q, got:\n%s", expected, output)
+		}
 	}
 }
 
@@ -809,7 +1115,24 @@ func TestChatAgentPickerResolvesByNumberPathAndSession(t *testing.T) {
 
 func TestChatAgentPickerPopupLinesIncludeAgentDetails(t *testing.T) {
 	lines := chatAgentPickerPopupLines([]toolbroker.AgentStatusResult{
-		{ID: "agent-1", SessionID: "session-1", Path: "/root/agent-1", Status: "idle", AgentType: "worker", TeamID: "team-1", TeammateID: "member-1", CurrentTaskID: "task-1", CurrentTaskStatus: "running"},
+		{
+			ID:                "agent-1",
+			SessionID:         "session-1",
+			Path:              "/root/agent-1",
+			Status:            "idle",
+			AgentType:         "worker",
+			Difficulty:        "hard",
+			DifficultySource:  "explicit",
+			Provider:          "remote",
+			Model:             "strong-model",
+			ReasoningEffort:   "high",
+			RouteSource:       "difficulty_level",
+			RouteWarnings:     []string{"provider_fallback_parent"},
+			TeamID:            "team-1",
+			TeammateID:        "member-1",
+			CurrentTaskID:     "task-1",
+			CurrentTaskStatus: "running",
+		},
 	}, "")
 	output := strings.Join(lines, "\n")
 	for _, expected := range []string{
@@ -818,6 +1141,13 @@ func TestChatAgentPickerPopupLinesIncludeAgentDetails(t *testing.T) {
 		"status=idle",
 		"session=session-1",
 		"type=worker",
+		"difficulty=hard",
+		"difficulty_source=explicit",
+		"provider=remote",
+		"model=strong-model",
+		"reasoning=high",
+		"route_source=difficulty_level",
+		"warnings=provider_fallback_parent",
 		"team=team-1",
 		"teammate=member-1",
 		"task=task-1",
@@ -1147,6 +1477,38 @@ func TestChatCollabLinesListsParentMailboxEvents(t *testing.T) {
 	}
 	if strings.Count(output, "mailbox_received") != 2 {
 		t.Fatalf("expected collab output to list mailbox substrate rows without session-event mirror duplicates, got:\n%s", output)
+	}
+}
+
+func TestChatCollabMailboxLineIncludesRouteMetadata(t *testing.T) {
+	message := toolbroker.BuildSubagentCompletionMailboxMessage("parent", "child", "/root/child", "worker", runtimechat.EventSessionEnd, map[string]interface{}{
+		"status":                 "idle",
+		"difficulty":             "hard",
+		"difficulty_source":      "explicit",
+		"route_provider":         "remote",
+		"route_model":            "strong-model",
+		"route_reasoning_effort": "high",
+		"route_source":           "difficulty_level",
+		"route_warnings":         []string{"provider_fallback_parent"},
+		"usage_total_tokens":     1200,
+	})
+	message.Seq = 7
+
+	line := chatCollabMailboxLine(message)
+	for _, expected := range []string{
+		"kind=subagent.completed",
+		"difficulty=hard",
+		"difficulty_source=explicit",
+		"provider=remote",
+		"model=strong-model",
+		"reasoning=high",
+		"route_source=difficulty_level",
+		"usage_total_tokens=1200",
+		"warnings=provider_fallback_parent",
+	} {
+		if !strings.Contains(line, expected) {
+			t.Fatalf("expected mailbox line to contain %q, got:\n%s", expected, line)
+		}
 	}
 }
 
@@ -1852,20 +2214,36 @@ func captureStdout(t *testing.T, fn func()) string {
 	}
 	os.Stdout = writer
 
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		data, err := io.ReadAll(reader)
+		readDone <- readResult{data: data, err: err}
+	}()
+
+	writerClosed := false
 	defer func() {
 		os.Stdout = originalStdout
+		if !writerClosed {
+			_ = writer.Close()
+		}
+		_ = reader.Close()
 	}()
 
 	fn()
 
+	os.Stdout = originalStdout
+	writerClosed = true
 	_ = writer.Close()
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
+	result := <-readDone
+	if result.err != nil {
+		t.Fatalf("read stdout: %v", result.err)
 	}
-	_ = reader.Close()
 
-	return string(data)
+	return string(result.data)
 }
 
 type recordingPanelRuntimeStore struct {

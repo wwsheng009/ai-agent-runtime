@@ -27,16 +27,25 @@ func TestSQLiteGlobalAgentRegistryStoreUpsertAndList(t *testing.T) {
 	require.Equal(t, "/root", root.AgentPath)
 
 	child, err := store.UpsertAgentControlAgent(ctx, AgentRecord{
-		AgentID:         "child-agent",
-		RootSessionID:   "root-session",
-		ParentAgentID:   root.AgentID,
-		ParentSessionID: "root-session",
-		SessionID:       "child-session",
-		AgentPath:       "/root/child-agent",
-		Depth:           1,
-		AgentType:       AgentTypeChild,
-		Nickname:        "worker",
-		Workflow:        WorkflowSpawnAgent,
+		AgentID:          "child-agent",
+		RootSessionID:    "root-session",
+		ParentAgentID:    root.AgentID,
+		ParentSessionID:  "root-session",
+		SessionID:        "child-session",
+		AgentPath:        "/root/child-agent",
+		Depth:            1,
+		AgentType:        AgentTypeChild,
+		Nickname:         "worker",
+		Workflow:         WorkflowSpawnAgent,
+		Provider:         "remote",
+		Model:            "strong-model",
+		ReasoningEffort:  "high",
+		Difficulty:       "hard",
+		DifficultySource: "explicit",
+		RouteSource:      "difficulty_level",
+		RouteWarnings:    []string{"provider_fallback_parent"},
+		FallbackUsed:     true,
+		FallbackReason:   "provider_unresolved_parent",
 	})
 	require.NoError(t, err)
 	require.Equal(t, int64(2), child.Seq)
@@ -50,6 +59,15 @@ func TestSQLiteGlobalAgentRegistryStoreUpsertAndList(t *testing.T) {
 	require.Len(t, records, 2)
 	require.Equal(t, "root-agent", records[0].AgentID)
 	require.Equal(t, "child-agent", records[1].AgentID)
+	require.Equal(t, "remote", records[1].Provider)
+	require.Equal(t, "strong-model", records[1].Model)
+	require.Equal(t, "high", records[1].ReasoningEffort)
+	require.Equal(t, "hard", records[1].Difficulty)
+	require.Equal(t, "explicit", records[1].DifficultySource)
+	require.Equal(t, "difficulty_level", records[1].RouteSource)
+	require.Equal(t, []string{"provider_fallback_parent"}, records[1].RouteWarnings)
+	require.True(t, records[1].FallbackUsed)
+	require.Equal(t, "provider_unresolved_parent", records[1].FallbackReason)
 
 	records, err = store.ListAgentControlAgents(ctx, AgentFilter{
 		RootSessionID: "root-session",

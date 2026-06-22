@@ -2,6 +2,9 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -18,8 +21,10 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -39,8 +44,9 @@ func (p *capturingLocalChatProvider) Name() string {
 func (p *capturingLocalChatProvider) Call(ctx context.Context, req *runtimellm.LLMRequest) (*runtimellm.LLMResponse, error) {
 	if req != nil {
 		p.requests = append(p.requests, &runtimellm.LLMRequest{
-			Provider: req.Provider,
-			Model:    req.Model,
+			Provider:        req.Provider,
+			Model:           req.Model,
+			ReasoningEffort: req.ReasoningEffort,
 		})
 	}
 	if p.callCount >= len(p.responses) {
@@ -525,6 +531,29 @@ func TestBuildLocalChatAgent_PropagatesReasoningEffortToAgentOptions(t *testing.
 	}
 }
 
+func TestBuildLocalChatAgent_UsesRequestedRouteOverrides(t *testing.T) {
+	session := &ChatSession{
+		ProviderName:    "base-provider",
+		Model:           "base-model",
+		ReasoningEffort: "low",
+	}
+	host := &localChatRuntimeHost{
+		Bootstrap: &runtimebootstrap.Manager{},
+	}
+
+	apiAgent := buildLocalChatAgent(session, host, nil, "", "worker", "hard-model", "hard-provider", "high")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+	cfg := apiAgent.GetConfig()
+	if cfg.Provider != "hard-provider" || cfg.Model != "hard-model" {
+		t.Fatalf("expected requested provider/model, got provider=%q model=%q", cfg.Provider, cfg.Model)
+	}
+	if cfg.Options == nil || cfg.Options["reasoning_effort"] != "high" {
+		t.Fatalf("expected requested reasoning_effort=high, got %#v", cfg.Options)
+	}
+}
+
 func TestLocalChatRuntimeHostBuildSessionActorIgnoresStaleRequestedModelForBaseSession(t *testing.T) {
 	ctx := context.Background()
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
@@ -612,6 +641,89 @@ func TestLocalChatRuntimeHostBuildSessionActorIgnoresStaleRequestedModelForBaseS
 	}
 }
 
+func TestLocalChatRuntimeHostBuildSessionActorUsesChildRouteContext(t *testing.T) {
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create root: %v", err)
+	}
+	childSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create child: %v", err)
+	}
+	childSession.SetContext(sessionmeta.ProviderName, "hard-provider")
+	childSession.SetContext(toolbroker.AgentSessionContextRequestedModel, "hard-model")
+	childSession.SetContext(sessionmeta.ReasoningEffort, "high")
+	if err := manager.Update(ctx, childSession); err != nil {
+		t.Fatalf("manager.Update child: %v", err)
+	}
+
+	baseProvider := &capturingLocalChatProvider{name: "base-provider"}
+	hardProvider := &capturingLocalChatProvider{
+		name: "hard-provider",
+		responses: []*runtimellm.LLMResponse{
+			{Content: "hard ok", Model: "hard-model"},
+		},
+	}
+	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
+		Config: runtimecfg.DefaultRuntimeConfig(),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer bootstrapManager.Stop()
+	if err := bootstrapManager.LLMRuntime().RegisterProvider("base-provider", baseProvider); err != nil {
+		t.Fatalf("Register base provider: %v", err)
+	}
+	if err := bootstrapManager.LLMRuntime().RegisterProvider("hard-provider", hardProvider); err != nil {
+		t.Fatalf("Register hard provider: %v", err)
+	}
+	if err := bootstrapManager.LLMRuntime().RegisterProviderAlias("base-model", "base-provider"); err != nil {
+		t.Fatalf("Register base alias: %v", err)
+	}
+	if err := bootstrapManager.LLMRuntime().RegisterProviderAlias("hard-model", "hard-provider"); err != nil {
+		t.Fatalf("Register hard alias: %v", err)
+	}
+	host := &localChatRuntimeHost{
+		Bootstrap:    bootstrapManager,
+		RuntimeStore: runtimechat.NewInMemoryRuntimeStore(64),
+	}
+	session := &ChatSession{
+		ProviderName:   "base-provider",
+		Model:          "base-model",
+		RuntimeSession: rootSession,
+		SessionManager: manager,
+	}
+
+	actor, err := host.buildSessionActor(childSession.ID, session, manager.GetStorage(), nil, "")
+	if err != nil {
+		t.Fatalf("buildSessionActor: %v", err)
+	}
+	result, err := actor.SubmitPrompt(ctx, "hello", nil)
+	if err != nil {
+		t.Fatalf("SubmitPrompt: %v", err)
+	}
+	if result == nil || strings.TrimSpace(result.Output) != "hard ok" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if len(hardProvider.requests) != 1 {
+		t.Fatalf("expected one hard-provider request, got %d", len(hardProvider.requests))
+	}
+	request := hardProvider.requests[0]
+	if request.Provider != "hard-provider" || request.Model != "hard-model" || request.ReasoningEffort != "high" {
+		t.Fatalf("unexpected routed request: %#v", request)
+	}
+	if len(baseProvider.requests) != 0 {
+		t.Fatalf("base provider should not be used, got %#v", baseProvider.requests)
+	}
+}
+
 func TestLocalActorRegistry_EnforcesAgentLimitsAndListsChildren(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -669,6 +781,188 @@ func TestLocalActorRegistry_EnforcesAgentLimitsAndListsChildren(t *testing.T) {
 	}
 	if list.Count != 2 {
 		t.Fatalf("expected active and closed child agents, got %#v", list)
+	}
+}
+
+func TestLocalActorRegistrySpawnPersistsDifficultyRouteContext(t *testing.T) {
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	enabled := true
+	host.BaseSession = &ChatSession{
+		ProviderName:     "base-provider",
+		Model:            "base-model",
+		ReasoningEffort:  "low",
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+		Config: &agentconfig.Config{
+			AICLI: &agentconfig.AICLIConfig{
+				Subagents: &agentconfig.AICLISubagentsConfig{
+					Routing: &agentconfig.AICLISubagentRoutingConfig{
+						Enabled:           &enabled,
+						DefaultDifficulty: "normal",
+						Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+							"hard": {
+								Provider:        "hard-provider",
+								Model:           "hard-model",
+								ReasoningEffort: "high",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:                  "route-child",
+		AgentType:           "worker",
+		Difficulty:          "hard",
+		DifficultyRationale: "provider-sensitive",
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if result.Provider != "hard-provider" || result.Model != "hard-model" || result.ReasoningEffort != "high" ||
+		result.Difficulty != "hard" || result.DifficultyRationale != "provider-sensitive" || result.RouteSource != "difficulty_level" {
+		t.Fatalf("unexpected route status: %#v", result)
+	}
+	stored, err := manager.Get(ctx, "route-child")
+	if err != nil {
+		t.Fatalf("manager.Get child: %v", err)
+	}
+	if got := agentcontrol.ContextString(stored, sessionmeta.ProviderName); got != "hard-provider" {
+		t.Fatalf("expected stored provider hard-provider, got %q", got)
+	}
+	if got := agentcontrol.ContextString(stored, toolbroker.AgentSessionContextRequestedModel); got != "hard-model" {
+		t.Fatalf("expected stored model hard-model, got %q", got)
+	}
+	if got := agentcontrol.ContextString(stored, sessionmeta.ReasoningEffort); got != "high" {
+		t.Fatalf("expected stored reasoning high, got %q", got)
+	}
+}
+
+func TestLocalActorRegistrySpawnKeepsLegacyRouteContextWhenRoutingDisabled(t *testing.T) {
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.BaseSession = &ChatSession{
+		ProviderName:     "base-provider",
+		Model:            "base-model",
+		ReasoningEffort:  "low",
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+
+	result, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "legacy-child"})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if result.Provider != "" || result.Model != "" || result.ReasoningEffort != "" {
+		t.Fatalf("routing disabled should not persist provider/model/reasoning overrides, got %#v", result)
+	}
+	stored, err := manager.Get(ctx, "legacy-child")
+	if err != nil {
+		t.Fatalf("manager.Get child: %v", err)
+	}
+	if got := agentcontrol.ContextString(stored, sessionmeta.ProviderName); got != "" {
+		t.Fatalf("expected no stored provider override, got %q", got)
+	}
+	if got := agentcontrol.ContextString(stored, toolbroker.AgentSessionContextRequestedModel); got != "" {
+		t.Fatalf("expected no stored model override, got %q", got)
+	}
+	if got := agentcontrol.ContextString(stored, sessionmeta.ReasoningEffort); got != "" {
+		t.Fatalf("expected no stored reasoning override, got %q", got)
+	}
+}
+
+func TestLocalActorRegistrySpawnKeepsLegacyModelOverrideWhenRoutingDisabled(t *testing.T) {
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.BaseSession = &ChatSession{
+		ProviderName:     "base-provider",
+		Model:            "base-model",
+		ReasoningEffort:  "low",
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+
+	result, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:              "legacy-model-child",
+		Model:           "legacy-child-model",
+		Provider:        "ignored-provider",
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if result.Provider != "" || result.Model != "legacy-child-model" || result.ReasoningEffort != "" {
+		t.Fatalf("routing disabled should preserve only legacy model override, got %#v", result)
+	}
+	stored, err := manager.Get(ctx, "legacy-model-child")
+	if err != nil {
+		t.Fatalf("manager.Get child: %v", err)
+	}
+	if got := agentcontrol.ContextString(stored, sessionmeta.ProviderName); got != "" {
+		t.Fatalf("expected no stored provider override, got %q", got)
+	}
+	if got := agentcontrol.ContextString(stored, toolbroker.AgentSessionContextRequestedModel); got != "legacy-child-model" {
+		t.Fatalf("expected stored model legacy-child-model, got %q", got)
+	}
+	if got := agentcontrol.ContextString(stored, sessionmeta.ReasoningEffort); got != "" {
+		t.Fatalf("expected no stored reasoning override, got %q", got)
 	}
 }
 
@@ -2005,30 +2299,101 @@ func TestLocalActorRegistry_MirrorsChildCompletionToParentEvents(t *testing.T) {
 
 	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
 	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	hookPayloads := make(chan map[string]interface{}, 2)
+	hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode hook payload: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		hookPayloads <- payload
+		_, _ = w.Write([]byte(`{"action":"continue"}`))
+	}))
+	defer hookServer.Close()
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Hooks = []runtimehooks.HookConfig{
+		{
+			ID:    "local-spawn-agent-start",
+			Event: runtimehooks.EventSubagentStart,
+			Exec:  runtimehooks.ExecConfig{Type: "http", URL: hookServer.URL},
+		},
+		{
+			ID:    "local-spawn-agent-stop",
+			Event: runtimehooks.EventSubagentStop,
+			Exec:  runtimehooks.ExecConfig{Type: "http", URL: hookServer.URL},
+		},
+	}
+	host.RuntimeConfig = runtimeConfig
+	enabled := true
 	host.BaseSession = &ChatSession{
 		RuntimeSession: rootSession,
 		SessionUserID:  userID,
+		Config: &agentconfig.Config{
+			AICLI: &agentconfig.AICLIConfig{
+				Subagents: &agentconfig.AICLISubagentsConfig{
+					Routing: &agentconfig.AICLISubagentRoutingConfig{
+						Enabled:           &enabled,
+						DefaultDifficulty: "normal",
+						Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+							"hard": {
+								Provider:        "completion-provider",
+								Model:           "completion-model",
+								ReasoningEffort: "high",
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 	registry := host.ActorRegistry
 
 	_, err = registry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{
-		ID:        "completion-child",
-		AgentType: "worker",
+		ID:                  "completion-child",
+		AgentType:           "worker",
+		Difficulty:          "hard",
+		DifficultyRationale: "completion audit",
 	})
 	if err != nil {
 		t.Fatalf("spawn completion child: %v", err)
+	}
+	startHook := waitLocalHookPayload(t, hookPayloads)
+	if startHook["session_id"] != "completion-child" ||
+		startHook["parent_session_id"] != rootSession.ID ||
+		startHook["path"] != "/root/completion-child" ||
+		startHook["agent_type"] != "worker" ||
+		startHook["difficulty"] != "hard" ||
+		startHook["route_provider"] != "completion-provider" ||
+		startHook["route_model"] != "completion-model" ||
+		startHook["route_reasoning_effort"] != "high" ||
+		startHook["route_source"] != "difficulty_level" {
+		t.Fatalf("unexpected local subagent start hook payload: %#v", startHook)
 	}
 	childEnd := runtimeevents.Event{
 		Type:      runtimechat.EventSessionEnd,
 		SessionID: "completion-child",
 		TraceID:   "trace-child-complete",
 		Payload: map[string]interface{}{
-			"success": true,
-			"steps":   3,
-			"seq":     int64(44),
+			"success":            true,
+			"steps":              3,
+			"seq":                int64(44),
+			"usage_total_tokens": 1200,
 		},
 	}
 	host.EventBus.Publish(childEnd)
+	stopHook := waitLocalHookPayload(t, hookPayloads)
+	if stopHook["session_id"] != "completion-child" ||
+		stopHook["source_event_type"] != runtimechat.EventSessionEnd ||
+		stopHook["status"] != string(runtimechat.SessionIdle) ||
+		stopHook["success"] != true ||
+		stopHook["agent_type"] != "worker" ||
+		stopHook["difficulty"] != "hard" ||
+		stopHook["route_model"] != "completion-model" ||
+		intPayloadValue(stopHook, "steps") != 3 ||
+		intPayloadValue(stopHook, "usage_total_tokens") != 1200 {
+		t.Fatalf("unexpected local subagent stop hook payload: %#v", stopHook)
+	}
 
 	events, err := host.EventStore.ListEvents(context.Background(), rootSession.ID, 0, 20)
 	if err != nil {
@@ -2056,7 +2421,15 @@ func TestLocalActorRegistry_MirrorsChildCompletionToParentEvents(t *testing.T) {
 		metadata["control_action"] != agentcontrol.ActionAgentCompleted ||
 		metadata["workflow"] != agentcontrol.WorkflowSpawnAgent ||
 		metadata["mailbox_delivery"] != agentcontrol.DeliverySessionMailbox ||
-		metadata["mailbox_kind"] != agentcontrol.MailboxKindSubagentCompleted {
+		metadata["mailbox_kind"] != agentcontrol.MailboxKindSubagentCompleted ||
+		metadata["difficulty"] != "hard" ||
+		metadata["difficulty_source"] != "explicit" ||
+		metadata["difficulty_rationale"] != "completion audit" ||
+		metadata["route_provider"] != "completion-provider" ||
+		metadata["route_model"] != "completion-model" ||
+		metadata["route_reasoning_effort"] != "high" ||
+		metadata["route_source"] != "difficulty_level" ||
+		intPayloadValue(metadata, "usage_total_tokens") != 1200 {
 		t.Fatalf("unexpected completion mailbox metadata: %#v", metadata)
 	}
 	event := events[1]
@@ -2076,7 +2449,15 @@ func TestLocalActorRegistry_MirrorsChildCompletionToParentEvents(t *testing.T) {
 		event.Payload["mirror_source"] != toolbroker.SubagentCompletionMirrorSource ||
 		event.Payload["mailbox_delivery_status"] != "delivered" ||
 		event.Payload["message_type"] != agentcontrol.MessageTypeSubagentCompleted ||
-		event.Payload["control_action"] != agentcontrol.ActionAgentCompleted {
+		event.Payload["control_action"] != agentcontrol.ActionAgentCompleted ||
+		event.Payload["difficulty"] != "hard" ||
+		event.Payload["difficulty_source"] != "explicit" ||
+		event.Payload["difficulty_rationale"] != "completion audit" ||
+		event.Payload["route_provider"] != "completion-provider" ||
+		event.Payload["route_model"] != "completion-model" ||
+		event.Payload["route_reasoning_effort"] != "high" ||
+		event.Payload["route_source"] != "difficulty_level" ||
+		intPayloadValue(event.Payload, "usage_total_tokens") != 1200 {
 		t.Fatalf("expected display mirror metadata, got %#v", event.Payload)
 	}
 }
@@ -2116,6 +2497,17 @@ func TestLocalActorRegistry_PersistsCompletionMailboxWithoutParentActor(t *testi
 		metadata["control_action"] != agentcontrol.ActionAgentCompleted ||
 		metadata["mailbox_kind"] != agentcontrol.MailboxKindSubagentCompleted {
 		t.Fatalf("unexpected mailbox metadata: %#v", metadata)
+	}
+}
+
+func waitLocalHookPayload(t *testing.T, payloads <-chan map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	select {
+	case payload := <-payloads:
+		return payload
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for local hook payload")
+		return nil
 	}
 }
 

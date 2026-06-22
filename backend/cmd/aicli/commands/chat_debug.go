@@ -10,9 +10,11 @@ import (
 	"sync"
 	"time"
 
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -50,6 +52,9 @@ func printChatDebugInfo(session *ChatSession) {
 		preview := session.RuntimeSession.BuildPreview()
 		if preview.Title != "" {
 			printChatSessionMetaRow("Title:", preview.Title)
+		}
+		if preview.Summary != "" {
+			printChatSessionMetaRow("Summary:", preview.Summary)
 		}
 		if preview.MessageCount > 0 {
 			printChatSessionMetaRow("History:", fmt.Sprintf("%d messages", preview.MessageCount))
@@ -95,9 +100,107 @@ func printChatDebugInfo(session *ChatSession) {
 	} else {
 		printChatSessionMetaRow("Surface:", "<none>")
 	}
+	printChatDebugRoutingSummary(session)
 	printChatDebugAgentControl(session)
 	printChatDebugAgentGraph(session)
 	printChatDebugMailbox(session)
+}
+
+func printChatDebugRoutingSummary(session *ChatSession) {
+	fmt.Println("Subagent Routing:")
+	if session == nil {
+		printChatSessionMetaRow("Routing:", "<no session>")
+		return
+	}
+	routing := localChatSubagentRoutingConfig(session)
+	printChatSessionMetaRow("Routing Enabled:", chatDebugBool(modelrouting.RoutingEnabled(routing)))
+	printChatSessionMetaRow("Compatibility:", modelrouting.CompatibilityMode(routing))
+	printChatSessionMetaRow("Default Difficulty:", modelrouting.DefaultDifficulty(routing))
+	printChatSessionMetaRow("Inherit Parent:", chatDebugBool(modelrouting.InheritParentWhenMissing(routing)))
+	printChatSessionMetaRow("Validate Models:", chatDebugBool(modelrouting.ValidateModelCapabilities(routing)))
+	if routing == nil {
+		printChatSessionMetaRow("Levels:", "<none>")
+		printChatSessionMetaRow("Roles:", "<none>")
+		return
+	}
+	printChatSessionMetaRow("Provider Override:", chatDebugBool(routing.AllowExplicitProviderOverride))
+	printChatSessionMetaRow("Model Override:", chatDebugBool(routing.AllowExplicitModelOverride))
+	printChatSessionMetaRow("Reasoning Override:", chatDebugBool(routing.AllowExplicitReasoningOverride))
+	printChatSessionMetaRow("Expert Limit:", strconv.Itoa(routing.MaxExpertConcurrency))
+	if len(routing.AllowedProviderOverrides) > 0 {
+		printChatSessionMetaRow("Allowed Providers:", strings.Join(routing.AllowedProviderOverrides, ", "))
+	}
+	if len(routing.AllowedModelOverrides) > 0 {
+		printChatSessionMetaRow("Allowed Models:", strings.Join(routing.AllowedModelOverrides, ", "))
+	}
+	printChatRouteLevels("Levels", routing.Levels)
+	printChatRouteRoles(routing.Roles)
+}
+
+func printChatRouteLevels(label string, levels map[string]config.AICLISubagentRouteProfile) {
+	if len(levels) == 0 {
+		printChatSessionMetaRow(label+":", "<none>")
+		return
+	}
+	keys := make([]string, 0, len(levels))
+	for key := range levels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	printChatSessionMetaRow(label+":", fmt.Sprintf("%d configured", len(keys)))
+	for _, key := range keys {
+		fmt.Printf("  - %s: %s\n", key, chatRouteProfileSummary(levels[key]))
+	}
+}
+
+func printChatRouteRoles(roles map[string]map[string]config.AICLISubagentRouteProfile) {
+	if len(roles) == 0 {
+		printChatSessionMetaRow("Roles:", "<none>")
+		return
+	}
+	roleNames := make([]string, 0, len(roles))
+	for role := range roles {
+		roleNames = append(roleNames, role)
+	}
+	sort.Strings(roleNames)
+	printChatSessionMetaRow("Roles:", fmt.Sprintf("%d configured", len(roleNames)))
+	for _, role := range roleNames {
+		levels := roles[role]
+		levelNames := make([]string, 0, len(levels))
+		for level := range levels {
+			levelNames = append(levelNames, level)
+		}
+		sort.Strings(levelNames)
+		for _, level := range levelNames {
+			fmt.Printf("  - %s.%s: %s\n", role, level, chatRouteProfileSummary(levels[level]))
+		}
+	}
+}
+
+func chatRouteProfileSummary(profile config.AICLISubagentRouteProfile) string {
+	parts := []string{}
+	if provider := strings.TrimSpace(profile.Provider); provider != "" {
+		parts = append(parts, "provider="+provider)
+	}
+	if model := strings.TrimSpace(profile.Model); model != "" {
+		parts = append(parts, "model="+model)
+	}
+	if effort := modelrouting.ProfileReasoningEffort(profile); effort != "" {
+		parts = append(parts, "reasoning_effort="+effort)
+	}
+	if profile.MaxTokens > 0 {
+		parts = append(parts, fmt.Sprintf("max_tokens=%d", profile.MaxTokens))
+	}
+	if profile.Timeout > 0 {
+		parts = append(parts, "timeout="+profile.Timeout.String())
+	}
+	if profile.Temperature != nil {
+		parts = append(parts, fmt.Sprintf("temperature=%g", *profile.Temperature))
+	}
+	if len(parts) == 0 {
+		return "<inherit>"
+	}
+	return strings.Join(parts, " ")
 }
 
 func printChatAgents(session *ChatSession) {
@@ -137,6 +240,10 @@ func handleChatAgentsCommand(session *ChatSession, command string) {
 		}
 	case "panel", "pane", "dashboard":
 		printChatAgentPanel(session, arg)
+	case "routing", "route":
+		if err := handleChatAgentRoutingCommand(session, arg); err != nil {
+			fmt.Printf("错误: %v\n", err)
+		}
 	default:
 		printChatAgents(session)
 	}
@@ -148,6 +255,152 @@ func firstChatAgentsArgToken(argument string) string {
 		return ""
 	}
 	return fields[0]
+}
+
+func handleChatAgentRoutingCommand(session *ChatSession, argument string) error {
+	if session == nil {
+		return fmt.Errorf("当前没有活动会话")
+	}
+	fields := splitChatCommandFields(argument)
+	if len(fields) < 2 {
+		printChatDebugRoutingSummary(session)
+		printChatAgentRoutingUsage()
+		return nil
+	}
+	action := strings.ToLower(strings.TrimSpace(fields[1]))
+	switch action {
+	case "test", "dry-run", "dryrun", "preview":
+		opts, err := parseChatAgentRoutingTestOptions(session, fields[2:])
+		if err != nil {
+			printChatAgentRoutingUsage()
+			return err
+		}
+		report, details, err := runDoctorSubagentRoute(session.Config, opts)
+		if err != nil {
+			if len(details) > 0 {
+				return fmt.Errorf("%w (%v)", err, details)
+			}
+			return err
+		}
+		renderDoctorSubagentRouteReport(report, structuredOutputOptions{Format: "text"})
+		return nil
+	case "summary", "status", "config":
+		printChatDebugRoutingSummary(session)
+		return nil
+	default:
+		printChatAgentRoutingUsage()
+		return fmt.Errorf("未知 /agents routing 参数: %s", fields[1])
+	}
+}
+
+func parseChatAgentRoutingTestOptions(session *ChatSession, fields []string) (doctorSubagentRouteOptions, error) {
+	opts := doctorSubagentRouteOptions{
+		ReadOnly: false,
+	}
+	if session != nil {
+		opts.ParentProvider = strings.TrimSpace(session.ProviderName)
+		opts.ParentModel = strings.TrimSpace(session.Model)
+		opts.ParentReasoningEffort = strings.TrimSpace(session.ReasoningEffort)
+	}
+	for i := 0; i < len(fields); i++ {
+		token := strings.TrimSpace(fields[i])
+		if token == "" {
+			continue
+		}
+		lower := strings.ToLower(token)
+		valueFor := func(name string) (string, error) {
+			if strings.HasPrefix(lower, name+"=") {
+				return strings.TrimSpace(token[len(name)+1:]), nil
+			}
+			if i+1 >= len(fields) {
+				return "", fmt.Errorf("%s 需要指定值", token)
+			}
+			i++
+			return strings.TrimSpace(fields[i]), nil
+		}
+		switch {
+		case lower == "--role" || strings.HasPrefix(lower, "--role="):
+			value, err := valueFor("--role")
+			if err != nil {
+				return opts, err
+			}
+			opts.Role = value
+		case lower == "--goal" || strings.HasPrefix(lower, "--goal="):
+			value, err := valueFor("--goal")
+			if err != nil {
+				return opts, err
+			}
+			opts.Goal = value
+		case lower == "--difficulty" || strings.HasPrefix(lower, "--difficulty="):
+			value, err := valueFor("--difficulty")
+			if err != nil {
+				return opts, err
+			}
+			opts.Difficulty = value
+		case lower == "--difficulty-rationale" || strings.HasPrefix(lower, "--difficulty-rationale="):
+			value, err := valueFor("--difficulty-rationale")
+			if err != nil {
+				return opts, err
+			}
+			opts.DifficultyRationale = value
+		case lower == "--provider" || strings.HasPrefix(lower, "--provider="):
+			value, err := valueFor("--provider")
+			if err != nil {
+				return opts, err
+			}
+			opts.Provider = value
+		case lower == "--model" || strings.HasPrefix(lower, "--model="):
+			value, err := valueFor("--model")
+			if err != nil {
+				return opts, err
+			}
+			opts.Model = value
+		case lower == "--reasoning-effort" || strings.HasPrefix(lower, "--reasoning-effort="):
+			value, err := valueFor("--reasoning-effort")
+			if err != nil {
+				return opts, err
+			}
+			opts.ReasoningEffort = value
+		case lower == "--budget-tokens" || strings.HasPrefix(lower, "--budget-tokens="):
+			value, err := valueFor("--budget-tokens")
+			if err != nil {
+				return opts, err
+			}
+			budget, err := strconv.Atoi(value)
+			if err != nil || budget < 0 {
+				return opts, fmt.Errorf("--budget-tokens 必须是非负整数")
+			}
+			opts.BudgetTokens = budget
+		case lower == "--timeout" || strings.HasPrefix(lower, "--timeout="):
+			value, err := valueFor("--timeout")
+			if err != nil {
+				return opts, err
+			}
+			timeout, err := time.ParseDuration(value)
+			if err != nil {
+				return opts, fmt.Errorf("--timeout 必须是 Go duration，例如 300s: %w", err)
+			}
+			opts.Timeout = timeout
+		case lower == "--read-only":
+			opts.ReadOnly = true
+		case strings.HasPrefix(lower, "--read-only="):
+			value := strings.TrimSpace(token[len("--read-only="):])
+			readOnly, err := strconv.ParseBool(value)
+			if err != nil {
+				return opts, fmt.Errorf("--read-only 必须是 true 或 false")
+			}
+			opts.ReadOnly = readOnly
+		case lower == "--write" || lower == "--mutating":
+			opts.ReadOnly = false
+		default:
+			return opts, fmt.Errorf("未知 routing test 参数: %s", token)
+		}
+	}
+	return opts, nil
+}
+
+func printChatAgentRoutingUsage() {
+	fmt.Println("用法: /agents routing test --role <role> --difficulty <easy|normal|hard|expert> [--goal <text>] [--provider <name>] [--model <model>] [--reasoning-effort <value>] [--read-only=true]")
 }
 
 func sendChatAgentMessageCommand(session *ChatSession, argument string, trigger bool) error {
@@ -614,8 +867,43 @@ func chatAgentPickerOptionLine(agent toolbroker.AgentStatusResult) string {
 	if agent.AgentType != "" {
 		parts = append(parts, "type="+agent.AgentType)
 	}
+	parts = appendAgentRouteStatusParts(parts, agent)
 	parts = appendAgentTeamTaskParts(parts, agent)
 	return strings.Join(parts, " ")
+}
+
+func appendAgentRouteStatusParts(parts []string, agent toolbroker.AgentStatusResult) []string {
+	for _, field := range []struct {
+		Value string
+		Label string
+	}{
+		{Value: agent.Difficulty, Label: "difficulty"},
+		{Value: agent.DifficultySource, Label: "difficulty_source"},
+		{Value: agent.Provider, Label: "provider"},
+		{Value: agent.Model, Label: "model"},
+		{Value: agent.ReasoningEffort, Label: "reasoning"},
+		{Value: agent.RouteSource, Label: "route_source"},
+		{Value: agent.FallbackReason, Label: "fallback_reason"},
+	} {
+		if value := strings.TrimSpace(field.Value); value != "" {
+			parts = append(parts, field.Label+"="+value)
+		}
+	}
+	if agent.FallbackUsed {
+		parts = append(parts, "fallback_used=true")
+	}
+	if len(agent.RouteWarnings) > 0 {
+		warnings := make([]string, 0, len(agent.RouteWarnings))
+		for _, warning := range agent.RouteWarnings {
+			if warning = strings.TrimSpace(warning); warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
+		if len(warnings) > 0 {
+			parts = append(parts, "warnings="+strings.Join(warnings, ","))
+		}
+	}
+	return parts
 }
 
 func resolveChatAgentPickerChoice(choice string, agents []toolbroker.AgentStatusResult) *toolbroker.AgentStatusResult {
@@ -657,6 +945,9 @@ func chatAgentPickerSelectionLines(agent toolbroker.AgentStatusResult) []string 
 	}
 	if agent.AgentType != "" {
 		lines = append(lines, "  type="+agent.AgentType)
+	}
+	for _, part := range appendAgentRouteStatusParts(nil, agent) {
+		lines = append(lines, "  "+part)
 	}
 	if agent.TeamID != "" {
 		lines = append(lines, "  team="+agent.TeamID)
@@ -2335,10 +2626,26 @@ func appendAgentControlMetadataParts(parts []string, metadata map[string]interfa
 		{Key: "mailbox_kind", Label: "mailbox"},
 		{Key: "event_type", Label: "event"},
 		{Key: "target_session_id", Label: "target"},
+		{Key: "difficulty", Label: "difficulty"},
+		{Key: "difficulty_source", Label: "difficulty_source"},
+		{Key: "route_provider", Label: "provider"},
+		{Key: "route_model", Label: "model"},
+		{Key: "route_reasoning_effort", Label: "reasoning"},
+		{Key: "route_source", Label: "route_source"},
+		{Key: "fallback_reason", Label: "fallback_reason"},
 	} {
 		if value := payloadStringValue(metadata[field.Key]); value != "" {
 			parts = append(parts, field.Label+"="+value)
 		}
+	}
+	if payloadBoolValue(metadata, "fallback_used") {
+		parts = append(parts, "fallback_used=true")
+	}
+	if totalTokens := intPayloadValue(metadata, "usage_total_tokens"); totalTokens > 0 {
+		parts = append(parts, fmt.Sprintf("usage_total_tokens=%d", totalTokens))
+	}
+	if warnings := stringSliceValueAny(metadata["route_warnings"]); len(warnings) > 0 {
+		parts = append(parts, "warnings="+strings.Join(warnings, ","))
 	}
 	return parts
 }

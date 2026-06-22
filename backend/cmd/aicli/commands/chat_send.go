@@ -78,7 +78,7 @@ func finishSuccessfulChatSend(session *ChatSession, response string, noInteracti
 		return
 	}
 	handledByStreamFinalize := finalizeInteractiveActorStreamIfNeeded(session, response)
-	if shouldDisplayFinalResponse(session, response) && !handledByStreamFinalize && !wasInteractiveActorResponseAlreadyRendered(session) {
+	if shouldDisplayFinalResponse(session, response) && !handledByStreamFinalize && !wasInteractiveActorResponseAlreadyRendered(session, response) {
 		renderChatResponse(session, response)
 	} else if session.Stream && !noInteractive && !handledByStreamFinalize {
 		beginDirectInteractiveOutput(session)

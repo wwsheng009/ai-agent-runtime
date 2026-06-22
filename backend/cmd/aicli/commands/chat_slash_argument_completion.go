@@ -127,6 +127,7 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "off", Summary: "关闭会话 debug 模式", Group: string(chatSlashCommandGroupSession)},
 			{Command: "status", Summary: "查看会话 debug 模式状态", Group: string(chatSlashCommandGroupSession)},
 			{Command: "display", Summary: "显示当前会话调试信息", Group: string(chatSlashCommandGroupSession)},
+			{Command: "routing", Summary: "显示 subagent routing 配置摘要", Group: string(chatSlashCommandGroupSession)},
 			{Command: "export", Summary: "打包调试文件", Group: string(chatSlashCommandGroupSession)},
 			{Command: "zip", Summary: "打包调试文件", Group: string(chatSlashCommandGroupSession)},
 			{Command: "--output", Summary: "指定 zip 输出文件", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
@@ -193,6 +194,8 @@ func completeAgentsSlashArgs(session *ChatSession, argsText string, cursor int) 
 		return completeAgentsMessageTargetSlashArgs(session, ctx, query)
 	case "followup", "task":
 		return completeAgentsMessageTargetSlashArgs(session, ctx, query)
+	case "routing", "route":
+		return completeAgentsRoutingSlashArgs(session, ctx, query)
 	default:
 		return matchSlashArgumentCandidates(agentTopLevelArgumentCandidates(), query)
 	}
@@ -231,6 +234,101 @@ func agentTopLevelArgumentCandidates() []chatSlashCompletionCandidate {
 		{Command: "followup", Summary: "向目标 agent 投递或触发 follow-up task", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 		{Command: "select", Summary: "pick 的别名", Group: string(chatSlashCommandGroupSession)},
 		{Command: "task", Summary: "followup 的别名", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "routing", Summary: "预览 subagent difficulty route", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+	}
+}
+
+func completeAgentsRoutingSlashArgs(session *ChatSession, ctx slashArgumentContext, query string) []chatSlashCompletionCandidate {
+	second := slashArgumentTokenText(ctx, 1)
+	if second == "" || slashArgumentCursorInToken(ctx, 1) {
+		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "test", Summary: "dry-run route decision", Group: string(chatSlashCommandGroupSession)},
+			{Command: "dry-run", Summary: "test 的别名", Group: string(chatSlashCommandGroupSession)},
+			{Command: "dryrun", Summary: "test 的别名", Group: string(chatSlashCommandGroupSession)},
+			{Command: "preview", Summary: "test 的别名", Group: string(chatSlashCommandGroupSession)},
+			{Command: "summary", Summary: "显示 routing 配置摘要", Group: string(chatSlashCommandGroupSession)},
+			{Command: "status", Summary: "summary 的别名", Group: string(chatSlashCommandGroupSession)},
+			{Command: "config", Summary: "summary 的别名", Group: string(chatSlashCommandGroupSession)},
+		}, query)
+	}
+	if strings.EqualFold(second, "test") || strings.EqualFold(second, "dry-run") || strings.EqualFold(second, "dryrun") || strings.EqualFold(second, "preview") {
+		valueQuery := slashAgentsRoutingArgumentQuery(ctx)
+		switch slashAgentsRoutingArgumentFocus(ctx) {
+		case "difficulty":
+			return matchSlashArgumentCandidates(agentRoutingDifficultyArgumentCandidates(), valueQuery)
+		case "provider":
+			return matchSlashArgumentCandidates(providerNameArgumentCandidates(session), valueQuery)
+		case "model":
+			return matchSlashArgumentCandidates(runtimeModelArgumentCandidates(session), valueQuery)
+		case "reasoning":
+			return matchSlashArgumentCandidates(reasoningEffortArgumentCandidates(session), valueQuery)
+		}
+		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "--role", Summary: "子任务 role", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--difficulty", Summary: "子任务难度", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--goal", Summary: "子任务目标", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--provider", Summary: "显式 provider override", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--model", Summary: "显式 model override", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--reasoning-effort", Summary: "显式 reasoning_effort", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--read-only=true", Summary: "按只读任务预览", Group: string(chatSlashCommandGroupSession)},
+			{Command: "--read-only=false", Summary: "按可写任务预览", Group: string(chatSlashCommandGroupSession)},
+			{Command: "--write", Summary: "按可写任务预览", Group: string(chatSlashCommandGroupSession)},
+		}, query)
+	}
+	return nil
+}
+
+func slashAgentsRoutingArgumentFocus(ctx slashArgumentContext) string {
+	current := strings.ToLower(strings.TrimSpace(ctx.Current.Text))
+	previous := strings.ToLower(strings.TrimSpace(ctx.Previous.Text))
+	switch {
+	case strings.HasPrefix(current, "--difficulty="):
+		return "difficulty"
+	case strings.HasPrefix(current, "--provider="):
+		return "provider"
+	case strings.HasPrefix(current, "--model="):
+		return "model"
+	case strings.HasPrefix(current, "--reasoning-effort="):
+		return "reasoning"
+	case current == "--difficulty" || current == "--provider" || current == "--model" || current == "--reasoning-effort":
+		return "flags"
+	}
+	if ctx.CurrentOK && strings.HasPrefix(current, "-") {
+		return "flags"
+	}
+	switch previous {
+	case "--difficulty":
+		return "difficulty"
+	case "--provider":
+		return "provider"
+	case "--model":
+		return "model"
+	case "--reasoning-effort":
+		return "reasoning"
+	default:
+		return "general"
+	}
+}
+
+func slashAgentsRoutingArgumentQuery(ctx slashArgumentContext) string {
+	current := strings.TrimSpace(ctx.Current.Text)
+	switch slashAgentsRoutingArgumentFocus(ctx) {
+	case "difficulty", "provider", "model", "reasoning":
+		if value := slashArgumentAssignmentValue(current); value != "" || strings.Contains(current, "=") {
+			return value
+		}
+		return activeSlashArgumentQuery(ctx)
+	default:
+		return activeSlashArgumentQuery(ctx)
+	}
+}
+
+func agentRoutingDifficultyArgumentCandidates() []chatSlashCompletionCandidate {
+	return []chatSlashCompletionCandidate{
+		{Command: "easy", Summary: "低复杂度任务", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "normal", Summary: "常规任务", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "hard", Summary: "复杂任务", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "expert", Summary: "高风险或高不确定性任务", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 	}
 }
 

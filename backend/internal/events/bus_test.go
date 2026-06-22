@@ -221,8 +221,22 @@ func TestBus_RecentTraces_ExecutionSummaryAndToolFilter(t *testing.T) {
 	bus.Publish(Event{Type: "tool.completed", TraceID: "trace-1", ToolName: "read_logs"})
 	bus.Publish(Event{Type: "tool.reduced", TraceID: "trace-1", ToolName: "read_logs", Payload: map[string]interface{}{"reducer": "text_truncation", "artifact_ref_count": 1}})
 	bus.Publish(Event{Type: "subagent.batch.started", TraceID: "trace-1", ToolName: "spawn_subagents"})
-	bus.Publish(Event{Type: "subagent.started", TraceID: "trace-1", Payload: map[string]interface{}{"role": "researcher"}})
-	bus.Publish(Event{Type: "subagent.completed", TraceID: "trace-1", Payload: map[string]interface{}{"role": "researcher"}})
+	bus.Publish(Event{Type: "subagent.started", TraceID: "trace-1", Payload: map[string]interface{}{
+		"role":                   "researcher",
+		"difficulty":             "hard",
+		"route_source":           "difficulty_level",
+		"route_provider":         "remote",
+		"route_model":            "strong-model",
+		"route_reasoning_effort": "high",
+		"route_warnings":         []interface{}{"provider_fallback_parent"},
+	}})
+	bus.Publish(Event{Type: "subagent.completed", TraceID: "trace-1", Payload: map[string]interface{}{
+		"role":               "researcher",
+		"difficulty":         "hard",
+		"route_provider":     "remote",
+		"route_model":        "strong-model",
+		"usage_total_tokens": 1200,
+	}})
 	bus.Publish(Event{Type: "subagent.batch.completed", TraceID: "trace-1", ToolName: "spawn_subagents"})
 	bus.Publish(Event{Type: "patch.applied", TraceID: "trace-1", ToolName: "spawn_subagents", Payload: map[string]interface{}{"applied_by": []interface{}{"writer-1"}, "artifact_ref_count": 2}})
 	bus.Publish(Event{Type: "tool.reduced", TraceID: "trace-2", ToolName: "run_tests", Payload: map[string]interface{}{"reducer": "go_test_json"}})
@@ -253,8 +267,22 @@ func TestBus_RecentTraces_ExecutionSummaryAndToolFilter(t *testing.T) {
 	if trace.Execution.SubagentRoles["researcher"] != 1 {
 		t.Fatalf("unexpected subagent role summary: %#v", trace.Execution.SubagentRoles)
 	}
+	if trace.Execution.SubagentDifficulties["hard"] != 1 ||
+		trace.Execution.SubagentRouteSources["difficulty_level"] != 1 ||
+		trace.Execution.SubagentRouteProviders["remote"] != 1 ||
+		trace.Execution.SubagentRouteModels["strong-model"] != 1 ||
+		trace.Execution.SubagentRouteReasoningEfforts["high"] != 1 ||
+		trace.Execution.SubagentRouteWarnings["provider_fallback_parent"] != 1 {
+		t.Fatalf("unexpected subagent route summary: %#v", trace.Execution)
+	}
 	if trace.Execution.PatchApplied != 1 || trace.Execution.AppliedBy["writer-1"] != 1 {
 		t.Fatalf("unexpected patch apply summary: %#v", trace.Execution)
+	}
+	if trace.Execution.SubagentUsageTotalTokens != 1200 ||
+		trace.Execution.SubagentUsageByDifficulty["hard"] != 1200 ||
+		trace.Execution.SubagentUsageByProvider["remote"] != 1200 ||
+		trace.Execution.SubagentUsageByModel["strong-model"] != 1200 {
+		t.Fatalf("unexpected subagent usage summary: %#v", trace.Execution)
 	}
 }
 
@@ -489,7 +517,23 @@ func TestBus_TraceStats_AggregatesRecentTraces(t *testing.T) {
 		Type:    "subagent.started",
 		TraceID: "trace-2",
 		Payload: map[string]interface{}{
-			"role": "verifier",
+			"role":                   "verifier",
+			"difficulty":             "normal",
+			"route_source":           "role_override",
+			"route_provider":         "local",
+			"route_model":            "verify-model",
+			"route_reasoning_effort": "low",
+			"route_warnings":         []string{"difficulty_missing_defaulted"},
+		},
+	})
+	bus.Publish(Event{
+		Type:    "subagent.completed",
+		TraceID: "trace-2",
+		Payload: map[string]interface{}{
+			"difficulty":         "normal",
+			"route_provider":     "local",
+			"route_model":        "verify-model",
+			"usage_total_tokens": 300,
 		},
 	})
 	bus.Publish(Event{
@@ -514,8 +558,8 @@ func TestBus_TraceStats_AggregatesRecentTraces(t *testing.T) {
 	if stats.TraceCount != 2 {
 		t.Fatalf("expected 2 traces, got %d", stats.TraceCount)
 	}
-	if stats.EventCount != 10 {
-		t.Fatalf("expected 10 events, got %d", stats.EventCount)
+	if stats.EventCount != 11 {
+		t.Fatalf("expected 11 events, got %d", stats.EventCount)
 	}
 	if stats.EventTypes["tool.requested"] != 1 || stats.EventTypes["tool.completed"] != 1 {
 		t.Fatalf("unexpected event type stats: %#v", stats.EventTypes)
@@ -553,8 +597,22 @@ func TestBus_TraceStats_AggregatesRecentTraces(t *testing.T) {
 	if stats.Execution.SubagentRoles["verifier"] != 1 {
 		t.Fatalf("unexpected subagent roles: %#v", stats.Execution.SubagentRoles)
 	}
+	if stats.Execution.SubagentDifficulties["normal"] != 1 ||
+		stats.Execution.SubagentRouteSources["role_override"] != 1 ||
+		stats.Execution.SubagentRouteProviders["local"] != 1 ||
+		stats.Execution.SubagentRouteModels["verify-model"] != 1 ||
+		stats.Execution.SubagentRouteReasoningEfforts["low"] != 1 ||
+		stats.Execution.SubagentRouteWarnings["difficulty_missing_defaulted"] != 1 {
+		t.Fatalf("unexpected subagent route stats: %#v", stats.Execution)
+	}
 	if stats.Recovery.PromptPreflightEvents != 1 || stats.Recovery.PromptPreflightByEventType["session_end"] != 1 {
 		t.Fatalf("unexpected prompt preflight recovery stats: %#v", stats.Recovery)
+	}
+	if stats.Execution.SubagentUsageTotalTokens != 300 ||
+		stats.Execution.SubagentUsageByDifficulty["normal"] != 300 ||
+		stats.Execution.SubagentUsageByProvider["local"] != 300 ||
+		stats.Execution.SubagentUsageByModel["verify-model"] != 300 {
+		t.Fatalf("unexpected subagent usage stats: %#v", stats.Execution)
 	}
 	if stats.Recovery.PromptPreflightFailureCodes["active_turn_not_compactable"] != 1 {
 		t.Fatalf("unexpected prompt preflight failure code stats: %#v", stats.Recovery.PromptPreflightFailureCodes)

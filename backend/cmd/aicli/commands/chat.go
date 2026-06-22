@@ -648,11 +648,11 @@ func shouldDisplayActorStreamFallback(session *ChatSession) bool {
 	return ok
 }
 
-func wasInteractiveActorResponseAlreadyRendered(session *ChatSession) bool {
+func wasInteractiveActorResponseAlreadyRendered(session *ChatSession, response string) bool {
 	if session == nil || session.NoInteractive || session.JSONOutput || session.RuntimeEventBridge == nil {
 		return false
 	}
-	return chatExecutorUsesRuntimeEvents(session.ChatExecutor) && session.RuntimeEventBridge.HasRenderedAssistantFinal()
+	return chatExecutorUsesRuntimeEvents(session.ChatExecutor) && session.RuntimeEventBridge.HasRenderedAssistantFinalResponse(response)
 }
 
 func finalizeInteractiveActorStreamIfNeeded(session *ChatSession, response string) bool {
@@ -672,7 +672,7 @@ func finalizeInteractiveActorStreamIfNeeded(session *ChatSession, response strin
 		completed = true
 	}
 	if completed {
-		session.RuntimeEventBridge.MarkAssistantFinalRendered()
+		session.RuntimeEventBridge.MarkAssistantFinalResponseRendered(response)
 	}
 	return completed
 }

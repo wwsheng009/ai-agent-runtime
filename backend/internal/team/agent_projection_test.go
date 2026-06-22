@@ -70,14 +70,16 @@ func TestAgentControlTaskRecordsProjectTeamTasks(t *testing.T) {
 	parentTaskID := "task-parent"
 	assignee := "member-1"
 	_, err = store.CreateTask(ctx, Task{
-		ID:           "task-child",
-		TeamID:       teamID,
-		ParentTaskID: &parentTaskID,
-		Title:        " Inspect docs ",
-		Status:       TaskStatusRunning,
-		Priority:     9,
-		Assignee:     &assignee,
-		Summary:      " in progress ",
+		ID:                  "task-child",
+		TeamID:              teamID,
+		ParentTaskID:        &parentTaskID,
+		Title:               " Inspect docs ",
+		Difficulty:          TaskDifficultyHard,
+		DifficultyRationale: "needs shared context",
+		Status:              TaskStatusRunning,
+		Priority:            9,
+		Assignee:            &assignee,
+		Summary:             " in progress ",
 	})
 	require.NoError(t, err)
 
@@ -95,6 +97,8 @@ func TestAgentControlTaskRecordsProjectTeamTasks(t *testing.T) {
 	require.Equal(t, "/root/teams/team-1/member-1", record.Path)
 	require.Equal(t, "Inspect docs", record.Title)
 	require.Equal(t, "in progress", record.Summary)
+	require.Equal(t, TaskDifficultyHard, record.Difficulty)
+	require.Equal(t, "needs shared context", record.DifficultyRationale)
 	require.Equal(t, "running", record.Status)
 	require.Equal(t, 9, record.Priority)
 	require.False(t, record.CreatedAt.IsZero())
@@ -105,6 +109,8 @@ func TestAgentControlTaskRecordsProjectTeamTasks(t *testing.T) {
 	require.NotNil(t, active)
 	require.Equal(t, record.ID, active.ID)
 	require.Equal(t, record.Path, active.Path)
+	require.Equal(t, record.Difficulty, active.Difficulty)
+	require.Equal(t, record.DifficultyRationale, active.DifficultyRationale)
 	require.Equal(t, record.Status, active.Status)
 
 	registry := NewAgentControlTaskRegistry(store)
@@ -118,6 +124,8 @@ func TestAgentControlTaskRecordsProjectTeamTasks(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
 	require.Equal(t, record.ID, filtered[0].ID)
+	require.Equal(t, record.Difficulty, filtered[0].Difficulty)
+	require.Equal(t, record.DifficultyRationale, filtered[0].DifficultyRationale)
 
 	unsupported, err := registry.ListAgentControlTasks(ctx, agentcontrol.TaskFilter{Workflow: agentcontrol.WorkflowSpawnAgent})
 	require.NoError(t, err)
@@ -204,35 +212,43 @@ func TestAgentControlTaskRegistryCreatesTask(t *testing.T) {
 
 	registry := NewAgentControlTaskRegistry(store)
 	record, err := registry.CreateAgentControlTask(ctx, agentcontrol.TaskCreateRequest{
-		ID:           "task-create",
-		Workflow:     agentcontrol.WorkflowSpawnTeam,
-		TeamID:       teamID,
-		Title:        " Inspect docs ",
-		Goal:         "Review docs",
-		Status:       string(TaskStatusReady),
-		Priority:     7,
-		Assignee:     assignee,
-		ReadPaths:    []string{"docs"},
-		WritePaths:   []string{"docs/plan"},
-		Deliverables: []string{"summary"},
-		Summary:      "new task",
+		ID:                  "task-create",
+		Workflow:            agentcontrol.WorkflowSpawnTeam,
+		TeamID:              teamID,
+		Title:               " Inspect docs ",
+		Goal:                "Review docs",
+		Difficulty:          " HARD ",
+		DifficultyRationale: " Requires cross-table review. ",
+		Status:              string(TaskStatusReady),
+		Priority:            7,
+		Assignee:            assignee,
+		ReadPaths:           []string{"docs"},
+		WritePaths:          []string{"docs/plan"},
+		Deliverables:        []string{"summary"},
+		Summary:             "new task",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, record)
 	require.Equal(t, "task-create", record.ID)
 	require.Equal(t, "ready", record.Status)
 	require.Equal(t, "Inspect docs", record.Title)
+	require.Equal(t, TaskDifficultyHard, record.Difficulty)
+	require.Equal(t, "Requires cross-table review.", record.DifficultyRationale)
 	require.Equal(t, "/root/teams/team-1/member-1", record.Path)
 
 	created, err := store.GetTask(ctx, "task-create")
 	require.NoError(t, err)
 	require.NotNil(t, created)
 	require.Equal(t, TaskStatusReady, created.Status)
+	require.Equal(t, TaskDifficultyHard, created.Difficulty)
+	require.Equal(t, "Requires cross-table review.", created.DifficultyRationale)
 	require.NotNil(t, created.Assignee)
 	require.Equal(t, assignee, *created.Assignee)
 
 	var (
 		goalRaw         string
+		difficultyRaw   string
+		rationaleRaw    string
 		inputsRaw       string
 		readPathsRaw    string
 		writePathsRaw   string
@@ -240,11 +256,13 @@ func TestAgentControlTaskRegistryCreatesTask(t *testing.T) {
 		versionRaw      int64
 	)
 	require.NoError(t, store.db.QueryRowContext(ctx, `
-		SELECT goal, inputs_json, read_paths_json, write_paths_json, deliverables_json, version
+		SELECT goal, difficulty, difficulty_rationale, inputs_json, read_paths_json, write_paths_json, deliverables_json, version
 		FROM agent_control_task_records
 		WHERE workflow = ? AND task_id = ?
-	`, agentcontrol.WorkflowSpawnTeam, "task-create").Scan(&goalRaw, &inputsRaw, &readPathsRaw, &writePathsRaw, &deliverablesRaw, &versionRaw))
+	`, agentcontrol.WorkflowSpawnTeam, "task-create").Scan(&goalRaw, &difficultyRaw, &rationaleRaw, &inputsRaw, &readPathsRaw, &writePathsRaw, &deliverablesRaw, &versionRaw))
 	require.Equal(t, "Review docs", goalRaw)
+	require.Equal(t, TaskDifficultyHard, difficultyRaw)
+	require.Equal(t, "Requires cross-table review.", rationaleRaw)
 	require.Equal(t, "[]", inputsRaw)
 	require.Equal(t, `["docs"]`, readPathsRaw)
 	require.Equal(t, `["docs/plan"]`, writePathsRaw)
@@ -281,18 +299,22 @@ func TestAgentControlTaskRegistryUpdatesTask(t *testing.T) {
 	status := string(TaskStatusReady)
 	priority := 7
 	summary := "patched through agentcontrol"
+	difficulty := TaskDifficultyExpert
+	difficultyRationale := "requires architecture review"
 	readPaths := []string{"docs", "backend"}
 	registry := NewAgentControlTaskRegistry(store)
 	record, err := registry.UpdateAgentControlTask(ctx, agentcontrol.TaskUpdateRequest{
-		ID:        taskID,
-		Workflow:  agentcontrol.WorkflowSpawnTeam,
-		TeamID:    teamID,
-		Title:     &title,
-		Status:    &status,
-		Priority:  &priority,
-		Assignee:  &assignee,
-		ReadPaths: &readPaths,
-		Summary:   &summary,
+		ID:                  taskID,
+		Workflow:            agentcontrol.WorkflowSpawnTeam,
+		TeamID:              teamID,
+		Title:               &title,
+		Difficulty:          &difficulty,
+		DifficultyRationale: &difficultyRationale,
+		Status:              &status,
+		Priority:            &priority,
+		Assignee:            &assignee,
+		ReadPaths:           &readPaths,
+		Summary:             &summary,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, record)
@@ -300,6 +322,8 @@ func TestAgentControlTaskRegistryUpdatesTask(t *testing.T) {
 	require.Equal(t, "ready", record.Status)
 	require.Equal(t, assignee, record.Assignee)
 	require.Equal(t, "New title", record.Title)
+	require.Equal(t, TaskDifficultyExpert, record.Difficulty)
+	require.Equal(t, "requires architecture review", record.DifficultyRationale)
 	require.Equal(t, "patched through agentcontrol", record.Summary)
 
 	updated, err := store.GetTask(ctx, taskID)
@@ -309,7 +333,36 @@ func TestAgentControlTaskRegistryUpdatesTask(t *testing.T) {
 	require.Equal(t, 7, updated.Priority)
 	require.NotNil(t, updated.Assignee)
 	require.Equal(t, assignee, *updated.Assignee)
+	require.Equal(t, TaskDifficultyExpert, updated.Difficulty)
+	require.Equal(t, "requires architecture review", updated.DifficultyRationale)
 	require.Equal(t, []string{"docs", "backend"}, updated.ReadPaths)
+}
+
+func TestAgentControlTaskRegistryRejectsInvalidDifficulty(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:     "task-invalid-difficulty",
+		TeamID: teamID,
+		Title:  "Invalid difficulty",
+		Status: TaskStatusPending,
+	})
+	require.NoError(t, err)
+
+	difficulty := "impossible"
+	_, err = NewAgentControlTaskRegistry(store).UpdateAgentControlTask(ctx, agentcontrol.TaskUpdateRequest{
+		ID:         taskID,
+		Workflow:   agentcontrol.WorkflowSpawnTeam,
+		TeamID:     teamID,
+		Difficulty: &difficulty,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported task difficulty")
 }
 
 func TestAgentControlTaskRegistryCreatesTaskDependency(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -243,7 +244,9 @@ func refreshLocalRuntimeAfterModelSelection(session *ChatSession) error {
 
 func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *ChatSession, sessionStore runtimechat.SessionStorage, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string) (*runtimechat.SessionActor, error) {
 	childAgentType := ""
+	requestedProvider := ""
 	requestedModel := ""
+	requestedReasoningEffort := ""
 	baseSessionID := ""
 	if session != nil && session.RuntimeSession != nil {
 		baseSessionID = strings.TrimSpace(session.RuntimeSession.ID)
@@ -257,15 +260,16 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 				}
 			}
 			if !isBaseSession {
-				if value, ok := runtimeSession.GetContext(toolbroker.AgentSessionContextRequestedModel); ok {
-					if text, ok := value.(string); ok {
-						requestedModel = strings.TrimSpace(text)
-					}
+				requestedProvider = agentcontrol.ContextString(runtimeSession, sessionmeta.ProviderName)
+				requestedModel = agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextRequestedModel)
+				if requestedModel == "" {
+					requestedModel = agentcontrol.ContextString(runtimeSession, sessionmeta.Model)
 				}
+				requestedReasoningEffort = agentcontrol.ContextString(runtimeSession, sessionmeta.ReasoningEffort)
 			}
 		}
 	}
-	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, childAgentType, requestedModel)
+	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, childAgentType, requestedModel, requestedProvider, requestedReasoningEffort)
 	leaseHandle, leaseErr := acquireLocalChatSessionLease(context.Background(), h.RuntimeStore, sessionID)
 	if leaseErr != nil {
 		return nil, leaseErr
@@ -277,7 +281,7 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		StateStore:   h.RuntimeStore,
 		EventStore:   h.EventStore,
 		EventBus:     h.EventBus,
-		LoopConfig:   buildLocalChatLoopConfig(runtimeConfig, session),
+		LoopConfig:   buildLocalChatLoopConfig(runtimeConfig, session, requestedReasoningEffort),
 		PrepareRun:   localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
 		PersistHook:  localGoalPersistHook(sessionStore),
 		OnStop: func() {
@@ -346,7 +350,15 @@ func sanitizeLocalChatLeaseOwnerPart(value string) string {
 	return value
 }
 
-func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string, childAgentType string, requestedModel string) *agent.Agent {
+func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string, childAgentType string, requestedModel string, requestedRoute ...string) *agent.Agent {
+	requestedProvider := ""
+	requestedReasoningEffort := ""
+	if len(requestedRoute) > 0 {
+		requestedProvider = strings.TrimSpace(requestedRoute[0])
+	}
+	if len(requestedRoute) > 1 {
+		requestedReasoningEffort = strings.TrimSpace(requestedRoute[1])
+	}
 	agentConfig := &agent.Config{
 		Name:         firstNonEmptyChatValue(strings.TrimSpace(childAgentType), "aicli-chat"),
 		Provider:     resolveLocalChatAgentProvider(session, host),
@@ -359,6 +371,9 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			agentConfig.DefaultMaxTokens = maxTokens
 		}
 	}
+	if requestedProvider != "" {
+		agentConfig.Provider = requestedProvider
+	}
 	if strings.TrimSpace(requestedModel) != "" {
 		agentConfig.Model = strings.TrimSpace(requestedModel)
 	}
@@ -367,12 +382,20 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 	workspaceMode := resolveLocalChatWorkspaceMode(runtimeConfig)
 	workspaceContextEnabled := workspaceMode != "" && !strings.EqualFold(workspaceMode, contextmgr.WorkspaceModeDisabled)
-	if session.Stream || (workspaceRoot != "" && workspaceContextEnabled) || len(session.ProfileContext) > 0 {
+	stream := session != nil && session.Stream
+	var profileContext map[string]interface{}
+	sessionReasoningEffort := ""
+	if session != nil {
+		profileContext = session.ProfileContext
+		sessionReasoningEffort = session.ReasoningEffort
+	}
+	reasoningEffort := firstNonEmptyChatValue(requestedReasoningEffort, sessionReasoningEffort)
+	if stream || strings.TrimSpace(reasoningEffort) != "" || (workspaceRoot != "" && workspaceContextEnabled) || len(profileContext) > 0 {
 		agentConfig.Options = make(map[string]interface{})
-		if session.Stream {
+		if stream {
 			agentConfig.Options["stream"] = true
 		}
-		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
+		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(reasoningEffort); reasoningEffort != "" {
 			agentConfig.Options["reasoning_effort"] = reasoningEffort
 		}
 		if workspaceRoot != "" && workspaceContextEnabled {
@@ -380,13 +403,16 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			agentConfig.Options["context_workspace_mode"] = workspaceMode
 			agentConfig.Options["context_min_workspace_query_length"] = 4
 		}
-		if len(session.ProfileContext) > 0 {
-			agentConfig.Options["profile_context"] = cloneSkillContextMap(session.ProfileContext)
+		if len(profileContext) > 0 {
+			agentConfig.Options["profile_context"] = cloneSkillContextMap(profileContext)
 		}
 	}
 	applyLocalChatContextOptions(agentConfig, runtimeConfig)
 
 	apiAgent := agent.NewAgentWithLLM(agentConfig, host.ToolSurface, host.Bootstrap.LLMRuntime())
+	apiAgent.SetSubagentScheduler(agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
+		Routing: localChatSubagentRoutingConfig(session),
+	}))
 	if registry := host.Bootstrap.Registry(); registry != nil {
 		for _, summary := range registry.ListSummaries() {
 			if summary == nil {
@@ -508,6 +534,9 @@ func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) st
 			"When planning file or directory work, only use paths that you directly confirmed from tool output in the current workspace. Do not invent sibling directories or extrapolate missing paths from naming patterns.",
 			"Team-only tools such as read_task_spec, read_task_context, send_team_message, read_mailbox_digest, report_task_outcome, and block_current_task require an active team run. Only call them after spawn_team has created the team run or when the current chat is already bound to an active team task.",
 			"When calling team tools, leave teammate session_id unset unless you truly need a fixed explicit session. Never use session_id=\"current\" for teammates.",
+			"For simple single-command checks such as `git status`, inspect them directly in the parent session; do not spawn a child agent unless the user explicitly asks for subagents or the task benefits from parallel delegation.",
+			"When the user explicitly requests a trusted bounded child agent task that must run local tools, pass spawn_agent permission_mode=\"bypass_permissions\" only if the task is safe and scoped; otherwise keep the default approval behavior and expect the child may wait for approval.",
+			"If a spawn_agent child reaches waiting_approval, inspect pending_approval_id or the approval_requested event and call resolve_agent_approval with allow=true or allow=false; do not repeatedly wait, poll, rerun the same tool in the parent, or start a fallback agent for that approval.",
 			"When calling spawn_team from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
 			"When you call spawn_team with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",
 			"After spawn_team auto_start=true, call wait_team with the returned team_id to wait for durable team.completed/team.summary. Do not use wait_agent or read_agent_events for spawn_team teammate ids such as member-1; those tools are only for spawn_agent child sessions.",
@@ -547,7 +576,7 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 	return policy
 }
 
-func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *ChatSession) *agent.LoopReActConfig {
+func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *ChatSession, requestedReasoningEffort ...string) *agent.LoopReActConfig {
 	config := &agent.LoopReActConfig{
 		MaxSteps:             0,
 		EnableThought:        true,
@@ -563,12 +592,25 @@ func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *
 			config.MaxParallelToolCalls = runtimeConfig.Agent.MaxParallelToolCalls
 		}
 	}
+	if len(requestedReasoningEffort) > 0 {
+		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(requestedReasoningEffort[0]); reasoningEffort != "" {
+			config.ReasoningEffort = reasoningEffort
+			return config
+		}
+	}
 	if session != nil {
 		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort); reasoningEffort != "" {
 			config.ReasoningEffort = reasoningEffort
 		}
 	}
 	return config
+}
+
+func localChatSubagentRoutingConfig(session *ChatSession) *config.AICLISubagentRoutingConfig {
+	if session == nil || session.Config == nil || session.Config.AICLI == nil || session.Config.AICLI.Subagents == nil {
+		return nil
+	}
+	return session.Config.AICLI.Subagents.Routing
 }
 
 func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runtimecfg.RuntimeConfig) {

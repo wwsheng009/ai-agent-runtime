@@ -336,8 +336,63 @@ func TestBuildSubagentTasksFromPlan_WriterVerifierGraph(t *testing.T) {
 	if tasks[1].Role != "verifier" {
 		t.Fatalf("expected second task to be verifier, got %s", tasks[1].Role)
 	}
+	if tasks[0].Difficulty != "normal" || tasks[1].Difficulty != "normal" {
+		t.Fatalf("expected planner tasks to default to normal difficulty, got %+v", tasks)
+	}
 	if len(tasks[1].DependsOn) != 1 || tasks[1].DependsOn[0] != "step_write" {
 		t.Fatalf("expected verifier to depend on writer, got %+v", tasks[1].DependsOn)
+	}
+}
+
+func TestBuildSubagentTasksFromPlan_CopiesDifficultyMetadata(t *testing.T) {
+	plan := &Plan{
+		Goal: "Investigate provider routing",
+		Steps: []PlanStep{
+			{
+				ID:                  "step_research",
+				Description:         "Inspect routing implementation",
+				Tool:                "read_file",
+				Priority:            1,
+				Difficulty:          "hard",
+				DifficultyRationale: "Touches provider routing policy.",
+			},
+		},
+	}
+
+	tasks := BuildSubagentTasksFromPlan(plan)
+	if len(tasks) != 1 {
+		t.Fatalf("expected one subagent task, got %d", len(tasks))
+	}
+	if tasks[0].Difficulty != "hard" ||
+		tasks[0].DifficultyRationale != "Touches provider routing policy." {
+		t.Fatalf("expected difficulty metadata to be copied, got %+v", tasks[0])
+	}
+}
+
+func TestBuildSubagentTasksFromPlan_HardWriterAddsHardVerifier(t *testing.T) {
+	plan := &Plan{
+		Goal: "Implement provider migration",
+		Steps: []PlanStep{
+			{
+				ID:                  "step_write",
+				Description:         "Write provider migration",
+				Tool:                "write_file",
+				Priority:            1,
+				Difficulty:          "expert",
+				DifficultyRationale: "Provider migration risk.",
+			},
+		},
+	}
+
+	tasks := BuildSubagentTasksFromPlan(plan)
+	if len(tasks) != 2 {
+		t.Fatalf("expected writer plus auto verifier, got %+v", tasks)
+	}
+	if tasks[0].Difficulty != "expert" {
+		t.Fatalf("expected writer difficulty to be copied, got %+v", tasks[0])
+	}
+	if tasks[1].Role != "verifier" || tasks[1].Difficulty != "hard" {
+		t.Fatalf("expected hard auto verifier, got %+v", tasks[1])
 	}
 }
 
@@ -351,6 +406,29 @@ func TestValidatePlannedSubagentExecution_BlocksMultipleWriters(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "only one writer") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidatePlannedSubagentExecution_BlocksHardWriterWithNormalVerifier(t *testing.T) {
+	err := ValidatePlannedSubagentExecution([]SubagentTask{
+		{ID: "writer_1", Role: "writer", Difficulty: "hard", ReadOnly: false, ToolsWhitelist: []string{"write_file"}},
+		{ID: "verifier_1", Role: "verifier", Difficulty: "normal", ReadOnly: true, ToolsWhitelist: []string{"run_tests"}, DependsOn: []string{"writer_1"}},
+	}, nil, true)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "requires a hard-or-higher verifier") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidatePlannedSubagentExecution_AllowsHardWriterWithHardVerifier(t *testing.T) {
+	err := ValidatePlannedSubagentExecution([]SubagentTask{
+		{ID: "writer_1", Role: "writer", Difficulty: "hard", ReadOnly: false, ToolsWhitelist: []string{"write_file"}},
+		{ID: "verifier_1", Role: "verifier", Difficulty: "hard", ReadOnly: true, ToolsWhitelist: []string{"run_tests"}, DependsOn: []string{"writer_1"}},
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("expected hard verifier to satisfy policy, got %v", err)
 	}
 }
 

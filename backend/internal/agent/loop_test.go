@@ -2,12 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -37,8 +40,19 @@ type SequenceLLMProvider struct {
 	responses         []*llm.LLMResponse
 	callCount         int
 	requests          []*llm.LLMRequest
+	defaultModel      string
 	providerCaps      *llm.ModelCapabilities
 	modelCapabilities map[string]agentconfig.ModelCapabilitySpec
+}
+
+type BlockingLLMProvider struct {
+	name         string
+	release      <-chan struct{}
+	entered      chan struct{}
+	mu           sync.Mutex
+	active       int
+	maxActive    int
+	requestCount int
 }
 
 func (m *MockLLMProvider) Name() string {
@@ -83,6 +97,10 @@ func (m *MockLLMProvider) CheckHealth(ctx context.Context) error {
 
 func (s *SequenceLLMProvider) Name() string {
 	return s.name
+}
+
+func (s *SequenceLLMProvider) DefaultModelName() string {
+	return strings.TrimSpace(s.defaultModel)
 }
 
 func (s *SequenceLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
@@ -148,6 +166,70 @@ func (s *SequenceLLMProvider) GetCapabilities() *llm.ModelCapabilities {
 
 func (s *SequenceLLMProvider) CheckHealth(ctx context.Context) error {
 	return nil
+}
+
+func (p *BlockingLLMProvider) Name() string {
+	return p.name
+}
+
+func (p *BlockingLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	p.mu.Lock()
+	p.active++
+	p.requestCount++
+	if p.active > p.maxActive {
+		p.maxActive = p.active
+	}
+	p.mu.Unlock()
+
+	select {
+	case p.entered <- struct{}{}:
+	default:
+	}
+
+	defer func() {
+		p.mu.Lock()
+		p.active--
+		p.mu.Unlock()
+	}()
+
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return &llm.LLMResponse{Content: "Expert child summary.", Model: req.Model}, nil
+}
+
+func (p *BlockingLLMProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
+	return nil, nil
+}
+
+func (p *BlockingLLMProvider) CountTokens(text string) int {
+	return len(text) / 4
+}
+
+func (p *BlockingLLMProvider) GetCapabilities() *llm.ModelCapabilities {
+	return &llm.ModelCapabilities{
+		MaxContextTokens: 128000,
+		MaxOutputTokens:  4096,
+		SupportsTools:    true,
+	}
+}
+
+func (p *BlockingLLMProvider) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
+func (p *BlockingLLMProvider) MaxActive() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.maxActive
+}
+
+func (p *BlockingLLMProvider) RequestCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.requestCount
 }
 
 type RetrySequenceLLMProvider struct {
@@ -378,6 +460,37 @@ func TestReActLoop_RunWithSession_PropagatesStreamOptionToLLMRequest(t *testing.
 	if !provider.requests[0].Stream {
 		t.Fatalf("expected stream=true on provider request, got %#v", provider.requests[0])
 	}
+}
+
+func TestResolvePromptPreflightProviderModelUsesLoopConfigOverride(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "default-provider",
+		DefaultModel:    "default-model",
+	})
+	baseProvider := &SequenceLLMProvider{name: "base-provider"}
+	routeProvider := &SequenceLLMProvider{name: "route-provider"}
+	require.NoError(t, runtime.RegisterProvider(baseProvider.Name(), baseProvider))
+	require.NoError(t, runtime.RegisterProvider(routeProvider.Name(), routeProvider))
+
+	agent := &Agent{
+		config: &Config{
+			Name:     "preflight-route-test",
+			Provider: "base-provider",
+			Model:    "base-model",
+		},
+	}
+	loopConfig := &LoopReActConfig{
+		Provider: "route-provider",
+		Model:    "route-model",
+	}
+
+	provider, model := resolvePromptPreflightProviderModel(runtime, agent, loopConfig)
+	require.Equal(t, "route-provider", provider)
+	require.Equal(t, "route-model", model)
+
+	provider, model = resolvePromptPreflightProviderModel(runtime, agent, nil)
+	require.Equal(t, "base-provider", provider)
+	require.Equal(t, "base-model", model)
 }
 
 func TestReActLoop_RunWithSession_ForcesStreamForImageGenerationCapability(t *testing.T) {
@@ -2344,6 +2457,32 @@ func TestReActLoop_Run_SpawnSubagentsUsesStructuredReports(t *testing.T) {
 	}
 }
 
+func TestDecodeSubagentTasksReadsRoutingFields(t *testing.T) {
+	tasks, err := decodeSubagentTasks(map[string]interface{}{
+		"agents": []interface{}{
+			map[string]interface{}{
+				"id":                   "child-1",
+				"role":                 "verifier",
+				"goal":                 "Verify the implementation.",
+				"difficulty":           "hard",
+				"difficulty_rationale": "Touches provider routing.",
+				"provider":             "local-strong",
+				"model":                "strong-model",
+				"thinking_effort":      "high",
+				"read_only":            true,
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "hard", tasks[0].Difficulty)
+	assert.Equal(t, "Touches provider routing.", tasks[0].DifficultyRationale)
+	assert.Equal(t, "local-strong", tasks[0].Provider)
+	assert.Equal(t, "strong-model", tasks[0].Model)
+	assert.Equal(t, "high", tasks[0].ReasoningEffort)
+	assert.Contains(t, tasks[0].RouteWarnings, "thinking_effort_alias_used")
+}
+
 func TestReActLoop_Run_SpawnSubagentsChildUsesPromptBuilder(t *testing.T) {
 	agent := &Agent{
 		config: &Config{
@@ -2475,6 +2614,574 @@ func TestSubagentScheduler_RunChildren_AppliesBudgetAndSessionIsolation(t *testi
 	assert.Equal(t, 10.0, completedUsageTotal)
 	require.Len(t, provider.requests, 1)
 	assert.Equal(t, 1024, provider.requests[0].MaxTokens)
+}
+
+func TestSubagentScheduler_RunChildren_RoutesByDifficulty(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:             "test-agent",
+			Provider:         "parent-provider",
+			Model:            "parent-model",
+			MaxSteps:         3,
+			DefaultMaxTokens: 512,
+			SystemPrompt:     "Parent system prompt.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "parent-provider",
+		DefaultModel:    "parent-model",
+		MaxRetries:      0,
+	})
+	parentProvider := &SequenceLLMProvider{name: "parent-provider"}
+	hardProvider := &SequenceLLMProvider{
+		name: "hard-provider",
+		responses: []*llm.LLMResponse{
+			{Content: "Hard child summary.", Model: "hard-model", Usage: &types.TokenUsage{TotalTokens: 17}},
+		},
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"hard-model": {ReasoningModel: true, ReasoningEfforts: []string{"high"}},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("parent-provider", parentProvider))
+	require.NoError(t, llmRuntime.RegisterProvider("hard-provider", hardProvider))
+	agent.llmRuntime = llmRuntime
+
+	enabled := true
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 1,
+		MaxDepth:      1,
+		Routing: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled: &enabled,
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				"hard": {
+					Provider:        "hard-provider",
+					Model:           "hard-model",
+					ReasoningEffort: "high",
+					MaxTokens:       4096,
+				},
+			},
+		},
+	})
+
+	bus := runtimeevents.NewBus()
+	var startPayload map[string]interface{}
+	bus.Subscribe("subagent.started", func(event runtimeevents.Event) {
+		startPayload = event.Payload
+	})
+	agent.SetEventBus(bus)
+	hookPayloads := make(chan map[string]interface{}, 4)
+	hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload := map[string]interface{}{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			payload["_decode_error"] = err.Error()
+		}
+		payload["_hook_path"] = strings.TrimPrefix(r.URL.Path, "/")
+		hookPayloads <- payload
+		_, _ = w.Write([]byte(`{"action":"continue"}`))
+	}))
+	defer hookServer.Close()
+	agent.SetHookManager(runtimehooks.NewManager([]runtimehooks.HookConfig{
+		{
+			ID:    "subagent-start-route-audit",
+			Event: runtimehooks.EventSubagentStart,
+			Exec:  runtimehooks.ExecConfig{Type: "http", URL: hookServer.URL + "/start", Method: http.MethodPost},
+		},
+		{
+			ID:    "subagent-stop-route-audit",
+			Event: runtimehooks.EventSubagentStop,
+			Exec:  runtimehooks.ExecConfig{Type: "http", URL: hookServer.URL + "/stop", Method: http.MethodPost},
+		},
+	}))
+
+	results, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{
+		TraceID:         "trace_route",
+		ParentSessionID: "parent-session",
+		Depth:           1,
+	}, []SubagentTask{
+		{
+			ID:                  "hard-child",
+			Role:                "researcher",
+			Goal:                "Analyze the provider migration.",
+			Difficulty:          "hard",
+			DifficultyRationale: "Cross-provider behavior.",
+			BudgetTokens:        8192,
+			ReadOnly:            true,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Len(t, hardProvider.requests, 1)
+	assert.Equal(t, "hard-provider", hardProvider.requests[0].Provider)
+	assert.Equal(t, "hard-model", hardProvider.requests[0].Model)
+	assert.Equal(t, "high", hardProvider.requests[0].ReasoningEffort)
+	assert.Equal(t, 4096, hardProvider.requests[0].MaxTokens)
+	assert.Contains(t, hardProvider.requests[0].Messages[0].Content, "Subtask difficulty: hard.")
+	assert.Contains(t, hardProvider.requests[0].Messages[0].Content, "Runtime routing: provider=hard-provider, model=hard-model, reasoning_effort=high, source=difficulty_level.")
+	require.NotNil(t, startPayload)
+	assert.Equal(t, "hard", startPayload["difficulty"])
+	assert.Equal(t, "explicit", startPayload["difficulty_source"])
+	assert.Equal(t, "hard-provider", startPayload["route_provider"])
+	assert.Equal(t, "hard-model", startPayload["route_model"])
+	assert.Equal(t, "high", startPayload["route_reasoning_effort"])
+	warnings, ok := startPayload["route_warnings"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, warnings, "budget_tokens_capped_by_route")
+	hookStartPayload, hookStopPayload := waitForSubagentHookPayloads(t, hookPayloads)
+	assert.Equal(t, "hard", hookStartPayload["difficulty"])
+	assert.Equal(t, "hard-provider", hookStartPayload["route_provider"])
+	assert.Equal(t, "hard-model", hookStartPayload["route_model"])
+	assert.Equal(t, "difficulty_level", hookStartPayload["route_source"])
+	assert.Equal(t, "hard", hookStopPayload["difficulty"])
+	assert.Equal(t, "hard-provider", hookStopPayload["route_provider"])
+	assert.Equal(t, "hard-model", hookStopPayload["route_model"])
+	assert.Equal(t, float64(17), hookStopPayload["usage_total_tokens"])
+}
+
+func waitForSubagentHookPayloads(t *testing.T, payloads <-chan map[string]interface{}) (map[string]interface{}, map[string]interface{}) {
+	t.Helper()
+	var startPayload map[string]interface{}
+	var stopPayload map[string]interface{}
+	deadline := time.After(2 * time.Second)
+	for startPayload == nil || stopPayload == nil {
+		select {
+		case payload := <-payloads:
+			require.Empty(t, payload["_decode_error"])
+			switch payload["_hook_path"] {
+			case "start":
+				startPayload = payload
+			case "stop":
+				stopPayload = payload
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for subagent hook payloads: start=%#v stop=%#v", startPayload, stopPayload)
+		}
+	}
+	return startPayload, stopPayload
+}
+
+func TestSubagentScheduler_RunChildren_ProviderOnlyRouteUsesProviderDefaultModel(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:             "test-agent",
+			Provider:         "parent-provider",
+			Model:            "parent-model",
+			MaxSteps:         3,
+			DefaultMaxTokens: 512,
+			SystemPrompt:     "Parent system prompt.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "parent-provider",
+		DefaultModel:    "parent-model",
+		MaxRetries:      0,
+	})
+	parentProvider := &SequenceLLMProvider{name: "parent-provider"}
+	hardProvider := &SequenceLLMProvider{
+		name:         "hard-provider",
+		defaultModel: "hard-default-model",
+		responses: []*llm.LLMResponse{
+			{Content: "Hard child summary.", Model: "hard-default-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("parent-provider", parentProvider))
+	require.NoError(t, llmRuntime.RegisterProvider("hard-provider", hardProvider))
+	agent.llmRuntime = llmRuntime
+
+	enabled := true
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 1,
+		MaxDepth:      1,
+		Routing: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled: &enabled,
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				"hard": {Provider: "hard-provider"},
+			},
+		},
+	})
+
+	bus := runtimeevents.NewBus()
+	var startPayload map[string]interface{}
+	bus.Subscribe("subagent.started", func(event runtimeevents.Event) {
+		startPayload = event.Payload
+	})
+	agent.SetEventBus(bus)
+
+	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{Depth: 1}, []SubagentTask{
+		{ID: "hard-child", Goal: "Analyze provider migration.", Difficulty: "hard", ReadOnly: true},
+	})
+	require.NoError(t, err)
+	require.Len(t, hardProvider.requests, 1)
+	assert.Equal(t, "hard-provider", hardProvider.requests[0].Provider)
+	assert.Equal(t, "hard-default-model", hardProvider.requests[0].Model)
+	require.NotNil(t, startPayload)
+	assert.Equal(t, "hard-default-model", startPayload["route_model"])
+	warnings, ok := startPayload["route_warnings"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, warnings, "model_default_provider")
+}
+
+func TestSubagentScheduler_RunChildren_RoutingDisabledPreservesLegacyModelOnlyOverride(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:             "test-agent",
+			Provider:         "parent-provider",
+			Model:            "parent-model",
+			MaxSteps:         3,
+			DefaultMaxTokens: 512,
+			SystemPrompt:     "Parent system prompt.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "parent-provider",
+		DefaultModel:    "parent-model",
+		MaxRetries:      0,
+	})
+	parentProvider := &SequenceLLMProvider{
+		name: "parent-provider",
+		responses: []*llm.LLMResponse{
+			{Content: "Legacy child summary.", Model: "legacy-child-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("parent-provider", parentProvider))
+	agent.llmRuntime = llmRuntime
+
+	disabled := false
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 1,
+		MaxDepth:      1,
+		Routing: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled:           &disabled,
+			DefaultDifficulty: "not-a-real-difficulty",
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				"hard": {Provider: "hard-provider", Model: "hard-model", ReasoningEffort: "high"},
+			},
+		},
+	})
+
+	bus := runtimeevents.NewBus()
+	var startPayload map[string]interface{}
+	bus.Subscribe("subagent.started", func(event runtimeevents.Event) {
+		startPayload = event.Payload
+	})
+	agent.SetEventBus(bus)
+
+	results, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{Depth: 1}, []SubagentTask{
+		{
+			ID:              "legacy-child",
+			Goal:            "Inspect legacy route behavior.",
+			Provider:        "ignored-provider",
+			Model:           "legacy-child-model",
+			ReasoningEffort: "high",
+			BudgetTokens:    1024,
+			ReadOnly:        true,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, parentProvider.requests, 1, "results=%+v", results)
+	assert.Equal(t, "parent-provider", parentProvider.requests[0].Provider)
+	assert.Equal(t, "legacy-child-model", parentProvider.requests[0].Model)
+	assert.Equal(t, "", parentProvider.requests[0].ReasoningEffort)
+	assert.Equal(t, 1024, parentProvider.requests[0].MaxTokens)
+	require.NotNil(t, startPayload)
+	assert.Equal(t, "disabled", startPayload["route_source"])
+}
+
+func TestSubagentScheduler_RunChildren_EmitsInvalidDifficultyWarning(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Provider:     "parent-provider",
+			Model:        "parent-model",
+			MaxSteps:     3,
+			SystemPrompt: "Parent system prompt.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "parent-provider",
+		DefaultModel:    "parent-model",
+		MaxRetries:      0,
+	})
+	provider := &SequenceLLMProvider{
+		name: "parent-provider",
+		responses: []*llm.LLMResponse{
+			{Content: "Child summary.", Model: "parent-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("parent-provider", provider))
+	agent.llmRuntime = llmRuntime
+
+	enabled := true
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 1,
+		MaxDepth:      1,
+		Routing: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled:           &enabled,
+			DefaultDifficulty: "normal",
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				"normal": {Provider: "parent-provider", Model: "parent-model"},
+			},
+		},
+	})
+
+	bus := runtimeevents.NewBus()
+	var startPayload map[string]interface{}
+	bus.Subscribe("subagent.started", func(event runtimeevents.Event) {
+		startPayload = event.Payload
+	})
+	agent.SetEventBus(bus)
+
+	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{Depth: 1}, []SubagentTask{
+		{ID: "child", Goal: "Inspect behavior.", Difficulty: "复杂", ReadOnly: true},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, startPayload)
+	warnings, ok := startPayload["route_warnings"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, warnings, "difficulty_invalid_defaulted")
+}
+
+func TestSubagentScheduler_RunChildren_UnavailableRouteProviderFallsBackToParentRequest(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Provider:     "parent-provider",
+			Model:        "parent-model",
+			MaxSteps:     3,
+			SystemPrompt: "Parent system prompt.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "parent-provider",
+		DefaultModel:    "parent-model",
+		MaxRetries:      0,
+	})
+	parentProvider := &SequenceLLMProvider{
+		name: "parent-provider",
+		responses: []*llm.LLMResponse{
+			{Content: "Fallback child summary.", Model: "parent-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("parent-provider", parentProvider))
+	agent.llmRuntime = llmRuntime
+
+	enabled := true
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 1,
+		MaxDepth:      1,
+		Routing: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled: &enabled,
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				"hard": {Provider: "missing-provider", Model: "missing-model"},
+			},
+		},
+	})
+
+	bus := runtimeevents.NewBus()
+	var startPayload map[string]interface{}
+	bus.Subscribe("subagent.started", func(event runtimeevents.Event) {
+		startPayload = event.Payload
+	})
+	agent.SetEventBus(bus)
+
+	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{Depth: 1}, []SubagentTask{
+		{ID: "child", Goal: "Inspect fallback.", Difficulty: "hard", ReadOnly: true},
+	})
+	require.NoError(t, err)
+	require.Len(t, parentProvider.requests, 1)
+	assert.Equal(t, "parent-provider", parentProvider.requests[0].Provider)
+	assert.Equal(t, "parent-model", parentProvider.requests[0].Model)
+	require.NotNil(t, startPayload)
+	assert.Equal(t, "fallback", startPayload["route_source"])
+	assert.Equal(t, true, startPayload["fallback_used"])
+	assert.Equal(t, "provider_unresolved_parent", startPayload["fallback_reason"])
+	warnings, ok := startPayload["route_warnings"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, warnings, "provider_unresolved")
+	assert.Contains(t, warnings, "provider_fallback_parent")
+	assert.Contains(t, warnings, "model_fallback_parent")
+}
+
+func TestSubagentScheduler_RunChildren_BlocksExplicitHardWriterWithoutVerifier(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Provider:     "parent-provider",
+			Model:        "parent-model",
+			MaxSteps:     3,
+			SystemPrompt: "Parent system prompt.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{MaxConcurrent: 1, MaxDepth: 1})
+
+	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{Depth: 1}, []SubagentTask{
+		{
+			ID:             "writer",
+			Role:           "writer",
+			Goal:           "Write provider migration.",
+			Difficulty:     "hard",
+			ReadOnly:       false,
+			ToolsWhitelist: []string{"write_file"},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires a read-only verifier dependency")
+}
+
+func TestSubagentScheduler_RunChildren_LimitsExpertConcurrency(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Provider:     "expert-provider",
+			Model:        "expert-model",
+			MaxSteps:     3,
+			SystemPrompt: "Parent system prompt.",
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+
+	release := make(chan struct{})
+	provider := &BlockingLLMProvider{
+		name:    "expert-provider",
+		release: release,
+		entered: make(chan struct{}, 2),
+	}
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "expert-provider",
+		DefaultModel:    "expert-model",
+		MaxRetries:      0,
+	})
+	require.NoError(t, llmRuntime.RegisterProvider("expert-provider", provider))
+	agent.llmRuntime = llmRuntime
+
+	enabled := true
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 2,
+		MaxDepth:      1,
+		Routing: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled:              &enabled,
+			MaxExpertConcurrency: 1,
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				"expert": {Provider: "expert-provider", Model: "expert-model"},
+			},
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{Depth: 1}, []SubagentTask{
+			{ID: "expert-1", Goal: "Inspect expert path one.", Difficulty: "expert", ReadOnly: true},
+			{ID: "expert-2", Goal: "Inspect expert path two.", Difficulty: "expert", ReadOnly: true},
+		})
+		done <- err
+	}()
+
+	select {
+	case <-provider.entered:
+	case <-time.After(time.Second):
+		t.Fatal("expected first expert request to start")
+	}
+	select {
+	case <-provider.entered:
+		t.Fatal("expected second expert request to wait for expert concurrency slot")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for expert subagents")
+	}
+	assert.Equal(t, 2, provider.RequestCount())
+	assert.Equal(t, 1, provider.MaxActive())
+}
+
+func TestSubagentScheduler_RunChildren_EmitsRoutingWarnings(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:             "test-agent",
+			Provider:         "parent-provider",
+			Model:            "parent-model",
+			MaxSteps:         3,
+			DefaultMaxTokens: 512,
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  &MockMCPManager{},
+	}
+
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "parent-provider",
+		DefaultModel:    "parent-model",
+		MaxRetries:      0,
+	})
+	provider := &SequenceLLMProvider{
+		name: "parent-provider",
+		responses: []*llm.LLMResponse{
+			{Content: "Child summary.", Model: "parent-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("parent-provider", provider))
+	agent.llmRuntime = llmRuntime
+
+	enabled := true
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 1,
+		MaxDepth:      1,
+		Routing: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled: &enabled,
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				"normal": {
+					Provider:        "parent-provider",
+					Model:           "parent-model",
+					ReasoningEffort: "high",
+				},
+			},
+		},
+	})
+
+	bus := runtimeevents.NewBus()
+	var startPayload map[string]interface{}
+	bus.Subscribe("subagent.started", func(event runtimeevents.Event) {
+		startPayload = event.Payload
+	})
+	agent.SetEventBus(bus)
+
+	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{Depth: 1}, []SubagentTask{
+		{ID: "child", Goal: "Inspect behavior.", ReadOnly: true},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, startPayload)
+	warnings, ok := startPayload["route_warnings"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, warnings, "difficulty_missing_defaulted")
+	assert.Contains(t, warnings, "reasoning_effort_capability_unknown")
 }
 
 func TestReActLoop_GetAvailableTools_ExposesStableManagerToolsAcrossGoals(t *testing.T) {
@@ -3344,6 +4051,100 @@ func TestSubagentScheduler_ReadOnlyRejectsWriteLikeTools(t *testing.T) {
 	assert.Contains(t, deniedReasons[0], "requested write-like tools")
 }
 
+func TestSubagentScheduler_RejectsDuplicateTaskID(t *testing.T) {
+	agent := &Agent{
+		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
+	}
+	bus := runtimeevents.NewBus()
+	var deniedReasons []string
+	bus.Subscribe("subagent.denied", func(event runtimeevents.Event) {
+		if reason, ok := event.Payload["reason"].(string); ok {
+			deniedReasons = append(deniedReasons, reason)
+		}
+	})
+	agent.SetEventBus(bus)
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent:       2,
+		MaxDepth:            1,
+		EnforceSingleWriter: true,
+	})
+
+	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{
+		TraceID: "trace_duplicate_id",
+		Depth:   1,
+	}, []SubagentTask{
+		{ID: "reader-1", Goal: "Inspect files", ReadOnly: true},
+		{ID: "reader-1", Goal: "Inspect logs", ReadOnly: true},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `duplicate subagent task id "reader-1"`)
+	assert.Contains(t, deniedReasons[0], `duplicate subagent task id "reader-1"`)
+}
+
+func TestSubagentScheduler_RejectsUnknownDependency(t *testing.T) {
+	agent := &Agent{
+		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
+	}
+	bus := runtimeevents.NewBus()
+	var deniedReasons []string
+	bus.Subscribe("subagent.denied", func(event runtimeevents.Event) {
+		if reason, ok := event.Payload["reason"].(string); ok {
+			deniedReasons = append(deniedReasons, reason)
+		}
+	})
+	agent.SetEventBus(bus)
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent:       2,
+		MaxDepth:            1,
+		EnforceSingleWriter: true,
+	})
+
+	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{
+		TraceID: "trace_unknown_dependency",
+		Depth:   1,
+	}, []SubagentTask{
+		{ID: "reader-1", Goal: "Inspect files", ReadOnly: true, DependsOn: []string{"missing-task"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `depends on unknown task "missing-task"`)
+	assert.Contains(t, deniedReasons[0], `depends on unknown task "missing-task"`)
+}
+
+func TestSubagentScheduler_RejectsDependencyCycle(t *testing.T) {
+	agent := &Agent{
+		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
+	}
+	bus := runtimeevents.NewBus()
+	var deniedPolicies []string
+	var deniedReasons []string
+	bus.Subscribe("subagent.denied", func(event runtimeevents.Event) {
+		if policy, ok := event.Payload["policy"].(string); ok {
+			deniedPolicies = append(deniedPolicies, policy)
+		}
+		if reason, ok := event.Payload["reason"].(string); ok {
+			deniedReasons = append(deniedReasons, reason)
+		}
+	})
+	agent.SetEventBus(bus)
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent:       2,
+		MaxDepth:            1,
+		EnforceSingleWriter: true,
+	})
+
+	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{
+		TraceID: "trace_dependency_cycle",
+		Depth:   1,
+	}, []SubagentTask{
+		{ID: "reader-1", Goal: "Inspect files", ReadOnly: true, DependsOn: []string{"reader-2"}},
+		{ID: "reader-2", Goal: "Inspect logs", ReadOnly: true, DependsOn: []string{"reader-1"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subagent dependency deadlock detected")
+	assert.Contains(t, deniedPolicies, "dependency")
+	assert.Contains(t, deniedReasons, "subagent dependency deadlock detected")
+}
+
 func TestSubagentScheduler_ReadOnlyParentRejectsWritableSubagent(t *testing.T) {
 	agent := &Agent{
 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
@@ -3535,10 +4336,12 @@ func cloneLLMRequest(req *llm.LLMRequest) *llm.LLMRequest {
 	}
 
 	cloned := &llm.LLMRequest{
-		Model:       req.Model,
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
-		Stream:      req.Stream,
+		Provider:        req.Provider,
+		Model:           req.Model,
+		MaxTokens:       req.MaxTokens,
+		Temperature:     req.Temperature,
+		ReasoningEffort: req.ReasoningEffort,
+		Stream:          req.Stream,
 	}
 	if len(req.Messages) > 0 {
 		cloned.Messages = make([]types.Message, len(req.Messages))

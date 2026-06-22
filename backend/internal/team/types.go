@@ -1,6 +1,9 @@
 package team
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // TeamStatus represents the lifecycle state of a team.
 type TeamStatus string
@@ -34,6 +37,31 @@ const (
 	TaskStatusFailed    TaskStatus = "failed"
 	TaskStatusCancelled TaskStatus = "cancelled"
 )
+
+const (
+	TaskDifficultyEasy   = "easy"
+	TaskDifficultyNormal = "normal"
+	TaskDifficultyHard   = "hard"
+	TaskDifficultyExpert = "expert"
+)
+
+// NormalizeTaskDifficulty canonicalizes task difficulty metadata.
+func NormalizeTaskDifficulty(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return "", true
+	case TaskDifficultyEasy:
+		return TaskDifficultyEasy, true
+	case TaskDifficultyNormal:
+		return TaskDifficultyNormal, true
+	case TaskDifficultyHard:
+		return TaskDifficultyHard, true
+	case TaskDifficultyExpert:
+		return TaskDifficultyExpert, true
+	default:
+		return "", false
+	}
+}
 
 // PathClaimMode indicates whether a path is claimed for read or write.
 type PathClaimMode string
@@ -72,25 +100,73 @@ type Teammate struct {
 
 // Task represents a unit of work assigned to a teammate.
 type Task struct {
-	ID           string     `json:"id"`
-	TeamID       string     `json:"team_id"`
-	ParentTaskID *string    `json:"parent_task_id,omitempty"`
-	Title        string     `json:"title"`
-	Goal         string     `json:"goal"`
-	Inputs       []string   `json:"inputs,omitempty"`
-	Status       TaskStatus `json:"status"`
-	Priority     int        `json:"priority"`
-	Assignee     *string    `json:"assignee,omitempty"`
-	LeaseUntil   *time.Time `json:"lease_until,omitempty"`
-	RetryCount   int        `json:"retry_count"`
-	ReadPaths    []string   `json:"read_paths,omitempty"`
-	WritePaths   []string   `json:"write_paths,omitempty"`
-	Deliverables []string   `json:"deliverables,omitempty"`
-	Summary      string     `json:"summary,omitempty"`
-	ResultRef    *string    `json:"result_ref,omitempty"`
-	Version      int64      `json:"version"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID                  string     `json:"id"`
+	TeamID              string     `json:"team_id"`
+	ParentTaskID        *string    `json:"parent_task_id,omitempty"`
+	Title               string     `json:"title"`
+	Goal                string     `json:"goal"`
+	Difficulty          string     `json:"difficulty,omitempty"`
+	DifficultyRationale string     `json:"difficulty_rationale,omitempty"`
+	Inputs              []string   `json:"inputs,omitempty"`
+	Status              TaskStatus `json:"status"`
+	Priority            int        `json:"priority"`
+	Assignee            *string    `json:"assignee,omitempty"`
+	LeaseUntil          *time.Time `json:"lease_until,omitempty"`
+	RetryCount          int        `json:"retry_count"`
+	ReadPaths           []string   `json:"read_paths,omitempty"`
+	WritePaths          []string   `json:"write_paths,omitempty"`
+	Deliverables        []string   `json:"deliverables,omitempty"`
+	Summary             string     `json:"summary,omitempty"`
+	ResultRef           *string    `json:"result_ref,omitempty"`
+	Version             int64      `json:"version"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+// TaskExecutionRoute describes the model route selected for a single task run.
+type TaskExecutionRoute struct {
+	Difficulty          string    `json:"difficulty,omitempty"`
+	DifficultySource    string    `json:"difficulty_source,omitempty"`
+	DifficultyRationale string    `json:"difficulty_rationale,omitempty"`
+	Provider            string    `json:"provider,omitempty"`
+	Model               string    `json:"model,omitempty"`
+	ReasoningEffort     string    `json:"reasoning_effort,omitempty"`
+	Source              string    `json:"source,omitempty"`
+	Warnings            []string  `json:"warnings,omitempty"`
+	FallbackUsed        bool      `json:"fallback_used,omitempty"`
+	FallbackReason      string    `json:"fallback_reason,omitempty"`
+	ResolvedAt          time.Time `json:"resolved_at,omitempty"`
+	Attempt             int       `json:"attempt,omitempty"`
+	Error               string    `json:"error,omitempty"`
+}
+
+// Clone returns a defensive copy of TaskExecutionRoute.
+func (r *TaskExecutionRoute) Clone() *TaskExecutionRoute {
+	if r == nil {
+		return nil
+	}
+	clone := *r
+	clone.Warnings = append([]string(nil), r.Warnings...)
+	return &clone
+}
+
+// TaskRouteAudit records the route decision associated with a task execution.
+type TaskRouteAudit struct {
+	TeamID     string              `json:"team_id,omitempty"`
+	AgentID    string              `json:"agent_id,omitempty"`
+	TaskID     string              `json:"task_id,omitempty"`
+	SessionID  string              `json:"session_id,omitempty"`
+	Route      *TaskExecutionRoute `json:"route,omitempty"`
+	Strict     bool                `json:"strict,omitempty"`
+	Disabled   bool                `json:"disabled,omitempty"`
+	RecordedAt time.Time           `json:"recorded_at,omitempty"`
+	Error      string              `json:"error,omitempty"`
+}
+
+// Clone returns a defensive copy of TaskRouteAudit.
+func (a TaskRouteAudit) Clone() TaskRouteAudit {
+	a.Route = a.Route.Clone()
+	return a
 }
 
 // MailMessage represents a message exchanged inside the team mailbox.

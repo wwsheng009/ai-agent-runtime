@@ -244,12 +244,63 @@ func taskDispatchPayload(request TaskTriggerRequest) map[string]interface{} {
 		"prompt_chars": utf8.RuneCountInString(request.Prompt),
 		"via":          taskDispatchViaAgentControl,
 	}
+	if difficulty := strings.TrimSpace(request.Difficulty); difficulty != "" {
+		payload["difficulty"] = difficulty
+	}
+	if rationale := strings.TrimSpace(request.DifficultyRationale); rationale != "" {
+		payload["difficulty_rationale"] = rationale
+	}
+	appendTaskDispatchRoutePayload(payload, request.Route)
 	if request.RunMeta != nil {
 		if permissionMode := strings.TrimSpace(request.RunMeta.PermissionMode); permissionMode != "" {
 			payload["permission_mode"] = permissionMode
 		}
 	}
 	return payload
+}
+
+func appendTaskDispatchRoutePayload(payload map[string]interface{}, route *TaskExecutionRoute) {
+	if payload == nil || route == nil {
+		return
+	}
+	if difficulty := strings.TrimSpace(route.Difficulty); difficulty != "" {
+		payload["difficulty"] = difficulty
+	}
+	if source := strings.TrimSpace(route.DifficultySource); source != "" {
+		payload["difficulty_source"] = source
+	}
+	if rationale := strings.TrimSpace(route.DifficultyRationale); rationale != "" {
+		payload["difficulty_rationale"] = rationale
+	}
+	if provider := strings.TrimSpace(route.Provider); provider != "" {
+		payload["route_provider"] = provider
+	}
+	if model := strings.TrimSpace(route.Model); model != "" {
+		payload["route_model"] = model
+	}
+	if effort := strings.TrimSpace(route.ReasoningEffort); effort != "" {
+		payload["route_reasoning_effort"] = effort
+	}
+	if source := strings.TrimSpace(route.Source); source != "" {
+		payload["route_source"] = source
+	}
+	if len(route.Warnings) > 0 {
+		payload["route_warnings"] = append([]string(nil), route.Warnings...)
+	}
+	payload["fallback"] = route.FallbackUsed
+	payload["fallback_used"] = route.FallbackUsed
+	if reason := strings.TrimSpace(route.FallbackReason); reason != "" {
+		payload["fallback_reason"] = reason
+	}
+	if !route.ResolvedAt.IsZero() {
+		payload["route_resolved_at"] = route.ResolvedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if route.Attempt > 0 {
+		payload["route_attempt"] = route.Attempt
+	}
+	if routeError := strings.TrimSpace(route.Error); routeError != "" {
+		payload["route_error"] = truncateLine(routeError, 240)
+	}
 }
 
 func appendTaskDispatchResultPayload(payload map[string]interface{}, result *SessionResult, dispatchErr error) {

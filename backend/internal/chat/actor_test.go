@@ -284,6 +284,83 @@ func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
 	require.NotEmpty(t, events)
 }
 
+func TestSessionActorSubmitPromptRouteOverrideAppliesToNextLLMRequestOnly(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-route-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "base-provider",
+		DefaultModel:    "base-model",
+		MaxRetries:      0,
+	})
+	baseProvider := &capturingSequenceProvider{
+		name: "base-provider",
+		responses: []*llm.LLMResponse{{
+			Content: "base reply",
+			Model:   "base-model",
+		}},
+	}
+	routeProvider := &capturingSequenceProvider{
+		name: "route-provider",
+		responses: []*llm.LLMResponse{{
+			Content: "route reply",
+			Model:   "route-model",
+		}},
+	}
+	require.NoError(t, runtime.RegisterProvider(baseProvider.Name(), baseProvider))
+	require.NoError(t, runtime.RegisterProvider(routeProvider.Name(), routeProvider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-route-test",
+		Provider: "base-provider",
+		Model:    "base-model",
+		MaxSteps: 1,
+	}, nil, runtime)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   NewInMemoryRuntimeStore(64),
+	})
+	require.NoError(t, err)
+
+	first, err := actor.SubmitPrompt(ctx, "Use the routed model for this run.", nil, SubmitPromptOption{
+		RouteOverride: &RunRouteOverride{
+			Provider:        "route-provider",
+			Model:           "route-model",
+			ReasoningEffort: "high",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, first)
+
+	require.Len(t, routeProvider.requests, 1)
+	require.Equal(t, "route-provider", routeProvider.requests[0].Provider)
+	require.Equal(t, "route-model", routeProvider.requests[0].Model)
+	require.Equal(t, "high", routeProvider.requests[0].ReasoningEffort)
+	require.Empty(t, baseProvider.requests)
+
+	second, err := actor.SubmitPrompt(ctx, "Use the base model for this run.", nil)
+	require.NoError(t, err)
+	require.NotNil(t, second)
+
+	require.Len(t, routeProvider.requests, 1)
+	require.Len(t, baseProvider.requests, 1)
+	require.Equal(t, "base-provider", baseProvider.requests[0].Provider)
+	require.Equal(t, "base-model", baseProvider.requests[0].Model)
+	require.Empty(t, baseProvider.requests[0].ReasoningEffort)
+
+	cfg := apiAgent.GetConfig()
+	require.NotNil(t, cfg)
+	require.Equal(t, "base-provider", cfg.Provider)
+	require.Equal(t, "base-model", cfg.Model)
+}
+
 func TestSessionActorContinueUsesTransientPromptAndStripsIt(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()
@@ -460,6 +537,7 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 
 	assistantIndex := -1
 	sessionEndIndex := -1
+	var sessionEndPayload map[string]interface{}
 	for index, event := range events {
 		switch event.Type {
 		case EventAssistantMessage:
@@ -469,6 +547,7 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 		case EventSessionEnd:
 			if sessionEndIndex < 0 {
 				sessionEndIndex = index
+				sessionEndPayload = event.Payload
 			}
 		}
 	}
@@ -476,6 +555,10 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 	require.GreaterOrEqual(t, assistantIndex, 0)
 	require.GreaterOrEqual(t, sessionEndIndex, 0)
 	require.Less(t, assistantIndex, sessionEndIndex)
+	require.NotNil(t, result.Usage)
+	require.Equal(t, result.Usage.PromptTokens, sessionEndPayload["usage_prompt_tokens"])
+	require.Equal(t, result.Usage.CompletionTokens, sessionEndPayload["usage_completion_tokens"])
+	require.Equal(t, result.Usage.TotalTokens, sessionEndPayload["usage_total_tokens"])
 }
 
 func TestAppendStructuredRunErrorPayload_UsesPromptPreflightMetadata(t *testing.T) {

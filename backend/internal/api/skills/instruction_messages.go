@@ -11,12 +11,12 @@ import (
 func buildRuntimeInstructionMessages(profileState *profileRuntimeState, workspacePath, provider string) []types.Message {
 	layers := buildRuntimeInstructionLayers(profileState, workspacePath)
 	if layers.HasAny() {
-		return layers.CompileInstructionMessages(provider)
+		return withTaskDifficultyGuidance(layers.CompileInstructionMessages(provider))
 	}
 	if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
-		return []types.Message{*types.NewSystemMessage(strings.TrimSpace(profileState.PromptText))}
+		return withTaskDifficultyGuidance([]types.Message{*types.NewSystemMessage(strings.TrimSpace(profileState.PromptText))})
 	}
-	return nil
+	return withTaskDifficultyGuidance(nil)
 }
 
 func buildRuntimeInstructionLayers(profileState *profileRuntimeState, workspacePath string) *runtimeprompt.Layers {
@@ -113,6 +113,31 @@ func cloneInstructionMessages(messages []types.Message) []types.Message {
 		cloned = append(cloned, *message.Clone())
 	}
 	return cloned
+}
+
+func withTaskDifficultyGuidance(messages []types.Message) []types.Message {
+	guidance := strings.TrimSpace(runtimeprompt.RenderTaskDifficultyGuidance())
+	if guidance == "" {
+		return cloneInstructionMessages(messages)
+	}
+	cloned := cloneInstructionMessages(messages)
+	for index := range cloned {
+		if !strings.EqualFold(strings.TrimSpace(cloned[index].Role), "system") {
+			continue
+		}
+		content := strings.TrimSpace(cloned[index].Content)
+		if strings.Contains(content, "Task difficulty rating and subagent delegation policy:") {
+			return cloned
+		}
+		if content == "" {
+			cloned[index].Content = guidance
+		} else {
+			cloned[index].Content = content + "\n\n" + guidance
+		}
+		return cloned
+	}
+	guidanceMessage := *types.NewSystemMessage(guidance)
+	return append([]types.Message{guidanceMessage}, cloned...)
 }
 
 func primarySystemInstructionContent(messages []types.Message) string {

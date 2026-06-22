@@ -290,6 +290,71 @@ func TestRenderSharedChatToolEvent_AppendsShellContext(t *testing.T) {
 	}
 }
 
+func TestRenderSharedChatToolEvent_RendersTodosListAndUpdateState(t *testing.T) {
+	output := strings.Join([]string{
+		"任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
+		"任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
+		"当前任务列表:",
+		"1. [待处理] 分析需求 (新增)",
+		"2. [进行中] 修改实现 (新增)",
+		"3. [待处理] 运行测试 (新增)",
+	}, "\n")
+
+	got := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Stage:    "tool_result",
+		ToolName: "todos",
+		Arguments: map[string]interface{}{
+			"todos": []interface{}{1, 2, 3},
+		},
+		Output:  output,
+		Success: true,
+	})
+
+	want := strings.Join([]string{
+		"• Ran todos todos=[3]",
+		"  任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
+		"  任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
+		"  当前任务列表:",
+		"  1. [待处理] 分析需求 (新增)",
+		"  2. [进行中] 修改实现 (新增)",
+		"  3. [待处理] 运行测试 (新增)",
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected todos render:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
+func TestRenderChatRuntimeEvent_RendersTodosListFromEventToolName(t *testing.T) {
+	got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "todos",
+		Payload: map[string]interface{}{
+			"arg_preview": "todos=[3]",
+			"summary_lines": []interface{}{
+				"任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
+				"任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
+				"当前任务列表:",
+				"1. [待处理] 分析需求 (新增)",
+				"2. [进行中] 修改实现 (新增)",
+				"3. [待处理] 运行测试 (新增)",
+			},
+		},
+	})
+
+	want := strings.Join([]string{
+		"• Ran todos todos=[3]",
+		"  任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
+		"  任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
+		"  当前任务列表:",
+		"  1. [待处理] 分析需求 (新增)",
+		"  2. [进行中] 修改实现 (新增)",
+		"  3. [待处理] 运行测试 (新增)",
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected runtime todos render:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
 func TestRenderEditedDiffOutput_HandlesCreatedAndDeletedFiles(t *testing.T) {
 	output := strings.Join([]string{
 		"文件差异:",
@@ -613,6 +678,22 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "subagent.completed", Payload: map[string]interface{}{"agent_id": "writer"}}); got != "[subagent] completed writer" {
 		t.Fatalf("unexpected subagent render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: "subagent.completed",
+		Payload: map[string]interface{}{
+			"agent_id":               "writer",
+			"difficulty":             "hard",
+			"route_provider":         "remote",
+			"route_model":            "strong-model",
+			"route_reasoning_effort": "high",
+			"permission_mode":        "bypass_permissions",
+			"route_source":           "difficulty_level",
+			"route_warnings":         []interface{}{"provider_fallback_parent"},
+			"usage_total_tokens":     1200,
+		},
+	}); got != "[subagent] completed writer difficulty=hard provider=remote model=strong-model reasoning=high permission_mode=bypass_permissions route_source=difficulty_level usage_total_tokens=1200 warnings=provider_fallback_parent" {
+		t.Fatalf("unexpected routed subagent render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "tool.requested", ToolName: "ls", Payload: map[string]interface{}{"arg_preview": "path=src"}}); got != "• Running ls path=src" {
 		t.Fatalf("unexpected tool requested render: %q", got)
@@ -2195,6 +2276,7 @@ func TestChatRuntimeEvents_RendersAssistantDeltaAndFinalizesWithoutRepeatingResp
 	if !bridge.HasRenderedAssistantFinal() {
 		t.Fatal("expected bridge to remember rendered assistant final output")
 	}
+	require.True(t, bridge.HasRenderedAssistantFinalResponse("Hello"))
 }
 
 func TestChatRuntimeEvents_CompletesAssistantDeltaWithFinalMessageContent(t *testing.T) {
@@ -2241,6 +2323,7 @@ func TestChatRuntimeEvents_CompletesAssistantDeltaWithFinalMessageContent(t *tes
 	require.Equal(t, 0, renderedResponses)
 	require.True(t, bridge.HasRenderedAssistantDelta())
 	require.True(t, bridge.HasRenderedAssistantFinal())
+	require.True(t, bridge.HasRenderedAssistantFinalResponse("`E:\\projects\\ai\\ai-gateway` 的 git 状态如下：\n\n- 当前分支：`main`"))
 }
 
 func TestChatRuntimeEvents_MarksAssistantDeltaRenderedBeforeSlowWriteCompletes(t *testing.T) {
@@ -3363,12 +3446,91 @@ func TestChatRuntimeEvents_FlushesBufferedDeltaOnSessionEnd(t *testing.T) {
 	bridge.EndRun()
 
 	require.Equal(t, []string{"delta:Analyzing the issue...", "finalize", "PROMPT"}, rendered)
-	if !bridge.HasRenderedAssistantFinal() {
-		t.Fatal("expected assistant final flag after session_end flush")
+	if bridge.HasRenderedAssistantFinal() {
+		t.Fatal("expected session_end delta flush not to mark final assistant response rendered")
 	}
 	if finalized != 1 {
 		t.Fatalf("expected delta to be finalized on session_end, got %d finalizations", finalized)
 	}
+}
+
+func TestChatRuntimeEvents_RendersPrimaryAssistantMessageAfterSessionEndDeltaFlush(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	finalized := 0
+	bridge.writeDelta = func(delta string) {
+		rendered = append(rendered, "delta:"+delta)
+	}
+	bridge.finalizeDelta = func() {
+		rendered = append(rendered, "finalize")
+		finalized++
+	}
+	bridge.renderResponse = func(response string) {
+		rendered = append(rendered, "response:"+response)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": "Working..."},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"success": true},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"content": "Final parent response"},
+	})
+
+	require.Equal(t, []string{"delta:Working...", "finalize", "response:Final parent response"}, rendered)
+	require.Equal(t, 1, finalized)
+	require.True(t, bridge.HasRenderedAssistantFinal())
+	require.True(t, bridge.HasRenderedAssistantFinalResponse("Final parent response"))
+}
+
+func TestInteractiveActorResponseAlreadyRenderedRequiresMatchingContent(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+		ChatExecutor:   newAICLIActorChatExecutor(),
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	bridge.writeDelta = func(string) {}
+	bridge.finalizeDelta = func() {}
+	bridge.renderResponse = func(string) {}
+	bridge.writePrompt = func() {}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": "Working..."},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"success": true},
+	})
+
+	require.False(t, wasInteractiveActorResponseAlreadyRendered(session, "Final parent response"))
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"content": "Final parent response"},
+	})
+
+	require.True(t, wasInteractiveActorResponseAlreadyRendered(session, "Final parent response"))
+	require.False(t, wasInteractiveActorResponseAlreadyRendered(session, "Different final response"))
 }
 
 func TestChatRuntimeEvents_SkipsDeltaFlushOnSessionEndWhenAlreadyFinalized(t *testing.T) {

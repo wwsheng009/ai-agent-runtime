@@ -54,18 +54,45 @@ type TraceFilter struct {
 }
 
 type ExecutionView struct {
-	ToolRequested     int            `json:"tool_requested"`
-	ToolCompleted     int            `json:"tool_completed"`
-	ToolReduced       int            `json:"tool_reduced"`
-	ArtifactRefs      int            `json:"artifact_refs"`
-	Reducers          map[string]int `json:"reducers"`
-	SubagentBatches   int            `json:"subagent_batches"`
-	SubagentBatchDone int            `json:"subagent_batch_completed"`
-	SubagentStarted   int            `json:"subagent_started"`
-	SubagentCompleted int            `json:"subagent_completed"`
-	SubagentRoles     map[string]int `json:"subagent_roles"`
-	PatchApplied      int            `json:"patch_applied"`
-	AppliedBy         map[string]int `json:"applied_by"`
+	ToolRequested                 int            `json:"tool_requested"`
+	ToolCompleted                 int            `json:"tool_completed"`
+	ToolReduced                   int            `json:"tool_reduced"`
+	ArtifactRefs                  int            `json:"artifact_refs"`
+	Reducers                      map[string]int `json:"reducers"`
+	SubagentBatches               int            `json:"subagent_batches"`
+	SubagentBatchDone             int            `json:"subagent_batch_completed"`
+	SubagentStarted               int            `json:"subagent_started"`
+	SubagentCompleted             int            `json:"subagent_completed"`
+	SubagentRoles                 map[string]int `json:"subagent_roles"`
+	SubagentDifficulties          map[string]int `json:"subagent_difficulties,omitempty"`
+	SubagentRouteSources          map[string]int `json:"subagent_route_sources,omitempty"`
+	SubagentRouteProviders        map[string]int `json:"subagent_route_providers,omitempty"`
+	SubagentRouteModels           map[string]int `json:"subagent_route_models,omitempty"`
+	SubagentRouteReasoningEfforts map[string]int `json:"subagent_route_reasoning_efforts,omitempty"`
+	SubagentRouteWarnings         map[string]int `json:"subagent_route_warnings,omitempty"`
+	SubagentUsageTotalTokens      int            `json:"subagent_usage_total_tokens,omitempty"`
+	SubagentUsageByDifficulty     map[string]int `json:"subagent_usage_by_difficulty,omitempty"`
+	SubagentUsageByProvider       map[string]int `json:"subagent_usage_by_provider,omitempty"`
+	SubagentUsageByModel          map[string]int `json:"subagent_usage_by_model,omitempty"`
+	PatchApplied                  int            `json:"patch_applied"`
+	AppliedBy                     map[string]int `json:"applied_by"`
+}
+
+func newExecutionView() ExecutionView {
+	return ExecutionView{
+		Reducers:                      make(map[string]int),
+		SubagentRoles:                 make(map[string]int),
+		SubagentDifficulties:          make(map[string]int),
+		SubagentRouteSources:          make(map[string]int),
+		SubagentRouteProviders:        make(map[string]int),
+		SubagentRouteModels:           make(map[string]int),
+		SubagentRouteReasoningEfforts: make(map[string]int),
+		SubagentRouteWarnings:         make(map[string]int),
+		SubagentUsageByDifficulty:     make(map[string]int),
+		SubagentUsageByProvider:       make(map[string]int),
+		SubagentUsageByModel:          make(map[string]int),
+		AppliedBy:                     make(map[string]int),
+	}
 }
 
 type ProvenanceView struct {
@@ -426,11 +453,7 @@ func (b *Bus) RecentTraces(filter TraceFilter) []TraceSummary {
 						Reasons:       make(map[string]int),
 						PatchPolicies: make(map[string]int),
 					},
-					Execution: ExecutionView{
-						Reducers:      make(map[string]int),
-						SubagentRoles: make(map[string]int),
-						AppliedBy:     make(map[string]int),
-					},
+					Execution: newExecutionView(),
 					Provenance: ProvenanceView{
 						ProfileResourceKinds: make(map[string]int),
 					},
@@ -540,11 +563,7 @@ func (b *Bus) TraceStats(filter TraceFilter) TraceStats {
 			Reasons:       make(map[string]int),
 			PatchPolicies: make(map[string]int),
 		},
-		Execution: ExecutionView{
-			Reducers:      make(map[string]int),
-			SubagentRoles: make(map[string]int),
-			AppliedBy:     make(map[string]int),
-		},
+		Execution: newExecutionView(),
 		Provenance: ProvenanceView{
 			ProfileResourceKinds: make(map[string]int),
 		},
@@ -637,6 +656,34 @@ func (b *Bus) TraceStats(filter TraceFilter) TraceStats {
 		for role, count := range trace.Execution.SubagentRoles {
 			stats.Execution.SubagentRoles[role] += count
 		}
+		for difficulty, count := range trace.Execution.SubagentDifficulties {
+			stats.Execution.SubagentDifficulties[difficulty] += count
+		}
+		for source, count := range trace.Execution.SubagentRouteSources {
+			stats.Execution.SubagentRouteSources[source] += count
+		}
+		for provider, count := range trace.Execution.SubagentRouteProviders {
+			stats.Execution.SubagentRouteProviders[provider] += count
+		}
+		for model, count := range trace.Execution.SubagentRouteModels {
+			stats.Execution.SubagentRouteModels[model] += count
+		}
+		for effort, count := range trace.Execution.SubagentRouteReasoningEfforts {
+			stats.Execution.SubagentRouteReasoningEfforts[effort] += count
+		}
+		for warning, count := range trace.Execution.SubagentRouteWarnings {
+			stats.Execution.SubagentRouteWarnings[warning] += count
+		}
+		stats.Execution.SubagentUsageTotalTokens += trace.Execution.SubagentUsageTotalTokens
+		for difficulty, tokens := range trace.Execution.SubagentUsageByDifficulty {
+			stats.Execution.SubagentUsageByDifficulty[difficulty] += tokens
+		}
+		for provider, tokens := range trace.Execution.SubagentUsageByProvider {
+			stats.Execution.SubagentUsageByProvider[provider] += tokens
+		}
+		for model, tokens := range trace.Execution.SubagentUsageByModel {
+			stats.Execution.SubagentUsageByModel[model] += tokens
+		}
 		for actor, count := range trace.Execution.AppliedBy {
 			stats.Execution.AppliedBy[actor] += count
 		}
@@ -698,11 +745,7 @@ func (b *Bus) GovernanceStats(filter TraceFilter) GovernanceStats {
 		TeamIDs:       make(map[string]int),
 		Tools:         make(map[string]int),
 		MCPNames:      make(map[string]int),
-		Execution: ExecutionView{
-			Reducers:      make(map[string]int),
-			SubagentRoles: make(map[string]int),
-			AppliedBy:     make(map[string]int),
-		},
+		Execution:     newExecutionView(),
 		Provenance: ProvenanceView{
 			ProfileResourceKinds: make(map[string]int),
 		},
@@ -941,6 +984,33 @@ func applyExecutionEvent(summary *ExecutionView, event Event) {
 	if summary.SubagentRoles == nil {
 		summary.SubagentRoles = make(map[string]int)
 	}
+	if summary.SubagentDifficulties == nil {
+		summary.SubagentDifficulties = make(map[string]int)
+	}
+	if summary.SubagentRouteSources == nil {
+		summary.SubagentRouteSources = make(map[string]int)
+	}
+	if summary.SubagentRouteProviders == nil {
+		summary.SubagentRouteProviders = make(map[string]int)
+	}
+	if summary.SubagentRouteModels == nil {
+		summary.SubagentRouteModels = make(map[string]int)
+	}
+	if summary.SubagentRouteReasoningEfforts == nil {
+		summary.SubagentRouteReasoningEfforts = make(map[string]int)
+	}
+	if summary.SubagentRouteWarnings == nil {
+		summary.SubagentRouteWarnings = make(map[string]int)
+	}
+	if summary.SubagentUsageByDifficulty == nil {
+		summary.SubagentUsageByDifficulty = make(map[string]int)
+	}
+	if summary.SubagentUsageByProvider == nil {
+		summary.SubagentUsageByProvider = make(map[string]int)
+	}
+	if summary.SubagentUsageByModel == nil {
+		summary.SubagentUsageByModel = make(map[string]int)
+	}
 	if summary.AppliedBy == nil {
 		summary.AppliedBy = make(map[string]int)
 	}
@@ -965,14 +1035,60 @@ func applyExecutionEvent(summary *ExecutionView, event Event) {
 		if role, ok := stringPayloadValue(event.Payload, "role"); ok {
 			summary.SubagentRoles[role]++
 		}
+		applySubagentRouteExecutionEvent(summary, event)
 	case "subagent.completed":
 		summary.SubagentCompleted++
+		applySubagentRouteUsageEvent(summary, event)
 	case "patch.applied":
 		summary.PatchApplied++
 		summary.ArtifactRefs += intPayloadValue(event.Payload, "artifact_ref_count")
 		for _, actor := range stringSlicePayloadValue(event.Payload, "applied_by") {
 			summary.AppliedBy[actor]++
 		}
+	}
+}
+
+func applySubagentRouteExecutionEvent(summary *ExecutionView, event Event) {
+	if summary == nil {
+		return
+	}
+	if difficulty, ok := stringPayloadValue(event.Payload, "difficulty"); ok {
+		summary.SubagentDifficulties[difficulty]++
+	}
+	if source, ok := stringPayloadValue(event.Payload, "route_source"); ok {
+		summary.SubagentRouteSources[source]++
+	}
+	if provider, ok := stringPayloadValue(event.Payload, "route_provider"); ok {
+		summary.SubagentRouteProviders[provider]++
+	}
+	if model, ok := stringPayloadValue(event.Payload, "route_model"); ok {
+		summary.SubagentRouteModels[model]++
+	}
+	if effort, ok := stringPayloadValue(event.Payload, "route_reasoning_effort"); ok {
+		summary.SubagentRouteReasoningEfforts[effort]++
+	}
+	for _, warning := range stringSlicePayloadValue(event.Payload, "route_warnings") {
+		summary.SubagentRouteWarnings[warning]++
+	}
+}
+
+func applySubagentRouteUsageEvent(summary *ExecutionView, event Event) {
+	if summary == nil {
+		return
+	}
+	usage := intPayloadValue(event.Payload, "usage_total_tokens")
+	if usage <= 0 {
+		return
+	}
+	summary.SubagentUsageTotalTokens += usage
+	if difficulty, ok := stringPayloadValue(event.Payload, "difficulty"); ok {
+		summary.SubagentUsageByDifficulty[difficulty] += usage
+	}
+	if provider, ok := stringPayloadValue(event.Payload, "route_provider"); ok {
+		summary.SubagentUsageByProvider[provider] += usage
+	}
+	if model, ok := stringPayloadValue(event.Payload, "route_model"); ok {
+		summary.SubagentUsageByModel[model] += usage
 	}
 }
 

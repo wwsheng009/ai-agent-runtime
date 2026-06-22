@@ -25,23 +25,33 @@ const (
 // intentionally separate from chat session state: sessions remain execution
 // containers, while AgentRecord is the durable control-plane identity.
 type AgentRecord struct {
-	Seq             int64      `json:"seq,omitempty"`
-	AgentID         string     `json:"agent_id,omitempty"`
-	RootSessionID   string     `json:"root_session_id,omitempty"`
-	ParentAgentID   string     `json:"parent_agent_id,omitempty"`
-	ParentSessionID string     `json:"parent_session_id,omitempty"`
-	SessionID       string     `json:"session_id,omitempty"`
-	AgentPath       string     `json:"agent_path,omitempty"`
-	Depth           int        `json:"depth,omitempty"`
-	AgentType       string     `json:"agent_type,omitempty"`
-	Nickname        string     `json:"nickname,omitempty"`
-	Workflow        string     `json:"workflow,omitempty"`
-	TeamID          string     `json:"team_id,omitempty"`
-	TeammateID      string     `json:"teammate_id,omitempty"`
-	Status          string     `json:"status,omitempty"`
-	CreatedAt       time.Time  `json:"created_at,omitempty"`
-	UpdatedAt       time.Time  `json:"updated_at,omitempty"`
-	ClosedAt        *time.Time `json:"closed_at,omitempty"`
+	Seq                 int64      `json:"seq,omitempty"`
+	AgentID             string     `json:"agent_id,omitempty"`
+	RootSessionID       string     `json:"root_session_id,omitempty"`
+	ParentAgentID       string     `json:"parent_agent_id,omitempty"`
+	ParentSessionID     string     `json:"parent_session_id,omitempty"`
+	SessionID           string     `json:"session_id,omitempty"`
+	AgentPath           string     `json:"agent_path,omitempty"`
+	Depth               int        `json:"depth,omitempty"`
+	AgentType           string     `json:"agent_type,omitempty"`
+	Nickname            string     `json:"nickname,omitempty"`
+	Workflow            string     `json:"workflow,omitempty"`
+	TeamID              string     `json:"team_id,omitempty"`
+	TeammateID          string     `json:"teammate_id,omitempty"`
+	Provider            string     `json:"provider,omitempty"`
+	Model               string     `json:"model,omitempty"`
+	ReasoningEffort     string     `json:"reasoning_effort,omitempty"`
+	Difficulty          string     `json:"difficulty,omitempty"`
+	DifficultySource    string     `json:"difficulty_source,omitempty"`
+	DifficultyRationale string     `json:"difficulty_rationale,omitempty"`
+	RouteSource         string     `json:"route_source,omitempty"`
+	RouteWarnings       []string   `json:"route_warnings,omitempty"`
+	FallbackUsed        bool       `json:"fallback_used,omitempty"`
+	FallbackReason      string     `json:"fallback_reason,omitempty"`
+	Status              string     `json:"status,omitempty"`
+	CreatedAt           time.Time  `json:"created_at,omitempty"`
+	UpdatedAt           time.Time  `json:"updated_at,omitempty"`
+	ClosedAt            *time.Time `json:"closed_at,omitempty"`
 }
 
 // Normalize returns a stable AgentRecord shape for storage and comparison.
@@ -57,6 +67,15 @@ func (r AgentRecord) Normalize() AgentRecord {
 	r.Workflow = strings.TrimSpace(r.Workflow)
 	r.TeamID = strings.TrimSpace(r.TeamID)
 	r.TeammateID = strings.TrimSpace(r.TeammateID)
+	r.Provider = strings.TrimSpace(r.Provider)
+	r.Model = strings.TrimSpace(r.Model)
+	r.ReasoningEffort = strings.TrimSpace(r.ReasoningEffort)
+	r.Difficulty = strings.TrimSpace(r.Difficulty)
+	r.DifficultySource = strings.TrimSpace(r.DifficultySource)
+	r.DifficultyRationale = strings.TrimSpace(r.DifficultyRationale)
+	r.RouteSource = strings.TrimSpace(r.RouteSource)
+	r.RouteWarnings = trimAgentRecordStrings(r.RouteWarnings)
+	r.FallbackReason = strings.TrimSpace(r.FallbackReason)
 	r.Status = strings.TrimSpace(r.Status)
 	if r.Status == "" {
 		r.Status = AgentStatusActive
@@ -65,6 +84,19 @@ func (r AgentRecord) Normalize() AgentRecord {
 		r.Depth = 0
 	}
 	return r
+}
+
+func trimAgentRecordStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 // Closed reports whether the durable identity is terminal.

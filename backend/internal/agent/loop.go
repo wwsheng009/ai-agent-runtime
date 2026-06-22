@@ -43,6 +43,8 @@ type LoopReActConfig struct {
 	MaxParallelToolCalls int                   `yaml:"maxParallelToolCalls"`
 	Verbose              bool                  `yaml:"verbose"`
 	Temperature          float64               `yaml:"temperature"`
+	Provider             string                `yaml:"provider"`
+	Model                string                `yaml:"model"`
 	ReasoningEffort      string                `yaml:"reasoningEffort"`
 	Thinking             *types.ThinkingConfig `yaml:"thinking"`
 	StopOnSuccess        bool                  `yaml:"stopOnSuccess"`
@@ -121,6 +123,30 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 		llmRuntime: llmRuntime,
 		config:     config,
 	}
+}
+
+func (loop *ReActLoop) requestProvider() string {
+	if loop != nil && loop.config != nil {
+		if provider := strings.TrimSpace(loop.config.Provider); provider != "" {
+			return provider
+		}
+	}
+	if loop != nil && loop.agent != nil && loop.agent.config != nil {
+		return strings.TrimSpace(loop.agent.config.Provider)
+	}
+	return ""
+}
+
+func (loop *ReActLoop) requestModel() string {
+	if loop != nil && loop.config != nil {
+		if model := strings.TrimSpace(loop.config.Model); model != "" {
+			return model
+		}
+	}
+	if loop != nil && loop.agent != nil && loop.agent.config != nil {
+		return strings.TrimSpace(loop.agent.config.Model)
+	}
+	return ""
 }
 
 // Run 执行 ReAct 循环
@@ -474,7 +500,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			teamID = optionString(loop.agent.config.Options, "team_id")
 			profileContext = optionMap(loop.agent.config.Options, "profile_context")
 		}
-		contextBudget := resolveContextBuildPromptBudget(loop.llmRuntime, loop.agent)
+		contextBudget := resolveContextBuildPromptBudget(loop.llmRuntime, loop.agent, loop.config)
 		built := manager.Build(ctx, contextmgr.BuildInput{
 			TraceID:                  traceID,
 			SessionID:                sessionID,
@@ -501,10 +527,13 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		return "", nil, nil, err
 	}
 
+	requestProvider := loop.requestProvider()
+	requestModel := loop.requestModel()
+
 	// 构建请求
 	req := &llm.LLMRequest{
-		Provider:        loop.agent.config.Provider,
-		Model:           loop.agent.config.Model,
+		Provider:        requestProvider,
+		Model:           requestModel,
 		Messages:        managedHistory,
 		MaxTokens:       resolveLoopMaxTokens(loop.agent.config.DefaultMaxTokens, remainingBudget),
 		Temperature:     loop.config.Temperature,
@@ -2354,7 +2383,7 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 		return messages, nil, nil
 	}
 
-	budget := resolvePromptPreflightBudget(loop.llmRuntime, loop.agent, remainingBudget)
+	budget := resolvePromptPreflightBudget(loop.llmRuntime, loop.agent, loop.config, remainingBudget)
 	if budget.PromptBudget <= 0 {
 		return messages, nil, nil
 	}
@@ -2475,10 +2504,8 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 	runtime := compactruntime.New(loop.llmRuntime, loop.agent.GetContextManager())
 	provider := ""
 	model := ""
-	if loop.agent.config != nil {
-		provider = loop.agent.config.Provider
-		model = loop.agent.config.Model
-	}
+	provider = loop.requestProvider()
+	model = loop.requestModel()
 
 	startedPayload := map[string]interface{}{
 		"session_id":    sessionID,
@@ -2604,11 +2631,11 @@ func buildPromptPreflightFailure(code string, messages []types.Message, promptTo
 	return failure
 }
 
-func resolveContextBuildPromptBudget(runtime *llm.LLMRuntime, agent *Agent) promptPreflightBudget {
-	return resolvePromptPreflightBudget(runtime, agent, 0)
+func resolveContextBuildPromptBudget(runtime *llm.LLMRuntime, agent *Agent, loopConfig *LoopReActConfig) promptPreflightBudget {
+	return resolvePromptPreflightBudget(runtime, agent, loopConfig, 0)
 }
 
-func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remainingBudget int) promptPreflightBudget {
+func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, loopConfig *LoopReActConfig, remainingBudget int) promptPreflightBudget {
 	budget := promptPreflightBudget{}
 
 	managerBudget := 0
@@ -2641,7 +2668,7 @@ func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, remaini
 		budget.addCandidate(source, value, detail)
 	}
 
-	resolvedProvider, resolvedModel := resolvePromptPreflightProviderModel(runtime, agent)
+	resolvedProvider, resolvedModel := resolvePromptPreflightProviderModel(runtime, agent, loopConfig)
 	budget.ResolvedProvider = resolvedProvider
 	budget.ResolvedModel = resolvedModel
 
@@ -2748,12 +2775,20 @@ func promptPreflightContextBudgetOverride(agent *Agent) (int, bool) {
 	return contextOptionInt(agent.config.Options, "context_max_prompt_tokens")
 }
 
-func resolvePromptPreflightProviderModel(runtime *llm.LLMRuntime, agent *Agent) (string, string) {
+func resolvePromptPreflightProviderModel(runtime *llm.LLMRuntime, agent *Agent, loopConfig *LoopReActConfig) (string, string) {
 	providerName := ""
 	model := ""
+	if loopConfig != nil {
+		providerName = strings.TrimSpace(loopConfig.Provider)
+		model = strings.TrimSpace(loopConfig.Model)
+	}
 	if agent != nil && agent.config != nil {
-		providerName = strings.TrimSpace(agent.config.Provider)
-		model = strings.TrimSpace(agent.config.Model)
+		if providerName == "" {
+			providerName = strings.TrimSpace(agent.config.Provider)
+		}
+		if model == "" {
+			model = strings.TrimSpace(agent.config.Model)
+		}
 	}
 	if runtime != nil {
 		if resolved := runtime.ResolveProviderName(providerName); resolved != "" {
@@ -2911,14 +2946,26 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		if !ok {
 			return nil, fmt.Errorf("spawn_subagents agent %d is invalid", index)
 		}
+		reasoningEffort := stringValue(item["reasoning_effort"])
+		thinkingEffort := stringValue(item["thinking_effort"])
+		routeWarnings := []string(nil)
+		if strings.TrimSpace(reasoningEffort) == "" && strings.TrimSpace(thinkingEffort) != "" {
+			reasoningEffort = thinkingEffort
+			routeWarnings = append(routeWarnings, "thinking_effort_alias_used")
+		}
 		task := SubagentTask{
-			ID:           stringValue(item["id"]),
-			Role:         stringValue(item["role"]),
-			Goal:         stringValue(item["goal"]),
-			Model:        stringValue(item["model"]),
-			BudgetTokens: intValue(item["budget_tokens"]),
-			TimeoutSec:   intValue(item["timeout"]),
-			ReadOnly:     boolValue(item["read_only"]),
+			ID:                  stringValue(item["id"]),
+			Role:                stringValue(item["role"]),
+			Goal:                stringValue(item["goal"]),
+			Difficulty:          stringValue(item["difficulty"]),
+			DifficultyRationale: stringValue(item["difficulty_rationale"]),
+			Provider:            stringValue(item["provider"]),
+			Model:               stringValue(item["model"]),
+			ReasoningEffort:     reasoningEffort,
+			RouteWarnings:       routeWarnings,
+			BudgetTokens:        intValue(item["budget_tokens"]),
+			TimeoutSec:          intValue(item["timeout"]),
+			ReadOnly:            boolValue(item["read_only"]),
 		}
 		task.ToolsWhitelist = stringSliceValue(item["tools_whitelist"])
 		task.DependsOn = stringSliceValue(item["depends_on"])
@@ -3079,7 +3126,7 @@ func cloneOptionValue(value interface{}) interface{} {
 func spawnSubagentsToolDefinition() types.ToolDefinition {
 	return types.ToolDefinition{
 		Name:        "spawn_subagents",
-		Description: "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent.",
+		Description: "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty and difficulty_rationale for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration.",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -3088,11 +3135,16 @@ func spawnSubagentsToolDefinition() types.ToolDefinition {
 					"items": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"id":              map[string]interface{}{"type": "string"},
-							"role":            map[string]interface{}{"type": "string"},
-							"goal":            map[string]interface{}{"type": "string"},
-							"tools_whitelist": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"depends_on":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"id":                   map[string]interface{}{"type": "string"},
+							"role":                 map[string]interface{}{"type": "string"},
+							"goal":                 map[string]interface{}{"type": "string"},
+							"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Estimated task difficulty. Local runtime treats this as a routing hint."},
+							"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Short reason for the difficulty rating."},
+							"provider":             map[string]interface{}{"type": "string", "description": "Optional provider hint. The local runtime may ignore it unless explicitly allowed."},
+							"reasoning_effort":     map[string]interface{}{"type": "string", "enum": []string{"low", "medium", "high"}, "description": "Optional reasoning effort hint. The local runtime validates it against local policy."},
+							"thinking_effort":      map[string]interface{}{"type": "string", "description": "Deprecated alias for reasoning_effort."},
+							"tools_whitelist":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"depends_on":           map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 							"patches": map[string]interface{}{
 								"type": "array",
 								"items": map[string]interface{}{

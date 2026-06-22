@@ -1760,7 +1760,23 @@ func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
 		Type:    "subagent.started",
 		TraceID: "trace-beta",
 		Payload: map[string]interface{}{
-			"role": "verifier",
+			"role":                   "verifier",
+			"difficulty":             "hard",
+			"route_source":           "difficulty_level",
+			"route_provider":         "remote",
+			"route_model":            "strong-model",
+			"route_reasoning_effort": "high",
+			"route_warnings":         []interface{}{"provider_fallback_parent"},
+		},
+	})
+	bus.Publish(runtimeevents.Event{
+		Type:    "subagent.completed",
+		TraceID: "trace-beta",
+		Payload: map[string]interface{}{
+			"difficulty":         "hard",
+			"route_provider":     "remote",
+			"route_model":        "strong-model",
+			"usage_total_tokens": 1200,
 		},
 	})
 	bus.Publish(runtimeevents.Event{
@@ -1813,7 +1829,7 @@ func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	stats := payload["stats"].(map[string]interface{})
 	assert.Equal(t, float64(2), stats["trace_count"])
-	assert.Equal(t, float64(12), stats["event_count"])
+	assert.Equal(t, float64(13), stats["event_count"])
 
 	eventTypes := stats["event_types"].(map[string]interface{})
 	assert.Equal(t, float64(1), eventTypes["tool.requested"])
@@ -1847,8 +1863,19 @@ func TestGetRuntimeTraceStats_ReturnsAggregates(t *testing.T) {
 	assert.Equal(t, float64(1), execution["artifact_refs"])
 	assert.Equal(t, float64(1), execution["subagent_batches"])
 	assert.Equal(t, float64(1), execution["subagent_started"])
+	assert.Equal(t, float64(1), execution["subagent_completed"])
 	assert.Equal(t, float64(1), execution["reducers"].(map[string]interface{})["go_test_json"])
 	assert.Equal(t, float64(1), execution["subagent_roles"].(map[string]interface{})["verifier"])
+	assert.Equal(t, float64(1), execution["subagent_difficulties"].(map[string]interface{})["hard"])
+	assert.Equal(t, float64(1), execution["subagent_route_sources"].(map[string]interface{})["difficulty_level"])
+	assert.Equal(t, float64(1), execution["subagent_route_providers"].(map[string]interface{})["remote"])
+	assert.Equal(t, float64(1), execution["subagent_route_models"].(map[string]interface{})["strong-model"])
+	assert.Equal(t, float64(1), execution["subagent_route_reasoning_efforts"].(map[string]interface{})["high"])
+	assert.Equal(t, float64(1), execution["subagent_route_warnings"].(map[string]interface{})["provider_fallback_parent"])
+	assert.Equal(t, float64(1200), execution["subagent_usage_total_tokens"])
+	assert.Equal(t, float64(1200), execution["subagent_usage_by_difficulty"].(map[string]interface{})["hard"])
+	assert.Equal(t, float64(1200), execution["subagent_usage_by_provider"].(map[string]interface{})["remote"])
+	assert.Equal(t, float64(1200), execution["subagent_usage_by_model"].(map[string]interface{})["strong-model"])
 	provenance := stats["provenance"].(map[string]interface{})
 	assert.Equal(t, float64(1), provenance["recall_with_source_refs"])
 	assert.Contains(t, provenance["profile_resource_refs"].([]interface{}), "profile-resource:memory:E:/profiles/dev/agents/tester/memory/memory.json")
@@ -2594,6 +2621,8 @@ func TestBuildSessionActor_UsesSharedSessionMetadataContext(t *testing.T) {
 	assert.True(t, request.Stream)
 	assert.Empty(t, request.Tools, "disable_tools metadata should remove the tool surface")
 	assert.True(t, messageListContainsText(request.Messages, "Shared workspace instruction."))
+	assert.True(t, messageListContainsText(request.Messages, "Task difficulty rating and subagent delegation policy:"))
+	assert.True(t, messageListContainsText(request.Messages, "difficulty_rationale"))
 }
 
 func TestBuildSessionLoopConfig_PropagatesParallelToolConfig(t *testing.T) {

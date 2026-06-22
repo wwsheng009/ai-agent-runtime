@@ -51,6 +51,9 @@ func renderSharedChatToolEvent(event runtimechatcore.ChatEvent) string {
 
 func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface{} {
 	payload := map[string]interface{}{}
+	if toolName := strings.TrimSpace(event.ToolName); toolName != "" {
+		payload["tool_name"] = toolName
+	}
 	if preview := summarizeSharedChatToolCallArgs(event.Arguments); preview != "" {
 		payload["arg_preview"] = preview
 	}
@@ -176,15 +179,16 @@ func renderSharedChatToolArgValue(value interface{}) string {
 }
 
 func summarizeSharedChatToolResultLines(event runtimechatcore.ChatEvent) []string {
-	if summary := strings.TrimSpace(truncateOutputPreview(event.Output, 3, 360)); summary != "" {
-		lines := make([]string, 0, 3)
+	maxLines, maxBytes := sharedChatToolResultPreviewLimits(event.ToolName)
+	if summary := strings.TrimSpace(truncateOutputPreview(event.Output, maxLines, maxBytes)); summary != "" {
+		lines := make([]string, 0, maxLines)
 		for _, line := range strings.Split(strings.ReplaceAll(summary, "\r\n", "\n"), "\n") {
 			normalized := normalizeSharedChatToolText(line)
 			if normalized == "" {
 				continue
 			}
 			lines = append(lines, normalized)
-			if len(lines) == 3 {
+			if len(lines) == maxLines {
 				return lines
 			}
 		}
@@ -196,6 +200,13 @@ func summarizeSharedChatToolResultLines(event runtimechatcore.ChatEvent) []strin
 		return []string{"failed: " + normalizeSharedChatToolText(errText)}
 	}
 	return nil
+}
+
+func sharedChatToolResultPreviewLimits(toolName string) (int, int) {
+	if strings.EqualFold(strings.TrimSpace(toolName), "todos") {
+		return 32, 4096
+	}
+	return 3, 360
 }
 
 func summarizeSharedShellToolCommand(toolName string, args map[string]interface{}) string {

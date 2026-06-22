@@ -27,6 +27,29 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask) s
 	if task.Role != "" {
 		lines = append(lines, "Subagent role: "+task.Role)
 	}
+	if task.Difficulty != "" {
+		lines = append(lines, "Subtask difficulty: "+task.Difficulty+".")
+	}
+	if strings.TrimSpace(task.DifficultyRationale) != "" {
+		lines = append(lines, "Difficulty rationale: "+strings.TrimSpace(task.DifficultyRationale))
+	}
+	if task.Provider != "" || task.Model != "" || task.ReasoningEffort != "" {
+		parts := []string{}
+		if task.Provider != "" {
+			parts = append(parts, "provider="+task.Provider)
+		}
+		if task.Model != "" {
+			parts = append(parts, "model="+task.Model)
+		}
+		if task.ReasoningEffort != "" {
+			parts = append(parts, "reasoning_effort="+task.ReasoningEffort)
+		}
+		if task.RoutingSource != "" {
+			parts = append(parts, "source="+task.RoutingSource)
+		}
+		lines = append(lines, "Runtime routing: "+strings.Join(parts, ", ")+".")
+		lines = append(lines, "Do not request a stronger model yourself; report if the assigned model seems insufficient.")
+	}
 	lines = append(lines, "Focus only on your assigned subtask and return a concise final report.")
 	lines = append(lines, "The parent receives only your compressed report, not your full transcript.")
 	lines = append(lines, "Do not change the overall plan unless the subtask requires it.")

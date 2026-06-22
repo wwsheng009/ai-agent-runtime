@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -233,6 +234,12 @@ func TestPlanner_buildPlanningPrompt(t *testing.T) {
 		t.Logf("prompt: %s", prompt)
 		t.Log("Note: prompt may not contain tool name directly if formatted as JSON")
 	}
+	if !strings.Contains(prompt, `"difficulty": "easy|normal|hard|expert"`) {
+		t.Fatalf("expected difficulty field guidance, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Do not assign provider, model, or reasoning_effort") {
+		t.Fatalf("expected provider/model routing boundary guidance, got:\n%s", prompt)
+	}
 }
 
 func TestPlanner_parseLLMResponseToPlan_EmptyContent(t *testing.T) {
@@ -265,6 +272,39 @@ func TestPlanner_parseLLMResponseToPlan_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestPlanner_parseLLMResponseToPlan_AcceptsDifficultyMetadata(t *testing.T) {
+	planner := NewPlanner(&MockMCPManager{})
+	response := &llm.LLMResponse{Content: `{
+		"goal":"inspect route policy",
+		"steps":[
+			{
+				"id":"step_1",
+				"description":"inspect routing policy",
+				"tool":"read_file",
+				"args":{"path":"config.yaml"},
+				"dependsOn":[],
+				"priority":1,
+				"difficulty":"hard",
+				"difficulty_rationale":"touches provider routing"
+			}
+		]
+	}`}
+
+	plan, err := planner.parseLLMResponseToPlan(response, []skill.ToolInfo{
+		{Name: "read_file", Description: "read file", Enabled: true},
+	})
+	if err != nil {
+		t.Fatalf("expected plan parse success, got %v", err)
+	}
+	if len(plan.Steps) != 1 {
+		t.Fatalf("expected one step, got %d", len(plan.Steps))
+	}
+	if plan.Steps[0].Difficulty != "hard" ||
+		plan.Steps[0].DifficultyRationale != "touches provider routing" {
+		t.Fatalf("unexpected difficulty metadata: %+v", plan.Steps[0])
+	}
+}
+
 func TestPlan_ValidatePlan_RejectsUnavailableTool(t *testing.T) {
 	plan := &Plan{
 		Goal: "validate",
@@ -280,6 +320,36 @@ func TestPlan_ValidatePlan_RejectsUnavailableTool(t *testing.T) {
 
 	if err := plan.ValidatePlan([]string{"read_file", "run_tests"}); err == nil {
 		t.Fatal("expected validation failure for unavailable tool")
+	}
+}
+
+func TestPlan_Clone_PreservesDifficultyMetadata(t *testing.T) {
+	plan := &Plan{
+		Goal: "clone",
+		Steps: []PlanStep{
+			{
+				ID:                  "step_1",
+				Description:         "inspect",
+				Tool:                "read_file",
+				Args:                map[string]interface{}{"path": "config.yaml"},
+				Priority:            1,
+				Difficulty:          "expert",
+				DifficultyRationale: "provider migration",
+			},
+		},
+	}
+
+	clone := plan.Clone()
+	if clone == nil || len(clone.Steps) != 1 {
+		t.Fatalf("unexpected clone: %+v", clone)
+	}
+	if clone.Steps[0].Difficulty != "expert" ||
+		clone.Steps[0].DifficultyRationale != "provider migration" {
+		t.Fatalf("clone lost difficulty metadata: %+v", clone.Steps[0])
+	}
+	clone.Steps[0].Args["path"] = "other.yaml"
+	if plan.Steps[0].Args["path"] != "config.yaml" {
+		t.Fatalf("clone should not mutate original args: %+v", plan.Steps[0].Args)
 	}
 }
 

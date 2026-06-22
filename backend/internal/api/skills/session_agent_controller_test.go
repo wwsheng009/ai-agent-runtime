@@ -2,17 +2,23 @@ package skills
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -77,6 +83,103 @@ func TestSessionAgentController_PathTargetsAndCloseSubtree(t *testing.T) {
 	assert.Equal(t, 3, listResult.Count)
 }
 
+func TestSessionAgentControllerSpawnPersistsRouteContext(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+	enabled := true
+	handler.SetAICLIConfig(&agentconfig.Config{
+		AICLI: &agentconfig.AICLIConfig{
+			Subagents: &agentconfig.AICLISubagentsConfig{
+				Routing: &agentconfig.AICLISubagentRoutingConfig{
+					Enabled:           &enabled,
+					DefaultDifficulty: "normal",
+					Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+						"hard": {
+							Provider:        "codex",
+							Model:           "gpt-5.4",
+							ReasoningEffort: "high",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	rootSession, err := sessionManager.Create(ctx, "user-session-agent-controller-route")
+	require.NoError(t, err)
+
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+
+	result, err := controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:                  "api-route-child",
+		AgentType:           "worker",
+		Difficulty:          "hard",
+		DifficultyRationale: "policy-sensitive",
+		PermissionMode:      "bypass_permissions",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "codex", result.Provider)
+	assert.Equal(t, "gpt-5.4", result.Model)
+	assert.Equal(t, "high", result.ReasoningEffort)
+	assert.Equal(t, "hard", result.Difficulty)
+	assert.Equal(t, "bypass_permissions", result.PermissionMode)
+	assert.Equal(t, "explicit", result.DifficultySource)
+	assert.Equal(t, "policy-sensitive", result.DifficultyRationale)
+	assert.Equal(t, "difficulty_level", result.RouteSource)
+	assert.Empty(t, result.RouteWarnings)
+
+	child, err := sessionManager.Get(ctx, "api-route-child")
+	require.NoError(t, err)
+	assert.Equal(t, "codex", agentcontrol.ContextString(child, sessionmeta.ProviderName))
+	assert.Equal(t, "gpt-5.4", agentcontrol.ContextString(child, toolbroker.AgentSessionContextRequestedModel))
+	assert.Equal(t, "gpt-5.4", agentcontrol.ContextString(child, sessionmeta.Model))
+	assert.Equal(t, "high", agentcontrol.ContextString(child, sessionmeta.ReasoningEffort))
+	assert.Equal(t, "hard", agentcontrol.ContextString(child, toolbroker.AgentSessionContextDifficulty))
+	assert.Equal(t, "bypass_permissions", agentcontrol.ContextString(child, toolbroker.AgentSessionContextPermissionMode))
+}
+
+func TestSessionAgentControllerSpawnIgnoresProviderAndReasoningWhenRoutingDisabled(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+
+	rootSession, err := sessionManager.Create(ctx, "user-session-agent-controller-route-disabled")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+
+	result, err := controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:              "api-route-disabled-child",
+		Provider:        "untrusted-provider",
+		Model:           "legacy-child-model",
+		ReasoningEffort: "high",
+		Difficulty:      "hard",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.Provider)
+	assert.Equal(t, "legacy-child-model", result.Model)
+	assert.Empty(t, result.ReasoningEffort)
+	assert.Equal(t, "hard", result.Difficulty)
+	assert.Equal(t, "explicit", result.DifficultySource)
+	assert.Equal(t, "disabled", result.RouteSource)
+
+	child, err := sessionManager.Get(ctx, "api-route-disabled-child")
+	require.NoError(t, err)
+	assert.Empty(t, agentcontrol.ContextString(child, sessionmeta.ProviderName))
+	assert.Equal(t, "legacy-child-model", agentcontrol.ContextString(child, toolbroker.AgentSessionContextRequestedModel))
+	assert.Empty(t, agentcontrol.ContextString(child, sessionmeta.ReasoningEffort))
+}
+
 func TestSessionAgentController_WritesAndReadsAgentRegistry(t *testing.T) {
 	ctx := context.Background()
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
@@ -87,6 +190,24 @@ func TestSessionAgentController_WritesAndReadsAgentRegistry(t *testing.T) {
 	cfg := runtimecfg.DefaultRuntimeConfig()
 	cfg.Agents.MaxDepth = 2
 	handler.SetRuntimeConfig(cfg, "")
+	enabled := true
+	handler.SetAICLIConfig(&agentconfig.Config{
+		AICLI: &agentconfig.AICLIConfig{
+			Subagents: &agentconfig.AICLISubagentsConfig{
+				Routing: &agentconfig.AICLISubagentRoutingConfig{
+					Enabled:           &enabled,
+					DefaultDifficulty: "normal",
+					Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+						"hard": {
+							Provider:        "remote",
+							Model:           "strong-model",
+							ReasoningEffort: "high",
+						},
+					},
+				},
+			},
+		},
+	})
 	store, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
 		Path: t.TempDir() + "/agents.db",
 	})
@@ -99,7 +220,7 @@ func TestSessionAgentController_WritesAndReadsAgentRegistry(t *testing.T) {
 	controller := handler.getAgentSessionController()
 	require.NotNil(t, controller)
 
-	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-registry-child", AgentType: "worker"})
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-registry-child", AgentType: "worker", Difficulty: "hard"})
 	require.NoError(t, err)
 	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
 		RootSessionID: rootSession.ID,
@@ -120,6 +241,11 @@ func TestSessionAgentController_WritesAndReadsAgentRegistry(t *testing.T) {
 	assert.Equal(t, "api-registry-child", agent.SessionID)
 	assert.Equal(t, "/root/api-registry-child", agent.Path)
 	assert.Equal(t, "worker", agent.AgentType)
+	assert.Equal(t, "remote", agent.Provider)
+	assert.Equal(t, "strong-model", agent.Model)
+	assert.Equal(t, "high", agent.ReasoningEffort)
+	assert.Equal(t, "hard", agent.Difficulty)
+	assert.Equal(t, "difficulty_level", agent.RouteSource)
 	assert.False(t, agent.Exists)
 	assert.Equal(t, "missing", agent.Status)
 }
@@ -785,7 +911,45 @@ func TestSessionAgentController_MirrorsChildCompletionToParentEvents(t *testing.
 	defer sessionManager.Stop()
 	defer handler.getSessionHub().StopAll()
 	handler.SetSessionManager(sessionManager)
-	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+	hookPayloads := make(chan map[string]interface{}, 2)
+	hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode hook payload: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		hookPayloads <- payload
+		_, _ = w.Write([]byte(`{"action":"continue"}`))
+	}))
+	defer hookServer.Close()
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Hooks = []runtimehooks.HookConfig{
+		{
+			ID:    "api-spawn-agent-start",
+			Event: runtimehooks.EventSubagentStart,
+			Exec:  runtimehooks.ExecConfig{Type: "http", URL: hookServer.URL},
+		},
+		{
+			ID:    "api-spawn-agent-stop",
+			Event: runtimehooks.EventSubagentStop,
+			Exec:  runtimehooks.ExecConfig{Type: "http", URL: hookServer.URL},
+		},
+	}
+	handler.SetRuntimeConfig(runtimeConfig, "")
+	enabled := true
+	handler.SetAICLIConfig(&agentconfig.Config{
+		AICLI: &agentconfig.AICLIConfig{
+			Subagents: &agentconfig.AICLISubagentsConfig{
+				Routing: &agentconfig.AICLISubagentRoutingConfig{
+					Enabled:                        &enabled,
+					AllowExplicitProviderOverride:  true,
+					AllowExplicitModelOverride:     true,
+					AllowExplicitReasoningOverride: true,
+				},
+			},
+		},
+	})
 
 	rootSession, err := sessionManager.Create(ctx, "user-session-agent-controller-completion")
 	require.NoError(t, err)
@@ -793,22 +957,50 @@ func TestSessionAgentController_MirrorsChildCompletionToParentEvents(t *testing.
 	require.NotNil(t, controller)
 
 	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
-		ID:        "api-completion-child",
-		AgentType: "worker",
+		ID:                  "api-completion-child",
+		AgentType:           "worker",
+		Provider:            "codex",
+		Model:               "gpt-5.4",
+		ReasoningEffort:     "high",
+		Difficulty:          "hard",
+		DifficultySource:    "explicit",
+		DifficultyRationale: "completion audit",
+		RouteSource:         "explicit_override",
 	})
 	require.NoError(t, err)
+	startHook := waitAPIHookPayload(t, hookPayloads)
+	assert.Equal(t, "api-completion-child", startHook["session_id"])
+	assert.Equal(t, rootSession.ID, startHook["parent_session_id"])
+	assert.Equal(t, "/root/api-completion-child", startHook["path"])
+	assert.Equal(t, "worker", startHook["agent_type"])
+	assert.Equal(t, "hard", startHook["difficulty"])
+	assert.Equal(t, "codex", startHook["route_provider"])
+	assert.Equal(t, "gpt-5.4", startHook["route_model"])
+	assert.Equal(t, "high", startHook["route_reasoning_effort"])
+	assert.Equal(t, "explicit_override", startHook["route_source"])
 
 	childEnd := runtimeevents.Event{
 		Type:      chat.EventSessionEnd,
 		SessionID: "api-completion-child",
 		TraceID:   "trace-api-child-complete",
 		Payload: map[string]interface{}{
-			"success": true,
-			"steps":   5,
-			"seq":     int64(55),
+			"success":            true,
+			"steps":              5,
+			"seq":                int64(55),
+			"usage_total_tokens": 1200,
 		},
 	}
 	handler.getRuntimeEventBus().Publish(childEnd)
+	stopHook := waitAPIHookPayload(t, hookPayloads)
+	assert.Equal(t, "api-completion-child", stopHook["session_id"])
+	assert.Equal(t, chat.EventSessionEnd, stopHook["source_event_type"])
+	assert.Equal(t, string(chat.SessionIdle), stopHook["status"])
+	assert.Equal(t, true, stopHook["success"])
+	assert.Equal(t, "worker", stopHook["agent_type"])
+	assert.Equal(t, "hard", stopHook["difficulty"])
+	assert.Equal(t, "gpt-5.4", stopHook["route_model"])
+	assert.Equal(t, float64(5), stopHook["steps"])
+	assert.Equal(t, float64(1200), stopHook["usage_total_tokens"])
 
 	store := handler.getSessionEventStore()
 	require.NotNil(t, store)
@@ -832,6 +1024,14 @@ func TestSessionAgentController_MirrorsChildCompletionToParentEvents(t *testing.
 	assert.Equal(t, agentcontrol.WorkflowSpawnAgent, metadata["workflow"])
 	assert.Equal(t, agentcontrol.DeliverySessionMailbox, metadata["mailbox_delivery"])
 	assert.Equal(t, agentcontrol.MailboxKindSubagentCompleted, metadata["mailbox_kind"])
+	assert.Equal(t, "hard", metadata["difficulty"])
+	assert.Equal(t, "explicit", metadata["difficulty_source"])
+	assert.Equal(t, "completion audit", metadata["difficulty_rationale"])
+	assert.Equal(t, "codex", metadata["route_provider"])
+	assert.Equal(t, "gpt-5.4", metadata["route_model"])
+	assert.Equal(t, "high", metadata["route_reasoning_effort"])
+	assert.Equal(t, "explicit_override", metadata["route_source"])
+	assert.Equal(t, 1200, metadata["usage_total_tokens"])
 	event := events[1]
 	assert.Equal(t, "subagent.completed", event.Type)
 	assert.Equal(t, rootSession.ID, event.SessionID)
@@ -847,6 +1047,25 @@ func TestSessionAgentController_MirrorsChildCompletionToParentEvents(t *testing.
 	assert.Equal(t, "delivered", event.Payload["mailbox_delivery_status"])
 	assert.Equal(t, agentcontrol.MessageTypeSubagentCompleted, event.Payload["message_type"])
 	assert.Equal(t, agentcontrol.ActionAgentCompleted, event.Payload["control_action"])
+	assert.Equal(t, "hard", event.Payload["difficulty"])
+	assert.Equal(t, "explicit", event.Payload["difficulty_source"])
+	assert.Equal(t, "completion audit", event.Payload["difficulty_rationale"])
+	assert.Equal(t, "codex", event.Payload["route_provider"])
+	assert.Equal(t, "gpt-5.4", event.Payload["route_model"])
+	assert.Equal(t, "high", event.Payload["route_reasoning_effort"])
+	assert.Equal(t, "explicit_override", event.Payload["route_source"])
+	assert.Equal(t, 1200, event.Payload["usage_total_tokens"])
+}
+
+func waitAPIHookPayload(t *testing.T, payloads <-chan map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	select {
+	case payload := <-payloads:
+		return payload
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for API hook payload")
+		return nil
+	}
 }
 
 func TestSessionAgentController_PersistsCompletionMailboxWithoutParentActor(t *testing.T) {

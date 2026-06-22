@@ -95,6 +95,27 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 		} else if seq, ok := payload["seq"]; ok {
 			metadata["event_seq"] = seq
 		}
+		for _, key := range []string{
+			"difficulty",
+			"difficulty_source",
+			"difficulty_rationale",
+			"route_provider",
+			"route_model",
+			"route_reasoning_effort",
+			"route_source",
+			"route_warnings",
+			"fallback_used",
+			"fallback_reason",
+			"usage_prompt_tokens",
+			"usage_completion_tokens",
+			"usage_total_tokens",
+			"usage_cached_tokens",
+			"usage_reasoning_tokens",
+		} {
+			if value, ok := payload[key]; ok {
+				metadata[key] = value
+			}
+		}
 	}
 	status := "completed"
 	if value, ok := metadata["status"].(string); ok && strings.TrimSpace(value) != "" {

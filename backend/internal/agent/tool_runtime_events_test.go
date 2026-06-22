@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
@@ -93,6 +94,52 @@ func TestToolCompletedEventPayloadPrefersStructuredSummary(t *testing.T) {
 	}
 	if got := payload["arg_preview"]; got != "path=." {
 		t.Fatalf("expected path preview, got %#v", got)
+	}
+}
+
+func TestToolCompletedEventPayloadPreservesTodosListLines(t *testing.T) {
+	output := strings.Join([]string{
+		"任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
+		"任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
+		"当前任务列表:",
+		"1. [待处理] 分析需求 (新增)",
+		"2. [进行中] 修改实现 (新增)",
+		"3. [待处理] 运行测试 (新增)",
+	}, "\n")
+
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-todos",
+			Name: "todos",
+			Args: map[string]interface{}{
+				"todos": []interface{}{1, 2, 3},
+			},
+		},
+		Output: output,
+	}, 1, "trace-todos", nil)
+
+	summaryLines, ok := payload["summary_lines"].([]string)
+	if !ok {
+		t.Fatalf("expected summary lines, got %#v", payload["summary_lines"])
+	}
+	expected := []string{
+		"任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
+		"任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
+		"当前任务列表:",
+		"1. [待处理] 分析需求 (新增)",
+		"2. [进行中] 修改实现 (新增)",
+		"3. [待处理] 运行测试 (新增)",
+	}
+	if len(summaryLines) != len(expected) {
+		t.Fatalf("expected %d summary lines, got %#v", len(expected), summaryLines)
+	}
+	for i, line := range expected {
+		if summaryLines[i] != line {
+			t.Fatalf("expected summary line %d to be %q, got %q", i, line, summaryLines[i])
+		}
+	}
+	if got := payload["arg_preview"]; got != "todos=[3]" {
+		t.Fatalf("expected todos arg preview, got %#v", got)
 	}
 }
 

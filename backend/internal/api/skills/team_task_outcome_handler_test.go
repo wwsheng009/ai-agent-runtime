@@ -334,7 +334,7 @@ func TestCreateTaskUsesAgentControlTaskCreateWriter(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, team.Team{})
 	require.NoError(t, err)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks", strings.NewReader(`{"id":"task-create-api","title":"create through api","goal":"verify create","status":"ready","priority":5,"assignee":"mate-1","read_paths":["docs"],"write_paths":["docs/plan"],"deliverables":["summary"],"summary":"created through agentcontrol"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks", strings.NewReader(`{"id":"task-create-api","title":"create through api","goal":"verify create","difficulty":"hard","difficulty_rationale":"API create metadata path.","status":"ready","priority":5,"assignee":"mate-1","read_paths":["docs"],"write_paths":["docs/plan"],"deliverables":["summary"],"summary":"created through agentcontrol"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -348,6 +348,8 @@ func TestCreateTaskUsesAgentControlTaskCreateWriter(t *testing.T) {
 	require.Equal(t, "task-create-api", resp.Task.ID)
 	require.Equal(t, team.TaskStatusReady, resp.Task.Status)
 	require.Equal(t, "create through api", resp.Task.Title)
+	require.Equal(t, team.TaskDifficultyHard, resp.Task.Difficulty)
+	require.Equal(t, "API create metadata path.", resp.Task.DifficultyRationale)
 	require.Equal(t, "created through agentcontrol", resp.Task.Summary)
 	require.Equal(t, 5, resp.Task.Priority)
 	require.NotNil(t, resp.Task.Assignee)
@@ -359,7 +361,37 @@ func TestCreateTaskUsesAgentControlTaskCreateWriter(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, created)
 	require.Equal(t, team.TaskStatusReady, created.Status)
+	require.Equal(t, team.TaskDifficultyHard, created.Difficulty)
+	require.Equal(t, "API create metadata path.", created.DifficultyRationale)
 	require.Equal(t, []string{"summary"}, created.Deliverables)
+
+	records, err := team.NewAgentControlTaskRegistry(store).ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, team.TaskDifficultyHard, records[0].Difficulty)
+	require.Equal(t, "API create metadata path.", records[0].DifficultyRationale)
+}
+
+func TestCreateTaskRejectsInvalidDifficulty(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-create-invalid-difficulty?mode=memory&cache=shared")
+
+	teamID, err := store.CreateTeam(ctx, team.Team{})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/teams/"+teamID+"/tasks", strings.NewReader(`{"id":"task-create-invalid","title":"bad difficulty","difficulty":"extreme"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "invalid task difficulty")
+
+	created, err := store.GetTask(ctx, "task-create-invalid")
+	require.NoError(t, err)
+	require.Nil(t, created)
 }
 
 func TestUpdateTaskUsesAgentControlTaskUpdateWriter(t *testing.T) {
@@ -419,7 +451,7 @@ func TestUpdateAgentControlTaskEndpointUsesTaskUpdateWriter(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	body := `{"workflow":"spawn_team","team_id":"` + teamID + `","title":"patched control title","status":"ready","summary":"patched through control endpoint"}`
+	body := `{"workflow":"spawn_team","team_id":"` + teamID + `","title":"patched control title","difficulty":"hard","difficulty_rationale":"requires shared context review","status":"ready","summary":"patched through control endpoint"}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+taskID, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -434,6 +466,8 @@ func TestUpdateAgentControlTaskEndpointUsesTaskUpdateWriter(t *testing.T) {
 	require.Equal(t, taskID, resp.Task.ID)
 	require.Equal(t, "ready", resp.Task.Status)
 	require.Equal(t, "patched control title", resp.Task.Title)
+	require.Equal(t, "hard", resp.Task.Difficulty)
+	require.Equal(t, "requires shared context review", resp.Task.DifficultyRationale)
 	require.Equal(t, "patched through control endpoint", resp.Task.Summary)
 
 	updated, err := store.GetTask(ctx, taskID)
@@ -441,7 +475,36 @@ func TestUpdateAgentControlTaskEndpointUsesTaskUpdateWriter(t *testing.T) {
 	require.NotNil(t, updated)
 	require.Equal(t, team.TaskStatusReady, updated.Status)
 	require.Equal(t, "patched control title", updated.Title)
+	require.Equal(t, team.TaskDifficultyHard, updated.Difficulty)
+	require.Equal(t, "requires shared context review", updated.DifficultyRationale)
 	require.Equal(t, "patched through control endpoint", updated.Summary)
+}
+
+func TestUpdateAgentControlTaskEndpointRejectsInvalidDifficulty(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:agentcontrol-update-invalid-difficulty?mode=memory&cache=shared")
+
+	teamID, err := store.CreateTeam(ctx, team.Team{})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, team.Task{
+		TeamID: teamID,
+		Title:  "old control title",
+		Status: team.TaskStatusPending,
+	})
+	require.NoError(t, err)
+
+	body := `{"workflow":"spawn_team","team_id":"` + teamID + `","difficulty":"impossible"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/runtime/agent-control/tasks/"+taskID, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "invalid task difficulty")
+
+	updated, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.Empty(t, updated.Difficulty)
 }
 
 func TestUpdateTaskTerminalStatusesReleaseLease(t *testing.T) {
@@ -845,6 +908,25 @@ func TestListAgentControlTasksHandlerProjectsTeamTasks(t *testing.T) {
 	require.Equal(t, teamID, payload.Filters["team_id"])
 }
 
+func TestCreateAgentControlTaskEndpointRejectsInvalidDifficulty(t *testing.T) {
+	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:agentcontrol-create-invalid-difficulty?mode=memory&cache=shared")
+
+	_, err := store.CreateTeam(ctx, team.Team{ID: "team-1"})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-control-invalid","workflow":"spawn_team","team_id":"team-1","title":"bad difficulty","difficulty":"extreme"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "invalid task difficulty")
+
+	created, err := store.GetTask(ctx, "task-control-invalid")
+	require.NoError(t, err)
+	require.Nil(t, created)
+}
+
 func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	ctx, store, router := newTeamTaskOutcomeTestRouter(t, "file:team-agentcontrol-task-write-handlers?mode=memory&cache=shared")
 
@@ -857,24 +939,28 @@ func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-control","workflow":"spawn_team","team_id":"team-1","title":"Control task","status":"ready","assignee":"mate-1","write_paths":["docs/plan.md"]}`))
+	createReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-control","workflow":"spawn_team","team_id":"team-1","title":"Control task","difficulty":"expert","difficulty_rationale":"Control API create path.","status":"ready","assignee":"mate-1","write_paths":["docs/plan.md"]}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	createRec := httptest.NewRecorder()
 	router.ServeHTTP(createRec, createReq)
 	require.Equal(t, http.StatusCreated, createRec.Code)
 	var createPayload struct {
 		Task struct {
-			ID       string `json:"id"`
-			Workflow string `json:"workflow"`
-			TeamID   string `json:"team_id"`
-			Status   string `json:"status"`
-			Assignee string `json:"assignee"`
+			ID                  string `json:"id"`
+			Workflow            string `json:"workflow"`
+			TeamID              string `json:"team_id"`
+			Difficulty          string `json:"difficulty"`
+			DifficultyRationale string `json:"difficulty_rationale"`
+			Status              string `json:"status"`
+			Assignee            string `json:"assignee"`
 		} `json:"task"`
 	}
 	require.NoError(t, decodeJSONResponse(createRec, &createPayload))
 	require.Equal(t, "task-control", createPayload.Task.ID)
 	require.Equal(t, "spawn_team", createPayload.Task.Workflow)
 	require.Equal(t, teamID, createPayload.Task.TeamID)
+	require.Equal(t, "expert", createPayload.Task.Difficulty)
+	require.Equal(t, "Control API create path.", createPayload.Task.DifficultyRationale)
 	require.Equal(t, "ready", createPayload.Task.Status)
 	require.Equal(t, "mate-1", createPayload.Task.Assignee)
 
@@ -882,6 +968,8 @@ func TestAgentControlTaskWriteHandlersUseTaskRegistrySeams(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, task)
 	require.Equal(t, int64(1), task.Version)
+	require.Equal(t, team.TaskDifficultyExpert, task.Difficulty)
+	require.Equal(t, "Control API create path.", task.DifficultyRationale)
 
 	depReq := httptest.NewRequest(http.MethodPost, "/api/runtime/agent-control/tasks", strings.NewReader(`{"id":"task-dependency","workflow":"spawn_team","team_id":"team-1","title":"Dependency","status":"done"}`))
 	depReq.Header.Set("Content-Type", "application/json")

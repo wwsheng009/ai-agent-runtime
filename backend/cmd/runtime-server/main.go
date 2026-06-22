@@ -803,6 +803,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 
 	handler := skillsapi.NewHandler(bootstrapManager.Registry(), bootstrapManager.Loader(), mcpAdapter)
 	bootstrapManager.ApplyToSkillsHandler(handler)
+	handler.SetAICLIConfig(cfg)
 	handler.SetFileTransferService(filetransport.NewLocalService())
 	handler.SetRuntimeConfig(runtimeConfig, runtimeManager.GetFilePath())
 	handler.SetRuntimeLogFilePath(strings.TrimSpace(cfg.Log.FilePath))

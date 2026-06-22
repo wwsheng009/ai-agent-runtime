@@ -169,6 +169,7 @@ func (a *SessionActor) runStopHook() {
 type SubmitPromptOption struct {
 	ImagePaths       []string
 	ImageArtifactDir string
+	RouteOverride    *RunRouteOverride
 }
 
 // SubmitPrompt submits a prompt and waits for the result.
@@ -188,6 +189,7 @@ func (a *SessionActor) SubmitPrompt(ctx context.Context, prompt string, runMeta 
 		ImagePaths:       opt.ImagePaths,
 		ImageArtifactDir: opt.ImageArtifactDir,
 		RunMeta:          runMeta.Clone(),
+		RouteOverride:    opt.RouteOverride.Clone(),
 		Reply:            reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
@@ -248,6 +250,7 @@ func (a *SessionActor) SubmitPromptAsync(ctx context.Context, prompt string, run
 		ImagePaths:       opt.ImagePaths,
 		ImageArtifactDir: opt.ImageArtifactDir,
 		RunMeta:          runMeta.Clone(),
+		RouteOverride:    opt.RouteOverride.Clone(),
 		Reply:            reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
@@ -608,7 +611,7 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	})
-	a.startSessionRun(ctx, session, prompt, false, turnID, cmd.RunMeta, reply, appendedPrompt)
+	a.startSessionRun(ctx, session, prompt, false, turnID, cmd.RunMeta, cmd.RouteOverride, reply, appendedPrompt)
 }
 
 func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
@@ -639,7 +642,7 @@ func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	})
-	a.startSessionRun(ctx, session, "", true, turnID, cmd.RunMeta, reply, false, cmd.StripMetadataKeys...)
+	a.startSessionRun(ctx, session, "", true, turnID, cmd.RunMeta, nil, reply, false, cmd.StripMetadataKeys...)
 }
 
 func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
@@ -1038,7 +1041,7 @@ func (a *SessionActor) ensureReady() error {
 	}
 }
 
-func (a *SessionActor) runLoop(ctx context.Context, prompt string, session *Session) (*agent.Result, error) {
+func (a *SessionActor) runLoop(ctx context.Context, prompt string, session *Session, routeOverride *RunRouteOverride) (*agent.Result, error) {
 	if a.agent == nil {
 		return nil, fmt.Errorf("agent is not configured")
 	}
@@ -1048,7 +1051,7 @@ func (a *SessionActor) runLoop(ctx context.Context, prompt string, session *Sess
 	if a.llmRuntime == nil {
 		return nil, fmt.Errorf("llm runtime is not configured")
 	}
-	loop := agent.NewReActLoop(a.agent, a.llmRuntime, a.loopConfig)
+	loop := agent.NewReActLoop(a.agent, a.llmRuntime, cloneLoopConfigWithRouteOverride(a.loopConfig, routeOverride))
 	return loop.RunWithSession(ctx, prompt, session)
 }
 
@@ -1061,6 +1064,38 @@ func (a *SessionActor) continueLoop(ctx context.Context, session *Session) (*age
 	}
 	loop := agent.NewReActLoop(a.agent, a.llmRuntime, a.loopConfig)
 	return loop.ContinueWithSession(ctx, session)
+}
+
+func cloneLoopConfigWithRouteOverride(base *agent.LoopReActConfig, routeOverride *RunRouteOverride) *agent.LoopReActConfig {
+	if base == nil && routeOverride == nil {
+		return nil
+	}
+	cfg := agent.LoopReActConfig{
+		MaxSteps:             0,
+		EnableThought:        true,
+		EnableToolCalls:      true,
+		EnableParallelTools:  false,
+		MaxParallelToolCalls: 1,
+		Temperature:          0.7,
+		StopOnSuccess:        true,
+		MaxIterations:        10,
+	}
+	if base != nil {
+		cfg = *base
+		cfg.Thinking = runtimetypes.CloneThinkingConfig(base.Thinking)
+	}
+	if routeOverride != nil {
+		if value := strings.TrimSpace(routeOverride.Provider); value != "" {
+			cfg.Provider = value
+		}
+		if value := strings.TrimSpace(routeOverride.Model); value != "" {
+			cfg.Model = value
+		}
+		if value := strings.TrimSpace(routeOverride.ReasoningEffort); value != "" {
+			cfg.ReasoningEffort = value
+		}
+	}
+	return &cfg
 }
 
 func (a *SessionActor) tryRouteSkill(ctx context.Context, prompt string, session *Session) (*agent.Result, bool, error) {
@@ -1679,7 +1714,7 @@ func normalizedMetadataKeys(keys []string) []string {
 	return normalized
 }
 
-func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, reply chan SubmitResult, appendedPrompt bool, stripMetadataKeys ...string) {
+func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, routeOverride *RunRouteOverride, reply chan SubmitResult, appendedPrompt bool, stripMetadataKeys ...string) {
 	if a == nil || session == nil {
 		if reply != nil {
 			reply <- SubmitResult{Err: fmt.Errorf("session is nil")}
@@ -1745,10 +1780,10 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		if resume {
 			result, execErr = a.continueLoop(runCtx, session)
 		} else {
-			result, execErr = a.runLoop(runCtx, prompt, session)
+			result, execErr = a.runLoop(runCtx, prompt, session, routeOverride)
 			if preflightErr, ok := agent.AsPromptPreflightError(execErr); ok && preflightErr != nil {
 				if compactResult, _, compactErr := a.runManualCompact(ctx, session, compactruntime.ModeLocal); compactErr == nil && compactResult != nil {
-					result, execErr = a.runLoop(runCtx, prompt, session)
+					result, execErr = a.runLoop(runCtx, prompt, session, routeOverride)
 				}
 			}
 		}
@@ -1791,6 +1826,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		appendStructuredRunErrorPayload(payload, execErr)
 		if result != nil {
 			payload["trace_id"] = result.TraceID
+			appendSessionActorUsagePayload(payload, result.Usage)
 			if result.LimitReached {
 				payload["limit_reached"] = true
 				if result.StepLimit > 0 {
@@ -1809,6 +1845,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			appendStructuredRunErrorPayload(hookPayload, execErr)
 			if result != nil {
 				hookPayload["trace_id"] = result.TraceID
+				appendSessionActorUsagePayload(hookPayload, result.Usage)
 			}
 			hookMgr.DispatchAsync(ctx, runtimehooks.EventSessionEnd, hookPayload)
 		}
@@ -2234,7 +2271,7 @@ func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session
 		}
 		cancel()
 		a.clearActiveCancel()
-		a.startSessionRun(context.Background(), session, "", true, turnID, runMeta, nil, false)
+		a.startSessionRun(context.Background(), session, "", true, turnID, runMeta, nil, nil, false)
 	}()
 }
 
@@ -3014,6 +3051,27 @@ func durationMillis(result *agent.Result) int64 {
 		return 0
 	}
 	return result.Duration.GetDuration().Milliseconds()
+}
+
+func appendSessionActorUsagePayload(payload map[string]interface{}, usage *runtimetypes.TokenUsage) {
+	if payload == nil || usage == nil || usage.IsZero() {
+		return
+	}
+	if usage.PromptTokens > 0 {
+		payload["usage_prompt_tokens"] = usage.PromptTokens
+	}
+	if usage.CompletionTokens > 0 {
+		payload["usage_completion_tokens"] = usage.CompletionTokens
+	}
+	if usage.TotalTokens > 0 {
+		payload["usage_total_tokens"] = usage.TotalTokens
+	}
+	if usage.CachedTokens > 0 {
+		payload["usage_cached_tokens"] = usage.CachedTokens
+	}
+	if usage.ReasoningTokens > 0 {
+		payload["usage_reasoning_tokens"] = usage.ReasoningTokens
+	}
 }
 
 func errorString(err error) string {

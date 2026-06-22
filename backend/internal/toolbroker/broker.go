@@ -13,6 +13,8 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -20,26 +22,27 @@ import (
 )
 
 const (
-	ToolAskUserQuestion   = "ask_user_question"
-	ToolBackgroundTask    = "background_task"
-	ToolTaskOutput        = "task_output"
-	ToolSpawnAgent        = "spawn_agent"
-	ToolListAgents        = "list_agents"
-	ToolSendMessage       = "send_message"
-	ToolFollowupTask      = "followup_task"
-	ToolSendInput         = "send_input"
-	ToolWaitAgent         = "wait_agent"
-	ToolReadAgentEvents   = "read_agent_events"
-	ToolCloseAgent        = "close_agent"
-	ToolResumeAgent       = "resume_agent"
-	ToolSpawnTeam         = "spawn_team"
-	ToolWaitTeam          = "wait_team"
-	ToolSendTeamMessage   = "send_team_message"
-	ToolReadMailboxDigest = "read_mailbox_digest"
-	ToolReadTaskSpec      = "read_task_spec"
-	ToolReadTaskContext   = "read_task_context"
-	ToolReportTaskOutcome = "report_task_outcome"
-	ToolBlockCurrentTask  = "block_current_task"
+	ToolAskUserQuestion      = "ask_user_question"
+	ToolBackgroundTask       = "background_task"
+	ToolTaskOutput           = "task_output"
+	ToolSpawnAgent           = "spawn_agent"
+	ToolListAgents           = "list_agents"
+	ToolSendMessage          = "send_message"
+	ToolFollowupTask         = "followup_task"
+	ToolSendInput            = "send_input"
+	ToolResolveAgentApproval = "resolve_agent_approval"
+	ToolWaitAgent            = "wait_agent"
+	ToolReadAgentEvents      = "read_agent_events"
+	ToolCloseAgent           = "close_agent"
+	ToolResumeAgent          = "resume_agent"
+	ToolSpawnTeam            = "spawn_team"
+	ToolWaitTeam             = "wait_team"
+	ToolSendTeamMessage      = "send_team_message"
+	ToolReadMailboxDigest    = "read_mailbox_digest"
+	ToolReadTaskSpec         = "read_task_spec"
+	ToolReadTaskContext      = "read_task_context"
+	ToolReportTaskOutcome    = "report_task_outcome"
+	ToolBlockCurrentTask     = "block_current_task"
 )
 
 // Broker provides synthetic tools backed by runtime services.
@@ -75,7 +78,7 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask:
+	case ToolAskUserQuestion, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask:
 		return true
 	default:
 		return false
@@ -171,13 +174,19 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":           map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
-						"session_id":   map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"message":      map[string]interface{}{"type": "string", "description": "Initial prompt for the child agent."},
-						"agent_type":   map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
-						"model":        map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
-						"fork_context": map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
-						"fork_turns":   map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
+						"id":                   map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
+						"session_id":           map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"message":              map[string]interface{}{"type": "string", "description": "Initial prompt for the child agent."},
+						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
+						"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
+						"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
+						"provider":             map[string]interface{}{"type": "string", "description": "Optional provider override hint. Runtime policy may deny or ignore it."},
+						"model":                map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
+						"reasoning_effort":     map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
+						"thinking_effort":      map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
+						"permission_mode":      map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"fork_context":         map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
+						"fork_turns":           map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
 					},
 				},
 			},
@@ -236,8 +245,23 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
+				Name:        ToolResolveAgentApproval,
+				Description: "Approve or deny a pending tool approval request in a spawn_agent child session. Use this when wait_agent/read_agent_events reports waiting_approval; do not repeatedly wait for the same approval.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id":           map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"session_id":   map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"request_id":   map[string]interface{}{"type": "string", "description": "Pending approval request id from wait_agent status or approval_requested event."},
+						"allow":        map[string]interface{}{"type": "boolean", "description": "true to approve the child tool call, false to deny it."},
+						"patched_args": map[string]interface{}{"type": "object", "description": "Optional replacement tool arguments to use when approving."},
+					},
+					"required": []string{"request_id", "allow"},
+				},
+			},
+			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for collaboration progress. With id/ids, waits for spawn_agent child sessions to become idle or blocked. Without id, waits for the current parent session mailbox/collab event. Session event-store watchers wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
+				Description: "Wait for collaboration progress. With id/ids, waits for spawn_agent child sessions to become idle, blocked, failed, or waiting_approval; waiting_approval is a ready state that needs permission handling, not repeated waiting. Without id, waits for the current parent session mailbox/collab event. Session event-store watchers wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; team progress is reported through team lifecycle events and team.summary.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -252,7 +276,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1.",
+				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -296,13 +320,19 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":           map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
-						"session_id":   map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"message":      map[string]interface{}{"type": "string", "description": "Initial prompt for the child agent."},
-						"agent_type":   map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
-						"model":        map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
-						"fork_context": map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
-						"fork_turns":   map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
+						"id":                   map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
+						"session_id":           map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"message":              map[string]interface{}{"type": "string", "description": "Initial prompt for the child agent."},
+						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
+						"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
+						"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
+						"provider":             map[string]interface{}{"type": "string", "description": "Optional provider override hint. Runtime policy may deny or ignore it."},
+						"model":                map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
+						"reasoning_effort":     map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
+						"thinking_effort":      map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
+						"permission_mode":      map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"fork_context":         map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
+						"fork_turns":           map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
 					},
 				},
 			},
@@ -361,8 +391,23 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
+				Name:        ToolResolveAgentApproval,
+				Description: "Approve or deny a pending tool approval request in a spawn_agent child session. Use this when wait_agent/read_agent_events reports waiting_approval; do not repeatedly wait for the same approval.",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id":           map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"session_id":   map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"request_id":   map[string]interface{}{"type": "string", "description": "Pending approval request id from wait_agent status or approval_requested event."},
+						"allow":        map[string]interface{}{"type": "boolean", "description": "true to approve the child tool call, false to deny it."},
+						"patched_args": map[string]interface{}{"type": "object", "description": "Optional replacement tool arguments to use when approving."},
+					},
+					"required": []string{"request_id", "allow"},
+				},
+			},
+			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for a spawn_agent child session to become idle or blocked. Runtime events wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team progress and final team.summary.",
+				Description: "Wait for a spawn_agent child session to become idle, blocked, failed, or waiting_approval. Treat waiting_approval as a ready state that needs permission handling, not repeated waiting. Runtime events wake the wait loop, with a low-frequency fallback check. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team progress and final team.summary.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -376,7 +421,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team lifecycle events.",
+				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team lifecycle events.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -510,6 +555,15 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 								"goal": map[string]interface{}{
 									"type":        "string",
 									"description": "Task goal or objective.",
+								},
+								"difficulty": map[string]interface{}{
+									"type":        "string",
+									"enum":        []string{"easy", "normal", "hard", "expert"},
+									"description": "Optional task difficulty metadata. Recorded for planning/audit only; does not change teammate routing.",
+								},
+								"difficulty_rationale": map[string]interface{}{
+									"type":        "string",
+									"description": "Optional short rationale for the selected task difficulty.",
 								},
 								"inputs": map[string]interface{}{
 									"type":  "array",
@@ -968,8 +1022,49 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["agent_type"].(string); ok {
 			request.AgentType = strings.TrimSpace(value)
 		}
+		if value, ok := args["difficulty"].(string); ok {
+			if strings.TrimSpace(value) != "" {
+				difficulty, ok := modelrouting.NormalizeDifficulty(value)
+				if !ok {
+					return nil, nil, fmt.Errorf("invalid agent difficulty: %s", strings.TrimSpace(value))
+				}
+				request.Difficulty = difficulty
+			}
+		}
+		if value, ok := args["difficulty_rationale"].(string); ok {
+			request.DifficultyRationale = strings.TrimSpace(value)
+		}
+		if value, ok := args["provider"].(string); ok {
+			request.Provider = strings.TrimSpace(value)
+		}
 		if value, ok := args["model"].(string); ok {
 			request.Model = strings.TrimSpace(value)
+		}
+		if value, ok := args["reasoning_effort"].(string); ok {
+			request.ReasoningEffort = strings.TrimSpace(value)
+		}
+		if value, ok := args["thinking_effort"].(string); ok {
+			request.ThinkingEffort = strings.TrimSpace(value)
+			if request.ReasoningEffort == "" {
+				request.ReasoningEffort = request.ThinkingEffort
+				if request.ThinkingEffort != "" {
+					request.RouteWarnings = append(request.RouteWarnings, "thinking_effort_alias_used")
+				}
+			}
+		}
+		if value, ok := args["permission_mode"].(string); ok {
+			permissionMode, err := normalizeSpawnAgentPermissionMode(value)
+			if err != nil {
+				return nil, nil, err
+			}
+			request.PermissionMode = permissionMode
+		}
+		if strings.TrimSpace(request.PermissionMode) == "" {
+			if runMeta, ok := team.GetRunMeta(ctx); ok && runMeta != nil {
+				if permissionMode, err := normalizeSpawnAgentPermissionMode(runMeta.PermissionMode); err == nil {
+					request.PermissionMode = permissionMode
+				}
+			}
 		}
 		if value, ok := args["fork_context"].(bool); ok {
 			request.ForkContext = &value
@@ -997,13 +1092,40 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if aliasedResult != nil {
 			aliasedSessionID = firstNonEmptyToolValue(aliasedResult.SessionID, aliasedResult.ID)
 		}
-		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+		metadata := map[string]interface{}{
 			"session_id":    actualSessionID,
 			"session_alias": aliasedSessionID,
 			"status":        valueOrEmptyAgentStatus(result),
 			"created":       result != nil && result.Created,
 			"queued":        result != nil && result.Queued,
-		}, agentStatusCacheSafeSummary(aliasedResult)), nil
+		}
+		if result != nil {
+			if provider := strings.TrimSpace(result.Provider); provider != "" {
+				metadata["provider"] = provider
+			}
+			if model := strings.TrimSpace(result.Model); model != "" {
+				metadata["model"] = model
+			}
+			if effort := strings.TrimSpace(result.ReasoningEffort); effort != "" {
+				metadata["reasoning_effort"] = effort
+			}
+			if permissionMode := strings.TrimSpace(result.PermissionMode); permissionMode != "" {
+				metadata["permission_mode"] = permissionMode
+			}
+			if difficulty := strings.TrimSpace(result.Difficulty); difficulty != "" {
+				metadata["difficulty"] = difficulty
+			}
+			if source := strings.TrimSpace(result.RouteSource); source != "" {
+				metadata["route_source"] = source
+			}
+			if result.FallbackUsed {
+				metadata["fallback_used"] = true
+			}
+			if reason := strings.TrimSpace(result.FallbackReason); reason != "" {
+				metadata["fallback_reason"] = reason
+			}
+		}
+		return aliasedResult, attachCacheSafeSummary(metadata, agentStatusCacheSafeSummary(aliasedResult)), nil
 
 	case ToolListAgents:
 		if b.AgentSessions == nil {
@@ -1125,6 +1247,76 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":        valueOrEmptyAgentStatus(result),
 			"queued":        result != nil && result.Queued,
 		}, agentStatusCacheSafeSummary(aliasedResult)), nil
+
+	case ToolResolveAgentApproval:
+		if b.AgentSessions == nil {
+			return nil, nil, fmt.Errorf("agent session controller is not configured")
+		}
+		request := ResolveAgentApprovalArgs{}
+		if value, ok := args["id"].(string); ok {
+			request.ID = strings.TrimSpace(value)
+		}
+		if value, ok := args["session_id"].(string); ok && strings.TrimSpace(request.ID) == "" {
+			request.SessionID = strings.TrimSpace(value)
+		}
+		if value, ok := args["request_id"].(string); ok {
+			request.RequestID = strings.TrimSpace(value)
+		}
+		allowValue, hasAllow := args["allow"].(bool)
+		if !hasAllow {
+			return nil, nil, fmt.Errorf("allow is required")
+		}
+		request.Allow = allowValue
+		if patched, ok := args["patched_args"]; ok {
+			raw, err := marshalToolJSONArg(patched)
+			if err != nil {
+				return nil, nil, fmt.Errorf("patched_args: %w", err)
+			}
+			request.PatchedArgs = raw
+		}
+		sessionRef := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID))
+		if sessionRef == "" {
+			return nil, nil, fmt.Errorf("id is required")
+		}
+		if request.RequestID == "" {
+			return nil, nil, fmt.Errorf("request_id is required")
+		}
+		actualSessionID := sessionRef
+		if handleAliases != nil {
+			actualSessionID, _, err = handleAliases.Sessions.resolve(sessionRef, agentSessionAliasPrefix, "agent session")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolResolveAgentApproval, actualSessionID); err != nil {
+			return nil, nil, err
+		}
+		if strings.TrimSpace(request.ID) != "" {
+			request.ID = actualSessionID
+		} else {
+			request.SessionID = actualSessionID
+		}
+		result, err := b.AgentSessions.ResolveApproval(ctx, request)
+		if err != nil {
+			return nil, nil, err
+		}
+		aliasedResult := aliasAgentApprovalResult(result, handleAliases)
+		aliasedSessionID := actualSessionID
+		if aliasedResult != nil {
+			aliasedSessionID = strings.TrimSpace(aliasedResult.SessionID)
+		}
+		status := ""
+		if result != nil && result.Status != nil {
+			status = strings.TrimSpace(result.Status.Status)
+		}
+		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+			"session_id":    actualSessionID,
+			"session_alias": aliasedSessionID,
+			"request_id":    request.RequestID,
+			"allowed":       result != nil && result.Allowed,
+			"resolved":      result != nil && result.Resolved,
+			"status":        status,
+		}, agentApprovalCacheSafeSummary(aliasedResult)), nil
 
 	case ToolWaitAgent:
 		if b.AgentSessions == nil {
@@ -1432,6 +1624,16 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				if value, ok := entry["goal"].(string); ok {
 					spec.Goal = strings.TrimSpace(value)
 				}
+				if value, ok := entry["difficulty"].(string); ok {
+					difficulty, ok := team.NormalizeTaskDifficulty(value)
+					if !ok {
+						return nil, nil, fmt.Errorf("invalid task difficulty: %s", strings.TrimSpace(value))
+					}
+					spec.Difficulty = difficulty
+				}
+				if value, ok := entry["difficulty_rationale"].(string); ok {
+					spec.DifficultyRationale = strings.TrimSpace(value)
+				}
 				spec.Inputs = coerceStringSlice(entry["inputs"])
 				spec.ReadPaths = coerceStringSlice(entry["read_paths"])
 				spec.WritePaths = coerceStringSlice(entry["write_paths"])
@@ -1633,17 +1835,19 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				}
 			}
 			created, err := taskRegistry.CreateAgentControlTask(ctx, agentcontrol.TaskCreateRequest{
-				ID:           taskID,
-				Workflow:     agentcontrol.WorkflowSpawnTeam,
-				TeamID:       teamID,
-				Title:        strings.TrimSpace(spec.Title),
-				Goal:         strings.TrimSpace(spec.Goal),
-				Priority:     spec.Priority,
-				Assignee:     strings.TrimSpace(spec.Assignee),
-				Inputs:       append([]string(nil), spec.Inputs...),
-				ReadPaths:    append([]string(nil), spec.ReadPaths...),
-				WritePaths:   append([]string(nil), spec.WritePaths...),
-				Deliverables: append([]string(nil), spec.Deliverables...),
+				ID:                  taskID,
+				Workflow:            agentcontrol.WorkflowSpawnTeam,
+				TeamID:              teamID,
+				Title:               strings.TrimSpace(spec.Title),
+				Goal:                strings.TrimSpace(spec.Goal),
+				Difficulty:          strings.TrimSpace(spec.Difficulty),
+				DifficultyRationale: strings.TrimSpace(spec.DifficultyRationale),
+				Priority:            spec.Priority,
+				Assignee:            strings.TrimSpace(spec.Assignee),
+				Inputs:              append([]string(nil), spec.Inputs...),
+				ReadPaths:           append([]string(nil), spec.ReadPaths...),
+				WritePaths:          append([]string(nil), spec.WritePaths...),
+				Deliverables:        append([]string(nil), spec.Deliverables...),
 			})
 			if err != nil {
 				return nil, nil, err
@@ -2176,6 +2380,17 @@ func (b *Broker) prepareSpawnTaskSpecs(specs []SpawnTaskSpec) ([]SpawnTaskSpec, 
 	root := strings.TrimSpace(b.workspaceRoot())
 	resolved := make([]SpawnTaskSpec, len(specs))
 	copy(resolved, specs)
+	seenIDs := make(map[string]struct{}, len(resolved))
+	for _, spec := range resolved {
+		id := strings.TrimSpace(spec.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seenIDs[id]; ok {
+			return nil, fmt.Errorf("duplicate spawn_team task id %q", id)
+		}
+		seenIDs[id] = struct{}{}
+	}
 	if root == "" {
 		return resolved, nil
 	}
@@ -2278,6 +2493,8 @@ func normalizeToolName(name string) string {
 		return ToolFollowupTask
 	case "sendinput":
 		return ToolSendInput
+	case "resolveagentapproval", "approve_agent_tool", "approveagenttool", "approve_child_tool", "approvechildtool":
+		return ToolResolveAgentApproval
 	case "waitagent":
 		return ToolWaitAgent
 	case "readagentevents":
@@ -2380,6 +2597,47 @@ func coerceStringSlice(value interface{}) []string {
 		}
 	}
 	return nil
+}
+
+func marshalToolJSONArg(value interface{}) (json.RawMessage, error) {
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case json.RawMessage:
+		if len(typed) == 0 {
+			return nil, nil
+		}
+		if !json.Valid(typed) {
+			return nil, fmt.Errorf("invalid JSON")
+		}
+		return append(json.RawMessage(nil), typed...), nil
+	case []byte:
+		if len(typed) == 0 {
+			return nil, nil
+		}
+		if !json.Valid(typed) {
+			return nil, fmt.Errorf("invalid JSON")
+		}
+		return append(json.RawMessage(nil), typed...), nil
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return nil, nil
+		}
+		if !json.Valid([]byte(text)) {
+			return nil, fmt.Errorf("invalid JSON string")
+		}
+		return json.RawMessage(text), nil
+	default:
+		raw, err := json.Marshal(typed)
+		if err != nil {
+			return nil, err
+		}
+		if string(raw) == "null" {
+			return nil, nil
+		}
+		return raw, nil
+	}
 }
 
 func coerceObjectArray(value interface{}, field string) ([]map[string]interface{}, error) {
@@ -2638,22 +2896,36 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
+func normalizeSpawnAgentPermissionMode(raw string) (string, error) {
+	mode := runtimepolicy.Mode(strings.ToLower(strings.TrimSpace(raw)))
+	switch mode {
+	case "":
+		return "", nil
+	case runtimepolicy.ModeDefault, runtimepolicy.ModeAcceptEdits, runtimepolicy.ModePlan, runtimepolicy.ModeBypassPermissions:
+		return string(mode), nil
+	default:
+		return "", fmt.Errorf("invalid agent permission_mode: %s", strings.TrimSpace(raw))
+	}
+}
+
 func buildTaskSpecResult(task *team.Task) ReadTaskSpecResult {
 	if task == nil {
 		return ReadTaskSpecResult{}
 	}
 	result := ReadTaskSpecResult{
-		TaskID:       task.ID,
-		TeamID:       task.TeamID,
-		Title:        task.Title,
-		Goal:         task.Goal,
-		Inputs:       append([]string(nil), task.Inputs...),
-		Status:       string(task.Status),
-		Priority:     task.Priority,
-		ReadPaths:    append([]string(nil), task.ReadPaths...),
-		WritePaths:   append([]string(nil), task.WritePaths...),
-		Deliverables: append([]string(nil), task.Deliverables...),
-		Summary:      task.Summary,
+		TaskID:              task.ID,
+		TeamID:              task.TeamID,
+		Title:               task.Title,
+		Goal:                task.Goal,
+		Difficulty:          task.Difficulty,
+		DifficultyRationale: task.DifficultyRationale,
+		Inputs:              append([]string(nil), task.Inputs...),
+		Status:              string(task.Status),
+		Priority:            task.Priority,
+		ReadPaths:           append([]string(nil), task.ReadPaths...),
+		WritePaths:          append([]string(nil), task.WritePaths...),
+		Deliverables:        append([]string(nil), task.Deliverables...),
+		Summary:             task.Summary,
 	}
 	if task.Assignee != nil {
 		result.Assignee = strings.TrimSpace(*task.Assignee)
@@ -2897,7 +3169,7 @@ func (b *Broker) rejectTeamTeammateAgentRefs(ctx context.Context, parentSessionI
 		if teammate == nil {
 			continue
 		}
-		return fmt.Errorf("%s is a spawn_agent child-session tool, but %q is a spawn_team teammate id in team %q; do not use wait_agent/read_agent_events for team teammates, call wait_team with team_id %q instead", toolName, ref, strings.TrimSpace(teammate.TeamID), strings.TrimSpace(teammate.TeamID))
+		return fmt.Errorf("%s is a spawn_agent child-session tool, but %q is a spawn_team teammate id in team %q; use spawn_agent child session ids/paths with this tool, or call wait_team with team_id %q for spawn_team progress", toolName, ref, strings.TrimSpace(teammate.TeamID), strings.TrimSpace(teammate.TeamID))
 	}
 	return nil
 }

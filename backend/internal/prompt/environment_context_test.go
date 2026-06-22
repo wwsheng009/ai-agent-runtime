@@ -41,3 +41,19 @@ func TestRenderFileEditingGuidance_PrefersApplyPatchForCodeEdits(t *testing.T) {
 		t.Fatalf("expected verification guidance, got:\n%s", got)
 	}
 }
+
+func TestRenderTaskDifficultyGuidance_IncludesSubagentRoutingMetadata(t *testing.T) {
+	got := RenderTaskDifficultyGuidance()
+
+	for _, expected := range []string{
+		"Task difficulty rating and subagent delegation policy:",
+		"easy, normal, hard, expert",
+		"include difficulty and difficulty_rationale for every child task",
+		"leave provider/model empty unless the user explicitly asked",
+		"runtime maps difficulty to local provider/model configuration",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in guidance, got:\n%s", expected, got)
+		}
+	}
+}

@@ -10,19 +10,30 @@ import (
 // to an agent. Workflow implementations can project their native task state
 // into this shape without moving write ownership into AgentControl yet.
 type TaskRecord struct {
-	ID           string    `json:"id"`
-	Workflow     string    `json:"workflow,omitempty"`
-	TeamID       string    `json:"team_id,omitempty"`
-	ParentTaskID string    `json:"parent_task_id,omitempty"`
-	Assignee     string    `json:"assignee,omitempty"`
-	SessionID    string    `json:"session_id,omitempty"`
-	Path         string    `json:"path,omitempty"`
-	Title        string    `json:"title,omitempty"`
-	Summary      string    `json:"summary,omitempty"`
-	Status       string    `json:"status,omitempty"`
-	Priority     int       `json:"priority,omitempty"`
-	CreatedAt    time.Time `json:"created_at,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at,omitempty"`
+	ID                  string    `json:"id"`
+	Workflow            string    `json:"workflow,omitempty"`
+	TeamID              string    `json:"team_id,omitempty"`
+	ParentTaskID        string    `json:"parent_task_id,omitempty"`
+	Assignee            string    `json:"assignee,omitempty"`
+	SessionID           string    `json:"session_id,omitempty"`
+	Path                string    `json:"path,omitempty"`
+	Title               string    `json:"title,omitempty"`
+	Summary             string    `json:"summary,omitempty"`
+	Difficulty          string    `json:"difficulty,omitempty"`
+	DifficultyRationale string    `json:"difficulty_rationale,omitempty"`
+	RouteProvider       string    `json:"route_provider,omitempty"`
+	RouteModel          string    `json:"route_model,omitempty"`
+	RouteReasoningEffort string   `json:"route_reasoning_effort,omitempty"`
+	RouteSource         string    `json:"route_source,omitempty"`
+	RouteWarnings       []string  `json:"route_warnings,omitempty"`
+	FallbackUsed        bool      `json:"fallback_used,omitempty"`
+	FallbackReason      string    `json:"fallback_reason,omitempty"`
+	RouteResolvedAt     time.Time `json:"route_resolved_at,omitempty"`
+	RouteAttempt        int       `json:"route_attempt,omitempty"`
+	Status              string    `json:"status,omitempty"`
+	Priority            int       `json:"priority,omitempty"`
+	CreatedAt           time.Time `json:"created_at,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at,omitempty"`
 }
 
 // TaskFilter describes AgentControl task registry read filters without tying
@@ -153,42 +164,72 @@ type TaskStatusUpdateRequest struct {
 // TaskCreateRequest describes task creation through the AgentControl task
 // registry write seam without depending on a workflow-specific task table.
 type TaskCreateRequest struct {
-	ID           string
-	Workflow     string
-	TeamID       string
-	ParentTaskID string
-	Title        string
-	Goal         string
-	Status       string
-	Priority     int
-	Assignee     string
-	Inputs       []string
-	ReadPaths    []string
-	WritePaths   []string
-	Deliverables []string
-	Summary      string
-	ResultRef    string
+	ID                  string
+	Workflow            string
+	TeamID              string
+	ParentTaskID        string
+	Title               string
+	Goal                string
+	Difficulty          string
+	DifficultyRationale string
+	RouteProvider       string
+	RouteModel          string
+	RouteReasoningEffort string
+	RouteSource         string
+	RouteWarnings       []string
+	FallbackUsed        bool
+	FallbackReason      string
+	RouteResolvedAt     time.Time
+	RouteAttempt        int
+	Status              string
+	Priority            int
+	Assignee            string
+	Inputs              []string
+	ReadPaths           []string
+	WritePaths          []string
+	Deliverables        []string
+	Summary             string
+	ResultRef           string
 }
 
 // TaskUpdateRequest describes a full task patch through the AgentControl task
 // registry write seam. Nil fields are left unchanged; non-nil string pointers
 // can be empty when the backing workflow supports clearing that field.
 type TaskUpdateRequest struct {
-	ID           string
-	Workflow     string
-	TeamID       string
-	ParentTaskID *string
-	Title        *string
-	Goal         *string
-	Status       *string
-	Priority     *int
-	Assignee     *string
-	Inputs       *[]string
-	ReadPaths    *[]string
-	WritePaths   *[]string
-	Deliverables *[]string
-	Summary      *string
-	ResultRef    *string
+	ID                  string
+	Workflow            string
+	TeamID              string
+	ParentTaskID        *string
+	Title               *string
+	Goal                *string
+	Difficulty          *string
+	DifficultyRationale *string
+	Status              *string
+	Priority            *int
+	Assignee            *string
+	Inputs              *[]string
+	ReadPaths           *[]string
+	WritePaths          *[]string
+	Deliverables        *[]string
+	Summary             *string
+	ResultRef           *string
+}
+
+// TaskRouteAuditUpdateRequest updates the latest route audit metadata for a
+// task without changing lifecycle, lease, assignee, or path-claim state.
+type TaskRouteAuditUpdateRequest struct {
+	ID                   string
+	Workflow             string
+	TeamID               string
+	RouteProvider        string
+	RouteModel           string
+	RouteReasoningEffort string
+	RouteSource          string
+	RouteWarnings        []string
+	FallbackUsed         bool
+	FallbackReason       string
+	RouteResolvedAt      time.Time
+	RouteAttempt         int
 }
 
 // TaskDependencyCreateRequest describes creating a dependency edge through the
@@ -341,6 +382,12 @@ type TaskRegistryBlockWriter interface {
 	BlockAgentControlTask(ctx context.Context, request TaskBlockRequest) (*TaskRecord, error)
 }
 
+// TaskRegistryRouteAuditWriter exposes latest route audit updates through the
+// AgentControl task seam.
+type TaskRegistryRouteAuditWriter interface {
+	UpdateAgentControlTaskRouteAudit(ctx context.Context, request TaskRouteAuditUpdateRequest) (*TaskRecord, error)
+}
+
 // Normalize trims string fields without changing workflow ownership.
 func (r TaskRecord) Normalize() TaskRecord {
 	r.ID = strings.TrimSpace(r.ID)
@@ -352,6 +399,14 @@ func (r TaskRecord) Normalize() TaskRecord {
 	r.Path = strings.TrimSpace(r.Path)
 	r.Title = strings.TrimSpace(r.Title)
 	r.Summary = strings.TrimSpace(r.Summary)
+	r.Difficulty = strings.TrimSpace(r.Difficulty)
+	r.DifficultyRationale = strings.TrimSpace(r.DifficultyRationale)
+	r.RouteProvider = strings.TrimSpace(r.RouteProvider)
+	r.RouteModel = strings.TrimSpace(r.RouteModel)
+	r.RouteReasoningEffort = strings.TrimSpace(r.RouteReasoningEffort)
+	r.RouteSource = strings.TrimSpace(r.RouteSource)
+	r.RouteWarnings = trimStringSlice(r.RouteWarnings)
+	r.FallbackReason = strings.TrimSpace(r.FallbackReason)
 	r.Status = strings.TrimSpace(r.Status)
 	return r
 }
@@ -428,6 +483,14 @@ func (r TaskCreateRequest) Normalize() TaskCreateRequest {
 	r.ParentTaskID = strings.TrimSpace(r.ParentTaskID)
 	r.Title = strings.TrimSpace(r.Title)
 	r.Goal = strings.TrimSpace(r.Goal)
+	r.Difficulty = strings.TrimSpace(r.Difficulty)
+	r.DifficultyRationale = strings.TrimSpace(r.DifficultyRationale)
+	r.RouteProvider = strings.TrimSpace(r.RouteProvider)
+	r.RouteModel = strings.TrimSpace(r.RouteModel)
+	r.RouteReasoningEffort = strings.TrimSpace(r.RouteReasoningEffort)
+	r.RouteSource = strings.TrimSpace(r.RouteSource)
+	r.RouteWarnings = trimStringSlice(r.RouteWarnings)
+	r.FallbackReason = strings.TrimSpace(r.FallbackReason)
 	r.Status = strings.TrimSpace(r.Status)
 	r.Assignee = strings.TrimSpace(r.Assignee)
 	r.Summary = strings.TrimSpace(r.Summary)
@@ -450,6 +513,8 @@ func (r TaskUpdateRequest) Normalize() TaskUpdateRequest {
 	trimStringPtr(&r.ParentTaskID)
 	trimStringPtr(&r.Title)
 	trimStringPtr(&r.Goal)
+	trimStringPtr(&r.Difficulty)
+	trimStringPtr(&r.DifficultyRationale)
 	trimStringPtr(&r.Status)
 	trimStringPtr(&r.Assignee)
 	trimStringPtr(&r.Summary)
@@ -532,13 +597,35 @@ func (r TaskBlockRequest) Normalize() TaskBlockRequest {
 	return r
 }
 
+// Normalize trims string fields in a route audit update request.
+func (r TaskRouteAuditUpdateRequest) Normalize() TaskRouteAuditUpdateRequest {
+	r.ID = strings.TrimSpace(r.ID)
+	r.Workflow = strings.TrimSpace(r.Workflow)
+	r.TeamID = strings.TrimSpace(r.TeamID)
+	r.RouteProvider = strings.TrimSpace(r.RouteProvider)
+	r.RouteModel = strings.TrimSpace(r.RouteModel)
+	r.RouteReasoningEffort = strings.TrimSpace(r.RouteReasoningEffort)
+	r.RouteSource = strings.TrimSpace(r.RouteSource)
+	r.RouteWarnings = trimStringSlice(r.RouteWarnings)
+	r.FallbackReason = strings.TrimSpace(r.FallbackReason)
+	return r
+}
+
 func trimStringSlicePtr(values *[]string) *[]string {
 	if values == nil {
 		return nil
 	}
-	trimmed := make([]string, 0, len(*values))
-	for _, value := range *values {
+	trimmed := trimStringSlice(*values)
+	return &trimmed
+}
+
+func trimStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	trimmed := make([]string, 0, len(values))
+	for _, value := range values {
 		trimmed = append(trimmed, strings.TrimSpace(value))
 	}
-	return &trimmed
+	return trimmed
 }

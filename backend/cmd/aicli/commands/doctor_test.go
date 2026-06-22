@@ -3,8 +3,11 @@ package commands
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
 func TestDoctorProviderCasesUseExplicitConfigAndModes(t *testing.T) {
@@ -108,6 +111,223 @@ func TestSummarizeDoctorChatDebugLogRequest(t *testing.T) {
 	}
 	if resp.ResponseStatusCode != 200 || resp.BodyBytes != 99 {
 		t.Fatalf("unexpected response summary: %#v", resp)
+	}
+}
+
+func TestRunDoctorSubagentRouteUsesConfiguredHardRoute(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		ConfigFilePath: "config.yaml",
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "parent",
+			Items: map[string]config.Provider{
+				"parent": {
+					Enabled:      true,
+					DefaultModel: "parent-model",
+					MaxToken:     2048,
+				},
+				"strong": {
+					Enabled:         true,
+					DefaultModel:    "strong-default",
+					SupportedModels: []string{"strong-model"},
+					ModelCapabilities: map[string]config.ModelCapabilitySpec{
+						"strong-model": {
+							ReasoningModel:   true,
+							ReasoningEfforts: []string{"high"},
+						},
+					},
+				},
+			},
+		},
+		AICLI: &config.AICLIConfig{
+			Subagents: &config.AICLISubagentsConfig{
+				Routing: &config.AICLISubagentRoutingConfig{
+					Enabled: &enabled,
+					Levels: map[string]config.AICLISubagentRouteProfile{
+						"hard": {
+							Provider:        "strong",
+							Model:           "strong-model",
+							ReasoningEffort: "high",
+							MaxTokens:       12000,
+							Timeout:         5 * time.Minute,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	report, _, err := runDoctorSubagentRoute(cfg, doctorSubagentRouteOptions{
+		Role:       "researcher",
+		Goal:       "Analyze provider protocol migration.",
+		Difficulty: "hard",
+		ReadOnly:   true,
+	})
+	if err != nil {
+		t.Fatalf("runDoctorSubagentRoute failed: %v", err)
+	}
+	if !report.RoutingEnabled {
+		t.Fatal("expected routing enabled")
+	}
+	if report.Decision.Provider != "strong" ||
+		report.Decision.Model != "strong-model" ||
+		report.Decision.ReasoningEffort != "high" ||
+		report.Decision.Source != "difficulty_level" {
+		t.Fatalf("unexpected decision: %#v", report.Decision)
+	}
+	if report.Decision.MaxTokens != 12000 || report.Decision.Timeout != "5m0s" {
+		t.Fatalf("unexpected route budget: %#v", report.Decision)
+	}
+}
+
+func TestRunDoctorSubagentRouteUsesChatDefaultsForParent(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "global-parent",
+			Items: map[string]config.Provider{
+				"global-parent": {
+					Enabled:      true,
+					DefaultModel: "global-model",
+				},
+				"chat-parent": {
+					Enabled:      true,
+					DefaultModel: "provider-fallback-model",
+					MaxToken:     4096,
+				},
+			},
+		},
+		AICLI: &config.AICLIConfig{
+			Chat: &config.AICLIChatConfig{
+				DefaultProvider: "chat-parent",
+				DefaultModel:    "chat-model",
+				ReasoningEffort: "medium",
+			},
+			Subagents: &config.AICLISubagentsConfig{
+				Routing: &config.AICLISubagentRoutingConfig{
+					Enabled: &enabled,
+				},
+			},
+		},
+	}
+
+	report, _, err := runDoctorSubagentRoute(cfg, doctorSubagentRouteOptions{
+		Difficulty: "normal",
+		ReadOnly:   true,
+	})
+	if err != nil {
+		t.Fatalf("runDoctorSubagentRoute failed: %v", err)
+	}
+	if report.Parent.Provider != "chat-parent" ||
+		report.Parent.Model != "chat-model" ||
+		report.Parent.ReasoningEffort != "medium" ||
+		report.Parent.MaxTokens != 4096 {
+		t.Fatalf("expected parent defaults from aicli.chat, got %#v", report.Parent)
+	}
+}
+
+func TestDoctorSubagentRouteCommandFlagsJSON(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		ConfigFilePath: "config.yaml",
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "parent",
+			Items: map[string]config.Provider{
+				"parent": {
+					Enabled:      true,
+					DefaultModel: "parent-model",
+				},
+				"strong": {
+					Enabled:         true,
+					DefaultModel:    "strong-default",
+					SupportedModels: []string{"strong-model"},
+					ModelCapabilities: map[string]config.ModelCapabilitySpec{
+						"strong-model": {
+							ReasoningModel:   true,
+							ReasoningEfforts: []string{"high"},
+						},
+					},
+				},
+			},
+		},
+		AICLI: &config.AICLIConfig{
+			Subagents: &config.AICLISubagentsConfig{
+				Routing: &config.AICLISubagentRoutingConfig{
+					Enabled: &enabled,
+					Levels: map[string]config.AICLISubagentRouteProfile{
+						"hard": {
+							Provider:        "strong",
+							Model:           "strong-model",
+							ReasoningEffort: "high",
+						},
+					},
+				},
+			},
+		},
+	}
+	cmd := NewDoctorCommand(func() *config.Config { return cfg })
+	cmd.SetArgs([]string{"subagent-route", "--role", "writer", "--difficulty", "hard", "--json"})
+
+	output := captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("doctor subagent-route failed: %v", err)
+		}
+	})
+	for _, expected := range []string{
+		`"routing_enabled":true`,
+		`"role":"writer"`,
+		`"difficulty":"hard"`,
+		`"provider":"strong"`,
+		`"model":"strong-model"`,
+		`"reasoning_effort":"high"`,
+		`"source":"difficulty_level"`,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected JSON output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestRunDoctorSubagentRouteDisabledPreservesLegacyModelOverride(t *testing.T) {
+	disabled := false
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "parent",
+			Items: map[string]config.Provider{
+				"parent": {
+					Enabled:      true,
+					DefaultModel: "parent-model",
+					MaxToken:     2048,
+				},
+			},
+		},
+		AICLI: &config.AICLIConfig{
+			Subagents: &config.AICLISubagentsConfig{
+				Routing: &config.AICLISubagentRoutingConfig{
+					Enabled:           &disabled,
+					DefaultDifficulty: "not-a-real-difficulty",
+				},
+			},
+		},
+	}
+
+	report, _, err := runDoctorSubagentRoute(cfg, doctorSubagentRouteOptions{
+		Provider:        "ignored-provider",
+		Model:           "child-model",
+		ReasoningEffort: "high",
+		ReadOnly:        true,
+	})
+	if err != nil {
+		t.Fatalf("runDoctorSubagentRoute failed: %v", err)
+	}
+	if report.RoutingEnabled {
+		t.Fatal("expected routing disabled")
+	}
+	if report.Decision.Provider != "parent" ||
+		report.Decision.Model != "child-model" ||
+		report.Decision.ReasoningEffort != "" ||
+		report.Decision.Source != "disabled" {
+		t.Fatalf("unexpected disabled decision: %#v", report.Decision)
 	}
 }
 

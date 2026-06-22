@@ -128,16 +128,18 @@ func ActiveAgentControlTaskRecordForAssignee(ctx context.Context, store Store, t
 // AgentControl task read model.
 func AgentControlTaskRecord(task Task, teammate *Teammate) agentcontrol.TaskRecord {
 	record := agentcontrol.TaskRecord{
-		ID:        task.ID,
-		Workflow:  agentcontrol.WorkflowSpawnTeam,
-		TeamID:    task.TeamID,
-		Assignee:  taskAssigneeID(task),
-		Title:     task.Title,
-		Summary:   task.Summary,
-		Status:    string(task.Status),
-		Priority:  task.Priority,
-		CreatedAt: task.CreatedAt,
-		UpdatedAt: task.UpdatedAt,
+		ID:                  task.ID,
+		Workflow:            agentcontrol.WorkflowSpawnTeam,
+		TeamID:              task.TeamID,
+		Assignee:            taskAssigneeID(task),
+		Title:               task.Title,
+		Summary:             task.Summary,
+		Difficulty:          task.Difficulty,
+		DifficultyRationale: task.DifficultyRationale,
+		Status:              string(task.Status),
+		Priority:            task.Priority,
+		CreatedAt:           task.CreatedAt,
+		UpdatedAt:           task.UpdatedAt,
 	}
 	if task.ParentTaskID != nil {
 		record.ParentTaskID = strings.TrimSpace(*task.ParentTaskID)

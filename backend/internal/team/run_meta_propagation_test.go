@@ -59,11 +59,27 @@ func TestTeammateRunnerStartTaskIncludesRunMeta(t *testing.T) {
 	assert.Equal(t, "bypass_permissions", client.lastRunMeta.PermissionMode)
 }
 
+func TestTeamRunMetaCloneCopiesRouteWarnings(t *testing.T) {
+	original := &TeamRunMeta{
+		TeamID:        "team-1",
+		AgentID:       "mate-1",
+		CurrentTaskID: "task-1",
+		RouteWarnings: []string{"warning-one"},
+	}
+
+	clone := original.Clone()
+	require.NotNil(t, clone)
+	require.Equal(t, []string{"warning-one"}, clone.RouteWarnings)
+
+	clone.RouteWarnings[0] = "changed"
+	require.Equal(t, []string{"warning-one"}, original.RouteWarnings)
+}
+
 func TestLeadPlannerInitialPlanIncludesTeamRunMeta(t *testing.T) {
 	client := &capturingSessionClient{
 		result: &SessionResult{
 			Success: true,
-			Output:  `{"tasks":[{"id":"task-1","title":"Plan","goal":"Do work"}]}`,
+			Output:  `{"tasks":[{"id":"task-1","title":"Plan","goal":"Do work","difficulty":"Hard","difficulty_rationale":" Requires cross-team coordination. "}]}`,
 		},
 	}
 	planner := &LeadPlanner{Sessions: client}
@@ -74,9 +90,14 @@ func TestLeadPlannerInitialPlanIncludesTeamRunMeta(t *testing.T) {
 	}, "Ship feature")
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Len(t, result.Tasks, 1)
 	require.NotNil(t, client.lastRunMeta)
 	require.NotNil(t, client.lastRunMeta.Team)
 
+	assert.Equal(t, TaskDifficultyHard, result.Tasks[0].Difficulty)
+	assert.Equal(t, "Requires cross-team coordination.", result.Tasks[0].DifficultyRationale)
+	assert.Contains(t, client.prompt, `"difficulty":"normal"`)
+	assert.Contains(t, client.prompt, "Set difficulty to one of easy, normal, hard, expert")
 	assert.Equal(t, "team-1", client.lastRunMeta.Team.TeamID)
 	assert.Equal(t, "", client.lastRunMeta.Team.AgentID)
 	assert.Equal(t, "", client.lastRunMeta.Team.CurrentTaskID)
@@ -87,7 +108,7 @@ func TestLeadPlannerReplanOnFailureIncludesTaskRunMeta(t *testing.T) {
 	client := &capturingSessionClient{
 		result: &SessionResult{
 			Success: true,
-			Output:  `{"tasks":[{"id":"task-2","title":"Retry","goal":"Retry work"}]}`,
+			Output:  `{"tasks":[{"id":"task-2","title":"Retry","goal":"Retry work","difficulty":"expert","difficulty_rationale":"Failure recovery touches shared state."}]}`,
 		},
 	}
 	planner := &LeadPlanner{Sessions: client}
@@ -103,13 +124,34 @@ func TestLeadPlannerReplanOnFailureIncludesTaskRunMeta(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.Len(t, result.Tasks, 1)
 	require.NotNil(t, client.lastRunMeta)
 	require.NotNil(t, client.lastRunMeta.Team)
 
+	assert.Equal(t, TaskDifficultyExpert, result.Tasks[0].Difficulty)
+	assert.Equal(t, "Failure recovery touches shared state.", result.Tasks[0].DifficultyRationale)
 	assert.Equal(t, "team-1", client.lastRunMeta.Team.TeamID)
 	assert.Equal(t, "", client.lastRunMeta.Team.AgentID)
 	assert.Equal(t, "task-9", client.lastRunMeta.Team.CurrentTaskID)
 	assert.Equal(t, "bypass_permissions", client.lastRunMeta.PermissionMode)
+}
+
+func TestLeadPlannerInitialPlanRejectsInvalidDifficulty(t *testing.T) {
+	client := &capturingSessionClient{
+		result: &SessionResult{
+			Success: true,
+			Output:  `{"tasks":[{"id":"task-1","title":"Plan","goal":"Do work","difficulty":"extreme"}]}`,
+		},
+	}
+	planner := &LeadPlanner{Sessions: client}
+
+	result, err := planner.InitialPlan(context.Background(), Team{
+		ID:            "team-1",
+		LeadSessionID: "lead-session",
+	}, "Ship feature")
+	require.Error(t, err)
+	require.Nil(t, result)
+	assert.Contains(t, err.Error(), "invalid task difficulty")
 }
 
 func TestLeadPlannerInitialPlanWrapsPromptPreflightSessionExecutionError(t *testing.T) {

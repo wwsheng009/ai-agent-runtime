@@ -20,48 +20,51 @@ import (
 )
 
 type chatRuntimeEventBridge struct {
-	session                *ChatSession
-	startOnce              sync.Once
-	processorOnce          sync.Once
-	eventQueue             chan runtimeevents.Event
-	runMu                  sync.Mutex
-	logMu                  sync.Mutex
-	renderMu               sync.Mutex
-	progressMu             sync.Mutex
-	runErr                 error
-	rendered               map[string]struct{}
-	approvalGrants         map[string]time.Time
-	permissionHintShown    bool
-	renderedAssistantDelta bool
-	renderedAssistantFinal bool
-	renderedReasoningDelta bool
-	renderedReasoningFinal bool
-	runStarted             bool
-	runActive              bool
-	nextRunPrompt          string
-	activeRunPrompt        string
-	requestLogState        map[string]*chatRuntimeRequestLogState
-	traceLatestRequestKey  map[string]string
-	latestRequestKey       string
-	loggedToolCalls        map[string]struct{}
-	loggedToolResults      map[string]struct{}
-	toolExecutionCalls     []aicliToolExecutionCallSummary
-	toolSummaryLogged      bool
-	enqueuedEvents         uint64
-	processedEvents        uint64
-	askApproval            func(*runtimechat.ApprovalRequest) (bool, error)
-	askQuestion            func(prompt string, suggestions []string, required bool) (string, error)
-	approveTool            func(ctx context.Context, sessionID, requestID string, allow bool) error
-	answerQuestion         func(ctx context.Context, sessionID, questionID, answer string) error
-	writeLine              func(string)
-	writeDelta             func(string)
-	finalizeDelta          func()
-	completeDelta          func(string) bool
-	writeReasoningDelta    func(*runtimetypes.ReasoningBlock)
-	finalizeReasoning      func()
-	completeReasoning      func(*runtimetypes.ReasoningBlock) bool
-	renderResponse         func(string)
-	writePrompt            func()
+	session                         *ChatSession
+	startOnce                       sync.Once
+	processorOnce                   sync.Once
+	eventQueue                      chan runtimeevents.Event
+	runMu                           sync.Mutex
+	logMu                           sync.Mutex
+	renderMu                        sync.Mutex
+	progressMu                      sync.Mutex
+	runErr                          error
+	rendered                        map[string]struct{}
+	approvalGrants                  map[string]time.Time
+	permissionHintShown             bool
+	renderedAssistantDelta          bool
+	renderedAssistantDeltaFinalized bool
+	renderedAssistantDeltaContent   string
+	renderedAssistantFinal          bool
+	renderedAssistantFinalContent   string
+	renderedReasoningDelta          bool
+	renderedReasoningFinal          bool
+	runStarted                      bool
+	runActive                       bool
+	nextRunPrompt                   string
+	activeRunPrompt                 string
+	requestLogState                 map[string]*chatRuntimeRequestLogState
+	traceLatestRequestKey           map[string]string
+	latestRequestKey                string
+	loggedToolCalls                 map[string]struct{}
+	loggedToolResults               map[string]struct{}
+	toolExecutionCalls              []aicliToolExecutionCallSummary
+	toolSummaryLogged               bool
+	enqueuedEvents                  uint64
+	processedEvents                 uint64
+	askApproval                     func(*runtimechat.ApprovalRequest) (bool, error)
+	askQuestion                     func(prompt string, suggestions []string, required bool) (string, error)
+	approveTool                     func(ctx context.Context, sessionID, requestID string, allow bool) error
+	answerQuestion                  func(ctx context.Context, sessionID, questionID, answer string) error
+	writeLine                       func(string)
+	writeDelta                      func(string)
+	finalizeDelta                   func()
+	completeDelta                   func(string) bool
+	writeReasoningDelta             func(*runtimetypes.ReasoningBlock)
+	finalizeReasoning               func()
+	completeReasoning               func(*runtimetypes.ReasoningBlock) bool
+	renderResponse                  func(string)
+	writePrompt                     func()
 }
 
 type chatRuntimeRequestLogState struct {
@@ -266,7 +269,10 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.rendered = make(map[string]struct{})
 	b.pruneApprovalGrantsLocked(time.Now().UTC())
 	b.renderedAssistantDelta = false
+	b.renderedAssistantDeltaFinalized = false
+	b.renderedAssistantDeltaContent = ""
 	b.renderedAssistantFinal = false
+	b.renderedAssistantFinalContent = ""
 	b.renderedReasoningDelta = false
 	b.renderedReasoningFinal = false
 	b.runStarted = true
@@ -755,6 +761,16 @@ func runtimeEventToolName(event runtimeevents.Event) string {
 	return firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"]))
 }
 
+func runtimeToolTimelinePayload(event runtimeevents.Event) map[string]interface{} {
+	toolName := runtimeEventToolName(event)
+	if strings.TrimSpace(toolName) == "" || strings.TrimSpace(payloadStringValue(event.Payload["tool_name"])) != "" {
+		return event.Payload
+	}
+	payload := cloneRuntimeEventLogPayload(event.Payload)
+	payload["tool_name"] = toolName
+	return payload
+}
+
 func runtimeToolExecutionSummaryCall(event runtimeevents.Event) aicliToolExecutionCallSummary {
 	toolCallID := strings.TrimSpace(payloadStringValue(event.Payload["tool_call_id"]))
 	function := runtimeEventToolName(event)
@@ -1078,15 +1094,13 @@ func (b *chatRuntimeEventBridge) shouldFlushAssistantDeltaOnSessionEnd(event run
 	if b == nil || b.session == nil || event.Type != runtimechat.EventSessionEnd {
 		return false
 	}
-	if !b.HasRenderedAssistantDelta() || b.HasRenderedAssistantFinal() {
+	if !b.HasRenderedAssistantDelta() || b.HasRenderedAssistantFinal() || b.hasFinalizedAssistantDelta() {
 		return false
 	}
 	if b.finalizeDelta != nil {
 		b.finalizeDelta()
 	}
-	b.renderMu.Lock()
-	b.renderedAssistantFinal = true
-	b.renderMu.Unlock()
+	b.markAssistantDeltaFinalized()
 	return true
 }
 
@@ -1156,9 +1170,7 @@ func (b *chatRuntimeEventBridge) handleAssistantDelta(event runtimeevents.Event)
 	if delta == "" {
 		return false
 	}
-	b.renderMu.Lock()
-	b.renderedAssistantDelta = true
-	b.renderMu.Unlock()
+	b.markAssistantDeltaRendered(delta)
 	if b.writeDelta != nil {
 		b.writeDelta(delta)
 	}
@@ -1175,9 +1187,11 @@ func (b *chatRuntimeEventBridge) finalizeAssistantDelta(event runtimeevents.Even
 	if b.finalizeDelta != nil {
 		b.finalizeDelta()
 	}
-	b.renderMu.Lock()
-	b.renderedAssistantFinal = true
-	b.renderMu.Unlock()
+	b.markAssistantDeltaFinalized()
+	content, _ := event.Payload["content"].(string)
+	if b.hasRenderedAssistantContent(content) {
+		b.markAssistantFinalRendered(content)
+	}
 	return true
 }
 
@@ -1202,9 +1216,15 @@ func (b *chatRuntimeEventBridge) handlePrimaryAssistantMessage(event runtimeeven
 	if b.HasRenderedAssistantDelta() {
 		content, _ := event.Payload["content"].(string)
 		if strings.TrimSpace(content) != "" && b.completeDelta != nil && b.completeDelta(content) {
-			b.renderMu.Lock()
-			b.renderedAssistantFinal = true
-			b.renderMu.Unlock()
+			b.markAssistantFinalRendered(content)
+			return true
+		}
+		if strings.TrimSpace(content) != "" && b.hasFinalizedAssistantDelta() {
+			content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
+			if b.renderResponse != nil {
+				b.renderResponse(content)
+			}
+			b.markAssistantFinalRendered(content)
 			return true
 		}
 		return b.finalizeAssistantDelta(event) || renderedSummary
@@ -1217,9 +1237,7 @@ func (b *chatRuntimeEventBridge) handlePrimaryAssistantMessage(event runtimeeven
 	if b.renderResponse != nil {
 		b.renderResponse(content)
 	}
-	b.renderMu.Lock()
-	b.renderedAssistantFinal = true
-	b.renderMu.Unlock()
+	b.markAssistantFinalRendered(content)
 	return true
 }
 
@@ -1563,6 +1581,74 @@ func (b *chatRuntimeEventBridge) pruneApprovalGrantsLocked(now time.Time) {
 	}
 }
 
+func normalizeRenderedAssistantContent(content string) string {
+	content = sanitizeInteractiveAsyncTeamLaunchResponse(content)
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	return strings.TrimSpace(content)
+}
+
+func (b *chatRuntimeEventBridge) markAssistantDeltaRendered(delta string) {
+	if b == nil {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.renderedAssistantDelta = true
+	b.renderedAssistantDeltaFinalized = false
+	b.renderedAssistantDeltaContent += delta
+}
+
+func (b *chatRuntimeEventBridge) markAssistantDeltaFinalized() {
+	if b == nil {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.renderedAssistantDeltaFinalized = true
+}
+
+func (b *chatRuntimeEventBridge) hasFinalizedAssistantDelta() bool {
+	if b == nil {
+		return false
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	return b.renderedAssistantDeltaFinalized
+}
+
+func (b *chatRuntimeEventBridge) markAssistantFinalRendered(content string) {
+	if b == nil {
+		return
+	}
+	normalized := normalizeRenderedAssistantContent(content)
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.renderedAssistantFinal = true
+	if normalized != "" {
+		b.renderedAssistantFinalContent = normalized
+	}
+}
+
+func (b *chatRuntimeEventBridge) hasRenderedAssistantContent(content string) bool {
+	if b == nil {
+		return false
+	}
+	normalized := normalizeRenderedAssistantContent(content)
+	if normalized == "" {
+		return false
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.renderedAssistantFinalContent != "" && b.renderedAssistantFinalContent == normalized {
+		return true
+	}
+	if b.renderedAssistantDeltaFinalized && normalizeRenderedAssistantContent(b.renderedAssistantDeltaContent) == normalized {
+		return true
+	}
+	return false
+}
+
 func (b *chatRuntimeEventBridge) HasRenderedAssistantDelta() bool {
 	if b == nil {
 		return false
@@ -1582,12 +1668,15 @@ func (b *chatRuntimeEventBridge) HasRenderedAssistantFinal() bool {
 }
 
 func (b *chatRuntimeEventBridge) MarkAssistantFinalRendered() {
-	if b == nil {
-		return
-	}
-	b.renderMu.Lock()
-	defer b.renderMu.Unlock()
-	b.renderedAssistantFinal = true
+	b.markAssistantFinalRendered("")
+}
+
+func (b *chatRuntimeEventBridge) MarkAssistantFinalResponseRendered(content string) {
+	b.markAssistantFinalRendered(content)
+}
+
+func (b *chatRuntimeEventBridge) HasRenderedAssistantFinalResponse(content string) bool {
+	return b.hasRenderedAssistantContent(content)
 }
 
 func (b *chatRuntimeEventBridge) hasRenderedReasoningDelta() bool {
@@ -1660,8 +1749,8 @@ func (b *chatRuntimeEventBridge) asyncTeamAssistantResponse(event runtimeevents.
 		b.rendered = make(map[string]struct{})
 	}
 	b.rendered[key] = struct{}{}
-	b.renderedAssistantFinal = true
 	b.renderMu.Unlock()
+	b.markAssistantFinalRendered(content)
 	return content
 }
 
@@ -1803,16 +1892,18 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 	case "subagent.started":
 		return chatRuntimeTimelineEvent{}
 	case "subagent.completed":
-		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[subagent] completed %s", firstNonEmptyChatValue(payloadStringValue(event.Payload["agent_id"]), payloadStringValue(event.Payload["role"]), strings.TrimSpace(event.SessionID)))}
+		return chatRuntimeTimelineEvent{Line: renderSubagentCompletedTimelineEvent(event)}
 	case "subagent.denied":
 		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[subagent] denied %s", payloadStringValue(event.Payload["reason"]))}
 	case "tool.requested":
-		return chatRuntimeTimelineEvent{Line: appendCompactToolDirectory(renderCompactToolRequestedWithSource(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]), payloadStringValue(event.Payload[toolresult.SourceKey])), event.Payload)}
+		payload := runtimeToolTimelinePayload(event)
+		return chatRuntimeTimelineEvent{Line: appendCompactToolDirectory(renderCompactToolRequestedWithSource(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(payload["tool_name"])), "", payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), payloadStringValue(payload[toolresult.SourceKey])), payload)}
 	case "tool.completed":
-		line := renderCompactToolCompletedWithPayload(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(event.Payload["tool_name"])), "", payloadStringValue(event.Payload["command_text"]), payloadStringValue(event.Payload["arg_preview"]), payloadStringValue(event.Payload[toolresult.SourceKey]), chatToolSummaryLines(event.Payload), event.Payload)
-		line = appendCompactToolDirectory(line, event.Payload)
+		payload := runtimeToolTimelinePayload(event)
+		line := renderCompactToolCompletedWithPayload(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(payload["tool_name"])), "", payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), payloadStringValue(payload[toolresult.SourceKey]), chatToolSummaryLines(payload), payload)
+		line = appendCompactToolDirectory(line, payload)
 		rendered := []string{line}
-		if waitingLine := chatToolPostCommandHint(event.Payload); waitingLine != "" {
+		if waitingLine := chatToolPostCommandHint(payload); waitingLine != "" {
 			rendered = append(rendered, waitingLine)
 		}
 		line = strings.Join(rendered, "\n")
@@ -3243,37 +3334,48 @@ func chatToolSummaryLines(payload map[string]interface{}) []string {
 		}
 	}
 
-	out := make([]string, 0, 3)
+	maxChars := chatToolSummaryTextLimit(payload)
+	out := make([]string, 0, maxLines)
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
-		out = append(out, truncateChatRuntimeText(trimmed, 120))
+		out = append(out, truncateChatRuntimeText(trimmed, maxChars))
 		if len(out) == maxLines {
 			return out
 		}
 	}
 	if len(out) > 0 {
 		if errText != "" && isGenericChatToolFailureSummary(out) {
-			return []string{truncateChatRuntimeText("failed: "+errText, 120)}
+			return []string{truncateChatRuntimeText("failed: "+errText, maxChars)}
 		}
 		return out
 	}
 
 	if errText != "" {
-		return []string{truncateChatRuntimeText("failed: "+errText, 120)}
+		return []string{truncateChatRuntimeText("failed: "+errText, maxChars)}
 	}
 	return nil
 }
 
 func chatToolSummaryLineLimit(payload map[string]interface{}) int {
+	if strings.EqualFold(strings.TrimSpace(payloadStringValue(payload["tool_name"])), "todos") {
+		return 32
+	}
 	switch toolresult.NormalizeSource(payloadStringValue(payload[toolresult.SourceKey])) {
 	case toolresult.SourceMeta, toolresult.SourceMCP, toolresult.SourceBroker:
 		return 2
 	default:
 		return 3
 	}
+}
+
+func chatToolSummaryTextLimit(payload map[string]interface{}) int {
+	if strings.EqualFold(strings.TrimSpace(payloadStringValue(payload["tool_name"])), "todos") {
+		return 240
+	}
+	return 120
 }
 
 func chatLLMRequestToolAvailabilityHint(payload map[string]interface{}) string {
@@ -3399,6 +3501,37 @@ func formatRuntimeLLMRequestFinishedDebugInfo(event runtimeevents.Event) string 
 		return ""
 	}
 	return "[llm-debug] request_finished " + strings.Join(parts, " ")
+}
+
+func renderSubagentCompletedTimelineEvent(event runtimeevents.Event) string {
+	payload := event.Payload
+	agentID := firstNonEmptyChatValue(payloadStringValue(payload["agent_id"]), payloadStringValue(payload["role"]), strings.TrimSpace(event.SessionID))
+	parts := []string{fmt.Sprintf("[subagent] completed %s", agentID)}
+	if difficulty := strings.TrimSpace(payloadStringValue(payload["difficulty"])); difficulty != "" {
+		parts = append(parts, "difficulty="+difficulty)
+	}
+	if provider := strings.TrimSpace(payloadStringValue(payload["route_provider"])); provider != "" {
+		parts = append(parts, "provider="+provider)
+	}
+	if model := strings.TrimSpace(payloadStringValue(payload["route_model"])); model != "" {
+		parts = append(parts, "model="+model)
+	}
+	if effort := strings.TrimSpace(payloadStringValue(payload["route_reasoning_effort"])); effort != "" {
+		parts = append(parts, "reasoning="+effort)
+	}
+	if permissionMode := strings.TrimSpace(payloadStringValue(payload["permission_mode"])); permissionMode != "" {
+		parts = append(parts, "permission_mode="+permissionMode)
+	}
+	if source := strings.TrimSpace(payloadStringValue(payload["route_source"])); source != "" {
+		parts = append(parts, "route_source="+source)
+	}
+	if totalTokens := intPayloadValue(payload, "usage_total_tokens"); totalTokens > 0 {
+		parts = append(parts, fmt.Sprintf("usage_total_tokens=%d", totalTokens))
+	}
+	if warnings := stringSliceValueAny(payload["route_warnings"]); len(warnings) > 0 {
+		parts = append(parts, "warnings="+strings.Join(warnings, ","))
+	}
+	return strings.Join(parts, " ")
 }
 
 func chatToolPostCommandHint(payload map[string]interface{}) string {

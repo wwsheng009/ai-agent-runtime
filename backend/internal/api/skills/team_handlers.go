@@ -1643,21 +1643,23 @@ func (h *Handler) CreateAgentControlTask(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req struct {
-		ID           string   `json:"id,omitempty"`
-		Workflow     string   `json:"workflow,omitempty"`
-		TeamID       string   `json:"team_id,omitempty"`
-		ParentTaskID string   `json:"parent_task_id,omitempty"`
-		Title        string   `json:"title,omitempty"`
-		Goal         string   `json:"goal,omitempty"`
-		Status       string   `json:"status,omitempty"`
-		Priority     int      `json:"priority,omitempty"`
-		Assignee     string   `json:"assignee,omitempty"`
-		Inputs       []string `json:"inputs,omitempty"`
-		ReadPaths    []string `json:"read_paths,omitempty"`
-		WritePaths   []string `json:"write_paths,omitempty"`
-		Deliverables []string `json:"deliverables,omitempty"`
-		Summary      string   `json:"summary,omitempty"`
-		ResultRef    string   `json:"result_ref,omitempty"`
+		ID                  string   `json:"id,omitempty"`
+		Workflow            string   `json:"workflow,omitempty"`
+		TeamID              string   `json:"team_id,omitempty"`
+		ParentTaskID        string   `json:"parent_task_id,omitempty"`
+		Title               string   `json:"title,omitempty"`
+		Goal                string   `json:"goal,omitempty"`
+		Difficulty          string   `json:"difficulty,omitempty"`
+		DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
+		Status              string   `json:"status,omitempty"`
+		Priority            int      `json:"priority,omitempty"`
+		Assignee            string   `json:"assignee,omitempty"`
+		Inputs              []string `json:"inputs,omitempty"`
+		ReadPaths           []string `json:"read_paths,omitempty"`
+		WritePaths          []string `json:"write_paths,omitempty"`
+		Deliverables        []string `json:"deliverables,omitempty"`
+		Summary             string   `json:"summary,omitempty"`
+		ResultRef           string   `json:"result_ref,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -1668,23 +1670,30 @@ func (h *Handler) CreateAgentControlTask(w http.ResponseWriter, r *http.Request)
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	difficulty, err := parseTaskDifficulty(req.Difficulty)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	registry := team.NewAgentControlTaskRegistry(store)
 	record, err := registry.CreateAgentControlTask(r.Context(), agentcontrol.TaskCreateRequest{
-		ID:           req.ID,
-		Workflow:     firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
-		TeamID:       req.TeamID,
-		ParentTaskID: req.ParentTaskID,
-		Title:        req.Title,
-		Goal:         req.Goal,
-		Status:       string(status),
-		Priority:     req.Priority,
-		Assignee:     req.Assignee,
-		Inputs:       req.Inputs,
-		ReadPaths:    req.ReadPaths,
-		WritePaths:   req.WritePaths,
-		Deliverables: req.Deliverables,
-		Summary:      req.Summary,
-		ResultRef:    req.ResultRef,
+		ID:                  req.ID,
+		Workflow:            firstNonEmptyString(strings.TrimSpace(req.Workflow), agentcontrol.WorkflowSpawnTeam),
+		TeamID:              req.TeamID,
+		ParentTaskID:        req.ParentTaskID,
+		Title:               req.Title,
+		Goal:                req.Goal,
+		Difficulty:          difficulty,
+		DifficultyRationale: req.DifficultyRationale,
+		Status:              string(status),
+		Priority:            req.Priority,
+		Assignee:            req.Assignee,
+		Inputs:              req.Inputs,
+		ReadPaths:           req.ReadPaths,
+		WritePaths:          req.WritePaths,
+		Deliverables:        req.Deliverables,
+		Summary:             req.Summary,
+		ResultRef:           req.ResultRef,
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -1705,20 +1714,22 @@ func (h *Handler) UpdateAgentControlTask(w http.ResponseWriter, r *http.Request)
 	}
 	taskID := mux.Vars(r)["task_id"]
 	var req struct {
-		Workflow     string   `json:"workflow,omitempty"`
-		TeamID       string   `json:"team_id,omitempty"`
-		ParentTaskID *string  `json:"parent_task_id,omitempty"`
-		Title        *string  `json:"title,omitempty"`
-		Goal         *string  `json:"goal,omitempty"`
-		Status       *string  `json:"status,omitempty"`
-		Priority     *int     `json:"priority,omitempty"`
-		Assignee     *string  `json:"assignee,omitempty"`
-		Inputs       []string `json:"inputs,omitempty"`
-		ReadPaths    []string `json:"read_paths,omitempty"`
-		WritePaths   []string `json:"write_paths,omitempty"`
-		Deliverables []string `json:"deliverables,omitempty"`
-		Summary      *string  `json:"summary,omitempty"`
-		ResultRef    *string  `json:"result_ref,omitempty"`
+		Workflow            string   `json:"workflow,omitempty"`
+		TeamID              string   `json:"team_id,omitempty"`
+		ParentTaskID        *string  `json:"parent_task_id,omitempty"`
+		Title               *string  `json:"title,omitempty"`
+		Goal                *string  `json:"goal,omitempty"`
+		Difficulty          *string  `json:"difficulty,omitempty"`
+		DifficultyRationale *string  `json:"difficulty_rationale,omitempty"`
+		Status              *string  `json:"status,omitempty"`
+		Priority            *int     `json:"priority,omitempty"`
+		Assignee            *string  `json:"assignee,omitempty"`
+		Inputs              []string `json:"inputs,omitempty"`
+		ReadPaths           []string `json:"read_paths,omitempty"`
+		WritePaths          []string `json:"write_paths,omitempty"`
+		Deliverables        []string `json:"deliverables,omitempty"`
+		Summary             *string  `json:"summary,omitempty"`
+		ResultRef           *string  `json:"result_ref,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -1742,6 +1753,15 @@ func (h *Handler) UpdateAgentControlTask(w http.ResponseWriter, r *http.Request)
 		Summary:      req.Summary,
 		ResultRef:    req.ResultRef,
 	}
+	if req.Difficulty != nil {
+		difficulty, err := parseTaskDifficulty(*req.Difficulty)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		updateReq.Difficulty = &difficulty
+	}
+	updateReq.DifficultyRationale = req.DifficultyRationale
 	if req.Status != nil {
 		status, err := parseTaskStatus(*req.Status)
 		if err != nil {
@@ -2507,19 +2527,21 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	teamID := mux.Vars(r)["id"]
 	var req struct {
-		ID           string   `json:"id,omitempty"`
-		ParentTaskID string   `json:"parent_task_id,omitempty"`
-		Title        string   `json:"title,omitempty"`
-		Goal         string   `json:"goal,omitempty"`
-		Status       string   `json:"status,omitempty"`
-		Priority     int      `json:"priority,omitempty"`
-		Assignee     string   `json:"assignee,omitempty"`
-		Inputs       []string `json:"inputs,omitempty"`
-		ReadPaths    []string `json:"read_paths,omitempty"`
-		WritePaths   []string `json:"write_paths,omitempty"`
-		Deliverables []string `json:"deliverables,omitempty"`
-		Summary      string   `json:"summary,omitempty"`
-		ResultRef    string   `json:"result_ref,omitempty"`
+		ID                  string   `json:"id,omitempty"`
+		ParentTaskID        string   `json:"parent_task_id,omitempty"`
+		Title               string   `json:"title,omitempty"`
+		Goal                string   `json:"goal,omitempty"`
+		Difficulty          string   `json:"difficulty,omitempty"`
+		DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
+		Status              string   `json:"status,omitempty"`
+		Priority            int      `json:"priority,omitempty"`
+		Assignee            string   `json:"assignee,omitempty"`
+		Inputs              []string `json:"inputs,omitempty"`
+		ReadPaths           []string `json:"read_paths,omitempty"`
+		WritePaths          []string `json:"write_paths,omitempty"`
+		Deliverables        []string `json:"deliverables,omitempty"`
+		Summary             string   `json:"summary,omitempty"`
+		ResultRef           string   `json:"result_ref,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
@@ -2530,23 +2552,30 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	difficulty, err := parseTaskDifficulty(req.Difficulty)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	taskRegistry := team.NewAgentControlTaskRegistry(store)
 	record, err := taskRegistry.CreateAgentControlTask(r.Context(), agentcontrol.TaskCreateRequest{
-		ID:           req.ID,
-		Workflow:     agentcontrol.WorkflowSpawnTeam,
-		TeamID:       teamID,
-		ParentTaskID: req.ParentTaskID,
-		Title:        req.Title,
-		Goal:         req.Goal,
-		Status:       string(status),
-		Priority:     req.Priority,
-		Assignee:     req.Assignee,
-		Inputs:       req.Inputs,
-		ReadPaths:    req.ReadPaths,
-		WritePaths:   req.WritePaths,
-		Deliverables: req.Deliverables,
-		Summary:      req.Summary,
-		ResultRef:    req.ResultRef,
+		ID:                  req.ID,
+		Workflow:            agentcontrol.WorkflowSpawnTeam,
+		TeamID:              teamID,
+		ParentTaskID:        req.ParentTaskID,
+		Title:               req.Title,
+		Goal:                req.Goal,
+		Difficulty:          difficulty,
+		DifficultyRationale: req.DifficultyRationale,
+		Status:              string(status),
+		Priority:            req.Priority,
+		Assignee:            req.Assignee,
+		Inputs:              req.Inputs,
+		ReadPaths:           req.ReadPaths,
+		WritePaths:          req.WritePaths,
+		Deliverables:        req.Deliverables,
+		Summary:             req.Summary,
+		ResultRef:           req.ResultRef,
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -4612,6 +4641,14 @@ func parseTaskStatus(raw string) (team.TaskStatus, error) {
 	default:
 		return "", errors.New(errors.ErrValidationFailed, "invalid task status")
 	}
+}
+
+func parseTaskDifficulty(raw string) (string, error) {
+	difficulty, ok := team.NormalizeTaskDifficulty(raw)
+	if !ok {
+		return "", errors.New(errors.ErrValidationFailed, "invalid task difficulty")
+	}
+	return difficulty, nil
 }
 
 func parseTaskStatuses(raw string) ([]team.TaskStatus, error) {

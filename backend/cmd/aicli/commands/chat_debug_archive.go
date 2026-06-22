@@ -60,6 +60,8 @@ func handleDebugCommand(session *ChatSession, command string) bool {
 		printChatDebugModeStatus(session)
 	case "display":
 		printChatDebugInfo(session)
+	case "routing":
+		printChatDebugRoutingSummary(session)
 	case "export":
 		result, err := exportChatDebugArchive(session, opts)
 		if err != nil {
@@ -104,6 +106,12 @@ func parseChatDebugCommand(argument string) (string, chatDebugArchiveOptions, er
 			action = next
 		case lower == "display" || lower == "show" || lower == "info":
 			next, err := chooseChatDebugAction(action, "display", token)
+			if err != nil {
+				return action, opts, err
+			}
+			action = next
+		case lower == "routing" || lower == "route" || lower == "routes":
+			next, err := chooseChatDebugAction(action, "routing", token)
 			if err != nil {
 				return action, opts, err
 			}
@@ -174,7 +182,7 @@ func printChatDebugModeStatus(session *ChatSession) {
 }
 
 func printChatDebugUsage() {
-	fmt.Println("用法: /debug on | /debug off | /debug status | /debug display | /debug export [--output <zip>|--dir <dir>]")
+	fmt.Println("用法: /debug on | /debug off | /debug status | /debug display | /debug routing | /debug export [--output <zip>|--dir <dir>]")
 }
 
 func exportChatDebugArchive(session *ChatSession, opts chatDebugArchiveOptions) (*chatDebugArchiveResult, error) {

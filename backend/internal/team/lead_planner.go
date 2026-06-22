@@ -19,15 +19,17 @@ type LeadPlanner struct {
 }
 
 type planTask struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	Goal         string   `json:"goal"`
-	Inputs       []string `json:"inputs,omitempty"`
-	ReadPaths    []string `json:"read_paths,omitempty"`
-	WritePaths   []string `json:"write_paths,omitempty"`
-	Deliverables []string `json:"deliverables,omitempty"`
-	Priority     int      `json:"priority,omitempty"`
-	Assignee     string   `json:"assignee,omitempty"`
+	ID                  string   `json:"id"`
+	Title               string   `json:"title"`
+	Goal                string   `json:"goal"`
+	Difficulty          string   `json:"difficulty,omitempty"`
+	DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
+	Inputs              []string `json:"inputs,omitempty"`
+	ReadPaths           []string `json:"read_paths,omitempty"`
+	WritePaths          []string `json:"write_paths,omitempty"`
+	Deliverables        []string `json:"deliverables,omitempty"`
+	Priority            int      `json:"priority,omitempty"`
+	Assignee            string   `json:"assignee,omitempty"`
 }
 
 type planDependency struct {
@@ -244,16 +246,23 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 		if spec.Goal == "" {
 			spec.Goal = spec.Title
 		}
+		difficulty, ok := NormalizeTaskDifficulty(spec.Difficulty)
+		if !ok {
+			return nil, fmt.Errorf("invalid task difficulty: %s", strings.TrimSpace(spec.Difficulty))
+		}
+		difficultyRationale := strings.TrimSpace(spec.DifficultyRationale)
 		task := Task{
-			TeamID:       teamID,
-			Title:        spec.Title,
-			Goal:         spec.Goal,
-			Status:       TaskStatusPending,
-			Priority:     spec.Priority,
-			Inputs:       cleanStringSlice(spec.Inputs),
-			ReadPaths:    cleanStringSlice(spec.ReadPaths),
-			WritePaths:   cleanStringSlice(spec.WritePaths),
-			Deliverables: cleanStringSlice(spec.Deliverables),
+			TeamID:              teamID,
+			Title:               spec.Title,
+			Goal:                spec.Goal,
+			Difficulty:          difficulty,
+			DifficultyRationale: difficultyRationale,
+			Status:              TaskStatusPending,
+			Priority:            spec.Priority,
+			Inputs:              cleanStringSlice(spec.Inputs),
+			ReadPaths:           cleanStringSlice(spec.ReadPaths),
+			WritePaths:          cleanStringSlice(spec.WritePaths),
+			Deliverables:        cleanStringSlice(spec.Deliverables),
 		}
 		if strings.TrimSpace(spec.Assignee) != "" {
 			assignee := strings.TrimSpace(spec.Assignee)
@@ -272,19 +281,21 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 				assignee = strings.TrimSpace(*tasks[i].Assignee)
 			}
 			created, err := taskWriter.CreateAgentControlTask(ctx, agentcontrol.TaskCreateRequest{
-				ID:           tasks[i].ID,
-				Workflow:     agentcontrol.WorkflowSpawnTeam,
-				TeamID:       tasks[i].TeamID,
-				Title:        tasks[i].Title,
-				Goal:         tasks[i].Goal,
-				Status:       string(tasks[i].Status),
-				Priority:     tasks[i].Priority,
-				Assignee:     assignee,
-				Inputs:       tasks[i].Inputs,
-				ReadPaths:    tasks[i].ReadPaths,
-				WritePaths:   tasks[i].WritePaths,
-				Deliverables: tasks[i].Deliverables,
-				Summary:      tasks[i].Summary,
+				ID:                  tasks[i].ID,
+				Workflow:            agentcontrol.WorkflowSpawnTeam,
+				TeamID:              tasks[i].TeamID,
+				Title:               tasks[i].Title,
+				Goal:                tasks[i].Goal,
+				Difficulty:          tasks[i].Difficulty,
+				DifficultyRationale: tasks[i].DifficultyRationale,
+				Status:              string(tasks[i].Status),
+				Priority:            tasks[i].Priority,
+				Assignee:            assignee,
+				Inputs:              tasks[i].Inputs,
+				ReadPaths:           tasks[i].ReadPaths,
+				WritePaths:          tasks[i].WritePaths,
+				Deliverables:        tasks[i].Deliverables,
+				Summary:             tasks[i].Summary,
 			})
 			if err != nil {
 				return nil, err
@@ -341,10 +352,12 @@ func buildPlanPrompt(goal string, failed *Task, teamContext string) string {
 	lines := []string{
 		"You are the team lead. Decompose the goal into a DAG plan.",
 		"Return JSON only with the following schema:",
-		`{"tasks":[{"id":"task-1","title":"...","goal":"...","inputs":[],"read_paths":[],"write_paths":[],"deliverables":[],"priority":0,"assignee":""}],"dependencies":[{"task":"task-2","depends_on":"task-1"}]}`,
+		`{"tasks":[{"id":"task-1","title":"...","goal":"...","difficulty":"normal","difficulty_rationale":"...","inputs":[],"read_paths":[],"write_paths":[],"deliverables":[],"priority":0,"assignee":""}],"dependencies":[{"task":"task-2","depends_on":"task-1"}]}`,
 		"Rules:",
 		"- Use stable task ids within the JSON.",
 		"- Keep tasks atomic and outcome-focused.",
+		"- Set difficulty to one of easy, normal, hard, expert for every task.",
+		"- Keep difficulty_rationale short and focused on routing/audit context.",
 		"- Leave assignee empty unless a teammate is explicitly required.",
 	}
 	if strings.TrimSpace(goal) != "" {

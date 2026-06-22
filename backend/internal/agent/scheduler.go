@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/google/uuid"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/google/uuid"
 )
 
 // FilePatch 预留给 writer agent 的 patch 回执。
@@ -26,16 +26,22 @@ type FilePatch struct {
 
 // SubagentTask 描述一个子代理任务包。
 type SubagentTask struct {
-	ID             string      `json:"id,omitempty" yaml:"id,omitempty"`
-	Role           string      `json:"role,omitempty" yaml:"role,omitempty"`
-	Goal           string      `json:"goal" yaml:"goal"`
-	ToolsWhitelist []string    `json:"tools_whitelist,omitempty" yaml:"tools_whitelist,omitempty"`
-	DependsOn      []string    `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`
-	PatchContext   []FilePatch `json:"patches,omitempty" yaml:"patches,omitempty"`
-	Model          string      `json:"model,omitempty" yaml:"model,omitempty"`
-	BudgetTokens   int         `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
-	TimeoutSec     int         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-	ReadOnly       bool        `json:"read_only,omitempty" yaml:"read_only,omitempty"`
+	ID                  string      `json:"id,omitempty" yaml:"id,omitempty"`
+	Role                string      `json:"role,omitempty" yaml:"role,omitempty"`
+	Goal                string      `json:"goal" yaml:"goal"`
+	Difficulty          string      `json:"difficulty,omitempty" yaml:"difficulty,omitempty"`
+	DifficultyRationale string      `json:"difficulty_rationale,omitempty" yaml:"difficulty_rationale,omitempty"`
+	Provider            string      `json:"provider,omitempty" yaml:"provider,omitempty"`
+	Model               string      `json:"model,omitempty" yaml:"model,omitempty"`
+	ReasoningEffort     string      `json:"reasoning_effort,omitempty" yaml:"reasoning_effort,omitempty"`
+	RoutingSource       string      `json:"-" yaml:"-"`
+	RouteWarnings       []string    `json:"-" yaml:"-"`
+	ToolsWhitelist      []string    `json:"tools_whitelist,omitempty" yaml:"tools_whitelist,omitempty"`
+	DependsOn           []string    `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`
+	PatchContext        []FilePatch `json:"patches,omitempty" yaml:"patches,omitempty"`
+	BudgetTokens        int         `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
+	TimeoutSec          int         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	ReadOnly            bool        `json:"read_only,omitempty" yaml:"read_only,omitempty"`
 }
 
 // SubagentResult 是父代理可见的结构化回执。
@@ -57,9 +63,10 @@ type SubagentResult struct {
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
 type SubagentSchedulerConfig struct {
-	MaxConcurrent       int  `json:"maxConcurrent" yaml:"maxConcurrent"`
-	MaxDepth            int  `json:"maxDepth" yaml:"maxDepth"`
-	EnforceSingleWriter bool `json:"enforceSingleWriter" yaml:"enforceSingleWriter"`
+	MaxConcurrent       int                                     `json:"maxConcurrent" yaml:"maxConcurrent"`
+	MaxDepth            int                                     `json:"maxDepth" yaml:"maxDepth"`
+	EnforceSingleWriter bool                                    `json:"enforceSingleWriter" yaml:"enforceSingleWriter"`
+	Routing             *agentconfig.AICLISubagentRoutingConfig `json:"-" yaml:"-"`
 }
 
 // SubagentRunOptions 描述一次 parent -> child 协同批次的上下文。
@@ -72,8 +79,9 @@ type SubagentRunOptions struct {
 
 // SubagentScheduler 在 Go 侧调度 fresh child agents。
 type SubagentScheduler struct {
-	parent *Agent
-	config SubagentSchedulerConfig
+	parent    *Agent
+	config    SubagentSchedulerConfig
+	expertSem chan struct{}
 }
 
 // NewSubagentScheduler 创建一个最小子代理调度器。
@@ -87,9 +95,32 @@ func NewSubagentScheduler(parent *Agent, config SubagentSchedulerConfig) *Subage
 	if !config.EnforceSingleWriter {
 		config.EnforceSingleWriter = true
 	}
-	return &SubagentScheduler{
+	scheduler := &SubagentScheduler{
 		parent: parent,
 		config: config,
+	}
+	if limit := subagentExpertConcurrencyLimit(config.Routing); limit > 0 {
+		scheduler.expertSem = make(chan struct{}, limit)
+	}
+	return scheduler
+}
+
+func subagentExpertConcurrencyLimit(cfg *agentconfig.AICLISubagentRoutingConfig) int {
+	if cfg == nil || cfg.Enabled == nil || !*cfg.Enabled || cfg.MaxExpertConcurrency <= 0 {
+		return 0
+	}
+	return cfg.MaxExpertConcurrency
+}
+
+func (s *SubagentScheduler) acquireExpertSlot(ctx context.Context, difficulty string) (func(), error) {
+	if s == nil || s.expertSem == nil || !strings.EqualFold(strings.TrimSpace(difficulty), "expert") {
+		return nil, nil
+	}
+	select {
+	case s.expertSem <- struct{}{}:
+		return func() { <-s.expertSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -189,34 +220,62 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 		}, nil
 	}
 
+	factory := ChildAgentFactory{}
+	spec, err := factory.Build(ctx, ChildBuildRequest{
+		Parent:  s.parent,
+		Task:    task,
+		Options: options,
+		Config:  s.config,
+	})
+	if err != nil {
+		s.emitSubagentDenied(options, task.ID, "routing", err.Error(), map[string]interface{}{
+			"subagent_id": task.ID,
+		})
+		return SubagentResult{
+			ID:               task.ID,
+			Role:             task.Role,
+			ParentSessionID:  options.ParentSessionID,
+			ParentToolCallID: options.ParentToolCallID,
+			ReadOnly:         task.ReadOnly,
+			BudgetTokens:     task.BudgetTokens,
+			Success:          false,
+			Error:            err.Error(),
+			Summary:          err.Error(),
+		}, nil
+	}
+	releaseExpertSlot, err := s.acquireExpertSlot(ctx, spec.Decision.Difficulty)
+	if err != nil {
+		s.emitSubagentDenied(options, task.ID, "expert_concurrency", err.Error(), map[string]interface{}{
+			"subagent_id": task.ID,
+			"difficulty":  spec.Decision.Difficulty,
+		})
+		return SubagentResult{
+			ID:               task.ID,
+			Role:             task.Role,
+			ParentSessionID:  options.ParentSessionID,
+			ParentToolCallID: options.ParentToolCallID,
+			ReadOnly:         task.ReadOnly,
+			BudgetTokens:     task.BudgetTokens,
+			Success:          false,
+			Error:            err.Error(),
+			Summary:          err.Error(),
+		}, nil
+	}
+	if releaseExpertSlot != nil {
+		defer releaseExpertSlot()
+	}
 	childCtx := ctx
 	var cancel context.CancelFunc
-	if task.TimeoutSec > 0 {
-		childCtx, cancel = context.WithTimeout(ctx, time.Duration(task.TimeoutSec)*time.Second)
+	if spec.Decision.Timeout > 0 {
+		childCtx, cancel = context.WithTimeout(ctx, spec.Decision.Timeout)
 		defer cancel()
 	}
-
-	childConfig := *s.parent.GetConfig()
-	childConfig.Name = firstNonEmptyString(task.ID, childConfig.Name+"-subagent")
-	if task.Model != "" {
-		childConfig.Model = task.Model
-	}
-	if task.BudgetTokens > 0 {
-		childConfig.DefaultMaxTokens = task.BudgetTokens
-	}
-	if task.ToolsWhitelist == nil {
-		task.ToolsWhitelist = DefaultToolsForRole(task.Role)
-	}
-	childConfig.SystemPrompt = s.parent.GetPromptBuilder().BuildSubagentPrompt(s.parent.GetConfig(), task)
-	childAgent := NewAgentWithLLM(&childConfig, s.parent.mcpManager, s.parent.llmRuntime)
-	childAgent.SetSubagentScheduler(NewSubagentScheduler(childAgent, s.config))
-	childAgent.SetEventBus(s.parent.GetEventBus())
-	childAgent.SetPromptBuilder(s.parent.GetPromptBuilder())
-	childAgent.inheritToolHooksFrom(s.parent)
-	childAgent.SetToolExecutionPolicy(s.childPolicy(task))
-	childSessionID := buildSubagentSessionID(task.ID)
+	task = spec.Task
+	childConfig := spec.Config
+	childAgent := spec.Agent
+	childSessionID := spec.SessionID
 	if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
-		hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStart, map[string]interface{}{
+		payload := mergeRouteAuditPayload(map[string]interface{}{
 			"subagent_id":         task.ID,
 			"role":                task.Role,
 			"goal":                task.Goal,
@@ -228,9 +287,10 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 			"child_session_id":    childSessionID,
 			"child_agent_name":    childConfig.Name,
 			"trace_id":            options.TraceID,
-		})
+		}, spec.Decision)
+		hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStart, payload)
 	}
-	s.parent.emitRuntimeEvent("subagent.started", childSessionID, "", map[string]interface{}{
+	s.parent.emitRuntimeEvent("subagent.started", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 		"subagent_id":         task.ID,
 		"role":                task.Role,
 		"goal":                task.Goal,
@@ -241,14 +301,9 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 		"parent_tool_call_id": options.ParentToolCallID,
 		"child_agent_name":    childConfig.Name,
 		"trace_id":            options.TraceID,
-	})
+	}, spec.Decision))
 
-	loop := NewReActLoop(childAgent, s.parent.llmRuntime, &LoopReActConfig{
-		MaxSteps:        childConfig.MaxSteps,
-		EnableThought:   true,
-		EnableToolCalls: true,
-		Temperature:     childConfig.Temperature,
-	})
+	loop := NewReActLoop(childAgent, spec.Runtime, spec.LoopConfig)
 
 	result, err := loop.run(childCtx, task.Goal, loopRunOptions{
 		TraceID:       options.TraceID,
@@ -271,7 +326,7 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 			Error:            err.Error(),
 			Summary:          err.Error(),
 		}
-		s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", map[string]interface{}{
+		s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 			"subagent_id":         task.ID,
 			"role":                task.Role,
 			"read_only":           task.ReadOnly,
@@ -282,9 +337,9 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 			"parent_tool_call_id": options.ParentToolCallID,
 			"child_agent_name":    childConfig.Name,
 			"trace_id":            options.TraceID,
-		})
+		}, spec.Decision))
 		if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
-			hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStop, map[string]interface{}{
+			payload := mergeRouteAuditPayload(map[string]interface{}{
 				"subagent_id":         task.ID,
 				"role":                task.Role,
 				"read_only":           task.ReadOnly,
@@ -296,7 +351,8 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 				"child_session_id":    childSessionID,
 				"child_agent_name":    childConfig.Name,
 				"trace_id":            options.TraceID,
-			})
+			}, spec.Decision)
+			hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStop, payload)
 		}
 		return report, nil
 	}
@@ -321,7 +377,7 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 	if result.Error != "" {
 		report.Error = result.Error
 	}
-	s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", map[string]interface{}{
+	s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 		"subagent_id":         task.ID,
 		"role":                task.Role,
 		"read_only":           task.ReadOnly,
@@ -333,9 +389,9 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 		"child_agent_name":    childConfig.Name,
 		"usage_total_tokens":  usageTotal(report.Usage),
 		"trace_id":            options.TraceID,
-	})
+	}, spec.Decision))
 	if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
-		hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStop, map[string]interface{}{
+		payload := mergeRouteAuditPayload(map[string]interface{}{
 			"subagent_id":         task.ID,
 			"role":                task.Role,
 			"read_only":           task.ReadOnly,
@@ -348,7 +404,8 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 			"child_agent_name":    childConfig.Name,
 			"usage_total_tokens":  usageTotal(report.Usage),
 			"trace_id":            options.TraceID,
-		})
+		}, spec.Decision)
+		hookMgr.DispatchAsync(context.Background(), runtimehooks.EventSubagentStop, payload)
 	}
 	return report, nil
 }
@@ -920,6 +977,9 @@ func (s *SubagentScheduler) prepareTasks(tasks []SubagentTask) ([]SubagentTask, 
 		if effective.ToolsWhitelist == nil {
 			effective.ToolsWhitelist = DefaultToolsForRole(effective.Role)
 		}
+		if knownIDs[effective.ID] {
+			return nil, fmt.Errorf("duplicate subagent task id %q", effective.ID)
+		}
 		if parentPolicy != nil {
 			if parentPolicy.ReadOnly && !effective.ReadOnly {
 				return nil, fmt.Errorf("read-only parent policy blocks writable subagent %q", effective.ID)
@@ -945,8 +1005,35 @@ func (s *SubagentScheduler) prepareTasks(tasks []SubagentTask) ([]SubagentTask, 
 			}
 		}
 	}
+	if err := validateHighRiskWriterVerifierTasks(prepared); err != nil {
+		return nil, err
+	}
 
 	return prepared, nil
+}
+
+func validateHighRiskWriterVerifierTasks(tasks []SubagentTask) error {
+	for _, writer := range tasks {
+		if !isHighRiskWriterTask(writer) {
+			continue
+		}
+		verifierFound := false
+		for _, task := range tasks {
+			if !strings.EqualFold(strings.TrimSpace(task.Role), "verifier") ||
+				!task.ReadOnly ||
+				!dependsOnAny(task.DependsOn, []string{writer.ID}) {
+				continue
+			}
+			verifierFound = true
+			if subagentDifficultyRank(task.Difficulty) < subagentDifficultyRank("hard") {
+				return fmt.Errorf("hard or expert writer subagent %q requires a hard-or-higher verifier", writer.ID)
+			}
+		}
+		if !verifierFound {
+			return fmt.Errorf("hard or expert writer subagent %q requires a read-only verifier dependency", writer.ID)
+		}
+	}
+	return nil
 }
 
 func (s *SubagentScheduler) childPolicy(task SubagentTask) *ToolExecutionPolicy {
