@@ -559,7 +559,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 								"difficulty": map[string]interface{}{
 									"type":        "string",
 									"enum":        []string{"easy", "normal", "hard", "expert"},
-									"description": "Optional task difficulty metadata. Recorded for planning/audit only; does not change teammate routing.",
+									"description": "Optional local routing/audit metadata. When routing is enabled, difficulty may affect this teammate task's provider/model/reasoning through local policy; task payloads cannot directly set provider, model, permission mode, or tool policy.",
 								},
 								"difficulty_rationale": map[string]interface{}{
 									"type":        "string",
@@ -2984,6 +2984,7 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 	if err := team.ValidateAllowedTaskOutcomeStatus(outcome, allowed...); err != nil {
 		return ReportTaskOutcomeResult{}, nil, err
 	}
+	route := team.TaskExecutionRouteFromRunMeta(activeRunMeta(ctx))
 
 	switch outcome.Status {
 	case team.TaskOutcomeDone, team.TaskOutcomeFailed:
@@ -3005,6 +3006,7 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 			TeammateID:      agentID,
 			Outcome:         applyOutcome,
 			ResultRef:       resultRef,
+			Route:           route.Clone(),
 			DefaultStatus:   outcome.Status,
 			SkipStateUpdate: true,
 		})
@@ -3071,6 +3073,7 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 			Task:            *task,
 			TeammateID:      agentID,
 			Outcome:         applyOutcome,
+			Route:           route.Clone(),
 			NotifyRecipient: request.NotifyLead,
 			AutoReplan:      request.AutoReplan,
 			SkipStateUpdate: true,
@@ -3135,6 +3138,14 @@ func (b *Broker) executeReportTaskOutcome(ctx context.Context, sessionID string,
 	default:
 		return ReportTaskOutcomeResult{}, nil, fmt.Errorf("unsupported task outcome: %s", outcome.Status)
 	}
+}
+
+func activeRunMeta(ctx context.Context) *team.RunMeta {
+	runMeta, ok := team.GetRunMeta(ctx)
+	if !ok {
+		return nil
+	}
+	return runMeta
 }
 
 func (b *Broker) notifyTeamLifecycleChanged() {

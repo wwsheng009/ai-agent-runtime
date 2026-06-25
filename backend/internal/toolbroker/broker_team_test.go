@@ -1260,9 +1260,17 @@ func TestBrokerReportTaskOutcomePersistsTaskEventBeforeTeamCompleted(t *testing.
 	}
 	runCtx := team.WithRunMeta(ctx, &team.RunMeta{
 		Team: &team.TeamRunMeta{
-			TeamID:        teamID,
-			AgentID:       assignee,
-			CurrentTaskID: taskID,
+			TeamID:               teamID,
+			AgentID:              assignee,
+			CurrentTaskID:        taskID,
+			Difficulty:           team.TaskDifficultyHard,
+			DifficultySource:     "explicit",
+			DifficultyRationale:  "Touches terminal event route metadata.",
+			RouteProvider:        "remote-strong",
+			RouteModel:           "strong-model",
+			RouteReasoningEffort: "high",
+			RouteSource:          "difficulty_level",
+			RouteWarnings:        []string{"provider_fallback_parent"},
 		},
 	})
 
@@ -1281,6 +1289,13 @@ func TestBrokerReportTaskOutcomePersistsTaskEventBeforeTeamCompleted(t *testing.
 	assert.Equal(t, "task.completed", events[0].Type)
 	assert.Equal(t, "task-order", events[0].Payload["task_id"])
 	assert.Equal(t, "mate-1", events[0].Payload["assignee"])
+	assert.Equal(t, team.TaskDifficultyHard, events[0].Payload["difficulty"])
+	assert.Equal(t, "explicit", events[0].Payload["difficulty_source"])
+	assert.Equal(t, "Touches terminal event route metadata.", events[0].Payload["difficulty_rationale"])
+	assert.Equal(t, "remote-strong", events[0].Payload["route_provider"])
+	assert.Equal(t, "strong-model", events[0].Payload["route_model"])
+	assert.Equal(t, "high", events[0].Payload["route_reasoning_effort"])
+	assert.Equal(t, "difficulty_level", events[0].Payload["route_source"])
 	assert.Equal(t, "team.completed", events[1].Type)
 	assert.Equal(t, "done", events[1].Payload["status"])
 }

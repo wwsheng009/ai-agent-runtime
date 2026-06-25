@@ -10,30 +10,30 @@ import (
 // to an agent. Workflow implementations can project their native task state
 // into this shape without moving write ownership into AgentControl yet.
 type TaskRecord struct {
-	ID                  string    `json:"id"`
-	Workflow            string    `json:"workflow,omitempty"`
-	TeamID              string    `json:"team_id,omitempty"`
-	ParentTaskID        string    `json:"parent_task_id,omitempty"`
-	Assignee            string    `json:"assignee,omitempty"`
-	SessionID           string    `json:"session_id,omitempty"`
-	Path                string    `json:"path,omitempty"`
-	Title               string    `json:"title,omitempty"`
-	Summary             string    `json:"summary,omitempty"`
-	Difficulty          string    `json:"difficulty,omitempty"`
-	DifficultyRationale string    `json:"difficulty_rationale,omitempty"`
-	RouteProvider       string    `json:"route_provider,omitempty"`
-	RouteModel          string    `json:"route_model,omitempty"`
-	RouteReasoningEffort string   `json:"route_reasoning_effort,omitempty"`
-	RouteSource         string    `json:"route_source,omitempty"`
-	RouteWarnings       []string  `json:"route_warnings,omitempty"`
-	FallbackUsed        bool      `json:"fallback_used,omitempty"`
-	FallbackReason      string    `json:"fallback_reason,omitempty"`
-	RouteResolvedAt     time.Time `json:"route_resolved_at,omitempty"`
-	RouteAttempt        int       `json:"route_attempt,omitempty"`
-	Status              string    `json:"status,omitempty"`
-	Priority            int       `json:"priority,omitempty"`
-	CreatedAt           time.Time `json:"created_at,omitempty"`
-	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+	ID                   string    `json:"id"`
+	Workflow             string    `json:"workflow,omitempty"`
+	TeamID               string    `json:"team_id,omitempty"`
+	ParentTaskID         string    `json:"parent_task_id,omitempty"`
+	Assignee             string    `json:"assignee,omitempty"`
+	SessionID            string    `json:"session_id,omitempty"`
+	Path                 string    `json:"path,omitempty"`
+	Title                string    `json:"title,omitempty"`
+	Summary              string    `json:"summary,omitempty"`
+	Difficulty           string    `json:"difficulty,omitempty"`
+	DifficultyRationale  string    `json:"difficulty_rationale,omitempty"`
+	RouteProvider        string    `json:"route_provider,omitempty"`
+	RouteModel           string    `json:"route_model,omitempty"`
+	RouteReasoningEffort string    `json:"route_reasoning_effort,omitempty"`
+	RouteSource          string    `json:"route_source,omitempty"`
+	RouteWarnings        []string  `json:"route_warnings,omitempty"`
+	FallbackUsed         bool      `json:"fallback_used,omitempty"`
+	FallbackReason       string    `json:"fallback_reason,omitempty"`
+	RouteResolvedAt      time.Time `json:"route_resolved_at,omitempty"`
+	RouteAttempt         int       `json:"route_attempt,omitempty"`
+	Status               string    `json:"status,omitempty"`
+	Priority             int       `json:"priority,omitempty"`
+	CreatedAt            time.Time `json:"created_at,omitempty"`
+	UpdatedAt            time.Time `json:"updated_at,omitempty"`
 }
 
 // TaskFilter describes AgentControl task registry read filters without tying
@@ -164,32 +164,32 @@ type TaskStatusUpdateRequest struct {
 // TaskCreateRequest describes task creation through the AgentControl task
 // registry write seam without depending on a workflow-specific task table.
 type TaskCreateRequest struct {
-	ID                  string
-	Workflow            string
-	TeamID              string
-	ParentTaskID        string
-	Title               string
-	Goal                string
-	Difficulty          string
-	DifficultyRationale string
-	RouteProvider       string
-	RouteModel          string
+	ID                   string
+	Workflow             string
+	TeamID               string
+	ParentTaskID         string
+	Title                string
+	Goal                 string
+	Difficulty           string
+	DifficultyRationale  string
+	RouteProvider        string
+	RouteModel           string
 	RouteReasoningEffort string
-	RouteSource         string
-	RouteWarnings       []string
-	FallbackUsed        bool
-	FallbackReason      string
-	RouteResolvedAt     time.Time
-	RouteAttempt        int
-	Status              string
-	Priority            int
-	Assignee            string
-	Inputs              []string
-	ReadPaths           []string
-	WritePaths          []string
-	Deliverables        []string
-	Summary             string
-	ResultRef           string
+	RouteSource          string
+	RouteWarnings        []string
+	FallbackUsed         bool
+	FallbackReason       string
+	RouteResolvedAt      time.Time
+	RouteAttempt         int
+	Status               string
+	Priority             int
+	Assignee             string
+	Inputs               []string
+	ReadPaths            []string
+	WritePaths           []string
+	Deliverables         []string
+	Summary              string
+	ResultRef            string
 }
 
 // TaskUpdateRequest describes a full task patch through the AgentControl task

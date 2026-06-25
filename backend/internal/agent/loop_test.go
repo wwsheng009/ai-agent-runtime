@@ -1636,7 +1636,7 @@ func TestResolvePromptPreflightBudget_UsesModelCapabilityThresholdWhenMoreConser
 		},
 	}
 
-	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
 	require.Equal(t, 7500, budget.PromptBudget)
 	require.Equal(t, "model_capability_context_ratio", budget.BudgetSource)
 	require.Equal(t, 10000, budget.ModelCapabilityMaxContextTokens)
@@ -1677,7 +1677,7 @@ func TestResolvePromptPreflightBudget_DoesNotLetDefaultBudgetOverrideKnownCapabi
 		},
 	}
 
-	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
 	require.Equal(t, 200000, budget.PromptBudget)
 	require.Equal(t, "model_capability_auto_compact_token_limit", budget.BudgetSource)
 	require.Equal(t, 200000, budget.ModelCapabilityAutoCompactTokenLimit)
@@ -1719,7 +1719,7 @@ func TestResolvePromptPreflightBudget_ContextProfileDoesNotConstrainKnownCapabil
 		},
 	}
 
-	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
 	require.Equal(t, 900000, budget.PromptBudget)
 	require.Equal(t, "model_capability_context_ratio", budget.BudgetSource)
 	require.Equal(t, 1000000, budget.ModelCapabilityMaxContextTokens)
@@ -1754,7 +1754,7 @@ func TestResolveContextBuildPromptBudget_ContextProfileDoesNotConstrainKnownCapa
 		},
 	}, &MockMCPManager{}, llmRuntime)
 
-	contextBudget := resolveContextBuildPromptBudget(llmRuntime, agent)
+	contextBudget := resolveContextBuildPromptBudget(llmRuntime, agent, nil)
 	require.Equal(t, 900000, contextBudget.PromptBudget)
 	require.Equal(t, "model_capability_context_ratio", contextBudget.BudgetSource)
 
@@ -1843,7 +1843,7 @@ func TestResolvePromptPreflightBudget_UsesConfigurableFallbackForUnknownCapabili
 		},
 	}, &MockMCPManager{}, llmRuntime)
 
-	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
 	require.Equal(t, 32000, budget.PromptBudget)
 	require.Equal(t, "context_fallback_max_prompt_tokens", budget.BudgetSource)
 	require.Equal(t, 12000, agent.GetContextManager().Budget.MaxPromptTokens)
@@ -1867,7 +1867,7 @@ func TestResolvePromptPreflightBudget_UsesDefaultFallbackForUnknownCapability(t 
 		Model:    "test-model",
 	}, &MockMCPManager{}, llmRuntime)
 
-	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
 	require.Equal(t, contextmgr.DefaultFallbackMaxPromptTokens, budget.PromptBudget)
 	require.Equal(t, "default_context_fallback_max_prompt_tokens", budget.BudgetSource)
 	require.NotContains(t, budget.BudgetCandidates, "default_context_max_prompt_tokens")
@@ -1904,7 +1904,7 @@ func TestResolvePromptPreflightBudget_ExplicitContextBudgetStillConstrainsCapabi
 		},
 	}
 
-	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
 	require.Equal(t, 12000, budget.PromptBudget)
 	require.Equal(t, "context_max_prompt_tokens", budget.BudgetSource)
 	require.Equal(t, 200000, budget.ModelCapabilityAutoCompactTokenLimit)
@@ -1938,7 +1938,7 @@ func TestResolvePromptPreflightBudget_FallsBackToProviderContextLimitWhenCapabil
 		},
 	}
 
-	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
 	require.Equal(t, 7200, budget.PromptBudget)
 	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
 	require.Equal(t, 8000, budget.ProviderContextLimit)
@@ -1979,7 +1979,7 @@ func TestResolvePromptPreflightBudget_UsesProviderContextLimitWhenWildcardCapabi
 		},
 	}
 
-	budget := resolvePromptPreflightBudget(llmRuntime, agent, 0)
+	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
 	require.Equal(t, 115200, budget.PromptBudget)
 	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
 	require.Equal(t, 128000, budget.ProviderContextLimit)
