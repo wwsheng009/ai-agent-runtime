@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -78,16 +80,19 @@ func TestLocalActorRegistry_TriggerTaskUsesSessionHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTeamEvents: %v", err)
 	}
-	if len(events) != 2 {
-		t.Fatalf("expected requested/completed dispatch events, got %#v", events)
+	if len(events) != 3 {
+		t.Fatalf("expected requested/started/completed dispatch events, got %#v", events)
 	}
 	if events[0].Type != team.TaskDispatchRequestedEvent {
 		t.Fatalf("unexpected first event type: %s", events[0].Type)
 	}
-	if events[1].Type != team.TaskDispatchCompletedEvent {
+	if events[1].Type != team.TaskDispatchStartedEvent {
 		t.Fatalf("unexpected second event type: %s", events[1].Type)
 	}
-	payload := events[1].Payload
+	if events[2].Type != team.TaskDispatchCompletedEvent {
+		t.Fatalf("unexpected third event type: %s", events[2].Type)
+	}
+	payload := events[2].Payload
 	if payload["team_id"] != "team-1" || payload["task_id"] != "task-1" || payload["agent_id"] != "mate-1" {
 		t.Fatalf("unexpected dispatch payload: %#v", payload)
 	}
@@ -143,6 +148,384 @@ func TestLocalActorRegistry_TriggerTaskUsesSessionHub(t *testing.T) {
 	}
 	if controlMessages[0].Kind != team.TaskAssignmentMailboxKind || controlMessages[0].Metadata["message_type"] != team.TaskAssignmentControlMessageType {
 		t.Fatalf("unexpected assignment agent-control row: %#v", controlMessages[0])
+	}
+}
+
+func TestLocalActorRegistry_TriggerTaskDetachesRunFromCallerCancel(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.CreateTeam(context.Background(), team.Team{ID: "team-1"}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	provider := &cancelingContextProvider{cancel: cancel}
+	registry := newLocalActorRegistry(&localChatRuntimeHost{
+		SessionHub: buildTestSessionHubWithProvider(t, provider),
+		EventStore: runtimechat.NewInMemoryRuntimeStore(16),
+		EventBus:   runtimeevents.NewBusWithRetention(16),
+		TeamStore:  store,
+	})
+
+	result, err := registry.TriggerTask(ctx, team.TaskTriggerRequest{
+		SessionID: "session-1",
+		TeamID:    "team-1",
+		AgentID:   "mate-1",
+		TaskID:    "task-1",
+		Prompt:    "inspect",
+	})
+	if err != nil {
+		t.Fatalf("TriggerTask failed after caller cancel: %v", err)
+	}
+	if result == nil || result.Output != "inspection complete" {
+		t.Fatalf("unexpected result after caller cancel: %#v", result)
+	}
+
+	events, err := store.ListTeamEvents(context.Background(), team.TeamEventFilter{TeamID: "team-1"})
+	if err != nil {
+		t.Fatalf("ListTeamEvents: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected requested/started/completed dispatch events, got %#v", events)
+	}
+	if events[2].Type != team.TaskDispatchCompletedEvent {
+		t.Fatalf("expected completed dispatch event, got %#v", events[2])
+	}
+	if events[2].Payload["success"] != true {
+		t.Fatalf("expected successful completed dispatch payload, got %#v", events[2].Payload)
+	}
+}
+
+func TestLocalActorRegistry_TriggerTaskAppliesRouteOverridePerRun(t *testing.T) {
+	registry, baseProvider, routedProvider := buildRouteOverrideTestRegistry(t)
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.CreateTeam(context.Background(), team.Team{ID: "team-1"}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	registry.Host.TeamStore = store
+
+	result, err := registry.TriggerTask(context.Background(), team.TaskTriggerRequest{
+		SessionID: "session-1",
+		TeamID:    "team-1",
+		AgentID:   "mate-1",
+		TaskID:    "task-routed",
+		Prompt:    "use routed model",
+		Route: &team.TaskExecutionRoute{
+			Provider:        "routed-provider",
+			Model:           "routed-model",
+			ReasoningEffort: "high",
+			Source:          modelrouting.SourceDifficultyLevel,
+		},
+		RunMeta: &team.RunMeta{
+			PermissionMode: "bypass_permissions",
+			Team: &team.TeamRunMeta{
+				TeamID:        "team-1",
+				AgentID:       "mate-1",
+				CurrentTaskID: "task-routed",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TriggerTask routed failed: %v", err)
+	}
+	if result == nil || result.Output != "routed ok" {
+		t.Fatalf("unexpected routed result: %#v", result)
+	}
+	if len(routedProvider.requests) != 1 {
+		t.Fatalf("expected one routed-provider request, got %d", len(routedProvider.requests))
+	}
+	routedRequest := routedProvider.requests[0]
+	if routedRequest.Provider != "routed-provider" || routedRequest.Model != "routed-model" || routedRequest.ReasoningEffort != "high" {
+		t.Fatalf("unexpected routed request: %#v", routedRequest)
+	}
+	events, err := store.ListTeamEvents(context.Background(), team.TeamEventFilter{TeamID: "team-1"})
+	if err != nil {
+		t.Fatalf("ListTeamEvents: %v", err)
+	}
+	if len(events) < 2 {
+		t.Fatalf("expected dispatch events, got %#v", events)
+	}
+	payload := events[1].Payload
+	if payload["permission_mode"] != "bypass_permissions" {
+		t.Fatalf("permission mode changed or missing in dispatch payload: %#v", payload)
+	}
+	if payload["route_provider"] != "routed-provider" || payload["route_model"] != "routed-model" || payload["route_reasoning_effort"] != "high" {
+		t.Fatalf("route metadata missing from dispatch payload: %#v", payload)
+	}
+
+	result, err = registry.TriggerTask(context.Background(), team.TaskTriggerRequest{
+		SessionID: "session-1",
+		TeamID:    "team-1",
+		AgentID:   "mate-1",
+		TaskID:    "task-base",
+		Prompt:    "use base model",
+	})
+	if err != nil {
+		t.Fatalf("TriggerTask base failed: %v", err)
+	}
+	if result == nil || result.Output != "base ok" {
+		t.Fatalf("unexpected base result: %#v", result)
+	}
+	if len(baseProvider.requests) != 1 {
+		t.Fatalf("expected one base-provider request, got %d", len(baseProvider.requests))
+	}
+	baseRequest := baseProvider.requests[0]
+	if baseRequest.Provider != "base-provider" || baseRequest.Model != "base-model" || baseRequest.ReasoningEffort != "" {
+		t.Fatalf("route override leaked into base request: %#v", baseRequest)
+	}
+}
+
+func TestLocalActorRegistry_TriggerTaskIgnoresDisabledRouteOverride(t *testing.T) {
+	registry, baseProvider, routedProvider := buildRouteOverrideTestRegistry(t)
+
+	result, err := registry.TriggerTask(context.Background(), team.TaskTriggerRequest{
+		SessionID: "session-1",
+		TeamID:    "team-1",
+		AgentID:   "mate-1",
+		TaskID:    "task-disabled",
+		Prompt:    "disabled route should use base",
+		Route: &team.TaskExecutionRoute{
+			Provider:        "routed-provider",
+			Model:           "routed-model",
+			ReasoningEffort: "high",
+			Source:          modelrouting.SourceDisabled,
+		},
+	})
+	if err != nil {
+		t.Fatalf("TriggerTask disabled route failed: %v", err)
+	}
+	if result == nil || result.Output != "base ok" {
+		t.Fatalf("unexpected disabled-route result: %#v", result)
+	}
+	if len(routedProvider.requests) != 0 {
+		t.Fatalf("disabled route should not call routed provider: %#v", routedProvider.requests)
+	}
+	if len(baseProvider.requests) != 1 {
+		t.Fatalf("expected one base request, got %d", len(baseProvider.requests))
+	}
+}
+
+func TestLocalTeamTaskRouteResolverEnabledDisabledAndStrict(t *testing.T) {
+	enabled := true
+	host := &localChatRuntimeHost{
+		BaseSession: &ChatSession{
+			ProviderName:    "base-provider",
+			Model:           "base-model",
+			ReasoningEffort: "low",
+			Config: &agentconfig.Config{
+				AICLI: &agentconfig.AICLIConfig{
+					Subagents: &agentconfig.AICLISubagentsConfig{
+						Routing: &agentconfig.AICLISubagentRoutingConfig{
+							Enabled:           &enabled,
+							DefaultDifficulty: "normal",
+							Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+								"hard": {
+									Provider:        "hard-provider",
+									Model:           "hard-model",
+									ReasoningEffort: "high",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	resolver := newLocalTeamTaskRouteResolver(host)
+	resolution, err := resolver.ResolveTaskRoute(context.Background(), team.TaskRouteRequest{
+		Teammate: team.Teammate{ID: "mate-1", Profile: "writer", SessionID: "session-1"},
+		Task: team.Task{
+			ID:         "task-hard",
+			Title:      "Implement routing",
+			Difficulty: team.TaskDifficultyHard,
+		},
+		Attempt: 2,
+	})
+	if err != nil {
+		t.Fatalf("ResolveTaskRoute enabled failed: %v", err)
+	}
+	if resolution == nil || resolution.Disabled || resolution.Strict {
+		t.Fatalf("unexpected enabled resolution flags: %#v", resolution)
+	}
+	if resolution.Route == nil || resolution.Route.Provider != "hard-provider" || resolution.Route.Model != "hard-model" || resolution.Route.ReasoningEffort != "high" {
+		t.Fatalf("unexpected enabled route: %#v", resolution)
+	}
+	if resolution.Route.Attempt != 2 || resolution.Route.Source != modelrouting.SourceDifficultyLevel {
+		t.Fatalf("unexpected enabled route audit fields: %#v", resolution.Route)
+	}
+
+	disabled := false
+	host.BaseSession.Config.AICLI.Subagents.Routing.Enabled = &disabled
+	resolution, err = resolver.ResolveTaskRoute(context.Background(), team.TaskRouteRequest{
+		Task: team.Task{
+			ID:         "task-disabled",
+			Title:      "Implement routing",
+			Difficulty: team.TaskDifficultyHard,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolveTaskRoute disabled failed: %v", err)
+	}
+	if resolution == nil || !resolution.Disabled {
+		t.Fatalf("expected disabled resolution, got %#v", resolution)
+	}
+	if override := localChatRunRouteOverrideFromTeamRoute(resolution.Route); override != nil {
+		t.Fatalf("disabled route must not become a run override: %#v", override)
+	}
+
+	enabled = true
+	host.BaseSession.Config.AICLI.Subagents.Routing.Enabled = &enabled
+	host.BaseSession.Config.AICLI.Subagents.Routing.CompatibilityMode = modelrouting.CompatibilityStrict
+	resolution, err = resolver.ResolveTaskRoute(context.Background(), team.TaskRouteRequest{
+		Task: team.Task{
+			ID:         "task-invalid",
+			Title:      "Invalid difficulty",
+			Difficulty: "impossible",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected strict invalid difficulty error")
+	}
+	if resolution == nil || !resolution.Strict {
+		t.Fatalf("strict failures must be marked for TeammateRunner blocking: %#v", resolution)
+	}
+}
+
+func TestLocalChatTeamExpertConcurrencyLimitRequiresRoutingEnabled(t *testing.T) {
+	enabled := true
+	session := &ChatSession{
+		Config: &agentconfig.Config{
+			AICLI: &agentconfig.AICLIConfig{
+				Subagents: &agentconfig.AICLISubagentsConfig{
+					Routing: &agentconfig.AICLISubagentRoutingConfig{
+						Enabled:              &enabled,
+						MaxExpertConcurrency: 2,
+					},
+				},
+			},
+		},
+	}
+	if got := localChatTeamExpertConcurrencyLimit(session); got != 2 {
+		t.Fatalf("expected enabled expert limit 2, got %d", got)
+	}
+
+	disabled := false
+	session.Config.AICLI.Subagents.Routing.Enabled = &disabled
+	if got := localChatTeamExpertConcurrencyLimit(session); got != 0 {
+		t.Fatalf("expected disabled expert limit 0, got %d", got)
+	}
+}
+
+func TestLocalTeamTaskRouteAuditSinkPublishesTaskRouteResolvedToRuntimeBus(t *testing.T) {
+	ctx := context.Background()
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.CreateTeam(ctx, team.Team{
+		ID:            "team-route",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	taskID, err := store.CreateTask(ctx, team.Task{
+		ID:         "task-route",
+		TeamID:     "team-route",
+		Title:      "Route task",
+		Goal:       "Verify route audit sink",
+		Difficulty: team.TaskDifficultyHard,
+		Status:     team.TaskStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	host := &localChatRuntimeHost{
+		EventStore: runtimechat.NewInMemoryRuntimeStore(16),
+		EventBus:   runtimeevents.NewBusWithRetention(16),
+		TeamStore:  store,
+		Orchestrator: &team.Orchestrator{
+			Events: team.NewTeamEventBus(),
+		},
+		BaseSession: &ChatSession{
+			RuntimeSession: &runtimechat.Session{ID: "base-session"},
+		},
+	}
+	host.bindTeamLifecycleEvents()
+	sink := newLocalTeamTaskRouteAuditSink(host)
+	if sink == nil {
+		t.Fatal("expected route audit sink")
+	}
+
+	recordedAt := time.Now().UTC()
+	err = sink.RecordTaskRouteAudit(ctx, team.TaskRouteAudit{
+		TeamID:    "team-route",
+		AgentID:   "mate-1",
+		TaskID:    taskID,
+		SessionID: "mate-session",
+		Route: &team.TaskExecutionRoute{
+			Difficulty:      team.TaskDifficultyHard,
+			Provider:        "openai",
+			Model:           "gpt-test",
+			ReasoningEffort: "high",
+			Source:          modelrouting.SourceDifficultyLevel,
+			Warnings:        []string{"provider_fallback_parent"},
+			ResolvedAt:      recordedAt,
+			Attempt:         2,
+		},
+		RecordedAt: recordedAt,
+	})
+	if err != nil {
+		t.Fatalf("RecordTaskRouteAudit: %v", err)
+	}
+
+	events, err := store.ListTeamEvents(ctx, team.TeamEventFilter{
+		TeamID:    "team-route",
+		EventType: team.TaskRouteResolvedEvent,
+	})
+	if err != nil {
+		t.Fatalf("ListTeamEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected one persisted route event, got %#v", events)
+	}
+	payload := events[0].Payload
+	if payload["task_id"] != taskID || payload["agent_id"] != "mate-1" || payload["session_id"] != "mate-session" {
+		t.Fatalf("unexpected persisted route identity payload: %#v", payload)
+	}
+	if payload["route_provider"] != "openai" || payload["route_model"] != "gpt-test" || payload["route_reasoning_effort"] != "high" {
+		t.Fatalf("unexpected persisted route model payload: %#v", payload)
+	}
+	if payload["route_source"] != modelrouting.SourceDifficultyLevel {
+		t.Fatalf("unexpected persisted route audit payload: %#v", payload)
+	}
+	if attempt, ok := payloadIntValue(payload["route_attempt"]); !ok || attempt != 2 {
+		t.Fatalf("unexpected persisted route attempt: %#v", payload["route_attempt"])
+	}
+
+	recent := host.EventBus.Recent(10)
+	if len(recent) != 1 || recent[0].Type != team.TaskRouteResolvedEvent {
+		t.Fatalf("expected route resolved on runtime bus, got %#v", recent)
+	}
+	if recent[0].SessionID != "lead-session" {
+		t.Fatalf("expected route event to use team lead session, got %#v", recent[0])
+	}
+	if recent[0].Payload["route_provider"] != "openai" || recent[0].Payload["route_model"] != "gpt-test" {
+		t.Fatalf("unexpected runtime bus route payload: %#v", recent[0].Payload)
+	}
+	if attempt, ok := payloadIntValue(recent[0].Payload["route_attempt"]); !ok || attempt != 2 {
+		t.Fatalf("unexpected runtime bus route attempt: %#v", recent[0].Payload["route_attempt"])
 	}
 }
 
@@ -362,7 +745,7 @@ func TestLocalActorRegistry_RewritesCurrentTeammateSessionPlaceholder(t *testing
 	}
 }
 
-func buildTestSessionHub(t *testing.T) *runtimechat.SessionHub {
+func buildRouteOverrideTestRegistry(t *testing.T) (*localActorRegistry, *capturingLocalChatProvider, *capturingLocalChatProvider) {
 	t.Helper()
 
 	sessionStore := runtimechat.NewInMemoryStorage()
@@ -372,8 +755,126 @@ func buildTestSessionHub(t *testing.T) *runtimechat.SessionHub {
 		t.Fatalf("sessionStore.Save: %v", err)
 	}
 
+	baseProvider := &capturingLocalChatProvider{
+		name: "base-provider",
+		responses: []*runtimellm.LLMResponse{
+			{Content: "base ok", Model: "base-model"},
+		},
+	}
+	routedProvider := &capturingLocalChatProvider{
+		name: "routed-provider",
+		responses: []*runtimellm.LLMResponse{
+			{Content: "routed ok", Model: "routed-model"},
+		},
+	}
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+		DefaultProvider: "base-provider",
+		DefaultModel:    "base-model",
+	})
+	if err := llmRuntime.RegisterProvider("base-provider", baseProvider); err != nil {
+		t.Fatalf("Register base provider: %v", err)
+	}
+	if err := llmRuntime.RegisterProvider("routed-provider", routedProvider); err != nil {
+		t.Fatalf("Register routed provider: %v", err)
+	}
+	if err := llmRuntime.RegisterProviderAlias("base-model", "base-provider"); err != nil {
+		t.Fatalf("Register base alias: %v", err)
+	}
+	if err := llmRuntime.RegisterProviderAlias("routed-model", "routed-provider"); err != nil {
+		t.Fatalf("Register routed alias: %v", err)
+	}
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(64)
+	host := &localChatRuntimeHost{
+		EventBus:     runtimeevents.NewBusWithRetention(32),
+		EventStore:   runtimeStore,
+		RuntimeStore: runtimeStore,
+		SessionStore: sessionStore,
+		SessionHub: runtimechat.NewSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
+			a := agent.NewAgentWithLLM(&agent.Config{
+				Name:     "route-override-test",
+				Provider: "base-provider",
+				Model:    "base-model",
+				MaxSteps: 4,
+			}, nil, llmRuntime)
+			a.SetToolExecutionPolicy(runtimepolicy.NewToolExecutionPolicy([]string{}, false))
+			return runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
+				Agent:        a,
+				LLMRuntime:   llmRuntime,
+				SessionStore: sessionStore,
+				StateStore:   runtimeStore,
+				EventStore:   runtimeStore,
+				EventBus:     runtimeevents.NewBusWithRetention(32),
+			})
+		}),
+	}
+	return newLocalActorRegistry(host), baseProvider, routedProvider
+}
+
+type cancelingContextProvider struct {
+	cancel context.CancelFunc
+}
+
+func (p *cancelingContextProvider) Name() string { return "mock" }
+
+func (p *cancelingContextProvider) Call(ctx context.Context, req *runtimellm.LLMRequest) (*runtimellm.LLMResponse, error) {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(20 * time.Millisecond):
+	}
+	return &runtimellm.LLMResponse{
+		Content: "inspection complete",
+		Model:   req.Model,
+	}, nil
+}
+
+func (p *cancelingContextProvider) Stream(ctx context.Context, req *runtimellm.LLMRequest) (<-chan runtimellm.StreamChunk, error) {
+	ch := make(chan runtimellm.StreamChunk, 2)
+	go func() {
+		defer close(ch)
+		resp, err := p.Call(ctx, req)
+		if err != nil {
+			ch <- runtimellm.StreamChunk{Type: runtimellm.EventTypeError, Error: err.Error()}
+			return
+		}
+		ch <- runtimellm.StreamChunk{Type: runtimellm.EventTypeText, Content: resp.Content}
+		ch <- runtimellm.StreamChunk{Type: runtimellm.EventTypeDone, Done: true}
+	}()
+	return ch, nil
+}
+
+func (p *cancelingContextProvider) CountTokens(text string) int { return len(text) }
+
+func (p *cancelingContextProvider) GetCapabilities() *runtimellm.ModelCapabilities {
+	return &runtimellm.ModelCapabilities{
+		MaxContextTokens:  128000,
+		MaxOutputTokens:   4096,
+		SupportsTools:     true,
+		SupportsStreaming: false,
+	}
+}
+
+func (p *cancelingContextProvider) CheckHealth(ctx context.Context) error { return nil }
+
+func buildTestSessionHub(t *testing.T) *runtimechat.SessionHub {
 	provider := runtimellm.NewMockProvider("mock", 0)
 	provider.SetResponse("inspect", "inspection complete")
+	return buildTestSessionHubWithProvider(t, provider)
+}
+
+func buildTestSessionHubWithProvider(t *testing.T, provider runtimellm.Provider) *runtimechat.SessionHub {
+	t.Helper()
+
+	sessionStore := runtimechat.NewInMemoryStorage()
+	session := runtimechat.NewSession("tester")
+	session.ID = "session-1"
+	if err := sessionStore.Save(context.Background(), session); err != nil {
+		t.Fatalf("sessionStore.Save: %v", err)
+	}
+
 	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
 		DefaultProvider: "mock",
 		DefaultModel:    "mock-model",

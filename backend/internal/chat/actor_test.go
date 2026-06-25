@@ -284,6 +284,58 @@ func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
 	require.NotEmpty(t, events)
 }
 
+func TestSessionActorInterruptClearsBusyRuntimeState(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	sessionID := "actor-interrupt-state"
+	require.NoError(t, runtimeStore.SaveState(ctx, &RuntimeState{
+		SessionID:     sessionID,
+		Status:        SessionRunning,
+		CurrentTurnID: "turn_busy",
+		CurrentRunMeta: &team.RunMeta{
+			PermissionMode: "default",
+		},
+		FrozenTurnTools:    []types.ToolDefinition{{Name: "grep"}},
+		FrozenTurnToolsSet: true,
+		PendingTool: &PendingToolInvocation{
+			ToolCallID: "tool_busy",
+			ToolName:   "grep",
+		},
+		PendingApproval: &runtimepolicy.ApprovalRequest{
+			ID:       "approval_busy",
+			ToolName: "grep",
+		},
+		PendingQuestion: &toolbroker.UserQuestionRequest{
+			ID:     "question_busy",
+			Prompt: "continue?",
+		},
+	}))
+
+	actor := &SessionActor{
+		id:         sessionID,
+		stateStore: runtimeStore,
+		eventStore: runtimeStore,
+		eventBus:   runtimeevents.NewBus(),
+	}
+	require.NoError(t, actor.loadState(ctx))
+
+	reply := make(chan error, 1)
+	actor.handleInterrupt(Interrupt{Reply: reply})
+	require.NoError(t, <-reply)
+
+	state, err := runtimeStore.LoadState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, SessionStopped, state.Status)
+	require.Empty(t, state.CurrentTurnID)
+	require.Nil(t, state.CurrentRunMeta)
+	require.Nil(t, state.PendingTool)
+	require.Nil(t, state.PendingApproval)
+	require.Nil(t, state.PendingQuestion)
+	require.False(t, state.FrozenTurnToolsSet)
+	require.Empty(t, state.FrozenTurnTools)
+}
+
 func TestSessionActorSubmitPromptRouteOverrideAppliesToNextLLMRequestOnly(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()
@@ -359,6 +411,180 @@ func TestSessionActorSubmitPromptRouteOverrideAppliesToNextLLMRequestOnly(t *tes
 	require.NotNil(t, cfg)
 	require.Equal(t, "base-provider", cfg.Provider)
 	require.Equal(t, "base-model", cfg.Model)
+}
+
+func TestSessionActorApproveToolResumeUsesRouteOverrideFromRunMeta(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-route-approval-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "base-provider",
+		DefaultModel:    "base-model",
+		MaxRetries:      0,
+	})
+	baseProvider := &capturingSequenceProvider{
+		name: "base-provider",
+		responses: []*llm.LLMResponse{{
+			Content: "base reply",
+			Model:   "base-model",
+		}},
+	}
+	routeProvider := &capturingSequenceProvider{
+		name: "route-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "route needs approval",
+				Model:   "route-model",
+				ToolCalls: []types.ToolCall{{
+					ID:   "tool_route_approval",
+					Name: "team_echo",
+					Args: map[string]interface{}{"message": "hello"},
+				}},
+			},
+			{
+				Content: "route resumed",
+				Model:   "route-model",
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider(baseProvider.Name(), baseProvider))
+	require.NoError(t, runtime.RegisterProvider(routeProvider.Name(), routeProvider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-route-approval-test",
+		Provider: "base-provider",
+		Model:    "base-model",
+		MaxSteps: 3,
+	}, &simpleEchoMCPManager{}, runtime)
+	apiAgent.SetPermissionEngine(&agent.PermissionEngine{
+		Callback: func(ctx context.Context, req runtimepolicy.EvalRequest) (runtimepolicy.Decision, string, error) {
+			if req.ToolName == "team_echo" {
+				return runtimepolicy.Decision{Type: runtimepolicy.DecisionAsk}, "manual approval", nil
+			}
+			return runtimepolicy.Decision{Type: runtimepolicy.DecisionAllow}, "", nil
+		},
+	})
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor1, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	runMeta := &team.RunMeta{
+		Team: &team.TeamRunMeta{
+			TeamID:               "team-route-approval",
+			AgentID:              "mate-route-approval",
+			CurrentTaskID:        "task-route-approval",
+			RouteProvider:        "route-provider",
+			RouteModel:           "route-model",
+			RouteReasoningEffort: "high",
+		},
+	}
+	resultCh := make(chan *agent.Result, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, submitErr := actor1.SubmitPrompt(ctx, "Start routed approval flow.", runMeta, SubmitPromptOption{
+			RouteOverride: &RunRouteOverride{
+				Provider:        "route-provider",
+				Model:           "route-model",
+				ReasoningEffort: "high",
+			},
+		})
+		resultCh <- result
+		errCh <- submitErr
+	}()
+
+	var requestID string
+	require.Eventually(t, func() bool {
+		state := actor1.State()
+		if state == nil || state.PendingApproval == nil || state.PendingTool == nil {
+			return false
+		}
+		if state.Status != SessionWaitingApproval || state.PendingTool.ToolCallID != "tool_route_approval" {
+			return false
+		}
+		requestID = state.PendingApproval.ID
+		return requestID != ""
+	}, 5*time.Second, 20*time.Millisecond)
+
+	actor2, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	require.NoError(t, actor2.ApproveTool(context.Background(), requestID, true))
+
+	require.Eventually(t, func() bool {
+		state := actor2.State()
+		if state == nil || state.Status != SessionIdle || state.PendingApproval != nil || state.PendingTool != nil {
+			return false
+		}
+		updated, loadErr := storage.Load(context.Background(), session.ID)
+		if loadErr != nil || updated == nil {
+			return false
+		}
+		messages := updated.GetMessages()
+		if len(messages) == 0 {
+			return false
+		}
+		last := messages[len(messages)-1]
+		return last.Role == "assistant" && last.Content == "route resumed"
+	}, 5*time.Second, 20*time.Millisecond)
+
+	require.Len(t, routeProvider.requests, 2)
+	for _, request := range routeProvider.requests {
+		require.Equal(t, "route-provider", request.Provider)
+		require.Equal(t, "route-model", request.Model)
+		require.Equal(t, "high", request.ReasoningEffort)
+	}
+	require.Empty(t, baseProvider.requests)
+
+	cancel()
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("original routed approval submit did not exit after cancellation")
+	}
+	select {
+	case <-resultCh:
+	default:
+	}
+}
+
+func TestRunRouteOverrideFromRunMetaUsesCurrentTeamRoute(t *testing.T) {
+	assert.Nil(t, runRouteOverrideFromRunMeta(nil))
+	assert.Nil(t, runRouteOverrideFromRunMeta(&team.RunMeta{
+		Team: &team.TeamRunMeta{
+			Difficulty: "hard",
+		},
+	}))
+
+	override := runRouteOverrideFromRunMeta(&team.RunMeta{
+		Team: &team.TeamRunMeta{
+			RouteProvider:        " route-provider ",
+			RouteModel:           " route-model ",
+			RouteReasoningEffort: " high ",
+		},
+	})
+	require.NotNil(t, override)
+	assert.Equal(t, "route-provider", override.Provider)
+	assert.Equal(t, "route-model", override.Model)
+	assert.Equal(t, "high", override.ReasoningEffort)
 }
 
 func TestSessionActorContinueUsesTransientPromptAndStripsIt(t *testing.T) {
@@ -1853,6 +2079,102 @@ func TestSessionActorApproveToolResumesWithoutInMemoryWaiter(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("original actor submit did not exit after cancellation")
 	}
+}
+
+func TestApprovalRequestedEventPayloadIncludesRunMetaRouteAndPermission(t *testing.T) {
+	state := &RuntimeState{
+		CurrentRunMeta: &team.RunMeta{
+			PermissionMode: string(runtimepolicy.ModeBypassPermissions),
+			Team: &team.TeamRunMeta{
+				TeamID:               "team-approval",
+				AgentID:              "mate-approval",
+				CurrentTaskID:        "task-approval",
+				Difficulty:           "hard",
+				DifficultySource:     "classifier",
+				DifficultyRationale:  "requires parallel edits",
+				RouteProvider:        "openai",
+				RouteModel:           "gpt-test",
+				RouteReasoningEffort: "high",
+				RouteSource:          "difficulty_level",
+				RouteWarnings:        []string{"provider_fallback_parent"},
+				RouteFallbackUsed:    true,
+				RouteFallbackReason:  "primary unavailable",
+			},
+		},
+	}
+	pending := &ApprovalRequest{ToolCallID: "tool_approval"}
+	payload := approvalRequestedEventPayload(state, pending, runtimepolicy.ApprovalRequest{
+		ID:         "approval-1",
+		ToolCallID: "tool_approval",
+		ToolName:   "team_echo",
+		Reason:     "manual approval",
+		RiskLevel:  "medium",
+	})
+
+	require.Equal(t, "approval-1", payload["request_id"])
+	require.Equal(t, "tool_approval", payload["tool_call_id"])
+	require.Equal(t, "team_echo", payload["tool_name"])
+	require.Equal(t, "manual approval", payload["reason"])
+	require.Equal(t, "medium", payload["risk_level"])
+	require.Equal(t, string(runtimepolicy.ModeBypassPermissions), payload["permission_mode"])
+	require.Equal(t, "team-approval", payload["team_id"])
+	require.Equal(t, "mate-approval", payload["agent_id"])
+	require.Equal(t, "mate-approval", payload["teammate_id"])
+	require.Equal(t, "task-approval", payload["task_id"])
+	require.Equal(t, "hard", payload["difficulty"])
+	require.Equal(t, "classifier", payload["difficulty_source"])
+	require.Equal(t, "requires parallel edits", payload["difficulty_rationale"])
+	require.Equal(t, "openai", payload["route_provider"])
+	require.Equal(t, "gpt-test", payload["route_model"])
+	require.Equal(t, "high", payload["route_reasoning_effort"])
+	require.Equal(t, "difficulty_level", payload["route_source"])
+	require.Equal(t, []string{"provider_fallback_parent"}, payload["route_warnings"])
+	require.Equal(t, true, payload["fallback_used"])
+	require.Equal(t, "primary unavailable", payload["fallback_reason"])
+}
+
+func TestApprovalResolvedEventPayloadIncludesRunMetaRouteAndPermission(t *testing.T) {
+	state := &RuntimeState{
+		PendingApproval: &ApprovalRequest{
+			ToolCallID: "tool_approval",
+			ToolName:   "team_echo",
+		},
+		CurrentRunMeta: &team.RunMeta{
+			PermissionMode: string(runtimepolicy.ModeBypassPermissions),
+			Team: &team.TeamRunMeta{
+				TeamID:               "team-approval",
+				AgentID:              "mate-approval",
+				CurrentTaskID:        "task-approval",
+				Difficulty:           "expert",
+				RouteProvider:        "openai",
+				RouteModel:           "gpt-test",
+				RouteReasoningEffort: "high",
+				RouteSource:          "difficulty_level",
+				RouteWarnings:        []string{"provider_fallback_parent"},
+				RouteFallbackUsed:    true,
+				RouteFallbackReason:  "primary unavailable",
+			},
+		},
+	}
+	payload := approvalResolvedEventPayload(state, "approval-1", true)
+
+	require.Equal(t, "approval-1", payload["request_id"])
+	require.Equal(t, true, payload["allowed"])
+	require.Equal(t, "tool_approval", payload["tool_call_id"])
+	require.Equal(t, "team_echo", payload["tool_name"])
+	require.Equal(t, string(runtimepolicy.ModeBypassPermissions), payload["permission_mode"])
+	require.Equal(t, "team-approval", payload["team_id"])
+	require.Equal(t, "mate-approval", payload["agent_id"])
+	require.Equal(t, "mate-approval", payload["teammate_id"])
+	require.Equal(t, "task-approval", payload["task_id"])
+	require.Equal(t, "expert", payload["difficulty"])
+	require.Equal(t, "openai", payload["route_provider"])
+	require.Equal(t, "gpt-test", payload["route_model"])
+	require.Equal(t, "high", payload["route_reasoning_effort"])
+	require.Equal(t, "difficulty_level", payload["route_source"])
+	require.Equal(t, []string{"provider_fallback_parent"}, payload["route_warnings"])
+	require.Equal(t, true, payload["fallback_used"])
+	require.Equal(t, "primary unavailable", payload["fallback_reason"])
 }
 
 func TestSessionActorApproveToolRecoversRemainingSiblingCallsBeforeResumingModel(t *testing.T) {

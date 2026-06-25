@@ -682,6 +682,56 @@ func TestHandleCommand_AgentsRoutingTestPrintsDryRunDecision(t *testing.T) {
 	}
 }
 
+func TestHandleCommand_AgentsRoutingTestSpawnTeamWritePathPreview(t *testing.T) {
+	enabled := true
+	session := &ChatSession{
+		ProviderName: "parent",
+		Model:        "parent-model",
+		Config: &config.Config{
+			Providers: config.ProvidersConfig{
+				DefaultProvider: "parent",
+				Items: map[string]config.Provider{
+					"parent": {Enabled: true, DefaultModel: "parent-model"},
+					"strong": {Enabled: true, DefaultModel: "strong-model"},
+				},
+			},
+			AICLI: &config.AICLIConfig{
+				Subagents: &config.AICLISubagentsConfig{
+					Routing: &config.AICLISubagentRoutingConfig{
+						Enabled: &enabled,
+						Roles: map[string]map[string]config.AICLISubagentRouteProfile{
+							"writer": {
+								"hard": {Provider: "strong", Model: "strong-model", ReasoningEffort: "high"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents routing test --workflow spawn_team --team-id team-1 --teammate member-1 --task task-1 --difficulty hard --write-path src/foo.go", false); quit {
+			t.Fatal("agents routing command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Workflow:      spawn_team",
+		"Team task:     team=team-1 teammate=member-1 task=task-1",
+		"Role:          writer",
+		"Read only:     false",
+		"Write paths:   src/foo.go",
+		"Provider:      strong",
+		"Model:         strong-model",
+		"Reasoning:     high",
+		"Source:        role_override",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected routing dry-run output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
 func TestHandleCommand_AgentsRoutingTestDefaultsToWritableSpawnAgentPreview(t *testing.T) {
 	enabled := true
 	session := &ChatSession{
@@ -1335,6 +1385,9 @@ func TestChatTimelineLinesIncludesTaskDispatchDetails(t *testing.T) {
 	if _, err := team.AppendTaskDispatchRequested(context.Background(), store, request); err != nil {
 		t.Fatalf("AppendTaskDispatchRequested: %v", err)
 	}
+	if _, err := team.AppendTaskDispatchStarted(context.Background(), store, request); err != nil {
+		t.Fatalf("AppendTaskDispatchStarted: %v", err)
+	}
 	if _, err := team.AppendTaskDispatchCompleted(context.Background(), store, request, &team.SessionResult{
 		Success: true,
 		TraceID: "trace-1",
@@ -1355,12 +1408,76 @@ func TestChatTimelineLinesIncludesTaskDispatchDetails(t *testing.T) {
 		"session=team-1__member-1",
 		"assignee=member-1",
 		"via=agent_control.trigger_task",
-		"#2 " + team.TaskDispatchCompletedEvent,
+		"#2 " + team.TaskDispatchStartedEvent,
+		"#3 " + team.TaskDispatchCompletedEvent,
 		"success=true",
 		"trace=trace-1",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected dispatch timeline to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestChatTimelineLinesIncludesTaskRouteDetails(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	const teamID = "timeline-route-team"
+	if _, err := store.CreateTeam(context.Background(), team.Team{
+		ID:            teamID,
+		LeadSessionID: "timeline-root",
+		Status:        team.TeamStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if _, err := team.AppendTaskRouteResolved(context.Background(), store, team.TaskRouteAudit{
+		TeamID:    teamID,
+		AgentID:   "member-1",
+		TaskID:    "task-1",
+		SessionID: "session-1",
+		Route: &team.TaskExecutionRoute{
+			Difficulty:      team.TaskDifficultyHard,
+			Provider:        "openai",
+			Model:           "gpt-test",
+			ReasoningEffort: "high",
+			Source:          "difficulty_level",
+			Warnings:        []string{"provider_fallback_parent"},
+			FallbackUsed:    true,
+			FallbackReason:  "provider_fallback_parent",
+			Attempt:         2,
+		},
+		RecordedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("AppendTaskRouteResolved: %v", err)
+	}
+
+	session := &ChatSession{
+		ActiveTeam:       &chatTeamBinding{TeamID: teamID, AgentID: "lead"},
+		LocalRuntimeHost: &localChatRuntimeHost{TeamStore: store},
+	}
+	output := strings.Join(chatTimelineLines(session, 10), "\n")
+	for _, expected := range []string{
+		"#1 " + team.TaskRouteResolvedEvent,
+		"task=task-1",
+		"session=session-1",
+		"assignee=member-1",
+		"via=agent_control.trigger_task",
+		"difficulty=hard",
+		"provider=openai",
+		"model=gpt-test",
+		"reasoning=high",
+		"route_source=difficulty_level",
+		"fallback_used=true",
+		"fallback_reason=provider_fallback_parent",
+		"warnings=provider_fallback_parent",
+		"attempt=2",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected route timeline to contain %q, got:\n%s", expected, output)
 		}
 	}
 }

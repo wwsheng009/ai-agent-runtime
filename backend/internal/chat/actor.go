@@ -642,7 +642,7 @@ func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	})
-	a.startSessionRun(ctx, session, "", true, turnID, cmd.RunMeta, nil, reply, false, cmd.StripMetadataKeys...)
+	a.startSessionRun(ctx, session, "", true, turnID, cmd.RunMeta, runRouteOverrideFromRunMeta(cmd.RunMeta), reply, false, cmd.StripMetadataKeys...)
 }
 
 func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
@@ -689,10 +689,7 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 	a.publish(runtimeevents.Event{
 		Type:      EventApprovalResolved,
 		SessionID: a.id,
-		Payload: map[string]interface{}{
-			"request_id": cmd.RequestID,
-			"allowed":    cmd.Allow,
-		},
+		Payload:   approvalResolvedEventPayload(state, cmd.RequestID, cmd.Allow),
 	})
 	cmd.Reply <- nil
 }
@@ -753,6 +750,12 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 	a.cancelActive()
 	_ = a.updateState(context.Background(), func(state *RuntimeState) error {
 		state.Status = SessionStopped
+		state.CurrentTurnID = ""
+		state.CurrentRunMeta = nil
+		resetFrozenTurnTools(state)
+		state.PendingTool = nil
+		state.PendingApproval = nil
+		state.PendingQuestion = nil
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	})
@@ -1055,14 +1058,14 @@ func (a *SessionActor) runLoop(ctx context.Context, prompt string, session *Sess
 	return loop.RunWithSession(ctx, prompt, session)
 }
 
-func (a *SessionActor) continueLoop(ctx context.Context, session *Session) (*agent.Result, error) {
+func (a *SessionActor) continueLoop(ctx context.Context, session *Session, routeOverride *RunRouteOverride) (*agent.Result, error) {
 	if a.agent == nil {
 		return nil, fmt.Errorf("agent is not configured")
 	}
 	if a.llmRuntime == nil {
 		return nil, fmt.Errorf("llm runtime is not configured")
 	}
-	loop := agent.NewReActLoop(a.agent, a.llmRuntime, a.loopConfig)
+	loop := agent.NewReActLoop(a.agent, a.llmRuntime, cloneLoopConfigWithRouteOverride(a.loopConfig, routeOverride))
 	return loop.ContinueWithSession(ctx, session)
 }
 
@@ -1096,6 +1099,22 @@ func cloneLoopConfigWithRouteOverride(base *agent.LoopReActConfig, routeOverride
 		}
 	}
 	return &cfg
+}
+
+func runRouteOverrideFromRunMeta(runMeta *team.RunMeta) *RunRouteOverride {
+	route := team.TaskExecutionRouteFromRunMeta(runMeta)
+	if route == nil {
+		return nil
+	}
+	override := &RunRouteOverride{
+		Provider:        strings.TrimSpace(route.Provider),
+		Model:           strings.TrimSpace(route.Model),
+		ReasoningEffort: strings.TrimSpace(route.ReasoningEffort),
+	}
+	if override.Provider == "" && override.Model == "" && override.ReasoningEffort == "" {
+		return nil
+	}
+	return override
 }
 
 func (a *SessionActor) tryRouteSkill(ctx context.Context, prompt string, session *Session) (*agent.Result, bool, error) {
@@ -1778,7 +1797,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			execErr error
 		)
 		if resume {
-			result, execErr = a.continueLoop(runCtx, session)
+			result, execErr = a.continueLoop(runCtx, session, routeOverride)
 		} else {
 			result, execErr = a.runLoop(runCtx, prompt, session, routeOverride)
 			if preflightErr, ok := agent.AsPromptPreflightError(execErr); ok && preflightErr != nil {
@@ -2271,7 +2290,7 @@ func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session
 		}
 		cancel()
 		a.clearActiveCancel()
-		a.startSessionRun(context.Background(), session, "", true, turnID, runMeta, nil, nil, false)
+		a.startSessionRun(context.Background(), session, "", true, turnID, runMeta, runRouteOverrideFromRunMeta(runMeta), nil, false)
 	}()
 }
 
@@ -2428,15 +2447,11 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 		return runtimepolicy.ApprovalResponse{}, err
 	}
 	waiter := a.registerApprovalWaiter(req.ID)
+	state := a.State()
 	a.publish(runtimeevents.Event{
 		Type:      EventApprovalRequested,
 		SessionID: a.id,
-		Payload: map[string]interface{}{
-			"request_id": req.ID,
-			"tool_name":  req.ToolName,
-			"reason":     req.Reason,
-			"risk_level": req.RiskLevel,
-		},
+		Payload:   approvalRequestedEventPayload(state, pending, req),
 	})
 	select {
 	case resp := <-waiter:
@@ -2456,6 +2471,93 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 			return nil
 		})
 		return runtimepolicy.ApprovalResponse{}, ctx.Err()
+	}
+}
+
+func approvalRequestedEventPayload(state *RuntimeState, pending *ApprovalRequest, req runtimepolicy.ApprovalRequest) map[string]interface{} {
+	payload := map[string]interface{}{
+		"request_id": req.ID,
+		"tool_name":  req.ToolName,
+		"reason":     req.Reason,
+		"risk_level": req.RiskLevel,
+	}
+	if pending != nil && strings.TrimSpace(pending.ToolCallID) != "" {
+		payload["tool_call_id"] = strings.TrimSpace(pending.ToolCallID)
+	}
+	appendApprovalRunMetaPayload(payload, state)
+	return payload
+}
+
+func approvalResolvedEventPayload(state *RuntimeState, requestID string, allowed bool) map[string]interface{} {
+	payload := map[string]interface{}{
+		"request_id": strings.TrimSpace(requestID),
+		"allowed":    allowed,
+	}
+	if state != nil && state.PendingApproval != nil {
+		if toolName := strings.TrimSpace(state.PendingApproval.ToolName); toolName != "" {
+			payload["tool_name"] = toolName
+		}
+		if toolCallID := strings.TrimSpace(state.PendingApproval.ToolCallID); toolCallID != "" {
+			payload["tool_call_id"] = toolCallID
+		}
+	}
+	appendApprovalRunMetaPayload(payload, state)
+	return payload
+}
+
+func appendApprovalRunMetaPayload(payload map[string]interface{}, state *RuntimeState) {
+	if payload == nil {
+		return
+	}
+	if state == nil || state.CurrentRunMeta == nil {
+		return
+	}
+	if permissionMode := strings.TrimSpace(state.CurrentRunMeta.PermissionMode); permissionMode != "" {
+		payload["permission_mode"] = permissionMode
+	}
+	if state.CurrentRunMeta.Team == nil {
+		return
+	}
+	teamMeta := state.CurrentRunMeta.Team
+	if teamID := strings.TrimSpace(teamMeta.TeamID); teamID != "" {
+		payload["team_id"] = teamID
+	}
+	if agentID := strings.TrimSpace(teamMeta.AgentID); agentID != "" {
+		payload["agent_id"] = agentID
+		payload["teammate_id"] = agentID
+	}
+	if taskID := strings.TrimSpace(teamMeta.CurrentTaskID); taskID != "" {
+		payload["task_id"] = taskID
+	}
+	if difficulty := strings.TrimSpace(teamMeta.Difficulty); difficulty != "" {
+		payload["difficulty"] = difficulty
+	}
+	if source := strings.TrimSpace(teamMeta.DifficultySource); source != "" {
+		payload["difficulty_source"] = source
+	}
+	if rationale := strings.TrimSpace(teamMeta.DifficultyRationale); rationale != "" {
+		payload["difficulty_rationale"] = rationale
+	}
+	if provider := strings.TrimSpace(teamMeta.RouteProvider); provider != "" {
+		payload["route_provider"] = provider
+	}
+	if model := strings.TrimSpace(teamMeta.RouteModel); model != "" {
+		payload["route_model"] = model
+	}
+	if effort := strings.TrimSpace(teamMeta.RouteReasoningEffort); effort != "" {
+		payload["route_reasoning_effort"] = effort
+	}
+	if source := strings.TrimSpace(teamMeta.RouteSource); source != "" {
+		payload["route_source"] = source
+	}
+	if len(teamMeta.RouteWarnings) > 0 {
+		payload["route_warnings"] = append([]string(nil), teamMeta.RouteWarnings...)
+	}
+	if teamMeta.RouteFallbackUsed {
+		payload["fallback_used"] = true
+	}
+	if fallbackReason := strings.TrimSpace(teamMeta.RouteFallbackReason); fallbackReason != "" {
+		payload["fallback_reason"] = fallbackReason
 	}
 }
 

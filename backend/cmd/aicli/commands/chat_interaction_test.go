@@ -186,6 +186,41 @@ func TestSchedulePromptRedraw_RestoresPromptDraft(t *testing.T) {
 	}, 200*time.Millisecond, 10*time.Millisecond)
 }
 
+func TestChatInteractionCoordinator_PrintPrompt_InsertsBlankLineAfterCompletedBlock(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+
+	coord.RenderAssistant("第一轮回复")
+	coord.PrintPrompt()
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "第一轮回复") || !strings.Contains(rendered, "\n\n"+ui.UserPromptText(0)) {
+		t.Fatalf("expected prompt redraw to keep one blank line after completed block, got %q", rendered)
+	}
+}
+
+func TestChatInteractionCoordinator_RenderAsyncLine_KeepsGapAcrossPromptRedraw(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.promptAdvanceFn = func() bool { return false }
+	output := &terminalCaptureWriter{}
+	coord.SetWriter(output)
+
+	coord.RenderAsyncLine("• Running grep path=E:/projects/ai/ai-agent-runtime/backend")
+	coord.PrintPrompt()
+	coord.RenderAsyncLine("• Completed grep path=E:/projects/ai/ai-agent-runtime/backend")
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "• Running grep path=E:/projects/ai/ai-agent-runtime/backend") {
+		t.Fatalf("expected first tool timeline line, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "• Running grep path=E:/projects/ai/ai-agent-runtime/backend\n\n• Completed grep path=E:/projects/ai/ai-agent-runtime/backend") {
+		t.Fatalf("expected second tool timeline line to preserve blank-line gap after prompt redraw, got %q", rendered)
+	}
+}
+
 func TestFinishInteractiveReadPromptState_PreservesDraftForQueuedInput(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
@@ -2354,6 +2389,22 @@ func TestChatInteractionCoordinator_DoesNotRedrawPromptDuringStreaming(t *testin
 	if strings.Count(rendered, ui.UserPromptText(0)) != 1 {
 		t.Fatalf("expected one prompt redraw after stream finalization, got %q", rendered)
 	}
+}
+
+func TestChatInteractionCoordinator_SchedulePromptRedraw_InsertsBlankLineAfterCompletedBlock(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.promptDelay = 10 * time.Millisecond
+	output := &synchronizedBuffer{}
+	coord.SetWriter(output)
+
+	coord.RenderAssistant("第一轮回复")
+	coord.SchedulePromptRedraw()
+
+	require.Eventually(t, func() bool {
+		rendered := output.String()
+		return strings.Contains(rendered, "第一轮回复") && strings.Contains(rendered, "\n\n"+ui.UserPromptText(0))
+	}, 200*time.Millisecond, 10*time.Millisecond)
 }
 
 type terminalCaptureWriter struct {

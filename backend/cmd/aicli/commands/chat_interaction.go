@@ -48,6 +48,8 @@ type chatInteractionCoordinator struct {
 	reasoningMeta       string
 	reasoningBuffer     strings.Builder
 	completeBlockOutput bool
+	lastCompletedAsyncLine bool
+	promptAfterBlockGap bool
 	shutdown            bool
 }
 
@@ -135,6 +137,7 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(prompt) {
 		c.promptVisible = true
 		c.promptRenderedOnSurface = true
+		c.promptAfterBlockGap = false
 		if c.promptInput != "" {
 			rows := c.currentPromptDisplayRowsLocked()
 			cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
@@ -143,6 +146,13 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 		return
 	}
 	c.promptRenderedOnSurface = false
+	if c.lastCompletedAsyncLine {
+		c.promptAfterBlockGap = true
+		c.completeBlockOutput = false
+	} else {
+		c.promptAfterBlockGap = false
+		c.writePromptGapLocked()
+	}
 	c.writeTextLocked(prompt)
 	if c.promptInput != "" {
 		c.writeTextLocked(c.promptInput)
@@ -228,6 +238,14 @@ func (c *chatInteractionCoordinator) writeLineLocked(text string) {
 		return
 	}
 	c.writeTextLocked(text + "\n")
+}
+
+func (c *chatInteractionCoordinator) writePromptGapLocked() {
+	if c == nil || !c.completeBlockOutput {
+		return
+	}
+	c.writeLineLocked("")
+	c.completeBlockOutput = false
 }
 
 func (c *chatInteractionCoordinator) writeFormatLocked(format string, args ...interface{}) {
@@ -585,6 +603,7 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	promptWasVisible := c.promptVisible
+	promptAfterBlockGap := c.promptAfterBlockGap
 	if !c.beginMessageLocked() {
 		return
 	}
@@ -593,7 +612,8 @@ func (c *chatInteractionCoordinator) RenderAssistant(response string) {
 	if c.session.Formatter != nil {
 		formatted = c.session.Formatter.Format(response)
 	}
-	c.writeCompleteBlockLocked(ui.FormatAssistantMessage(formatted), promptWasVisible)
+	c.writeCompleteBlockLocked(ui.FormatAssistantMessage(formatted), promptWasVisible && !promptAfterBlockGap)
+	c.lastCompletedAsyncLine = false
 }
 
 func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.ReasoningBlock) {
@@ -917,10 +937,12 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	promptWasVisible := c.promptVisible
+	promptAfterBlockGap := c.promptAfterBlockGap
 	if !c.beginMessageLocked() {
 		return
 	}
-	c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(line), promptWasVisible)
+	c.writeCompleteBlockLocked(ui.FormatAssistantSupplementBlock(line), promptWasVisible && !promptAfterBlockGap)
+	c.lastCompletedAsyncLine = true
 }
 
 func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
@@ -933,6 +955,7 @@ func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 		return
 	}
 	c.writeCompleteBlockLocked(ui.FormatUserMessage(input), false)
+	c.lastCompletedAsyncLine = false
 }
 
 func (c *chatInteractionCoordinator) RenderError(err error) {
@@ -942,10 +965,12 @@ func (c *chatInteractionCoordinator) RenderError(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	promptWasVisible := c.promptVisible
+	promptAfterBlockGap := c.promptAfterBlockGap
 	if !c.beginMessageLocked() {
 		return
 	}
-	c.writeCompleteBlockLocked(ui.FormatErrorMessage(fmt.Sprintf("操作错误: %v", err)), promptWasVisible)
+	c.writeCompleteBlockLocked(ui.FormatErrorMessage(fmt.Sprintf("操作错误: %v", err)), promptWasVisible && !promptAfterBlockGap)
+	c.lastCompletedAsyncLine = false
 }
 
 func (c *chatInteractionCoordinator) ClearPrompt() {
@@ -1115,6 +1140,8 @@ func (c *chatInteractionCoordinator) ResetRunState() {
 		return
 	}
 	c.completeBlockOutput = false
+	c.lastCompletedAsyncLine = false
+	c.promptAfterBlockGap = false
 	c.updateSurfaceStatusLocked("Ready")
 }
 
@@ -1140,6 +1167,8 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.streamingActive = false
 	c.reasoningActive = false
 	c.completeBlockOutput = false
+	c.lastCompletedAsyncLine = false
+	c.promptAfterBlockGap = false
 	c.surface = nil
 }
 
@@ -1531,11 +1560,12 @@ func (c *chatInteractionCoordinator) writeCompleteBlockLocked(rendered string, s
 	if strings.TrimSpace(rendered) == "" {
 		return
 	}
-	if !suppressSeparator && c.completeBlockOutput {
+	if !suppressSeparator && (c.completeBlockOutput || c.promptAfterBlockGap) {
 		c.writeLineLocked("")
 	}
 	c.writeLineLocked(rendered)
 	c.completeBlockOutput = true
+	c.promptAfterBlockGap = false
 }
 
 func (c *chatInteractionCoordinator) shouldAdvanceAfterPromptLocked() bool {
@@ -1758,12 +1788,21 @@ func (c *chatInteractionCoordinator) SchedulePromptRedraw() {
 		if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(prompt) {
 			c.promptVisible = true
 			c.promptRenderedOnSurface = true
+			c.promptAfterBlockGap = false
 			if c.promptInput != "" {
 				rows := c.currentPromptDisplayRowsLocked()
 				cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
 				c.surface.SetPromptInputState(prompt, c.promptInput, rows, cursorRow, cursorCol)
 			}
 			return
+		}
+		c.promptRenderedOnSurface = false
+		if c.lastCompletedAsyncLine {
+			c.promptAfterBlockGap = true
+			c.completeBlockOutput = false
+		} else {
+			c.promptAfterBlockGap = false
+			c.writePromptGapLocked()
 		}
 		c.writeTextLocked(prompt)
 		if c.promptInput != "" {

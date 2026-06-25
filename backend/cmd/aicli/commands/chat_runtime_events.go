@@ -48,11 +48,12 @@ type chatRuntimeEventBridge struct {
 	latestRequestKey                string
 	loggedToolCalls                 map[string]struct{}
 	loggedToolResults               map[string]struct{}
+	toolCallStartedAt               map[string]time.Time
 	toolExecutionCalls              []aicliToolExecutionCallSummary
 	toolSummaryLogged               bool
 	enqueuedEvents                  uint64
 	processedEvents                 uint64
-	askApproval                     func(*runtimechat.ApprovalRequest) (bool, error)
+	askApproval                     func(*runtimechat.ApprovalRequest, []string) (bool, error)
 	askQuestion                     func(prompt string, suggestions []string, required bool) (string, error)
 	approveTool                     func(ctx context.Context, sessionID, requestID string, allow bool) error
 	answerQuestion                  func(ctx context.Context, sessionID, questionID, answer string) error
@@ -182,10 +183,15 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			}
 			fmt.Print(ui.FormatUserPromptWithAttachments(len(session.ImagePaths)))
 		},
-		askApproval: func(approval *runtimechat.ApprovalRequest) (bool, error) {
+		askApproval: func(approval *runtimechat.ApprovalRequest, contextLines []string) (bool, error) {
 			lines := make([]string, 0, 4)
 			if notice := discardPendingInteractiveInputForPriorityPrompt(session, "审批提示"); notice != "" {
 				lines = append(lines, notice)
+			}
+			for _, line := range contextLines {
+				if line = strings.TrimSpace(line); line != "" {
+					lines = append(lines, "[approval] "+line)
+				}
 			}
 			toolName := ""
 			reason := ""
@@ -290,6 +296,7 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.latestRequestKey = ""
 	b.loggedToolCalls = make(map[string]struct{})
 	b.loggedToolResults = make(map[string]struct{})
+	b.toolCallStartedAt = make(map[string]time.Time)
 	b.toolExecutionCalls = nil
 	b.toolSummaryLogged = false
 	b.logMu.Unlock()
@@ -736,6 +743,10 @@ func runtimeEventTimestamp(event runtimeevents.Event) time.Time {
 	return time.Now().UTC()
 }
 
+func runtimeEventExplicitTimestamp(event runtimeevents.Event) time.Time {
+	return event.Timestamp
+}
+
 func runtimeEventDurationMs(start time.Time, end time.Time) int64 {
 	if start.IsZero() {
 		return 0
@@ -791,6 +802,61 @@ func runtimeToolExecutionSummaryCall(event runtimeevents.Event) aicliToolExecuti
 	return summary
 }
 
+func runtimeToolCallTimelineKey(event runtimeevents.Event, payload map[string]interface{}) string {
+	toolCallID := strings.TrimSpace(payloadStringValue(payload["tool_call_id"]))
+	if toolCallID == "" {
+		return ""
+	}
+	sessionID := firstNonEmptyChatValue(strings.TrimSpace(event.SessionID), payloadStringValue(payload["session_id"]))
+	traceID := firstNonEmptyChatValue(strings.TrimSpace(event.TraceID), payloadStringValue(payload["trace_id"]))
+	return strings.Join([]string{sessionID, traceID, toolCallID}, "\x00")
+}
+
+func (b *chatRuntimeEventBridge) enrichTimelineEvent(event runtimeevents.Event) runtimeevents.Event {
+	if b == nil {
+		return event
+	}
+	switch event.Type {
+	case runtimechat.EventToolStarted, "tool.requested", runtimechat.EventToolFinished, "tool.completed":
+	default:
+		return event
+	}
+	payload := cloneRuntimeEventLogPayload(runtimeToolTimelinePayload(event))
+	if payload == nil {
+		payload = make(map[string]interface{})
+	}
+	toolCallKey := runtimeToolCallTimelineKey(event, payload)
+	timestamp := runtimeEventExplicitTimestamp(event)
+	switch event.Type {
+	case runtimechat.EventToolStarted, "tool.requested":
+		if toolCallKey != "" && !timestamp.IsZero() {
+			b.renderMu.Lock()
+			if b.toolCallStartedAt == nil {
+				b.toolCallStartedAt = make(map[string]time.Time)
+			}
+			b.toolCallStartedAt[toolCallKey] = timestamp
+			b.renderMu.Unlock()
+		}
+	case runtimechat.EventToolFinished, "tool.completed":
+		if toolCallKey != "" && intPayloadValue(payload, "duration_ms") <= 0 && !timestamp.IsZero() {
+			var startedAt time.Time
+			b.renderMu.Lock()
+			if b.toolCallStartedAt != nil {
+				startedAt = b.toolCallStartedAt[toolCallKey]
+				delete(b.toolCallStartedAt, toolCallKey)
+			}
+			b.renderMu.Unlock()
+			if !startedAt.IsZero() {
+				if durationMs := runtimeEventDurationMs(startedAt, timestamp); durationMs > 0 {
+					payload["duration_ms"] = durationMs
+				}
+			}
+		}
+	}
+	event.Payload = payload
+	return event
+}
+
 func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b == nil || b.session == nil {
 		return
@@ -804,7 +870,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b.shouldSuppressLatePrimaryRunEvent(event) {
 		return
 	}
-	if isTeamLifecycleRuntimeEvent(event.Type) && strings.TrimSpace(event.SessionID) != "" && !b.isPrimarySessionEvent(event) {
+	if isTeamLifecycleRuntimeEvent(event.Type) && strings.TrimSpace(event.SessionID) != "" && !b.shouldAcceptTeamLifecycleRuntimeEvent(event) {
 		return
 	}
 	if b.handleAssistantReasoning(event) {
@@ -834,8 +900,9 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	}
 	renderedSomething := false
 	rendered := chatRuntimeTimelineEvent{}
+	timelineEvent := b.enrichTimelineEvent(event)
 	if !suppressApprovalTimeline {
-		rendered = renderChatRuntimeTimelineEvent(event)
+		rendered = renderChatRuntimeTimelineEvent(timelineEvent)
 		if rendered.Line == "" {
 			rendered = b.renderAsyncTeamSummaryFallback(event)
 		}
@@ -862,6 +929,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	case runtimechat.EventApprovalRequested:
 		requestID, _ := event.Payload["request_id"].(string)
 		approval := b.approvalRequestForEvent(event)
+		approvalContextLines := approvalRequestContextLines(event.Payload)
 		if grantKey := b.autoApprovalGrantKey(event.SessionID, approval); grantKey != "" && b.hasApprovalGrant(grantKey) {
 			if err := b.resolveApproval(context.Background(), event.SessionID, requestID, true); err != nil {
 				b.setRunError(err)
@@ -878,7 +946,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		if hint := b.approvalPromptHint(event.SessionID, approval); hint != "" && b.writeLine != nil {
 			b.writeLine(hint)
 		}
-		allowed, askErr := b.askApproval(approval)
+		allowed, askErr := b.askApproval(approval, approvalContextLines)
 		if askErr != nil {
 			b.setRunError(askErr)
 			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
@@ -1012,6 +1080,58 @@ func (b *chatRuntimeEventBridge) approvalRequestForEvent(event runtimeevents.Eve
 		ToolName: strings.TrimSpace(toolName),
 		Reason:   strings.TrimSpace(reason),
 	}
+}
+
+func approvalRequestContextLines(payload map[string]interface{}) []string {
+	if payload == nil {
+		return nil
+	}
+	lines := make([]string, 0, 2)
+	scopeParts := make([]string, 0, 4)
+	if teamID := truncateChatRuntimeText(payloadStringValue(payload["team_id"]), 80); teamID != "" {
+		scopeParts = append(scopeParts, "team="+teamID)
+	}
+	if taskID := truncateChatRuntimeText(payloadStringValue(payload["task_id"]), 80); taskID != "" {
+		scopeParts = append(scopeParts, "task="+taskID)
+	}
+	if teammateID := truncateChatRuntimeText(payloadStringValue(payload["teammate_id"]), 80); teammateID != "" {
+		scopeParts = append(scopeParts, "teammate="+teammateID)
+	} else if agentID := truncateChatRuntimeText(payloadStringValue(payload["agent_id"]), 80); agentID != "" {
+		scopeParts = append(scopeParts, "agent="+agentID)
+	}
+	if permissionMode := truncateChatRuntimeText(payloadStringValue(payload["permission_mode"]), 80); permissionMode != "" {
+		scopeParts = append(scopeParts, "permission_mode="+permissionMode)
+	}
+	if len(scopeParts) > 0 {
+		lines = append(lines, strings.Join(scopeParts, " "))
+	}
+
+	routeParts := make([]string, 0, 6)
+	if provider := truncateChatRuntimeText(payloadStringValue(payload["route_provider"]), 80); provider != "" {
+		routeParts = append(routeParts, "provider="+provider)
+	}
+	if model := truncateChatRuntimeText(payloadStringValue(payload["route_model"]), 80); model != "" {
+		routeParts = append(routeParts, "model="+model)
+	}
+	if effort := truncateChatRuntimeText(payloadStringValue(payload["route_reasoning_effort"]), 80); effort != "" {
+		routeParts = append(routeParts, "reasoning="+effort)
+	}
+	if source := truncateChatRuntimeText(payloadStringValue(payload["route_source"]), 80); source != "" {
+		routeParts = append(routeParts, "route_source="+source)
+	}
+	if payloadBoolValue(payload, "fallback_used") {
+		routeParts = append(routeParts, "fallback=true")
+	}
+	if fallbackReason := truncateChatRuntimeText(payloadStringValue(payload["fallback_reason"]), 80); fallbackReason != "" {
+		routeParts = append(routeParts, "fallback_reason="+fallbackReason)
+	}
+	if warnings := stringSliceValueAny(payload["route_warnings"]); len(warnings) > 0 {
+		routeParts = append(routeParts, "warnings="+strings.Join(warnings, ","))
+	}
+	if len(routeParts) > 0 {
+		lines = append(lines, strings.Join(routeParts, " "))
+	}
+	return lines
 }
 
 func showChatRuntimePriorityPrompt(session *ChatSession, lines []string, prompt string) (string, func(), bool) {
@@ -1709,6 +1829,28 @@ func isTeamLifecycleRuntimeEvent(eventType string) bool {
 	return strings.HasPrefix(eventType, "team.") || strings.HasPrefix(eventType, "task.")
 }
 
+func isTaskRouteResolvedRuntimeEvent(eventType string) bool {
+	return strings.EqualFold(strings.TrimSpace(eventType), team.TaskRouteResolvedEvent)
+}
+
+func (b *chatRuntimeEventBridge) shouldAcceptTeamLifecycleRuntimeEvent(event runtimeevents.Event) bool {
+	if b == nil {
+		return false
+	}
+	if b.isPrimarySessionEvent(event) {
+		return true
+	}
+	if !isTaskRouteResolvedRuntimeEvent(event.Type) {
+		return false
+	}
+	if b.session == nil || b.session.ActiveTeam == nil {
+		return false
+	}
+	activeTeamID := strings.TrimSpace(b.session.ActiveTeam.TeamID)
+	eventTeamID := strings.TrimSpace(payloadStringValue(event.Payload["team_id"]))
+	return activeTeamID != "" && eventTeamID == activeTeamID
+}
+
 func (b *chatRuntimeEventBridge) isTerminalTeam(teamID string) bool {
 	if b == nil || b.session == nil || b.session.LocalRuntimeHost == nil || b.session.LocalRuntimeHost.TeamStore == nil {
 		return false
@@ -1901,7 +2043,6 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 	case "tool.completed":
 		payload := runtimeToolTimelinePayload(event)
 		line := renderCompactToolCompletedWithPayload(firstNonEmptyChatValue(strings.TrimSpace(event.ToolName), payloadStringValue(payload["tool_name"])), "", payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), payloadStringValue(payload[toolresult.SourceKey]), chatToolSummaryLines(payload), payload)
-		line = appendCompactToolDirectory(line, payload)
 		rendered := []string{line}
 		if waitingLine := chatToolPostCommandHint(payload); waitingLine != "" {
 			rendered = append(rendered, waitingLine)
@@ -1912,7 +2053,7 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		line := fmt.Sprintf("[tool denied] %s", payloadStringValue(event.Payload["reason"]))
 		return chatRuntimeTimelineEvent{Line: line}
 	case runtimechat.EventApprovalRequested:
-		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[approval] %s", payloadStringValue(event.Payload["tool_name"]))}
+		return renderApprovalRequestedTimelineEvent(event)
 	case runtimechat.EventQuestionAsked:
 		return chatRuntimeTimelineEvent{Line: fmt.Sprintf("[question] %s", payloadStringValue(event.Payload["prompt"]))}
 	case runtimechat.EventMailboxReceived:
@@ -1938,6 +2079,8 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			line += " " + body
 		}
 		return chatRuntimeTimelineEvent{Line: line, DedupKey: "mailbox:" + messageID}
+	case team.TaskRouteResolvedEvent:
+		return renderTaskRouteResolvedTimelineEvent(event, teamID)
 	case "task.started", "task.completed", "task.failed", "task.blocked", "team.task.completed", "team.task.failed", "team.task.blocked":
 		action := chatRuntimeTaskAction(event.Type)
 		if action == "started" {
@@ -3264,6 +3407,17 @@ func appendCompactToolDirectory(line string, payload map[string]interface{}) str
 	if line == "" || payload == nil {
 		return line
 	}
+	extras := compactToolContextLines(payload)
+	if len(extras) == 0 {
+		return line
+	}
+	return line + "\n" + strings.Join(extras, "\n")
+}
+
+func compactToolContextLines(payload map[string]interface{}) []string {
+	if payload == nil {
+		return nil
+	}
 	extras := make([]string, 0, 2)
 	if workdir := truncateChatRuntimeText(payloadStringValue(payload["workdir"]), 160); workdir != "" {
 		extras = append(extras, "  workdir: "+workdir)
@@ -3274,9 +3428,9 @@ func appendCompactToolDirectory(line string, payload map[string]interface{}) str
 		extras = append(extras, "  shell: "+shell)
 	}
 	if len(extras) == 0 {
-		return line
+		return nil
 	}
-	return line + "\n" + strings.Join(extras, "\n")
+	return extras
 }
 
 func chatToolShellDisplay(payload map[string]interface{}) string {
@@ -3532,6 +3686,69 @@ func renderSubagentCompletedTimelineEvent(event runtimeevents.Event) string {
 		parts = append(parts, "warnings="+strings.Join(warnings, ","))
 	}
 	return strings.Join(parts, " ")
+}
+
+func renderTaskRouteResolvedTimelineEvent(event runtimeevents.Event, teamID string) chatRuntimeTimelineEvent {
+	payload := event.Payload
+	taskID := firstNonEmptyChatValue(payloadStringValue(payload["task_id"]), "?")
+	assignee := firstNonEmptyChatValue(payloadStringValue(payload["assignee"]), payloadStringValue(payload["agent_id"]))
+	parts := []string{fmt.Sprintf("[task route] resolved %s", taskID)}
+	if assignee != "" {
+		parts = append(parts, "@"+assignee)
+	}
+	if difficulty := strings.TrimSpace(payloadStringValue(payload["difficulty"])); difficulty != "" {
+		parts = append(parts, "difficulty="+difficulty)
+	}
+	if provider := strings.TrimSpace(payloadStringValue(payload["route_provider"])); provider != "" {
+		parts = append(parts, "provider="+provider)
+	}
+	if model := strings.TrimSpace(payloadStringValue(payload["route_model"])); model != "" {
+		parts = append(parts, "model="+model)
+	}
+	if effort := strings.TrimSpace(payloadStringValue(payload["route_reasoning_effort"])); effort != "" {
+		parts = append(parts, "reasoning="+effort)
+	}
+	if source := strings.TrimSpace(payloadStringValue(payload["route_source"])); source != "" {
+		parts = append(parts, "route_source="+source)
+	}
+	attempt := intPayloadValue(payload, "route_attempt")
+	if attempt > 0 {
+		parts = append(parts, fmt.Sprintf("attempt=%d", attempt))
+	}
+	if payloadBoolValue(payload, "disabled") {
+		parts = append(parts, "disabled=true")
+	}
+	if payloadBoolValue(payload, "strict") {
+		parts = append(parts, "strict=true")
+	}
+	if payloadBoolValue(payload, "fallback_used") || payloadBoolValue(payload, "fallback") {
+		parts = append(parts, "fallback=true")
+	}
+	if reason := strings.TrimSpace(payloadStringValue(payload["fallback_reason"])); reason != "" {
+		parts = append(parts, "fallback_reason="+truncateChatRuntimeText(reason, 80))
+	}
+	if warnings := stringSliceValueAny(payload["route_warnings"]); len(warnings) > 0 {
+		parts = append(parts, "warnings="+strings.Join(warnings, ","))
+	}
+	if routeError := strings.TrimSpace(payloadStringValue(payload["route_error"])); routeError != "" {
+		parts = append(parts, "error="+truncateChatRuntimeText(routeError, 120))
+	}
+	return chatRuntimeTimelineEvent{
+		Line:     strings.Join(parts, " "),
+		DedupKey: fmt.Sprintf("%s:%s:%s:%d", team.TaskRouteResolvedEvent, teamID, taskID, attempt),
+	}
+}
+
+func renderApprovalRequestedTimelineEvent(event runtimeevents.Event) chatRuntimeTimelineEvent {
+	payload := event.Payload
+	toolName := firstNonEmptyChatValue(payloadStringValue(payload["tool_name"]), "tool")
+	lines := []string{fmt.Sprintf("[approval] %s", toolName)}
+	for _, line := range approvalRequestContextLines(payload) {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, "  "+line)
+		}
+	}
+	return chatRuntimeTimelineEvent{Line: strings.Join(lines, "\n")}
 }
 
 func chatToolPostCommandHint(payload map[string]interface{}) string {

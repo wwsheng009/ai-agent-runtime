@@ -154,6 +154,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	claims := team.NewPathClaimManager(host.TeamStore, workspaceRoot)
 	host.TeamClaims = claims
 	host.Orchestrator = team.NewOrchestrator(host.TeamStore, claims, nil)
+	host.Orchestrator.ExpertConcurrencyLimit = localChatTeamExpertConcurrencyLimit(session)
 	if globalMailboxStore != nil {
 		host.Orchestrator.MailboxWake = globalMailboxStore
 	}
@@ -163,10 +164,12 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		host.Orchestrator.Mailbox = mailbox
 		host.Orchestrator.Dispatcher = host.ActorRegistry
 		host.Orchestrator.Runner = &team.TeammateRunner{
-			Sessions:     host.ActorRegistry,
-			AgentControl: host.ActorRegistry,
-			Mailbox:      mailbox,
-			Context:      team.NewContextBuilder(host.TeamStore),
+			Sessions:      host.ActorRegistry,
+			AgentControl:  host.ActorRegistry,
+			Mailbox:       mailbox,
+			Context:       team.NewContextBuilder(host.TeamStore),
+			RouteResolver: newLocalTeamTaskRouteResolver(host),
+			RouteAudit:    newLocalTeamTaskRouteAuditSink(host),
 		}
 		host.Orchestrator.LeadPlanner = &team.LeadPlanner{
 			Sessions:    host.ActorRegistry,
@@ -1126,15 +1129,18 @@ func (h *localChatRuntimeHost) dispatchTeamLifecycleEvent(event team.TeamEvent, 
 		h.deliverTeamLifecycleMailbox(context.Background(), sessionID, event)
 		h.deliverTeamTaskLifecycleMailbox(context.Background(), event)
 	}
-	if h.isLifecycleEventForBaseSession(sessionID) {
+	isBaseLifecycleSession := h.isLifecycleEventForBaseSession(sessionID)
+	if isBaseLifecycleSession {
 		if lifecycle := h.teamLifecycleService(); lifecycle != nil {
 			lifecycle.Apply(runtimeEvent)
 		}
+	}
+	if isBaseLifecycleSession || strings.EqualFold(strings.TrimSpace(event.Type), team.TaskRouteResolvedEvent) {
 		if h.EventBus != nil {
 			h.EventBus.Publish(runtimeEvent)
 		}
 	}
-	if h.BaseSession != nil && h.isLifecycleEventForBaseSession(sessionID) {
+	if h.BaseSession != nil && isBaseLifecycleSession {
 		warnIfChatSessionSyncFails(h.BaseSession, "team lifecycle sync", syncAmbientTeamLifecycleState(h.BaseSession))
 	}
 }

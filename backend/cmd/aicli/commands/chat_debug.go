@@ -319,6 +319,36 @@ func parseChatAgentRoutingTestOptions(session *ChatSession, fields []string) (do
 			return strings.TrimSpace(fields[i]), nil
 		}
 		switch {
+		case lower == "--workflow" || strings.HasPrefix(lower, "--workflow="):
+			value, err := valueFor("--workflow")
+			if err != nil {
+				return opts, err
+			}
+			opts.Workflow = value
+		case lower == "--team-id" || strings.HasPrefix(lower, "--team-id="):
+			value, err := valueFor("--team-id")
+			if err != nil {
+				return opts, err
+			}
+			opts.TeamID = value
+		case lower == "--teammate" || strings.HasPrefix(lower, "--teammate="):
+			value, err := valueFor("--teammate")
+			if err != nil {
+				return opts, err
+			}
+			opts.Teammate = value
+		case lower == "--task" || strings.HasPrefix(lower, "--task="):
+			value, err := valueFor("--task")
+			if err != nil {
+				return opts, err
+			}
+			opts.TaskID = value
+		case lower == "--task-id" || strings.HasPrefix(lower, "--task-id="):
+			value, err := valueFor("--task-id")
+			if err != nil {
+				return opts, err
+			}
+			opts.TaskID = value
 		case lower == "--role" || strings.HasPrefix(lower, "--role="):
 			value, err := valueFor("--role")
 			if err != nil {
@@ -390,6 +420,13 @@ func parseChatAgentRoutingTestOptions(session *ChatSession, fields []string) (do
 				return opts, fmt.Errorf("--read-only 必须是 true 或 false")
 			}
 			opts.ReadOnly = readOnly
+		case lower == "--write-path" || strings.HasPrefix(lower, "--write-path="):
+			value, err := valueFor("--write-path")
+			if err != nil {
+				return opts, err
+			}
+			opts.WritePaths = append(opts.WritePaths, value)
+			opts.ReadOnly = false
 		case lower == "--write" || lower == "--mutating":
 			opts.ReadOnly = false
 		default:
@@ -400,7 +437,7 @@ func parseChatAgentRoutingTestOptions(session *ChatSession, fields []string) (do
 }
 
 func printChatAgentRoutingUsage() {
-	fmt.Println("用法: /agents routing test --role <role> --difficulty <easy|normal|hard|expert> [--goal <text>] [--provider <name>] [--model <model>] [--reasoning-effort <value>] [--read-only=true]")
+	fmt.Println("用法: /agents routing test --role <role> --difficulty <easy|normal|hard|expert> [--workflow spawn_team] [--team-id <id>] [--teammate <id>] [--task <id>] [--write-path <path>] [--goal <text>] [--provider <name>] [--model <model>] [--reasoning-effort <value>] [--read-only=true]")
 }
 
 func sendChatAgentMessageCommand(session *ChatSession, argument string, trigger bool) error {
@@ -1962,6 +1999,36 @@ func chatTimelineEventLine(event team.TeamEventRecord) string {
 	}
 	if via := payloadStringValue(payload["via"]); via != "" {
 		parts = append(parts, "via="+via)
+	}
+	if difficulty := payloadStringValue(payload["difficulty"]); difficulty != "" {
+		parts = append(parts, "difficulty="+difficulty)
+	}
+	if provider := payloadStringValue(payload["route_provider"]); provider != "" {
+		parts = append(parts, "provider="+provider)
+	}
+	if model := payloadStringValue(payload["route_model"]); model != "" {
+		parts = append(parts, "model="+model)
+	}
+	if effort := payloadStringValue(payload["route_reasoning_effort"]); effort != "" {
+		parts = append(parts, "reasoning="+effort)
+	}
+	if source := payloadStringValue(payload["route_source"]); source != "" {
+		parts = append(parts, "route_source="+source)
+	}
+	if payloadBoolValue(payload, "fallback_used") {
+		parts = append(parts, "fallback_used=true")
+	}
+	if fallbackReason := payloadStringValue(payload["fallback_reason"]); fallbackReason != "" {
+		parts = append(parts, "fallback_reason="+fallbackReason)
+	}
+	if warnings := stringSliceValueAny(payload["route_warnings"]); len(warnings) > 0 {
+		parts = append(parts, "warnings="+strings.Join(warnings, ","))
+	}
+	if attempt := intPayloadValue(payload, "route_attempt"); attempt > 0 {
+		parts = append(parts, fmt.Sprintf("attempt=%d", attempt))
+	}
+	if routeError := payloadStringValue(payload["route_error"]); routeError != "" {
+		parts = append(parts, "error="+routeError)
 	}
 	if _, ok := payload["success"]; ok {
 		parts = append(parts, "success="+strconv.FormatBool(payloadBoolValue(payload, "success")))

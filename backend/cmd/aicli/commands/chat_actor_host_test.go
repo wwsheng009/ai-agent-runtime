@@ -2851,6 +2851,31 @@ func TestLocalChatRuntimeHost_DispatchTeamLifecycleEventUsesTeamLeadSession(t *t
 	}
 
 	host.dispatchTeamLifecycleEvent(team.TeamEvent{
+		Type:   team.TaskRouteResolvedEvent,
+		TeamID: "team-old",
+		Payload: map[string]interface{}{
+			"task_id":        "task-old-route",
+			"route_provider": "openai",
+			"route_model":    "gpt-test",
+		},
+	}, true)
+
+	oldEvents, err = eventStore.ListEvents(context.Background(), "old-session", 0, 10)
+	if err != nil {
+		t.Fatalf("ListEvents old after route event: %v", err)
+	}
+	if len(oldEvents) != 2 || oldEvents[1].Type != team.TaskRouteResolvedEvent || oldEvents[1].SessionID != "old-session" {
+		t.Fatalf("expected foreign route event persisted to old lead session, got %+v", oldEvents)
+	}
+	if len(lifecycle.applied) != 0 {
+		t.Fatalf("expected foreign route event not to apply to current lifecycle, got %+v", lifecycle.applied)
+	}
+	recent := host.EventBus.Recent(10)
+	if len(recent) != 1 || recent[0].Type != team.TaskRouteResolvedEvent || recent[0].SessionID != "old-session" {
+		t.Fatalf("expected foreign route event published to runtime bus once, got %+v", recent)
+	}
+
+	host.dispatchTeamLifecycleEvent(team.TeamEvent{
 		Type:   "task.completed",
 		TeamID: "team-current",
 		Payload: map[string]interface{}{

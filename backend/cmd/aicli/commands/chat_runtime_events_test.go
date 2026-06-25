@@ -280,10 +280,10 @@ func TestRenderSharedChatToolEvent_AppendsShellContext(t *testing.T) {
 	})
 
 	want := strings.Join([]string{
-		"• Ran git status",
-		"  On branch main",
+		"• Completed git status",
 		"  workdir: E:/projects/ai/ai-agent-runtime",
 		`  shell: pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
+		"  On branch main",
 	}, "\n")
 	if got != want {
 		t.Fatalf("unexpected shared chat tool render: %q", got)
@@ -311,7 +311,7 @@ func TestRenderSharedChatToolEvent_RendersTodosListAndUpdateState(t *testing.T) 
 	})
 
 	want := strings.Join([]string{
-		"• Ran todos todos=[3]",
+		"• Completed todos todos=[3]",
 		"  任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
 		"  任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
 		"  当前任务列表:",
@@ -342,7 +342,7 @@ func TestRenderChatRuntimeEvent_RendersTodosListFromEventToolName(t *testing.T) 
 	})
 
 	want := strings.Join([]string{
-		"• Ran todos todos=[3]",
+		"• Completed todos todos=[3]",
 		"  任务列表已更新: 2 待处理, 1 进行中, 0 已完成",
 		"  任务列表更新状态: 新增 3, 状态变更 0, 保持 0, 移除 0",
 		"  当前任务列表:",
@@ -505,7 +505,7 @@ func TestRenderSharedChatToolEvent_DoesNotTreatShellDiffAsEdit(t *testing.T) {
 	if strings.Contains(got, "• Edited app.go") {
 		t.Fatalf("expected shell diff to remain tool output, got:\n%s", got)
 	}
-	if !strings.Contains(got, "• Ran git diff") {
+	if !strings.Contains(got, "• Completed git diff") {
 		t.Fatalf("expected shell command render, got:\n%s", got)
 	}
 }
@@ -724,7 +724,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"summary_lines": []interface{}{"目录: src", "📁 a/ · 📁 b/", "统计: 0 个文件, 2 个目录"},
 		},
 	}); got != strings.Join([]string{
-		"• Ran ls path=src",
+		"• Completed ls path=src",
 		"  目录: src",
 		"  📁 a/ · 📁 b/",
 		"  统计: 0 个文件, 2 个目录",
@@ -755,6 +755,27 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:     "tool.completed",
+		ToolName: "edit",
+		Payload: map[string]interface{}{
+			"arg_preview":               "file_path=sample.txt",
+			"duration_ms":               250,
+			"render_output_format":      "markdown",
+			"render_output_untruncated": true,
+			"render_output":             "updated\nok",
+			"workdir":                   "E:/projects/ai/ai-agent-runtime",
+			"shell_display":             "pwsh",
+		},
+	}); got != strings.Join([]string{
+		"• Completed edit file_path=sample.txt in 250ms",
+		"  workdir: E:/projects/ai/ai-agent-runtime",
+		"  shell: pwsh",
+		"  updated",
+		"  ok",
+	}, "\n") {
+		t.Fatalf("unexpected markdown tool context render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
 		ToolName: "execute_shell_command",
 		Payload: map[string]interface{}{
 			"command_text":  "git status",
@@ -763,10 +784,24 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"error":         "exit status 128",
 		},
 	}); got != strings.Join([]string{
-		"• Ran git status",
+		"• Failed git status",
 		"  failed: exit status 128",
 	}, "\n") {
 		t.Fatalf("unexpected failed tool render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "execute_shell_command",
+		Payload: map[string]interface{}{
+			"command_text":  "git status",
+			"duration_ms":   1500,
+			"summary_lines": []interface{}{"On branch main"},
+		},
+	}); got != strings.Join([]string{
+		"• Completed git status in 1.5s",
+		"  On branch main",
+	}, "\n") {
+		t.Fatalf("unexpected completed tool duration render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type:     "tool.completed",
@@ -778,10 +813,10 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"summary_lines": []interface{}{"On branch main"},
 		},
 	}); got != strings.Join([]string{
-		"• Ran git status",
-		"  On branch main",
+		"• Completed git status",
 		"  workdir: E:/projects/ai/ai-agent-runtime",
 		`  shell: pwsh (C:\Program Files\PowerShell\7\pwsh.exe)`,
+		"  On branch main",
 	}, "\n") {
 		t.Fatalf("unexpected completed tool workdir render: %q", got)
 	}
@@ -794,7 +829,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"summary_lines": []interface{}{"Tool returned no output."},
 		},
 	}); got != strings.Join([]string{
-		"• Ran go build -o .\\aicli-cachetest.exe .\\cmd\\aicli",
+		"• Completed go build -o .\\aicli-cachetest.exe .\\cmd\\aicli",
 		"  (no output)",
 	}, "\n") {
 		t.Fatalf("unexpected no-output shell tool render: %q", got)
@@ -808,7 +843,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"awaiting_model": true,
 		},
 	}); got != strings.Join([]string{
-		"• Ran web_search query=天气预报",
+		"• Completed web_search query=天气预报",
 		"  返回 10 条结果",
 	}, "\n") {
 		t.Fatalf("unexpected tool render: %q", got)
@@ -821,7 +856,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"summary_lines": []interface{}{"server=docs resources=12", "next_cursor=cursor-1", "warning=truncated"},
 		},
 	}); got != strings.Join([]string{
-		"• Ran [meta] list_mcp_resources",
+		"• Completed [meta] list_mcp_resources",
 		"  server=docs resources=12",
 		"  next_cursor=cursor-1",
 	}, "\n") {
@@ -836,7 +871,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"summary_lines": []interface{}{"result 1", "result 2", "result 3"},
 		},
 	}); got != strings.Join([]string{
-		"• Ran [mcp] remote_search query=golang tools",
+		"• Completed [mcp] remote_search query=golang tools",
 		"  result 1",
 		"  result 2",
 	}, "\n") {
@@ -851,7 +886,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"summary_lines": []interface{}{"job_id=job-1", "status=queued", "restart_policy=fail"},
 		},
 	}); got != strings.Join([]string{
-		"• Ran [broker] background_task command=git status",
+		"• Completed [broker] background_task command=git status",
 		"  job_id=job-1",
 		"  status=queued",
 	}, "\n") {
@@ -865,6 +900,27 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: "task.started", Payload: map[string]interface{}{"task_id": "task-1", "assignee": "planner"}}); got != "" {
 		t.Fatalf("unexpected task render: %q", got)
+	}
+	if got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: team.TaskRouteResolvedEvent,
+		Payload: map[string]interface{}{
+			"team_id":                "team-1",
+			"task_id":                "task-1",
+			"assignee":               "mate-1",
+			"difficulty":             "hard",
+			"route_provider":         "remote",
+			"route_model":            "strong-model",
+			"route_reasoning_effort": "high",
+			"route_source":           "difficulty_level",
+			"route_attempt":          2,
+			"strict":                 true,
+			"fallback_used":          true,
+			"fallback_reason":        "provider_fallback_parent",
+			"route_warnings":         []interface{}{"capability_unknown"},
+			"route_error":            "provider unavailable",
+		},
+	}); got != "[task route] resolved task-1 @mate-1 difficulty=hard provider=remote model=strong-model reasoning=high route_source=difficulty_level attempt=2 strict=true fallback=true fallback_reason=provider_fallback_parent warnings=capability_unknown error=provider unavailable" {
+		t.Fatalf("unexpected task route render: %q", got)
 	}
 	if got := renderChatRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventMailboxReceived, Payload: map[string]interface{}{"team_id": "team-1", "message_id": "msg-1", "from_agent": "planner", "to_agent": "lead", "kind": "progress", "task_id": "task-1", "body": "Started task: Draft"}}); got != "[progress] planner -> lead task-1 Started task: Draft" {
 		t.Fatalf("unexpected mailbox render: %q", got)
@@ -1266,6 +1322,57 @@ func TestChatRuntimeEvents_DedupesStableTimelineEventsPerRun(t *testing.T) {
 	if len(rendered) != 1 {
 		t.Fatalf("expected one rendered line after dedupe, got %d (%v)", len(rendered), rendered)
 	}
+}
+
+func TestChatRuntimeEvents_RendersActiveTeamTaskRouteResolvedTimeline(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "current-session"},
+		ActiveTeam:     &chatTeamBinding{TeamID: "team-active"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "task.failed",
+		SessionID: "old-session",
+		Payload: map[string]interface{}{
+			"team_id": "team-old",
+			"task_id": "task-old",
+			"summary": "stale failure",
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      team.TaskRouteResolvedEvent,
+		SessionID: "old-session",
+		Payload: map[string]interface{}{
+			"team_id":        "team-old",
+			"task_id":        "task-route",
+			"assignee":       "mate-1",
+			"route_provider": "openai",
+			"route_model":    "gpt-test",
+			"route_attempt":  1,
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      team.TaskRouteResolvedEvent,
+		SessionID: "old-session",
+		Payload: map[string]interface{}{
+			"team_id":        "team-active",
+			"task_id":        "task-route",
+			"assignee":       "mate-1",
+			"route_provider": "openai",
+			"route_model":    "gpt-test",
+			"route_attempt":  1,
+		},
+	})
+
+	require.Equal(t, []string{
+		"[task route] resolved task-route @mate-1 provider=openai model=gpt-test attempt=1",
+	}, rendered)
 }
 
 func TestChatRuntimeEvents_RendersRepeatedLLMRequestStartedForDifferentSteps(t *testing.T) {
@@ -1767,6 +1874,150 @@ func TestChatRuntimeEvents_DoesNotRedrawPromptWhileRunActive(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeEvents_InjectsToolDurationFromRequestedAndCompletedTimestamps(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+
+	base := time.Date(2026, 6, 25, 15, 0, 0, 0, time.UTC)
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "lead-session",
+		ToolName:  "execute_shell_command",
+		Timestamp: base,
+		Payload: map[string]interface{}{
+			"tool_call_id": "call-1",
+			"command_text": "git diff --stat",
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.completed",
+		SessionID: "lead-session",
+		ToolName:  "execute_shell_command",
+		Timestamp: base.Add(1500 * time.Millisecond),
+		Payload: map[string]interface{}{
+			"tool_call_id": "call-1",
+			"command_text": "git diff --stat",
+			"summary_lines": []interface{}{
+				"changed 2 files",
+			},
+		},
+	})
+
+	if !containsAllChatTimelineLines(rendered,
+		"• Running git diff --stat",
+		"• Completed git diff --stat in 1.5s",
+		"changed 2 files",
+	) {
+		t.Fatalf("expected completed tool timeline with injected duration, got %v", rendered)
+	}
+}
+
+func TestChatRuntimeEvents_DoesNotInjectToolDurationWithoutEventTimestamps(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "lead-session",
+		ToolName:  "execute_shell_command",
+		Payload: map[string]interface{}{
+			"tool_call_id": "call-1",
+			"command_text": "git diff --stat",
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.completed",
+		SessionID: "lead-session",
+		ToolName:  "execute_shell_command",
+		Payload: map[string]interface{}{
+			"tool_call_id":  "call-1",
+			"command_text":  "git diff --stat",
+			"summary_lines": []interface{}{"changed 2 files"},
+		},
+	})
+
+	if containsAllChatTimelineLines(rendered,
+		"• Completed git diff --stat in",
+	) {
+		t.Fatalf("expected no synthetic duration without explicit timestamps, got %v", rendered)
+	}
+	if !containsAllChatTimelineLines(rendered,
+		"• Completed git diff --stat",
+		"changed 2 files",
+	) {
+		t.Fatalf("expected completed tool timeline without duration, got %v", rendered)
+	}
+}
+
+func TestChatRuntimeEvents_ToolDurationIsScopedBySessionAndTrace(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	var rendered []string
+	bridge.writeLine = func(line string) {
+		rendered = append(rendered, line)
+	}
+
+	base := time.Date(2026, 6, 25, 15, 0, 0, 0, time.UTC)
+	bridge.BeginRun()
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "lead-session",
+		TraceID:   "trace-lead",
+		ToolName:  "execute_shell_command",
+		Timestamp: base,
+		Payload: map[string]interface{}{
+			"tool_call_id": "call-1",
+			"command_text": "git diff --stat",
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.requested",
+		SessionID: "teammate-session",
+		TraceID:   "trace-mate",
+		ToolName:  "execute_shell_command",
+		Timestamp: base.Add(100 * time.Millisecond),
+		Payload: map[string]interface{}{
+			"tool_call_id": "call-1",
+			"command_text": "git status",
+		},
+	})
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      "tool.completed",
+		SessionID: "lead-session",
+		TraceID:   "trace-lead",
+		ToolName:  "execute_shell_command",
+		Timestamp: base.Add(1500 * time.Millisecond),
+		Payload: map[string]interface{}{
+			"tool_call_id":  "call-1",
+			"command_text":  "git diff --stat",
+			"summary_lines": []interface{}{"changed 2 files"},
+		},
+	})
+
+	if !containsAllChatTimelineLines(rendered,
+		"• Completed git diff --stat in 1.5s",
+		"changed 2 files",
+	) {
+		t.Fatalf("expected lead tool duration to use lead start event, got %v", rendered)
+	}
+}
+
 func TestChatRuntimeEvents_IgnoresLatePrimaryAssistantEventsAfterRunEnds(t *testing.T) {
 	session := &ChatSession{
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
@@ -2054,6 +2305,51 @@ func TestChatRuntimeEvents_ApprovalPromptHintForMutatingShell(t *testing.T) {
 	if !strings.Contains(hint, "不参与 approval-reuse") {
 		t.Fatalf("expected non-reusable hint, got %q", hint)
 	}
+}
+
+func TestChatRuntimeEvents_ApprovalRequestContextLinesIncludesTeamRouteAndPermission(t *testing.T) {
+	lines := approvalRequestContextLines(map[string]interface{}{
+		"team_id":                "team-approval",
+		"task_id":                "task-approval",
+		"teammate_id":            "mate-approval",
+		"permission_mode":        "default",
+		"route_provider":         "openai",
+		"route_model":            "gpt-test",
+		"route_reasoning_effort": "high",
+		"route_source":           "difficulty_level",
+		"fallback_used":          true,
+		"fallback_reason":        "primary unavailable",
+		"route_warnings":         []interface{}{"provider_fallback_parent"},
+	})
+
+	require.Equal(t, []string{
+		"team=team-approval task=task-approval teammate=mate-approval permission_mode=default",
+		"provider=openai model=gpt-test reasoning=high route_source=difficulty_level fallback=true fallback_reason=primary unavailable warnings=provider_fallback_parent",
+	}, lines)
+}
+
+func TestChatRuntimeEvents_RenderApprovalRequestedIncludesTeamRouteContext(t *testing.T) {
+	got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: runtimechat.EventApprovalRequested,
+		Payload: map[string]interface{}{
+			"tool_name":              "execute_shell_command",
+			"team_id":                "team-approval",
+			"task_id":                "task-approval",
+			"teammate_id":            "mate-approval",
+			"permission_mode":        "default",
+			"route_provider":         "openai",
+			"route_model":            "gpt-test",
+			"route_reasoning_effort": "high",
+			"route_source":           "difficulty_level",
+			"route_warnings":         []string{"provider_fallback_parent"},
+		},
+	})
+
+	require.Equal(t, strings.Join([]string{
+		"[approval] execute_shell_command",
+		"  team=team-approval task=task-approval teammate=mate-approval permission_mode=default",
+		"  provider=openai model=gpt-test reasoning=high route_source=difficulty_level warnings=provider_fallback_parent",
+	}, "\n"), got)
 }
 
 func TestApprovalRequestPreviewLines_ShellCommand(t *testing.T) {
@@ -2707,6 +3003,7 @@ func TestActorExecutor_ApprovalThroughCLIBridgeExecutesToolOnceAndResumes(t *tes
 		SessionDir:       dir,
 		LocalRuntimeHost: host,
 		ChatExecutor:     newAICLIActorChatExecutor(),
+		PermissionMode:   runtimepolicy.ModeDefault,
 		ActiveTeam:       &chatTeamBinding{TeamID: "team-approval", AgentID: "mate-approval", TaskID: "task-approval"},
 	}
 	host.BaseSession = session
@@ -2720,7 +3017,7 @@ func TestActorExecutor_ApprovalThroughCLIBridgeExecutesToolOnceAndResumes(t *tes
 		rendered.WriteString(line)
 		rendered.WriteString("\n")
 	}
-	bridge.askApproval = func(approval *runtimechat.ApprovalRequest) (bool, error) {
+	bridge.askApproval = func(approval *runtimechat.ApprovalRequest, contextLines []string) (bool, error) {
 		approvalCalls.Add(1)
 		if approval == nil || approval.ToolName != "team_echo" {
 			t.Fatalf("unexpected approval request: %+v", approval)
@@ -2728,6 +3025,7 @@ func TestActorExecutor_ApprovalThroughCLIBridgeExecutesToolOnceAndResumes(t *tes
 		if approval.Reason != "manual approval" {
 			t.Fatalf("unexpected approval reason: %q", approval.Reason)
 		}
+		require.Contains(t, contextLines, "team=team-approval task=task-approval teammate=mate-approval permission_mode=default")
 		return true, nil
 	}
 	session.RuntimeEventBridge = bridge
@@ -2988,6 +3286,7 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 		LocalRuntimeHost:  host,
 		ChatExecutor:      newAICLIActorChatExecutor(),
 		ApprovalReuseMode: chatApprovalReuseTeamReadOnlyShell,
+		PermissionMode:    runtimepolicy.ModeDefault,
 		ActiveTeam:        &chatTeamBinding{TeamID: "team-approval", AgentID: "lead", TaskID: "task-approval"},
 	}
 	host.BaseSession = session
@@ -3001,7 +3300,7 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 		rendered.WriteString(line)
 		rendered.WriteString("\n")
 	}
-	bridge.askApproval = func(approval *runtimechat.ApprovalRequest) (bool, error) {
+	bridge.askApproval = func(approval *runtimechat.ApprovalRequest, contextLines []string) (bool, error) {
 		approvalCalls.Add(1)
 		if approval == nil {
 			t.Fatal("expected approval request")
@@ -3009,6 +3308,7 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 		if approval.Reason != "manual approval" {
 			t.Fatalf("unexpected approval reason: %q", approval.Reason)
 		}
+		require.Contains(t, contextLines, "team=team-approval task=task-approval teammate=lead permission_mode=default")
 		return true, nil
 	}
 	session.RuntimeEventBridge = bridge

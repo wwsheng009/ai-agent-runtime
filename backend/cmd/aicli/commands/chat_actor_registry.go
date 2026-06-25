@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -30,6 +32,10 @@ func newLocalActorRegistry(host *localChatRuntimeHost) *localActorRegistry {
 }
 
 func (r *localActorRegistry) SubmitPrompt(ctx context.Context, sessionID, prompt string, runMeta *team.RunMeta) (*team.SessionResult, error) {
+	return r.submitPrompt(ctx, sessionID, prompt, runMeta, nil)
+}
+
+func (r *localActorRegistry) submitPrompt(ctx context.Context, sessionID, prompt string, runMeta *team.RunMeta, routeOverride *runtimechat.RunRouteOverride) (*team.SessionResult, error) {
 	if r == nil || r.Host == nil || r.Host.SessionHub == nil {
 		return nil, fmt.Errorf("session hub not configured")
 	}
@@ -40,7 +46,12 @@ func (r *localActorRegistry) SubmitPrompt(ctx context.Context, sessionID, prompt
 	if err != nil {
 		return nil, err
 	}
-	result, err := actor.SubmitPrompt(ctx, prompt, runMeta)
+	var result *agent.Result
+	if routeOverride != nil {
+		result, err = actor.SubmitPrompt(ctx, prompt, runMeta, runtimechat.SubmitPromptOption{RouteOverride: routeOverride})
+	} else {
+		result, err = actor.SubmitPrompt(ctx, prompt, runMeta)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -64,9 +75,29 @@ func (r *localActorRegistry) TriggerTask(ctx context.Context, request team.TaskT
 	}
 	_, _ = team.AppendTaskDispatchRequested(ctx, store, request)
 	_ = r.deliverAgentMailboxEvent(ctx, request.SessionID, team.BuildTaskAssignmentMailboxMessage(request))
-	result, err := r.SubmitPrompt(ctx, request.SessionID, request.Prompt, request.RunMeta)
-	_, _ = team.AppendTaskDispatchCompleted(ctx, store, request, result, err)
+	_, _ = team.AppendTaskDispatchStarted(ctx, store, request)
+	runCtx := team.DetachedTaskExecutionContext(ctx)
+	result, err := r.submitPrompt(runCtx, request.SessionID, request.Prompt, request.RunMeta, localChatRunRouteOverrideFromTeamRoute(request.Route))
+	_, _ = team.AppendTaskDispatchCompleted(runCtx, store, request, result, err)
 	return result, err
+}
+
+func localChatRunRouteOverrideFromTeamRoute(route *team.TaskExecutionRoute) *runtimechat.RunRouteOverride {
+	if route == nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(route.Source), modelrouting.SourceDisabled) {
+		return nil
+	}
+	override := &runtimechat.RunRouteOverride{
+		Provider:        strings.TrimSpace(route.Provider),
+		Model:           strings.TrimSpace(route.Model),
+		ReasoningEffort: strings.TrimSpace(route.ReasoningEffort),
+	}
+	if override.Provider == "" && override.Model == "" && override.ReasoningEffort == "" {
+		return nil
+	}
+	return override
 }
 
 func (r *localActorRegistry) DispatchTeamMailboxMessage(ctx context.Context, message team.MailMessage) error {
@@ -301,9 +332,16 @@ func (r *localActorRegistry) resolveSpawnAgentRoute(parentSession *runtimechat.S
 }
 
 func (r *localActorRegistry) spawnAgentParentDefaults(parentSession *runtimechat.Session) modelrouting.ParentDefaults {
+	if r == nil {
+		return localChatRouteParentDefaults(nil, parentSession)
+	}
+	return localChatRouteParentDefaults(r.Host, parentSession)
+}
+
+func localChatRouteParentDefaults(host *localChatRuntimeHost, parentSession *runtimechat.Session) modelrouting.ParentDefaults {
 	parent := modelrouting.ParentDefaults{}
-	if r != nil && r.Host != nil && r.Host.BaseSession != nil {
-		base := r.Host.BaseSession
+	if host != nil && host.BaseSession != nil {
+		base := host.BaseSession
 		parent.Provider = strings.TrimSpace(base.ProviderName)
 		parent.Model = strings.TrimSpace(base.Model)
 		parent.ReasoningEffort = strings.TrimSpace(base.ReasoningEffort)
@@ -325,8 +363,8 @@ func (r *localActorRegistry) spawnAgentParentDefaults(parentSession *runtimechat
 			parent.ReasoningEffort = effort
 		}
 	}
-	if r != nil && r.Host != nil && r.Host.Bootstrap != nil && r.Host.Bootstrap.LLMRuntime() != nil {
-		runtime := r.Host.Bootstrap.LLMRuntime()
+	if host != nil && host.Bootstrap != nil && host.Bootstrap.LLMRuntime() != nil {
+		runtime := host.Bootstrap.LLMRuntime()
 		if strings.TrimSpace(parent.Provider) == "" {
 			parent.Provider = strings.TrimSpace(runtime.DefaultProvider())
 		}
@@ -335,6 +373,196 @@ func (r *localActorRegistry) spawnAgentParentDefaults(parentSession *runtimechat
 		}
 	}
 	return parent
+}
+
+type localTeamTaskRouteResolver struct {
+	Host *localChatRuntimeHost
+}
+
+type localTeamTaskRouteAuditSink struct {
+	Host *localChatRuntimeHost
+}
+
+func newLocalTeamTaskRouteResolver(host *localChatRuntimeHost) *localTeamTaskRouteResolver {
+	return &localTeamTaskRouteResolver{Host: host}
+}
+
+func localChatTeamExpertConcurrencyLimit(session *ChatSession) int {
+	routingConfig := localChatSubagentRoutingConfig(session)
+	if !modelrouting.RoutingEnabled(routingConfig) || routingConfig.MaxExpertConcurrency <= 0 {
+		return 0
+	}
+	return routingConfig.MaxExpertConcurrency
+}
+
+func newLocalTeamTaskRouteAuditSink(host *localChatRuntimeHost) team.TaskRouteAuditSink {
+	if host == nil || host.TeamStore == nil {
+		return nil
+	}
+	return &localTeamTaskRouteAuditSink{Host: host}
+}
+
+func (r *localTeamTaskRouteResolver) ResolveTaskRoute(ctx context.Context, request team.TaskRouteRequest) (*team.TaskRouteResolution, error) {
+	routingConfig := localChatSubagentRoutingConfig(nil)
+	if r != nil && r.Host != nil {
+		routingConfig = localChatSubagentRoutingConfig(r.Host.BaseSession)
+	}
+	disabled := !modelrouting.RoutingEnabled(routingConfig)
+	strict := !disabled && modelrouting.StrictCompatibilityMode(routingConfig)
+	resolution := &team.TaskRouteResolution{
+		Disabled: disabled,
+		Strict:   strict,
+	}
+	parent := modelrouting.ParentDefaults{}
+	if r != nil {
+		parent = r.parentDefaults(ctx, request)
+	}
+	task := modelrouting.TaskHint{
+		ID:                  strings.TrimSpace(request.Task.ID),
+		Role:                localTeamTaskRouteRole(request.Teammate, request.Task),
+		Goal:                firstNonEmptyChatValue(strings.TrimSpace(request.Task.Goal), strings.TrimSpace(request.Task.Title)),
+		Difficulty:          strings.TrimSpace(request.Task.Difficulty),
+		DifficultyRationale: strings.TrimSpace(request.Task.DifficultyRationale),
+		ReadOnly:            !localTeamTaskHasWritePaths(request.Task),
+	}
+	decision, err := (modelrouting.Resolver{
+		Config:  routingConfig,
+		Catalog: r.providerCatalog(),
+	}).Resolve(parent, task)
+	if err != nil {
+		resolution.Route = localTeamTaskFallbackRoute(parent, request.Task, request.Attempt, routingConfig, err)
+		return resolution, err
+	}
+	resolution.Route = localTeamTaskRouteFromDecision(decision, request.Task, request.Attempt)
+	return resolution, nil
+}
+
+func (s *localTeamTaskRouteAuditSink) RecordTaskRouteAudit(ctx context.Context, audit team.TaskRouteAudit) error {
+	if s == nil || s.Host == nil || s.Host.TeamStore == nil {
+		return nil
+	}
+	err := team.NewAgentControlTaskRegistry(s.Host.TeamStore).RecordTaskRouteAudit(ctx, audit)
+	if err == nil && s.Host.Orchestrator != nil && s.Host.Orchestrator.Events != nil {
+		event := team.TaskRouteResolvedEventFromAudit(audit)
+		if strings.TrimSpace(event.TeamID) != "" {
+			s.Host.Orchestrator.Events.Publish(event)
+		}
+	}
+	return err
+}
+
+func (r *localTeamTaskRouteResolver) parentDefaults(ctx context.Context, request team.TaskRouteRequest) modelrouting.ParentDefaults {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var parentSession *runtimechat.Session
+	parentSessionID := strings.TrimSpace(request.Team.LeadSessionID)
+	if parentSessionID == "" && r != nil && r.Host != nil && r.Host.TeamStore != nil {
+		teamID := firstNonEmptyChatValue(strings.TrimSpace(request.Team.ID), strings.TrimSpace(request.Task.TeamID))
+		if teamID != "" {
+			if record, err := r.Host.TeamStore.GetTeam(ctx, teamID); err == nil && record != nil {
+				parentSessionID = strings.TrimSpace(record.LeadSessionID)
+			}
+		}
+	}
+	if parentSessionID == "" && r != nil && r.Host != nil {
+		parentSessionID = r.Host.baseRuntimeSessionID()
+	}
+	if parentSessionID != "" && r != nil && r.Host != nil && r.Host.SessionStore != nil {
+		if session, err := r.Host.SessionStore.Load(ctx, parentSessionID); err == nil {
+			parentSession = session
+		}
+	}
+	if r == nil {
+		return localChatRouteParentDefaults(nil, parentSession)
+	}
+	return localChatRouteParentDefaults(r.Host, parentSession)
+}
+
+func (r *localTeamTaskRouteResolver) providerCatalog() modelrouting.ProviderCatalog {
+	if r == nil || r.Host == nil || r.Host.Bootstrap == nil || r.Host.Bootstrap.LLMRuntime() == nil {
+		return nil
+	}
+	return modelrouting.NewRuntimeCatalog(r.Host.Bootstrap.LLMRuntime())
+}
+
+func localTeamTaskRouteRole(mate team.Teammate, task team.Task) string {
+	if profile := strings.TrimSpace(mate.Profile); profile != "" {
+		return profile
+	}
+	if localTeamTaskHasWritePaths(task) {
+		return "writer"
+	}
+	return "researcher"
+}
+
+func localTeamTaskHasWritePaths(task team.Task) bool {
+	for _, path := range task.WritePaths {
+		if strings.TrimSpace(path) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func localTeamTaskRouteFromDecision(decision modelrouting.RouteDecision, task team.Task, attempt int) *team.TaskExecutionRoute {
+	route := localTeamTaskRouteFromTask(task, attempt)
+	route.Difficulty = strings.TrimSpace(decision.Difficulty)
+	route.DifficultySource = strings.TrimSpace(decision.DifficultySource)
+	route.DifficultyRationale = strings.TrimSpace(decision.DifficultyRationale)
+	route.Provider = strings.TrimSpace(decision.Provider)
+	route.Model = strings.TrimSpace(decision.Model)
+	route.ReasoningEffort = strings.TrimSpace(decision.ReasoningEffort)
+	route.Source = strings.TrimSpace(decision.Source)
+	route.Warnings = append([]string(nil), decision.Warnings...)
+	route.FallbackUsed = decision.FallbackUsed
+	route.FallbackReason = strings.TrimSpace(decision.FallbackReason)
+	return route
+}
+
+func localTeamTaskRouteFromTask(task team.Task, attempt int) *team.TaskExecutionRoute {
+	if attempt <= 0 {
+		attempt = task.RetryCount + 1
+	}
+	if attempt <= 0 {
+		attempt = 1
+	}
+	return &team.TaskExecutionRoute{
+		Difficulty:          strings.TrimSpace(task.Difficulty),
+		DifficultyRationale: strings.TrimSpace(task.DifficultyRationale),
+		ResolvedAt:          time.Now().UTC(),
+		Attempt:             attempt,
+	}
+}
+
+func localTeamTaskFallbackRoute(parent modelrouting.ParentDefaults, task team.Task, attempt int, routingConfig *agentconfig.AICLISubagentRoutingConfig, routeErr error) *team.TaskExecutionRoute {
+	route := localTeamTaskRouteFromTask(task, attempt)
+	if difficulty, ok := modelrouting.NormalizeDifficulty(task.Difficulty); ok && difficulty != "" {
+		route.Difficulty = difficulty
+		route.DifficultySource = "explicit"
+	} else {
+		route.Difficulty = modelrouting.DefaultDifficulty(routingConfig)
+		route.DifficultySource = "default"
+	}
+	route.Provider = strings.TrimSpace(parent.Provider)
+	route.Model = strings.TrimSpace(parent.Model)
+	route.ReasoningEffort = strings.TrimSpace(parent.ReasoningEffort)
+	route.Source = modelrouting.SourceFallback
+	route.Warnings = []string{"route_resolution_failed_fallback_parent"}
+	route.FallbackUsed = true
+	route.FallbackReason = "route_resolution_error"
+	if routeErr != nil {
+		route.Error = truncateLocalRouteLine(routeErr.Error(), 240)
+	}
+	return route
+}
+
+func truncateLocalRouteLine(value string, limit int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit]
 }
 
 func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, args toolbroker.SpawnAgentArgs) (*toolbroker.AgentStatusResult, error) {

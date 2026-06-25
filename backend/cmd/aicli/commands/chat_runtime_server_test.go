@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/require"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -440,9 +441,18 @@ func TestAICLIRuntimeServerChatExecutorApprovesRuntimeServerToolRequest(t *testi
 			events := []map[string]interface{}{}
 			if submitted && after == "" && !approved {
 				events = append(events, runtimeServerTestEvent(runtimeSession.ID, "approval_requested", 1, map[string]interface{}{
-					"request_id": "approval-1",
-					"tool_name":  "run_shell_command",
-					"reason":     "needs approval",
+					"request_id":             "approval-1",
+					"tool_name":              "run_shell_command",
+					"reason":                 "needs approval",
+					"team_id":                "team-approval",
+					"task_id":                "task-approval",
+					"teammate_id":            "mate-approval",
+					"permission_mode":        "default",
+					"route_provider":         "openai",
+					"route_model":            "gpt-test",
+					"route_reasoning_effort": "high",
+					"route_source":           "difficulty_level",
+					"route_warnings":         []interface{}{"provider_fallback_parent"},
 				}))
 			}
 			if approved && after == "1" {
@@ -491,7 +501,16 @@ func TestAICLIRuntimeServerChatExecutorApprovesRuntimeServerToolRequest(t *testi
 		HTTPClient:     server.Client(),
 	}
 	bridge := newChatRuntimeEventBridge(session)
-	bridge.askApproval = func(*runtimechat.ApprovalRequest) (bool, error) { return true, nil }
+	bridge.askApproval = func(approval *runtimechat.ApprovalRequest, contextLines []string) (bool, error) {
+		if approval == nil || approval.ToolName != "run_shell_command" {
+			t.Fatalf("unexpected approval request: %+v", approval)
+		}
+		require.Equal(t, []string{
+			"team=team-approval task=task-approval teammate=mate-approval permission_mode=default",
+			"provider=openai model=gpt-test reasoning=high route_source=difficulty_level warnings=provider_fallback_parent",
+		}, contextLines)
+		return true, nil
+	}
 	bridge.writeLine = func(string) {}
 	bridge.renderResponse = func(string) {}
 	bridge.writePrompt = func() {}

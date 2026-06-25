@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -41,7 +42,7 @@ func renderSharedChatToolEvent(event runtimechatcore.ChatEvent) string {
 	case "tool_requested":
 		return appendCompactToolDirectory(renderCompactToolRequestedWithSource(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource), payload)
 	case "tool_result":
-		return appendCompactToolDirectory(renderCompactToolCompletedWithPayload(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource, chatToolSummaryLines(payload), payload), payload)
+		return renderCompactToolCompletedWithPayload(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource, chatToolSummaryLines(payload), payload)
 	case "batch_end":
 		return ""
 	default:
@@ -249,9 +250,14 @@ func renderCompactToolCompletedWithPayload(toolName, commandArg, commandText, ar
 	if display == "" {
 		return ""
 	}
-	lines := []string{"• Ran " + display}
-	if rendered := renderMarkdownToolOutput(payload); rendered != "" {
+	if rendered := renderMarkdownEditedDiffToolOutput(payload); rendered != "" {
 		return rendered
+	}
+	lines := []string{compactToolCompletionTitle(payload, display)}
+	lines = append(lines, compactToolContextLines(payload)...)
+	if renderedLines := renderMarkdownToolOutputLines(payload); len(renderedLines) > 0 {
+		lines = append(lines, renderedLines...)
+		return strings.Join(lines, "\n")
 	}
 	outputLines := compactToolOutputLines(summaryLines)
 	if len(outputLines) == 0 {
@@ -264,24 +270,51 @@ func renderCompactToolCompletedWithPayload(toolName, commandArg, commandText, ar
 }
 
 func renderMarkdownToolOutput(payload map[string]interface{}) string {
-	if payload == nil || !payloadBoolValue(payload, "render_output_untruncated") {
+	if rendered := renderMarkdownEditedDiffToolOutput(payload); rendered != "" {
+		return rendered
+	}
+	lines := renderMarkdownToolOutputLines(payload)
+	if len(lines) == 0 {
 		return ""
 	}
-	if format := strings.TrimSpace(payloadStringValue(payload["render_output_format"])); format != "" && format != "markdown" {
+	return strings.Join(lines, "\n")
+}
+
+func renderMarkdownEditedDiffToolOutput(payload map[string]interface{}) string {
+	output, ok := markdownToolOutput(payload)
+	if !ok {
 		return ""
 	}
-	output := strings.TrimRight(strings.ReplaceAll(payloadStringValue(payload["render_output"]), "\r\n", "\n"), "\n")
-	if strings.TrimSpace(output) == "" {
-		return ""
+	return renderEditedDiffOutput(output)
+}
+
+func renderMarkdownToolOutputLines(payload map[string]interface{}) []string {
+	output, ok := markdownToolOutput(payload)
+	if !ok {
+		return nil
 	}
 	if rendered := renderEditedDiffOutput(output); rendered != "" {
-		return rendered
+		return strings.Split(rendered, "\n")
 	}
 	lines := strings.Split(output, "\n")
 	for i, line := range lines {
 		lines[i] = "  " + line
 	}
-	return strings.Join(lines, "\n")
+	return lines
+}
+
+func markdownToolOutput(payload map[string]interface{}) (string, bool) {
+	if payload == nil || !payloadBoolValue(payload, "render_output_untruncated") {
+		return "", false
+	}
+	if format := strings.TrimSpace(payloadStringValue(payload["render_output_format"])); format != "" && format != "markdown" {
+		return "", false
+	}
+	output := strings.TrimRight(strings.ReplaceAll(payloadStringValue(payload["render_output"]), "\r\n", "\n"), "\n")
+	if strings.TrimSpace(output) == "" {
+		return "", false
+	}
+	return output, true
 }
 
 var unifiedDiffHunkHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
@@ -595,6 +628,25 @@ func compactToolOutputLines(summaryLines []string) []string {
 		return nil
 	}
 	return out
+}
+
+func compactToolDurationSuffix(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	durationMs := intPayloadValue(payload, "duration_ms")
+	if durationMs <= 0 {
+		return ""
+	}
+	return " in " + durationString(time.Duration(durationMs)*time.Millisecond)
+}
+
+func compactToolCompletionTitle(payload map[string]interface{}, display string) string {
+	status := "Completed"
+	if strings.TrimSpace(payloadStringValue(payload["error"])) != "" {
+		status = "Failed"
+	}
+	return "• " + status + " " + display + compactToolDurationSuffix(payload)
 }
 
 func compactToolDisplaySegment(text string) string {
