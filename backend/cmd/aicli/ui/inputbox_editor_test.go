@@ -1112,6 +1112,28 @@ func TestReadInteractiveLine_NoHoldPreservesNonBracketedPasteNewlineWhenMoreInpu
 	}
 }
 
+func TestReadInteractiveLine_NoHoldTreatsCRLFSubmitAsSubmit(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLineWithOptions(
+		&chunkedReader{chunks: [][]byte{[]byte("hello\r"), []byte("\n")}},
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithOptions: %v", err)
+	}
+	if line != "hello" {
+		t.Fatalf("expected CRLF submit to return typed line, got %q", line)
+	}
+	if strings.Count(output.String(), "\r\n") != 1 {
+		t.Fatalf("expected exactly one submit newline echo, got %q", output.String())
+	}
+}
+
 func TestReadInteractiveLine_CtrlCOnEmptyLineRequestsExit(t *testing.T) {
 	var output bytes.Buffer
 	_, err := readInteractiveLine(

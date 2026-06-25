@@ -773,6 +773,101 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		return ready, err
 	}
 
+	prependPendingBytes := func(data []byte) {
+		if len(data) == 0 {
+			return
+		}
+		if len(pending) == 0 {
+			pending = append(pending[:0], data...)
+			return
+		}
+		merged := make([]byte, 0, len(data)+len(pending))
+		merged = append(merged, data...)
+		merged = append(merged, pending...)
+		pending = merged
+	}
+
+	readReadyInteractiveBytes := func() ([]byte, error) {
+		if reader == nil {
+			return nil, nil
+		}
+		var buf [64]byte
+		n, err := reader.Read(buf[:])
+		if n > 0 {
+			return append([]byte(nil), buf[:n]...), nil
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	classifyCarriageReturnEnter := func(timeout time.Duration) (bool, bool, error) {
+		if stdinFile == nil {
+			return false, false, nil
+		}
+		if len(pending) > 0 {
+			if pending[0] != '\n' {
+				return true, false, nil
+			}
+			if len(pending) == 1 {
+				pending = pending[:0]
+				return false, true, nil
+			}
+			pending = pending[1:]
+			return true, false, nil
+		}
+		if timeout <= 0 {
+			return false, false, nil
+		}
+		ready, err := waitForInteractiveInputReady(int(stdinFile.Fd()), timeout)
+		if err != nil {
+			if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+				time.Sleep(timeout)
+				return false, false, nil
+			}
+			return false, false, err
+		}
+		if !ready {
+			return false, false, nil
+		}
+		data, err := readReadyInteractiveBytes()
+		if err != nil {
+			return false, false, err
+		}
+		if len(data) == 0 {
+			return false, false, nil
+		}
+		if data[0] != '\n' {
+			prependPendingBytes(data)
+			return true, false, nil
+		}
+		remainder := append([]byte(nil), data[1:]...)
+		if len(remainder) == 0 {
+			ready, err = waitForInteractiveInputReady(int(stdinFile.Fd()), trailingLineFeedDrainWait)
+			if err != nil {
+				if errors.Is(err, errInteractiveInputReadinessUnsupported) {
+					time.Sleep(trailingLineFeedDrainWait)
+					ready = false
+				} else {
+					return false, false, err
+				}
+			}
+			if ready {
+				more, err := readReadyInteractiveBytes()
+				if err != nil {
+					return false, false, err
+				}
+				remainder = append(remainder, more...)
+			}
+		}
+		if len(remainder) == 0 {
+			return false, true, nil
+		}
+		prependPendingBytes(remainder)
+		return true, false, nil
+	}
+
 	promoteDraft = func() {
 		if historyPos == len(history) {
 			return
@@ -937,7 +1032,43 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				continue
 			}
 		case editorKeyEnter:
-			if pasteBurst.IsActive() {
+			suppressSubmitDrain := false
+			handledCarriageReturn := false
+			if key.fromCarriageReturn {
+				timeout := time.Until(pasteBurst.PlainContinuationDeadline())
+				if pasteBurst.IsActive() {
+					timeout = time.Until(pasteBurst.Deadline())
+				}
+				insertNewline, consumedTrailingLF, err := classifyCarriageReturnEnter(timeout)
+				if err != nil {
+					return "", err
+				}
+				handledCarriageReturn = true
+				if consumedTrailingLF {
+					suppressSubmitDrain = true
+					key.fromCarriageReturn = false
+				}
+				if insertNewline {
+					now := time.Now()
+					if pasteBurst.IsActive() {
+						if pasteBurst.HasPendingFirstChar() && !pasteBurst.HasBufferedText() {
+							if pasteBurst.BeginBufferFromPending(now) {
+								pasteBurst.AppendCharToBuffer('\n', now)
+								continue
+							}
+						}
+						if pasteBurst.HasBufferedText() {
+							pasteBurst.AppendCharToBuffer('\n', now)
+							continue
+						}
+					}
+					pasteBurst.ClearWindowAfterNonChar()
+					insertTypedRune('\n')
+					pasteBurst.ExtendWindow(now)
+					continue
+				}
+			}
+			if !handledCarriageReturn && pasteBurst.IsActive() {
 				// If more bytes are already queued, this Enter belongs to a
 				// non-bracketed paste and must stay in the editable text.
 				insertNewline, err := pasteBurstEnterShouldInsertNewline()
@@ -962,16 +1093,18 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				}
 				flushPasteBurstBeforeModifiedInput()
 			}
-			insertPlainPasteNewline, err := plainPasteEnterShouldInsertNewline()
-			if err != nil {
-				return "", err
-			}
-			if insertPlainPasteNewline {
-				now := time.Now()
-				pasteBurst.ClearWindowAfterNonChar()
-				insertTypedRune('\n')
-				pasteBurst.ExtendWindow(now)
-				continue
+			if !handledCarriageReturn {
+				insertPlainPasteNewline, err := plainPasteEnterShouldInsertNewline()
+				if err != nil {
+					return "", err
+				}
+				if insertPlainPasteNewline {
+					now := time.Now()
+					pasteBurst.ClearWindowAfterNonChar()
+					insertTypedRune('\n')
+					pasteBurst.ExtendWindow(now)
+					continue
+				}
 			}
 			if hooks != nil && hooks.OnSubmit != nil {
 				if repl, ok := hooks.OnSubmit(snapshot()); ok {
@@ -985,7 +1118,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			if onChange != nil {
 				onChange("")
 			}
-			if shouldDrainTrailingLineFeedAfterSubmit(key, echoSubmit, line) {
+			if !suppressSubmitDrain && shouldDrainTrailingLineFeedAfterSubmit(key, echoSubmit, line) {
 				drainTrailingLineFeedAfterCarriageReturn(ctx, reader, &pending, stdinFile)
 			}
 			return submittedText(), nil
