@@ -181,6 +181,90 @@ func TestAppendTaskDispatchRequestedIncludesRouteMetadataAndPermissionMode(t *te
 	require.Equal(t, "bypass_permissions", payload["permission_mode"])
 }
 
+func TestAppendTaskDispatchStartedIncludesRouteMetadataAndPermissionMode(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	seq, err := AppendTaskDispatchStarted(ctx, store, TaskTriggerRequest{
+		SessionID: "session-1",
+		TeamID:    teamID,
+		AgentID:   "mate-1",
+		TaskID:    "task-1",
+		Prompt:    "do the task",
+		Route: &TaskExecutionRoute{
+			Difficulty:      TaskDifficultyExpert,
+			Provider:        "remote-strong",
+			Model:           "strong-model",
+			ReasoningEffort: "high",
+			Source:          "difficulty_level",
+			Warnings:        []string{"fallback checked"},
+			FallbackUsed:    true,
+			FallbackReason:  "provider fallback",
+			Attempt:         2,
+		},
+		RunMeta: &RunMeta{
+			PermissionMode: "bypass_permissions",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), seq)
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{
+		TeamID:    teamID,
+		EventType: TaskDispatchStartedEvent,
+	})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	payload := events[0].Payload
+	require.Equal(t, TaskDifficultyExpert, payload["difficulty"])
+	require.Equal(t, "remote-strong", payload["route_provider"])
+	require.Equal(t, "strong-model", payload["route_model"])
+	require.Equal(t, "high", payload["route_reasoning_effort"])
+	require.Equal(t, "difficulty_level", payload["route_source"])
+	require.Equal(t, []interface{}{"fallback checked"}, payload["route_warnings"])
+	require.Equal(t, true, payload["fallback"])
+	require.Equal(t, true, payload["fallback_used"])
+	require.Equal(t, "provider fallback", payload["fallback_reason"])
+	require.Equal(t, float64(2), payload["route_attempt"])
+	require.Equal(t, "bypass_permissions", payload["permission_mode"])
+}
+
+func TestAppendTaskRouteResolvedRedactsSensitiveRouteError(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = AppendTaskRouteResolved(ctx, store, TaskRouteAudit{
+		TeamID:    teamID,
+		AgentID:   "mate-1",
+		TaskID:    "task-1",
+		SessionID: "session-1",
+		Route: &TaskExecutionRoute{
+			Difficulty: TaskDifficultyExpert,
+			Source:     "difficulty_level",
+			Error:      "provider failed Authorization: Bearer sk-secret-token api_key=abc123 https://user:pass@example.test/v1",
+		},
+		Error: "provider failed Authorization: Bearer sk-secret-token api_key=abc123 https://user:pass@example.test/v1",
+	})
+	require.NoError(t, err)
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{
+		TeamID:    teamID,
+		EventType: TaskRouteResolvedEvent,
+	})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	routeError, _ := events[0].Payload["route_error"].(string)
+	require.NotEmpty(t, routeError)
+	require.NotContains(t, routeError, "sk-secret-token")
+	require.NotContains(t, routeError, "abc123")
+	require.NotContains(t, routeError, "user:pass")
+	require.Contains(t, routeError, "[REDACTED]")
+}
+
 func TestAppendTaskDispatchCompletedPreservesDifficultyMetadata(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

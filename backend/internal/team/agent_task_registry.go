@@ -39,9 +39,14 @@ type agentControlTaskReadyStore interface {
 	MarkAgentControlTaskRecordsReady(ctx context.Context, teamID string) (int64, error)
 }
 
+type agentControlTaskRouteAuditUpdateStore interface {
+	UpdateAgentControlTaskRouteAudit(ctx context.Context, request agentcontrol.TaskRouteAuditUpdateRequest) (*agentcontrol.TaskRecord, error)
+}
+
 var _ agentcontrol.TaskRegistryReader = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryCreateWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryUpdateWriter = AgentControlTaskRegistry{}
+var _ agentcontrol.TaskRegistryRouteAuditWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskDependencyReader = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskGraphEventReader = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskDependencyCreateWriter = AgentControlTaskRegistry{}
@@ -55,6 +60,7 @@ var _ agentcontrol.TaskRegistryTerminalWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskRegistryBlockWriter = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskWakeWatcher = AgentControlTaskRegistry{}
 var _ agentcontrol.TaskWakeSequencer = AgentControlTaskRegistry{}
+var _ TaskRouteAuditSink = AgentControlTaskRegistry{}
 
 // NewAgentControlTaskRegistry creates a task registry projection over a team
 // store.
@@ -335,6 +341,15 @@ func (r AgentControlTaskRegistry) CreateAgentControlTask(ctx context.Context, re
 		}
 	}
 	record := AgentControlTaskRecord(*created, mate)
+	if taskCreateRequestHasRouteAudit(request) {
+		routeRecord, err := r.UpdateAgentControlTaskRouteAudit(ctx, taskRouteAuditUpdateRequestFromCreate(request, record.ID))
+		if err != nil {
+			return nil, err
+		}
+		if routeRecord != nil {
+			return routeRecord, nil
+		}
+	}
 	return &record, nil
 }
 
@@ -1296,6 +1311,137 @@ func (r AgentControlTaskRegistry) RetryAgentControlTask(ctx context.Context, req
 	}
 	record := AgentControlTaskRecord(*task, mate)
 	return &record, nil
+}
+
+// RecordTaskRouteAudit adapts teammate runner route audits to the AgentControl
+// latest-route task read model.
+func (r AgentControlTaskRegistry) RecordTaskRouteAudit(ctx context.Context, audit TaskRouteAudit) error {
+	request := taskRouteAuditUpdateRequestFromAudit(audit)
+	if strings.TrimSpace(request.ID) == "" {
+		return nil
+	}
+	_, updateErr := r.UpdateAgentControlTaskRouteAudit(ctx, request)
+	_, eventErr := AppendTaskRouteResolved(ctx, r.Store, audit)
+	if updateErr != nil {
+		return updateErr
+	}
+	return eventErr
+}
+
+// UpdateAgentControlTaskRouteAudit maps latest route audit metadata onto the
+// shared AgentControl task read model without touching lifecycle or lease state.
+func (r AgentControlTaskRegistry) UpdateAgentControlTaskRouteAudit(ctx context.Context, request agentcontrol.TaskRouteAuditUpdateRequest) (*agentcontrol.TaskRecord, error) {
+	if r.Store == nil {
+		return nil, fmt.Errorf("team store is not configured")
+	}
+	request = request.Normalize()
+	if request.ID == "" {
+		return nil, fmt.Errorf("task id is required")
+	}
+	if request.Workflow != "" && request.Workflow != agentcontrol.WorkflowSpawnTeam {
+		return nil, fmt.Errorf("unsupported task workflow: %s", request.Workflow)
+	}
+	if request.Workflow == "" {
+		request.Workflow = agentcontrol.WorkflowSpawnTeam
+	}
+	if writer, ok := r.Store.(agentControlTaskRouteAuditUpdateStore); ok {
+		return writer.UpdateAgentControlTaskRouteAudit(ctx, request)
+	}
+
+	task, err := r.Store.GetTask(ctx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task not found: %s", request.ID)
+	}
+	if request.TeamID != "" && !strings.EqualFold(strings.TrimSpace(task.TeamID), request.TeamID) {
+		return nil, fmt.Errorf("task does not belong to team: %s", request.ID)
+	}
+	var mate *Teammate
+	if assignee := taskAssigneeID(*task); assignee != "" {
+		if record, err := r.Store.GetTeammate(ctx, assignee); err == nil && record != nil {
+			mate = record
+		}
+	}
+	record := AgentControlTaskRecord(*task, mate)
+	applyTaskRouteAuditUpdateToRecord(&record, request)
+	return &record, nil
+}
+
+func taskCreateRequestHasRouteAudit(request agentcontrol.TaskCreateRequest) bool {
+	return strings.TrimSpace(request.RouteProvider) != "" ||
+		strings.TrimSpace(request.RouteModel) != "" ||
+		strings.TrimSpace(request.RouteReasoningEffort) != "" ||
+		strings.TrimSpace(request.RouteSource) != "" ||
+		len(request.RouteWarnings) > 0 ||
+		request.FallbackUsed ||
+		strings.TrimSpace(request.FallbackReason) != "" ||
+		!request.RouteResolvedAt.IsZero() ||
+		request.RouteAttempt > 0
+}
+
+func taskRouteAuditUpdateRequestFromCreate(request agentcontrol.TaskCreateRequest, taskID string) agentcontrol.TaskRouteAuditUpdateRequest {
+	return agentcontrol.TaskRouteAuditUpdateRequest{
+		ID:                   firstNonEmptyString(taskID, request.ID),
+		Workflow:             agentcontrol.WorkflowSpawnTeam,
+		TeamID:               request.TeamID,
+		RouteProvider:        request.RouteProvider,
+		RouteModel:           request.RouteModel,
+		RouteReasoningEffort: request.RouteReasoningEffort,
+		RouteSource:          request.RouteSource,
+		RouteWarnings:        append([]string(nil), request.RouteWarnings...),
+		FallbackUsed:         request.FallbackUsed,
+		FallbackReason:       request.FallbackReason,
+		RouteResolvedAt:      request.RouteResolvedAt,
+		RouteAttempt:         request.RouteAttempt,
+	}
+}
+
+func taskRouteAuditUpdateRequestFromAudit(audit TaskRouteAudit) agentcontrol.TaskRouteAuditUpdateRequest {
+	route := audit.Route.Clone()
+	request := agentcontrol.TaskRouteAuditUpdateRequest{
+		ID:       strings.TrimSpace(audit.TaskID),
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   strings.TrimSpace(audit.TeamID),
+	}
+	if route != nil {
+		request.RouteProvider = route.Provider
+		request.RouteModel = route.Model
+		request.RouteReasoningEffort = route.ReasoningEffort
+		request.RouteSource = route.Source
+		request.RouteWarnings = append([]string(nil), route.Warnings...)
+		request.FallbackUsed = route.FallbackUsed
+		request.FallbackReason = route.FallbackReason
+		request.RouteResolvedAt = route.ResolvedAt
+		request.RouteAttempt = route.Attempt
+	}
+	if audit.Disabled && strings.TrimSpace(request.RouteSource) == "" {
+		request.RouteSource = "disabled"
+	}
+	if request.RouteResolvedAt.IsZero() {
+		request.RouteResolvedAt = audit.RecordedAt
+	}
+	if request.RouteResolvedAt.IsZero() {
+		request.RouteResolvedAt = time.Now().UTC()
+	}
+	return request
+}
+
+func applyTaskRouteAuditUpdateToRecord(record *agentcontrol.TaskRecord, request agentcontrol.TaskRouteAuditUpdateRequest) {
+	if record == nil {
+		return
+	}
+	record.RouteProvider = request.RouteProvider
+	record.RouteModel = request.RouteModel
+	record.RouteReasoningEffort = request.RouteReasoningEffort
+	record.RouteSource = request.RouteSource
+	record.RouteWarnings = append([]string(nil), request.RouteWarnings...)
+	record.FallbackUsed = request.FallbackUsed
+	record.FallbackReason = request.FallbackReason
+	record.RouteResolvedAt = request.RouteResolvedAt
+	record.RouteAttempt = request.RouteAttempt
+	*record = record.Normalize()
 }
 
 func (r AgentControlTaskRegistry) registryTeamIDs(ctx context.Context, teamID string) ([]string, error) {

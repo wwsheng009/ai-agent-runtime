@@ -22,6 +22,23 @@ func newTestStore(t *testing.T) *SQLiteStore {
 	return store
 }
 
+type cancelAwareSessionClient struct {
+	cancel func()
+	result *SessionResult
+}
+
+func (c *cancelAwareSessionClient) SubmitPrompt(ctx context.Context, sessionID, prompt string, runMeta *RunMeta) (*SessionResult, error) {
+	if c.cancel != nil {
+		c.cancel()
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(20 * time.Millisecond):
+	}
+	return c.result, nil
+}
+
 type notifyingClaimStore struct {
 	Store
 	claimed chan struct{}
@@ -186,6 +203,137 @@ func TestOrchestratorClaimReadyTasksHonorsMaxWriters(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, running, 1)
+}
+
+func TestOrchestratorExecuteAssignmentCompletesAfterCallerContextCanceled(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:       "task-1",
+		TeamID:   teamID,
+		Title:    "task-1",
+		Status:   TaskStatusRunning,
+		Assignee: stringPtr("mate-1"),
+	})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-1",
+		TeamID:    teamID,
+		SessionID: "session-1",
+		State:     TeammateStateBusy,
+	})
+	require.NoError(t, err)
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner := &TeammateRunner{
+		Sessions: &cancelAwareSessionClient{
+			cancel: cancel,
+			result: &SessionResult{
+				Success: true,
+				Output:  "```json\n{\"task_status\":\"done\",\"summary\":\"all done\"}\n```",
+			},
+		},
+	}
+	orchestrator := &Orchestrator{
+		Store:  store,
+		Runner: runner,
+	}
+
+	orchestrator.executeAssignment(runCtx, teamID, Assignment{
+		Task: Task{
+			ID:       taskID,
+			TeamID:   teamID,
+			Title:    "task-1",
+			Status:   TaskStatusRunning,
+			Assignee: stringPtr("mate-1"),
+		},
+		Teammate: Teammate{
+			ID:        "mate-1",
+			TeamID:    teamID,
+			SessionID: "session-1",
+			State:     TeammateStateBusy,
+		},
+	})
+
+	task, err := store.GetTask(context.Background(), taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	assert.Equal(t, TaskStatusDone, task.Status)
+	assert.Equal(t, "all done", task.Summary)
+
+	mate, err := store.GetTeammate(context.Background(), "mate-1")
+	require.NoError(t, err)
+	require.NotNil(t, mate)
+	assert.Equal(t, TeammateStateIdle, mate.State)
+}
+
+func TestOrchestratorClaimReadyTasksHonorsExpertConcurrencyLimit(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-active", TeamID: teamID, State: TeammateStateBusy})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-a", TeamID: teamID, State: TeammateStateIdle})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{ID: "mate-b", TeamID: teamID, State: TeammateStateIdle})
+	require.NoError(t, err)
+
+	activeAssignee := "mate-active"
+	leaseUntil := time.Now().UTC().Add(time.Minute)
+	_, err = store.CreateTask(ctx, Task{
+		TeamID:     teamID,
+		Title:      "active expert",
+		Status:     TaskStatusRunning,
+		Difficulty: TaskDifficultyExpert,
+		Assignee:   &activeAssignee,
+		LeaseUntil: &leaseUntil,
+	})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, Task{
+		TeamID:     teamID,
+		Title:      "ready expert",
+		Status:     TaskStatusReady,
+		Difficulty: TaskDifficultyExpert,
+	})
+	require.NoError(t, err)
+	normalTaskID, err := store.CreateTask(ctx, Task{
+		TeamID:     teamID,
+		Title:      "ready normal",
+		Status:     TaskStatusReady,
+		Difficulty: TaskDifficultyNormal,
+	})
+	require.NoError(t, err)
+
+	orchestrator := NewOrchestrator(store, nil, nil)
+	orchestrator.ExpertConcurrencyLimit = 1
+	assignments, err := orchestrator.ClaimReadyTasks(ctx, teamID, 0)
+	require.NoError(t, err)
+	require.Len(t, assignments, 1)
+	require.Equal(t, normalTaskID, assignments[0].Task.ID)
+
+	running, err := store.ListTasks(ctx, TaskFilter{
+		TeamID: teamID,
+		Status: []TaskStatus{TaskStatusRunning},
+	})
+	require.NoError(t, err)
+	expertRunning := 0
+	normalRunning := 0
+	for _, task := range running {
+		switch task.Difficulty {
+		case TaskDifficultyExpert:
+			expertRunning++
+		case TaskDifficultyNormal:
+			normalRunning++
+		}
+	}
+	require.Equal(t, 1, expertRunning)
+	require.Equal(t, 1, normalRunning)
 }
 
 func TestOrchestratorClaimReadyTasksRespectsPinnedAssignee(t *testing.T) {
@@ -900,6 +1048,93 @@ func TestOrchestratorExecuteAssignmentFailsProtocolErrorOutput(t *testing.T) {
 	assert.Equal(t, TeammateStateIdle, mate.State)
 }
 
+func TestOrchestratorExecuteAssignmentBlocksStrictRouteFailure(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-1",
+		TeamID:    teamID,
+		SessionID: "mate-session",
+		State:     TeammateStateBusy,
+	})
+	require.NoError(t, err)
+	assignee := "mate-1"
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID:     teamID,
+		Title:      "strict route task",
+		Status:     TaskStatusRunning,
+		Assignee:   &assignee,
+		Difficulty: TaskDifficultyExpert,
+	})
+	require.NoError(t, err)
+
+	control := &capturingTaskTriggerClient{
+		result: &SessionResult{
+			Success: true,
+			Output:  "should not run",
+		},
+	}
+	orchestrator := NewOrchestrator(store, nil, nil)
+	orchestrator.Runner = &TeammateRunner{
+		AgentControl: control,
+		RouteResolver: &staticTaskRouteResolver{
+			resolution: &TaskRouteResolution{
+				Strict: true,
+				Route: &TaskExecutionRoute{
+					Difficulty: TaskDifficultyExpert,
+					Source:     "difficulty_level",
+				},
+			},
+			err: assert.AnError,
+		},
+	}
+
+	orchestrator.executeAssignment(ctx, teamID, Assignment{
+		Task: Task{
+			ID:         taskID,
+			TeamID:     teamID,
+			Title:      "strict route task",
+			Difficulty: TaskDifficultyExpert,
+		},
+		Teammate: Teammate{
+			ID:        "mate-1",
+			TeamID:    teamID,
+			SessionID: "mate-session",
+		},
+	})
+
+	assert.False(t, control.called)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+	assert.Equal(t, TaskStatusBlocked, task.Status)
+	assert.Contains(t, task.Summary, assert.AnError.Error())
+	require.NotNil(t, task.Assignee)
+	assert.Equal(t, "mate-1", *task.Assignee)
+	assert.Nil(t, task.LeaseUntil)
+
+	mate, err := store.GetTeammate(ctx, "mate-1")
+	require.NoError(t, err)
+	require.NotNil(t, mate)
+	assert.Equal(t, TeammateStateBlocked, mate.State)
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	var blocked TeamEventRecord
+	for _, event := range events {
+		if event.Type == "task.blocked" {
+			blocked = event
+			break
+		}
+	}
+	require.Equal(t, "task.blocked", blocked.Type)
+	assert.Equal(t, "difficulty_level", blocked.Payload["route_source"])
+}
+
 func TestOrchestratorExecuteAssignmentPublishesPromptPreflightFailureMetadata(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -922,6 +1157,18 @@ func TestOrchestratorExecuteAssignmentPublishesPromptPreflightFailureMetadata(t 
 
 	orchestrator := NewOrchestrator(store, nil, nil)
 	orchestrator.Runner = &TeammateRunner{
+		RouteResolver: &staticTaskRouteResolver{
+			resolution: &TaskRouteResolution{
+				Route: &TaskExecutionRoute{
+					Difficulty:      TaskDifficultyHard,
+					Provider:        "remote-strong",
+					Model:           "strong-model",
+					ReasoningEffort: "high",
+					Source:          "difficulty_level",
+					Warnings:        []string{"provider_fallback_parent"},
+				},
+			},
+		},
 		Sessions: &staticSessionClient{
 			result: &SessionResult{
 				Success:   false,
@@ -965,6 +1212,10 @@ func TestOrchestratorExecuteAssignmentPublishesPromptPreflightFailureMetadata(t 
 	assert.Equal(t, "prompt_preflight", failedEvent.Payload["error_type"])
 	assert.Equal(t, "prompt_still_exceeds_budget_after_compaction", failedEvent.Payload["failure_reason_code"])
 	assert.Equal(t, true, failedEvent.Payload["replacement_history_applied"])
+	assert.Equal(t, "remote-strong", failedEvent.Payload["route_provider"])
+	assert.Equal(t, "strong-model", failedEvent.Payload["route_model"])
+	assert.Equal(t, "high", failedEvent.Payload["route_reasoning_effort"])
+	assert.Equal(t, "difficulty_level", failedEvent.Payload["route_source"])
 }
 
 func TestOrchestratorExecuteAssignmentMarksTeamDoneWhenLastTaskCompletes(t *testing.T) {

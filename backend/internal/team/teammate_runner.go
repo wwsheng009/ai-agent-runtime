@@ -229,6 +229,9 @@ func (r *TeammateRunner) triggerTask(ctx context.Context, request TaskTriggerReq
 	if r == nil || r.Sessions == nil {
 		return nil, fmt.Errorf("teammate runner agent control is not configured")
 	}
+	if request.Route != nil {
+		return nil, fmt.Errorf("teammate runner route override requires agent control trigger support")
+	}
 	return r.Sessions.SubmitPrompt(ctx, request.SessionID, request.Prompt, request.RunMeta)
 }
 
@@ -263,7 +266,7 @@ func (r *TeammateRunner) resolveTaskRoute(ctx context.Context, team Team, mate T
 		if route == nil {
 			route = &TaskExecutionRoute{}
 		}
-		route.Error = truncateLine(err.Error(), 240)
+		route.Error = truncateLine(sanitizeRouteAuditText(err.Error()), 240)
 		if route.ResolvedAt.IsZero() {
 			route.ResolvedAt = time.Now().UTC()
 		}
@@ -307,7 +310,7 @@ func (r *TeammateRunner) recordTaskRouteAudit(ctx context.Context, team Team, ma
 		RecordedAt: time.Now().UTC(),
 	}
 	if routeErr != nil {
-		audit.Error = truncateLine(routeErr.Error(), 240)
+		audit.Error = truncateLine(sanitizeRouteAuditText(routeErr.Error()), 240)
 	}
 	if err := r.RouteAudit.RecordTaskRouteAudit(ctx, audit); err != nil {
 		logger.Debug("teammate runner: route audit skipped",
@@ -336,21 +339,20 @@ func applyRouteToTeamRunMeta(meta *TeamRunMeta, route *TaskExecutionRoute) {
 func buildStrictRouteFailureResult(route *TaskExecutionRoute, routeErr error) *TaskRunResult {
 	message := "task route resolution failed"
 	if routeErr != nil && strings.TrimSpace(routeErr.Error()) != "" {
-		message = truncateLine(routeErr.Error(), 240)
+		message = truncateLine(sanitizeRouteAuditText(routeErr.Error()), 240)
 	} else if route != nil && strings.TrimSpace(route.Error) != "" {
-		message = truncateLine(route.Error, 240)
+		message = truncateLine(sanitizeRouteAuditText(route.Error), 240)
 	}
 	return &TaskRunResult{
-		Success:        true,
-		Summary:        message,
-		Error:          message,
-		ErrorType:      "task_route_resolution",
-		Blocked:        true,
-		Outcome:        TaskOutcomeBlocked,
-		OutcomeApplied: true,
-		Blocker:        message,
-		Structured:     true,
-		Route:          route.Clone(),
+		Success:    true,
+		Summary:    message,
+		Error:      message,
+		ErrorType:  "task_route_resolution",
+		Blocked:    true,
+		Outcome:    TaskOutcomeBlocked,
+		Blocker:    message,
+		Structured: true,
+		Route:      route.Clone(),
 	}
 }
 

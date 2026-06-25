@@ -165,6 +165,15 @@ func TestSQLiteStoreMigratesAgentControlTaskDifficultyMetadata(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "difficulty"))
 	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "difficulty_rationale"))
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "route_provider"))
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "route_model"))
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "route_reasoning_effort"))
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "route_source"))
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "route_warnings_json"))
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "fallback_used"))
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "fallback_reason"))
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "route_resolved_at"))
+	require.True(t, sqliteColumnExists(t, store.db, "agent_control_task_records", "route_attempt"))
 
 	legacy, err := store.GetTask(ctx, "legacy-task")
 	require.NoError(t, err)
@@ -180,6 +189,15 @@ func TestSQLiteStoreMigratesAgentControlTaskDifficultyMetadata(t *testing.T) {
 	require.Len(t, records, 1)
 	assert.Equal(t, "", records[0].Difficulty)
 	assert.Equal(t, "", records[0].DifficultyRationale)
+	assert.Equal(t, "", records[0].RouteProvider)
+	assert.Equal(t, "", records[0].RouteModel)
+	assert.Equal(t, "", records[0].RouteReasoningEffort)
+	assert.Equal(t, "", records[0].RouteSource)
+	assert.Empty(t, records[0].RouteWarnings)
+	assert.False(t, records[0].FallbackUsed)
+	assert.Equal(t, "", records[0].FallbackReason)
+	assert.True(t, records[0].RouteResolvedAt.IsZero())
+	assert.Equal(t, 0, records[0].RouteAttempt)
 
 	_, err = store.CreateAgentControlTaskRecord(ctx, Task{
 		ID:                  "new-task",

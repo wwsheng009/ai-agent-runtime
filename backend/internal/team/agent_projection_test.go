@@ -338,6 +338,273 @@ func TestAgentControlTaskRegistryUpdatesTask(t *testing.T) {
 	require.Equal(t, []string{"docs", "backend"}, updated.ReadPaths)
 }
 
+func TestAgentControlTaskRegistryCreatesTaskWithRouteAudit(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	resolvedAt := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)
+
+	registry := NewAgentControlTaskRegistry(store)
+	record, err := registry.CreateAgentControlTask(ctx, agentcontrol.TaskCreateRequest{
+		ID:                   "task-create-route",
+		Workflow:             agentcontrol.WorkflowSpawnTeam,
+		TeamID:               teamID,
+		Title:                "Route task",
+		Difficulty:           TaskDifficultyHard,
+		RouteProvider:        " remote-strong ",
+		RouteModel:           " strong-model ",
+		RouteReasoningEffort: " high ",
+		RouteSource:          " difficulty_level ",
+		RouteWarnings:        []string{" fallback checked "},
+		FallbackUsed:         true,
+		FallbackReason:       " provider fallback ",
+		RouteResolvedAt:      resolvedAt,
+		RouteAttempt:         2,
+		Status:               string(TaskStatusReady),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, "remote-strong", record.RouteProvider)
+	require.Equal(t, "strong-model", record.RouteModel)
+	require.Equal(t, "high", record.RouteReasoningEffort)
+	require.Equal(t, "difficulty_level", record.RouteSource)
+	require.Equal(t, []string{"fallback checked"}, record.RouteWarnings)
+	require.True(t, record.FallbackUsed)
+	require.Equal(t, "provider fallback", record.FallbackReason)
+	require.Equal(t, resolvedAt, record.RouteResolvedAt)
+	require.Equal(t, 2, record.RouteAttempt)
+
+	records, err := registry.ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, record.RouteProvider, records[0].RouteProvider)
+	require.Equal(t, record.RouteModel, records[0].RouteModel)
+	require.Equal(t, record.RouteReasoningEffort, records[0].RouteReasoningEffort)
+	require.Equal(t, record.RouteSource, records[0].RouteSource)
+	require.Equal(t, record.RouteWarnings, records[0].RouteWarnings)
+	require.True(t, records[0].FallbackUsed)
+	require.Equal(t, record.FallbackReason, records[0].FallbackReason)
+	require.Equal(t, record.RouteResolvedAt, records[0].RouteResolvedAt)
+	require.Equal(t, record.RouteAttempt, records[0].RouteAttempt)
+}
+
+func TestAgentControlTaskRegistryUpdatesRouteAuditWithoutChangingExecutionState(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-1"})
+	require.NoError(t, err)
+	assignee := "member-1"
+	_, err = store.UpsertTeammate(ctx, Teammate{
+		ID:        assignee,
+		TeamID:    teamID,
+		Name:      "Member One",
+		SessionID: "session-1",
+		State:     TeammateStateIdle,
+	})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:         "task-route-audit",
+		TeamID:     teamID,
+		Title:      "Route audit",
+		Status:     TaskStatusReady,
+		WritePaths: []string{"src/file.go"},
+	})
+	require.NoError(t, err)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+
+	leaseUntil := time.Now().UTC().Add(5 * time.Minute)
+	registry := NewAgentControlTaskRegistry(store)
+	_, claimed, err := registry.ClaimAgentControlTask(ctx, agentcontrol.TaskClaimRequest{
+		ID:              taskID,
+		Workflow:        agentcontrol.WorkflowSpawnTeam,
+		TeamID:          teamID,
+		Assignee:        assignee,
+		LeaseUntil:      leaseUntil,
+		ExpectedVersion: task.Version,
+		WritePaths:      task.WritePaths,
+		UsePathClaims:   true,
+		WorkspaceRoot:   "workspace",
+	})
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	claimedTask, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, claimedTask)
+	require.NotNil(t, claimedTask.Assignee)
+	require.NotNil(t, claimedTask.LeaseUntil)
+	claimedVersion := claimedTask.Version
+	claimsBefore, err := store.ListPathClaims(ctx, teamID)
+	require.NoError(t, err)
+	require.Len(t, claimsBefore, 1)
+
+	resolvedAt := time.Date(2026, 6, 22, 11, 0, 0, 0, time.UTC)
+	record, err := registry.UpdateAgentControlTaskRouteAudit(ctx, agentcontrol.TaskRouteAuditUpdateRequest{
+		ID:                   taskID,
+		Workflow:             agentcontrol.WorkflowSpawnTeam,
+		TeamID:               teamID,
+		RouteProvider:        "remote-strong",
+		RouteModel:           "strong-model",
+		RouteReasoningEffort: "high",
+		RouteSource:          "difficulty_level",
+		RouteWarnings:        []string{"fallback checked"},
+		FallbackUsed:         true,
+		FallbackReason:       "provider fallback",
+		RouteResolvedAt:      resolvedAt,
+		RouteAttempt:         2,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.Equal(t, "remote-strong", record.RouteProvider)
+	require.Equal(t, "strong-model", record.RouteModel)
+	require.Equal(t, "high", record.RouteReasoningEffort)
+	require.Equal(t, "difficulty_level", record.RouteSource)
+	require.Equal(t, []string{"fallback checked"}, record.RouteWarnings)
+	require.True(t, record.FallbackUsed)
+	require.Equal(t, "provider fallback", record.FallbackReason)
+	require.Equal(t, resolvedAt, record.RouteResolvedAt)
+	require.Equal(t, 2, record.RouteAttempt)
+
+	afterRouteTask, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, afterRouteTask)
+	require.Equal(t, TaskStatusRunning, afterRouteTask.Status)
+	require.Equal(t, claimedVersion, afterRouteTask.Version)
+	require.NotNil(t, afterRouteTask.Assignee)
+	require.Equal(t, assignee, *afterRouteTask.Assignee)
+	require.NotNil(t, afterRouteTask.LeaseUntil)
+	require.WithinDuration(t, leaseUntil, *afterRouteTask.LeaseUntil, time.Second)
+	claimsAfter, err := store.ListPathClaims(ctx, teamID)
+	require.NoError(t, err)
+	require.Equal(t, claimsBefore, claimsAfter)
+	mate, err := store.GetTeammate(ctx, assignee)
+	require.NoError(t, err)
+	require.NotNil(t, mate)
+	require.Equal(t, TeammateStateBusy, mate.State)
+
+	records, err := registry.ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, "remote-strong", records[0].RouteProvider)
+	require.Equal(t, "strong-model", records[0].RouteModel)
+	require.Equal(t, "high", records[0].RouteReasoningEffort)
+	require.True(t, records[0].FallbackUsed)
+
+	nextResolvedAt := resolvedAt.Add(time.Minute)
+	err = registry.RecordTaskRouteAudit(ctx, TaskRouteAudit{
+		TeamID: teamID,
+		TaskID: taskID,
+		Route: &TaskExecutionRoute{
+			Provider:        "local-small",
+			Model:           "small-model",
+			ReasoningEffort: "low",
+			Source:          "role_override",
+			ResolvedAt:      nextResolvedAt,
+			Attempt:         3,
+		},
+		RecordedAt: nextResolvedAt,
+	})
+	require.NoError(t, err)
+	records, err = registry.ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, "local-small", records[0].RouteProvider)
+	require.Equal(t, "small-model", records[0].RouteModel)
+	require.Equal(t, "low", records[0].RouteReasoningEffort)
+	require.Equal(t, "role_override", records[0].RouteSource)
+	require.Equal(t, nextResolvedAt, records[0].RouteResolvedAt)
+	require.Equal(t, 3, records[0].RouteAttempt)
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{
+		TeamID:    teamID,
+		EventType: TaskRouteResolvedEvent,
+	})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	payload := events[0].Payload
+	require.Equal(t, taskID, payload["task_id"])
+	require.Equal(t, "local-small", payload["route_provider"])
+	require.Equal(t, "small-model", payload["route_model"])
+	require.Equal(t, "low", payload["route_reasoning_effort"])
+	require.Equal(t, "role_override", payload["route_source"])
+	require.Equal(t, float64(3), payload["route_attempt"])
+}
+
+func TestAgentControlTaskRegistryIgnoresStaleRouteAuditAttempt(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	defer store.Close()
+
+	teamID, err := store.CreateTeam(ctx, Team{ID: "team-route-attempt"})
+	require.NoError(t, err)
+	taskID, err := store.CreateTask(ctx, Task{
+		ID:     "task-route-attempt",
+		TeamID: teamID,
+		Title:  "Route attempt",
+		Status: TaskStatusRunning,
+	})
+	require.NoError(t, err)
+
+	registry := NewAgentControlTaskRegistry(store)
+	newer, err := registry.UpdateAgentControlTaskRouteAudit(ctx, agentcontrol.TaskRouteAuditUpdateRequest{
+		ID:            taskID,
+		Workflow:      agentcontrol.WorkflowSpawnTeam,
+		TeamID:        teamID,
+		RouteProvider: "new-provider",
+		RouteModel:    "new-model",
+		RouteSource:   "difficulty_level",
+		RouteAttempt:  2,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, newer)
+	require.Equal(t, "new-provider", newer.RouteProvider)
+	require.Equal(t, 2, newer.RouteAttempt)
+
+	stale, err := registry.UpdateAgentControlTaskRouteAudit(ctx, agentcontrol.TaskRouteAuditUpdateRequest{
+		ID:            taskID,
+		Workflow:      agentcontrol.WorkflowSpawnTeam,
+		TeamID:        teamID,
+		RouteProvider: "old-provider",
+		RouteModel:    "old-model",
+		RouteSource:   "difficulty_level",
+		RouteAttempt:  1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, stale)
+	require.Equal(t, "new-provider", stale.RouteProvider)
+	require.Equal(t, "new-model", stale.RouteModel)
+	require.Equal(t, 2, stale.RouteAttempt)
+
+	records, err := registry.ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
+		Workflow: agentcontrol.WorkflowSpawnTeam,
+		TeamID:   teamID,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, "new-provider", records[0].RouteProvider)
+	require.Equal(t, "new-model", records[0].RouteModel)
+	require.Equal(t, 2, records[0].RouteAttempt)
+}
+
 func TestAgentControlTaskRegistryRejectsInvalidDifficulty(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewSQLiteStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})

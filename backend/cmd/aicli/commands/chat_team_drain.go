@@ -21,10 +21,13 @@ func awaitNoInteractiveLocalTeamDrain(session *ChatSession) {
 	}
 	if session.ActiveTeam == nil || strings.TrimSpace(session.ActiveTeam.TeamID) == "" {
 		_ = reloadChatRuntimeSessionFromStore(session)
-		return
 	}
 
-	teamID := strings.TrimSpace(session.ActiveTeam.TeamID)
+	binding := resolvedInteractiveTeamBinding(session)
+	if binding == nil || strings.TrimSpace(binding.TeamID) == "" {
+		return
+	}
+	teamID := strings.TrimSpace(binding.TeamID)
 	timeout := resolveNoInteractiveTeamDrainTimeout(session)
 	if timeout <= 0 {
 		timeout = defaultNoInteractiveTeamDrainTimeout
@@ -34,6 +37,36 @@ func awaitNoInteractiveLocalTeamDrain(session *ChatSession) {
 
 	_ = session.LocalRuntimeHost.waitForTeamTerminal(ctx, teamID)
 	_ = reloadChatRuntimeSessionFromStore(session)
+}
+
+func recoverNoInteractiveTerminalTeamSummary(session *ChatSession) (string, bool) {
+	if session == nil || !session.NoInteractive || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil {
+		return "", false
+	}
+	binding := resolvedInteractiveTeamBinding(session)
+	if binding == nil || strings.TrimSpace(binding.TeamID) == "" {
+		return "", false
+	}
+	teamID := strings.TrimSpace(binding.TeamID)
+	record, err := session.LocalRuntimeHost.TeamStore.GetTeam(context.Background(), teamID)
+	if err != nil || record == nil || record.Status == team.TeamStatusActive {
+		return "", false
+	}
+	events, err := session.LocalRuntimeHost.TeamStore.ListTeamEvents(context.Background(), team.TeamEventFilter{
+		TeamID:    teamID,
+		EventType: "team.summary*",
+		Limit:     16,
+	})
+	if err != nil {
+		return "", false
+	}
+	for index := len(events) - 1; index >= 0; index-- {
+		summary := payloadStringValue(events[index].Payload["summary"])
+		if summary != "" {
+			return summary, true
+		}
+	}
+	return "", false
 }
 
 func shouldDisplayInteractivePrompt(session *ChatSession) bool {

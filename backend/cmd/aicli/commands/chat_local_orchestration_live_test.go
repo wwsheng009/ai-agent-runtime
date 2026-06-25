@@ -603,7 +603,7 @@ func TestAICLIChatActorExecutor_LiveDocsPromptClearsPromptBeforeAsyncTimeline(t 
 	deadline := time.Now().Add(45 * time.Second)
 	for {
 		rendered := capture.String()
-		if (strings.Contains(rendered, "• Running ") || strings.Contains(rendered, "• Ran ") || strings.Contains(rendered, "[task] ") || strings.Contains(rendered, "[team summary] ")) &&
+		if (strings.Contains(rendered, "• Running ") || strings.Contains(rendered, "• Completed ") || strings.Contains(rendered, "[task] ") || strings.Contains(rendered, "[team summary] ")) &&
 			strings.Contains(rendered, ui.UserPromptText(0)) {
 			break
 		}
@@ -619,7 +619,7 @@ func TestAICLIChatActorExecutor_LiveDocsPromptClearsPromptBeforeAsyncTimeline(t 
 		trimmed := strings.TrimSpace(line)
 		if strings.Contains(trimmed, "[thinking]") ||
 			strings.Contains(trimmed, "• Running ") ||
-			strings.Contains(trimmed, "• Ran ") ||
+			strings.Contains(trimmed, "• Completed ") ||
 			strings.Contains(trimmed, "[task]") ||
 			strings.Contains(trimmed, "[team]") ||
 			strings.Contains(trimmed, "[team summary]") {

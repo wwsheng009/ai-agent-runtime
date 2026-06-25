@@ -14,8 +14,12 @@ const (
 	// TaskDispatchRequestedEvent records that a team task is being submitted to
 	// a teammate session through the agent-control trigger surface.
 	TaskDispatchRequestedEvent = "task.dispatch.requested"
+	// TaskDispatchStartedEvent records that the teammate assignment has been
+	// delivered and the teammate run is about to start with the resolved route.
+	TaskDispatchStartedEvent = "task.dispatch.started"
 	// TaskDispatchCompletedEvent records the submit result for a teammate task.
 	TaskDispatchCompletedEvent             = "task.dispatch.completed"
+	TaskRouteResolvedEvent                 = "task.route.resolved"
 	TaskDependencyCreatedEvent             = "task.dependency.created"
 	TaskAssignmentMailboxKind              = agentcontrol.MailboxKindTeamTaskAssignment
 	TaskAssignmentControlMessageType       = agentcontrol.MessageTypeTeamTaskAssignment
@@ -37,11 +41,67 @@ func AppendTaskDispatchRequested(ctx context.Context, store Store, request TaskT
 	return appendTaskDispatchEvent(ctx, store, TaskDispatchRequestedEvent, request, nil, nil)
 }
 
+// AppendTaskDispatchStarted persists an audit event for a teammate task after
+// the assignment mailbox has been delivered and immediately before the actor
+// run is submitted.
+func AppendTaskDispatchStarted(ctx context.Context, store Store, request TaskTriggerRequest) (int64, error) {
+	return appendTaskDispatchEvent(ctx, store, TaskDispatchStartedEvent, request, nil, nil)
+}
+
 // AppendTaskDispatchCompleted persists an audit event for a teammate task
 // dispatch result. Missing stores or team IDs are treated as no-op so task
 // execution is not coupled to observability persistence.
 func AppendTaskDispatchCompleted(ctx context.Context, store Store, request TaskTriggerRequest, result *SessionResult, dispatchErr error) (int64, error) {
 	return appendTaskDispatchEvent(ctx, store, TaskDispatchCompletedEvent, request, result, dispatchErr)
+}
+
+// AppendTaskRouteResolved persists the route decision chosen for a teammate
+// task execution attempt. Missing stores or team IDs are treated as no-op so
+// routing observability cannot block execution.
+func AppendTaskRouteResolved(ctx context.Context, store Store, audit TaskRouteAudit) (int64, error) {
+	if store == nil {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	event := TaskRouteResolvedEventFromAudit(audit)
+	if strings.TrimSpace(event.TeamID) == "" {
+		return 0, nil
+	}
+	return store.AppendTeamEvent(ctx, event)
+}
+
+// TaskRouteResolvedEventFromAudit builds the event payload for a teammate route
+// decision without persisting it.
+func TaskRouteResolvedEventFromAudit(audit TaskRouteAudit) TeamEvent {
+	teamID := strings.TrimSpace(audit.TeamID)
+	payload := map[string]interface{}{
+		"team_id":    teamID,
+		"agent_id":   strings.TrimSpace(audit.AgentID),
+		"assignee":   strings.TrimSpace(audit.AgentID),
+		"task_id":    strings.TrimSpace(audit.TaskID),
+		"session_id": strings.TrimSpace(audit.SessionID),
+		"strict":     audit.Strict,
+		"disabled":   audit.Disabled,
+		"via":        taskDispatchViaAgentControl,
+	}
+	appendTaskDispatchRoutePayload(payload, audit.Route)
+	if audit.Disabled && payload["route_source"] == nil {
+		payload["route_source"] = "disabled"
+	}
+	if errText := strings.TrimSpace(audit.Error); errText != "" {
+		payload["route_error"] = truncateLine(sanitizeRouteAuditText(errText), 240)
+	}
+	if !audit.RecordedAt.IsZero() {
+		payload["recorded_at"] = audit.RecordedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return TeamEvent{
+		Type:      TaskRouteResolvedEvent,
+		TeamID:    teamID,
+		Payload:   payload,
+		Timestamp: time.Now().UTC(),
+	}
 }
 
 // BuildTaskAssignmentMailboxMessage creates a durable mailbox envelope for the
@@ -299,7 +359,7 @@ func appendTaskDispatchRoutePayload(payload map[string]interface{}, route *TaskE
 		payload["route_attempt"] = route.Attempt
 	}
 	if routeError := strings.TrimSpace(route.Error); routeError != "" {
-		payload["route_error"] = truncateLine(routeError, 240)
+		payload["route_error"] = truncateLine(sanitizeRouteAuditText(routeError), 240)
 	}
 }
 

@@ -117,6 +117,7 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 	orchestrator := h.teamOrchestrator
 	orchestrator.Store = store
 	orchestrator.Claims = claims
+	orchestrator.ExpertConcurrencyLimit = teamExpertConcurrencyLimit(h.subagentRoutingConfig())
 	applyTeamOrchestratorMailboxWake(orchestrator, mailboxWakeStore)
 
 	mailbox := orchestrator.Mailbox
@@ -177,6 +178,12 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 		}
 		if orchestrator.Runner.Context == nil {
 			orchestrator.Runner.Context = team.NewContextBuilder(store)
+		}
+		if orchestrator.Runner.RouteResolver == nil {
+			orchestrator.Runner.RouteResolver = h.newTeamTaskRouteResolver()
+		}
+		if orchestrator.Runner.RouteAudit == nil {
+			orchestrator.Runner.RouteAudit = newAPITeamTaskRouteAuditSink(store, orchestrator.Events)
 		}
 		if orchestrator.LeadPlanner == nil {
 			orchestrator.LeadPlanner = &team.LeadPlanner{}
@@ -3308,6 +3315,10 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 			return
 		}
 	}
+	route := (*team.TaskExecutionRoute)(nil)
+	if runMeta, ok := team.GetRunMeta(r.Context()); ok {
+		route = team.TaskExecutionRouteFromRunMeta(runMeta)
+	}
 
 	switch req.Outcome.Status {
 	case team.TaskOutcomeDone, team.TaskOutcomeFailed:
@@ -3324,6 +3335,7 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 			TeammateID:    req.TeammateID,
 			Outcome:       applyOutcome,
 			ResultRef:     req.ResultRef,
+			Route:         route.Clone(),
 			DefaultStatus: req.Outcome.Status,
 		})
 		if err != nil {
@@ -3418,6 +3430,7 @@ func (h *Handler) handleTaskOutcome(w http.ResponseWriter, r *http.Request, opti
 			Task:            *current,
 			TeammateID:      req.TeammateID,
 			Outcome:         applyOutcome,
+			Route:           route.Clone(),
 			NotifyRecipient: req.NotifyLead,
 			AutoReplan:      req.AutoReplan,
 		})

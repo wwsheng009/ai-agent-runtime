@@ -275,6 +275,43 @@ func TestTeammateRunnerDisabledRouteKeepsLegacyRequest(t *testing.T) {
 	assert.Empty(t, control.request.RunMeta.Team.RouteProvider)
 }
 
+func TestTeammateRunnerSessionsFallbackRejectsRouteOverride(t *testing.T) {
+	session := &staticSessionClient{
+		result: &SessionResult{
+			Success: true,
+			Output:  "```json\n{\"task_status\":\"done\",\"summary\":\"should not run\"}\n```",
+		},
+	}
+	runner := &TeammateRunner{
+		Sessions: session,
+		RouteResolver: &staticTaskRouteResolver{
+			resolution: &TaskRouteResolution{
+				Route: &TaskExecutionRoute{
+					Provider:        "remote-strong",
+					Model:           "strong-model",
+					ReasoningEffort: "high",
+					Source:          "difficulty_level",
+				},
+			},
+		},
+	}
+
+	result, err := runner.StartTask(context.Background(), Team{ID: "team-1"}, Teammate{
+		ID:        "mate-1",
+		SessionID: "session-1",
+	}, Task{
+		ID:     "task-1",
+		TeamID: "team-1",
+		Title:  "Implement change",
+	})
+	require.Error(t, err)
+	require.NotNil(t, result)
+	assert.Contains(t, err.Error(), "route override requires agent control trigger support")
+	assert.Equal(t, "", session.prompt)
+	assert.False(t, result.Success)
+	assert.NotNil(t, result.Route)
+}
+
 func TestTeammateRunnerStrictRouteFailureBlocksWithoutTriggeringSession(t *testing.T) {
 	control := &capturingTaskTriggerClient{
 		result: &SessionResult{
@@ -311,7 +348,7 @@ func TestTeammateRunnerStrictRouteFailureBlocksWithoutTriggeringSession(t *testi
 	assert.False(t, control.called)
 	assert.True(t, result.Success)
 	assert.True(t, result.Blocked)
-	assert.True(t, result.OutcomeApplied)
+	assert.False(t, result.OutcomeApplied)
 	assert.True(t, result.Structured)
 	assert.Equal(t, TaskOutcomeBlocked, result.Outcome)
 	assert.Equal(t, "task_route_resolution", result.ErrorType)

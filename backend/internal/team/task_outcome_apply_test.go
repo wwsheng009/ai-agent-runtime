@@ -58,6 +58,14 @@ func TestApplyBlockedTaskOutcomeBlocksAndReplans(t *testing.T) {
 		Outcome: TaskOutcomeContract{
 			Summary: "waiting on architecture review",
 		},
+		Route: &TaskExecutionRoute{
+			Difficulty:      TaskDifficultyHard,
+			Provider:        "remote-strong",
+			Model:           "strong-model",
+			ReasoningEffort: "high",
+			Source:          "difficulty_level",
+			Warnings:        []string{"provider_fallback_parent"},
+		},
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -81,6 +89,10 @@ func TestApplyBlockedTaskOutcomeBlocksAndReplans(t *testing.T) {
 	assert.Equal(t, "task.blocked", result.Message.Metadata["event_type"])
 	assert.Equal(t, taskID, result.Message.Metadata["task_id"])
 	assert.Equal(t, "mate-1", result.Message.Metadata["blocked_by"])
+	assert.Equal(t, "remote-strong", result.Message.Metadata["route_provider"])
+	assert.Equal(t, "strong-model", result.Message.Metadata["route_model"])
+	assert.Equal(t, "high", result.Message.Metadata["route_reasoning_effort"])
+	assert.Equal(t, "difficulty_level", result.Message.Metadata["route_source"])
 
 	records, err := NewAgentControlTaskRegistry(store).ListAgentControlTasks(ctx, agentcontrol.TaskFilter{
 		Workflow: agentcontrol.WorkflowSpawnTeam,
@@ -324,6 +336,69 @@ func TestApplyTerminalTaskOutcomeReleasesTaskAndSetsResultRef(t *testing.T) {
 	assert.Equal(t, "mate-1", events[0].Payload["assignee"])
 	assert.Equal(t, "artifact published", events[0].Payload["summary"])
 	assert.Equal(t, "artifact://build-1", events[0].Payload["result_ref"])
+}
+
+func TestApplyTerminalTaskOutcomePublishesRouteMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	assignee := "mate-1"
+	taskID, err := store.CreateTask(ctx, Task{
+		TeamID:   teamID,
+		Title:    "routed terminal task",
+		Status:   TaskStatusRunning,
+		Assignee: &assignee,
+	})
+	require.NoError(t, err)
+	task, err := store.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, task)
+
+	_, err = ApplyTerminalTaskOutcome(ctx, TaskOutcomeApplyServices{
+		Store: store,
+	}, TerminalTaskOutcomeRequest{
+		Task:          *task,
+		TeammateID:    "mate-1",
+		DefaultStatus: TaskOutcomeDone,
+		Outcome: TaskOutcomeContract{
+			Summary: "routed result",
+		},
+		Route: &TaskExecutionRoute{
+			Difficulty:          TaskDifficultyHard,
+			DifficultySource:    "explicit",
+			DifficultyRationale: "Touches route projection.",
+			Provider:            "remote-strong",
+			Model:               "strong-model",
+			ReasoningEffort:     "high",
+			Source:              "difficulty_level",
+			Warnings:            []string{"budget_tokens_capped_by_route"},
+			FallbackUsed:        true,
+			FallbackReason:      "provider_fallback_parent",
+			Attempt:             2,
+		},
+	})
+	require.NoError(t, err)
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	payload := events[0].Payload
+	assert.Equal(t, "task.completed", events[0].Type)
+	assert.Equal(t, taskID, payload["task_id"])
+	assert.Equal(t, "routed result", payload["summary"])
+	assert.Equal(t, TaskDifficultyHard, payload["difficulty"])
+	assert.Equal(t, "explicit", payload["difficulty_source"])
+	assert.Equal(t, "Touches route projection.", payload["difficulty_rationale"])
+	assert.Equal(t, "remote-strong", payload["route_provider"])
+	assert.Equal(t, "strong-model", payload["route_model"])
+	assert.Equal(t, "high", payload["route_reasoning_effort"])
+	assert.Equal(t, "difficulty_level", payload["route_source"])
+	assert.Equal(t, []interface{}{"budget_tokens_capped_by_route"}, payload["route_warnings"])
+	assert.Equal(t, true, payload["fallback_used"])
+	assert.Equal(t, "provider_fallback_parent", payload["fallback_reason"])
+	assert.Equal(t, float64(2), payload["route_attempt"])
 }
 
 func TestApplyTerminalTaskOutcomePublishesTerminalTaskEventOnce(t *testing.T) {

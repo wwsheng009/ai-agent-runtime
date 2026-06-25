@@ -779,6 +779,84 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, id string, status Ta
 	return nil
 }
 
+// UpdateAgentControlTaskRouteAudit updates latest route audit metadata without
+// changing task lifecycle, lease, assignee, version, or path-claim state.
+func (s *SQLiteStore) UpdateAgentControlTaskRouteAudit(ctx context.Context, request agentcontrol.TaskRouteAuditUpdateRequest) (*agentcontrol.TaskRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("team store is not initialized")
+	}
+	request = request.Normalize()
+	if request.ID == "" {
+		return nil, fmt.Errorf("task id is required")
+	}
+	if request.Workflow != "" && request.Workflow != agentcontrol.WorkflowSpawnTeam {
+		return nil, fmt.Errorf("unsupported task workflow: %s", request.Workflow)
+	}
+	if request.Workflow == "" {
+		request.Workflow = agentcontrol.WorkflowSpawnTeam
+	}
+	warningsJSON, err := encodeStringSlice(request.RouteWarnings)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	updated := false
+	if err := s.WithImmediateTx(ctx, func(tx *sql.Tx) error {
+		query := `
+			UPDATE agent_control_task_records
+			SET route_provider = ?, route_model = ?, route_reasoning_effort = ?, route_source = ?,
+				route_warnings_json = ?, fallback_used = ?, fallback_reason = ?, route_resolved_at = ?,
+				route_attempt = ?, updated_at = ?
+			WHERE workflow = ? AND task_id = ?
+		`
+		args := []interface{}{
+			request.RouteProvider,
+			request.RouteModel,
+			request.RouteReasoningEffort,
+			request.RouteSource,
+			warningsJSON,
+			boolInt(request.FallbackUsed),
+			request.FallbackReason,
+			nullableTimeValue(request.RouteResolvedAt),
+			request.RouteAttempt,
+			formatTime(now),
+			request.Workflow,
+			request.ID,
+		}
+		if request.TeamID != "" {
+			query += " AND team_id = ?"
+			args = append(args, request.TeamID)
+		}
+		if request.RouteAttempt > 0 {
+			query += " AND route_attempt <= ?"
+			args = append(args, request.RouteAttempt)
+		}
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("update agent control task route audit: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		updated = affected > 0
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if !updated {
+		current, err := s.getAgentControlTaskRecord(ctx, request.Workflow, request.ID)
+		if err != nil {
+			return nil, err
+		}
+		if current != nil &&
+			(request.TeamID == "" || strings.EqualFold(strings.TrimSpace(current.TeamID), request.TeamID)) &&
+			request.RouteAttempt > 0 &&
+			current.RouteAttempt > request.RouteAttempt {
+			return current, nil
+		}
+		return nil, fmt.Errorf("task not found: %s", request.ID)
+	}
+	return s.getAgentControlTaskRecord(ctx, request.Workflow, request.ID)
+}
+
 // IncrementTaskRetry increments the retry counter for a task.
 func (s *SQLiteStore) IncrementTaskRetry(ctx context.Context, id string) error {
 	if s == nil || s.db == nil {
@@ -1702,7 +1780,10 @@ func (s *SQLiteStore) ListAgentControlTaskRecords(ctx context.Context, filter ag
 	}
 	query := `
 		SELECT task_id, workflow, team_id, parent_task_id, assignee, session_id, agent_path,
-			title, summary, difficulty, difficulty_rationale, status, priority, created_at, updated_at
+			title, summary, difficulty, difficulty_rationale,
+			route_provider, route_model, route_reasoning_effort, route_source, route_warnings_json,
+			fallback_used, fallback_reason, route_resolved_at, route_attempt,
+			status, priority, created_at, updated_at
 		FROM agent_control_task_records
 		WHERE ` + strings.Join(clauses, " AND ") + `
 		ORDER BY priority DESC, created_at ASC, task_id ASC
@@ -1719,50 +1800,118 @@ func (s *SQLiteStore) ListAgentControlTaskRecords(ctx context.Context, filter ag
 
 	records := make([]agentcontrol.TaskRecord, 0)
 	for rows.Next() {
-		var (
-			record       agentcontrol.TaskRecord
-			parentRaw    sql.NullString
-			assigneeRaw  sql.NullString
-			sessionRaw   sql.NullString
-			pathRaw      sql.NullString
-			titleRaw     sql.NullString
-			summaryRaw   sql.NullString
-			statusRaw    sql.NullString
-			createdAtRaw string
-			updatedAtRaw string
-		)
-		if err := rows.Scan(&record.ID, &record.Workflow, &record.TeamID, &parentRaw, &assigneeRaw, &sessionRaw, &pathRaw, &titleRaw, &summaryRaw, &record.Difficulty, &record.DifficultyRationale, &statusRaw, &record.Priority, &createdAtRaw, &updatedAtRaw); err != nil {
+		record, err := scanAgentControlTaskRecord(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan agent control task record: %w", err)
 		}
-		if parentRaw.Valid {
-			record.ParentTaskID = parentRaw.String
-		}
-		if assigneeRaw.Valid {
-			record.Assignee = assigneeRaw.String
-		}
-		if sessionRaw.Valid {
-			record.SessionID = sessionRaw.String
-		}
-		if pathRaw.Valid {
-			record.Path = pathRaw.String
-		}
-		if titleRaw.Valid {
-			record.Title = titleRaw.String
-		}
-		if summaryRaw.Valid {
-			record.Summary = summaryRaw.String
-		}
-		if statusRaw.Valid {
-			record.Status = statusRaw.String
-		}
-		record.CreatedAt = parseTime(createdAtRaw)
-		record.UpdatedAt = parseTime(updatedAtRaw)
-		records = append(records, record.Normalize())
+		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return records, nil
+}
+
+func (s *SQLiteStore) getAgentControlTaskRecord(ctx context.Context, workflow, taskID string) (*agentcontrol.TaskRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("team store is not initialized")
+	}
+	workflow = strings.TrimSpace(workflow)
+	if workflow == "" {
+		workflow = agentcontrol.WorkflowSpawnTeam
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT task_id, workflow, team_id, parent_task_id, assignee, session_id, agent_path,
+			title, summary, difficulty, difficulty_rationale,
+			route_provider, route_model, route_reasoning_effort, route_source, route_warnings_json,
+			fallback_used, fallback_reason, route_resolved_at, route_attempt,
+			status, priority, created_at, updated_at
+		FROM agent_control_task_records
+		WHERE workflow = ? AND task_id = ?
+	`, workflow, strings.TrimSpace(taskID))
+	record, err := scanAgentControlTaskRecord(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load agent control task record: %w", err)
+	}
+	return &record, nil
+}
+
+func scanAgentControlTaskRecord(row taskRowScanner) (agentcontrol.TaskRecord, error) {
+	var (
+		record             agentcontrol.TaskRecord
+		parentRaw          sql.NullString
+		assigneeRaw        sql.NullString
+		sessionRaw         sql.NullString
+		pathRaw            sql.NullString
+		titleRaw           sql.NullString
+		summaryRaw         sql.NullString
+		statusRaw          sql.NullString
+		routeResolvedAtRaw sql.NullString
+		routeWarningsRaw   string
+		fallbackUsedRaw    int
+		createdAtRaw       string
+		updatedAtRaw       string
+	)
+	if err := row.Scan(
+		&record.ID,
+		&record.Workflow,
+		&record.TeamID,
+		&parentRaw,
+		&assigneeRaw,
+		&sessionRaw,
+		&pathRaw,
+		&titleRaw,
+		&summaryRaw,
+		&record.Difficulty,
+		&record.DifficultyRationale,
+		&record.RouteProvider,
+		&record.RouteModel,
+		&record.RouteReasoningEffort,
+		&record.RouteSource,
+		&routeWarningsRaw,
+		&fallbackUsedRaw,
+		&record.FallbackReason,
+		&routeResolvedAtRaw,
+		&record.RouteAttempt,
+		&statusRaw,
+		&record.Priority,
+		&createdAtRaw,
+		&updatedAtRaw,
+	); err != nil {
+		return agentcontrol.TaskRecord{}, err
+	}
+	if parentRaw.Valid {
+		record.ParentTaskID = parentRaw.String
+	}
+	if assigneeRaw.Valid {
+		record.Assignee = assigneeRaw.String
+	}
+	if sessionRaw.Valid {
+		record.SessionID = sessionRaw.String
+	}
+	if pathRaw.Valid {
+		record.Path = pathRaw.String
+	}
+	if titleRaw.Valid {
+		record.Title = titleRaw.String
+	}
+	if summaryRaw.Valid {
+		record.Summary = summaryRaw.String
+	}
+	if statusRaw.Valid {
+		record.Status = statusRaw.String
+	}
+	if routeResolvedAtRaw.Valid {
+		record.RouteResolvedAt = parseTime(routeResolvedAtRaw.String)
+	}
+	record.RouteWarnings = decodeStringSlice(routeWarningsRaw)
+	record.FallbackUsed = fallbackUsedRaw != 0
+	record.CreatedAt = parseTime(createdAtRaw)
+	record.UpdatedAt = parseTime(updatedAtRaw)
+	return record.Normalize(), nil
 }
 
 // InsertMail inserts a mailbox message.
@@ -4079,6 +4228,21 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 				ALTER TABLE agent_control_task_records ADD COLUMN difficulty_rationale TEXT NOT NULL DEFAULT '';
 			`,
 		},
+		{
+			Version: 22,
+			Name:    "agent_control_task_route_metadata",
+			UpSQL: `
+				ALTER TABLE agent_control_task_records ADD COLUMN route_provider TEXT NOT NULL DEFAULT '';
+				ALTER TABLE agent_control_task_records ADD COLUMN route_model TEXT NOT NULL DEFAULT '';
+				ALTER TABLE agent_control_task_records ADD COLUMN route_reasoning_effort TEXT NOT NULL DEFAULT '';
+				ALTER TABLE agent_control_task_records ADD COLUMN route_source TEXT NOT NULL DEFAULT '';
+				ALTER TABLE agent_control_task_records ADD COLUMN route_warnings_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE agent_control_task_records ADD COLUMN fallback_used INTEGER NOT NULL DEFAULT 0;
+				ALTER TABLE agent_control_task_records ADD COLUMN fallback_reason TEXT NOT NULL DEFAULT '';
+				ALTER TABLE agent_control_task_records ADD COLUMN route_resolved_at TEXT;
+				ALTER TABLE agent_control_task_records ADD COLUMN route_attempt INTEGER NOT NULL DEFAULT 0;
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }
@@ -4326,4 +4490,18 @@ func nullableTime(value *time.Time) interface{} {
 		return nil
 	}
 	return formatTime(*value)
+}
+
+func nullableTimeValue(value time.Time) interface{} {
+	if value.IsZero() {
+		return nil
+	}
+	return formatTime(value)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

@@ -339,6 +339,65 @@ func TestFinalizeChatSession_NoInteractiveDrainsAutoStartedTeamLoop(t *testing.T
 	}
 }
 
+func TestAwaitNoInteractiveLocalTeamDrainResolvesActiveTeamFromStore(t *testing.T) {
+	manager, userID, dir, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: t.TempDir() + "/team.db"})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	if _, err := teamStore.CreateTeam(context.Background(), team.Team{
+		ID:            "team-drain",
+		LeadSessionID: runtimeSession.ID,
+		Status:        team.TeamStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
+	if err := runtimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{
+		SessionID: runtimeSession.ID,
+		Status:    runtimechat.SessionRunning,
+		AmbientRunMeta: &team.RunMeta{
+			Team: &team.TeamRunMeta{TeamID: "team-drain", AgentID: "lead"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	lifecycle := &recordingTeamLifecycleService{}
+	session := &ChatSession{
+		SessionManager: manager,
+		RuntimeSession: runtimeSession,
+		SessionUserID:  userID,
+		SessionDir:     dir,
+		NoInteractive:  true,
+		RequestTimeout: time.Second,
+		LocalRuntimeHost: &localChatRuntimeHost{
+			RuntimeStore:  runtimeStore,
+			TeamStore:     teamStore,
+			TeamLifecycle: lifecycle,
+		},
+	}
+
+	awaitNoInteractiveLocalTeamDrain(session)
+
+	if session.ActiveTeam == nil || session.ActiveTeam.TeamID != "team-drain" {
+		t.Fatalf("expected active team to be resolved from store, got %+v", session.ActiveTeam)
+	}
+	if len(lifecycle.waitedTeamIDs) != 1 || lifecycle.waitedTeamIDs[0] != "team-drain" {
+		t.Fatalf("expected drain to wait for team-drain, got %+v", lifecycle.waitedTeamIDs)
+	}
+}
+
 func TestAICLIChatActorExecutor_InteractiveAutoStartRendersTeamTimeline(t *testing.T) {
 	manager, userID, dir, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -1434,13 +1493,13 @@ func chatTimelineToolAliases(expected string) []string {
 		if tail == "" {
 			return []string{"• Running", "• Ran"}
 		}
-		return []string{"• Running " + tail, "• Ran " + tail}
+		return []string{"• Running " + tail, "• Completed " + tail}
 	case strings.HasPrefix(expected, "[tool done] "):
 		tail := strings.TrimSpace(strings.TrimPrefix(expected, "[tool done] "))
 		if tail == "" {
 			return []string{"• Ran"}
 		}
-		return []string{"• Ran " + tail}
+		return []string{"• Completed " + tail}
 	default:
 		return nil
 	}

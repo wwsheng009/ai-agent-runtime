@@ -12,20 +12,21 @@ import (
 
 // Orchestrator coordinates ready task claims and release lifecycle.
 type Orchestrator struct {
-	Store         Store
-	Claims        *PathClaimManager
-	Scheduler     Scheduler
-	Runner        *TeammateRunner
-	Dispatcher    MailboxDispatcher
-	LeaseManager  *LeaseManager
-	LeadPlanner   *LeadPlanner
-	Mailbox       *MailboxService
-	Events        *TeamEventBus
-	MailboxWake   agentcontrol.MailboxWakeSource
-	TaskWake      agentcontrol.TaskWakeSource
-	LeaseDuration time.Duration
-	TickInterval  time.Duration
-	Clock         func() time.Time
+	Store                  Store
+	Claims                 *PathClaimManager
+	Scheduler              Scheduler
+	Runner                 *TeammateRunner
+	Dispatcher             MailboxDispatcher
+	LeaseManager           *LeaseManager
+	LeadPlanner            *LeadPlanner
+	Mailbox                *MailboxService
+	Events                 *TeamEventBus
+	MailboxWake            agentcontrol.MailboxWakeSource
+	TaskWake               agentcontrol.TaskWakeSource
+	LeaseDuration          time.Duration
+	TickInterval           time.Duration
+	Clock                  func() time.Time
+	ExpertConcurrencyLimit int
 }
 
 // NewOrchestrator builds a team orchestrator with defaults.
@@ -332,6 +333,31 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 			writerSlots = 0
 		}
 	}
+	expertSlots := -1
+	if o.ExpertConcurrencyLimit > 0 {
+		running, err := o.Store.ListTasks(ctx, TaskFilter{
+			TeamID: teamID,
+			Status: []TaskStatus{TaskStatusRunning},
+		})
+		if err != nil {
+			return nil, err
+		}
+		now := time.Now().UTC()
+		inUse := 0
+		for _, task := range running {
+			if !isExpertTask(task) {
+				continue
+			}
+			if task.LeaseUntil != nil && task.LeaseUntil.Before(now) {
+				continue
+			}
+			inUse++
+		}
+		expertSlots = o.ExpertConcurrencyLimit - inUse
+		if expertSlots < 0 {
+			expertSlots = 0
+		}
+	}
 
 	scheduler := o.Scheduler
 	if scheduler == nil {
@@ -371,6 +397,15 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 		}
 		return writerSlots > 0
 	}
+	canAssignExpert := func(task Task) bool {
+		if expertSlots < 0 {
+			return true
+		}
+		if !isExpertTask(task) {
+			return true
+		}
+		return expertSlots > 0
+	}
 
 	claimAssignment := func(task Task, mate Teammate) bool {
 		leaseUntil := time.Now().UTC().Add(leaseDuration)
@@ -400,6 +435,9 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 		if writerSlots > 0 && len(task.WritePaths) > 0 {
 			writerSlots--
 		}
+		if expertSlots > 0 && isExpertTask(task) {
+			expertSlots--
+		}
 		return true
 	}
 
@@ -416,6 +454,9 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 			continue
 		}
 		if !canAssignWriter(task) {
+			continue
+		}
+		if !canAssignExpert(task) {
 			continue
 		}
 		_ = claimAssignment(task, mate)
@@ -459,10 +500,18 @@ func (o *Orchestrator) ClaimReadyTasks(ctx context.Context, teamID string, limit
 		if !canAssignWriter(assignment.Task) {
 			continue
 		}
+		if !canAssignExpert(assignment.Task) {
+			continue
+		}
 		_ = claimAssignment(assignment.Task, assignment.Teammate)
 	}
 
 	return assignments, nil
+}
+
+func isExpertTask(task Task) bool {
+	difficulty, ok := NormalizeTaskDifficulty(task.Difficulty)
+	return ok && difficulty == TaskDifficultyExpert
 }
 
 func (o *Orchestrator) tick(ctx context.Context, teamID string) error {
@@ -492,29 +541,32 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 	if o == nil || o.Runner == nil {
 		return
 	}
-	team := o.loadTeam(ctx, teamID)
+	runCtx := DetachedTaskExecutionContext(ctx)
+	team := o.loadTeam(runCtx, teamID)
 	o.publish("task.started", teamID, map[string]interface{}{
 		"task_id":  assignment.Task.ID,
 		"assignee": assignment.Teammate.ID,
 	})
-	o.sendLeadProgress(ctx, teamID, assignment, "progress", fmt.Sprintf("Started task: %s", summarizeTaskTitle(assignment.Task)))
-	result, err := o.Runner.StartTask(ctx, team, assignment.Teammate, assignment.Task)
+	o.sendLeadProgress(runCtx, teamID, assignment, "progress", fmt.Sprintf("Started task: %s", summarizeTaskTitle(assignment.Task)), nil)
+	result, err := o.Runner.StartTask(runCtx, team, assignment.Teammate, assignment.Task)
 	if result != nil && result.OutcomeApplied {
 		summary := strings.TrimSpace(firstNonEmptyString(result.Summary, summarizeRunSuccess(result), summarizeRunFailure(result, err)))
 		switch result.Outcome {
 		case TaskOutcomeBlocked, TaskOutcomeHandoff:
-			o.setTeammateState(ctx, assignment.Teammate.ID, TeammateStateBlocked)
-			o.publish("task.blocked", teamID, map[string]interface{}{
+			o.setTeammateState(runCtx, assignment.Teammate.ID, TeammateStateBlocked)
+			payload := map[string]interface{}{
 				"task_id":    assignment.Task.ID,
 				"assignee":   assignment.Teammate.ID,
 				"summary":    summary,
 				"trace_id":   resultTraceID(result),
 				"handoff_to": result.HandoffTo,
-			})
+			}
+			appendTaskDispatchRoutePayload(payload, result.Route)
+			o.publish("task.blocked", teamID, payload)
 			return
 		case TaskOutcomeFailed:
-			o.setTeammateState(ctx, assignment.Teammate.ID, TeammateStateIdle)
-			o.sendLeadProgress(ctx, teamID, assignment, "failed", summary)
+			o.setTeammateState(runCtx, assignment.Teammate.ID, TeammateStateIdle)
+			o.sendLeadProgress(runCtx, teamID, assignment, "failed", summary, result.Route)
 			if termErr := o.checkTerminalState(context.Background(), teamID); termErr != nil {
 				logger.Debug("team orchestrator: terminal check failed",
 					logger.String("team_id", teamID),
@@ -524,8 +576,8 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 			}
 			return
 		default:
-			o.setTeammateState(ctx, assignment.Teammate.ID, TeammateStateIdle)
-			o.sendLeadProgress(ctx, teamID, assignment, "done", summary)
+			o.setTeammateState(runCtx, assignment.Teammate.ID, TeammateStateIdle)
+			o.sendLeadProgress(runCtx, teamID, assignment, "done", summary, result.Route)
 			if termErr := o.checkTerminalState(context.Background(), teamID); termErr != nil {
 				logger.Debug("team orchestrator: terminal check failed",
 					logger.String("team_id", teamID),
@@ -538,8 +590,8 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 	}
 	if err != nil || result == nil || !result.Success {
 		summary := summarizeRunFailure(result, err)
-		_ = o.failTaskWithRunResult(ctx, assignment, summary, result, err)
-		o.sendLeadProgress(ctx, teamID, assignment, "failed", summary)
+		_ = o.failTaskWithRunResult(runCtx, assignment, summary, result, err)
+		o.sendLeadProgress(runCtx, teamID, assignment, "failed", summary, taskRunRoute(result))
 		if termErr := o.checkTerminalState(context.Background(), teamID); termErr != nil {
 			logger.Debug("team orchestrator: terminal check failed",
 				logger.String("team_id", teamID),
@@ -551,8 +603,9 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 	}
 	if result.Blocked {
 		summary := summarizeRunBlocked(result)
-		plannedTaskIDs, dependencyCount, blockErr := o.BlockTask(ctx, team, assignment, summary, result.HandoffTo)
-		o.publish("task.blocked", teamID, map[string]interface{}{
+		autoReplan := !strings.EqualFold(strings.TrimSpace(result.ErrorType), "task_route_resolution")
+		plannedTaskIDs, dependencyCount, blockErr := o.BlockTask(runCtx, team, assignment, summary, result.HandoffTo, result.Route, autoReplan)
+		payload := map[string]interface{}{
 			"task_id":          assignment.Task.ID,
 			"assignee":         assignment.Teammate.ID,
 			"summary":          summary,
@@ -562,12 +615,14 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 			"block_error":      errorString(blockErr),
 			"replanned":        len(plannedTaskIDs) > 0,
 			"handoff_to":       result.HandoffTo,
-		})
+		}
+		appendTaskDispatchRoutePayload(payload, result.Route)
+		o.publish("task.blocked", teamID, payload)
 		return
 	}
 	summary := summarizeRunSuccess(result)
-	_ = o.completeTaskWithRunResult(ctx, assignment, summary, result)
-	o.sendLeadProgress(ctx, teamID, assignment, "done", summary)
+	_ = o.completeTaskWithRunResult(runCtx, assignment, summary, result)
+	o.sendLeadProgress(runCtx, teamID, assignment, "done", summary, result.Route)
 	if termErr := o.checkTerminalState(context.Background(), teamID); termErr != nil {
 		logger.Debug("team orchestrator: terminal check failed",
 			logger.String("team_id", teamID),
@@ -577,7 +632,7 @@ func (o *Orchestrator) executeAssignment(ctx context.Context, teamID string, ass
 	}
 }
 
-func (o *Orchestrator) sendLeadProgress(ctx context.Context, teamID string, assignment Assignment, kind string, summary string) {
+func (o *Orchestrator) sendLeadProgress(ctx context.Context, teamID string, assignment Assignment, kind string, summary string, route *TaskExecutionRoute) {
 	if o == nil || o.Mailbox == nil {
 		return
 	}
@@ -598,6 +653,13 @@ func (o *Orchestrator) sendLeadProgress(ctx context.Context, teamID string, assi
 	}
 	if taskID := strings.TrimSpace(assignment.Task.ID); taskID != "" {
 		message.TaskID = &taskID
+	}
+	if route != nil {
+		metadata := map[string]interface{}{}
+		appendTaskDispatchRoutePayload(metadata, route)
+		if len(metadata) > 0 {
+			message.Metadata = metadata
+		}
 	}
 	messageID, err := o.Mailbox.Send(ctx, message)
 	if err != nil {
@@ -638,7 +700,7 @@ func (o *Orchestrator) setTeammateState(ctx context.Context, teammateID string, 
 }
 
 // BlockTask marks the task as blocked, releases claims, notifies a recipient, and optionally replans follow-up work.
-func (o *Orchestrator) BlockTask(ctx context.Context, team Team, assignment Assignment, summary, handoffTo string) ([]string, int, error) {
+func (o *Orchestrator) BlockTask(ctx context.Context, team Team, assignment Assignment, summary, handoffTo string, route *TaskExecutionRoute, autoReplan bool) ([]string, int, error) {
 	if o == nil || o.Store == nil {
 		return nil, 0, fmt.Errorf("orchestrator store is not configured")
 	}
@@ -655,6 +717,8 @@ func (o *Orchestrator) BlockTask(ctx context.Context, team Team, assignment Assi
 			Summary:   strings.TrimSpace(summary),
 			HandoffTo: strings.TrimSpace(handoffTo),
 		},
+		Route:      route.Clone(),
+		AutoReplan: &autoReplan,
 	})
 	if err != nil {
 		return nil, 0, err
@@ -702,6 +766,7 @@ func (o *Orchestrator) completeTaskWithRunResult(ctx context.Context, assignment
 			Summary: strings.TrimSpace(summary),
 		},
 		TraceID: resultTraceID(result),
+		Route:   taskRunRoute(result),
 	})
 	return err
 }
@@ -734,11 +799,19 @@ func (o *Orchestrator) failTaskWithRunResult(ctx context.Context, assignment Ass
 			Summary: strings.TrimSpace(summary),
 		},
 		TraceID:       resultTraceID(result),
+		Route:         taskRunRoute(result),
 		Error:         errorText,
 		ErrorType:     taskRunErrorType(result),
 		ErrorMetadata: taskRunErrorMetadata(result),
 	})
 	return err
+}
+
+func taskRunRoute(result *TaskRunResult) *TaskExecutionRoute {
+	if result == nil {
+		return nil
+	}
+	return result.Route.Clone()
 }
 
 func (o *Orchestrator) publish(eventType, teamID string, payload map[string]interface{}) {

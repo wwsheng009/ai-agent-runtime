@@ -24,6 +24,7 @@ type BlockedTaskOutcomeRequest struct {
 	Task            Task
 	TeammateID      string
 	Outcome         TaskOutcomeContract
+	Route           *TaskExecutionRoute
 	NotifyRecipient *bool
 	AutoReplan      *bool
 	SkipStateUpdate bool
@@ -58,6 +59,7 @@ type TerminalTaskOutcomeRequest struct {
 	TeammateID      string
 	Outcome         TaskOutcomeContract
 	ResultRef       *string
+	Route           *TaskExecutionRoute
 	DefaultStatus   TaskOutcomeStatus
 	SkipStateUpdate bool
 	TraceID         string
@@ -183,6 +185,7 @@ func emitTerminalTaskOutcomeEvent(ctx context.Context, services TaskOutcomeApply
 	if result.ResultRef != nil && strings.TrimSpace(*result.ResultRef) != "" {
 		payload["result_ref"] = strings.TrimSpace(*result.ResultRef)
 	}
+	appendTaskDispatchRoutePayload(payload, req.Route)
 	if traceID := strings.TrimSpace(req.TraceID); traceID != "" {
 		payload["trace_id"] = traceID
 	}
@@ -330,7 +333,7 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 	}
 	if notifyRecipient && services.Mailbox != nil {
 		recipient := firstNonEmptyString(handoffTo, "lead")
-		message := BuildBlockedTaskOutcomeMailboxMessage(teamRecord.ID, taskID, teammateID, recipient, summary, normalized)
+		message := buildBlockedTaskOutcomeMailboxMessage(teamRecord.ID, taskID, teammateID, recipient, summary, normalized, req.Route)
 		messageID, err := services.Mailbox.Send(ctx, message)
 		if err != nil {
 			return nil, err
@@ -387,6 +390,10 @@ func ApplyBlockedTaskOutcome(ctx context.Context, services TaskOutcomeApplyServi
 // blocked/handoff task outcomes while carrying the AgentControl task lifecycle
 // envelope needed by session mailbox mirrors and future control substrates.
 func BuildBlockedTaskOutcomeMailboxMessage(teamID, taskID, teammateID, recipient, summary string, outcome TaskOutcomeContract) MailMessage {
+	return buildBlockedTaskOutcomeMailboxMessage(teamID, taskID, teammateID, recipient, summary, outcome, nil)
+}
+
+func buildBlockedTaskOutcomeMailboxMessage(teamID, taskID, teammateID, recipient, summary string, outcome TaskOutcomeContract, route *TaskExecutionRoute) MailMessage {
 	teamID = strings.TrimSpace(teamID)
 	taskID = strings.TrimSpace(taskID)
 	teammateID = strings.TrimSpace(teammateID)
@@ -423,6 +430,7 @@ func BuildBlockedTaskOutcomeMailboxMessage(teamID, taskID, teammateID, recipient
 	if outcomeSummary := strings.TrimSpace(outcome.Summary); outcomeSummary != "" {
 		metadata["summary"] = outcomeSummary
 	}
+	appendTaskDispatchRoutePayload(metadata, route)
 	var taskIDPtr *string
 	if taskID != "" {
 		taskIDValue := taskID
