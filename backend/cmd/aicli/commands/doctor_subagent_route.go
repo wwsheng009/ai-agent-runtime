@@ -13,6 +13,10 @@ import (
 )
 
 type doctorSubagentRouteOptions struct {
+	Workflow              string
+	TeamID                string
+	Teammate              string
+	TaskID                string
 	Role                  string
 	Goal                  string
 	Difficulty            string
@@ -23,6 +27,7 @@ type doctorSubagentRouteOptions struct {
 	BudgetTokens          int
 	Timeout               time.Duration
 	ReadOnly              bool
+	WritePaths            []string
 	ParentProvider        string
 	ParentModel           string
 	ParentReasoningEffort string
@@ -40,16 +45,21 @@ type doctorSubagentRouteReport struct {
 }
 
 type doctorSubagentRouteRequestReport struct {
-	Role                string `json:"role,omitempty"`
-	Goal                string `json:"goal,omitempty"`
-	Difficulty          string `json:"difficulty,omitempty"`
-	DifficultyRationale string `json:"difficulty_rationale,omitempty"`
-	Provider            string `json:"provider,omitempty"`
-	Model               string `json:"model,omitempty"`
-	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
-	BudgetTokens        int    `json:"budget_tokens,omitempty"`
-	Timeout             string `json:"timeout,omitempty"`
-	ReadOnly            bool   `json:"read_only,omitempty"`
+	Workflow            string   `json:"workflow,omitempty"`
+	TeamID              string   `json:"team_id,omitempty"`
+	Teammate            string   `json:"teammate,omitempty"`
+	TaskID              string   `json:"task_id,omitempty"`
+	Role                string   `json:"role,omitempty"`
+	Goal                string   `json:"goal,omitempty"`
+	Difficulty          string   `json:"difficulty,omitempty"`
+	DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
+	Provider            string   `json:"provider,omitempty"`
+	Model               string   `json:"model,omitempty"`
+	ReasoningEffort     string   `json:"reasoning_effort,omitempty"`
+	BudgetTokens        int      `json:"budget_tokens,omitempty"`
+	Timeout             string   `json:"timeout,omitempty"`
+	ReadOnly            bool     `json:"read_only,omitempty"`
+	WritePaths          []string `json:"write_paths,omitempty"`
 }
 
 type doctorSubagentRouteParentReport struct {
@@ -100,6 +110,11 @@ func newDoctorSubagentRouteCommand(getCfg func() *config.Config) *cobra.Command 
 			renderDoctorSubagentRouteReport(report, outputOptions)
 		},
 	}
+	cmd.Flags().StringVar(&opts.Workflow, "workflow", "", "workflow hint，例如 spawn_agent 或 spawn_team")
+	cmd.Flags().StringVar(&opts.TeamID, "team-id", "", "spawn_team team id，仅用于 dry-run 上下文")
+	cmd.Flags().StringVar(&opts.Teammate, "teammate", "", "spawn_team teammate id/profile hint，仅用于 dry-run 上下文")
+	cmd.Flags().StringVar(&opts.TaskID, "task", "", "spawn_team task id，仅用于 dry-run 上下文")
+	cmd.Flags().StringVar(&opts.TaskID, "task-id", "", "spawn_team task id，仅用于 dry-run 上下文")
 	cmd.Flags().StringVar(&opts.Role, "role", "", "子任务 role，例如 researcher、writer、verifier")
 	cmd.Flags().StringVar(&opts.Goal, "goal", "", "子任务 goal，用于难度缺失时的启发式推断")
 	cmd.Flags().StringVar(&opts.Difficulty, "difficulty", "", "子任务难度 easy|normal|hard|expert 或别名")
@@ -110,6 +125,7 @@ func newDoctorSubagentRouteCommand(getCfg func() *config.Config) *cobra.Command 
 	cmd.Flags().IntVar(&opts.BudgetTokens, "budget-tokens", 0, "子任务 token 预算")
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", 0, "子任务 timeout，例如 300s")
 	cmd.Flags().BoolVar(&opts.ReadOnly, "read-only", true, "按只读子任务预览")
+	cmd.Flags().StringArrayVar(&opts.WritePaths, "write-path", nil, "spawn_team 写路径 hint，可重复")
 	cmd.Flags().StringVar(&opts.ParentProvider, "parent-provider", "", "parent provider，留空使用默认 provider")
 	cmd.Flags().StringVar(&opts.ParentModel, "parent-model", "", "parent model，留空使用 parent provider 默认模型")
 	cmd.Flags().StringVar(&opts.ParentReasoningEffort, "parent-reasoning-effort", "", "parent reasoning_effort fallback")
@@ -126,8 +142,22 @@ func runDoctorSubagentRoute(cfg *config.Config, opts doctorSubagentRouteOptions)
 
 	catalog := newDoctorSubagentRouteCatalog(cfg)
 	parent := resolveDoctorSubagentRouteParent(cfg, catalog, opts)
+	workflow := normalizeDoctorRouteWorkflow(opts.Workflow)
+	writePaths := normalizeDoctorRouteStringSlice(opts.WritePaths)
+	readOnly := opts.ReadOnly
+	if len(writePaths) > 0 {
+		readOnly = false
+	}
+	role := strings.TrimSpace(opts.Role)
+	if role == "" && workflow == "spawn_team" {
+		if len(writePaths) > 0 {
+			role = "writer"
+		} else {
+			role = strings.TrimSpace(opts.Teammate)
+		}
+	}
 	task := modelrouting.TaskHint{
-		Role:                strings.TrimSpace(opts.Role),
+		Role:                role,
 		Goal:                strings.TrimSpace(opts.Goal),
 		Difficulty:          strings.TrimSpace(opts.Difficulty),
 		DifficultyRationale: strings.TrimSpace(opts.DifficultyRationale),
@@ -136,7 +166,7 @@ func runDoctorSubagentRoute(cfg *config.Config, opts doctorSubagentRouteOptions)
 		ReasoningEffort:     strings.TrimSpace(opts.ReasoningEffort),
 		BudgetTokens:        opts.BudgetTokens,
 		Timeout:             opts.Timeout,
-		ReadOnly:            opts.ReadOnly,
+		ReadOnly:            readOnly,
 	}
 	routing := (*config.AICLISubagentRoutingConfig)(nil)
 	if cfg.AICLI != nil && cfg.AICLI.Subagents != nil {
@@ -156,6 +186,10 @@ func runDoctorSubagentRoute(cfg *config.Config, opts doctorSubagentRouteOptions)
 		ConfigPath:     strings.TrimSpace(cfg.ConfigFilePath),
 		RoutingEnabled: modelrouting.RoutingEnabled(routing),
 		Request: doctorSubagentRouteRequestReport{
+			Workflow:            workflow,
+			TeamID:              strings.TrimSpace(opts.TeamID),
+			Teammate:            strings.TrimSpace(opts.Teammate),
+			TaskID:              strings.TrimSpace(opts.TaskID),
 			Role:                task.Role,
 			Goal:                task.Goal,
 			Difficulty:          task.Difficulty,
@@ -166,6 +200,7 @@ func runDoctorSubagentRoute(cfg *config.Config, opts doctorSubagentRouteOptions)
 			BudgetTokens:        task.BudgetTokens,
 			Timeout:             durationString(task.Timeout),
 			ReadOnly:            task.ReadOnly,
+			WritePaths:          writePaths,
 		},
 		Parent: doctorSubagentRouteParentReport{
 			Provider:        parent.Provider,
@@ -194,6 +229,41 @@ func runDoctorSubagentRoute(cfg *config.Config, opts doctorSubagentRouteOptions)
 	return report, nil, nil
 }
 
+func normalizeDoctorRouteWorkflow(workflow string) string {
+	workflow = strings.ToLower(strings.TrimSpace(workflow))
+	switch workflow {
+	case "", "subagent", "spawn_agent", "spawn-agent":
+		return ""
+	case "team", "spawn_team", "spawn-team":
+		return "spawn_team"
+	default:
+		return workflow
+	}
+}
+
+func normalizeDoctorRouteStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, item := range strings.Split(value, ",") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			key := strings.ToLower(item)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			normalized = append(normalized, item)
+		}
+	}
+	return normalized
+}
+
 func renderDoctorSubagentRouteReport(report *doctorSubagentRouteReport, outputOptions structuredOutputOptions) {
 	if isJSONOutputFormat(outputOptions.Format) {
 		printCommandJSONOutput("doctor subagent-route", outputOptions.Envelope, report)
@@ -212,9 +282,22 @@ func renderDoctorSubagentRouteReport(report *doctorSubagentRouteReport, outputOp
 	fmt.Printf("Routing enabled: %v\n", report.RoutingEnabled)
 	fmt.Println()
 	fmt.Println("[Request]")
+	if report.Request.Workflow != "" {
+		fmt.Printf("  Workflow:      %s\n", report.Request.Workflow)
+	}
+	if report.Request.TeamID != "" || report.Request.Teammate != "" || report.Request.TaskID != "" {
+		fmt.Printf("  Team task:     team=%s teammate=%s task=%s\n",
+			emptyIfBlank(report.Request.TeamID),
+			emptyIfBlank(report.Request.Teammate),
+			emptyIfBlank(report.Request.TaskID),
+		)
+	}
 	fmt.Printf("  Role:          %s\n", emptyIfBlank(report.Request.Role))
 	fmt.Printf("  Difficulty:    %s\n", emptyIfBlank(report.Request.Difficulty))
 	fmt.Printf("  Read only:     %v\n", report.Request.ReadOnly)
+	if len(report.Request.WritePaths) > 0 {
+		fmt.Printf("  Write paths:   %s\n", strings.Join(report.Request.WritePaths, ", "))
+	}
 	if report.Request.Goal != "" {
 		fmt.Printf("  Goal:          %s\n", report.Request.Goal)
 	}

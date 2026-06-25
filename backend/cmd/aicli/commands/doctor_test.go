@@ -180,6 +180,62 @@ func TestRunDoctorSubagentRouteUsesConfiguredHardRoute(t *testing.T) {
 	}
 }
 
+func TestRunDoctorSubagentRouteSpawnTeamWritePathPreview(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "parent",
+			Items: map[string]config.Provider{
+				"parent": {Enabled: true, DefaultModel: "parent-model"},
+				"strong": {Enabled: true, DefaultModel: "strong-model"},
+			},
+		},
+		AICLI: &config.AICLIConfig{
+			Subagents: &config.AICLISubagentsConfig{
+				Routing: &config.AICLISubagentRoutingConfig{
+					Enabled: &enabled,
+					Roles: map[string]map[string]config.AICLISubagentRouteProfile{
+						"writer": {
+							"hard": {Provider: "strong", Model: "strong-model", ReasoningEffort: "high"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	report, _, err := runDoctorSubagentRoute(cfg, doctorSubagentRouteOptions{
+		Workflow:   "spawn_team",
+		TeamID:     "team-1",
+		Teammate:   "member-1",
+		TaskID:     "task-1",
+		Difficulty: "hard",
+		WritePaths: []string{"src/foo.go", "src/foo.go"},
+		ReadOnly:   true,
+	})
+	if err != nil {
+		t.Fatalf("runDoctorSubagentRoute failed: %v", err)
+	}
+	if report.Request.Workflow != "spawn_team" ||
+		report.Request.TeamID != "team-1" ||
+		report.Request.Teammate != "member-1" ||
+		report.Request.TaskID != "task-1" {
+		t.Fatalf("unexpected spawn_team request context: %#v", report.Request)
+	}
+	if report.Request.Role != "writer" || report.Request.ReadOnly {
+		t.Fatalf("expected write-path spawn_team preview to infer writer writable task, got %#v", report.Request)
+	}
+	if len(report.Request.WritePaths) != 1 || report.Request.WritePaths[0] != "src/foo.go" {
+		t.Fatalf("unexpected write paths: %#v", report.Request.WritePaths)
+	}
+	if report.Decision.Provider != "strong" ||
+		report.Decision.Model != "strong-model" ||
+		report.Decision.ReasoningEffort != "high" ||
+		report.Decision.Source != "role_override" {
+		t.Fatalf("unexpected spawn_team route decision: %#v", report.Decision)
+	}
+}
+
 func TestRunDoctorSubagentRouteUsesChatDefaultsForParent(t *testing.T) {
 	enabled := true
 	cfg := &config.Config{

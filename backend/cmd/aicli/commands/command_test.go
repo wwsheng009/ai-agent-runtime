@@ -616,11 +616,11 @@ func TestResolveChatReasoningEffort_UsesNVIDIAFallbackCapability(t *testing.T) {
 	}
 
 	effort, warning, err = resolveChatReasoningEffort(provider, "z-ai/glm4.7", "max", true)
-	if err == nil {
-		t.Fatal("expected explicit unsupported nvidia effort to fail")
+	if err != nil {
+		t.Fatalf("expected nil error for explicit custom effort, got %v", err)
 	}
-	if effort != "" || warning != "" {
-		t.Fatalf("expected empty effort/warning on explicit error, got effort=%q warning=%q", effort, warning)
+	if effort != "max" || !strings.Contains(warning, "已强制设置") {
+		t.Fatalf("expected effort=max with forced warning, got effort=%q warning=%q", effort, warning)
 	}
 }
 
@@ -650,11 +650,11 @@ func TestResolveChatReasoningEffort_UsesSensenovaFallbackCapability(t *testing.T
 	}
 
 	effort, warning, err = resolveChatReasoningEffort(provider, "sensenova-6.7-flash-lite", "xhigh", true)
-	if err == nil {
-		t.Fatal("expected explicit unsupported sensenova effort to fail")
+	if err != nil {
+		t.Fatalf("expected nil error for explicit custom effort, got %v", err)
 	}
-	if effort != "" || warning != "" {
-		t.Fatalf("expected empty effort/warning on explicit error, got effort=%q warning=%q", effort, warning)
+	if effort != "xhigh" || !strings.Contains(warning, "已强制设置") {
+		t.Fatalf("expected effort=xhigh with forced warning, got effort=%q warning=%q", effort, warning)
 	}
 }
 

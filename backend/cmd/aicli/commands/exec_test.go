@@ -2,15 +2,19 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 func newTestExecCommand() *cobra.Command {
@@ -256,6 +260,99 @@ func TestExecOutputLastMessageWritesFile(t *testing.T) {
 	}
 	if string(data) != "final message" {
 		t.Fatalf("unexpected last message file content: %q", string(data))
+	}
+}
+
+func TestExecuteExecDrainsNoInteractiveTeamOnTurnError(t *testing.T) {
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	lifecycle := &recordingTeamLifecycleService{}
+	processor := NewExecEventProcessor(true, &bytes.Buffer{}, "")
+	session := &ExecSession{
+		Options: &ExecOptions{
+			Prompt:       "trigger error",
+			OutputFormat: "text",
+		},
+		Processor: processor,
+		ChatSession: &ChatSession{
+			ProviderName:   "test-provider",
+			Model:          "test-model",
+			NoInteractive:  true,
+			RequestTimeout: time.Second,
+			ChatExecutor: &fakeChatExecutor{
+				err: errors.New("lead request timed out"),
+			},
+			ActiveTeam: &chatTeamBinding{TeamID: "team-drain"},
+			LocalRuntimeHost: &localChatRuntimeHost{
+				TeamStore:     teamStore,
+				TeamLifecycle: lifecycle,
+			},
+		},
+	}
+
+	err = executeExec(context.Background(), session)
+	if err == nil {
+		t.Fatal("expected executeExec error")
+	}
+	if len(lifecycle.waitedTeamIDs) != 1 || lifecycle.waitedTeamIDs[0] != "team-drain" {
+		t.Fatalf("expected error path to drain team-drain, got %+v", lifecycle.waitedTeamIDs)
+	}
+}
+
+func TestExecuteExecRecoversTerminalTeamSummaryAfterTurnError(t *testing.T) {
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	if _, err := teamStore.CreateTeam(context.Background(), team.Team{
+		ID:     "team-done",
+		Status: team.TeamStatusDone,
+	}); err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if _, err := teamStore.AppendTeamEvent(context.Background(), team.TeamEvent{
+		Type:      "team.summary",
+		TeamID:    "team-done",
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]interface{}{
+			"summary": "team_id: team-done\nfinal status: done\ntask summary: recovered",
+		},
+	}); err != nil {
+		t.Fatalf("AppendTeamEvent: %v", err)
+	}
+
+	processor := NewExecEventProcessor(true, &bytes.Buffer{}, "")
+	session := &ExecSession{
+		Options: &ExecOptions{
+			Prompt:       "trigger error",
+			OutputFormat: "text",
+		},
+		Processor: processor,
+		ChatSession: &ChatSession{
+			ProviderName:  "test-provider",
+			Model:         "test-model",
+			NoInteractive: true,
+			ChatExecutor: &fakeChatExecutor{
+				err: errors.New("wait_team deadline exceeded"),
+			},
+			ActiveTeam: &chatTeamBinding{TeamID: "team-done"},
+			LocalRuntimeHost: &localChatRuntimeHost{
+				TeamStore:     teamStore,
+				TeamLifecycle: &recordingTeamLifecycleService{},
+			},
+		},
+	}
+
+	if err := executeExec(context.Background(), session); err != nil {
+		t.Fatalf("expected terminal team summary recovery, got %v", err)
+	}
+	if got := processor.GetFinalMessage(); !strings.Contains(got, "task summary: recovered") {
+		t.Fatalf("expected recovered final summary, got %q", got)
 	}
 }
 

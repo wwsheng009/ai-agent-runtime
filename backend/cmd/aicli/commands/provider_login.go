@@ -209,6 +209,7 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		groupingProtocol = validationLoginProtocol
 	}
 	modelGroups := groupProviderLoginModelsByProviderTemplate(providerName, groupingProtocol, loginProtocol, candidate, modelsResult.Models, modelCardCatalog, authMode)
+	modelGroups = ensureExplicitProviderLoginModelGroup(loginProtocol, candidate, modelsResult.Models, modelGroups, modelCardCatalog, authMode)
 	primaryGroupIndex := selectPrimaryProviderLoginModelGroup(modelGroups, loginProtocol, candidate, modelCardCatalog)
 	if primaryGroupIndex < 0 {
 		return nil, fmt.Errorf("models endpoint returned no supported models")
@@ -887,6 +888,63 @@ func groupProviderLoginModelsByProviderTemplate(
 		groups[i].Models = dedupeProviderModels(groups[i].Models)
 	}
 	return groups
+}
+
+func ensureExplicitProviderLoginModelGroup(
+	requestedLoginProtocol string,
+	provider config.Provider,
+	models []providerModelInfo,
+	groups []providerLoginModelGroup,
+	catalog *modelcard.Catalog,
+	authMode string,
+) []providerLoginModelGroup {
+	if isAutoLoginProtocol(requestedLoginProtocol) || len(models) == 0 {
+		return groups
+	}
+	runtimeProtocol := runtimeProtocolForLoginProtocol(requestedLoginProtocol)
+	if strings.EqualFold(runtimeProtocol, "openai") {
+		return groups
+	}
+	template, hasTemplate := resolveProviderLoginProviderTemplate(catalog, runtimeProtocol, provider)
+	if providerLoginModelGroupsContainExplicitProtocol(groups, runtimeProtocol, template, hasTemplate) {
+		return groups
+	}
+	loginProtocol := loginProtocolForProviderTemplate(template, hasTemplate, requestedLoginProtocol, authMode)
+	groupRuntimeProtocol := runtimeProtocolForLoginProtocol(loginProtocol)
+	group := providerLoginModelGroup{
+		Key:              providerLoginModelGroupKey(groupRuntimeProtocol, template, hasTemplate),
+		LoginProtocol:    loginProtocol,
+		RuntimeProtocol:  groupRuntimeProtocol,
+		ProviderTemplate: template,
+		HasTemplate:      hasTemplate,
+	}
+	for _, model := range models {
+		groupModel := model
+		groupModel.ID = normalizeProviderModelID(groupModel.ID, loginProtocol)
+		if strings.TrimSpace(groupModel.DisplayName) == "" {
+			groupModel.DisplayName = groupModel.ID
+		}
+		if strings.TrimSpace(groupModel.ID) != "" {
+			group.Models = append(group.Models, groupModel)
+		}
+	}
+	group.Models = dedupeProviderModels(group.Models)
+	if len(group.Models) == 0 {
+		return groups
+	}
+	return []providerLoginModelGroup{group}
+}
+
+func providerLoginModelGroupsContainExplicitProtocol(groups []providerLoginModelGroup, runtimeProtocol string, template modelcard.ProviderTemplate, hasTemplate bool) bool {
+	for _, group := range groups {
+		if hasTemplate && group.HasTemplate && sameProviderLoginTemplateID(group.ProviderTemplate, template) {
+			return true
+		}
+		if strings.EqualFold(group.RuntimeProtocol, runtimeProtocol) {
+			return true
+		}
+	}
+	return false
 }
 
 func providerLoginAutoImageModelTemplate(catalog *modelcard.Catalog, requestedLoginProtocol, modelID string, applied []modelcard.AppliedCard, hasTemplate bool) (modelcard.ProviderTemplate, bool) {

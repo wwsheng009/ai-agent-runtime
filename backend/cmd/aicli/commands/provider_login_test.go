@@ -371,6 +371,49 @@ func TestRunProviderLogin_AppliesAnthropicModelCard(t *testing.T) {
 	}
 }
 
+func TestRunProviderLogin_ExplicitAnthropicKeepsAnthropicEndpointForDeepSeekModels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/anthropic/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"deepseek-v4-flash"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+	baseURL := server.URL + "/anthropic"
+
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:        cfg,
+		ProviderName:  "deepseek_anthropic",
+		LoginProtocol: "anthropic",
+		BaseURL:       baseURL,
+		APIKey:        "sk-ant-test",
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if result.Protocol != "anthropic" || result.LoginProtocol != "anthropic" {
+		t.Fatalf("explicit anthropic login should not switch protocols, got %+v", result)
+	}
+	provider := cfg.Providers.Items["deepseek_anthropic"]
+	if provider.Protocol != "anthropic" || provider.BaseURL != baseURL || provider.APIPath != "/v1/messages" || provider.ForwardURL != "/v1/messages" {
+		t.Fatalf("expected anthropic provider endpoint fields, got %+v", provider)
+	}
+	if endpoint := buildProviderURL(provider, "/v1/messages", "deepseek-v4-flash"); endpoint != server.URL+"/anthropic/v1/messages" {
+		t.Fatalf("unexpected anthropic endpoint: %s", endpoint)
+	}
+	if _, exists := cfg.Providers.Items["deepseek_anthropic_openai"]; exists {
+		t.Fatalf("explicit anthropic login should not create an openai primary fallback: %+v", cfg.Providers.Items["deepseek_anthropic_openai"])
+	}
+}
+
 func TestRunProviderLogin_GroupsModelsByProviderTemplate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"claude-sonnet-4-6"},{"id":"gpt-image-2"}]}`))

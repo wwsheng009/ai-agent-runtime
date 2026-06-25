@@ -385,6 +385,13 @@ func executeExec(ctx context.Context, session *ExecSession) error {
 	response, err := sendMessage(chatSession, opts.Prompt)
 	duration := time.Since(started)
 	if err != nil {
+		awaitNoInteractiveLocalTeamDrain(chatSession)
+		if recovered, ok := recoverNoInteractiveTerminalTeamSummary(chatSession); ok {
+			response = recovered
+			err = nil
+		}
+	}
+	if err != nil {
 		return handleExecTurnError(ctx, processor, turnID, duration, opts, err)
 	}
 	if strings.TrimSpace(opts.OutputSchema) != "" {
