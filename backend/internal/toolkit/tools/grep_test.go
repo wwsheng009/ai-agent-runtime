@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,6 +126,35 @@ func TestGrepTool(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGrepTool_BuiltinWalkerRespectsCancelledContext(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("hello\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(string) (string, error) {
+		return "", exec.ErrNotFound
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := tool.Execute(ctx, map[string]interface{}{
+		"pattern": "hello",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("Execute returned unexpected direct error: %v", err)
+	}
+	if result == nil || result.Error == nil {
+		t.Fatalf("expected cancelled grep result error, got %#v", result)
+	}
+	if !errors.Is(result.Error, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", result.Error)
 	}
 }
 

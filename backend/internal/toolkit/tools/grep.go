@@ -677,6 +677,9 @@ func (g *GrepTool) isRgAvailable() bool {
 
 // Execute 实现 Tool 接口
 func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	opts, err := g.parseOptions(params)
 	if err != nil {
 		return &toolkit.ToolResult{
@@ -769,7 +772,7 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 		return result, nil
 	}
 
-	return g.searchWithWalker(opts, re), nil
+	return g.searchWithWalker(ctx, opts, re), nil
 }
 
 type rgCompatArgs struct {
@@ -3909,20 +3912,20 @@ type fileMatchCount struct {
 	count    int
 }
 
-func (g *GrepTool) searchWithWalker(opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
+func (g *GrepTool) searchWithWalker(ctx context.Context, opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
 	switch opts.mode {
 	case grepModeFiles:
-		return g.walkerSearchFiles(opts, re)
+		return g.walkerSearchFiles(ctx, opts, re)
 	case grepModeFilesWithout:
-		return g.walkerSearchFilesWithout(opts, re)
+		return g.walkerSearchFilesWithout(ctx, opts, re)
 	case grepModeCount:
-		return g.walkerSearchCount(opts, re)
+		return g.walkerSearchCount(ctx, opts, re)
 	default:
-		return g.walkerSearchContent(opts, re)
+		return g.walkerSearchContent(ctx, opts, re)
 	}
 }
 
-func (g *GrepTool) walkerSearchContent(opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
+func (g *GrepTool) walkerSearchContent(ctx context.Context, opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
 	matches := make([]grepMatch, 0, 16)
 	matchCount := 0
 	var stats *grepStats
@@ -3930,7 +3933,10 @@ func (g *GrepTool) walkerSearchContent(opts *grepOptions, re *regexp.Regexp) *to
 		stats = &grepStats{}
 	}
 
-	err := g.walkFiles(opts, func(path string, relPath string) error {
+	err := g.walkFiles(ctx, opts, func(path string, relPath string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if hasExplicitZeroMaxCount(opts) {
 			if stats != nil {
 				if info, statErr := os.Stat(path); statErr == nil {
@@ -3944,6 +3950,9 @@ func (g *GrepTool) walkerSearchContent(opts *grepOptions, re *regexp.Regexp) *to
 		if err != nil {
 			return nil
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if stats != nil {
 			if info, statErr := os.Stat(path); statErr == nil {
 				stats.FilesSearched++
@@ -3955,6 +3964,9 @@ func (g *GrepTool) walkerSearchContent(opts *grepOptions, re *regexp.Regexp) *to
 		matchedLinesThisFile := 0
 		actualMatchesThisFile := 0
 		for i, line := range lines {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !lineSatisfiesMatch(re, line, opts.invertMatch) {
 				continue
 			}
@@ -4003,7 +4015,15 @@ func (g *GrepTool) walkerSearchContent(opts *grepOptions, re *regexp.Regexp) *to
 	// Build output with optional context
 	var results []string
 	if (opts.beforeContext > 0 || opts.afterContext > 0) && len(matches) > 0 && !opts.onlyMatching {
-		results = g.buildContextOutput(opts, matches)
+		var contextErr error
+		results, contextErr = g.buildContextOutput(ctx, opts, matches)
+		if contextErr != nil {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("搜索失败: %w", contextErr),
+			}
+		}
 	} else {
 		results = make([]string, len(matches))
 		for i, m := range matches {
@@ -4016,7 +4036,7 @@ func (g *GrepTool) walkerSearchContent(opts *grepOptions, re *regexp.Regexp) *to
 	return buildGrepResult(opts, results, matchCount, truncated, stats)
 }
 
-func (g *GrepTool) walkerSearchFiles(opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
+func (g *GrepTool) walkerSearchFiles(ctx context.Context, opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
 	fileSet := make(map[string]struct{})
 	results := make([]string, 0, 16)
 	var stats *grepStats
@@ -4024,7 +4044,10 @@ func (g *GrepTool) walkerSearchFiles(opts *grepOptions, re *regexp.Regexp) *tool
 		stats = &grepStats{}
 	}
 
-	err := g.walkFiles(opts, func(path string, relPath string) error {
+	err := g.walkFiles(ctx, opts, func(path string, relPath string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if hasExplicitZeroMaxCount(opts) {
 			if stats != nil {
 				if info, statErr := os.Stat(path); statErr == nil {
@@ -4050,6 +4073,9 @@ func (g *GrepTool) walkerSearchFiles(opts *grepOptions, re *regexp.Regexp) *tool
 		matchedLinesThisFile := 0
 		actualMatchesThisFile := 0
 		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			line := scanner.Text()
 			if lineSatisfiesMatch(re, line, opts.invertMatch) {
 				if _, exists := fileSet[relPath]; !exists {
@@ -4082,7 +4108,7 @@ func (g *GrepTool) walkerSearchFiles(opts *grepOptions, re *regexp.Regexp) *tool
 	return buildGrepResult(opts, results, len(results), false, stats)
 }
 
-func (g *GrepTool) walkerSearchFilesWithout(opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
+func (g *GrepTool) walkerSearchFilesWithout(ctx context.Context, opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
 	fileSet := make(map[string]struct{})
 	results := make([]string, 0, 16)
 	var stats *grepStats
@@ -4090,7 +4116,10 @@ func (g *GrepTool) walkerSearchFilesWithout(opts *grepOptions, re *regexp.Regexp
 		stats = &grepStats{}
 	}
 
-	err := g.walkFiles(opts, func(path string, relPath string) error {
+	err := g.walkFiles(ctx, opts, func(path string, relPath string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if hasExplicitZeroMaxCount(opts) {
 			if stats != nil {
 				if info, statErr := os.Stat(path); statErr == nil {
@@ -4121,6 +4150,9 @@ func (g *GrepTool) walkerSearchFilesWithout(opts *grepOptions, re *regexp.Regexp
 		matchedLinesThisFile := 0
 		actualMatchesThisFile := 0
 		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			line := scanner.Text()
 			if lineSatisfiesMatch(re, line, opts.invertMatch) {
 				hasMatch = true
@@ -4156,14 +4188,17 @@ func (g *GrepTool) walkerSearchFilesWithout(opts *grepOptions, re *regexp.Regexp
 	return buildGrepResult(opts, results, len(results), false, stats)
 }
 
-func (g *GrepTool) walkerSearchCount(opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
+func (g *GrepTool) walkerSearchCount(ctx context.Context, opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
 	counts := make([]fileMatchCount, 0, 16)
 	var stats *grepStats
 	if opts.stats {
 		stats = &grepStats{}
 	}
 
-	err := g.walkFiles(opts, func(path string, relPath string) error {
+	err := g.walkFiles(ctx, opts, func(path string, relPath string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if hasExplicitZeroMaxCount(opts) {
 			if stats != nil {
 				if info, statErr := os.Stat(path); statErr == nil {
@@ -4190,6 +4225,9 @@ func (g *GrepTool) walkerSearchCount(opts *grepOptions, re *regexp.Regexp) *tool
 		matchedLinesThisFile := 0
 		actualMatchesThisFile := 0
 		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			line := scanner.Text()
 			if lineSatisfiesMatch(re, line, opts.invertMatch) {
 				matchedLinesThisFile++
@@ -4234,7 +4272,7 @@ func (g *GrepTool) walkerSearchCount(opts *grepOptions, re *regexp.Regexp) *tool
 }
 
 // buildContextOutput produces output with context lines around each match.
-func (g *GrepTool) buildContextOutput(opts *grepOptions, matches []grepMatch) []string {
+func (g *GrepTool) buildContextOutput(ctx context.Context, opts *grepOptions, matches []grepMatch) ([]string, error) {
 	// Group matches by file for context rendering
 	type fileMatches struct {
 		relPath string
@@ -4246,6 +4284,9 @@ func (g *GrepTool) buildContextOutput(opts *grepOptions, matches []grepMatch) []
 	fileOrder := make([]string, 0)
 
 	for _, m := range matches {
+		if ctx != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		fg, ok := fileGroups[m.filePath]
 		if !ok {
 			lines, err := readFileLines(m.absPath)
@@ -4268,6 +4309,9 @@ func (g *GrepTool) buildContextOutput(opts *grepOptions, matches []grepMatch) []
 	}
 
 	for _, fname := range fileOrder {
+		if ctx != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		fg := fileGroups[fname]
 		if len(results) > 0 && !opts.noContextSeparator {
 			if contextSeparator != "" {
@@ -4327,7 +4371,7 @@ func (g *GrepTool) buildContextOutput(opts *grepOptions, matches []grepMatch) []
 		}
 	}
 
-	return results
+	return results, nil
 }
 
 type grepFileCandidate struct {
@@ -4336,12 +4380,18 @@ type grepFileCandidate struct {
 }
 
 // walkFiles walks the directory tree, calling fn for each file that passes filters.
-func (g *GrepTool) walkFiles(opts *grepOptions, fn func(path string, relPath string) error) error {
-	candidates, err := g.collectFileCandidates(opts)
+func (g *GrepTool) walkFiles(ctx context.Context, opts *grepOptions, fn func(path string, relPath string) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	candidates, err := g.collectFileCandidates(ctx, opts)
 	if err != nil {
 		return err
 	}
 	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := fn(candidate.path, candidate.relPath); err != nil {
 			return err
 		}
@@ -4349,11 +4399,17 @@ func (g *GrepTool) walkFiles(opts *grepOptions, fn func(path string, relPath str
 	return nil
 }
 
-func (g *GrepTool) collectFileCandidates(opts *grepOptions) ([]grepFileCandidate, error) {
+func (g *GrepTool) collectFileCandidates(ctx context.Context, opts *grepOptions) ([]grepFileCandidate, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	includeGlobs := resolveIncludeGlobs(opts)
 	excludeGlobs := resolveExcludeGlobs(opts)
 	candidates := make([]grepFileCandidate, 0, 32)
 	for _, scope := range opts.searchScopes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		baseIgnorePatterns, err := loadIgnorePatternsForScope(opts, scope)
 		if err != nil {
 			return nil, err
@@ -4405,6 +4461,9 @@ func (g *GrepTool) collectFileCandidates(opts *grepOptions) ([]grepFileCandidate
 		}
 
 		walkErr := filepath.Walk(scope.workingDir, func(path string, info os.FileInfo, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if walkErr != nil {
 				return nil
 			}

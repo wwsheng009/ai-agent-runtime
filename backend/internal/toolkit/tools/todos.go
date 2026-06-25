@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,18 @@ type TodoItem struct {
 // TodoList 任务列表
 type TodoList struct {
 	Items []TodoItem `json:"items"`
+}
+
+type todoUpdateSummary struct {
+	Added         int
+	StatusChanged int
+	Unchanged     int
+	Removed       int
+}
+
+type todoItemUpdate struct {
+	Label          string
+	PreviousStatus string
 }
 
 // NewTodosTool 创建任务管理工具
@@ -166,6 +179,8 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 		}, nil
 	}
 
+	previousTodos, loadErr := t.loadTodos()
+
 	// 为新任务设置创建时间，为完成的任务设置完成时间
 	now := time.Now().Unix()
 	for i := range newTodos {
@@ -176,6 +191,8 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 			newTodos[i].CompletedAt = now
 		}
 	}
+
+	updates, removedTodos, updateSummary := compareTodoLists(previousTodos, newTodos)
 
 	// 保存到文件
 	storageMode, err := t.saveTodos(newTodos)
@@ -203,7 +220,7 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 	}
 
 	// 构建结果
-	result := fmt.Sprintf("任务列表已更新: %d 待处理, %d 进行中, %d 已完成", pending, inProgress, completed)
+	result := formatTodosResult(newTodos, updates, removedTodos, updateSummary, loadErr, pending, inProgress, completed)
 
 	return &toolkit.ToolResult{
 		Success:    true,
@@ -218,6 +235,109 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 			"storage_mode": storageMode,
 		},
 	}, nil
+}
+
+func compareTodoLists(previous, current []TodoItem) ([]todoItemUpdate, []TodoItem, todoUpdateSummary) {
+	updates := make([]todoItemUpdate, len(current))
+	matchedPrevious := make([]bool, len(previous))
+	summary := todoUpdateSummary{}
+
+	for i, todo := range current {
+		if idx := findMatchingTodo(previous, matchedPrevious, todo.Content, todo.Status); idx >= 0 {
+			matchedPrevious[idx] = true
+			updates[i] = todoItemUpdate{Label: "保持", PreviousStatus: previous[idx].Status}
+			summary.Unchanged++
+			continue
+		}
+		if idx := findMatchingTodo(previous, matchedPrevious, todo.Content, ""); idx >= 0 {
+			matchedPrevious[idx] = true
+			updates[i] = todoItemUpdate{Label: "状态变更", PreviousStatus: previous[idx].Status}
+			summary.StatusChanged++
+			continue
+		}
+		updates[i] = todoItemUpdate{Label: "新增"}
+		summary.Added++
+	}
+
+	removed := make([]TodoItem, 0)
+	for i, todo := range previous {
+		if matchedPrevious[i] {
+			continue
+		}
+		removed = append(removed, todo)
+		summary.Removed++
+	}
+
+	return updates, removed, summary
+}
+
+func findMatchingTodo(items []TodoItem, matched []bool, content, status string) int {
+	for i, item := range items {
+		if matched[i] || item.Content != content {
+			continue
+		}
+		if status == "" || item.Status == status {
+			return i
+		}
+	}
+	return -1
+}
+
+func formatTodosResult(todos []TodoItem, updates []todoItemUpdate, removed []TodoItem, summary todoUpdateSummary, loadErr error, pending, inProgress, completed int) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "任务列表已更新: %d 待处理, %d 进行中, %d 已完成", pending, inProgress, completed)
+	builder.WriteString("\n")
+	if loadErr != nil {
+		fmt.Fprintf(&builder, "任务列表更新状态: 已保存；旧列表读取失败，无法计算差异: %v", loadErr)
+	} else {
+		fmt.Fprintf(&builder, "任务列表更新状态: 新增 %d, 状态变更 %d, 保持 %d, 移除 %d", summary.Added, summary.StatusChanged, summary.Unchanged, summary.Removed)
+	}
+	builder.WriteString("\n当前任务列表:")
+	if len(todos) == 0 {
+		builder.WriteString("\n(空)")
+	} else {
+		for i, todo := range todos {
+			update := todoItemUpdate{}
+			if loadErr == nil && i < len(updates) {
+				update = updates[i]
+			}
+			fmt.Fprintf(&builder, "\n%d. [%s] %s", i+1, todoStatusLabel(todo.Status), todo.Content)
+			if label := todoUpdateLabel(todo.Status, update); label != "" {
+				fmt.Fprintf(&builder, " (%s)", label)
+			}
+		}
+	}
+	if len(removed) > 0 {
+		builder.WriteString("\n已移除任务:")
+		for _, todo := range removed {
+			fmt.Fprintf(&builder, "\n- [%s] %s", todoStatusLabel(todo.Status), todo.Content)
+		}
+	}
+	return builder.String()
+}
+
+func todoUpdateLabel(currentStatus string, update todoItemUpdate) string {
+	switch update.Label {
+	case "状态变更":
+		return fmt.Sprintf("状态变更: %s -> %s", todoStatusLabel(update.PreviousStatus), todoStatusLabel(currentStatus))
+	case "新增", "保持":
+		return update.Label
+	default:
+		return ""
+	}
+}
+
+func todoStatusLabel(status string) string {
+	switch status {
+	case "pending":
+		return "待处理"
+	case "in_progress":
+		return "进行中"
+	case "completed":
+		return "已完成"
+	default:
+		return status
+	}
 }
 
 // loadTodos 加载任务列表
