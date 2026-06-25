@@ -123,16 +123,16 @@ func assertRequestConfigEqual(t *testing.T, field string, want, got interface{})
 
 func TestBuildProviderAdapterRequest_CapsMaxTokensByCapability(t *testing.T) {
 	input := providerAdapterRequestInput{
-		Protocol: "anthropic",
-		Model:    "claude-opus-4-7",
+		Protocol:  "anthropic",
+		Model:     "claude-opus-4-7",
 		MaxTokens: 131072,
 		ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
 			"claude-opus-4-7": {
-				MaxTokens:         128000,
-				MaxContextTokens:  1000000,
-				ReasoningModel:    true,
-				ReasoningEfforts:  []string{"low", "medium", "high", "xhigh", "max"},
-				InputModalities:   []string{"text", "image"},
+				MaxTokens:        128000,
+				MaxContextTokens: 1000000,
+				ReasoningModel:   true,
+				ReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max"},
+				InputModalities:  []string{"text", "image"},
 			},
 		},
 		Messages: []map[string]interface{}{
@@ -147,10 +147,33 @@ func TestBuildProviderAdapterRequest_CapsMaxTokensByCapability(t *testing.T) {
 	}
 }
 
-func TestBuildProviderAdapterRequest_NoCapWhenNoCapability(t *testing.T) {
+func TestBuildProviderAdapterRequest_AnthropicDropsTrailingAssistantPrefill(t *testing.T) {
 	input := providerAdapterRequestInput{
 		Protocol: "anthropic",
-		Model:    "unknown-model",
+		Model:    "claude-sonnet-4-6",
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "hello"},
+			{"role": "assistant", "content": "done"},
+		},
+	}
+
+	result := buildProviderAdapterRequest(input)
+
+	if len(result.Messages) != 1 {
+		t.Fatalf("expected trailing assistant prefill to be dropped, got %#v", result.Messages)
+	}
+	if result.Messages[0]["role"] != "user" {
+		t.Fatalf("expected request to end with user, got %#v", result.Messages[0])
+	}
+	if result.Metadata["tool_replay_sanitized"] != true {
+		t.Fatalf("expected sanitizer metadata to be set, got %#v", result.Metadata)
+	}
+}
+
+func TestBuildProviderAdapterRequest_NoCapWhenNoCapability(t *testing.T) {
+	input := providerAdapterRequestInput{
+		Protocol:  "anthropic",
+		Model:     "unknown-model",
 		MaxTokens: 131072,
 		Messages: []map[string]interface{}{
 			{"role": "user", "content": "hello"},
@@ -166,8 +189,8 @@ func TestBuildProviderAdapterRequest_NoCapWhenNoCapability(t *testing.T) {
 
 func TestBuildProviderAdapterRequest_NoCapWhenWithinLimit(t *testing.T) {
 	input := providerAdapterRequestInput{
-		Protocol: "anthropic",
-		Model:    "claude-opus-4-7",
+		Protocol:  "anthropic",
+		Model:     "claude-opus-4-7",
 		MaxTokens: 8192,
 		ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
 			"claude-opus-4-7": {

@@ -190,8 +190,8 @@ func TestResolveRuntimeReasoningEffortInput_SupportsBlankDefaultAndClear(t *test
 	if got, ok := resolveRuntimeReasoningEffortInput("2", "high", true, "", options); !ok || got != "max" {
 		t.Fatalf("expected numeric selection to pick max, got %q ok=%v", got, ok)
 	}
-	if _, ok := resolveRuntimeReasoningEffortInput("medium", "high", true, "", options); ok {
-		t.Fatal("expected unsupported effort to be rejected")
+	if got, ok := resolveRuntimeReasoningEffortInput("medium", "high", true, "", options); !ok || got != "medium" {
+		t.Fatalf("expected custom effort to be accepted, got %q ok=%v", got, ok)
 	}
 }
 

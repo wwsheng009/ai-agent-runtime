@@ -132,7 +132,7 @@ func TestSelectReasoningEffortWithReader_DefaultsToFirstOnInitialSelection(t *te
 	if stdout != "" {
 		t.Fatalf("expected no stdout output, got:\n%s", stdout)
 	}
-	if !strings.Contains(stderr, "(默认)") || !strings.Contains(stderr, "请输入选项 (回车默认: high / 输入 0 清空): ") {
+	if !strings.Contains(stderr, "(默认)") || !strings.Contains(stderr, "请输入选项 (回车默认: high / 输入 0 清空 / 可输入自定义值): ") {
 		t.Fatalf("expected default-first prompt output on stderr, got:\n%s", stderr)
 	}
 }

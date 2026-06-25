@@ -669,7 +669,34 @@ func sanitizeAnthropicProtocolMessages(messages []map[string]interface{}) []map[
 			})
 		}
 	}
-	return enforceAnthropicMessageAlternation(result)
+	return trimAnthropicAssistantPrefill(enforceAnthropicMessageAlternation(result))
+}
+
+func trimAnthropicAssistantPrefill(messages []map[string]interface{}) []map[string]interface{} {
+	for {
+		lastMessageIndex := lastAnthropicDialogueMessageIndex(messages)
+		if lastMessageIndex < 0 {
+			return messages
+		}
+		role, _ := messages[lastMessageIndex]["role"].(string)
+		if !strings.EqualFold(strings.TrimSpace(role), "assistant") {
+			return messages
+		}
+		messages = append(messages[:lastMessageIndex], messages[lastMessageIndex+1:]...)
+	}
+}
+
+func lastAnthropicDialogueMessageIndex(messages []map[string]interface{}) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		role, _ := messages[i]["role"].(string)
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "system", "developer", "":
+			continue
+		default:
+			return i
+		}
+	}
+	return -1
 }
 
 // enforceAnthropicMessageAlternation merges consecutive same-role messages

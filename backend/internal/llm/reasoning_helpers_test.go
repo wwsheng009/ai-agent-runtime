@@ -654,6 +654,57 @@ func TestEnforceAnthropicMessageAlternation_PreservesStructuredAssistantBlocks(t
 	}
 }
 
+func TestRuntimeMessagesToProtocolMessages_AnthropicDropsTrailingAssistantPrefill(t *testing.T) {
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{
+		*types.NewSystemMessage("Base instruction"),
+		*types.NewUserMessage("First question"),
+		*types.NewAssistantMessage("First answer"),
+		*types.NewDeveloperMessage("Late instruction"),
+	}, "anthropic")
+
+	if len(messages) != 3 {
+		t.Fatalf("expected trailing assistant to be dropped while preserving instructions, got %d messages: %#v", len(messages), messages)
+	}
+	if messages[0]["role"] != "system" {
+		t.Fatalf("expected system instruction to remain, got %#v", messages[0])
+	}
+	if messages[1]["role"] != "user" {
+		t.Fatalf("expected last dialogue message to be user, got %#v", messages[1])
+	}
+	if messages[2]["role"] != "developer" {
+		t.Fatalf("expected trailing developer instruction to remain, got %#v", messages[2])
+	}
+}
+
+func TestRuntimeMessagesToProtocolMessages_AnthropicKeepsToolResultTurnAtEnd(t *testing.T) {
+	assistant := types.Message{
+		Role: "assistant",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_1", Name: "list_files"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+	tool := types.Message{
+		Role:       "tool",
+		Content:    "ok",
+		ToolCallID: "call_1",
+		Metadata:   types.NewMetadata(),
+	}
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{
+		*types.NewUserMessage("List files"),
+		assistant,
+		tool,
+	}, "anthropic")
+
+	if len(messages) != 3 {
+		t.Fatalf("expected tool_result replay to be preserved, got %d messages: %#v", len(messages), messages)
+	}
+	if messages[len(messages)-1]["role"] != "user" {
+		t.Fatalf("expected Anthropic tool_result replay to end with user, got %#v", messages[len(messages)-1])
+	}
+}
+
 func TestAnthropicToolUseBlock_DefaultsEmptyInputForNoArgToolCall(t *testing.T) {
 	block := anthropicToolUseBlock(map[string]interface{}{
 		"id":   "call_1",

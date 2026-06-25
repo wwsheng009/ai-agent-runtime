@@ -34,7 +34,8 @@ func resolveChatReasoningEffort(provider config.Provider, modelName, raw string,
 	if !reasoningEffortAllowed(normalized, catalog.options) {
 		allowed := strings.Join(catalog.options, "|")
 		if explicit {
-			return "", "", fmt.Errorf("无效的 reasoning-effort: %s（当前模型可选值: %s）", raw, allowed)
+			// 允许用户直接设置自定义值，仅显示警告
+			return normalized, fmt.Sprintf("Warning: reasoning_effort %q 不在当前模型声明的可选列表中（%s），已强制设置", normalized, allowed), nil
 		}
 		return "", fmt.Sprintf("Warning: reasoning-effort %q 不在当前模型支持列表中，已清空", normalized), nil
 	}
@@ -248,11 +249,11 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 
 	for {
 		if currentValid {
-			printChatSelectionPrompt("请输入选项 (回车保留当前: %s / 输入 0 清空): ", currentMatch)
+			printChatSelectionPrompt("请输入选项 (回车保留当前: %s / 输入 0 清空 / 可输入自定义值): ", currentMatch)
 		} else if defaultOption != "" {
-			printChatSelectionPrompt("请输入选项 (回车默认: %s / 输入 0 清空): ", defaultOption)
+			printChatSelectionPrompt("请输入选项 (回车默认: %s / 输入 0 清空 / 可输入自定义值): ", defaultOption)
 		} else {
-			printChatSelectionPrompt("请输入选项 (回车清空当前无效值 / 输入 0 清空): ")
+			printChatSelectionPrompt("请输入选项 (回车清空当前无效值 / 输入 0 清空 / 可输入自定义值): ")
 		}
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
@@ -285,6 +286,12 @@ func selectReasoningEffortWithReader(current string, options []string, reader *b
 
 		if matched, ok := reasoningEffortOptionMatch(normalizedInput, normalizedOptions); ok {
 			return matched
+		}
+
+		// 允许输入自定义值
+		customValue := runtimetypes.NormalizeReasoningEffort(normalizedInput)
+		if customValue != "" {
+			return customValue
 		}
 
 		printChatSelectionWarning("无效的选择，请重新输入")

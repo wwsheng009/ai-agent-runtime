@@ -270,7 +270,7 @@ func selectRuntimeReasoningEffortPopup(session *ChatSession, current string, opt
 	}
 
 	notice := discardPendingInteractiveInputForPriorityPrompt(session, "reasoning_effort 选择")
-	hint := "  提示: 输入编号或名称，回车保留当前，输入 0 清空"
+	hint := "  提示: 输入编号、名称或自定义值，回车保留当前，输入 0 清空"
 	popupLines := renderSelectionPopupLines("选择 reasoning_effort 值", "reasoning_effort", currentEffort, normalizedOptions, currentMatch, defaultOption, hint, notice, "")
 	prompt := reasoningEffortSelectionPrompt(currentValid, defaultOption)
 	showRuntimeSelectionPopup(session, popupLines, prompt)
@@ -494,6 +494,12 @@ func resolveRuntimeReasoningEffortInput(input, currentMatch string, currentValid
 
 	if matched, ok := reasoningEffortOptionMatch(input, options); ok {
 		return matched, true
+	}
+
+	// 允许输入自定义值
+	normalized := runtimetypes.NormalizeReasoningEffort(input)
+	if normalized != "" {
+		return normalized, true
 	}
 	return "", false
 }

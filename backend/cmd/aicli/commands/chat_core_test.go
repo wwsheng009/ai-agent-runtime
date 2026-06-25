@@ -2053,7 +2053,7 @@ func TestAICLIEventRenderer_ToolBatchUsesUnifiedInteractionRendering(t *testing.
 	rendered := output.String()
 	preludeIndex := strings.Index(rendered, "先说明一下。")
 	toolStartIndex := strings.Index(rendered, "• Running ls path=docs")
-	toolDoneIndex := strings.Index(rendered, "• Ran ls path=docs")
+	toolDoneIndex := strings.Index(rendered, "• Completed ls path=docs")
 	finalIndex := strings.Index(rendered, "最终答案。")
 	if preludeIndex == -1 || toolStartIndex == -1 || toolDoneIndex == -1 || finalIndex == -1 {
 		t.Fatalf("expected buffered content, tool lines, and final answer in output, got %q", rendered)
@@ -2124,7 +2124,7 @@ func TestAICLIEventRenderer_ShellToolUsesCompactCommandRendering(t *testing.T) {
 	if !strings.Contains(rendered, "• Running Get-Item '.\\\\aicli-cachetest.exe' | Select-Object FullName,Length,LastWriteTime") {
 		t.Fatalf("expected compact shell running line, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "• Ran Get-Item '.\\\\aicli-cachetest.exe' | Select-Object FullName,Length,LastWriteTime") {
+	if !strings.Contains(rendered, "• Completed Get-Item '.\\\\aicli-cachetest.exe' | Select-Object FullName,Length,LastWriteTime") {
 		t.Fatalf("expected compact shell completion line, got %q", rendered)
 	}
 	if strings.Contains(rendered, "[tool] execute_shell_command") || strings.Contains(rendered, "[tool done] execute_shell_command") {
@@ -2157,7 +2157,7 @@ func TestAICLIEventRenderer_SharedToolResultUsesSourceLabelsAndTighterFolding(t 
 	})
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "• Ran [mcp] remote_search query=golang tools") {
+	if !strings.Contains(rendered, "• Completed [mcp] remote_search query=golang tools") {
 		t.Fatalf("expected mcp label in shared tool render, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "  result 1") || !strings.Contains(rendered, "  result 2") {
@@ -2212,7 +2212,7 @@ func TestAICLIEventRenderer_SharedBrokerToolResultUsesSourceLabels(t *testing.T)
 	})
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "• Ran [broker] background_task command=git status") {
+	if !strings.Contains(rendered, "• Completed [broker] background_task command=git status") {
 		t.Fatalf("expected broker label in shared tool render, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "  job_id=job-1") || !strings.Contains(rendered, "  status=queued") {

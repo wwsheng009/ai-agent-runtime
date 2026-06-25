@@ -254,6 +254,11 @@ func completeAgentsRoutingSlashArgs(session *ChatSession, ctx slashArgumentConte
 	if strings.EqualFold(second, "test") || strings.EqualFold(second, "dry-run") || strings.EqualFold(second, "dryrun") || strings.EqualFold(second, "preview") {
 		valueQuery := slashAgentsRoutingArgumentQuery(ctx)
 		switch slashAgentsRoutingArgumentFocus(ctx) {
+		case "workflow":
+			return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+				{Command: "spawn_team", Summary: "预览 spawn_team task route", Group: string(chatSlashCommandGroupSession)},
+				{Command: "spawn_agent", Summary: "预览 spawn_agent/subagent route", Group: string(chatSlashCommandGroupSession)},
+			}, valueQuery)
 		case "difficulty":
 			return matchSlashArgumentCandidates(agentRoutingDifficultyArgumentCandidates(), valueQuery)
 		case "provider":
@@ -264,6 +269,11 @@ func completeAgentsRoutingSlashArgs(session *ChatSession, ctx slashArgumentConte
 			return matchSlashArgumentCandidates(reasoningEffortArgumentCandidates(session), valueQuery)
 		}
 		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "--workflow", Summary: "workflow hint", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--team-id", Summary: "spawn_team team id", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--teammate", Summary: "spawn_team teammate hint", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--task", Summary: "spawn_team task id", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+			{Command: "--task-id", Summary: "spawn_team task id", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 			{Command: "--role", Summary: "子任务 role", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 			{Command: "--difficulty", Summary: "子任务难度", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 			{Command: "--goal", Summary: "子任务目标", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
@@ -272,6 +282,7 @@ func completeAgentsRoutingSlashArgs(session *ChatSession, ctx slashArgumentConte
 			{Command: "--reasoning-effort", Summary: "显式 reasoning_effort", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 			{Command: "--read-only=true", Summary: "按只读任务预览", Group: string(chatSlashCommandGroupSession)},
 			{Command: "--read-only=false", Summary: "按可写任务预览", Group: string(chatSlashCommandGroupSession)},
+			{Command: "--write-path", Summary: "spawn_team 写路径 hint", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 			{Command: "--write", Summary: "按可写任务预览", Group: string(chatSlashCommandGroupSession)},
 		}, query)
 	}
@@ -282,6 +293,8 @@ func slashAgentsRoutingArgumentFocus(ctx slashArgumentContext) string {
 	current := strings.ToLower(strings.TrimSpace(ctx.Current.Text))
 	previous := strings.ToLower(strings.TrimSpace(ctx.Previous.Text))
 	switch {
+	case strings.HasPrefix(current, "--workflow="):
+		return "workflow"
 	case strings.HasPrefix(current, "--difficulty="):
 		return "difficulty"
 	case strings.HasPrefix(current, "--provider="):
@@ -290,13 +303,15 @@ func slashAgentsRoutingArgumentFocus(ctx slashArgumentContext) string {
 		return "model"
 	case strings.HasPrefix(current, "--reasoning-effort="):
 		return "reasoning"
-	case current == "--difficulty" || current == "--provider" || current == "--model" || current == "--reasoning-effort":
+	case current == "--workflow" || current == "--difficulty" || current == "--provider" || current == "--model" || current == "--reasoning-effort":
 		return "flags"
 	}
 	if ctx.CurrentOK && strings.HasPrefix(current, "-") {
 		return "flags"
 	}
 	switch previous {
+	case "--workflow":
+		return "workflow"
 	case "--difficulty":
 		return "difficulty"
 	case "--provider":
