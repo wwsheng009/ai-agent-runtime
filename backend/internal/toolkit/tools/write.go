@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -31,6 +32,10 @@ func NewWriteTool() *WriteTool {
 				"type":        "string",
 				"description": "文件内容。若内容较长，请拆分为多个更小的写入块，按章节或按块逐步写入，避免一次性生成超长参数导致工具调用被截断。",
 			},
+			"expected_sha256": map[string]interface{}{
+				"type":        "string",
+				"description": "可选并发保护：写入前文件内容的 SHA-256；新文件使用 absent。重试同一内容会自动识别为幂等回放。",
+			},
 		},
 		"required": []string{"file_path", "content"},
 	}
@@ -49,12 +54,14 @@ func NewWriteTool() *WriteTool {
 func (w *WriteTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassIdempotencyKeyRequired,
 	}
 }
 
 type WriteParams struct {
-	FilePath string `json:"file_path"`
-	Content  string `json:"content"`
+	FilePath       string `json:"file_path"`
+	Content        string `json:"content"`
+	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
 }
 
 // Execute 实现 Tool 接口
@@ -85,6 +92,12 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 		}, nil
 	}
 	p.Content = content
+	if expected, ok := params["expected_sha256"].(string); ok {
+		p.ExpectedSHA256 = strings.ToLower(strings.TrimSpace(expected))
+	}
+	if !validWritePrecondition(p.ExpectedSHA256) {
+		return writePreconditionFailure("expected_sha256 必须是 64 位十六进制 SHA-256 或 absent", "", p.ExpectedSHA256), nil
+	}
 	if err := validateInlineFileMutationPayload("write", inlineMutationSegment{
 		Name:  "content",
 		Value: p.Content,
@@ -140,6 +153,18 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 			oldContent = string(content)
 		}
 	}
+	currentRevision := writeContentRevision(fileExists, oldContent)
+	desiredRevision := writeContentRevision(true, p.Content)
+	if fileExists && oldContent == p.Content {
+		return idempotentWriteResult(absPath, oldSize, desiredRevision, p.ExpectedSHA256), nil
+	}
+	if p.ExpectedSHA256 != "" && p.ExpectedSHA256 != currentRevision {
+		return writePreconditionFailure(
+			fmt.Sprintf("写入前置条件不匹配: 当前版本为 %s", currentRevision),
+			currentRevision,
+			p.ExpectedSHA256,
+		), nil
+	}
 
 	// 创建父目录
 	dir := filepath.Dir(absPath)
@@ -189,6 +214,9 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 			"size_changed":  int64(len(p.Content)) - oldSize,
 			"patch":         buildUnifiedPatch(absPath, oldContent, p.Content),
 			"mutated_paths": []string{absPath},
+			"old_sha256":    currentRevision,
+			"new_sha256":    desiredRevision,
+			"retry_class":   runtimetypes.ToolRetryClassIdempotencyKeyRequired,
 		},
 	}, nil
 }

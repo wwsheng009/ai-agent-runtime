@@ -185,6 +185,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"reasoning_effort":     map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":      map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
 						"permission_mode":      map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"read_only":            map[string]interface{}{"type": "boolean", "description": "Restrict the child to read-only, non-shell tools. Defaults permission_mode to plan when omitted."},
 						"fork_context":         map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
 						"fork_turns":           map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
 					},
@@ -331,6 +332,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"reasoning_effort":     map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":      map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
 						"permission_mode":      map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"read_only":            map[string]interface{}{"type": "boolean", "description": "Restrict the child to read-only, non-shell tools. Defaults permission_mode to plan when omitted."},
 						"fork_context":         map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
 						"fork_turns":           map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
 					},
@@ -489,7 +491,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 					"status": map[string]interface{}{
 						"type":        "string",
-						"description": "Optional team status: active, paused, done, failed. Defaults to active.",
+						"description": "Optional team status: active, paused, done, failed, partially_completed, canceled. Defaults to active.",
 					},
 					"max_teammates": map[string]interface{}{
 						"type":        "integer",
@@ -934,18 +936,24 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				return nil, nil, err
 			}
 		}
+		resultMetadata := map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+			"job_id":               strings.TrimSpace(job.ID),
+			"job_alias":            jobAlias,
+			"status":               string(job.Status),
+			"restart_policy":       job.RestartPolicy,
+		}
+		for _, key := range []string{"timeout_requested_ms", "timeout_effective_ms", "timeout_ms", "timeout_source"} {
+			if value, ok := job.Metadata[key]; ok {
+				resultMetadata[key] = value
+			}
+		}
 		return BackgroundTaskResult{
-				JobID:         jobAlias,
-				Status:        string(job.Status),
-				Message:       job.Message,
-				RestartPolicy: job.RestartPolicy,
-			}, map[string]interface{}{
-				toolresult.MetadataKey: toolresult.KindStructured,
-				"job_id":               strings.TrimSpace(job.ID),
-				"job_alias":            jobAlias,
-				"status":               string(job.Status),
-				"restart_policy":       job.RestartPolicy,
-			}, nil
+			JobID:         jobAlias,
+			Status:        string(job.Status),
+			Message:       job.Message,
+			RestartPolicy: job.RestartPolicy,
+		}, resultMetadata, nil
 
 	case ToolTaskOutput:
 		if b.Background == nil {
@@ -991,19 +999,41 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				displayJobID = jobAlias
 			}
 		}
+		outputMetadata := map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+			"job_id":               strings.TrimSpace(output.JobID),
+			"job_alias":            displayJobID,
+			"status":               output.Status,
+			"next_offset":          output.NextOffset,
+		}
+		for key, value := range map[string]interface{}{
+			"error_code":           output.ErrorCode,
+			"timeout_requested_ms": output.TimeoutRequestedMs,
+			"timeout_effective_ms": output.TimeoutEffectiveMs,
+			"timeout_source":       output.TimeoutSource,
+			"cancel_source":        output.CancelSource,
+		} {
+			if textValue, ok := value.(string); ok && strings.TrimSpace(textValue) == "" {
+				continue
+			}
+			if intValue, ok := value.(int64); ok && intValue == 0 {
+				continue
+			}
+			outputMetadata[key] = value
+		}
 		return TaskOutputResult{
-				JobID:      displayJobID,
-				Status:     output.Status,
-				Output:     output.Output,
-				NextOffset: output.NextOffset,
-				ExitCode:   output.ExitCode,
-			}, map[string]interface{}{
-				toolresult.MetadataKey: toolresult.KindStructured,
-				"job_id":               strings.TrimSpace(output.JobID),
-				"job_alias":            displayJobID,
-				"status":               output.Status,
-				"next_offset":          output.NextOffset,
-			}, nil
+			JobID:              displayJobID,
+			Status:             output.Status,
+			Output:             output.Output,
+			NextOffset:         output.NextOffset,
+			ExitCode:           output.ExitCode,
+			Message:            output.Message,
+			ErrorCode:          output.ErrorCode,
+			TimeoutRequestedMs: output.TimeoutRequestedMs,
+			TimeoutEffectiveMs: output.TimeoutEffectiveMs,
+			TimeoutSource:      output.TimeoutSource,
+			CancelSource:       output.CancelSource,
+		}, outputMetadata, nil
 
 	case ToolSpawnAgent:
 		if b.AgentSessions == nil {
@@ -1052,12 +1082,20 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				}
 			}
 		}
+		permissionModeExplicit := false
 		if value, ok := args["permission_mode"].(string); ok {
 			permissionMode, err := normalizeSpawnAgentPermissionMode(value)
 			if err != nil {
 				return nil, nil, err
 			}
 			request.PermissionMode = permissionMode
+			permissionModeExplicit = strings.TrimSpace(value) != ""
+		}
+		if value, ok := args["read_only"].(bool); ok {
+			request.ReadOnly = value
+		}
+		if request.ReadOnly && !permissionModeExplicit {
+			request.PermissionMode = string(runtimepolicy.ModePlan)
 		}
 		if strings.TrimSpace(request.PermissionMode) == "" {
 			if runMeta, ok := team.GetRunMeta(ctx); ok && runMeta != nil {
@@ -1111,6 +1149,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			}
 			if permissionMode := strings.TrimSpace(result.PermissionMode); permissionMode != "" {
 				metadata["permission_mode"] = permissionMode
+			}
+			if result.ReadOnly {
+				metadata["read_only"] = true
 			}
 			if difficulty := strings.TrimSpace(result.Difficulty); difficulty != "" {
 				metadata["difficulty"] = difficulty
@@ -1677,7 +1718,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				if !allowExisting {
 					return nil, nil, fmt.Errorf("team_id already exists")
 				}
-				if existing.Status == team.TeamStatusDone || existing.Status == team.TeamStatusFailed ||
+				if team.IsTerminalTeamStatus(existing.Status) ||
 					(strings.TrimSpace(existing.LeadSessionID) != "" &&
 						strings.TrimSpace(request.LeadSessionID) != "" &&
 						!strings.EqualFold(strings.TrimSpace(existing.LeadSessionID), strings.TrimSpace(request.LeadSessionID))) {
@@ -2549,6 +2590,10 @@ func parseTeamStatus(raw string) (team.TeamStatus, error) {
 		return team.TeamStatusDone, nil
 	case string(team.TeamStatusFailed):
 		return team.TeamStatusFailed, nil
+	case string(team.TeamStatusPartiallyCompleted):
+		return team.TeamStatusPartiallyCompleted, nil
+	case string(team.TeamStatusCanceled):
+		return team.TeamStatusCanceled, nil
 	default:
 		return "", fmt.Errorf("invalid team status: %s", raw)
 	}
@@ -2760,6 +2805,13 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 		return WaitTeamResult{}, err
 	}
 	b.notifyTeamLifecycleChanged()
+	if _, err := team.ReconcileTerminalTeamState(ctx, team.TerminalTeamServices{
+		Store:   b.TeamStore,
+		Planner: b.TeamPlanner,
+		Events:  b.TeamEvents,
+	}, teamID); err != nil {
+		return WaitTeamResult{}, err
+	}
 	if request.Limit <= 0 {
 		request.Limit = 24
 	}
@@ -2791,7 +2843,7 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 		if err != nil {
 			return WaitTeamResult{}, err
 		}
-		if result.Terminal && (!b.waitTeamRequiresSummary(request) || result.Status != string(team.TeamStatusDone) || result.SummaryReady) {
+		if result.Terminal && (!b.waitTeamRequiresSummary(request) || result.SummaryReady) {
 			return result, nil
 		}
 		select {
@@ -2810,7 +2862,7 @@ func (b *Broker) waitTeamRequiresSummary(request WaitTeamArgs) bool {
 	if request.RequireSummary != nil {
 		return *request.RequireSummary
 	}
-	return b != nil && b.TeamPlanner != nil
+	return true
 }
 
 func (b *Broker) readWaitTeamSnapshot(ctx context.Context, teamID string, request WaitTeamArgs) (WaitTeamResult, error) {
@@ -2832,7 +2884,7 @@ func (b *Broker) readWaitTeamSnapshot(ctx context.Context, teamID string, reques
 	result := WaitTeamResult{
 		TeamID:   strings.TrimSpace(record.ID),
 		Status:   string(record.Status),
-		Terminal: record.Status == team.TeamStatusDone || record.Status == team.TeamStatusFailed,
+		Terminal: team.IsTerminalTeamStatus(record.Status),
 		Events:   make([]WaitTeamEventResult, 0, len(events)),
 	}
 	for _, event := range events {
@@ -2852,6 +2904,7 @@ func (b *Broker) readWaitTeamSnapshot(ctx context.Context, teamID string, reques
 			result.SummaryEventSeq = item.Seq
 			result.Summary = firstNonEmptyString(payloadString(item.Payload, "summary"), result.Summary)
 			result.SummarySource = firstNonEmptyString(payloadString(item.Payload, "summary_source"), result.SummarySource)
+			result.SummaryPayload = cloneAliasPayloadMap(item.Payload)
 		}
 	}
 	result.EventCount = len(result.Events)
@@ -2863,6 +2916,7 @@ func (b *Broker) readWaitTeamSnapshot(ctx context.Context, teamID string, reques
 			result.SummaryEventSeq = summaryEvent.Seq
 			result.Summary = payloadString(summaryEvent.Payload, "summary")
 			result.SummarySource = payloadString(summaryEvent.Payload, "summary_source")
+			result.SummaryPayload = cloneAliasPayloadMap(summaryEvent.Payload)
 			if summaryEvent.Seq > result.LatestSeq {
 				result.LatestSeq = summaryEvent.Seq
 			}

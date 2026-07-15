@@ -107,17 +107,30 @@ func printChatDebugInfo(session *ChatSession) {
 }
 
 func printChatDebugRoutingSummary(session *ChatSession) {
-	fmt.Println("Subagent Routing:")
 	if session == nil {
+		fmt.Println("Subagent Routing:")
 		printChatSessionMetaRow("Routing:", "<no session>")
 		return
 	}
-	routing := localChatSubagentRoutingConfig(session)
+	printChatRoutingConfigSummary("Subagent Routing", localChatSubagentRoutingConfig(session), "subagent")
+	teamSource := "subagent_inherited"
+	if session.Config != nil && session.Config.AICLI != nil && session.Config.AICLI.Teams != nil && session.Config.AICLI.Teams.Routing != nil {
+		teamSource = "team_independent"
+	}
+	printChatRoutingConfigSummary("Team Routing", localChatTeamRoutingConfig(session), teamSource)
+}
+
+func printChatRoutingConfigSummary(title string, routing *config.AICLISubagentRoutingConfig, source string) {
+	fmt.Println(title + ":")
+	if strings.TrimSpace(source) != "" {
+		printChatSessionMetaRow("Routing Source:", source)
+	}
 	printChatSessionMetaRow("Routing Enabled:", chatDebugBool(modelrouting.RoutingEnabled(routing)))
 	printChatSessionMetaRow("Compatibility:", modelrouting.CompatibilityMode(routing))
 	printChatSessionMetaRow("Default Difficulty:", modelrouting.DefaultDifficulty(routing))
 	printChatSessionMetaRow("Inherit Parent:", chatDebugBool(modelrouting.InheritParentWhenMissing(routing)))
 	printChatSessionMetaRow("Validate Models:", chatDebugBool(modelrouting.ValidateModelCapabilities(routing)))
+	printChatSessionMetaRow("Reasoning Policy:", modelrouting.UnsupportedReasoningPolicy(routing))
 	if routing == nil {
 		printChatSessionMetaRow("Levels:", "<none>")
 		printChatSessionMetaRow("Roles:", "<none>")
@@ -319,6 +332,12 @@ func parseChatAgentRoutingTestOptions(session *ChatSession, fields []string) (do
 			return strings.TrimSpace(fields[i]), nil
 		}
 		switch {
+		case lower == "--scope" || strings.HasPrefix(lower, "--scope="):
+			value, err := valueFor("--scope")
+			if err != nil {
+				return opts, err
+			}
+			opts.Scope = value
 		case lower == "--workflow" || strings.HasPrefix(lower, "--workflow="):
 			value, err := valueFor("--workflow")
 			if err != nil {
@@ -437,7 +456,7 @@ func parseChatAgentRoutingTestOptions(session *ChatSession, fields []string) (do
 }
 
 func printChatAgentRoutingUsage() {
-	fmt.Println("用法: /agents routing test --role <role> --difficulty <easy|normal|hard|expert> [--workflow spawn_team] [--team-id <id>] [--teammate <id>] [--task <id>] [--write-path <path>] [--goal <text>] [--provider <name>] [--model <model>] [--reasoning-effort <value>] [--read-only=true]")
+	fmt.Println("用法: /agents routing test --role <role> --difficulty <easy|normal|hard|expert> [--scope auto|subagent|team] [--workflow spawn_team] [--team-id <id>] [--teammate <id>] [--task <id>] [--write-path <path>] [--goal <text>] [--provider <name>] [--model <model>] [--reasoning-effort <value>] [--read-only=true]")
 }
 
 func sendChatAgentMessageCommand(session *ChatSession, argument string, trigger bool) error {

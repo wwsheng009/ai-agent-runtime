@@ -92,6 +92,10 @@ type HistorySession interface {
 	ReplaceHistory([]types.Message)
 }
 
+type historySessionContextReader interface {
+	GetContext(key string) (interface{}, bool)
+}
+
 // NewReActLoop 创建 ReAct 循环
 func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActConfig) *ReActLoop {
 	if config == nil {
@@ -168,6 +172,7 @@ func (loop *ReActLoop) RunWithSession(ctx context.Context, prompt string, sessio
 		includePrompt = false
 	}
 
+	ctx = toolctx.WithGoalID(ctx, sessionGoalID(session))
 	return loop.run(ctx, prompt, loopRunOptions{
 		TraceID:       "trace_" + uuid.NewString(),
 		SessionID:     session.SessionID(),
@@ -186,6 +191,7 @@ func (loop *ReActLoop) ContinueWithSession(ctx context.Context, session HistoryS
 		return nil, errors.New(errors.ErrValidationFailed, "session is nil")
 	}
 
+	ctx = toolctx.WithGoalID(ctx, sessionGoalID(session))
 	return loop.run(ctx, "", loopRunOptions{
 		TraceID:       "trace_" + uuid.NewString(),
 		SessionID:     session.SessionID(),
@@ -198,7 +204,32 @@ func (loop *ReActLoop) ContinueWithSession(ctx context.Context, session HistoryS
 	})
 }
 
-func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOptions) (*Result, error) {
+func sessionGoalID(session HistorySession) string {
+	reader, ok := session.(historySessionContextReader)
+	if !ok {
+		return ""
+	}
+	raw, ok := reader.GetContext("aicli.goal")
+	if !ok || raw == nil {
+		return ""
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return ""
+	}
+	var owner struct {
+		GoalID string `json:"goal_id"`
+	}
+	if err := json.Unmarshal(data, &owner); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(owner.GoalID)
+}
+
+func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOptions) (result *Result, runErr error) {
+	defer func() {
+		ensureAgentResultContract(result, prompt)
+	}()
 	if loop.agent == nil {
 		return nil, errors.New(errors.ErrValidationFailed, "agent is nil")
 	}
@@ -218,7 +249,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		startTime.StopTimer()
 	}()
 
-	result := &Result{
+	result = &Result{
 		State: loop.agent.GetState(),
 	}
 	totalUsage := &types.TokenUsage{}
@@ -425,7 +456,18 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 		// 3. Observe: 记录执行结果
 		currentCtx = promoteTeamRunContext(currentCtx, toolResults)
+		observationStart := len(observations)
 		observations = loop.observe(currentCtx, toolResults, observations, step)
+		if manager := loop.agent.GetContextManager(); manager != nil && observationStart < len(observations) {
+			workspaceID := ""
+			if loop.agent.config != nil {
+				workspaceID = optionString(loop.agent.config.Options, "workspace_id")
+			}
+			manager.RecordObservations(currentCtx, contextmgr.FactObservationInput{
+				TraceID: traceID, WorkspaceID: workspaceID, SessionID: sessionID,
+				GoalID: toolctx.GoalID(currentCtx), Observations: observations[observationStart:],
+			})
+		}
 
 		// 4. 更新对话历史
 		builder.AppendToolResults(normalizedCalls, toolResultsToPayloads(toolResults))
@@ -503,7 +545,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		contextBudget := resolveContextBuildPromptBudget(loop.llmRuntime, loop.agent, loop.config)
 		built := manager.Build(ctx, contextmgr.BuildInput{
 			TraceID:                  traceID,
+			WorkspaceID:              optionString(loop.agent.config.Options, "workspace_id"),
 			SessionID:                sessionID,
+			GoalID:                   toolctx.GoalID(ctx),
 			TaskID:                   taskID,
 			TeamID:                   teamID,
 			Profile:                  profileContext,

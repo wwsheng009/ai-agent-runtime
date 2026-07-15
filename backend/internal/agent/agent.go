@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
@@ -87,6 +88,7 @@ type Result struct {
 	Reasoning    *types.ReasoningBlock `json:"reasoning,omitempty"`
 	Duration     types.Duration        `json:"duration"`
 	Error        string                `json:"error,omitempty"`
+	Contract     *agentresult.Result   `json:"result_contract,omitempty"`
 }
 
 // NewAgent 创建 Agent

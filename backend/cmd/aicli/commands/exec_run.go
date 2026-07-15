@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
@@ -331,7 +332,7 @@ func prepareExecPersistence(cfg *config.Config, chatOpts *chatCommandOptions, op
 		if strings.TrimSpace(opts.SessionDir) != "" || strings.TrimSpace(opts.SessionTitle) != "" {
 			return nil, newExecExitError(execExitUsage, "EPHEMERAL_SESSION_CONFLICT", fmt.Errorf("--ephemeral 不能与 --session-dir 或 --title 同时使用"))
 		}
-		return &chatPersistenceState{}, nil
+		return newEphemeralChatPersistenceState(opts.SessionUser), nil
 	}
 	return prepareChatPersistence(cfg, chatOpts, profileState)
 }
@@ -340,9 +341,15 @@ func executeExecWithSignals(session *ExecSession) error {
 	if session == nil || session.Options == nil || session.ChatSession == nil {
 		return newExecExitError(execExitExecutionFailed, "INVALID_SESSION", fmt.Errorf("exec session is nil"))
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	base := runtimeexecution.WithCancelSource(context.Background(), "user_interrupt")
+	var (
+		ctx    context.Context
+		cancel context.CancelFunc
+	)
 	if session.Options.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, session.Options.Timeout)
+		ctx, cancel = runtimeexecution.WithTimeoutSource(base, session.Options.Timeout, runtimeexecution.TimeoutSourceAgentRunDeadline)
+	} else {
+		ctx, cancel = context.WithCancel(base)
 	}
 	defer cancel()
 	session.ChatSession.cancelCtx = ctx

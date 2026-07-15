@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -24,7 +26,8 @@ type TodosTool struct {
 	sandboxPolicy
 	mu      sync.Mutex
 	storage string
-	memory  []TodoItem
+	root    string
+	memory  map[string][]TodoItem
 }
 
 // TodoItem 任务项
@@ -94,7 +97,7 @@ func NewTodosTool() *TodosTool {
 			parameters,
 			true,
 		),
-		storage: filepath.Join(os.TempDir(), "aicli-todos.json"),
+		memory: make(map[string][]TodoItem),
 	}
 }
 
@@ -108,6 +111,7 @@ func (t *TodosTool) DefinitionMetadata() map[string]interface{} {
 func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	storagePath, ownerKey := t.storageForContext(ctx)
 
 	// 解析任务列表
 	todosRaw, ok := params["todos"].([]interface{})
@@ -179,7 +183,7 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 		}, nil
 	}
 
-	previousTodos, loadErr := t.loadTodos()
+	previousTodos, loadErr := t.loadTodos(storagePath, ownerKey)
 
 	// 为新任务设置创建时间，为完成的任务设置完成时间
 	now := time.Now().Unix()
@@ -195,7 +199,7 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 	updates, removedTodos, updateSummary := compareTodoLists(previousTodos, newTodos)
 
 	// 保存到文件
-	storageMode, err := t.saveTodos(newTodos)
+	storageMode, err := t.saveTodos(storagePath, ownerKey, newTodos)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -233,6 +237,8 @@ func (t *TodosTool) Execute(ctx context.Context, params map[string]interface{}) 
 			"completed":    completed,
 			"todos":        newTodos,
 			"storage_mode": storageMode,
+			"session_id":   toolctx.SessionID(ctx),
+			"goal_id":      toolctx.GoalID(ctx),
 		},
 	}, nil
 }
@@ -340,15 +346,55 @@ func todoStatusLabel(status string) string {
 	}
 }
 
+func (t *TodosTool) storageForContext(ctx context.Context) (string, string) {
+	if explicit := strings.TrimSpace(t.storage); explicit != "" {
+		return explicit, "explicit:" + filepath.Clean(explicit)
+	}
+	sessionID := toolctx.SessionID(ctx)
+	goalID := toolctx.GoalID(ctx)
+	sessionSegment := todoOwnerSegment(sessionID, "no-session")
+	goalSegment := todoOwnerSegment(goalID, "no-goal")
+	root := strings.TrimSpace(t.root)
+	if root == "" {
+		root = filepath.Join(os.TempDir(), "ai-agent-runtime", "todos")
+	}
+	path := filepath.Join(root, sessionSegment, goalSegment+".json")
+	return path, sessionID + "\x00" + goalID
+}
+
+func todoOwnerSegment(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	var builder strings.Builder
+	for _, ch := range value {
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9', ch == '-', ch == '_':
+			builder.WriteRune(ch)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+	if segment := strings.Trim(builder.String(), "_"); segment != "" {
+		if segment == value {
+			return segment
+		}
+		digest := sha256.Sum256([]byte(value))
+		return fmt.Sprintf("%s-%x", segment, digest[:6])
+	}
+	return fallback
+}
+
 // loadTodos 加载任务列表
-func (t *TodosTool) loadTodos() ([]TodoItem, error) {
-	if err := t.checkPath(runtimeexecutor.OpRead, t.storage); err != nil {
+func (t *TodosTool) loadTodos(storagePath, ownerKey string) ([]TodoItem, error) {
+	if err := t.checkPath(runtimeexecutor.OpRead, storagePath); err != nil {
 		if isSandboxPermissionError(err) {
-			return cloneTodoItems(t.memory), nil
+			return cloneTodoItems(t.memory[ownerKey]), nil
 		}
 		return nil, err
 	}
-	data, err := os.ReadFile(t.storage)
+	data, err := os.ReadFile(storagePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []TodoItem{}, nil
@@ -365,10 +411,13 @@ func (t *TodosTool) loadTodos() ([]TodoItem, error) {
 }
 
 // saveTodos 保存任务列表
-func (t *TodosTool) saveTodos(todos []TodoItem) (string, error) {
-	if err := t.checkPath(runtimeexecutor.OpWrite, t.storage); err != nil {
+func (t *TodosTool) saveTodos(storagePath, ownerKey string, todos []TodoItem) (string, error) {
+	if err := t.checkPath(runtimeexecutor.OpWrite, storagePath); err != nil {
 		if isSandboxPermissionError(err) {
-			t.memory = cloneTodoItems(todos)
+			if t.memory == nil {
+				t.memory = make(map[string][]TodoItem)
+			}
+			t.memory[ownerKey] = cloneTodoItems(todos)
 			return "memory", nil
 		}
 		return "", err
@@ -378,14 +427,17 @@ func (t *TodosTool) saveTodos(todos []TodoItem) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(t.storage), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(storagePath), 0o755); err != nil {
 		return "", err
 	}
 
-	if err := os.WriteFile(t.storage, data, 0644); err != nil {
+	if err := os.WriteFile(storagePath, data, 0644); err != nil {
 		return "", err
 	}
-	t.memory = cloneTodoItems(todos)
+	if t.memory == nil {
+		t.memory = make(map[string][]TodoItem)
+	}
+	t.memory[ownerKey] = cloneTodoItems(todos)
 	return "file", nil
 }
 

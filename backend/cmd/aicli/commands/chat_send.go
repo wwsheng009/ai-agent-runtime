@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 )
 
 // sendMessage 发送消息
@@ -22,7 +24,12 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	defer stopBusyInputCapture()
 	ensureChatSystemPromptMessage(session)
 	beginChatUserTurn(session, userMessage)
-	executor := ensureChatExecutor(session)
+	executor, err := ensureChatExecutor(session)
+	if err != nil {
+		logChatTurnFailureIfUnrecorded(session, userMessage, err)
+		flushChatSessionLog(session)
+		return "", err
+	}
 	resetChatTurnTokenUsage(session)
 
 	if !session.NoInteractive && shouldShowInitialThinkingIndicator(session, executor) {
@@ -39,7 +46,7 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	}
 	var cancel context.CancelFunc
 	if session.RequestTimeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, session.RequestTimeout)
+		ctx, cancel = runtimeexecution.WithTimeoutSource(ctx, session.RequestTimeout, runtimeexecution.TimeoutSourceChatTurnDeadline)
 		defer cancel()
 	}
 
@@ -142,7 +149,7 @@ func shouldShowInitialThinkingIndicator(session *ChatSession, executor aicliChat
 	if session.LocalRuntimeHost != nil || session.ActorFirstReady {
 		return false
 	}
-	if _, ok := executor.(*aicliActorChatExecutor); ok {
+	if descriptor, ok := chatRuntimeExecutorDescriptor(executor); ok && descriptor.RuntimeEvents {
 		return false
 	}
 	return true

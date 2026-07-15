@@ -2,6 +2,7 @@ package team
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -57,7 +58,7 @@ func TestReconcileTerminalTeamStateDoesNotDuplicateSummarySideEffects(t *testing
 	require.NotNil(t, second)
 	assert.True(t, second.Terminal)
 	assert.Equal(t, TeamStatusDone, second.Status)
-	assert.Empty(t, second.Summary)
+	assert.Equal(t, "final team summary", second.Summary)
 
 	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
 	require.NoError(t, err)
@@ -78,6 +79,106 @@ func TestReconcileTerminalTeamStateDoesNotDuplicateSummarySideEffects(t *testing
 	assert.Equal(t, "lead", messages[0].FromAgent)
 	assert.Equal(t, "*", messages[0].ToAgent)
 	assert.Equal(t, "final team summary", messages[0].Body)
+}
+
+func TestReconcileTerminalTeamStateConcurrentCallsPublishOneSummary(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, Task{
+		ID:      "task-concurrent",
+		TeamID:  teamID,
+		Title:   "concurrent terminal task",
+		Status:  TaskStatusDone,
+		Summary: "finished once",
+	})
+	require.NoError(t, err)
+	mailbox := NewMailboxService(store)
+
+	const workers = 8
+	start := make(chan struct{})
+	errors := make(chan error, workers)
+	var waitGroup sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			<-start
+			_, reconcileErr := ReconcileTerminalTeamState(ctx, TerminalTeamServices{
+				Store:   store,
+				Mailbox: mailbox,
+			}, teamID)
+			errors <- reconcileErr
+		}()
+	}
+	close(start)
+	waitGroup.Wait()
+	close(errors)
+	for reconcileErr := range errors {
+		require.NoError(t, reconcileErr)
+	}
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
+	require.NoError(t, err)
+	eventCounts := map[string]int{}
+	for _, event := range events {
+		eventCounts[event.Type]++
+	}
+	assert.Equal(t, 1, eventCounts["team.completed"])
+	assert.Equal(t, 1, eventCounts["team.summary"])
+
+	messages, err := store.ListMail(ctx, MailFilter{TeamID: teamID, Kind: "done"})
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	assert.Contains(t, messages[0].Body, "finished once")
+}
+
+func TestReconcileTerminalTeamStatePreservesPartialResults(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, Task{ID: "task-ok", TeamID: teamID, Title: "successful task", Status: TaskStatusDone, Summary: "kept result"})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, Task{ID: "task-failed", TeamID: teamID, Title: "failed task", Status: TaskStatusFailed, Summary: "retry this"})
+	require.NoError(t, err)
+
+	result, err := ReconcileTerminalTeamState(ctx, TerminalTeamServices{Store: store}, teamID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, TeamStatusPartiallyCompleted, result.Status)
+	assert.Contains(t, result.Summary, "kept result")
+	assert.Contains(t, result.Summary, "retry this")
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID, EventType: "team.summary"})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "partially_completed", events[0].Payload["status"])
+	assert.Len(t, events[0].Payload["successful_tasks"], 1)
+	assert.Len(t, events[0].Payload["failed_tasks"], 1)
+	assert.Len(t, events[0].Payload["retryable_tasks"], 1)
+}
+
+func TestReconcileTerminalTeamStateFailedStillPublishesFallbackSummary(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, Task{ID: "task-failed", TeamID: teamID, Status: TaskStatusFailed, Summary: "failure evidence"})
+	require.NoError(t, err)
+
+	result, err := ReconcileTerminalTeamState(ctx, TerminalTeamServices{Store: store}, teamID)
+	require.NoError(t, err)
+	assert.Equal(t, TeamStatusFailed, result.Status)
+	assert.Equal(t, FinalSummarySourceFallback, result.SummarySource)
+	assert.Equal(t, FinalSummaryFallbackPlannerNotConfigured, result.SummaryFallbackReason)
+	assert.Contains(t, result.Summary, "failure evidence")
+
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID, EventType: "team.summary"})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
 }
 
 func TestReconcileTerminalTeamStateDoesNotDowngradeTerminalDoneTeam(t *testing.T) {
@@ -114,7 +215,9 @@ func TestReconcileTerminalTeamStateDoesNotDowngradeTerminalDoneTeam(t *testing.T
 
 	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID})
 	require.NoError(t, err)
-	assert.Empty(t, events)
+	require.Len(t, events, 1)
+	assert.Equal(t, "team.summary", events[0].Type)
+	assert.Equal(t, "done", events[0].Payload["status"])
 }
 
 func TestReconcileTerminalTeamStateDoesNotCompletePausedCancelledTeam(t *testing.T) {

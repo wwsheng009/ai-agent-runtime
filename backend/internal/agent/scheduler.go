@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentresult"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -46,19 +47,20 @@ type SubagentTask struct {
 
 // SubagentResult 是父代理可见的结构化回执。
 type SubagentResult struct {
-	ID               string            `json:"id,omitempty" yaml:"id,omitempty"`
-	Role             string            `json:"role,omitempty" yaml:"role,omitempty"`
-	SessionID        string            `json:"session_id,omitempty" yaml:"session_id,omitempty"`
-	ParentSessionID  string            `json:"parent_session_id,omitempty" yaml:"parent_session_id,omitempty"`
-	ParentToolCallID string            `json:"parent_tool_call_id,omitempty" yaml:"parent_tool_call_id,omitempty"`
-	ReadOnly         bool              `json:"read_only,omitempty" yaml:"read_only,omitempty"`
-	BudgetTokens     int               `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
-	Success          bool              `json:"success" yaml:"success"`
-	Summary          string            `json:"summary" yaml:"summary"`
-	Patches          []FilePatch       `json:"patches,omitempty" yaml:"patches,omitempty"`
-	Findings         []string          `json:"findings,omitempty" yaml:"findings,omitempty"`
-	Usage            *types.TokenUsage `json:"usage,omitempty" yaml:"usage,omitempty"`
-	Error            string            `json:"error,omitempty" yaml:"error,omitempty"`
+	ID               string              `json:"id,omitempty" yaml:"id,omitempty"`
+	Role             string              `json:"role,omitempty" yaml:"role,omitempty"`
+	SessionID        string              `json:"session_id,omitempty" yaml:"session_id,omitempty"`
+	ParentSessionID  string              `json:"parent_session_id,omitempty" yaml:"parent_session_id,omitempty"`
+	ParentToolCallID string              `json:"parent_tool_call_id,omitempty" yaml:"parent_tool_call_id,omitempty"`
+	ReadOnly         bool                `json:"read_only,omitempty" yaml:"read_only,omitempty"`
+	BudgetTokens     int                 `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
+	Success          bool                `json:"success" yaml:"success"`
+	Summary          string              `json:"summary" yaml:"summary"`
+	Patches          []FilePatch         `json:"patches,omitempty" yaml:"patches,omitempty"`
+	Findings         []string            `json:"findings,omitempty" yaml:"findings,omitempty"`
+	Usage            *types.TokenUsage   `json:"usage,omitempty" yaml:"usage,omitempty"`
+	Error            string              `json:"error,omitempty" yaml:"error,omitempty"`
+	Contract         *agentresult.Result `json:"result_contract,omitempty" yaml:"result_contract,omitempty"`
 }
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
@@ -201,6 +203,12 @@ func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRun
 }
 
 func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOptions, task SubagentTask) (SubagentResult, error) {
+	report, err := s.runChildUncontracted(ctx, options, task)
+	ensureSubagentResultContract(&report, task)
+	return report, err
+}
+
+func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options SubagentRunOptions, task SubagentTask) (SubagentResult, error) {
 	if s.parent == nil {
 		return SubagentResult{}, fmt.Errorf("parent agent is nil")
 	}
@@ -368,6 +376,7 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 		Success:          result.Success,
 		Summary:          result.Output,
 		Usage:            result.Usage,
+		Contract:         result.Contract.Clone(),
 	}
 	if task.ReadOnly {
 		report.Findings = collectFindings(result.Observations)
@@ -984,7 +993,7 @@ func (s *SubagentScheduler) prepareTasks(tasks []SubagentTask) ([]SubagentTask, 
 			if parentPolicy.ReadOnly && !effective.ReadOnly {
 				return nil, fmt.Errorf("read-only parent policy blocks writable subagent %q", effective.ID)
 			}
-			childPolicy := parentPolicy.DeriveChild(effective.ToolsWhitelist, effective.ReadOnly)
+			childPolicy := parentPolicy.DeriveChildForTask(effective.ToolsWhitelist, effective.ReadOnly, effective.Role, subagentWritePaths(effective))
 			effective.ReadOnly = childPolicy.ReadOnly
 			if childPolicy.AllowlistEnabled {
 				effective.ToolsWhitelist = childPolicy.AllowedToolNames()
@@ -1042,9 +1051,21 @@ func (s *SubagentScheduler) childPolicy(task SubagentTask) *ToolExecutionPolicy 
 		parentPolicy = s.parent.GetToolExecutionPolicy()
 	}
 	if parentPolicy != nil {
-		return parentPolicy.DeriveChild(task.ToolsWhitelist, task.ReadOnly)
+		return parentPolicy.DeriveChildForTask(task.ToolsWhitelist, task.ReadOnly, task.Role, subagentWritePaths(task))
 	}
-	return NewToolExecutionPolicy(task.ToolsWhitelist, task.ReadOnly)
+	child := NewToolExecutionPolicy(task.ToolsWhitelist, task.ReadOnly)
+	child.SetCapabilityScope(CapabilitiesForTask(task.Role, task.ReadOnly, task.ToolsWhitelist, subagentWritePaths(task)))
+	return child
+}
+
+func subagentWritePaths(task SubagentTask) []string {
+	paths := make([]string, 0, len(task.PatchContext))
+	for _, patch := range task.PatchContext {
+		if path := strings.TrimSpace(patch.Path); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 type indexedSubagentTask struct {

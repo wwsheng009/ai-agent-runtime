@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
 func TestManagerDispatchesByPriorityWithinCapacity(t *testing.T) {
@@ -70,7 +71,7 @@ func TestManagerDispatchesByPriorityWithinCapacity(t *testing.T) {
 	require.Equal(t, []string{blocker.ID, high.ID, low.ID}, runningOrder[:3])
 }
 
-func TestManagerRecoversPendingAndFailsInterruptedRunningJobs(t *testing.T) {
+func TestManagerRecoversPendingAndMarksInterruptedRunningJobsOrphaned(t *testing.T) {
 	ctx := context.Background()
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "background.db")
@@ -132,8 +133,8 @@ func TestManagerRecoversPendingAndFailsInterruptedRunningJobs(t *testing.T) {
 	recoveredRunning, err := manager.GetJob(ctx, runningJob.ID)
 	require.NoError(t, err)
 	require.NotNil(t, recoveredRunning)
-	require.Equal(t, StatusFailed, recoveredRunning.Status)
-	require.Contains(t, recoveredRunning.Message, "restarted before job completion")
+	require.Equal(t, StatusOrphaned, recoveredRunning.Status)
+	require.Contains(t, recoveredRunning.Message, "restarted before job")
 
 	pendingEvents, err := manager.ListEvents(ctx, pendingJob.ID, 0, 0)
 	require.NoError(t, err)
@@ -141,7 +142,45 @@ func TestManagerRecoversPendingAndFailsInterruptedRunningJobs(t *testing.T) {
 
 	runningEvents, err := manager.ListEvents(ctx, runningJob.ID, 0, 0)
 	require.NoError(t, err)
-	require.Contains(t, eventTypes(runningEvents), "recovered_failed")
+	require.Contains(t, eventTypes(runningEvents), "orphaned")
+}
+
+func TestManagerReturnsStableJobNotFoundCode(t *testing.T) {
+	manager := NewManager(DefaultConfig())
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	_, err := manager.GetJob(context.Background(), "job_missing")
+	require.Error(t, err)
+	require.True(t, runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound))
+	_, err = manager.ReadOutput(context.Background(), TaskOutputArgs{JobID: "job_missing"})
+	require.Error(t, err)
+	require.True(t, runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound))
+}
+
+func TestManagerPrunesExpiredTerminalJobsAndOwnedArtifacts(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "background.db")
+	logDir := filepath.Join(tempDir, "logs")
+	require.NoError(t, os.MkdirAll(logDir, 0o755))
+	logPath := filepath.Join(logDir, "job_expired.log")
+	require.NoError(t, os.WriteFile(logPath, []byte("old output"), 0o644))
+
+	store, err := NewSQLiteStore(&StoreConfig{Path: storePath})
+	require.NoError(t, err)
+	finishedAt := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, store.SaveJob(ctx, Job{
+		ID: "job_expired", SessionID: "session-1", Status: StatusCompleted,
+		CreatedAt: finishedAt.Add(-time.Minute), FinishedAt: &finishedAt, LogPath: logPath,
+	}))
+	require.NoError(t, store.Close())
+
+	manager := NewManager(Config{StorePath: storePath, LogDir: logDir, Retention: time.Hour})
+	defer func() { require.NoError(t, manager.Close()) }()
+	_, err = manager.GetJob(ctx, "job_expired")
+	require.True(t, runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound))
+	_, statErr := os.Stat(logPath)
+	require.True(t, os.IsNotExist(statErr))
 }
 
 func TestManagerRecoversRunningJobWithRerunPolicy(t *testing.T) {
@@ -247,6 +286,75 @@ func TestManagerRecoversDetachedRunningJobAcrossRestart(t *testing.T) {
 	events, err := recoveredManager.ListEvents(ctx, job.ID, 0, 0)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, strings.Count(strings.Join(eventTypes(events), ","), "running"), 2)
+}
+
+func TestManagerPersistsTimeoutBudgetAndStructuredTimeoutOutcome(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(Config{
+		MaxConcurrentJobs: 1,
+		DefaultTimeout:    100 * time.Millisecond,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	explicit, err := manager.SubmitShell(ctx, "session-timeout", BackgroundTaskArgs{
+		Command:    shellEchoCommand("explicit-timeout"),
+		TimeoutSec: 600,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(600000), explicit.Metadata["timeout_requested_ms"])
+	require.Equal(t, int64(600000), explicit.Metadata["timeout_effective_ms"])
+	require.Equal(t, "tool_argument", explicit.Metadata["timeout_source"])
+
+	timedOut, err := manager.SubmitShell(ctx, "session-timeout", BackgroundTaskArgs{
+		Command: shellDelayCommand(500*time.Millisecond, "too-late"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, timedOut.ID, StatusTimedOut, backgroundTestTimeout(10*time.Second)))
+
+	job, err := manager.GetJob(ctx, timedOut.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(runtimeerrors.ErrToolTimeout), job.Metadata["error_code"])
+	require.Equal(t, int64(100), job.Metadata["timeout_effective_ms"])
+	require.Equal(t, "tool_default", job.Metadata["timeout_source"])
+
+	output, err := manager.ReadOutput(ctx, TaskOutputArgs{JobID: timedOut.ID})
+	require.NoError(t, err)
+	require.Equal(t, string(StatusTimedOut), output.Status)
+	require.Equal(t, string(runtimeerrors.ErrToolTimeout), output.ErrorCode)
+	require.Equal(t, int64(100), output.TimeoutEffectiveMs)
+	require.Equal(t, "tool_default", output.TimeoutSource)
+}
+
+func TestReliabilityEvalBackgroundTimeoutRetrySucceeds(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(Config{
+		MaxConcurrentJobs: 1,
+		DefaultTimeout:    100 * time.Millisecond,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	first, err := manager.SubmitShell(ctx, "session-retry", BackgroundTaskArgs{
+		Command: shellDelayCommand(500*time.Millisecond, "too-late"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, first.ID, StatusTimedOut, backgroundTestTimeout(10*time.Second)))
+
+	retry, err := manager.SubmitShell(ctx, "session-retry", BackgroundTaskArgs{
+		Command:    shellEchoCommand("retry-succeeded"),
+		TimeoutSec: 5,
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, first.ID, retry.ID)
+	require.NoError(t, waitForJobStatus(ctx, manager, retry.ID, StatusCompleted, backgroundTestTimeout(10*time.Second)))
+
+	firstAfterRetry, err := manager.GetJob(ctx, first.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusTimedOut, firstAfterRetry.Status)
+	require.Equal(t, string(runtimeerrors.ErrToolTimeout), firstAfterRetry.Metadata["error_code"])
+	retryOutput, err := manager.ReadOutput(ctx, TaskOutputArgs{JobID: retry.ID})
+	require.NoError(t, err)
+	require.Equal(t, string(StatusCompleted), retryOutput.Status)
+	require.Contains(t, retryOutput.Output, "retry-succeeded")
 }
 
 func waitForJobStatus(ctx context.Context, manager *Manager, jobID string, status JobStatus, timeout time.Duration) error {

@@ -134,6 +134,12 @@ func formatChatCompactReport(report *chatCompactReport) string {
 	if len(report.Result.CheckpointIDs) > 0 {
 		parts = append(parts, "checkpoint_id="+report.Result.CheckpointIDs[len(report.Result.CheckpointIDs)-1])
 	}
+	if reconciliation := report.Result.Reconciliation; reconciliation != nil {
+		parts = append(parts, fmt.Sprintf("context_drift=%d", reconciliation.DriftCount))
+		if reconciliation.CorrectionMade {
+			parts = append(parts, "correction=applied")
+		}
+	}
 	return strings.Join(parts, " | ")
 }
 

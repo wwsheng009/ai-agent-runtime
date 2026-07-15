@@ -9,16 +9,21 @@ const (
 	ErrNetworkUnavailable ErrorCode = "NETWORK_UNAVAILABLE"
 
 	// API 错误
-	ErrAPIRateLimit   ErrorCode = "API_RATE_LIMIT"
+	ErrAPIRateLimit    ErrorCode = "API_RATE_LIMIT"
 	ErrAPIUnauthorized ErrorCode = "API_UNAUTHORIZED"
-	ErrAPINotFound    ErrorCode = "API_NOT_FOUND"
-	ErrAPIBadRequest  ErrorCode = "API_BAD_REQUEST"
-	ErrAPIServerError ErrorCode = "API_SERVER_ERROR"
+	ErrAPINotFound     ErrorCode = "API_NOT_FOUND"
+	ErrAPIBadRequest   ErrorCode = "API_BAD_REQUEST"
+	ErrAPIServerError  ErrorCode = "API_SERVER_ERROR"
 
 	// 工具错误
-	ErrToolNotFound  ErrorCode = "TOOL_NOT_FOUND"
-	ErrToolExecution ErrorCode = "TOOL_EXECUTION"
-	ErrToolTimeout   ErrorCode = "TOOL_TIMEOUT"
+	ErrToolNotFound         ErrorCode = "TOOL_NOT_FOUND"
+	ErrToolExecution        ErrorCode = "TOOL_EXECUTION"
+	ErrToolTimeout          ErrorCode = "TOOL_TIMEOUT"
+	ErrWritePrecondition    ErrorCode = "WRITE_PRECONDITION_FAILED"
+	ErrJobNotFound          ErrorCode = "JOB_NOT_FOUND"
+	ErrTurnDeadlineExceeded ErrorCode = "TURN_DEADLINE_EXCEEDED"
+	ErrAgentRunCanceled     ErrorCode = "AGENT_RUN_CANCELED"
+	ErrApprovalExpired      ErrorCode = "APPROVAL_EXPIRED"
 
 	// Agent 错误
 	ErrAgentMaxSteps   ErrorCode = "AGENT_MAX_STEPS"

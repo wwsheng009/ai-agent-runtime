@@ -117,7 +117,7 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 	orchestrator := h.teamOrchestrator
 	orchestrator.Store = store
 	orchestrator.Claims = claims
-	orchestrator.ExpertConcurrencyLimit = teamExpertConcurrencyLimit(h.subagentRoutingConfig())
+	orchestrator.ExpertConcurrencyLimit = teamExpertConcurrencyLimit(h.teamRoutingConfig())
 	applyTeamOrchestratorMailboxWake(orchestrator, mailboxWakeStore)
 
 	mailbox := orchestrator.Mailbox
@@ -4622,7 +4622,8 @@ func parseTeamStatus(raw string) (team.TeamStatus, error) {
 		return "", nil
 	}
 	switch team.TeamStatus(strings.ToLower(value)) {
-	case team.TeamStatusActive, team.TeamStatusPaused, team.TeamStatusDone, team.TeamStatusFailed:
+	case team.TeamStatusActive, team.TeamStatusPaused, team.TeamStatusDone, team.TeamStatusFailed,
+		team.TeamStatusPartiallyCompleted, team.TeamStatusCanceled:
 		return team.TeamStatus(strings.ToLower(value)), nil
 	default:
 		return "", errors.New(errors.ErrValidationFailed, "invalid team status")

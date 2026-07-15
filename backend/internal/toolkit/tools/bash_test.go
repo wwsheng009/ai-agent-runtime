@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
@@ -263,11 +264,17 @@ func TestBashTool_EnvDefaultTimeoutStopsRealWindowsCommand(t *testing.T) {
 	if result.Success {
 		t.Fatalf("expected real command to time out, got success with output %q", result.Content)
 	}
-	if result.Error == nil || !strings.Contains(result.Error.Error(), "命令执行超时") {
-		t.Fatalf("expected timeout error, got %v", result.Error)
+	if !runtimeerrors.Is(result.Error, runtimeerrors.ErrToolTimeout) {
+		t.Fatalf("expected structured timeout error, got %v", result.Error)
 	}
 	if got := result.Metadata["timeout_ms"]; got != int64(100) {
 		t.Fatalf("expected timeout_ms metadata from env default, got %#v", got)
+	}
+	if got := result.Metadata["timeout_requested_ms"]; got != int64(100) {
+		t.Fatalf("expected requested timeout metadata from env default, got %#v", got)
+	}
+	if got := result.Metadata["timeout_source"]; got != "tool_default" {
+		t.Fatalf("expected tool_default timeout source, got %#v", got)
 	}
 }
 

@@ -520,6 +520,11 @@ func (o *Orchestrator) tick(ctx context.Context, teamID string) error {
 			return err
 		}
 	}
+	dependencyFailures, err := ReconcileFailedTaskDependencies(ctx, o.Store, teamID)
+	if err != nil {
+		return err
+	}
+	publishDependencyFailureEvents(o.Events, teamID, dependencyFailures)
 	_, _ = o.markAgentControlTasksReady(ctx, teamID)
 
 	assignments, err := o.ClaimReadyTasks(ctx, teamID, 0)
@@ -779,6 +784,12 @@ func (o *Orchestrator) FailTask(ctx context.Context, assignment Assignment, summ
 func (o *Orchestrator) failTaskWithRunResult(ctx context.Context, assignment Assignment, summary string, result *TaskRunResult, runErr error) error {
 	if o == nil || o.Store == nil {
 		return fmt.Errorf("orchestrator store is not configured")
+	}
+	if current, loadErr := o.Store.GetTask(ctx, strings.TrimSpace(assignment.Task.ID)); loadErr == nil && current != nil {
+		switch current.Status {
+		case TaskStatusDone, TaskStatusFailed, TaskStatusCancelled:
+			return nil
+		}
 	}
 	errorText := ""
 	if result != nil {

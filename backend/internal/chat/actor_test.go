@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -228,6 +229,51 @@ func TestNewPendingToolInvocationInfersStableCurrentBatchToolCallID(t *testing.T
 	require.Len(t, first.BatchToolCalls, 2)
 	require.Equal(t, firstID, first.BatchToolCalls[0].ToolCallID)
 	require.Equal(t, secondID, first.BatchToolCalls[1].ToolCallID)
+}
+
+func TestSessionActorRequestApprovalExpiresWithStructuredError(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "approval-expiry-user")
+	require.NoError(t, err)
+
+	apiAgent := agent.NewAgent(&agent.Config{
+		Name:     "approval-expiry-agent",
+		Model:    "test-model",
+		MaxSteps: 1,
+	}, nil)
+	runtimeStore := NewInMemoryRuntimeStore(32)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	_, err = actor.RequestApproval(ctx, runtimepolicy.ApprovalRequest{
+		ID:         "approval-expiry",
+		SessionID:  session.ID,
+		ToolCallID: "tool-expiry",
+		ToolName:   "write_file",
+		ExpiresAt:  time.Now().UTC().Add(40 * time.Millisecond),
+	})
+	require.Error(t, err)
+	require.True(t, runtimeerrors.Is(err, runtimeerrors.ErrApprovalExpired), "unexpected error: %v", err)
+
+	state := actor.State()
+	require.NotNil(t, state)
+	require.Equal(t, SessionIdle, state.Status)
+	require.Nil(t, state.PendingApproval)
+	require.Nil(t, state.PendingTool)
+
+	events, listErr := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, listErr)
+	require.NotEmpty(t, events)
+	last := events[len(events)-1]
+	require.Equal(t, EventApprovalResolved, last.Type)
+	require.Equal(t, string(runtimeerrors.ErrApprovalExpired), last.Payload["error_code"])
 }
 
 func TestSessionActorSubmitPromptUpdatesSession(t *testing.T) {
@@ -2034,6 +2080,21 @@ func TestSessionActorApproveToolResumesWithoutInMemoryWaiter(t *testing.T) {
 	require.Equal(t, "tool_approval", pendingSession.History[1].ToolCalls[0].ID)
 	require.Equal(t, "team_echo", pendingSession.History[1].ToolCalls[0].Name)
 
+	cancel()
+	select {
+	case <-submitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("original actor submit did not exit after turn cancellation")
+	}
+	require.Eventually(t, func() bool {
+		state := actor1.State()
+		return state != nil && state.Status == SessionWaitingApproval &&
+			state.PendingApproval != nil && state.PendingApproval.ID == requestID &&
+			state.PendingTool != nil && state.PendingTool.ToolCallID == "tool_approval" &&
+			state.CurrentRunMeta != nil && state.CurrentRunMeta.Team != nil &&
+			state.FrozenTurnToolsSet
+	}, 2*time.Second, 20*time.Millisecond)
+
 	actor2, err := NewSessionActor(session.ID, SessionActorConfig{
 		Agent:        apiAgent,
 		LLMRuntime:   runtime,
@@ -2073,12 +2134,6 @@ func TestSessionActorApproveToolResumesWithoutInMemoryWaiter(t *testing.T) {
 		"source":       "receipt_store",
 	})
 
-	cancel()
-	select {
-	case <-submitDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("original actor submit did not exit after cancellation")
-	}
 }
 
 func TestApprovalRequestedEventPayloadIncludesRunMetaRouteAndPermission(t *testing.T) {

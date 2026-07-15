@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestManagerRestoreConversationPreviewReturnsConversationPlan(t *testing.T) {
@@ -52,6 +52,7 @@ func TestManagerRestoreBothRestoresCodeAndConversationPlan(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sample.txt")
 	require.NoError(t, os.WriteFile(path, []byte("after"), 0o644))
+	sharedCreatedAt := time.Unix(100, 0).UTC()
 
 	targetID, err := store.SaveCheckpoint(context.Background(), artifact.Checkpoint{
 		SessionID:    "session-1",
@@ -70,6 +71,7 @@ func TestManagerRestoreBothRestoresCodeAndConversationPlan(t *testing.T) {
 				},
 			},
 		},
+		CreatedAt: sharedCreatedAt,
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, []byte("after"), 0o644))
@@ -91,6 +93,7 @@ func TestManagerRestoreBothRestoresCodeAndConversationPlan(t *testing.T) {
 				},
 			},
 		},
+		CreatedAt: sharedCreatedAt,
 	})
 	require.NoError(t, err)
 

@@ -118,6 +118,68 @@ aicli:
 	}
 }
 
+func TestInitGlobalConfigLoadsIndependentTeamRouting(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `
+aicli:
+  subagents:
+    routing:
+      enabled: true
+      levels:
+        hard:
+          provider: child-provider
+          model: child-model
+  teams:
+    routing:
+      enabled: true
+      levels:
+        hard:
+          provider: team-provider
+          model: team-model
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+
+	cfg, err := InitGlobalConfig(configPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig failed: %v", err)
+	}
+	teamRouting := EffectiveTeamRoutingConfig(cfg)
+	if teamRouting == nil {
+		t.Fatal("expected team routing config")
+	}
+	if got := teamRouting.Levels["hard"]; got.Provider != "team-provider" || got.Model != "team-model" {
+		t.Fatalf("unexpected team hard route: %#v", got)
+	}
+}
+
+func TestEffectiveTeamRoutingConfigFallsBackToSubagentRouting(t *testing.T) {
+	subagentRouting := &AICLISubagentRoutingConfig{DefaultDifficulty: "hard"}
+	cfg := &Config{AICLI: &AICLIConfig{
+		Subagents: &AICLISubagentsConfig{Routing: subagentRouting},
+	}}
+	if got := EffectiveTeamRoutingConfig(cfg); got != subagentRouting {
+		t.Fatalf("expected team routing to inherit subagent routing, got %#v", got)
+	}
+}
+
+func TestValidateConfigRejectsInvalidEnabledTeamRouting(t *testing.T) {
+	enabled := true
+	err := ValidateConfig(&Config{AICLI: &AICLIConfig{
+		Teams: &AICLITeamsConfig{Routing: &AICLISubagentRoutingConfig{
+			Enabled:           &enabled,
+			DefaultDifficulty: "impossible",
+		}},
+	}})
+	if err == nil {
+		t.Fatal("expected invalid team routing error")
+	}
+	if !strings.Contains(err.Error(), "aicli.teams.routing.default_difficulty") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
 func TestInitGlobalConfigRejectsInvalidEnabledSubagentRoutingCompatibilityMode(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	configYAML := `

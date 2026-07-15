@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -297,5 +299,39 @@ func TestToolCompletedEventPayloadIncludesShellMetadata(t *testing.T) {
 	}
 	if got := payload["shell_display"]; got != `pwsh (C:\Program Files\PowerShell\7\pwsh.exe)` {
 		t.Fatalf("expected shell_display to be preserved, got %#v", got)
+	}
+}
+
+func TestToolCompletedEventPayloadIncludesStructuredTimeoutMetadata(t *testing.T) {
+	metadata := map[string]interface{}{}
+	result := toolExecutionResult{
+		Call: types.ToolCall{ID: "call-timeout", Name: "bash"},
+	}
+	recordToolExecutionOutcome(&result, metadata, "partial output", map[string]interface{}{
+		"shell_type": "pwsh",
+	}, runtimeerrors.WrapWithContext(
+		runtimeerrors.ErrTurnDeadlineExceeded,
+		"turn deadline exceeded",
+		context.DeadlineExceeded,
+		map[string]interface{}{
+			"timeout_requested_ms": int64(600000),
+			"timeout_effective_ms": int64(30000),
+			"timeout_source":       "chat_turn_deadline",
+		},
+	))
+	result.Envelope = &output.Envelope{Metadata: metadata}
+
+	payload := toolCompletedEventPayload(result, 1, "trace-timeout", nil)
+	if got := payload["error_code"]; got != string(runtimeerrors.ErrTurnDeadlineExceeded) {
+		t.Fatalf("expected structured error code, got %#v", got)
+	}
+	if got := payload["timeout_requested_ms"]; got != int64(600000) {
+		t.Fatalf("expected requested timeout, got %#v", got)
+	}
+	if got := payload["timeout_effective_ms"]; got != int64(30000) {
+		t.Fatalf("expected effective timeout, got %#v", got)
+	}
+	if got := payload["timeout_source"]; got != "chat_turn_deadline" {
+		t.Fatalf("expected timeout source, got %#v", got)
 	}
 }

@@ -78,6 +78,10 @@ var (
 		"providers.items",
 		"retry",
 	}
+	hotReloadAgentRoutingPrefixes = []string{
+		"aicli.subagents.routing",
+		"aicli.teams.routing",
+	}
 )
 
 type ConfigDocumentHotReloadResult struct {
@@ -90,6 +94,7 @@ type ConfigDocumentHotReloader interface {
 }
 
 type RuntimeConfigApplyTarget interface {
+	SetAICLIConfig(config *agentconfig.Config)
 	SetAdminToken(token string)
 	SetMutationPolicy(policy skillsapi.MutationPolicy)
 	SetProfileSupport(cfg skillsapi.ProfileSupportConfig)
@@ -187,6 +192,16 @@ func (r *RuntimeConfigHotReloader) Apply(
 				fmt.Sprintf("provider 配置已保存，但热替换 provider 注册表失败: %v", err))
 		} else {
 			addMatchingPathsForPrefixes(appliedSet, hotPaths, hotReloadProviderPrefixes)
+		}
+	}
+
+	if hasAnyPrefixInSet(hotPaths, hotReloadAgentRoutingPrefixes) {
+		if r.target == nil {
+			result.Warnings = append(result.Warnings,
+				"子 Agent / Team 难度路由配置已保存，但当前进程未接入路由热重载目标。")
+		} else {
+			r.target.SetAICLIConfig(nextCfg)
+			addMatchingPathsForPrefixes(appliedSet, hotPaths, hotReloadAgentRoutingPrefixes)
 		}
 	}
 
@@ -303,6 +318,9 @@ func classifyConfigDocumentPath(path string) runtimeConfigPathDisposition {
 	if hasAnyPrefixInSet([]string{path}, hotReloadProviderPrefixes) {
 		return runtimeConfigPathHotReload
 	}
+	if hasAnyPrefixInSet([]string{path}, hotReloadAgentRoutingPrefixes) {
+		return runtimeConfigPathHotReload
+	}
 	if hasAnyPrefixInSet([]string{path}, inactiveSkillsRuntimePrefixes) {
 		return runtimeConfigPathInactive
 	}
@@ -383,7 +401,7 @@ func buildConfigDocumentWarnings(
 		warnings = append(warnings,
 			"providers.items.*、providers.timeout、providers.max_retries、providers.backoff、retry.* 会同步刷新运行中 provider 注册表。")
 		warnings = append(warnings,
-			"skills_runtime 的治理策略、log、profiles、aicli.mcp 相关配置也会在当前进程内即时应用。")
+			"skills_runtime、log、profiles、aicli.mcp 以及子 Agent / Team 难度路由配置会在当前进程内即时应用。")
 		return warnings
 	}
 

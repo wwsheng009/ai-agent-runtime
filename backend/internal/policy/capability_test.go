@@ -27,9 +27,12 @@ func TestNormalizeToolNameMapsReportTaskOutcomeAliases(t *testing.T) {
 	assert.Equal(t, "read_agent_events", normalizeToolName("readagentevents"))
 }
 
-func TestDefaultCapabilityResolverTreatsLightAgentToolsAsReadOnly(t *testing.T) {
+func TestDefaultCapabilityResolverSeparatesAgentManagementFromObservation(t *testing.T) {
 	resolver := DefaultCapabilityResolver{}
-	for _, toolName := range []string{"spawn_agent", "list_agents", "send_message", "followup_task", "send_input", "wait_agent", "read_agent_events", "close_agent", "resume_agent"} {
+	for _, toolName := range []string{"spawn_agent", "send_message", "followup_task", "send_input", "close_agent", "resume_agent"} {
+		assert.Equal(t, []Capability{CapReadOnly, CapAgentManagement}, resolver.Resolve(EvalRequest{ToolName: toolName}))
+	}
+	for _, toolName := range []string{"list_agents", "wait_agent", "read_agent_events"} {
 		assert.Equal(t, []Capability{CapReadOnly}, resolver.Resolve(EvalRequest{ToolName: toolName}))
 	}
 }

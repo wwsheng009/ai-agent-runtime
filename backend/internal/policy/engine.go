@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -55,7 +56,10 @@ type Engine struct {
 	AskHandler         ApprovalHandler
 	Policy             *ToolExecutionPolicy
 	CapabilityResolver CapabilityResolver
+	ApprovalTimeout    time.Duration
 }
+
+const DefaultApprovalTimeout = 30 * time.Minute
 
 // Evaluate performs a permission evaluation for the given request.
 func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error) {
@@ -110,6 +114,9 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	}
 
 	if e.Policy != nil {
+		if err := e.Policy.AllowCapabilities(req.Capabilities); err != nil {
+			return Decision{Type: DecisionDeny, Reason: err.Error()}, nil
+		}
 		if err := e.Policy.AllowTool(req.ToolName); err != nil {
 			return Decision{Type: DecisionDeny, Reason: err.Error()}, nil
 		}
@@ -185,6 +192,13 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 		Reason:     decision.Reason,
 		RiskLevel:  riskLevel(req.Capabilities),
 	}
+	approvalTimeout := e.ApprovalTimeout
+	if approvalTimeout == 0 {
+		approvalTimeout = DefaultApprovalTimeout
+	}
+	if approvalTimeout > 0 {
+		approvalReq.ExpiresAt = time.Now().UTC().Add(approvalTimeout)
+	}
 	if len(req.Args) > 0 {
 		if payload, err := json.Marshal(req.Args); err == nil {
 			approvalReq.ArgsJSON = payload
@@ -230,7 +244,7 @@ func riskLevel(caps []Capability) string {
 			return "high"
 		}
 	}
-	if hasCapability(caps, CapNetwork) || hasCapability(caps, CapBackgroundTask) {
+	if hasCapability(caps, CapNetwork) || hasCapability(caps, CapBackgroundTask) || hasCapability(caps, CapAgentManagement) {
 		return "medium"
 	}
 	return "low"

@@ -2,17 +2,16 @@ package commands
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 )
 
 type doctorSubagentRouteOptions struct {
+	Scope                 string
 	Workflow              string
 	TeamID                string
 	Teammate              string
@@ -36,6 +35,8 @@ type doctorSubagentRouteOptions struct {
 
 type doctorSubagentRouteReport struct {
 	ConfigPath     string                             `json:"config_path,omitempty"`
+	Scope          string                             `json:"scope"`
+	RoutingSource  string                             `json:"routing_source"`
 	RoutingEnabled bool                               `json:"routing_enabled"`
 	Request        doctorSubagentRouteRequestReport   `json:"request"`
 	Parent         doctorSubagentRouteParentReport    `json:"parent"`
@@ -85,18 +86,13 @@ type doctorSubagentRouteDecisionReport struct {
 	FallbackReason      string   `json:"fallback_reason,omitempty"`
 }
 
-type doctorSubagentRouteProviderBrief struct {
-	Name           string   `json:"name"`
-	DefaultModel   string   `json:"default_model,omitempty"`
-	Supported      []string `json:"supported_models,omitempty"`
-	CapabilityKeys []string `json:"capability_keys,omitempty"`
-}
+type doctorSubagentRouteProviderBrief = modelrouting.ProviderBrief
 
 func newDoctorSubagentRouteCommand(getCfg func() *config.Config) *cobra.Command {
 	var opts doctorSubagentRouteOptions
 	cmd := &cobra.Command{
 		Use:   "subagent-route",
-		Short: "预览子 agent 难度路由结果，不调用模型",
+		Short: "预览子 Agent / Team 难度路由结果，不调用模型",
 		Run: func(cmd *cobra.Command, args []string) {
 			outputOptions, err := resolveStructuredOutputOptions(cmd, "text", "text", "json")
 			if err != nil {
@@ -110,6 +106,7 @@ func newDoctorSubagentRouteCommand(getCfg func() *config.Config) *cobra.Command 
 			renderDoctorSubagentRouteReport(report, outputOptions)
 		},
 	}
+	cmd.Flags().StringVar(&opts.Scope, "scope", "auto", "路由范围 auto|subagent|team；auto 根据 workflow 选择")
 	cmd.Flags().StringVar(&opts.Workflow, "workflow", "", "workflow hint，例如 spawn_agent 或 spawn_team")
 	cmd.Flags().StringVar(&opts.TeamID, "team-id", "", "spawn_team team id，仅用于 dry-run 上下文")
 	cmd.Flags().StringVar(&opts.Teammate, "teammate", "", "spawn_team teammate id/profile hint，仅用于 dry-run 上下文")
@@ -140,9 +137,14 @@ func runDoctorSubagentRoute(cfg *config.Config, opts doctorSubagentRouteOptions)
 		return nil, details, fmt.Errorf("config is nil")
 	}
 
-	catalog := newDoctorSubagentRouteCatalog(cfg)
+	catalog := modelrouting.NewConfigCatalog(cfg)
 	parent := resolveDoctorSubagentRouteParent(cfg, catalog, opts)
 	workflow := normalizeDoctorRouteWorkflow(opts.Workflow)
+	scope, routingSource, routing, err := modelrouting.ResolveConfigScope(cfg, opts.Scope, workflow)
+	if err != nil {
+		details["scope"] = strings.TrimSpace(opts.Scope)
+		return nil, details, err
+	}
 	writePaths := normalizeDoctorRouteStringSlice(opts.WritePaths)
 	readOnly := opts.ReadOnly
 	if len(writePaths) > 0 {
@@ -168,10 +170,6 @@ func runDoctorSubagentRoute(cfg *config.Config, opts doctorSubagentRouteOptions)
 		Timeout:             opts.Timeout,
 		ReadOnly:            readOnly,
 	}
-	routing := (*config.AICLISubagentRoutingConfig)(nil)
-	if cfg.AICLI != nil && cfg.AICLI.Subagents != nil {
-		routing = cfg.AICLI.Subagents.Routing
-	}
 	decision, err := (modelrouting.Resolver{
 		Config:  routing,
 		Catalog: catalog,
@@ -184,6 +182,8 @@ func runDoctorSubagentRoute(cfg *config.Config, opts doctorSubagentRouteOptions)
 
 	report := &doctorSubagentRouteReport{
 		ConfigPath:     strings.TrimSpace(cfg.ConfigFilePath),
+		Scope:          scope,
+		RoutingSource:  routingSource,
 		RoutingEnabled: modelrouting.RoutingEnabled(routing),
 		Request: doctorSubagentRouteRequestReport{
 			Workflow:            workflow,
@@ -274,11 +274,17 @@ func renderDoctorSubagentRouteReport(report *doctorSubagentRouteReport, outputOp
 		return
 	}
 	fmt.Println("================================================================================")
-	fmt.Println("                         Subagent Route Dry Run")
+	if report.Scope == "team" {
+		fmt.Println("                           Team Route Dry Run")
+	} else {
+		fmt.Println("                         Subagent Route Dry Run")
+	}
 	fmt.Println("================================================================================")
 	if report.ConfigPath != "" {
 		fmt.Printf("Config:          %s\n", report.ConfigPath)
 	}
+	fmt.Printf("Scope:           %s\n", report.Scope)
+	fmt.Printf("Routing source:  %s\n", report.RoutingSource)
 	fmt.Printf("Routing enabled: %v\n", report.RoutingEnabled)
 	fmt.Println()
 	fmt.Println("[Request]")
@@ -345,255 +351,16 @@ func renderDoctorSubagentRouteReport(report *doctorSubagentRouteReport, outputOp
 	}
 }
 
-func resolveDoctorSubagentRouteParent(cfg *config.Config, catalog *doctorSubagentRouteCatalog, opts doctorSubagentRouteOptions) modelrouting.ParentDefaults {
-	parentProvider := strings.TrimSpace(opts.ParentProvider)
-	if parentProvider == "" && cfg != nil && cfg.AICLI != nil && cfg.AICLI.Chat != nil {
-		if preferred := strings.TrimSpace(cfg.AICLI.Chat.DefaultProvider); preferred != "" && isEnabledProvider(cfg, preferred) {
-			parentProvider = preferred
-		}
-	}
-	if parentProvider == "" && cfg != nil {
-		parentProvider = strings.TrimSpace(cfg.Providers.DefaultProvider)
-	}
-	if catalog != nil {
-		if resolved := catalog.ResolveProviderName(parentProvider); resolved != "" {
-			parentProvider = resolved
-		}
-	}
-
-	parentModel := strings.TrimSpace(opts.ParentModel)
-	if parentModel == "" && cfg != nil && cfg.AICLI != nil && cfg.AICLI.Chat != nil {
-		parentModel = strings.TrimSpace(cfg.AICLI.Chat.DefaultModel)
-	}
-	parentMaxTokens := 0
-	parentTimeout := time.Duration(0)
-	if cfg != nil && parentProvider != "" {
-		if provider, ok := cfg.Providers.Items[parentProvider]; ok {
-			if parentModel == "" {
-				parentModel = strings.TrimSpace(provider.DefaultModel)
-			}
-			if parentModel != "" {
-				parentModel = config.ApplyModelMapping(&provider, parentModel)
-			}
-			parentMaxTokens = provider.GetMaxTokensLimit()
-			parentTimeout = provider.Timeout
-		}
-	}
-	return modelrouting.ParentDefaults{
-		Provider:        parentProvider,
-		Model:           parentModel,
-		ReasoningEffort: resolveDoctorSubagentRouteParentReasoning(cfg, opts),
-		MaxTokens:       parentMaxTokens,
-		Timeout:         parentTimeout,
-	}
-}
-
-func resolveDoctorSubagentRouteParentReasoning(cfg *config.Config, opts doctorSubagentRouteOptions) string {
-	if effort := strings.TrimSpace(opts.ParentReasoningEffort); effort != "" {
-		return effort
-	}
-	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.Chat != nil {
-		return strings.TrimSpace(cfg.AICLI.Chat.ReasoningEffort)
-	}
-	return ""
-}
-
-type doctorSubagentRouteCatalog struct {
-	cfg     *config.Config
-	aliases map[string]string
-}
-
-func newDoctorSubagentRouteCatalog(cfg *config.Config) *doctorSubagentRouteCatalog {
-	c := &doctorSubagentRouteCatalog{
-		cfg:     cfg,
-		aliases: map[string]string{},
-	}
-	if cfg == nil {
-		return c
-	}
-	for name, provider := range cfg.Providers.Items {
-		if !provider.Enabled {
-			continue
-		}
-		c.addAlias(name, name)
-		c.addAlias(provider.DefaultModel, name)
-		for _, model := range provider.SupportedModels {
-			c.addAlias(model, name)
-		}
-	}
-	return c
-}
-
-func (c *doctorSubagentRouteCatalog) addAlias(alias, provider string) {
-	alias = strings.TrimSpace(alias)
-	provider = strings.TrimSpace(provider)
-	if alias == "" || provider == "" {
-		return
-	}
-	c.aliases[alias] = provider
-}
-
-func (c *doctorSubagentRouteCatalog) ResolveProviderName(name string) string {
-	if c == nil {
-		return ""
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return ""
-	}
-	if provider, ok := c.aliases[name]; ok {
-		return provider
-	}
-	for alias, provider := range c.aliases {
-		if strings.EqualFold(alias, name) {
-			return provider
-		}
-	}
-	return ""
-}
-
-func (c *doctorSubagentRouteCatalog) DefaultModel(provider string) string {
-	if c == nil || c.cfg == nil {
-		return ""
-	}
-	provider = c.ResolveProviderName(provider)
-	if provider == "" {
-		return ""
-	}
-	cfgProvider, ok := c.cfg.Providers.Items[provider]
-	if !ok || !cfgProvider.Enabled {
-		return ""
-	}
-	model := strings.TrimSpace(cfgProvider.DefaultModel)
-	if model == "" {
-		return ""
-	}
-	return config.ApplyModelMapping(&cfgProvider, model)
-}
-
-func (c *doctorSubagentRouteCatalog) SupportsModel(provider, model string) (bool, bool) {
-	cfgProvider, mappedModel, ok := c.resolveProviderModel(provider, model)
-	if !ok {
-		return false, false
-	}
-	if len(cfgProvider.ModelCapabilities) > 0 {
-		if _, ok := runtimellm.ResolveModelCapabilitySpec(mappedModel, cfgProvider.ModelCapabilities); ok {
-			return true, true
-		}
-		if strings.TrimSpace(model) != "" && mappedModel != strings.TrimSpace(model) {
-			if _, ok := runtimellm.ResolveModelCapabilitySpec(strings.TrimSpace(model), cfgProvider.ModelCapabilities); ok {
-				return true, true
-			}
-		}
-		return false, true
-	}
-	if len(cfgProvider.SupportedModels) > 0 {
-		for _, supported := range cfgProvider.SupportedModels {
-			if strings.EqualFold(strings.TrimSpace(supported), strings.TrimSpace(model)) ||
-				strings.EqualFold(strings.TrimSpace(supported), mappedModel) {
-				return true, true
-			}
-		}
-		return false, true
-	}
-	return false, false
-}
-
-func (c *doctorSubagentRouteCatalog) SupportsReasoningEffort(provider, model, effort string) (bool, bool) {
-	effort = strings.TrimSpace(effort)
-	if effort == "" {
-		return true, true
-	}
-	capability, ok := c.resolveModelCapability(provider, model)
-	if !ok {
-		return false, false
-	}
-	if len(capability.ReasoningEfforts) == 0 {
-		return capability.ReasoningModel, true
-	}
-	for _, allowed := range capability.ReasoningEfforts {
-		if strings.EqualFold(strings.TrimSpace(allowed), effort) {
-			return true, true
-		}
-	}
-	return false, true
-}
-
-func (c *doctorSubagentRouteCatalog) SupportedReasoningEfforts(provider, model string) ([]string, bool) {
-	capability, ok := c.resolveModelCapability(provider, model)
-	if !ok {
-		return nil, false
-	}
-	efforts := make([]string, 0, len(capability.ReasoningEfforts))
-	for _, effort := range capability.ReasoningEfforts {
-		if effort = strings.TrimSpace(effort); effort != "" {
-			efforts = append(efforts, effort)
-		}
-	}
-	return efforts, true
-}
-
-func (c *doctorSubagentRouteCatalog) resolveProviderModel(provider, model string) (config.Provider, string, bool) {
-	if c == nil || c.cfg == nil {
-		return config.Provider{}, "", false
-	}
-	provider = c.ResolveProviderName(provider)
-	if provider == "" {
-		return config.Provider{}, "", false
-	}
-	cfgProvider, ok := c.cfg.Providers.Items[provider]
-	if !ok || !cfgProvider.Enabled {
-		return config.Provider{}, "", false
-	}
-	model = strings.TrimSpace(model)
-	if model == "" {
-		model = strings.TrimSpace(cfgProvider.DefaultModel)
-	}
-	if model == "" {
-		return cfgProvider, "", false
-	}
-	return cfgProvider, config.ApplyModelMapping(&cfgProvider, model), true
-}
-
-func (c *doctorSubagentRouteCatalog) resolveModelCapability(provider, model string) (config.ModelCapabilitySpec, bool) {
-	cfgProvider, mappedModel, ok := c.resolveProviderModel(provider, model)
-	if !ok {
-		return config.ModelCapabilitySpec{}, false
-	}
-	capability, ok := runtimellm.ResolveModelCapabilitySpec(mappedModel, cfgProvider.ModelCapabilities)
-	if !ok && mappedModel != strings.TrimSpace(model) {
-		capability, ok = runtimellm.ResolveModelCapabilitySpec(strings.TrimSpace(model), cfgProvider.ModelCapabilities)
-	}
-	return capability, ok
-}
-
-func (c *doctorSubagentRouteCatalog) ProviderBriefs() []doctorSubagentRouteProviderBrief {
-	if c == nil || c.cfg == nil {
-		return nil
-	}
-	names := make([]string, 0, len(c.cfg.Providers.Items))
-	for name, provider := range c.cfg.Providers.Items {
-		if provider.Enabled {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	briefs := make([]doctorSubagentRouteProviderBrief, 0, len(names))
-	for _, name := range names {
-		provider := c.cfg.Providers.Items[name]
-		capabilityKeys := make([]string, 0, len(provider.ModelCapabilities))
-		for key := range provider.ModelCapabilities {
-			capabilityKeys = append(capabilityKeys, key)
-		}
-		sort.Strings(capabilityKeys)
-		briefs = append(briefs, doctorSubagentRouteProviderBrief{
-			Name:           name,
-			DefaultModel:   strings.TrimSpace(provider.DefaultModel),
-			Supported:      append([]string(nil), provider.SupportedModels...),
-			CapabilityKeys: capabilityKeys,
-		})
-	}
-	return briefs
+func resolveDoctorSubagentRouteParent(
+	cfg *config.Config,
+	catalog modelrouting.ProviderCatalog,
+	opts doctorSubagentRouteOptions,
+) modelrouting.ParentDefaults {
+	return modelrouting.ResolveParentDefaults(cfg, catalog, modelrouting.ConfigParentOverrides{
+		Provider:        opts.ParentProvider,
+		Model:           opts.ParentModel,
+		ReasoningEffort: opts.ParentReasoningEffort,
+	})
 }
 
 func durationString(value time.Duration) string {

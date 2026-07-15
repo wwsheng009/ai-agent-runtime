@@ -126,6 +126,7 @@ type Handler struct {
 	runtimeConfig                  *runtimecfg.RuntimeConfig
 	runtimeConfigFile              string
 	runtimeConfigResolver          func(UsageScope) *runtimecfg.RuntimeConfig
+	aicliConfigMu                  sync.RWMutex
 	aicliConfig                    *agentconfig.Config
 	configDocumentService          ConfigDocumentService
 	serviceControlService          RuntimeServiceControlService
@@ -344,14 +345,95 @@ func (h *Handler) SetLLMRuntime(runtime *llm.LLMRuntime) {
 // SetAICLIConfig stores the user-facing aicli config for runtime-server
 // behavior that is intentionally outside the skills runtime config.
 func (h *Handler) SetAICLIConfig(config *agentconfig.Config) {
-	h.aicliConfig = config
+	if h == nil {
+		return
+	}
+	snapshot := cloneAICLIRoutingConfig(config)
+	h.aicliConfigMu.Lock()
+	h.aicliConfig = snapshot
+	h.aicliConfigMu.Unlock()
 }
 
 func (h *Handler) subagentRoutingConfig() *agentconfig.AICLISubagentRoutingConfig {
-	if h == nil || h.aicliConfig == nil || h.aicliConfig.AICLI == nil || h.aicliConfig.AICLI.Subagents == nil {
+	config := h.aicliConfigSnapshot()
+	if config == nil || config.AICLI == nil || config.AICLI.Subagents == nil {
 		return nil
 	}
-	return h.aicliConfig.AICLI.Subagents.Routing
+	return config.AICLI.Subagents.Routing
+}
+
+func (h *Handler) teamRoutingConfig() *agentconfig.AICLISubagentRoutingConfig {
+	return agentconfig.EffectiveTeamRoutingConfig(h.aicliConfigSnapshot())
+}
+
+func (h *Handler) aicliConfigSnapshot() *agentconfig.Config {
+	if h == nil {
+		return nil
+	}
+	h.aicliConfigMu.RLock()
+	config := h.aicliConfig
+	h.aicliConfigMu.RUnlock()
+	return config
+}
+
+func cloneAICLIRoutingConfig(config *agentconfig.Config) *agentconfig.Config {
+	if config == nil || config.AICLI == nil {
+		return nil
+	}
+	cloned := &agentconfig.Config{AICLI: &agentconfig.AICLIConfig{}}
+	if config.AICLI.Subagents != nil {
+		cloned.AICLI.Subagents = &agentconfig.AICLISubagentsConfig{
+			Routing: cloneAgentRoutingConfig(config.AICLI.Subagents.Routing),
+		}
+	}
+	if config.AICLI.Teams != nil {
+		cloned.AICLI.Teams = &agentconfig.AICLITeamsConfig{
+			Routing: cloneAgentRoutingConfig(config.AICLI.Teams.Routing),
+		}
+	}
+	return cloned
+}
+
+func cloneAgentRoutingConfig(config *agentconfig.AICLISubagentRoutingConfig) *agentconfig.AICLISubagentRoutingConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	cloned.Enabled = cloneBoolPointer(config.Enabled)
+	cloned.InheritParentWhenMissing = cloneBoolPointer(config.InheritParentWhenMissing)
+	cloned.ValidateModelCapabilities = cloneBoolPointer(config.ValidateModelCapabilities)
+	cloned.AllowedProviderOverrides = append([]string(nil), config.AllowedProviderOverrides...)
+	cloned.AllowedModelOverrides = append([]string(nil), config.AllowedModelOverrides...)
+	cloned.Levels = make(map[string]agentconfig.AICLISubagentRouteProfile, len(config.Levels))
+	for difficulty, profile := range config.Levels {
+		cloned.Levels[difficulty] = cloneAgentRouteProfile(profile)
+	}
+	cloned.Roles = make(map[string]map[string]agentconfig.AICLISubagentRouteProfile, len(config.Roles))
+	for role, levels := range config.Roles {
+		clonedLevels := make(map[string]agentconfig.AICLISubagentRouteProfile, len(levels))
+		for difficulty, profile := range levels {
+			clonedLevels[difficulty] = cloneAgentRouteProfile(profile)
+		}
+		cloned.Roles[role] = clonedLevels
+	}
+	return &cloned
+}
+
+func cloneAgentRouteProfile(profile agentconfig.AICLISubagentRouteProfile) agentconfig.AICLISubagentRouteProfile {
+	cloned := profile
+	if profile.Temperature != nil {
+		temperature := *profile.Temperature
+		cloned.Temperature = &temperature
+	}
+	return cloned
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // SetSessionManager 设置 Session Manager
@@ -555,6 +637,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/governance/policy", h.GetGovernancePolicy).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/config/document", h.GetConfigDocument).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/config/document/preview", h.PreviewConfigDocument).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/config/document/agent-route-preview", h.PreviewAgentRoute).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/config/document", h.UpdateConfigDocument).Methods(http.MethodPut)
 	runtimeRouter.HandleFunc("/skills/config/write", h.WriteConfigDocument).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/service", h.GetRuntimeServiceStatus).Methods(http.MethodGet)
@@ -7971,17 +8054,19 @@ func (h *Handler) runtimeStatusSnapshot(ctx context.Context, mode llm.HealthChec
 	}
 
 	return map[string]interface{}{
-		"default_provider":    defaultAgentProvider(h.llmRuntime),
-		"default_model":       defaultAgentModel(h.llmRuntime),
-		"providers":           providers,
-		"provider_count":      len(providers),
-		"mcps":                mcps,
-		"mcp_count":           len(mcps),
-		"context":             contextSnapshot,
-		"session_persistence": h.sessionPersistenceSnapshot(),
-		"tool_catalog":        toolCatalog,
-		"patch_governance":    patchGovernance,
-		"provenance":          provenance,
+		"execution_core":        chat.SessionActorRuntimeCore(),
+		"default_provider":      defaultAgentProvider(h.llmRuntime),
+		"default_model":         defaultAgentModel(h.llmRuntime),
+		"providers":             providers,
+		"provider_count":        len(providers),
+		"mcps":                  mcps,
+		"mcp_count":             len(mcps),
+		"context":               contextSnapshot,
+		"session_persistence":   h.sessionPersistenceSnapshot(),
+		"tool_catalog":          toolCatalog,
+		"patch_governance":      patchGovernance,
+		"provenance":            provenance,
+		"execution_diagnostics": h.executionDiagnosticsSnapshot(ctx),
 	}
 }
 

@@ -18,7 +18,9 @@ const (
 	StatusRunning   JobStatus = "running"
 	StatusCompleted JobStatus = "completed"
 	StatusFailed    JobStatus = "failed"
+	StatusTimedOut  JobStatus = "timed_out"
 	StatusCancelled JobStatus = "cancelled"
+	StatusOrphaned  JobStatus = "orphaned"
 )
 
 // BackgroundTaskArgs describes background task submission.
@@ -47,11 +49,17 @@ type TaskOutputArgs struct {
 
 // TaskOutputResult returns output chunk information.
 type TaskOutputResult struct {
-	JobID      string `json:"job_id"`
-	Status     string `json:"status"`
-	Output     string `json:"output,omitempty"`
-	NextOffset int64  `json:"next_offset"`
-	ExitCode   *int   `json:"exit_code,omitempty"`
+	JobID              string `json:"job_id"`
+	Status             string `json:"status"`
+	Output             string `json:"output,omitempty"`
+	NextOffset         int64  `json:"next_offset"`
+	ExitCode           *int   `json:"exit_code,omitempty"`
+	Message            string `json:"message,omitempty"`
+	ErrorCode          string `json:"error_code,omitempty"`
+	TimeoutRequestedMs int64  `json:"timeout_requested_ms,omitempty"`
+	TimeoutEffectiveMs int64  `json:"timeout_effective_ms,omitempty"`
+	TimeoutSource      string `json:"timeout_source,omitempty"`
+	CancelSource       string `json:"cancel_source,omitempty"`
 }
 
 // JobFilter filters background job queries.

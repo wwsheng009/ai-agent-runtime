@@ -73,6 +73,7 @@ type ChatSession struct {
 	RuntimeSession                  *runtimechat.Session               // 当前持久化会话
 	SessionUserID                   string                             // 当前会话所属用户
 	SessionDir                      string                             // 会话存储目录
+	Ephemeral                       bool                               // 会话仅驻留内存，不写入会话文件
 	SessionFilter                   ChatSessionListFilter              // 会话列表筛选条件
 	NoInteractive                   bool                               // 是否为非交互模式
 	JSONOutput                      bool                               // 是否输出 JSON
@@ -106,7 +107,7 @@ type ChatSession struct {
 	RuntimeEventBridge              *chatRuntimeEventBridge            // actor runtime event bridge
 	ExecEventBridge                 *execEventBridge                   // optional headless exec event bridge
 	ActorFirstReady                 bool                               // actor-first executor established for this session
-	ChatExecutor                    aicliChatExecutor                  // shared chatcore-backed chat executor
+	ChatExecutor                    aicliChatExecutor                  // 当前会话的统一 turn executor
 	LocalRuntimeHost                *localChatRuntimeHost              // actor-first local runtime host
 	actorWarmupMu                   sync.Mutex
 	actorWarmup                     *chatActorWarmup
@@ -503,6 +504,10 @@ func selectStreamModeWithReader(reader *bufio.Reader) bool {
 // printSessionInfo 打印会话信息
 func printSessionInfo(session *ChatSession) {
 	ui.PrintSessionInfo(buildChatSessionInfo(session))
+	if descriptor, ok := chatRuntimeExecutorDescriptor(session.ChatExecutor); ok {
+		printChatSessionMetaRow("Runtime Core:", fmt.Sprintf("%s contract=v%d", descriptor.Core.Name, descriptor.Core.ContractVersion))
+		printChatSessionMetaRow("Runtime Transport:", descriptor.Transport)
+	}
 
 	// 显示 MCP 状态
 	if session.MCPEnabled && session.MCPStatus != nil {
@@ -641,11 +646,8 @@ func shouldDisplayActorStreamFallback(session *ChatSession) bool {
 	if session == nil || !session.Stream {
 		return false
 	}
-	if _, ok := session.ChatExecutor.(*aicliActorChatExecutor); ok {
-		return true
-	}
-	_, ok := session.ChatExecutor.(*aicliRuntimeServerChatExecutor)
-	return ok
+	descriptor, ok := chatRuntimeExecutorDescriptor(session.ChatExecutor)
+	return ok && descriptor.unifiedActorRuntime()
 }
 
 func wasInteractiveActorResponseAlreadyRendered(session *ChatSession, response string) bool {
@@ -678,12 +680,15 @@ func finalizeInteractiveActorStreamIfNeeded(session *ChatSession, response strin
 }
 
 func chatExecutorUsesRuntimeEvents(executor aicliChatExecutor) bool {
-	switch executor.(type) {
-	case *aicliActorChatExecutor, *aicliRuntimeServerChatExecutor:
-		return true
-	default:
-		return false
+	descriptor, ok := chatRuntimeExecutorDescriptor(executor)
+	return ok && descriptor.unifiedActorRuntime()
+}
+
+func chatRuntimeExecutorDescriptor(executor aicliChatExecutor) (aicliRuntimeExecutorDescriptor, bool) {
+	if executor == nil {
+		return aicliRuntimeExecutorDescriptor{}, false
 	}
+	return executor.RuntimeDescriptor(), true
 }
 
 func shouldPrintChatSessionPreamble(session *ChatSession) bool {
@@ -696,6 +701,9 @@ type chatResponsePayload struct {
 	Protocol                   string `json:"protocol,omitempty"`
 	Model                      string `json:"model,omitempty"`
 	Stream                     bool   `json:"stream"`
+	RuntimeCore                string `json:"runtime_core,omitempty"`
+	RuntimeContractVersion     int    `json:"runtime_contract_version,omitempty"`
+	RuntimeTransport           string `json:"runtime_transport,omitempty"`
 	SessionID                  string `json:"session_id,omitempty"`
 	SessionPath                string `json:"session_path,omitempty"`
 	SessionStore               string `json:"session_store,omitempty"`
@@ -725,6 +733,11 @@ func buildChatResponsePayload(session *ChatSession, response string) chatRespons
 	payload.Protocol = session.Provider.GetProtocol()
 	payload.Model = session.Model
 	payload.Stream = session.Stream
+	if descriptor, ok := chatRuntimeExecutorDescriptor(session.ChatExecutor); ok {
+		payload.RuntimeCore = descriptor.Core.Name
+		payload.RuntimeContractVersion = descriptor.Core.ContractVersion
+		payload.RuntimeTransport = descriptor.Transport
+	}
 	payload.ReasoningEffort = runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
 	if session.RuntimeSession != nil {
 		payload.SessionID = session.RuntimeSession.ID
@@ -811,7 +824,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		if session.cancelFunc != nil {
 			session.cancelFunc()
 		}
-		session.cancelCtx, session.cancelFunc = context.WithCancel(context.Background())
+		session.cancelCtx, session.cancelFunc = newChatCancelContext()
 		if shouldExit.Load() {
 			beginDirectInteractiveOutput(session)
 			fmt.Println()

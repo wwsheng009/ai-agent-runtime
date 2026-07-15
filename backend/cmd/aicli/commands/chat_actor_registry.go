@@ -388,7 +388,7 @@ func newLocalTeamTaskRouteResolver(host *localChatRuntimeHost) *localTeamTaskRou
 }
 
 func localChatTeamExpertConcurrencyLimit(session *ChatSession) int {
-	routingConfig := localChatSubagentRoutingConfig(session)
+	routingConfig := localChatTeamRoutingConfig(session)
 	if !modelrouting.RoutingEnabled(routingConfig) || routingConfig.MaxExpertConcurrency <= 0 {
 		return 0
 	}
@@ -403,9 +403,9 @@ func newLocalTeamTaskRouteAuditSink(host *localChatRuntimeHost) team.TaskRouteAu
 }
 
 func (r *localTeamTaskRouteResolver) ResolveTaskRoute(ctx context.Context, request team.TaskRouteRequest) (*team.TaskRouteResolution, error) {
-	routingConfig := localChatSubagentRoutingConfig(nil)
+	routingConfig := localChatTeamRoutingConfig(nil)
 	if r != nil && r.Host != nil {
-		routingConfig = localChatSubagentRoutingConfig(r.Host.BaseSession)
+		routingConfig = localChatTeamRoutingConfig(r.Host.BaseSession)
 	}
 	disabled := !modelrouting.RoutingEnabled(routingConfig)
 	strict := !disabled && modelrouting.StrictCompatibilityMode(routingConfig)

@@ -732,9 +732,24 @@ func TestChatSlashArgumentCompletionAgents(t *testing.T) {
 	}
 
 	controller.UpdateAt("/agents routing dryrun --", len([]rune("/agents routing dryrun --")))
-	for _, command := range []string{"--workflow", "--team-id", "--teammate", "--task", "--task-id", "--role", "--difficulty", "--goal", "--provider", "--model", "--reasoning-effort", "--read-only=true", "--read-only=false", "--write-path", "--write"} {
+	for _, command := range []string{"--scope", "--workflow", "--team-id", "--teammate", "--task", "--task-id", "--role", "--difficulty", "--goal", "--provider", "--model", "--reasoning-effort", "--read-only=true", "--read-only=false", "--write-path", "--write"} {
 		if !containsSlashCandidate(controller.state.Candidates, command) {
 			t.Fatalf("expected /agents routing dryrun candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+}
+
+func TestChatSlashArgumentCompletionAgentsRoutingScope(t *testing.T) {
+	t.Parallel()
+
+	controller := newChatSlashCompletionController(&ChatSession{})
+	controller.UpdateAt("/agents routing test --scope ", len([]rune("/agents routing test --scope ")))
+	if !controller.state.Active || !controller.state.Context.InArguments {
+		t.Fatalf("expected routing scope value popup to be active, got %#v", controller.state)
+	}
+	for _, command := range []string{"auto", "subagent", "team"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /agents routing test --scope candidates to include %q, got %#v", command, controller.state.Candidates)
 		}
 	}
 }

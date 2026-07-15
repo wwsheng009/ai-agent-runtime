@@ -241,9 +241,6 @@ type MessageChunk struct {
 	// content_block_delta - Delta 字段用于 content_block_delta 事件
 	Delta *ContentBlockDelta `json:"delta,omitempty"`
 
-	// content_block_stop
-	ContentBlockStopIndex int `json:"index,omitempty"`
-
 	// message_delta - 使用不同的 JSON 字段名避免冲突
 	MessageDelta *MessageDeltaData `json:"message_delta,omitempty"`
 

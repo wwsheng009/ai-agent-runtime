@@ -246,7 +246,7 @@ func (c *localTeamLifecycleService) RunSettled(ctx context.Context, teamID strin
 	if c.hasTeamLoop(teamID) {
 		return false, nil
 	}
-	if record.Status == team.TeamStatusDone {
+	if team.IsTerminalTeamStatus(record.Status) {
 		summaryReady, err := c.terminalSummaryReady(ctx, teamID)
 		if err != nil {
 			return false, err
@@ -283,12 +283,39 @@ func (c *localTeamLifecycleService) terminalSummaryReady(ctx context.Context, te
 	if c == nil || c.Host == nil || c.Host.TeamStore == nil {
 		return true, nil
 	}
-	if c.Host.Orchestrator == nil || c.Host.Orchestrator.LeadPlanner == nil {
-		return true, nil
-	}
 	events, err := c.Host.TeamStore.ListTeamEvents(ctx, team.TeamEventFilter{
 		TeamID:    strings.TrimSpace(teamID),
-		EventType: "team.summary*",
+		EventType: "team.summary",
+		Limit:     1,
+	})
+	if err != nil {
+		return false, err
+	}
+	if len(events) > 0 {
+		return true, nil
+	}
+	if orchestrator := c.Host.Orchestrator; orchestrator != nil && orchestrator.LeadPlanner != nil {
+		// A configured lead planner owns summary generation. Treat the short
+		// status-to-summary interval as unsettled instead of racing it with a
+		// fallback summary from the lifecycle observer.
+		return false, nil
+	}
+
+	services := team.TerminalTeamServices{
+		Store:               c.Host.TeamStore,
+		IgnoreBusyTeammates: true,
+	}
+	if orchestrator := c.Host.Orchestrator; orchestrator != nil {
+		services.Planner = orchestrator.LeadPlanner
+		services.Mailbox = orchestrator.Mailbox
+		services.Events = orchestrator.Events
+	}
+	if _, err := team.ReconcileTerminalTeamState(ctx, services, strings.TrimSpace(teamID)); err != nil {
+		return false, err
+	}
+	events, err = c.Host.TeamStore.ListTeamEvents(ctx, team.TeamEventFilter{
+		TeamID:    strings.TrimSpace(teamID),
+		EventType: "team.summary",
 		Limit:     1,
 	})
 	if err != nil {

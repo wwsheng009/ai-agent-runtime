@@ -123,6 +123,13 @@ func (s MetadataStore) Get(session *runtimechat.Session) (*SessionGoal, bool, er
 	if err := goal.Validate(); err != nil {
 		return nil, true, err
 	}
+	sessionID := strings.TrimSpace(session.ID)
+	goal.SessionID = strings.TrimSpace(goal.SessionID)
+	if goal.SessionID == "" {
+		goal.SessionID = sessionID
+	} else if sessionID != "" && goal.SessionID != sessionID {
+		return nil, true, fmt.Errorf("goal %q belongs to session %q, not %q", goal.GoalID, goal.SessionID, sessionID)
+	}
 	return &goal, true, nil
 }
 
@@ -206,9 +213,13 @@ func (p GoalMergePolicy) MergeContextValue(key string, oldValue, newValue interf
 }
 
 func normalizeForSession(sessionID string, goal SessionGoal) (SessionGoal, error) {
+	sessionID = strings.TrimSpace(sessionID)
 	goal.Objective = strings.TrimSpace(goal.Objective)
+	goal.SessionID = strings.TrimSpace(goal.SessionID)
 	if goal.SessionID == "" {
-		goal.SessionID = strings.TrimSpace(sessionID)
+		goal.SessionID = sessionID
+	} else if sessionID != "" && goal.SessionID != sessionID {
+		return SessionGoal{}, fmt.Errorf("goal %q belongs to session %q, not %q", goal.GoalID, goal.SessionID, sessionID)
 	}
 	if goal.GoalID == "" {
 		goal.GoalID = defaultGoalIDPrefix + uuid.NewString()

@@ -222,6 +222,9 @@ func TestRunDoctorSubagentRouteSpawnTeamWritePathPreview(t *testing.T) {
 		report.Request.TaskID != "task-1" {
 		t.Fatalf("unexpected spawn_team request context: %#v", report.Request)
 	}
+	if report.Scope != "team" || report.RoutingSource != "subagent_inherited" {
+		t.Fatalf("expected team scope to inherit subagent routing, got %#v", report)
+	}
 	if report.Request.Role != "writer" || report.Request.ReadOnly {
 		t.Fatalf("expected write-path spawn_team preview to infer writer writable task, got %#v", report.Request)
 	}
@@ -233,6 +236,100 @@ func TestRunDoctorSubagentRouteSpawnTeamWritePathPreview(t *testing.T) {
 		report.Decision.ReasoningEffort != "high" ||
 		report.Decision.Source != "role_override" {
 		t.Fatalf("unexpected spawn_team route decision: %#v", report.Decision)
+	}
+}
+
+func TestRunDoctorSubagentRouteSpawnTeamUsesIndependentTeamPolicy(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "parent",
+			Items: map[string]config.Provider{
+				"parent": {Enabled: true, DefaultModel: "parent-model"},
+				"child":  {Enabled: true, DefaultModel: "child-model"},
+				"team":   {Enabled: true, DefaultModel: "team-model"},
+			},
+		},
+		AICLI: &config.AICLIConfig{
+			Subagents: &config.AICLISubagentsConfig{
+				Routing: &config.AICLISubagentRoutingConfig{
+					Enabled: &enabled,
+					Levels: map[string]config.AICLISubagentRouteProfile{
+						"hard": {Provider: "child", Model: "child-model"},
+					},
+				},
+			},
+			Teams: &config.AICLITeamsConfig{
+				Routing: &config.AICLISubagentRoutingConfig{
+					Enabled: &enabled,
+					Levels: map[string]config.AICLISubagentRouteProfile{
+						"hard": {Provider: "team", Model: "team-model"},
+					},
+				},
+			},
+		},
+	}
+
+	report, _, err := runDoctorSubagentRoute(cfg, doctorSubagentRouteOptions{
+		Workflow:   "spawn_team",
+		Difficulty: "hard",
+		ReadOnly:   true,
+	})
+	if err != nil {
+		t.Fatalf("runDoctorSubagentRoute failed: %v", err)
+	}
+	if report.Scope != "team" || report.RoutingSource != "team_independent" {
+		t.Fatalf("expected independent team scope, got %#v", report)
+	}
+	if report.Decision.Provider != "team" || report.Decision.Model != "team-model" {
+		t.Fatalf("expected team route decision, got %#v", report.Decision)
+	}
+}
+
+func TestRunDoctorSubagentRouteExplicitSubagentScopeOverridesTeamWorkflow(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "child",
+			Items: map[string]config.Provider{
+				"child": {Enabled: true, DefaultModel: "child-model"},
+			},
+		},
+		AICLI: &config.AICLIConfig{
+			Subagents: &config.AICLISubagentsConfig{
+				Routing: &config.AICLISubagentRoutingConfig{
+					Enabled: &enabled,
+					Levels: map[string]config.AICLISubagentRouteProfile{
+						"hard": {Provider: "child", Model: "child-model"},
+					},
+				},
+			},
+		},
+	}
+
+	report, _, err := runDoctorSubagentRoute(cfg, doctorSubagentRouteOptions{
+		Scope:      "subagent",
+		Workflow:   "spawn_team",
+		Difficulty: "hard",
+		ReadOnly:   true,
+	})
+	if err != nil {
+		t.Fatalf("runDoctorSubagentRoute failed: %v", err)
+	}
+	if report.Scope != "subagent" || report.RoutingSource != "subagent" {
+		t.Fatalf("expected explicit subagent scope, got %#v", report)
+	}
+}
+
+func TestRunDoctorSubagentRouteRejectsInvalidScope(t *testing.T) {
+	_, details, err := runDoctorSubagentRoute(&config.Config{}, doctorSubagentRouteOptions{
+		Scope: "unknown",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid route scope") {
+		t.Fatalf("expected invalid scope error, got %v", err)
+	}
+	if details["scope"] != "unknown" {
+		t.Fatalf("expected scope detail, got %#v", details)
 	}
 }
 
@@ -330,6 +427,8 @@ func TestDoctorSubagentRouteCommandFlagsJSON(t *testing.T) {
 		}
 	})
 	for _, expected := range []string{
+		`"scope":"subagent"`,
+		`"routing_source":"subagent"`,
 		`"routing_enabled":true`,
 		`"role":"writer"`,
 		`"difficulty":"hard"`,

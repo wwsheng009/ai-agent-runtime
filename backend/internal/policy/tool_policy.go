@@ -13,13 +13,16 @@ import (
 
 // ToolExecutionPolicy constrains which runtime tools may execute.
 type ToolExecutionPolicy struct {
-	ReadOnly          bool
-	AllowedTools      map[string]bool
-	DeniedTools       map[string]bool
-	AllowlistEnabled  bool
-	BlockUntrustedMCP bool
-	BlockRemoteWrites bool
-	Sandbox           *executor.Sandbox
+	ReadOnly               bool
+	AllowedTools           map[string]bool
+	DeniedTools            map[string]bool
+	AllowlistEnabled       bool
+	AllowedCapabilities    map[Capability]bool
+	CapabilityScopeEnabled bool
+	CapabilityResolver     CapabilityResolver
+	BlockUntrustedMCP      bool
+	BlockRemoteWrites      bool
+	Sandbox                *executor.Sandbox
 }
 
 // NewToolExecutionPolicy creates a new tool policy.
@@ -47,8 +50,16 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 	if p.AllowlistEnabled && !p.AllowedTools[toolName] {
 		return fmt.Errorf("tool not allowed by execution policy: %s", toolName)
 	}
-	if p.ReadOnly && IsWriteLikeToolName(toolName) {
-		return fmt.Errorf("read-only policy blocks write-like tool: %s", toolName)
+	if err := p.AllowCapabilities(p.resolveCapabilities(EvalRequest{ToolName: toolName})); err != nil {
+		return fmt.Errorf("tool %s: %w", toolName, err)
+	}
+	if p.ReadOnly {
+		if IsWriteLikeToolName(toolName) {
+			return fmt.Errorf("read-only policy blocks write-like tool: %s", toolName)
+		}
+		if IsShellLikeToolName(toolName) {
+			return fmt.Errorf("read-only policy blocks shell-like tool: %s", toolName)
+		}
 	}
 	return nil
 }
@@ -60,6 +71,9 @@ func (p *ToolExecutionPolicy) AllowToolInfo(tool skill.ToolInfo) error {
 	}
 	if p == nil {
 		return nil
+	}
+	if err := p.AllowCapabilities(p.resolveCapabilities(EvalRequest{ToolName: tool.Name, ToolInfo: &tool})); err != nil {
+		return fmt.Errorf("tool %s: %w", tool.Name, err)
 	}
 	if p.BlockUntrustedMCP && tool.MCPTrustLevel == "untrusted_remote" && IsWriteLikeToolName(tool.Name) {
 		return fmt.Errorf("untrusted remote MCP cannot execute write-like tool: %s", tool.Name)
@@ -127,12 +141,15 @@ func (p *ToolExecutionPolicy) Clone() *ToolExecutionPolicy {
 		return nil
 	}
 	cloned := &ToolExecutionPolicy{
-		ReadOnly:          p.ReadOnly,
-		AllowedTools:      cloneAllowedToolsMap(p.AllowedTools),
-		DeniedTools:       cloneAllowedToolsMap(p.DeniedTools),
-		AllowlistEnabled:  p.AllowlistEnabled,
-		BlockUntrustedMCP: p.BlockUntrustedMCP,
-		BlockRemoteWrites: p.BlockRemoteWrites,
+		ReadOnly:               p.ReadOnly,
+		AllowedTools:           cloneAllowedToolsMap(p.AllowedTools),
+		DeniedTools:            cloneAllowedToolsMap(p.DeniedTools),
+		AllowlistEnabled:       p.AllowlistEnabled,
+		AllowedCapabilities:    cloneCapabilityMap(p.AllowedCapabilities),
+		CapabilityScopeEnabled: p.CapabilityScopeEnabled,
+		CapabilityResolver:     p.CapabilityResolver,
+		BlockUntrustedMCP:      p.BlockUntrustedMCP,
+		BlockRemoteWrites:      p.BlockRemoteWrites,
 	}
 	if p.Sandbox != nil {
 		cfg := p.Sandbox.Config()
@@ -143,12 +160,25 @@ func (p *ToolExecutionPolicy) Clone() *ToolExecutionPolicy {
 
 // DeriveChild narrows the parent policy for child execution.
 func (p *ToolExecutionPolicy) DeriveChild(allowedTools []string, readOnly bool) *ToolExecutionPolicy {
+	return p.DeriveChildForTask(allowedTools, readOnly, "", nil)
+}
+
+// DeriveChildForTask creates the minimum capability surface implied by role,
+// requested tools, and declared write paths, while never widening the parent.
+func (p *ToolExecutionPolicy) DeriveChildForTask(allowedTools []string, readOnly bool, role string, writePaths []string) *ToolExecutionPolicy {
 	if p == nil {
-		return NewToolExecutionPolicy(allowedTools, readOnly)
+		child := NewToolExecutionPolicy(allowedTools, readOnly)
+		child.SetCapabilityScope(CapabilitiesForTask(role, readOnly, allowedTools, writePaths))
+		return child
 	}
 	child := p.Clone()
 	child.ReadOnly = child.ReadOnly || readOnly
 	child.AllowlistEnabled, child.AllowedTools = intersectAllowedTools(p.AllowlistEnabled, p.AllowedTools, allowedTools)
+	requested := CapabilitiesForTask(role, child.ReadOnly, allowedTools, writePaths)
+	if p.CapabilityScopeEnabled {
+		requested = intersectCapabilities(p.AllowedCapabilities, requested)
+	}
+	child.SetCapabilityScope(requested)
 	return child
 }
 

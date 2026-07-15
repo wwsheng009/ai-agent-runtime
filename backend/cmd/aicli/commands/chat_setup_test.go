@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -826,7 +827,7 @@ func TestBootstrapChatSession_UsesActorExecutorByDefault(t *testing.T) {
 	}
 }
 
-func TestBootstrapChatSession_DisableToolsUsesSharedExecutor(t *testing.T) {
+func TestBootstrapChatSession_DisableToolsUsesActorExecutorWithEmptyToolSurface(t *testing.T) {
 	cfg := &config.Config{}
 	manager, userID, dir, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -865,14 +866,20 @@ func TestBootstrapChatSession_DisableToolsUsesSharedExecutor(t *testing.T) {
 	if session.ChatExecutor == nil {
 		t.Fatal("expected chat executor")
 	}
-	if got := reflect.TypeOf(session.ChatExecutor).String(); got != "*commands.aicliSharedChatExecutor" {
-		t.Fatalf("expected shared executor when tools are disabled, got %s", got)
+	if got := reflect.TypeOf(session.ChatExecutor).String(); got != "*commands.aicliActorChatExecutor" {
+		t.Fatalf("expected actor executor when tools are disabled, got %s", got)
 	}
-	if session.LocalRuntimeHost != nil {
-		t.Fatal("expected LocalRuntimeHost not to be initialized when tools are disabled")
+	if session.LocalRuntimeHost == nil {
+		t.Fatal("expected LocalRuntimeHost to be initialized when tools are disabled")
 	}
-	if session.ActorFirstReady {
-		t.Fatal("expected ActorFirstReady to remain false when tools are disabled")
+	if !session.ActorFirstReady {
+		t.Fatal("expected ActorFirstReady when tools are disabled")
+	}
+	if session.LocalRuntimeHost.ToolSurface == nil {
+		t.Fatal("expected actor tool surface wrapper")
+	}
+	if tools := session.LocalRuntimeHost.ToolSurface.ListTools(); len(tools) != 0 {
+		t.Fatalf("expected disabled tools to expose an empty actor tool surface, got %+v", tools)
 	}
 }
 
@@ -901,6 +908,155 @@ func TestBuildLocalChatToolPolicy_AllowsBrokerTeamTools(t *testing.T) {
 			t.Fatalf("expected %q to be allowed, got %#v", name, policy.AllowedTools)
 		}
 	}
+}
+
+func TestBuildLocalChatToolPolicy_DisableToolsBlocksEveryDefinition(t *testing.T) {
+	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	broker := &toolbroker.Broker{TeamStore: store}
+	policy := buildLocalChatToolPolicy(&ChatSession{DisableTools: true}, stubLocalChatToolSurface{
+		tools: []runtimeskill.ToolInfo{{Name: "bash"}, {Name: getGoalFunctionName}},
+	}, broker)
+	if policy == nil || !policy.AllowlistEnabled || len(policy.AllowedTools) != 0 {
+		t.Fatalf("expected an enabled empty allowlist, got %#v", policy)
+	}
+	for _, name := range []string{"bash", getGoalFunctionName, "spawn_subagents"} {
+		if policy.AllowsDefinition(name) {
+			t.Fatalf("expected disabled tools policy to hide %q", name)
+		}
+	}
+	for _, definition := range broker.Definitions() {
+		if policy.AllowsDefinition(definition.Name) {
+			t.Fatalf("expected disabled tools policy to hide broker definition %q", definition.Name)
+		}
+	}
+}
+
+func TestApplyLocalChatRuntimePersistenceDefaults_EphemeralClearsDiskStores(t *testing.T) {
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Sessions.Dir = filepath.Join(t.TempDir(), "sessions")
+	cfg.SessionRuntime.StorePath = "runtime.sqlite"
+	cfg.SessionRuntime.StoreDSN = "file:runtime.db"
+	cfg.Team.StorePath = "team.sqlite"
+	cfg.Team.StoreDSN = "file:team.db"
+	cfg.AgentControl.StorePath = "agent-control.sqlite"
+	cfg.AgentControl.StoreDSN = "file:agent-control.db"
+	cfg.AgentControl.MailboxStorePath = "mailbox.sqlite"
+	cfg.AgentControl.MailboxStoreDSN = "file:mailbox.db"
+	cfg.AgentControl.AgentStorePath = "agents.sqlite"
+	cfg.AgentControl.AgentStoreDSN = "file:agents.db"
+	cfg.Artifact.StorePath = "artifacts.sqlite"
+	cfg.Artifact.StoreDSN = "file:artifacts.db"
+	cfg.Background.StorePath = "background.sqlite"
+	cfg.Background.StoreDSN = "file:background.db"
+	cfg.Background.LogDir = "background-logs"
+
+	applyLocalChatRuntimePersistenceDefaults(cfg, &ChatSession{Ephemeral: true}, "runtime.yaml")
+
+	paths := []string{
+		cfg.Sessions.Dir,
+		cfg.SessionRuntime.StorePath, cfg.SessionRuntime.StoreDSN,
+		cfg.Team.StorePath, cfg.Team.StoreDSN,
+		cfg.AgentControl.StorePath, cfg.AgentControl.StoreDSN,
+		cfg.AgentControl.MailboxStorePath, cfg.AgentControl.MailboxStoreDSN,
+		cfg.AgentControl.AgentStorePath, cfg.AgentControl.AgentStoreDSN,
+		cfg.Artifact.StorePath, cfg.Artifact.StoreDSN,
+		cfg.Background.StorePath, cfg.Background.StoreDSN, cfg.Background.LogDir,
+	}
+	for _, value := range paths {
+		if value != "" {
+			t.Fatalf("expected ephemeral persistence path to be empty, got %q", value)
+		}
+	}
+	if cfg.SessionRuntime.DefaultPersistence != "memory" {
+		t.Fatalf("expected memory runtime persistence, got %q", cfg.SessionRuntime.DefaultPersistence)
+	}
+}
+
+func TestBootstrapChatSession_EphemeralIgnoresPersistentRuntimePaths(t *testing.T) {
+	root := t.TempDir()
+	persistentRoot := filepath.Join(root, "persistent")
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Sessions.Dir = filepath.Join(persistentRoot, "sessions")
+	runtimeConfig.SessionRuntime.StorePath = filepath.Join(persistentRoot, "session-runtime.sqlite")
+	runtimeConfig.SessionRuntime.StoreDSN = "file:persistent-runtime?mode=rwc"
+	runtimeConfig.Team.StorePath = filepath.Join(persistentRoot, "team.sqlite")
+	runtimeConfig.Team.StoreDSN = "file:persistent-team?mode=rwc"
+	runtimeConfig.AgentControl.StorePath = filepath.Join(persistentRoot, "agent-control.sqlite")
+	runtimeConfig.AgentControl.StoreDSN = "file:persistent-agent-control?mode=rwc"
+	runtimeConfig.AgentControl.MailboxStorePath = filepath.Join(persistentRoot, "mailbox.sqlite")
+	runtimeConfig.AgentControl.MailboxStoreDSN = "file:persistent-mailbox?mode=rwc"
+	runtimeConfig.AgentControl.AgentStorePath = filepath.Join(persistentRoot, "agents.sqlite")
+	runtimeConfig.AgentControl.AgentStoreDSN = "file:persistent-agents?mode=rwc"
+	runtimeConfig.Artifact.StorePath = filepath.Join(persistentRoot, "artifacts.sqlite")
+	runtimeConfig.Artifact.StoreDSN = "file:persistent-artifacts?mode=rwc"
+	runtimeConfig.Background.StorePath = filepath.Join(persistentRoot, "background.sqlite")
+	runtimeConfig.Background.StoreDSN = "file:persistent-background?mode=rwc"
+	runtimeConfig.Background.LogDir = filepath.Join(persistentRoot, "background-logs")
+
+	configPayload, err := json.Marshal(runtimeConfig)
+	require.NoError(t, err)
+	configPath := filepath.Join(root, "runtime.json")
+	require.NoError(t, os.WriteFile(configPath, configPayload, 0o600))
+	cfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: configPath}}
+	persistence := newEphemeralChatPersistenceState("ephemeral-bootstrap-user")
+
+	session, cleanup, err := bootstrapChatSession(cfg, &chatCommandOptions{
+		NoInteractive: true,
+		OutputFormat:  "json",
+		DisableTools:  true,
+	}, nil, persistence, &chatRuntimeState{
+		providerName:    "codex_ee",
+		provider:        config.Provider{Enabled: true, Protocol: "codex", BaseURL: "https://example.com"},
+		adapter:         &adapter.CodexAdapter{},
+		modelName:       "gpt-5.2-code",
+		reasoningEffort: "medium",
+		baseURL:         "https://example.com/v1/responses",
+		retryCfg:        defaultRetryConfig(),
+		requestTimeout:  15 * time.Second,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cleanup)
+	t.Cleanup(func() {
+		cleanup()
+		persistence.runtimeSessionManager.Stop()
+	})
+
+	require.True(t, session.Ephemeral)
+	require.Empty(t, session.SessionDir)
+	require.NotNil(t, session.LocalRuntimeHost)
+	host := session.LocalRuntimeHost
+	_, memoryRuntime := host.RuntimeStore.(*runtimechat.InMemoryRuntimeStore)
+	require.True(t, memoryRuntime, "ephemeral actor runtime must use an in-memory state store")
+	_, sqliteTeam := host.TeamStore.(*team.SQLiteStore)
+	require.True(t, sqliteTeam, "team runtime should use its in-memory SQLite implementation")
+	require.Nil(t, host.AgentControl)
+	require.Nil(t, host.Background)
+	require.Equal(t, "memory", host.RuntimeConfig.SessionRuntime.DefaultPersistence)
+	require.Empty(t, host.RuntimeConfig.Sessions.Dir)
+	require.Empty(t, host.RuntimeConfig.SessionRuntime.StorePath)
+	require.Empty(t, host.RuntimeConfig.SessionRuntime.StoreDSN)
+	require.Empty(t, host.RuntimeConfig.Team.StorePath)
+	require.Empty(t, host.RuntimeConfig.Team.StoreDSN)
+	require.Empty(t, host.RuntimeConfig.AgentControl.StorePath)
+	require.Empty(t, host.RuntimeConfig.Artifact.StorePath)
+	require.Empty(t, host.RuntimeConfig.Background.StorePath)
+
+	assertEphemeralRuntimePathsAbsent(t, persistentRoot)
+	cleanup()
+	persistence.runtimeSessionManager.Stop()
+	cleanup()
+	assertEphemeralRuntimePathsAbsent(t, persistentRoot)
+}
+
+func assertEphemeralRuntimePathsAbsent(t *testing.T, root string) {
+	t.Helper()
+	_, err := os.Stat(root)
+	require.ErrorIs(t, err, os.ErrNotExist, "ephemeral bootstrap unexpectedly created %s", root)
 }
 
 func TestLoadLocalChatRuntimeConfig_DefaultsTeamStorePathToSessionRuntimeDir(t *testing.T) {

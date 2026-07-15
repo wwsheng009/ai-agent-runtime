@@ -19,6 +19,7 @@ type chatPersistenceState struct {
 	sessionUserID         string
 	resolvedSessionDir    string
 	loadedRuntimeSession  *runtimechat.Session
+	ephemeral             bool
 }
 
 type chatRuntimeState struct {
@@ -66,8 +67,8 @@ func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profil
 		if opts.SessionFeaturesRequested {
 			return nil, fmt.Errorf("初始化会话管理失败: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "Warning: 初始化会话管理失败，已退回临时会话: %v\n", err)
-		return state, nil
+		fmt.Fprintf(os.Stderr, "Warning: 初始化文件会话管理失败，已退回内存会话: %v\n", err)
+		return newEphemeralChatPersistenceState(opts.SessionUserFlag), nil
 	}
 
 	state.runtimeSessionManager = manager
@@ -83,6 +84,22 @@ func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profil
 	}
 
 	return state, nil
+}
+
+func newEphemeralChatPersistenceState(explicitUserID string) *chatPersistenceState {
+	managerConfig := runtimechat.DefaultSessionManagerConfig()
+	managerConfig.MaxHistory = 200
+	managerConfig.CleanupInterval = 6 * time.Hour
+	managerConfig.IdleTimeout = 72 * time.Hour
+	userID := sessionruntime.ResolveSessionUserID(sessionruntime.IdentitySource{
+		CLIUserID: strings.TrimSpace(explicitUserID),
+		CLILocal:  true,
+	})
+	return &chatPersistenceState{
+		runtimeSessionManager: runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), managerConfig),
+		sessionUserID:         userID,
+		ephemeral:             true,
+	}
 }
 
 func loadChatPersistenceRuntimeConfig(cfg *config.Config, profileState *chatProfileState) (*runtimecfg.RuntimeConfig, string) {

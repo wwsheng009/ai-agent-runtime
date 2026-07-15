@@ -1294,10 +1294,18 @@ func TestAICLIChatActorExecutor_FailedAutoStartTeamClosesNonLeadTeammateSessionA
 	if err != nil {
 		t.Fatalf("runtimeSessionEvents: %v", err)
 	}
+	summaryCount := 0
 	for _, event := range events {
-		if event.Type == "team.summary" {
-			t.Fatalf("expected no team.summary for failed terminal team, got %+v", events)
+		if event.Type != "team.summary" {
+			continue
 		}
+		summaryCount++
+		if event.Payload["status"] != "failed" {
+			t.Fatalf("expected failed structured team summary, got %+v", event.Payload)
+		}
+	}
+	if summaryCount != 1 {
+		t.Fatalf("expected exactly one team.summary for failed terminal team, got %+v", events)
 	}
 }
 
@@ -1396,10 +1404,17 @@ func TestAICLIChatActorExecutor_AutoStartTeamHandlesTeammateProviderStreamError(
 	if !hasTeamEventType(events, "task.failed") || !hasTeamEventType(events, "team.completed") {
 		t.Fatalf("expected task.failed and team.completed events, got %+v", events)
 	}
+	summaryCount := 0
 	for _, event := range events {
 		if event.Type == "team.summary" {
-			t.Fatalf("expected no team.summary for stream-error failed team, got %+v", events)
+			summaryCount++
+			if event.Payload["status"] != "failed" {
+				t.Fatalf("expected failed structured team summary, got %+v", event.Payload)
+			}
 		}
+	}
+	if summaryCount != 1 {
+		t.Fatalf("expected exactly one team.summary for stream-error failed team, got %+v", events)
 	}
 
 	linesMu.Lock()
@@ -1410,8 +1425,8 @@ func TestAICLIChatActorExecutor_AutoStartTeamHandlesTeammateProviderStreamError(
 		!containsChatTimelinePrefix(snapshot, "[team] completed team-stream-error status=failed") {
 		t.Fatalf("expected stream-error failure timeline, got %v", snapshot)
 	}
-	if containsChatTimelinePrefix(snapshot, "[team summary] team-stream-error") {
-		t.Fatalf("expected no team summary timeline for stream-error failure, got %v", snapshot)
+	if !containsChatTimelinePrefix(snapshot, "[team summary] team-stream-error") {
+		t.Fatalf("expected terminal team summary timeline for stream-error failure, got %v", snapshot)
 	}
 }
 

@@ -1,6 +1,9 @@
 package chatcore
 
-import "github.com/wwsheng009/ai-agent-runtime/internal/types"
+import (
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentresult"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
+)
 
 // OrchestrationSummary captures the shared orchestration view for chat entrypoints.
 type OrchestrationSummary struct {
@@ -41,6 +44,7 @@ type ChatResult struct {
 	ToolExecutions []ToolExecutionSummary `json:"tool_executions,omitempty"`
 	Orchestration  *OrchestrationSummary  `json:"orchestration,omitempty"`
 	Planning       *PlanningSummary       `json:"planning,omitempty"`
+	ResultContract *agentresult.Result    `json:"result_contract,omitempty"`
 }
 
 // NewChatResult creates an empty shared result.

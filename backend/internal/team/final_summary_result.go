@@ -1,6 +1,10 @@
 package team
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentresult"
+)
 
 const (
 	FinalSummarySourceLead     = "lead"
@@ -13,6 +17,7 @@ const (
 	FinalSummaryFallbackLeadSessionMissing    = "lead_session_missing"
 	FinalSummaryFallbackLeadSessionError      = "lead_session_error"
 	FinalSummaryFallbackLeadOutputEmpty       = "lead_output_empty"
+	FinalSummaryFallbackPlannerNotConfigured  = "planner_not_configured"
 )
 
 // FinalSummaryResult captures the final summary together with whether the lead
@@ -26,6 +31,7 @@ type FinalSummaryResult struct {
 	ErrorType      string
 	ErrorMetadata  map[string]interface{}
 	SessionError   error
+	Contract       *agentresult.Result
 }
 
 func (r *FinalSummaryResult) CloneErrorMetadata() map[string]interface{} {

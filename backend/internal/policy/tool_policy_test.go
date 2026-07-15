@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
@@ -31,6 +32,15 @@ func TestToolExecutionPolicy_AllowToolInfo_AllowsLocalRead(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected local read tool to be allowed, got %v", err)
+	}
+}
+
+func TestToolExecutionPolicy_AllowTool_BlocksShellSurfaceInReadOnlyMode(t *testing.T) {
+	policy := NewToolExecutionPolicy(nil, true)
+	for _, name := range []string{"bash", "shell_command", "aicli_exec"} {
+		if err := policy.AllowTool(name); err == nil {
+			t.Fatalf("expected read-only policy to block %q", name)
+		}
 	}
 }
 
@@ -119,6 +129,27 @@ func TestToolExecutionPolicy_AllowToolCall_BlocksNestedShellCommandInReadOnlyMod
 	if err == nil {
 		t.Fatal("expected shell-like command to be blocked in read-only mode")
 	}
+}
+
+func TestCapabilityScopedPolicyExposesOnlyDeclaredCapabilitySurface(t *testing.T) {
+	policy := NewCapabilityScopedToolExecutionPolicy(nil, []Capability{CapReadOnly, CapNetwork})
+	assert.NoError(t, policy.AllowTool("read_file"))
+	assert.NoError(t, policy.AllowTool("web_search"))
+	assert.Error(t, policy.AllowTool("write_file"))
+	assert.Error(t, policy.AllowTool("spawn_agent"))
+	assert.Equal(t, []string{"network", "read_only"}, policy.AllowedCapabilityNames())
+}
+
+func TestDeriveChildForTaskNarrowsParentCapabilities(t *testing.T) {
+	parent := NewCapabilityScopedToolExecutionPolicy(nil, []Capability{
+		CapReadOnly, CapWriteFS, CapExecShell, CapNetwork, CapAgentManagement,
+	})
+	child := parent.DeriveChildForTask([]string{"read_file", "web_search", "write_file"}, true, "reviewer", nil)
+	assert.True(t, child.ReadOnly)
+	assert.Equal(t, []string{"network", "read_only"}, child.AllowedCapabilityNames())
+	assert.NoError(t, child.AllowTool("web_search"))
+	assert.Error(t, child.AllowTool("write_file"))
+	assert.Error(t, child.AllowTool("spawn_agent"))
 }
 
 func TestToolExecutionPolicy_AllowToolCall_BlocksPatchPathOutsideSandbox(t *testing.T) {

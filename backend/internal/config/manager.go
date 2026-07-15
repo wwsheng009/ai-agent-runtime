@@ -19,8 +19,6 @@ import (
 
 // RuntimeConfig Skills Runtime 配置
 type RuntimeConfig struct {
-	mu sync.RWMutex
-
 	Version string `yaml:"version,omitempty" json:"version,omitempty"`
 
 	// Skills 引擎配置

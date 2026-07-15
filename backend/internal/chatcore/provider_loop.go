@@ -149,6 +149,7 @@ func ExecuteToolLoop(ctx context.Context, req ToolLoopRequest) (*ToolLoopResult,
 		if len(assistantMessage.ToolCalls) == 0 {
 			response.Output = assistantMessage.Content
 			response.Usage = cloneUsage(turn.Usage)
+			buildChatResultContract(response)
 			return &ToolLoopResult{
 				Response: response,
 				History:  cloneMessages(history),

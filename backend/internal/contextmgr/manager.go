@@ -7,6 +7,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/factledger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memory"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -99,7 +100,9 @@ type Budget struct {
 // BuildInput 描述一次上下文装配请求。
 type BuildInput struct {
 	TraceID      string
+	WorkspaceID  string
 	SessionID    string
+	GoalID       string
 	TaskID       string
 	TeamID       string
 	Profile      map[string]interface{}
@@ -157,6 +160,7 @@ type Manager struct {
 	Strategy    Strategy
 	Artifact    ArtifactSearcher
 	Ledger      LedgerStore
+	Facts       *factledger.Ledger
 	TeamContext TeamContextBuilder
 	Workspace   WorkspaceContextBuilder
 	Events      runtimeevents.Publisher
@@ -334,6 +338,7 @@ func NewManager(budget Budget, artifactSearcher ArtifactSearcher) *Manager {
 		Strategy: StrategyForProfile(BudgetProfileBalanced),
 		Artifact: artifactSearcher,
 		Ledger:   ledgerStoreFromSearcher(artifactSearcher),
+		Facts:    factledger.New(ledgerStoreFromSearcher(artifactSearcher)),
 	}
 }
 
@@ -364,12 +369,15 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		promptBudgetSource = "context_manager_budget"
 	}
 
-	systemMessages, nonSystemMessages := splitMessages(input.History)
+	scopedHistory, goalScopeStats := filterMessagesByGoalScope(input.History, input.GoalID)
+	systemMessages, nonSystemMessages := splitMessages(scopedHistory)
 	result := BuildResult{
 		Metadata: map[string]interface{}{
 			"budget_max_prompt_tokens":        budget.MaxPromptTokens,
 			"budget_max_prompt_tokens_source": promptBudgetSource,
 			"budget_max_messages":             budget.MaxMessages,
+			"goal_scoped_messages_filtered":   goalScopeStats.MessagesFiltered,
+			"goal_scoped_tool_calls_filtered": goalScopeStats.ToolCallsFiltered,
 			"context_profile":                 m.Strategy.Profile,
 			"context_strategy": map[string]interface{}{
 				"compaction_mode":            m.Strategy.CompactionMode,
@@ -391,6 +399,13 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 	if detail := strings.TrimSpace(input.PromptBudgetSourceDetail); detail != "" {
 		result.Metadata["budget_max_prompt_tokens_source_detail"] = detail
 	}
+	if goalScopeStats.MessagesFiltered > 0 || goalScopeStats.ToolCallsFiltered > 0 {
+		m.emitEvent("context.goal_scope.filtered", input.TraceID, input.SessionID, map[string]interface{}{
+			"goal_id":             strings.TrimSpace(input.GoalID),
+			"messages_filtered":   goalScopeStats.MessagesFiltered,
+			"tool_calls_filtered": goalScopeStats.ToolCallsFiltered,
+		})
+	}
 
 	recent := cloneMessages(nonSystemMessages)
 	var older []types.Message
@@ -398,6 +413,7 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		recent = keepRecent(nonSystemMessages, budget.KeepRecentMessages)
 		older = dropRecent(nonSystemMessages, budget.KeepRecentMessages)
 	}
+	activeTurnHasReplay := activeUserTurnHasReplay(recent)
 
 	layerMetrics := map[string]interface{}{
 		"hot": map[string]interface{}{
@@ -441,6 +457,12 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"injected":       false,
 			"resource_count": 0,
 		},
+		"facts": map[string]interface{}{
+			"injected":                   false,
+			"count":                      0,
+			"goal_id":                    input.GoalID,
+			"suppressed_for_active_turn": activeTurnHasReplay,
+		},
 	}
 	result.Metadata["context_layer_metrics"] = layerMetrics
 
@@ -468,16 +490,32 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		m.emitEvent("context.profile.injected", input.TraceID, input.SessionID, profileMeta)
 	}
 
+	if factMessage, factCount, evidenceRefs := m.buildFactLedgerMessage(ctx, input); !activeTurnHasReplay && factMessage != nil {
+		managed = append(managed, *factMessage)
+		result.Metadata["fact_ledger_injected"] = true
+		result.Metadata["fact_count"] = factCount
+		result.Metadata["fact_evidence_refs"] = evidenceRefs
+		if metrics, ok := layerMetrics["facts"].(map[string]interface{}); ok {
+			metrics["injected"] = true
+			metrics["count"] = factCount
+			metrics["evidence_count"] = len(evidenceRefs)
+		}
+		m.emitEvent("context.fact_ledger.injected", input.TraceID, input.SessionID, map[string]interface{}{
+			"goal_id": input.GoalID, "fact_count": factCount, "evidence_refs": evidenceRefs,
+		})
+	}
+
 	if len(older) >= maxInt(1, m.Strategy.MinCompactionMessages) {
 		m.emitEvent("context.compact.started", input.TraceID, input.SessionID, map[string]interface{}{
-			"task_id":          input.TaskID,
-			"source_messages":  len(older),
-			"keep_recent":      budget.KeepRecentMessages,
-			"history_messages": len(input.History),
-			"compaction_mode":  m.Strategy.CompactionMode,
+			"task_id":                   input.TaskID,
+			"source_messages":           len(older),
+			"keep_recent":               budget.KeepRecentMessages,
+			"history_messages":          len(scopedHistory),
+			"unscoped_history_messages": len(input.History),
+			"compaction_mode":           m.Strategy.CompactionMode,
 		})
 		if m.Strategy.CompactionMode == CompactionModeLedgerPreferred {
-			if ledgerMessages, checkpointIDs := m.buildLedgerMessages(ctx, input.SessionID, input.TaskID, older, input.Profile); len(ledgerMessages) > 0 {
+			if ledgerMessages, checkpointIDs := m.buildLedgerMessages(ctx, input.WorkspaceID, input.SessionID, input.GoalID, input.TaskID, older, input.Profile); len(ledgerMessages) > 0 {
 				for _, ledgerMessage := range ledgerMessages {
 					managed = append(managed, ledgerMessage)
 				}
@@ -547,8 +585,6 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 	}
 
 	managed = append(managed, cloneMessages(recent)...)
-	activeTurnHasReplay := activeUserTurnHasReplay(recent)
-
 	selectedObservations := selectObservationsForMode(input.Memory, input.Observations, m.Strategy.ObservationMode)
 	layerMetrics["warm"].(map[string]interface{})["selected_items"] = len(selectedObservations)
 	if activeTurnHasReplay {
@@ -776,7 +812,7 @@ func (m *Manager) buildCompactionSummaryMessages(ctx context.Context, sessionID,
 	return nil, checkpointIDs
 }
 
-func (m *Manager) buildLedgerMessages(ctx context.Context, sessionID, taskID string, older []types.Message, profile map[string]interface{}) ([]types.Message, []string) {
+func (m *Manager) buildLedgerMessages(ctx context.Context, workspaceID, sessionID, goalID, taskID string, older []types.Message, profile map[string]interface{}) ([]types.Message, []string) {
 	if m == nil || m.Ledger == nil || len(older) == 0 {
 		return nil, nil
 	}
@@ -794,7 +830,7 @@ func (m *Manager) buildLedgerMessages(ctx context.Context, sessionID, taskID str
 	}
 
 	if covered < len(older) {
-		if checkpoint, entries := m.saveLedgerCheckpointSegment(ctx, sessionID, taskID, older[covered:], covered, profile); len(entries) > 0 {
+		if checkpoint, entries := m.saveLedgerCheckpointSegment(ctx, workspaceID, sessionID, goalID, taskID, older[covered:], covered, profile); len(entries) > 0 {
 			if message := ledgerPromptMessage(entries, checkpoint.ID, covered, covered+len(older[covered:]), len(messages) > 0); message != nil {
 				messages = append(messages, *message)
 				if strings.TrimSpace(checkpoint.ID) != "" {
@@ -964,7 +1000,7 @@ func (m *Manager) saveSummaryCheckpointSegment(ctx context.Context, sessionID, t
 	return checkpoint, summaryText
 }
 
-func (m *Manager) saveLedgerCheckpointSegment(ctx context.Context, sessionID, taskID string, segment []types.Message, segmentStart int, profile map[string]interface{}) (artifact.Checkpoint, []artifact.MemoryEntry) {
+func (m *Manager) saveLedgerCheckpointSegment(ctx context.Context, workspaceID, sessionID, goalID, taskID string, segment []types.Message, segmentStart int, profile map[string]interface{}) (artifact.Checkpoint, []artifact.MemoryEntry) {
 	if m == nil || m.Ledger == nil || len(segment) == 0 {
 		return artifact.Checkpoint{}, nil
 	}
@@ -977,6 +1013,7 @@ func (m *Manager) saveLedgerCheckpointSegment(ctx context.Context, sessionID, ta
 	for _, entry := range entries {
 		_, _ = m.Ledger.InsertMemoryEntry(ctx, entry)
 	}
+	m.persistStructuredFacts(ctx, workspaceID, sessionID, goalID, entries)
 
 	sourceRefs := mergeSourceRefsFromEntries(entries)
 	checkpoint := artifact.Checkpoint{
@@ -1150,6 +1187,83 @@ func (m *Manager) searchRecallHits(ctx context.Context, sessionID, goal string, 
 		return merged, nil
 	}
 	return merged, err
+}
+
+type goalScopeFilterStats struct {
+	MessagesFiltered  int
+	ToolCallsFiltered int
+}
+
+// filterMessagesByGoalScope removes explicitly foreign goal state before any
+// compaction can turn it into durable prompt context. Tool calls and their
+// results are filtered by call ID so the provider never receives an orphaned
+// half of a replay block.
+func filterMessagesByGoalScope(history []types.Message, activeGoalID string) ([]types.Message, goalScopeFilterStats) {
+	activeGoalID = strings.TrimSpace(activeGoalID)
+	dropMessage := make([]bool, len(history))
+	toolResultMessages := make(map[string][]int)
+
+	for index, message := range history {
+		dropMessage[index] = messageHasForeignGoal(message, activeGoalID)
+		if callID := strings.TrimSpace(message.ToolCallID); callID != "" {
+			toolResultMessages[callID] = append(toolResultMessages[callID], index)
+		}
+	}
+
+	filteredCalls := make(map[string]bool)
+	for index, message := range history {
+		if !dropMessage[index] {
+			continue
+		}
+		for _, call := range message.ToolCalls {
+			if callID := strings.TrimSpace(call.ID); callID != "" {
+				filteredCalls[callID] = true
+			}
+		}
+		if callID := strings.TrimSpace(message.ToolCallID); callID != "" {
+			filteredCalls[callID] = true
+		}
+	}
+	for callID := range filteredCalls {
+		for _, index := range toolResultMessages[callID] {
+			dropMessage[index] = true
+		}
+	}
+
+	filtered := make([]types.Message, 0, len(history))
+	stats := goalScopeFilterStats{}
+	for index, message := range history {
+		if dropMessage[index] {
+			stats.MessagesFiltered++
+			stats.ToolCallsFiltered += len(message.ToolCalls)
+			continue
+		}
+
+		cloned := message.Clone()
+		if len(cloned.ToolCalls) > 0 {
+			keptCalls := make([]types.ToolCall, 0, len(cloned.ToolCalls))
+			for _, call := range cloned.ToolCalls {
+				if filteredCalls[strings.TrimSpace(call.ID)] {
+					stats.ToolCallsFiltered++
+					continue
+				}
+				keptCalls = append(keptCalls, call)
+			}
+			cloned.ToolCalls = keptCalls
+			if len(keptCalls) == 0 && strings.TrimSpace(cloned.Content) == "" && len(cloned.ContentParts) == 0 {
+				stats.MessagesFiltered++
+				continue
+			}
+		}
+		filtered = append(filtered, *cloned)
+	}
+
+	return filtered, stats
+}
+
+func messageHasForeignGoal(message types.Message, activeGoalID string) bool {
+	messageGoalID := strings.TrimSpace(message.Metadata.GetString("goal_id", ""))
+	return messageGoalID != "" && messageGoalID != activeGoalID
 }
 
 func splitMessages(history []types.Message) ([]types.Message, []types.Message) {
@@ -1520,7 +1634,7 @@ func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Me
 		}
 		if stage := message.Metadata.GetString("context_stage", ""); stage != "" {
 			switch stage {
-			case "ledger", "profile", "compaction", "workspace", "team":
+			case "ledger", "fact_ledger", "correction", "profile", "compaction", "workspace", "team":
 				stableMessages = append(stableMessages, *message.Clone())
 			default:
 				dynamicMessages = append(dynamicMessages, *message.Clone())

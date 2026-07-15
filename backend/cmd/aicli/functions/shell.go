@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
@@ -87,8 +88,9 @@ func (e *DefaultCommandExecuter) ExecuteDetailed(ctx context.Context, command st
 		opt(cfg)
 	}
 
+	budget := runtimeexecution.ResolveTimeout(ctx, timeout)
 	// 创建带超时的 context
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, budget.Effective)
 	defer cancel()
 
 	// 使用智能 shell 检测
@@ -120,11 +122,14 @@ func (e *DefaultCommandExecuter) ExecuteDetailed(ctx context.Context, command st
 	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureLimitBytesFromExecConfig(cfg), "function", command, "", outputMirror)
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "function", command)
 	outputStr := capture.Output
-	metadata := buildShellExecutionMetadata(command, outputStr, capture, artifactPath, artifactErr, shell, cfg.workdir, timeout)
+	metadata := buildShellExecutionMetadata(command, outputStr, capture, artifactPath, artifactErr, shell, cfg.workdir, budget)
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return ShellExecutionResult{Output: outputStr, Metadata: metadata}, shellFunctionTimeoutError(timeout)
+			return ShellExecutionResult{Output: outputStr, Metadata: metadata}, runtimeexecution.TimeoutError(budget)
+		}
+		if ctx.Err() == context.Canceled {
+			return ShellExecutionResult{Output: outputStr, Metadata: metadata}, runtimeexecution.ContextCancellationError(ctx)
 		}
 
 		// 针对常见错误给出友好提示
@@ -212,7 +217,7 @@ func GetEnvironmentInfo() string {
 	return getShellEnvironmentInfo()
 }
 
-func buildShellExecutionMetadata(command string, output string, capture runtimeexecutor.CombinedOutputCapture, artifactPath string, artifactErr error, shell runtimeexecutor.Shell, workdir string, timeout time.Duration) map[string]interface{} {
+func buildShellExecutionMetadata(command string, output string, capture runtimeexecutor.CombinedOutputCapture, artifactPath string, artifactErr error, shell runtimeexecutor.Shell, workdir string, budget runtimeexecution.TimeoutBudget) map[string]interface{} {
 	retainedBytes := capture.RetainedBytes
 	if retainedBytes == 0 && output != "" {
 		retainedBytes = len(output)
@@ -228,7 +233,10 @@ func buildShellExecutionMetadata(command string, output string, capture runtimee
 	metadata := map[string]interface{}{
 		"command":                       command,
 		"command_length_bytes":          len(command),
-		"timeout_ms":                    timeout.Milliseconds(),
+		"timeout_ms":                    budget.Effective.Milliseconds(),
+		"timeout_requested_ms":          budget.Requested.Milliseconds(),
+		"timeout_effective_ms":          budget.Effective.Milliseconds(),
+		"timeout_source":                string(budget.Source),
 		"output_size":                   len(output),
 		"captured_output_bytes":         retainedBytes,
 		"retained_output_bytes":         retainedBytes,
@@ -369,6 +377,19 @@ func parseShellFunctionTimeout(args map[string]interface{}, defaultTimeout time.
 		return parsed, nil
 	}
 	return defaultTimeout, nil
+}
+
+func hasExplicitShellFunctionTimeout(args map[string]interface{}) bool {
+	for _, key := range []string{"timeout_ms", "timeout_sec", "timeout"} {
+		value, ok := args[key]
+		if !ok || value == nil {
+			continue
+		}
+		if text, isText := value.(string); !isText || strings.TrimSpace(text) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func shellFunctionTimeoutError(timeout time.Duration) error {
@@ -517,6 +538,11 @@ func (f *ShellFunction) ExecuteWithMeta(ctx context.Context, args map[string]int
 	if err != nil {
 		return "", nil, err
 	}
+	timeoutSource := runtimeexecution.TimeoutSourceToolDefault
+	if hasExplicitShellFunctionTimeout(args) {
+		timeoutSource = runtimeexecution.TimeoutSourceToolArgument
+	}
+	ctx = runtimeexecution.WithTimeoutRequestSource(ctx, timeoutSource)
 
 	if rich, ok := f.executer.(DetailedCommandExecuter); ok {
 		result, err := rich.ExecuteDetailed(ctx, command, timeout, opts...)

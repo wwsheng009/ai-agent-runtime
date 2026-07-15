@@ -486,7 +486,7 @@ func (s *Store) LatestCheckpoint(ctx context.Context, sessionID string) (*Checkp
 		SELECT id, session_id, task_id, reason, history_hash, message_count, ledger_json, metadata_json, created_at
 		FROM checkpoints
 		WHERE session_id = ?
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, rowid DESC
 		LIMIT 1
 	`, sessionID)
 
@@ -575,7 +575,7 @@ func (s *Store) ListCheckpoints(ctx context.Context, sessionID string, limit, of
 		SELECT id, session_id, task_id, reason, history_hash, message_count, ledger_json, metadata_json, created_at
 		FROM checkpoints
 		WHERE session_id = ?
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, rowid DESC
 	`
 	args := []interface{}{sessionID}
 	if limit > 0 {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
@@ -33,6 +34,8 @@ type TerminalTeamResult struct {
 	SummaryErrorMetadata  map[string]interface{}
 }
 
+var terminalSummaryLocks sync.Map
+
 // ReconcileTerminalTeamState updates a team to a terminal state once no active tasks remain.
 func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServices, teamID string) (*TerminalTeamResult, error) {
 	if services.Store == nil {
@@ -42,6 +45,11 @@ func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServic
 	if teamID == "" {
 		return nil, fmt.Errorf("team id is required")
 	}
+	dependencyFailures, err := ReconcileFailedTaskDependencies(ctx, services.Store, teamID)
+	if err != nil {
+		return nil, err
+	}
+	publishDependencyFailureEvents(services.Events, teamID, dependencyFailures)
 	if sqliteStore, ok := services.Store.(*SQLiteStore); ok {
 		return reconcileTerminalTeamStateSQLite(ctx, sqliteStore, services, teamID)
 	}
@@ -50,12 +58,12 @@ func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServic
 	if err != nil {
 		return nil, err
 	}
-	if isTerminalTeamStatus(currentTeamStatus(current)) {
-		return &TerminalTeamResult{
+	if IsTerminalTeamStatus(currentTeamStatus(current)) {
+		return finalizeTerminalTeamState(ctx, services, teamID, &TerminalTeamResult{
 			Terminal:   true,
 			Transition: false,
 			Status:     current.Status,
-		}, nil
+		}, nil)
 	}
 	if currentTeamStatus(current) == TeamStatusPaused {
 		return &TerminalTeamResult{
@@ -91,18 +99,7 @@ func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServic
 		return &TerminalTeamResult{Terminal: false}, nil
 	}
 
-	failed, err := services.Store.ListTasks(ctx, TaskFilter{
-		TeamID: teamID,
-		Status: []TaskStatus{TaskStatusFailed},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	status := TeamStatusDone
-	if len(failed) > 0 {
-		status = TeamStatusFailed
-	}
+	status := terminalStatusForTasks(allTasks)
 
 	if current != nil && current.Status == status {
 		return &TerminalTeamResult{
@@ -121,55 +118,7 @@ func ReconcileTerminalTeamState(ctx context.Context, services TerminalTeamServic
 		Transition: true,
 		Status:     status,
 	}
-	if !result.Transition {
-		return result, nil
-	}
-	emitTerminalTeamEvent(services.Store, services.Events, TeamEvent{
-		Type:   "team.completed",
-		TeamID: teamID,
-		Payload: map[string]interface{}{
-			"status": string(status),
-		},
-	})
-
-	if status != TeamStatusDone || services.Planner == nil {
-		return result, nil
-	}
-
-	summaryResult, err := services.Planner.FinalSummaryDetailed(ctx, teamID)
-	if err != nil {
-		emitTerminalTeamSummaryFailure(services.Store, services.Events, teamID, nil, err)
-		return result, nil
-	}
-	applyTerminalTeamSummaryResult(result, summaryResult)
-	if summaryResult != nil && summaryResult.HasSessionError() {
-		emitTerminalTeamSummaryFailure(services.Store, services.Events, teamID, summaryResult, summaryResult.SessionError)
-	}
-	summary := ""
-	if summaryResult != nil {
-		summary = strings.TrimSpace(summaryResult.Summary)
-	}
-	if summary == "" {
-		return result, nil
-	}
-
-	result.Summary = summary
-	emitTerminalTeamEvent(services.Store, services.Events, TeamEvent{
-		Type:    "team.summary",
-		TeamID:  teamID,
-		Payload: BuildFinalSummaryEventPayload(summaryResult),
-	})
-	if services.Mailbox != nil {
-		_, _ = services.Mailbox.Send(ctx, MailMessage{
-			TeamID:    teamID,
-			FromAgent: "lead",
-			ToAgent:   "*",
-			Kind:      "done",
-			Body:      summary,
-		})
-	}
-
-	return result, nil
+	return finalizeTerminalTeamState(ctx, services, teamID, result, allTasks)
 }
 
 func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, services TerminalTeamServices, teamID string) (*TerminalTeamResult, error) {
@@ -184,7 +133,7 @@ func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, s
 			if err != nil {
 				return err
 			}
-			if isTerminalTeamStatus(currentStatus) {
+			if IsTerminalTeamStatus(currentStatus) {
 				result.Terminal = true
 				result.Transition = false
 				result.Status = currentStatus
@@ -229,11 +178,16 @@ func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, s
 			if err != nil {
 				return err
 			}
-
-			status := TeamStatusDone
-			if failedCount > 0 {
-				status = TeamStatusFailed
+			doneCount, err := countTasksByStatusTx(ctx, tx, teamID, TaskStatusDone)
+			if err != nil {
+				return err
 			}
+			canceledCount, err := countTasksByStatusTx(ctx, tx, teamID, TaskStatusCancelled)
+			if err != nil {
+				return err
+			}
+
+			status := terminalStatusFromCounts(doneCount, failedCount, canceledCount, taskCount)
 
 			if currentStatus == status {
 				result.Terminal = true
@@ -267,55 +221,11 @@ func reconcileTerminalTeamStateSQLite(ctx context.Context, store *SQLiteStore, s
 	if !result.Terminal {
 		return result, nil
 	}
-	if !result.Transition {
-		return result, nil
-	}
-
-	emitTerminalTeamEvent(services.Store, services.Events, TeamEvent{
-		Type:   "team.completed",
-		TeamID: teamID,
-		Payload: map[string]interface{}{
-			"status": string(result.Status),
-		},
-	})
-
-	if result.Status != TeamStatusDone || services.Planner == nil {
-		return result, nil
-	}
-
-	summaryResult, err := services.Planner.FinalSummaryDetailed(ctx, teamID)
+	tasks, err := services.Store.ListTasks(ctx, TaskFilter{TeamID: teamID})
 	if err != nil {
-		emitTerminalTeamSummaryFailure(services.Store, services.Events, teamID, nil, err)
-		return result, nil
+		return nil, err
 	}
-	applyTerminalTeamSummaryResult(result, summaryResult)
-	if summaryResult != nil && summaryResult.HasSessionError() {
-		emitTerminalTeamSummaryFailure(services.Store, services.Events, teamID, summaryResult, summaryResult.SessionError)
-	}
-	summary := ""
-	if summaryResult != nil {
-		summary = strings.TrimSpace(summaryResult.Summary)
-	}
-	if summary == "" {
-		return result, nil
-	}
-
-	result.Summary = summary
-	emitTerminalTeamEvent(services.Store, services.Events, TeamEvent{
-		Type:    "team.summary",
-		TeamID:  teamID,
-		Payload: BuildFinalSummaryEventPayload(summaryResult),
-	})
-	if services.Mailbox != nil {
-		_, _ = services.Mailbox.Send(ctx, MailMessage{
-			TeamID:    teamID,
-			FromAgent: "lead",
-			ToAgent:   "*",
-			Kind:      "done",
-			Body:      summary,
-		})
-	}
-	return result, nil
+	return finalizeTerminalTeamState(ctx, services, teamID, result, tasks)
 }
 
 func hasBusyTeammates(ctx context.Context, store Store, teamID string) (bool, error) {
@@ -413,8 +323,111 @@ func currentTeamStatus(record *Team) TeamStatus {
 	return record.Status
 }
 
-func isTerminalTeamStatus(status TeamStatus) bool {
-	return status == TeamStatusDone || status == TeamStatusFailed
+func finalizeTerminalTeamState(ctx context.Context, services TerminalTeamServices, teamID string, result *TerminalTeamResult, tasks []Task) (*TerminalTeamResult, error) {
+	if result == nil || !result.Terminal {
+		return result, nil
+	}
+	if result.Transition {
+		emitTerminalTeamEvent(services.Store, services.Events, TeamEvent{
+			Type:   "team.completed",
+			TeamID: teamID,
+			Payload: map[string]interface{}{
+				"status": string(result.Status),
+			},
+		})
+	}
+	unlock := lockTerminalTeamSummary(teamID)
+	defer unlock()
+	if found, err := applyPersistedTerminalSummary(ctx, services.Store, teamID, result); err != nil {
+		return nil, err
+	} else if found {
+		return result, nil
+	}
+	if tasks == nil {
+		var err error
+		tasks, err = services.Store.ListTasks(ctx, TaskFilter{TeamID: teamID})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var summaryResult *FinalSummaryResult
+	if services.Planner != nil {
+		generated, err := services.Planner.FinalSummaryDetailed(ctx, teamID)
+		if err != nil {
+			emitTerminalTeamSummaryFailure(services.Store, services.Events, teamID, nil, err)
+			summaryResult = terminalFallbackSummary(teamID, tasks, FinalSummaryFallbackLeadSessionError)
+		} else {
+			summaryResult = generated
+		}
+	} else {
+		summaryResult = terminalFallbackSummary(teamID, tasks, FinalSummaryFallbackPlannerNotConfigured)
+	}
+	if summaryResult == nil || strings.TrimSpace(summaryResult.Summary) == "" {
+		summaryResult = terminalFallbackSummary(teamID, tasks, FinalSummaryFallbackLeadOutputEmpty)
+	}
+	applyTerminalTeamSummaryResult(result, summaryResult)
+	if summaryResult.HasSessionError() {
+		emitTerminalTeamSummaryFailure(services.Store, services.Events, teamID, summaryResult, summaryResult.SessionError)
+	}
+
+	payload := BuildFinalSummaryEventPayload(summaryResult)
+	appendTerminalOutcomePayload(payload, result.Status, tasks)
+	emitTerminalTeamEvent(services.Store, services.Events, TeamEvent{
+		Type:    "team.summary",
+		TeamID:  teamID,
+		Payload: payload,
+	})
+	if services.Mailbox != nil {
+		_, _ = services.Mailbox.Send(ctx, MailMessage{
+			TeamID:    teamID,
+			FromAgent: "lead",
+			ToAgent:   "*",
+			Kind:      "done",
+			Body:      result.Summary,
+			Metadata:  payload,
+		})
+	}
+	return result, nil
+}
+
+func lockTerminalTeamSummary(teamID string) func() {
+	key := strings.TrimSpace(teamID)
+	value, _ := terminalSummaryLocks.LoadOrStore(key, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
+
+func terminalFallbackSummary(teamID string, tasks []Task, reason string) *FinalSummaryResult {
+	return &FinalSummaryResult{
+		Summary:        buildSummaryFallback(teamID, tasks),
+		SummarySource:  FinalSummarySourceFallback,
+		UsedFallback:   true,
+		FallbackReason: strings.TrimSpace(reason),
+	}
+}
+
+func applyPersistedTerminalSummary(ctx context.Context, store Store, teamID string, result *TerminalTeamResult) (bool, error) {
+	events, err := store.ListTeamEvents(ctx, TeamEventFilter{TeamID: teamID, EventType: "team.summary", Limit: 1000})
+	if err != nil {
+		return false, err
+	}
+	for index := len(events) - 1; index >= 0; index-- {
+		payload := events[index].Payload
+		summary, _ := payload["summary"].(string)
+		if strings.TrimSpace(summary) == "" {
+			continue
+		}
+		result.Summary = strings.TrimSpace(summary)
+		result.SummarySource, _ = payload["summary_source"].(string)
+		result.SummaryUsedFallback, _ = payload["used_fallback"].(bool)
+		result.SummaryFallbackReason, _ = payload["fallback_reason"].(string)
+		result.SummaryTraceID, _ = payload["trace_id"].(string)
+		result.SummaryErrorType, _ = payload["error_type"].(string)
+		return true, nil
+	}
+	return false, nil
 }
 
 func emitTerminalTeamEvent(store Store, events *TeamEventBus, event TeamEvent) {

@@ -120,17 +120,18 @@ type WaitTeamEventResult struct {
 
 // WaitTeamResult returns terminal state plus recent durable lifecycle events.
 type WaitTeamResult struct {
-	TeamID          string                `json:"team_id"`
-	Status          string                `json:"status"`
-	Terminal        bool                  `json:"terminal"`
-	TimedOut        bool                  `json:"timed_out"`
-	SummaryReady    bool                  `json:"summary_ready"`
-	Summary         string                `json:"summary,omitempty"`
-	SummarySource   string                `json:"summary_source,omitempty"`
-	SummaryEventSeq int64                 `json:"summary_event_seq,omitempty"`
-	Events          []WaitTeamEventResult `json:"events,omitempty"`
-	EventCount      int                   `json:"event_count"`
-	LatestSeq       int64                 `json:"latest_seq,omitempty"`
+	TeamID          string                 `json:"team_id"`
+	Status          string                 `json:"status"`
+	Terminal        bool                   `json:"terminal"`
+	TimedOut        bool                   `json:"timed_out"`
+	SummaryReady    bool                   `json:"summary_ready"`
+	Summary         string                 `json:"summary,omitempty"`
+	SummarySource   string                 `json:"summary_source,omitempty"`
+	SummaryPayload  map[string]interface{} `json:"summary_payload,omitempty"`
+	SummaryEventSeq int64                  `json:"summary_event_seq,omitempty"`
+	Events          []WaitTeamEventResult  `json:"events,omitempty"`
+	EventCount      int                    `json:"event_count"`
+	LatestSeq       int64                  `json:"latest_seq,omitempty"`
 }
 
 // TeamMailboxDispatcher delivers mailbox events to active team sessions.
@@ -285,6 +286,7 @@ type SpawnAgentArgs struct {
 	ReasoningEffort     string   `json:"reasoning_effort,omitempty"`
 	ThinkingEffort      string   `json:"thinking_effort,omitempty"`
 	PermissionMode      string   `json:"permission_mode,omitempty"`
+	ReadOnly            bool     `json:"read_only,omitempty"`
 	ForkContext         *bool    `json:"fork_context,omitempty"`
 	ForkTurns           string   `json:"fork_turns,omitempty"`
 	DifficultySource    string   `json:"-"`
@@ -354,6 +356,7 @@ type AgentStatusResult struct {
 	Model                    string   `json:"model,omitempty"`
 	ReasoningEffort          string   `json:"reasoning_effort,omitempty"`
 	PermissionMode           string   `json:"permission_mode,omitempty"`
+	ReadOnly                 bool     `json:"read_only,omitempty"`
 	Difficulty               string   `json:"difficulty,omitempty"`
 	DifficultySource         string   `json:"difficulty_source,omitempty"`
 	DifficultyRationale      string   `json:"difficulty_rationale,omitempty"`
@@ -487,6 +490,7 @@ const (
 	AgentSessionContextTeamID              = agentcontrol.SessionContextTeamID
 	AgentSessionContextTeammateID          = agentcontrol.SessionContextTeammateID
 	AgentSessionContextPermissionMode      = "permission_mode"
+	AgentSessionContextReadOnly            = "read_only"
 )
 
 // ApplySpawnAgentRouteContext persists spawn_agent route hints on a child
@@ -542,6 +546,9 @@ func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnA
 	if permissionMode := strings.TrimSpace(args.PermissionMode); permissionMode != "" {
 		session.SetContext(AgentSessionContextPermissionMode, permissionMode)
 	}
+	if args.ReadOnly {
+		session.SetContext(AgentSessionContextReadOnly, true)
+	}
 }
 
 // ApplySpawnAgentRouteStatusContext copies persisted spawn_agent route
@@ -565,6 +572,9 @@ func ApplySpawnAgentRouteStatusContext(result *AgentStatusResult, session agentc
 	}
 	if permissionMode := agentcontrol.ContextString(session, AgentSessionContextPermissionMode); permissionMode != "" {
 		result.PermissionMode = permissionMode
+	}
+	if value, ok := session.GetContext(AgentSessionContextReadOnly); ok {
+		result.ReadOnly, _ = value.(bool)
 	}
 	if difficulty := agentcontrol.ContextString(session, AgentSessionContextDifficulty); difficulty != "" {
 		result.Difficulty = difficulty
@@ -616,6 +626,9 @@ func AddSpawnAgentRoutePayload(payload map[string]interface{}, session agentcont
 	}
 	if status.PermissionMode != "" {
 		payload["permission_mode"] = status.PermissionMode
+	}
+	if status.ReadOnly {
+		payload["read_only"] = true
 	}
 	if status.RouteSource != "" {
 		payload["route_source"] = status.RouteSource

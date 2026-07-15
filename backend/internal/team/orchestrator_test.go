@@ -1169,7 +1169,7 @@ func TestOrchestratorExecuteAssignmentPublishesPromptPreflightFailureMetadata(t 
 				},
 			},
 		},
-		Sessions: &staticSessionClient{
+		AgentControl: &capturingTaskTriggerClient{
 			result: &SessionResult{
 				Success:   false,
 				Error:     "prompt preflight budget exceeded",
@@ -1343,9 +1343,15 @@ func TestOrchestratorExecuteAssignmentSendsLeadProgressMailbox(t *testing.T) {
 
 	messages, err := store.ListMail(ctx, MailFilter{TeamID: teamID})
 	require.NoError(t, err)
-	require.Len(t, messages, 2)
+	require.Len(t, messages, 3)
 	byKind := map[string]MailMessage{}
+	var terminalSummary *MailMessage
 	for _, message := range messages {
+		if message.TaskID == nil {
+			cloned := message
+			terminalSummary = &cloned
+			continue
+		}
 		byKind[message.Kind] = message
 	}
 	progress, ok := byKind["progress"]
@@ -1361,4 +1367,10 @@ func TestOrchestratorExecuteAssignmentSendsLeadProgressMailbox(t *testing.T) {
 	assert.Equal(t, "mate-1", done.FromAgent)
 	assert.Equal(t, taskID, *done.TaskID)
 	assert.Equal(t, "all done", done.Body)
+
+	require.NotNil(t, terminalSummary, "expected terminal team summary mailbox message")
+	assert.Equal(t, "*", terminalSummary.ToAgent)
+	assert.Equal(t, "lead", terminalSummary.FromAgent)
+	assert.Equal(t, "done", terminalSummary.Kind)
+	assert.Contains(t, terminalSummary.Body, "all done")
 }

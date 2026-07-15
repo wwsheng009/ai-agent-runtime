@@ -9,11 +9,23 @@ import (
 type TeamStatus string
 
 const (
-	TeamStatusActive TeamStatus = "active"
-	TeamStatusPaused TeamStatus = "paused"
-	TeamStatusDone   TeamStatus = "done"
-	TeamStatusFailed TeamStatus = "failed"
+	TeamStatusActive             TeamStatus = "active"
+	TeamStatusPaused             TeamStatus = "paused"
+	TeamStatusDone               TeamStatus = "done"
+	TeamStatusFailed             TeamStatus = "failed"
+	TeamStatusPartiallyCompleted TeamStatus = "partially_completed"
+	TeamStatusCanceled           TeamStatus = "canceled"
 )
+
+// IsTerminalTeamStatus reports whether a team can no longer schedule work.
+func IsTerminalTeamStatus(status TeamStatus) bool {
+	switch status {
+	case TeamStatusDone, TeamStatusFailed, TeamStatusPartiallyCompleted, TeamStatusCanceled:
+		return true
+	default:
+		return false
+	}
+}
 
 // TeammateState represents the current availability of a teammate.
 type TeammateState string

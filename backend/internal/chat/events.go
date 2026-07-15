@@ -23,6 +23,7 @@ const (
 	EventSessionCompactCompleted = "session_compact_completed"
 	EventSessionCompactSkipped   = "session_compact_skipped"
 	EventSessionCompactFailed    = "session_compact_failed"
+	EventContextReconciled       = "context_reconciled"
 	EventRewindStarted           = "rewind_started"
 	EventRewindFinished          = "rewind_finished"
 	EventJobStarted              = "job_started"

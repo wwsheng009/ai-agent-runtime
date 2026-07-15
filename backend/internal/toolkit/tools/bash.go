@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -123,6 +124,9 @@ type CommandExecutionResult struct {
 	ShellType              string
 	ShellPath              string
 	TimeoutMs              int64
+	TimeoutRequestedMs     int64
+	TimeoutEffectiveMs     int64
+	TimeoutSource          string
 }
 
 type outputCaptureSettings struct {
@@ -168,6 +172,11 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Error:      err,
 		}, nil
 	}
+	timeoutSource := runtimeexecution.TimeoutSourceToolDefault
+	if hasExplicitShellTimeout(params) {
+		timeoutSource = runtimeexecution.TimeoutSourceToolArgument
+	}
+	ctx = runtimeexecution.WithTimeoutRequestSource(ctx, timeoutSource)
 
 	// 检查黑名单
 	if b.isBlacklisted(command) {
@@ -204,6 +213,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	if err != nil {
 		return CommandExecutionResult{}, err
 	}
+	budget := runtimeexecution.ResolveTimeout(ctx, timeout)
 
 	if b.sandbox == nil {
 		opts := []ExecOption{WithWorkdir(resolvedWorkdir)}
@@ -214,7 +224,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 			opts = append(opts, WithDisableOutputCap())
 		}
 		result, err := b.executer.Execute(ctx, command, timeout, opts...)
-		result.TimeoutMs = timeout.Milliseconds()
+		applyCommandTimeoutBudget(&result, budget)
 		return result, err
 	}
 
@@ -237,11 +247,9 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	}
 
 	if configured := b.sandbox.Config().MaxExecutionTime; configured > 0 {
-		if timeout <= 0 || timeout > configured {
-			timeout = configured
-		}
+		budget = runtimeexecution.LimitTimeout(budget, configured, runtimeexecution.TimeoutSourceSandboxPolicy)
 	}
-	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
+	cmdCtx, cancel := context.WithTimeout(ctx, budget.Effective)
 	defer cancel()
 
 	// 使用智能 shell 检测
@@ -276,17 +284,27 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 			if artifactErr != nil {
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
-			applyCommandExecutionShell(result, shell)
-			result.TimeoutMs = timeout.Milliseconds()
-			return result, shellCommandTimeoutError(timeout)
+			result = applyCommandExecutionShell(result, shell)
+			applyCommandTimeoutBudget(&result, budget)
+			return result, runtimeexecution.TimeoutError(budget)
+		}
+		if cmdCtx.Err() == context.Canceled {
+			result := commandExecutionFromCapture(capture)
+			result.RawOutputArtifactPath = artifactPath
+			if artifactErr != nil {
+				result.RawOutputArtifactError = artifactErr.Error()
+			}
+			result = applyCommandExecutionShell(result, shell)
+			applyCommandTimeoutBudget(&result, budget)
+			return result, runtimeexecution.ContextCancellationError(ctx)
 		}
 		result := commandExecutionFromCapture(capture)
 		result.RawOutputArtifactPath = artifactPath
 		if artifactErr != nil {
 			result.RawOutputArtifactError = artifactErr.Error()
 		}
-		applyCommandExecutionShell(result, shell)
-		result.TimeoutMs = timeout.Milliseconds()
+		result = applyCommandExecutionShell(result, shell)
+		applyCommandTimeoutBudget(&result, budget)
 		return result, err
 	}
 	result := commandExecutionFromCapture(capture)
@@ -294,8 +312,8 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	if artifactErr != nil {
 		result.RawOutputArtifactError = artifactErr.Error()
 	}
-	applyCommandExecutionShell(result, shell)
-	result.TimeoutMs = timeout.Milliseconds()
+	result = applyCommandExecutionShell(result, shell)
+	applyCommandTimeoutBudget(&result, budget)
 	return result, nil
 }
 
@@ -358,7 +376,8 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		opt(cfg)
 	}
 
-	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
+	budget := runtimeexecution.ResolveTimeout(ctx, timeout)
+	cmdCtx, cancel := context.WithTimeout(ctx, budget.Effective)
 	defer cancel()
 
 	// 使用智能 shell 检测
@@ -395,8 +414,16 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 			if artifactErr != nil {
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
-			applyCommandExecutionShell(result, shell)
-			return result, shellCommandTimeoutError(timeout)
+			result = applyCommandExecutionShell(result, shell)
+			applyCommandTimeoutBudget(&result, budget)
+			return result, runtimeexecution.TimeoutError(budget)
+		}
+		if cmdCtx.Err() == context.Canceled {
+			result := commandExecutionFromCapture(capture)
+			result.RawOutputArtifactPath = artifactPath
+			result = applyCommandExecutionShell(result, shell)
+			applyCommandTimeoutBudget(&result, budget)
+			return result, runtimeexecution.ContextCancellationError(ctx)
 		}
 
 		// 检查常见错误并给出友好提示
@@ -407,7 +434,8 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 			if artifactErr != nil {
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
-			applyCommandExecutionShell(result, shell)
+			result = applyCommandExecutionShell(result, shell)
+			applyCommandTimeoutBudget(&result, budget)
 			return result, fmt.Errorf("命令执行失败: %w\n%s\n\n当前环境信息:\n%s", err, friendlyHint, GetShellEnvironmentInfo())
 		}
 		result := commandExecutionFromCapture(capture)
@@ -415,7 +443,8 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		if artifactErr != nil {
 			result.RawOutputArtifactError = artifactErr.Error()
 		}
-		applyCommandExecutionShell(result, shell)
+		result = applyCommandExecutionShell(result, shell)
+		applyCommandTimeoutBudget(&result, budget)
 		return result, err
 	}
 
@@ -424,7 +453,8 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 	if artifactErr != nil {
 		result.RawOutputArtifactError = artifactErr.Error()
 	}
-	applyCommandExecutionShell(result, shell)
+	result = applyCommandExecutionShell(result, shell)
+	applyCommandTimeoutBudget(&result, budget)
 	return result, nil
 }
 
@@ -447,6 +477,16 @@ func applyCommandExecutionShell(result CommandExecutionResult, shell runtimeexec
 	result.ShellType = strings.TrimSpace(string(shell.Type))
 	result.ShellPath = strings.TrimSpace(shell.Path)
 	return result
+}
+
+func applyCommandTimeoutBudget(result *CommandExecutionResult, budget runtimeexecution.TimeoutBudget) {
+	if result == nil {
+		return
+	}
+	result.TimeoutRequestedMs = budget.Requested.Milliseconds()
+	result.TimeoutEffectiveMs = budget.Effective.Milliseconds()
+	result.TimeoutMs = result.TimeoutEffectiveMs
+	result.TimeoutSource = string(budget.Source)
 }
 
 func buildCommandExecutionMetadata(command string, mutatedPaths []string, result CommandExecutionResult) map[string]interface{} {
@@ -489,6 +529,15 @@ func buildCommandExecutionMetadata(command string, mutatedPaths []string, result
 	}
 	if result.TimeoutMs > 0 {
 		metadata["timeout_ms"] = result.TimeoutMs
+	}
+	if result.TimeoutRequestedMs > 0 {
+		metadata["timeout_requested_ms"] = result.TimeoutRequestedMs
+	}
+	if result.TimeoutEffectiveMs > 0 {
+		metadata["timeout_effective_ms"] = result.TimeoutEffectiveMs
+	}
+	if strings.TrimSpace(result.TimeoutSource) != "" {
+		metadata["timeout_source"] = strings.TrimSpace(result.TimeoutSource)
 	}
 	shell := runtimeexecutor.Shell{
 		Type: runtimeexecutor.ShellType(strings.TrimSpace(result.ShellType)),
@@ -704,6 +753,17 @@ func parseShellCommandTimeout(params map[string]interface{}, defaultTimeout time
 		return parsed, nil
 	}
 	return defaultTimeout, nil
+}
+
+func hasExplicitShellTimeout(params map[string]interface{}) bool {
+	for _, key := range []string{"timeout_ms", "timeout_sec", "timeout"} {
+		if value, ok := params[key]; ok && value != nil {
+			if text, isText := value.(string); !isText || strings.TrimSpace(text) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func shellCommandTimeoutError(timeout time.Duration) error {

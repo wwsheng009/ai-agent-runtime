@@ -221,6 +221,28 @@ func TestChatInteractionCoordinator_RenderAsyncLine_KeepsGapAcrossPromptRedraw(t
 	}
 }
 
+func TestChatInteractionCoordinator_RenderAsyncLine_KeepsGapWhenPromptVisibleAfterAsyncLine(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.promptAdvanceFn = func() bool { return false }
+	output := &terminalCaptureWriter{}
+	coord.SetWriter(output)
+
+	coord.RenderAsyncLine("• Running git ls-files --others --exclude-standard\n  workdir: E:/projects/ai/ai-agent-runtime")
+	coord.mu.Lock()
+	coord.promptVisible = true
+	coord.promptAfterBlockGap = false
+	coord.completeBlockOutput = true
+	coord.lastCompletedAsyncLine = true
+	coord.mu.Unlock()
+	coord.RenderAsyncLine("• Completed git ls-files --others --exclude-standard in 868ms\n  workdir: E:/projects/ai/ai-agent-runtime")
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "  workdir: E:/projects/ai/ai-agent-runtime\n\n• Completed git ls-files --others --exclude-standard in 868ms") {
+		t.Fatalf("expected completed tool timeline line to keep a blank-line gap after prompt clear, got %q", rendered)
+	}
+}
+
 func TestFinishInteractiveReadPromptState_PreservesDraftForQueuedInput(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)

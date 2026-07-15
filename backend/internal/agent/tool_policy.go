@@ -10,6 +10,10 @@ func NewToolExecutionPolicy(allowedTools []string, readOnly bool) *ToolExecution
 	return runtimepolicy.NewToolExecutionPolicy(allowedTools, readOnly)
 }
 
+func CapabilitiesForTask(role string, readOnly bool, toolNames, writePaths []string) []runtimepolicy.Capability {
+	return runtimepolicy.CapabilitiesForTask(role, readOnly, toolNames, writePaths)
+}
+
 func isWriteLikeToolName(toolName string) bool {
 	return runtimepolicy.IsWriteLikeToolName(toolName)
 }

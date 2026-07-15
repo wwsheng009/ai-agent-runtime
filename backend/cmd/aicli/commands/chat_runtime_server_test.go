@@ -93,6 +93,57 @@ func TestPrepareRuntimeServerChatPersistenceAutoFallsBackWhenServerUnavailable(t
 	}
 }
 
+func TestRuntimeServerHealthCheckRequiresUnifiedSessionActorContract(t *testing.T) {
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+	}))
+	defer legacy.Close()
+	if err := runtimeServerHealthCheck(context.Background(), legacy.URL); err == nil || !strings.Contains(err.Error(), "执行核心不兼容") {
+		t.Fatalf("expected incompatible runtime core error, got %v", err)
+	}
+
+	unified := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":             true,
+			"execution_core": runtimechat.SessionActorRuntimeCore(),
+		})
+	}))
+	defer unified.Close()
+	if err := runtimeServerHealthCheck(context.Background(), unified.URL); err != nil {
+		t.Fatalf("expected unified runtime core health check to pass: %v", err)
+	}
+}
+
+func TestConfigureRuntimeServerChatExecutorMarksUnifiedActorCoreReady(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":             true,
+			"execution_core": runtimechat.SessionActorRuntimeCore(),
+		})
+	}))
+	defer server.Close()
+
+	session := &ChatSession{}
+	configured, err := configureRuntimeServerChatExecutor(context.Background(), &chatCommandOptions{
+		RuntimeMode:      aicliRuntimeModeServer,
+		RuntimeServerURL: server.URL,
+	}, session)
+	if err != nil {
+		t.Fatalf("configure runtime-server executor: %v", err)
+	}
+	if !configured || !session.ActorFirstReady || session.LocalRuntimeHost != nil {
+		t.Fatalf("expected remote unified actor core, configured=%v ready=%v host=%#v", configured, session.ActorFirstReady, session.LocalRuntimeHost)
+	}
+	executor, err := ensureChatExecutor(session)
+	if err != nil {
+		t.Fatalf("ensure runtime-server executor: %v", err)
+	}
+	descriptor := executor.RuntimeDescriptor()
+	if !descriptor.unifiedActorRuntime() || descriptor.Transport != aicliRuntimeTransportHTTP {
+		t.Fatalf("unexpected runtime descriptor: %#v", descriptor)
+	}
+}
+
 func TestAICLIRuntimeServerCurrentEventSeqUsesLatestSeq(t *testing.T) {
 	var gotLimit string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -337,6 +388,51 @@ func TestAICLIRuntimeServerChatExecutorUsesRuntimeCommandsAndRefreshesHistory(t 
 	}
 	if len(session.Messages) != 2 || session.Messages[1].Content != "server output" {
 		t.Fatalf("session history was not refreshed from server write: %#v", session.Messages)
+	}
+}
+
+func TestAICLIRuntimeServerChatExecutorRejectsLegacyAgentChatFallback(t *testing.T) {
+	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), runtimechat.DefaultSessionManagerConfig())
+	defer manager.Stop()
+	runtimeSession, err := manager.Create(context.Background(), "cli-user")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	agentChatCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/events":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"events": []interface{}{}, "count": 0, "latest_seq": 0})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/commands":
+			http.NotFound(w, r)
+		case r.URL.Path == "/api/agent/chat":
+			agentChatCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"result": map[string]interface{}{"output": "legacy output"}})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		SessionManager: manager,
+		RuntimeSession: runtimeSession,
+		SessionUserID:  "cli-user",
+		HTTPClient:     server.Client(),
+	}
+	output, err := newAICLIRuntimeServerChatExecutor(server.URL).Execute(context.Background(), session, "hello")
+	if err == nil {
+		t.Fatal("expected missing SessionActor command API to fail")
+	}
+	if output != "" {
+		t.Fatalf("expected no legacy output, got %q", output)
+	}
+	if agentChatCalled {
+		t.Fatal("runtime-server executor must not fall back to /api/agent/chat")
+	}
+	if !strings.Contains(err.Error(), "统一 SessionActor Runtime 命令接口") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -740,7 +836,10 @@ func TestPrepareChatPersistence_ServerModeUsesRuntimeServerSessionManager(t *tes
 	handler.SetSessionManager(remoteManager)
 	router := mux.NewRouter()
 	router.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":             true,
+			"execution_core": runtimechat.SessionActorRuntimeCore(),
+		})
 	})
 	handler.RegisterRoutes(router)
 	server := httptest.NewServer(router)

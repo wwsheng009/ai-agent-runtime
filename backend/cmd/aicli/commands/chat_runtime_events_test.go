@@ -2937,7 +2937,7 @@ func TestActorExecutor_AskUserQuestionAnswerSurvivesReducerAndStreamFallback(t *
 	}
 }
 
-func TestActorExecutor_ApprovalThroughCLIBridgeExecutesToolOnceAndResumes(t *testing.T) {
+func TestReliabilityEvalActorExecutorApprovalBridgeDelaysAndExecutesToolOnce(t *testing.T) {
 	manager, userID, dir, err := newChatSessionManager(t.TempDir())
 	if err != nil {
 		t.Fatalf("newChatSessionManager: %v", err)
@@ -3012,6 +3012,12 @@ func TestActorExecutor_ApprovalThroughCLIBridgeExecutesToolOnceAndResumes(t *tes
 		rendered      bytes.Buffer
 		approvalCalls atomic.Int32
 	)
+	approvalStarted := make(chan struct{}, 1)
+	approvalRelease := make(chan struct{})
+	var releaseApproval sync.Once
+	t.Cleanup(func() {
+		releaseApproval.Do(func() { close(approvalRelease) })
+	})
 	bridge := newChatRuntimeEventBridge(session)
 	bridge.writeLine = func(line string) {
 		rendered.WriteString(line)
@@ -3020,17 +3026,63 @@ func TestActorExecutor_ApprovalThroughCLIBridgeExecutesToolOnceAndResumes(t *tes
 	bridge.askApproval = func(approval *runtimechat.ApprovalRequest, contextLines []string) (bool, error) {
 		approvalCalls.Add(1)
 		if approval == nil || approval.ToolName != "team_echo" {
-			t.Fatalf("unexpected approval request: %+v", approval)
+			t.Errorf("unexpected approval request: %+v", approval)
 		}
-		if approval.Reason != "manual approval" {
-			t.Fatalf("unexpected approval reason: %q", approval.Reason)
+		if approval != nil && approval.Reason != "manual approval" {
+			t.Errorf("unexpected approval reason: %q", approval.Reason)
 		}
-		require.Contains(t, contextLines, "team=team-approval task=task-approval teammate=mate-approval permission_mode=default")
+		if !strings.Contains(strings.Join(contextLines, "\n"), "team=team-approval task=task-approval teammate=mate-approval permission_mode=default") {
+			t.Errorf("approval context did not preserve team run metadata: %+v", contextLines)
+		}
+		select {
+		case approvalStarted <- struct{}{}:
+		default:
+		}
+		<-approvalRelease
 		return true, nil
 	}
 	session.RuntimeEventBridge = bridge
 
-	output, err := session.ChatExecutor.Execute(context.Background(), session, "trigger approval")
+	type executeResult struct {
+		output string
+		err    error
+	}
+	executeDone := make(chan executeResult, 1)
+	executeCtx, cancelExecute := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelExecute()
+	go func() {
+		output, executeErr := session.ChatExecutor.Execute(executeCtx, session, "trigger approval")
+		executeDone <- executeResult{output: output, err: executeErr}
+	}()
+
+	select {
+	case <-approvalStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for delayed approval request")
+	}
+	if approvalCalls.Load() != 1 {
+		t.Fatalf("expected one pending approval prompt, got %d", approvalCalls.Load())
+	}
+	if mcpManager.callCount != 0 {
+		t.Fatalf("tool executed before approval was resolved: %d calls", mcpManager.callCount)
+	}
+	select {
+	case early := <-executeDone:
+		t.Fatalf("execution completed before approval release: output=%q err=%v", early.output, early.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if mcpManager.callCount != 0 {
+		t.Fatalf("tool executed while approval remained delayed: %d calls", mcpManager.callCount)
+	}
+	releaseApproval.Do(func() { close(approvalRelease) })
+
+	var completed executeResult
+	select {
+	case completed = <-executeDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for execution after approval release")
+	}
+	output, err := completed.output, completed.err
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}

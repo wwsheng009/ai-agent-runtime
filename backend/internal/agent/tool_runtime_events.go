@@ -79,6 +79,7 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 			payload[toolresult.MetadataKey] = kind
 		}
 		copyToolShellMetadata(payload, result.Envelope.Metadata)
+		copyToolReliabilityMetadata(payload, result.Envelope.Metadata)
 	}
 	mergeToolEventPayload(payload, extra)
 	return payload
@@ -295,6 +296,28 @@ func copyToolShellMetadata(payload map[string]interface{}, metadata map[string]i
 		value, _ := metadata[key].(string)
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
 			payload[key] = trimmed
+		}
+	}
+}
+
+func copyToolReliabilityMetadata(payload map[string]interface{}, metadata map[string]interface{}) {
+	if payload == nil || len(metadata) == 0 {
+		return
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		copyToolReliabilityMetadata(payload, nested)
+	}
+	for _, key := range []string{
+		"error_code",
+		"error_message",
+		"timeout_requested_ms",
+		"timeout_effective_ms",
+		"timeout_source",
+		"timeout_ms",
+		"cancel_source",
+	} {
+		if value, ok := metadata[key]; ok && value != nil {
+			payload[key] = value
 		}
 	}
 }

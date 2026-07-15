@@ -18,14 +18,22 @@ func chatToolAvailable(session *ChatSession, toolName string) bool {
 	if !chatToolAllowedByPolicy(session, toolName) {
 		return false
 	}
-	switch session.ChatExecutor.(type) {
-	case *aicliActorChatExecutor:
-		return chatActorToolAvailable(session, toolName)
-	case *aicliRuntimeServerChatExecutor:
-		return chatRuntimeServerToolAvailable(session, toolName)
-	default:
-		return chatSharedToolAvailable(session, toolName)
+	if session.ChatExecutor == nil {
+		return false
 	}
+	return session.ChatExecutor.ToolAvailable(session, toolName)
+}
+
+func (e *aicliSharedChatExecutor) ToolAvailable(session *ChatSession, toolName string) bool {
+	return chatSharedToolAvailable(session, toolName)
+}
+
+func (e *aicliActorChatExecutor) ToolAvailable(session *ChatSession, toolName string) bool {
+	return chatActorToolAvailable(session, toolName)
+}
+
+func (e *aicliRuntimeServerChatExecutor) ToolAvailable(session *ChatSession, toolName string) bool {
+	return chatRuntimeServerToolAvailable(e, session, toolName)
 }
 
 func chatSharedToolAvailable(session *ChatSession, toolName string) bool {
@@ -59,16 +67,12 @@ func chatActorToolAvailable(session *ChatSession, toolName string) bool {
 	return err == nil
 }
 
-func chatRuntimeServerToolAvailable(session *ChatSession, toolName string) bool {
+func chatRuntimeServerToolAvailable(executor *aicliRuntimeServerChatExecutor, session *ChatSession, toolName string) bool {
 	toolName = strings.TrimSpace(toolName)
-	if session == nil || toolName == "" || session.DisableTools {
+	if executor == nil || session == nil || toolName == "" || session.DisableTools {
 		return false
 	}
 	if !chatToolAllowedByPolicy(session, toolName) {
-		return false
-	}
-	executor, ok := session.ChatExecutor.(*aicliRuntimeServerChatExecutor)
-	if !ok || executor == nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

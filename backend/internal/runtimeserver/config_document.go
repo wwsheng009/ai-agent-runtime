@@ -429,6 +429,9 @@ func decodeConfigDocumentAgentConfig(content []byte, format string) (*agentconfi
 			return nil, fmt.Errorf("validate runtime config yaml: %w", err)
 		}
 	}
+	if err := agentconfig.ValidateConfig(cfg); err != nil {
+		return nil, fmt.Errorf("validate runtime config: %w", err)
+	}
 	return cfg, nil
 }
 

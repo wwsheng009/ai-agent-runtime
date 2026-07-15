@@ -261,10 +261,38 @@ func TestBrokerExecuteWaitTeamReturnsDurableSummary(t *testing.T) {
 	assert.True(t, result.SummaryReady)
 	assert.Equal(t, "all docs reviewed", result.Summary)
 	assert.Equal(t, "lead", result.SummarySource)
+	assert.Equal(t, "all docs reviewed", result.SummaryPayload["summary"])
 	assert.Equal(t, summarySeq, result.SummaryEventSeq)
 	assert.Equal(t, summarySeq, result.LatestSeq)
 	require.NotNil(t, meta)
 	assert.Contains(t, meta[cacheSafeSummaryMetadataKey], "Summary is ready")
+}
+
+func TestBrokerExecuteWaitTeamReturnsPartialStructuredSummary(t *testing.T) {
+	store := newTeamStore(t)
+	ctx := context.Background()
+	teamID, err := store.CreateTeam(ctx, team.Team{ID: "team-partial", Status: team.TeamStatusPartiallyCompleted})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, team.Task{ID: "task-ok", TeamID: teamID, Status: team.TaskStatusDone, Summary: "usable result"})
+	require.NoError(t, err)
+	_, err = store.CreateTask(ctx, team.Task{ID: "task-failed", TeamID: teamID, Status: team.TaskStatusFailed, Summary: "retry evidence"})
+	require.NoError(t, err)
+
+	broker := &Broker{TeamStore: store}
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+		"team_id": teamID, "timeout_ms": 1000,
+	})
+	require.NoError(t, err)
+	result := raw.(WaitTeamResult)
+	assert.True(t, result.Terminal)
+	assert.Equal(t, string(team.TeamStatusPartiallyCompleted), result.Status)
+	assert.True(t, result.SummaryReady)
+	assert.Contains(t, result.Summary, "usable result")
+	require.NotNil(t, result.SummaryPayload)
+	assert.Equal(t, "partially_completed", result.SummaryPayload["status"])
+	assert.Len(t, result.SummaryPayload["successful_tasks"], 1)
+	assert.Len(t, result.SummaryPayload["failed_tasks"], 1)
+	assert.Len(t, result.SummaryPayload["retryable_tasks"], 1)
 }
 
 func TestBrokerExecuteWaitTeamWaitsForSummaryWhenPlannerConfigured(t *testing.T) {
@@ -1285,7 +1313,7 @@ func TestBrokerReportTaskOutcomePersistsTaskEventBeforeTeamCompleted(t *testing.
 
 	events, err := store.ListTeamEvents(ctx, team.TeamEventFilter{TeamID: teamID})
 	require.NoError(t, err)
-	require.Len(t, events, 2)
+	require.Len(t, events, 3)
 	assert.Equal(t, "task.completed", events[0].Type)
 	assert.Equal(t, "task-order", events[0].Payload["task_id"])
 	assert.Equal(t, "mate-1", events[0].Payload["assignee"])
@@ -1298,6 +1326,9 @@ func TestBrokerReportTaskOutcomePersistsTaskEventBeforeTeamCompleted(t *testing.
 	assert.Equal(t, "difficulty_level", events[0].Payload["route_source"])
 	assert.Equal(t, "team.completed", events[1].Type)
 	assert.Equal(t, "done", events[1].Payload["status"])
+	assert.Equal(t, "team.summary", events[2].Type)
+	assert.Equal(t, "done", events[2].Payload["status"])
+	assert.Equal(t, true, events[2].Payload["used_fallback"])
 }
 
 func TestBrokerExecuteSpawnTeamRehomesTerminalTeamAndTaskIDConflicts(t *testing.T) {

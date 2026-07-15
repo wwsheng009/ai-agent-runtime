@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -52,6 +53,8 @@ type Manager struct {
 	hotReload       *skill.HotReload
 	embeddingRouter *skill.SemanticEmbeddingRouter
 	teamStore       team.Store
+	stopOnce        sync.Once
+	stopErr         error
 }
 
 // NewManager 创建 Runtime Bootstrap Manager
@@ -81,6 +84,12 @@ func NewManager(opts *Options) (*Manager, error) {
 		loader:          skill.NewLoader(opts.MCPManager),
 		sessionManager:  sessionManager,
 	}
+	cleanupOnError := true
+	defer func() {
+		if cleanupOnError {
+			_ = manager.Stop()
+		}
+	}()
 
 	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{
 		Path: strings.TrimSpace(config.Team.StorePath),
@@ -122,6 +131,7 @@ func NewManager(opts *Options) (*Manager, error) {
 		if err != nil {
 			return nil, err
 		}
+		manager.hotReload = hotReload
 		manager.attachHotReloadEmbeddingSync(hotReload)
 		if config.HotReload.DebounceDelay > 0 {
 			hotReload.SetDebounceTime(config.HotReload.DebounceDelay)
@@ -132,9 +142,9 @@ func NewManager(opts *Options) (*Manager, error) {
 		if err := hotReload.Reload(); err != nil {
 			return nil, err
 		}
-		manager.hotReload = hotReload
 	}
 
+	cleanupOnError = false
 	return manager, nil
 }
 
@@ -510,21 +520,25 @@ func (m *Manager) ApplyToSkillsHandler(target SkillsHandlerTarget) {
 
 // Stop 停止由 bootstrap manager 管理的后台组件
 func (m *Manager) Stop() error {
-	var stopErr error
-	if m.hotReload != nil {
-		if err := m.hotReload.Stop(); err != nil {
-			stopErr = err
+	if m == nil {
+		return nil
+	}
+	m.stopOnce.Do(func() {
+		if m.hotReload != nil {
+			if err := m.hotReload.Stop(); err != nil {
+				m.stopErr = err
+			}
 		}
-	}
-	if m.sessionManager != nil {
-		m.sessionManager.Stop()
-	}
-	if m.teamStore != nil {
-		if err := m.teamStore.Close(); err != nil && stopErr == nil {
-			stopErr = err
+		if m.sessionManager != nil {
+			m.sessionManager.Stop()
 		}
-	}
-	return stopErr
+		if m.teamStore != nil {
+			if err := m.teamStore.Close(); err != nil && m.stopErr == nil {
+				m.stopErr = err
+			}
+		}
+	})
+	return m.stopErr
 }
 
 // Config 返回当前配置

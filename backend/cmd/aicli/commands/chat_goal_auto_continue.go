@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -78,7 +79,7 @@ func goalAutoContinuationAttemptContext(ctx context.Context, session *ChatSessio
 		base = ctx
 	}
 	if session != nil && session.RequestTimeout > 0 {
-		return context.WithTimeout(base, session.RequestTimeout)
+		return runtimeexecution.WithTimeoutSource(base, session.RequestTimeout, runtimeexecution.TimeoutSourceChatTurnDeadline)
 	}
 	return base, func() {}
 }

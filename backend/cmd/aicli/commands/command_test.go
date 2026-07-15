@@ -787,6 +787,7 @@ func TestBuildChatResponsePayload(t *testing.T) {
 		Provider:                   config.Provider{Protocol: "codex"},
 		Model:                      "gpt-5.2-code",
 		Stream:                     false,
+		ChatExecutor:               newAICLIActorChatExecutor(),
 		ReasoningEffort:            "medium",
 		Logger:                     logger,
 		SessionDir:                 sessionDir,
@@ -805,6 +806,11 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	}
 	if payload.Model != "gpt-5.2-code" || payload.ReasoningEffort != "medium" {
 		t.Fatalf("unexpected payload model fields: %+v", payload)
+	}
+	if payload.RuntimeCore != runtimechat.RuntimeCoreSessionActor ||
+		payload.RuntimeContractVersion != runtimechat.RuntimeCoreContractVersion ||
+		payload.RuntimeTransport != aicliRuntimeTransportInProcess {
+		t.Fatalf("unexpected runtime contract fields: %+v", payload)
 	}
 	if payload.SessionID != "session-123" || payload.SessionState != "active" {
 		t.Fatalf("unexpected payload session fields: %+v", payload)
@@ -841,6 +847,32 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	}
 	if !strings.HasSuffix(payload.LastLocalShellArtifactPath, "001_git.txt") {
 		t.Fatalf("unexpected payload last local shell artifact: %+v", payload)
+	}
+}
+
+func TestBuildChatResponsePayloadReportsRuntimeTransport(t *testing.T) {
+	tests := []struct {
+		name      string
+		executor  aicliChatExecutor
+		transport string
+	}{
+		{name: "local", executor: newAICLIActorChatExecutor(), transport: aicliRuntimeTransportInProcess},
+		{name: "runtime-server", executor: newAICLIRuntimeServerChatExecutor("http://runtime.example"), transport: aicliRuntimeTransportHTTP},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := buildChatResponsePayload(&ChatSession{ChatExecutor: test.executor}, "ok")
+			if payload.RuntimeCore != runtimechat.RuntimeCoreSessionActor {
+				t.Fatalf("expected runtime core %q, got %+v", runtimechat.RuntimeCoreSessionActor, payload)
+			}
+			if payload.RuntimeContractVersion != runtimechat.RuntimeCoreContractVersion {
+				t.Fatalf("expected runtime contract version %d, got %+v", runtimechat.RuntimeCoreContractVersion, payload)
+			}
+			if payload.RuntimeTransport != test.transport {
+				t.Fatalf("expected runtime transport %q, got %+v", test.transport, payload)
+			}
+		})
 	}
 }
 

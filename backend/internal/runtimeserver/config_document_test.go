@@ -147,6 +147,26 @@ func TestLocalConfigDocumentServicePreviewDoesNotPersist(t *testing.T) {
 	require.Empty(t, matches)
 }
 
+func TestLocalConfigDocumentServiceRejectsInvalidTeamRouting(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	initial := "aicli:\n  teams:\n    routing:\n      enabled: false\n"
+	require.NoError(t, os.WriteFile(configPath, []byte(initial), 0o644))
+	service := NewLocalConfigDocumentService(configPath)
+	require.NotNil(t, service)
+
+	invalid := "aicli:\n  teams:\n    routing:\n      enabled: true\n      default_difficulty: impossible\n"
+	_, err := service.PreviewDocument(skillsapi.ConfigDocumentSaveRequest{
+		Raw:  &invalid,
+		Mode: "raw",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "aicli.teams.routing.default_difficulty")
+
+	raw, readErr := os.ReadFile(configPath)
+	require.NoError(t, readErr)
+	require.Equal(t, initial, string(raw))
+}
+
 func TestLocalConfigDocumentServiceIgnoresSnapshotFile(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(configPath, []byte("server:\n  host: base.local\n"), 0o644))

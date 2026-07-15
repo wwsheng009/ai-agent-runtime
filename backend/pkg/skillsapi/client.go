@@ -423,6 +423,7 @@ type AgentChatResult struct {
 	Metadata        map[string]interface{}   `json:"metadata,omitempty"`
 	ToolCalls       []map[string]interface{} `json:"tool_calls,omitempty"`
 	Reasoning       string                   `json:"reasoning,omitempty"`
+	ResultContract  map[string]interface{}   `json:"result_contract,omitempty"`
 
 	decodedOrchestrationOnce sync.Once             `json:"-"`
 	decodedOrchestration     *OrchestrationSummary `json:"-"`
@@ -677,6 +678,7 @@ type SubagentResultSummary struct {
 	Patches          []SubagentPatchSummary `json:"patches,omitempty"`
 	Findings         []string               `json:"findings,omitempty"`
 	Error            string                 `json:"error,omitempty"`
+	ResultContract   map[string]interface{} `json:"result_contract,omitempty"`
 }
 
 type PlanningSummary struct {

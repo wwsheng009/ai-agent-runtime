@@ -9,8 +9,10 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextreconcile"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -39,6 +41,32 @@ var autoCompactSharedChatHistory = maybeAutoCompactSharedChatHistory
 
 type aicliChatExecutor interface {
 	Execute(ctx context.Context, session *ChatSession, prompt string) (string, error)
+	RuntimeDescriptor() aicliRuntimeExecutorDescriptor
+	ToolAvailable(session *ChatSession, toolName string) bool
+}
+
+type aicliRuntimeExecutorDescriptor struct {
+	Core          runtimechat.RuntimeCoreDescriptor `json:"core"`
+	Transport     string                            `json:"transport"`
+	RuntimeEvents bool                              `json:"runtime_events"`
+}
+
+const (
+	aicliRuntimeTransportInProcess = "in_process"
+	aicliRuntimeTransportHTTP      = "http"
+	aicliRuntimeTransportLegacy    = "legacy_in_process"
+)
+
+func newAICLIActorRuntimeDescriptor(transport string) aicliRuntimeExecutorDescriptor {
+	return aicliRuntimeExecutorDescriptor{
+		Core:          runtimechat.SessionActorRuntimeCore(),
+		Transport:     strings.TrimSpace(transport),
+		RuntimeEvents: true,
+	}
+}
+
+func (d aicliRuntimeExecutorDescriptor) unifiedActorRuntime() bool {
+	return runtimechat.IsSessionActorRuntimeCore(d.Core) && strings.TrimSpace(d.Transport) != "" && d.RuntimeEvents
 }
 
 type aicliGoalContinuationExecutor interface {
@@ -72,18 +100,37 @@ func newAICLISharedChatExecutor() aicliChatExecutor {
 	return &aicliSharedChatExecutor{}
 }
 
-func ensureChatExecutor(session *ChatSession) aicliChatExecutor {
+func ensureChatExecutor(session *ChatSession) (aicliChatExecutor, error) {
 	if session == nil {
-		return newAICLISharedChatExecutor()
+		return nil, fmt.Errorf("chat session is nil")
 	}
 	if session.ChatExecutor == nil {
-		if session.ActorFirstReady {
+		if session.ActorFirstReady && session.LocalRuntimeHost != nil {
 			session.ChatExecutor = newAICLIActorChatExecutor()
 		} else {
-			session.ChatExecutor = newAICLISharedChatExecutor()
+			return nil, fmt.Errorf("chat executor is not initialized")
 		}
 	}
-	return session.ChatExecutor
+	descriptor := session.ChatExecutor.RuntimeDescriptor()
+	if !descriptor.unifiedActorRuntime() {
+		return nil, fmt.Errorf("chat executor does not implement the unified SessionActor runtime contract: core=%s contract=%d transport=%s",
+			descriptor.Core.Name, descriptor.Core.ContractVersion, descriptor.Transport)
+	}
+	return session.ChatExecutor, nil
+}
+
+func (e *aicliSharedChatExecutor) RuntimeDescriptor() aicliRuntimeExecutorDescriptor {
+	return aicliRuntimeExecutorDescriptor{
+		Core: runtimechat.RuntimeCoreDescriptor{
+			Name:            "legacy_tool_loop",
+			ContractVersion: 0,
+			Lifecycle:       "turn_scoped",
+			StateAuthority:  "chat_history",
+			EventProtocol:   "tool_loop_events",
+		},
+		Transport:     aicliRuntimeTransportLegacy,
+		RuntimeEvents: false,
+	}
 }
 
 func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSession, prompt string) (string, error) {
@@ -378,6 +425,15 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 		applyChatCompactContextUsage(session, result, status, false)
 		return history, report, err
 	}
+	if session.RuntimeSession != nil {
+		replacement, reconciliation := contextreconcile.Reconcile(
+			result.ReplacementHistory,
+			runtimechat.CanonicalContextSnapshot(session.RuntimeSession),
+		)
+		result.ReplacementHistory = replacement
+		result.Reconciliation = &reconciliation
+		result.TokenAfter = llmRuntime.CountMessagesTokens(replacement)
+	}
 
 	if err := replaceRuntimeMessages(session, result.ReplacementHistory); err != nil {
 		return history, report, fmt.Errorf("共享 chat 自动压缩结果更新失败: %w", err)
@@ -601,6 +657,11 @@ func sharedChatAutoCompactChatEvent(report *sharedChatAutoCompactReport, err err
 	metadata["token_after"] = report.Result.TokenAfter
 	metadata["compacted_messages"] = report.Result.CompactedMessages
 	metadata["history_messages"] = len(report.Result.ReplacementHistory)
+	if reconciliation := report.Result.Reconciliation; reconciliation != nil {
+		metadata["context_drift_count"] = reconciliation.DriftCount
+		metadata["context_correction_made"] = reconciliation.CorrectionMade
+		metadata["context_corrections"] = reconciliation.Corrections
+	}
 	return runtimechatcore.ChatEvent{
 		Type:     runtimechatcore.EventWarning,
 		Content:  formatSharedChatAutoCompactApplied(report.Result),

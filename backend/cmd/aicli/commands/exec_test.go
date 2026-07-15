@@ -125,6 +125,36 @@ func TestParseExecOptions_ToolFlagsConflict(t *testing.T) {
 	}
 }
 
+func TestPrepareExecPersistence_EphemeralUsesInMemorySessionManager(t *testing.T) {
+	state, err := prepareExecPersistence(&config.Config{}, &chatCommandOptions{}, &ExecOptions{
+		Ephemeral:   true,
+		SessionUser: "ephemeral-user",
+	}, nil)
+	if err != nil {
+		t.Fatalf("prepareExecPersistence: %v", err)
+	}
+	if state == nil || state.runtimeSessionManager == nil {
+		t.Fatal("expected ephemeral in-memory session manager")
+	}
+	defer state.runtimeSessionManager.Stop()
+	if !state.ephemeral {
+		t.Fatal("expected persistence state to be marked ephemeral")
+	}
+	if state.resolvedSessionDir != "" {
+		t.Fatalf("expected no session directory, got %q", state.resolvedSessionDir)
+	}
+	if state.sessionUserID != "ephemeral-user" {
+		t.Fatalf("expected explicit ephemeral user, got %q", state.sessionUserID)
+	}
+	created, err := state.runtimeSessionManager.Create(context.Background(), state.sessionUserID)
+	if err != nil {
+		t.Fatalf("create ephemeral session: %v", err)
+	}
+	if created == nil || strings.TrimSpace(created.ID) == "" {
+		t.Fatalf("expected created ephemeral session, got %#v", created)
+	}
+}
+
 func TestApplyConfigOverrides(t *testing.T) {
 	cfg := &config.Config{
 		Providers: config.ProvidersConfig{

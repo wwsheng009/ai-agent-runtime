@@ -72,6 +72,7 @@ func TestMetadataStoreDecodesJSONMap(t *testing.T) {
 	t.Parallel()
 
 	session := runtimechat.NewSession("tester")
+	session.ID = "session-1"
 	session.Metadata.Context[MetadataKey] = map[string]interface{}{
 		"goal_id":    "goal-1",
 		"session_id": "session-1",
@@ -90,6 +91,25 @@ func TestMetadataStoreDecodesJSONMap(t *testing.T) {
 	}
 	if got.Status != StatusPaused || got.Objective != "review implementation" {
 		t.Fatalf("unexpected decoded goal: %+v", got)
+	}
+}
+
+func TestMetadataStoreRejectsCrossSessionGoalOwnership(t *testing.T) {
+	t.Parallel()
+
+	session := runtimechat.NewSession("tester")
+	session.ID = "session-a"
+	foreign, err := NewSessionGoal("session-b", "foreign goal", time.Now())
+	if err != nil {
+		t.Fatalf("NewSessionGoal failed: %v", err)
+	}
+	if err := NewMetadataStore().Put(session, foreign); err == nil {
+		t.Fatal("expected Put to reject a goal owned by another session")
+	}
+
+	session.Metadata.Context[MetadataKey] = foreign
+	if _, ok, err := NewMetadataStore().Get(session); err == nil || !ok {
+		t.Fatalf("expected Get to report mismatched ownership, ok=%v err=%v", ok, err)
 	}
 }
 

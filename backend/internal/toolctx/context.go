@@ -11,6 +11,7 @@ type contextKey string
 
 const (
 	sessionIDKey               contextKey = "tool_session_id"
+	goalIDKey                  contextKey = "tool_goal_id"
 	generatedImageOutputDirKey contextKey = "generated_image_output_dir"
 )
 
@@ -28,6 +29,25 @@ func SessionID(ctx context.Context) string {
 		return ""
 	}
 	if value, ok := ctx.Value(sessionIDKey).(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+// WithGoalID stores the goal that owns state created by a tool invocation.
+func WithGoalID(ctx context.Context, goalID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, goalIDKey, strings.TrimSpace(goalID))
+}
+
+// GoalID retrieves the active goal ID from ctx.
+func GoalID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value, ok := ctx.Value(goalIDKey).(string); ok {
 		return strings.TrimSpace(value)
 	}
 	return ""

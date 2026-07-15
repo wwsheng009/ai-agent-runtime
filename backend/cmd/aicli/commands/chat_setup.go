@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -26,7 +27,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		return nil, nil, fmt.Errorf("chat setup requires options and runtime state")
 	}
 
-	cancelCtx, cancelFunc := context.WithCancel(context.Background())
+	cancelCtx, cancelFunc := newChatCancelContext()
 	registry := functions.NewFunctionRegistry()
 	functionCatalog := newAICLIFunctionCatalog(runtimeState.provider.GetProtocol(), registry)
 
@@ -95,6 +96,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		RuntimeSession:     nil,
 		SessionUserID:      persistenceState.sessionUserID,
 		SessionDir:         persistenceState.resolvedSessionDir,
+		Ephemeral:          persistenceState.ephemeral,
 		SessionFilter:      opts.SessionFilter,
 		NoInteractive:      opts.NoInteractive,
 		JSONOutput:         opts.OutputFormat == "json",
@@ -110,7 +112,6 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		InputReader:        chatOptionInputReader(opts),
 		PermissionMode:     opts.PermissionMode,
 		ApprovalReuseMode:  opts.ApprovalReuseMode,
-		ChatExecutor:       newAICLISharedChatExecutor(),
 		Surface:            surface,
 		runtimeHTTPCapture: &chatRuntimeHTTPCapture{},
 		ImagePaths:         opts.ImagePaths,
@@ -150,6 +151,11 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	}
 
 	return session, cleanup, nil
+}
+
+func newChatCancelContext() (context.Context, context.CancelFunc) {
+	base := runtimeexecution.WithCancelSource(context.Background(), "user_interrupt")
+	return context.WithCancel(base)
 }
 
 func shouldInitializeChatKeyHandler(opts *chatCommandOptions) bool {
@@ -219,14 +225,7 @@ func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPer
 	}
 
 	if err := createNewRuntimeConversation(session, opts.SessionTitleFlag); err != nil {
-		if opts.SessionFeaturesRequested {
-			return fmt.Errorf("创建会话失败: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "Warning: 创建持久化会话失败，当前会话不会保存: %v\n", err)
-		session.SessionManager = nil
-		session.RuntimeSession = nil
-		session.SessionUserID = ""
-		session.SessionDir = ""
+		return fmt.Errorf("创建会话失败: %w", err)
 	}
 	ensureChatSystemPromptMessage(session)
 	warnIfChatSessionSyncFails(session, "init session prompt", syncRuntimeSessionFromChat(session))
@@ -291,19 +290,24 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 		}
 	}
 
-	if !session.DisableTools {
-		localRuntimeHost, hostErr := initializeLocalChatRuntimeHost(cfg, session, toolManager)
-		if hostErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: 初始化 actor runtime host 失败，继续使用 legacy chat executor: %v\n", hostErr)
-			logpkg.Warnf("AICLI actor runtime host init failed: %v", hostErr)
-		} else if localRuntimeHost != nil {
-			session.LocalRuntimeHost = localRuntimeHost
-			session.ActorFirstReady = true
-			restoreLocalRuntimeHostTeamState(session)
-			session.ChatExecutor = newAICLIActorChatExecutor()
-			startChatActorWarmup(session)
+	localRuntimeHost, hostErr := initializeLocalChatRuntimeHost(cfg, session, toolManager)
+	if hostErr != nil {
+		if skillsBinding != nil {
+			_ = skillsBinding.Close()
 		}
+		return nil, nil, fmt.Errorf("初始化 actor runtime host 失败: %w", hostErr)
 	}
+	if localRuntimeHost == nil {
+		if skillsBinding != nil {
+			_ = skillsBinding.Close()
+		}
+		return nil, nil, fmt.Errorf("初始化 actor runtime host 失败: runtime host is nil")
+	}
+	session.LocalRuntimeHost = localRuntimeHost
+	session.ActorFirstReady = true
+	restoreLocalRuntimeHostTeamState(session)
+	session.ChatExecutor = newAICLIActorChatExecutor()
+	startChatActorWarmup(session)
 
 	refreshBuiltinFunctionSchemas(session)
 	if session.FunctionCatalog != nil {

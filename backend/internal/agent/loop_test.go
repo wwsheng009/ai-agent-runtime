@@ -3281,6 +3281,52 @@ func TestReActLoop_GetAvailableTools_PreservesMetaToolkitAndBrokerSourceMetadata
 	assert.Equal(t, toolresult.SourceBroker, brokerSource)
 }
 
+func TestReActLoop_EmptyAllowlistHidesAndRejectsEveryToolSurface(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Model:        "test-provider",
+			MaxSteps:     2,
+			SystemPrompt: "No tools are available.",
+		},
+		mcpManager: &MockPolicyMCPManager{},
+		toolBroker: &toolbroker.Broker{},
+	}
+	agent.SetSubagentScheduler(NewSubagentScheduler(agent, SubagentSchedulerConfig{MaxConcurrent: 1, MaxDepth: 1}))
+	agent.SetToolExecutionPolicy(NewToolExecutionPolicy([]string{}, false))
+
+	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{EnableToolCalls: true})
+	tools, err := loop.getAvailableTools(context.Background(), "try every tool", nil)
+	require.NoError(t, err)
+	require.Empty(t, tools, "empty allowlist must hide MCP, broker, and subagent tools")
+
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "Attempting a forged tool call.",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{{
+					Name: "write_file",
+					Args: map[string]interface{}{"path": "forbidden.txt"},
+				}},
+			},
+			{Content: "The tool call was rejected.", Model: "test-model"},
+		},
+	}
+	llmRuntime := llm.NewLLMRuntime(nil)
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	loop = NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        2,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+	result, err := loop.Run(context.Background(), "forge a tool call")
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Observations)
+	assert.Contains(t, result.Observations[0].Error, "tool not allowed by execution policy")
+}
+
 func TestReActLoop_Run_AttachesToolSurfaceMetadataToLLMRequest(t *testing.T) {
 	agent := &Agent{
 		config: &Config{
@@ -4420,6 +4466,32 @@ func (s *testHistorySession) ReplaceHistory(messages []types.Message) {
 		return
 	}
 	s.messages = cloneTestMessages(messages)
+}
+
+type testContextHistorySession struct {
+	*testHistorySession
+	context map[string]interface{}
+}
+
+func (s *testContextHistorySession) GetContext(key string) (interface{}, bool) {
+	value, ok := s.context[key]
+	return value, ok
+}
+
+func TestSessionGoalIDReadsOnlyCurrentSessionMetadata(t *testing.T) {
+	session := &testContextHistorySession{
+		testHistorySession: newTestHistorySession("session-a"),
+		context: map[string]interface{}{
+			"aicli.goal": map[string]interface{}{"goal_id": "goal-a"},
+		},
+	}
+	if got := sessionGoalID(session); got != "goal-a" {
+		t.Fatalf("expected goal-a, got %q", got)
+	}
+	delete(session.context, "aicli.goal")
+	if got := sessionGoalID(session); got != "" {
+		t.Fatalf("expected empty goal after metadata removal, got %q", got)
+	}
 }
 
 func cloneTestMessages(messages []types.Message) []types.Message {

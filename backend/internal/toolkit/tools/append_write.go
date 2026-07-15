@@ -43,6 +43,11 @@ func NewAppendWriteTool() *AppendWriteTool {
 				"type":        "boolean",
 				"description": "若为 true 且本块末尾没有换行，则自动补一个换行。默认 false。",
 			},
+			"expected_offset": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "可选并发与重试保护：追加前预期文件字节数。相同 offset 和内容的重复请求会作为幂等回放，不会重复追加。",
+			},
 		},
 		"required": []string{"file_path", "content"},
 	}
@@ -62,6 +67,7 @@ func NewAppendWriteTool() *AppendWriteTool {
 func (w *AppendWriteTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
+		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassIdempotencyKeyRequired,
 	}
 }
 
@@ -107,6 +113,10 @@ func (w *AppendWriteTool) Execute(ctx context.Context, params map[string]interfa
 
 	truncateFirst, _ := params["truncate_first"].(bool)
 	ensureTrailingNewline, _ := params["ensure_trailing_newline"].(bool)
+	expectedOffset, hasExpectedOffset, validExpectedOffset := optionalNonNegativeInt64(params, "expected_offset")
+	if !validExpectedOffset {
+		return writePreconditionFailure("expected_offset 必须是非负整数", "", fmt.Sprint(params["expected_offset"])), nil
+	}
 	if ensureTrailingNewline && !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
@@ -129,9 +139,33 @@ func (w *AppendWriteTool) Execute(ctx context.Context, params map[string]interfa
 		}, nil
 	}
 
-	oldContent := ""
-	if data, readErr := os.ReadFile(absPath); readErr == nil {
-		oldContent = string(data)
+	oldContentBytes, readErr := os.ReadFile(absPath)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("读取写入前文件失败: %w", readErr),
+		}, nil
+	}
+	oldContent := string(oldContentBytes)
+	actualOffset := int64(len(oldContentBytes))
+	chunkBytes := []byte(content)
+	if truncateFirst && readErr == nil && oldContent == content {
+		return idempotentAppendWriteResult(absPath, actualOffset, content, expectedOffset, hasExpectedOffset, true), nil
+	}
+	if !truncateFirst && hasExpectedOffset {
+		replayedSize := expectedOffset + int64(len(chunkBytes))
+		if actualOffset == replayedSize && expectedOffset <= actualOffset &&
+			string(oldContentBytes[int(expectedOffset):]) == content {
+			return idempotentAppendWriteResult(absPath, actualOffset, content, expectedOffset, true, false), nil
+		}
+		if actualOffset != expectedOffset {
+			return writePreconditionFailure(
+				fmt.Sprintf("追加写入前置条件不匹配: 当前 offset 为 %d", actualOffset),
+				fmt.Sprint(actualOffset),
+				fmt.Sprint(expectedOffset),
+			), nil
+		}
 	}
 
 	var transferResult *filetransport.WriteResult
@@ -180,6 +214,9 @@ func (w *AppendWriteTool) Execute(ctx context.Context, params map[string]interfa
 			"patch":             buildUnifiedPatch(transferResult.Path, oldContent, newContent),
 			"mutated_paths":     []string{transferResult.Path},
 			"transport_backend": "local_filetransport",
+			"expected_offset":   expectedOffsetMetadata(expectedOffset, hasExpectedOffset),
+			"chunk_sha256":      writeContentRevision(true, content),
+			"retry_class":       runtimetypes.ToolRetryClassIdempotencyKeyRequired,
 		},
 	}, nil
 }

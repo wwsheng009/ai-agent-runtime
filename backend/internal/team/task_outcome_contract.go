@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentresult"
 )
 
 // TaskOutcomeStatus captures the structured terminal state emitted by a teammate.
@@ -19,10 +21,11 @@ const (
 
 // TaskOutcomeContract defines the structured teammate completion contract.
 type TaskOutcomeContract struct {
-	Status    TaskOutcomeStatus `json:"task_status"`
-	Summary   string            `json:"summary,omitempty"`
-	Blocker   string            `json:"blocker,omitempty"`
-	HandoffTo string            `json:"handoff_to,omitempty"`
+	Status         TaskOutcomeStatus   `json:"task_status"`
+	Summary        string              `json:"summary,omitempty"`
+	Blocker        string              `json:"blocker,omitempty"`
+	HandoffTo      string              `json:"handoff_to,omitempty"`
+	ResultContract *agentresult.Result `json:"result_contract,omitempty"`
 }
 
 // TaskOutcomeContractSchema returns the reusable JSON schema for teammate outcomes.
@@ -52,6 +55,10 @@ func TaskOutcomeContractSchemaFor(allowed ...TaskOutcomeStatus) map[string]inter
 			"handoff_to": map[string]interface{}{
 				"type":        "string",
 				"description": "Required only when task_status=handoff.",
+			},
+			"result_contract": map[string]interface{}{
+				"type":        "object",
+				"description": "Optional shared agent result contract; the runtime fills it when omitted.",
 			},
 		},
 		"required":             []string{"task_status", "summary"},
@@ -129,6 +136,12 @@ func ValidateTaskOutcomeContract(outcome TaskOutcomeContract) (TaskOutcomeContra
 			return TaskOutcomeContract{}, fmt.Errorf("handoff_to is required when task_status=handoff")
 		}
 	}
+	if outcome.ResultContract != nil {
+		if err := outcome.ResultContract.Validate(); err != nil {
+			return TaskOutcomeContract{}, fmt.Errorf("invalid result_contract: %w", err)
+		}
+	}
+	outcome.ResultContract = ensureTaskOutcomeResultContract(outcome)
 	return outcome, nil
 }
 
@@ -141,6 +154,7 @@ func NormalizeTaskOutcomeContract(defaultStatus TaskOutcomeStatus, outcome TaskO
 
 	if outcome.Status == "" && outcome.Blocker == "" && outcome.HandoffTo == "" {
 		outcome.Status = TaskOutcomeStatus(strings.ToLower(strings.TrimSpace(string(defaultStatus))))
+		outcome.ResultContract = ensureTaskOutcomeResultContract(outcome)
 		return outcome, false, nil
 	}
 

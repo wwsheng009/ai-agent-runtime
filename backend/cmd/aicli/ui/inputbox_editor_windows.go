@@ -32,6 +32,7 @@ var (
 	procIsClipboardFormatAvailable = windows.NewLazySystemDLL("user32.dll").NewProc("IsClipboardFormatAvailable")
 	procGlobalLock                 = windows.NewLazySystemDLL("kernel32.dll").NewProc("GlobalLock")
 	procGlobalUnlock               = windows.NewLazySystemDLL("kernel32.dll").NewProc("GlobalUnlock")
+	procLstrlenW                   = windows.NewLazySystemDLL("kernel32.dll").NewProc("lstrlenW")
 )
 
 type consoleInputRecord struct {
@@ -339,5 +340,24 @@ func platformClipboardText() (string, error) {
 	}
 	defer procGlobalUnlock.Call(handle)
 
-	return windows.UTF16PtrToString((*uint16)(unsafe.Pointer(ptr))), nil
+	length, _, _ := procLstrlenW.Call(ptr)
+	if length == 0 {
+		return "", nil
+	}
+	text := make([]uint16, int(length))
+	byteLength := uintptr(len(text)) * unsafe.Sizeof(text[0])
+	var bytesRead uintptr
+	if err := windows.ReadProcessMemory(
+		windows.CurrentProcess(),
+		ptr,
+		(*byte)(unsafe.Pointer(&text[0])),
+		byteLength,
+		&bytesRead,
+	); err != nil {
+		return "", err
+	}
+	if bytesRead != byteLength {
+		return "", errors.New("read clipboard data returned partial UTF-16 text")
+	}
+	return windows.UTF16ToString(text), nil
 }

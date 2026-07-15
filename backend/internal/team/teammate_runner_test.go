@@ -2,11 +2,14 @@ package team
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 )
 
 type staticSessionClient struct {
@@ -30,6 +33,31 @@ func (c *delayedSessionClient) SubmitPrompt(ctx context.Context, sessionID, prom
 		time.Sleep(c.delay)
 	}
 	return c.result, nil
+}
+
+type contextDeadlineSessionClient struct {
+	requestedTimeout time.Duration
+}
+
+func (c *contextDeadlineSessionClient) SubmitPrompt(ctx context.Context, sessionID, prompt string, runMeta *RunMeta) (*SessionResult, error) {
+	budget := runtimeexecution.ResolveTimeout(ctx, c.requestedTimeout)
+	<-ctx.Done()
+	timeoutErr := runtimeexecution.TimeoutError(budget)
+	metadata := budget.Metadata()
+	errorCode := runtimeerrors.ErrToolTimeout
+	if structured, ok := timeoutErr.(*runtimeerrors.RuntimeError); ok {
+		metadata = structured.GetContext()
+		errorCode = structured.Code
+	}
+	metadata["error_code"] = string(errorCode)
+	metadata["retryable"] = true
+	return &SessionResult{
+		Success:       false,
+		Error:         timeoutErr.Error(),
+		TraceID:       "trace-member-context-deadline",
+		ErrorType:     "timeout",
+		ErrorMetadata: metadata,
+	}, timeoutErr
 }
 
 type updatingSessionClient struct {
@@ -421,6 +449,46 @@ func TestTeammateRunnerPreservesStructuredSessionErrorMetadata(t *testing.T) {
 	assert.Contains(t, result.Summary, "prompt preflight")
 }
 
+func TestReliabilityEvalTeammateTimeoutPreservesStructuredFailure(t *testing.T) {
+	const requestedTimeout = 5 * time.Second
+	ctx, cancel := runtimeexecution.WithTimeoutSource(
+		context.Background(),
+		250*time.Millisecond,
+		runtimeexecution.TimeoutSourceAgentRunDeadline,
+	)
+	defer cancel()
+
+	runner := &TeammateRunner{
+		Sessions: &contextDeadlineSessionClient{requestedTimeout: requestedTimeout},
+	}
+
+	startedAt := time.Now()
+	result, err := runner.StartTask(ctx, Team{ID: "team-timeout"}, Teammate{
+		ID: "mate-timeout", SessionID: "session-timeout",
+	}, Task{ID: "task-timeout", TeamID: "team-timeout", Title: "slow member task"})
+	elapsed := time.Since(startedAt)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrToolTimeout))
+	require.NotNil(t, result)
+	assert.False(t, result.Success)
+	assert.Equal(t, "trace-member-context-deadline", result.TraceID)
+	assert.Equal(t, "timeout", result.ErrorType)
+	assert.Equal(t, "TOOL_TIMEOUT", result.ErrorMetadata["error_code"])
+	effectiveMs, ok := result.ErrorMetadata["timeout_effective_ms"].(int64)
+	require.True(t, ok, "timeout_effective_ms should be int64: %#v", result.ErrorMetadata)
+	assert.Positive(t, effectiveMs)
+	assert.Less(t, effectiveMs, requestedTimeout.Milliseconds())
+	timeoutSource, ok := result.ErrorMetadata["timeout_source"].(string)
+	require.True(t, ok, "timeout_source should be string: %#v", result.ErrorMetadata)
+	assert.Equal(t, runtimeexecution.TimeoutSourceAgentRunDeadline, runtimeexecution.TimeoutSource(timeoutSource))
+	assert.Equal(t, true, result.ErrorMetadata["retryable"])
+	assert.Contains(t, result.Summary, "execution timed out")
+	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond)
+	assert.Less(t, elapsed, 2*time.Second)
+}
+
 func TestTeammateRunnerMarksMailboxDigestReadWhenInjected(t *testing.T) {
 	store, err := NewSQLiteStore(&StoreConfig{
 		DSN: "file:teammate-runner-mailbox-test?mode=memory&cache=shared",
@@ -758,6 +826,90 @@ func TestTeammateRunnerRecoversStructuredOutcomeFromStoreAfterSessionCancel(t *t
 	assert.True(t, result.OutcomeApplied)
 	assert.Equal(t, TaskOutcomeDone, result.Outcome)
 	assert.Equal(t, "completed before cancellation", result.Summary)
+	assert.Empty(t, result.ProtocolError)
+}
+
+func TestReliabilityEvalTeammateRuntimeRestartRecoversStructuredOutcome(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "team-runtime-restart.db")
+	storeBeforeRestart, err := NewSQLiteStore(&StoreConfig{Path: databasePath})
+	require.NoError(t, err)
+	storeBeforeRestartClosed := false
+	t.Cleanup(func() {
+		if !storeBeforeRestartClosed {
+			_ = storeBeforeRestart.Close()
+		}
+	})
+
+	teamID, err := storeBeforeRestart.CreateTeam(ctx, Team{})
+	require.NoError(t, err)
+	taskID, err := storeBeforeRestart.CreateTask(ctx, Task{
+		ID:      "task-runtime-restart",
+		TeamID:  teamID,
+		Title:   "durable task",
+		Status:  TaskStatusRunning,
+		Summary: "",
+	})
+	require.NoError(t, err)
+	_, err = storeBeforeRestart.UpsertTeammate(ctx, Teammate{
+		ID:        "mate-runtime-restart",
+		TeamID:    teamID,
+		SessionID: "session-runtime-restart",
+		State:     TeammateStateBusy,
+	})
+	require.NoError(t, err)
+
+	_, err = ApplyTerminalTaskOutcome(ctx, TaskOutcomeApplyServices{
+		Store: storeBeforeRestart,
+	}, TerminalTaskOutcomeRequest{
+		Task: Task{
+			ID:       taskID,
+			TeamID:   teamID,
+			Title:    "durable task",
+			Status:   TaskStatusRunning,
+			Assignee: stringPtr("mate-runtime-restart"),
+		},
+		TeammateID:    "mate-runtime-restart",
+		DefaultStatus: TaskOutcomeDone,
+		Outcome: TaskOutcomeContract{
+			Status:  TaskOutcomeDone,
+			Summary: "completed before runtime restart",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, storeBeforeRestart.Close())
+	storeBeforeRestartClosed = true
+
+	storeAfterRestart, err := NewSQLiteStore(&StoreConfig{Path: databasePath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storeAfterRestart.Close() })
+
+	persistedTask, err := storeAfterRestart.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.NotNil(t, persistedTask)
+	require.Equal(t, TaskStatusDone, persistedTask.Status)
+	require.Equal(t, "completed before runtime restart", persistedTask.Summary)
+
+	runner := &TeammateRunner{
+		Sessions: &staticSessionClient{err: context.Canceled},
+		Context:  NewContextBuilder(storeAfterRestart),
+	}
+	result, err := runner.StartTask(ctx, Team{ID: teamID}, Teammate{
+		ID:        "mate-runtime-restart",
+		SessionID: "session-runtime-restart",
+	}, Task{
+		ID:     taskID,
+		TeamID: teamID,
+		Title:  "durable task",
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotNil(t, result)
+	assert.True(t, result.Success)
+	assert.True(t, result.Structured)
+	assert.True(t, result.OutcomeApplied)
+	assert.Equal(t, TaskOutcomeDone, result.Outcome)
+	assert.Equal(t, "completed before runtime restart", result.Summary)
 	assert.Empty(t, result.ProtocolError)
 }
 

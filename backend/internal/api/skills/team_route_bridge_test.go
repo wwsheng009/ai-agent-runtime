@@ -159,6 +159,34 @@ func TestAPITeamTaskRouteResolverResolvesWriterRoute(t *testing.T) {
 	assert.False(t, resolution.Route.ResolvedAt.IsZero())
 }
 
+func TestAPITeamTaskRouteResolverPrefersIndependentTeamRouting(t *testing.T) {
+	enabled := true
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAICLIConfig(&agentconfig.Config{AICLI: &agentconfig.AICLIConfig{
+		Subagents: &agentconfig.AICLISubagentsConfig{Routing: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled: &enabled,
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				"hard": {Provider: "child-provider", Model: "child-model"},
+			},
+		}},
+		Teams: &agentconfig.AICLITeamsConfig{Routing: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled: &enabled,
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				"hard": {Provider: "team-provider", Model: "team-model"},
+			},
+		}},
+	}})
+
+	resolution, err := (&apiTeamTaskRouteResolver{handler: handler}).ResolveTaskRoute(context.Background(), team.TaskRouteRequest{
+		Task: team.Task{ID: "task-hard", Difficulty: "hard"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resolution)
+	require.NotNil(t, resolution.Route)
+	assert.Equal(t, "team-provider", resolution.Route.Provider)
+	assert.Equal(t, "team-model", resolution.Route.Model)
+}
+
 func TestAPITeamTaskRouteResolverDisabledAndStrictModes(t *testing.T) {
 	t.Run("disabled", func(t *testing.T) {
 		handler := NewHandler(skill.NewRegistry(nil), nil, nil)

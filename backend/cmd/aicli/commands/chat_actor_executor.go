@@ -24,6 +24,10 @@ func newAICLIActorChatExecutor() aicliChatExecutor {
 	return &aicliActorChatExecutor{}
 }
 
+func (e *aicliActorChatExecutor) RuntimeDescriptor() aicliRuntimeExecutorDescriptor {
+	return newAICLIActorRuntimeDescriptor(aicliRuntimeTransportInProcess)
+}
+
 func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSession, prompt string) (string, error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
@@ -316,6 +320,12 @@ func currentRunMetaForSession(session *ChatSession) *team.RunMeta {
 func shouldPropagateTeamRunMeta(session *ChatSession, binding *chatTeamBinding) bool {
 	if binding == nil || strings.TrimSpace(binding.TeamID) == "" {
 		return false
+	}
+	if session != nil && session.LocalRuntimeHost != nil && session.LocalRuntimeHost.TeamStore != nil {
+		record, err := session.LocalRuntimeHost.TeamStore.GetTeam(context.Background(), strings.TrimSpace(binding.TeamID))
+		if err == nil && record != nil && team.IsTerminalTeamStatus(record.Status) {
+			return false
+		}
 	}
 	if interactiveTeamPendingByTeamID(session, binding.TeamID) {
 		return true

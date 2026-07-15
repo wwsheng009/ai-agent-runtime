@@ -455,6 +455,15 @@ func TestHandleCommand_DebugPrintsSessionArtifactsAndRuntimeState(t *testing.T) 
 						},
 					},
 				},
+				Teams: &config.AICLITeamsConfig{
+					Routing: &config.AICLISubagentRoutingConfig{
+						Enabled:           &enabled,
+						DefaultDifficulty: "expert",
+						Levels: map[string]config.AICLISubagentRouteProfile{
+							"expert": {Provider: "team", Model: "team-model"},
+						},
+					},
+				},
 			},
 		},
 		runtimeHTTPCapture:         runtimeCapture,
@@ -569,7 +578,7 @@ func TestHandleCommand_DebugModeTogglesStatusAndPersists(t *testing.T) {
 	}
 }
 
-func TestHandleCommand_DebugRoutingPrintsSubagentRoutingSummary(t *testing.T) {
+func TestHandleCommand_DebugRoutingPrintsSubagentAndTeamRoutingSummary(t *testing.T) {
 	enabled := true
 	session := &ChatSession{
 		Config: &config.Config{
@@ -593,6 +602,15 @@ func TestHandleCommand_DebugRoutingPrintsSubagentRoutingSummary(t *testing.T) {
 						},
 					},
 				},
+				Teams: &config.AICLITeamsConfig{
+					Routing: &config.AICLISubagentRoutingConfig{
+						Enabled:           &enabled,
+						DefaultDifficulty: "expert",
+						Levels: map[string]config.AICLISubagentRouteProfile{
+							"expert": {Provider: "team", Model: "team-model"},
+						},
+					},
+				},
 			},
 		},
 	}
@@ -610,6 +628,9 @@ func TestHandleCommand_DebugRoutingPrintsSubagentRoutingSummary(t *testing.T) {
 		fmt.Sprintf("%-18s %s", "Reasoning Override:", "on"),
 		fmt.Sprintf("%-18s %s", "Expert Limit:", "2"),
 		"hard: provider=strong model=strong-model reasoning_effort=high max_tokens=12000",
+		"Team Routing:",
+		fmt.Sprintf("%-18s %s", "Routing Source:", "team_independent"),
+		"expert: provider=team model=team-model",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected routing output to contain %q, got:\n%s", expected, output)
@@ -668,6 +689,8 @@ func TestHandleCommand_AgentsRoutingTestPrintsDryRunDecision(t *testing.T) {
 	})
 	for _, expected := range []string{
 		"Subagent Route Dry Run",
+		"Scope:           subagent",
+		"Routing source:  subagent",
 		"Routing enabled: true",
 		"Role:          writer",
 		"Difficulty:    hard",
@@ -716,6 +739,9 @@ func TestHandleCommand_AgentsRoutingTestSpawnTeamWritePathPreview(t *testing.T) 
 		}
 	})
 	for _, expected := range []string{
+		"Team Route Dry Run",
+		"Scope:           team",
+		"Routing source:  subagent_inherited",
 		"Workflow:      spawn_team",
 		"Team task:     team=team-1 teammate=member-1 task=task-1",
 		"Role:          writer",

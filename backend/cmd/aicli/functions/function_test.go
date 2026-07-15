@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
@@ -572,7 +573,11 @@ func TestBuildShellExecutionMetadata_RecordsSelectedShell(t *testing.T) {
 			Path: `C:\Program Files\PowerShell\7\pwsh.exe`,
 		},
 		workdir,
-		2*time.Minute,
+		runtimeexecution.TimeoutBudget{
+			Requested: 2 * time.Minute,
+			Effective: 2 * time.Minute,
+			Source:    runtimeexecution.TimeoutSourceToolArgument,
+		},
 	)
 
 	if got := metadata["shell_type"]; got != "pwsh" {
@@ -592,6 +597,12 @@ func TestBuildShellExecutionMetadata_RecordsSelectedShell(t *testing.T) {
 	}
 	if got := metadata["timeout_ms"]; got != int64(120000) {
 		t.Fatalf("expected timeout_ms to be preserved, got %#v", got)
+	}
+	if got := metadata["timeout_requested_ms"]; got != int64(120000) {
+		t.Fatalf("expected requested timeout to be preserved, got %#v", got)
+	}
+	if got := metadata["timeout_source"]; got != string(runtimeexecution.TimeoutSourceToolArgument) {
+		t.Fatalf("expected timeout source to be preserved, got %#v", got)
 	}
 }
 

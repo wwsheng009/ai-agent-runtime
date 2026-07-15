@@ -50,6 +50,7 @@ func (f *fakeAgentSessionController) Spawn(ctx context.Context, parentSessionID 
 		Model:               args.Model,
 		ReasoningEffort:     args.ReasoningEffort,
 		PermissionMode:      args.PermissionMode,
+		ReadOnly:            args.ReadOnly,
 		Difficulty:          args.Difficulty,
 		DifficultyRationale: args.DifficultyRationale,
 		RouteSource:         args.RouteSource,
@@ -197,7 +198,7 @@ func TestBroker_Definitions_ExposeSpawnAgentRouteSchema(t *testing.T) {
 	if !ok {
 		t.Fatalf("spawn_agent properties missing: %#v", spawnDef)
 	}
-	for _, key := range []string{"difficulty", "difficulty_rationale", "provider", "model", "reasoning_effort", "thinking_effort", "permission_mode"} {
+	for _, key := range []string{"difficulty", "difficulty_rationale", "provider", "model", "reasoning_effort", "thinking_effort", "permission_mode", "read_only"} {
 		if _, ok := properties[key]; !ok {
 			t.Fatalf("expected spawn_agent property %q in %#v", key, properties)
 		}
@@ -375,6 +376,26 @@ func TestBroker_Execute_SpawnAgentInheritsPermissionModeFromRunMeta(t *testing.T
 	}
 }
 
+func TestBroker_Execute_ReadOnlySpawnDefaultsToPlanMode(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{PermissionMode: "bypass_permissions"})
+
+	_, meta, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":   "review only",
+		"read_only": true,
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if !controller.lastSpawn.ReadOnly || controller.lastSpawn.PermissionMode != "plan" {
+		t.Fatalf("expected read-only plan child, got %#v", controller.lastSpawn)
+	}
+	if meta["read_only"] != true || meta["permission_mode"] != "plan" {
+		t.Fatalf("unexpected read-only metadata: %#v", meta)
+	}
+}
+
 func TestBroker_Execute_SpawnAgentRejectsInvalidPermissionMode(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
@@ -432,6 +453,7 @@ func TestApplySpawnAgentRouteContextPersistsRouteMetadata(t *testing.T) {
 		Difficulty:          " hard ",
 		DifficultyRationale: "provider-sensitive",
 		PermissionMode:      "bypass_permissions",
+		ReadOnly:            true,
 		RouteSource:         "difficulty_level",
 		RouteWarnings:       []string{" inherited ", " ", "capability_unknown"},
 		FallbackUsed:        true,
@@ -443,6 +465,7 @@ func TestApplySpawnAgentRouteContextPersistsRouteMetadata(t *testing.T) {
 		ctx[AgentSessionContextModel] != "gpt-5.4" ||
 		ctx[AgentSessionContextReasoningEffort] != "high" ||
 		ctx[AgentSessionContextPermissionMode] != "bypass_permissions" ||
+		ctx[AgentSessionContextReadOnly] != true ||
 		ctx[AgentSessionContextDifficulty] != "hard" ||
 		ctx[AgentSessionContextDifficultyRationale] != "provider-sensitive" ||
 		ctx[AgentSessionContextRouteSource] != "difficulty_level" ||
@@ -461,6 +484,7 @@ func TestApplySpawnAgentRouteContextPersistsRouteMetadata(t *testing.T) {
 		status.Model != "gpt-5.4" ||
 		status.ReasoningEffort != "high" ||
 		status.PermissionMode != "bypass_permissions" ||
+		!status.ReadOnly ||
 		status.Difficulty != "hard" ||
 		!status.FallbackUsed ||
 		status.FallbackReason != "provider_unresolved_parent" ||
@@ -473,6 +497,7 @@ func TestApplySpawnAgentRouteContextPersistsRouteMetadata(t *testing.T) {
 		payload["route_model"] != "gpt-5.4" ||
 		payload["route_reasoning_effort"] != "high" ||
 		payload["permission_mode"] != "bypass_permissions" ||
+		payload["read_only"] != true ||
 		payload["difficulty"] != "hard" ||
 		payload["fallback_used"] != true ||
 		payload["fallback_reason"] != "provider_unresolved_parent" {

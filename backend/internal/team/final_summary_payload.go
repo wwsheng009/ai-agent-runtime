@@ -42,6 +42,9 @@ func BuildFinalSummaryEventPayload(summaryResult *FinalSummaryResult) map[string
 	payload := map[string]interface{}{
 		"summary": strings.TrimSpace(summaryResult.Summary),
 	}
+	if contract := ensureFinalSummaryContract(summaryResult); contract != nil {
+		payload["result_contract"] = contract
+	}
 	AppendFinalSummaryMetadata(payload, summaryResult)
 	return payload
 }
@@ -53,6 +56,9 @@ func BuildFinalSummaryFailurePayload(summaryResult *FinalSummaryResult, err erro
 		return nil
 	}
 	payload := map[string]interface{}{}
+	if contract := ensureFinalSummaryContract(summaryResult); contract != nil {
+		payload["result_contract"] = contract
+	}
 	AppendFinalSummaryMetadata(payload, summaryResult)
 	if err != nil {
 		if text := strings.TrimSpace(err.Error()); text != "" {

@@ -1442,6 +1442,8 @@ func (b *chatRuntimeEventBridge) renderAsyncTeamSummaryFallback(event runtimeeve
 	teamID := strings.TrimSpace(b.session.ActiveTeam.TeamID)
 	if !b.hasRenderedTimelineKey("team.completed:"+teamID+":done") &&
 		!b.hasRenderedTimelineKey("team.completed:"+teamID+":failed") &&
+		!b.hasRenderedTimelineKey("team.completed:"+teamID+":partially_completed") &&
+		!b.hasRenderedTimelineKey("team.completed:"+teamID+":canceled") &&
 		!b.isTerminalTeam(teamID) {
 		return chatRuntimeTimelineEvent{}
 	}
@@ -1859,7 +1861,7 @@ func (b *chatRuntimeEventBridge) isTerminalTeam(teamID string) bool {
 	if err != nil || record == nil {
 		return false
 	}
-	return record.Status == team.TeamStatusDone || record.Status == team.TeamStatusFailed
+	return team.IsTerminalTeamStatus(record.Status)
 }
 
 func (b *chatRuntimeEventBridge) asyncTeamAssistantResponse(event runtimeevents.Event) string {
@@ -1875,6 +1877,8 @@ func (b *chatRuntimeEventBridge) asyncTeamAssistantResponse(event runtimeevents.
 	teamID := strings.TrimSpace(b.session.ActiveTeam.TeamID)
 	if !b.hasRenderedTimelineKey("team.completed:"+teamID+":done") &&
 		!b.hasRenderedTimelineKey("team.completed:"+teamID+":failed") &&
+		!b.hasRenderedTimelineKey("team.completed:"+teamID+":partially_completed") &&
+		!b.hasRenderedTimelineKey("team.completed:"+teamID+":canceled") &&
 		!b.isTerminalTeam(teamID) {
 		return ""
 	}

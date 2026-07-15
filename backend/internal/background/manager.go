@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
@@ -24,6 +26,8 @@ type Config struct {
 	StoreDSN          string
 	LogDir            string
 	MaxConcurrentJobs int
+	Retention         time.Duration
+	CleanupInterval   time.Duration
 	EventHandler      func(JobEvent)
 }
 
@@ -36,6 +40,8 @@ func DefaultConfig() Config {
 		StoreDSN:          "",
 		LogDir:            "",
 		MaxConcurrentJobs: 2,
+		Retention:         30 * 24 * time.Hour,
+		CleanupInterval:   time.Hour,
 		EventHandler:      nil,
 	}
 }
@@ -77,6 +83,12 @@ func NewManager(cfg Config) *Manager {
 	if cfg.MaxConcurrentJobs <= 0 {
 		cfg.MaxConcurrentJobs = DefaultConfig().MaxConcurrentJobs
 	}
+	if cfg.Retention == 0 {
+		cfg.Retention = DefaultConfig().Retention
+	}
+	if cfg.CleanupInterval == 0 {
+		cfg.CleanupInterval = DefaultConfig().CleanupInterval
+	}
 	manager := &Manager{
 		config:            cfg,
 		jobs:              make(map[string]*managedJob),
@@ -106,6 +118,7 @@ func NewManager(cfg Config) *Manager {
 	}
 	go manager.dispatchLoop()
 	manager.recoverPersistedJobs(context.Background())
+	_, _ = manager.Cleanup(context.Background())
 	manager.notifyDispatcher()
 	return manager
 }
@@ -124,9 +137,15 @@ func (m *Manager) Close() error {
 			if job == nil {
 				continue
 			}
-			job.mu.RLock()
+			job.mu.Lock()
 			cancel := job.cancel
-			job.mu.RUnlock()
+			if !isTerminalStatus(job.info.Status) {
+				if job.info.Metadata == nil {
+					job.info.Metadata = map[string]interface{}{}
+				}
+				job.info.Metadata["cancel_source"] = "runtime_shutdown"
+			}
+			job.mu.Unlock()
 			if cancel != nil {
 				cancels = append(cancels, cancel)
 			}
@@ -182,7 +201,7 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 			Status:        StatusPending,
 			CreatedAt:     now,
 			LogPath:       logPath,
-			Metadata:      metadataFromRequest(req),
+			Metadata:      metadataFromRequest(req, m.config.DefaultTimeout),
 		},
 		request: sanitizeBackgroundTaskArgs(req),
 		output:  newOutputBuffer(m.config.MaxOutputBytes),
@@ -226,31 +245,34 @@ func (m *Manager) ReadOutput(ctx context.Context, req TaskOutputArgs) (TaskOutpu
 			return TaskOutputResult{}, err
 		}
 		if job != nil {
-			return m.readOutputFromLog(job.LogPath, jobID, job.Status, job.ExitCode, req.Offset, req.Limit)
+			result, readErr := m.readOutputFromLog(job.LogPath, jobID, job.Status, job.ExitCode, req.Offset, req.Limit)
+			return decorateTaskOutputResult(result, *job), readErr
 		}
 	}
 	if managed == nil {
-		return TaskOutputResult{}, fmt.Errorf("job not found: %s", jobID)
+		return TaskOutputResult{}, jobNotFoundError(jobID)
 	}
 
 	managed.mu.RLock()
-	status := managed.info.Status
-	exitCode := managed.info.ExitCode
+	info := managed.info
+	status := info.Status
+	exitCode := info.ExitCode
 	logPath := managed.logPath
 	managed.mu.RUnlock()
 
 	if logPath != "" {
-		return m.readOutputFromLog(logPath, jobID, status, exitCode, req.Offset, req.Limit)
+		result, readErr := m.readOutputFromLog(logPath, jobID, status, exitCode, req.Offset, req.Limit)
+		return decorateTaskOutputResult(result, info), readErr
 	}
 
 	output, nextOffset := managed.output.Read(req.Offset, req.Limit)
-	return TaskOutputResult{
+	return decorateTaskOutputResult(TaskOutputResult{
 		JobID:      jobID,
 		Status:     string(status),
 		Output:     output,
 		NextOffset: nextOffset,
 		ExitCode:   exitCode,
-	}, nil
+	}, info), nil
 }
 
 // GetJob returns a background job by id.
@@ -266,9 +288,15 @@ func (m *Manager) GetJob(ctx context.Context, jobID string) (*Job, error) {
 		return managed.snapshot(), nil
 	}
 	if m.store != nil {
-		return m.store.GetJob(ctx, jobID)
+		job, err := m.store.GetJob(ctx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if job != nil {
+			return job, nil
+		}
 	}
-	return nil, fmt.Errorf("job not found: %s", jobID)
+	return nil, jobNotFoundError(jobID)
 }
 
 // CancelJob requests cancellation of a background job.
@@ -285,7 +313,7 @@ func (m *Manager) CancelJob(ctx context.Context, jobID string) (*Job, error) {
 	}
 	managed := m.getJob(jobID)
 	if managed == nil {
-		return nil, fmt.Errorf("job not found: %s", jobID)
+		return nil, jobNotFoundError(jobID)
 	}
 
 	managed.mu.RLock()
@@ -297,6 +325,10 @@ func (m *Manager) CancelJob(ctx context.Context, jobID string) (*Job, error) {
 	managed.mu.Lock()
 	cancel := managed.cancel
 	pid, hasPID := detachedPID(managed.info.Metadata)
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	managed.info.Metadata["cancel_source"] = "user_request"
 	managed.mu.Unlock()
 
 	if hasPID {
@@ -377,6 +409,71 @@ func (m *Manager) ListEvents(ctx context.Context, jobID string, afterSeq int64, 
 	return reader.ListEvents(ctx, jobID, afterSeq, limit)
 }
 
+// Cleanup applies the configured retention policy to terminal job records and
+// their manager-owned artifacts. A negative retention disables cleanup.
+func (m *Manager) Cleanup(ctx context.Context) (int, error) {
+	if m == nil || m.store == nil || m.config.Retention <= 0 {
+		return 0, nil
+	}
+	pruner, ok := m.store.(JobPruner)
+	if !ok {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	expired, err := pruner.PruneJobs(ctx, time.Now().UTC().Add(-m.config.Retention))
+	if err != nil {
+		return 0, err
+	}
+	for _, job := range expired {
+		m.mu.Lock()
+		delete(m.jobs, job.ID)
+		m.mu.Unlock()
+		m.removeOwnedJobArtifacts(job)
+	}
+	return len(expired), nil
+}
+
+func (m *Manager) removeOwnedJobArtifacts(job Job) {
+	root := strings.TrimSpace(m.logDir)
+	if root == "" {
+		return
+	}
+	paths := []string{job.LogPath}
+	for _, key := range []string{backgroundMetaStatusPath, backgroundMetaRunnerPath} {
+		if path, ok := stringMetadataValue(job.Metadata, key); ok {
+			paths = append(paths, path)
+		}
+	}
+	for _, path := range paths {
+		if pathWithinRoot(path, root) {
+			_ = os.Remove(path)
+		}
+	}
+}
+
+func pathWithinRoot(path, root string) bool {
+	path = strings.TrimSpace(path)
+	root = strings.TrimSpace(root)
+	if path == "" || root == "" {
+		return false
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(absRoot, absPath)
+	if err != nil || relative == "." {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
 func (m *Manager) runJob(managed *managedJob) {
 	if managed == nil {
 		return
@@ -408,7 +505,7 @@ func (m *Manager) runJob(managed *managedJob) {
 	}
 	if timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
+		ctx, cancel = runtimeexecution.WithTimeoutSource(ctx, timeout, backgroundTimeoutSource(req))
 		defer cancel()
 	}
 	if err := ctx.Err(); err != nil {
@@ -491,7 +588,7 @@ func (m *Manager) runJob(managed *managedJob) {
 		return
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		m.failJob(managed, fmt.Errorf("command timed out"))
+		m.markTimedOut(managed, "command timed out")
 		return
 	}
 	if waitErr != nil {
@@ -563,6 +660,70 @@ func (m *Manager) failJobWithCode(managed *managedJob, exitCode int, message str
 	m.notifyDispatcher()
 }
 
+func (m *Manager) markTimedOut(managed *managedJob, message string) {
+	if managed == nil {
+		return
+	}
+	finishedAt := time.Now().UTC()
+	managed.mu.Lock()
+	if isTerminalStatus(managed.info.Status) {
+		managed.scheduled = false
+		managed.mu.Unlock()
+		m.notifyDispatcher()
+		return
+	}
+	managed.scheduled = false
+	managed.info.Status = StatusTimedOut
+	managed.info.Message = strings.TrimSpace(message)
+	managed.info.ExitCode = nil
+	managed.info.FinishedAt = &finishedAt
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	managed.info.Metadata["error_code"] = string(runtimeerrors.ErrToolTimeout)
+	managed.mu.Unlock()
+	if m.store != nil {
+		_ = m.store.UpdateJob(context.Background(), managed.info)
+	}
+	m.appendJobEvent(context.Background(), managed.info.ID, "timed_out", map[string]interface{}{
+		"status":     managed.info.Status,
+		"error_code": string(runtimeerrors.ErrToolTimeout),
+		"error":      managed.info.Message,
+	})
+	m.notifyDispatcher()
+}
+
+func (m *Manager) orphanJob(managed *managedJob, message string) {
+	if managed == nil {
+		return
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "background job outcome could not be determined"
+	}
+	finishedAt := time.Now().UTC()
+	managed.mu.Lock()
+	if isTerminalStatus(managed.info.Status) {
+		managed.scheduled = false
+		managed.mu.Unlock()
+		return
+	}
+	managed.scheduled = false
+	managed.info.Status = StatusOrphaned
+	managed.info.Message = message
+	managed.info.ExitCode = nil
+	managed.info.FinishedAt = &finishedAt
+	managed.mu.Unlock()
+	if m.store != nil {
+		_ = m.store.UpdateJob(context.Background(), managed.info)
+	}
+	m.appendJobEvent(context.Background(), managed.info.ID, "orphaned", map[string]interface{}{
+		"status": StatusOrphaned,
+		"reason": message,
+	})
+	m.notifyDispatcher()
+}
+
 func (m *Manager) markCancelled(ctx context.Context, managed *managedJob, reason string) {
 	if managed == nil {
 		return
@@ -593,13 +754,22 @@ func (m *Manager) markCancelled(ctx context.Context, managed *managedJob, reason
 	managed.info.Message = reason
 	managed.info.ExitCode = &exitCode
 	managed.info.FinishedAt = &finishedAt
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	managed.info.Metadata["error_code"] = string(runtimeerrors.ErrAgentRunCanceled)
+	if _, exists := managed.info.Metadata["cancel_source"]; !exists {
+		managed.info.Metadata["cancel_source"] = "parent_context"
+	}
 	managed.mu.Unlock()
 	if m.store != nil {
 		_ = m.store.UpdateJob(context.Background(), managed.info)
 	}
 	m.appendJobEvent(context.Background(), managed.info.ID, "cancelled", map[string]interface{}{
-		"status": managed.info.Status,
-		"reason": reason,
+		"status":        managed.info.Status,
+		"reason":        reason,
+		"error_code":    string(runtimeerrors.ErrAgentRunCanceled),
+		"cancel_source": managed.info.Metadata["cancel_source"],
 	})
 	m.notifyDispatcher()
 }
@@ -647,12 +817,21 @@ func (m *Manager) getJob(jobID string) *managedJob {
 
 func (m *Manager) dispatchLoop() {
 	defer close(m.doneCh)
+	var cleanupTicker *time.Ticker
+	var cleanup <-chan time.Time
+	if m.config.Retention > 0 && m.config.CleanupInterval > 0 {
+		cleanupTicker = time.NewTicker(m.config.CleanupInterval)
+		cleanup = cleanupTicker.C
+		defer cleanupTicker.Stop()
+	}
 	for {
 		select {
 		case <-m.stopCh:
 			return
 		case <-m.dispatchCh:
 			m.dispatchPending()
+		case <-cleanup:
+			_, _ = m.Cleanup(context.Background())
 		}
 	}
 }
@@ -825,32 +1004,41 @@ func (m *Manager) recoverPersistedJobs(ctx context.Context) {
 			}
 			recovered := job
 			recovered.RestartPolicy = normalizeRestartPolicy(req.RestartPolicy)
-			recovered.Status = StatusFailed
-			recovered.Message = "background manager restarted before job completion"
-			exitCode := -1
-			recovered.ExitCode = &exitCode
-			finishedAt := time.Now().UTC()
-			recovered.FinishedAt = &finishedAt
 			if recovered.Metadata == nil {
 				recovered.Metadata = map[string]interface{}{}
 			}
-			recovered.Metadata["recovery_reason"] = recovered.Message
-			_ = m.store.UpdateJob(context.Background(), recovered)
-			m.appendJobEvent(context.Background(), job.ID, "recovered_failed", map[string]interface{}{
-				"status":          recovered.Status,
-				"previous_status": StatusRunning,
-				"reason":          recovered.Message,
-			})
+			recovered.Metadata["recovery_reason"] = "background manager restarted before job outcome was recorded"
+			managed := m.managedJobFromStored(recovered)
+			if managed == nil {
+				continue
+			}
+			m.mu.Lock()
+			if _, exists := m.jobs[job.ID]; !exists {
+				m.jobs[job.ID] = managed
+			}
+			m.mu.Unlock()
+			m.orphanJob(managed, "background manager restarted before job outcome was recorded")
 		}
 	}
 }
 
 func (m *Manager) managedJobFromStored(job Job) *managedJob {
 	jobCtx, cancel := context.WithCancel(context.Background())
+	request := requestFromJob(job)
+	if job.Metadata == nil {
+		job.Metadata = metadataFromRequest(request, m.config.DefaultTimeout)
+	} else {
+		defaults := metadataFromRequest(request, m.config.DefaultTimeout)
+		for key, value := range defaults {
+			if _, exists := job.Metadata[key]; !exists {
+				job.Metadata[key] = value
+			}
+		}
+	}
 	managed := &managedJob{
 		ctx:       jobCtx,
 		info:      job,
-		request:   requestFromJob(job),
+		request:   request,
 		output:    newOutputBuffer(m.config.MaxOutputBytes),
 		logPath:   strings.TrimSpace(job.LogPath),
 		cancel:    cancel,
@@ -877,18 +1065,30 @@ func sanitizeBackgroundTaskArgs(req BackgroundTaskArgs) BackgroundTaskArgs {
 	return req
 }
 
-func metadataFromRequest(req BackgroundTaskArgs) map[string]interface{} {
-	metadata := make(map[string]interface{}, 2)
+func metadataFromRequest(req BackgroundTaskArgs, defaultTimeout time.Duration) map[string]interface{} {
+	metadata := make(map[string]interface{}, 6)
 	if req.TimeoutSec > 0 {
 		metadata["timeout_sec"] = req.TimeoutSec
 	}
+	timeout := time.Duration(req.TimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	metadata["timeout_requested_ms"] = timeout.Milliseconds()
+	metadata["timeout_effective_ms"] = timeout.Milliseconds()
+	metadata["timeout_ms"] = timeout.Milliseconds()
+	metadata["timeout_source"] = string(backgroundTimeoutSource(req))
 	if normalizeRestartPolicy(req.RestartPolicy) != RestartPolicyFail {
 		metadata["restart_policy"] = string(normalizeRestartPolicy(req.RestartPolicy))
 	}
-	if len(metadata) == 0 {
-		return nil
-	}
 	return metadata
+}
+
+func backgroundTimeoutSource(req BackgroundTaskArgs) runtimeexecution.TimeoutSource {
+	if req.TimeoutSec > 0 {
+		return runtimeexecution.TimeoutSourceToolArgument
+	}
+	return runtimeexecution.TimeoutSourceToolDefault
 }
 
 func requestFromJob(job Job) BackgroundTaskArgs {
@@ -905,6 +1105,26 @@ func requestFromJob(job Job) BackgroundTaskArgs {
 		req.RestartPolicy = RestartPolicy(restartPolicy)
 	}
 	return req
+}
+
+func decorateTaskOutputResult(result TaskOutputResult, job Job) TaskOutputResult {
+	result.Message = strings.TrimSpace(job.Message)
+	if value, ok := stringMetadataValue(job.Metadata, "error_code"); ok {
+		result.ErrorCode = value
+	}
+	if value, ok := intMetadataValue(job.Metadata, "timeout_requested_ms"); ok {
+		result.TimeoutRequestedMs = int64(value)
+	}
+	if value, ok := intMetadataValue(job.Metadata, "timeout_effective_ms"); ok {
+		result.TimeoutEffectiveMs = int64(value)
+	}
+	if value, ok := stringMetadataValue(job.Metadata, "timeout_source"); ok {
+		result.TimeoutSource = value
+	}
+	if value, ok := stringMetadataValue(job.Metadata, "cancel_source"); ok {
+		result.CancelSource = value
+	}
+	return result
 }
 
 func intMetadataValue(metadata map[string]interface{}, key string) (int, bool) {
@@ -994,11 +1214,16 @@ func exitCodeFromError(err error) int {
 
 func isTerminalStatus(status JobStatus) bool {
 	switch status {
-	case StatusCompleted, StatusFailed, StatusCancelled:
+	case StatusCompleted, StatusFailed, StatusTimedOut, StatusCancelled, StatusOrphaned:
 		return true
 	default:
 		return false
 	}
+}
+
+func jobNotFoundError(jobID string) error {
+	return runtimeerrors.Newf(runtimeerrors.ErrJobNotFound, "background job not found: %s", strings.TrimSpace(jobID)).
+		WithContext("job_id", strings.TrimSpace(jobID))
 }
 
 type outputBuffer struct {

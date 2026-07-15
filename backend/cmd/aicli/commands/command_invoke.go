@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 )
 
@@ -310,7 +311,7 @@ func executeDirectFunction(session *ChatSession, requestedName, functionName str
 		}
 		if session.RequestTimeout > 0 {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, session.RequestTimeout)
+			ctx, cancel = runtimeexecution.WithTimeoutSource(ctx, session.RequestTimeout, runtimeexecution.TimeoutSourceChatTurnDeadline)
 			defer cancel()
 		}
 	}

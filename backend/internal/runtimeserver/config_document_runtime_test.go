@@ -13,6 +13,7 @@ import (
 )
 
 type fakeRuntimeConfigApplyTarget struct {
+	aicliConfig    *agentconfig.Config
 	adminToken     string
 	logFilePath    string
 	profileSupport skillsapi.ProfileSupportConfig
@@ -20,6 +21,10 @@ type fakeRuntimeConfigApplyTarget struct {
 	scopeResolver  skillsapi.ScopeResolverConfig
 	searchCooldown time.Duration
 	usagePolicy    skillsapi.UsagePolicy
+}
+
+func (f *fakeRuntimeConfigApplyTarget) SetAICLIConfig(config *agentconfig.Config) {
+	f.aicliConfig = config
 }
 
 func (f *fakeRuntimeConfigApplyTarget) SetAdminToken(token string) {
@@ -131,6 +136,31 @@ func TestClassifyConfigDocumentPathTreatsRetrySettingsAsHotReload(t *testing.T) 
 	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("providers.backoff.initial_interval"))
 	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("retry.default_backoff_multiplier"))
 	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("retry.rules.0.retry_delay_ms"))
+}
+
+func TestClassifyConfigDocumentPathTreatsAgentRoutingAsHotReload(t *testing.T) {
+	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("aicli.subagents.routing.levels.hard.model"))
+	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("aicli.teams.routing.levels.expert.provider"))
+}
+
+func TestRuntimeConfigHotReloaderAppliesAgentRouting(t *testing.T) {
+	enabled := true
+	currentCfg := &agentconfig.Config{}
+	target := &fakeRuntimeConfigApplyTarget{}
+	reloader := NewRuntimeConfigHotReloader(target, currentCfg, nil)
+	nextCfg := &agentconfig.Config{AICLI: &agentconfig.AICLIConfig{
+		Teams: &agentconfig.AICLITeamsConfig{Routing: &agentconfig.AICLISubagentRoutingConfig{
+			Enabled: &enabled,
+			Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+				"expert": {Provider: "team-provider", Model: "team-model"},
+			},
+		}},
+	}}
+
+	result := reloader.Apply(nextCfg, []string{"aicli.teams.routing.levels.expert.model"})
+	require.Equal(t, []string{"aicli.teams.routing.levels.expert.model"}, result.AppliedPaths)
+	require.Same(t, nextCfg, target.aicliConfig)
+	require.Equal(t, "team-model", currentCfg.AICLI.Teams.Routing.Levels["expert"].Model)
 }
 
 func TestRuntimeConfigHotReloaderAppliesHotReloadableSettings(t *testing.T) {

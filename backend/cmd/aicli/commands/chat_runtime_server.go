@@ -121,6 +121,16 @@ func runtimeServerHealthCheck(ctx context.Context, serverURL string) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("runtime-server healthz returned %s", resp.Status)
 	}
+	var health struct {
+		ExecutionCore runtimechat.RuntimeCoreDescriptor `json:"execution_core"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		return fmt.Errorf("runtime-server healthz 缺少可解析的执行核心声明: %w", err)
+	}
+	if !runtimechat.IsSessionActorRuntimeCore(health.ExecutionCore) {
+		return fmt.Errorf("runtime-server 执行核心不兼容: core=%s contract=%d",
+			health.ExecutionCore.Name, health.ExecutionCore.ContractVersion)
+	}
 	return nil
 }
 
@@ -413,15 +423,6 @@ type aicliRuntimeServerChatExecutor struct {
 	toolSurfaceBySession map[string]map[string]bool
 }
 
-type runtimeServerAgentChatResponse struct {
-	SessionID string                 `json:"session_id"`
-	AgentID   string                 `json:"agent_id"`
-	Result    map[string]interface{} `json:"result"`
-	Source    string                 `json:"source"`
-	Status    string                 `json:"status"`
-	TraceID   string                 `json:"trace_id,omitempty"`
-}
-
 type runtimeServerRuntimeCommandResponse struct {
 	OK      bool                      `json:"ok"`
 	Pending bool                      `json:"pending"`
@@ -487,6 +488,10 @@ func newAICLIRuntimeServerChatExecutor(serverURL string) aicliChatExecutor {
 	return &aicliRuntimeServerChatExecutor{serverURL: strings.TrimRight(strings.TrimSpace(serverURL), "/")}
 }
 
+func (e *aicliRuntimeServerChatExecutor) RuntimeDescriptor() aicliRuntimeExecutorDescriptor {
+	return newAICLIActorRuntimeDescriptor(aicliRuntimeTransportHTTP)
+}
+
 func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *ChatSession, prompt string) (string, error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
@@ -501,14 +506,14 @@ func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *C
 		return "", fmt.Errorf("aicli runtime-server 模式暂不支持本地图片附件，请改用本地模式或移除 --image")
 	}
 	output, result, err := e.executeRuntimeCommand(ctx, session, prompt)
-	if err == nil {
-		applyRuntimeServerUsage(session, result)
-		return output, nil
+	if err != nil {
+		if isRuntimeServerCommandUnavailable(err) {
+			return "", fmt.Errorf("runtime-server 不支持统一 SessionActor Runtime 命令接口，请升级服务端后重试: %w", err)
+		}
+		return "", err
 	}
-	if isRuntimeServerCommandUnavailable(err) {
-		return e.executeAgentChat(ctx, session, prompt)
-	}
-	return "", err
+	applyRuntimeServerUsage(session, result)
+	return output, nil
 }
 
 func (e *aicliRuntimeServerChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (string, error) {
@@ -526,65 +531,6 @@ func (e *aicliRuntimeServerChatExecutor) ContinueGoal(ctx context.Context, sessi
 		return "", err
 	}
 	applyRuntimeServerUsage(session, result)
-	return output, nil
-}
-
-func (e *aicliRuntimeServerChatExecutor) executeAgentChat(ctx context.Context, session *ChatSession, prompt string) (string, error) {
-	if session == nil {
-		return "", fmt.Errorf("chat session is nil")
-	}
-	body := map[string]interface{}{
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
-		"session_id":       currentRuntimeSessionID(session),
-		"user_id":          strings.TrimSpace(session.SessionUserID),
-		"profile":          firstNonEmptyChatValue(session.ProfileReference, session.ProfileName),
-		"agent":            strings.TrimSpace(session.ProfileAgent),
-		"provider":         strings.TrimSpace(session.ProviderName),
-		"model":            strings.TrimSpace(session.Model),
-		"reasoning_effort": strings.TrimSpace(session.ReasoningEffort),
-		"workspace_path":   resolveLocalWorkspacePath(loadRuntimeToolConfig(session.Config, session), session),
-		"enable_react":     !session.DisableTools,
-		"stream":           false,
-	}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return "", err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.serverURL+"/api/agent/chat", bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	client := session.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("runtime-server 请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("runtime-server 返回 %s: %s", resp.Status, strings.TrimSpace(string(data)))
-	}
-	var decoded runtimeServerAgentChatResponse
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return "", fmt.Errorf("解析 runtime-server 响应失败: %w", err)
-	}
-	output := runtimeServerResultOutput(decoded.Result)
-	if strings.TrimSpace(decoded.SessionID) != "" {
-		refreshChatSessionFromRuntimeServer(session, decoded.SessionID, prompt, output)
-	} else {
-		appendRuntimeServerFallbackTurn(session, prompt, output)
-	}
-	applyRuntimeServerUsage(session, decoded.Result)
 	return output, nil
 }
 
@@ -631,7 +577,7 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Conte
 	waitForCompletion := statusCode == http.StatusAccepted || commandResp.Pending
 	pollResult, pollErr := e.waitRuntimeServerEvents(ctx, session, sessionID, afterSeq, bridge, waitForCompletion)
 	if pollErr != nil {
-		refreshChatSessionFromRuntimeServer(session, sessionID, prompt, pollResult.Output)
+		_ = refreshChatSessionFromRuntimeServer(session, sessionID)
 		return "", commandResp.Result, humanizeActorExecutorError(session, pollErr)
 	}
 
@@ -639,7 +585,9 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Conte
 	if strings.TrimSpace(output) == "" {
 		output = pollResult.Output
 	}
-	refreshChatSessionFromRuntimeServer(session, sessionID, prompt, output)
+	if err := refreshChatSessionFromRuntimeServer(session, sessionID); err != nil {
+		return "", commandResp.Result, err
+	}
 	if strings.TrimSpace(output) == "" {
 		output = latestAssistantResponseText(session)
 	}
@@ -689,7 +637,7 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeContinuation(ctx context.
 	waitForCompletion := statusCode == http.StatusAccepted || commandResp.Pending
 	pollResult, pollErr := e.waitRuntimeServerEvents(ctx, session, sessionID, afterSeq, bridge, waitForCompletion)
 	if pollErr != nil {
-		refreshChatSessionFromRuntimeServer(session, sessionID, "", pollResult.Output)
+		_ = refreshChatSessionFromRuntimeServer(session, sessionID)
 		return "", commandResp.Result, humanizeActorExecutorError(session, pollErr)
 	}
 
@@ -697,7 +645,9 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeContinuation(ctx context.
 	if strings.TrimSpace(output) == "" {
 		output = pollResult.Output
 	}
-	refreshChatSessionFromRuntimeServer(session, sessionID, "", output)
+	if err := refreshChatSessionFromRuntimeServer(session, sessionID); err != nil {
+		return "", commandResp.Result, err
+	}
 	if strings.TrimSpace(output) == "" {
 		output = latestAssistantResponseText(session)
 	}
@@ -1368,32 +1318,28 @@ func runtimeServerResultOutput(result map[string]interface{}) string {
 	return ""
 }
 
-func refreshChatSessionFromRuntimeServer(session *ChatSession, sessionID, prompt, output string) {
-	if session == nil || strings.TrimSpace(sessionID) == "" {
-		return
-	}
-	if session.SessionManager != nil {
-		if runtimeSession, err := session.SessionManager.Get(context.Background(), sessionID); err == nil && runtimeSession != nil {
-			_ = restoreChatStateFromRuntimeSession(session, runtimeSession)
-			return
-		}
-	}
-	appendRuntimeServerFallbackTurn(session, prompt, output)
-}
-
-func appendRuntimeServerFallbackTurn(session *ChatSession, prompt, output string) {
+func refreshChatSessionFromRuntimeServer(session *ChatSession, sessionID string) error {
 	if session == nil {
-		return
+		return fmt.Errorf("chat session is nil")
 	}
-	messages := cloneRuntimeMessages(session.Messages)
-	if strings.TrimSpace(prompt) != "" {
-		messages = append(messages, *runtimetypes.NewUserMessage(prompt))
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return fmt.Errorf("runtime-server session id is empty")
 	}
-	if strings.TrimSpace(output) != "" {
-		messages = append(messages, *runtimetypes.NewAssistantMessage(output))
+	if session.SessionManager == nil {
+		return fmt.Errorf("runtime-server session manager is not configured")
 	}
-	_ = replaceRuntimeMessages(session, messages)
-	warnIfChatSessionSyncFails(session, "runtime-server fallback sync", syncRuntimeSessionFromChat(session))
+	runtimeSession, err := session.SessionManager.Get(context.Background(), sessionID)
+	if err != nil {
+		return fmt.Errorf("refresh runtime-server session %s: %w", sessionID, err)
+	}
+	if runtimeSession == nil {
+		return fmt.Errorf("refresh runtime-server session %s: session not found", sessionID)
+	}
+	if err := restoreChatStateFromRuntimeSession(session, runtimeSession); err != nil {
+		return fmt.Errorf("restore runtime-server session %s: %w", sessionID, err)
+	}
+	return nil
 }
 
 func applyRuntimeServerUsage(session *ChatSession, result map[string]interface{}) {
@@ -1449,7 +1395,7 @@ func configureRuntimeServerChatExecutor(ctx context.Context, opts *chatCommandOp
 		return false, fmt.Errorf("runtime-server 不可用: %w", err)
 	}
 	session.ChatExecutor = newAICLIRuntimeServerChatExecutor(serverURL)
-	session.ActorFirstReady = false
+	session.ActorFirstReady = true
 	session.LocalRuntimeHost = nil
 	return true, nil
 }

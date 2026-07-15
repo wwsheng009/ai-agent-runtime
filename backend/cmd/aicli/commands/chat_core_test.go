@@ -59,6 +59,14 @@ func (f *fakeChatExecutor) Execute(ctx context.Context, session *ChatSession, pr
 	return f.output, f.err
 }
 
+func (f *fakeChatExecutor) RuntimeDescriptor() aicliRuntimeExecutorDescriptor {
+	return newAICLIActorRuntimeDescriptor(aicliRuntimeTransportInProcess)
+}
+
+func (f *fakeChatExecutor) ToolAvailable(session *ChatSession, toolName string) bool {
+	return chatSharedToolAvailable(session, toolName)
+}
+
 func (f *fakeChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (string, error) {
 	f.continued = true
 	f.continuations++
@@ -1044,7 +1052,11 @@ func TestSendMessage_UsesActorFirstExecutorWhenLocalHostAvailable(t *testing.T) 
 	if response != "actor output" {
 		t.Fatalf("unexpected response: %q", response)
 	}
-	if got := ensureChatExecutor(session); got == nil {
+	got, err := ensureChatExecutor(session)
+	if err != nil {
+		t.Fatalf("ensureChatExecutor failed: %v", err)
+	}
+	if got == nil {
 		t.Fatal("expected actor executor to be installed")
 	}
 }
@@ -1316,7 +1328,7 @@ func TestSharedChatAutoCompactChatEvent_Applied(t *testing.T) {
 	}
 }
 
-func TestAICLISharedChatExecutor_RemainsAvailableAsFallback(t *testing.T) {
+func TestAICLISharedChatExecutor_RemainsAvailableWhenExplicitlySelected(t *testing.T) {
 	originalExecute := executeToolLoop
 	defer func() {
 		executeToolLoop = originalExecute
@@ -1341,14 +1353,46 @@ func TestAICLISharedChatExecutor_RemainsAvailableAsFallback(t *testing.T) {
 		NoInteractive:    true,
 		FunctionRegistry: functions.NewFunctionRegistry(),
 		FunctionCatalog:  newAICLIFunctionCatalog("codex", nil),
+		ChatExecutor:     newAICLISharedChatExecutor(),
 	}
 
-	response, err := sendMessage(session, "hello")
+	response, err := session.ChatExecutor.Execute(context.Background(), session, "hello")
 	if err != nil {
-		t.Fatalf("sendMessage failed: %v", err)
+		t.Fatalf("legacy executor direct call failed: %v", err)
 	}
 	if response != "legacy output" {
 		t.Fatalf("unexpected response: %q", response)
+	}
+}
+
+func TestEnsureChatExecutorRejectsLegacyToolLoop(t *testing.T) {
+	session := &ChatSession{ChatExecutor: newAICLISharedChatExecutor()}
+	executor, err := ensureChatExecutor(session)
+	if err == nil {
+		t.Fatal("expected legacy tool loop to be rejected")
+	}
+	if executor != nil {
+		t.Fatalf("expected no executor, got %#v", executor)
+	}
+	if !strings.Contains(err.Error(), "unified SessionActor runtime contract") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLocalAndRemoteExecutorsShareSessionActorRuntimeContract(t *testing.T) {
+	local := newAICLIActorChatExecutor().RuntimeDescriptor()
+	remote := newAICLIRuntimeServerChatExecutor("http://runtime.example").RuntimeDescriptor()
+	if !local.unifiedActorRuntime() || !remote.unifiedActorRuntime() {
+		t.Fatalf("expected unified runtime descriptors, local=%#v remote=%#v", local, remote)
+	}
+	if local.Core != remote.Core {
+		t.Fatalf("expected identical runtime core contract, local=%#v remote=%#v", local.Core, remote.Core)
+	}
+	if local.Transport != aicliRuntimeTransportInProcess || remote.Transport != aicliRuntimeTransportHTTP {
+		t.Fatalf("unexpected transports, local=%q remote=%q", local.Transport, remote.Transport)
+	}
+	if newAICLISharedChatExecutor().RuntimeDescriptor().unifiedActorRuntime() {
+		t.Fatal("legacy shared tool loop must not satisfy the SessionActor contract")
 	}
 }
 

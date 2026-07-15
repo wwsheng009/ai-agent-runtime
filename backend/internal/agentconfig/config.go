@@ -351,6 +351,7 @@ type AICLIConfig struct {
 	Runtime    *AICLIRuntimeConfig    `yaml:"runtime" mapstructure:"runtime"`
 	ModelCards *AICLIModelCardsConfig `yaml:"model_cards" mapstructure:"model_cards"`
 	Subagents  *AICLISubagentsConfig  `yaml:"subagents" mapstructure:"subagents"`
+	Teams      *AICLITeamsConfig      `yaml:"teams" mapstructure:"teams"`
 }
 
 // AICLIMCPConfig holds aicli MCP configuration.
@@ -409,6 +410,27 @@ type AICLIModelCardsConfig struct {
 // AICLISubagentsConfig holds subagent execution preferences.
 type AICLISubagentsConfig struct {
 	Routing *AICLISubagentRoutingConfig `yaml:"routing" mapstructure:"routing"`
+}
+
+// AICLITeamsConfig holds team teammate execution preferences. When routing is
+// absent, team tasks inherit aicli.subagents.routing for backward compatibility.
+type AICLITeamsConfig struct {
+	Routing *AICLISubagentRoutingConfig `yaml:"routing" mapstructure:"routing"`
+}
+
+// EffectiveTeamRoutingConfig returns the team-specific routing policy when it
+// exists and otherwise falls back to the shared subagent routing policy.
+func EffectiveTeamRoutingConfig(cfg *Config) *AICLISubagentRoutingConfig {
+	if cfg == nil || cfg.AICLI == nil {
+		return nil
+	}
+	if cfg.AICLI.Teams != nil && cfg.AICLI.Teams.Routing != nil {
+		return cfg.AICLI.Teams.Routing
+	}
+	if cfg.AICLI.Subagents == nil {
+		return nil
+	}
+	return cfg.AICLI.Subagents.Routing
 }
 
 // AICLISubagentRoutingConfig maps subtask difficulty and role to model routes.
@@ -844,75 +866,91 @@ func expandEnvVars(content string) string {
 }
 
 func validateLoadedConfig(cfg *Config) error {
-	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.Subagents == nil || cfg.AICLI.Subagents.Routing == nil {
-		return nil
-	}
-	return validateSubagentRoutingConfig(cfg.AICLI.Subagents.Routing)
+	return ValidateConfig(cfg)
 }
 
-func validateSubagentRoutingConfig(cfg *AICLISubagentRoutingConfig) error {
+// ValidateConfig validates user-facing configuration that must be checked by
+// both process startup and the runtime-server configuration document API.
+func ValidateConfig(cfg *Config) error {
+	if cfg == nil || cfg.AICLI == nil {
+		return nil
+	}
+	if cfg.AICLI.Subagents != nil && cfg.AICLI.Subagents.Routing != nil {
+		if err := validateAgentRoutingConfig("aicli.subagents.routing", cfg.AICLI.Subagents.Routing); err != nil {
+			return err
+		}
+	}
+	if cfg.AICLI.Teams != nil && cfg.AICLI.Teams.Routing != nil {
+		if err := validateAgentRoutingConfig("aicli.teams.routing", cfg.AICLI.Teams.Routing); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateAgentRoutingConfig(configPath string, cfg *AICLISubagentRoutingConfig) error {
 	if cfg == nil || cfg.Enabled == nil || !*cfg.Enabled {
 		return nil
 	}
 	if strings.TrimSpace(cfg.CompatibilityMode) != "" {
 		if _, ok := normalizeSubagentCompatibilityMode(cfg.CompatibilityMode); !ok {
-			return fmt.Errorf("invalid aicli.subagents.routing.compatibility_mode %q", cfg.CompatibilityMode)
+			return fmt.Errorf("invalid %s.compatibility_mode %q", configPath, cfg.CompatibilityMode)
 		}
 	}
 	if strings.TrimSpace(cfg.DefaultDifficulty) != "" {
 		if _, ok := normalizeSubagentDifficulty(cfg.DefaultDifficulty); !ok {
-			return fmt.Errorf("invalid aicli.subagents.routing.default_difficulty %q", cfg.DefaultDifficulty)
+			return fmt.Errorf("invalid %s.default_difficulty %q", configPath, cfg.DefaultDifficulty)
 		}
 	}
 	if strings.TrimSpace(cfg.UnsupportedReasoningPolicy) != "" {
 		if _, ok := normalizeSubagentUnsupportedReasoningPolicy(cfg.UnsupportedReasoningPolicy); !ok {
-			return fmt.Errorf("invalid aicli.subagents.routing.unsupported_reasoning_policy %q", cfg.UnsupportedReasoningPolicy)
+			return fmt.Errorf("invalid %s.unsupported_reasoning_policy %q", configPath, cfg.UnsupportedReasoningPolicy)
 		}
 	}
 	if strings.TrimSpace(cfg.OnReasoningUnsupported) != "" {
 		if _, ok := normalizeSubagentUnsupportedReasoningPolicy(cfg.OnReasoningUnsupported); !ok {
-			return fmt.Errorf("invalid aicli.subagents.routing.on_reasoning_unsupported %q", cfg.OnReasoningUnsupported)
+			return fmt.Errorf("invalid %s.on_reasoning_unsupported %q", configPath, cfg.OnReasoningUnsupported)
 		}
 	}
 	for key, profile := range cfg.Levels {
 		difficulty, ok := normalizeSubagentDifficulty(key)
 		if !ok {
-			return fmt.Errorf("invalid aicli.subagents.routing.levels key %q", key)
+			return fmt.Errorf("invalid %s.levels key %q", configPath, key)
 		}
-		if err := validateSubagentRouteProfile("levels."+difficulty, profile, cfg); err != nil {
+		if err := validateSubagentRouteProfile(configPath+".levels."+difficulty, profile, cfg); err != nil {
 			return err
 		}
 	}
 	for role, levels := range cfg.Roles {
 		role = strings.TrimSpace(role)
 		if role == "" {
-			return fmt.Errorf("aicli.subagents.routing.roles key cannot be empty")
+			return fmt.Errorf("%s.roles key cannot be empty", configPath)
 		}
 		for key, profile := range levels {
 			difficulty, ok := normalizeSubagentDifficulty(key)
 			if !ok {
-				return fmt.Errorf("invalid aicli.subagents.routing.roles.%s key %q", role, key)
+				return fmt.Errorf("invalid %s.roles.%s key %q", configPath, role, key)
 			}
-			if err := validateSubagentRouteProfile("roles."+role+"."+difficulty, profile, cfg); err != nil {
+			if err := validateSubagentRouteProfile(configPath+".roles."+role+"."+difficulty, profile, cfg); err != nil {
 				return err
 			}
 		}
 	}
 	if cfg.MaxExpertConcurrency < 0 {
-		return fmt.Errorf("aicli.subagents.routing.max_expert_concurrency cannot be negative")
+		return fmt.Errorf("%s.max_expert_concurrency cannot be negative", configPath)
 	}
 	return nil
 }
 
 func validateSubagentRouteProfile(label string, profile AICLISubagentRouteProfile, cfg *AICLISubagentRoutingConfig) error {
 	if profile.MaxTokens < 0 {
-		return fmt.Errorf("aicli.subagents.routing.%s.max_tokens cannot be negative", label)
+		return fmt.Errorf("%s.max_tokens cannot be negative", label)
 	}
 	if profile.Timeout < 0 {
-		return fmt.Errorf("aicli.subagents.routing.%s.timeout cannot be negative", label)
+		return fmt.Errorf("%s.timeout cannot be negative", label)
 	}
 	if !subagentRoutingInheritParentWhenMissing(cfg) && (strings.TrimSpace(profile.Provider) == "" || strings.TrimSpace(profile.Model) == "") {
-		return fmt.Errorf("aicli.subagents.routing.%s must set provider and model when inherit_parent_when_missing=false", label)
+		return fmt.Errorf("%s must set provider and model when inherit_parent_when_missing=false", label)
 	}
 	return nil
 }

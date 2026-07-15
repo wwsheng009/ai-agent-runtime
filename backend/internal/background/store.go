@@ -42,6 +42,11 @@ type JobLister interface {
 	ListJobs(ctx context.Context, filter JobFilter) ([]Job, error)
 }
 
+// JobPruner removes terminal jobs older than a retention boundary.
+type JobPruner interface {
+	PruneJobs(ctx context.Context, before time.Time) ([]Job, error)
+}
+
 // EventWriter appends background job events.
 type EventWriter interface {
 	AppendEvent(ctx context.Context, jobID, eventType string, payload map[string]interface{}) error
@@ -392,6 +397,53 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, er
 		return nil, err
 	}
 	return jobs, nil
+}
+
+// PruneJobs deletes terminal jobs whose terminal timestamp is older than before.
+func (s *SQLiteStore) PruneJobs(ctx context.Context, before time.Time) ([]Job, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("background store is not initialized")
+	}
+	if before.IsZero() {
+		return nil, nil
+	}
+	candidates, err := s.ListJobs(ctx, JobFilter{Status: []JobStatus{
+		StatusCompleted, StatusFailed, StatusTimedOut, StatusCancelled, StatusOrphaned,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	expired := make([]Job, 0)
+	for _, job := range candidates {
+		reference := job.CreatedAt
+		if job.FinishedAt != nil && !job.FinishedAt.IsZero() {
+			reference = *job.FinishedAt
+		}
+		if !reference.IsZero() && reference.Before(before) {
+			expired = append(expired, job)
+		}
+	}
+	if len(expired) == 0 {
+		return nil, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin background prune tx: %w", err)
+	}
+	for _, job := range expired {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM background_job_events WHERE job_id = ?`, job.ID); err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("delete background job events: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM background_jobs WHERE id = ?`, job.ID); err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("delete background job: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit background prune: %w", err)
+	}
+	return expired, nil
 }
 
 // AppendEvent stores a job event and returns its sequence.

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextreconcile"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -56,6 +57,7 @@ type Result struct {
 	CompactedMessages  int
 	CheckpointIDs      []string
 	ReplacementHistory []types.Message
+	Reconciliation     *contextreconcile.Report
 }
 
 // Status captures skip/failure context for observability.

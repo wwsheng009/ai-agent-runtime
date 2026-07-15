@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +15,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -25,6 +27,12 @@ import (
 )
 
 const aicliRuntimeContextTokenCountKey = "aicli_context_token_count"
+
+type approvalDetachContextKey struct{}
+
+type approvalDetachState struct {
+	detached atomic.Bool
+}
 
 // SessionActorConfig configures a SessionActor instance.
 type SessionActorConfig struct {
@@ -656,6 +664,34 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 	state := a.State()
 	if state == nil || state.PendingApproval == nil || state.PendingApproval.ID != cmd.RequestID {
 		cmd.Reply <- fmt.Errorf("approval request not found")
+		return
+	}
+	if approvalRequestExpired(state.PendingApproval, time.Now().UTC()) {
+		expiryErr := approvalExpiredError(state.PendingApproval)
+		response := runtimepolicy.ApprovalResponse{Allowed: false, Reason: expiryErr.Error()}
+		if a.resolveApproval(cmd.RequestID, response) {
+			if err := a.updateState(ctx, func(runtimeState *RuntimeState) error {
+				if runtimeState.PendingApproval == nil || runtimeState.PendingApproval.ID != cmd.RequestID {
+					return fmt.Errorf("approval request not found")
+				}
+				runtimeState.PendingApproval = nil
+				runtimeState.PendingTool = nil
+				runtimeState.Status = approvalResumeStatus(runtimeState)
+				runtimeState.UpdatedAt = time.Now().UTC()
+				return nil
+			}); err != nil {
+				cmd.Reply <- err
+				return
+			}
+		} else if err := a.resumePendingToolWithResult(ctx, state, nil, expiryErr.Error(), approvalErrorMetadata(expiryErr)); err != nil {
+			cmd.Reply <- err
+			return
+		}
+		payload := approvalResolvedEventPayload(state, cmd.RequestID, false)
+		payload["resolution"] = "expired"
+		payload["error_code"] = string(runtimeerrors.ErrApprovalExpired)
+		a.publish(runtimeevents.Event{Type: EventApprovalResolved, SessionID: a.id, Payload: payload})
+		cmd.Reply <- expiryErr
 		return
 	}
 	if a.resolveApproval(cmd.RequestID, runtimepolicy.ApprovalResponse{
@@ -1463,6 +1499,7 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		return
 	}
 
+	a.reconcileCompactResult(ctx, session, result)
 	originalHistory := history
 	session.ReplaceHistory(result.ReplacementHistory)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
@@ -1490,6 +1527,7 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		TraceID:   turnID,
 		Payload:   payload,
 	})
+	a.publishCompactReconciliation(turnID, result)
 }
 
 func (a *SessionActor) runManualCompact(
@@ -1601,6 +1639,7 @@ func (a *SessionActor) runManualCompact(
 		return nil, status, nil
 	}
 
+	a.reconcileCompactResult(ctx, session, result)
 	originalHistory := session.GetMessages()
 	session.ReplaceHistory(result.ReplacementHistory)
 	if persistErr := a.persistSession(ctx, session); persistErr != nil {
@@ -1628,6 +1667,7 @@ func (a *SessionActor) runManualCompact(
 		TraceID:   traceID,
 		Payload:   payload,
 	})
+	a.publishCompactReconciliation(traceID, result)
 	return result, status, nil
 }
 
@@ -1784,6 +1824,8 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	a.maybeAutoCompactSession(ctx, session, turnID, runMeta, resume)
 
 	runCtx, cancel := context.WithCancel(ctx)
+	approvalDetach := &approvalDetachState{}
+	runCtx = context.WithValue(runCtx, approvalDetachContextKey{}, approvalDetach)
 	runCtx = team.WithRunMeta(runCtx, runMeta)
 	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
 	a.setActiveCancel(cancel)
@@ -1808,12 +1850,13 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		}
 		cancel()
 		a.clearActiveCancel()
-		if shouldRollbackFailedPrompt(execErr, result, resume, appendedPrompt) {
+		approvalDetached := approvalDetach.detached.Load()
+		if !approvalDetached && shouldRollbackFailedPrompt(execErr, result, resume, appendedPrompt) {
 			if rollbackErr := a.rollbackLastUserPrompt(context.Background(), session, prompt); rollbackErr != nil && execErr == nil {
 				execErr = rollbackErr
 			}
 		}
-		if len(stripMetadataKeys) > 0 {
+		if !approvalDetached && len(stripMetadataKeys) > 0 {
 			stripMessagesWithMetadataKeys(session, stripMetadataKeys)
 		}
 
@@ -1821,17 +1864,19 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		if ctx.Err() != nil || a.consumeInterrupted() {
 			status = SessionStopped
 		}
-		_ = a.updateState(context.Background(), func(state *RuntimeState) error {
-			state.Status = status
-			state.CurrentTurnID = ""
-			state.CurrentRunMeta = nil
-			resetFrozenTurnTools(state)
-			state.PendingTool = nil
-			state.UpdatedAt = time.Now().UTC()
-			return nil
-		})
-		if persistErr := a.persistSession(context.Background(), session); persistErr != nil && execErr == nil {
-			execErr = persistErr
+		if !approvalDetached {
+			_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+				state.Status = status
+				state.CurrentTurnID = ""
+				state.CurrentRunMeta = nil
+				resetFrozenTurnTools(state)
+				state.PendingTool = nil
+				state.UpdatedAt = time.Now().UTC()
+				return nil
+			})
+			if persistErr := a.persistSession(context.Background(), session); persistErr != nil && execErr == nil {
+				execErr = persistErr
+			}
 		}
 
 		payload := map[string]interface{}{
@@ -2007,7 +2052,7 @@ func (a *SessionActor) recordPendingToolCall(ctx context.Context, pending *Pendi
 	return a.persistSession(ctx, session)
 }
 
-func (a *SessionActor) resumePendingToolWithResult(ctx context.Context, state *RuntimeState, content interface{}, toolErr string) error {
+func (a *SessionActor) resumePendingToolWithResult(ctx context.Context, state *RuntimeState, content interface{}, toolErr string, metadata ...map[string]interface{}) error {
 	if a == nil {
 		return fmt.Errorf("session actor is nil")
 	}
@@ -2033,7 +2078,7 @@ func (a *SessionActor) resumePendingToolWithResult(ctx context.Context, state *R
 	if sessionHasToolResult(session, state.PendingTool.ToolCallID) {
 		return a.resumeFromPersistedToolResult(ctx, state, session)
 	}
-	toolMessage, err := a.buildPendingToolResultMessage(ctx, state.PendingTool, content, toolErr)
+	toolMessage, err := a.buildPendingToolResultMessage(ctx, state.PendingTool, content, toolErr, metadata...)
 	if err != nil {
 		return err
 	}
@@ -2198,7 +2243,7 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 	return a.resumePendingBatchAfterCurrentResult(ctx, state, &pending, session, true)
 }
 
-func (a *SessionActor) buildPendingToolResultMessage(ctx context.Context, pending *PendingToolInvocation, content interface{}, toolErr string) (*runtimetypes.Message, error) {
+func (a *SessionActor) buildPendingToolResultMessage(ctx context.Context, pending *PendingToolInvocation, content interface{}, toolErr string, metadata ...map[string]interface{}) (*runtimetypes.Message, error) {
 	if a == nil || pending == nil {
 		return nil, fmt.Errorf("pending tool is nil")
 	}
@@ -2206,12 +2251,20 @@ func (a *SessionActor) buildPendingToolResultMessage(ctx context.Context, pendin
 		ctx = context.Background()
 	}
 	gateway := a.agent.GetOutputGateway()
+	var toolMetadata map[string]interface{}
+	if len(metadata) > 0 && len(metadata[0]) > 0 {
+		toolMetadata = make(map[string]interface{}, len(metadata[0]))
+		for key, value := range metadata[0] {
+			toolMetadata[key] = value
+		}
+	}
 	envelope, gatewayErr := gateway.Process(ctx, runtimeoutput.RawToolResult{
 		SessionID:  a.id,
 		ToolName:   pending.ToolName,
 		ToolCallID: pending.ToolCallID,
 		Content:    content,
 		Error:      toolErr,
+		Metadata:   toolMetadata,
 	})
 	message := runtimetypes.NewToolMessage(pending.ToolCallID, "")
 	message.Content = runtimeoutput.RenderToolResultContentForModel(content, toolErr, envelope)
@@ -2420,6 +2473,9 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 	if strings.TrimSpace(req.SessionID) == "" {
 		req.SessionID = a.id
 	}
+	if approvalRequestExpired(&req, time.Now().UTC()) {
+		return runtimepolicy.ApprovalResponse{}, approvalExpiredError(&req)
+	}
 	pendingTool, err := newPendingToolInvocation(ctx, req.ToolCallID, req.ToolName, req.ArgsJSON)
 	if err != nil {
 		return runtimepolicy.ApprovalResponse{}, err
@@ -2453,19 +2509,41 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 		SessionID: a.id,
 		Payload:   approvalRequestedEventPayload(state, pending, req),
 	})
+	var expiryTimer *time.Timer
+	var expiry <-chan time.Time
+	if !pending.ExpiresAt.IsZero() {
+		expiryTimer = time.NewTimer(time.Until(pending.ExpiresAt))
+		expiry = expiryTimer.C
+		defer expiryTimer.Stop()
+	}
 	select {
 	case resp := <-waiter:
 		return resp, nil
-	case <-ctx.Done():
+	case <-expiry:
 		a.unregisterApprovalWaiter(req.ID)
+		expiryErr := approvalExpiredError(pending)
 		_ = a.updateState(context.Background(), func(state *RuntimeState) error {
 			if state.PendingApproval != nil && state.PendingApproval.ID == req.ID {
 				state.PendingApproval = nil
 				state.PendingTool = nil
-				state.Status = SessionIdle
-				state.CurrentTurnID = ""
-				state.CurrentRunMeta = nil
-				resetFrozenTurnTools(state)
+				state.Status = approvalResumeStatus(state)
+				state.UpdatedAt = time.Now().UTC()
+			}
+			return nil
+		})
+		payload := approvalResolvedEventPayload(state, req.ID, false)
+		payload["resolution"] = "expired"
+		payload["error_code"] = string(runtimeerrors.ErrApprovalExpired)
+		a.publish(runtimeevents.Event{Type: EventApprovalResolved, SessionID: a.id, Payload: payload})
+		return runtimepolicy.ApprovalResponse{}, expiryErr
+	case <-ctx.Done():
+		if detach, ok := ctx.Value(approvalDetachContextKey{}).(*approvalDetachState); ok && detach != nil {
+			detach.detached.Store(true)
+		}
+		a.unregisterApprovalWaiter(req.ID)
+		_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+			if state.PendingApproval != nil && state.PendingApproval.ID == req.ID {
+				state.Status = SessionWaitingApproval
 				state.UpdatedAt = time.Now().UTC()
 			}
 			return nil
@@ -2484,8 +2562,45 @@ func approvalRequestedEventPayload(state *RuntimeState, pending *ApprovalRequest
 	if pending != nil && strings.TrimSpace(pending.ToolCallID) != "" {
 		payload["tool_call_id"] = strings.TrimSpace(pending.ToolCallID)
 	}
+	if pending != nil && !pending.ExpiresAt.IsZero() {
+		payload["expires_at"] = pending.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
 	appendApprovalRunMetaPayload(payload, state)
 	return payload
+}
+
+func approvalRequestExpired(req *ApprovalRequest, now time.Time) bool {
+	return req != nil && !req.ExpiresAt.IsZero() && !now.Before(req.ExpiresAt)
+}
+
+func approvalResumeStatus(state *RuntimeState) SessionStatus {
+	if state != nil && strings.TrimSpace(state.CurrentTurnID) != "" {
+		return SessionRunning
+	}
+	return SessionIdle
+}
+
+func approvalExpiredError(req *ApprovalRequest) *runtimeerrors.RuntimeError {
+	metadata := map[string]interface{}{}
+	if req != nil {
+		metadata["approval_id"] = strings.TrimSpace(req.ID)
+		metadata["tool_call_id"] = strings.TrimSpace(req.ToolCallID)
+		metadata["tool_name"] = strings.TrimSpace(req.ToolName)
+		if !req.ExpiresAt.IsZero() {
+			metadata["expired_at"] = req.ExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	return runtimeerrors.WrapWithContext(runtimeerrors.ErrApprovalExpired, "tool approval request expired", nil, metadata)
+}
+
+func approvalErrorMetadata(err *runtimeerrors.RuntimeError) map[string]interface{} {
+	if err == nil {
+		return nil
+	}
+	metadata := err.GetContext()
+	metadata["error_code"] = string(err.Code)
+	metadata["error_message"] = err.Message
+	return metadata
 }
 
 func approvalResolvedEventPayload(state *RuntimeState, requestID string, allowed bool) map[string]interface{} {

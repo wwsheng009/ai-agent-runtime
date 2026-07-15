@@ -344,7 +344,7 @@ func (r *apiTeamTaskRouteResolver) ResolveTaskRoute(ctx context.Context, request
 	if r == nil || r.handler == nil {
 		return nil, nil
 	}
-	routingConfig := r.handler.subagentRoutingConfig()
+	routingConfig := r.handler.teamRoutingConfig()
 	parent := (&sessionAgentController{handler: r.handler}).spawnAgentParentDefaults(r.parentSession(ctx, request))
 	var catalog modelrouting.ProviderCatalog
 	if r.handler.llmRuntime != nil {
@@ -2585,6 +2585,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	requestedReasoningEffort := ""
 	streamRequested := false
 	disableTools := false
+	childReadOnly := false
 	if session, err := h.sessionManager.Get(context.Background(), sessionID); err == nil && session != nil {
 		getContextString := func(key string) string {
 			return sessionmeta.String(session.Metadata.Context, key)
@@ -2609,6 +2610,9 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		}
 		if value, ok := sessionmeta.Bool(session.Metadata.Context, sessionmeta.DisableTools); ok {
 			disableTools = value
+		}
+		if value, ok := sessionmeta.Bool(session.Metadata.Context, toolbroker.AgentSessionContextReadOnly); ok {
+			childReadOnly = value
 		}
 	}
 
@@ -2689,6 +2693,16 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		apiAgent.SetToolExecutionPolicy(agent.NewToolExecutionPolicy([]string{}, false))
 	} else {
 		h.applyAgentExecutionPolicy(apiAgent, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
+	}
+	if childReadOnly {
+		toolPolicy := apiAgent.GetToolExecutionPolicy()
+		if toolPolicy == nil {
+			toolPolicy = agent.NewToolExecutionPolicy(nil, true)
+		} else {
+			toolPolicy = toolPolicy.Clone()
+			toolPolicy.ReadOnly = true
+		}
+		apiAgent.SetToolExecutionPolicy(toolPolicy)
 	}
 	h.applyAgentHooks(apiAgent, selectedConfig)
 	h.applyAgentRuntimeServices(apiAgent, selectedConfig)

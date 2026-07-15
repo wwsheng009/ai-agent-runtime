@@ -15,6 +15,7 @@ const (
 	CapExternalSideEffect Capability = "external_side_effect"
 	CapAskUser            Capability = "ask_user"
 	CapBackgroundTask     Capability = "background_task"
+	CapAgentManagement    Capability = "agent_management"
 )
 
 // CapabilityResolver determines required capabilities for a tool call.
@@ -39,8 +40,9 @@ func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 		return []Capability{CapBackgroundTask}
 	case "task_output":
 		return []Capability{CapReadOnly}
-	case "spawn_agent", "list_agents", "send_message", "followup_task", "send_input", "wait_agent", "read_agent_events", "close_agent", "resume_agent",
-		"send_team_message", "read_mailbox_digest", "read_task_spec", "read_task_context", "report_task_outcome", "block_current_task":
+	case "spawn_agent", "send_message", "followup_task", "send_input", "close_agent", "resume_agent", "resolve_agent_approval", "spawn_team", "send_team_message":
+		return []Capability{CapReadOnly, CapAgentManagement}
+	case "list_agents", "wait_agent", "read_agent_events", "wait_team", "read_mailbox_digest", "read_task_spec", "read_task_context", "report_task_outcome", "block_current_task":
 		return []Capability{CapReadOnly}
 	}
 
@@ -106,6 +108,12 @@ func normalizeToolName(name string) string {
 		return "close_agent"
 	case "resumeagent":
 		return "resume_agent"
+	case "resolveagentapproval":
+		return "resolve_agent_approval"
+	case "spawnteam":
+		return "spawn_team"
+	case "waitteam":
+		return "wait_team"
 	case "sendteammessage":
 		return "send_team_message"
 	case "readmailboxdigest":

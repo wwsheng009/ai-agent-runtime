@@ -6,9 +6,19 @@ import (
 	"strings"
 )
 
-// ToolMetadataSupportsParallelKey marks whether a tool explicitly supports
-// parallel execution in its definition metadata.
-const ToolMetadataSupportsParallelKey = "supports_parallel"
+const (
+	// ToolMetadataSupportsParallelKey marks whether a tool explicitly supports
+	// parallel execution in its definition metadata.
+	ToolMetadataSupportsParallelKey = "supports_parallel"
+	// ToolMetadataRetryClassKey declares the side-effect retry contract exposed
+	// to schedulers and approval policy.
+	ToolMetadataRetryClassKey = "retry_class"
+
+	ToolRetryClassNever                  = "never"
+	ToolRetryClassSafe                   = "safe"
+	ToolRetryClassIdempotencyKeyRequired = "idempotency_key_required"
+	ToolRetryClassCompensatable          = "compensatable"
+)
 
 // BoolMetadataValue extracts a boolean metadata value from a generic tool
 // metadata map. The second return value reports whether the key existed and

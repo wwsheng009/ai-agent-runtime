@@ -14,11 +14,13 @@ import (
 )
 
 type fakeConfigDocumentService struct {
-	document *ConfigDocument
-	preview  ConfigDocumentSaveRequest
-	saved    ConfigDocumentSaveRequest
-	saveErr  error
-	loadErr  error
+	document     *ConfigDocument
+	preview      ConfigDocumentSaveRequest
+	routePreview AgentRoutePreviewRequest
+	routeResult  *AgentRoutePreviewResult
+	saved        ConfigDocumentSaveRequest
+	saveErr      error
+	loadErr      error
 }
 
 func (s *fakeConfigDocumentService) LoadDocument() (*ConfigDocument, error) {
@@ -39,6 +41,11 @@ func (s *fakeConfigDocumentService) SaveDocument(req ConfigDocumentSaveRequest) 
 	}
 	s.saved = req
 	return s.document, nil
+}
+
+func (s *fakeConfigDocumentService) PreviewAgentRoute(req AgentRoutePreviewRequest) (*AgentRoutePreviewResult, error) {
+	s.routePreview = req
+	return s.routeResult, nil
 }
 
 func TestGetConfigDocument(t *testing.T) {
@@ -165,6 +172,43 @@ func TestPreviewConfigDocument(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "raw", service.preview.Mode)
 	require.NotNil(t, service.preview.Raw)
+}
+
+func TestPreviewAgentRoute(t *testing.T) {
+	service := &fakeConfigDocumentService{
+		routeResult: &AgentRoutePreviewResult{
+			Scope:          "team",
+			RoutingSource:  "team_independent",
+			RoutingEnabled: true,
+			Decision: AgentRoutePreviewDecision{
+				Provider: "strong",
+				Model:    "strong-model",
+			},
+		},
+	}
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetConfigDocumentService(service)
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	body := []byte(`{"document":{"mode":"structured","parsed":{"aicli":{}}},"scope":"team","task":{"difficulty":"hard"}}`)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/runtime/config/document/agent-route-preview",
+		bytes.NewReader(body),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "team", service.routePreview.Scope)
+	require.Equal(t, "hard", service.routePreview.Task.Difficulty)
+	var payload struct {
+		Route AgentRoutePreviewResult `json:"route"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, "strong-model", payload.Route.Decision.Model)
 }
 
 func TestConfigDocumentPayloadTopSections(t *testing.T) {

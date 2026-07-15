@@ -127,7 +127,7 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "off", Summary: "关闭会话 debug 模式", Group: string(chatSlashCommandGroupSession)},
 			{Command: "status", Summary: "查看会话 debug 模式状态", Group: string(chatSlashCommandGroupSession)},
 			{Command: "display", Summary: "显示当前会话调试信息", Group: string(chatSlashCommandGroupSession)},
-			{Command: "routing", Summary: "显示 subagent routing 配置摘要", Group: string(chatSlashCommandGroupSession)},
+			{Command: "routing", Summary: "显示子 Agent / Team routing 配置摘要", Group: string(chatSlashCommandGroupSession)},
 			{Command: "export", Summary: "打包调试文件", Group: string(chatSlashCommandGroupSession)},
 			{Command: "zip", Summary: "打包调试文件", Group: string(chatSlashCommandGroupSession)},
 			{Command: "--output", Summary: "指定 zip 输出文件", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
@@ -234,7 +234,7 @@ func agentTopLevelArgumentCandidates() []chatSlashCompletionCandidate {
 		{Command: "followup", Summary: "向目标 agent 投递或触发 follow-up task", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 		{Command: "select", Summary: "pick 的别名", Group: string(chatSlashCommandGroupSession)},
 		{Command: "task", Summary: "followup 的别名", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
-		{Command: "routing", Summary: "预览 subagent difficulty route", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "routing", Summary: "预览子 Agent / Team difficulty route", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 	}
 }
 
@@ -254,6 +254,12 @@ func completeAgentsRoutingSlashArgs(session *ChatSession, ctx slashArgumentConte
 	if strings.EqualFold(second, "test") || strings.EqualFold(second, "dry-run") || strings.EqualFold(second, "dryrun") || strings.EqualFold(second, "preview") {
 		valueQuery := slashAgentsRoutingArgumentQuery(ctx)
 		switch slashAgentsRoutingArgumentFocus(ctx) {
+		case "scope":
+			return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+				{Command: "auto", Summary: "根据 workflow 自动选择", Group: string(chatSlashCommandGroupSession)},
+				{Command: "subagent", Summary: "使用子 Agent 路由", Group: string(chatSlashCommandGroupSession)},
+				{Command: "team", Summary: "使用 Team 有效路由", Group: string(chatSlashCommandGroupSession)},
+			}, valueQuery)
 		case "workflow":
 			return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
 				{Command: "spawn_team", Summary: "预览 spawn_team task route", Group: string(chatSlashCommandGroupSession)},
@@ -269,6 +275,7 @@ func completeAgentsRoutingSlashArgs(session *ChatSession, ctx slashArgumentConte
 			return matchSlashArgumentCandidates(reasoningEffortArgumentCandidates(session), valueQuery)
 		}
 		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "--scope", Summary: "路由范围 auto|subagent|team", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 			{Command: "--workflow", Summary: "workflow hint", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 			{Command: "--team-id", Summary: "spawn_team team id", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 			{Command: "--teammate", Summary: "spawn_team teammate hint", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
@@ -293,6 +300,8 @@ func slashAgentsRoutingArgumentFocus(ctx slashArgumentContext) string {
 	current := strings.ToLower(strings.TrimSpace(ctx.Current.Text))
 	previous := strings.ToLower(strings.TrimSpace(ctx.Previous.Text))
 	switch {
+	case strings.HasPrefix(current, "--scope="):
+		return "scope"
 	case strings.HasPrefix(current, "--workflow="):
 		return "workflow"
 	case strings.HasPrefix(current, "--difficulty="):
@@ -303,13 +312,15 @@ func slashAgentsRoutingArgumentFocus(ctx slashArgumentContext) string {
 		return "model"
 	case strings.HasPrefix(current, "--reasoning-effort="):
 		return "reasoning"
-	case current == "--workflow" || current == "--difficulty" || current == "--provider" || current == "--model" || current == "--reasoning-effort":
+	case current == "--scope" || current == "--workflow" || current == "--difficulty" || current == "--provider" || current == "--model" || current == "--reasoning-effort":
 		return "flags"
 	}
 	if ctx.CurrentOK && strings.HasPrefix(current, "-") {
 		return "flags"
 	}
 	switch previous {
+	case "--scope":
+		return "scope"
 	case "--workflow":
 		return "workflow"
 	case "--difficulty":
@@ -328,7 +339,7 @@ func slashAgentsRoutingArgumentFocus(ctx slashArgumentContext) string {
 func slashAgentsRoutingArgumentQuery(ctx slashArgumentContext) string {
 	current := strings.TrimSpace(ctx.Current.Text)
 	switch slashAgentsRoutingArgumentFocus(ctx) {
-	case "difficulty", "provider", "model", "reasoning":
+	case "scope", "difficulty", "provider", "model", "reasoning":
 		if value := slashArgumentAssignmentValue(current); value != "" || strings.Contains(current, "=") {
 			return value
 		}

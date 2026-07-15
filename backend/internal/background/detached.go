@@ -162,7 +162,7 @@ func (m *Manager) monitorDetachedJob(ctx context.Context, managed *managedJob, p
 
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			_ = terminateProcess(pid)
-			m.failJobWithCode(managed, -1, "command timed out")
+			m.markTimedOut(managed, "command timed out")
 			return
 		}
 		if exitCode, ok := readDetachedExitCode(statusPath); ok {
@@ -178,7 +178,7 @@ func (m *Manager) monitorDetachedJob(ctx context.Context, managed *managedJob, p
 			if missingStatusSince.IsZero() {
 				missingStatusSince = time.Now().UTC()
 			} else if time.Since(missingStatusSince) >= 500*time.Millisecond {
-				m.failJobWithCode(managed, -1, "background process exited without status file")
+				m.orphanJob(managed, "background process exited without status file; exit status is unknown")
 				return
 			}
 		} else {

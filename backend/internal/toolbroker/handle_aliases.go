@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
 const (
@@ -196,6 +198,10 @@ func (s *handleAliasSet) resolve(reference, prefix, label string) (actual string
 		return actual, reference, nil
 	}
 	if strings.HasPrefix(reference, prefix) {
+		if prefix == backgroundJobAliasPrefix {
+			return "", "", runtimeerrors.Newf(runtimeerrors.ErrJobNotFound, "background job reference not found: %s", reference).
+				WithContext("job_reference", reference)
+		}
 		return "", "", fmt.Errorf("unknown %s reference: %s", label, reference)
 	}
 	return reference, strings.TrimSpace(s.ActualToAlias[reference]), nil

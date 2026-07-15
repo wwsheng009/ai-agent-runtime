@@ -17,6 +17,20 @@ aicli:
     default_model: mimo-v2.5-pro
     reasoning_effort: medium
     stream: true
+  subagents:
+    routing:
+      enabled: false
+      compatibility_mode: permissive
+      default_difficulty: normal
+      inherit_parent_when_missing: true
+      validate_model_capabilities: true
+      unsupported_reasoning_policy: downgrade
+      max_expert_concurrency: 1
+      levels:
+        easy: {}
+        normal: {}
+        hard: {}
+        expert: {}
 auth:
   access_auth:
     allow_anonymous: ${AUTH_ACCESS_ALLOW_ANONYMOUS:-true}

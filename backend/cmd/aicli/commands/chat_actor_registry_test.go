@@ -404,7 +404,7 @@ func TestLocalChatTeamExpertConcurrencyLimitRequiresRoutingEnabled(t *testing.T)
 	session := &ChatSession{
 		Config: &agentconfig.Config{
 			AICLI: &agentconfig.AICLIConfig{
-				Subagents: &agentconfig.AICLISubagentsConfig{
+				Teams: &agentconfig.AICLITeamsConfig{
 					Routing: &agentconfig.AICLISubagentRoutingConfig{
 						Enabled:              &enabled,
 						MaxExpertConcurrency: 2,
@@ -418,7 +418,7 @@ func TestLocalChatTeamExpertConcurrencyLimitRequiresRoutingEnabled(t *testing.T)
 	}
 
 	disabled := false
-	session.Config.AICLI.Subagents.Routing.Enabled = &disabled
+	session.Config.AICLI.Teams.Routing.Enabled = &disabled
 	if got := localChatTeamExpertConcurrencyLimit(session); got != 0 {
 		t.Fatalf("expected disabled expert limit 0, got %d", got)
 	}

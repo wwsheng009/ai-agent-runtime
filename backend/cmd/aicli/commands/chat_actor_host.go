@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
@@ -54,18 +55,21 @@ type localChatRuntimeHost struct {
 	TeamLifecycle      teamLifecycleService
 	ActorRegistry      *localActorRegistry
 	cleanupFns         []func()
+	closeOnce          sync.Once
 }
 
 func (h *localChatRuntimeHost) Close() {
 	if h == nil {
 		return
 	}
-	h.waitForWarmup()
-	for i := len(h.cleanupFns) - 1; i >= 0; i-- {
-		if h.cleanupFns[i] != nil {
-			h.cleanupFns[i]()
+	h.closeOnce.Do(func() {
+		h.waitForWarmup()
+		for i := len(h.cleanupFns) - 1; i >= 0; i-- {
+			if h.cleanupFns[i] != nil {
+				h.cleanupFns[i]()
+			}
 		}
-	}
+	})
 }
 
 func (h *localChatRuntimeHost) waitForWarmup() {
@@ -616,6 +620,13 @@ func localChatSubagentRoutingConfig(session *ChatSession) *config.AICLISubagentR
 	return session.Config.AICLI.Subagents.Routing
 }
 
+func localChatTeamRoutingConfig(session *ChatSession) *config.AICLISubagentRoutingConfig {
+	if session == nil {
+		return nil
+	}
+	return config.EffectiveTeamRoutingConfig(session.Config)
+}
+
 func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runtimecfg.RuntimeConfig) {
 	if agentConfig == nil || runtimeConfig == nil {
 		return
@@ -740,6 +751,26 @@ func loadLocalChatRuntimeConfig(cfg *config.Config, session *ChatSession) (*runt
 
 func applyLocalChatRuntimePersistenceDefaults(config *runtimecfg.RuntimeConfig, session *ChatSession, configPath string) {
 	if config == nil || session == nil {
+		return
+	}
+	if session.Ephemeral {
+		config.Sessions.Dir = ""
+		config.SessionRuntime.StorePath = ""
+		config.SessionRuntime.StoreDSN = ""
+		config.SessionRuntime.DefaultPersistence = sessionruntime.PersistenceMemory
+		config.Team.StorePath = ""
+		config.Team.StoreDSN = ""
+		config.AgentControl.StorePath = ""
+		config.AgentControl.StoreDSN = ""
+		config.AgentControl.MailboxStorePath = ""
+		config.AgentControl.MailboxStoreDSN = ""
+		config.AgentControl.AgentStorePath = ""
+		config.AgentControl.AgentStoreDSN = ""
+		config.Artifact.StorePath = ""
+		config.Artifact.StoreDSN = ""
+		config.Background.StorePath = ""
+		config.Background.StoreDSN = ""
+		config.Background.LogDir = ""
 		return
 	}
 	sessionruntime.ApplyDefaults(config, sessionruntime.ResolveOptions{
@@ -924,6 +955,9 @@ func closeLocalRuntimeStores(store runtimechat.RuntimeStateStore, eventStore run
 }
 
 func resolveLocalChatRuntimeStorePath(session *ChatSession, runtimeConfig *runtimecfg.RuntimeConfig) string {
+	if session != nil && session.Ephemeral {
+		return ""
+	}
 	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath) != "" {
 		return strings.TrimSpace(runtimeConfig.SessionRuntime.StorePath)
 	}

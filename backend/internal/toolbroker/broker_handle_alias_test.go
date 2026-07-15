@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -95,6 +97,44 @@ func TestBrokerBackgroundTaskPersistsStableJobAliasAcrossBrokerInstances(t *test
 	assert.Equal(t, result.JobID, outputMeta["job_alias"])
 }
 
+func TestBrokerBackgroundAliasSurvivesManagerRestart(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	config := background.Config{
+		StorePath: filepath.Join(tempDir, "background.db"),
+		LogDir:    filepath.Join(tempDir, "logs"),
+	}
+	contextStore := newFakeSessionContextStore()
+	managerOne := background.NewManager(config)
+	brokerOne := &Broker{Background: managerOne, SessionContextStore: contextStore}
+
+	raw, meta, err := brokerOne.ExecuteToolCall(ctx, "parent-session", types.ToolCall{
+		ID: "call-bg-restart", Name: ToolBackgroundTask,
+		Args: map[string]interface{}{"command": "echo cross-restart"},
+	})
+	require.NoError(t, err)
+	alias := raw.(BackgroundTaskResult).JobID
+	actualID := meta["job_id"].(string)
+	require.Eventually(t, func() bool {
+		job, getErr := managerOne.GetJob(ctx, actualID)
+		return getErr == nil && job != nil && job.Status == background.StatusCompleted
+	}, 15*time.Second, 50*time.Millisecond)
+	require.NoError(t, managerOne.Close())
+
+	managerTwo := background.NewManager(config)
+	defer func() { require.NoError(t, managerTwo.Close()) }()
+	brokerTwo := &Broker{Background: managerTwo, SessionContextStore: contextStore}
+	outputRaw, outputMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolTaskOutput, map[string]interface{}{
+		"job_id": alias,
+	})
+	require.NoError(t, err)
+	output := outputRaw.(TaskOutputResult)
+	assert.Equal(t, alias, output.JobID)
+	assert.Equal(t, actualID, outputMeta["job_id"])
+	assert.Equal(t, string(background.StatusCompleted), output.Status)
+	assert.Contains(t, output.Output, "cross-restart")
+}
+
 func TestBrokerAgentAliasesPersistAcrossBrokerInstances(t *testing.T) {
 	ctx := context.Background()
 	store := newFakeSessionContextStore()
@@ -172,6 +212,13 @@ func TestBrokerAgentAliasesPersistAcrossBrokerInstances(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "child-1", controller.lastResume)
 	assert.Equal(t, spawnResult.SessionID, resumeMeta["session_alias"])
+}
+
+func TestUnknownBackgroundAliasUsesStableErrorCode(t *testing.T) {
+	aliases := handleAliasSet{}
+	_, _, err := aliases.resolve("job_ref_missing", backgroundJobAliasPrefix, "background job")
+	require.Error(t, err)
+	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound))
 }
 
 func TestBrokerAgentCacheSafeSummaryOmitsDynamicTurnIDs(t *testing.T) {

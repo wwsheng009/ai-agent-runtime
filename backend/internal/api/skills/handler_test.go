@@ -36,10 +36,20 @@ import (
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type testMCPManager struct{}
+
+type readOnlyToolSurfaceMCPManager struct{ testMCPManager }
+
+func (m *readOnlyToolSurfaceMCPManager) ListTools() []skill.ToolInfo {
+	return []skill.ToolInfo{
+		{Name: "echo_tool", Description: "read tool", MCPName: "test-mcp", Enabled: true},
+		{Name: "bash", Description: "shell tool", MCPName: "test-mcp", Enabled: true},
+	}
+}
 
 func (m *testMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
 	return skill.ToolInfo{
@@ -663,9 +673,10 @@ func TestAgentChat_UsesLLMAndPersistsSession(t *testing.T) {
 
 	session, err := sessionManager.GetSession(context.Background(), sessionIDValue)
 	require.NoError(t, err)
-	require.Len(t, session.GetMessages(), 2)
-	assert.Equal(t, "user", session.GetMessages()[0].Role)
-	assert.Equal(t, "assistant", session.GetMessages()[1].Role)
+	require.Len(t, session.GetMessages(), 3)
+	assert.Equal(t, "system", session.GetMessages()[0].Role)
+	assert.Equal(t, "user", session.GetMessages()[1].Role)
+	assert.Equal(t, "assistant", session.GetMessages()[2].Role)
 }
 
 func TestAgentChat_SessionHistoryAutoCompactsBeforeLLMFallback(t *testing.T) {
@@ -819,32 +830,17 @@ func TestAgentChat_ReActReturnsStructuredFailureWhenMaxStepsIsReached(t *testing
 		DefaultModel:    "test-model",
 		MaxRetries:      0,
 	})
-	provider := &testSequenceLLMProvider{
-		name: "test-provider",
-		responses: []*llm.LLMResponse{
-			{
-				Content: "先查看第一段日志。",
-				Model:   "test-model",
-				ToolCalls: []types.ToolCall{
-					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app-1.log"}},
-				},
+	responses := make([]*llm.LLMResponse, 0, 7)
+	for index := 1; index <= 7; index++ {
+		responses = append(responses, &llm.LLMResponse{
+			Content: fmt.Sprintf("继续查看第 %d 段日志。", index),
+			Model:   "test-model",
+			ToolCalls: []types.ToolCall{
+				{Name: "read_logs", Args: map[string]interface{}{"path": fmt.Sprintf("logs/app-%d.log", index)}},
 			},
-			{
-				Content: "再查看第二段日志。",
-				Model:   "test-model",
-				ToolCalls: []types.ToolCall{
-					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app-2.log"}},
-				},
-			},
-			{
-				Content: "继续查看第三段日志。",
-				Model:   "test-model",
-				ToolCalls: []types.ToolCall{
-					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app-3.log"}},
-				},
-			},
-		},
+		})
 	}
+	provider := &testSequenceLLMProvider{name: "test-provider", responses: responses}
 	require.NoError(t, runtime.RegisterProvider("test-provider", provider))
 	handler.SetLLMRuntime(runtime)
 
@@ -852,7 +848,10 @@ func TestAgentChat_ReActReturnsStructuredFailureWhenMaxStepsIsReached(t *testing
 	runtimeConfig.Agent.DefaultProvider = "test-provider"
 	runtimeConfig.Agent.DefaultModel = "test-model"
 	runtimeConfig.Agent.MaxMaxSteps = 6
-	runtimeConfig.Context.MaxPromptTokens = 900
+	// The runtime policy system message is part of the prompt budget. Leave
+	// enough room for the three deliberately large ReAct tool turns so this
+	// test reaches the max-step guard instead of prompt preflight.
+	runtimeConfig.Context.MaxPromptTokens = 50000
 	runtimeConfig.Context.MaxMessages = 16
 	runtimeConfig.Context.KeepRecentMessages = 8
 	handler.SetRuntimeConfig(runtimeConfig, "")
@@ -2623,6 +2622,37 @@ func TestBuildSessionActor_UsesSharedSessionMetadataContext(t *testing.T) {
 	assert.True(t, messageListContainsText(request.Messages, "Shared workspace instruction."))
 	assert.True(t, messageListContainsText(request.Messages, "Task difficulty rating and subagent delegation policy:"))
 	assert.True(t, messageListContainsText(request.Messages, "difficulty_rationale"))
+}
+
+func TestBuildSessionActor_ReadOnlyChildHidesShellTools(t *testing.T) {
+	mcpManager := &readOnlyToolSurfaceMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+	handler.SetSessionManager(chat.NewSessionManager(chat.NewInMemoryStorage(), nil))
+
+	provider := &testLLMProvider{name: "test-model", content: "reviewed"}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
+	require.NoError(t, runtime.RegisterProvider("test-model", provider))
+	handler.SetLLMRuntime(runtime)
+
+	session, err := handler.sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+	session.SetContext(toolbroker.AgentSessionContextReadOnly, true)
+	require.NoError(t, handler.sessionManager.Update(context.Background(), session))
+
+	actor, err := handler.buildSessionActor(session.ID)
+	require.NoError(t, err)
+	defer actor.Stop()
+	_, err = actor.SubmitPrompt(context.Background(), "review", nil)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, provider.requests)
+	names := make(map[string]bool)
+	for _, definition := range provider.requests[0].Tools {
+		names[definition.Name] = true
+	}
+	assert.True(t, names["echo_tool"])
+	assert.False(t, names["bash"])
 }
 
 func TestBuildSessionLoopConfig_PropagatesParallelToolConfig(t *testing.T) {
@@ -4732,9 +4762,10 @@ func TestAgentChat_StreamSSE(t *testing.T) {
 
 	session, err := sessionManager.GetSession(context.Background(), sessionIDValue)
 	require.NoError(t, err)
-	require.Len(t, session.GetMessages(), 2)
-	assert.Equal(t, "stream please", session.GetMessages()[0].Content)
-	assert.Equal(t, "hello world", session.GetMessages()[1].Content)
+	require.Len(t, session.GetMessages(), 3)
+	assert.Equal(t, "system", session.GetMessages()[0].Role)
+	assert.Equal(t, "stream please", session.GetMessages()[1].Content)
+	assert.Equal(t, "hello world", session.GetMessages()[2].Content)
 }
 
 func TestAgentChat_StreamSSE_AgentRouteResult(t *testing.T) {
