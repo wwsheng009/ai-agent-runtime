@@ -33,6 +33,12 @@ logs/
 # Build artifacts
 dist/
 build/
+output/
+
+# runtime-server embeds generated frontend files; only keep the build placeholder.
+!backend/internal/webui/dist/
+backend/internal/webui/dist/*
+!backend/internal/webui/dist/placeholder.txt
 
 # Temp
 tmp/

@@ -20,10 +20,13 @@ on:
         default: 'false'
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   GO_VERSION: '1.24.2'
+  NODE_VERSION: '24'
+  PNPM_VERSION: '10.27.0'
+  PLAYWRIGHT_CLI_VERSION: '0.1.17'
   CMD_PATH: ./cmd/aicli
   BIN_NAME: aicli
   WORKDIR: backend
@@ -31,15 +34,76 @@ env:
   GOPROXY: https://proxy.golang.org,direct
 
 jobs:
+  release-gate:
+    name: Release reliability gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: ${{ env.WORKDIR }}/go.sum
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install Playwright browser
+        id: playwright_browser
+        continue-on-error: true
+        shell: pwsh
+        run: >-
+          npx --yes --package "@playwright/cli@$env:PLAYWRIGHT_CLI_VERSION"
+          playwright-cli install-browser chrome-for-testing --with-deps
+
+      - name: Run release gate
+        shell: pwsh
+        run: |
+          $version = "gate-" + $env:GITHUB_SHA.Substring(0, 12)
+          $gateArgs = @(
+            "-Version", $version,
+            "-PlaywrightVersion", $env:PLAYWRIGHT_CLI_VERSION,
+            "-StepTimeoutSeconds", "1200"
+          )
+          if ("${{ steps.playwright_browser.outcome }}" -eq "success") {
+            $gateArgs += "-SkipBrowserInstall"
+          }
+          & ./scripts/verify-release.ps1 @gateArgs
+
+      - name: Upload release gate evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-gate-evidence
+          path: output/release-gate/**
+          if-no-files-found: warn
+          retention-days: 14
+
   validate:
     name: Validate no-CGO build prerequisites
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -67,7 +131,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    needs: validate
+    needs: [validate, release-gate]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -87,10 +151,10 @@ jobs:
             goarch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -167,7 +231,7 @@ jobs:
           echo "basename=${BASENAME}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pkg.outputs.basename }}
           path: |
@@ -181,12 +245,14 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish_release == 'true'
+    permissions:
+      contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

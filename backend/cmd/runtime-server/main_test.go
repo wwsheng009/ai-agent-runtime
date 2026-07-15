@@ -2,13 +2,62 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 )
+
+func TestRuntimeInfoHandlerExposesBuildProvenance(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	response := httptest.NewRecorder()
+
+	runtimeInfoHandler(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", response.Code)
+	}
+	if cacheControl := response.Header().Get("Cache-Control"); cacheControl != "no-store" {
+		t.Fatalf("expected no-store cache policy, got %q", cacheControl)
+	}
+	var body struct {
+		OK            bool                              `json:"ok"`
+		Status        string                            `json:"status"`
+		Service       string                            `json:"service"`
+		ExecutionCore runtimechat.RuntimeCoreDescriptor `json:"execution_core"`
+		Backend       struct {
+			Version   string `json:"version"`
+			GitCommit string `json:"git_commit"`
+			BuildTime string `json:"build_time"`
+		} `json:"backend"`
+		Frontend struct {
+			AssetManifestHash string `json:"asset_manifest_hash"`
+			BuildTime         string `json:"build_time"`
+			EntryAsset        string `json:"entry_asset"`
+		} `json:"frontend"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if !body.OK || body.Status != "ok" || body.Service != "ai-agent-runtime" {
+		t.Fatalf("unexpected health identity: %+v", body)
+	}
+	if !runtimechat.IsSessionActorRuntimeCore(body.ExecutionCore) {
+		t.Fatalf("unexpected execution core: %+v", body.ExecutionCore)
+	}
+	if body.Backend.Version == "" || body.Backend.GitCommit == "" || body.Backend.BuildTime == "" {
+		t.Fatalf("backend provenance is incomplete: %+v", body.Backend)
+	}
+	if body.Frontend.AssetManifestHash == "" || body.Frontend.BuildTime == "" || body.Frontend.EntryAsset == "" {
+		t.Fatalf("frontend provenance is incomplete: %+v", body.Frontend)
+	}
+}
 
 func TestResolvePathFromConfigFile(t *testing.T) {
 	configFile := filepath.Join("backend", "configs", "runtime.yaml")

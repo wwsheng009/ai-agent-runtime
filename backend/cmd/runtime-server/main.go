@@ -21,6 +21,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
+	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/filetransport"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -31,6 +33,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
+	"github.com/wwsheng009/ai-agent-runtime/internal/webui"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -812,7 +815,14 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		if selectedConfig == nil {
 			return nil
 		}
-		configCopy := *selectedConfig
+		rawConfig, err := json.Marshal(selectedConfig)
+		if err != nil {
+			return nil
+		}
+		var configCopy runtimecfg.RuntimeConfig
+		if err := json.Unmarshal(rawConfig, &configCopy); err != nil {
+			return nil
+		}
 		configCopy.Sessions.Dir = resolveRuntimeServerSessionDir(selectedPath, configCopy.Sessions.Dir)
 		sessionruntime.ApplyDefaults(&configCopy, sessionruntime.ResolveOptions{
 			Config:     &configCopy,
@@ -856,9 +866,13 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 
 	router := mux.NewRouter()
 	router.UseEncodedPath()
-	router.HandleFunc("/", runtimeInfoHandler).Methods(http.MethodGet)
 	router.HandleFunc("/healthz", runtimeInfoHandler).Methods(http.MethodGet)
 	handler.RegisterRoutes(router)
+	if webui.Available() {
+		router.PathPrefix("/").Handler(webui.Handler())
+	} else {
+		router.HandleFunc("/", runtimeInfoHandler).Methods(http.MethodGet)
+	}
 
 	return &runtimeServerApp{
 		router:         router,
@@ -1262,10 +1276,15 @@ func allConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig) []string {
 
 func runtimeInfoHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"ok":      true,
-		"service": "ai-agent-runtime",
-		"routes":  []string{"/api/agent/chat", "/api/runtime"},
+		"ok":             true,
+		"status":         "ok",
+		"service":        "ai-agent-runtime",
+		"execution_core": runtimechat.SessionActorRuntimeCore(),
+		"backend":        buildinfo.Backend(),
+		"frontend":       webui.Provenance(),
+		"routes":         []string{"/api/agent/chat", "/api/runtime"},
 	})
 }
 
