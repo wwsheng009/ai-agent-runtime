@@ -1,22 +1,28 @@
 import Prism from "prismjs";
 
-import "prismjs/components/prism-bash";
-import "prismjs/components/prism-clike";
-import "prismjs/components/prism-css";
-import "prismjs/components/prism-diff";
-import "prismjs/components/prism-go";
-import "prismjs/components/prism-javascript";
-import "prismjs/components/prism-json";
-import "prismjs/components/prism-jsx";
-import "prismjs/components/prism-markdown";
-import "prismjs/components/prism-markup";
-import "prismjs/components/prism-markup-templating";
-import "prismjs/components/prism-powershell";
-import "prismjs/components/prism-python";
-import "prismjs/components/prism-sql";
-import "prismjs/components/prism-tsx";
-import "prismjs/components/prism-typescript";
-import "prismjs/components/prism-yaml";
+// Prism language components are legacy scripts which read a global `Prism`
+// identifier. Static side-effect imports can be reordered by production
+// bundlers, causing a component chunk to execute before the core is exposed.
+// Set the global explicitly, then load components in dependency order.
+(globalThis as typeof globalThis & { Prism: typeof Prism }).Prism = Prism;
+
+await import("prismjs/components/prism-markup");
+await import("prismjs/components/prism-css");
+await import("prismjs/components/prism-clike");
+await import("prismjs/components/prism-javascript");
+await import("prismjs/components/prism-markup-templating");
+await import("prismjs/components/prism-bash");
+await import("prismjs/components/prism-diff");
+await import("prismjs/components/prism-go");
+await import("prismjs/components/prism-json");
+await import("prismjs/components/prism-jsx");
+await import("prismjs/components/prism-markdown");
+await import("prismjs/components/prism-powershell");
+await import("prismjs/components/prism-python");
+await import("prismjs/components/prism-sql");
+await import("prismjs/components/prism-typescript");
+await import("prismjs/components/prism-tsx");
+await import("prismjs/components/prism-yaml");
 
 export type CodeHighlightSegment = {
   content: string;

@@ -9,6 +9,7 @@ type SettingsInlineToggleCardProps = {
   description?: ReactNode;
   className?: string;
   labelClassName?: string;
+  disabled?: boolean;
 };
 
 export function SettingsInlineToggleCard({
@@ -18,11 +19,13 @@ export function SettingsInlineToggleCard({
   description,
   className,
   labelClassName,
+  disabled = false,
 }: SettingsInlineToggleCardProps) {
   return (
     <div
       className={cn(
         "rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2.5",
+        disabled ? "cursor-not-allowed opacity-60" : null,
         className,
       )}
     >
@@ -44,6 +47,7 @@ export function SettingsInlineToggleCard({
           type="checkbox"
           className="h-4 w-4 shrink-0 accent-[var(--accent-primary)]"
           checked={checked}
+          disabled={disabled}
           onChange={(event) => onCheckedChange(event.target.checked)}
         />
       </label>

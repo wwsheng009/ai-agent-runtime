@@ -104,6 +104,9 @@ export default defineConfig(({ mode }) => {
   const devHost = readString(env, "VITE_DEV_HOST") ?? "0.0.0.0";
   const devPort = readNumber(env, "VITE_DEV_PORT", 5193);
   const backendPort = readNumber(env, "VITE_API_PROXY_PORT", 8101);
+  const testMaxWorkers =
+    readOptionalNumber(env, "VITEST_MAX_WORKERS") ??
+    (process.platform === "win32" ? 2 : undefined);
   const proxyTarget =
     readString(env, "VITE_API_PROXY_TARGET") ??
     `http://127.0.0.1:${backendPort}`;
@@ -165,6 +168,7 @@ export default defineConfig(({ mode }) => {
     },
     test: {
       environment: "jsdom",
+      maxWorkers: testMaxWorkers,
       setupFiles: ["./src/test/setup.ts"],
     },
   };

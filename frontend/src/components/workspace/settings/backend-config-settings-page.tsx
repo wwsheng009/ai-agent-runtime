@@ -10,6 +10,7 @@ import {
   RotateCcwIcon,
   RouteIcon,
   Settings2Icon,
+  UsersIcon,
   WifiIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -28,10 +29,13 @@ import { Button } from "@/components/ui/button";
 import {
   getRuntimeConfigDocument,
   getRuntimeServiceStatus,
+  previewRuntimeAgentRoute,
   previewRuntimeConfigDocument,
   restartRuntimeService,
   saveRuntimeConfigDocument,
   type RuntimeConfigDocument,
+  type RuntimeAgentRoutePreviewResult,
+  type RuntimeAgentRoutePreviewTask,
   type RuntimeServiceStatus,
 } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
@@ -140,7 +144,18 @@ import {
   type TransformerModifierScope,
 } from "./runtime-transformer-domain-utils";
 import { SettingsSection } from "./settings-section";
+import {
+  analyzeRuntimeAgentRoutingConfig,
+  getRuntimeAgentRoutingSettings,
+  updateRuntimeAgentRoutingConfig,
+  updateRuntimeTeamRoutingInheritance,
+  type AgentRoutingScope,
+  type RuntimeAgentRoutingConfigSummary,
+} from "./runtime-agent-routing-domain-utils";
 
+// The page combines runtimeConfig and common namespace translators; keep this
+// boundary intentionally loose while the individual editor components remain typed.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Translator = any;
 
 const RuntimeProviderDomainEditor = lazy(() =>
@@ -213,6 +228,11 @@ const RuntimeTransformerDomainEditor = lazy(() =>
     default: module.RuntimeTransformerDomainEditor,
   })),
 );
+const RuntimeAgentRoutingDomainEditor = lazy(() =>
+  import("./runtime-agent-routing-domain-editor").then((module) => ({
+    default: module.RuntimeAgentRoutingDomainEditor,
+  })),
+);
 
 type EditorMode =
   | "providers"
@@ -229,6 +249,7 @@ type EditorMode =
   | "circuitBreaker"
   | "transformer"
   | "auth"
+  | "agentRouting"
   | "source";
 
 const modeMenuEntries: Array<{
@@ -242,6 +263,12 @@ const modeMenuEntries: Array<{
     labelKey: "editor.modes.providers.label",
     descriptionKey: "editor.modes.providers.description",
     icon: BotIcon,
+  },
+  {
+    mode: "agentRouting",
+    labelKey: "editor.modes.agentRouting.label",
+    descriptionKey: "editor.modes.agentRouting.description",
+    icon: UsersIcon,
   },
   {
     mode: "providerGroups",
@@ -813,6 +840,23 @@ export function BackendConfigSettingsPage() {
     () => listRuntimeProviderSummaries(draftParsed),
     [draftParsed],
   );
+  const agentRoutingSettings = useMemo(
+    () => getRuntimeAgentRoutingSettings(draftParsed),
+    [draftParsed],
+  );
+  const agentRoutingHealth = useMemo(() => {
+    const subagents = analyzeRuntimeAgentRoutingConfig(
+      agentRoutingSettings.subagents,
+      providers,
+    );
+    const teams = agentRoutingSettings.teamUsesSubagentRouting
+      ? null
+      : analyzeRuntimeAgentRoutingConfig(agentRoutingSettings.teams, providers);
+    return {
+      errorCount: subagents.errorCount + (teams?.errorCount ?? 0),
+      warningCount: subagents.warningCount + (teams?.warningCount ?? 0),
+    };
+  }, [agentRoutingSettings, providers]);
   const providerGroups = useMemo(
     () => listRuntimeProviderGroupSummaries(draftParsed),
     [draftParsed],
@@ -925,6 +969,8 @@ export function BackendConfigSettingsPage() {
     switch (modeValue) {
       case "providers":
         return t("editor.counts.providers", { count: providers.length });
+      case "agentRouting":
+        return getAgentRoutingStatusLabel();
       case "providerGroups":
         return t("editor.counts.providerGroups", {
           count: providerGroups.length,
@@ -983,10 +1029,30 @@ export function BackendConfigSettingsPage() {
     }
   }
 
+  function getAgentRoutingStatusLabel() {
+    if (agentRoutingHealth.errorCount > 0) {
+      return t("editor.agentRouting.health.errorCount", {
+        count: agentRoutingHealth.errorCount,
+      });
+    }
+    if (agentRoutingHealth.warningCount > 0) {
+      return t("editor.agentRouting.health.warningCount", {
+        count: agentRoutingHealth.warningCount,
+      });
+    }
+    return agentRoutingSettings.subagents.enabled ||
+      (!agentRoutingSettings.teamUsesSubagentRouting &&
+        agentRoutingSettings.teams.enabled)
+      ? tCommon("states.enabled")
+      : tCommon("states.disabled");
+  }
+
   function getModeSummary(modeValue: EditorMode) {
     switch (modeValue) {
       case "providers":
         return t("editor.summary.providers");
+      case "agentRouting":
+        return t("editor.summary.agentRouting");
       case "providerGroups":
         return t("editor.summary.groups");
       case "networkProxy":
@@ -1087,7 +1153,7 @@ export function BackendConfigSettingsPage() {
     }
 
     void load();
-  }, []);
+  }, [t]);
 
   async function switchMode(nextMode: EditorMode) {
     if (nextMode === mode) {
@@ -1303,6 +1369,50 @@ export function BackendConfigSettingsPage() {
       setConfigValueAtPath(current, ["providers", "default_provider"], name),
     );
     setStatusMessage(t("editor.messages.defaultProviderSet", { name }));
+  }
+
+  function handleAgentRoutingChange(
+    scope: AgentRoutingScope,
+    nextConfig: RuntimeAgentRoutingConfigSummary,
+  ) {
+    setDraftParsed((current: unknown) =>
+      updateRuntimeAgentRoutingConfig(current, scope, nextConfig),
+    );
+    setStatusMessage(
+      t("editor.messages.agentRoutingUpdated", {
+        scope: t(`editor.agentRouting.scopes.${scope}` as never),
+      }),
+    );
+  }
+
+  async function handleAgentRoutePreview(
+    scope: AgentRoutingScope,
+    task: RuntimeAgentRoutePreviewTask,
+  ): Promise<RuntimeAgentRoutePreviewResult> {
+    if (draftParsed == null) {
+      throw new Error(t("editor.agentRouting.preview.documentUnavailable"));
+    }
+    return previewRuntimeAgentRoute({
+      document: {
+        mode: "structured",
+        parsed: draftParsed,
+        changed_by: "web-runtime-config",
+      },
+      scope: scope === "teams" ? "team" : "subagent",
+      workflow: scope === "teams" ? "spawn_team" : "spawn_agent",
+      task,
+    });
+  }
+
+  function handleTeamRoutingInheritanceChange(inherit: boolean) {
+    setDraftParsed((current: unknown) =>
+      updateRuntimeTeamRoutingInheritance(current, inherit),
+    );
+    setStatusMessage(
+      inherit
+        ? t("editor.messages.teamRoutingInherited")
+        : t("editor.messages.teamRoutingIndependent"),
+    );
   }
 
   function handleProxyConfigChange(nextProxyConfig: RuntimeProxyConfigSummary) {
@@ -3156,6 +3266,10 @@ export function BackendConfigSettingsPage() {
                   value={`${providers.length}`}
                 />
                 <SummaryPill
+                  label={t("editor.summary.agentRouting")}
+                  value={getAgentRoutingStatusLabel()}
+                />
+                <SummaryPill
                   label={t("editor.summary.groups")}
                   value={`${providerGroups.length}`}
                 />
@@ -3253,6 +3367,24 @@ export function BackendConfigSettingsPage() {
                   onSaveProvider={handleSaveProvider}
                   onSetDefaultProvider={handleSetDefaultProvider}
                   providers={providers}
+                />
+              </Suspense>
+            ) : null}
+
+            {mode === "agentRouting" ? (
+              <Suspense
+                fallback={
+                  <ConfigEditorLoadingCard
+                    label={t("editor.modes.agentRouting.label")}
+                  />
+                }
+              >
+                <RuntimeAgentRoutingDomainEditor
+                  onChange={handleAgentRoutingChange}
+                  onPreviewRoute={handleAgentRoutePreview}
+                  onTeamInheritanceChange={handleTeamRoutingInheritanceChange}
+                  providers={providers}
+                  settings={agentRoutingSettings}
                 />
               </Suspense>
             ) : null}
@@ -3607,7 +3739,7 @@ export function BackendConfigSettingsPage() {
       ) : null}
 
       {hasUnsavedChanges ? (
-        <div className="sticky bottom-3 z-20">
+        <div className="mt-3">
           <div className="rounded-[0.9rem] border border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] px-3 py-2.5">
             <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-2">

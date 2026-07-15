@@ -3,6 +3,7 @@ export * from "@/types/runtime";
 export {
   getRuntimeConfigDocument,
   getRuntimeServiceStatus,
+  previewRuntimeAgentRoute,
   previewRuntimeConfigDocument,
   restartRuntimeService,
   saveRuntimeConfigDocument,

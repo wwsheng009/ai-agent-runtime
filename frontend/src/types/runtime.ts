@@ -727,6 +727,62 @@ export type RuntimeConfigDocumentSaveResponse = {
   document: RuntimeConfigDocument;
 };
 
+export type RuntimeAgentRoutePreviewParent = {
+  provider?: string;
+  model?: string;
+  reasoning_effort?: string;
+  max_tokens?: number;
+  timeout?: string;
+};
+
+export type RuntimeAgentRoutePreviewTask = {
+  role?: string;
+  goal?: string;
+  difficulty?: string;
+  difficulty_rationale?: string;
+  provider?: string;
+  model?: string;
+  reasoning_effort?: string;
+  budget_tokens?: number;
+  timeout?: string;
+  read_only?: boolean;
+};
+
+export type RuntimeAgentRoutePreviewRequest = {
+  document: RuntimeConfigDocumentSaveRequest;
+  scope?: "auto" | "subagent" | "team";
+  workflow?: string;
+  parent?: RuntimeAgentRoutePreviewParent;
+  task?: RuntimeAgentRoutePreviewTask;
+};
+
+export type RuntimeAgentRoutePreviewDecision = {
+  difficulty?: string;
+  difficulty_source?: string;
+  difficulty_rationale?: string;
+  provider?: string;
+  model?: string;
+  reasoning_effort?: string;
+  max_tokens?: number;
+  timeout?: string;
+  source?: string;
+  warnings?: string[];
+  fallback_used?: boolean;
+  fallback_reason?: string;
+};
+
+export type RuntimeAgentRoutePreviewResult = {
+  scope: "subagent" | "team";
+  routing_source: "subagent" | "team_independent" | "subagent_inherited";
+  routing_enabled: boolean;
+  parent: RuntimeAgentRoutePreviewParent;
+  decision: RuntimeAgentRoutePreviewDecision;
+};
+
+export type RuntimeAgentRoutePreviewResponse = {
+  route: RuntimeAgentRoutePreviewResult;
+};
+
 export type RuntimeServiceStatus = {
   running: boolean;
   pid: number;

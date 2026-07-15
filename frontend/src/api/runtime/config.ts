@@ -1,4 +1,6 @@
 import type {
+  RuntimeAgentRoutePreviewRequest,
+  RuntimeAgentRoutePreviewResponse,
   RuntimeConfigDocumentResponse,
   RuntimeConfigDocumentSaveRequest,
   RuntimeConfigDocumentSaveResponse,
@@ -10,6 +12,9 @@ import { buildRuntimeUrl, fetchRuntimeJson } from "./shared";
 
 const runtimeConfigDocumentUrl = buildRuntimeUrl("/api/runtime/config/document");
 const runtimeConfigPreviewUrl = buildRuntimeUrl("/api/runtime/config/document/preview");
+const runtimeAgentRoutePreviewUrl = buildRuntimeUrl(
+  "/api/runtime/config/document/agent-route-preview",
+);
 const runtimeSkillsConfigWriteUrl = buildRuntimeUrl("/api/runtime/skills/config/write");
 const runtimeServiceUrl = buildRuntimeUrl("/api/runtime/service");
 const runtimeServiceRestartUrl = buildRuntimeUrl("/api/runtime/service/restart");
@@ -67,6 +72,22 @@ export async function previewRuntimeConfigDocument(
     },
   );
   return response.document;
+}
+
+export async function previewRuntimeAgentRoute(
+  request: RuntimeAgentRoutePreviewRequest,
+) {
+  const response = await fetchRuntimeJson<RuntimeAgentRoutePreviewResponse>(
+    runtimeAgentRoutePreviewUrl,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    },
+  );
+  return response.route;
 }
 
 export async function getRuntimeServiceStatus() {
