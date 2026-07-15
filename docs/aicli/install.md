@@ -421,6 +421,35 @@ aicli:
             reasoning_effort: medium
 ```
 
+Team 默认沿用 `aicli.subagents.routing`。如果 Team task 需要与普通子 Agent 使用不同的 provider/model，可增加独立配置：
+
+```yaml
+aicli:
+  teams:
+    routing:
+      enabled: true
+      default_difficulty: normal
+      inherit_parent_when_missing: true
+      validate_model_capabilities: true
+      levels:
+        easy:
+          provider: local_fast
+          model: gpt-5.4-mini
+        normal:
+          provider: balanced_remote
+          model: gpt-5.4
+        hard:
+          provider: strong_remote
+          model: gpt-5.4
+          reasoning_effort: high
+        expert:
+          provider: audit_model
+          model: gpt-5.4
+          reasoning_effort: high
+```
+
+在 runtime-server Web 配置页的“Agent 难度路由”中可维护这两套配置。保存后，新创建的子 Agent 和 Team task 会立即使用新策略；已经运行中的任务不会被重新路由。
+
 可观测入口：
 
 - `aicli doctor subagent-route --role writer --difficulty hard`：不调用模型，只输出最终 route decision。未显式传 `--parent-*` 时，会优先使用 `aicli.chat.default_provider/default_model/reasoning_effort` 作为 parent 默认值，再回退 provider 默认配置。
@@ -435,7 +464,7 @@ tool 参数边界：
 - `spawn_subagents` 支持 `difficulty`、`difficulty_rationale`、`provider`、`model`、`reasoning_effort`；`thinking_effort` 是 `reasoning_effort` 的兼容别名。routing enabled 时，provider/model/reasoning 最终仍由本地 routing policy 授权；未授权 override 会被忽略或记录 warning。
 - `spawn_agent` 支持同样的 route hints，并会把最终 route 写入 child session context 和 AgentControl durable graph。routing disabled 时只保留 legacy `model` override，不会因为新增字段切换 provider 或 reasoning。
 - planner 生成的 `PlanStep.difficulty` / `difficulty_rationale` 会复制到建议的 subagent task；hard/expert writer 必须带只读 verifier 依赖，且 verifier 难度至少为 hard。
-- `spawn_team.tasks[].difficulty` 与 `difficulty_rationale` 只用于 task metadata、planner/audit、dispatch/mailbox 展示，不会改变 teammate provider/model routing。
+- `spawn_team.tasks[].difficulty` 与 `difficulty_rationale` 会进入 Team task 路由决策、planner/audit、dispatch/mailbox 和 runtime event。若未配置 `aicli.teams.routing`，Team 沿用 `aicli.subagents.routing`。
 
 ---
 
