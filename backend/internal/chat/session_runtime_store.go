@@ -88,7 +88,12 @@ func (e *LeaseConflictError) Error() string {
 	return fmt.Sprintf("session %s is already owned by %s until %s", e.Lease.SessionID, e.Lease.OwnerID, e.Lease.ExpiresAt.Format(time.RFC3339Nano))
 }
 
-const defaultSessionLeaseTTL = 2 * time.Minute
+const (
+	defaultSessionLeaseTTL           = 2 * time.Minute
+	stableToolSurfaceReferenceMarker = `{"$stable":true}`
+)
+
+var stableToolSurfaceReferenceJSON = []byte(stableToolSurfaceReferenceMarker)
 
 // SessionLeaseHandle owns a live session lease and renews it until released.
 type SessionLeaseHandle struct {
@@ -1762,7 +1767,8 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 	frozenToolsJSON := bytes.TrimSpace(frozenTurnToolsRaw)
 	if len(frozenToolsJSON) > 0 {
 		stableToolsJSON := bytes.TrimSpace(stableToolSurfaceRaw)
-		if state.StableToolSurfaceSet && bytes.Equal(stableToolsJSON, frozenToolsJSON) {
+		if state.StableToolSurfaceSet &&
+			(bytes.Equal(stableToolsJSON, frozenToolsJSON) || bytes.Equal(frozenToolsJSON, stableToolSurfaceReferenceJSON)) {
 			state.FrozenTurnTools = state.StableToolSurface
 			state.FrozenTurnToolsSet = true
 		} else {
@@ -1842,7 +1848,7 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 	var frozenTurnToolsJSON []byte
 	if state.FrozenTurnToolsSet {
 		if state.StableToolSurfaceSet && runtimeToolDefinitionsShareBacking(state.StableToolSurface, state.FrozenTurnTools) {
-			frozenTurnToolsJSON = stableToolSurfaceJSON
+			frozenTurnToolsJSON = stableToolSurfaceReferenceJSON
 		} else {
 			payload, err := json.Marshal(state.FrozenTurnTools)
 			if err != nil {

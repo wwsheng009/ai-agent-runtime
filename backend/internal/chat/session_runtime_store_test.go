@@ -1727,6 +1727,13 @@ func TestSQLiteRuntimeStoreSharesIdenticalToolSurfacesAfterLoad(t *testing.T) {
 		FrozenTurnToolsSet:   true,
 	}
 	require.NoError(t, store.SaveState(context.Background(), state))
+	var stableJSON, frozenJSON []byte
+	require.NoError(t, store.db.QueryRow(`
+		SELECT stable_tool_surface_json, frozen_turn_tools_json
+		FROM session_runtime_state WHERE session_id = ?
+	`, state.SessionID).Scan(&stableJSON, &frozenJSON))
+	require.Greater(t, len(stableJSON), len(frozenJSON))
+	require.JSONEq(t, stableToolSurfaceReferenceMarker, string(frozenJSON))
 
 	loaded, err := store.LoadState(context.Background(), state.SessionID)
 	require.NoError(t, err)
@@ -1734,6 +1741,16 @@ func TestSQLiteRuntimeStoreSharesIdenticalToolSurfacesAfterLoad(t *testing.T) {
 	require.True(t, runtimeToolDefinitionsShareBacking(loaded.StableToolSurface, loaded.FrozenTurnTools))
 	loaded.StableToolSurface[0].Name = "changed"
 	require.Equal(t, "changed", loaded.FrozenTurnTools[0].Name)
+
+	loaded.Status = SessionWaitingApproval
+	require.NoError(t, store.SaveState(context.Background(), loaded))
+	var stableJSONAfter []byte
+	require.NoError(t, store.db.QueryRow(`
+		SELECT stable_tool_surface_json
+		FROM session_runtime_state WHERE session_id = ?
+	`, state.SessionID).Scan(&stableJSONAfter))
+	require.NotEqual(t, stableJSON, stableJSONAfter)
+	require.Contains(t, string(stableJSONAfter), `"changed"`)
 }
 
 func TestSQLiteRuntimeStorePersistsToolReceipt(t *testing.T) {
