@@ -26,7 +26,7 @@ func (a *SessionActor) reconcileCompactResult(ctx context.Context, session *Sess
 
 func (a *SessionActor) compactCanonicalSnapshot(ctx context.Context, session *Session) contextreconcile.Snapshot {
 	snapshot := CanonicalContextSnapshot(session)
-	state := a.State()
+	state := a.StateForInspection()
 	if state != nil {
 		if state.Status != SessionIdle && state.Status != SessionStopped {
 			snapshot.Run.Status = string(state.Status)

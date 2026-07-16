@@ -1005,11 +1005,14 @@ func (c *sessionAgentController) deliverAgentMessage(ctx context.Context, fromSe
 	delivered := false
 	triggered := false
 	if trigger && !c.apiAgentSessionBusy(ctx, sessionID) {
-		if actor := c.apiAgentActor(ctx, sessionID); actor != nil && !apiAgentActorBusy(actor.State()) {
-			if err := actor.SubmitPromptAsync(ctx, message, c.apiAgentRunMeta(ctx, sessionID)); err != nil {
-				return nil, err
+		if actor := c.apiAgentActor(ctx, sessionID); actor != nil {
+			state, ok := actor.StateSummary()
+			if !ok || !state.Busy() {
+				if err := actor.SubmitPromptAsync(ctx, message, c.apiAgentRunMeta(ctx, sessionID)); err != nil {
+					return nil, err
+				}
+				triggered = true
 			}
-			triggered = true
 		}
 	}
 	if !triggered {
@@ -1039,8 +1042,10 @@ func (c *sessionAgentController) apiAgentSessionBusy(ctx context.Context, sessio
 		return false
 	}
 	if hub := c.handler.getSessionHub(); hub != nil {
-		if actor, ok := hub.Get(strings.TrimSpace(sessionID)); ok && actor != nil && apiAgentActorBusy(actor.State()) {
-			return true
+		if actor, exists := hub.Get(strings.TrimSpace(sessionID)); exists && actor != nil {
+			if state, ok := actor.StateSummary(); ok && state.Busy() {
+				return true
+			}
 		}
 	}
 	if store := c.handler.getSessionRuntimeStore(); store != nil {
@@ -1123,9 +1128,8 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 	if err != nil {
 		return nil, err
 	}
-	if state := actor.State(); state != nil {
-		busy := state.Status == chat.SessionRunning || state.Status == chat.SessionRewinding || state.Status == chat.SessionWaitingApproval || state.Status == chat.SessionWaitingInput
-		if busy {
+	if state, ok := actor.StateSummary(); ok {
+		if state.Busy() {
 			interrupt := args.Interrupt != nil && *args.Interrupt
 			if !interrupt {
 				return nil, fmt.Errorf("session is busy (%s)", state.Status)
@@ -1973,20 +1977,20 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 	}
 	if hub := c.handler.getSessionHub(); hub != nil {
 		if actor, ok := hub.Get(sessionID); ok && actor != nil {
-			state := actor.State()
-			if state != nil {
+			state, exists := actor.StateSummary()
+			if exists {
 				result.Status = string(state.Status)
-				result.PendingApproval = state.PendingApproval != nil
-				if state.PendingApproval != nil {
-					result.PendingApprovalID = strings.TrimSpace(state.PendingApproval.ID)
-					result.PendingApprovalReason = strings.TrimSpace(state.PendingApproval.Reason)
-					result.PendingApprovalRiskLevel = strings.TrimSpace(state.PendingApproval.RiskLevel)
+				result.PendingApproval = state.PendingApproval
+				if state.PendingApproval {
+					result.PendingApprovalID = strings.TrimSpace(state.PendingApprovalID)
+					result.PendingApprovalReason = strings.TrimSpace(state.PendingApprovalReason)
+					result.PendingApprovalRiskLevel = strings.TrimSpace(state.PendingApprovalRiskLevel)
 				}
-				result.PendingQuestion = state.PendingQuestion != nil
+				result.PendingQuestion = state.PendingQuestion
 				result.CurrentTurnID = strings.TrimSpace(state.CurrentTurnID)
-				if state.PendingTool != nil {
-					result.PendingToolName = strings.TrimSpace(state.PendingTool.ToolName)
-					result.PendingToolCallID = strings.TrimSpace(state.PendingTool.ToolCallID)
+				if state.PendingTool {
+					result.PendingToolName = strings.TrimSpace(state.PendingToolName)
+					result.PendingToolCallID = strings.TrimSpace(state.PendingToolCallID)
 				}
 			}
 		}

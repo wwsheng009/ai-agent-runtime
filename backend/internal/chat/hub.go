@@ -156,15 +156,15 @@ func sessionActorEvictable(actor *SessionActor) bool {
 	if actor == nil {
 		return true
 	}
-	state := actor.State()
-	if state == nil {
+	state, ok := actor.StateSummary()
+	if !ok {
 		return true
 	}
 	if state.Status != SessionIdle && state.Status != SessionStopped {
 		return false
 	}
-	return state.PendingTool == nil && state.PendingApproval == nil && state.PendingQuestion == nil &&
-		state.CurrentTurnID == "" && len(state.ActiveJobIDs) == 0
+	return !state.PendingTool && !state.PendingApproval && !state.PendingQuestion &&
+		state.CurrentTurnID == "" && state.ActiveJobCount == 0
 }
 
 func (h *SessionHub) sweepLoop(interval time.Duration) {

@@ -82,17 +82,89 @@ type RuntimeState struct {
 	UpdatedAt            time.Time              `json:"updated_at"`
 }
 
+// RuntimeStateSummary is the allocation-free projection used by status polls.
+// Large tool schemas and replay receipts intentionally stay out of this view.
+type RuntimeStateSummary struct {
+	SessionID                string
+	Status                   SessionStatus
+	CurrentTurnID            string
+	CurrentCheckpointID      string
+	PendingTool              bool
+	PendingToolCallID        string
+	PendingToolName          string
+	PendingApproval          bool
+	PendingApprovalID        string
+	PendingApprovalReason    string
+	PendingApprovalRiskLevel string
+	PendingQuestion          bool
+	ActiveJobCount           int
+}
+
+// Busy reports whether the summary represents a state that cannot accept a new turn.
+func (s RuntimeStateSummary) Busy() bool {
+	switch s.Status {
+	case SessionRunning, SessionWaitingApproval, SessionWaitingInput, SessionRewinding:
+		return true
+	default:
+		return false
+	}
+}
+
+// Summary returns a small immutable projection suitable for frequent polling.
+func (s *RuntimeState) Summary() RuntimeStateSummary {
+	if s == nil {
+		return RuntimeStateSummary{}
+	}
+	summary := RuntimeStateSummary{
+		SessionID:           s.SessionID,
+		Status:              s.Status,
+		CurrentTurnID:       s.CurrentTurnID,
+		CurrentCheckpointID: s.CurrentCheckpointID,
+		PendingTool:         s.PendingTool != nil,
+		PendingApproval:     s.PendingApproval != nil,
+		PendingQuestion:     s.PendingQuestion != nil,
+		ActiveJobCount:      len(s.ActiveJobIDs),
+	}
+	if s.PendingTool != nil {
+		summary.PendingToolCallID = s.PendingTool.ToolCallID
+		summary.PendingToolName = s.PendingTool.ToolName
+	}
+	if s.PendingApproval != nil {
+		summary.PendingApprovalID = s.PendingApproval.ID
+		summary.PendingApprovalReason = s.PendingApproval.Reason
+		summary.PendingApprovalRiskLevel = s.PendingApproval.RiskLevel
+	}
+	return summary
+}
+
 // Clone returns a defensive copy of the runtime state.
 func (s *RuntimeState) Clone() *RuntimeState {
+	return s.clone(true, true)
+}
+
+// CloneForInspection returns a defensive copy without large persisted payloads
+// that status checks and control-flow decisions do not need.
+func (s *RuntimeState) CloneForInspection() *RuntimeState {
+	return s.clone(false, false)
+}
+
+func (s *RuntimeState) clone(includeToolSurfaces, includeToolResult bool) *RuntimeState {
 	if s == nil {
 		return nil
 	}
 	clone := *s
 	clone.CurrentRunMeta = s.CurrentRunMeta.Clone()
 	clone.AmbientRunMeta = s.AmbientRunMeta.Clone()
-	clone.StableToolSurface = cloneRuntimeToolDefinitions(s.StableToolSurface)
-	clone.FrozenTurnTools = cloneRuntimeToolDefinitions(s.FrozenTurnTools)
-	clone.PendingTool = clonePendingToolInvocation(s.PendingTool, true)
+	clone.StableToolSurface = nil
+	clone.FrozenTurnTools = nil
+	if includeToolSurfaces {
+		clone.StableToolSurface = cloneRuntimeToolDefinitions(s.StableToolSurface)
+		clone.FrozenTurnTools = cloneRuntimeToolDefinitions(s.FrozenTurnTools)
+	} else {
+		clone.StableToolSurfaceSet = false
+		clone.FrozenTurnToolsSet = false
+	}
+	clone.PendingTool = clonePendingToolInvocation(s.PendingTool, includeToolResult)
 	if s.PendingApproval != nil {
 		approval := *s.PendingApproval
 		if len(approval.ArgsJSON) > 0 {

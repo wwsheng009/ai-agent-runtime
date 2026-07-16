@@ -1481,15 +1481,7 @@ func (b *chatRuntimeEventBridge) pendingApprovalForSession(sessionID string) *ru
 	if err != nil || actor == nil {
 		return nil
 	}
-	state := actor.State()
-	if state == nil || state.PendingApproval == nil {
-		return nil
-	}
-	approval := *state.PendingApproval
-	if len(approval.ArgsJSON) > 0 {
-		approval.ArgsJSON = append(json.RawMessage(nil), approval.ArgsJSON...)
-	}
-	return &approval
+	return actor.PendingApproval()
 }
 
 func (b *chatRuntimeEventBridge) autoApprovalGrantKey(sessionID string, approval *runtimechat.ApprovalRequest) string {

@@ -844,15 +844,15 @@ func chatAgentPickerApplyLiveStatus(host *localChatRuntimeHost, result *toolbrok
 		return
 	}
 	if actor, ok := host.SessionHub.Get(strings.TrimSpace(result.SessionID)); ok && actor != nil {
-		state := actor.State()
-		if state != nil {
+		state, exists := actor.StateSummary()
+		if exists {
 			result.Status = string(state.Status)
-			result.PendingApproval = state.PendingApproval != nil
-			result.PendingQuestion = state.PendingQuestion != nil
+			result.PendingApproval = state.PendingApproval
+			result.PendingQuestion = state.PendingQuestion
 			result.CurrentTurnID = strings.TrimSpace(state.CurrentTurnID)
-			if state.PendingTool != nil {
-				result.PendingToolName = strings.TrimSpace(state.PendingTool.ToolName)
-				result.PendingToolCallID = strings.TrimSpace(state.PendingTool.ToolCallID)
+			if state.PendingTool {
+				result.PendingToolName = strings.TrimSpace(state.PendingToolName)
+				result.PendingToolCallID = strings.TrimSpace(state.PendingToolCallID)
 			}
 		}
 	}

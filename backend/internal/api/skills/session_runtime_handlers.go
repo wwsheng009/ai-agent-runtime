@@ -800,7 +800,7 @@ func submitSessionPrompt(actor *chat.SessionActor, requestCtx context.Context, p
 		case outcome := <-resultCh:
 			return outcome.result, nil, outcome.err, true
 		case <-ticker.C:
-			state := actor.State()
+			state := actor.StateForInspection()
 			if state == nil {
 				continue
 			}
@@ -809,13 +809,12 @@ func submitSessionPrompt(actor *chat.SessionActor, requestCtx context.Context, p
 				return nil, state, nil, false
 			}
 		case <-timer.C:
-			state := actor.State()
+			state := actor.StateForInspection()
 			if state == nil {
 				state = &chat.RuntimeState{
 					Status: chat.SessionRunning,
 				}
 			} else if state.Status == chat.SessionIdle {
-				state = state.Clone()
 				state.Status = chat.SessionRunning
 			}
 			return nil, state, nil, false
@@ -845,7 +844,7 @@ func submitSessionContinue(actor *chat.SessionActor, requestCtx context.Context,
 		case outcome := <-resultCh:
 			return outcome.result, nil, outcome.err, true
 		case <-ticker.C:
-			state := actor.State()
+			state := actor.StateForInspection()
 			if state == nil {
 				continue
 			}
@@ -854,13 +853,12 @@ func submitSessionContinue(actor *chat.SessionActor, requestCtx context.Context,
 				return nil, state, nil, false
 			}
 		case <-timer.C:
-			state := actor.State()
+			state := actor.StateForInspection()
 			if state == nil {
 				state = &chat.RuntimeState{
 					Status: chat.SessionRunning,
 				}
 			} else if state.Status == chat.SessionIdle {
-				state = state.Clone()
 				state.Status = chat.SessionRunning
 			}
 			return nil, state, nil, false

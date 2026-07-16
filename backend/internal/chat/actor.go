@@ -512,6 +512,20 @@ func (a *SessionActor) SubscribeEvents(ctx context.Context, eventType string, ch
 
 // State returns the current runtime state snapshot.
 func (a *SessionActor) State() *RuntimeState {
+	return a.cloneState(true, true)
+}
+
+// StateForInspection returns a defensive state snapshot without large tool
+// surfaces or replayed tool-result bytes.
+func (a *SessionActor) StateForInspection() *RuntimeState {
+	return a.cloneState(false, false)
+}
+
+func (a *SessionActor) stateWithoutToolSurfaces() *RuntimeState {
+	return a.cloneState(false, true)
+}
+
+func (a *SessionActor) cloneState(includeToolSurfaces, includeToolResult bool) *RuntimeState {
 	if a == nil {
 		return nil
 	}
@@ -520,7 +534,36 @@ func (a *SessionActor) State() *RuntimeState {
 	if a.state == nil {
 		return nil
 	}
-	return a.state.Clone()
+	return a.state.clone(includeToolSurfaces, includeToolResult)
+}
+
+// StateSummary returns the small status projection without cloning tool schemas,
+// pending receipt bytes, or other large recovery payloads.
+func (a *SessionActor) StateSummary() (RuntimeStateSummary, bool) {
+	if a == nil {
+		return RuntimeStateSummary{}, false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.state == nil {
+		return RuntimeStateSummary{}, false
+	}
+	return a.state.Summary(), true
+}
+
+// PendingApproval returns only the approval payload required by approval UIs.
+func (a *SessionActor) PendingApproval() *ApprovalRequest {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.state == nil || a.state.PendingApproval == nil {
+		return nil
+	}
+	approval := *a.state.PendingApproval
+	approval.ArgsJSON = append(json.RawMessage(nil), approval.ArgsJSON...)
+	return &approval
 }
 
 func (a *SessionActor) run() {
@@ -662,7 +705,7 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	state := a.State()
+	state := a.stateWithoutToolSurfaces()
 	if state == nil || state.PendingApproval == nil || state.PendingApproval.ID != cmd.RequestID {
 		cmd.Reply <- fmt.Errorf("approval request not found")
 		return
@@ -739,7 +782,7 @@ func (a *SessionActor) handleAnswerQuestion(cmd AnswerQuestion) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	state := a.State()
+	state := a.StateForInspection()
 	if state == nil || state.PendingQuestion == nil || state.PendingQuestion.ID != cmd.QuestionID {
 		cmd.Reply <- fmt.Errorf("question request not found")
 		return
@@ -1078,8 +1121,8 @@ func (a *SessionActor) send(ctx context.Context, cmd Command) error {
 }
 
 func (a *SessionActor) ensureReady() error {
-	state := a.State()
-	if state == nil {
+	state, ok := a.StateSummary()
+	if !ok {
 		return nil
 	}
 	switch state.Status {
@@ -1426,13 +1469,13 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		return
 	}
 
-	state := a.State()
+	state, _ := a.StateSummary()
 	switch {
-	case state != nil && state.PendingTool != nil:
+	case state.PendingTool:
 		payload["reason"] = "pending_tool"
-	case state != nil && state.PendingApproval != nil:
+	case state.PendingApproval:
 		payload["reason"] = "pending_approval"
-	case state != nil && state.PendingQuestion != nil:
+	case state.PendingQuestion:
 		payload["reason"] = "pending_question"
 	}
 	if payload["reason"] != nil {
@@ -1569,13 +1612,13 @@ func (a *SessionActor) runManualCompact(
 		payload["mode"] = compactruntime.ModeAuto
 	}
 
-	state := a.State()
+	state, _ := a.StateSummary()
 	switch {
-	case state != nil && state.PendingTool != nil:
+	case state.PendingTool:
 		status.Reason = "pending_tool"
-	case state != nil && state.PendingApproval != nil:
+	case state.PendingApproval:
 		status.Reason = "pending_approval"
-	case state != nil && state.PendingQuestion != nil:
+	case state.PendingQuestion:
 		status.Reason = "pending_question"
 	}
 	if status.Reason != "" {
@@ -2514,7 +2557,7 @@ func (a *SessionActor) RequestApproval(ctx context.Context, req runtimepolicy.Ap
 		return runtimepolicy.ApprovalResponse{}, err
 	}
 	waiter := a.registerApprovalWaiter(req.ID)
-	state := a.State()
+	state := a.StateForInspection()
 	a.publish(runtimeevents.Event{
 		Type:      EventApprovalRequested,
 		SessionID: a.id,

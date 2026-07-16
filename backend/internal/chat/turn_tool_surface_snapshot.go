@@ -32,7 +32,9 @@ func (s *runtimeTurnToolSurfaceSnapshot) LoadTurnToolSurface(ctx context.Context
 	if s == nil || s.actor == nil || s.turnID == "" {
 		return nil, false, nil
 	}
-	state := s.actor.State()
+	s.actor.mu.RLock()
+	defer s.actor.mu.RUnlock()
+	state := s.actor.state
 	if state == nil {
 		return nil, false, nil
 	}

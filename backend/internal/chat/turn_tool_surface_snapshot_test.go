@@ -85,3 +85,36 @@ func TestRuntimeTurnToolSurfaceSnapshotPreservesEmptyParameterProperties(t *test
 		require.NotNil(t, params["properties"])
 	}
 }
+
+func TestRuntimeTurnToolSurfaceSnapshotReturnsSingleOwnedProjection(t *testing.T) {
+	actor := &SessionActor{
+		id: "session-owned-tools",
+		state: &RuntimeState{
+			SessionID:            "session-owned-tools",
+			Status:               SessionRunning,
+			CurrentTurnID:        "turn-owned",
+			StableToolSurfaceSet: true,
+			StableToolSurface: []types.ToolDefinition{{
+				Name: "shell",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"command": map[string]interface{}{"type": "string"},
+					},
+				},
+			}},
+		},
+	}
+
+	tools, cached, err := actor.turnToolSurfaceSnapshot("turn-owned").LoadTurnToolSurface(context.Background())
+	require.NoError(t, err)
+	require.True(t, cached)
+	require.Len(t, tools, 1)
+	tools[0].Name = "changed"
+	tools[0].Parameters["type"] = "changed"
+
+	actor.mu.RLock()
+	defer actor.mu.RUnlock()
+	require.Equal(t, "shell", actor.state.StableToolSurface[0].Name)
+	require.Equal(t, "object", actor.state.StableToolSurface[0].Parameters["type"])
+}
