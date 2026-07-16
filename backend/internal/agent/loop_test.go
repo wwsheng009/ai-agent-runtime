@@ -237,6 +237,7 @@ type RetrySequenceLLMProvider struct {
 	errs      []error
 	response  *llm.LLMResponse
 	callCount int
+	requests  []*llm.LLMRequest
 }
 
 func (p *RetrySequenceLLMProvider) Name() string {
@@ -245,6 +246,7 @@ func (p *RetrySequenceLLMProvider) Name() string {
 
 func (p *RetrySequenceLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
 	p.callCount++
+	p.requests = append(p.requests, cloneLLMRequest(req))
 	if index := p.callCount - 1; index < len(p.errs) && p.errs[index] != nil {
 		return nil, p.errs[index]
 	}
@@ -259,6 +261,7 @@ func (p *RetrySequenceLLMProvider) Call(ctx context.Context, req *llm.LLMRequest
 
 func (p *RetrySequenceLLMProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
 	p.callCount++
+	p.requests = append(p.requests, cloneLLMRequest(req))
 	if index := p.callCount - 1; index < len(p.errs) && p.errs[index] != nil {
 		return nil, p.errs[index]
 	}
@@ -509,6 +512,41 @@ func TestReActLoop_PropagatesParallelToolCapabilityToLLMRequest(t *testing.T) {
 	require.Len(t, provider.requests, 1)
 	require.Equal(t, true, provider.requests[0].Metadata[llm.MetadataKeyParallelToolCalls])
 	require.Equal(t, 4, provider.requests[0].Metadata["max_parallel_tool_calls"])
+}
+
+func TestReActLoop_DowngradesUnsupportedParallelToolParameterWithoutAdvancingStep(t *testing.T) {
+	provider := &RetrySequenceLLMProvider{
+		name: "test-provider",
+		errs: []error{fmt.Errorf("HTTP 400: unsupported parameter: parallel_tool_calls")},
+		response: &llm.LLMResponse{
+			Content: "inspection complete",
+			Model:   "test-model",
+		},
+	}
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{MaxRetries: 0})
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := &Agent{
+		config: &Config{
+			Name: "test-agent", Provider: "test-provider", Model: "test-model",
+			SystemPrompt: "You are a helpful assistant.",
+		},
+		mcpManager: &MockMCPManager{},
+	}
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps: 1, EnableThought: true, EnableToolCalls: true,
+		EnableParallelTools: true, MaxParallelToolCalls: 4,
+	})
+
+	result, err := loop.RunWithSession(context.Background(), "inspect the repository", newTestHistorySession("session-parallel-downgrade"))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 1, result.Steps)
+	require.Len(t, provider.requests, 2)
+	require.Equal(t, true, provider.requests[0].Metadata[llm.MetadataKeyParallelToolCalls])
+	_, stillPresent := provider.requests[1].Metadata[llm.MetadataKeyParallelToolCalls]
+	require.False(t, stillPresent)
+	require.True(t, loop.parallelToolCallsUnsupported.Load())
 }
 
 func TestResolvePromptPreflightProviderModelUsesLoopConfigOverride(t *testing.T) {

@@ -30,6 +30,19 @@ type inspectExecuter struct {
 	lastTimeout time.Duration
 }
 
+type batchInspectExecuter struct {
+	commands []string
+	timeouts []time.Duration
+	failures map[string]error
+}
+
+func (f *batchInspectExecuter) Execute(_ context.Context, command string, timeout time.Duration, _ ...ExecOption) (CommandExecutionResult, error) {
+	f.commands = append(f.commands, command)
+	f.timeouts = append(f.timeouts, timeout)
+	err := f.failures[command]
+	return CommandExecutionResult{Output: "output for " + command}, err
+}
+
 func (f *inspectExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (CommandExecutionResult, error) {
 	cfg := execConfig{}
 	for _, opt := range opts {
@@ -61,6 +74,80 @@ func TestBashTool_EmitsMutatedPaths(t *testing.T) {
 	paths, ok := raw.([]string)
 	if !ok || len(paths) != 2 {
 		t.Fatalf("unexpected mutated_paths metadata: %#v", raw)
+	}
+}
+
+func TestBashTool_ExecutesStructuredCommandBatchInOneToolCall(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &batchInspectExecuter{}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"workdir": ".",
+		"commands": []interface{}{
+			map[string]interface{}{"command": "git diff --check"},
+			map[string]interface{}{"command": "go test ./internal/agent", "timeout": "2m"},
+		},
+	})
+
+	if err != nil || !result.Success {
+		t.Fatalf("expected successful command batch, result=%#v err=%v", result, err)
+	}
+	if got := strings.Join(inspector.commands, "|"); got != "git diff --check|go test ./internal/agent" {
+		t.Fatalf("unexpected commands: %q", got)
+	}
+	if len(inspector.timeouts) != 2 || inspector.timeouts[0] != defaultShellCommandTimeout || inspector.timeouts[1] != 2*time.Minute {
+		t.Fatalf("unexpected command timeouts: %#v", inspector.timeouts)
+	}
+	if !strings.Contains(result.Content, "command 1/2 [ok]") || !strings.Contains(result.Content, "command 2/2 [ok]") {
+		t.Fatalf("expected stable batch sections, got %q", result.Content)
+	}
+	if got := result.Metadata["executed_count"]; got != 2 {
+		t.Fatalf("expected executed_count=2, got %#v", got)
+	}
+}
+
+func TestBashTool_CommandBatchContinuesAfterFailureByDefault(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &batchInspectExecuter{failures: map[string]error{"first": fmt.Errorf("first failed")}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"commands": []interface{}{
+			map[string]interface{}{"command": "first"},
+			map[string]interface{}{"command": "second"},
+		},
+	})
+
+	if err != nil || result.Success {
+		t.Fatalf("expected completed batch with reported failure, result=%#v err=%v", result, err)
+	}
+	if len(inspector.commands) != 2 {
+		t.Fatalf("expected second command to run after failure, got %#v", inspector.commands)
+	}
+	if result.Metadata["failed_count"] != 1 || result.Metadata["executed_count"] != 2 {
+		t.Fatalf("unexpected batch metadata: %#v", result.Metadata)
+	}
+}
+
+func TestBashTool_CommandBatchCanStopOnError(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &batchInspectExecuter{failures: map[string]error{"first": fmt.Errorf("first failed")}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"stop_on_error": true,
+		"commands": []interface{}{
+			map[string]interface{}{"command": "first"},
+			map[string]interface{}{"command": "second"},
+		},
+	})
+
+	if err != nil || result.Success {
+		t.Fatalf("expected stopped failed batch, result=%#v err=%v", result, err)
+	}
+	if len(inspector.commands) != 1 || result.Metadata["executed_count"] != 1 {
+		t.Fatalf("expected batch to stop after first command, commands=%#v metadata=%#v", inspector.commands, result.Metadata)
 	}
 }
 
@@ -133,6 +220,10 @@ func TestBashTool_CommandDescriptionMentionsPowerShellHeadCompatibility(t *testi
 	}
 	if _, ok := properties["timeout_ms"]; !ok {
 		t.Fatalf("expected timeout_ms parameter in bash schema: %#v", properties)
+	}
+	commandsSchema, ok := properties["commands"].(map[string]interface{})
+	if !ok || commandsSchema["type"] != "array" {
+		t.Fatalf("expected structured commands batch parameter, got %#v", properties["commands"])
 	}
 }
 

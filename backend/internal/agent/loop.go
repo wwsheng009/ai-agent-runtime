@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
@@ -53,9 +54,10 @@ type LoopReActConfig struct {
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
 type ReActLoop struct {
-	agent      *Agent
-	llmRuntime *llm.LLMRuntime
-	config     *LoopReActConfig
+	agent                        *Agent
+	llmRuntime                   *llm.LLMRuntime
+	config                       *LoopReActConfig
+	parallelToolCallsUnsupported atomic.Bool
 }
 
 type toolExecutionResult struct {
@@ -650,7 +652,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			"remaining_budget": remainingBudget,
 		},
 	}
-	if loop.config.EnableParallelTools && loop.config.MaxParallelToolCalls > 1 && len(availableTools) > 1 {
+	if loop.config.EnableParallelTools && loop.config.MaxParallelToolCalls > 1 && len(availableTools) > 1 && !loop.parallelToolCallsUnsupported.Load() {
 		req.Metadata[llm.MetadataKeyParallelToolCalls] = true
 		req.Metadata["max_parallel_tool_calls"] = loop.config.MaxParallelToolCalls
 	}
@@ -842,6 +844,15 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	loop.agent.emitRuntimeEvent("llm.request.started", sessionID, "", requestPayload)
 	response, err := loop.llmRuntime.Call(callCtx, req)
+	if err != nil && req.Metadata[llm.MetadataKeyParallelToolCalls] == true && llm.IsUnsupportedRequestParameter(err, llm.MetadataKeyParallelToolCalls) {
+		loop.parallelToolCallsUnsupported.Store(true)
+		delete(req.Metadata, llm.MetadataKeyParallelToolCalls)
+		delete(req.Metadata, "max_parallel_tool_calls")
+		loop.agent.emitRuntimeEvent("llm.parallel_tool_calls.downgraded", sessionID, "", map[string]interface{}{
+			"trace_id": traceID, "step": step, "provider": req.Provider, "model": req.Model, "error": err.Error(),
+		})
+		response, err = loop.llmRuntime.Call(callCtx, req)
+	}
 	if err != nil {
 		finishedPayload := map[string]interface{}{
 			"trace_id": traceID,

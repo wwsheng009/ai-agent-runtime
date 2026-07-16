@@ -48,3 +48,25 @@ func metadataBool(value interface{}) bool {
 		return false
 	}
 }
+
+// IsUnsupportedRequestParameter identifies provider validation errors for one
+// optional request field so callers can downgrade without retrying the same body.
+func IsUnsupportedRequestParameter(err error, parameter string) bool {
+	if err == nil {
+		return false
+	}
+	parameter = strings.ToLower(strings.TrimSpace(parameter))
+	message := strings.ToLower(err.Error())
+	if parameter == "" || !strings.Contains(message, parameter) {
+		return false
+	}
+	for _, marker := range []string{
+		"unsupported parameter", "unknown parameter", "unexpected parameter",
+		"unrecognized request argument", "not supported", "not allowed",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}

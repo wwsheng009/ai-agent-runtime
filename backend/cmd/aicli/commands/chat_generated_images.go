@@ -41,5 +41,8 @@ func generatedImageToolContext(ctx context.Context, session *ChatSession) contex
 	if outputDir := currentGeneratedImageArtifactDir(session); strings.TrimSpace(outputDir) != "" {
 		ctx = toolctx.WithGeneratedImageOutputDir(ctx, outputDir)
 	}
+	if outputDir := currentLocalShellArtifactDir(session); strings.TrimSpace(outputDir) != "" {
+		ctx = toolctx.WithShellOutputArtifactDir(ctx, outputDir)
+	}
 	return ctx
 }

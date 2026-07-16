@@ -55,7 +55,27 @@ func NewBashTool() *BashTool {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "Shell command. Related inspections or tests with clear ordering may be combined to reduce LLM round trips; split only on data dependencies. Use workdir for directory changes. Windows usually uses PowerShell/pwsh, where output limiting uses Select-Object instead of head.",
+				"description": "单条 Shell 命令。需要顺序执行多条独立检查时改用 commands，减少 LLM 往返。用 workdir 切换目录；Windows PowerShell 没有 head 时使用 Select-Object。",
+			},
+			"commands": map[string]interface{}{
+				"type":        "array",
+				"description": "顺序执行的命令批次。每项可覆盖 workdir 和 timeout；默认执行全部命令并一次返回所有结果。",
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"command":     map[string]interface{}{"type": "string"},
+						"workdir":     map[string]interface{}{"type": "string"},
+						"timeout":     map[string]interface{}{"type": "string"},
+						"timeout_ms":  map[string]interface{}{"type": "integer"},
+						"timeout_sec": map[string]interface{}{"type": "integer"},
+					},
+					"required":             []string{"command"},
+					"additionalProperties": false,
+				},
+			},
+			"stop_on_error": map[string]interface{}{
+				"type":        "boolean",
+				"description": "commands 批次中某条失败后是否停止；默认 false，以便一次收集全部检查结果。",
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
@@ -89,14 +109,14 @@ func NewBashTool() *BashTool {
 				},
 			},
 		},
-		"required": []string{"command"},
+		"required": []string{},
 	}
 
 	return &BashTool{
 		BaseTool: toolkit.NewBaseTool(
 			"bash",
-			"执行 Shell 命令并返回输出。相关且顺序明确的检查或测试可合并为一次调用，减少 LLM 往返；存在数据依赖时再分步。用 workdir 指定目录；Windows 默认按 PowerShell 语义执行，没有 head 时使用 Select-Object。",
-			"1.1.0",
+			"执行一条 Shell 命令，或用 commands 顺序执行一批检查并一次返回全部结果。仅当后续命令依赖前一条输出且需模型决策时才拆分。Windows 默认使用 PowerShell；没有 head 时使用 Select-Object。",
+			"1.2.0",
 			parameters,
 			true, // 支持直接调用
 		),
@@ -137,8 +157,20 @@ type outputCaptureSettings struct {
 	disableOutputCap  bool
 }
 
+type bashCommandBatchItem struct {
+	Command string
+	Params  map[string]interface{}
+}
+
 // Execute 实现 Tool 接口
 func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	commands, batchRequested, err := parseBashCommandBatch(params)
+	if err != nil {
+		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
+	}
+	if batchRequested {
+		return b.executeBatch(ctx, params, commands)
+	}
 	command, ok := params["command"].(string)
 	if !ok {
 		return &toolkit.ToolResult{
@@ -211,6 +243,132 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		Content:    execResult.Output,
 		Metadata:   buildCommandExecutionMetadata(command, mutatedPaths, execResult),
 	}, nil
+}
+
+func parseBashCommandBatch(params map[string]interface{}) ([]bashCommandBatchItem, bool, error) {
+	raw, exists := params["commands"]
+	if !exists || raw == nil {
+		return nil, false, nil
+	}
+	values, ok := raw.([]interface{})
+	if !ok {
+		if typed, typedOK := raw.([]map[string]interface{}); typedOK {
+			values = make([]interface{}, 0, len(typed))
+			for _, item := range typed {
+				values = append(values, item)
+			}
+		} else {
+			return nil, true, fmt.Errorf("commands 参数必须是对象数组")
+		}
+	}
+	if len(values) == 0 {
+		return nil, true, fmt.Errorf("commands 参数不能为空")
+	}
+	commands := make([]bashCommandBatchItem, 0, len(values))
+	for index, rawItem := range values {
+		item, ok := rawItem.(map[string]interface{})
+		if !ok {
+			return nil, true, fmt.Errorf("commands[%d] 必须是对象", index)
+		}
+		command := strings.TrimSpace(extractString(item["command"]))
+		if command == "" {
+			return nil, true, fmt.Errorf("commands[%d].command 参数缺失或为空", index)
+		}
+		commands = append(commands, bashCommandBatchItem{Command: command, Params: item})
+	}
+	return commands, true, nil
+}
+
+func (b *BashTool) executeBatch(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem) (*toolkit.ToolResult, error) {
+	stopOnError, _ := resolveBoolParam(parent, "stop_on_error")
+	sections := make([]string, 0, len(commands))
+	items := make([]map[string]interface{}, 0, len(commands))
+	failed := 0
+	commandTexts := make([]string, 0, len(commands))
+	artifactPaths := make([]string, 0, len(commands))
+	batchArtifactPath := ""
+	for index, item := range commands {
+		commandTexts = append(commandTexts, item.Command)
+		commandParams := bashBatchCommandParams(parent, item.Params)
+		commandParams["command"] = item.Command
+		delete(commandParams, "commands")
+		result, err := b.Execute(ctx, commandParams)
+		if err != nil {
+			result = &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}
+		}
+		entry := map[string]interface{}{
+			"index": index, "command": item.Command, "success": result != nil && result.Success,
+		}
+		status := "ok"
+		content := ""
+		if result != nil {
+			content = result.Content
+			entry["metadata"] = result.Metadata
+			if artifactPath := extractString(result.Metadata["raw_output_artifact_path"]); artifactPath != "" {
+				artifactPaths = append(artifactPaths, artifactPath)
+			}
+		}
+		if result == nil || !result.Success {
+			failed++
+			status = "failed"
+			if result != nil && result.Error != nil {
+				entry["error"] = result.Error.Error()
+				if strings.TrimSpace(content) == "" {
+					content = result.Error.Error()
+				}
+			}
+		}
+		sections = append(sections, fmt.Sprintf("===== command %d/%d [%s] =====\n%s\n%s", index+1, len(commands), status, item.Command, strings.TrimSpace(content)))
+		items = append(items, entry)
+		if failed > 0 && stopOnError {
+			break
+		}
+	}
+	metadata := map[string]interface{}{
+		"batch": true, "requested_count": len(commands), "executed_count": len(items),
+		"failed_count": failed, "stop_on_error": stopOnError, "items": items,
+		"command": strings.Join(commandTexts, "\n"), "commands": commandTexts,
+	}
+	batchOutput := strings.Join(sections, "\n\n")
+	if mutatedPaths := extractStringList(parent["mutated_paths"]); len(mutatedPaths) > 0 {
+		metadata["mutated_paths"] = mutatedPaths
+	}
+	if len(batchOutput) > modelHistoryArtifactThresholdBytes {
+		artifactPath, artifactErr := runtimeexecutor.PersistShellOutputArtifact(
+			"toolkit", "bash command batch", toolctx.ShellOutputArtifactDir(ctx), batchOutput,
+		)
+		if artifactErr != nil {
+			metadata["raw_output_artifact_error"] = artifactErr.Error()
+		} else if strings.TrimSpace(artifactPath) != "" {
+			artifactPaths = append(artifactPaths, artifactPath)
+			batchArtifactPath = artifactPath
+		}
+	}
+	if len(artifactPaths) > 0 {
+		metadata["raw_output_artifact_paths"] = artifactPaths
+		if batchArtifactPath == "" {
+			batchArtifactPath = artifactPaths[0]
+		}
+		metadata["raw_output_artifact_path"] = batchArtifactPath
+	}
+	if failed > 0 {
+		return &toolkit.ToolResult{
+			Success: false, OutputKind: toolresult.KindText, Content: batchOutput,
+			Metadata: metadata, Error: fmt.Errorf("bash command batch completed with %d failure(s)", failed),
+		}, nil
+	}
+	return &toolkit.ToolResult{Success: true, OutputKind: toolresult.KindText, Content: batchOutput, Metadata: metadata}, nil
+}
+
+func bashBatchCommandParams(parent, item map[string]interface{}) map[string]interface{} {
+	params := make(map[string]interface{}, len(parent)+len(item))
+	for key, value := range parent {
+		params[key] = value
+	}
+	for key, value := range item {
+		params[key] = value
+	}
+	return params
 }
 
 func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string, timeout time.Duration, captureSettings outputCaptureSettings) (CommandExecutionResult, error) {

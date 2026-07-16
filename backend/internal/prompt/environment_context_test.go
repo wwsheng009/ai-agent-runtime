@@ -26,6 +26,9 @@ func TestRenderParallelToolGuidance_EncouragesBatchedReadOnlyInspections(t *test
 	if !strings.Contains(got, "all predictable independent evidence") {
 		t.Fatalf("expected single-turn evidence gathering guidance, got:\n%s", got)
 	}
+	if !strings.Contains(got, "bash.commands") || !strings.Contains(got, "true data dependencies") {
+		t.Fatalf("expected structured shell batch guidance, got:\n%s", got)
+	}
 	if !strings.Contains(got, "dependent tool calls serial") {
 		t.Fatalf("expected serial dependency guidance, got:\n%s", got)
 	}
