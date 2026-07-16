@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -34,9 +35,12 @@ type chatRuntimeEventBridge struct {
 	permissionHintShown             bool
 	renderedAssistantDelta          bool
 	renderedAssistantDeltaFinalized bool
-	renderedAssistantDeltaContent   string
+	renderedAssistantDeltaContent   strings.Builder
+	renderedAssistantDeltaDigest    [sha256.Size]byte
+	renderedAssistantDeltaLength    int
 	renderedAssistantFinal          bool
-	renderedAssistantFinalContent   string
+	renderedAssistantFinalDigest    [sha256.Size]byte
+	renderedAssistantFinalLength    int
 	renderedReasoningDelta          bool
 	renderedReasoningFinal          bool
 	runStarted                      bool
@@ -276,9 +280,12 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.pruneApprovalGrantsLocked(time.Now().UTC())
 	b.renderedAssistantDelta = false
 	b.renderedAssistantDeltaFinalized = false
-	b.renderedAssistantDeltaContent = ""
+	b.renderedAssistantDeltaContent.Reset()
+	b.renderedAssistantDeltaDigest = [sha256.Size]byte{}
+	b.renderedAssistantDeltaLength = 0
 	b.renderedAssistantFinal = false
-	b.renderedAssistantFinalContent = ""
+	b.renderedAssistantFinalDigest = [sha256.Size]byte{}
+	b.renderedAssistantFinalLength = 0
 	b.renderedReasoningDelta = false
 	b.renderedReasoningFinal = false
 	b.runStarted = true
@@ -1713,7 +1720,7 @@ func (b *chatRuntimeEventBridge) markAssistantDeltaRendered(delta string) {
 	defer b.renderMu.Unlock()
 	b.renderedAssistantDelta = true
 	b.renderedAssistantDeltaFinalized = false
-	b.renderedAssistantDeltaContent += delta
+	b.renderedAssistantDeltaContent.WriteString(delta)
 }
 
 func (b *chatRuntimeEventBridge) markAssistantDeltaFinalized() {
@@ -1723,6 +1730,9 @@ func (b *chatRuntimeEventBridge) markAssistantDeltaFinalized() {
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
 	b.renderedAssistantDeltaFinalized = true
+	normalized := normalizeRenderedAssistantContent(b.renderedAssistantDeltaContent.String())
+	b.renderedAssistantDeltaDigest, b.renderedAssistantDeltaLength = digestRenderedAssistantContent(normalized)
+	b.renderedAssistantDeltaContent = strings.Builder{}
 }
 
 func (b *chatRuntimeEventBridge) hasFinalizedAssistantDelta() bool {
@@ -1743,7 +1753,8 @@ func (b *chatRuntimeEventBridge) markAssistantFinalRendered(content string) {
 	defer b.renderMu.Unlock()
 	b.renderedAssistantFinal = true
 	if normalized != "" {
-		b.renderedAssistantFinalContent = normalized
+		b.renderedAssistantFinalDigest, b.renderedAssistantFinalLength = digestRenderedAssistantContent(normalized)
+		b.renderedAssistantDeltaContent = strings.Builder{}
 	}
 }
 
@@ -1757,13 +1768,21 @@ func (b *chatRuntimeEventBridge) hasRenderedAssistantContent(content string) boo
 	}
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
-	if b.renderedAssistantFinalContent != "" && b.renderedAssistantFinalContent == normalized {
+	digest, length := digestRenderedAssistantContent(normalized)
+	if b.renderedAssistantFinalLength == length && b.renderedAssistantFinalDigest == digest {
 		return true
 	}
-	if b.renderedAssistantDeltaFinalized && normalizeRenderedAssistantContent(b.renderedAssistantDeltaContent) == normalized {
+	if b.renderedAssistantDeltaFinalized && b.renderedAssistantDeltaLength == length && b.renderedAssistantDeltaDigest == digest {
 		return true
 	}
 	return false
+}
+
+func digestRenderedAssistantContent(content string) ([sha256.Size]byte, int) {
+	if content == "" {
+		return [sha256.Size]byte{}, 0
+	}
+	return sha256.Sum256([]byte(content)), len(content)
 }
 
 func (b *chatRuntimeEventBridge) HasRenderedAssistantDelta() bool {

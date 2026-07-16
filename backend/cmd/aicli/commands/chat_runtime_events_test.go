@@ -2575,6 +2575,32 @@ func TestChatRuntimeEvents_RendersAssistantDeltaAndFinalizesWithoutRepeatingResp
 	require.True(t, bridge.HasRenderedAssistantFinalResponse("Hello"))
 }
 
+func TestChatRuntimeEventBridgeReleasesFinalizedDeltaContent(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	content := strings.Repeat("streamed-response-", 32<<10)
+	bridge.BeginRun()
+	for offset := 0; offset < len(content); offset += 4096 {
+		end := offset + 4096
+		if end > len(content) {
+			end = len(content)
+		}
+		bridge.markAssistantDeltaRendered(content[offset:end])
+	}
+	require.Equal(t, len(content), bridge.renderedAssistantDeltaContent.Len())
+
+	bridge.markAssistantDeltaFinalized()
+	require.Zero(t, bridge.renderedAssistantDeltaContent.Len())
+	require.True(t, bridge.HasRenderedAssistantFinalResponse(content))
+	require.False(t, bridge.HasRenderedAssistantFinalResponse(content+"changed"))
+
+	bridge.BeginRun()
+	require.False(t, bridge.HasRenderedAssistantFinalResponse(content))
+	bridge.markAssistantDeltaRendered(content)
+	bridge.markAssistantFinalRendered(content)
+	require.Zero(t, bridge.renderedAssistantDeltaContent.Len())
+	require.True(t, bridge.HasRenderedAssistantFinalResponse(content))
+}
+
 func TestChatRuntimeEvents_CompletesAssistantDeltaWithFinalMessageContent(t *testing.T) {
 	session := &ChatSession{
 		Stream:         true,
