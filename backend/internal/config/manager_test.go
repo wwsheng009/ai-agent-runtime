@@ -134,6 +134,13 @@ func TestValidateSandboxConfig(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestDefaultRuntimeConfigDoesNotCapExplicitToolTimeouts(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	require.False(t, cfg.Sandbox.Enabled)
+	require.Zero(t, cfg.Sandbox.MaxExecutionTime, "tool-specific timeouts should be effective unless sandbox policy explicitly overrides them")
+	require.False(t, runtimeexecutor.SandboxConfigActive(cfg.Sandbox))
+}
+
 func TestValidateContextConfig(t *testing.T) {
 	cfg := DefaultRuntimeConfig()
 	require.Equal(t, "balanced", cfg.Context.Profile)

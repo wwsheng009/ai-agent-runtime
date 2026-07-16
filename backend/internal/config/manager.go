@@ -362,8 +362,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			CacheTTL:       5 * time.Minute,
 		},
 		Sandbox: runtimeexecutor.SandboxConfig{
-			Enabled:          false,
-			MaxExecutionTime: 30 * time.Second,
+			Enabled: false,
 		},
 		HotReload: HotReloadConfig{
 			Enabled:       true,
