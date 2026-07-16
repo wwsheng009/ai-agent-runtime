@@ -331,7 +331,7 @@ func TestMaybeCompactFallsBackToDeterministicSummaryWhenProviderErrors(t *testin
 	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "upstream compact failed")
 }
 
-func TestMaybeCompactSkipsProviderWhenCompactionRequestExceedsInputBudget(t *testing.T) {
+func TestMaybeCompactReducesOversizedInputBeforeProviderCompaction(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "provider-a",
 		DefaultModel:    "gpt-5",
@@ -363,10 +363,13 @@ func TestMaybeCompactSkipsProviderWhenCompactionRequestExceedsInputBudget(t *tes
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Zero(t, provider.streamCount, "oversized compaction input must not be sent to the provider")
+	require.Equal(t, 1, provider.streamCount, "a fitted reduced request should preserve provider compaction")
+	require.NotNil(t, provider.lastRequest)
+	require.Equal(t, true, provider.lastRequest.Metadata["compact_input_reduced"])
+	require.Greater(t, provider.lastRequest.Metadata["compact_omitted_messages"].(int), 0)
+	require.Empty(t, localCompactionRequestBudgetFailure(runtime, provider.lastRequest, threshold{MaxContextTokens: 5000}))
 	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
-	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
-	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "compact request skipped")
+	require.NotEqual(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
 }
 
 func TestLocalCompactionRequestBudgetRejectsOversizedSerializedInput(t *testing.T) {
@@ -378,6 +381,31 @@ func TestLocalCompactionRequestBudgetRejectsOversizedSerializedInput(t *testing.
 	reason := localCompactionRequestBudgetFailure(runtime, request, threshold{MaxContextTokens: 2_000_000})
 	require.Contains(t, reason, "serialized input")
 	require.Contains(t, reason, "limit")
+}
+
+func TestBuildFittedLocalCompactionRequestKeepsToolBatchBoundary(t *testing.T) {
+	runtime := llm.NewLLMRuntime(nil)
+	history := []types.Message{
+		*types.NewUserMessage(strings.Repeat("old request ", 500)),
+		{Role: "assistant", ToolCalls: []types.ToolCall{{ID: "call-1", Name: "view"}}},
+		*types.NewToolMessage("call-1", strings.Repeat("large tool result ", 500)),
+		*types.NewUserMessage("latest request"),
+	}
+	req := Request{Provider: "provider-a", Model: "gpt-5"}
+	require.NotContains(t, safeLocalCompactionStarts(history), 2)
+	fitted := buildFittedLocalCompactionLLMRequest(
+		runtime, req, threshold{MaxContextTokens: 3600}, nil, history, 128, "", "oversized",
+	)
+
+	require.NotNil(t, fitted)
+	require.Empty(t, localCompactionRequestBudgetFailure(runtime, fitted, threshold{MaxContextTokens: 3600}))
+	omitted := fitted.Metadata["compact_omitted_messages"].(int)
+	require.NotEqual(t, 2, omitted, "the retained suffix must not begin with an orphaned tool result")
+	for _, message := range fitted.Messages {
+		if message.Role == "tool" {
+			require.NotEmpty(t, strings.TrimSpace(message.ToolCallID))
+		}
+	}
 }
 
 func TestBuildDeterministicCompactSummaryRetainsLatestItems(t *testing.T) {

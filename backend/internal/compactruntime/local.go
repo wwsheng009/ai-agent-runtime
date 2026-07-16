@@ -100,7 +100,10 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, thr
 	maxTokens, reasoningEffort := resolveCompactSummaryRequestSettings(a.llmRuntime, req.Provider, req.Model)
 	request := buildLocalCompactionLLMRequest(req, systemMessages, history, maxTokens, reasoningEffort)
 	if reason := localCompactionRequestBudgetFailure(a.llmRuntime, request, threshold); reason != "" {
-		return a.buildDeterministicSummaryMessage(ctx, req, history, reason)
+		request = buildFittedLocalCompactionLLMRequest(a.llmRuntime, req, threshold, systemMessages, history, maxTokens, reasoningEffort, reason)
+		if request == nil {
+			return a.buildDeterministicSummaryMessage(ctx, req, history, reason)
+		}
 	}
 
 	response, err := a.streamSummaryResponse(ctx, request)
@@ -326,6 +329,74 @@ func buildLocalCompactionLLMRequest(req Request, systemMessages, history []types
 			"session_id":                     strings.TrimSpace(req.SessionID),
 		},
 	}
+}
+
+// buildFittedLocalCompactionLLMRequest maps the omitted prefix locally and lets
+// the provider reduce that checkpoint together with the largest safe recent
+// suffix. It keeps oversized raw history off the wire while preserving one
+// provider compaction pass whenever a reduced request can fit.
+func buildFittedLocalCompactionLLMRequest(runtime *llm.LLMRuntime, req Request, threshold threshold, systemMessages, history []types.Message, maxTokens int, reasoningEffort, preflightReason string) *llm.LLMRequest {
+	starts := safeLocalCompactionStarts(history)
+	if len(starts) == 0 {
+		return nil
+	}
+
+	buildCandidate := func(start int, systems []types.Message) *llm.LLMRequest {
+		reduced := make([]types.Message, 0, len(history)-start+1)
+		if start > 0 {
+			prefix := types.NewUserMessage(buildDeterministicCompactSummary(history[:start], preflightReason))
+			prefix.Metadata["context_stage"] = "compaction"
+			prefix.Metadata["summary_source"] = "deterministic_prefix_map"
+			prefix.Metadata["omitted_message_count"] = start
+			reduced = append(reduced, *prefix)
+		}
+		reduced = append(reduced, cloneMessages(history[start:])...)
+		candidate := buildLocalCompactionLLMRequest(req, systems, reduced, maxTokens, reasoningEffort)
+		candidate.Metadata["compact_input_reduced"] = true
+		candidate.Metadata["compact_omitted_messages"] = start
+		candidate.Metadata["compact_retained_messages"] = len(history) - start
+		candidate.Metadata["compact_preflight_reason"] = summarizeCompactLine(preflightReason, 240)
+		if len(systems) == 0 && len(systemMessages) > 0 {
+			candidate.Metadata["compact_system_messages_omitted"] = len(systemMessages)
+		}
+		return candidate
+	}
+
+	findFit := func(systems []types.Message) *llm.LLMRequest {
+		last := buildCandidate(starts[len(starts)-1], systems)
+		if localCompactionRequestBudgetFailure(runtime, last, threshold) != "" {
+			return nil
+		}
+		low, high := 0, len(starts)-1
+		for low < high {
+			mid := low + (high-low)/2
+			candidate := buildCandidate(starts[mid], systems)
+			if localCompactionRequestBudgetFailure(runtime, candidate, threshold) == "" {
+				high = mid
+			} else {
+				low = mid + 1
+			}
+		}
+		return buildCandidate(starts[low], systems)
+	}
+
+	if fitted := findFit(systemMessages); fitted != nil {
+		return fitted
+	}
+	return findFit(nil)
+}
+
+func safeLocalCompactionStarts(history []types.Message) []int {
+	starts := make([]int, 0, len(history)+1)
+	for index, message := range history {
+		if index == 0 || !strings.EqualFold(strings.TrimSpace(message.Role), "tool") {
+			starts = append(starts, index)
+		}
+	}
+	if len(starts) == 0 || starts[len(starts)-1] != len(history) {
+		starts = append(starts, len(history))
+	}
+	return starts
 }
 
 func localCompactionRequestBudgetFailure(runtime *llm.LLMRuntime, request *llm.LLMRequest, threshold threshold) string {
