@@ -202,6 +202,59 @@ func TestSQLiteRuntimeStoreSessionLeaseLifecycle(t *testing.T) {
 	require.Nil(t, loaded)
 }
 
+func TestSQLiteRuntimeStoreConfiguresLowMemoryFileConnection(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.sqlite")
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		Path:           dbPath,
+		SQLiteCacheKiB: 768,
+		BusyTimeout:    2 * time.Second,
+	})
+	require.NoError(t, err)
+
+	assert.True(t, store.fileBacked)
+	assert.Equal(t, 1, store.db.Stats().MaxOpenConnections)
+	var journalMode string
+	require.NoError(t, store.db.QueryRow("PRAGMA journal_mode").Scan(&journalMode))
+	assert.Equal(t, "wal", strings.ToLower(journalMode))
+	var cacheSize, mmapSize, tempStore, busyTimeout, autoCheckpoint, journalLimit int64
+	require.NoError(t, store.db.QueryRow("PRAGMA cache_size").Scan(&cacheSize))
+	require.NoError(t, store.db.QueryRow("PRAGMA mmap_size").Scan(&mmapSize))
+	require.NoError(t, store.db.QueryRow("PRAGMA temp_store").Scan(&tempStore))
+	require.NoError(t, store.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout))
+	require.NoError(t, store.db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&autoCheckpoint))
+	require.NoError(t, store.db.QueryRow("PRAGMA journal_size_limit").Scan(&journalLimit))
+	assert.Equal(t, int64(-768), cacheSize)
+	assert.Zero(t, mmapSize)
+	assert.Equal(t, int64(1), tempStore)
+	assert.Equal(t, int64(2000), busyTimeout)
+	assert.Equal(t, int64(256), autoCheckpoint)
+	assert.Equal(t, int64(16<<20), journalLimit)
+
+	_, err = store.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      "wal-test",
+		SessionID: "sqlite-low-memory",
+		Payload:   map[string]interface{}{"content": strings.Repeat("x", 64<<10)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+	if info, statErr := os.Stat(dbPath + "-wal"); statErr == nil {
+		assert.Zero(t, info.Size())
+	} else {
+		require.True(t, os.IsNotExist(statErr), "stat WAL: %v", statErr)
+	}
+}
+
+func TestSQLiteRuntimeStoreUsesSingleConnectionForMemoryDSN(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-low-memory-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	assert.False(t, store.fileBacked)
+	assert.Equal(t, 1, store.db.Stats().MaxOpenConnections)
+}
+
 func TestSessionLeaseHandleStopsRenewingAfterRenewError(t *testing.T) {
 	store := &failingRenewLeaseStore{renewErr: fmt.Errorf("database closed")}
 	handle, err := AcquireSessionLease(context.Background(), store, LeaseRequest{

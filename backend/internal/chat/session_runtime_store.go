@@ -198,9 +198,16 @@ type EventSequenceStore interface {
 
 // RuntimeStoreConfig configures the sqlite-backed runtime store.
 type RuntimeStoreConfig struct {
-	Path string
-	DSN  string
+	Path           string
+	DSN            string
+	SQLiteCacheKiB int
+	BusyTimeout    time.Duration
 }
+
+const (
+	defaultRuntimeSQLiteCacheKiB = 2048
+	defaultRuntimeBusyTimeout    = 5 * time.Second
+)
 
 const defaultInMemoryRuntimeRetention = 2048
 
@@ -1458,8 +1465,11 @@ func mailboxRecordFromRuntimeMessage(sessionID string, message team.MailMessage)
 
 // SQLiteRuntimeStore persists runtime data in sqlite.
 type SQLiteRuntimeStore struct {
-	mu sync.Mutex
-	db *sql.DB
+	mu          sync.Mutex
+	db          *sql.DB
+	fileBacked  bool
+	busyTimeout time.Duration
+	cacheKiB    int
 
 	globalMailboxWriter agentcontrol.GlobalMailboxWriter
 
@@ -1523,10 +1533,22 @@ func NewSQLiteRuntimeStore(cfg *RuntimeStoreConfig) (*SQLiteRuntimeStore, error)
 	if err != nil {
 		return nil, fmt.Errorf("open runtime db: %w", err)
 	}
-	if strings.Contains(dsn, "mode=memory") {
-		db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	busyTimeout := cfg.BusyTimeout
+	if busyTimeout <= 0 {
+		busyTimeout = defaultRuntimeBusyTimeout
 	}
-	store := &SQLiteRuntimeStore{db: db}
+	cacheKiB := cfg.SQLiteCacheKiB
+	if cacheKiB <= 0 {
+		cacheKiB = defaultRuntimeSQLiteCacheKiB
+	}
+	store := &SQLiteRuntimeStore{
+		db:          db,
+		fileBacked:  !isRuntimeSQLiteMemoryDSN(dsn),
+		busyTimeout: busyTimeout,
+		cacheKiB:    cacheKiB,
+	}
 	if err := store.init(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -1537,6 +1559,19 @@ func NewSQLiteRuntimeStore(cfg *RuntimeStoreConfig) (*SQLiteRuntimeStore, error)
 // Close closes the underlying database.
 func (s *SQLiteRuntimeStore) Close() error {
 	if s == nil || s.db == nil {
+		return nil
+	}
+	if s.fileBacked {
+		ctx, cancel := context.WithTimeout(context.Background(), s.busyTimeout)
+		_, checkpointErr := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+		cancel()
+		closeErr := s.db.Close()
+		if closeErr != nil {
+			return closeErr
+		}
+		if checkpointErr != nil {
+			return fmt.Errorf("checkpoint runtime sqlite WAL: %w", checkpointErr)
+		}
 		return nil
 	}
 	return s.db.Close()
@@ -3380,6 +3415,31 @@ func (s *SQLiteRuntimeStore) notifyAgentControlMailboxWatchers(sessionID string,
 }
 
 func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("runtime store is not initialized")
+	}
+	pragmas := []string{
+		"PRAGMA synchronous=NORMAL",
+		fmt.Sprintf("PRAGMA busy_timeout=%d", s.busyTimeout.Milliseconds()),
+		fmt.Sprintf("PRAGMA cache_size=-%d", s.cacheKiB),
+		"PRAGMA temp_store=FILE",
+		"PRAGMA mmap_size=0",
+		"PRAGMA foreign_keys=ON",
+	}
+	if s.fileBacked {
+		pragmas = append([]string{
+			"PRAGMA auto_vacuum=INCREMENTAL",
+			"PRAGMA journal_mode=WAL",
+			"PRAGMA wal_autocheckpoint=256",
+			"PRAGMA journal_size_limit=16777216",
+		}, pragmas...)
+	}
+	for _, statement := range pragmas {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("configure runtime sqlite: %w", err)
+		}
+	}
+
 	migrations := []migrate.Migration{
 		{
 			Version: 1,
@@ -3698,6 +3758,11 @@ func resolveRuntimeDSN(cfg *RuntimeStoreConfig) (string, error) {
 		return cfg.DSN, nil
 	}
 	return fmt.Sprintf("file:runtime-store-%s?mode=memory&cache=shared", uuid.NewString()), nil
+}
+
+func isRuntimeSQLiteMemoryDSN(dsn string) bool {
+	lower := strings.ToLower(strings.TrimSpace(dsn))
+	return lower == ":memory:" || strings.Contains(lower, "mode=memory")
 }
 
 func getSessionLeaseTx(ctx context.Context, tx *sql.Tx, sessionID string) (*SessionLease, error) {
