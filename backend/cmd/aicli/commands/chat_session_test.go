@@ -252,6 +252,20 @@ func TestDecodeToolArguments_RecordsParseError(t *testing.T) {
 	}
 }
 
+func TestDecodeToolArguments_RepairsMissingStructuralClosers(t *testing.T) {
+	args := decodeToolArguments(`{"path":"backend","options":{"depth":2}`)
+	if args["path"] != "backend" {
+		t.Fatalf("expected repaired path argument, got %#v", args)
+	}
+	options, ok := args["options"].(map[string]interface{})
+	if !ok || options["depth"] != float64(2) {
+		t.Fatalf("expected repaired nested object, got %#v", args)
+	}
+	if _, exists := args["_parse_error"]; exists {
+		t.Fatalf("did not expect parse error after structural repair: %#v", args)
+	}
+}
+
 func TestLoadRequestedRuntimeSessionReturnsLatestMeaningfulSessionForResume(t *testing.T) {
 	storage, err := runtimechat.NewFileStorage(t.TempDir())
 	if err != nil {

@@ -249,14 +249,7 @@ type AssistantMessage struct {
 
 // ParseArguments 解析 StreamToolCall 的参数，自动修复不完整 JSON
 func (tc *StreamToolCall) ParseArguments() map[string]interface{} {
-	argStr := repairJSON(tc.Args.String())
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(argStr), &result); err != nil {
-		return toolargs.Normalize(map[string]interface{}{
-			"_raw": tc.Args.String(),
-		})
-	}
-	return toolargs.Normalize(result)
+	return toolargs.DecodeJSON(tc.Args.String())
 }
 
 // ToToolCall 将 StreamToolCall 转换为 ToolCall
@@ -269,46 +262,6 @@ func (tc *StreamToolCall) ToToolCall() *ToolCall {
 			Arguments: tc.Args.String(),
 		},
 	}
-}
-
-// repairJSON 修复不完整的 JSON（如缺少闭合括号）
-func repairJSON(s string) string {
-	if json.Valid([]byte(s)) {
-		return s
-	}
-
-	openObjects := 0
-	inString := false
-	escaped := false
-	for _, r := range s {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if inString && r == '\\' {
-			escaped = true
-			continue
-		}
-		if r == '"' {
-			inString = !inString
-			continue
-		}
-		if inString {
-			continue
-		}
-		switch r {
-		case '{':
-			openObjects++
-		case '}':
-			if openObjects > 0 {
-				openObjects--
-			}
-		}
-	}
-	if openObjects > 0 {
-		s += strings.Repeat("}", openObjects)
-	}
-	return s
 }
 
 const (
@@ -775,11 +728,7 @@ func (a *OpenAIAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]inter
 		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
 			args := make(map[string]interface{})
 			if argsStr, ok := fn["arguments"].(string); ok && argsStr != "" {
-				// 使用 JSON 修复后再解析
-				fixedArgs := repairJSON(argsStr)
-				if err := json.Unmarshal([]byte(fixedArgs), &args); err != nil {
-					args = map[string]interface{}{"_raw": argsStr}
-				}
+				args = toolargs.DecodeJSON(argsStr)
 			} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
 				args = argsMap
 			}

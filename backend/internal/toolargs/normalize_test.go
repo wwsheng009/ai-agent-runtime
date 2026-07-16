@@ -52,3 +52,38 @@ func TestNormalizeDoesNotOverwriteExplicitArgs(t *testing.T) {
 		t.Fatalf("expected explicit args to be preserved, got %#v", got)
 	}
 }
+
+func TestDecodeJSONCompletesMissingStructuralDelimiters(t *testing.T) {
+	got := DecodeJSON(`{"commands":[{"command":"git status"},{"command":"git diff"}`)
+	commands, ok := got["commands"].([]interface{})
+	if !ok || len(commands) != 2 {
+		t.Fatalf("expected repaired command array, got %#v", got)
+	}
+	if commands[1].(map[string]interface{})["command"] != "git diff" {
+		t.Fatalf("unexpected repaired arguments: %#v", got)
+	}
+	if _, exists := got["_parse_error"]; exists {
+		t.Fatalf("did not expect parse error after structural repair: %#v", got)
+	}
+}
+
+func TestDecodeJSONDoesNotRepairTruncatedString(t *testing.T) {
+	raw := `{"file_path":"E:/project/out.txt","content":"partial`
+	got := DecodeJSON(raw)
+	if got["_raw"] != raw {
+		t.Fatalf("expected original truncated input, got %#v", got)
+	}
+	if got["_parse_error"] == nil {
+		t.Fatalf("expected parse error for truncated string, got %#v", got)
+	}
+	if _, exists := got["content"]; exists {
+		t.Fatalf("truncated content must not become executable args: %#v", got)
+	}
+}
+
+func TestDecodeJSONUnwrapsProviderRawEnvelope(t *testing.T) {
+	got := DecodeJSON(`{"_raw":"{\"cmd\":\"git status\"}"}`)
+	if got["cmd"] != "git status" {
+		t.Fatalf("expected nested raw arguments to be unwrapped, got %#v", got)
+	}
+}

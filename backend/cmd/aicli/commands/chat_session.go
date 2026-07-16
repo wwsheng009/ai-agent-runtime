@@ -20,6 +20,7 @@ import (
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -1402,18 +1403,7 @@ func encodeRuntimeToolCalls(calls []runtimetypes.ToolCall) []map[string]interfac
 }
 
 func decodeToolArguments(raw string) map[string]interface{} {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return map[string]interface{}{}
-	}
-	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return map[string]interface{}{
-			"_raw":         raw,
-			"_parse_error": err.Error(),
-		}
-	}
-	return args
+	return toolargs.DecodeJSON(raw)
 }
 
 func blankToDash(value string) string {

@@ -697,11 +697,7 @@ func (a *AnthropicAdapter) ExtractToolCallsFromRawCalls(rawCalls []map[string]in
 		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
 			args := make(map[string]interface{})
 			if argsStr, ok := fn["arguments"].(string); ok && argsStr != "" {
-				// 使用 JSON 修复后再解析
-				fixedArgs := repairJSON(argsStr)
-				if err := json.Unmarshal([]byte(fixedArgs), &args); err != nil {
-					args = map[string]interface{}{"_raw": argsStr}
-				}
+				args = toolargs.DecodeJSON(argsStr)
 			} else if argsMap, ok := fn["arguments"].(map[string]interface{}); ok {
 				args = argsMap
 			}

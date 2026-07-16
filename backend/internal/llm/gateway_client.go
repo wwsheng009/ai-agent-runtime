@@ -1208,25 +1208,9 @@ func normalizeGatewayToolCalls(raw interface{}) []interface{} {
 	}
 }
 
-// parseToolCalls 解析工具调用参数
-func parseToolCallArgs(argsStr string) map[string]interface{} {
-	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
-		return make(map[string]interface{})
-	}
-	return args
-}
-
 // parseToolArguments 解析工具参数
 func parseToolArguments(argsStr string) map[string]interface{} {
-	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
-		if strings.TrimSpace(argsStr) == "" {
-			return make(map[string]interface{})
-		}
-		return toolargs.Normalize(map[string]interface{}{"_raw": argsStr})
-	}
-	return toolargs.Normalize(args)
+	return toolargs.DecodeJSON(argsStr)
 }
 
 func resolveProviderAPIPath(provider *ProviderResource, defaultPath string) string {
