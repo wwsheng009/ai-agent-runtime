@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -80,7 +81,7 @@ func (s *FileStorage) Load(ctx context.Context, sessionID string) (*Session, err
 	if err != nil {
 		return nil, err
 	}
-	return session.Clone(), nil
+	return session, nil
 }
 
 // Delete 删除会话。
@@ -338,7 +339,7 @@ func (s *FileStorage) listFiltered(ctx context.Context, keep func(*Session) bool
 	filtered := make([]*Session, 0, len(sessions))
 	for _, session := range sessions {
 		if keep == nil || keep(session) {
-			filtered = append(filtered, session.Clone())
+			filtered = append(filtered, session)
 		}
 	}
 	sortSessionsByUpdated(filtered)
@@ -378,16 +379,17 @@ func (s *FileStorage) readSessionLocked(sessionID string) (*Session, error) {
 }
 
 func (s *FileStorage) readSessionFileLocked(path string) (*Session, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if os.IsNotExist(err) {
 		return nil, ErrSessionNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read session file %s: %w", path, err)
 	}
+	defer file.Close()
 
 	var session Session
-	if err := json.Unmarshal(data, &session); err != nil {
+	if err := json.NewDecoder(file).Decode(&session); err != nil {
 		return nil, fmt.Errorf("decode session file %s: %w", path, err)
 	}
 	return &session, nil
@@ -397,15 +399,25 @@ func (s *FileStorage) writeSessionLocked(session *Session) error {
 	if session == nil || strings.TrimSpace(session.ID) == "" {
 		return ErrInvalidSession
 	}
-	data, err := json.MarshalIndent(session, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode session %s: %w", session.ID, err)
-	}
-
 	path := s.sessionPath(session.ID)
 	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
 		return fmt.Errorf("write temp session %s: %w", session.ID, err)
+	}
+	writer := bufio.NewWriterSize(file, 64*1024)
+	encodeErr := encodeSessionJSON(writer, session)
+	if encodeErr == nil {
+		encodeErr = writer.Flush()
+	}
+	closeErr := file.Close()
+	if encodeErr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("encode session %s: %w", session.ID, encodeErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp session %s: %w", session.ID, closeErr)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
@@ -416,6 +428,78 @@ func (s *FileStorage) writeSessionLocked(session *Session) error {
 			_ = os.Remove(tmpPath)
 			return fmt.Errorf("rename session %s: %w", session.ID, retryErr)
 		}
+	}
+	return nil
+}
+
+func encodeSessionJSON(writer *bufio.Writer, session *Session) error {
+	if writer == nil || session == nil {
+		return ErrInvalidSession
+	}
+	encoder := json.NewEncoder(writer)
+	encoder.SetEscapeHTML(false)
+	if _, err := writer.WriteString("{\n"); err != nil {
+		return err
+	}
+	fields := []struct {
+		name  string
+		value interface{}
+	}{
+		{name: "id", value: session.ID},
+		{name: "userId", value: session.UserID},
+		{name: "state", value: session.State},
+	}
+	for _, field := range fields {
+		if err := encodeSessionJSONField(writer, encoder, field.name, field.value, true); err != nil {
+			return err
+		}
+	}
+	if _, err := writer.WriteString("  \"history\": [\n"); err != nil {
+		return err
+	}
+	for index := range session.History {
+		if index > 0 {
+			if _, err := writer.WriteString(",\n"); err != nil {
+				return err
+			}
+		}
+		if err := encoder.Encode(session.History[index]); err != nil {
+			return err
+		}
+	}
+	if _, err := writer.WriteString("  ],\n"); err != nil {
+		return err
+	}
+	remaining := []struct {
+		name  string
+		value interface{}
+	}{
+		{name: "headOffset", value: session.HeadOffset},
+		{name: "canonicalMessageCount", value: session.CanonicalMessageCount},
+		{name: "metadata", value: session.Metadata},
+		{name: "createdAt", value: session.CreatedAt},
+		{name: "updatedAt", value: session.UpdatedAt},
+		{name: "expiresAt", value: session.ExpiresAt},
+	}
+	for index, field := range remaining {
+		if err := encodeSessionJSONField(writer, encoder, field.name, field.value, index < len(remaining)-1); err != nil {
+			return err
+		}
+	}
+	_, err := writer.WriteString("}\n")
+	return err
+}
+
+func encodeSessionJSONField(writer *bufio.Writer, encoder *json.Encoder, name string, value interface{}, comma bool) error {
+	if _, err := fmt.Fprintf(writer, "  %q: ", name); err != nil {
+		return err
+	}
+	if err := encoder.Encode(value); err != nil {
+		return err
+	}
+	if comma {
+		_, err := writer.WriteString(",")
+		return err
 	}
 	return nil
 }

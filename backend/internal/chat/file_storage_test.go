@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -114,5 +115,45 @@ func TestFileStorageRoundTripAndLatest(t *testing.T) {
 	}
 	if previews[0].ID != second.ID {
 		t.Fatalf("expected newest preview first, got %s", previews[0].ID)
+	}
+}
+
+func TestFileStorageLoadReturnsOwnedDecodedSession(t *testing.T) {
+	storage, err := NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file storage: %v", err)
+	}
+	session := NewSession("owner-test")
+	session.ReplaceHistory([]types.Message{*types.NewUserMessage("original")})
+	if err := storage.Save(context.Background(), session); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	first, err := storage.Load(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	first.History[0].Content = "mutated"
+	second, err := storage.Load(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+	if second.History[0].Content != "original" {
+		t.Fatalf("disk session changed through loaded object: %q", second.History[0].Content)
+	}
+}
+
+func TestFileStorageStreamingEncodeRemovesFailedTempFile(t *testing.T) {
+	storage, err := NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file storage: %v", err)
+	}
+	session := NewSession("encode-failure")
+	session.Metadata.Context["unsupported"] = make(chan struct{})
+	if err := storage.Save(context.Background(), session); err == nil {
+		t.Fatal("expected unsupported metadata encode to fail")
+	}
+	if _, err := os.Stat(storage.sessionPath(session.ID) + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("failed temp file was not removed: %v", err)
 	}
 }
