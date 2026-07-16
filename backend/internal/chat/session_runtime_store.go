@@ -1,12 +1,14 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -451,14 +453,51 @@ func (s *InMemoryRuntimeStore) SaveState(ctx context.Context, state *RuntimeStat
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	cloned := state.Clone()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cloned := cloneRuntimeStateForInMemoryStore(state, s.states[state.SessionID])
 	if cloned.UpdatedAt.IsZero() {
 		cloned.UpdatedAt = time.Now().UTC()
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.states[state.SessionID] = cloned
 	return nil
+}
+
+func cloneRuntimeStateForInMemoryStore(state, previous *RuntimeState) *RuntimeState {
+	if state == nil {
+		return nil
+	}
+	cloned := state.clone(false, false)
+	cloned.StableToolSurfaceSet = state.StableToolSurfaceSet
+	cloned.FrozenTurnToolsSet = state.FrozenTurnToolsSet
+	cloned.StableToolSurface = reuseOrCloneRuntimeTools(state.StableToolSurface, previous, true)
+	cloned.FrozenTurnTools = reuseOrCloneRuntimeTools(state.FrozenTurnTools, previous, false)
+	if cloned.PendingTool != nil && len(state.PendingTool.ResultMessageJSON) > 0 {
+		if previous != nil && previous.PendingTool != nil &&
+			previous.PendingTool.ToolCallID == state.PendingTool.ToolCallID &&
+			bytes.Equal(previous.PendingTool.ResultMessageJSON, state.PendingTool.ResultMessageJSON) {
+			cloned.PendingTool.ResultMessageJSON = previous.PendingTool.ResultMessageJSON
+		} else {
+			cloned.PendingTool.ResultMessageJSON = append(json.RawMessage(nil), state.PendingTool.ResultMessageJSON...)
+		}
+	}
+	return cloned
+}
+
+func reuseOrCloneRuntimeTools(tools []types.ToolDefinition, previous *RuntimeState, stable bool) []types.ToolDefinition {
+	if len(tools) == 0 {
+		return nil
+	}
+	if previous != nil {
+		candidate := previous.FrozenTurnTools
+		if stable {
+			candidate = previous.StableToolSurface
+		}
+		if reflect.DeepEqual(candidate, tools) {
+			return candidate
+		}
+	}
+	return cloneRuntimeToolDefinitions(tools)
 }
 
 // DeleteState removes a session runtime state.

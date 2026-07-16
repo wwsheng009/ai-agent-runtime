@@ -86,6 +86,62 @@ func assertSQLiteTableMissing(t *testing.T, db *sql.DB, table string) {
 	assert.Equal(t, 0, count)
 }
 
+func TestInMemoryRuntimeStoreReusesUnchangedLargeStateFields(t *testing.T) {
+	store := NewInMemoryRuntimeStore(16)
+	ctx := context.Background()
+	tools := []types.ToolDefinition{{
+		Name: "shell",
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"command": map[string]interface{}{"type": "string"},
+			},
+		},
+	}}
+	state := &RuntimeState{
+		SessionID:            "session-large-state",
+		Status:               SessionWaitingApproval,
+		StableToolSurface:    tools,
+		StableToolSurfaceSet: true,
+		FrozenTurnTools:      cloneRuntimeToolDefinitions(tools),
+		FrozenTurnToolsSet:   true,
+		PendingTool: &PendingToolInvocation{
+			ToolCallID:        "call-large",
+			ToolName:          "shell",
+			ArgsJSON:          []byte(`{"command":"build"}`),
+			ResultMessageJSON: make([]byte, 512<<10),
+		},
+	}
+	require.NoError(t, store.SaveState(ctx, state))
+	first := store.states[state.SessionID]
+	require.NotNil(t, first)
+	require.NotEmpty(t, first.PendingTool.ResultMessageJSON)
+
+	state.Status = SessionRunning
+	require.NoError(t, store.SaveState(ctx, state))
+	second := store.states[state.SessionID]
+	require.NotNil(t, second)
+	require.Same(t, &first.StableToolSurface[0], &second.StableToolSurface[0])
+	require.Same(t, &first.FrozenTurnTools[0], &second.FrozenTurnTools[0])
+	require.Same(t, &first.PendingTool.ResultMessageJSON[0], &second.PendingTool.ResultMessageJSON[0])
+
+	state.StableToolSurface[0].Parameters["type"] = "changed"
+	state.PendingTool.ResultMessageJSON[0] = 1
+	require.NoError(t, store.SaveState(ctx, state))
+	third := store.states[state.SessionID]
+	require.NotSame(t, &second.StableToolSurface[0], &third.StableToolSurface[0])
+	require.NotSame(t, &second.PendingTool.ResultMessageJSON[0], &third.PendingTool.ResultMessageJSON[0])
+	require.Equal(t, "object", second.StableToolSurface[0].Parameters["type"])
+	require.Equal(t, byte(0), second.PendingTool.ResultMessageJSON[0])
+
+	loaded, err := store.LoadState(ctx, state.SessionID)
+	require.NoError(t, err)
+	loaded.StableToolSurface[0].Parameters["type"] = "loaded-change"
+	loaded.PendingTool.ResultMessageJSON[0] = 2
+	require.Equal(t, "changed", third.StableToolSurface[0].Parameters["type"])
+	require.Equal(t, byte(1), third.PendingTool.ResultMessageJSON[0])
+}
+
 func TestInMemoryRuntimeStoreSessionLeaseLifecycle(t *testing.T) {
 	store := NewInMemoryRuntimeStore(16)
 	ctx := context.Background()
