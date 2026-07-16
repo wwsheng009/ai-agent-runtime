@@ -1531,6 +1531,11 @@ func shortProfileResourceName(value string) string {
 }
 
 func cloneEvent(event Event) Event {
+	return CloneEvent(event)
+}
+
+// CloneEvent returns an owned copy of an event and its JSON-like payload.
+func CloneEvent(event Event) Event {
 	cloned := event
 	if len(event.Payload) > 0 {
 		cloned.Payload = make(map[string]interface{}, len(event.Payload))

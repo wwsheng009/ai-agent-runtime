@@ -3887,12 +3887,5 @@ func parseStoredUnixOrRFC3339Time(unixNano sql.NullInt64, raw string) time.Time 
 }
 
 func cloneRuntimeEvent(event runtimeevents.Event) runtimeevents.Event {
-	cloned := event
-	if len(event.Payload) > 0 {
-		cloned.Payload = make(map[string]interface{}, len(event.Payload))
-		for key, value := range event.Payload {
-			cloned.Payload[key] = value
-		}
-	}
-	return cloned
+	return runtimeevents.CloneEvent(event)
 }
