@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -155,5 +156,51 @@ func TestFileStorageStreamingEncodeRemovesFailedTempFile(t *testing.T) {
 	}
 	if _, err := os.Stat(storage.sessionPath(session.ID) + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf("failed temp file was not removed: %v", err)
+	}
+}
+
+func TestFileStorageMetadataListingScansHistoryWithoutRetainingIt(t *testing.T) {
+	storage, err := NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file storage: %v", err)
+	}
+	legacy := NewSession("metadata-user")
+	legacy.History = []types.Message{
+		*types.NewSystemMessage("instructions"),
+		*types.NewUserMessage("derived legacy title"),
+		*types.NewAssistantMessage("latest legacy summary"),
+	}
+	legacy.Metadata.Title = ""
+	legacy.Metadata.TitleSource = ""
+	legacy.Metadata.Summary = ""
+	legacy.CanonicalMessageCount = 0
+	payload, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy session: %v", err)
+	}
+	if err := os.WriteFile(storage.sessionPath(legacy.ID), payload, 0644); err != nil {
+		t.Fatalf("write legacy session: %v", err)
+	}
+
+	metadata, err := storage.ListMetadataPage(context.Background(), "metadata-user", 10, 0)
+	if err != nil {
+		t.Fatalf("list metadata: %v", err)
+	}
+	if len(metadata) != 1 {
+		t.Fatalf("expected one metadata row, got %d", len(metadata))
+	}
+	item := metadata[0]
+	if item.HistoryLoaded || len(item.History) != 0 {
+		t.Fatalf("metadata listing retained history: loaded=%v len=%d", item.HistoryLoaded, len(item.History))
+	}
+	if item.CanonicalMessageCount != 3 || item.Metadata.Title != "derived legacy title" || item.Metadata.Summary != "latest legacy summary" {
+		t.Fatalf("unexpected scanned metadata: %#v", item)
+	}
+	previews, err := storage.ListPreviews(context.Background(), "metadata-user", 10, 0)
+	if err != nil {
+		t.Fatalf("list previews: %v", err)
+	}
+	if len(previews) != 1 || previews[0].MessageCount != 3 || previews[0].Title != "derived legacy title" {
+		t.Fatalf("unexpected scanned preview: %#v", previews)
 	}
 }

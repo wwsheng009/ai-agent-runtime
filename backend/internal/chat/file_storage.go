@@ -110,6 +110,61 @@ func (s *FileStorage) List(ctx context.Context, userID string) ([]*Session, erro
 	})
 }
 
+// ListMetadataPage lists sessions without retaining their full histories.
+func (s *FileStorage) ListMetadataPage(ctx context.Context, userID string, limit, offset int) ([]*Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("read session dir: %w", err)
+	}
+	sessions := make([]*Session, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		session, scanErr := s.readSessionMetadataFileLocked(filepath.Join(s.dir, entry.Name()))
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if session.UserID == userID {
+			sessions = append(sessions, session)
+		}
+	}
+	sortSessionsByUpdated(sessions)
+	if offset >= len(sessions) {
+		return []*Session{}, nil
+	}
+	if offset > 0 {
+		sessions = sessions[offset:]
+	}
+	if limit > 0 && len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+	return sessions, nil
+}
+
+// ListPreviews avoids materializing canonical histories for session pickers.
+func (s *FileStorage) ListPreviews(ctx context.Context, userID string, limit, offset int) ([]*SessionPreview, error) {
+	sessions, err := s.ListMetadataPage(ctx, userID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	previews := make([]*SessionPreview, 0, len(sessions))
+	for _, session := range sessions {
+		if session != nil {
+			previews = append(previews, session.BuildPreview())
+		}
+	}
+	return previews, nil
+}
+
 // ListWithState 列出指定状态会话。
 func (s *FileStorage) ListWithState(ctx context.Context, userID string, state SessionState) ([]*Session, error) {
 	return s.listFiltered(ctx, func(session *Session) bool {
@@ -393,6 +448,150 @@ func (s *FileStorage) readSessionFileLocked(path string) (*Session, error) {
 		return nil, fmt.Errorf("decode session file %s: %w", path, err)
 	}
 	return &session, nil
+}
+
+type fileSessionPreviewText struct {
+	firstUser      string
+	firstAssistant string
+	firstOther     string
+	lastContent    string
+	messageCount   int
+}
+
+func (p *fileSessionPreviewText) observe(message types.Message) {
+	p.messageCount++
+	content := strings.TrimSpace(message.Content)
+	if content == "" {
+		return
+	}
+	p.lastContent = summarizeSessionText(content, sessionSummaryLimit)
+	switch strings.ToLower(strings.TrimSpace(message.Role)) {
+	case "user":
+		if p.firstUser == "" {
+			p.firstUser = summarizeSessionText(content, sessionTitleLimit)
+		}
+	case "assistant":
+		if p.firstAssistant == "" {
+			p.firstAssistant = summarizeSessionText(content, sessionTitleLimit)
+		}
+	case "system", "developer", "tool":
+	default:
+		if p.firstOther == "" {
+			p.firstOther = summarizeSessionText(content, sessionTitleLimit)
+		}
+	}
+}
+
+func (p *fileSessionPreviewText) apply(metadata *SessionMetadata) {
+	if metadata == nil {
+		return
+	}
+	derivedTitle := p.firstUser
+	if derivedTitle == "" {
+		derivedTitle = p.firstAssistant
+	}
+	if derivedTitle == "" {
+		derivedTitle = p.firstOther
+	}
+	title := strings.TrimSpace(metadata.Title)
+	if metadata.TitleSource != sessionTitleSourceManual &&
+		(title == "" || metadata.TitleSource == sessionTitleSourceDerived || shouldRepairLegacyDerivedTitle(title)) {
+		metadata.Title = derivedTitle
+		if derivedTitle != "" {
+			metadata.TitleSource = sessionTitleSourceDerived
+		}
+	}
+	if strings.TrimSpace(metadata.Summary) == "" {
+		metadata.Summary = p.lastContent
+	}
+}
+
+func (s *FileStorage) readSessionMetadataFileLocked(path string) (*Session, error) {
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil, ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read session file %s: %w", path, err)
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return nil, fmt.Errorf("decode session metadata file %s: invalid object", path)
+	}
+	session := &Session{}
+	previewText := fileSessionPreviewText{}
+	for decoder.More() {
+		nameToken, tokenErr := decoder.Token()
+		if tokenErr != nil {
+			return nil, fmt.Errorf("decode session metadata file %s: %w", path, tokenErr)
+		}
+		name, _ := nameToken.(string)
+		switch name {
+		case "id":
+			err = decoder.Decode(&session.ID)
+		case "userId":
+			err = decoder.Decode(&session.UserID)
+		case "state":
+			err = decoder.Decode(&session.State)
+		case "history":
+			err = decodeFileSessionHistoryMetadata(decoder, &previewText)
+		case "headOffset":
+			err = decoder.Decode(&session.HeadOffset)
+		case "canonicalMessageCount":
+			err = decoder.Decode(&session.CanonicalMessageCount)
+		case "metadata":
+			err = decoder.Decode(&session.Metadata)
+		case "createdAt":
+			err = decoder.Decode(&session.CreatedAt)
+		case "updatedAt":
+			err = decoder.Decode(&session.UpdatedAt)
+		case "expiresAt":
+			err = decoder.Decode(&session.ExpiresAt)
+		default:
+			var ignored json.RawMessage
+			err = decoder.Decode(&ignored)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("decode session metadata file %s field %s: %w", path, name, err)
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("decode session metadata file %s: %w", path, err)
+	}
+	if session.CanonicalMessageCount < previewText.messageCount {
+		session.CanonicalMessageCount = previewText.messageCount
+	}
+	session.Metadata.TotalTurns = session.CanonicalMessageCount
+	previewText.apply(&session.Metadata)
+	session.HistoryLoaded = false
+	return session, nil
+}
+
+func decodeFileSessionHistoryMetadata(decoder *json.Decoder, preview *fileSessionPreviewText) error {
+	if decoder == nil || preview == nil {
+		return ErrInvalidSession
+	}
+	opening, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if opening == nil {
+		return nil
+	}
+	if opening != json.Delim('[') {
+		return fmt.Errorf("history is not an array")
+	}
+	for decoder.More() {
+		var message types.Message
+		if err := decoder.Decode(&message); err != nil {
+			return err
+		}
+		preview.observe(message)
+	}
+	_, err = decoder.Token()
+	return err
 }
 
 func (s *FileStorage) writeSessionLocked(session *Session) error {
