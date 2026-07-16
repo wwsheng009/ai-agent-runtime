@@ -84,6 +84,7 @@ func TestCodexBuildRequest_PreservesNativeImageGenerationToolAndDisablesParallel
 				},
 			},
 		},
+		Metadata: map[string]interface{}{"parallel_tool_calls": true},
 	})
 
 	if req["parallel_tool_calls"] != false {
@@ -106,6 +107,25 @@ func TestCodexBuildRequest_PreservesNativeImageGenerationToolAndDisablesParallel
 	}
 	if !sawNative {
 		t.Fatalf("expected native image_generation tool, got %#v", tools)
+	}
+}
+
+func TestCodexBuildRequest_PropagatesParallelToolCalls(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.4",
+		Messages: []map[string]interface{}{{"role": "user", "content": "inspect files"}},
+		Functions: []map[string]interface{}{
+			{
+				"type": "function", "name": "view",
+				"parameters": map[string]interface{}{"type": "object"},
+			},
+		},
+		Metadata: map[string]interface{}{"parallel_tool_calls": true},
+	})
+
+	if req["parallel_tool_calls"] != true {
+		t.Fatalf("expected parallel_tool_calls=true, got %#v", req["parallel_tool_calls"])
 	}
 }
 

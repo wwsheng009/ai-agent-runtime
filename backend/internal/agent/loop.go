@@ -650,6 +650,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			"remaining_budget": remainingBudget,
 		},
 	}
+	if loop.config.EnableParallelTools && loop.config.MaxParallelToolCalls > 1 && len(availableTools) > 1 {
+		req.Metadata[llm.MetadataKeyParallelToolCalls] = true
+		req.Metadata["max_parallel_tool_calls"] = loop.config.MaxParallelToolCalls
+	}
 	if len(preflightMetadata) > 0 {
 		req.Metadata["context_preflight"] = cloneInterfaceMap(preflightMetadata)
 	}
@@ -759,6 +763,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		"message_count":    len(req.Messages),
 		"tool_count":       len(req.Tools),
 		"remaining_budget": remainingBudget,
+	}
+	if parallel, _ := req.Metadata[llm.MetadataKeyParallelToolCalls].(bool); parallel {
+		requestPayload[llm.MetadataKeyParallelToolCalls] = true
+		requestPayload["max_parallel_tool_calls"] = loop.config.MaxParallelToolCalls
 	}
 	if len(preflightMetadata) > 0 {
 		requestPayload["context_preflight"] = cloneInterfaceMap(preflightMetadata)

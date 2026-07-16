@@ -32,6 +32,9 @@ func applyOpenAICompatibleRequestMetadata(request map[string]interface{}, config
 	if toolChoice, ok := openAICompatibleMetadataValue(config.Metadata, "tool_choice"); ok {
 		request["tool_choice"] = toolChoice
 	}
+	if parallel, ok := requestMetadataBool(config.Metadata, "parallel_tool_calls"); ok {
+		request["parallel_tool_calls"] = parallel
+	}
 	if thinking, ok := openAICompatibleMetadataObject(config.Metadata, "thinking"); ok {
 		request["thinking"] = thinking
 	}

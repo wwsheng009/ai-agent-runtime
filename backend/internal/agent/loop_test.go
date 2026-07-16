@@ -475,6 +475,42 @@ func TestReActLoop_RunWithSession_PropagatesStreamOptionToLLMRequest(t *testing.
 	}
 }
 
+func TestReActLoop_PropagatesParallelToolCapabilityToLLMRequest(t *testing.T) {
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{{
+			Content: "inspection complete",
+			Model:   "test-model",
+		}},
+	}
+	llmRuntime := llm.NewLLMRuntime(nil)
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := &Agent{
+		config: &Config{
+			Name:         "test-agent",
+			Provider:     "test-provider",
+			Model:        "test-model",
+			SystemPrompt: "You are a helpful assistant.",
+		},
+		mcpManager: &MockMCPManager{},
+	}
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:             1,
+		EnableThought:        true,
+		EnableToolCalls:      true,
+		EnableParallelTools:  true,
+		MaxParallelToolCalls: 4,
+	})
+
+	result, err := loop.RunWithSession(context.Background(), "inspect the repository", newTestHistorySession("session-parallel-hint"))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, provider.requests, 1)
+	require.Equal(t, true, provider.requests[0].Metadata[llm.MetadataKeyParallelToolCalls])
+	require.Equal(t, 4, provider.requests[0].Metadata["max_parallel_tool_calls"])
+}
+
 func TestResolvePromptPreflightProviderModelUsesLoopConfigOverride(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "default-provider",

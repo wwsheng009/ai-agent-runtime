@@ -534,6 +534,44 @@ func TestApplyPatchTool_MissingContextIncludesExpectedLines(t *testing.T) {
 	}
 }
 
+func TestApplyPatchTool_MissingContextIncludesClosestCurrentLines(t *testing.T) {
+	root := t.TempDir()
+	requireWriteFile(t, filepath.Join(root, "manager.go"), strings.Join([]string{
+		"package manager",
+		"",
+		"func (m *Manager) RegisterGroup(name string, active bool) error {",
+		"\treturn m.register(name, active)",
+		"}",
+		"",
+	}, "\n"))
+
+	tool := NewApplyPatchTool()
+	tool.SetBasePath(root)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: manager.go",
+		"@@ func (m *Manager) RegisterGroup(name string, priority int, active bool) error {",
+		"-\treturn m.register(name, priority, active)",
+		"+\treturn m.registerWithPriority(name, priority, active)",
+		"*** End Patch",
+	}, "\n")
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if result.Success || result.Error == nil {
+		t.Fatalf("expected patch failure, got %#v", result)
+	}
+	message := result.Error.Error()
+	if !strings.Contains(message, "最接近的当前内容") {
+		t.Fatalf("expected current context in diagnostic, got %q", message)
+	}
+	if !strings.Contains(message, "3: func (m *Manager) RegisterGroup(name string, active bool) error {") {
+		t.Fatalf("expected stable current line numbers, got %q", message)
+	}
+}
+
 func requireWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

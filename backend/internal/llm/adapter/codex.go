@@ -137,6 +137,9 @@ func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{}
 			} else {
 				request["tool_choice"] = "auto"
 			}
+			if parallel, ok := requestMetadataBool(config.Metadata, "parallel_tool_calls"); ok {
+				request["parallel_tool_calls"] = parallel
+			}
 			if codexToolsContainType(tools, codexImageGenerationToolType) {
 				request["parallel_tool_calls"] = false
 			}

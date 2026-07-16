@@ -743,7 +743,7 @@ func applyPatchHunks(content string, hunks []patchHunk) (string, error) {
 		if contextLine := hunkChangeContextLine(hunk.Header); contextLine != "" {
 			contextStart := locateHunk(lines, []string{contextLine}, searchCursor, false)
 			if contextStart < 0 {
-				return "", buildPatchHunkNotFoundError(hunk, []string{contextLine}, "未找到 @@ 上下文行")
+				return "", buildPatchHunkNotFoundError(hunk, []string{contextLine}, lines, "未找到 @@ 上下文行")
 			}
 			searchCursor = contextStart + 1
 		}
@@ -767,7 +767,7 @@ func applyPatchHunks(content string, hunks []patchHunk) (string, error) {
 			}
 		}
 		if start < 0 {
-			return "", buildPatchHunkNotFoundError(hunk, oldLines, "未找到期望旧内容")
+			return "", buildPatchHunkNotFoundError(hunk, oldLines, lines, "未找到期望旧内容")
 		}
 		touchesEOF := start+len(matchOldLines) == len(lines)
 
@@ -916,16 +916,25 @@ func hunkChangeContextLine(header string) string {
 	return ""
 }
 
-func buildPatchHunkNotFoundError(hunk patchHunk, expected []string, reason string) error {
+func buildPatchHunkNotFoundError(hunk patchHunk, expected, actual []string, reason string) error {
 	header := strings.TrimSpace(hunk.Header)
 	if header == "" {
 		header = "@@"
 	}
+	current := ""
+	if startLine, closest := closestPatchCurrentContext(actual, expected); len(closest) > 0 {
+		current = fmt.Sprintf(
+			"\n最接近的当前内容（第 %d 行附近，可直接据此修正补丁）:\n%s",
+			startLine,
+			formatPatchCurrentLines(closest, startLine),
+		)
+	}
 	return fmt.Errorf(
-		"无法定位 hunk: %s；%s。请先用 view/grep 确认文件中的最新上下文，或使用更靠近目标位置的 @@ 函数/类上下文。\n期望内容:\n%s",
+		"无法定位 hunk: %s；%s。请优先根据返回的当前内容直接修正补丁；信息不足时再用 view/grep。也可使用更靠近目标位置的 @@ 函数/类上下文。\n期望内容:\n%s%s",
 		header,
 		reason,
 		formatPatchExpectedLines(expected),
+		current,
 	)
 }
 
@@ -946,6 +955,91 @@ func formatPatchExpectedLines(lines []string) string {
 		preview = append(preview, fmt.Sprintf("... 省略 %d 行", len(lines)-limit))
 	}
 	return strings.Join(preview, "\n")
+}
+
+func closestPatchCurrentContext(actual, expected []string) (int, []string) {
+	if len(actual) == 0 {
+		return 0, nil
+	}
+	bestIndex := -1
+	bestScore := 0
+	for actualIndex, actualLine := range actual {
+		for _, expectedLine := range expected {
+			if score := patchLineSimilarity(actualLine, expectedLine); score > bestScore {
+				bestScore = score
+				bestIndex = actualIndex
+			}
+		}
+	}
+	if bestIndex < 0 {
+		return 0, nil
+	}
+	start := bestIndex - 3
+	if start < 0 {
+		start = 0
+	}
+	window := len(expected) + 6
+	if window < 8 {
+		window = 8
+	}
+	if window > 16 {
+		window = 16
+	}
+	end := start + window
+	if end > len(actual) {
+		end = len(actual)
+		start = end - window
+		if start < 0 {
+			start = 0
+		}
+	}
+	return start + 1, append([]string(nil), actual[start:end]...)
+}
+
+func patchLineSimilarity(actual, expected string) int {
+	actual = strings.ToLower(normalizePatchComparableLine(actual))
+	expected = strings.ToLower(normalizePatchComparableLine(expected))
+	if actual == "" || expected == "" {
+		return 0
+	}
+	if actual == expected {
+		return 10000 + len([]rune(actual))
+	}
+	if strings.Contains(actual, expected) || strings.Contains(expected, actual) {
+		return 5000 + min(len([]rune(actual)), len([]rune(expected)))
+	}
+	actualTerms := patchComparableTerms(actual)
+	expectedTerms := patchComparableTerms(expected)
+	if len(actualTerms) == 0 || len(expectedTerms) == 0 {
+		return 0
+	}
+	score := 0
+	for term := range expectedTerms {
+		if actualTerms[term] {
+			score += 100 + len([]rune(term))
+		}
+	}
+	return score
+}
+
+func patchComparableTerms(line string) map[string]bool {
+	terms := make(map[string]bool)
+	for _, term := range strings.FieldsFunc(line, func(char rune) bool {
+		return char != '_' && !unicode.IsLetter(char) && !unicode.IsNumber(char)
+	}) {
+		if len([]rune(term)) >= 2 {
+			terms[term] = true
+		}
+	}
+	return terms
+}
+
+func formatPatchCurrentLines(lines []string, startLine int) string {
+	formatted := make([]string, 0, len(lines))
+	for index, line := range lines {
+		formatted = append(formatted, fmt.Sprintf("%d: %s", startLine+index, truncateDiagnosticText(line, 240)))
+	}
+	return strings.Join(formatted, "\n")
 }
 
 func truncateDiagnosticText(text string, limit int) string {

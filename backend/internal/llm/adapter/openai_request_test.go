@@ -125,11 +125,12 @@ func TestOpenAIBuildRequest_PropagatesCompatibleMetadataOptions(t *testing.T) {
 			"stream_options": map[string]interface{}{
 				"include_usage": true,
 			},
-			"stop":              []string{"END"},
-			"top_p":             0.9,
-			"frequency_penalty": 0.1,
-			"presence_penalty":  0.2,
-			"tool_choice":       "none",
+			"stop":                []string{"END"},
+			"top_p":               0.9,
+			"frequency_penalty":   0.1,
+			"presence_penalty":    0.2,
+			"tool_choice":         "none",
+			"parallel_tool_calls": true,
 			"extra_body": map[string]interface{}{
 				"foo": "bar",
 			},
@@ -159,6 +160,9 @@ func TestOpenAIBuildRequest_PropagatesCompatibleMetadataOptions(t *testing.T) {
 	}
 	if got := req["tool_choice"]; got != "none" {
 		t.Fatalf("expected explicit tool_choice none, got %#v", got)
+	}
+	if got := req["parallel_tool_calls"]; got != true {
+		t.Fatalf("expected parallel_tool_calls=true, got %#v", got)
 	}
 	if got := req["foo"]; got != "bar" {
 		t.Fatalf("expected extra_body foo=bar, got %#v", got)

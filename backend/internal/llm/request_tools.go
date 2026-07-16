@@ -6,6 +6,7 @@ const (
 	MetadataKeyInternalOperation = "internal_operation"
 	MetadataKeyDisableTools      = "disable_tools"
 	MetadataKeyDisableMetaTools  = "disable_meta_tools"
+	MetadataKeyParallelToolCalls = "parallel_tool_calls"
 )
 
 func metadataDisablesTools(metadata map[string]interface{}) bool {
