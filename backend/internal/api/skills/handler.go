@@ -2094,21 +2094,45 @@ func (h *Handler) GetSessionHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := h.sessionManager.GetSession(r.Context(), mux.Vars(r)["id"])
+	sessionID := mux.Vars(r)["id"]
+	limit := 100
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsed, parseErr := strconv.Atoi(rawLimit)
+		if parseErr != nil || parsed <= 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "history limit must be a positive integer"))
+			return
+		}
+		limit = min(parsed, 1000)
+	}
+	beforeSeq := 0
+	if rawBefore := strings.TrimSpace(r.URL.Query().Get("before_seq")); rawBefore != "" {
+		parsed, parseErr := strconv.Atoi(rawBefore)
+		if parseErr != nil || parsed <= 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "before_seq must be a positive integer"))
+			return
+		}
+		beforeSeq = parsed
+	}
+	page, err := h.sessionManager.GetHistoryPage(r.Context(), sessionID, beforeSeq, limit)
 	if err != nil {
 		h.writeError(w, http.StatusNotFound, err)
 		return
 	}
-
-	history := session.GetMessages()
+	history := page.Messages
 	if history == nil {
 		history = []types.Message{}
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"session_id": session.ID,
-		"history":    history,
-		"count":      len(history),
+		"session_id":      sessionID,
+		"history":         history,
+		"count":           len(history),
+		"total":           page.Total,
+		"has_more":        page.HasMore,
+		"limit":           limit,
+		"first_seq":       page.FirstSeq,
+		"last_seq":        page.LastSeq,
+		"next_before_seq": page.NextBeforeSeq,
 	})
 }
 

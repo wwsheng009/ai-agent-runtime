@@ -202,6 +202,26 @@ func (m *SessionManager) List(ctx context.Context, userID string) ([]*Session, e
 	return m.storage.List(ctx, userID)
 }
 
+func (m *SessionManager) ListMetadataPage(ctx context.Context, userID string, limit, offset int) ([]*Session, error) {
+	if pager, ok := m.storage.(SessionStorageMetadataPager); ok {
+		return pager.ListMetadataPage(ctx, userID, limit, offset)
+	}
+	sessions, err := m.storage.List(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if offset >= len(sessions) {
+		return []*Session{}, nil
+	}
+	if offset > 0 {
+		sessions = sessions[offset:]
+	}
+	if limit > 0 && len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+	return sessions, nil
+}
+
 // ListActive 列出用户的活跃会话
 func (m *SessionManager) ListActive(ctx context.Context, userID string) ([]*Session, error) {
 	return m.storage.ListWithState(ctx, userID, StateActive)
@@ -223,16 +243,108 @@ func (m *SessionManager) GetStatistics(ctx context.Context, userID string) (*Ses
 
 // GetHistory 获取会话历史
 func (m *SessionManager) GetHistory(ctx context.Context, sessionID string, limit int) ([]types.Message, error) {
+	page, err := m.GetHistoryPage(ctx, sessionID, 0, limit)
+	if err != nil {
+		return nil, err
+	}
+	return page.Messages, nil
+}
+
+// GetHistoryPage returns a bounded canonical history page. beforeSeq is an
+// exclusive cursor; zero starts from the newest message.
+func (m *SessionManager) GetHistoryPage(ctx context.Context, sessionID string, beforeSeq, limit int) (*SessionHistoryPage, error) {
+	if pager, ok := m.storage.(SessionStorageHistoryPager); ok {
+		return pager.GetMessagePage(ctx, sessionID, beforeSeq, limit)
+	}
+	if reader, ok := m.storage.(SessionStorageRecentHistoryReader); ok {
+		if beforeSeq <= 0 {
+			messages, err := reader.GetRecentMessages(ctx, sessionID, limit)
+			if err != nil {
+				return nil, err
+			}
+			total, countErr := m.MessageCount(ctx, sessionID)
+			if countErr != nil {
+				total = len(messages)
+			}
+			return buildSessionHistoryPage(messages, total-len(messages)+1, total), nil
+		}
+	}
 	session, err := m.Get(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
+	total := session.MessageCount()
+	end := total
+	if beforeSeq > 0 && beforeSeq <= total+1 {
+		end = beforeSeq - 1
+	}
+	if end < 0 {
+		end = 0
+	}
+	start := 0
+	if limit > 0 && end > limit {
+		start = end - limit
+	}
+	history := session.visibleHistory()
+	if end > len(history) {
+		end = len(history)
+	}
+	if start > end {
+		start = end
+	}
+	messages := append([]types.Message(nil), history[start:end]...)
+	return buildSessionHistoryPage(messages, start+1, total), nil
+}
 
-	return session.GetRecentMessages(limit), nil
+func buildSessionHistoryPage(messages []types.Message, firstSeq, total int) *SessionHistoryPage {
+	page := &SessionHistoryPage{Messages: messages, Total: total}
+	if len(messages) == 0 {
+		return page
+	}
+	page.FirstSeq = max(firstSeq, 1)
+	page.LastSeq = page.FirstSeq + len(messages) - 1
+	page.HasMore = page.FirstSeq > 1
+	if page.HasMore {
+		page.NextBeforeSeq = page.FirstSeq
+	}
+	return page
+}
+
+func (m *SessionManager) MessageCount(ctx context.Context, sessionID string) (int, error) {
+	if counter, ok := m.storage.(SessionStorageMessageCounter); ok {
+		return counter.MessageCount(ctx, sessionID)
+	}
+	session, err := m.Get(ctx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return session.MessageCount(), nil
+}
+
+func (m *SessionManager) StreamHistory(ctx context.Context, sessionID string, visit func(seq int, message types.Message) error) error {
+	if visit == nil {
+		return fmt.Errorf("history visitor cannot be nil")
+	}
+	if streamer, ok := m.storage.(SessionStorageHistoryStreamer); ok {
+		return streamer.StreamMessages(ctx, sessionID, visit)
+	}
+	session, err := m.Get(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	for index, message := range session.visibleHistory() {
+		if err := visit(index+1, message); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ClearHistory 清空会话历史
 func (m *SessionManager) ClearHistory(ctx context.Context, sessionID string) error {
+	if clearer, ok := m.storage.(SessionStorageHistoryClearer); ok {
+		return clearer.ClearMessages(ctx, sessionID)
+	}
 	session, err := m.Get(ctx, sessionID)
 	if err != nil {
 		return err
@@ -486,18 +598,21 @@ func (m *SessionManager) SearchSessions(ctx context.Context, opts *SessionSearch
 
 // GetLatest 获取用户最近更新的会话
 func (m *SessionManager) GetLatest(ctx context.Context, userID string) (*Session, error) {
-	sessions, err := m.List(ctx, userID)
+	sessions, err := m.ListMetadataPage(ctx, userID, 1, 0)
 	if err != nil {
 		return nil, err
 	}
 	if len(sessions) == 0 {
 		return nil, ErrSessionNotFound
 	}
-	return sessions[0], nil
+	return m.Get(ctx, sessions[0].ID)
 }
 
 // ListPreviews 列出会话预览信息
 func (m *SessionManager) ListPreviews(ctx context.Context, userID string, limit, offset int) ([]*SessionPreview, error) {
+	if lister, ok := m.storage.(SessionStoragePreviewLister); ok {
+		return lister.ListPreviews(ctx, userID, limit, offset)
+	}
 	sessions, err := m.List(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -532,6 +647,10 @@ func (m *SessionManager) ArchiveSession(ctx context.Context, sessionID string) e
 func (m *SessionManager) ArchiveIdleSessions() {
 	ctx := context.Background()
 	idleThreshold := time.Now().Add(-m.config.IdleTimeout)
+	if archiver, ok := m.storage.(SessionStorageIdleArchiver); ok {
+		_, _ = archiver.ArchiveIdleSessions(ctx, idleThreshold, 128)
+		return
+	}
 
 	listAller, ok := m.storage.(SessionStorageAllLister)
 	if !ok {
@@ -559,6 +678,10 @@ func (m *SessionManager) Stop() {
 
 		if m.archiveTicker != nil {
 			close(m.archiveStop)
+		}
+
+		if closer, ok := m.storage.(SessionStorageCloser); ok {
+			_ = closer.CloseStorage()
 		}
 	})
 }

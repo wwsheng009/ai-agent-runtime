@@ -2,9 +2,13 @@ package commands
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"testing"
+	"time"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -106,5 +110,50 @@ func TestWriteRuntimeHTTPArtifact_PersistsRawBodiesAndTracksLatestPaths(t *testi
 	}
 	if snapshot.RequestArtifactPath != requestPath || snapshot.ResponseArtifactPath != responsePath {
 		t.Fatalf("unexpected artifact paths snapshot: %+v", snapshot)
+	}
+}
+
+func TestBuildRuntimeHTTPArtifactEnvelopeMarksBoundedBody(t *testing.T) {
+	envelope := buildRuntimeHTTPArtifactEnvelope(1, runtimellm.HTTPDebugEvent{
+		Phase:            "request",
+		RequestBodyBytes: 4096,
+		RequestBodyRaw:   []byte(`{"bounded":true}`),
+	})
+	if !envelope.BodyTruncated || envelope.BodyBytes != 4096 {
+		t.Fatalf("expected original body size and truncation marker, got %+v", envelope)
+	}
+	if envelope.BodyCapturedBytes != len(`{"bounded":true}`) {
+		t.Fatalf("unexpected captured body size: %+v", envelope)
+	}
+}
+
+func TestPruneRuntimeHTTPArtifactsEnforcesCountAndByteBudgets(t *testing.T) {
+	dir := t.TempDir()
+	baseTime := time.Now().Add(-time.Hour)
+	for index := 1; index <= 5; index++ {
+		path := filepath.Join(dir, fmt.Sprintf("%03d_request_runtime.json", index))
+		if err := os.WriteFile(path, []byte("12345678"), 0644); err != nil {
+			t.Fatalf("write artifact: %v", err)
+		}
+		stamp := baseTime.Add(time.Duration(index) * time.Second)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatalf("set artifact timestamp: %v", err)
+		}
+	}
+	if err := pruneRuntimeHTTPArtifacts(dir, 3, 20); err != nil {
+		t.Fatalf("prune artifacts: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read artifact directory: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	want := []string{"004_request_runtime.json", "005_request_runtime.json"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("expected newest artifacts %v, got %v", want, names)
 	}
 }

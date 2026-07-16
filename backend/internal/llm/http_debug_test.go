@@ -1,6 +1,32 @@
 package llm
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+	"unicode/utf8"
+)
+
+func TestBoundHTTPDebugRawBodyRetainsEndsWithinFixedLimit(t *testing.T) {
+	body := append(bytes.Repeat([]byte("h"), maxHTTPDebugRawBodyBytes), bytes.Repeat([]byte("t"), 4096)...)
+	bounded := boundHTTPDebugRawBody(body)
+	if len(bounded) != maxHTTPDebugRawBodyBytes {
+		t.Fatalf("expected %d retained bytes, got %d", maxHTTPDebugRawBodyBytes, len(bounded))
+	}
+	if !bytes.HasPrefix(bounded, []byte("hhhh")) || !bytes.HasSuffix(bounded, []byte("tttt")) {
+		t.Fatalf("expected bounded body to retain both head and tail")
+	}
+	if !bytes.Contains(bounded, httpDebugOmissionMarker) {
+		t.Fatalf("expected omission marker in bounded body")
+	}
+}
+
+func TestTruncateHTTPDebugBytesAvoidsFullConversionAndInvalidUTF8(t *testing.T) {
+	data := append(bytes.Repeat([]byte("a"), 31), []byte("界tail")...)
+	truncated := truncateHTTPDebugBytes(data, 33)
+	if len(truncated) > 33 || !utf8.ValidString(truncated) {
+		t.Fatalf("expected bounded valid UTF-8 preview, got %q", truncated)
+	}
+}
 
 func TestBuildHTTPDebugRequestMetadataAddsStableFingerprints(t *testing.T) {
 	requestBody := map[string]interface{}{

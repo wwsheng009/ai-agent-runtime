@@ -3562,6 +3562,42 @@ func TestGetSessionHistory_EmptyHistoryUsesEmptyArray(t *testing.T) {
 	assert.Equal(t, float64(0), payload["count"])
 }
 
+func TestGetSessionHistory_UsesExclusiveSequenceCursor(t *testing.T) {
+	registry := skill.NewRegistry(nil)
+	handler := NewHandler(registry, nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+
+	session, err := sessionManager.CreateSession(context.Background(), "history-page-user")
+	require.NoError(t, err)
+	for index := 1; index <= 5; index++ {
+		require.NoError(t, sessionManager.AddMessage(context.Background(), session.ID,
+			*types.NewUserMessage(fmt.Sprintf("message-%d", index))))
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/history?limit=2&before_seq=4", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := httptest.NewRecorder()
+	handler.GetSessionHistory(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var payload struct {
+		History       []types.Message `json:"history"`
+		Total         int             `json:"total"`
+		FirstSeq      int             `json:"first_seq"`
+		LastSeq       int             `json:"last_seq"`
+		NextBeforeSeq int             `json:"next_before_seq"`
+		HasMore       bool            `json:"has_more"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, 5, payload.Total)
+	require.Equal(t, 2, payload.FirstSeq)
+	require.Equal(t, 3, payload.LastSeq)
+	require.Equal(t, 2, payload.NextBeforeSeq)
+	require.True(t, payload.HasMore)
+	require.Equal(t, []string{"message-2", "message-3"}, []string{payload.History[0].Content, payload.History[1].Content})
+}
+
 func TestSessionEndpoints_SearchUpdateAndBatchOperations(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)

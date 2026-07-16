@@ -67,7 +67,20 @@ func newChatSessionManagerWithRuntimeConfig(dir string, runtimeConfig *runtimecf
 		}
 	}
 
-	storage, err := runtimechat.NewFileStorage(resolvedDir)
+	storageConfig := runtimechat.DefaultPersistentSessionStorageConfig(resolvedDir)
+	if runtimeConfig != nil {
+		storageConfig.Backend = runtimeConfig.Sessions.Backend
+		storageConfig.Path = runtimeConfig.Sessions.StorePath
+		storageConfig.HotHistoryMessages = runtimeConfig.Sessions.MaxHistory
+		storageConfig.HotHistoryBytes = runtimeConfig.Sessions.HotHistoryBytes
+		storageConfig.MaxHotMessageBytes = runtimeConfig.Sessions.MaxHotMessageBytes
+		storageConfig.HistoryPageMessages = runtimeConfig.Sessions.HistoryPageMessages
+		storageConfig.HistoryPageBytes = runtimeConfig.Sessions.HistoryPageBytes
+		storageConfig.MaxInlineMessageBytes = runtimeConfig.Sessions.MaxInlineMessageBytes
+		storageConfig.SQLiteCacheKiB = runtimeConfig.Sessions.SQLiteCacheKiB
+		storageConfig.BusyTimeout = runtimeConfig.Sessions.BusyTimeout
+	}
+	storage, err := runtimechat.OpenPersistentSessionStorage(storageConfig)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -250,33 +263,43 @@ func loadLatestResumableRuntimeSessionExcluding(ctx context.Context, manager *ru
 		return nil, nil
 	}
 
-	sessions, err := manager.List(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	if len(sessions) == 0 {
-		return nil, runtimechat.ErrSessionNotFound
-	}
-
-	for _, session := range sessions {
-		if shouldSkipRuntimeResumeSession(session, excludedSessionID, true) {
-			continue
+	const pageSize = 100
+	excludedSessionID = strings.TrimSpace(excludedSessionID)
+	var fallback *runtimechat.Session
+	for offset := 0; ; {
+		previews, err := manager.ListPreviews(ctx, userID, pageSize, offset)
+		if err != nil {
+			return nil, err
 		}
-		return session, nil
-	}
-
-	if strings.TrimSpace(excludedSessionID) != "" {
-		return nil, runtimechat.ErrSessionNotFound
-	}
-	for _, session := range sessions {
-		if shouldSkipRuntimeResumeSession(session, excludedSessionID, false) {
-			continue
+		if len(previews) == 0 {
+			break
 		}
-		if session != nil {
-			return session, nil
+		for _, preview := range previews {
+			if preview == nil || strings.TrimSpace(preview.ID) == "" {
+				continue
+			}
+			if excludedSessionID != "" && strings.EqualFold(strings.TrimSpace(preview.ID), excludedSessionID) {
+				continue
+			}
+			loaded, loadErr := manager.Get(ctx, preview.ID)
+			if loadErr != nil || loaded == nil {
+				continue
+			}
+			if fallback == nil {
+				fallback = loaded
+			}
+			if !shouldSkipRuntimeResumeSession(loaded, excludedSessionID, true) {
+				return loaded, nil
+			}
+		}
+		offset += len(previews)
+		if len(previews) < pageSize {
+			break
 		}
 	}
-
+	if excludedSessionID == "" && fallback != nil {
+		return fallback, nil
+	}
 	return nil, runtimechat.ErrSessionNotFound
 }
 
@@ -440,27 +463,64 @@ func printChatSessionSummaries(manager *runtimechat.SessionManager, userID, curr
 		return fmt.Errorf("会话管理未启用")
 	}
 
-	sessions, err := listFilteredChatSessions(manager, userID, filter)
+	sessions, err := listFilteredChatSessionsExcluding(manager, userID, filter, currentID)
 	if err != nil {
 		return err
 	}
 	if len(sessions) == 0 {
-		fmt.Println("暂无可恢复会话")
+		if strings.TrimSpace(currentID) != "" {
+			fmt.Println("暂无其他历史会话")
+		} else {
+			fmt.Println("暂无可用会话")
+		}
 		return nil
 	}
 
 	now := time.Now()
-	fmt.Println("可用会话:")
+	if strings.TrimSpace(currentID) != "" {
+		fmt.Println("历史会话:")
+	} else {
+		fmt.Println("可用会话:")
+	}
 	for _, item := range sessions {
 		if item == nil {
 			continue
 		}
 
-		for _, line := range clampSessionSummaryLines(renderRuntimeSessionSummaryLines(item, currentID, now), ui.GetTerminalWidth()) {
+		for _, line := range clampSessionSummaryLines(renderRuntimeSessionSummaryLines(item, now), ui.GetTerminalWidth()) {
 			fmt.Println(line)
 		}
 	}
 	return nil
+}
+
+func listFilteredChatSessionsExcluding(manager *runtimechat.SessionManager, userID string, filter ChatSessionListFilter, excludedID string) ([]*runtimechat.Session, error) {
+	limit := filter.Limit
+	filter.Limit = 0
+	sessions, err := listFilteredChatSessions(manager, userID, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	excludedID = strings.TrimSpace(excludedID)
+	filtered := make([]*runtimechat.Session, 0, len(sessions))
+	for _, session := range sessions {
+		if session == nil || (excludedID != "" && strings.EqualFold(strings.TrimSpace(session.ID), excludedID)) {
+			continue
+		}
+		if excludedID != "" {
+			loaded, loadErr := manager.Get(context.Background(), session.ID)
+			if loadErr != nil || !runtimeSessionHasConversation(loaded) {
+				continue
+			}
+			session = loaded
+		}
+		filtered = append(filtered, session)
+		if limit > 0 && len(filtered) >= limit {
+			break
+		}
+	}
+	return filtered, nil
 }
 
 func listFilteredChatSessions(manager *runtimechat.SessionManager, userID string, filter ChatSessionListFilter) ([]*runtimechat.Session, error) {
@@ -468,21 +528,31 @@ func listFilteredChatSessions(manager *runtimechat.SessionManager, userID string
 		return nil, fmt.Errorf("会话管理未启用")
 	}
 
-	sessions, err := manager.List(context.Background(), userID)
-	if err != nil {
-		return nil, err
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
 	}
-
-	filtered := make([]*runtimechat.Session, 0, len(sessions))
-	for _, session := range sessions {
-		if session == nil {
-			continue
+	filtered := make([]*runtimechat.Session, 0, min(limit, 100))
+	const pageSize = 100
+	for offset := 0; len(filtered) < limit; {
+		sessions, err := manager.ListMetadataPage(context.Background(), userID, pageSize, offset)
+		if err != nil {
+			return nil, err
 		}
-		if !matchesChatSessionFilter(session, filter) {
-			continue
+		if len(sessions) == 0 {
+			break
 		}
-		filtered = append(filtered, session)
-		if filter.Limit > 0 && len(filtered) >= filter.Limit {
+		for _, session := range sessions {
+			if session == nil || !matchesChatSessionFilter(session, filter) {
+				continue
+			}
+			filtered = append(filtered, session)
+			if len(filtered) >= limit {
+				break
+			}
+		}
+		offset += len(sessions)
+		if len(sessions) < pageSize {
 			break
 		}
 	}
@@ -500,10 +570,14 @@ func listResumeCandidateChatSessions(manager *runtimechat.SessionManager, userID
 
 	candidates := make([]*runtimechat.Session, 0, len(sessions))
 	for _, session := range sessions {
-		if shouldSkipRuntimeResumeSession(session, currentID, true) {
+		if session == nil || strings.EqualFold(strings.TrimSpace(session.ID), strings.TrimSpace(currentID)) {
 			continue
 		}
-		candidates = append(candidates, session)
+		loaded, loadErr := manager.Get(context.Background(), session.ID)
+		if loadErr != nil || shouldSkipRuntimeResumeSession(loaded, currentID, true) {
+			continue
+		}
+		candidates = append(candidates, loaded)
 		if limit > 0 && len(candidates) >= limit {
 			break
 		}
@@ -608,7 +682,7 @@ func promptSelectSessionFromList(reader *bufio.Reader, sessions []*runtimechat.S
 		if session == nil {
 			continue
 		}
-		lines := clampSessionSummaryLines(renderRuntimeSessionSummaryLines(session, "", now), ui.GetTerminalWidth())
+		lines := clampSessionSummaryLines(renderRuntimeSessionSummaryLines(session, now), ui.GetTerminalWidth())
 		if len(lines) == 0 {
 			continue
 		}
@@ -697,12 +771,59 @@ func currentRuntimeSessionPath(session *ChatSession) string {
 	if session == nil {
 		return ""
 	}
+	if session.SessionManager != nil {
+		if pathReader, ok := session.SessionManager.GetStorage().(interface{ Path() string }); ok {
+			if path := resolveAbsoluteChatPath(pathReader.Path()); path != "" {
+				return path
+			}
+		}
+	}
 	sessionDir := resolveAbsoluteChatPath(session.SessionDir)
 	sessionID := currentRuntimeSessionID(session)
 	if sessionDir == "" || sessionID == "" {
 		return ""
 	}
 	return filepath.Join(sessionDir, filepath.Base(strings.TrimSpace(sessionID))+".json")
+}
+
+func currentRuntimeSessionArtifactRoot(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	if sessionDir := resolveAbsoluteChatPath(session.SessionDir); sessionDir != "" {
+		if sessionID := filepath.Base(strings.TrimSpace(currentRuntimeSessionID(session))); sessionID != "" && sessionID != "." {
+			return filepath.Join(sessionDir, sessionID+".artifacts")
+		}
+	}
+	sessionPath := currentRuntimeSessionPath(session)
+	if sessionPath == "" {
+		return ""
+	}
+	baseName := strings.TrimSuffix(filepath.Base(sessionPath), filepath.Ext(sessionPath))
+	if baseName == "" {
+		return ""
+	}
+	return resolveAbsoluteChatPath(filepath.Join(filepath.Dir(sessionPath), baseName+".artifacts"))
+}
+
+func currentCanonicalSessionArtifactDir(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	sessionID := filepath.Base(strings.TrimSpace(currentRuntimeSessionID(session)))
+	if sessionID == "" || sessionID == "." {
+		return ""
+	}
+	baseDir := resolveAbsoluteChatPath(session.SessionDir)
+	if baseDir == "" {
+		if sessionPath := currentRuntimeSessionPath(session); sessionPath != "" {
+			baseDir = filepath.Dir(sessionPath)
+		}
+	}
+	if baseDir == "" {
+		return ""
+	}
+	return filepath.Join(baseDir, "session-artifacts", sessionID)
 }
 
 func currentRuntimeSessionStoreSummary(session *ChatSession) string {
@@ -713,14 +834,20 @@ func currentRuntimeSessionStoreSummary(session *ChatSession) string {
 	if sessionDir == "" {
 		return ""
 	}
+	backend := "file"
+	if session != nil && session.SessionManager != nil {
+		if _, ok := session.SessionManager.GetStorage().(interface{ Path() string }); ok {
+			backend = "sqlite"
+		}
+	}
 	defaultDir := resolveAbsoluteChatPath(resolveDefaultChatSessionDir())
 	if defaultDir == "" {
-		return sessionDir
+		return fmt.Sprintf("%s (%s)", sessionDir, backend)
 	}
 	if pathWithinBaseDir(defaultDir, currentRuntimeSessionPath(session)) {
-		return fmt.Sprintf("%s (default)", sessionDir)
+		return fmt.Sprintf("%s (%s; default)", sessionDir, backend)
 	}
-	return fmt.Sprintf("%s (custom; default %s)", sessionDir, defaultDir)
+	return fmt.Sprintf("%s (%s; custom; default %s)", sessionDir, backend, defaultDir)
 }
 
 func resolveAbsoluteChatPath(path string) string {
@@ -1287,7 +1414,7 @@ func blankToDash(value string) string {
 	return value
 }
 
-func renderRuntimeSessionSummaryLines(session *runtimechat.Session, currentID string, now time.Time) []string {
+func renderRuntimeSessionSummaryLines(session *runtimechat.Session, now time.Time) []string {
 	if session == nil {
 		return nil
 	}
@@ -1301,15 +1428,14 @@ func renderRuntimeSessionSummaryLines(session *runtimechat.Session, currentID st
 	protocol := strings.TrimSpace(runtimeSessionContextString(session, chatRuntimeContextProtocol))
 	provider := strings.TrimSpace(runtimeSessionContextString(session, chatRuntimeContextProviderName))
 	model := strings.TrimSpace(runtimeSessionContextString(session, chatRuntimeContextModel))
-	lastUsed := formatSessionRelativeTime(session.UpdatedAt, now)
+	turnCount, messageCount := runtimeSessionConversationCounts(session)
 
 	header := fmt.Sprintf("  %s [%s]", session.ID, session.State)
-	if currentID != "" && session.ID == currentID {
-		header += " 【当前】"
-	}
-	header += fmt.Sprintf(" 协议=%s 最后使用=%s",
+	header += fmt.Sprintf(" 协议=%s 最后更新=%s 轮次=%d 消息=%d",
 		blankToDash(protocol),
-		lastUsed,
+		formatSessionUpdatedAt(session.UpdatedAt, now),
+		turnCount,
+		messageCount,
 	)
 	if provider != "" || model != "" {
 		header += fmt.Sprintf(" provider=%s model=%s", blankToDash(provider), blankToDash(model))
@@ -1327,7 +1453,24 @@ func renderRuntimeResumeSessionLine(session *runtimechat.Session, now time.Time)
 	if session == nil {
 		return ""
 	}
-	return fmt.Sprintf("%-10s %s", formatSessionRelativeTime(session.UpdatedAt, now), runtimeResumeSessionTitle(session))
+	turnCount, messageCount := runtimeSessionConversationCounts(session)
+	return fmt.Sprintf("%s  %d轮/%d条消息  %s",
+		formatSessionUpdatedAt(session.UpdatedAt, now),
+		turnCount,
+		messageCount,
+		runtimeResumeSessionTitle(session),
+	)
+}
+
+// A conversation turn is one persisted user message. Message count includes
+// system, assistant, and tool messages so the two values describe both the
+// conversational depth and the amount of history that will be restored.
+func runtimeSessionConversationCounts(session *runtimechat.Session) (turnCount, messageCount int) {
+	if session == nil {
+		return 0, 0
+	}
+	messages := session.GetMessages()
+	return countRuntimeUserMessages(messages), session.MessageCount()
 }
 
 func runtimeResumeSessionTitle(session *runtimechat.Session) string {
@@ -1365,11 +1508,15 @@ func sanitizeRuntimeResumeSessionTitle(title string) string {
 	return title
 }
 
-func formatSessionLastUsed(updatedAt time.Time, now time.Time) string {
+func formatSessionUpdatedAt(updatedAt time.Time, now time.Time) string {
 	if updatedAt.IsZero() {
 		return "-"
 	}
-	return fmt.Sprintf("%s (%s)", updatedAt.Format("2006-01-02 15:04"), formatSessionRelativeTime(updatedAt, now))
+	displayTime := updatedAt
+	if !now.IsZero() && now.Location() != nil {
+		displayTime = updatedAt.In(now.Location())
+	}
+	return fmt.Sprintf("%s (%s)", displayTime.Format("2006-01-02 15:04"), formatSessionRelativeTime(updatedAt, now))
 }
 
 func formatSessionRelativeTime(updatedAt time.Time, now time.Time) string {

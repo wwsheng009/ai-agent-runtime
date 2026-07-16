@@ -15,6 +15,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type slashRouteExpectation struct {
@@ -575,14 +576,29 @@ func TestChatSlashArgumentCompletionModelAndResume(t *testing.T) {
 	first := runtimechat.NewSession("tester")
 	first.ID = "resume-1"
 	first.Metadata.Title = "First session"
+	first.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "hello", Metadata: runtimetypes.NewMetadata()},
+		{Role: "assistant", Content: "hi", Metadata: runtimetypes.NewMetadata()},
+	})
 	if err := resumeStorage.Save(context.Background(), first); err != nil {
 		t.Fatalf("failed to save first resume session: %v", err)
 	}
 	second := runtimechat.NewSession("tester")
 	second.ID = "resume-2"
 	second.Metadata.Title = "Second session"
+	second.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "second", Metadata: runtimetypes.NewMetadata()},
+	})
 	if err := resumeStorage.Save(context.Background(), second); err != nil {
 		t.Fatalf("failed to save second resume session: %v", err)
+	}
+	placeholder := runtimechat.NewSession("tester")
+	placeholder.ID = "resume-placeholder"
+	placeholder.ReplaceHistory([]runtimetypes.Message{
+		{Role: "system", Content: "instructions", Metadata: runtimetypes.NewMetadata()},
+	})
+	if err := resumeStorage.Save(context.Background(), placeholder); err != nil {
+		t.Fatalf("failed to save placeholder resume session: %v", err)
 	}
 
 	resumeSession := &ChatSession{
@@ -597,11 +613,18 @@ func TestChatSlashArgumentCompletionModelAndResume(t *testing.T) {
 	if !containsSlashCandidate(resumeController.state.Candidates, "latest") {
 		t.Fatalf("expected resume popup to include latest shortcut, got %#v", resumeController.state.Candidates)
 	}
-	if candidate := findSlashCandidate(resumeController.state.Candidates, "latest"); candidate == nil || candidate.Summary != "直接恢复最近可恢复会话" {
+	if candidate := findSlashCandidate(resumeController.state.Candidates, "latest"); candidate == nil || candidate.Summary != "直接恢复最近的其他会话" {
 		t.Fatalf("expected latest shortcut summary to describe resumable sessions, got %#v", candidate)
 	}
 	if !containsSlashCandidate(resumeController.state.Candidates, "resume-1") || !containsSlashCandidate(resumeController.state.Candidates, "resume-2") {
 		t.Fatalf("expected resume popup to include cached session ids, got %#v", resumeController.state.Candidates)
+	}
+	if containsSlashCandidate(resumeController.state.Candidates, "resume-placeholder") {
+		t.Fatalf("did not expect resume popup to include a system-only placeholder, got %#v", resumeController.state.Candidates)
+	}
+	if candidate := findSlashCandidate(resumeController.state.Candidates, "resume-1"); candidate == nil ||
+		!strings.Contains(candidate.Summary, "First session · 1轮/2条消息 · 最后更新") {
+		t.Fatalf("expected resume session summary to include activity details, got %#v", candidate)
 	}
 	if got := atomic.LoadInt32(&resumeStorage.listCalls); got != 1 {
 		t.Fatalf("expected session list to be loaded once, got %d", got)
@@ -609,6 +632,23 @@ func TestChatSlashArgumentCompletionModelAndResume(t *testing.T) {
 	resumeController.UpdateAt("/resume ", len([]rune("/resume ")))
 	if got := atomic.LoadInt32(&resumeStorage.listCalls); got != 1 {
 		t.Fatalf("expected cached resume candidates to avoid repeated list calls, got %d", got)
+	}
+
+	resumeSession.RuntimeSession = first
+	resumeController.UpdateAt("/resume ", len([]rune("/resume ")))
+	if containsSlashCandidate(resumeController.state.Candidates, "resume-1") || !containsSlashCandidate(resumeController.state.Candidates, "resume-2") {
+		t.Fatalf("expected resume popup to skip the current session, got %#v", resumeController.state.Candidates)
+	}
+	if got := atomic.LoadInt32(&resumeStorage.listCalls); got != 2 {
+		t.Fatalf("expected changing the current session to refresh cached resume candidates, got %d list calls", got)
+	}
+
+	resumeController.UpdateAt("/load ", len([]rune("/load ")))
+	if containsSlashCandidate(resumeController.state.Candidates, "resume-1") || !containsSlashCandidate(resumeController.state.Candidates, "resume-2") {
+		t.Fatalf("expected load popup to hide the current session, got %#v", resumeController.state.Candidates)
+	}
+	if got := atomic.LoadInt32(&resumeStorage.listCalls); got != 3 {
+		t.Fatalf("expected load candidates to use their own cache, got %d list calls", got)
 	}
 }
 
@@ -931,7 +971,7 @@ func TestBuildChatSlashHelpLinesUsesCatalog(t *testing.T) {
 			t.Fatalf("expected help text to include %q, got %#v", label, lines)
 		}
 	}
-	if !strings.Contains(joined, "恢复最近可恢复会话或弹出恢复菜单") {
+	if !strings.Contains(joined, "打开历史会话列表或恢复指定会话") {
 		t.Fatalf("expected help text to use resumable-session wording, got %#v", lines)
 	}
 }

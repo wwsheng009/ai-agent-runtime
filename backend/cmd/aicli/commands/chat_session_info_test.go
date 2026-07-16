@@ -252,7 +252,7 @@ func TestCurrentRuntimeSessionPathAndStoreSummary_CustomDir(t *testing.T) {
 	if !strings.Contains(summary, sessionDir) {
 		t.Fatalf("expected store summary to include custom dir %q, got %q", sessionDir, summary)
 	}
-	if !strings.Contains(summary, "(custom; default ") {
+	if !strings.Contains(summary, "(file; custom; default ") {
 		t.Fatalf("expected custom store summary, got %q", summary)
 	}
 }
@@ -267,8 +267,32 @@ func TestCurrentRuntimeSessionStoreSummary_DefaultDir(t *testing.T) {
 	}
 
 	summary := currentRuntimeSessionStoreSummary(session)
-	if !strings.Contains(summary, "(default)") {
+	if !strings.Contains(summary, "(file; default)") {
 		t.Fatalf("expected default store summary, got %q", summary)
+	}
+}
+
+func TestCurrentRuntimeSessionArtifactRootUsesSessionIDWithSQLiteStore(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager, _, _, err := newChatSessionManager(sessionDir)
+	if err != nil {
+		t.Fatalf("create sqlite session manager: %v", err)
+	}
+	t.Cleanup(manager.Stop)
+	session := &ChatSession{
+		SessionDir:     sessionDir,
+		SessionManager: manager,
+		RuntimeSession: &runtimechat.Session{ID: "session-1", State: runtimechat.StateActive},
+	}
+	wantRoot := filepath.Join(sessionDir, "session-1.artifacts")
+	if got := currentRuntimeSessionArtifactRoot(session); got != wantRoot {
+		t.Fatalf("expected per-session artifact root %q, got %q", wantRoot, got)
+	}
+	if got := currentRuntimeHTTPArtifactDir(session); got != filepath.Join(wantRoot, "runtime-http") {
+		t.Fatalf("unexpected runtime HTTP artifact dir: %q", got)
+	}
+	if got := currentLocalShellArtifactDir(session); got != filepath.Join(wantRoot, "local-shell") {
+		t.Fatalf("unexpected local shell artifact dir: %q", got)
 	}
 }
 
@@ -308,7 +332,7 @@ func TestPrintCurrentRuntimeSession_IncludesSessionPathAndStore(t *testing.T) {
 	for _, expected := range []string{
 		"Session:           session-1 [active]",
 		"Session File:      " + filepath.Join(sessionDir, "session-1.json"),
-		"Session Store:     " + sessionDir + " (custom; default ",
+		"Session Store:     " + sessionDir + " (file; custom; default ",
 		"Chat Log File:     " + logger.SessionLogPath(),
 		"Debug Log File:    " + logger.DebugLogPath(),
 		"HTTP Artifact Dir: " + logger.RuntimeHTTPArtifactDir(),
@@ -367,7 +391,7 @@ func TestPrintCurrentRuntimeSession_ResolvesRelativePathsToAbsolute(t *testing.T
 
 	for _, expected := range []string{
 		"Session File:      " + resolveAbsoluteChatPath(filepath.Join("sessions", "session-1.json")),
-		"Session Store:     " + resolveAbsoluteChatPath("sessions") + " (custom; default ",
+		"Session Store:     " + resolveAbsoluteChatPath("sessions") + " (file; custom; default ",
 		"Chat Log File:     " + resolveAbsoluteChatPath(logger.SessionLogPath()),
 		"Debug Log File:    " + resolveAbsoluteChatPath(logger.DebugLogPath()),
 		"HTTP Artifact Dir: " + resolveAbsoluteChatPath(logger.RuntimeHTTPArtifactDir()),

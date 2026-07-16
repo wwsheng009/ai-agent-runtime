@@ -5,10 +5,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+)
+
+const (
+	runtimeHTTPArtifactMaxFiles = 256
+	runtimeHTTPArtifactMaxBytes = 64 * 1024 * 1024
+	runtimeHTTPMetadataMaxKeys  = 128
+	runtimeHTTPMetadataMaxItems = 128
+	runtimeHTTPMetadataMaxDepth = 8
+	runtimeHTTPMetadataMaxText  = 16 * 1024
 )
 
 type runtimeHTTPArtifactEnvelope struct {
@@ -29,6 +39,8 @@ type runtimeHTTPArtifactEnvelope struct {
 	RetryReason        string                 `json:"retry_reason,omitempty"`
 	RetryDelayMS       int64                  `json:"retry_delay_ms,omitempty"`
 	BodyBytes          int                    `json:"body_bytes,omitempty"`
+	BodyCapturedBytes  int                    `json:"body_captured_bytes,omitempty"`
+	BodyTruncated      bool                   `json:"body_truncated,omitempty"`
 	BodyFormat         string                 `json:"body_format,omitempty"`
 	BodyPreview        string                 `json:"body_preview,omitempty"`
 	BodyJSON           json.RawMessage        `json:"body_json,omitempty"`
@@ -61,6 +73,9 @@ func writeRuntimeHTTPArtifact(session *ChatSession, event runtimellm.HTTPDebugEv
 		return "", fmt.Errorf("写入 runtime HTTP artifact 失败: %w", err)
 	}
 	session.runtimeHTTPCapture.RecordArtifactPath(event.Phase, path)
+	if err := pruneRuntimeHTTPArtifacts(dir, runtimeHTTPArtifactMaxFiles, runtimeHTTPArtifactMaxBytes); err != nil {
+		return path, fmt.Errorf("清理 runtime HTTP artifact 失败: %w", err)
+	}
 	return path, nil
 }
 
@@ -86,6 +101,8 @@ func buildRuntimeHTTPArtifactEnvelope(sequence int, event runtimellm.HTTPDebugEv
 
 	body, preview, byteCount := runtimeHTTPArtifactBody(event)
 	envelope.BodyBytes = byteCount
+	envelope.BodyCapturedBytes = len(body)
+	envelope.BodyTruncated = byteCount > len(body)
 	envelope.BodyPreview = preview
 	if len(body) == 0 {
 		return envelope
@@ -104,7 +121,7 @@ func runtimeHTTPArtifactBody(event runtimellm.HTTPDebugEvent) ([]byte, string, i
 	switch strings.ToLower(strings.TrimSpace(event.Phase)) {
 	case "request":
 		if len(event.RequestBodyRaw) > 0 {
-			return append([]byte(nil), event.RequestBodyRaw...), strings.TrimSpace(event.RequestBody), len(event.RequestBodyRaw)
+			return append([]byte(nil), event.RequestBodyRaw...), strings.TrimSpace(event.RequestBody), firstNonZero(event.RequestBodyBytes, len(event.RequestBodyRaw))
 		}
 		body := strings.TrimSpace(event.RequestBody)
 		if body == "" {
@@ -113,7 +130,7 @@ func runtimeHTTPArtifactBody(event runtimellm.HTTPDebugEvent) ([]byte, string, i
 		return []byte(body), body, firstNonZero(event.RequestBodyBytes, len(body))
 	default:
 		if len(event.ResponseBodyRaw) > 0 {
-			return append([]byte(nil), event.ResponseBodyRaw...), strings.TrimSpace(event.ResponseBodyPreview), len(event.ResponseBodyRaw)
+			return append([]byte(nil), event.ResponseBodyRaw...), strings.TrimSpace(event.ResponseBodyPreview), firstNonZero(event.ResponseBodyBytes, len(event.ResponseBodyRaw))
 		}
 		preview := strings.TrimSpace(event.ResponseBodyPreview)
 		if preview == "" {
@@ -121,6 +138,53 @@ func runtimeHTTPArtifactBody(event runtimellm.HTTPDebugEvent) ([]byte, string, i
 		}
 		return []byte(preview), preview, firstNonZero(event.ResponseBodyBytes, len(preview))
 	}
+}
+
+func pruneRuntimeHTTPArtifacts(dir string, maxFiles int, maxBytes int64) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	type artifactFile struct {
+		path    string
+		name    string
+		size    int64
+		modTime time.Time
+	}
+	files := make([]artifactFile, 0, len(entries))
+	var totalBytes int64
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		files = append(files, artifactFile{
+			path: filepath.Join(dir, entry.Name()), name: entry.Name(),
+			size: info.Size(), modTime: info.ModTime(),
+		})
+		totalBytes += info.Size()
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].modTime.Equal(files[j].modTime) {
+			return files[i].name < files[j].name
+		}
+		return files[i].modTime.Before(files[j].modTime)
+	})
+	for len(files) > 0 && ((maxFiles > 0 && len(files) > maxFiles) || (maxBytes > 0 && totalBytes > maxBytes)) {
+		oldest := files[0]
+		if err := os.Remove(oldest.path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		totalBytes -= oldest.size
+		files = files[1:]
+	}
+	return nil
 }
 
 func currentRuntimeHTTPArtifactDir(session *ChatSession) string {
@@ -132,15 +196,11 @@ func currentRuntimeHTTPArtifactDir(session *ChatSession) string {
 			return resolveAbsoluteChatPath(dir)
 		}
 	}
-	sessionPath := currentRuntimeSessionPath(session)
-	if sessionPath == "" {
+	artifactRoot := currentRuntimeSessionArtifactRoot(session)
+	if artifactRoot == "" {
 		return ""
 	}
-	baseName := strings.TrimSuffix(filepath.Base(sessionPath), filepath.Ext(sessionPath))
-	if baseName == "" {
-		return ""
-	}
-	return resolveAbsoluteChatPath(filepath.Join(filepath.Dir(sessionPath), baseName+".artifacts", "runtime-http"))
+	return resolveAbsoluteChatPath(filepath.Join(artifactRoot, "runtime-http"))
 }
 
 func currentChatLogFile(session *ChatSession) string {
@@ -167,32 +227,59 @@ func firstNonZero(values ...int) int {
 }
 
 func cloneRuntimeHTTPArtifactMetadata(input map[string]interface{}) map[string]interface{} {
+	return cloneRuntimeHTTPArtifactMetadataDepth(input, 0)
+}
+
+func cloneRuntimeHTTPArtifactMetadataDepth(input map[string]interface{}, depth int) map[string]interface{} {
 	if len(input) == 0 {
 		return nil
 	}
-	cloned := make(map[string]interface{}, len(input))
-	for key, value := range input {
-		cloned[key] = cloneRuntimeHTTPArtifactValue(value)
+	keys := make([]string, 0, len(input))
+	for key := range input {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) > runtimeHTTPMetadataMaxKeys {
+		keys = keys[:runtimeHTTPMetadataMaxKeys]
+	}
+	cloned := make(map[string]interface{}, len(keys)+1)
+	for _, key := range keys {
+		cloned[key] = cloneRuntimeHTTPArtifactValue(input[key], depth+1)
+	}
+	if omitted := len(input) - len(keys); omitted > 0 {
+		cloned["_artifact_metadata_omitted_keys"] = omitted
 	}
 	return cloned
 }
 
-func cloneRuntimeHTTPArtifactValue(value interface{}) interface{} {
+func cloneRuntimeHTTPArtifactValue(value interface{}, depth int) interface{} {
+	if depth >= runtimeHTTPMetadataMaxDepth {
+		return "[artifact metadata depth omitted]"
+	}
 	switch typed := value.(type) {
+	case string:
+		return truncateUTF8Bytes(typed, runtimeHTTPMetadataMaxText)
 	case map[string]interface{}:
-		return cloneRuntimeHTTPArtifactMetadata(typed)
+		return cloneRuntimeHTTPArtifactMetadataDepth(typed, depth)
 	case []interface{}:
-		cloned := make([]interface{}, len(typed))
-		for index, item := range typed {
-			cloned[index] = cloneRuntimeHTTPArtifactValue(item)
+		limit := min(len(typed), runtimeHTTPMetadataMaxItems)
+		cloned := make([]interface{}, limit)
+		for index := 0; index < limit; index++ {
+			cloned[index] = cloneRuntimeHTTPArtifactValue(typed[index], depth+1)
 		}
 		return cloned
 	case []string:
-		return append([]string(nil), typed...)
+		limit := min(len(typed), runtimeHTTPMetadataMaxItems)
+		cloned := make([]string, limit)
+		for index := 0; index < limit; index++ {
+			cloned[index] = truncateUTF8Bytes(typed[index], runtimeHTTPMetadataMaxText)
+		}
+		return cloned
 	case []map[string]interface{}:
-		cloned := make([]map[string]interface{}, len(typed))
-		for index, item := range typed {
-			cloned[index] = cloneRuntimeHTTPArtifactMetadata(item)
+		limit := min(len(typed), runtimeHTTPMetadataMaxItems)
+		cloned := make([]map[string]interface{}, limit)
+		for index := 0; index < limit; index++ {
+			cloned[index] = cloneRuntimeHTTPArtifactMetadataDepth(typed[index], depth+1)
 		}
 		return cloned
 	default:

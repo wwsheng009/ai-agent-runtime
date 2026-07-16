@@ -709,6 +709,7 @@ func renderSharedChatWarningEvent(event runtimechatcore.ChatEvent) string {
 
 type aicliEventRenderer struct {
 	session        *ChatSession
+	transcript     *aicliTranscriptRenderer
 	streamBuffer   strings.Builder
 	streamLines    int
 	reasoningOpen  bool
@@ -716,7 +717,10 @@ type aicliEventRenderer struct {
 }
 
 func newAICLIEventRenderer(session *ChatSession) *aicliEventRenderer {
-	return &aicliEventRenderer{session: session}
+	return &aicliEventRenderer{
+		session:    session,
+		transcript: newAICLITranscriptRenderer(session),
+	}
 }
 
 func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
@@ -782,15 +786,7 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 		if event.Stage == "batch_start" {
 			r.flushAssistantTurnForToolBatch()
 		}
-		rendered := renderSharedChatToolEvent(event)
-		if strings.TrimSpace(rendered) == "" {
-			return
-		}
-		if r.session.Interaction != nil {
-			r.session.Interaction.RenderAsyncLine(rendered)
-			return
-		}
-		fmt.Println(rendered)
+		r.transcript.RenderToolEvent(event)
 	case runtimechatcore.EventWarning:
 		if !shouldRenderInteractiveOutput(r.session) {
 			return
@@ -800,18 +796,10 @@ func (r *aicliEventRenderer) Handle(event runtimechatcore.ChatEvent) {
 		}
 		r.clearSpinner()
 		if rendered := renderSharedChatWarningEvent(event); rendered != "" {
-			if r.session.Interaction != nil {
-				r.session.Interaction.RenderAsyncLine(rendered)
-				return
-			}
-			fmt.Println(rendered)
+			r.transcript.RenderSupplement(rendered)
 			return
 		}
-		if r.session.Interaction != nil {
-			r.session.Interaction.RenderAsyncLine(fmt.Sprintf("⚠ %s", event.Content))
-			return
-		}
-		fmt.Printf("\n⚠ %s\n", event.Content)
+		r.transcript.RenderSupplement(fmt.Sprintf("⚠ %s", event.Content))
 	}
 }
 
@@ -823,14 +811,7 @@ func (r *aicliEventRenderer) Finalize(response *runtimechatcore.ChatResult, fina
 	reasoningBlock := finalReasoningBlock(finalMessage)
 	if reasoningBlock != nil && shouldRenderChatReasoning(r.session) && !r.session.Stream {
 		r.clearSpinner()
-		lines := chatReasoningLines(reasoningBlock)
-		if len(lines) > 0 {
-			if r.session.Interaction != nil {
-				r.session.Interaction.RenderAsyncLine(strings.Join(lines, "\n"))
-			} else {
-				fmt.Println(strings.Join(lines, "\n"))
-			}
-		}
+		r.transcript.RenderReasoning(reasoningBlock)
 	}
 
 	if r.session.Stream && shouldRenderInteractiveOutput(r.session) {

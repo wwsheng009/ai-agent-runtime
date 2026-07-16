@@ -1048,7 +1048,16 @@ func (a *SessionActor) handleSubscribeEvents(cmd SubscribeEvents) {
 		default:
 		}
 	}
-	a.eventBus.Subscribe(cmd.EventType, handler)
+	unsubscribe := a.eventBus.SubscribeCancelable(cmd.EventType, handler)
+	if cmd.Ctx != nil {
+		go func() {
+			select {
+			case <-cmd.Ctx.Done():
+			case <-a.done:
+			}
+			unsubscribe()
+		}()
+	}
 	cmd.Reply <- nil
 }
 

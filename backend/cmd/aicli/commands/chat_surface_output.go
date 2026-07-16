@@ -197,7 +197,7 @@ func renderSubmittedUserInputEcho(session *ChatSession, input string) {
 	if session.Surface == nil || !session.Surface.Enabled() || session.Interaction == nil {
 		return
 	}
-	session.Interaction.RenderSubmittedUserInput(input)
+	newAICLITranscriptRenderer(session).RenderUser(input)
 }
 
 func writeChatLogBufferedMarker(session *ChatSession) {

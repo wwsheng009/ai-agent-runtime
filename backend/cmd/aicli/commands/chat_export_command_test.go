@@ -2,7 +2,11 @@ package commands
 
 import (
 	"archive/zip"
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +80,102 @@ func TestHandleExportCommandFullAndBodyModes(t *testing.T) {
 	}
 }
 
+func TestExportChatSessionStreamsCompleteSQLiteCanonicalHistory(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager, userID, _, err := newChatSessionManager(sessionDir)
+	if err != nil {
+		t.Fatalf("create sqlite session manager: %v", err)
+	}
+	t.Cleanup(manager.Stop)
+	runtimeSession, err := manager.CreateSession(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("create runtime session: %v", err)
+	}
+	for index := 0; index < 140; index++ {
+		message := runtimetypes.NewUserMessage(fmt.Sprintf("message-%03d", index))
+		if err := manager.AddMessage(context.Background(), runtimeSession.ID, *message); err != nil {
+			t.Fatalf("append canonical message %d: %v", index, err)
+		}
+	}
+	loaded, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("load bounded session: %v", err)
+	}
+	if len(loaded.History) >= loaded.CanonicalMessageCount {
+		t.Fatalf("test requires bounded projection, got history=%d canonical=%d", len(loaded.History), loaded.CanonicalMessageCount)
+	}
+	outputPath := filepath.Join(t.TempDir(), "canonical-export.json")
+	result, err := exportChatSession(&ChatSession{
+		SessionManager: manager,
+		SessionDir:     sessionDir,
+		SessionUserID:  userID,
+	}, chatExportOptions{Target: runtimeSession.ID, Format: chatExportFormatFull, OutputPath: outputPath})
+	if err != nil {
+		t.Fatalf("export canonical session: %v", err)
+	}
+	if result.Stats.MessageCount != 140 {
+		t.Fatalf("expected 140 exported canonical messages, got %+v", result.Stats)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read canonical export: %v", err)
+	}
+	var envelope chatSessionExportEnvelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode canonical export: %v", err)
+	}
+	if envelope.Session == nil || len(envelope.Session.History) != 140 {
+		t.Fatalf("expected complete canonical history, got %d", len(envelope.Session.History))
+	}
+}
+
+func TestExportChatSessionPreservesExistingTargetWhenCanonicalStreamFails(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager, userID, _, err := newChatSessionManager(sessionDir)
+	if err != nil {
+		t.Fatalf("create sqlite session manager: %v", err)
+	}
+	t.Cleanup(manager.Stop)
+	runtimeSession, err := manager.CreateSession(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("create runtime session: %v", err)
+	}
+	largeMessage := runtimetypes.NewToolMessage("large-call", strings.Repeat("x", 600*1024))
+	if err := manager.AddMessage(context.Background(), runtimeSession.ID, *largeMessage); err != nil {
+		t.Fatalf("append externalized message: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(sessionDir, "session-artifacts", runtimeSession.ID)); err != nil {
+		t.Fatalf("remove canonical artifact to force stream failure: %v", err)
+	}
+	outputPath := filepath.Join(t.TempDir(), "existing-export.json")
+	const original = "existing export must survive"
+	if err := os.WriteFile(outputPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("write existing target: %v", err)
+	}
+	_, err = exportChatSession(&ChatSession{
+		SessionManager: manager,
+		SessionDir:     sessionDir,
+		SessionUserID:  userID,
+	}, chatExportOptions{Target: runtimeSession.ID, Format: chatExportFormatFull, OutputPath: outputPath})
+	if err == nil {
+		t.Fatal("expected canonical stream failure")
+	}
+	data, readErr := os.ReadFile(outputPath)
+	if readErr != nil {
+		t.Fatalf("read preserved target: %v", readErr)
+	}
+	if string(data) != original {
+		t.Fatalf("expected original target to remain unchanged, got %q", data)
+	}
+	temporaryFiles, globErr := filepath.Glob(outputPath + ".*.tmp")
+	if globErr != nil {
+		t.Fatalf("glob temporary export files: %v", globErr)
+	}
+	if len(temporaryFiles) != 0 {
+		t.Fatalf("expected temporary export cleanup, got %#v", temporaryFiles)
+	}
+}
+
 func TestHandleDebugCommandExportsArchive(t *testing.T) {
 	outputDir := t.TempDir()
 	sessionDir := t.TempDir()
@@ -137,6 +237,88 @@ func TestHandleDebugCommandExportsArchive(t *testing.T) {
 		if !containsString(names, expected) {
 			t.Fatalf("expected zip to contain %q, got %#v", expected, names)
 		}
+	}
+}
+
+func TestDebugArchiveUsesStandaloneSQLiteSnapshot(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager, userID, _, err := newChatSessionManager(sessionDir)
+	if err != nil {
+		t.Fatalf("create sqlite session manager: %v", err)
+	}
+	t.Cleanup(manager.Stop)
+	runtimeSession, err := manager.CreateSession(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("create runtime session: %v", err)
+	}
+	if err := manager.AddMessage(context.Background(), runtimeSession.ID,
+		*runtimetypes.NewUserMessage("committed in WAL")); err != nil {
+		t.Fatalf("append runtime message: %v", err)
+	}
+	if err := manager.AddMessage(context.Background(), runtimeSession.ID,
+		*runtimetypes.NewToolMessage("large-debug-call", strings.Repeat("artifact", 80*1024))); err != nil {
+		t.Fatalf("append externalized runtime message: %v", err)
+	}
+	outputPath := filepath.Join(t.TempDir(), "sqlite-debug.zip")
+	_, err = exportChatDebugArchive(&ChatSession{
+		RuntimeSession: runtimeSession,
+		SessionManager: manager,
+		SessionDir:     sessionDir,
+	}, chatDebugArchiveOptions{OutputPath: outputPath})
+	if err != nil {
+		t.Fatalf("export sqlite debug archive: %v", err)
+	}
+
+	archive, err := zip.OpenReader(outputPath)
+	if err != nil {
+		t.Fatalf("open sqlite debug archive: %v", err)
+	}
+	defer archive.Close()
+	var databaseEntry *zip.File
+	foundCanonicalArtifact := false
+	for _, entry := range archive.File {
+		if entry.Name == "session_file/session_history.sqlite" {
+			databaseEntry = entry
+		}
+		if strings.HasPrefix(entry.Name, "session_file/session-artifacts/"+runtimeSession.ID+"/") &&
+			strings.HasSuffix(entry.Name, ".json") {
+			foundCanonicalArtifact = true
+		}
+	}
+	if databaseEntry == nil {
+		t.Fatalf("expected standalone sqlite snapshot, got %#v", zipEntryNames(t, outputPath))
+	}
+	if !foundCanonicalArtifact {
+		t.Fatalf("expected external canonical artifact beside sqlite snapshot, got %#v", zipEntryNames(t, outputPath))
+	}
+	reader, err := databaseEntry.Open()
+	if err != nil {
+		t.Fatalf("open sqlite snapshot entry: %v", err)
+	}
+	snapshotPath := filepath.Join(t.TempDir(), "snapshot.sqlite")
+	snapshotFile, err := os.OpenFile(snapshotPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		reader.Close()
+		t.Fatalf("create extracted sqlite snapshot: %v", err)
+	}
+	_, copyErr := io.Copy(snapshotFile, reader)
+	closeErr := snapshotFile.Close()
+	readerErr := reader.Close()
+	if copyErr != nil || closeErr != nil || readerErr != nil {
+		t.Fatalf("extract sqlite snapshot: copy=%v close=%v reader=%v", copyErr, closeErr, readerErr)
+	}
+
+	database, err := sql.Open("sqlite3", snapshotPath)
+	if err != nil {
+		t.Fatalf("open extracted sqlite snapshot: %v", err)
+	}
+	defer database.Close()
+	var messageCount int
+	if err := database.QueryRow(`SELECT message_count FROM sessions WHERE id = ?`, runtimeSession.ID).Scan(&messageCount); err != nil {
+		t.Fatalf("query extracted sqlite snapshot: %v", err)
+	}
+	if messageCount != 2 {
+		t.Fatalf("expected latest committed message in snapshot, got %d", messageCount)
 	}
 }
 

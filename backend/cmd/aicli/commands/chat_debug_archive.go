@@ -2,6 +2,7 @@ package commands
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 )
 
 type chatDebugArchiveOptions struct {
@@ -18,9 +21,11 @@ type chatDebugArchiveOptions struct {
 }
 
 type chatDebugArchiveItem struct {
-	Label string `json:"label"`
-	Path  string `json:"path"`
-	Kind  string `json:"kind"`
+	Label         string `json:"label"`
+	Path          string `json:"path"`
+	Kind          string `json:"kind"`
+	SourcePath    string `json:"-"`
+	ArchivePrefix string `json:"-"`
 }
 
 type chatDebugArchiveResult struct {
@@ -193,19 +198,83 @@ func exportChatDebugArchive(session *ChatSession, opts chatDebugArchiveOptions) 
 	if err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return nil, fmt.Errorf("创建 debug 打包目录失败: %w", err)
+	}
 	items := collectChatDebugArchiveItems(session)
 	if len(items) == 0 {
 		return nil, fmt.Errorf("当前 /debug 没有可打包的会话文件")
 	}
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-		return nil, fmt.Errorf("创建 debug 打包目录失败: %w", err)
-	}
-	result, err := writeChatDebugArchive(outputPath, session, items)
+	cleanupSnapshot, err := attachChatDebugSessionSnapshot(session, outputPath, items)
 	if err != nil {
+		return nil, err
+	}
+	defer cleanupSnapshot()
+	temporaryFile, err := os.CreateTemp(filepath.Dir(outputPath), filepath.Base(outputPath)+".*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("创建 debug zip 临时文件失败: %w", err)
+	}
+	temporaryPath := temporaryFile.Name()
+	if err := temporaryFile.Chmod(0o644); err != nil {
+		_ = temporaryFile.Close()
+		_ = os.Remove(temporaryPath)
+		return nil, fmt.Errorf("设置 debug zip 临时文件权限失败: %w", err)
+	}
+	if err := temporaryFile.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return nil, fmt.Errorf("关闭 debug zip 临时文件失败: %w", err)
+	}
+	defer os.Remove(temporaryPath)
+	result, err := writeChatDebugArchive(temporaryPath, session, items)
+	if err != nil {
+		return nil, err
+	}
+	if err := publishChatExportFile(temporaryPath, outputPath); err != nil {
 		return nil, err
 	}
 	result.Path = resolveAbsoluteChatPath(outputPath)
 	return result, nil
+}
+
+func attachChatDebugSessionSnapshot(session *ChatSession, outputPath string, items []chatDebugArchiveItem) (func(), error) {
+	cleanup := func() {}
+	if session == nil || session.SessionManager == nil {
+		return cleanup, nil
+	}
+	storage := session.SessionManager.GetStorage()
+	sessionSnapshotter, hasSessionSnapshot := storage.(runtimechat.SessionStorageSessionSnapshotter)
+	snapshotter, hasFullSnapshot := storage.(runtimechat.SessionStorageSnapshotter)
+	if !hasSessionSnapshot && !hasFullSnapshot {
+		return cleanup, nil
+	}
+	temporaryDir, err := os.MkdirTemp(filepath.Dir(outputPath), ".aicli-session-snapshot-*")
+	if err != nil {
+		return cleanup, fmt.Errorf("创建 SQLite 会话快照目录失败: %w", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(temporaryDir) }
+	sourcePath := currentRuntimeSessionPath(session)
+	snapshotName := filepath.Base(sourcePath)
+	if snapshotName == "" || snapshotName == "." {
+		snapshotName = "session_history.sqlite"
+	}
+	snapshotPath := filepath.Join(temporaryDir, snapshotName)
+	var snapshotErr error
+	if hasSessionSnapshot {
+		snapshotErr = sessionSnapshotter.SnapshotSession(context.Background(), currentRuntimeSessionID(session), snapshotPath)
+	} else {
+		snapshotErr = snapshotter.Snapshot(context.Background(), snapshotPath)
+	}
+	if snapshotErr != nil {
+		cleanup()
+		return func() {}, fmt.Errorf("创建 SQLite 会话一致性快照失败: %w", snapshotErr)
+	}
+	for index := range items {
+		if items[index].Label == "session_file" {
+			items[index].SourcePath = snapshotPath
+			break
+		}
+	}
+	return cleanup, nil
 }
 
 func resolveChatDebugArchiveOutputPath(session *ChatSession, opts chatDebugArchiveOptions) (string, error) {
@@ -263,6 +332,13 @@ func collectChatDebugArchiveItems(session *ChatSession) []chatDebugArchiveItem {
 	}
 
 	add("session_file", currentRuntimeSessionPath(session), "file")
+	if root := currentCanonicalSessionArtifactDir(session); root != "" {
+		if info, err := os.Stat(root); err == nil && info.IsDir() {
+			add("canonical_session_artifact_dir", root, "dir")
+			items[len(items)-1].ArchivePrefix = filepath.ToSlash(filepath.Join(
+				"session_file", "session-artifacts", filepath.Base(root)))
+		}
+	}
 	add("chat_log_file", currentChatLogFile(session), "file")
 	add("debug_log_file", currentDebugLogFile(session), "file")
 	add("runtime_http_artifact_dir", currentRuntimeHTTPArtifactDir(session), "dir")
@@ -285,12 +361,14 @@ func writeChatDebugArchive(path string, session *ChatSession, items []chatDebugA
 	usedNames := make(map[string]struct{})
 
 	for _, item := range items {
-		info, statErr := os.Stat(item.Path)
+		sourcePath := chatDebugArchiveSourcePath(item)
+		info, statErr := os.Stat(sourcePath)
 		if statErr != nil {
 			result.Missing = append(result.Missing, item)
 			continue
 		}
 		if item.Kind == "dir" || info.IsDir() {
+			item.SourcePath = sourcePath
 			if err := addDebugArchiveDir(zipWriter, item, usedNames, result); err != nil {
 				_ = zipWriter.Close()
 				return nil, err
@@ -298,7 +376,7 @@ func writeChatDebugArchive(path string, session *ChatSession, items []chatDebugA
 			result.Items = append(result.Items, item)
 			continue
 		}
-		if err := addDebugArchiveFile(zipWriter, item.Path, debugArchiveEntryName(item.Label, filepath.Base(item.Path)), usedNames); err != nil {
+		if err := addDebugArchiveFile(zipWriter, sourcePath, debugArchiveItemEntryName(item, filepath.Base(item.Path)), usedNames); err != nil {
 			_ = zipWriter.Close()
 			return nil, err
 		}
@@ -329,8 +407,22 @@ func writeChatDebugArchive(path string, session *ChatSession, items []chatDebugA
 	return result, nil
 }
 
+func chatDebugArchiveSourcePath(item chatDebugArchiveItem) string {
+	if path := strings.TrimSpace(item.SourcePath); path != "" {
+		return resolveAbsoluteChatPath(path)
+	}
+	return resolveAbsoluteChatPath(item.Path)
+}
+
+func debugArchiveItemEntryName(item chatDebugArchiveItem, relative string) string {
+	if prefix := strings.Trim(filepath.ToSlash(strings.TrimSpace(item.ArchivePrefix)), "/"); prefix != "" {
+		return filepath.ToSlash(filepath.Join(prefix, relative))
+	}
+	return debugArchiveEntryName(item.Label, relative)
+}
+
 func addDebugArchiveDir(zipWriter *zip.Writer, item chatDebugArchiveItem, usedNames map[string]struct{}, result *chatDebugArchiveResult) error {
-	root := resolveAbsoluteChatPath(item.Path)
+	root := chatDebugArchiveSourcePath(item)
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -358,7 +450,7 @@ func addDebugArchiveDir(zipWriter *zip.Writer, item chatDebugArchiveItem, usedNa
 		if relative == "." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || relative == ".." {
 			return nil
 		}
-		name := debugArchiveEntryName(item.Label, relative)
+		name := debugArchiveItemEntryName(item, relative)
 		if err := addDebugArchiveFile(zipWriter, path, name, usedNames); err != nil {
 			return err
 		}

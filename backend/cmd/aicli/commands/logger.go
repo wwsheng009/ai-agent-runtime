@@ -12,6 +12,12 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	chatLogRetainedMessages = 128
+	chatLogContentMaxBytes  = 16 * 1024
+	chatLogRawMaxBytes      = 32 * 1024
+)
+
 type aicliLogScope struct {
 	TurnID    string
 	RequestID string
@@ -63,6 +69,10 @@ type ChatLogger struct {
 	logDir          string
 	sessionLog      *ChatSessionLog
 	currentReqIndex int // 当前请求日志索引（用于更新 duration）
+	totalRequests   int
+	totalResponses  int
+	totalToolCalls  int
+	responseTimeMS  int64
 }
 
 // NewChatLogger 创建新的聊天日志记录器
@@ -143,9 +153,9 @@ func (cl *ChatLogger) LogRequest(scope aicliLogScope, content interface{}) {
 		MessageType: "request",
 		TurnID:      scope.TurnID,
 		RequestID:   scope.RequestID,
-		Content:     content,
+		Content:     boundChatLogContent(content),
 	}
-	cl.sessionLog.Messages = append(cl.sessionLog.Messages, detail)
+	cl.appendDetail(detail)
 	cl.currentReqIndex = len(cl.sessionLog.Messages) - 1
 }
 
@@ -156,13 +166,14 @@ func (cl *ChatLogger) LogResponse(scope aicliLogScope, content interface{}, raw 
 		MessageType: "response",
 		TurnID:      scope.TurnID,
 		RequestID:   scope.RequestID,
-		Content:     content,
+		Content:     boundChatLogContent(content),
 		Duration:    durationMs,
 	}
 	if err != nil {
 		detail.Error = err.Error()
 	}
 	if raw != nil {
+		raw = boundedTailBytes(raw, chatLogRawMaxBytes)
 		if isStream {
 			// SSE/流式格式：保存为字符串
 			detail.RawContent = string(raw)
@@ -175,7 +186,7 @@ func (cl *ChatLogger) LogResponse(scope aicliLogScope, content interface{}, raw 
 			}
 		}
 	}
-	cl.sessionLog.Messages = append(cl.sessionLog.Messages, detail)
+	cl.appendDetail(detail)
 
 	// 更新当前请求的 duration（如果需要）
 	if cl.currentReqIndex >= 0 && cl.currentReqIndex < len(cl.sessionLog.Messages) {
@@ -195,12 +206,12 @@ func (cl *ChatLogger) LogToolCall(scope aicliLogScope, toolCallID, function stri
 		TurnID:      scope.TurnID,
 		RequestID:   scope.RequestID,
 		ToolCallID:  toolCallID,
-		Content: map[string]interface{}{
+		Content: boundChatLogContent(map[string]interface{}{
 			"function": function,
 			"args":     args,
-		},
+		}),
 	}
-	cl.sessionLog.Messages = append(cl.sessionLog.Messages, detail)
+	cl.appendDetail(detail)
 }
 
 // LogToolResult 记录工具执行结果
@@ -211,15 +222,15 @@ func (cl *ChatLogger) LogToolResult(scope aicliLogScope, toolCallID, function st
 		TurnID:      scope.TurnID,
 		RequestID:   scope.RequestID,
 		ToolCallID:  toolCallID,
-		Content: map[string]interface{}{
+		Content: boundChatLogContent(map[string]interface{}{
 			"function": function,
 			"result":   result,
-		},
+		}),
 	}
 	if err != nil {
 		detail.Error = err.Error()
 	}
-	cl.sessionLog.Messages = append(cl.sessionLog.Messages, detail)
+	cl.appendDetail(detail)
 }
 
 // LogToolExecutionSummary 记录一次工具执行批次的聚合摘要
@@ -229,9 +240,70 @@ func (cl *ChatLogger) LogToolExecutionSummary(scope aicliLogScope, summary inter
 		MessageType: "tool_execution_summary",
 		TurnID:      scope.TurnID,
 		RequestID:   scope.RequestID,
-		Content:     summary,
+		Content:     boundChatLogContent(summary),
+	}
+	cl.appendDetail(detail)
+}
+
+func (cl *ChatLogger) appendDetail(detail ChatLogDetail) {
+	if cl == nil || cl.sessionLog == nil {
+		return
+	}
+	switch detail.MessageType {
+	case "request":
+		cl.totalRequests++
+	case "response":
+		cl.totalResponses++
+		cl.responseTimeMS += detail.Duration
+	case "tool_call":
+		cl.totalToolCalls++
 	}
 	cl.sessionLog.Messages = append(cl.sessionLog.Messages, detail)
+	if len(cl.sessionLog.Messages) <= chatLogRetainedMessages {
+		return
+	}
+	drop := len(cl.sessionLog.Messages) - chatLogRetainedMessages
+	copy(cl.sessionLog.Messages, cl.sessionLog.Messages[drop:])
+	clear(cl.sessionLog.Messages[len(cl.sessionLog.Messages)-drop:])
+	cl.sessionLog.Messages = cl.sessionLog.Messages[:chatLogRetainedMessages]
+	if cl.currentReqIndex >= 0 {
+		cl.currentReqIndex -= drop
+		if cl.currentReqIndex < 0 {
+			cl.currentReqIndex = -1
+		}
+	}
+}
+
+func boundChatLogContent(content interface{}) interface{} {
+	if content == nil {
+		return nil
+	}
+	if text, ok := content.(string); ok {
+		if len(text) <= chatLogContentMaxBytes {
+			return text
+		}
+		return map[string]interface{}{
+			"truncated":  true,
+			"byte_count": len(text),
+			"preview":    truncateUTF8Bytes(text, chatLogContentMaxBytes),
+		}
+	}
+	payload, err := json.Marshal(content)
+	if err != nil || len(payload) <= chatLogContentMaxBytes {
+		return content
+	}
+	return map[string]interface{}{
+		"truncated":  true,
+		"byte_count": len(payload),
+		"preview":    truncateUTF8ByteSlice(payload, chatLogContentMaxBytes),
+	}
+}
+
+func boundedTailBytes(raw []byte, limit int) []byte {
+	if limit <= 0 || len(raw) <= limit {
+		return append([]byte(nil), raw...)
+	}
+	return append([]byte(nil), raw[len(raw)-limit:]...)
 }
 
 // WriteDebugInfo 写入调试信息到单独的日志文件
@@ -271,7 +343,7 @@ func (cl *ChatLogger) WriteDebugInfo(logDir, debugInfo string) error {
 
 // SetInitialMessage 设置初始消息
 func (cl *ChatLogger) SetInitialMessage(msg string) {
-	cl.sessionLog.InitialMessage = msg
+	cl.sessionLog.InitialMessage = truncateUTF8Bytes(msg, chatLogContentMaxBytes)
 }
 
 // EndSession 结束会话
@@ -297,17 +369,19 @@ func (cl *ChatLogger) FlushSession() error {
 		return fmt.Errorf("创建会话目录失败: %w", err)
 	}
 
-	// 序列化
-	data, err := json.MarshalIndent(cl.sessionLog, "", "  ")
+	logPath := cl.buildLogPath()
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
+		return fmt.Errorf("打开会话日志失败: %w", err)
+	}
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(cl.sessionLog); err != nil {
+		_ = file.Close()
 		return fmt.Errorf("序列化会话日志失败: %w", err)
 	}
-
-	logPath := cl.buildLogPath()
-
-	// 写入文件
-	if err := os.WriteFile(logPath, data, 0644); err != nil {
-		return fmt.Errorf("写入会话日志失败: %w", err)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("关闭会话日志失败: %w", err)
 	}
 
 	return nil
@@ -420,24 +494,26 @@ func (cl *ChatLogger) updateSummary(content interface{}, durationMs int64) {
 // calculateSummary 计算会话摘要
 func (cl *ChatLogger) calculateSummary() *ChatSessionSummary {
 	summary := &ChatSessionSummary{
-		TotalRequests:  0,
-		TotalResponses: 0,
-		TotalToolCalls: 0,
+		TotalRequests:  cl.totalRequests,
+		TotalResponses: cl.totalResponses,
+		TotalToolCalls: cl.totalToolCalls,
 	}
 
-	var totalResponseTime int64
+	totalResponseTime := cl.responseTimeMS
 	messageCount := len(cl.sessionLog.Messages)
 
-	for i := 0; i < messageCount; i++ {
-		msg := cl.sessionLog.Messages[i]
-		switch msg.MessageType {
-		case "request":
-			summary.TotalRequests++
-		case "response":
-			summary.TotalResponses++
-			totalResponseTime += msg.Duration
-		case "tool_call":
-			summary.TotalToolCalls++
+	if summary.TotalRequests == 0 && summary.TotalResponses == 0 && summary.TotalToolCalls == 0 {
+		for i := 0; i < messageCount; i++ {
+			msg := cl.sessionLog.Messages[i]
+			switch msg.MessageType {
+			case "request":
+				summary.TotalRequests++
+			case "response":
+				summary.TotalResponses++
+				totalResponseTime += msg.Duration
+			case "tool_call":
+				summary.TotalToolCalls++
+			}
 		}
 	}
 

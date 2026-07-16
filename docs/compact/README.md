@@ -9,7 +9,7 @@
 - 增加统一的压缩适配层，保留本地压缩 / 远程压缩两种模式的扩展位。
 - 先实现本地压缩。
 - 先做 `pre-turn auto compact`，不做 `mid-turn`。
-- 压缩结果不是临时 prompt 注入，而是直接替换并持久化 session history。
+- 压缩结果会替换并持久化有界的 prompt projection；SQLite canonical transcript 采用追加写，不会因 compact 丢失压缩前原文。
 - 压缩阈值按 `provider -> model_capabilities -> model` 解析，不再使用全局固定 token limit。
 - 普通 prompt 组装不再默认执行 recent-window / ledger / summary 重组；只有显式 compact、达到阈值的 session compact 或发送前 preflight 压缩才允许缩短要发送的 prompt。
 - `aicli` 状态栏里的 `ctx used` 表示最近一次 LLM API 响应确认的 active context 大小，由 provider usage 的 `total_tokens` / input+output 口径确认；普通请求只允许递增，只有 compact / reset / new / clear 允许降低。
@@ -22,21 +22,21 @@
    在真正发起下一次模型请求前判断是否需要压缩。
 2. 适配层
    根据能力决定走本地压缩还是远程压缩。
-3. 历史替换层
-   产出 replacement history，并把 live history 替换成压缩后的历史。
+3. 投影替换层
+   产出 replacement history，并把 live prompt projection 替换成压缩后的历史。
 
 它不是简单的“超过窗口就截断”，而是：
 
 1. 把较早历史交给压缩实现生成 handoff summary。
 2. 保留近期消息窗口。
 3. 用“压缩摘要 + 近期原始消息”重建历史。
-4. 持久化 replacement history，供后续回合继续使用。
+4. 持久化 replacement prompt projection，供后续回合继续使用；canonical transcript 继续保留完整追加历史。
 
 这个结构值得直接借鉴，因为：
 
 - 触发条件和实现方式解耦。
 - 本地压缩和远程压缩可以挂在同一入口。
-- session 语义清晰，后续恢复 / 重放 / 继续对话都基于压缩后的真实历史。
+- session 语义清晰：继续对话和普通恢复加载压缩后的有界投影，审计、分页和导出读取 canonical transcript。
 
 ## 当前仓库的基础能力
 
@@ -437,7 +437,7 @@ go test ./internal/llm ./internal/compactruntime ./internal/chat ./internal/api/
 - 触发阈值按具体模型能力解析。
 - 默认阈值是 `max_context_tokens * 0.9`。
 - `context` 只负责保留窗口等上下文治理参数；普通 prompt Build 不会默认 recent-window 裁剪历史。
-- 当前已支持本地 `pre-turn` 压缩，以及 Codex 远端 `pre-turn` 压缩，并直接替换持久化 session history。
+- 当前已支持本地 `pre-turn` 压缩，以及 Codex 远端 `pre-turn` 压缩；压缩替换持久化 prompt projection，不覆盖 SQLite canonical transcript。
 - prompt-only preflight 压缩只修改当次发送给模型的 prompt view；只有 session-level compact 成功后才替换并持久化 session history。
 - `aicli` `ctx used` 是最近一次 LLM API 响应确认的 active context 观察值，由 provider usage 的 `total_tokens` / input+output 口径确认。普通请求路径不提前显示本地预估，也不会因 provider 返回较小值而回落；本地预估只在请求失败或 usage 无法解析时作为兜底。
 

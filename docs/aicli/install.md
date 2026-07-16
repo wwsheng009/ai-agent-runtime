@@ -298,6 +298,34 @@ aicli --help
 
 当前启动时不再自动弹出历史会话选择菜单；默认创建新会话。恢复历史会话请使用 `--resume`、`--session`、`/resume`、`/sessions` 或 `/load`。
 
+### 会话存储与长会话内存上限
+
+持久会话默认使用 SQLite。完整 canonical transcript 追加写入 `session_messages`，运行时只加载有界的 `session_prompt_messages` 投影；compact 只替换 prompt projection，不覆盖 compact 前的 canonical transcript。会话列表只读取 metadata，历史接口使用 `before_seq` 游标按页向前读取，因此恢复和列表不会随完整历史长度线性占用内存。
+
+```yaml
+sessions:
+  backend: sqlite
+  # 相对路径以 sessions.dir 为基准；留空时使用 session_history.sqlite
+  storePath: session_history.sqlite
+  maxHistory: 128
+  hotHistoryBytes: 2097152
+  maxHotMessageBytes: 131072
+  historyPageMessages: 100
+  historyPageBytes: 4194304
+  maxInlineMessageBytes: 524288
+  sqliteCacheKiB: 2048
+  busyTimeout: 5s
+```
+
+- 单条 canonical 消息超过 `maxInlineMessageBytes` 时，正文按内容哈希写入 `session-artifacts/<session-id>/`，SQLite 保存路径、大小、校验值和有界预览。
+- SQLite 使用单连接、WAL、`synchronous=NORMAL`、文件临时表、禁用 mmap 和小页缓存；关闭存储时执行 WAL truncate checkpoint，新数据库启用 incremental auto-vacuum。
+- 首次切换到 SQLite 时会流式导入 sessions 目录中的旧 JSON 会话。旧 JSON 默认保留作为回滚源，不会自动删除。
+- `resume latest`、会话选择和 slash 补全按 100 条 metadata/preview 分页读取；清理和 idle 归档按最多 128 条一批执行，避免会话文件或过期会话总数抬高峰值内存。
+- `/export --full` 从 canonical JSON 流式写出；新写入的外置 canonical 消息会边读取边校验 SHA-256，不需要把整条大 artifact 读入 Go 内存。导出先写同目录临时文件，成功后再发布，失败不会留下半文件或覆盖旧目标。
+- 需要兼容旧格式时可显式配置 `sessions.backend: file`；该模式仍会按旧 JSON 文件读写，不具备 SQLite canonical transcript、artifact 外置和游标分页的完整能力。
+- `GET /api/runtime/sessions/{id}/history?limit=100&before_seq=<cursor>` 返回 `first_seq`、`last_seq`、`next_before_seq` 和 `has_more`；继续加载旧历史时传回 `next_before_seq`，不要一次请求完整会话。
+- runtime HTTP debug artifacts 每个会话最多保留 256 个 JSON 文件且总量最多 64 MiB，超限时自动删除最旧文件；单次 debug raw body 捕获固定上限为 256 KiB，并保留首尾片段和原始字节数。
+
 ### MCP 子命令概览
 
 `aicli mcp` 支持常用管理动作：
@@ -365,9 +393,11 @@ aicli --help
 - `/model` 支持 `status`、`clear-reasoning`、`--provider/-p`、`--model/-m`、`--reasoning-effort/-r`；切换后会刷新 provider、adapter、BaseURL、HTTP client、function builder、logger 和 runtime session metadata。
 - `/login` 与 `aicli login` 共用 provider 登录逻辑，支持 API key、Codex OAuth、`--models-path`、`--default-model`、`--set-default`、`--dry-run` 和 JSON 输出。
 - `/stream`、`/s`、`/normal` 会更新当前会话，并在可写配置存在时写回 `aicli.chat.stream`。
-- `/resume latest` 会跳过当前正在使用的 runtime session 和只有 system prompt 的启动占位 session；交互式选择器只显示相对更新时间与清理后的标题，不再把 session id、provider 和 session file 路径塞进候选行。
+- `/resume` 会直接打开按最后更新时间倒序排列的历史会话列表，回车恢复第一项，输入编号选择其他会话，输入 `q` 取消；不再先显示“最近会话/选择会话”的二级菜单。当前会话和只有 system prompt 的启动占位 session 不会出现在列表中。
+- `/resume latest` 直接恢复最近的其他可恢复会话。交互式选择器显示最后更新时间（绝对时间与相对时间）、会话轮次、消息数和清理后的标题，不再把 session id、provider 和 session file 路径塞进候选行。轮次按持久化的 user 消息数统计，消息数包含 system、user、assistant 和 tool 消息。
+- chat 内的 `/sessions` 不显示当前会话和启动占位会话；`aicli chat --list-sessions` 的独立完整列表显示最后更新时间、轮次和消息数，并保留 session id、状态、protocol、provider、model 等诊断信息。
 - `/export` 无参数时会弹出选择器；`--full` 生成完整 JSON，`--body` 只导出用户/助手正文；可用 `--output <path>` 或 `--dir <dir>` 指定输出位置。
-- `/debug export` / `/debug zip` 会把 `/debug display` 中“会话文件与目录”部分的 session file、chat/debug log、runtime-http/local-shell/generated-images artifacts 打包为 zip，并附带 `manifest.json`。
+- `/debug export` / `/debug zip` 会把 `/debug display` 中“会话文件与目录”部分的 session file、chat/debug log、runtime-http/local-shell/generated-images artifacts 打包为 zip，并附带 `manifest.json`。SQLite 模式在同一读事务中生成只含当前 session 的一致性快照，包含已提交 WAL 内容但不会泄露其他会话，并同时打包当前会话引用的 canonical artifacts。
 - `spawn_team auto_start=true` 之后应使用 `wait_team` 等待持久 `team.completed` / `team.summary`；`wait_agent` / `read_agent_events` 面向 `spawn_agent` child session，不应拿 team member id 当 child session id。
 - `/shell` / `/cmd` 支持 `--output-bytes-cap <bytes>` 与 `--disable-output-cap`；默认使用检测到的用户 shell。危险命令仍会进入确认/权限流程。
 - builtin `execute_shell_command` function 支持 `command`、`workdir`、`output_bytes_cap`、`disable_output_cap`；Windows PowerShell/pwsh 下不要把 POSIX-only 命令如 `head` 当默认可用命令。

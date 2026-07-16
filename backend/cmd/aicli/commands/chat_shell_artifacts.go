@@ -87,15 +87,11 @@ func currentLocalShellArtifactDir(session *ChatSession) string {
 			return resolveAbsoluteChatPath(dir)
 		}
 	}
-	sessionPath := currentRuntimeSessionPath(session)
-	if sessionPath == "" {
+	artifactRoot := currentRuntimeSessionArtifactRoot(session)
+	if artifactRoot == "" {
 		return ""
 	}
-	baseName := strings.TrimSuffix(filepath.Base(sessionPath), filepath.Ext(sessionPath))
-	if baseName == "" {
-		return ""
-	}
-	return resolveAbsoluteChatPath(filepath.Join(filepath.Dir(sessionPath), baseName+".artifacts", "local-shell"))
+	return resolveAbsoluteChatPath(filepath.Join(artifactRoot, "local-shell"))
 }
 
 func currentLastLocalShellArtifactPath(session *ChatSession) string {

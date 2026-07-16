@@ -325,9 +325,9 @@ func (p *ProviderWrapper) RemoteCompact(ctx context.Context, req RemoteCompactRe
 		Method:           http.MethodPost,
 		URL:              url,
 		RequestMetadata:  buildHTTPDebugRequestMetadata(nil, p.config.Type, requestBody),
-		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
-		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
 	})
 
 	headers := buildCodexRemoteCompactHeaders(p.config.APIKey, p.config.Timeout, requestBody, p.config.Headers)
@@ -343,8 +343,8 @@ func (p *ProviderWrapper) RemoteCompact(ctx context.Context, req RemoteCompactRe
 			URL:                 url,
 			ResponseStatusCode:  statusCode,
 			ResponseBodyBytes:   len(responseBody),
-			ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
-			ResponseBodyRaw:     append([]byte(nil), responseBody...),
+			ResponseBodyPreview: truncateHTTPDebugBytes(responseBody, 4096),
+			ResponseBodyRaw:     boundHTTPDebugRawBody(responseBody),
 			Error:               err.Error(),
 		})
 		return nil, err
@@ -358,8 +358,8 @@ func (p *ProviderWrapper) RemoteCompact(ctx context.Context, req RemoteCompactRe
 		URL:                 url,
 		ResponseStatusCode:  statusCode,
 		ResponseBodyBytes:   len(responseBody),
-		ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
-		ResponseBodyRaw:     append([]byte(nil), responseBody...),
+		ResponseBodyPreview: truncateHTTPDebugBytes(responseBody, 4096),
+		ResponseBodyRaw:     boundHTTPDebugRawBody(responseBody),
 	})
 
 	return decodeCodexRemoteCompactResponse(req.History, responseBody)
@@ -449,9 +449,9 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 		Method:           http.MethodPost,
 		URL:              url,
 		RequestMetadata:  buildHTTPDebugRequestMetadata(request.Metadata, p.config.Type, requestBody),
-		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
-		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
 	})
 
 	// 创建 HTTP 请求
@@ -503,8 +503,8 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 			URL:                 url,
 			ResponseStatusCode:  resp.StatusCode,
 			ResponseBodyBytes:   len(body),
-			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
-			ResponseBodyRaw:     append([]byte(nil), body...),
+			ResponseBodyPreview: truncateHTTPDebugBytes(body, 4096),
+			ResponseBodyRaw:     boundHTTPDebugRawBody(body),
 			Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 		})
 		return nil, newProviderHTTPError(resp.StatusCode, string(body), resp.Header)
@@ -523,8 +523,8 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 		URL:                 url,
 		ResponseStatusCode:  resp.StatusCode,
 		ResponseBodyBytes:   len(body),
-		ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
-		ResponseBodyRaw:     append([]byte(nil), body...),
+		ResponseBodyPreview: truncateHTTPDebugBytes(body, 4096),
+		ResponseBodyRaw:     boundHTTPDebugRawBody(body),
 	})
 	if err := validateNonStreamingChatResponseBody(p.config.Type, body); err != nil {
 		return nil, err
@@ -689,9 +689,9 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 		Method:           http.MethodPost,
 		URL:              url,
 		RequestMetadata:  buildHTTPDebugRequestMetadata(request.Metadata, p.config.Type, requestBody),
-		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
-		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
 	})
 
 	// 创建 HTTP 请求
@@ -743,8 +743,8 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 			URL:                 url,
 			ResponseStatusCode:  resp.StatusCode,
 			ResponseBodyBytes:   len(body),
-			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
-			ResponseBodyRaw:     append([]byte(nil), body...),
+			ResponseBodyPreview: truncateHTTPDebugBytes(body, 4096),
+			ResponseBodyRaw:     boundHTTPDebugRawBody(body),
 			Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 		})
 		return newProviderHTTPError(resp.StatusCode, string(body), resp.Header)
@@ -803,8 +803,8 @@ func (p *ProviderWrapper) ChatStream(ctx context.Context, request ChatRequest, o
 		URL:                 url,
 		ResponseStatusCode:  resp.StatusCode,
 		ResponseBodyBytes:   len(responseBody),
-		ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
-		ResponseBodyRaw:     responseBody,
+		ResponseBodyPreview: truncateHTTPDebugBytes(responseBody, 4096),
+		ResponseBodyRaw:     boundHTTPDebugRawBody(responseBody),
 		Error:               errorString(err),
 	})
 	if err != nil {
@@ -1079,9 +1079,9 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			Method:           http.MethodPost,
 			URL:              url,
 			RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, p.config.Type, requestBody),
-			RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+			RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 			RequestBodyBytes: len(bodyBytes),
-			RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+			RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
 		})
 
 		httpReq, err := http.NewRequestWithContext(attemptCtx, "POST", url, bytes.NewReader(bodyBytes))
@@ -1130,8 +1130,8 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				URL:                 url,
 				ResponseStatusCode:  resp.StatusCode,
 				ResponseBodyBytes:   len(responseBody),
-				ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
-				ResponseBodyRaw:     append([]byte(nil), responseBody...),
+				ResponseBodyPreview: truncateHTTPDebugBytes(responseBody, 4096),
+				ResponseBodyRaw:     boundHTTPDebugRawBody(responseBody),
 				Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 			})
 			lastErr = newProviderHTTPError(resp.StatusCode, string(responseBody), resp.Header)
@@ -1217,8 +1217,8 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			URL:                 url,
 			ResponseStatusCode:  resp.StatusCode,
 			ResponseBodyBytes:   len(responseBody),
-			ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
-			ResponseBodyRaw:     responseBody,
+			ResponseBodyPreview: truncateHTTPDebugBytes(responseBody, 4096),
+			ResponseBodyRaw:     boundHTTPDebugRawBody(responseBody),
 			Error:               errorString(handleErr),
 		})
 

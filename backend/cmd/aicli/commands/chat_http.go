@@ -139,12 +139,19 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 		slowRetryInterval = defaultSlowRetryInterval
 	}
 
-	var originalBody []byte
-	if req.Body != nil {
-		originalBody, _ = io.ReadAll(req.Body)
-		req.Body.Close()
+	bodyFactory := req.GetBody
+	if bodyFactory == nil {
+		var originalBody []byte
+		if req.Body != nil {
+			originalBody, _ = io.ReadAll(req.Body)
+		}
+		bodyFactory = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(originalBody)), nil
+		}
 	}
-	req.Body = io.NopCloser(bytes.NewReader(originalBody))
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
 
 	startTime := time.Now()
 
@@ -155,7 +162,7 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 				report.FinalStatusCode = lastResp.StatusCode
 			}
 			report.LastResponseBytes = len(body)
-			report.LastResponsePreview = truncateUTF8Bytes(string(body), 2048)
+			report.LastResponsePreview = truncateUTF8ByteSlice(body, 2048)
 			return lastResp, body, report, errors.New(report.FinalError)
 		}
 
@@ -202,8 +209,14 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 		if onAttemptStart != nil {
 			onAttemptStart(attempt + 1)
 		}
-		newReq, err := http.NewRequest(req.Method, req.URL.String(), bytes.NewReader(originalBody))
+		attemptBody, err := bodyFactory()
 		if err != nil {
+			report.FinalError = fmt.Sprintf("创建重试请求体失败: %v", err)
+			return nil, nil, report, fmt.Errorf("创建重试请求体失败: %w", err)
+		}
+		newReq, err := http.NewRequest(req.Method, req.URL.String(), attemptBody)
+		if err != nil {
+			_ = attemptBody.Close()
 			report.FinalError = fmt.Sprintf("创建重试请求失败: %v", err)
 			return nil, nil, report, fmt.Errorf("创建重试请求失败: %w", err)
 		}
@@ -265,7 +278,7 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 			Attempt:         attempt + 1,
 			StatusCode:      resp.StatusCode,
 			ResponseBytes:   len(body),
-			ResponsePreview: truncateUTF8Bytes(string(body), 2048),
+			ResponsePreview: truncateUTF8ByteSlice(body, 2048),
 			DurationMs:      time.Since(attemptStart).Milliseconds(),
 		})
 
@@ -275,7 +288,7 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 					report.FinalStatusCode = resp.StatusCode
 					report.FinalError = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))
 					report.LastResponseBytes = len(body)
-					report.LastResponsePreview = truncateUTF8Bytes(string(body), 2048)
+					report.LastResponsePreview = truncateUTF8ByteSlice(body, 2048)
 					return resp, body, report, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 				}
 				lastResp = resp
@@ -285,13 +298,13 @@ func sendHTTPRequest(client *http.Client, req *http.Request, retryCfg RetryConfi
 			report.FinalStatusCode = resp.StatusCode
 			report.FinalError = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))
 			report.LastResponseBytes = len(body)
-			report.LastResponsePreview = truncateUTF8Bytes(string(body), 2048)
+			report.LastResponsePreview = truncateUTF8ByteSlice(body, 2048)
 			return resp, body, report, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 		}
 
 		report.FinalStatusCode = resp.StatusCode
 		report.LastResponseBytes = len(body)
-		report.LastResponsePreview = truncateUTF8Bytes(string(body), 2048)
+		report.LastResponsePreview = truncateUTF8ByteSlice(body, 2048)
 		return resp, body, report, nil
 	}
 }
@@ -323,6 +336,37 @@ func buildRequestLogContent(baseURL string, requestBody map[string]interface{}, 
 	return content
 }
 
+func summarizeRequestLogBody(requestBody map[string]interface{}, byteCount int) map[string]interface{} {
+	summary := map[string]interface{}{
+		"truncated":  true,
+		"byte_count": byteCount,
+	}
+	for _, key := range []string{"model", "stream", "max_tokens", "max_output_tokens", "temperature"} {
+		if value, ok := requestBody[key]; ok {
+			summary[key] = value
+		}
+	}
+	for _, key := range []string{"messages", "input", "tools"} {
+		if count := requestLogCollectionLength(requestBody[key]); count > 0 {
+			summary[key+"_count"] = count
+		}
+	}
+	return summary
+}
+
+func requestLogCollectionLength(value interface{}) int {
+	switch typed := value.(type) {
+	case []interface{}:
+		return len(typed)
+	case []map[string]interface{}:
+		return len(typed)
+	case []string:
+		return len(typed)
+	default:
+		return 0
+	}
+}
+
 func formatHTTPDebugReport(req *http.Request, requestBody []byte, report *httpRequestReport) string {
 	if report == nil {
 		return "[http-debug] no report available"
@@ -339,7 +383,7 @@ func formatHTTPDebugReport(req *http.Request, requestBody []byte, report *httpRe
 	}
 	if len(requestBody) > 0 {
 		lines = append(lines, fmt.Sprintf("[http-debug] request_body_bytes=%d", len(requestBody)))
-		lines = append(lines, fmt.Sprintf("[http-debug] request_body=%s", truncateUTF8Bytes(string(requestBody), 4096)))
+		lines = append(lines, fmt.Sprintf("[http-debug] request_body=%s", truncateUTF8ByteSlice(requestBody, 4096)))
 	}
 	if req != nil {
 		lines = append(lines, fmt.Sprintf("[http-debug] request_headers=%s", marshalIndentedJSON(sanitizeHeadersForDebug(req.Header))))

@@ -223,9 +223,9 @@ func (c *GatewayClient) RemoteCompact(ctx context.Context, req RemoteCompactRequ
 		Method:           http.MethodPost,
 		URL:              url,
 		RequestMetadata:  buildHTTPDebugRequestMetadata(nil, protocol, requestBody),
-		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
-		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
 	})
 
 	headers := buildCodexRemoteCompactHeaders(selected.KeyValue, c.defaultTimeout, requestBody, nil)
@@ -248,8 +248,8 @@ func (c *GatewayClient) RemoteCompact(ctx context.Context, req RemoteCompactRequ
 			URL:                 url,
 			ResponseStatusCode:  statusCode,
 			ResponseBodyBytes:   len(responseBody),
-			ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
-			ResponseBodyRaw:     append([]byte(nil), responseBody...),
+			ResponseBodyPreview: truncateHTTPDebugBytes(responseBody, 4096),
+			ResponseBodyRaw:     boundHTTPDebugRawBody(responseBody),
 			Error:               err.Error(),
 		})
 		c.resourceManager.RecordResult(selected, false, err, statusCode, latencyMs)
@@ -265,8 +265,8 @@ func (c *GatewayClient) RemoteCompact(ctx context.Context, req RemoteCompactRequ
 		URL:                 url,
 		ResponseStatusCode:  statusCode,
 		ResponseBodyBytes:   len(responseBody),
-		ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
-		ResponseBodyRaw:     append([]byte(nil), responseBody...),
+		ResponseBodyPreview: truncateHTTPDebugBytes(responseBody, 4096),
+		ResponseBodyRaw:     boundHTTPDebugRawBody(responseBody),
 	})
 
 	response, decodeErr := decodeCodexRemoteCompactResponse(req.History, responseBody)
@@ -422,9 +422,9 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		Method:           http.MethodPost,
 		URL:              url,
 		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
-		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
-		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
 	})
 
 	// 创建 HTTP 请求
@@ -484,8 +484,8 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 			URL:                 url,
 			ResponseStatusCode:  httpResp.StatusCode,
 			ResponseBodyBytes:   len(body),
-			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
-			ResponseBodyRaw:     append([]byte(nil), body...),
+			ResponseBodyPreview: truncateHTTPDebugBytes(body, 4096),
+			ResponseBodyRaw:     boundHTTPDebugRawBody(body),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
 		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), httpResp.Header, c.retryRules)
@@ -505,8 +505,8 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		URL:                 url,
 		ResponseStatusCode:  httpResp.StatusCode,
 		ResponseBodyBytes:   len(body),
-		ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
-		ResponseBodyRaw:     append([]byte(nil), body...),
+		ResponseBodyPreview: truncateHTTPDebugBytes(body, 4096),
+		ResponseBodyRaw:     boundHTTPDebugRawBody(body),
 	})
 
 	// 使用 adapter 处理响应
@@ -656,9 +656,9 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		Method:           http.MethodPost,
 		URL:              url,
 		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
-		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
-		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
 	})
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
@@ -712,8 +712,8 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			URL:                 url,
 			ResponseStatusCode:  httpResp.StatusCode,
 			ResponseBodyBytes:   len(body),
-			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
-			ResponseBodyRaw:     append([]byte(nil), body...),
+			ResponseBodyPreview: truncateHTTPDebugBytes(body, 4096),
+			ResponseBodyRaw:     boundHTTPDebugRawBody(body),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
 		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), httpResp.Header, c.retryRules)
@@ -788,8 +788,8 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 		URL:                 url,
 		ResponseStatusCode:  httpResp.StatusCode,
 		ResponseBodyBytes:   len(responseBody),
-		ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
-		ResponseBodyRaw:     responseBody,
+		ResponseBodyPreview: truncateHTTPDebugBytes(responseBody, 4096),
+		ResponseBodyRaw:     boundHTTPDebugRawBody(responseBody),
 		Error:               errorString(err),
 	})
 	if err != nil {
@@ -924,9 +924,9 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 		Method:           http.MethodPost,
 		URL:              url,
 		RequestMetadata:  buildHTTPDebugRequestMetadata(req.Metadata, protocol, requestBody),
-		RequestBody:      truncateHTTPDebugText(string(bodyBytes), 32768),
+		RequestBody:      truncateHTTPDebugBytes(bodyBytes, 32768),
 		RequestBodyBytes: len(bodyBytes),
-		RequestBodyRaw:   append([]byte(nil), bodyBytes...),
+		RequestBodyRaw:   boundHTTPDebugRawBody(bodyBytes),
 	})
 
 	// 创建 HTTP 请求
@@ -983,8 +983,8 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 			URL:                 url,
 			ResponseStatusCode:  httpResp.StatusCode,
 			ResponseBodyBytes:   len(body),
-			ResponseBodyPreview: truncateHTTPDebugText(string(body), 4096),
-			ResponseBodyRaw:     append([]byte(nil), body...),
+			ResponseBodyPreview: truncateHTTPDebugBytes(body, 4096),
+			ResponseBodyRaw:     boundHTTPDebugRawBody(body),
 			Error:               fmt.Sprintf("HTTP %d", httpResp.StatusCode),
 		})
 		return nil, newGatewayHTTPError(httpResp.StatusCode, string(body), httpResp.Header, c.retryRules)
@@ -1059,8 +1059,8 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 			URL:                 url,
 			ResponseStatusCode:  httpResp.StatusCode,
 			ResponseBodyBytes:   len(responseBody),
-			ResponseBodyPreview: truncateHTTPDebugText(string(responseBody), 4096),
-			ResponseBodyRaw:     responseBody,
+			ResponseBodyPreview: truncateHTTPDebugBytes(responseBody, 4096),
+			ResponseBodyRaw:     boundHTTPDebugRawBody(responseBody),
 			Error:               errorString(err),
 		})
 		if err != nil {

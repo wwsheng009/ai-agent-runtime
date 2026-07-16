@@ -17,15 +17,11 @@ func currentGeneratedImageArtifactDir(session *ChatSession) string {
 			return resolveAbsoluteChatPath(filepath.Join(sessionDir, "generated-images"))
 		}
 	}
-	sessionPath := currentRuntimeSessionPath(session)
-	if sessionPath == "" {
+	artifactRoot := currentRuntimeSessionArtifactRoot(session)
+	if artifactRoot == "" {
 		return ""
 	}
-	baseName := strings.TrimSuffix(filepath.Base(sessionPath), filepath.Ext(sessionPath))
-	if baseName == "" {
-		return ""
-	}
-	return resolveAbsoluteChatPath(filepath.Join(filepath.Dir(sessionPath), baseName+".artifacts", "generated-images"))
+	return resolveAbsoluteChatPath(filepath.Join(artifactRoot, "generated-images"))
 }
 
 func generatedImageToolContext(ctx context.Context, session *ChatSession) context.Context {

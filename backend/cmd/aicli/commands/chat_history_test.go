@@ -1,16 +1,18 @@
 package commands
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
 	"github.com/fatih/color"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-func TestPrintVisibleChatHistory_RendersRestoredMessagesWithToolSummary(t *testing.T) {
+func TestPrintVisibleChatHistory_RendersRestoredMessagesWithUnifiedToolRenderer(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true
 	defer func() {
@@ -47,8 +49,9 @@ func TestPrintVisibleChatHistory_RendersRestoredMessagesWithToolSummary(t *testi
 		"已加载历史会话 (3 条消息):",
 		"查看当前目录",
 		"我来查看当前目录。",
-		"调用工具: shell_command",
-		"[call-1] 目录: backend",
+		"• Running dir",
+		"• Completed dir",
+		"目录: backend",
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected output to contain %q, got:\n%s", expected, output)
@@ -86,7 +89,7 @@ func TestPrintVisibleChatHistory_ReturnsZeroWhenOnlyHiddenSystemPromptExists(t *
 	}
 }
 
-func TestPrintVisibleChatHistory_TruncatesToolOutputForCLI(t *testing.T) {
+func TestPrintVisibleChatHistory_UsesUnifiedToolPreviewLimits(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true
 	defer func() {
@@ -116,14 +119,212 @@ func TestPrintVisibleChatHistory_TruncatesToolOutputForCLI(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(output, "[call-1] line 1") {
-		t.Fatalf("expected truncated tool output to keep leading content, got:\n%s", output)
+	if !strings.Contains(output, "• Completed call-1") || !strings.Contains(output, "line 1") {
+		t.Fatalf("expected unified tool output to keep its title and leading content, got:\n%s", output)
 	}
-	if !strings.Contains(output, "已省略剩余 1 行") {
-		t.Fatalf("expected truncated tool output marker, got:\n%s", output)
+	if !strings.Contains(output, "line 3") {
+		t.Fatalf("expected unified three-line tool preview, got:\n%s", output)
 	}
-	if strings.Contains(output, "line 7") {
-		t.Fatalf("did not expect full tool output in CLI history, got:\n%s", output)
+	if strings.Contains(output, "line 4") || strings.Contains(output, "line 7") {
+		t.Fatalf("did not expect replay to bypass live tool preview limits, got:\n%s", output)
+	}
+}
+
+func TestPrintVisibleChatHistory_MatchesLiveCompleteBlockRendering(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	assistant := runtimetypes.Message{
+		Role:    "assistant",
+		Content: "我先查看目录。",
+		ToolCalls: []runtimetypes.ToolCall{
+			{ID: "call-1", Name: "ls", Args: map[string]interface{}{"path": "docs"}},
+		},
+		Metadata: runtimetypes.NewMetadata(),
+	}
+	runtimetypes.SetReasoningBlock(assistant.Metadata, &runtimetypes.ReasoningBlock{
+		Summary:    "先确认目录内容。",
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+	tool := runtimetypes.NewToolMessage("call-1", "目录: docs\nREADME.md")
+	tool.Metadata["tool_source"] = "meta"
+	tool.Metadata["workdir"] = `E:\repo`
+	tool.Metadata["duration_ms"] = 1250
+
+	historySession := &ChatSession{}
+	historySession.Interaction = newChatInteractionCoordinator(historySession)
+	var historyOutput bytes.Buffer
+	historySession.Interaction.SetWriter(&historyOutput)
+	replaceRuntimeMessages(historySession, []runtimetypes.Message{
+		*runtimetypes.NewUserMessage("查看 docs"),
+		assistant,
+		*tool,
+	})
+	if count := printVisibleChatHistory(historySession, ""); count != 3 {
+		t.Fatalf("expected 3 replayed messages, got %d", count)
+	}
+
+	liveSession := &ChatSession{}
+	liveSession.Interaction = newChatInteractionCoordinator(liveSession)
+	var liveOutput bytes.Buffer
+	liveSession.Interaction.SetWriter(&liveOutput)
+	liveRenderer := newAICLITranscriptRenderer(liveSession)
+	liveRenderer.RenderUser("查看 docs")
+	liveRenderer.RenderReasoning(runtimetypes.GetReasoningBlock(assistant.Metadata))
+	liveRenderer.RenderAssistant("我先查看目录。")
+	liveRenderer.RenderToolEvent(runtimechatcore.ChatEvent{
+		Type:       runtimechatcore.EventTool,
+		Stage:      "tool_requested",
+		ToolName:   "ls",
+		ToolCallID: "call-1",
+		Arguments:  map[string]interface{}{"path": "docs"},
+		Metadata: map[string]interface{}{
+			"tool_source": "meta",
+			"workdir":     `E:\repo`,
+			"duration_ms": 1250,
+		},
+	})
+	liveRenderer.RenderToolEvent(runtimechatcore.ChatEvent{
+		Type:       runtimechatcore.EventTool,
+		Stage:      "tool_result",
+		ToolName:   "ls",
+		ToolCallID: "call-1",
+		Arguments:  map[string]interface{}{"path": "docs"},
+		Output:     "目录: docs\nREADME.md",
+		Success:    true,
+		Metadata: map[string]interface{}{
+			"tool_source": "meta",
+			"workdir":     `E:\repo`,
+			"duration_ms": 1250,
+		},
+	})
+
+	if historyOutput.String() != liveOutput.String() {
+		t.Fatalf("expected history replay and live complete blocks to share rendering\nhistory:\n%s\nlive:\n%s", historyOutput.String(), liveOutput.String())
+	}
+}
+
+func TestPrintVisibleChatHistory_PreservesCompleteMessageContent(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	content := "回答：\n\n    保留缩进的代码\n"
+	historySession := &ChatSession{}
+	historySession.Interaction = newChatInteractionCoordinator(historySession)
+	var historyOutput bytes.Buffer
+	historySession.Interaction.SetWriter(&historyOutput)
+	replaceRuntimeMessages(historySession, []runtimetypes.Message{
+		*runtimetypes.NewAssistantMessage(content),
+	})
+	if count := printVisibleChatHistory(historySession, ""); count != 1 {
+		t.Fatalf("expected one replayed assistant message, got %d", count)
+	}
+
+	liveSession := &ChatSession{}
+	liveSession.Interaction = newChatInteractionCoordinator(liveSession)
+	var liveOutput bytes.Buffer
+	liveSession.Interaction.SetWriter(&liveOutput)
+	newAICLITranscriptRenderer(liveSession).RenderAssistant(content)
+
+	if historyOutput.String() != liveOutput.String() {
+		t.Fatalf("expected replay to preserve complete message whitespace\nhistory:\n%q\nlive:\n%q", historyOutput.String(), liveOutput.String())
+	}
+}
+
+func TestPrintVisibleChatHistory_HandlesNestedMetadataAndUnknownRoles(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	tool := runtimetypes.NewToolMessage("orphan-call", "result 1")
+	tool.Metadata["tool_metadata"] = runtimetypes.Metadata{
+		"tool_name":   "remote_search",
+		"tool_source": "mcp",
+		"workdir":     `E:\repo`,
+		"duration_ms": 1250,
+	}
+	session := &ChatSession{}
+	session.Interaction = newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	session.Interaction.SetWriter(&output)
+	replaceRuntimeMessages(session, []runtimetypes.Message{
+		*tool,
+		{Role: "critic", Content: "需要补充证据。"},
+	})
+
+	if count := printVisibleChatHistory(session, ""); count != 2 {
+		t.Fatalf("expected orphan tool result and unknown role to remain visible, got %d", count)
+	}
+	rendered := output.String()
+	for _, expected := range []string{
+		"• Completed [mcp] remote_search",
+		"in 1.25s",
+		`workdir: E:\repo`,
+		"result 1",
+		"[critic] 需要补充证据。",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("expected replay output to contain %q, got:\n%s", expected, rendered)
+		}
+	}
+}
+
+func TestPrintVisibleChatHistory_RendersReasoningAndToolFailures(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() {
+		color.NoColor = oldNoColor
+	}()
+	ui.SetTheme(ui.ThemeAuto)
+
+	assistant := runtimetypes.Message{
+		Role:      "assistant",
+		ToolCalls: []runtimetypes.ToolCall{{ID: "call-err", Name: "execute_shell_command", Args: map[string]interface{}{"command": "exit 1"}}},
+		Metadata:  runtimetypes.NewMetadata(),
+	}
+	runtimetypes.SetReasoningBlock(assistant.Metadata, &runtimetypes.ReasoningBlock{
+		Summary:    "需要验证失败原因。",
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+	tool := runtimetypes.NewToolMessage("call-err", "Tool execution failed: exit status 1\nstderr details")
+	tool.Metadata["tool_metadata"] = runtimetypes.Metadata{
+		"tool_error": "exit status 1",
+	}
+
+	session := &ChatSession{}
+	session.Interaction = newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	session.Interaction.SetWriter(&output)
+	replaceRuntimeMessages(session, []runtimetypes.Message{assistant, *tool})
+
+	if count := printVisibleChatHistory(session, ""); count != 2 {
+		t.Fatalf("expected reasoning/tool messages to remain visible, got %d", count)
+	}
+	rendered := output.String()
+	for _, expected := range []string{
+		chatToolDivider("reasoning"),
+		"需要验证失败原因。",
+		"• Running exit 1",
+		"• Failed exit 1",
+		"stderr details",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("expected replay output to contain %q, got:\n%s", expected, rendered)
+		}
+	}
+	if strings.Count(rendered, "Tool execution failed:") != 0 {
+		t.Fatalf("expected the model-history error prefix to be adapted rather than duplicated, got:\n%s", rendered)
 	}
 }
 

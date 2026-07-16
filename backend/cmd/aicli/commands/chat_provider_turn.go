@@ -70,7 +70,11 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		} else if exposureReport != nil {
 			e.exposureLogged = true
 		}
-		session.Logger.LogRequest(logScope, buildRequestLogContent(session.BaseURL, requestBody, exposureReport))
+		logContent := buildRequestLogContent(session.BaseURL, requestBody, exposureReport)
+		if len(bodyBytes) > chatLogContentMaxBytes {
+			logContent["body"] = summarizeRequestLogBody(requestBody, len(bodyBytes))
+		}
+		session.Logger.LogRequest(logScope, logContent)
 	}
 
 	httpReq, err := http.NewRequest(http.MethodPost, session.BaseURL, bytes.NewReader(bodyBytes))
@@ -196,9 +200,9 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	}
 
 	var respReader io.Reader
-	var streamCapture bytes.Buffer
+	streamCapture := newTailCaptureBuffer(chatStreamCaptureMaxBytes)
 	if needStreamBody {
-		respReader = normalizeChatSessionStreamReader(session, io.TeeReader(resp.Body, &streamCapture))
+		respReader = normalizeChatSessionStreamReader(session, io.TeeReader(resp.Body, streamCapture))
 	} else {
 		respReader = bytes.NewReader(responseBody)
 	}

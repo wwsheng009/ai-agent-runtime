@@ -4621,6 +4621,12 @@ func TestChatRuntimeEventBridge_LogsActorRunToChatLogger(t *testing.T) {
 	if summary.Calls[0].ShellType != "pwsh" || summary.Calls[0].ShellPath != `C:\Program Files\PowerShell\7\pwsh.exe` {
 		t.Fatalf("expected shell metadata in summary, got %+v", summary.Calls[0])
 	}
+	if summary.Calls[0].RawOutputArtifactPath != `C:\logs\local-shell\toolkit\git_123.txt` {
+		t.Fatalf("expected shell artifact path in summary, got %+v", summary.Calls[0])
+	}
+	if got := currentLastLocalShellArtifactPath(session); got != resolveAbsoluteChatPath(`C:\logs\local-shell\toolkit\git_123.txt`) {
+		t.Fatalf("expected session to record latest shell artifact, got %q", got)
+	}
 
 	currentSummary := logger.CurrentSummary()
 	if currentSummary == nil {
@@ -4810,6 +4816,7 @@ func emitActorLoggingTestRun(bridge *chatRuntimeEventBridge, sessionID, traceID 
 				"retained_output_bytes":         4096,
 				"omitted_output_bytes":          2048,
 				"output_capture_limit_disabled": false,
+				"raw_output_artifact_path":      `C:\logs\local-shell\toolkit\git_123.txt`,
 			},
 		},
 		{

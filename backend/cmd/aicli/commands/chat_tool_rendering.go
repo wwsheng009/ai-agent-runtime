@@ -65,6 +65,10 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 		payload["workdir"] = workdir
 	} else if cwd := strings.TrimSpace(payloadStringValue(event.Arguments["cwd"])); cwd != "" {
 		payload["cwd"] = cwd
+	} else if workdir := strings.TrimSpace(payloadStringValue(event.Metadata["workdir"])); workdir != "" {
+		payload["workdir"] = workdir
+	} else if cwd := strings.TrimSpace(payloadStringValue(event.Metadata["cwd"])); cwd != "" {
+		payload["cwd"] = cwd
 	}
 	if lines := summarizeSharedChatToolResultLines(event); len(lines) > 0 {
 		payload["summary_lines"] = lines
@@ -85,6 +89,9 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 		if value := payloadStringValue(event.Metadata[key]); value != "" {
 			payload[key] = value
 		}
+	}
+	if durationMs := intPayloadValue(event.Metadata, "duration_ms"); durationMs > 0 {
+		payload["duration_ms"] = durationMs
 	}
 	if event.Stage == "batch_end" {
 		payload["awaiting_model"] = true

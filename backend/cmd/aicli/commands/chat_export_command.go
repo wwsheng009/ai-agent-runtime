@@ -1,11 +1,14 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -220,7 +223,12 @@ func exportInteractiveSelect(session *ChatSession, opts chatExportOptions) bool 
 		fmt.Println("已取消导出")
 		return false
 	case exportChoicePick:
-		picked, err := readResumeSessionPick(session, candidates)
+		picked, err := readHistoricalSessionPick(
+			session,
+			candidates,
+			"选择要导出的历史会话（最近更新优先）:",
+			"选择会话 (回车选择 1，q 取消): ",
+		)
 		if err != nil {
 			fmt.Printf("错误: %v\n", err)
 			return false
@@ -383,24 +391,37 @@ func exportChatSession(session *ChatSession, opts chatExportOptions) (*chatExpor
 	if err != nil {
 		return nil, err
 	}
-	stats := chatSessionExportStatsFor(runtimeSession)
-	var data []byte
-	switch opts.Format {
-	case chatExportFormatBody:
-		data = []byte(renderChatSessionBodyMarkdown(runtimeSession))
-	default:
-		opts.Format = chatExportFormatFull
-		envelope := buildChatSessionExportEnvelope(session, runtimeSession, source, stats)
-		data, err = json.MarshalIndent(envelope, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("序列化会话导出失败: %w", err)
-		}
-	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return nil, fmt.Errorf("创建导出目录失败: %w", err)
 	}
-	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
-		return nil, fmt.Errorf("写入导出文件失败: %w", err)
+	temporaryFile, err := os.CreateTemp(filepath.Dir(outputPath), filepath.Base(outputPath)+".*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("创建导出临时文件失败: %w", err)
+	}
+	temporaryPath := temporaryFile.Name()
+	if err := temporaryFile.Chmod(0o644); err != nil {
+		_ = temporaryFile.Close()
+		_ = os.Remove(temporaryPath)
+		return nil, fmt.Errorf("设置导出临时文件权限失败: %w", err)
+	}
+	if err := temporaryFile.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return nil, fmt.Errorf("关闭导出临时文件失败: %w", err)
+	}
+	defer os.Remove(temporaryPath)
+	var stats chatSessionExportStats
+	switch opts.Format {
+	case chatExportFormatBody:
+		stats, err = writeChatSessionBodyExport(temporaryPath, session, runtimeSession)
+	default:
+		opts.Format = chatExportFormatFull
+		stats, err = writeChatSessionFullExport(temporaryPath, session, runtimeSession, source)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := publishChatExportFile(temporaryPath, outputPath); err != nil {
+		return nil, err
 	}
 	return &chatExportResult{
 		Path:      resolveAbsoluteChatPath(outputPath),
@@ -408,6 +429,304 @@ func exportChatSession(session *ChatSession, opts chatExportOptions) (*chatExpor
 		SessionID: strings.TrimSpace(runtimeSession.ID),
 		Stats:     stats,
 	}, nil
+}
+
+func publishChatExportFile(temporaryPath, outputPath string) error {
+	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
+		if err := os.Rename(temporaryPath, outputPath); err != nil {
+			return fmt.Errorf("发布输出文件失败: %w", err)
+		}
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("检查现有输出文件失败: %w", err)
+	}
+	backupPath := temporaryPath + ".previous"
+	if err := os.Rename(outputPath, backupPath); err != nil {
+		return fmt.Errorf("准备替换输出文件失败: %w", err)
+	}
+	if err := os.Rename(temporaryPath, outputPath); err != nil {
+		restoreErr := os.Rename(backupPath, outputPath)
+		if restoreErr != nil {
+			return fmt.Errorf("发布输出文件失败: %w；恢复原文件失败: %v；原文件保留在 %s", err, restoreErr, backupPath)
+		}
+		return fmt.Errorf("发布输出文件失败: %w（原文件已恢复）", err)
+	}
+	_ = os.Remove(backupPath)
+	return nil
+}
+
+func streamChatExportMessages(session *ChatSession, runtimeSession *runtimechat.Session, visit func(int, runtimetypes.Message) error) error {
+	if session != nil && session.SessionManager != nil && runtimeSession != nil && strings.TrimSpace(runtimeSession.ID) != "" {
+		return session.SessionManager.StreamHistory(context.Background(), runtimeSession.ID, visit)
+	}
+	if runtimeSession == nil {
+		return nil
+	}
+	for index, message := range runtimeSession.GetMessages() {
+		if err := visit(index+1, message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func streamChatExportMessageJSON(session *ChatSession, runtimeSession *runtimechat.Session, visit func(int, runtimechat.CanonicalMessageInfo, io.Reader) error) error {
+	if session != nil && session.SessionManager != nil && runtimeSession != nil && strings.TrimSpace(runtimeSession.ID) != "" {
+		if streamer, ok := session.SessionManager.GetStorage().(runtimechat.SessionStorageCanonicalJSONStreamer); ok {
+			return streamer.StreamMessageJSON(context.Background(), runtimeSession.ID, visit)
+		}
+	}
+	return streamChatExportMessages(session, runtimeSession, func(sequence int, message runtimetypes.Message) error {
+		payload, err := json.Marshal(message)
+		if err != nil {
+			return err
+		}
+		return visit(sequence, canonicalMessageInfo(message), bytes.NewReader(payload))
+	})
+}
+
+func canonicalMessageInfo(message runtimetypes.Message) runtimechat.CanonicalMessageInfo {
+	return runtimechat.CanonicalMessageInfo{
+		Role:             message.Role,
+		RoleKnown:        true,
+		ToolCallCount:    len(message.ToolCalls),
+		ToolResult:       strings.EqualFold(strings.TrimSpace(message.Role), "tool"),
+		ContentPartCount: len(message.ContentParts),
+		StatsKnown:       true,
+	}
+}
+
+func updateChatExportStats(stats *chatSessionExportStats, message runtimetypes.Message) {
+	stats.MessageCount++
+	stats.ToolCallCount += len(message.ToolCalls)
+	stats.ContentPartCount += len(message.ContentParts)
+	if strings.EqualFold(strings.TrimSpace(message.Role), "tool") {
+		stats.ToolResultCount++
+	}
+}
+
+func updateChatExportStatsFromInfo(stats *chatSessionExportStats, info runtimechat.CanonicalMessageInfo) {
+	stats.MessageCount++
+	stats.ToolCallCount += info.ToolCallCount
+	stats.ContentPartCount += info.ContentPartCount
+	if info.ToolResult {
+		stats.ToolResultCount++
+	}
+}
+
+func writeChatSessionFullExport(path string, session *ChatSession, runtimeSession *runtimechat.Session, source string) (chatSessionExportStats, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return chatSessionExportStats{}, fmt.Errorf("创建会话导出文件失败: %w", err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+	}()
+	prefix := struct {
+		Version      int                         `json:"version"`
+		ExportedAt   time.Time                   `json:"exported_at"`
+		Format       string                      `json:"format"`
+		Source       string                      `json:"source,omitempty"`
+		SessionPath  string                      `json:"session_path,omitempty"`
+		SessionStore string                      `json:"session_store,omitempty"`
+		Preview      *runtimechat.SessionPreview `json:"preview,omitempty"`
+	}{Version: 1, ExportedAt: time.Now(), Format: string(chatExportFormatFull), Source: source, Preview: runtimeSession.BuildPreview()}
+	if session != nil {
+		prefix.SessionStore = currentRuntimeSessionStoreSummary(session)
+		if strings.EqualFold(strings.TrimSpace(runtimeSession.ID), currentRuntimeSessionID(session)) {
+			prefix.SessionPath = currentRuntimeSessionPath(session)
+		}
+	}
+	prefixJSON, err := json.Marshal(prefix)
+	if err != nil {
+		return chatSessionExportStats{}, fmt.Errorf("序列化会话导出元数据失败: %w", err)
+	}
+	if len(prefixJSON) == 0 || prefixJSON[len(prefixJSON)-1] != '}' {
+		return chatSessionExportStats{}, fmt.Errorf("无效的会话导出元数据")
+	}
+	if _, err := file.Write(prefixJSON[:len(prefixJSON)-1]); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	if _, err := io.WriteString(file, `,"session":`); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	stats, err := writeStreamedRuntimeSessionJSON(file, session, runtimeSession)
+	if err != nil {
+		return chatSessionExportStats{}, err
+	}
+	statsJSON, err := json.Marshal(stats)
+	if err != nil {
+		return chatSessionExportStats{}, err
+	}
+	if _, err := io.WriteString(file, `,"stats":`); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	if _, err := file.Write(statsJSON); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	if _, err := io.WriteString(file, "}\n"); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	if err := file.Close(); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	closed = true
+	return stats, nil
+}
+
+func writeStreamedRuntimeSessionJSON(writer io.Writer, session *ChatSession, runtimeSession *runtimechat.Session) (chatSessionExportStats, error) {
+	metadataOnly := runtimeSession.Clone()
+	metadataOnly.History = nil
+	payload, err := json.Marshal(metadataOnly)
+	if err != nil {
+		return chatSessionExportStats{}, fmt.Errorf("序列化会话 metadata 失败: %w", err)
+	}
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	delete(fields, "history")
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if _, err := io.WriteString(writer, "{"); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	wroteField := false
+	for _, key := range keys {
+		keyJSON, _ := json.Marshal(key)
+		if wroteField {
+			_, err = io.WriteString(writer, ",")
+		}
+		if err == nil {
+			_, err = writer.Write(keyJSON)
+		}
+		if err == nil {
+			_, err = io.WriteString(writer, ":")
+		}
+		if err == nil {
+			_, err = writer.Write(fields[key])
+		}
+		if err != nil {
+			return chatSessionExportStats{}, err
+		}
+		wroteField = true
+	}
+	if wroteField {
+		if _, err := io.WriteString(writer, ","); err != nil {
+			return chatSessionExportStats{}, err
+		}
+	}
+	if _, err := io.WriteString(writer, `"history":[`); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	stats := chatSessionExportStats{}
+	firstMessage := true
+	err = streamChatExportMessageJSON(session, runtimeSession, func(_ int, info runtimechat.CanonicalMessageInfo, payload io.Reader) error {
+		if !firstMessage {
+			if _, err := io.WriteString(writer, ","); err != nil {
+				return err
+			}
+		}
+		if info.StatsKnown {
+			if _, err := io.Copy(writer, payload); err != nil {
+				return err
+			}
+			updateChatExportStatsFromInfo(&stats, info)
+		} else {
+			var message runtimetypes.Message
+			if err := json.NewDecoder(payload).Decode(&message); err != nil {
+				return err
+			}
+			if err := json.NewEncoder(writer).Encode(message); err != nil {
+				return err
+			}
+			updateChatExportStats(&stats, message)
+		}
+		firstMessage = false
+		return nil
+	})
+	if err != nil {
+		return chatSessionExportStats{}, fmt.Errorf("流式读取 canonical 会话历史失败: %w", err)
+	}
+	if _, err := io.WriteString(writer, "]}"); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	return stats, nil
+}
+
+func writeChatSessionBodyExport(path string, session *ChatSession, runtimeSession *runtimechat.Session) (chatSessionExportStats, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return chatSessionExportStats{}, fmt.Errorf("创建会话正文导出文件失败: %w", err)
+	}
+	defer file.Close()
+	title := "(untitled)"
+	if preview := runtimeSession.BuildPreview(); preview != nil && strings.TrimSpace(preview.Title) != "" {
+		title = strings.TrimSpace(preview.Title)
+	}
+	fmt.Fprintf(file, "# %s\n\n- Session: %s\n- State: %s\n- Created: %s\n- Updated: %s\n\n## Conversation\n",
+		markdownPlainLine(title), strings.TrimSpace(runtimeSession.ID), runtimeSession.State,
+		formatChatExportTime(runtimeSession.CreatedAt), formatChatExportTime(runtimeSession.UpdatedAt))
+	stats := chatSessionExportStats{}
+	wrote := false
+	err = streamChatExportMessageJSON(session, runtimeSession, func(_ int, info runtimechat.CanonicalMessageInfo, payload io.Reader) error {
+		role := strings.ToLower(strings.TrimSpace(info.Role))
+		if info.RoleKnown && role != "user" && role != "assistant" {
+			if info.StatsKnown {
+				updateChatExportStatsFromInfo(&stats, info)
+			} else {
+				stats.MessageCount++
+				if role == "tool" {
+					stats.ToolResultCount++
+				}
+			}
+			return nil
+		}
+		if info.StatsKnown {
+			updateChatExportStatsFromInfo(&stats, info)
+		}
+		var message runtimetypes.Message
+		if err := json.NewDecoder(payload).Decode(&message); err != nil {
+			return err
+		}
+		if !info.StatsKnown {
+			updateChatExportStats(&stats, message)
+			role = strings.ToLower(strings.TrimSpace(message.Role))
+		}
+		if role != "user" && role != "assistant" {
+			return nil
+		}
+		content := strings.TrimSpace(chatExportMessageBodyText(message))
+		if content == "" {
+			return nil
+		}
+		label := "User"
+		if role == "assistant" {
+			label = "Assistant"
+		}
+		_, err := fmt.Fprintf(file, "\n### %s\n\n%s\n", label, content)
+		wrote = true
+		return err
+	})
+	if err != nil {
+		return chatSessionExportStats{}, fmt.Errorf("流式读取 canonical 会话历史失败: %w", err)
+	}
+	if !wrote {
+		_, err = io.WriteString(file, "\n<empty>\n")
+	}
+	if err != nil {
+		return chatSessionExportStats{}, err
+	}
+	if err := file.Close(); err != nil {
+		return chatSessionExportStats{}, err
+	}
+	return stats, nil
 }
 
 func resolveChatExportRuntimeSession(session *ChatSession, opts chatExportOptions) (*runtimechat.Session, string, error) {

@@ -134,13 +134,22 @@ type CatalogConfig struct {
 
 // SessionsConfig configures session history persistence.
 type SessionsConfig struct {
-	Dir             string        `yaml:"dir" json:"dir"`
-	DefaultUserID   string        `yaml:"defaultUserId" json:"defaultUserId"`
-	MaxHistory      int           `yaml:"maxHistory" json:"maxHistory"`
-	TTL             time.Duration `yaml:"ttl" json:"ttl"`
-	CleanupInterval time.Duration `yaml:"cleanupInterval" json:"cleanupInterval"`
-	IdleTimeout     time.Duration `yaml:"idleTimeout" json:"idleTimeout"`
-	AutoArchive     bool          `yaml:"autoArchive" json:"autoArchive"`
+	Dir                   string        `yaml:"dir" json:"dir"`
+	Backend               string        `yaml:"backend" json:"backend"`
+	StorePath             string        `yaml:"storePath" json:"storePath"`
+	DefaultUserID         string        `yaml:"defaultUserId" json:"defaultUserId"`
+	MaxHistory            int           `yaml:"maxHistory" json:"maxHistory"`
+	HotHistoryBytes       int           `yaml:"hotHistoryBytes" json:"hotHistoryBytes"`
+	MaxHotMessageBytes    int           `yaml:"maxHotMessageBytes" json:"maxHotMessageBytes"`
+	HistoryPageMessages   int           `yaml:"historyPageMessages" json:"historyPageMessages"`
+	HistoryPageBytes      int           `yaml:"historyPageBytes" json:"historyPageBytes"`
+	MaxInlineMessageBytes int           `yaml:"maxInlineMessageBytes" json:"maxInlineMessageBytes"`
+	SQLiteCacheKiB        int           `yaml:"sqliteCacheKiB" json:"sqliteCacheKiB"`
+	BusyTimeout           time.Duration `yaml:"busyTimeout" json:"busyTimeout"`
+	TTL                   time.Duration `yaml:"ttl" json:"ttl"`
+	CleanupInterval       time.Duration `yaml:"cleanupInterval" json:"cleanupInterval"`
+	IdleTimeout           time.Duration `yaml:"idleTimeout" json:"idleTimeout"`
+	AutoArchive           bool          `yaml:"autoArchive" json:"autoArchive"`
 }
 
 // TraceConfig configures runtime trace exports.
@@ -318,7 +327,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		Catalog: CatalogConfig{
 			Backend: "memory",
 		},
-		Sessions: SessionsConfig{},
+		Sessions: SessionsConfig{Backend: "sqlite"},
 		Trace: TraceConfig{
 			TeamIDLimit: 0,
 		},
@@ -695,6 +704,13 @@ func ValidateCatalogConfig(config *CatalogConfig) error {
 func ValidateSessionsConfig(config *SessionsConfig) error {
 	if config == nil {
 		return nil
+	}
+	backend := strings.ToLower(strings.TrimSpace(config.Backend))
+	if backend != "" && backend != "file" && backend != "sqlite" {
+		return errors.New(errors.ErrValidationFailed, "sessions backend must be file or sqlite")
+	}
+	if config.HotHistoryBytes < 0 || config.MaxHotMessageBytes < 0 || config.HistoryPageMessages < 0 || config.HistoryPageBytes < 0 || config.MaxInlineMessageBytes < 0 || config.SQLiteCacheKiB < 0 {
+		return errors.New(errors.ErrValidationFailed, "session storage memory and inline byte limits cannot be negative")
 	}
 	return nil
 }

@@ -2556,7 +2556,7 @@ func (h *Handler) getSessionHub() *chat.SessionHub {
 	h.sessionRuntimeMu.Lock()
 	defer h.sessionRuntimeMu.Unlock()
 	if h.sessionHub == nil {
-		h.sessionHub = chat.NewSessionHub(func(sessionID string) (*chat.SessionActor, error) {
+		h.sessionHub = chat.NewBoundedSessionHub(func(sessionID string) (*chat.SessionActor, error) {
 			return h.buildSessionActor(sessionID)
 		})
 	}

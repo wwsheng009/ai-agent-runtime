@@ -312,6 +312,44 @@ func TestLoadRequestedRuntimeSessionReturnsLatestMeaningfulSessionForResume(t *t
 	}
 }
 
+func TestLoadLatestResumableRuntimeSessionUsesBoundedSQLitePreviews(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("create sqlite session manager: %v", err)
+	}
+	defer manager.Stop()
+	ctx := context.Background()
+	meaningful, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("create meaningful session: %v", err)
+	}
+	if err := manager.AddMessage(ctx, meaningful.ID,
+		*runtimetypes.NewUserMessage("resume this session")); err != nil {
+		t.Fatalf("append meaningful message: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	placeholder, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("create placeholder session: %v", err)
+	}
+	if err := manager.AddMessage(ctx, placeholder.ID, runtimetypes.Message{
+		Role: "system", Content: "system placeholder", Metadata: runtimetypes.NewMetadata(),
+	}); err != nil {
+		t.Fatalf("append placeholder message: %v", err)
+	}
+
+	loaded, err := loadLatestResumableRuntimeSession(ctx, manager, userID)
+	if err != nil {
+		t.Fatalf("load latest resumable sqlite session: %v", err)
+	}
+	if loaded.ID != meaningful.ID {
+		t.Fatalf("expected meaningful session %s, got %s", meaningful.ID, loaded.ID)
+	}
+	if len(loaded.History) > 128 {
+		t.Fatalf("expected bounded prompt projection, got %d messages", len(loaded.History))
+	}
+}
+
 func TestResumeLatestRuntimeConversationSkipsSystemOnlySession(t *testing.T) {
 	storage, err := runtimechat.NewFileStorage(t.TempDir())
 	if err != nil {
@@ -587,6 +625,49 @@ func TestListResumeCandidateChatSessionsSkipsCurrentAndSystemOnly(t *testing.T) 
 	}
 	if len(candidates) != 1 || candidates[0].ID != previous.ID {
 		t.Fatalf("expected only previous session %s, got %#v", previous.ID, candidates)
+	}
+}
+
+func TestListResumeCandidateChatSessionsLoadsSQLiteMetadataCandidatesOnDemand(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("create sqlite session manager: %v", err)
+	}
+	defer manager.Stop()
+	ctx := context.Background()
+	previous, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("create previous sqlite session: %v", err)
+	}
+	if err := manager.AddMessage(ctx, previous.ID, *runtimetypes.NewUserMessage("previous")); err != nil {
+		t.Fatalf("append previous sqlite message: %v", err)
+	}
+	placeholder, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("create sqlite placeholder: %v", err)
+	}
+	if err := manager.AddMessage(ctx, placeholder.ID, runtimetypes.Message{
+		Role: "system", Content: "placeholder", Metadata: runtimetypes.NewMetadata(),
+	}); err != nil {
+		t.Fatalf("append sqlite placeholder: %v", err)
+	}
+	current, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("create current sqlite session: %v", err)
+	}
+	if err := manager.AddMessage(ctx, current.ID, *runtimetypes.NewUserMessage("current")); err != nil {
+		t.Fatalf("append current sqlite message: %v", err)
+	}
+
+	candidates, err := listResumeCandidateChatSessions(manager, userID, ChatSessionListFilter{Limit: 20}, current.ID)
+	if err != nil {
+		t.Fatalf("list sqlite resume candidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != previous.ID {
+		t.Fatalf("expected only previous sqlite session %s, got %#v", previous.ID, candidates)
+	}
+	if !candidates[0].HistoryLoaded || !runtimeSessionHasConversation(candidates[0]) {
+		t.Fatalf("expected selected sqlite candidate to have a bounded loaded projection: %#v", candidates[0])
 	}
 }
 

@@ -778,11 +778,7 @@ func renderChatResponse(session *ChatSession, response string) {
 		fmt.Println(response)
 		return
 	}
-	if session.Interaction != nil {
-		session.Interaction.RenderAssistant(response)
-		return
-	}
-	ui.DisplayAssistantMessage(session.Formatter.Format(response))
+	newAICLITranscriptRenderer(session).RenderAssistant(response)
 }
 
 // runChatLoop 运行聊天循环

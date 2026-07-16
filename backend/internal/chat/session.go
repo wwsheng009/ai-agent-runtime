@@ -42,15 +42,20 @@ type SessionMetadata struct {
 
 // Session 用户会话
 type Session struct {
-	ID         string          `json:"id" yaml:"id"`
-	UserID     string          `json:"userId" yaml:"userId"`
-	State      SessionState    `json:"state" yaml:"state"`
-	History    []types.Message `json:"history" yaml:"history"`
-	HeadOffset int             `json:"headOffset,omitempty" yaml:"headOffset,omitempty"`
-	Metadata   SessionMetadata `json:"metadata" yaml:"metadata"`
-	CreatedAt  time.Time       `json:"createdAt" yaml:"createdAt"`
-	UpdatedAt  time.Time       `json:"updatedAt" yaml:"updatedAt"`
-	ExpiresAt  *time.Time      `json:"expiresAt,omitempty" yaml:"expiresAt,omitempty"`
+	ID                    string          `json:"id" yaml:"id"`
+	UserID                string          `json:"userId" yaml:"userId"`
+	State                 SessionState    `json:"state" yaml:"state"`
+	History               []types.Message `json:"history" yaml:"history"`
+	HeadOffset            int             `json:"headOffset,omitempty" yaml:"headOffset,omitempty"`
+	CanonicalMessageCount int             `json:"canonicalMessageCount,omitempty" yaml:"canonicalMessageCount,omitempty"`
+	Metadata              SessionMetadata `json:"metadata" yaml:"metadata"`
+	CreatedAt             time.Time       `json:"createdAt" yaml:"createdAt"`
+	UpdatedAt             time.Time       `json:"updatedAt" yaml:"updatedAt"`
+	ExpiresAt             *time.Time      `json:"expiresAt,omitempty" yaml:"expiresAt,omitempty"`
+
+	// HistoryLoaded distinguishes a metadata-only listing result from an
+	// intentionally empty prompt projection. It is never serialized.
+	HistoryLoaded bool `json:"-" yaml:"-"`
 }
 
 // SessionPreview 会话预览信息
@@ -71,11 +76,12 @@ func NewSession(userID string) *Session {
 	now := time.Now()
 
 	return &Session{
-		ID:         generateSessionID(),
-		UserID:     userID,
-		State:      StateActive,
-		History:    make([]types.Message, 0),
-		HeadOffset: 0,
+		ID:            generateSessionID(),
+		UserID:        userID,
+		State:         StateActive,
+		History:       make([]types.Message, 0),
+		HeadOffset:    0,
+		HistoryLoaded: true,
 		Metadata: SessionMetadata{
 			Tags:       []string{},
 			TotalTurns: 0,
@@ -89,7 +95,12 @@ func NewSession(userID string) *Session {
 // AddMessage 添加消息到会话
 func (s *Session) AddMessage(msg types.Message) {
 	prevLen := len(s.History)
+	if s.CanonicalMessageCount < prevLen {
+		s.CanonicalMessageCount = prevLen
+	}
 	s.History = append(s.History, msg)
+	s.HistoryLoaded = true
+	s.CanonicalMessageCount++
 	if s.HeadOffset > 0 {
 		if s.HeadOffset < prevLen {
 			s.HeadOffset++
@@ -126,6 +137,8 @@ func (s *Session) GetMessages() []types.Message {
 func (s *Session) ClearHistory() {
 	s.History = make([]types.Message, 0)
 	s.HeadOffset = 0
+	s.CanonicalMessageCount = 0
+	s.HistoryLoaded = true
 	s.UpdatedAt = time.Now()
 	s.Metadata.TotalTurns = 0
 	s.Metadata.Summary = ""
@@ -144,6 +157,10 @@ func (s *Session) ReplaceHistory(messages []types.Message) {
 	}
 
 	s.History = cloned
+	s.HistoryLoaded = true
+	if len(cloned) > s.CanonicalMessageCount {
+		s.CanonicalMessageCount = len(cloned)
+	}
 	if s.HeadOffset > 0 {
 		if s.HeadOffset > len(s.History) {
 			s.HeadOffset = len(s.History)
@@ -269,6 +286,12 @@ func (s *Session) SessionID() string {
 
 // MessageCount 返回消息数量
 func (s *Session) MessageCount() int {
+	if s == nil {
+		return 0
+	}
+	if s.CanonicalMessageCount > len(s.visibleHistory()) {
+		return s.CanonicalMessageCount
+	}
 	return len(s.visibleHistory())
 }
 
@@ -291,7 +314,7 @@ func (s *Session) BuildPreview() *SessionPreview {
 		State:        s.State,
 		Title:        title,
 		Summary:      summary,
-		MessageCount: len(s.History),
+		MessageCount: s.MessageCount(),
 		CreatedAt:    s.CreatedAt,
 		UpdatedAt:    s.UpdatedAt,
 	}
@@ -314,15 +337,17 @@ func (s *Session) Clone() *Session {
 	}
 
 	clone := &Session{
-		ID:         s.ID,
-		UserID:     s.UserID,
-		State:      s.State,
-		History:    make([]types.Message, len(s.History)),
-		HeadOffset: s.HeadOffset,
-		Metadata:   s.Metadata,
-		CreatedAt:  s.CreatedAt,
-		UpdatedAt:  s.UpdatedAt,
-		ExpiresAt:  expiresAt,
+		ID:                    s.ID,
+		UserID:                s.UserID,
+		State:                 s.State,
+		History:               make([]types.Message, len(s.History)),
+		HeadOffset:            s.HeadOffset,
+		CanonicalMessageCount: s.CanonicalMessageCount,
+		Metadata:              s.Metadata,
+		CreatedAt:             s.CreatedAt,
+		UpdatedAt:             s.UpdatedAt,
+		ExpiresAt:             expiresAt,
+		HistoryLoaded:         s.HistoryLoaded,
 	}
 
 	// 克隆历史
@@ -356,7 +381,11 @@ func (s *Session) updateMetadata(msg types.Message) {
 }
 
 func (s *Session) refreshDerivedMetadata() {
-	s.Metadata.TotalTurns = len(s.visibleHistory())
+	messageCount := len(s.visibleHistory())
+	if s.CanonicalMessageCount > messageCount {
+		messageCount = s.CanonicalMessageCount
+	}
+	s.Metadata.TotalTurns = messageCount
 	s.refreshDerivedTitle()
 	s.Metadata.Summary = summarizeSessionText(s.lastContent(), sessionSummaryLimit)
 }

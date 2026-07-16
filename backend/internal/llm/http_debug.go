@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // HTTPDebugEvent captures a low-level HTTP request/response snapshot emitted by runtime LLM providers.
@@ -46,6 +47,10 @@ type httpDebugRetryAttemptState struct {
 
 const httpDebugRequestDiagnosticsKey = "_request_debug"
 
+const maxHTTPDebugRawBodyBytes = 256 * 1024
+
+var httpDebugOmissionMarker = []byte("\n...[http debug body omitted middle bytes]...\n")
+
 // WithHTTPDebugReporter attaches a runtime HTTP debug reporter to the context.
 func WithHTTPDebugReporter(ctx context.Context, reporter HTTPDebugReporter) context.Context {
 	if reporter == nil {
@@ -76,6 +81,26 @@ func reportHTTPDebug(ctx context.Context, event HTTPDebugEvent) {
 	reporter(event)
 }
 
+// boundHTTPDebugRawBody prevents diagnostics from duplicating an arbitrarily
+// large request or response. It retains both ends because provider errors and
+// streaming terminators commonly appear at the tail.
+func boundHTTPDebugRawBody(body []byte) []byte {
+	if len(body) <= maxHTTPDebugRawBodyBytes {
+		return append([]byte(nil), body...)
+	}
+	available := maxHTTPDebugRawBodyBytes - len(httpDebugOmissionMarker)
+	if available <= 0 {
+		return append([]byte(nil), body[:maxHTTPDebugRawBodyBytes]...)
+	}
+	head := available / 2
+	tail := available - head
+	bounded := make([]byte, 0, maxHTTPDebugRawBodyBytes)
+	bounded = append(bounded, body[:head]...)
+	bounded = append(bounded, httpDebugOmissionMarker...)
+	bounded = append(bounded, body[len(body)-tail:]...)
+	return bounded
+}
+
 func withHTTPDebugRetryAttempt(ctx context.Context, attempt int, maxAttempts int) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -93,7 +118,25 @@ func truncateHTTPDebugText(text string, maxBytes int) string {
 	if text == "" || maxBytes <= 0 || len(text) <= maxBytes {
 		return text
 	}
-	return text[:maxBytes]
+	end := maxBytes
+	for end > 0 && !utf8.ValidString(text[:end]) {
+		end--
+	}
+	return text[:end]
+}
+
+func truncateHTTPDebugBytes(data []byte, maxBytes int) string {
+	if len(data) == 0 || maxBytes <= 0 {
+		return ""
+	}
+	if len(data) <= maxBytes {
+		return string(data)
+	}
+	end := maxBytes
+	for end > 0 && !utf8.Valid(data[:end]) {
+		end--
+	}
+	return string(data[:end])
 }
 
 func errorString(err error) string {
@@ -213,12 +256,11 @@ func canonicalHTTPDebugValueSHA256(value interface{}) string {
 	if value == nil {
 		return ""
 	}
-	payload, err := json.Marshal(value)
-	if err != nil || len(payload) == 0 {
+	hasher := sha256.New()
+	if err := json.NewEncoder(hasher).Encode(value); err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 func httpDebugSliceLen(value interface{}) int {

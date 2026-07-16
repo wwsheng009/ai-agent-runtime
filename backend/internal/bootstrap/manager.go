@@ -151,11 +151,35 @@ func NewManager(opts *Options) (*Manager, error) {
 func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, error) {
 	if config != nil {
 		if dir := strings.TrimSpace(config.Sessions.Dir); dir != "" {
-			storage, err := chat.NewFileStorage(dir)
+			storageConfig := chat.DefaultPersistentSessionStorageConfig(dir)
+			storageConfig.Backend = config.Sessions.Backend
+			storageConfig.Path = config.Sessions.StorePath
+			storageConfig.HotHistoryMessages = config.Sessions.MaxHistory
+			storageConfig.HotHistoryBytes = config.Sessions.HotHistoryBytes
+			storageConfig.MaxHotMessageBytes = config.Sessions.MaxHotMessageBytes
+			storageConfig.HistoryPageMessages = config.Sessions.HistoryPageMessages
+			storageConfig.HistoryPageBytes = config.Sessions.HistoryPageBytes
+			storageConfig.MaxInlineMessageBytes = config.Sessions.MaxInlineMessageBytes
+			storageConfig.SQLiteCacheKiB = config.Sessions.SQLiteCacheKiB
+			storageConfig.BusyTimeout = config.Sessions.BusyTimeout
+			storage, err := chat.OpenPersistentSessionStorage(storageConfig)
 			if err != nil {
-				return nil, fmt.Errorf("failed to initialize session file storage: %w", err)
+				return nil, fmt.Errorf("failed to initialize persistent session storage: %w", err)
 			}
-			return chat.NewSessionManager(storage, nil), nil
+			managerConfig := chat.DefaultSessionManagerConfig()
+			if config.Sessions.MaxHistory > 0 {
+				managerConfig.MaxHistory = config.Sessions.MaxHistory
+			}
+			if config.Sessions.TTL > 0 {
+				managerConfig.TTL = config.Sessions.TTL
+			}
+			if config.Sessions.CleanupInterval > 0 {
+				managerConfig.CleanupInterval = config.Sessions.CleanupInterval
+			}
+			if config.Sessions.IdleTimeout > 0 {
+				managerConfig.IdleTimeout = config.Sessions.IdleTimeout
+			}
+			return chat.NewSessionManager(storage, managerConfig), nil
 		}
 	}
 

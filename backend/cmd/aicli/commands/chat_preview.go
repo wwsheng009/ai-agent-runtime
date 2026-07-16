@@ -37,6 +37,19 @@ func truncateUTF8Bytes(text string, maxBytes int) string {
 	return text[:maxBytes]
 }
 
+func truncateUTF8ByteSlice(data []byte, maxBytes int) string {
+	if len(data) == 0 || maxBytes <= 0 {
+		return ""
+	}
+	if len(data) <= maxBytes {
+		return string(data)
+	}
+	for maxBytes > 0 && !utf8.Valid(data[:maxBytes]) {
+		maxBytes--
+	}
+	return string(data[:maxBytes])
+}
+
 func truncateOutputPreview(text string, maxLines, maxBytes int) string {
 	preview := truncateOutput(text, maxLines)
 	if preview == "" || maxBytes <= 0 || len(preview) <= maxBytes {

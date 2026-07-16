@@ -4,14 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
-
-type chatHistoryEntry struct {
-	Role    string
-	Content string
-}
 
 func truncateAICLIMessages(session *ChatSession, keep int) {
 	if session == nil {
@@ -113,122 +108,197 @@ func countChatStatusMessages(messages []runtimetypes.Message) int {
 }
 
 func printVisibleChatHistory(session *ChatSession, header string) int {
-	entries := collectVisibleChatHistory(session)
-	if len(entries) == 0 {
+	messages := collectVisibleChatHistory(session)
+	if len(messages) == 0 {
 		return 0
 	}
+	renderer := newAICLITranscriptRenderer(session)
 	if strings.TrimSpace(header) != "" {
-		fmt.Printf("%s (%d 条消息):\n", strings.TrimSpace(header), len(entries))
+		renderer.RenderSupplement(fmt.Sprintf("%s (%d 条消息):", strings.TrimSpace(header), len(messages)))
 	}
-	for _, entry := range entries {
-		printVisibleChatHistoryEntry(session, entry)
+	toolCalls := indexChatHistoryToolCalls(messages)
+	toolMetadata := indexChatHistoryToolMetadata(messages)
+	for index := range messages {
+		renderVisibleChatHistoryMessage(renderer, messages[index], toolCalls, toolMetadata)
 	}
-	return len(entries)
+	return len(messages)
 }
 
 func hasVisibleChatHistory(session *ChatSession) bool {
 	return len(collectVisibleChatHistory(session)) > 0
 }
 
-func collectVisibleChatHistory(session *ChatSession) []chatHistoryEntry {
+func collectVisibleChatHistory(session *ChatSession) []runtimetypes.Message {
 	if session == nil || len(session.Messages) == 0 {
 		return nil
 	}
 
 	hiddenSystemPrompt := strings.TrimSpace(composeChatSystemPromptWithGuidance(session))
 	rawSystemPrompt := strings.TrimSpace(session.SystemPromptText)
-	entries := make([]chatHistoryEntry, 0, len(session.Messages))
+	messages := make([]runtimetypes.Message, 0, len(session.Messages))
 	for _, message := range session.Messages {
-		entry, ok := buildChatHistoryEntry(message, hiddenSystemPrompt, rawSystemPrompt)
-		if !ok {
+		if !isVisibleChatHistoryMessage(session, message, hiddenSystemPrompt, rawSystemPrompt) {
 			continue
 		}
-		entries = append(entries, entry)
+		messages = append(messages, *message.Clone())
 	}
-	return entries
+	return messages
 }
 
-func buildChatHistoryEntry(message runtimetypes.Message, hiddenSystemPrompt string, rawSystemPrompt string) (chatHistoryEntry, bool) {
+func isVisibleChatHistoryMessage(session *ChatSession, message runtimetypes.Message, hiddenSystemPrompt string, rawSystemPrompt string) bool {
 	if strings.TrimSpace(message.Role) == "" {
-		return chatHistoryEntry{}, false
+		return false
 	}
 
 	role := strings.ToLower(strings.TrimSpace(message.Role))
 	content := strings.TrimSpace(message.Content)
-	toolSummary := chatHistoryToolSummary(message.ToolCalls)
-
 	switch role {
 	case "system":
 		if content == "" || (hiddenSystemPrompt != "" && content == hiddenSystemPrompt) || (rawSystemPrompt != "" && content == rawSystemPrompt) {
-			return chatHistoryEntry{}, false
+			return false
 		}
 	case "assistant":
-		switch {
-		case content != "" && toolSummary != "":
-			content += "\n调用工具: " + toolSummary
-		case content == "" && toolSummary != "":
-			content = "调用工具: " + toolSummary
-		case content == "":
-			return chatHistoryEntry{}, false
-		}
+		return content != "" || len(message.ToolCalls) > 0 || (chatReasoningOutputEnabled(session) && finalReasoningBlock(&message) != nil)
 	case "tool":
-		if content == "" {
-			return chatHistoryEntry{}, false
-		}
-		content = truncateOutputPreview(content, maxToolResultPreviewLines, maxToolResultPreviewBytes)
-		if toolCallID := strings.TrimSpace(message.ToolCallID); toolCallID != "" {
-			content = fmt.Sprintf("[%s] %s", toolCallID, content)
-		}
+		return content != "" || strings.TrimSpace(chatHistoryToolError(message)) != ""
 	default:
-		if content == "" {
-			return chatHistoryEntry{}, false
-		}
-		if role != "user" {
-			content = fmt.Sprintf("[%s] %s", role, content)
-			role = "system"
-		}
+		return content != ""
 	}
-
-	return chatHistoryEntry{
-		Role:    role,
-		Content: content,
-	}, true
+	return true
 }
 
-func printVisibleChatHistoryEntry(session *ChatSession, entry chatHistoryEntry) {
-	content := entry.Content
-	switch entry.Role {
+func renderVisibleChatHistoryMessage(renderer *aicliTranscriptRenderer, message runtimetypes.Message, toolCalls map[string]runtimetypes.ToolCall, toolMetadata map[string]map[string]interface{}) {
+	if renderer == nil {
+		return
+	}
+	role := strings.ToLower(strings.TrimSpace(message.Role))
+	content := message.Content
+	switch role {
 	case "assistant":
-		if session != nil && session.Formatter != nil {
-			content = session.Formatter.Format(content)
+		renderer.RenderReasoning(finalReasoningBlock(&message))
+		renderer.RenderAssistant(content)
+		for _, call := range message.ToolCalls {
+			metadata := toolMetadata[strings.TrimSpace(call.ID)]
+			renderer.RenderToolEvent(runtimechatcore.ChatEvent{
+				Type:       runtimechatcore.EventTool,
+				Stage:      "tool_requested",
+				ToolName:   call.Name,
+				ToolCallID: call.ID,
+				Arguments:  cloneFunctionSchema(call.Args),
+				Metadata:   cloneFunctionSchema(metadata),
+			})
 		}
-		ui.DisplayAssistantMessage(content)
 	case "tool":
-		ui.DisplayToolMessage(content)
+		call := toolCalls[strings.TrimSpace(message.ToolCallID)]
+		toolName := firstNonEmptyChatValue(
+			strings.TrimSpace(call.Name),
+			chatHistoryToolNameFromMetadata(message.Metadata),
+			strings.TrimSpace(message.ToolCallID),
+			"tool",
+		)
+		output, toolErr := splitChatHistoryToolResult(message)
+		renderer.RenderToolEvent(runtimechatcore.ChatEvent{
+			Type:       runtimechatcore.EventTool,
+			Stage:      "tool_result",
+			ToolName:   toolName,
+			ToolCallID: message.ToolCallID,
+			Arguments:  cloneFunctionSchema(call.Args),
+			Output:     output,
+			Error:      toolErr,
+			Success:    strings.TrimSpace(toolErr) == "",
+			Metadata:   chatHistoryToolMetadataMap(message.Metadata),
+		})
 	case "system":
-		ui.DisplaySystemMessage(content)
+		renderer.RenderSystem(content)
+	case "user":
+		renderer.RenderUser(content)
 	default:
-		ui.DisplayUserMessage(content)
+		renderer.RenderSystem(fmt.Sprintf("[%s] %s", role, content))
 	}
 }
 
-func chatHistoryToolSummary(toolCalls []runtimetypes.ToolCall) string {
-	names := chatHistoryToolNames(toolCalls)
-	if len(names) == 0 {
-		return ""
+func indexChatHistoryToolCalls(messages []runtimetypes.Message) map[string]runtimetypes.ToolCall {
+	indexed := make(map[string]runtimetypes.ToolCall)
+	for _, message := range messages {
+		for _, call := range message.ToolCalls {
+			if callID := strings.TrimSpace(call.ID); callID != "" {
+				indexed[callID] = call
+			}
+		}
 	}
-	return strings.Join(names, ", ")
+	return indexed
 }
 
-func chatHistoryToolNames(toolCalls []runtimetypes.ToolCall) []string {
-	if len(toolCalls) == 0 {
+func indexChatHistoryToolMetadata(messages []runtimetypes.Message) map[string]map[string]interface{} {
+	indexed := make(map[string]map[string]interface{})
+	for _, message := range messages {
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "tool") {
+			continue
+		}
+		if callID := strings.TrimSpace(message.ToolCallID); callID != "" {
+			indexed[callID] = chatHistoryToolMetadataMap(message.Metadata)
+		}
+	}
+	return indexed
+}
+
+func chatHistoryToolNameFromMetadata(metadata runtimetypes.Metadata) string {
+	return payloadStringValue(chatHistoryToolMetadataMap(metadata)["tool_name"])
+}
+
+func chatHistoryToolMetadataMap(metadata runtimetypes.Metadata) map[string]interface{} {
+	flat := cloneFunctionSchema(map[string]interface{}(metadata))
+	if len(flat) == 0 {
 		return nil
 	}
-	names := make([]string, 0, len(toolCalls))
-	for _, call := range toolCalls {
-		if name := strings.TrimSpace(call.Name); name != "" {
-			names = append(names, name)
+
+	var nested map[string]interface{}
+	switch value := flat["tool_metadata"].(type) {
+	case map[string]interface{}:
+		nested = value
+	case runtimetypes.Metadata:
+		nested = map[string]interface{}(value)
+	}
+	for _, key := range []string{"tool_name", "tool_source", "tool_error", "error", "shell_type", "shell_path", "shell_display", "workdir", "cwd"} {
+		if payloadStringValue(flat[key]) == "" && payloadStringValue(nested[key]) != "" {
+			flat[key] = nested[key]
 		}
 	}
-	return names
+	if intPayloadValue(flat, "duration_ms") <= 0 && intPayloadValue(nested, "duration_ms") > 0 {
+		flat["duration_ms"] = intPayloadValue(nested, "duration_ms")
+	}
+	return flat
+}
+
+func chatHistoryToolError(message runtimetypes.Message) string {
+	metadata := chatHistoryToolMetadataMap(message.Metadata)
+	for _, key := range []string{"tool_error", "error"} {
+		if errText := strings.TrimSpace(payloadStringValue(metadata[key])); errText != "" {
+			return errText
+		}
+	}
+	const prefix = "Tool execution failed:"
+	content := strings.TrimSpace(message.Content)
+	if !strings.HasPrefix(content, prefix) {
+		return ""
+	}
+	firstLine := strings.SplitN(strings.TrimSpace(strings.TrimPrefix(content, prefix)), "\n", 2)[0]
+	return strings.TrimSpace(firstLine)
+}
+
+func splitChatHistoryToolResult(message runtimetypes.Message) (string, string) {
+	content := strings.TrimSpace(message.Content)
+	toolErr := chatHistoryToolError(message)
+	if toolErr == "" {
+		return content, ""
+	}
+	const failurePrefix = "Tool execution failed:"
+	if strings.HasPrefix(content, failurePrefix) {
+		if newline := strings.IndexByte(content, '\n'); newline >= 0 {
+			content = strings.TrimSpace(content[newline+1:])
+		} else {
+			content = ""
+		}
+	}
+	return content, toolErr
 }

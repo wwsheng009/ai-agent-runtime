@@ -47,9 +47,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
-		if !session.Stream && response != "" {
-			fmt.Println(response)
-		}
+		finishSuccessfulChatSend(session, response, noInteractive)
 		return false
 	}
 	if commandMatches(cmdLower, "/function") || commandMatches(cmdLower, "/describe") {

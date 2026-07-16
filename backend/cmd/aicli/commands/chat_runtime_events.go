@@ -159,19 +159,19 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			if strings.TrimSpace(response) == "" {
 				return
 			}
-			if session != nil && session.Interaction != nil {
-				session.Interaction.RenderAssistant(response)
-				return
-			}
 			if session == nil {
 				fmt.Println(response)
 				return
 			}
-			if !session.JSONOutput && !session.NoInteractive && session.Formatter == nil {
-				fmt.Println(response)
+			if session.JSONOutput || session.NoInteractive {
+				if session.Interaction != nil {
+					newAICLITranscriptRenderer(session).RenderAssistant(response)
+					return
+				}
+				renderChatResponse(session, response)
 				return
 			}
-			renderChatResponse(session, response)
+			newAICLITranscriptRenderer(session).RenderAssistant(response)
 		},
 		writePrompt: func() {
 			if session == nil || session.NoInteractive || session.JSONOutput {
@@ -492,6 +492,9 @@ func (b *chatRuntimeEventBridge) logToolCompleted(event runtimeevents.Event) {
 	resultPayload := cloneRuntimeEventLogPayload(event.Payload)
 	err := runtimeEventError(event.Payload)
 	callSummary := runtimeToolExecutionSummaryCall(event)
+	if callSummary.RawOutputArtifactPath != "" {
+		recordLocalShellArtifactPath(b.session, callSummary.RawOutputArtifactPath)
+	}
 	b.logMu.Lock()
 	if _, exists := b.loggedToolResults[toolCallID]; exists {
 		b.logMu.Unlock()

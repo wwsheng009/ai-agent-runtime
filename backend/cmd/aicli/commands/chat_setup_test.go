@@ -37,6 +37,7 @@ func TestPrepareChatPersistence_UsesProvidedSessionDir(t *testing.T) {
 	if state == nil || state.runtimeSessionManager == nil {
 		t.Fatal("expected runtime session manager")
 	}
+	t.Cleanup(state.runtimeSessionManager.Stop)
 	if state.resolvedSessionDir != dir {
 		t.Fatalf("expected session dir %q, got %q", dir, state.resolvedSessionDir)
 	}

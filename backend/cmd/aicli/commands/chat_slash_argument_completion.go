@@ -2,9 +2,11 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -21,8 +23,9 @@ type chatSlashArgumentCompletionProvider struct {
 }
 
 type slashSessionCacheKey struct {
-	manager *runtimechat.SessionManager
-	userID  string
+	manager   *runtimechat.SessionManager
+	userID    string
+	currentID string
 }
 
 type slashArgumentToken struct {
@@ -920,9 +923,11 @@ func (p *chatSlashArgumentCompletionProvider) cachedSessionArgumentCandidates(se
 		return nil
 	}
 
+	currentID := currentRuntimeSessionID(session)
 	key := slashSessionCacheKey{
-		manager: session.SessionManager,
-		userID:  strings.TrimSpace(session.SessionUserID),
+		manager:   session.SessionManager,
+		userID:    strings.TrimSpace(session.SessionUserID),
+		currentID: strings.TrimSpace(currentID),
 	}
 
 	p.mu.Lock()
@@ -937,7 +942,7 @@ func (p *chatSlashArgumentCompletionProvider) cachedSessionArgumentCandidates(se
 	}
 	p.mu.Unlock()
 
-	sessions, err := session.SessionManager.List(context.Background(), session.SessionUserID)
+	sessions, err := session.SessionManager.ListMetadataPage(context.Background(), session.SessionUserID, 100, 0)
 	if err != nil {
 		return nil
 	}
@@ -946,27 +951,33 @@ func (p *chatSlashArgumentCompletionProvider) cachedSessionArgumentCandidates(se
 	if includeLatest {
 		candidates = append(candidates, chatSlashCompletionCandidate{
 			Command:     "latest",
-			Summary:     "直接恢复最近可恢复会话",
+			Summary:     "直接恢复最近的其他会话",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: false,
 		})
 	}
-	currentID := currentRuntimeSessionID(session)
+	now := time.Now()
 	for _, item := range sessions {
 		if item == nil || strings.TrimSpace(item.ID) == "" {
 			continue
 		}
-		preview := item.BuildPreview()
-		summary := strings.TrimSpace(preview.Title)
-		if summary == "" {
-			summary = strings.TrimSpace(preview.Summary)
+		if currentID != "" && strings.EqualFold(strings.TrimSpace(item.ID), strings.TrimSpace(currentID)) {
+			continue
 		}
-		if summary == "" {
-			summary = string(item.State)
+		if includeLatest {
+			loaded, loadErr := session.SessionManager.Get(context.Background(), item.ID)
+			if loadErr != nil || !runtimeSessionHasConversation(loaded) {
+				continue
+			}
+			item = loaded
 		}
-		if currentID != "" && strings.EqualFold(currentID, item.ID) {
-			summary += "（当前）"
-		}
+		turnCount, messageCount := runtimeSessionConversationCounts(item)
+		summary := fmt.Sprintf("%s · %d轮/%d条消息 · 最后更新 %s",
+			runtimeResumeSessionTitle(item),
+			turnCount,
+			messageCount,
+			formatSessionUpdatedAt(item.UpdatedAt, now),
+		)
 		candidates = append(candidates, chatSlashCompletionCandidate{
 			Command:     item.ID,
 			Summary:     summary,

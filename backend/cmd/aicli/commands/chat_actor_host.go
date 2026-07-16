@@ -185,7 +185,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		host.Orchestrator.LeaseManager.Mailbox = mailbox
 	}
 	host.bindTeamLifecycleEvents()
-	host.SessionHub = runtimechat.NewSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
+	host.SessionHub = runtimechat.NewBoundedSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
 		return host.buildSessionActor(sessionID, session, sessionStore, runtimeConfig, workspaceRoot)
 	})
 	host.cleanupFns = []func(){
