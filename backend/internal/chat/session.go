@@ -329,6 +329,24 @@ func (s *Session) Clone() *Session {
 	if s == nil {
 		return nil
 	}
+	clone := s.CloneWithoutHistory()
+	clone.History = make([]types.Message, len(s.History))
+	clone.HistoryLoaded = s.HistoryLoaded
+
+	for i, msg := range s.History {
+		clone.History[i] = *msg.Clone()
+	}
+
+	clone.refreshDerivedMetadata()
+	return clone
+}
+
+// CloneWithoutHistory clones session metadata without retaining or copying the
+// prompt projection. HistoryLoaded is false until the caller supplies history.
+func (s *Session) CloneWithoutHistory() *Session {
+	if s == nil {
+		return nil
+	}
 
 	var expiresAt *time.Time
 	if s.ExpiresAt != nil {
@@ -340,19 +358,13 @@ func (s *Session) Clone() *Session {
 		ID:                    s.ID,
 		UserID:                s.UserID,
 		State:                 s.State,
-		History:               make([]types.Message, len(s.History)),
 		HeadOffset:            s.HeadOffset,
 		CanonicalMessageCount: s.CanonicalMessageCount,
 		Metadata:              s.Metadata,
 		CreatedAt:             s.CreatedAt,
 		UpdatedAt:             s.UpdatedAt,
 		ExpiresAt:             expiresAt,
-		HistoryLoaded:         s.HistoryLoaded,
-	}
-
-	// 克隆历史
-	for i, msg := range s.History {
-		clone.History[i] = *msg.Clone()
+		HistoryLoaded:         false,
 	}
 
 	// 克隆标签
@@ -369,7 +381,6 @@ func (s *Session) Clone() *Session {
 		clone.Metadata.Context = context
 	}
 
-	clone.refreshDerivedMetadata()
 	return clone
 }
 

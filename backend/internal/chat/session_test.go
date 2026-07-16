@@ -138,6 +138,64 @@ func TestSessionManualTitleClearIsPreserved(t *testing.T) {
 	}
 }
 
+func TestSessionCloneWithoutHistoryPreservesMetadataOnly(t *testing.T) {
+	session := NewSession("test-user")
+	session.AddTag("memory")
+	session.SetContext("mode", "bounded")
+	session.ReplaceHistory([]types.Message{
+		*types.NewUserMessage("first"),
+		*types.NewAssistantMessage("second"),
+	})
+	session.CanonicalMessageCount = 42
+	session.SetHeadOffset(1)
+	session.SetTTL(time.Hour)
+
+	clone := session.CloneWithoutHistory()
+	if clone == nil {
+		t.Fatal("expected metadata-only clone")
+	}
+	if len(clone.History) != 0 || clone.HistoryLoaded {
+		t.Fatalf("expected unloaded history, got len=%d loaded=%v", len(clone.History), clone.HistoryLoaded)
+	}
+	if clone.CanonicalMessageCount != 42 || clone.HeadOffset != 1 {
+		t.Fatalf("session cursors changed: canonical=%d head=%d", clone.CanonicalMessageCount, clone.HeadOffset)
+	}
+	if clone.Metadata.Title != session.Metadata.Title || clone.Metadata.Summary != session.Metadata.Summary {
+		t.Fatalf("derived metadata changed: %#v", clone.Metadata)
+	}
+	clone.Metadata.Tags[0] = "changed"
+	clone.Metadata.Context["mode"] = "changed"
+	if session.Metadata.Tags[0] != "memory" || session.Metadata.Context["mode"] != "bounded" {
+		t.Fatal("metadata-only clone shares mutable metadata containers")
+	}
+	if clone.ExpiresAt == session.ExpiresAt {
+		t.Fatal("metadata-only clone shares expiration pointer")
+	}
+}
+
+func TestSessionCloneWithoutHistoryAvoidsHistoryAllocations(t *testing.T) {
+	session := NewSession("test-user")
+	session.History = make([]types.Message, 128)
+	for index := range session.History {
+		session.History[index] = *types.NewToolMessage("call", "payload")
+		session.History[index].Metadata.Set("index", index)
+	}
+
+	fullAllocs := testing.AllocsPerRun(10, func() {
+		if session.Clone() == nil {
+			panic("nil full clone")
+		}
+	})
+	metadataAllocs := testing.AllocsPerRun(10, func() {
+		if session.CloneWithoutHistory() == nil {
+			panic("nil metadata clone")
+		}
+	})
+	if metadataAllocs >= fullAllocs/4 {
+		t.Fatalf("metadata clone still scales with history: full=%.0f metadata=%.0f", fullAllocs, metadataAllocs)
+	}
+}
+
 func TestSessionSetGetContext(t *testing.T) {
 	session := NewSession("test-user")
 

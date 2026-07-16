@@ -326,13 +326,11 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 		return nil
 	}
 
-	history := cloneRuntimeMessages(session.Messages)
-
-	runtimeSession := session.RuntimeSession.Clone()
+	runtimeSession := session.RuntimeSession.CloneWithoutHistory()
 	if runtimeSession == nil {
 		return runtimechat.ErrInvalidSession
 	}
-	runtimeSession.ReplaceHistory(history)
+	runtimeSession.ReplaceHistory(session.Messages)
 	runtimeSession.MarkActive()
 	runtimeSession.Metadata.LastModel = session.Model
 	if runtimeSession.Metadata.Context == nil {
