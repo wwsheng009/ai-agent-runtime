@@ -549,6 +549,49 @@ func TestReActLoop_DowngradesUnsupportedParallelToolParameterWithoutAdvancingSte
 	require.True(t, loop.parallelToolCallsUnsupported.Load())
 }
 
+func TestReActLoop_DowngradesUnsupportedOptionalParametersAndRemembersCapability(t *testing.T) {
+	provider := &RetrySequenceLLMProvider{
+		name: "test-provider",
+		errs: []error{
+			fmt.Errorf("HTTP 400: unsupported parameter: reasoning_effort"),
+			fmt.Errorf("HTTP 400: unsupported parameter: temperature"),
+		},
+		response: &llm.LLMResponse{Content: "inspection complete", Model: "test-model"},
+	}
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{MaxRetries: 0})
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := &Agent{
+		config: &Config{
+			Name: "test-agent", Provider: "test-provider", Model: "test-model",
+			SystemPrompt: "You are a helpful assistant.",
+		},
+		mcpManager: &MockMCPManager{},
+	}
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps: 1, EnableThought: true, EnableToolCalls: true,
+		ReasoningEffort: "high", Temperature: 0.7,
+	})
+
+	result, err := loop.RunWithSession(context.Background(), "inspect the repository", newTestHistorySession("session-parameter-downgrade"))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 1, result.Steps)
+	require.Len(t, provider.requests, 3)
+	require.Equal(t, "high", provider.requests[0].ReasoningEffort)
+	require.Empty(t, provider.requests[1].ReasoningEffort)
+	require.Equal(t, 0.7, provider.requests[1].Temperature)
+	require.Zero(t, provider.requests[2].Temperature)
+
+	_, err = loop.RunWithSession(context.Background(), "inspect another file", newTestHistorySession("session-parameter-memory"))
+	require.NoError(t, err)
+	require.Len(t, provider.requests, 4)
+	require.Empty(t, provider.requests[3].ReasoningEffort)
+	require.Zero(t, provider.requests[3].Temperature)
+	require.True(t, loop.reasoningEffortUnsupported.Load())
+	require.True(t, loop.temperatureUnsupported.Load())
+}
+
 func TestResolvePromptPreflightProviderModelUsesLoopConfigOverride(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "default-provider",

@@ -58,6 +58,9 @@ type ReActLoop struct {
 	llmRuntime                   *llm.LLMRuntime
 	config                       *LoopReActConfig
 	parallelToolCallsUnsupported atomic.Bool
+	reasoningEffortUnsupported   atomic.Bool
+	thinkingUnsupported          atomic.Bool
+	temperatureUnsupported       atomic.Bool
 }
 
 type toolExecutionResult struct {
@@ -129,6 +132,49 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 		llmRuntime: llmRuntime,
 		config:     config,
 	}
+}
+
+func (loop *ReActLoop) applyRememberedProviderRequestDowngrades(req *llm.LLMRequest) {
+	if loop == nil || req == nil {
+		return
+	}
+	if loop.reasoningEffortUnsupported.Load() {
+		req.ReasoningEffort = ""
+	}
+	if loop.thinkingUnsupported.Load() {
+		req.Thinking = nil
+	}
+	if loop.temperatureUnsupported.Load() {
+		req.Temperature = 0
+	}
+}
+
+func (loop *ReActLoop) downgradeUnsupportedProviderRequest(req *llm.LLMRequest, err error) string {
+	if loop == nil || req == nil || err == nil {
+		return ""
+	}
+	if req.Metadata[llm.MetadataKeyParallelToolCalls] == true && llm.IsUnsupportedRequestParameter(err, llm.MetadataKeyParallelToolCalls) {
+		loop.parallelToolCallsUnsupported.Store(true)
+		delete(req.Metadata, llm.MetadataKeyParallelToolCalls)
+		delete(req.Metadata, "max_parallel_tool_calls")
+		return llm.MetadataKeyParallelToolCalls
+	}
+	if strings.TrimSpace(req.ReasoningEffort) != "" && llm.IsUnsupportedRequestParameter(err, "reasoning_effort") {
+		loop.reasoningEffortUnsupported.Store(true)
+		req.ReasoningEffort = ""
+		return "reasoning_effort"
+	}
+	if req.Thinking != nil && llm.IsUnsupportedRequestParameter(err, "thinking") {
+		loop.thinkingUnsupported.Store(true)
+		req.Thinking = nil
+		return "thinking"
+	}
+	if req.Temperature != 0 && llm.IsUnsupportedRequestParameter(err, "temperature") {
+		loop.temperatureUnsupported.Store(true)
+		req.Temperature = 0
+		return "temperature"
+	}
+	return ""
 }
 
 func (loop *ReActLoop) requestProvider() string {
@@ -652,6 +698,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			"remaining_budget": remainingBudget,
 		},
 	}
+	loop.applyRememberedProviderRequestDowngrades(req)
 	if loop.config.EnableParallelTools && loop.config.MaxParallelToolCalls > 1 && len(availableTools) > 1 && !loop.parallelToolCallsUnsupported.Load() {
 		req.Metadata[llm.MetadataKeyParallelToolCalls] = true
 		req.Metadata["max_parallel_tool_calls"] = loop.config.MaxParallelToolCalls
@@ -844,12 +891,18 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	loop.agent.emitRuntimeEvent("llm.request.started", sessionID, "", requestPayload)
 	response, err := loop.llmRuntime.Call(callCtx, req)
-	if err != nil && req.Metadata[llm.MetadataKeyParallelToolCalls] == true && llm.IsUnsupportedRequestParameter(err, llm.MetadataKeyParallelToolCalls) {
-		loop.parallelToolCallsUnsupported.Store(true)
-		delete(req.Metadata, llm.MetadataKeyParallelToolCalls)
-		delete(req.Metadata, "max_parallel_tool_calls")
-		loop.agent.emitRuntimeEvent("llm.parallel_tool_calls.downgraded", sessionID, "", map[string]interface{}{
-			"trace_id": traceID, "step": step, "provider": req.Provider, "model": req.Model, "error": err.Error(),
+	for err != nil {
+		parameter := loop.downgradeUnsupportedProviderRequest(req, err)
+		if parameter == "" {
+			break
+		}
+		eventType := "llm.request_parameter.downgraded"
+		if parameter == llm.MetadataKeyParallelToolCalls {
+			eventType = "llm.parallel_tool_calls.downgraded"
+		}
+		loop.agent.emitRuntimeEvent(eventType, sessionID, "", map[string]interface{}{
+			"trace_id": traceID, "step": step, "provider": req.Provider, "model": req.Model,
+			"parameter": parameter, "error": err.Error(),
 		})
 		response, err = loop.llmRuntime.Call(callCtx, req)
 	}
