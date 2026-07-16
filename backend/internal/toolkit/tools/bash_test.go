@@ -127,6 +127,44 @@ func TestBashTool_ExecutesStructuredCommandBatchInOneToolCall(t *testing.T) {
 	}
 }
 
+func TestBashTool_EmptyOptionalCommandBatchFallsBackToSingleCommand(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &batchInspectExecuter{}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":  "git status",
+		"commands": []interface{}{},
+		"workdir":  ".",
+	})
+
+	if err != nil || !result.Success {
+		t.Fatalf("expected empty optional batch to use command, result=%#v err=%v", result, err)
+	}
+	if got := strings.Join(inspector.commands, "|"); got != "git status" {
+		t.Fatalf("expected single command execution, got %q", got)
+	}
+	if strings.Contains(result.Content, "command 1/1") {
+		t.Fatalf("expected direct command output, got batch wrapper %q", result.Content)
+	}
+}
+
+func TestBashTool_EmptyCommandBatchWithoutSingleCommandStillFails(t *testing.T) {
+	tool := NewBashTool()
+	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "unexpected"}}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"commands": []map[string]interface{}{},
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if result.Success || result.Error == nil || !strings.Contains(result.Error.Error(), "commands 参数不能为空") {
+		t.Fatalf("expected empty commands validation error, got %#v", result)
+	}
+}
+
 func TestBashTool_CommandBatchContinuesAfterFailureByDefault(t *testing.T) {
 	tool := NewBashTool()
 	inspector := &batchInspectExecuter{failures: map[string]error{"first": fmt.Errorf("first failed")}}

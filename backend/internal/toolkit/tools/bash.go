@@ -272,6 +272,13 @@ func parseBashCommandBatch(params map[string]interface{}) ([]bashCommandBatchIte
 		}
 	}
 	if len(values) == 0 {
+		// Strict tool schemas make optional nullable fields required at the
+		// provider boundary. Some models materialize an unused commands field as
+		// [] even when they supplied a valid single command. Treat that shape as
+		// the single-command form instead of spending another model round trip.
+		if extractString(params["command"]) != "" {
+			return nil, false, nil
+		}
 		return nil, true, fmt.Errorf("commands 参数不能为空")
 	}
 	commands := make([]bashCommandBatchItem, 0, len(values))
