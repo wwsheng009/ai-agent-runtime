@@ -250,6 +250,26 @@ func normalizeRuntimeToolParameterObjectSchema(schema map[string]interface{}) {
 	}
 }
 
+func normalizeRuntimeToolDefinitionsInPlace(tools []types.ToolDefinition) {
+	for index := range tools {
+		normalizeRuntimeToolParameterValueInPlace(tools[index].Parameters)
+	}
+}
+
+func normalizeRuntimeToolParameterValueInPlace(value interface{}) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for _, item := range typed {
+			normalizeRuntimeToolParameterValueInPlace(item)
+		}
+		normalizeRuntimeToolParameterObjectSchema(typed)
+	case []interface{}:
+		for _, item := range typed {
+			normalizeRuntimeToolParameterValueInPlace(item)
+		}
+	}
+}
+
 func cloneRuntimeToolParameterValue(value interface{}) interface{} {
 	switch typed := value.(type) {
 	case map[string]interface{}:

@@ -1678,7 +1678,11 @@ func TestSQLiteRuntimeStorePersistsStableToolSurface(t *testing.T) {
 		SessionID: "session-stable-tool-surface",
 		Status:    SessionIdle,
 		StableToolSurface: []types.ToolDefinition{
-			{Name: "get_goal", Description: "Read goal"},
+			{Name: "get_goal", Description: "Read goal", Parameters: map[string]interface{}{
+				"type": "object", "properties": map[string]interface{}{
+					"nested": map[string]interface{}{"type": "object", "properties": nil},
+				},
+			}},
 			{Name: "update_goal", Description: "Complete goal"},
 		},
 		StableToolSurfaceSet: true,
@@ -1693,6 +1697,9 @@ func TestSQLiteRuntimeStorePersistsStableToolSurface(t *testing.T) {
 	require.Len(t, loaded.StableToolSurface, 2)
 	assert.Equal(t, "get_goal", loaded.StableToolSurface[0].Name)
 	assert.Equal(t, "update_goal", loaded.StableToolSurface[1].Name)
+	properties := loaded.StableToolSurface[0].Parameters["properties"].(map[string]interface{})
+	nested := properties["nested"].(map[string]interface{})
+	assert.IsType(t, map[string]interface{}{}, nested["properties"])
 }
 
 func TestSQLiteRuntimeStorePersistsToolReceipt(t *testing.T) {

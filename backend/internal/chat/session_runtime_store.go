@@ -1695,14 +1695,14 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 	var (
 		state                RuntimeState
 		statusRaw            string
-		currentRunMetaRaw    sql.NullString
-		ambientRunMetaRaw    sql.NullString
-		stableToolSurfaceRaw sql.NullString
-		frozenTurnToolsRaw   sql.NullString
-		pendingToolRaw       sql.NullString
-		pendingApprovalRaw   sql.NullString
-		pendingQuestionRaw   sql.NullString
-		activeJobsRaw        sql.NullString
+		currentRunMetaRaw    []byte
+		ambientRunMetaRaw    []byte
+		stableToolSurfaceRaw []byte
+		frozenTurnToolsRaw   []byte
+		pendingToolRaw       []byte
+		pendingApprovalRaw   []byte
+		pendingQuestionRaw   []byte
+		activeJobsRaw        []byte
 		updatedAtRaw         string
 		currentTurnIDRaw     sql.NullString
 		currentCheckpointRaw sql.NullString
@@ -1735,52 +1735,54 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 	if currentCheckpointRaw.Valid {
 		state.CurrentCheckpointID = currentCheckpointRaw.String
 	}
-	if currentRunMetaRaw.Valid && strings.TrimSpace(currentRunMetaRaw.String) != "" {
+	if len(bytes.TrimSpace(currentRunMetaRaw)) > 0 {
 		var runMeta team.RunMeta
-		if err := json.Unmarshal([]byte(currentRunMetaRaw.String), &runMeta); err == nil {
-			state.CurrentRunMeta = runMeta.Clone()
+		if err := json.Unmarshal(currentRunMetaRaw, &runMeta); err == nil {
+			state.CurrentRunMeta = &runMeta
 		}
 	}
-	if ambientRunMetaRaw.Valid && strings.TrimSpace(ambientRunMetaRaw.String) != "" {
+	if len(bytes.TrimSpace(ambientRunMetaRaw)) > 0 {
 		var runMeta team.RunMeta
-		if err := json.Unmarshal([]byte(ambientRunMetaRaw.String), &runMeta); err == nil {
-			state.AmbientRunMeta = runMeta.Clone()
+		if err := json.Unmarshal(ambientRunMetaRaw, &runMeta); err == nil {
+			state.AmbientRunMeta = &runMeta
 		}
 	}
-	if stableToolSurfaceRaw.Valid && strings.TrimSpace(stableToolSurfaceRaw.String) != "" {
+	if len(bytes.TrimSpace(stableToolSurfaceRaw)) > 0 {
 		var tools []types.ToolDefinition
-		if err := json.Unmarshal([]byte(stableToolSurfaceRaw.String), &tools); err == nil {
-			state.StableToolSurface = cloneRuntimeToolDefinitions(tools)
+		if err := json.Unmarshal(stableToolSurfaceRaw, &tools); err == nil {
+			normalizeRuntimeToolDefinitionsInPlace(tools)
+			state.StableToolSurface = tools
 			state.StableToolSurfaceSet = true
 		}
 	}
-	if frozenTurnToolsRaw.Valid && strings.TrimSpace(frozenTurnToolsRaw.String) != "" {
+	if len(bytes.TrimSpace(frozenTurnToolsRaw)) > 0 {
 		var frozen []types.ToolDefinition
-		if err := json.Unmarshal([]byte(frozenTurnToolsRaw.String), &frozen); err == nil {
-			state.FrozenTurnTools = cloneRuntimeToolDefinitions(frozen)
+		if err := json.Unmarshal(frozenTurnToolsRaw, &frozen); err == nil {
+			normalizeRuntimeToolDefinitionsInPlace(frozen)
+			state.FrozenTurnTools = frozen
 			state.FrozenTurnToolsSet = true
 		}
 	}
-	if pendingToolRaw.Valid && strings.TrimSpace(pendingToolRaw.String) != "" {
+	if len(bytes.TrimSpace(pendingToolRaw)) > 0 {
 		var pendingTool PendingToolInvocation
-		if err := json.Unmarshal([]byte(pendingToolRaw.String), &pendingTool); err == nil {
+		if err := json.Unmarshal(pendingToolRaw, &pendingTool); err == nil {
 			state.PendingTool = &pendingTool
 		}
 	}
-	if pendingApprovalRaw.Valid && strings.TrimSpace(pendingApprovalRaw.String) != "" {
+	if len(bytes.TrimSpace(pendingApprovalRaw)) > 0 {
 		var approval ApprovalRequest
-		if err := json.Unmarshal([]byte(pendingApprovalRaw.String), &approval); err == nil {
+		if err := json.Unmarshal(pendingApprovalRaw, &approval); err == nil {
 			state.PendingApproval = &approval
 		}
 	}
-	if pendingQuestionRaw.Valid && strings.TrimSpace(pendingQuestionRaw.String) != "" {
+	if len(bytes.TrimSpace(pendingQuestionRaw)) > 0 {
 		var question UserQuestionRequest
-		if err := json.Unmarshal([]byte(pendingQuestionRaw.String), &question); err == nil {
+		if err := json.Unmarshal(pendingQuestionRaw, &question); err == nil {
 			state.PendingQuestion = &question
 		}
 	}
-	if activeJobsRaw.Valid && strings.TrimSpace(activeJobsRaw.String) != "" {
-		_ = json.Unmarshal([]byte(activeJobsRaw.String), &state.ActiveJobIDs)
+	if len(bytes.TrimSpace(activeJobsRaw)) > 0 {
+		_ = json.Unmarshal(activeJobsRaw, &state.ActiveJobIDs)
 	}
 	if updatedAtRaw != "" {
 		state.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAtRaw)
@@ -1799,69 +1801,69 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 	if state.UpdatedAt.IsZero() {
 		state.UpdatedAt = time.Now().UTC()
 	}
-	currentRunMetaJSON := ""
+	var currentRunMetaJSON []byte
 	if state.CurrentRunMeta != nil {
 		payload, err := json.Marshal(state.CurrentRunMeta)
 		if err != nil {
 			return fmt.Errorf("marshal current run meta: %w", err)
 		}
-		currentRunMetaJSON = string(payload)
+		currentRunMetaJSON = payload
 	}
-	ambientRunMetaJSON := ""
+	var ambientRunMetaJSON []byte
 	if state.AmbientRunMeta != nil {
 		payload, err := json.Marshal(state.AmbientRunMeta)
 		if err != nil {
 			return fmt.Errorf("marshal ambient run meta: %w", err)
 		}
-		ambientRunMetaJSON = string(payload)
+		ambientRunMetaJSON = payload
 	}
-	stableToolSurfaceJSON := ""
+	var stableToolSurfaceJSON []byte
 	if state.StableToolSurfaceSet {
 		payload, err := json.Marshal(state.StableToolSurface)
 		if err != nil {
 			return fmt.Errorf("marshal stable tool surface: %w", err)
 		}
-		stableToolSurfaceJSON = string(payload)
+		stableToolSurfaceJSON = payload
 	}
-	frozenTurnToolsJSON := ""
+	var frozenTurnToolsJSON []byte
 	if state.FrozenTurnToolsSet {
 		payload, err := json.Marshal(state.FrozenTurnTools)
 		if err != nil {
 			return fmt.Errorf("marshal frozen turn tools: %w", err)
 		}
-		frozenTurnToolsJSON = string(payload)
+		frozenTurnToolsJSON = payload
 	}
-	pendingToolJSON := ""
+	var pendingToolJSON []byte
 	if state.PendingTool != nil {
 		payload, err := json.Marshal(state.PendingTool)
 		if err != nil {
 			return fmt.Errorf("marshal pending tool: %w", err)
 		}
-		pendingToolJSON = string(payload)
+		pendingToolJSON = payload
 	}
-	pendingApprovalJSON := ""
+	var pendingApprovalJSON []byte
 	if state.PendingApproval != nil {
 		payload, err := json.Marshal(state.PendingApproval)
 		if err != nil {
 			return fmt.Errorf("marshal pending approval: %w", err)
 		}
-		pendingApprovalJSON = string(payload)
+		pendingApprovalJSON = payload
 	}
-	pendingQuestionJSON := ""
+	var pendingQuestionJSON []byte
 	if state.PendingQuestion != nil {
 		payload, err := json.Marshal(state.PendingQuestion)
 		if err != nil {
 			return fmt.Errorf("marshal pending question: %w", err)
 		}
-		pendingQuestionJSON = string(payload)
+		pendingQuestionJSON = payload
 	}
-	activeJobsJSON := "[]"
+	activeJobsJSON := []byte("[]")
 	if len(state.ActiveJobIDs) > 0 {
 		payload, err := json.Marshal(state.ActiveJobIDs)
 		if err != nil {
 			return fmt.Errorf("marshal active job ids: %w", err)
 		}
-		activeJobsJSON = string(payload)
+		activeJobsJSON = payload
 	}
 
 	_, err := s.db.ExecContext(ctx, `
@@ -1884,7 +1886,7 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 			active_job_ids_json = excluded.active_job_ids_json,
 			updated_at = excluded.updated_at
 	`, state.SessionID, string(state.Status), nullIfEmpty(state.CurrentTurnID), nullIfEmpty(state.CurrentCheckpointID),
-		nullIfEmpty(currentRunMetaJSON), nullIfEmpty(ambientRunMetaJSON), nullIfEmpty(stableToolSurfaceJSON), nullIfEmpty(frozenTurnToolsJSON), nullIfEmpty(pendingToolJSON), pendingApprovalJSON, pendingQuestionJSON, state.HeadOffset, activeJobsJSON, state.UpdatedAt.Format(time.RFC3339Nano))
+		nullIfEmptyBytes(currentRunMetaJSON), nullIfEmptyBytes(ambientRunMetaJSON), nullIfEmptyBytes(stableToolSurfaceJSON), nullIfEmptyBytes(frozenTurnToolsJSON), nullIfEmptyBytes(pendingToolJSON), nullIfEmptyBytes(pendingApprovalJSON), nullIfEmptyBytes(pendingQuestionJSON), state.HeadOffset, activeJobsJSON, state.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("save runtime state: %w", err)
 	}
@@ -3906,6 +3908,13 @@ func parseRFC3339Time(raw string) time.Time {
 func nullIfEmpty(value string) interface{} {
 	value = strings.TrimSpace(value)
 	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullIfEmptyBytes(value []byte) interface{} {
+	if len(bytes.TrimSpace(value)) == 0 {
 		return nil
 	}
 	return value
