@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -3159,14 +3160,16 @@ func (a *SessionActor) publishToolReceiptEvent(eventType, traceID, source string
 	if a == nil {
 		return
 	}
+	messageHash := sha256.Sum256(receipt.MessageJSON)
 	payload := map[string]interface{}{
 		"tool_call_id": receipt.ToolCallID,
 		"source":       strings.TrimSpace(source),
 		"receipt": map[string]interface{}{
-			"session_id":   receipt.SessionID,
-			"tool_call_id": receipt.ToolCallID,
-			"message_json": append(json.RawMessage(nil), receipt.MessageJSON...),
-			"created_at":   receipt.CreatedAt,
+			"session_id":     receipt.SessionID,
+			"tool_call_id":   receipt.ToolCallID,
+			"message_bytes":  len(receipt.MessageJSON),
+			"message_sha256": fmt.Sprintf("%x", messageHash),
+			"created_at":     receipt.CreatedAt,
 		},
 	}
 	if strings.TrimSpace(receipt.ToolName) != "" {

@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"testing"
@@ -3065,6 +3066,31 @@ func TestSessionActorApproveToolUsesIndependentReceiptStore(t *testing.T) {
 		"source":       "receipt_store",
 	})
 	require.Equal(t, 0, mcpManager.callCount)
+}
+
+func TestPublishToolReceiptEventStoresOnlyMessageDiagnostics(t *testing.T) {
+	store := NewInMemoryRuntimeStore(8)
+	actor := &SessionActor{id: "receipt-event-session", eventStore: store}
+	messageJSON := []byte(`{"role":"tool","content":"large result","tool_call_id":"call-1"}`)
+
+	actor.publishToolReceiptEvent(EventToolReceiptRecorded, "trace-1", "receipt_store", ToolExecutionReceipt{
+		SessionID:   actor.id,
+		ToolCallID:  "call-1",
+		ToolName:    "shell",
+		MessageJSON: messageJSON,
+		CreatedAt:   time.Now().UTC(),
+	})
+
+	events, err := store.ListEvents(context.Background(), actor.id, 0, 0)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	receiptPayload, ok := events[0].Payload["receipt"].(map[string]interface{})
+	require.True(t, ok)
+	assert.NotContains(t, receiptPayload, "message_json")
+	assert.Equal(t, len(messageJSON), receiptPayload["message_bytes"])
+	assert.Equal(t, fmt.Sprintf("%x", sha256.Sum256(messageJSON)), receiptPayload["message_sha256"])
+	assert.Equal(t, "call-1", receiptPayload["tool_call_id"])
+	assert.Equal(t, "shell", receiptPayload["tool_name"])
 }
 
 func assertRuntimeEvent(t *testing.T, store EventStore, sessionID, eventType string, payload map[string]string) {
