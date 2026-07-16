@@ -92,28 +92,7 @@ func (s *RuntimeState) Clone() *RuntimeState {
 	clone.AmbientRunMeta = s.AmbientRunMeta.Clone()
 	clone.StableToolSurface = cloneRuntimeToolDefinitions(s.StableToolSurface)
 	clone.FrozenTurnTools = cloneRuntimeToolDefinitions(s.FrozenTurnTools)
-	if s.PendingTool != nil {
-		pendingTool := *s.PendingTool
-		if len(pendingTool.ArgsJSON) > 0 {
-			pendingTool.ArgsJSON = append(json.RawMessage(nil), pendingTool.ArgsJSON...)
-		}
-		if len(pendingTool.BatchToolCalls) > 0 {
-			pendingTool.BatchToolCalls = make([]PendingToolCall, len(s.PendingTool.BatchToolCalls))
-			for index := range s.PendingTool.BatchToolCalls {
-				pendingTool.BatchToolCalls[index] = PendingToolCall{
-					ToolCallID: s.PendingTool.BatchToolCalls[index].ToolCallID,
-					ToolName:   s.PendingTool.BatchToolCalls[index].ToolName,
-				}
-				if len(s.PendingTool.BatchToolCalls[index].ArgsJSON) > 0 {
-					pendingTool.BatchToolCalls[index].ArgsJSON = append(json.RawMessage(nil), s.PendingTool.BatchToolCalls[index].ArgsJSON...)
-				}
-			}
-		}
-		if len(pendingTool.ResultMessageJSON) > 0 {
-			pendingTool.ResultMessageJSON = append(json.RawMessage(nil), pendingTool.ResultMessageJSON...)
-		}
-		clone.PendingTool = &pendingTool
-	}
+	clone.PendingTool = clonePendingToolInvocation(s.PendingTool, true)
 	if s.PendingApproval != nil {
 		approval := *s.PendingApproval
 		if len(approval.ArgsJSON) > 0 {
@@ -132,6 +111,29 @@ func (s *RuntimeState) Clone() *RuntimeState {
 		clone.ActiveJobIDs = append([]string(nil), s.ActiveJobIDs...)
 	}
 	return &clone
+}
+
+func clonePendingToolInvocation(pending *PendingToolInvocation, includeResult bool) *PendingToolInvocation {
+	if pending == nil {
+		return nil
+	}
+	cloned := *pending
+	cloned.ArgsJSON = append(json.RawMessage(nil), pending.ArgsJSON...)
+	if len(pending.BatchToolCalls) > 0 {
+		cloned.BatchToolCalls = make([]PendingToolCall, len(pending.BatchToolCalls))
+		for index, call := range pending.BatchToolCalls {
+			cloned.BatchToolCalls[index] = PendingToolCall{
+				ToolCallID: call.ToolCallID,
+				ToolName:   call.ToolName,
+				ArgsJSON:   append(json.RawMessage(nil), call.ArgsJSON...),
+			}
+		}
+	}
+	cloned.ResultMessageJSON = nil
+	if includeResult {
+		cloned.ResultMessageJSON = append(json.RawMessage(nil), pending.ResultMessageJSON...)
+	}
+	return &cloned
 }
 
 func cloneRuntimeToolDefinitions(input []types.ToolDefinition) []types.ToolDefinition {

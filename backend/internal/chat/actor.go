@@ -2309,6 +2309,7 @@ func (a *SessionActor) resumePendingBatchAfterCurrentResult(ctx context.Context,
 	if err := a.persistSession(ctx, session); err != nil {
 		return err
 	}
+	recoveryPending := clonePendingToolInvocation(pending, false)
 	runMeta := state.CurrentRunMeta.Clone()
 	turnID := strings.TrimSpace(state.CurrentTurnID)
 	if err := a.updateState(ctx, func(runtimeState *RuntimeState) error {
@@ -2327,7 +2328,7 @@ func (a *SessionActor) resumePendingBatchAfterCurrentResult(ctx context.Context,
 	if deleteStoredReceipt {
 		a.deleteStoredToolReceipt(context.Background(), a.id, pending.ToolCallID)
 	}
-	a.startPendingBatchRecoveryRun(ctx, session, pending, turnID, runMeta)
+	a.startPendingBatchRecoveryRun(ctx, session, recoveryPending, turnID, runMeta)
 	return nil
 }
 
