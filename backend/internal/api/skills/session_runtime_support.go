@@ -2742,8 +2742,8 @@ func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig, requestedR
 		MaxSteps:             0,
 		EnableThought:        true,
 		EnableToolCalls:      true,
-		EnableParallelTools:  false,
-		MaxParallelToolCalls: 1,
+		EnableParallelTools:  true,
+		MaxParallelToolCalls: 4,
 		Temperature:          0.7,
 	}
 	if selectedConfig != nil {

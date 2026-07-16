@@ -588,8 +588,8 @@ func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *
 		MaxSteps:             0,
 		EnableThought:        true,
 		EnableToolCalls:      true,
-		EnableParallelTools:  false,
-		MaxParallelToolCalls: 1,
+		EnableParallelTools:  true,
+		MaxParallelToolCalls: 4,
 		Temperature:          0.7,
 	}
 	if runtimeConfig != nil {

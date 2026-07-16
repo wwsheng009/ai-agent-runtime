@@ -354,18 +354,22 @@ func TestNewReActLoop_WithNilConfig(t *testing.T) {
 
 	// 验证默认配置
 	expectedDefaults := map[string]interface{}{
-		"MaxSteps":        0,
-		"EnableThought":   true,
-		"EnableToolCalls": true,
-		"Verbose":         false,
-		"Temperature":     0.7,
-		"StopOnSuccess":   true,
-		"MaxIterations":   10,
+		"MaxSteps":             0,
+		"EnableThought":        true,
+		"EnableToolCalls":      true,
+		"EnableParallelTools":  true,
+		"MaxParallelToolCalls": 4,
+		"Verbose":              false,
+		"Temperature":          0.7,
+		"StopOnSuccess":        true,
+		"MaxIterations":        10,
 	}
 
 	if loop.config.MaxSteps != expectedDefaults["MaxSteps"].(int) {
 		t.Errorf("expected default MaxSteps %d, got %d", expectedDefaults["MaxSteps"].(int), loop.config.MaxSteps)
 	}
+	require.Equal(t, expectedDefaults["EnableParallelTools"], loop.config.EnableParallelTools)
+	require.Equal(t, expectedDefaults["MaxParallelToolCalls"], loop.config.MaxParallelToolCalls)
 }
 
 func TestReActLoop_RunWithSession_DoesNotLimitWhenMaxStepsIsNonPositive(t *testing.T) {

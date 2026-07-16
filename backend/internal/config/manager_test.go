@@ -71,8 +71,8 @@ func TestValidateAgentConfig_AllowsNonPositiveMaxStepsAsUnlimited(t *testing.T) 
 
 func TestValidateAgentConfig_ParallelToolDefaults(t *testing.T) {
 	cfg := DefaultRuntimeConfig()
-	require.False(t, cfg.Agent.EnableParallelTools)
-	require.Equal(t, 1, cfg.Agent.MaxParallelToolCalls)
+	require.True(t, cfg.Agent.EnableParallelTools)
+	require.Equal(t, 4, cfg.Agent.MaxParallelToolCalls)
 	require.NoError(t, ValidateRuntimeConfig(cfg))
 
 	cfg.Agent.MaxParallelToolCalls = 0

@@ -703,8 +703,8 @@ func (a *Agent) RunReAct(ctx context.Context, llmRuntime *llm.LLMRuntime, prompt
 		MaxSteps:             a.config.MaxSteps,
 		EnableThought:        true,
 		EnableToolCalls:      true,
-		EnableParallelTools:  false,
-		MaxParallelToolCalls: 1,
+		EnableParallelTools:  true,
+		MaxParallelToolCalls: 4,
 		Temperature:          a.config.Temperature,
 	}
 
@@ -722,8 +722,8 @@ func (a *Agent) RunReActWithConfig(ctx context.Context, llmRuntime *llm.LLMRunti
 			MaxSteps:             a.config.MaxSteps,
 			EnableThought:        true,
 			EnableToolCalls:      true,
-			EnableParallelTools:  false,
-			MaxParallelToolCalls: 1,
+			EnableParallelTools:  true,
+			MaxParallelToolCalls: 4,
 			Temperature:          a.config.Temperature,
 		}
 	}
@@ -739,8 +739,8 @@ func (a *Agent) RunReActWithSession(ctx context.Context, llmRuntime *llm.LLMRunt
 			MaxSteps:             a.config.MaxSteps,
 			EnableThought:        true,
 			EnableToolCalls:      true,
-			EnableParallelTools:  false,
-			MaxParallelToolCalls: 1,
+			EnableParallelTools:  true,
+			MaxParallelToolCalls: 4,
 			Temperature:          a.config.Temperature,
 		}
 	}

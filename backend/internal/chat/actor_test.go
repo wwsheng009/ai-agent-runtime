@@ -738,7 +738,7 @@ func TestSessionActorSubmitPromptRollsBackPromptWhenInitialLLMRequestFails(t *te
 	require.Len(t, provider.requests, 1)
 }
 
-func TestNewSessionActor_DefaultLoopConfigDisablesParallelTools(t *testing.T) {
+func TestNewSessionActor_DefaultLoopConfigEnablesBoundedParallelTools(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()
 	manager := NewSessionManager(storage, nil)
@@ -761,8 +761,8 @@ func TestNewSessionActor_DefaultLoopConfigDisablesParallelTools(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, actor)
 	require.NotNil(t, actor.loopConfig)
-	assert.False(t, actor.loopConfig.EnableParallelTools)
-	assert.Equal(t, 1, actor.loopConfig.MaxParallelToolCalls)
+	assert.True(t, actor.loopConfig.EnableParallelTools)
+	assert.Equal(t, 4, actor.loopConfig.MaxParallelToolCalls)
 }
 
 func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *testing.T) {

@@ -104,8 +104,8 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 				MaxSteps:             agent.NormalizeMaxSteps(agentConfig.MaxSteps),
 				EnableThought:        true,
 				EnableToolCalls:      true,
-				EnableParallelTools:  false,
-				MaxParallelToolCalls: 1,
+				EnableParallelTools:  true,
+				MaxParallelToolCalls: 4,
 				Temperature:          agentConfig.Temperature,
 			}
 		}
@@ -1122,8 +1122,8 @@ func cloneLoopConfigWithRouteOverride(base *agent.LoopReActConfig, routeOverride
 		MaxSteps:             0,
 		EnableThought:        true,
 		EnableToolCalls:      true,
-		EnableParallelTools:  false,
-		MaxParallelToolCalls: 1,
+		EnableParallelTools:  true,
+		MaxParallelToolCalls: 4,
 		Temperature:          0.7,
 		StopOnSuccess:        true,
 		MaxIterations:        10,
