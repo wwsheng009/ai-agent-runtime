@@ -2,7 +2,9 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -347,6 +349,79 @@ func TestLoadLatestResumableRuntimeSessionUsesBoundedSQLitePreviews(t *testing.T
 	}
 	if len(loaded.History) > 128 {
 		t.Fatalf("expected bounded prompt projection, got %d messages", len(loaded.History))
+	}
+}
+
+func TestSyncRuntimeSessionKeepsLongRunningCLIHistoryBounded(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("create sqlite session manager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("create runtime session: %v", err)
+	}
+	session := &ChatSession{
+		Provider:       config.Provider{Protocol: "openai"},
+		SessionManager: manager,
+		SessionUserID:  userID,
+		RuntimeSession: runtimeSession,
+		MsgCount:       777,
+	}
+
+	const smallMessageCount = 600
+	for index := 0; index < smallMessageCount; index++ {
+		message := runtimetypes.NewAssistantMessage("reply-" + strconv.Itoa(index))
+		if index%2 == 0 {
+			message = runtimetypes.NewUserMessage("prompt-" + strconv.Itoa(index))
+		}
+		appendRuntimeMessage(session, *message)
+		if err := syncRuntimeSessionFromChat(session); err != nil {
+			t.Fatalf("sync message %d: %v", index, err)
+		}
+		if len(session.Messages) > 128 {
+			t.Fatalf("CLI history grew beyond hot message limit at %d: %d", index, len(session.Messages))
+		}
+		if len(session.RuntimeSession.History) > 128 {
+			t.Fatalf("runtime history grew beyond hot message limit at %d: %d", index, len(session.RuntimeSession.History))
+		}
+	}
+
+	largeContent := strings.Repeat("large-tool-output-", 48*1024)
+	appendRuntimeMessage(session, *runtimetypes.NewToolMessage("call-large", largeContent))
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		t.Fatalf("sync large tool result: %v", err)
+	}
+	if session.MsgCount != 777 {
+		t.Fatalf("expected cumulative message counter to survive projection trim, got %d", session.MsgCount)
+	}
+	if session.StatusMessageCount != countChatStatusMessages(session.Messages) {
+		t.Fatalf("status count does not match bounded CLI history: %d", session.StatusMessageCount)
+	}
+	hotJSON, err := json.Marshal(session.Messages)
+	if err != nil {
+		t.Fatalf("marshal hot history: %v", err)
+	}
+	if len(hotJSON) > 2*1024*1024+1024 {
+		t.Fatalf("hot CLI history exceeded byte budget: %d", len(hotJSON))
+	}
+
+	wantCanonicalCount := smallMessageCount + 1
+	canonicalCount, err := manager.MessageCount(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("count canonical messages: %v", err)
+	}
+	if canonicalCount != wantCanonicalCount {
+		t.Fatalf("expected %d canonical messages, got %d", wantCanonicalCount, canonicalCount)
+	}
+	page, err := manager.GetHistoryPage(context.Background(), runtimeSession.ID, 0, 1)
+	if err != nil {
+		t.Fatalf("load latest canonical message: %v", err)
+	}
+	if len(page.Messages) != 1 || page.Messages[0].Content != largeContent {
+		t.Fatalf("expected canonical large tool result to remain complete")
 	}
 }
 

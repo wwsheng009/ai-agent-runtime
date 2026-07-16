@@ -388,6 +388,11 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 			return err
 		}
 	}
+	// SQLite replaces History with the bounded prompt projection after the
+	// canonical append commits. Keep the live CLI history on that projection as
+	// well so a long-running process does not retain every previous turn.
+	session.Messages = runtimeSession.History
+	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 	session.RuntimeSession = runtimeSession
 	return nil
 }

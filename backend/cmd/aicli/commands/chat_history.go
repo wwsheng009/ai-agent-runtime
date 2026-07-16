@@ -58,7 +58,7 @@ func appendRuntimeMessage(session *ChatSession, message runtimetypes.Message) {
 	if session == nil {
 		return
 	}
-	session.Messages = append(cloneRuntimeMessages(session.Messages), *message.Clone())
+	session.Messages = append(session.Messages, *message.Clone())
 	session.StatusMessageCount = countChatStatusMessages(session.Messages)
 }
 
