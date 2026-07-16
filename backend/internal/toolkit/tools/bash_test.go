@@ -12,6 +12,7 @@ import (
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
 type fakeExecuter struct {
@@ -36,11 +37,30 @@ type batchInspectExecuter struct {
 	failures map[string]error
 }
 
+type parallelBatchExecuter struct {
+	started chan string
+	release chan struct{}
+}
+
 func (f *batchInspectExecuter) Execute(_ context.Context, command string, timeout time.Duration, _ ...ExecOption) (CommandExecutionResult, error) {
 	f.commands = append(f.commands, command)
 	f.timeouts = append(f.timeouts, timeout)
 	err := f.failures[command]
 	return CommandExecutionResult{Output: "output for " + command}, err
+}
+
+func (f *parallelBatchExecuter) Execute(ctx context.Context, command string, _ time.Duration, _ ...ExecOption) (CommandExecutionResult, error) {
+	select {
+	case f.started <- command:
+	case <-ctx.Done():
+		return CommandExecutionResult{}, ctx.Err()
+	}
+	select {
+	case <-f.release:
+		return CommandExecutionResult{Output: "output for " + command}, nil
+	case <-ctx.Done():
+		return CommandExecutionResult{}, ctx.Err()
+	}
 }
 
 func (f *inspectExecuter) Execute(ctx context.Context, command string, timeout time.Duration, opts ...ExecOption) (CommandExecutionResult, error) {
@@ -137,6 +157,7 @@ func TestBashTool_CommandBatchCanStopOnError(t *testing.T) {
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"stop_on_error": true,
+		"parallel":      true,
 		"commands": []interface{}{
 			map[string]interface{}{"command": "first"},
 			map[string]interface{}{"command": "second"},
@@ -148,6 +169,70 @@ func TestBashTool_CommandBatchCanStopOnError(t *testing.T) {
 	}
 	if len(inspector.commands) != 1 || result.Metadata["executed_count"] != 1 {
 		t.Fatalf("expected batch to stop after first command, commands=%#v metadata=%#v", inspector.commands, result.Metadata)
+	}
+	if result.Metadata["parallel_downgraded_reason"] != "stop_on_error_requires_ordered_execution" {
+		t.Fatalf("expected graceful ordered fallback, got metadata=%#v", result.Metadata)
+	}
+}
+
+func TestBashTool_CommandBatchAcceptsStringItems(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &batchInspectExecuter{}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"commands": []interface{}{"git diff --check", "go test ./internal/agent"},
+	})
+
+	if err != nil || !result.Success {
+		t.Fatalf("expected string command batch to succeed, result=%#v err=%v", result, err)
+	}
+	if got := strings.Join(inspector.commands, "|"); got != "git diff --check|go test ./internal/agent" {
+		t.Fatalf("unexpected commands: %q", got)
+	}
+}
+
+func TestBashTool_CommandBatchRunsIndependentChecksInParallel(t *testing.T) {
+	tool := NewBashTool()
+	executer := &parallelBatchExecuter{started: make(chan string, 2), release: make(chan struct{})}
+	tool.executer = executer
+	type execution struct {
+		result *toolkit.ToolResult
+		err    error
+	}
+	done := make(chan execution, 1)
+	go func() {
+		result, err := tool.Execute(context.Background(), map[string]interface{}{
+			"parallel": true, "max_parallel": 2,
+			"commands": []interface{}{
+				map[string]interface{}{"command": "first"},
+				map[string]interface{}{"command": "second"},
+			},
+		})
+		done <- execution{result: result, err: err}
+	}()
+
+	started := map[string]bool{}
+	for len(started) < 2 {
+		select {
+		case command := <-executer.started:
+			started[command] = true
+		case <-time.After(time.Second):
+			t.Fatal("expected both batch commands to start concurrently")
+		}
+	}
+	close(executer.release)
+	completed := <-done
+	if completed.err != nil || !completed.result.Success {
+		t.Fatalf("expected parallel batch to succeed, result=%#v err=%v", completed.result, completed.err)
+	}
+	if completed.result.Metadata["parallel"] != true || completed.result.Metadata["parallelism"] != 2 {
+		t.Fatalf("expected parallel metadata, got %#v", completed.result.Metadata)
+	}
+	first := strings.Index(completed.result.Content, "first")
+	second := strings.Index(completed.result.Content, "second")
+	if first < 0 || second < 0 || first >= second {
+		t.Fatalf("expected input-ordered output, got %q", completed.result.Content)
 	}
 }
 

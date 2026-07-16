@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
@@ -59,7 +61,7 @@ func NewBashTool() *BashTool {
 			},
 			"commands": map[string]interface{}{
 				"type":        "array",
-				"description": "顺序执行的命令批次。每项可覆盖 workdir 和 timeout；默认执行全部命令并一次返回所有结果。",
+				"description": "命令批次。默认顺序执行；仅当各命令互不依赖且只读时可设置 parallel=true。每项可覆盖 workdir 和 timeout。",
 				"items": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -76,6 +78,14 @@ func NewBashTool() *BashTool {
 			"stop_on_error": map[string]interface{}{
 				"type":        "boolean",
 				"description": "commands 批次中某条失败后是否停止；默认 false，以便一次收集全部检查结果。",
+			},
+			"parallel": map[string]interface{}{
+				"type":        "boolean",
+				"description": "commands 是否并发执行。仅用于互不依赖的只读检查；默认 false。结果仍按输入顺序返回。",
+			},
+			"max_parallel": map[string]interface{}{
+				"type":        "integer",
+				"description": "parallel=true 时的最大并发命令数。默认根据 CPU 自动选择，最多 4；显式设置可覆盖。",
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
@@ -266,6 +276,14 @@ func parseBashCommandBatch(params map[string]interface{}) ([]bashCommandBatchIte
 	}
 	commands := make([]bashCommandBatchItem, 0, len(values))
 	for index, rawItem := range values {
+		if command, isString := rawItem.(string); isString {
+			command = strings.TrimSpace(command)
+			if command == "" {
+				return nil, true, fmt.Errorf("commands[%d] 不能为空", index)
+			}
+			commands = append(commands, bashCommandBatchItem{Command: command, Params: map[string]interface{}{}})
+			continue
+		}
 		item, ok := rawItem.(map[string]interface{})
 		if !ok {
 			return nil, true, fmt.Errorf("commands[%d] 必须是对象", index)
@@ -281,21 +299,110 @@ func parseBashCommandBatch(params map[string]interface{}) ([]bashCommandBatchIte
 
 func (b *BashTool) executeBatch(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem) (*toolkit.ToolResult, error) {
 	stopOnError, _ := resolveBoolParam(parent, "stop_on_error")
+	parallel, _ := resolveBoolParam(parent, "parallel")
+	if parallel && stopOnError {
+		result, err := b.executeSequentialBatch(ctx, parent, commands, true)
+		if result != nil && result.Metadata != nil {
+			result.Metadata["parallel_requested"] = true
+			result.Metadata["parallel_downgraded_reason"] = "stop_on_error_requires_ordered_execution"
+		}
+		return result, err
+	}
+	if parallel {
+		return b.executeParallelBatch(ctx, parent, commands)
+	}
+	return b.executeSequentialBatch(ctx, parent, commands, stopOnError)
+}
+
+func (b *BashTool) executeSequentialBatch(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem, stopOnError bool) (*toolkit.ToolResult, error) {
+	results := make([]*toolkit.ToolResult, 0, len(commands))
+	for _, item := range commands {
+		result := b.executeBatchItem(ctx, parent, item)
+		results = append(results, result)
+		if stopOnError && !result.Success {
+			break
+		}
+	}
+	return buildBashBatchResult(ctx, parent, commands, results, stopOnError, 1)
+}
+
+func (b *BashTool) executeParallelBatch(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem) (*toolkit.ToolResult, error) {
+	parallelism, err := resolveBashBatchParallelism(parent, len(commands))
+	if err != nil {
+		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
+	}
+	results := make([]*toolkit.ToolResult, len(commands))
+	sem := make(chan struct{}, parallelism)
+	var wg sync.WaitGroup
+	for index, item := range commands {
+		wg.Add(1)
+		go func(index int, item bashCommandBatchItem) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[index] = &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: ctx.Err()}
+				return
+			}
+			results[index] = b.executeBatchItem(ctx, parent, item)
+		}(index, item)
+	}
+	wg.Wait()
+	return buildBashBatchResult(ctx, parent, commands, results, false, parallelism)
+}
+
+func resolveBashBatchParallelism(params map[string]interface{}, commandCount int) (int, error) {
+	if commandCount <= 1 {
+		return 1, nil
+	}
+	parallelism := runtime.GOMAXPROCS(0)
+	if parallelism <= 0 {
+		parallelism = 1
+	}
+	if parallelism > 4 {
+		parallelism = 4
+	}
+	if raw, ok := params["max_parallel"]; ok && raw != nil {
+		value, err := extractPositiveInt(raw)
+		if err != nil {
+			return 0, fmt.Errorf("max_parallel 参数无效: %w", err)
+		}
+		parallelism = value
+	}
+	if parallelism > commandCount {
+		parallelism = commandCount
+	}
+	return parallelism, nil
+}
+
+func (b *BashTool) executeBatchItem(ctx context.Context, parent map[string]interface{}, item bashCommandBatchItem) *toolkit.ToolResult {
+	commandParams := bashBatchCommandParams(parent, item.Params)
+	commandParams["command"] = item.Command
+	delete(commandParams, "commands")
+	delete(commandParams, "parallel")
+	delete(commandParams, "max_parallel")
+	delete(commandParams, "stop_on_error")
+	result, err := b.Execute(ctx, commandParams)
+	if err != nil {
+		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}
+	}
+	if result == nil {
+		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: fmt.Errorf("bash command returned no result")}
+	}
+	return result
+}
+
+func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem, results []*toolkit.ToolResult, stopOnError bool, parallelism int) (*toolkit.ToolResult, error) {
 	sections := make([]string, 0, len(commands))
 	items := make([]map[string]interface{}, 0, len(commands))
 	failed := 0
 	commandTexts := make([]string, 0, len(commands))
 	artifactPaths := make([]string, 0, len(commands))
 	batchArtifactPath := ""
-	for index, item := range commands {
+	for index, result := range results {
+		item := commands[index]
 		commandTexts = append(commandTexts, item.Command)
-		commandParams := bashBatchCommandParams(parent, item.Params)
-		commandParams["command"] = item.Command
-		delete(commandParams, "commands")
-		result, err := b.Execute(ctx, commandParams)
-		if err != nil {
-			result = &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}
-		}
 		entry := map[string]interface{}{
 			"index": index, "command": item.Command, "success": result != nil && result.Success,
 		}
@@ -320,13 +427,11 @@ func (b *BashTool) executeBatch(ctx context.Context, parent map[string]interface
 		}
 		sections = append(sections, fmt.Sprintf("===== command %d/%d [%s] =====\n%s\n%s", index+1, len(commands), status, item.Command, strings.TrimSpace(content)))
 		items = append(items, entry)
-		if failed > 0 && stopOnError {
-			break
-		}
 	}
 	metadata := map[string]interface{}{
 		"batch": true, "requested_count": len(commands), "executed_count": len(items),
 		"failed_count": failed, "stop_on_error": stopOnError, "items": items,
+		"parallel": parallelism > 1, "parallelism": parallelism,
 		"command": strings.Join(commandTexts, "\n"), "commands": commandTexts,
 	}
 	batchOutput := strings.Join(sections, "\n\n")
