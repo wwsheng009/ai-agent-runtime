@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -658,6 +659,59 @@ func TestInMemoryRuntimeStoreBoundsPerSessionRuntimeCollections(t *testing.T) {
 	lastMailbox, err := store.LastMailboxSeq(ctx, "bounded-session")
 	require.NoError(t, err)
 	assert.Equal(t, int64(6), lastMailbox)
+}
+
+func TestBoundedRuntimeLogBoundsCountAndBytes(t *testing.T) {
+	log := &boundedRuntimeLog[string]{}
+	require.True(t, log.append("one", 3, 3, 6))
+	require.True(t, log.append("two", 3, 3, 6))
+	require.True(t, log.append("three", 3, 3, 6))
+	require.Equal(t, 2, log.len())
+	assert.Equal(t, "two", *log.at(0))
+	assert.Equal(t, "three", *log.at(1))
+	assert.Equal(t, int64(6), log.bytes)
+
+	require.True(t, log.append("four", 3, 3, 6))
+	assert.Equal(t, "three", *log.at(0))
+	assert.Equal(t, "four", *log.at(1))
+	assert.Equal(t, int64(6), log.bytes)
+
+	assert.False(t, log.append("oversized", 7, 3, 6))
+	require.Equal(t, 2, log.len())
+	assert.Equal(t, "three", *log.at(0))
+	assert.Equal(t, "four", *log.at(1))
+}
+
+func TestInMemoryRuntimeStoreRejectsOversizedRetainedPayloads(t *testing.T) {
+	store := NewInMemoryRuntimeStore(16)
+	ctx := context.Background()
+	oversizedEvent := strings.Repeat("e", int(defaultInMemoryEventBytes)+1)
+
+	seq, err := store.AppendEvent(ctx, runtimeevents.Event{
+		Type:      "oversized",
+		SessionID: "bounded-bytes",
+		Payload:   map[string]interface{}{"content": oversizedEvent},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), seq)
+	events, err := store.ListEvents(ctx, "bounded-bytes", 0, 0)
+	require.NoError(t, err)
+	assert.Empty(t, events)
+	lastSeq, err := store.LastEventSeq(ctx, "bounded-bytes")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), lastSeq)
+
+	oversizedReceipt := make([]byte, int(defaultInMemoryReceiptBytes)+1)
+	require.NoError(t, store.SaveToolReceipt(ctx, ToolExecutionReceipt{
+		SessionID:   "bounded-bytes",
+		ToolCallID:  "oversized-receipt",
+		MessageJSON: oversizedReceipt,
+		CreatedAt:   time.Now().UTC(),
+	}))
+	receipt, err := store.GetToolReceipt(ctx, "bounded-bytes", "oversized-receipt")
+	require.NoError(t, err)
+	assert.Nil(t, receipt)
+	assert.Zero(t, store.receiptBytes["bounded-bytes"])
 }
 
 func TestInMemoryRuntimeStoreUsesSafeDefaultRetention(t *testing.T) {

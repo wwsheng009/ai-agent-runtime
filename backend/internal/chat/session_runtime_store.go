@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -203,6 +204,13 @@ type RuntimeStoreConfig struct {
 
 const defaultInMemoryRuntimeRetention = 2048
 
+const (
+	defaultInMemoryEventBytes          int64 = 8 << 20
+	defaultInMemoryMailboxBytes        int64 = 4 << 20
+	defaultInMemoryControlMailboxBytes int64 = 4 << 20
+	defaultInMemoryReceiptBytes        int64 = 8 << 20
+)
+
 // InMemoryRuntimeStore stores bounded runtime state and events in memory.
 type InMemoryRuntimeStore struct {
 	mu             sync.RWMutex
@@ -211,6 +219,7 @@ type InMemoryRuntimeStore struct {
 	mailbox        map[string]*boundedRuntimeLog[team.MailMessage]
 	controlMailbox map[string]*boundedRuntimeLog[team.MailMessage]
 	receipts       map[string]map[string]ToolExecutionReceipt
+	receiptBytes   map[string]int64
 	seq            map[string]int64
 	mailboxSeq     map[string]int64
 	controlSeq     map[string]int64
@@ -269,49 +278,197 @@ type storedEvent struct {
 // without copying the entire retention window on every append.
 type boundedRuntimeLog[T any] struct {
 	entries []T
+	sizes   []int64
 	start   int
+	count   int
+	bytes   int64
 }
 
-func (l *boundedRuntimeLog[T]) append(value T, limit int) {
+func (l *boundedRuntimeLog[T]) append(value T, size int64, limit int, byteLimit int64) bool {
 	if l == nil || limit <= 0 {
-		return
+		return false
 	}
-	if len(l.entries) < limit {
-		l.entries = append(l.entries, value)
-		return
+	if size < 0 {
+		size = 0
 	}
-	l.entries[l.start] = value
-	l.start++
-	if l.start == len(l.entries) {
-		l.start = 0
+	if byteLimit > 0 && size > byteLimit {
+		return false
 	}
+	for l.count >= limit || (byteLimit > 0 && l.bytes+size > byteLimit) {
+		l.evictOldest()
+	}
+	l.ensureCapacity(limit)
+	physical := (l.start + l.count) % len(l.entries)
+	l.entries[physical] = value
+	l.sizes[physical] = size
+	l.count++
+	l.bytes += size
+	return true
 }
 
 func (l *boundedRuntimeLog[T]) len() int {
 	if l == nil {
 		return 0
 	}
-	return len(l.entries)
+	return l.count
 }
 
 func (l *boundedRuntimeLog[T]) at(index int) *T {
-	if l == nil || index < 0 || index >= len(l.entries) {
+	if l == nil || index < 0 || index >= l.count {
 		return nil
 	}
-	physical := l.start + index
-	if physical >= len(l.entries) {
-		physical -= len(l.entries)
-	}
+	physical := (l.start + index) % len(l.entries)
 	return &l.entries[physical]
 }
 
-func appendBoundedRuntimeLog[T any](logs map[string]*boundedRuntimeLog[T], key string, value T, limit int) {
+func (l *boundedRuntimeLog[T]) ensureCapacity(limit int) {
+	if l.count < len(l.entries) {
+		return
+	}
+	capacity := len(l.entries) * 2
+	if capacity < 1 {
+		capacity = 1
+	}
+	if capacity > limit {
+		capacity = limit
+	}
+	entries := make([]T, capacity)
+	sizes := make([]int64, capacity)
+	for index := 0; index < l.count; index++ {
+		physical := (l.start + index) % len(l.entries)
+		entries[index] = l.entries[physical]
+		sizes[index] = l.sizes[physical]
+	}
+	l.entries = entries
+	l.sizes = sizes
+	l.start = 0
+}
+
+func (l *boundedRuntimeLog[T]) evictOldest() {
+	if l == nil || l.count == 0 {
+		return
+	}
+	var zero T
+	l.entries[l.start] = zero
+	l.bytes -= l.sizes[l.start]
+	l.sizes[l.start] = 0
+	l.start = (l.start + 1) % len(l.entries)
+	l.count--
+	if l.count == 0 {
+		l.start = 0
+		l.bytes = 0
+	}
+}
+
+func appendBoundedRuntimeLog[T any](logs map[string]*boundedRuntimeLog[T], key string, value T, size int64, limit int, byteLimit int64) {
 	log := logs[key]
 	if log == nil {
 		log = &boundedRuntimeLog[T]{}
 		logs[key] = log
 	}
-	log.append(value, limit)
+	if !log.append(value, size, limit, byteLimit) && log.len() == 0 {
+		delete(logs, key)
+	}
+}
+
+func estimateRuntimeEventBytes(event runtimeevents.Event) int64 {
+	return int64(len(event.Type)+len(event.TraceID)+len(event.AgentName)+len(event.SessionID)+len(event.ToolName)) +
+		estimateRuntimeValueBytes(event.Payload, 0)
+}
+
+func estimateMailMessageBytes(message team.MailMessage) int64 {
+	size := len(message.ID) + len(message.TeamID) + len(message.FromAgent) + len(message.ToAgent) + len(message.Kind) + len(message.Body)
+	if message.TaskID != nil {
+		size += len(*message.TaskID)
+	}
+	return int64(size) + estimateRuntimeValueBytes(message.Metadata, 0)
+}
+
+func estimateToolReceiptBytes(receipt ToolExecutionReceipt) int64 {
+	return int64(len(receipt.SessionID) + len(receipt.ToolCallID) + len(receipt.ToolName) + len(receipt.MessageJSON))
+}
+
+func estimateRuntimeValueBytes(value interface{}, depth int) int64 {
+	if value == nil || depth > 16 {
+		return 0
+	}
+	switch typed := value.(type) {
+	case string:
+		return int64(len(typed))
+	case json.RawMessage:
+		return int64(len(typed))
+	case []byte:
+		return int64(len(typed))
+	case map[string]interface{}:
+		var size int64
+		for key, item := range typed {
+			size += int64(len(key)) + estimateRuntimeValueBytes(item, depth+1)
+		}
+		return size
+	case map[string]string:
+		var size int64
+		for key, item := range typed {
+			size += int64(len(key) + len(item))
+		}
+		return size
+	case []interface{}:
+		var size int64
+		for _, item := range typed {
+			size += estimateRuntimeValueBytes(item, depth+1)
+		}
+		return size
+	case []string:
+		var size int64
+		for _, item := range typed {
+			size += int64(len(item))
+		}
+		return size
+	case time.Time:
+		return 24
+	default:
+		return estimateReflectedRuntimeValueBytes(reflect.ValueOf(value), depth+1)
+	}
+}
+
+func estimateReflectedRuntimeValueBytes(value reflect.Value, depth int) int64 {
+	if !value.IsValid() || depth > 16 {
+		return 0
+	}
+	for value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return 0
+		}
+		value = value.Elem()
+	}
+	switch value.Kind() {
+	case reflect.String:
+		return int64(value.Len())
+	case reflect.Slice, reflect.Array:
+		if value.Type().Elem().Kind() == reflect.Uint8 {
+			return int64(value.Len())
+		}
+		var size int64
+		for index := 0; index < value.Len(); index++ {
+			size += estimateReflectedRuntimeValueBytes(value.Index(index), depth+1)
+		}
+		return size
+	case reflect.Map:
+		var size int64
+		iterator := value.MapRange()
+		for iterator.Next() {
+			size += estimateReflectedRuntimeValueBytes(iterator.Key(), depth+1)
+			size += estimateReflectedRuntimeValueBytes(iterator.Value(), depth+1)
+		}
+		return size
+	case reflect.Struct:
+		var size int64
+		for index := 0; index < value.NumField(); index++ {
+			size += estimateReflectedRuntimeValueBytes(value.Field(index), depth+1)
+		}
+		return size
+	default:
+		return 16
+	}
 }
 
 type eventWatcher struct {
@@ -335,6 +492,7 @@ func NewInMemoryRuntimeStore(retention int) *InMemoryRuntimeStore {
 		mailbox:        make(map[string]*boundedRuntimeLog[team.MailMessage]),
 		controlMailbox: make(map[string]*boundedRuntimeLog[team.MailMessage]),
 		receipts:       make(map[string]map[string]ToolExecutionReceipt),
+		receiptBytes:   make(map[string]int64),
 		seq:            make(map[string]int64),
 		mailboxSeq:     make(map[string]int64),
 		controlSeq:     make(map[string]int64),
@@ -387,6 +545,7 @@ func (s *InMemoryRuntimeStore) DeleteState(ctx context.Context, sessionID string
 	delete(s.mailbox, sessionID)
 	delete(s.controlMailbox, sessionID)
 	delete(s.receipts, sessionID)
+	delete(s.receiptBytes, sessionID)
 	delete(s.seq, sessionID)
 	delete(s.mailboxSeq, sessionID)
 	delete(s.controlSeq, sessionID)
@@ -481,6 +640,21 @@ func (s *InMemoryRuntimeStore) SaveToolReceipt(ctx context.Context, receipt Tool
 	if receipt.CreatedAt.IsZero() {
 		receipt.CreatedAt = time.Now().UTC()
 	}
+	if estimateToolReceiptBytes(receipt) > defaultInMemoryReceiptBytes {
+		s.mu.Lock()
+		if bySession := s.receipts[receipt.SessionID]; bySession != nil {
+			if previous, ok := bySession[receipt.ToolCallID]; ok {
+				s.receiptBytes[receipt.SessionID] -= estimateToolReceiptBytes(previous)
+				delete(bySession, receipt.ToolCallID)
+			}
+			if len(bySession) == 0 {
+				delete(s.receipts, receipt.SessionID)
+				delete(s.receiptBytes, receipt.SessionID)
+			}
+		}
+		s.mu.Unlock()
+		return nil
+	}
 	if len(receipt.MessageJSON) > 0 {
 		receipt.MessageJSON = append(json.RawMessage(nil), receipt.MessageJSON...)
 	}
@@ -489,14 +663,18 @@ func (s *InMemoryRuntimeStore) SaveToolReceipt(ctx context.Context, receipt Tool
 	if s.receipts[receipt.SessionID] == nil {
 		s.receipts[receipt.SessionID] = make(map[string]ToolExecutionReceipt)
 	}
+	if previous, ok := s.receipts[receipt.SessionID][receipt.ToolCallID]; ok {
+		s.receiptBytes[receipt.SessionID] -= estimateToolReceiptBytes(previous)
+	}
 	s.receipts[receipt.SessionID][receipt.ToolCallID] = receipt
+	s.receiptBytes[receipt.SessionID] += estimateToolReceiptBytes(receipt)
 	s.trimToolReceiptsLocked(receipt.SessionID)
 	return nil
 }
 
 func (s *InMemoryRuntimeStore) trimToolReceiptsLocked(sessionID string) {
 	bySession := s.receipts[sessionID]
-	for len(bySession) > s.retention {
+	for len(bySession) > s.retention || s.receiptBytes[sessionID] > defaultInMemoryReceiptBytes {
 		oldestID := ""
 		var oldestTime time.Time
 		for toolCallID, receipt := range bySession {
@@ -506,7 +684,12 @@ func (s *InMemoryRuntimeStore) trimToolReceiptsLocked(sessionID string) {
 				oldestTime = receipt.CreatedAt
 			}
 		}
+		s.receiptBytes[sessionID] -= estimateToolReceiptBytes(bySession[oldestID])
 		delete(bySession, oldestID)
+	}
+	if len(bySession) == 0 {
+		delete(s.receipts, sessionID)
+		delete(s.receiptBytes, sessionID)
 	}
 }
 
@@ -543,9 +726,13 @@ func (s *InMemoryRuntimeStore) DeleteToolReceipt(ctx context.Context, sessionID,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if bySession := s.receipts[sessionID]; bySession != nil {
+		if receipt, ok := bySession[toolCallID]; ok {
+			s.receiptBytes[sessionID] -= estimateToolReceiptBytes(receipt)
+		}
 		delete(bySession, toolCallID)
 		if len(bySession) == 0 {
 			delete(s.receipts, sessionID)
+			delete(s.receiptBytes, sessionID)
 		}
 	}
 	return nil
@@ -597,7 +784,7 @@ func (s *InMemoryRuntimeStore) AppendEvent(ctx context.Context, event runtimeeve
 	s.seq[event.SessionID]++
 	seq := s.seq[event.SessionID]
 	entry := storedEvent{Seq: seq, Event: cloneRuntimeEvent(event)}
-	appendBoundedRuntimeLog(s.events, event.SessionID, entry, s.retention)
+	appendBoundedRuntimeLog(s.events, event.SessionID, entry, estimateRuntimeEventBytes(event), s.retention, defaultInMemoryEventBytes)
 	s.mu.Unlock()
 	s.notifyEventWatchers(seq, event)
 	return seq, nil
@@ -640,9 +827,9 @@ func (s *InMemoryRuntimeStore) AppendMailbox(ctx context.Context, sessionID stri
 		controlMessage.Seq = controlSeq
 		controlMessage.ControlSeq = controlSeq
 		controlMessage.SessionMailboxSeq = mailboxSeq
-		appendBoundedRuntimeLog(s.controlMailbox, sessionID, controlMessage, s.retention)
+		appendBoundedRuntimeLog(s.controlMailbox, sessionID, controlMessage, estimateMailMessageBytes(controlMessage), s.retention, defaultInMemoryControlMailboxBytes)
 	}
-	appendBoundedRuntimeLog(s.mailbox, sessionID, cloneTeamMailMessage(message), s.retention)
+	appendBoundedRuntimeLog(s.mailbox, sessionID, cloneTeamMailMessage(message), estimateMailMessageBytes(message), s.retention, defaultInMemoryMailboxBytes)
 	s.mu.Unlock()
 	if controlMessage.ControlSeq > 0 {
 		if globalPrimaryUsed {
@@ -714,8 +901,8 @@ func (s *InMemoryRuntimeStore) AppendAgentControlMailbox(ctx context.Context, se
 	controlMessage.Seq = controlSeq
 	controlMessage.ControlSeq = controlSeq
 	controlMessage.SessionMailboxSeq = mailboxSeq
-	appendBoundedRuntimeLog(s.controlMailbox, sessionID, controlMessage, s.retention)
-	appendBoundedRuntimeLog(s.mailbox, sessionID, cloneTeamMailMessage(message), s.retention)
+	appendBoundedRuntimeLog(s.controlMailbox, sessionID, controlMessage, estimateMailMessageBytes(controlMessage), s.retention, defaultInMemoryControlMailboxBytes)
+	appendBoundedRuntimeLog(s.mailbox, sessionID, cloneTeamMailMessage(message), estimateMailMessageBytes(message), s.retention, defaultInMemoryMailboxBytes)
 	s.mu.Unlock()
 	if globalPrimaryUsed {
 		if refreshed, _, err := s.appendPrimaryGlobalMailboxRecord(ctx, sessionID, controlMessage); err != nil {
