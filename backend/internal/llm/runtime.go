@@ -450,9 +450,10 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 	policy := newRuntimeRetryPolicy(maxRetries, retryTuning, retryRules)
 	var lastError error
 	startedAt := time.Now()
+	activeMaxAttempts := policy.initialMaxAttempts()
 
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
-		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
+		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		response, err := provider.Call(attemptCtx, req)
 		if err == nil {
 			return response, nil
@@ -467,6 +468,7 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 		if retryErr != nil {
 			return nil, retryErr
 		}
+		activeMaxAttempts = retryResult.MaxAttempts
 		if !retryResult.Decision.Retryable {
 			return nil, err
 		}
@@ -528,7 +530,7 @@ func (r *LLMRuntime) Stream(ctx context.Context, req *LLMRequest) (<-chan Stream
 		Model:    req.Model,
 	}
 
-	stream, attempt, err := openStreamWithRetry(ctx, provider, policy, startedAt, 1, req, meta)
+	stream, attempt, err := openStreamWithRetry(ctx, provider, policy, startedAt, 1, policy.initialMaxAttempts(), req, meta)
 	if err != nil {
 		return nil, err
 	}
@@ -538,19 +540,22 @@ func (r *LLMRuntime) Stream(ctx context.Context, req *LLMRequest) (<-chan Stream
 	return out, nil
 }
 
-func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPolicy, startedAt time.Time, startAttempt int, req *LLMRequest, meta retryExecutionMeta) (<-chan StreamChunk, int, error) {
+func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPolicy, startedAt time.Time, startAttempt int, activeMaxAttempts int, req *LLMRequest, meta retryExecutionMeta) (<-chan StreamChunk, int, error) {
 	if provider == nil {
 		return nil, startAttempt, errors.New(errors.ErrValidationFailed, "provider cannot be nil")
 	}
 	if startAttempt < 1 {
 		startAttempt = 1
 	}
+	if activeMaxAttempts < 1 {
+		activeMaxAttempts = policy.initialMaxAttempts()
+	}
 
 	var lastErr error
 	lastAttempt := startAttempt
 	for attempt := startAttempt; attempt <= policy.MaxAttempts; attempt++ {
 		lastAttempt = attempt
-		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
+		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		stream, err := provider.Stream(attemptCtx, req)
 		if err == nil && stream != nil {
 			return stream, attempt, nil
@@ -564,6 +569,7 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 		if retryErr != nil {
 			return nil, attempt, retryErr
 		}
+		activeMaxAttempts = retryResult.MaxAttempts
 		if !retryResult.Decision.Retryable {
 			return nil, attempt, err
 		}
@@ -593,7 +599,7 @@ func forwardStreamWithRetry(ctx context.Context, out chan<- StreamChunk, provide
 					return
 				}
 				if retryResult.Retry {
-					nextStream, nextAttempt, openErr := openStreamWithRetry(ctx, provider, policy, startedAt, attempt+1, req, meta)
+					nextStream, nextAttempt, openErr := openStreamWithRetry(ctx, provider, policy, startedAt, attempt+1, retryResult.MaxAttempts, req, meta)
 					if openErr != nil {
 						sendStreamChunk(ctx, out, StreamChunk{Type: EventTypeError, Error: openErr.Error(), Done: true})
 						return

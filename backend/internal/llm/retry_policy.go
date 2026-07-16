@@ -69,13 +69,14 @@ type RetryStatusCodeMatcher struct {
 }
 
 type retryPolicy struct {
-	MaxAttempts    int
-	BaseDelay      time.Duration
-	MaxDelay       time.Duration
-	MaxElapsedTime time.Duration
-	Multiplier     float64
-	Randomization  float64
-	Rules          []RetryRule
+	MaxAttempts        int
+	DefaultMaxAttempts int
+	BaseDelay          time.Duration
+	MaxDelay           time.Duration
+	MaxElapsedTime     time.Duration
+	Multiplier         float64
+	Randomization      float64
+	Rules              []RetryRule
 }
 
 type retryExhaustedError struct {
@@ -195,13 +196,14 @@ func newRuntimeRetryPolicy(maxRetries int, tuning RetryTuning, rules []RetryRule
 	tuning = tuning.normalized()
 	rules = cloneRetryRules(rules)
 	return retryPolicy{
-		MaxAttempts:    maxRetryPolicyInt(attempts, maxRetryRuleAttempts(rules)),
-		BaseDelay:      tuning.BaseDelay,
-		MaxDelay:       tuning.MaxDelay,
-		MaxElapsedTime: tuning.MaxElapsedTime,
-		Multiplier:     tuning.Multiplier,
-		Randomization:  tuning.Randomization,
-		Rules:          rules,
+		MaxAttempts:        maxRetryPolicyInt(attempts, maxRetryRuleAttempts(rules)),
+		DefaultMaxAttempts: attempts,
+		BaseDelay:          tuning.BaseDelay,
+		MaxDelay:           tuning.MaxDelay,
+		MaxElapsedTime:     tuning.MaxElapsedTime,
+		Multiplier:         tuning.Multiplier,
+		Randomization:      tuning.Randomization,
+		Rules:              rules,
 	}
 }
 
@@ -213,13 +215,14 @@ func newProviderRetryPolicy(maxRetries int, tuning RetryTuning, rules []RetryRul
 	tuning = tuning.normalized()
 	rules = cloneRetryRules(rules)
 	return retryPolicy{
-		MaxAttempts:    maxRetryPolicyInt(attempts, maxRetryRuleAttempts(rules)),
-		BaseDelay:      tuning.BaseDelay,
-		MaxDelay:       tuning.MaxDelay,
-		MaxElapsedTime: tuning.MaxElapsedTime,
-		Multiplier:     tuning.Multiplier,
-		Randomization:  tuning.Randomization,
-		Rules:          rules,
+		MaxAttempts:        maxRetryPolicyInt(attempts, maxRetryRuleAttempts(rules)),
+		DefaultMaxAttempts: attempts,
+		BaseDelay:          tuning.BaseDelay,
+		MaxDelay:           tuning.MaxDelay,
+		MaxElapsedTime:     tuning.MaxElapsedTime,
+		Multiplier:         tuning.Multiplier,
+		Randomization:      tuning.Randomization,
+		Rules:              rules,
 	}
 }
 
@@ -231,7 +234,14 @@ func (p retryPolicy) maxAttemptsForDecision(decision retryDecision) int {
 	if decision.MaxAttempts > 0 {
 		return decision.MaxAttempts
 	}
+	if p.DefaultMaxAttempts > 0 {
+		return p.DefaultMaxAttempts
+	}
 	return p.MaxAttempts
+}
+
+func (p retryPolicy) initialMaxAttempts() int {
+	return p.maxAttemptsForDecision(retryDecision{})
 }
 
 func (p retryPolicy) delayForDecision(attempt int, decision retryDecision) time.Duration {

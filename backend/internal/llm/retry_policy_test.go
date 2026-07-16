@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -116,6 +117,82 @@ func TestNewProviderRetryPolicy_UsesConfiguredTuning(t *testing.T) {
 	assert.Equal(t, 1.5, policy.Multiplier)
 	assert.Equal(t, 400*time.Millisecond, policy.delayForDecision(1, policy.decisionForError(fmt.Errorf("HTTP 500"))))
 	assert.Equal(t, 600*time.Millisecond, policy.delayForDecision(2, policy.decisionForError(fmt.Errorf("HTTP 500"))))
+}
+
+func TestRetryPolicy_KeepsRuleAttemptLimitsErrorSpecific(t *testing.T) {
+	rules := []RetryRule{
+		{
+			Name:       "rate_limit_retry",
+			Enabled:    true,
+			MaxRetries: 10,
+			Keyword: RetryKeywordMatcher{
+				Values: []string{"rate limit"},
+			},
+		},
+		{
+			Name:       "http_5xx_retry",
+			Enabled:    true,
+			MaxRetries: 3,
+			StatusCode: RetryStatusCodeMatcher{
+				Range: "500-504",
+			},
+		},
+	}
+
+	policy := newProviderRetryPolicy(3, RetryTuning{}, rules)
+	assert.Equal(t, 10, policy.MaxAttempts)
+	assert.Equal(t, 3, policy.DefaultMaxAttempts)
+	assert.Equal(t, 3, policy.initialMaxAttempts())
+
+	transportDecision := policy.decisionForError(fmt.Errorf("Post https://example.test: net/http: TLS handshake timeout"))
+	require.True(t, transportDecision.Retryable)
+	assert.Equal(t, "transport", transportDecision.Reason)
+	assert.Equal(t, 3, policy.maxAttemptsForDecision(transportDecision))
+
+	rateLimitDecision := policy.decisionForError(fmt.Errorf("HTTP 429: rate limit reached"))
+	require.True(t, rateLimitDecision.Retryable)
+	assert.Equal(t, "rate_limit_retry", rateLimitDecision.Reason)
+	assert.Equal(t, 10, policy.maxAttemptsForDecision(rateLimitDecision))
+
+	serverDecision := policy.decisionForError(fmt.Errorf("HTTP 503: upstream unavailable"))
+	require.True(t, serverDecision.Retryable)
+	assert.Equal(t, "http_5xx_retry", serverDecision.Reason)
+	assert.Equal(t, 3, policy.maxAttemptsForDecision(serverDecision))
+}
+
+func TestRetryPolicy_DefaultAttemptLimitWithoutRulesRemainsUnchanged(t *testing.T) {
+	providerPolicy := newProviderRetryPolicy(3, RetryTuning{}, nil)
+	assert.Equal(t, 3, providerPolicy.MaxAttempts)
+	assert.Equal(t, 3, providerPolicy.DefaultMaxAttempts)
+	assert.Equal(t, 3, providerPolicy.maxAttemptsForDecision(providerPolicy.decisionForError(fmt.Errorf("temporary failure"))))
+
+	runtimePolicy := newRuntimeRetryPolicy(2, RetryTuning{}, nil)
+	assert.Equal(t, 3, runtimePolicy.MaxAttempts)
+	assert.Equal(t, 3, runtimePolicy.DefaultMaxAttempts)
+	assert.Equal(t, 3, runtimePolicy.maxAttemptsForDecision(runtimePolicy.decisionForError(fmt.Errorf("temporary failure"))))
+}
+
+func TestPrepareRetry_UsesTheLimitForTheCurrentErrorClass(t *testing.T) {
+	policy := newProviderRetryPolicy(3, RetryTuning{}, []RetryRule{
+		{
+			Name:       "rate_limit_retry",
+			Enabled:    true,
+			MaxRetries: 10,
+			Keyword: RetryKeywordMatcher{
+				Values: []string{"rate limit"},
+			},
+		},
+	})
+
+	transportResult, err := prepareRetry(context.Background(), policy, time.Now(), 3, fmt.Errorf("TLS handshake timeout"), retryExecutionMeta{})
+	require.NoError(t, err)
+	assert.Equal(t, 3, transportResult.MaxAttempts)
+	assert.False(t, transportResult.Retry)
+
+	rateLimitResult, err := prepareRetry(context.Background(), policy, time.Now(), 3, fmt.Errorf("HTTP 429: rate limit reached"), retryExecutionMeta{})
+	require.NoError(t, err)
+	assert.Equal(t, 10, rateLimitResult.MaxAttempts)
+	assert.True(t, rateLimitResult.Retry)
 }
 
 func TestClassifyRetryableLLMErrorWithRules_MatchesKeywordRule(t *testing.T) {

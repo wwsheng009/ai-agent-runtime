@@ -293,17 +293,18 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 	// 选择 Provider
 	policy := newProviderRetryPolicy(c.maxRetries, c.retryTuning, c.retryRules)
 	startedAt := time.Now()
+	activeMaxAttempts := policy.initialMaxAttempts()
 	retryInfo := RetryInfo{
 		TargetGroup:      "default",
 		Attempt:          1,
-		MaxAttempts:      policy.MaxAttempts,
+		MaxAttempts:      activeMaxAttempts,
 		RequestedModel:   model,
 		UseEnhancedRetry: true,
 	}
 
 	var lastError error
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
-		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
+		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		retryInfo.Attempt = attempt
 
 		selected, err := c.resourceManager.SelectResource(retryInfo)
@@ -357,6 +358,8 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 			if retryErr != nil {
 				return nil, retryErr
 			}
+			activeMaxAttempts = retryResult.MaxAttempts
+			retryInfo.MaxAttempts = activeMaxAttempts
 			if retryResult.Retry {
 				continue
 			}

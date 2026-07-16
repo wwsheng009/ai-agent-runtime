@@ -894,9 +894,10 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	var lastErr error
 	startedAt := time.Now()
 	resolvedModel := p.resolveModel(chatReq.Model)
+	activeMaxAttempts := policy.initialMaxAttempts()
 
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
-		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
+		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		chatResp, err := p.Chat(attemptCtx, chatReq)
 		if err == nil {
 			if chatResp == nil {
@@ -919,6 +920,7 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		if retryErr != nil {
 			return nil, retryErr
 		}
+		activeMaxAttempts = retryResult.MaxAttempts
 		if !retryResult.Decision.Retryable {
 			return nil, err
 		}
@@ -1068,9 +1070,10 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	policy := newProviderRetryPolicy(p.config.MaxRetries, p.config.RetryTuning, p.config.RetryRules)
 	var lastErr error
 	startedAt := time.Now()
+	activeMaxAttempts := policy.initialMaxAttempts()
 
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
-		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, policy.MaxAttempts)
+		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 			Source:           "provider_wrapper",
 			Phase:            "request",
@@ -1112,6 +1115,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			if retryErr != nil {
 				return nil, retryErr
 			}
+			activeMaxAttempts = retryResult.MaxAttempts
 			if retryResult.Retry {
 				continue
 			}
@@ -1143,6 +1147,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			if retryErr != nil {
 				return nil, retryErr
 			}
+			activeMaxAttempts = retryResult.MaxAttempts
 			if retryResult.Retry {
 				continue
 			}
@@ -1235,6 +1240,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			if retryErr != nil {
 				return nil, retryErr
 			}
+			activeMaxAttempts = retryResult.MaxAttempts
 			if retryResult.Retry {
 				continue
 			}
