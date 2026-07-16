@@ -152,10 +152,16 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	}
 
 	previousSessionID := currentRuntimeSessionID(session)
+	restoredRuntimeSession := runtimeSession.CloneWithoutHistory()
+	if restoredRuntimeSession == nil {
+		return runtimechat.ErrInvalidSession
+	}
 	if err := replaceRuntimeMessages(session, runtimeSession.History); err != nil {
 		return err
 	}
-	session.RuntimeSession = runtimeSession.Clone()
+	restoredRuntimeSession.History = session.Messages
+	restoredRuntimeSession.HistoryLoaded = runtimeSession.HistoryLoaded
+	session.RuntimeSession = restoredRuntimeSession
 	if !strings.EqualFold(strings.TrimSpace(previousSessionID), strings.TrimSpace(runtimeSession.ID)) {
 		resetStableSharedToolSurface(session)
 	}

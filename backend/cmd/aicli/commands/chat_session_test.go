@@ -791,6 +791,35 @@ func TestRestoreChatStateFromRuntimeSession_PreservesStableToolSurfaceWithinSame
 	}
 }
 
+func TestRestoreChatStateSharesOneOwnedHotProjection(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "restore", Metadata: runtimetypes.Metadata{"source": "loaded"}},
+		{Role: "assistant", Content: "reply", Metadata: runtimetypes.NewMetadata()},
+	})
+	runtimeSession.CanonicalMessageCount = 99
+	runtimeSession.SetHeadOffset(1)
+	session := &ChatSession{}
+
+	if err := restoreChatStateFromRuntimeSession(session, runtimeSession); err != nil {
+		t.Fatalf("restoreChatStateFromRuntimeSession: %v", err)
+	}
+	if session.RuntimeSession == nil || len(session.Messages) != 2 || len(session.RuntimeSession.History) != 2 {
+		t.Fatalf("unexpected restored histories: messages=%d runtime=%#v", len(session.Messages), session.RuntimeSession)
+	}
+	if &session.Messages[0] != &session.RuntimeSession.History[0] {
+		t.Fatal("restored CLI and runtime histories do not share the owned hot projection")
+	}
+	if session.RuntimeSession.CanonicalMessageCount != 99 || session.RuntimeSession.HeadOffset != 1 || !session.RuntimeSession.HistoryLoaded {
+		t.Fatalf("restored session semantics changed: %#v", session.RuntimeSession)
+	}
+	runtimeSession.History[0].Content = "source mutation"
+	runtimeSession.History[0].Metadata["source"] = "changed"
+	if session.Messages[0].Content != "restore" || session.Messages[0].Metadata["source"] != "loaded" {
+		t.Fatal("restored projection still aliases the source load object")
+	}
+}
+
 func TestRuntimeResumeSessionTitleStripsEmbeddedSessionMetadata(t *testing.T) {
 	session := runtimechat.NewSession("tester")
 	session.Metadata.Title = `检查 multi team执行功能机制， Session: session_20260506094548_QX3iM9PR [active]Session File: C:\Users\vince\.aicli\sessions\session_20260506094548_QX3iM9PR.json`
