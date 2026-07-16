@@ -3,6 +3,7 @@ package compactruntime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -330,6 +331,104 @@ func TestMaybeCompactFallsBackToDeterministicSummaryWhenProviderErrors(t *testin
 	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "upstream compact failed")
 }
 
+func TestMaybeCompactSkipsProviderWhenCompactionRequestExceedsInputBudget(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {
+				MaxContextTokens:      5000,
+				AutoCompactTokenLimit: 100,
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	history := compactTestHistory()
+	history = append(history, *types.NewToolMessage("call-large", strings.Repeat("large output ", 1000)))
+	result, _, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID: "session-compact-preflight",
+		Provider:  "provider-a",
+		Model:     "gpt-5",
+		History:   history,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 100
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Zero(t, provider.streamCount, "oversized compaction input must not be sent to the provider")
+	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
+	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
+	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "compact request skipped")
+}
+
+func TestLocalCompactionRequestBudgetRejectsOversizedSerializedInput(t *testing.T) {
+	runtime := llm.NewLLMRuntime(nil)
+	request := &llm.LLMRequest{
+		Messages:  []types.Message{*types.NewUserMessage(strings.Repeat("x", localCompactMaxRequestBytes+1))},
+		MaxTokens: 128,
+	}
+	reason := localCompactionRequestBudgetFailure(runtime, request, threshold{MaxContextTokens: 2_000_000})
+	require.Contains(t, reason, "serialized input")
+	require.Contains(t, reason, "limit")
+}
+
+func TestBuildDeterministicCompactSummaryRetainsLatestItems(t *testing.T) {
+	history := make([]types.Message, 0, 100)
+	for index := 1; index <= 20; index++ {
+		history = append(history, *types.NewUserMessage(fmt.Sprintf("user request %d %s", index, strings.Repeat("u", 180))))
+	}
+	for index := 1; index <= 24; index++ {
+		history = append(history, *types.NewAssistantMessage(fmt.Sprintf("assistant progress %d %s", index, strings.Repeat("a", 180))))
+	}
+	for index := 1; index <= 36; index++ {
+		assistant := types.NewAssistantMessage("")
+		assistant.ToolCalls = []types.ToolCall{{ID: fmt.Sprintf("call-%d", index), Name: fmt.Sprintf("tool-%d", index)}}
+		history = append(history, *assistant)
+		toolMessage := types.NewToolMessage(fmt.Sprintf("call-%d", index), fmt.Sprintf("tool outcome %d %s", index, strings.Repeat("t", 180)))
+		if index == 36 {
+			toolMessage.Metadata["tool_error"] = "final failure"
+		}
+		history = append(history, *toolMessage)
+	}
+
+	summary := buildDeterministicCompactSummary(history, "provider unavailable")
+	require.NotContains(t, summary, "\n- user request 1 ")
+	require.Contains(t, summary, "user request 20")
+	require.NotContains(t, summary, "\n- assistant progress 1 ")
+	require.Contains(t, summary, "assistant progress 24")
+	require.NotContains(t, summary, "\n- tool-1: tool outcome 1 ")
+	require.Contains(t, summary, "\n- tool-36: tool outcome 36 ")
+	require.Contains(t, summary, "Recent tool failures to account for:")
+	require.Contains(t, summary, "tool-36: final failure")
+}
+
+func TestBuildDeterministicCompactSummaryUsesAvailableBudgetForShortItems(t *testing.T) {
+	history := make([]types.Message, 0, 42)
+	for index := 1; index <= 10; index++ {
+		history = append(history, *types.NewUserMessage(fmt.Sprintf("short user request %d", index)))
+	}
+	for index := 1; index <= 12; index++ {
+		history = append(history, *types.NewAssistantMessage(fmt.Sprintf("short assistant progress %d", index)))
+	}
+	for index := 1; index <= 20; index++ {
+		history = append(history, *types.NewToolMessage(fmt.Sprintf("short-call-%d", index), fmt.Sprintf("short tool outcome %d", index)))
+	}
+
+	summary := buildDeterministicCompactSummary(history, "provider unavailable")
+	require.Contains(t, summary, "short user request 1")
+	require.Contains(t, summary, "short assistant progress 1")
+	require.Contains(t, summary, "short tool outcome 1")
+	require.Contains(t, summary, "short tool outcome 20")
+}
+
 func TestMaybeCompactFallsBackToDeterministicSummaryWhenStreamRequestsToolCall(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "provider-a",
@@ -420,7 +519,7 @@ func TestMaybeCompactUsesObservedTokensForTrigger(t *testing.T) {
 	provider := &compactTestProvider{
 		name: "provider-a",
 		capabilities: map[string]agentconfig.ModelCapabilitySpec{
-			"gpt-5": {MaxContextTokens: 100, AutoCompactTokenLimit: 90},
+			"gpt-5": {MaxContextTokens: 5000, AutoCompactTokenLimit: 90},
 		},
 	}
 	require.NoError(t, runtime.RegisterProvider("provider-a", provider))

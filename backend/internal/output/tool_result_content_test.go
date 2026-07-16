@@ -222,6 +222,32 @@ func TestRenderToolResultContentForModel_TruncatesLargeErrorOutputForHistory(t *
 	}
 }
 
+func TestRenderToolResultContentForModel_PrefersLargeTestSummaryAndArtifact(t *testing.T) {
+	envelope := &Envelope{
+		ToolName: "bash",
+		Summary:  "Parsed go test output: failed.\nFailed tests: TestRecovery",
+		Error:    "exit status 1",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:     toolresult.KindText,
+			"model_summary_preferred":  true,
+			"raw_output_artifact_path": `C:\temp\local-shell\go-test.txt`,
+		},
+	}
+	raw := strings.Repeat("noisy test log\n", 2000)
+
+	got := RenderToolResultContentForModel(raw, "exit status 1", envelope)
+
+	if strings.Contains(got, "noisy test log") {
+		t.Fatalf("expected reduced test summary instead of raw log, got %q", got)
+	}
+	if !strings.Contains(got, "Failed tests: TestRecovery") || !strings.Contains(got, "Tool execution failed: exit status 1") {
+		t.Fatalf("expected actionable failure summary, got %q", got)
+	}
+	if !strings.Contains(got, `Full raw output artifact: C:\temp\local-shell\go-test.txt`) {
+		t.Fatalf("expected raw artifact reference, got %q", got)
+	}
+}
+
 func TestRenderToolResultContentForModel_ExternalMCPPreservesFullStructuredOutput(t *testing.T) {
 	envelope := &Envelope{
 		Summary: "reduced summary only",

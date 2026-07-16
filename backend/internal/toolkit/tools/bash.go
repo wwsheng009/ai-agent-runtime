@@ -11,6 +11,7 @@ import (
 
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -42,6 +43,7 @@ var defaultBlacklist = []string{
 const (
 	modelHistoryArtifactThresholdBytes = 12 * 1024
 	defaultShellCommandTimeout         = 30 * time.Second
+	defaultGoTestCommandTimeout        = 5 * time.Minute
 	shellCommandTimeoutEnv             = "AICLI_SHELL_COMMAND_TIMEOUT"
 	shellCommandTimeoutMSEnv           = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
 )
@@ -53,7 +55,7 @@ func NewBashTool() *BashTool {
 		"properties": map[string]interface{}{
 			"command": map[string]interface{}{
 				"type":        "string",
-				"description": "Shell command. On Windows this tool uses the detected user shell, usually PowerShell/pwsh rather than cmd.exe. Prefer the workdir parameter for directory changes; use pwd/Get-Location to print the current directory and do not use bare cd for that purpose. If the task contains multiple steps or multiple independent goals, split it into multiple bash calls and keep each call focused on one clear command goal. Windows PowerShell/pwsh does not provide `head` by default; when you need to limit output, prefer `... | Select-Object -First 200`.",
+				"description": "Shell command. Related inspections or tests with clear ordering may be combined to reduce LLM round trips; split only on data dependencies. Use workdir for directory changes. Windows usually uses PowerShell/pwsh, where output limiting uses Select-Object instead of head.",
 			},
 			"workdir": map[string]interface{}{
 				"type":        "string",
@@ -61,7 +63,7 @@ func NewBashTool() *BashTool {
 			},
 			"timeout": map[string]interface{}{
 				"type":        "string",
-				"description": "可选：命令超时，例如 30s、2m、5m。默认 30s，可用 AICLI_SHELL_COMMAND_TIMEOUT 或 AICLI_SHELL_COMMAND_TIMEOUT_MS 调整全局默认；运行测试、构建、类型检查等可能超过默认值的命令时，应由模型显式设置更长超时。",
+				"description": "可选：命令超时，例如 30s、2m、5m。普通命令默认 30s，go test 未显式设置时自动使用至少 5m；环境变量和显式参数仍可覆盖。",
 			},
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
@@ -93,7 +95,7 @@ func NewBashTool() *BashTool {
 	return &BashTool{
 		BaseTool: toolkit.NewBaseTool(
 			"bash",
-			"执行 Shell 命令并返回输出。Windows 下优先使用检测到的 PowerShell/pwsh；切换目录优先使用 workdir 参数；如果命令包含多个步骤或多个独立目标，请拆分为多次 bash 调用，每次只聚焦一个明确的命令目标。PowerShell/pwsh 默认没有 `head`，限制输出请使用 `Select-Object -First N`。",
+			"执行 Shell 命令并返回输出。相关且顺序明确的检查或测试可合并为一次调用，减少 LLM 往返；存在数据依赖时再分步。用 workdir 指定目录；Windows 默认按 PowerShell 语义执行，没有 head 时使用 Select-Object。",
 			"1.1.0",
 			parameters,
 			true, // 支持直接调用
@@ -164,7 +166,11 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Error:      err,
 		}, nil
 	}
-	timeout, err := parseShellCommandTimeout(params, b.timeout)
+	defaultTimeout := b.timeout
+	if !hasExplicitShellTimeout(params) {
+		defaultTimeout = inferredShellCommandTimeout(command, defaultTimeout)
+	}
+	timeout, err := parseShellCommandTimeout(params, defaultTimeout)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -275,8 +281,9 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	}
 
 	outputMirror := runtimeexecutor.OutputMirrorFromContext(ctx)
-	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureSettings.captureLimitBytes(), "toolkit", command, "", outputMirror)
-	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command)
+	artifactRoot := toolctx.ShellOutputArtifactDir(ctx)
+	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureSettings.captureLimitBytes(), "toolkit", command, artifactRoot, outputMirror)
+	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command, artifactRoot)
 	if err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
 			result := commandExecutionFromCapture(capture)
@@ -404,8 +411,9 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
 	}
 
-	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureLimitBytesFromExecConfig(cfg), "toolkit", command, "", outputMirror)
-	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command)
+	artifactRoot := toolctx.ShellOutputArtifactDir(ctx)
+	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureLimitBytesFromExecConfig(cfg), "toolkit", command, artifactRoot, outputMirror)
+	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command, artifactRoot)
 
 	if err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
@@ -552,14 +560,14 @@ func buildCommandExecutionMetadata(command string, mutatedPaths []string, result
 	return metadata
 }
 
-func ensureLargeHistoryOutputArtifact(capture runtimeexecutor.CombinedOutputCapture, artifactPath string, artifactErr error, scope string, command string) (string, error) {
+func ensureLargeHistoryOutputArtifact(capture runtimeexecutor.CombinedOutputCapture, artifactPath string, artifactErr error, scope string, command string, preferredRoot string) (string, error) {
 	if strings.TrimSpace(artifactPath) != "" || artifactErr != nil || capture.Truncated {
 		return artifactPath, artifactErr
 	}
 	if capture.TotalBytes <= modelHistoryArtifactThresholdBytes || strings.TrimSpace(capture.Output) == "" {
 		return artifactPath, artifactErr
 	}
-	path, err := runtimeexecutor.PersistShellOutputArtifact(scope, command, "", capture.Output)
+	path, err := runtimeexecutor.PersistShellOutputArtifact(scope, command, preferredRoot, capture.Output)
 	if err != nil {
 		return "", err
 	}
@@ -753,6 +761,22 @@ func parseShellCommandTimeout(params map[string]interface{}, defaultTimeout time
 		return parsed, nil
 	}
 	return defaultTimeout, nil
+}
+
+func inferredShellCommandTimeout(command string, fallback time.Duration) time.Duration {
+	if fallback <= 0 {
+		fallback = resolveDefaultShellCommandTimeout()
+	}
+	fields := strings.Fields(strings.ToLower(command))
+	for index := 0; index+1 < len(fields); index++ {
+		if (fields[index] == "go" || fields[index] == "go.exe") && fields[index+1] == "test" {
+			if fallback < defaultGoTestCommandTimeout {
+				return defaultGoTestCommandTimeout
+			}
+			break
+		}
+	}
+	return fallback
 }
 
 func hasExplicitShellTimeout(params map[string]interface{}) bool {

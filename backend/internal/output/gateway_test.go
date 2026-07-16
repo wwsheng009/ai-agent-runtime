@@ -261,3 +261,22 @@ func TestGateway_PromotesToolSourceFromNestedToolMetadata(t *testing.T) {
 		t.Fatalf("expected %s=%q, got %#v", toolresult.SourceKey, toolresult.SourceToolkit, got)
 	}
 }
+
+func TestGateway_PrefersReducerSummaryForLargeGoTestOutput(t *testing.T) {
+	gateway := NewGateway(nil)
+	raw := strings.Repeat("verbose log line\n", 1000) +
+		"--- FAIL: TestRecovery (0.01s)\nFAIL\tgithub.com/demo/agent\t0.1s\n"
+	envelope, err := gateway.Process(context.Background(), RawToolResult{
+		ToolName: "bash", ToolCallID: "call-go-test", Content: raw, Error: "exit status 1",
+		Metadata: map[string]interface{}{"command": "go test ./internal/agent -count=1"},
+	})
+	if err != nil || envelope == nil {
+		t.Fatalf("process go test output: envelope=%#v err=%v", envelope, err)
+	}
+	if envelope.Metadata["reducer"] != "go_test_text" {
+		t.Fatalf("expected go_test_text reducer, got %#v", envelope.Metadata)
+	}
+	if preferred, _ := envelope.Metadata["model_summary_preferred"].(bool); !preferred {
+		t.Fatalf("expected model summary preference for large test output, got %#v", envelope.Metadata)
+	}
+}

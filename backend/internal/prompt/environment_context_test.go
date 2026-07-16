@@ -20,6 +20,12 @@ func TestRenderParallelToolGuidance_EncouragesBatchedReadOnlyInspections(t *test
 	if !strings.Contains(got, "same assistant turn") {
 		t.Fatalf("expected parallel batching guidance, got:\n%s", got)
 	}
+	if !strings.Contains(got, "view.files") || !strings.Contains(got, "grep.patterns") || !strings.Contains(got, "grep.paths") {
+		t.Fatalf("expected structured batch parameter guidance, got:\n%s", got)
+	}
+	if !strings.Contains(got, "all predictable independent evidence") {
+		t.Fatalf("expected single-turn evidence gathering guidance, got:\n%s", got)
+	}
 	if !strings.Contains(got, "dependent tool calls serial") {
 		t.Fatalf("expected serial dependency guidance, got:\n%s", got)
 	}

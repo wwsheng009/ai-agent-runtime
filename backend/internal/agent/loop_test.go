@@ -258,7 +258,20 @@ func (p *RetrySequenceLLMProvider) Call(ctx context.Context, req *llm.LLMRequest
 }
 
 func (p *RetrySequenceLLMProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
-	return nil, nil
+	p.callCount++
+	if index := p.callCount - 1; index < len(p.errs) && p.errs[index] != nil {
+		return nil, p.errs[index]
+	}
+	response := p.response
+	ch := make(chan llm.StreamChunk, 2)
+	go func() {
+		defer close(ch)
+		if response != nil && strings.TrimSpace(response.Content) != "" {
+			ch <- llm.StreamChunk{Type: llm.EventTypeText, Content: response.Content}
+		}
+		ch <- llm.StreamChunk{Type: llm.EventTypeDone, Done: true}
+	}()
+	return ch, nil
 }
 
 func (p *RetrySequenceLLMProvider) CountTokens(text string) int {
@@ -722,6 +735,80 @@ func TestReActLoop_RunWithSession_EmitsLLMRetryRuntimeEvent(t *testing.T) {
 	assert.Contains(t, retryEvent.Payload["error"], "HTTP 429")
 }
 
+func TestReActLoop_ProviderContextErrorCompactsAndRetriesSameStep(t *testing.T) {
+	provider := &RetrySequenceLLMProvider{
+		name: "test-provider",
+		errs: []error{
+			fmt.Errorf("HTTP 502: Your input exceeds the context window of this model"),
+		},
+		response: &llm.LLMResponse{Content: "恢复后的最终回答。", Model: "test-model"},
+	}
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+		MaxRetries:      3,
+	})
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		MaxSteps:         0,
+		DefaultMaxTokens: 256,
+	}, nil, llmRuntime)
+
+	bus := runtimeevents.NewBus()
+	var startedEvents []runtimeevents.Event
+	bus.Subscribe("session_compact_started", func(event runtimeevents.Event) {
+		startedEvents = append(startedEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	session := newTestHistorySession("session-provider-context-recovery")
+	for index := 0; index < 8; index++ {
+		session.messages = append(session.messages,
+			*types.NewUserMessage(fmt.Sprintf("历史请求 %d %s", index, strings.Repeat("context ", 40))),
+			*types.NewAssistantMessage(fmt.Sprintf("历史回答 %d", index)),
+		)
+	}
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 0})
+	result, err := loop.RunWithSession(context.Background(), "继续完成任务", session)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, "恢复后的最终回答。", result.Output)
+	require.Equal(t, 1, result.Steps, "context recovery should retry the same logical step")
+	require.Equal(t, 3, provider.callCount, "one failed call, one compact stream, and one recovered call")
+	require.Len(t, startedEvents, 1)
+	require.Equal(t, "provider_context_window_recovery", startedEvents[0].Payload["reason"])
+}
+
+func TestCompactionRecoveryMadeProgressUsesActualHistoryReduction(t *testing.T) {
+	runtime := llm.NewLLMRuntime(nil)
+	before := []types.Message{
+		*types.NewUserMessage(strings.Repeat("task context ", 80)),
+		*types.NewAssistantMessage(strings.Repeat("progress ", 80)),
+	}
+	reducedMessages := []types.Message{*types.NewUserMessage("compact summary")}
+	reducedTokens := []types.Message{
+		*types.NewUserMessage("short task"),
+		*types.NewAssistantMessage("short progress"),
+	}
+
+	require.True(t, compactionRecoveryMadeProgress(runtime, before, reducedMessages))
+	require.True(t, compactionRecoveryMadeProgress(runtime, before, reducedTokens))
+	require.False(t, compactionRecoveryMadeProgress(runtime, before, before))
+	require.False(t, compactionRecoveryMadeProgress(runtime, reducedMessages, before))
+}
+
+func TestMarkSessionCompactionRecoveryInputRejectsOnlySameHistory(t *testing.T) {
+	seen := map[string]struct{}{}
+	require.True(t, markSessionCompactionRecoveryInput(seen, "history-a"))
+	require.False(t, markSessionCompactionRecoveryInput(seen, "history-a"))
+	require.True(t, markSessionCompactionRecoveryInput(seen, "history-b"))
+}
+
 func TestReActLoop_RunWithSession_PreservesExplicitEmptyReasoningContentMetadata(t *testing.T) {
 	provider := &SequenceLLMProvider{
 		name: "test-provider",
@@ -974,6 +1061,69 @@ func TestReActLoop_RunWithSession_EmitsLimitNoticeAndPersistsAssistantMessage(t 
 	require.Len(t, messages, 4)
 	require.Equal(t, "assistant", messages[len(messages)-1].Role)
 	require.Equal(t, result.Output, messages[len(messages)-1].Content)
+}
+
+func TestReActLoop_ObservesRepeatedSemanticToolCallsWithoutStopping(t *testing.T) {
+	manager := &MockSequenceMCPManager{output: "same directory listing"}
+	llmRuntime := llm.NewLLMRuntime(nil)
+	responses := make([]*llm.LLMResponse, 0, repeatedSemanticToolCallNoticeThreshold+1)
+	for index := 1; index <= repeatedSemanticToolCallNoticeThreshold; index++ {
+		responses = append(responses, &llm.LLMResponse{
+			Content: "检查目录。",
+			Model:   "test-model",
+			ToolCalls: []types.ToolCall{{
+				ID:   fmt.Sprintf("call-%d", index),
+				Name: "read_logs",
+				Args: map[string]interface{}{"path": "logs/app.log"},
+			}},
+		})
+	}
+	responses = append(responses, &llm.LLMResponse{Content: "日志检查完成。", Model: "test-model"})
+	provider := &SequenceLLMProvider{name: "test-provider", responses: responses}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name:     "test-agent",
+		Provider: "test-provider",
+		Model:    "test-model",
+		MaxSteps: 0,
+	}, manager, llmRuntime)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        0,
+		EnableToolCalls: true,
+	})
+	bus := runtimeevents.NewBus()
+	var observedEvents []runtimeevents.Event
+	bus.Subscribe("tool_loop.repeated_semantic_call_observed", func(event runtimeevents.Event) {
+		observedEvents = append(observedEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	result, err := loop.Run(context.Background(), "持续检查日志")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Success)
+	require.Equal(t, "日志检查完成。", result.Output)
+	require.Equal(t, repeatedSemanticToolCallNoticeThreshold+1, len(provider.requests))
+	require.Equal(t, repeatedSemanticToolCallNoticeThreshold, manager.callCount)
+	require.Len(t, observedEvents, 1)
+	require.Equal(t, repeatedSemanticToolCallNoticeThreshold, observedEvents[0].Payload["repeat_count"])
+	advisoryFound := false
+	for _, message := range provider.requests[2].Messages {
+		if message.Role == "tool" && strings.Contains(message.Content, "Execution was not blocked") {
+			advisoryFound = true
+			break
+		}
+	}
+	require.True(t, advisoryFound, "repeated calls should receive non-blocking model guidance")
+}
+
+func TestSemanticToolCallFingerprintExemptsPollingTools(t *testing.T) {
+	fingerprint := semanticToolCallFingerprint([]types.ToolCall{{
+		ID:   "poll-1",
+		Name: "background_task",
+		Args: map[string]interface{}{"task_id": "task-1"},
+	}})
+	require.Empty(t, fingerprint)
 }
 
 func TestReActLoop_Run_WithTimeout(t *testing.T) {
@@ -1287,7 +1437,7 @@ func TestReActLoop_Run_PromptBudgetCompactsActiveTurnReplayBeforeThirdRequest(t 
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    680,
+			"context_max_prompt_tokens":    1300,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -1357,7 +1507,7 @@ func TestReActLoop_RunWithSession_PromptOnlyActiveTurnCompactionDoesNotPersist(t
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    680,
+			"context_max_prompt_tokens":    1300,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -1446,6 +1596,70 @@ func TestReActLoop_EnforcePromptPreflight_CompactsActiveTurnReplayByTokenBudget(
 	require.Equal(t, "test-model", metadata["resolved_model"])
 }
 
+func TestReActLoop_EnforcePromptPreflight_CountsToolSchemas(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{name: "test-provider"}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		DefaultMaxTokens: 128,
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens": 300,
+		},
+	}, nil, llmRuntime)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{})
+	tools := []types.ToolDefinition{{
+		Name:        "large_schema_tool",
+		Description: strings.Repeat("schema description ", 100),
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"input": map[string]interface{}{"type": "string"},
+			},
+		},
+	}}
+
+	_, metadata, err := loop.enforcePromptPreflightWithTools(
+		"trace-tools",
+		"session-tools",
+		1,
+		[]types.Message{*types.NewUserMessage("run the tool")},
+		tools,
+		0,
+	)
+	require.Error(t, err)
+	preflightErr, ok := AsPromptPreflightError(err)
+	require.True(t, ok)
+	require.Equal(t, "tool_schema_exceeds_budget", preflightErr.Code)
+	require.Greater(t, metadata["tool_schema_tokens"].(int), 300)
+	require.Equal(t, 1, metadata["tool_count"])
+}
+
+func TestEstimatePromptMessageTokensIncludesToolArgumentsAndContentParts(t *testing.T) {
+	runtime := llm.NewLLMRuntime(nil)
+	messages := []types.Message{{
+		Role: "assistant",
+		ContentParts: []types.ContentPart{{
+			Type: types.ContentPartText,
+			Text: strings.Repeat("structured content ", 40),
+		}},
+		ToolCalls: []types.ToolCall{{
+			ID:   "call-large",
+			Name: "write_file",
+			Args: map[string]interface{}{"content": strings.Repeat("payload ", 80)},
+		}},
+		Metadata: types.NewMetadata(),
+	}}
+
+	base := runtime.CountMessagesTokens(messages)
+	estimated := estimatePromptMessageTokens(runtime, messages)
+	require.Greater(t, estimated, base)
+	require.Greater(t, estimated-base, 100)
+}
+
 func TestReActLoop_Run_PromptPreflightFailsWhenReplayCannotBeCompactedFurther(t *testing.T) {
 	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
 	llmRuntime := llm.NewLLMRuntime(nil)
@@ -1475,7 +1689,7 @@ func TestReActLoop_Run_PromptPreflightFailsWhenReplayCannotBeCompactedFurther(t 
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    250,
+			"context_max_prompt_tokens":    500,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -1500,9 +1714,11 @@ func TestReActLoop_Run_PromptPreflightFailsWhenReplayCannotBeCompactedFurther(t 
 	preflightErr, ok := AsPromptPreflightError(err)
 	require.True(t, ok, "expected prompt preflight error type")
 	require.Equal(t, "active_turn_not_compactable", preflightErr.Code)
-	require.Equal(t, 250, preflightErr.PromptBudget)
+	require.Equal(t, 500, preflightErr.PromptBudget)
 	require.Equal(t, false, preflightErr.ActiveTurnCompacted)
-	require.Len(t, provider.requests, 1)
+	// Recovery may compact more than once while each replacement still shrinks
+	// the history, then returns once compaction can no longer make progress.
+	require.GreaterOrEqual(t, len(provider.requests), 2)
 	require.NotEmpty(t, failedEvents)
 	payload := failedEvents[len(failedEvents)-1].Payload
 	require.Equal(t, "active-turn replay cannot be compacted further", payload["failure_reason"])
@@ -1513,7 +1729,7 @@ func TestReActLoop_Run_PromptPreflightFailsWhenReplayCannotBeCompactedFurther(t 
 }
 
 func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPreflightFailure(t *testing.T) {
-	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 400)
 	llmRuntime := llm.NewLLMRuntime(nil)
 	provider := &SequenceLLMProvider{
 		name: "test-provider",
@@ -1552,7 +1768,7 @@ func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPref
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    550,
+			"context_max_prompt_tokens":    1400,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -2840,7 +3056,7 @@ func TestSubagentScheduler_RunChildren_RoutingDisabledPreservesLegacyModelOnlyOv
 		},
 		skillRouter: &skill.Router{},
 		skillExec:   &skill.Executor{},
-		mcpManager:  &MockMCPManager{},
+		mcpManager:  nil,
 	}
 
 	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
@@ -2884,7 +3100,7 @@ func TestSubagentScheduler_RunChildren_RoutingDisabledPreservesLegacyModelOnlyOv
 			Provider:        "ignored-provider",
 			Model:           "legacy-child-model",
 			ReasoningEffort: "high",
-			BudgetTokens:    1024,
+			BudgetTokens:    1280,
 			ReadOnly:        true,
 		},
 	})
@@ -2893,7 +3109,7 @@ func TestSubagentScheduler_RunChildren_RoutingDisabledPreservesLegacyModelOnlyOv
 	assert.Equal(t, "parent-provider", parentProvider.requests[0].Provider)
 	assert.Equal(t, "legacy-child-model", parentProvider.requests[0].Model)
 	assert.Equal(t, "", parentProvider.requests[0].ReasoningEffort)
-	assert.Equal(t, 1024, parentProvider.requests[0].MaxTokens)
+	assert.Equal(t, 1280, parentProvider.requests[0].MaxTokens)
 	require.NotNil(t, startPayload)
 	assert.Equal(t, "disabled", startPayload["route_source"])
 }
@@ -3220,6 +3436,150 @@ func TestReActLoop_GetAvailableTools_ExposesStableManagerToolsAcrossGoals(t *tes
 		}
 	}
 	t.Fatal("expected read_logs to be exposed")
+}
+
+func TestOptimizeModelToolSurfacePrefersCanonicalShellAndCompactsGrep(t *testing.T) {
+	raw := []types.ToolDefinition{
+		{Name: "bash", Description: "canonical shell", Parameters: map[string]interface{}{"type": "object"}},
+		{Name: "execute_shell_command", Description: strings.Repeat("legacy shell guidance ", 100), Parameters: map[string]interface{}{"type": "object"}},
+		{
+			Name:        "grep",
+			Description: strings.Repeat("verbose grep guidance ", 100),
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"pattern": map[string]interface{}{"type": "string"},
+					"paths":   map[string]interface{}{"type": "array"},
+					"rg_args": map[string]interface{}{"type": "array"},
+					"pretty":  map[string]interface{}{"type": "boolean", "description": strings.Repeat("verbose ", 100)},
+				},
+				"additionalProperties": false,
+			},
+		},
+	}
+	rawJSON, err := json.Marshal(raw)
+	require.NoError(t, err)
+
+	optimized := optimizeModelToolSurface(raw)
+	require.Equal(t, []string{"bash", "grep"}, toolDefinitionNames(optimized))
+	optimizedJSON, err := json.Marshal(optimized)
+	require.NoError(t, err)
+	require.Less(t, len(optimizedJSON), len(rawJSON)/2)
+
+	grepDefinition := optimized[1]
+	require.Contains(t, grepDefinition.Description, "patterns + paths")
+	properties := grepDefinition.Parameters["properties"].(map[string]interface{})
+	require.Contains(t, properties, "pattern")
+	require.Contains(t, properties, "paths")
+	require.Contains(t, properties, "rg_args")
+	require.NotContains(t, properties, "pretty")
+}
+
+func TestOptimizeModelToolSurfaceKeepsLegacyShellWhenCanonicalIsUnavailable(t *testing.T) {
+	tools := optimizeModelToolSurface([]types.ToolDefinition{{Name: "execute_shell_command"}})
+	require.Len(t, tools, 1)
+	require.Equal(t, "execute_shell_command", tools[0].Name)
+}
+
+func TestOptimizeModelToolSurfaceReducesDefaultToolkitSchema(t *testing.T) {
+	manager := runtimetools.NewAgentAdapter(runtimetools.NewDefaultManager(nil))
+	raw := make([]types.ToolDefinition, 0)
+	for _, info := range manager.ListTools() {
+		raw = append(raw, types.ToolDefinition{
+			Name:        info.Name,
+			Description: info.Description,
+			Parameters:  normalizeToolParameters(info.InputSchema),
+		})
+	}
+	rawJSON, err := json.Marshal(raw)
+	require.NoError(t, err)
+	optimized := optimizeModelToolSurface(raw)
+	optimizedJSON, err := json.Marshal(optimized)
+	require.NoError(t, err)
+
+	require.NotContains(t, toolDefinitionNames(optimized), "execute_shell_command")
+	require.Greater(t, len(rawJSON)-len(optimizedJSON), 8*1024)
+}
+
+func TestCompactToolSurfaceToBudgetStripsAnnotationsWithoutRemovingParameters(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	agent := &Agent{config: &Config{
+		Name:  "test-agent",
+		Model: "test-model",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens": 300,
+		},
+	}}
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{})
+	tools := []types.ToolDefinition{{
+		Name:        "inspect",
+		Description: strings.Repeat("verbose tool description ", 100),
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": strings.Repeat("verbose path guidance ", 100),
+					"default":     ".",
+				},
+				"mode": map[string]interface{}{
+					"type": "string",
+					"enum": []interface{}{"fast", "full"},
+				},
+			},
+			"required": []string{"path"},
+		},
+	}}
+
+	compacted := loop.compactToolSurfaceToBudget(tools)
+	require.Len(t, compacted, 1)
+	require.Less(t, len([]rune(compacted[0].Description)), len([]rune(tools[0].Description)))
+	properties := compacted[0].Parameters["properties"].(map[string]interface{})
+	pathSchema := properties["path"].(map[string]interface{})
+	require.NotContains(t, pathSchema, "description")
+	require.NotContains(t, pathSchema, "default")
+	require.Equal(t, "string", pathSchema["type"])
+	require.Equal(t, []string{"path"}, compacted[0].Parameters["required"])
+	require.Equal(t, []interface{}{"fast", "full"}, properties["mode"].(map[string]interface{})["enum"])
+}
+
+func TestCompactToolSurfaceForPromptUsesCombinedMessageAndSchemaPressure(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	agent := &Agent{config: &Config{
+		Name:    "test-agent",
+		Model:   "test-model",
+		Options: map[string]interface{}{},
+	}}
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{})
+	tools := []types.ToolDefinition{{
+		Name:        "inspect",
+		Description: strings.Repeat("tool guidance ", 80),
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": strings.Repeat("path guidance ", 80),
+				},
+			},
+		},
+	}}
+	toolTokens := estimateToolDefinitionTokens(llmRuntime, tools)
+	require.Positive(t, toolTokens)
+	agent.config.Options["context_max_prompt_tokens"] = toolTokens + 1
+
+	compacted := loop.compactToolSurfaceForPrompt(
+		[]types.Message{*types.NewUserMessage(strings.Repeat("active task context ", 200))},
+		tools,
+		0,
+	)
+
+	require.Len(t, compacted, 1)
+	require.Equal(t, "inspect", compacted[0].Name)
+	require.Less(t, estimateToolDefinitionTokens(llmRuntime, compacted), toolTokens)
+	properties := compacted[0].Parameters["properties"].(map[string]interface{})
+	require.NotContains(t, properties["path"].(map[string]interface{}), "description")
+	require.Equal(t, "string", properties["path"].(map[string]interface{})["type"])
 }
 
 func TestReActLoop_GetAvailableTools_AlwaysExposesCoreFileTools(t *testing.T) {
@@ -4246,7 +4606,8 @@ func (m *MockMCPManager) ListTools() []skill.ToolInfo {
 }
 
 type MockSequenceMCPManager struct {
-	output string
+	output    string
+	callCount int
 }
 
 func (m *MockSequenceMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
@@ -4258,6 +4619,7 @@ func (m *MockSequenceMCPManager) FindTool(toolName string) (skill.ToolInfo, erro
 }
 
 func (m *MockSequenceMCPManager) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
+	m.callCount++
 	if m.output == "" {
 		return nil, fmt.Errorf("no output configured for %s", toolName)
 	}
@@ -4528,6 +4890,29 @@ func TestToolExecutionResultMessage_UsesFullRawOutputInsteadOfReducedEnvelope(t 
 	}
 }
 
+func TestToolCompletedEventPayloadPropagatesShellArtifactMetadata(t *testing.T) {
+	result := toolExecutionResult{
+		Call: types.ToolCall{ID: "call-shell", Name: "bash"},
+		Envelope: &output.Envelope{Metadata: map[string]interface{}{
+			"tool_metadata": map[string]interface{}{
+				"raw_output_artifact_path":   `C:\logs\local-shell\toolkit\git_123.txt`,
+				"output_capture_complete":    false,
+				"capture_limit_reached":      true,
+				"retained_output_bytes":      4096,
+				"omitted_output_bytes":       2048,
+				"output_capture_limit_bytes": 4096,
+			},
+		}},
+	}
+
+	payload := toolCompletedEventPayload(result, 1, "trace-shell", nil)
+	require.Equal(t, `C:\logs\local-shell\toolkit\git_123.txt`, payload["raw_output_artifact_path"])
+	require.Equal(t, false, payload["output_capture_complete"])
+	require.Equal(t, true, payload["capture_limit_reached"])
+	require.Equal(t, 4096, payload["retained_output_bytes"])
+	require.Equal(t, 2048, payload["omitted_output_bytes"])
+}
+
 func TestToolResultsToPayloads_UsesFullRawOutputInsteadOfReducedEnvelope(t *testing.T) {
 	payloads := toolResultsToPayloads([]toolExecutionResult{
 		{
@@ -4545,7 +4930,7 @@ func TestToolResultsToPayloads_UsesFullRawOutputInsteadOfReducedEnvelope(t *test
 				},
 			},
 		},
-	})
+	}, "")
 
 	if len(payloads) != 1 {
 		t.Fatalf("expected 1 payload, got %d", len(payloads))
@@ -4556,4 +4941,15 @@ func TestToolResultsToPayloads_UsesFullRawOutputInsteadOfReducedEnvelope(t *test
 	if payloads[0].Metadata["reducer"] != "text_truncation" {
 		t.Fatalf("expected reducer metadata to stay attached, got %v", payloads[0].Metadata["reducer"])
 	}
+}
+
+func TestToolResultsToPayloads_AppendsSemanticRepeatAdvisoryOnce(t *testing.T) {
+	payloads := toolResultsToPayloads([]toolExecutionResult{
+		{Call: types.ToolCall{ID: "call-1", Name: "view"}, Output: "first"},
+		{Call: types.ToolCall{ID: "call-2", Name: "grep"}, Output: "second"},
+	}, repeatedSemanticToolCallAdvisory(2))
+	require.Len(t, payloads, 2)
+	require.NotContains(t, payloads[0].Content, "Runtime advisory")
+	require.Contains(t, payloads[1].Content, "Execution was not blocked")
+	require.Equal(t, true, payloads[1].Metadata["semantic_repeat_advisory"])
 }

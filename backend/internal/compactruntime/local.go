@@ -3,6 +3,7 @@ package compactruntime
 import (
 	"context"
 	"crypto/sha1"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -13,14 +14,20 @@ import (
 )
 
 const (
-	localSummaryCheckpointReason = "history_window_summary_segment"
-	localSegmentStartKey         = "segment_start"
-	localSegmentEndKey           = "segment_end"
-	localSummaryTextKey          = "summary_text"
-	localSummaryHeading          = "Compacted context from earlier turns:"
-	localRetainedUserMaxTokens   = 20000
-	localCompactDefaultMaxTokens = 2048
-	localCompactionPrompt        = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+	localSummaryCheckpointReason  = "history_window_summary_segment"
+	localSegmentStartKey          = "segment_start"
+	localSegmentEndKey            = "segment_end"
+	localSummaryTextKey           = "summary_text"
+	localSummaryHeading           = "Compacted context from earlier turns:"
+	localRetainedUserMaxTokens    = 20000
+	localCompactDefaultMaxTokens  = 2048
+	localCompactMaxRequestBytes   = 1024 * 1024
+	localFallbackUserRunes        = 1600
+	localFallbackAssistantRunes   = 2000
+	localFallbackToolRequestRunes = 800
+	localFallbackToolRunes        = 3600
+	localFallbackFailureRunes     = 1200
+	localCompactionPrompt         = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
 Include:
 - Current progress and key decisions made
@@ -46,7 +53,7 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		return nil, "no_non_system_history", nil
 	}
 
-	summaryMessage, checkpointIDs, usage, usageSource, err := a.buildSummaryMessage(ctx, req, systemMessages, nonSystemMessages)
+	summaryMessage, checkpointIDs, usage, usageSource, err := a.buildSummaryMessage(ctx, req, threshold, systemMessages, nonSystemMessages)
 	if err != nil {
 		return nil, "summary_generation_failed", err
 	}
@@ -79,7 +86,7 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 	}, "", nil
 }
 
-func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, systemMessages, history []types.Message) (*types.Message, []string, *types.TokenUsage, string, error) {
+func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, threshold threshold, systemMessages, history []types.Message) (*types.Message, []string, *types.TokenUsage, string, error) {
 	if message, checkpointID := a.findReusableSummaryCheckpoint(ctx, req.SessionID, req.Phase, history); message != nil {
 		if checkpointID == "" {
 			return message, nil, nil, "", nil
@@ -91,8 +98,12 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, sys
 	}
 
 	maxTokens, reasoningEffort := resolveCompactSummaryRequestSettings(a.llmRuntime, req.Provider, req.Model)
+	request := buildLocalCompactionLLMRequest(req, systemMessages, history, maxTokens, reasoningEffort)
+	if reason := localCompactionRequestBudgetFailure(a.llmRuntime, request, threshold); reason != "" {
+		return a.buildDeterministicSummaryMessage(ctx, req, history, reason)
+	}
 
-	response, err := a.streamSummaryResponse(ctx, buildLocalCompactionLLMRequest(req, systemMessages, history, maxTokens, reasoningEffort))
+	response, err := a.streamSummaryResponse(ctx, request)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, nil, "", ctxErr
@@ -198,9 +209,12 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 		lines = append(lines, "Fallback reason: "+summarizeCompactLine(trimmed, 240))
 	}
 
-	userItems := make([]string, 0, 4)
-	assistantItems := make([]string, 0, 5)
-	toolItems := make([]string, 0, 8)
+	userItems := make([]string, 0, 16)
+	assistantItems := make([]string, 0, 24)
+	toolRequestItems := make([]string, 0, 12)
+	toolItems := make([]string, 0, 32)
+	failureItems := make([]string, 0, 12)
+	toolNames := toolCallNamesByID(history)
 	for _, message := range history {
 		content := strings.TrimSpace(message.Content)
 		switch message.Role {
@@ -209,9 +223,12 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 				continue
 			}
 			if content != "" {
-				userItems = appendLimited(userItems, summarizeCompactLine(content, 220), 4)
+				userItems = appendWithinRuneBudget(userItems, summarizeCompactLine(content, 260), 16, localFallbackUserRunes)
 			}
 		case "assistant":
+			if content != "" {
+				assistantItems = appendWithinRuneBudget(assistantItems, summarizeCompactLine(content, 260), 24, localFallbackAssistantRunes)
+			}
 			if len(message.ToolCalls) > 0 {
 				names := make([]string, 0, len(message.ToolCalls))
 				for _, call := range message.ToolCalls {
@@ -220,14 +237,23 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 					}
 				}
 				if len(names) > 0 {
-					assistantItems = appendLimited(assistantItems, "requested tools: "+strings.Join(names, ", "), 5)
+					toolRequestItems = appendWithinRuneBudget(toolRequestItems, strings.Join(names, ", "), 12, localFallbackToolRequestRunes)
 				}
-			} else if content != "" {
-				assistantItems = appendLimited(assistantItems, summarizeCompactLine(content, 220), 5)
 			}
 		case "tool":
 			if content != "" {
-				toolItems = appendLimited(toolItems, summarizeCompactLine(content, 240), 8)
+				item := summarizeCompactLine(content, 300)
+				if name := toolNames[strings.TrimSpace(message.ToolCallID)]; name != "" {
+					item = name + ": " + item
+				}
+				toolItems = appendWithinRuneBudget(toolItems, item, 32, localFallbackToolRunes)
+				if toolErr := strings.TrimSpace(message.Metadata.GetString("tool_error", "")); toolErr != "" {
+					failure := summarizeCompactLine(toolErr, 300)
+					if name := toolNames[strings.TrimSpace(message.ToolCallID)]; name != "" {
+						failure = name + ": " + failure
+					}
+					failureItems = appendWithinRuneBudget(failureItems, failure, 12, localFallbackFailureRunes)
+				}
 			}
 		}
 	}
@@ -244,9 +270,21 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 			lines = append(lines, "- "+item)
 		}
 	}
+	if len(toolRequestItems) > 0 {
+		lines = append(lines, "Recent tool requests:")
+		for _, item := range toolRequestItems {
+			lines = append(lines, "- "+item)
+		}
+	}
 	if len(toolItems) > 0 {
 		lines = append(lines, "Tool outcomes:")
 		for _, item := range toolItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(failureItems) > 0 {
+		lines = append(lines, "Recent tool failures to account for:")
+		for _, item := range failureItems {
 			lines = append(lines, "- "+item)
 		}
 	}
@@ -288,6 +326,47 @@ func buildLocalCompactionLLMRequest(req Request, systemMessages, history []types
 			"session_id":                     strings.TrimSpace(req.SessionID),
 		},
 	}
+}
+
+func localCompactionRequestBudgetFailure(runtime *llm.LLMRuntime, request *llm.LLMRequest, threshold threshold) string {
+	if runtime == nil || request == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(request.Messages)
+	if err != nil {
+		return fmt.Sprintf("compact request could not be measured safely: %v", err)
+	}
+	if len(encoded) > localCompactMaxRequestBytes {
+		return fmt.Sprintf("compact request skipped because serialized input is %d bytes (limit %d)", len(encoded), localCompactMaxRequestBytes)
+	}
+
+	inputTokens := runtime.CountMessagesTokens(request.Messages)
+	if serializedTokens := runtime.CountTokens(string(encoded)); serializedTokens > inputTokens {
+		inputTokens = serializedTokens
+	}
+	inputBudget := localCompactionInputBudget(runtime, request, threshold)
+	if inputBudget > 0 && inputTokens > inputBudget {
+		return fmt.Sprintf("compact request skipped because estimated input is %d tokens (budget %d)", inputTokens, inputBudget)
+	}
+	return ""
+}
+
+func localCompactionInputBudget(runtime *llm.LLMRuntime, request *llm.LLMRequest, threshold threshold) int {
+	maxContextTokens := threshold.MaxContextTokens
+	if maxContextTokens <= 0 && runtime != nil && request != nil {
+		_, _, capability, ok := llm.ResolveRuntimeModelCapability(runtime, request.Provider, request.Model)
+		if ok {
+			maxContextTokens = capability.MaxContextTokens
+		}
+	}
+	if maxContextTokens <= 0 || request == nil {
+		return 0
+	}
+	inputBudget := maxContextTokens - request.MaxTokens
+	if inputBudget <= 0 {
+		return 1
+	}
+	return inputBudget
 }
 
 func compactStreamResponse(request *llm.LLMRequest, content, reasoning string, metadata map[string]interface{}) *llm.LLMResponse {
@@ -412,11 +491,40 @@ func ensureSummaryHeading(summary string) string {
 	return localSummaryHeading + "\n" + summary
 }
 
-func appendLimited(items []string, item string, limit int) []string {
-	if strings.TrimSpace(item) == "" || len(items) >= limit {
+func toolCallNamesByID(history []types.Message) map[string]string {
+	names := make(map[string]string)
+	for _, message := range history {
+		for _, call := range message.ToolCalls {
+			id := strings.TrimSpace(call.ID)
+			name := strings.TrimSpace(call.Name)
+			if id != "" && name != "" {
+				names[id] = name
+			}
+		}
+	}
+	return names
+}
+
+func appendWithinRuneBudget(items []string, item string, maxItems, maxRunes int) []string {
+	item = strings.TrimSpace(item)
+	if item == "" || maxItems <= 0 || maxRunes <= 0 {
 		return items
 	}
-	return append(items, item)
+	items = append(items, item)
+	usedRunes := 0
+	start := len(items)
+	for index := len(items) - 1; index >= 0 && len(items)-index <= maxItems; index-- {
+		itemRunes := len([]rune(items[index]))
+		if usedRunes+itemRunes > maxRunes {
+			break
+		}
+		usedRunes += itemRunes
+		start = index
+	}
+	if start == len(items) {
+		return []string{summarizeCompactLine(item, maxRunes)}
+	}
+	return append([]string(nil), items[start:]...)
 }
 
 func summarizeCompactLine(text string, limit int) string {

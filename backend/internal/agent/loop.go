@@ -31,7 +31,7 @@ import (
 )
 
 const emptyTerminalAssistantResponseError = "upstream model returned an empty reply: no text and no tool calls"
-const repeatedPromptToolLoopError = "repeated identical prompt view while model is still requesting tools"
+const repeatedSemanticToolCallNoticeThreshold = 4
 const defaultPromptPreflightAutoCompactRatio = 0.9
 
 // LoopReActConfig ReAct 循环配置
@@ -285,8 +285,11 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	remainingBudget := options.BudgetTokens
 	currentCtx := ensureTurnToolSurfaceSnapshot(ctx)
 	sessionCompactionRecoveryStep := 0
+	sessionCompactionRecoveryInputs := make(map[string]struct{})
 	lastToolPromptFingerprint := ""
 	repeatedToolPromptFingerprint := 0
+	lastSemanticToolFingerprint := ""
+	repeatedSemanticToolCalls := 0
 
 	// ReAct 循环：Think - Act - Observe
 	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
@@ -308,27 +311,44 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// 1. Think: LLM 推理决定下一步行动
 		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, builder.Messages(), observations, options.ToolWhitelist, remainingBudget)
 		if err != nil {
-			if preflightErr, ok := AsPromptPreflightError(err); ok && options.PersistHistory != nil {
-				recoveryHistory := builder.Messages()
+			recoveryHistory := builder.Messages()
+			recoveryMetadata := map[string]interface{}(nil)
+			recoveryKind := ""
+			if preflightErr, ok := AsPromptPreflightError(err); ok {
 				if replacement := preflightErr.CloneReplacementHistory(); len(replacement) > 0 {
 					recoveryHistory = replacement
 				}
-				if sessionCompactionRecoveryStep != step {
-					recoveredHistory, recovered, recoveryErr := loop.trySessionCompactionRecovery(ctx, sessionID, traceID, step, recoveryHistory, preflightErr.Metadata())
-					if recoveryErr != nil {
-						loop.agent.AddError(fmt.Sprintf("session compaction recovery failed: %v", recoveryErr))
-					} else if recovered && len(recoveredHistory) > 0 {
+				recoveryMetadata = preflightErr.Metadata()
+				recoveryKind = "prompt preflight"
+			} else if llm.IsContextWindowError(err) {
+				recoveryMetadata = map[string]interface{}{
+					"reason":         "provider_context_window_recovery",
+					"provider_error": err.Error(),
+				}
+				recoveryKind = "provider context window"
+			}
+			recoveryFingerprint := promptMessageFingerprint(recoveryHistory)
+			if sessionCompactionRecoveryStep != step {
+				sessionCompactionRecoveryStep = step
+				clear(sessionCompactionRecoveryInputs)
+			}
+			if recoveryKind != "" && markSessionCompactionRecoveryInput(sessionCompactionRecoveryInputs, recoveryFingerprint) {
+				recoveredHistory, recovered, recoveryErr := loop.trySessionCompactionRecovery(ctx, sessionID, traceID, step, recoveryHistory, recoveryMetadata)
+				if recoveryErr != nil {
+					loop.agent.AddError(fmt.Sprintf("session compaction recovery failed after %s error: %v", recoveryKind, recoveryErr))
+				} else if recovered && compactionRecoveryMadeProgress(loop.llmRuntime, recoveryHistory, recoveredHistory) {
+					if options.PersistHistory != nil {
 						if persistErr := options.PersistHistory(recoveredHistory); persistErr != nil {
-							loop.agent.AddError(fmt.Sprintf("persist compacted history after prompt preflight failed: %v", persistErr))
+							loop.agent.AddError(fmt.Sprintf("persist compacted history after %s error failed: %v", recoveryKind, persistErr))
 							result.Error = err.Error()
 							result.Usage = totalUsage.Clone()
 							result.State = loop.agent.GetState()
 							return result, fmt.Errorf("%w: persisted compacted history failed: %v", err, persistErr)
 						}
-						builder = NewMessageBuilder(recoveredHistory)
-						sessionCompactionRecoveryStep = step
-						continue
 					}
+					builder = NewMessageBuilder(recoveredHistory)
+					step--
+					continue
 				}
 			}
 			loop.agent.AddError(fmt.Sprintf("think failed: %v", err))
@@ -389,6 +409,30 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 			return result, nil
 		}
+		repeatedSemanticAdvisory := ""
+		if fingerprint := semanticToolCallFingerprint(action.ToolCalls); fingerprint != "" {
+			if fingerprint == lastSemanticToolFingerprint {
+				repeatedSemanticToolCalls++
+			} else {
+				lastSemanticToolFingerprint = fingerprint
+				repeatedSemanticToolCalls = 1
+			}
+			if repeatedSemanticToolCalls == repeatedSemanticToolCallNoticeThreshold {
+				loop.agent.emitRuntimeEvent("tool_loop.repeated_semantic_call_observed", sessionID, "", map[string]interface{}{
+					"trace_id":              traceID,
+					"step":                  step,
+					"tool_call_fingerprint": fingerprint,
+					"repeat_count":          repeatedSemanticToolCalls,
+					"tool_call_count":       len(action.ToolCalls),
+				})
+			}
+			if repeatedSemanticToolCalls >= 2 {
+				repeatedSemanticAdvisory = repeatedSemanticToolCallAdvisory(repeatedSemanticToolCalls)
+			}
+		} else {
+			lastSemanticToolFingerprint = ""
+			repeatedSemanticToolCalls = 0
+		}
 		if fingerprint := actionPromptFingerprint(action); fingerprint != "" {
 			if fingerprint == lastToolPromptFingerprint {
 				repeatedToolPromptFingerprint++
@@ -396,23 +440,14 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				lastToolPromptFingerprint = fingerprint
 				repeatedToolPromptFingerprint = 1
 			}
-			if repeatedToolPromptFingerprint >= 2 {
-				err := fmt.Errorf("%s: fingerprint=%s step=%d", repeatedPromptToolLoopError, fingerprint, step)
-				loop.agent.AddError(err.Error())
-				result.Success = false
-				result.Error = err.Error()
-				result.Steps = step
-				result.Observations = observations
-				result.Duration = *startTime
-				result.Usage = totalUsage.Clone()
-				result.State = loop.agent.GetState()
-				loop.agent.emitRuntimeEvent("tool_loop.repeated_prompt_stopped", sessionID, "", map[string]interface{}{
+			if repeatedToolPromptFingerprint == 2 {
+				loop.agent.emitRuntimeEvent("tool_loop.repeated_prompt_observed", sessionID, "", map[string]interface{}{
 					"trace_id":           traceID,
 					"step":               step,
 					"prompt_fingerprint": fingerprint,
+					"repeat_count":       repeatedToolPromptFingerprint,
 					"tool_call_count":    len(action.ToolCalls),
 				})
-				return result, err
 			}
 		} else {
 			lastToolPromptFingerprint = ""
@@ -470,7 +505,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 
 		// 4. 更新对话历史
-		builder.AppendToolResults(normalizedCalls, toolResultsToPayloads(toolResults))
+		builder.AppendToolResults(normalizedCalls, toolResultsToPayloads(toolResults, repeatedSemanticAdvisory))
 		if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 			return nil, err
 		}
@@ -565,8 +600,33 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			"context": built.Metadata,
 		}
 	}
+	var availableTools []types.ToolDefinition
+	if loop.config.EnableToolCalls {
+		availableTools, err = loop.getAvailableTools(ctx, goal, toolWhitelist)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		toolTokensBefore := estimateToolDefinitionTokens(loop.llmRuntime, availableTools)
+		availableTools = loop.compactToolSurfaceForPrompt(managedHistory, availableTools, remainingBudget)
+		toolTokensAfter := estimateToolDefinitionTokens(loop.llmRuntime, availableTools)
+		if toolTokensAfter > 0 && toolTokensAfter < toolTokensBefore {
+			if snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx); ok && snapshot != nil {
+				if saveErr := snapshot.SaveTurnToolSurface(ctx, availableTools); saveErr != nil {
+					return "", nil, nil, saveErr
+				}
+			}
+			loop.agent.emitRuntimeEvent("context.tool_schema.compacted", sessionID, "", map[string]interface{}{
+				"trace_id":           traceID,
+				"step":               step,
+				"tool_count":         len(availableTools),
+				"tool_schema_before": toolTokensBefore,
+				"tool_schema_after":  toolTokensAfter,
+				"reason":             "prompt_pressure",
+			})
+		}
+	}
 	var preflightMetadata map[string]interface{}
-	managedHistory, preflightMetadata, err = loop.enforcePromptPreflight(traceID, sessionID, step, managedHistory, remainingBudget)
+	managedHistory, preflightMetadata, err = loop.enforcePromptPreflightWithTools(traceID, sessionID, step, managedHistory, availableTools, remainingBudget)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -579,6 +639,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		Provider:        requestProvider,
 		Model:           requestModel,
 		Messages:        managedHistory,
+		Tools:           availableTools,
 		MaxTokens:       resolveLoopMaxTokens(loop.agent.config.DefaultMaxTokens, remainingBudget),
 		Temperature:     loop.config.Temperature,
 		ReasoningEffort: loop.config.ReasoningEffort,
@@ -688,16 +749,6 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		})
 	}
 	callCtx = llm.WithRetryEventReporter(callCtx, loop.runtimeRetryEventReporter(traceID, sessionID, step, req))
-
-	// 添加工具定义（如果启用了工具调用）
-	if loop.config.EnableToolCalls {
-		// 获取可用工具
-		tools, err := loop.getAvailableTools(ctx, goal, toolWhitelist)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		req.Tools = tools
-	}
 
 	// 调用 LLM
 	requestPayload := map[string]interface{}{
@@ -1868,8 +1919,153 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 		}
 	}
 
+	tools = optimizeModelToolSurface(tools)
+	tools = loop.compactToolSurfaceToBudget(tools)
 	sortToolDefinitionsByName(tools)
 	return tools, nil
+}
+
+func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefinition {
+	if len(tools) == 0 {
+		return nil
+	}
+	hasBash := false
+	for _, definition := range tools {
+		if strings.EqualFold(strings.TrimSpace(definition.Name), "bash") {
+			hasBash = true
+			break
+		}
+	}
+
+	optimized := make([]types.ToolDefinition, 0, len(tools))
+	for _, definition := range tools {
+		name := strings.ToLower(strings.TrimSpace(definition.Name))
+		if hasBash && name == "execute_shell_command" {
+			continue
+		}
+		item := types.ToolDefinition{
+			Name:        definition.Name,
+			Description: definition.Description,
+			Parameters:  cloneInterfaceMap(definition.Parameters),
+			Metadata:    cloneInterfaceMap(definition.Metadata),
+		}
+		if name == "grep" {
+			item.Description = "搜索文件内容。优先用 patterns + paths 在一次调用中批量搜索相关目标；高级 ripgrep 选项放入 rg_args。结果统一为 path:line[:column]: text。"
+			item.Parameters = compactGrepParametersForModel(item.Parameters)
+		}
+		optimized = append(optimized, item)
+	}
+	return optimized
+}
+
+func compactGrepParametersForModel(parameters map[string]interface{}) map[string]interface{} {
+	properties, _ := parameters["properties"].(map[string]interface{})
+	if len(properties) == 0 {
+		return parameters
+	}
+	commonNames := []string{
+		"pattern", "patterns", "regexp", "pattern_file", "pattern_files",
+		"path", "paths", "glob", "include", "exclude", "file_type", "type", "type_not",
+		"fixed_strings", "literal", "ignore_case", "case_sensitive", "smart_case",
+		"word", "word_regexp", "line_regexp", "invert_match", "only_matching",
+		"context", "before_context", "after_context", "max_count", "max_depth", "max_filesize",
+		"files_with_matches", "files_without_match", "count", "count_matches",
+		"hidden", "no_ignore", "ignore_file", "pcre2", "multiline", "rg_args",
+	}
+	compactProperties := make(map[string]interface{}, len(commonNames))
+	for _, name := range commonNames {
+		if schema, ok := properties[name]; ok {
+			compactProperties[name] = schema
+		}
+	}
+	compacted := map[string]interface{}{
+		"type":                 "object",
+		"properties":           compactProperties,
+		"additionalProperties": false,
+	}
+	if required, ok := parameters["required"]; ok {
+		compacted["required"] = required
+	}
+	return compacted
+}
+
+func (loop *ReActLoop) compactToolSurfaceToBudget(tools []types.ToolDefinition) []types.ToolDefinition {
+	return loop.compactToolSurfaceForPrompt(nil, tools, 0)
+}
+
+func (loop *ReActLoop) compactToolSurfaceForPrompt(messages []types.Message, tools []types.ToolDefinition, remainingBudget int) []types.ToolDefinition {
+	if loop == nil || loop.llmRuntime == nil || len(tools) == 0 {
+		return tools
+	}
+	budget := resolvePromptPreflightBudget(loop.llmRuntime, loop.agent, loop.config, remainingBudget)
+	if budget.PromptBudget <= 0 {
+		return tools
+	}
+	before := estimateToolDefinitionTokens(loop.llmRuntime, tools)
+	messageTokens := estimatePromptMessageTokens(loop.llmRuntime, messages)
+	if before+messageTokens < budget.PromptBudget {
+		return tools
+	}
+	compacted := compactToolDefinitionAnnotations(tools)
+	if after := estimateToolDefinitionTokens(loop.llmRuntime, compacted); after > 0 && after < before {
+		return compacted
+	}
+	return tools
+}
+
+func compactToolDefinitionAnnotations(tools []types.ToolDefinition) []types.ToolDefinition {
+	compacted := cloneToolDefinitions(tools)
+	for index := range compacted {
+		compacted[index].Description = truncateToolDescription(compacted[index].Description, 160)
+		compacted[index].Parameters = stripToolSchemaAnnotations(compacted[index].Parameters)
+	}
+	return compacted
+}
+
+func stripToolSchemaAnnotations(schema map[string]interface{}) map[string]interface{} {
+	if len(schema) == 0 {
+		return schema
+	}
+	cleaned, _ := stripToolSchemaValue(schema).(map[string]interface{})
+	return cleaned
+}
+
+func stripToolSchemaValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		cleaned := make(map[string]interface{}, len(typed))
+		for key, item := range typed {
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "description", "title", "examples", "example", "$comment", "deprecated", "default":
+				continue
+			default:
+				cleaned[key] = stripToolSchemaValue(item)
+			}
+		}
+		return cleaned
+	case []interface{}:
+		cleaned := make([]interface{}, len(typed))
+		for index, item := range typed {
+			cleaned[index] = stripToolSchemaValue(item)
+		}
+		return cleaned
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return typed
+	}
+}
+
+func truncateToolDescription(description string, limit int) string {
+	trimmed := strings.TrimSpace(description)
+	if limit <= 0 || trimmed == "" {
+		return ""
+	}
+	runes := []rune(trimmed)
+	if len(runes) <= limit {
+		return trimmed
+	}
+	return strings.TrimSpace(string(runes[:limit])) + "..."
 }
 
 func sortToolDefinitionsByName(tools []types.ToolDefinition) {
@@ -2031,7 +2227,7 @@ func (loop *ReActLoop) IsRunning() bool {
 	return loop.agent.IsRunning()
 }
 
-func toolResultsToPayloads(results []toolExecutionResult) []ToolResultPayload {
+func toolResultsToPayloads(results []toolExecutionResult, advisory string) []ToolResultPayload {
 	payloads := make([]ToolResultPayload, 0, len(results))
 	for _, result := range results {
 		payload := ToolResultPayload{
@@ -2052,7 +2248,22 @@ func toolResultsToPayloads(results []toolExecutionResult) []ToolResultPayload {
 		}
 		payloads = append(payloads, payload)
 	}
+	if len(payloads) > 0 && strings.TrimSpace(advisory) != "" {
+		last := len(payloads) - 1
+		payloads[last].Content = strings.TrimSpace(payloads[last].Content) + "\n\n" + strings.TrimSpace(advisory)
+		payloads[last].Metadata["semantic_repeat_advisory"] = true
+	}
 	return payloads
+}
+
+func repeatedSemanticToolCallAdvisory(repeatCount int) string {
+	if repeatCount < 2 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Runtime advisory: the same semantic tool request has run %d consecutive times. Execution was not blocked. If the evidence is unchanged, reuse it and change the query, batch related inputs, or proceed to the next task step instead of repeating the call.",
+		repeatCount,
+	)
 }
 
 func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToolCallID string, completed []toolExecutionResult, agent *Agent, sessionID string) context.Context {
@@ -2205,6 +2416,39 @@ func actionPromptFingerprint(action *AgentAction) string {
 	return strings.TrimSpace(stringValue(action.Metadata["prompt_fingerprint"]))
 }
 
+func semanticToolCallFingerprint(calls []types.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	type semanticToolCall struct {
+		Name string                 `json:"name"`
+		Args map[string]interface{} `json:"arguments,omitempty"`
+	}
+	payload := make([]semanticToolCall, 0, len(calls))
+	for _, call := range calls {
+		name := strings.ToLower(strings.TrimSpace(call.Name))
+		if name == "" || semanticToolCallRepeatExempt(name) {
+			return ""
+		}
+		payload = append(payload, semanticToolCall{Name: name, Args: call.Args})
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func semanticToolCallRepeatExempt(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "background_task", "wait_agent", "read_agent", "list_agents", "get_agents", "get_goal", "read_goal":
+		return true
+	default:
+		return false
+	}
+}
+
 func promptMessageFingerprint(messages []types.Message) string {
 	if len(messages) == 0 {
 		return ""
@@ -2249,6 +2493,32 @@ func promptMessageFingerprint(messages []types.Message) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
+func markSessionCompactionRecoveryInput(seen map[string]struct{}, fingerprint string) bool {
+	if seen == nil || strings.TrimSpace(fingerprint) == "" {
+		return false
+	}
+	if _, exists := seen[fingerprint]; exists {
+		return false
+	}
+	seen[fingerprint] = struct{}{}
+	return true
+}
+
+func compactionRecoveryMadeProgress(runtime *llm.LLMRuntime, before, after []types.Message) bool {
+	if len(after) == 0 || promptMessageFingerprint(before) == promptMessageFingerprint(after) {
+		return false
+	}
+	if len(after) < len(before) {
+		return true
+	}
+	if runtime == nil {
+		return false
+	}
+	beforeTokens := estimatePromptMessageTokens(runtime, before)
+	afterTokens := estimatePromptMessageTokens(runtime, after)
+	return beforeTokens > 0 && afterTokens > 0 && afterTokens < beforeTokens
+}
+
 func cloneToolDefinitions(input []types.ToolDefinition) []types.ToolDefinition {
 	if len(input) == 0 {
 		return nil
@@ -2263,6 +2533,40 @@ func cloneToolDefinitions(input []types.ToolDefinition) []types.ToolDefinition {
 		}
 	}
 	return cloned
+}
+
+func estimateToolDefinitionTokens(runtime *llm.LLMRuntime, tools []types.ToolDefinition) int {
+	if runtime == nil || len(tools) == 0 {
+		return 0
+	}
+	encoded, err := json.Marshal(tools)
+	if err != nil {
+		return 0
+	}
+	return runtime.CountTokens(string(encoded))
+}
+
+func estimatePromptMessageTokens(runtime *llm.LLMRuntime, messages []types.Message) int {
+	if runtime == nil || len(messages) == 0 {
+		return 0
+	}
+	total := runtime.CountMessagesTokens(messages)
+	for _, message := range messages {
+		if len(message.ContentParts) > 0 {
+			if encoded, err := json.Marshal(message.ContentParts); err == nil {
+				total += runtime.CountTokens(string(encoded))
+			}
+		}
+		if len(message.ToolCalls) > 0 {
+			if encoded, err := json.Marshal(message.ToolCalls); err == nil {
+				total += runtime.CountTokens(string(encoded))
+			}
+		}
+		if toolCallID := strings.TrimSpace(message.ToolCallID); toolCallID != "" {
+			total += runtime.CountTokens(toolCallID)
+		}
+	}
+	return total
 }
 
 func mergeHookMetadata(metadata map[string]interface{}, message string, context map[string]string) {
@@ -2423,6 +2727,10 @@ func newPromptPreflightError(
 }
 
 func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step int, messages []types.Message, remainingBudget int) ([]types.Message, map[string]interface{}, error) {
+	return loop.enforcePromptPreflightWithTools(traceID, sessionID, step, messages, nil, remainingBudget)
+}
+
+func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string, step int, messages []types.Message, tools []types.ToolDefinition, remainingBudget int) ([]types.Message, map[string]interface{}, error) {
 	if len(messages) == 0 || loop == nil || loop.llmRuntime == nil {
 		return messages, nil, nil
 	}
@@ -2432,9 +2740,22 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 		return messages, nil, nil
 	}
 
-	promptTokensBefore := loop.llmRuntime.CountMessagesTokens(messages)
+	countPromptMessages := func(input []types.Message) int {
+		return estimatePromptMessageTokens(loop.llmRuntime, input)
+	}
+	messageTokensBefore := countPromptMessages(messages)
+	toolSchemaTokens := estimateToolDefinitionTokens(loop.llmRuntime, tools)
+	promptTokensBefore := messageTokensBefore + toolSchemaTokens
+	preflightMetadata := budget.Metadata()
+	if preflightMetadata == nil {
+		preflightMetadata = map[string]interface{}{}
+	}
+	preflightMetadata["prompt_tokens_before"] = promptTokensBefore
+	preflightMetadata["message_tokens_before"] = messageTokensBefore
+	preflightMetadata["tool_schema_tokens"] = toolSchemaTokens
+	preflightMetadata["tool_count"] = len(tools)
 	if promptTokensBefore <= 0 || promptTokensBefore <= budget.PromptBudget {
-		return messages, nil, nil
+		return messages, preflightMetadata, nil
 	}
 
 	startedPayload := budget.Metadata()
@@ -2444,30 +2765,48 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 	startedPayload["trace_id"] = traceID
 	startedPayload["step"] = step
 	startedPayload["prompt_tokens"] = promptTokensBefore
+	startedPayload["message_tokens"] = messageTokensBefore
+	startedPayload["tool_schema_tokens"] = toolSchemaTokens
+	startedPayload["tool_count"] = len(tools)
 	startedPayload["message_count"] = len(messages)
 	startedPayload["remaining_budget"] = remainingBudget
 	startedPayload["active_turn_replay"] = true
 	loop.agent.emitRuntimeEvent("context.preflight.started", sessionID, "", startedPayload)
 
+	messageBudget := budget.PromptBudget - toolSchemaTokens
+	if messageBudget <= 0 {
+		preflightMetadata["active_turn_compacted"] = false
+		failure := buildPromptPreflightFailure(
+			"tool_schema_exceeds_budget",
+			messages,
+			promptTokensBefore,
+			budget.PromptBudget,
+		)
+		failureErr := newPromptPreflightError(budget, failure, promptTokensBefore, false, nil)
+		failedPayload := cloneInterfaceMap(startedPayload)
+		failedPayload["active_turn_compacted"] = false
+		for key, value := range failureErr.Metadata() {
+			failedPayload[key] = value
+			preflightMetadata[key] = value
+		}
+		loop.agent.emitRuntimeEvent("context.preflight.failed", sessionID, "", failedPayload)
+		return nil, preflightMetadata, failureErr
+	}
 	compactedMessages, compacted := historyguard.CompactActiveTurnReplayWithCounter(
 		messages,
 		historyguard.DefaultActiveTurnReplayMaxBytes,
-		budget.PromptBudget,
-		loop.llmRuntime.CountMessagesTokens,
+		messageBudget,
+		countPromptMessages,
 	)
-
-	preflightMetadata := budget.Metadata()
-	if preflightMetadata == nil {
-		preflightMetadata = map[string]interface{}{}
-	}
-	preflightMetadata["prompt_tokens_before"] = promptTokensBefore
 	preflightMetadata["message_count_before"] = len(messages)
 
 	if compacted {
-		promptTokensAfter := loop.llmRuntime.CountMessagesTokens(compactedMessages)
+		messageTokensAfter := countPromptMessages(compactedMessages)
+		promptTokensAfter := messageTokensAfter + toolSchemaTokens
 		preflightMetadata["active_turn_compacted"] = true
 		preflightMetadata["active_turn_prompt_only"] = true
 		preflightMetadata["prompt_tokens_after"] = promptTokensAfter
+		preflightMetadata["message_tokens_after"] = messageTokensAfter
 		preflightMetadata["message_count_after"] = len(compactedMessages)
 
 		compactedPayload := budget.Metadata()
@@ -2478,6 +2817,10 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 		compactedPayload["step"] = step
 		compactedPayload["prompt_tokens_before"] = promptTokensBefore
 		compactedPayload["prompt_tokens_after"] = promptTokensAfter
+		compactedPayload["message_tokens_before"] = messageTokensBefore
+		compactedPayload["message_tokens_after"] = messageTokensAfter
+		compactedPayload["tool_schema_tokens"] = toolSchemaTokens
+		compactedPayload["tool_count"] = len(tools)
 		compactedPayload["message_count_before"] = len(messages)
 		compactedPayload["message_count_after"] = len(compactedMessages)
 		compactedPayload["remaining_budget"] = remainingBudget
@@ -2501,6 +2844,9 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 		failedPayload["trace_id"] = traceID
 		failedPayload["step"] = step
 		failedPayload["prompt_tokens"] = promptTokensAfter
+		failedPayload["message_tokens"] = messageTokensAfter
+		failedPayload["tool_schema_tokens"] = toolSchemaTokens
+		failedPayload["tool_count"] = len(tools)
 		failedPayload["message_count"] = len(compactedMessages)
 		failedPayload["remaining_budget"] = remainingBudget
 		failedPayload["active_turn_compacted"] = true
@@ -2529,6 +2875,9 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 	failedPayload["trace_id"] = traceID
 	failedPayload["step"] = step
 	failedPayload["prompt_tokens"] = promptTokensBefore
+	failedPayload["message_tokens"] = messageTokensBefore
+	failedPayload["tool_schema_tokens"] = toolSchemaTokens
+	failedPayload["tool_count"] = len(tools)
 	failedPayload["message_count"] = len(messages)
 	failedPayload["remaining_budget"] = remainingBudget
 	failedPayload["active_turn_compacted"] = false
@@ -2658,6 +3007,10 @@ func buildPromptPreflightFailure(code string, messages []types.Message, promptTo
 	}
 
 	switch failure.Code {
+	case "tool_schema_exceeds_budget":
+		failure.Reason = "tool definitions exceed the prompt budget"
+		failure.Detail = fmt.Sprintf("messages plus tool definitions require %d tokens, exceeding prompt budget %d before the provider request is sent", promptTokens, promptBudget)
+		failure.SuggestedAction = "请缩小工具白名单、精简工具 Schema，或提高 prompt 预算。"
 	case "active_turn_not_compactable":
 		failure.Reason = "active-turn replay cannot be compacted further"
 		failure.Detail = fmt.Sprintf("prompt tokens %d exceed budget %d, and no earlier replay block remains available for compaction", promptTokens, promptBudget)

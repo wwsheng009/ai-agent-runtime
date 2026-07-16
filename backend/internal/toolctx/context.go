@@ -13,6 +13,7 @@ const (
 	sessionIDKey               contextKey = "tool_session_id"
 	goalIDKey                  contextKey = "tool_goal_id"
 	generatedImageOutputDirKey contextKey = "generated_image_output_dir"
+	shellOutputArtifactDirKey  contextKey = "shell_output_artifact_dir"
 )
 
 // WithSessionID stores the active session ID in ctx.
@@ -75,6 +76,25 @@ func GeneratedImageOutputDir(ctx context.Context) string {
 	}
 	if sessionID := SessionID(ctx); sessionID != "" {
 		return filepath.Join(defaultGeneratedImageRoot(), sanitizePathSegment(sessionID))
+	}
+	return ""
+}
+
+// WithShellOutputArtifactDir stores the session-local root for raw shell output.
+func WithShellOutputArtifactDir(ctx context.Context, outputDir string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, shellOutputArtifactDirKey, strings.TrimSpace(outputDir))
+}
+
+// ShellOutputArtifactDir retrieves the session-local root for raw shell output.
+func ShellOutputArtifactDir(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value, ok := ctx.Value(shellOutputArtifactDirKey).(string); ok {
+		return strings.TrimSpace(value)
 	}
 	return ""
 }

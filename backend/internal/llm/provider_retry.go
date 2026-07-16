@@ -70,6 +70,9 @@ func isRetryableProviderResponseError(err error) bool {
 		return false
 	}
 
+	if IsContextWindowError(err) {
+		return false
+	}
 	lower := strings.ToLower(err.Error())
 	for _, needle := range []string{
 		"invalid_request_error",
@@ -80,10 +83,6 @@ func isRetryableProviderResponseError(err error) bool {
 		"unrecognized request argument",
 		"unknown parameter",
 		"unexpected parameter",
-		"context_length_exceeded",
-		"context window exceeded",
-		"maximum context length",
-		"prompt is too long",
 		"invalid api key",
 		"incorrect api key",
 	} {
@@ -93,6 +92,29 @@ func isRetryableProviderResponseError(err error) bool {
 	}
 
 	return true
+}
+
+// IsContextWindowError reports deterministic provider failures caused by an
+// oversized prompt. Callers can compact or reduce the request before retrying.
+func IsContextWindowError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"context_length_exceeded",
+		"context window exceeded",
+		"exceeds the context window",
+		"input exceeds the context",
+		"input is too long for the context",
+		"maximum context length",
+		"prompt is too long",
+	} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func providerCallHTTPStatus(err error) (int, bool) {

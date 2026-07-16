@@ -1,6 +1,8 @@
 version: "v1"
 
 agent:
+  # Agent runs are unbounded by default. Set a positive value only as an explicit opt-in limit.
+  maxSteps: 0
   enableParallelTools: true
   maxParallelToolCalls: 4
 

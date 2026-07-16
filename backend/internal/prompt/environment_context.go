@@ -112,6 +112,8 @@ func RenderParallelToolGuidance() string {
 		"Use this only for independent read-only inspections.",
 		"When a tool definition explicitly marks supports_parallel=true, prefer batching it with other independent calls in the same assistant turn.",
 		"When several inspections do not depend on each other, request them in the same assistant turn so the runtime can batch them in parallel.",
+		"Prefer view.files for multiple file ranges and grep.patterns plus grep.paths for related searches, so one tool result can answer the whole inspection question.",
+		"Gather all predictable independent evidence in one assistant turn before deciding edits; do not discover unchanged files one at a time.",
 		"Keep dependent tool calls serial and wait for the earlier result before planning the next dependent step.",
 	}
 

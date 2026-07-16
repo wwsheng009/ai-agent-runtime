@@ -72,6 +72,7 @@ func NewGateway(store ArtifactWriter, reducers ...Reducer) *Gateway {
 	if len(normalized) == 0 {
 		normalized = append(normalized,
 			&GoTestJSONReducer{},
+			&GoTestTextReducer{},
 			&GitLogReducer{},
 			&PlaywrightSnapshotReducer{},
 			&JSONReducer{},
@@ -145,8 +146,12 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 		}
 
 		handled = true
+		reducerName := reducer.Name()
 		envelope = mergeEnvelope(envelope, reduced)
-		envelope.Metadata["reducer"] = reducer.Name()
+		envelope.Metadata["reducer"] = reducerName
+		if input.ByteCount > modelToolTextByteBudget && prefersModelSummaryForLargeText(reducerName) {
+			envelope.Metadata["model_summary_preferred"] = true
+		}
 		break
 	}
 
@@ -166,6 +171,15 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 	}
 
 	return envelope, joinErrors(processErrs)
+}
+
+func prefersModelSummaryForLargeText(reducerName string) bool {
+	switch strings.ToLower(strings.TrimSpace(reducerName)) {
+	case "go_test_json", "go_test_text", "log_summary":
+		return true
+	default:
+		return false
+	}
 }
 
 // Render 把 envelope 变成适合放入 tool_result 的文本。

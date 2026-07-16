@@ -35,7 +35,7 @@ func NewLsTool() *LsTool {
 		"properties": map[string]interface{}{
 			"path": map[string]interface{}{
 				"type":        "string",
-				"description": "目录路径（默认为当前目录）。若需要查看多个目录，请拆分为多次 ls 调用，每次聚焦一个目录。",
+				"description": "目录路径，默认为当前目录。多个独立目录可在同一 assistant 响应中并行发起 ls 调用。",
 			},
 			"depth": map[string]interface{}{
 				"type":        "integer",
@@ -48,7 +48,7 @@ func NewLsTool() *LsTool {
 	return &LsTool{
 		BaseTool: toolkit.NewBaseTool(
 			"ls",
-			"列出目录内容。若需要查看多个目录，请拆分为多次 ls 调用，每次只聚焦一个目录或一个较小的目录子树。",
+			"列出目录内容。优先用合适的 depth 一次取得所需子树；多个独立目录可在同一轮并行调用。",
 			"1.0.0",
 			parameters,
 			true,

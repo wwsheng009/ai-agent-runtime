@@ -292,7 +292,16 @@ func copyToolShellMetadata(payload map[string]interface{}, metadata map[string]i
 	if payload == nil || len(metadata) == 0 {
 		return
 	}
-	for _, key := range []string{"shell_type", "shell_path", "shell_display"} {
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		copyToolShellMetadata(payload, nested)
+	}
+	for _, key := range []string{
+		"shell_type",
+		"shell_path",
+		"shell_display",
+		"raw_output_artifact_path",
+		"raw_output_artifact_error",
+	} {
 		value, _ := metadata[key].(string)
 		if trimmed := strings.TrimSpace(value); trimmed != "" {
 			payload[key] = trimmed
@@ -315,6 +324,12 @@ func copyToolReliabilityMetadata(payload map[string]interface{}, metadata map[st
 		"timeout_source",
 		"timeout_ms",
 		"cancel_source",
+		"output_capture_complete",
+		"capture_limit_reached",
+		"output_capture_limit_disabled",
+		"output_capture_limit_bytes",
+		"retained_output_bytes",
+		"omitted_output_bytes",
 	} {
 		if value, ok := metadata[key]; ok && value != nil {
 			payload[key] = value

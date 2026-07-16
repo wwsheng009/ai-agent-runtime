@@ -174,12 +174,12 @@ func TestLsTool_PreservesParentPathForNestedEntries(t *testing.T) {
 	}
 }
 
-func TestLsTool_DescriptionGuidesSingleTargetFocus(t *testing.T) {
+func TestLsTool_DescriptionGuidesParallelDirectoryInspection(t *testing.T) {
 	tool := NewLsTool()
 
 	desc := tool.Description()
-	if !strings.Contains(desc, "拆分") || !strings.Contains(desc, "每次只聚焦一个目录") {
-		t.Fatalf("expected ls description to guide single-target focus, got %q", desc)
+	if !strings.Contains(desc, "depth") || !strings.Contains(desc, "并行") {
+		t.Fatalf("expected ls description to guide efficient directory inspection, got %q", desc)
 	}
 
 	params := tool.Parameters()
@@ -192,7 +192,7 @@ func TestLsTool_DescriptionGuidesSingleTargetFocus(t *testing.T) {
 		t.Fatalf("expected path schema in properties, got %#v", props)
 	}
 	pathDesc, _ := pathSchema["description"].(string)
-	if !strings.Contains(pathDesc, "拆分") || !strings.Contains(pathDesc, "多个目录") {
-		t.Fatalf("expected path description to guide single-target focus, got %q", pathDesc)
+	if !strings.Contains(pathDesc, "多个独立目录") || !strings.Contains(pathDesc, "并行") {
+		t.Fatalf("expected path description to guide parallel calls, got %q", pathDesc)
 	}
 }

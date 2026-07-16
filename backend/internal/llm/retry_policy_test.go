@@ -34,6 +34,33 @@ func TestClassifyRetryableLLMError_TreatsInsufficientQuotaAsRetryable(t *testing
 	assert.Equal(t, "rate_limit", decision.Reason)
 }
 
+func TestClassifyRetryableLLMError_DoesNotRetryContextOverflowBehind5xx(t *testing.T) {
+	tests := []string{
+		"HTTP 502: Your input exceeds the context window of this model.",
+		"HTTP 502: input exceeds the context length limit",
+		"HTTP 503: input is too long for the context window",
+	}
+	for _, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			decision := classifyRetryableLLMError(fmt.Errorf("%s", message))
+			assert.False(t, decision.Retryable)
+			assert.Equal(t, "non_retryable_response", decision.Reason)
+		})
+	}
+}
+
+func TestIsContextWindowErrorSupportsAgentLevelRecovery(t *testing.T) {
+	for _, message := range []string{
+		"context_length_exceeded",
+		"HTTP 502: Your input exceeds the context window of this model",
+		"maximum context length is 128000 tokens",
+		"prompt is too long",
+	} {
+		require.True(t, IsContextWindowError(fmt.Errorf("%s", message)), message)
+	}
+	require.False(t, IsContextWindowError(fmt.Errorf("HTTP 502: upstream unavailable")))
+}
+
 func TestParseRetryAfterHeaderValue_ParsesSecondsAndHTTPDate(t *testing.T) {
 	now := time.Date(2026, time.April, 26, 10, 0, 0, 0, time.UTC)
 

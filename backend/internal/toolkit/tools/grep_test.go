@@ -1651,7 +1651,7 @@ func TestGrepTool_DescriptionMentionsRgArgsCompatibility(t *testing.T) {
 	}
 }
 
-func TestGrepTool_ParametersGuideSingleTargetFocus(t *testing.T) {
+func TestGrepTool_ParametersGuideBatchSearch(t *testing.T) {
 	tool := NewGrepTool()
 	params := tool.Parameters()
 
@@ -1665,8 +1665,8 @@ func TestGrepTool_ParametersGuideSingleTargetFocus(t *testing.T) {
 		t.Fatalf("expected pattern schema in properties, got %#v", props)
 	}
 	patternDesc, _ := patternSchema["description"].(string)
-	if !strings.Contains(patternDesc, "拆分") || !strings.Contains(patternDesc, "每次只聚焦一个目标") {
-		t.Fatalf("expected pattern description to guide single-target focus, got %q", patternDesc)
+	if !strings.Contains(patternDesc, "patterns") || !strings.Contains(patternDesc, "多个相关模式") {
+		t.Fatalf("expected pattern description to guide batch search, got %q", patternDesc)
 	}
 
 	rgArgsSchema, ok := props["rg_args"].(map[string]interface{})
@@ -1674,10 +1674,10 @@ func TestGrepTool_ParametersGuideSingleTargetFocus(t *testing.T) {
 		t.Fatalf("expected rg_args schema in properties, got %#v", props)
 	}
 	rgArgsDesc, _ := rgArgsSchema["description"].(string)
-	if !strings.Contains(rgArgsDesc, "拆分") || !strings.Contains(rgArgsDesc, "每次聚焦一个目标") {
-		t.Fatalf("expected rg_args description to guide single-target focus, got %q", rgArgsDesc)
+	if !strings.Contains(rgArgsDesc, "高级 ripgrep") {
+		t.Fatalf("expected rg_args description to be concise and advanced-only, got %q", rgArgsDesc)
 	}
-	if !strings.Contains(rgArgsDesc, "结构化参数优先于 rg_args") {
+	if !strings.Contains(rgArgsDesc, "结构化参数优先") {
 		t.Fatalf("expected rg_args description to mention structured priority, got %q", rgArgsDesc)
 	}
 }

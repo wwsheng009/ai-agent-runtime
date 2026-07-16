@@ -183,6 +183,41 @@ func TestBashTool_UsesEnvDefaultTimeout(t *testing.T) {
 	}
 }
 
+func TestBashTool_GoTestUsesExtendedInferredTimeout(t *testing.T) {
+	t.Setenv(shellCommandTimeoutEnv, "")
+	t.Setenv(shellCommandTimeoutMSEnv, "")
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "$env:GOMAXPROCS='2'; go test -p 1 ./internal/agent",
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected inferred go test timeout, result=%#v err=%v", result, err)
+	}
+	if inspector.lastTimeout != defaultGoTestCommandTimeout {
+		t.Fatalf("expected go test timeout %v, got %v", defaultGoTestCommandTimeout, inspector.lastTimeout)
+	}
+}
+
+func TestBashTool_ExplicitTimeoutOverridesGoTestInference(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "go test ./...",
+		"timeout": "45s",
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected explicit timeout, result=%#v err=%v", result, err)
+	}
+	if inspector.lastTimeout != 45*time.Second {
+		t.Fatalf("expected explicit 45s timeout, got %v", inspector.lastTimeout)
+	}
+}
+
 func TestBashTool_NonStringTimeoutFallsBackToDefault(t *testing.T) {
 	t.Setenv(shellCommandTimeoutEnv, "45s")
 	t.Setenv(shellCommandTimeoutMSEnv, "")
@@ -589,18 +624,21 @@ func TestFriendlyHintFor_PathNotFoundIncludesWorkdirCandidates(t *testing.T) {
 
 func TestEnsureLargeHistoryOutputArtifact_PersistsCompleteLargeOutput(t *testing.T) {
 	artifactRoot := t.TempDir()
-	t.Setenv("AICLI_SHELL_OUTPUT_ARTIFACT_DIR", artifactRoot)
+	t.Setenv("AICLI_SHELL_OUTPUT_ARTIFACT_DIR", "")
 	capture := runtimeexecutor.CombinedOutputCapture{
 		Output:     strings.Repeat("diff-line-abcdefghijklmnopqrstuvwxyz0123456789\n", 400),
 		TotalBytes: 400 * len("diff-line-abcdefghijklmnopqrstuvwxyz0123456789\n"),
 	}
 
-	artifactPath, artifactErr := ensureLargeHistoryOutputArtifact(capture, "", nil, "toolkit", "git diff")
+	artifactPath, artifactErr := ensureLargeHistoryOutputArtifact(capture, "", nil, "toolkit", "git diff", artifactRoot)
 	if artifactErr != nil {
 		t.Fatalf("did not expect artifact error, got %v", artifactErr)
 	}
 	if strings.TrimSpace(artifactPath) == "" {
 		t.Fatal("expected artifact path for large complete output")
+	}
+	if !strings.HasPrefix(artifactPath, filepath.Join(artifactRoot, "toolkit")) {
+		t.Fatalf("expected artifact under session root %q, got %q", artifactRoot, artifactPath)
 	}
 	data, err := os.ReadFile(artifactPath)
 	if err != nil {

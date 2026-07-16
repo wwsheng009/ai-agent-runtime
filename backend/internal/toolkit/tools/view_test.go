@@ -1,19 +1,21 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
-func TestViewTool_DescriptionGuidesSingleFileFocus(t *testing.T) {
+func TestViewTool_DescriptionAndSchemaSupportBatchReads(t *testing.T) {
 	tool := NewViewTool()
 
 	desc := tool.Description()
-	if !strings.Contains(desc, "拆分") || !strings.Contains(desc, "每次只聚焦一个文件") {
-		t.Fatalf("expected view description to guide single-file focus, got %q", desc)
+	if !strings.Contains(desc, "多个文件") || !strings.Contains(desc, "files") {
+		t.Fatalf("expected view description to advertise batch reads, got %q", desc)
 	}
 
 	params := tool.Parameters()
@@ -26,8 +28,102 @@ func TestViewTool_DescriptionGuidesSingleFileFocus(t *testing.T) {
 		t.Fatalf("expected file_path schema in properties, got %#v", props)
 	}
 	pathDesc, _ := pathSchema["description"].(string)
-	if !strings.Contains(pathDesc, "拆分") || !strings.Contains(pathDesc, "多个文件") {
-		t.Fatalf("expected file_path description to guide single-file focus, got %q", pathDesc)
+	if !strings.Contains(pathDesc, "files") {
+		t.Fatalf("expected file_path description to point to batch mode, got %q", pathDesc)
+	}
+	filesSchema, ok := props["files"].(map[string]interface{})
+	if !ok || filesSchema["type"] != "array" {
+		t.Fatalf("expected files array schema, got %#v", props["files"])
+	}
+}
+
+func TestViewTool_OutputPreservesLinesAndAddsLineNumbers(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": "notes.txt",
+		"offset":    1,
+		"limit":     2,
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected successful read, result=%#v err=%v", result, err)
+	}
+	if result.Content != "2: two\n3: three" {
+		t.Fatalf("expected stable line-oriented output, got %q", result.Content)
+	}
+}
+
+func TestViewTool_BatchReadsReturnSuccessfulFilesAndPartialErrors(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("alpha\n"), 0o644); err != nil {
+		t.Fatalf("write a: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b.txt"), []byte("bravo\ncharlie\n"), 0o644); err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"files": []interface{}{
+			map[string]interface{}{"file_path": "a.txt", "limit": 1},
+			map[string]interface{}{"file_path": "b.txt", "offset": 1, "limit": 1},
+			map[string]interface{}{"file_path": "missing.txt"},
+		},
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected partial batch success, result=%#v err=%v", result, err)
+	}
+	for _, want := range []string{"===== a.txt =====", "1: alpha", "===== b.txt =====", "2: charlie", "===== errors =====", "missing.txt"} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("expected batch output to contain %q, got %q", want, result.Content)
+		}
+	}
+	if result.Metadata["succeeded_count"] != 2 || result.Metadata["failed_count"] != 1 || result.Metadata["partial_failure"] != true {
+		t.Fatalf("unexpected batch metadata: %#v", result.Metadata)
+	}
+}
+
+func TestViewTool_LongUnicodeLineIsReadableAndTruncatedSafely(t *testing.T) {
+	root := t.TempDir()
+	line := strings.Repeat("界", 25000)
+	if err := os.WriteFile(filepath.Join(root, "long.txt"), []byte(line+"\n"), 0o644); err != nil {
+		t.Fatalf("write long line: %v", err)
+	}
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"file_path": "long.txt", "limit": 1})
+	if err != nil || !result.Success {
+		t.Fatalf("expected long line read to succeed, result=%#v err=%v", result, err)
+	}
+	if !utf8.ValidString(result.Content) {
+		t.Fatalf("expected valid UTF-8 after truncation")
+	}
+	if !strings.HasSuffix(result.Content, "...") {
+		t.Fatalf("expected long line truncation marker, got suffix %q", result.Content[len(result.Content)-10:])
+	}
+}
+
+func TestViewTool_LargeFileCanBeReadInSmallRanges(t *testing.T) {
+	root := t.TempDir()
+	content := append([]byte("one\ntwo\n"), bytes.Repeat([]byte("x\n"), 3*1024*1024)...)
+	if err := os.WriteFile(filepath.Join(root, "large.log"), content, 0o644); err != nil {
+		t.Fatalf("write large file: %v", err)
+	}
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": "large.log",
+		"limit":     1,
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected range read from large file, result=%#v err=%v", result, err)
+	}
+	if result.Content != "1: one" || result.Metadata["is_truncated"] != true {
+		t.Fatalf("unexpected large-file range result: content=%q metadata=%#v", result.Content, result.Metadata)
 	}
 }
 

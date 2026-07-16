@@ -46,6 +46,9 @@ func RenderToolResultContentForModel(content interface{}, toolErr string, envelo
 	if isExternalMCPToolResult(envelope) {
 		return RenderFullToolResultContent(content, toolErr)
 	}
+	if modelSummaryPreferred(envelope) {
+		return appendToolArtifactNotice(envelope.Render(), modelArtifactNotice(envelope))
+	}
 	if isTaskOutputToolResult(envelope) {
 		return renderToolTextForModelHistory(content, toolErr, envelope)
 	}
@@ -71,6 +74,14 @@ func RenderToolResultContentForModel(content interface{}, toolErr string, envelo
 		}
 	}
 	return RenderFullToolResultContent(content, toolErr)
+}
+
+func modelSummaryPreferred(envelope *Envelope) bool {
+	if envelope == nil || strings.TrimSpace(envelope.Summary) == "" {
+		return false
+	}
+	preferred, _ := envelope.Metadata["model_summary_preferred"].(bool)
+	return preferred
 }
 
 func isTaskOutputToolResult(envelope *Envelope) bool {

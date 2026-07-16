@@ -283,13 +283,13 @@ func NewGrepTool() *GrepTool {
 		"properties": map[string]interface{}{
 			"pattern": map[string]interface{}{
 				"type":        "string",
-				"description": "搜索模式。默认按正则表达式处理；若 literal/fixed_strings=true，则按字面文本处理。若搜索目标很多，请拆分为多个更小的 grep 调用，每次只聚焦一个目标；若提供 rg_args，也可把 pattern 作为第一个位置参数放在 rg_args 中。",
+				"description": "单个搜索模式，默认是正则；字面搜索设 literal/fixed_strings=true。多个相关模式优先使用 patterns。",
 			},
 			"regexp": map[string]interface{}{
 				"type":        "string",
 				"description": "兼容 rg 的 --regexp/-e 单模式写法；等价于 pattern。",
 			},
-			"patterns": stringOrStringArraySchema("兼容多模式搜索。可传多个 pattern/regexp，等价于多次使用 rg -e/--regexp。多个模式按 OR 语义匹配；若模式很多，建议拆分为多个更小的 grep 调用，每次只聚焦一个目标。"),
+			"patterns": stringOrStringArraySchema("批量搜索多个模式，按 OR 语义匹配，等价于多次 rg -e。"),
 			"pattern_file": map[string]interface{}{
 				"type":        "string",
 				"description": "兼容 rg 的 --file/-f 单文件写法。文件中每行视作一个 pattern；空行会按 rg 语义视为空正则，可能匹配所有行。",
@@ -299,7 +299,7 @@ func NewGrepTool() *GrepTool {
 				"type":        "string",
 				"description": "搜索路径（默认为当前目录）。若提供 rg_args，也可把 path 作为第二个位置参数放在 rg_args 中。",
 			},
-			"paths":   stringOrStringArraySchema("兼容 rg 的多个搜索根路径。可传字符串数组，等价于 rg pattern path1 path2 ...；若路径很多，建议拆分为多个更小的 grep 调用，避免一次性塞入过多条件；也可与 rg_args 的多个位置路径配合使用。"),
+			"paths":   stringOrStringArraySchema("批量搜索多个文件或目录，等价于 rg pattern path1 path2 ...。"),
 			"include": stringOrStringArraySchema("包含的文件名 glob 模式，例如 *.go。支持字符串、字符串数组，或逗号分隔多个模式。"),
 			"exclude": stringOrStringArraySchema("排除的文件名 glob 模式，例如 *.test.ts。支持字符串、字符串数组，或逗号分隔多个模式。"),
 			"glob":    stringOrStringArraySchema("兼容 rg 的 --glob/-g。可直接按 ripgrep 思路传 glob；以 ! 开头的模式会视为排除模式。"),
@@ -628,7 +628,7 @@ func NewGrepTool() *GrepTool {
 				"items": map[string]interface{}{
 					"type": "string",
 				},
-				"description": "可选：ripgrep/rg 风格参数列表。支持常见选项与位置参数，例如 [\"-g\", \"*.go\", \"-i\", \"-w\", \"-C\", \"2\", \"pattern\", \"backend\"]、多模式 [\"-e\", \"foo\", \"-e\", \"bar\", \"backend\"]、pattern file [\"-f\", \"patterns.txt\", \"backend\"]、ignore file [\"--ignore-file\", \"ignore.txt\", \"backend\"]、列号/裁剪 [\"--column\", \"--trim\", \"foo\", \"backend\"]、路径排序 [\"--sort\", \"path\", \"foo\", \"backend\"]、计数次数 [\"--count-matches\", \"foo\", \"backend\"] 等；若搜索条件很多，请先拆分成多个更小的 grep 调用，每次聚焦一个目标，再组合结果；像 -n/-H/-N/--no-filename/--color 以及 null/null_data/block_buffered/field_context_separator/path_separator 这类展示层参数也会被兼容接收；像 --no-ignore-parent/--no-ignore-vcs/--no-ignore-global/--no-ignore-dot/--ignore-file-case-insensitive 这类 ignore 相关参数、以及 -u/-uu/-uuu/--unrestricted 这类放宽过滤参数（-u 主要放宽 ignore，-uu 进一步放宽 hidden，-uuu 再进一步放宽 binary）、以及 --no-messages 这类安静模式参数，也可按 rg 心智迁移；rg_args 内部冲突时，no_hidden 优先于 hidden，no_ignore_files 优先于 ignore_file，ignore_file_case_insensitive 只作用于显式 ignore_file，follow + one_file_system 这类 symlink/遍历组合依赖 rg 的完整实现；结构化参数优先于 rg_args，冲突时以结构化参数为准。",
+				"description": "高级 ripgrep 参数列表，例如 [\"-P\", \"foo.*bar\", \"backend\"]。优先使用结构化参数；冲突时结构化参数优先。",
 			},
 		},
 		"additionalProperties": false,
@@ -637,7 +637,7 @@ func NewGrepTool() *GrepTool {
 	return &GrepTool{
 		BaseTool: toolkit.NewBaseTool(
 			"grep",
-			"文件内容搜索（优先使用 ripgrep/rg，不可用时回退到内置扫描；支持常见 rg 风格参数、多路径/单文件路径、路径感知 glob/iglob、glob_case_insensitive、pattern_file/-f、ignore_file/--ignore-file、ignore_file_case_insensitive、no_ignore_files、no_ignore_parent/vcs/global/dot、hidden/no_hidden、-u/-uu/-uuu/--unrestricted、pcre2/-P、multiline/-U、replace/-r、column/trim、count_matches、stats、json、follow、sort/sortr/sort_files、type_add/type_clear、-e 多模式、-v/-x/-l/-o、--files-without-match、--max-filesize、null/null-data/block-buffered、field-context-separator/path-separator 与 rg_args 兼容层）",
+			"搜索文件内容。用 patterns + paths 批量搜索相关目标；高级 ripgrep 选项使用 rg_args。优先使用 rg，不可用时回退内置扫描。",
 			"3.2.0",
 			parameters,
 			true,

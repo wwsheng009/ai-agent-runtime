@@ -32,6 +32,47 @@ func TestGoTestJSONReducer_Reduce(t *testing.T) {
 	}
 }
 
+func TestGoTestTextReducer_ExtractsActionableFailures(t *testing.T) {
+	text := strings.Join([]string{
+		"noisy warning line",
+		"--- FAIL: TestKeyRecovery (0.01s)",
+		"    recovery_test.go:42: expected traffic probe event",
+		"FAIL\tgithub.com/demo/loadbalancer\t0.123s",
+	}, "\n")
+	env, ok, err := (&GoTestTextReducer{}).Reduce(context.Background(), ReducedInput{
+		Raw: RawToolResult{
+			ToolName: "bash", ToolCallID: "call-test", Error: "exit status 1",
+			Metadata: map[string]interface{}{"command": "go test ./internal/loadbalancer -count=1"},
+		},
+		Text: text,
+	})
+	if err != nil || !ok {
+		t.Fatalf("expected go test text reducer, ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(env.Summary, "Failed tests: TestKeyRecovery") {
+		t.Fatalf("expected failed test name, got %q", env.Summary)
+	}
+	if !strings.Contains(env.Summary, "expected traffic probe event") {
+		t.Fatalf("expected assertion signal, got %q", env.Summary)
+	}
+	if env.Metadata["go_test_status"] != "failed" {
+		t.Fatalf("expected failed status, got %#v", env.Metadata)
+	}
+}
+
+func TestGoTestTextReducer_ReportsSuccessfulTarget(t *testing.T) {
+	env, ok, err := (&GoTestTextReducer{}).Reduce(context.Background(), ReducedInput{
+		Raw:  RawToolResult{ToolName: "bash", Metadata: map[string]interface{}{"command": "go test ./internal/agent"}},
+		Text: "ok\tgithub.com/demo/agent\t4.557s",
+	})
+	if err != nil || !ok {
+		t.Fatalf("expected go test text reducer, ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(env.Summary, "Parsed go test output: passed") || !strings.Contains(env.Summary, "github.com/demo/agent") {
+		t.Fatalf("unexpected success summary: %q", env.Summary)
+	}
+}
+
 func TestPlaywrightSnapshotReducer_Reduce(t *testing.T) {
 	reducer := &PlaywrightSnapshotReducer{}
 	text := strings.Join([]string{

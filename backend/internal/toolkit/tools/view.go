@@ -3,8 +3,10 @@ package tools
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"unicode/utf8"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
@@ -17,7 +19,7 @@ import (
 type ViewTool struct {
 	*toolkit.BaseTool
 	sandboxPolicy
-	maxReadSize int64
+	maxLineSize int64
 }
 
 // NewViewTool 创建 View 工具
@@ -27,7 +29,21 @@ func NewViewTool() *ViewTool {
 		"properties": map[string]interface{}{
 			"file_path": map[string]interface{}{
 				"type":        "string",
-				"description": "要查看的文件路径。若需要查看多个文件，请拆分为多次 view 调用，每次只聚焦一个文件。",
+				"description": "单个文件路径。也可改用 files 在一次调用中读取多个文件。",
+			},
+			"files": map[string]interface{}{
+				"type":        "array",
+				"description": "批量文件读取请求；适合一次获取多个独立文件或不同区间，减少 LLM 往返。",
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"file_path": map[string]interface{}{"type": "string", "description": "文件路径。"},
+						"offset":    map[string]interface{}{"type": "integer", "description": "0-based 起始行，默认 0。"},
+						"limit":     map[string]interface{}{"type": "integer", "description": "读取行数，默认 2000。"},
+					},
+					"required":             []string{"file_path"},
+					"additionalProperties": false,
+				},
 			},
 			"offset": map[string]interface{}{
 				"type":        "integer",
@@ -35,21 +51,21 @@ func NewViewTool() *ViewTool {
 			},
 			"limit": map[string]interface{}{
 				"type":        "integer",
-				"description": "读取的行数（默认为 2000）。若文件较大，建议保持较小的单次读取范围并分次查看。",
+				"description": "读取行数，默认 2000；结果会标记 eof 和 is_truncated，便于按需继续。",
 			},
 		},
-		"required": []string{"file_path"},
+		"required": []string{},
 	}
 
 	return &ViewTool{
 		BaseTool: toolkit.NewBaseTool(
 			"view",
-			"查看文件内容。若需要查看多个文件，请拆分为多次 view 调用，每次只聚焦一个文件；大文件建议按 offset/limit 分段查看。",
-			"1.0.0",
+			"查看一个或多个文件。用 files 批量读取独立文件或区间；单文件用 file_path。输出包含稳定行号和截断元数据。",
+			"1.1.0",
 			parameters,
 			true,
 		),
-		maxReadSize: 5 * 1024 * 1024, // 5MB
+		maxLineSize: 5 * 1024 * 1024,
 	}
 }
 
@@ -60,6 +76,13 @@ func (v *ViewTool) DefinitionMetadata() map[string]interface{} {
 }
 
 type ViewParams struct {
+	FilePath string            `json:"file_path,omitempty"`
+	Files    []ViewFileRequest `json:"files,omitempty"`
+	Offset   int               `json:"offset,omitempty"`
+	Limit    int               `json:"limit,omitempty"`
+}
+
+type ViewFileRequest struct {
 	FilePath string `json:"file_path"`
 	Offset   int    `json:"offset,omitempty"`
 	Limit    int    `json:"limit,omitempty"`
@@ -68,37 +91,43 @@ type ViewParams struct {
 // Execute 实现 Tool 接口
 func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	var p ViewParams
-
-	// 解析参数
-	filePath, ok := params["file_path"].(string)
-	if !ok || filePath == "" {
+	encoded, err := json.Marshal(params)
+	if err != nil || json.Unmarshal(encoded, &p) != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("file_path 参数缺失或无效"),
+			Error:      fmt.Errorf("view 参数格式无效"),
 		}, nil
 	}
-
-	p.FilePath = filePath
-	resolvedPath := v.resolvePath(p.FilePath)
-
-	if offset, ok := params["offset"].(float64); ok {
-		p.Offset = int(offset)
+	requests := make([]ViewFileRequest, 0, len(p.Files)+1)
+	if strings.TrimSpace(p.FilePath) != "" {
+		requests = append(requests, ViewFileRequest{FilePath: p.FilePath, Offset: p.Offset, Limit: p.Limit})
 	}
-	if offset, ok := params["offset"].(int64); ok {
-		p.Offset = int(offset)
+	requests = append(requests, p.Files...)
+	if len(requests) == 0 {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("file_path 或 files 参数至少需要一个"),
+		}, nil
 	}
+	if len(requests) == 1 {
+		return v.executeSingle(ctx, requests[0])
+	}
+	return v.executeBatch(ctx, requests)
+}
 
-	if limit, ok := params["limit"].(float64); ok {
-		p.Limit = int(limit)
+func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolkit.ToolResult, error) {
+	if strings.TrimSpace(p.FilePath) == "" {
+		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: fmt.Errorf("file_path 参数缺失或无效")}, nil
 	}
-	if limit, ok := params["limit"].(int64); ok {
-		p.Limit = int(limit)
+	if p.Offset < 0 {
+		p.Offset = 0
 	}
-
 	if p.Limit <= 0 {
-		p.Limit = 2000 // 默认值
+		p.Limit = 2000
 	}
+	resolvedPath := v.resolvePath(p.FilePath)
 
 	// 检查文件是否存在
 	if err := v.checkPath(runtimeexecutor.OpRead, resolvedPath); err != nil {
@@ -130,15 +159,6 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Success:    false,
 			OutputKind: toolresult.KindText,
 			Error:      v.buildPathKindMismatchError("路径是目录，不是文件", p.FilePath),
-		}, nil
-	}
-
-	// 检查文件大小
-	if fileInfo.Size() > v.maxReadSize {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("文件过大（超过 %d MB），无法读取", v.maxReadSize/(1024*1024)),
 		}, nil
 	}
 
@@ -188,6 +208,59 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	return result, nil
 }
 
+func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest) (*toolkit.ToolResult, error) {
+	sections := make([]string, 0, len(requests))
+	items := make([]map[string]interface{}, 0, len(requests))
+	failures := make([]string, 0)
+	succeeded := 0
+	for _, request := range requests {
+		result, err := v.executeSingle(ctx, request)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", request.FilePath, err))
+			continue
+		}
+		if result == nil || !result.Success {
+			message := "unknown error"
+			if result != nil && result.Error != nil {
+				message = result.Error.Error()
+			}
+			failures = append(failures, fmt.Sprintf("%s: %s", request.FilePath, message))
+			continue
+		}
+		succeeded++
+		sections = append(sections, fmt.Sprintf("===== %s =====\n%s", request.FilePath, result.Content))
+		items = append(items, result.Metadata)
+	}
+	if len(failures) > 0 {
+		sections = append(sections, "===== errors =====\n"+strings.Join(failures, "\n"))
+	}
+	if succeeded == 0 {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("批量读取失败: %s", strings.Join(failures, "; ")),
+			Metadata: map[string]interface{}{
+				"batch":         true,
+				"request_count": len(requests),
+				"failed_count":  len(failures),
+			},
+		}, nil
+	}
+	return &toolkit.ToolResult{
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    strings.Join(sections, "\n\n"),
+		Metadata: map[string]interface{}{
+			"batch":           true,
+			"request_count":   len(requests),
+			"succeeded_count": succeeded,
+			"failed_count":    len(failures),
+			"partial_failure": len(failures) > 0,
+			"items":           items,
+		},
+	}, nil
+}
+
 type viewReadResult struct {
 	TotalLines      int
 	TotalLinesKnown bool
@@ -205,6 +278,7 @@ func (v *ViewTool) readFile(filePath string, offset, limit int) (string, viewRea
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), int(v.maxLineSize))
 	var lines []string
 	meta := viewReadResult{}
 
@@ -232,7 +306,7 @@ func (v *ViewTool) readFile(filePath string, offset, limit int) (string, viewRea
 
 		// 跳过过长的行
 		if utf8.RuneCountInString(line) > 2000 {
-			line = line[:2000] + "..."
+			line = string([]rune(line)[:2000]) + "..."
 		}
 
 		lines = append(lines, line)
@@ -265,15 +339,22 @@ func (v *ViewTool) readFile(filePath string, offset, limit int) (string, viewRea
 		return fmt.Sprintf("Reached end of file: offset %d is beyond total lines %d.", offset, meta.TotalLines), meta, nil
 	}
 
-	return v.formatContent(lines), meta, nil
+	return v.formatContent(lines, offset), meta, nil
 }
 
 // formatContent 格式化内容
-func (v *ViewTool) formatContent(lines []string) string {
+func (v *ViewTool) formatContent(lines []string, offset int) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s", lines)
+	var output strings.Builder
+	for index, line := range lines {
+		fmt.Fprintf(&output, "%d: %s", offset+index+1, line)
+		if index < len(lines)-1 {
+			output.WriteByte('\n')
+		}
+	}
+	return output.String()
 }
 
 // isBinaryFile 检查文件是否为二进制文件

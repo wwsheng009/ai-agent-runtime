@@ -11,6 +11,7 @@ import (
 	"time"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -217,8 +218,16 @@ func (t *AICLIExecTool) Execute(ctx context.Context, params map[string]interface
 		req.CaptureLimitBytes(),
 		"toolkit",
 		"aicli_exec",
-		"",
+		toolctx.ShellOutputArtifactDir(ctx),
 		outputMirror,
+	)
+	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(
+		capture,
+		artifactPath,
+		artifactErr,
+		"toolkit",
+		"aicli_exec",
+		toolctx.ShellOutputArtifactDir(ctx),
 	)
 	duration := time.Since(started)
 
