@@ -2446,7 +2446,7 @@ func TestChatRuntimeEvents_HandleDoesNotDropEventsWhenQueueBacksUp(t *testing.T)
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
 	bridge := newChatRuntimeEventBridge(session)
-	bridge.eventQueue = make(chan runtimeevents.Event, 1)
+	bridge.eventQueue = make(chan chatRuntimeQueuedEvent, 1)
 
 	var (
 		mu      sync.Mutex
@@ -2524,6 +2524,103 @@ func TestChatRuntimeEvents_HandleDoesNotDropEventsWhenQueueBacksUp(t *testing.T)
 	mu.Lock()
 	defer mu.Unlock()
 	require.Equal(t, []string{"Hello", " world", "!"}, deltas)
+}
+
+func TestChatRuntimeEvents_HandleBackpressuresOnRetainedBytes(t *testing.T) {
+	session := &ChatSession{
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	first := runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": strings.Repeat("a", 128)},
+	}
+	second := runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: "lead-session",
+		Payload:   map[string]interface{}{"delta": strings.Repeat("b", 128)},
+	}
+	bridge.eventQueueByteLimit = runtimeevents.ApproximateEventBytes(first)
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	bridge.writeDelta = func(string) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		bridge.run()
+	}()
+	defer func() {
+		releaseOnce.Do(func() { close(release) })
+		close(bridge.eventQueue)
+		<-done
+	}()
+
+	bridge.BeginRun()
+	bridge.Handle(first)
+	<-started
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		bridge.Handle(second)
+	}()
+
+	select {
+	case <-secondDone:
+		t.Fatal("expected byte budget to block the second event while the first payload is retained")
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	<-secondDone
+	bridge.WaitForCurrentEvents(300 * time.Millisecond)
+	bridge.eventQueueMu.Lock()
+	queuedBytes := bridge.eventQueueBytes
+	bridge.eventQueueMu.Unlock()
+	require.Zero(t, queuedBytes)
+}
+
+func TestChatRuntimeEvents_AllowsOneEventLargerThanByteLimit(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.eventQueueByteLimit = 1
+	event := runtimeevents.Event{
+		Type:    "large.event",
+		Payload: map[string]interface{}{"content": strings.Repeat("x", 1024)},
+	}
+
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		bridge.Handle(event)
+	}()
+	select {
+	case <-handled:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected a single oversized event to pass through an empty byte budget")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		bridge.run()
+	}()
+	bridge.WaitForCurrentEvents(300 * time.Millisecond)
+	close(bridge.eventQueue)
+	<-done
+	bridge.eventQueueMu.Lock()
+	queuedBytes := bridge.eventQueueBytes
+	bridge.eventQueueMu.Unlock()
+	require.Zero(t, queuedBytes)
 }
 
 func TestChatRuntimeEvents_RendersAssistantDeltaAndFinalizesWithoutRepeatingResponse(t *testing.T) {

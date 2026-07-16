@@ -24,7 +24,11 @@ type chatRuntimeEventBridge struct {
 	session                         *ChatSession
 	startOnce                       sync.Once
 	processorOnce                   sync.Once
-	eventQueue                      chan runtimeevents.Event
+	eventQueue                      chan chatRuntimeQueuedEvent
+	eventQueueMu                    sync.Mutex
+	eventQueueCond                  *sync.Cond
+	eventQueueBytes                 int64
+	eventQueueByteLimit             int64
 	runMu                           sync.Mutex
 	logMu                           sync.Mutex
 	renderMu                        sync.Mutex
@@ -72,6 +76,11 @@ type chatRuntimeEventBridge struct {
 	writePrompt                     func()
 }
 
+type chatRuntimeQueuedEvent struct {
+	event runtimeevents.Event
+	size  int64
+}
+
 type chatRuntimeRequestLogState struct {
 	Scope                   aicliLogScope
 	StartedAt               time.Time
@@ -84,6 +93,7 @@ type chatRuntimeRequestLogState struct {
 
 const chatApprovalGrantTTL = 10 * time.Minute
 const chatRuntimeEventSettleWindow = 80 * time.Millisecond
+const chatRuntimeEventQueueByteLimit int64 = 4 << 20
 
 func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	if session == nil {
@@ -97,10 +107,11 @@ func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge 
 }
 
 func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
-	return &chatRuntimeEventBridge{
-		session:    session,
-		eventQueue: make(chan runtimeevents.Event, 512),
-		rendered:   make(map[string]struct{}),
+	bridge := &chatRuntimeEventBridge{
+		session:             session,
+		eventQueue:          make(chan chatRuntimeQueuedEvent, 512),
+		eventQueueByteLimit: chatRuntimeEventQueueByteLimit,
+		rendered:            make(map[string]struct{}),
 		writeLine: func(line string) {
 			if strings.TrimSpace(line) == "" {
 				return
@@ -247,6 +258,8 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			return strings.TrimSpace(normalizeQueuedInputLine(text)), nil
 		},
 	}
+	bridge.eventQueueCond = sync.NewCond(&bridge.eventQueueMu)
+	return bridge
 }
 
 func (b *chatRuntimeEventBridge) start() {
@@ -344,19 +357,45 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 	if b == nil {
 		return
 	}
-	b.eventQueue <- event
+	size := runtimeevents.ApproximateEventBytes(event)
+	if size < 1 {
+		size = 1
+	}
+	b.reserveEventQueueBytes(size)
+	b.eventQueue <- chatRuntimeQueuedEvent{event: event, size: size}
 	b.progressMu.Lock()
 	b.enqueuedEvents++
 	b.progressMu.Unlock()
 }
 
 func (b *chatRuntimeEventBridge) run() {
-	for event := range b.eventQueue {
-		b.handleEvent(event)
+	for queued := range b.eventQueue {
+		b.handleEvent(queued.event)
 		b.progressMu.Lock()
 		b.processedEvents++
 		b.progressMu.Unlock()
+		queued.event = runtimeevents.Event{}
+		b.releaseEventQueueBytes(queued.size)
 	}
+}
+
+func (b *chatRuntimeEventBridge) reserveEventQueueBytes(size int64) {
+	b.eventQueueMu.Lock()
+	defer b.eventQueueMu.Unlock()
+	for b.eventQueueByteLimit > 0 && b.eventQueueBytes > 0 && size > b.eventQueueByteLimit-b.eventQueueBytes {
+		b.eventQueueCond.Wait()
+	}
+	b.eventQueueBytes += size
+}
+
+func (b *chatRuntimeEventBridge) releaseEventQueueBytes(size int64) {
+	b.eventQueueMu.Lock()
+	b.eventQueueBytes -= size
+	if b.eventQueueBytes < 0 {
+		b.eventQueueBytes = 0
+	}
+	b.eventQueueCond.Broadcast()
+	b.eventQueueMu.Unlock()
 }
 
 func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) {
