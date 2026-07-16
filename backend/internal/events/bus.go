@@ -224,6 +224,11 @@ type Bus struct {
 	nextID      int64
 	retention   int
 	events      []Event
+	eventSizes  []int64
+	eventStart  int
+	eventCount  int
+	eventBytes  int64
+	byteLimit   int64
 }
 
 type subscription struct {
@@ -236,16 +241,26 @@ func NewBus() *Bus {
 	return NewBusWithRetention(512)
 }
 
+const defaultBusRetentionBytes int64 = 8 << 20
+
 // NewBusWithRetention 创建带有界事件留存的 runtime event bus。
 func NewBusWithRetention(retention int) *Bus {
+	return NewBusWithLimits(retention, defaultBusRetentionBytes)
+}
+
+// NewBusWithLimits creates an event bus bounded by both count and bytes.
+func NewBusWithLimits(retention int, byteLimit int64) *Bus {
 	if retention < 0 {
 		retention = 0
+	}
+	if byteLimit < 0 {
+		byteLimit = 0
 	}
 	return &Bus{
 		subscribers: make(map[string][]subscription),
 		all:         make([]subscription, 0),
 		retention:   retention,
-		events:      make([]Event, 0, retention),
+		byteLimit:   byteLimit,
 	}
 }
 
@@ -300,12 +315,7 @@ func (b *Bus) Publish(event Event) {
 
 	b.mu.Lock()
 	if b.retention > 0 {
-		if len(b.events) == b.retention {
-			copy(b.events, b.events[1:])
-			b.events[len(b.events)-1] = cloneEvent(event)
-		} else {
-			b.events = append(b.events, cloneEvent(event))
-		}
+		b.appendRetainedEvent(event)
 	}
 	typed := cloneSubscriptionHandlers(b.subscribers[event.Type])
 	all := cloneSubscriptionHandlers(b.all)
@@ -317,6 +327,72 @@ func (b *Bus) Publish(event Event) {
 	for _, handler := range typed {
 		handler(event)
 	}
+}
+
+func (b *Bus) appendRetainedEvent(event Event) {
+	size := ApproximateEventBytes(event)
+	if b.byteLimit > 0 && size > b.byteLimit {
+		return
+	}
+	for b.eventCount >= b.retention || (b.byteLimit > 0 && b.eventBytes+size > b.byteLimit) {
+		b.evictOldestEvent()
+	}
+	b.ensureEventCapacity()
+	physical := (b.eventStart + b.eventCount) % len(b.events)
+	b.events[physical] = cloneEvent(event)
+	b.eventSizes[physical] = size
+	b.eventCount++
+	b.eventBytes += size
+}
+
+func (b *Bus) ensureEventCapacity() {
+	if b.eventCount < len(b.events) {
+		return
+	}
+	capacity := len(b.events) * 2
+	if capacity < 1 {
+		capacity = 1
+	}
+	if capacity > b.retention {
+		capacity = b.retention
+	}
+	events := make([]Event, capacity)
+	sizes := make([]int64, capacity)
+	for index := 0; index < b.eventCount; index++ {
+		physical := (b.eventStart + index) % len(b.events)
+		events[index] = b.events[physical]
+		sizes[index] = b.eventSizes[physical]
+	}
+	b.events = events
+	b.eventSizes = sizes
+	b.eventStart = 0
+}
+
+func (b *Bus) evictOldestEvent() {
+	if b.eventCount == 0 {
+		return
+	}
+	b.events[b.eventStart] = Event{}
+	b.eventBytes -= b.eventSizes[b.eventStart]
+	b.eventSizes[b.eventStart] = 0
+	b.eventStart = (b.eventStart + 1) % len(b.events)
+	b.eventCount--
+	if b.eventCount == 0 {
+		b.eventStart = 0
+		b.eventBytes = 0
+	}
+}
+
+func (b *Bus) retainedEventsLocked() []Event {
+	if b.eventCount == 0 {
+		return nil
+	}
+	events := make([]Event, 0, b.eventCount)
+	for index := 0; index < b.eventCount; index++ {
+		physical := (b.eventStart + index) % len(b.events)
+		events = append(events, cloneEvent(b.events[physical]))
+	}
+	return events
 }
 
 func removeSubscriptionByID(items []subscription, id int64) []subscription {
@@ -355,7 +431,7 @@ func (b *Bus) Recent(limit int) []Event {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return limitEvents(cloneEvents(b.events), limit)
+	return limitEvents(b.retainedEventsLocked(), limit)
 }
 
 // Trace 返回指定 trace 的最近事件。
@@ -373,7 +449,7 @@ func (b *Bus) Query(filter QueryFilter) []Event {
 	}
 
 	b.mu.RLock()
-	events := cloneEvents(b.events)
+	events := b.retainedEventsLocked()
 	b.mu.RUnlock()
 
 	if len(events) == 0 {
@@ -390,7 +466,7 @@ func (b *Bus) RecentTraces(filter TraceFilter) []TraceSummary {
 	}
 
 	b.mu.RLock()
-	events := cloneEvents(b.events)
+	events := b.retainedEventsLocked()
 	b.mu.RUnlock()
 
 	if len(events) == 0 {
@@ -780,7 +856,7 @@ func (b *Bus) GovernanceStats(filter TraceFilter) GovernanceStats {
 	}
 
 	b.mu.RLock()
-	events := cloneEvents(b.events)
+	events := b.retainedEventsLocked()
 	b.mu.RUnlock()
 
 	seenAgentByTrace := make(map[string]map[string]bool)
@@ -867,17 +943,6 @@ func limitEvents(events []Event, limit int) []Event {
 		return events
 	}
 	return append([]Event(nil), events[len(events)-limit:]...)
-}
-
-func cloneEvents(events []Event) []Event {
-	if len(events) == 0 {
-		return nil
-	}
-	cloned := make([]Event, 0, len(events))
-	for _, event := range events {
-		cloned = append(cloned, cloneEvent(event))
-	}
-	return cloned
 }
 
 func filterEvents(events []Event, filter QueryFilter) []Event {
@@ -1470,7 +1535,7 @@ func cloneEvent(event Event) Event {
 	if len(event.Payload) > 0 {
 		cloned.Payload = make(map[string]interface{}, len(event.Payload))
 		for key, value := range event.Payload {
-			cloned.Payload[key] = value
+			cloned.Payload[key] = clonePayloadValue(value, 0)
 		}
 	}
 	return cloned

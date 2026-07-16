@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -379,8 +378,7 @@ func appendBoundedRuntimeLog[T any](logs map[string]*boundedRuntimeLog[T], key s
 }
 
 func estimateRuntimeEventBytes(event runtimeevents.Event) int64 {
-	return int64(len(event.Type)+len(event.TraceID)+len(event.AgentName)+len(event.SessionID)+len(event.ToolName)) +
-		estimateRuntimeValueBytes(event.Payload, 0)
+	return runtimeevents.ApproximateEventBytes(event)
 }
 
 func estimateMailMessageBytes(message team.MailMessage) int64 {
@@ -388,94 +386,11 @@ func estimateMailMessageBytes(message team.MailMessage) int64 {
 	if message.TaskID != nil {
 		size += len(*message.TaskID)
 	}
-	return int64(size) + estimateRuntimeValueBytes(message.Metadata, 0)
+	return int64(size) + runtimeevents.ApproximateValueBytes(message.Metadata)
 }
 
 func estimateToolReceiptBytes(receipt ToolExecutionReceipt) int64 {
 	return int64(len(receipt.SessionID) + len(receipt.ToolCallID) + len(receipt.ToolName) + len(receipt.MessageJSON))
-}
-
-func estimateRuntimeValueBytes(value interface{}, depth int) int64 {
-	if value == nil || depth > 16 {
-		return 0
-	}
-	switch typed := value.(type) {
-	case string:
-		return int64(len(typed))
-	case json.RawMessage:
-		return int64(len(typed))
-	case []byte:
-		return int64(len(typed))
-	case map[string]interface{}:
-		var size int64
-		for key, item := range typed {
-			size += int64(len(key)) + estimateRuntimeValueBytes(item, depth+1)
-		}
-		return size
-	case map[string]string:
-		var size int64
-		for key, item := range typed {
-			size += int64(len(key) + len(item))
-		}
-		return size
-	case []interface{}:
-		var size int64
-		for _, item := range typed {
-			size += estimateRuntimeValueBytes(item, depth+1)
-		}
-		return size
-	case []string:
-		var size int64
-		for _, item := range typed {
-			size += int64(len(item))
-		}
-		return size
-	case time.Time:
-		return 24
-	default:
-		return estimateReflectedRuntimeValueBytes(reflect.ValueOf(value), depth+1)
-	}
-}
-
-func estimateReflectedRuntimeValueBytes(value reflect.Value, depth int) int64 {
-	if !value.IsValid() || depth > 16 {
-		return 0
-	}
-	for value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer {
-		if value.IsNil() {
-			return 0
-		}
-		value = value.Elem()
-	}
-	switch value.Kind() {
-	case reflect.String:
-		return int64(value.Len())
-	case reflect.Slice, reflect.Array:
-		if value.Type().Elem().Kind() == reflect.Uint8 {
-			return int64(value.Len())
-		}
-		var size int64
-		for index := 0; index < value.Len(); index++ {
-			size += estimateReflectedRuntimeValueBytes(value.Index(index), depth+1)
-		}
-		return size
-	case reflect.Map:
-		var size int64
-		iterator := value.MapRange()
-		for iterator.Next() {
-			size += estimateReflectedRuntimeValueBytes(iterator.Key(), depth+1)
-			size += estimateReflectedRuntimeValueBytes(iterator.Value(), depth+1)
-		}
-		return size
-	case reflect.Struct:
-		var size int64
-		for index := 0; index < value.NumField(); index++ {
-			size += estimateReflectedRuntimeValueBytes(value.Field(index), depth+1)
-		}
-		return size
-	default:
-		return 16
-	}
 }
 
 type eventWatcher struct {

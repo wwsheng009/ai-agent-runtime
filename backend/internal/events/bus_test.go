@@ -1,6 +1,9 @@
 package events
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
 
 func TestBus_SubscribeAndPublish(t *testing.T) {
 	bus := NewBus()
@@ -92,6 +95,66 @@ func TestBus_QueryHonorsRetentionLimit(t *testing.T) {
 	}
 	if events[0].Type != "tool.completed" || events[1].Type != "subagent.started" {
 		t.Fatalf("unexpected retained event order: %#v", events)
+	}
+}
+
+func TestBusRetentionHonorsByteLimitAndKeepsRealtimeDelivery(t *testing.T) {
+	bus := NewBusWithLimits(10, 20)
+	delivered := 0
+	bus.Subscribe("e", func(Event) { delivered++ })
+
+	bus.Publish(Event{Type: "e", TraceID: "one", Payload: map[string]interface{}{"content": "12345"}})
+	bus.Publish(Event{Type: "e", TraceID: "two", Payload: map[string]interface{}{"content": "67890"}})
+	bus.Publish(Event{Type: "e", TraceID: "oversized", Payload: map[string]interface{}{"content": "payload-exceeds-retention"}})
+
+	if delivered != 3 {
+		t.Fatalf("expected complete realtime delivery, got %d", delivered)
+	}
+	events := bus.Recent(10)
+	if len(events) != 1 || events[0].TraceID != "two" {
+		t.Fatalf("unexpected byte-bounded retention: %#v", events)
+	}
+	if bus.eventBytes > bus.byteLimit {
+		t.Fatalf("retained bytes exceeded limit: %d > %d", bus.eventBytes, bus.byteLimit)
+	}
+}
+
+func TestBusRetentionDeepClonesJSONPayloadContainers(t *testing.T) {
+	bus := NewBusWithRetention(4)
+	raw := []byte("original")
+	nested := map[string]interface{}{"value": "before", "raw": raw}
+	bus.Publish(Event{Type: "nested", Payload: map[string]interface{}{"nested": nested}})
+
+	raw[0] = 'X'
+	nested["value"] = "after"
+	first := bus.Recent(1)
+	retained := first[0].Payload["nested"].(map[string]interface{})
+	if retained["value"] != "before" || string(retained["raw"].([]byte)) != "original" {
+		t.Fatalf("retained payload changed with publisher mutation: %#v", retained)
+	}
+	retained["value"] = "reader mutation"
+	second := bus.Recent(1)
+	if second[0].Payload["nested"].(map[string]interface{})["value"] != "before" {
+		t.Fatal("retained payload changed with reader mutation")
+	}
+}
+
+func TestBusConcurrentPublishAndRead(t *testing.T) {
+	bus := NewBusWithLimits(32, 4<<10)
+	var wait sync.WaitGroup
+	for worker := 0; worker < 4; worker++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for index := 0; index < 100; index++ {
+				bus.Publish(Event{Type: "concurrent", Payload: map[string]interface{}{"index": index}})
+				_ = bus.Recent(8)
+			}
+		}()
+	}
+	wait.Wait()
+	if events := bus.Recent(100); len(events) > 32 {
+		t.Fatalf("retention exceeded under concurrent access: %d", len(events))
 	}
 }
 
