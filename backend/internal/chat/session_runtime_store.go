@@ -197,15 +197,21 @@ type EventSequenceStore interface {
 
 // RuntimeStoreConfig configures the sqlite-backed runtime store.
 type RuntimeStoreConfig struct {
-	Path           string
-	DSN            string
-	SQLiteCacheKiB int
-	BusyTimeout    time.Duration
+	Path             string
+	DSN              string
+	SQLiteCacheKiB   int
+	BusyTimeout      time.Duration
+	EventRetention   int
+	MailboxRetention int
+	PruneInterval    int
 }
 
 const (
-	defaultRuntimeSQLiteCacheKiB = 2048
-	defaultRuntimeBusyTimeout    = 5 * time.Second
+	defaultRuntimeSQLiteCacheKiB   = 2048
+	defaultRuntimeBusyTimeout      = 5 * time.Second
+	defaultRuntimeEventRetention   = 2048
+	defaultRuntimeMailboxRetention = 2048
+	defaultRuntimePruneInterval    = 256
 )
 
 const defaultInMemoryRuntimeRetention = 2048
@@ -1380,11 +1386,14 @@ func mailboxRecordFromRuntimeMessage(sessionID string, message team.MailMessage)
 
 // SQLiteRuntimeStore persists runtime data in sqlite.
 type SQLiteRuntimeStore struct {
-	mu          sync.Mutex
-	db          *sql.DB
-	fileBacked  bool
-	busyTimeout time.Duration
-	cacheKiB    int
+	mu               sync.Mutex
+	db               *sql.DB
+	fileBacked       bool
+	busyTimeout      time.Duration
+	cacheKiB         int
+	eventRetention   int
+	mailboxRetention int
+	pruneInterval    int
 
 	globalMailboxWriter agentcontrol.GlobalMailboxWriter
 
@@ -1458,11 +1467,26 @@ func NewSQLiteRuntimeStore(cfg *RuntimeStoreConfig) (*SQLiteRuntimeStore, error)
 	if cacheKiB <= 0 {
 		cacheKiB = defaultRuntimeSQLiteCacheKiB
 	}
+	eventRetention := cfg.EventRetention
+	if eventRetention <= 0 {
+		eventRetention = defaultRuntimeEventRetention
+	}
+	mailboxRetention := cfg.MailboxRetention
+	if mailboxRetention <= 0 {
+		mailboxRetention = defaultRuntimeMailboxRetention
+	}
+	pruneInterval := cfg.PruneInterval
+	if pruneInterval <= 0 {
+		pruneInterval = defaultRuntimePruneInterval
+	}
 	store := &SQLiteRuntimeStore{
-		db:          db,
-		fileBacked:  !isRuntimeSQLiteMemoryDSN(dsn),
-		busyTimeout: busyTimeout,
-		cacheKiB:    cacheKiB,
+		db:               db,
+		fileBacked:       !isRuntimeSQLiteMemoryDSN(dsn),
+		busyTimeout:      busyTimeout,
+		cacheKiB:         cacheKiB,
+		eventRetention:   eventRetention,
+		mailboxRetention: mailboxRetention,
+		pruneInterval:    pruneInterval,
 	}
 	if err := store.init(context.Background()); err != nil {
 		_ = db.Close()
@@ -2004,6 +2028,11 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 		s.mu.Unlock()
 		return 0, fmt.Errorf("insert session event: %w", err)
 	}
+	if err := s.pruneRuntimeRowsTx(ctx, tx, event.SessionID, seq, 0); err != nil {
+		_ = tx.Rollback()
+		s.mu.Unlock()
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		s.mu.Unlock()
 		return 0, fmt.Errorf("commit session event: %w", err)
@@ -2011,6 +2040,37 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 	s.mu.Unlock()
 	s.notifyEventWatchers(seq, event)
 	return seq, nil
+}
+
+func (s *SQLiteRuntimeStore) pruneRuntimeRowsTx(ctx context.Context, tx *sql.Tx, sessionID string, eventSeq, mailboxSeq int64) error {
+	if s == nil || tx == nil || s.pruneInterval <= 0 {
+		return nil
+	}
+	pruned := false
+	if eventSeq > int64(s.eventRetention) && eventSeq%int64(s.pruneInterval) == 0 {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM session_events
+			WHERE session_id = ? AND seq <= ?
+		`, sessionID, eventSeq-int64(s.eventRetention)); err != nil {
+			return fmt.Errorf("prune session events: %w", err)
+		}
+		pruned = true
+	}
+	if mailboxSeq > int64(s.mailboxRetention) && mailboxSeq%int64(s.pruneInterval) == 0 {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM agent_control_mailbox_records
+			WHERE scope = ? AND session_id = ? AND session_mailbox_seq <= ?
+		`, agentcontrol.MailboxScopeSession, sessionID, mailboxSeq-int64(s.mailboxRetention)); err != nil {
+			return fmt.Errorf("prune session mailbox: %w", err)
+		}
+		pruned = true
+	}
+	if pruned && s.fileBacked {
+		if _, err := tx.ExecContext(ctx, "PRAGMA incremental_vacuum(64)"); err != nil {
+			return fmt.Errorf("incrementally vacuum runtime sqlite: %w", err)
+		}
+	}
+	return nil
 }
 
 // AppendMailbox stores an agent mailbox message through the runtime store's
@@ -2288,6 +2348,13 @@ func (s *SQLiteRuntimeStore) appendMailboxTx(ctx context.Context, tx *sql.Tx, se
 		result.eventSeq = eventSeq
 		return result, fmt.Errorf("insert mailbox session event: %w", err)
 	}
+	if err := s.pruneRuntimeRowsTx(ctx, tx, sessionID, eventSeq, mailboxSeq); err != nil {
+		result.event = event
+		result.mailboxSeq = mailboxSeq
+		result.controlSeq = controlSeq
+		result.eventSeq = eventSeq
+		return result, err
+	}
 	if event.Payload == nil {
 		event.Payload = map[string]interface{}{}
 	}
@@ -2354,6 +2421,13 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxPrimaryTx(ctx context.Cont
 		result.controlSeq = recordSeq
 		result.eventSeq = eventSeq
 		return result, fmt.Errorf("insert mailbox session event mirror: %w", err)
+	}
+	if err := s.pruneRuntimeRowsTx(ctx, tx, sessionID, eventSeq, mailboxSeq); err != nil {
+		result.event = event
+		result.mailboxSeq = mailboxSeq
+		result.controlSeq = recordSeq
+		result.eventSeq = eventSeq
+		return result, err
 	}
 	if event.Payload == nil {
 		event.Payload = map[string]interface{}{}
@@ -3653,6 +3727,14 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 			Name:    "session_runtime_state_stable_tool_surface",
 			UpSQL: `
 				ALTER TABLE session_runtime_state ADD COLUMN stable_tool_surface_json BLOB;
+			`,
+		},
+		{
+			Version: 18,
+			Name:    "runtime_retention_indexes",
+			UpSQL: `
+				CREATE INDEX IF NOT EXISTS idx_agent_control_mailbox_records_session_mailbox_seq
+				ON agent_control_mailbox_records(scope, session_id, session_mailbox_seq);
 			`,
 		},
 	}

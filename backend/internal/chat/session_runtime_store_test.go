@@ -216,19 +216,21 @@ func TestSQLiteRuntimeStoreConfiguresLowMemoryFileConnection(t *testing.T) {
 	var journalMode string
 	require.NoError(t, store.db.QueryRow("PRAGMA journal_mode").Scan(&journalMode))
 	assert.Equal(t, "wal", strings.ToLower(journalMode))
-	var cacheSize, mmapSize, tempStore, busyTimeout, autoCheckpoint, journalLimit int64
+	var cacheSize, mmapSize, tempStore, busyTimeout, autoCheckpoint, journalLimit, autoVacuum int64
 	require.NoError(t, store.db.QueryRow("PRAGMA cache_size").Scan(&cacheSize))
 	require.NoError(t, store.db.QueryRow("PRAGMA mmap_size").Scan(&mmapSize))
 	require.NoError(t, store.db.QueryRow("PRAGMA temp_store").Scan(&tempStore))
 	require.NoError(t, store.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout))
 	require.NoError(t, store.db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&autoCheckpoint))
 	require.NoError(t, store.db.QueryRow("PRAGMA journal_size_limit").Scan(&journalLimit))
+	require.NoError(t, store.db.QueryRow("PRAGMA auto_vacuum").Scan(&autoVacuum))
 	assert.Equal(t, int64(-768), cacheSize)
 	assert.Zero(t, mmapSize)
 	assert.Equal(t, int64(1), tempStore)
 	assert.Equal(t, int64(2000), busyTimeout)
 	assert.Equal(t, int64(256), autoCheckpoint)
 	assert.Equal(t, int64(16<<20), journalLimit)
+	assert.Equal(t, int64(2), autoVacuum)
 
 	_, err = store.AppendEvent(context.Background(), runtimeevents.Event{
 		Type:      "wal-test",
@@ -253,6 +255,53 @@ func TestSQLiteRuntimeStoreUsesSingleConnectionForMemoryDSN(t *testing.T) {
 
 	assert.False(t, store.fileBacked)
 	assert.Equal(t, 1, store.db.Stats().MaxOpenConnections)
+}
+
+func TestSQLiteRuntimeStorePrunesEventsAndMailboxInBatches(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		Path:             filepath.Join(t.TempDir(), "runtime.sqlite"),
+		EventRetention:   3,
+		MailboxRetention: 3,
+		PruneInterval:    2,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+
+	for index := 1; index <= 6; index++ {
+		seq, appendErr := store.AppendEvent(ctx, runtimeevents.Event{
+			Type:      "bounded",
+			SessionID: "event-retention",
+			Payload:   map[string]interface{}{"index": index},
+		})
+		require.NoError(t, appendErr)
+		assert.Equal(t, int64(index), seq)
+	}
+	events, err := store.ListEvents(ctx, "event-retention", 0, 0)
+	require.NoError(t, err)
+	require.Len(t, events, 3)
+	assert.Equal(t, int64(4), events[0].Payload["seq"])
+	assert.Equal(t, int64(6), events[2].Payload["seq"])
+
+	for index := 1; index <= 6; index++ {
+		_, seq, appendErr := store.AppendMailbox(ctx, "mailbox-retention", team.MailMessage{
+			ID:        fmt.Sprintf("mail-%d", index),
+			FromAgent: "worker",
+			ToAgent:   "lead",
+			Kind:      "message",
+			Body:      fmt.Sprintf("body-%d", index),
+		})
+		require.NoError(t, appendErr)
+		assert.Equal(t, int64(index), seq)
+	}
+	mailbox, err := store.ListMailbox(ctx, "mailbox-retention", 0, 0)
+	require.NoError(t, err)
+	require.Len(t, mailbox, 3)
+	assert.Equal(t, int64(4), mailbox[0].Seq)
+	assert.Equal(t, int64(6), mailbox[2].Seq)
+	lastSeq, err := store.LastMailboxSeq(ctx, "mailbox-retention")
+	require.NoError(t, err)
+	assert.Equal(t, int64(6), lastSeq)
 }
 
 func TestSessionLeaseHandleStopsRenewingAfterRenewError(t *testing.T) {
