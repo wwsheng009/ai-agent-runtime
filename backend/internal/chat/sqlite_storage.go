@@ -843,7 +843,7 @@ func loadPromptPayloadsTx(ctx context.Context, tx *sql.Tx, sessionID string) ([]
 		if err := rows.Scan(&payload); err != nil {
 			return nil, fmt.Errorf("scan current prompt projection: %w", err)
 		}
-		payloads = append(payloads, append([]byte(nil), payload...))
+		payloads = append(payloads, payload)
 	}
 	return payloads, rows.Err()
 }
