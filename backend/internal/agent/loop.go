@@ -159,7 +159,8 @@ func (loop *ReActLoop) downgradeUnsupportedProviderRequest(req *llm.LLMRequest, 
 		delete(req.Metadata, "max_parallel_tool_calls")
 		return llm.MetadataKeyParallelToolCalls
 	}
-	if strings.TrimSpace(req.ReasoningEffort) != "" && llm.IsUnsupportedRequestParameter(err, "reasoning_effort") {
+	if strings.TrimSpace(req.ReasoningEffort) != "" &&
+		(llm.IsUnsupportedRequestParameter(err, "reasoning_effort") || llm.IsUnsupportedRequestParameter(err, "reasoning")) {
 		loop.reasoningEffortUnsupported.Store(true)
 		req.ReasoningEffort = ""
 		return "reasoning_effort"

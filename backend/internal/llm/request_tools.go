@@ -62,7 +62,9 @@ func IsUnsupportedRequestParameter(err error, parameter string) bool {
 	}
 	for _, marker := range []string{
 		"unsupported parameter", "unknown parameter", "unexpected parameter",
-		"unrecognized request argument", "not supported", "not allowed",
+		"unrecognized request argument", "unknown field", "invalid parameter",
+		"not supported", "does not support", "not allowed", "not permitted",
+		"extra inputs are not permitted", "extra_forbidden",
 	} {
 		if strings.Contains(message, marker) {
 			return true
