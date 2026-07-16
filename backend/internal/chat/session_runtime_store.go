@@ -201,13 +201,15 @@ type RuntimeStoreConfig struct {
 	DSN  string
 }
 
-// InMemoryRuntimeStore stores state and events in memory.
+const defaultInMemoryRuntimeRetention = 2048
+
+// InMemoryRuntimeStore stores bounded runtime state and events in memory.
 type InMemoryRuntimeStore struct {
 	mu             sync.RWMutex
 	states         map[string]*RuntimeState
-	events         map[string][]storedEvent
-	mailbox        map[string][]team.MailMessage
-	controlMailbox map[string][]team.MailMessage
+	events         map[string]*boundedRuntimeLog[storedEvent]
+	mailbox        map[string]*boundedRuntimeLog[team.MailMessage]
+	controlMailbox map[string]*boundedRuntimeLog[team.MailMessage]
 	receipts       map[string]map[string]ToolExecutionReceipt
 	seq            map[string]int64
 	mailboxSeq     map[string]int64
@@ -262,6 +264,56 @@ type storedEvent struct {
 	Event runtimeevents.Event
 }
 
+// boundedRuntimeLog is a fixed-capacity ring ordered from oldest to newest.
+// Overwriting the oldest slot releases references held by expired entries
+// without copying the entire retention window on every append.
+type boundedRuntimeLog[T any] struct {
+	entries []T
+	start   int
+}
+
+func (l *boundedRuntimeLog[T]) append(value T, limit int) {
+	if l == nil || limit <= 0 {
+		return
+	}
+	if len(l.entries) < limit {
+		l.entries = append(l.entries, value)
+		return
+	}
+	l.entries[l.start] = value
+	l.start++
+	if l.start == len(l.entries) {
+		l.start = 0
+	}
+}
+
+func (l *boundedRuntimeLog[T]) len() int {
+	if l == nil {
+		return 0
+	}
+	return len(l.entries)
+}
+
+func (l *boundedRuntimeLog[T]) at(index int) *T {
+	if l == nil || index < 0 || index >= len(l.entries) {
+		return nil
+	}
+	physical := l.start + index
+	if physical >= len(l.entries) {
+		physical -= len(l.entries)
+	}
+	return &l.entries[physical]
+}
+
+func appendBoundedRuntimeLog[T any](logs map[string]*boundedRuntimeLog[T], key string, value T, limit int) {
+	log := logs[key]
+	if log == nil {
+		log = &boundedRuntimeLog[T]{}
+		logs[key] = log
+	}
+	log.append(value, limit)
+}
+
 type eventWatcher struct {
 	sessionID string
 	ch        chan runtimeevents.Event
@@ -274,14 +326,14 @@ type mailboxWatcher struct {
 
 // NewInMemoryRuntimeStore creates a memory-backed runtime store.
 func NewInMemoryRuntimeStore(retention int) *InMemoryRuntimeStore {
-	if retention < 0 {
-		retention = 0
+	if retention <= 0 {
+		retention = defaultInMemoryRuntimeRetention
 	}
 	return &InMemoryRuntimeStore{
 		states:         make(map[string]*RuntimeState),
-		events:         make(map[string][]storedEvent),
-		mailbox:        make(map[string][]team.MailMessage),
-		controlMailbox: make(map[string][]team.MailMessage),
+		events:         make(map[string]*boundedRuntimeLog[storedEvent]),
+		mailbox:        make(map[string]*boundedRuntimeLog[team.MailMessage]),
+		controlMailbox: make(map[string]*boundedRuntimeLog[team.MailMessage]),
 		receipts:       make(map[string]map[string]ToolExecutionReceipt),
 		seq:            make(map[string]int64),
 		mailboxSeq:     make(map[string]int64),
@@ -438,7 +490,24 @@ func (s *InMemoryRuntimeStore) SaveToolReceipt(ctx context.Context, receipt Tool
 		s.receipts[receipt.SessionID] = make(map[string]ToolExecutionReceipt)
 	}
 	s.receipts[receipt.SessionID][receipt.ToolCallID] = receipt
+	s.trimToolReceiptsLocked(receipt.SessionID)
 	return nil
+}
+
+func (s *InMemoryRuntimeStore) trimToolReceiptsLocked(sessionID string) {
+	bySession := s.receipts[sessionID]
+	for len(bySession) > s.retention {
+		oldestID := ""
+		var oldestTime time.Time
+		for toolCallID, receipt := range bySession {
+			if oldestID == "" || receipt.CreatedAt.Before(oldestTime) ||
+				(receipt.CreatedAt.Equal(oldestTime) && toolCallID > oldestID) {
+				oldestID = toolCallID
+				oldestTime = receipt.CreatedAt
+			}
+		}
+		delete(bySession, oldestID)
+	}
 }
 
 // GetToolReceipt loads a persisted tool receipt.
@@ -528,11 +597,7 @@ func (s *InMemoryRuntimeStore) AppendEvent(ctx context.Context, event runtimeeve
 	s.seq[event.SessionID]++
 	seq := s.seq[event.SessionID]
 	entry := storedEvent{Seq: seq, Event: cloneRuntimeEvent(event)}
-	list := append(s.events[event.SessionID], entry)
-	if s.retention > 0 && len(list) > s.retention {
-		list = list[len(list)-s.retention:]
-	}
-	s.events[event.SessionID] = list
+	appendBoundedRuntimeLog(s.events, event.SessionID, entry, s.retention)
 	s.mu.Unlock()
 	s.notifyEventWatchers(seq, event)
 	return seq, nil
@@ -575,9 +640,9 @@ func (s *InMemoryRuntimeStore) AppendMailbox(ctx context.Context, sessionID stri
 		controlMessage.Seq = controlSeq
 		controlMessage.ControlSeq = controlSeq
 		controlMessage.SessionMailboxSeq = mailboxSeq
-		s.controlMailbox[sessionID] = append(s.controlMailbox[sessionID], controlMessage)
+		appendBoundedRuntimeLog(s.controlMailbox, sessionID, controlMessage, s.retention)
 	}
-	s.mailbox[sessionID] = append(s.mailbox[sessionID], cloneTeamMailMessage(message))
+	appendBoundedRuntimeLog(s.mailbox, sessionID, cloneTeamMailMessage(message), s.retention)
 	s.mu.Unlock()
 	if controlMessage.ControlSeq > 0 {
 		if globalPrimaryUsed {
@@ -649,8 +714,8 @@ func (s *InMemoryRuntimeStore) AppendAgentControlMailbox(ctx context.Context, se
 	controlMessage.Seq = controlSeq
 	controlMessage.ControlSeq = controlSeq
 	controlMessage.SessionMailboxSeq = mailboxSeq
-	s.controlMailbox[sessionID] = append(s.controlMailbox[sessionID], controlMessage)
-	s.mailbox[sessionID] = append(s.mailbox[sessionID], cloneTeamMailMessage(message))
+	appendBoundedRuntimeLog(s.controlMailbox, sessionID, controlMessage, s.retention)
+	appendBoundedRuntimeLog(s.mailbox, sessionID, cloneTeamMailMessage(message), s.retention)
 	s.mu.Unlock()
 	if globalPrimaryUsed {
 		if refreshed, _, err := s.appendPrimaryGlobalMailboxRecord(ctx, sessionID, controlMessage); err != nil {
@@ -737,21 +802,25 @@ func (s *InMemoryRuntimeStore) setInMemoryControlMailboxGlobalSeq(sessionID stri
 	defer s.mu.Unlock()
 	sessionMailboxSeq := int64(0)
 	messageID := ""
-	for index := range s.controlMailbox[sessionID] {
-		if s.controlMailbox[sessionID][index].ControlSeq == controlSeq {
-			s.controlMailbox[sessionID][index].GlobalSeq = globalSeq
-			sessionMailboxSeq = s.controlMailbox[sessionID][index].SessionMailboxSeq
-			messageID = strings.TrimSpace(s.controlMailbox[sessionID][index].ID)
+	controlLog := s.controlMailbox[sessionID]
+	for index := 0; index < controlLog.len(); index++ {
+		entry := controlLog.at(index)
+		if entry.ControlSeq == controlSeq {
+			entry.GlobalSeq = globalSeq
+			sessionMailboxSeq = entry.SessionMailboxSeq
+			messageID = strings.TrimSpace(entry.ID)
 			break
 		}
 	}
-	for index := range s.mailbox[sessionID] {
-		if sessionMailboxSeq > 0 && s.mailbox[sessionID][index].SessionMailboxSeq == sessionMailboxSeq {
-			s.mailbox[sessionID][index].GlobalSeq = globalSeq
+	mailboxLog := s.mailbox[sessionID]
+	for index := 0; index < mailboxLog.len(); index++ {
+		entry := mailboxLog.at(index)
+		if sessionMailboxSeq > 0 && entry.SessionMailboxSeq == sessionMailboxSeq {
+			entry.GlobalSeq = globalSeq
 			return
 		}
-		if messageID != "" && strings.EqualFold(strings.TrimSpace(s.mailbox[sessionID][index].ID), messageID) {
-			s.mailbox[sessionID][index].GlobalSeq = globalSeq
+		if messageID != "" && strings.EqualFold(strings.TrimSpace(entry.ID), messageID) {
+			entry.GlobalSeq = globalSeq
 			return
 		}
 	}
@@ -765,11 +834,12 @@ func (s *InMemoryRuntimeStore) ListEvents(ctx context.Context, sessionID string,
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	list := s.events[sessionID]
-	if len(list) == 0 {
+	if list.len() == 0 {
 		return nil, nil
 	}
-	result := make([]runtimeevents.Event, 0, len(list))
-	for _, entry := range list {
+	result := make([]runtimeevents.Event, 0, list.len())
+	for index := 0; index < list.len(); index++ {
+		entry := list.at(index)
 		if entry.Seq <= afterSeq {
 			continue
 		}
@@ -798,15 +868,16 @@ func (s *InMemoryRuntimeStore) ListMailbox(ctx context.Context, sessionID string
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	list := s.mailbox[sessionID]
-	if len(list) == 0 {
+	if list.len() == 0 {
 		return nil, nil
 	}
-	result := make([]team.MailMessage, 0, len(list))
-	for _, message := range list {
+	result := make([]team.MailMessage, 0, list.len())
+	for index := 0; index < list.len(); index++ {
+		message := list.at(index)
 		if message.Seq <= afterSeq {
 			continue
 		}
-		result = append(result, cloneTeamMailMessage(message))
+		result = append(result, cloneTeamMailMessage(*message))
 		if limit > 0 && len(result) >= limit {
 			break
 		}
@@ -826,15 +897,16 @@ func (s *InMemoryRuntimeStore) ListAgentControlMailbox(ctx context.Context, sess
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	list := s.controlMailbox[sessionID]
-	if len(list) == 0 {
+	if list.len() == 0 {
 		return nil, nil
 	}
-	result := make([]team.MailMessage, 0, len(list))
-	for _, message := range list {
+	result := make([]team.MailMessage, 0, list.len())
+	for index := 0; index < list.len(); index++ {
+		message := list.at(index)
 		if message.ControlSeq <= afterSeq {
 			continue
 		}
-		cloned := cloneTeamMailMessage(message)
+		cloned := cloneTeamMailMessage(*message)
 		cloned.Seq = cloned.ControlSeq
 		result = append(result, cloned)
 		if limit > 0 && len(result) >= limit {
@@ -863,11 +935,12 @@ func (s *InMemoryRuntimeStore) ListAgentControlMailboxRecords(ctx context.Contex
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	list := s.controlMailbox[filter.SessionID]
-	if len(list) == 0 {
+	if list.len() == 0 {
 		return nil, nil
 	}
-	records := make([]agentcontrol.MailboxRecord, 0, len(list))
-	for _, message := range list {
+	records := make([]agentcontrol.MailboxRecord, 0, list.len())
+	for index := 0; index < list.len(); index++ {
+		message := list.at(index)
 		if message.ControlSeq <= filter.AfterSeq {
 			continue
 		}
@@ -878,7 +951,7 @@ func (s *InMemoryRuntimeStore) ListAgentControlMailboxRecords(ctx context.Contex
 		if filter.TeamID != "" && !strings.EqualFold(strings.TrimSpace(message.TeamID), filter.TeamID) {
 			continue
 		}
-		records = append(records, mailboxRecordFromRuntimeMessage(filter.SessionID, message))
+		records = append(records, mailboxRecordFromRuntimeMessage(filter.SessionID, *message))
 		if filter.Limit > 0 && len(records) >= filter.Limit {
 			break
 		}

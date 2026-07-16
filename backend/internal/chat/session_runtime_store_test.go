@@ -591,6 +591,80 @@ func TestInMemoryRuntimeStoreWatchEventsAndLastSeq(t *testing.T) {
 	assert.Equal(t, int64(1), lastSeq)
 }
 
+func TestInMemoryRuntimeStoreBoundsPerSessionRuntimeCollections(t *testing.T) {
+	const retention = 3
+	store := NewInMemoryRuntimeStore(retention)
+	ctx := context.Background()
+	baseTime := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
+	envelope := agentcontrol.Envelope{
+		MessageType:     agentcontrol.MessageTypeAgentMessage,
+		ControlAction:   agentcontrol.ActionAgentMessage,
+		Workflow:        agentcontrol.WorkflowSpawnAgent,
+		MailboxDelivery: agentcontrol.DeliverySessionMailbox,
+		MailboxKind:     agentcontrol.MailboxKindAgentMessage,
+	}
+
+	for index := 1; index <= 6; index++ {
+		messageID := fmt.Sprintf("mail-%d", index)
+		_, mailboxSeq, err := store.AppendAgentControlMailbox(ctx, "bounded-session", team.MailMessage{
+			ID:        messageID,
+			FromAgent: "parent",
+			ToAgent:   "child",
+			Kind:      agentcontrol.MailboxKindAgentMessage,
+			Body:      fmt.Sprintf("body-%d", index),
+			Metadata:  envelope.Metadata(),
+			CreatedAt: baseTime.Add(time.Duration(index) * time.Second),
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(index), mailboxSeq)
+		require.NoError(t, store.SaveToolReceipt(ctx, ToolExecutionReceipt{
+			SessionID:   "bounded-session",
+			ToolCallID:  fmt.Sprintf("tool-%d", index),
+			MessageJSON: []byte(fmt.Sprintf(`{"index":%d}`, index)),
+			CreatedAt:   baseTime.Add(time.Duration(index) * time.Second),
+		}))
+	}
+
+	events, err := store.ListEvents(ctx, "bounded-session", 0, 0)
+	require.NoError(t, err)
+	require.Len(t, events, retention)
+	assert.Equal(t, int64(4), events[0].Payload["seq"])
+	assert.Equal(t, int64(6), events[2].Payload["seq"])
+
+	mailbox, err := store.ListMailbox(ctx, "bounded-session", 0, 0)
+	require.NoError(t, err)
+	require.Len(t, mailbox, retention)
+	assert.Equal(t, int64(4), mailbox[0].Seq)
+	assert.Equal(t, int64(6), mailbox[2].Seq)
+
+	control, err := store.ListAgentControlMailbox(ctx, "bounded-session", 4, 0)
+	require.NoError(t, err)
+	require.Len(t, control, 2)
+	assert.Equal(t, int64(5), control[0].ControlSeq)
+	assert.Equal(t, int64(6), control[1].ControlSeq)
+
+	receipts, err := store.ListToolReceipts(ctx, "bounded-session", 0)
+	require.NoError(t, err)
+	require.Len(t, receipts, retention)
+	assert.Equal(t, "tool-6", receipts[0].ToolCallID)
+	assert.Equal(t, "tool-4", receipts[2].ToolCallID)
+	oldest, err := store.GetToolReceipt(ctx, "bounded-session", "tool-1")
+	require.NoError(t, err)
+	assert.Nil(t, oldest)
+
+	lastEvent, err := store.LastEventSeq(ctx, "bounded-session")
+	require.NoError(t, err)
+	assert.Equal(t, int64(6), lastEvent)
+	lastMailbox, err := store.LastMailboxSeq(ctx, "bounded-session")
+	require.NoError(t, err)
+	assert.Equal(t, int64(6), lastMailbox)
+}
+
+func TestInMemoryRuntimeStoreUsesSafeDefaultRetention(t *testing.T) {
+	store := NewInMemoryRuntimeStore(0)
+	assert.Equal(t, defaultInMemoryRuntimeRetention, store.retention)
+}
+
 func TestSQLiteRuntimeStoreMailboxProjectionStatus(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: filepath.Join(t.TempDir(), "runtime.sqlite")})
 	require.NoError(t, err)
