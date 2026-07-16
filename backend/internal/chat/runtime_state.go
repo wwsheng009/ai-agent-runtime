@@ -159,7 +159,11 @@ func (s *RuntimeState) clone(includeToolSurfaces, includeToolResult bool) *Runti
 	clone.FrozenTurnTools = nil
 	if includeToolSurfaces {
 		clone.StableToolSurface = cloneRuntimeToolDefinitions(s.StableToolSurface)
-		clone.FrozenTurnTools = cloneRuntimeToolDefinitions(s.FrozenTurnTools)
+		if runtimeToolDefinitionsShareBacking(s.StableToolSurface, s.FrozenTurnTools) {
+			clone.FrozenTurnTools = clone.StableToolSurface
+		} else {
+			clone.FrozenTurnTools = cloneRuntimeToolDefinitions(s.FrozenTurnTools)
+		}
 	} else {
 		clone.StableToolSurfaceSet = false
 		clone.FrozenTurnToolsSet = false
@@ -183,6 +187,10 @@ func (s *RuntimeState) clone(includeToolSurfaces, includeToolResult bool) *Runti
 		clone.ActiveJobIDs = append([]string(nil), s.ActiveJobIDs...)
 	}
 	return &clone
+}
+
+func runtimeToolDefinitionsShareBacking(left, right []types.ToolDefinition) bool {
+	return len(left) > 0 && len(left) == len(right) && &left[0] == &right[0]
 }
 
 func clonePendingToolInvocation(pending *PendingToolInvocation, includeResult bool) *PendingToolInvocation {

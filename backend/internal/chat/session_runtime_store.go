@@ -471,7 +471,11 @@ func cloneRuntimeStateForInMemoryStore(state, previous *RuntimeState) *RuntimeSt
 	cloned.StableToolSurfaceSet = state.StableToolSurfaceSet
 	cloned.FrozenTurnToolsSet = state.FrozenTurnToolsSet
 	cloned.StableToolSurface = reuseOrCloneRuntimeTools(state.StableToolSurface, previous, true)
-	cloned.FrozenTurnTools = reuseOrCloneRuntimeTools(state.FrozenTurnTools, previous, false)
+	if runtimeToolDefinitionsShareBacking(state.StableToolSurface, state.FrozenTurnTools) {
+		cloned.FrozenTurnTools = cloned.StableToolSurface
+	} else {
+		cloned.FrozenTurnTools = reuseOrCloneRuntimeTools(state.FrozenTurnTools, previous, false)
+	}
 	if cloned.PendingTool != nil && len(state.PendingTool.ResultMessageJSON) > 0 {
 		if previous != nil && previous.PendingTool != nil &&
 			previous.PendingTool.ToolCallID == state.PendingTool.ToolCallID &&
@@ -1755,12 +1759,22 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 			state.StableToolSurfaceSet = true
 		}
 	}
-	if len(bytes.TrimSpace(frozenTurnToolsRaw)) > 0 {
-		var frozen []types.ToolDefinition
-		if err := json.Unmarshal(frozenTurnToolsRaw, &frozen); err == nil {
-			normalizeRuntimeToolDefinitionsInPlace(frozen)
-			state.FrozenTurnTools = frozen
+	frozenToolsJSON := bytes.TrimSpace(frozenTurnToolsRaw)
+	if len(frozenToolsJSON) > 0 {
+		stableToolsJSON := bytes.TrimSpace(stableToolSurfaceRaw)
+		if state.StableToolSurfaceSet && bytes.Equal(stableToolsJSON, frozenToolsJSON) {
+			state.FrozenTurnTools = state.StableToolSurface
 			state.FrozenTurnToolsSet = true
+		} else {
+			var frozen []types.ToolDefinition
+			if err := json.Unmarshal(frozenToolsJSON, &frozen); err == nil {
+				normalizeRuntimeToolDefinitionsInPlace(frozen)
+				state.FrozenTurnTools = frozen
+				state.FrozenTurnToolsSet = true
+				if state.StableToolSurfaceSet && reflect.DeepEqual(state.StableToolSurface, frozen) {
+					state.FrozenTurnTools = state.StableToolSurface
+				}
+			}
 		}
 	}
 	if len(bytes.TrimSpace(pendingToolRaw)) > 0 {
@@ -1827,11 +1841,15 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 	}
 	var frozenTurnToolsJSON []byte
 	if state.FrozenTurnToolsSet {
-		payload, err := json.Marshal(state.FrozenTurnTools)
-		if err != nil {
-			return fmt.Errorf("marshal frozen turn tools: %w", err)
+		if state.StableToolSurfaceSet && runtimeToolDefinitionsShareBacking(state.StableToolSurface, state.FrozenTurnTools) {
+			frozenTurnToolsJSON = stableToolSurfaceJSON
+		} else {
+			payload, err := json.Marshal(state.FrozenTurnTools)
+			if err != nil {
+				return fmt.Errorf("marshal frozen turn tools: %w", err)
+			}
+			frozenTurnToolsJSON = payload
 		}
-		frozenTurnToolsJSON = payload
 	}
 	var pendingToolJSON []byte
 	if state.PendingTool != nil {

@@ -103,7 +103,7 @@ func TestInMemoryRuntimeStoreReusesUnchangedLargeStateFields(t *testing.T) {
 		Status:               SessionWaitingApproval,
 		StableToolSurface:    tools,
 		StableToolSurfaceSet: true,
-		FrozenTurnTools:      cloneRuntimeToolDefinitions(tools),
+		FrozenTurnTools:      tools,
 		FrozenTurnToolsSet:   true,
 		PendingTool: &PendingToolInvocation{
 			ToolCallID:        "call-large",
@@ -116,6 +116,7 @@ func TestInMemoryRuntimeStoreReusesUnchangedLargeStateFields(t *testing.T) {
 	first := store.states[state.SessionID]
 	require.NotNil(t, first)
 	require.NotEmpty(t, first.PendingTool.ResultMessageJSON)
+	require.True(t, runtimeToolDefinitionsShareBacking(first.StableToolSurface, first.FrozenTurnTools))
 
 	state.Status = SessionRunning
 	require.NoError(t, store.SaveState(ctx, state))
@@ -131,6 +132,7 @@ func TestInMemoryRuntimeStoreReusesUnchangedLargeStateFields(t *testing.T) {
 	third := store.states[state.SessionID]
 	require.NotSame(t, &second.StableToolSurface[0], &third.StableToolSurface[0])
 	require.NotSame(t, &second.PendingTool.ResultMessageJSON[0], &third.PendingTool.ResultMessageJSON[0])
+	require.True(t, runtimeToolDefinitionsShareBacking(third.StableToolSurface, third.FrozenTurnTools))
 	require.Equal(t, "object", second.StableToolSurface[0].Parameters["type"])
 	require.Equal(t, byte(0), second.PendingTool.ResultMessageJSON[0])
 
@@ -1700,6 +1702,38 @@ func TestSQLiteRuntimeStorePersistsStableToolSurface(t *testing.T) {
 	properties := loaded.StableToolSurface[0].Parameters["properties"].(map[string]interface{})
 	nested := properties["nested"].(map[string]interface{})
 	assert.IsType(t, map[string]interface{}{}, nested["properties"])
+}
+
+func TestSQLiteRuntimeStoreSharesIdenticalToolSurfacesAfterLoad(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-shared-tool-surfaces-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	tools := []types.ToolDefinition{{
+		Name: "shell",
+		Parameters: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{"command": map[string]interface{}{"type": "string"}},
+		},
+	}}
+	state := &RuntimeState{
+		SessionID:            "session-shared-tool-surfaces",
+		Status:               SessionRunning,
+		StableToolSurface:    tools,
+		StableToolSurfaceSet: true,
+		FrozenTurnTools:      tools,
+		FrozenTurnToolsSet:   true,
+	}
+	require.NoError(t, store.SaveState(context.Background(), state))
+
+	loaded, err := store.LoadState(context.Background(), state.SessionID)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.True(t, runtimeToolDefinitionsShareBacking(loaded.StableToolSurface, loaded.FrozenTurnTools))
+	loaded.StableToolSurface[0].Name = "changed"
+	require.Equal(t, "changed", loaded.FrozenTurnTools[0].Name)
 }
 
 func TestSQLiteRuntimeStorePersistsToolReceipt(t *testing.T) {

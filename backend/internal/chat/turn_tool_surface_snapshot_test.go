@@ -118,3 +118,26 @@ func TestRuntimeTurnToolSurfaceSnapshotReturnsSingleOwnedProjection(t *testing.T
 	require.Equal(t, "shell", actor.state.StableToolSurface[0].Name)
 	require.Equal(t, "object", actor.state.StableToolSurface[0].Parameters["type"])
 }
+
+func TestRuntimeTurnToolSurfaceSnapshotSharesIdenticalStoredSurfaces(t *testing.T) {
+	actor := &SessionActor{
+		id: "session-shared-tools",
+		state: &RuntimeState{
+			SessionID:     "session-shared-tools",
+			Status:        SessionRunning,
+			CurrentTurnID: "turn-shared",
+		},
+	}
+	snapshot := actor.turnToolSurfaceSnapshot("turn-shared")
+	require.NoError(t, snapshot.SaveTurnToolSurface(context.Background(), []types.ToolDefinition{{Name: "shell"}}))
+
+	state := actor.State()
+	require.True(t, runtimeToolDefinitionsShareBacking(state.StableToolSurface, state.FrozenTurnTools))
+	state.StableToolSurface[0].Name = "changed"
+	require.Equal(t, "changed", state.FrozenTurnTools[0].Name)
+
+	actor.mu.RLock()
+	defer actor.mu.RUnlock()
+	require.Equal(t, "shell", actor.state.StableToolSurface[0].Name)
+	require.True(t, runtimeToolDefinitionsShareBacking(actor.state.StableToolSurface, actor.state.FrozenTurnTools))
+}

@@ -61,9 +61,10 @@ func (s *runtimeTurnToolSurfaceSnapshot) SaveTurnToolSurface(ctx context.Context
 		if strings.TrimSpace(state.CurrentTurnID) != s.turnID {
 			return nil
 		}
-		state.StableToolSurface = cloneRuntimeToolDefinitions(tools)
+		ownedTools := cloneRuntimeToolDefinitions(tools)
+		state.StableToolSurface = ownedTools
 		state.StableToolSurfaceSet = true
-		state.FrozenTurnTools = cloneRuntimeToolDefinitions(tools)
+		state.FrozenTurnTools = ownedTools
 		state.FrozenTurnToolsSet = true
 		state.UpdatedAt = time.Now().UTC()
 		return nil
