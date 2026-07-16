@@ -927,12 +927,12 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 
 	updated, err := storage.Load(ctx, session.ID)
 	require.NoError(t, err)
-	require.Len(t, updated.History, 4)
+	require.Len(t, updated.History, 3)
 	require.Equal(t, "system", updated.History[0].Role)
 	require.Equal(t, "user", updated.History[1].Role)
 	require.Equal(t, "user", updated.History[2].Role)
-	require.Equal(t, "user", updated.History[3].Role)
-	require.Equal(t, "compaction", updated.History[3].Metadata["context_stage"])
+	require.Equal(t, "compaction", updated.History[1].Metadata["context_stage"])
+	require.Contains(t, updated.History[2].Content, "recent user context")
 	require.Equal(t, 140, runtimeSessionObservedTokenUsage(updated))
 	require.Equal(t, 1, provider.callCount)
 
@@ -1295,9 +1295,9 @@ func TestSessionActorCompactForcesCompaction(t *testing.T) {
 
 	updated, err := storage.Load(ctx, session.ID)
 	require.NoError(t, err)
-	require.Len(t, updated.History, 4)
-	require.Equal(t, "compaction", updated.History[2].Metadata["context_stage"])
-	require.Equal(t, "user", updated.History[3].Role)
+	require.Len(t, updated.History, 3)
+	require.Equal(t, "compaction", updated.History[1].Metadata["context_stage"])
+	require.Equal(t, "user", updated.History[2].Role)
 	require.Equal(t, 0, runtimeSessionObservedTokenUsage(updated))
 }
 

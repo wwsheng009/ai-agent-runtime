@@ -14,20 +14,21 @@ import (
 )
 
 const (
-	localSummaryCheckpointReason  = "history_window_summary_segment"
-	localSegmentStartKey          = "segment_start"
-	localSegmentEndKey            = "segment_end"
-	localSummaryTextKey           = "summary_text"
-	localSummaryHeading           = "Compacted context from earlier turns:"
-	localRetainedUserMaxTokens    = 20000
-	localCompactDefaultMaxTokens  = 2048
-	localCompactMaxRequestBytes   = 1024 * 1024
-	localFallbackUserRunes        = 1600
-	localFallbackAssistantRunes   = 2000
-	localFallbackToolRequestRunes = 800
-	localFallbackToolRunes        = 3600
-	localFallbackFailureRunes     = 1200
-	localCompactionPrompt         = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+	localSummaryCheckpointReason   = "history_window_summary_segment"
+	localSegmentStartKey           = "segment_start"
+	localSegmentEndKey             = "segment_end"
+	localSummaryTextKey            = "summary_text"
+	localSummaryHeading            = "Compacted context from earlier turns:"
+	localRetainedRecentMaxTokens   = 20000
+	localCompactDefaultMaxTokens   = 2048
+	localCompactMaxRequestBytes    = 1024 * 1024
+	localFallbackUserRunes         = 1600
+	localFallbackAssistantRunes    = 2000
+	localFallbackToolRequestRunes  = 800
+	localFallbackToolRunes         = 3600
+	localFallbackFailureRunes      = 1200
+	localFallbackPriorSummaryRunes = 3600
+	localCompactionPrompt          = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
 Include:
 - Current progress and key decisions made
@@ -53,7 +54,7 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		return nil, "no_non_system_history", nil
 	}
 
-	summaryMessage, checkpointIDs, usage, usageSource, err := a.buildSummaryMessage(ctx, req, threshold, systemMessages, nonSystemMessages)
+	summaryMessage, checkpointIDs, usage, usageSource, err := a.buildSummaryMessage(ctx, req, threshold, systemMessages, nonSystemMessages, counter)
 	if err != nil {
 		return nil, "summary_generation_failed", err
 	}
@@ -61,10 +62,16 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		return nil, "summary_generation_empty", nil
 	}
 
-	retainedUsers := selectCompactionUserMessages(nonSystemMessages, counter, localRetainedUserMaxTokens)
-	replacement := buildLocalReplacementHistory(systemMessages, nonSystemMessages, retainedUsers, *summaryMessage)
+	recentTokenLimit := localRecentTokenLimit(req, systemMessages, *summaryMessage, counter)
+	retainedRecent := selectCompactionRecentMessages(
+		nonSystemMessages,
+		req.KeepRecentMessages,
+		counter,
+		recentTokenLimit,
+	)
+	replacement := buildLocalReplacementHistory(systemMessages, retainedRecent, *summaryMessage)
 
-	compactedMessages := len(nonSystemMessages) - len(retainedUsers)
+	compactedMessages := len(nonSystemMessages) - len(retainedRecent)
 	if compactedMessages < 0 {
 		compactedMessages = 0
 	}
@@ -86,7 +93,23 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 	}, "", nil
 }
 
-func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, threshold threshold, systemMessages, history []types.Message) (*types.Message, []string, *types.TokenUsage, string, error) {
+func localRecentTokenLimit(req Request, systemMessages []types.Message, summaryMessage types.Message, counter TokenCounter) int {
+	limit := localRetainedRecentMaxTokens
+	if req.ReplacementTokenLimit <= 0 || counter == nil {
+		return limit
+	}
+	fixed := append(cloneMessages(systemMessages), *summaryMessage.Clone())
+	available := req.ReplacementTokenLimit - counter(fixed)
+	if available <= 0 {
+		return 1
+	}
+	if available < limit {
+		return available
+	}
+	return limit
+}
+
+func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, threshold threshold, systemMessages, history []types.Message, counter TokenCounter) (*types.Message, []string, *types.TokenUsage, string, error) {
 	if message, checkpointID := a.findReusableSummaryCheckpoint(ctx, req.SessionID, req.Phase, history); message != nil {
 		if checkpointID == "" {
 			return message, nil, nil, "", nil
@@ -98,6 +121,7 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, thr
 	}
 
 	maxTokens, reasoningEffort := resolveCompactSummaryRequestSettings(a.llmRuntime, req.Provider, req.Model)
+	maxTokens = fitLocalCompactSummaryMaxTokens(maxTokens, req, systemMessages, history, counter)
 	request := buildLocalCompactionLLMRequest(req, systemMessages, history, maxTokens, reasoningEffort)
 	if reason := localCompactionRequestBudgetFailure(a.llmRuntime, request, threshold); reason != "" {
 		request = buildFittedLocalCompactionLLMRequest(a.llmRuntime, req, threshold, systemMessages, history, maxTokens, reasoningEffort, reason)
@@ -213,6 +237,7 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 	}
 
 	userItems := make([]string, 0, 16)
+	priorSummaryItems := make([]string, 0, 4)
 	assistantItems := make([]string, 0, 24)
 	toolRequestItems := make([]string, 0, 12)
 	toolItems := make([]string, 0, 32)
@@ -223,6 +248,9 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 		switch message.Role {
 		case "user":
 			if strings.EqualFold(message.Metadata.GetString("context_stage", ""), "compaction") {
+				if content != "" {
+					priorSummaryItems = appendWithinRuneBudget(priorSummaryItems, summarizeCompactLine(content, 1200), 4, localFallbackPriorSummaryRunes)
+				}
 				continue
 			}
 			if content != "" {
@@ -261,6 +289,12 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 		}
 	}
 
+	if len(priorSummaryItems) > 0 {
+		lines = append(lines, "Prior compacted context:")
+		for _, item := range priorSummaryItems {
+			lines = append(lines, "- "+item)
+		}
+	}
 	if len(userItems) > 0 {
 		lines = append(lines, "Recent user requests:")
 		for _, item := range userItems {
@@ -483,72 +517,130 @@ func buildLocalCompactionRequest(systemMessages, history []types.Message) []type
 	return request
 }
 
-func selectCompactionUserMessages(messages []types.Message, counter TokenCounter, maxTokens int) []types.Message {
-	userMessages := collectRetainedUserMessages(messages)
-	if len(userMessages) == 0 {
+type localRetentionUnit []types.Message
+
+// buildLocalRetentionUnits removes stale compact projections and treats one
+// assistant tool request plus all of its results as an indivisible unit.
+func buildLocalRetentionUnits(messages []types.Message) []localRetentionUnit {
+	units := make([]localRetentionUnit, 0, len(messages))
+	for index := 0; index < len(messages); {
+		message := messages[index]
+		if isCompactionMessage(message) {
+			index++
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		if role == "tool" {
+			index++
+			continue
+		}
+		if role != "assistant" || len(message.ToolCalls) == 0 {
+			units = append(units, localRetentionUnit{*message.Clone()})
+			index++
+			continue
+		}
+
+		expected := make(map[string]bool, len(message.ToolCalls))
+		valid := true
+		for _, call := range message.ToolCalls {
+			id := strings.TrimSpace(call.ID)
+			if id == "" || expected[id] {
+				valid = false
+				continue
+			}
+			expected[id] = true
+		}
+		seen := make(map[string]bool, len(expected))
+		end := index + 1
+		for end < len(messages) && strings.EqualFold(strings.TrimSpace(messages[end].Role), "tool") {
+			result := messages[end]
+			id := strings.TrimSpace(result.ToolCallID)
+			if isCompactionMessage(result) || id == "" || !expected[id] || seen[id] {
+				valid = false
+			} else {
+				seen[id] = true
+			}
+			end++
+		}
+		if valid && len(seen) == len(expected) {
+			units = append(units, localRetentionUnit(cloneMessages(messages[index:end])))
+		}
+		index = end
+	}
+	return units
+}
+
+func isCompactionMessage(message types.Message) bool {
+	return strings.EqualFold(strings.TrimSpace(message.Metadata.GetString("context_stage", "")), "compaction")
+}
+
+func selectCompactionRecentMessages(messages []types.Message, keepRecent int, counter TokenCounter, maxTokens int) []types.Message {
+	units := buildLocalRetentionUnits(messages)
+	if len(units) == 0 {
 		return nil
 	}
-	if counter == nil || maxTokens <= 0 {
-		return userMessages
-	}
 
-	selectedStart := len(userMessages)
-	for index := len(userMessages) - 1; index >= 0; index-- {
-		candidate := cloneMessages(userMessages[index:])
-		if counter(candidate) > maxTokens {
+	start := len(units)
+	for index := len(units) - 1; index >= 0; index-- {
+		candidate := flattenLocalRetentionUnits(units[index:])
+		if keepRecent > 0 && len(candidate) > keepRecent && start < len(units) {
 			break
 		}
-		selectedStart = index
+		if counter != nil && maxTokens > 0 && counter(candidate) > maxTokens {
+			break
+		}
+		start = index
 	}
-	if selectedStart < len(userMessages) {
-		return cloneMessages(userMessages[selectedStart:])
+
+	activeUserUnit := -1
+	for index := len(units) - 1; index >= 0; index-- {
+		if len(units[index]) == 1 && strings.EqualFold(strings.TrimSpace(units[index][0].Role), "user") {
+			activeUserUnit = index
+			break
+		}
 	}
-	return cloneMessages(userMessages[len(userMessages)-1:])
+	if activeUserUnit < 0 || activeUserUnit >= start {
+		return flattenLocalRetentionUnits(units[start:])
+	}
+
+	// The active request is pinned even when it alone exceeds the recent token
+	// budget. Drop whole older suffix units until the combined replay fits.
+	pinned := cloneMessages(units[activeUserUnit])
+	for start < len(units) {
+		candidate := append(cloneMessages(pinned), flattenLocalRetentionUnits(units[start:])...)
+		if localRetentionFits(candidate, keepRecent, counter, maxTokens) {
+			return candidate
+		}
+		start++
+	}
+	return pinned
 }
 
-func collectRetainedUserMessages(messages []types.Message) []types.Message {
-	if len(messages) == 0 {
-		return nil
+func localRetentionFits(messages []types.Message, keepRecent int, counter TokenCounter, maxTokens int) bool {
+	if keepRecent > 0 && len(messages) > keepRecent {
+		return false
 	}
-	retained := make([]types.Message, 0, len(messages))
-	for _, message := range messages {
-		if message.Role != "user" {
-			continue
-		}
-		if strings.EqualFold(message.Metadata.GetString("context_stage", ""), "compaction") {
-			continue
-		}
-		retained = append(retained, *message.Clone())
-	}
-	return retained
+	return counter == nil || maxTokens <= 0 || counter(messages) <= maxTokens
 }
 
-func buildLocalReplacementHistory(systemMessages, nonSystemMessages, retainedUsers []types.Message, summaryMessage types.Message) []types.Message {
-	replacement := make([]types.Message, 0, len(systemMessages)+len(retainedUsers)+1)
+func flattenLocalRetentionUnits(units []localRetentionUnit) []types.Message {
+	count := 0
+	for _, unit := range units {
+		count += len(unit)
+	}
+	flattened := make([]types.Message, 0, count)
+	for _, unit := range units {
+		flattened = append(flattened, cloneMessages(unit)...)
+	}
+	return flattened
+}
+
+func buildLocalReplacementHistory(systemMessages, retainedRecent []types.Message, summaryMessage types.Message) []types.Message {
+	replacement := make([]types.Message, 0, len(systemMessages)+len(retainedRecent)+1)
 	replacement = append(replacement, cloneMessages(systemMessages)...)
-	if shouldKeepTrailingUserAfterSummary(nonSystemMessages, retainedUsers) {
-		replacement = append(replacement, cloneMessages(retainedUsers[:len(retainedUsers)-1])...)
-		replacement = append(replacement, *summaryMessage.Clone())
-		replacement = append(replacement, *retainedUsers[len(retainedUsers)-1].Clone())
-		return replacement
-	}
-	replacement = append(replacement, cloneMessages(retainedUsers)...)
 	replacement = append(replacement, *summaryMessage.Clone())
+	replacement = append(replacement, cloneMessages(retainedRecent)...)
 	return replacement
-}
-
-func shouldKeepTrailingUserAfterSummary(nonSystemMessages, retainedUsers []types.Message) bool {
-	if len(nonSystemMessages) == 0 || len(retainedUsers) == 0 {
-		return false
-	}
-	last := nonSystemMessages[len(nonSystemMessages)-1]
-	if last.Role != "user" {
-		return false
-	}
-	if strings.EqualFold(last.Metadata.GetString("context_stage", ""), "compaction") {
-		return false
-	}
-	return true
 }
 
 func ensureSummaryHeading(summary string) string {
@@ -633,6 +725,38 @@ func resolveCompactSummaryRequestSettings(runtime *llm.LLMRuntime, providerName,
 	}
 
 	return maxTokens, reasoningEffort
+}
+
+func fitLocalCompactSummaryMaxTokens(configured int, req Request, systemMessages, history []types.Message, counter TokenCounter) int {
+	if configured <= 0 {
+		configured = localCompactDefaultMaxTokens
+	}
+	if req.ReplacementTokenLimit <= 0 || counter == nil {
+		return configured
+	}
+
+	reserved := cloneMessages(systemMessages)
+	for index := len(history) - 1; index >= 0; index-- {
+		if strings.EqualFold(strings.TrimSpace(history[index].Role), "user") && !isCompactionMessage(history[index]) {
+			reserved = append(reserved, *history[index].Clone())
+			break
+		}
+	}
+	remaining := req.ReplacementTokenLimit - counter(reserved)
+	if remaining <= 0 {
+		return 1
+	}
+	target := remaining / 2
+	if target < 64 {
+		target = 64
+		if remaining < target {
+			target = remaining
+		}
+	}
+	if target < configured {
+		return target
+	}
+	return configured
 }
 
 func buildCompactionMessage(summaryText, checkpointID string, segmentStart, segmentEnd int, phase string) *types.Message {

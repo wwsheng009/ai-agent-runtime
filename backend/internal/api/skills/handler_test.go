@@ -741,9 +741,12 @@ func TestAgentChat_SessionHistoryAutoCompactsBeforeLLMFallback(t *testing.T) {
 
 	updated, err := sessionManager.GetSession(context.Background(), session.ID)
 	require.NoError(t, err)
-	require.Len(t, updated.GetMessages(), 6)
-	require.Equal(t, "compaction", updated.GetMessages()[3].Metadata["context_stage"])
-	assert.NotContains(t, updated.GetMessages()[3].Content, "older assistant context older assistant context")
+	require.Len(t, updated.GetMessages(), 5)
+	require.Equal(t, "compaction", updated.GetMessages()[1].Metadata["context_stage"])
+	assert.NotContains(t, updated.GetMessages()[1].Content, "older assistant context older assistant context")
+	require.Contains(t, updated.GetMessages()[2].Content, "recent user context")
+	require.Equal(t, "continue from here", updated.GetMessages()[3].Content)
+	require.Equal(t, "assistant", updated.GetMessages()[4].Role)
 }
 
 func TestAgentChat_ErrorResponseIncludesRequestID(t *testing.T) {

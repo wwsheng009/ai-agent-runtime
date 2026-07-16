@@ -161,9 +161,11 @@ func TestMaybeCompactUsesModelSpecificLimit(t *testing.T) {
 	require.Equal(t, "system", result.ReplacementHistory[0].Role)
 	require.Equal(t, "user", result.ReplacementHistory[1].Role)
 	require.Equal(t, "user", result.ReplacementHistory[2].Role)
-	require.Equal(t, "user", result.ReplacementHistory[3].Role)
-	require.Equal(t, "compaction", result.ReplacementHistory[3].Metadata["context_stage"])
-	require.Equal(t, ModeLocal, result.ReplacementHistory[3].Metadata["compact_mode"])
+	require.Equal(t, "assistant", result.ReplacementHistory[3].Role)
+	require.Equal(t, "compaction", result.ReplacementHistory[1].Metadata["context_stage"])
+	require.Equal(t, ModeLocal, result.ReplacementHistory[1].Metadata["compact_mode"])
+	require.Equal(t, "Continue and summarize the root cause.", result.ReplacementHistory[2].Content)
+	require.Equal(t, "The latest logs point at a missing provider config.", result.ReplacementHistory[3].Content)
 	require.Equal(t, 2, result.CompactedMessages)
 }
 
@@ -205,6 +207,22 @@ func TestMaybeCompactUsesModelSpecificCompactSettings(t *testing.T) {
 	require.NotNil(t, provider.lastRequest)
 	assert.Equal(t, 4096, provider.lastRequest.MaxTokens)
 	assert.Equal(t, "none", provider.lastRequest.ReasoningEffort)
+}
+
+func TestFitLocalCompactSummaryMaxTokensReservesRecentContext(t *testing.T) {
+	counter := func(messages []types.Message) int { return len(messages) * 60 }
+	maxTokens := fitLocalCompactSummaryMaxTokens(
+		2048,
+		Request{ReplacementTokenLimit: 600},
+		[]types.Message{*types.NewSystemMessage("system")},
+		[]types.Message{
+			*types.NewUserMessage("active request"),
+			*types.NewAssistantMessage("current progress"),
+		},
+		counter,
+	)
+
+	require.Equal(t, 240, maxTokens)
 }
 
 func TestMaybeCompactDefaultCompactRequestDisablesToolsAndOmitsReasoningEffort(t *testing.T) {
@@ -285,7 +303,7 @@ func TestMaybeCompactFallsBackToDeterministicSummaryWhenProviderSummaryEmpty(t *
 	require.Equal(t, 1, provider.streamCount)
 	require.NotEmpty(t, result.ReplacementHistory)
 	require.Equal(t, "", status.Reason)
-	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
+	summary := requireCompactionMessage(t, result.ReplacementHistory)
 	require.Equal(t, "compaction", summary.Metadata.GetString("context_stage", ""))
 	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
 	require.Contains(t, summary.Content, "Fallback summary generated locally")
@@ -326,7 +344,7 @@ func TestMaybeCompactFallsBackToDeterministicSummaryWhenProviderErrors(t *testin
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 1, provider.streamCount)
-	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
+	summary := requireCompactionMessage(t, result.ReplacementHistory)
 	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
 	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "upstream compact failed")
 }
@@ -368,7 +386,7 @@ func TestMaybeCompactReducesOversizedInputBeforeProviderCompaction(t *testing.T)
 	require.Equal(t, true, provider.lastRequest.Metadata["compact_input_reduced"])
 	require.Greater(t, provider.lastRequest.Metadata["compact_omitted_messages"].(int), 0)
 	require.Empty(t, localCompactionRequestBudgetFailure(runtime, provider.lastRequest, threshold{MaxContextTokens: 5000}))
-	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
+	summary := requireCompactionMessage(t, result.ReplacementHistory)
 	require.NotEqual(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
 }
 
@@ -406,6 +424,100 @@ func TestBuildFittedLocalCompactionRequestKeepsToolBatchBoundary(t *testing.T) {
 			require.NotEmpty(t, strings.TrimSpace(message.ToolCallID))
 		}
 	}
+}
+
+func TestSelectCompactionRecentMessagesHonorsCountAndKeepsAssistantProgress(t *testing.T) {
+	history := []types.Message{
+		*types.NewUserMessage("old request"),
+		*types.NewAssistantMessage("old progress"),
+		*types.NewUserMessage("current request"),
+		*types.NewAssistantMessage("current progress"),
+	}
+	counter := func(messages []types.Message) int { return len(messages) * 10 }
+
+	retained := selectCompactionRecentMessages(history, 2, counter, 100)
+	require.Len(t, retained, 2)
+	assert.Equal(t, "current request", retained[0].Content)
+	assert.Equal(t, "current progress", retained[1].Content)
+
+	retained = selectCompactionRecentMessages(history, 4, counter, 100)
+	require.Len(t, retained, 4)
+}
+
+func TestSelectCompactionRecentMessagesKeepsCompleteToolBatch(t *testing.T) {
+	assistant := types.NewAssistantMessage("Inspecting both files.")
+	assistant.ToolCalls = []types.ToolCall{
+		{ID: "call-1", Name: "view"},
+		{ID: "call-2", Name: "view"},
+	}
+	history := []types.Message{
+		*types.NewUserMessage("inspect the files"),
+		*assistant,
+		*types.NewToolMessage("call-1", "first result"),
+		*types.NewToolMessage("call-2", "second result"),
+	}
+
+	retained := selectCompactionRecentMessages(history, 4, nil, 0)
+	require.Len(t, retained, 4)
+	require.Len(t, retained[1].ToolCalls, 2)
+	assert.Equal(t, "call-1", retained[2].ToolCallID)
+	assert.Equal(t, "call-2", retained[3].ToolCallID)
+}
+
+func TestSelectCompactionRecentMessagesDropsIncompleteToolBatch(t *testing.T) {
+	assistant := types.NewAssistantMessage("Inspecting both files.")
+	assistant.ToolCalls = []types.ToolCall{
+		{ID: "call-1", Name: "view"},
+		{ID: "call-2", Name: "view"},
+	}
+	history := []types.Message{
+		*types.NewUserMessage("inspect the files"),
+		*assistant,
+		*types.NewToolMessage("call-1", "only first result"),
+	}
+
+	retained := selectCompactionRecentMessages(history, 8, nil, 0)
+	require.Len(t, retained, 1)
+	assert.Equal(t, "inspect the files", retained[0].Content)
+}
+
+func TestSelectCompactionRecentMessagesDropsStaleSummaryAndOrphanTool(t *testing.T) {
+	oldSummary := types.NewUserMessage("old compacted objective")
+	oldSummary.Metadata["context_stage"] = "compaction"
+	history := []types.Message{
+		*oldSummary,
+		*types.NewToolMessage("orphan-call", "orphan result"),
+		*types.NewUserMessage("current request"),
+		*types.NewAssistantMessage("current progress"),
+	}
+
+	retained := selectCompactionRecentMessages(history, 8, nil, 0)
+	require.Len(t, retained, 2)
+	assert.Equal(t, "current request", retained[0].Content)
+	assert.Equal(t, "current progress", retained[1].Content)
+	for _, message := range retained {
+		assert.NotEqual(t, "tool", message.Role)
+		assert.NotEqual(t, "compaction", message.Metadata.GetString("context_stage", ""))
+	}
+}
+
+func TestSelectCompactionRecentMessagesPinsOversizedActiveUser(t *testing.T) {
+	history := []types.Message{
+		*types.NewUserMessage("old request"),
+		*types.NewAssistantMessage("old progress"),
+		*types.NewUserMessage(strings.Repeat("current request ", 20)),
+	}
+	counter := func(messages []types.Message) int {
+		total := 0
+		for _, message := range messages {
+			total += len(message.Content)
+		}
+		return total
+	}
+
+	retained := selectCompactionRecentMessages(history, 8, counter, 10)
+	require.Len(t, retained, 1)
+	assert.Contains(t, retained[0].Content, "current request")
 }
 
 func TestBuildDeterministicCompactSummaryRetainsLatestItems(t *testing.T) {
@@ -457,6 +569,21 @@ func TestBuildDeterministicCompactSummaryUsesAvailableBudgetForShortItems(t *tes
 	require.Contains(t, summary, "short tool outcome 20")
 }
 
+func TestBuildDeterministicCompactSummaryCarriesPriorCompactedContext(t *testing.T) {
+	prior := types.NewUserMessage("Original objective: keep unattended agent execution running until the task is complete.")
+	prior.Metadata["context_stage"] = "compaction"
+	history := []types.Message{
+		*prior,
+		*types.NewAssistantMessage("Implemented the first recovery improvement."),
+		*types.NewUserMessage("Continue optimizing."),
+	}
+
+	summary := buildDeterministicCompactSummary(history, "provider unavailable")
+	require.Contains(t, summary, "Prior compacted context:")
+	require.Contains(t, summary, "Original objective: keep unattended agent execution running")
+	require.Contains(t, summary, "Continue optimizing.")
+}
+
 func TestMaybeCompactFallsBackToDeterministicSummaryWhenStreamRequestsToolCall(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "provider-a",
@@ -501,7 +628,7 @@ func TestMaybeCompactFallsBackToDeterministicSummaryWhenStreamRequestsToolCall(t
 	require.Equal(t, 0, provider.callCount)
 	require.Equal(t, 1, provider.streamCount)
 
-	summary := result.ReplacementHistory[len(result.ReplacementHistory)-1]
+	summary := requireCompactionMessage(t, result.ReplacementHistory)
 	require.Equal(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
 	require.Contains(t, summary.Metadata.GetString("summary_fallback_reason", ""), "tool_calls")
 }
@@ -1040,7 +1167,7 @@ func TestMaybeCompactUsesReasoningFallbackWhenContentIsEmpty(t *testing.T) {
 	require.Equal(t, 1, provider.streamCount)
 	require.NotEmpty(t, result.ReplacementHistory)
 
-	summaryMessage := result.ReplacementHistory[len(result.ReplacementHistory)-1]
+	summaryMessage := requireCompactionMessage(t, result.ReplacementHistory)
 	require.Equal(t, "user", summaryMessage.Role)
 	require.Equal(t, "compaction", summaryMessage.Metadata["context_stage"])
 	require.Contains(t, summaryMessage.Content, localSummaryHeading)
@@ -1082,11 +1209,75 @@ func TestMaybeCompactKeepsTrailingActiveUserAfterSummary(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Len(t, result.ReplacementHistory, 4)
+	require.Len(t, result.ReplacementHistory, 3)
 	require.Equal(t, "system", result.ReplacementHistory[0].Role)
-	require.Equal(t, "user", result.ReplacementHistory[1].Role)
-	require.Equal(t, "compaction", result.ReplacementHistory[2].Metadata["context_stage"])
-	require.Equal(t, "Continue from the latest findings.", result.ReplacementHistory[3].Content)
+	require.Equal(t, "compaction", result.ReplacementHistory[1].Metadata["context_stage"])
+	require.Equal(t, "Continue from the latest findings.", result.ReplacementHistory[2].Content)
+}
+
+func TestMaybeCompactReplacementShrinksAndDoesNotAccumulateSummaries(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 100},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	history := []types.Message{*types.NewSystemMessage("system")}
+	for index := 0; index < 8; index++ {
+		history = append(history,
+			*types.NewUserMessage(fmt.Sprintf("request-%d %s", index, strings.Repeat("u", 400))),
+			*types.NewAssistantMessage(fmt.Sprintf("progress-%d %s", index, strings.Repeat("a", 400))),
+		)
+	}
+	counter := func(messages []types.Message) int {
+		total := 0
+		for _, message := range messages {
+			total += len(message.Content)
+		}
+		return total
+	}
+	compactor := New(runtime, nil)
+	result, _, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID: "session-bounded-replacement", Model: "gpt-5", History: history,
+		KeepRecentMessages: 2, CountTokens: counter,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Less(t, result.TokenAfter, result.TokenBefore)
+	require.Equal(t, len(history)-1-2, result.CompactedMessages)
+
+	second, _, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID: "session-bounded-replacement", Model: "gpt-5", Force: true,
+		History: result.ReplacementHistory, KeepRecentMessages: 2, CountTokens: counter,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	compactionCount := 0
+	for _, message := range second.ReplacementHistory {
+		if message.Metadata.GetString("context_stage", "") == "compaction" {
+			compactionCount++
+		}
+	}
+	require.Equal(t, 1, compactionCount)
+}
+
+func requireCompactionMessage(t *testing.T, messages []types.Message) types.Message {
+	t.Helper()
+	for _, message := range messages {
+		if message.Metadata.GetString("context_stage", "") == "compaction" {
+			return message
+		}
+	}
+	require.FailNow(t, "compaction message not found")
+	return types.Message{}
 }
 
 func compactTestHistory() []types.Message {

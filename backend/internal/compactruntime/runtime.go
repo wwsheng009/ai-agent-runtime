@@ -36,10 +36,13 @@ type Request struct {
 	Force              bool
 	History            []types.Message
 	KeepRecentMessages int
-	Phase              string
-	CountTokens        TokenCounter
-	ObservedTokens     int
-	HasObservedTokens  bool
+	// ReplacementTokenLimit optionally fits the summary and recent replay to a
+	// concrete message budget, such as prompt budget minus tool schema tokens.
+	ReplacementTokenLimit int
+	Phase                 string
+	CountTokens           TokenCounter
+	ObservedTokens        int
+	HasObservedTokens     bool
 }
 
 // Result captures a successful history replacement.

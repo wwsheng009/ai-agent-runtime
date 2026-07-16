@@ -3002,16 +3002,17 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 	loop.agent.emitRuntimeEvent("session_compact_started", sessionID, "", startedPayload)
 
 	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
-		SessionID: sessionID,
-		TaskID:    sessionID,
-		Provider:  provider,
-		Model:     model,
-		Mode:      compactruntime.ModeLocal,
-		Force:     true,
-		History:   cloneMessageHistory(history),
-		Phase:     compactruntime.PhasePreTurn,
+		SessionID:             sessionID,
+		TaskID:                sessionID,
+		Provider:              provider,
+		Model:                 model,
+		Mode:                  compactruntime.ModeLocal,
+		Force:                 true,
+		History:               cloneMessageHistory(history),
+		ReplacementTokenLimit: compactRecoveryMessageTokenLimit(budgetMetadata),
+		Phase:                 compactruntime.PhasePreTurn,
 		CountTokens: func(messages []types.Message) int {
-			return loop.llmRuntime.CountMessagesTokens(messages)
+			return estimatePromptMessageTokens(loop.llmRuntime, messages)
 		},
 	})
 	if err != nil {
@@ -3061,6 +3062,20 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 	loop.agent.emitRuntimeEvent("session_compact_completed", sessionID, "", completedPayload)
 
 	return cloneMessageHistory(result.ReplacementHistory), true, nil
+}
+
+func compactRecoveryMessageTokenLimit(metadata map[string]interface{}) int {
+	limit := firstPositiveBudgetMetadataInt(metadata["prompt_budget"])
+	if limit <= 0 {
+		return 0
+	}
+	if toolTokens := intValue(metadata["tool_schema_tokens"]); toolTokens > 0 {
+		limit -= toolTokens
+	}
+	if limit <= 0 {
+		return 1
+	}
+	return limit
 }
 
 func firstPositiveBudgetMetadataInt(values ...interface{}) int {

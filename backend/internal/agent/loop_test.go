@@ -1781,6 +1781,18 @@ func TestEstimatePromptMessageTokensIncludesToolArgumentsAndContentParts(t *test
 	require.Greater(t, estimated-base, 100)
 }
 
+func TestCompactRecoveryMessageTokenLimitReservesToolSchema(t *testing.T) {
+	require.Equal(t, 800, compactRecoveryMessageTokenLimit(map[string]interface{}{
+		"prompt_budget":      1000,
+		"tool_schema_tokens": 200,
+	}))
+	require.Equal(t, 1, compactRecoveryMessageTokenLimit(map[string]interface{}{
+		"prompt_budget":      100,
+		"tool_schema_tokens": 120,
+	}))
+	require.Zero(t, compactRecoveryMessageTokenLimit(nil))
+}
+
 func TestReActLoop_Run_PromptPreflightFailsWhenReplayCannotBeCompactedFurther(t *testing.T) {
 	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
 	llmRuntime := llm.NewLLMRuntime(nil)
