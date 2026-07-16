@@ -148,7 +148,7 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 	if m.toolkit != nil {
 		if tool, ok := m.toolkit.Get(lookupName); ok {
 			if m.shouldPreferLocalToolkitTool(lookupName) {
-				result, err := tool.Execute(ctx, args)
+				result, err := tool.Execute(ctx, normalizeToolkitToolArgs(lookupName, args))
 				if err != nil {
 					return "", nil, err
 				}
@@ -162,7 +162,7 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 		if err == nil && info != nil {
 			if m.shouldPreferLocalToolkit(info.MCPName, lookupName) && m.toolkit != nil {
 				if tool, ok := m.toolkit.Get(lookupName); ok {
-					result, execErr := tool.Execute(ctx, args)
+					result, execErr := tool.Execute(ctx, normalizeToolkitToolArgs(lookupName, args))
 					if execErr != nil {
 						return "", nil, execErr
 					}
@@ -179,7 +179,7 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 
 	if m.toolkit != nil {
 		if tool, ok := m.toolkit.Get(lookupName); ok {
-			result, err := tool.Execute(ctx, args)
+			result, err := tool.Execute(ctx, normalizeToolkitToolArgs(lookupName, args))
 			if err != nil {
 				return "", nil, err
 			}

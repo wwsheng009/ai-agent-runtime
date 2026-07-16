@@ -244,6 +244,137 @@ func TestNewDefaultManagerWithRuntimeConfig_PreservesParallelDefinitionMetadata(
 	}
 }
 
+func TestNormalizeToolkitToolArgs_PreservesCanonicalValuesAndOriginalArgs(t *testing.T) {
+	original := map[string]interface{}{
+		"file_path": "canonical.txt",
+		"path":      "alias.txt",
+		"old_text":  "before",
+		"new_text":  "after",
+	}
+
+	normalized := normalizeToolkitToolArgs("edit", original)
+	if got := normalized["file_path"]; got != "canonical.txt" {
+		t.Fatalf("expected canonical file_path to win, got %#v", got)
+	}
+	if got := normalized["old_string"]; got != "before" {
+		t.Fatalf("expected old_text alias to become old_string, got %#v", got)
+	}
+	if got := normalized["new_string"]; got != "after" {
+		t.Fatalf("expected new_text alias to become new_string, got %#v", got)
+	}
+	if _, exists := normalized["old_text"]; exists {
+		t.Fatal("expected promoted old_text alias to be removed")
+	}
+	if _, exists := original["old_string"]; exists {
+		t.Fatal("normalization mutated the original argument map")
+	}
+	if got := original["old_text"]; got != "before" {
+		t.Fatalf("normalization changed the original alias, got %#v", got)
+	}
+}
+
+func TestNormalizeToolkitToolArgs_NormalizesShellAndSearchAliases(t *testing.T) {
+	bashArgs := normalizeToolkitToolArgs("bash", map[string]interface{}{
+		"cmd": "go test ./...",
+		"cwd": "backend",
+	})
+	if got := bashArgs["command"]; got != "go test ./..." {
+		t.Fatalf("expected cmd alias to become command, got %#v", got)
+	}
+	if got := bashArgs["workdir"]; got != "backend" {
+		t.Fatalf("expected cwd alias to become workdir, got %#v", got)
+	}
+
+	grepArgs := normalizeToolkitToolArgs("grep", map[string]interface{}{
+		"query": "TODO",
+		"root":  "backend",
+	})
+	if got := grepArgs["pattern"]; got != "TODO" {
+		t.Fatalf("expected query alias to become pattern, got %#v", got)
+	}
+	if got := grepArgs["path"]; got != "backend" {
+		t.Fatalf("expected root alias to become path, got %#v", got)
+	}
+}
+
+func TestNormalizeToolkitToolArgs_NormalizesNestedObjectLists(t *testing.T) {
+	viewItem := map[string]interface{}{"path": "README.md", "offset": 2}
+	viewArgs := normalizeToolkitToolArgs("view", map[string]interface{}{
+		"files": []interface{}{viewItem},
+	})
+	viewFiles := viewArgs["files"].([]interface{})
+	if got := viewFiles[0].(map[string]interface{})["file_path"]; got != "README.md" {
+		t.Fatalf("expected nested view path alias to become file_path, got %#v", got)
+	}
+	if _, exists := viewItem["file_path"]; exists {
+		t.Fatal("nested normalization mutated the original view item")
+	}
+
+	bashItem := map[string]interface{}{"cmd": "go version", "cwd": "backend"}
+	bashArgs := normalizeToolkitToolArgs("bash", map[string]interface{}{
+		"commands": []map[string]interface{}{bashItem},
+	})
+	bashCommands := bashArgs["commands"].([]map[string]interface{})
+	if got := bashCommands[0]["command"]; got != "go version" {
+		t.Fatalf("expected typed nested cmd alias to become command, got %#v", got)
+	}
+	if got := bashCommands[0]["workdir"]; got != "backend" {
+		t.Fatalf("expected typed nested cwd alias to become workdir, got %#v", got)
+	}
+	if _, exists := bashItem["command"]; exists {
+		t.Fatal("nested normalization mutated the original bash item")
+	}
+
+	editItem := map[string]interface{}{"old": "before", "replacement": "after"}
+	multieditArgs := normalizeToolkitToolArgs("multiedit", map[string]interface{}{
+		"edits": []interface{}{editItem},
+	})
+	edits := multieditArgs["edits"].([]interface{})
+	if got := edits[0].(map[string]interface{})["old_string"]; got != "before" {
+		t.Fatalf("expected nested old alias to become old_string, got %#v", got)
+	}
+	if got := edits[0].(map[string]interface{})["new_string"]; got != "after" {
+		t.Fatalf("expected nested replacement alias to become new_string, got %#v", got)
+	}
+}
+
+func TestManagerExecute_NormalizesLocalViewPathAlias(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "alias.txt")
+	if err := os.WriteFile(filePath, []byte("alias content\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	manager := NewDefaultManager(nil)
+	output, err := manager.Execute(context.Background(), "view", map[string]interface{}{"path": filePath})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if !strings.Contains(output, "alias content") {
+		t.Fatalf("expected file content, got %q", output)
+	}
+}
+
+func TestManagerExecute_DoesNotNormalizeExternalMCPArgs(t *testing.T) {
+	mcpManager := newStubMCPManager()
+	manager := &Manager{mcp: mcpManager}
+	original := map[string]interface{}{"cmd": "provider-defined-command"}
+
+	output, err := manager.Execute(context.Background(), "bash", original)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if output != "mcp-bash" {
+		t.Fatalf("unexpected MCP output: %q", output)
+	}
+	if got := mcpManager.lastArgs["cmd"]; got != "provider-defined-command" {
+		t.Fatalf("expected MCP alias argument to remain unchanged, got %#v", got)
+	}
+	if _, exists := mcpManager.lastArgs["command"]; exists {
+		t.Fatal("external MCP arguments were normalized as local toolkit arguments")
+	}
+}
+
 func TestExecuteWithMeta_ListMCPResources_ExposesExplicitTextOutputKind(t *testing.T) {
 	manager := NewDefaultManager(newMetaResourcesMCPManager())
 
@@ -633,7 +764,9 @@ func TestFormatMCPResult_PreservesErrorText(t *testing.T) {
 	}
 }
 
-type stubMCPManager struct{}
+type stubMCPManager struct {
+	lastArgs map[string]interface{}
+}
 
 func newStubMCPManager() *stubMCPManager {
 	return &stubMCPManager{}
@@ -691,6 +824,7 @@ func (m *stubMCPManager) FindTool(name string) (*registry.ToolInfo, error) {
 }
 
 func (m *stubMCPManager) CallTool(ctx context.Context, mcpName, toolName string, args map[string]interface{}) (*protocol.CallToolResult, error) {
+	m.lastArgs = args
 	switch toolName {
 	case "mcp_echo":
 		return &protocol.CallToolResult{
