@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,40 @@ import (
 type captureProvider struct {
 	name    string
 	lastReq *LLMRequest
+}
+
+func TestCountMessagesTokensIncludesStructuredMessagePayload(t *testing.T) {
+	runtime := NewLLMRuntime(nil)
+	structured := types.Message{
+		Role:    "assistant",
+		Content: strings.Repeat("flat content is superseded ", 100),
+		ContentParts: []types.ContentPart{{
+			Type: types.ContentPartText,
+			Text: strings.Repeat("structured content ", 40),
+		}},
+		ToolCalls: []types.ToolCall{{
+			ID:   "call-large",
+			Name: "write_file",
+			Args: map[string]interface{}{"content": strings.Repeat("payload ", 80)},
+		}},
+		Metadata: types.NewMetadata(),
+	}
+	toolResult := types.NewToolMessage(strings.Repeat("call-id-", 20), "result")
+	messages := []types.Message{structured, *toolResult}
+	base := runtime.CountMessagesTokens([]types.Message{
+		{Role: "assistant", Metadata: types.NewMetadata()},
+		*types.NewToolMessage("", "result"),
+	})
+
+	counted := runtime.CountMessagesTokens(messages)
+	require.Greater(t, counted-base, 100)
+
+	withoutFlatDuplicate := structured
+	withoutFlatDuplicate.Content = ""
+	require.Equal(t,
+		runtime.CountMessagesTokens([]types.Message{withoutFlatDuplicate}),
+		runtime.CountMessagesTokens([]types.Message{structured}),
+	)
 }
 
 func (p *captureProvider) Name() string { return p.name }

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -650,16 +651,75 @@ func (r *LLMRuntime) CountTokens(text string) int {
 
 // CountMessagesTokens 统计消息的 Token 数
 func (r *LLMRuntime) CountMessagesTokens(messages []types.Message) int {
-	// 转换 []types.Message 到 []interface{} 以适配 tokenizer.CountMessages
+	return countTypedMessagesTokens(r.tokenizer, messages)
+}
+
+func countTypedMessagesTokens(tokenizer *Tokenizer, messages []types.Message) int {
+	if tokenizer == nil || len(messages) == 0 {
+		return 0
+	}
 	converted := make([]interface{}, len(messages))
 	for i, msg := range messages {
+		content := msg.Content
+		if len(msg.ContentParts) > 0 {
+			content = ""
+		}
 		converted[i] = map[string]interface{}{
 			"role":    msg.Role,
-			"content": msg.Content,
+			"content": content,
 			"name":    "",
 		}
 	}
-	return r.tokenizer.CountMessages(converted)
+
+	total := tokenizer.CountMessages(converted)
+	for _, message := range messages {
+		total += countStructuredTokenField(tokenizer, message.ContentParts)
+		total += countStructuredTokenField(tokenizer, message.ToolCalls)
+		if toolCallID := strings.TrimSpace(message.ToolCallID); toolCallID != "" {
+			total += tokenizer.Count(toolCallID)
+		}
+	}
+	return total
+}
+
+func countChatMessagesTokens(tokenizer *Tokenizer, messages []Message) int {
+	if tokenizer == nil || len(messages) == 0 {
+		return 0
+	}
+	converted := make([]interface{}, len(messages))
+	for index, message := range messages {
+		content := message.Content
+		if len(message.ContentParts) > 0 {
+			content = ""
+		}
+		converted[index] = map[string]interface{}{
+			"role":    message.Role,
+			"content": content,
+			"name":    "",
+		}
+	}
+
+	total := tokenizer.CountMessages(converted)
+	for _, message := range messages {
+		total += countStructuredTokenField(tokenizer, message.ContentParts)
+		total += countStructuredTokenField(tokenizer, message.ToolCalls)
+		if toolCallID := strings.TrimSpace(message.ToolCallID); toolCallID != "" {
+			total += tokenizer.Count(toolCallID)
+		}
+		if reasoning := strings.TrimSpace(message.Reasoning); reasoning != "" {
+			total += tokenizer.Count(reasoning)
+		}
+	}
+	return total
+}
+
+func countStructuredTokenField(tokenizer *Tokenizer, value interface{}) int {
+	encoded, err := json.Marshal(value)
+	serialized := string(encoded)
+	if err != nil || serialized == "null" || serialized == "[]" {
+		return 0
+	}
+	return tokenizer.Count(serialized)
 }
 
 // GetCapabilities 获取指定模型的能力

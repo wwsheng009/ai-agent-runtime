@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -144,6 +145,51 @@ func TestResolveUnifiedTokenUsage_FallsBackToLocalEstimate(t *testing.T) {
 	require.Greater(t, usage.PromptTokens, 0)
 	require.Greater(t, usage.CompletionTokens, 0)
 	require.Equal(t, usage.PromptTokens+usage.CompletionTokens, usage.TotalTokens)
+}
+
+func TestEstimateTokenUsageIncludesToolArgumentsAndStructuredContent(t *testing.T) {
+	tokenizer := NewTokenizer("openai")
+	message := types.Message{
+		Role: "assistant",
+		ContentParts: []types.ContentPart{{
+			Type: types.ContentPartText,
+			Text: strings.Repeat("structured content ", 20),
+		}},
+		ToolCalls: []types.ToolCall{{
+			ID:   "call-1",
+			Name: "write_file",
+			Args: map[string]interface{}{"content": strings.Repeat("payload ", 40)},
+		}},
+		Metadata: types.NewMetadata(),
+	}
+
+	usage := estimateTokenUsage("openai", tokenizer, []types.Message{message}, "ok")
+	flat := estimateTokenUsage("openai", tokenizer, []types.Message{{Role: "assistant"}}, "ok")
+	require.Greater(t, usage.PromptTokens, flat.PromptTokens)
+}
+
+func TestEstimateChatTokenUsageIncludesStructuredReplay(t *testing.T) {
+	tokenizer := NewTokenizer("openai")
+	message := Message{
+		Role: "assistant",
+		ContentParts: []types.ContentPart{{
+			Type: types.ContentPartText,
+			Text: strings.Repeat("structured content ", 20),
+		}},
+		ToolCalls: []ToolCall{{
+			ID:   "call-1",
+			Type: "function",
+			Function: ToolCallFunc{
+				Name:      "write_file",
+				Arguments: strings.Repeat("payload ", 40),
+			},
+		}},
+		Reasoning: strings.Repeat("reasoning ", 20),
+	}
+
+	usage := estimateChatTokenUsage("openai", tokenizer, []Message{message}, "ok")
+	flat := estimateChatTokenUsage("openai", tokenizer, []Message{{Role: "assistant"}}, "ok")
+	require.Greater(t, usage.PromptTokens, flat.PromptTokens)
 }
 
 func TestTokenUsageToMap_PreservesCanonicalAndAliasFields(t *testing.T) {

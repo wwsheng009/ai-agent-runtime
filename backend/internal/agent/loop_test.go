@@ -1759,7 +1759,7 @@ func TestReActLoop_EnforcePromptPreflight_CountsToolSchemas(t *testing.T) {
 	require.Equal(t, 1, metadata["tool_count"])
 }
 
-func TestEstimatePromptMessageTokensIncludesToolArgumentsAndContentParts(t *testing.T) {
+func TestEstimatePromptMessageTokensUsesCompleteRuntimeCount(t *testing.T) {
 	runtime := llm.NewLLMRuntime(nil)
 	messages := []types.Message{{
 		Role: "assistant",
@@ -1775,10 +1775,11 @@ func TestEstimatePromptMessageTokensIncludesToolArgumentsAndContentParts(t *test
 		Metadata: types.NewMetadata(),
 	}}
 
-	base := runtime.CountMessagesTokens(messages)
+	flat := runtime.CountMessagesTokens([]types.Message{{Role: "assistant", Metadata: types.NewMetadata()}})
+	counted := runtime.CountMessagesTokens(messages)
 	estimated := estimatePromptMessageTokens(runtime, messages)
-	require.Greater(t, estimated, base)
-	require.Greater(t, estimated-base, 100)
+	require.Equal(t, counted, estimated)
+	require.Greater(t, counted-flat, 100)
 }
 
 func TestCompactRecoveryMessageTokenLimitReservesToolSchema(t *testing.T) {

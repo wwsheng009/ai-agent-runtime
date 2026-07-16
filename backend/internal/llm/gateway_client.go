@@ -1430,18 +1430,3 @@ func (c *GatewayClient) SupportedModels() []string {
 		"gemini-pro", "gemini-1.5-pro",
 	}
 }
-
-// convertToInterfaceSlice 将 []types.Message 转换为 []interface{}
-func convertToInterfaceSlice(messages []types.Message) []interface{} {
-	result := make([]interface{}, len(messages))
-	for i, msg := range messages {
-		result[i] = map[string]interface{}{
-			"role":    msg.Role,
-			"content": msg.Content,
-		}
-		if msg.ToolCallID != "" {
-			result[i].(map[string]interface{})["tool_call_id"] = msg.ToolCallID
-		}
-	}
-	return result
-}

@@ -2623,23 +2623,7 @@ func estimatePromptMessageTokens(runtime *llm.LLMRuntime, messages []types.Messa
 	if runtime == nil || len(messages) == 0 {
 		return 0
 	}
-	total := runtime.CountMessagesTokens(messages)
-	for _, message := range messages {
-		if len(message.ContentParts) > 0 {
-			if encoded, err := json.Marshal(message.ContentParts); err == nil {
-				total += runtime.CountTokens(string(encoded))
-			}
-		}
-		if len(message.ToolCalls) > 0 {
-			if encoded, err := json.Marshal(message.ToolCalls); err == nil {
-				total += runtime.CountTokens(string(encoded))
-			}
-		}
-		if toolCallID := strings.TrimSpace(message.ToolCallID); toolCallID != "" {
-			total += runtime.CountTokens(toolCallID)
-		}
-	}
-	return total
+	return runtime.CountMessagesTokens(messages)
 }
 
 func mergeHookMetadata(metadata map[string]interface{}, message string, context map[string]string) {

@@ -243,7 +243,7 @@ func estimateTokenUsage(protocol string, tokenizer *Tokenizer, requestMessages [
 	promptTokens := 0
 	completionTokens := 0
 	if tokenizer != nil {
-		promptTokens = tokenizer.CountMessages(convertToInterfaceSlice(requestMessages))
+		promptTokens = countTypedMessagesTokens(tokenizer, requestMessages)
 		completionTokens = tokenizer.Count(responseContent)
 	}
 
@@ -262,7 +262,7 @@ func estimateChatTokenUsage(protocol string, tokenizer *Tokenizer, requestMessag
 	promptTokens := 0
 	completionTokens := 0
 	if tokenizer != nil {
-		promptTokens = tokenizer.CountMessages(convertChatMessagesToInterfaceSlice(requestMessages))
+		promptTokens = countChatMessagesTokens(tokenizer, requestMessages)
 		completionTokens = tokenizer.Count(responseContent)
 	}
 
@@ -293,18 +293,6 @@ func firstPositiveInt(values ...interface{}) int {
 		}
 	}
 	return 0
-}
-
-func convertChatMessagesToInterfaceSlice(messages []Message) []interface{} {
-	converted := make([]interface{}, len(messages))
-	for i, msg := range messages {
-		converted[i] = map[string]interface{}{
-			"role":    msg.Role,
-			"content": msg.Content,
-			"name":    "",
-		}
-	}
-	return converted
 }
 
 func intValue(value interface{}) int {
