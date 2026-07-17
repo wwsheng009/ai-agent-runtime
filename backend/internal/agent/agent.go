@@ -536,9 +536,7 @@ func (a *Agent) buildRequest(prompt string, history []types.Message, includeProm
 	if includePromptInHistory {
 		req.AddToHistory(*types.NewUserMessage(prompt))
 	}
-	if a.config.SystemPrompt != "" && !hasSystemPrompt(req.History, a.config.SystemPrompt) {
-		req.History = append([]types.Message{*types.NewSystemMessage(a.config.SystemPrompt)}, req.History...)
-	}
+	req.History = mergeConfiguredSystemPrompt(req.History, a.config.SystemPrompt)
 	return req
 }
 

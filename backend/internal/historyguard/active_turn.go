@@ -3,6 +3,7 @@ package historyguard
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -278,21 +279,29 @@ func buildActiveTurnReplaySummary(messages []types.Message) *types.Message {
 	assistantItems := make([]string, 0)
 	toolItems := make([]string, 0)
 	toolCalls := 0
+	repeatedCalls := make(map[string]*summarizedToolCall)
+	callOrder := 0
 
 	for _, message := range messages {
 		content := strings.TrimSpace(message.Content)
 		switch message.Role {
 		case "assistant":
 			if len(message.ToolCalls) > 0 {
-				names := make([]string, 0, len(message.ToolCalls))
+				calls := make([]string, 0, len(message.ToolCalls))
 				for _, call := range message.ToolCalls {
 					toolCalls++
-					if strings.TrimSpace(call.Name) != "" {
-						names = append(names, strings.TrimSpace(call.Name))
+					if label, key := summarizeToolCall(call); label != "" {
+						calls = append(calls, label)
+						if existing := repeatedCalls[key]; existing != nil {
+							existing.Count++
+						} else {
+							repeatedCalls[key] = &summarizedToolCall{Label: label, Count: 1, Order: callOrder}
+							callOrder++
+						}
 					}
 				}
-				if len(names) > 0 {
-					assistantItems = append(assistantItems, "assistant requested tools: "+strings.Join(names, ", "))
+				if len(calls) > 0 {
+					assistantItems = append(assistantItems, "assistant requested tools: "+strings.Join(calls, "; "))
 				}
 			} else if content != "" {
 				assistantItems = append(assistantItems, summarizeLine(content, 180))
@@ -329,12 +338,63 @@ func buildActiveTurnReplaySummary(messages []types.Message) *types.Message {
 			}
 		}
 	}
+	if repeated := mostRepeatedToolCalls(repeatedCalls, 5); len(repeated) > 0 {
+		lines = append(lines, "Repeated semantic tool calls:")
+		for _, call := range repeated {
+			lines = append(lines, fmt.Sprintf("- %dx %s", call.Count, call.Label))
+		}
+	}
 
 	message := types.NewAssistantMessage(strings.Join(lines, "\n"))
 	message.Metadata["active_turn_compaction"] = true
 	message.Metadata["compacted_messages"] = len(messages)
 	message.Metadata["compacted_tool_calls"] = toolCalls
 	return message
+}
+
+type summarizedToolCall struct {
+	Label string
+	Count int
+	Order int
+}
+
+func summarizeToolCall(call types.ToolCall) (string, string) {
+	name := strings.TrimSpace(call.Name)
+	if name == "" {
+		return "", ""
+	}
+	payload := "{}"
+	if len(call.Args) > 0 {
+		if encoded, err := json.Marshal(call.Args); err == nil {
+			payload = string(encoded)
+		} else {
+			payload = fmt.Sprintf("%v", call.Args)
+		}
+	}
+	key := strings.ToLower(name) + "\x00" + payload
+	return summarizeLine(name+" "+payload, 260), key
+}
+
+func mostRepeatedToolCalls(calls map[string]*summarizedToolCall, limit int) []summarizedToolCall {
+	if len(calls) == 0 || limit <= 0 {
+		return nil
+	}
+	result := make([]summarizedToolCall, 0, len(calls))
+	for _, call := range calls {
+		if call != nil && call.Count > 1 {
+			result = append(result, *call)
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Count != result[j].Count {
+			return result[i].Count > result[j].Count
+		}
+		return result[i].Order < result[j].Order
+	})
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result
 }
 
 func latestReplayBlockStart(messages []types.Message, userIndex int) int {

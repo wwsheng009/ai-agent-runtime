@@ -33,6 +33,7 @@ import (
 
 const emptyTerminalAssistantResponseError = "upstream model returned an empty reply: no text and no tool calls"
 const repeatedSemanticToolCallNoticeThreshold = 4
+const explorationStallNoticeThreshold = 12
 const defaultPromptPreflightAutoCompactRatio = 0.9
 
 // LoopReActConfig ReAct 循环配置
@@ -308,13 +309,12 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	if options.IncludePrompt {
 		history = append(history, *types.NewUserMessage(prompt))
 	}
+	history = mergeConfiguredSystemPrompt(history, loop.agent.config.SystemPrompt)
 	builder := NewMessageBuilder(history)
-
-	// 添加系统提示词
-	if loop.agent.config.SystemPrompt != "" && !hasLeadingSystemPrompt(history, loop.agent.config.SystemPrompt) {
-		systemMsg := types.NewSystemMessage(loop.agent.config.SystemPrompt)
-		builder = NewMessageBuilder(append([]types.Message{*systemMsg}, history...))
-	}
+	// Keep a compact prompt view separate from the full durable audit history.
+	// Once preflight compacts a long active turn, later model calls build on that
+	// view instead of reprocessing the same raw replay on every step.
+	promptBuilder := NewMessageBuilder(history)
 
 	var observations []types.Observation
 	hadToolFailure := false
@@ -339,6 +339,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	repeatedToolPromptFingerprint := 0
 	lastSemanticToolFingerprint := ""
 	repeatedSemanticToolCalls := 0
+	consecutiveExplorationSteps := 0
 
 	// ReAct 循环：Think - Act - Observe
 	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
@@ -358,7 +359,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 
 		// 1. Think: LLM 推理决定下一步行动
-		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, builder.Messages(), observations, options.ToolWhitelist, remainingBudget)
+		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, promptBuilder.Messages(), observations, options.ToolWhitelist, remainingBudget)
 		if err != nil {
 			recoveryHistory := builder.Messages()
 			recoveryMetadata := map[string]interface{}(nil)
@@ -396,6 +397,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 						}
 					}
 					builder = NewMessageBuilder(recoveredHistory)
+					promptBuilder = NewMessageBuilder(recoveredHistory)
 					step--
 					continue
 				}
@@ -408,6 +410,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 		totalUsage.Add(usage)
 		result.Usage = totalUsage.Clone()
+		if len(action.promptHistory) > 0 {
+			promptBuilder = NewMessageBuilder(action.promptHistory)
+		}
 		if options.BudgetTokens > 0 && usage != nil {
 			remainingBudget -= usage.TotalTokens
 		}
@@ -482,6 +487,21 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			lastSemanticToolFingerprint = ""
 			repeatedSemanticToolCalls = 0
 		}
+		consecutiveExplorationSteps = nextExplorationStallCount(consecutiveExplorationSteps, action.ToolCalls)
+		if consecutiveExplorationSteps == explorationStallNoticeThreshold {
+			loop.agent.emitRuntimeEvent("tool_loop.exploration_stall_observed", sessionID, "", map[string]interface{}{
+				"trace_id":                   traceID,
+				"step":                       step,
+				"consecutive_readonly_steps": consecutiveExplorationSteps,
+				"tool_call_count":            len(action.ToolCalls),
+			})
+		}
+		if consecutiveExplorationSteps >= explorationStallNoticeThreshold {
+			repeatedSemanticAdvisory = joinRuntimeAdvisories(
+				repeatedSemanticAdvisory,
+				explorationStallAdvisory(consecutiveExplorationSteps),
+			)
+		}
 		if fingerprint := actionPromptFingerprint(action); fingerprint != "" {
 			if fingerprint == lastToolPromptFingerprint {
 				repeatedToolPromptFingerprint++
@@ -505,6 +525,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 		// 2. Act: 执行工具调用
 		normalizedCalls := builder.AppendAssistantAction(action.Content, action.ToolCalls, action.Reasoning, action.MessageMetadata)
+		promptBuilder.AppendAssistantAction(action.Content, normalizedCalls, action.Reasoning, action.MessageMetadata)
 		historySnapshot := builder.Messages()
 		toolResults, err := loop.act(currentCtx, traceID, sessionID, step, options.Depth, historySnapshot, normalizedCalls, options.ToolWhitelist)
 		if err != nil {
@@ -554,7 +575,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		}
 
 		// 4. 更新对话历史
-		builder.AppendToolResults(normalizedCalls, toolResultsToPayloads(toolResults, repeatedSemanticAdvisory))
+		toolPayloads := toolResultsToPayloads(toolResults, repeatedSemanticAdvisory)
+		builder.AppendToolResults(normalizedCalls, toolPayloads)
+		promptBuilder.AppendToolResults(normalizedCalls, toolPayloads)
 		if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 			return nil, err
 		}
@@ -679,6 +702,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if err != nil {
 		return "", nil, nil, err
 	}
+	action.promptHistory = reusablePromptHistory(history, managedHistory)
 
 	requestProvider := loop.requestProvider()
 	requestModel := loop.requestModel()
@@ -2283,6 +2307,7 @@ type AgentAction struct {
 	Reasoning       *types.ReasoningBlock  `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
 	Metadata        map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 	MessageMetadata types.Metadata         `json:"messageMetadata,omitempty" yaml:"messageMetadata,omitempty"`
+	promptHistory   []types.Message
 }
 
 // Stop 停止循环
@@ -2337,6 +2362,70 @@ func repeatedSemanticToolCallAdvisory(repeatCount int) string {
 		"Runtime advisory: the same semantic tool request has run %d consecutive times. Execution was not blocked. If the evidence is unchanged, reuse it and change the query, batch related inputs, or proceed to the next task step instead of repeating the call.",
 		repeatCount,
 	)
+}
+
+func nextExplorationStallCount(current int, calls []types.ToolCall) int {
+	if len(calls) == 0 {
+		return 0
+	}
+	for _, call := range calls {
+		if !isExplorationOnlyToolCall(call) {
+			return 0
+		}
+	}
+	return current + 1
+}
+
+func isExplorationOnlyToolCall(call types.ToolCall) bool {
+	switch strings.ToLower(strings.TrimSpace(call.Name)) {
+	case "view", "grep", "glob", "ls", "fetch", "web_search", "sourcegraph", "list_mcp_resources":
+		return true
+	case "bash", "execute_shell_command":
+		return !toolCallDeclaresMutatedPaths(call.Args)
+	default:
+		return false
+	}
+}
+
+func toolCallDeclaresMutatedPaths(args map[string]interface{}) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch values := args["mutated_paths"].(type) {
+	case []string:
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, value := range values {
+			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func explorationStallAdvisory(stepCount int) string {
+	if stepCount < explorationStallNoticeThreshold {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Runtime advisory: %d consecutive tool rounds have only inspected or checked state without a declared workspace mutation. Execution remains unrestricted. Reuse the evidence already collected: state the current root-cause hypothesis, implement the smallest justified fix, and verify it. If the task is read-only or already solved, stop calling tools and return the conclusion. Do not repeat searches merely to reconfirm unchanged evidence.",
+		stepCount,
+	)
+}
+
+func joinRuntimeAdvisories(values ...string) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToolCallID string, completed []toolExecutionResult, agent *Agent, sessionID string) context.Context {
@@ -2414,6 +2503,29 @@ func hasLeadingSystemPrompt(history []types.Message, systemPrompt string) bool {
 	return first.Role == "system" && first.Content == systemPrompt
 }
 
+func mergeConfiguredSystemPrompt(history []types.Message, systemPrompt string) []types.Message {
+	desired := strings.TrimSpace(systemPrompt)
+	if desired == "" {
+		return cloneMessageHistory(history)
+	}
+	if len(history) == 0 {
+		return []types.Message{*types.NewSystemMessage(desired)}
+	}
+
+	first := history[0]
+	existing := strings.TrimSpace(first.Content)
+	if first.Role == "system" && (existing == desired || (existing != "" && strings.HasPrefix(desired, existing+"\n"))) {
+		merged := cloneMessageHistory(history)
+		merged[0].Content = desired
+		return merged
+	}
+
+	merged := make([]types.Message, 0, len(history)+1)
+	merged = append(merged, *types.NewSystemMessage(desired))
+	merged = append(merged, cloneMessageHistory(history)...)
+	return merged
+}
+
 func hasSystemPrompt(history []types.Message, systemPrompt string) bool {
 	for _, msg := range history {
 		if msg.Role == "system" && msg.Content == systemPrompt {
@@ -2433,6 +2545,39 @@ func cloneMessageHistory(history []types.Message) []types.Message {
 		cloned[index] = *history[index].Clone()
 	}
 	return cloned
+}
+
+func reusablePromptHistory(source, managed []types.Message) []types.Message {
+	if len(managed) == 0 {
+		return nil
+	}
+
+	persistedContext := make(map[string]int)
+	for _, message := range source {
+		stage := strings.TrimSpace(message.Metadata.GetString("context_stage", ""))
+		if stage == "" {
+			continue
+		}
+		persistedContext[promptContextMessageKey(message, stage)]++
+	}
+
+	reusable := make([]types.Message, 0, len(managed))
+	for _, message := range managed {
+		stage := strings.TrimSpace(message.Metadata.GetString("context_stage", ""))
+		if stage != "" {
+			key := promptContextMessageKey(message, stage)
+			if persistedContext[key] <= 0 {
+				continue
+			}
+			persistedContext[key]--
+		}
+		reusable = append(reusable, *message.Clone())
+	}
+	return reusable
+}
+
+func promptContextMessageKey(message types.Message, stage string) string {
+	return strings.Join([]string{message.Role, stage, message.ToolCallID, message.Content}, "\x00")
 }
 
 func stripSystemMessages(history []types.Message) []types.Message {

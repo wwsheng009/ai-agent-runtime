@@ -1247,6 +1247,75 @@ func TestSemanticToolCallFingerprintExemptsPollingTools(t *testing.T) {
 	require.Empty(t, fingerprint)
 }
 
+func TestReActLoop_AdvisesAfterProlongedExplorationWithoutStopping(t *testing.T) {
+	manager := &MockSequenceMCPManager{output: "inspection result"}
+	llmRuntime := llm.NewLLMRuntime(nil)
+	responses := make([]*llm.LLMResponse, 0, explorationStallNoticeThreshold+1)
+	for index := 1; index <= explorationStallNoticeThreshold; index++ {
+		responses = append(responses, &llm.LLMResponse{
+			Content: "继续检查。",
+			Model:   "test-model",
+			ToolCalls: []types.ToolCall{{
+				ID:   fmt.Sprintf("inspect-%d", index),
+				Name: "view",
+				Args: map[string]interface{}{
+					"file_path": fmt.Sprintf("file-%d.go", index),
+				},
+			}},
+		})
+	}
+	responses = append(responses, &llm.LLMResponse{Content: "已根据现有证据完成分析。", Model: "test-model"})
+	provider := &SequenceLLMProvider{name: "test-provider", responses: responses}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name:     "test-agent",
+		Provider: "test-provider",
+		Model:    "test-model",
+		MaxSteps: 0,
+	}, manager, llmRuntime)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        0,
+		EnableToolCalls: true,
+	})
+	bus := runtimeevents.NewBus()
+	var observedEvents []runtimeevents.Event
+	bus.Subscribe("tool_loop.exploration_stall_observed", func(event runtimeevents.Event) {
+		observedEvents = append(observedEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	result, err := loop.Run(context.Background(), "调查问题并在证据充分后处理")
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, "已根据现有证据完成分析。", result.Output)
+	require.Len(t, provider.requests, explorationStallNoticeThreshold+1)
+	require.Len(t, observedEvents, 1)
+	require.Equal(t, explorationStallNoticeThreshold, observedEvents[0].Payload["consecutive_readonly_steps"])
+
+	advisoryFound := false
+	for _, message := range provider.requests[len(provider.requests)-1].Messages {
+		if message.Role == "tool" && strings.Contains(message.Content, "only inspected or checked state") {
+			advisoryFound = true
+			break
+		}
+	}
+	require.True(t, advisoryFound, "the next model turn should receive non-blocking progress guidance")
+}
+
+func TestNextExplorationStallCountResetsOnMutation(t *testing.T) {
+	count := nextExplorationStallCount(4, []types.ToolCall{{Name: "grep"}, {Name: "bash", Args: map[string]interface{}{"mutated_paths": []interface{}{}}}})
+	require.Equal(t, 5, count)
+
+	count = nextExplorationStallCount(count, []types.ToolCall{{Name: "edit"}})
+	require.Zero(t, count)
+
+	count = nextExplorationStallCount(3, []types.ToolCall{{
+		Name: "bash",
+		Args: map[string]interface{}{"mutated_paths": []interface{}{"backend/internal/agent/loop.go"}},
+	}})
+	require.Zero(t, count)
+}
+
 func TestReActLoop_Run_WithTimeout(t *testing.T) {
 	agent := &Agent{
 		config: &Config{
@@ -1666,6 +1735,86 @@ func TestReActLoop_RunWithSession_PromptOnlyActiveTurnCompactionDoesNotPersist(t
 	require.Contains(t, messages[2].Content, "LOG ")
 	require.Contains(t, messages[4].Content, "LOG ")
 	require.Equal(t, "已完成分析。", messages[5].Content)
+}
+
+func TestReActLoop_ReusesCompactedPromptViewAcrossLongActiveTurn(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "检查最后一个状态。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{{
+					ID: "call_latest", Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"},
+				}},
+			},
+			{Content: "已完成分析。", Model: "test-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		DefaultMaxTokens: 256,
+		SystemPrompt:     "You are a helpful assistant.",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens": 120000,
+		},
+	}, &MockSequenceMCPManager{output: "latest log"}, llmRuntime)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 0, EnableToolCalls: true})
+	session := newTestHistorySession("session-long-prompt-view")
+	session.messages = append(session.messages, *types.NewUserMessage("find the root cause and fix it"))
+	for index := 0; index < 500; index++ {
+		callID := fmt.Sprintf("call_%d", index)
+		assistant := types.NewAssistantMessage("继续检查")
+		assistant.ToolCalls = []types.ToolCall{{ID: callID, Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}}}
+		session.messages = append(session.messages, *assistant, *types.NewToolMessage(callID, "LOG "+large))
+	}
+
+	result, err := loop.ContinueWithSession(context.Background(), session)
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Len(t, provider.requests, 2)
+
+	firstRaw, firstOK := provider.requests[0].Metadata["context_preflight"]
+	require.True(t, firstOK, "first request metadata: %#v", provider.requests[0].Metadata)
+	firstPreflight, firstOK := firstRaw.(map[string]interface{})
+	require.True(t, firstOK, "first preflight metadata: %#v", firstRaw)
+	secondRaw, secondOK := provider.requests[1].Metadata["context_preflight"]
+	require.True(t, secondOK, "second request metadata: %#v", provider.requests[1].Metadata)
+	secondPreflight, secondOK := secondRaw.(map[string]interface{})
+	require.True(t, secondOK, "second preflight metadata: %#v", secondRaw)
+	firstTokens := intValue(firstPreflight["message_tokens_before"])
+	secondTokens := intValue(secondPreflight["message_tokens_before"])
+	require.Greater(t, firstTokens, 100000)
+	require.Less(t, secondTokens, 10000)
+	require.Less(t, secondTokens*10, firstTokens)
+
+	// Prompt compaction is an execution view; durable history remains available
+	// for audit, explicit session compaction, and later artifact recovery.
+	require.Greater(t, len(session.GetMessages()), 1000)
+	providerMessages := provider.requests[1].Messages
+	require.Equal(t, "find the root cause and fix it", providerMessages[1].Content)
+	require.True(t, providerMessages[2].Metadata.GetBool("active_turn_compaction", false))
+}
+
+func TestMergeConfiguredSystemPromptReplacesExtendedPrefixWithoutDuplication(t *testing.T) {
+	base := "Base instructions.\n\nEnvironment context."
+	extended := base + "\n\nCurrent workspace root: E:\\workspace"
+	original := types.NewSystemMessage(base)
+	original.Metadata["prompt_layer"] = "base"
+	history := []types.Message{*original, *types.NewUserMessage("fix it")}
+
+	merged := mergeConfiguredSystemPrompt(history, extended)
+	require.Len(t, merged, 2)
+	require.Equal(t, "system", merged[0].Role)
+	require.Equal(t, extended, merged[0].Content)
+	require.Equal(t, "base", merged[0].Metadata.GetString("prompt_layer", ""))
+	require.Equal(t, base, history[0].Content, "source history must not be mutated")
 }
 
 func TestReActLoop_EnforcePromptPreflight_CompactsActiveTurnReplayByTokenBudget(t *testing.T) {

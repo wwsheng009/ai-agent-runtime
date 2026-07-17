@@ -1,6 +1,7 @@
 package historyguard
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -265,5 +266,42 @@ func TestCompactActiveTurnReplay_PreservesEarlierCompactionSummaryAnchor(t *test
 	}
 	if got[4].Role != "tool" || got[4].ToolCallID != "call_3" {
 		t.Fatalf("expected latest tool result to be preserved, got %#v", got[4])
+	}
+}
+
+func TestCompactActiveTurnReplaySummaryRetainsArgumentsAndRepeatedCalls(t *testing.T) {
+	large := strings.Repeat("unchanged output ", 220)
+	messages := []types.Message{*types.NewUserMessage("fix the issue")}
+	for index := 0; index < 4; index++ {
+		callID := fmt.Sprintf("call_%d", index)
+		assistant := types.NewAssistantMessage("checking")
+		assistant.ToolCalls = []types.ToolCall{{
+			ID:   callID,
+			Name: "view",
+			Args: map[string]interface{}{
+				"file_path": "backend/internal/agent/loop.go",
+				"offset":    396,
+				"limit":     120,
+			},
+		}}
+		messages = append(messages, *assistant, *types.NewToolMessage(callID, large))
+	}
+	latest := types.NewAssistantMessage("check another file")
+	latest.ToolCalls = []types.ToolCall{{ID: "call_latest", Name: "grep", Args: map[string]interface{}{"pattern": "TODO"}}}
+	messages = append(messages, *latest, *types.NewToolMessage("call_latest", "one result"))
+
+	got, compacted := CompactActiveTurnReplay(messages, 2048)
+	if !compacted {
+		t.Fatalf("expected compaction")
+	}
+	summary := got[1].Content
+	for _, expected := range []string{
+		`view {"file_path":"backend/internal/agent/loop.go","limit":120,"offset":396}`,
+		"Repeated semantic tool calls:",
+		"- 4x view",
+	} {
+		if !strings.Contains(summary, expected) {
+			t.Fatalf("expected summary to contain %q, got:\n%s", expected, summary)
+		}
 	}
 }
