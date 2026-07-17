@@ -1820,6 +1820,61 @@ func TestReActLoop_MidTurnSemanticCompactionContinuesWithoutReplacingDurableHist
 	}
 }
 
+func TestReActLoop_PreTurnSemanticCompactionRunsBeforeFirstModelDecision(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+		MaxRetries:      0,
+	})
+	provider := &SequenceLLMProvider{
+		name:         "test-provider",
+		defaultModel: "test-model",
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"test-model": {MaxContextTokens: 10000, AutoCompactTokenLimit: 1200},
+		},
+		responses: []*llm.LLMResponse{
+			{Content: "Pre-turn semantic checkpoint: preserve the original goal and continue from verified evidence.", Model: "test-model"},
+			{Content: "Completed from the pre-turn semantic checkpoint.", Model: "test-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name: "test-agent", Provider: "test-provider", Model: "test-model",
+		DefaultMaxTokens: 256, SystemPrompt: "Current canonical instructions.",
+	}, nil, llmRuntime)
+	bus := runtimeevents.NewBus()
+	var completedEvents []runtimeevents.Event
+	bus.Subscribe("context.pre_turn_compact.completed", func(event runtimeevents.Event) {
+		completedEvents = append(completedEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	session := newTestHistorySession("session-pre-turn-semantic")
+	session.messages = append(session.messages, *types.NewUserMessage("Finish the original long-running task without losing its constraints."))
+	for index := 0; index < 12; index++ {
+		callID := fmt.Sprintf("pre-call-%d", index)
+		assistant := types.NewAssistantMessage(fmt.Sprintf("verified progress %d", index))
+		assistant.ToolCalls = []types.ToolCall{{ID: callID, Name: "inspect", Args: map[string]interface{}{"index": index}}}
+		session.messages = append(session.messages, *assistant, *types.NewToolMessage(callID, strings.Repeat(fmt.Sprintf("evidence-%d ", index), 60)))
+	}
+	durableBefore := len(session.messages)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 0, EnableToolCalls: false})
+	result, err := loop.ContinueWithSession(context.Background(), session)
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, "Completed from the pre-turn semantic checkpoint.", result.Output)
+	require.Len(t, provider.requests, 2)
+	require.Contains(t, provider.requests[0].Messages[len(provider.requests[0].Messages)-1].Content, "CONTEXT CHECKPOINT COMPACTION")
+	require.Contains(t, joinedMessageContents(provider.requests[1].Messages), "Finish the original long-running task")
+	require.Contains(t, joinedMessageContents(provider.requests[1].Messages), "Pre-turn semantic checkpoint")
+	require.Len(t, completedEvents, 1)
+	require.Equal(t, compactruntime.PhasePreTurn, completedEvents[0].Payload["phase"])
+	require.Len(t, session.GetMessages(), durableBefore+1)
+	for _, message := range session.GetMessages() {
+		require.NotEqual(t, "compaction", message.Metadata.GetString("context_stage", ""))
+	}
+}
+
 func joinedMessageContents(messages []types.Message) string {
 	contents := make([]string, 0, len(messages))
 	for _, message := range messages {

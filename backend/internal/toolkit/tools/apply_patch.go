@@ -235,7 +235,7 @@ type patchHunkLine struct {
 }
 
 func parseApplyPatch(input string) ([]patchOperation, error) {
-	normalizedInput := unwrapApplyPatchHeredoc(strings.TrimSpace(strings.ReplaceAll(input, "\r\n", "\n")))
+	normalizedInput := normalizeApplyPatchEnvelope(strings.TrimSpace(strings.ReplaceAll(input, "\r\n", "\n")))
 	lines := strings.Split(normalizedInput, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != applyPatchBeginMarker {
 		return nil, fmt.Errorf("补丁必须以 %q 开始", applyPatchBeginMarker)
@@ -282,6 +282,23 @@ func parseApplyPatch(input string) ([]patchOperation, error) {
 	}
 
 	return nil, fmt.Errorf("补丁缺少 %q 结束标记", applyPatchEndMarker)
+}
+
+func normalizeApplyPatchEnvelope(input string) string {
+	input = unwrapApplyPatchHeredoc(input)
+	lines := strings.Split(input, "\n")
+	if len(lines) >= 3 && strings.HasPrefix(strings.TrimSpace(lines[0]), "```") && strings.TrimSpace(lines[len(lines)-1]) == "```" {
+		lines = lines[1 : len(lines)-1]
+	}
+	for index, line := range lines {
+		switch strings.TrimSpace(line) {
+		case applyPatchBeginMarker + " ***":
+			lines[index] = applyPatchBeginMarker
+		case applyPatchEndMarker + " ***":
+			lines[index] = applyPatchEndMarker
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 func unwrapApplyPatchHeredoc(input string) string {

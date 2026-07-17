@@ -114,6 +114,44 @@ func TestApplyPatchTool_AcceptsHeredocWrapper(t *testing.T) {
 	assertFileContent(t, path, "HELLO\n")
 }
 
+func TestApplyPatchTool_NormalizesCommonModelEnvelopeVariants(t *testing.T) {
+	for _, wrapper := range []struct {
+		name   string
+		prefix string
+		suffix string
+		begin  string
+		end    string
+	}{
+		{name: "redundant boundary stars", begin: "*** Begin Patch ***", end: "*** End Patch ***"},
+		{name: "markdown fence", prefix: "```patch\n", suffix: "\n```", begin: "*** Begin Patch", end: "*** End Patch"},
+	} {
+		t.Run(wrapper.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "wrapped.txt")
+			requireWriteFile(t, path, "old\n")
+			tool := NewApplyPatchTool()
+			tool.SetBasePath(root)
+			patch := wrapper.prefix + strings.Join([]string{
+				wrapper.begin,
+				"*** Update File: wrapped.txt",
+				"@@",
+				"-old",
+				"+new",
+				wrapper.end,
+			}, "\n") + wrapper.suffix
+
+			result, err := tool.Execute(context.Background(), map[string]interface{}{"patch": patch})
+			if err != nil {
+				t.Fatalf("Execute returned error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got error: %v", result.Error)
+			}
+			assertFileContent(t, path, "new\n")
+		})
+	}
+}
+
 func TestApplyPatchTool_AcceptsFirstUpdateChunkWithoutContextMarker(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "no-context.txt")

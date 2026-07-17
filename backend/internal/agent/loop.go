@@ -357,6 +357,31 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		if loop.config.Verbose {
 			fmt.Printf("[Step %d] Starting ReAct iteration\n", step)
 		}
+		if step == 1 {
+			compactedHistory, compactUsage, compacted, compactErr := loop.tryActiveTurnSemanticCompaction(
+				currentCtx,
+				sessionID,
+				traceID,
+				step,
+				promptBuilder.Messages(),
+				0,
+				nil,
+				compactruntime.PhasePreTurn,
+				"active_turn_start_context_limit",
+			)
+			if compactErr != nil {
+				if ctxErr := currentCtx.Err(); ctxErr != nil {
+					return result, ctxErr
+				}
+			} else if compacted {
+				promptBuilder = NewMessageBuilder(compactedHistory)
+				totalUsage.Add(compactUsage)
+				result.Usage = totalUsage.Clone()
+				if options.BudgetTokens > 0 && compactUsage != nil {
+					remainingBudget -= compactUsage.TotalTokens
+				}
+			}
+		}
 
 		// 1. Think: LLM 推理决定下一步行动
 		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, promptBuilder.Messages(), observations, options.ToolWhitelist, remainingBudget)
@@ -582,7 +607,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			return nil, err
 		}
 
-		compactedHistory, compactUsage, compacted, compactErr := loop.tryMidTurnSemanticCompaction(
+		compactedHistory, compactUsage, compacted, compactErr := loop.tryActiveTurnSemanticCompaction(
 			currentCtx,
 			sessionID,
 			traceID,
@@ -590,6 +615,8 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			promptBuilder.Messages(),
 			action.toolSchemaTokens,
 			usage,
+			compactruntime.PhaseMidTurn,
+			"context_limit",
 		)
 		if compactErr != nil {
 			if ctxErr := currentCtx.Err(); ctxErr != nil {
@@ -3217,7 +3244,7 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 	return cloneMessageHistory(result.ReplacementHistory), true, nil
 }
 
-func (loop *ReActLoop) tryMidTurnSemanticCompaction(ctx context.Context, sessionID, traceID string, step int, history []types.Message, toolSchemaTokens int, observedUsage *types.TokenUsage) ([]types.Message, *types.TokenUsage, bool, error) {
+func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sessionID, traceID string, step int, history []types.Message, toolSchemaTokens int, observedUsage *types.TokenUsage, phase, reason string) ([]types.Message, *types.TokenUsage, bool, error) {
 	if loop == nil || loop.agent == nil || loop.llmRuntime == nil || len(history) == 0 {
 		return nil, nil, false, nil
 	}
@@ -3228,7 +3255,7 @@ func (loop *ReActLoop) tryMidTurnSemanticCompaction(ctx context.Context, session
 	}
 	messageTokens := estimatePromptMessageTokens(loop.llmRuntime, history)
 	promptTokens := messageTokens + maxIntValue(0, toolSchemaTokens)
-	if promptTokens <= budget.PromptBudget || !midTurnSemanticCompactionEligible(budget, observedUsage) {
+	if promptTokens <= budget.PromptBudget || !activeTurnSemanticCompactionEligible(budget, observedUsage) {
 		return nil, nil, false, nil
 	}
 
@@ -3238,6 +3265,12 @@ func (loop *ReActLoop) tryMidTurnSemanticCompaction(ctx context.Context, session
 	}
 	provider := loop.requestProvider()
 	model := loop.requestModel()
+	phase = firstNonEmptyTrimmed(phase, compactruntime.PhaseMidTurn)
+	reason = firstNonEmptyTrimmed(reason, "context_limit")
+	eventPrefix := "context.mid_turn_compact"
+	if phase == compactruntime.PhasePreTurn {
+		eventPrefix = "context.pre_turn_compact"
+	}
 	startedPayload := budget.Metadata()
 	if startedPayload == nil {
 		startedPayload = map[string]interface{}{}
@@ -3245,9 +3278,9 @@ func (loop *ReActLoop) tryMidTurnSemanticCompaction(ctx context.Context, session
 	startedPayload["session_id"] = sessionID
 	startedPayload["trace_id"] = traceID
 	startedPayload["step"] = step
-	startedPayload["phase"] = compactruntime.PhaseMidTurn
+	startedPayload["phase"] = phase
 	startedPayload["mode"] = compactruntime.ModeAuto
-	startedPayload["reason"] = "context_limit"
+	startedPayload["reason"] = reason
 	startedPayload["provider"] = provider
 	startedPayload["model"] = model
 	startedPayload["message_count"] = len(history)
@@ -3257,7 +3290,7 @@ func (loop *ReActLoop) tryMidTurnSemanticCompaction(ctx context.Context, session
 	startedPayload["replacement_token_limit"] = replacementTokenLimit
 	startedPayload["prompt_only"] = true
 	startedPayload["durable_history_replaced"] = false
-	loop.agent.emitRuntimeEvent("context.mid_turn_compact.started", sessionID, "", startedPayload)
+	loop.agent.emitRuntimeEvent(eventPrefix+".started", sessionID, "", startedPayload)
 
 	taskID := sessionID
 	if loop.agent.config != nil {
@@ -3273,7 +3306,7 @@ func (loop *ReActLoop) tryMidTurnSemanticCompaction(ctx context.Context, session
 		Force:                 true,
 		History:               cloneMessageHistory(history),
 		ReplacementTokenLimit: replacementTokenLimit,
-		Phase:                 compactruntime.PhaseMidTurn,
+		Phase:                 phase,
 		CountTokens: func(messages []types.Message) int {
 			return estimatePromptMessageTokens(loop.llmRuntime, messages)
 		},
@@ -3289,7 +3322,7 @@ func (loop *ReActLoop) tryMidTurnSemanticCompaction(ctx context.Context, session
 		if err != nil {
 			fallbackPayload["error"] = err.Error()
 		}
-		loop.agent.emitRuntimeEvent("context.mid_turn_compact.fallback", sessionID, "", fallbackPayload)
+		loop.agent.emitRuntimeEvent(eventPrefix+".fallback", sessionID, "", fallbackPayload)
 		compactRequest.Mode = compactruntime.ModeLocal
 		result, status, err = runtime.MaybeCompact(ctx, compactRequest)
 	}
@@ -3297,13 +3330,13 @@ func (loop *ReActLoop) tryMidTurnSemanticCompaction(ctx context.Context, session
 		failedPayload := cloneInterfaceMap(startedPayload)
 		failedPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "semantic_compaction_failed")
 		failedPayload["error"] = err.Error()
-		loop.agent.emitRuntimeEvent("context.mid_turn_compact.failed", sessionID, "", failedPayload)
+		loop.agent.emitRuntimeEvent(eventPrefix+".failed", sessionID, "", failedPayload)
 		return nil, nil, false, err
 	}
 	if result == nil || len(result.ReplacementHistory) == 0 || !compactionRecoveryMadeProgress(loop.llmRuntime, history, result.ReplacementHistory) {
 		skippedPayload := cloneInterfaceMap(startedPayload)
 		skippedPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "replacement_did_not_reduce_context")
-		loop.agent.emitRuntimeEvent("context.mid_turn_compact.skipped", sessionID, "", skippedPayload)
+		loop.agent.emitRuntimeEvent(eventPrefix+".skipped", sessionID, "", skippedPayload)
 		return nil, nil, false, nil
 	}
 
@@ -3330,11 +3363,11 @@ func (loop *ReActLoop) tryMidTurnSemanticCompaction(ctx context.Context, session
 		completedPayload["usage_completion_tokens"] = result.Usage.CompletionTokens
 		completedPayload["usage_total_tokens"] = result.Usage.TotalTokens
 	}
-	loop.agent.emitRuntimeEvent("context.mid_turn_compact.completed", sessionID, "", completedPayload)
+	loop.agent.emitRuntimeEvent(eventPrefix+".completed", sessionID, "", completedPayload)
 	return cloneMessageHistory(result.ReplacementHistory), result.Usage, true, nil
 }
 
-func midTurnSemanticCompactionEligible(budget promptPreflightBudget, observedUsage *types.TokenUsage) bool {
+func activeTurnSemanticCompactionEligible(budget promptPreflightBudget, observedUsage *types.TokenUsage) bool {
 	if budget.ModelCapabilityAutoCompactTokenLimit > 0 || budget.ModelCapabilityMaxContextTokens > 0 {
 		return true
 	}
