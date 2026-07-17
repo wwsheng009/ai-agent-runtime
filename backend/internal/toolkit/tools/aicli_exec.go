@@ -122,6 +122,7 @@ func NewAICLIExecTool() *AICLIExecTool {
 			},
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
+				"minimum":     1,
 				"description": "可选：整次子 aicli exec 超时毫秒数。优先级高于 timeout。",
 			},
 			"request_timeout": map[string]interface{}{
@@ -146,11 +147,12 @@ func NewAICLIExecTool() *AICLIExecTool {
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",
-				"description": "可选：stdout/stderr 合并输出的保留上限（字节）。必须为正整数，不能与 disable_output_cap 同时设置。",
+				"minimum":     1,
+				"description": "可选：stdout/stderr 合并输出的保留上限（字节）。必须为正整数。若同时设置 disable_output_cap=true，为保证资源边界，以本参数为准。",
 			},
 			"disable_output_cap": map[string]interface{}{
 				"type":        "boolean",
-				"description": "可选：设为 true 时关闭工具输出 capture limit；不能与 output_bytes_cap 同时设置。",
+				"description": "可选：设为 true 时关闭工具输出 capture limit；若同时设置 output_bytes_cap，则保留后者的显式上限。",
 			},
 		},
 		"required":             []string{"prompt"},
@@ -381,7 +383,7 @@ func parseAICLIExecRequest(params map[string]interface{}) (aicliExecRequest, err
 		req.DisableOutputCap = value
 	}
 	if req.DisableOutputCap && req.HasOutputBytesCap {
-		return req, fmt.Errorf("output_bytes_cap 不能与 disable_output_cap 同时设置")
+		req.DisableOutputCap = false
 	}
 	return req, nil
 }
@@ -596,6 +598,9 @@ func optionalPositiveInt(params map[string]interface{}, key string) (int, bool, 
 	}
 	raw, ok := params[key]
 	if !ok || raw == nil {
+		return 0, false, nil
+	}
+	if isNumericZero(raw) {
 		return 0, false, nil
 	}
 	value, err := extractPositiveInt(raw)

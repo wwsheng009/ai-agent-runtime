@@ -476,13 +476,53 @@ func TestBashTool_ExplicitTimeoutOverridesEnvDefault(t *testing.T) {
 	}
 }
 
-func TestBashTool_RejectsInvalidTimeout(t *testing.T) {
+func TestBashTool_AcceptsPlainNumericTimeoutAsSeconds(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": "git status",
+		"timeout": "30",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %v", result.Error)
+	}
+	if inspector.lastTimeout != 30*time.Second {
+		t.Fatalf("expected numeric timeout to mean 30 seconds, got %v", inspector.lastTimeout)
+	}
+}
+
+func TestBashTool_IgnoresZeroTimeoutPlaceholder(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":    "npx tsc --noEmit",
+		"timeout_ms": 0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected zero placeholder to use the default timeout, got error=%v", result.Error)
+	}
+	if inspector.lastTimeout != tool.timeout {
+		t.Fatalf("expected default timeout %v, got %v", tool.timeout, inspector.lastTimeout)
+	}
+}
+
+func TestBashTool_RejectsNegativeTimeout(t *testing.T) {
 	tool := NewBashTool()
 	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command":    "npx tsc --noEmit",
-		"timeout_ms": 0,
+		"timeout_ms": -1,
 	})
 	if err != nil {
 		t.Fatalf("unexpected outer error: %v", err)
@@ -749,9 +789,10 @@ func TestBashTool_PassesOutputCaptureOptionsToExecuter(t *testing.T) {
 	}
 }
 
-func TestBashTool_RejectsConflictingOutputCaptureOptions(t *testing.T) {
+func TestBashTool_ExplicitOutputCapWinsOverDisablePlaceholder(t *testing.T) {
 	tool := NewBashTool()
-	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"command":            "echo hello",
@@ -761,11 +802,14 @@ func TestBashTool_RejectsConflictingOutputCaptureOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected outer error: %v", err)
 	}
-	if result.Success {
-		t.Fatalf("expected validation failure, got success with metadata %#v", result.Metadata)
+	if !result.Success {
+		t.Fatalf("expected bounded output cap to win, got error %#v", result.Error)
 	}
-	if result.Error == nil || !strings.Contains(result.Error.Error(), "不能与 disable_output_cap 同时设置") {
-		t.Fatalf("expected conflict error, got %#v", result.Error)
+	if !inspector.lastConfig.hasOutputBytesCap || inspector.lastConfig.outputBytesCap != 8192 {
+		t.Fatalf("expected explicit output cap to be retained, got %+v", inspector.lastConfig)
+	}
+	if inspector.lastConfig.disableOutputCap {
+		t.Fatalf("expected bounded cap to disable the unbounded option, got %+v", inspector.lastConfig)
 	}
 }
 
@@ -790,6 +834,56 @@ func TestBashTool_IgnoresNullOutputCaptureOptions(t *testing.T) {
 	}
 	if inspector.lastConfig.disableOutputCap {
 		t.Fatalf("did not expect disable_output_cap when null, got %+v", inspector.lastConfig)
+	}
+}
+
+func TestBashTool_IgnoresZeroStrictSchemaPlaceholders(t *testing.T) {
+	tool := NewBashTool()
+	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}
+	tool.executer = inspector
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command":          "git status",
+		"commands":         []interface{}{},
+		"output_bytes_cap": 0,
+		"max_parallel":     0,
+		"timeout_ms":       0,
+		"timeout_sec":      0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected strict-schema placeholders to be ignored, got error: %v", result.Error)
+	}
+	if inspector.lastConfig.hasOutputBytesCap {
+		t.Fatalf("did not expect zero output_bytes_cap to override the default: %+v", inspector.lastConfig)
+	}
+	if inspector.lastTimeout != tool.timeout {
+		t.Fatalf("expected default timeout %v, got %v", tool.timeout, inspector.lastTimeout)
+	}
+}
+
+func TestBashTool_BatchIgnoresZeroMaxParallelPlaceholder(t *testing.T) {
+	tool := NewBashTool()
+	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "ok"}}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"commands": []interface{}{
+			map[string]interface{}{"command": "git status"},
+			map[string]interface{}{"command": "git diff --stat"},
+		},
+		"parallel":     true,
+		"max_parallel": 0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected zero max_parallel placeholder to use the default, got error: %v", result.Error)
+	}
+	if got := result.Metadata["parallelism"]; got != 2 {
+		t.Fatalf("expected parallelism to be capped by the two commands, got %#v", got)
 	}
 }
 

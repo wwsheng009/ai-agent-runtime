@@ -33,19 +33,22 @@ func NewExecuteShellCommandTool() *ExecuteShellCommandTool {
 			},
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
+				"minimum":     1,
 				"description": "可选：命令超时毫秒数，必须为正整数。优先级高于 timeout 和 timeout_sec。",
 			},
 			"timeout_sec": map[string]interface{}{
 				"type":        "integer",
+				"minimum":     1,
 				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。",
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",
-				"description": "可选：stdout/stderr 合并输出的保留上限（字节）。用于覆盖默认 256KB capture limit；必须为正整数，不能与 disable_output_cap 同时设置。",
+				"minimum":     1,
+				"description": "可选：stdout/stderr 合并输出的保留上限（字节）。用于覆盖默认 256KB capture limit；必须为正整数。若同时设置 disable_output_cap=true，为保证资源边界，以本参数为准。",
 			},
 			"disable_output_cap": map[string]interface{}{
 				"type":        "boolean",
-				"description": "可选：设为 true 时关闭 shell 输出 capture limit，尽量保留完整原始输出；不能与 output_bytes_cap 同时设置。",
+				"description": "可选：设为 true 时关闭 shell 输出 capture limit，尽量保留完整原始输出；若同时设置 output_bytes_cap，则保留后者的显式上限。",
 			},
 			"mutated_paths": map[string]interface{}{
 				"type":        "array",

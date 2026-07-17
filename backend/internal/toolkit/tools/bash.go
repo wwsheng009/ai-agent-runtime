@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,8 +69,8 @@ func NewBashTool() *BashTool {
 						"command":     map[string]interface{}{"type": "string"},
 						"workdir":     map[string]interface{}{"type": "string"},
 						"timeout":     map[string]interface{}{"type": "string"},
-						"timeout_ms":  map[string]interface{}{"type": "integer"},
-						"timeout_sec": map[string]interface{}{"type": "integer"},
+						"timeout_ms":  map[string]interface{}{"type": "integer", "minimum": 1},
+						"timeout_sec": map[string]interface{}{"type": "integer", "minimum": 1},
 					},
 					"required":             []string{"command"},
 					"additionalProperties": false,
@@ -85,6 +86,7 @@ func NewBashTool() *BashTool {
 			},
 			"max_parallel": map[string]interface{}{
 				"type":        "integer",
+				"minimum":     1,
 				"description": "parallel=true 时的最大并发命令数。默认根据 CPU 自动选择，最多 4；显式设置可覆盖。",
 			},
 			"workdir": map[string]interface{}{
@@ -97,19 +99,22 @@ func NewBashTool() *BashTool {
 			},
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
+				"minimum":     1,
 				"description": "可选：命令超时毫秒数，必须为正整数。优先级高于 timeout 和 timeout_sec。",
 			},
 			"timeout_sec": map[string]interface{}{
 				"type":        "integer",
+				"minimum":     1,
 				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。",
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",
-				"description": "可选：stdout/stderr 合并输出的保留上限（字节）。用于覆盖默认 256KB capture limit；必须为正整数，不能与 disable_output_cap 同时设置。",
+				"minimum":     1,
+				"description": "可选：stdout/stderr 合并输出的保留上限（字节）。用于覆盖默认 256KB capture limit；必须为正整数。若同时设置 disable_output_cap=true，为保证资源边界，以本参数为准。",
 			},
 			"disable_output_cap": map[string]interface{}{
 				"type":        "boolean",
-				"description": "可选：设为 true 时关闭 shell 输出 capture limit，尽量保留完整原始输出；不能与 output_bytes_cap 同时设置。",
+				"description": "可选：设为 true 时关闭 shell 输出 capture limit，尽量保留完整原始输出；若同时设置 output_bytes_cap，则保留后者的显式上限。",
 			},
 			"mutated_paths": map[string]interface{}{
 				"type":        "array",
@@ -371,11 +376,13 @@ func resolveBashBatchParallelism(params map[string]interface{}, commandCount int
 		parallelism = 4
 	}
 	if raw, ok := params["max_parallel"]; ok && raw != nil {
-		value, err := extractPositiveInt(raw)
-		if err != nil {
-			return 0, fmt.Errorf("max_parallel 参数无效: %w", err)
+		if !isNumericZero(raw) {
+			value, err := extractPositiveInt(raw)
+			if err != nil {
+				return 0, fmt.Errorf("max_parallel 参数无效: %w", err)
+			}
+			parallelism = value
 		}
-		parallelism = value
 	}
 	if parallelism > commandCount {
 		parallelism = commandCount
@@ -976,7 +983,7 @@ func parseOutputCaptureSettings(params map[string]interface{}) (outputCaptureSet
 	}
 
 	if rawCap, ok := params["output_bytes_cap"]; ok {
-		if rawCap != nil {
+		if rawCap != nil && !isNumericZero(rawCap) {
 			value, err := extractPositiveInt(rawCap)
 			if err != nil {
 				return settings, fmt.Errorf("output_bytes_cap 参数无效: %w", err)
@@ -987,7 +994,7 @@ func parseOutputCaptureSettings(params map[string]interface{}) (outputCaptureSet
 	}
 
 	if settings.disableOutputCap && settings.hasOutputBytesCap {
-		return settings, fmt.Errorf("output_bytes_cap 不能与 disable_output_cap 同时设置")
+		settings.disableOutputCap = false
 	}
 
 	return settings, nil
@@ -1001,14 +1008,14 @@ func parseShellCommandTimeout(params map[string]interface{}, defaultTimeout time
 		return defaultTimeout, nil
 	}
 
-	if raw, ok := params["timeout_ms"]; ok && raw != nil {
+	if raw, ok := params["timeout_ms"]; ok && raw != nil && !isNumericZero(raw) {
 		value, err := extractPositiveInt(raw)
 		if err != nil {
 			return 0, fmt.Errorf("timeout_ms 参数无效: %w", err)
 		}
 		return time.Duration(value) * time.Millisecond, nil
 	}
-	if raw, ok := params["timeout_sec"]; ok && raw != nil {
+	if raw, ok := params["timeout_sec"]; ok && raw != nil && !isNumericZero(raw) {
 		value, err := extractPositiveInt(raw)
 		if err != nil {
 			return 0, fmt.Errorf("timeout_sec 参数无效: %w", err)
@@ -1023,6 +1030,9 @@ func parseShellCommandTimeout(params map[string]interface{}, defaultTimeout time
 		timeoutText = strings.TrimSpace(timeoutText)
 		if timeoutText == "" {
 			return defaultTimeout, nil
+		}
+		if seconds, numberErr := strconv.ParseFloat(timeoutText, 64); numberErr == nil && seconds > 0 {
+			return time.Duration(seconds * float64(time.Second)), nil
 		}
 		parsed, err := time.ParseDuration(timeoutText)
 		if err != nil || parsed <= 0 {
@@ -1052,6 +1062,9 @@ func inferredShellCommandTimeout(command string, fallback time.Duration) time.Du
 func hasExplicitShellTimeout(params map[string]interface{}) bool {
 	for _, key := range []string{"timeout_ms", "timeout_sec", "timeout"} {
 		if value, ok := params[key]; ok && value != nil {
+			if isNumericZero(value) {
+				continue
+			}
 			if text, isText := value.(string); !isText || strings.TrimSpace(text) != "" {
 				return true
 			}
@@ -1127,6 +1140,29 @@ func extractPositiveInt(value interface{}) (int, error) {
 		return int(typed), nil
 	default:
 		return 0, fmt.Errorf("必须为正整数")
+	}
+}
+
+func isNumericZero(value interface{}) bool {
+	switch typed := value.(type) {
+	case int:
+		return typed == 0
+	case int32:
+		return typed == 0
+	case int64:
+		return typed == 0
+	case uint:
+		return typed == 0
+	case uint32:
+		return typed == 0
+	case uint64:
+		return typed == 0
+	case float32:
+		return typed == 0
+	case float64:
+		return typed == 0
+	default:
+		return false
 	}
 }
 

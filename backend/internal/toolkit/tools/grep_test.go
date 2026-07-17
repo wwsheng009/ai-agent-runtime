@@ -2170,6 +2170,42 @@ func TestGrepTool_NullMaxFilesizeIgnored(t *testing.T) {
 	}
 }
 
+func TestGrepTool_QuotedEmptyMaxFilesizePlaceholderIgnored(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "match.txt"), []byte("foo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGrepTool()
+	tool.lookPath = func(name string) (string, error) {
+		return "", os.ErrNotExist
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern":      "foo",
+		"path":         tmpDir,
+		"max_filesize": `""`,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success || !strings.Contains(result.Content, "match.txt") {
+		t.Fatalf("expected quoted empty placeholder to be ignored, got success=%v content=%q error=%v", result.Success, result.Content, result.Error)
+	}
+}
+
+func TestGrepOptionalQuotedEmptyPlaceholdersAreOmitted(t *testing.T) {
+	if value, ok := resolveStringParam(map[string]interface{}{"pattern_file": `""`}, "pattern_file"); ok || value != "" {
+		t.Fatalf("expected quoted empty string parameter to be omitted, got value=%q ok=%v", value, ok)
+	}
+	if values := normalizeSearchPathList([]string{`""`, "backend"}); len(values) != 1 || values[0] != "backend" {
+		t.Fatalf("expected quoted empty search path to be omitted, got %#v", values)
+	}
+	if values := normalizePatternList([]string{`''`, "TODO"}); len(values) != 1 || values[0] != "TODO" {
+		t.Fatalf("expected quoted empty pattern to be omitted, got %#v", values)
+	}
+}
+
 func TestGrepTool_RgMaxFilesizeTranslatesAndCountAggregates(t *testing.T) {
 	rootA := t.TempDir()
 	rootB := t.TempDir()

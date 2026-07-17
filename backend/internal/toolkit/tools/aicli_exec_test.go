@@ -91,6 +91,40 @@ func TestAICLIExecParseTimeoutMSOverridesTimeoutText(t *testing.T) {
 	}
 }
 
+func TestAICLIExecParseIgnoresZeroOptionalPlaceholders(t *testing.T) {
+	req, err := parseAICLIExecRequest(map[string]interface{}{
+		"prompt":           "hello",
+		"timeout_ms":       0,
+		"output_bytes_cap": 0,
+	})
+	if err != nil {
+		t.Fatalf("parse request: %v", err)
+	}
+	if req.Timeout != defaultAICLIExecTimeout {
+		t.Fatalf("expected default timeout %v, got %v", defaultAICLIExecTimeout, req.Timeout)
+	}
+	if req.HasOutputBytesCap {
+		t.Fatalf("did not expect zero output cap placeholder to be explicit: %#v", req)
+	}
+}
+
+func TestAICLIExecParseExplicitOutputCapWinsOverDisablePlaceholder(t *testing.T) {
+	req, err := parseAICLIExecRequest(map[string]interface{}{
+		"prompt":             "hello",
+		"output_bytes_cap":   8192,
+		"disable_output_cap": true,
+	})
+	if err != nil {
+		t.Fatalf("parse request: %v", err)
+	}
+	if !req.HasOutputBytesCap || req.OutputBytesCap != 8192 {
+		t.Fatalf("expected explicit output cap, got %#v", req)
+	}
+	if req.DisableOutputCap {
+		t.Fatalf("expected bounded output cap to win, got %#v", req)
+	}
+}
+
 func TestAICLIExecRejectsRecursiveCallByDefault(t *testing.T) {
 	t.Setenv(aicliExecNestedDepthEnvVar, "1")
 	tool := NewAICLIExecTool()

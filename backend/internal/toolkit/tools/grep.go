@@ -2455,6 +2455,9 @@ func resolveIntParam(params map[string]interface{}, keys ...string) (int, bool) 
 func resolveStringParam(params map[string]interface{}, keys ...string) (string, bool) {
 	for _, key := range keys {
 		if v, ok := params[key].(string); ok {
+			if isQuotedEmptyPlaceholder(v) {
+				continue
+			}
 			return v, true
 		}
 	}
@@ -2569,7 +2572,7 @@ func resolveSizeParam(params map[string]interface{}, keys ...string) (string, bo
 		switch value := raw.(type) {
 		case string:
 			trimmed := strings.TrimSpace(value)
-			if trimmed == "" {
+			if trimmed == "" || isQuotedEmptyPlaceholder(trimmed) {
 				return "", false, nil
 			}
 			return trimmed, true, nil
@@ -2595,7 +2598,7 @@ func normalizeSearchPathList(values []string) []string {
 	result := make([]string, 0, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" {
+		if value == "" || isQuotedEmptyPlaceholder(value) {
 			continue
 		}
 		result = append(result, value)
@@ -2895,12 +2898,21 @@ func normalizePatternList(values []string) []string {
 	result := make([]string, 0, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" {
+		if value == "" || isQuotedEmptyPlaceholder(value) {
 			continue
 		}
 		result = append(result, value)
 	}
 	return result
+}
+
+func isQuotedEmptyPlaceholder(value string) bool {
+	switch strings.TrimSpace(value) {
+	case `""`, `''`:
+		return true
+	default:
+		return false
+	}
 }
 
 func appendUniqueString(values []string, raw string) []string {
