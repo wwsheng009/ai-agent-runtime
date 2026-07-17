@@ -1215,6 +1215,142 @@ func TestMaybeCompactKeepsTrailingActiveUserAfterSummary(t *testing.T) {
 	require.Equal(t, "Continue from the latest findings.", result.ReplacementHistory[2].Content)
 }
 
+func TestMaybeCompactMidTurnKeepsRealUsersAndLatestToolReplayBeforeSummary(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name:            "provider-a",
+		responseContent: "Root cause confirmed. Continue by applying and testing the fix.",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 100},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	staleSummary := buildCompactionMessage("stale summary", "", 0, 2, PhasePreTurn)
+	firstCall := types.NewAssistantMessage("Inspect the first log.")
+	firstCall.ToolCalls = []types.ToolCall{{ID: "call-1", Name: "read", Args: map[string]interface{}{"path": "first.log"}}}
+	latestCall := types.NewAssistantMessage("Verify the latest result.")
+	latestCall.ToolCalls = []types.ToolCall{{ID: "call-2", Name: "read", Args: map[string]interface{}{"path": "latest.log"}}}
+	staleWorkspace := types.NewUserMessage("stale workspace wrapper")
+	staleWorkspace.Metadata["context_stage"] = "workspace"
+	history := []types.Message{
+		*types.NewSystemMessage("current canonical instructions"),
+		*types.NewUserMessage("Fix the original build failure."),
+		*staleSummary,
+		*staleWorkspace,
+		*firstCall,
+		*types.NewToolMessage("call-1", "first result"),
+		*types.NewUserMessage("Preserve compatibility while fixing it."),
+		*latestCall,
+		*types.NewToolMessage("call-2", "latest verified result"),
+	}
+	counter := func(messages []types.Message) int {
+		total := 0
+		for _, message := range messages {
+			total += len(message.Content) + len(message.ToolCalls)*20
+		}
+		return total
+	}
+
+	result, _, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID:             "session-mid-turn-shape",
+		Model:                 "gpt-5",
+		Force:                 true,
+		History:               history,
+		KeepRecentMessages:    2,
+		ReplacementTokenLimit: 2000,
+		Phase:                 PhaseMidTurn,
+		CountTokens:           counter,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, PhaseMidTurn, result.Phase)
+	require.Len(t, result.ReplacementHistory, 6)
+	require.Equal(t, "current canonical instructions", result.ReplacementHistory[0].Content)
+	require.Equal(t, "Fix the original build failure.", result.ReplacementHistory[1].Content)
+	require.Equal(t, "Preserve compatibility while fixing it.", result.ReplacementHistory[2].Content)
+	require.Equal(t, "call-2", result.ReplacementHistory[3].ToolCalls[0].ID)
+	require.Equal(t, "call-2", result.ReplacementHistory[4].ToolCallID)
+	require.Equal(t, "compaction", result.ReplacementHistory[5].Metadata.GetString("context_stage", ""))
+	require.Equal(t, PhaseMidTurn, result.ReplacementHistory[5].Metadata.GetString("compact_phase", ""))
+	require.Equal(t, "provider", result.ReplacementHistory[5].Metadata.GetString("summary_source", ""))
+	require.Contains(t, result.ReplacementHistory[5].Content, "Root cause confirmed")
+	require.NotNil(t, provider.lastRequest)
+	for _, message := range provider.lastRequest.Messages {
+		require.NotEqual(t, "stale workspace wrapper", message.Content)
+	}
+	for _, message := range result.ReplacementHistory {
+		require.NotEqual(t, "stale summary", message.Content)
+		require.NotEqual(t, "stale workspace wrapper", message.Content)
+	}
+	require.NotContains(t, buildDeterministicCompactSummary(history[1:], "provider unavailable"), "stale workspace wrapper")
+}
+
+func TestMaybeCompactRepeatedMidTurnReplacesPriorSummaryInsteadOfStacking(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultProvider: "provider-a", DefaultModel: "gpt-5", MaxRetries: 0})
+	provider := &compactTestProvider{
+		name:            "provider-a",
+		responseContent: "first semantic checkpoint",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 100},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+	counter := func(messages []types.Message) int {
+		total := 0
+		for _, message := range messages {
+			total += len(message.Content) + len(message.ToolCalls)*20
+		}
+		return total
+	}
+	firstCall := types.NewAssistantMessage("inspect")
+	firstCall.ToolCalls = []types.ToolCall{{ID: "call-1", Name: "read"}}
+	first, _, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID: "session-repeated-mid-turn", Model: "gpt-5", Force: true, Phase: PhaseMidTurn,
+		History: []types.Message{
+			*types.NewSystemMessage("canonical"),
+			*types.NewUserMessage("complete the original task"),
+			*firstCall,
+			*types.NewToolMessage("call-1", "first evidence"),
+		},
+		KeepRecentMessages: 2, ReplacementTokenLimit: 2000, CountTokens: counter,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, first)
+
+	secondCall := types.NewAssistantMessage("verify")
+	secondCall.ToolCalls = []types.ToolCall{{ID: "call-2", Name: "read"}}
+	secondHistory := append(cloneMessages(first.ReplacementHistory), *secondCall, *types.NewToolMessage("call-2", "second evidence"))
+	provider.responseContent = "second semantic checkpoint"
+	second, _, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID: "session-repeated-mid-turn", Model: "gpt-5", Force: true, Phase: PhaseMidTurn,
+		History: secondHistory, KeepRecentMessages: 2, ReplacementTokenLimit: 2000, CountTokens: counter,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, second)
+
+	compactionCount := 0
+	userGoalCount := 0
+	for _, message := range second.ReplacementHistory {
+		if isCompactionMessage(message) {
+			compactionCount++
+		}
+		if message.Content == "complete the original task" {
+			userGoalCount++
+		}
+		require.NotContains(t, message.Content, "first semantic checkpoint")
+	}
+	require.Equal(t, 1, compactionCount)
+	require.Equal(t, 1, userGoalCount)
+	require.Contains(t, second.ReplacementHistory[len(second.ReplacementHistory)-1].Content, "second semantic checkpoint")
+}
+
 func TestMaybeCompactReplacementShrinksAndDoesNotAccumulateSummaries(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "provider-a",

@@ -70,6 +70,21 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		recentTokenLimit,
 	)
 	replacement := buildLocalReplacementHistory(systemMessages, retainedRecent, *summaryMessage)
+	if normalizedPhase(req.Phase) == PhaseMidTurn {
+		retainedUsers := selectCompactionUserMessages(nonSystemMessages, counter, recentTokenLimit)
+		replayTokenLimit := recentTokenLimit
+		if counter != nil {
+			replayTokenLimit -= counter(retainedUsers)
+		}
+		retainedReplay := selectCompactionRecentToolReplay(
+			nonSystemMessages,
+			req.KeepRecentMessages,
+			counter,
+			replayTokenLimit,
+		)
+		replacement = buildMidTurnReplacementHistory(systemMessages, retainedUsers, retainedReplay, *summaryMessage)
+		retainedRecent = append(cloneMessages(retainedUsers), cloneMessages(retainedReplay)...)
+	}
 
 	compactedMessages := len(nonSystemMessages) - len(retainedRecent)
 	if compactedMessages < 0 {
@@ -120,11 +135,12 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, thr
 		return a.buildDeterministicSummaryMessage(ctx, req, history, "llm runtime is not configured")
 	}
 
+	summaryHistory := compactionSummaryHistory(req.Phase, history)
 	maxTokens, reasoningEffort := resolveCompactSummaryRequestSettings(a.llmRuntime, req.Provider, req.Model)
-	maxTokens = fitLocalCompactSummaryMaxTokens(maxTokens, req, systemMessages, history, counter)
-	request := buildLocalCompactionLLMRequest(req, systemMessages, history, maxTokens, reasoningEffort)
+	maxTokens = fitLocalCompactSummaryMaxTokens(maxTokens, req, systemMessages, summaryHistory, counter)
+	request := buildLocalCompactionLLMRequest(req, systemMessages, summaryHistory, maxTokens, reasoningEffort)
 	if reason := localCompactionRequestBudgetFailure(a.llmRuntime, request, threshold); reason != "" {
-		request = buildFittedLocalCompactionLLMRequest(a.llmRuntime, req, threshold, systemMessages, history, maxTokens, reasoningEffort, reason)
+		request = buildFittedLocalCompactionLLMRequest(a.llmRuntime, req, threshold, systemMessages, summaryHistory, maxTokens, reasoningEffort, reason)
 		if request == nil {
 			return a.buildDeterministicSummaryMessage(ctx, req, history, reason)
 		}
@@ -148,6 +164,7 @@ func (a *LocalAdapter) buildSummaryMessage(ctx context.Context, req Request, thr
 	if message == nil {
 		return nil, nil, nil, "", fmt.Errorf("failed to build compaction message")
 	}
+	message.Metadata["summary_source"] = "provider"
 	var usage *types.TokenUsage
 	if response != nil && response.Usage != nil {
 		usage = response.Usage.Clone()
@@ -247,10 +264,14 @@ func buildDeterministicCompactSummary(history []types.Message, reason string) st
 		content := strings.TrimSpace(message.Content)
 		switch message.Role {
 		case "user":
-			if strings.EqualFold(message.Metadata.GetString("context_stage", ""), "compaction") {
+			stage := strings.TrimSpace(message.Metadata.GetString("context_stage", ""))
+			if strings.EqualFold(stage, "compaction") {
 				if content != "" {
 					priorSummaryItems = appendWithinRuneBudget(priorSummaryItems, summarizeCompactLine(content, 1200), 4, localFallbackPriorSummaryRunes)
 				}
+				continue
+			}
+			if stage != "" {
 				continue
 			}
 			if content != "" {
@@ -517,6 +538,21 @@ func buildLocalCompactionRequest(systemMessages, history []types.Message) []type
 	return request
 }
 
+func compactionSummaryHistory(phase string, history []types.Message) []types.Message {
+	if normalizedPhase(phase) != PhaseMidTurn {
+		return cloneMessages(history)
+	}
+	filtered := make([]types.Message, 0, len(history))
+	for _, message := range history {
+		stage := strings.TrimSpace(message.Metadata.GetString("context_stage", ""))
+		if strings.EqualFold(strings.TrimSpace(message.Role), "user") && stage != "" && !strings.EqualFold(stage, "compaction") {
+			continue
+		}
+		filtered = append(filtered, *message.Clone())
+	}
+	return filtered
+}
+
 type localRetentionUnit []types.Message
 
 // buildLocalRetentionUnits removes stale compact projections and treats one
@@ -641,6 +677,68 @@ func buildLocalReplacementHistory(systemMessages, retainedRecent []types.Message
 	replacement = append(replacement, *summaryMessage.Clone())
 	replacement = append(replacement, cloneMessages(retainedRecent)...)
 	return replacement
+}
+
+// Mid-turn replacement follows Codex's context-window shape: canonical
+// instructions, independently retained real user requests, recent complete
+// tool replay, and one latest semantic checkpoint as the final item.
+func buildMidTurnReplacementHistory(systemMessages, retainedUsers, retainedReplay []types.Message, summaryMessage types.Message) []types.Message {
+	replacement := make([]types.Message, 0, len(systemMessages)+len(retainedUsers)+len(retainedReplay)+1)
+	replacement = append(replacement, cloneMessages(systemMessages)...)
+	replacement = append(replacement, cloneMessages(retainedUsers)...)
+	replacement = append(replacement, cloneMessages(retainedReplay)...)
+	replacement = append(replacement, *summaryMessage.Clone())
+	return replacement
+}
+
+func selectCompactionUserMessages(messages []types.Message, counter TokenCounter, maxTokens int) []types.Message {
+	selected := make([]types.Message, 0, 4)
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		if !isRealCompactionUserMessage(message) {
+			continue
+		}
+		candidate := append([]types.Message{*message.Clone()}, selected...)
+		if counter != nil && maxTokens > 0 && counter(candidate) > maxTokens {
+			if len(selected) == 0 {
+				return []types.Message{*message.Clone()}
+			}
+			break
+		}
+		selected = candidate
+	}
+	return selected
+}
+
+func isRealCompactionUserMessage(message types.Message) bool {
+	if !strings.EqualFold(strings.TrimSpace(message.Role), "user") {
+		return false
+	}
+	return strings.TrimSpace(message.Metadata.GetString("context_stage", "")) == ""
+}
+
+func selectCompactionRecentToolReplay(messages []types.Message, keepRecent int, counter TokenCounter, maxTokens int) []types.Message {
+	if maxTokens <= 0 {
+		return nil
+	}
+	units := buildLocalRetentionUnits(messages)
+	selected := make([]localRetentionUnit, 0, 2)
+	for index := len(units) - 1; index >= 0; index-- {
+		unit := units[index]
+		if len(unit) < 2 || !strings.EqualFold(strings.TrimSpace(unit[0].Role), "assistant") || len(unit[0].ToolCalls) == 0 {
+			continue
+		}
+		candidateUnits := append([]localRetentionUnit{unit}, selected...)
+		candidate := flattenLocalRetentionUnits(candidateUnits)
+		if keepRecent > 0 && len(candidate) > keepRecent {
+			break
+		}
+		if counter != nil && counter(candidate) > maxTokens {
+			break
+		}
+		selected = candidateUnits
+	}
+	return flattenLocalRetentionUnits(selected)
 }
 
 func ensureSummaryHeading(summary string) string {

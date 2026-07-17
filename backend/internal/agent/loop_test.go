@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
@@ -1735,6 +1736,96 @@ func TestReActLoop_RunWithSession_PromptOnlyActiveTurnCompactionDoesNotPersist(t
 	require.Contains(t, messages[2].Content, "LOG ")
 	require.Contains(t, messages[4].Content, "LOG ")
 	require.Equal(t, "已完成分析。", messages[5].Content)
+}
+
+func TestReActLoop_MidTurnSemanticCompactionContinuesWithoutReplacingDurableHistory(t *testing.T) {
+	largeResult := "ROOT_CAUSE_CONFIRMED\n" + strings.Repeat("verified tool evidence line\n", 500)
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+		MaxRetries:      0,
+	})
+	provider := &SequenceLLMProvider{
+		name:         "test-provider",
+		defaultModel: "test-model",
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"test-model": {
+				MaxContextTokens:      10000,
+				AutoCompactTokenLimit: 2500,
+			},
+		},
+		responses: []*llm.LLMResponse{
+			{
+				Content: "Inspect the failing log.",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{{
+					ID: "call-mid-turn", Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"},
+				}},
+			},
+			{
+				Content: "Semantic checkpoint: the root cause is confirmed; apply the targeted fix and run tests.",
+				Model:   "test-model",
+			},
+			{
+				Content: "Fix completed after the semantic checkpoint.",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		DefaultMaxTokens: 256,
+		SystemPrompt:     "Current canonical instructions.",
+	}, &MockSequenceMCPManager{output: largeResult}, llmRuntime)
+	bus := runtimeevents.NewBus()
+	var startedEvents []runtimeevents.Event
+	var completedEvents []runtimeevents.Event
+	bus.Subscribe("context.mid_turn_compact.started", func(event runtimeevents.Event) {
+		startedEvents = append(startedEvents, event)
+	})
+	bus.Subscribe("context.mid_turn_compact.completed", func(event runtimeevents.Event) {
+		completedEvents = append(completedEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 0, EnableToolCalls: true})
+	session := newTestHistorySession("session-mid-turn-semantic")
+	result, err := loop.RunWithSession(context.Background(), "Find and fix the build failure.", session)
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, "Fix completed after the semantic checkpoint.", result.Output)
+	require.Len(t, provider.requests, 3)
+	require.Empty(t, provider.requests[1].Tools, "semantic compaction must not expose execution tools")
+	require.Contains(t, provider.requests[1].Messages[len(provider.requests[1].Messages)-1].Content, "CONTEXT CHECKPOINT COMPACTION")
+
+	continuationPrompt := provider.requests[2].Messages
+	require.Contains(t, joinedMessageContents(continuationPrompt), "Find and fix the build failure.")
+	require.Contains(t, joinedMessageContents(continuationPrompt), "Semantic checkpoint: the root cause is confirmed")
+	require.Len(t, startedEvents, 1)
+	require.Len(t, completedEvents, 1)
+	require.Equal(t, compactruntime.PhaseMidTurn, completedEvents[0].Payload["phase"])
+	require.Equal(t, false, completedEvents[0].Payload["durable_history_replaced"])
+	require.Equal(t, "provider", completedEvents[0].Payload["summary_source"])
+	require.Equal(t, true, completedEvents[0].Payload["semantic_checkpoint"])
+
+	durable := session.GetMessages()
+	require.Contains(t, joinedMessageContents(durable), "ROOT_CAUSE_CONFIRMED")
+	require.Contains(t, joinedMessageContents(durable), "Fix completed after the semantic checkpoint.")
+	for _, message := range durable {
+		require.NotEqual(t, "compaction", message.Metadata.GetString("context_stage", ""))
+	}
+}
+
+func joinedMessageContents(messages []types.Message) string {
+	contents := make([]string, 0, len(messages))
+	for _, message := range messages {
+		contents = append(contents, message.Content)
+	}
+	return strings.Join(contents, "\n")
 }
 
 func TestReActLoop_ReusesCompactedPromptViewAcrossLongActiveTurn(t *testing.T) {

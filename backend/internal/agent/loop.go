@@ -582,6 +582,28 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			return nil, err
 		}
 
+		compactedHistory, compactUsage, compacted, compactErr := loop.tryMidTurnSemanticCompaction(
+			currentCtx,
+			sessionID,
+			traceID,
+			step,
+			promptBuilder.Messages(),
+			action.toolSchemaTokens,
+			usage,
+		)
+		if compactErr != nil {
+			if ctxErr := currentCtx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
+		} else if compacted {
+			promptBuilder = NewMessageBuilder(compactedHistory)
+			totalUsage.Add(compactUsage)
+			result.Usage = totalUsage.Clone()
+			if options.BudgetTokens > 0 && compactUsage != nil {
+				remainingBudget -= compactUsage.TotalTokens
+			}
+		}
+
 		if loop.config.Verbose {
 			fmt.Printf("[Step %d] Completed %d tool calls\n", step, len(toolResults))
 		}
@@ -703,6 +725,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		return "", nil, nil, err
 	}
 	action.promptHistory = reusablePromptHistory(history, managedHistory)
+	action.toolSchemaTokens = estimateToolDefinitionTokens(loop.llmRuntime, availableTools)
 
 	requestProvider := loop.requestProvider()
 	requestModel := loop.requestModel()
@@ -2301,13 +2324,14 @@ func normalizeToolParameters(schema map[string]interface{}) map[string]interface
 
 // AgentAction Agent 行动
 type AgentAction struct {
-	Content         string                 `json:"content" yaml:"content"`
-	ToolCalls       []types.ToolCall       `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
-	Thought         string                 `json:"thought,omitempty" yaml:"thought,omitempty"`
-	Reasoning       *types.ReasoningBlock  `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	MessageMetadata types.Metadata         `json:"messageMetadata,omitempty" yaml:"messageMetadata,omitempty"`
-	promptHistory   []types.Message
+	Content          string                 `json:"content" yaml:"content"`
+	ToolCalls        []types.ToolCall       `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
+	Thought          string                 `json:"thought,omitempty" yaml:"thought,omitempty"`
+	Reasoning        *types.ReasoningBlock  `json:"reasoning,omitempty" yaml:"reasoning,omitempty"`
+	Metadata         map[string]interface{} `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	MessageMetadata  types.Metadata         `json:"messageMetadata,omitempty" yaml:"messageMetadata,omitempty"`
+	promptHistory    []types.Message
+	toolSchemaTokens int
 }
 
 // Stop 停止循环
@@ -3191,6 +3215,153 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 	loop.agent.emitRuntimeEvent("session_compact_completed", sessionID, "", completedPayload)
 
 	return cloneMessageHistory(result.ReplacementHistory), true, nil
+}
+
+func (loop *ReActLoop) tryMidTurnSemanticCompaction(ctx context.Context, sessionID, traceID string, step int, history []types.Message, toolSchemaTokens int, observedUsage *types.TokenUsage) ([]types.Message, *types.TokenUsage, bool, error) {
+	if loop == nil || loop.agent == nil || loop.llmRuntime == nil || len(history) == 0 {
+		return nil, nil, false, nil
+	}
+
+	budget := resolveContextBuildPromptBudget(loop.llmRuntime, loop.agent, loop.config)
+	if budget.PromptBudget <= 0 {
+		return nil, nil, false, nil
+	}
+	messageTokens := estimatePromptMessageTokens(loop.llmRuntime, history)
+	promptTokens := messageTokens + maxIntValue(0, toolSchemaTokens)
+	if promptTokens <= budget.PromptBudget || !midTurnSemanticCompactionEligible(budget, observedUsage) {
+		return nil, nil, false, nil
+	}
+
+	replacementTokenLimit := budget.PromptBudget - maxIntValue(0, toolSchemaTokens)
+	if replacementTokenLimit <= 0 {
+		replacementTokenLimit = 1
+	}
+	provider := loop.requestProvider()
+	model := loop.requestModel()
+	startedPayload := budget.Metadata()
+	if startedPayload == nil {
+		startedPayload = map[string]interface{}{}
+	}
+	startedPayload["session_id"] = sessionID
+	startedPayload["trace_id"] = traceID
+	startedPayload["step"] = step
+	startedPayload["phase"] = compactruntime.PhaseMidTurn
+	startedPayload["mode"] = compactruntime.ModeAuto
+	startedPayload["reason"] = "context_limit"
+	startedPayload["provider"] = provider
+	startedPayload["model"] = model
+	startedPayload["message_count"] = len(history)
+	startedPayload["message_tokens"] = messageTokens
+	startedPayload["tool_schema_tokens"] = toolSchemaTokens
+	startedPayload["prompt_tokens"] = promptTokens
+	startedPayload["replacement_token_limit"] = replacementTokenLimit
+	startedPayload["prompt_only"] = true
+	startedPayload["durable_history_replaced"] = false
+	loop.agent.emitRuntimeEvent("context.mid_turn_compact.started", sessionID, "", startedPayload)
+
+	taskID := sessionID
+	if loop.agent.config != nil {
+		taskID = firstNonEmptyTrimmed(optionString(loop.agent.config.Options, "task_id"), taskID)
+	}
+	runtime := compactruntime.New(loop.llmRuntime, loop.agent.GetContextManager())
+	compactRequest := compactruntime.Request{
+		SessionID:             sessionID,
+		TaskID:                taskID,
+		Provider:              provider,
+		Model:                 model,
+		Mode:                  compactruntime.ModeAuto,
+		Force:                 true,
+		History:               cloneMessageHistory(history),
+		ReplacementTokenLimit: replacementTokenLimit,
+		Phase:                 compactruntime.PhaseMidTurn,
+		CountTokens: func(messages []types.Message) int {
+			return estimatePromptMessageTokens(loop.llmRuntime, messages)
+		},
+		ObservedTokens:    promptTokens,
+		HasObservedTokens: true,
+	}
+	result, status, err := runtime.MaybeCompact(ctx, compactRequest)
+	if status.Mode == compactruntime.ModeRemote && (err != nil || result == nil || len(result.ReplacementHistory) == 0) && ctx.Err() == nil {
+		fallbackPayload := cloneInterfaceMap(startedPayload)
+		fallbackPayload["from_mode"] = compactruntime.ModeRemote
+		fallbackPayload["to_mode"] = compactruntime.ModeLocal
+		fallbackPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "remote_compaction_unavailable")
+		if err != nil {
+			fallbackPayload["error"] = err.Error()
+		}
+		loop.agent.emitRuntimeEvent("context.mid_turn_compact.fallback", sessionID, "", fallbackPayload)
+		compactRequest.Mode = compactruntime.ModeLocal
+		result, status, err = runtime.MaybeCompact(ctx, compactRequest)
+	}
+	if err != nil {
+		failedPayload := cloneInterfaceMap(startedPayload)
+		failedPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "semantic_compaction_failed")
+		failedPayload["error"] = err.Error()
+		loop.agent.emitRuntimeEvent("context.mid_turn_compact.failed", sessionID, "", failedPayload)
+		return nil, nil, false, err
+	}
+	if result == nil || len(result.ReplacementHistory) == 0 || !compactionRecoveryMadeProgress(loop.llmRuntime, history, result.ReplacementHistory) {
+		skippedPayload := cloneInterfaceMap(startedPayload)
+		skippedPayload["reason"] = firstNonEmptyTrimmed(status.Reason, "replacement_did_not_reduce_context")
+		loop.agent.emitRuntimeEvent("context.mid_turn_compact.skipped", sessionID, "", skippedPayload)
+		return nil, nil, false, nil
+	}
+
+	completedPayload := cloneInterfaceMap(startedPayload)
+	completedPayload["mode"] = firstNonEmptyTrimmed(result.Mode, status.Mode)
+	completedPayload["token_after"] = result.TokenAfter
+	completedPayload["message_count_after"] = len(result.ReplacementHistory)
+	completedPayload["compacted_messages"] = result.CompactedMessages
+	completedPayload["usage_source"] = result.UsageSource
+	summarySource := midTurnCompactionSummarySource(result)
+	completedPayload["summary_source"] = summarySource
+	completedPayload["semantic_checkpoint"] = summarySource != "deterministic_fallback"
+	if summarySource == "deterministic_fallback" {
+		completedPayload["reason"] = "deterministic_checkpoint_fallback_installed"
+	} else {
+		completedPayload["reason"] = "semantic_checkpoint_installed"
+	}
+	if len(result.CheckpointIDs) > 0 {
+		completedPayload["checkpoint_ids"] = append([]string(nil), result.CheckpointIDs...)
+		completedPayload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]
+	}
+	if result.Usage != nil {
+		completedPayload["usage_prompt_tokens"] = result.Usage.PromptTokens
+		completedPayload["usage_completion_tokens"] = result.Usage.CompletionTokens
+		completedPayload["usage_total_tokens"] = result.Usage.TotalTokens
+	}
+	loop.agent.emitRuntimeEvent("context.mid_turn_compact.completed", sessionID, "", completedPayload)
+	return cloneMessageHistory(result.ReplacementHistory), result.Usage, true, nil
+}
+
+func midTurnSemanticCompactionEligible(budget promptPreflightBudget, observedUsage *types.TokenUsage) bool {
+	if budget.ModelCapabilityAutoCompactTokenLimit > 0 || budget.ModelCapabilityMaxContextTokens > 0 {
+		return true
+	}
+	return observedUsage != nil && observedUsage.PromptTokens > 0 && budget.ProviderContextLimit > 0
+}
+
+func midTurnCompactionSummarySource(result *compactruntime.Result) string {
+	if result == nil {
+		return "unknown"
+	}
+	if strings.EqualFold(strings.TrimSpace(result.Mode), compactruntime.ModeRemote) {
+		return "remote"
+	}
+	for index := len(result.ReplacementHistory) - 1; index >= 0; index-- {
+		message := result.ReplacementHistory[index]
+		if strings.EqualFold(strings.TrimSpace(message.Metadata.GetString("context_stage", "")), "compaction") {
+			return firstNonEmptyTrimmed(message.Metadata.GetString("summary_source", ""), "provider")
+		}
+	}
+	return "provider"
+}
+
+func maxIntValue(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func compactRecoveryMessageTokenLimit(metadata map[string]interface{}) int {
