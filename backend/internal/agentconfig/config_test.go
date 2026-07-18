@@ -8,6 +8,51 @@ import (
 	"testing"
 )
 
+func TestInitGlobalConfigLoadsAndMergesProviderHeaders(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `
+providers:
+  headers:
+    X-Global: global-value
+    X-Shared: global-value
+  items:
+    alpha:
+      enabled: true
+      protocol: openai
+      headers:
+        x-shared: provider-value
+        X-Provider: provider-only
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+
+	cfg, err := InitGlobalConfig(configPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig failed: %v", err)
+	}
+	provider := cfg.Providers.Items["alpha"]
+	merged := EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers)
+
+	if got := merged["X-Global"]; got != "global-value" {
+		t.Fatalf("global header = %q, want global-value", got)
+	}
+	if got := merged["X-Shared"]; got != "provider-value" {
+		t.Fatalf("shared header = %q, want provider-value", got)
+	}
+	if got := merged["X-Provider"]; got != "provider-only" {
+		t.Fatalf("provider header = %q, want provider-only", got)
+	}
+
+	merged["X-Global"] = "changed"
+	if got := cfg.Providers.Headers["X-Global"]; got != "global-value" {
+		t.Fatalf("merge mutated global headers: %q", got)
+	}
+	if got := provider.Headers["x-shared"]; got != "provider-value" {
+		t.Fatalf("merge mutated provider headers: %q", got)
+	}
+}
+
 func TestInitGlobalConfigProviderMaxTokenAlias(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	configYAML := `

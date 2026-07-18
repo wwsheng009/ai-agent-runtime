@@ -48,7 +48,7 @@ func buildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm
 			SupportedModels:         cloneRuntimeStringSlice(provider.SupportedModels),
 			ModelMappings:           cloneRuntimeStringMap(provider.ModelMappings),
 			ModelCapabilities:       cloneRuntimeModelCapabilities(provider.ModelCapabilities),
-			Headers:                 cloneRuntimeStringMap(provider.Headers),
+			Headers:                 agentconfig.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),
 			HeaderMappings:          cloneRuntimeStringMap(provider.HeaderMappings),
 			HeaderMappingRules:      cloneRuntimeHeaderMappingRules(provider.HeaderMappingRules),
 			SupportsMaxOutputTokens: provider.SupportsMaxOutputTokens,

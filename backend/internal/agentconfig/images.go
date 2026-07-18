@@ -101,6 +101,7 @@ func SelectAllImagesGenerationsProviders(cfg *Config, hint ImagesGenerationsHint
 		if !ok || !provider.Enabled {
 			continue
 		}
+		provider.Headers = EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers)
 		models := imagesGenerationCandidateModels(provider, hint.Model)
 		for _, model := range models {
 			spec, ok := ResolveModelCapabilitySpec(model, provider.ModelCapabilities)
@@ -151,6 +152,7 @@ func SelectAllCodexNativeImageGenerationProviders(cfg *Config, hint CodexNativeI
 		if !ok || !provider.Enabled || !strings.EqualFold(provider.GetProtocol(), "codex") {
 			continue
 		}
+		provider.Headers = EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers)
 		models := imagesGenerationCandidateModels(provider, hint.Model)
 		for _, model := range models {
 			if strings.TrimSpace(model) == "*" {

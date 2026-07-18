@@ -293,7 +293,7 @@ func runProviderShowCommand(cfg *config.Config, name string, showModels bool) (p
 		MaxTokensLimit:            provider.GetMaxTokensLimit(),
 		SupportsMaxOutputTokens:   provider.SupportsMaxOutputTokens,
 		ModelCapabilitiesCount:    len(provider.ModelCapabilities),
-		HeadersConfigured:         len(provider.Headers) > 0,
+		HeadersConfigured:         len(config.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers)) > 0,
 		HeaderMappingsCount:       len(provider.HeaderMappings),
 		HeaderMappingRulesCount:   len(provider.HeaderMappingRules),
 		SupportedModelsShownCount: len(models),

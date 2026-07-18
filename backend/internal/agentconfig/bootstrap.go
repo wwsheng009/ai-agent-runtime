@@ -174,11 +174,13 @@ func defaultStarterConfigYAML() string {
 	return strings.TrimSpace(`
 # Auto-generated starter config for aicli.
 # Add providers under providers.items, then set providers.default_provider when ready.
+# Add shared upstream request headers under providers.headers when required.
 aicli:
   chat:
     stream: true
 providers:
   default_provider: ""
+  headers: {}
   items: {}
 `) + "\n"
 }

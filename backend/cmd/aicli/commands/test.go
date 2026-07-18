@@ -108,6 +108,7 @@ func runTestCommand(cfg *config.Config, providerFlag, modelFlag string, opts tes
 		Type:    ctx.Provider.GetProtocol(),
 		APIKey:  ctx.Provider.GetAPIKey(),
 		Timeout: time.Duration(opts.TimeoutSec) * time.Second,
+		Headers: ctx.Provider.Headers,
 	}
 	headers := ctx.Adapter.BuildHeaders(adapterConfig)
 	requestHeaders := make(map[string]string, len(headers))

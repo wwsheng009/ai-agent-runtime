@@ -801,7 +801,7 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 			SupportedModels:   append([]string(nil), session.Provider.SupportedModels...),
 			ModelMappings:     cloneStringMap(session.Provider.ModelMappings),
 			ModelCapabilities: cloneProviderModelCapabilities(session.Provider.ModelCapabilities),
-			Headers:           nil,
+			Headers:           effectiveChatProviderHeaders(session),
 			HeaderMappings:    cloneStringMap(session.Provider.HeaderMappings),
 			Proxy:             session.Provider.Proxy.Clone(),
 			RequestsPerMinute: session.Provider.RequestsPerMinute,

@@ -1375,6 +1375,10 @@ func TestBuildSkillsProviderConfigsPropagatesRetryPolicyFromAgentConfig(t *testi
 		Providers: config.ProvidersConfig{
 			Timeout:    45 * time.Second,
 			MaxRetries: 0,
+			Headers: map[string]string{
+				"X-Global": "global-value",
+				"X-Shared": "global-value",
+			},
 			Backoff: config.BackoffConfig{
 				InitialInterval: 300 * time.Millisecond,
 				MaxInterval:     4 * time.Second,
@@ -1388,6 +1392,9 @@ func TestBuildSkillsProviderConfigsPropagatesRetryPolicyFromAgentConfig(t *testi
 					Protocol:     "openai",
 					BaseURL:      "https://api.example.com",
 					DefaultModel: "gpt-5",
+					Headers: map[string]string{
+						"x-shared": "provider-value",
+					},
 				},
 			},
 		},
@@ -1415,6 +1422,9 @@ func TestBuildSkillsProviderConfigsPropagatesRetryPolicyFromAgentConfig(t *testi
 	}
 	if providerCfg.Timeout != 45*time.Second {
 		t.Fatalf("expected timeout 45s, got %v", providerCfg.Timeout)
+	}
+	if providerCfg.Headers["X-Global"] != "global-value" || providerCfg.Headers["X-Shared"] != "provider-value" {
+		t.Fatalf("unexpected effective headers: %+v", providerCfg.Headers)
 	}
 	if providerCfg.MaxRetries != 4 {
 		t.Fatalf("expected max retries 4, got %d", providerCfg.MaxRetries)

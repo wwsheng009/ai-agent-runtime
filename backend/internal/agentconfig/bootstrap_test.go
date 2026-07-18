@@ -49,6 +49,9 @@ func TestEnsureStarterConfigFileCreatesMinimalConfig(t *testing.T) {
 	if !strings.Contains(content, "aicli:") {
 		t.Fatalf("starter config missing aicli section: %s", content)
 	}
+	if !strings.Contains(content, "headers: {}") {
+		t.Fatalf("starter config missing global provider headers section: %s", content)
+	}
 
 	cfg, err := InitGlobalConfig(path)
 	if err != nil {

@@ -41,13 +41,17 @@ type providerModelsValidationResult struct {
 }
 
 func validateProviderModels(req providerModelsValidationRequest) (*providerModelsValidationResult, error) {
+	provider := req.Provider
+	if req.Config != nil {
+		provider.Headers = config.EffectiveProviderHeaders(req.Config.Providers.Headers, provider.Headers)
+	}
 	loginProtocol := normalizeLoginProtocol(req.LoginProtocol, req.Provider.AuthMode)
-	modelsPath := resolveProviderModelsPath(loginProtocol, req.Provider, req.ModelsPath)
-	endpoint, err := buildProviderModelsURL(req.Provider, modelsPath)
+	modelsPath := resolveProviderModelsPath(loginProtocol, provider, req.ModelsPath)
+	endpoint, err := buildProviderModelsURL(provider, modelsPath)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(req.Provider.GetAPIKey()) == "" && !strings.EqualFold(req.Provider.AuthMode, "oauth") {
+	if strings.TrimSpace(provider.GetAPIKey()) == "" && !strings.EqualFold(provider.AuthMode, "oauth") {
 		return nil, fmt.Errorf("api key is required for provider models validation")
 	}
 
@@ -55,7 +59,7 @@ func validateProviderModels(req providerModelsValidationRequest) (*providerModel
 	if err != nil {
 		return nil, fmt.Errorf("create models request: %w", err)
 	}
-	headers := buildProviderModelsHeaders(req.Provider, loginProtocol)
+	headers := buildProviderModelsHeaders(provider, loginProtocol)
 	for key, value := range headers {
 		if strings.TrimSpace(value) == "" {
 			continue
@@ -66,7 +70,7 @@ func validateProviderModels(req providerModelsValidationRequest) (*providerModel
 
 	client := http.DefaultClient
 	if req.Config != nil {
-		client = httpclient.GetHTTPClientWithProvider(req.Config, &req.Provider)
+		client = httpclient.GetHTTPClientWithProvider(req.Config, &provider)
 	}
 	if req.Timeout > 0 {
 		cloned := *client

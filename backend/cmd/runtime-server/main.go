@@ -1089,7 +1089,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			SupportedModels:    append([]string(nil), provider.SupportedModels...),
 			ModelMappings:      cloneStringMap(provider.ModelMappings),
 			ModelCapabilities:  cloneProviderModelCapabilities(provider.ModelCapabilities),
-			Headers:            cloneStringMap(provider.Headers),
+			Headers:            config.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),
 			HeaderMappings:     cloneStringMap(provider.HeaderMappings),
 			HeaderMappingRules: cloneHeaderMappingRules(provider.HeaderMappingRules),
 			Proxy:              config.EffectiveProxyConfig(&cfg.Providers.Proxy, provider.Proxy),

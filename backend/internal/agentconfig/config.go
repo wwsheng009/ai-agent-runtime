@@ -5,6 +5,7 @@ package agentconfig
 import (
 	"fmt"
 	"math/rand"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -39,12 +40,35 @@ type Config struct {
 // ProvidersConfig holds the provider collection configuration.
 type ProvidersConfig struct {
 	DefaultProvider string              `yaml:"default_provider" mapstructure:"default_provider" env:"PROVIDERS_DEFAULT"`
+	Headers         map[string]string   `yaml:"headers" mapstructure:"headers"`
 	Timeout         time.Duration       `yaml:"timeout" mapstructure:"timeout" env:"PROVIDERS_TIMEOUT"`
 	MaxRetries      int                 `yaml:"max_retries" mapstructure:"max_retries" env:"PROVIDERS_MAX_RETRIES"`
 	Backoff         BackoffConfig       `yaml:"backoff" mapstructure:"backoff"`
 	HTTPTimeout     HTTPTimeout         `yaml:"http_timeout" mapstructure:"http_timeout"`
 	Proxy           ProxyConfig         `yaml:"proxy" mapstructure:"proxy"`
 	Items           map[string]Provider `yaml:"items" mapstructure:"items"`
+}
+
+// EffectiveProviderHeaders merges global and provider-specific request headers.
+// Header names are matched case-insensitively, and provider values take priority.
+func EffectiveProviderHeaders(globalHeaders, providerHeaders map[string]string) map[string]string {
+	if len(globalHeaders) == 0 && len(providerHeaders) == 0 {
+		return nil
+	}
+
+	merged := make(map[string]string, len(globalHeaders)+len(providerHeaders))
+	merge := func(headers map[string]string) {
+		for key, value := range headers {
+			canonicalKey := textproto.CanonicalMIMEHeaderKey(strings.TrimSpace(key))
+			if canonicalKey == "" {
+				canonicalKey = key
+			}
+			merged[canonicalKey] = value
+		}
+	}
+	merge(globalHeaders)
+	merge(providerHeaders)
+	return merged
 }
 
 // BackoffConfig holds retry backoff configuration.

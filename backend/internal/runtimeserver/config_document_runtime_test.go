@@ -134,6 +134,7 @@ func TestAnalyzeConfigDocumentRuntimeImpactClassifiesChangedPaths(t *testing.T) 
 
 func TestClassifyConfigDocumentPathTreatsRetrySettingsAsHotReload(t *testing.T) {
 	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("providers.backoff.initial_interval"))
+	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("providers.headers.X-Upstream-Token"))
 	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("retry.default_backoff_multiplier"))
 	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("retry.rules.0.retry_delay_ms"))
 }

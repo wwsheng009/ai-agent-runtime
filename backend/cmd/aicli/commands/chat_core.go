@@ -556,7 +556,7 @@ func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRun
 		SupportedModels:         append([]string(nil), session.Provider.SupportedModels...),
 		ModelMappings:           cloneStringMap(session.Provider.ModelMappings),
 		ModelCapabilities:       cloneProviderModelCapabilities(session.Provider.ModelCapabilities),
-		Headers:                 cloneStringMap(session.Provider.Headers),
+		Headers:                 effectiveChatProviderHeaders(session),
 		HeaderMappings:          cloneStringMap(session.Provider.HeaderMappings),
 		HeaderMappingRules:      cloneHeaderMappingRules(session.Provider.HeaderMappingRules),
 		SupportsMaxOutputTokens: session.Provider.SupportsMaxOutputTokens,

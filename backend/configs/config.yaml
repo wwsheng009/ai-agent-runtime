@@ -264,6 +264,9 @@ provider_queue:
     max_wait_time: 120s
 providers:
   default_provider: ${PROVIDERS_DEFAULT:-nvidia}
+  # Applied to every upstream provider request. An item-level header with the
+  # same name overrides this value (header names are case-insensitive).
+  headers: {}
   http_timeout:
     body_read_timeout: ${PROVIDERS_BODY_READ_TIMEOUT:-60s}
     dial_timeout: ${PROVIDERS_DIAL_TIMEOUT:-5s}

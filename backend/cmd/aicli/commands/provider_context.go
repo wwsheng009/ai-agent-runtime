@@ -18,6 +18,17 @@ type providerExecutionContext struct {
 	ModelMapped    bool
 }
 
+func effectiveChatProviderHeaders(session *ChatSession) map[string]string {
+	if session == nil {
+		return nil
+	}
+	var globalHeaders map[string]string
+	if session.Config != nil {
+		globalHeaders = session.Config.Providers.Headers
+	}
+	return config.EffectiveProviderHeaders(globalHeaders, session.Provider.Headers)
+}
+
 func resolveProviderExecutionContext(cfg *config.Config, providerFlag, modelFlag string) (*providerExecutionContext, map[string]interface{}, error) {
 	details := map[string]interface{}{}
 	if cfg == nil {
@@ -43,6 +54,7 @@ func resolveProviderExecutionContext(cfg *config.Config, providerFlag, modelFlag
 	if !provider.Enabled {
 		return nil, details, fmt.Errorf("provider '%s' is disabled", providerName)
 	}
+	provider.Headers = config.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers)
 
 	modelName := modelFlag
 	if modelName == "" {

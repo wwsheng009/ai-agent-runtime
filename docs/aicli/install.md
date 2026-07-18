@@ -176,6 +176,29 @@ aicli:
 
 完整字段示例见 [`backend/configs/config.yaml`](../../backend/configs/config.yaml)。
 
+### 自定义上游请求 Header
+
+可以在 `providers.headers` 中声明所有 provider 共用的请求 Header，也可以在 `providers.items.<name>.headers` 中为单个 provider 覆盖或补充。Header 名称按大小写不敏感方式匹配；同名时 provider 级配置优先。配置值同样支持 `${VAR}` 和 `${VAR:-default}` 环境变量展开。
+
+```yaml
+providers:
+  headers:
+    X-Upstream-Client: ${UPSTREAM_CLIENT_ID:-aicli}
+    X-Upstream-Route: default
+  items:
+    private_upstream:
+      enabled: true
+      protocol: openai
+      base_url: https://llm.example.com
+      api_key: ${PRIVATE_UPSTREAM_API_KEY}
+      default_model: example-model
+      headers:
+        x-upstream-route: private
+        X-Upstream-Token: ${PRIVATE_UPSTREAM_TOKEN}
+```
+
+以上配置对普通聊天、`pipe`、`test`、`context`、模型列表校验、runtime-server 调用以及图片生成请求生效。最终发送的 `X-Upstream-Route` 为 `private`，同时保留全局的 `X-Upstream-Client` 和 provider 专属的 `X-Upstream-Token`。
+
 `aicli.chat` 偏好优先级：
 
 1. 命令行 flag，例如 `--provider`、`--model`、`--reasoning-effort`、`--stream`

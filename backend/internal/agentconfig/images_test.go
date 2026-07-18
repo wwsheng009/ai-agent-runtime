@@ -2,6 +2,39 @@ package agentconfig
 
 import "testing"
 
+func TestSelectImagesGenerationsProviderMergesGlobalAndProviderHeaders(t *testing.T) {
+	cfg := &Config{Providers: ProvidersConfig{
+		Headers: map[string]string{
+			"X-Global": "global-value",
+			"X-Shared": "global-value",
+		},
+		Items: map[string]Provider{
+			"images": {
+				Enabled:      true,
+				Protocol:     "openai",
+				DefaultModel: "gpt-image-1",
+				Headers: map[string]string{
+					"x-shared": "provider-value",
+				},
+				ModelCapabilities: map[string]ModelCapabilitySpec{
+					"gpt-image-1": {NativeTools: NativeToolCapabilities{ImagesGenerationsAPI: true}},
+				},
+			},
+		},
+	}}
+
+	selection, err := SelectImagesGenerationsProvider(cfg, ImagesGenerationsHint{})
+	if err != nil {
+		t.Fatalf("SelectImagesGenerationsProvider failed: %v", err)
+	}
+	if selection.Provider.Headers["X-Global"] != "global-value" {
+		t.Fatalf("global header missing: %+v", selection.Provider.Headers)
+	}
+	if selection.Provider.Headers["X-Shared"] != "provider-value" {
+		t.Fatalf("provider header did not override global header: %+v", selection.Provider.Headers)
+	}
+}
+
 func TestSelectImagesGenerationsProvider_SelectsMatchingModel(t *testing.T) {
 	cfg := &Config{
 		Providers: ProvidersConfig{

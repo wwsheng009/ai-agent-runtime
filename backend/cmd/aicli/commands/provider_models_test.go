@@ -64,16 +64,29 @@ func TestValidateProviderModels_SendsExpectedHeadersAndParsesModels(t *testing.T
 		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
 			t.Fatalf("unexpected auth header: %q", got)
 		}
+		if got := r.Header.Get("X-Global"); got != "global-value" {
+			t.Fatalf("unexpected global header: %q", got)
+		}
+		if got := r.Header.Get("X-Shared"); got != "provider-value" {
+			t.Fatalf("unexpected shared header: %q", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1-mini"}]}`))
 	}))
 	defer server.Close()
 
 	result, err := validateProviderModels(providerModelsValidationRequest{
+		Config: &config.Config{Providers: config.ProvidersConfig{Headers: map[string]string{
+			"X-Global": "global-value",
+			"X-Shared": "global-value",
+		}}},
 		Provider: config.Provider{
 			Protocol: "openai",
 			BaseURL:  server.URL,
 			APIKey:   "sk-test",
+			Headers: map[string]string{
+				"x-shared": "provider-value",
+			},
 		},
 		LoginProtocol: "openai",
 	})

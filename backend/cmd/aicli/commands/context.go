@@ -334,6 +334,7 @@ func sendContextRequest(cfg *config.Config, provider config.Provider, llmAdapter
 		Type:    provider.GetProtocol(),
 		APIKey:  provider.GetAPIKey(),
 		Timeout: time.Duration(timeout) * time.Second,
+		Headers: config.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),
 	})
 
 	attempts := retries + 1

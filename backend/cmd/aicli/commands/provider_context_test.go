@@ -10,6 +10,10 @@ func TestResolveProviderExecutionContext(t *testing.T) {
 	cfg := &config.Config{
 		Providers: config.ProvidersConfig{
 			DefaultProvider: "alpha",
+			Headers: map[string]string{
+				"X-Global": "global-value",
+				"X-Shared": "global-value",
+			},
 			Items: map[string]config.Provider{
 				"alpha": {
 					Enabled:      true,
@@ -17,6 +21,9 @@ func TestResolveProviderExecutionContext(t *testing.T) {
 					DefaultModel: "gpt-4.1",
 					ModelMappings: map[string]string{
 						"gpt-5-mini": "gpt-5.2-mini",
+					},
+					Headers: map[string]string{
+						"x-shared": "provider-value",
 					},
 				},
 				"beta": {
@@ -37,6 +44,13 @@ func TestResolveProviderExecutionContext(t *testing.T) {
 	}
 	if details["provider"] != "alpha" || details["model"] != "gpt-4.1" {
 		t.Fatalf("unexpected details: %+v", details)
+	}
+	if resolved.Provider.Headers["X-Global"] != "global-value" || resolved.Provider.Headers["X-Shared"] != "provider-value" {
+		t.Fatalf("unexpected effective headers: %+v", resolved.Provider.Headers)
+	}
+	chatHeaders := adapterAdapterConfig(&ChatSession{Config: cfg, Provider: cfg.Providers.Items["alpha"]}).Headers
+	if chatHeaders["X-Global"] != "global-value" || chatHeaders["X-Shared"] != "provider-value" {
+		t.Fatalf("unexpected chat request headers: %+v", chatHeaders)
 	}
 
 	resolved, details, err = resolveProviderExecutionContext(cfg, "alpha", "gpt-5-mini")

@@ -272,6 +272,7 @@ func sendPipeRequest(session *PipeSession, message string, stream bool) (*pipeCo
 		Type:    session.Provider.GetProtocol(),
 		APIKey:  session.Provider.GetAPIKey(),
 		Timeout: 120 * time.Second,
+		Headers: session.Provider.Headers,
 	}
 	headers := session.Adapter.BuildHeaders(adapterConfig)
 	for key, value := range headers {

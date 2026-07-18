@@ -12,6 +12,10 @@ func TestBuildRuntimeProviderConfigsMergesGlobalAndProviderProxy(t *testing.T) {
 	cfg := &agentconfig.Config{
 		Providers: agentconfig.ProvidersConfig{
 			Timeout: 45 * time.Second,
+			Headers: map[string]string{
+				"X-Global": "global-value",
+				"X-Shared": "global-value",
+			},
 			Backoff: agentconfig.BackoffConfig{
 				InitialInterval: 350 * time.Millisecond,
 				MaxInterval:     4 * time.Second,
@@ -28,6 +32,10 @@ func TestBuildRuntimeProviderConfigsMergesGlobalAndProviderProxy(t *testing.T) {
 					Protocol:     "openai",
 					BaseURL:      "https://api.example.com",
 					DefaultModel: "gpt-5",
+					Headers: map[string]string{
+						"x-shared":   "provider-value",
+						"X-Provider": "provider-only",
+					},
 					ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
 						"gpt-5": {
 							MaxContextTokens:      272000,
@@ -76,4 +84,7 @@ func TestBuildRuntimeProviderConfigsMergesGlobalAndProviderProxy(t *testing.T) {
 	require.Equal(t, "500-504", result["openai-main"].RetryRules[0].StatusCode.Range)
 	require.Equal(t, 272000, result["openai-main"].ModelCapabilities["gpt-5"].MaxContextTokens)
 	require.Equal(t, 240000, result["openai-main"].ModelCapabilities["gpt-5"].AutoCompactTokenLimit)
+	require.Equal(t, "global-value", result["openai-main"].Headers["X-Global"])
+	require.Equal(t, "provider-value", result["openai-main"].Headers["X-Shared"])
+	require.Equal(t, "provider-only", result["openai-main"].Headers["X-Provider"])
 }

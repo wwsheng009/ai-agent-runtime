@@ -415,6 +415,7 @@ func adapterAdapterConfig(session *ChatSession) adapter.AdapterConfig {
 		Type:    session.Provider.GetProtocol(),
 		APIKey:  session.Provider.GetAPIKey(),
 		Timeout: 120 * time.Second,
+		Headers: effectiveChatProviderHeaders(session),
 	}
 }
 
