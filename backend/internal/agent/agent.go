@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
@@ -22,19 +23,23 @@ import (
 
 // Config Agent 配置
 type Config struct {
-	Name              string                 `yaml:"name" json:"name"`
-	Provider          string                 `yaml:"provider,omitempty" json:"provider,omitempty"`
-	Model             string                 `yaml:"model" json:"model"`
-	MaxSteps          int                    `yaml:"maxSteps" json:"maxSteps"`
-	DefaultMaxTokens  int                    `yaml:"defaultMaxTokens" json:"defaultMaxTokens"`
-	Temperature       float64                `yaml:"temperature" json:"temperature"`
-	SystemPrompt      string                 `yaml:"systemPrompt" json:"systemPrompt"`
-	EnableMemory      bool                   `yaml:"enableMemory" json:"enableMemory"`
-	EnablePlanning    bool                   `yaml:"enablePlanning" json:"enablePlanning"`
-	EnableSelfReflect bool                   `yaml:"enableSelfReflect" json:"enableSelfReflect"`
-	MemoryMaxSize     int                    `yaml:"memoryMaxSize" json:"memoryMaxSize"`
-	ArtifactStorePath string                 `yaml:"artifactStorePath" json:"artifactStorePath"`
-	Options           map[string]interface{} `yaml:"options" json:"options"`
+	Name                 string                 `yaml:"name" json:"name"`
+	Provider             string                 `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Model                string                 `yaml:"model" json:"model"`
+	MaxSteps             int                    `yaml:"maxSteps" json:"maxSteps"`
+	MaxToolCalls         int                    `yaml:"maxToolCalls" json:"maxToolCalls"`
+	MaxRunDuration       time.Duration          `yaml:"maxRunDuration" json:"maxRunDuration"`
+	MaxExplorationSteps  int                    `yaml:"maxExplorationSteps" json:"maxExplorationSteps"`
+	MaxRepeatedToolCalls int                    `yaml:"maxRepeatedToolCalls" json:"maxRepeatedToolCalls"`
+	DefaultMaxTokens     int                    `yaml:"defaultMaxTokens" json:"defaultMaxTokens"`
+	Temperature          float64                `yaml:"temperature" json:"temperature"`
+	SystemPrompt         string                 `yaml:"systemPrompt" json:"systemPrompt"`
+	EnableMemory         bool                   `yaml:"enableMemory" json:"enableMemory"`
+	EnablePlanning       bool                   `yaml:"enablePlanning" json:"enablePlanning"`
+	EnableSelfReflect    bool                   `yaml:"enableSelfReflect" json:"enableSelfReflect"`
+	MemoryMaxSize        int                    `yaml:"memoryMaxSize" json:"memoryMaxSize"`
+	ArtifactStorePath    string                 `yaml:"artifactStorePath" json:"artifactStorePath"`
+	Options              map[string]interface{} `yaml:"options" json:"options"`
 }
 
 // Agent AI Agent
@@ -75,20 +80,22 @@ type AgentState struct {
 
 // Result Agent 执行结果
 type Result struct {
-	Success      bool                  `json:"success"`
-	Output       string                `json:"output"`
-	Steps        int                   `json:"steps"`
-	LimitReached bool                  `json:"limit_reached,omitempty"`
-	StepLimit    int                   `json:"step_limit,omitempty"`
-	Observations []types.Observation   `json:"observations"`
-	Skill        string                `json:"skill,omitempty"`
-	TraceID      string                `json:"trace_id,omitempty"`
-	State        AgentState            `json:"state"`
-	Usage        *types.TokenUsage     `json:"usage,omitempty"`
-	Reasoning    *types.ReasoningBlock `json:"reasoning,omitempty"`
-	Duration     types.Duration        `json:"duration"`
-	Error        string                `json:"error,omitempty"`
-	Contract     *agentresult.Result   `json:"result_contract,omitempty"`
+	Success       bool                  `json:"success"`
+	Output        string                `json:"output"`
+	Steps         int                   `json:"steps"`
+	LimitReached  bool                  `json:"limit_reached,omitempty"`
+	StepLimit     int                   `json:"step_limit,omitempty"`
+	ToolCallLimit int                   `json:"tool_call_limit,omitempty"`
+	LimitReason   string                `json:"limit_reason,omitempty"`
+	Observations  []types.Observation   `json:"observations"`
+	Skill         string                `json:"skill,omitempty"`
+	TraceID       string                `json:"trace_id,omitempty"`
+	State         AgentState            `json:"state"`
+	Usage         *types.TokenUsage     `json:"usage,omitempty"`
+	Reasoning     *types.ReasoningBlock `json:"reasoning,omitempty"`
+	Duration      types.Duration        `json:"duration"`
+	Error         string                `json:"error,omitempty"`
+	Contract      *agentresult.Result   `json:"result_contract,omitempty"`
 }
 
 // NewAgent 创建 Agent
@@ -699,6 +706,10 @@ func (a *Agent) RunReAct(ctx context.Context, llmRuntime *llm.LLMRuntime, prompt
 	// 创建 ReAct 循环配置
 	loopConfig := &LoopReActConfig{
 		MaxSteps:             a.config.MaxSteps,
+		MaxToolCalls:         a.config.MaxToolCalls,
+		MaxRunDuration:       a.config.MaxRunDuration,
+		MaxExplorationSteps:  a.config.MaxExplorationSteps,
+		MaxRepeatedToolCalls: a.config.MaxRepeatedToolCalls,
 		EnableThought:        true,
 		EnableToolCalls:      true,
 		EnableParallelTools:  true,
@@ -718,6 +729,10 @@ func (a *Agent) RunReActWithConfig(ctx context.Context, llmRuntime *llm.LLMRunti
 	if loopConfig == nil {
 		loopConfig = &LoopReActConfig{
 			MaxSteps:             a.config.MaxSteps,
+			MaxToolCalls:         a.config.MaxToolCalls,
+			MaxRunDuration:       a.config.MaxRunDuration,
+			MaxExplorationSteps:  a.config.MaxExplorationSteps,
+			MaxRepeatedToolCalls: a.config.MaxRepeatedToolCalls,
 			EnableThought:        true,
 			EnableToolCalls:      true,
 			EnableParallelTools:  true,
@@ -735,6 +750,10 @@ func (a *Agent) RunReActWithSession(ctx context.Context, llmRuntime *llm.LLMRunt
 	if loopConfig == nil {
 		loopConfig = &LoopReActConfig{
 			MaxSteps:             a.config.MaxSteps,
+			MaxToolCalls:         a.config.MaxToolCalls,
+			MaxRunDuration:       a.config.MaxRunDuration,
+			MaxExplorationSteps:  a.config.MaxExplorationSteps,
+			MaxRepeatedToolCalls: a.config.MaxRepeatedToolCalls,
 			EnableThought:        true,
 			EnableToolCalls:      true,
 			EnableParallelTools:  true,

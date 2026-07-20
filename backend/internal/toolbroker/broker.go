@@ -112,7 +112,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		{
 			Name:        ToolBackgroundTask,
-			Description: "Run a long-running task in the background and return a job id. Commands execute through the detected user shell; prefer the cwd parameter for directory changes instead of embedding cd in the command.",
+			Description: "Run a long-running task in the background and return a job id. Commands execute through the detected user shell; prefer the cwd parameter for directory changes instead of embedding cd in the command. Use restart_policy=rerun only when automatic infrastructure-failure recovery is safe for the command.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -126,7 +126,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 					"timeout_sec": map[string]interface{}{
 						"type":        "integer",
-						"description": "Command timeout in seconds.",
+						"description": "Optional command timeout in seconds. Omit or use zero for no execution deadline.",
 					},
 					"priority": map[string]interface{}{
 						"type":        "integer",
@@ -134,7 +134,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 					"restart_policy": map[string]interface{}{
 						"type":        "string",
-						"description": "Optional restart handling policy: fail (default) or rerun.",
+						"description": "Infrastructure-failure recovery policy: fail (default) or rerun. Rerun automatically requeues after heartbeat stalls, zombie detection, process loss, PID reuse, or repeated launch failure, and may repeat command side effects.",
 					},
 				},
 				"required": []string{"command"},
@@ -142,7 +142,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		{
 			Name:        ToolTaskOutput,
-			Description: "Read background task output by offset.",
+			Description: "Read background task output, process/heartbeat health, quiet duration, and automatic recovery state by offset.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

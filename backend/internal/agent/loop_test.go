@@ -369,6 +369,10 @@ func TestNewReActLoop_WithNilConfig(t *testing.T) {
 	if loop.config.MaxSteps != expectedDefaults["MaxSteps"].(int) {
 		t.Errorf("expected default MaxSteps %d, got %d", expectedDefaults["MaxSteps"].(int), loop.config.MaxSteps)
 	}
+	require.Zero(t, loop.config.MaxToolCalls)
+	require.Zero(t, loop.config.MaxRunDuration)
+	require.Zero(t, loop.config.MaxExplorationSteps)
+	require.Zero(t, loop.config.MaxRepeatedToolCalls)
 	require.Equal(t, expectedDefaults["EnableParallelTools"], loop.config.EnableParallelTools)
 	require.Equal(t, expectedDefaults["MaxParallelToolCalls"], loop.config.MaxParallelToolCalls)
 }
@@ -1237,6 +1241,101 @@ func TestReActLoop_ObservesRepeatedSemanticToolCallsWithoutStopping(t *testing.T
 		}
 	}
 	require.True(t, advisoryFound, "repeated calls should receive non-blocking model guidance")
+}
+
+func TestReActLoop_StopsRepeatedSemanticToolCallsAtConfiguredLimit(t *testing.T) {
+	manager := &MockSequenceMCPManager{output: "unchanged evidence"}
+	provider := &SequenceLLMProvider{name: "test-provider", responses: []*llm.LLMResponse{
+		{Content: "inspect", ToolCalls: []types.ToolCall{{ID: "call-1", Name: "read_logs", Args: map[string]interface{}{"path": "app.log"}}}},
+		{Content: "inspect again", ToolCalls: []types.ToolCall{{ID: "call-2", Name: "read_logs", Args: map[string]interface{}{"path": "app.log"}}}},
+		{Content: "inspect again", ToolCalls: []types.ToolCall{{ID: "call-3", Name: "read_logs", Args: map[string]interface{}{"path": "app.log"}}}},
+		{Content: "should not be reached"},
+	}}
+	runtime := llm.NewLLMRuntime(nil)
+	require.NoError(t, runtime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{Name: "test-agent", Provider: "test-provider", Model: "test-model"}, manager, runtime)
+	loop := NewReActLoop(agent, runtime, &LoopReActConfig{
+		MaxSteps:             10,
+		MaxRepeatedToolCalls: 3,
+		EnableToolCalls:      true,
+	})
+
+	result, err := loop.Run(context.Background(), "inspect logs")
+	require.NoError(t, err)
+	require.True(t, result.LimitReached)
+	require.Equal(t, "repeated_tool_calls", result.LimitReason)
+	require.Equal(t, 3, provider.callCount)
+	require.Len(t, result.Observations, 2, "the threshold call must not execute again")
+}
+
+func TestReActLoop_StopsBeforeExceedingToolCallBudget(t *testing.T) {
+	provider := &SequenceLLMProvider{name: "test-provider", responses: []*llm.LLMResponse{{
+		Content: "read both",
+		ToolCalls: []types.ToolCall{
+			{ID: "call-1", Name: "read_logs", Args: map[string]interface{}{"path": "a.log"}},
+			{ID: "call-2", Name: "read_logs", Args: map[string]interface{}{"path": "b.log"}},
+		},
+	}}}
+	runtime := llm.NewLLMRuntime(nil)
+	require.NoError(t, runtime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{Name: "test-agent", Provider: "test-provider", Model: "test-model"}, &MockSequenceMCPManager{}, runtime)
+	loop := NewReActLoop(agent, runtime, &LoopReActConfig{MaxSteps: 10, MaxToolCalls: 1, EnableToolCalls: true})
+
+	result, err := loop.Run(context.Background(), "read logs")
+	require.NoError(t, err)
+	require.True(t, result.LimitReached)
+	require.Equal(t, "tool_calls", result.LimitReason)
+	require.Equal(t, 1, result.ToolCallLimit)
+	require.Empty(t, result.Observations)
+}
+
+func TestReActLoop_MaxRunDurationCancelsBlockedProvider(t *testing.T) {
+	provider := &BlockingLLMProvider{name: "test-provider", release: make(chan struct{}), entered: make(chan struct{}, 1)}
+	runtime := llm.NewLLMRuntime(nil)
+	require.NoError(t, runtime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{Name: "test-agent", Provider: "test-provider", Model: "test-model"}, nil, runtime)
+	loop := NewReActLoop(agent, runtime, &LoopReActConfig{MaxSteps: 10, MaxRunDuration: 50 * time.Millisecond})
+
+	result, err := loop.Run(context.Background(), "wait forever")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotNil(t, result)
+	require.True(t, result.LimitReached)
+	require.Equal(t, "run_timeout", result.LimitReason)
+	require.False(t, agent.IsRunning())
+}
+
+func TestReActLoop_ParentDeadlineIsNotReportedAsRunDurationLimit(t *testing.T) {
+	provider := &BlockingLLMProvider{name: "test-provider", release: make(chan struct{}), entered: make(chan struct{}, 1)}
+	runtime := llm.NewLLMRuntime(nil)
+	require.NoError(t, runtime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{Name: "test-agent", Provider: "test-provider", Model: "test-model"}, nil, runtime)
+	loop := NewReActLoop(agent, runtime, &LoopReActConfig{MaxSteps: 10, MaxRunDuration: time.Minute})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	result, err := loop.Run(ctx, "wait for caller deadline")
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotNil(t, result)
+	require.False(t, result.LimitReached)
+	require.Equal(t, "canceled", result.LimitReason)
+	require.False(t, agent.IsRunning())
+}
+
+func TestProjectSimpleGoalToolSurfaceKeepsOnlyRelevantTools(t *testing.T) {
+	tools := []types.ToolDefinition{
+		{Name: "ls"}, {Name: "glob"}, {Name: "view"}, {Name: "bash"},
+		{Name: "web_search"}, {Name: "spawn_team"}, {Name: "openai_image_generate"},
+	}
+
+	projected := projectSimpleGoalToolSurface("ls file", tools)
+	require.Equal(t, []string{"ls", "glob"}, toolDefinitionNames(projected))
+
+	projected = projectSimpleGoalToolSurface("git status", tools)
+	require.Equal(t, []string{"bash"}, toolDefinitionNames(projected))
+
+	projected = projectSimpleGoalToolSurface("inspect the repository and fix the failing tests", tools)
+	require.Equal(t, toolDefinitionNames(tools), toolDefinitionNames(projected))
 }
 
 func TestSemanticToolCallFingerprintExemptsPollingTools(t *testing.T) {

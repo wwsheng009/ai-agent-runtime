@@ -15,6 +15,38 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
+func TestDefaultConfigKeepsExplicitRerunRecoveryUnlimited(t *testing.T) {
+	cfg := DefaultConfig()
+	require.Equal(t, -1, cfg.RecoveryMaxAttempts)
+	require.Equal(t, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}, cfg.RecoveryBackoffSchedule)
+}
+
+func TestPendingCandidatesDoNotChargeRecoveryBackoffAgainstExecutionCapacity(t *testing.T) {
+	manager := &Manager{
+		maxConcurrentJobs: 1,
+		jobs: map[string]*managedJob{
+			"recovering": {
+				info: Job{
+					ID:     "recovering",
+					Status: StatusRunning,
+					Metadata: map[string]interface{}{
+						backgroundMetaNextRecoveryAt: time.Now().Add(time.Minute).Format(time.RFC3339Nano),
+					},
+				},
+				scheduled: true,
+			},
+			"pending": {
+				info: Job{ID: "pending", Status: StatusPending},
+			},
+		},
+	}
+
+	capacity, pending := manager.pendingCandidates()
+	require.Equal(t, 1, capacity)
+	require.Len(t, pending, 1)
+	require.Equal(t, "pending", pending[0].info.ID)
+}
+
 func TestManagerDispatchesByPriorityWithinCapacity(t *testing.T) {
 	ctx := context.Background()
 	var (
@@ -215,9 +247,10 @@ func TestManagerRecoversRunningJobWithRerunPolicy(t *testing.T) {
 	require.NoError(t, store.Close())
 
 	manager := NewManager(Config{
-		StorePath:         storePath,
-		LogDir:            logDir,
-		MaxConcurrentJobs: 1,
+		StorePath:               storePath,
+		LogDir:                  logDir,
+		MaxConcurrentJobs:       1,
+		RecoveryBackoffSchedule: []time.Duration{time.Millisecond},
 	})
 	defer func() {
 		require.NoError(t, manager.Close())
@@ -272,7 +305,18 @@ func TestManagerRecoversDetachedRunningJobAcrossRestart(t *testing.T) {
 		require.NoError(t, recoveredManager.Close())
 	}()
 
-	require.NoError(t, waitForJobStatus(ctx, recoveredManager, job.ID, StatusCompleted, backgroundTestTimeout(20*time.Second)))
+	if err := waitForJobStatus(ctx, recoveredManager, job.ID, StatusCompleted, backgroundTestTimeout(20*time.Second)); err != nil {
+		recovered, _ := recoveredManager.GetJob(ctx, job.ID)
+		if recovered != nil {
+			logData, _ := os.ReadFile(recovered.LogPath)
+			statusPath, _ := stringMetadataValue(recovered.Metadata, backgroundMetaStatusPath)
+			statusData, _ := os.ReadFile(statusPath)
+			runnerPath, _ := stringMetadataValue(recovered.Metadata, backgroundMetaRunnerPath)
+			runnerData, _ := os.ReadFile(runnerPath)
+			t.Logf("recovery diagnostics: metadata=%v log=%q status=%q runner=%q", recovered.Metadata, string(logData), string(statusData), string(runnerData))
+		}
+		require.NoError(t, err)
+	}
 
 	recovered, err := recoveredManager.GetJob(ctx, job.ID)
 	require.NoError(t, err)
@@ -323,6 +367,60 @@ func TestManagerPersistsTimeoutBudgetAndStructuredTimeoutOutcome(t *testing.T) {
 	require.Equal(t, string(runtimeerrors.ErrToolTimeout), output.ErrorCode)
 	require.Equal(t, int64(100), output.TimeoutEffectiveMs)
 	require.Equal(t, "tool_default", output.TimeoutSource)
+}
+
+func TestDetachedRunnerRefreshesHeartbeatWhileCommandIsQuiet(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	manager := NewManager(Config{
+		StorePath:         filepath.Join(tempDir, "background.db"),
+		LogDir:            filepath.Join(tempDir, "logs"),
+		MaxConcurrentJobs: 1,
+		HeartbeatTimeout:  10 * time.Second,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	job, err := manager.SubmitShell(ctx, "session-heartbeat", BackgroundTaskArgs{
+		Command: shellDelayCommand(4*time.Second, "heartbeat-finished"),
+	})
+	require.NoError(t, err)
+	defer func() {
+		current, getErr := manager.GetJob(context.Background(), job.ID)
+		if getErr == nil && current != nil && !isTerminalStatus(current.Status) {
+			_, _ = manager.CancelJob(context.Background(), job.ID)
+		}
+	}()
+	require.NoError(t, waitForJobStatus(ctx, manager, job.ID, StatusRunning, backgroundTestTimeout(10*time.Second)))
+
+	running, err := manager.GetJob(ctx, job.ID)
+	require.NoError(t, err)
+	heartbeatPath, ok := stringMetadataValue(running.Metadata, backgroundMetaHeartbeatPath)
+	require.True(t, ok)
+	var first []byte
+	heartbeatDeadline := time.Now().Add(backgroundTestTimeout(5 * time.Second))
+	for time.Now().Before(heartbeatDeadline) {
+		first, err = os.ReadFile(heartbeatPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	require.NoError(t, err)
+	require.NotEmpty(t, first)
+
+	heartbeatDeadline = time.Now().Add(backgroundTestTimeout(3 * time.Second))
+	advanced := false
+	for time.Now().Before(heartbeatDeadline) {
+		second, readErr := os.ReadFile(heartbeatPath)
+		if readErr == nil && string(second) != string(first) {
+			advanced = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.True(t, advanced, "heartbeat content did not advance")
+	_, err = manager.CancelJob(ctx, job.ID)
+	require.NoError(t, err)
 }
 
 func TestReliabilityEvalBackgroundTimeoutRetrySucceeds(t *testing.T) {

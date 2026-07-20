@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"math"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
@@ -36,9 +38,15 @@ const repeatedSemanticToolCallNoticeThreshold = 4
 const explorationStallNoticeThreshold = 12
 const defaultPromptPreflightAutoCompactRatio = 0.9
 
+var errReActRunTimeout = stderrors.New("ReAct run duration limit reached")
+
 // LoopReActConfig ReAct 循环配置
 type LoopReActConfig struct {
 	MaxSteps             int                   `yaml:"maxSteps"`
+	MaxToolCalls         int                   `yaml:"maxToolCalls"`
+	MaxRunDuration       time.Duration         `yaml:"maxRunDuration"`
+	MaxExplorationSteps  int                   `yaml:"maxExplorationSteps"`
+	MaxRepeatedToolCalls int                   `yaml:"maxRepeatedToolCalls"`
 	EnableThought        bool                  `yaml:"enableThought"`
 	EnableToolCalls      bool                  `yaml:"enableToolCalls"`
 	EnableParallelTools  bool                  `yaml:"enableParallelTools"`
@@ -293,10 +301,43 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	loop.agent.state.CurrentStep = 0
 
 	startTime := types.NewDuration()
+	var observations []types.Observation
+	currentCtx := ensureTurnToolSurfaceSnapshot(ctx)
+	if loop.config.MaxRunDuration > 0 {
+		var runCancel context.CancelFunc
+		currentCtx, runCancel = context.WithTimeoutCause(currentCtx, loop.config.MaxRunDuration, errReActRunTimeout)
+		defer runCancel()
+	}
 
 	defer func() {
-		loop.agent.SetRunning(false)
 		startTime.StopTimer()
+		loop.agent.SetRunning(false)
+		if result == nil {
+			return
+		}
+		if result.Steps <= 0 {
+			result.Steps = loop.agent.state.CurrentStep
+		}
+		if result.Duration.GetDuration() <= 0 {
+			result.Duration = *startTime
+		}
+		if runErr != nil && strings.TrimSpace(result.Error) == "" {
+			result.Error = runErr.Error()
+		}
+		if stderrors.Is(context.Cause(currentCtx), errReActRunTimeout) {
+			result.LimitReached = true
+			result.LimitReason = "run_timeout"
+		} else if (stderrors.Is(runErr, context.Canceled) || stderrors.Is(runErr, context.DeadlineExceeded)) && result.LimitReason == "" {
+			result.LimitReason = "canceled"
+		}
+		if len(result.Observations) == 0 && len(observations) > 0 {
+			result.Observations = observations
+		}
+		if runErr != nil && strings.TrimSpace(result.Output) == "" &&
+			(stderrors.Is(runErr, context.Canceled) || stderrors.Is(runErr, context.DeadlineExceeded)) {
+			result.Output = fmt.Sprintf("当前运行已停止；已保留 %d 条工具观察，可从现有会话继续。", len(result.Observations))
+		}
+		result.State = loop.agent.GetState()
 	}()
 
 	result = &Result{
@@ -316,7 +357,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// view instead of reprocessing the same raw replay on every step.
 	promptBuilder := NewMessageBuilder(history)
 
-	var observations []types.Observation
 	hadToolFailure := false
 	failureMessages := make([]string, 0, 4)
 	sessionID := options.SessionID
@@ -332,7 +372,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		return nil, err
 	}
 	remainingBudget := options.BudgetTokens
-	currentCtx := ensureTurnToolSurfaceSnapshot(ctx)
 	sessionCompactionRecoveryStep := 0
 	sessionCompactionRecoveryInputs := make(map[string]struct{})
 	lastToolPromptFingerprint := ""
@@ -340,6 +379,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	lastSemanticToolFingerprint := ""
 	repeatedSemanticToolCalls := 0
 	consecutiveExplorationSteps := 0
+	totalToolCalls := 0
 
 	// ReAct 循环：Think - Act - Observe
 	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
@@ -352,6 +392,21 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			result.Steps = step - 1
 			result.Duration = *startTime
 			return result, nil
+		}
+		if err := currentCtx.Err(); err != nil {
+			result.Success = false
+			result.Error = err.Error()
+			result.LimitReached = stderrors.Is(context.Cause(currentCtx), errReActRunTimeout)
+			if result.LimitReached {
+				result.LimitReason = "run_timeout"
+			} else {
+				result.LimitReason = "canceled"
+			}
+			result.Steps = step - 1
+			result.Observations = observations
+			result.Duration = *startTime
+			result.Usage = totalUsage.Clone()
+			return result, err
 		}
 
 		if loop.config.Verbose {
@@ -408,7 +463,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				clear(sessionCompactionRecoveryInputs)
 			}
 			if recoveryKind != "" && markSessionCompactionRecoveryInput(sessionCompactionRecoveryInputs, recoveryFingerprint) {
-				recoveredHistory, recovered, recoveryErr := loop.trySessionCompactionRecovery(ctx, sessionID, traceID, step, recoveryHistory, recoveryMetadata)
+				recoveredHistory, recovered, recoveryErr := loop.trySessionCompactionRecovery(currentCtx, sessionID, traceID, step, recoveryHistory, recoveryMetadata)
 				if recoveryErr != nil {
 					loop.agent.AddError(fmt.Sprintf("session compaction recovery failed after %s error: %v", recoveryKind, recoveryErr))
 				} else if recovered && compactionRecoveryMadeProgress(loop.llmRuntime, recoveryHistory, recoveredHistory) {
@@ -488,6 +543,23 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 			return result, nil
 		}
+		if loop.config.MaxToolCalls > 0 && totalToolCalls+len(action.ToolCalls) > loop.config.MaxToolCalls {
+			result.Success = false
+			result.LimitReached = true
+			result.LimitReason = "tool_calls"
+			result.ToolCallLimit = loop.config.MaxToolCalls
+			result.Output = toolCallLimitReachedMessage(loop.config.MaxToolCalls)
+			result.Error = result.Output
+			result.Steps = step
+			result.Observations = observations
+			result.Duration = *startTime
+			result.Usage = totalUsage.Clone()
+			builder.AppendAssistantAction(result.Output, nil, nil, nil)
+			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+				return nil, err
+			}
+			return result, nil
+		}
 		repeatedSemanticAdvisory := ""
 		if fingerprint := semanticToolCallFingerprint(action.ToolCalls); fingerprint != "" {
 			if fingerprint == lastSemanticToolFingerprint {
@@ -527,6 +599,39 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				explorationStallAdvisory(consecutiveExplorationSteps),
 			)
 		}
+		if loop.config.MaxExplorationSteps > 0 && consecutiveExplorationSteps >= loop.config.MaxExplorationSteps {
+			result.Success = false
+			result.LimitReached = true
+			result.LimitReason = "exploration_stall"
+			result.Output = explorationLimitReachedMessage(loop.config.MaxExplorationSteps)
+			result.Error = result.Output
+			result.Steps = step
+			result.Observations = observations
+			result.Duration = *startTime
+			result.Usage = totalUsage.Clone()
+			builder.AppendAssistantAction(result.Output, nil, nil, nil)
+			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+				return nil, err
+			}
+			return result, nil
+		}
+		if loop.config.MaxRepeatedToolCalls > 0 && repeatedSemanticToolCalls >= loop.config.MaxRepeatedToolCalls {
+			result.Success = false
+			result.LimitReached = true
+			result.LimitReason = "repeated_tool_calls"
+			result.Output = repeatedToolLimitReachedMessage(loop.config.MaxRepeatedToolCalls)
+			result.Error = result.Output
+			result.Steps = step
+			result.Observations = observations
+			result.Duration = *startTime
+			result.Usage = totalUsage.Clone()
+			builder.AppendAssistantAction(result.Output, nil, nil, nil)
+			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+				return nil, err
+			}
+			return result, nil
+		}
+		totalToolCalls += len(action.ToolCalls)
 		if fingerprint := actionPromptFingerprint(action); fingerprint != "" {
 			if fingerprint == lastToolPromptFingerprint {
 				repeatedToolPromptFingerprint++
@@ -674,6 +779,21 @@ func stepLimitReachedMessage(maxSteps int) string {
 		return "当前运行未配置步数上限。"
 	}
 	return fmt.Sprintf("已达到 maxSteps=%d 的执行上限，当前轮次已停止。未配置、0 或负数表示不限制。", maxSteps)
+}
+
+func toolCallLimitReachedMessage(maxCalls int) string {
+	if maxCalls <= 0 {
+		return "当前运行未配置工具调用上限。"
+	}
+	return fmt.Sprintf("已达到 maxToolCalls=%d 的工具调用上限，当前运行已停止并保留已有结果。", maxCalls)
+}
+
+func explorationLimitReachedMessage(maxSteps int) string {
+	return fmt.Sprintf("连续只读探索达到 %d 轮且没有形成新的行动信号，当前运行已停止并保留已有证据。", maxSteps)
+}
+
+func repeatedToolLimitReachedMessage(maxCalls int) string {
+	return fmt.Sprintf("同一语义工具调用连续重复达到 %d 次，当前运行已停止以避免无效循环。", maxCalls)
 }
 
 // think 思考阶段：让 LLM 决定下一步行动
@@ -2067,9 +2187,59 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	}
 
 	tools = optimizeModelToolSurface(tools)
+	if len(allowed) == 0 {
+		tools = projectSimpleGoalToolSurface(goal, tools)
+	}
 	tools = loop.compactToolSurfaceToBudget(tools)
 	sortToolDefinitionsByName(tools)
 	return tools, nil
+}
+
+func projectSimpleGoalToolSurface(goal string, tools []types.ToolDefinition) []types.ToolDefinition {
+	allowed := simpleGoalToolNames(goal)
+	if len(allowed) == 0 || len(tools) == 0 {
+		return tools
+	}
+	projected := make([]types.ToolDefinition, 0, len(allowed))
+	for _, definition := range tools {
+		if allowed[strings.ToLower(strings.TrimSpace(definition.Name))] {
+			projected = append(projected, definition)
+		}
+	}
+	if len(projected) == 0 {
+		return tools
+	}
+	return projected
+}
+
+func simpleGoalToolNames(goal string) map[string]bool {
+	normalized := strings.ToLower(strings.TrimSpace(goal))
+	if normalized == "" || len([]rune(normalized)) > 120 || strings.ContainsAny(normalized, "\n;&|") {
+		return nil
+	}
+	fields := strings.Fields(normalized)
+	if len(fields) == 0 || len(fields) > 8 {
+		return nil
+	}
+	first := fields[0]
+	switch {
+	case first == "ls" || first == "dir" || strings.HasPrefix(normalized, "list files") ||
+		strings.HasPrefix(normalized, "list directory") || strings.HasPrefix(normalized, "列出文件") ||
+		strings.HasPrefix(normalized, "列出目录"):
+		return map[string]bool{"ls": true, "glob": true}
+	case strings.HasPrefix(normalized, "read file") || strings.HasPrefix(normalized, "view file") ||
+		strings.HasPrefix(normalized, "show file") || strings.HasPrefix(normalized, "读取文件") ||
+		strings.HasPrefix(normalized, "查看文件"):
+		return map[string]bool{"view": true}
+	case strings.HasPrefix(normalized, "find file") || strings.HasPrefix(normalized, "search files") ||
+		strings.HasPrefix(normalized, "grep ") || strings.HasPrefix(normalized, "搜索文件") ||
+		strings.HasPrefix(normalized, "查找文件"):
+		return map[string]bool{"grep": true, "glob": true}
+	case normalized == "pwd" || normalized == "date" || normalized == "whoami" || normalized == "git status":
+		return map[string]bool{"bash": true, "execute_shell_command": true}
+	default:
+		return nil
+	}
 }
 
 func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefinition {

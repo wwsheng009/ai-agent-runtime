@@ -56,6 +56,9 @@ type RuntimeConfig struct {
 // AgentConfig Agent 配置
 type AgentConfig struct {
 	MaxMaxSteps          int           `yaml:"maxSteps" json:"maxSteps"`
+	MaxToolCalls         int           `yaml:"maxToolCalls" json:"maxToolCalls"`
+	MaxExplorationSteps  int           `yaml:"maxExplorationSteps" json:"maxExplorationSteps"`
+	MaxRepeatedToolCalls int           `yaml:"maxRepeatedToolCalls" json:"maxRepeatedToolCalls"`
 	DefaultProvider      string        `yaml:"defaultProvider,omitempty" json:"defaultProvider,omitempty"`
 	DefaultModel         string        `yaml:"defaultModel" json:"defaultModel"`
 	EnableMemory         bool          `yaml:"enableMemory" json:"enableMemory"`
@@ -194,12 +197,18 @@ type CheckpointConfig struct {
 
 // BackgroundConfig controls background task persistence.
 type BackgroundConfig struct {
-	StorePath         string        `yaml:"storePath" json:"storePath"`
-	StoreDSN          string        `yaml:"storeDSN" json:"storeDSN"`
-	LogDir            string        `yaml:"logDir" json:"logDir"`
-	MaxOutputBytes    int           `yaml:"maxOutputBytes" json:"maxOutputBytes"`
-	MaxConcurrentJobs int           `yaml:"maxConcurrentJobs" json:"maxConcurrentJobs"`
-	DefaultTimeout    time.Duration `yaml:"defaultTimeout" json:"defaultTimeout"`
+	StorePath               string          `yaml:"storePath" json:"storePath"`
+	StoreDSN                string          `yaml:"storeDSN" json:"storeDSN"`
+	LogDir                  string          `yaml:"logDir" json:"logDir"`
+	MaxOutputBytes          int             `yaml:"maxOutputBytes" json:"maxOutputBytes"`
+	MaxConcurrentJobs       int             `yaml:"maxConcurrentJobs" json:"maxConcurrentJobs"`
+	DefaultTimeout          time.Duration   `yaml:"defaultTimeout" json:"defaultTimeout"`
+	MonitorInterval         time.Duration   `yaml:"monitorInterval" json:"monitorInterval"`
+	HeartbeatTimeout        time.Duration   `yaml:"heartbeatTimeout" json:"heartbeatTimeout"`
+	LaunchMaxAttempts       int             `yaml:"launchMaxAttempts" json:"launchMaxAttempts"`
+	RetryBackoff            time.Duration   `yaml:"retryBackoff" json:"retryBackoff"`
+	RecoveryMaxAttempts     int             `yaml:"recoveryMaxAttempts" json:"recoveryMaxAttempts"`
+	RecoveryBackoffSchedule []time.Duration `yaml:"recoveryBackoffSchedule" json:"recoveryBackoffSchedule"`
 }
 
 // ImagesConfig controls HTTP behavior for runtime-generated images.
@@ -277,6 +286,9 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 	return &RuntimeConfig{
 		Agent: AgentConfig{
 			MaxMaxSteps:          0,
+			MaxToolCalls:         0,
+			MaxExplorationSteps:  0,
+			MaxRepeatedToolCalls: 0,
 			DefaultProvider:      "",
 			DefaultModel:         "claude-3-5-sonnet",
 			EnableMemory:         true,
@@ -285,7 +297,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			EnableParallelTools:  true,
 			MaxMemorySize:        1000,
 			MaxParallelToolCalls: 4,
-			Timeout:              5 * time.Minute,
+			Timeout:              0,
 			DefaultPlanningMode:  "",
 		},
 		Agents: AgentsConfig{
@@ -340,8 +352,15 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			MaxFileBytes: 1 * 1024 * 1024,
 		},
 		Background: BackgroundConfig{
-			MaxOutputBytes:    1 * 1024 * 1024,
-			MaxConcurrentJobs: 2,
+			MaxOutputBytes:          1 * 1024 * 1024,
+			MaxConcurrentJobs:       2,
+			DefaultTimeout:          0,
+			MonitorInterval:         250 * time.Millisecond,
+			HeartbeatTimeout:        30 * time.Second,
+			LaunchMaxAttempts:       3,
+			RetryBackoff:            500 * time.Millisecond,
+			RecoveryMaxAttempts:     -1,
+			RecoveryBackoffSchedule: []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute},
 		},
 		Images: ImagesConfig{
 			CacheMaxAge: time.Hour,
@@ -798,6 +817,20 @@ func ValidateBackgroundConfig(config *BackgroundConfig) error {
 	if config.DefaultTimeout < 0 {
 		return errors.New(errors.ErrValidationFailed, "background.defaultTimeout cannot be negative")
 	}
+	if config.MonitorInterval < 0 || config.HeartbeatTimeout < 0 || config.RetryBackoff < 0 {
+		return errors.New(errors.ErrValidationFailed, "background watchdog durations cannot be negative")
+	}
+	if config.LaunchMaxAttempts < 0 {
+		return errors.New(errors.ErrValidationFailed, "background.launchMaxAttempts cannot be negative")
+	}
+	if config.RecoveryMaxAttempts < -1 {
+		return errors.New(errors.ErrValidationFailed, "background.recoveryMaxAttempts must be -1 or greater")
+	}
+	for _, delay := range config.RecoveryBackoffSchedule {
+		if delay <= 0 {
+			return errors.New(errors.ErrValidationFailed, "background.recoveryBackoffSchedule entries must be positive")
+		}
+	}
 	return nil
 }
 
@@ -906,8 +939,8 @@ func ValidateAgentConfig(config *AgentConfig) error {
 	if config.MaxMemorySize < 0 {
 		return errors.New(errors.ErrValidationFailed, "maxMemorySize cannot be negative")
 	}
-	if config.Timeout <= 0 {
-		return errors.New(errors.ErrValidationFailed, "timeout must be positive")
+	if config.Timeout < 0 {
+		return errors.New(errors.ErrValidationFailed, "timeout cannot be negative")
 	}
 	if config.DefaultPlanningMode != "" {
 		mode := strings.ToLower(strings.TrimSpace(config.DefaultPlanningMode))
@@ -919,6 +952,9 @@ func ValidateAgentConfig(config *AgentConfig) error {
 	}
 	if config.MaxParallelToolCalls < 0 {
 		return errors.New(errors.ErrValidationFailed, "maxParallelToolCalls cannot be negative")
+	}
+	if config.MaxToolCalls < 0 || config.MaxExplorationSteps < 0 || config.MaxRepeatedToolCalls < 0 {
+		return errors.New(errors.ErrValidationFailed, "agent execution limits cannot be negative")
 	}
 	return nil
 }

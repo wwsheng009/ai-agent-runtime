@@ -1,10 +1,26 @@
 version: "v1"
 
 agent:
-  # Agent runs are unbounded by default. Set a positive value only as an explicit opt-in limit.
+  # The model decides when the run is complete. Positive limits are explicit
+  # operator policies; zero keeps the normal agent loop unbounded.
   maxSteps: 0
+  maxToolCalls: 0
+  maxExplorationSteps: 0
+  maxRepeatedToolCalls: 0
+  timeout: 0s
   enableParallelTools: true
   maxParallelToolCalls: 4
+
+background:
+  # Background tools are also unbounded unless timeout_sec is supplied.
+  defaultTimeout: 0s
+  monitorInterval: 250ms
+  heartbeatTimeout: 30s
+  launchMaxAttempts: 3
+  retryBackoff: 500ms
+  # -1 keeps explicitly rerunnable jobs recovering until they are cancelled.
+  recoveryMaxAttempts: -1
+  recoveryBackoffSchedule: [30s, 1m, 2m, 3m, 5m]
 
 context:
   # Used only when neither provider/model capability nor context.maxPromptTokens

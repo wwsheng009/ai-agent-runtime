@@ -82,6 +82,24 @@ func TestValidateAgentConfig_ParallelToolDefaults(t *testing.T) {
 	require.Error(t, ValidateRuntimeConfig(cfg))
 }
 
+func TestDefaultRuntimeConfigLeavesAgentCompletionToTheModel(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	require.Zero(t, cfg.Agent.MaxMaxSteps)
+	require.Zero(t, cfg.Agent.MaxToolCalls)
+	require.Zero(t, cfg.Agent.MaxExplorationSteps)
+	require.Zero(t, cfg.Agent.MaxRepeatedToolCalls)
+	require.Zero(t, cfg.Agent.Timeout)
+	require.Zero(t, cfg.Background.DefaultTimeout)
+	require.Equal(t, 3, cfg.Background.LaunchMaxAttempts)
+	require.Equal(t, 30*time.Second, cfg.Background.HeartbeatTimeout)
+	require.Equal(t, -1, cfg.Background.RecoveryMaxAttempts)
+	require.Equal(t, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}, cfg.Background.RecoveryBackoffSchedule)
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.Agent.Timeout = -time.Second
+	require.Error(t, ValidateRuntimeConfig(cfg))
+}
+
 func TestValidateAgentsConfig_DefaultsAndValidation(t *testing.T) {
 	cfg := DefaultRuntimeConfig()
 	require.Equal(t, 6, cfg.Agents.MaxThreads)

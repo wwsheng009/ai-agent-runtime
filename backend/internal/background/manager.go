@@ -20,30 +20,70 @@ import (
 
 // Config controls background execution defaults.
 type Config struct {
-	MaxOutputBytes    int
-	DefaultTimeout    time.Duration
-	StorePath         string
-	StoreDSN          string
-	LogDir            string
-	MaxConcurrentJobs int
-	Retention         time.Duration
-	CleanupInterval   time.Duration
-	EventHandler      func(JobEvent)
+	MaxOutputBytes          int
+	DefaultTimeout          time.Duration
+	MonitorInterval         time.Duration
+	HeartbeatTimeout        time.Duration
+	LaunchMaxAttempts       int
+	RetryBackoff            time.Duration
+	RecoveryMaxAttempts     int
+	RecoveryBackoffSchedule []time.Duration
+	StorePath               string
+	StoreDSN                string
+	LogDir                  string
+	MaxConcurrentJobs       int
+	Retention               time.Duration
+	CleanupInterval         time.Duration
+	EventHandler            func(JobEvent)
 }
 
 // DefaultConfig returns a conservative default config.
 func DefaultConfig() Config {
 	return Config{
-		MaxOutputBytes:    1 * 1024 * 1024, // 1MB
-		DefaultTimeout:    0,
-		StorePath:         "",
-		StoreDSN:          "",
-		LogDir:            "",
-		MaxConcurrentJobs: 2,
-		Retention:         30 * 24 * time.Hour,
-		CleanupInterval:   time.Hour,
-		EventHandler:      nil,
+		MaxOutputBytes:          1 * 1024 * 1024, // 1MB
+		DefaultTimeout:          0,
+		MonitorInterval:         250 * time.Millisecond,
+		HeartbeatTimeout:        30 * time.Second,
+		LaunchMaxAttempts:       3,
+		RetryBackoff:            500 * time.Millisecond,
+		RecoveryMaxAttempts:     -1,
+		RecoveryBackoffSchedule: defaultBackgroundRecoverySchedule(),
+		StorePath:               "",
+		StoreDSN:                "",
+		LogDir:                  "",
+		MaxConcurrentJobs:       2,
+		Retention:               30 * 24 * time.Hour,
+		CleanupInterval:         time.Hour,
+		EventHandler:            nil,
 	}
+}
+
+func defaultBackgroundRecoverySchedule() []time.Duration {
+	return []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}
+}
+
+func normalizeBackgroundRecoverySchedule(schedule []time.Duration) []time.Duration {
+	normalized := make([]time.Duration, 0, len(schedule))
+	for _, delay := range schedule {
+		if delay > 0 {
+			normalized = append(normalized, delay)
+		}
+	}
+	return normalized
+}
+
+func backgroundRecoveryDelay(schedule []time.Duration, attempt int) time.Duration {
+	if len(schedule) == 0 {
+		return 0
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	index := attempt - 1
+	if index >= len(schedule) {
+		index = len(schedule) - 1
+	}
+	return schedule[index]
 }
 
 // Manager executes background tasks and retains output.
@@ -82,6 +122,25 @@ func NewManager(cfg Config) *Manager {
 	}
 	if cfg.MaxConcurrentJobs <= 0 {
 		cfg.MaxConcurrentJobs = DefaultConfig().MaxConcurrentJobs
+	}
+	if cfg.MonitorInterval <= 0 {
+		cfg.MonitorInterval = DefaultConfig().MonitorInterval
+	}
+	if cfg.HeartbeatTimeout <= 0 {
+		cfg.HeartbeatTimeout = DefaultConfig().HeartbeatTimeout
+	}
+	if cfg.LaunchMaxAttempts <= 0 {
+		cfg.LaunchMaxAttempts = DefaultConfig().LaunchMaxAttempts
+	}
+	if cfg.RetryBackoff <= 0 {
+		cfg.RetryBackoff = DefaultConfig().RetryBackoff
+	}
+	if cfg.RecoveryMaxAttempts == 0 {
+		cfg.RecoveryMaxAttempts = DefaultConfig().RecoveryMaxAttempts
+	}
+	cfg.RecoveryBackoffSchedule = normalizeBackgroundRecoverySchedule(cfg.RecoveryBackoffSchedule)
+	if len(cfg.RecoveryBackoffSchedule) == 0 {
+		cfg.RecoveryBackoffSchedule = defaultBackgroundRecoverySchedule()
 	}
 	if cfg.Retention == 0 {
 		cfg.Retention = DefaultConfig().Retention
@@ -441,7 +500,7 @@ func (m *Manager) removeOwnedJobArtifacts(job Job) {
 		return
 	}
 	paths := []string{job.LogPath}
-	for _, key := range []string{backgroundMetaStatusPath, backgroundMetaRunnerPath} {
+	for _, key := range []string{backgroundMetaStatusPath, backgroundMetaRunnerPath, backgroundMetaHeartbeatPath} {
 		if path, ok := stringMetadataValue(job.Metadata, key); ok {
 			paths = append(paths, path)
 		}
@@ -912,7 +971,11 @@ func (m *Manager) pendingCandidates() (int, []*managedJob) {
 		managed.mu.RLock()
 		status := managed.info.Status
 		scheduled := managed.scheduled
+		_, waitingForRecovery := stringMetadataValue(managed.info.Metadata, backgroundMetaNextRecoveryAt)
 		managed.mu.RUnlock()
+		if scheduled && waitingForRecovery {
+			continue
+		}
 		if status == StatusRunning || scheduled {
 			active++
 			continue
@@ -975,17 +1038,12 @@ func (m *Manager) recoverPersistedJobs(ctx context.Context) {
 			req := requestFromJob(job)
 			if normalizeRestartPolicy(req.RestartPolicy) == RestartPolicyRerun {
 				recovered := job
-				recovered.Status = StatusPending
 				recovered.RestartPolicy = RestartPolicyRerun
-				recovered.Message = "background manager restarted; rerunning job"
-				recovered.StartedAt = nil
-				recovered.FinishedAt = nil
-				recovered.ExitCode = nil
 				if recovered.Metadata == nil {
 					recovered.Metadata = map[string]interface{}{}
 				}
-				recovered.Metadata["recovery_reason"] = recovered.Message
-				_ = m.store.UpdateJob(context.Background(), recovered)
+				reason := "background manager restarted before the detached process outcome was recorded"
+				recovered.Metadata["recovery_reason"] = reason
 				managed := m.managedJobFromStored(recovered)
 				if managed == nil {
 					continue
@@ -995,11 +1053,27 @@ func (m *Manager) recoverPersistedJobs(ctx context.Context) {
 					m.jobs[job.ID] = managed
 				}
 				m.mu.Unlock()
-				m.appendJobEvent(context.Background(), job.ID, "recovered_requeued", map[string]interface{}{
-					"status":          recovered.Status,
-					"previous_status": StatusRunning,
-					"restart_policy":  string(RestartPolicyRerun),
-				})
+				m.jobWG.Add(1)
+				go func(jobID string, recoveredJob *managedJob, recoveryReason string) {
+					defer m.jobWG.Done()
+					recoveryQueued := m.resumeDetachedRecovery(recoveredJob, recoveryReason)
+					if !recoveryQueued {
+						recoveryQueued = m.scheduleDetachedRecovery(recoveredJob, "manager_restarted", recoveryReason)
+					}
+					if !recoveryQueued {
+						m.orphanJob(recoveredJob, "automatic recovery attempts exhausted after background manager restart")
+						return
+					}
+					current := recoveredJob.snapshot()
+					if current == nil || current.Status != StatusPending {
+						return
+					}
+					m.appendJobEvent(context.Background(), jobID, "recovered_requeued", map[string]interface{}{
+						"status":          current.Status,
+						"previous_status": StatusRunning,
+						"restart_policy":  string(RestartPolicyRerun),
+					})
+				}(job.ID, managed, reason)
 				continue
 			}
 			recovered := job
@@ -1124,7 +1198,65 @@ func decorateTaskOutputResult(result TaskOutputResult, job Job) TaskOutputResult
 	if value, ok := stringMetadataValue(job.Metadata, "cancel_source"); ok {
 		result.CancelSource = value
 	}
+	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaWatchdogState); ok {
+		result.WatchdogState = value
+	}
+	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaWatchdogCode); ok {
+		result.WatchdogErrorCode = value
+	}
+	if value, ok := intMetadataValue(job.Metadata, "launch_attempt"); ok {
+		result.LaunchAttempt = value
+	}
+	if value, ok := intMetadataValue(job.Metadata, "launch_max_attempts"); ok {
+		result.LaunchMaxAttempts = value
+	}
+	if value, ok := intMetadataValue(job.Metadata, backgroundMetaRecoveryAttempt); ok {
+		result.RecoveryAttempt = value
+	}
+	if value, ok := intMetadataValue(job.Metadata, backgroundMetaRecoveryMax); ok {
+		result.RecoveryMaxAttempts = value
+	}
+	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaNextRecoveryAt); ok {
+		result.NextRecoveryAt = value
+	}
+	decorateTaskOutputHealth(&result, job, time.Now().UTC())
 	return result
+}
+
+func decorateTaskOutputHealth(result *TaskOutputResult, job Job, now time.Time) {
+	if result == nil {
+		return
+	}
+	if pid, ok := detachedPID(job.Metadata); ok {
+		health := inspectProcess(pid)
+		switch {
+		case health.Zombie:
+			result.ProcessState = watchdogStateZombie
+		case !health.Running:
+			result.ProcessState = watchdogStateMissing
+		case !detachedProcessMatches(job.Metadata, health):
+			result.ProcessState = watchdogStatePIDReused
+		default:
+			result.ProcessState = "running"
+		}
+	}
+	if path, ok := stringMetadataValue(job.Metadata, backgroundMetaHeartbeatPath); ok {
+		if info, err := os.Stat(path); err == nil {
+			result.HeartbeatAgeMs = nonNegativeDuration(now.Sub(info.ModTime())).Milliseconds()
+		}
+	}
+	if info, err := os.Stat(strings.TrimSpace(job.LogPath)); err == nil && info.Size() > 0 {
+		lastOutputAt := info.ModTime().UTC()
+		result.LastOutputAt = lastOutputAt.Format(time.RFC3339Nano)
+		result.QuietForMs = nonNegativeDuration(now.Sub(lastOutputAt)).Milliseconds()
+	}
+}
+
+func nonNegativeDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func intMetadataValue(metadata map[string]interface{}, key string) (int, bool) {

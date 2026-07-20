@@ -49,17 +49,28 @@ type TaskOutputArgs struct {
 
 // TaskOutputResult returns output chunk information.
 type TaskOutputResult struct {
-	JobID              string `json:"job_id"`
-	Status             string `json:"status"`
-	Output             string `json:"output,omitempty"`
-	NextOffset         int64  `json:"next_offset"`
-	ExitCode           *int   `json:"exit_code,omitempty"`
-	Message            string `json:"message,omitempty"`
-	ErrorCode          string `json:"error_code,omitempty"`
-	TimeoutRequestedMs int64  `json:"timeout_requested_ms,omitempty"`
-	TimeoutEffectiveMs int64  `json:"timeout_effective_ms,omitempty"`
-	TimeoutSource      string `json:"timeout_source,omitempty"`
-	CancelSource       string `json:"cancel_source,omitempty"`
+	JobID               string `json:"job_id"`
+	Status              string `json:"status"`
+	Output              string `json:"output,omitempty"`
+	NextOffset          int64  `json:"next_offset"`
+	ExitCode            *int   `json:"exit_code,omitempty"`
+	Message             string `json:"message,omitempty"`
+	ErrorCode           string `json:"error_code,omitempty"`
+	TimeoutRequestedMs  int64  `json:"timeout_requested_ms,omitempty"`
+	TimeoutEffectiveMs  int64  `json:"timeout_effective_ms,omitempty"`
+	TimeoutSource       string `json:"timeout_source,omitempty"`
+	CancelSource        string `json:"cancel_source,omitempty"`
+	WatchdogState       string `json:"watchdog_state,omitempty"`
+	WatchdogErrorCode   string `json:"watchdog_error_code,omitempty"`
+	LaunchAttempt       int    `json:"launch_attempt,omitempty"`
+	LaunchMaxAttempts   int    `json:"launch_max_attempts,omitempty"`
+	ProcessState        string `json:"process_state,omitempty"`
+	HeartbeatAgeMs      int64  `json:"heartbeat_age_ms,omitempty"`
+	LastOutputAt        string `json:"last_output_at,omitempty"`
+	QuietForMs          int64  `json:"quiet_for_ms,omitempty"`
+	RecoveryAttempt     int    `json:"recovery_attempt,omitempty"`
+	RecoveryMaxAttempts int    `json:"recovery_max_attempts,omitempty"`
+	NextRecoveryAt      string `json:"next_recovery_at,omitempty"`
 }
 
 // JobFilter filters background job queries.
