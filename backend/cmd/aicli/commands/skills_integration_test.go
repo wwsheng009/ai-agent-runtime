@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -1385,6 +1386,7 @@ func TestBuildSkillsProviderConfigsPropagatesRetryPolicyFromAgentConfig(t *testi
 				MaxElapsedTime:  30 * time.Second,
 				Multiplier:      1.8,
 				Randomization:   0.25,
+				Schedule:        []time.Duration{time.Second, 2 * time.Second},
 			},
 			Items: map[string]config.Provider{
 				"openai-main": {
@@ -1443,6 +1445,9 @@ func TestBuildSkillsProviderConfigsPropagatesRetryPolicyFromAgentConfig(t *testi
 	}
 	if providerCfg.RetryTuning.Randomization != 0.25 {
 		t.Fatalf("expected randomization 0.25, got %v", providerCfg.RetryTuning.Randomization)
+	}
+	if !reflect.DeepEqual(providerCfg.RetryTuning.Schedule, []time.Duration{time.Second, 2 * time.Second}) {
+		t.Fatalf("unexpected retry schedule: %v", providerCfg.RetryTuning.Schedule)
 	}
 	if len(providerCfg.RetryRules) != 1 {
 		t.Fatalf("expected 1 retry rule, got %d", len(providerCfg.RetryRules))

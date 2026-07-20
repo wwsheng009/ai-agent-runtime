@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -291,6 +292,7 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		LoopConfig:   buildLocalChatLoopConfig(runtimeConfig, session, requestedReasoningEffort),
 		PrepareRun:   localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
 		PersistHook:  localGoalPersistHook(sessionStore),
+		RecoverStale: true,
 		OnStop: func() {
 			if leaseHandle != nil {
 				_ = leaseHandle.Release(context.Background())
@@ -318,13 +320,40 @@ func acquireLocalChatSessionLease(ctx context.Context, store runtimechat.Runtime
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return runtimechat.AcquireSessionLease(ctx, leaseStore, runtimechat.LeaseRequest{
+	req := runtimechat.LeaseRequest{
 		SessionID: sessionID,
 		OwnerID:   localChatSessionLeaseOwnerID(localChatSessionActorLeaseOwnerKind, sessionID),
 		OwnerKind: localChatSessionActorLeaseOwnerKind,
 		PID:       os.Getpid(),
 		Hostname:  localChatHostname(),
-	})
+	}
+	handle, err := runtimechat.AcquireSessionLease(ctx, leaseStore, req)
+	if err == nil {
+		return handle, nil
+	}
+	var conflict *runtimechat.LeaseConflictError
+	if !errors.As(err, &conflict) || !localChatSessionLeaseOwnerStopped(conflict.Lease) {
+		return nil, err
+	}
+	// Release is owner-conditional, so a concurrent live takeover cannot be
+	// deleted between the conflict read and this stale-owner cleanup.
+	if releaseErr := leaseStore.ReleaseLease(ctx, sessionID, conflict.Lease.OwnerID); releaseErr != nil {
+		return nil, fmt.Errorf("release stale local session lease: %w", releaseErr)
+	}
+	return runtimechat.AcquireSessionLease(ctx, leaseStore, req)
+}
+
+func localChatSessionLeaseOwnerStopped(lease *runtimechat.SessionLease) bool {
+	if lease == nil || lease.PID <= 0 || !strings.EqualFold(strings.TrimSpace(lease.OwnerKind), localChatSessionActorLeaseOwnerKind) {
+		return false
+	}
+	leaseHost := strings.TrimSpace(lease.Hostname)
+	localHost := localChatHostname()
+	if leaseHost == "" || localHost == "" || !strings.EqualFold(leaseHost, localHost) {
+		return false
+	}
+	running, known := localChatProcessRunning(lease.PID)
+	return known && !running
 }
 
 func localChatSessionLeaseOwnerID(ownerKind, scope string) string {
@@ -386,6 +415,10 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 	if runtimeConfig != nil {
 		agentConfig.MaxSteps = agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps)
+		agentConfig.MaxToolCalls = runtimeConfig.Agent.MaxToolCalls
+		agentConfig.MaxRunDuration = runtimeConfig.Agent.Timeout
+		agentConfig.MaxExplorationSteps = runtimeConfig.Agent.MaxExplorationSteps
+		agentConfig.MaxRepeatedToolCalls = runtimeConfig.Agent.MaxRepeatedToolCalls
 	}
 	workspaceMode := resolveLocalChatWorkspaceMode(runtimeConfig)
 	workspaceContextEnabled := workspaceMode != "" && !strings.EqualFold(workspaceMode, contextmgr.WorkspaceModeDisabled)
@@ -594,6 +627,10 @@ func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *
 	}
 	if runtimeConfig != nil {
 		config.MaxSteps = agent.NormalizeMaxSteps(runtimeConfig.Agent.MaxMaxSteps)
+		config.MaxToolCalls = runtimeConfig.Agent.MaxToolCalls
+		config.MaxRunDuration = runtimeConfig.Agent.Timeout
+		config.MaxExplorationSteps = runtimeConfig.Agent.MaxExplorationSteps
+		config.MaxRepeatedToolCalls = runtimeConfig.Agent.MaxRepeatedToolCalls
 		config.EnableParallelTools = runtimeConfig.Agent.EnableParallelTools
 		if runtimeConfig.Agent.MaxParallelToolCalls > 0 {
 			config.MaxParallelToolCalls = runtimeConfig.Agent.MaxParallelToolCalls
@@ -789,6 +826,9 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 	if providerName == "" {
 		return nil
 	}
+	retryTuning := runtimellm.RetryTuningFromAgentConfig(session.Config)
+	retryRules := runtimellm.RetryRulesFromAgentConfig(session.Config)
+	maxRetries := runtimellm.ProviderMaxRetriesFromAgentConfig(session.Config)
 	if _, err := runtime.GetProvider(providerName); err != nil {
 		provider, buildErr := runtimellm.NewProvider(&runtimellm.ProviderConfig{
 			Type:              session.Provider.GetType(),
@@ -796,7 +836,9 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 			BaseURL:           session.Provider.BaseURL,
 			APIPath:           session.Provider.APIPath,
 			Timeout:           session.Provider.Timeout,
-			MaxRetries:        3,
+			MaxRetries:        maxRetries,
+			RetryTuning:       retryTuning,
+			RetryRules:        retryRules,
 			DefaultModel:      session.Provider.DefaultModel,
 			SupportedModels:   append([]string(nil), session.Provider.SupportedModels...),
 			ModelMappings:     cloneStringMap(session.Provider.ModelMappings),
@@ -847,12 +889,18 @@ func buildLocalChatBackgroundManager(runtimeConfig *runtimecfg.RuntimeConfig) *b
 		return nil
 	}
 	return background.NewManager(background.Config{
-		MaxOutputBytes:    cfg.MaxOutputBytes,
-		DefaultTimeout:    cfg.DefaultTimeout,
-		StorePath:         strings.TrimSpace(cfg.StorePath),
-		StoreDSN:          strings.TrimSpace(cfg.StoreDSN),
-		LogDir:            strings.TrimSpace(cfg.LogDir),
-		MaxConcurrentJobs: cfg.MaxConcurrentJobs,
+		MaxOutputBytes:          cfg.MaxOutputBytes,
+		DefaultTimeout:          cfg.DefaultTimeout,
+		MonitorInterval:         cfg.MonitorInterval,
+		HeartbeatTimeout:        cfg.HeartbeatTimeout,
+		LaunchMaxAttempts:       cfg.LaunchMaxAttempts,
+		RetryBackoff:            cfg.RetryBackoff,
+		RecoveryMaxAttempts:     cfg.RecoveryMaxAttempts,
+		RecoveryBackoffSchedule: append([]time.Duration(nil), cfg.RecoveryBackoffSchedule...),
+		StorePath:               strings.TrimSpace(cfg.StorePath),
+		StoreDSN:                strings.TrimSpace(cfg.StoreDSN),
+		LogDir:                  strings.TrimSpace(cfg.LogDir),
+		MaxConcurrentJobs:       cfg.MaxConcurrentJobs,
 	})
 }
 

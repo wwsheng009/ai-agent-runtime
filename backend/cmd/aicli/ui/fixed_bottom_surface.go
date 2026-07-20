@@ -16,13 +16,18 @@ type FixedBottomSurface struct {
 	statusLine             string
 	popupLines             []string
 	popupOwner             string
+	popupInstance          uint64
+	nextPopupInstance      uint64
+	popupViewport          *PopupViewportSpec
 	popupBelowPrompt       bool
 	popupStack             []fixedBottomPopupState
 	composerLine           string
 	promptNoticeLine       string
+	promptEditorStatusLine string
 	promptLine             string
 	promptInput            string
 	promptReservedRows     int
+	promptViewportStart    int
 	promptCursorRow        int
 	promptCursorCol        int
 	promptRenderedStartRow int
@@ -40,9 +45,27 @@ type FixedBottomSurface struct {
 type fixedBottomPopupState struct {
 	lines             []string
 	owner             string
+	instance          uint64
+	viewport          *PopupViewportSpec
 	composerLine      string
 	popupBelowPrompt  bool
 	popupReservedRows int
+}
+
+type PopupHandle struct {
+	owner    string
+	instance uint64
+}
+
+type PopupViewportSpec struct {
+	HeaderLines []string
+	BodyLines   []string
+	FooterLines []string
+	Anchor      int
+}
+
+func (h PopupHandle) Valid() bool {
+	return strings.TrimSpace(h.owner) != "" && h.instance != 0
 }
 
 func NewFixedBottomSurface(term *Terminal) *FixedBottomSurface {
@@ -106,6 +129,8 @@ func (s *FixedBottomSurface) clearPopupStateLocked(clearStack bool) {
 	}
 	s.popupLines = nil
 	s.popupOwner = ""
+	s.popupInstance = 0
+	s.popupViewport = nil
 	s.popupBelowPrompt = false
 	s.popupReservedRows = 0
 	if clearStack {
@@ -136,9 +161,11 @@ func (s *FixedBottomSurface) clearPromptStateLocked(clearNotice bool) {
 	if clearNotice {
 		s.promptNoticeLine = ""
 	}
+	s.promptEditorStatusLine = ""
 	s.promptLine = ""
 	s.promptInput = ""
 	s.promptReservedRows = 0
+	s.promptViewportStart = 0
 	s.promptCursorRow = 0
 	s.promptCursorCol = 0
 	s.promptRenderedStartRow = 0
@@ -149,10 +176,19 @@ func (s *FixedBottomSurface) setPromptStateLocked(line string, input string, row
 	if s == nil {
 		return
 	}
+	s.refreshTerminalDimensionsLocked()
 	s.promptLine = line
 	s.promptInput = input
-	s.promptReservedRows = rows
-	s.promptCursorRow = cursorRow
+	visibleRows := rows
+	if maxRows := s.promptInputMaxVisibleRowsLocked(); visibleRows > maxRows {
+		visibleRows = maxRows
+	}
+	if visibleRows < 1 {
+		visibleRows = 1
+	}
+	s.promptViewportStart = boundedInteractiveInputViewportStart(rows, cursorRow, visibleRows, s.promptViewportStart)
+	s.promptReservedRows = visibleRows
+	s.promptCursorRow = cursorRow - s.promptViewportStart
 	s.promptCursorCol = cursorCol
 }
 
@@ -163,6 +199,74 @@ func (s *FixedBottomSurface) Enabled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.enabled
+}
+
+// PromptInputMaxVisibleRows returns the editor viewport budget that keeps one
+// output row, the status row, runtime notices, and a possible editor status
+// visible. Disabled surfaces retain the regular composer limit.
+func (s *FixedBottomSurface) PromptInputMaxVisibleRows() int {
+	if s == nil || s.terminal == nil {
+		return ChatComposerMaxVisibleRows
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return ChatComposerMaxVisibleRows
+	}
+	s.refreshTerminalDimensionsLocked()
+	return s.promptInputMaxVisibleRowsLocked()
+}
+
+func (s *FixedBottomSurface) refreshTerminalDimensionsLocked() {
+	if s == nil || s.terminal == nil || s.terminal.driver == nil || s.terminal.driver.stdout == nil {
+		return
+	}
+	width, height, err := s.terminal.driver.Size()
+	if err != nil || width <= 0 || height <= 0 {
+		return
+	}
+	s.terminal.width = width
+	s.terminal.height = height
+}
+
+func (s *FixedBottomSurface) promptInputMaxVisibleRowsLocked() int {
+	if s == nil || s.terminal == nil {
+		return ChatComposerMaxVisibleRows
+	}
+	height := s.terminal.Height()
+	if height <= 0 {
+		return ChatComposerMaxVisibleRows
+	}
+	const (
+		outputRows       = 1
+		statusRows       = 1
+		editorStatusRows = 1
+	)
+	rows := height - outputRows - statusRows - editorStatusRows - len(promptNoticeDisplayLines(s.promptNoticeLine))
+	if rows < 1 {
+		return 1
+	}
+	if rows > ChatComposerMaxVisibleRows {
+		return ChatComposerMaxVisibleRows
+	}
+	return rows
+}
+
+func (s *FixedBottomSurface) reflowPromptViewportLocked() {
+	if s == nil || s.terminal == nil || s.promptReservedRows < 1 {
+		return
+	}
+	width := s.terminal.Width()
+	if width <= 0 {
+		width = 80
+	}
+	totalRows := interactiveInputDisplayRows(
+		[]rune(s.promptInput),
+		terminalVisibleWidth(s.promptLine),
+		width,
+	)
+	cursorRow := s.promptViewportStart + s.promptCursorRow
+	s.setPromptStateLocked(s.promptLine, s.promptInput, totalRows, cursorRow, s.promptCursorCol)
 }
 
 func (s *FixedBottomSurface) BeginOutput() {
@@ -176,7 +280,6 @@ func (s *FixedBottomSurface) BeginOutput() {
 	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
-		s.resetScrollCompensationLocked()
 		s.moveToOutputLocked()
 	})
 }
@@ -190,14 +293,47 @@ func (s *FixedBottomSurface) PromptCursorPrefix(rowOffset, col int) (string, boo
 	if !s.enabled {
 		return "", false
 	}
+	var builder strings.Builder
+	s.appendApplyLayoutSequenceLocked(&builder)
 	row, column, ok := s.promptCursorPositionLocked(rowOffset, col)
 	if !ok {
 		return "", false
 	}
-	var builder strings.Builder
-	s.appendApplyLayoutSequenceLocked(&builder)
 	builder.WriteString(terminalMoveToSequence(row, column))
 	return builder.String(), true
+}
+
+// WritePromptEditorText resolves the prompt cursor and writes the editor ANSI
+// sequence while holding both surface and terminal write locks. This prevents
+// asynchronous status or popup updates from invalidating an absolute cursor
+// prefix between its calculation and use.
+func (s *FixedBottomSurface) WritePromptEditorText(writer io.Writer, rowOffset, col int, editorText string) bool {
+	if s == nil || s.terminal == nil || writer == nil || editorText == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return false
+	}
+	handled := false
+	WithTerminalWriteLock(func() {
+		var layout strings.Builder
+		s.appendApplyLayoutSequenceLocked(&layout)
+		row, column, ok := s.promptCursorPositionLocked(rowOffset, col)
+		if !ok {
+			return
+		}
+		var builder strings.Builder
+		builder.WriteString(cursorHideSequence)
+		builder.WriteString(layout.String())
+		builder.WriteString(terminalMoveToSequence(row, column))
+		builder.WriteString(editorText)
+		builder.WriteString(cursorShowSequence)
+		_, _ = io.WriteString(writer, builder.String())
+		handled = true
+	})
+	return handled
 }
 
 // WriteOutput moves the real terminal cursor into the scrollable output region
@@ -218,7 +354,9 @@ func (s *FixedBottomSurface) WriteOutput(writer io.Writer, text string) (int, er
 		s.applyLayoutLocked()
 		s.moveToOutputLocked()
 		n, err = io.WriteString(writer, normalizeFixedSurfaceOutputText(text))
-		s.resetScrollCompensationLocked()
+		if n > 0 {
+			s.markOutputWrittenLocked()
+		}
 		s.restoreStoredPromptCursorLocked()
 	})
 	return n, err, true
@@ -237,6 +375,7 @@ func (s *FixedBottomSurface) ShowPrompt(line string) bool {
 	s.promptLine = line
 	s.promptInput = ""
 	s.promptReservedRows = 1
+	s.promptViewportStart = 0
 	s.setPromptCursorToLineEndLocked(line)
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
@@ -267,6 +406,7 @@ func (s *FixedBottomSurface) ResetPrompt(line string, rows int) bool {
 		s.promptLine = line
 		s.promptInput = ""
 		s.promptReservedRows = 1
+		s.promptViewportStart = 0
 		s.setPromptCursorToLineEndLocked(line)
 		s.applyLayoutLocked()
 		s.renderPopupLocked()
@@ -307,6 +447,7 @@ func (s *FixedBottomSurface) SetPromptRows(rows int) bool {
 			s.clearPopupRenderStateLocked()
 		}
 		s.promptReservedRows = rows
+		s.promptViewportStart = 0
 		s.applyLayoutLocked()
 		s.renderPopupLocked()
 		s.renderStatusLocked()
@@ -329,6 +470,7 @@ func (s *FixedBottomSurface) SetPromptNoticeLine(line string) bool {
 		return true
 	}
 	s.promptNoticeLine = line
+	s.reflowPromptViewportLocked()
 	if !s.enabled {
 		return false
 	}
@@ -348,6 +490,36 @@ func (s *FixedBottomSurface) SetPromptNoticeLine(line string) bool {
 		if restorePromptCursor {
 			s.restoreStoredPromptCursorLocked()
 		}
+	})
+	return true
+}
+
+// SetPromptEditorStatusLine shows compact, editor-owned context above a
+// multiline draft. It is kept separate from runtime notices so queue and
+// approval feedback cannot be overwritten by cursor movement.
+func (s *FixedBottomSurface) SetPromptEditorStatusLine(line string) bool {
+	if s == nil || s.terminal == nil {
+		return false
+	}
+	line = strings.TrimRight(SanitizeTerminalText(line), "\r\n")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.promptEditorStatusLine == line {
+		return true
+	}
+	s.promptEditorStatusLine = line
+	s.reflowPromptViewportLocked()
+	if !s.enabled {
+		return false
+	}
+	WithTerminalWriteLock(func() {
+		s.terminal.HideCursor()
+		defer s.terminal.ShowCursor()
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.renderPromptRowsLocked(true)
+		s.restoreStoredPromptCursorLocked()
 	})
 	return true
 }
@@ -379,8 +551,10 @@ func (s *FixedBottomSurface) TrackPromptInputState(line string, input string, ro
 	if !s.enabled {
 		return false
 	}
-	needsRender := s.promptReservedRows != rows
+	previousRows := s.promptReservedRows
+	previousViewportStart := s.promptViewportStart
 	s.setPromptStateLocked(line, input, rows, cursorRow, cursorCol)
+	needsRender := previousRows != s.promptReservedRows || previousViewportStart != s.promptViewportStart
 	if needsRender {
 		WithTerminalWriteLock(func() {
 			s.terminal.HideCursor()
@@ -491,9 +665,11 @@ func (s *FixedBottomSurface) ClearPromptRows(rows int) bool {
 		s.applyLayoutLocked()
 		s.clearPromptRowsLocked(rows)
 		s.promptNoticeLine = ""
+		s.promptEditorStatusLine = ""
 		s.promptLine = ""
 		s.promptInput = ""
 		s.promptReservedRows = 0
+		s.promptViewportStart = 0
 		s.promptCursorRow = 0
 		s.promptCursorCol = 0
 		s.promptRenderedStartRow = 0
@@ -568,15 +744,43 @@ func (s *FixedBottomSurface) showPopupPreserveCursorForOwner(lines []string, own
 }
 
 func (s *FixedBottomSurface) ShowPopupInput(lines []string, prompt string) {
+	s.showPopupInputForOwner(lines, prompt, "", false)
+}
+
+func (s *FixedBottomSurface) ShowPopupInputForOwner(lines []string, prompt string, owner string) {
+	s.showPopupInputForOwner(lines, prompt, owner, false)
+}
+
+func (s *FixedBottomSurface) ShowPopupInputPreserveCursorForOwner(lines []string, prompt string, owner string) {
+	s.showPopupInputForOwner(lines, prompt, owner, true)
+}
+
+func (s *FixedBottomSurface) BeginPopupInputForOwner(lines []string, prompt string, owner string) PopupHandle {
+	return s.beginPopupInputForOwner(lines, prompt, owner, nil)
+}
+
+func (s *FixedBottomSurface) BeginPopupInputForOwnerWithViewport(lines []string, prompt string, owner string, viewport PopupViewportSpec) PopupHandle {
+	return s.beginPopupInputForOwner(lines, prompt, owner, &viewport)
+}
+
+func (s *FixedBottomSurface) beginPopupInputForOwner(lines []string, prompt string, owner string, viewport *PopupViewportSpec) PopupHandle {
 	if s == nil || s.terminal == nil {
-		return
+		return PopupHandle{}
 	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return PopupHandle{}
+	}
+	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
-	s.setActivePopupStateLocked(cloneAndSanitizePopupLines(lines), "", prompt, false)
-	if !s.enabled {
-		return
+	s.nextPopupInstance++
+	if s.nextPopupInstance == 0 {
+		s.nextPopupInstance++
+	}
+	handle := PopupHandle{owner: owner, instance: s.nextPopupInstance}
+	if !s.beginPopupInstanceLocked(cloneAndSanitizePopupLines(lines), prompt, handle, viewport) || !s.enabled {
+		return handle
 	}
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
@@ -584,28 +788,64 @@ func (s *FixedBottomSurface) ShowPopupInput(lines []string, prompt string) {
 		s.renderStatusLocked()
 		s.moveToPopupInputLocked()
 	})
+	return handle
 }
 
-func (s *FixedBottomSurface) ShowPopupInputPreserveCursor(lines []string, prompt string) {
+func (s *FixedBottomSurface) UpdatePopupInputForHandle(handle PopupHandle, lines []string, prompt string, preserveCursor bool) bool {
+	if s == nil || s.terminal == nil || !handle.Valid() {
+		return false
+	}
+	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	active := s.updatePopupInstanceLocked(handle, cloneAndSanitizePopupLines(lines), prompt)
+	if !active || !s.enabled {
+		return active
+	}
+	WithTerminalWriteLock(func() {
+		if preserveCursor {
+			s.terminal.SaveCursor()
+			defer s.terminal.RestoreCursor()
+		}
+		s.applyLayoutLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		if !preserveCursor {
+			s.moveToPopupInputLocked()
+		}
+	})
+	return true
+}
+
+func (s *FixedBottomSurface) showPopupInputForOwner(lines []string, prompt string, owner string, preserveCursor bool) {
 	if s == nil || s.terminal == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
-	if !s.setActivePopupStateLocked(cloneAndSanitizePopupLines(lines), "", prompt, false) {
+	if !s.setActivePopupStateLocked(cloneAndSanitizePopupLines(lines), strings.TrimSpace(owner), prompt, false) {
 		return
 	}
 	if !s.enabled {
 		return
 	}
 	WithTerminalWriteLock(func() {
-		s.terminal.SaveCursor()
-		defer s.terminal.RestoreCursor()
+		if preserveCursor {
+			s.terminal.SaveCursor()
+			defer s.terminal.RestoreCursor()
+		}
 		s.applyLayoutLocked()
 		s.renderPopupLocked()
 		s.renderStatusLocked()
+		if !preserveCursor {
+			s.moveToPopupInputLocked()
+		}
 	})
+}
+
+func (s *FixedBottomSurface) ShowPopupInputPreserveCursor(lines []string, prompt string) {
+	s.showPopupInputForOwner(lines, prompt, "", true)
 }
 
 func (s *FixedBottomSurface) ShowPendingPastePreview(lines int, text string) {
@@ -732,6 +972,44 @@ func (s *FixedBottomSurface) ClearPopupForOwnerPreserveCursor(owner string) {
 	})
 }
 
+func (s *FixedBottomSurface) ClearPopupHandlePreserveCursor(handle PopupHandle) {
+	if s == nil || s.terminal == nil || !handle.Valid() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.popupOwner != handle.owner || s.popupInstance != handle.instance {
+		s.removePopupInstanceFromStackLocked(handle)
+		return
+	}
+	wasBelowPrompt := s.bottomPaneStateLocked().popupExpandsBelowPrompt()
+	previousRows := s.popupRenderedRows
+	previousGapRows := s.popupRenderedGapRows
+	s.restorePopupStateFromStackLocked()
+	if !s.enabled {
+		return
+	}
+	restorePromptCursor := wasBelowPrompt || s.bottomPaneStateLocked().popupExpandsBelowPrompt()
+	WithTerminalWriteLock(func() {
+		if restorePromptCursor {
+			s.terminal.HideCursor()
+			defer s.terminal.ShowCursor()
+		} else {
+			s.terminal.SaveCursor()
+			defer s.terminal.RestoreCursor()
+		}
+		s.applyLayoutLocked()
+		s.clearPopupAreaLocked(previousRows, previousGapRows)
+		s.clearPopupRenderStateLocked()
+		s.renderPopupLocked()
+		s.renderStatusLocked()
+		s.renderPromptRowsLocked(true)
+		if restorePromptCursor {
+			s.restoreStoredPromptCursorLocked()
+		}
+	})
+}
+
 func (s *FixedBottomSurface) SetStatusLine(line string) {
 	if s == nil || s.terminal == nil {
 		return
@@ -825,6 +1103,8 @@ func (s *FixedBottomSurface) setActivePopupStateLocked(lines []string, owner str
 		s.popupStack = nil
 		s.popupLines = lines
 		s.popupOwner = ""
+		s.popupInstance = 0
+		s.popupViewport = nil
 		s.popupBelowPrompt = belowPrompt
 		s.popupReservedRows = reservedRows
 		s.composerLine = composerLine
@@ -832,6 +1112,8 @@ func (s *FixedBottomSurface) setActivePopupStateLocked(lines []string, owner str
 	}
 	if s.popupOwner == owner {
 		s.popupLines = lines
+		s.popupInstance = 0
+		s.popupViewport = nil
 		s.popupBelowPrompt = belowPrompt
 		s.popupReservedRows = reservedRows
 		s.composerLine = composerLine
@@ -841,6 +1123,7 @@ func (s *FixedBottomSurface) setActivePopupStateLocked(lines []string, owner str
 		s.upsertPopupStateInStackLocked(fixedBottomPopupState{
 			lines:             lines,
 			owner:             owner,
+			instance:          0,
 			composerLine:      composerLine,
 			popupBelowPrompt:  belowPrompt,
 			popupReservedRows: reservedRows,
@@ -851,6 +1134,8 @@ func (s *FixedBottomSurface) setActivePopupStateLocked(lines []string, owner str
 		s.upsertPopupStateInStackLocked(fixedBottomPopupState{
 			lines:             append([]string(nil), s.popupLines...),
 			owner:             s.popupOwner,
+			instance:          s.popupInstance,
+			viewport:          clonePopupViewportSpec(s.popupViewport),
 			composerLine:      s.composerLine,
 			popupBelowPrompt:  s.popupBelowPrompt,
 			popupReservedRows: s.popupReservedRows,
@@ -859,10 +1144,70 @@ func (s *FixedBottomSurface) setActivePopupStateLocked(lines []string, owner str
 	s.removePopupStateFromStackLocked(owner)
 	s.popupLines = lines
 	s.popupOwner = owner
+	s.popupInstance = 0
+	s.popupViewport = nil
 	s.popupBelowPrompt = belowPrompt
 	s.popupReservedRows = reservedRows
 	s.composerLine = composerLine
 	return true
+}
+
+func (s *FixedBottomSurface) beginPopupInstanceLocked(
+	lines []string,
+	composerLine string,
+	handle PopupHandle,
+	viewport *PopupViewportSpec,
+) bool {
+	state := fixedBottomPopupState{
+		lines:        append([]string(nil), lines...),
+		owner:        handle.owner,
+		instance:     handle.instance,
+		viewport:     clonePopupViewportSpec(viewport),
+		composerLine: composerLine,
+	}
+	if s.popupOwner != "" && popupOwnerPriority(handle.owner) < popupOwnerPriority(s.popupOwner) {
+		s.popupStack = append(s.popupStack, state)
+		return false
+	}
+	if s.popupOwner != "" || len(s.popupLines) > 0 || strings.TrimSpace(s.composerLine) != "" {
+		s.popupStack = append(s.popupStack, fixedBottomPopupState{
+			lines:             append([]string(nil), s.popupLines...),
+			owner:             s.popupOwner,
+			instance:          s.popupInstance,
+			viewport:          clonePopupViewportSpec(s.popupViewport),
+			composerLine:      s.composerLine,
+			popupBelowPrompt:  s.popupBelowPrompt,
+			popupReservedRows: s.popupReservedRows,
+		})
+	}
+	s.popupLines = state.lines
+	s.popupOwner = state.owner
+	s.popupInstance = state.instance
+	s.popupViewport = clonePopupViewportSpec(state.viewport)
+	s.popupBelowPrompt = false
+	s.popupReservedRows = 0
+	s.composerLine = state.composerLine
+	return true
+}
+
+func (s *FixedBottomSurface) updatePopupInstanceLocked(handle PopupHandle, lines []string, composerLine string) bool {
+	if s.popupOwner == handle.owner && s.popupInstance == handle.instance {
+		s.popupLines = lines
+		s.popupBelowPrompt = false
+		s.popupReservedRows = 0
+		s.composerLine = composerLine
+		return true
+	}
+	for i := len(s.popupStack) - 1; i >= 0; i-- {
+		if s.popupStack[i].owner == handle.owner && s.popupStack[i].instance == handle.instance {
+			s.popupStack[i].lines = append([]string(nil), lines...)
+			s.popupStack[i].popupBelowPrompt = false
+			s.popupStack[i].popupReservedRows = 0
+			s.popupStack[i].composerLine = composerLine
+			return false
+		}
+	}
+	return false
 }
 
 func (s *FixedBottomSurface) popupReservedRowsForUpdateLocked(lines []string, owner string, belowPrompt bool) int {
@@ -885,8 +1230,11 @@ func (s *FixedBottomSurface) upsertPopupStateInStackLocked(state fixedBottomPopu
 		return
 	}
 	state.lines = append([]string(nil), state.lines...)
+	state.viewport = clonePopupViewportSpec(state.viewport)
 	for i := range s.popupStack {
-		if s.popupStack[i].owner == state.owner {
+		sameLegacyOwner := state.instance == 0 && s.popupStack[i].instance == 0 && s.popupStack[i].owner == state.owner
+		sameInstance := state.instance != 0 && s.popupStack[i].owner == state.owner && s.popupStack[i].instance == state.instance
+		if sameLegacyOwner || sameInstance {
 			s.popupStack[i] = state
 			return
 		}
@@ -909,6 +1257,20 @@ func (s *FixedBottomSurface) removePopupStateFromStackLocked(owner string) {
 	s.popupStack = filtered
 }
 
+func (s *FixedBottomSurface) removePopupInstanceFromStackLocked(handle PopupHandle) {
+	if !handle.Valid() || len(s.popupStack) == 0 {
+		return
+	}
+	filtered := s.popupStack[:0]
+	for _, state := range s.popupStack {
+		if state.owner == handle.owner && state.instance == handle.instance {
+			continue
+		}
+		filtered = append(filtered, state)
+	}
+	s.popupStack = filtered
+}
+
 func (s *FixedBottomSurface) restorePopupStateFromStackLocked() {
 	for len(s.popupStack) > 0 {
 		last := s.popupStack[len(s.popupStack)-1]
@@ -918,6 +1280,8 @@ func (s *FixedBottomSurface) restorePopupStateFromStackLocked() {
 		}
 		s.popupLines = append([]string(nil), last.lines...)
 		s.popupOwner = last.owner
+		s.popupInstance = last.instance
+		s.popupViewport = clonePopupViewportSpec(last.viewport)
 		s.popupBelowPrompt = last.popupBelowPrompt
 		s.popupReservedRows = last.popupReservedRows
 		s.composerLine = last.composerLine
@@ -928,7 +1292,14 @@ func (s *FixedBottomSurface) restorePopupStateFromStackLocked() {
 }
 
 func popupOwnerPriority(owner string) int {
-	switch strings.TrimSpace(owner) {
+	owner = strings.TrimSpace(owner)
+	switch {
+	case strings.HasPrefix(owner, "modal:priority:"):
+		return 300
+	case strings.HasPrefix(owner, "modal:"):
+		return 200
+	}
+	switch owner {
 	case "slash_completion":
 		return 100
 	case "pending_paste":
@@ -994,7 +1365,10 @@ func (s *FixedBottomSurface) appendApplyLayoutSequenceLocked(builder *strings.Bu
 	builder.WriteString(terminalScrollRegionSequence(1, outputBottomRowForHeight(height, bottomRows)))
 }
 
-func (s *FixedBottomSurface) resetScrollCompensationLocked() {
+// markOutputWrittenLocked invalidates prior spare-row compensation only after
+// bytes really reach the output region. BeginOutput is also used to position
+// the cursor before transient command popups, so it must not call this method.
+func (s *FixedBottomSurface) markOutputWrittenLocked() {
 	if s == nil || s.terminal == nil {
 		return
 	}
@@ -1364,7 +1738,7 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 		s.clearRowsLocked(start, areaRows)
 	}
 	if noticeRows > 0 {
-		noticeLines := promptNoticeDisplayLines(state.PromptNoticeLine)
+		noticeLines := state.promptNoticeLines()
 		for i := 0; i < noticeRows && i < len(noticeLines); i++ {
 			s.terminal.MoveTo(start+i, 1)
 			notice := truncateFixedPopupLine(noticeLines[i], s.terminal.Width())
@@ -1374,11 +1748,15 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 		}
 	}
 	s.terminal.MoveTo(promptStart, 1)
-	if s.promptLine != "" {
-		fmt.Print(s.promptLine)
-	}
-	if s.promptInput != "" {
-		fmt.Print(renderInteractiveInputForTerminal([]rune(s.promptInput)))
+	viewportText := renderInteractiveInputViewport(
+		s.promptLine,
+		[]rune(s.promptInput),
+		s.terminal.Width(),
+		s.promptViewportStart,
+		rows,
+	)
+	if viewportText != "" {
+		fmt.Print(viewportText)
 	}
 	s.promptRenderedStartRow = start
 	s.promptRenderedRows = areaRows
@@ -1425,13 +1803,16 @@ func (s *FixedBottomSurface) clearPopupAreaLocked(rows int, gapRows int) {
 }
 
 type BottomPaneState struct {
-	StatusLine         string
-	PopupLines         []string
-	PopupBelowPrompt   bool
-	PopupReservedRows  int
-	ComposerLine       string
-	PromptNoticeLine   string
-	PromptReservedRows int
+	StatusLine             string
+	PopupLines             []string
+	PopupOwner             string
+	PopupBelowPrompt       bool
+	PopupReservedRows      int
+	PopupViewport          *PopupViewportSpec
+	ComposerLine           string
+	PromptNoticeLine       string
+	PromptEditorStatusLine string
+	PromptReservedRows     int
 }
 
 func (s BottomPaneState) composerLineText() string {
@@ -1446,10 +1827,18 @@ func (s BottomPaneState) composerVisibleRowCount() int {
 }
 
 func (s BottomPaneState) promptNoticeVisibleRowCount() int {
-	if s.composerVisibleRowCount() > 0 || strings.TrimSpace(s.PromptNoticeLine) == "" || s.promptReservedRowCount() < 1 {
+	if s.composerVisibleRowCount() > 0 || s.promptReservedRowCount() < 1 {
 		return 0
 	}
-	return len(promptNoticeDisplayLines(s.PromptNoticeLine))
+	return len(s.promptNoticeLines())
+}
+
+func (s BottomPaneState) promptNoticeLines() []string {
+	lines := promptNoticeDisplayLines(s.PromptNoticeLine)
+	if status := strings.TrimSpace(s.PromptEditorStatusLine); status != "" {
+		lines = append(lines, status)
+	}
+	return lines
 }
 
 func (s BottomPaneState) promptAreaVisibleRowCount() int {
@@ -1539,6 +1928,14 @@ func (s BottomPaneState) VisiblePopupLines(height int) []string {
 	if len(s.PopupLines) <= rows {
 		return append([]string(nil), s.PopupLines...)
 	}
+	if s.PopupViewport != nil {
+		if semanticLines := visibleSemanticPopupLines(s.PopupViewport, rows); len(semanticLines) > 0 {
+			return semanticLines
+		}
+	}
+	if popupOwnerUsesSelectionViewport(s.PopupOwner) {
+		return visibleSelectionPopupLines(s.PopupLines, rows)
+	}
 	if rows == 1 {
 		return []string{s.PopupLines[len(s.PopupLines)-1]}
 	}
@@ -1555,6 +1952,162 @@ func (s BottomPaneState) VisiblePopupLines(height int) []string {
 	}
 	out = append(out, s.PopupLines[tailStart:]...)
 	return out
+}
+
+func popupOwnerUsesSelectionViewport(owner string) bool {
+	owner = strings.ToLower(strings.TrimSpace(owner))
+	return owner == "slash_completion" || owner == "modal:selection"
+}
+
+func visibleSelectionPopupLines(lines []string, rows int) []string {
+	if rows <= 0 || len(lines) == 0 {
+		return nil
+	}
+	anchor := selectionPopupAnchorLine(lines)
+	if rows == 1 {
+		return []string{lines[anchor]}
+	}
+
+	indices := make([]int, 0, rows)
+	appendUnique := func(index int) {
+		if index < 0 || index >= len(lines) || len(indices) >= rows {
+			return
+		}
+		for _, existing := range indices {
+			if existing == index {
+				return
+			}
+		}
+		indices = append(indices, index)
+	}
+
+	appendUnique(0)
+	appendUnique(anchor)
+	warning := selectionPopupWarningLine(lines)
+	appendUnique(warning)
+	if (warning < 0 && rows >= 3) || (warning >= 0 && rows >= 4) {
+		appendUnique(len(lines) - 1)
+	}
+	for distance := 1; len(indices) < rows && distance < len(lines); distance++ {
+		appendUnique(anchor - distance)
+		appendUnique(anchor + distance)
+	}
+	for index := 0; len(indices) < rows && index < len(lines); index++ {
+		appendUnique(index)
+	}
+
+	sortInts(indices)
+	out := make([]string, 0, len(indices))
+	for _, index := range indices {
+		out = append(out, lines[index])
+	}
+	return out
+}
+
+func selectionPopupWarningLine(lines []string) int {
+	for index, line := range lines {
+		normalized := strings.TrimSpace(line)
+		if strings.Contains(normalized, "无效") || strings.Contains(normalized, "失败") || strings.HasPrefix(normalized, "错误") {
+			return index
+		}
+	}
+	return -1
+}
+
+func selectionPopupAnchorLine(lines []string) int {
+	for index, line := range lines {
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "> ") || strings.Contains(line, "(当前)") {
+			return index
+		}
+	}
+	for index, line := range lines {
+		if strings.Contains(line, "(默认)") || strings.HasPrefix(strings.TrimLeft(line, " \t"), "[") {
+			return index
+		}
+	}
+	return 0
+}
+
+func sortInts(values []int) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+			values[j], values[j-1] = values[j-1], values[j]
+		}
+	}
+}
+
+func clonePopupViewportSpec(spec *PopupViewportSpec) *PopupViewportSpec {
+	if spec == nil {
+		return nil
+	}
+	clone := &PopupViewportSpec{
+		HeaderLines: append([]string(nil), spec.HeaderLines...),
+		BodyLines:   append([]string(nil), spec.BodyLines...),
+		FooterLines: append([]string(nil), spec.FooterLines...),
+		Anchor:      spec.Anchor,
+	}
+	return clone
+}
+
+func visibleSemanticPopupLines(spec *PopupViewportSpec, rows int) []string {
+	if spec == nil || rows <= 0 {
+		return nil
+	}
+	header := cloneAndSanitizePopupLines(spec.HeaderLines)
+	body := cloneAndSanitizePopupLines(spec.BodyLines)
+	footer := cloneAndSanitizePopupLines(spec.FooterLines)
+	if rows == 1 {
+		if len(body) > 0 {
+			return []string{body[clampPopupIndex(spec.Anchor, len(body))]}
+		}
+		if len(header) > 0 {
+			return []string{header[0]}
+		}
+		return append([]string(nil), footer[:minPopupInt(1, len(footer))]...)
+	}
+
+	out := make([]string, 0, rows)
+	if len(header) > 0 {
+		out = append(out, header[0])
+	}
+	footerBudget := minPopupInt(len(footer), 1)
+	bodyBudget := rows - len(out) - footerBudget
+	if bodyBudget > 0 && len(body) > 0 {
+		anchor := clampPopupIndex(spec.Anchor, len(body))
+		start := anchor - bodyBudget/2
+		if start < 0 {
+			start = 0
+		}
+		if start+bodyBudget > len(body) {
+			start = maxInt(0, len(body)-bodyBudget)
+		}
+		end := minPopupInt(len(body), start+bodyBudget)
+		out = append(out, body[start:end]...)
+	}
+	if footerBudget > 0 && len(out) < rows {
+		out = append(out, footer[len(footer)-1])
+	}
+	for index := 1; len(out) < rows && index < len(header); index++ {
+		out = append(out, header[index])
+	}
+	return out
+}
+
+func clampPopupIndex(index int, length int) int {
+	if length <= 0 || index < 0 {
+		return 0
+	}
+	if index >= length {
+		return length - 1
+	}
+	return index
+}
+
+func minPopupInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (s BottomPaneState) popupLineVisibleRowCount(height int) int {
@@ -1592,12 +2145,15 @@ func promptNoticeDisplayLines(line string) []string {
 
 func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 	state := BottomPaneState{
-		StatusLine:         s.statusLine,
-		PopupLines:         append([]string(nil), s.popupLines...),
-		PopupBelowPrompt:   s.popupBelowPrompt,
-		PopupReservedRows:  s.popupReservedRows,
-		PromptNoticeLine:   s.promptNoticeLine,
-		PromptReservedRows: s.promptReservedRows,
+		StatusLine:             s.statusLine,
+		PopupLines:             append([]string(nil), s.popupLines...),
+		PopupOwner:             s.popupOwner,
+		PopupBelowPrompt:       s.popupBelowPrompt,
+		PopupReservedRows:      s.popupReservedRows,
+		PopupViewport:          clonePopupViewportSpec(s.popupViewport),
+		PromptNoticeLine:       s.promptNoticeLine,
+		PromptEditorStatusLine: s.promptEditorStatusLine,
+		PromptReservedRows:     s.promptReservedRows,
 	}
 	if strings.TrimSpace(s.composerLine) != "" {
 		state.ComposerLine = s.composerLine

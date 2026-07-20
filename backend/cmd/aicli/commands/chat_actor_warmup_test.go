@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	runtimeagent "github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 )
 
@@ -110,5 +111,45 @@ func TestChatActorForSessionFallsBackWhenWarmupMissing(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 1 {
 		t.Fatalf("expected one fallback factory call, got %d", calls)
+	}
+}
+
+func TestChatActorForSessionRefreshesActorAfterWarmupActorStops(t *testing.T) {
+	var calls int32
+	hub := runtimechat.NewSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
+		atomic.AddInt32(&calls, 1)
+		return runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
+			Agent: runtimeagent.NewAgent(&runtimeagent.Config{Name: "warmup-test"}, nil),
+		})
+	})
+	t.Cleanup(hub.StopAll)
+	session := &ChatSession{
+		RuntimeSession:   &runtimechat.Session{ID: "session-1"},
+		LocalRuntimeHost: &localChatRuntimeHost{SessionHub: hub},
+	}
+
+	startChatActorWarmup(session)
+	warmup := currentChatActorWarmup(session, "session-1")
+	if warmup == nil {
+		t.Fatal("expected actor warmup")
+	}
+	stale, err := warmup.wait(context.Background())
+	if err != nil {
+		t.Fatalf("warmup wait returned error: %v", err)
+	}
+	hub.Stop("session-1")
+
+	fresh, err := chatActorForSession(context.Background(), session)
+	if err != nil {
+		t.Fatalf("chatActorForSession returned error: %v", err)
+	}
+	if fresh == stale {
+		t.Fatal("expected chatActorForSession to resolve a fresh actor from the hub")
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("expected a second actor factory call, got %d", calls)
+	}
+	if currentChatActorWarmup(session, "session-1") != nil {
+		t.Fatal("expected completed warmup state to be released")
 	}
 }

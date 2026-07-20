@@ -33,7 +33,7 @@ func TestComposerStateLargePasteUsesPlaceholderAndExpandsOnSubmit(t *testing.T) 
 	large := strings.Repeat("a", LargePasteCharThreshold+1)
 	cursor := composer.HandlePasteAt(0, large)
 
-	placeholder := "[Pasted Content 1001 chars]"
+	placeholder := "[已粘贴 1001 字符 / 1 行]"
 	if composer.Text() != placeholder {
 		t.Fatalf("unexpected visible placeholder: %q", composer.Text())
 	}
@@ -45,16 +45,31 @@ func TestComposerStateLargePasteUsesPlaceholderAndExpandsOnSubmit(t *testing.T) 
 	}
 }
 
+func TestComposerStateLargePastePlaceholderIncludesLineCount(t *testing.T) {
+	composer := NewComposerState()
+	large := strings.Repeat("a", LargePasteCharThreshold) + "\nsecond"
+
+	composer.HandlePasteAt(0, large)
+
+	want := "[已粘贴 1007 字符 / 2 行]"
+	if got := composer.Text(); got != want {
+		t.Fatalf("unexpected multiline paste placeholder: got %q want %q", got, want)
+	}
+	if got := composer.SubmitText(); got != large {
+		t.Fatalf("expected multiline paste to expand on submit, len=%d", len(got))
+	}
+}
+
 func TestComposerStateLargePastePlaceholdersAreUnique(t *testing.T) {
 	composer := NewComposerState()
 	large := strings.Repeat("a", LargePasteCharThreshold+1)
 	cursor := composer.HandlePasteAt(0, large)
 	cursor = composer.HandlePasteAt(cursor, large)
 
-	if !strings.Contains(composer.Text(), "[Pasted Content 1001 chars]") {
+	if !strings.Contains(composer.Text(), "[已粘贴 1001 字符 / 1 行]") {
 		t.Fatalf("expected first placeholder, got %q", composer.Text())
 	}
-	if !strings.Contains(composer.Text(), "[Pasted Content 1001 chars] #2") {
+	if !strings.Contains(composer.Text(), "[已粘贴 1001 字符 / 1 行] #2") {
 		t.Fatalf("expected second placeholder, got %q", composer.Text())
 	}
 	if got := composer.SubmitText(); got != large+large {
@@ -128,9 +143,9 @@ func TestComposerStateSetTextPrunesDeletedPendingPaste(t *testing.T) {
 	composer.HandlePasteAt(0, large)
 
 	composer.SetText("")
-	composer.SetText("[Pasted Content 1001 chars]")
+	composer.SetText("[已粘贴 1001 字符 / 1 行]")
 
-	if got := composer.SubmitText(); got != "[Pasted Content 1001 chars]" {
+	if got := composer.SubmitText(); got != "[已粘贴 1001 字符 / 1 行]" {
 		t.Fatalf("expected deleted pending paste not to expand, got %q", got)
 	}
 	if pending := composer.PendingPastes(); len(pending) != 0 {

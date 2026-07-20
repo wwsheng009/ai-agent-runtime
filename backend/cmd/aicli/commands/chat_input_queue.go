@@ -31,6 +31,108 @@ type chatQueuedInput struct {
 	EnqueuedAt time.Time
 }
 
+type chatInputRouteDisposition uint8
+
+const (
+	chatInputRouteQueued chatInputRouteDisposition = iota
+	chatInputRoutePriority
+	chatInputRouteRejectedCommand
+)
+
+type chatInputRouteResult struct {
+	Disposition chatInputRouteDisposition
+}
+
+func (r chatInputRouteResult) queued() bool {
+	return r.Disposition == chatInputRouteQueued
+}
+
+func (r chatInputRouteResult) rejected() bool {
+	return r.Disposition == chatInputRouteRejectedCommand
+}
+
+type chatPendingInputSuspension struct {
+	queue       *chatInputQueue
+	queued      []chatQueuedInput
+	readyText   string
+	draftText   string
+	draftLines  int
+	draftActive bool
+	count       int
+	restoreOnce sync.Once
+}
+
+func (s *chatPendingInputSuspension) Count() int {
+	if s == nil {
+		return 0
+	}
+	return s.count
+}
+
+func (s *chatPendingInputSuspension) Restore() int {
+	if s == nil || s.queue == nil {
+		return 0
+	}
+	restored := 0
+	s.restoreOnce.Do(func() {
+		q := s.queue
+		q.ensureChannels()
+		q.routeMu.Lock()
+
+		q.queuedMu.Lock()
+		if len(s.queued) > 0 {
+			front := make([]chatQueuedInput, 0, len(s.queued)+len(q.queuedFront))
+			front = append(front, s.queued...)
+			front = append(front, q.queuedFront...)
+			q.queuedFront = front
+
+			preview := make([]chatQueuedInput, 0, len(s.queued)+len(q.queuedPreview))
+			preview = append(preview, s.queued...)
+			preview = append(preview, q.queuedPreview...)
+			q.queuedPreview = preview
+		}
+		q.queuedMu.Unlock()
+
+		q.draftMu.Lock()
+		if strings.TrimSpace(s.readyText) != "" {
+			q.readyText = prependPendingInputText(s.readyText, q.readyText)
+		}
+		if s.draftActive && strings.TrimSpace(s.draftText) != "" {
+			q.draftText = prependPendingInputText(s.draftText, q.draftText)
+			q.draftLines = countInputLines(q.draftText)
+			q.draftActive = true
+		}
+		draftNotify := q.draftNotify
+		draftActive := q.draftActive
+		draftLines := q.draftLines
+		draftText := q.draftText
+		q.draftMu.Unlock()
+		q.routeMu.Unlock()
+
+		if draftNotify != nil && draftActive {
+			draftNotify(true, draftLines, draftText)
+		}
+		if len(s.queued) > 0 || strings.TrimSpace(s.readyText) != "" {
+			q.signalReadySubmission()
+		}
+		restored = s.count
+	})
+	return restored
+}
+
+func prependPendingInputText(prefix, current string) string {
+	if prefix == "" {
+		return current
+	}
+	if current == "" {
+		return prefix
+	}
+	if strings.HasSuffix(prefix, "\n") || strings.HasPrefix(current, "\n") {
+		return prefix + current
+	}
+	return prefix + "\n" + current
+}
+
 type chatInputReadLifecycle struct {
 	session *ChatSession
 }
@@ -50,6 +152,7 @@ type chatInputQueue struct {
 	externalCaptureActive bool
 	terminalMu            sync.RWMutex
 	terminalErr           error
+	routeMu               sync.Mutex
 
 	draftMu     sync.RWMutex
 	draftNotify func(active bool, lines int, text string)
@@ -59,9 +162,11 @@ type chatInputQueue struct {
 	readyText   string
 
 	queuedMu      sync.Mutex
+	queuedFront   []chatQueuedInput
 	queuedPreview []chatQueuedInput
 
-	commandGate func(string) bool
+	commandGate   func(string) bool
+	routeFeedback func(string, chatInputRouteResult)
 }
 
 func newChatInputQueue(reader *bufio.Reader) *chatInputQueue {
@@ -90,6 +195,9 @@ func ensureChatInputQueue(session *ChatSession) *chatInputQueue {
 	})
 	session.InputQueue.setCommandGate(func(text string) bool {
 		return chatInputCommandAllowed(session, text)
+	})
+	session.InputQueue.setRouteFeedback(func(text string, result chatInputRouteResult) {
+		renderBusyInputRouteFeedback(session, text, result)
 	})
 	session.InputQueue.startPump()
 	return session.InputQueue
@@ -173,6 +281,13 @@ func (q *chatInputQueue) stdinPump() {
 			return
 		}
 
+		// 优先提示只接收本次明确输入，不能把普通 draft / ready submission
+		// 当成审批或问题答案。多行回答也直接进入 priorityLines。
+		if q.isPriorityMode() {
+			q.routeInputText(text)
+			return
+		}
+
 		if q.hasDraft() {
 			if isSubmissionCommand(strings.TrimSpace(text)) {
 				q.routeInputText(text)
@@ -252,15 +367,16 @@ func (q *chatInputQueue) stdinReadLoop(events chan<- stdinLineEvent) {
 	}
 }
 
-func (q *chatInputQueue) routeInputText(text string) {
-	if q.rejectCommandInput(text) {
-		return
-	}
-	q.routeLine(chatQueuedInput{
+func (q *chatInputQueue) routeInputText(text string) chatInputRouteResult {
+	result := q.routeLineWithCommandGate(chatQueuedInput{
 		Text:       text,
 		Source:     "stdin",
 		EnqueuedAt: time.Now().UTC(),
-	})
+	}, true)
+	if result.rejected() {
+		q.notifyRouteFeedback(text, result)
+	}
+	return result
 }
 
 func (q *chatInputQueue) stageDraft(text string) {
@@ -324,11 +440,20 @@ func (q *chatInputQueue) consumeDraft() (string, bool) {
 }
 
 func (q *chatInputQueue) confirmDraft() bool {
-	text, ok := q.consumeDraft()
-	if !ok {
+	q.draftMu.RLock()
+	text := q.draftText
+	active := q.draftActive
+	q.draftMu.RUnlock()
+	if !active || strings.TrimSpace(text) == "" {
 		return false
 	}
 	if q.rejectCommandInput(text) {
+		// 保留被拒绝的 slash draft，避免状态变化期间确认草稿导致内容丢失。
+		q.notifyRouteFeedback(text, chatInputRouteResult{Disposition: chatInputRouteRejectedCommand})
+		return false
+	}
+	text, ok := q.consumeDraft()
+	if !ok {
 		return false
 	}
 	q.draftMu.Lock()
@@ -455,6 +580,9 @@ func (q *chatInputQueue) readAvailableLine() (string, bool) {
 	if text, ok := q.takeReadySubmission(); ok {
 		return text, true
 	}
+	if item, ok := q.takeQueuedFront(); ok {
+		return item.Text, true
+	}
 	q.ensureChannels()
 	select {
 	case item := <-q.lines:
@@ -465,16 +593,37 @@ func (q *chatInputQueue) readAvailableLine() (string, bool) {
 	}
 }
 
+func (q *chatInputQueue) takeQueuedFront() (chatQueuedInput, bool) {
+	if q == nil {
+		return chatQueuedInput{}, false
+	}
+	q.queuedMu.Lock()
+	defer q.queuedMu.Unlock()
+	if len(q.queuedFront) == 0 {
+		return chatQueuedInput{}, false
+	}
+	item := q.queuedFront[0]
+	copy(q.queuedFront, q.queuedFront[1:])
+	q.queuedFront = q.queuedFront[:len(q.queuedFront)-1]
+	q.dropQueuedPreviewLocked()
+	return item, true
+}
+
 func (q *chatInputQueue) noteQueuedLineRead() {
 	if q == nil {
 		return
 	}
 	q.queuedMu.Lock()
-	if len(q.queuedPreview) > 0 {
-		copy(q.queuedPreview, q.queuedPreview[1:])
-		q.queuedPreview = q.queuedPreview[:len(q.queuedPreview)-1]
-	}
+	q.dropQueuedPreviewLocked()
 	q.queuedMu.Unlock()
+}
+
+func (q *chatInputQueue) dropQueuedPreviewLocked() {
+	if len(q.queuedPreview) == 0 {
+		return
+	}
+	copy(q.queuedPreview, q.queuedPreview[1:])
+	q.queuedPreview = q.queuedPreview[:len(q.queuedPreview)-1]
 }
 
 func (q *chatInputQueue) setDraftNotifier(fn func(active bool, lines int, text string)) {
@@ -493,6 +642,27 @@ func (q *chatInputQueue) setCommandGate(fn func(string) bool) {
 	q.mu.Lock()
 	q.commandGate = fn
 	q.mu.Unlock()
+}
+
+func (q *chatInputQueue) setRouteFeedback(fn func(string, chatInputRouteResult)) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	q.routeFeedback = fn
+	q.mu.Unlock()
+}
+
+func (q *chatInputQueue) notifyRouteFeedback(text string, result chatInputRouteResult) {
+	if q == nil {
+		return
+	}
+	q.mu.RLock()
+	feedback := q.routeFeedback
+	q.mu.RUnlock()
+	if feedback != nil {
+		feedback(text, result)
+	}
 }
 
 func (q *chatInputQueue) rejectCommandInput(text string) bool {
@@ -572,6 +742,9 @@ func (q *chatInputQueue) readLine(ctx context.Context) (string, error) {
 		if text, ok := q.takeReadySubmission(); ok {
 			return text, nil
 		}
+		if item, ok := q.takeQueuedFront(); ok {
+			return item.Text, nil
+		}
 		select {
 		case item := <-q.lines:
 			q.noteQueuedLineRead()
@@ -615,9 +788,6 @@ func (q *chatInputQueue) readPriorityLineWithPrompt(ctx context.Context, prompt 
 		q.startPump()
 	}
 	for {
-		if text, ok := q.takeReadySubmission(); ok {
-			return text, nil
-		}
 		select {
 		case item := <-q.priorityLines:
 			return item.Text, nil
@@ -651,7 +821,10 @@ func (q *chatInputQueue) pendingCount() int {
 	q.ensureChannels()
 	// 这里只统计已经进入队列、等待消费的输入。
 	// draft 只表示“暂存中、等待用户确认”，不能影响 prompt / drain 判断。
-	return len(q.lines)
+	q.queuedMu.Lock()
+	front := len(q.queuedFront)
+	q.queuedMu.Unlock()
+	return front + len(q.lines)
 }
 
 func (q *chatInputQueue) queuedSubmissionCount() int {
@@ -670,16 +843,70 @@ func (q *chatInputQueue) discardPending() int {
 		return 0
 	}
 	q.ensureChannels()
-	discarded := 0
+	q.routeMu.Lock()
+	q.queuedMu.Lock()
+	discarded := len(q.queuedFront)
+	q.queuedFront = nil
 	for {
 		select {
 		case <-q.lines:
-			q.noteQueuedLineRead()
 			discarded++
 		default:
+			q.queuedPreview = nil
+			q.queuedMu.Unlock()
+			q.routeMu.Unlock()
 			return discarded + q.discardDraft() + q.discardReadySubmission()
 		}
 	}
+}
+
+func (q *chatInputQueue) suspendPendingInput() *chatPendingInputSuspension {
+	suspension := &chatPendingInputSuspension{queue: q}
+	if q == nil {
+		return suspension
+	}
+	q.ensureChannels()
+
+	q.routeMu.Lock()
+	q.queuedMu.Lock()
+	suspension.queued = append(suspension.queued, q.queuedFront...)
+	q.queuedFront = nil
+	for {
+		select {
+		case item := <-q.lines:
+			suspension.queued = append(suspension.queued, item)
+		default:
+			q.queuedPreview = nil
+			q.queuedMu.Unlock()
+			goto queuedCaptured
+		}
+	}
+
+queuedCaptured:
+	q.draftMu.Lock()
+	suspension.readyText = q.readyText
+	suspension.draftText = q.draftText
+	suspension.draftLines = q.draftLines
+	suspension.draftActive = q.draftActive
+	q.readyText = ""
+	q.draftText = ""
+	q.draftLines = 0
+	q.draftActive = false
+	draftNotify := q.draftNotify
+	q.draftMu.Unlock()
+	q.routeMu.Unlock()
+
+	suspension.count = len(suspension.queued)
+	if strings.TrimSpace(suspension.readyText) != "" {
+		suspension.count++
+	}
+	if suspension.draftActive && strings.TrimSpace(suspension.draftText) != "" {
+		suspension.count++
+	}
+	if draftNotify != nil && suspension.draftActive {
+		draftNotify(false, 0, "")
+	}
+	return suspension
 }
 
 func newChatInputReadLifecycle(session *ChatSession) chatInputReadLifecycle {
@@ -848,7 +1075,22 @@ func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context
 }
 
 func chatInteractiveReadPrioritySecretWithPrompt(session *ChatSession, ctx context.Context, prompt string) (string, error) {
-	if notice := discardPendingInteractiveInputForPriorityPrompt(session, "密钥输入"); notice != "" {
+	restoreInputMode := pushChatComposerInputMode(session, chatInputModeSecret)
+	defer restoreInputMode()
+	var suspension *chatPendingInputSuspension
+	var notice string
+	if session != nil && session.InputQueue != nil {
+		suspension = session.InputQueue.suspendPendingInput()
+		if count := suspension.Count(); count > 0 {
+			notice = fmt.Sprintf("[input] 检测到 %d 条待处理输入；已在密钥输入期间临时挂起，结束后将按原顺序恢复。", count)
+		}
+	} else {
+		notice = discardPendingInteractiveInputForPriorityPrompt(session, "密钥输入")
+	}
+	if suspension != nil {
+		defer suspension.Restore()
+	}
+	if notice != "" {
 		beginDirectInteractiveOutput(session)
 		ui.PrintWarning("%s", notice)
 	}
@@ -857,6 +1099,11 @@ func chatInteractiveReadPrioritySecretWithPrompt(session *ChatSession, ctx conte
 	if renderedOnSurface {
 		readPrompt = ""
 		defer clearRuntimeComposerPrompt(session)
+	}
+	if shouldRoutePriorityPromptThroughQueue(session) {
+		line, err := session.InputQueue.readPriorityLineWithPrompt(ctx, readPrompt)
+		newChatInputReadLifecycle(session).finishQueuedPriorityRead(err)
+		return line, err
 	}
 	if session != nil && session.InputBox != nil {
 		return newChatSecretComposerPrompt(session, readPrompt).ReadLine()
@@ -980,6 +1227,7 @@ func (q *chatInputQueue) setPriorityCapture(active bool, prompt string) {
 	q.ensureChannels()
 	prompt = strings.TrimRight(prompt, "\r\n")
 	changed := false
+	q.routeMu.Lock()
 	q.mu.Lock()
 	if q.priorityMode != active || q.priorityPrompt != prompt {
 		changed = true
@@ -992,6 +1240,7 @@ func (q *chatInputQueue) setPriorityCapture(active bool, prompt string) {
 		q.priorityPrompt = ""
 	}
 	q.mu.Unlock()
+	q.routeMu.Unlock()
 	if changed {
 		q.signalPriorityCaptureChange()
 	}
@@ -1064,20 +1313,31 @@ func (q *chatInputQueue) hasExternalInputCaptureActive() bool {
 	return q.externalCaptureActive
 }
 
-func (q *chatInputQueue) routeLine(item chatQueuedInput) {
+func (q *chatInputQueue) routeLine(item chatQueuedInput) chatInputRouteResult {
+	return q.routeLineWithCommandGate(item, false)
+}
+
+func (q *chatInputQueue) routeLineWithCommandGate(item chatQueuedInput, enforceCommandGate bool) chatInputRouteResult {
 	if q == nil {
-		return
+		return chatInputRouteResult{Disposition: chatInputRouteQueued}
 	}
 	q.ensureChannels()
+	q.routeMu.Lock()
+	defer q.routeMu.Unlock()
 	q.mu.RLock()
 	priorityMode := q.priorityMode
+	gate := q.commandGate
 	q.mu.RUnlock()
 	if priorityMode {
 		q.priorityLines <- item
-		return
+		return chatInputRouteResult{Disposition: chatInputRoutePriority}
+	}
+	if enforceCommandGate && isSlashCommandInput(item.Text) && gate != nil && !gate(item.Text) {
+		return chatInputRouteResult{Disposition: chatInputRouteRejectedCommand}
 	}
 	q.queuedMu.Lock()
 	q.queuedPreview = append(q.queuedPreview, item)
 	q.queuedMu.Unlock()
 	q.lines <- item
+	return chatInputRouteResult{Disposition: chatInputRouteQueued}
 }

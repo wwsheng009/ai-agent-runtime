@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -2382,6 +2383,266 @@ func TestApprovalRequestPreviewLines_FallbackArgs(t *testing.T) {
 	require.Equal(t, []string{"args={\"message\":\"hello\"}"}, lines)
 }
 
+func TestApprovalPriorityPromptLines_ShowActionContextAndOptions(t *testing.T) {
+	lines := approvalPriorityPromptLines(&runtimechat.ApprovalRequest{
+		ToolName:  "execute_shell_command",
+		Reason:    "permission_mode_requires_approval",
+		RiskLevel: "high",
+		ArgsJSON:  []byte(`{"command":"git commit -m test","workdir":"E:/projects/ai/ai-agent-runtime"}`),
+	}, []string{"team=team-1 permission_mode=default"})
+
+	rendered := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"[审批] Agent 请求执行需要授权的操作",
+		"[审批] 工具：execute_shell_command",
+		"[审批] 原因：当前权限模式要求在执行前获得确认（permission_mode_requires_approval）",
+		"[审批] 风险等级：高（high）",
+		"[审批] 上下文：team=team-1 permission_mode=default",
+		"[审批] 命令：git commit -m test",
+		"[审批] 工作目录：E:/projects/ai/ai-agent-runtime",
+		"[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数",
+	} {
+		require.Contains(t, rendered, want)
+	}
+}
+
+func TestParseApprovalPromptDecisionSupportsNumberedAndLegacyAnswers(t *testing.T) {
+	tests := map[string]approvalPromptDecision{
+		"1":   approvalPromptAllowOnce,
+		"y":   approvalPromptAllowOnce,
+		"YES": approvalPromptAllowOnce,
+		"2":   approvalPromptDeny,
+		"n":   approvalPromptDeny,
+		"":    approvalPromptDeny,
+		"3":   approvalPromptShowDetails,
+		"4":   approvalPromptInvalid,
+		"x":   approvalPromptInvalid,
+	}
+	for input, want := range tests {
+		t.Run(fmt.Sprintf("input_%q", input), func(t *testing.T) {
+			require.Equal(t, want, parseApprovalPromptDecision(input))
+		})
+	}
+}
+
+func TestUpsertPriorityPromptValidationLineDoesNotGrowPanel(t *testing.T) {
+	lines := []string{"标题", "[审批] 无效选项，请输入 1。", "正文"}
+	lines = upsertPriorityPromptValidationLine(lines, "[审批] 无效选项", "[审批] 无效选项，请输入 1、2、3。")
+	lines = upsertPriorityPromptValidationLine(lines, "[审批] 无效选项", "[审批] 无效选项，请输入 1、2、3、4。")
+	require.Len(t, lines, 3)
+	require.Equal(t, "[审批] 无效选项，请输入 1、2、3、4。", lines[2])
+}
+
+func TestChatRuntimeEvents_ApprovalDetailsExpandBeforeDecision(t *testing.T) {
+	session := &ChatSession{
+		InputReader:   bufio.NewReader(strings.NewReader("3\n3\n1\n")),
+		NoInteractive: true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		Reason:   "manual approval",
+		ArgsJSON: []byte(`{"command":"git status","workdir":"C:/work","mutated_paths":[]}`),
+	}
+
+	var answer chatApprovalAnswer
+	var askErr error
+	output := captureStdout(t, func() {
+		answer, askErr = bridge.askApproval(approval, nil)
+	})
+	require.NoError(t, askErr)
+	require.True(t, answer.Allowed)
+	require.False(t, answer.Reuse)
+	require.Contains(t, output, "[审批] 完整参数：")
+	require.Contains(t, output, `"mutated_paths": []`)
+	require.GreaterOrEqual(t, strings.Count(output, "[审批] 请选择"), 2)
+}
+
+func TestChatRuntimeEvents_ApprovalReuseRequiresExplicitOption(t *testing.T) {
+	session := &ChatSession{
+		InputReader:       bufio.NewReader(strings.NewReader("4\n")),
+		NoInteractive:     true,
+		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"git status","workdir":"C:/work"}`),
+	}
+
+	answer, err := bridge.askApproval(approval, nil)
+	require.NoError(t, err)
+	require.True(t, answer.Allowed)
+	require.True(t, answer.Reuse)
+	require.Contains(t, approvalDecisionPromptWithReuse("当前会话内"), "[4] 允许并在当前会话内复用")
+}
+
+func TestApprovalFullParameterLinesLimitsVisibleOutput(t *testing.T) {
+	rawLines := make([]string, 20)
+	for index := range rawLines {
+		rawLines[index] = fmt.Sprintf("line-%02d=%s", index+1, strings.Repeat("x", 300))
+	}
+	lines := approvalFullParameterLines(&runtimechat.ApprovalRequest{
+		ArgsJSON: []byte(strings.Join(rawLines, "\n")),
+	})
+
+	require.LessOrEqual(t, len(lines), 15)
+	require.Contains(t, strings.Join(lines, "\n"), "已省略 8 行")
+	require.Contains(t, strings.Join(lines, "\n"), "...")
+}
+
+func TestQuestionPromptNumbersSuggestionsAndMapsSelection(t *testing.T) {
+	suggestions := []string{"继续执行", "", "先查看差异"}
+	lines := questionPriorityPromptLines("下一步怎么处理？", suggestions)
+	require.Equal(t, []string{
+		"[提问] Agent 需要你的补充信息",
+		"[提问] 问题：下一步怎么处理？",
+		"[提问] 1. 继续执行",
+		"[提问] 2. 先查看差异",
+	}, lines)
+	require.Equal(t, "先查看差异", mapQuestionSuggestionAnswer("2", suggestions))
+	require.Equal(t, "使用另一种方案", mapQuestionSuggestionAnswer("使用另一种方案", suggestions))
+	require.Empty(t, mapQuestionSuggestionAnswer("", suggestions))
+	require.Contains(t, questionAnswerPrompt(false, true), "直接 Enter 跳过")
+	require.Contains(t, questionAnswerPrompt(true, true), "必答")
+}
+
+func TestChatRuntimeEvents_QuestionNumberSelectsSuggestion(t *testing.T) {
+	session := &ChatSession{
+		InputReader:   bufio.NewReader(strings.NewReader("2\n")),
+		NoInteractive: true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+
+	var answer string
+	var askErr error
+	output := captureStdout(t, func() {
+		answer, askErr = bridge.askQuestion("请选择处理方式", []string{"继续", "停止"}, true)
+	})
+	require.NoError(t, askErr)
+	require.Equal(t, "停止", answer)
+	require.Contains(t, output, "[提问] 1. 继续")
+	require.Contains(t, output, "[提问] 2. 停止")
+	require.Contains(t, output, "可输入建议编号")
+}
+
+func TestChatRuntimeEvents_RequiredQuestionRejectsEmptyButOptionalQuestionAllowsIt(t *testing.T) {
+	requiredSession := &ChatSession{
+		InputReader:   bufio.NewReader(strings.NewReader("\n最终回答\n")),
+		NoInteractive: true,
+	}
+	requiredBridge := newChatRuntimeEventBridge(requiredSession)
+	var requiredAnswer string
+	var requiredErr error
+	requiredOutput := captureStdout(t, func() {
+		requiredAnswer, requiredErr = requiredBridge.askQuestion("请补充说明", nil, true)
+	})
+	require.NoError(t, requiredErr)
+	require.Equal(t, "最终回答", requiredAnswer)
+	require.Contains(t, requiredOutput, "此问题为必答项")
+
+	optionalSession := &ChatSession{
+		InputReader:   bufio.NewReader(strings.NewReader("\n")),
+		NoInteractive: true,
+	}
+	optionalBridge := newChatRuntimeEventBridge(optionalSession)
+	var optionalAnswer string
+	var optionalErr error
+	optionalOutput := captureStdout(t, func() {
+		optionalAnswer, optionalErr = optionalBridge.askQuestion("还有补充吗？", nil, false)
+	})
+	require.NoError(t, optionalErr)
+	require.Empty(t, optionalAnswer)
+	require.Contains(t, optionalOutput, "直接 Enter 跳过")
+}
+
+func TestPushChatComposerAgentStageRestoresPreviousStageWithoutOverwritingInterrupt(t *testing.T) {
+	session := &ChatSession{NoInteractive: true}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell_command")
+
+	restore := pushChatComposerAgentStage(session, chatAgentStageAwaitingApproval)
+	require.Equal(t, chatAgentStageAwaitingApproval, coord.AgentStage())
+	require.Equal(t, chatInputModeApproval, coord.InputMode())
+	restore()
+	require.Equal(t, chatAgentStageToolRunning, coord.AgentStage())
+	require.Equal(t, "shell_command", coord.AgentStageDetail())
+	require.Equal(t, chatInputModeChat, coord.InputMode())
+
+	restore = pushChatComposerAgentStage(session, chatAgentStageAwaitingAnswer)
+	require.Equal(t, chatInputModeAnswer, coord.InputMode())
+	coord.SetAgentStage(chatAgentStageStopping)
+	restore()
+	require.Equal(t, chatAgentStageStopping, coord.AgentStage())
+	require.Equal(t, chatInputModeChat, coord.InputMode())
+}
+
+func TestChatRuntimeEvents_PrimaryRunUpdatesComposerAgentStage(t *testing.T) {
+	runtimeSession := &runtimechat.Session{ID: "primary-session"}
+	session := &ChatSession{RuntimeSession: runtimeSession, NoInteractive: true}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	bridge := newChatRuntimeEventBridge(session)
+
+	bridge.BeginRun()
+	require.Equal(t, chatAgentStagePlanning, coord.AgentStage())
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventToolStarted,
+		SessionID: runtimeSession.ID,
+		ToolName:  "execute_shell_command",
+	})
+	require.Equal(t, chatAgentStageToolRunning, coord.AgentStage())
+	require.Equal(t, "execute_shell_command", coord.AgentStageDetail())
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventLLMRequestStarted,
+		SessionID: runtimeSession.ID,
+	})
+	require.Equal(t, chatAgentStagePlanning, coord.AgentStage())
+	require.Empty(t, coord.AgentStageDetail())
+
+	bridge.EndRun()
+	require.Equal(t, chatAgentStageCompleted, coord.AgentStage())
+}
+
+func TestChatRuntimeEvents_SecondaryRunDoesNotOverrideComposerAgentStage(t *testing.T) {
+	runtimeSession := &runtimechat.Session{ID: "primary-session"}
+	session := &ChatSession{RuntimeSession: runtimeSession, NoInteractive: true}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.BeginRun()
+
+	bridge.handleEvent(runtimeevents.Event{
+		Type:      runtimechat.EventToolStarted,
+		SessionID: "teammate-session",
+		ToolName:  "write_file",
+	})
+	require.Equal(t, chatAgentStagePlanning, coord.AgentStage())
+	require.Empty(t, coord.AgentStageDetail())
+
+	bridge.setRunError(fmt.Errorf("run failed"))
+	bridge.EndRun()
+	require.Equal(t, chatAgentStageFailed, coord.AgentStage())
+}
+
+func TestChatRuntimeEvents_InterruptedRunKeepsComposerStoppingStage(t *testing.T) {
+	session := &ChatSession{NoInteractive: true}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	bridge := newChatRuntimeEventBridge(session)
+
+	bridge.BeginRun()
+	session.InterruptPreservePendingInput()
+	bridge.EndRun()
+
+	require.Equal(t, chatAgentStageStopping, coord.AgentStage())
+	session.ResetInterrupt()
+	require.Equal(t, chatAgentStageIdle, coord.AgentStage())
+}
+
 func TestChatRuntimeEvents_RenderApprovalDecisionKeepsStatusOnly(t *testing.T) {
 	var rendered bytes.Buffer
 	bridge := newChatRuntimeEventBridge(&ChatSession{})
@@ -3146,7 +3407,7 @@ func TestReliabilityEvalActorExecutorApprovalBridgeDelaysAndExecutesToolOnce(t *
 		rendered.WriteString(line)
 		rendered.WriteString("\n")
 	}
-	bridge.askApproval = func(approval *runtimechat.ApprovalRequest, contextLines []string) (bool, error) {
+	bridge.askApproval = func(approval *runtimechat.ApprovalRequest, contextLines []string) (chatApprovalAnswer, error) {
 		approvalCalls.Add(1)
 		if approval == nil || approval.ToolName != "team_echo" {
 			t.Errorf("unexpected approval request: %+v", approval)
@@ -3162,7 +3423,7 @@ func TestReliabilityEvalActorExecutorApprovalBridgeDelaysAndExecutesToolOnce(t *
 		default:
 		}
 		<-approvalRelease
-		return true, nil
+		return chatApprovalAnswer{Allowed: true}, nil
 	}
 	session.RuntimeEventBridge = bridge
 
@@ -3475,7 +3736,7 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 		rendered.WriteString(line)
 		rendered.WriteString("\n")
 	}
-	bridge.askApproval = func(approval *runtimechat.ApprovalRequest, contextLines []string) (bool, error) {
+	bridge.askApproval = func(approval *runtimechat.ApprovalRequest, contextLines []string) (chatApprovalAnswer, error) {
 		approvalCalls.Add(1)
 		if approval == nil {
 			t.Fatal("expected approval request")
@@ -3484,7 +3745,7 @@ func TestChatRuntimeEvents_ReusesReadOnlyShellApprovalWithinSameTeamRun(t *testi
 			t.Fatalf("unexpected approval reason: %q", approval.Reason)
 		}
 		require.Contains(t, contextLines, "team=team-approval task=task-approval teammate=lead permission_mode=default")
-		return true, nil
+		return chatApprovalAnswer{Allowed: true, Reuse: true}, nil
 	}
 	session.RuntimeEventBridge = bridge
 
@@ -3588,6 +3849,24 @@ func TestChatRuntimeEvents_ApprovalReusePersistsAcrossTurnsForSameTeam(t *testin
 	if !bridge.hasApprovalGrant(key) {
 		t.Fatalf("expected approval grant to persist across turns for same team")
 	}
+}
+
+func TestChatRuntimeEvents_ApprovalGrantStatusAndClear(t *testing.T) {
+	now := time.Now().UTC()
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.approvalGrants = map[string]time.Time{
+		"session:session-1|readonly_shell": now.Add(5 * time.Minute),
+		"team:team-1|readonly_network":     now.Add(-time.Second),
+	}
+
+	lines := bridge.approvalGrantStatusLines(now)
+	require.Len(t, lines, 1)
+	require.Contains(t, lines[0], "scope=当前会话")
+	require.Contains(t, lines[0], "family=readonly_shell")
+	require.Contains(t, lines[0], "expires_in=5m0s")
+	require.Equal(t, 1, bridge.clearApprovalGrants())
+	require.Empty(t, bridge.approvalGrantStatusLines(now))
+	require.Equal(t, 0, bridge.clearApprovalGrants())
 }
 
 func TestChatRuntimeEvents_ApprovalReuseDoesNotApplyWithoutActiveTeam(t *testing.T) {
@@ -4810,6 +5089,59 @@ func TestChatRuntimeEventBridge_BeginRunResetsSupplementSeparator(t *testing.T) 
 	}
 	if !strings.Contains(rendered, "[tool] first\n[tool] second") {
 		t.Fatalf("expected adjacent runs to stay compact, got %q", rendered)
+	}
+}
+
+func TestChatRuntimeEventBridge_LogsFailedLLMRequestToDebugFile(t *testing.T) {
+	logDir := t.TempDir()
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.4", true, "https://example.com")
+	if err := logger.SetLogDir(logDir); err != nil {
+		t.Fatalf("set log dir: %v", err)
+	}
+	session := &ChatSession{
+		Logger:         logger,
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "session-actor-failure"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.PrepareRunPrompt("retry the failed request")
+	bridge.BeginRun()
+	defer bridge.EndRun()
+
+	startedAt := time.Date(2026, 7, 19, 7, 57, 40, 0, time.UTC)
+	bridge.handleStructuredLogEvent(runtimeevents.Event{
+		Type:      "llm.request.started",
+		SessionID: session.RuntimeSession.ID,
+		TraceID:   "trace-rate-limit",
+		Timestamp: startedAt,
+		Payload: map[string]interface{}{
+			"trace_id": "trace-rate-limit",
+			"step":     1,
+		},
+	})
+	bridge.handleStructuredLogEvent(runtimeevents.Event{
+		Type:      "llm.request.finished",
+		SessionID: session.RuntimeSession.ID,
+		TraceID:   "trace-rate-limit",
+		Timestamp: startedAt.Add(3 * time.Second),
+		Payload: map[string]interface{}{
+			"trace_id": "trace-rate-limit",
+			"step":     1,
+			"success":  false,
+			"error":    "upstream returned HTTP 429 after 3 attempts",
+		},
+	})
+
+	debugData, err := os.ReadFile(logger.DebugLogPath())
+	if err != nil {
+		t.Fatalf("read debug log: %v", err)
+	}
+	debugText := string(debugData)
+	if !strings.Contains(debugText, "request_finished") || !strings.Contains(debugText, "success=false") {
+		t.Fatalf("expected failed request completion in debug log, got:\n%s", debugText)
+	}
+	if !strings.Contains(debugText, "upstream returned HTTP 429 after 3 attempts") {
+		t.Fatalf("expected failed request error in debug log, got:\n%s", debugText)
 	}
 }
 

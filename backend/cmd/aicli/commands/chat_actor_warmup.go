@@ -64,6 +64,17 @@ func currentChatActorWarmup(session *ChatSession, sessionID string) *chatActorWa
 	return session.actorWarmup
 }
 
+func clearChatActorWarmup(session *ChatSession, completed *chatActorWarmup) {
+	if session == nil || completed == nil {
+		return
+	}
+	session.actorWarmupMu.Lock()
+	if session.actorWarmup == completed {
+		session.actorWarmup = nil
+	}
+	session.actorWarmupMu.Unlock()
+}
+
 func (w *chatActorWarmup) complete(actor *runtimechat.SessionActor, err error) {
 	if w == nil {
 		return
@@ -104,11 +115,17 @@ func chatActorForSession(ctx context.Context, session *ChatSession) (*runtimecha
 		return nil, fmt.Errorf("runtime session id is required")
 	}
 	if warmup := currentChatActorWarmup(session, sessionID); warmup != nil {
-		return warmup.wait(ctx)
+		// Warmup only gates the initial factory call. The hub remains the source
+		// of truth because it may evict and stop the warmed actor after an idle
+		// period while the interactive ChatSession continues to live.
+		_, warmupErr := warmup.wait(ctx)
+		if warmupErr == nil || ctx == nil || ctx.Err() == nil {
+			clearChatActorWarmup(session, warmup)
+		}
+		if warmupErr != nil && ctx != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 	}
 
-	// Fallback for tests and manually constructed sessions that bypass normal
-	// bootstrap. Production chat sessions start warmup immediately after the
-	// local runtime host is initialized.
 	return session.LocalRuntimeHost.SessionHub.GetOrCreate(sessionID)
 }

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -200,6 +201,9 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 func humanizeActorExecutorError(session *ChatSession, err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, runtimechat.ErrSessionActorStopped) {
+		return fmt.Errorf("本地会话执行器已停止，本次请求未被处理；请重新发送，系统会自动创建新的执行器")
 	}
 	if preflightErr, ok := agent.AsPromptPreflightError(err); ok && preflightErr != nil {
 		message := fmt.Sprintf(

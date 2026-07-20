@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -95,4 +96,28 @@ func discardPendingInteractiveInputForPriorityPrompt(session *ChatSession, promp
 		promptKind = "交互提示"
 	}
 	return "[input] 检测到之前排队的输入内容；为避免误用，已在" + promptKind + "前丢弃这些输入。"
+}
+
+// suspendPendingInteractiveInputForPriorityPrompt 在审批或问题接管输入前，
+// 暂存普通消息、已确认提交和未确认草稿。调用方必须在优先提示结束后调用 Restore。
+// 非队列终端无法安全回放控制台缓冲区，因此沿用丢弃策略以避免误作优先回答。
+func suspendPendingInteractiveInputForPriorityPrompt(session *ChatSession, promptKind string) (*chatPendingInputSuspension, string) {
+	if session == nil || session.NoInteractive || session.JSONOutput {
+		return nil, ""
+	}
+	promptKind = strings.TrimSpace(promptKind)
+	if promptKind == "" {
+		promptKind = "交互提示"
+	}
+	if session.InputQueue == nil {
+		return nil, discardPendingInteractiveInputForPriorityPrompt(session, promptKind)
+	}
+
+	suspension := session.InputQueue.suspendPendingInput()
+	if suspension.Count() == 0 {
+		return suspension, ""
+	}
+	notice := "[input] 检测到 " + fmt.Sprintf("%d", suspension.Count()) +
+		" 条待处理输入；已在" + promptKind + "期间临时挂起，结束后将按原顺序恢复。"
+	return suspension, notice
 }

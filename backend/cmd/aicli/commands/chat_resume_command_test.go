@@ -98,6 +98,42 @@ func TestReadResumeSessionPickRendersUpdateTimeCountsAndTitle(t *testing.T) {
 	}
 }
 
+func TestBuildResumeFullScreenItemsIncludesHistoryDetailsAndSearchMetadata(t *testing.T) {
+	now := time.Date(2026, 7, 17, 16, 0, 0, 0, time.Local)
+	session := runtimechat.NewSession("tester")
+	session.ID = "resume-fullscreen"
+	session.Metadata.Title = "Resume full-screen picker"
+	session.Metadata.Context = map[string]interface{}{
+		chatRuntimeContextProtocol:     "anthropic",
+		chatRuntimeContextProviderName: "provider-a",
+		chatRuntimeContextModel:        "model-a",
+	}
+	session.ReplaceHistory([]runtimetypes.Message{
+		{Role: "user", Content: "improve resume", Metadata: runtimetypes.NewMetadata()},
+		{Role: "assistant", Content: "working", Metadata: runtimetypes.NewMetadata()},
+	})
+	session.UpdatedAt = now.Add(-5 * time.Minute)
+
+	items, selectable := buildResumeFullScreenItems([]*runtimechat.Session{nil, session}, now)
+	if len(items) != 1 || len(selectable) != 1 || selectable[0] != session {
+		t.Fatalf("expected nil sessions to be skipped while preserving selection mapping, got items=%#v selectable=%#v", items, selectable)
+	}
+	item := items[0]
+	if item.Title != "Resume full-screen picker" {
+		t.Fatalf("unexpected full-screen title: %q", item.Title)
+	}
+	for _, expected := range []string{"5分钟前", "1轮/2条"} {
+		if !strings.Contains(item.Detail, expected) {
+			t.Fatalf("expected detail to contain %q, got %q", expected, item.Detail)
+		}
+	}
+	for _, expected := range []string{"resume-fullscreen", "anthropic", "provider-a", "model-a"} {
+		if !strings.Contains(item.SearchText, expected) {
+			t.Fatalf("expected search metadata to contain %q, got %q", expected, item.SearchText)
+		}
+	}
+}
+
 func TestResumeInteractiveSelectShowsHistoryDirectlyAndExcludesCurrent(t *testing.T) {
 	storage := runtimechat.NewInMemoryStorage()
 	manager := runtimechat.NewSessionManager(storage, nil)

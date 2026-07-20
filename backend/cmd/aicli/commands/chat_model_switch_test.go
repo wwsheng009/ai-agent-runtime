@@ -138,7 +138,7 @@ func TestRenderSelectionPopupLines_ShowsCurrentValueAndHint(t *testing.T) {
 		"gpt-4.1",
 		"",
 		"  提示: 输入编号、模型名，回车保持当前",
-		"  [input] 检测到之前排队的输入内容；为避免误用，已在模型选择前丢弃这些输入。",
+		"  [input] 检测到 1 条待处理输入；已在模型选择期间临时挂起，结束后将按原顺序恢复。",
 		"",
 	)
 
@@ -150,11 +150,66 @@ func TestRenderSelectionPopupLines_ShowsCurrentValueAndHint(t *testing.T) {
 		"(当前)",
 		"[2] gpt-4.1-mini",
 		"提示: 输入编号、模型名，回车保持当前",
-		"模型选择前丢弃这些输入",
+		"模型选择期间临时挂起",
 	} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("expected popup lines to contain %q, got:\n%s", expected, rendered)
 		}
+	}
+}
+
+func TestRenderSelectionPopupLinesAlignsCJKOptionsByDisplayWidth(t *testing.T) {
+	lines := renderSelectionPopupLines(
+		"选择模型",
+		"模型",
+		"模型甲",
+		[]string{"模型甲", "gpt"},
+		"模型甲",
+		"gpt",
+		"",
+		"",
+		"",
+	)
+
+	markerColumns := make([]int, 0, 2)
+	for _, line := range lines {
+		marker := "(当前)"
+		if !strings.Contains(line, marker) {
+			marker = "(默认)"
+		}
+		if index := strings.Index(line, marker); index >= 0 {
+			markerColumns = append(markerColumns, ui.DisplayWidth(line[:index]))
+		}
+	}
+	if len(markerColumns) != 2 || markerColumns[0] != markerColumns[1] {
+		t.Fatalf("expected CJK and ASCII markers to align, got columns %#v from %#v", markerColumns, lines)
+	}
+}
+
+func TestPrepareRuntimeSelectionInputSuspendsAndRestoresQueuedMessages(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.routeInputText("follow up\n")
+	session := &ChatSession{InputQueue: queue}
+	session.Interaction = newChatInteractionCoordinator(session)
+
+	notice, restore := prepareRuntimeSelectionInput(session, "模型选择")
+	if !strings.Contains(notice, "临时挂起") || strings.Contains(notice, "丢弃") {
+		t.Fatalf("expected suspension notice, got %q", notice)
+	}
+	if got := queue.pendingCount(); got != 0 {
+		t.Fatalf("expected queue to be suspended, got %d pending inputs", got)
+	}
+	if got := session.Interaction.InputMode(); got != chatInputModeSelection {
+		t.Fatalf("expected selection input mode, got %q", got)
+	}
+
+	restore()
+	if got := session.Interaction.InputMode(); got != chatInputModeChat {
+		t.Fatalf("expected chat input mode after restore, got %q", got)
+	}
+	line, ok := queue.readAvailableLine()
+	if !ok || normalizeQueuedInputLine(line) != "follow up" {
+		t.Fatalf("expected queued input to be restored, got %q ok=%v", line, ok)
 	}
 }
 
@@ -299,7 +354,7 @@ func TestHandleCommand_ModelPromptKeepsCurrentModelAndUsesPriorityReasoningSelec
 		},
 	}
 	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
-	queue.lines <- chatQueuedInput{Text: "stale-input\n", Source: "stdin"}
+	queue.lines <- chatQueuedInput{Text: "queued-follow-up\n", Source: "stdin"}
 	// Pre-load priority inputs for provider selector (empty = accept current),
 	// model selector (empty = accept current) and reasoning effort selector
 	// ("2" = select second option).
@@ -332,14 +387,18 @@ func TestHandleCommand_ModelPromptKeepsCurrentModelAndUsesPriorityReasoningSelec
 	if session.ReasoningEffort != "medium" {
 		t.Fatalf("expected reasoning effort to switch to medium, got %q", session.ReasoningEffort)
 	}
-	if !strings.Contains(output, "provider 选择前丢弃这些输入") {
-		t.Fatalf("expected stale input discard notice, got:\n%s", output)
+	if !strings.Contains(output, "provider 选择期间临时挂起") {
+		t.Fatalf("expected queued input suspension notice, got:\n%s", output)
 	}
 	if !strings.Contains(output, "当前模型: gpt-4.1") {
 		t.Fatalf("expected current model summary, got:\n%s", output)
 	}
 	if !strings.Contains(output, "当前 reasoning_effort: medium") {
 		t.Fatalf("expected reasoning effort summary, got:\n%s", output)
+	}
+	line, ok := queue.readAvailableLine()
+	if !ok || normalizeQueuedInputLine(line) != "queued-follow-up" {
+		t.Fatalf("expected queued follow-up to be restored, got %q ok=%v", line, ok)
 	}
 
 	stored, err := manager.Get(context.Background(), runtimeSession.ID)

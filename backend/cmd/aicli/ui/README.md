@@ -20,6 +20,7 @@ cmd/aicli/
 │   ├── status.go                 # 状态指示组件（成功/错误/警告）
 │   ├── statusbar.go              # 状态栏组件（固定显示重要状态）
 │   ├── terminal.go               # 终端控制组件（光标位置、屏幕更新）
+│   ├── fullscreen_list.go        # 备用屏幕全屏列表选择器
 │   └── layout.go                 # 屏幕布局管理器（区域划分）
 ```
 
@@ -103,7 +104,12 @@ cmd/aicli/
 - PrintMessage() - 在聊天区域打印消息
 - Render() - 渲染完整布局
 
-### 15. inputbox.go - 输入框组件
+### 15. fullscreen_list.go - 全屏列表选择器
+- SelectFullScreenList() - 在备用屏幕中选择列表项目
+- 支持上下移动、翻页、首尾跳转、搜索、确认和取消
+- 离开选择器时恢复原聊天屏幕、滚动区域、光标和终端 raw mode
+
+### 16. inputbox.go - 输入框组件
 - Read() - 读取单行输入
 - ReadMultiLine() - 读取多行输入
 - 支持历史记录导航

@@ -540,10 +540,16 @@ func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRun
 	if defaultModel == "" {
 		defaultModel = strings.TrimSpace(session.Provider.DefaultModel)
 	}
+	maxRetries := runtimellm.ProviderMaxRetriesFromAgentConfig(session.Config)
+	retryTuning := runtimellm.RetryTuningFromAgentConfig(session.Config)
+	retryRules := runtimellm.RetryRulesFromAgentConfig(session.Config)
 
 	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
 		DefaultProvider: providerName,
 		DefaultModel:    defaultModel,
+		MaxRetries:      maxRetries,
+		RetryTuning:     retryTuning,
+		RetryRules:      retryRules,
 	})
 	provider, err := runtimellm.NewProvider(&runtimellm.ProviderConfig{
 		Type:                    providerType,
@@ -551,7 +557,9 @@ func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRun
 		BaseURL:                 session.Provider.BaseURL,
 		APIPath:                 session.Provider.APIPath,
 		Timeout:                 session.Provider.Timeout,
-		MaxRetries:              1,
+		MaxRetries:              maxRetries,
+		RetryTuning:             retryTuning,
+		RetryRules:              retryRules,
 		DefaultModel:            strings.TrimSpace(session.Provider.DefaultModel),
 		SupportedModels:         append([]string(nil), session.Provider.SupportedModels...),
 		ModelMappings:           cloneStringMap(session.Provider.ModelMappings),

@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 )
 
@@ -23,6 +26,10 @@ type directFunctionInvokeReport struct {
 func handleDirectFunctionCommand(session *ChatSession, command string) bool {
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
+		return false
+	}
+	if session.DisableTools {
+		fmt.Println("错误: 当前会话已禁用 tools；/call、/tool 和 /skill 不可执行")
 		return false
 	}
 
@@ -44,6 +51,11 @@ func handleDirectFunctionCommand(session *ChatSession, command string) bool {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
 	}
+	args, err = authorizeDirectFunctionInvocation(session, resolvedName, args, !jsonOutput)
+	if err != nil {
+		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
+		return false
+	}
 
 	report, err := executeDirectFunction(session, requestedName, resolvedName, args)
 	if err != nil {
@@ -57,6 +69,10 @@ func handleDirectFunctionCommand(session *ChatSession, command string) bool {
 func handleDirectSkillCommand(session *ChatSession, command string) bool {
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
+		return false
+	}
+	if session.DisableTools {
+		fmt.Println("错误: 当前会话已禁用 tools；/call、/tool 和 /skill 不可执行")
 		return false
 	}
 
@@ -74,6 +90,11 @@ func handleDirectSkillCommand(session *ChatSession, command string) bool {
 		return false
 	}
 	args, err := parseDirectFunctionArgs(rawPrompt, true, resolvedName)
+	if err != nil {
+		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
+		return false
+	}
+	args, err = authorizeDirectFunctionInvocation(session, resolvedName, args, !jsonOutput)
 	if err != nil {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
@@ -298,6 +319,281 @@ func parseDirectFunctionArgs(raw string, isSkill bool, functionName string) (map
 	return nil, fmt.Errorf("非 skill function 需要 JSON object 参数，例如 {\"prompt\":\"...\"}")
 }
 
+type directFunctionApprovalHandler struct {
+	session     *ChatSession
+	interactive bool
+}
+
+func (h directFunctionApprovalHandler) RequestApproval(ctx context.Context, req runtimepolicy.ApprovalRequest) (runtimepolicy.ApprovalResponse, error) {
+	if h.session == nil || !h.interactive || h.session.NoInteractive {
+		return runtimepolicy.ApprovalResponse{}, fmt.Errorf(
+			"直接调用 %s 需要审批，但当前模式不可交互；请在交互 chat 中确认，或在可信环境显式使用 permission-mode=bypass_permissions",
+			strings.TrimSpace(req.ToolName),
+		)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	approval := &runtimechat.ApprovalRequest{
+		ID:         req.ID,
+		SessionID:  req.SessionID,
+		ToolCallID: req.ToolCallID,
+		ToolName:   req.ToolName,
+		ArgsJSON:   req.ArgsJSON,
+		Reason:     req.Reason,
+		RiskLevel:  req.RiskLevel,
+		ExpiresAt:  req.ExpiresAt,
+	}
+	restoreStage := pushChatComposerAgentStage(h.session, chatAgentStageAwaitingApproval)
+	defer restoreStage()
+
+	lines := make([]string, 0, 12)
+	contextLines := []string{
+		"来源：用户直接执行 Slash 命令",
+		"permission-mode=" + chatRuntimePermissionModeLabel(h.session),
+	}
+	lines = append(lines, approvalPriorityPromptLines(approval, contextLines)...)
+	promptLine := approvalDecisionPrompt()
+	detailsShown := false
+
+	endAction := beginChatTitleAction(h.session, "Direct Function Approval Required")
+	defer endAction()
+	for {
+		readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(h.session, lines, promptLine)
+		text, err := chatInteractiveReadPriorityLineWithPrompt(h.session, ctx, readPrompt)
+		cleanupPrompt()
+		if err != nil {
+			return runtimepolicy.ApprovalResponse{}, err
+		}
+		text = strings.TrimSpace(normalizeQueuedInputLine(text))
+		decision := parseApprovalPromptDecision(text)
+		if decision == approvalPromptShowDetails {
+			if !detailsShown {
+				lines = append(lines, approvalFullParameterLines(approval)...)
+				detailsShown = true
+			}
+			continue
+		}
+		if decision == approvalPromptInvalid {
+			lines = upsertPriorityPromptValidationLine(lines, "[审批] 无效选项", "[审批] 无效选项，请输入 1、2、3，或 y/n。")
+			continue
+		}
+		if transientPrompt {
+			renderChatRuntimePriorityPromptTranscript(h.session, lines, promptLine, text)
+		}
+		allowed := decision == approvalPromptAllowOnce
+		if allowed {
+			fmt.Printf("[审批] 已允许本次直接调用：%s\n", strings.TrimSpace(req.ToolName))
+		}
+		return runtimepolicy.ApprovalResponse{Allowed: allowed}, nil
+	}
+}
+
+func authorizeDirectFunctionInvocation(session *ChatSession, functionName string, args map[string]interface{}, interactive bool) (map[string]interface{}, error) {
+	if session == nil {
+		return nil, fmt.Errorf("当前没有活动会话")
+	}
+	if session.DisableTools {
+		return nil, fmt.Errorf("当前会话已禁用 tools；/call、/tool 和 /skill 不可执行")
+	}
+	catalog := ensureFunctionCatalog(session)
+	if catalog == nil || catalog.Registry() == nil {
+		return nil, fmt.Errorf("function registry 未初始化")
+	}
+
+	ctx := context.Background()
+	if session.cancelCtx != nil {
+		ctx = session.cancelCtx
+	}
+	policy := session.ToolPolicy
+	if policy == nil {
+		policy = catalog.toolPolicy
+	}
+	engine := &runtimepolicy.Engine{
+		Mode:       session.PermissionMode,
+		Policy:     policy,
+		AskHandler: directFunctionApprovalHandler{session: session, interactive: interactive},
+	}
+	decision, err := engine.Evaluate(ctx, runtimepolicy.EvalRequest{
+		SessionID:    currentRuntimeSessionID(session),
+		ToolCallID:   "direct-slash-call",
+		ToolName:     functionName,
+		Args:         args,
+		Capabilities: directFunctionCapabilities(catalog, functionName, args),
+		Mode:         session.PermissionMode,
+		Metadata: map[string]interface{}{
+			"source": "direct_slash_command",
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if decision.Type != runtimepolicy.DecisionAllow {
+		reason := strings.TrimSpace(decision.Reason)
+		if reason == "" {
+			reason = "permission policy denied the direct invocation"
+		}
+		return nil, fmt.Errorf("permission-mode=%s 阻止直接调用 %s: %s", chatRuntimePermissionModeLabel(session), functionName, reason)
+	}
+	if len(decision.PatchedArgs) == 0 {
+		return args, nil
+	}
+	patched := map[string]interface{}{}
+	if err := json.Unmarshal(decision.PatchedArgs, &patched); err != nil {
+		return nil, fmt.Errorf("审批返回的参数补丁无效: %w", err)
+	}
+	return patched, nil
+}
+
+func directFunctionCapabilities(catalog *aicliFunctionCatalog, functionName string, args map[string]interface{}) []runtimepolicy.Capability {
+	resolver := runtimepolicy.DefaultCapabilityResolver{}
+	caps := append([]runtimepolicy.Capability(nil), resolver.Resolve(runtimepolicy.EvalRequest{
+		ToolName: functionName,
+		Args:     args,
+	})...)
+	descriptor := catalog.Descriptor(functionName)
+	if descriptor != nil {
+		for _, declared := range descriptor.Capabilities {
+			caps = append(caps, directDeclaredCapabilities(declared)...)
+		}
+		for _, dependency := range descriptor.Dependencies {
+			caps = append(caps, resolver.Resolve(runtimepolicy.EvalRequest{ToolName: dependency.Name})...)
+		}
+	}
+
+	isSkill := strings.HasPrefix(functionName, skillFunctionPrefix) || (descriptor != nil && descriptor.Kind == capability.KindSkill)
+	if isSkill {
+		// Skill handlers may call nested tools or external agents. Treat the top-level
+		// direct invocation conservatively even when the manifest omits capabilities.
+		caps = append(caps, runtimepolicy.CapExternalSideEffect)
+	}
+	if toolnames.IsOpenAIImageGenerateToolName(functionName) {
+		caps = append(caps, runtimepolicy.CapNetwork, runtimepolicy.CapWriteFS)
+	}
+	if runtimepolicy.HasMutationHints(args) || hasDirectStringArg(args, "output", "output_path", "save_path", "destination") {
+		caps = append(caps, runtimepolicy.CapWriteFS)
+	}
+	if hasDirectStringArg(args, "command", "cmd", "script", "powershell", "bash") {
+		caps = append(caps, runtimepolicy.CapExecShell)
+	}
+	if hasDirectStringArg(args, "url", "uri", "endpoint") {
+		caps = append(caps, runtimepolicy.CapNetwork)
+	}
+	if !isSkill && directCapabilitiesOnlyRead(caps) && !directFunctionNameLooksReadOnly(functionName) {
+		// Generic registry functions often have no governance metadata. Unknown
+		// direct calls are confirmed instead of being assumed side-effect free.
+		caps = append(caps, runtimepolicy.CapExternalSideEffect)
+	}
+	for _, item := range caps {
+		if item == runtimepolicy.CapAgentManagement {
+			caps = append(caps, runtimepolicy.CapExternalSideEffect)
+			break
+		}
+	}
+	return normalizeDirectFunctionCapabilities(caps)
+}
+
+func directDeclaredCapabilities(value string) []runtimepolicy.Capability {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.NewReplacer("-", "_", " ", "_").Replace(normalized)
+	if normalized == "" {
+		return nil
+	}
+	caps := make([]runtimepolicy.Capability, 0, 2)
+	if strings.Contains(normalized, "read") {
+		caps = append(caps, runtimepolicy.CapReadOnly)
+	}
+	if strings.Contains(normalized, "write") || strings.Contains(normalized, "edit") || strings.Contains(normalized, "patch") || strings.Contains(normalized, "filesystem") {
+		caps = append(caps, runtimepolicy.CapWriteFS)
+	}
+	if strings.Contains(normalized, "shell") || strings.Contains(normalized, "exec") || strings.Contains(normalized, "command") {
+		caps = append(caps, runtimepolicy.CapExecShell)
+	}
+	if strings.Contains(normalized, "network") || strings.Contains(normalized, "http") || strings.Contains(normalized, "web") || strings.Contains(normalized, "search") {
+		caps = append(caps, runtimepolicy.CapNetwork)
+	}
+	if strings.Contains(normalized, "background") {
+		caps = append(caps, runtimepolicy.CapBackgroundTask)
+	}
+	if strings.Contains(normalized, "agent") || strings.Contains(normalized, "team") {
+		caps = append(caps, runtimepolicy.CapAgentManagement)
+	}
+	if strings.Contains(normalized, "external") || strings.Contains(normalized, "notify") || strings.Contains(normalized, "publish") || strings.Contains(normalized, "deploy") {
+		caps = append(caps, runtimepolicy.CapExternalSideEffect)
+	}
+	if len(caps) == 0 {
+		caps = append(caps, runtimepolicy.CapExternalSideEffect)
+	}
+	return caps
+}
+
+func hasDirectStringArg(args map[string]interface{}, keys ...string) bool {
+	for _, key := range keys {
+		if value, ok := args[key].(string); ok && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func directCapabilitiesOnlyRead(values []runtimepolicy.Capability) bool {
+	if len(values) == 0 {
+		return true
+	}
+	for _, value := range values {
+		if value != runtimepolicy.CapReadOnly {
+			return false
+		}
+	}
+	return true
+}
+
+func directFunctionNameLooksReadOnly(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, marker := range []string{"read", "get", "list", "search", "status", "describe", "inspect", "view", "show", "query", "find", "check", "wait"} {
+		if strings.Contains(name, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func dedupeDirectFunctionCapabilities(values []runtimepolicy.Capability) []runtimepolicy.Capability {
+	seen := make(map[runtimepolicy.Capability]bool, len(values))
+	result := make([]runtimepolicy.Capability, 0, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func normalizeDirectFunctionCapabilities(values []runtimepolicy.Capability) []runtimepolicy.Capability {
+	values = dedupeDirectFunctionCapabilities(values)
+	hasSideEffect := false
+	for _, value := range values {
+		switch value {
+		case runtimepolicy.CapWriteFS, runtimepolicy.CapExecShell, runtimepolicy.CapNetwork,
+			runtimepolicy.CapExternalSideEffect, runtimepolicy.CapBackgroundTask, runtimepolicy.CapAgentManagement:
+			hasSideEffect = true
+		}
+	}
+	if !hasSideEffect {
+		return values
+	}
+	result := make([]runtimepolicy.Capability, 0, len(values))
+	for _, value := range values {
+		if value != runtimepolicy.CapReadOnly {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
 func executeDirectFunction(session *ChatSession, requestedName, functionName string, args map[string]interface{}) (*directFunctionInvokeReport, error) {
 	catalog := ensureFunctionCatalog(session)
 	if catalog == nil || catalog.Registry() == nil {
@@ -318,7 +614,9 @@ func executeDirectFunction(session *ChatSession, requestedName, functionName str
 	ctx = generatedImageToolContext(ctx, session)
 
 	scope, toolCallID, startedAt, shouldLog := beginDirectFunctionExecutionLog(session, requestedName, functionName, args)
-	output, metadata, err := catalog.Registry().ExecuteFunctionWithMeta(ctx, functionName, args)
+	restoreComposerStage := beginDirectFunctionComposerExecution(session, functionName)
+	defer restoreComposerStage()
+	output, metadata, err := catalog.ExecuteFunctionWithMeta(ctx, functionName, args)
 	if err != nil {
 		finishDirectFunctionExecutionLog(session, scope, toolCallID, functionName, output, metadata, err, startedAt, shouldLog)
 		return nil, err
@@ -339,6 +637,26 @@ func executeDirectFunction(session *ChatSession, requestedName, functionName str
 		Output:        output,
 		Metadata:      metadata,
 	}, nil
+}
+
+func beginDirectFunctionComposerExecution(session *ChatSession, functionName string) func() {
+	if session == nil || session.Interaction == nil {
+		return func() {}
+	}
+	interaction := session.Interaction
+	previousStage := interaction.AgentStage()
+	previousDetail := interaction.AgentStageDetail()
+	runningDetail := compactStatusValue(strings.TrimSpace(functionName), 48)
+	interaction.SetAgentStageDetail(chatAgentStageToolRunning, runningDetail)
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if interaction.AgentStage() == chatAgentStageToolRunning && interaction.AgentStageDetail() == runningDetail {
+				interaction.SetAgentStageDetail(previousStage, previousDetail)
+			}
+		})
+	}
 }
 
 func renderDirectSkillInvocationStarted(session *ChatSession, command, requestedName, functionName string, args map[string]interface{}, jsonOutput bool) {

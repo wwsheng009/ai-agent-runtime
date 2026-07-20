@@ -16,10 +16,13 @@ const (
 	maxSpecialConsoleInputScan  = 64
 	windowsClipboardUnicodeText = 13
 	windowsVKV                  = 0x56
+	windowsVKReturn             = 0x0D
+	windowsShiftPressed         = 0x0010
 	windowsLeftCtrlPressed      = 0x0008
 	windowsRightCtrlPressed     = 0x0004
 	windowsClipboardOpenRetries = 5
 	windowsClipboardRetryDelay  = 10 * time.Millisecond
+	windowsInputPollInterval    = 20 * time.Millisecond
 )
 
 var (
@@ -88,7 +91,7 @@ func platformWaitForInteractiveInputReady(fd int, timeout time.Duration) (bool, 
 		if remaining <= 0 {
 			return false, nil
 		}
-		sleep := 5 * time.Millisecond
+		sleep := windowsInputPollInterval
 		if remaining < sleep {
 			sleep = remaining
 		}
@@ -106,6 +109,9 @@ func hasPendingConsoleKeyEvent(handle windows.Handle) (bool, error) {
 	}
 	if eventCount > maxPeekConsoleInputRecords {
 		eventCount = maxPeekConsoleInputRecords
+	}
+	if eventCount > maxSpecialConsoleInputScan {
+		eventCount = maxSpecialConsoleInputScan
 	}
 
 	records := make([]consoleInputRecord, eventCount)
@@ -179,6 +185,14 @@ func platformConsumeSpecialInteractiveKey(fd int) (editorKey, bool, error) {
 	for i := range records {
 		if records[i].EventType == windows.KEY_EVENT {
 			key := (*consoleKeyEventRecord)(unsafe.Pointer(&records[i].Event[0]))
+			if consoleKeyEventIsModifiedEnterDown(key) {
+				for consumed := 0; consumed <= i; consumed++ {
+					if err := readConsoleInputRecord(handle); err != nil {
+						return editorKey{}, false, err
+					}
+				}
+				return editorKey{kind: editorKeyInsertNewline}, true, nil
+			}
 			if consoleKeyEventIsCtrlVDown(key) {
 				for consumed := 0; consumed <= i; consumed++ {
 					if err := readConsoleInputRecord(handle); err != nil {
@@ -200,6 +214,13 @@ func platformConsumeSpecialInteractiveKey(fd int) (editorKey, bool, error) {
 		return editorKey{}, false, err
 	}
 	return editorKey{}, false, nil
+}
+
+func consoleKeyEventIsModifiedEnterDown(key *consoleKeyEventRecord) bool {
+	return key != nil &&
+		key.KeyDown != 0 &&
+		key.VirtualKeyCode == windowsVKReturn &&
+		key.ControlKeyState&windowsShiftPressed != 0
 }
 
 func consoleInputRecordCanProduceInput(record consoleInputRecord) bool {

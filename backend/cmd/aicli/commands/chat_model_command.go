@@ -296,6 +296,7 @@ func applyChatExecutionContext(session *ChatSession, providerCtx *providerExecut
 		session.FunctionBuilder = functions.GetFunctionCallBuilder(session.Provider.GetProtocol())
 	}
 	syncChatLoggerModelState(session)
+	refreshChatTitleMetadata(session)
 	return nil
 }
 
@@ -347,12 +348,13 @@ func promptModelCommandProviderSelectionPopup(session *ChatSession, current stri
 		defaultOption = options[0]
 	}
 
-	notice := discardPendingInteractiveInputForPriorityPrompt(session, "provider 选择")
+	notice, restoreInput := prepareRuntimeSelectionInput(session, "provider 选择")
+	defer restoreInput()
 	hint := "  提示: 输入编号或名称，回车保持当前"
 	popupLines := renderSelectionPopupLines("选择 Provider", "provider", current, options, currentMatch, defaultOption, hint, notice, "")
 	prompt := providerSelectionPrompt(currentValid, defaultOption)
-	showRuntimeSelectionPopup(session, popupLines, prompt)
-	defer clearRuntimeSelectionPopup(session)
+	handle := beginRuntimeSelectionPopup(session, popupLines, prompt)
+	defer clearRuntimeSelectionPopupHandle(session, handle)
 
 	for {
 		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
@@ -365,7 +367,7 @@ func promptModelCommandProviderSelectionPopup(session *ChatSession, current stri
 			return selected, nil
 		}
 		popupLines = renderSelectionPopupLines("选择 Provider", "provider", current, options, currentMatch, defaultOption, hint, notice, "  无效的选择，请重新输入")
-		showRuntimeSelectionPopup(session, popupLines, prompt)
+		updateRuntimeSelectionPopup(session, handle, popupLines, prompt)
 	}
 }
 
@@ -382,7 +384,9 @@ func promptModelCommandProviderSelectionLegacy(session *ChatSession, current str
 		defaultOption = options[0]
 	}
 
-	if notice := discardPendingInteractiveInputForPriorityPrompt(session, "provider 选择"); notice != "" {
+	notice, restoreInput := prepareRuntimeSelectionInput(session, "provider 选择")
+	defer restoreInput()
+	if notice != "" {
 		fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine(notice))
 	}
 

@@ -21,7 +21,13 @@ func TestChatComposerControllerBuildsCoreHooksWithoutCompletion(t *testing.T) {
 	if hooks.InitialText != "draft" || hooks.InitialCursor != len([]rune("draft")) {
 		t.Fatalf("expected composer to seed draft snapshot, got text=%q cursor=%d", hooks.InitialText, hooks.InitialCursor)
 	}
-	if hooks.OnChange == nil || hooks.OnBeforeTerminalWrite == nil {
+	if hooks.MaxVisibleRows != ui.ChatComposerMaxVisibleRows {
+		t.Fatalf("expected bounded composer viewport, got %d", hooks.MaxVisibleRows)
+	}
+	if hooks.ResolveMaxVisibleRows == nil || hooks.ResolveMaxVisibleRows() != ui.ChatComposerMaxVisibleRows {
+		t.Fatal("expected composer viewport budget to be resolved dynamically")
+	}
+	if hooks.OnChange == nil || hooks.OnBeforeTerminalWrite == nil || hooks.OnTerminalWrite == nil {
 		t.Fatal("expected core editor hooks to be present")
 	}
 	if hooks.OnComplete != nil || hooks.OnNavigate != nil || hooks.OnSubmit != nil || hooks.OnCancelPopup != nil {
@@ -32,6 +38,30 @@ func TestChatComposerControllerBuildsCoreHooksWithoutCompletion(t *testing.T) {
 	snapshot := coord.PromptInputSnapshot()
 	if snapshot.Text != "next" || snapshot.Cursor != 4 {
 		t.Fatalf("expected composer change hook to update interaction prompt, got %#v", snapshot)
+	}
+}
+
+func TestFormatChatComposerEditorStatusIsConditionalAndTracksLogicalLine(t *testing.T) {
+	if status := formatChatComposerEditorStatus(ui.LineEditorSnapshot{LogicalLine: 1, LogicalLines: 1, DisplayRows: 1}); status != "" {
+		t.Fatalf("expected single-line composer status to stay hidden, got %q", status)
+	}
+	status := formatChatComposerEditorStatus(ui.LineEditorSnapshot{
+		LogicalLine:  2,
+		LogicalLines: 4,
+		DisplayRows:  4,
+	})
+	if status != "多行 2/4" {
+		t.Fatalf("unexpected multiline composer status %q", status)
+	}
+	status = formatChatComposerEditorStatus(ui.LineEditorSnapshot{
+		LogicalLine:   1,
+		LogicalLines:  1,
+		DisplayRows:   12,
+		ViewportStart: 6,
+		ViewportRows:  ui.ChatComposerMaxVisibleRows,
+	})
+	if status != "自动换行 · 显示 12 行 · 视图 7-12/12" {
+		t.Fatalf("unexpected wrapped composer status %q", status)
 	}
 }
 
@@ -120,6 +150,12 @@ func TestChatBusyComposerCaptureTracksAndClearsNonPriorityPrompt(t *testing.T) {
 	session.Interaction = coord
 	capture := newChatBusyComposerCapture(session, "> ", false)
 	hooks := capture.hooks()
+	if hooks.ResolveMaxVisibleRows == nil {
+		t.Fatal("expected busy composer viewport budget to be resolved dynamically")
+	}
+	if hooks.OnTerminalWrite == nil {
+		t.Fatal("expected busy composer to install the atomic terminal writer")
+	}
 
 	hooks.OnChange(ui.LineEditorSnapshot{Text: "queued while busy", Cursor: len([]rune("queued while busy"))})
 	snapshot := coord.PromptInputSnapshot()
@@ -250,6 +286,22 @@ func TestChatAgentPanelComposerHooksDriveController(t *testing.T) {
 	}
 }
 
+func TestParseChatAgentPanelOptionsSupportsExplicitClose(t *testing.T) {
+	for _, argument := range []string{"panel close", "panel hide", "panel off"} {
+		opts := parseChatAgentPanelOptions(argument, 8)
+		if opts.Nav != "close" {
+			t.Fatalf("expected %q to close the persistent panel, got %#v", argument, opts)
+		}
+	}
+}
+
+func TestParseChatAgentPanelOptionsSupportsFullDetail(t *testing.T) {
+	opts := parseChatAgentPanelOptions("panel full 12", 8)
+	if !opts.Full || opts.Limit != 12 || opts.Follow || opts.Nav != "" {
+		t.Fatalf("expected explicit full detail options, got %#v", opts)
+	}
+}
+
 func TestChatAgentPanelModalControllerDoesNotMarkRenderedWithoutSurface(t *testing.T) {
 	state := newChatAgentPanelModalState(3)
 	controller := newChatAgentPanelModalController(&ChatSession{}, &state, "Agent Panel> ")
@@ -261,7 +313,7 @@ func TestChatAgentPanelModalControllerDoesNotMarkRenderedWithoutSurface(t *testi
 	}
 }
 
-func TestNormalizeChatAgentPanelComposerReadErrorInterruptsAndResetsPrompt(t *testing.T) {
+func TestNormalizeChatAgentPanelComposerReadErrorClosesPanelWithoutInterruptingSession(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
 	session.Interaction = coord
@@ -271,8 +323,8 @@ func TestNormalizeChatAgentPanelComposerReadErrorInterruptsAndResetsPrompt(t *te
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("expected agent panel exit request to become EOF, got %v", err)
 	}
-	if !session.IsInterrupted() {
-		t.Fatal("expected agent panel exit request to interrupt the session")
+	if session.IsInterrupted() {
+		t.Fatal("expected agent panel exit request to close only the panel")
 	}
 	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "" {
 		t.Fatalf("expected agent panel exit request to reset prompt state, got %#v", snapshot)

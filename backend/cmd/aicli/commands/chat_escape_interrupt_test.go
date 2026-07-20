@@ -39,6 +39,39 @@ func TestStartChatEscapeInterruptWatcherInterruptsActiveSession(t *testing.T) {
 	}
 }
 
+func TestStartChatEscapeInterruptWatcherPreservesQueuedInput(t *testing.T) {
+	kh := ui.NewKeyHandler()
+	kh.Start()
+	defer kh.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	queue := newChatInputQueue(nil)
+	queue.routeLine(chatQueuedInput{Text: "follow up", Source: "stdin"})
+	session := &ChatSession{
+		KeyHandler: kh,
+		InputQueue: queue,
+		cancelCtx:  ctx,
+		cancelFunc: cancel,
+	}
+
+	stop := startChatEscapeInterruptWatcher(session)
+	defer stop()
+	kh.Notify()
+
+	deadline := time.After(2 * time.Second)
+	for !session.IsInterrupted() {
+		select {
+		case <-deadline:
+			t.Fatal("expected ESC watcher to interrupt active session")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if got := queue.pendingCount(); got != 1 {
+		t.Fatalf("expected ESC to preserve queued input, got %d", got)
+	}
+}
+
 func TestStartChatEscapeInterruptWatcherStoppedDoesNotInterruptSession(t *testing.T) {
 	kh := ui.NewKeyHandler()
 	kh.Start()

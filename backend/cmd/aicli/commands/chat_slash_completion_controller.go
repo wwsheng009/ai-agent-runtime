@@ -10,6 +10,7 @@ import (
 
 const (
 	slashCompletionShellHintLine = "Shell 快捷: !git status"
+	slashCompletionKeyHintLine   = "↑↓ 选择 · Tab 补全 · Enter 确认 · Esc 关闭"
 	slashCompletionPopupOwner    = "slash_completion"
 )
 
@@ -454,6 +455,9 @@ func renderSlashCommandCompletionPopup(state chatSlashCompletionState, width int
 	}
 	if !state.Context.InArguments && strings.TrimSpace(state.Query) == "/" && len(lines)+1 <= slashCompletionMaxPopupRows {
 		lines = append(lines, slashCompletionShellHintLine)
+	}
+	if len(lines)+1 <= slashCompletionMaxPopupRows {
+		lines = append(lines, slashCompletionKeyHintLine)
 	}
 	return clampSlashCompletionPopupLines(lines, width)
 }

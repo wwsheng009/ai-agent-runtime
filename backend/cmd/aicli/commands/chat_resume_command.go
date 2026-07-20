@@ -101,12 +101,100 @@ func resumeInteractiveSelect(session *ChatSession) bool {
 }
 
 func readResumeSessionPick(session *ChatSession, sessions []*runtimechat.Session) (*runtimechat.Session, error) {
+	if terminal := resumeFullScreenTerminal(session); ui.CanUseFullScreenList(terminal) {
+		picked, err := readResumeSessionPickFullScreen(session, terminal, sessions)
+		if err == nil || !errors.Is(err, ui.ErrFullScreenUnavailable) {
+			return picked, err
+		}
+	}
 	return readHistoricalSessionPick(
 		session,
 		sessions,
 		fmt.Sprintf("恢复历史会话（最近更新优先，共 %d 个）:", len(sessions)),
 		"选择会话 (回车恢复 1，q 取消): ",
 	)
+}
+
+func resumeFullScreenTerminal(session *ChatSession) *ui.Terminal {
+	if session == nil || session.Layout == nil {
+		return nil
+	}
+	return session.Layout.Terminal()
+}
+
+func readResumeSessionPickFullScreen(session *ChatSession, terminal *ui.Terminal, sessions []*runtimechat.Session) (*runtimechat.Session, error) {
+	items, selectable := buildResumeFullScreenItems(sessions, time.Now())
+	if len(selectable) == 0 {
+		return nil, nil
+	}
+
+	surfaceEnabled := session != nil && session.Surface != nil && session.Surface.Enabled()
+	if session != nil && session.Interaction != nil {
+		session.Interaction.ClearPrompt()
+		session.Interaction.ResetPromptState()
+	}
+	if surfaceEnabled {
+		session.Surface.Disable()
+	}
+	defer func() {
+		if surfaceEnabled {
+			session.Surface.Enable()
+		}
+		if session != nil && session.Interaction != nil {
+			session.Interaction.ResetPromptState()
+			session.Interaction.RefreshStatus("")
+		}
+	}()
+
+	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+		Title:        "恢复历史会话",
+		Subtitle:     fmt.Sprintf("最近更新优先，共 %d 个可恢复会话", len(selectable)),
+		EmptyMessage: "没有匹配的历史会话",
+		ConfirmLabel: "恢复选中会话",
+		Items:        items,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result.Cancelled || result.Index < 0 || result.Index >= len(selectable) {
+		return nil, nil
+	}
+	return selectable[result.Index], nil
+}
+
+func buildResumeFullScreenItems(sessions []*runtimechat.Session, now time.Time) ([]ui.FullScreenListItem, []*runtimechat.Session) {
+	items := make([]ui.FullScreenListItem, 0, len(sessions))
+	selectable := make([]*runtimechat.Session, 0, len(sessions))
+	for _, item := range sessions {
+		if item == nil {
+			continue
+		}
+		turnCount, messageCount := runtimeSessionConversationCounts(item)
+		title := runtimeResumeSessionTitle(item)
+		preview := item.BuildPreview()
+		summary := ""
+		if preview != nil {
+			summary = strings.TrimSpace(preview.Summary)
+		}
+		if summary == "" || strings.EqualFold(summary, title) {
+			summary = fmt.Sprintf("%d 轮对话，%d 条消息", turnCount, messageCount)
+		}
+		detail := fmt.Sprintf("%s  %d轮/%d条", formatSessionUpdatedAt(item.UpdatedAt, now), turnCount, messageCount)
+		searchText := strings.Join([]string{
+			item.ID,
+			runtimeSessionContextString(item, chatRuntimeContextProtocol),
+			runtimeSessionContextString(item, chatRuntimeContextProviderName),
+			runtimeSessionContextString(item, chatRuntimeContextModel),
+		}, " ")
+		items = append(items, ui.FullScreenListItem{
+			Title:      title,
+			Detail:     detail,
+			Preview:    summary,
+			SearchText: searchText,
+		})
+		selectable = append(selectable, item)
+	}
+	return items, selectable
 }
 
 func readHistoricalSessionPick(session *ChatSession, sessions []*runtimechat.Session, header, prompt string) (*runtimechat.Session, error) {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -1098,6 +1099,16 @@ func chatAgentGraphLinesAndSelectedSession(session *ChatSession, selected string
 
 func printChatAgentPanel(session *ChatSession, argument string) {
 	opts := parseChatAgentPanelOptions(argument, 8)
+	if strings.EqualFold(opts.Nav, "close") {
+		if session != nil && session.Surface != nil {
+			session.Surface.ClearPopupForOwnerPreserveCursor(chatAgentPanelPopupOwner)
+		}
+		if session != nil && session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
+		}
+		fmt.Println("Agent Panel 已关闭")
+		return
+	}
 	if changed, err := applyChatAgentPanelNavigation(session, opts); err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return
@@ -1116,7 +1127,10 @@ func printChatAgentPanel(session *ChatSession, argument string) {
 	if useRuntimeSelectionPopup(session) {
 		showChatAgentPanelPopup(session, chatAgentPanelLoadingLines(session))
 	}
-	lines := chatAgentPanelLines(session, opts.Limit)
+	lines := chatAgentPanelSummaryLines(session, opts.Limit)
+	if opts.Full || opts.Follow {
+		lines = chatAgentPanelLines(session, opts.Limit)
+	}
 	if opts.Follow {
 		lines = append(lines, chatAgentPanelFollowLines(session, opts)...)
 	}
@@ -1172,6 +1186,7 @@ func parseChatAgentPanelLimit(argument string, fallback int) int {
 type chatAgentPanelOptions struct {
 	Limit   int
 	Follow  bool
+	Full    bool
 	Timeout time.Duration
 	Nav     string
 	Target  string
@@ -1180,6 +1195,7 @@ type chatAgentPanelOptions struct {
 func parseChatAgentPanelOptions(argument string, fallback int) chatAgentPanelOptions {
 	limit := fallback
 	follow := false
+	full := false
 	timeout := 10 * time.Second
 	for _, field := range strings.Fields(strings.TrimSpace(argument)) {
 		if strings.EqualFold(field, "panel") || strings.EqualFold(field, "pane") || strings.EqualFold(field, "dashboard") {
@@ -1189,13 +1205,20 @@ func parseChatAgentPanelOptions(argument string, fallback int) chatAgentPanelOpt
 			if strings.EqualFold(field, "previous") {
 				field = "prev"
 			}
-			return chatAgentPanelOptions{Limit: limit, Follow: follow, Timeout: timeout, Nav: strings.ToLower(field)}
+			return chatAgentPanelOptions{Limit: limit, Follow: follow, Full: full, Timeout: timeout, Nav: strings.ToLower(field)}
+		}
+		if strings.EqualFold(field, "close") || strings.EqualFold(field, "hide") || strings.EqualFold(field, "off") {
+			return chatAgentPanelOptions{Limit: limit, Follow: follow, Full: full, Timeout: timeout, Nav: "close"}
 		}
 		if strings.EqualFold(field, "target") {
 			continue
 		}
 		if strings.EqualFold(field, "follow") || strings.EqualFold(field, "watch") {
 			follow = true
+			continue
+		}
+		if strings.EqualFold(field, "full") {
+			full = true
 			continue
 		}
 		if duration, ok := chatCollabTimeoutToken(field); ok {
@@ -1207,7 +1230,7 @@ func parseChatAgentPanelOptions(argument string, fallback int) chatAgentPanelOpt
 		value, err := strconv.Atoi(field)
 		if err != nil || value <= 0 {
 			if !strings.HasPrefix(field, "timeout=") && !strings.HasPrefix(field, "wait=") {
-				return chatAgentPanelOptions{Limit: limit, Follow: follow, Timeout: timeout, Nav: "target", Target: strings.TrimSpace(field)}
+				return chatAgentPanelOptions{Limit: limit, Follow: follow, Full: full, Timeout: timeout, Nav: "target", Target: strings.TrimSpace(field)}
 			}
 			continue
 		}
@@ -1216,7 +1239,7 @@ func parseChatAgentPanelOptions(argument string, fallback int) chatAgentPanelOpt
 		}
 		limit = value
 	}
-	return chatAgentPanelOptions{Limit: limit, Follow: follow, Timeout: timeout}
+	return chatAgentPanelOptions{Limit: limit, Follow: follow, Full: full, Timeout: timeout}
 }
 
 func applyChatAgentPanelNavigation(session *ChatSession, opts chatAgentPanelOptions) (bool, error) {
@@ -1356,7 +1379,8 @@ func runChatAgentPanelModal(session *ChatSession, opts chatAgentPanelOptions) er
 	state := newChatAgentPanelModalState(opts.Limit)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	defer clearRuntimeSelectionPopup(session)
+	restoreInputMode := pushChatComposerInputMode(session, chatInputModePanel)
+	defer restoreInputMode()
 	beginDirectInteractiveOutput(session)
 	controller := newChatAgentPanelModalController(session, &state, "Agent Panel> ")
 	controller.Start(ctx)
@@ -1372,6 +1396,9 @@ type chatAgentPanelModalController struct {
 	mu       sync.Mutex
 	cancel   context.CancelFunc
 	rendered bool
+	handle   ui.PopupHandle
+	stopped  bool
+	wg       sync.WaitGroup
 }
 
 func newChatAgentPanelModalController(session *ChatSession, state *chatAgentPanelModalState, prompt string) *chatAgentPanelModalController {
@@ -1385,9 +1412,12 @@ func (c *chatAgentPanelModalController) Start(ctx context.Context) {
 	watchCtx, cancel := context.WithCancel(ctx)
 	c.mu.Lock()
 	c.cancel = cancel
+	c.stopped = false
+	c.wg.Add(1)
 	c.mu.Unlock()
 	updates := watchChatAgentPanelModalUpdates(watchCtx, c.session)
 	go func() {
+		defer c.wg.Done()
 		for {
 			select {
 			case <-watchCtx.Done():
@@ -1409,10 +1439,15 @@ func (c *chatAgentPanelModalController) Stop() {
 	c.mu.Lock()
 	cancel := c.cancel
 	c.cancel = nil
+	c.stopped = true
+	handle := c.handle
+	c.handle = ui.PopupHandle{}
 	c.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	c.wg.Wait()
+	newChatPromptOverlay(c.session).clearPopupHandle(handle)
 }
 
 func (c *chatAgentPanelModalController) Navigate(delta int) {
@@ -1469,14 +1504,21 @@ func (c *chatAgentPanelModalController) Render() {
 }
 
 func (c *chatAgentPanelModalController) renderLocked() {
-	if c == nil || c.session == nil {
+	if c == nil || c.session == nil || c.stopped {
 		return
 	}
 	lines := chatAgentPanelModalLines(c.session, c.state)
-	preserveCursor := c.rendered
-	if newChatPromptOverlay(c.session).renderModalPopupInput(lines, c.prompt, preserveCursor) {
+	overlay := newChatPromptOverlay(c.session)
+	if !c.rendered {
+		handle, ok := overlay.beginModalPopupInput(lines, c.prompt)
+		if !ok {
+			return
+		}
+		c.handle = handle
 		c.rendered = true
+		return
 	}
+	overlay.updatePopupInput(c.handle, lines, c.prompt, true)
 }
 
 func chatAgentPanelModalLines(session *ChatSession, state *chatAgentPanelModalState) []string {
@@ -1486,7 +1528,7 @@ func chatAgentPanelModalLines(session *ChatSession, state *chatAgentPanelModalSt
 	}
 	lines := []string{
 		"Agent Control Panel:",
-		fmt.Sprintf("  mode=follow pane=%s cursor=%d", state.Pane.String(), state.Cursor+1),
+		fmt.Sprintf("  mode=follow view=%s agent_cursor=%d", state.Pane.String(), state.Cursor+1),
 	}
 	selected := "<none>"
 	if session != nil && strings.TrimSpace(session.SelectedAgentTarget) != "" {
@@ -1501,9 +1543,13 @@ func chatAgentPanelModalLines(session *ChatSession, state *chatAgentPanelModalSt
 	}
 	lines = append(lines, chatAgentPanelRegistryLine(session))
 	lines = append(lines, chatAgentPanelModalAgentLines(session, state)...)
-	lines = append(lines, chatAgentPanelModalMailboxLines(session, state)...)
-	lines = append(lines, chatAgentPanelModalTimelineLines(session, state)...)
-	lines = append(lines, "  提示: ↑↓ 选择 agent，←→ 切换 pane，Enter 设为 target，Esc 关闭")
+	switch state.Pane {
+	case chatAgentPanelPaneMailbox:
+		lines = append(lines, chatAgentPanelModalMailboxLines(session, state)...)
+	case chatAgentPanelPaneTimeline:
+		lines = append(lines, chatAgentPanelModalTimelineLines(session, state)...)
+	}
+	lines = append(lines, "  提示: ↑↓ 选择 Agent，←→ 切换详情视图，Enter 设为 target，Esc 仅关闭面板")
 	return compactChatAgentPanelLines(lines, 80)
 }
 
@@ -1538,11 +1584,7 @@ func chatAgentPanelModalAgentLines(session *ChatSession, state *chatAgentPanelMo
 }
 
 func chatAgentPanelModalMailboxLines(session *ChatSession, state *chatAgentPanelModalState) []string {
-	header := "Mailbox:"
-	if state.Pane == chatAgentPanelPaneMailbox {
-		header += " <focused>"
-	}
-	lines := []string{header}
+	lines := []string{"Mailbox:"}
 	target := ""
 	if session != nil && strings.TrimSpace(session.SelectedAgentTarget) != "" {
 		target = "selected"
@@ -1551,11 +1593,7 @@ func chatAgentPanelModalMailboxLines(session *ChatSession, state *chatAgentPanel
 }
 
 func chatAgentPanelModalTimelineLines(session *ChatSession, state *chatAgentPanelModalState) []string {
-	header := "Timeline:"
-	if state.Pane == chatAgentPanelPaneTimeline {
-		header += " <focused>"
-	}
-	lines := []string{header}
+	lines := []string{"Timeline:"}
 	if session != nil && session.ActiveTeam != nil {
 		return append(lines, chatAgentPanelTimelineLines(session, state.Limit)...)
 	}
@@ -1656,6 +1694,82 @@ func chatAgentPanelFollowLines(session *ChatSession, opts chatAgentPanelOptions)
 	lines := []string{"Panel Follow:"}
 	lines = append(lines, chatCollabFollowUpdateLines(session, followOpts)...)
 	return lines
+}
+
+func chatAgentPanelSummaryLines(session *ChatSession, limit int) []string {
+	selected := ""
+	if session != nil {
+		selected = strings.TrimSpace(session.SelectedAgentTarget)
+	}
+	displaySelected := firstNonEmptyChatValue(selected, "<none>")
+	lines := []string{
+		"Agent Control Panel:",
+		"  selected=" + displaySelected,
+	}
+	if session != nil && session.RuntimeSession != nil {
+		lines = append(lines, "  parent_session="+strings.TrimSpace(session.RuntimeSession.ID)+" state="+strings.TrimSpace(string(session.RuntimeSession.State)))
+	}
+	if session != nil && session.ActiveTeam != nil {
+		lines = append(lines, "  active_team="+strings.TrimSpace(session.ActiveTeam.TeamID)+" agent="+strings.TrimSpace(session.ActiveTeam.AgentID))
+	}
+	lines = append(lines, chatAgentPanelRegistryLine(session), "Agents:")
+
+	agents, err := chatAgentPickerItems(session)
+	if err != nil {
+		lines = append(lines, "  <error: "+err.Error()+">")
+	} else if len(agents) == 0 {
+		lines = append(lines, "  <none>")
+	} else {
+		maxVisible := limit
+		if maxVisible <= 0 || maxVisible > 4 {
+			maxVisible = 4
+		}
+		lines = append(lines, fmt.Sprintf("  count=%d", len(agents)))
+		visible := agents
+		if len(visible) > maxVisible {
+			visible = visible[:maxVisible]
+		}
+		selectedVisible := selected == ""
+		for _, agent := range visible {
+			selectedVisible = selectedVisible || chatAgentTargetMatchesSelected(selected, agent)
+			lines = append(lines, chatAgentPanelSummaryAgentLine(agent, selected))
+		}
+		if !selectedVisible {
+			for _, agent := range agents[maxVisible:] {
+				if chatAgentTargetMatchesSelected(selected, agent) {
+					lines = append(lines, chatAgentPanelSummaryAgentLine(agent, selected))
+					break
+				}
+			}
+		}
+		if omitted := len(agents) - len(visible); omitted > 0 {
+			lines = append(lines, fmt.Sprintf("  ... %d more agents", omitted))
+		}
+	}
+	lines = append(lines,
+		"  详情: /agents panel full；实时跟随: /agents panel follow",
+		"  关闭: /agents panel close",
+	)
+	return lines
+}
+
+func chatAgentPanelSummaryAgentLine(agent toolbroker.AgentStatusResult, selected string) string {
+	marker := " "
+	if chatAgentTargetMatchesSelected(selected, agent) {
+		marker = "*"
+	}
+	parts := []string{
+		fmt.Sprintf("  %s %s", marker, firstNonEmptyChatValue(agent.Path, agent.SessionID, agent.ID, "<unknown>")),
+		"status=" + firstNonEmptyChatValue(agent.Status, "unknown"),
+	}
+	if agent.PendingApproval {
+		parts = append(parts, "waiting=approval")
+	} else if agent.PendingQuestion {
+		parts = append(parts, "waiting=answer")
+	} else if taskID := strings.TrimSpace(agent.CurrentTaskID); taskID != "" {
+		parts = append(parts, "task="+taskID)
+	}
+	return strings.Join(parts, " ")
 }
 
 func chatAgentPanelLines(session *ChatSession, limit int) []string {

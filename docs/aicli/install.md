@@ -170,6 +170,10 @@ aicli:
     default_model: z-ai/glm-5.1
     reasoning_effort: medium
     stream: true
+    terminal_title:
+      enabled: true
+      animations: true
+      items: [activity, state, project]
   log:
     file_path: ${AICLI_LOG_FILE_PATH:-~/.aicli/logs/aicli.log}
 ```
@@ -208,6 +212,8 @@ providers:
 5. provider 的默认模型
 
 `/model`、`/stream`、`/s`、`/normal` 等 chat 内命令会同步更新当前 session；在具备可写配置路径时，也会把相关偏好写回 `aicli.chat`。
+
+交互式 `aicli chat` 默认会通过 OSC 0 更新终端窗口或标签标题。`activity` 显示状态图标，`state` 显示 `Ready`、`Waiting`、`Running` 或需要操作的提醒，`project` 显示当前目录名。`items` 还支持 `model`、`thread` 和 `app-name`；设置 `animations: false` 可保留状态图标但关闭动画，设置 `enabled: false` 可完全关闭标题更新。非 TTY、非交互模式、JSON 输出以及不支持 ANSI 标题的终端会自动跳过。
 
 ### 环境变量
 
@@ -416,8 +422,8 @@ sessions:
 - `/model` 支持 `status`、`clear-reasoning`、`--provider/-p`、`--model/-m`、`--reasoning-effort/-r`；切换后会刷新 provider、adapter、BaseURL、HTTP client、function builder、logger 和 runtime session metadata。
 - `/login` 与 `aicli login` 共用 provider 登录逻辑，支持 API key、Codex OAuth、`--models-path`、`--default-model`、`--set-default`、`--dry-run` 和 JSON 输出。
 - `/stream`、`/s`、`/normal` 会更新当前会话，并在可写配置存在时写回 `aicli.chat.stream`。
-- `/resume` 会直接打开按最后更新时间倒序排列的历史会话列表，回车恢复第一项，输入编号选择其他会话，输入 `q` 取消；不再先显示“最近会话/选择会话”的二级菜单。当前会话和只有 system prompt 的启动占位 session 不会出现在列表中。
-- `/resume latest` 直接恢复最近的其他可恢复会话。交互式选择器显示最后更新时间（绝对时间与相对时间）、会话轮次、消息数和清理后的标题，不再把 session id、provider 和 session file 路径塞进候选行。轮次按持久化的 user 消息数统计，消息数包含 system、user、assistant 和 tool 消息。
+- `/resume` 会打开按最后更新时间倒序排列的全屏历史会话选择器，不再把候选项挤在聊天输入框上方的小弹层中。使用方向键或 `j`/`k` 移动，`PgUp`/`PgDn` 翻页，`Home`/`End` 跳到首尾，`/` 搜索，回车恢复，`Esc` 或 `q` 取消。当前会话和只有 system prompt 的启动占位 session 不会出现在列表中；不支持 ANSI/TTY 的环境自动回退到编号输入列表。
+- `/resume latest` 直接恢复最近的其他可恢复会话。全屏选择器显示最后更新时间（绝对时间与相对时间）、会话轮次、消息数、清理后的标题和选中会话摘要；session id、protocol、provider 和 model 只进入搜索索引，不占用候选行。轮次按持久化的 user 消息数统计，消息数包含 system、user、assistant 和 tool 消息。
 - chat 内的 `/sessions` 不显示当前会话和启动占位会话；`aicli chat --list-sessions` 的独立完整列表显示最后更新时间、轮次和消息数，并保留 session id、状态、protocol、provider、model 等诊断信息。
 - `/export` 无参数时会弹出选择器；`--full` 生成完整 JSON，`--body` 只导出用户/助手正文；可用 `--output <path>` 或 `--dir <dir>` 指定输出位置。
 - `/debug export` / `/debug zip` 会把 `/debug display` 中“会话文件与目录”部分的 session file、chat/debug log、runtime-http/local-shell/generated-images artifacts 打包为 zip，并附带 `manifest.json`。SQLite 模式在同一读事务中生成只含当前 session 的一致性快照，包含已提交 WAL 内容但不会泄露其他会话，并同时打包当前会话引用的 canonical artifacts。

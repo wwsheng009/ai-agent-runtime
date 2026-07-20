@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,7 +62,7 @@ type chatRuntimeEventBridge struct {
 	toolSummaryLogged               bool
 	enqueuedEvents                  uint64
 	processedEvents                 uint64
-	askApproval                     func(*runtimechat.ApprovalRequest, []string) (bool, error)
+	askApproval                     func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
 	askQuestion                     func(prompt string, suggestions []string, required bool) (string, error)
 	approveTool                     func(ctx context.Context, sessionID, requestID string, allow bool) error
 	answerQuestion                  func(ctx context.Context, sessionID, questionID, answer string) error
@@ -89,6 +90,11 @@ type chatRuntimeRequestLogState struct {
 	ResponseLogged          bool
 	AwaitingAssistantResult bool
 	PendingResponseContent  map[string]interface{}
+}
+
+type chatApprovalAnswer struct {
+	Allowed bool
+	Reuse   bool
 }
 
 const chatApprovalGrantTTL = 10 * time.Minute
@@ -198,68 +204,117 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			}
 			fmt.Print(ui.FormatUserPromptWithAttachments(len(session.ImagePaths)))
 		},
-		askApproval: func(approval *runtimechat.ApprovalRequest, contextLines []string) (bool, error) {
-			lines := make([]string, 0, 4)
-			if notice := discardPendingInteractiveInputForPriorityPrompt(session, "审批提示"); notice != "" {
+		askApproval: func(approval *runtimechat.ApprovalRequest, contextLines []string) (chatApprovalAnswer, error) {
+			restoreStage := pushChatComposerAgentStage(session, chatAgentStageAwaitingApproval)
+			defer restoreStage()
+			lines := make([]string, 0, 10)
+			suspension, notice := suspendPendingInteractiveInputForPriorityPrompt(session, "审批提示")
+			if suspension != nil {
+				defer suspension.Restore()
+			}
+			if notice != "" {
 				lines = append(lines, notice)
 			}
-			for _, line := range contextLines {
-				if line = strings.TrimSpace(line); line != "" {
-					lines = append(lines, "[approval] "+line)
-				}
+			reuseScope := approvalReusePromptScope(session, approval)
+			approvalLines := approvalPriorityPromptLines(approval, contextLines)
+			if reuseScope != "" && len(approvalLines) > 0 {
+				approvalLines[len(approvalLines)-1] = fmt.Sprintf(
+					"[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟",
+					reuseScope,
+				)
 			}
-			toolName := ""
-			reason := ""
-			if approval != nil {
-				toolName = strings.TrimSpace(approval.ToolName)
-				reason = strings.TrimSpace(approval.Reason)
-				for _, line := range approvalRequestPreviewLines(approval) {
-					lines = append(lines, "[approval] "+line)
-				}
-			}
-			promptLine := fmt.Sprintf("[approval] allow %s", strings.TrimSpace(toolName))
-			if strings.TrimSpace(reason) != "" {
-				promptLine += fmt.Sprintf(" (%s)", strings.TrimSpace(reason))
-			}
-			readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine+"? [y/N]: ")
-			text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
-			if err != nil {
+			lines = append(lines, approvalLines...)
+			promptLine := approvalDecisionPromptWithReuse(reuseScope)
+			detailsShown := false
+			for {
+				readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine)
+				text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
 				cleanupPrompt()
-				return false, err
+				if err != nil {
+					return chatApprovalAnswer{}, err
+				}
+				text = strings.TrimSpace(normalizeQueuedInputLine(text))
+				decision := parseApprovalPromptDecisionWithReuse(text, reuseScope != "")
+				if decision == approvalPromptShowDetails {
+					if !detailsShown {
+						lines = append(lines, approvalFullParameterLines(approval)...)
+						detailsShown = true
+					}
+					continue
+				}
+				if decision == approvalPromptInvalid {
+					validOptions := "1、2、3，或 y/n"
+					if reuseScope != "" {
+						validOptions = "1、2、3、4，或 y/n"
+					}
+					lines = upsertPriorityPromptValidationLine(lines, "[审批] 无效选项", "[审批] 无效选项，请输入 "+validOptions+"。")
+					continue
+				}
+				if transientPrompt {
+					renderChatRuntimePriorityPromptTranscript(session, lines, promptLine, text)
+				}
+				return chatApprovalAnswer{
+					Allowed: decision == approvalPromptAllowOnce || decision == approvalPromptAllowReuse,
+					Reuse:   decision == approvalPromptAllowReuse,
+				}, nil
 			}
-			text = strings.ToLower(strings.TrimSpace(normalizeQueuedInputLine(text)))
-			cleanupPrompt()
-			if transientPrompt {
-				renderChatRuntimePriorityPromptTranscript(session, lines, promptLine+"? [y/N]: ", text)
-			}
-			return text == "y" || text == "yes", nil
 		},
 		askQuestion: func(prompt string, suggestions []string, required bool) (string, error) {
-			lines := make([]string, 0, 3)
-			if notice := discardPendingInteractiveInputForPriorityPrompt(session, "问题提示"); notice != "" {
+			restoreStage := pushChatComposerAgentStage(session, chatAgentStageAwaitingAnswer)
+			defer restoreStage()
+			normalizedSuggestions := normalizedQuestionSuggestions(suggestions)
+			lines := make([]string, 0, len(normalizedSuggestions)+3)
+			suspension, notice := suspendPendingInteractiveInputForPriorityPrompt(session, "问题提示")
+			if suspension != nil {
+				defer suspension.Restore()
+			}
+			if notice != "" {
 				lines = append(lines, notice)
 			}
-			lines = append(lines, "[question] "+strings.TrimSpace(prompt))
-			if len(suggestions) > 0 {
-				lines = append(lines, "Suggestions: "+strings.Join(suggestions, ", "))
+			lines = append(lines, questionPriorityPromptLines(prompt, normalizedSuggestions)...)
+			promptLine := questionAnswerPrompt(required, len(normalizedSuggestions) > 0)
+			for {
+				readPrompt, cleanupPrompt, _ := showChatRuntimePriorityPrompt(session, lines, promptLine)
+				text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
+				cleanupPrompt()
+				if err != nil {
+					return "", err
+				}
+				answer := mapQuestionSuggestionAnswer(normalizeQueuedInputLine(text), normalizedSuggestions)
+				if required && answer == "" {
+					lines = upsertPriorityPromptValidationLine(lines, "[提问] 此问题为必答项", "[提问] 此问题为必答项，请输入回答。")
+					continue
+				}
+				return answer, nil
 			}
-			readPrompt := "> "
-			if required {
-				readPrompt = "> "
-			} else {
-				readPrompt = "> (optional) "
-			}
-			readPrompt, cleanupPrompt, _ := showChatRuntimePriorityPrompt(session, lines, readPrompt)
-			defer cleanupPrompt()
-			text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
-			if err != nil {
-				return "", err
-			}
-			return strings.TrimSpace(normalizeQueuedInputLine(text)), nil
 		},
 	}
 	bridge.eventQueueCond = sync.NewCond(&bridge.eventQueueMu)
 	return bridge
+}
+
+func pushChatComposerAgentStage(session *ChatSession, stage chatAgentStage) func() {
+	if session == nil || session.Interaction == nil {
+		return func() {}
+	}
+	inputMode := chatInputModeChat
+	switch normalizeChatAgentStage(stage) {
+	case chatAgentStageAwaitingApproval:
+		inputMode = chatInputModeApproval
+	case chatAgentStageAwaitingAnswer:
+		inputMode = chatInputModeAnswer
+	}
+	restoreInputMode := pushChatComposerInputMode(session, inputMode)
+	interaction := session.Interaction
+	previousStage := interaction.AgentStage()
+	previousDetail := interaction.AgentStageDetail()
+	interaction.SetAgentStage(stage)
+	return func() {
+		if interaction.AgentStage() == stage {
+			interaction.SetAgentStageDetail(previousStage, previousDetail)
+		}
+		restoreInputMode()
+	}
 }
 
 func (b *chatRuntimeEventBridge) start() {
@@ -322,6 +377,10 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.logMu.Unlock()
 	if b.session != nil && b.session.Interaction != nil {
 		b.session.Interaction.ResetRunState()
+		b.session.Interaction.SetAgentStage(chatAgentStagePlanning)
+	}
+	if b.session != nil && b.session.TitleNotifier != nil {
+		b.session.TitleNotifier.ClearTools()
 	}
 }
 
@@ -332,6 +391,18 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	b.renderMu.Lock()
 	b.runActive = false
 	b.renderMu.Unlock()
+	if b.session != nil && b.session.TitleNotifier != nil {
+		b.session.TitleNotifier.ClearTools()
+	}
+	if b.session != nil && b.session.Interaction != nil {
+		stage := chatAgentStageCompleted
+		if b.session.IsInterrupted() {
+			stage = chatAgentStageStopping
+		} else if b.RunError() != nil {
+			stage = chatAgentStageFailed
+		}
+		b.session.Interaction.SetAgentStage(stage)
+	}
 	b.writePromptIfIdle()
 }
 
@@ -488,6 +559,9 @@ func (b *chatRuntimeEventBridge) logLLMRequestFinished(event runtimeevents.Event
 		state.ResponseLogged = true
 		state.AwaitingAssistantResult = false
 		state.PendingResponseContent = nil
+		if debugInfo := formatRuntimeLLMRequestDebugInfo(event); debugInfo != "" {
+			writeSessionDebugInfo(b.session, debugInfo, false)
+		}
 		return
 	}
 	if toolCallCount > 0 {
@@ -919,9 +993,11 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b.shouldSuppressLatePrimaryRunEvent(event) {
 		return
 	}
+	b.updateComposerAgentStageForRuntimeEvent(event)
 	if isTeamLifecycleRuntimeEvent(event.Type) && strings.TrimSpace(event.SessionID) != "" && !b.shouldAcceptTeamLifecycleRuntimeEvent(event) {
 		return
 	}
+	b.updateChatTitleForRuntimeEvent(event)
 	if b.handleAssistantReasoning(event) {
 		return
 	}
@@ -995,17 +1071,21 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		if hint := b.approvalPromptHint(event.SessionID, approval); hint != "" && b.writeLine != nil {
 			b.writeLine(hint)
 		}
-		allowed, askErr := b.askApproval(approval, approvalContextLines)
+		answer, askErr := func() (chatApprovalAnswer, error) {
+			endAction := beginChatTitleAction(b.session, "Approval Required")
+			defer endAction()
+			return b.askApproval(approval, approvalContextLines)
+		}()
 		if askErr != nil {
 			b.setRunError(askErr)
 			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
 			return
 		}
-		b.renderApprovalDecision(approval, allowed)
-		if allowed {
+		b.renderApprovalDecision(approval, answer.Allowed)
+		if answer.Allowed && answer.Reuse {
 			b.rememberApprovalGrant(b.autoApprovalGrantKey(event.SessionID, approval))
 		}
-		if err := b.resolveApproval(context.Background(), event.SessionID, requestID, allowed); err != nil {
+		if err := b.resolveApproval(context.Background(), event.SessionID, requestID, answer.Allowed); err != nil {
 			b.setRunError(err)
 		}
 	case runtimechat.EventQuestionAsked:
@@ -1018,7 +1098,11 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
 			return
 		}
-		answer, askErr := b.askQuestion(prompt, suggestions, required)
+		answer, askErr := func() (string, error) {
+			endAction := beginChatTitleAction(b.session, "Input Required")
+			defer endAction()
+			return b.askQuestion(prompt, suggestions, required)
+		}()
 		if askErr != nil {
 			b.setRunError(askErr)
 			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
@@ -1026,6 +1110,39 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		}
 		if err := b.resolveQuestion(context.Background(), event.SessionID, questionID, answer); err != nil {
 			b.setRunError(err)
+		}
+	}
+}
+
+func (b *chatRuntimeEventBridge) updateComposerAgentStageForRuntimeEvent(event runtimeevents.Event) {
+	if b == nil || b.session == nil || b.session.Interaction == nil || !b.isRunActive() || !b.isPrimarySessionEvent(event) {
+		return
+	}
+	switch event.Type {
+	case runtimechat.EventLLMRequestStarted, "llm.request.started":
+		b.session.Interaction.SetAgentStage(chatAgentStagePlanning)
+	case runtimechat.EventToolStarted, "tool.requested":
+		b.session.Interaction.SetAgentStageDetail(chatAgentStageToolRunning, runtimeEventToolName(event))
+	}
+}
+
+func (b *chatRuntimeEventBridge) updateChatTitleForRuntimeEvent(event runtimeevents.Event) {
+	if b == nil || b.session == nil || b.session.TitleNotifier == nil {
+		return
+	}
+	switch event.Type {
+	case runtimechat.EventToolStarted, "tool.requested":
+		key := runtimeToolCallTimelineKey(event, runtimeToolTimelinePayload(event))
+		b.session.TitleNotifier.SetToolRunning(key, true)
+	case runtimechat.EventToolFinished, "tool.completed":
+		key := runtimeToolCallTimelineKey(event, runtimeToolTimelinePayload(event))
+		b.session.TitleNotifier.SetToolRunning(key, false)
+	case runtimechat.EventSessionEnd:
+		sessionID := firstNonEmptyChatValue(strings.TrimSpace(event.SessionID), payloadStringValue(event.Payload["session_id"]))
+		if sessionID == "" || b.isPrimarySessionEvent(event) {
+			b.session.TitleNotifier.ClearTools()
+		} else {
+			b.session.TitleNotifier.ClearToolsForSession(sessionID)
 		}
 	}
 }
@@ -1181,6 +1298,239 @@ func approvalRequestContextLines(payload map[string]interface{}) []string {
 		lines = append(lines, strings.Join(routeParts, " "))
 	}
 	return lines
+}
+
+type approvalPromptDecision uint8
+
+const (
+	approvalPromptInvalid approvalPromptDecision = iota
+	approvalPromptAllowOnce
+	approvalPromptAllowReuse
+	approvalPromptDeny
+	approvalPromptShowDetails
+)
+
+func approvalDecisionPrompt() string {
+	return "[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数（兼容 y/n）： "
+}
+
+func approvalDecisionPromptWithReuse(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return approvalDecisionPrompt()
+	}
+	return fmt.Sprintf("[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟： ", scope)
+}
+
+func parseApprovalPromptDecision(input string) approvalPromptDecision {
+	return parseApprovalPromptDecisionWithReuse(input, false)
+}
+
+func parseApprovalPromptDecisionWithReuse(input string, reuseAvailable bool) approvalPromptDecision {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "1", "y", "yes", "允许", "同意":
+		return approvalPromptAllowOnce
+	case "4":
+		if reuseAvailable {
+			return approvalPromptAllowReuse
+		}
+		return approvalPromptInvalid
+	case "", "2", "n", "no", "拒绝", "deny":
+		return approvalPromptDeny
+	case "3":
+		return approvalPromptShowDetails
+	default:
+		return approvalPromptInvalid
+	}
+}
+
+func approvalReusePromptScope(session *ChatSession, approval *runtimechat.ApprovalRequest) string {
+	if session == nil || approval == nil || approvalGrantFamily(strings.TrimSpace(approval.ToolName), approval.ArgsJSON) == "" {
+		return ""
+	}
+	switch session.ApprovalReuseMode {
+	case chatApprovalReuseSessionReadOnlyShell:
+		return "当前会话内"
+	case chatApprovalReuseTeamReadOnlyShell:
+		if session.ActiveTeam != nil && strings.TrimSpace(session.ActiveTeam.TeamID) != "" {
+			return "当前团队内"
+		}
+	}
+	return ""
+}
+
+func upsertPriorityPromptValidationLine(lines []string, prefix, line string) []string {
+	prefix = strings.TrimSpace(prefix)
+	filtered := make([]string, 0, len(lines)+1)
+	for _, existing := range lines {
+		if prefix != "" && strings.HasPrefix(strings.TrimSpace(existing), prefix) {
+			continue
+		}
+		filtered = append(filtered, existing)
+	}
+	return append(filtered, line)
+}
+
+func approvalPriorityPromptLines(approval *runtimechat.ApprovalRequest, contextLines []string) []string {
+	lines := []string{"[审批] Agent 请求执行需要授权的操作"}
+	toolName := "未知工具"
+	if approval != nil {
+		if value := strings.TrimSpace(approval.ToolName); value != "" {
+			toolName = value
+		}
+	}
+	lines = append(lines, "[审批] 工具："+toolName)
+
+	if approval != nil {
+		if reason := strings.TrimSpace(approval.Reason); reason != "" {
+			lines = append(lines, "[审批] 原因："+humanApprovalReason(reason))
+		} else {
+			lines = append(lines, "[审批] 原因：工具策略要求确认")
+		}
+		if risk := strings.TrimSpace(approval.RiskLevel); risk != "" {
+			lines = append(lines, "[审批] 风险等级："+humanApprovalRiskLevel(risk))
+		}
+	}
+	for _, line := range contextLines {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, "[审批] 上下文："+line)
+		}
+	}
+
+	previewLines := approvalRequestPreviewLines(approval)
+	if len(previewLines) == 0 {
+		lines = append(lines, "[审批] 参数摘要：（无参数）")
+	} else {
+		for _, line := range previewLines {
+			lines = append(lines, localizeApprovalPreviewLine(line))
+		}
+	}
+	lines = append(lines, "[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数")
+	return lines
+}
+
+func humanApprovalReason(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "permission_mode_requires_approval":
+		return "当前权限模式要求在执行前获得确认（permission_mode_requires_approval）"
+	case "manual approval":
+		return "当前工具策略要求人工审批"
+	case "approval_required":
+		return "当前操作需要审批"
+	default:
+		return strings.TrimSpace(reason)
+	}
+}
+
+func humanApprovalRiskLevel(risk string) string {
+	switch strings.ToLower(strings.TrimSpace(risk)) {
+	case "low":
+		return "低（low）"
+	case "medium":
+		return "中（medium）"
+	case "high":
+		return "高（high）"
+	case "critical":
+		return "严重（critical）"
+	default:
+		return strings.TrimSpace(risk)
+	}
+}
+
+func localizeApprovalPreviewLine(line string) string {
+	line = strings.TrimSpace(line)
+	labels := []struct {
+		prefix string
+		label  string
+	}{
+		{"command=", "命令"},
+		{"workdir=", "工作目录"},
+		{"cwd=", "工作目录"},
+		{"url=", "网址"},
+		{"path=", "路径"},
+		{"query=", "查询"},
+		{"prompt=", "提示"},
+		{"args=", "参数摘要"},
+	}
+	for _, item := range labels {
+		if strings.HasPrefix(line, item.prefix) {
+			return "[审批] " + item.label + "：" + strings.TrimSpace(strings.TrimPrefix(line, item.prefix))
+		}
+	}
+	return "[审批] 参数摘要：" + line
+}
+
+func approvalFullParameterLines(approval *runtimechat.ApprovalRequest) []string {
+	const maxVisibleParameterLines = 12
+	const maxVisibleParameterLineRunes = 240
+
+	lines := []string{"[审批] 完整参数："}
+	if approval == nil || len(approval.ArgsJSON) == 0 {
+		return append(lines, "[审批]   （无参数）", "[审批] 查看完毕，请继续选择。")
+	}
+
+	formatted := strings.TrimSpace(string(approval.ArgsJSON))
+	var payload interface{}
+	if json.Unmarshal(approval.ArgsJSON, &payload) == nil {
+		if indented, err := json.MarshalIndent(payload, "", "  "); err == nil {
+			formatted = string(indented)
+		}
+	}
+	formatted = strings.ReplaceAll(formatted, "\r\n", "\n")
+	parameterLines := strings.Split(formatted, "\n")
+	visibleCount := len(parameterLines)
+	if visibleCount > maxVisibleParameterLines {
+		visibleCount = maxVisibleParameterLines
+	}
+	for _, line := range parameterLines[:visibleCount] {
+		lines = append(lines, "[审批]   "+truncateChatRuntimeText(line, maxVisibleParameterLineRunes))
+	}
+	if omitted := len(parameterLines) - visibleCount; omitted > 0 {
+		lines = append(lines, fmt.Sprintf("[审批]   已省略 %d 行；可从日志或调试输出查看完整参数。", omitted))
+	}
+	return append(lines, "[审批] 查看完毕，请继续选择。")
+}
+
+func normalizedQuestionSuggestions(suggestions []string) []string {
+	normalized := make([]string, 0, len(suggestions))
+	for _, suggestion := range suggestions {
+		if suggestion = strings.TrimSpace(suggestion); suggestion != "" {
+			normalized = append(normalized, suggestion)
+		}
+	}
+	return normalized
+}
+
+func questionPriorityPromptLines(prompt string, suggestions []string) []string {
+	lines := []string{"[提问] Agent 需要你的补充信息", "[提问] 问题：" + strings.TrimSpace(prompt)}
+	for index, suggestion := range normalizedQuestionSuggestions(suggestions) {
+		lines = append(lines, fmt.Sprintf("[提问] %d. %s", index+1, suggestion))
+	}
+	return lines
+}
+
+func questionAnswerPrompt(required bool, hasSuggestions bool) string {
+	choiceHint := ""
+	if hasSuggestions {
+		choiceHint = "，可输入建议编号"
+	}
+	if required {
+		return "[提问] 请输入回答" + choiceHint + "（必答）： "
+	}
+	return "[提问] 请输入回答" + choiceHint + "（可选，直接 Enter 跳过）： "
+}
+
+func mapQuestionSuggestionAnswer(input string, suggestions []string) string {
+	answer := strings.TrimSpace(input)
+	if answer == "" {
+		return ""
+	}
+	normalized := normalizedQuestionSuggestions(suggestions)
+	choice, err := strconv.Atoi(answer)
+	if err == nil && choice >= 1 && choice <= len(normalized) {
+		return normalized[choice-1]
+	}
+	return answer
 }
 
 func showChatRuntimePriorityPrompt(session *ChatSession, lines []string, prompt string) (string, func(), bool) {
@@ -1598,6 +1948,52 @@ func (b *chatRuntimeEventBridge) rememberApprovalGrant(key string) {
 		b.approvalGrants = make(map[string]time.Time)
 	}
 	b.approvalGrants[strings.TrimSpace(key)] = time.Now().UTC().Add(chatApprovalGrantTTL)
+}
+
+func (b *chatRuntimeEventBridge) approvalGrantStatusLines(now time.Time) []string {
+	if b == nil {
+		return nil
+	}
+	now = now.UTC()
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	b.pruneApprovalGrantsLocked(now)
+	if len(b.approvalGrants) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(b.approvalGrants))
+	for key := range b.approvalGrants {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		expiresAt := b.approvalGrants[key]
+		scope, family, _ := strings.Cut(key, "|")
+		remaining := expiresAt.Sub(now)
+		if remaining < 0 {
+			remaining = 0
+		}
+		remaining = remaining.Round(time.Second)
+		lines = append(lines, fmt.Sprintf(
+			"  scope=%s family=%s expires_in=%s",
+			approvalGrantScopeLabel(scope),
+			firstNonEmptyChatValue(strings.TrimSpace(family), "unknown"),
+			remaining,
+		))
+	}
+	return lines
+}
+
+func (b *chatRuntimeEventBridge) clearApprovalGrants() int {
+	if b == nil {
+		return 0
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	count := len(b.approvalGrants)
+	b.approvalGrants = nil
+	return count
 }
 
 func (b *chatRuntimeEventBridge) nonInteractiveApprovalError(approval *runtimechat.ApprovalRequest) error {
@@ -3707,6 +4103,9 @@ func formatRuntimeLLMRequestFinishedDebugInfo(event runtimeevents.Event) string 
 	}
 	if source := strings.TrimSpace(payloadStringValue(event.Payload["usage_source"])); source != "" {
 		parts = append(parts, "usage_source="+truncateChatRuntimeText(source, 80))
+	}
+	if errText := strings.TrimSpace(payloadStringValue(event.Payload["error"])); errText != "" {
+		parts = append(parts, "error="+strconv.Quote(truncateChatRuntimeText(errText, 240)))
 	}
 	if len(parts) == 0 {
 		return ""

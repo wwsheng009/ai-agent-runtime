@@ -136,6 +136,9 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 
 	cleanup := func() {
 		mcpmanager.SetStatusOutput(os.Stdout)
+		if session.TitleNotifier != nil {
+			session.TitleNotifier.Close()
+		}
 		if session.Interaction != nil {
 			session.Interaction.Shutdown()
 		}
@@ -340,6 +343,11 @@ func bootstrapChatSession(cfg *config.Config, opts *chatCommandOptions, profileS
 		buildChatFinalCleanup(session, cleanupSession)()
 		return nil, nil, err
 	}
+	initializeChatTitleNotifier(session)
+	initializeChatSoundNotifier(session)
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
 
 	_, cleanupCapabilities, err := initializeChatCapabilities(cfg, opts, session)
 	if err != nil {
@@ -363,6 +371,9 @@ func buildChatFinalCleanup(session *ChatSession, cleanupSession func()) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			if session != nil && session.TitleNotifier != nil {
+				session.TitleNotifier.Close()
+			}
 			if session != nil && session.Interaction != nil {
 				session.Interaction.Shutdown()
 			}

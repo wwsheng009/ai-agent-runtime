@@ -3,8 +3,10 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -29,6 +31,89 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+func TestAcquireLocalChatSessionLeaseReclaimsStoppedLocalOwner(t *testing.T) {
+	deadPID := 1 << 30
+	if running, known := localChatProcessRunning(deadPID); !known || running {
+		t.Skipf("cannot establish a stopped test PID: running=%v known=%v", running, known)
+	}
+
+	store := runtimechat.NewInMemoryRuntimeStore(32)
+	ctx := context.Background()
+	sessionID := "stale-local-session"
+	_, err := store.AcquireLease(ctx, runtimechat.LeaseRequest{
+		SessionID: sessionID,
+		OwnerID:   "aicli-actor:" + localChatHostname() + ":stale",
+		OwnerKind: localChatSessionActorLeaseOwnerKind,
+		PID:       deadPID,
+		Hostname:  localChatHostname(),
+		TTL:       time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("seed stale lease: %v", err)
+	}
+
+	handle, err := acquireLocalChatSessionLease(ctx, store, sessionID)
+	if err != nil {
+		t.Fatalf("acquire after stopped owner: %v", err)
+	}
+	defer handle.Release(ctx)
+	if lease := handle.Lease(); lease == nil || lease.OwnerID == "" || lease.OwnerID == "aicli-actor:"+localChatHostname()+":stale" {
+		t.Fatalf("expected current process to own reclaimed lease, got %#v", lease)
+	}
+}
+
+func TestAcquireLocalChatSessionLeasePreservesLiveConflict(t *testing.T) {
+	store := runtimechat.NewInMemoryRuntimeStore(32)
+	ctx := context.Background()
+	sessionID := "live-local-session"
+	_, err := store.AcquireLease(ctx, runtimechat.LeaseRequest{
+		SessionID: sessionID,
+		OwnerID:   "aicli-actor:" + localChatHostname() + ":live",
+		OwnerKind: localChatSessionActorLeaseOwnerKind,
+		PID:       os.Getpid(),
+		Hostname:  localChatHostname(),
+		TTL:       time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("seed live lease: %v", err)
+	}
+
+	_, err = acquireLocalChatSessionLease(ctx, store, sessionID)
+	var conflict *runtimechat.LeaseConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("expected live owner conflict, got %v", err)
+	}
+}
+
+func TestLocalChatSessionLeaseOwnerStoppedRequiresLocalAICLIOwner(t *testing.T) {
+	deadPID := 1 << 30
+	if running, known := localChatProcessRunning(deadPID); !known || running {
+		t.Skipf("cannot establish a stopped test PID: running=%v known=%v", running, known)
+	}
+	base := runtimechat.SessionLease{
+		SessionID:   "guarded-stale-session",
+		OwnerID:     "stale-owner",
+		OwnerKind:   localChatSessionActorLeaseOwnerKind,
+		PID:         deadPID,
+		Hostname:    localChatHostname(),
+		ExpiresAt:   time.Now().Add(time.Minute),
+		HeartbeatAt: time.Now(),
+	}
+	if !localChatSessionLeaseOwnerStopped(&base) {
+		t.Fatal("expected stopped local aicli owner to be reclaimable")
+	}
+	remote := base
+	remote.Hostname = "remote-host.example"
+	if localChatSessionLeaseOwnerStopped(&remote) {
+		t.Fatal("remote lease owner must not be reclaimed using a local PID lookup")
+	}
+	otherKind := base
+	otherKind.OwnerKind = "runtime-server-actor"
+	if localChatSessionLeaseOwnerStopped(&otherKind) {
+		t.Fatal("non-aicli lease owner must not be reclaimed by the local CLI")
+	}
+}
 
 type capturingLocalChatProvider struct {
 	name      string

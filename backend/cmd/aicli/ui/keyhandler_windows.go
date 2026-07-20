@@ -4,6 +4,7 @@ package ui
 
 import (
 	"os"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -13,41 +14,55 @@ import (
 const (
 	windowsEscapeVirtualKeyCode = 0x1B
 	windowsEscapePollInterval   = 50 * time.Millisecond
+	windowsEscapePeekBytes      = 8
 )
 
 var (
-	procGetAsyncKeyState         = windows.NewLazySystemDLL("user32.dll").NewProc("GetAsyncKeyState")
-	procGetConsoleWindow         = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleWindow")
-	procGetForegroundWindow      = windows.NewLazySystemDLL("user32.dll").NewProc("GetForegroundWindow")
-	procGetWindowThreadProcessID = windows.NewLazySystemDLL("user32.dll").NewProc("GetWindowThreadProcessId")
-
-	windowsEscapeKeyDownFunc     = windowsEscapeKeyDown
-	windowsConsoleForegroundFunc = windowsConsoleForeground
+	windowsReadSessionEscapeFunc        = windowsReadSessionEscape
+	windowsConsumeConsoleInputRecordsFn = consumeConsoleInputRecords
 )
 
 // Start 启动键盘监听（Windows 系统）。
-// Windows 控制台没有 Unix SIGUSR2 这类可复用的 ESC 信号，因此这里用
-// GetAsyncKeyState 做轻量轮询；真正是否取消当前 turn 由调用方决定。
+// Windows 控制台没有 Unix SIGUSR2 这类可复用的 ESC 信号。按键必须从
+// 当前进程自己的 console/PTY stdin 读取；GetAsyncKeyState 是桌面全局
+// 状态，会让同一 Windows Terminal 中的其他 aicli 会话一起收到 ESC。
 func (kh *KeyHandler) Start() <-chan bool {
-	if kh.enabled {
+	if kh == nil {
+		return nil
+	}
+	if kh.started.Swap(true) {
 		return kh.notifyChan
 	}
 
-	kh.enabled = true
+	kh.enabled.Store(true)
 
 	go func() {
-		ticker := time.NewTicker(windowsEscapePollInterval)
-		defer ticker.Stop()
+		defer close(kh.doneChan)
+		var ticker *time.Ticker
+		var ticks <-chan time.Time
+		defer func() {
+			if ticker != nil {
+				ticker.Stop()
+			}
+		}()
 
-		wasDown := false
 		for {
+			polling := kh.armed.Load() && !kh.suspended.Load()
+			if polling && ticker == nil {
+				ticker = time.NewTicker(windowsEscapePollInterval)
+				ticks = ticker.C
+			} else if !polling && ticker != nil {
+				ticker.Stop()
+				ticker = nil
+				ticks = nil
+			}
+
 			select {
-			case <-ticker.C:
-				down := windowsConsoleForegroundFunc() && windowsEscapeKeyDownFunc()
-				if down && !wasDown {
+			case <-ticks:
+				if kh.armed.Load() && !kh.suspended.Load() && windowsReadSessionEscapeFunc() {
 					kh.Notify()
 				}
-				wasDown = down
+			case <-kh.pollState:
 			case <-kh.quitChan:
 				return
 			}
@@ -57,57 +72,60 @@ func (kh *KeyHandler) Start() <-chan bool {
 	return kh.notifyChan
 }
 
-func windowsEscapeKeyDown() bool {
-	state, _, _ := procGetAsyncKeyState.Call(uintptr(windowsEscapeVirtualKeyCode))
-	return state&0x8000 != 0
-}
-
-func windowsConsoleForeground() bool {
-	consoleWindow, _, _ := procGetConsoleWindow.Call()
-	if consoleWindow == 0 {
+func windowsReadSessionEscape() bool {
+	if os.Stdin == nil {
 		return false
 	}
-	foregroundWindow, _, _ := procGetForegroundWindow.Call()
-	if foregroundWindow == 0 {
-		return false
+	handle := windows.Handle(os.Stdin.Fd())
+	if records, err := peekConsoleInputRecords(handle, maxSpecialConsoleInputScan); err == nil {
+		return consumeLeadingConsoleEscape(handle, records)
 	}
-	if foregroundWindow == consoleWindow {
-		return true
-	}
-	foregroundPID := windowsForegroundWindowProcessID(foregroundWindow)
-	return foregroundPID != 0 && windowsProcessIsAncestor(uint32(os.Getpid()), foregroundPID)
+	return consumeLeadingPipeEscape(handle, os.Stdin)
 }
 
-func windowsForegroundWindowProcessID(hwnd uintptr) uint32 {
-	var pid uint32
-	procGetWindowThreadProcessID.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
-	return pid
-}
-
-func windowsProcessIsAncestor(pid, ancestorPID uint32) bool {
-	if pid == 0 || ancestorPID == 0 || pid == ancestorPID {
-		return pid != 0 && ancestorPID != 0
-	}
-
-	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
-	if err != nil {
-		return false
-	}
-	defer windows.CloseHandle(snapshot)
-
-	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
-	for err = windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
-		if entry.ProcessID != pid {
-			continue
+func consumeLeadingConsoleEscape(handle windows.Handle, records []consoleInputRecord) bool {
+	noiseRecords := 0
+	for i := range records {
+		record := records[i]
+		if record.EventType == windows.KEY_EVENT {
+			key := (*consoleKeyEventRecord)(unsafe.Pointer(&record.Event[0]))
+			if key.KeyDown != 0 && key.VirtualKeyCode == windowsEscapeVirtualKeyCode {
+				return windowsConsumeConsoleInputRecordsFn(handle, noiseRecords+1) == nil
+			}
 		}
-		parentPID := entry.ParentProcessID
-		if parentPID == ancestorPID {
-			return true
-		}
-		if parentPID == 0 || parentPID == pid {
+		if consoleInputRecordCanProduceInput(record) {
+			// Preserve ordinary input queued before ESC; consuming through the
+			// escape record would silently discard the user's draft.
 			return false
 		}
-		pid = parentPID
+		noiseRecords++
 	}
 	return false
+}
+
+func consumeLeadingPipeEscape(handle windows.Handle, reader *os.File) bool {
+	if reader == nil {
+		return false
+	}
+	buffer := make([]byte, windowsEscapePeekBytes)
+	var peeked uint32
+	ret, _, callErr := procPeekNamedPipe.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(&buffer[0])),
+		uintptr(len(buffer)),
+		uintptr(unsafe.Pointer(&peeked)),
+		0,
+		0,
+	)
+	if ret == 0 || callErr != syscall.Errno(0) || peeked == 0 || buffer[0] != windowsEscapeVirtualKeyCode {
+		return false
+	}
+	if peeked != 1 {
+		// Escape-prefixed multi-byte input is an ANSI navigation/Alt sequence,
+		// not a bare ESC cancellation. Leave the complete sequence untouched.
+		return false
+	}
+	var consumed [1]byte
+	n, err := reader.Read(consumed[:])
+	return err == nil && n == 1 && consumed[0] == windowsEscapeVirtualKeyCode
 }

@@ -110,6 +110,23 @@ func TestConsoleKeyEventCanProduceInputAcceptsCtrlVClipboardShortcut(t *testing.
 	}
 }
 
+func TestConsoleKeyEventRecognizesShiftEnterAsNewline(t *testing.T) {
+	shiftEnter := &consoleKeyEventRecord{
+		KeyDown:         1,
+		VirtualKeyCode:  windowsVKReturn,
+		UnicodeChar:     '\r',
+		ControlKeyState: windowsShiftPressed,
+	}
+	if !consoleKeyEventIsModifiedEnterDown(shiftEnter) {
+		t.Fatal("expected Shift+Enter console event to insert a newline")
+	}
+	plainEnter := *shiftEnter
+	plainEnter.ControlKeyState = 0
+	if consoleKeyEventIsModifiedEnterDown(&plainEnter) {
+		t.Fatal("expected plain Enter to retain submit behavior")
+	}
+}
+
 func TestConsoleKeyEventCanProduceInputAcceptsCharactersAndEditingKeys(t *testing.T) {
 	character := &consoleKeyEventRecord{
 		KeyDown:        1,

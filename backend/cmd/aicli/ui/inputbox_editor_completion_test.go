@@ -172,6 +172,72 @@ func TestReadInteractiveLineWithHooks_OnNavigateConsumesHistoryNavigation(t *tes
 	}
 }
 
+func TestTransientLineEditorHistoryDoesNotRestoreChatMessages(t *testing.T) {
+	t.Parallel()
+
+	history := []string{"y"}
+	if got := lineEditorHistory(history, false); got != nil {
+		t.Fatalf("expected transient editor history to be disabled, got %#v", got)
+	}
+
+	var output bytes.Buffer
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("\x1b[An\r\n"),
+		&output,
+		"",
+		lineEditorHistory(history, false),
+		nil,
+		&LineEditorHooks{},
+		false,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "n" {
+		t.Fatalf("expected Up to leave transient modal empty, got %q", line)
+	}
+	if got := lineEditorHistory(history, true); len(got) != 1 || got[0] != "y" {
+		t.Fatalf("expected main composer history to remain available, got %#v", got)
+	}
+}
+
+func TestReadInteractiveLineWithHooks_OnNavigatePrecedesMultilineMovement(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	var navigations []int
+	hooks := LineEditorHooks{
+		InitialText:    "first\nsecond",
+		InitialCursor:  len([]rune("first\nsecond")),
+		MaxVisibleRows: ChatComposerMaxVisibleRows,
+		OnNavigate: func(_ LineEditorSnapshot, delta int) bool {
+			navigations = append(navigations, delta)
+			return true
+		},
+	}
+
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("\x1b[AX\r\n"),
+		&output,
+		"",
+		nil,
+		nil,
+		&hooks,
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "first\nsecondX" {
+		t.Fatalf("expected navigation hook to preserve multiline cursor, got %q", line)
+	}
+	if len(navigations) != 1 || navigations[0] != -1 {
+		t.Fatalf("expected one up-navigation callback, got %#v", navigations)
+	}
+}
+
 func TestReadInteractiveLineWithHooks_OnMoveConsumesCursorMovement(t *testing.T) {
 	t.Parallel()
 

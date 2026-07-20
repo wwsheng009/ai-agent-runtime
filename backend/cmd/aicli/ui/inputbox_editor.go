@@ -25,6 +25,9 @@ var readInteractiveClipboardText = platformClipboardText
 var consumeSpecialInteractiveKey = platformConsumeSpecialInteractiveKey
 
 const (
+	// ChatComposerMaxVisibleRows keeps multiline drafts useful without letting
+	// the fixed composer consume the entire terminal output region.
+	ChatComposerMaxVisibleRows    = 6
 	bracketedPasteEnableSequence  = "\x1b[?2004h"
 	bracketedPasteDisableSequence = "\x1b[?2004l"
 	cursorSaveSequence            = "\x1b[s"
@@ -50,6 +53,7 @@ const (
 	editorKeyIgnore editorKeyKind = iota
 	editorKeyRune
 	editorKeyEnter
+	editorKeyInsertNewline
 	editorKeyComplete
 	editorKeyCancelPopup
 	editorKeyBackspace
@@ -58,6 +62,8 @@ const (
 	editorKeyRight
 	editorKeyUp
 	editorKeyDown
+	editorKeyPageUp
+	editorKeyPageDown
 	editorKeyHome
 	editorKeyEnd
 	editorKeyClearLine
@@ -240,11 +246,19 @@ func (ib *InputBox) readPromptWithHooksContext(ctx context.Context, prompt strin
 	}()
 	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence)
 
-	line, readErr := readInteractiveLineWithHooksContext(ctx, os.Stdin, os.Stdout, prompt, ib.history, nil, &hooks, echoSubmit, holdFirstRune)
+	editorHistory := lineEditorHistory(ib.history, keepHistory)
+	line, readErr := readInteractiveLineWithHooksContext(ctx, os.Stdin, os.Stdout, prompt, editorHistory, nil, &hooks, echoSubmit, holdFirstRune)
 	if readErr == nil && keepHistory && strings.TrimSpace(line) != "" {
 		ib.AddToHistory(line)
 	}
 	return line, readErr
+}
+
+func lineEditorHistory(history []string, enabled bool) []string {
+	if !enabled {
+		return nil
+	}
+	return history
 }
 
 func readBufferedLine(reader io.Reader) (string, error) {
@@ -345,20 +359,46 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 	lastRenderedHasContent := false
 	lastRenderedTermWidth := 0
 	lastRenderedPromptWidth := 0
+	lastRenderedViewportStart := 0
+	viewportStartRow := 0
+	preferredVisualCol := -1
 	var redraw func()
+	maxVisibleRows := func() int {
+		if hooks == nil {
+			return 0
+		}
+		if hooks.ResolveMaxVisibleRows != nil {
+			return hooks.ResolveMaxVisibleRows()
+		}
+		return hooks.MaxVisibleRows
+	}
 	snapshot := func() LineEditorSnapshot {
+		termWidth := GetTerminalWidth()
+		if termWidth <= 0 {
+			termWidth = 80
+		}
+		viewport := calculateInteractiveInputViewport(line, cursor, terminalVisibleWidth(prompt), termWidth, maxVisibleRows(), viewportStartRow)
+		viewportStartRow = viewport.startRow
+		logicalLine, logicalLines := interactiveInputLogicalPosition(line, cursor)
 		return LineEditorSnapshot{
-			Text:        string(line),
-			Cursor:      cursor,
-			Prompt:      prompt,
-			HistoryPos:  historyPos,
-			PasteActive: pasteActive || pasteInsertActive || pasteBurst.IsActive(),
+			Text:             string(line),
+			Cursor:           cursor,
+			Prompt:           prompt,
+			HistoryPos:       historyPos,
+			PasteActive:      pasteActive || pasteInsertActive || pasteBurst.IsActive(),
+			DisplayRows:      viewport.total,
+			CursorDisplayRow: viewport.startRow + viewport.cursor.row,
+			ViewportStart:    viewport.startRow,
+			ViewportRows:     viewport.rows,
+			LogicalLine:      logicalLine,
+			LogicalLines:     logicalLines,
 		}
 	}
 	renderSnapshot := func() LineEditorRenderSnapshot {
 		return LineEditorRenderSnapshot{
 			LastCursorRow: lastCursorRow,
 			LastCursorCol: lastCursorCol,
+			ViewportStart: lastRenderedViewportStart,
 		}
 	}
 	terminalWritePrefix := func(render LineEditorRenderSnapshot) string {
@@ -375,6 +415,9 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 	}
 	writeEditorText := func(text string, render LineEditorRenderSnapshot) {
 		if text == "" {
+			return
+		}
+		if hooks != nil && hooks.OnTerminalWrite != nil && hooks.OnTerminalWrite(snapshot(), render, writer, text) {
 			return
 		}
 		if prefix := terminalWritePrefix(render); prefix != "" {
@@ -424,7 +467,10 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			termWidth = 80
 		}
 		promptWidth := terminalVisibleWidth(prompt)
-		cursorPos := interactiveInputVisualPosition(line, cursor, promptWidth, termWidth)
+		resolvedMaxVisibleRows := maxVisibleRows()
+		viewport := calculateInteractiveInputViewport(line, cursor, promptWidth, termWidth, resolvedMaxVisibleRows, viewportStartRow)
+		viewportStartRow = viewport.startRow
+		cursorPos := viewport.cursor
 
 		// Fast path: 内容、终端宽度、提示符宽度都未变化时，只发光标增量。
 		// 这能让方向键 / Home / End / 历史导航等"光标-only"操作跳过整段
@@ -432,6 +478,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if lastRenderedHasContent &&
 			termWidth == lastRenderedTermWidth &&
 			promptWidth == lastRenderedPromptWidth &&
+			viewport.startRow == lastRenderedViewportStart &&
 			runesEqual(line, lastRenderedLine) {
 			if cursorPos.row == lastCursorRow && cursorPos.col == lastCursorCol {
 				return
@@ -453,7 +500,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			return
 		}
 
-		renderedRows := interactiveInputDisplayRows(line, promptWidth, termWidth)
+		renderedRows := viewport.rows
 		clearRows := renderedRows
 		if lastRenderedRows > clearRows {
 			clearRows = lastRenderedRows
@@ -464,10 +511,10 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if lastCursorRow > 0 {
 			fmt.Fprintf(&builder, "\x1b[%dA", lastCursorRow)
 		}
-		// 2) 移到提示符之后的第一个输入列。`\r` 回到列 0 不会动到提示符内容；
-		//    随后用 `\x1b[<n>C` 前进到 promptWidth，光标位置即输入区起点。
+		// 2) 移到当前视口的起始列。有限高视口会重绘提示符，因此从
+		//    第 0 列开始；旧的无限高模式仍从提示符之后开始。
 		builder.WriteByte('\r')
-		if promptWidth > 0 {
+		if resolvedMaxVisibleRows <= 0 && promptWidth > 0 {
 			fmt.Fprintf(&builder, "\x1b[%dC", promptWidth)
 		}
 		// 3) 清掉锚点行从输入起点开始的旧内容；并按需向下逐行清理。
@@ -480,11 +527,24 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			fmt.Fprintf(&builder, "\x1b[%dA", clearRows-1)
 		}
 		builder.WriteByte('\r')
-		if promptWidth > 0 {
+		if resolvedMaxVisibleRows <= 0 && promptWidth > 0 {
 			fmt.Fprintf(&builder, "\x1b[%dC", promptWidth)
 		}
-		builder.WriteString(renderInteractiveInputForTerminal(line))
+		if resolvedMaxVisibleRows > 0 {
+			builder.WriteString(renderInteractiveInputViewport(prompt, line, termWidth, viewport.startRow, viewport.rows))
+		} else {
+			builder.WriteString(renderInteractiveInputForTerminal(line))
+		}
 		endPos := interactiveInputVisualPosition(line, len(line), promptWidth, termWidth)
+		endPos.row -= viewport.startRow
+		if endPos.row >= viewport.rows {
+			endPos.row = viewport.rows - 1
+			endPos.col = termWidth - 1
+		}
+		if endPos.row < 0 {
+			endPos.row = 0
+			endPos.col = 0
+		}
 		if cursor < len(line) {
 			if rowsUp := endPos.row - cursorPos.row; rowsUp > 0 {
 				fmt.Fprintf(&builder, "\x1b[%dA", rowsUp)
@@ -503,6 +563,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		lastRenderedHasContent = true
 		lastRenderedTermWidth = termWidth
 		lastRenderedPromptWidth = promptWidth
+		lastRenderedViewportStart = viewport.startRow
 		lastRenderedLine = append(lastRenderedLine[:0], line...)
 		writeEditorText(builder.String(), renderBefore)
 	}
@@ -519,6 +580,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if len(chars) == 0 {
 			return
 		}
+		preferredVisualCol = -1
 		reverseSearchActive = false
 		reverseSearchQuery = reverseSearchQuery[:0]
 		reverseSearchStart = len(history)
@@ -534,6 +596,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if text == "" {
 			return false
 		}
+		preferredVisualCol = -1
 		reverseSearchActive = false
 		reverseSearchQuery = reverseSearchQuery[:0]
 		reverseSearchStart = len(history)
@@ -554,6 +617,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if ch == 0 {
 			return
 		}
+		preferredVisualCol = -1
 		reverseSearchActive = false
 		reverseSearchQuery = reverseSearchQuery[:0]
 		reverseSearchStart = len(history)
@@ -631,6 +695,46 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		cursor = nextCursor
 		emitChange()
 		redraw()
+	}
+
+	moveVisualLine := func(delta int) bool {
+		if delta == 0 || len(line) == 0 {
+			return false
+		}
+		termWidth := GetTerminalWidth()
+		if termWidth <= 0 {
+			termWidth = 80
+		}
+		promptWidth := terminalVisibleWidth(prompt)
+		current := interactiveInputVisualPosition(line, cursor, promptWidth, termWidth)
+		targetRow := current.row + delta
+		totalRows := interactiveInputDisplayRows(line, promptWidth, termWidth)
+		if targetRow < 0 || targetRow >= totalRows {
+			preferredVisualCol = -1
+			return false
+		}
+		if preferredVisualCol < 0 {
+			preferredVisualCol = current.col
+			if current.row == 0 {
+				preferredVisualCol -= promptWidth
+			}
+			if preferredVisualCol < 0 {
+				preferredVisualCol = 0
+			}
+		}
+		targetCol := preferredVisualCol
+		if targetRow == 0 {
+			targetCol += promptWidth
+		}
+		nextCursor, ok := interactiveInputCursorAtVisualRow(line, promptWidth, termWidth, targetRow, targetCol)
+		if !ok || nextCursor == cursor {
+			return false
+		}
+		promoteDraft()
+		cursor = nextCursor
+		emitChange()
+		redraw()
+		return true
 	}
 
 	deleteForwardWord := func() {
@@ -891,6 +995,9 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if !ok || key.kind == editorKeyIgnore {
 			continue
 		}
+		if key.kind != editorKeyUp && key.kind != editorKeyDown && key.kind != editorKeyPageUp && key.kind != editorKeyPageDown {
+			preferredVisualCol = -1
+		}
 		if key.kind == editorKeyPasteStart {
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
@@ -910,7 +1017,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			}
 			continue
 		}
-		if pasteActive && key.kind == editorKeyEnter {
+		if pasteActive && (key.kind == editorKeyEnter || key.kind == editorKeyInsertNewline) {
 			// 粘贴块里的换行是文本内容，不应触发提交。
 			key.kind = editorKeyRune
 			key.r = '\n'
@@ -1010,6 +1117,10 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				continue
 			}
 			insertTypedRune(key.r)
+		case editorKeyInsertNewline:
+			flushPasteBurstBeforeModifiedInput()
+			clearReverseSearchState()
+			insertTypedRune('\n')
 		case editorKeyComplete:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
@@ -1147,6 +1258,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		case editorKeyLeft:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
+			preferredVisualCol = -1
 			if hooks != nil && hooks.OnMove != nil && hooks.OnMove(snapshot(), -1) {
 				continue
 			}
@@ -1158,6 +1270,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		case editorKeyRight:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
+			preferredVisualCol = -1
 			if hooks != nil && hooks.OnMove != nil && hooks.OnMove(snapshot(), 1) {
 				continue
 			}
@@ -1169,6 +1282,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		case editorKeyHome:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
+			preferredVisualCol = -1
 			if cursor != 0 {
 				cursor = 0
 				emitChange()
@@ -1177,6 +1291,7 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		case editorKeyEnd:
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
+			preferredVisualCol = -1
 			if cursor != len(line) {
 				cursor = len(line)
 				emitChange()
@@ -1186,6 +1301,9 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			flushPasteBurstBeforeModifiedInput()
 			clearReverseSearchState()
 			if hooks != nil && hooks.OnNavigate != nil && hooks.OnNavigate(snapshot(), -1) {
+				continue
+			}
+			if moveVisualLine(-1) {
 				continue
 			}
 			if len(history) == 0 {
@@ -1204,6 +1322,9 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			if hooks != nil && hooks.OnNavigate != nil && hooks.OnNavigate(snapshot(), 1) {
 				continue
 			}
+			if moveVisualLine(1) {
+				continue
+			}
 			if len(history) == 0 {
 				continue
 			}
@@ -1219,6 +1340,32 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				} else {
 					setLine(nil)
 				}
+			}
+		case editorKeyPageUp:
+			flushPasteBurstBeforeModifiedInput()
+			clearReverseSearchState()
+			rows := maxVisibleRows()
+			if rows <= 0 {
+				rows = ChatComposerMaxVisibleRows
+			}
+			steps := rows - 1
+			if steps < 1 {
+				steps = 1
+			}
+			for i := 0; i < steps && moveVisualLine(-1); i++ {
+			}
+		case editorKeyPageDown:
+			flushPasteBurstBeforeModifiedInput()
+			clearReverseSearchState()
+			rows := maxVisibleRows()
+			if rows <= 0 {
+				rows = ChatComposerMaxVisibleRows
+			}
+			steps := rows - 1
+			if steps < 1 {
+				steps = 1
+			}
+			for i := 0; i < steps && moveVisualLine(1); i++ {
 			}
 		case editorKeyClearLine:
 			flushPasteBurstBeforeModifiedInput()
@@ -1329,6 +1476,151 @@ type interactiveInputPosition struct {
 	col int
 }
 
+type interactiveInputViewport struct {
+	startRow int
+	rows     int
+	total    int
+	cursor   interactiveInputPosition
+}
+
+func calculateInteractiveInputViewport(line []rune, cursor, startCol, termWidth, maxRows, previousStart int) interactiveInputViewport {
+	cursorPos := interactiveInputVisualPosition(line, cursor, startCol, termWidth)
+	totalRows := interactiveInputDisplayRows(line, startCol, termWidth)
+	visibleRows := totalRows
+	if maxRows > 0 && visibleRows > maxRows {
+		visibleRows = maxRows
+	}
+	start := boundedInteractiveInputViewportStart(totalRows, cursorPos.row, visibleRows, previousStart)
+	cursorPos.row -= start
+	return interactiveInputViewport{startRow: start, rows: visibleRows, total: totalRows, cursor: cursorPos}
+}
+
+func boundedInteractiveInputViewportStart(totalRows, cursorRow, visibleRows, previousStart int) int {
+	if totalRows < 1 {
+		totalRows = 1
+	}
+	if visibleRows < 1 || visibleRows >= totalRows {
+		return 0
+	}
+	maxStart := totalRows - visibleRows
+	start := previousStart
+	if start < 0 {
+		start = 0
+	}
+	if start > maxStart {
+		start = maxStart
+	}
+	if cursorRow < start {
+		start = cursorRow
+	} else if cursorRow >= start+visibleRows {
+		start = cursorRow - visibleRows + 1
+	}
+	if start < 0 {
+		return 0
+	}
+	if start > maxStart {
+		return maxStart
+	}
+	return start
+}
+
+func renderInteractiveInputViewport(prompt string, line []rune, termWidth, startRow, rows int) string {
+	visualRows := interactiveInputVisualRows(prompt, line, termWidth)
+	if len(visualRows) == 0 || rows <= 0 || startRow >= len(visualRows) {
+		return ""
+	}
+	if startRow < 0 {
+		startRow = 0
+	}
+	end := startRow + rows
+	if end > len(visualRows) {
+		end = len(visualRows)
+	}
+	return strings.Join(visualRows[startRow:end], "\r\n")
+}
+
+func interactiveInputVisualRows(prompt string, line []rune, termWidth int) []string {
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+	rows := []strings.Builder{{}}
+	rows[0].WriteString(prompt)
+	col := terminalVisibleWidth(prompt)
+	if col >= termWidth {
+		col %= termWidth
+	}
+	newRow := func() {
+		rows = append(rows, strings.Builder{})
+		col = 0
+	}
+	for _, r := range line {
+		if r == '\r' || r == '\n' {
+			newRow()
+			continue
+		}
+		width := DisplayWidth(string(r))
+		if width <= 0 {
+			rows[len(rows)-1].WriteRune(r)
+			continue
+		}
+		if col > 0 && col+width > termWidth {
+			newRow()
+		}
+		rows[len(rows)-1].WriteRune(r)
+		col += width
+		if col >= termWidth {
+			newRow()
+		}
+	}
+	out := make([]string, len(rows))
+	for i := range rows {
+		out[i] = rows[i].String()
+	}
+	return out
+}
+
+func interactiveInputCursorAtVisualRow(line []rune, startCol, termWidth, targetRow, targetCol int) (int, bool) {
+	bestCursor := -1
+	bestDistance := int(^uint(0) >> 1)
+	for candidate := 0; candidate <= len(line); candidate++ {
+		pos := interactiveInputVisualPosition(line, candidate, startCol, termWidth)
+		if pos.row != targetRow {
+			continue
+		}
+		distance := pos.col - targetCol
+		if distance < 0 {
+			distance = -distance
+		}
+		if distance < bestDistance {
+			bestCursor = candidate
+			bestDistance = distance
+		}
+	}
+	return bestCursor, bestCursor >= 0
+}
+
+func interactiveInputLogicalPosition(line []rune, cursor int) (int, int) {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(line) {
+		cursor = len(line)
+	}
+	current := 1
+	for _, r := range line[:cursor] {
+		if r == '\r' || r == '\n' {
+			current++
+		}
+	}
+	total := current
+	for _, r := range line[cursor:] {
+		if r == '\r' || r == '\n' {
+			total++
+		}
+	}
+	return current, total
+}
+
 func runesEqual(a, b []rune) bool {
 	if len(a) != len(b) {
 		return false
@@ -1409,6 +1701,10 @@ func interactiveInputVisualPosition(line []rune, cursor, startCol, termWidth int
 		width := DisplayWidth(string(r))
 		if width <= 0 {
 			continue
+		}
+		if pos.col > 0 && pos.col+width > termWidth {
+			pos.row++
+			pos.col = 0
 		}
 		pos.col += width
 		if pos.col >= termWidth {
@@ -1628,6 +1924,10 @@ func decodeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter, fromCarriageReturn: true}, consumed: 1}, true
 	case '\n':
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter}, consumed: 1}, true
+	case 15:
+		// Ctrl+O is the portable control-key fallback for inserting a newline.
+		// Ctrl+J is indistinguishable from a terminal LF/Enter submission.
+		return decodedInteractiveKey{key: editorKey{kind: editorKeyInsertNewline}, consumed: 1}, true
 	case '\t':
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyComplete}, consumed: 1}, true
 	case '\b', 127:
@@ -1686,6 +1986,8 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 	}
 	if pending[1] != '[' && pending[1] != 'O' {
 		switch pending[1] {
+		case '\r', '\n':
+			return decodedInteractiveKey{key: editorKey{kind: editorKeyInsertNewline}, consumed: 2}, true
 		case 'b', 'B':
 			return decodedInteractiveKey{key: editorKey{kind: editorKeyBackwardWord}, consumed: 2}, true
 		case 'f', 'F':
@@ -1707,6 +2009,11 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 		switch pending[1] {
 		case '[':
 			switch b {
+			case 'u':
+				if isModifiedEnterSequence(string(pending[2:i])) {
+					return decodedInteractiveKey{key: editorKey{kind: editorKeyInsertNewline}, consumed: i + 1}, true
+				}
+				return decodedInteractiveKey{key: editorKey{kind: editorKeyIgnore}, consumed: i + 1}, true
 			case 'A':
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyUp}, consumed: i + 1}, true
 			case 'B':
@@ -1727,8 +2034,14 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyEnd}, consumed: i + 1}, true
 			case '~':
 				switch string(pending[2:i]) {
+				case "13;2", "27;2;13", "27;3;13", "27;5;13":
+					return decodedInteractiveKey{key: editorKey{kind: editorKeyInsertNewline}, consumed: i + 1}, true
 				case "1", "7":
 					return decodedInteractiveKey{key: editorKey{kind: editorKeyHome}, consumed: i + 1}, true
+				case "5":
+					return decodedInteractiveKey{key: editorKey{kind: editorKeyPageUp}, consumed: i + 1}, true
+				case "6":
+					return decodedInteractiveKey{key: editorKey{kind: editorKeyPageDown}, consumed: i + 1}, true
 				case "3":
 					return decodedInteractiveKey{key: editorKey{kind: editorKeyDelete}, consumed: i + 1}, true
 				case "3;3", "3;5":
@@ -1764,6 +2077,14 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 	}
 
 	return decodedInteractiveKey{}, false
+}
+
+func isModifiedEnterSequence(params string) bool {
+	parts := strings.Split(params, ";")
+	if len(parts) < 2 || parts[0] != "13" {
+		return false
+	}
+	return parts[1] == "2" || parts[1] == "3" || parts[1] == "5"
 }
 
 func isWordMovementModifierSequence(params []byte) bool {

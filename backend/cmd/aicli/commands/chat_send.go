@@ -16,6 +16,7 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	if session.IsInterrupted() {
 		return "", fmt.Errorf("用户中断")
 	}
+	defer notifyChatSound(session, chatSoundTurnComplete)
 	if session.Interaction != nil {
 		session.Interaction.StartWaiting()
 		defer session.Interaction.ClearWaiting()
@@ -84,6 +85,7 @@ func finishSuccessfulChatSend(session *ChatSession, response string, noInteracti
 	if session == nil {
 		return
 	}
+	clearChatTurnRecovery(session)
 	handledByStreamFinalize := finalizeInteractiveActorStreamIfNeeded(session, response)
 	if shouldDisplayFinalResponse(session, response) && !handledByStreamFinalize && !wasInteractiveActorResponseAlreadyRendered(session, response) {
 		renderChatResponse(session, response)
@@ -93,6 +95,7 @@ func finishSuccessfulChatSend(session *ChatSession, response string, noInteracti
 	}
 
 	session.ImagePaths = nil
+	refreshChatComposerContext(session)
 	flushChatSessionLog(session)
 }
 

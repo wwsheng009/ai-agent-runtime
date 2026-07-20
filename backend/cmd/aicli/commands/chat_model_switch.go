@@ -127,6 +127,7 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 	session.ContextWindowTokenCount = 0
 	resetStableSharedToolSurface(session)
 	syncChatLoggerModelState(session)
+	refreshChatTitleMetadata(session)
 	warnIfChatSessionSyncFails(session, "toggle model", syncRuntimeSessionFromChat(session))
 	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
 		warnIfChatSessionSyncFails(session, "refresh local runtime after model switch", err)
@@ -163,12 +164,13 @@ func promptRuntimeModelSelectionPopup(session *ChatSession) (string, bool, error
 	currentModel := effectiveRuntimeModel(session)
 	options := runtimeModelSelectionOptions(session)
 	currentMatch, _ := matchCaseInsensitive(options, currentModel)
-	notice := discardPendingInteractiveInputForPriorityPrompt(session, "模型选择")
+	notice, restoreInput := prepareRuntimeSelectionInput(session, "模型选择")
+	defer restoreInput()
 	hint := "  提示: 输入编号、模型名，回车保持当前"
 	popupLines := renderSelectionPopupLines("选择模型", "模型", currentModel, options, currentMatch, "", hint, notice, "")
 	prompt := "请输入选项 (回车保持当前): "
-	showRuntimeSelectionPopup(session, popupLines, prompt)
-	defer clearRuntimeSelectionPopup(session)
+	handle := beginRuntimeSelectionPopup(session, popupLines, prompt)
+	defer clearRuntimeSelectionPopupHandle(session, handle)
 
 	for {
 		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
@@ -181,7 +183,7 @@ func promptRuntimeModelSelectionPopup(session *ChatSession) (string, bool, error
 			return selected, true, nil
 		}
 		popupLines = renderSelectionPopupLines("选择模型", "模型", currentModel, options, currentMatch, "", hint, notice, "  无效的选择，请重新输入")
-		showRuntimeSelectionPopup(session, popupLines, prompt)
+		updateRuntimeSelectionPopup(session, handle, popupLines, prompt)
 	}
 }
 
@@ -190,7 +192,9 @@ func promptRuntimeModelSelectionLegacy(session *ChatSession) (string, bool, erro
 	currentModel := effectiveRuntimeModel(session)
 	options := runtimeModelSelectionOptions(session)
 
-	if notice := discardPendingInteractiveInputForPriorityPrompt(session, "模型选择"); notice != "" {
+	notice, restoreInput := prepareRuntimeSelectionInput(session, "模型选择")
+	defer restoreInput()
+	if notice != "" {
 		fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine(notice))
 	}
 
@@ -269,12 +273,13 @@ func selectRuntimeReasoningEffortPopup(session *ChatSession, current string, opt
 		defaultOption = normalizedOptions[0]
 	}
 
-	notice := discardPendingInteractiveInputForPriorityPrompt(session, "reasoning_effort 选择")
+	notice, restoreInput := prepareRuntimeSelectionInput(session, "reasoning_effort 选择")
+	defer restoreInput()
 	hint := "  提示: 输入编号、名称或自定义值，回车保留当前，输入 0 清空"
 	popupLines := renderSelectionPopupLines("选择 reasoning_effort 值", "reasoning_effort", currentEffort, normalizedOptions, currentMatch, defaultOption, hint, notice, "")
 	prompt := reasoningEffortSelectionPrompt(currentValid, defaultOption)
-	showRuntimeSelectionPopup(session, popupLines, prompt)
-	defer clearRuntimeSelectionPopup(session)
+	handle := beginRuntimeSelectionPopup(session, popupLines, prompt)
+	defer clearRuntimeSelectionPopupHandle(session, handle)
 
 	for {
 		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), prompt)
@@ -288,7 +293,7 @@ func selectRuntimeReasoningEffortPopup(session *ChatSession, current string, opt
 			return selected, true, nil
 		}
 		popupLines = renderSelectionPopupLines("选择 reasoning_effort 值", "reasoning_effort", currentEffort, normalizedOptions, currentMatch, defaultOption, hint, notice, "  无效的选择，请重新输入")
-		showRuntimeSelectionPopup(session, popupLines, prompt)
+		updateRuntimeSelectionPopup(session, handle, popupLines, prompt)
 	}
 }
 
@@ -302,7 +307,9 @@ func selectRuntimeReasoningEffortLegacy(session *ChatSession, current string, op
 		defaultOption = normalizedOptions[0]
 	}
 
-	if notice := discardPendingInteractiveInputForPriorityPrompt(session, "reasoning_effort 选择"); notice != "" {
+	notice, restoreInput := prepareRuntimeSelectionInput(session, "reasoning_effort 选择")
+	defer restoreInput()
+	if notice != "" {
 		fmt.Printf("\n%s\n", formatInteractiveSupplementPromptLine(notice))
 	}
 
@@ -384,8 +391,32 @@ func showRuntimeSelectionPopup(session *ChatSession, lines []string, prompt stri
 	newChatPromptOverlay(session).showSelectionPopup(lines, prompt)
 }
 
+func beginRuntimeSelectionPopup(session *ChatSession, lines []string, prompt string) ui.PopupHandle {
+	handle, _ := newChatPromptOverlay(session).beginSelectionPopup(lines, prompt)
+	return handle
+}
+
+func updateRuntimeSelectionPopup(session *ChatSession, handle ui.PopupHandle, lines []string, prompt string) bool {
+	return newChatPromptOverlay(session).updatePopupInput(handle, lines, prompt, false)
+}
+
 func clearRuntimeSelectionPopup(session *ChatSession) {
 	newChatPromptOverlay(session).clearSelectionPopup()
+}
+
+func clearRuntimeSelectionPopupHandle(session *ChatSession, handle ui.PopupHandle) {
+	newChatPromptOverlay(session).clearPopupHandle(handle)
+}
+
+func prepareRuntimeSelectionInput(session *ChatSession, promptKind string) (string, func()) {
+	restoreMode := pushChatComposerInputMode(session, chatInputModeSelection)
+	suspension, notice := suspendPendingInteractiveInputForPriorityPrompt(session, promptKind)
+	return notice, func() {
+		if suspension != nil {
+			suspension.Restore()
+		}
+		restoreMode()
+	}
 }
 
 func renderSelectionPopupLines(title, currentLabel, currentValue string, options []string, currentMatch, defaultOption, hint, notice, warning string) []string {
@@ -410,18 +441,19 @@ func renderSelectionPopupLines(title, currentLabel, currentValue string, options
 	if len(options) > 0 {
 		maxLen := 0
 		for _, option := range options {
-			if len(option) > maxLen {
-				maxLen = len(option)
+			if width := ui.DisplayWidth(option); width > maxLen {
+				maxLen = width
 			}
 		}
 		for i, option := range options {
+			paddedOption := padRuntimeSelectionOption(option, maxLen)
 			switch {
 			case strings.EqualFold(option, currentMatch):
-				lines = append(lines, fmt.Sprintf("  [%d] %-*s  (当前)", i+1, maxLen, option))
+				lines = append(lines, fmt.Sprintf("  [%d] %s  (当前)", i+1, paddedOption))
 			case defaultOption != "" && strings.EqualFold(option, defaultOption):
-				lines = append(lines, fmt.Sprintf("  [%d] %-*s  (默认)", i+1, maxLen, option))
+				lines = append(lines, fmt.Sprintf("  [%d] %s  (默认)", i+1, paddedOption))
 			default:
-				lines = append(lines, fmt.Sprintf("  [%d] %-*s", i+1, maxLen, option))
+				lines = append(lines, fmt.Sprintf("  [%d] %s", i+1, paddedOption))
 			}
 		}
 	}
@@ -429,6 +461,14 @@ func renderSelectionPopupLines(title, currentLabel, currentValue string, options
 		lines = append(lines, hint)
 	}
 	return lines
+}
+
+func padRuntimeSelectionOption(option string, width int) string {
+	padding := width - ui.DisplayWidth(option)
+	if padding <= 0 {
+		return option
+	}
+	return option + strings.Repeat(" ", padding)
 }
 
 func resolveRuntimeSelectionInput(input, current, defaultOption string, options []string, allowCustom, allowClear bool) (string, bool) {

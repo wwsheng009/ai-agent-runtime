@@ -94,6 +94,8 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		})
 	case "/approval-reuse":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "status", Summary: "查看复用授权和剩余时间", Group: string(chatSlashCommandGroupPermission)},
+			{Command: "clear", Summary: "撤销全部复用授权", Group: string(chatSlashCommandGroupPermission)},
 			{Command: "off", Summary: "关闭审批复用", Group: string(chatSlashCommandGroupPermission)},
 			{Command: "session_readonly_shell", Summary: "会话只读 shell", Group: string(chatSlashCommandGroupPermission)},
 			{Command: "team_readonly_shell", Summary: "团队只读 shell", Group: string(chatSlashCommandGroupPermission)},
@@ -101,6 +103,7 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 	case "/attach":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "clear", Summary: "清空待发送图片附件", Group: string(chatSlashCommandGroupContext)},
+			{Command: "remove", Summary: "移除指定图片附件", Group: string(chatSlashCommandGroupContext), AcceptsArgs: true},
 		})
 	case "/image":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
@@ -363,10 +366,12 @@ func agentRoutingDifficultyArgumentCandidates() []chatSlashCompletionCandidate {
 
 func agentPanelArgumentCandidates() []chatSlashCompletionCandidate {
 	return []chatSlashCompletionCandidate{
+		{Command: "full", Summary: "显示 mailbox 与 timeline 完整详情", Group: string(chatSlashCommandGroupSession)},
 		{Command: "follow", Summary: "进入面板跟随模式或等待 mailbox 更新", Group: string(chatSlashCommandGroupSession)},
 		{Command: "target", Summary: "切换 panel 到指定 agent target", Group: string(chatSlashCommandGroupSession)},
 		{Command: "next", Summary: "切换 panel 到下一个 agent target", Group: string(chatSlashCommandGroupSession)},
 		{Command: "prev", Summary: "切换 panel 到上一个 agent target", Group: string(chatSlashCommandGroupSession)},
+		{Command: "close", Summary: "关闭当前固定面板", Group: string(chatSlashCommandGroupSession)},
 		{Command: "watch", Summary: "follow 的别名", Group: string(chatSlashCommandGroupSession)},
 		{Command: "previous", Summary: "prev 的别名", Group: string(chatSlashCommandGroupSession)},
 	}

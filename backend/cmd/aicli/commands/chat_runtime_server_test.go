@@ -597,7 +597,7 @@ func TestAICLIRuntimeServerChatExecutorApprovesRuntimeServerToolRequest(t *testi
 		HTTPClient:     server.Client(),
 	}
 	bridge := newChatRuntimeEventBridge(session)
-	bridge.askApproval = func(approval *runtimechat.ApprovalRequest, contextLines []string) (bool, error) {
+	bridge.askApproval = func(approval *runtimechat.ApprovalRequest, contextLines []string) (chatApprovalAnswer, error) {
 		if approval == nil || approval.ToolName != "run_shell_command" {
 			t.Fatalf("unexpected approval request: %+v", approval)
 		}
@@ -605,7 +605,7 @@ func TestAICLIRuntimeServerChatExecutorApprovesRuntimeServerToolRequest(t *testi
 			"team=team-approval task=task-approval teammate=mate-approval permission_mode=default",
 			"provider=openai model=gpt-test reasoning=high route_source=difficulty_level warnings=provider_fallback_parent",
 		}, contextLines)
-		return true, nil
+		return chatApprovalAnswer{Allowed: true}, nil
 	}
 	bridge.writeLine = func(string) {}
 	bridge.renderResponse = func(string) {}

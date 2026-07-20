@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,16 +19,95 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+const commandTestTinyPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP+qC1oAAAAAElFTkSuQmCC"
 
 type directMetadataFunction struct {
 	name     string
 	output   string
 	metadata map[string]interface{}
 	lastArgs map[string]interface{}
+}
+
+type blockingDirectFunction struct {
+	name       string
+	started    chan struct{}
+	release    chan struct{}
+	executeErr error
+}
+
+func (f *blockingDirectFunction) Name() string { return f.name }
+
+func (f *blockingDirectFunction) Description() string { return "blocking direct function" }
+
+func (f *blockingDirectFunction) Parameters() map[string]interface{} {
+	return map[string]interface{}{"type": "object"}
+}
+
+func (f *blockingDirectFunction) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	close(f.started)
+	select {
+	case <-f.release:
+		return "done", f.executeErr
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func TestHandleImageAttachmentCommandValidatesAndRemovesAttachments(t *testing.T) {
+	payload, err := base64.StdEncoding.DecodeString(commandTestTinyPNGBase64)
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	imagePath := filepath.Join(t.TempDir(), "diagram.png")
+	if err := os.WriteFile(imagePath, payload, 0o644); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+	session := &ChatSession{}
+
+	output := captureStdout(t, func() {
+		handleImageAttachmentCommand(session, "/attach \""+imagePath+"\"")
+	})
+	if len(session.ImagePaths) != 1 || session.ImagePaths[0] != imagePath {
+		t.Fatalf("expected validated attachment, got %#v", session.ImagePaths)
+	}
+	if !strings.Contains(output, "已添加图片附件") {
+		t.Fatalf("expected attachment confirmation, got %q", output)
+	}
+
+	output = captureStdout(t, func() {
+		handleImageAttachmentCommand(session, "/attach "+imagePath)
+	})
+	if len(session.ImagePaths) != 1 || !strings.Contains(output, "附件已存在") {
+		t.Fatalf("expected duplicate attachment to be ignored, paths=%#v output=%q", session.ImagePaths, output)
+	}
+
+	output = captureStdout(t, func() {
+		handleImageAttachmentCommand(session, "/attach remove 1")
+	})
+	if len(session.ImagePaths) != 0 || !strings.Contains(output, "已移除图片附件") {
+		t.Fatalf("expected attachment removal, paths=%#v output=%q", session.ImagePaths, output)
+	}
+}
+
+func TestHandleImageAttachmentCommandRejectsInvalidImage(t *testing.T) {
+	session := &ChatSession{}
+	path := filepath.Join(t.TempDir(), "notes.txt")
+	if err := os.WriteFile(path, []byte("not an image"), 0o644); err != nil {
+		t.Fatalf("write text file: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		handleImageAttachmentCommand(session, "/attach "+path)
+	})
+	if len(session.ImagePaths) != 0 || !strings.Contains(output, "无法添加图片附件") {
+		t.Fatalf("expected invalid attachment rejection, paths=%#v output=%q", session.ImagePaths, output)
+	}
 }
 
 func (f *directMetadataFunction) Name() string { return f.name }
@@ -1138,6 +1219,7 @@ func TestHandleCommand_PermissionModeAndApprovalReuse(t *testing.T) {
 		PermissionMode:    "default",
 		ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell,
 		ActiveTeam:        &chatTeamBinding{TeamID: "team-1", AgentID: "lead"},
+		InputReader:       bufio.NewReader(strings.NewReader("bypass_permissions\n")),
 	}
 
 	output := captureStdout(t, func() {
@@ -1172,6 +1254,114 @@ func TestHandleCommand_PermissionModeAndApprovalReuse(t *testing.T) {
 	}
 	if session.ApprovalReuseMode != chatApprovalReuseOff {
 		t.Fatalf("expected approval reuse mode off, got %+v", session)
+	}
+	for _, expected := range []string{"当前会话后续的 Agent 工具调用将不再逐次请求审批", "team=team-1 将同步切换"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected bypass impact warning %q, got %q", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_ApprovalReuseStatusClearAndModeChange(t *testing.T) {
+	now := time.Now().UTC()
+	session := &ChatSession{ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	bridge.approvalGrants = map[string]time.Time{
+		"session:session-1|readonly_shell": now.Add(5 * time.Minute),
+	}
+
+	output := captureStdout(t, func() {
+		handleCommand(session, "/approval-reuse status", false)
+	})
+	for _, expected := range []string{
+		"当前 approval-reuse: session_readonly_shell",
+		"生效中的审批复用授权: 1",
+		"scope=当前会话",
+		"family=readonly_shell",
+		"使用 /approval-reuse clear 可立即撤销全部授权",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected approval reuse status to contain %q, got %q", expected, output)
+		}
+	}
+
+	output = captureStdout(t, func() {
+		handleCommand(session, "/approval-reuse clear", false)
+	})
+	if !strings.Contains(output, "已撤销 approval-reuse 授权: 1") {
+		t.Fatalf("expected clear feedback, got %q", output)
+	}
+	if lines := bridge.approvalGrantStatusLines(time.Now()); len(lines) != 0 {
+		t.Fatalf("expected clear to remove all grants, got %#v", lines)
+	}
+
+	bridge.approvalGrants = map[string]time.Time{
+		"session:session-1|readonly_shell": time.Now().Add(5 * time.Minute),
+	}
+	output = captureStdout(t, func() {
+		handleCommand(session, "/approval-reuse off", false)
+	})
+	if session.ApprovalReuseMode != chatApprovalReuseOff {
+		t.Fatalf("expected mode change to disable approval reuse, got %s", session.ApprovalReuseMode)
+	}
+	if !strings.Contains(output, "已撤销旧作用域授权 1 条") {
+		t.Fatalf("expected mode change to report revoked grants, got %q", output)
+	}
+	if lines := bridge.approvalGrantStatusLines(time.Now()); len(lines) != 0 {
+		t.Fatalf("expected mode change to invalidate old-scope grants, got %#v", lines)
+	}
+}
+
+func TestHandleCommand_ApprovalReuseStatusWithoutRuntimeBridge(t *testing.T) {
+	session := &ChatSession{ApprovalReuseMode: chatApprovalReuseSessionReadOnlyShell}
+	output := captureStdout(t, func() {
+		handleCommand(session, "/approval-reuse", false)
+	})
+	if !strings.Contains(output, "当前没有生效的审批复用授权") {
+		t.Fatalf("expected an explicit empty grant state, got %q", output)
+	}
+}
+
+func TestHandleCommand_BypassPermissionModeRequiresExactConfirmation(t *testing.T) {
+	session := &ChatSession{
+		PermissionMode: "default",
+		ActiveTeam:     &chatTeamBinding{TeamID: "team-safe", AgentID: "lead", PermissionMode: "default"},
+		InputReader:    bufio.NewReader(strings.NewReader("yes\n")),
+	}
+
+	output := captureStdout(t, func() {
+		handleCommand(session, "/permission-mode bypass_permissions", false)
+	})
+	if session.PermissionMode != runtimepolicy.ModeDefault || session.ActiveTeam.PermissionMode != runtimepolicy.ModeDefault {
+		t.Fatalf("expected imprecise confirmation to preserve permission mode, session=%s team=%s", session.PermissionMode, session.ActiveTeam.PermissionMode)
+	}
+	if !strings.Contains(output, "请输入 bypass_permissions 确认切换") || !strings.Contains(output, "已取消") {
+		t.Fatalf("expected explicit confirmation and cancellation feedback, got %q", output)
+	}
+
+	session.InputReader = bufio.NewReader(strings.NewReader("bypass_permissions\n"))
+	output = captureStdout(t, func() {
+		handleCommand(session, "/permission-mode bypass_permissions", false)
+	})
+	if session.PermissionMode != runtimepolicy.ModeBypassPermissions || session.ActiveTeam.PermissionMode != runtimepolicy.ModeBypassPermissions {
+		t.Fatalf("expected exact confirmation to update session and team, session=%s team=%s", session.PermissionMode, session.ActiveTeam.PermissionMode)
+	}
+	if !strings.Contains(output, "已切换到 permission-mode=bypass_permissions") {
+		t.Fatalf("expected permission mode success feedback, got %q", output)
+	}
+}
+
+func TestHandleCommand_YoloRefusesNonInteractiveConfirmation(t *testing.T) {
+	session := &ChatSession{PermissionMode: runtimepolicy.ModeDefault, NoInteractive: true}
+	output := captureStdout(t, func() {
+		handleCommand(session, "/yolo", true)
+	})
+	if session.PermissionMode != runtimepolicy.ModeDefault {
+		t.Fatalf("expected non-interactive /yolo to preserve permission mode, got %s", session.PermissionMode)
+	}
+	if !strings.Contains(output, "非交互模式不能在会话内确认") {
+		t.Fatalf("expected actionable non-interactive error, got %q", output)
 	}
 }
 
@@ -1229,6 +1419,7 @@ func TestHandleCommand_ClearResetsConversationTokenUsage(t *testing.T) {
 		TurnContextTokenCount:   666,
 		MsgCount:                3,
 		TurnRequestCount:        2,
+		InputReader:             bufio.NewReader(strings.NewReader("clear\n")),
 	}
 	replaceRuntimeMessages(session, []runtimetypes.Message{
 		*runtimetypes.NewSystemMessage("previous system prompt"),
@@ -1256,6 +1447,59 @@ func TestHandleCommand_ClearResetsConversationTokenUsage(t *testing.T) {
 	}
 	if got, ok := runtimeSessionContextInt(session.RuntimeSession, chatRuntimeContextTokenCount); ok {
 		t.Fatalf("expected token count metadata to be removed, got %d", got)
+	}
+}
+
+func TestHandleCommand_ClearRequiresExactConfirmation(t *testing.T) {
+	session := &ChatSession{
+		Messages: []runtimetypes.Message{
+			*runtimetypes.NewUserMessage("keep me"),
+		},
+		MsgCount:    1,
+		InputReader: bufio.NewReader(strings.NewReader("yes\n")),
+	}
+
+	output := captureStdout(t, func() {
+		handleCommand(session, "/clear", false)
+	})
+	if !strings.Contains(output, "已取消") {
+		t.Fatalf("expected clear cancellation feedback, got %q", output)
+	}
+	if !chatMessagesHaveConversation(session.Messages) || session.MsgCount != 1 {
+		t.Fatalf("expected conversation to remain unchanged after invalid confirmation")
+	}
+}
+
+func TestConfirmClearConversationHistoryOwnsConfirmationInputMode(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setExternalInputCaptureActive(true)
+	session := &ChatSession{
+		Messages:   []runtimetypes.Message{*runtimetypes.NewUserMessage("keep me")},
+		MsgCount:   1,
+		InputQueue: queue,
+	}
+	interaction := newChatInteractionCoordinator(session)
+	session.Interaction = interaction
+
+	confirmed := make(chan bool, 1)
+	go func() {
+		confirmed <- confirmClearConversationHistory(session)
+	}()
+	requireEventuallyPriorityMode(t, queue)
+	if got := interaction.InputMode(); got != chatInputModeConfirmation {
+		t.Fatalf("expected confirmation input mode while /clear waits, got %q", got)
+	}
+	queue.routeInputText("clear")
+	select {
+	case ok := <-confirmed:
+		if !ok {
+			t.Fatal("expected exact clear confirmation to succeed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for clear confirmation")
+	}
+	if got := interaction.InputMode(); got != chatInputModeChat {
+		t.Fatalf("expected /clear confirmation to restore chat input mode, got %q", got)
 	}
 }
 
@@ -1392,6 +1636,7 @@ func TestHandleCommand_DirectFunctionCall_JSON(t *testing.T) {
 	session := &ChatSession{
 		FunctionCatalog:  catalog,
 		FunctionRegistry: registry,
+		PermissionMode:   runtimepolicy.ModeBypassPermissions,
 	}
 
 	output := captureStdout(t, func() {
@@ -1412,6 +1657,71 @@ func TestHandleCommand_DirectFunctionCall_JSON(t *testing.T) {
 	}
 }
 
+func TestExecuteDirectFunctionPublishesAndRestoresToolRunningStage(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		executeErr error
+	}{
+		{name: "success"},
+		{name: "failure", executeErr: errors.New("function failed")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := functions.NewFunctionRegistry()
+			catalog := newAICLIFunctionCatalog("openai", registry)
+			fn := &blockingDirectFunction{
+				name:       "blocking_tool",
+				started:    make(chan struct{}),
+				release:    make(chan struct{}),
+				executeErr: tt.executeErr,
+			}
+			catalog.RegisterFunction(fn)
+			session := &ChatSession{FunctionCatalog: catalog, FunctionRegistry: registry}
+			interaction := newChatInteractionCoordinator(session)
+			session.Interaction = interaction
+			interaction.SetAgentStageDetail(chatAgentStageAwaitingAnswer, "existing question")
+
+			done := make(chan error, 1)
+			go func() {
+				_, err := executeDirectFunction(session, "blocking_tool", "blocking_tool", map[string]interface{}{})
+				done <- err
+			}()
+			select {
+			case <-fn.started:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for direct function execution")
+			}
+			if got := interaction.AgentStage(); got != chatAgentStageToolRunning {
+				t.Fatalf("expected tool-running stage during direct execution, got %q", got)
+			}
+			if got := interaction.AgentStageDetail(); got != "blocking_tool" {
+				t.Fatalf("expected running function detail, got %q", got)
+			}
+			interaction.mu.Lock()
+			surfaceState := interaction.currentSurfaceStateLocked()
+			interaction.mu.Unlock()
+			if surfaceState != "Tool blocking_tool" {
+				t.Fatalf("expected non-ready tool surface state, got %q", surfaceState)
+			}
+
+			close(fn.release)
+			select {
+			case err := <-done:
+				if !errors.Is(err, tt.executeErr) {
+					t.Fatalf("unexpected direct function result error: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for direct function completion")
+			}
+			if got := interaction.AgentStage(); got != chatAgentStageAwaitingAnswer {
+				t.Fatalf("expected previous stage to be restored, got %q", got)
+			}
+			if got := interaction.AgentStageDetail(); got != "existing question" {
+				t.Fatalf("expected previous stage detail to be restored, got %q", got)
+			}
+		})
+	}
+}
+
 func TestHandleCommand_DirectFunctionCall_OpenAIImageGeneratePromptShortcut(t *testing.T) {
 	registry := functions.NewFunctionRegistry()
 	catalog := newAICLIFunctionCatalog("openai", registry)
@@ -1424,6 +1734,7 @@ func TestHandleCommand_DirectFunctionCall_OpenAIImageGeneratePromptShortcut(t *t
 	session := &ChatSession{
 		FunctionCatalog:  catalog,
 		FunctionRegistry: registry,
+		PermissionMode:   runtimepolicy.ModeBypassPermissions,
 	}
 
 	output := captureStdout(t, func() {
@@ -1441,6 +1752,158 @@ func TestHandleCommand_DirectFunctionCall_OpenAIImageGeneratePromptShortcut(t *t
 	}
 	if payload.FunctionName != "openai_image_generate" {
 		t.Fatalf("unexpected function name: %+v", payload)
+	}
+}
+
+func TestHandleCommand_DirectFunctionRespectsDisableTools(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	fn := &directMetadataFunction{name: "read_status", output: "ok"}
+	catalog.RegisterFunction(fn)
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+		DisableTools:     true,
+	}
+
+	output := captureStdout(t, func() {
+		for _, command := range []string{`/call read_status {}`, `/tool read_status {}`, `/skill anything run`} {
+			handleCommand(session, command, false)
+		}
+	})
+	if fn.lastArgs != nil {
+		t.Fatalf("expected disabled tools to block execution, got args %#v", fn.lastArgs)
+	}
+	if !strings.Contains(output, "当前会话已禁用 tools") {
+		t.Fatalf("expected disabled-tools feedback, got %q", output)
+	}
+}
+
+func TestHandleCommand_DirectRiskyFunctionFailsClosedWhenNonInteractive(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	fn := &directMetadataFunction{name: "write_file", output: "written"}
+	catalog.RegisterFunction(fn)
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+		PermissionMode:   runtimepolicy.ModeDefault,
+		NoInteractive:    true,
+	}
+
+	output := captureStdout(t, func() {
+		handleCommand(session, `/call write_file {"path":"notes.txt"}`, true)
+	})
+	if fn.lastArgs != nil {
+		t.Fatalf("expected non-interactive risky invocation not to execute, got %#v", fn.lastArgs)
+	}
+	if !strings.Contains(output, "需要审批，但当前模式不可交互") {
+		t.Fatalf("expected fail-closed non-interactive feedback, got %q", output)
+	}
+}
+
+func TestHandleCommand_DirectRiskyFunctionRequiresApproval(t *testing.T) {
+	newSession := func(input string) (*ChatSession, *directMetadataFunction) {
+		registry := functions.NewFunctionRegistry()
+		catalog := newAICLIFunctionCatalog("openai", registry)
+		fn := &directMetadataFunction{name: "write_file", output: "written"}
+		catalog.RegisterFunction(fn)
+		return &ChatSession{
+			FunctionCatalog:  catalog,
+			FunctionRegistry: registry,
+			PermissionMode:   runtimepolicy.ModeDefault,
+			InputReader:      bufio.NewReader(strings.NewReader(input)),
+		}, fn
+	}
+
+	deniedSession, deniedFn := newSession("2\n")
+	deniedOutput := captureStdout(t, func() {
+		handleCommand(deniedSession, `/call write_file {"path":"notes.txt","content":"x"}`, false)
+	})
+	if deniedFn.lastArgs != nil {
+		t.Fatalf("expected denied direct function not to execute, got %#v", deniedFn.lastArgs)
+	}
+	for _, expected := range []string{"Agent 请求执行需要授权的操作", "write_file", "permission-mode=default", "approval_denied"} {
+		if !strings.Contains(deniedOutput, expected) {
+			t.Fatalf("expected denied approval output to contain %q, got %q", expected, deniedOutput)
+		}
+	}
+
+	allowedSession, allowedFn := newSession("1\n")
+	allowedOutput := captureStdout(t, func() {
+		handleCommand(allowedSession, `/call write_file {"path":"notes.txt","content":"x"}`, false)
+	})
+	if allowedFn.lastArgs == nil || allowedFn.lastArgs["path"] != "notes.txt" {
+		t.Fatalf("expected approved direct function to execute, got %#v", allowedFn.lastArgs)
+	}
+	if !strings.Contains(allowedOutput, "已允许本次直接调用") || !strings.Contains(allowedOutput, "written") {
+		t.Fatalf("expected approval and execution feedback, got %q", allowedOutput)
+	}
+}
+
+func TestHandleCommand_DirectFunctionPermissionModes(t *testing.T) {
+	newSession := func(mode runtimepolicy.Mode) (*ChatSession, *directMetadataFunction) {
+		registry := functions.NewFunctionRegistry()
+		catalog := newAICLIFunctionCatalog("openai", registry)
+		fn := &directMetadataFunction{name: "execute_shell_command", output: "done"}
+		catalog.RegisterFunction(fn)
+		return &ChatSession{FunctionCatalog: catalog, FunctionRegistry: registry, PermissionMode: mode}, fn
+	}
+
+	planSession, planFn := newSession(runtimepolicy.ModePlan)
+	planOutput := captureStdout(t, func() {
+		handleCommand(planSession, `/call execute_shell_command {"command":"echo ok"}`, false)
+	})
+	if planFn.lastArgs != nil || !strings.Contains(planOutput, "permission-mode=plan 阻止直接调用") {
+		t.Fatalf("expected plan mode to deny shell execution, args=%#v output=%q", planFn.lastArgs, planOutput)
+	}
+
+	bypassSession, bypassFn := newSession(runtimepolicy.ModeBypassPermissions)
+	bypassOutput := captureStdout(t, func() {
+		handleCommand(bypassSession, `/call execute_shell_command {"command":"echo ok"}`, false)
+	})
+	if bypassFn.lastArgs == nil || !strings.Contains(bypassOutput, "done") {
+		t.Fatalf("expected bypass mode to execute without prompt, args=%#v output=%q", bypassFn.lastArgs, bypassOutput)
+	}
+}
+
+func TestHandleCommand_DirectFunctionStillRespectsToolPolicyInBypassMode(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	fn := &directMetadataFunction{name: "read_secret", output: "secret"}
+	catalog.RegisterFunction(fn)
+	toolPolicy := runtimepolicy.NewToolExecutionPolicy([]string{"read_status"}, false)
+	catalog.SetToolPolicy(toolPolicy)
+	session := &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+		PermissionMode:   runtimepolicy.ModeBypassPermissions,
+		ToolPolicy:       toolPolicy,
+	}
+
+	output := captureStdout(t, func() {
+		handleCommand(session, `/call read_secret {}`, false)
+	})
+	if fn.lastArgs != nil {
+		t.Fatalf("expected explicit tool policy to block bypass invocation, got %#v", fn.lastArgs)
+	}
+	if !strings.Contains(output, "tool not allowed by execution policy") {
+		t.Fatalf("expected tool policy denial feedback, got %q", output)
+	}
+}
+
+func TestHandleCommand_DirectReadOnlyFunctionRemainsNonInteractive(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	fn := &directMetadataFunction{name: "read_status", output: "healthy"}
+	catalog.RegisterFunction(fn)
+	session := &ChatSession{FunctionCatalog: catalog, FunctionRegistry: registry, PermissionMode: runtimepolicy.ModeDefault}
+
+	output := captureStdout(t, func() {
+		handleCommand(session, `/call read_status {}`, false)
+	})
+	if fn.lastArgs == nil || !strings.Contains(output, "healthy") {
+		t.Fatalf("expected read-only direct function to remain prompt-free, args=%#v output=%q", fn.lastArgs, output)
 	}
 }
 
@@ -1476,6 +1939,7 @@ func TestHandleCommand_DirectSkillCall_UsesPromptShortcut(t *testing.T) {
 	session := &ChatSession{
 		FunctionCatalog:  catalog,
 		FunctionRegistry: registry,
+		InputReader:      bufio.NewReader(strings.NewReader("1\n")),
 	}
 
 	output := captureStdout(t, func() {
@@ -1508,6 +1972,7 @@ func TestHandleCommand_DirectAICLISkillCall_EchoesInvocationBeforeExecution(t *t
 	session := &ChatSession{
 		FunctionCatalog:  catalog,
 		FunctionRegistry: registry,
+		InputReader:      bufio.NewReader(strings.NewReader("1\n")),
 	}
 	command := `/skill aicli {"prompt":"查看当前日期","options":{"timeout":"60s","request-timeout":"45s"}}`
 	output := captureStdout(t, func() {
@@ -1615,7 +2080,7 @@ func TestHandleCommand_SkillsMenu_SelectsAndExecutes(t *testing.T) {
 	session := &ChatSession{
 		FunctionCatalog:  catalog,
 		FunctionRegistry: registry,
-		InputReader:      bufio.NewReader(strings.NewReader("1\n帮我生成一张风景图\n")),
+		InputReader:      bufio.NewReader(strings.NewReader("1\n帮我生成一张风景图\n1\n")),
 	}
 
 	stdout, stderr := captureStdoutStderr(t, func() {

@@ -4,8 +4,16 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+)
+
+const (
+	chatComposerPreviewPopupOwner = "modal:composer"
+	chatSelectionPopupOwner       = "modal:selection"
+	chatModalPopupOwner           = "modal:agent_panel"
+	chatPriorityPromptPopupOwner  = "modal:priority:agent_input"
 )
 
 type chatPromptOverlay struct {
@@ -43,16 +51,13 @@ func (o chatPromptOverlay) showComposerPreview(prompt string) bool {
 		return false
 	}
 	o.beginDirectOutput()
-	o.session.Surface.SetComposerPreview(prompt)
+	o.session.Surface.ShowPopupInputForOwner(nil, prompt, chatComposerPreviewPopupOwner)
 	o.resetPromptState()
 	return true
 }
 
 func (o chatPromptOverlay) clearComposerPreview() {
-	if o.session != nil && o.session.Surface != nil {
-		o.session.Surface.ClearComposerPreview()
-	}
-	o.resetPromptState()
+	o.clearOwnedModalPopup(chatComposerPreviewPopupOwner)
 }
 
 func (o chatPromptOverlay) showSelectionPopup(lines []string, prompt string) bool {
@@ -60,8 +65,32 @@ func (o chatPromptOverlay) showSelectionPopup(lines []string, prompt string) boo
 		return false
 	}
 	o.beginDirectOutput()
-	o.session.Surface.ShowPopupInput(lines, prompt)
+	o.session.Surface.ShowPopupInputForOwner(lines, prompt, chatSelectionPopupOwner)
 	return true
+}
+
+func (o chatPromptOverlay) beginSelectionPopup(lines []string, prompt string) (ui.PopupHandle, bool) {
+	if !o.surfaceEnabled() {
+		return ui.PopupHandle{}, false
+	}
+	o.beginDirectOutput()
+	handle := o.session.Surface.BeginPopupInputForOwner(lines, prompt, chatSelectionPopupOwner)
+	return handle, handle.Valid()
+}
+
+func (o chatPromptOverlay) updatePopupInput(handle ui.PopupHandle, lines []string, prompt string, preserveCursor bool) bool {
+	if !o.surfaceEnabled() || !handle.Valid() {
+		return false
+	}
+	return o.session.Surface.UpdatePopupInputForHandle(handle, lines, prompt, preserveCursor)
+}
+
+func (o chatPromptOverlay) beginModalPopupInput(lines []string, prompt string) (ui.PopupHandle, bool) {
+	if !o.surfaceEnabled() {
+		return ui.PopupHandle{}, false
+	}
+	handle := o.session.Surface.BeginPopupInputForOwner(lines, prompt, chatModalPopupOwner)
+	return handle, handle.Valid()
 }
 
 func (o chatPromptOverlay) renderModalPopupInput(lines []string, prompt string, preserveCursor bool) bool {
@@ -69,16 +98,31 @@ func (o chatPromptOverlay) renderModalPopupInput(lines []string, prompt string, 
 		return false
 	}
 	if preserveCursor {
-		o.session.Surface.ShowPopupInputPreserveCursor(lines, prompt)
+		o.session.Surface.ShowPopupInputPreserveCursorForOwner(lines, prompt, chatModalPopupOwner)
 		return true
 	}
-	o.session.Surface.ShowPopupInput(lines, prompt)
+	o.session.Surface.ShowPopupInputForOwner(lines, prompt, chatModalPopupOwner)
 	return true
 }
 
 func (o chatPromptOverlay) clearSelectionPopup() {
+	o.clearOwnedModalPopup(chatSelectionPopupOwner)
+}
+
+func (o chatPromptOverlay) clearModalPopup() {
+	o.clearOwnedModalPopup(chatModalPopupOwner)
+}
+
+func (o chatPromptOverlay) clearPopupHandle(handle ui.PopupHandle) {
+	if o.session != nil && o.session.Surface != nil && handle.Valid() {
+		o.session.Surface.ClearPopupHandlePreserveCursor(handle)
+	}
+	o.resetPromptState()
+}
+
+func (o chatPromptOverlay) clearOwnedModalPopup(owner string) {
 	if o.session != nil && o.session.Surface != nil {
-		o.session.Surface.ClearPopupPreserveCursor()
+		o.session.Surface.ClearPopupForOwnerPreserveCursor(owner)
 	}
 	o.resetPromptState()
 }
@@ -117,11 +161,35 @@ func (o chatPromptOverlay) clearPendingPasteDraft() bool {
 }
 
 func (o chatPromptOverlay) showPriorityPrompt(lines []string, prompt string) (string, func(), bool) {
+	locked := o.session != nil
+	if locked {
+		o.session.priorityPromptMu.Lock()
+	}
+	var (
+		handle ui.PopupHandle
+		once   sync.Once
+	)
+	cleanup := func() {
+		once.Do(func() {
+			if handle.Valid() {
+				o.clearPopupHandle(handle)
+			}
+			if locked {
+				o.session.priorityPromptMu.Unlock()
+			}
+		})
+	}
+
 	prompt = sanitizeInteractivePromptLine(prompt)
 	if o.surfaceEnabled() {
 		o.beginDirectOutput()
-		o.session.Surface.ShowPopupInput(lines, prompt)
-		return prompt, func() { o.clearSelectionPopup() }, true
+		handle = o.session.Surface.BeginPopupInputForOwnerWithViewport(
+			lines,
+			prompt,
+			chatPriorityPromptPopupOwner,
+			priorityPromptViewport(lines),
+		)
+		return prompt, cleanup, true
 	}
 
 	o.beginDirectOutput()
@@ -136,7 +204,43 @@ func (o chatPromptOverlay) showPriorityPrompt(lines []string, prompt string) (st
 		renderedPrompt = prompt
 	}
 	fmt.Print(renderedPrompt)
-	return renderedPrompt, func() {}, false
+	return renderedPrompt, cleanup, false
+}
+
+func priorityPromptViewport(lines []string) ui.PopupViewportSpec {
+	normalized := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line = sanitizeInteractivePromptLine(line); strings.TrimSpace(line) != "" {
+			normalized = append(normalized, line)
+		}
+	}
+	if len(normalized) == 0 {
+		return ui.PopupViewportSpec{}
+	}
+
+	headerEnd := len(normalized)
+	if headerEnd > 2 {
+		headerEnd = 2
+	}
+	viewport := ui.PopupViewportSpec{
+		HeaderLines: []string{strings.Join(normalized[:headerEnd], " | ")},
+	}
+	if len(normalized) <= 2 {
+		return viewport
+	}
+
+	viewport.FooterLines = []string{normalized[len(normalized)-1]}
+	body := normalized[headerEnd : len(normalized)-1]
+	if len(body) == 0 {
+		return viewport
+	}
+	summaryEnd := len(body)
+	if summaryEnd > 3 {
+		summaryEnd = 3
+	}
+	viewport.BodyLines = append(viewport.BodyLines, strings.Join(body[:summaryEnd], " | "))
+	viewport.BodyLines = append(viewport.BodyLines, body[summaryEnd:]...)
+	return viewport
 }
 
 func sanitizeInteractivePromptLine(line string) string {
@@ -161,6 +265,10 @@ func showRuntimeComposerPrompt(session *ChatSession, prompt string) bool {
 
 func clearRuntimeComposerPrompt(session *ChatSession) {
 	newChatPromptOverlay(session).clearComposerPreview()
+}
+
+func clearRuntimeModalPopup(session *ChatSession) {
+	newChatPromptOverlay(session).clearModalPopup()
 }
 
 // notifyChatInputDraftState displays pending paste drafts through the overlay;

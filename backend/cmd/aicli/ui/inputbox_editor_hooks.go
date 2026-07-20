@@ -1,5 +1,7 @@
 package ui
 
+import "io"
+
 // LineEditorSnapshot captures the current editable line state for hooks.
 type LineEditorSnapshot struct {
 	Text        string
@@ -7,6 +9,16 @@ type LineEditorSnapshot struct {
 	Prompt      string
 	HistoryPos  int
 	PasteActive bool
+	// DisplayRows is the number of terminal rows currently occupied by the
+	// editor viewport. ViewportStart is the first logical display row shown.
+	// These fields let a fixed-bottom surface expose multiline state without
+	// changing the submitted text contract.
+	DisplayRows      int
+	CursorDisplayRow int
+	ViewportStart    int
+	ViewportRows     int
+	LogicalLine      int
+	LogicalLines     int
 }
 
 // LineEditorReplacement describes a text replacement requested by a hook.
@@ -18,6 +30,7 @@ type LineEditorReplacement struct {
 type LineEditorRenderSnapshot struct {
 	LastCursorRow int
 	LastCursorCol int
+	ViewportStart int
 }
 
 // LineEditorHooks lets the caller observe and intercept editor actions.
@@ -27,10 +40,18 @@ type LineEditorHooks struct {
 	OnChange              func(LineEditorSnapshot)
 	OnBeforeRedraw        func(LineEditorSnapshot, LineEditorRenderSnapshot)
 	OnBeforeTerminalWrite func(LineEditorSnapshot, LineEditorRenderSnapshot) string
+	OnTerminalWrite       func(LineEditorSnapshot, LineEditorRenderSnapshot, io.Writer, string) bool
 	OnComplete            func(LineEditorSnapshot) (LineEditorReplacement, bool)
 	OnNavigate            func(LineEditorSnapshot, int) bool
 	OnMove                func(LineEditorSnapshot, int) bool
 	OnSubmit              func(LineEditorSnapshot) (LineEditorReplacement, bool)
 	OnCancelPopup         func(LineEditorSnapshot) bool
 	OnCancel              func(LineEditorSnapshot) bool
+	// MaxVisibleRows bounds the editor viewport. Zero preserves the legacy
+	// unbounded rendering behavior used by transient prompts and tests.
+	// ResolveMaxVisibleRows, when set, is evaluated for every snapshot and
+	// redraw so terminal resize and bottom-surface context changes take effect
+	// without restarting the editor.
+	MaxVisibleRows        int
+	ResolveMaxVisibleRows func() int
 }

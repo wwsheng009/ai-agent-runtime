@@ -415,7 +415,28 @@ type AICLIChatConfig struct {
 	DefaultModel    string `yaml:"default_model,omitempty" mapstructure:"default_model"`
 	ReasoningEffort string `yaml:"reasoning_effort,omitempty" mapstructure:"reasoning_effort"`
 	// Stream 记录用户偏好的输出模式（流式/普通）。使用指针以便区分“未配置”与“显式 false”。
-	Stream *bool `yaml:"stream,omitempty" mapstructure:"stream"`
+	Stream        *bool                     `yaml:"stream,omitempty" mapstructure:"stream"`
+	TerminalTitle *AICLITerminalTitleConfig `yaml:"terminal_title,omitempty" mapstructure:"terminal_title"`
+	Notifications *AICLIChatNotifications   `yaml:"notifications,omitempty" mapstructure:"notifications"`
+}
+
+// AICLITerminalTitleConfig controls the interactive chat window/tab title.
+type AICLITerminalTitleConfig struct {
+	Enabled    *bool    `yaml:"enabled,omitempty" mapstructure:"enabled"`
+	Animations *bool    `yaml:"animations,omitempty" mapstructure:"animations"`
+	Items      []string `yaml:"items,omitempty" mapstructure:"items"`
+}
+
+// AICLIChatNotifications controls interactive attention signals.
+type AICLIChatNotifications struct {
+	Sound *AICLIChatSoundConfig `yaml:"sound,omitempty" mapstructure:"sound"`
+}
+
+// AICLIChatSoundConfig controls the lightweight terminal bell notification.
+type AICLIChatSoundConfig struct {
+	Enabled    *bool    `yaml:"enabled,omitempty" mapstructure:"enabled"`
+	Events     []string `yaml:"events,omitempty" mapstructure:"events"`
+	CooldownMS *int     `yaml:"cooldown_ms,omitempty" mapstructure:"cooldown_ms"`
 }
 
 // AICLIRuntimeConfig controls whether aicli executes turns locally or via runtime-server.

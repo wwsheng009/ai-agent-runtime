@@ -1877,7 +1877,7 @@ func TestHandleCommand_AgentsPanelShowsUnifiedMultiAgentView(t *testing.T) {
 	require.NoError(t, err)
 
 	output := captureStdout(t, func() {
-		if quit := handleCommand(session, "/agents panel 5", false); quit {
+		if quit := handleCommand(session, "/agents panel full 5", false); quit {
 			t.Fatal("agents panel command should not quit")
 		}
 	})
@@ -1893,6 +1893,36 @@ func TestHandleCommand_AgentsPanelShowsUnifiedMultiAgentView(t *testing.T) {
 	} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("expected agents panel output to contain %q, got:\n%s", expected, output)
+		}
+	}
+}
+
+func TestHandleCommand_AgentsPanelDefaultsToCompactSummary(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession:      &runtimechat.Session{ID: "panel-summary-root", State: runtimechat.StateActive},
+		SelectedAgentTarget: "/root/selected-worker",
+	}
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, "/agents panel", false); quit {
+			t.Fatal("agents panel summary command should not quit")
+		}
+	})
+	for _, expected := range []string{
+		"Agent Control Panel:",
+		"selected=/root/selected-worker",
+		"parent_session=panel-summary-root",
+		"/agents panel full",
+		"/agents panel follow",
+		"/agents panel close",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("expected compact panel summary to contain %q, got:\n%s", expected, output)
+		}
+	}
+	for _, unexpected := range []string{"Mailbox:", "Timeline:"} {
+		if strings.Contains(output, unexpected) {
+			t.Fatalf("did not expect compact panel summary to render %q; use /agents panel full for details:\n%s", unexpected, output)
 		}
 	}
 }
@@ -1984,7 +2014,7 @@ func TestHandleCommand_AgentsPanelShowsRegistryServiceMode(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if quit := handleCommand(session, "/agents panel 5", false); quit {
+		if quit := handleCommand(session, "/agents panel full 5", false); quit {
 			t.Fatal("agents panel command should not quit")
 		}
 	})
@@ -2102,7 +2132,7 @@ func TestHandleCommand_CollabAndPanelUseCompletionMailboxWithoutDisplayMirror(t 
 	}
 
 	panelOutput := captureStdout(t, func() {
-		if quit := handleCommand(session, "/agents panel 5", false); quit {
+		if quit := handleCommand(session, "/agents panel full 5", false); quit {
 			t.Fatal("agents panel command should not quit")
 		}
 	})
@@ -2317,10 +2347,10 @@ func TestChatAgentPanelModalControllerNavigatesAndSelectsTarget(t *testing.T) {
 	lines := chatAgentPanelModalLines(session, &state)
 	joined := strings.Join(lines, "\n")
 	for _, expected := range []string{
-		"mode=follow pane=timeline cursor=2",
+		"mode=follow view=timeline agent_cursor=2",
 		"selected=/root/panel-modal-second",
 		">* [2] /root/panel-modal-second",
-		"Timeline: <focused>",
+		"Timeline:",
 		"Enter 设为 target",
 	} {
 		if !strings.Contains(joined, expected) {
@@ -2329,14 +2359,14 @@ func TestChatAgentPanelModalControllerNavigatesAndSelectsTarget(t *testing.T) {
 	}
 }
 
-func TestRunChatAgentPanelModalInterruptMarksSessionInterrupted(t *testing.T) {
+func TestRunChatAgentPanelModalInterruptOnlyClosesPanel(t *testing.T) {
 	session := &ChatSession{}
 	err := normalizeChatAgentPanelComposerReadError(session, ui.ErrInteractiveInputInterrupted)
 	if err != io.EOF {
 		t.Fatalf("expected interrupt to return io.EOF, got %v", err)
 	}
-	if !session.IsInterrupted() {
-		t.Fatal("expected panel modal interrupt to mark session interrupted")
+	if session.IsInterrupted() {
+		t.Fatal("expected panel modal interrupt to leave the chat session running")
 	}
 }
 

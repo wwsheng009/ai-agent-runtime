@@ -55,20 +55,26 @@ func TestChatInputQueue_SingleLineStillSubmitsImmediately(t *testing.T) {
 	}
 }
 
-func TestChatInputQueue_DropsSlashCommandWhenCommandGateRejects(t *testing.T) {
+func TestChatInputQueue_ReturnsExplicitResultWhenCommandGateRejects(t *testing.T) {
 	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
 	queue.setCommandGate(func(text string) bool {
 		return false
 	})
 
-	queue.routeInputText("/help\n")
+	result := queue.routeInputText("/help\n")
+	if !result.rejected() || result.Disposition != chatInputRouteRejectedCommand {
+		t.Fatalf("expected explicit command rejection result, got %+v", result)
+	}
 	select {
 	case item := <-queue.lines:
 		t.Fatalf("expected rejected slash command not to be queued, got %q", item.Text)
 	default:
 	}
 
-	queue.routeInputText("normal prompt\n")
+	result = queue.routeInputText("normal prompt\n")
+	if !result.queued() {
+		t.Fatalf("expected normal prompt to be queued, got %+v", result)
+	}
 	select {
 	case item := <-queue.lines:
 		if strings.TrimSpace(item.Text) != "normal prompt" {
@@ -76,6 +82,107 @@ func TestChatInputQueue_DropsSlashCommandWhenCommandGateRejects(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected normal prompt to remain queueable")
+	}
+}
+
+func TestChatInputQueue_PumpReportsRejectedSlashCommand(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("/queue clear\n")))
+	queue.setCommandGate(func(string) bool { return false })
+	feedback := make(chan string, 1)
+	queue.setRouteFeedback(func(text string, result chatInputRouteResult) {
+		if result.rejected() {
+			feedback <- strings.TrimSpace(text)
+		}
+	})
+	queue.startPump()
+
+	select {
+	case command := <-feedback:
+		if command != "/queue clear" {
+			t.Fatalf("unexpected rejected command feedback: %q", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for rejected slash command feedback")
+	}
+	select {
+	case item := <-queue.lines:
+		t.Fatalf("expected rejected slash command not to be queued, got %q", item.Text)
+	default:
+	}
+}
+
+func TestChatInputQueue_RejectedSlashDraftRemainsEditable(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setCommandGate(func(text string) bool { return false })
+	feedback := 0
+	queue.setRouteFeedback(func(string, chatInputRouteResult) { feedback++ })
+	queue.stageDraft("/queue clear")
+
+	if queue.confirmDraft() {
+		t.Fatal("expected rejected slash draft not to be confirmed")
+	}
+	if !queue.hasDraft() {
+		t.Fatal("expected rejected slash draft to remain staged")
+	}
+	queue.draftMu.RLock()
+	draft := queue.draftText
+	queue.draftMu.RUnlock()
+	if draft != "/queue clear" {
+		t.Fatalf("expected rejected draft to remain unchanged, got %q", draft)
+	}
+	if feedback != 1 {
+		t.Fatalf("expected rejected draft confirmation to render feedback once, got %d", feedback)
+	}
+}
+
+func TestRenderBusyInputRouteFeedbackExplainsRejectedQueueClear(t *testing.T) {
+	var output strings.Builder
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	coord.SetWriter(&output)
+	session.Interaction = coord
+
+	renderBusyInputRouteFeedback(session, "/queue clear", chatInputRouteResult{
+		Disposition: chatInputRouteRejectedCommand,
+	})
+
+	rendered := output.String()
+	for _, want := range []string{"/queue clear", "Ready", "队列保持不变"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected busy rejection feedback to contain %q, got %q", want, rendered)
+		}
+	}
+}
+
+func TestInterruptChatTurnFromBusyInputCancelPreservesPendingInput(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.routeInputText("queued follow-up\n")
+	queue.stageDraft("unfinished draft")
+	session := &ChatSession{
+		NoInteractive: true,
+		InputQueue:    queue,
+		cancelCtx:     ctx,
+		cancelFunc:    cancel,
+	}
+
+	interruptChatTurnFromBusyInputCancel(session)
+
+	if !session.IsInterrupted() {
+		t.Fatal("expected busy-input ESC to interrupt the active turn")
+	}
+	if queue.pendingCount() != 1 || !queue.hasDraft() {
+		t.Fatalf("expected ESC to preserve queued input and draft, pending=%d draft=%v", queue.pendingCount(), queue.hasDraft())
+	}
+	previews := queue.queuedPreviewLines(5)
+	if len(previews) != 1 || previews[0] != "queued follow-up" {
+		t.Fatalf("expected queued preview to survive ESC, got %#v", previews)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected busy-input ESC to cancel active context")
 	}
 }
 
@@ -100,6 +207,144 @@ func TestChatInputQueue_QueuedPreviewLinesFollowPendingLines(t *testing.T) {
 	previews = queue.queuedPreviewLines(5)
 	if len(previews) != 1 || previews[0] != "second prompt" {
 		t.Fatalf("expected preview list to drop consumed line, got %#v", previews)
+	}
+}
+
+func TestChatInputQueue_SuspendRestorePreservesOrderDraftAndPreviewWithoutBlocking(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.lines = make(chan chatQueuedInput, 1)
+	queue.routeInputText("original queued\n")
+	queue.stageDraft("confirmed draft\n")
+	if !queue.confirmDraft() {
+		t.Fatal("expected first draft to become ready submission")
+	}
+	queue.stageDraft("still editing")
+
+	suspension := queue.suspendPendingInput()
+	if suspension.Count() != 3 {
+		t.Fatalf("expected queued, ready and draft inputs to be suspended, got %d", suspension.Count())
+	}
+	if queue.pendingCount() != 0 || queue.hasReadySubmission() || queue.hasDraft() {
+		t.Fatal("expected suspended input to be absent from active queue state")
+	}
+	if previews := queue.queuedPreviewLines(5); len(previews) != 0 {
+		t.Fatalf("expected active preview to be empty while suspended, got %#v", previews)
+	}
+
+	// Fill the channel again before restore. Restored items use queuedFront, so
+	// restoration must not block trying to write back into the full channel.
+	queue.routeInputText("queued during prompt\n")
+	restored := make(chan int, 1)
+	go func() { restored <- suspension.Restore() }()
+	select {
+	case count := <-restored:
+		if count != 3 {
+			t.Fatalf("expected three restored inputs, got %d", count)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restore blocked on a full queue channel")
+	}
+
+	previews := queue.queuedPreviewLines(5)
+	wantPreviews := []string{"confirmed draft", "original queued", "queued during prompt"}
+	if strings.Join(previews, "|") != strings.Join(wantPreviews, "|") {
+		t.Fatalf("unexpected restored preview order: got %#v want %#v", previews, wantPreviews)
+	}
+	for _, want := range wantPreviews {
+		line, ok := queue.readAvailableLine()
+		if !ok || normalizeQueuedInputLine(line) != want {
+			t.Fatalf("expected restored read %q, got %q ok=%v", want, line, ok)
+		}
+	}
+	if !queue.hasDraft() {
+		t.Fatal("expected unconfirmed draft to be restored after queued submissions")
+	}
+	if got := suspension.Restore(); got != 0 {
+		t.Fatalf("expected restore to be idempotent, got %d on second call", got)
+	}
+}
+
+func TestSuspendPendingInteractiveInputForPriorityPromptReportsAndRestoresQueue(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.routeInputText("follow up\n")
+	session := &ChatSession{InputQueue: queue}
+
+	suspension, notice := suspendPendingInteractiveInputForPriorityPrompt(session, "审批提示")
+	if suspension == nil || suspension.Count() != 1 {
+		t.Fatalf("expected one suspended input, got %#v", suspension)
+	}
+	if !strings.Contains(notice, "审批提示") || !strings.Contains(notice, "临时挂起") || strings.Contains(notice, "丢弃") {
+		t.Fatalf("unexpected suspension notice: %q", notice)
+	}
+	if queue.pendingCount() != 0 {
+		t.Fatalf("expected active queue to be empty during priority prompt, got %d", queue.pendingCount())
+	}
+
+	suspension.Restore()
+	line, ok := queue.readAvailableLine()
+	if !ok || normalizeQueuedInputLine(line) != "follow up" {
+		t.Fatalf("expected suspended follow-up to be restored, got %q ok=%v", line, ok)
+	}
+}
+
+func TestChatInteractiveReadPrioritySecretSuspendsAndRestoresOrdinaryInput(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setExternalInputCaptureActive(true)
+	queue.routeInputText("ordinary queued\n")
+	queue.stageDraft("ready submission")
+	if !queue.confirmDraft() {
+		t.Fatal("expected staged input to become a ready submission")
+	}
+	queue.stageDraft("unfinished draft")
+
+	session := &ChatSession{InputQueue: queue}
+	interaction := newChatInteractionCoordinator(session)
+	session.Interaction = interaction
+	result := make(chan string, 1)
+	errs := make(chan error, 1)
+	go func() {
+		line, err := chatInteractiveReadPrioritySecretWithPrompt(session, context.Background(), "Secret: ")
+		if err != nil {
+			errs <- err
+			return
+		}
+		result <- line
+	}()
+
+	requireEventuallyPriorityMode(t, queue)
+	if got := interaction.InputMode(); got != chatInputModeSecret {
+		t.Fatalf("expected secret input mode while prompt owns input, got %q", got)
+	}
+	if queue.pendingCount() != 0 || queue.hasReadySubmission() || queue.hasDraft() {
+		t.Fatal("ordinary queued, ready, and draft input must be suspended during secret capture")
+	}
+	queue.routeInputText("s3cr3t")
+
+	select {
+	case err := <-errs:
+		t.Fatalf("secret read failed: %v", err)
+	case line := <-result:
+		if line != "s3cr3t" {
+			t.Fatalf("unexpected secret answer %q", line)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for secret answer")
+	}
+	if got := interaction.InputMode(); got != chatInputModeChat {
+		t.Fatalf("expected secret input lease to restore chat mode, got %q", got)
+	}
+
+	for _, want := range []string{"ready submission", "ordinary queued"} {
+		line, ok := queue.readAvailableLine()
+		if !ok || normalizeQueuedInputLine(line) != want {
+			t.Fatalf("expected restored ordinary input %q, got %q ok=%v", want, line, ok)
+		}
+	}
+	queue.draftMu.RLock()
+	draftText, draftActive := queue.draftText, queue.draftActive
+	queue.draftMu.RUnlock()
+	if !draftActive || draftText != "unfinished draft" {
+		t.Fatalf("expected unfinished draft to be restored, active=%v text=%q", draftActive, draftText)
 	}
 }
 
@@ -615,6 +860,77 @@ func TestChatInputQueue_PriorityReadPublishesCapturePrompt(t *testing.T) {
 	}
 }
 
+func TestChatInputQueue_PriorityReadNeverConsumesReadySubmission(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setExternalInputCaptureActive(true)
+	queue.draftMu.Lock()
+	queue.readyText = "ordinary queued message\n"
+	queue.draftMu.Unlock()
+
+	result := make(chan string, 1)
+	go func() {
+		line, err := queue.readPriorityLineWithPrompt(context.Background(), "[approval] allow? ")
+		if err != nil {
+			result <- "error: " + err.Error()
+			return
+		}
+		result <- line
+	}()
+	requireEventuallyPriorityMode(t, queue)
+
+	select {
+	case line := <-result:
+		t.Fatalf("priority read consumed ordinary ready submission: %q", line)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	queue.routeLine(chatQueuedInput{Text: "y", Source: "test"})
+	select {
+	case line := <-result:
+		if line != "y" {
+			t.Fatalf("expected explicit priority answer, got %q", line)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for explicit priority answer")
+	}
+
+	line, ok := queue.readAvailableLine()
+	if !ok || normalizeQueuedInputLine(line) != "ordinary queued message" {
+		t.Fatalf("expected ordinary ready submission to remain queued, got %q ok=%v", line, ok)
+	}
+}
+
+func TestChatInputQueue_PriorityAnswerBypassesBusySlashCommandGate(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setCommandGate(func(string) bool { return false })
+	queue.setPriorityCapture(true, "[question] path: ")
+	defer queue.setPriorityCapture(false, "")
+
+	result := queue.routeInputText("/workspace/docs")
+	if result.Disposition != chatInputRoutePriority {
+		t.Fatalf("expected slash-prefixed answer to reach priority prompt, got %+v", result)
+	}
+	select {
+	case item := <-queue.priorityLines:
+		if item.Text != "/workspace/docs" {
+			t.Fatalf("unexpected priority answer: %q", item.Text)
+		}
+	default:
+		t.Fatal("expected slash-prefixed priority answer to be readable")
+	}
+}
+
+func requireEventuallyPriorityMode(t *testing.T, queue *chatInputQueue) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for !queue.isPriorityMode() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for priority mode")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestChatInteractiveReadPrioritySecretWithPrompt_UsesSecretInputBoxWithoutSharedReader(t *testing.T) {
 	restore := withTransientStdio(t, "secret-value\n")
 	defer restore()
@@ -647,8 +963,12 @@ func TestChatInteractiveReadPrioritySecretWithPrompt_UsesSecretInputBoxWithoutSh
 	if nextLine != "stale\n" {
 		t.Fatalf("expected shared reader input to remain untouched, got %q", nextLine)
 	}
-	if session.InputQueue.pendingCount() != 0 {
-		t.Fatalf("expected queued input to be discarded before secret prompt")
+	if session.InputQueue.pendingCount() != 1 {
+		t.Fatalf("expected queued input to be restored after secret prompt")
+	}
+	queued, ok := session.InputQueue.readAvailableLine()
+	if !ok || normalizeQueuedInputLine(queued) != "queued" {
+		t.Fatalf("expected original queued input to remain available, got %q ok=%v", queued, ok)
 	}
 }
 

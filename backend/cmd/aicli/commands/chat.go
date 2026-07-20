@@ -113,14 +113,19 @@ type ChatSession struct {
 	actorWarmup                     *chatActorWarmup
 	Interaction                     *chatInteractionCoordinator // unified interactive stdout/prompt coordinator
 	Surface                         *ui.FixedBottomSurface      // optional fixed-bottom terminal surface
+	TitleNotifier                   *chatTitleNotifier          // terminal window/tab title notification sink
+	SoundNotifier                   *chatSoundNotifier          // lightweight terminal bell notification sink
 	runtimeHTTPCapture              *chatRuntimeHTTPCapture     // recent runtime HTTP response diagnostics
 	localShellArtifactMu            sync.Mutex
 	localShellArtifactCounter       int
 	lastLocalShellArtifactPath      string
-	queuedInputDrain                bool     // suppress repeated queued-input notices while draining
-	queuedInputEchoed               bool     // queued input was already echoed in the fixed prompt while busy
-	lastInteractiveInputQueued      bool     // last chatInteractiveReadLine result came from InputQueue
-	ImagePaths                      []string // explicit local image attachments for current turn
+	turnRecoveryMu                  sync.Mutex
+	turnRecovery                    *chatTurnRecovery
+	priorityPromptMu                sync.Mutex // serializes modal prompts that own the priority input channel
+	queuedInputDrain                bool       // suppress repeated queued-input notices while draining
+	queuedInputEchoed               bool       // queued input was already echoed in the fixed prompt while busy
+	lastInteractiveInputQueued      bool       // last chatInteractiveReadLine result came from InputQueue
+	ImagePaths                      []string   // explicit local image attachments for current turn
 }
 
 type chatRuntimeHTTPCapture struct {
@@ -141,8 +146,21 @@ type chatRuntimeHTTPCapture struct {
 
 // Interrupt 中断当前操作
 func (s *ChatSession) Interrupt() {
+	s.interrupt(false)
+}
+
+// InterruptPreservePendingInput 中断当前 Agent 运行，但保留用户在运行期间
+// 已排队的后续消息。运行期 Esc 使用该语义；普通 Composer 取消仍使用 Interrupt。
+func (s *ChatSession) InterruptPreservePendingInput() {
+	s.interrupt(true)
+}
+
+func (s *ChatSession) interrupt(preservePendingInput bool) {
 	if s == nil {
 		return
+	}
+	if preservePendingInput && s.Interaction != nil {
+		s.Interaction.SetAgentStage(chatAgentStageStopping)
 	}
 	if s.cancelFunc != nil {
 		s.cancelFunc()
@@ -150,7 +168,9 @@ func (s *ChatSession) Interrupt() {
 	s.interruptLocalRuntimeWorkAsync()
 	// 中断语义是“取消当前输入/当前轮次”，因此需要同时清掉尚未提交的输入草稿
 	// 和已渲染但尚未重绘的 prompt 状态，避免下一轮仍被旧状态挡住。
-	_ = discardPendingInteractiveInput(s)
+	if !preservePendingInput {
+		_ = discardPendingInteractiveInput(s)
+	}
 	if s.Interaction != nil {
 		s.Interaction.ResetPromptState()
 	}
@@ -160,6 +180,9 @@ func (s *ChatSession) Interrupt() {
 // ResetInterrupt 重置中断状态
 func (s *ChatSession) ResetInterrupt() {
 	s.interrupted.Store(false)
+	if s.Interaction != nil && s.Interaction.AgentStage() == chatAgentStageStopping {
+		s.Interaction.ClearAgentStage()
+	}
 }
 
 // IsInterrupted 检查是否被中断
@@ -989,9 +1012,12 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		// 发送消息
 		response, err := sendMessage(session, input)
 		if err != nil {
+			interrupted := session.IsInterrupted()
+			rememberChatTurnRecovery(session, input, interrupted)
 			// 检查是否是用户中断
-			if session.IsInterrupted() {
+			if interrupted {
 				// 用户中断，直接继续到下一次循环（不打印错误）
+				renderChatTurnRecoveryHintForError(session, err)
 				continue
 			}
 			// 其他错误，打印错误信息
@@ -1003,6 +1029,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			} else {
 				ui.PrintError("操作错误: %v", err)
 			}
+			renderChatTurnRecoveryHintForError(session, err)
 			continue
 		}
 

@@ -41,6 +41,12 @@ type chatInteractionCoordinator struct {
 	promptAdvanceFn         func() bool
 	liveStreamFn            func() bool
 	waitingActive           bool
+	agentStage              chatAgentStage
+	agentStageDetail        string
+	inputMode               chatInputMode
+	inputModeBase           chatInputMode
+	inputLeaseSeq           uint64
+	inputLease              *chatInputModeLease
 
 	reasoningActive        bool
 	reasoningRendered      bool
@@ -51,6 +57,116 @@ type chatInteractionCoordinator struct {
 	lastCompletedAsyncLine bool
 	promptAfterBlockGap    bool
 	shutdown               bool
+}
+
+// chatAgentStage describes the agent-specific phase that is more precise than
+// the legacy Ready/Waiting/Thinking/Streaming activity flags.
+type chatAgentStage string
+
+// chatInputMode describes what the active prompt will do with the next input.
+// It is intentionally independent from the agent stage: configuration and
+// other local modals may own input while the agent itself is idle.
+type chatInputMode string
+
+// chatInputModeLease gives each modal prompt a distinct input owner. A lease
+// may be released out of order without changing the mode owned by a newer one.
+type chatInputModeLease struct {
+	generation uint64
+	mode       chatInputMode
+	previous   *chatInputModeLease
+	released   bool
+}
+
+const (
+	chatAgentStageIdle             chatAgentStage = ""
+	chatAgentStagePlanning         chatAgentStage = "planning"
+	chatAgentStageToolRunning      chatAgentStage = "tool_running"
+	chatAgentStageAwaitingApproval chatAgentStage = "awaiting_approval"
+	chatAgentStageAwaitingAnswer   chatAgentStage = "awaiting_answer"
+	chatAgentStageStopping         chatAgentStage = "stopping"
+	chatAgentStageCompleted        chatAgentStage = "completed"
+	chatAgentStageFailed           chatAgentStage = "failed"
+)
+
+const (
+	chatInputModeChat         chatInputMode = ""
+	chatInputModeApproval     chatInputMode = "approval_decision"
+	chatInputModeAnswer       chatInputMode = "question_answer"
+	chatInputModeSelection    chatInputMode = "selection"
+	chatInputModeConfirmation chatInputMode = "confirmation"
+	chatInputModeSecret       chatInputMode = "secret_input"
+	chatInputModePanel        chatInputMode = "panel_navigation"
+)
+
+func normalizeChatInputMode(mode chatInputMode) chatInputMode {
+	switch chatInputMode(strings.ToLower(strings.TrimSpace(string(mode)))) {
+	case chatInputModeApproval:
+		return chatInputModeApproval
+	case chatInputModeAnswer:
+		return chatInputModeAnswer
+	case chatInputModeSelection:
+		return chatInputModeSelection
+	case chatInputModeConfirmation:
+		return chatInputModeConfirmation
+	case chatInputModeSecret:
+		return chatInputModeSecret
+	case chatInputModePanel:
+		return chatInputModePanel
+	default:
+		return chatInputModeChat
+	}
+}
+
+func normalizeChatAgentStage(stage chatAgentStage) chatAgentStage {
+	switch chatAgentStage(strings.ToLower(strings.TrimSpace(string(stage)))) {
+	case chatAgentStagePlanning:
+		return chatAgentStagePlanning
+	case chatAgentStageToolRunning:
+		return chatAgentStageToolRunning
+	case chatAgentStageAwaitingApproval:
+		return chatAgentStageAwaitingApproval
+	case chatAgentStageAwaitingAnswer:
+		return chatAgentStageAwaitingAnswer
+	case chatAgentStageStopping:
+		return chatAgentStageStopping
+	case chatAgentStageCompleted:
+		return chatAgentStageCompleted
+	case chatAgentStageFailed:
+		return chatAgentStageFailed
+	default:
+		return chatAgentStageIdle
+	}
+}
+
+func chatAgentStageSurfaceLabel(stage chatAgentStage) string {
+	switch normalizeChatAgentStage(stage) {
+	case chatAgentStagePlanning:
+		return "Planning"
+	case chatAgentStageToolRunning:
+		return "Tool running"
+	case chatAgentStageAwaitingApproval:
+		return "Awaiting approval"
+	case chatAgentStageAwaitingAnswer:
+		return "Awaiting answer"
+	case chatAgentStageStopping:
+		return "Stopping"
+	case chatAgentStageCompleted:
+		return "Completed"
+	case chatAgentStageFailed:
+		return "Failed"
+	default:
+		return ""
+	}
+}
+
+func chatAgentStageIsTerminal(stage chatAgentStage) bool {
+	stage = normalizeChatAgentStage(stage)
+	return stage == chatAgentStageCompleted || stage == chatAgentStageFailed
+}
+
+func chatAgentStageBlocksReady(stage chatAgentStage) bool {
+	stage = normalizeChatAgentStage(stage)
+	return stage != chatAgentStageIdle && !chatAgentStageIsTerminal(stage)
 }
 
 func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordinator {
@@ -171,28 +287,118 @@ func promptDisplayText(session *ChatSession) string {
 }
 
 func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(state string) {
-	if c == nil || c.surface == nil || c.shutdown {
+	if c == nil || c.shutdown {
 		return
 	}
-	c.surface.SetStatusLine(buildChatSurfaceStatusLine(c.session, state))
-	c.surface.SetPromptNoticeLine(buildChatPromptNoticeLine(c.session))
+	if c.session != nil && c.session.TitleNotifier != nil {
+		c.session.TitleNotifier.SetBaseState(chatTitleStateForSurface(chatSurfaceTitleState(state)))
+	}
+	if c.surface != nil {
+		c.surface.SetStatusLine(buildChatSurfaceStatusLineForWidthAndInputMode(c.session, state, ui.GetTerminalWidth(), c.inputMode))
+		c.surface.SetPromptNoticeLine(buildChatPromptNoticeLineForWidth(c.session, state, ui.GetTerminalWidth()))
+	}
+}
+
+func chatSurfaceTitleState(state string) string {
+	normalized := strings.ToLower(strings.TrimSpace(state))
+	if strings.HasPrefix(normalized, "tool ") {
+		return "running"
+	}
+	switch normalized {
+	case "planning", "tool running", "stopping":
+		return "running"
+	case "awaiting approval", "awaiting answer":
+		return "waiting"
+	case "completed", "failed":
+		return "ready"
+	default:
+		return state
+	}
 }
 
 func buildChatPromptNoticeLine(session *ChatSession) string {
-	queuedCount, _ := queuedInteractiveInputState(session)
-	if queuedCount <= 0 {
+	return buildChatPromptNoticeLineForWidth(session, "Ready", ui.GetTerminalWidth())
+}
+
+func refreshChatComposerContext(session *ChatSession) {
+	if session != nil && session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
+}
+
+func buildChatPromptNoticeLineForWidth(session *ChatSession, state string, width int) string {
+	if session == nil {
 		return ""
 	}
-	value := "• Message to be submitted after next tool call"
-	lines := []string{value + " (press esc to interrupt and send immediately)"}
-	for _, preview := range queuedInteractiveInputPreviewLines(session, 5) {
-		preview = compactPromptNoticeMessagePreview(preview)
-		if preview == "" {
-			continue
+	if width <= 0 {
+		width = 80
+	}
+
+	queuedCount, _ := queuedInteractiveInputState(session)
+	lines := make([]string, 0, 3)
+	if queuedCount > 0 {
+		lines = append(lines, buildQueuedInputContextLine(queuedCount, width))
+	}
+	if len(session.ImagePaths) > 0 && !chatSurfaceStateIsRunning(state) {
+		lines = append(lines, buildAttachmentContextLine(session.ImagePaths, width))
+	}
+
+	previewLimit := 0
+	if queuedCount > 0 && width >= 64 {
+		previewLimit = 3 - len(lines)
+		if width < 100 && previewLimit > 1 {
+			previewLimit = 1
 		}
-		lines = append(lines, "  - "+preview)
+	}
+	if previewLimit > 0 {
+		for _, preview := range queuedInteractiveInputPreviewLines(session, previewLimit) {
+			if len(lines) >= 3 {
+				break
+			}
+			preview = compactPromptNoticeMessagePreviewForWidth(preview, width-4)
+			if preview != "" {
+				lines = append(lines, "  - "+preview)
+			}
+		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func buildQueuedInputContextLine(count int, width int) string {
+	candidates := []string{
+		fmt.Sprintf("• 队列 %d：当前运行结束后发送；Esc 中断并提前处理（就绪后 /queue 管理）", count),
+		fmt.Sprintf("• 队列 %d：运行后发送；Esc 可中断（就绪后 /queue）", count),
+		fmt.Sprintf("• 队列 %d（就绪后 /queue）", count),
+	}
+	return firstPromptContextCandidateThatFits(candidates, width)
+}
+
+func buildAttachmentContextLine(paths []string, width int) string {
+	count := len(paths)
+	compact := fmt.Sprintf("• 图片附件 %d（/attach）", count)
+	managed := fmt.Sprintf("• 待发送图片 %d（/attach 管理）", count)
+	prefix := fmt.Sprintf("• 待发送图片 %d：", count)
+	suffix := "（/attach remove N）"
+	nameBudget := width - ui.DisplayWidth(prefix) - ui.DisplayWidth(suffix)
+	detailed := ""
+	if nameBudget >= 8 {
+		detailed = prefix + compactAttachmentPathSummary(paths, nameBudget) + suffix
+	}
+	return firstPromptContextCandidateThatFits([]string{detailed, managed, compact}, width)
+}
+
+func firstPromptContextCandidateThatFits(candidates []string, width int) string {
+	for _, candidate := range candidates {
+		if candidate != "" && ui.DisplayWidth(candidate) <= width {
+			return candidate
+		}
+	}
+	for i := len(candidates) - 1; i >= 0; i-- {
+		if candidates[i] != "" {
+			return truncateStatusValue(candidates[i], width)
+		}
+	}
+	return ""
 }
 
 func queuedInteractiveInputPreviewLines(session *ChatSession, limit int) []string {
@@ -203,18 +409,52 @@ func queuedInteractiveInputPreviewLines(session *ChatSession, limit int) []strin
 }
 
 func compactPromptNoticeMessagePreview(text string) string {
+	return compactPromptNoticeMessagePreviewForWidth(text, 96)
+}
+
+func compactPromptNoticeMessagePreviewForWidth(text string, maxWidth int) string {
 	text = strings.TrimSpace(normalizeQueuedInputLine(text))
 	if text == "" {
 		return ""
 	}
 	text = strings.ReplaceAll(text, "\n", " / ")
 	text = strings.Join(strings.Fields(text), " ")
-	const maxRunes = 96
-	runes := []rune(text)
-	if len(runes) <= maxRunes {
-		return text
+	if maxWidth <= 0 {
+		return ""
 	}
-	return string(runes[:maxRunes-3]) + "..."
+	return truncateStatusValue(text, maxWidth)
+}
+
+func compactAttachmentPathSummary(paths []string, maxWidth int) string {
+	if len(paths) == 0 || maxWidth <= 0 {
+		return ""
+	}
+	detailCount := len(paths)
+	if detailCount > 3 {
+		detailCount = 3
+	}
+	names := make([]string, 0, detailCount)
+	for index, path := range paths[:detailCount] {
+		name := filepath.Base(filepath.Clean(strings.TrimSpace(path)))
+		if name == "" || name == "." || name == string(filepath.Separator) {
+			name = strings.TrimSpace(path)
+		}
+		if name == "" {
+			name = "image"
+		}
+		names = append(names, fmt.Sprintf("[%d] %s", index+1, name))
+	}
+
+	for visible := len(names); visible >= 1; visible-- {
+		summary := strings.Join(names[:visible], "、")
+		if visible < len(paths) {
+			summary += fmt.Sprintf("等%d个", len(paths))
+		}
+		if ui.DisplayWidth(summary) <= maxWidth {
+			return summary
+		}
+	}
+	return truncateStatusValue(names[0], maxWidth)
 }
 
 func (c *chatInteractionCoordinator) writeTextLocked(text string) {
@@ -289,6 +529,138 @@ func (c *chatInteractionCoordinator) RefreshStatus(state string) {
 	c.updateSurfaceStatusLocked(state)
 }
 
+// SetAgentStage switches the composer to an agent-specific run phase. Passing
+// chatAgentStageIdle restores the state derived from the legacy activity flags.
+func (c *chatInteractionCoordinator) SetAgentStage(stage chatAgentStage) {
+	c.SetAgentStageDetail(stage, "")
+}
+
+// SetAgentStageDetail also exposes the active operation, such as a tool name,
+// while keeping the stage itself available for narrow-terminal fallback.
+func (c *chatInteractionCoordinator) SetAgentStageDetail(stage chatAgentStage, detail string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
+	c.agentStage = normalizeChatAgentStage(stage)
+	c.agentStageDetail = compactStatusValue(strings.TrimSpace(detail), 48)
+	if c.agentStage == chatAgentStageIdle {
+		c.agentStageDetail = ""
+	}
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+}
+
+func (c *chatInteractionCoordinator) ClearAgentStage() {
+	c.SetAgentStage(chatAgentStageIdle)
+}
+
+func (c *chatInteractionCoordinator) AgentStage() chatAgentStage {
+	if c == nil {
+		return chatAgentStageIdle
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.agentStage
+}
+
+func (c *chatInteractionCoordinator) AgentStageDetail() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.agentStageDetail
+}
+
+// SetInputMode forcefully replaces the composer input contract. Any outstanding
+// modal leases are detached so their later cleanup cannot overwrite this mode.
+func (c *chatInteractionCoordinator) SetInputMode(mode chatInputMode) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown {
+		return
+	}
+	c.inputModeBase = normalizeChatInputMode(mode)
+	c.inputLease = nil
+	c.inputMode = c.inputModeBase
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+}
+
+func (c *chatInteractionCoordinator) acquireInputMode(mode chatInputMode) func() {
+	if c == nil {
+		return func() {}
+	}
+	mode = normalizeChatInputMode(mode)
+	c.mu.Lock()
+	if c.shutdown {
+		c.mu.Unlock()
+		return func() {}
+	}
+	c.inputLeaseSeq++
+	lease := &chatInputModeLease{
+		generation: c.inputLeaseSeq,
+		mode:       mode,
+		previous:   c.inputLease,
+	}
+	c.inputLease = lease
+	c.inputMode = mode
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	c.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.releaseInputMode(lease)
+		})
+	}
+}
+
+func (c *chatInteractionCoordinator) releaseInputMode(lease *chatInputModeLease) {
+	if c == nil || lease == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	lease.released = true
+	if c.inputLease != lease {
+		return
+	}
+	for c.inputLease != nil && c.inputLease.released {
+		c.inputLease = c.inputLease.previous
+	}
+	if c.inputLease != nil {
+		c.inputMode = c.inputLease.mode
+	} else {
+		c.inputMode = c.inputModeBase
+	}
+	if !c.shutdown {
+		c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	}
+}
+
+func (c *chatInteractionCoordinator) InputMode() chatInputMode {
+	if c == nil {
+		return chatInputModeChat
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inputMode
+}
+
+func pushChatComposerInputMode(session *ChatSession, mode chatInputMode) func() {
+	if session == nil || session.Interaction == nil {
+		return func() {}
+	}
+	return session.Interaction.acquireInputMode(mode)
+}
+
 func (c *chatInteractionCoordinator) StartWaiting() {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
 		return
@@ -319,6 +691,10 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 		c.surface.SetPromptInputState(formatSessionUserPrompt(c.session), c.promptInput, rows, cursorRow, cursorCol)
 	}
 	c.waitingActive = true
+	if chatAgentStageIsTerminal(c.agentStage) {
+		c.agentStage = chatAgentStageIdle
+		c.agentStageDetail = ""
+	}
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 }
 
@@ -345,10 +721,16 @@ func (c *chatInteractionCoordinator) IsReady() bool {
 }
 
 func (c *chatInteractionCoordinator) isReadyLocked() bool {
-	return c != nil && !c.shutdown && !c.waitingActive && !c.thinkingActive && !c.streamingActive && !c.reasoningActive
+	return c != nil && !c.shutdown && !c.waitingActive && !c.thinkingActive && !c.streamingActive && !c.reasoningActive && !chatAgentStageBlocksReady(c.agentStage)
 }
 
 func (c *chatInteractionCoordinator) currentSurfaceStateLocked() string {
+	if stage := chatAgentStageSurfaceLabel(c.agentStage); stage != "" {
+		if c.agentStage == chatAgentStageToolRunning && c.agentStageDetail != "" {
+			return "Tool " + c.agentStageDetail
+		}
+		return stage
+	}
 	if c.streamingActive {
 		return "Streaming"
 	}
@@ -362,55 +744,248 @@ func (c *chatInteractionCoordinator) currentSurfaceStateLocked() string {
 }
 
 func buildChatSurfaceStatusLine(session *ChatSession, state string) string {
+	return buildChatSurfaceStatusLineForWidth(session, state, ui.GetTerminalWidth())
+}
+
+type chatStatusSegment struct {
+	full    string
+	compact string
+}
+
+func buildChatSurfaceStatusLineForWidth(session *ChatSession, state string, width int) string {
+	return buildChatSurfaceStatusLineForWidthAndInputMode(session, state, width, chatInputModeForSurfaceState(state))
+}
+
+func buildChatSurfaceStatusLineForWidthAndInputMode(session *ChatSession, state string, width int, inputMode chatInputMode) string {
 	state = strings.TrimSpace(state)
 	if state == "" {
 		state = "Ready"
 	}
-
-	parts := make([]string, 0, 8)
-	parts = append(parts, state)
-
-	if session != nil {
-		if goalStatus := resolveChatStatusGoal(session); goalStatus != "" {
-			parts = append(parts, goalStatus)
-		}
-
-		if model := compactStatusValue(strings.TrimSpace(session.Model), 28); model != "" {
-			parts = append(parts, "model "+model)
-		}
-
-		reasoningEffort := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
-		if reasoningEffort == "" {
-			reasoningEffort = "-"
-		}
-		parts = append(parts, "reasoning_effort "+compactStatusValueOrDash(reasoningEffort, 12))
-		if !chatReasoningOutputEnabled(session) {
-			parts = append(parts, "reasoning off")
-		}
-
-		if budget := resolveSharedChatPromptBudget(session); budget.ActiveTurnMaxTokens > 0 || budget.ModelCapabilityMaxContextTokens > 0 || budget.ProviderContextLimit > 0 || session.ContextWindowTokenCount > 0 || session.ContextTokenCount > 0 || len(session.Messages) > 0 {
-			if ctxSummary := formatChatContextWindowSummary(session, budget); ctxSummary != "" {
-				parts = append(parts, "ctx "+ctxSummary)
-			}
-		}
-
-		if cwd := resolveChatStatusCurrentDirectory(session); cwd != "" {
-			parts = append(parts, "cwd "+cwd)
-		}
-
-		provider := strings.TrimSpace(session.ProviderName)
-		if provider == "" {
-			provider = strings.TrimSpace(session.Provider.GetProtocol())
-		}
-		if provider = compactStatusValue(provider, 20); provider != "" {
-			parts = append(parts, provider)
-		}
-		if messageCount := resolveChatStatusMessageCount(session); messageCount > 0 {
-			parts = append(parts, "msgs "+compactStatusCount(messageCount))
-		}
+	if width <= 0 {
+		width = 80
 	}
 
-	return strings.Join(parts, " | ")
+	queuedCount, _ := queuedInteractiveInputState(session)
+	primary := []chatStatusSegment{
+		{full: chatSurfaceStateDisplay(state), compact: compactChatSurfaceState(state)},
+		{full: "权限 " + chatPermissionModeDisplay(session), compact: "权限 " + compactChatPermissionMode(session)},
+		chatInputDestinationStatusSegment(inputMode, state, queuedCount),
+	}
+	if queuedCount > 0 {
+		primary = append(primary, chatStatusSegment{full: fmt.Sprintf("队列 %d", queuedCount), compact: fmt.Sprintf("队%d", queuedCount)})
+	}
+	parts := fitRequiredChatStatusSegments(primary, width)
+
+	for _, optional := range buildOptionalChatStatusSegments(session) {
+		candidate := append(append([]string(nil), parts...), optional)
+		if ui.DisplayWidth(strings.Join(candidate, " | ")) <= width {
+			parts = candidate
+		}
+	}
+	return truncateStatusValue(strings.Join(parts, " | "), width)
+}
+
+func fitRequiredChatStatusSegments(segments []chatStatusSegment, width int) []string {
+	parts := make([]string, len(segments))
+	for i, segment := range segments {
+		parts[i] = segment.compact
+		if parts[i] == "" {
+			parts[i] = segment.full
+		}
+	}
+	for i, segment := range segments {
+		if segment.full == "" || segment.full == parts[i] {
+			continue
+		}
+		candidate := append([]string(nil), parts...)
+		candidate[i] = segment.full
+		if ui.DisplayWidth(strings.Join(candidate, " | ")) <= width {
+			parts = candidate
+		}
+	}
+	return parts
+}
+
+func compactChatSurfaceState(state string) string {
+	normalized := strings.ToLower(strings.TrimSpace(state))
+	if strings.HasPrefix(normalized, "tool ") {
+		return "执行工具"
+	}
+	switch normalized {
+	case "ready":
+		return "就绪"
+	case "waiting":
+		return "等待"
+	case "thinking":
+		return "思考"
+	case "streaming":
+		return "输出中"
+	case "planning":
+		return "规划中"
+	case "tool running":
+		return "执行工具"
+	case "awaiting approval":
+		return "等待审批"
+	case "awaiting answer":
+		return "等待回答"
+	case "stopping":
+		return "停止中"
+	case "completed":
+		return "已完成"
+	case "failed":
+		return "失败"
+	default:
+		return compactStatusValue(state, 10)
+	}
+}
+
+func chatSurfaceStateDisplay(state string) string {
+	normalized := strings.ToLower(strings.TrimSpace(state))
+	if strings.HasPrefix(normalized, "tool ") {
+		return "执行工具 " + strings.TrimSpace(state[len("tool "):])
+	}
+	return compactChatSurfaceState(state)
+}
+
+func chatPermissionModeDisplay(session *ChatSession) string {
+	if session == nil {
+		return "默认"
+	}
+	switch strings.TrimSpace(string(session.PermissionMode)) {
+	case "accept_edits":
+		return "允许编辑"
+	case "plan":
+		return "计划"
+	case "bypass_permissions":
+		return "完全访问"
+	default:
+		return "默认"
+	}
+}
+
+func compactChatPermissionMode(session *ChatSession) string {
+	if session == nil {
+		return "默认"
+	}
+	switch strings.TrimSpace(string(session.PermissionMode)) {
+	case "accept_edits":
+		return "编辑"
+	case "plan":
+		return "计划"
+	case "bypass_permissions":
+		return "全开"
+	default:
+		return "默认"
+	}
+}
+
+func chatInputModeForSurfaceState(state string) chatInputMode {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "awaiting approval":
+		return chatInputModeApproval
+	case "awaiting answer":
+		return chatInputModeAnswer
+	default:
+		return chatInputModeChat
+	}
+}
+
+func chatInputDestinationStatusSegment(inputMode chatInputMode, state string, queuedCount int) chatStatusSegment {
+	switch normalizeChatInputMode(inputMode) {
+	case chatInputModeApproval:
+		return chatStatusSegment{full: "输入 审批决定", compact: "审批"}
+	case chatInputModeAnswer:
+		return chatStatusSegment{full: "输入 回答问题", compact: "回答"}
+	case chatInputModeSelection:
+		return chatStatusSegment{full: "输入 选择选项", compact: "选择"}
+	case chatInputModeConfirmation:
+		return chatStatusSegment{full: "输入 确认操作", compact: "确认"}
+	case chatInputModeSecret:
+		return chatStatusSegment{full: "输入 敏感信息", compact: "密钥"}
+	case chatInputModePanel:
+		return chatStatusSegment{full: "输入 面板导航", compact: "导航"}
+	}
+	if queuedCount > 0 || chatSurfaceStateIsRunning(state) {
+		return chatStatusSegment{full: "输入 当前运行后发送", compact: "稍后发"}
+	}
+	return chatStatusSegment{full: "输入 立即发送", compact: "立即发"}
+}
+
+func chatSurfaceStateIsRunning(state string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(state))
+	if strings.HasPrefix(normalized, "tool ") {
+		return true
+	}
+	switch normalized {
+	case "waiting", "thinking", "streaming", "planning", "tool running", "awaiting approval", "awaiting answer", "stopping", "retrying", "running", "working", "busy":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildOptionalChatStatusSegments(session *ChatSession) []string {
+	if session == nil {
+		return nil
+	}
+	parts := make([]string, 0, 4)
+	if cwd := compactChatStatusDirectory(resolveChatStatusCurrentDirectory(session)); cwd != "" {
+		parts = append(parts, "目录 "+cwd)
+	}
+	if model := compactStatusValue(strings.TrimSpace(session.Model), 20); model != "" {
+		parts = append(parts, "模型 "+model)
+	}
+	budget := resolveSharedChatPromptBudget(session)
+	if budget.ActiveTurnMaxTokens > 0 || budget.ModelCapabilityMaxContextTokens > 0 || budget.ProviderContextLimit > 0 || session.ContextWindowTokenCount > 0 || session.ContextTokenCount > 0 || len(session.Messages) > 0 {
+		if context := formatChatContextWindowCompactSummary(session, budget); context != "" {
+			parts = append(parts, "上下文 "+context)
+		}
+	}
+	if goalStatus := resolveChatStatusGoal(session); goalStatus != "" {
+		parts = append(parts, goalStatus)
+	}
+	return parts
+}
+
+func formatChatContextWindowCompactSummary(session *ChatSession, budget sharedChatPromptBudget) string {
+	totalWindow := budget.ModelCapabilityMaxContextTokens
+	if session != nil && session.ContextWindowTokenCount > 0 {
+		totalWindow = session.ContextWindowTokenCount
+	}
+	if totalWindow <= 0 && budget.ProviderContextLimit > 0 {
+		totalWindow = budget.ProviderContextLimit
+	}
+	if totalWindow <= 0 {
+		totalWindow = budget.ActiveTurnMaxTokens
+	}
+	usedTokens := resolveChatStatusContextUsedTokens(session)
+	if totalWindow <= 0 {
+		if usedTokens > 0 {
+			return compactStatusCount(usedTokens)
+		}
+		return ""
+	}
+	percent := 0
+	if usedTokens > 0 {
+		percent = int(math.Round(float64(usedTokens) * 100 / float64(totalWindow)))
+		if percent < 0 {
+			percent = 0
+		}
+	}
+	return fmt.Sprintf("%d%%", percent)
+}
+
+func compactChatStatusDirectory(cwd string) string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return ""
+	}
+	clean := filepath.Clean(cwd)
+	base := filepath.Base(clean)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return compactStatusValue(clean, 20)
+	}
+	return compactStatusValue(base, 20)
 }
 
 func resolveChatStatusGoal(session *ChatSession) string {
@@ -422,7 +997,22 @@ func resolveChatStatusGoal(session *ChatSession) string {
 	if status == "" {
 		return ""
 	}
-	return "goal " + status
+	return "目标 " + chatGoalStatusDisplay(status)
+}
+
+func chatGoalStatusDisplay(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "active":
+		return "进行中"
+	case "paused":
+		return "已暂停"
+	case "budget_limited":
+		return "预算受限"
+	case "complete":
+		return "已完成"
+	default:
+		return status
+	}
 }
 
 func resolveChatStatusCurrentDirectory(session *ChatSession) string {
@@ -588,6 +1178,10 @@ func (c *chatInteractionCoordinator) StartThinking() {
 		return
 	}
 	c.thinkingActive = true
+	if chatAgentStageIsTerminal(c.agentStage) {
+		c.agentStage = chatAgentStageIdle
+		c.agentStageDetail = ""
+	}
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 }
 
@@ -1122,6 +1716,18 @@ func (c *chatInteractionCoordinator) PromptCursorPrefix(rowOffset, col int) stri
 	return prefix
 }
 
+func (c *chatInteractionCoordinator) WritePromptEditorText(writer io.Writer, rowOffset, col int, text string) bool {
+	if c == nil || writer == nil || text == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.promptSurfaceActiveLocked() {
+		return false
+	}
+	return c.surface.WritePromptEditorText(writer, rowOffset, col, text)
+}
+
 func (c *chatInteractionCoordinator) DebugSummary() string {
 	if c == nil {
 		return ""
@@ -1152,7 +1758,12 @@ func (c *chatInteractionCoordinator) ResetRunState() {
 	c.completeBlockOutput = false
 	c.lastCompletedAsyncLine = false
 	c.promptAfterBlockGap = false
-	c.updateSurfaceStatusLocked("Ready")
+	c.agentStage = chatAgentStageIdle
+	c.agentStageDetail = ""
+	c.inputModeBase = chatInputModeChat
+	c.inputLease = nil
+	c.inputMode = chatInputModeChat
+	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
 }
 
 // Shutdown 停止所有后续 prompt 重绘和状态栏更新，供最终退出使用。
@@ -1173,6 +1784,11 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.promptRenderedOnSurface = false
 	c.promptPasteActive = false
 	c.waitingActive = false
+	c.agentStage = chatAgentStageIdle
+	c.agentStageDetail = ""
+	c.inputModeBase = chatInputModeChat
+	c.inputLease = nil
+	c.inputMode = chatInputModeChat
 	c.thinkingActive = false
 	c.streamingActive = false
 	c.reasoningActive = false
@@ -1395,11 +2011,7 @@ func interactivePromptDisplayRows(text string, termWidth int) int {
 		if width <= 0 {
 			continue
 		}
-		col += width
-		if col >= termWidth {
-			row += col / termWidth
-			col %= termWidth
-		}
+		row, col = advanceInteractivePromptPosition(row, col, width, termWidth)
 	}
 	return row + 1
 }
@@ -1410,6 +2022,9 @@ func interactivePromptCursorRow(promptText, input string, cursor int, termWidth 
 }
 
 func interactivePromptCursorPosition(promptText, input string, cursor int, termWidth int) (int, int) {
+	if termWidth <= 0 {
+		termWidth = 80
+	}
 	if cursor < 0 {
 		cursor = 0
 	}
@@ -1429,11 +2044,26 @@ func interactivePromptCursorPosition(promptText, input string, cursor int, termW
 		if width <= 0 {
 			continue
 		}
-		col += width
-		if col >= termWidth {
-			row += col / termWidth
-			col %= termWidth
-		}
+		row, col = advanceInteractivePromptPosition(row, col, width, termWidth)
+	}
+	return row, col
+}
+
+func advanceInteractivePromptPosition(row, col, runeWidth, termWidth int) (int, int) {
+	if runeWidth <= 0 {
+		return row, col
+	}
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+	if col > 0 && col+runeWidth > termWidth {
+		row++
+		col = 0
+	}
+	col += runeWidth
+	if col >= termWidth {
+		row += col / termWidth
+		col %= termWidth
 	}
 	return row, col
 }

@@ -61,6 +61,128 @@ func TestDecodeInteractiveKeyMarksLoneCarriageReturnEnter(t *testing.T) {
 	}
 }
 
+func TestDecodeInteractiveKey_ModifiedEnterAndCtrlOInsertNewline(t *testing.T) {
+	sequences := [][]byte{
+		[]byte("\x1b[13;2u"),
+		[]byte("\x1b[27;2;13~"),
+		{0x1b, '\r'},
+		{15},
+	}
+	for _, sequence := range sequences {
+		decoded, ok := decodeInteractiveKey(sequence)
+		if !ok || decoded.key.kind != editorKeyInsertNewline {
+			t.Fatalf("expected modified enter for %q, got key=%#v ok=%t", sequence, decoded.key, ok)
+		}
+	}
+}
+
+func TestReadInteractiveLine_ModifiedEnterBuildsMultilineDraft(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("first\x1b[13;2usecond\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		&LineEditorHooks{MaxVisibleRows: ChatComposerMaxVisibleRows},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "first\nsecond" {
+		t.Fatalf("expected multiline draft, got %q", line)
+	}
+}
+
+func TestReadInteractiveLine_ResolvesVisibleRowsDuringEditing(t *testing.T) {
+	var output bytes.Buffer
+	resolved := 0
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("one\x1b[13;2utwo\x1b[13;2uthree\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		&LineEditorHooks{
+			MaxVisibleRows: 6,
+			ResolveMaxVisibleRows: func() int {
+				resolved++
+				return 2
+			},
+		},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "one\ntwo\nthree" {
+		t.Fatalf("expected multiline draft, got %q", line)
+	}
+	if resolved < 2 {
+		t.Fatalf("expected visible-row resolver to run throughout editing, calls=%d", resolved)
+	}
+}
+
+func TestReadInteractiveLine_UsesAtomicTerminalWriteHook(t *testing.T) {
+	var output bytes.Buffer
+	handled := 0
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("draft\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		&LineEditorHooks{
+			OnBeforeTerminalWrite: func(LineEditorSnapshot, LineEditorRenderSnapshot) string {
+				t.Fatal("expected atomic writer to bypass cursor-prefix fallback")
+				return ""
+			},
+			OnTerminalWrite: func(_ LineEditorSnapshot, _ LineEditorRenderSnapshot, writer io.Writer, text string) bool {
+				if writer != &output || text == "" {
+					t.Fatalf("unexpected atomic write writer=%T text=%q", writer, text)
+				}
+				handled++
+				return true
+			},
+		},
+		false,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "draft" || handled == 0 || output.Len() != 0 {
+		t.Fatalf("expected all editor writes to use the atomic hook, line=%q handled=%d output=%q", line, handled, output.String())
+	}
+}
+
+func TestReadInteractiveLine_UpMovesInsideMultilineDraftBeforeHistory(t *testing.T) {
+	var output bytes.Buffer
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("\x1b[AX\n"),
+		&output,
+		UserPromptText(0),
+		[]string{"history"},
+		nil,
+		&LineEditorHooks{
+			InitialText:    "first\nsecond",
+			InitialCursor:  len([]rune("first\nsecond")),
+			MaxVisibleRows: ChatComposerMaxVisibleRows,
+		},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	if line != "firstX\nsecond" {
+		t.Fatalf("expected Up to edit the previous draft line, got %q", line)
+	}
+}
+
 func TestDecodeInteractiveKey_CtrlVRequestsClipboardPaste(t *testing.T) {
 	decoded, ok := decodeInteractiveKey([]byte{22})
 	if !ok {
@@ -518,6 +640,49 @@ func TestReadInteractiveLine_HandlesBracketedPasteAsAtomicMultiLineInput(t *test
 	}
 }
 
+func TestInteractiveInputViewportFollowsCursorWithinBoundedHeight(t *testing.T) {
+	line := []rune("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight")
+	viewport := calculateInteractiveInputViewport(
+		line,
+		len(line),
+		DisplayWidth(UserPromptText(0)),
+		80,
+		ChatComposerMaxVisibleRows,
+		0,
+	)
+	if viewport.total != 8 || viewport.rows != ChatComposerMaxVisibleRows {
+		t.Fatalf("unexpected viewport dimensions: %#v", viewport)
+	}
+	if viewport.startRow != 2 || viewport.cursor.row != 5 {
+		t.Fatalf("expected cursor-following viewport rows 2..7, got %#v", viewport)
+	}
+	rendered := renderInteractiveInputViewport(UserPromptText(0), line, 80, viewport.startRow, viewport.rows)
+	if strings.Contains(rendered, "one") || !strings.HasPrefix(rendered, "three\r\nfour") || !strings.HasSuffix(rendered, "eight") {
+		t.Fatalf("unexpected viewport rendering %q", rendered)
+	}
+}
+
+func TestInteractiveInputCursorAtVisualRowPreservesColumn(t *testing.T) {
+	line := []rune("short\nconsiderably longer")
+	cursor, ok := interactiveInputCursorAtVisualRow(line, DisplayWidth(UserPromptText(0)), 80, 0, 12)
+	if !ok || cursor != len([]rune("short")) {
+		t.Fatalf("expected nearest cursor at end of short first line, cursor=%d ok=%t", cursor, ok)
+	}
+}
+
+func TestInteractiveInputViewportKeepsWideRuneWrapAndCursorAligned(t *testing.T) {
+	prompt := ">>>"
+	line := []rune("你a")
+	position := interactiveInputVisualPosition(line, len(line), DisplayWidth(prompt), 4)
+	rows := interactiveInputVisualRows(prompt, line, 4)
+	if position.row != 1 || position.col != 3 {
+		t.Fatalf("expected wide rune to wrap before the last narrow column, got %#v", position)
+	}
+	if len(rows) != position.row+1 || rows[0] != prompt || rows[1] != "你a" {
+		t.Fatalf("expected rendered rows to match cursor wrapping, rows=%q position=%#v", rows, position)
+	}
+}
+
 func TestReadInteractiveLine_CtrlVInsertsClipboardText(t *testing.T) {
 	oldClipboard := readInteractiveClipboardText
 	readInteractiveClipboardText = func() (string, error) {
@@ -734,7 +899,7 @@ func TestReadInteractiveLine_LargeBracketedPasteUsesPlaceholderButSubmitsFullTex
 	}
 
 	rendered := output.String()
-	if !strings.Contains(rendered, "[Pasted Content 1001 chars]") {
+	if !strings.Contains(rendered, "[已粘贴 1001 字符 / 1 行]") {
 		t.Fatalf("expected visible placeholder for large paste, got %q", rendered)
 	}
 	if strings.Contains(rendered, large) {
@@ -745,7 +910,7 @@ func TestReadInteractiveLine_LargeBracketedPasteUsesPlaceholderButSubmitsFullTex
 func TestReadInteractiveLine_LargePastePlaceholderTracksThroughTypedPrefix(t *testing.T) {
 	var output bytes.Buffer
 	large := strings.Repeat("a", LargePasteCharThreshold+1)
-	placeholder := "[Pasted Content 1001 chars]"
+	placeholder := "[已粘贴 1001 字符 / 1 行]"
 	input := "\x1b[200~" + large + "\x1b[201~\x01" + placeholder + " \n"
 
 	line, err := readInteractiveLine(

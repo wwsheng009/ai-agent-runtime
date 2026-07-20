@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -135,6 +137,71 @@ func TestChatInteractionCoordinator_WaitingStateBlocksCommandInput(t *testing.T)
 	}
 	if !chatInputCommandAllowed(session, "/help") {
 		t.Fatal("expected slash commands to be accepted after ready")
+	}
+}
+
+func TestChatInteractionCoordinator_AgentStageOverridesLegacyThinkingState(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+
+	coord.StartThinking()
+	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell_command")
+	if got := coord.currentSurfaceStateForTest(); got != "Tool shell_command" {
+		t.Fatalf("expected tool-running stage, got %q", got)
+	}
+	if got := coord.AgentStage(); got != chatAgentStageToolRunning {
+		t.Fatalf("expected stored agent stage, got %q", got)
+	}
+	if got := coord.AgentStageDetail(); got != "shell_command" {
+		t.Fatalf("expected stored stage detail, got %q", got)
+	}
+	if coord.IsReady() {
+		t.Fatal("expected an active agent stage to block Ready")
+	}
+
+	coord.ClearAgentStage()
+	if got := coord.currentSurfaceStateForTest(); got != "Thinking" {
+		t.Fatalf("expected legacy thinking state after clearing stage, got %q", got)
+	}
+}
+
+func TestChatInteractionCoordinator_AgentStageLabels(t *testing.T) {
+	tests := []struct {
+		stage chatAgentStage
+		want  string
+	}{
+		{chatAgentStagePlanning, "Planning"},
+		{chatAgentStageToolRunning, "Tool running"},
+		{chatAgentStageAwaitingApproval, "Awaiting approval"},
+		{chatAgentStageAwaitingAnswer, "Awaiting answer"},
+		{chatAgentStageStopping, "Stopping"},
+		{chatAgentStageCompleted, "Completed"},
+		{chatAgentStageFailed, "Failed"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.stage), func(t *testing.T) {
+			coord := newChatInteractionCoordinator(&ChatSession{})
+			coord.SetAgentStage(tt.stage)
+			if got := coord.currentSurfaceStateForTest(); got != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestChatInteractionCoordinator_AgentStagePrecedesStreamingState(t *testing.T) {
+	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord.mu.Lock()
+	coord.streamingActive = true
+	coord.mu.Unlock()
+
+	coord.SetAgentStage(chatAgentStageAwaitingApproval)
+	if got := coord.currentSurfaceStateForTest(); got != "Awaiting approval" {
+		t.Fatalf("expected action-required stage to override streaming, got %q", got)
+	}
+	coord.ClearAgentStage()
+	if got := coord.currentSurfaceStateForTest(); got != "Streaming" {
+		t.Fatalf("expected streaming state after clearing explicit stage, got %q", got)
 	}
 }
 
@@ -343,6 +410,19 @@ func TestInteractivePromptCursorRowUsesSnapshotCursor(t *testing.T) {
 	}
 	if got := interactivePromptCursorRow(prompt, input, len([]rune(input)), termWidth); got != 2 {
 		t.Fatalf("expected cursor at wrapped input end to be on third row, got %d", got)
+	}
+}
+
+func TestInteractivePromptPositionPreWrapsWideRuneAtRightEdge(t *testing.T) {
+	prompt := ">>>"
+	input := "你a"
+
+	row, col := interactivePromptCursorPosition(prompt, input, len([]rune(input)), 4)
+	if row != 1 || col != 3 {
+		t.Fatalf("expected wide rune to pre-wrap before the last narrow column, row=%d col=%d", row, col)
+	}
+	if rows := interactivePromptDisplayRows(prompt+input, 4); rows != 2 {
+		t.Fatalf("expected prompt and wide input to occupy two rows, got %d", rows)
 	}
 }
 
@@ -1417,7 +1497,7 @@ func TestChatInteractionCoordinator_ClearPromptAdvancesLineForBufferedWriters(t 
 	}
 }
 
-func TestBuildChatSurfaceStatusLine_IncludesReasoningEffortContextAndCurrentDirectory(t *testing.T) {
+func TestBuildChatSurfaceStatusLine_PrioritizesAgentContextOverDiagnostics(t *testing.T) {
 	previousWD, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("os.Getwd: %v", err)
@@ -1451,32 +1531,174 @@ func TestBuildChatSurfaceStatusLine_IncludesReasoningEffortContextAndCurrentDire
 		},
 	}
 
-	status := buildChatSurfaceStatusLine(session, "Thinking")
+	status := buildChatSurfaceStatusLineForWidth(session, "Thinking", 120)
 
 	for _, want := range []string{
-		"Thinking",
-		"model gpt-5.4-code",
-		"reasoning_effort " + runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort),
-		"ctx 128000 used 28640 22%",
-		"openai",
-		"msgs 17",
+		"思考",
+		"权限 默认",
+		"输入 当前运行后发送",
+		"模型 gpt-5.4-code",
+		"上下文 22%",
+		"目录 epsilon",
 	} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("expected status line to contain %q, got %q", want, status)
 		}
 	}
-	if strings.Contains(status, "tokens ") {
-		t.Fatalf("expected status line to omit duplicate tokens field, got %q", status)
+	for _, unwanted := range []string{"reasoning_effort", "openai", "msgs 17", filepath.Clean(nested)} {
+		if strings.Contains(status, unwanted) {
+			t.Fatalf("expected status line to omit low-priority diagnostic %q, got %q", unwanted, status)
+		}
 	}
-	if strings.Contains(status, "4096") {
-		t.Fatalf("expected ctx used to avoid small output-limit fallback, got %q", status)
+}
+
+func TestBuildChatSurfaceStatusLine_RespectsWidthAndKeepsRequiredState(t *testing.T) {
+	queue := newChatInputQueue(nil)
+	queue.routeLine(chatQueuedInput{Text: "first\n", Source: "stdin"})
+	queue.routeLine(chatQueuedInput{Text: "second\n", Source: "stdin"})
+	session := &ChatSession{
+		PermissionMode:    runtimepolicy.ModeBypassPermissions,
+		InputQueue:        queue,
+		Model:             "gpt-5.4-code",
+		ContextTokenCount: 28640,
+		Provider: config.Provider{ModelCapabilities: map[string]config.ModelCapabilitySpec{
+			"gpt-5.4-code": {MaxContextTokens: 128000},
+		}},
 	}
-	wantCwd := filepath.Clean(nested)
-	if !strings.Contains(status, "cwd "+wantCwd) {
-		t.Fatalf("expected cwd to keep full absolute path %q, got %q", wantCwd, status)
+
+	for _, width := range []int{40, 80, 120} {
+		t.Run(strconv.Itoa(width), func(t *testing.T) {
+			status := buildChatSurfaceStatusLineForWidth(session, "Awaiting approval", width)
+			if got := ui.DisplayWidth(status); got > width {
+				t.Fatalf("status width %d exceeds budget %d: %q", got, width, status)
+			}
+			for _, want := range []string{"等待审批", "权限", "审批", "2"} {
+				if !strings.Contains(strings.ToLower(status), strings.ToLower(want)) {
+					t.Fatalf("expected required status %q at width %d, got %q", want, width, status)
+				}
+			}
+		})
 	}
-	if strings.Contains(status, "...") {
-		t.Fatalf("expected cwd to avoid ellipsis shortening, got %q", status)
+}
+
+func TestBuildChatSurfaceStatusLine_ShowsPermissionAndInputDestination(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       runtimepolicy.Mode
+		state      string
+		permission string
+		input      string
+	}{
+		{name: "default ready", mode: runtimepolicy.ModeDefault, state: "Ready", permission: "权限 默认", input: "输入 立即发送"},
+		{name: "accept edits planning", mode: runtimepolicy.ModeAcceptEdits, state: "Planning", permission: "权限 允许编辑", input: "输入 当前运行后发送"},
+		{name: "plan awaiting answer", mode: runtimepolicy.ModePlan, state: "Awaiting answer", permission: "权限 计划", input: "输入 回答问题"},
+		{name: "full access tool", mode: runtimepolicy.ModeBypassPermissions, state: "Tool running", permission: "权限 完全访问", input: "输入 当前运行后发送"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := buildChatSurfaceStatusLineForWidth(&ChatSession{PermissionMode: tt.mode}, tt.state, 120)
+			for _, want := range []string{chatSurfaceStateDisplay(tt.state), tt.permission, tt.input} {
+				if !strings.Contains(status, want) {
+					t.Fatalf("expected %q in status, got %q", want, status)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_ExplicitModalInputModeOverridesAgentState(t *testing.T) {
+	status := buildChatSurfaceStatusLineForWidthAndInputMode(
+		&ChatSession{PermissionMode: runtimepolicy.ModeDefault},
+		"Ready",
+		120,
+		chatInputModeSelection,
+	)
+	if !strings.Contains(status, "输入 选择选项") {
+		t.Fatalf("expected selection input destination, got %q", status)
+	}
+	if strings.Contains(status, "立即发送") {
+		t.Fatalf("selection modal must not advertise chat submission, got %q", status)
+	}
+}
+
+func TestPushChatComposerInputMode_SameModeLeaseReleaseCannotOverwriteNewOwner(t *testing.T) {
+	session := &ChatSession{}
+	interaction := newChatInteractionCoordinator(session)
+	session.Interaction = interaction
+
+	releaseOlder := pushChatComposerInputMode(session, chatInputModeSelection)
+	olderGeneration := interaction.inputLease.generation
+	releaseNewer := pushChatComposerInputMode(session, chatInputModeSelection)
+	newerGeneration := interaction.inputLease.generation
+	if newerGeneration <= olderGeneration {
+		t.Fatalf("expected unique increasing lease generations, older=%d newer=%d", olderGeneration, newerGeneration)
+	}
+
+	releaseOlder()
+	if got := interaction.InputMode(); got != chatInputModeSelection {
+		t.Fatalf("older release must not overwrite newer same-mode lease, got %q", got)
+	}
+	releaseNewer()
+	if got := interaction.InputMode(); got != chatInputModeChat {
+		t.Fatalf("expected input mode to return to chat after both releases, got %q", got)
+	}
+
+	// Cleanup closures are deliberately idempotent.
+	releaseOlder()
+	releaseNewer()
+	if got := interaction.InputMode(); got != chatInputModeChat {
+		t.Fatalf("duplicate release changed input mode to %q", got)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_ShowsConfirmationInputDestination(t *testing.T) {
+	status := buildChatSurfaceStatusLineForWidthAndInputMode(
+		&ChatSession{PermissionMode: runtimepolicy.ModeDefault},
+		"Ready",
+		120,
+		chatInputModeConfirmation,
+	)
+	if !strings.Contains(status, "输入 确认操作") {
+		t.Fatalf("expected confirmation input destination, got %q", status)
+	}
+	if strings.Contains(status, "立即发送") {
+		t.Fatalf("confirmation prompt must not advertise chat submission, got %q", status)
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_LocalizesAgentStates(t *testing.T) {
+	tests := map[string]string{
+		"Ready":             "就绪",
+		"Waiting":           "等待",
+		"Thinking":          "思考",
+		"Streaming":         "输出中",
+		"Planning":          "规划中",
+		"Tool running":      "执行工具",
+		"Awaiting approval": "等待审批",
+		"Awaiting answer":   "等待回答",
+		"Stopping":          "停止中",
+		"Completed":         "已完成",
+		"Failed":            "失败",
+	}
+	for state, want := range tests {
+		t.Run(state, func(t *testing.T) {
+			status := buildChatSurfaceStatusLineForWidth(&ChatSession{}, state, 120)
+			if !strings.Contains(status, want) {
+				t.Fatalf("expected localized state %q, got %q", want, status)
+			}
+		})
+	}
+}
+
+func TestBuildChatSurfaceStatusLine_ToolDetailDegradesAtNarrowWidth(t *testing.T) {
+	session := &ChatSession{PermissionMode: runtimepolicy.ModeDefault}
+	wide := buildChatSurfaceStatusLineForWidth(session, "Tool shell_command", 120)
+	if !strings.Contains(wide, "执行工具 shell_command") {
+		t.Fatalf("expected wide status to include tool detail, got %q", wide)
+	}
+	narrow := buildChatSurfaceStatusLineForWidth(session, "Tool shell_command", 40)
+	if !strings.Contains(narrow, "执行工具") || strings.Contains(narrow, "shell_command") {
+		t.Fatalf("expected narrow status to keep stage and omit tool detail, got %q", narrow)
 	}
 }
 
@@ -1485,8 +1707,8 @@ func TestBuildChatSurfaceStatusLine_IncludesContextWindowWhenOnlyWindowIsKnown(t
 		ContextWindowTokenCount: 128000,
 	}
 
-	status := buildChatSurfaceStatusLine(session, "Ready")
-	if !strings.Contains(status, "ctx 128000 used 0 0%") {
+	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 80)
+	if !strings.Contains(status, "上下文 0%") {
 		t.Fatalf("expected status line to include context window summary, got %q", status)
 	}
 	if strings.Contains(status, "Thinking") {
@@ -1494,18 +1716,15 @@ func TestBuildChatSurfaceStatusLine_IncludesContextWindowWhenOnlyWindowIsKnown(t
 	}
 }
 
-func TestBuildChatSurfaceStatusLine_UsesLiveStatusMessageCount(t *testing.T) {
+func TestBuildChatSurfaceStatusLine_OmitsMessageCountFromComposer(t *testing.T) {
 	session := &ChatSession{
 		MsgCount:           2,
 		StatusMessageCount: 37,
 	}
 
-	status := buildChatSurfaceStatusLine(session, "Ready")
-	if !strings.Contains(status, "msgs 37") {
-		t.Fatalf("expected status line to use live context message count, got %q", status)
-	}
-	if strings.Contains(status, "msgs 2") {
-		t.Fatalf("expected status line not to fall back to turn count when live count exists, got %q", status)
+	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 120)
+	if strings.Contains(status, "msgs ") {
+		t.Fatalf("expected message count to stay in /status diagnostics, got %q", status)
 	}
 }
 
@@ -1517,8 +1736,8 @@ func TestBuildChatPromptNoticeLine_IncludesQueuedInputState(t *testing.T) {
 		queuedInputDrain: true,
 	}
 
-	notice := buildChatPromptNoticeLine(session)
-	if !strings.Contains(notice, "• Message to be submitted after next tool call (press esc to interrupt and send immediately)") {
+	notice := buildChatPromptNoticeLineForWidth(session, "Thinking", 80)
+	if !strings.Contains(notice, "队列 1") || !strings.Contains(notice, "就绪后 /queue") {
 		t.Fatalf("expected prompt notice to include queued input state, got %q", notice)
 	}
 	if !strings.Contains(notice, "  - queued") {
@@ -1533,12 +1752,120 @@ func TestBuildChatPromptNoticeLine_IncludesReadySubmissionPreview(t *testing.T) 
 		InputQueue: queue,
 	}
 
-	notice := buildChatPromptNoticeLine(session)
-	if !strings.Contains(notice, "• Message to be submitted after next tool call (press esc to interrupt and send immediately)") {
+	notice := buildChatPromptNoticeLineForWidth(session, "Thinking", 80)
+	if !strings.Contains(notice, "队列 1") || !strings.Contains(notice, "就绪后 /queue") {
 		t.Fatalf("expected prompt notice to include ready submission state, got %q", notice)
 	}
 	if !strings.Contains(notice, "  - confirmed draft") {
 		t.Fatalf("expected prompt notice to include ready submission preview, got %q", notice)
+	}
+}
+
+func TestBuildChatPromptNoticeLine_QueueWidthMatrix(t *testing.T) {
+	queue := newChatInputQueue(nil)
+	queue.routeLine(chatQueuedInput{Text: strings.Repeat("很长的排队消息", 12) + "\n", Source: "stdin"})
+	queue.routeLine(chatQueuedInput{Text: "second queued message\n", Source: "stdin"})
+	session := &ChatSession{InputQueue: queue, queuedInputDrain: true}
+
+	for _, width := range []int{40, 80, 120} {
+		t.Run(strconv.Itoa(width), func(t *testing.T) {
+			notice := buildChatPromptNoticeLineForWidth(session, "Thinking", width)
+			lines := strings.Split(notice, "\n")
+			if len(lines) > 3 {
+				t.Fatalf("expected bounded composer context rows, got %d: %q", len(lines), notice)
+			}
+			for _, line := range lines {
+				if got := ui.DisplayWidth(line); got > width {
+					t.Fatalf("notice width %d exceeds budget %d: %q", got, width, line)
+				}
+			}
+			if !strings.Contains(lines[0], "队列 2") || !strings.Contains(lines[0], "/queue") {
+				t.Fatalf("expected queue count and deferred management entry, got %q", notice)
+			}
+			if strings.Contains(lines[0], "/queue clear") {
+				t.Fatalf("did not expect busy composer to advertise unavailable queue clear, got %q", notice)
+			}
+			if width == 40 && len(lines) != 1 {
+				t.Fatalf("expected narrow queue context to suppress previews, got %q", notice)
+			}
+		})
+	}
+}
+
+func TestBuildChatPromptNoticeLine_AttachmentWidthMatrix(t *testing.T) {
+	session := &ChatSession{ImagePaths: []string{
+		filepath.Join("very", "deep", "directory", "product-dashboard-reference-image.png"),
+		filepath.Join("another", "long", "directory", "error-state.png"),
+	}}
+
+	for _, width := range []int{40, 80, 120} {
+		t.Run(strconv.Itoa(width), func(t *testing.T) {
+			notice := buildChatPromptNoticeLineForWidth(session, "Ready", width)
+			if got := ui.DisplayWidth(notice); got > width {
+				t.Fatalf("attachment context width %d exceeds budget %d: %q", got, width, notice)
+			}
+			if !strings.Contains(notice, "图片") || !strings.Contains(notice, "2") || !strings.Contains(notice, "/attach") {
+				t.Fatalf("expected attachment count and management entry, got %q", notice)
+			}
+			if width == 120 && (!strings.Contains(notice, "product-dashboard-reference-image.png") || !strings.Contains(notice, "remove N")) {
+				t.Fatalf("expected wide context to expose attachment identity and removal action, got %q", notice)
+			}
+		})
+	}
+}
+
+func TestBuildChatPromptNoticeLine_PrioritizesQueueAndCapsCombinedRows(t *testing.T) {
+	queue := newChatInputQueue(nil)
+	queue.routeLine(chatQueuedInput{Text: "queued follow-up\n", Source: "stdin"})
+	session := &ChatSession{
+		InputQueue: queue,
+		ImagePaths: []string{filepath.Join("images", "reference.png")},
+	}
+
+	notice := buildChatPromptNoticeLineForWidth(session, "Ready", 120)
+	lines := strings.Split(notice, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected queue, attachment and one preview row, got %q", notice)
+	}
+	if !strings.Contains(lines[0], "队列 1") || !strings.Contains(lines[1], "图片 1") {
+		t.Fatalf("expected deterministic queue-first context priority, got %q", notice)
+	}
+	if !strings.Contains(lines[2], "queued follow-up") {
+		t.Fatalf("expected remaining row budget to show one queue preview, got %q", notice)
+	}
+
+	running := buildChatPromptNoticeLineForWidth(session, "Planning", 120)
+	if strings.Contains(running, "图片") {
+		t.Fatalf("expected in-flight attachments to stay out of pending composer context, got %q", running)
+	}
+}
+
+func TestFinishSuccessfulChatSendClearsAndRefreshesAttachmentContext(t *testing.T) {
+	notifier := &chatTitleNotifier{
+		snapshot: chatTitleSnapshot{baseState: chatTitleIdle},
+		wake:     make(chan struct{}, 1),
+	}
+	session := &ChatSession{
+		ImagePaths:    []string{filepath.Join("images", "reference.png")},
+		TitleNotifier: notifier,
+	}
+	coord := newChatInteractionCoordinator(session)
+	coord.agentStage = chatAgentStagePlanning
+	session.Interaction = coord
+
+	if before := buildChatPromptNoticeLineForWidth(session, "Ready", 80); !strings.Contains(before, "图片 1") {
+		t.Fatalf("expected pending attachment context before successful send, got %q", before)
+	}
+	finishSuccessfulChatSend(session, "", true)
+
+	if len(session.ImagePaths) != 0 {
+		t.Fatalf("expected successful send to clear attachments, got %#v", session.ImagePaths)
+	}
+	if after := buildChatPromptNoticeLineForWidth(session, "Ready", 80); after != "" {
+		t.Fatalf("expected attachment context to clear after successful send, got %q", after)
+	}
+	if state := notifier.currentSnapshot().baseState; state != chatTitleRunning {
+		t.Fatalf("expected successful send to refresh the composer coordinator, title state=%v", state)
 	}
 }
 
@@ -1554,15 +1881,15 @@ func TestBuildChatSurfaceStatusLine_IncludesGoalStatusWhenSet(t *testing.T) {
 	}
 
 	session := &ChatSession{RuntimeSession: runtimeSession}
-	status := buildChatSurfaceStatusLine(session, "Ready")
-	if !strings.Contains(status, "goal paused") {
+	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 120)
+	if !strings.Contains(status, "目标 已暂停") {
 		t.Fatalf("expected status line to include goal status, got %q", status)
 	}
 }
 
 func TestBuildChatSurfaceStatusLine_OmitsGoalStatusWhenUnset(t *testing.T) {
 	status := buildChatSurfaceStatusLine(&ChatSession{RuntimeSession: runtimechat.NewSession("test-user")}, "Ready")
-	if strings.Contains(status, "goal ") {
+	if strings.Contains(status, "目标 ") {
 		t.Fatalf("expected status line to omit missing goal, got %q", status)
 	}
 }
@@ -1574,7 +1901,7 @@ func TestBuildChatSurfaceStatusLine_FallsBackToDefaultContextWindowWhenNoCapabil
 	}
 
 	status := buildChatSurfaceStatusLine(session, "Ready")
-	if !strings.Contains(status, "ctx 256000 used 28640 11%") {
+	if !strings.Contains(status, "上下文 11%") {
 		t.Fatalf("expected default context window summary, got %q", status)
 	}
 	if strings.Contains(status, "8000") {
@@ -1603,8 +1930,9 @@ func TestBuildChatSurfaceStatusLine_UsesZeroWhenCountersAreMissing(t *testing.T)
 
 	status := buildChatSurfaceStatusLine(session, "Ready")
 	wantUsed := countChatContextTokensForMessages(session, messages)
-	if !strings.Contains(status, fmt.Sprintf("ctx 128000 used %d", wantUsed)) {
-		t.Fatalf("expected status line to fall back to history context estimate %d, got %q", wantUsed, status)
+	wantPercent := int(math.Round(float64(wantUsed) * 100 / 128000))
+	if !strings.Contains(status, fmt.Sprintf("上下文 %d%%", wantPercent)) {
+		t.Fatalf("expected status line to fall back to history context estimate %d%%, got %q", wantPercent, status)
 	}
 }
 

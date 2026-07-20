@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -254,6 +255,46 @@ func TestFixedBottomSurface_ShowPopupBelowPromptExpandsDownward(t *testing.T) {
 	}
 }
 
+func TestFixedBottomSurface_BeginOutputDoesNotRepeatPopupScrollCompensation(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPrompt("> ")
+		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{"one", "two"}, "command_popup")
+		surface.ClearPopupForOwnerPreserveCursor("command_popup")
+	})
+
+	output := captureUIStdout(t, func() {
+		// Slash-command dispatch positions the cursor before it knows whether
+		// the command will write output or open another transient popup.
+		surface.BeginOutput()
+		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{"one", "two"}, "command_popup")
+	})
+
+	if strings.Contains(output, "\n\n") || strings.Contains(output, "\x1b[22;1H\n\n") {
+		t.Fatalf("expected cursor positioning alone not to repeat popup scroll compensation, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_ActualOutputInvalidatesPopupScrollCompensation(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPrompt("> ")
+		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{"one", "two"}, "command_popup")
+		surface.ClearPopupForOwnerPreserveCursor("command_popup")
+		if _, err, handled := surface.WriteOutput(os.Stdout, "new output\n"); !handled || err != nil {
+			t.Fatalf("expected actual output to be written, handled=%t err=%v", handled, err)
+		}
+	})
+
+	output := captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwnerBelowPrompt([]string{"one", "two"}, "command_popup")
+	})
+
+	if !strings.Contains(output, "\x1b[22;1H\n\n") {
+		t.Fatalf("expected actual output to require fresh popup scroll compensation, got %q", output)
+	}
+}
+
 func TestFixedBottomSurface_TrackPromptInputStateDoesNotRedraw(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true
@@ -320,6 +361,128 @@ func TestFixedBottomSurface_TrackPromptInputStateRedrawsWhenRowsChange(t *testin
 	}
 }
 
+func TestFixedBottomSurface_BoundsMultilinePromptAndFollowsCursor(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		if !surface.ShowPrompt("> ") {
+			t.Fatal("expected enabled surface to show prompt")
+		}
+	})
+
+	input := "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight"
+	output := captureUIStdout(t, func() {
+		if !surface.TrackPromptInputState("> ", input, 8, 7, len("eight")) {
+			t.Fatal("expected enabled surface to track multiline input")
+		}
+	})
+
+	if surface.promptReservedRows != ChatComposerMaxVisibleRows || surface.promptViewportStart != 2 {
+		t.Fatalf("expected bounded viewport, rows=%d start=%d", surface.promptReservedRows, surface.promptViewportStart)
+	}
+	if strings.Contains(output, "> one") || !strings.Contains(output, "three\r\nfour") {
+		t.Fatalf("expected only the cursor-adjacent viewport to render, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[23;6H"+cursorShowSequence) {
+		t.Fatalf("expected cursor on the final visible row, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_PromptInputMaxVisibleRowsReservesSmallTerminalContext(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	surface.terminal.height = 10
+	surface.promptNoticeLine = "queue\nattachments\npreview"
+
+	if got := surface.PromptInputMaxVisibleRows(); got != 4 {
+		t.Fatalf("expected four editor rows after context reservation, got %d", got)
+	}
+
+	surface.terminal.height = 5
+	surface.promptNoticeLine = "queue"
+	if got := surface.PromptInputMaxVisibleRows(); got != 1 {
+		t.Fatalf("expected one editor row in a minimal terminal, got %d", got)
+	}
+}
+
+func TestFixedBottomSurface_SetPromptStateUsesDynamicVisibleRowBudget(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	surface.terminal.height = 10
+	surface.setPromptStateLocked("> ", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight", 8, 7, len("eight"))
+	if surface.promptReservedRows != 6 || surface.promptViewportStart != 2 {
+		t.Fatalf("expected initial six-row viewport, rows=%d start=%d", surface.promptReservedRows, surface.promptViewportStart)
+	}
+
+	surface.promptNoticeLine = "queue\nattachments\npreview"
+	surface.reflowPromptViewportLocked()
+
+	if surface.promptReservedRows != 4 || surface.promptViewportStart != 4 {
+		t.Fatalf(
+			"expected dynamic four-row viewport following the cursor, rows=%d start=%d",
+			surface.promptReservedRows,
+			surface.promptViewportStart,
+		)
+	}
+
+	surface.terminal.height = 5
+	surface.promptNoticeLine = "queue"
+	surface.reflowPromptViewportLocked()
+	if surface.promptReservedRows != 1 || surface.promptViewportStart != 7 {
+		t.Fatalf(
+			"expected minimal viewport to retain the cursor row, rows=%d start=%d",
+			surface.promptReservedRows,
+			surface.promptViewportStart,
+		)
+	}
+}
+
+func TestFixedBottomSurface_RendersCursorAdjacentRowsWithinSmallTerminal(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	surface.terminal.height = 10
+	surface.promptNoticeLine = "queue\nattachments\npreview"
+	surface.promptEditorStatusLine = "multiline 8/8"
+	surface.setPromptStateLocked("> ", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight", 8, 7, len("eight"))
+
+	output := captureUIStdout(t, func() {
+		surface.renderPromptRowsLocked(true)
+		surface.restoreStoredPromptCursorLocked()
+	})
+
+	if strings.Contains(output, "> one") || !strings.Contains(output, "five\r\nsix") || !strings.Contains(output, "eight") {
+		t.Fatalf("expected cursor-adjacent rows in the bounded viewport, got %q", output)
+	}
+	if strings.Contains(output, "\x1b[10;") {
+		t.Fatalf("expected prompt rendering to leave the status row untouched, got %q", output)
+	}
+	if !strings.HasSuffix(output, "\x1b[9;6H") {
+		t.Fatalf("expected cursor on the final prompt row, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_EditorStatusDoesNotReplaceRuntimeNotice(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPrompt("> ")
+		surface.SetPromptNoticeLine("已排队 1 条消息")
+	})
+	output := captureUIStdout(t, func() {
+		surface.SetPromptEditorStatusLine("多行 2/3 · Enter 发送")
+	})
+	if !strings.Contains(output, "已排队 1 条消息") || !strings.Contains(output, "多行 2/3") {
+		t.Fatalf("expected runtime notice and editor status to coexist, got %q", output)
+	}
+}
+
 func TestFixedBottomSurface_SetPromptInputStateRestoresPromptCursorWithoutPopup(t *testing.T) {
 	oldNoColor := color.NoColor
 	color.NoColor = true
@@ -346,6 +509,25 @@ func TestFixedBottomSurface_SetPromptInputStateRestoresPromptCursorWithoutPopup(
 	}
 	if !strings.HasSuffix(output, "\x1b[23;3H"+cursorShowSequence) {
 		t.Fatalf("expected cursor to return after prompt marker, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_WritePromptEditorTextUsesAtomicCursorSequence(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	surface.promptLine = "> "
+	surface.promptReservedRows = 1
+	surface.promptCursorCol = 2
+	surface.lastWidth = 80
+	surface.lastHeight = 24
+	surface.lastBottomRows = 2
+
+	var output bytes.Buffer
+	if !surface.WritePromptEditorText(&output, 0, 2, "draft") {
+		t.Fatal("expected enabled surface to handle the editor write")
+	}
+	got := output.String()
+	if !strings.HasPrefix(got, cursorHideSequence) || !strings.Contains(got, "\x1b[23;3Hdraft") || !strings.HasSuffix(got, cursorShowSequence) {
+		t.Fatalf("expected one cursor-positioned atomic sequence, got %q", got)
 	}
 }
 
@@ -598,6 +780,169 @@ func TestFixedBottomSurface_OwnerPopupRestoresPreviousPanel(t *testing.T) {
 	}
 	if !strings.Contains(output, "Agent Control Panel:") {
 		t.Fatalf("expected restored panel to render, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_OwnedPopupInputRestoresBackgroundPanel(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwner([]string{
+			"Agent Control Panel:",
+			"  selected=/root/worker",
+		}, "agent_panel")
+		surface.ShowPopupInputForOwner([]string{
+			"选择模型",
+			"  [1] gpt-5",
+		}, "请输入选项: ", "modal:selection")
+	})
+
+	if surface.popupOwner != "modal:selection" || surface.composerLine != "请输入选项: " {
+		t.Fatalf("expected owned modal input to be active, owner=%q composer=%q", surface.popupOwner, surface.composerLine)
+	}
+
+	output := captureUIStdout(t, func() {
+		surface.ClearPopupForOwnerPreserveCursor("modal:selection")
+	})
+	if surface.popupOwner != "agent_panel" || surface.composerLine != "" {
+		t.Fatalf("expected background panel restore, owner=%q composer=%q", surface.popupOwner, surface.composerLine)
+	}
+	if !strings.Contains(output, "Agent Control Panel:") {
+		t.Fatalf("expected restored background panel to render, got %q", output)
+	}
+}
+
+func TestFixedBottomSurface_DelayedOwnedModalCleanupKeepsNewPopup(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwner([]string{"Agent Control Panel:"}, "agent_panel")
+		surface.ShowPopupInputForOwner([]string{"选择模型"}, "model> ", "modal:selection")
+		surface.ShowPopupInputForOwner([]string{"需要审批"}, "approval> ", "modal:priority:approval")
+	})
+
+	output := captureUIStdout(t, func() {
+		surface.ClearPopupForOwnerPreserveCursor("modal:selection")
+	})
+	if output != "" {
+		t.Fatalf("expected delayed cleanup of suspended modal to avoid redraw, got %q", output)
+	}
+	if surface.popupOwner != "modal:priority:approval" || surface.composerLine != "approval> " {
+		t.Fatalf("expected newer priority popup to remain active, owner=%q composer=%q", surface.popupOwner, surface.composerLine)
+	}
+
+	captureUIStdout(t, func() {
+		surface.ClearPopupForOwnerPreserveCursor("modal:priority:approval")
+	})
+	if surface.popupOwner != "agent_panel" {
+		t.Fatalf("expected cleanup to restore background directly, owner=%q stack=%#v", surface.popupOwner, surface.popupStack)
+	}
+}
+
+func TestFixedBottomSurface_PopupHandleCleanupKeepsNewSameOwnerInstance(t *testing.T) {
+	oldNoColor := color.NoColor
+	color.NoColor = true
+	defer func() { color.NoColor = oldNoColor }()
+
+	surface := newTestFixedBottomSurface()
+	var first, second PopupHandle
+	captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwner([]string{"Agent Control Panel:"}, "agent_panel")
+		first = surface.BeginPopupInputForOwner([]string{"选择模型 A"}, "model-a> ", "modal:selection")
+		second = surface.BeginPopupInputForOwner([]string{"选择模型 B"}, "model-b> ", "modal:selection")
+	})
+
+	if !first.Valid() || !second.Valid() || first.instance == second.instance {
+		t.Fatalf("expected distinct valid popup handles, first=%#v second=%#v", first, second)
+	}
+	captureUIStdout(t, func() {
+		surface.ClearPopupHandlePreserveCursor(first)
+	})
+	if surface.popupInstance != second.instance || surface.composerLine != "model-b> " {
+		t.Fatalf("expected second instance to remain active, instance=%d composer=%q", surface.popupInstance, surface.composerLine)
+	}
+
+	captureUIStdout(t, func() {
+		surface.ClearPopupHandlePreserveCursor(second)
+	})
+	if surface.popupOwner != "agent_panel" {
+		t.Fatalf("expected background panel to be restored, owner=%q stack=%#v", surface.popupOwner, surface.popupStack)
+	}
+}
+
+func TestFixedBottomSurface_PopupHandleNewestCleanupRestoresPreviousInstance(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	var first, second PopupHandle
+	captureUIStdout(t, func() {
+		surface.ShowPopupPreserveCursorForOwner([]string{"background"}, "agent_panel")
+		first = surface.BeginPopupInputForOwner([]string{"first"}, "first> ", "modal:selection")
+		second = surface.BeginPopupInputForOwner([]string{"second"}, "second> ", "modal:selection")
+		surface.ClearPopupHandlePreserveCursor(second)
+	})
+	if surface.popupInstance != first.instance || surface.composerLine != "first> " {
+		t.Fatalf("expected first instance restore, instance=%d composer=%q", surface.popupInstance, surface.composerLine)
+	}
+	captureUIStdout(t, func() {
+		surface.ClearPopupHandlePreserveCursor(second)
+		surface.ClearPopupHandlePreserveCursor(first)
+		surface.ClearPopupHandlePreserveCursor(first)
+	})
+	if surface.popupOwner != "agent_panel" {
+		t.Fatalf("expected idempotent cleanup to preserve background, owner=%q", surface.popupOwner)
+	}
+}
+
+func TestFixedBottomSurface_LegacySameOwnerUpdateInvalidatesOldHandle(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	var handle PopupHandle
+	captureUIStdout(t, func() {
+		handle = surface.BeginPopupInputForOwner([]string{"handle"}, "handle> ", "modal:selection")
+		surface.ShowPopupInputForOwner([]string{"legacy-new"}, "legacy> ", "modal:selection")
+		surface.ClearPopupHandlePreserveCursor(handle)
+	})
+	if surface.popupInstance != 0 || surface.composerLine != "legacy> " || strings.Join(surface.popupLines, "") != "legacy-new" {
+		t.Fatalf("expected stale handle cleanup to keep legacy content, instance=%d composer=%q lines=%#v", surface.popupInstance, surface.composerLine, surface.popupLines)
+	}
+}
+
+func TestFixedBottomSurface_PopupHandleViewportSurvivesUpdateAndStackRestore(t *testing.T) {
+	surface := newTestFixedBottomSurface()
+	viewport := PopupViewportSpec{
+		HeaderLines: []string{"header"},
+		BodyLines:   []string{"reason", "risk=high", "command"},
+		FooterLines: []string{"warning"},
+		Anchor:      1,
+	}
+	var first, second PopupHandle
+	captureUIStdout(t, func() {
+		first = surface.BeginPopupInputForOwnerWithViewport(
+			[]string{"header", "reason", "risk=high", "command", "warning"},
+			"approve> ",
+			"modal:priority:approval",
+			viewport,
+		)
+		second = surface.BeginPopupInputForOwner([]string{"second"}, "second> ", "modal:priority:approval")
+		if surface.UpdatePopupInputForHandle(first, []string{"header", "reason updated", "risk=high", "command", "warning"}, "approve> ", true) {
+			t.Fatal("expected hidden handle update not to become active")
+		}
+		surface.ClearPopupHandlePreserveCursor(second)
+	})
+	if surface.popupInstance != first.instance || surface.popupViewport == nil {
+		t.Fatalf("expected viewport instance restore, instance=%d viewport=%#v", surface.popupInstance, surface.popupViewport)
+	}
+	visible := surface.bottomPaneStateLocked().VisiblePopupLines(6)
+	if got := strings.Join(visible, "\n"); got != "header\nrisk=high\nwarning" {
+		t.Fatalf("expected restored semantic viewport, got %q", got)
+	}
+	viewport.HeaderLines[0] = "mutated caller"
+	if surface.popupViewport.HeaderLines[0] != "header" {
+		t.Fatalf("expected viewport input to be copied, got %#v", surface.popupViewport)
 	}
 }
 
@@ -1136,6 +1481,97 @@ func TestFixedBottomSurface_ClearPromptRowsClearsOnlyPopupInputGap(t *testing.T)
 	}
 	if !strings.HasSuffix(output, "\x1b[20;1H") {
 		t.Fatalf("expected cursor to return to popup-adjusted output bottom row, got %q", output)
+	}
+}
+
+func TestBottomPaneSelectionViewportKeepsSlashSelectionVisible(t *testing.T) {
+	state := BottomPaneState{
+		PopupOwner: "slash_completion",
+		PopupLines: []string{
+			"  /agents  查看 agents",
+			"  /clear   清空会话",
+			"> /model   切换模型",
+			"  /resume  恢复会话",
+			"方向键选择，Enter 确认",
+		},
+	}
+
+	visible := state.VisiblePopupLines(4)
+	if len(visible) != 1 || !strings.Contains(visible[0], "> /model") {
+		t.Fatalf("expected the selected slash command to remain visible, got %#v", visible)
+	}
+}
+
+func TestBottomPaneSelectionViewportKeepsCurrentOptionVisible(t *testing.T) {
+	state := BottomPaneState{
+		PopupOwner: "modal:selection",
+		PopupLines: []string{
+			"选择模型",
+			"当前模型: gpt-5",
+			"  [1] gpt-4.1",
+			"  [2] gpt-4.1-mini",
+			"  [3] gpt-5  (当前)",
+			"  [4] o3",
+			"提示: 输入编号，回车保持当前",
+		},
+	}
+
+	visible := state.VisiblePopupLines(6)
+	rendered := strings.Join(visible, "\n")
+	for _, want := range []string{"选择模型", "[3] gpt-5", "提示: 输入编号"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected viewport to contain %q, got %#v", want, visible)
+		}
+	}
+}
+
+func TestBottomPaneSelectionViewportKeepsValidationVisible(t *testing.T) {
+	state := BottomPaneState{
+		PopupOwner: "modal:selection",
+		PopupLines: []string{
+			"选择模型",
+			"当前模型: gpt-5",
+			"无效的选择，请重新输入",
+			"  [1] gpt-4.1",
+			"  [2] gpt-5  (当前)",
+			"  [3] o3",
+			"提示: 输入编号",
+		},
+	}
+
+	visible := state.VisiblePopupLines(6)
+	rendered := strings.Join(visible, "\n")
+	for _, want := range []string{"选择模型", "无效的选择", "[2] gpt-5"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected validation viewport to contain %q, got %#v", want, visible)
+		}
+	}
+}
+
+func TestBottomPaneSemanticViewportKeepsPriorityPromptContextInSixRows(t *testing.T) {
+	state := BottomPaneState{
+		PopupLines: []string{
+			"审批 | tool=shell",
+			"reason=needs access",
+			"risk=high",
+			"command=git status",
+			"invalid choice",
+		},
+		PopupViewport: &PopupViewportSpec{
+			HeaderLines: []string{"审批 | tool=shell"},
+			BodyLines:   []string{"reason=needs access", "risk=high", "command=git status"},
+			FooterLines: []string{"invalid choice"},
+			Anchor:      1,
+		},
+		ComposerLine: "请选择 [1] 允许 [2] 拒绝: ",
+	}
+
+	visible := state.VisiblePopupLines(6)
+	if got, want := strings.Join(visible, "\n"), "审批 | tool=shell\nrisk=high\ninvalid choice"; got != want {
+		t.Fatalf("expected semantic priority viewport %q, got %q", want, got)
+	}
+	if state.ComposerLine != "请选择 [1] 允许 [2] 拒绝: " {
+		t.Fatalf("expected operation footer to remain in composer, got %q", state.ComposerLine)
 	}
 }
 

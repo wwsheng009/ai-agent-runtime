@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -71,10 +72,15 @@ func (c *chatComposerController) ReadLine() (string, error) {
 }
 
 func (c *chatComposerController) Close() {
-	if c == nil || c.completion == nil {
+	if c == nil {
 		return
 	}
-	c.completion.Clear()
+	if c.completion != nil {
+		c.completion.Clear()
+	}
+	if c.session != nil && c.session.Surface != nil {
+		c.session.Surface.SetPromptEditorStatusLine("")
+	}
 }
 
 func (c *chatComposerController) hooks() ui.LineEditorHooks {
@@ -83,6 +89,9 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		InitialCursor:         c.initial.Cursor,
 		OnChange:              c.onChange,
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
+		OnTerminalWrite:       c.onTerminalWrite,
+		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
+		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
 	}
 	if c.completion != nil {
 		hooks.OnComplete = c.onComplete
@@ -91,6 +100,13 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		hooks.OnCancelPopup = c.onCancelPopup
 	}
 	return hooks
+}
+
+func chatComposerMaxVisibleRows(session *ChatSession) int {
+	if session == nil || session.Surface == nil {
+		return ui.ChatComposerMaxVisibleRows
+	}
+	return session.Surface.PromptInputMaxVisibleRows()
 }
 
 func (c *chatComposerController) onChange(snapshot ui.LineEditorSnapshot) {
@@ -107,6 +123,35 @@ func (c *chatComposerController) onChange(snapshot ui.LineEditorSnapshot) {
 	if c.completion != nil {
 		c.completion.UpdateSnapshot(snapshot)
 	}
+	if c.session.Surface != nil {
+		c.session.Surface.SetPromptEditorStatusLine(formatChatComposerEditorStatus(snapshot))
+	}
+}
+
+func formatChatComposerEditorStatus(snapshot ui.LineEditorSnapshot) string {
+	if snapshot.LogicalLines <= 1 && snapshot.DisplayRows <= 1 {
+		return ""
+	}
+	line := snapshot.LogicalLine
+	lines := snapshot.LogicalLines
+	if line < 1 {
+		line = 1
+	}
+	if lines < line {
+		lines = line
+	}
+	status := ""
+	if lines > 1 {
+		status = fmt.Sprintf("多行 %d/%d", line, lines)
+	} else {
+		status = fmt.Sprintf("自动换行 · 显示 %d 行", snapshot.DisplayRows)
+	}
+	if snapshot.ViewportRows > 0 && snapshot.DisplayRows > snapshot.ViewportRows {
+		start := snapshot.ViewportStart + 1
+		end := snapshot.ViewportStart + snapshot.ViewportRows
+		status += fmt.Sprintf(" · 视图 %d-%d/%d", start, end, snapshot.DisplayRows)
+	}
+	return status
 }
 
 func (c *chatComposerController) onBeforeTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
@@ -114,6 +159,13 @@ func (c *chatComposerController) onBeforeTerminalWrite(_ ui.LineEditorSnapshot, 
 		return ""
 	}
 	return c.session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
+}
+
+func (c *chatComposerController) onTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot, writer io.Writer, text string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorText(writer, render.LastCursorRow, render.LastCursorCol, text)
 }
 
 func (c *chatComposerController) onComplete(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
@@ -195,7 +247,10 @@ func (c *chatBusyComposerCapture) hooks() ui.LineEditorHooks {
 	return ui.LineEditorHooks{
 		OnChange:              c.onChange,
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
+		OnTerminalWrite:       c.onTerminalWrite,
 		OnCancel:              c.onCancel,
+		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
+		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
 	}
 }
 
@@ -222,6 +277,13 @@ func (c *chatBusyComposerCapture) onBeforeTerminalWrite(_ ui.LineEditorSnapshot,
 		return ""
 	}
 	return c.session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
+}
+
+func (c *chatBusyComposerCapture) onTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot, writer io.Writer, text string) bool {
+	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorText(writer, render.LastCursorRow, render.LastCursorCol, text)
 }
 
 func (c *chatBusyComposerCapture) onCancel(ui.LineEditorSnapshot) bool {
@@ -315,6 +377,8 @@ func (c *chatSecretComposerPrompt) ReadLine() (string, error) {
 	if c == nil || c.session == nil || c.session.InputBox == nil {
 		return "", io.EOF
 	}
+	restoreInputMode := pushChatComposerInputMode(c.session, chatInputModeSecret)
+	defer restoreInputMode()
 	resetChatComposerPromptInput(c.session)
 	line, err := c.session.InputBox.ReadTransientSecretPrompt(c.prompt)
 	if err == nil {
@@ -382,7 +446,6 @@ func (c *chatAgentPanelComposer) onCancel(ui.LineEditorSnapshot) bool {
 
 func normalizeChatAgentPanelComposerReadError(session *ChatSession, err error) error {
 	if errors.Is(err, ui.ErrInteractiveInputInterrupted) || errors.Is(err, ui.ErrInteractiveInputExitRequested) {
-		interruptChatComposerSession(session)
 		resetChatComposerPrompt(session)
 		return io.EOF
 	}

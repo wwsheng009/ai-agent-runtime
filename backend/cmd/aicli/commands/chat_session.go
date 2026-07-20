@@ -163,6 +163,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	restoredRuntimeSession.History = session.Messages
 	restoredRuntimeSession.HistoryLoaded = runtimeSession.HistoryLoaded
 	session.RuntimeSession = restoredRuntimeSession
+	clearChatTurnRecovery(session)
 	if !strings.EqualFold(strings.TrimSpace(previousSessionID), strings.TrimSpace(runtimeSession.ID)) {
 		resetStableSharedToolSurface(session)
 	}
@@ -173,6 +174,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	restoreChatRuntimeContext(session, session.RuntimeSession)
 	restoreChatContextTokenUsage(session, session.RuntimeSession)
 	restoreChatTokenCount(session, session.RuntimeSession)
+	refreshChatTitleMetadata(session)
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
@@ -200,11 +202,13 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	session.turnPrimed = false
 	resetChatConversationTokenUsage(session)
 	session.RuntimeSession = runtimeSession
+	clearChatTurnRecovery(session)
 	resetStableSharedToolSurface(session)
 	ensureChatSystemPromptMessage(session)
 	if err := syncRuntimeSessionFromChat(session); err != nil {
 		return err
 	}
+	refreshChatTitleMetadata(session)
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}

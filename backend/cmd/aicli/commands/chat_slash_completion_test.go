@@ -283,8 +283,8 @@ func TestRenderSlashCommandCompletionPopup(t *testing.T) {
 
 	state := buildSlashCompletionState("/s", len([]rune("/s")), -1)
 	lines := renderSlashCommandCompletionPopup(state, 36)
-	if len(lines) != 6 {
-		t.Fatalf("expected 6 rendered lines, got %d: %#v", len(lines), lines)
+	if len(lines) != 7 {
+		t.Fatalf("expected 7 rendered lines, got %d: %#v", len(lines), lines)
 	}
 	if strings.HasPrefix(lines[0], "命令补全") {
 		t.Fatalf("expected command completion title line to be omitted, got %q", lines[0])
@@ -292,8 +292,8 @@ func TestRenderSlashCommandCompletionPopup(t *testing.T) {
 	if !strings.HasPrefix(lines[0], "> /s") {
 		t.Fatalf("expected selected exact command on the first line, got %q", lines[0])
 	}
-	if strings.Contains(strings.Join(lines, "\n"), "提示: ↑↓") {
-		t.Fatalf("expected slash usage hint line to be omitted, got %#v", lines)
+	if !strings.Contains(strings.Join(lines, "\n"), "↑↓ 选择") {
+		t.Fatalf("expected slash usage hint line, got %#v", lines)
 	}
 	for i, line := range lines {
 		if ui.DisplayWidth(line) > 36 {
@@ -357,6 +357,7 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/compact", forms: []string{"/compact"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/attach", forms: []string{"/attach"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/image", forms: []string{"/image"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/retry", forms: []string{"/retry"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/queue", forms: []string{"/queue"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/permission-mode", forms: []string{"/permission-mode", "/mode"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/approval-reuse", forms: []string{"/approval-reuse"}, acceptsArgs: true, requiresArgs: false},
@@ -672,6 +673,31 @@ func TestChatSlashArgumentCompletionAttach(t *testing.T) {
 	}
 }
 
+func TestChatSlashArgumentCompletionApprovalReuseStatusAndClear(t *testing.T) {
+	t.Parallel()
+
+	controller := newChatSlashCompletionController(&ChatSession{})
+	controller.UpdateAt("/approval-reuse ", len([]rune("/approval-reuse ")))
+	if !controller.state.Active || !controller.state.Context.InArguments {
+		t.Fatalf("expected approval-reuse args popup to be active, got %#v", controller.state)
+	}
+	for _, command := range []string{"status", "clear", "off", "session_readonly_shell", "team_readonly_shell"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected approval-reuse candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/approval-reuse st", len([]rune("/approval-reuse st")))
+	if len(controller.state.Candidates) != 1 || controller.state.Candidates[0].Command != "status" {
+		t.Fatalf("expected status prefix to narrow the popup, got %#v", controller.state.Candidates)
+	}
+
+	controller.UpdateAt("/approval-reuse cl", len([]rune("/approval-reuse cl")))
+	if len(controller.state.Candidates) != 1 || controller.state.Candidates[0].Command != "clear" {
+		t.Fatalf("expected clear prefix to narrow the popup, got %#v", controller.state.Candidates)
+	}
+}
+
 func TestChatSlashArgumentCompletionGoal(t *testing.T) {
 	t.Parallel()
 
@@ -751,7 +777,7 @@ func TestChatSlashArgumentCompletionAgents(t *testing.T) {
 	}
 
 	controller.UpdateAt("/agents panel ", len([]rune("/agents panel ")))
-	for _, command := range []string{"follow", "target", "next", "prev"} {
+	for _, command := range []string{"full", "follow", "target", "next", "prev", "close"} {
 		if !containsSlashCandidate(controller.state.Candidates, command) {
 			t.Fatalf("expected /agents panel candidates to include %q, got %#v", command, controller.state.Candidates)
 		}

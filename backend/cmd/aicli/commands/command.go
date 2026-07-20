@@ -11,9 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 )
 
 func dispatchChatCommand(session *ChatSession, command string, noInteractive bool) bool {
@@ -129,6 +131,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
+		refreshChatTitleMetadata(session)
 		fmt.Println("会话标题已更新")
 		return false
 	}
@@ -140,6 +143,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	}
 	if commandMatches(cmdLower, "/queue") {
 		return handleQueueCommand(session, command)
+	}
+	if commandMatches(cmdLower, "/retry") {
+		return handleRetryCommand(session, command)
 	}
 	if commandMatches(cmdLower, "/compact") {
 		return handleCompactCommand(session, command)
@@ -195,10 +201,14 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		return true
 
 	case "/clear", "/cls":
+		if !confirmClearConversationHistory(session) {
+			return false
+		}
 		if err := replaceRuntimeMessages(session, nil); err != nil {
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
+		clearChatTurnRecovery(session)
 		session.MsgCount = 0
 		session.TurnRequestCount = 0
 		session.turnPrimed = false
@@ -273,6 +283,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			fmt.Println("错误: 当前没有活动会话")
 			return false
 		}
+		if !confirmBypassPermissionModeChange(session, "/yolo") {
+			return false
+		}
 		session.PermissionMode = "bypass_permissions"
 		if session.ActiveTeam != nil {
 			session.ActiveTeam.PermissionMode = session.PermissionMode
@@ -297,6 +310,52 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	return false
 }
 
+func confirmClearConversationHistory(session *ChatSession) bool {
+	if session == nil {
+		return false
+	}
+	messageCount := countChatStatusMessages(session.Messages)
+	if messageCount == 0 && session.MsgCount > 0 {
+		messageCount = session.MsgCount
+	}
+	if messageCount == 0 {
+		return true
+	}
+
+	lines := []string{
+		fmt.Sprintf("[会话] 即将清空当前会话中的 %d 条聊天消息。", messageCount),
+		"[会话] 此操作会重置上下文与 token 统计，不能通过 undo 恢复。",
+		"[会话] Goal、会话配置、团队绑定和本地文件不会被删除。",
+	}
+	if session.NoInteractive {
+		for _, line := range lines {
+			fmt.Println(line)
+		}
+		fmt.Println("错误: 非交互模式不能确认清空会话历史")
+		return false
+	}
+
+	restoreInputMode := pushChatComposerInputMode(session, chatInputModeConfirmation)
+	defer restoreInputMode()
+	prompt := "[会话] 请输入 clear 确认清空（其他输入取消）： "
+	readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, prompt)
+	text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
+	cleanupPrompt()
+	if err != nil {
+		fmt.Println("已取消，会话历史未清空")
+		return false
+	}
+	text = strings.TrimSpace(normalizeQueuedInputLine(text))
+	if transientPrompt {
+		renderChatRuntimePriorityPromptTranscript(session, lines, prompt, text)
+	}
+	if text != "clear" {
+		fmt.Println("已取消，会话历史未清空")
+		return false
+	}
+	return true
+}
+
 func handlePermissionModeCommand(session *ChatSession, command string) bool {
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
@@ -312,6 +371,9 @@ func handlePermissionModeCommand(session *ChatSession, command string) bool {
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
+	if mode == "bypass_permissions" && !confirmBypassPermissionModeChange(session, "/permission-mode") {
+		return false
+	}
 	session.PermissionMode = mode
 	if session.ActiveTeam != nil {
 		session.ActiveTeam.PermissionMode = mode
@@ -319,6 +381,65 @@ func handlePermissionModeCommand(session *ChatSession, command string) bool {
 	warnIfChatSessionSyncFails(session, "toggle permission mode", syncRuntimeSessionFromChat(session))
 	fmt.Printf("提示: 已切换到 permission-mode=%s\n", mode)
 	return false
+}
+
+func confirmBypassPermissionModeChange(session *ChatSession, source string) bool {
+	if session == nil {
+		return false
+	}
+	currentMode := chatRuntimePermissionModeLabel(session)
+	if currentMode == "bypass_permissions" {
+		return true
+	}
+
+	lines := []string{
+		"[权限] 即将切换到 bypass_permissions",
+		"[权限] 影响：当前会话后续的 Agent 工具调用将不再逐次请求审批。",
+		"[权限] 边界：profile/tool policy 的明确拒绝与 sandbox 约束仍然生效。",
+	}
+	if session.ActiveTeam != nil {
+		teamID := strings.TrimSpace(session.ActiveTeam.TeamID)
+		if teamID == "" {
+			teamID = "<unknown>"
+		}
+		lines = append(lines, "[权限] ActiveTeam：team="+teamID+" 将同步切换到 bypass_permissions。")
+	} else {
+		lines = append(lines, "[权限] ActiveTeam：当前未绑定团队；本次仅更新当前会话。")
+	}
+	if source = strings.TrimSpace(source); source != "" {
+		lines = append(lines, "[权限] 来源："+source)
+	}
+	if session.NoInteractive {
+		for _, line := range lines {
+			fmt.Println(line)
+		}
+		fmt.Println("错误: 非交互模式不能在会话内确认 bypass_permissions；请改用启动参数显式配置")
+		return false
+	}
+
+	restoreInputMode := pushChatComposerInputMode(session, chatInputModeConfirmation)
+	defer restoreInputMode()
+	prompt := "[权限] 请输入 bypass_permissions 确认切换（其他输入取消）： "
+	readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, prompt)
+	text, err := func() (string, error) {
+		endAction := beginChatTitleAction(session, "Permission Mode Confirmation Required")
+		defer endAction()
+		return chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
+	}()
+	cleanupPrompt()
+	if err != nil {
+		fmt.Printf("已取消，permission-mode 保持为 %s\n", currentMode)
+		return false
+	}
+	text = strings.TrimSpace(normalizeQueuedInputLine(text))
+	if transientPrompt {
+		renderChatRuntimePriorityPromptTranscript(session, lines, prompt, text)
+	}
+	if text != "bypass_permissions" {
+		fmt.Printf("已取消，permission-mode 保持为 %s\n", currentMode)
+		return false
+	}
+	return true
 }
 
 func handleImageAttachmentCommand(session *ChatSession, command string) bool {
@@ -339,15 +460,44 @@ func handleImageAttachmentCommand(session *ChatSession, command string) bool {
 		}
 		return false
 	}
-	if arg == "clear" {
+	if strings.EqualFold(arg, "clear") {
 		count := len(session.ImagePaths)
 		session.ImagePaths = nil
+		refreshChatComposerContext(session)
 		fmt.Printf("已清空 %d 个待发送图片附件\n", count)
 		return false
 	}
+	if strings.HasPrefix(strings.ToLower(arg), "remove ") {
+		if len(session.ImagePaths) == 0 {
+			fmt.Println("错误: 当前没有可移除的图片附件")
+			return false
+		}
+		indexText := strings.TrimSpace(arg[len("remove "):])
+		index, err := strconv.Atoi(indexText)
+		if err != nil || index < 1 || index > len(session.ImagePaths) {
+			fmt.Printf("错误: 附件序号无效，可选范围为 1-%d\n", len(session.ImagePaths))
+			return false
+		}
+		removed := session.ImagePaths[index-1]
+		session.ImagePaths = append(session.ImagePaths[:index-1], session.ImagePaths[index:]...)
+		refreshChatComposerContext(session)
+		fmt.Printf("已移除图片附件: %s (当前剩余 %d 个)\n", removed, len(session.ImagePaths))
+		return false
+	}
 	// /attach <path>: add image path
-	path := arg
+	path := strings.Trim(strings.TrimSpace(arg), `"'`)
+	if warnings := llm.ValidateLocalInputImagePaths([]string{path}); len(warnings) > 0 {
+		fmt.Printf("错误: 无法添加图片附件 %q；请确认文件存在、可读且为支持的非 SVG 图片\n", path)
+		return false
+	}
+	for _, existing := range session.ImagePaths {
+		if strings.EqualFold(strings.TrimSpace(existing), path) {
+			fmt.Printf("提示: 图片附件已存在: %s\n", path)
+			return false
+		}
+	}
 	session.ImagePaths = append(session.ImagePaths, path)
+	refreshChatComposerContext(session)
 	fmt.Printf("已添加图片附件: %s (当前共 %d 个)\n", path, len(session.ImagePaths))
 	return false
 }
@@ -369,6 +519,7 @@ func handleQueueCommand(session *ChatSession, command string) bool {
 		return false
 	case "clear":
 		discarded := discardPendingInteractiveInput(session)
+		refreshChatComposerContext(session)
 		fmt.Printf("已清空 queued input: %d\n", discarded)
 		return false
 	default:
@@ -406,8 +557,17 @@ func handleApprovalReuseCommand(session *ChatSession, command string) bool {
 		return false
 	}
 	value := extractCommandArgument(command)
-	if strings.TrimSpace(value) == "" {
-		fmt.Printf("当前 approval-reuse: %s\n", formatChatApprovalReuseMode(session.ApprovalReuseMode))
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || value == "status" || value == "list" {
+		printApprovalReuseStatus(session)
+		return false
+	}
+	if value == "clear" || value == "revoke" {
+		cleared := 0
+		if session.RuntimeEventBridge != nil {
+			cleared = session.RuntimeEventBridge.clearApprovalGrants()
+		}
+		fmt.Printf("已撤销 approval-reuse 授权: %d\n", cleared)
 		return false
 	}
 	mode, err := parseChatApprovalReuseMode(value)
@@ -416,9 +576,33 @@ func handleApprovalReuseCommand(session *ChatSession, command string) bool {
 		return false
 	}
 	session.ApprovalReuseMode = mode
+	cleared := 0
+	if session.RuntimeEventBridge != nil {
+		cleared = session.RuntimeEventBridge.clearApprovalGrants()
+	}
 	warnIfChatSessionSyncFails(session, "toggle approval reuse", syncRuntimeSessionFromChat(session))
-	fmt.Printf("提示: 已切换到 approval-reuse=%s\n", formatChatApprovalReuseMode(mode))
+	fmt.Printf("提示: 已切换到 approval-reuse=%s；已撤销旧作用域授权 %d 条\n", formatChatApprovalReuseMode(mode), cleared)
 	return false
+}
+
+func printApprovalReuseStatus(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	fmt.Printf("当前 approval-reuse: %s\n", formatChatApprovalReuseMode(session.ApprovalReuseMode))
+	lines := []string(nil)
+	if session.RuntimeEventBridge != nil {
+		lines = session.RuntimeEventBridge.approvalGrantStatusLines(time.Now())
+	}
+	if len(lines) == 0 {
+		fmt.Println("当前没有生效的审批复用授权")
+		return
+	}
+	fmt.Printf("生效中的审批复用授权: %d\n", len(lines))
+	for _, line := range lines {
+		fmt.Println(line)
+	}
+	fmt.Println("使用 /approval-reuse clear 可立即撤销全部授权")
 }
 
 func commandMatches(commandLower, name string) bool {
@@ -989,11 +1173,18 @@ func executeShellCommandDetailed(session *ChatSession, cmdStr string) (shellComm
 		fmt.Printf("\n警告: 检测到可能危险的命令: %s\n", executedCommand)
 		fmt.Print("确认执行? (yes/no): ")
 
-		confirm, err := chatInteractiveReadTransientLine(session, context.Background())
+		confirm, err := func() (string, error) {
+			endAction := beginChatTitleAction(session, "Command Approval Required")
+			defer endAction()
+			return chatInteractiveReadTransientLine(session, context.Background())
+		}()
 		if err != nil || strings.ToLower(strings.TrimSpace(normalizeQueuedInputLine(confirm))) != "yes" {
 			return result, fmt.Errorf("命令已取消")
 		}
 	}
+
+	endRunning := beginChatTitleTool(session, "local-shell")
+	defer endRunning()
 
 	artifactWriter, artifactErr := openLocalShellArtifactWriter(session, executedCommand)
 	if artifactErr != nil {

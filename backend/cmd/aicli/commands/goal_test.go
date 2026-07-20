@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"context"
 	"strings"
 	"testing"
@@ -125,6 +126,7 @@ func TestGoalCommandPersistsToSessionStoreAndSurvivesClearHistory(t *testing.T) 
 		t.Fatalf("expected goal after set, ok=%v err=%v", ok, err)
 	}
 
+	session.InputReader = bufio.NewReader(strings.NewReader("clear\n"))
 	captureStdout(t, func() {
 		handleCommand(session, "/clear", false)
 	})

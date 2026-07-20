@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -26,6 +27,9 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 	if queue == nil {
 		return func() {}
 	}
+	if session.KeyHandler != nil {
+		session.KeyHandler.Suspend()
+	}
 	queue.setExternalInputCaptureActive(true)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -33,6 +37,9 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 	go func() {
 		defer func() {
 			queue.setExternalInputCaptureActive(false)
+			if session.KeyHandler != nil {
+				session.KeyHandler.Resume()
+			}
 			close(done)
 		}()
 		for ctx.Err() == nil {
@@ -99,15 +106,20 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 				capture.ClearPrompt()
 				continue
 			}
-			queue.routeInputText(line)
-			session.queuedInputEchoed = true
-			if session.Interaction != nil {
-				session.Interaction.RefreshStatus("")
+			result := queue.routeInputText(line)
+			capture.ClearPrompt()
+			if result.rejected() {
+				continue
 			}
-			if !isSlashCommandInput(line) && session.InputBox != nil {
+			if result.queued() {
+				session.queuedInputEchoed = true
+				if session.Interaction != nil {
+					session.Interaction.RefreshStatus("")
+				}
+			}
+			if result.queued() && !isSlashCommandInput(line) && session.InputBox != nil {
 				session.InputBox.AddToHistory(line)
 			}
-			capture.ClearPrompt()
 		}
 	}()
 
@@ -120,12 +132,28 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 	}
 }
 
+func renderBusyInputRouteFeedback(session *ChatSession, input string, result chatInputRouteResult) {
+	if session == nil || session.Interaction == nil || !result.rejected() {
+		return
+	}
+	command := strings.TrimSpace(normalizeQueuedInputLine(input))
+	fields := strings.Fields(command)
+	if len(fields) == 2 && strings.EqualFold(fields[0], "/queue") && strings.EqualFold(fields[1], "clear") {
+		session.Interaction.RenderAsyncLine("[input] Agent 正在运行，无法执行 /queue clear；现有队列保持不变。请等待状态回到 Ready 后再次执行。")
+		return
+	}
+	session.Interaction.RenderAsyncLine(fmt.Sprintf(
+		"[input] Agent 正在运行，slash 命令 %q 未执行，也未加入消息队列；请等待状态回到 Ready 后重试。",
+		command,
+	))
+}
+
 func interruptChatTurnFromBusyInputCancel(session *ChatSession) {
 	if session == nil {
 		return
 	}
 	wasInterrupted := session.IsInterrupted()
-	session.Interrupt()
+	session.InterruptPreservePendingInput()
 	if !wasInterrupted {
 		renderChatEscapeInterruptNotice(session)
 	}
@@ -143,6 +171,9 @@ func ensureChatBufferedInputQueue(session *ChatSession) *chatInputQueue {
 	})
 	session.InputQueue.setCommandGate(func(text string) bool {
 		return chatInputCommandAllowed(session, text)
+	})
+	session.InputQueue.setRouteFeedback(func(text string, result chatInputRouteResult) {
+		renderBusyInputRouteFeedback(session, text, result)
 	})
 	return session.InputQueue
 }

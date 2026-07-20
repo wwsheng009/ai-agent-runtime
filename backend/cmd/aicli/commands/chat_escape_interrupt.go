@@ -13,6 +13,7 @@ func startChatEscapeInterruptWatcher(session *ChatSession) func() {
 
 	escCh := session.KeyHandler.GetESCChannel()
 	drainChatEscapeEvents(escCh)
+	session.KeyHandler.Arm()
 
 	done := make(chan struct{})
 	stopped := make(chan struct{})
@@ -22,7 +23,7 @@ func startChatEscapeInterruptWatcher(session *ChatSession) func() {
 		defer close(stopped)
 		select {
 		case <-escCh:
-			session.Interrupt()
+			session.InterruptPreservePendingInput()
 			renderChatEscapeInterruptNotice(session)
 		case <-done:
 		}
@@ -30,6 +31,7 @@ func startChatEscapeInterruptWatcher(session *ChatSession) func() {
 
 	return func() {
 		stopOnce.Do(func() {
+			session.KeyHandler.Disarm()
 			close(done)
 			<-stopped
 			drainChatEscapeEvents(escCh)

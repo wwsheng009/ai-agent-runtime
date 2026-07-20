@@ -102,7 +102,7 @@ func (c *ComposerState) HandlePasteAt(cursor int, pasted string) int {
 	}
 	charCount := utf8.RuneCountInString(pasted)
 	if charCount > LargePasteCharThreshold {
-		placeholder := c.nextLargePastePlaceholder(charCount)
+		placeholder := c.nextLargePastePlaceholder(pasted, charCount)
 		cursor = c.clampCursor(cursor)
 		placeholderLen := utf8.RuneCountInString(placeholder)
 		c.pendingPastes = append(c.pendingPastes, PendingPaste{
@@ -149,8 +149,9 @@ func (c *ComposerState) ClearPendingPastes() {
 	c.largePasteCounters = nil
 }
 
-func (c *ComposerState) nextLargePastePlaceholder(charCount int) string {
-	base := fmt.Sprintf("[Pasted Content %d chars]", charCount)
+func (c *ComposerState) nextLargePastePlaceholder(pasted string, charCount int) string {
+	lineCount := strings.Count(pasted, "\n") + 1
+	base := fmt.Sprintf("[已粘贴 %d 字符 / %d 行]", charCount, lineCount)
 	if c.largePasteCounters == nil {
 		c.largePasteCounters = make(map[int]int)
 	}

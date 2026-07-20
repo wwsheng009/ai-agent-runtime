@@ -103,12 +103,14 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/agents",
-			Usage:       "/agents [panel [follow|target <target>|next|prev]|pick|target <target>|send [target] <message>|followup [target] <message>|routing test [--scope auto|subagent|team] --role <role> --difficulty <level>]",
+			Usage:       "/agents [panel [full|follow|target <target>|next|prev|close]|pick|target <target>|send [target] <message>|followup [target] <message>|routing test [--scope auto|subagent|team] --role <role> --difficulty <level>]",
 			Summary:     "显示、选择或发送 agent 协作消息",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{
-				{Token: "panel", Summary: "显示多 agent 富交互面板"},
+				{Token: "panel", Summary: "显示多 agent 摘要面板"},
+				{Token: "full", Summary: "显示 mailbox 与 timeline 完整详情"},
+				{Token: "close", Summary: "关闭当前固定面板"},
 				{Token: "pane", Summary: "panel 的别名"},
 				{Token: "dashboard", Summary: "panel 的别名"},
 				{Token: "follow", Summary: "进入 fixed-bottom 面板跟随模式，legacy 终端等待 mailbox 更新后刷新一次"},
@@ -341,12 +343,13 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/attach",
-			Usage:       "/attach [path|clear]",
+			Usage:       "/attach [path|clear|remove <序号>]",
 			Summary:     "查看、添加或清空待发送图片附件",
 			Group:       string(chatSlashCommandGroupContext),
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{
 				{Token: "clear", Summary: "清空待发送图片附件"},
+				{Token: "remove <序号>", Summary: "移除指定图片附件"},
 			},
 		},
 		{
@@ -369,6 +372,13 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "--json", Summary: "输出 JSON"},
 				{Token: "--debug", Summary: "输出调试信息"},
 			},
+		},
+		{
+			Name:        "/retry",
+			Usage:       "/retry",
+			Summary:     "将上一条失败或中断消息恢复为可编辑草稿",
+			Group:       string(chatSlashCommandGroupContext),
+			AcceptsArgs: false,
 		},
 		{
 			Name:        "/queue",
@@ -397,10 +407,17 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/approval-reuse",
-			Usage:       "/approval-reuse [off|session_readonly_shell|team_readonly_shell]",
-			Summary:     "查看或切换审批复用策略",
+			Usage:       "/approval-reuse [status|clear|off|session_readonly_shell|team_readonly_shell]",
+			Summary:     "查看、撤销或切换审批复用策略",
 			Group:       string(chatSlashCommandGroupPermission),
 			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "status", Summary: "查看当前复用授权及剩余时间"},
+				{Token: "clear", Summary: "撤销当前会话中的全部复用授权"},
+				{Token: "off", Summary: "关闭审批复用"},
+				{Token: "session_readonly_shell", Summary: "当前会话复用只读审批"},
+				{Token: "team_readonly_shell", Summary: "当前团队复用只读审批"},
+			},
 		},
 		{
 			Name:        "/yolo",
