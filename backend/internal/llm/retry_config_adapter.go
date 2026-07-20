@@ -17,6 +17,7 @@ func RetryTuningFromAgentConfig(cfg *agentconfig.Config) RetryTuning {
 		MaxElapsedTime: cfg.Providers.Backoff.MaxElapsedTime,
 		Multiplier:     cfg.Providers.Backoff.Multiplier,
 		Randomization:  cfg.Providers.Backoff.Randomization,
+		Schedule:       append([]time.Duration(nil), cfg.Providers.Backoff.Schedule...),
 	}
 	if cfg.Retry != nil {
 		if tuning.BaseDelay <= 0 && cfg.Retry.DefaultRetryDelayMS > 0 {
@@ -64,11 +65,16 @@ func RetryRulesFromAgentConfig(cfg *agentconfig.Config) []RetryRule {
 // ProviderMaxRetriesFromAgentConfig resolves the default provider retry count.
 func ProviderMaxRetriesFromAgentConfig(cfg *agentconfig.Config) int {
 	if cfg == nil {
-		return 3
+		return -1
 	}
 	maxRetries := cfg.Providers.MaxRetries
+	if maxRetries < 0 {
+		return maxRetries
+	}
 	if maxRetries <= 0 && cfg.Retry != nil && cfg.Retry.DefaultMaxRetries > 0 {
 		maxRetries = cfg.Retry.DefaultMaxRetries
+	} else if maxRetries == 0 && cfg.Retry != nil && cfg.Retry.DefaultMaxRetries < 0 {
+		return cfg.Retry.DefaultMaxRetries
 	}
 	if maxRetries <= 0 {
 		maxRetries = 3

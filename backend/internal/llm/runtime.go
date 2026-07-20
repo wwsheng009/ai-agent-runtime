@@ -249,9 +249,7 @@ func (r *LLMRuntime) RegisterGatewayClient(name string, resourceManager Resource
 		if r.config.DefaultTimeout > 0 {
 			gatewayClient.SetTimeout(r.config.DefaultTimeout)
 		}
-		if r.config.MaxRetries > 0 {
-			gatewayClient.SetMaxRetries(r.config.MaxRetries)
-		}
+		gatewayClient.SetMaxRetries(r.config.MaxRetries)
 		gatewayClient.SetRetryTuning(r.config.RetryTuning)
 		gatewayClient.SetRetryRules(r.config.RetryRules)
 	}
@@ -452,7 +450,7 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
 
-	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		response, err := provider.Call(attemptCtx, req)
 		if err == nil {
@@ -553,7 +551,7 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 
 	var lastErr error
 	lastAttempt := startAttempt
-	for attempt := startAttempt; attempt <= policy.MaxAttempts; attempt++ {
+	for attempt := startAttempt; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		lastAttempt = attempt
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		stream, err := provider.Stream(attemptCtx, req)

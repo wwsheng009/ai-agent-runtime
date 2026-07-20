@@ -6,7 +6,40 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestInitGlobalConfigLoadsProviderRetrySchedule(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configYAML := `
+providers:
+  max_retries: -1
+  backoff:
+    max_interval: 6m
+    randomization: 0.1
+    schedule: [30s, 1m, 2m, 3m, 5m]
+`
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatalf("write config yaml: %v", err)
+	}
+
+	cfg, err := InitGlobalConfig(configPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig failed: %v", err)
+	}
+	if cfg.Providers.MaxRetries != -1 {
+		t.Fatalf("expected unlimited transient retries, got %d", cfg.Providers.MaxRetries)
+	}
+	expected := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}
+	if len(cfg.Providers.Backoff.Schedule) != len(expected) {
+		t.Fatalf("unexpected retry schedule: %v", cfg.Providers.Backoff.Schedule)
+	}
+	for index := range expected {
+		if cfg.Providers.Backoff.Schedule[index] != expected[index] {
+			t.Fatalf("retry schedule[%d]: expected %s, got %s", index, expected[index], cfg.Providers.Backoff.Schedule[index])
+		}
+	}
+}
 
 func TestInitGlobalConfigLoadsAndMergesProviderHeaders(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")

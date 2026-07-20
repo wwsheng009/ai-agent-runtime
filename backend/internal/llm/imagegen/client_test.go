@@ -228,6 +228,40 @@ func TestClientGenerate_RetriesOnTransientTransportError(t *testing.T) {
 	require.Equal(t, int32(2), atomic.LoadInt32(&requestCount))
 }
 
+func TestClientGenerate_UnlimitedTransientRetriesStopOnContextCancellation(t *testing.T) {
+	var requestCount int32
+	client := NewClient(agentconfig.Provider{BaseURL: "https://example.invalid", APIKey: "test-key"}, time.Second, nil)
+	client.SetRetryPolicy(-1, []time.Duration{time.Millisecond}, 0, 0)
+	client.httpClient = &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			atomic.AddInt32(&requestCount, 1)
+			return nil, transientNetError{message: "temporary network failure"}
+		}),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := client.Generate(ctx, &GenerateRequest{
+		Model:   "gpt-image-2",
+		Prompt:  "retry until cancelled",
+		Size:    "1024x1024",
+		Quality: "medium",
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Greater(t, atomic.LoadInt32(&requestCount), int32(3))
+}
+
+func TestClientRetryDelayUsesStaircaseAndServerHintOnlyExtends(t *testing.T) {
+	client := NewClient(agentconfig.Provider{}, time.Second, nil)
+	client.SetRetryPolicy(-1, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute}, 0, 0)
+
+	require.Equal(t, 30*time.Second, client.retryDelay(1, time.Second))
+	require.Equal(t, time.Minute, client.retryDelay(2, 0))
+	require.Equal(t, 2*time.Minute, client.retryDelay(3, 0))
+	require.Equal(t, 2*time.Minute, client.retryDelay(8, 0))
+	require.Equal(t, 4*time.Minute, client.retryDelay(1, 4*time.Minute))
+}
+
 func TestParseImageGenAPIError_ExtractsRetryAfterDelay(t *testing.T) {
 	err := parseImageGenAPIError(http.StatusTooManyRequests, []byte(`{"error":{"message":"slow down","type":"rate_limit_error","code":"rate_limit"},"retry_after_ms":125}`), nil)
 	require.Error(t, err)

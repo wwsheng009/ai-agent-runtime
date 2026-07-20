@@ -33,7 +33,7 @@ func prepareRetry(ctx context.Context, policy retryPolicy, startedAt time.Time, 
 	if !result.Decision.Retryable {
 		return result, nil
 	}
-	if attempt >= result.MaxAttempts {
+	if result.MaxAttempts > 0 && attempt >= result.MaxAttempts {
 		return result, nil
 	}
 

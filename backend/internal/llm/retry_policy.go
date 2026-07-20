@@ -33,11 +33,12 @@ type retryDecision struct {
 }
 
 type RetryTuning struct {
-	BaseDelay      time.Duration `yaml:"baseDelay,omitempty" json:"baseDelay,omitempty"`
-	MaxDelay       time.Duration `yaml:"maxDelay,omitempty" json:"maxDelay,omitempty"`
-	MaxElapsedTime time.Duration `yaml:"maxElapsedTime,omitempty" json:"maxElapsedTime,omitempty"`
-	Multiplier     float64       `yaml:"multiplier,omitempty" json:"multiplier,omitempty"`
-	Randomization  float64       `yaml:"randomization,omitempty" json:"randomization,omitempty"`
+	BaseDelay      time.Duration   `yaml:"baseDelay,omitempty" json:"baseDelay,omitempty"`
+	MaxDelay       time.Duration   `yaml:"maxDelay,omitempty" json:"maxDelay,omitempty"`
+	MaxElapsedTime time.Duration   `yaml:"maxElapsedTime,omitempty" json:"maxElapsedTime,omitempty"`
+	Multiplier     float64         `yaml:"multiplier,omitempty" json:"multiplier,omitempty"`
+	Randomization  float64         `yaml:"randomization,omitempty" json:"randomization,omitempty"`
+	Schedule       []time.Duration `yaml:"schedule,omitempty" json:"schedule,omitempty"`
 }
 
 type RetryRule struct {
@@ -76,6 +77,7 @@ type retryPolicy struct {
 	MaxElapsedTime     time.Duration
 	Multiplier         float64
 	Randomization      float64
+	Schedule           []time.Duration
 	Rules              []RetryRule
 }
 
@@ -167,11 +169,20 @@ func (s *streamEmissionState) emittedAnything() bool {
 }
 
 func (c RetryTuning) normalized() RetryTuning {
+	c.Schedule = normalizeRetrySchedule(c.Schedule)
 	if c.BaseDelay <= 0 {
-		c.BaseDelay = defaultLLMRetryBaseDelay
+		if len(c.Schedule) > 0 {
+			c.BaseDelay = c.Schedule[0]
+		} else {
+			c.BaseDelay = defaultLLMRetryBaseDelay
+		}
 	}
 	if c.MaxDelay <= 0 {
-		c.MaxDelay = defaultLLMRetryMaxDelay
+		if len(c.Schedule) > 0 {
+			c.MaxDelay = maxRetryScheduleDelay(c.Schedule)
+		} else {
+			c.MaxDelay = defaultLLMRetryMaxDelay
+		}
 	}
 	if c.MaxDelay < c.BaseDelay {
 		c.MaxDelay = c.BaseDelay
@@ -188,40 +199,78 @@ func (c RetryTuning) normalized() RetryTuning {
 	return c
 }
 
+func normalizeRetrySchedule(schedule []time.Duration) []time.Duration {
+	if len(schedule) == 0 {
+		return nil
+	}
+	normalized := make([]time.Duration, 0, len(schedule))
+	for _, delay := range schedule {
+		if delay > 0 {
+			normalized = append(normalized, delay)
+		}
+	}
+	return normalized
+}
+
+func maxRetryScheduleDelay(schedule []time.Duration) time.Duration {
+	var maximum time.Duration
+	for _, delay := range schedule {
+		if delay > maximum {
+			maximum = delay
+		}
+	}
+	return maximum
+}
+
 func newRuntimeRetryPolicy(maxRetries int, tuning RetryTuning, rules []RetryRule) retryPolicy {
-	attempts := maxRetries + 1
-	if attempts < 1 {
+	attempts := 0
+	if maxRetries >= 0 {
+		attempts = maxRetries + 1
+	}
+	if maxRetries >= 0 && attempts < 1 {
 		attempts = 1
 	}
 	tuning = tuning.normalized()
 	rules = cloneRetryRules(rules)
+	maxAttempts := maxRetryPolicyInt(attempts, maxRetryRuleAttempts(rules))
+	if attempts == 0 {
+		maxAttempts = 0
+	}
 	return retryPolicy{
-		MaxAttempts:        maxRetryPolicyInt(attempts, maxRetryRuleAttempts(rules)),
+		MaxAttempts:        maxAttempts,
 		DefaultMaxAttempts: attempts,
 		BaseDelay:          tuning.BaseDelay,
 		MaxDelay:           tuning.MaxDelay,
 		MaxElapsedTime:     tuning.MaxElapsedTime,
 		Multiplier:         tuning.Multiplier,
 		Randomization:      tuning.Randomization,
+		Schedule:           append([]time.Duration(nil), tuning.Schedule...),
 		Rules:              rules,
 	}
 }
 
 func newProviderRetryPolicy(maxRetries int, tuning RetryTuning, rules []RetryRule) retryPolicy {
 	attempts := maxRetries
-	if attempts < 1 {
+	if maxRetries == 0 {
 		attempts = 1
+	} else if maxRetries < 0 {
+		attempts = 0
 	}
 	tuning = tuning.normalized()
 	rules = cloneRetryRules(rules)
+	maxAttempts := maxRetryPolicyInt(attempts, maxRetryRuleAttempts(rules))
+	if attempts == 0 {
+		maxAttempts = 0
+	}
 	return retryPolicy{
-		MaxAttempts:        maxRetryPolicyInt(attempts, maxRetryRuleAttempts(rules)),
+		MaxAttempts:        maxAttempts,
 		DefaultMaxAttempts: attempts,
 		BaseDelay:          tuning.BaseDelay,
 		MaxDelay:           tuning.MaxDelay,
 		MaxElapsedTime:     tuning.MaxElapsedTime,
 		Multiplier:         tuning.Multiplier,
 		Randomization:      tuning.Randomization,
+		Schedule:           append([]time.Duration(nil), tuning.Schedule...),
 		Rules:              rules,
 	}
 }
@@ -244,20 +293,47 @@ func (p retryPolicy) initialMaxAttempts() int {
 	return p.maxAttemptsForDecision(retryDecision{})
 }
 
+func retryAttemptAllowed(maxAttempts int, attempt int) bool {
+	return attempt > 0 && (maxAttempts <= 0 || attempt <= maxAttempts)
+}
+
 func (p retryPolicy) delayForDecision(attempt int, decision retryDecision) time.Duration {
-	if decision.Delay > 0 {
+	if decision.Delay > 0 && len(p.Schedule) == 0 {
 		return decision.Delay
 	}
-	baseDelay := p.BaseDelay
-	if decision.BaseDelay > 0 {
-		baseDelay = decision.BaseDelay
+	delay := time.Duration(0)
+	if len(p.Schedule) > 0 && decision.BaseDelay <= 0 && decision.Multiplier < 1 {
+		delay = retryScheduleDelay(p.Schedule, attempt)
+	} else {
+		baseDelay := p.BaseDelay
+		if decision.BaseDelay > 0 {
+			baseDelay = decision.BaseDelay
+		}
+		multiplier := p.Multiplier
+		if decision.Multiplier >= 1 {
+			multiplier = decision.Multiplier
+		}
+		delay = nextRetryDelay(baseDelay, multiplier, attempt, p.MaxDelay)
 	}
-	multiplier := p.Multiplier
-	if decision.Multiplier >= 1 {
-		multiplier = decision.Multiplier
+	delay = p.randomizeDelay(delay)
+	if decision.Delay > delay {
+		return decision.Delay
 	}
-	delay := nextRetryDelay(baseDelay, multiplier, attempt, p.MaxDelay)
-	return p.randomizeDelay(delay)
+	return delay
+}
+
+func retryScheduleDelay(schedule []time.Duration, attempt int) time.Duration {
+	if len(schedule) == 0 {
+		return 0
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	index := attempt - 1
+	if index >= len(schedule) {
+		index = len(schedule) - 1
+	}
+	return schedule[index]
 }
 
 var retryPolicyRandomFloat64 = rand.Float64

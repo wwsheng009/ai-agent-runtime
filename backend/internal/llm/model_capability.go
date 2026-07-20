@@ -6,7 +6,10 @@ import (
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
-const defaultCompactMaxTokens = 2048
+const (
+	defaultCompactMaxTokens    = 2048
+	DefaultContextWindowTokens = 128000
+)
 
 // ModelCapabilityResolver allows runtime providers to expose provider/model
 // capability metadata without forcing callers to know the concrete provider type.

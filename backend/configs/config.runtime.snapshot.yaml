@@ -277,6 +277,19 @@ provider_queue:
         max_wait_time: 120s
 providers:
     default_provider: ${PROVIDERS_DEFAULT:-nvidia}
+    max_retries: ${PROVIDERS_MAX_RETRIES:--1}
+    backoff:
+        initial_interval: ${PROVIDERS_RETRY_DELAY_1:-30s}
+        max_interval: ${PROVIDERS_RETRY_MAX_INTERVAL:-6m}
+        max_elapsed_time: ${PROVIDERS_RETRY_MAX_ELAPSED_TIME:-0s}
+        multiplier: 2
+        randomization: ${PROVIDERS_RETRY_RANDOMIZATION:-0.10}
+        schedule:
+            - ${PROVIDERS_RETRY_DELAY_1:-30s}
+            - ${PROVIDERS_RETRY_DELAY_2:-1m}
+            - ${PROVIDERS_RETRY_DELAY_3:-2m}
+            - ${PROVIDERS_RETRY_DELAY_4:-3m}
+            - ${PROVIDERS_RETRY_DELAY_5:-5m}
     http_timeout:
         body_read_timeout: ${PROVIDERS_BODY_READ_TIMEOUT:-60s}
         dial_timeout: ${PROVIDERS_DIAL_TIMEOUT:-5s}
@@ -932,8 +945,8 @@ resource_manager:
     stats_retention: ${RESOURCE_MANAGER_STATS_RETENTION:-24h}
 retry:
     default_backoff_multiplier: 2
-    default_max_retries: ${RETRY_DEFAULT_MAX_RETRIES:-3}
-    default_retry_delay_ms: ${RETRY_DEFAULT_DELAY_MS:-1000}
+    default_max_retries: ${RETRY_DEFAULT_MAX_RETRIES:--1}
+    default_retry_delay_ms: ${RETRY_DEFAULT_DELAY_MS:-30000}
     enabled: ${RETRY_ENABLED:-true}
     enhanced_strategy:
         enabled: ${ENHANCED_STRATEGY_ENABLED:-true}
@@ -944,7 +957,7 @@ retry:
     invalid_encrypted_content_recovery:
         strip_client_state_once: ${RETRY_INVALID_ENCRYPTED_CONTENT_STRIP_CLIENT_STATE_ONCE:-false}
     rules:
-        - backoff_multiplier: 1.5
+        - backoff_multiplier: 0
           description: SSE 空流响应自动重试（只有 ping/waiting 事件）
           enabled: true
           keyword:
@@ -952,20 +965,20 @@ retry:
             values:
                 - empty_stream_response
                 - only ping events
-          max_retries: 3
+          max_retries: -1
           name: empty_stream_response
-          retry_delay_ms: 2000
-        - backoff_multiplier: 1.5
+          retry_delay_ms: 0
+        - backoff_multiplier: 0
           description: SSE 流式响应心跳超时自动重试
           enabled: true
           keyword:
             case_sensitive: false
             values:
                 - heartbeat timeout
-          max_retries: 3
+          max_retries: -1
           name: sse_heartbeat_timeout
-          retry_delay_ms: 5000
-        - backoff_multiplier: 2
+          retry_delay_ms: 0
+        - backoff_multiplier: 0
           description: Codex 流式响应在 response.completed 前断开时自动重试
           enabled: true
           error_code:
@@ -977,15 +990,15 @@ retry:
                 - stream disconnected before completion
                 - stream closed before response.completed
                 - request timeout
-          max_retries: 3
+          max_retries: -1
           name: codex_request_timeout_retry
-          retry_delay_ms: 1000
-        - backoff_multiplier: 2
+          retry_delay_ms: 0
+        - backoff_multiplier: 0
           description: HTTP 5xx 服务器错误重试
           enabled: true
-          max_retries: 3
+          max_retries: -1
           name: http_5xx_retry
-          retry_delay_ms: 1000
+          retry_delay_ms: 0
           status_code:
             range: 500-504
         - backoff_multiplier: 1.5
@@ -996,7 +1009,7 @@ retry:
           max_retries: 5
           name: context_limit_retry
           retry_delay_ms: 500
-        - backoff_multiplier: 2
+        - backoff_multiplier: 0
           description: 速率限制错误重试（429 Too Many Requests）
           enabled: true
           error_code:
@@ -1017,9 +1030,9 @@ retry:
                 - 速率限制
                 - 限流
                 - 频率限制
-          max_retries: 10
+          max_retries: -1
           name: rate_limit_retry
-          retry_delay_ms: 2000
+          retry_delay_ms: 0
 routing:
     failover: true
     routes:

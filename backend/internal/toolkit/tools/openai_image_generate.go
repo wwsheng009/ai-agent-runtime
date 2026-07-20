@@ -31,6 +31,10 @@ type OpenAIImageGenerateTool struct {
 	clientFactory          func(provider agentconfig.Provider, timeout time.Duration, proxy *agentconfig.ProxyConfig) imagegen.Generator
 }
 
+type imageGenerationRetryConfigurer interface {
+	SetRetryPolicy(maxRetries int, schedule []time.Duration, maxElapsed time.Duration, randomization float64)
+}
+
 type openAIImageGenerateDebug struct {
 	enabled bool
 	writer  io.Writer
@@ -651,10 +655,23 @@ func (t *OpenAIImageGenerateTool) applyRuntimeDefaults(req *imagegen.GenerateReq
 }
 
 func (t *OpenAIImageGenerateTool) newClient(provider agentconfig.Provider, timeout time.Duration) imagegen.Generator {
+	var generator imagegen.Generator
 	if t != nil && t.clientFactory != nil {
-		return t.clientFactory(provider, timeout, provider.Proxy)
+		generator = t.clientFactory(provider, timeout, provider.Proxy)
+	} else {
+		generator = imagegen.NewClient(provider, timeout, provider.Proxy)
 	}
-	return imagegen.NewClient(provider, timeout, provider.Proxy)
+	if configurable, ok := generator.(imageGenerationRetryConfigurer); ok {
+		cfg := t.resolveProviderConfig()
+		tuning := llm.RetryTuningFromAgentConfig(cfg)
+		configurable.SetRetryPolicy(
+			llm.ProviderMaxRetriesFromAgentConfig(cfg),
+			tuning.Schedule,
+			tuning.MaxElapsedTime,
+			tuning.Randomization,
+		)
+	}
+	return generator
 }
 
 func (t *OpenAIImageGenerateTool) newCodexNativeProvider(provider agentconfig.Provider, timeout time.Duration) (llm.Provider, error) {
@@ -662,13 +679,16 @@ func (t *OpenAIImageGenerateTool) newCodexNativeProvider(provider agentconfig.Pr
 	if timeout > 0 {
 		providerTimeout = timeout
 	}
+	cfg := t.resolveProviderConfig()
 	return llm.NewProvider(&llm.ProviderConfig{
 		Type:                    provider.GetProtocol(),
 		APIKey:                  provider.GetAPIKey(),
 		BaseURL:                 provider.BaseURL,
 		APIPath:                 provider.APIPath,
 		Timeout:                 providerTimeout,
-		MaxRetries:              3,
+		MaxRetries:              llm.ProviderMaxRetriesFromAgentConfig(cfg),
+		RetryTuning:             llm.RetryTuningFromAgentConfig(cfg),
+		RetryRules:              llm.RetryRulesFromAgentConfig(cfg),
 		DefaultModel:            strings.TrimSpace(provider.DefaultModel),
 		SupportedModels:         append([]string(nil), provider.SupportedModels...),
 		ModelMappings:           cloneStringStringMap(provider.ModelMappings),

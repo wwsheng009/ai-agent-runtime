@@ -167,6 +167,15 @@ func (c *GatewayClient) ResolveModelCapability(requestedModel string) (string, a
 			resolvedModel = model
 		}
 	}
+	if !ok {
+		if fallback := c.GetCapabilities(); fallback != nil && fallback.MaxContextTokens > 0 {
+			capability = agentconfig.ModelCapabilitySpec{
+				MaxContextTokens: fallback.MaxContextTokens,
+				MaxTokens:        fallback.MaxOutputTokens,
+			}
+			ok = true
+		}
+	}
 	return strings.TrimSpace(resolvedModel), capability, ok
 }
 
@@ -303,7 +312,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 	}
 
 	var lastError error
-	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		retryInfo.Attempt = attempt
 
@@ -1093,7 +1102,7 @@ func (c *GatewayClient) CountTokens(text string) int {
 // GetCapabilities 获取模型能力
 func (c *GatewayClient) GetCapabilities() *ModelCapabilities {
 	return &ModelCapabilities{
-		MaxContextTokens:  128000,
+		MaxContextTokens:  DefaultContextWindowTokens,
 		MaxOutputTokens:   4096,
 		SupportsVision:    false,
 		SupportsTools:     true,

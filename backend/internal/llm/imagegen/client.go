@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"strconv"
@@ -24,11 +25,15 @@ type Generator interface {
 
 // Client wraps an OpenAI-compatible image generations endpoint.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
-	apiPath    string
-	apiKey     string
-	headers    map[string]string
+	httpClient         *http.Client
+	baseURL            string
+	apiPath            string
+	apiKey             string
+	headers            map[string]string
+	maxAttempts        int
+	retrySchedule      []time.Duration
+	retryMaxElapsed    time.Duration
+	retryRandomization float64
 }
 
 // NewClient constructs a new image generations client using the shared provider
@@ -56,12 +61,41 @@ func NewClient(provider agentconfig.Provider, timeout time.Duration, proxy *agen
 	}
 
 	return &Client{
-		httpClient: runtimehttpclient.NewProviderHTTPClient(timeout, proxy, false),
-		baseURL:    strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/"),
-		apiPath:    apiPath,
-		apiKey:     strings.TrimSpace(provider.GetAPIKey()),
-		headers:    headers,
+		httpClient:  runtimehttpclient.NewProviderHTTPClient(timeout, proxy, false),
+		baseURL:     strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/"),
+		apiPath:     apiPath,
+		apiKey:      strings.TrimSpace(provider.GetAPIKey()),
+		headers:     headers,
+		maxAttempts: 3,
 	}
+}
+
+// SetRetryPolicy configures retries for transient image generation failures.
+// A negative maxRetries value retries until the context is cancelled.
+func (c *Client) SetRetryPolicy(maxRetries int, schedule []time.Duration, maxElapsed time.Duration, randomization float64) {
+	if c == nil {
+		return
+	}
+	switch {
+	case maxRetries < 0:
+		c.maxAttempts = 0
+	case maxRetries == 0:
+		c.maxAttempts = 1
+	default:
+		c.maxAttempts = maxRetries
+	}
+	c.retrySchedule = normalizeImageGenRetrySchedule(schedule)
+	if c.maxAttempts == 0 && len(c.retrySchedule) == 0 {
+		c.retrySchedule = defaultImageGenRetrySchedule()
+	}
+	c.retryMaxElapsed = maxElapsed
+	if randomization < 0 {
+		randomization = 0
+	}
+	if randomization > 1 {
+		randomization = 1
+	}
+	c.retryRandomization = randomization
 }
 
 // Generate invokes POST /v1/images/generations and returns the parsed response.
@@ -90,18 +124,19 @@ func (c *Client) Generate(ctx context.Context, req *GenerateRequest) (*GenerateR
 	}
 
 	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
+	startedAt := time.Now()
+	for attempt := 1; c.maxAttempts <= 0 || attempt <= c.maxAttempts; attempt++ {
 		response, err := c.doGenerate(ctx, req)
 		if err == nil {
 			return response, nil
 		}
 		lastErr = err
-		if !isRetryableImageGenError(err) || attempt == 3 {
+		if !isRetryableImageGenError(err) || (c.maxAttempts > 0 && attempt >= c.maxAttempts) {
 			break
 		}
-		delay := retryDelayFromImageGenError(err)
-		if delay <= 0 {
-			delay = retryBackoffDelay(attempt)
+		delay := c.retryDelay(attempt, retryDelayFromImageGenError(err))
+		if c.retryMaxElapsed > 0 && time.Since(startedAt)+delay > c.retryMaxElapsed {
+			break
 		}
 		select {
 		case <-ctx.Done():
@@ -339,6 +374,71 @@ func retryDelayFromImageGenError(err error) time.Duration {
 		}
 	}
 	return 0
+}
+
+func defaultImageGenRetrySchedule() []time.Duration {
+	return []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}
+}
+
+func normalizeImageGenRetrySchedule(schedule []time.Duration) []time.Duration {
+	if len(schedule) == 0 {
+		return nil
+	}
+	normalized := make([]time.Duration, 0, len(schedule))
+	for _, delay := range schedule {
+		if delay > 0 {
+			normalized = append(normalized, delay)
+		}
+	}
+	return normalized
+}
+
+func imageGenRetryScheduleDelay(schedule []time.Duration, attempt int) time.Duration {
+	if len(schedule) == 0 {
+		return 0
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	index := attempt - 1
+	if index >= len(schedule) {
+		index = len(schedule) - 1
+	}
+	return schedule[index]
+}
+
+func (c *Client) retryDelay(attempt int, serverHint time.Duration) time.Duration {
+	if c == nil {
+		return serverHint
+	}
+	if len(c.retrySchedule) == 0 {
+		if serverHint > 0 {
+			return serverHint
+		}
+		return retryBackoffDelay(attempt)
+	}
+
+	delay := imageGenRetryScheduleDelay(c.retrySchedule, attempt)
+	if c.retryRandomization > 0 {
+		factor := 1 + ((rand.Float64()*2 - 1) * c.retryRandomization)
+		if factor < 0 {
+			factor = 0
+		}
+		delay = time.Duration(float64(delay) * factor)
+		maximum := c.retrySchedule[0]
+		for _, candidate := range c.retrySchedule[1:] {
+			if candidate > maximum {
+				maximum = candidate
+			}
+		}
+		if delay > maximum {
+			delay = maximum
+		}
+	}
+	if serverHint > delay {
+		return serverHint
+	}
+	return delay
 }
 
 func retryBackoffDelay(attempt int) time.Duration {

@@ -435,6 +435,18 @@ func TestLLMRuntime_RegisterGatewayClient(t *testing.T) {
 	assert.Contains(t, runtime.ListProviders(), "gateway-default")
 }
 
+func TestLLMRuntime_RegisterGatewayClientPreservesUnlimitedRetries(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{MaxRetries: -1})
+
+	require.NoError(t, runtime.RegisterGatewayClient("gateway-default", &mockResourceManager{}, "gpt-4o"))
+	provider, err := runtime.GetProvider("gateway-default")
+	require.NoError(t, err)
+
+	gatewayProvider, ok := provider.(*GatewayClient)
+	require.True(t, ok)
+	require.Equal(t, -1, gatewayProvider.maxRetries)
+}
+
 func TestLLMRuntime_Stream_RetriesErrorChunkBeforeText(t *testing.T) {
 	runtime := NewLLMRuntime(&RuntimeConfig{
 		DefaultProvider: "provider-a",

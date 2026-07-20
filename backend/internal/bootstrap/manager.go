@@ -366,7 +366,7 @@ func (m *Manager) ReloadProviderConfigs(providerConfigs map[string]*llm.Provider
 
 func runtimeRetryConfigFromProviderConfigs(providerConfigs map[string]*llm.ProviderConfig) (int, llm.RetryTuning, []llm.RetryRule) {
 	if len(providerConfigs) == 0 {
-		return 3, llm.RetryTuning{}, nil
+		return -1, llm.RetryTuning{}, nil
 	}
 
 	names := make([]string, 0, len(providerConfigs))
@@ -381,12 +381,12 @@ func runtimeRetryConfigFromProviderConfigs(providerConfigs map[string]*llm.Provi
 			continue
 		}
 		maxRetries := providerConfig.MaxRetries
-		if maxRetries <= 0 {
-			maxRetries = 3
+		if maxRetries == 0 {
+			maxRetries = -1
 		}
 		return maxRetries, providerConfig.RetryTuning, cloneRetryRules(providerConfig.RetryRules)
 	}
-	return 3, llm.RetryTuning{}, nil
+	return -1, llm.RetryTuning{}, nil
 }
 
 func collectProviderAliases(providerConfig *llm.ProviderConfig, provider llm.ModelCatalogProvider) []string {

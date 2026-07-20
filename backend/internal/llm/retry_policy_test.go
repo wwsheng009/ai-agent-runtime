@@ -119,6 +119,35 @@ func TestNewProviderRetryPolicy_UsesConfiguredTuning(t *testing.T) {
 	assert.Equal(t, 600*time.Millisecond, policy.delayForDecision(2, policy.decisionForError(fmt.Errorf("HTTP 500"))))
 }
 
+func TestRetryPolicy_UsesConfiguredStaircaseAndRepeatsFinalDelay(t *testing.T) {
+	schedule := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}
+	policy := newProviderRetryPolicy(-1, RetryTuning{
+		Schedule:      schedule,
+		MaxDelay:      6 * time.Minute,
+		Randomization: 0,
+	}, nil)
+	decision := policy.decisionForError(fmt.Errorf("HTTP 503: upstream unavailable"))
+
+	require.Zero(t, policy.MaxAttempts)
+	require.Zero(t, policy.DefaultMaxAttempts)
+	for index, expected := range schedule {
+		require.Equal(t, expected, policy.delayForDecision(index+1, decision))
+	}
+	require.Equal(t, 5*time.Minute, policy.delayForDecision(6, decision))
+	require.True(t, retryAttemptAllowed(policy.MaxAttempts, 1_000_000))
+}
+
+func TestRetryPolicy_ServerHintCanExtendButNotShortenSchedule(t *testing.T) {
+	policy := newProviderRetryPolicy(-1, RetryTuning{
+		Schedule:      []time.Duration{30 * time.Second, time.Minute},
+		MaxDelay:      2 * time.Minute,
+		Randomization: 0,
+	}, nil)
+
+	require.Equal(t, 30*time.Second, policy.delayForDecision(1, retryDecision{Delay: time.Second}))
+	require.Equal(t, 90*time.Second, policy.delayForDecision(1, retryDecision{Delay: 90 * time.Second}))
+}
+
 func TestRetryPolicy_KeepsRuleAttemptLimitsErrorSpecific(t *testing.T) {
 	rules := []RetryRule{
 		{

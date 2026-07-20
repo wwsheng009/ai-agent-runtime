@@ -896,7 +896,7 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	resolvedModel := p.resolveModel(chatReq.Model)
 	activeMaxAttempts := policy.initialMaxAttempts()
 
-	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		chatResp, err := p.Chat(attemptCtx, chatReq)
 		if err == nil {
@@ -1072,7 +1072,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
 
-	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		reportHTTPDebug(attemptCtx, HTTPDebugEvent{
 			Source:           "provider_wrapper",
@@ -1383,7 +1383,7 @@ func (p *ProviderWrapper) CountTokens(text string) int {
 // GetCapabilities ??????
 func (p *ProviderWrapper) GetCapabilities() *ModelCapabilities {
 	caps := &ModelCapabilities{
-		MaxContextTokens:  128000,
+		MaxContextTokens:  DefaultContextWindowTokens,
 		MaxOutputTokens:   4096,
 		SupportsTools:     true,
 		SupportsStreaming: true,

@@ -73,11 +73,12 @@ func EffectiveProviderHeaders(globalHeaders, providerHeaders map[string]string) 
 
 // BackoffConfig holds retry backoff configuration.
 type BackoffConfig struct {
-	InitialInterval time.Duration `yaml:"initial_interval" mapstructure:"initial_interval"`
-	MaxInterval     time.Duration `yaml:"max_interval" mapstructure:"max_interval"`
-	MaxElapsedTime  time.Duration `yaml:"max_elapsed_time" mapstructure:"max_elapsed_time"`
-	Multiplier      float64       `yaml:"multiplier" mapstructure:"multiplier"`
-	Randomization   float64       `yaml:"randomization" mapstructure:"randomization"`
+	InitialInterval time.Duration   `yaml:"initial_interval" mapstructure:"initial_interval"`
+	MaxInterval     time.Duration   `yaml:"max_interval" mapstructure:"max_interval"`
+	MaxElapsedTime  time.Duration   `yaml:"max_elapsed_time" mapstructure:"max_elapsed_time"`
+	Multiplier      float64         `yaml:"multiplier" mapstructure:"multiplier"`
+	Randomization   float64         `yaml:"randomization" mapstructure:"randomization"`
+	Schedule        []time.Duration `yaml:"schedule" mapstructure:"schedule"`
 }
 
 // RetryConfig holds fine-grained retry rule configuration.

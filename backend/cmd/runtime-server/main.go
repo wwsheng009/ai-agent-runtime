@@ -1068,13 +1068,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 		if timeout <= 0 {
 			timeout = cfg.Providers.Timeout
 		}
-		maxRetries := cfg.Providers.MaxRetries
-		if maxRetries <= 0 && cfg.Retry != nil && cfg.Retry.DefaultMaxRetries > 0 {
-			maxRetries = cfg.Retry.DefaultMaxRetries
-		}
-		if maxRetries <= 0 {
-			maxRetries = 3
-		}
+		maxRetries := runtimellm.ProviderMaxRetriesFromAgentConfig(cfg)
 
 		providerConfigs[name] = &runtimellm.ProviderConfig{
 			Type:               providerType,
@@ -1101,23 +1095,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 }
 
 func buildLLMRetryTuning(cfg *config.Config) runtimellm.RetryTuning {
-	if cfg == nil {
-		return runtimellm.RetryTuning{}
-	}
-	tuning := runtimellm.RetryTuning{
-		BaseDelay:  cfg.Providers.Backoff.InitialInterval,
-		MaxDelay:   cfg.Providers.Backoff.MaxInterval,
-		Multiplier: cfg.Providers.Backoff.Multiplier,
-	}
-	if cfg.Retry != nil {
-		if tuning.BaseDelay <= 0 && cfg.Retry.DefaultRetryDelayMS > 0 {
-			tuning.BaseDelay = time.Duration(cfg.Retry.DefaultRetryDelayMS) * time.Millisecond
-		}
-		if tuning.Multiplier < 1 && cfg.Retry.DefaultBackoffMultiplier >= 1 {
-			tuning.Multiplier = cfg.Retry.DefaultBackoffMultiplier
-		}
-	}
-	return tuning
+	return runtimellm.RetryTuningFromAgentConfig(cfg)
 }
 
 func buildLLMRetryRules(cfg *config.Config) []runtimellm.RetryRule {

@@ -227,6 +227,18 @@ func TestManager_NewManager_WiresRuntimeRetryConfigFromProviderConfig(t *testing
 	assert.Equal(t, "500-504", rules[0].StatusCode.Range)
 }
 
+func TestRuntimeRetryConfigDefaultsToUnlimited(t *testing.T) {
+	maxRetries, tuning, rules := runtimeRetryConfigFromProviderConfigs(nil)
+	require.Equal(t, -1, maxRetries)
+	require.Equal(t, llm.RetryTuning{}, tuning)
+	require.Empty(t, rules)
+
+	maxRetries, _, _ = runtimeRetryConfigFromProviderConfigs(map[string]*llm.ProviderConfig{
+		"default": {},
+	})
+	require.Equal(t, -1, maxRetries)
+}
+
 func TestManager_ReloadProviderConfigsReplacesRuntimeProviders(t *testing.T) {
 	firstUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
