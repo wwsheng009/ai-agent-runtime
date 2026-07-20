@@ -8,10 +8,10 @@ import {
 } from "@/types/runtime";
 
 import {
-  buildErrorMessage,
   buildRuntimeUrl,
   buildRuntimeUrlWithQuery,
   parseErrorPayload,
+  RuntimeApiError,
 } from "./shared";
 
 type SseConsumeHandlers = {
@@ -170,7 +170,7 @@ export async function streamSessionRuntime(
 
   if (!response.ok) {
     const payload = await parseErrorPayload(response);
-    throw new Error(buildErrorMessage(response.status, payload));
+    throw new RuntimeApiError(response.status, payload);
   }
 
   await consumeSseResponse(response, {
@@ -208,7 +208,7 @@ export async function streamAgentChat(
 
   if (!response.ok) {
     const payload = await parseErrorPayload(response);
-    throw new Error(buildErrorMessage(response.status, payload));
+    throw new RuntimeApiError(response.status, payload);
   }
 
   await consumeSseResponse(response, {

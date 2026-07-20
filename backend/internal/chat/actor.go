@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,6 +30,10 @@ import (
 
 const aicliRuntimeContextTokenCountKey = "aicli_context_token_count"
 
+// ErrSessionActorStopped is returned when a command targets an actor whose
+// command loop has already been stopped.
+var ErrSessionActorStopped = errors.New("session actor is stopped")
+
 type approvalDetachContextKey struct{}
 
 type approvalDetachState struct {
@@ -46,6 +51,9 @@ type SessionActorConfig struct {
 	LoopConfig   *agent.LoopReActConfig
 	PrepareRun   func(ctx context.Context, session *Session, resume bool) error
 	PersistHook  func(ctx context.Context, session *Session) (*Session, error)
+	// RecoverStale releases transient busy states left by a previous
+	// actor instance. Enable it only after acquiring exclusive session ownership.
+	RecoverStale bool
 	OnStop       func()
 }
 
@@ -61,6 +69,7 @@ type SessionActor struct {
 	eventBus     *runtimeevents.Bus
 	prepareRun   func(context.Context, *Session, bool) error
 	persistHook  func(context.Context, *Session) (*Session, error)
+	recoverStale bool
 
 	cmdCh chan Command
 	stop  chan struct{}
@@ -103,6 +112,10 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		if agentConfig := cfg.Agent.GetConfig(); agentConfig != nil {
 			loopConfig = &agent.LoopReActConfig{
 				MaxSteps:             agent.NormalizeMaxSteps(agentConfig.MaxSteps),
+				MaxToolCalls:         agentConfig.MaxToolCalls,
+				MaxRunDuration:       agentConfig.MaxRunDuration,
+				MaxExplorationSteps:  agentConfig.MaxExplorationSteps,
+				MaxRepeatedToolCalls: agentConfig.MaxRepeatedToolCalls,
 				EnableThought:        true,
 				EnableToolCalls:      true,
 				EnableParallelTools:  true,
@@ -122,6 +135,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		eventBus:        bus,
 		prepareRun:      cfg.PrepareRun,
 		persistHook:     cfg.PersistHook,
+		recoverStale:    cfg.RecoverStale,
 		onStop:          cfg.OnStop,
 		cmdCh:           make(chan Command, 32),
 		stop:            make(chan struct{}),
@@ -158,6 +172,25 @@ func (a *SessionActor) Stop() {
 		a.cancelActive()
 	})
 	<-a.done
+}
+
+// IsStopped reports whether the actor has begun stopping or its command loop
+// has already exited.
+func (a *SessionActor) IsStopped() bool {
+	if a == nil {
+		return true
+	}
+	select {
+	case <-a.stop:
+		return true
+	default:
+	}
+	select {
+	case <-a.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *SessionActor) runStopHook() {
@@ -207,6 +240,8 @@ func (a *SessionActor) SubmitPrompt(ctx context.Context, prompt string, runMeta 
 	select {
 	case res := <-reply:
 		return res.Result, res.Err
+	case <-a.done:
+		return nil, ErrSessionActorStopped
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -237,6 +272,8 @@ func (a *SessionActor) Continue(ctx context.Context, runMeta *team.RunMeta, opts
 	select {
 	case res := <-reply:
 		return res.Result, res.Err
+	case <-a.done:
+		return nil, ErrSessionActorStopped
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -266,7 +303,10 @@ func (a *SessionActor) SubmitPromptAsync(ctx context.Context, prompt string, run
 		return err
 	}
 	go func() {
-		<-reply
+		select {
+		case <-reply:
+		case <-a.done:
+		}
 	}()
 	return nil
 }
@@ -301,6 +341,8 @@ func (a *SessionActor) ApproveToolWithArgs(ctx context.Context, requestID string
 	select {
 	case err := <-reply:
 		return err
+	case <-a.done:
+		return ErrSessionActorStopped
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -325,6 +367,8 @@ func (a *SessionActor) AnswerQuestion(ctx context.Context, questionID, answer st
 	select {
 	case err := <-reply:
 		return err
+	case <-a.done:
+		return ErrSessionActorStopped
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -344,6 +388,8 @@ func (a *SessionActor) Interrupt(ctx context.Context) error {
 	select {
 	case err := <-reply:
 		return err
+	case <-a.done:
+		return ErrSessionActorStopped
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -369,6 +415,8 @@ func (a *SessionActor) Rewind(ctx context.Context, checkpointID, mode string) (*
 	select {
 	case res := <-reply:
 		return res.Result, res.Err
+	case <-a.done:
+		return nil, ErrSessionActorStopped
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -395,6 +443,8 @@ func (a *SessionActor) Compact(ctx context.Context, mode string) (*compactruntim
 	select {
 	case res := <-reply:
 		return res.Result, res.Status, res.Err
+	case <-a.done:
+		return nil, compactruntime.Status{}, ErrSessionActorStopped
 	case <-ctx.Done():
 		return nil, compactruntime.Status{}, ctx.Err()
 	}
@@ -486,6 +536,8 @@ func (a *SessionActor) DeliverMailboxMessage(ctx context.Context, message team.M
 	select {
 	case err := <-reply:
 		return err
+	case <-a.done:
+		return ErrSessionActorStopped
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -505,6 +557,8 @@ func (a *SessionActor) SubscribeEvents(ctx context.Context, eventType string, ch
 	select {
 	case err := <-reply:
 		return err
+	case <-a.done:
+		return ErrSessionActorStopped
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -1112,9 +1166,16 @@ func (a *SessionActor) send(ctx context.Context, cmd Command) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if a.IsStopped() {
+		return ErrSessionActorStopped
+	}
 	select {
 	case a.cmdCh <- cmd:
 		return nil
+	case <-a.stop:
+		return ErrSessionActorStopped
+	case <-a.done:
+		return ErrSessionActorStopped
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -1298,7 +1359,7 @@ func shouldRollbackFailedPrompt(execErr error, result *agent.Result, resume bool
 	if result == nil {
 		return true
 	}
-	return strings.TrimSpace(result.Output) == "" && result.Steps == 0 && len(result.Observations) == 0
+	return strings.TrimSpace(result.Output) == "" && len(result.Observations) == 0
 }
 
 func (a *SessionActor) rollbackLastUserPrompt(ctx context.Context, session *Session, prompt string) error {
@@ -1841,6 +1902,14 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	}
 	if a.prepareRun != nil {
 		if err := a.prepareRun(ctx, session, resume); err != nil {
+			_ = a.updateState(context.Background(), func(state *RuntimeState) error {
+				state.Status = SessionIdle
+				state.CurrentTurnID = ""
+				state.CurrentRunMeta = nil
+				resetFrozenTurnTools(state)
+				state.UpdatedAt = time.Now().UTC()
+				return nil
+			})
 			if reply != nil {
 				reply <- SubmitResult{Err: err}
 			}
@@ -1885,6 +1954,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	a.setActiveStripMetadataKeys(stripMetadataKeys)
 	a.activeRunWG.Add(1)
 	go func() {
+		runStartedAt := time.Now()
 		defer a.activeRunWG.Done()
 		defer a.clearActiveStripMetadataKeys()
 		var (
@@ -1914,7 +1984,8 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		}
 
 		status := SessionIdle
-		if ctx.Err() != nil || a.consumeInterrupted() {
+		interrupted := a.consumeInterrupted()
+		if ctx.Err() != nil || interrupted || errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded) {
 			status = SessionStopped
 		}
 		if !approvalDetached {
@@ -1932,13 +2003,21 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			}
 		}
 
+		duration := durationMillis(result)
+		if duration <= 0 {
+			duration = time.Since(runStartedAt).Milliseconds()
+		}
 		payload := map[string]interface{}{
 			"turn_id":  turnID,
 			"resume":   resume,
 			"success":  execErr == nil && result != nil && result.Success,
 			"steps":    resultSteps(result),
 			"error":    firstNonEmptyError(execErr, result),
-			"duration": durationMillis(result),
+			"duration": duration,
+			"status":   status,
+		}
+		if cancelSource := sessionRunCancelSource(ctx, execErr, interrupted, result); cancelSource != "" {
+			payload["cancel_source"] = cancelSource
 		}
 		appendStructuredRunErrorPayload(payload, execErr)
 		if result != nil {
@@ -1946,8 +2025,14 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			appendSessionActorUsagePayload(payload, result.Usage)
 			if result.LimitReached {
 				payload["limit_reached"] = true
+				if result.LimitReason != "" {
+					payload["limit_reason"] = result.LimitReason
+				}
 				if result.StepLimit > 0 {
 					payload["step_limit"] = result.StepLimit
+				}
+				if result.ToolCallLimit > 0 {
+					payload["tool_call_limit"] = result.ToolCallLimit
 				}
 			}
 		}
@@ -2059,8 +2144,89 @@ func (a *SessionActor) loadState(ctx context.Context) error {
 		}
 		_ = a.stateStore.SaveState(ctx, state)
 	}
+	if a.recoverStale && reconcileRecoveredRuntimeState(state) {
+		if err := a.stateStore.SaveState(ctx, state); err != nil {
+			return err
+		}
+	}
 	a.state = state
 	return nil
+}
+
+// A newly constructed actor cannot still own an in-process run from a previous
+// actor instance. Preserve durable approval/question waits, but release
+// transient states that would otherwise leave a restored session permanently
+// busy after the previous process exited unexpectedly.
+func reconcileRecoveredRuntimeState(state *RuntimeState) bool {
+	if state == nil {
+		return false
+	}
+
+	switch state.Status {
+	case SessionRunning:
+		switch {
+		case state.PendingApproval != nil:
+			state.Status = SessionWaitingApproval
+			state.UpdatedAt = time.Now().UTC()
+			return true
+		case state.PendingQuestion != nil:
+			state.Status = SessionWaitingInput
+			state.UpdatedAt = time.Now().UTC()
+			return true
+		default:
+			stopRecoveredRuntimeState(state)
+			return true
+		}
+	case SessionWaitingApproval:
+		if state.PendingApproval == nil {
+			stopRecoveredRuntimeState(state)
+			return true
+		}
+	case SessionWaitingInput:
+		if state.PendingQuestion == nil {
+			stopRecoveredRuntimeState(state)
+			return true
+		}
+	case SessionRewinding:
+		stopRecoveredRuntimeState(state)
+		return true
+	}
+	return false
+}
+
+func stopRecoveredRuntimeState(state *RuntimeState) {
+	state.Status = SessionStopped
+	state.CurrentTurnID = ""
+	state.CurrentRunMeta = nil
+	resetFrozenTurnTools(state)
+	state.PendingTool = nil
+	state.PendingApproval = nil
+	state.PendingQuestion = nil
+	state.UpdatedAt = time.Now().UTC()
+}
+
+func sessionRunCancelSource(ctx context.Context, execErr error, interrupted bool, result *agent.Result) string {
+	if interrupted {
+		return "user_interrupt"
+	}
+	if result != nil && result.LimitReason == "run_timeout" {
+		return "run_timeout"
+	}
+	if errors.Is(execErr, context.DeadlineExceeded) {
+		return "deadline"
+	}
+	if errors.Is(execErr, context.Canceled) {
+		return "execution_context"
+	}
+	if ctx != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "parent_deadline"
+		}
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return "parent_context"
+		}
+	}
+	return ""
 }
 
 func (a *SessionActor) updateState(ctx context.Context, mutate func(*RuntimeState) error) error {
@@ -2084,7 +2250,17 @@ func (a *SessionActor) updateState(ctx context.Context, mutate func(*RuntimeStat
 		a.state.UpdatedAt = time.Now().UTC()
 	}
 	if a.stateStore != nil {
-		return a.stateStore.SaveState(ctx, a.state)
+		var saveErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			saveErr = a.stateStore.SaveState(ctx, a.state)
+			if saveErr == nil {
+				return nil
+			}
+			if attempt < 3 {
+				time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
+			}
+		}
+		return saveErr
 	}
 	return nil
 }

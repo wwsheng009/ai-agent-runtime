@@ -68,6 +68,8 @@ func TestRestoreSessionCheckpointConversationRewritesSessionHistory(t *testing.T
 		require.Equal(t, session.ID, sessionID)
 		return actor, nil
 	})
+	_, err = handler.sessionHub.GetOrCreate(session.ID)
+	require.NoError(t, err)
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -143,6 +145,8 @@ func TestPreviewSessionCheckpointConversationReportsExactSnapshot(t *testing.T) 
 		require.Equal(t, session.ID, sessionID)
 		return actor, nil
 	})
+	_, err = handler.sessionHub.GetOrCreate(session.ID)
+	require.NoError(t, err)
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -216,6 +220,8 @@ func TestPreviewSessionCheckpointConversationIncludesProvenance(t *testing.T) {
 		require.Equal(t, session.ID, sessionID)
 		return actor, nil
 	})
+	_, err = handler.sessionHub.GetOrCreate(session.ID)
+	require.NoError(t, err)
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -282,6 +288,8 @@ func TestListSessionCheckpointsIncludesConversationExactSummary(t *testing.T) {
 		require.Equal(t, session.ID, sessionID)
 		return actor, nil
 	})
+	_, err = handler.sessionHub.GetOrCreate(session.ID)
+	require.NoError(t, err)
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
@@ -302,6 +310,27 @@ func TestListSessionCheckpointsIncludesConversationExactSummary(t *testing.T) {
 	require.Len(t, resp.Checkpoints, 1)
 	require.True(t, resp.Checkpoints[0].ConversationExact)
 	require.Equal(t, 1, resp.Checkpoints[0].ConversationMessageCount)
+}
+
+func TestListSessionCheckpointsDoesNotCreateSessionActor(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	factoryCalls := 0
+	handler.sessionHub = chat.NewSessionHub(func(string) (*chat.SessionActor, error) {
+		factoryCalls++
+		return nil, context.Canceled
+	})
+	t.Cleanup(handler.sessionHub.StopAll)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/read-only-session/checkpoints", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Zero(t, factoryCalls)
+	_, actorExists := handler.sessionHub.Get("read-only-session")
+	require.False(t, actorExists)
 }
 
 func TestListSessionCheckpointsIncludesProvenanceSummary(t *testing.T) {
@@ -355,6 +384,8 @@ func TestListSessionCheckpointsIncludesProvenanceSummary(t *testing.T) {
 		require.Equal(t, session.ID, sessionID)
 		return actor, nil
 	})
+	_, err = handler.sessionHub.GetOrCreate(session.ID)
+	require.NoError(t, err)
 
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)

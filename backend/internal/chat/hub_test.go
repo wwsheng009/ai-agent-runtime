@@ -96,3 +96,58 @@ func TestBoundedSessionHubEvictsExpiredIdleActorsAndStopsWorker(t *testing.T) {
 		t.Fatalf("expected expired actor to stop exactly once, got %d", stopped.Load())
 	}
 }
+
+func TestSessionHubGetOrCreateReplacesStoppedActor(t *testing.T) {
+	var created atomic.Int32
+	hub := NewSessionHub(func(id string) (*SessionActor, error) {
+		created.Add(1)
+		return newHubTestActor(id, SessionIdle, nil), nil
+	})
+	t.Cleanup(hub.StopAll)
+
+	first, err := hub.GetOrCreate("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Stop()
+
+	second, err := hub.GetOrCreate("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("expected the hub to replace the stopped actor")
+	}
+	if created.Load() != 2 {
+		t.Fatalf("expected two actor factory calls, got %d", created.Load())
+	}
+}
+
+func TestBoundedSessionHubCreatesFreshActorAfterIdleSweep(t *testing.T) {
+	var created atomic.Int32
+	hub := NewBoundedSessionHub(func(id string) (*SessionActor, error) {
+		created.Add(1)
+		return newHubTestActor(id, SessionIdle, nil), nil
+	}, SessionHubOptions{MaxActors: 8, IdleTTL: time.Minute, SweepInterval: time.Hour})
+	t.Cleanup(hub.StopAll)
+
+	first, err := hub.GetOrCreate("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.mu.Lock()
+	hub.lastAccess["session-1"] = time.Now().Add(-2 * time.Minute)
+	hub.mu.Unlock()
+	hub.evictIdle(time.Now())
+
+	second, err := hub.GetOrCreate("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == first {
+		t.Fatal("expected a fresh actor after idle eviction")
+	}
+	if created.Load() != 2 {
+		t.Fatalf("expected two actor factory calls, got %d", created.Load())
+	}
+}

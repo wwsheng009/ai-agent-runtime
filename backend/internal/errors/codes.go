@@ -24,6 +24,7 @@ const (
 	ErrTurnDeadlineExceeded ErrorCode = "TURN_DEADLINE_EXCEEDED"
 	ErrAgentRunCanceled     ErrorCode = "AGENT_RUN_CANCELED"
 	ErrApprovalExpired      ErrorCode = "APPROVAL_EXPIRED"
+	ErrSessionLeaseConflict ErrorCode = "SESSION_LEASE_CONFLICT"
 
 	// Agent 错误
 	ErrAgentMaxSteps   ErrorCode = "AGENT_MAX_STEPS"

@@ -44,6 +44,7 @@ export {
 } from "./teams";
 export {
   getRuntimeBaseUrl,
+  isRuntimeApiErrorCode,
 } from "./shared";
 export {
   streamAgentChat,

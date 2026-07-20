@@ -13,6 +13,7 @@ import { type Artifact, type ChatMessage, type Thread } from "@/data/mock";
 import { useRuntimeModelCatalog } from "@/hooks/workspace/use-runtime-model-catalog";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import {
+  isRuntimeApiErrorCode,
   streamAgentChat,
   type AgentChatResult,
   type AgentChatStreamDonePayload,
@@ -224,11 +225,14 @@ export function useWorkspaceAgentChatTurn({
       });
     };
 
-    const updateStreamingError = (message: string) => {
+    const updateStreamingError = (
+      message: string,
+      heading = "Runtime stream failed.",
+    ) => {
       cancelStreamingFrame();
       const content = streamedText.trim()
         ? `${streamedText}\n\n[stream interrupted]\n${message}`
-        : `Runtime stream failed.\n\n${message}`;
+        : `${heading}\n\n${message}`;
       updateCurrentThread((thread) =>
         updateThreadMessage(thread, assistantMessageId, (currentMessage) => ({
           ...currentMessage,
@@ -715,7 +719,12 @@ export function useWorkspaceAgentChatTurn({
           return;
         }
         const message = getErrorMessage(error, "agent chat stream failed");
-        updateStreamingError(message);
+        updateStreamingError(
+          message,
+          isRuntimeApiErrorCode(error, "SESSION_LEASE_CONFLICT")
+            ? "Session is active in another runtime."
+            : undefined,
+        );
         updateCurrentThread((thread) => ({
           ...thread,
           updatedAt: new Date().toISOString(),

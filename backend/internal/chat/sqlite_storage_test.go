@@ -337,6 +337,24 @@ func TestSQLiteSessionStorageAppendDoesNotRewriteWholeProjection(t *testing.T) {
 	require.LessOrEqual(t, len(session.History), store.cfg.HotHistoryMessages)
 }
 
+func TestSQLiteSessionStorageMetadataOnlyUpdateReusesHotProjection(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteSessionStorage(t, nil)
+	session := NewSession("metadata-memory-user")
+	require.NoError(t, store.Save(ctx, session))
+	require.NoError(t, store.AddMessage(ctx, session.ID, *types.NewUserMessage(strings.Repeat("history", 1024))))
+
+	loaded, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.History, 1)
+	projectionMessage := &loaded.History[0]
+	loaded.UpdateTitle("metadata only")
+	require.NoError(t, store.Update(ctx, loaded))
+
+	require.Same(t, projectionMessage, &loaded.History[0], "metadata-only saves should not replace the in-memory projection")
+	require.Equal(t, "metadata only", loaded.Metadata.Title)
+}
+
 func TestSQLiteSessionStorageUpdateKeepsInMemoryProjectionBounded(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {

@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -24,6 +25,55 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+func TestSessionActorSubmitPromptReturnsAfterActorStopped(t *testing.T) {
+	actor := &SessionActor{
+		cmdCh: make(chan Command, 1),
+		stop:  make(chan struct{}),
+		done:  make(chan struct{}),
+	}
+	actor.Stop()
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := actor.SubmitPrompt(context.Background(), "retry", nil)
+		resultCh <- err
+	}()
+
+	select {
+	case err := <-resultCh:
+		require.ErrorIs(t, err, ErrSessionActorStopped)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("SubmitPrompt blocked after the actor had stopped")
+	}
+}
+
+func TestSessionActorSubmitPromptReturnsWhenLoopExitsBeforeReply(t *testing.T) {
+	actor := &SessionActor{
+		cmdCh: make(chan Command, 1),
+		stop:  make(chan struct{}),
+		done:  make(chan struct{}),
+	}
+	actor.startOnce.Do(func() {})
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := actor.SubmitPrompt(context.Background(), "retry", nil)
+		resultCh <- err
+	}()
+
+	require.Eventually(t, func() bool { return len(actor.cmdCh) == 1 }, 250*time.Millisecond, time.Millisecond)
+	close(actor.done)
+
+	select {
+	case err := <-resultCh:
+		if !errors.Is(err, ErrSessionActorStopped) {
+			t.Fatalf("expected stopped actor error, got %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("SubmitPrompt blocked after the actor loop exited")
+	}
+}
 
 type capturingSequenceProvider struct {
 	name         string
@@ -190,6 +240,43 @@ func (p *failingLLMProvider) GetCapabilities() *llm.ModelCapabilities {
 }
 
 func (p *failingLLMProvider) CheckHealth(ctx context.Context) error {
+	return nil
+}
+
+type cancelBlockingLLMProvider struct {
+	name    string
+	entered chan struct{}
+}
+
+func (p *cancelBlockingLLMProvider) Name() string {
+	return p.name
+}
+
+func (p *cancelBlockingLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	select {
+	case p.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (p *cancelBlockingLLMProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
+	return nil, fmt.Errorf("streaming is not supported")
+}
+
+func (p *cancelBlockingLLMProvider) CountTokens(text string) int {
+	return len(text) / 4
+}
+
+func (p *cancelBlockingLLMProvider) GetCapabilities() *llm.ModelCapabilities {
+	return &llm.ModelCapabilities{
+		MaxContextTokens: 128000,
+		SupportsTools:    true,
+	}
+}
+
+func (p *cancelBlockingLLMProvider) CheckHealth(ctx context.Context) error {
 	return nil
 }
 
@@ -381,6 +468,70 @@ func TestSessionActorInterruptClearsBusyRuntimeState(t *testing.T) {
 	require.Nil(t, state.PendingQuestion)
 	require.False(t, state.FrozenTurnToolsSet)
 	require.Empty(t, state.FrozenTurnTools)
+}
+
+func TestSessionActorRecoversOrphanedRunningStateAndAcceptsPrompt(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-recovered-running-user")
+	require.NoError(t, err)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "gpt-4",
+		MaxRetries:   1,
+	})
+	mockProvider := NewMockLLMProviderForChat()
+	require.NoError(t, runtime.RegisterProvider(mockProvider.Name(), mockProvider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-4", mockProvider.Name()))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-recovered-running-agent",
+		Model:    "gpt-4",
+		MaxSteps: 3,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	require.NoError(t, runtimeStore.SaveState(ctx, &RuntimeState{
+		SessionID:     session.ID,
+		Status:        SessionRunning,
+		CurrentTurnID: "turn_orphaned",
+		CurrentRunMeta: &team.RunMeta{
+			PermissionMode: "default",
+		},
+		FrozenTurnTools:    []types.ToolDefinition{{Name: "grep"}},
+		FrozenTurnToolsSet: true,
+		UpdatedAt:          time.Now().UTC().Add(-time.Minute),
+	}))
+
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+		RecoverStale: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	recovered := actor.State()
+	require.NotNil(t, recovered)
+	require.Equal(t, SessionStopped, recovered.Status)
+	require.Empty(t, recovered.CurrentTurnID)
+	require.Nil(t, recovered.CurrentRunMeta)
+	require.False(t, recovered.FrozenTurnToolsSet)
+	require.Empty(t, recovered.FrozenTurnTools)
+
+	persisted, err := runtimeStore.LoadState(ctx, session.ID)
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	require.Equal(t, SessionStopped, persisted.Status)
+	require.Empty(t, persisted.CurrentTurnID)
+
+	result, err := actor.SubmitPrompt(ctx, "continue after restore", nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, SessionIdle, actor.State().Status)
 }
 
 func TestSessionActorSubmitPromptRouteOverrideAppliesToNextLLMRequestOnly(t *testing.T) {
@@ -832,6 +983,85 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 	require.Equal(t, result.Usage.PromptTokens, sessionEndPayload["usage_prompt_tokens"])
 	require.Equal(t, result.Usage.CompletionTokens, sessionEndPayload["usage_completion_tokens"])
 	require.Equal(t, result.Usage.TotalTokens, sessionEndPayload["usage_total_tokens"])
+}
+
+func TestSessionActorInterruptConvergesStoppedStateAndTelemetry(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-cancel-user")
+	require.NoError(t, err)
+
+	provider := &cancelBlockingLLMProvider{
+		name:    "cancel-blocking-provider",
+		entered: make(chan struct{}, 1),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-cancel-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 3,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	type submitResponse struct {
+		result *agent.Result
+		err    error
+	}
+	responseCh := make(chan submitResponse, 1)
+	go func() {
+		result, submitErr := actor.SubmitPrompt(ctx, "wait until interrupted", nil)
+		responseCh <- submitResponse{result: result, err: submitErr}
+	}()
+
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not start")
+	}
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, actor.Interrupt(ctx))
+
+	var response submitResponse
+	select {
+	case response = <-responseCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SubmitPrompt did not return after interrupt")
+	}
+	require.ErrorIs(t, response.err, context.Canceled)
+	require.NotNil(t, response.result)
+	require.GreaterOrEqual(t, response.result.Steps, 1)
+	require.Greater(t, response.result.Duration.GetDuration(), time.Duration(0))
+
+	state := actor.State()
+	require.Equal(t, SessionStopped, state.Status)
+	require.Empty(t, state.CurrentTurnID)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	var sessionEnd map[string]interface{}
+	for _, event := range events {
+		if event.Type == EventSessionEnd {
+			sessionEnd = event.Payload
+		}
+	}
+	require.NotNil(t, sessionEnd)
+	require.Equal(t, SessionStopped, sessionEnd["status"])
+	require.Equal(t, "user_interrupt", sessionEnd["cancel_source"])
+	require.GreaterOrEqual(t, sessionEnd["steps"].(int), 1)
+	require.Greater(t, sessionEnd["duration"].(int64), int64(0))
 }
 
 func TestAppendStructuredRunErrorPayload_UsesPromptPreflightMetadata(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
@@ -60,6 +61,34 @@ func TestAgentChatReturnsConflictWhenSessionLeaseIsHeld(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "session runtime lease conflict") {
 		t.Fatalf("expected lease conflict body, got %s", rec.Body.String())
+	}
+	var payload struct {
+		Code    string `json:"code"`
+		Context struct {
+			Lease           chat.SessionLease `json:"lease"`
+			Retryable       bool              `json:"retryable"`
+			SuggestedAction string            `json:"suggested_action"`
+		} `json:"context"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode lease conflict body: %v", err)
+	}
+	if payload.Code != string(errors.ErrSessionLeaseConflict) {
+		t.Fatalf("expected dedicated lease conflict code, got %q", payload.Code)
+	}
+	if payload.Context.Lease.OwnerID != "existing-owner" || payload.Context.Lease.OwnerKind != "test" {
+		t.Fatalf("expected current lease owner context, got %#v", payload.Context.Lease)
+	}
+	if !payload.Context.Retryable || payload.Context.SuggestedAction == "" {
+		t.Fatalf("expected retry guidance, got %#v", payload.Context)
+	}
+}
+
+func TestSessionLeaseConflictSuggestsRuntimeServerForLocalAICLIOwner(t *testing.T) {
+	lease := &chat.SessionLease{OwnerKind: "aicli-actor"}
+	action := sessionLeaseConflictSuggestedAction(lease)
+	if !strings.Contains(action, "--runtime-server auto") {
+		t.Fatalf("expected runtime-server recovery guidance, got %q", action)
 	}
 }
 

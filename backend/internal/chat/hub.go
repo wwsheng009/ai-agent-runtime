@@ -78,12 +78,23 @@ func (h *SessionHub) Get(sessionID string) (*SessionActor, bool) {
 		return nil, false
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	actor, ok := h.actors[sessionID]
-	if ok {
-		h.lastAccess[sessionID] = time.Now()
+	if !ok {
+		h.mu.Unlock()
+		return nil, false
 	}
-	return actor, ok
+	if actor == nil || actor.IsStopped() {
+		delete(h.actors, sessionID)
+		delete(h.lastAccess, sessionID)
+		h.mu.Unlock()
+		if actor != nil {
+			actor.Stop()
+		}
+		return nil, false
+	}
+	h.lastAccess[sessionID] = time.Now()
+	h.mu.Unlock()
+	return actor, true
 }
 
 // GetOrCreate returns an existing actor or creates a new one.
@@ -99,9 +110,18 @@ func (h *SessionHub) GetOrCreate(sessionID string) (*SessionActor, error) {
 	}
 	h.mu.Lock()
 	if actor, ok := h.actors[sessionID]; ok {
-		h.lastAccess[sessionID] = time.Now()
+		if actor != nil && !actor.IsStopped() {
+			h.lastAccess[sessionID] = time.Now()
+			h.mu.Unlock()
+			return actor, nil
+		}
+		delete(h.actors, sessionID)
+		delete(h.lastAccess, sessionID)
 		h.mu.Unlock()
-		return actor, nil
+		if actor != nil {
+			actor.Stop()
+		}
+		return h.GetOrCreate(sessionID)
 	}
 	if h.factory == nil {
 		h.mu.Unlock()

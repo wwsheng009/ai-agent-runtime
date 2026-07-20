@@ -558,24 +558,24 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 		return err
 	}
 	if session.HistoryLoaded {
-		currentPrompt, err := loadPromptPayloadsTx(ctx, tx, session.ID)
+		promptRows, prefixMatches, err := loadMatchingPromptRowsTx(ctx, tx, session.ID, session.History)
 		if err != nil {
 			return err
 		}
-		incoming, err := encodeMessages(session.History)
-		if err != nil {
-			return err
-		}
-		prefixMatches := payloadPrefixMatches(currentPrompt, incoming)
-		appendOnly := prefixMatches && len(incoming) > len(currentPrompt)
-		appendFrom := len(incoming)
+		currentPromptCount := len(promptRows)
+		appendOnly := prefixMatches && len(session.History) > currentPromptCount
+		appendFrom := len(session.History)
 		if appendOnly {
-			appendFrom = len(currentPrompt)
-		} else if declaredDelta := session.CanonicalMessageCount - count; declaredDelta > 0 && declaredDelta <= len(incoming) {
-			appendFrom = len(incoming) - declaredDelta
+			appendFrom = currentPromptCount
+		} else if declaredDelta := session.CanonicalMessageCount - count; declaredDelta > 0 && declaredDelta <= len(session.History) {
+			appendFrom = len(session.History) - declaredDelta
 		}
-		if appendFrom < len(incoming) {
-			for index := appendFrom; index < len(incoming); index++ {
+		if appendFrom < len(session.History) {
+			incoming, err := encodeMessages(session.History[appendFrom:])
+			if err != nil {
+				return err
+			}
+			for index := range incoming {
 				count++
 				if err := s.insertCanonicalEncodedTx(ctx, tx, session.ID, count, incoming[index]); err != nil {
 					return err
@@ -584,20 +584,16 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 		}
 		switch {
 		case appendOnly:
-			promptRows, err := loadPromptRowsTx(ctx, tx, session.ID)
-			if err != nil {
-				return err
-			}
-			for index := appendFrom; index < len(incoming); index++ {
-				promptRows, err = s.appendPromptMessageTx(ctx, tx, session.ID, promptRows, incoming[index].message)
+			for index := appendFrom; index < len(session.History); index++ {
+				promptRows, err = s.appendPromptMessageTx(ctx, tx, session.ID, promptRows, session.History[index])
 				if err != nil {
 					return err
 				}
 			}
 			*storedProjection = promptRowMessages(promptRows)
-		case prefixMatches && len(incoming) == len(currentPrompt):
+		case prefixMatches && len(session.History) == currentPromptCount:
 			// Metadata-only updates do not rewrite the bounded prompt projection.
-			*storedProjection = encodedMessages(incoming)
+			*storedProjection = session.History
 		default:
 			projection, err := s.buildHotProjection(session.History)
 			if err != nil {
@@ -816,36 +812,45 @@ func applyStoredPromptProjection(session *Session, projection []types.Message) {
 	}
 }
 
-func payloadPrefixMatches(current [][]byte, incoming []encodedSessionMessage) bool {
-	if len(current) > len(incoming) {
-		return false
-	}
-	for index := range current {
-		if !bytes.Equal(current[index], incoming[index].payload) {
-			return false
-		}
-	}
-	return true
-}
-
-func loadPromptPayloadsTx(ctx context.Context, tx *sql.Tx, sessionID string) ([][]byte, error) {
+func loadMatchingPromptRowsTx(ctx context.Context, tx *sql.Tx, sessionID string, history []types.Message) ([]promptProjectionRow, bool, error) {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT payload_json FROM session_prompt_messages
+		SELECT position, payload_json, byte_count FROM session_prompt_messages
 		WHERE session_id = ? ORDER BY position ASC
 	`, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("query current prompt projection: %w", err)
+		return nil, false, fmt.Errorf("query current prompt projection: %w", err)
 	}
 	defer rows.Close()
-	var payloads [][]byte
+	result := make([]promptProjectionRow, 0, min(len(history), 16))
 	for rows.Next() {
+		var position, byteCount int
 		var payload []byte
-		if err := rows.Scan(&payload); err != nil {
-			return nil, fmt.Errorf("scan current prompt projection: %w", err)
+		if err := rows.Scan(&position, &payload, &byteCount); err != nil {
+			return nil, false, fmt.Errorf("scan current prompt projection: %w", err)
 		}
-		payloads = append(payloads, payload)
+		index := len(result)
+		if index >= len(history) {
+			return nil, false, nil
+		}
+		incoming, err := json.Marshal(history[index])
+		if err != nil {
+			return nil, false, fmt.Errorf("encode message %d: %w", index, err)
+		}
+		if !bytes.Equal(payload, incoming) {
+			return nil, false, nil
+		}
+		result = append(result, promptProjectionRow{
+			position: position,
+			encoded: encodedSessionMessage{
+				message: history[index],
+				size:    byteCount,
+			},
+		})
 	}
-	return payloads, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	return result, true, nil
 }
 
 func loadPromptRowsTx(ctx context.Context, tx *sql.Tx, sessionID string) ([]promptProjectionRow, error) {
@@ -866,6 +871,7 @@ func loadPromptRowsTx(ctx context.Context, tx *sql.Tx, sessionID string) ([]prom
 		if err := json.Unmarshal(row.encoded.payload, &row.encoded.message); err != nil {
 			return nil, fmt.Errorf("decode prompt projection row: %w", err)
 		}
+		row.encoded.payload = nil
 		result = append(result, row)
 	}
 	return result, rows.Err()

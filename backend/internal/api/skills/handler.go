@@ -1478,6 +1478,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		agentConfig.SystemPrompt = strings.TrimSpace(profileState.PromptText)
 	}
 	if selectedConfig != nil {
+		agentConfig.MaxToolCalls = selectedConfig.Agent.MaxToolCalls
+		agentConfig.MaxRunDuration = selectedConfig.Agent.Timeout
+		agentConfig.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
+		agentConfig.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
 		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig)
 	}
 	if strings.TrimSpace(req.TeamID) != "" || strings.TrimSpace(req.TaskID) != "" {
@@ -1547,10 +1551,14 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			execSession.AddMessage(*types.NewUserMessage(lastMessage))
 
 			reactResult, reactErr := a.RunReActWithSession(ctx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
-				MaxSteps:            agentConfig.MaxSteps,
-				EnableThought:       true,
-				EnableToolCalls:     true,
-				EnableParallelTools: selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
+				MaxSteps:             agentConfig.MaxSteps,
+				MaxToolCalls:         agentConfig.MaxToolCalls,
+				MaxRunDuration:       agentConfig.MaxRunDuration,
+				MaxExplorationSteps:  agentConfig.MaxExplorationSteps,
+				MaxRepeatedToolCalls: agentConfig.MaxRepeatedToolCalls,
+				EnableThought:        true,
+				EnableToolCalls:      true,
+				EnableParallelTools:  selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
 				MaxParallelToolCalls: func() int {
 					if selectedConfig != nil && selectedConfig.Agent.MaxParallelToolCalls > 0 {
 						return selectedConfig.Agent.MaxParallelToolCalls
@@ -1802,10 +1810,14 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			PreparedHistory: prependContextMessages(historyForAgent, buildAgentContextMessages(agentContext, workspaceCtx)),
 			EnableReAct:     true,
 			ReActConfig: &agent.LoopReActConfig{
-				MaxSteps:            agentConfig.MaxSteps,
-				EnableThought:       true,
-				EnableToolCalls:     true,
-				EnableParallelTools: selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
+				MaxSteps:             agentConfig.MaxSteps,
+				MaxToolCalls:         agentConfig.MaxToolCalls,
+				MaxRunDuration:       agentConfig.MaxRunDuration,
+				MaxExplorationSteps:  agentConfig.MaxExplorationSteps,
+				MaxRepeatedToolCalls: agentConfig.MaxRepeatedToolCalls,
+				EnableThought:        true,
+				EnableToolCalls:      true,
+				EnableParallelTools:  selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
 				MaxParallelToolCalls: func() int {
 					if selectedConfig != nil && selectedConfig.Agent.MaxParallelToolCalls > 0 {
 						return selectedConfig.Agent.MaxParallelToolCalls
@@ -2714,12 +2726,54 @@ func (h *Handler) writeSessionLeaseConflict(w http.ResponseWriter, err error) bo
 	if !stderrors.As(err, &conflict) {
 		return false
 	}
-	runtimeErr := errors.New(errors.ErrValidationFailed, "session runtime lease conflict")
+	runtimeErr := errors.New(errors.ErrSessionLeaseConflict, sessionLeaseConflictMessage(conflict))
 	if conflict != nil && conflict.Lease != nil {
-		runtimeErr = runtimeErr.WithContext("lease", conflict.Lease)
+		runtimeErr = runtimeErr.
+			WithContext("lease", conflict.Lease).
+			WithContext("retryable", true).
+			WithContext("suggested_action", sessionLeaseConflictSuggestedAction(conflict.Lease))
 	}
 	h.writeError(w, http.StatusConflict, runtimeErr)
 	return true
+}
+
+func sessionLeaseConflictMessage(conflict *chat.LeaseConflictError) string {
+	if conflict == nil || conflict.Lease == nil {
+		return "session runtime lease conflict"
+	}
+	lease := conflict.Lease
+	owner := strings.TrimSpace(lease.OwnerKind)
+	if owner == "" {
+		owner = strings.TrimSpace(lease.OwnerID)
+	}
+	if owner == "" {
+		owner = "another runtime"
+	}
+	location := ""
+	if lease.PID > 0 {
+		location = fmt.Sprintf(" (pid %d", lease.PID)
+		if hostname := strings.TrimSpace(lease.Hostname); hostname != "" {
+			location += " on " + hostname
+		}
+		location += ")"
+	} else if hostname := strings.TrimSpace(lease.Hostname); hostname != "" {
+		location = " (on " + hostname + ")"
+	}
+	return fmt.Sprintf("session runtime lease conflict: session is currently owned by %s%s", owner, location)
+}
+
+func sessionLeaseConflictSuggestedAction(lease *chat.SessionLease) string {
+	if lease == nil {
+		return "wait for the current session owner to release the lease, then retry"
+	}
+	switch strings.ToLower(strings.TrimSpace(lease.OwnerKind)) {
+	case "aicli-actor":
+		return "continue in the owning aicli process, exit it before retrying here, or launch aicli with --runtime-server auto"
+	case sessionActorLeaseOwnerKind:
+		return "submit the turn through the session runtime command API so the existing runtime-server actor can serialize it"
+	default:
+		return "wait for the current session owner to release the lease, then retry"
+	}
 }
 
 func sessionLeaseOwnerID(ownerKind, scope string) string {
@@ -3973,7 +4027,7 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 	storePath := resolveRuntimeBackgroundStorePath(h.runtimeConfigFile, bgCfg.StorePath)
 	storeDSN := strings.TrimSpace(bgCfg.StoreDSN)
 	logDir := resolveRuntimeBackgroundLogDir(h.runtimeConfigFile, bgCfg.LogDir)
-	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s", storePath, storeDSN, logDir, bgCfg.MaxOutputBytes, bgCfg.MaxConcurrentJobs, bgCfg.DefaultTimeout)
+	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%s|%d|%s|%d|%v", storePath, storeDSN, logDir, bgCfg.MaxOutputBytes, bgCfg.MaxConcurrentJobs, bgCfg.DefaultTimeout, bgCfg.MonitorInterval, bgCfg.HeartbeatTimeout, bgCfg.LaunchMaxAttempts, bgCfg.RetryBackoff, bgCfg.RecoveryMaxAttempts, bgCfg.RecoveryBackoffSchedule)
 
 	h.backgroundMu.Lock()
 	defer h.backgroundMu.Unlock()
@@ -3981,13 +4035,19 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 		return h.backgroundManager
 	}
 	manager := background.NewManager(background.Config{
-		MaxOutputBytes:    bgCfg.MaxOutputBytes,
-		DefaultTimeout:    bgCfg.DefaultTimeout,
-		StorePath:         storePath,
-		StoreDSN:          storeDSN,
-		LogDir:            logDir,
-		MaxConcurrentJobs: bgCfg.MaxConcurrentJobs,
-		EventHandler:      h.handleBackgroundEvent,
+		MaxOutputBytes:          bgCfg.MaxOutputBytes,
+		DefaultTimeout:          bgCfg.DefaultTimeout,
+		MonitorInterval:         bgCfg.MonitorInterval,
+		HeartbeatTimeout:        bgCfg.HeartbeatTimeout,
+		LaunchMaxAttempts:       bgCfg.LaunchMaxAttempts,
+		RetryBackoff:            bgCfg.RetryBackoff,
+		RecoveryMaxAttempts:     bgCfg.RecoveryMaxAttempts,
+		RecoveryBackoffSchedule: append([]time.Duration(nil), bgCfg.RecoveryBackoffSchedule...),
+		StorePath:               storePath,
+		StoreDSN:                storeDSN,
+		LogDir:                  logDir,
+		MaxConcurrentJobs:       bgCfg.MaxConcurrentJobs,
+		EventHandler:            h.handleBackgroundEvent,
 	})
 	h.backgroundManager = manager
 	h.backgroundConfigKey = key

@@ -2654,6 +2654,10 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		agentConfig.MaxSteps = agent.NormalizeMaxSteps(selectedConfig.Agent.MaxMaxSteps)
 	}
 	if selectedConfig != nil {
+		agentConfig.MaxToolCalls = selectedConfig.Agent.MaxToolCalls
+		agentConfig.MaxRunDuration = selectedConfig.Agent.Timeout
+		agentConfig.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
+		agentConfig.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
 		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig)
 	}
 	if streamRequested || strings.TrimSpace(requestedReasoningEffort) != "" {
@@ -2726,6 +2730,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		EventBus:     h.getRuntimeEventBus(),
 		LoopConfig:   buildSessionLoopConfig(selectedConfig, requestedReasoningEffort),
 		PersistHook:  h.runtimeServerGoalPersistHook,
+		RecoverStale: true,
 		OnStop: func() {
 			if leaseHandle != nil {
 				_ = leaseHandle.Release(context.Background())
@@ -2752,6 +2757,10 @@ func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig, requestedR
 	}
 	if selectedConfig != nil {
 		config.MaxSteps = agent.NormalizeMaxSteps(selectedConfig.Agent.MaxMaxSteps)
+		config.MaxToolCalls = selectedConfig.Agent.MaxToolCalls
+		config.MaxRunDuration = selectedConfig.Agent.Timeout
+		config.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
+		config.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
 		config.EnableParallelTools = selectedConfig.Agent.EnableParallelTools
 		if selectedConfig.Agent.MaxParallelToolCalls > 0 {
 			config.MaxParallelToolCalls = selectedConfig.Agent.MaxParallelToolCalls
