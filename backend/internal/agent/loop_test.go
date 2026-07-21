@@ -4203,6 +4203,15 @@ func TestReActLoop_Run_FreezesToolSurfaceForEntireTurn(t *testing.T) {
 			"context_keep_recent_messages": 8,
 		},
 	}, &MockSequenceMCPManager{output: "LOG " + large}, llmRuntime)
+	bus := runtimeevents.NewBus()
+	var freezeEvents []runtimeevents.Event
+	bus.Subscribe("context.tool_schema.compacted", func(event runtimeevents.Event) {
+		freezeEvents = append(freezeEvents, event)
+	})
+	bus.Subscribe("context.tool_schema.frozen", func(event runtimeevents.Event) {
+		freezeEvents = append(freezeEvents, event)
+	})
+	agent.SetEventBus(bus)
 
 	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
 		MaxSteps:        3,
@@ -4221,6 +4230,8 @@ func TestReActLoop_Run_FreezesToolSurfaceForEntireTurn(t *testing.T) {
 		require.Equal(t, firstTools, estimateToolDefinitionTokens(llmRuntime, req.Tools), "request %d rewrote tool surface", index)
 		require.Equal(t, toolDefinitionNames(provider.requests[0].Tools), toolDefinitionNames(req.Tools), "request %d changed tool names", index)
 	}
+	require.Len(t, freezeEvents, 1)
+	require.Equal(t, ToolDefinitionsFingerprint(provider.requests[0].Tools), freezeEvents[0].Payload["tool_surface_fingerprint"])
 }
 
 func TestReActLoop_GetAvailableTools_AlwaysExposesCoreFileTools(t *testing.T) {
@@ -4371,6 +4382,54 @@ func TestReActLoop_Run_AttachesToolSurfaceMetadataToLLMRequest(t *testing.T) {
 	names, ok := surface["names"].([]string)
 	require.True(t, ok, "expected tool_surface.names to be a []string")
 	assert.Equal(t, toolDefinitionNames(request.Tools), names)
+	fingerprint := ToolDefinitionsFingerprint(request.Tools)
+	require.NotEmpty(t, fingerprint)
+	assert.Equal(t, fingerprint, surface["fingerprint"])
+	assert.Equal(t, fingerprint, request.Metadata["tool_surface_fingerprint"])
+}
+
+func TestReActLoop_Run_EmitsProviderCacheHitRatio(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{{
+			Content: "Done.",
+			Model:   "test-model",
+			Usage: &types.TokenUsage{
+				PromptTokens:     1000,
+				CompletionTokens: 100,
+				TotalTokens:      1100,
+				CachedTokens:     250,
+			},
+		}},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := &Agent{config: &Config{
+		Name:         "test-agent",
+		Provider:     "test-provider",
+		Model:        "test-model",
+		MaxSteps:     1,
+		SystemPrompt: "You are a helpful assistant.",
+	}}
+	bus := runtimeevents.NewBus()
+	var finishedEvents []runtimeevents.Event
+	bus.Subscribe("llm.request.finished", func(event runtimeevents.Event) {
+		finishedEvents = append(finishedEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        1,
+		EnableThought:   true,
+		EnableToolCalls: false,
+	})
+	result, err := loop.Run(context.Background(), "finish the task")
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Len(t, finishedEvents, 1)
+	require.Equal(t, 250, finishedEvents[0].Payload["usage_cached_tokens"])
+	require.InDelta(t, 0.25, finishedEvents[0].Payload["usage_cache_hit_ratio"], 0.000001)
 }
 
 func TestResolveToolSourceForRequest_PrefersResolvedRuntimeSource(t *testing.T) {

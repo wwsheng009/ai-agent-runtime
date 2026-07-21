@@ -2801,6 +2801,13 @@ func runtimeContextSummaryLines(payload map[string]interface{}, includeUsage boo
 		if cached := firstPositivePayloadInt(payload, "usage_cached_tokens"); cached > 0 {
 			usageParts = append(usageParts, fmt.Sprintf("cached=%d", cached))
 		}
+		if ratio, ok := payloadFloatValue(payload, "usage_cache_hit_ratio"); ok {
+			usageParts = append(usageParts, fmt.Sprintf("cache_hit=%.1f%%", ratio*100))
+		} else if prompt := firstPositivePayloadInt(payload, "usage_prompt_tokens"); prompt > 0 {
+			if cached := firstPositivePayloadInt(payload, "usage_cached_tokens"); cached > 0 {
+				usageParts = append(usageParts, fmt.Sprintf("cache_hit=%.1f%%", float64(cached)/float64(prompt)*100))
+			}
+		}
 		if reasoning := firstPositivePayloadInt(payload, "usage_reasoning_tokens"); reasoning > 0 {
 			usageParts = append(usageParts, fmt.Sprintf("reasoning=%d", reasoning))
 		}
@@ -3459,6 +3466,27 @@ func firstPositivePayloadInt(payload map[string]interface{}, keys ...string) int
 	return 0
 }
 
+func payloadFloatValue(payload map[string]interface{}, key string) (float64, bool) {
+	if payload == nil {
+		return 0, false
+	}
+	switch value := payload[key].(type) {
+	case float64:
+		return value, true
+	case float32:
+		return float64(value), true
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case json.Number:
+		parsed, err := value.Float64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
 func sanitizeInteractiveAsyncTeamLaunchResponse(content string) string {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
@@ -4066,6 +4094,9 @@ func formatRuntimeLLMRequestStartedDebugInfo(event runtimeevents.Event) string {
 	if source := strings.TrimSpace(payloadStringValue(event.Payload["budget_source"])); source != "" {
 		parts = append(parts, "budget_source="+truncateChatRuntimeText(source, 80))
 	}
+	if fingerprint := strings.TrimSpace(payloadStringValue(event.Payload["tool_surface_fingerprint"])); fingerprint != "" {
+		parts = append(parts, "tool_surface_fingerprint="+truncateChatRuntimeText(fingerprint, 80))
+	}
 	if len(parts) == 0 {
 		return ""
 	}
@@ -4097,6 +4128,13 @@ func formatRuntimeLLMRequestFinishedDebugInfo(event runtimeevents.Event) string 
 	}
 	if cachedTokens := intPayloadValue(event.Payload, "usage_cached_tokens"); cachedTokens > 0 {
 		parts = append(parts, fmt.Sprintf("usage_cached_tokens=%d", cachedTokens))
+	}
+	if ratio, ok := payloadFloatValue(event.Payload, "usage_cache_hit_ratio"); ok {
+		parts = append(parts, fmt.Sprintf("usage_cache_hit_ratio=%.4f", ratio))
+	} else if promptTokens := intPayloadValue(event.Payload, "usage_prompt_tokens"); promptTokens > 0 {
+		if cachedTokens := intPayloadValue(event.Payload, "usage_cached_tokens"); cachedTokens > 0 {
+			parts = append(parts, fmt.Sprintf("usage_cache_hit_ratio=%.4f", float64(cachedTokens)/float64(promptTokens)))
+		}
 	}
 	if reasoningTokens := intPayloadValue(event.Payload, "usage_reasoning_tokens"); reasoningTokens > 0 {
 		parts = append(parts, fmt.Sprintf("usage_reasoning_tokens=%d", reasoningTokens))

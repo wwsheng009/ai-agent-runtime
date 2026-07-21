@@ -610,7 +610,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 	}); got != strings.Join([]string{
 		"[thinking] request finished CODEX_LOCAL/codex-gpt-5.4",
 		"  context: prompt=23099 budget=200000 window=270000",
-		"  usage  : in=23099 out=1663 total=24762 cached=2048 reasoning=512 source=provider_reported",
+		"  usage  : in=23099 out=1663 total=24762 cached=2048 cache_hit=8.9% reasoning=512 source=provider_reported",
 		"  budget : source=模型能力 auto-compact token limit",
 		"           detail    : provider/model capability auto-compact token limit",
 		"           candidates: 4 option(s)",
@@ -1193,7 +1193,7 @@ func TestChatRuntimeEvents_RenderSessionCompactTimeline(t *testing.T) {
 	}); got != strings.Join([]string{
 		"[context] session compact completed mode=local phase=pre_turn token 23099 -> 1892 compacted_messages=33 history_messages=4 checkpoint_id=chk-usage-1",
 		"  context: prompt=1892",
-		"  usage  : in=23099 out=512 total=23611 cached=2048 reasoning=256 source=provider_reported",
+		"  usage  : in=23099 out=512 total=23611 cached=2048 cache_hit=8.9% reasoning=256 source=provider_reported",
 		"  budget : source=模型能力 auto-compact token limit",
 		"           detail    : provider/model capability auto-compact token limit",
 		"           candidates: 4 option(s)",
@@ -5336,5 +5336,54 @@ func emitActorLoggingTestRun(bridge *chatRuntimeEventBridge, sessionID, traceID 
 	}
 	for _, event := range events {
 		bridge.handleStructuredLogEvent(event)
+	}
+}
+
+func TestRuntimeContextSummaryLinesIncludesCacheHitRatio(t *testing.T) {
+	lines := runtimeContextSummaryLines(map[string]interface{}{
+		"usage_prompt_tokens":     1000,
+		"usage_completion_tokens": 100,
+		"usage_total_tokens":      1100,
+		"usage_cached_tokens":     250,
+		"usage_cache_hit_ratio":   0.25,
+	}, true)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "cached=250") {
+		t.Fatalf("expected cached token count, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "cache_hit=25.0%") {
+		t.Fatalf("expected cache hit ratio, got:\n%s", joined)
+	}
+}
+
+func TestFormatRuntimeLLMRequestFinishedDebugInfoIncludesCacheHitRatio(t *testing.T) {
+	info := formatRuntimeLLMRequestFinishedDebugInfo(runtimeevents.Event{
+		Type: "llm.request.finished",
+		Payload: map[string]interface{}{
+			"success":                 true,
+			"usage_prompt_tokens":     1000,
+			"usage_completion_tokens": 100,
+			"usage_total_tokens":      1100,
+			"usage_cached_tokens":     250,
+			"usage_cache_hit_ratio":   0.25,
+		},
+	})
+	if !strings.Contains(info, "usage_cached_tokens=250") {
+		t.Fatalf("expected cached tokens in debug info, got %q", info)
+	}
+	if !strings.Contains(info, "usage_cache_hit_ratio=0.2500") {
+		t.Fatalf("expected cache hit ratio in debug info, got %q", info)
+	}
+}
+
+func TestFormatRuntimeLLMRequestStartedDebugInfoIncludesToolSurfaceFingerprint(t *testing.T) {
+	info := formatRuntimeLLMRequestStartedDebugInfo(runtimeevents.Event{
+		Type: "llm.request.started",
+		Payload: map[string]interface{}{
+			"tool_surface_fingerprint": "abc123fingerprint",
+		},
+	})
+	if !strings.Contains(info, "tool_surface_fingerprint=abc123fingerprint") {
+		t.Fatalf("expected tool surface fingerprint in started debug info, got %q", info)
 	}
 }

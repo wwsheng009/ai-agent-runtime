@@ -869,14 +869,25 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					return "", nil, nil, saveErr
 				}
 			}
+			toolFingerprint := ToolDefinitionsFingerprint(availableTools)
 			if toolTokensAfter > 0 && toolTokensAfter < toolTokensBefore {
 				loop.agent.emitRuntimeEvent("context.tool_schema.compacted", sessionID, "", map[string]interface{}{
-					"trace_id":           traceID,
-					"step":               step,
-					"tool_count":         len(availableTools),
-					"tool_schema_before": toolTokensBefore,
-					"tool_schema_after":  toolTokensAfter,
-					"reason":             "turn_freeze",
+					"trace_id":                 traceID,
+					"step":                     step,
+					"tool_count":               len(availableTools),
+					"tool_schema_before":       toolTokensBefore,
+					"tool_schema_after":        toolTokensAfter,
+					"tool_surface_fingerprint": toolFingerprint,
+					"reason":                   "turn_freeze",
+				})
+			} else if toolFingerprint != "" {
+				loop.agent.emitRuntimeEvent("context.tool_schema.frozen", sessionID, "", map[string]interface{}{
+					"trace_id":                 traceID,
+					"step":                     step,
+					"tool_count":               len(availableTools),
+					"tool_schema_tokens":       toolTokensAfter,
+					"tool_surface_fingerprint": toolFingerprint,
+					"reason":                   "turn_freeze",
 				})
 			}
 		}
@@ -1084,6 +1095,11 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if surface := summarizeToolSurface(req.Tools); len(surface) > 0 {
 		req.Metadata["executor_path"] = "actor"
 		requestPayload["executor_path"] = "actor"
+		if fingerprint := ToolDefinitionsFingerprint(req.Tools); fingerprint != "" {
+			surface["fingerprint"] = fingerprint
+			req.Metadata["tool_surface_fingerprint"] = fingerprint
+			requestPayload["tool_surface_fingerprint"] = fingerprint
+		}
 		req.Metadata["tool_surface"] = surface
 		requestPayload["tool_surface"] = surface
 	}
@@ -1202,6 +1218,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		finishedPayload["usage_total_tokens"] = response.Usage.TotalTokens
 		if response.Usage.CachedTokens > 0 {
 			finishedPayload["usage_cached_tokens"] = response.Usage.CachedTokens
+		}
+		if response.Usage.PromptTokens > 0 {
+			ratio := float64(response.Usage.CachedTokens) / float64(response.Usage.PromptTokens)
+			finishedPayload["usage_cache_hit_ratio"] = ratio
 		}
 		if response.Usage.ReasoningTokens > 0 {
 			finishedPayload["usage_reasoning_tokens"] = response.Usage.ReasoningTokens
