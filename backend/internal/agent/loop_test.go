@@ -26,10 +26,17 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+func TestToolCallContextCarriesAgentDepth(t *testing.T) {
+	ctx := toolCallContext(context.Background(), nil, "", nil, nil, "session-depth", 2)
+	require.Equal(t, 2, toolctx.AgentDepth(ctx))
+	require.Equal(t, "session-depth", toolctx.SessionID(ctx))
+}
 
 // MockLLMProvider 模拟 LLM Provider 用于测试
 type MockLLMProvider struct {
@@ -4108,6 +4115,112 @@ func TestCompactToolSurfaceForPromptUsesCombinedMessageAndSchemaPressure(t *test
 	properties := compacted[0].Parameters["properties"].(map[string]interface{})
 	require.NotContains(t, properties["path"].(map[string]interface{}), "description")
 	require.Equal(t, "string", properties["path"].(map[string]interface{})["type"])
+}
+
+func TestFreezeToolSurfaceForTurnUsesFixedPromptBudgetShare(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	tools := []types.ToolDefinition{{
+		Name:        "inspect",
+		Description: strings.Repeat("verbose tool description ", 100),
+		Parameters: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": strings.Repeat("verbose path guidance ", 100),
+					"default":     ".",
+				},
+			},
+			"required": []string{"path"},
+		},
+	}}
+	toolTokens := estimateToolDefinitionTokens(llmRuntime, tools)
+	require.Positive(t, toolTokens)
+
+	// Tight turn budget: tools alone exceed 1/4 of prompt budget, so freeze lean.
+	tightAgent := &Agent{config: &Config{
+		Name:  "test-agent",
+		Model: "test-model",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens": toolTokens * 2,
+		},
+	}}
+	tightLoop := NewReActLoop(tightAgent, llmRuntime, &LoopReActConfig{})
+	frozenTight := tightLoop.freezeToolSurfaceForTurn(tools)
+	require.Less(t, estimateToolDefinitionTokens(llmRuntime, frozenTight), toolTokens)
+
+	// Large turn budget: keep full descriptions when tools fit the reserved share.
+	wideAgent := &Agent{config: &Config{
+		Name:  "test-agent",
+		Model: "test-model",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens": toolTokens * 8,
+		},
+	}}
+	wideLoop := NewReActLoop(wideAgent, llmRuntime, &LoopReActConfig{})
+	frozenWide := wideLoop.freezeToolSurfaceForTurn(tools)
+	require.Equal(t, toolTokens, estimateToolDefinitionTokens(llmRuntime, frozenWide))
+}
+
+func TestReActLoop_Run_FreezesToolSurfaceForEntireTurn(t *testing.T) {
+	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 40)
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{
+		name: "test-provider",
+		responses: []*llm.LLMResponse{
+			{
+				Content: "先查看一次日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+				},
+			},
+			{
+				Content: "继续查看最新日志。",
+				Model:   "test-model",
+				ToolCalls: []types.ToolCall{
+					{Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"}},
+				},
+			},
+			{
+				Content: "已完成分析。",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		MaxSteps:         3,
+		DefaultMaxTokens: 256,
+		SystemPrompt:     "You are a helpful assistant.",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens":    1300,
+			"context_max_messages":         16,
+			"context_keep_recent_messages": 8,
+		},
+	}, &MockSequenceMCPManager{output: "LOG " + large}, llmRuntime)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        3,
+		EnableThought:   true,
+		EnableToolCalls: true,
+	})
+
+	result, err := loop.Run(context.Background(), "继续处理")
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Len(t, provider.requests, 3)
+
+	firstTools := estimateToolDefinitionTokens(llmRuntime, provider.requests[0].Tools)
+	require.Positive(t, firstTools)
+	for index, req := range provider.requests {
+		require.Equal(t, firstTools, estimateToolDefinitionTokens(llmRuntime, req.Tools), "request %d rewrote tool surface", index)
+		require.Equal(t, toolDefinitionNames(provider.requests[0].Tools), toolDefinitionNames(req.Tools), "request %d changed tool names", index)
+	}
 }
 
 func TestReActLoop_GetAvailableTools_AlwaysExposesCoreFileTools(t *testing.T) {

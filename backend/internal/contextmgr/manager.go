@@ -490,19 +490,18 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		m.emitEvent("context.profile.injected", input.TraceID, input.SessionID, profileMeta)
 	}
 
-	if factMessage, factCount, evidenceRefs := m.buildFactLedgerMessage(ctx, input); !activeTurnHasReplay && factMessage != nil {
-		managed = append(managed, *factMessage)
-		result.Metadata["fact_ledger_injected"] = true
-		result.Metadata["fact_count"] = factCount
-		result.Metadata["fact_evidence_refs"] = evidenceRefs
-		if metrics, ok := layerMetrics["facts"].(map[string]interface{}); ok {
-			metrics["injected"] = true
-			metrics["count"] = factCount
-			metrics["evidence_count"] = len(evidenceRefs)
-		}
-		m.emitEvent("context.fact_ledger.injected", input.TraceID, input.SessionID, map[string]interface{}{
-			"goal_id": input.GoalID, "fact_count": factCount, "evidence_refs": evidenceRefs,
-		})
+	// Snapshot authoritative facts before compaction. Compaction may persist
+	// structured facts as a side effect; the prompt must still reflect the
+	// pre-compact projection, matching historical semantics. The snapshot is
+	// only appended after raw history so the conversation prefix stays stable
+	// for provider prompt caching (no forward inserts before turns).
+	var (
+		factMessage  *types.Message
+		factCount    int
+		factEvidence []string
+	)
+	if !activeTurnHasReplay {
+		factMessage, factCount, factEvidence = m.buildFactLedgerMessage(ctx, input)
 	}
 
 	if len(older) >= maxInt(1, m.Strategy.MinCompactionMessages) {
@@ -584,7 +583,28 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 		}
 	}
 
+	// Append-only raw history after the stable session prefix. Within a session this
+	// slice must only grow by appending (or be replaced by cold compaction summaries
+	// for older turns), never receive forward inserts.
 	managed = append(managed, cloneMessages(recent)...)
+
+	// Mutable context layers are always appended after raw history so they cannot
+	// reorder or split the conversation prefix used for provider prompt caching.
+	if factMessage != nil {
+		managed = append(managed, *factMessage)
+		result.Metadata["fact_ledger_injected"] = true
+		result.Metadata["fact_count"] = factCount
+		result.Metadata["fact_evidence_refs"] = factEvidence
+		if metrics, ok := layerMetrics["facts"].(map[string]interface{}); ok {
+			metrics["injected"] = true
+			metrics["count"] = factCount
+			metrics["evidence_count"] = len(factEvidence)
+		}
+		m.emitEvent("context.fact_ledger.injected", input.TraceID, input.SessionID, map[string]interface{}{
+			"goal_id": input.GoalID, "fact_count": factCount, "evidence_refs": factEvidence,
+		})
+	}
+
 	selectedObservations := selectObservationsForMode(input.Memory, input.Observations, m.Strategy.ObservationMode)
 	layerMetrics["warm"].(map[string]interface{})["selected_items"] = len(selectedObservations)
 	if activeTurnHasReplay {
@@ -1634,8 +1654,13 @@ func splitManagedMessages(messages []types.Message) ([]types.Message, []types.Me
 		}
 		if stage := message.Metadata.GetString("context_stage", ""); stage != "" {
 			switch stage {
-			case "ledger", "fact_ledger", "correction", "profile", "compaction", "workspace", "team":
+			// Session-stable cold layers may sit after system and before raw history.
+			// Mutable/request-local layers stay in the dynamic tail so trim/assemble
+			// never reorders them in front of conversation turns.
+			case "ledger", "correction", "profile", "compaction":
 				stableMessages = append(stableMessages, *message.Clone())
+			case "fact_ledger", "workspace", "team", "recall", "warm_memory", "observation", "todo_state":
+				dynamicMessages = append(dynamicMessages, *message.Clone())
 			default:
 				dynamicMessages = append(dynamicMessages, *message.Clone())
 			}

@@ -843,27 +843,42 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	var availableTools []types.ToolDefinition
 	if loop.config.EnableToolCalls {
+		// Freeze the tool surface once for the active turn. Re-compacting on later
+		// steps would rewrite the tools prefix mid-session and break provider
+		// prompt caching / tool-call continuity. Use the fixed turn prompt budget
+		// (not step remainingBudget / first-step message size) so the frozen
+		// surface remains budget-safe as active-turn history grows.
+		toolsFrozen := false
+		if snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx); ok && snapshot != nil {
+			if _, cached, loadErr := snapshot.LoadTurnToolSurface(ctx); loadErr != nil {
+				return "", nil, nil, loadErr
+			} else {
+				toolsFrozen = cached
+			}
+		}
 		availableTools, err = loop.getAvailableTools(ctx, goal, toolWhitelist)
 		if err != nil {
 			return "", nil, nil, err
 		}
-		toolTokensBefore := estimateToolDefinitionTokens(loop.llmRuntime, availableTools)
-		availableTools = loop.compactToolSurfaceForPrompt(managedHistory, availableTools, remainingBudget)
-		toolTokensAfter := estimateToolDefinitionTokens(loop.llmRuntime, availableTools)
-		if toolTokensAfter > 0 && toolTokensAfter < toolTokensBefore {
+		if !toolsFrozen {
+			toolTokensBefore := estimateToolDefinitionTokens(loop.llmRuntime, availableTools)
+			availableTools = loop.freezeToolSurfaceForTurn(availableTools)
+			toolTokensAfter := estimateToolDefinitionTokens(loop.llmRuntime, availableTools)
 			if snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx); ok && snapshot != nil {
 				if saveErr := snapshot.SaveTurnToolSurface(ctx, availableTools); saveErr != nil {
 					return "", nil, nil, saveErr
 				}
 			}
-			loop.agent.emitRuntimeEvent("context.tool_schema.compacted", sessionID, "", map[string]interface{}{
-				"trace_id":           traceID,
-				"step":               step,
-				"tool_count":         len(availableTools),
-				"tool_schema_before": toolTokensBefore,
-				"tool_schema_after":  toolTokensAfter,
-				"reason":             "prompt_pressure",
-			})
+			if toolTokensAfter > 0 && toolTokensAfter < toolTokensBefore {
+				loop.agent.emitRuntimeEvent("context.tool_schema.compacted", sessionID, "", map[string]interface{}{
+					"trace_id":           traceID,
+					"step":               step,
+					"tool_count":         len(availableTools),
+					"tool_schema_before": toolTokensBefore,
+					"tool_schema_after":  toolTokensAfter,
+					"reason":             "turn_freeze",
+				})
+			}
 		}
 	}
 	var preflightMetadata map[string]interface{}
@@ -1243,7 +1258,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step int, depth int, historySnapshot []types.Message, toolCalls []types.ToolCall, toolWhitelist []string) ([]toolExecutionResult, error) {
 	results := make([]toolExecutionResult, len(toolCalls))
 	if plan := loop.buildParallelToolBatchPlan(toolCalls, toolWhitelist); plan != nil {
-		return loop.runParallelToolBatch(ctx, traceID, sessionID, step, toolCalls, plan), nil
+		return loop.runParallelToolBatch(ctx, traceID, sessionID, step, depth, toolCalls, plan), nil
 	}
 	gateway := loop.agent.GetOutputGateway()
 	allowedTools := whitelistSet(toolWhitelist)
@@ -1264,7 +1279,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		if source := resolveToolSourceForRequest(loop.agent, tc.Name); source != "" {
 			metadata[toolresult.SourceKey] = source
 		}
-		callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, tc.ID, results[:i], loop.agent, sessionID), results[:i])
+		callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, tc.ID, results[:i], loop.agent, sessionID, depth), results[:i])
 		loop.agent.emitRuntimeEvent("tool.requested", sessionID, tc.Name, toolRequestedEventPayload(tc, step, traceID, toolRequestedEventSourcePayload(loop.agent, tc.Name)))
 		if err := loop.agent.runPreToolUseHooks(ctx, sessionID, tc); err != nil {
 			result.Error = err.Error()
@@ -2116,14 +2131,9 @@ func (loop *ReActLoop) getAvailableTools(ctx context.Context, goal string, toolW
 		if cached {
 			return cloneToolDefinitions(tools), nil
 		}
-		tools, err = loop.computeAvailableTools(ctx, goal, toolWhitelist)
-		if err != nil {
-			return nil, err
-		}
-		if err := snapshot.SaveTurnToolSurface(ctx, tools); err != nil {
-			return nil, err
-		}
-		return cloneToolDefinitions(tools), nil
+		// Do not freeze yet: the caller freezes a turn-stable surface after the
+		// first budget-aware compaction so later steps never rewrite tools.
+		return loop.computeAvailableTools(ctx, goal, toolWhitelist)
 	}
 	return loop.computeAvailableTools(ctx, goal, toolWhitelist)
 }
@@ -2308,6 +2318,38 @@ func compactGrepParametersForModel(parameters map[string]interface{}) map[string
 
 func (loop *ReActLoop) compactToolSurfaceToBudget(tools []types.ToolDefinition) []types.ToolDefinition {
 	return loop.compactToolSurfaceForPrompt(nil, tools, 0)
+}
+
+// freezeToolSurfaceForTurn selects a turn-stable tool surface before the first
+// model call. It uses the fixed turn prompt budget and reserves most of that
+// budget for active-turn message growth, so later steps do not need to rewrite
+// tools under tighter prompt pressure.
+func (loop *ReActLoop) freezeToolSurfaceForTurn(tools []types.ToolDefinition) []types.ToolDefinition {
+	if loop == nil || loop.llmRuntime == nil || len(tools) == 0 {
+		return tools
+	}
+	budget := resolveContextBuildPromptBudget(loop.llmRuntime, loop.agent, loop.config)
+	if budget.PromptBudget <= 0 {
+		return tools
+	}
+	before := estimateToolDefinitionTokens(loop.llmRuntime, tools)
+	if before <= 0 {
+		return tools
+	}
+	// Keep tools to at most ~1/4 of the turn prompt budget so active-turn replay
+	// growth and preflight message compaction still have room later in the turn.
+	toolBudget := budget.PromptBudget / 4
+	if toolBudget < 1 {
+		toolBudget = 1
+	}
+	if before <= toolBudget {
+		return tools
+	}
+	compacted := compactToolDefinitionAnnotations(tools)
+	if after := estimateToolDefinitionTokens(loop.llmRuntime, compacted); after > 0 && after < before {
+		return compacted
+	}
+	return tools
 }
 
 func (loop *ReActLoop) compactToolSurfaceForPrompt(messages []types.Message, tools []types.ToolDefinition, remainingBudget int) []types.ToolDefinition {
@@ -2649,7 +2691,7 @@ func joinRuntimeAdvisories(values ...string) string {
 	return strings.Join(parts, "\n\n")
 }
 
-func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToolCallID string, completed []toolExecutionResult, agent *Agent, sessionID string) context.Context {
+func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToolCallID string, completed []toolExecutionResult, agent *Agent, sessionID string, depth int) context.Context {
 	if batch, ok := ToolBatchContextFromContext(ctx); ok && len(batch.ToolCalls) > 0 {
 		ctx = WithToolBatchContext(ctx, batch.ToolCalls, currentToolCallID, batch.CompletedToolMessages)
 	} else {
@@ -2658,6 +2700,7 @@ func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToo
 	if strings.TrimSpace(sessionID) != "" {
 		ctx = toolctx.WithSessionID(ctx, sessionID)
 	}
+	ctx = toolctx.WithAgentDepth(ctx, depth)
 	if outputDir := generatedImageOutputDirForAgentSession(agent, sessionID); strings.TrimSpace(outputDir) != "" {
 		ctx = toolctx.WithGeneratedImageOutputDir(ctx, outputDir)
 	}

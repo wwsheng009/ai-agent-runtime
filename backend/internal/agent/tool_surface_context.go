@@ -69,6 +69,11 @@ func (s *inMemoryTurnToolSurfaceSnapshot) SaveTurnToolSurface(ctx context.Contex
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Once frozen for a turn, do not rewrite the tool surface. Mid-turn mutations
+	// would reorder/remove tool schemas and break prompt-cache prefixes.
+	if s.set {
+		return nil
+	}
 	s.tools = cloneToolDefinitions(tools)
 	s.set = true
 	return nil

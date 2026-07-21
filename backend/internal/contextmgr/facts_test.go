@@ -57,3 +57,79 @@ func TestRecordObservationsPersistsEvidenceLinkedTestFact(t *testing.T) {
 	require.Equal(t, "succeeded", facts[0].Predicate)
 	require.Equal(t, []string{"artifact:test-log"}, facts[0].EvidenceRefs)
 }
+
+func TestBuildKeepsConversationPrefixStableWhenFactLedgerInjected(t *testing.T) {
+	store, err := artifact.NewStore(&artifact.StoreConfig{Path: t.TempDir() + "/prefix.sqlite"})
+	require.NoError(t, err)
+	defer store.Close()
+	ledger := factledger.New(store)
+	_, err = ledger.Append(context.Background(), factledger.Fact{
+		FactID: "session-fact", SessionID: "s", Scope: factledger.ScopeSession,
+		Kind: "constraint", Subject: "user", Predicate: "requires", Value: "Chinese output",
+		SourceEventID: "event:u1", EvidenceRefs: []string{"event:u1"},
+	})
+	require.NoError(t, err)
+
+	history := []types.Message{
+		*types.NewSystemMessage("system prompt"),
+		*types.NewUserMessage("first user turn"),
+		*types.NewAssistantMessage("first assistant turn"),
+		// Active turn must end on user input; otherwise fact injection is suppressed
+		// by activeUserTurnHasReplay once an assistant reply already exists.
+		*types.NewUserMessage("continue with facts"),
+	}
+	manager := NewManager(DefaultBudget(), store)
+
+	withoutFacts := manager.Build(context.Background(), BuildInput{
+		SessionID: "", // no session id => no fact ledger
+		Goal:      "continue",
+		History:   history,
+	})
+	withFacts := manager.Build(context.Background(), BuildInput{
+		SessionID: "s",
+		Goal:      "continue",
+		History:   history,
+	})
+	require.Equal(t, true, withFacts.Metadata["fact_ledger_injected"])
+	require.NotEqual(t, true, withoutFacts.Metadata["fact_ledger_injected"])
+
+	// History prefix must be byte-identical; ledger may only append after it.
+	require.GreaterOrEqual(t, len(withFacts.Messages), len(withoutFacts.Messages))
+	for i := range withoutFacts.Messages {
+		require.Equal(t, withoutFacts.Messages[i].Role, withFacts.Messages[i].Role)
+		require.Equal(t, withoutFacts.Messages[i].Content, withFacts.Messages[i].Content)
+	}
+	ledgerMsg := withFacts.Messages[len(withFacts.Messages)-1]
+	require.Equal(t, "fact_ledger", ledgerMsg.Metadata.GetString("context_stage", ""))
+	require.Contains(t, ledgerMsg.Content, "Chinese output")
+}
+
+func TestBuildDoesNotPrependFactLedgerBeforeHistory(t *testing.T) {
+	store, err := artifact.NewStore(&artifact.StoreConfig{Path: t.TempDir() + "/order.sqlite"})
+	require.NoError(t, err)
+	defer store.Close()
+	ledger := factledger.New(store)
+	_, err = ledger.Append(context.Background(), factledger.Fact{
+		FactID: "f1", SessionID: "s", Scope: factledger.ScopeSession,
+		Kind: "execution", Subject: "grep", Predicate: "succeeded", Value: "ok",
+		SourceEventID: "event:1", EvidenceRefs: []string{"event:1"},
+	})
+	require.NoError(t, err)
+
+	manager := NewManager(DefaultBudget(), store)
+	result := manager.Build(context.Background(), BuildInput{
+		SessionID: "s",
+		Goal:      "continue",
+		History: []types.Message{
+			*types.NewSystemMessage("system prompt"),
+			*types.NewUserMessage("hello"),
+		},
+	})
+	require.True(t, result.Metadata["fact_ledger_injected"].(bool))
+	require.GreaterOrEqual(t, len(result.Messages), 3)
+	require.Equal(t, "system", result.Messages[0].Role)
+	require.Equal(t, "user", result.Messages[1].Role)
+	require.Equal(t, "hello", result.Messages[1].Content)
+	require.Equal(t, "fact_ledger", result.Messages[len(result.Messages)-1].Metadata.GetString("context_stage", ""))
+}
+

@@ -113,7 +113,7 @@ func (loop *ReActLoop) buildParallelToolBatchPlan(toolCalls []types.ToolCall, to
 	return plan
 }
 
-func (loop *ReActLoop) runParallelToolBatch(ctx context.Context, traceID, sessionID string, step int, toolCalls []types.ToolCall, plan *parallelToolBatchPlan) []toolExecutionResult {
+func (loop *ReActLoop) runParallelToolBatch(ctx context.Context, traceID, sessionID string, step, depth int, toolCalls []types.ToolCall, plan *parallelToolBatchPlan) []toolExecutionResult {
 	results := make([]toolExecutionResult, len(toolCalls))
 	if loop == nil || plan == nil || len(plan.calls) == 0 {
 		return results
@@ -129,7 +129,7 @@ func (loop *ReActLoop) runParallelToolBatch(ctx context.Context, traceID, sessio
 		item := item
 		go func() {
 			defer wg.Done()
-			results[item.index] = loop.executeParallelToolCall(ctx, gateway, traceID, sessionID, step, toolCalls, globalSem, mcpSems[item.toolInfo.MCPName], item)
+			results[item.index] = loop.executeParallelToolCall(ctx, gateway, traceID, sessionID, step, depth, toolCalls, globalSem, mcpSems[item.toolInfo.MCPName], item)
 		}()
 	}
 	wg.Wait()
@@ -164,7 +164,7 @@ func buildParallelMCPGates(plan *parallelToolBatchPlan) map[string]chan struct{}
 	return gates
 }
 
-func (loop *ReActLoop) executeParallelToolCall(ctx context.Context, gateway *output.Gateway, traceID, sessionID string, step int, toolCalls []types.ToolCall, globalSem, mcpSem chan struct{}, item parallelToolCallPlan) toolExecutionResult {
+func (loop *ReActLoop) executeParallelToolCall(ctx context.Context, gateway *output.Gateway, traceID, sessionID string, step, depth int, toolCalls []types.ToolCall, globalSem, mcpSem chan struct{}, item parallelToolCallPlan) toolExecutionResult {
 	result := toolExecutionResult{Call: item.call}
 	metadata := map[string]interface{}{
 		"step":     step,
@@ -179,7 +179,7 @@ func (loop *ReActLoop) executeParallelToolCall(ctx context.Context, gateway *out
 		metadata["execution_mode"] = item.toolInfo.ExecutionMode
 	}
 
-	callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, item.call.ID, nil, loop.agent, sessionID), nil)
+	callCtx := promoteTeamRunContext(toolCallContext(ctx, toolCalls, item.call.ID, nil, loop.agent, sessionID, depth), nil)
 	loop.agent.emitRuntimeEvent("tool.requested", sessionID, item.call.Name, toolRequestedEventPayload(item.call, step, traceID, map[string]interface{}{
 		"parallel":           true,
 		"batch_index":        item.index,

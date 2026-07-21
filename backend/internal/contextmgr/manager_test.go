@@ -1334,7 +1334,7 @@ func TestTrimByTokenBudget_KeepsLastUserWhenStableContextExceedsBudget(t *testin
 	assert.Equal(t, "latest user question", trimmed[2].Content)
 }
 
-func TestTrimByTokenBudget_PreservesWorkspaceRecallAsStableAnchor(t *testing.T) {
+func TestTrimByTokenBudget_KeepsWorkspaceRecallInDynamicTail(t *testing.T) {
 	messages := []types.Message{
 		*types.NewSystemMessage("system prompt"),
 		{
@@ -1346,18 +1346,20 @@ func TestTrimByTokenBudget_PreservesWorkspaceRecallAsStableAnchor(t *testing.T) 
 		},
 		{
 			Role:    "assistant",
+			Content: "recent assistant reply",
+		},
+		*types.NewUserMessage("latest user question"),
+		{
+			Role:    "assistant",
 			Content: "Workspace recall:\nSummary: workspace summary",
 			Metadata: types.Metadata{
 				"context_stage": "workspace",
 			},
 		},
-		{
-			Role:    "assistant",
-			Content: "recent assistant reply",
-		},
-		*types.NewUserMessage("latest user question"),
 	}
 
+	// Budget fits 4 messages. Dynamic workspace should be dropped before the active
+	// user turn, and must not be reordered in front of raw conversation history.
 	trimmed := trimByTokenBudget(messages, Budget{
 		MaxPromptTokens: 40,
 	}, func(messages []types.Message) int {
@@ -1367,9 +1369,13 @@ func TestTrimByTokenBudget_PreservesWorkspaceRecallAsStableAnchor(t *testing.T) 
 	require.Len(t, trimmed, 4)
 	assert.Equal(t, "system", trimmed[0].Role)
 	assert.Equal(t, "profile", trimmed[1].Metadata.GetString("context_stage", ""))
-	assert.Equal(t, "workspace", trimmed[2].Metadata.GetString("context_stage", ""))
+	assert.Equal(t, "assistant", trimmed[2].Role)
+	assert.Equal(t, "recent assistant reply", trimmed[2].Content)
 	assert.Equal(t, "user", trimmed[3].Role)
 	assert.Equal(t, "latest user question", trimmed[3].Content)
+	for _, message := range trimmed {
+		require.NotEqual(t, "workspace", message.Metadata.GetString("context_stage", ""))
+	}
 }
 
 func TestTrimByTokenBudget_DropsWholeToolReplayBlockInsteadOfLeavingOrphanTools(t *testing.T) {
