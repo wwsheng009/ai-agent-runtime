@@ -450,11 +450,15 @@ func TestUpdateGoalNegativePaths(t *testing.T) {
 	session, cleanup := newGoalCommandTestSession(t)
 	defer cleanup()
 
-	if _, err := executeUpdateGoalFunction(session, map[string]interface{}{
+	output, err := executeUpdateGoalFunction(session, map[string]interface{}{
 		"status":  "complete",
 		"summary": "no active goal",
-	}); err == nil || !strings.Contains(err.Error(), "no goal") {
-		t.Fatalf("expected no goal error, got %v", err)
+	})
+	if err != nil {
+		t.Fatalf("expected missing goal to be a no-op, got %v", err)
+	}
+	if !strings.Contains(output, `"updated": false`) || !strings.Contains(output, `"reason": "goal_missing"`) {
+		t.Fatalf("expected structured missing-goal no-op, got %q", output)
 	}
 
 	captureStdout(t, func() {

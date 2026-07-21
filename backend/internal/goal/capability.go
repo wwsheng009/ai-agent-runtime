@@ -121,7 +121,22 @@ func executeUpdateGoalCapability(ctx context.Context, toolSession aiclitools.Too
 		return aiclitools.ToolResult{}, err
 	}
 	if !ok || goal == nil {
-		return aiclitools.ToolResult{}, fmt.Errorf("current session has no goal")
+		// Goal tools are exposed for every persistent session so the model can
+		// use one stable tool surface. A session without a goal is therefore a
+		// valid no-op, not a failed turn: callers must not turn this optional
+		// housekeeping attempt into a failed session outcome.
+		return aiclitools.ToolResult{
+			Output: marshalIndentedJSON(map[string]interface{}{
+				"updated": false,
+				"goal":    nil,
+				"reason":  "goal_missing",
+				"message": "当前会话没有可更新的 goal；不要声称 goal 已更新。",
+			}),
+			Metadata: map[string]interface{}{
+				"no_op":  true,
+				"reason": "goal_missing",
+			},
+		}, nil
 	}
 	if goal.Status == StatusPaused {
 		return aiclitools.ToolResult{}, fmt.Errorf("update_goal cannot complete a paused goal; resume the goal before model completion")
