@@ -5,16 +5,23 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	runtimeagent "github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestRuntimeTurnToolSurfaceSnapshotReusesStableSurfaceAcrossTurns(t *testing.T) {
+	runtimeAgent := runtimeagent.NewAgent(&runtimeagent.Config{Name: "test-agent"}, nil)
 	actor := &SessionActor{
-		id: "session-stable-tools",
+		id:    "session-stable-tools",
+		agent: runtimeAgent,
 		state: &RuntimeState{
 			SessionID:     "session-stable-tools",
 			Status:        SessionRunning,
 			CurrentTurnID: "turn-1",
+			CurrentRunMeta: &team.RunMeta{
+				PermissionMode: "plan",
+			},
 		},
 	}
 
@@ -38,6 +45,97 @@ func TestRuntimeTurnToolSurfaceSnapshotReusesStableSurfaceAcrossTurns(t *testing
 	require.Len(t, tools, 2)
 	require.Equal(t, "get_goal", tools[0].Name)
 	require.Equal(t, "update_goal", tools[1].Name)
+	require.NotEmpty(t, actor.State().StableToolSurfaceBinding)
+}
+
+func TestRuntimeTurnToolSurfaceSnapshotInvalidatesAcrossTurnsWhenBindingChanges(t *testing.T) {
+	runtimeAgent := runtimeagent.NewAgent(&runtimeagent.Config{Name: "test-agent"}, nil)
+	actor := &SessionActor{
+		id:    "session-binding-change",
+		agent: runtimeAgent,
+		state: &RuntimeState{
+			SessionID:     "session-binding-change",
+			Status:        SessionRunning,
+			CurrentTurnID: "turn-1",
+			CurrentRunMeta: &team.RunMeta{
+				PermissionMode: "plan",
+			},
+		},
+	}
+
+	first := actor.turnToolSurfaceSnapshot("turn-1")
+	require.NoError(t, first.SaveTurnToolSurface(context.Background(), []types.ToolDefinition{{Name: "view"}}))
+	state := actor.State()
+	require.True(t, state.StableToolSurfaceSet)
+	require.NotEmpty(t, state.StableToolSurfaceBinding)
+	require.NotEmpty(t, state.StableToolSurfaceFingerprint)
+
+	require.NoError(t, actor.updateState(context.Background(), func(state *RuntimeState) error {
+		state.CurrentTurnID = "turn-2"
+		state.CurrentRunMeta = &team.RunMeta{PermissionMode: "accept_edits"}
+		resetFrozenTurnTools(state)
+		return nil
+	}))
+
+	tools, cached, err := actor.turnToolSurfaceSnapshot("turn-2").LoadTurnToolSurface(context.Background())
+	require.NoError(t, err)
+	require.False(t, cached)
+	require.Nil(t, tools)
+	state = actor.State()
+	require.False(t, state.StableToolSurfaceSet)
+	require.Empty(t, state.StableToolSurface)
+	require.Empty(t, state.StableToolSurfaceBinding)
+	require.Empty(t, state.StableToolSurfaceFingerprint)
+}
+
+func TestRuntimeTurnToolSurfaceSnapshotKeepsFrozenSurfaceWhenBindingChangesMidTurn(t *testing.T) {
+	runtimeAgent := runtimeagent.NewAgent(&runtimeagent.Config{Name: "test-agent"}, nil)
+	actor := &SessionActor{
+		id:    "session-mid-turn-binding-change",
+		agent: runtimeAgent,
+		state: &RuntimeState{
+			SessionID:     "session-mid-turn-binding-change",
+			Status:        SessionRunning,
+			CurrentTurnID: "turn-1",
+			CurrentRunMeta: &team.RunMeta{
+				PermissionMode: "plan",
+			},
+		},
+	}
+	snapshot := actor.turnToolSurfaceSnapshot("turn-1")
+	require.NoError(t, snapshot.SaveTurnToolSurface(context.Background(), []types.ToolDefinition{{Name: "view"}}))
+
+	require.NoError(t, actor.updateState(context.Background(), func(state *RuntimeState) error {
+		state.CurrentRunMeta = &team.RunMeta{PermissionMode: "accept_edits"}
+		return nil
+	}))
+
+	tools, cached, err := snapshot.LoadTurnToolSurface(context.Background())
+	require.NoError(t, err)
+	require.True(t, cached)
+	require.Equal(t, []string{"view"}, []string{tools[0].Name})
+	require.True(t, actor.State().StableToolSurfaceSet, "mid-turn policy changes must not rewrite the active tools prefix")
+}
+
+func TestRuntimeTurnToolSurfaceSnapshotSaveIsFreezeOnce(t *testing.T) {
+	actor := &SessionActor{
+		id: "session-freeze-once",
+		state: &RuntimeState{
+			SessionID:     "session-freeze-once",
+			Status:        SessionRunning,
+			CurrentTurnID: "turn-1",
+		},
+	}
+	snapshot := actor.turnToolSurfaceSnapshot("turn-1")
+	require.NoError(t, snapshot.SaveTurnToolSurface(context.Background(), []types.ToolDefinition{{Name: "view"}}))
+	firstFingerprint := actor.State().StableToolSurfaceFingerprint
+	require.NotEmpty(t, firstFingerprint)
+
+	require.NoError(t, snapshot.SaveTurnToolSurface(context.Background(), []types.ToolDefinition{{Name: "write"}}))
+	state := actor.State()
+	require.Equal(t, "view", state.StableToolSurface[0].Name)
+	require.Equal(t, "view", state.FrozenTurnTools[0].Name)
+	require.Equal(t, firstFingerprint, state.StableToolSurfaceFingerprint)
 }
 
 func TestRuntimeTurnToolSurfaceSnapshotPreservesEmptyParameterProperties(t *testing.T) {

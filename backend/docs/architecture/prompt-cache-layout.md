@@ -146,9 +146,17 @@ think() step N
 
 `runtimeTurnToolSurfaceSnapshot`:
 
-- **Load**: if `StableToolSurfaceSet`, return session-stable tools; else return
-  turn-frozen tools when `CurrentTurnID` matches.
-- **Save**: writes both `StableToolSurface` and `FrozenTurnTools`.
+- **Load**: if the active turn already has `FrozenTurnToolsSet`, return that
+  turn-local freeze (mid-turn eligibility changes must not rewrite tools).
+- **Load**: otherwise, if `StableToolSurfaceSet` and the stored eligibility
+  binding still matches (permission mode + tool policy + pre-freeze catalog),
+  reuse the session-stable surface.
+- **Load**: binding mismatch clears `StableToolSurface*` so the next freeze
+  rebinds under the new policy / MCP set. Legacy empty binding keeps reusing
+  until the next Save rewrites it with a key.
+- **Save**: freeze-once for the active turn; writes both `StableToolSurface`
+  and `FrozenTurnTools`, plus `StableToolSurfaceBinding` /
+  `StableToolSurfaceFingerprint`.
 - `resetFrozenTurnTools` clears only the turn-local freeze flags/fields; it does
   not by itself re-open a session-stable surface.
 
@@ -187,15 +195,38 @@ Optional live inspection: session `debug.log` lines
 usage (including cache tokens when the provider reports them). See
 `docs/aicli/prompt-layout-debug-note.md`.
 
-## Open / optional follow-ups
+## Invalidation policy
 
-1. **Broader package commit slice**: keep `contextmgr` + `agent` tool freeze
-   coherent; split unrelated WIP (`LoadRuntimeStateForInspection`, goal
-   no-op, `aicli_exec`, etc.) into separate commits.
-2. **Session-stable tool invalidation policy**: when tool whitelist / MCP set /
-   permission policy changes mid-session, document when
-   `StableToolSurface` should be cleared and re-frozen.
-3. **Observability**: surface `tool_schema_before` / `tool_schema_after` and
-   frozen-tool fingerprint in debug layout summaries.
-4. **Cross-turn cache metrics**: measure provider `cached_tokens` before/after
-   the layout change on long sessions.
+Session-stable tools are bound to an eligibility key:
+
+- permission mode (`RunMeta.PermissionMode`)
+- tool execution policy (allow/deny/readonly/MCP write guards/capabilities)
+- pre-freeze tool catalog fingerprint (MCP + broker + subagent tools, sorted)
+
+**Not** in the binding: goal projection (session stability is for schema
+continuity; per-goal shrink only applies on first freeze).
+
+Rules:
+
+1. **Turn-local freeze wins** once `FrozenTurnToolsSet` for the current turn.
+2. Across turns, a binding mismatch clears `StableToolSurface*` so the next
+   think step re-freezes under the new key.
+3. Legacy persisted states without a binding keep reusing the surface until the
+   next freeze writes a binding.
+
+## Observability
+
+| Signal | Where |
+| --- | --- |
+| `tool_surface_fingerprint` | freeze events (`context.tool_schema.compacted` / `.frozen`), LLM request metadata / `tool_surface.fingerprint`, aicli `[llm-debug] request_started` |
+| `tool_schema_before` / `tool_schema_after` | `context.tool_schema.compacted` when freeze lean-compacted tools |
+| `usage_cached_tokens` | `llm.request.finished` when the provider reports cache reads |
+| `usage_cache_hit_ratio` | `llm.request.finished` = `cached / prompt`; aicli usage panel shows `cache_hit=xx.x%` |
+
+## Remaining optional follow-ups
+
+1. Keep unrelated WIP (`LoadRuntimeStateForInspection`, goal no-op,
+   `aicli_exec`, compactruntime provider window) in separate commits from the
+   prompt-cache core path.
+2. Collect long-session provider `cached_tokens` / `cache_hit` before-vs-after
+   samples in live runs to quantify cache gains.

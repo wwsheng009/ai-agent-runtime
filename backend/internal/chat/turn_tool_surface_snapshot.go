@@ -33,18 +33,56 @@ func (s *runtimeTurnToolSurfaceSnapshot) LoadTurnToolSurface(ctx context.Context
 		return nil, false, nil
 	}
 	s.actor.mu.RLock()
-	defer s.actor.mu.RUnlock()
 	state := s.actor.state
 	if state == nil {
+		s.actor.mu.RUnlock()
 		return nil, false, nil
 	}
-	if state.StableToolSurfaceSet {
-		return cloneRuntimeToolDefinitions(state.StableToolSurface), true, nil
+
+	// Turn-local freeze always wins. Mid-turn eligibility changes must not
+	// rewrite tools once the active turn has already frozen a surface.
+	if strings.TrimSpace(state.CurrentTurnID) == s.turnID && state.FrozenTurnToolsSet {
+		tools := cloneRuntimeToolDefinitions(state.FrozenTurnTools)
+		s.actor.mu.RUnlock()
+		return tools, true, nil
 	}
-	if strings.TrimSpace(state.CurrentTurnID) != s.turnID || !state.FrozenTurnToolsSet {
+
+	if !state.StableToolSurfaceSet {
+		s.actor.mu.RUnlock()
 		return nil, false, nil
 	}
-	return cloneRuntimeToolDefinitions(state.FrozenTurnTools), true, nil
+
+	storedBinding := strings.TrimSpace(state.StableToolSurfaceBinding)
+	tools := cloneRuntimeToolDefinitions(state.StableToolSurface)
+	s.actor.mu.RUnlock()
+
+	// Legacy states without a binding keep reusing the stable surface until the
+	// next freeze rewrites them with an eligibility key.
+	if storedBinding == "" {
+		return tools, true, nil
+	}
+
+	currentBinding := s.currentEligibilityKey(ctx)
+	if currentBinding == "" || currentBinding == storedBinding {
+		return tools, true, nil
+	}
+
+	// Policy / MCP / permission changed since the surface was frozen: drop the
+	// durable cache so the next think step re-freezes under the new binding.
+	if err := s.actor.updateState(ctx, func(state *RuntimeState) error {
+		if state == nil || !state.StableToolSurfaceSet {
+			return nil
+		}
+		if strings.TrimSpace(state.StableToolSurfaceBinding) != storedBinding {
+			return nil
+		}
+		clearStableToolSurface(state)
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	}); err != nil {
+		return nil, false, err
+	}
+	return nil, false, nil
 }
 
 func (s *runtimeTurnToolSurfaceSnapshot) SaveTurnToolSurface(ctx context.Context, tools []types.ToolDefinition) error {
@@ -57,18 +95,45 @@ func (s *runtimeTurnToolSurfaceSnapshot) SaveTurnToolSurface(ctx context.Context
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	binding := s.currentEligibilityKey(ctx)
+	fingerprint := agent.ToolDefinitionsFingerprint(tools)
 	return s.actor.updateState(ctx, func(state *RuntimeState) error {
 		if strings.TrimSpace(state.CurrentTurnID) != s.turnID {
+			return nil
+		}
+		// Freeze-once for the active turn: later saves must not rewrite the
+		// tools prefix mid-turn (prompt-cache + tool-call continuity).
+		if state.FrozenTurnToolsSet {
 			return nil
 		}
 		ownedTools := cloneRuntimeToolDefinitions(tools)
 		state.StableToolSurface = ownedTools
 		state.StableToolSurfaceSet = true
+		state.StableToolSurfaceBinding = binding
+		state.StableToolSurfaceFingerprint = fingerprint
 		state.FrozenTurnTools = ownedTools
 		state.FrozenTurnToolsSet = true
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	})
+}
+
+func (s *runtimeTurnToolSurfaceSnapshot) currentEligibilityKey(ctx context.Context) string {
+	if s == nil || s.actor == nil || s.actor.agent == nil {
+		return ""
+	}
+	permissionMode := ""
+	s.actor.mu.RLock()
+	if s.actor.state != nil {
+		if s.actor.state.CurrentRunMeta != nil {
+			permissionMode = strings.TrimSpace(s.actor.state.CurrentRunMeta.PermissionMode)
+		}
+		if permissionMode == "" && s.actor.state.AmbientRunMeta != nil {
+			permissionMode = strings.TrimSpace(s.actor.state.AmbientRunMeta.PermissionMode)
+		}
+	}
+	s.actor.mu.RUnlock()
+	return s.actor.agent.EligibilityKeyForAgent(ctx, permissionMode)
 }
 
 func resetFrozenTurnTools(state *RuntimeState) {
@@ -77,4 +142,14 @@ func resetFrozenTurnTools(state *RuntimeState) {
 	}
 	state.FrozenTurnTools = nil
 	state.FrozenTurnToolsSet = false
+}
+
+func clearStableToolSurface(state *RuntimeState) {
+	if state == nil {
+		return
+	}
+	state.StableToolSurface = nil
+	state.StableToolSurfaceSet = false
+	state.StableToolSurfaceBinding = ""
+	state.StableToolSurfaceFingerprint = ""
 }

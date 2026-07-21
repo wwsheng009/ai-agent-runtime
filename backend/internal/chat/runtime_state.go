@@ -64,22 +64,24 @@ type UserQuestionRequest = toolbroker.UserQuestionRequest
 
 // RuntimeState tracks the session actor state across turns.
 type RuntimeState struct {
-	SessionID            string                 `json:"session_id"`
-	Status               SessionStatus          `json:"status"`
-	CurrentTurnID        string                 `json:"current_turn_id,omitempty"`
-	CurrentCheckpointID  string                 `json:"current_checkpoint_id,omitempty"`
-	CurrentRunMeta       *team.RunMeta          `json:"current_run_meta,omitempty"`
-	AmbientRunMeta       *team.RunMeta          `json:"ambient_run_meta,omitempty"`
-	StableToolSurface    []types.ToolDefinition `json:"stable_tool_surface,omitempty"`
-	StableToolSurfaceSet bool                   `json:"stable_tool_surface_set,omitempty"`
-	FrozenTurnTools      []types.ToolDefinition `json:"frozen_turn_tools,omitempty"`
-	FrozenTurnToolsSet   bool                   `json:"frozen_turn_tools_set,omitempty"`
-	PendingTool          *PendingToolInvocation `json:"pending_tool,omitempty"`
-	PendingApproval      *ApprovalRequest       `json:"pending_approval,omitempty"`
-	PendingQuestion      *UserQuestionRequest   `json:"pending_question,omitempty"`
-	HeadOffset           int64                  `json:"head_offset"`
-	ActiveJobIDs         []string               `json:"active_job_ids,omitempty"`
-	UpdatedAt            time.Time              `json:"updated_at"`
+	SessionID                    string                 `json:"session_id"`
+	Status                       SessionStatus          `json:"status"`
+	CurrentTurnID                string                 `json:"current_turn_id,omitempty"`
+	CurrentCheckpointID          string                 `json:"current_checkpoint_id,omitempty"`
+	CurrentRunMeta               *team.RunMeta          `json:"current_run_meta,omitempty"`
+	AmbientRunMeta               *team.RunMeta          `json:"ambient_run_meta,omitempty"`
+	StableToolSurface            []types.ToolDefinition `json:"stable_tool_surface,omitempty"`
+	StableToolSurfaceSet         bool                   `json:"stable_tool_surface_set,omitempty"`
+	StableToolSurfaceBinding     string                 `json:"stable_tool_surface_binding,omitempty"`
+	StableToolSurfaceFingerprint string                 `json:"stable_tool_surface_fingerprint,omitempty"`
+	FrozenTurnTools              []types.ToolDefinition `json:"frozen_turn_tools,omitempty"`
+	FrozenTurnToolsSet           bool                   `json:"frozen_turn_tools_set,omitempty"`
+	PendingTool                  *PendingToolInvocation `json:"pending_tool,omitempty"`
+	PendingApproval              *ApprovalRequest       `json:"pending_approval,omitempty"`
+	PendingQuestion              *UserQuestionRequest   `json:"pending_question,omitempty"`
+	HeadOffset                   int64                  `json:"head_offset"`
+	ActiveJobIDs                 []string               `json:"active_job_ids,omitempty"`
+	UpdatedAt                    time.Time              `json:"updated_at"`
 }
 
 // RuntimeStateSummary is the allocation-free projection used by status polls.
