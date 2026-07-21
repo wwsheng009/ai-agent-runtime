@@ -20,7 +20,7 @@ const (
 	PhaseMidTurn = "mid_turn"
 
 	defaultAutoCompactRatio         = 0.9
-	defaultAutoCompactContextWindow = 256000
+	defaultAutoCompactContextWindow = llm.DefaultContextWindowTokens
 	defaultKeepRecentMessages       = 8
 )
 
@@ -203,6 +203,9 @@ func resolveAutoCompactThreshold(runtime *llm.LLMRuntime, providerName, model, r
 	resolvedProvider, resolvedModel, capability, ok := llm.ResolveRuntimeModelCapability(runtime, providerName, model)
 	if !ok {
 		resolvedProvider, resolvedModel = resolveRuntimeProviderModel(runtime, providerName, model)
+		if contextWindow := resolveProviderContextWindow(runtime, resolvedProvider); contextWindow > 0 {
+			return autoCompactThresholdForWindow(resolvedProvider, resolvedModel, requestedMode, contextWindow), true
+		}
 		return defaultAutoCompactThreshold(resolvedProvider, resolvedModel, requestedMode), true
 	}
 
@@ -211,6 +214,9 @@ func resolveAutoCompactThreshold(runtime *llm.LLMRuntime, providerName, model, r
 		ResolvedModel:    resolvedModel,
 		Mode:             resolveAutoCompactMode(requestedMode, capability.AutoCompactMode, capability.SupportsRemoteCompact),
 		MaxContextTokens: capability.MaxContextTokens,
+	}
+	if limit.MaxContextTokens <= 0 {
+		limit.MaxContextTokens = resolveProviderContextWindow(runtime, resolvedProvider)
 	}
 	if capability.AutoCompactTokenLimit > 0 {
 		limit.TriggerTokenLimit = capability.AutoCompactTokenLimit
@@ -234,13 +240,35 @@ func resolveAutoCompactThreshold(runtime *llm.LLMRuntime, providerName, model, r
 }
 
 func defaultAutoCompactThreshold(providerName, model, requestedMode string) threshold {
+	return autoCompactThresholdForWindow(providerName, model, requestedMode, defaultAutoCompactContextWindow)
+}
+
+func autoCompactThresholdForWindow(providerName, model, requestedMode string, contextWindow int) threshold {
+	if contextWindow <= 0 {
+		contextWindow = defaultAutoCompactContextWindow
+	}
 	return threshold{
 		ResolvedProvider:  strings.TrimSpace(providerName),
 		ResolvedModel:     strings.TrimSpace(model),
 		Mode:              resolveAutoCompactMode(requestedMode, "", false),
-		MaxContextTokens:  defaultAutoCompactContextWindow,
-		TriggerTokenLimit: int(math.Floor(float64(defaultAutoCompactContextWindow) * defaultAutoCompactRatio)),
+		MaxContextTokens:  contextWindow,
+		TriggerTokenLimit: int(math.Floor(float64(contextWindow) * defaultAutoCompactRatio)),
 	}
+}
+
+func resolveProviderContextWindow(runtime *llm.LLMRuntime, providerName string) int {
+	if runtime == nil || strings.TrimSpace(providerName) == "" {
+		return 0
+	}
+	provider, err := runtime.GetProvider(providerName)
+	if err != nil || provider == nil {
+		return 0
+	}
+	capabilities := provider.GetCapabilities()
+	if capabilities == nil || capabilities.MaxContextTokens <= 0 {
+		return 0
+	}
+	return capabilities.MaxContextTokens
 }
 
 func resolveForcedLocalThreshold(runtime *llm.LLMRuntime, providerName, model string) threshold {

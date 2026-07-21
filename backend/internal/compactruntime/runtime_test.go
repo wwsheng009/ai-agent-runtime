@@ -29,6 +29,7 @@ type compactTestProvider struct {
 	streamErr         error
 	streamChunks      []llm.StreamChunk
 	allowEmpty        bool
+	maxContextTokens  int
 }
 
 type compactRemoteProvider struct {
@@ -96,7 +97,10 @@ func (p *compactTestProvider) defaultStreamChunks() []llm.StreamChunk {
 func (p *compactTestProvider) CountTokens(text string) int { return len(text) }
 
 func (p *compactTestProvider) GetCapabilities() *llm.ModelCapabilities {
-	return &llm.ModelCapabilities{SupportsStreaming: true}
+	return &llm.ModelCapabilities{
+		SupportsStreaming: true,
+		MaxContextTokens:  p.maxContextTokens,
+	}
 }
 
 func (p *compactTestProvider) CheckHealth(ctx context.Context) error { return nil }
@@ -966,6 +970,41 @@ func TestMaybeCompactMissingCapabilityUsesDefaultWindowAndReportsResolvedProvide
 	require.Equal(t, defaultAutoCompactContextWindow, status.TokenBefore)
 	require.Equal(t, defaultAutoCompactContextWindow, status.MaxContextTokens)
 	require.Equal(t, int(math.Floor(float64(defaultAutoCompactContextWindow)*defaultAutoCompactRatio)), status.TriggerTokenLimit)
+	require.Equal(t, 1, provider.streamCount)
+}
+
+func TestMaybeCompactMissingModelCapabilityUsesProviderContextWindow(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-provider-default",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name:             "provider-a",
+		capabilities:     map[string]agentconfig.ModelCapabilitySpec{},
+		maxContextTokens: 96000,
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-provider-default", "provider-a"))
+
+	compactor := New(runtime, nil)
+	result, status, err := compactor.MaybeCompact(context.Background(), Request{
+		SessionID:         "session-provider-context-window",
+		Model:             "gpt-provider-default",
+		History:           compactTestHistory(),
+		Phase:             PhasePreTurn,
+		ObservedTokens:    90000,
+		HasObservedTokens: true,
+		CountTokens: func(messages []types.Message) int {
+			return 10
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "provider-a", status.ResolvedProvider)
+	require.Equal(t, "gpt-provider-default", status.ResolvedModel)
+	require.Equal(t, 96000, status.MaxContextTokens)
+	require.Equal(t, 86400, status.TriggerTokenLimit)
 	require.Equal(t, 1, provider.streamCount)
 }
 
