@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -140,6 +141,24 @@ func TestAICLIExecRejectsRecursiveCallByDefault(t *testing.T) {
 	}
 	if result.Error == nil || !strings.Contains(result.Error.Error(), "递归调用") {
 		t.Fatalf("expected recursion error, got %#v", result)
+	}
+}
+
+func TestAICLIExecRejectsChildAgentEvenWhenNestedAllowed(t *testing.T) {
+	tool := NewAICLIExecTool()
+	ctx := toolctx.WithAgentDepth(context.Background(), 1)
+	result, err := tool.Execute(ctx, map[string]interface{}{
+		"prompt":       "nested child",
+		"allow_nested": true,
+	})
+	if err != nil {
+		t.Fatalf("execute returned unexpected transport error: %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("expected child agent call to fail, got %#v", result)
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "子 Agent") {
+		t.Fatalf("expected child-agent boundary error, got %#v", result)
 	}
 }
 

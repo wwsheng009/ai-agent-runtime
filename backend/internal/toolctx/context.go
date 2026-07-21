@@ -12,6 +12,7 @@ type contextKey string
 const (
 	sessionIDKey               contextKey = "tool_session_id"
 	goalIDKey                  contextKey = "tool_goal_id"
+	agentDepthKey              contextKey = "tool_agent_depth"
 	generatedImageOutputDirKey contextKey = "generated_image_output_dir"
 	shellOutputArtifactDirKey  contextKey = "shell_output_artifact_dir"
 )
@@ -52,6 +53,29 @@ func GoalID(ctx context.Context) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
+}
+
+// WithAgentDepth stores the depth of the agent invoking the tool. Root agents
+// use depth zero; spawned child agents use positive depths.
+func WithAgentDepth(ctx context.Context, depth int) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if depth < 0 {
+		depth = 0
+	}
+	return context.WithValue(ctx, agentDepthKey, depth)
+}
+
+// AgentDepth retrieves the invoking agent depth from ctx.
+func AgentDepth(ctx context.Context) int {
+	if ctx == nil {
+		return 0
+	}
+	if value, ok := ctx.Value(agentDepthKey).(int); ok && value > 0 {
+		return value
+	}
+	return 0
 }
 
 // WithGeneratedImageOutputDir stores the generated image output directory in ctx.

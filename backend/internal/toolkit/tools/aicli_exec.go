@@ -143,7 +143,7 @@ func NewAICLIExecTool() *AICLIExecTool {
 			},
 			"allow_nested": map[string]interface{}{
 				"type":        "boolean",
-				"description": "可选：允许 aicli_exec 在已有嵌套 aicli_exec 子进程中再次运行。默认 false，防止递归 agent 调用。",
+				"description": "可选：允许根 Agent 在已有嵌套 aicli_exec 子进程中再次运行。默认 false。该参数不能允许 spawn_agent 创建的子 Agent 再启动独立 aicli。",
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",
@@ -182,6 +182,13 @@ func (t *AICLIExecTool) Execute(ctx context.Context, params map[string]interface
 	req, err := parseAICLIExecRequest(params)
 	if err != nil {
 		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
+	}
+	if depth := toolctx.AgentDepth(ctx); depth > 0 {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("拒绝子 Agent 调用 aicli_exec：当前 Agent 深度为 %d；请由根 Agent 统一管理代理树和取消传播", depth),
+		}, nil
 	}
 	if !req.AllowNested && currentAICLIExecDepth() > 0 {
 		return &toolkit.ToolResult{
