@@ -35,6 +35,49 @@ func TestLocalActorRegistry_SubmitPromptUsesSessionHub(t *testing.T) {
 	}
 }
 
+func TestLocalActorRegistry_AgentSnapshotReconcilesStaleRunningState(t *testing.T) {
+	ctx := context.Background()
+	sessionStore := runtimechat.NewInMemoryStorage()
+	session := runtimechat.NewSession("stale-agent-user")
+	session.ID = "stale-agent-session"
+	if err := sessionStore.Save(ctx, session); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
+	if err := runtimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID:     session.ID,
+		Status:        runtimechat.SessionRunning,
+		CurrentTurnID: "turn-stale",
+		UpdatedAt:     time.Now().UTC().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("save runtime state: %v", err)
+	}
+	if _, err := runtimeStore.AcquireLease(ctx, runtimechat.LeaseRequest{
+		SessionID: session.ID,
+		OwnerID:   "stale-owner",
+		OwnerKind: "test",
+		TTL:       time.Second,
+		Now:       time.Now().UTC().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("save expired lease: %v", err)
+	}
+	registry := newLocalActorRegistry(&localChatRuntimeHost{
+		SessionStore: sessionStore,
+		RuntimeStore: runtimeStore,
+	})
+
+	result, err := registry.agentSnapshot(ctx, session.ID)
+	if err != nil {
+		t.Fatalf("agentSnapshot failed: %v", err)
+	}
+	if result == nil || result.Status != string(runtimechat.SessionStopped) {
+		t.Fatalf("expected stale session to report stopped, got %#v", result)
+	}
+	if result.CurrentTurnID != "" {
+		t.Fatalf("expected stale turn id to be cleared, got %#v", result)
+	}
+}
+
 func TestLocalActorRegistry_TriggerTaskUsesSessionHub(t *testing.T) {
 	store, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
 	if err != nil {

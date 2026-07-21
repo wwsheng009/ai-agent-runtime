@@ -2153,6 +2153,44 @@ func (a *SessionActor) loadState(ctx context.Context) error {
 	return nil
 }
 
+// LoadRuntimeStateForInspection loads a persisted state for a passive status
+// query. When no live session lease remains, transient actor states are
+// reconciled so a crashed process cannot keep reporting "running" forever.
+// A live lease is authoritative and is never changed by inspection.
+func LoadRuntimeStateForInspection(ctx context.Context, stateStore RuntimeStateStore, sessionID string) (*RuntimeState, error) {
+	if stateStore == nil {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	state, err := stateStore.LoadState(ctx, strings.TrimSpace(sessionID))
+	if err != nil || state == nil {
+		return state, err
+	}
+	leaseStore, ok := stateStore.(SessionLeaseStore)
+	if !ok || leaseStore == nil {
+		return state, nil
+	}
+	lease, err := leaseStore.GetLease(ctx, strings.TrimSpace(sessionID))
+	if err != nil {
+		return nil, err
+	}
+	// A missing lease is not enough evidence of a crashed actor: lightweight
+	// embedders and older runtimes may persist state without registering leases.
+	// Only an observed, expired lease proves that a previously owned run is stale.
+	if lease == nil || !leaseExpired(lease, time.Now().UTC()) {
+		return state, nil
+	}
+	if !reconcileRecoveredRuntimeState(state) {
+		return state, nil
+	}
+	if err := stateStore.SaveState(ctx, state); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
 // A newly constructed actor cannot still own an in-process run from a previous
 // actor instance. Preserve durable approval/question waits, but release
 // transient states that would otherwise leave a restored session permanently

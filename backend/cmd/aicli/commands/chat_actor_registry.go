@@ -1467,7 +1467,7 @@ func (r *localActorRegistry) localAgentSessionBusy(ctx context.Context, sessionI
 		}
 	}
 	if r.Host.RuntimeStore != nil {
-		state, err := r.Host.RuntimeStore.LoadState(ctx, strings.TrimSpace(sessionID))
+		state, err := runtimechat.LoadRuntimeStateForInspection(ctx, r.Host.RuntimeStore, strings.TrimSpace(sessionID))
 		if err == nil && localAgentActorBusy(state) {
 			return true
 		}
@@ -2416,27 +2416,45 @@ func (r *localActorRegistry) agentSnapshot(ctx context.Context, sessionID string
 		}
 		result.Status = string(runtimechat.SessionIdle)
 	}
+	hasActorState := false
 	if r.Host.SessionHub != nil {
 		if actor, ok := r.Host.SessionHub.Get(sessionID); ok && actor != nil {
 			state, exists := actor.StateSummary()
 			if exists {
-				result.Status = string(state.Status)
-				result.PendingApproval = state.PendingApproval
-				if state.PendingApproval {
-					result.PendingApprovalID = strings.TrimSpace(state.PendingApprovalID)
-					result.PendingApprovalReason = strings.TrimSpace(state.PendingApprovalReason)
-					result.PendingApprovalRiskLevel = strings.TrimSpace(state.PendingApprovalRiskLevel)
-				}
-				result.PendingQuestion = state.PendingQuestion
-				result.CurrentTurnID = strings.TrimSpace(state.CurrentTurnID)
-				if state.PendingTool {
-					result.PendingToolName = strings.TrimSpace(state.PendingToolName)
-					result.PendingToolCallID = strings.TrimSpace(state.PendingToolCallID)
-				}
+				applyLocalAgentRuntimeState(result, state)
+				hasActorState = true
 			}
 		}
 	}
+	if !hasActorState && r.Host.RuntimeStore != nil {
+		state, err := runtimechat.LoadRuntimeStateForInspection(ctx, r.Host.RuntimeStore, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if state != nil {
+			applyLocalAgentRuntimeState(result, state.Summary())
+		}
+	}
 	return result, nil
+}
+
+func applyLocalAgentRuntimeState(result *toolbroker.AgentStatusResult, state runtimechat.RuntimeStateSummary) {
+	if result == nil {
+		return
+	}
+	result.Status = string(state.Status)
+	result.PendingApproval = state.PendingApproval
+	if state.PendingApproval {
+		result.PendingApprovalID = strings.TrimSpace(state.PendingApprovalID)
+		result.PendingApprovalReason = strings.TrimSpace(state.PendingApprovalReason)
+		result.PendingApprovalRiskLevel = strings.TrimSpace(state.PendingApprovalRiskLevel)
+	}
+	result.PendingQuestion = state.PendingQuestion
+	result.CurrentTurnID = strings.TrimSpace(state.CurrentTurnID)
+	if state.PendingTool {
+		result.PendingToolName = strings.TrimSpace(state.PendingToolName)
+		result.PendingToolCallID = strings.TrimSpace(state.PendingToolCallID)
+	}
 }
 
 func (r *localActorRegistry) enrichAgentTeamProjection(ctx context.Context, session *runtimechat.Session, result *toolbroker.AgentStatusResult) error {

@@ -534,6 +534,61 @@ func TestSessionActorRecoversOrphanedRunningStateAndAcceptsPrompt(t *testing.T) 
 	require.Equal(t, SessionIdle, actor.State().Status)
 }
 
+func TestLoadRuntimeStateForInspectionReconcilesRunningStateWithoutLiveLease(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	sessionID := "inspection-stale-running"
+	require.NoError(t, runtimeStore.SaveState(ctx, &RuntimeState{
+		SessionID:     sessionID,
+		Status:        SessionRunning,
+		CurrentTurnID: "turn-stale",
+		UpdatedAt:     time.Now().UTC().Add(-time.Minute),
+	}))
+	_, err := runtimeStore.AcquireLease(ctx, LeaseRequest{
+		SessionID: sessionID,
+		OwnerID:   "owner-stale",
+		OwnerKind: "test",
+		TTL:       time.Second,
+		Now:       time.Now().UTC().Add(-time.Minute),
+	})
+	require.NoError(t, err)
+
+	state, err := LoadRuntimeStateForInspection(ctx, runtimeStore, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, SessionStopped, state.Status)
+	require.Empty(t, state.CurrentTurnID)
+
+	persisted, err := runtimeStore.LoadState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, SessionStopped, persisted.Status)
+}
+
+func TestLoadRuntimeStateForInspectionPreservesRunningStateWithLiveLease(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	sessionID := "inspection-live-running"
+	require.NoError(t, runtimeStore.SaveState(ctx, &RuntimeState{
+		SessionID:     sessionID,
+		Status:        SessionRunning,
+		CurrentTurnID: "turn-live",
+		UpdatedAt:     time.Now().UTC(),
+	}))
+	_, err := runtimeStore.AcquireLease(ctx, LeaseRequest{
+		SessionID: sessionID,
+		OwnerID:   "owner-live",
+		OwnerKind: "test",
+		TTL:       time.Minute,
+	})
+	require.NoError(t, err)
+
+	state, err := LoadRuntimeStateForInspection(ctx, runtimeStore, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, SessionRunning, state.Status)
+	require.Equal(t, "turn-live", state.CurrentTurnID)
+}
+
 func TestSessionActorSubmitPromptRouteOverrideAppliesToNextLLMRequestOnly(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()
