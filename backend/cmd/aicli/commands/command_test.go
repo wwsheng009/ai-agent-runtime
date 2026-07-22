@@ -888,6 +888,11 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	if payload.Model != "gpt-5.2-code" || payload.ReasoningEffort != "medium" {
 		t.Fatalf("unexpected payload model fields: %+v", payload)
 	}
+	if payload.RequestedProvider != "codex_ee" || payload.EffectiveProvider != "codex_ee" ||
+		payload.RequestedModel != "gpt-5.2-code" || payload.EffectiveModel != "gpt-5.2-code" ||
+		payload.RequestedReasoningEffort != "medium" || payload.EffectiveReasoningEffort != "medium" {
+		t.Fatalf("expected requested/effective route defaults, got %+v", payload)
+	}
 	if payload.RuntimeCore != runtimechat.RuntimeCoreSessionActor ||
 		payload.RuntimeContractVersion != runtimechat.RuntimeCoreContractVersion ||
 		payload.RuntimeTransport != aicliRuntimeTransportInProcess {
@@ -928,6 +933,37 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	}
 	if !strings.HasSuffix(payload.LastLocalShellArtifactPath, "001_git.txt") {
 		t.Fatalf("unexpected payload last local shell artifact: %+v", payload)
+	}
+}
+
+func TestBuildChatResponsePayloadPreservesRequestedAndEffectiveRoute(t *testing.T) {
+	payload := buildChatResponsePayload(&ChatSession{
+		ProviderName:             "canonical-provider",
+		Model:                    "canonical-model",
+		ReasoningEffort:          "high",
+		RequestedProvider:        "configured-alias",
+		EffectiveProvider:        "canonical-provider",
+		RequestedModel:           "friendly-model",
+		EffectiveModel:           "canonical-model",
+		RequestedReasoningEffort: "xhigh",
+		EffectiveReasoningEffort: "high",
+		RequestedPermissionMode:  "plan",
+		EffectivePermissionMode:  "plan",
+		RouteWarnings:            []string{"explicit_reasoning_override_denied"},
+		FallbackUsed:             true,
+		FallbackReason:           "route_policy",
+	}, "ok")
+
+	if payload.RequestedProvider != "configured-alias" || payload.EffectiveProvider != "canonical-provider" ||
+		payload.RequestedModel != "friendly-model" || payload.EffectiveModel != "canonical-model" {
+		t.Fatalf("unexpected provider/model route payload: %+v", payload)
+	}
+	if payload.RequestedReasoningEffort != "xhigh" || payload.EffectiveReasoningEffort != "high" ||
+		payload.RequestedPermissionMode != "plan" || payload.EffectivePermissionMode != "plan" {
+		t.Fatalf("unexpected reasoning/permission route payload: %+v", payload)
+	}
+	if !payload.FallbackUsed || payload.FallbackReason != "route_policy" || len(payload.RouteWarnings) != 1 {
+		t.Fatalf("unexpected route decision payload: %+v", payload)
 	}
 }
 
@@ -1248,6 +1284,9 @@ func TestHandleCommand_PermissionModeAndApprovalReuse(t *testing.T) {
 	}
 	if session.PermissionMode != "bypass_permissions" {
 		t.Fatalf("expected session permission mode to change, got %+v", session)
+	}
+	if session.RequestedPermissionMode != "bypass_permissions" || session.EffectivePermissionMode != "bypass_permissions" {
+		t.Fatalf("expected requested/effective permission mode to track the explicit switch, got requested=%q effective=%q", session.RequestedPermissionMode, session.EffectivePermissionMode)
 	}
 	if session.ActiveTeam == nil || session.ActiveTeam.PermissionMode != "bypass_permissions" {
 		t.Fatalf("expected active team permission mode to track session mode, got %+v", session.ActiveTeam)

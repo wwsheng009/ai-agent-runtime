@@ -85,8 +85,13 @@ func sharedChatToolPayload(event runtimechatcore.ChatEvent) map[string]interface
 	if source := payloadStringValue(event.Metadata[toolresult.SourceKey]); source != "" {
 		payload[toolresult.SourceKey] = source
 	}
-	for _, key := range []string{"shell_type", "shell_path", "shell_display"} {
+	for _, key := range []string{"shell_type", "shell_path", "shell_display", "error_code", "next_action"} {
 		if value := payloadStringValue(event.Metadata[key]); value != "" {
+			payload[key] = value
+		}
+	}
+	for _, key := range []string{"ok", "retryable"} {
+		if value, ok := event.Metadata[key]; ok {
 			payload[key] = value
 		}
 	}

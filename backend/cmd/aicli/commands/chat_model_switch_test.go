@@ -10,6 +10,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
@@ -300,6 +301,9 @@ func TestHandleCommand_ModelSwitchAppliesMappingAndClearsUnsupportedReasoning(t 
 	if session.Model != "canonical-model" {
 		t.Fatalf("expected mapped model canonical-model, got %q", session.Model)
 	}
+	if session.RequestedModel != "alias-model" || session.EffectiveModel != "canonical-model" {
+		t.Fatalf("expected requested/effective model mapping to remain visible, got requested=%q effective=%q", session.RequestedModel, session.EffectiveModel)
+	}
 	if session.ReasoningEffort != "" {
 		t.Fatalf("expected unsupported reasoning effort to be cleared, got %q", session.ReasoningEffort)
 	}
@@ -316,6 +320,12 @@ func TestHandleCommand_ModelSwitchAppliesMappingAndClearsUnsupportedReasoning(t 
 	}
 	if got := runtimeSessionContextString(stored, chatRuntimeContextModel); got != "canonical-model" {
 		t.Fatalf("expected stored model canonical-model, got %q", got)
+	}
+	if got := sessionmeta.String(stored.Metadata.Context, sessionmeta.RequestedModel); got != "alias-model" {
+		t.Fatalf("expected stored requested model alias-model, got %q", got)
+	}
+	if got := sessionmeta.String(stored.Metadata.Context, sessionmeta.EffectiveModel); got != "canonical-model" {
+		t.Fatalf("expected stored effective model canonical-model, got %q", got)
 	}
 	if got := runtimeSessionContextString(stored, toolbroker.AgentSessionContextRequestedModel); got != "canonical-model" {
 		t.Fatalf("expected stored requested model canonical-model, got %q", got)

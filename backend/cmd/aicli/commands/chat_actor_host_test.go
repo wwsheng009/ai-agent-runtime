@@ -809,6 +809,46 @@ func TestLocalChatRuntimeHostBuildSessionActorUsesChildRouteContext(t *testing.T
 	}
 }
 
+func TestApplyLocalChildReadOnlyPolicyOverridesBypassPermissions(t *testing.T) {
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{Name: "read-only-child"}, nil, nil)
+	apiAgent.SetToolExecutionPolicy(runtimepolicy.NewToolExecutionPolicy(nil, false))
+
+	applyLocalChildReadOnlyPolicy(apiAgent, true)
+	policy := apiAgent.GetToolExecutionPolicy()
+	if policy == nil || !policy.ReadOnly {
+		t.Fatalf("expected child read-only execution policy, got %#v", policy)
+	}
+	for _, toolName := range []string{"write_file", "edit", "apply_patch", "append_write", "bash", "execute_shell_command"} {
+		if err := policy.AllowTool(toolName); err == nil {
+			t.Fatalf("expected read-only policy to block %s", toolName)
+		}
+	}
+	for _, toolName := range []string{"background_task", "spawn_agent", "spawn_team"} {
+		if err := policy.AllowTool(toolName); err == nil {
+			t.Fatalf("expected read-only child capability scope to block %s", toolName)
+		}
+	}
+	if err := policy.AllowTool("view"); err != nil {
+		t.Fatalf("expected read-only policy to allow view: %v", err)
+	}
+}
+
+func TestApplyLocalChildDepthPolicyHidesUnavailableSpawnTools(t *testing.T) {
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{Name: "max-depth-child"}, nil, nil)
+	apiAgent.SetToolExecutionPolicy(runtimepolicy.NewToolExecutionPolicy(nil, false))
+
+	applyLocalChildDepthPolicy(apiAgent, 1, 1)
+	policy := apiAgent.GetToolExecutionPolicy()
+	for _, toolName := range []string{"spawn_agent", "spawn_subagents", "spawn_team"} {
+		if err := policy.AllowTool(toolName); err == nil {
+			t.Fatalf("expected max-depth policy to hide %s", toolName)
+		}
+	}
+	if err := policy.AllowTool("send_message"); err != nil {
+		t.Fatalf("expected existing-agent coordination to remain available: %v", err)
+	}
+}
+
 func TestLocalActorRegistry_EnforcesAgentLimitsAndListsChildren(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -849,8 +889,12 @@ func TestLocalActorRegistry_EnforcesAgentLimitsAndListsChildren(t *testing.T) {
 	if _, err := registry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "child-2"}); err != nil {
 		t.Fatalf("spawn after close failed: %v", err)
 	}
-	if _, err := registry.Spawn(context.Background(), "child-2", toolbroker.SpawnAgentArgs{ID: "grandchild-1"}); err == nil || !strings.Contains(err.Error(), "depth limit") {
-		t.Fatalf("expected max depth error, got %v", err)
+	if _, err := registry.Spawn(context.Background(), "child-2", toolbroker.SpawnAgentArgs{ID: "grandchild-1"}); err == nil ||
+		!strings.Contains(err.Error(), "depth limit") ||
+		!strings.Contains(err.Error(), `parent_session_id="child-2"`) ||
+		!strings.Contains(err.Error(), "requested_child_depth=2") ||
+		!strings.Contains(err.Error(), "continue the work locally") {
+		t.Fatalf("expected actionable max depth pre-check error, got %v", err)
 	}
 
 	list, err := registry.List(context.Background(), rootSession.ID, toolbroker.ListAgentsArgs{})
@@ -1121,6 +1165,47 @@ func TestLocalActorRegistry_WritesAndClosesAgentRegistryStore(t *testing.T) {
 	}
 }
 
+func TestLocalActorRegistry_CompletionClosesDurableAgentRecord(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	agentStore, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{Path: filepath.Join(t.TempDir(), "agent_control.sqlite")})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalAgentRegistryStore: %v", err)
+	}
+	defer agentStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.AgentRegistryStore = agentStore
+	if _, err := host.ActorRegistry.Spawn(context.Background(), rootSession.ID, toolbroker.SpawnAgentArgs{ID: "completed-child"}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	host.EventBus.Publish(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "completed-child",
+		Payload:   map[string]interface{}{"success": true},
+	})
+
+	records, err := agentStore.ListAgentControlAgents(context.Background(), agentcontrol.AgentFilter{SessionID: "completed-child", IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("ListAgentControlAgents: %v", err)
+	}
+	if len(records) != 1 || !records[0].Closed() {
+		t.Fatalf("expected completion to close durable child record, got %#v", records)
+	}
+}
+
 func TestLocalActorRegistry_ConcurrentSpawnAgentReservationsUseUniqueSessions(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
@@ -1284,12 +1369,19 @@ func TestLocalActorRegistry_RegistrySpawnLimitUsesDurableStore(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert root record: %v", err)
 	}
+	externalSession := runtimechat.NewSession(userID)
+	externalSession.ID = "external-child"
+	externalSession.SetContext(toolbroker.AgentSessionContextParentSessionID, rootSession.ID)
+	externalSession.SetContext(toolbroker.AgentSessionContextRootSessionID, rootSession.ID)
+	if err := manager.GetStorage().Save(context.Background(), externalSession); err != nil {
+		t.Fatalf("save external child session: %v", err)
+	}
 	if _, err := agentStore.UpsertAgentControlAgent(context.Background(), agentcontrol.AgentRecord{
 		AgentID:         "external-child",
 		RootSessionID:   rootSession.ID,
 		ParentAgentID:   "root:" + rootSession.ID,
 		ParentSessionID: rootSession.ID,
-		SessionID:       "external-child",
+		SessionID:       externalSession.ID,
 		AgentPath:       "/root/external-child",
 		Depth:           1,
 		AgentType:       agentcontrol.AgentTypeChild,
@@ -1362,6 +1454,122 @@ func TestLocalActorRegistry_RegistryProjectionDoesNotReopenClosedAgent(t *testin
 	}
 	if len(records) != 1 || !records[0].Closed() {
 		t.Fatalf("expected list/materialize to preserve closed durable row, got %#v", records)
+	}
+}
+
+func TestLocalActorRegistry_MaterializeMarksMissingSessionBindingStale(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	agentStore, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{Path: filepath.Join(t.TempDir(), "agent_control_agents.sqlite")})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalAgentRegistryStore: %v", err)
+	}
+	defer agentStore.Close()
+	if _, err := agentStore.UpsertAgentControlAgent(context.Background(), agentcontrol.AgentRecord{
+		AgentID:         "missing-child",
+		RootSessionID:   rootSession.ID,
+		ParentAgentID:   "root:" + rootSession.ID,
+		ParentSessionID: rootSession.ID,
+		SessionID:       "missing-child-session",
+		AgentPath:       "/root/missing-child",
+		AgentType:       agentcontrol.AgentTypeChild,
+		Workflow:        agentcontrol.WorkflowSpawnAgent,
+		Status:          agentcontrol.AgentStatusActive,
+	}); err != nil {
+		t.Fatalf("upsert missing child: %v", err)
+	}
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.AgentRegistryStore = agentStore
+	host.BaseSession = &ChatSession{RuntimeSession: rootSession, SessionUserID: userID}
+	if err := host.ActorRegistry.materializeLocalAgentRegistry(context.Background()); err != nil {
+		t.Fatalf("materializeLocalAgentRegistry: %v", err)
+	}
+	records, err := agentStore.ListAgentControlAgents(context.Background(), agentcontrol.AgentFilter{AgentID: "missing-child", IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("ListAgentControlAgents: %v", err)
+	}
+	if len(records) != 1 || records[0].Status != agentcontrol.AgentStatusStale || !records[0].Closed() {
+		t.Fatalf("expected missing child binding to be stale, got %#v", records)
+	}
+}
+
+func TestLocalActorRegistry_MaterializeMarksExpiredRunningLeaseStale(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+	rootSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	childSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create child: %v", err)
+	}
+	childSession.SetContext(toolbroker.AgentSessionContextParentSessionID, rootSession.ID)
+	childSession.SetContext(toolbroker.AgentSessionContextRootSessionID, rootSession.ID)
+	childSession.SetContext(toolbroker.AgentSessionContextPath, "/root/expired-child")
+	if err := manager.Update(context.Background(), childSession); err != nil {
+		t.Fatalf("manager.Update child: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+	agentStore, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{Path: filepath.Join(t.TempDir(), "agent_control_agents.sqlite")})
+	if err != nil {
+		t.Fatalf("NewSQLiteGlobalAgentRegistryStore: %v", err)
+	}
+	defer agentStore.Close()
+	if _, err := agentStore.UpsertAgentControlAgent(context.Background(), agentcontrol.AgentRecord{
+		AgentID:         childSession.ID,
+		RootSessionID:   rootSession.ID,
+		ParentAgentID:   "root:" + rootSession.ID,
+		ParentSessionID: rootSession.ID,
+		SessionID:       childSession.ID,
+		AgentPath:       "/root/expired-child",
+		AgentType:       agentcontrol.AgentTypeChild,
+		Workflow:        agentcontrol.WorkflowSpawnAgent,
+		Status:          agentcontrol.AgentStatusActive,
+	}); err != nil {
+		t.Fatalf("upsert child: %v", err)
+	}
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(16)
+	if err := runtimeStore.SaveState(context.Background(), &runtimechat.RuntimeState{SessionID: childSession.ID, Status: runtimechat.SessionRunning, UpdatedAt: time.Now().UTC().Add(-time.Minute)}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	if _, err := runtimeStore.AcquireLease(context.Background(), runtimechat.LeaseRequest{SessionID: childSession.ID, OwnerID: "expired-owner", OwnerKind: "test", TTL: time.Second, Now: time.Now().UTC().Add(-time.Minute)}); err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.AgentRegistryStore = agentStore
+	host.RuntimeStore = runtimeStore
+	host.BaseSession = &ChatSession{RuntimeSession: rootSession, SessionUserID: userID}
+	if err := host.ActorRegistry.materializeLocalAgentRegistry(context.Background()); err != nil {
+		t.Fatalf("materializeLocalAgentRegistry: %v", err)
+	}
+	records, err := agentStore.ListAgentControlAgents(context.Background(), agentcontrol.AgentFilter{AgentID: childSession.ID, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("ListAgentControlAgents: %v", err)
+	}
+	if len(records) != 1 || records[0].Status != agentcontrol.AgentStatusStale {
+		t.Fatalf("expected expired running child binding to be stale, got %#v", records)
 	}
 }
 

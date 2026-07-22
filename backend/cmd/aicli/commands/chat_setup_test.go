@@ -417,7 +417,7 @@ func TestRestoreChatStateFromRuntimeSessionClearsMissingTokenCount(t *testing.T)
 	}
 }
 
-func TestSyncRuntimeSessionBackIntoCLI_DoesNotLowerObservedContextSnapshotFromHistory(t *testing.T) {
+func TestSyncRuntimeSessionBackIntoCLI_AllowsHistorySnapshotToLowerAfterShrink(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
 		t.Fatalf("newChatSessionManager: %v", err)
@@ -455,8 +455,12 @@ func TestSyncRuntimeSessionBackIntoCLI_DoesNotLowerObservedContextSnapshotFromHi
 		t.Fatalf("syncRuntimeSessionBackIntoCLI: %v", err)
 	}
 
-	if session.ContextTokenCount != 23099 {
-		t.Fatalf("expected observed context snapshot to survive lower history estimate, got %d", session.ContextTokenCount)
+	expectedContextTokens := countChatContextTokensForMessages(session, session.Messages)
+	if expectedContextTokens <= 0 || expectedContextTokens >= 23099 {
+		t.Fatalf("expected lower positive history estimate, got %d", expectedContextTokens)
+	}
+	if session.ContextTokenCount != expectedContextTokens {
+		t.Fatalf("expected history shrink to lower active context snapshot, got %d want %d", session.ContextTokenCount, expectedContextTokens)
 	}
 	if session.ContextWindowTokenCount != 270000 {
 		t.Fatalf("expected runtime-observed context window to survive restore, got %d", session.ContextWindowTokenCount)
@@ -466,8 +470,8 @@ func TestSyncRuntimeSessionBackIntoCLI_DoesNotLowerObservedContextSnapshotFromHi
 	if err != nil {
 		t.Fatalf("manager.Get: %v", err)
 	}
-	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextTokenCount); !ok || got != 23099 {
-		t.Fatalf("expected persisted context token count 23099, got ok=%v value=%d", ok, got)
+	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextTokenCount); !ok || got != expectedContextTokens {
+		t.Fatalf("expected persisted lowered context token count %d, got ok=%v value=%d", expectedContextTokens, ok, got)
 	}
 	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextWindowTokenCount); !ok || got != 270000 {
 		t.Fatalf("expected persisted context window token count 270000, got ok=%v value=%d", ok, got)
@@ -523,7 +527,7 @@ func TestSyncRuntimeSessionBackIntoCLI_RecomputesContextSnapshotWhenNoObservedUs
 	}
 }
 
-func TestSyncRuntimeSessionBackIntoCLI_PreservesLiveContextSnapshotAfterHistorySync(t *testing.T) {
+func TestSyncRuntimeSessionBackIntoCLI_DoesNotUseTurnAggregateAsHistoryHighWater(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
 		t.Fatalf("newChatSessionManager: %v", err)
@@ -562,8 +566,12 @@ func TestSyncRuntimeSessionBackIntoCLI_PreservesLiveContextSnapshotAfterHistoryS
 		t.Fatalf("syncRuntimeSessionBackIntoCLI: %v", err)
 	}
 
-	if session.ContextTokenCount != 23099 {
-		t.Fatalf("expected live request context snapshot to survive lower history estimate, got %d", session.ContextTokenCount)
+	expectedContextTokens := countChatContextTokensForMessages(session, session.Messages)
+	if expectedContextTokens <= 0 || expectedContextTokens >= 23099 {
+		t.Fatalf("expected lower positive history estimate, got %d", expectedContextTokens)
+	}
+	if session.ContextTokenCount != expectedContextTokens {
+		t.Fatalf("expected turn aggregate not to re-inflate history snapshot, got %d want %d", session.ContextTokenCount, expectedContextTokens)
 	}
 	if session.ContextWindowTokenCount != 270000 {
 		t.Fatalf("expected runtime-observed context window to survive restore, got %d", session.ContextWindowTokenCount)
@@ -573,8 +581,8 @@ func TestSyncRuntimeSessionBackIntoCLI_PreservesLiveContextSnapshotAfterHistoryS
 	if err != nil {
 		t.Fatalf("manager.Get: %v", err)
 	}
-	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextTokenCount); !ok || got != 23099 {
-		t.Fatalf("expected persisted live context token count 23099, got ok=%v value=%d", ok, got)
+	if got, ok := runtimeSessionContextInt(stored, chatRuntimeContextContextTokenCount); !ok || got != expectedContextTokens {
+		t.Fatalf("expected persisted history context token count %d, got ok=%v value=%d", expectedContextTokens, ok, got)
 	}
 }
 

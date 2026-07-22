@@ -38,7 +38,8 @@ func TestTruncateUTF8ByteSliceReturnsValidBoundedText(t *testing.T) {
 func TestChatLoggerBoundsDetailsAndPreservesCumulativeSummary(t *testing.T) {
 	logger := NewChatLogger("provider", "openai", "model", true, "")
 	large := strings.Repeat("payload", 10*1024)
-	for index := 0; index < 200; index++ {
+	requestCount := chatLogRetainedMessages/2 + 100
+	for index := 0; index < requestCount; index++ {
 		scope := aicliLogScope{TurnID: "turn", RequestID: "request"}
 		logger.LogRequest(scope, large)
 		logger.LogResponse(scope, large, []byte(large), true, nil, 10)
@@ -47,8 +48,11 @@ func TestChatLoggerBoundsDetailsAndPreservesCumulativeSummary(t *testing.T) {
 		t.Fatalf("expected %d retained details, got %d", chatLogRetainedMessages, got)
 	}
 	summary := logger.CurrentSummary()
-	if summary.TotalRequests != 200 || summary.TotalResponses != 200 {
+	if summary.TotalRequests != requestCount || summary.TotalResponses != requestCount {
 		t.Fatalf("cumulative summary lost dropped details: %+v", summary)
+	}
+	if want := requestCount*2 - chatLogRetainedMessages; logger.sessionLog.DroppedMessages != want {
+		t.Fatalf("expected %d dropped details to be recorded, got %d", want, logger.sessionLog.DroppedMessages)
 	}
 	if summary.AverageResponseTimeMs != 10 {
 		t.Fatalf("unexpected response average: %+v", summary)

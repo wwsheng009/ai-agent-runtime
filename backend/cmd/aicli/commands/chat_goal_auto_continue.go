@@ -36,7 +36,11 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 			return err
 		}
 		if !decision.Continue {
-			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation stopped reason=%s attempt=%d", decision.Reason, i+1), false)
+			state := "stopped"
+			if i == 0 {
+				state = "skipped"
+			}
+			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation %s reason=%s attempts_completed=%d", state, decision.Reason, i), false)
 			return nil
 		}
 		writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation attempt=%d limit=%d status=%s", i+1, defaultGoalAutoContinuationLimit, decision.GoalStatus), false)
@@ -55,7 +59,7 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 	if decision.Continue {
 		reportGoalAutoContinuationLimitReached(session, defaultGoalAutoContinuationLimit)
 	} else {
-		writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation stopped reason=%s attempt=%d", decision.Reason, defaultGoalAutoContinuationLimit), false)
+		writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation stopped reason=%s attempts_completed=%d", decision.Reason, defaultGoalAutoContinuationLimit), false)
 	}
 	return nil
 }
@@ -66,8 +70,14 @@ func shouldAutoContinueAfterGoalTurnError(session *ChatSession, err error) bool 
 	}
 	decision, decisionErr := shouldAutoContinueActiveGoalDecision(session)
 	if decisionErr != nil || !decision.Continue {
+		if decisionErr != nil {
+			writeSessionDebugInfo(session, fmt.Sprintf("[goal] error recovery decision failed error=%q turn_error=%q", decisionErr.Error(), err.Error()), false)
+		} else {
+			writeSessionDebugInfo(session, fmt.Sprintf("[goal] error recovery skipped reason=%s turn_error=%q", decision.Reason, err.Error()), false)
+		}
 		return false
 	}
+	writeSessionDebugInfo(session, fmt.Sprintf("[goal] error recovery eligible reason=%s turn_error=%q", decision.Reason, err.Error()), false)
 	return true
 }
 

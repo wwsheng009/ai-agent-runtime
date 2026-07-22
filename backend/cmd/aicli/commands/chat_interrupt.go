@@ -14,9 +14,11 @@ import (
 
 const chatInterruptCleanupTimeout = 5 * time.Second
 
-func (s *ChatSession) interruptLocalRuntimeWorkAsync() {
+func (s *ChatSession) interruptLocalRuntimeWorkAsync() chan struct{} {
+	done := make(chan struct{})
 	if s == nil || s.LocalRuntimeHost == nil {
-		return
+		close(done)
+		return done
 	}
 	host := s.LocalRuntimeHost
 	baseSessionID := currentRuntimeSessionID(s)
@@ -24,10 +26,12 @@ func (s *ChatSession) interruptLocalRuntimeWorkAsync() {
 	activeTeamID := activeTeamID(s)
 
 	go func() {
+		defer close(done)
 		ctx, cancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
 		defer cancel()
 		host.interruptActiveRuns(ctx, baseSessionID, userID, activeTeamID)
 	}()
+	return done
 }
 
 func (h *localChatRuntimeHost) interruptActiveRuns(ctx context.Context, baseSessionID, userID, activeTeamID string) {
@@ -36,6 +40,10 @@ func (h *localChatRuntimeHost) interruptActiveRuns(ctx context.Context, baseSess
 	}
 	baseSessionID = strings.TrimSpace(baseSessionID)
 	userID = strings.TrimSpace(userID)
+	if baseSessionID != "" {
+		h.interruptActorRun(ctx, baseSessionID)
+		h.markRuntimeSessionStopped(ctx, baseSessionID)
+	}
 	teamSessionIDs := h.interruptActiveTeamRuns(ctx, baseSessionID, activeTeamID)
 	h.interruptChildAgentRuns(ctx, baseSessionID, userID, teamSessionIDs)
 }

@@ -140,7 +140,8 @@ func TestChatRuntimeEventBridge_LLMRequestStartedDoesNotDisplayEstimateBeforeFin
 	}
 }
 
-func TestChatRuntimeEventBridge_LLMRequestFinishedDoesNotLowerProviderSnapshot(t *testing.T) {
+func TestChatRuntimeEventBridge_LLMRequestFinishedOverwritesWithLastTurnUsage(t *testing.T) {
+	// Codex-aligned: finished usage becomes last_token_usage and overwrites the prior snapshot.
 	runtimeSession := runtimechat.NewSession("tester")
 	session := &ChatSession{
 		RuntimeSession:    runtimeSession,
@@ -163,8 +164,8 @@ func TestChatRuntimeEventBridge_LLMRequestFinishedDoesNotLowerProviderSnapshot(t
 		},
 	})
 
-	if session.ContextTokenCount != 1320 {
-		t.Fatalf("expected lower provider usage not to reduce active context snapshot, got %d", session.ContextTokenCount)
+	if session.ContextTokenCount != 40 {
+		t.Fatalf("expected last-turn provider usage to overwrite active context snapshot, got %d", session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 256000 {
 		t.Fatalf("expected context window to update, got %d", session.ContextWindowTokenCount)
@@ -5187,6 +5188,57 @@ func TestChatRuntimeEventBridge_FlushSessionPersistsActorLogs(t *testing.T) {
 	}
 }
 
+func TestChatRuntimeEventBridge_EndRunDrainsAndFlushesToolSummary(t *testing.T) {
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.4", true, "https://example.com")
+	if err := logger.SetLogDir(t.TempDir()); err != nil {
+		t.Fatalf("set log dir: %v", err)
+	}
+	session := &ChatSession{
+		Logger:         logger,
+		Stream:         true,
+		RuntimeSession: &runtimechat.Session{ID: "session-end-run-flush"},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.startProcessor()
+	bridge.PrepareRunPrompt("apply the patch")
+	bridge.BeginRun()
+	bridge.Handle(runtimeevents.Event{
+		Type:      "llm.request.started",
+		SessionID: session.RuntimeSession.ID,
+		TraceID:   "trace-end-run",
+		Payload:   map[string]interface{}{"trace_id": "trace-end-run", "step": 1},
+	})
+	bridge.Handle(runtimeevents.Event{
+		Type:      "tool.completed",
+		SessionID: session.RuntimeSession.ID,
+		TraceID:   "trace-end-run",
+		ToolName:  "apply_patch",
+		Payload: map[string]interface{}{
+			"trace_id":     "trace-end-run",
+			"step":         1,
+			"tool_call_id": "call-end-run",
+			"summary":      "changed 1 file",
+		},
+	})
+
+	bridge.EndRun()
+
+	data, err := os.ReadFile(logger.SessionLogPath())
+	if err != nil {
+		t.Fatalf("read flushed chat log: %v", err)
+	}
+	var payload ChatSessionLog
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal chat log: %v", err)
+	}
+	if len(payload.Messages) != 3 {
+		t.Fatalf("expected request, tool result, and forced summary, got %+v", payload.Messages)
+	}
+	if got := payload.Messages[len(payload.Messages)-1].MessageType; got != "tool_execution_summary" {
+		t.Fatalf("expected forced tool summary at run end, got %q", got)
+	}
+}
+
 func emitActorLoggingTestRun(bridge *chatRuntimeEventBridge, sessionID, traceID string, base time.Time) {
 	events := []runtimeevents.Event{
 		{
@@ -5341,11 +5393,13 @@ func emitActorLoggingTestRun(bridge *chatRuntimeEventBridge, sessionID, traceID 
 
 func TestRuntimeContextSummaryLinesIncludesCacheHitRatio(t *testing.T) {
 	lines := runtimeContextSummaryLines(map[string]interface{}{
-		"usage_prompt_tokens":     1000,
-		"usage_completion_tokens": 100,
-		"usage_total_tokens":      1100,
-		"usage_cached_tokens":     250,
-		"usage_cache_hit_ratio":   0.25,
+		"usage_prompt_tokens":         1000,
+		"usage_completion_tokens":     100,
+		"usage_total_tokens":          1100,
+		"usage_cached_tokens":         250,
+		"usage_cache_read_tokens":     250,
+		"usage_cache_creation_tokens": 500,
+		"usage_cache_hit_ratio":       0.25,
 	}, true)
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "cached=250") {
@@ -5354,18 +5408,40 @@ func TestRuntimeContextSummaryLinesIncludesCacheHitRatio(t *testing.T) {
 	if !strings.Contains(joined, "cache_hit=25.0%") {
 		t.Fatalf("expected cache hit ratio, got:\n%s", joined)
 	}
+	if !strings.Contains(joined, "cache_write=500") {
+		t.Fatalf("expected cache creation token count, got:\n%s", joined)
+	}
+}
+
+func TestRuntimeContextSummaryLinesDistinguishesReportedZeroCache(t *testing.T) {
+	lines := runtimeContextSummaryLines(map[string]interface{}{
+		"usage_prompt_tokens":       1000,
+		"usage_cache_hit_ratio":     0.0,
+		"usage_cache_read_reported": true,
+		"usage_cache_status":        "reported_zero",
+	}, true)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "cache_hit=0.0%") {
+		t.Fatalf("expected explicit zero cache hit ratio, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "cache_status=reported_zero") {
+		t.Fatalf("expected reported-zero status, got:\n%s", joined)
+	}
 }
 
 func TestFormatRuntimeLLMRequestFinishedDebugInfoIncludesCacheHitRatio(t *testing.T) {
 	info := formatRuntimeLLMRequestFinishedDebugInfo(runtimeevents.Event{
 		Type: "llm.request.finished",
 		Payload: map[string]interface{}{
-			"success":                 true,
-			"usage_prompt_tokens":     1000,
-			"usage_completion_tokens": 100,
-			"usage_total_tokens":      1100,
-			"usage_cached_tokens":     250,
-			"usage_cache_hit_ratio":   0.25,
+			"success":                   true,
+			"usage_prompt_tokens":       1000,
+			"usage_completion_tokens":   100,
+			"usage_total_tokens":        1100,
+			"usage_cached_tokens":       250,
+			"usage_cache_read_tokens":   250,
+			"usage_cache_read_reported": true,
+			"usage_cache_status":        "hit",
+			"usage_cache_hit_ratio":     0.25,
 		},
 	})
 	if !strings.Contains(info, "usage_cached_tokens=250") {
@@ -5373,6 +5449,9 @@ func TestFormatRuntimeLLMRequestFinishedDebugInfoIncludesCacheHitRatio(t *testin
 	}
 	if !strings.Contains(info, "usage_cache_hit_ratio=0.2500") {
 		t.Fatalf("expected cache hit ratio in debug info, got %q", info)
+	}
+	if !strings.Contains(info, "usage_cache_read_reported=true") || !strings.Contains(info, "usage_cache_status=hit") {
+		t.Fatalf("expected cache reporting diagnostics in debug info, got %q", info)
 	}
 }
 
@@ -5385,5 +5464,64 @@ func TestFormatRuntimeLLMRequestStartedDebugInfoIncludesToolSurfaceFingerprint(t
 	})
 	if !strings.Contains(info, "tool_surface_fingerprint=abc123fingerprint") {
 		t.Fatalf("expected tool surface fingerprint in started debug info, got %q", info)
+	}
+}
+
+func TestRenderChatRuntimeEventLLMQuotaFailureIsActionable(t *testing.T) {
+	got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: "llm.request.finished",
+		Payload: map[string]interface{}{
+			"success":     false,
+			"error":       "HTTP 403: insufficient_user_quota",
+			"error_code":  "UPSTREAM_QUOTA_EXHAUSTED",
+			"retryable":   false,
+			"next_action": "Increase provider quota or switch to an available provider/model; do not retry unchanged.",
+		},
+	})
+	want := strings.Join([]string{
+		"[thinking] model error [UPSTREAM_QUOTA_EXHAUSTED, retryable=false] HTTP 403: insufficient_user_quota",
+		"[action] Increase provider quota or switch to an available provider/model; do not retry unchanged.",
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected quota failure render:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestRenderChatRuntimeEventToolFailureShowsDiagnosticAction(t *testing.T) {
+	got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type:     "tool.completed",
+		ToolName: "task_output",
+		Payload: map[string]interface{}{
+			"arg_preview": "job_id=guessed-id",
+			"error":       "background job not found: guessed-id",
+			"error_code":  "JOB_NOT_FOUND",
+			"retryable":   false,
+			"next_action": "Use the exact job_id returned by background_task; do not guess or synthesize an id.",
+		},
+	})
+	for _, expected := range []string{
+		"• Failed task_output job_id=guessed-id",
+		"  diagnostic: JOB_NOT_FOUND (retryable=false)",
+		"  action: Use the exact job_id returned by background_task; do not guess or synthesize an id.",
+		"  failed: background job not found: guessed-id",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in rendered failure, got %q", expected, got)
+		}
+	}
+}
+
+func TestRenderChatRuntimeEventToolDeniedShowsRecoveryAction(t *testing.T) {
+	got := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: "tool.denied",
+		Payload: map[string]interface{}{
+			"reason":      "tool not allowed for this agent",
+			"error_code":  "AGENT_PERMISSION",
+			"retryable":   false,
+			"next_action": "Request the required approval or use an allowed tool; do not retry unchanged.",
+		},
+	})
+	if !strings.Contains(got, "diagnostic: AGENT_PERMISSION (retryable=false)") || !strings.Contains(got, "action: Request the required approval") {
+		t.Fatalf("expected denied tool recovery details, got %q", got)
 	}
 }

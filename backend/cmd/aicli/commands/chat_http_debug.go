@@ -16,6 +16,7 @@ func newRuntimeHTTPDebugReporter(session *ChatSession) runtimellm.HTTPDebugRepor
 		return nil
 	}
 	return func(event runtimellm.HTTPDebugEvent) {
+		event.RequestMetadata = withRuntimeHTTPRouteMetadata(event.RequestMetadata, session)
 		if session.runtimeHTTPCapture != nil {
 			session.runtimeHTTPCapture.SetArtifactDir(currentRuntimeHTTPArtifactDir(session))
 			session.runtimeHTTPCapture.Record(event)
@@ -29,6 +30,36 @@ func newRuntimeHTTPDebugReporter(session *ChatSession) runtimellm.HTTPDebugRepor
 			}
 		}
 	}
+}
+
+// withRuntimeHTTPRouteMetadata decorates each low-level attempt artifact with
+// the route actually configured for this chat session. It deliberately keeps
+// the data transport-neutral: adapters own provider request construction.
+func withRuntimeHTTPRouteMetadata(metadata map[string]interface{}, session *ChatSession) map[string]interface{} {
+	if session == nil {
+		return metadata
+	}
+	cloned := make(map[string]interface{}, len(metadata)+1)
+	for key, value := range metadata {
+		cloned[key] = value
+	}
+	route := map[string]interface{}{
+		"requested_provider":         strings.TrimSpace(firstNonEmptyChatValue(session.RequestedProvider, session.ProviderName)),
+		"effective_provider":         strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveProvider, session.ProviderName)),
+		"requested_model":            strings.TrimSpace(firstNonEmptyChatValue(session.RequestedModel, session.Model)),
+		"effective_model":            strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveModel, session.Model)),
+		"requested_reasoning_effort": strings.TrimSpace(firstNonEmptyChatValue(session.RequestedReasoningEffort, session.ReasoningEffort)),
+		"effective_reasoning_effort": strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveReasoningEffort, session.ReasoningEffort)),
+		"requested_permission_mode":  strings.TrimSpace(firstNonEmptyChatValue(session.RequestedPermissionMode, string(session.PermissionMode))),
+		"effective_permission_mode":  strings.TrimSpace(firstNonEmptyChatValue(session.EffectivePermissionMode, string(session.PermissionMode))),
+		"fallback_used":              session.FallbackUsed,
+		"fallback_reason":            strings.TrimSpace(session.FallbackReason),
+	}
+	if len(session.RouteWarnings) > 0 {
+		route["route_warnings"] = append([]string(nil), session.RouteWarnings...)
+	}
+	cloned["route"] = route
+	return cloned
 }
 
 func formatRuntimeHTTPDebugEvent(event runtimellm.HTTPDebugEvent) string {

@@ -18,6 +18,7 @@ const (
 	chatTitleIdle chatTitleState = iota
 	chatTitleWaiting
 	chatTitleRunning
+	chatTitleStopping
 	chatTitleActionRequired
 )
 
@@ -288,6 +289,9 @@ func (n *chatTitleNotifier) currentSnapshot() chatTitleSnapshot {
 }
 
 func (s chatTitleSnapshot) effectiveState() chatTitleState {
+	if s.baseState == chatTitleStopping {
+		return chatTitleStopping
+	}
 	if len(s.actions) > 0 {
 		return chatTitleActionRequired
 	}
@@ -311,7 +315,7 @@ func chatTitleAnimationInterval(snapshot chatTitleSnapshot) time.Duration {
 		return chatTitleRunningInterval
 	case chatTitleActionRequired:
 		return chatTitleActionInterval
-	case chatTitleIdle:
+	case chatTitleIdle, chatTitleStopping:
 		return 0
 	default:
 		return 0
@@ -367,6 +371,8 @@ func chatTitleActivity(state chatTitleState, animations bool, frame int) string 
 			return chatTitleRunningFrames[frame%len(chatTitleRunningFrames)]
 		}
 		return "▶"
+	case chatTitleStopping:
+		return "■"
 	case chatTitleActionRequired:
 		if animations && frame%2 == 1 {
 			return "[ . ]"
@@ -385,6 +391,8 @@ func chatTitleStateLabel(snapshot chatTitleSnapshot, state chatTitleState) strin
 		return "Waiting"
 	case chatTitleRunning:
 		return "Running"
+	case chatTitleStopping:
+		return "Stopping"
 	case chatTitleActionRequired:
 		if label := snapshot.actions[snapshot.latestID]; label != "" {
 			return label
@@ -475,6 +483,8 @@ func chatTitleStateForSurface(state string) chatTitleState {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "streaming", "thinking", "reasoning", "running", "working":
 		return chatTitleRunning
+	case "stopping":
+		return chatTitleStopping
 	case "waiting", "retrying", "pending", "busy":
 		return chatTitleWaiting
 	default:

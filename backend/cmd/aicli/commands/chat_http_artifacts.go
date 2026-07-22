@@ -22,29 +22,46 @@ const (
 )
 
 type runtimeHTTPArtifactEnvelope struct {
-	Sequence           int                    `json:"sequence"`
-	CapturedAt         string                 `json:"captured_at"`
-	Source             string                 `json:"source,omitempty"`
-	Phase              string                 `json:"phase,omitempty"`
-	Provider           string                 `json:"provider,omitempty"`
-	Protocol           string                 `json:"protocol,omitempty"`
-	Model              string                 `json:"model,omitempty"`
-	Attempt            int                    `json:"attempt,omitempty"`
-	MaxAttempts        int                    `json:"max_attempts,omitempty"`
-	Method             string                 `json:"method,omitempty"`
-	URL                string                 `json:"url,omitempty"`
-	RequestMetadata    map[string]interface{} `json:"request_metadata,omitempty"`
-	ResponseStatusCode int                    `json:"response_status_code,omitempty"`
-	Error              string                 `json:"error,omitempty"`
-	RetryReason        string                 `json:"retry_reason,omitempty"`
-	RetryDelayMS       int64                  `json:"retry_delay_ms,omitempty"`
-	BodyBytes          int                    `json:"body_bytes,omitempty"`
-	BodyCapturedBytes  int                    `json:"body_captured_bytes,omitempty"`
-	BodyTruncated      bool                   `json:"body_truncated,omitempty"`
-	BodyFormat         string                 `json:"body_format,omitempty"`
-	BodyPreview        string                 `json:"body_preview,omitempty"`
-	BodyJSON           json.RawMessage        `json:"body_json,omitempty"`
-	BodyText           string                 `json:"body_text,omitempty"`
+	Sequence                 int                    `json:"sequence"`
+	CapturedAt               string                 `json:"captured_at"`
+	Source                   string                 `json:"source,omitempty"`
+	Phase                    string                 `json:"phase,omitempty"`
+	Provider                 string                 `json:"provider,omitempty"`
+	Protocol                 string                 `json:"protocol,omitempty"`
+	Model                    string                 `json:"model,omitempty"`
+	Attempt                  int                    `json:"attempt,omitempty"`
+	MaxAttempts              int                    `json:"max_attempts,omitempty"`
+	Method                   string                 `json:"method,omitempty"`
+	URL                      string                 `json:"url,omitempty"`
+	RequestMetadata          map[string]interface{} `json:"request_metadata,omitempty"`
+	ResponseStatusCode       int                    `json:"response_status_code,omitempty"`
+	Error                    string                 `json:"error,omitempty"`
+	RetryReason              string                 `json:"retry_reason,omitempty"`
+	ErrorCode                string                 `json:"error_code,omitempty"`
+	RetryDelayMS             int64                  `json:"retry_delay_ms,omitempty"`
+	LogicalTurnID            string                 `json:"logical_turn_id,omitempty"`
+	LLMRequestID             string                 `json:"llm_request_id,omitempty"`
+	RetryAttemptID           string                 `json:"retry_attempt_id,omitempty"`
+	ProviderRequestID        string                 `json:"provider_request_id,omitempty"`
+	StreamID                 string                 `json:"stream_id,omitempty"`
+	RequestedProvider        string                 `json:"requested_provider,omitempty"`
+	EffectiveProvider        string                 `json:"effective_provider,omitempty"`
+	RequestedModel           string                 `json:"requested_model,omitempty"`
+	EffectiveModel           string                 `json:"effective_model,omitempty"`
+	RequestedReasoningEffort string                 `json:"requested_reasoning_effort,omitempty"`
+	EffectiveReasoningEffort string                 `json:"effective_reasoning_effort,omitempty"`
+	RequestedPermissionMode  string                 `json:"requested_permission_mode,omitempty"`
+	EffectivePermissionMode  string                 `json:"effective_permission_mode,omitempty"`
+	RouteWarnings            []string               `json:"route_warnings,omitempty"`
+	FallbackUsed             bool                   `json:"fallback_used,omitempty"`
+	FallbackReason           string                 `json:"fallback_reason,omitempty"`
+	BodyBytes                int                    `json:"body_bytes,omitempty"`
+	BodyCapturedBytes        int                    `json:"body_captured_bytes,omitempty"`
+	BodyTruncated            bool                   `json:"body_truncated,omitempty"`
+	BodyFormat               string                 `json:"body_format,omitempty"`
+	BodyPreview              string                 `json:"body_preview,omitempty"`
+	BodyJSON                 json.RawMessage        `json:"body_json,omitempty"`
+	BodyText                 string                 `json:"body_text,omitempty"`
 }
 
 func writeRuntimeHTTPArtifact(session *ChatSession, event runtimellm.HTTPDebugEvent) (string, error) {
@@ -96,7 +113,26 @@ func buildRuntimeHTTPArtifactEnvelope(sequence int, event runtimellm.HTTPDebugEv
 		ResponseStatusCode: event.ResponseStatusCode,
 		Error:              strings.TrimSpace(event.Error),
 		RetryReason:        strings.TrimSpace(event.RetryReason),
+		ErrorCode:          strings.TrimSpace(event.ErrorCode),
 		RetryDelayMS:       event.RetryDelayMS,
+		LogicalTurnID:      strings.TrimSpace(event.LogicalTurnID),
+		LLMRequestID:       strings.TrimSpace(event.LLMRequestID),
+		RetryAttemptID:     strings.TrimSpace(event.RetryAttemptID),
+		ProviderRequestID:  strings.TrimSpace(event.ProviderRequestID),
+		StreamID:           strings.TrimSpace(event.StreamID),
+	}
+	if route := runtimeHTTPArtifactRouteMetadata(event.RequestMetadata); route != nil {
+		envelope.RequestedProvider = route.RequestedProvider
+		envelope.EffectiveProvider = route.EffectiveProvider
+		envelope.RequestedModel = route.RequestedModel
+		envelope.EffectiveModel = route.EffectiveModel
+		envelope.RequestedReasoningEffort = route.RequestedReasoningEffort
+		envelope.EffectiveReasoningEffort = route.EffectiveReasoningEffort
+		envelope.RequestedPermissionMode = route.RequestedPermissionMode
+		envelope.EffectivePermissionMode = route.EffectivePermissionMode
+		envelope.RouteWarnings = append([]string(nil), route.RouteWarnings...)
+		envelope.FallbackUsed = route.FallbackUsed
+		envelope.FallbackReason = route.FallbackReason
 	}
 
 	body, preview, byteCount := runtimeHTTPArtifactBody(event)
@@ -115,6 +151,80 @@ func buildRuntimeHTTPArtifactEnvelope(sequence int, event runtimellm.HTTPDebugEv
 	envelope.BodyFormat = "text"
 	envelope.BodyText = string(body)
 	return envelope
+}
+
+type runtimeHTTPRouteMetadata struct {
+	RequestedProvider        string
+	EffectiveProvider        string
+	RequestedModel           string
+	EffectiveModel           string
+	RequestedReasoningEffort string
+	EffectiveReasoningEffort string
+	RequestedPermissionMode  string
+	EffectivePermissionMode  string
+	RouteWarnings            []string
+	FallbackUsed             bool
+	FallbackReason           string
+}
+
+func runtimeHTTPArtifactRouteMetadata(metadata map[string]interface{}) *runtimeHTTPRouteMetadata {
+	if len(metadata) == 0 {
+		return nil
+	}
+	route, _ := metadata["route"].(map[string]interface{})
+	if len(route) == 0 {
+		return nil
+	}
+	result := &runtimeHTTPRouteMetadata{
+		RequestedProvider:        strings.TrimSpace(fmt.Sprint(route["requested_provider"])),
+		EffectiveProvider:        strings.TrimSpace(fmt.Sprint(route["effective_provider"])),
+		RequestedModel:           strings.TrimSpace(fmt.Sprint(route["requested_model"])),
+		EffectiveModel:           strings.TrimSpace(fmt.Sprint(route["effective_model"])),
+		RequestedReasoningEffort: strings.TrimSpace(fmt.Sprint(route["requested_reasoning_effort"])),
+		EffectiveReasoningEffort: strings.TrimSpace(fmt.Sprint(route["effective_reasoning_effort"])),
+		RequestedPermissionMode:  strings.TrimSpace(fmt.Sprint(route["requested_permission_mode"])),
+		EffectivePermissionMode:  strings.TrimSpace(fmt.Sprint(route["effective_permission_mode"])),
+		FallbackReason:           strings.TrimSpace(fmt.Sprint(route["fallback_reason"])),
+	}
+	if result.RequestedProvider == "<nil>" {
+		result.RequestedProvider = ""
+	}
+	if result.EffectiveProvider == "<nil>" {
+		result.EffectiveProvider = ""
+	}
+	if result.RequestedModel == "<nil>" {
+		result.RequestedModel = ""
+	}
+	if result.EffectiveModel == "<nil>" {
+		result.EffectiveModel = ""
+	}
+	if result.RequestedReasoningEffort == "<nil>" {
+		result.RequestedReasoningEffort = ""
+	}
+	if result.EffectiveReasoningEffort == "<nil>" {
+		result.EffectiveReasoningEffort = ""
+	}
+	if result.RequestedPermissionMode == "<nil>" {
+		result.RequestedPermissionMode = ""
+	}
+	if result.EffectivePermissionMode == "<nil>" {
+		result.EffectivePermissionMode = ""
+	}
+	if result.FallbackReason == "<nil>" {
+		result.FallbackReason = ""
+	}
+	result.FallbackUsed, _ = route["fallback_used"].(bool)
+	switch warnings := route["route_warnings"].(type) {
+	case []string:
+		result.RouteWarnings = append([]string(nil), warnings...)
+	case []interface{}:
+		for _, warning := range warnings {
+			if text := strings.TrimSpace(fmt.Sprint(warning)); text != "" && text != "<nil>" {
+				result.RouteWarnings = append(result.RouteWarnings, text)
+			}
+		}
+	}
+	return result
 }
 
 func runtimeHTTPArtifactBody(event runtimellm.HTTPDebugEvent) ([]byte, string, int) {

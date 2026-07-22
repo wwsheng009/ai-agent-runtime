@@ -260,6 +260,12 @@ func applyModelCommandSelection(session *ChatSession, providerCtx *providerExecu
 	if err := applyChatExecutionContext(session, providerCtx, reasoning); err != nil {
 		return err
 	}
+	session.RequestedProvider = strings.TrimSpace(providerCtx.ProviderName)
+	session.RequestedModel = strings.TrimSpace(firstNonEmptyChatValue(requestedModel, providerCtx.RequestedModel, providerCtx.Model))
+	session.RequestedReasoningEffort = runtimetypes.NormalizeReasoningEffort(reasoning)
+	session.RouteWarnings = nil
+	session.FallbackUsed = false
+	session.FallbackReason = ""
 	warnIfChatSessionSyncFails(session, "toggle model", syncRuntimeSessionFromChat(session))
 	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
 		warnIfChatSessionSyncFails(session, "refresh local runtime after model switch", err)
@@ -280,6 +286,18 @@ func applyChatExecutionContext(session *ChatSession, providerCtx *providerExecut
 	session.Adapter = providerCtx.Adapter
 	session.Model = providerCtx.Model
 	session.ReasoningEffort = runtimetypes.NormalizeReasoningEffort(reasoning)
+	session.EffectiveProvider = session.ProviderName
+	session.EffectiveModel = session.Model
+	session.EffectiveReasoningEffort = session.ReasoningEffort
+	if session.RequestedProvider == "" {
+		session.RequestedProvider = session.ProviderName
+	}
+	if session.RequestedModel == "" {
+		session.RequestedModel = strings.TrimSpace(providerCtx.RequestedModel)
+	}
+	if session.RequestedReasoningEffort == "" {
+		session.RequestedReasoningEffort = session.ReasoningEffort
+	}
 
 	apiPath := ""
 	if session.Adapter != nil {

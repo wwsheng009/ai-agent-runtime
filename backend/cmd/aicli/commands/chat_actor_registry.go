@@ -272,6 +272,14 @@ func resolveLocalAgentForkMode(args toolbroker.SpawnAgentArgs) (localAgentForkMo
 }
 
 func (r *localActorRegistry) resolveSpawnAgentRoute(parentSession *runtimechat.Session, sessionID string, args toolbroker.SpawnAgentArgs) (toolbroker.SpawnAgentArgs, error) {
+	if !args.RequestedRouteCaptured {
+		args.RequestedProvider = strings.TrimSpace(args.Provider)
+		args.RequestedModel = strings.TrimSpace(args.Model)
+		args.RequestedReasoningEffort = firstNonEmptyChatValue(strings.TrimSpace(args.ReasoningEffort), strings.TrimSpace(args.ThinkingEffort))
+		args.RequestedPermissionMode = strings.TrimSpace(args.PermissionMode)
+		args.RequestedRouteCaptured = true
+	}
+	args.EffectivePermissionMode = strings.TrimSpace(args.PermissionMode)
 	parent := r.spawnAgentParentDefaults(parentSession)
 	routingConfig := localChatSubagentRoutingConfig(nil)
 	if r != nil && r.Host != nil {
@@ -715,6 +723,12 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 		}
 		toolbroker.AddSpawnAgentRoutePayload(payload, childSession)
 		copyLocalAgentCompletionPayload(payload, event.Payload)
+		if store := r.localAgentRegistryStore(); store != nil && childPath != "" {
+			rootSessionID := localAgentRootSessionID(childSession, parentSessionID)
+			if _, closeErr := store.CloseAgentControlAgentSubtree(context.Background(), rootSessionID, childPath, time.Now().UTC()); closeErr != nil {
+				payload["lifecycle_close_error"] = closeErr.Error()
+			}
+		}
 		completionMessage, mailboxErr := r.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, payload)
 		payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
 		r.dispatchLocalAgentHook(runtimehooks.EventSubagentStop, cloneRuntimeEventPayload(payload))
@@ -997,7 +1011,10 @@ func (r *localActorRegistry) localAgentStatusFromRecord(ctx context.Context, rec
 	result.TeammateID = firstNonEmptyChatValue(strings.TrimSpace(result.TeammateID), record.TeammateID)
 	toolbroker.ApplySpawnAgentRouteStatusRecord(result, record)
 	if record.Closed() {
-		result.Status = string(runtimechat.SessionStopped)
+		result.Status = strings.TrimSpace(record.Status)
+		if result.Status == "" {
+			result.Status = string(runtimechat.SessionStopped)
+		}
 		if result.SessionState == "" {
 			result.SessionState = string(runtimechat.StateClosed)
 		}
@@ -1012,6 +1029,9 @@ func (r *localActorRegistry) materializeLocalAgentRegistry(ctx context.Context) 
 	}
 	records, err := r.projectLocalAgentRecords(ctx)
 	if err != nil {
+		return err
+	}
+	if err := r.sweepStaleLocalAgentRegistry(ctx, store); err != nil {
 		return err
 	}
 	for _, record := range records {
@@ -1034,6 +1054,143 @@ func (r *localActorRegistry) materializeLocalAgentRegistry(ctx context.Context) 
 		}
 	}
 	return nil
+}
+
+func (r *localActorRegistry) auditLocalAgentRegistry(ctx context.Context) (agentcontrol.ConsistencyAuditReport, error) {
+	store := r.localAgentRegistryStore()
+	if store == nil {
+		return agentcontrol.ConsistencyAuditReport{}, nil
+	}
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{IncludeClosed: true})
+	if err != nil {
+		return agentcontrol.ConsistencyAuditReport{}, err
+	}
+	return agentcontrol.AuditAgentSessionConsistency(ctx, records, func(ctx context.Context, sessionID string) (agentcontrol.SessionBindingSnapshot, error) {
+		result := agentcontrol.SessionBindingSnapshot{SessionID: strings.TrimSpace(sessionID)}
+		if r == nil || r.Host == nil || r.Host.SessionStore == nil {
+			return result, nil
+		}
+		session, loadErr := r.Host.SessionStore.Load(ctx, result.SessionID)
+		if loadErr == runtimechat.ErrSessionNotFound || session == nil {
+			return result, nil
+		}
+		if loadErr != nil {
+			return result, loadErr
+		}
+		result.Exists = true
+		result.Closed = isClosedLocalAgentSession(session)
+		if result.Closed {
+			result.Status = string(runtimechat.SessionStopped)
+		}
+		if r.Host.RuntimeStore == nil {
+			return result, nil
+		}
+		state, stateErr := r.Host.RuntimeStore.LoadState(ctx, result.SessionID)
+		if stateErr != nil || state == nil {
+			return result, stateErr
+		}
+		result.Status = string(state.Status)
+		if stale, leaseErr := localAgentRegistryHasExpiredLease(ctx, r.Host.RuntimeStore, result.SessionID); leaseErr != nil {
+			return result, leaseErr
+		} else if stale && (state.Status == runtimechat.SessionRunning || state.Status == runtimechat.SessionRewinding || state.Status == runtimechat.SessionStopped) {
+			result.Stale = true
+		}
+		return result, nil
+	})
+}
+
+func (r *localActorRegistry) sweepStaleLocalAgentRegistry(ctx context.Context, store agentcontrol.AgentRegistryStore) error {
+	if store == nil {
+		return nil
+	}
+	existing, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{IncludeClosed: true})
+	if err != nil {
+		return err
+	}
+	markedRoots := map[string]bool{}
+	for _, record := range existing {
+		record = record.Normalize()
+		if record.Closed() || record.RootSessionID == "" || record.AgentPath == "" || record.SessionID == "" {
+			continue
+		}
+		terminal, stale, err := r.localAgentRegistryTerminalState(ctx, record.SessionID)
+		if err != nil {
+			return err
+		}
+		if !terminal {
+			continue
+		}
+		rootKey := strings.ToLower(record.RootSessionID + "|" + record.AgentPath)
+		if markedRoots[rootKey] {
+			continue
+		}
+		if stale {
+			if err := markLocalAgentSubtreeStale(ctx, store, record, time.Now().UTC()); err != nil {
+				return err
+			}
+		} else if _, err := store.CloseAgentControlAgentSubtree(ctx, record.RootSessionID, record.AgentPath, time.Now().UTC()); err != nil {
+			return err
+		}
+		markedRoots[rootKey] = true
+	}
+	return nil
+}
+
+func (r *localActorRegistry) localAgentRegistryTerminalState(ctx context.Context, sessionID string) (terminal bool, stale bool, err error) {
+	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
+		return false, false, nil
+	}
+	session, err := r.Host.SessionStore.Load(ctx, strings.TrimSpace(sessionID))
+	if err == runtimechat.ErrSessionNotFound || session == nil {
+		return true, true, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if isClosedLocalAgentSession(session) {
+		return true, false, nil
+	}
+	if r.Host.RuntimeStore == nil {
+		return false, false, nil
+	}
+	state, err := r.Host.RuntimeStore.LoadState(ctx, strings.TrimSpace(sessionID))
+	if err != nil || state == nil {
+		return false, false, err
+	}
+	if state.Status == runtimechat.SessionStopped {
+		if staleLease, leaseErr := localAgentRegistryHasExpiredLease(ctx, r.Host.RuntimeStore, sessionID); leaseErr != nil {
+			return false, false, leaseErr
+		} else if staleLease {
+			return true, true, nil
+		}
+		return true, false, nil
+	}
+	if state.Status != runtimechat.SessionRunning && state.Status != runtimechat.SessionRewinding {
+		return false, false, nil
+	}
+	staleLease, err := localAgentRegistryHasExpiredLease(ctx, r.Host.RuntimeStore, sessionID)
+	return staleLease, staleLease, err
+}
+
+func localAgentRegistryHasExpiredLease(ctx context.Context, runtimeStore runtimechat.RuntimeStateStore, sessionID string) (bool, error) {
+	leaseStore, ok := runtimeStore.(runtimechat.SessionLeaseStore)
+	if !ok || leaseStore == nil {
+		return false, nil
+	}
+	lease, err := leaseStore.GetLease(ctx, strings.TrimSpace(sessionID))
+	if err != nil || lease == nil {
+		return false, err
+	}
+	return !lease.ExpiresAt.After(time.Now().UTC()), nil
+}
+
+func markLocalAgentSubtreeStale(ctx context.Context, store agentcontrol.AgentRegistryStore, record agentcontrol.AgentRecord, staleAt time.Time) error {
+	if marker, ok := store.(agentcontrol.AgentStaleMarker); ok && marker != nil {
+		_, err := marker.MarkAgentControlAgentSubtreeStale(ctx, record.RootSessionID, record.AgentPath, staleAt)
+		return err
+	}
+	_, err := store.CloseAgentControlAgentSubtree(ctx, record.RootSessionID, record.AgentPath, staleAt)
+	return err
 }
 
 func (r *localActorRegistry) closeStaleLocalAgentSessionBinding(ctx context.Context, store agentcontrol.AgentRegistryStore, record agentcontrol.AgentRecord) error {
@@ -2525,7 +2682,11 @@ func normalizeLocalAgentWaitIDs(args toolbroker.WaitAgentArgs) []string {
 func (r *localActorRegistry) enforceLocalAgentSpawnLimits(ctx context.Context, parentSession *runtimechat.Session, parentSessionID string, childDepth int) error {
 	limits := r.localAgentsConfig()
 	if limits.MaxDepth > 0 && childDepth > limits.MaxDepth {
-		return fmt.Errorf("agent spawn depth limit reached: max_depth=%d requested_depth=%d", limits.MaxDepth, childDepth)
+		parentDepth := childDepth - 1
+		return fmt.Errorf(
+			"agent spawn depth limit reached before child creation: parent_session_id=%q parent_depth=%d requested_child_depth=%d max_depth=%d; this agent cannot spawn another child, so continue the work locally or send it to an existing agent",
+			strings.TrimSpace(parentSessionID), parentDepth, childDepth, limits.MaxDepth,
+		)
 	}
 	if limits.MaxThreads <= 0 {
 		return nil
@@ -2865,6 +3026,10 @@ func copyLocalAgentCompletionPayload(target map[string]interface{}, payload map[
 		"usage_completion_tokens",
 		"usage_total_tokens",
 		"usage_cached_tokens",
+		"usage_cache_read_tokens",
+		"usage_cache_creation_tokens",
+		"usage_cache_read_reported",
+		"usage_cache_status",
 		"usage_reasoning_tokens",
 	} {
 		if value, ok := payload[key]; ok {

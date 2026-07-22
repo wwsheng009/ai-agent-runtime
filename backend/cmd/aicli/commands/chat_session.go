@@ -172,6 +172,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	session.turnPrimed = false
 	resetChatTurnTokenUsage(session)
 	restoreChatRuntimeContext(session, session.RuntimeSession)
+	restoreChatRouteTransparency(session, session.RuntimeSession)
 	restoreChatContextTokenUsage(session, session.RuntimeSession)
 	restoreChatTokenCount(session, session.RuntimeSession)
 	refreshChatTitleMetadata(session)
@@ -351,6 +352,29 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProviderProtocol, session.Provider.GetProtocol(), chatRuntimeContextProtocol)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Model, session.Model, chatRuntimeContextModel)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ReasoningEffort, runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort), chatRuntimeContextReasoningEffort)
+	for key, value := range map[string]interface{}{
+		sessionmeta.RequestedProvider:        strings.TrimSpace(session.RequestedProvider),
+		sessionmeta.EffectiveProvider:        strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveProvider, session.ProviderName)),
+		sessionmeta.RequestedModel:           strings.TrimSpace(session.RequestedModel),
+		sessionmeta.EffectiveModel:           strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveModel, session.Model)),
+		sessionmeta.RequestedReasoningEffort: strings.TrimSpace(session.RequestedReasoningEffort),
+		sessionmeta.EffectiveReasoningEffort: runtimetypes.NormalizeReasoningEffort(firstNonEmptyChatValue(session.EffectiveReasoningEffort, session.ReasoningEffort)),
+		sessionmeta.RequestedPermissionMode:  strings.TrimSpace(session.RequestedPermissionMode),
+		sessionmeta.EffectivePermissionMode:  strings.TrimSpace(firstNonEmptyChatValue(session.EffectivePermissionMode, string(session.PermissionMode))),
+		sessionmeta.FallbackUsed:             session.FallbackUsed,
+		sessionmeta.FallbackReason:           strings.TrimSpace(session.FallbackReason),
+	} {
+		if text, ok := value.(string); ok && text == "" {
+			sessionmeta.Delete(runtimeSession.Metadata.Context, key)
+			continue
+		}
+		sessionmeta.Set(runtimeSession.Metadata.Context, key, value)
+	}
+	if len(session.RouteWarnings) == 0 {
+		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.RouteWarnings)
+	} else {
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.RouteWarnings, append([]string(nil), session.RouteWarnings...))
+	}
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ApprovalReuse, string(session.ApprovalReuseMode), chatRuntimeContextApprovalReuse)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.Stream, session.Stream, chatRuntimeContextStream)
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.DisableTools, session.DisableTools, chatRuntimeContextDisableTools)
@@ -970,6 +994,7 @@ func applyRuntimeSessionExecutionContext(session *ChatSession, runtimeSession *r
 	if err := applyChatExecutionContext(session, providerCtx, resolvedReasoning); err != nil {
 		return err
 	}
+	restoreChatRouteTransparency(session, runtimeSession)
 	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
 		warnIfChatSessionSyncFails(session, "refresh local runtime after resume", err)
 	}
@@ -977,6 +1002,81 @@ func applyRuntimeSessionExecutionContext(session *ChatSession, runtimeSession *r
 		session.Interaction.RefreshStatus("")
 	}
 	return nil
+}
+
+func restoreChatRouteTransparency(session *ChatSession, runtimeSession *runtimechat.Session) {
+	if session == nil || runtimeSession == nil {
+		return
+	}
+	context := runtimeSession.Metadata.Context
+	storedPermissionMode := sessionmeta.String(context, sessionmeta.PermissionMode)
+	session.RequestedProvider = firstNonEmptyChatValue(
+		sessionmeta.String(context, sessionmeta.RequestedProvider),
+		session.RequestedProvider,
+		session.ProviderName,
+	)
+	session.EffectiveProvider = firstNonEmptyChatValue(
+		session.ProviderName,
+		sessionmeta.String(context, sessionmeta.EffectiveProvider),
+	)
+	session.RequestedModel = firstNonEmptyChatValue(
+		sessionmeta.String(context, sessionmeta.RequestedModel),
+		session.RequestedModel,
+		session.Model,
+	)
+	session.EffectiveModel = firstNonEmptyChatValue(
+		session.Model,
+		sessionmeta.String(context, sessionmeta.EffectiveModel),
+	)
+	session.RequestedReasoningEffort = firstNonEmptyChatValue(
+		sessionmeta.String(context, sessionmeta.RequestedReasoningEffort),
+		session.RequestedReasoningEffort,
+		session.ReasoningEffort,
+	)
+	session.EffectiveReasoningEffort = firstNonEmptyChatValue(
+		session.ReasoningEffort,
+		sessionmeta.String(context, sessionmeta.EffectiveReasoningEffort),
+	)
+	session.RequestedPermissionMode = firstNonEmptyChatValue(
+		sessionmeta.String(context, sessionmeta.RequestedPermissionMode),
+		storedPermissionMode,
+		session.RequestedPermissionMode,
+		string(session.PermissionMode),
+	)
+	session.EffectivePermissionMode = firstNonEmptyChatValue(
+		string(session.PermissionMode),
+		sessionmeta.String(context, sessionmeta.EffectivePermissionMode),
+		storedPermissionMode,
+	)
+	session.RouteWarnings = runtimeSessionRouteWarnings(runtimeSession)
+	session.FallbackUsed, _ = sessionmeta.Bool(context, sessionmeta.FallbackUsed)
+	session.FallbackReason = sessionmeta.String(context, sessionmeta.FallbackReason)
+}
+
+func runtimeSessionRouteWarnings(runtimeSession *runtimechat.Session) []string {
+	if runtimeSession == nil {
+		return nil
+	}
+	value, ok := sessionmeta.Value(runtimeSession.Metadata.Context, sessionmeta.RouteWarnings)
+	if !ok || value == nil {
+		return nil
+	}
+	result := make([]string, 0)
+	switch warnings := value.(type) {
+	case []string:
+		for _, warning := range warnings {
+			if warning = strings.TrimSpace(warning); warning != "" {
+				result = append(result, warning)
+			}
+		}
+	case []interface{}:
+		for _, warning := range warnings {
+			if text := strings.TrimSpace(fmt.Sprint(warning)); text != "" && text != "<nil>" {
+				result = append(result, text)
+			}
+		}
+	}
+	return result
 }
 
 func resolveChatSessionProviderNameByProtocol(session *ChatSession, protocol string) (string, bool) {

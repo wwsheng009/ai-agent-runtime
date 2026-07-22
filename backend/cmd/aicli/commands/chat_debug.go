@@ -774,7 +774,7 @@ func chatAgentPickerStatusFromRecord(host *localChatRuntimeHost, record agentcon
 	status := firstNonEmptyChatValue(record.Status, "active")
 	sessionState := ""
 	if record.Closed() {
-		status = string(runtimechat.SessionStopped)
+		status = firstNonEmptyChatValue(record.Status, string(runtimechat.SessionStopped))
 		sessionState = string(runtimechat.StateClosed)
 	}
 	result := toolbroker.AgentStatusResult{
@@ -1032,6 +1032,24 @@ func printChatDebugAgentGraph(session *ChatSession) {
 func printChatDebugAgentControl(session *ChatSession) {
 	fmt.Println("AgentControl Registry:")
 	fmt.Println(chatAgentPanelRegistryLine(session))
+	for _, line := range chatAgentControlConsistencyLines(session) {
+		fmt.Println(line)
+	}
+}
+
+func chatAgentControlConsistencyLines(session *ChatSession) []string {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.ActorRegistry == nil {
+		return []string{"  consistency=<unavailable>"}
+	}
+	report, err := session.LocalRuntimeHost.ActorRegistry.auditLocalAgentRegistry(context.Background())
+	if err != nil {
+		return []string{"  consistency=<error: " + err.Error() + ">"}
+	}
+	lines := []string{fmt.Sprintf("  consistency records=%d active=%d issues=%d", report.RecordsChecked, report.ActiveChecked, report.IssueCount)}
+	for _, issue := range report.Issues {
+		lines = append(lines, fmt.Sprintf("  issue=%s agent=%s session=%s detail=%s", issue.Code, chatDebugValueOrNone(issue.AgentID), chatDebugValueOrNone(issue.SessionID), issue.Detail))
+	}
+	return lines
 }
 
 func chatDebugAgentGraphLines(session *ChatSession) []string {
@@ -1834,6 +1852,13 @@ func chatAgentPanelRegistryLine(session *ChatSession) string {
 	}
 	if session.LocalRuntimeHost.TeamStore != nil {
 		parts = append(parts, "tasks=durable")
+	}
+	if session.LocalRuntimeHost.ActorRegistry != nil {
+		if report, err := session.LocalRuntimeHost.ActorRegistry.auditLocalAgentRegistry(context.Background()); err != nil {
+			parts = append(parts, "consistency=error")
+		} else {
+			parts = append(parts, fmt.Sprintf("consistency_issues=%d", report.IssueCount))
+		}
 	}
 	if projection := chatMailboxProjectionStatusPart("runtime_projection", session.LocalRuntimeHost.EventStore); projection != "" {
 		parts = append(parts, projection)

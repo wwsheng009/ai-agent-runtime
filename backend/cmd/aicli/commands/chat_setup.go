@@ -67,54 +67,62 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	}
 
 	session := &ChatSession{
-		ProviderName:       runtimeState.providerName,
-		Provider:           runtimeState.provider,
-		Adapter:            runtimeState.adapter,
-		Model:              runtimeState.modelName,
-		ReasoningEffort:    runtimetypes.NormalizeReasoningEffort(runtimeState.reasoningEffort),
-		DisableTools:       opts.DisableTools,
-		HTTPDebug:          opts.HTTPDebug,
-		Stream:             runtimeState.shouldStream,
-		BaseURL:            runtimeState.baseURL,
-		Messages:           nil,
-		HTTPClient:         httpclient.GetHTTPClientWithProvider(cfg, &runtimeState.provider),
-		cancelCtx:          cancelCtx,
-		cancelFunc:         cancelFunc,
-		interrupted:        atomic.Bool{},
-		FunctionCatalog:    functionCatalog,
-		FunctionRegistry:   registry,
-		FunctionBuilder:    functionCatalog.Builder(runtimeState.provider.GetProtocol()),
-		Logger:             logger,
-		Formatter:          formatter.NewMarkdownFormatter(true),
-		Layout:             layout,
-		InputBox:           inputBox,
-		KeyHandler:         keyHandler,
-		TokenCount:         0,
-		MsgCount:           0,
-		TurnRequestCount:   0,
-		SessionManager:     persistenceState.runtimeSessionManager,
-		RuntimeSession:     nil,
-		SessionUserID:      persistenceState.sessionUserID,
-		SessionDir:         persistenceState.resolvedSessionDir,
-		Ephemeral:          persistenceState.ephemeral,
-		SessionFilter:      opts.SessionFilter,
-		NoInteractive:      opts.NoInteractive,
-		JSONOutput:         opts.OutputFormat == "json",
-		JSONEnvelope:       opts.JSONEnvelope,
-		MCPStatus:          nil,
-		MCPEnabled:         false,
-		SkillsMode:         opts.CLISkillsMode,
-		SkillsDebug:        opts.CLISkillsDebug,
-		Config:             cfg,
-		RetryConfig:        runtimeState.retryCfg,
-		RequestTimeout:     runtimeState.requestTimeout,
-		OutputFormat:       opts.OutputFormat,
-		InputReader:        chatOptionInputReader(opts),
-		PermissionMode:     opts.PermissionMode,
-		ApprovalReuseMode:  opts.ApprovalReuseMode,
-		Surface:            surface,
-		runtimeHTTPCapture: &chatRuntimeHTTPCapture{},
-		ImagePaths:         opts.ImagePaths,
+		ProviderName:             runtimeState.providerName,
+		Provider:                 runtimeState.provider,
+		Adapter:                  runtimeState.adapter,
+		Model:                    runtimeState.modelName,
+		ReasoningEffort:          runtimetypes.NormalizeReasoningEffort(runtimeState.reasoningEffort),
+		RequestedProvider:        strings.TrimSpace(runtimeState.requestedProvider),
+		EffectiveProvider:        strings.TrimSpace(runtimeState.providerName),
+		RequestedModel:           strings.TrimSpace(runtimeState.requestedModel),
+		EffectiveModel:           strings.TrimSpace(runtimeState.modelName),
+		RequestedReasoningEffort: strings.TrimSpace(runtimeState.requestedReasoningEffort),
+		EffectiveReasoningEffort: runtimetypes.NormalizeReasoningEffort(runtimeState.reasoningEffort),
+		RequestedPermissionMode:  string(opts.PermissionMode),
+		EffectivePermissionMode:  string(opts.PermissionMode),
+		DisableTools:             opts.DisableTools,
+		HTTPDebug:                opts.HTTPDebug,
+		Stream:                   runtimeState.shouldStream,
+		BaseURL:                  runtimeState.baseURL,
+		Messages:                 nil,
+		HTTPClient:               httpclient.GetHTTPClientWithProvider(cfg, &runtimeState.provider),
+		cancelCtx:                cancelCtx,
+		cancelFunc:               cancelFunc,
+		interrupted:              atomic.Bool{},
+		FunctionCatalog:          functionCatalog,
+		FunctionRegistry:         registry,
+		FunctionBuilder:          functionCatalog.Builder(runtimeState.provider.GetProtocol()),
+		Logger:                   logger,
+		Formatter:                formatter.NewMarkdownFormatter(true),
+		Layout:                   layout,
+		InputBox:                 inputBox,
+		KeyHandler:               keyHandler,
+		TokenCount:               0,
+		MsgCount:                 0,
+		TurnRequestCount:         0,
+		SessionManager:           persistenceState.runtimeSessionManager,
+		RuntimeSession:           nil,
+		SessionUserID:            persistenceState.sessionUserID,
+		SessionDir:               persistenceState.resolvedSessionDir,
+		Ephemeral:                persistenceState.ephemeral,
+		SessionFilter:            opts.SessionFilter,
+		NoInteractive:            opts.NoInteractive,
+		JSONOutput:               opts.OutputFormat == "json",
+		JSONEnvelope:             opts.JSONEnvelope,
+		MCPStatus:                nil,
+		MCPEnabled:               false,
+		SkillsMode:               opts.CLISkillsMode,
+		SkillsDebug:              opts.CLISkillsDebug,
+		Config:                   cfg,
+		RetryConfig:              runtimeState.retryCfg,
+		RequestTimeout:           runtimeState.requestTimeout,
+		OutputFormat:             opts.OutputFormat,
+		InputReader:              chatOptionInputReader(opts),
+		PermissionMode:           opts.PermissionMode,
+		ApprovalReuseMode:        opts.ApprovalReuseMode,
+		Surface:                  surface,
+		runtimeHTTPCapture:       &chatRuntimeHTTPCapture{},
+		ImagePaths:               opts.ImagePaths,
 	}
 	session.Interaction = newChatInteractionCoordinator(session)
 	session.Interaction.SetSurface(surface)
@@ -371,6 +379,7 @@ func buildChatFinalCleanup(session *ChatSession, cleanupSession func()) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			finalizeChatSession(session)
 			if session != nil && session.TitleNotifier != nil {
 				session.TitleNotifier.Close()
 			}
@@ -569,6 +578,10 @@ func printChatSessionInfoRow(writer *os.File, label, value string, width int) {
 }
 
 func finalizeChatSession(session *ChatSession) {
+	finalizeChatSessionWithError(session, nil)
+}
+
+func finalizeChatSessionWithError(session *ChatSession, terminalErr error) {
 	if session == nil {
 		return
 	}
@@ -576,7 +589,13 @@ func finalizeChatSession(session *ChatSession) {
 	awaitNoInteractiveLocalTeamDrain(session)
 	warnIfChatSessionSyncFails(session, "shutdown", syncRuntimeSessionFromChat(session))
 	if session.Logger != nil && session.Logger.logDir != "" {
-		if err := session.Logger.SaveSession(); err != nil {
+		var err error
+		if terminalErr != nil {
+			err = session.Logger.FailSession(terminalErr)
+		} else {
+			err = session.Logger.SaveSession()
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to save chat logs: %v\n", err)
 		} else if shouldPrintChatSessionPreamble(session) {
 			beginDirectInteractiveOutput(session)

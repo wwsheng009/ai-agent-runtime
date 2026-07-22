@@ -94,7 +94,7 @@ func resolveChatModelChoice(cfg *config.Config, provider config.Provider, opts *
 	return "", chatPreferenceSourceDefault
 }
 
-func resolveChatReasoningChoice(cfg *config.Config, provider config.Provider, modelName string, opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session) (string, chatPreferenceSource, string, error) {
+func resolveChatReasoningChoice(cfg *config.Config, provider config.Provider, modelName string, opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session) (string, string, chatPreferenceSource, string, error) {
 	interactive := opts != nil && !opts.NoInteractive
 	raw := ""
 	source := chatPreferenceSourceDefault
@@ -120,29 +120,29 @@ func resolveChatReasoningChoice(cfg *config.Config, provider config.Provider, mo
 		if interactive && catalog.supported {
 			selected := selectReasoningEffortWithReader("", catalog.options, chatOptionInputReader(opts))
 			if selected != "" {
-				return selected, chatPreferenceSourceInteractive, "", nil
+				return selected, selected, chatPreferenceSourceInteractive, "", nil
 			}
 		}
-		return "", source, "", nil
+		return "", "", source, "", nil
 	}
 
 	reasoningEffort, warningMessage, err := resolveChatReasoningEffort(provider, modelName, raw, source == chatPreferenceSourceFlag)
 	if err != nil {
-		return "", source, "", err
+		return "", raw, source, "", err
 	}
 	if warningMessage == "" {
-		return reasoningEffort, source, "", nil
+		return reasoningEffort, raw, source, "", nil
 	}
 
 	if source == chatPreferenceSourceConfig && interactive && catalog.supported {
 		selected := selectReasoningEffortWithReader(reasoningEffort, catalog.options, chatOptionInputReader(opts))
-		return selected, chatPreferenceSourceInteractive, "", nil
+		return selected, selected, chatPreferenceSourceInteractive, "", nil
 	}
 
 	if source == chatPreferenceSourceConfig || source == chatPreferenceSourceDefault {
-		return "", source, warningMessage, nil
+		return "", raw, source, warningMessage, nil
 	}
-	return reasoningEffort, source, warningMessage, nil
+	return reasoningEffort, raw, source, warningMessage, nil
 }
 
 func shouldPersistChatStartupPreferences(cfg *config.Config, opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session, providerSource, modelSource, reasoningSource, streamSource chatPreferenceSource) bool {

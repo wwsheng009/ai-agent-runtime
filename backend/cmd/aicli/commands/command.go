@@ -287,6 +287,8 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 			return false
 		}
 		session.PermissionMode = "bypass_permissions"
+		session.RequestedPermissionMode = string(session.PermissionMode)
+		session.EffectivePermissionMode = string(session.PermissionMode)
 		if session.ActiveTeam != nil {
 			session.ActiveTeam.PermissionMode = session.PermissionMode
 		}
@@ -375,6 +377,8 @@ func handlePermissionModeCommand(session *ChatSession, command string) bool {
 		return false
 	}
 	session.PermissionMode = mode
+	session.RequestedPermissionMode = string(mode)
+	session.EffectivePermissionMode = string(mode)
 	if session.ActiveTeam != nil {
 		session.ActiveTeam.PermissionMode = mode
 	}

@@ -255,6 +255,8 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	requestedProvider := ""
 	requestedModel := ""
 	requestedReasoningEffort := ""
+	childReadOnly := false
+	childDepth := 0
 	baseSessionID := ""
 	if session != nil && session.RuntimeSession != nil {
 		baseSessionID = strings.TrimSpace(session.RuntimeSession.ID)
@@ -274,10 +276,22 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 					requestedModel = agentcontrol.ContextString(runtimeSession, sessionmeta.Model)
 				}
 				requestedReasoningEffort = agentcontrol.ContextString(runtimeSession, sessionmeta.ReasoningEffort)
+				if value, ok := runtimeSessionContextBool(runtimeSession, toolbroker.AgentSessionContextReadOnly); ok {
+					childReadOnly = value
+				}
+				childDepth = localAgentSessionDepth(runtimeSession)
 			}
 		}
 	}
 	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, childAgentType, requestedModel, requestedProvider, requestedReasoningEffort)
+	applyLocalChildReadOnlyPolicy(apiAgent, childReadOnly)
+	maxDepth := 0
+	if runtimeConfig != nil {
+		maxDepth = runtimeConfig.Agents.MaxDepth
+	} else if h != nil && h.RuntimeConfig != nil {
+		maxDepth = h.RuntimeConfig.Agents.MaxDepth
+	}
+	applyLocalChildDepthPolicy(apiAgent, childDepth, maxDepth)
 	leaseHandle, leaseErr := acquireLocalChatSessionLease(context.Background(), h.RuntimeStore, sessionID)
 	if leaseErr != nil {
 		return nil, leaseErr
@@ -306,6 +320,43 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		return nil, err
 	}
 	return actor, nil
+}
+
+func applyLocalChildReadOnlyPolicy(apiAgent *agent.Agent, readOnly bool) {
+	if apiAgent == nil || !readOnly {
+		return
+	}
+	toolPolicy := apiAgent.GetToolExecutionPolicy()
+	if toolPolicy == nil {
+		toolPolicy = agent.NewToolExecutionPolicy(nil, true)
+	} else {
+		toolPolicy = toolPolicy.Clone()
+		toolPolicy.ReadOnly = true
+	}
+	toolPolicy.SetCapabilityScope([]runtimepolicy.Capability{
+		runtimepolicy.CapReadOnly,
+		runtimepolicy.CapNetwork,
+	})
+	apiAgent.SetToolExecutionPolicy(toolPolicy)
+}
+
+func applyLocalChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
+	if apiAgent == nil || maxDepth <= 0 || depth < maxDepth {
+		return
+	}
+	toolPolicy := apiAgent.GetToolExecutionPolicy()
+	if toolPolicy == nil {
+		toolPolicy = agent.NewToolExecutionPolicy(nil, false)
+	} else {
+		toolPolicy = toolPolicy.Clone()
+	}
+	if toolPolicy.DeniedTools == nil {
+		toolPolicy.DeniedTools = map[string]bool{}
+	}
+	for _, toolName := range []string{"spawn_agent", "spawn_subagents", "spawn_team"} {
+		toolPolicy.DeniedTools[toolName] = true
+	}
+	apiAgent.SetToolExecutionPolicy(toolPolicy)
 }
 
 func acquireLocalChatSessionLease(ctx context.Context, store runtimechat.RuntimeStateStore, sessionID string) (*runtimechat.SessionLeaseHandle, error) {

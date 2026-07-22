@@ -70,6 +70,7 @@ type ExecSession struct {
 	SessionMgr  *runtimechat.SessionManager
 	SessionID   string
 	StartTime   time.Time
+	FinalError  error
 }
 
 func runExec(cmd *cobra.Command, cfg *config.Config, args []string) error {
@@ -276,6 +277,9 @@ func buildExecSession(cfg *config.Config, opts *ExecOptions, processor ExecEvent
 		StartTime:   time.Now(),
 	}
 	cleanup := func() {
+		if session.ChatSession != nil {
+			finalizeChatSessionWithError(session.ChatSession, session.FinalError)
+		}
 		if cleanupSession != nil {
 			cleanupSession()
 		}
@@ -363,7 +367,9 @@ func executeExecWithSignals(session *ExecSession) error {
 		session.ChatSession.interrupted.Store(true)
 		cancel()
 	}()
-	return executeExec(ctx, session)
+	err := executeExec(ctx, session)
+	session.FinalError = err
+	return err
 }
 
 func executeExec(ctx context.Context, session *ExecSession) error {
@@ -428,8 +434,6 @@ func executeExec(ctx context.Context, session *ExecSession) error {
 	if err := processor.PrintFinalOutput(opts); err != nil {
 		return newExecExitError(execExitExecutionFailed, "OUTPUT_FAILED", err)
 	}
-	flushExecSession(chatSession)
-	finalizeChatSession(chatSession)
 	return nil
 }
 

@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	chatLogRetainedMessages = 128
+	chatLogRetainedMessages = 1024
 	chatLogContentMaxBytes  = 16 * 1024
 	chatLogRawMaxBytes      = 32 * 1024
 )
@@ -39,17 +39,21 @@ type ChatLogDetail struct {
 
 // ChatSessionLog 聊天会话日志
 type ChatSessionLog struct {
-	SessionID      string              `json:"session_id"`
-	StartTime      time.Time           `json:"start_time"`
-	EndTime        time.Time           `json:"end_time,omitempty"`
-	Provider       string              `json:"provider"`
-	Protocol       string              `json:"protocol"`
-	Model          string              `json:"model"`
-	BaseURL        string              `json:"base_url,omitempty"`
-	Stream         bool                `json:"stream"`
-	InitialMessage string              `json:"initial_message,omitempty"`
-	Messages       []ChatLogDetail     `json:"messages"`
-	SessionSummary *ChatSessionSummary `json:"summary,omitempty"`
+	SessionID         string              `json:"session_id"`
+	StartTime         time.Time           `json:"start_time"`
+	EndTime           time.Time           `json:"end_time,omitempty"`
+	LastObservedAt    time.Time           `json:"last_observed_at,omitempty"`
+	Status            string              `json:"status,omitempty"`
+	TerminationReason string              `json:"termination_reason,omitempty"`
+	Provider          string              `json:"provider"`
+	Protocol          string              `json:"protocol"`
+	Model             string              `json:"model"`
+	BaseURL           string              `json:"base_url,omitempty"`
+	Stream            bool                `json:"stream"`
+	InitialMessage    string              `json:"initial_message,omitempty"`
+	Messages          []ChatLogDetail     `json:"messages"`
+	DroppedMessages   int                 `json:"dropped_messages,omitempty"`
+	SessionSummary    *ChatSessionSummary `json:"summary,omitempty"`
 }
 
 // ChatSessionSummary 会话摘要信息
@@ -78,18 +82,21 @@ type ChatLogger struct {
 // NewChatLogger 创建新的聊天日志记录器
 func NewChatLogger(provider, protocol, model string, stream bool, baseURL string) *ChatLogger {
 	sessionID := newChatLogSessionID()
+	now := time.Now()
 	return &ChatLogger{
 		sessionID: sessionID,
 		logDir:    resolveDefaultChatLogDir(),
 		sessionLog: &ChatSessionLog{
-			SessionID: sessionID,
-			StartTime: time.Now(),
-			Provider:  provider,
-			Protocol:  protocol,
-			Model:     model,
-			BaseURL:   baseURL,
-			Stream:    stream,
-			Messages:  []ChatLogDetail{},
+			SessionID:      sessionID,
+			StartTime:      now,
+			LastObservedAt: now,
+			Status:         "active",
+			Provider:       provider,
+			Protocol:       protocol,
+			Model:          model,
+			BaseURL:        baseURL,
+			Stream:         stream,
+			Messages:       []ChatLogDetail{},
 		},
 		currentReqIndex: -1,
 	}
@@ -263,6 +270,7 @@ func (cl *ChatLogger) appendDetail(detail ChatLogDetail) {
 		return
 	}
 	drop := len(cl.sessionLog.Messages) - chatLogRetainedMessages
+	cl.sessionLog.DroppedMessages += drop
 	copy(cl.sessionLog.Messages, cl.sessionLog.Messages[drop:])
 	clear(cl.sessionLog.Messages[len(cl.sessionLog.Messages)-drop:])
 	cl.sessionLog.Messages = cl.sessionLog.Messages[:chatLogRetainedMessages]
@@ -348,14 +356,65 @@ func (cl *ChatLogger) SetInitialMessage(msg string) {
 
 // EndSession 结束会话
 func (cl *ChatLogger) EndSession() {
-	cl.sessionLog.EndTime = time.Now()
+	if cl == nil || cl.sessionLog == nil {
+		return
+	}
+	now := time.Now()
+	cl.sessionLog.EndTime = now
+	cl.sessionLog.LastObservedAt = now
+	cl.sessionLog.Status, cl.sessionLog.TerminationReason = cl.inferTerminalStatus()
+}
+
+// FailSession records a terminal failure and persists the final snapshot.
+func (cl *ChatLogger) FailSession(terminalErr error) error {
+	if cl == nil || cl.sessionLog == nil {
+		return nil
+	}
+	now := time.Now()
+	cl.sessionLog.EndTime = now
+	cl.sessionLog.LastObservedAt = now
+	cl.sessionLog.Status = "failed"
+	if terminalErr != nil {
+		cl.sessionLog.TerminationReason = truncateUTF8Bytes(strings.TrimSpace(terminalErr.Error()), chatLogContentMaxBytes)
+	} else {
+		cl.sessionLog.TerminationReason = ""
+	}
+	return cl.FlushSession()
+}
+
+func (cl *ChatLogger) inferTerminalStatus() (string, string) {
+	if cl == nil || cl.sessionLog == nil {
+		return "completed", ""
+	}
+	for index := len(cl.sessionLog.Messages) - 1; index >= 0; index-- {
+		message := cl.sessionLog.Messages[index]
+		if message.MessageType != "response" {
+			continue
+		}
+		if terminalErr := strings.TrimSpace(message.Error); terminalErr != "" {
+			return "failed", truncateUTF8Bytes(terminalErr, chatLogContentMaxBytes)
+		}
+		return "completed", ""
+	}
+	return "completed", ""
 }
 
 // FlushSession 刷新保存会话（不结束会话，即不设置 EndTime）
 // 用于在每次对话后实时保存日志，防止数据丢失
 func (cl *ChatLogger) FlushSession() error {
+	if cl == nil || cl.sessionLog == nil {
+		return fmt.Errorf("聊天日志未初始化")
+	}
 	if cl.logDir == "" {
 		return fmt.Errorf("日志目录未设置，调用 SetLogDir 方法设置")
+	}
+
+	now := time.Now()
+	if cl.sessionLog.LastObservedAt.IsZero() || now.After(cl.sessionLog.LastObservedAt) {
+		cl.sessionLog.LastObservedAt = now
+	}
+	if cl.sessionLog.EndTime.IsZero() && strings.TrimSpace(cl.sessionLog.Status) == "" {
+		cl.sessionLog.Status = "active"
 	}
 
 	cl.sanitizeRawJSONMessages()
@@ -522,9 +581,14 @@ func (cl *ChatLogger) calculateSummary() *ChatSessionSummary {
 		summary.AverageResponseTimeMs = totalResponseTime / int64(summary.TotalResponses)
 	}
 
-	// 总时长
-	if !cl.sessionLog.EndTime.IsZero() {
-		summary.TotalDurationMs = cl.sessionLog.EndTime.Sub(cl.sessionLog.StartTime).Milliseconds()
+	// EndTime is intentionally empty for active sessions. Use the latest flush
+	// observation so incremental logs still report an accurate elapsed duration.
+	durationEnd := cl.sessionLog.EndTime
+	if durationEnd.IsZero() {
+		durationEnd = cl.sessionLog.LastObservedAt
+	}
+	if !durationEnd.IsZero() && !cl.sessionLog.StartTime.IsZero() && durationEnd.After(cl.sessionLog.StartTime) {
+		summary.TotalDurationMs = durationEnd.Sub(cl.sessionLog.StartTime).Milliseconds()
 	}
 
 	// 从已有数据中获取 tokens 信息

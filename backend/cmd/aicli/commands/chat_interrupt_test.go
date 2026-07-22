@@ -311,6 +311,71 @@ func TestInterruptActiveRunsStopsDirectChildAgentState(t *testing.T) {
 	}
 }
 
+func TestInterruptActiveRunsStopsBaseSessionActor(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := runtimechat.NewInMemoryRuntimeStore(32)
+	hub := buildTestSessionHub(t)
+	host := &localChatRuntimeHost{
+		SessionHub:   hub,
+		RuntimeStore: runtimeStore,
+	}
+	t.Cleanup(hub.StopAll)
+
+	actor, err := hub.GetOrCreate("session-1")
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if err := runtimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID:     "session-1",
+		Status:        runtimechat.SessionRunning,
+		CurrentTurnID: "turn-1",
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	host.interruptActiveRuns(ctx, "session-1", "", "")
+
+	state, err := runtimeStore.LoadState(ctx, "session-1")
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if state == nil || state.Status != runtimechat.SessionStopped || state.CurrentTurnID != "" {
+		t.Fatalf("expected stopped base runtime state, got %+v", state)
+	}
+	actorState := actor.StateForInspection()
+	if actorState == nil || actorState.Status != runtimechat.SessionStopped {
+		t.Fatalf("expected base actor stopped state, got %+v", actorState)
+	}
+}
+
+func TestWaitForInterruptCleanupWaitsForConcurrentCleanups(t *testing.T) {
+	session := &ChatSession{}
+	first := make(chan struct{})
+	second := make(chan struct{})
+	session.setInterruptCleanup(first)
+	session.setInterruptCleanup(second)
+
+	waited := make(chan struct{})
+	go func() {
+		session.waitForInterruptCleanup()
+		close(waited)
+	}()
+
+	close(second)
+	select {
+	case <-waited:
+		t.Fatal("cleanup wait returned before the first cleanup completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(first)
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup wait did not return after all cleanups completed")
+	}
+}
+
 func TestInterruptActiveRunsStopsNestedChildAgentState(t *testing.T) {
 	ctx := context.Background()
 	userID := "user-1"

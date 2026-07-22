@@ -23,20 +23,23 @@ type chatPersistenceState struct {
 }
 
 type chatRuntimeState struct {
-	providerName     string
-	providerSource   chatPreferenceSource
-	provider         config.Provider
-	adapter          adapter.ProtocolAdapter
-	modelName        string
-	modelSource      chatPreferenceSource
-	reasoningEffort  string
-	reasoningSource  chatPreferenceSource
-	reasoningWarning string
-	shouldStream     bool
-	streamSource     chatPreferenceSource
-	baseURL          string
-	retryCfg         RetryConfig
-	requestTimeout   time.Duration
+	providerName             string
+	requestedProvider        string
+	providerSource           chatPreferenceSource
+	provider                 config.Provider
+	adapter                  adapter.ProtocolAdapter
+	modelName                string
+	requestedModel           string
+	modelSource              chatPreferenceSource
+	reasoningEffort          string
+	requestedReasoningEffort string
+	reasoningSource          chatPreferenceSource
+	reasoningWarning         string
+	shouldStream             bool
+	streamSource             chatPreferenceSource
+	baseURL                  string
+	retryCfg                 RetryConfig
+	requestTimeout           time.Duration
 }
 
 func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profileState *chatProfileState) (*chatPersistenceState, error) {
@@ -151,8 +154,8 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 		return nil, nil, fmt.Errorf("chat options is nil")
 	}
 
-	providerName, providerSource := resolveChatProviderChoice(cfg, opts, loadedRuntimeSession)
-	providerContext, details, err := resolveProviderExecutionContext(cfg, providerName, "")
+	requestedProvider, providerSource := resolveChatProviderChoice(cfg, opts, loadedRuntimeSession)
+	providerContext, details, err := resolveProviderExecutionContext(cfg, requestedProvider, "")
 	if err != nil {
 		return nil, details, err
 	}
@@ -165,21 +168,21 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 		storedProtocol := runtimeSessionContextString(loadedRuntimeSession, chatRuntimeContextProtocol)
 		if storedProtocol != "" && !strings.EqualFold(storedProtocol, provider.GetProtocol()) {
 			return nil, nil, fmt.Errorf("会话 %s 使用协议 %s，当前 provider %s 使用协议 %s，无法恢复",
-				loadedRuntimeSession.ID, storedProtocol, providerName, provider.GetProtocol())
+				loadedRuntimeSession.ID, storedProtocol, requestedProvider, provider.GetProtocol())
 		}
 	}
 
-	modelName, modelSource := resolveChatModelChoice(cfg, provider, opts, loadedRuntimeSession)
-	finalContext, details, err := resolveProviderExecutionContext(cfg, providerName, modelName)
+	requestedModel, modelSource := resolveChatModelChoice(cfg, provider, opts, loadedRuntimeSession)
+	finalContext, details, err := resolveProviderExecutionContext(cfg, providerContext.ProviderName, requestedModel)
 	if err != nil {
 		return nil, details, err
 	}
 	provider = finalContext.Provider
-	modelName = finalContext.Model
+	modelName := finalContext.Model
 	adapter := finalContext.Adapter
 
 	shouldStream, streamSource := resolveChatStreamChoice(cfg, opts, loadedRuntimeSession)
-	reasoningEffort, reasoningSource, warningMessage, err := resolveChatReasoningChoice(cfg, provider, modelName, opts, loadedRuntimeSession)
+	reasoningEffort, requestedReasoningEffort, reasoningSource, warningMessage, err := resolveChatReasoningChoice(cfg, provider, modelName, opts, loadedRuntimeSession)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -206,19 +209,22 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 	}
 
 	return &chatRuntimeState{
-		providerName:     providerName,
-		providerSource:   providerSource,
-		provider:         provider,
-		adapter:          adapter,
-		modelName:        modelName,
-		modelSource:      modelSource,
-		reasoningEffort:  reasoningEffort,
-		reasoningSource:  reasoningSource,
-		reasoningWarning: warningMessage,
-		shouldStream:     shouldStream,
-		streamSource:     streamSource,
-		baseURL:          buildProviderURL(provider, adapter.GetAPIPath(), modelName),
-		retryCfg:         retryCfg,
-		requestTimeout:   requestTimeout,
+		providerName:             providerContext.ProviderName,
+		providerSource:           providerSource,
+		provider:                 provider,
+		adapter:                  adapter,
+		modelName:                modelName,
+		modelSource:              modelSource,
+		reasoningEffort:          reasoningEffort,
+		requestedProvider:        strings.TrimSpace(requestedProvider),
+		requestedModel:           strings.TrimSpace(finalContext.RequestedModel),
+		requestedReasoningEffort: strings.TrimSpace(requestedReasoningEffort),
+		reasoningSource:          reasoningSource,
+		reasoningWarning:         warningMessage,
+		shouldStream:             shouldStream,
+		streamSource:             streamSource,
+		baseURL:                  buildProviderURL(provider, adapter.GetAPIPath(), modelName),
+		retryCfg:                 retryCfg,
+		requestTimeout:           requestTimeout,
 	}, nil, nil
 }

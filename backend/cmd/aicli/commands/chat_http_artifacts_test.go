@@ -115,15 +115,100 @@ func TestWriteRuntimeHTTPArtifact_PersistsRawBodiesAndTracksLatestPaths(t *testi
 
 func TestBuildRuntimeHTTPArtifactEnvelopeMarksBoundedBody(t *testing.T) {
 	envelope := buildRuntimeHTTPArtifactEnvelope(1, runtimellm.HTTPDebugEvent{
-		Phase:            "request",
-		RequestBodyBytes: 4096,
-		RequestBodyRaw:   []byte(`{"bounded":true}`),
+		Phase:             "request",
+		LogicalTurnID:     "turn-1",
+		LLMRequestID:      "request-1",
+		RetryAttemptID:    "attempt-1",
+		ProviderRequestID: "provider-request-1",
+		StreamID:          "stream-1",
+		ErrorCode:         "STREAM_INTERRUPTED",
+		RequestBodyBytes:  4096,
+		RequestBodyRaw:    []byte(`{"bounded":true}`),
 	})
 	if !envelope.BodyTruncated || envelope.BodyBytes != 4096 {
 		t.Fatalf("expected original body size and truncation marker, got %+v", envelope)
 	}
 	if envelope.BodyCapturedBytes != len(`{"bounded":true}`) {
 		t.Fatalf("unexpected captured body size: %+v", envelope)
+	}
+	if envelope.LogicalTurnID != "turn-1" || envelope.LLMRequestID != "request-1" ||
+		envelope.RetryAttemptID != "attempt-1" || envelope.ProviderRequestID != "provider-request-1" ||
+		envelope.StreamID != "stream-1" {
+		t.Fatalf("expected top-level correlation ids, got %+v", envelope)
+	}
+	if envelope.ErrorCode != "STREAM_INTERRUPTED" {
+		t.Fatalf("expected structured error code, got %+v", envelope)
+	}
+}
+
+func TestBuildRuntimeHTTPArtifactEnvelopePersistsRequestedAndEffectiveRoute(t *testing.T) {
+	envelope := buildRuntimeHTTPArtifactEnvelope(1, runtimellm.HTTPDebugEvent{
+		RequestMetadata: map[string]interface{}{
+			"route": map[string]interface{}{
+				"requested_provider":         "configured-alias",
+				"effective_provider":         "canonical-provider",
+				"requested_model":            "friendly-model",
+				"effective_model":            "canonical-model",
+				"requested_reasoning_effort": "xhigh",
+				"effective_reasoning_effort": "high",
+				"requested_permission_mode":  "plan",
+				"effective_permission_mode":  "plan",
+				"route_warnings":             []string{"explicit_reasoning_override_denied"},
+				"fallback_used":              true,
+				"fallback_reason":            "route_policy",
+			},
+		},
+	})
+	if envelope.RequestedProvider != "configured-alias" || envelope.EffectiveProvider != "canonical-provider" ||
+		envelope.RequestedModel != "friendly-model" || envelope.EffectiveModel != "canonical-model" {
+		t.Fatalf("unexpected provider/model route metadata: %+v", envelope)
+	}
+	if envelope.RequestedReasoningEffort != "xhigh" || envelope.EffectiveReasoningEffort != "high" ||
+		envelope.RequestedPermissionMode != "plan" || envelope.EffectivePermissionMode != "plan" {
+		t.Fatalf("unexpected reasoning/permission route metadata: %+v", envelope)
+	}
+	if !envelope.FallbackUsed || envelope.FallbackReason != "route_policy" || len(envelope.RouteWarnings) != 1 {
+		t.Fatalf("unexpected route warning metadata: %+v", envelope)
+	}
+}
+
+func TestWithRuntimeHTTPRouteMetadataUsesCurrentSessionRouteWithoutMutatingInput(t *testing.T) {
+	input := map[string]interface{}{"trace_id": "trace-1"}
+	session := &ChatSession{
+		ProviderName:             "canonical-provider",
+		Model:                    "canonical-model",
+		ReasoningEffort:          "high",
+		RequestedProvider:        "configured-alias",
+		EffectiveProvider:        "canonical-provider",
+		RequestedModel:           "friendly-model",
+		EffectiveModel:           "canonical-model",
+		RequestedReasoningEffort: "xhigh",
+		EffectiveReasoningEffort: "high",
+		RequestedPermissionMode:  "plan",
+		EffectivePermissionMode:  "plan",
+		RouteWarnings:            []string{"explicit_reasoning_override_denied"},
+		FallbackUsed:             true,
+		FallbackReason:           "route_policy",
+	}
+
+	metadata := withRuntimeHTTPRouteMetadata(input, session)
+	if _, exists := input["route"]; exists {
+		t.Fatal("expected input metadata to remain unchanged")
+	}
+	if metadata["trace_id"] != "trace-1" {
+		t.Fatalf("expected existing metadata to be retained, got %+v", metadata)
+	}
+	route, ok := metadata["route"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected route metadata object, got %#v", metadata["route"])
+	}
+	if route["requested_provider"] != "configured-alias" || route["effective_provider"] != "canonical-provider" ||
+		route["requested_model"] != "friendly-model" || route["effective_model"] != "canonical-model" {
+		t.Fatalf("unexpected provider/model route metadata: %+v", route)
+	}
+	if route["requested_reasoning_effort"] != "xhigh" || route["effective_reasoning_effort"] != "high" ||
+		route["fallback_used"] != true || route["fallback_reason"] != "route_policy" {
+		t.Fatalf("unexpected reasoning/fallback route metadata: %+v", route)
 	}
 }
 

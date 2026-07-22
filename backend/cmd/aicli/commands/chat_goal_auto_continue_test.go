@@ -147,6 +147,28 @@ func TestSendMessage_DoesNotAutoContinueInactiveGoal(t *testing.T) {
 	}
 }
 
+func TestSendMessage_MissingGoalDoesNotMaskInitialTurnError(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	updated, err := runtimegoal.NewMetadataStore().ClearPersistent(context.Background(), session.SessionManager.GetStorage(), session.RuntimeSession.ID)
+	if err != nil {
+		t.Fatalf("ClearPersistent: %v", err)
+	}
+	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
+		t.Fatalf("restoreChatStateFromRuntimeSession: %v", err)
+	}
+
+	executor := &fakeChatExecutor{err: context.DeadlineExceeded}
+	session.ChatExecutor = executor
+	_, err = sendMessage(session, "start")
+	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("expected original turn error to remain visible, got %v", err)
+	}
+	if executor.continuations != 0 {
+		t.Fatalf("expected missing goal to suppress continuation, got %d", executor.continuations)
+	}
+}
+
 func TestSendMessage_DoesNotAutoContinueWhenInputQueued(t *testing.T) {
 	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
 	defer cleanup()

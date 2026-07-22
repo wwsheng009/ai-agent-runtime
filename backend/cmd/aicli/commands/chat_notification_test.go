@@ -79,6 +79,11 @@ func TestRenderChatTerminalTitleStates(t *testing.T) {
 	if got := renderChatTerminalTitle(snapshot, 0); got != "◐ Running | runtime" {
 		t.Fatalf("running title = %q", got)
 	}
+	snapshot.baseState = chatTitleStopping
+	if got := renderChatTerminalTitle(snapshot, 0); got != "■ Stopping | runtime" {
+		t.Fatalf("stopping title = %q", got)
+	}
+	snapshot.baseState = chatTitleWaiting
 	snapshot.actions[1] = "Approval Required"
 	snapshot.latestID = 1
 	if got := renderChatTerminalTitle(snapshot, 0); got != "[ ! ] Approval Required | runtime" {
@@ -90,6 +95,21 @@ func TestRenderChatTerminalTitleStates(t *testing.T) {
 	snapshot.animations = false
 	if got := renderChatTerminalTitle(snapshot, 1); got != "[ ! ] Approval Required | runtime" {
 		t.Fatalf("static action title = %q", got)
+	}
+}
+
+func TestChatTitleStoppingOverridesStaleToolsAndActions(t *testing.T) {
+	snapshot := chatTitleSnapshot{
+		baseState: chatTitleStopping,
+		tools:     map[string]struct{}{"tool-1": {}},
+		actions:   map[uint64]string{1: "Approval Required"},
+		latestID:  1,
+	}
+	if got := snapshot.effectiveState(); got != chatTitleStopping {
+		t.Fatalf("stopping should override stale activity, got %v", got)
+	}
+	if got := chatTitleStateForSurface(chatSurfaceTitleState("Stopping")); got != chatTitleStopping {
+		t.Fatalf("surface stopping should map to title stopping, got %v", got)
 	}
 }
 

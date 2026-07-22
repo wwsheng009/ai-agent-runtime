@@ -353,33 +353,77 @@ func buildChatStatusTokenCountValue(session *ChatSession) string {
 	return compactStatusCount(session.TokenCount)
 }
 
+// chatStatusContextBaselineTokens mirrors Codex BASELINE_TOKENS: fixed system /
+// tool overhead that should not count against the user-controllable window %.
+const chatStatusContextBaselineTokens = 12000
+
 func buildChatStatusContextUsedValue(session *ChatSession) string {
 	if session == nil {
 		return "<none>"
 	}
 	usedTokens := resolveChatStatusContextUsedTokens(session)
-	budget := resolveSharedChatPromptBudget(session)
-	windowTokens := budget.ModelCapabilityMaxContextTokens
-	if session.ContextWindowTokenCount > 0 {
-		windowTokens = session.ContextWindowTokenCount
-	}
-	if windowTokens <= 0 && budget.ProviderContextLimit > 0 {
-		windowTokens = budget.ProviderContextLimit
-	}
+	windowTokens := resolveChatStatusContextWindowTokens(session)
 	if windowTokens <= 0 {
 		if usedTokens > 0 {
 			return fmt.Sprintf("%d", usedTokens)
 		}
 		return "0"
 	}
-	percent := 0
-	if usedTokens > 0 {
-		percent = int(float64(usedTokens)*100/float64(windowTokens) + 0.5)
-		if percent < 0 {
-			percent = 0
-		}
-	}
+	percent := chatStatusContextUsedPercent(usedTokens, windowTokens)
 	return fmt.Sprintf("%d / %d (%d%%)", usedTokens, windowTokens, percent)
+}
+
+func resolveChatStatusContextWindowTokens(session *ChatSession) int {
+	if session == nil {
+		return 0
+	}
+	budget := resolveSharedChatPromptBudget(session)
+	if session.ContextWindowTokenCount > 0 {
+		return session.ContextWindowTokenCount
+	}
+	if budget.ModelCapabilityMaxContextTokens > 0 {
+		return budget.ModelCapabilityMaxContextTokens
+	}
+	if budget.ProviderContextLimit > 0 {
+		return budget.ProviderContextLimit
+	}
+	return 0
+}
+
+// chatStatusContextUsedPercent returns the used portion of the effective context
+// window, Codex-aligned:
+//
+//	effective = window - baseline
+//	used_eff  = max(used - baseline, 0)
+//	percent   = clamp(round(used_eff / effective * 100), 0, 100)
+//
+// Absolute used/window counts remain unclamped in the status line; only the
+// percentage is bounded so UIs never show values like 114%.
+func chatStatusContextUsedPercent(usedTokens, windowTokens int) int {
+	if windowTokens <= 0 || usedTokens <= 0 {
+		return 0
+	}
+	if windowTokens <= chatStatusContextBaselineTokens {
+		percent := int(float64(usedTokens)*100/float64(windowTokens) + 0.5)
+		return clampChatStatusPercent(percent)
+	}
+	effective := windowTokens - chatStatusContextBaselineTokens
+	usedEff := usedTokens - chatStatusContextBaselineTokens
+	if usedEff < 0 {
+		usedEff = 0
+	}
+	percent := int(float64(usedEff)*100/float64(effective) + 0.5)
+	return clampChatStatusPercent(percent)
+}
+
+func clampChatStatusPercent(percent int) int {
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
 }
 
 func resolveChatStatusContextUsedTokens(session *ChatSession) int {
@@ -408,7 +452,24 @@ func buildChatStatusLimitsValue(session *ChatSession) string {
 		}
 		return fmt.Sprintf("%d context tokens", budget.ModelCapabilityMaxContextTokens)
 	}
-	return "data not available yet"
+	// Capability missing: still surface the same window used for Context used
+	// so /status never shows "unavailable" while the denominator is a real fallback.
+	windowTokens := 0
+	source := ""
+	if session.ContextWindowTokenCount > 0 {
+		windowTokens = session.ContextWindowTokenCount
+		source = "session window"
+	} else if budget.ProviderContextLimit > 0 {
+		windowTokens = budget.ProviderContextLimit
+		source = "provider default"
+	}
+	if windowTokens <= 0 {
+		return "data not available yet"
+	}
+	if budget.ActiveTurnMaxTokens > 0 && budget.ActiveTurnMaxTokens != windowTokens {
+		return fmt.Sprintf("%d context tokens (%s, active turn %d)", windowTokens, source, budget.ActiveTurnMaxTokens)
+	}
+	return fmt.Sprintf("%d context tokens (%s)", windowTokens, source)
 }
 
 type chatStatusTokenUsageSnapshot struct {

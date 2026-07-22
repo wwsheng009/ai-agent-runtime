@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1538,7 +1537,8 @@ func TestBuildChatSurfaceStatusLine_PrioritizesAgentContextOverDiagnostics(t *te
 		"权限 默认",
 		"输入 当前运行后发送",
 		"模型 gpt-5.4-code",
-		"上下文 22%",
+		// used=28640 / window=128000 with Codex baseline → ~14%
+		"上下文 14%",
 		"目录 epsilon",
 	} {
 		if !strings.Contains(status, want) {
@@ -1901,7 +1901,8 @@ func TestBuildChatSurfaceStatusLine_FallsBackToDefaultContextWindowWhenNoCapabil
 	}
 
 	status := buildChatSurfaceStatusLine(session, "Ready")
-	if !strings.Contains(status, "上下文 11%") {
+	// used=28640 / provider default 256000 with Codex baseline → ~7%
+	if !strings.Contains(status, "上下文 7%") {
 		t.Fatalf("expected default context window summary, got %q", status)
 	}
 	if strings.Contains(status, "8000") {
@@ -1930,7 +1931,7 @@ func TestBuildChatSurfaceStatusLine_UsesZeroWhenCountersAreMissing(t *testing.T)
 
 	status := buildChatSurfaceStatusLine(session, "Ready")
 	wantUsed := countChatContextTokensForMessages(session, messages)
-	wantPercent := int(math.Round(float64(wantUsed) * 100 / 128000))
+	wantPercent := chatStatusContextUsedPercent(wantUsed, 128000)
 	if !strings.Contains(status, fmt.Sprintf("上下文 %d%%", wantPercent)) {
 		t.Fatalf("expected status line to fall back to history context estimate %d%%, got %q", wantPercent, status)
 	}

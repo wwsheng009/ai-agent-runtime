@@ -12,6 +12,8 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -757,6 +759,110 @@ func TestListResumeCandidateChatSessionsLoadsSQLiteMetadataCandidatesOnDemand(t 
 	}
 	if !candidates[0].HistoryLoaded || !runtimeSessionHasConversation(candidates[0]) {
 		t.Fatalf("expected selected sqlite candidate to have a bounded loaded projection: %#v", candidates[0])
+	}
+}
+
+func TestSyncRuntimeSessionFromChatPersistsRouteTransparency(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	session := &ChatSession{
+		ProviderName:             "canonical-provider",
+		Provider:                 config.Provider{Enabled: true, Protocol: "openai"},
+		Model:                    "canonical-model",
+		ReasoningEffort:          "high",
+		PermissionMode:           runtimepolicy.ModePlan,
+		RequestedProvider:        "configured-alias",
+		EffectiveProvider:        "canonical-provider",
+		RequestedModel:           "friendly-model",
+		EffectiveModel:           "canonical-model",
+		RequestedReasoningEffort: "xhigh",
+		EffectiveReasoningEffort: "high",
+		RequestedPermissionMode:  "plan",
+		EffectivePermissionMode:  "plan",
+		RouteWarnings:            []string{"explicit_reasoning_override_denied"},
+		FallbackUsed:             true,
+		FallbackReason:           "route_policy",
+		SessionManager:           manager,
+		RuntimeSession:           runtimeSession,
+		SessionUserID:            userID,
+	}
+
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		t.Fatalf("syncRuntimeSessionFromChat: %v", err)
+	}
+	stored, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	context := stored.Metadata.Context
+	for key, want := range map[string]string{
+		sessionmeta.RequestedProvider:        "configured-alias",
+		sessionmeta.EffectiveProvider:        "canonical-provider",
+		sessionmeta.RequestedModel:           "friendly-model",
+		sessionmeta.EffectiveModel:           "canonical-model",
+		sessionmeta.RequestedReasoningEffort: "xhigh",
+		sessionmeta.EffectiveReasoningEffort: "high",
+		sessionmeta.RequestedPermissionMode:  "plan",
+		sessionmeta.EffectivePermissionMode:  "plan",
+		sessionmeta.FallbackReason:           "route_policy",
+	} {
+		if got := sessionmeta.String(context, key); got != want {
+			t.Fatalf("expected %s=%q, got %q", key, want, got)
+		}
+	}
+	if fallbackUsed, ok := sessionmeta.Bool(context, sessionmeta.FallbackUsed); !ok || !fallbackUsed {
+		t.Fatalf("expected fallback_used=true, got value=%v present=%v", fallbackUsed, ok)
+	}
+	warnings := runtimeSessionRouteWarnings(stored)
+	if len(warnings) != 1 || warnings[0] != "explicit_reasoning_override_denied" {
+		t.Fatalf("unexpected persisted route warnings: %#v", warnings)
+	}
+}
+
+func TestRestoreChatStateFromRuntimeSessionRestoresRouteTransparency(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.Metadata.Context = map[string]interface{}{
+		sessionmeta.PermissionMode:           "plan",
+		sessionmeta.RequestedProvider:        "configured-alias",
+		sessionmeta.EffectiveProvider:        "canonical-provider",
+		sessionmeta.RequestedModel:           "friendly-model",
+		sessionmeta.EffectiveModel:           "canonical-model",
+		sessionmeta.RequestedReasoningEffort: "xhigh",
+		sessionmeta.EffectiveReasoningEffort: "high",
+		sessionmeta.RequestedPermissionMode:  "plan",
+		sessionmeta.EffectivePermissionMode:  "plan",
+		sessionmeta.RouteWarnings:            []interface{}{"explicit_reasoning_override_denied"},
+		sessionmeta.FallbackUsed:             true,
+		sessionmeta.FallbackReason:           "route_policy",
+	}
+	session := &ChatSession{
+		ProviderName:    "canonical-provider",
+		Model:           "canonical-model",
+		ReasoningEffort: "high",
+		PermissionMode:  runtimepolicy.ModeDefault,
+	}
+
+	if err := restoreChatStateFromRuntimeSession(session, runtimeSession); err != nil {
+		t.Fatalf("restoreChatStateFromRuntimeSession: %v", err)
+	}
+	if session.RequestedProvider != "configured-alias" || session.EffectiveProvider != "canonical-provider" ||
+		session.RequestedModel != "friendly-model" || session.EffectiveModel != "canonical-model" {
+		t.Fatalf("unexpected restored provider/model route: %+v", session)
+	}
+	if session.RequestedReasoningEffort != "xhigh" || session.EffectiveReasoningEffort != "high" ||
+		session.RequestedPermissionMode != "plan" || session.EffectivePermissionMode != "plan" || session.PermissionMode != runtimepolicy.ModePlan {
+		t.Fatalf("unexpected restored reasoning/permission route: %+v", session)
+	}
+	if !session.FallbackUsed || session.FallbackReason != "route_policy" || len(session.RouteWarnings) != 1 {
+		t.Fatalf("unexpected restored route decision metadata: %+v", session)
 	}
 }
 

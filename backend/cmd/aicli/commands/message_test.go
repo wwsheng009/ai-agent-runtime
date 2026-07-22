@@ -309,7 +309,8 @@ func TestApplyChatContextTokensFromUsage_UsesPromptAndCompletionWhenTotalMissing
 	}
 }
 
-func TestApplyChatContextTokensFromUsage_DoesNotLowerDisplayedSnapshot(t *testing.T) {
+func TestApplyChatContextTokensFromUsage_OverwritesWithLastTurnUsage(t *testing.T) {
+	// Codex-aligned: last_token_usage is overwritten each turn (not a high-water mark).
 	session := &ChatSession{ContextTokenCount: 1320}
 
 	got := applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{
@@ -318,8 +319,8 @@ func TestApplyChatContextTokensFromUsage_DoesNotLowerDisplayedSnapshot(t *testin
 		TotalTokens:      40,
 	}, 256000, false)
 
-	if got != 40 || session.ContextTokenCount != 1320 {
-		t.Fatalf("expected lower provider usage not to reduce active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
+	if got != 40 || session.ContextTokenCount != 40 {
+		t.Fatalf("expected last-turn provider usage to overwrite active context snapshot, got return=%d context=%d", got, session.ContextTokenCount)
 	}
 	if session.ContextWindowTokenCount != 256000 {
 		t.Fatalf("expected window tokens to still update, got %d", session.ContextWindowTokenCount)

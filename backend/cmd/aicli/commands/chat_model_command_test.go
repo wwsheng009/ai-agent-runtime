@@ -229,6 +229,33 @@ func TestPersistChatStartupPreferences_ClearsInvalidPersistedReasoningAndSavesIt
 	}
 }
 
+func TestPrepareChatRuntimeStatePreservesRejectedConfiguredReasoningAsRequested(t *testing.T) {
+	cfg := &agentconfig.Config{
+		Providers: agentconfig.ProvidersConfig{
+			DefaultProvider: "alpha",
+			Items: map[string]agentconfig.Provider{
+				"alpha": {
+					Enabled:      true,
+					Protocol:     "openai",
+					DefaultModel: "alpha-model",
+					ModelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+						"alpha-model": {ReasoningEfforts: []string{"low", "medium"}},
+					},
+				},
+			},
+		},
+		AICLI: &agentconfig.AICLIConfig{Chat: &agentconfig.AICLIChatConfig{ReasoningEffort: "ultra"}},
+	}
+
+	state, _, err := prepareChatRuntimeState(cfg, &chatCommandOptions{NoInteractive: true}, nil)
+	if err != nil {
+		t.Fatalf("prepareChatRuntimeState: %v", err)
+	}
+	if state.requestedReasoningEffort != "ultra" || state.reasoningEffort != "" {
+		t.Fatalf("expected requested reasoning ultra and empty effective reasoning, got requested=%q effective=%q", state.requestedReasoningEffort, state.reasoningEffort)
+	}
+}
+
 func TestBootstrapChatSession_DoesNotPersistStartupPreferencesOnFailure(t *testing.T) {
 	cfg, cfgPath := testModelCommandConfig(t)
 	cfg.Providers.DefaultProvider = ""

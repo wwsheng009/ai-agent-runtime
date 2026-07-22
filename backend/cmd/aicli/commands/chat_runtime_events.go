@@ -100,6 +100,7 @@ type chatApprovalAnswer struct {
 const chatApprovalGrantTTL = 10 * time.Minute
 const chatRuntimeEventSettleWindow = 80 * time.Millisecond
 const chatRuntimeEventQueueByteLimit int64 = 4 << 20
+const chatRuntimeEndRunDrainTimeout = 8 * time.Second
 
 func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	if session == nil {
@@ -388,6 +389,8 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	if b == nil {
 		return
 	}
+	b.WaitForCurrentEvents(chatRuntimeEndRunDrainTimeout)
+	b.logRunEndFallback()
 	b.renderMu.Lock()
 	b.runActive = false
 	b.renderMu.Unlock()
@@ -403,7 +406,32 @@ func (b *chatRuntimeEventBridge) EndRun() {
 		}
 		b.session.Interaction.SetAgentStage(stage)
 	}
+	flushChatSessionLog(b.session)
 	b.writePromptIfIdle()
+}
+
+func (b *chatRuntimeEventBridge) logRunEndFallback() {
+	if b == nil || b.session == nil || b.session.Logger == nil {
+		return
+	}
+	sessionID := ""
+	if b.session.RuntimeSession != nil {
+		sessionID = strings.TrimSpace(b.session.RuntimeSession.ID)
+	}
+	payload := map[string]interface{}{"success": true, "source": "bridge_end_run"}
+	if runErr := b.RunError(); runErr != nil {
+		payload["success"] = false
+		payload["error"] = runErr.Error()
+	} else if b.session.IsInterrupted() {
+		payload["success"] = false
+		payload["error"] = "run interrupted"
+	}
+	b.logSessionEnd(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: sessionID,
+		Timestamp: time.Now().UTC(),
+		Payload:   payload,
+	})
 }
 
 func (b *chatRuntimeEventBridge) PrepareRunPrompt(prompt string) {
@@ -1190,12 +1218,17 @@ func (b *chatRuntimeEventBridge) applyLLMRequestStatus(event runtimeevents.Event
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		windowTokens := firstPositivePayloadInt(event.Payload, "context_window_tokens", "max_context_tokens", "model_capability_max_context_tokens", "provider_context_limit")
 		applyChatTurnContextTokens(b.session, 0, windowTokens, true)
+		cacheReadTokens := firstPositivePayloadInt(event.Payload, "usage_cache_read_tokens", "usage_cached_tokens", "cached_tokens", "cache_read_input_tokens")
+		cacheCreationTokens := firstPositivePayloadInt(event.Payload, "usage_cache_creation_tokens", "cache_creation_input_tokens")
 		usage := &runtimetypes.TokenUsage{
-			PromptTokens:     firstPositivePayloadInt(event.Payload, "usage_prompt_tokens", "prompt_tokens", "input_tokens"),
-			CompletionTokens: firstPositivePayloadInt(event.Payload, "usage_completion_tokens", "completion_tokens", "output_tokens"),
-			TotalTokens:      firstPositivePayloadInt(event.Payload, "usage_total_tokens"),
-			CachedTokens:     firstPositivePayloadInt(event.Payload, "usage_cached_tokens", "cached_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"),
-			ReasoningTokens:  firstPositivePayloadInt(event.Payload, "usage_reasoning_tokens", "reasoning_tokens", "thinking_tokens"),
+			PromptTokens:        firstPositivePayloadInt(event.Payload, "usage_prompt_tokens", "prompt_tokens", "input_tokens"),
+			CompletionTokens:    firstPositivePayloadInt(event.Payload, "usage_completion_tokens", "completion_tokens", "output_tokens"),
+			TotalTokens:         firstPositivePayloadInt(event.Payload, "usage_total_tokens"),
+			CachedTokens:        cacheReadTokens,
+			CacheReadTokens:     cacheReadTokens,
+			CacheCreationTokens: cacheCreationTokens,
+			CacheReadReported:   payloadBoolValue(event.Payload, "usage_cache_read_reported") || cacheReadTokens > 0,
+			ReasoningTokens:     firstPositivePayloadInt(event.Payload, "usage_reasoning_tokens", "reasoning_tokens", "thinking_tokens"),
 		}
 		if applied := applyChatContextTokensFromUsage(b.session, usage, windowTokens, true); applied <= 0 {
 			if estimateTokens := firstPositivePayloadInt(event.Payload, "context_prompt_tokens", "total_tokens"); estimateTokens > 0 {
@@ -2503,8 +2536,9 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		line = strings.Join(rendered, "\n")
 		return chatRuntimeTimelineEvent{Line: line}
 	case "tool.denied":
-		line := fmt.Sprintf("[tool denied] %s", payloadStringValue(event.Payload["reason"]))
-		return chatRuntimeTimelineEvent{Line: line}
+		lines := []string{fmt.Sprintf("[tool denied] %s", payloadStringValue(event.Payload["reason"]))}
+		lines = append(lines, compactToolContextLines(event.Payload)...)
+		return chatRuntimeTimelineEvent{Line: strings.Join(lines, "\n")}
 	case runtimechat.EventApprovalRequested:
 		return renderApprovalRequestedTimelineEvent(event)
 	case runtimechat.EventQuestionAsked:
@@ -2745,8 +2779,26 @@ func renderLLMRequestFinishedTimelineEvent(event runtimeevents.Event) chatRuntim
 		return chatRuntimeTimelineEvent{}
 	}
 	if !payloadBoolValue(payload, "success") {
+		headline := "[thinking] model error"
+		attributes := make([]string, 0, 2)
+		if code := strings.TrimSpace(payloadStringValue(payload["error_code"])); code != "" {
+			attributes = append(attributes, code)
+		}
+		if _, ok := payload["retryable"]; ok {
+			attributes = append(attributes, fmt.Sprintf("retryable=%t", payloadBoolValue(payload, "retryable")))
+		}
+		if len(attributes) > 0 {
+			headline += " [" + strings.Join(attributes, ", ") + "]"
+		}
+		if errText := truncateChatRuntimeText(payloadStringValue(payload["error"]), 240); errText != "" {
+			headline += " " + errText
+		}
+		lines := []string{headline}
+		if nextAction := truncateChatRuntimeText(payloadStringValue(payload["next_action"]), 240); nextAction != "" {
+			lines = append(lines, "[action] "+nextAction)
+		}
 		return chatRuntimeTimelineEvent{
-			Line:     fmt.Sprintf("[thinking] model error %s", payloadStringValue(payload["error"])),
+			Line:     strings.Join(lines, "\n"),
 			DedupKey: llmRequestDedupKey(event, "llm.request.finished"),
 		}
 	}
@@ -2798,15 +2850,21 @@ func runtimeContextSummaryLines(payload map[string]interface{}, includeUsage boo
 		if total := firstPositivePayloadInt(payload, "usage_total_tokens"); total > 0 {
 			usageParts = append(usageParts, fmt.Sprintf("total=%d", total))
 		}
-		if cached := firstPositivePayloadInt(payload, "usage_cached_tokens"); cached > 0 {
+		if cached := firstPositivePayloadInt(payload, "usage_cache_read_tokens", "usage_cached_tokens"); cached > 0 {
 			usageParts = append(usageParts, fmt.Sprintf("cached=%d", cached))
+		}
+		if created := firstPositivePayloadInt(payload, "usage_cache_creation_tokens"); created > 0 {
+			usageParts = append(usageParts, fmt.Sprintf("cache_write=%d", created))
 		}
 		if ratio, ok := payloadFloatValue(payload, "usage_cache_hit_ratio"); ok {
 			usageParts = append(usageParts, fmt.Sprintf("cache_hit=%.1f%%", ratio*100))
 		} else if prompt := firstPositivePayloadInt(payload, "usage_prompt_tokens"); prompt > 0 {
-			if cached := firstPositivePayloadInt(payload, "usage_cached_tokens"); cached > 0 {
+			if cached := firstPositivePayloadInt(payload, "usage_cache_read_tokens", "usage_cached_tokens"); cached > 0 {
 				usageParts = append(usageParts, fmt.Sprintf("cache_hit=%.1f%%", float64(cached)/float64(prompt)*100))
 			}
+		}
+		if status := strings.TrimSpace(payloadStringValue(payload["usage_cache_status"])); status != "" && status != "hit" {
+			usageParts = append(usageParts, "cache_status="+status)
 		}
 		if reasoning := firstPositivePayloadInt(payload, "usage_reasoning_tokens"); reasoning > 0 {
 			usageParts = append(usageParts, fmt.Sprintf("reasoning=%d", reasoning))
@@ -3899,7 +3957,7 @@ func compactToolContextLines(payload map[string]interface{}) []string {
 	if payload == nil {
 		return nil
 	}
-	extras := make([]string, 0, 2)
+	extras := make([]string, 0, 4)
 	if workdir := truncateChatRuntimeText(payloadStringValue(payload["workdir"]), 160); workdir != "" {
 		extras = append(extras, "  workdir: "+workdir)
 	} else if cwd := truncateChatRuntimeText(payloadStringValue(payload["cwd"]), 160); cwd != "" {
@@ -3907,6 +3965,16 @@ func compactToolContextLines(payload map[string]interface{}) []string {
 	}
 	if shell := truncateChatRuntimeText(chatToolShellDisplay(payload), 180); shell != "" {
 		extras = append(extras, "  shell: "+shell)
+	}
+	if code := strings.TrimSpace(payloadStringValue(payload["error_code"])); code != "" {
+		diagnostic := code
+		if _, ok := payload["retryable"]; ok {
+			diagnostic += fmt.Sprintf(" (retryable=%t)", payloadBoolValue(payload, "retryable"))
+		}
+		extras = append(extras, "  diagnostic: "+diagnostic)
+	}
+	if action := truncateChatRuntimeText(payloadStringValue(payload["next_action"]), 220); action != "" {
+		extras = append(extras, "  action: "+action)
 	}
 	if len(extras) == 0 {
 		return nil
@@ -4129,12 +4197,24 @@ func formatRuntimeLLMRequestFinishedDebugInfo(event runtimeevents.Event) string 
 	if cachedTokens := intPayloadValue(event.Payload, "usage_cached_tokens"); cachedTokens > 0 {
 		parts = append(parts, fmt.Sprintf("usage_cached_tokens=%d", cachedTokens))
 	}
+	if cacheReadTokens := intPayloadValue(event.Payload, "usage_cache_read_tokens"); cacheReadTokens > 0 {
+		parts = append(parts, fmt.Sprintf("usage_cache_read_tokens=%d", cacheReadTokens))
+	}
+	if cacheCreationTokens := intPayloadValue(event.Payload, "usage_cache_creation_tokens"); cacheCreationTokens > 0 {
+		parts = append(parts, fmt.Sprintf("usage_cache_creation_tokens=%d", cacheCreationTokens))
+	}
+	if _, ok := event.Payload["usage_cache_read_reported"]; ok {
+		parts = append(parts, fmt.Sprintf("usage_cache_read_reported=%t", payloadBoolValue(event.Payload, "usage_cache_read_reported")))
+	}
 	if ratio, ok := payloadFloatValue(event.Payload, "usage_cache_hit_ratio"); ok {
 		parts = append(parts, fmt.Sprintf("usage_cache_hit_ratio=%.4f", ratio))
 	} else if promptTokens := intPayloadValue(event.Payload, "usage_prompt_tokens"); promptTokens > 0 {
-		if cachedTokens := intPayloadValue(event.Payload, "usage_cached_tokens"); cachedTokens > 0 {
+		if cachedTokens := firstPositivePayloadInt(event.Payload, "usage_cache_read_tokens", "usage_cached_tokens"); cachedTokens > 0 {
 			parts = append(parts, fmt.Sprintf("usage_cache_hit_ratio=%.4f", float64(cachedTokens)/float64(promptTokens)))
 		}
+	}
+	if status := strings.TrimSpace(payloadStringValue(event.Payload["usage_cache_status"])); status != "" {
+		parts = append(parts, "usage_cache_status="+truncateChatRuntimeText(status, 80))
 	}
 	if reasoningTokens := intPayloadValue(event.Payload, "usage_reasoning_tokens"); reasoningTokens > 0 {
 		parts = append(parts, fmt.Sprintf("usage_reasoning_tokens=%d", reasoningTokens))

@@ -49,12 +49,17 @@ func resetChatContextTokenUsage(session *ChatSession) {
 	session.providerContextWindowTokenCount = 0
 }
 
+// applyChatContextTokens updates the active context snapshot used by /status.
+// Codex-aligned: overwrite last-turn context rather than keeping a monotonic high-water mark.
 func applyChatContextTokens(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool) {
-	applyChatContextTokensLocked(session, promptTokens, windowTokens, forceRefresh, false, true)
+	applyChatContextTokensLocked(session, promptTokens, windowTokens, forceRefresh, false, false)
 }
 
+// applyChatContextTokensReset is retained for call-site clarity after
+// compact/recovery. Last-turn overwrite is already the default (monotonic=false),
+// so this is intentionally identical to applyChatContextTokens.
 func applyChatContextTokensReset(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool) {
-	applyChatContextTokensLocked(session, promptTokens, windowTokens, forceRefresh, false, false)
+	applyChatContextTokens(session, promptTokens, windowTokens, forceRefresh)
 }
 
 func applyChatContextTokensLocked(session *ChatSession, promptTokens int, windowTokens int, forceRefresh bool, providerReported bool, monotonic bool) {
@@ -66,6 +71,9 @@ func applyChatContextTokensLocked(session *ChatSession, promptTokens int, window
 		session.providerContextTokenCount = 0
 		session.providerContextWindowTokenCount = 0
 	}
+	// When monotonic is false (default Codex last-turn semantics), always overwrite
+	// the displayed active context with the latest provider/local snapshot.
+	// Monotonic remains available for rare restore paths that still need high-water behavior.
 	if promptTokens > 0 && (!monotonic || session.ContextTokenCount <= 0 || promptTokens > session.ContextTokenCount) {
 		session.ContextTokenCount = promptTokens
 		changed = true
@@ -79,6 +87,9 @@ func applyChatContextTokensLocked(session *ChatSession, promptTokens int, window
 	}
 }
 
+// applyChatContextTokensFromUsage records the last-turn provider usage as the
+// active context window occupancy (Codex last_token_usage.total_tokens).
+// Cumulative billing remains on session.TokenCount / logger totals separately.
 func applyChatContextTokensFromUsage(session *ChatSession, usage *runtimetypes.TokenUsage, windowTokens int, forceRefresh bool) int {
 	if session == nil || usage == nil {
 		return 0
@@ -89,7 +100,8 @@ func applyChatContextTokensFromUsage(session *ChatSession, usage *runtimetypes.T
 	}
 	session.providerContextTokenCount = contextTokens
 	session.providerContextWindowTokenCount = windowTokens
-	applyChatContextTokensLocked(session, contextTokens, windowTokens, forceRefresh, true, true)
+	// Codex: last_token_usage is overwritten each turn, never max()-clamped upward.
+	applyChatContextTokensLocked(session, contextTokens, windowTokens, forceRefresh, true, false)
 	return contextTokens
 }
 

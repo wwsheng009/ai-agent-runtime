@@ -83,13 +83,15 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 		"Session:",
 		"019de76b-2481-7130-b902-f6166e6d2b96",
 		"Context used:",
-		"3277 / 256000 (1%)",
+		// Codex-aligned percent uses baseline (12k): used_eff=0 → 0% for small early turns.
+		"3277 / 256000 (0%)",
 		"Token count:",
 		"2.1m",
 		"Token usage:",
 		"34 total (21 input + 13 output)",
 		"Limits:",
-		"data not available yet",
+		// Capability missing: surface provider default window instead of "unavailable".
+		"256000 context tokens (provider default, active turn 217600)",
 	}
 	for _, expected := range expectedFragments {
 		if !strings.Contains(output, expected) {
@@ -116,7 +118,51 @@ func TestBuildChatStatusContextUsedValue_UsesContextWindow(t *testing.T) {
 		ContextWindowTokenCount: 100000,
 	}
 
-	if got := buildChatStatusContextUsedValue(session); got != "90000 / 100000 (90%)" {
+	// used_eff = 90000-12000, effective = 100000-12000 → ~89% (Codex baseline).
+	if got := buildChatStatusContextUsedValue(session); got != "90000 / 100000 (89%)" {
 		t.Fatalf("expected context usage percentage, got %q", got)
+	}
+}
+
+func TestBuildChatStatusContextUsedValue_ClampsPercentAt100(t *testing.T) {
+	session := &ChatSession{
+		ContextTokenCount:       145642,
+		ContextWindowTokenCount: 128000,
+	}
+
+	// Absolute counts stay unclamped; percent must never exceed 100.
+	if got := buildChatStatusContextUsedValue(session); got != "145642 / 128000 (100%)" {
+		t.Fatalf("expected over-window usage to clamp percent to 100, got %q", got)
+	}
+}
+
+func TestBuildChatStatusLimitsValue_FallsBackToSessionWindow(t *testing.T) {
+	session := &ChatSession{
+		ContextWindowTokenCount: 128000,
+	}
+
+	if got := buildChatStatusLimitsValue(session); got != "128000 context tokens (session window, active turn 217600)" {
+		t.Fatalf("expected limits fallback to session window, got %q", got)
+	}
+}
+
+func TestBuildChatStatusLimitsValue_FallsBackToProviderDefault(t *testing.T) {
+	session := &ChatSession{}
+
+	if got := buildChatStatusLimitsValue(session); got != "256000 context tokens (provider default, active turn 217600)" {
+		t.Fatalf("expected limits fallback to provider default, got %q", got)
+	}
+}
+
+func TestChatStatusContextUsedPercent_MatchesCodexBaselineClamp(t *testing.T) {
+	if got := chatStatusContextUsedPercent(12000, 128000); got != 0 {
+		t.Fatalf("expected baseline-only usage to report 0%% used, got %d", got)
+	}
+	if got := chatStatusContextUsedPercent(70000, 128000); got != 50 {
+		// used_eff=58000, effective=116000 → 50%
+		t.Fatalf("expected mid-window usage ~50%%, got %d", got)
+	}
+	if got := chatStatusContextUsedPercent(200000, 128000); got != 100 {
+		t.Fatalf("expected over-window usage to clamp at 100%%, got %d", got)
 	}
 }

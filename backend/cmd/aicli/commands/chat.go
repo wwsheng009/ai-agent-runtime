@@ -38,6 +38,17 @@ type ChatSession struct {
 	Adapter                         adapter.ProtocolAdapter
 	Model                           string
 	ReasoningEffort                 string
+	RequestedProvider               string
+	EffectiveProvider               string
+	RequestedModel                  string
+	EffectiveModel                  string
+	RequestedReasoningEffort        string
+	EffectiveReasoningEffort        string
+	RequestedPermissionMode         string
+	EffectivePermissionMode         string
+	RouteWarnings                   []string
+	FallbackUsed                    bool
+	FallbackReason                  string
 	SuppressReasoningOutput         bool
 	DisableTools                    bool
 	DebugMode                       bool
@@ -49,6 +60,8 @@ type ChatSession struct {
 	cancelCtx                       context.Context                    // 可取消的上下文
 	cancelFunc                      context.CancelFunc                 // 取消函数
 	interrupted                     atomic.Bool                        // 是否被中断（原子操作，避免竞态）
+	interruptCleanupMu              sync.Mutex                         // 保护当前中断清理完成信号
+	interruptCleanupDone            chan struct{}                      // 阻止下一轮与上一轮异步清理交错
 	FunctionCatalog                 *aicliFunctionCatalog              // 统一管理 builtin tools + skills + schema cache
 	FunctionRegistry                *functions.FunctionRegistry        // Function 注册表
 	FunctionBuilder                 functions.FunctionCallBuilder      // 协议对应的 function/tool builder
@@ -159,13 +172,15 @@ func (s *ChatSession) interrupt(preservePendingInput bool) {
 	if s == nil {
 		return
 	}
+	s.interrupted.Store(true)
 	if preservePendingInput && s.Interaction != nil {
 		s.Interaction.SetAgentStage(chatAgentStageStopping)
 	}
+	cleanupDone := s.interruptLocalRuntimeWorkAsync()
+	s.setInterruptCleanup(cleanupDone)
 	if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
-	s.interruptLocalRuntimeWorkAsync()
 	// 中断语义是“取消当前输入/当前轮次”，因此需要同时清掉尚未提交的输入草稿
 	// 和已渲染但尚未重绘的 prompt 状态，避免下一轮仍被旧状态挡住。
 	if !preservePendingInput {
@@ -174,14 +189,57 @@ func (s *ChatSession) interrupt(preservePendingInput bool) {
 	if s.Interaction != nil {
 		s.Interaction.ResetPromptState()
 	}
-	s.interrupted.Store(true)
 }
 
 // ResetInterrupt 重置中断状态
 func (s *ChatSession) ResetInterrupt() {
+	s.waitForInterruptCleanup()
 	s.interrupted.Store(false)
 	if s.Interaction != nil && s.Interaction.AgentStage() == chatAgentStageStopping {
 		s.Interaction.ClearAgentStage()
+	}
+}
+
+func (s *ChatSession) setInterruptCleanup(done chan struct{}) {
+	if s == nil || done == nil {
+		return
+	}
+	s.interruptCleanupMu.Lock()
+	previous := s.interruptCleanupDone
+	if previous == nil {
+		s.interruptCleanupDone = done
+		s.interruptCleanupMu.Unlock()
+		return
+	}
+	combined := make(chan struct{})
+	s.interruptCleanupDone = combined
+	s.interruptCleanupMu.Unlock()
+	go func() {
+		<-previous
+		<-done
+		close(combined)
+	}()
+}
+
+func (s *ChatSession) waitForInterruptCleanup() {
+	if s == nil {
+		return
+	}
+	for {
+		s.interruptCleanupMu.Lock()
+		done := s.interruptCleanupDone
+		s.interruptCleanupMu.Unlock()
+		if done == nil {
+			return
+		}
+		<-done
+		s.interruptCleanupMu.Lock()
+		if s.interruptCleanupDone == done {
+			s.interruptCleanupDone = nil
+			s.interruptCleanupMu.Unlock()
+			return
+		}
+		s.interruptCleanupMu.Unlock()
 	}
 }
 
@@ -290,7 +348,6 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 
 	// 开始聊天循环
 	runChatLoop(session, opts.NoInteractive, opts.Message)
-	finalizeChatSession(session)
 }
 
 func loadRuntimeToolConfig(cfg *config.Config, session *ChatSession) *runtimecfg.RuntimeConfig {
@@ -719,30 +776,41 @@ func shouldPrintChatSessionPreamble(session *ChatSession) bool {
 }
 
 type chatResponsePayload struct {
-	Response                   string `json:"response"`
-	Provider                   string `json:"provider,omitempty"`
-	Protocol                   string `json:"protocol,omitempty"`
-	Model                      string `json:"model,omitempty"`
-	Stream                     bool   `json:"stream"`
-	RuntimeCore                string `json:"runtime_core,omitempty"`
-	RuntimeContractVersion     int    `json:"runtime_contract_version,omitempty"`
-	RuntimeTransport           string `json:"runtime_transport,omitempty"`
-	SessionID                  string `json:"session_id,omitempty"`
-	SessionPath                string `json:"session_path,omitempty"`
-	SessionStore               string `json:"session_store,omitempty"`
-	SessionState               string `json:"session_state,omitempty"`
-	QueuedInputCount           int    `json:"queued_input_count,omitempty"`
-	QueuedInputDraining        bool   `json:"queued_input_draining,omitempty"`
-	ReasoningEffort            string `json:"reasoning_effort,omitempty"`
-	TotalTokens                int    `json:"total_tokens,omitempty"`
-	ResponseTimeMs             int64  `json:"average_response_time_ms,omitempty"`
-	LogPath                    string `json:"log_path,omitempty"`
-	DebugLogPath               string `json:"debug_log_path,omitempty"`
-	HTTPArtifactDir            string `json:"http_artifact_dir,omitempty"`
-	LastHTTPRequestPath        string `json:"last_http_request_path,omitempty"`
-	LastHTTPResponsePath       string `json:"last_http_response_path,omitempty"`
-	LocalShellArtifactDir      string `json:"local_shell_artifact_dir,omitempty"`
-	LastLocalShellArtifactPath string `json:"last_local_shell_artifact_path,omitempty"`
+	Response                   string   `json:"response"`
+	Provider                   string   `json:"provider,omitempty"`
+	Protocol                   string   `json:"protocol,omitempty"`
+	Model                      string   `json:"model,omitempty"`
+	Stream                     bool     `json:"stream"`
+	RuntimeCore                string   `json:"runtime_core,omitempty"`
+	RuntimeContractVersion     int      `json:"runtime_contract_version,omitempty"`
+	RuntimeTransport           string   `json:"runtime_transport,omitempty"`
+	SessionID                  string   `json:"session_id,omitempty"`
+	SessionPath                string   `json:"session_path,omitempty"`
+	SessionStore               string   `json:"session_store,omitempty"`
+	SessionState               string   `json:"session_state,omitempty"`
+	QueuedInputCount           int      `json:"queued_input_count,omitempty"`
+	QueuedInputDraining        bool     `json:"queued_input_draining,omitempty"`
+	ReasoningEffort            string   `json:"reasoning_effort,omitempty"`
+	RequestedProvider          string   `json:"requested_provider,omitempty"`
+	EffectiveProvider          string   `json:"effective_provider,omitempty"`
+	RequestedModel             string   `json:"requested_model,omitempty"`
+	EffectiveModel             string   `json:"effective_model,omitempty"`
+	RequestedReasoningEffort   string   `json:"requested_reasoning_effort,omitempty"`
+	EffectiveReasoningEffort   string   `json:"effective_reasoning_effort,omitempty"`
+	RequestedPermissionMode    string   `json:"requested_permission_mode,omitempty"`
+	EffectivePermissionMode    string   `json:"effective_permission_mode,omitempty"`
+	RouteWarnings              []string `json:"route_warnings,omitempty"`
+	FallbackUsed               bool     `json:"fallback_used,omitempty"`
+	FallbackReason             string   `json:"fallback_reason,omitempty"`
+	TotalTokens                int      `json:"total_tokens,omitempty"`
+	ResponseTimeMs             int64    `json:"average_response_time_ms,omitempty"`
+	LogPath                    string   `json:"log_path,omitempty"`
+	DebugLogPath               string   `json:"debug_log_path,omitempty"`
+	HTTPArtifactDir            string   `json:"http_artifact_dir,omitempty"`
+	LastHTTPRequestPath        string   `json:"last_http_request_path,omitempty"`
+	LastHTTPResponsePath       string   `json:"last_http_response_path,omitempty"`
+	LocalShellArtifactDir      string   `json:"local_shell_artifact_dir,omitempty"`
+	LastLocalShellArtifactPath string   `json:"last_local_shell_artifact_path,omitempty"`
 }
 
 func buildChatResponsePayload(session *ChatSession, response string) chatResponsePayload {
@@ -762,6 +830,17 @@ func buildChatResponsePayload(session *ChatSession, response string) chatRespons
 		payload.RuntimeTransport = descriptor.Transport
 	}
 	payload.ReasoningEffort = runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
+	payload.RequestedProvider = strings.TrimSpace(firstNonEmptyChatValue(session.RequestedProvider, session.ProviderName))
+	payload.EffectiveProvider = strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveProvider, session.ProviderName))
+	payload.RequestedModel = strings.TrimSpace(firstNonEmptyChatValue(session.RequestedModel, session.Model))
+	payload.EffectiveModel = strings.TrimSpace(firstNonEmptyChatValue(session.EffectiveModel, session.Model))
+	payload.RequestedReasoningEffort = runtimetypes.NormalizeReasoningEffort(firstNonEmptyChatValue(session.RequestedReasoningEffort, session.ReasoningEffort))
+	payload.EffectiveReasoningEffort = runtimetypes.NormalizeReasoningEffort(firstNonEmptyChatValue(session.EffectiveReasoningEffort, session.ReasoningEffort))
+	payload.RequestedPermissionMode = strings.TrimSpace(firstNonEmptyChatValue(session.RequestedPermissionMode, string(session.PermissionMode)))
+	payload.EffectivePermissionMode = strings.TrimSpace(firstNonEmptyChatValue(session.EffectivePermissionMode, string(session.PermissionMode)))
+	payload.RouteWarnings = append([]string(nil), session.RouteWarnings...)
+	payload.FallbackUsed = session.FallbackUsed
+	payload.FallbackReason = strings.TrimSpace(session.FallbackReason)
 	if session.RuntimeSession != nil {
 		payload.SessionID = session.RuntimeSession.ID
 		payload.SessionPath = currentRuntimeSessionPath(session)

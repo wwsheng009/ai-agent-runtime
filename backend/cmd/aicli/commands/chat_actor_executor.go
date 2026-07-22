@@ -373,11 +373,11 @@ func syncRuntimeSessionBackIntoCLIWithOptions(session *ChatSession, refreshConte
 	if session.LocalRuntimeHost != nil {
 		validateAmbientTeamBinding(session, session.LocalRuntimeHost.TeamStore)
 	}
+	// Prefer provider last-turn snapshot > history estimate > previous.
+	// Do not re-raise ContextTokenCount via previous>history high-water after
+	// compact/history shrink when the provider snapshot is empty.
 	if refreshContextFromHistory {
-		historyContextTokens := refreshChatContextTokenSnapshotFromMessages(session, previousContextWindowTokens, true)
-		if previousContextTokens > historyContextTokens {
-			applyChatContextTokens(session, previousContextTokens, previousContextWindowTokens, true)
-		}
+		_ = refreshChatContextTokenSnapshotFromMessages(session, previousContextWindowTokens, true)
 	} else if previousContextTokens > 0 || previousContextWindowTokens > 0 {
 		applyChatContextTokens(session, previousContextTokens, previousContextWindowTokens, true)
 	}

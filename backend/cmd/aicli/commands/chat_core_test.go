@@ -2336,8 +2336,9 @@ func TestResolveSharedChatPromptBudget_FallsBackToDefaultContextWindow(t *testin
 	if budget.ProviderContextLimit != 256000 {
 		t.Fatalf("expected default context window 256000, got %d", budget.ProviderContextLimit)
 	}
-	if budget.ActiveTurnMaxTokens != 230400 {
-		t.Fatalf("expected active turn budget 230400, got %d", budget.ActiveTurnMaxTokens)
+	// floor(256000 * sharedChatDefaultAutoCompactRatio(0.85)) == 217600
+	if budget.ActiveTurnMaxTokens != 217600 {
+		t.Fatalf("expected active turn budget 217600, got %d", budget.ActiveTurnMaxTokens)
 	}
 	if budget.BudgetSource != "default_context_window_default_ratio" {
 		t.Fatalf("expected default context window budget source, got %q", budget.BudgetSource)

@@ -3,7 +3,6 @@ package commands
 import (
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -305,8 +304,10 @@ func chatSurfaceTitleState(state string) string {
 		return "running"
 	}
 	switch normalized {
-	case "planning", "tool running", "stopping":
+	case "planning", "tool running":
 		return "running"
+	case "stopping":
+		return "stopping"
 	case "awaiting approval", "awaiting answer":
 		return "waiting"
 	case "completed", "failed":
@@ -948,13 +949,7 @@ func buildOptionalChatStatusSegments(session *ChatSession) []string {
 }
 
 func formatChatContextWindowCompactSummary(session *ChatSession, budget sharedChatPromptBudget) string {
-	totalWindow := budget.ModelCapabilityMaxContextTokens
-	if session != nil && session.ContextWindowTokenCount > 0 {
-		totalWindow = session.ContextWindowTokenCount
-	}
-	if totalWindow <= 0 && budget.ProviderContextLimit > 0 {
-		totalWindow = budget.ProviderContextLimit
-	}
+	totalWindow := resolveChatStatusContextWindowTokens(session)
 	if totalWindow <= 0 {
 		totalWindow = budget.ActiveTurnMaxTokens
 	}
@@ -965,14 +960,8 @@ func formatChatContextWindowCompactSummary(session *ChatSession, budget sharedCh
 		}
 		return ""
 	}
-	percent := 0
-	if usedTokens > 0 {
-		percent = int(math.Round(float64(usedTokens) * 100 / float64(totalWindow)))
-		if percent < 0 {
-			percent = 0
-		}
-	}
-	return fmt.Sprintf("%d%%", percent)
+	// Codex-aligned used% (baseline + clamp); absolute token counts stay on /status.
+	return fmt.Sprintf("%d%%", chatStatusContextUsedPercent(usedTokens, totalWindow))
 }
 
 func compactChatStatusDirectory(cwd string) string {
@@ -1034,13 +1023,7 @@ func resolveChatStatusCurrentDirectory(session *ChatSession) string {
 }
 
 func formatChatContextWindowSummary(session *ChatSession, budget sharedChatPromptBudget) string {
-	totalWindow := budget.ModelCapabilityMaxContextTokens
-	if session != nil && session.ContextWindowTokenCount > 0 {
-		totalWindow = session.ContextWindowTokenCount
-	}
-	if totalWindow <= 0 && budget.ProviderContextLimit > 0 {
-		totalWindow = budget.ProviderContextLimit
-	}
+	totalWindow := resolveChatStatusContextWindowTokens(session)
 	if totalWindow <= 0 {
 		totalWindow = budget.ActiveTurnMaxTokens
 	}
@@ -1051,14 +1034,7 @@ func formatChatContextWindowSummary(session *ChatSession, budget sharedChatPromp
 		}
 		return ""
 	}
-
-	percent := 0
-	if usedTokens > 0 {
-		percent = int(math.Round(float64(usedTokens) * 100 / float64(totalWindow)))
-		if percent < 0 {
-			percent = 0
-		}
-	}
+	percent := chatStatusContextUsedPercent(usedTokens, totalWindow)
 	return fmt.Sprintf("%d used %d %d%%", totalWindow, usedTokens, percent)
 }
 
